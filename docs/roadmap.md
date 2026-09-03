@@ -1,0 +1,80 @@
+# Roadmap
+
+Each phase ends with something runnable. Each bullet is one slice: one AI session, with a named check that proves it. Engine slices are measured in ruby/spec files that newly pass; the check names the directory. No dates. The progress bar is `bench/spec-status.md`.
+
+## Phase 0: skeleton
+
+- Cargo workspace with the crates from architecture.md, CI on macOS arm64 and Linux x64, `spinel --version`. *Check:* green CI.
+- `spinel-ast` types covering Prism's node set; `spinel-parse` lowering; `spinel parse file.rb` prints the tree. *Check:* every file under `spec/ruby/` and `stdlib/` lowers without an "unhandled node" error.
+- Vendor the pure-Ruby stdlib as a git subtree under `stdlib/` with its license files. *Check:* `stdlib/` present, license present, CI job diffs it against the upstream tag.
+- ruby/spec submodule at the branch matching the target language version, `spec/harness/` Rust runner for `describe`/`it`/`should ==`/`should_raise` and the `ruby_version_is`/`platform_is` guards. *Check:* the harness runs `language/if_spec.rb` and reports, even if everything fails.
+
+## Phase 1: a VM that runs `language/`
+
+- `Value`, tagged fixnum/flonum/symbol/special constants, `Heap` with mark-sweep GC and size classes, `HandleScope`. *Check:* allocation stress test survives 10M objects under a forced GC every 1k allocations.
+- Bootstrap classes, method tables, ancestor chains, global method cache, class serials. *Check:* Rust unit tests for `include`/`prepend` ordering against ruby/spec's documented cases.
+- Bytecode + compiler for literals, locals, control flow, `while`/`until`, `case/when`. *Check:* `language/{if,unless,while,until,case}_spec.rb`.
+- Method definition and the full calling convention, `yield`, blocks, procs, lambdas. *Check:* `language/{def,block,lambda,proc,yield,send}_spec.rb`.
+- Exceptions, `ensure`, `retry`, `throw/catch`, non-local `break`/`return`. *Check:* `language/{rescue,ensure,throw,break,return,next,redo}_spec.rb`.
+- Constants, modules, `class`/`module` bodies, `self`, singleton classes, `defined?`. *Check:* `language/` minus `regexp/`.
+- Regex engine decision and integration (engine.md, open questions), `Regexp` and `MatchData` basics, `=~`, `case` with regex. *Check:* `language/regexp/`.
+- `core/kernel.rb`, `core/object.rb`, minimal `Integer`, `String`, `Array`, `Hash`, `Symbol` in Ruby, enough to run the specs above. *Check:* `spinel run hello.rb` and the phase's spec directories.
+
+**Milestone:** `language/` passes above 90%.
+
+## Phase 2: core library
+
+One slice per class, each driven by `core/<class>/`: `Integer`, `Float`, `String` and `Encoding` (UTF-8/US-ASCII/binary), `Symbol`, `Array`, `Hash`, `Range`, `Comparable`, `Enumerable`, `Enumerator` (needs fibers), `Proc`/`Method`/`UnboundMethod`, `Module`/`Class` reflection (`define_method`, `instance_eval`, `method_missing`, hooks), `Exception` hierarchy with `caller_locations`, `Struct`, `Data`, `Time` (primitive clock), full `Regexp`/`MatchData`, `Rational`/`Complex` (Ruby), `Math`, `GC`/`ObjectSpace` with `WeakMap`, `WeakRef`, and finalizers, `Marshal`.
+
+- Fibers on the non-recursive interpreter plus `corosensei` for re-entrant primitives. *Check:* `core/fiber/`, `core/enumerator/`.
+- String `eval`, `binding`, `instance_eval` with strings. *Check:* `core/kernel/eval_spec.rb`, `core/binding/`.
+
+**Milestone:** `core/` passes above 80%, `mspec` itself runs on Spinel and replaces `spec/harness/`.
+
+## Phase 3: a real runtime
+
+- `require`/`load`/`$LOAD_PATH`/`autoload`, bytecode cache in `.spinel/bytecode/` keyed by content hash. *Check:* `core/kernel/require_spec.rb`; second run of a 500-file fixture is measurably faster.
+- `IO`, `File`, `Dir`, `Process` including `fork` and `spawn`, `ENV`, signals, `Kernel#system`/backticks, `ARGV`, exit codes. *Check:* `core/{io,file,dir,process,env}/`.
+- `Thread`, `Mutex`, `Queue`, `ConditionVariable`, `Monitor` on the per-Ractor lock, with the lock released around blocking calls. *Check:* `core/{thread,mutex,queue,conditionvariable}/`, `library/monitor/`.
+- Vendored pure-Ruby stdlib extracted on first run: `set`, `optparse`, `erb`, `fileutils`, `time`, `net/http`, `webrick` (a gem, vendored for the phase 4 milestone). *Check:* `library/` for each.
+- Built-in gems whose C parts become primitives: `json` (Ruby half + Rust parser), `stringio`, `strscan`, `digest`, `zlib`, `date`, `socket`. *Check:* `library/` for each; the built-in versions match the gem versions Spinel claims.
+- `ruby -e`, `-r`, `-I`, `-w`, `$0` parity so scripts and gems' shell-outs behave. *Check:* `command_line/`.
+- yjit-bench subset runs; record interpreter numbers. *Check:* `bench/README.md` table, target within 1.5× of `ruby --disable-yjit`.
+
+**Milestone:** `rake`, `minitest`, `rspec-core` run their own test suites on Spinel.
+
+## Phase 4: tooling on the engine
+
+The package-manager.md, cli.md, test-runner.md and build.md designs. Slices as listed in those docs, plus `tests/fixtures/bundler-setup` from cli.md. This phase covers pure-Ruby and built-in gems only; the `.spinel` extension path and Spinel-native gems are phase 5.
+
+**Milestone:** `spinel add sinatra`, a Sinatra app serves requests on WEBrick, `spinel test` runs its Minitest suite in parallel, `spinel build --compile` produces a binary that runs on a clean machine, `require "bundler/setup"` works inside the app.
+
+## Phase 5: extensions and Ractors
+
+- `spinel-ext` public API, versioned ABI, loader, an example extension gem, `Spinel::FFI` on libffi. *Check:* a gem with a `.spinel` extension installs and loads; `library/fiddle/` subset.
+- `openssl` (phased: digests, HMAC, random, then TLS for `net/https`), `psych`, `bigdecimal`, `io/console`, `etc`. *Check:* `library/` for each; `net/https` fetches a page.
+- Install-time substitution and `.spinel/substitutions.json`; `pg` and `sqlite3` Spinel-native gems published under `<cpu>-<os>-spinel`. *Check:* a Sinatra + sqlite fixture; `bundle install` on the same Gemfile and lock ignores the Spinel gems and the lock is unchanged.
+- `puma` and `nio4r` Spinel-native gems. *Check:* the Sinatra fixture serves on Puma.
+- Ractors: creation, message passing, shareability checks, parallel execution on separate OS threads. *Check:* `core/ractor/`; a CPU-bound benchmark scales with Ractor count.
+
+## Phase 6: JIT and GC
+
+- Cranelift lowering of the interpreter's bytecode, call-count tiering, guards and deopt, inline caches consumed at compile time, stack maps for the GC. *Check:* full ruby/spec run with `--jit` forced on every method produces the same results; yjit-bench headline set faster than `ruby --yjit`.
+- Generational, moving GC with the existing handle discipline. *Check:* same spec run; allocation-heavy benchmarks improve.
+
+## Phase 7: Rails and reach
+
+- Rails prerequisites: `TracePoint` (`:class`, `:call`, `:return`, `:line`, `:raise`), `Module#const_source_location`, `Class#subclasses`, Ractor-safe class-level state from the main Ractor. *Check:* `zeitwerk` and `activesupport` test suites.
+- `rails new` app boots on Spinel, `spinel test` runs its suite green with SQLite, then Postgres via the native `pg`. *Check:* fixture app in CI.
+- `nokogiri` Spinel-native gem on a Rust XML/HTML parser, because Rails' test helpers depend on it. *Check:* `rails-html-sanitizer` suite.
+- `spinel fmt` and `spinel lint` on `spinel_ast`. `spinel ruby install` for pinned Spinel versions. Windows.
+
+## How to vibecode this
+
+1. One slice per session. Paste the bullet and the relevant doc section; the check is the definition of done.
+2. Engine slices: run the named spec directory before and after; the PR states the delta. A slice that adds no passing specs is not done.
+3. Never mark a failing spec as expected. Skip with a reason in `spec/tags/` or fix it.
+4. The core library is Ruby. If a session reaches for Rust to implement a `String` method, it must justify why Ruby cannot express it.
+5. No globals. Reviews grep for `static mut`, `lazy_static`, `OnceCell` holding `Value`, and `thread_local!` holding VM objects. Anything found outside `spinel-vm/src/shared/` is a bug.
+6. Numbers live in `bench/`, reproduced by script, never typed into prose.
+7. When a slice reveals a doc is wrong, fix the doc in the same PR.
