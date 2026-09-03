@@ -2,6 +2,8 @@
 
 Each phase ends with something runnable. Each bullet is one slice: one AI session, with a named check that proves it. Engine slices are measured in ruby/spec files that newly pass; the check names the directory. No dates. The progress bar is `bench/spec-status.md`.
 
+Every bullet below is tracked as a GitHub issue, one milestone per phase: [milestones](https://github.com/ar4mirez/spinel/milestones). Issues carry a priority (`P0` critical path, `P1` needed for the milestone, `P2` can slip), a size (`size:S` one session, `size:M` two or three, `size:L` more), and an `area:` label. When a slice here and its issue disagree, fix both in the same PR.
+
 ## Phase 0: skeleton
 
 - Cargo workspace with the crates from architecture.md, CI on macOS arm64 and Linux x64, `spinel --version`. *Check:* green CI.
