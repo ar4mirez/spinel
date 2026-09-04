@@ -67,9 +67,23 @@ A collection runs inside an allocation, when bytes since the last one cross a th
 
 `HandleScope` is the discipline, and it is enforced rather than documented: `Heap` has no method that allocates. `HandleScope::alloc` returns a `Handle` — an index into the heap's root stack — and never a bare pointer, so an object the collector cannot see is a program that does not compile. A scope pops its own handles on drop, and a nested scope's handle cannot escape into its parent because `Handle` is covariant in the scope's lifetime. Today the root set is exactly that stack; the VM stack, frames, the current exception, and the per-heap tables each plug into the same mark phase as their slice lands.
 
+## Classes and ancestor chains
+
+Landed in [#8](https://github.com/ar4mirez/spinel/issues/8). Every class and module owns a **run** of the ancestor chain: the modules prepended to it, then the class itself, then the modules included in it. A class's ancestry is its own run followed by its superclass's, so `include` on a superclass is visible to every subclass with nothing propagated, and `ancestors` is a walk.
+
+The run is maintained by `include` and `prepend` rather than recomputed from a list of mixins, because the order depends on the state of the chain at the moment of each call: `include M; include B; include A` where `A` also includes `M` gives `[C, A, B, M]`, and no replay of `[M, B, A]` against `A`'s final contents produces that. Ruby 3.0's [Feature #9573](https://bugs.ruby-lang.org/issues/9573) — a module gaining an include reaches back into everything that already mixed it in — is a flat list of includers per module, patched at each includer's own copy of the module.
+
+These rules are CRuby's, and they were measured rather than read: `crates/spinel-vm/tests/ancestors.txt` is 42 hierarchies with the ancestors a real Ruby computes for them, `scripts/ancestors-oracle.rb` is what re-measures it in CI, and `tests/ancestors.rs` is what holds Spinel to it.
+
+Singleton classes are allocated on first ask, never at class creation. A class's singleton inherits from its superclass's, `BasicObject`'s inherits from `Class`, and a module's inherits from `Module` — the twist that puts `Class`, `Module`, `Object`, `Kernel`, and `BasicObject` at the end of every metaclass's ancestors. An ordinary object's singleton *becomes* its class, as in Ruby, so the header write is the whole mechanism.
+
+Method tables are Rust hash maps hanging off the class table, not object slots, so the class table is a root source in `Heap::mark`: it holds every class object and every method body.
+
 ## Shapes and inline caches
 
-Instance variables use hidden-class shapes (V8, YJIT). Method lookup uses a per-class method table plus a per-heap global cache keyed by `(class, method symbol)` and invalidated by a class serial that bumps on any method definition in the class or its ancestors. Call sites carry a monomorphic inline cache `(class serial, target)`. Because bytecode is shared across Ractors, inline caches do not live in the bytecode; each heap owns a side table indexed by call-site id. Class serials are atomic integers on the shared class object so every heap sees an invalidation. These are day-one features because retrofitting them into a VM that assumed direct table lookups is painful.
+Instance variables use hidden-class shapes (V8, YJIT). Method lookup uses a per-class method table plus a per-heap global cache keyed by `(class, method symbol)`, landed with #8; misses are cached too, so a `method_missing` dispatch does not re-walk the chain per call. Invalidation is a serial that bumps on any method definition, removal, `include`, or `prepend`. Today that serial is one per class *table* rather than one per class: correct, and coarser than it needs to be — a definition anywhere evicts every cached lookup. Per-class serials that bump on a definition in the class or its ancestors need a subclass list and a descendant walk per definition, and the benchmark that would justify writing them arrives with the JIT.
+
+Call sites carry a monomorphic inline cache `(class serial, target)`. Because bytecode is shared across Ractors, inline caches do not live in the bytecode; each heap owns a side table indexed by call-site id. Class serials are atomic integers on the shared class object so every heap sees an invalidation. These are day-one features because retrofitting them into a VM that assumed direct table lookups is painful.
 
 ## Calling convention
 
@@ -87,7 +101,7 @@ Ruby's full argument protocol from the start, because ruby/spec's `language/` di
 
 Boot order:
 
-1. `spinel-vm` creates the heap and the bootstrap classes `BasicObject`, `Object`, `Module`, `Class`, `Kernel`, `Symbol`, `String`, `Integer`, `Array`, `Hash`, `Proc`, `Exception` as empty shells with the right ancestry.
+1. `spinel-vm` creates the heap and the bootstrap classes `BasicObject`, `Object`, `Module`, `Class`, `Kernel`, `Comparable`, `Enumerable`, `Numeric`, `Symbol`, `String`, `Integer`, `Array`, `Hash`, `Proc`, `Exception` as empty shells with the right ancestry. The three modules and `Numeric` are on the list because of "the right ancestry": without them `Integer.ancestors` is wrong from the first commit, and `core/*.rb` cannot fix an ancestry it is loaded into.
 2. Rust primitives are registered under a hidden `Primitive` module.
 3. `core.image` (precompiled `core/*.rb`) is loaded and executed, filling in every method.
 4. Core classes are marked shareable. Reopening them from user code is allowed only from the main Ractor, as in Ruby 4 (see "Ractors and threads").

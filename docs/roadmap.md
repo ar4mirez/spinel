@@ -14,7 +14,9 @@ Every bullet below is tracked as a GitHub issue, one milestone per phase: [miles
 ## Phase 1: a VM that runs `language/`
 
 - `Value`, tagged fixnum/flonum/symbol/special constants, `Heap` with mark-sweep GC and size classes, `HandleScope`. *Check:* allocation stress test survives 10M objects under a forced GC every 1k allocations.
-- Bootstrap classes, method tables, ancestor chains, global method cache, class serials. *Check:* Rust unit tests for `include`/`prepend` ordering against ruby/spec's documented cases.
+- Bootstrap classes, method tables, ancestor chains, and the global method cache. *Check:* Rust unit tests for `include`/`prepend` ordering against ruby/spec's documented cases — measured from CRuby by a script CI re-runs, not written by hand.
+- Shapes: hidden-class instance variables and the per-heap shape tree. *Check:* two objects that set the same names in the same order share a shape, and in a different order do not.
+- Per-class serials, to replace the one-per-table serial the method cache ships with, and the subclass list they need. *Check:* defining a method on one class leaves another class's cached lookup in place.
 - Bytecode + compiler for literals, locals, control flow, `while`/`until`, `case/when`. *Check:* `language/{if,unless,while,until,case}_spec.rb`.
 - Method definition and the full calling convention, `yield`, blocks, procs, lambdas. *Check:* `language/{def,block,lambda,proc,yield,send}_spec.rb`.
 - Exceptions, `ensure`, `retry`, `throw/catch`, non-local `break`/`return`. *Check:* `language/{rescue,ensure,throw,break,return,next,redo}_spec.rb`.

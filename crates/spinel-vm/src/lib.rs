@@ -66,7 +66,9 @@ mod tests {
     }
 }
 
+pub mod class;
 pub mod heap;
 pub mod value;
+pub use class::{Builtin, ClassId, Classes, Kind, Method, Mixin, MixinError};
 pub use heap::{Handle, HandleScope, Heap, Payload, Stats};
 pub use value::{SymbolId, Unpacked, Value};
