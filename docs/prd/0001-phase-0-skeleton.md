@@ -97,7 +97,7 @@ so the first fixture arrives with `spinel run` in phase 1.
 | T1 | Root virtual manifest: shared version, edition 2024, MSRV, workspace lints | `cargo metadata` lists 8 members |
 | T2 | Scaffold the six library crates with the dependency edges from R1 | `cargo build` |
 | T3 | `spinel-cli`: `[[bin]] name = "spinel"`, clap parser, version + help | `spinel --version` |
-| T4 | `tests/` package: fixture + integration test over the built binary | `cargo test` |
+| T4 | Integration test in `crates/spinel-cli/tests/` driving the built binary | `cargo test` |
 | T5 | `.github/workflows/ci.yml`: build/test matrix + fmt + clippy | green CI |
 | T6 | CLI UX audit: version/help/error output, exit codes, `--help` on a bad flag | audit table below |
 | T7 | Reconcile `docs/architecture.md` with what shipped | doc diff |
