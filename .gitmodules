@@ -1,0 +1,4 @@
+[submodule "spec/ruby"]
+	path = spec/ruby
+	url = https://github.com/ruby/spec.git
+	branch = master

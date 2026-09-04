@@ -1,0 +1,24 @@
+[package]
+name = "spec-harness"
+description = "Temporary ruby/spec runner. Deleted when mspec runs on Spinel itself, end of phase 2."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+# Not part of the product: it is a development tool with a known deletion date,
+# and it must never be mistaken for something a user installs.
+publish = false
+
+[[bin]]
+name = "spec-harness"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+spinel-ast.workspace = true
+spinel-parse.workspace = true
+spinel-vm.workspace = true
+
+[lints]
+workspace = true

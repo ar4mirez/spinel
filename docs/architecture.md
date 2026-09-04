@@ -83,7 +83,7 @@ shims/                     setup.rb, test_worker.rb, gemfile_eval.rb
 spec/
   ruby/                    git submodule: ruby/spec
   tags/                    skipped specs with reasons
-  harness/                 minimal runner used before mspec itself runs on Spinel
+  harness/                 minimal runner used before mspec itself runs on Spinel (a workspace member, and the only crate outside crates/: it ships to nobody and is deleted in phase 2)
 scripts/                   spec.sh, bench.sh, release.sh, vendor-stdlib.sh
 crates/spinel-cli/tests/   tooling integration tests + fixtures/
 bench/                     yjit-bench subset, spec-status.md (CI-generated)

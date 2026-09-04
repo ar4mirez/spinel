@@ -51,4 +51,4 @@ CRuby carries thirty years of decisions that a new engine does not have to: a C 
 
 ## Status
 
-Pre-code. Progress is measured one way: ruby/spec pass counts per directory, published in `bench/spec-status.md` by CI.
+Phase 0. Progress is measured one way: ruby/spec pass counts per directory, published in `bench/spec-status.md` by CI. The corpus is in the tree and `scripts/spec.sh [dir]` counts it today; nothing passes yet, because there is no VM to run it.
