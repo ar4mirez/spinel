@@ -66,9 +66,16 @@ mod tests {
     }
 }
 
+pub mod bytecode;
 pub mod class;
+pub mod compile;
 pub mod heap;
+pub mod interp;
+pub mod shared;
 pub mod value;
+pub use bytecode::{BinOp, Insn, Iseq, Literal};
 pub use class::{Builtin, ClassId, Classes, Kind, Method, Mixin, MixinError};
+pub use compile::Unsupported;
 pub use heap::{Handle, HandleScope, Heap, Payload, Stats};
+pub use interp::{Error, Frame};
 pub use value::{SymbolId, Unpacked, Value};

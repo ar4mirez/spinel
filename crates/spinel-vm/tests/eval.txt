@@ -1,0 +1,122 @@
+# What Ruby answers, as measured from CRuby.
+#
+# Every `#=>` in this file was produced by running the snippet on the real Ruby
+# named in CI and recording `.inspect`. `scripts/eval-oracle.rb` is what
+# re-checks them and `tests/eval.rs` is what makes Spinel agree, so the file is
+# falsifiable in both directions: Ruby can disagree with it, Spinel can disagree
+# with it, and CI fails on either.
+#
+# It is a measurement rather than a transcription because several answers here
+# are not what a reading of the code would suggest. `-7 / 2` is -4 and not -3;
+# `-7 % 2` is 1 and not -1; `!0` is false because 0 is truthy; `1 && 2` is 2
+# rather than true. Each of those is a place an interpreter written from
+# intuition is quietly wrong.
+#
+# Format: one snippet per line, its result after `#=>`. Snippets must terminate
+# and must not raise — Spinel's *refusals* (a bignum, a division by zero, a loop
+# that never ends) are Rust-side tests, because Ruby's answer there is a value
+# this slice deliberately does not have.
+
+# ------------------------------------------------------------------ literals
+nil  #=> nil
+true  #=> true
+false  #=> false
+42  #=> 42
+-7  #=> -7
+1.5  #=> 1.5
+2.0  #=> 2.0
+:sym  #=> :sym
+'text'  #=> "text"
+[1, :two, 'three']  #=> [1, :two, "three"]
+[]  #=> []
+[[1], [2, 3]]  #=> [[1], [2, 3]]
+()  #=> nil
+
+# -------------------------------------------------------------------- locals
+a = 1; a  #=> 1
+a = 1; b = 2; a + b  #=> 3
+a = (b = 3)  #=> 3
+a = 1; a = 2; a  #=> 2
+
+# ---------------------------------------------------------------- arithmetic
+# Ruby's `/` and `%` floor. Rust's truncate, so these four are where an
+# interpreter that reached for `/` gets it wrong.
+7 / 2  #=> 3
+-7 / 2  #=> -4
+7 / -2  #=> -4
+-7 % 2  #=> 1
+7 % -2  #=> -1
+2 * 3 + 1  #=> 7
+1 + 2.0  #=> 3.0
+1 == 1.0  #=> true
+3 / 2.0  #=> 1.5
+
+# ----------------------------------------------------------------- if/unless
+if true then 1 else 2 end  #=> 1
+if false then 1 else 2 end  #=> 2
+if false then 1 end  #=> nil
+unless false then 1 else 2 end  #=> 1
+unless true then 1 else 2 end  #=> 2
+unless true; end  #=> nil
+if true; 'a'; 'b'; end  #=> "b"
+a = 2; if a == 1 then :one elsif a == 2 then :two else :other end  #=> :two
+a = 1; if (); a = 2; end; a  #=> 1
+
+# ----------------------------------------------------------------- while/until
+i = 0; while i < 10; i += 1; end; i  #=> 10
+i = 0; until i > 9; i += 1; end; i  #=> 10
+i = 0; while i < 3; i += 1; end  #=> nil
+i = 0; until i == 1; a = 123; i = 1; end; a  #=> 123
+a = 1; while false; a = 2; end; a  #=> 1
+a = 1; begin; a = 2; end while false; a  #=> 2
+a = 1; begin; a = 2; end until true; a  #=> 2
+i = 0; begin; i += 1; end while i < 5; i  #=> 5
+
+# ------------------------------------------------------------- break and next
+i = 0; while true; i += 1; break if i == 3; end; i  #=> 3
+while true; break 42; end  #=> 42
+i = 0; n = 0; while i < 5; i += 1; next if i == 2; n += 1; end; n  #=> 4
+
+# ------------------------------------------------------------------- logical
+# `&&` and `||` return an operand, not a boolean.
+1 && 2  #=> 2
+nil && 2  #=> nil
+nil || 2  #=> 2
+1 || 2  #=> 1
+false || nil  #=> nil
+a = 1; false && (a = 2); a  #=> 1
+a = 1; true || (a = 2); a  #=> 1
+a = nil; a ||= 5; a  #=> 5
+a = 1; a ||= 5; a  #=> 1
+a = 1; a &&= 5; a  #=> 5
+a = nil; a &&= 5; a  #=> nil
+a ||= 7; a  #=> 7
+
+# ----------------------------------------------------------------- case/when
+case 2; when 1 then :one; when 2 then :two; else :other; end  #=> :two
+case 9; when 1 then :one; else :other; end  #=> :other
+case 9; when 1 then :one; end  #=> nil
+case 3; when 1, 2, 3 then :low; else :high; end  #=> :low
+case 'b'; when 'a' then 1; when 'b' then 2; end  #=> 2
+a = 5; case; when a < 3 then :small; when a < 10 then :medium; end  #=> :medium
+n = 0; case 1; when 1 then n = 1; when 1 then n = 2; end; n  #=> 1
+
+# ------------------------------------------------------------------ equality
+'a' == 'a'  #=> true
+'a' == 'b'  #=> false
+[1, 2] == [1, 2]  #=> true
+[1, 2] == [1, 3]  #=> false
+[1, [2]] == [1, [2]]  #=> true
+[] == []  #=> true
+[1] == [1, 2]  #=> false
+:a == :a  #=> true
+nil == nil  #=> true
+nil == false  #=> false
+1 != 2  #=> true
+a = 'x'; b = 'x'; a == b  #=> true
+
+# ------------------------------------------------------------------- unary
+!true  #=> false
+!nil  #=> true
+!0  #=> false
+a = 5; -a  #=> -5

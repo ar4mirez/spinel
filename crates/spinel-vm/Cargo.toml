@@ -10,5 +10,11 @@ repository.workspace = true
 [dependencies]
 spinel-ast.workspace = true
 
+# Test-only, and not a layering violation: the tests read Ruby source, which
+# needs the parser, and `spinel-parse` depends on `spinel-ast` rather than on
+# this crate. Prism still lives in exactly one place.
+[dev-dependencies]
+spinel-parse.workspace = true
+
 [lints]
 workspace = true
