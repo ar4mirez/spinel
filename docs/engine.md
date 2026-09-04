@@ -102,7 +102,7 @@ Bytecode to Cranelift IR, method at a time, after a call count threshold, with i
 
 ## Conformance
 
-- `spec/ruby` is a git submodule of ruby/spec. `mspec` is Ruby, so it runs on Spinel itself once the engine is far enough along. Before that, `spec/harness/` is a tiny Rust runner that understands `describe`/`it`/`should ==` and a handful of matchers, enough to drive the `language/` specs.
+- `spec/ruby` is a git submodule of ruby/spec. `mspec` is Ruby, so it runs on Spinel itself once the engine is far enough along. Before that, `spec/harness/` is a tiny Rust runner that reads a spec file's syntax tree: it finds the `describe`/`it` structure and evaluates the `ruby_version_is` and `platform_is` guards against the target. It executes nothing, so every example it finds is reported `blocked` rather than passed or failed — a fourth column that disappears when phase 1 lands the interpreter and the matchers with it. Run it with `scripts/spec.sh [dir]`.
 - CI publishes `bench/spec-status.md`: pass/fail/skip counts per directory. That table is the project's progress bar.
 - Skips live in `spec/tags/` with a reason. There are no expected-failure markers in code.
 

@@ -27,7 +27,11 @@ jobs:
           - { os: macos-14, name: macos-arm64 }
           - { os: ubuntu-latest, name: linux-x64 }
     steps:
+      # `spec/ruby` is the ruby/spec submodule; `cargo test` runs the harness
+      # against it, so a shallow checkout without it fails.
       - uses: actions/checkout@v4
+        with:
+          submodules: true
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -91,7 +95,7 @@ jobs:
 
       - name: No process-global VM state
         run: |
-          if grep -rnE '(static mut|lazy_static!|thread_local!)' crates/ --include='*.rs' \
+          if grep -rnE '(static mut|lazy_static!|thread_local!)' crates/ spec/harness/ --include='*.rs' \
              | grep -v 'crates/spinel-vm/src/shared/'; then
             echo "::error::process-global mutable state outside spinel-vm/src/shared/ (see CLAUDE.md)"
             exit 1
@@ -114,17 +118,16 @@ jobs:
   # non-zero only on an unhandled node, never on a syntax error, because both
   # corpora ship files that are deliberately invalid Ruby.
   #
-  # ruby/spec is still cloned at a pinned SHA because vendoring it is its own
-  # roadmap slice (#5); the pin means an upstream commit cannot turn a green PR
-  # red. The stdlib half of this corpus is no longer cloned: `stdlib/` is in the
-  # tree, and the last step sweeps it.
+  # Both corpora are in the tree now: `stdlib/` since #4, `spec/ruby/` as a
+  # submodule since #5. Nothing is cloned at a floating pin any more, so an
+  # upstream commit cannot turn a green PR red.
   sweep:
     name: lower a real corpus
     runs-on: ubuntu-latest
-    env:
-      RUBY_SPEC_SHA: 620a912d97cf321a47eb5c754f37a060a94326e3
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -134,26 +137,42 @@ jobs:
 
       - run: cargo build --release -p spinel-cli
 
-      - name: Fetch ruby/spec
-        run: |
-          git init --quiet corpus/ruby-spec
-          cd corpus/ruby-spec
-          git remote add origin https://github.com/ruby/spec.git
-          git fetch --quiet --depth 1 origin "$RUBY_SPEC_SHA"
-          git checkout --quiet FETCH_HEAD
-
-      - name: Sweep ruby/spec
-        run: ./target/release/spinel parse corpus/ruby-spec
-
-      # Vendored copies. `stdlib/` is here now; `spec/ruby/` lands with #5, and
-      # is skipped rather than failing until then.
       - name: Sweep vendored corpora
         run: |
           for dir in spec/ruby stdlib; do
-            if [ -d "$dir" ]; then
-              echo "sweeping $dir"
-              ./target/release/spinel parse "$dir"
-            else
-              echo "$dir not vendored yet, skipping"
-            fi
+            echo "sweeping $dir"
+            ./target/release/spinel parse "$dir"
           done
+
+  # The definition of done for #5: the harness runs a ruby/spec directory and
+  # reports. Nothing passes yet — there is no VM — so what is asserted is that
+  # the run happens and the counts are real.
+  spec:
+    name: ruby/spec harness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: spec
+
+      - name: Run language/if_spec.rb
+        run: ./scripts/spec.sh language/if_spec.rb
+
+      # An example floor, not an exact count: upstream adds specs. Without it,
+      # an empty or unfetched submodule would report "0 examples" and pass,
+      # which is the one result a spec runner must never fake.
+      - name: Run language/
+        run: |
+          ./scripts/spec.sh language | tee spec-report.txt
+          examples=$(sed -nE 's/^[0-9]+ files? · ([0-9]+) examples ·.*/\1/p' spec-report.txt)
+          echo "language/ reports $examples examples"
+          if [ "${examples:-0}" -lt 2000 ]; then
+            echo "::error::language/ reported $examples examples; ruby/spec has ~2700, so the corpus is not all there"
+            exit 1
+          fi
