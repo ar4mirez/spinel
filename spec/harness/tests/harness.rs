@@ -84,23 +84,67 @@ fn a_spec_file_reports_its_examples_and_succeeds() {
     assert!(output.status.success(), "a clean run exits zero");
     let text = stdout(&output);
     assert!(
-        text.contains("two_spec.rb · 2 examples · 0 passed · 0 failed · 2 blocked · 0 skipped"),
+        text.contains("two_spec.rb · 2 examples · 2 passed · 0 failed · 0 blocked · 0 skipped"),
         "unexpected report:\n{text}"
     );
 }
 
+/// One example Spinel can run and one it cannot, in that order.
+const ONE_OF_EACH: &str = r##"
+describe "Something" do
+  it "is runnable" do
+    (1 + 1).should == 2
+  end
+
+  it "needs a method call" do
+    [1, 2].size.should == 2
+  end
+end
+"##;
+
 #[test]
-fn nothing_passes_while_there_is_no_vm() {
-    // The count that must not drift: a harness that reported passes it could
-    // not have earned would make the project's progress bar a lie.
-    let fixture = Fixture::new("nopass", TWO_EXAMPLES);
+fn an_example_it_cannot_run_is_blocked_and_never_failed() {
+    // The count that must not drift. A harness that reported a pass it could
+    // not have earned would make the project's progress bar a lie; one that
+    // reported a *failure* for a construct Spinel simply has not written yet
+    // would make the failure column useless for finding real disagreements.
+    let fixture = Fixture::new("mixed", ONE_OF_EACH);
     let text = stdout(&run(&[fixture.path()]));
 
-    assert!(text.contains("0 passed"), "nothing can pass yet:\n{text}");
     assert!(
-        text.contains("blocked: this build has no VM"),
-        "the report must say why:\n{text}"
+        text.contains("2 examples · 1 passed · 0 failed · 1 blocked"),
+        "unsupported must block, not fail:\n{text}"
     );
+    assert!(
+        text.contains("blocked by, most examples first"),
+        "the report must say what blocked it:\n{text}"
+    );
+    assert!(
+        text.contains("a method call is not compiled yet"),
+        "the reason must name the construct:\n{text}"
+    );
+}
+
+#[test]
+fn a_disagreement_with_ruby_is_a_failure_and_fails_the_run() {
+    // The other half: when Spinel *can* run an example and gets it wrong, that
+    // has to be loud and has to exit non-zero.
+    let fixture = Fixture::new(
+        "wrong",
+        "describe \"x\" do\n  it \"is wrong\" do\n    1.should == 2\n  end\nend\n",
+    );
+    let output = run(&[fixture.path()]);
+    let text = stdout(&output);
+
+    assert!(
+        text.contains("0 passed · 1 failed"),
+        "unexpected report:\n{text}"
+    );
+    assert!(
+        text.contains("1 should equal 2"),
+        "the report must say how:\n{text}"
+    );
+    assert!(!output.status.success(), "a failing example fails the run");
 }
 
 #[test]
@@ -198,19 +242,37 @@ fn a_missing_path_is_a_usage_error() {
 
 #[test]
 fn if_spec_reports_every_example() {
-    // The issue's definition of done: the harness runs `language/if_spec.rb`
-    // and reports, even though nothing can pass. 52 is the number of `it`
-    // blocks in the file at the pinned commit; if upstream edits the file this
-    // test is where that shows up, which is the point of pinning a submodule.
+    // 52 is the number of `it` blocks in the file at the pinned commit; if
+    // upstream edits the file this test is where that shows up, which is the
+    // point of pinning a submodule.
+    //
+    // The pass count is a *ratchet*, not an equality: this slice earned 27 and
+    // the ones after it earn more, so an exact number would have to be edited
+    // by every author who improved things and would eventually be edited
+    // downwards by one who did not notice. What must never move is `0 failed`.
+    const EARNED: usize = 27;
     let path = corpus().join("language/if_spec.rb");
     let output = run(&[path.to_str().expect("corpus path should be UTF-8")]);
 
     assert!(output.status.success(), "the run itself must succeed");
     let text = stdout(&output);
+    assert!(text.contains("52 examples"), "unexpected report:\n{text}");
     assert!(
-        text.contains("if_spec.rb · 52 examples · 0 passed · 0 failed · 52 blocked · 0 skipped"),
-        "unexpected report for if_spec.rb:\n{text}"
+        text.contains("0 failed"),
+        "no example may disagree with Ruby:\n{text}"
     );
+
+    let passed = passed_count(&text).expect("the report should carry a pass count");
+    assert!(
+        passed >= EARNED,
+        "if_spec.rb passed {passed}, down from the {EARNED} this slice earned:\n{text}"
+    );
+}
+
+/// The `N passed` out of a report line.
+fn passed_count(text: &str) -> Option<usize> {
+    let (before, _) = text.split_once(" passed")?;
+    before.rsplit(' ').next()?.parse().ok()
 }
 
 #[test]

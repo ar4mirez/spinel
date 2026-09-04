@@ -95,7 +95,9 @@ impl Ord for Version {
 // ---------------------------------------------------------------------------
 
 /// One `it "..." do ... end`, with the `describe` strings enclosing it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+//
+// Not `Eq`: the body holds float literals. Nothing compares examples.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Example {
     /// `describe` descriptions, outermost first.
     pub group: Vec<String>,
@@ -103,6 +105,12 @@ pub struct Example {
     pub description: String,
     /// Where it is, for a `path:line` in the report.
     pub span: Span,
+    /// The block body, so it can be run. Cloned rather than borrowed: the tree
+    /// is dropped once a file's examples are collected, and an example outlives
+    /// it.
+    pub body: Vec<Expr>,
+    /// The locals the parser assigned to the block's own scope, in slot order.
+    pub locals: Vec<spinel_ast::Name>,
     /// Set when a guard excluded this example, or when the harness could not
     /// evaluate the guard and refused to guess.
     pub skipped: Option<String>,
@@ -205,10 +213,16 @@ impl Walk<'_> {
     }
 
     fn push(&mut self, span: Span, call: &Call, skipped: Option<String>) {
+        let (body, locals) = match call.block.as_ref() {
+            Some(BlockArg::Block(block)) => (block.body.clone(), block.locals.clone()),
+            _ => (Vec::new(), Vec::new()),
+        };
         self.out.push(Example {
             group: self.group.clone(),
             description: argument_text(call).unwrap_or_else(|| "<no description>".to_owned()),
             span,
+            body,
+            locals,
             skipped,
         });
     }

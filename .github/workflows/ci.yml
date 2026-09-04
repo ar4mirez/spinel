@@ -155,6 +155,48 @@ jobs:
           ruby-version: '4.0'
       - run: ruby scripts/ancestors-oracle.rb --check
 
+  # The same arrangement for #10's answers. `crates/spinel-vm/tests/eval.txt` is
+  # what CRuby prints for ~90 snippets of the Ruby this slice compiles, and
+  # `tests/eval.rs` is what makes Spinel agree. This job checks the other half:
+  # that the table still says what Ruby says. Floored division, the sign of `%`,
+  # `0` being truthy and `&&` returning an operand are all places an interpreter
+  # written from intuition is quietly wrong, so the expectations are measured
+  # rather than believed.
+  eval:
+    name: eval oracle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@v1
+        with:
+          # The language version this build implements.
+          ruby-version: '4.0'
+      - run: ruby scripts/eval-oracle.rb --check
+
+  # The anti-false-pass check, and the reason the pass count can be trusted at
+  # all. Every example the harness reports `passed` is sliced back out of its
+  # spec file and re-run on a real Ruby with a four-line mspec shim. A pass
+  # Spinel had no right to is strictly worse than a blocked example, and it is
+  # exactly the failure mode a partial VM invites: the harness only recognises
+  # one matcher shape, so an example it *mis*-read would otherwise pass in
+  # silence.
+  passes:
+    name: verify passes on real ruby
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '4.0'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: passes
+      - run: cargo build --release -p spec-harness
+      - run: ruby scripts/verify-passes.rb spec/ruby
+
   # The definition of done for the lowering (#3): every Ruby file in a real
   # corpus reaches `spinel_ast` without an unhandled node. The sweep exits
   # non-zero only on an unhandled node, never on a syntax error, because both
@@ -186,9 +228,13 @@ jobs:
             ./target/release/spinel parse "$dir"
           done
 
-  # The definition of done for #5: the harness runs a ruby/spec directory and
-  # reports. Nothing passes yet — there is no VM — so what is asserted is that
-  # the run happens and the counts are real.
+  # The definition of done for #5, and then for #10: the harness runs a
+  # ruby/spec directory and reports, and since #10 some of what it reports is
+  # `passed`. Two floors are asserted below and one ceiling: enough examples to
+  # prove the corpus is checked out, enough passes to prove the VM still runs,
+  # and zero failures — because a construct Spinel has not written yet must be
+  # `blocked`, and the failure column has to stay meaningful for the day
+  # something really does disagree with Ruby.
   spec:
     name: ruby/spec harness
     runs-on: ubuntu-latest
@@ -216,5 +262,20 @@ jobs:
           echo "language/ reports $examples examples"
           if [ "${examples:-0}" -lt 2000 ]; then
             echo "::error::language/ reported $examples examples; ruby/spec has ~2700, so the corpus is not all there"
+            exit 1
+          fi
+
+          # A ratchet, not an equality: later slices earn more, and an exact
+          # number would have to be edited by everyone who improved things.
+          passed=$(sed -nE 's/.* · ([0-9]+) passed ·.*/\1/p' spec-report.txt)
+          echo "language/ reports $passed passed"
+          if [ "${passed:-0}" -lt 155 ]; then
+            echo "::error::language/ passed $passed, down from the 155 #10 earned"
+            exit 1
+          fi
+
+          failed=$(sed -nE 's/.* · ([0-9]+) failed ·.*/\1/p' spec-report.txt)
+          if [ "${failed:-0}" -ne 0 ]; then
+            echo "::error::language/ has $failed failing example(s): a real disagreement with Ruby"
             exit 1
           fi

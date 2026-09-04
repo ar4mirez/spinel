@@ -14,9 +14,37 @@ source ──Prism──▶ spinel_ast ──resolve──▶ bytecode ──▶
 ```
 
 - **Parse.** `spinel-parse` lowers Prism's tree into `spinel_ast`. Error-tolerant: syntax errors become nodes with diagnostics, so tooling can still format or lint a broken file.
-- **Resolve.** Ruby needs a pass that knows which bare identifiers are locals versus method calls, assigns slot indexes to locals per scope, and marks variables captured by blocks. Prism already does the local-versus-call decision; Spinel keeps its own pass so the AST stays parser-independent.
+- **Resolve.** Ruby needs to know which bare identifiers are locals versus method calls, which slot each local gets, and which variables a block captures. The first is decided in `spinel-parse`, because Prism decides it and the lowering keeps the answer as `VarRef::Local` versus a `Call` with `variable_call`. The second is done by the compiler as it walks, since a scope's slot map is exactly what the compiler is already building. Landed that way in [#10](https://github.com/ar4mirez/spinel/issues/10): a separate pass had nothing left to do that the walk was not doing anyway. Capture analysis has no home yet and gets one with blocks, in [#11](https://github.com/ar4mirez/spinel/issues/11) — that is the pass this line originally described, and the only part of it that is a real pass.
 - **Compile.** One bytecode function per method, block, or top-level script. Blocks compile to their own function with a pointer to the enclosing frame's environment. Bytecode is immutable and position-independent (symbols by name, relinked on load), so it can be cached on disk and shared between Ractors.
 - **Execute.** A non-recursive interpreter loop. A Ruby-to-Ruby call pushes a frame and continues the same loop; it does not recurse on the Rust stack. This matters for fibers and for deep recursion limits that match Ruby's.
+
+### Bytecode
+
+Landed in [#10](https://github.com/ar4mirez/spinel/issues/10). An `Iseq` is a
+`Vec<Insn>` — a Rust enum, not a packed byte buffer, because the decode step a
+buffer buys is the `match` an enum already does and `Insn` is `Copy` and 16
+bytes either way. The on-disk form phase 3 caches is therefore a *serialisation*
+of the enum rather than the enum's own bytes.
+
+Three rules make an `Iseq` position-independent, which is what lets it be cached
+on disk and shared between Ractors:
+
+- **Jumps are relative**, counted from the instruction after the jump, so an
+  `Iseq` never needs relocating.
+- **Symbols are names.** The pool holds `Box<str>` and instructions index it;
+  `Iseq::link` interns the pool against the process table. Two processes agree
+  about symbols without agreeing about the order they first saw them in.
+- **Literals are descriptions**, never `Value`s, because a `Value` can be a
+  pointer into one heap. Materialising is per heap, which is also what makes a
+  string literal a fresh object per evaluation, as Ruby requires.
+
+Arithmetic and comparison are instructions rather than sends — `opt_plus` and
+friends, as YARV has them: a fast path for fixnums and flonums with a real send
+behind it. The send behind it arrives with the calling convention in #11. Until
+then an operand off the fast path is *not yet dispatchable* rather than wrong,
+and the spec that needed it stays blocked. Integer overflow is the same answer:
+Ruby promotes to a bignum, there is no bignum, and a wrapped result would be a
+wrong answer where a blocked spec is merely an incomplete one.
 
 ## Values
 
@@ -144,7 +172,7 @@ Bytecode to Cranelift IR, method at a time, after a call count threshold, with i
 
 ## Conformance
 
-- `spec/ruby` is a git submodule of ruby/spec. `mspec` is Ruby, so it runs on Spinel itself once the engine is far enough along. Before that, `spec/harness/` is a tiny Rust runner that reads a spec file's syntax tree: it finds the `describe`/`it` structure and evaluates the `ruby_version_is` and `platform_is` guards against the target. It executes nothing, so every example it finds is reported `blocked` rather than passed or failed — a fourth column that disappears when phase 1 lands the interpreter and the matchers with it. Run it with `scripts/spec.sh [dir]`.
+- `spec/ruby` is a git submodule of ruby/spec. `mspec` is Ruby, so it runs on Spinel itself once the engine is far enough along. Before that, `spec/harness/` is a tiny Rust runner that reads a spec file's syntax tree: it finds the `describe`/`it` structure and evaluates the `ruby_version_is` and `platform_is` guards against the target. Since [#10](https://github.com/ar4mirez/spinel/issues/10) it also *runs* the examples it can: an example whose every construct compiles is executed and its `.should ==` expectations checked, and one that mentions anything the compiler cannot mean yet is reported `blocked` rather than passed or failed. The `blocked` column shrinks slice by slice and disappears with the harness itself. Each run ends by ranking what the blocking constructs were, in order of how many examples each accounts for, which is how the next slice gets chosen from data rather than from a guess about which corner of Ruby matters. Run it with `scripts/spec.sh [dir]`.
 - CI publishes `bench/spec-status.md`: pass/fail/skip counts per directory. That table is the project's progress bar.
 - Skips live in `spec/tags/` with a reason. There are no expected-failure markers in code.
 

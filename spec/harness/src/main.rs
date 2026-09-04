@@ -10,20 +10,24 @@
 //! count — the project's progress bar — a lie.
 
 mod discover;
+mod run;
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
 
 use clap::Parser;
-use discover::{Example, Target};
+use discover::Target;
+use run::Outcome;
 
 const MILESTONES: &str = "https://github.com/ar4mirez/spinel/milestones";
 
 const AFTER_HELP: &str = "\
-No example can pass yet: this build has no VM, so every example is reported
-blocked. That is the point — the counts are real, and they move when phase 1
-lands the interpreter.
+An example runs when every construct in it compiles. One that mentions
+something the VM cannot mean yet is reported blocked rather than failed, and
+the run ends by ranking what the blocking constructs were — which is how the
+next slice gets chosen from data.
 
 This harness is temporary. mspec replaces it at the end of phase 2.";
 
@@ -43,25 +47,6 @@ struct Cli {
     /// checked without reading the harness's source.
     #[arg(long)]
     list: bool,
-}
-
-/// What became of one example.
-enum Outcome {
-    /// A guard excluded it, or the harness would have had to guess.
-    Skipped,
-    /// Nothing can run it yet.
-    //
-    // ponytail: this is the whole VM-shaped hole. Phase 1 replaces it with a
-    // real evaluation of the example body, and `Passed`/`Failed` start moving.
-    Blocked,
-}
-
-fn outcome(example: &Example) -> Outcome {
-    if example.skipped.is_some() {
-        Outcome::Skipped
-    } else {
-        Outcome::Blocked
-    }
 }
 
 #[derive(Default)]
@@ -100,6 +85,9 @@ impl Counts {
 const MAX_LISTED_FILES: usize = 20;
 /// How many unreadable files to name before summarising.
 const MAX_REPORTED: usize = 20;
+/// How many distinct "blocked by" reasons to rank before summarising. Long
+/// enough to plan the next few slices from, short enough to read.
+const MAX_BLOCKED_REASONS: usize = 15;
 
 /// A spec file that did not parse. Not a failing example: a file the harness
 /// could not read at all, which is a bug in Spinel rather than a result.
@@ -139,6 +127,14 @@ fn main() -> ExitCode {
     // a directory that printed "0 examples" and nothing else would look like a
     // broken checkout instead of a known blind spot.
     let mut without_examples: Vec<String> = Vec::new();
+    // Every expectation that disagreed with Ruby. A failure is a real result and
+    // the one thing a spec run must never summarise away.
+    let mut failures: Vec<String> = Vec::new();
+    // What each blocked example was blocked *by*, counted. This is the run's
+    // most useful output while the VM is partial: it names the next slice, in
+    // order of how many examples it would unblock, from data rather than from a
+    // guess about which corner of Ruby matters.
+    let mut blocked_by: BTreeMap<String, usize> = BTreeMap::new();
     // A single file needs no per-file line: the summary names it. Above the
     // cap the lines stop being a report and become a wall.
     let show_files = (2..=MAX_LISTED_FILES).contains(&files.len()) && !cli.list;
@@ -162,13 +158,25 @@ fn main() -> ExitCode {
         }
         if cli.list {
             for example in &examples {
-                let reason = match &example.skipped {
-                    Some(reason) => format!("\tskipped: {reason}"),
-                    None => String::new(),
+                // `outcome<TAB>start-end` before the description, because the
+                // byte range is what `scripts/verify-passes.rb` slices out of
+                // the file to replay an example on a real Ruby. Everything a
+                // reader wants is still on the line.
+                let outcome = match run::run(example) {
+                    Outcome::Passed => "passed".to_owned(),
+                    Outcome::Failed(why) => format!("failed: {why}"),
+                    Outcome::Skipped => match &example.skipped {
+                        Some(reason) => format!("skipped: {reason}"),
+                        None => "skipped".to_owned(),
+                    },
+                    Outcome::Blocked(why) => format!("blocked: {why}"),
                 };
                 println!(
-                    "{}\t{}{reason}",
+                    "{}\t{}\t{}-{}\t{}",
                     display_path(file),
+                    outcome,
+                    example.span.start,
+                    example.span.end,
                     example.full_description()
                 );
             }
@@ -180,9 +188,21 @@ fn main() -> ExitCode {
             ..Counts::default()
         };
         for example in &examples {
-            match outcome(example) {
+            match run::run(example) {
+                Outcome::Passed => counts.passed += 1,
+                Outcome::Failed(why) => {
+                    counts.failed += 1;
+                    failures.push(format!(
+                        "{} {}: {why}",
+                        display_path(file),
+                        example.full_description()
+                    ));
+                }
                 Outcome::Skipped => counts.skipped += 1,
-                Outcome::Blocked => counts.blocked += 1,
+                Outcome::Blocked(why) => {
+                    counts.blocked += 1;
+                    *blocked_by.entry(why).or_insert(0usize) += 1;
+                }
             }
         }
         if show_files {
@@ -197,6 +217,7 @@ fn main() -> ExitCode {
         println!();
     }
     report("could not be parsed", &unparseable, None);
+    report("failed", &failures, None);
     report(
         "no examples found",
         &without_examples,
@@ -218,7 +239,21 @@ fn main() -> ExitCode {
         started.elapsed().as_secs_f64(),
     );
     if totals.blocked > 0 {
-        println!("blocked: this build has no VM. Running Ruby lands in phase 1: {MILESTONES}");
+        // Ranked by how many examples each reason accounts for, because that is
+        // the order the remaining phase-1 slices are worth doing in.
+        let mut ranked: Vec<(&String, &usize)> = blocked_by.iter().collect();
+        ranked.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+        println!();
+        println!("blocked by, most examples first ({MILESTONES}):");
+        for (reason, count) in ranked.iter().take(MAX_BLOCKED_REASONS) {
+            println!("  {count:>5}  {reason}");
+        }
+        if ranked.len() > MAX_BLOCKED_REASONS {
+            println!(
+                "  ... and {} more reasons",
+                ranked.len() - MAX_BLOCKED_REASONS
+            );
+        }
     }
 
     if totals.failed > 0 || !unparseable.is_empty() {

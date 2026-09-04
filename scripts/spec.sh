@@ -11,9 +11,12 @@
 # checked out, so the argument reads the way ruby/spec's own directories do. A
 # path that exists as given is used as given, so `spec/ruby/core/array` works too.
 #
-# No example passes yet: this build has no VM, so every example is reported
-# blocked. The counts are still real, and they are the project's progress bar.
-# `spec/harness/` is deleted when mspec runs on Spinel, at the end of phase 2.
+# An example runs when every construct in it compiles; one that mentions
+# something the VM cannot mean yet is reported blocked rather than failed. The
+# run ends by ranking what the blocking constructs were, most examples first,
+# which is how the next slice gets chosen. These counts are the project's
+# progress bar. `spec/harness/` is deleted when mspec runs on Spinel, at the end
+# of phase 2.
 
 set -euo pipefail
 
