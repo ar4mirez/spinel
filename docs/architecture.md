@@ -34,7 +34,7 @@ A Cargo workspace. More than one crate because the engine and the tooling have d
 
 | crate | contents | depends on |
 |---|---|---|
-| `spinel-ast` | AST types, spans, visitor. No parser. | nothing |
+| `spinel-ast` | AST types, spans, and the Prism coverage table. No parser. | nothing |
 | `spinel-parse` | `ruby-prism` in, `spinel_ast` out. The only place Prism is imported. | ast |
 | `spinel-vm` | `Value`, `Heap`, GC, shapes, symbols, bytecode, compiler, interpreter, frames, exceptions, fibers, Ractors | ast |
 | `spinel-core` | Rust primitives + `core/*.rb`, plus a `build.rs` that compiles `core/*.rb` to a bytecode image (so `spinel-vm` is also a build-dependency; the image is little-endian and target-independent) | vm |
