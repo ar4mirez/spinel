@@ -282,8 +282,11 @@ mod tests {
     use super::*;
 
     /// Every kind of `Value`, for the tests that must cover all of them.
-    fn one_of_each() -> Vec<Value> {
-        let boxed = Box::leak(Box::new(0u64));
+    ///
+    /// `anchor` is the caller's, and eight-byte aligned because it is a `u64`. It used
+    /// to be a `Box::leak`, which made `cargo miri test` report a leak — and a leak
+    /// check that starts red is one nobody reads. #7 added that check to CI.
+    fn one_of_each(anchor: &u64) -> Vec<Value> {
         vec![
             Value::fixnum(0).unwrap(),
             Value::fixnum(-1).unwrap(),
@@ -297,7 +300,7 @@ mod tests {
             Value::FALSE,
             Value::TRUE,
             Value::UNDEF,
-            Value::heap(NonNull::from(boxed).cast()),
+            Value::heap(NonNull::from(anchor).cast()),
         ]
     }
 
@@ -419,7 +422,8 @@ mod tests {
 
     #[test]
     fn only_nil_and_false_are_falsy() {
-        for v in one_of_each() {
+        let anchor = 0u64;
+        for v in one_of_each(&anchor) {
             let expected = v != Value::NIL && v != Value::FALSE;
             assert_eq!(v.is_truthy(), expected, "{v:?}");
         }
@@ -432,7 +436,8 @@ mod tests {
 
     #[test]
     fn every_value_has_exactly_one_tag() {
-        for v in one_of_each() {
+        let anchor = 0u64;
+        for v in one_of_each(&anchor) {
             let claims = [
                 v.as_fixnum().is_some(),
                 v.as_flonum().is_some(),

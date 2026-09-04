@@ -69,6 +69,31 @@ jobs:
 
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
+  # The collector in #7 is the only unsafe code in the tree, and its bugs are the kind
+  # that a passing test cannot see: a stale free-list link, a cell read after it was
+  # handed back, a block never given to the allocator. Miri sees all three.
+  #
+  # Not `-Zmiri-strict-provenance`, which PRD 0006 guessed at: that mode bans the
+  # integer-to-pointer round trip, and a tagged `Value` *is* that round trip. The
+  # default model tracks exposed provenance, which is the one `Value` is written in.
+  miri:
+    name: miri
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: miri
+
+      # The heap's tests scale themselves down under `cfg(miri)`: what is being checked
+      # here is the pointer arithmetic, not ten million iterations of it.
+      - run: cargo miri test -p spinel-vm
+
   # Catches a dependency edge that architecture.md forbids, e.g. Prism escaping
   # spinel-parse, before it becomes load-bearing and expensive to unwind.
   layering:

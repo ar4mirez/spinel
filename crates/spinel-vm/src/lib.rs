@@ -66,5 +66,7 @@ mod tests {
     }
 }
 
+pub mod heap;
 pub mod value;
+pub use heap::{Handle, HandleScope, Heap, Payload, Stats};
 pub use value::{SymbolId, Unpacked, Value};
