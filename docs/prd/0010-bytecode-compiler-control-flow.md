@@ -222,6 +222,23 @@ unsupported statement blocks the example; it does not fail it.
   loop are not reclaimed until the evaluation ends — is a follow-up, not a fix
   here, because it needs the interpreter's stack to be a root source.
 
+### What CI caught that review did not
+
+- **The no-globals guard did not cover this slice's global.** `CLAUDE.md` is
+  enforced by a grep for `static mut|lazy_static!|thread_local!`, and the symbol
+  table is a `static OnceLock<RwLock<Table>>` — none of those. It lives in
+  `src/shared/`, where it is allowed, but the guard would not have noticed if it
+  had not. `CLAUDE.md`'s own wording ("`OnceCell` holding a `Value`") was already
+  broader than the pattern enforcing it. Widened in this PR.
+- **miri cannot run the new tests, and the reason is a good one.** They parse
+  Ruby, `spinel-parse` calls into Prism, and Prism is C, so miri aborts on
+  `pm_parser_init`. Skipping them under `cfg(miri)` is only half an answer: what
+  miri is in CI for is the heap's pointer arithmetic, and the interpreter
+  allocates strings and arrays and reads slots — exactly that code. Three unit
+  tests in `interp.rs` now build their `Iseq` by hand so miri still reaches it,
+  including one that forces a collection either side of a run to check the scope
+  really is holding what the value stack points at.
+
 ## Numbers
 
 Measured on the pinned ruby/spec commit. Before is `main` at
