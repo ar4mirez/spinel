@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 clap.workspace = true
+spinel-ast.workspace = true
 spinel-core.workspace = true
 spinel-ext.workspace = true
 spinel-jit.workspace = true

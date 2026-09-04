@@ -97,3 +97,68 @@ jobs:
             exit 1
           fi
           echo "clean"
+
+  # The definition of done for the lowering (#3): every Ruby file in a real
+  # corpus reaches `spinel_ast` without an unhandled node. The sweep exits
+  # non-zero only on an unhandled node, never on a syntax error, because both
+  # corpora ship files that are deliberately invalid Ruby.
+  #
+  # The corpora are cloned rather than vendored because vendoring them is its own
+  # roadmap slice. Both are pinned so an upstream commit cannot turn a green PR
+  # red; bump the SHAs deliberately. Once `spec/ruby/` and `stdlib/` exist in the
+  # tree, the last step sweeps those instead and these clones can go.
+  sweep:
+    name: lower a real corpus
+    runs-on: ubuntu-latest
+    env:
+      RUBY_SPEC_SHA: 620a912d97cf321a47eb5c754f37a060a94326e3
+      RUBY_SRC_SHA: 5efd4ad899688af06963fbf9eb5d1a08d3ea99ee
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: sweep
+
+      - run: cargo build --release -p spinel-cli
+
+      - name: Fetch ruby/spec
+        run: |
+          git init --quiet corpus/ruby-spec
+          cd corpus/ruby-spec
+          git remote add origin https://github.com/ruby/spec.git
+          git fetch --quiet --depth 1 origin "$RUBY_SPEC_SHA"
+          git checkout --quiet FETCH_HEAD
+
+      # Only `lib/`: the rest of ruby/ruby is C, and this stands in for the
+      # `stdlib/` subtree until that slice lands.
+      - name: Fetch ruby/ruby lib
+        run: |
+          git init --quiet corpus/ruby-lib
+          cd corpus/ruby-lib
+          git remote add origin https://github.com/ruby/ruby.git
+          git config core.sparseCheckout true
+          echo 'lib/' > .git/info/sparse-checkout
+          git fetch --quiet --depth 1 --filter=blob:none origin "$RUBY_SRC_SHA"
+          git checkout --quiet FETCH_HEAD
+
+      - name: Sweep ruby/spec
+        run: ./target/release/spinel parse corpus/ruby-spec
+
+      - name: Sweep the pure-Ruby stdlib
+        run: ./target/release/spinel parse corpus/ruby-lib/lib
+
+      # Vendored copies, once they exist. Skipped until then rather than failing,
+      # so this job does not have to be edited twice.
+      - name: Sweep vendored corpora
+        run: |
+          for dir in spec/ruby stdlib; do
+            if [ -d "$dir" ]; then
+              echo "sweeping $dir"
+              ./target/release/spinel parse "$dir"
+            else
+              echo "$dir not vendored yet, skipping"
+            fi
+          done
