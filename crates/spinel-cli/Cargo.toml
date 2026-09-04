@@ -1,0 +1,23 @@
+[package]
+name = "spinel-cli"
+description = "The spinel binary: CLI, package manager, test runner, build packer."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "spinel"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+spinel-core.workspace = true
+spinel-ext.workspace = true
+spinel-jit.workspace = true
+spinel-parse.workspace = true
+spinel-vm.workspace = true
+
+[lints]
+workspace = true

@@ -80,7 +80,14 @@ spec/
   tags/                    skipped specs with reasons
   harness/                 minimal runner used before mspec itself runs on Spinel
 scripts/                   spec.sh, bench.sh, release.sh
-tests/                     tooling integration tests + fixtures/
+crates/spinel-cli/tests/   tooling integration tests + fixtures/
 bench/                     yjit-bench subset, spec-status.md (CI-generated)
 docs/
 ```
+
+Tooling integration tests live inside `spinel-cli` rather than a top-level `tests/`
+package. Cargo only sets `CARGO_BIN_EXE_spinel`, and only guarantees the binary is
+rebuilt before the test runs, for tests in the binary's own package; a separate
+package has no dependency edge to `spinel-cli`, so `cargo test` will happily run the
+suite against a stale binary from an earlier build. `spinel-cli` is where the tooling
+lives anyway, so this is also where its tests belong.

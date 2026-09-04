@@ -1,0 +1,30 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/ar4mirez/spinel"
+
+[workspace.dependencies]
+spinel-ast = { path = "crates/spinel-ast", version = "0.0.1" }
+spinel-core = { path = "crates/spinel-core", version = "0.0.1" }
+spinel-ext = { path = "crates/spinel-ext", version = "0.0.1" }
+spinel-jit = { path = "crates/spinel-jit", version = "0.0.1" }
+spinel-parse = { path = "crates/spinel-parse", version = "0.0.1" }
+spinel-vm = { path = "crates/spinel-vm", version = "0.0.1" }
+clap = { version = "4", features = ["derive"] }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
+
+[workspace.lints.clippy]
+# The no-globals rule from CLAUDE.md, enforced by the compiler rather than by review.
+mut_from_ref = "deny"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

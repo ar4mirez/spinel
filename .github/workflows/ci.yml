@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A force-push should not leave the old run burning CI minutes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  # The two tier-1 targets from README.md. A slice is not done until both are green.
+  test:
+    name: test (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-14, name: macos-arm64 }
+          - { os: ubuntu-latest, name: linux-x64 }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.name }}
+
+      - name: Build release
+        run: cargo build --release --workspace
+
+      # The issue's definition of done, asserted in CI and not just by a human.
+      - name: spinel --version
+        run: |
+          ./target/release/spinel --version
+          ./target/release/spinel --version | grep -Eq '^spinel [0-9]+\.[0-9]+\.[0-9]+ \(ruby [0-9]+\.[0-9]+\.[0-9]+\) \[.+\]$'
+
+      - name: Test
+        run: cargo test --workspace
+
+  lint:
+    name: fmt + clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: lint
+
+      - run: cargo fmt --all --check
+
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  # Catches a dependency edge that architecture.md forbids, e.g. Prism escaping
+  # spinel-parse, before it becomes load-bearing and expensive to unwind.
+  layering:
+    name: crate layering
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: layering
+      # Direct dependencies only: spinel-cli depends on spinel-parse, so a
+      # transitive edge to Prism is expected and fine. A direct one is the bug.
+      - name: No Prism outside spinel-parse
+        run: |
+          owners=$(cargo metadata --format-version 1 --no-deps \
+            | jq -r '.packages[] | select(any(.dependencies[]?; .name == "ruby-prism")) | .name' \
+            | grep -v '^spinel-parse$' || true)
+          if [ -n "$owners" ]; then
+            echo "::error::these crates depend on ruby-prism directly: $owners (see docs/architecture.md)"
+            exit 1
+          fi
+          echo "Prism is contained in spinel-parse"
+
+      - name: No process-global VM state
+        run: |
+          if grep -rnE '(static mut|lazy_static!|thread_local!)' crates/ --include='*.rs' \
+             | grep -v 'crates/spinel-vm/src/shared/'; then
+            echo "::error::process-global mutable state outside spinel-vm/src/shared/ (see CLAUDE.md)"
+            exit 1
+          fi
+          echo "clean"
