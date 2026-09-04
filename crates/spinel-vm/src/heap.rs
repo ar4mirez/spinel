@@ -40,6 +40,7 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::ptr::{self, NonNull};
 
+use crate::class::Classes;
 use crate::value::Value;
 
 /// Cell sizes, in bytes. Powers of two so the class index is one shift.
@@ -183,6 +184,8 @@ pub struct Heap {
     next_gc: usize,
     collections: u64,
     total_allocated: u64,
+    /// This Ractor's classes and modules. A root source: see [`Heap::mark`].
+    classes: Classes,
 }
 
 /// The class index for an object needing `bytes` in total, or `None` for large objects.
@@ -215,7 +218,17 @@ impl Heap {
             next_gc: MIN_GC_BYTES,
             collections: 0,
             total_allocated: 0,
+            classes: Classes::new(),
         }
+    }
+
+    /// This heap's classes and modules. [`HandleScope::bootstrap`] fills it.
+    pub fn classes(&self) -> &Classes {
+        &self.classes
+    }
+
+    pub fn classes_mut(&mut self) -> &mut Classes {
+        &mut self.classes
     }
 
     /// Open the outermost handle scope. Everything that allocates goes through one.
@@ -356,8 +369,16 @@ impl Heap {
         debug_assert!(self.mark_stack.is_empty());
         for i in 0..self.roots.len() {
             let root = self.roots[i];
-            self.shade(root);
+            Heap::shade(&mut self.mark_stack, root);
         }
+        // The second root source: a class object is reachable from its table
+        // entry and a method body from its method table, and neither is on the
+        // handle stack. `shade` takes the mark stack rather than the whole heap
+        // so that this is two disjoint field borrows and not a table moved out
+        // and put back — a walk that panicked halfway through the second shape
+        // would leave the heap with no classes at all.
+        let (classes, mark_stack) = (&self.classes, &mut self.mark_stack);
+        classes.each_root(|value| Heap::shade(mark_stack, value));
         // R3: a worklist, not recursion. A Ruby program can build a chain a million
         // objects deep, and a recursive tracer turns that into a stack overflow inside
         // the collector, with no Ruby frame to blame it on.
@@ -367,7 +388,7 @@ impl Heap {
             let header = unsafe { &*obj.header() };
             let (class, len, payload) = (header.class, header.len, header.payload);
             if let Some(class) = class {
-                self.shade(class);
+                Heap::shade(&mut self.mark_stack, class);
             }
             if payload == Payload::Slots {
                 let slots = obj.slots();
@@ -375,14 +396,17 @@ impl Heap {
                     // SAFETY: the payload holds `len` initialised `Value`s; `allocate`
                     // writes every one before the object is reachable.
                     let slot = unsafe { ptr::read(slots.add(i)) };
-                    self.shade(slot);
+                    Heap::shade(&mut self.mark_stack, slot);
                 }
             }
         }
     }
 
     /// Mark `value` if it is an unmarked heap object, and queue it for tracing.
-    fn shade(&mut self, value: Value) {
+    ///
+    /// Takes the mark stack rather than `&mut self`, so a root source held
+    /// behind `&self` — the class table — can be walked without moving it out.
+    fn shade(mark_stack: &mut Vec<Obj>, value: Value) {
         let Some(pointer) = value.as_heap() else {
             return;
         };
@@ -392,7 +416,7 @@ impl Heap {
         let flags = unsafe { &mut (*obj.header()).flags };
         if *flags & MARKED == 0 {
             *flags |= MARKED;
-            self.mark_stack.push(obj);
+            mark_stack.push(obj);
         }
     }
 
@@ -482,6 +506,7 @@ impl fmt::Debug for Heap {
         f.debug_struct("Heap")
             .field("roots", &self.roots.len())
             .field("stats", &self.stats())
+            .field("classes", &self.classes)
             .finish()
     }
 }
@@ -569,6 +594,29 @@ impl<'h> HandleScope<'h> {
 
     pub fn get(&self, handle: Handle<'h>) -> Value {
         self.heap.roots[handle.index]
+    }
+
+    /// Repoint an object's class. The header field the collector traces.
+    ///
+    /// Two callers, both of which Ruby has and neither of which is "reopening a
+    /// class": bootstrap, which allocates `Class` before it can point anything at
+    /// it, and `singleton_class_of`, where an object's class *becoming* its
+    /// singleton is the whole mechanism.
+    pub fn set_class(&mut self, handle: Handle<'h>, class: Value) {
+        self.storable(class);
+        let object = self.object(handle);
+        // SAFETY: the handle roots a live object of this heap, and `storable`
+        // checked that the class it is about to point at is live too.
+        unsafe { (*object.header()).class = Some(class) }
+    }
+
+    /// This heap's classes and modules.
+    pub fn classes(&self) -> &Classes {
+        self.heap.classes()
+    }
+
+    pub fn classes_mut(&mut self) -> &mut Classes {
+        self.heap.classes_mut()
     }
 
     /// Point a handle at a different object. The old one loses this root.

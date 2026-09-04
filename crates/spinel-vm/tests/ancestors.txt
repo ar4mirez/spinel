@@ -1,0 +1,462 @@
+# Ancestor ordering, as measured from CRuby.
+#
+# Every `expect` line in this file was produced by running the case on the real
+# Ruby named in CI and recording the answer. `scripts/ancestors-oracle.rb` is
+# what produces and re-checks them; `ancestors.rs` is what makes spinel-vm agree.
+#
+# So this file is the definition of done for #8, and it is a measurement rather
+# than a transcription: `include`/`prepend` ordering follows rules CRuby
+# documents nowhere, and several of them are surprising enough that reading
+# `class.c` and believing the result would have been the wrong move.
+#
+# Verbs: `module X`, `class X [< Y]`, `include X A B`, `prepend X A`,
+# `singleton X SX`, `expect X : ...`. An `expect` keeps only the entities its
+# case declared, plus any built-in it names itself.
+
+# ---------------------------------------------------------------- the basics
+
+case one_include
+  module M
+  class C
+  include C M
+  expect C : C M
+end
+
+case a_later_include_sits_closer
+  module A
+  module B
+  class C
+  include C A
+  include C B
+  expect C : C B A
+end
+
+case one_include_argument_list_is_reversed
+  module A
+  module B
+  module D
+  class C
+  include C A B D
+  expect C : C A B D
+end
+
+case an_included_module_brings_its_own_chain
+  module A
+  module B
+  module D
+  class C
+  include B A
+  include D B
+  include C D
+  expect C : C D B A
+end
+
+case a_repeated_include_changes_nothing
+  module A
+  module B
+  class C
+  include C A
+  include C B
+  include C A
+  expect C : C B A
+end
+
+# ruby/spec's `Module#ancestors` opener, entity for entity.
+case a_superclass_chain_follows_the_class
+  module Basic
+  module Super
+  class Parent
+  class Child < Parent
+  include Super Basic
+  include Child Super
+  expect Super : Super Basic
+  expect Child : Child Super Basic Parent Object Kernel BasicObject
+end
+
+# ------------------------------------------------- diamonds and shared modules
+
+case a_diamond_keeps_one_copy_of_the_shared_module
+  module M
+  module A
+  module B
+  class C
+  include A M
+  include B M
+  include C A
+  include C B
+  expect C : C B A M
+end
+
+case a_module_already_in_a_superclass_is_not_added_again
+  module M
+  class Base
+  class C < Base
+  include Base M
+  include C M
+  expect C : C Base M
+end
+
+case a_shared_module_stays_where_it_is
+  module M
+  module A
+  class C
+  include A M
+  include C M
+  include C A
+  expect C : C A M
+end
+
+case a_shared_module_does_not_drag_later_includes_forward
+  module M
+  module A
+  module B
+  class C
+  include A M
+  include C M
+  include C B
+  include C A
+  expect C : C A B M
+end
+
+case the_insertion_point_follows_a_module_already_in_place
+  module M
+  module N
+  module A
+  class C
+  include A N
+  include A M
+  include C M
+  include C A
+  expect C : C A M N
+end
+
+# ------------------------------------------------------------------- prepend
+
+case a_later_prepend_sits_closer
+  module A
+  module B
+  class C
+  prepend C A
+  prepend C B
+  expect C : B A C
+end
+
+case one_prepend_argument_list_is_reversed
+  module A
+  module B
+  module D
+  class C
+  prepend C A B D
+  expect C : A B D C
+end
+
+case a_repeated_prepend_changes_nothing
+  module A
+  module B
+  class C
+  prepend C A
+  prepend C B
+  prepend C A
+  expect C : B A C
+end
+
+case prepend_does_not_see_what_include_put_behind_the_class
+  module M
+  class C
+  include C M
+  prepend C M
+  expect C : M C M
+end
+
+case include_does_see_what_prepend_put_in_front
+  module M
+  class C
+  prepend C M
+  include C M
+  expect C : M C
+end
+
+case prepend_does_not_search_the_superclass
+  module M
+  class Base
+  class C < Base
+  include Base M
+  prepend C M
+  expect C : M C Base M
+end
+
+case a_prepended_module_brings_the_rest_of_its_chain
+  module M
+  module N
+  module A
+  class C
+  include A N
+  include A M
+  prepend C M
+  prepend C A
+  expect C : A M N C
+end
+
+case a_module_prepended_in_front_does_not_move_a_later_include
+  module M
+  module N
+  module A
+  class C
+  include A N
+  include A M
+  prepend C M
+  include C A
+  expect C : M C A N
+end
+
+case a_superclass_prepend_does_not_move_the_insertion_point
+  module M
+  module N
+  module A
+  class Base
+  class C < Base
+  include A N
+  include A M
+  prepend Base M
+  include C A
+  expect C : C A N M Base
+end
+
+# --------------------------------------- a module that gains a mixin later on
+# Ruby 3.0's Feature #9573: `include` reaches back into everything that already
+# mixed the module in.
+
+case a_module_included_later_reaches_an_earlier_includer
+  module M1
+  module M2
+  module M3
+  include M3 M2
+  include M2 M1
+  expect M3 : M3 M2 M1
+end
+
+case a_re_include_after_the_module_grew_preserves_the_order
+  module M1
+  module M2
+  module M3
+  include M3 M2
+  include M2 M1
+  include M3 M2
+  expect M3 : M3 M2 M1
+end
+
+case a_chain_of_module_includes_reaches_the_class
+  module N1
+  module N2
+  module N3
+  module N4
+  class C
+  include C N1
+  include N1 N2
+  include N2 N3
+  include N3 N4
+  expect C : C N1 N2 N3 N4
+end
+
+case every_includer_is_patched_at_its_own_copy_of_the_module
+  module M
+  module N
+  module A
+  class C
+  include A M
+  include C A
+  include M N
+  expect C : C A M N
+  expect A : A M N
+end
+
+case two_includers_are_both_patched
+  module M
+  module N
+  class A
+  class B
+  include A M
+  include B M
+  include M N
+  expect A : A M N
+  expect B : B M N
+end
+
+case a_later_prepend_on_a_module_lands_in_front_of_it
+  module Q1
+  module Q2
+  module Q3
+  class C
+  include Q3 Q1
+  include C Q3
+  prepend Q3 Q2
+  expect C : C Q2 Q3 Q1
+end
+
+case a_later_include_on_a_superclass_reaches_the_subclass
+  module M
+  class Base
+  class C < Base
+  include Base M
+  expect C : C Base M
+end
+
+case ruby_spec_recursively_includes_new_mixins
+  module U
+  module V
+  module W
+  module X
+  module Y
+  class A
+  class B < A
+  include A X
+  include B U V W
+  expect B : B U V W A X
+  include V X U Y
+  expect B : B U V U Y W A X
+  include B V
+  expect B : B U V U Y W A X
+end
+
+case ruby_spec_ignores_modules_already_included_by_mutual_inclusion
+  module M0
+  module M
+  class K
+  include M M0
+  include K M
+  include K M
+  expect K : K M M0
+end
+
+# --------------------------------------------------------- singleton classes
+
+case a_singleton_inherits_the_singleton_of_the_superclass
+  class A
+  class B < A
+  singleton B SB
+  singleton A SA
+  expect SB : SB SA Class Module Object Kernel BasicObject
+end
+
+case a_module_singleton_inherits_module_itself
+  module M
+  singleton M SM
+  expect SM : SM Module Object Kernel BasicObject
+end
+
+case a_singleton_class_takes_mixins_like_any_other
+  module M
+  class C
+  singleton C SC
+  include SC M
+  expect SC : SC M Class Module Object Kernel BasicObject
+end
+
+case a_module_that_gains_two_prepends_keeps_their_order_in_its_includers
+  module P1
+  module P2
+  module M
+  class C
+  include C M
+  prepend M P1
+  prepend M P2
+  expect M : P2 P1 M
+  expect C : C P2 P1 M
+end
+
+case a_module_that_gains_a_prepend_and_an_include_puts_them_on_opposite_sides
+  module P
+  module I
+  module M
+  class C
+  include C M
+  prepend M P
+  include M I
+  expect M : P M I
+  expect C : C P M I
+end
+
+case a_prepended_module_that_grows_reaches_its_target
+  module N
+  module P
+  class C
+  prepend C P
+  include P N
+  expect C : P N C
+end
+
+# ------------------------------------------- the corners, found by extending
+
+case a_module_with_prepends_and_includes_splices_in_chain_order
+  module P
+  module I
+  module M
+  class C
+  prepend M P
+  include M I
+  include C M
+  expect C : C P M I
+end
+
+case a_superclass_that_gains_a_prepend_after_the_subclass_exists
+  module P
+  class Base
+  class C < Base
+  prepend Base P
+  expect C : C P Base
+end
+
+case a_module_reached_through_two_others_grows_once_in_each
+  module N
+  module M
+  module A
+  module B
+  class C
+  include A M
+  include B M
+  include C A
+  include C B
+  include M N
+  expect C : C B A M N
+  expect A : A M N
+  expect B : B M N
+end
+
+case a_prepended_module_that_gains_an_include
+  module N
+  module M
+  class C
+  prepend C M
+  include M N
+  expect C : M N C
+end
+
+case a_module_that_gains_a_prepend_while_prepended_elsewhere
+  module P
+  module M
+  class C
+  prepend C M
+  prepend M P
+  expect C : P M C
+end
+
+case an_include_into_a_module_that_a_subclass_reaches_through_its_superclass
+  module N
+  module M
+  class Base
+  class C < Base
+  include Base M
+  include M N
+  expect C : C Base M N
+  expect Base : Base M N
+end
+
+case a_module_included_before_and_after_it_grew
+  module N
+  module M
+  class C
+  include C M
+  include M N
+  include C M
+  expect C : C M N
+end

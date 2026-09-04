@@ -138,6 +138,23 @@ jobs:
       - uses: actions/checkout@v4
       - run: ./scripts/vendor-stdlib.sh --check
 
+  # `crates/spinel-vm/tests/ancestors.txt` is CRuby's answer to 30-odd `include`
+  # and `prepend` orderings, and `spinel-vm` is checked against it by
+  # `tests/ancestors.rs`. This job checks the other half: that the table still
+  # says what Ruby says. Without it the table is one engineer's reading of
+  # `class.c` frozen into a file that can never be wrong.
+  ancestors:
+    name: ancestors oracle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@v1
+        with:
+          # The language version this build implements, so `include` semantics
+          # are the ones Spinel is targeting rather than an older release's.
+          ruby-version: '4.0'
+      - run: ruby scripts/ancestors-oracle.rb --check
+
   # The definition of done for the lowering (#3): every Ruby file in a real
   # corpus reaches `spinel_ast` without an unhandled node. The sweep exits
   # non-zero only on an unhandled node, never on a syntax error, because both
