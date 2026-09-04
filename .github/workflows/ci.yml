@@ -118,9 +118,14 @@ jobs:
           fi
           echo "Prism is contained in spinel-parse"
 
+      # `OnceLock`/`OnceCell` and a `static` lock joined this list in #10, which
+      # is what the symbol table is built from: the old pattern would not have
+      # caught it. CLAUDE.md's own wording — "`OnceCell` holding a `Value`" —
+      # was already broader than the grep enforcing it.
       - name: No process-global VM state
         run: |
-          if grep -rnE '(static mut|lazy_static!|thread_local!)' crates/ spec/harness/ --include='*.rs' \
+          if grep -rnE '(static mut|lazy_static!|thread_local!|OnceLock|OnceCell|static [A-Z_]+ *: *(Mutex|RwLock|Atomic))' \
+             crates/ spec/harness/ --include='*.rs' \
              | grep -v 'crates/spinel-vm/src/shared/'; then
             echo "::error::process-global mutable state outside spinel-vm/src/shared/ (see CLAUDE.md)"
             exit 1
