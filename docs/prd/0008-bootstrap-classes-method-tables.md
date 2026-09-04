@@ -188,6 +188,7 @@ table against Ruby 4.0.
 | T11 | Spinel held to the table | `spinel_agrees_with_the_ruby_ancestors_table` |
 | T12 | The oracle in CI | `.github/workflows/ci.yml` |
 | T13 | engine.md carries the model that exists | The "Classes and ancestor chains" section |
+| T14 | The roadmap and the tracker agree | One phase-1 bullet became three, matching #8, #151, and #9 |
 
 ## What the audit caught
 
@@ -228,6 +229,16 @@ table against Ruby 4.0.
   `include M; prepend M` yields two `M`s. Four of the table's cases exist because a
   measurement disagreed with a reading, and they are the reason the oracle is a CI job
   rather than a one-off script.
+
+## What the triage found
+
+The roadmap folded this slice, the global method cache, and class serials into one bullet
+while the tracker splits them across #8 and #9; the bullet is three now, and #9's scope is
+narrowed on the issue to the descendant walk it still owes. Two of this PRD's own
+cross-references were wrong — #9 is the method cache, not shapes, and #14 is the regex
+engine, not constants. Chasing the first of those turned up work nothing tracked at all:
+engine.md commits to hidden-class shapes and no issue or roadmap bullet existed for them,
+which is [#151](https://github.com/ar4mirez/spinel/issues/151) and a new bullet.
 
 ## Numbers
 
