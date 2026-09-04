@@ -186,10 +186,10 @@ impl Builtin {
 
     /// Look one up by the name Ruby knows it as.
     ///
-    /// Not `Object.const_get`: the constant table is [#14]. This is the inverse
+    /// Not `Object.const_get`: the constant table is [#13]. This is the inverse
     /// of [`Builtin::name`] and nothing more.
     ///
-    /// [#14]: https://github.com/ar4mirez/spinel/issues/14
+    /// [#13]: https://github.com/ar4mirez/spinel/issues/13
     pub fn from_name(name: &str) -> Option<Builtin> {
         Builtin::ALL.into_iter().find(|b| b.name() == name)
     }
@@ -683,8 +683,8 @@ impl Classes {
     // ponytail: linear in the number of methods defined, on every collection,
     // where the handle stack is linear in what Rust is holding right now. With a
     // full `core/*.rb` that is thousands of entries per GC and still small beside
-    // the trace it precedes. It stops being a walk at all when #9's shapes let a
-    // method table be a heap object like anything else.
+    // the trace it precedes. It stops being a walk at all when #151's shapes let
+    // a method table be a heap object like anything else.
     pub(crate) fn each_root(&self, mut f: impl FnMut(Value)) {
         for entry in &self.entries {
             f(entry.object);
@@ -708,7 +708,7 @@ impl fmt::Debug for Classes {
 /// A class object's slots. One for now: the id, so that an instance's header
 /// class pointer can be resolved back to a table entry.
 ///
-// ponytail: an ivar in a fixed slot, because shapes are not here yet. When #9
+// ponytail: an ivar in a fixed slot, because shapes are not here yet. When #151
 // lands the shape tree, this becomes an ordinary hidden instance variable and
 // `class_of` reads it through the shape.
 const SLOT_ID: usize = 0;

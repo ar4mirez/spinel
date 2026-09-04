@@ -27,8 +27,9 @@ table, and Spinel can disagree with the table, and CI fails on either.
 
 ## Non-goals
 
-- **Shapes and instance variables.** [#9](https://github.com/ar4mirez/spinel/issues/9) has
-  the shape tree. The two reserved header bytes stay reserved; a class object carries its
+- **Shapes and instance variables.** [#151](https://github.com/ar4mirez/spinel/issues/151)
+  has the shape tree — an issue this slice's triage had to open, because engine.md commits
+  to shapes and nothing tracked them. The two reserved header bytes stay reserved; a class object carries its
   table id in a fixed slot until an ordinary hidden ivar can hold it.
 - **Method *bodies*.** A method entry is an opaque `Value` here, because bytecode arrives
   with [#10](https://github.com/ar4mirez/spinel/issues/10) and calling one with
@@ -36,13 +37,16 @@ table, and Spinel can disagree with the table, and CI fails on either.
   lookup that finds the entry and the `owner` that `super` resumes from.
 - **Constants, and `Module#name` as Ruby computes it.** A class here carries the string it
   was defined with. `Object.const_get`, nesting, `const_missing`, and the anonymous-to-
-  named transition are [#14](https://github.com/ar4mirez/spinel/issues/14).
+  named transition are [#13](https://github.com/ar4mirez/spinel/issues/13).
 - **Dispatch on immediates.** `1.class` needs `NilClass`, `TrueClass`, `FalseClass`, and
   `Float`, and those are `core/*.rb`'s
   ([#15](https://github.com/ar4mirez/spinel/issues/15)). Lookup takes a class; mapping a
   `Value` to one is that slice's job.
-- **Inline caches.** The global method cache and the serial that invalidates it are here.
-  The per-call-site cache that reads the serial is #10's, because there are no call sites.
+- **Per-class serials, and inline caches.** The global method cache and a serial that
+  invalidates it are here, because a method table without invalidation is a bug waiting for
+  its first caller. Sharpening the serial to one per class is
+  [#9](https://github.com/ar4mirez/spinel/issues/9); the per-call-site cache that reads it
+  is #10's, because there are no call sites yet.
 - **Ractors.** Classes are per heap. engine.md makes them shared objects behind the main
   Ractor's class lock, and [#118](https://github.com/ar4mirez/spinel/issues/118) is the
   slice with a second Ractor to share them with.
@@ -55,7 +59,8 @@ table, and Spinel can disagree with the table, and CI fails on either.
 | [#11](https://github.com/ar4mirez/spinel/issues/11) calling convention, `super` | The `owner` of a found method, so `super` resumes at the right point in the chain |
 | [#13](https://github.com/ar4mirez/spinel/issues/13) `class`/`module` bodies, singletons | `define_class`, `define_module`, and singleton classes that already exist and are already lazy |
 | [#15](https://github.com/ar4mirez/spinel/issues/15) `core/*.rb` | Shells to reopen with the right ancestry, so `Integer.ancestors` is not wrong before a line of Ruby runs |
-| [#9](https://github.com/ar4mirez/spinel/issues/9) shapes | A class object to hang a shape tree off, and the reserved header bytes to put a shape id in |
+| [#9](https://github.com/ar4mirez/spinel/issues/9) per-class serials | A serial and a cache to sharpen, rather than a design to invent |
+| [#151](https://github.com/ar4mirez/spinel/issues/151) shapes | A class object to hang a shape tree off, and the reserved header bytes to put a shape id in |
 
 ## Requirements
 
@@ -236,8 +241,9 @@ lookup under a real workload, and the thing to measure it with is #10's interpre
    that bumps on a definition in the class or its ancestors. A shared one is correct and
    coarser: defining a method anywhere evicts every cached lookup, which is free at load
    time and wrong in a program that defines methods while running. Per-class serials need a
-   subclass list and a descendant walk per definition. The benchmark that would justify
-   them arrives with the JIT.
+   subclass list and a descendant walk per definition, and that is
+   [#9](https://github.com/ar4mirez/spinel/issues/9) — which this slice leaves narrower
+   than it found it rather than closing.
 2. **The method cache is unbounded.** CRuby's global cache was a fixed-size direct-mapped
    table that evicted rather than grew. This one is emptied by every definition, so it
    cannot outgrow the `(class, name)` pairs a program actually calls between two of them —
@@ -249,15 +255,15 @@ lookup under a real workload, and the thing to measure it with is #10's interpre
 4. **A class is named by the string it was defined with**, where Ruby derives
    `Module#name` from the constant it is first assigned to and leaves it `nil` until then.
    Nothing can assign a constant yet, so the two agree on every case in the table; they
-   stop agreeing the moment #14 lands, and #14 is the slice that should take the name away
+   stop agreeing the moment #13 lands, and #13 is the slice that should take the name away
    from `define_class`.
 
 ## Follow-ups
 
-- Per-class serials, and the subclass list they need. Same slice as inline caches, or the
-  first benchmark that shows load-time churn evicting a hot lookup.
+- Per-class serials, and the subclass list they need — [#9](https://github.com/ar4mirez/spinel/issues/9),
+  whose scope this slice narrows to exactly that.
 - `Module#name` as Ruby computes it, and the anonymous-to-named transition on first
-  assignment to a constant — [#14](https://github.com/ar4mirez/spinel/issues/14), which is
+  assignment to a constant — [#13](https://github.com/ar4mirez/spinel/issues/13), which is
   the slice that has constants to assign to.
 - Reclaiming an unreachable class. Every class object is a permanent root today, because
   deciding that one is unreachable needs the constant table to say what still names it.
