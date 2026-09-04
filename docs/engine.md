@@ -18,18 +18,30 @@ source ──Prism──▶ spinel_ast ──resolve──▶ bytecode ──▶
 - **Compile.** One bytecode function per method, block, or top-level script. Blocks compile to their own function with a pointer to the enclosing frame's environment. Bytecode is immutable and position-independent (symbols by name, relinked on load), so it can be cached on disk and shared between Ractors.
 - **Execute.** A non-recursive interpreter loop. A Ruby-to-Ruby call pushes a frame and continues the same loop; it does not recurse on the Rust stack. This matters for fibers and for deep recursion limits that match Ruby's.
 
-## Values (default)
+## Values
 
-64-bit tagged word, CRuby's proven scheme:
+Landed in [#6](https://github.com/ar4mirez/spinel/issues/6). A 64-bit tagged word,
+CRuby's proven scheme:
 
-| tag | meaning |
-|---|---|
-| `...1` | fixnum, 63-bit |
-| `..10` | flonum (most doubles, rotated bits), so floats rarely allocate |
-| `x..00` | heap pointer, 8-byte aligned |
-| small constants | `nil`, `true`, `false`, `undef`, static symbols |
+| low bits | the rest of the word | kind |
+|---|---|---|
+| `1` | 63-bit signed integer | fixnum |
+| `10` | double, rotated left by three | flonum |
+| `0100` | ordinal | `nil`, `false`, `true`, `undef` |
+| `1100` | symbol id | static symbol |
+| `000` | 8-byte-aligned pointer | heap object |
 
-`Integer` promotes to a heap bignum on overflow. Bignum arithmetic is a primitive over a pure-Rust bigint crate.
+The zero word is deliberately not a `Value`. `Option<Value>` is therefore one word as
+well, and a zeroed slot is a detectable bug rather than a plausible object.
+
+Flonums cover the doubles whose top three exponent bits are `011` or `100`: magnitudes
+between roughly 1.7e-77 and 1.8e77, which is every float a normal program holds. NaN,
+the infinities, `-0.0`, and the extremes allocate instead. Excluding those three is also
+what makes bitwise equality on `Value` exactly Ruby's `equal?`, which the interpreter,
+the method cache, and the GC all rely on.
+
+`Integer` promotes to a heap bignum past ±2^62. Bignum arithmetic is a primitive over a
+pure-Rust bigint crate.
 
 ## Heap and GC
 

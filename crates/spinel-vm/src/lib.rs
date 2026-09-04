@@ -65,3 +65,6 @@ mod tests {
         assert!(!p.starts_with('-') && !p.ends_with('-'), "{p}");
     }
 }
+
+pub mod value;
+pub use value::{SymbolId, Unpacked, Value};
