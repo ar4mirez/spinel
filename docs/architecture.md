@@ -4,7 +4,7 @@
 
 ```
 ┌────────────────────────────────── spinel (one static binary) ──────────────────────────────────┐
-│  CLI (clap): run · x · init · install · add · remove · update · test · build · spec              │
+│  CLI (clap): run · x · init · install · add · remove · update · test · build · parse · spec      │
 │                                                                                                │
 │  ┌── tooling (spinel-cli) ───────────────────────────────────────────────────────────────────┐ │
 │  │ gems: index · resolver · lockfile · store · ext loader   test: pool · report   build: pack │ │
@@ -35,7 +35,7 @@ A Cargo workspace. More than one crate because the engine and the tooling have d
 | crate | contents | depends on |
 |---|---|---|
 | `spinel-ast` | AST types, spans, and the Prism coverage table. No parser. | nothing |
-| `spinel-parse` | `ruby-prism` in, `spinel_ast` out. The only place Prism is imported. | ast |
+| `spinel-parse` | `ruby-prism` in, `spinel_ast` out. The only place Prism is imported. The lowering matches Prism's node enum exhaustively, so a new upstream node kind is a build failure here rather than a run-time surprise. | ast |
 | `spinel-vm` | `Value`, `Heap`, GC, shapes, symbols, bytecode, compiler, interpreter, frames, exceptions, fibers, Ractors | ast |
 | `spinel-core` | Rust primitives + `core/*.rb`, plus a `build.rs` that compiles `core/*.rb` to a bytecode image (so `spinel-vm` is also a build-dependency; the image is little-endian and target-independent) | vm |
 | `spinel-ext` | Handle-based API for extensions: `Value`, `Heap` access, method definition macros, ABI version | vm |
@@ -43,6 +43,11 @@ A Cargo workspace. More than one crate because the engine and the tooling have d
 | `spinel-cli` | the binary: subcommands, package manager, test runner, build packer | all |
 
 Rule from `CLAUDE.md` restated: nothing outside `spinel-parse` sees Prism. That is what keeps "write our own parser later" a contained project.
+
+`spinel parse <dir>` sweeps a corpus through that lowering and fails only on a
+node it does not handle, never on invalid Ruby. The `sweep` CI job runs it
+against ruby/spec and ruby/ruby's `lib/`, which is how the boundary is kept
+honest as Ruby grows syntax.
 
 ## Binary layout
 

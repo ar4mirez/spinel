@@ -14,6 +14,8 @@ What `spinel` does outside the engine: how it runs a file, how it reports itself
 | `spinel install/add/remove/update` | package-manager.md |
 | `spinel test` | test-runner.md |
 | `spinel build` | build.md |
+| `spinel parse <file>` | print the `spinel_ast` tree for one file; `--format debug` for the derived `Debug`. Exits 1 on a syntax error, 2 if the file cannot be read. |
+| `spinel parse <dir>` | lower every `.rb` file under a directory and report only what failed. Exits non-zero on an unhandled node, never on a syntax error, because a corpus may legitimately contain invalid Ruby. This is the check behind the `sweep` CI job. |
 | `spinel spec [dir]` | run ruby/spec (development only, hidden from `--help` in release builds) |
 
 ## What `spinel run` sets up

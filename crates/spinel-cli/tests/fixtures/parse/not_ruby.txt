@@ -1,0 +1,1 @@
+This file is not Ruby and the sweep must not read it.
