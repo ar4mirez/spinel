@@ -74,8 +74,8 @@ fn spinel_agrees_with_the_ruby_that_measured_the_table() {
 fn a_construct_this_slice_does_not_compile_is_an_error_never_a_guess() {
     // The property the spec harness depends on: unsupported is loud.
     for source in [
-        "def foo; end",
-        "[1].each { |x| x }",
+        // `def` and a block literal moved to the other side of this list with
+        // #11; what stays is what later slices own.
         "@a = 1",
         "$a = 1",
         "A = 1",

@@ -117,9 +117,20 @@ Call sites carry a monomorphic inline cache `(class serial, target)`. Because by
 
 Ruby's full argument protocol from the start, because ruby/spec's `language/` directory exercises all of it and everything else depends on it: required, optional, splat, post-required, keyword, keyword splat, `**nil`, block argument, block pass, anonymous `*`/`**`/`&` forwarding, `...`. Arity errors match Ruby's messages exactly; the spec checks the text.
 
+Landed in [#11](https://github.com/ar4mirez/spinel/issues/11), less the parts that need a class the VM does not have yet: `**kwrest` collects into a `Hash` and there is no `Hash`, and `&`/`...` forwarding waits with it. One `bind` fills a frame's parameter slots from a call's arguments, and the caller never inspects the callee's parameters — which is what makes an ordinary call, `send`, `yield`, and `Proc#call` the same code path with a different receiver.
+
+A method or lambda and a block differ in exactly two places, and both are the binder's: a lambda checks arity and raises `ArgumentError`, and a block pads with `nil`, drops extras, and spreads a single `Array` across its parameters when it has room for more than one value. `{ |a| }` and `{ |*a| }` take the array whole; `{ |a, b| }` and `{ |a,| }` spread it.
+
+A call site is a table entry rather than an instruction operand: `Insn::Send(u32)` indexes `Iseq::call_sites`, which carries the name, the positional count, the keyword names, and what block the call passes. That is where the inline caches above go, since they are per heap and bytecode is not.
+
+Optional and keyword defaults are code at the top of the body rather than something the binder evaluates. The binder writes an undef marker into the slots a call left out, and each default is guarded by a `JumpUnlessUndef`. That handles a default that calls a method, and it handles keywords — which are independent rather than a fall-through chain, so a per-parameter entry offset would not.
+
 ## Frames, blocks, exceptions, fibers
 
 - Frames hold locals, an environment pointer for captured variables (environments are heap-allocated only when a block captures them; default: a `captured` bit from the resolve pass decides), the receiver, the method entry, and a catch table.
+- As landed in #11, a frame is a value in a `Vec` that the loop pushes and pops, so a Ruby-to-Ruby call never grows the Rust stack. Locals live in a heap environment whose first slot links to the enclosing one, and `GetLocal` carries a depth that walks it. The environment is a plain slots object, so the collector traces a captured local with no code that knows what an environment is.
+- That environment is allocated for *every* frame rather than only for the ones a block captures, which is the `ponytail:` note in `interp.rs`. The escape analysis this section describes needs a resolve pass that does not exist yet, and the slice's check is a spec delta rather than a benchmark. It is a cost, not a wrong answer.
+- A method body is a definition id — a fixnum indexing a per-heap table of `Iseq`s and primitives — rather than a heap object, because the heap has no payload kind that holds a Rust `Iseq` and no finaliser to drop one. A fixnum body is also one the collector never traces.
 - `break`, `next`, `redo`, `return` from blocks, and `throw`/`catch` are all non-local exits through the same unwinding path as exceptions, with catch tables per bytecode range, like YARV and the JVM.
 - Fibers own a VM stack. Switching fibers is switching which VM stack the interpreter loop uses. Because the interpreter is non-recursive and the core library is in Ruby, almost no fiber switch happens with Rust frames in between. Where a primitive must call back into Ruby (a sort comparator, `Hash#each` primitive fallback), the re-entrant call runs on a `corosensei` coroutine so the fiber can still be suspended. The heap's root stack is what the GC scans, and a suspended coroutine keeps its own region of it, so the GC still sees every handle. `Enumerator#next` and the Fiber scheduler API come from this for free.
 

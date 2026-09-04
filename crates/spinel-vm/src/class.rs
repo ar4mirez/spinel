@@ -762,6 +762,10 @@ impl<'h> HandleScope<'h> {
             let meta = scope.classes().object(meta.id());
             scope.set_class(handle, meta);
         }
+        // The handful of methods that are dispatch rather than Ruby. A heap
+        // with classes is one where a `Proc` can be called; everything else
+        // waits for `core/*.rb`.
+        crate::interp::install_primitives(self);
     }
 
     /// A new class. `superclass` is `None` only for `BasicObject`.
@@ -1029,7 +1033,10 @@ mod tests {
     fn lookup_walks_the_chain_and_a_prepended_module_wins() {
         let mut heap = booted();
         let mut scope = heap.scope();
-        let name = SymbolId(1);
+        // Interned rather than fabricated: this asserts the name is *absent*
+        // from a chain that reaches `Kernel`, where `bootstrap` defines the
+        // primitives, so a raw id could collide with one of their names.
+        let name = crate::shared::symbols::intern("chain_test_name");
         let base = scope.define_class(Some("Base"), Some(Builtin::Object.id()));
         let sub = scope.define_class(Some("Sub"), Some(base));
         let included = scope.define_module(Some("Included"));
@@ -1069,7 +1076,10 @@ mod tests {
     fn the_method_cache_is_emptied_by_anything_that_can_move_a_method() {
         let mut heap = booted();
         let mut scope = heap.scope();
-        let name = SymbolId(7);
+        // Interned rather than fabricated: `bootstrap` defines the primitives
+        // on `Kernel`, which is in `C`'s ancestry, so a raw `SymbolId` can
+        // collide with one of their names and make a "missing" method found.
+        let name = crate::shared::symbols::intern("cache_test_defined");
         let c = scope.define_class(Some("C"), Some(Builtin::Object.id()));
         let m1 = scope.define_module(Some("M1"));
         let m2 = scope.define_module(Some("M2"));
@@ -1091,7 +1101,7 @@ mod tests {
         assert_eq!(classes.lookup(c, name).unwrap().owner, m2);
 
         // Misses are cached too, and invalidated the same way.
-        let missing = SymbolId(8);
+        let missing = crate::shared::symbols::intern("cache_test_missing");
         assert_eq!(classes.lookup(c, missing), None);
         assert_eq!(classes.cached_lookups(), 2);
         classes.define_method(m2, missing, Value::fixnum(3).unwrap());

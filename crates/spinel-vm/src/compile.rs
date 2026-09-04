@@ -1,9 +1,10 @@
 //! `spinel_ast` → [`Iseq`].
 //!
-//! The scope is the part of Ruby that needs no calling convention: literals,
-//! local variables, `if`/`unless`, `while`/`until`, `case`/`when`, `break` and
-//! `next` inside a loop, the logical operators, and the specialised arithmetic
-//! and comparison operators. Everything else is [`Unsupported`].
+//! Literals, local variables, `if`/`unless`, `while`/`until`, `case`/`when`,
+//! `break` and `next` inside a loop, the logical operators, the specialised
+//! arithmetic and comparison operators, and — since
+//! [#11](https://github.com/ar4mirez/spinel/issues/11) — `def`, calls, blocks,
+//! `yield`, and `->`. Everything else is [`Unsupported`].
 //!
 //! # `Unsupported` is the whole safety property
 //!
@@ -24,14 +25,22 @@
 //! A local read before its assignment is `nil`, which is Ruby's rule and falls
 //! out of frames starting zeroed.
 //!
+//! Prism also decides how many scopes up a name lives, which is the other half.
+//! A block compiler carries the enclosing scopes' name lists so that a depth can
+//! become a slot; a method body carries none, because it cannot see them.
+//!
 //! [`Call`]: spinel_ast::Call
 
+use std::sync::Arc;
+
 use spinel_ast::{
-    Assign, AssignOp, Case, CaseBranches, Expr, ExprKind, If, IntValue, Logical, LogicalOp, Name,
-    Program, Span, StrPart, Target, TargetKind, VarRef, While,
+    Assign, AssignOp, BlockArg, Case, CaseBranches, Expr, ExprKind, If, IntValue, Logical,
+    LogicalOp, Name, ParamList, Params, Program, Span, StrPart, Target, TargetKind, VarRef, While,
 };
 
-use crate::bytecode::{BinOp, Insn, Iseq, Literal};
+use crate::bytecode::{
+    BinOp, BlockRef, CallSite, Insn, Iseq, Keyword, Literal, Optional, ParamSpec,
+};
 use crate::value::Value;
 
 /// A node this slice does not compile.
@@ -60,6 +69,13 @@ impl std::fmt::Display for Unsupported {
 impl std::error::Error for Unsupported {}
 
 type Emit = Result<(), Unsupported>;
+
+/// The slot name for the implicit block parameter.
+///
+/// A real local called `it` shadows it, and Prism has already decided which is
+/// which — a shadowed one arrives as [`VarRef::Local`], not [`VarRef::It`], so
+/// sharing the name here cannot collide with a user's variable.
+const IT: &str = "it";
 
 /// Compile a whole parsed file.
 pub fn program(program: &Program) -> Result<Iseq, Unsupported> {
@@ -133,6 +149,19 @@ struct Compiler {
     loops: Vec<Loop>,
     depth: usize,
     max_stack: usize,
+    children: Vec<Arc<Iseq>>,
+    call_sites: Vec<CallSite>,
+    definitions: Vec<(u32, u32)>,
+    params: ParamSpec,
+    /// A method body starts a new scope; a block body continues the enclosing
+    /// one. `GetLocal` with a depth may not cross a barrier.
+    scope_barrier: bool,
+    /// A lambda body: shares a block's scope rules and a method's `return`.
+    is_lambda_body: bool,
+    /// The local-name lists of the enclosing scopes, innermost first, so a
+    /// `VarRef::Local { depth }` can be turned into a slot number. Prism has
+    /// already done the hard half by deciding the depth; this is the lookup.
+    outer: Vec<Vec<Box<str>>>,
 }
 
 impl Compiler {
@@ -146,7 +175,29 @@ impl Compiler {
             loops: Vec::new(),
             depth: 0,
             max_stack: 0,
+            children: Vec::new(),
+            call_sites: Vec::new(),
+            definitions: Vec::new(),
+            params: ParamSpec::default(),
+            scope_barrier: true,
+            is_lambda_body: false,
+            outer: Vec::new(),
         }
+    }
+
+    /// A compiler for a nested scope: a method body, a block, or a lambda.
+    ///
+    /// `barrier` is the difference between the two kinds. A method body cannot
+    /// see the locals it is written inside; a block can, and carries the
+    /// enclosing scopes' name lists so a depth can become a slot.
+    fn nested(name: &str, locals: &[Name], parent: &Compiler, barrier: bool) -> Compiler {
+        let mut compiler = Compiler::new(name, locals);
+        compiler.scope_barrier = barrier;
+        if !barrier {
+            compiler.outer.push(parent.locals.clone());
+            compiler.outer.extend(parent.outer.iter().cloned());
+        }
+        compiler
     }
 
     fn finish(mut self) -> Iseq {
@@ -160,6 +211,11 @@ impl Compiler {
             // `Leave` reads the top of the stack, so a frame always needs room
             // for one value even when the body pushed nothing.
             max_stack: self.max_stack.max(1),
+            params: self.params,
+            children: self.children,
+            call_sites: self.call_sites,
+            definitions: self.definitions,
+            scope_barrier: self.scope_barrier,
         }
     }
 
@@ -171,7 +227,7 @@ impl Compiler {
     /// only because every lowering below leaves both sides of a branch at the
     /// same depth; a lowering that did not would be a bug this function cannot
     /// see, which is why the branch depths are asserted at each merge point.
-    const fn effect(insn: Insn) -> isize {
+    fn effect(&self, insn: Insn) -> isize {
         match insn {
             Insn::PushNil
             | Insn::PushTrue
@@ -182,25 +238,50 @@ impl Compiler {
             | Insn::PushSym(_)
             | Insn::Dup => 1,
             Insn::Pop
-            | Insn::SetLocal(_)
+            | Insn::SetLocal(_, _)
             | Insn::JumpUnless(_)
             | Insn::JumpIf(_)
+            | Insn::JumpUnlessUndef(_)
             | Insn::BinOp(_)
             | Insn::CaseEq
             | Insn::Leave => -1,
-            Insn::GetLocal(_) => 1,
+            Insn::GetLocal(_, _) | Insn::MakeProc(_, _) => 1,
+            // `Return` pops its value at run time, but control does not fall
+            // through to whatever follows. Counting it as neutral keeps the
+            // linear depth model sane across the unreachable code after it,
+            // and leaves `max_stack` one too large rather than one too small —
+            // which is the safe direction for a frame's capacity.
+            Insn::Return => 0,
             Insn::Jump(_)
             | Insn::JumpUnlessKeep(_)
             | Insn::JumpIfKeep(_)
             | Insn::Neg
-            | Insn::Not => 0,
+            | Insn::Not
+            // Pops the receiver the method is defined on, pushes the name.
+            | Insn::DefineMethod(_) => 0,
             // Pops `n`, pushes the array.
             Insn::NewArray(n) => 1 - n as isize,
+            // A send pops the receiver, the arguments, and a passed block, and
+            // pushes one result. The count lives in the call site rather than
+            // the instruction, so this is the one case that has to look it up.
+            Insn::Send(site) => 1 - self.site_operands(site, true),
+            // `yield` is the same shape without a receiver: the block comes
+            // from the frame.
+            Insn::Yield(site) => 1 - self.site_operands(site, false),
         }
     }
 
+    /// How many stack values a call site consumes below its result.
+    fn site_operands(&self, site: u32, receiver: bool) -> isize {
+        let site = &self.call_sites[site as usize];
+        isize::from(receiver)
+            + site.argc as isize
+            + site.keywords.len() as isize
+            + isize::from(site.block == BlockRef::Pass)
+    }
+
     fn emit(&mut self, insn: Insn) {
-        let depth = self.depth as isize + Self::effect(insn);
+        let depth = self.depth as isize + self.effect(insn);
         debug_assert!(depth >= 0, "{insn:?} underflows the stack in {}", self.name);
         self.depth = depth.max(0) as usize;
         self.max_stack = self.max_stack.max(self.depth);
@@ -229,6 +310,7 @@ impl Compiler {
             Insn::JumpUnless(_) => Insn::JumpUnless(displacement),
             Insn::JumpIf(_) => Insn::JumpIf(displacement),
             Insn::JumpUnlessKeep(_) => Insn::JumpUnlessKeep(displacement),
+            Insn::JumpUnlessUndef(_) => Insn::JumpUnlessUndef(displacement),
             Insn::JumpIfKeep(_) => Insn::JumpIfKeep(displacement),
             other => unreachable!("{other:?} is not a jump"),
         };
@@ -367,6 +449,11 @@ impl Compiler {
             ExprKind::Break(value) => self.jump_out(value.as_deref(), true, span)?,
             ExprKind::Next(value) => self.jump_out(value.as_deref(), false, span)?,
 
+            ExprKind::Def(def) => self.def_expr(def, span)?,
+            ExprKind::Yield(node) => self.yield_expr(node, span)?,
+            ExprKind::Lambda(block) => self.lambda(block, span)?,
+            ExprKind::Return(value) => self.return_expr(value.as_deref(), span)?,
+
             other => return Err(Unsupported::at(node_name(other), span)),
         }
         Ok(())
@@ -374,19 +461,20 @@ impl Compiler {
 
     fn var(&mut self, var: &VarRef, span: Span) -> Emit {
         match var {
-            VarRef::Local { name, depth: 0 } => {
-                let slot = self.slot(name);
-                self.emit(Insn::GetLocal(slot));
+            VarRef::Local { name, depth } => {
+                let slot = self.outer_slot(name, *depth, span)?;
+                self.emit(Insn::GetLocal(slot, *depth as u16));
                 Ok(())
             }
-            // A local from an enclosing scope needs the environment pointer that
-            // arrives with blocks, in #11.
-            VarRef::Local { .. } => Err(Unsupported::at("a captured local variable", span)),
             VarRef::Instance(_) => Err(Unsupported::at("an instance variable", span)),
             VarRef::Class(_) => Err(Unsupported::at("a class variable", span)),
             VarRef::Global(_) => Err(Unsupported::at("a global variable", span)),
             VarRef::Const(_) => Err(Unsupported::at("a constant", span)),
-            VarRef::It => Err(Unsupported::at("the implicit block parameter `it`", span)),
+            VarRef::It => {
+                let slot = self.slot(IT);
+                self.emit(Insn::GetLocal(slot, 0));
+                Ok(())
+            }
             VarRef::BackRef(_) | VarRef::NumberedRef(_) => {
                 Err(Unsupported::at("a regexp back-reference", span))
             }
@@ -394,21 +482,21 @@ impl Compiler {
     }
 
     fn assign(&mut self, assign: &Assign, span: Span) -> Emit {
-        let slot = self.local_target(&assign.target)?;
+        let (slot, depth) = self.local_target(&assign.target)?;
         match &assign.op {
             AssignOp::Assign => {
                 self.expr(&assign.value)?;
                 self.emit(Insn::Dup);
-                self.emit(Insn::SetLocal(slot));
+                self.emit(Insn::SetLocal(slot, depth));
             }
             AssignOp::Binary(op) => {
                 let op = BinOp::from_name(op)
                     .ok_or_else(|| Unsupported::at("this compound assignment operator", span))?;
-                self.emit(Insn::GetLocal(slot));
+                self.emit(Insn::GetLocal(slot, depth));
                 self.expr(&assign.value)?;
                 self.emit(Insn::BinOp(op));
                 self.emit(Insn::Dup);
-                self.emit(Insn::SetLocal(slot));
+                self.emit(Insn::SetLocal(slot, depth));
             }
             // `a ||= v` reads `a`, and assigns only when it is falsy. The read
             // is safe before any write because a frame's locals start `nil`,
@@ -419,26 +507,27 @@ impl Compiler {
                 } else {
                     Insn::JumpUnlessKeep as fn(i32) -> Insn
                 };
-                self.emit(Insn::GetLocal(slot));
+                self.emit(Insn::GetLocal(slot, depth));
                 let skip = self.emit_jump(keep);
                 self.emit(Insn::Pop);
                 self.expr(&assign.value)?;
                 self.emit(Insn::Dup);
-                self.emit(Insn::SetLocal(slot));
+                self.emit(Insn::SetLocal(slot, depth));
                 self.patch_here(skip);
             }
         }
         Ok(())
     }
 
-    /// The only assignment target this slice writes to.
-    fn local_target(&mut self, target: &Target) -> Result<u16, Unsupported> {
+    /// The only assignment target this slice writes to: a local, at whatever
+    /// depth it was declared. A block assigning an enclosing scope's local
+    /// writes through the captured environment rather than shadowing it.
+    fn local_target(&mut self, target: &Target) -> Result<(u16, u16), Unsupported> {
         match &target.kind {
-            TargetKind::Var(VarRef::Local { name, depth: 0 }) => Ok(self.slot(name)),
-            TargetKind::Var(VarRef::Local { .. }) => Err(Unsupported::at(
-                "assigning a captured local variable",
-                target.span,
-            )),
+            TargetKind::Var(VarRef::Local { name, depth }) => {
+                let slot = self.outer_slot(name, *depth, target.span)?;
+                Ok((slot, *depth as u16))
+            }
             TargetKind::Var(VarRef::Instance(_)) => Err(Unsupported::at(
                 "assigning an instance variable",
                 target.span,
@@ -553,19 +642,30 @@ impl Compiler {
     /// this frame. Out of a *block* they are non-local exits, and those are
     /// [#12](https://github.com/ar4mirez/spinel/issues/12)'s.
     fn jump_out(&mut self, value: Option<&Expr>, is_break: bool, span: Span) -> Emit {
-        // Out of a *block* rather than a loop, both are non-local exits through
-        // the unwinding path, which is #12's.
         let Some(&Loop {
             base_depth,
             next_target,
             ..
         }) = self.loops.last()
         else {
+            // Outside a loop, the two part company. `next` in a block ends that
+            // block's *call* with a value, which is a local exit and exactly
+            // what leaving a frame already does. `break` ends the method that
+            // yielded to the block, which is a non-local exit through the
+            // unwinding path and #12's.
+            if !is_break && !self.scope_barrier {
+                match value {
+                    Some(value) => self.expr(value)?,
+                    None => self.emit(Insn::PushNil),
+                }
+                self.emit(Insn::Return);
+                return Ok(());
+            }
             return Err(Unsupported::at(
                 if is_break {
-                    "`break` outside a loop"
+                    "`break` out of a block"
                 } else {
-                    "`next` outside a loop"
+                    "`next` outside a loop or block"
                 },
                 span,
             ));
@@ -683,20 +783,277 @@ impl Compiler {
         Ok(())
     }
 
-    /// The only calls this slice compiles are the operators it specialises.
+    /// The slot a `VarRef::Local` names, `depth` scopes up.
     ///
-    /// Everything else needs [#11](https://github.com/ar4mirez/spinel/issues/11).
-    fn call(&mut self, call: &spinel_ast::Call, span: Span) -> Emit {
-        if call.block.is_some() {
-            return Err(Unsupported::at("a method call with a block", span));
+    /// Depth 0 may create the slot: a target can be the first mention of a
+    /// name. A depth above 0 may not — the enclosing scope's list is fixed by
+    /// the time this block is compiled, and a name missing from it would mean
+    /// Prism and this compiler disagreed about what a local is, which is a bug
+    /// rather than a construct to lower.
+    fn outer_slot(&mut self, name: &str, depth: u32, span: Span) -> Result<u16, Unsupported> {
+        if depth == 0 {
+            return Ok(self.slot(name));
         }
-        let Some(receiver) = &call.receiver else {
-            return Err(Unsupported::at("a method call", span));
+        // A method body cannot see the locals of the scope it was written in,
+        // and the compiler never builds one that tries. A block nested in a
+        // method that is nested in a block can, which is why this is a walk.
+        let scope = self
+            .outer
+            .get(depth as usize - 1)
+            .ok_or_else(|| Unsupported::at("a local variable from an enclosing scope", span))?;
+        scope
+            .iter()
+            .position(|l| &**l == name)
+            .map(|index| index as u16)
+            .ok_or_else(|| Unsupported::at("a local variable from an enclosing scope", span))
+    }
+
+    // -- definitions ------------------------------------------------------
+
+    /// `def name(params) body end`.
+    ///
+    /// The body is compiled as a child `Iseq` with a scope barrier, so it
+    /// cannot see the locals around the `def` — which is Ruby, and is the one
+    /// place a nested scope differs from a block.
+    fn def_expr(&mut self, def: &spinel_ast::Def, span: Span) -> Emit {
+        if def.receiver.is_some() {
+            // `def self.foo` needs a singleton class, which is #13's.
+            return Err(Unsupported::at("a singleton method definition", span));
+        }
+        let child = self.child_iseq(&def.name, &def.params, &def.locals, &def.body, true, span)?;
+        let name = self.symbol(&def.name);
+        let index = self.push_child(child);
+        let definition = self.definitions.len() as u32;
+        self.definitions.push((name, index));
+        // The receiver is what the method is defined on. At the top level that
+        // is `self`, and `Object` is where it lands.
+        self.emit(Insn::PushSelf);
+        self.emit(Insn::DefineMethod(definition));
+        Ok(())
+    }
+
+    /// Compile a body that has its own parameters: a method, a block, a lambda.
+    fn child_iseq(
+        &mut self,
+        name: &str,
+        params: &Params,
+        locals: &[Name],
+        body: &[Expr],
+        barrier: bool,
+        span: Span,
+    ) -> Result<Iseq, Unsupported> {
+        self.child_iseq_as(name, params, locals, body, barrier, false, span)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn child_iseq_as(
+        &mut self,
+        name: &str,
+        params: &Params,
+        locals: &[Name],
+        body: &[Expr],
+        barrier: bool,
+        lambda: bool,
+        span: Span,
+    ) -> Result<Iseq, Unsupported> {
+        let mut child = Compiler::nested(name, locals, self, barrier);
+        child.is_lambda_body = lambda;
+        child.params = child.lower_params(params, span)?;
+        // Optional defaults are emitted first, each at a known instruction, so
+        // the binder can enter the body at the first default it has to compute
+        // and fall through the rest. The body proper starts after them.
+        child.emit_defaults(params, span)?;
+        child.statements(body, true)?;
+        Ok(child.finish())
+    }
+
+    fn push_child(&mut self, child: Iseq) -> u32 {
+        self.children.push(Arc::new(child));
+        (self.children.len() - 1) as u32
+    }
+
+    /// `spinel_ast::Params` → [`ParamSpec`], allocating slots in binder order.
+    fn lower_params(&mut self, params: &Params, span: Span) -> Result<ParamSpec, Unsupported> {
+        let list = match params {
+            Params::None => return Ok(ParamSpec::default()),
+            Params::Explicit(list) => list,
+            // `_1`/`_2` and `it` are sugar for a plain parameter list. Prism
+            // lowers a use of `_1` to an ordinary local and `it` to
+            // [`VarRef::It`], so naming the slots here in order is the whole
+            // implementation: `_1` is slot 0 because it is bound first.
+            Params::Numbered(highest) => {
+                let mut spec = ParamSpec::default();
+                for index in 1..=u16::from(*highest) {
+                    self.slot(&format!("_{index}"));
+                    spec.required += 1;
+                }
+                return Ok(spec);
+            }
+            Params::It => {
+                self.slot(IT);
+                return Ok(ParamSpec {
+                    required: 1,
+                    ..ParamSpec::default()
+                });
+            }
         };
+        self.spec_from_list(list, span)
+    }
+
+    fn spec_from_list(&mut self, list: &ParamList, span: Span) -> Result<ParamSpec, Unsupported> {
+        use spinel_ast::{KeywordRestKind, RequiredParamKind};
+
+        let mut spec = ParamSpec::default();
+        for required in &list.required {
+            match &required.kind {
+                RequiredParamKind::Named(name) => {
+                    self.slot(name);
+                    spec.required += 1;
+                }
+                // `{ |(a, b)| }` assigns through a multiple-assignment target,
+                // which the binder would have to run rather than fill.
+                RequiredParamKind::Destructure(_) => {
+                    return Err(Unsupported::at("a destructuring block parameter", span));
+                }
+            }
+        }
+        for optional in &list.optional {
+            let slot = self.slot(&optional.name);
+            spec.optional.push(Optional { slot });
+        }
+        if let Some(rest) = &list.rest {
+            let name = rest.name.as_deref().unwrap_or("*");
+            spec.rest = Some(self.slot(name));
+        }
+        for post in &list.posts {
+            match &post.kind {
+                RequiredParamKind::Named(name) => {
+                    self.slot(name);
+                    spec.post += 1;
+                }
+                RequiredParamKind::Destructure(_) => {
+                    return Err(Unsupported::at("a destructuring block parameter", span));
+                }
+            }
+        }
+        for keyword in &list.keywords {
+            let slot = self.slot(&keyword.name);
+            let name = self.symbol(&keyword.name);
+            spec.keywords.push(Keyword {
+                name,
+                slot,
+                required: keyword.default.is_none(),
+            });
+        }
+        if let Some(rest) = &list.keyword_rest {
+            match rest.kind {
+                // `**kw` collects into a Hash, and there is no Hash.
+                KeywordRestKind::Named(_) => {
+                    return Err(Unsupported::at("a keyword rest parameter", span));
+                }
+                KeywordRestKind::Forbidden => {}
+                KeywordRestKind::Forwarding => {
+                    return Err(Unsupported::at("argument forwarding", span));
+                }
+            }
+        }
+        if let Some(block) = &list.block {
+            let name = block.name.as_deref().unwrap_or("&");
+            spec.block = Some(self.slot(name));
+        }
+        // `{ |a; b| }`: block-locals are ordinary locals of the block's own
+        // scope, already in Prism's list for it. Naming them here only fixes
+        // their slots ahead of any later mention.
+        for local in &list.locals {
+            self.slot(&local.name);
+        }
+
+        // The binder derives the required and post slots by arithmetic —
+        // required is `0..required`, post starts after required, optional, and
+        // the splat — rather than storing them. That is only correct while
+        // Prism lists a scope's parameters in exactly that order, which it
+        // does, and which this asserts rather than assumes: a reordering
+        // upstream would otherwise bind the right values to the wrong names,
+        // and every test here would still pass on the shapes that happen to be
+        // symmetrical.
+        debug_assert!(
+            self.locals.len() >= spec.slots()
+                && spec
+                    .optional
+                    .iter()
+                    .map(|o| o.slot as usize)
+                    .chain(spec.rest.map(|slot| slot as usize))
+                    .chain(spec.keywords.iter().map(|k| k.slot as usize))
+                    .chain(spec.block.map(|slot| slot as usize))
+                    .eq(binder_order(&spec)),
+            "prism ordered {:?} against the binder's {:?}",
+            self.locals,
+            spec,
+        );
+        Ok(spec)
+    }
+
+    /// Emit each optional and keyword default, guarded.
+    ///
+    /// The binder marks a parameter it did not fill with the undef value, and
+    /// each default here is `if this slot is undef, compute it`. Optionals and
+    /// keywords take the same shape, and a default that calls a method works
+    /// because it is ordinary code in the body rather than something the binder
+    /// has to evaluate.
+    fn emit_defaults(&mut self, params: &Params, _span: Span) -> Emit {
+        let Params::Explicit(list) = params else {
+            return Ok(());
+        };
+        let defaults: Vec<(Box<str>, &Expr)> =
+            list.optional
+                .iter()
+                .map(|o| (o.name.to_string().into_boxed_str(), &o.default))
+                .chain(list.keywords.iter().filter_map(|k| {
+                    Some((k.name.to_string().into_boxed_str(), k.default.as_ref()?))
+                }))
+                .collect();
+        for (name, default) in defaults {
+            let slot = self.slot(&name);
+            self.emit(Insn::GetLocal(slot, 0));
+            let supplied = self.emit_jump(Insn::JumpUnlessUndef);
+            self.expr(default)?;
+            self.emit(Insn::SetLocal(slot, 0));
+            self.patch_here(supplied);
+        }
+        Ok(())
+    }
+
+    // -- calls ------------------------------------------------------------
+
+    /// A call: the specialised operators when they apply, a real send otherwise.
+    fn call(&mut self, call: &spinel_ast::Call, span: Span) -> Emit {
         if call.flags.safe_nav {
             return Err(Unsupported::at("a safe-navigation call", span));
         }
+        if self.try_operator(call)? {
+            return Ok(());
+        }
 
+        // Receiver first: Ruby evaluates it before the arguments.
+        match &call.receiver {
+            Some(receiver) => self.expr(receiver)?,
+            None => self.emit(Insn::PushSelf),
+        }
+        let site = self.arguments(&call.name, &call.args, call.block.as_ref(), span)?;
+        let site = self.push_site(site, call.receiver.is_none());
+        self.emit(Insn::Send(site));
+        Ok(())
+    }
+
+    /// The operators #10 emits as instructions, when the shape is exactly one
+    /// of them. A `+` with a block or a splat is a send like any other.
+    fn try_operator(&mut self, call: &spinel_ast::Call) -> Result<bool, Unsupported> {
+        let Some(receiver) = &call.receiver else {
+            return Ok(false);
+        };
+        if call.block.is_some() {
+            return Ok(false);
+        }
         match (&*call.name, call.args.len()) {
             ("!", 0) => {
                 self.expr(receiver)?;
@@ -708,24 +1065,193 @@ impl Compiler {
             }
             ("+@", 0) => self.expr(receiver)?,
             (name, 1) => {
-                let op =
-                    BinOp::from_name(name).ok_or_else(|| Unsupported::at("a method call", span))?;
+                let Some(op) = BinOp::from_name(name) else {
+                    return Ok(false);
+                };
                 if matches!(call.args[0].kind, ExprKind::Splat(_) | ExprKind::Hash(_)) {
-                    return Err(Unsupported::at("a method call", span));
+                    return Ok(false);
                 }
                 self.expr(receiver)?;
                 self.expr(&call.args[0])?;
                 self.emit(Insn::BinOp(op));
             }
-            _ => return Err(Unsupported::at("a method call", span)),
+            _ => return Ok(false),
         }
+        Ok(true)
+    }
+
+    /// Push the arguments and describe them.
+    ///
+    /// Positional values first, then keyword values, then a passed block —
+    /// which is the order the interpreter pops them off in reverse.
+    fn arguments(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+        block: Option<&BlockArg>,
+        span: Span,
+    ) -> Result<CallSite, Unsupported> {
+        let mut site = CallSite {
+            name: self.symbol(name),
+            argc: 0,
+            splats: Vec::new(),
+            keywords: Vec::new(),
+            block: BlockRef::None,
+            implicit_self: false,
+        };
+
+        for arg in args {
+            match &arg.kind {
+                ExprKind::Splat(Some(inner)) => {
+                    self.expr(inner)?;
+                    site.splats.push(site.argc);
+                    site.argc += 1;
+                }
+                ExprKind::Splat(None) => {
+                    return Err(Unsupported::at("argument forwarding", arg.span));
+                }
+                ExprKind::ForwardingArgs => {
+                    return Err(Unsupported::at("argument forwarding", arg.span));
+                }
+                // A trailing brace-less hash is Ruby's keyword syntax.
+                ExprKind::Hash(hash) if !hash.braces => {
+                    for pair in &hash.entries {
+                        let key = keyword_name(pair)
+                            .ok_or_else(|| Unsupported::at("a hash literal", arg.span))?;
+                        let symbol = self.symbol(key);
+                        let value = pair_value(pair)
+                            .ok_or_else(|| Unsupported::at("a hash literal", arg.span))?;
+                        self.expr(value)?;
+                        site.keywords.push(symbol);
+                    }
+                }
+                _ => {
+                    self.expr(arg)?;
+                    site.argc += 1;
+                }
+            }
+        }
+
+        match block {
+            None => {}
+            Some(BlockArg::Block(block)) => {
+                let child = self.child_iseq(
+                    "block in <compiled>",
+                    &block.params,
+                    &block.locals,
+                    &block.body,
+                    false,
+                    span,
+                )?;
+                site.block = BlockRef::Literal(self.push_child(child));
+            }
+            Some(BlockArg::Pass(Some(expr))) => {
+                self.expr(expr)?;
+                site.block = BlockRef::Pass;
+            }
+            Some(BlockArg::Pass(None)) => {
+                return Err(Unsupported::at("an anonymous block parameter", span));
+            }
+        }
+        Ok(site)
+    }
+
+    fn push_site(&mut self, mut site: CallSite, implicit_self: bool) -> u32 {
+        site.implicit_self = implicit_self;
+        self.call_sites.push(site);
+        (self.call_sites.len() - 1) as u32
+    }
+
+    /// `yield`. The block comes from the frame, so there is no receiver.
+    fn yield_expr(&mut self, node: &spinel_ast::Yield, span: Span) -> Emit {
+        let site = self.arguments("yield", &node.args, None, span)?;
+        let site = self.push_site(site, true);
+        self.emit(Insn::Yield(site));
         Ok(())
+    }
+
+    /// `-> { }`, which is a lambda: strict arity and a local `return`.
+    fn lambda(&mut self, block: &spinel_ast::Block, span: Span) -> Emit {
+        let child = self.child_iseq_as(
+            "lambda in <compiled>",
+            &block.params,
+            &block.locals,
+            &block.body,
+            false,
+            true,
+            span,
+        )?;
+        let index = self.push_child(child);
+        self.emit(Insn::MakeProc(index, true));
+        Ok(())
+    }
+
+    /// `return`, which leaves the frame it is written in.
+    ///
+    /// Inside a method or a lambda that is a local return. Inside a block it is
+    /// a non-local exit through the enclosing method, which shares an unwinding
+    /// path with exceptions and belongs to
+    /// [#12](https://github.com/ar4mirez/spinel/issues/12). The compiler knows
+    /// which it is — a block body has no scope barrier — so it refuses the one
+    /// it cannot mean rather than emitting a local return for it.
+    fn return_expr(&mut self, value: Option<&Expr>, span: Span) -> Emit {
+        if !self.scope_barrier && !self.is_lambda_body {
+            return Err(Unsupported::at("`return` from a block", span));
+        }
+        match value {
+            Some(expr) => self.expr(expr)?,
+            None => self.emit(Insn::PushNil),
+        }
+        self.emit(Insn::Return);
+        Ok(())
+    }
+}
+
+/// The `key:` of a keyword argument written as a brace-less hash pair.
+fn keyword_name(pair: &spinel_ast::HashEntry) -> Option<&str> {
+    match &pair.kind {
+        spinel_ast::HashEntryKind::Pair { key, .. } => match &key.kind {
+            ExprKind::Sym(symbol) => match symbol.parts.as_slice() {
+                [StrPart::Bytes(bytes)] => std::str::from_utf8(bytes).ok(),
+                _ => None,
+            },
+            _ => None,
+        },
+        spinel_ast::HashEntryKind::Splat(_) => None,
+    }
+}
+
+fn pair_value(pair: &spinel_ast::HashEntry) -> Option<&Expr> {
+    match &pair.kind {
+        spinel_ast::HashEntryKind::Pair { value, .. } => Some(value),
+        spinel_ast::HashEntryKind::Splat(_) => None,
     }
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// The slots the binder expects the non-required, non-post parameters to have,
+/// in the order `spec_from_list` names them.
+///
+/// Not `cfg(debug_assertions)`: `debug_assert!` still type-checks its argument
+/// in a release build, so a gated helper is a release-only compile error.
+fn binder_order(spec: &ParamSpec) -> impl Iterator<Item = usize> + '_ {
+    let required = spec.required as usize;
+    let optionals = required..required + spec.optional.len();
+    let rest = optionals.end..optionals.end + usize::from(spec.rest.is_some());
+    // Post parameters sit between the splat and the keywords, and the binder
+    // computes their base the same way.
+    let keywords = rest.end + spec.post as usize;
+    optionals
+        .chain(rest)
+        .chain(keywords..keywords + spec.keywords.len())
+        .chain(
+            (keywords + spec.keywords.len())
+                ..(keywords + spec.keywords.len() + usize::from(spec.block.is_some())),
+        )
+}
 
 /// The bytes of a literal with no interpolation, or `None` if it has any.
 fn flat_bytes(parts: &[StrPart]) -> Option<Box<[u8]>> {
