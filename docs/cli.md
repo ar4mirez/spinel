@@ -52,4 +52,4 @@ Reporting `"spinel"` rather than `"ruby"` is honest and is what JRuby and Truffl
 
 ## Bundler running on Spinel
 
-Apps call `require "bundler/setup"` in their own boot files, so Bundler the gem must run on Spinel and read Spinel's `.spinel/gem_home` and `Gemfile.lock`. Bundler is pure Ruby, and the GEM_HOME layout is standard, so this is a compatibility test rather than new code: `tests/fixtures/bundler-setup` boots an app through `bundler/setup` with `BUNDLE_PATH` pointed at `.spinel/gem_home`. `spinel install` writes `.bundle/config` with that `BUNDLE_PATH` so plain Bundler commands in the same project agree with Spinel.
+Apps call `require "bundler/setup"` in their own boot files, so Bundler the gem must run on Spinel and read Spinel's `.spinel/gem_home` and `Gemfile.lock`. Bundler is pure Ruby, and the GEM_HOME layout is standard, so this is a compatibility test rather than new code: `crates/spinel-cli/tests/fixtures/bundler-setup` boots an app through `bundler/setup` with `BUNDLE_PATH` pointed at `.spinel/gem_home`. `spinel install` writes `.bundle/config` with that `BUNDLE_PATH` so plain Bundler commands in the same project agree with Spinel.

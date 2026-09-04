@@ -15,7 +15,7 @@ Read `README.md`, then `docs/engine.md` if touching the VM, or the subsystem doc
 ## Conventions
 
 - Definition of done for engine work is a ruby/spec delta: name the spec files or directories that newly pass. `scripts/spec.sh core/array` runs one directory. Never mark a spec as "expected failure" to make a slice green; skip it with a reason in `spec/tags/`.
-- Definition of done for tooling work is an integration test under `tests/` shelling out to the built `spinel` binary against a fixture in `tests/fixtures/`.
+- Definition of done for tooling work is an integration test under `crates/spinel-cli/tests/` shelling out to the built `spinel` binary against a fixture in `crates/spinel-cli/tests/fixtures/`. It lives in `spinel-cli` because Cargo only guarantees a freshly built binary, via `CARGO_BIN_EXE_spinel`, to tests in the binary's own package.
 - Prefer boring: `clap`, `reqwest` + `tokio`, `pubgrub`, `serde`, `notify`, `cranelift` (later).
 - Mark deliberate shortcuts with a `// ponytail:` comment naming the ceiling and the upgrade path.
 - Benchmarks live in `bench/` and compare against system `ruby --yjit`. Numbers go in the PR, not in code.

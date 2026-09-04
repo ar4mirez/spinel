@@ -1,0 +1,14 @@
+[package]
+name = "spinel-core"
+description = "Rust primitives under the Ruby core library in core/*.rb."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+spinel-vm.workspace = true
+
+[lints]
+workspace = true

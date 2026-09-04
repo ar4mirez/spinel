@@ -47,7 +47,7 @@ One slice per class, each driven by `core/<class>/`: `Integer`, `Float`, `String
 
 ## Phase 4: tooling on the engine
 
-The package-manager.md, cli.md, test-runner.md and build.md designs. Slices as listed in those docs, plus `tests/fixtures/bundler-setup` from cli.md. This phase covers pure-Ruby and built-in gems only; the `.spinel` extension path and Spinel-native gems are phase 5.
+The package-manager.md, cli.md, test-runner.md and build.md designs. Slices as listed in those docs, plus `crates/spinel-cli/tests/fixtures/bundler-setup` from cli.md. This phase covers pure-Ruby and built-in gems only; the `.spinel` extension path and Spinel-native gems are phase 5.
 
 **Milestone:** `spinel add sinatra`, a Sinatra app serves requests on WEBrick, `spinel test` runs its Minitest suite in parallel, `spinel build --compile` produces a binary that runs on a clean machine, `require "bundler/setup"` works inside the app.
 
@@ -75,8 +75,9 @@ The package-manager.md, cli.md, test-runner.md and build.md designs. Slices as l
 
 1. One slice per session. Paste the bullet and the relevant doc section; the check is the definition of done.
 2. Engine slices: run the named spec directory before and after; the PR states the delta. A slice that adds no passing specs is not done.
-3. Never mark a failing spec as expected. Skip with a reason in `spec/tags/` or fix it.
-4. The core library is Ruby. If a session reaches for Rust to implement a `String` method, it must justify why Ruby cannot express it.
-5. No globals. Reviews grep for `static mut`, `lazy_static`, `OnceCell` holding `Value`, and `thread_local!` holding VM objects. Anything found outside `spinel-vm/src/shared/` is a bug.
-6. Numbers live in `bench/`, reproduced by script, never typed into prose.
-7. When a slice reveals a doc is wrong, fix the doc in the same PR.
+3. Tooling slices: the check is an integration test in `crates/spinel-cli/tests/` that shells out to the built binary. It lives inside `spinel-cli` rather than a top-level `tests/` because Cargo only guarantees a freshly rebuilt binary, via `CARGO_BIN_EXE_spinel`, to tests in the binary's own package.
+4. Never mark a failing spec as expected. Skip with a reason in `spec/tags/` or fix it.
+5. The core library is Ruby. If a session reaches for Rust to implement a `String` method, it must justify why Ruby cannot express it.
+6. No globals. Reviews grep for `static mut`, `lazy_static`, `OnceCell` holding `Value`, and `thread_local!` holding VM objects. Anything found outside `spinel-vm/src/shared/` is a bug.
+7. Numbers live in `bench/`, reproduced by script, never typed into prose.
+8. When a slice reveals a doc is wrong, fix the doc in the same PR.

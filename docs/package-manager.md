@@ -101,9 +101,9 @@ The `spinel-ext` ABI version is part of the ext cache key `~/.spinel/store/ext/<
 
 ## Validation targets
 
-1. `tests/fixtures/plain`: `gem "rake"`; install, `spinel run -e 'require "rake"'`.
-2. `tests/fixtures/native-gem`: a gem shipping a `.spinel` extension; install and load it (phase 5).
-   `tests/fixtures/builtin-gem`: a lock pinning `json` and `bigdecimal`; install uses the built-ins and skips `ext/`.
-3. `tests/fixtures/sinatra-lock`: a real Sinatra app lockfile; install, serve a request. Run the same `Gemfile.lock` through `bundle install` and diff.
-4. `tests/fixtures/rails-lock` (phase 7): a `rails new` lockfile; install, `spinel run bin/rails runner 'puts Rails.version'`.
+1. `crates/spinel-cli/tests/fixtures/plain`: `gem "rake"`; install, `spinel run -e 'require "rake"'`.
+2. `crates/spinel-cli/tests/fixtures/native-gem`: a gem shipping a `.spinel` extension; install and load it (phase 5).
+   `crates/spinel-cli/tests/fixtures/builtin-gem`: a lock pinning `json` and `bigdecimal`; install uses the built-ins and skips `ext/`.
+3. `crates/spinel-cli/tests/fixtures/sinatra-lock`: a real Sinatra app lockfile; install, serve a request. Run the same `Gemfile.lock` through `bundle install` and diff.
+4. `crates/spinel-cli/tests/fixtures/rails-lock` (phase 7): a `rails new` lockfile; install, `spinel run bin/rails runner 'puts Rails.version'`.
 5. `bench/install.sh`: cold and warm install of the Rails fixture, Spinel vs Bundler.
