@@ -564,3 +564,96 @@ pub fn inspect(scope: &mut HandleScope<'_>, value: Value) -> String {
         },
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bytecode::Iseq;
+
+    /// Build an `Iseq` without the parser, so miri can run it.
+    ///
+    /// `tests/eval.rs` and `tests/bytecode.rs` cover far more, and both are
+    /// skipped under miri because `spinel-parse` calls into Prism and Prism is
+    /// C. This keeps the part miri is actually for — the heap's pointer
+    /// arithmetic, reached here through a string literal, an array, and a slot
+    /// read — inside the job's reach.
+    fn iseq(insns: Vec<Insn>, literals: Vec<Literal>, max_stack: usize) -> Iseq {
+        Iseq {
+            name: "<test>".into(),
+            insns,
+            literals,
+            symbols: vec!["a_symbol".into()],
+            locals: vec!["slot".into()],
+            max_stack,
+        }
+    }
+
+    #[test]
+    fn the_interpreter_allocates_and_reads_under_miri() {
+        let iseq = iseq(
+            vec![
+                // ["hi", :a_symbol] stored in a local, then read back.
+                Insn::PushLit(0),
+                Insn::PushSym(0),
+                Insn::NewArray(2),
+                Insn::SetLocal(0),
+                Insn::GetLocal(0),
+                Insn::Leave,
+            ],
+            vec![Literal::Str(Box::from(&b"hi"[..]))],
+            3,
+        );
+
+        let mut heap = Heap::new();
+        let mut frame = Frame::new(1);
+        let mut scope = heap.scope();
+        scope.bootstrap();
+        let value = eval_in(&mut scope, &mut frame, &iseq).expect("should run");
+        assert_eq!(inspect(&mut scope, value), "[\"hi\", :a_symbol]");
+    }
+
+    #[test]
+    fn a_collection_mid_run_does_not_lose_the_stack() {
+        // Everything the loop allocates is rooted in the scope it was handed, so
+        // a collection between two allocations cannot free a value the stack is
+        // still holding. Forcing one is the only way to check that claim.
+        let iseq = iseq(
+            vec![
+                Insn::PushLit(0),
+                Insn::PushLit(0),
+                Insn::NewArray(2),
+                Insn::Leave,
+            ],
+            vec![Literal::Str(Box::from(&b"survivor"[..]))],
+            3,
+        );
+
+        let mut heap = Heap::new();
+        let mut frame = Frame::new(1);
+        let mut scope = heap.scope();
+        scope.bootstrap();
+        scope.collect();
+        let value = eval_in(&mut scope, &mut frame, &iseq).expect("should run");
+        scope.collect();
+        assert_eq!(inspect(&mut scope, value), "[\"survivor\", \"survivor\"]");
+    }
+
+    #[test]
+    fn arithmetic_that_leaves_the_fast_path_refuses() {
+        for (op, left, right) in [
+            (BinOp::Add, Value::TRUE, Value::fixnum(1).unwrap()),
+            (BinOp::Lt, Value::NIL, Value::NIL),
+        ] {
+            let mut heap = Heap::new();
+            let mut scope = heap.scope();
+            scope.bootstrap();
+            assert!(
+                matches!(
+                    binop(&mut scope, op, left, right),
+                    Err(Error::NoDispatch { .. })
+                ),
+                "{op:?} should refuse rather than guess"
+            );
+        }
+    }
+}

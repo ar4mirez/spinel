@@ -11,6 +11,13 @@
 //! Spinel deliberately *refuses*, because Ruby's answer there is a value this
 //! slice does not have.
 
+//! Skipped under miri: `spinel_parse` calls into Prism, which is C, and miri
+//! cannot run foreign functions. What miri is here to check is the heap's
+//! pointer arithmetic, and the interpreter's share of that is covered by
+//! `interp::tests::the_interpreter_allocates_and_reads_under_miri`, which builds
+//! its `Iseq` by hand and needs no parser.
+#![cfg(not(miri))]
+
 use spinel_vm::Heap;
 use spinel_vm::compile;
 use spinel_vm::interp;

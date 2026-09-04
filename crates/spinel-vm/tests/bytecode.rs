@@ -7,6 +7,13 @@
 //! bytecode cache and `core.image` in phase 3 are the callers that depend on
 //! them, and they arrive long after the mistake would have been made.
 
+//! Skipped under miri: `spinel_parse` calls into Prism, which is C, and miri
+//! cannot run foreign functions. What miri is here to check is the heap's
+//! pointer arithmetic, and the interpreter's share of that is covered by
+//! `interp::tests::the_interpreter_allocates_and_reads_under_miri`, which builds
+//! its `Iseq` by hand and needs no parser.
+#![cfg(not(miri))]
+
 use spinel_vm::bytecode::{Insn, Iseq};
 use spinel_vm::{Heap, compile, interp};
 
