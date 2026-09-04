@@ -49,7 +49,23 @@ pure-Rust bigint crate.
 
 **Default GC:** precise, non-moving mark-sweep with size-class free lists and a large-object space. Precise because the compiler knows every root: the VM stack, frames, the current exception, per-heap tables, and Rust-side handles. Rust code holds `Value`s only inside a `HandleScope`, so a GC in the middle of a primitive cannot lose them. Non-moving first because it is the simplest correct thing. Because there is no C API pinning objects, a moving generational collector is a contained upgrade later; `spinel-ext` uses handles from day one so extensions survive that upgrade.
 
-Object header (default, 16 bytes): class pointer, shape id, flags (frozen, ractor-shareable, mark bit, age). Instance variables live in a slots array indexed by shape; the shape tree is per heap.
+Landed in [#7](https://github.com/ar4mirez/spinel/issues/7). The object header is 16 bytes:
+
+| offset | field | notes |
+|---|---|---|
+| 0 | class pointer | `Option<Value>`; also the free-list link while the cell is free |
+| 8 | `len` | `Value` slots, or bytes |
+| 12 | flags | mark bit; frozen and ractor-shareable join it with #8 |
+| 13 | payload kind | slots or bytes — whether the collector descends |
+| 14 | reserved | #8's shape id |
+
+Instance variables live in a slots array indexed by the shape; the shape tree is per heap.
+
+Cells come from 64 KiB blocks, one size class per block: 32, 64, 128, 256, and 512 bytes, holding 2, 6, 14, 30, and 62 slots. Anything larger gets its own allocation in the large-object list. Sweeping rebuilds every free list from the unmarked cells, so a dead object and a cell that has never been used take the same path; blocks are zeroed on arrival so that an unused cell reads as unmarked rather than as uninitialised memory.
+
+A collection runs inside an allocation, when bytes since the last one cross a threshold — 1 MiB, then twice the live bytes, floored at 1 MiB — or when a caller asks. There is no collector thread and no interior mutability, so every collection point is a `&mut Heap`, which is what makes "a GC in the middle of a primitive" something the compiler can see.
+
+`HandleScope` is the discipline, and it is enforced rather than documented: `Heap` has no method that allocates. `HandleScope::alloc` returns a `Handle` — an index into the heap's root stack — and never a bare pointer, so an object the collector cannot see is a program that does not compile. A scope pops its own handles on drop, and a nested scope's handle cannot escape into its parent because `Handle` is covariant in the scope's lifetime. Today the root set is exactly that stack; the VM stack, frames, the current exception, and the per-heap tables each plug into the same mark phase as their slice lands.
 
 ## Shapes and inline caches
 
@@ -63,7 +79,7 @@ Ruby's full argument protocol from the start, because ruby/spec's `language/` di
 
 - Frames hold locals, an environment pointer for captured variables (environments are heap-allocated only when a block captures them; default: a `captured` bit from the resolve pass decides), the receiver, the method entry, and a catch table.
 - `break`, `next`, `redo`, `return` from blocks, and `throw`/`catch` are all non-local exits through the same unwinding path as exceptions, with catch tables per bytecode range, like YARV and the JVM.
-- Fibers own a VM stack. Switching fibers is switching which VM stack the interpreter loop uses. Because the interpreter is non-recursive and the core library is in Ruby, almost no fiber switch happens with Rust frames in between. Where a primitive must call back into Ruby (a sort comparator, `Hash#each` primitive fallback), the re-entrant call runs on a `corosensei` coroutine so the fiber can still be suspended. `HandleScope`s form a per-thread linked list that includes suspended coroutine stacks, so the GC still sees every handle. `Enumerator#next` and the Fiber scheduler API come from this for free.
+- Fibers own a VM stack. Switching fibers is switching which VM stack the interpreter loop uses. Because the interpreter is non-recursive and the core library is in Ruby, almost no fiber switch happens with Rust frames in between. Where a primitive must call back into Ruby (a sort comparator, `Hash#each` primitive fallback), the re-entrant call runs on a `corosensei` coroutine so the fiber can still be suspended. The heap's root stack is what the GC scans, and a suspended coroutine keeps its own region of it, so the GC still sees every handle. `Enumerator#next` and the Fiber scheduler API come from this for free.
 
 ## Core library
 
