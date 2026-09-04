@@ -1,0 +1,3 @@
+# Vendored upstream bytes: never normalise EOLs, or the drift check in
+# scripts/vendor-stdlib.sh fails on a checkout rather than on a real change.
+stdlib/** -text

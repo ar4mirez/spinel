@@ -98,21 +98,31 @@ jobs:
           fi
           echo "clean"
 
+  # `stdlib/` is a verbatim copy of ruby/ruby's `lib/` at a pinned tag, not a
+  # fork. This job is what makes that claim checkable: it re-fetches the tag and
+  # diffs. Any difference fails, which is stricter than the "unexplained drift"
+  # the slice asked for and needs no allowlist to stay honest.
+  stdlib:
+    name: stdlib drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./scripts/vendor-stdlib.sh --check
+
   # The definition of done for the lowering (#3): every Ruby file in a real
   # corpus reaches `spinel_ast` without an unhandled node. The sweep exits
   # non-zero only on an unhandled node, never on a syntax error, because both
   # corpora ship files that are deliberately invalid Ruby.
   #
-  # The corpora are cloned rather than vendored because vendoring them is its own
-  # roadmap slice. Both are pinned so an upstream commit cannot turn a green PR
-  # red; bump the SHAs deliberately. Once `spec/ruby/` and `stdlib/` exist in the
-  # tree, the last step sweeps those instead and these clones can go.
+  # ruby/spec is still cloned at a pinned SHA because vendoring it is its own
+  # roadmap slice (#5); the pin means an upstream commit cannot turn a green PR
+  # red. The stdlib half of this corpus is no longer cloned: `stdlib/` is in the
+  # tree, and the last step sweeps it.
   sweep:
     name: lower a real corpus
     runs-on: ubuntu-latest
     env:
       RUBY_SPEC_SHA: 620a912d97cf321a47eb5c754f37a060a94326e3
-      RUBY_SRC_SHA: 5efd4ad899688af06963fbf9eb5d1a08d3ea99ee
     steps:
       - uses: actions/checkout@v4
 
@@ -132,26 +142,11 @@ jobs:
           git fetch --quiet --depth 1 origin "$RUBY_SPEC_SHA"
           git checkout --quiet FETCH_HEAD
 
-      # Only `lib/`: the rest of ruby/ruby is C, and this stands in for the
-      # `stdlib/` subtree until that slice lands.
-      - name: Fetch ruby/ruby lib
-        run: |
-          git init --quiet corpus/ruby-lib
-          cd corpus/ruby-lib
-          git remote add origin https://github.com/ruby/ruby.git
-          git config core.sparseCheckout true
-          echo 'lib/' > .git/info/sparse-checkout
-          git fetch --quiet --depth 1 --filter=blob:none origin "$RUBY_SRC_SHA"
-          git checkout --quiet FETCH_HEAD
-
       - name: Sweep ruby/spec
         run: ./target/release/spinel parse corpus/ruby-spec
 
-      - name: Sweep the pure-Ruby stdlib
-        run: ./target/release/spinel parse corpus/ruby-lib/lib
-
-      # Vendored copies, once they exist. Skipped until then rather than failing,
-      # so this job does not have to be edited twice.
+      # Vendored copies. `stdlib/` is here now; `spec/ruby/` lands with #5, and
+      # is skipped rather than failing until then.
       - name: Sweep vendored corpora
         run: |
           for dir in spec/ruby stdlib; do

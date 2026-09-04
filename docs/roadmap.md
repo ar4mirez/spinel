@@ -8,7 +8,7 @@ Every bullet below is tracked as a GitHub issue, one milestone per phase: [miles
 
 - Cargo workspace with the crates from architecture.md, CI on macOS arm64 and Linux x64, `spinel --version`. *Check:* green CI.
 - `spinel-ast` types covering Prism's node set; `spinel-parse` lowering; `spinel parse file.rb` prints the tree. *Check:* `spinel parse <dir>` lowers a ruby/spec and pure-Ruby-stdlib corpus with no "unhandled node" error. Until the two slices below vendor them, CI clones both at pinned SHAs; the job already sweeps `spec/ruby/` and `stdlib/` once they exist.
-- Vendor the pure-Ruby stdlib as a git subtree under `stdlib/` with its license files. *Check:* `stdlib/` present, license present, CI job diffs it against the upstream tag.
+- Vendor the pure-Ruby stdlib under `stdlib/` — ruby/ruby's `lib/` at a pinned tag, with its license files. Not a `git subtree`: that copies a whole repository, and this is one directory of one. *Check:* `stdlib/` present, license present, CI job diffs it against the upstream tag.
 - ruby/spec submodule at the branch matching the target language version, `spec/harness/` Rust runner for `describe`/`it`/`should ==`/`should_raise` and the `ruby_version_is`/`platform_is` guards. *Check:* the harness runs `language/if_spec.rb` and reports, even if everything fails.
 
 ## Phase 1: a VM that runs `language/`
