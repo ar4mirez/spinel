@@ -1,0 +1,13 @@
+Ruby's pure-Ruby standard library, vendored verbatim.
+
+    upstream  https://github.com/ruby/ruby.git
+    tag       v4.0.6
+    commit    03b6d3f8898a28604fe6cb00eae3226b821168f4
+    path      lib/ (flattened to this directory, so stdlib/ is a $LOAD_PATH root)
+
+Licenses are upstream's, in LICENSE/. LEGAL records the per-file terms for the
+files here that are not under Ruby's own license.
+
+Do not edit anything under stdlib/ by hand. CI diffs this tree against the tag
+above and fails on any difference. To update, edit RUBY_TAG in
+scripts/vendor-stdlib.sh and run it.

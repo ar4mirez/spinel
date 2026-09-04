@@ -54,7 +54,7 @@ honest as Ruby grows syntax.
 The release binary is Rust code plus an embedded zstd archive:
 
 - `core.image`: the precompiled bytecode of `core/*.rb`, loaded at boot instead of parsing (this is the startup trick; there is no snapshot of a heap, only of bytecode)
-- `stdlib/**/*.rb`: the pure-Ruby standard library, vendored from Ruby's repository (Ruby license / BSD-2). `set`, `erb`, `optparse`, `fileutils`, `json`'s Ruby half, `net/http`, and so on. Extracted once to `~/.spinel/stdlib/<ver>/`.
+- `stdlib/**/*.rb`: the pure-Ruby standard library, vendored from Ruby's repository (Ruby license / BSD-2, per-file terms in `stdlib/LICENSE/LEGAL`). `erb`, `optparse`, `fileutils`, `json`'s Ruby half, `net/http`, and so on. `set` is not among them: it is a core class as of Ruby 4.0. Extracted once to `~/.spinel/stdlib/<ver>/`.
 - `shims/*.rb`: Spinel's setup, test worker, Gemfile evaluator (cli.md)
 
 Default gems whose parts are C in CRuby (`json` parser, `openssl`, `zlib`, `socket`, `io-console`, `digest`, `date`, `bigdecimal`, `psych`, `etc`, `fiddle`, `monitor`) ship as built-in gems: their Ruby halves in the asset archive, their C halves as Spinel primitives. See engine.md, "Built-in gems".
@@ -78,13 +78,13 @@ Target size: under 30 MB. No libruby, no OpenSSL unless we link it for the `open
 Cargo.toml                 workspace
 crates/                    one dir per crate above
 core/                      Ruby source for core classes, compiled into core.image
-stdlib/                    vendored pure-Ruby stdlib (git subtree from ruby/ruby lib/, with its LICENSE files)
+stdlib/                    vendored pure-Ruby stdlib: ruby/ruby `lib/` at a pinned tag, flattened so stdlib/ is a $LOAD_PATH root, with UPSTREAM and its LICENSE/ files
 shims/                     setup.rb, test_worker.rb, gemfile_eval.rb
 spec/
   ruby/                    git submodule: ruby/spec
   tags/                    skipped specs with reasons
   harness/                 minimal runner used before mspec itself runs on Spinel
-scripts/                   spec.sh, bench.sh, release.sh
+scripts/                   spec.sh, bench.sh, release.sh, vendor-stdlib.sh
 crates/spinel-cli/tests/   tooling integration tests + fixtures/
 bench/                     yjit-bench subset, spec-status.md (CI-generated)
 docs/
