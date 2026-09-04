@@ -106,6 +106,7 @@ stays until [#5](https://github.com/ar4mirez/spinel/issues/5) vendors it.
 - [x] The sweep's cloned stdlib corpus is deleted and the vendored tree replaces it
 - [x] Integration test under `crates/spinel-cli/tests/`, per `CLAUDE.md`
 - [x] `docs/architecture.md` and `docs/roadmap.md` corrected in the same PR
+- [x] Backlog corrected where the vendored tree falsified it — #4 retitled, #48 retriaged, #47 and #5 handed the facts
 
 ## Corpus result
 
@@ -134,11 +135,21 @@ sweep — and just as clean. No lowering change was needed.
 
 ## What the audit caught
 
-**A1 — `set.rb` is not in Ruby 4.0's `lib/`.** Found when a deliberately
-tampered `stdlib/set.rb` made the drift check report the file as *added*. `Set`
-became a core class; `architecture.md` listed `set` among the vendored files and
-was wrong. The doc is fixed, and `the_stdlib_is_vendored` asserts the file's
-absence, so an upstream bump that reintroduces it is read rather than absorbed.
+**A1 — `set.rb` is not in Ruby 4.0's `lib/`, and three places assumed it was.**
+Found when a deliberately tampered `stdlib/set.rb` made the drift check report
+the file as *added*. Upstream ships `set.c` and no `lib/set.rb`: `Set` is a core
+class now. That falsified, in order of blast radius:
+
+- `docs/roadmap.md`, which listed `set` among the stdlib extracted on first run
+  in phase 3 — fixed here.
+- `docs/architecture.md`, which listed it among the vendored files — fixed here.
+- [#48](https://github.com/ar4mirez/spinel/issues/48), *"stdlib: `set`"*, whose
+  definition of done was `library/set/` passing. ruby/spec at the pinned
+  `620a912` has `core/set/` (58 entries) and no `library/set/`, so the slice was
+  unachievable as written. Retriaged to *"core: `Set`"*, phase 2, `area:core-lib`.
+
+`the_stdlib_is_vendored` asserts the file's absence, so an upstream bump that
+reintroduces it is read rather than absorbed.
 
 **A2 — The drift check needed the network, so nothing guarded the tree
 locally.** A contributor bumping `RUBY_TAG` without re-running the script would
@@ -173,9 +184,12 @@ Fixed by `.gitattributes` before it could happen; see R4.
    ruby/ruby at bump time and a history that still will not merge.
 2. **`bundler/` and `rubygems/` are 4.2 MB of the 6.6.** Vendored verbatim here
    because filtering costs the sweep its corpus and the binary is not built yet.
-   The question belongs to the slice that embeds the asset: Spinel replaces both
-   tools, so shipping their Ruby inside a 30 MB binary is probably wrong. Worth
-   an issue against phase 3.
+   The question belongs to the slice that embeds the asset — Spinel replaces both
+   tools, so shipping their Ruby inside a 30 MB binary is probably wrong — and is
+   now on [#47](https://github.com/ar4mirez/spinel/issues/47) with the numbers,
+   including the 145 non-`.rb` files `architecture.md`'s `stdlib/**/*.rb` already
+   excludes. Filtering belongs in the packager, not in the vendored tree, so
+   `stdlib/` stays byte-exact and the drift check stays allowlist-free.
 3. **Bump policy.** Today: edit `RUBY_TAG`, run the script, commit the tree in
    its own commit. No automation, because a language-version bump is a decision
    and not a chore.
@@ -185,6 +199,8 @@ Fixed by `.gitattributes` before it could happen; see R4.
 - Delete the ruby/spec clone from the `sweep` job when
   [#5](https://github.com/ar4mirez/spinel/issues/5) vendors `spec/ruby/`. The
   job already sweeps it when present.
-- The extraction step and `$LOAD_PATH` wiring, phase 3.
-- Revisit what the embedded asset contains when the packager exists — open
+- The extraction step and `$LOAD_PATH` wiring, phase 3
+  ([#47](https://github.com/ar4mirez/spinel/issues/47)), which also carries open
   decision 2.
+- `Set` as a core class, phase 2
+  ([#48](https://github.com/ar4mirez/spinel/issues/48)), retriaged by A1.

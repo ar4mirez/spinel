@@ -38,7 +38,7 @@ One slice per class, each driven by `core/<class>/`: `Integer`, `Float`, `String
 - `require`/`load`/`$LOAD_PATH`/`autoload`, bytecode cache in `.spinel/bytecode/` keyed by content hash. *Check:* `core/kernel/require_spec.rb`; second run of a 500-file fixture is measurably faster.
 - `IO`, `File`, `Dir`, `Process` including `fork` and `spawn`, `ENV`, signals, `Kernel#system`/backticks, `ARGV`, exit codes. *Check:* `core/{io,file,dir,process,env}/`.
 - `Thread`, `Mutex`, `Queue`, `ConditionVariable`, `Monitor` on the per-Ractor lock, with the lock released around blocking calls. *Check:* `core/{thread,mutex,queue,conditionvariable}/`, `library/monitor/`.
-- Vendored pure-Ruby stdlib extracted on first run: `set`, `optparse`, `erb`, `fileutils`, `time`, `net/http`, `webrick` (a gem, vendored for the phase 4 milestone). *Check:* `library/` for each.
+- Vendored pure-Ruby stdlib extracted on first run: `optparse`, `erb`, `fileutils`, `time`, `net/http`, `webrick` (a gem, vendored for the phase 4 milestone). *Check:* `library/` for each. Not `set`: it is a core class as of Ruby 4.0 (`set.c`, no `lib/set.rb`), so it belongs to phase 2.
 - Built-in gems whose C parts become primitives: `json` (Ruby half + Rust parser), `stringio`, `strscan`, `digest`, `zlib`, `date`, `socket`. *Check:* `library/` for each; the built-in versions match the gem versions Spinel claims.
 - `ruby -e`, `-r`, `-I`, `-w`, `$0` parity so scripts and gems' shell-outs behave. *Check:* `command_line/`.
 - yjit-bench subset runs; record interpreter numbers. *Check:* `bench/README.md` table, target within 1.5× of `ruby --disable-yjit`.
