@@ -281,6 +281,11 @@ impl Compiler {
             | Insn::JumpUnlessUndef(_)
             | Insn::BinOp(_)
             | Insn::CaseEq
+            // `LeaveThroughEnsure` stands exactly where a `Leave` stood, at a
+            // site that already emits the `PushNil` the linear depth model
+            // wants after it. Counting it anything but -1 would put the two
+            // arms of an `if` containing a `next` one slot apart.
+            | Insn::LeaveThroughEnsure
             | Insn::Leave => -1,
             Insn::GetLocal(_, _) | Insn::MakeProc(_, _) => 1,
             // `Return` pops its value at run time, but control does not fall
@@ -296,7 +301,6 @@ impl Compiler {
             // `Jump` and a `GotoValue` interchangeable for the depth model,
             // which is exactly what `emit_goto` relies on.
             Insn::Return
-            | Insn::LeaveThroughEnsure
             | Insn::Break
             | Insn::Raise
             | Insn::Goto(_, _)

@@ -19,19 +19,20 @@
 //! because a method table belongs to a heap. Parsing per heap is not, so the
 //! compile happens on the first call and the resulting [`Iseq`]s are cached.
 //!
-//! The cache is a `OnceLock<Vec<Arc<Iseq>>>`. That is not the process-global
-//! mutable VM state `CLAUDE.md` forbids: an `Iseq` is immutable bytecode and
-//! holds no `Value`, so no heap can reach another's objects through it. It is
-//! the same category as `spinel_vm::shared::symbols`.
+//! The cache lives in `spinel_vm::shared::core_image`, which is the directory
+//! `CLAUDE.md` names as the exception to "no process-global mutable VM state":
+//! immutable, append-only tables. An `Iseq` is immutable bytecode and holds no
+//! `Value`, so no heap can reach another's objects through it — the same
+//! category as `spinel_vm::shared::symbols`.
 //!
 //! `// ponytail:` this is `docs/engine.md`'s `core.image` minus the
 //! serialisation. The ceiling is one parse and compile per *process*. The
 //! upgrade path is a `build.rs` that serialises the `Iseq`s into the binary, and
 //! it is worth writing when that parse shows up in a benchmark.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
-use spinel_vm::{HandleScope, Iseq, compile, interp};
+use spinel_vm::{HandleScope, Iseq, compile, interp, shared};
 
 /// The core library sources, in load order.
 ///
@@ -80,9 +81,13 @@ const SOURCES: &[(&str, &str)] = &[
 ];
 
 /// The compiled core library, one [`Iseq`] per file.
+///
+/// The cache itself is `spinel_vm::shared::core_image`, because that directory
+/// is where `CLAUDE.md` puts immutable process-wide tables and a compiled
+/// `Iseq` is one. Only the compiling is here, because only this crate has a
+/// parser.
 fn image() -> &'static [Arc<Iseq>] {
-    static IMAGE: OnceLock<Vec<Arc<Iseq>>> = OnceLock::new();
-    IMAGE.get_or_init(|| {
+    shared::core_image::get_or_compile(|| {
         SOURCES
             .iter()
             .map(|(name, source)| {

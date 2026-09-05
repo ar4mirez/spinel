@@ -471,6 +471,7 @@ name = "spinel-vm"
 version = "0.0.1"
 dependencies = [
  "spinel-ast",
+ "spinel-core",
  "spinel-parse",
  "spinel-regex",
 ]

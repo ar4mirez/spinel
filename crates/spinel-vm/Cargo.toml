@@ -16,6 +16,11 @@ spinel-regex.workspace = true
 # this crate. Prism still lives in exactly one place.
 [dev-dependencies]
 spinel-parse.workspace = true
+# Test-only, and a cycle only on paper: `spinel-core` depends on this crate, and
+# Cargo allows a dev-dependency to close that loop because a dev-dependency is
+# not part of the library's own build. Tests that need the *core library* — not
+# just the VM — say so here rather than moving to a crate that has one.
+spinel-core.workspace = true
 
 [lints]
 workspace = true
