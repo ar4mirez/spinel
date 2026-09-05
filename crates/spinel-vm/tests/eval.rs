@@ -120,7 +120,10 @@ fn naming_errors_carry_rubys_own_message() {
             "uninitialized constant S::TOP",
         ),
         ("1::Nope", "1 is not a class/module"),
-        ("class B; end; class S < B; end; class S < String; end", "superclass mismatch for class S"),
+        (
+            "class B; end; class S < B; end; class S < String; end",
+            "superclass mismatch for class S",
+        ),
         (
             "class S < 1; end",
             "superclass must be an instance of Class (given an instance of Integer)",
@@ -130,7 +133,10 @@ fn naming_errors_carry_rubys_own_message() {
         ("class << 1; end", "can't define singleton"),
     ] {
         let err = eval(source).unwrap_err();
-        assert!(err.contains(want), "{source:?}\n  want: {want}\n  got:  {err}");
+        assert!(
+            err.contains(want),
+            "{source:?}\n  want: {want}\n  got:  {err}"
+        );
     }
 }
 

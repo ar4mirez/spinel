@@ -972,9 +972,7 @@ impl Compiler {
             ExprKind::Call(call) => self.defined_call(call, span),
 
             // Every element must be defined for the literal to be.
-            ExprKind::Array(elements) => {
-                self.guarded(elements, |me| me.push_word("expression"))
-            }
+            ExprKind::Array(elements) => self.guarded(elements, |me| me.push_word("expression")),
 
             // A kind whose answer this VM cannot know. Ruby answers `nil` for an
             // undefined instance variable, so answering `nil` here would pass
@@ -1032,11 +1030,7 @@ impl Compiler {
     ///
     /// The first guard that answers `nil` is the answer for the whole
     /// expression, which is a chain of `JumpUnless` — the same shape `&&` has.
-    fn guarded(
-        &mut self,
-        guards: &[Expr],
-        answer: impl FnOnce(&mut Self) -> Emit,
-    ) -> Emit {
+    fn guarded(&mut self, guards: &[Expr], answer: impl FnOnce(&mut Self) -> Emit) -> Emit {
         let mut undefined = Vec::new();
         for guard in guards {
             self.defined(guard, guard.span)?;
@@ -1068,7 +1062,11 @@ impl Compiler {
     // -- constants, classes, and modules ---------------------------------
 
     /// The symbol and lookup rule an `A::B` or `::B` names.
-    fn const_path(&mut self, path: &spinel_ast::ConstPath, span: Span) -> Result<(u32, ConstScope), Unsupported> {
+    fn const_path(
+        &mut self,
+        path: &spinel_ast::ConstPath,
+        span: Span,
+    ) -> Result<(u32, ConstScope), Unsupported> {
         let Some(name) = &path.name else {
             // `A::` with nothing after it — a syntax error the parser kept so
             // the rest of the tree survives.
@@ -1094,9 +1092,7 @@ impl Compiler {
             TargetKind::Var(VarRef::Const(name)) => {
                 Ok(Some((self.symbol(name), ConstScope::Lexical)))
             }
-            TargetKind::ConstPath(path) => {
-                Ok(Some(self.const_path(path, target.span)?))
-            }
+            TargetKind::ConstPath(path) => Ok(Some(self.const_path(path, target.span)?)),
             _ => Ok(None),
         }
     }

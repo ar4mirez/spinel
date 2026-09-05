@@ -524,13 +524,7 @@ impl Classes {
     }
 
     /// Define a method that remembers the lexical scope its `def` appeared in.
-    pub fn define_method_in(
-        &mut self,
-        id: ClassId,
-        name: SymbolId,
-        body: Value,
-        cref: CrefId,
-    ) {
+    pub fn define_method_in(&mut self, id: ClassId, name: SymbolId, body: Value, cref: CrefId) {
         self.entry_mut(id).methods.insert(name, (body, cref));
         self.bump();
     }
@@ -1513,7 +1507,9 @@ mod tests {
         let inner_scope = scope.classes_mut().push_cref(outer_scope, inner);
 
         let name = SymbolId(5);
-        scope.classes_mut().const_set(outer, name, Value::fixnum(1).unwrap());
+        scope
+            .classes_mut()
+            .const_set(outer, name, Value::fixnum(1).unwrap());
         assert_eq!(
             scope.classes().const_get(inner_scope, name),
             Some(Value::fixnum(1).unwrap()),
@@ -1521,7 +1517,9 @@ mod tests {
         );
 
         // The innermost scope's own table wins over the enclosing one.
-        scope.classes_mut().const_set(inner, name, Value::fixnum(2).unwrap());
+        scope
+            .classes_mut()
+            .const_set(inner, name, Value::fixnum(2).unwrap());
         assert_eq!(
             scope.classes().const_get(inner_scope, name),
             Some(Value::fixnum(2).unwrap())

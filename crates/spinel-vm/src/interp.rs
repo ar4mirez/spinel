@@ -1199,7 +1199,8 @@ fn define_or_reopen(
     let wanted = match superclass {
         None => None,
         Some(value) => {
-            let id = class_id_of(scope, value).filter(|&id| scope.classes().kind(id) == Kind::Class);
+            let id =
+                class_id_of(scope, value).filter(|&id| scope.classes().kind(id) == Kind::Class);
             let Some(id) = id else {
                 return Err(Error::raise(
                     "TypeError",
@@ -1298,7 +1299,9 @@ fn define_method_on(
     let body = scope
         .definitions_mut()
         .intern_iseq(&iseq, Arc::as_ptr(&iseq) as usize);
-    scope.classes_mut().define_method_in(owner, name, body, cref);
+    scope
+        .classes_mut()
+        .define_method_in(owner, name, body, cref);
 }
 
 /// The singleton class of a value, allocating it on the first ask.
@@ -1663,7 +1666,8 @@ fn native_call<'h>(
             }
         }
         Native::ClassOf => {
-            let mut class = class_of(scope, call.receiver).ok_or_else(|| no_class(call.receiver))?;
+            let mut class =
+                class_of(scope, call.receiver).ok_or_else(|| no_class(call.receiver))?;
             // `Object#class` skips singletons: `C.class` is `Class`, not
             // `#<Class:C>`, and `obj.class` is unchanged by `class << obj`.
             // The header points at the singleton once one exists, which is what
