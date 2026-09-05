@@ -1,9 +1,26 @@
 # Exception.
 #
-# `message`, `to_s` and `backtrace` are primitives, because the message is in a
-# slot the VM writes when it raises. `full_message` and `detailed_message` wait
-# for backtraces, which PRD 0012 named as a non-goal.
+# The VM writes `@message` when it raises, so everything here is ordinary Ruby
+# reading an ordinary instance variable. It was two primitives over two fixed
+# slots until #151 gave objects a shape to hold ivars in.
+#
+# `backtrace` is always nil: a real one needs source positions the compiler does
+# not record, and `[]` would be a plausible-but-wrong answer rather than an
+# absent one. `full_message` and `detailed_message` wait on the same thing,
+# which PRD 0012 named as a non-goal.
 class Exception
+  def message
+    @message
+  end
+
+  def to_s
+    @message
+  end
+
+  def backtrace
+    @backtrace
+  end
+
   def inspect
     text = message
     text.empty? ? self.class.name : "#<" + self.class.name + ": " + text + ">"

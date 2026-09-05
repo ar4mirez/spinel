@@ -32,7 +32,7 @@
 //! | 8 | `len` | — |
 //! | 12 | `flags` | zero: not allocated, which is what makes it free |
 //! | 13 | `payload` | — |
-//! | 14 | reserved for #8's shape id | — |
+//! | 14 | shape id | — |
 //! | 16.. | `len` slots, or `len` bytes | — |
 
 use std::alloc;
@@ -41,6 +41,7 @@ use std::marker::PhantomData;
 use std::ptr::{self, NonNull};
 
 use crate::class::Classes;
+use crate::shape::{ShapeId, Shapes};
 use crate::value::Value;
 
 /// Cell sizes, in bytes. Powers of two so the class index is one shift.
@@ -102,8 +103,11 @@ struct Header {
     len: u32,
     flags: u8,
     payload: Payload,
-    /// #8's shape id. Two bytes, already paid for by the alignment of `class`.
-    _reserved: [u8; 2],
+    /// Which instance variables the object holds, and at what index. Two
+    /// bytes, already paid for by the alignment of `class`. [`ShapeId::NONE`]
+    /// on an object whose class has a representation of its own — see
+    /// `shape.rs`.
+    shape: ShapeId,
 }
 
 // R1: the header is two words. Checked by the compiler, because every size class and
@@ -193,6 +197,10 @@ pub struct Heap {
     total_allocated: u64,
     /// This Ractor's classes and modules. A root source: see [`Heap::mark`].
     classes: Classes,
+    /// Per heap, like everything else here. Two heaps that build the same
+    /// object hand out different ids for it, which is fine because a shape id
+    /// never leaves the heap that minted it.
+    shapes: Shapes,
     definitions: crate::method::Definitions,
     regexps: crate::regexp::Regexps,
     /// The `MatchData` the last successful match produced, which is what `$~`
@@ -236,6 +244,7 @@ impl Heap {
             collections: 0,
             total_allocated: 0,
             classes: Classes::new(),
+            shapes: Shapes::new(),
             definitions: crate::method::Definitions::new(),
             regexps: crate::regexp::Regexps::new(),
             last_match: Value::NIL,
@@ -279,6 +288,17 @@ impl Heap {
 
     pub fn classes_mut(&mut self) -> &mut Classes {
         &mut self.classes
+    }
+
+    /// This heap's shape tree — what an object's instance variables are called
+    /// and where they live. Not a root source: it holds symbols and indices,
+    /// never a [`Value`].
+    pub fn shapes(&self) -> &Shapes {
+        &self.shapes
+    }
+
+    pub fn shapes_mut(&mut self) -> &mut Shapes {
+        &mut self.shapes
     }
 
     /// Open the outermost handle scope. Everything that allocates goes through one.
@@ -340,7 +360,7 @@ impl Heap {
                     len,
                     flags: ALLOCATED,
                     payload,
-                    _reserved: [0; 2],
+                    shape: ShapeId::NONE,
                 },
             );
             match payload {
@@ -675,6 +695,15 @@ impl<'h> HandleScope<'h> {
         self.heap.classes_mut()
     }
 
+    /// This heap's shape tree.
+    pub fn shapes(&self) -> &Shapes {
+        self.heap.shapes()
+    }
+
+    pub fn shapes_mut(&mut self) -> &mut Shapes {
+        self.heap.shapes_mut()
+    }
+
     /// The method bodies this heap's class table points at.
     pub fn definitions(&self) -> &crate::method::Definitions {
         self.heap.definitions()
@@ -769,6 +798,21 @@ impl<'h> HandleScope<'h> {
     pub fn class(&self, handle: Handle<'h>) -> Option<Value> {
         // SAFETY: as above.
         unsafe { (*self.object(handle).header()).class }
+    }
+
+    /// Which instance variables the object holds. [`ShapeId::NONE`] when it
+    /// cannot hold any — see `shape.rs`, and `interp.rs`'s `ivar_get`.
+    pub fn shape(&self, handle: Handle<'h>) -> ShapeId {
+        // SAFETY: as above.
+        unsafe { (*self.object(handle).header()).shape }
+    }
+
+    /// Record a transition. Cannot collect; the caller has already written the
+    /// value the new shape describes.
+    pub fn set_shape(&mut self, handle: Handle<'h>, shape: ShapeId) {
+        let object = self.object(handle);
+        // SAFETY: as above.
+        unsafe { (*object.header()).shape = shape }
     }
 
     /// # Panics

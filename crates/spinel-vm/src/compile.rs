@@ -123,6 +123,19 @@ pub fn declared_locals(statements: &[Expr]) -> Vec<Name> {
 // ---------------------------------------------------------------------------
 
 /// Where `break` and `next` go. Nested loops push and pop these.
+/// Where an assignment writes, once the target has been resolved.
+///
+/// A local knows its slot and how many scopes up it lives; an instance
+/// variable knows only its name, because which index it lands at is the
+/// object's shape's business and is not known until the write runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Slot {
+    /// `(slot, depth)`, as [`Insn::GetLocal`] takes them.
+    Local(u16, u16),
+    /// An index into [`Iseq::symbols`].
+    Ivar(u32),
+}
+
 /// A `begin` body a `retry` inside its `rescue` can restart.
 struct Retry {
     /// Where the protected body starts.
@@ -273,9 +286,12 @@ impl Compiler {
             | Insn::PushLit(_)
             | Insn::PushSym(_)
             | Insn::LastMatch(_)
+            | Insn::GetIvar(_)
+            | Insn::DefinedIvar(_)
             | Insn::Dup => 1,
             Insn::Pop
             | Insn::SetLocal(_, _)
+            | Insn::SetIvar(_)
             | Insn::JumpUnless(_)
             | Insn::JumpIf(_)
             | Insn::JumpUnlessUndef(_)
@@ -626,7 +642,11 @@ impl Compiler {
                 self.emit(Insn::GetLocal(slot, *depth as u16));
                 Ok(())
             }
-            VarRef::Instance(_) => Err(Unsupported::at("an instance variable", span)),
+            VarRef::Instance(name) => {
+                let symbol = self.symbol(name);
+                self.emit(Insn::GetIvar(symbol));
+                Ok(())
+            }
             VarRef::Class(_) => Err(Unsupported::at("a class variable", span)),
             VarRef::Global(name) => match match_ref(name) {
                 Some(which) => {
@@ -666,21 +686,21 @@ impl Compiler {
             self.emit(Insn::SetConst(name, how));
             return Ok(());
         }
-        let (slot, depth) = self.local_target(&assign.target)?;
+        let slot = self.target_slot(&assign.target)?;
         match &assign.op {
             AssignOp::Assign => {
                 self.expr(&assign.value)?;
                 self.emit(Insn::Dup);
-                self.emit(Insn::SetLocal(slot, depth));
+                self.emit_set(slot);
             }
             AssignOp::Binary(op) => {
                 let op = BinOp::from_name(op)
                     .ok_or_else(|| Unsupported::at("this compound assignment operator", span))?;
-                self.emit(Insn::GetLocal(slot, depth));
+                self.emit_get(slot);
                 self.expr(&assign.value)?;
                 self.emit(Insn::BinOp(op));
                 self.emit(Insn::Dup);
-                self.emit(Insn::SetLocal(slot, depth));
+                self.emit_set(slot);
             }
             // `a ||= v` reads `a`, and assigns only when it is falsy. The read
             // is safe before any write because a frame's locals start `nil`,
@@ -691,31 +711,34 @@ impl Compiler {
                 } else {
                     Insn::JumpUnlessKeep as fn(i32) -> Insn
                 };
-                self.emit(Insn::GetLocal(slot, depth));
+                self.emit_get(slot);
                 let skip = self.emit_jump(keep);
                 self.emit(Insn::Pop);
                 self.expr(&assign.value)?;
                 self.emit(Insn::Dup);
-                self.emit(Insn::SetLocal(slot, depth));
+                self.emit_set(slot);
                 self.patch_here(skip);
             }
         }
         Ok(())
     }
 
-    /// The only assignment target this slice writes to: a local, at whatever
-    /// depth it was declared. A block assigning an enclosing scope's local
-    /// writes through the captured environment rather than shadowing it.
-    fn local_target(&mut self, target: &Target) -> Result<(u16, u16), Unsupported> {
+    /// Where an assignment writes: a local at whatever depth it was declared,
+    /// or an instance variable of the frame's `self`. A block assigning an
+    /// enclosing scope's local writes through the captured environment rather
+    /// than shadowing it.
+    ///
+    /// Returned rather than emitted, so `a = 1`, `a += 1`, `a ||= 1` and
+    /// `rescue => a` stay one piece of code each. All four read the target,
+    /// write it, or both, and the only difference between a local and an ivar
+    /// is which pair of instructions does that.
+    fn target_slot(&mut self, target: &Target) -> Result<Slot, Unsupported> {
         match &target.kind {
             TargetKind::Var(VarRef::Local { name, depth }) => {
                 let slot = self.outer_slot(name, *depth, target.span)?;
-                Ok((slot, *depth as u16))
+                Ok(Slot::Local(slot, *depth as u16))
             }
-            TargetKind::Var(VarRef::Instance(_)) => Err(Unsupported::at(
-                "assigning an instance variable",
-                target.span,
-            )),
+            TargetKind::Var(VarRef::Instance(name)) => Ok(Slot::Ivar(self.symbol(name))),
             TargetKind::Var(VarRef::Class(_)) => {
                 Err(Unsupported::at("assigning a class variable", target.span))
             }
@@ -730,6 +753,25 @@ impl Compiler {
             TargetKind::Multi(_) | TargetKind::Splat(_) => {
                 Err(Unsupported::at("a multiple assignment", target.span))
             }
+        }
+    }
+
+    /// Push what the target currently holds. Both kinds answer `nil` for a
+    /// name never assigned, which is what makes `a ||= 1` safe to compile as a
+    /// read followed by a conditional write.
+    fn emit_get(&mut self, slot: Slot) {
+        match slot {
+            Slot::Local(slot, depth) => self.emit(Insn::GetLocal(slot, depth)),
+            Slot::Ivar(symbol) => self.emit(Insn::GetIvar(symbol)),
+        }
+    }
+
+    /// Pop into the target. Callers emit `Dup` first where the value is wanted,
+    /// because assignment is an expression.
+    fn emit_set(&mut self, slot: Slot) {
+        match slot {
+            Slot::Local(slot, depth) => self.emit(Insn::SetLocal(slot, depth)),
+            Slot::Ivar(symbol) => self.emit(Insn::SetIvar(symbol)),
         }
     }
 
@@ -1127,12 +1169,14 @@ impl Compiler {
             // Every element must be defined for the literal to be.
             ExprKind::Array(elements) => self.guarded(elements, |me| me.push_word("expression")),
 
-            // A kind whose answer this VM cannot know. Ruby answers `nil` for an
-            // undefined instance variable, so answering `nil` here would pass
-            // `defined?(@nope).should be_nil` while the VM has no instance
-            // variables at all — a wrong answer wearing a passing spec.
-            ExprKind::Var(VarRef::Instance(_)) => {
-                Err(Unsupported::at("`defined?` on an instance variable", span))
+            // #13 refused this rather than answer `nil`: a VM with no instance
+            // variables would have passed `defined?(@nope).should be_nil`
+            // without being able to represent the question. It can now, so the
+            // `nil` this may answer is a measurement rather than a coincidence.
+            ExprKind::Var(VarRef::Instance(name)) => {
+                let symbol = self.symbol(name);
+                self.emit(Insn::DefinedIvar(symbol));
+                Ok(())
             }
             ExprKind::Var(VarRef::Class(_)) => {
                 Err(Unsupported::at("`defined?` on a class variable", span))
@@ -1471,9 +1515,15 @@ impl Compiler {
             spec.optional.push(Optional { slot });
         }
         if let Some(rest) = &list.rest {
-            let name = rest.name.as_deref().unwrap_or("*");
-            spec.rest = Some(self.param_slot(name, at));
-            at += 1;
+            if rest.implicit {
+                // `|a,|`. Nothing to bind, so no slot — only the spread rule
+                // changes. See `ParamSpec::trailing_comma`.
+                spec.trailing_comma = true;
+            } else {
+                let name = rest.name.as_deref().unwrap_or("*");
+                spec.rest = Some(self.param_slot(name, at));
+                at += 1;
+            }
         }
         for post in &list.posts {
             match &post.kind {
@@ -1892,8 +1942,8 @@ impl Compiler {
             self.depth = base + 1;
             match &clause.reference {
                 Some(target) => {
-                    let (slot, depth) = self.local_target(target)?;
-                    self.emit(Insn::SetLocal(slot, depth));
+                    let slot = self.target_slot(target)?;
+                    self.emit_set(slot);
                 }
                 None => self.emit(Insn::Pop),
             }

@@ -171,6 +171,17 @@ pub enum Insn {
     /// `class << obj` body in a new frame.
     OpenClass(u32),
 
+    // -- instance variables ------------------------------------------------
+    /// Index into [`Iseq::symbols`]; pushes the frame's `self`'s ivar of that
+    /// name, or `nil`. Ruby's answer for one never assigned is `nil`, so a
+    /// miss is not an error.
+    GetIvar(u32),
+    /// Pops. Like [`Insn::SetLocal`], the compiler emits `Dup` first where the
+    /// value is wanted, because assignment is an expression.
+    SetIvar(u32),
+    /// `defined?(@a)`. Pushes `"instance-variable"` or `nil`.
+    DefinedIvar(u32),
+
     // -- defined? ----------------------------------------------------------
     /// `defined?(recv.m)`. Pops the receiver; pushes `"method"` or `nil`.
     ///
@@ -588,6 +599,13 @@ pub struct ParamSpec {
     pub optional: Vec<Optional>,
     /// `*rest`. `Some` even for an anonymous `*`, which still collects.
     pub rest: Option<u16>,
+    /// The trailing comma in `|a,|`, which is not a rest parameter.
+    ///
+    /// It spreads a single `Array` across the parameters the way a rest does —
+    /// `proc { |a,| }.call([1, 2])` binds `a` to `1` — while leaving the arity
+    /// exactly what the named parameters say, so `lambda { |a,| }.call(1, 2)`
+    /// is an `ArgumentError` and `lambda { |a, *| }.call(1, 2)` is not.
+    pub trailing_comma: bool,
     /// Required parameters *after* the splat: `def f(a, *b, c)`. They are bound
     /// from the right, which is why they are counted separately rather than
     /// added to `required`.

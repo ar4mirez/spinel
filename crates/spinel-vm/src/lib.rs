@@ -73,6 +73,7 @@ pub mod heap;
 pub mod interp;
 pub mod method;
 pub mod regexp;
+pub mod shape;
 pub mod shared;
 pub mod value;
 pub use bytecode::{BinOp, Insn, Iseq, Literal};
@@ -80,6 +81,7 @@ pub use class::{Builtin, ClassId, Classes, CrefId, Kind, Method, Mixin, MixinErr
 pub use compile::Unsupported;
 pub use heap::{Handle, HandleScope, Heap, Payload, Stats};
 pub use interp::{Error, Frame};
-pub use method::{BitOp, Definition, Definitions, Native};
+pub use method::{BitOp, Definition, Definitions, IvarOp, Native};
 pub use regexp::Regexps;
+pub use shape::{ShapeId, Shapes};
 pub use value::{SymbolId, Unpacked, Value};

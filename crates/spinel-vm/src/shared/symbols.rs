@@ -75,6 +75,24 @@ pub fn intern(name: &str) -> SymbolId {
     id
 }
 
+/// `@__id__`, the hidden instance variable a class object carries its table id
+/// in — memoised, because `class_of` reads it on every method call.
+///
+/// [`intern`] is a read lock plus a hash lookup, which measured as 4% of a
+/// tight dispatch loop for six characters known at compile time. The memo lives
+/// here rather than beside `class_of` for the reason `CLAUDE.md` gives: process-
+/// global state belongs in this directory. It adds none that is not already
+/// here — a `SymbolId` is an index into the append-only table this module owns.
+#[must_use]
+pub fn class_id_ivar() -> SymbolId {
+    static ID: OnceLock<SymbolId> = OnceLock::new();
+    *ID.get_or_init(|| intern(CLASS_ID_IVAR))
+}
+
+/// The name behind [`class_id_ivar`]. Public so `class.rs` can say what it is
+/// reading without a second copy of the string.
+pub const CLASS_ID_IVAR: &str = "@__id__";
+
 /// The name `id` was interned under, or `None` if it was never interned.
 ///
 /// Returns an owned `String` rather than a borrow: the table is behind a lock,

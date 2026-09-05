@@ -42,7 +42,8 @@ use crate::bytecode::{
 use crate::class::Builtin;
 use crate::class::{ClassId, CrefId, Kind};
 use crate::heap::{Handle, HandleScope, Heap, Payload};
-use crate::method::{BitOp, Definition, Native};
+use crate::method::{BitOp, Definition, IvarOp, Native};
+use crate::shape::ShapeId;
 use crate::value::SymbolId;
 use crate::value::Value;
 
@@ -458,10 +459,11 @@ pub fn eval_in(
     frame.reserve(iseq.locals.len());
     let env = frame.env(scope);
     if frame.receiver == Value::NIL {
-        // `main`. A plain `Object` with no slots, as Ruby has it: `def` at the
-        // top level lands on its class, and a receiverless call finds it there.
+        // `main`. A plain `Object`, as Ruby has it: `def` at the top level
+        // lands on its class, a receiverless call finds it there, and `@a` at
+        // the top level is an ivar on this object like any other.
         let object = class_handle(scope, Builtin::Object);
-        let handle = scope.alloc(Some(object), Payload::Slots, 0);
+        let handle = alloc_ivar_object(scope, Some(object));
         frame.receiver = scope.get(handle);
     }
 
@@ -535,6 +537,31 @@ pub fn eval_in(
                 }
                 Insn::Dup => {
                     let value = *stack.last().expect("dup on an empty stack");
+                    stack.push(value);
+                }
+
+                Insn::GetIvar(name) => {
+                    let symbol = frames[top].symbols[name as usize];
+                    let receiver = frames[top].receiver;
+                    stack.push(ivar_get(scope, receiver, symbol)?);
+                }
+
+                Insn::SetIvar(name) => {
+                    let symbol = frames[top].symbols[name as usize];
+                    let receiver = frames[top].receiver;
+                    let value = stack.pop().expect("setivar on an empty stack");
+                    ivar_set(scope, receiver, symbol, value)?;
+                }
+
+                Insn::DefinedIvar(name) => {
+                    let symbol = frames[top].symbols[name as usize];
+                    let receiver = frames[top].receiver;
+                    // `defined_word`, not `defined_answer`: an object this
+                    // heap holds is the authority on which ivars it has, so a
+                    // miss really is Ruby's `nil` and not #39's "never seen".
+                    let held = ivar_defined(scope, receiver, symbol)?;
+                    let value =
+                        defined_word(scope, string_class, held.then_some("instance-variable"));
                     stack.push(value);
                 }
 
@@ -1563,7 +1590,7 @@ fn bind(
 /// and `{ |a,| }` spread, `{ |a| }` and `{ |*a| }` and `{ |a = 1| }` do not.
 fn spreads(spec: &ParamSpec) -> bool {
     let places = spec.required as usize + spec.optional.len() + spec.post as usize;
-    places > 1 || (spec.rest.is_some() && places > 0)
+    places > 1 || ((spec.rest.is_some() || spec.trailing_comma) && places > 0)
 }
 
 fn bind_keywords(
@@ -1678,18 +1705,18 @@ fn make_proc<'h>(
     scope.get(handle)
 }
 
-/// An exception is two slots: what it says, and where it came from.
+/// An exception is two instance variables: what it says, and where it came
+/// from.
 ///
-/// Slots rather than instance variables because instance variables are
-/// [#151](https://github.com/ar4mirez/spinel/issues/151)'s shape tree and do not
-/// exist yet — the same reason a `Proc` is slots. When they do, this becomes
-/// two ivars and the accessors below become ordinary Ruby.
-const EXC_MESSAGE: usize = 0;
-/// Always `nil`. A real backtrace needs source positions the compiler does not
-/// record, and `[]` would be a plausible-but-wrong answer rather than an absent
-/// one — see the non-goals in PRD 0012.
-const EXC_BACKTRACE: usize = 1;
-const EXC_SLOTS: u32 = 2;
+/// They were two fixed slots until #151, for the same reason a `Proc`'s six
+/// are: there was nowhere else to put them. Now that there is, `Exception`'s
+/// accessors are three lines of `core/exception.rb` rather than two natives.
+///
+/// `@backtrace` is always `nil`. A real backtrace needs source positions the
+/// compiler does not record, and `[]` would be a plausible-but-wrong answer
+/// rather than an absent one — see the non-goals in PRD 0012.
+const EXC_MESSAGE: &str = "@message";
+const EXC_BACKTRACE: &str = "@backtrace";
 
 /// A Ruby `String` holding `text`.
 fn string_new(scope: &mut HandleScope<'_>, text: &str) -> Value {
@@ -1708,10 +1735,15 @@ fn exception_of(scope: &mut HandleScope<'_>, class: Value, message: &str) -> Val
     // allocation below cannot collect it out from under the slot write.
     let text = string_new(scope, message);
     let class = scope.root(class);
-    let handle = scope.alloc(Some(class), Payload::Slots, EXC_SLOTS);
-    scope.set_slot(handle, EXC_MESSAGE, text);
-    scope.set_slot(handle, EXC_BACKTRACE, Value::NIL);
-    scope.get(handle)
+    let handle = alloc_ivar_object(scope, Some(class));
+    let object = scope.get(handle);
+    let set = |scope: &mut HandleScope<'_>, name, value| {
+        ivar_set(scope, object, symbol(name), value)
+            .expect("a fresh exception is unfrozen and holds instance variables");
+    };
+    set(scope, EXC_MESSAGE, text);
+    set(scope, EXC_BACKTRACE, Value::NIL);
+    object
 }
 
 /// An instance of the exception class `class` names at the top level.
@@ -1734,11 +1766,9 @@ fn exception_message(scope: &mut HandleScope<'_>, exception: Value) -> String {
     if exception.is_immediate() {
         return String::new();
     }
-    let handle = scope.root(exception);
-    if scope.payload(handle) != Payload::Slots || scope.len(handle) < EXC_SLOTS {
+    let Ok(text) = ivar_get(scope, exception, symbol(EXC_MESSAGE)) else {
         return String::new();
-    }
-    let text = scope.slot(handle, EXC_MESSAGE);
+    };
     if text.is_immediate() {
         return String::new();
     }
@@ -2579,6 +2609,271 @@ fn resolve_index(index: i64, length: usize) -> Option<usize> {
     (index >= 0 && index < length).then_some(index as usize)
 }
 
+// ---------------------------------------------------------------------------
+// Instance variables
+// ---------------------------------------------------------------------------
+//
+// Slot 0 of an ivar-capable object holds its ivar storage: a classless
+// `Payload::Slots` object of `capacity` values, or `nil` before the first
+// write. The object's shape says which index a name lands at — see `shape.rs`.
+//
+// The indirection is the one an `Array` already pays, and for the same reason
+// spelled out above `ARRAY_STORAGE`: a heap cell cannot grow, so an object that
+// held its ivars directly could only gain the fourth one by becoming a
+// different cell, and Ruby would see `equal?` change. Growing replaces the
+// storage; the object's address never moves.
+//
+// `Heap::mark` needs no change for any of this. The storage hangs off a traced
+// slot of a `Payload::Slots` object, which is exactly what the collector
+// already descends into.
+
+/// Whether `name` spells an instance variable: `@` and then an identifier.
+///
+/// `:@0` and `:@@x` are `NameError`s in Ruby, not misses — `@0` is not a name
+/// and `@@x` is a class variable — so the check is the grammar rather than a
+/// leading `@`.
+fn is_ivar_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    if chars.next() != Some('@') {
+        return false;
+    }
+    match chars.next() {
+        Some(first) if first == '_' || first.is_alphabetic() => {}
+        _ => return false,
+    }
+    chars.all(|c| c == '_' || c.is_alphanumeric())
+}
+
+/// A method or ivar name given as a Symbol or a String, as every reflective
+/// method in Ruby accepts both.
+fn attribute_name(scope: &mut HandleScope<'_>, value: Value) -> Option<String> {
+    if let Some(id) = value.as_symbol() {
+        return crate::shared::symbols::name(id);
+    }
+    let bytes = string_bytes(scope, value)?;
+    String::from_utf8(bytes).ok()
+}
+
+/// An interned name, for the handful of ivars the VM writes itself.
+pub(crate) fn symbol(name: &str) -> SymbolId {
+    crate::shared::symbols::intern(name)
+}
+
+/// Slot of the ivar storage inside an ivar-capable object.
+const SLOT_IVARS: usize = 0;
+/// Slots in such an object, before its class's own representation adds any.
+const IVAR_SLOTS: u32 = 1;
+/// Capacity of the first storage object. Doubling from here, as `Array` does.
+const IVAR_MIN_CAPACITY: u32 = 2;
+
+/// Allocate a plain object of `class`: one slot, and a shape that says the slot
+/// is for instance variables.
+///
+/// The one place [`ShapeId::ROOT`] is handed out. Everything that can hold an
+/// ivar comes from here, so "which objects can" is a question with one answer
+/// rather than a rule spread across the allocators.
+pub(crate) fn alloc_ivar_object<'h>(
+    scope: &mut HandleScope<'h>,
+    class: Option<Handle<'h>>,
+) -> Handle<'h> {
+    let handle = scope.alloc(class, Payload::Slots, IVAR_SLOTS);
+    scope.set_slot(handle, SLOT_IVARS, Value::NIL);
+    scope.set_shape(handle, ShapeId::ROOT);
+    handle
+}
+
+/// Why this object cannot hold an instance variable.
+///
+/// Named per representation rather than bucketed, because the blocked-reason
+/// ranking is how the next slice gets chosen and one bucket for every built-in
+/// tells nobody which representation to give a slot to first.
+fn ivar_refusal(scope: &mut HandleScope<'_>, value: Value) -> Error {
+    let mut nested = scope.nested();
+    let handle = nested.root(value);
+    let class = nested.class(handle);
+    let classes = nested.classes();
+    let named = |builtin: Builtin| class == Some(classes.object(builtin.id()));
+    let what = if named(Builtin::Array) {
+        "an instance variable on an `Array`"
+    } else if named(Builtin::String) {
+        "an instance variable on a `String`"
+    } else if named(Builtin::Proc) {
+        "an instance variable on a `Proc`"
+    } else if named(Builtin::Regexp) {
+        "an instance variable on a `Regexp`"
+    } else if named(Builtin::MatchData) {
+        "an instance variable on a `MatchData`"
+    } else {
+        "an instance variable on a built-in with a representation of its own"
+    };
+    Error::Unknowable {
+        what,
+        needs: "that representation reserves an ivar slot (#151)",
+    }
+}
+
+/// The value of `name` on `object`, or `nil` — which is Ruby's answer for an
+/// instance variable that was never assigned.
+///
+/// Refuses only where the object has nowhere to put one, which is a different
+/// thing from holding none.
+pub(crate) fn ivar_get(
+    scope: &mut HandleScope<'_>,
+    object: Value,
+    name: SymbolId,
+) -> Result<Value, Error> {
+    // Ruby answers `nil` for `@a` on an immediate, and warns about nothing.
+    // There is no storage to consult and no question about what it holds.
+    if object.is_immediate() {
+        return Ok(Value::NIL);
+    }
+    let mut nested = scope.nested();
+    let handle = nested.root(object);
+    let shape = nested.shape(handle);
+    if shape == ShapeId::NONE {
+        return Err(ivar_refusal(&mut nested, object));
+    }
+    let Some(index) = nested.shapes().index_of(shape, name) else {
+        return Ok(Value::NIL);
+    };
+    let storage = nested.slot(handle, SLOT_IVARS);
+    debug_assert!(storage != Value::NIL, "a shape with no storage behind it");
+    let storage = nested.root(storage);
+    Ok(nested.slot(storage, index as usize))
+}
+
+/// Whether `object` holds an instance variable called `name`.
+///
+/// The question `defined?(@a)` asks, and the one #13 could not answer: a VM
+/// with no instance variables saying `nil` would have passed
+/// `defined?(@nope).should be_nil` without being able to represent the
+/// question. It can now, so `nil` here is a measurement.
+fn ivar_defined(scope: &mut HandleScope<'_>, object: Value, name: SymbolId) -> Result<bool, Error> {
+    if object.is_immediate() {
+        return Ok(false);
+    }
+    let mut nested = scope.nested();
+    let handle = nested.root(object);
+    let shape = nested.shape(handle);
+    if shape == ShapeId::NONE {
+        return Err(ivar_refusal(&mut nested, object));
+    }
+    Ok(nested.shapes().index_of(shape, name).is_some())
+}
+
+/// Set `name` on `object` to `value`, transitioning its shape if this is the
+/// first time it has been given one by that name.
+pub(crate) fn ivar_set(
+    scope: &mut HandleScope<'_>,
+    object: Value,
+    name: SymbolId,
+    value: Value,
+) -> Result<Value, Error> {
+    // `1.instance_variable_set(:@a, 1)` is a `FrozenError` in Ruby, because
+    // every immediate is frozen. That is a real answer rather than a refusal,
+    // so it is given.
+    if object.is_immediate() {
+        return Err(Error::raise(
+            "FrozenError",
+            format!("can't modify frozen {}", class_name(scope, object)),
+        ));
+    }
+    let mut nested = scope.nested();
+    let handle = nested.root(object);
+    // Named only on refusal. `class_name` reaches `class_of`, which reads a
+    // class object's own `@__id__` through this function — asking for it on
+    // every write would make writing that very ivar a regress.
+    if nested.is_frozen(handle) {
+        let class = class_name(&mut nested, object);
+        return Err(Error::raise(
+            "FrozenError",
+            format!("can't modify frozen {class}"),
+        ));
+    }
+    let shape = nested.shape(handle);
+    if shape == ShapeId::NONE {
+        return Err(ivar_refusal(&mut nested, object));
+    }
+    let (index, value) = match nested.shapes().index_of(shape, name) {
+        Some(index) => (index, value),
+        None => {
+            let Some((grown, index)) = nested.shapes_mut().transition(shape, name) else {
+                return Err(Error::Unknowable {
+                    what: "an instance variable past this heap's 65,534th shape",
+                    needs: "a shape id wider than the header's two bytes (#7)",
+                });
+            };
+            // Reserve before the shape is recorded: a collection inside the
+            // allocation must not find an object whose shape promises a slot
+            // its storage does not have. The value comes back rather than
+            // being reused, because that allocation is a collection point and
+            // the caller handed it over unrooted.
+            let value = ivar_reserve(&mut nested, handle, index + 1, value);
+            nested.set_shape(handle, grown);
+            (index, value)
+        }
+    };
+    let storage = nested.slot(handle, SLOT_IVARS);
+    let storage = nested.root(storage);
+    nested.set_slot(storage, index as usize, value);
+    Ok(value)
+}
+
+/// Storage room for at least `wanted` instance variables, copying the ones
+/// already there into a bigger object when there is not.
+///
+/// `keep` is the value about to be written. It is passed in and re-rooted
+/// because the allocation below can collect, and a value living only on the
+/// operand stack of the caller would not survive it.
+fn ivar_reserve<'h>(
+    scope: &mut HandleScope<'h>,
+    object: Handle<'h>,
+    wanted: u16,
+    keep: Value,
+) -> Value {
+    let current = scope.slot(object, SLOT_IVARS);
+    let capacity = if current == Value::NIL {
+        0
+    } else {
+        let handle = scope.root(current);
+        scope.len(handle)
+    };
+    if capacity >= u32::from(wanted) {
+        return keep;
+    }
+    let mut grown = IVAR_MIN_CAPACITY;
+    while grown < u32::from(wanted) {
+        grown *= 2;
+    }
+    let keep = scope.root(keep);
+    let fresh = scope.alloc(None, Payload::Slots, grown);
+    if current != Value::NIL {
+        let old = scope.root(current);
+        for index in 0..capacity as usize {
+            let value = scope.slot(old, index);
+            scope.set_slot(fresh, index, value);
+        }
+    }
+    let fresh = scope.get(fresh);
+    scope.set_slot(object, SLOT_IVARS, fresh);
+    scope.get(keep)
+}
+
+/// The names `object` holds, in the order it acquired them — which is the
+/// order `Object#instance_variables` answers in.
+fn ivar_names(scope: &mut HandleScope<'_>, object: Value) -> Vec<SymbolId> {
+    if object.is_immediate() {
+        return Vec::new();
+    }
+    let mut nested = scope.nested();
+    let handle = nested.root(object);
+    let shape = nested.shape(handle);
+    if shape == ShapeId::NONE {
+        return Vec::new();
+    }
+    nested.shapes().names(shape)
+}
+
 /// Refuse to mutate a frozen object, the way Ruby does.
 fn frozen_check(scope: &mut HandleScope<'_>, value: Value, what: &str) -> Result<(), Error> {
     if value.is_immediate() {
@@ -2759,10 +3054,13 @@ fn dup_value(scope: &mut HandleScope<'_>, value: Value) -> Result<Value, Error> 
         return Ok(value);
     }
     let source = scope.root(value);
-    let class = scope.class(source);
     let payload = scope.payload(source);
     let len = scope.len(source);
-    let class = class.map(|class| scope.root(class));
+    // `dup` does not carry the singleton class across — that is what
+    // `singleton_class_spec.rb` means by a constant on it not being preserved.
+    // `clone` does, which is the difference between the two and the reason this
+    // walks rather than copying the header.
+    let class = dup_class_of(scope, value).map(|class| scope.root(class));
     let copy = scope.alloc(class, payload, len);
     match payload {
         Payload::Bytes => {
@@ -2776,7 +3074,40 @@ fn dup_value(scope: &mut HandleScope<'_>, value: Value) -> Result<Value, Error> 
             }
         }
     }
+    // The shape travels with the slots, and the ivar storage is copied rather
+    // than shared: `b = a.dup; b.instance_variable_set(:@x, 1)` must not reach
+    // into `a`. Ruby copies instance variables on `dup`, so the copy wears the
+    // same shape and owns its own storage.
+    let shape = scope.shape(source);
+    scope.set_shape(copy, shape);
+    if shape != ShapeId::NONE {
+        let storage = scope.slot(source, SLOT_IVARS);
+        if storage != Value::NIL {
+            let storage = scope.root(storage);
+            let capacity = scope.len(storage);
+            let fresh = scope.alloc(None, Payload::Slots, capacity);
+            for index in 0..capacity as usize {
+                let ivar = scope.slot(storage, index);
+                scope.set_slot(fresh, index, ivar);
+            }
+            let fresh = scope.get(fresh);
+            scope.set_slot(copy, SLOT_IVARS, fresh);
+        }
+    }
     Ok(scope.get(copy))
+}
+
+/// The class a copy of `value` should wear: its own, with any singleton
+/// class walked past.
+///
+/// An object's singleton *becomes* its class, so the header is not a reliable
+/// answer for "what is this an instance of" once a `def obj.m` has run.
+fn dup_class_of(scope: &mut HandleScope<'_>, value: Value) -> Option<Value> {
+    let mut id = class_of(scope, value)?;
+    while scope.classes().is_singleton(id) {
+        id = scope.classes().superclass(id)?;
+    }
+    Some(scope.classes().object(id))
 }
 
 /// Which class `allocate` refused on, as a `&'static str` the reason can carry.
@@ -2818,12 +3149,12 @@ const fn allocate_refusal(builtin: Builtin) -> &'static str {
 /// past the end of one before #13 closed the door.
 fn allocate_instance(scope: &mut HandleScope<'_>, id: ClassId) -> Result<Value, Error> {
     match Builtin::ALL.get(id.index()) {
-        // A user-defined class, or `Object` itself: slots, and no ivars to make
-        // room for until #151's shapes say how many.
+        // A user-defined class, or `Object` itself: one slot, for the ivar
+        // storage a shape transition will hang off it.
         None | Some(Builtin::Object | Builtin::BasicObject) => {
             let class = scope.classes().object(id);
             let class = scope.root(class);
-            let handle = scope.alloc(Some(class), Payload::Slots, 0);
+            let handle = alloc_ivar_object(scope, Some(class));
             Ok(scope.get(handle))
         }
         Some(Builtin::Array) => {
@@ -2832,17 +3163,20 @@ fn allocate_instance(scope: &mut HandleScope<'_>, id: ClassId) -> Result<Value, 
         }
         Some(Builtin::String) => Ok(string_bytes_new(scope, b"")),
         Some(Builtin::Hash) => {
-            // Three slots: the association list, the default, and whether that
-            // default is a block. See `core/hash.rb`, and the note there about
-            // what replaces the whole representation.
-            let pairs = new_array(scope, &[]);
+            // Three ordinary instance variables: the association list, the
+            // default, and whether that default is a block. They were three
+            // fixed slots with three `Getter`/`Setter` pairs in front of them
+            // until shapes landed; `core/hash.rb` now reads `@pairs` like any
+            // other Ruby class.
             let class = scope.classes().object(id);
             let class = scope.root(class);
-            let handle = scope.alloc(Some(class), Payload::Slots, 3);
-            scope.set_slot(handle, 0, pairs);
-            scope.set_slot(handle, 1, Value::NIL);
-            scope.set_slot(handle, 2, Value::FALSE);
-            Ok(scope.get(handle))
+            let handle = alloc_ivar_object(scope, Some(class));
+            let object = scope.get(handle);
+            let pairs = new_array(scope, &[]);
+            ivar_set(scope, object, symbol("@pairs"), pairs)?;
+            ivar_set(scope, object, symbol("@default"), Value::NIL)?;
+            ivar_set(scope, object, symbol("@default_is_proc"), Value::FALSE)?;
+            Ok(object)
         }
         Some(other) => {
             if is_exception_class(scope, id) {
@@ -3898,6 +4232,108 @@ fn native_call<'h>(
             Ok(None)
         }
 
+        Native::IvarReader(name) => {
+            let value = ivar_get(scope, call.receiver, name)?;
+            stack.push(value);
+            Ok(None)
+        }
+
+        Native::IvarWriter(name) => {
+            let value = call.args.first().copied().unwrap_or(Value::NIL);
+            ivar_set(scope, call.receiver, name, value)?;
+            stack.push(value);
+            Ok(None)
+        }
+
+        Native::AttrDefine { reader, writer } => {
+            let Some(owner) = class_id_of(scope, call.receiver) else {
+                return Err(Error::raise(
+                    "NoMethodError",
+                    format!(
+                        "undefined method 'attr_accessor' for an instance of {}",
+                        class_name(scope, call.receiver)
+                    ),
+                ));
+            };
+            let mut defined: Vec<Value> = Vec::new();
+            for &argument in &call.args {
+                let Some(name) = attribute_name(scope, argument) else {
+                    return Err(Error::raise(
+                        "TypeError",
+                        format!("{} is not a symbol nor a string", inspect(scope, argument)),
+                    ));
+                };
+                let ivar = symbol(&format!("@{name}"));
+                if reader {
+                    let body = scope
+                        .definitions_mut()
+                        .add(Definition::Native(Native::IvarReader(ivar)));
+                    let getter = symbol(&name);
+                    scope.classes_mut().define_method(owner, getter, body);
+                    defined.push(Value::symbol(getter));
+                }
+                if writer {
+                    let body = scope
+                        .definitions_mut()
+                        .add(Definition::Native(Native::IvarWriter(ivar)));
+                    let setter = symbol(&format!("{name}="));
+                    scope.classes_mut().define_method(owner, setter, body);
+                    defined.push(Value::symbol(setter));
+                }
+            }
+            let value = new_array(scope, &defined);
+            stack.push(value);
+            Ok(None)
+        }
+
+        Native::InstanceVariable(op) => {
+            let value = match op {
+                IvarOp::Names => {
+                    let names: Vec<Value> = ivar_names(scope, call.receiver)
+                        .into_iter()
+                        .map(Value::symbol)
+                        .collect();
+                    new_array(scope, &names)
+                }
+                _ => {
+                    let argument = call.args.first().copied().unwrap_or(Value::NIL);
+                    let Some(name) = attribute_name(scope, argument) else {
+                        return Err(Error::raise(
+                            "TypeError",
+                            format!("{} is not a symbol nor a string", inspect(scope, argument)),
+                        ));
+                    };
+                    // Ruby checks the spelling before the object: an argument
+                    // that is not an ivar name is a `NameError` whether or not
+                    // the receiver holds anything.
+                    if !is_ivar_name(&name) {
+                        return Err(Error::raise(
+                            "NameError",
+                            format!("'{name}' is not allowed as an instance variable name"),
+                        ));
+                    }
+                    let ivar = symbol(&name);
+                    match op {
+                        IvarOp::Get => ivar_get(scope, call.receiver, ivar)?,
+                        IvarOp::Defined => {
+                            if ivar_defined(scope, call.receiver, ivar)? {
+                                Value::TRUE
+                            } else {
+                                Value::FALSE
+                            }
+                        }
+                        IvarOp::Set => {
+                            let to = call.args.get(1).copied().unwrap_or(Value::NIL);
+                            ivar_set(scope, call.receiver, ivar, to)?
+                        }
+                        IvarOp::Names => unreachable!("handled above"),
+                    }
+                }
+            };
+            stack.push(value);
+            Ok(None)
+        }
+
         Native::Raise => {
             let exception = raise_argument(scope, frames, &call.args)?;
             Ok(Some(Unwind::Exception(exception)))
@@ -3941,7 +4377,7 @@ fn native_call<'h>(
                 Some(&tag) => tag,
                 None => {
                     let class = class_handle(scope, Builtin::Object);
-                    let handle = scope.alloc(Some(class), Payload::Slots, 0);
+                    let handle = alloc_ivar_object(scope, Some(class));
                     scope.get(handle)
                 }
             };
@@ -4069,6 +4505,7 @@ fn native_call<'h>(
         | Native::MatchToA { .. }
         | Native::MatchAround { .. }
         | Native::MatchEdge { .. }
+        | Native::MatchNames
         | Native::MatchSize => {
             let Some((regexp, text, groups)) = match_parts(scope, call.receiver) else {
                 return Err(Error::NoDispatch {
@@ -4078,18 +4515,6 @@ fn native_call<'h>(
             };
             let value = match_answer(scope, native, &call, regexp, &text, &groups)?;
             stack.push(value);
-            Ok(None)
-        }
-
-        Native::ExceptionMessage => {
-            let message = exception_message(scope, call.receiver);
-            let value = string_new(scope, &message);
-            stack.push(value);
-            Ok(None)
-        }
-
-        Native::ExceptionBacktrace => {
-            stack.push(Value::NIL);
             Ok(None)
         }
     }
@@ -4249,16 +4674,6 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         (Builtin::Kernel, &["raise", "fail"], Native::Raise),
         (Builtin::Kernel, &["throw"], Native::Throw),
         (Builtin::Kernel, &["catch"], Native::Catch),
-        (
-            Builtin::Exception,
-            &["message", "to_s"],
-            Native::ExceptionMessage,
-        ),
-        (
-            Builtin::Exception,
-            &["backtrace"],
-            Native::ExceptionBacktrace,
-        ),
         (Builtin::Regexp, &["=~"], Native::RegexpMatchOp),
         (Builtin::Regexp, &["match"], Native::RegexpMatch),
         (Builtin::Regexp, &["match?"], Native::RegexpMatchP),
@@ -4310,6 +4725,51 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             Native::MatchEdge { end: true },
         ),
         (Builtin::MatchData, &["size", "length"], Native::MatchSize),
+        (Builtin::MatchData, &["names"], Native::MatchNames),
+        (
+            Builtin::Module,
+            &["attr_reader"],
+            Native::AttrDefine {
+                reader: true,
+                writer: false,
+            },
+        ),
+        (
+            Builtin::Module,
+            &["attr_writer"],
+            Native::AttrDefine {
+                reader: false,
+                writer: true,
+            },
+        ),
+        (
+            Builtin::Module,
+            &["attr_accessor", "attr"],
+            Native::AttrDefine {
+                reader: true,
+                writer: true,
+            },
+        ),
+        (
+            Builtin::Kernel,
+            &["instance_variable_get"],
+            Native::InstanceVariable(IvarOp::Get),
+        ),
+        (
+            Builtin::Kernel,
+            &["instance_variable_set"],
+            Native::InstanceVariable(IvarOp::Set),
+        ),
+        (
+            Builtin::Kernel,
+            &["instance_variable_defined?"],
+            Native::InstanceVariable(IvarOp::Defined),
+        ),
+        (
+            Builtin::Kernel,
+            &["instance_variables"],
+            Native::InstanceVariable(IvarOp::Names),
+        ),
         // `regexp` and `string` are the pattern and the subject the match was
         // made against, in the slots `match_data_new` wrote them to. Reading a
         // slot is what `Getter` is; `core/match_data.rb` builds `==` on them.
@@ -4384,20 +4844,6 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         (Builtin::Float, &["to_s"], Native::FloatToS),
         (Builtin::String, &["[]"], Native::StringIndex),
         (Builtin::String, &["<=>"], Native::StringCompare),
-        // `core/hash.rb` keeps its association list, its default, and whether
-        // that default is a block in three slots. These are how it reaches
-        // them. #151's shapes turn all three into ordinary instance variables
-        // and delete this block.
-        (Builtin::Hash, &["__pairs__"], Native::Getter(0)),
-        (Builtin::Hash, &["__set_pairs__"], Native::Setter(0)),
-        (Builtin::Hash, &["__default__"], Native::Getter(1)),
-        (Builtin::Hash, &["__set_default__"], Native::Setter(1)),
-        (Builtin::Hash, &["__default_is_proc__"], Native::Getter(2)),
-        (
-            Builtin::Hash,
-            &["__set_default_is_proc__"],
-            Native::Setter(2),
-        ),
     ];
     for (builtin, names, native) in table {
         let body = scope.definitions_mut().add(Definition::Native(*native));
@@ -5078,6 +5524,27 @@ fn match_answer(
 ) -> Result<Value, Error> {
     let whole = groups.first().copied().flatten();
     match native {
+        Native::MatchNames => {
+            let Some(program) = regexp_program(scope, regexp) else {
+                return Err(Error::NoDispatch {
+                    op: "names",
+                    operands: "a MatchData whose regexp is gone",
+                });
+            };
+            // One name may label several groups, and Ruby lists it once.
+            let mut names: Vec<String> = Vec::new();
+            for (name, _) in program.names() {
+                if !names.iter().any(|seen| seen == name) {
+                    names.push(name.clone());
+                }
+            }
+            let names: Vec<Value> = names
+                .into_iter()
+                .map(|name| string_new(scope, &name))
+                .collect();
+            Ok(new_array(scope, &names))
+        }
+
         Native::MatchSize => Ok(
             Value::fixnum(i64::try_from(groups.len()).unwrap_or(i64::MAX))
                 .expect("a group count fits a fixnum"),

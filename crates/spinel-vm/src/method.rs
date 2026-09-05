@@ -19,7 +19,17 @@
 use std::sync::Arc;
 
 use crate::bytecode::Iseq;
-use crate::value::Value;
+use crate::value::{SymbolId, Value};
+
+/// Which of `Object`'s four instance-variable reflection methods is being run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IvarOp {
+    Get,
+    Set,
+    Defined,
+    /// `Object#instance_variables`, in the order the object acquired them.
+    Names,
+}
 
 /// An operation the VM performs itself.
 ///
@@ -63,11 +73,32 @@ pub enum Native {
     Equal,
     /// `Array#+`: a new array with the two joined. Allocation, so Rust.
     ArrayPlus,
-    /// Read slot `n` of the receiver. What `attr_reader` becomes when
-    /// `core/*.rb` can ask for one.
+    /// Read slot `n` of the receiver. A fixed slot, so only for the built-ins
+    /// whose representation *is* fixed: `MatchData`'s regexp and subject.
     Getter(u16),
     /// Write slot `n` of the receiver, answering the value written.
     Setter(u16),
+    /// Read the receiver's instance variable, by name. What `attr_reader`
+    /// defines.
+    ///
+    /// By name and not by slot, because which slot an instance variable lands
+    /// at is the object's shape's business: an `attr_reader` built on slot 0
+    /// would be right for a class with one ivar and wrong for its second. #15
+    /// left `attr_accessor` out rather than ship that.
+    IvarReader(SymbolId),
+    /// Write the receiver's instance variable, by name, answering the value
+    /// written. What `attr_writer` defines.
+    IvarWriter(SymbolId),
+    /// `Module#attr_reader`, `#attr_writer`, `#attr_accessor`. Defines an
+    /// [`Native::IvarReader`], an [`Native::IvarWriter`], or both per name, and
+    /// answers the array of symbols it defined — which is what Ruby 3.0 does.
+    AttrDefine {
+        reader: bool,
+        writer: bool,
+    },
+    /// `Object#instance_variable_get`, `#instance_variable_set`,
+    /// `#instance_variable_defined?` and `#instance_variables`.
+    InstanceVariable(IvarOp),
     /// `Kernel#raise` and `Kernel#fail`. Does not return a value: it hands the
     /// interpreter an unwind, which is why it lives here and not in Ruby.
     Raise,
@@ -114,10 +145,9 @@ pub enum Native {
     },
     /// `MatchData#size` and `#length`.
     MatchSize,
-    /// `Exception#message` and `#to_s`.
-    ExceptionMessage,
-    /// `Exception#backtrace`. Always `nil` — see PRD 0012's non-goals.
-    ExceptionBacktrace,
+    /// `MatchData#names` — the capture names the pattern declares, in group
+    /// order and without repeats. What `MatchData#inspect` branches on.
+    MatchNames,
     /// `Object#frozen?`, `Object#nil?`, `Object#!`. Cheap predicates the target
     /// specs reach for while checking something else.
     NilP,

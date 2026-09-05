@@ -39,6 +39,11 @@ fn eval(source: &str) -> Result<String, String> {
     let mut frame = interp::Frame::new(iseq.locals.len());
     let mut scope = heap.scope();
     scope.bootstrap();
+    // The core library, not just the VM. `Exception#message` and the rest are
+    // `core/*.rb` since #151 moved them off fixed slots onto instance
+    // variables, and a table that measured the VM without its core library
+    // would be measuring a language nobody runs.
+    spinel_core::boot(&mut scope);
     let value =
         interp::eval_in(&mut scope, &mut frame, &iseq).map_err(|e| format!("error: {e}"))?;
     Ok(interp::inspect(&mut scope, value))
@@ -77,13 +82,13 @@ fn a_construct_this_slice_does_not_compile_is_an_error_never_a_guess() {
         // `def` and a block literal moved to the other side of this list with
         // #11, and constants, class bodies, and `defined?` with #13; what stays
         // is what later slices own.
-        "@a = 1",
         "$a = 1",
         "@@a = 1",
         // #13 answers `defined?` for the kinds it can mean, and refuses the
         // kinds it cannot rather than answering Ruby's `nil` for the wrong
-        // reason. See `Compiler::defined`.
-        "defined?(@a)",
+        // reason. See `Compiler::defined`. `defined?(@a)` left this list with
+        // #151: an object with a shape can say whether it holds `@a`, so the
+        // `nil` is now an answer rather than a coincidence.
         "defined?($a)",
         "defined?(@@a)",
         "A ||= 1",

@@ -245,14 +245,29 @@ impl Walk<'_> {
                     Guard::Run => None,
                     Guard::Skip(reason) | Guard::Undecidable(reason) => Some(reason),
                 });
-                self.body(block);
+                self.nested(block);
                 self.skipped = outer;
             }
             // Some specs build examples in a loop. Descending into any other
-            // block finds those; `before`/`after` hold no examples, so the walk
-            // costs nothing and misses nothing.
-            _ => self.body(block),
+            // block finds those.
+            _ => self.nested(block),
         }
+    }
+
+    /// Walk a block that is not a `describe` but can still hold both hooks and
+    /// examples.
+    ///
+    /// `struct_group_spec.rb` puts its `before :all` inside `platform_is_not`,
+    /// so a walk that only collected hooks from `describe` bodies handed the
+    /// examples below it a `@g` that was never assigned. They then *ran*
+    /// against `nil` instead of blocking — `(@g == nil).should == false`
+    /// failed, and would have as happily passed. A hook that is skipped has to
+    /// be skipped visibly.
+    fn nested(&mut self, statements: &[Expr]) {
+        let depth = self.setup.len();
+        self.collect_setup(statements);
+        self.body(statements);
+        self.setup.truncate(depth);
     }
 
     /// Find this group's `before` blocks and stack them for its examples.
