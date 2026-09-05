@@ -10,8 +10,10 @@ class BasicObject
     equal?(other)
   end
 
+  # Truthiness, by identity. `self == false` would ask the object's own `==`,
+  # and an object that answers true to everything would then be falsy.
   def !
-    self == false || self == nil
+    equal?(false) || equal?(nil)
   end
 
   def !=(other)

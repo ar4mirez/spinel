@@ -1008,7 +1008,17 @@ fn unwind_to_handler(
             if frames.is_empty() {
                 return Ok(Some(value));
             }
-            if !done.keeps_receiver {
+            if done.keeps_receiver {
+                // `Class#new` left the object below this frame's base so that
+                // `initialize`'s own value is dropped. A `break` out of a block
+                // `initialize` was given is not `initialize` returning, though:
+                // `Array.new(2) { break :x }` answers `:x`, not the array. So
+                // the object goes and the break value takes its place.
+                if matches!(unwind, Unwind::Break { .. }) {
+                    stack.pop();
+                    stack.push(value);
+                }
+            } else {
                 stack.push(value);
             }
             return Ok(None);
@@ -2342,6 +2352,68 @@ fn fixnum_or_refuse(n: i64, op: &'static str) -> Result<Value, Error> {
     })
 }
 
+/// How deep `hash` will follow nested arrays before refusing.
+///
+/// Ruby answers for a self-referential array — `a = []; a << a; a.hash` — by
+/// noticing the cycle. Spinel does not track one, so a bound is what keeps the
+/// recursion from running off the stack, and hitting it is a refusal rather
+/// than an answer for a structure it did not finish reading.
+const HASH_DEPTH: usize = 32;
+
+/// `Object#hash`, written into `hasher`.
+///
+/// Content for a `String` and an `Array`, because `==` on those is content;
+/// identity for everything else, because `==` on those is identity. That
+/// equivalence — `a == b` implies `a.hash == b.hash` — is the whole contract.
+fn hash_value(
+    scope: &mut HandleScope<'_>,
+    value: Value,
+    hasher: &mut impl std::hash::Hasher,
+    depth: usize,
+) -> Result<(), Error> {
+    use std::hash::Hash as _;
+    if depth > HASH_DEPTH {
+        return Err(Error::Unknowable {
+            what: "`hash` of a deeply nested or self-referential array",
+            needs: "cycle detection, which this VM does not track",
+        });
+    }
+    match heap_kind(scope, value) {
+        Some(HeapKind::Str) => {
+            let handle = scope.root(value);
+            0u8.hash(hasher);
+            scope.bytes(handle).hash(hasher);
+        }
+        Some(HeapKind::Array) => {
+            let handle = scope.root(value);
+            let len = array_len(scope, handle);
+            1u8.hash(hasher);
+            len.hash(hasher);
+            for index in 0..len {
+                let element = array_get(scope, handle, index);
+                hash_value(scope, element, hasher, depth + 1)?;
+            }
+        }
+        // An immediate hashes by its bits, so two `1`s and two `:a`s agree.
+        // A heap object with no content equality hashes by identity, and its
+        // `Value` *is* its address.
+        None => {
+            2u8.hash(hasher);
+            value.to_bits().hash(hasher);
+        }
+    }
+    Ok(())
+}
+
+/// A method name given as a `Symbol` or a `String`, as Ruby's reflection takes
+/// either.
+fn method_name_of(scope: &mut HandleScope<'_>, value: Value) -> Option<String> {
+    if let Some(id) = value.as_symbol() {
+        return crate::shared::symbols::name(id);
+    }
+    string_bytes(scope, value).and_then(|bytes| String::from_utf8(bytes).ok())
+}
+
 /// `String.new`, `String.new(str)`.
 ///
 /// A keyword — `encoding:`, `capacity:` — is refused rather than ignored: this
@@ -3353,6 +3425,80 @@ fn native_call<'h>(
             Ok(None)
         }
 
+        Native::HashValue => {
+            let mut hasher = std::hash::DefaultHasher::new();
+            hash_value(scope, call.receiver, &mut hasher, 0)?;
+            // Ruby's `hash` is a fixnum, so the top bits go: a fixnum is 62
+            // bits and the shift keeps the sign bit clear.
+            let bits = std::hash::Hasher::finish(&hasher) >> 2;
+            stack.push(Value::fixnum(bits as i64).unwrap_or(Value::NIL));
+            Ok(None)
+        }
+
+        Native::Ancestors => {
+            let Some(id) = class_id_of(scope, call.receiver) else {
+                return Err(Error::NoDispatch {
+                    op: "Module#ancestors",
+                    operands: "a receiver that is not a Module",
+                });
+            };
+            let ids = scope.classes().ancestors(id);
+            let objects: Vec<Value> = ids
+                .into_iter()
+                .map(|id| scope.classes().object(id))
+                .collect();
+            let value = new_array(scope, &objects);
+            stack.push(value);
+            Ok(None)
+        }
+
+        Native::Superclass => {
+            let Some(id) = class_id_of(scope, call.receiver) else {
+                return Err(Error::NoDispatch {
+                    op: "Class#superclass",
+                    operands: "a receiver that is not a Class",
+                });
+            };
+            // `BasicObject.superclass` is nil, and so is a module's — but a
+            // module has no `superclass` method at all in Ruby, so saying nil
+            // for one would be answering a call that should not have arrived.
+            if scope.classes().kind(id) == Kind::Module {
+                return Err(Error::raise(
+                    "NoMethodError",
+                    format!(
+                        "undefined method 'superclass' for module {}",
+                        scope.classes().name(id).unwrap_or("an anonymous module")
+                    ),
+                ));
+            }
+            let value = match scope.classes().superclass(id) {
+                Some(parent) => scope.classes().object(parent),
+                None => Value::NIL,
+            };
+            stack.push(value);
+            Ok(None)
+        }
+
+        Native::MethodDefined => {
+            let Some(id) = class_id_of(scope, call.receiver) else {
+                return Err(Error::NoDispatch {
+                    op: "Module#method_defined?",
+                    operands: "a receiver that is not a Module",
+                });
+            };
+            let Some(name) = call.args.first().and_then(|&v| method_name_of(scope, v)) else {
+                return Err(Error::raise("TypeError", "is not a symbol nor a string"));
+            };
+            // ponytail: `method_defined?` excludes private methods in Ruby, and
+            // this table has no visibility (#161). It therefore answers true
+            // for a private method, which `respond_to?(:puts)` shows. The fix
+            // is a visibility field, not a special case here.
+            let symbol = crate::shared::symbols::intern(&name);
+            let found = scope.classes_mut().lookup(id, symbol).is_some();
+            stack.push(bool_value(found));
+            Ok(None)
+        }
+
         Native::ModuleName => {
             let Some(id) = class_id_of(scope, call.receiver) else {
                 return Err(Error::NoDispatch {
@@ -3882,6 +4028,10 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             Native::SymbolName { length: true },
         ),
         (Builtin::Module, &["name"], Native::ModuleName),
+        (Builtin::Kernel, &["hash"], Native::HashValue),
+        (Builtin::Module, &["ancestors"], Native::Ancestors),
+        (Builtin::Module, &["method_defined?"], Native::MethodDefined),
+        (Builtin::Class, &["superclass"], Native::Superclass),
         (Builtin::Kernel, &["__write__"], Native::WriteString),
         (Builtin::Float, &["to_s"], Native::FloatToS),
         (Builtin::String, &["[]"], Native::StringIndex),

@@ -63,11 +63,14 @@ class Hash
     __default__
   end
 
-  def fetch(key, fallback = nil)
+  # `fetch(k, nil)` answers nil; only `fetch(k)` with no block raises. So this
+  # counts the arguments given rather than testing one for nil.
+  def fetch(*fallback)
+    key = fallback[0]
     at = __index__(key)
     return __pairs__[at][1] unless at.nil?
     return yield(key) if block_given?
-    return fallback unless fallback.nil?
+    return fallback[1] if fallback.size > 1
     raise KeyError, "key not found: " + key.inspect
   end
 

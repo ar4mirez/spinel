@@ -7,11 +7,23 @@
 # the array the caller is holding rather than allocating a new one. See
 # `interp.rs`, "Array".
 class Array
-  def initialize(size = 0, default = nil)
-    # `Array.new(3)`, `Array.new(3, :x)`, and `Array.new(3) { |i| ... }`.
-    # `Array.new([1, 2])` is a copy, which is a different argument entirely.
+  # `Array.new`, `Array.new(3)`, `Array.new(3, :x)`, `Array.new(3) { |i| ... }`,
+  # and `Array.new([1, 2])`, which copies. Reachable as `initialize` too, where
+  # the receiver may already hold elements — hence the `clear`: Ruby *replaces*
+  # the contents rather than appending to them.
+  def initialize(*given)
+    if given.size > 2
+      raise ArgumentError, "wrong number of arguments (given " + given.size.to_s + ", expected 0..2)"
+    end
+    size = given.size > 0 ? given[0] : 0
+    default = given.size > 1 ? given[1] : nil
     if size.is_a?(Array)
-      raise ArgumentError, "wrong number of arguments" unless default.nil?
+      # `Array.new([1, 2], :x)` is a TypeError, not an arity error: the first
+      # argument was taken as a size and an Array is not one.
+      unless given.size < 2
+        raise TypeError, "no implicit conversion of Array into Integer"
+      end
+      clear
       size.each { |element| push(element) }
       return self
     end
@@ -19,6 +31,7 @@ class Array
       raise TypeError, "no implicit conversion into Integer"
     end
     raise ArgumentError, "negative array size" if size < 0
+    clear
     i = 0
     while i < size
       push(block_given? ? yield(i) : default)
@@ -191,17 +204,31 @@ class Array
     total
   end
 
+  # With a block, the block *is* the comparison — `min { |a, b| ... }` — and it
+  # is called with the candidate first and the incumbent second.
   def min
     return nil if empty?
     best = self[0]
-    each { |element| best = element if (element <=> best) < 0 }
+    i = 1
+    while i < size
+      element = self[i]
+      order = block_given? ? yield(element, best) : (element <=> best)
+      best = element if order < 0
+      i = i + 1
+    end
     best
   end
 
   def max
     return nil if empty?
     best = self[0]
-    each { |element| best = element if (element <=> best) > 0 }
+    i = 1
+    while i < size
+      element = self[i]
+      order = block_given? ? yield(element, best) : (element <=> best)
+      best = element if order > 0
+      i = i + 1
+    end
     best
   end
 
@@ -244,6 +271,9 @@ class Array
   # `shift` answers the first element; `shift(n)` answers a new array of the
   # first n. Both leave the rest behind, in this same array.
   def shift(*count)
+    if count.size > 1
+      raise ArgumentError, "wrong number of arguments (given " + count.size.to_s + ", expected 0..1)"
+    end
     given = count.size > 0
     wanted = given ? __count__(count[0]) : 1
     taken = __take__(0, wanted)

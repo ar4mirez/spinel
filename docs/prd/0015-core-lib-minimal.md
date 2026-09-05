@@ -77,6 +77,10 @@ engine.md's rule is that a primitive is raw memory, allocation, encoding tables,
 | `Object#freeze`, `#frozen?` | a header flag bit |
 | `Symbol#to_s`, `#length` | reads the shared symbol table |
 | `Object#object_id` | the object's address |
+| `Object#hash` | reads raw bytes and raw slots |
+| `Module#ancestors`, `#method_defined?`, `Class#superclass` | reads the class table |
+| `Float#to_s` | shortest round-tripping decimal is an algorithm, not a format |
+| `Kernel#__write__` | a syscall |
 
 `each`, `map`, `include?`, `first`, `last`, `empty?`, `join`, `reverse`, `min`, `max`, `sum`, `times`, `upto`, `loop`, `is_a?`, `respond_to?`, `dup` on `Object`, and the whole of `Comparable` are Ruby, on top of those. If a method is missing from `core/*.rb` and its absence is not explained by a missing primitive, it was left out, not blocked.
 
@@ -124,18 +128,26 @@ The spec delta:
 
 ```
 language/    545 -> 619 passed   (2145 -> 2067 blocked)
-corpus       713 -> 1023 passed  (23056 -> 22742 blocked)
+corpus       713 -> 1108 passed  (23056 -> 22656 blocked)
 ```
 
-Per directory, where this slice moved a number for the first time:
+Per directory, every one of which was at zero before this slice:
 
 ```
-core/array      0 -> 72     core/string     0 -> 33     core/integer   0 -> 54
-core/matchdata  0 -> 45     core/kernel     0 -> 43     core/float     0 -> 29
-core/symbol     0 -> 10     core/hash       0 -> 8
+core/array      115    core/integer     60    core/matchdata   49    core/kernel   45
+core/string      43    core/float       34    core/module      27    core/symbol   19
+core/proc        16    core/exception    9    core/hash         9
 ```
 
-`scripts/verify-passes.rb` re-ran every one of those passes on ruby 4.0.6 — 619 in `language/`, 400 in `core/` — and all agree, so none of them is a pass Spinel had no right to.
+`scripts/verify-passes.rb` re-ran all 1,108 of those passes on ruby 4.0.6 and all agree, so none of them is a pass Spinel had no right to.
+
+### Reflection was the gap the numbers did not show
+
+`language/` moved to 619 with `Kernel#is_a?`, `kind_of?`, `respond_to?`, `Module#===` and `Module#<` all *dead*: each is written in Ruby against `Module#ancestors` or `#method_defined?`, and neither existed. Nothing failed, because a missing method is reported blocked — the specs that would have caught it were blocked on something else first. It was found by running a handful of expressions through `spinel run` and diffing against CRuby, which is the check the spec numbers cannot be.
+
+`Module#ancestors`, `Class#superclass`, `Module#method_defined?` and `Object#hash` are the four primitives that answer it, and they took the corpus from 1,023 to 1,108. The same pass then found four wrong answers in code the specs did not yet reach: `Hash#fetch(k, nil)` raised instead of answering nil, `1 <=> 1.5` was nil instead of -1, `BasicObject#!` asked the object's own `==` instead of testing identity, and `Array#initialize` appended where Ruby replaces.
+
+Making `respond_to?` answer also turned five refusals into failures, all of them real: `Array.new([1,2])` did not replace the receiver's contents, `Array.new(a, x)` raised `ArgumentError` where Ruby raises `TypeError`, `Array#shift` took any number of arguments, `Array#min`/`#max` ignored a comparison block, and `Array.new(n) { break :x }` answered the array rather than `:x` — that last one a `Class#new` bug, where the pre-placed object survived a `break` that named the frame.
 
 `cargo test` covers the representation directly: growth preserves object identity across reallocation, a read past the length is `nil` rather than stale storage, every immediate has a class, and `Float#to_s` matches Ruby's shape at the boundaries measured from CRuby.
 
@@ -149,10 +161,11 @@ Making the core library reachable turned three refusals into failures, which is 
 
 ### What is skipped, and why
 
-Four examples are in `spec/tags/skip.txt`, each naming a gap this slice does not own:
+Five examples are in `spec/tags/skip.txt`, each naming a gap this slice does not own:
 
 - `defined?` of a private method needs method visibility, which the class table does not have.
 - `[[:blank:]]` must match U+1680; `spinel-regex`'s POSIX brackets are still ASCII for that class. Visible rather than blocked now only because `nil.to_a` answers.
-- Two in `send_spec.rb`: `m(*args, &args.pop)` must expand the splat before evaluating the block argument, and Spinel expands splats after every argument is on the stack. Fixing it needs a dynamic argument count at the call site, which is the calling convention's.
+- Two in `send_spec.rb`: `m(*args, &args.pop)` must expand the splat before evaluating the block argument, and Spinel expands splats after every argument is on the stack. Fixing it needs a dynamic argument count at the call site, which is the calling convention's ([#160](https://github.com/ar4mirez/spinel/issues/160)).
+- `Kernel#to_enum` must exist, and an `Enumerator` needs fibers ([#26](https://github.com/ar4mirez/spinel/issues/26), [#16](https://github.com/ar4mirez/spinel/issues/16)). Blocked before this slice, failing after it only because `respond_to?` can now answer honestly.
 
 None is an expected failure: each is reported *skipped* with its reason, and none was added to make a run green.

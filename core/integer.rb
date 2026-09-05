@@ -80,7 +80,7 @@ class Integer
   end
 
   def <=>(other)
-    return nil unless other.is_a?(Integer)
+    return nil unless other.is_a?(Numeric)
     return -1 if self < other
     return 1 if self > other
     0

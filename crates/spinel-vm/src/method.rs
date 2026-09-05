@@ -167,6 +167,19 @@ pub enum Native {
     },
     /// `Module#name`, `Module#to_s` — reads the class table.
     ModuleName,
+    /// `Object#hash` — a fixnum that is equal whenever `==` is.
+    ///
+    /// Content for a `String` and an `Array`, identity for everything else,
+    /// which is Ruby's own default. A primitive because it reads raw bytes and
+    /// raw slots, and because a `Hash` keyed on it wants it as an intrinsic.
+    HashValue,
+    /// `Module#ancestors` — the linearised chain, which only the class table
+    /// knows. `is_a?`, `kind_of?`, `Module#===` and `Module#<` are Ruby on it.
+    Ancestors,
+    /// `Class#superclass` — one step up the same chain.
+    Superclass,
+    /// `Module#method_defined?` — a method-table lookup.
+    MethodDefined,
     /// `Float#to_s` — the shortest decimal that reads back as the same float,
     /// which is an algorithm (Ruby uses `dtoa`) and not a formatting rule.
     FloatToS,
