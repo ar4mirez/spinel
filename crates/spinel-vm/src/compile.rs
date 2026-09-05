@@ -1593,6 +1593,27 @@ impl Compiler {
         }
         let site = self.arguments(&call.name, &call.args, call.block.as_ref(), span)?;
         let site = self.push_site(site, call.receiver.is_none());
+
+        // `a.b = v` and `a[k] = v` evaluate to `v`, never to what `b=` returned
+        // — Ruby's rule, and `def b=(*) = 1` is exactly how ruby/spec checks it.
+        // The value is the last thing `arguments` pushed, so it is stashed in a
+        // hidden local before the send and read back after. A local rather than
+        // a stack rotate because the VM has no rotate instruction, and adding
+        // one to move a value the compiler can already name would be the larger
+        // change.
+        //
+        // The slot's name is not a Ruby identifier, so it cannot collide with a
+        // program's local, and it is per call site, so `a.b = (c.d = 1)` gives
+        // the two writes two slots instead of one they would clobber.
+        if call.flags.attribute_write {
+            let slot = self.slot(&format!("%attr{}", self.here()));
+            self.emit(Insn::Dup);
+            self.emit(Insn::SetLocal(slot, 0));
+            self.emit(Insn::Send(site));
+            self.emit(Insn::Pop);
+            self.emit(Insn::GetLocal(slot, 0));
+            return Ok(());
+        }
         self.emit(Insn::Send(site));
         Ok(())
     }

@@ -697,6 +697,7 @@ impl Lower {
                         variable_call: n.is_variable_call(),
                         ignore_visibility: n.is_ignore_visibility(),
                         has_parens: n.opening_loc().is_some(),
+                        attribute_write: n.is_attribute_write(),
                     },
                 }))
             }

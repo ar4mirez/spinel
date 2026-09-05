@@ -659,6 +659,14 @@ pub fn eval_in(
                     let symbol = frames[top].symbols[name as usize];
                     let cref = frames[top].cref;
                     let owner = scope.classes().cref_class(cref);
+                    hook_refusal(
+                        scope,
+                        owner,
+                        &[(
+                            "method_added",
+                            "`method_added`, which this definition would fire",
+                        )],
+                    )?;
                     define_method_on(scope, owner, symbol, iseq, cref);
                     stack.push(Value::symbol(symbol));
                 }
@@ -711,7 +719,19 @@ pub fn eval_in(
                     let cref = frames[top].cref;
                     let value = stack.pop().expect("a value to assign");
                     let target = const_base(scope, &mut stack, cref, how)?;
+                    hook_refusal(
+                        scope,
+                        target,
+                        &[(
+                            "const_added",
+                            "`const_added`, which this assignment would fire",
+                        )],
+                    )?;
                     scope.classes_mut().const_set(target, symbol, value);
+                    // `Foo = Class.new` is how an anonymous class gets a name,
+                    // and the only way one ever does. Only the first assignment
+                    // names it: `A = Class.new; B = A` leaves both `"A"`.
+                    name_if_anonymous(scope, target, symbol, value);
                     // Assignment is an expression, and its value is what was
                     // assigned — not the module it landed on.
                     stack.push(value);
@@ -1752,6 +1772,22 @@ fn exception_matches(
             "class or module required for rescue clause",
         ));
     };
+    // Ruby's `rescue X` is `X === exception`, and `Module#===` is `is_a?` —
+    // the ancestor walk below, which is why it has always agreed. A class that
+    // *overrides* `===` gets a different answer, and Spinel cannot ask it from
+    // here: `CheckMatch` is one instruction and a Ruby call needs a frame.
+    // `core/module.rb`'s `Module#===` is the default, so the override test is
+    // "the method this lookup found is not that one".
+    let comparison = crate::shared::symbols::intern("===");
+    if let Some(class_of_class) = class_of(scope, class)
+        && let Some(method) = scope.classes_mut().lookup(class_of_class, comparison)
+        && method.owner != Builtin::Module.id()
+    {
+        return Err(Error::Unknowable {
+            what: "`rescue` against a class with its own `===`",
+            needs: "a Ruby call from the exception matcher (#28)",
+        });
+    }
     let Some(actual) = class_of(scope, exception) else {
         return Ok(false);
     };
@@ -1852,7 +1888,10 @@ fn open_class(
                         )
                     })?
                 }
-                false => scope.classes().cref_class(outer),
+                // `cref_base`: `class Deep; end` written inside `Class.new`'s
+                // block defines `Deep` at the enclosing scope, not under the
+                // anonymous class. Measured — `anonymous.txt`.
+                false => scope.classes().cref_base(outer),
             };
             let name = frames[top].symbols[def.name as usize];
             define_or_reopen(scope, cbase, name, kind, superclass)?
@@ -1963,6 +2002,11 @@ fn define_or_reopen(
     }
 
     let path = qualified_name(scope, cbase, name);
+    // Only a *new* class fires `inherited`; reopening one above did not, and
+    // returned before reaching here. A module has no superclass to fire on.
+    if kind != DefKind::Module {
+        inherited_refusal(scope, wanted.unwrap_or(Builtin::Object.id()))?;
+    }
     let id = match kind {
         DefKind::Module => scope.define_module(Some(&path)),
         // No superclass named means `Object`, which is Ruby's default and is
@@ -1977,12 +2021,201 @@ fn define_or_reopen(
     if kind != DefKind::Module {
         scope.singleton_class(id);
     }
+    // `class A::C` names the class by assigning `C` on `A`, which is a constant
+    // assignment like any other and fires `const_added` on `A`. `Insn::SetConst`
+    // guards the `X = v` form; this is the other way in.
+    hook_refusal(
+        scope,
+        cbase,
+        &[(
+            "const_added",
+            "`const_added`, which this definition would fire",
+        )],
+    )?;
     let object = scope.classes().object(id);
     scope.classes_mut().const_set(cbase, name, object);
     Ok(id)
 }
 
 /// `Module#name`: `"A::B"` inside `A`, and `"B"` at the top level.
+/// `Class.new` and `Module.new`: a class or module with no name.
+///
+/// The block, when there is one, is `module_eval`: it runs with `self` set to
+/// the new class and with a cref that is the *definee* only — `def` inside it
+/// lands on the class, while a constant read, a constant assignment, and a
+/// bare `class Foo` all resolve in the scope the block was written in. See
+/// [`CrefNode::pushed_by_eval`] and `crates/spinel-vm/tests/anonymous.txt`.
+///
+/// [`CrefNode::pushed_by_eval`]: crate::class::CrefNode
+fn anonymous_module(
+    scope: &mut HandleScope<'_>,
+    stack: &mut Vec<Value>,
+    frames: &mut Vec<Call>,
+    call: &Pending,
+    receiver: ClassId,
+    ids: &mut u64,
+) -> Result<Option<Unwind>, Error> {
+    let building_class = receiver == Builtin::Class.id();
+    let given = call.args.len() + call.keywords.len();
+
+    // `Module.new` takes nothing; `Class.new` takes an optional superclass.
+    // Ruby's own wording, because ruby/spec checks the message text.
+    let most = usize::from(building_class);
+    if given > most {
+        let expected = if building_class { "0..1" } else { "0" };
+        return Err(Error::raise(
+            "ArgumentError",
+            format!("wrong number of arguments (given {given}, expected {expected})"),
+        ));
+    }
+
+    let id = if building_class {
+        let superclass = match call.args.first() {
+            None => Builtin::Object.id(),
+            Some(&value) => superclass_of(scope, value)?,
+        };
+        inherited_refusal(scope, superclass)?;
+        let id = scope.define_class(None, Some(superclass));
+        // The same link `class C < A` owes: `#<Class:C> < #<Class:A>` is what
+        // makes an inherited `def self.m` reachable. See `define_or_reopen`.
+        scope.singleton_class(id);
+        id
+    } else {
+        scope.define_module(None)
+    };
+
+    let object = scope.classes().object(id);
+    // Below the block's frame base, so `Insn::Leave` leaves it behind when the
+    // block ends: `Class.new { 42 }` answers the class, not 42. The same trick
+    // `new` uses to answer the object rather than what `initialize` returned.
+    stack.push(object);
+
+    if call.block == Value::NIL {
+        return Ok(None);
+    }
+
+    let block = call.block;
+    let inner = Pending {
+        name: call.name,
+        receiver: block,
+        // Ruby yields the new module to the block as well as making it `self`,
+        // so `Module.new { |mod| ... }` and `Module.new { self }` agree.
+        args: vec![object],
+        keywords: Vec::new(),
+        block: Value::NIL,
+        block_is_literal: false,
+        cref: call.cref,
+        target: Target::Block(block),
+    };
+    push_proc_frame(scope, stack, frames, &inner, block, ids)?;
+    let cref = scope.classes_mut().push_eval_cref(inner.cref, id);
+    let last = frames.len() - 1;
+    frames[last].receiver = object;
+    frames[last].cref = cref;
+    frames[last].keeps_receiver = true;
+    Ok(None)
+}
+
+/// The `ClassId` a value may be made the superclass of, or Ruby's refusal.
+fn superclass_of(scope: &mut HandleScope<'_>, value: Value) -> Result<ClassId, Error> {
+    let id = class_id_of(scope, value).filter(|&id| scope.classes().kind(id) == Kind::Class);
+    let Some(id) = id else {
+        return Err(Error::raise(
+            "TypeError",
+            format!(
+                "superclass must be an instance of Class (given an instance of {})",
+                class_name(scope, value)
+            ),
+        ));
+    };
+    // Both of these are a `Class` and so pass the check above, and both are
+    // refused for the same reason: the subclass would need a metaclass Ruby
+    // cannot build. The messages are Ruby's own.
+    if scope.classes().is_singleton(id) {
+        return Err(Error::raise(
+            "TypeError",
+            "can't make subclass of singleton class",
+        ));
+    }
+    if id == Builtin::Class.id() {
+        return Err(Error::raise("TypeError", "can't make subclass of Class"));
+    }
+    Ok(id)
+}
+
+/// Refuse an operation that Ruby would answer by calling a definition hook.
+///
+/// Ruby fires `inherited`, `method_added`, `const_added`, `included`,
+/// `prepended` and their `*_features` partners at the moment a definition
+/// happens. Spinel does not: firing one needs a primitive that pushes the
+/// hook's frame and then carries on with the definition, which a native cannot
+/// do. Going ahead without it would leave a program that watches its own
+/// definitions reporting a state it never reached — silently, and with a green
+/// result — which is strictly worse than saying the VM cannot get there.
+///
+/// That is #15's rule for `singleton_method_added`, generalised. The hooks
+/// themselves are #28's, and this is the list it deletes.
+///
+/// `owner` is the object the hook would be called *on*: the superclass for
+/// `inherited`, the module for `method_added` and `const_added`, the module
+/// being mixed in for `included` and `prepended`. Costs one cached method
+/// lookup per definition, and only a heap where someone wrote a hook refuses.
+fn hook_refusal(
+    scope: &mut HandleScope<'_>,
+    owner: ClassId,
+    hooks: &[(&str, &'static str)],
+) -> Result<(), Error> {
+    // A hook is a singleton method, so a module with no singleton class has no
+    // hook. Asking `singleton_class` would *build* one — an allocation per
+    // definition, and an observable change: `Comparable`'s error messages start
+    // saying `#<Class:Comparable>` the moment one exists. Classes get theirs
+    // eagerly in `define_or_reopen`, so an inherited hook is still found.
+    let Some(meta) = scope.classes().singleton(owner) else {
+        return Ok(());
+    };
+    for (name, what) in hooks {
+        let symbol = crate::shared::symbols::intern(name);
+        if scope.classes_mut().lookup(meta, symbol).is_some() {
+            return Err(Error::Unknowable {
+                what,
+                needs: "the definition hooks (#28)",
+            });
+        }
+    }
+    Ok(())
+}
+
+/// The hook `class C < P` and `Class.new(P)` would fire on `P`.
+fn inherited_refusal(scope: &mut HandleScope<'_>, superclass: ClassId) -> Result<(), Error> {
+    hook_refusal(
+        scope,
+        superclass,
+        &[(
+            "inherited",
+            "`inherited`, which this class definition would fire",
+        )],
+    )
+}
+
+/// Name a class or module that a constant assignment just gave a name to.
+///
+/// Ruby has no `Module#name=`: assigning an anonymous class to a constant is
+/// the naming operation, and the name is the constant's *path*, so
+/// `NS::Inner = Class.new` answers `"NS::Inner"` rather than `"Inner"`.
+///
+/// A no-op for anything that is not a class, and for a class that already has a
+/// name — including one this heap named a moment ago through another constant.
+fn name_if_anonymous(scope: &mut HandleScope<'_>, cbase: ClassId, name: SymbolId, value: Value) {
+    let Some(id) = class_id_of(scope, value) else {
+        return;
+    };
+    if scope.classes().name(id).is_some() {
+        return;
+    }
+    let path = qualified_name(scope, cbase, name);
+    scope.classes_mut().name_if_anonymous(id, &path);
+}
+
 fn qualified_name(scope: &mut HandleScope<'_>, cbase: ClassId, name: SymbolId) -> String {
     let leaf = symbol_name(name);
     match scope.classes().name(cbase) {
@@ -1999,9 +2232,26 @@ fn kind_of(kind: DefKind) -> Kind {
 }
 
 /// The name of a value's class, for a message that has to name a type.
+/// What Ruby's messages mean by "an instance of X".
+///
+/// Singletons are skipped, the same walk `Object#class` does: `Comparable` is
+/// an instance of `Module`, not of `#<Class:Comparable>`, and a module only
+/// grows a singleton when someone defines a method on it — so without the skip
+/// the wording of a `TypeError` would depend on whether anything had.
 fn class_name(scope: &mut HandleScope<'_>, value: Value) -> String {
-    class_of(scope, value)
-        .and_then(|id| scope.classes().name(id).map(str::to_string))
+    let Some(mut id) = class_of(scope, value) else {
+        return inspect(scope, value);
+    };
+    while scope.classes().is_singleton(id) {
+        let Some(up) = scope.classes().superclass(id) else {
+            break;
+        };
+        id = up;
+    }
+    scope
+        .classes()
+        .name(id)
+        .map(str::to_string)
         .unwrap_or_else(|| inspect(scope, value))
 }
 
@@ -2061,8 +2311,9 @@ fn const_base(
 ) -> Result<ClassId, Error> {
     match how {
         // `const_get` walks the chain itself; the innermost scope is only what
-        // a `NameError` would name.
-        ConstScope::Lexical => Ok(scope.classes().cref_class(cref)),
+        // a `NameError` would name. `cref_base`, not `cref_class`: `X = 1` in
+        // the block of `Class.new` writes to the enclosing scope, not the class.
+        ConstScope::Lexical => Ok(scope.classes().cref_base(cref)),
         ConstScope::Top => Ok(Builtin::Object.id()),
         ConstScope::Qualified => {
             let value = stack.pop().expect("a module to look the constant up in");
@@ -2609,11 +2860,14 @@ fn allocate_instance(scope: &mut HandleScope<'_>, id: ClassId) -> Result<Value, 
             Err(Error::Unknowable {
                 what: allocate_refusal(*other),
                 needs: match other {
-                    // `Class.new` and `Module.new` build an *anonymous* class,
-                    // which is a real Ruby operation and the two biggest
-                    // remaining refusals — not a gap in `core/*.rb` at all.
-                    Builtin::Class => "`Class.new`, which builds an anonymous class",
-                    Builtin::Module => "`Module.new`, which builds an anonymous module",
+                    // #162 made `Class.new` and `Module.new` real. What is left
+                    // is `allocate` itself, which in Ruby answers a class that
+                    // is not initialised — `superclass` raises `TypeError:
+                    // uninitialized class` on it and `new` refuses to
+                    // instantiate it. That is the bare-object-wearing-a-class
+                    // hazard #13 shut the door on, so it stays shut.
+                    Builtin::Class => "a class can exist uninitialised (#28)",
+                    Builtin::Module => "`Module.allocate` is a `NoMethodError` in Ruby (#28)",
                     Builtin::Proc => "`Proc.new` can be given the block it is",
                     Builtin::Regexp => "a pattern can be compiled from a run-time value",
                     Builtin::Integer | Builtin::Symbol | Builtin::Float => {
@@ -2790,6 +3044,15 @@ fn native_call<'h>(
             // primitive on them would then misread — `Proc.new` used to reach
             // `Proc#lambda?` and index past the end of the object. `Object` and
             // `BasicObject` really are plain, so they are allowed.
+            // `Class.new` and `Module.new` build a class rather than an
+            // instance of one, so they never reach `allocate` — which is also
+            // Ruby: `core/class/new_spec.rb` pins that a `self.allocate` that
+            // raises is not called. They push a frame when given a block, so
+            // they live here rather than in `allocate_instance`.
+            if id == Builtin::Class.id() || id == Builtin::Module.id() {
+                return anonymous_module(scope, stack, frames, &call, id, ids);
+            }
+
             // An exception class is allocatable: `raise ArgumentError.new("x")`
             // and `rescue Klass => e` are everywhere in the corpus, and the
             // representation is two slots this module owns rather than one
@@ -3461,6 +3724,29 @@ fn native_call<'h>(
                         ),
                     ));
                 };
+                // Ruby calls `module.append_features(target)` and then
+                // `module.included(target)` — `prepend_features`/`prepended`
+                // for the other end — and both are overridable, so a module
+                // that defines `append_features` decides its own splice.
+                // Splicing anyway would be a wrong ancestry, not a missing one.
+                let hooks: &[(&str, &'static str)] = if prepend {
+                    &[
+                        (
+                            "prepend_features",
+                            "`prepend_features`, which decides this splice",
+                        ),
+                        ("prepended", "`prepended`, which this prepend would fire"),
+                    ]
+                } else {
+                    &[
+                        (
+                            "append_features",
+                            "`append_features`, which decides this splice",
+                        ),
+                        ("included", "`included`, which this include would fire"),
+                    ]
+                };
+                hook_refusal(scope, module, hooks)?;
                 let how = if prepend {
                     scope.classes_mut().prepend(target, module)
                 } else {

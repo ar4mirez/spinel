@@ -195,6 +195,23 @@ jobs:
           ruby-version: '4.0'
       - run: ruby scripts/eval-oracle.rb --check
 
+  # `Class.new` is four rules that read like one, and three of them run
+  # backwards from intuition: the block moves `self` without moving the lexical
+  # scope, so a constant on the superclass is a NameError inside it; only the
+  # *first* constant assignment names a class; and `inherited` fires before the
+  # block, not after. `tests/anonymous.rs` holds Spinel to the table; this job
+  # holds the table to Ruby.
+  anonymous:
+    name: anonymous class oracle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@v1
+        with:
+          # The language version this build implements.
+          ruby-version: '4.0'
+      - run: ruby scripts/anonymous-oracle.rb --check
+
   # Ruby's regex dialect is Onigmo's, and the parts of it that matter are the
   # parts nobody would guess: `\w` is ASCII while `[[:alpha:]]` is not, `^` is a
   # line anchor that still does not match after a trailing newline, and an empty

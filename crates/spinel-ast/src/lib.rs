@@ -518,6 +518,13 @@ pub struct CallFlags {
     pub ignore_visibility: bool,
     /// The call had parentheses. `foo()` and `foo` differ to `super`.
     pub has_parens: bool,
+    /// The call was written as an assignment: `a.b = v`, `a[k] = v`, and the
+    /// parenthesised `a.b=(v)`. Such a call evaluates to the value assigned,
+    /// never to what the writer method returned — `def b=(*) = 1` still makes
+    /// `(a.b = "x")` answer `"x"`. `a.send(:b=, "x")` is not one of these and
+    /// does answer 1, which is why this is a flag from the parser rather than
+    /// a test on the method name.
+    pub attribute_write: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]

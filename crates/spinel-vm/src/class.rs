@@ -102,6 +102,29 @@ struct CrefNode {
     class: ClassId,
     /// `None` only for [`CrefId::ROOT`].
     parent: Option<CrefId>,
+    /// Whether this node was pushed by an eval-shaped construct — `Class.new`'s
+    /// block, and `module_eval`/`class_eval`/`instance_eval` when #28 adds them.
+    ///
+    /// Such a node is the **definee** without being the **lexical scope**, which
+    /// in Ruby are two jobs one `CrefId` was doing here. Measured, in
+    /// `crates/spinel-vm/tests/anonymous.txt`:
+    ///
+    /// ```ruby
+    /// class P; CV = 1; end
+    /// k = Class.new(P) do
+    ///   def foo; end        # defined on k
+    ///   [1].each { def deep; end }  # also on k — a nested block keeps it
+    ///   CV                  # NameError: the block does not see P's constants
+    ///   ASSIGNED = 1        # lands at top level, not on k
+    ///   class Deep; end     # also top level: `Deep`, not `#<Class:0x..>::Deep`
+    /// end
+    /// ```
+    ///
+    /// So [`Classes::cref_class`] reads this node and [`Classes::const_get`],
+    /// [`Classes::cref_base`], and everything that resolves a bare name skip it.
+    /// That is CRuby's `CREF_PUSHED_BY_EVAL`, and it is the same flag for the
+    /// same reason.
+    pushed_by_eval: bool,
 }
 
 /// Whether `include` accepts it, and whether it can have a superclass.
@@ -546,6 +569,22 @@ impl Classes {
         self.entry(id).name.as_deref()
     }
 
+    /// Give an anonymous class or module the name a constant just gave it, and
+    /// answer whether it took one.
+    ///
+    /// `Foo = Class.new` makes `Foo.name` `"Foo"`, but only the first
+    /// assignment does: `A = Class.new; B = A` leaves both answering `"A"`.
+    /// That is why this is `_if_anonymous` and not a setter — the second
+    /// assignment has to be a no-op, not a rename.
+    pub fn name_if_anonymous(&mut self, id: ClassId, name: &str) -> bool {
+        let entry = self.entry_mut(id);
+        if entry.name.is_some() {
+            return false;
+        }
+        entry.name = Some(Box::from(name));
+        true
+    }
+
     pub fn superclass(&self, id: ClassId) -> Option<ClassId> {
         self.entry(id).superclass
     }
@@ -705,7 +744,12 @@ impl Classes {
         let mut scope = Some(cref);
         while let Some(c) = scope {
             let node = self.cref(c);
-            if let Some(value) = self.const_get_here(node.class, name) {
+            // A node pushed by eval is a definee, not a lexical scope: the body
+            // of `Class.new(P) { CV }` is a `NameError` even when `P::CV` is
+            // there. See [`CrefNode::pushed_by_eval`].
+            if !node.pushed_by_eval
+                && let Some(value) = self.const_get_here(node.class, name)
+            {
                 return Some(value);
             }
             scope = node.parent;
@@ -714,7 +758,10 @@ impl Classes {
         // Step 2 searches the whole chain including `Object` — a class body
         // does reach a top-level constant through its superclass — which is why
         // this is not `const_get_qualified`, whose skip is `A::X`'s rule alone.
-        let innermost = self.cref(cref).class;
+        //
+        // The innermost *lexical* scope, so the ancestors searched are the ones
+        // the code was written inside rather than a class an eval node named.
+        let innermost = self.cref_base(cref);
         let object = Builtin::Object.id();
         let ancestors = self.ancestors(innermost);
         if let Some(value) = ancestors.iter().find_map(|&c| self.const_get_here(c, name)) {
@@ -742,16 +789,48 @@ impl Classes {
         self.cref(cref).parent
     }
 
+    /// The innermost module a *name* resolves against, skipping eval nodes.
+    ///
+    /// Where [`Classes::cref_class`] answers "what does `def` define on",
+    /// this answers "what does `X` look in, and what does `X = 1` write to".
+    /// They differ only inside an eval node; see [`CrefNode::pushed_by_eval`].
+    #[must_use]
+    pub fn cref_base(&self, cref: CrefId) -> ClassId {
+        let mut scope = Some(cref);
+        while let Some(c) = scope {
+            let node = self.cref(c);
+            if !node.pushed_by_eval {
+                return node.class;
+            }
+            scope = node.parent;
+        }
+        // Unreachable while `ROOT` is the only parentless node and is not an
+        // eval node, but a wrong answer here is a silently misplaced constant.
+        Builtin::Object.id()
+    }
+
     /// Open a scope for `class` nested inside `outer`.
     ///
     /// Nodes are never freed: a scope lives as long as the bodies compiled
     /// inside it, which is as long as the heap. One `u64` per `class` keyword
     /// executed, and `class` inside a loop reopens rather than re-pushing.
     pub fn push_cref(&mut self, outer: CrefId, class: ClassId) -> CrefId {
+        self.push_cref_node(outer, class, false)
+    }
+
+    /// Open a scope that is the definee but not the lexical scope: the block of
+    /// `Class.new`, and the `*_eval` family when #28 lands. See
+    /// [`CrefNode::pushed_by_eval`].
+    pub fn push_eval_cref(&mut self, outer: CrefId, class: ClassId) -> CrefId {
+        self.push_cref_node(outer, class, true)
+    }
+
+    fn push_cref_node(&mut self, outer: CrefId, class: ClassId, pushed_by_eval: bool) -> CrefId {
         let id = CrefId(self.crefs.len() as u32);
         self.crefs.push(CrefNode {
             class,
             parent: Some(outer),
+            pushed_by_eval,
         });
         id
     }
@@ -764,6 +843,7 @@ impl Classes {
         self.crefs.push(CrefNode {
             class: Builtin::Object.id(),
             parent: None,
+            pushed_by_eval: false,
         });
     }
 
