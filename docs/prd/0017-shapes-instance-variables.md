@@ -153,6 +153,12 @@ That is worse than a failure: the same hole would as happily have produced a *pa
 
 `eval.rs` bootstrapped a heap without `core/*.rb`, so moving `Exception#message` into Ruby broke seven of its rows. The fix is one line — the test boots the core library, as `anonymous.rs` and `bytecode.rs` already do — and it is the right direction anyway: a table that measured the VM without its core library was measuring a language nobody runs. `spinel-core` was already a dev-dependency for exactly this.
 
+### Editing `core/*.rb` did not rebuild the crate that embeds it
+
+`spinel-core` pulls every `core/*.rb` in with `include_str!`, and Cargo does not track those paths: editing `core/hash.rb` rebuilt `spinel-cli` and left `spinel-core` alone, so the binary went on running the *previous* core library. It cost two debugging passes here — a method moved into Ruby simply did not exist — before it was believed rather than worked around with a `touch`.
+
+`crates/spinel-core/build.rs` is five lines and one `cargo:rerun-if-changed`. It watches the directory rather than each file, so a new `core/*.rb` counts too. A stale core library that still builds and still runs is the worst shape a build bug can take, and it will bite harder as more of the language moves into Ruby.
+
 ### What is skipped, and why
 
 - **Ivars on `Array`, `String`, `Proc`, `Regexp`, `MatchData`.** A slot per object to serve a case ruby/spec barely exercises. The refusal names the class, so the ranking will say when one starts to matter.
