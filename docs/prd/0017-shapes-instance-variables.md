@@ -153,6 +153,19 @@ That is worse than a failure: the same hole would as happily have produced a *pa
 
 `eval.rs` bootstrapped a heap without `core/*.rb`, so moving `Exception#message` into Ruby broke seven of its rows. The fix is one line — the test boots the core library, as `anonymous.rs` and `bytecode.rs` already do — and it is the right direction anyway: a table that measured the VM without its core library was measuring a language nobody runs. `spinel-core` was already a dev-dependency for exactly this.
 
+### Dispatch, measured
+
+`class_of` runs on every method call, and this slice moved the id it reads from a fixed slot to an ivar behind a shape. That is a deref and a walk added to the hottest path in the VM, so it was measured rather than assumed — 3,000,000 sends of `c.m(i)` on a user-defined class, six runs each, against the binary built from `5f80637`:
+
+```
+base   0.67  0.67  0.67  0.67  0.67  0.69
+new    0.64  0.64  0.64  0.64  0.65  0.65
+```
+
+The first attempt was 4% *slower*, and the cause was not the shape walk: `class_of` was calling `symbols::intern("@__id__")` per dispatch — a read lock plus a hash lookup on a process-global table. Interning it once behind a `OnceLock` recovered the whole difference and then some. The chain of one shape link and two slot reads costs less than the fixed-slot version it replaced, which is not a claim worth defending in either direction — the honest reading is that it is a wash.
+
+There is no `bench/` yet, so this is an ad-hoc measurement rather than a tracked one. It belongs in #147's page when that lands.
+
 ### Editing `core/*.rb` did not rebuild the crate that embeds it
 
 `spinel-core` pulls every `core/*.rb` in with `include_str!`, and Cargo does not track those paths: editing `core/hash.rb` rebuilt `spinel-cli` and left `spinel-core` alone, so the binary went on running the *previous* core library. It cost two debugging passes here — a method moved into Ruby simply did not exist — before it was believed rather than worked around with a `touch`.
