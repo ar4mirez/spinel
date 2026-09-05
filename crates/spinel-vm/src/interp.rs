@@ -37,7 +37,7 @@ use std::sync::Arc;
 
 use crate::bytecode::{
     BinOp, BlockRef, CallSite, CatchKind, ClassDef, ConstScope, DefKind, Insn, Iseq, Literal,
-    ParamSpec,
+    MatchRef, ParamSpec,
 };
 use crate::class::Builtin;
 use crate::class::{ClassId, CrefId, Kind};
@@ -624,6 +624,11 @@ pub fn eval_in(
                         scope.set_slot(handle, index, value);
                     }
                     stack.push(scope.get(handle));
+                }
+
+                Insn::LastMatch(which) => {
+                    let value = last_match_part(scope, &which)?;
+                    stack.push(value);
                 }
 
                 Insn::CaseEq => {
@@ -2564,6 +2569,125 @@ fn native_call<'h>(
             Ok(None)
         }
 
+        // -- regexps ----------------------------------------------------
+        //
+        // Every matcher but `match?` sets `$~`, which is why they go through
+        // one helper rather than each doing its own thing.
+        Native::RegexpMatchOp | Native::StringMatchOp => {
+            let (regexp, subject) = match native {
+                Native::RegexpMatchOp => (call.receiver, first_arg(&call)),
+                _ => (first_arg(&call), call.receiver),
+            };
+            // `"str" =~ "str"` is a TypeError in Ruby, not a comparison.
+            if !is_regexp(scope, regexp) {
+                return Err(Error::Raise {
+                    class: "TypeError",
+                    message: format!("type mismatch: {} given", class_name_of(scope, regexp)),
+                });
+            }
+            let data = regexp_match_value(scope, regexp, subject)?;
+            let answer = match match_parts(scope, data) {
+                Some((_, text, groups)) => match groups.first().copied().flatten() {
+                    Some((start, _)) => Value::fixnum(char_offset(&text, start))
+                        .expect("a character offset fits a fixnum"),
+                    None => Value::NIL,
+                },
+                None => Value::NIL,
+            };
+            stack.push(answer);
+            Ok(None)
+        }
+        Native::RegexpMatch | Native::StringMatch => {
+            let (regexp, subject) = match native {
+                Native::RegexpMatch => (call.receiver, first_arg(&call)),
+                _ => (first_arg(&call), call.receiver),
+            };
+            let data = regexp_match_from(scope, regexp, subject, nth_arg(&call, 1))?;
+            stack.push(data);
+            Ok(None)
+        }
+        Native::RegexpCaseEq => {
+            let data = regexp_match_value(scope, call.receiver, first_arg(&call))?;
+            stack.push(bool_value(data != Value::NIL));
+            Ok(None)
+        }
+        Native::RegexpMatchP | Native::StringMatchP => {
+            let (regexp, subject) = match native {
+                Native::RegexpMatchP => (call.receiver, first_arg(&call)),
+                _ => (first_arg(&call), call.receiver),
+            };
+            // `match?` is the one that does not touch `$~`, so the previous
+            // match has to survive it.
+            let saved = scope.last_match();
+            let data = regexp_match_from(scope, regexp, subject, nth_arg(&call, 1))?;
+            scope.set_last_match(saved);
+            stack.push(bool_value(data != Value::NIL));
+            Ok(None)
+        }
+        Native::RegexpSource | Native::RegexpOptions => {
+            let slot = if matches!(native, Native::RegexpSource) {
+                crate::regexp::REGEXP_SOURCE
+            } else {
+                crate::regexp::REGEXP_OPTIONS
+            };
+            if !is_regexp(scope, call.receiver) {
+                return Err(Error::NoDispatch {
+                    op: "source",
+                    operands: "a receiver that is not a Regexp",
+                });
+            }
+            let mut nested = scope.nested();
+            let handle = nested.root(call.receiver);
+            let value = nested.slot(handle, slot);
+            stack.push(value);
+            Ok(None)
+        }
+        Native::RegexpToS { inspect } => {
+            let Some(program) = regexp_program(scope, call.receiver) else {
+                return Err(Error::NoDispatch {
+                    op: "to_s",
+                    operands: "a receiver that is not a Regexp",
+                });
+            };
+            let text = if inspect {
+                // `%r{/foo/bar}.inspect` is `/\/foo\/bar/`: a slash that the
+                // source did not escape has to be escaped now, or the result
+                // does not read back as the same literal.
+                format!(
+                    "/{}/{}",
+                    escape_slashes(program.source()),
+                    program.flags().to_letters()
+                )
+            } else {
+                // `(?mix-mix:source)`: every flag named, on one side or the
+                // other, which is what makes two `to_s` strings comparable.
+                let on = program.flags().to_letters();
+                let off: String = "mix".chars().filter(|c| !on.contains(*c)).collect();
+                let dash = if off.is_empty() { "" } else { "-" };
+                format!("(?{on}{dash}{off}:{})", program.source())
+            };
+            let value = string_new(scope, &text);
+            stack.push(value);
+            Ok(None)
+        }
+
+        // -- match data -------------------------------------------------
+        Native::MatchIndex
+        | Native::MatchToA { .. }
+        | Native::MatchAround { .. }
+        | Native::MatchEdge { .. }
+        | Native::MatchSize => {
+            let Some((regexp, text, groups)) = match_parts(scope, call.receiver) else {
+                return Err(Error::NoDispatch {
+                    op: "[]",
+                    operands: "a receiver that is not a MatchData",
+                });
+            };
+            let value = match_answer(scope, native, &call, regexp, &text, &groups)?;
+            stack.push(value);
+            Ok(None)
+        }
+
         Native::ExceptionMessage => {
             let message = exception_message(scope, call.receiver);
             let value = string_new(scope, &message);
@@ -2742,6 +2866,57 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             &["backtrace"],
             Native::ExceptionBacktrace,
         ),
+        (Builtin::Regexp, &["=~"], Native::RegexpMatchOp),
+        (Builtin::Regexp, &["match"], Native::RegexpMatch),
+        (Builtin::Regexp, &["match?"], Native::RegexpMatchP),
+        (Builtin::Regexp, &["==="], Native::RegexpCaseEq),
+        (Builtin::Regexp, &["source"], Native::RegexpSource),
+        (Builtin::Regexp, &["options"], Native::RegexpOptions),
+        (
+            Builtin::Regexp,
+            &["to_s"],
+            Native::RegexpToS { inspect: false },
+        ),
+        (
+            Builtin::Regexp,
+            &["inspect"],
+            Native::RegexpToS { inspect: true },
+        ),
+        (Builtin::String, &["=~"], Native::StringMatchOp),
+        (Builtin::String, &["match"], Native::StringMatch),
+        (Builtin::String, &["match?"], Native::StringMatchP),
+        (Builtin::MatchData, &["[]"], Native::MatchIndex),
+        (
+            Builtin::MatchData,
+            &["to_a"],
+            Native::MatchToA { captures: false },
+        ),
+        (
+            Builtin::MatchData,
+            &["captures"],
+            Native::MatchToA { captures: true },
+        ),
+        (
+            Builtin::MatchData,
+            &["pre_match"],
+            Native::MatchAround { post: false },
+        ),
+        (
+            Builtin::MatchData,
+            &["post_match"],
+            Native::MatchAround { post: true },
+        ),
+        (
+            Builtin::MatchData,
+            &["begin"],
+            Native::MatchEdge { end: false },
+        ),
+        (
+            Builtin::MatchData,
+            &["end"],
+            Native::MatchEdge { end: true },
+        ),
+        (Builtin::MatchData, &["size", "length"], Native::MatchSize),
         (Builtin::Kernel, &["equal?"], Native::Equal),
         (Builtin::Kernel, &["nil?"], Native::NilP),
     ];
@@ -2791,6 +2966,7 @@ fn materialise<'h>(
             op: "Integer",
             operands: "a value wider than a fixnum",
         }),
+        Literal::Regexp { source, options } => regexp_literal(scope, source, *options),
         Literal::Str(bytes) => {
             let len = u32::try_from(bytes.len()).map_err(|_| Error::NoDispatch {
                 op: "String",
@@ -2997,6 +3173,11 @@ pub fn ruby_eq(scope: &mut HandleScope<'_>, left: Value, right: Value) -> Result
 /// `===`, which is `==` for every type this slice has and is deliberately *not*
 /// assumed to be for the ones it does not.
 fn case_eq(scope: &mut HandleScope<'_>, condition: Value, subject: Value) -> Result<bool, Error> {
+    // `when /re/` is `Regexp#===`, which matches and sets `$~` rather than
+    // comparing. The first `when` condition in this VM that is not `==`.
+    if is_regexp(scope, condition) {
+        return Ok(regexp_match_value(scope, condition, subject)? != Value::NIL);
+    }
     if !condition.is_immediate() && heap_kind(scope, condition).is_none() {
         // A Range, Class, Regexp, or Proc in `when` position means something
         // other than `==`, and getting it wrong would pass a spec for the wrong
@@ -3092,6 +3273,468 @@ pub fn inspect(scope: &mut HandleScope<'_>, value: Value) -> String {
             }
         },
     }
+}
+
+// -- regexps ---------------------------------------------------------------
+//
+// A `Regexp` object is three slots: an index into the heap's compiled table,
+// the source as a `String`, and the options as a fixnum. A `MatchData` is
+// three more: the regexp, the subject, and an `Array` of byte offsets, two per
+// group, with `nil` where a group took no part.
+//
+// Byte offsets in the array, character offsets out of `#begin` and `#end`,
+// because the subject is right there to convert with and storing both would
+// mean keeping them in step.
+
+/// What a refusal from the regex engine means to the VM.
+fn regexp_error(error: &spinel_regex::Error) -> Error {
+    match error {
+        spinel_regex::Error::Syntax(message) => Error::Raise {
+            class: "RegexpError",
+            message: message.clone(),
+        },
+        // Never a wrong answer: the harness reports the example blocked.
+        spinel_regex::Error::Unsupported(what) => Error::Unknowable {
+            what,
+            needs: "the rest of the Onigmo dialect",
+        },
+        spinel_regex::Error::Budget => Error::Budget,
+    }
+}
+
+/// A regexp literal, compiled once and cached.
+///
+/// Ruby answers the *same* object every time a literal without interpolation is
+/// evaluated — `rs[0].should.equal?(rs[1])` in `regexp_spec.rb` — so the cache
+/// is a correctness requirement rather than an optimisation.
+fn regexp_literal(scope: &mut HandleScope<'_>, source: &str, options: i64) -> Result<Value, Error> {
+    if let Some(cached) = scope.regexps().cached(source, options) {
+        return Ok(cached);
+    }
+    let value = regexp_new(scope, source, options)?;
+    scope.regexps_mut().cache(source, options, value);
+    Ok(value)
+}
+
+/// Compile `source` and wrap it in a `Regexp` object.
+fn regexp_new(scope: &mut HandleScope<'_>, source: &str, options: i64) -> Result<Value, Error> {
+    let index = scope
+        .regexps_mut()
+        .add(source, options)
+        .map_err(|e| regexp_error(&e))?;
+    let text = string_new(scope, source);
+    let class = class_handle(scope, Builtin::Regexp);
+    let (payload, slots) = crate::regexp::regexp_shape();
+    let mut nested = scope.nested();
+    let text = nested.root(text);
+    let handle = nested.alloc(Some(class), payload, slots);
+    let index = Value::fixnum(i64::try_from(index).unwrap_or(i64::MAX))
+        .expect("a regexp table index fits a fixnum");
+    nested.set_slot(handle, crate::regexp::REGEXP_INDEX, index);
+    let text = nested.get(text);
+    nested.set_slot(handle, crate::regexp::REGEXP_SOURCE, text);
+    nested.set_slot(
+        handle,
+        crate::regexp::REGEXP_OPTIONS,
+        Value::fixnum(options).expect("regexp options fit a fixnum"),
+    );
+    Ok(nested.get(handle))
+}
+
+fn is_builtin(scope: &mut HandleScope<'_>, value: Value, builtin: Builtin) -> bool {
+    class_of(scope, value) == Some(builtin.id())
+}
+
+fn is_regexp(scope: &mut HandleScope<'_>, value: Value) -> bool {
+    is_builtin(scope, value, Builtin::Regexp)
+}
+
+/// The compiled pattern behind a `Regexp` object.
+fn regexp_program(
+    scope: &mut HandleScope<'_>,
+    value: Value,
+) -> Option<std::sync::Arc<spinel_regex::Regex>> {
+    if !is_regexp(scope, value) {
+        return None;
+    }
+    let mut nested = scope.nested();
+    let handle = nested.root(value);
+    let index = nested
+        .slot(handle, crate::regexp::REGEXP_INDEX)
+        .as_fixnum()?;
+    let index = usize::try_from(index).ok()?;
+    nested.regexps().get(index).map(std::sync::Arc::clone)
+}
+
+/// A `String` object's text, when it is one and it is UTF-8.
+fn string_text(scope: &mut HandleScope<'_>, value: Value) -> Option<String> {
+    let bytes = string_bytes(scope, value)?;
+    String::from_utf8(bytes).ok()
+}
+
+/// Match `regexp` against `subject`, answer a `MatchData` or nil, and set `$~`.
+fn regexp_match_value(
+    scope: &mut HandleScope<'_>,
+    regexp: Value,
+    subject: Value,
+) -> Result<Value, Error> {
+    regexp_match_from(scope, regexp, subject, Value::NIL)
+}
+
+/// The same, from a starting position.
+///
+/// `pos` is in *characters* and may be negative, counting back from the end —
+/// `Regexp#match` and `String#match` both take one, and both spell it that way.
+fn regexp_match_from(
+    scope: &mut HandleScope<'_>,
+    regexp: Value,
+    subject: Value,
+    pos: Value,
+) -> Result<Value, Error> {
+    let Some(program) = regexp_program(scope, regexp) else {
+        return Err(Error::NoDispatch {
+            op: "=~",
+            operands: "a receiver that is not a Regexp",
+        });
+    };
+    // `/re/ =~ nil` is nil in Ruby, not a TypeError.
+    if subject == Value::NIL {
+        scope.set_last_match(Value::NIL);
+        return Ok(Value::NIL);
+    }
+    let Some(text) = string_text(scope, subject) else {
+        return Err(Error::Raise {
+            class: "TypeError",
+            message: format!(
+                "no implicit conversion of {} into String",
+                class_name_of(scope, subject)
+            ),
+        });
+    };
+
+    // A position past either end of the subject is no match at all, rather
+    // than an error.
+    let start = match pos {
+        Value::NIL => 0,
+        _ => {
+            let Some(n) = pos.as_fixnum() else {
+                return Err(Error::Raise {
+                    class: "TypeError",
+                    message: format!(
+                        "no implicit conversion of {} into Integer",
+                        class_name_of(scope, pos)
+                    ),
+                });
+            };
+            let chars = text.chars().count() as i64;
+            let from = if n < 0 { chars + n } else { n };
+            if from < 0 || from > chars {
+                scope.set_last_match(Value::NIL);
+                return Ok(Value::NIL);
+            }
+            byte_offset(&text, from as usize)
+        }
+    };
+
+    let found = program
+        .find_at(&text, start)
+        .map_err(|e| regexp_error(&e))?;
+    let Some(caps) = found else {
+        scope.set_last_match(Value::NIL);
+        return Ok(Value::NIL);
+    };
+
+    let mut offsets = Vec::with_capacity(caps.len() * 2);
+    for group in 0..caps.len() {
+        match caps.group(group) {
+            Some((start, end)) => {
+                offsets.push(
+                    Value::fixnum(i64::try_from(start).unwrap_or(i64::MAX))
+                        .expect("an offset fits a fixnum"),
+                );
+                offsets.push(
+                    Value::fixnum(i64::try_from(end).unwrap_or(i64::MAX))
+                        .expect("an offset fits a fixnum"),
+                );
+            }
+            None => {
+                offsets.push(Value::NIL);
+                offsets.push(Value::NIL);
+            }
+        }
+    }
+
+    let data = match_data_new(scope, regexp, subject, &offsets);
+    scope.set_last_match(data);
+    Ok(data)
+}
+
+fn match_data_new(
+    scope: &mut HandleScope<'_>,
+    regexp: Value,
+    subject: Value,
+    offsets: &[Value],
+) -> Value {
+    let array = new_array(scope, offsets);
+    let class = class_handle(scope, Builtin::MatchData);
+    let (payload, slots) = crate::regexp::match_shape();
+    let mut nested = scope.nested();
+    let array = nested.root(array);
+    let handle = nested.alloc(Some(class), payload, slots);
+    nested.set_slot(handle, crate::regexp::MATCH_REGEXP, regexp);
+    nested.set_slot(handle, crate::regexp::MATCH_SUBJECT, subject);
+    let array = nested.get(array);
+    nested.set_slot(handle, crate::regexp::MATCH_OFFSETS, array);
+    nested.get(handle)
+}
+
+/// A `MatchData`'s three parts: its regexp, its subject text, and the byte
+/// range each group covered.
+type MatchParts = (Value, String, Vec<Option<(usize, usize)>>);
+
+/// A `MatchData`'s three parts: its regexp, its subject text, and its offsets.
+fn match_parts(scope: &mut HandleScope<'_>, value: Value) -> Option<MatchParts> {
+    if !is_builtin(scope, value, Builtin::MatchData) {
+        return None;
+    }
+    let (regexp, subject, offsets) = {
+        let mut nested = scope.nested();
+        let handle = nested.root(value);
+        (
+            nested.slot(handle, crate::regexp::MATCH_REGEXP),
+            nested.slot(handle, crate::regexp::MATCH_SUBJECT),
+            nested.slot(handle, crate::regexp::MATCH_OFFSETS),
+        )
+    };
+    let text = string_text(scope, subject)?;
+    let raw = array_elements(scope, offsets)?;
+    let groups = raw
+        .chunks(2)
+        .map(
+            |pair| match (pair.first()?.as_fixnum(), pair.get(1)?.as_fixnum()) {
+                (Some(start), Some(end)) => Some((start as usize, end as usize)),
+                _ => None,
+            },
+        )
+        .collect();
+    Some((regexp, text, groups))
+}
+
+/// One of `$~`, `$&`, `` $` ``, `$'`, `$1`..`$n`, read off the last match.
+fn last_match_part(scope: &mut HandleScope<'_>, which: &MatchRef) -> Result<Value, Error> {
+    let data = scope.last_match();
+    if matches!(which, MatchRef::Data) {
+        return Ok(data);
+    }
+    if data == Value::NIL {
+        return Ok(Value::NIL);
+    }
+    let Some((_, text, groups)) = match_parts(scope, data) else {
+        return Ok(Value::NIL);
+    };
+    let whole = groups.first().copied().flatten();
+    let slice = match which {
+        MatchRef::Data => unreachable!("answered above"),
+        MatchRef::Whole => whole,
+        MatchRef::Pre => whole.map(|(start, _)| (0, start)),
+        MatchRef::Post => whole.map(|(_, end)| (end, text.len())),
+        // `$10` is group 10 when the pattern has one, and nil otherwise.
+        MatchRef::Group(n) => groups.get(*n as usize).copied().flatten(),
+    };
+    Ok(match slice {
+        Some((start, end)) => string_new(scope, &text[start..end]),
+        None => Value::NIL,
+    })
+}
+
+/// Ruby reports match offsets in characters; the engine works in bytes.
+fn char_offset(text: &str, byte: usize) -> i64 {
+    i64::try_from(text[..byte.min(text.len())].chars().count()).unwrap_or(i64::MAX)
+}
+
+/// The first argument of a call, or nil when it was given none.
+fn first_arg(call: &Pending) -> Value {
+    nth_arg(call, 0)
+}
+
+fn nth_arg(call: &Pending, n: usize) -> Value {
+    call.args.get(n).copied().unwrap_or(Value::NIL)
+}
+
+/// Ruby counts positions in characters; the engine works in bytes.
+fn byte_offset(text: &str, chars: usize) -> usize {
+    text.char_indices()
+        .nth(chars)
+        .map_or(text.len(), |(i, _)| i)
+}
+
+/// Escape any `/` the source left bare, for `Regexp#inspect`.
+fn escape_slashes(source: &str) -> String {
+    let mut out = String::with_capacity(source.len());
+    let mut escaped = false;
+    for c in source.chars() {
+        if c == '/' && !escaped {
+            out.push('\\');
+        }
+        escaped = c == '\\' && !escaped;
+        out.push(c);
+    }
+    out
+}
+
+/// The `MatchData` readers, which all work off the same three parts.
+fn match_answer(
+    scope: &mut HandleScope<'_>,
+    native: Native,
+    call: &Pending,
+    regexp: Value,
+    text: &str,
+    groups: &[Option<(usize, usize)>],
+) -> Result<Value, Error> {
+    let whole = groups.first().copied().flatten();
+    match native {
+        Native::MatchSize => Ok(
+            Value::fixnum(i64::try_from(groups.len()).unwrap_or(i64::MAX))
+                .expect("a group count fits a fixnum"),
+        ),
+
+        Native::MatchAround { post } => {
+            let slice = match (whole, post) {
+                (Some((_, end)), true) => (end, text.len()),
+                (Some((start, _)), false) => (0, start),
+                (None, _) => return Ok(Value::NIL),
+            };
+            Ok(string_new(scope, &text[slice.0..slice.1]))
+        }
+
+        Native::MatchEdge { end } => {
+            let index = match_group_index(scope, call, regexp)?;
+            // `#begin` is stricter than `#[]`: a group number the pattern does
+            // not have is an IndexError rather than nil.
+            if index >= groups.len() {
+                return Err(Error::Raise {
+                    class: "IndexError",
+                    message: format!("index {index} out of matches"),
+                });
+            }
+            Ok(match groups.get(index).copied().flatten() {
+                Some((start, stop)) => {
+                    let byte = if end { stop } else { start };
+                    Value::fixnum(char_offset(text, byte)).expect("an offset fits a fixnum")
+                }
+                None => Value::NIL,
+            })
+        }
+
+        Native::MatchToA { captures } => {
+            // `to_a` leads with the whole match; `captures` does not.
+            let skip = usize::from(captures);
+            let elements: Vec<Value> = groups
+                .iter()
+                .skip(skip)
+                .map(|group| match group {
+                    Some((start, end)) => string_new(scope, &text[*start..*end]),
+                    None => Value::NIL,
+                })
+                .collect();
+            Ok(new_array(scope, &elements))
+        }
+
+        Native::MatchIndex => {
+            // `m[start, length]` slices the group list, the way `Array#[]`
+            // does, rather than naming one group.
+            if call.args.len() == 2 {
+                let (Some(start), Some(length)) =
+                    (first_arg(call).as_fixnum(), nth_arg(call, 1).as_fixnum())
+                else {
+                    return Err(Error::Raise {
+                        class: "TypeError",
+                        message: "no implicit conversion into Integer".to_owned(),
+                    });
+                };
+                let count = groups.len() as i64;
+                let from = if start < 0 { count + start } else { start };
+                if from < 0 || from > count || length < 0 {
+                    return Ok(Value::NIL);
+                }
+                let upto = (from + length).min(count);
+                let elements: Vec<Value> = groups[from as usize..upto as usize]
+                    .iter()
+                    .map(|group| match group {
+                        Some((s, e)) => string_new(scope, &text[*s..*e]),
+                        None => Value::NIL,
+                    })
+                    .collect();
+                return Ok(new_array(scope, &elements));
+            }
+            let index = match_group_index(scope, call, regexp)?;
+            Ok(match groups.get(index).copied().flatten() {
+                Some((start, end)) => string_new(scope, &text[start..end]),
+                None => Value::NIL,
+            })
+        }
+
+        _ => Err(Error::NoDispatch {
+            op: "MatchData",
+            operands: "a reader this slice does not have",
+        }),
+    }
+}
+
+/// The group a `MatchData` reader was asked for: a number, or a capture name.
+fn match_group_index(
+    scope: &mut HandleScope<'_>,
+    call: &Pending,
+    regexp: Value,
+) -> Result<usize, Error> {
+    let key = first_arg(call);
+    if let Some(n) = key.as_fixnum() {
+        // A negative index counts back from the end, as everywhere else.
+        return usize::try_from(n).map_err(|_| Error::Raise {
+            class: "IndexError",
+            message: format!("index {n} out of matches"),
+        });
+    }
+    // `m[:name]` and `m["name"]` both work in Ruby.
+    let name = match key.as_symbol() {
+        Some(id) => Some(symbol_name(id)),
+        None => string_text(scope, key),
+    };
+    let Some(name) = name else {
+        return Err(Error::Raise {
+            class: "TypeError",
+            message: format!(
+                "no implicit conversion of {} into Integer",
+                class_name_of(scope, key)
+            ),
+        });
+    };
+    let Some(program) = regexp_program(scope, regexp) else {
+        return Err(Error::NoDispatch {
+            op: "[]",
+            operands: "a MatchData whose regexp is gone",
+        });
+    };
+    let candidates = program.groups_named(&name);
+    if candidates.is_empty() {
+        return Err(Error::Raise {
+            class: "IndexError",
+            message: format!("undefined group name reference: {name}"),
+        });
+    }
+    // One name may label several groups. Ruby answers the *farthest* one that
+    // took part — "returns the last match when multiple named matches exist
+    // with the same name" — so the search runs from the back.
+    let matched = match_parts(scope, call.receiver)
+        .map(|(_, _, groups)| groups)
+        .and_then(|groups| {
+            candidates
+                .iter()
+                .rev()
+                .copied()
+                .find(|&g| groups.get(g).copied().flatten().is_some())
+        });
+    Ok(matched.unwrap_or_else(|| candidates.last().copied().expect("just checked non-empty")))
 }
 
 #[cfg(test)]

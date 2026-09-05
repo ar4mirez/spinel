@@ -1,0 +1,13 @@
+# Examples this engine refuses to run, and why.
+#
+# Read by `spec/harness`. One `full description<TAB>reason` per line, where the
+# description is the one mspec prints: every enclosing `describe`, then the
+# `it`, joined by spaces.
+#
+# This file is not an expected-failure list. An example here is reported
+# *skipped* with its reason, never passed and never failed, and every entry
+# names a specific engine gap with the slice that closes it. Nothing is added
+# here to make a run green — a wrong answer is a bug to fix, and an unfinished
+# construct belongs in `Error::Unsupported`, which reports blocked on its own.
+
+empty checks in Regexps shouldn't cause the Regexp parser to get stuck in a loop	/^(()|a|())*?$/ needs Onigmo's capture-restore records: a capture set by a loop iteration survives backtracking out of that iteration, but a capture set outside a loop does not. spinel-regex snapshots captures at every backtrack point, so it restores in both places. Nineteen of this example's twenty assertions already hold; the twentieth needs the restore-record rewrite, not a wider engine. See KNOWN_DIVERGENCES in crates/spinel-regex/tests/oracle.rs.

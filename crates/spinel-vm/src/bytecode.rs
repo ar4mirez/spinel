@@ -201,6 +201,14 @@ pub enum Insn {
     /// its own class against the same one, and the handler ends by either
     /// binding it or re-raising it.
     CheckMatch,
+
+    /// Push one of the regexp special variables, read off the last match.
+    ///
+    /// `$~` and friends are not ordinary globals: they are set by every
+    /// successful match and read straight out of the `MatchData` the VM keeps.
+    /// Giving them their own instruction keeps the global table free of names
+    /// no assignment ever writes.
+    LastMatch(MatchRef),
     /// A jump within this frame that runs the `ensure` bodies it leaves.
     ///
     /// `break` and `next` inside a `while` are ordinary jumps — until the loop
@@ -318,6 +326,21 @@ impl BinOp {
 ///
 /// `A::X` not falling back to `Object` is Ruby 2.5's change: `Sub::TOP` for a
 /// top-level `TOP` is a `NameError`.
+/// Which part of the last match a [`Insn::LastMatch`] wants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MatchRef {
+    /// `$~` — the `MatchData` itself, or nil.
+    Data,
+    /// `$1` through `$9`, and any higher number the source names.
+    Group(u16),
+    /// `$&` — the text the whole match covered.
+    Whole,
+    /// `` $` `` — everything before the match.
+    Pre,
+    /// `$'` — everything after it.
+    Post,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConstScope {
     /// A bare `X`, resolved from the frame's lexical scope.
@@ -374,6 +397,14 @@ pub enum Literal {
     Float(f64),
     /// Ruby strings are byte strings, not UTF-8.
     Str(Box<[u8]>),
+    /// A regexp literal: the pattern as written, plus the flags it carries.
+    ///
+    /// Held as source rather than as a compiled pattern because an `Iseq`
+    /// outlives any one heap, and the compiled form lives in the heap's own
+    /// table. Compiled on first evaluation, then cached: Ruby answers the same
+    /// object every time a literal is evaluated, which `regexp_spec.rb` checks
+    /// with `equal?`.
+    Regexp { source: Box<str>, options: i64 },
 }
 
 /// What a [`CatchEntry`] does when control leaves its range abnormally.

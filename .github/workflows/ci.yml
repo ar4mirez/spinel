@@ -195,6 +195,26 @@ jobs:
           ruby-version: '4.0'
       - run: ruby scripts/eval-oracle.rb --check
 
+  # Ruby's regex dialect is Onigmo's, and the parts of it that matter are the
+  # parts nobody would guess: `\w` is ASCII while `[[:alpha:]]` is not, `^` is a
+  # line anchor that still does not match after a trailing newline, and an empty
+  # loop iteration continues only if it changed a capture. `oracle.txt` is what
+  # CRuby answers for every pattern `language/regexp/` uses, over a thirty-subject
+  # probe corpus; `crates/spinel-regex/tests/oracle.rs` makes the engine agree.
+  # This job checks the other half: that the table still says what Ruby says.
+  regexp:
+    name: regexp oracle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: ruby/setup-ruby@v1
+        with:
+          # The language version this build implements.
+          ruby-version: '4.0'
+      - run: ruby scripts/regexp-oracle.rb --check
+
   # The anti-false-pass check, and the reason the pass count can be trusted at
   # all. Every example the harness reports `passed` is sliced back out of its
   # spec file and re-run on a real Ruby with a four-line mspec shim. A pass

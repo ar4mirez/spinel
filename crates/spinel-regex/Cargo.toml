@@ -1,0 +1,13 @@
+[package]
+name = "spinel-regex"
+description = "Ruby's regex dialect: parser and backtracking matcher, from scratch in Rust."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

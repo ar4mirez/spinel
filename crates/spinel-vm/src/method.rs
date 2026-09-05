@@ -43,7 +43,9 @@ pub enum Native {
     Send,
     /// `Kernel#proc`, `Kernel#lambda`, `Proc.new`. Returns the block it was
     /// passed; `lambda` also marks it one.
-    MakeProc { lambda: bool },
+    MakeProc {
+        lambda: bool,
+    },
     /// `Proc#lambda?`
     IsLambda,
     /// `Proc#arity`
@@ -74,6 +76,44 @@ pub enum Native {
     /// `Kernel#catch`. Pushes a frame for the block and marks it as the
     /// boundary a matching `throw` stops at.
     Catch,
+    /// `Regexp#=~` — the character offset the match began at, or nil.
+    RegexpMatchOp,
+    /// `Regexp#match` — a `MatchData`, or nil.
+    RegexpMatch,
+    /// `Regexp#match?` — a boolean, and the one matcher that leaves `$~` alone.
+    RegexpMatchP,
+    /// `Regexp#===`, which is what `when /re/` runs.
+    RegexpCaseEq,
+    /// `Regexp#source`
+    RegexpSource,
+    /// `Regexp#options`
+    RegexpOptions,
+    /// `Regexp#to_s` (`(?-mix:foo)`) and `#inspect` (`/foo/`), which differ.
+    RegexpToS {
+        inspect: bool,
+    },
+    /// `String#=~`, `String#match`, `String#match?` — the same three matchers
+    /// with the operands the other way round.
+    StringMatchOp,
+    StringMatch,
+    StringMatchP,
+    /// `MatchData#[]`, by group number or by capture name.
+    MatchIndex,
+    /// `MatchData#to_a` and `#captures`, which differ only in whether the whole
+    /// match is the first element.
+    MatchToA {
+        captures: bool,
+    },
+    /// `MatchData#pre_match` and `#post_match`.
+    MatchAround {
+        post: bool,
+    },
+    /// `MatchData#begin` and `#end`, in characters.
+    MatchEdge {
+        end: bool,
+    },
+    /// `MatchData#size` and `#length`.
+    MatchSize,
     /// `Exception#message` and `#to_s`.
     ExceptionMessage,
     /// `Exception#backtrace`. Always `nil` — see PRD 0012's non-goals.

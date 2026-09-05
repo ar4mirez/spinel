@@ -70,7 +70,7 @@ Target size: under 30 MB. No libruby, no OpenSSL unless we link it for the `open
 | `corosensei` | stackful coroutines for fibers when a primitive must re-enter the interpreter |
 | `libffi` | `Spinel::FFI` |
 | `pubgrub`, `reqwest`, `tokio`, `serde`, `notify`, `clap`, `zstd` | tooling |
-| Onigmo (direct C binding, not the `onig` crate, which wraps Oniguruma) or a Rust engine | Ruby regex semantics (see engine.md, open questions) |
+| none — `spinel-regex` is this workspace's own | Ruby regex semantics; measured against CRuby by `scripts/regexp-oracle.rb` (see engine.md, "Regex") |
 
 ## Repo layout
 
