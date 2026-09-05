@@ -42,7 +42,7 @@ use crate::bytecode::{
 use crate::class::Builtin;
 use crate::class::{ClassId, CrefId, Kind};
 use crate::heap::{Handle, HandleScope, Heap, Payload};
-use crate::method::{Definition, Native};
+use crate::method::{BitOp, Definition, Native};
 use crate::value::SymbolId;
 use crate::value::Value;
 
@@ -469,7 +469,6 @@ pub fn eval_in(
     // class, and taking one inside the loop would grow the root stack by an
     // entry per literal.
     let string_class = class_handle(scope, Builtin::String);
-    let array_class = class_handle(scope, Builtin::Array);
     let proc_class = class_handle(scope, Builtin::Proc);
 
     let mut stack: Vec<Value> = Vec::with_capacity(iseq.max_stack);
@@ -619,11 +618,9 @@ pub fn eval_in(
 
                 Insn::NewArray(count) => {
                     let at = stack.len() - count as usize;
-                    let handle = scope.alloc(Some(array_class), Payload::Slots, count);
-                    for (index, value) in stack.drain(at..).enumerate() {
-                        scope.set_slot(handle, index, value);
-                    }
-                    stack.push(scope.get(handle));
+                    let elements: Vec<Value> = stack.drain(at..).collect();
+                    let value = new_array(scope, &elements);
+                    stack.push(value);
                 }
 
                 Insn::LastMatch(which) => {
@@ -672,6 +669,9 @@ pub fn eval_in(
                     let symbol = frames[top].symbols[name as usize];
                     let cref = frames[top].cref;
                     let receiver = stack.pop().expect("a receiver to define on");
+                    // `def frozen_obj.m` raises: a singleton method is stored on
+                    // the object, and a frozen object does not take stores.
+                    frozen_check(scope, receiver, "object")?;
                     let owner = singleton_of(scope, receiver)?;
                     // Ruby calls `singleton_method_added` on the receiver here.
                     // Spinel does not, and an object that defines the hook would
@@ -808,6 +808,18 @@ pub fn eval_in(
                     if !done.keeps_receiver {
                         stack.push(value);
                     }
+                }
+
+                Insn::LeaveThroughEnsure => {
+                    let value = stack.pop().unwrap_or(Value::NIL);
+                    // The same unwind `return` uses, aimed at *this* frame
+                    // rather than the method the block was written in: the
+                    // search pops to it, running every `ensure` on the way, and
+                    // leaves `value` behind as the block's value.
+                    return Ok(Step::Unwind(Unwind::Return {
+                        frame: frames[top].id,
+                        value,
+                    }));
                 }
 
                 Insn::Return => {
@@ -996,7 +1008,17 @@ fn unwind_to_handler(
             if frames.is_empty() {
                 return Ok(Some(value));
             }
-            if !done.keeps_receiver {
+            if done.keeps_receiver {
+                // `Class#new` left the object below this frame's base so that
+                // `initialize`'s own value is dropped. A `break` out of a block
+                // `initialize` was given is not `initialize` returning, though:
+                // `Array.new(2) { break :x }` answers `:x`, not the array. So
+                // the object goes and the break value takes its place.
+                if matches!(unwind, Unwind::Break { .. }) {
+                    stack.pop();
+                    stack.push(value);
+                }
+            } else {
                 stack.push(value);
             }
             return Ok(None);
@@ -2122,6 +2144,9 @@ fn defined_word<'h>(
     };
     let handle = scope.alloc(Some(string_class), Payload::Bytes, answer.len() as u32);
     scope.bytes_mut(handle).copy_from_slice(answer.as_bytes());
+    // `defined?` answers a frozen string in Ruby, and `defined_spec.rb` asserts
+    // it on every literal it asks about.
+    scope.freeze(handle);
     scope.get(handle)
 }
 
@@ -2155,9 +2180,13 @@ fn class_of(scope: &mut HandleScope<'_>, value: Value) -> Option<ClassId> {
     match value.unpack() {
         Unpacked::Fixnum(_) => Some(Builtin::Integer.id()),
         Unpacked::Symbol(_) => Some(Builtin::Symbol.id()),
-        // NilClass, TrueClass, FalseClass and Float are not in the bootstrap
-        // set; #13 creates them with the rest of the constant table.
-        Unpacked::Nil | Unpacked::True | Unpacked::False | Unpacked::Flonum(_) => None,
+        Unpacked::Nil => Some(Builtin::NilClass.id()),
+        Unpacked::True => Some(Builtin::TrueClass.id()),
+        Unpacked::False => Some(Builtin::FalseClass.id()),
+        Unpacked::Flonum(_) => Some(Builtin::Float.id()),
+        // `undefined` is the marker a call leaves in a slot no argument filled.
+        // It is not a Ruby value and has no class on purpose: reaching one
+        // through `class_of` means the binder let it escape.
         Unpacked::Undef => None,
         Unpacked::Heap(_) => {
             let handle = scope.root(value);
@@ -2170,25 +2199,470 @@ fn symbol_name(id: SymbolId) -> String {
     crate::shared::symbols::name(id).unwrap_or_else(|| format!("<symbol {}>", id.0))
 }
 
+// ---------------------------------------------------------------------------
+// Array
+// ---------------------------------------------------------------------------
+//
+// An `Array` is two slots, `[storage, length]`. `storage` is a separate
+// `Payload::Slots` object of `capacity` elements and `length` is a fixnum of how
+// many of them are live.
+//
+// The indirection is what makes `a << 1` mutate the array the caller is
+// holding. A heap cell cannot grow — mark-sweep with size classes hands out a
+// fixed cell — so elements living directly in the `Array`'s own slots could
+// only grow by becoming a *different* object, and Ruby would see the identity
+// change. Growing replaces the storage instead; the `Array`'s address never
+// moves. CRuby's `RARRAY` is a pointer and a length for the same reason.
+//
+// The storage object has no class. It is never handed to Ruby, `class_of` is
+// never asked about it, and the collector traces its slots either way.
+
+/// Slot of the storage object inside an `Array`.
+const ARRAY_STORAGE: usize = 0;
+/// Slot of the live element count inside an `Array`.
+const ARRAY_LENGTH: usize = 1;
+/// Slots in the `Array` object itself. Not the element count.
+const ARRAY_SLOTS: u32 = 2;
+/// Capacity of the first storage object. Growth doubles from here, which is
+/// `Vec`'s amortisation argument and the one every growable array makes.
+const ARRAY_MIN_CAPACITY: u32 = 4;
+
+/// The live element count of an `Array`, given a handle to one.
+fn array_len<'h>(scope: &mut HandleScope<'h>, array: Handle<'h>) -> usize {
+    scope
+        .slot(array, ARRAY_LENGTH)
+        .as_fixnum()
+        .and_then(|n| usize::try_from(n).ok())
+        .unwrap_or(0)
+}
+
+/// Element `index`, or `nil` past the end — which is `Array#[]`'s answer for a
+/// slot inside capacity but past `length`, and must not read stale storage.
+fn array_get<'h>(scope: &mut HandleScope<'h>, array: Handle<'h>, index: usize) -> Value {
+    if index >= array_len(scope, array) {
+        return Value::NIL;
+    }
+    let storage = scope.slot(array, ARRAY_STORAGE);
+    let storage = scope.root(storage);
+    scope.slot(storage, index)
+}
+
+/// Storage with room for at least `wanted` elements, copying the live ones
+/// across when a bigger object is needed. Stored back into the `Array`.
+fn array_reserve<'h>(scope: &mut HandleScope<'h>, array: Handle<'h>, wanted: usize) {
+    let current = scope.slot(array, ARRAY_STORAGE);
+    let capacity = if current == Value::NIL {
+        0
+    } else {
+        let handle = scope.root(current);
+        scope.len(handle) as usize
+    };
+    if capacity >= wanted {
+        return;
+    }
+    let mut grown = ARRAY_MIN_CAPACITY as usize;
+    while grown < wanted {
+        grown *= 2;
+    }
+    let live = array_len(scope, array);
+    let fresh = scope.alloc(None, Payload::Slots, grown as u32);
+    if current != Value::NIL {
+        let old = scope.root(current);
+        for index in 0..live.min(capacity) {
+            let value = scope.slot(old, index);
+            scope.set_slot(fresh, index, value);
+        }
+    }
+    let fresh = scope.get(fresh);
+    scope.set_slot(array, ARRAY_STORAGE, fresh);
+}
+
+/// Write element `index`, growing storage and extending `length` with `nil`s if
+/// the write lands past the end. That is `Array#[]=`, which never raises for a
+/// non-negative index.
+fn array_set<'h>(scope: &mut HandleScope<'h>, array: Handle<'h>, index: usize, value: Value) {
+    array_reserve(scope, array, index + 1);
+    let storage = scope.slot(array, ARRAY_STORAGE);
+    let storage = scope.root(storage);
+    let live = array_len(scope, array);
+    for gap in live..index {
+        scope.set_slot(storage, gap, Value::NIL);
+    }
+    scope.set_slot(storage, index, value);
+    if index >= live {
+        array_set_len(scope, array, index + 1);
+    }
+}
+
+fn array_set_len<'h>(scope: &mut HandleScope<'h>, array: Handle<'h>, length: usize) {
+    let length = Value::fixnum(length as i64).expect("an array length fits a fixnum");
+    scope.set_slot(array, ARRAY_LENGTH, length);
+}
+
+/// Append, growing storage when it is full. The `Array` object is unchanged.
+fn array_push<'h>(scope: &mut HandleScope<'h>, array: Handle<'h>, value: Value) {
+    let live = array_len(scope, array);
+    array_set(scope, array, live, value);
+}
+
+/// A handle to the receiver, or a refusal naming the method that wanted one.
+fn expect_array<'h>(
+    scope: &mut HandleScope<'h>,
+    value: Value,
+    op: &'static str,
+) -> Result<Handle<'h>, Error> {
+    if heap_kind(scope, value) != Some(HeapKind::Array) {
+        return Err(Error::NoDispatch {
+            op,
+            operands: "a receiver that is not an Array",
+        });
+    }
+    Ok(scope.root(value))
+}
+
+/// A Ruby index against a length: negative counts back from the end, and out of
+/// range is `None` rather than a clamp.
+fn resolve_index(index: i64, length: usize) -> Option<usize> {
+    let length = length as i64;
+    let index = if index < 0 { index + length } else { index };
+    (index >= 0 && index < length).then_some(index as usize)
+}
+
+/// Refuse to mutate a frozen object, the way Ruby does.
+fn frozen_check(scope: &mut HandleScope<'_>, value: Value, what: &str) -> Result<(), Error> {
+    if value.is_immediate() {
+        return Ok(());
+    }
+    let handle = scope.root(value);
+    if scope.is_frozen(handle) {
+        return Err(Error::raise(
+            "FrozenError",
+            format!("can't modify frozen {what}"),
+        ));
+    }
+    Ok(())
+}
+
+/// A fixnum, or a refusal when the answer does not fit one. Spinel has no
+/// bignum, and a wrapped answer would be wrong rather than missing.
+fn fixnum_or_refuse(n: i64, op: &'static str) -> Result<Value, Error> {
+    Value::fixnum(n).ok_or(Error::NoDispatch {
+        op,
+        operands: "a result wider than a fixnum",
+    })
+}
+
+/// How deep `hash` will follow nested arrays before refusing.
+///
+/// Ruby answers for a self-referential array — `a = []; a << a; a.hash` — by
+/// noticing the cycle. Spinel does not track one, so a bound is what keeps the
+/// recursion from running off the stack, and hitting it is a refusal rather
+/// than an answer for a structure it did not finish reading.
+const HASH_DEPTH: usize = 32;
+
+/// `Object#hash`, written into `hasher`.
+///
+/// Content for a `String` and an `Array`, because `==` on those is content;
+/// identity for everything else, because `==` on those is identity. That
+/// equivalence — `a == b` implies `a.hash == b.hash` — is the whole contract.
+fn hash_value(
+    scope: &mut HandleScope<'_>,
+    value: Value,
+    hasher: &mut impl std::hash::Hasher,
+    depth: usize,
+) -> Result<(), Error> {
+    use std::hash::Hash as _;
+    if depth > HASH_DEPTH {
+        return Err(Error::Unknowable {
+            what: "`hash` of a deeply nested or self-referential array",
+            needs: "cycle detection, which this VM does not track",
+        });
+    }
+    match heap_kind(scope, value) {
+        Some(HeapKind::Str) => {
+            let handle = scope.root(value);
+            0u8.hash(hasher);
+            scope.bytes(handle).hash(hasher);
+        }
+        Some(HeapKind::Array) => {
+            let handle = scope.root(value);
+            let len = array_len(scope, handle);
+            1u8.hash(hasher);
+            len.hash(hasher);
+            for index in 0..len {
+                let element = array_get(scope, handle, index);
+                hash_value(scope, element, hasher, depth + 1)?;
+            }
+        }
+        // An immediate hashes by its bits, so two `1`s and two `:a`s agree.
+        // A heap object with no content equality hashes by identity, and its
+        // `Value` *is* its address.
+        None => {
+            2u8.hash(hasher);
+            value.to_bits().hash(hasher);
+        }
+    }
+    Ok(())
+}
+
+/// A method name given as a `Symbol` or a `String`, as Ruby's reflection takes
+/// either.
+fn method_name_of(scope: &mut HandleScope<'_>, value: Value) -> Option<String> {
+    if let Some(id) = value.as_symbol() {
+        return crate::shared::symbols::name(id);
+    }
+    string_bytes(scope, value).and_then(|bytes| String::from_utf8(bytes).ok())
+}
+
+/// `String.new`, `String.new(str)`.
+///
+/// A keyword — `encoding:`, `capacity:` — is refused rather than ignored: this
+/// VM's strings have no encoding to set, and answering as though one had been
+/// set would be wrong rather than missing.
+fn string_new_from(scope: &mut HandleScope<'_>, call: &Pending) -> Result<Value, Error> {
+    if !call.keywords.is_empty() {
+        return Err(Error::Unknowable {
+            what: "`String.new` with `encoding:` or `capacity:`",
+            needs: "the Encoding slice, which gives a string an encoding",
+        });
+    }
+    match call.args.as_slice() {
+        [] => Ok(string_bytes_new(scope, b"")),
+        [source] => match string_bytes(scope, *source) {
+            Some(bytes) => Ok(string_bytes_new(scope, &bytes)),
+            None => Err(Error::raise(
+                "TypeError",
+                format!(
+                    "no implicit conversion of {} into String",
+                    class_name(scope, *source)
+                ),
+            )),
+        },
+        args => Err(Error::raise(
+            "ArgumentError",
+            format!(
+                "wrong number of arguments (given {}, expected 0..1)",
+                args.len()
+            ),
+        )),
+    }
+}
+
+/// `Float#to_s`, in Ruby's shape.
+///
+/// Two rules, both measured against CRuby rather than reasoned about: a float
+/// always shows a fractional part (`1.0`, not `1`), and one whose magnitude is
+/// outside `[1e-4, 1e15)` is written in exponent form (`1.0e+20`, `1.0e-05`)
+/// with a two-digit, signed exponent.
+fn float_to_s(f: f64) -> String {
+    if f == 0.0 {
+        // `-0.0` prints its sign, and `0.0.fract()` is 0 either way.
+        return if f.is_sign_negative() {
+            "-0.0".to_owned()
+        } else {
+            "0.0".to_owned()
+        };
+    }
+    let magnitude = f.abs();
+    if (1e-4..1e15).contains(&magnitude) {
+        let plain = if f.fract() == 0.0 {
+            format!("{f:.1}")
+        } else {
+            f.to_string()
+        };
+        return plain;
+    }
+    // `{:e}` gives `1e20`; Ruby wants `1.0e+20`.
+    let scientific = format!("{f:e}");
+    let (mantissa, exponent) = scientific
+        .split_once('e')
+        .expect("`{:e}` always writes an exponent");
+    let mantissa = if mantissa.contains('.') {
+        mantissa.to_owned()
+    } else {
+        format!("{mantissa}.0")
+    };
+    let (sign, digits) = match exponent.strip_prefix('-') {
+        Some(digits) => ("-", digits),
+        None => ("+", exponent),
+    };
+    format!("{mantissa}e{sign}{digits:0>2}")
+}
+
+/// A new `String` with these bytes.
+fn string_bytes_new(scope: &mut HandleScope<'_>, bytes: &[u8]) -> Value {
+    let class = class_handle(scope, Builtin::String);
+    let handle = scope.alloc(Some(class), Payload::Bytes, bytes.len() as u32);
+    scope.bytes_mut(handle).copy_from_slice(bytes);
+    scope.get(handle)
+}
+
+/// `Object#dup`: a shallow copy of the cell, unfrozen.
+///
+/// `Array` overrides this in `core/array.rb`, because copying an `Array`'s two
+/// slots would hand the copy the *same* storage object and `b << 1` would show
+/// up in `a`.
+fn dup_value(scope: &mut HandleScope<'_>, value: Value) -> Result<Value, Error> {
+    // An immediate has no cell to copy, and Ruby answers with itself.
+    if value.is_immediate() {
+        return Ok(value);
+    }
+    let source = scope.root(value);
+    let class = scope.class(source);
+    let payload = scope.payload(source);
+    let len = scope.len(source);
+    let class = class.map(|class| scope.root(class));
+    let copy = scope.alloc(class, payload, len);
+    match payload {
+        Payload::Bytes => {
+            let bytes = scope.bytes(source).to_vec();
+            scope.bytes_mut(copy).copy_from_slice(&bytes);
+        }
+        Payload::Slots => {
+            for index in 0..len as usize {
+                let slot = scope.slot(source, index);
+                scope.set_slot(copy, index, slot);
+            }
+        }
+    }
+    Ok(scope.get(copy))
+}
+
+/// Which class `allocate` refused on, as a `&'static str` the reason can carry.
+///
+/// [`Error::Unknowable`]'s fields are static so that a reason costs nothing to
+/// build on a path that runs per blocked example. One arm per class buys the
+/// ranking a separate line per class, which is what makes it plannable.
+const fn allocate_refusal(builtin: Builtin) -> &'static str {
+    match builtin {
+        Builtin::BasicObject => "`allocate` on `BasicObject`",
+        Builtin::Object => "`allocate` on `Object`",
+        Builtin::Module => "`allocate` on `Module`",
+        Builtin::Class => "`allocate` on `Class`",
+        Builtin::Kernel => "`allocate` on `Kernel`",
+        Builtin::Comparable => "`allocate` on `Comparable`",
+        Builtin::Enumerable => "`allocate` on `Enumerable`",
+        Builtin::Numeric => "`allocate` on `Numeric`",
+        Builtin::Symbol => "`allocate` on `Symbol`",
+        Builtin::String => "`allocate` on `String`",
+        Builtin::Integer => "`allocate` on `Integer`",
+        Builtin::Array => "`allocate` on `Array`",
+        Builtin::Hash => "`allocate` on `Hash`",
+        Builtin::Proc => "`allocate` on `Proc`",
+        Builtin::Exception => "`allocate` on `Exception`",
+        Builtin::Regexp => "`allocate` on `Regexp`",
+        Builtin::MatchData => "`allocate` on `MatchData`",
+        Builtin::NilClass => "`allocate` on `NilClass`",
+        Builtin::TrueClass => "`allocate` on `TrueClass`",
+        Builtin::FalseClass => "`allocate` on `FalseClass`",
+        Builtin::Float => "`allocate` on `Float`",
+    }
+}
+
+/// `Class#allocate`: an uninitialised instance, in the representation its class
+/// expects.
+///
+/// A class Spinel has no shape for refuses rather than handing back a bare
+/// zero-slot object wearing that class — which is what made `Proc#lambda?` read
+/// past the end of one before #13 closed the door.
+fn allocate_instance(scope: &mut HandleScope<'_>, id: ClassId) -> Result<Value, Error> {
+    match Builtin::ALL.get(id.index()) {
+        // A user-defined class, or `Object` itself: slots, and no ivars to make
+        // room for until #151's shapes say how many.
+        None | Some(Builtin::Object | Builtin::BasicObject) => {
+            let class = scope.classes().object(id);
+            let class = scope.root(class);
+            let handle = scope.alloc(Some(class), Payload::Slots, 0);
+            Ok(scope.get(handle))
+        }
+        Some(Builtin::Array) => {
+            let handle = empty_array(scope);
+            Ok(scope.get(handle))
+        }
+        Some(Builtin::String) => Ok(string_bytes_new(scope, b"")),
+        Some(Builtin::Hash) => {
+            // Three slots: the association list, the default, and whether that
+            // default is a block. See `core/hash.rb`, and the note there about
+            // what replaces the whole representation.
+            let pairs = new_array(scope, &[]);
+            let class = scope.classes().object(id);
+            let class = scope.root(class);
+            let handle = scope.alloc(Some(class), Payload::Slots, 3);
+            scope.set_slot(handle, 0, pairs);
+            scope.set_slot(handle, 1, Value::NIL);
+            scope.set_slot(handle, 2, Value::FALSE);
+            Ok(scope.get(handle))
+        }
+        Some(other) => {
+            if is_exception_class(scope, id) {
+                let class = scope.classes().object(id);
+                return Ok(exception_of(scope, class, ""));
+            }
+            // `Proc.new` without a block, `Integer.new`, `Symbol.new` all raise
+            // in Ruby. Saying so needs each class's rule; refusing says the VM
+            // does not know it yet, which is the true answer.
+            //
+            // The class is *in* the reason rather than behind a "this built-in
+            // class", because the blocked-reason ranking is how the next slice
+            // is chosen and one bucket of every class tells nobody which to
+            // write next.
+            Err(Error::Unknowable {
+                what: allocate_refusal(*other),
+                needs: match other {
+                    // `Class.new` and `Module.new` build an *anonymous* class,
+                    // which is a real Ruby operation and the two biggest
+                    // remaining refusals — not a gap in `core/*.rb` at all.
+                    Builtin::Class => "`Class.new`, which builds an anonymous class",
+                    Builtin::Module => "`Module.new`, which builds an anonymous module",
+                    Builtin::Proc => "`Proc.new` can be given the block it is",
+                    Builtin::Regexp => "a pattern can be compiled from a run-time value",
+                    Builtin::Integer | Builtin::Symbol | Builtin::Float => {
+                        "the rule by which Ruby refuses it too"
+                    }
+                    Builtin::NilClass | Builtin::TrueClass | Builtin::FalseClass => {
+                        "the rule that these classes have no `new`"
+                    }
+                    _ => "`core/*.rb` defines its representation",
+                },
+            })
+        }
+    }
+}
+
 /// The elements of an `Array`, or `None` if the value is not one.
 fn array_elements(scope: &mut HandleScope<'_>, value: Value) -> Option<Vec<Value>> {
     if heap_kind(scope, value) != Some(HeapKind::Array) {
         return None;
     }
     let handle = scope.root(value);
+    let live = array_len(scope, handle);
     Some(
-        (0..scope.len(handle) as usize)
-            .map(|index| scope.slot(handle, index))
+        (0..live)
+            .map(|index| array_get(scope, handle, index))
             .collect(),
     )
 }
 
-fn new_array(scope: &mut HandleScope<'_>, elements: &[Value]) -> Value {
+/// An empty `Array`, with storage left unallocated until something is written.
+fn empty_array<'h>(scope: &mut HandleScope<'h>) -> Handle<'h> {
     let class = class_handle(scope, Builtin::Array);
-    let handle = scope.alloc(Some(class), Payload::Slots, elements.len() as u32);
-    for (index, value) in elements.iter().enumerate() {
-        scope.set_slot(handle, index, *value);
+    let handle = scope.alloc(Some(class), Payload::Slots, ARRAY_SLOTS);
+    scope.set_slot(handle, ARRAY_STORAGE, Value::NIL);
+    array_set_len(scope, handle, 0);
+    handle
+}
+
+fn new_array(scope: &mut HandleScope<'_>, elements: &[Value]) -> Value {
+    let handle = empty_array(scope);
+    array_reserve(scope, handle, elements.len());
+    let storage = scope.slot(handle, ARRAY_STORAGE);
+    if storage != Value::NIL {
+        let storage = scope.root(storage);
+        for (index, value) in elements.iter().enumerate() {
+            scope.set_slot(storage, index, *value);
+        }
     }
+    array_set_len(scope, handle, elements.len());
     scope.get(handle)
 }
 
@@ -2351,16 +2825,6 @@ fn native_call<'h>(
                 stack.push(exception);
                 return Ok(None);
             }
-            let plain = matches!(
-                Builtin::ALL.get(id.index()),
-                None | Some(Builtin::Object | Builtin::BasicObject)
-            );
-            if !plain {
-                return Err(Error::Unknowable {
-                    what: "`new` on a built-in class",
-                    needs: "`core/*.rb` defines how one is allocated (#15)",
-                });
-            }
             if scope.classes().kind(id) == Kind::Module {
                 return Err(Error::raise(
                     "NoMethodError",
@@ -2370,14 +2834,20 @@ fn native_call<'h>(
                     ),
                 ));
             }
-            let class = scope.classes().object(id);
-            let class = scope.root(class);
-            // ponytail: no instance slots, because instance variables are
-            // #151's shape tree. A zero-slot object is enough to have an
-            // identity, a class, and singleton methods, which is what this
-            // slice's specs ask of it.
-            let handle = scope.alloc(Some(class), Payload::Slots, 0);
-            let object = scope.get(handle);
+            // `String.new(str)` allocates a payload sized from its argument,
+            // which `allocate` cannot do — it runs before the argument is seen,
+            // and a `String`'s bytes cannot be grown afterwards. So `new` on
+            // `String` answers here rather than through `initialize`.
+            if id == Builtin::String.id() {
+                let value = string_new_from(scope, &call)?;
+                stack.push(value);
+                return Ok(None);
+            }
+            // Since #15 the shape per class lives in one place, and `new` is
+            // what Ruby says it is: allocate, then `initialize`. A class with no
+            // shape refuses inside `allocate` and names which one, rather than
+            // handing back a bare object wearing a class that would misread it.
+            let object = allocate_instance(scope, id)?;
             let initialize = crate::shared::symbols::intern("initialize");
             match scope.classes_mut().lookup(id, initialize) {
                 None => {
@@ -2462,6 +2932,643 @@ fn native_call<'h>(
         }
         Native::NilP => {
             stack.push(bool_value(call.receiver == Value::NIL));
+            Ok(None)
+        }
+
+        // -- #15's core library ------------------------------------------------
+        // Raw storage and allocation. Everything else about these classes is
+        // Ruby, in `core/*.rb`.
+        Native::ArraySize => {
+            let handle = expect_array(scope, call.receiver, "size")?;
+            let length = array_len(scope, handle);
+            stack.push(Value::fixnum(length as i64).expect("a length fits a fixnum"));
+            Ok(None)
+        }
+
+        Native::ArrayIndex => {
+            let handle = expect_array(scope, call.receiver, "[]")?;
+            let length = array_len(scope, handle);
+            // A Range, or a `(start, length)` pair, is slicing: it allocates a
+            // new array and answers a different shape entirely. Reading only
+            // the first argument and ignoring the second would answer `a[1, 3]`
+            // with one element, which is wrong rather than missing.
+            let index = match call.args.as_slice() {
+                [index] => index.as_fixnum(),
+                _ => None,
+            };
+            let Some(index) = index else {
+                return Err(Error::NoDispatch {
+                    op: "Array#[]",
+                    operands: "a slice, or an index that is not an Integer",
+                });
+            };
+            let resolved = resolve_index(index, length);
+            let value = match resolved {
+                Some(index) => array_get(scope, handle, index),
+                None => Value::NIL,
+            };
+            stack.push(value);
+            Ok(None)
+        }
+
+        Native::ArrayStore => {
+            let handle = expect_array(scope, call.receiver, "[]=")?;
+            frozen_check(scope, call.receiver, "array")?;
+            let length = array_len(scope, handle);
+            // `a[i, n] = x` and `a[range] = x` splice, which is a different
+            // operation on a different number of arguments. Three arguments
+            // here is the splice form, not an index and a value.
+            let assignment = match call.args.as_slice() {
+                [index, value] => index.as_fixnum().map(|index| (index, *value)),
+                _ => None,
+            };
+            let Some((index, value)) = assignment else {
+                return Err(Error::NoDispatch {
+                    op: "Array#[]=",
+                    operands: "a splice, or an index that is not an Integer",
+                });
+            };
+            // A negative index past the front is an IndexError in Ruby, not a
+            // silent write at zero.
+            let Some(index) = resolve_index(index, length) else {
+                return Err(Error::raise(
+                    "IndexError",
+                    format!("index {index} too small for array; minimum: -{length}"),
+                ));
+            };
+            array_set(scope, handle, index, value);
+            stack.push(value);
+            Ok(None)
+        }
+
+        Native::ArrayPush => {
+            let handle = expect_array(scope, call.receiver, "push")?;
+            frozen_check(scope, call.receiver, "array")?;
+            for &value in &call.args {
+                array_push(scope, handle, value);
+            }
+            // `push` and `<<` both answer the array itself, which is what makes
+            // `a << 1 << 2` chain.
+            stack.push(call.receiver);
+            Ok(None)
+        }
+
+        Native::ArrayPop => {
+            let handle = expect_array(scope, call.receiver, "pop")?;
+            frozen_check(scope, call.receiver, "array")?;
+            // `pop(n)` answers a new *array* of the last n, which allocates and
+            // is a different operation. Answering the one-element form for it
+            // would be wrong rather than missing.
+            if !call.args.is_empty() {
+                return Err(Error::NoDispatch {
+                    op: "Array#pop",
+                    operands: "a count, which answers a new array",
+                });
+            }
+            let length = array_len(scope, handle);
+            if length == 0 {
+                stack.push(Value::NIL);
+                return Ok(None);
+            }
+            let value = array_get(scope, handle, length - 1);
+            array_set_len(scope, handle, length - 1);
+            stack.push(value);
+            Ok(None)
+        }
+
+        Native::StringSize { bytes } => {
+            let Some(payload) = string_bytes(scope, call.receiver) else {
+                return Err(Error::NoDispatch {
+                    op: "String#length",
+                    operands: "a receiver that is not a String",
+                });
+            };
+            let length = if bytes {
+                payload.len()
+            } else {
+                // Characters, and a character is a UTF-8 codepoint because
+                // UTF-8 is the source encoding every string in this corpus is
+                // written in. A payload that is not UTF-8 has a length only an
+                // Encoding can answer, so it refuses rather than counting bytes
+                // and calling them characters.
+                let Ok(text) = std::str::from_utf8(&payload) else {
+                    return Err(Error::Unknowable {
+                        what: "`length` of a string that is not UTF-8",
+                        needs: "the Encoding slice, which gives a string an encoding",
+                    });
+                };
+                text.chars().count()
+            };
+            stack.push(Value::fixnum(length as i64).expect("a length fits a fixnum"));
+            Ok(None)
+        }
+
+        Native::StringConcat => {
+            let Some(mut left) = string_bytes(scope, call.receiver) else {
+                return Err(Error::NoDispatch {
+                    op: "String#+",
+                    operands: "a receiver that is not a String",
+                });
+            };
+            let Some(right) = call.args.first().and_then(|&v| string_bytes(scope, v)) else {
+                return Err(Error::raise(
+                    "TypeError",
+                    "no implicit conversion of nil into String",
+                ));
+            };
+            left.extend_from_slice(&right);
+            let value = string_bytes_new(scope, &left);
+            stack.push(value);
+            Ok(None)
+        }
+
+        Native::StringRepeat => {
+            let Some(bytes) = string_bytes(scope, call.receiver) else {
+                return Err(Error::NoDispatch {
+                    op: "String#*",
+                    operands: "a receiver that is not a String",
+                });
+            };
+            let Some(count) = call.args.first().and_then(|v| v.as_fixnum()) else {
+                return Err(Error::raise(
+                    "TypeError",
+                    "no implicit conversion into Integer",
+                ));
+            };
+            if count < 0 {
+                return Err(Error::raise("ArgumentError", "negative argument"));
+            }
+            let value = string_bytes_new(scope, &bytes.repeat(count as usize));
+            stack.push(value);
+            Ok(None)
+        }
+
+        Native::Freeze => {
+            if !call.receiver.is_immediate() {
+                let handle = scope.root(call.receiver);
+                scope.freeze(handle);
+            }
+            stack.push(call.receiver);
+            Ok(None)
+        }
+
+        Native::FrozenP => {
+            // Every immediate is frozen in Ruby: a fixnum, a symbol, `nil`,
+            // `true` and `false` have nothing to mutate.
+            let frozen = if call.receiver.is_immediate() {
+                true
+            } else {
+                let handle = scope.root(call.receiver);
+                scope.is_frozen(handle)
+            };
+            stack.push(bool_value(frozen));
+            Ok(None)
+        }
+
+        Native::ObjectId => {
+            // ponytail: an object's id is derived from its address, which is
+            // unique and stable only because the collector does not move
+            // objects. Phase 6's moving GC needs a side table keyed by the id
+            // already handed out.
+            //
+            // The immediates are Ruby's own documented values where Ruby has
+            // one, and the tagged word otherwise — which is unique per value
+            // and equal for the same value, the two properties `object_id` is
+            // asked for.
+            use crate::value::Unpacked;
+            let id = match call.receiver.unpack() {
+                Unpacked::Fixnum(n) => n.checked_mul(2).and_then(|n| n.checked_add(1)),
+                Unpacked::Nil => Some(8),
+                Unpacked::True => Some(20),
+                Unpacked::False => Some(0),
+                Unpacked::Symbol(_) | Unpacked::Flonum(_) | Unpacked::Undef => {
+                    i64::try_from(call.receiver.to_bits() >> 1).ok()
+                }
+                Unpacked::Heap(_) => {
+                    let handle = scope.root(call.receiver);
+                    // The address, shifted past the alignment bits that are
+                    // zero on every cell.
+                    i64::try_from(scope.address(handle) >> 4).ok()
+                }
+            };
+            stack.push(id.and_then(Value::fixnum).unwrap_or(Value::NIL));
+            Ok(None)
+        }
+
+        Native::Dup => {
+            // A class's identity lives in the class table, not in its cell:
+            // copying the cell would hand back an object that looks like the
+            // class and shares its method table. `Class#dup` is real in Ruby
+            // and is not this.
+            if class_id_of(scope, call.receiver).is_some() {
+                return Err(Error::Unknowable {
+                    what: "`dup` on a class or module",
+                    needs: "a copy of its method table, which is `Module#dup`",
+                });
+            }
+            // A copy of a `Proc` must be `==` to the original — CRuby special-
+            // cases it — and `Proc#==` here would be comparing six slots whose
+            // equality is not the same question. Copying the cell and letting
+            // `==` answer false would be a wrong answer, not a missing one.
+            if is_builtin(scope, call.receiver, Builtin::Proc) {
+                return Err(Error::Unknowable {
+                    what: "`dup` on a Proc",
+                    needs: "`Proc#==`, which compares bodies rather than identity",
+                });
+            }
+            let value = dup_value(scope, call.receiver)?;
+            stack.push(value);
+            Ok(None)
+        }
+
+        Native::Allocate => {
+            let Some(id) = class_id_of(scope, call.receiver) else {
+                return Err(Error::raise(
+                    "NoMethodError",
+                    format!(
+                        "undefined method 'allocate' for an instance of {}",
+                        class_name(scope, call.receiver)
+                    ),
+                ));
+            };
+            // `Array.allocate(1)` raises in Ruby: `allocate` never takes
+            // arguments, on any class.
+            if !call.args.is_empty() || !call.keywords.is_empty() {
+                let given = call.args.len() + call.keywords.len();
+                return Err(Error::raise(
+                    "ArgumentError",
+                    format!("wrong number of arguments (given {given}, expected 0)"),
+                ));
+            }
+            let value = allocate_instance(scope, id)?;
+            stack.push(value);
+            Ok(None)
+        }
+
+        Native::IntBits(op) => {
+            let Some(left) = call.receiver.as_fixnum() else {
+                return Err(Error::NoDispatch {
+                    op: "Integer bit operation",
+                    operands: "a receiver that is not an Integer",
+                });
+            };
+            if op == crate::method::BitOp::Not {
+                stack.push(fixnum_or_refuse(!left, "~")?);
+                return Ok(None);
+            }
+            let Some(right) = call.args.first().and_then(|v| v.as_fixnum()) else {
+                return Err(Error::raise(
+                    "TypeError",
+                    "no implicit conversion into Integer",
+                ));
+            };
+            let answer = match op {
+                crate::method::BitOp::And => left & right,
+                crate::method::BitOp::Or => left | right,
+                crate::method::BitOp::Xor => left ^ right,
+                crate::method::BitOp::Not => unreachable!("handled above"),
+                // A shift wider than the word, or one that would push a bit off
+                // the top, is a bignum in Ruby. Refuse rather than wrap.
+                crate::method::BitOp::Shl | crate::method::BitOp::Shr => {
+                    let left_shift = op == crate::method::BitOp::Shl;
+                    // `a >> -n` is `a << n`, and the other way round.
+                    let (left_shift, distance) = if right < 0 {
+                        (!left_shift, -right)
+                    } else {
+                        (left_shift, right)
+                    };
+                    if distance >= 64 {
+                        if left_shift {
+                            return Err(Error::NoDispatch {
+                                op: "Integer#<<",
+                                operands: "a shift wider than a fixnum",
+                            });
+                        }
+                        // Shifting right off the end is the sign bit, forever.
+                        if left < 0 { -1 } else { 0 }
+                    } else if left_shift {
+                        match left.checked_shl(distance as u32) {
+                            Some(shifted) if (shifted >> distance) == left => shifted,
+                            _ => {
+                                return Err(Error::NoDispatch {
+                                    op: "Integer#<<",
+                                    operands: "a result wider than a fixnum",
+                                });
+                            }
+                        }
+                    } else {
+                        left >> distance
+                    }
+                }
+            };
+            stack.push(fixnum_or_refuse(answer, "Integer bit operation")?);
+            Ok(None)
+        }
+
+        Native::IntPow => {
+            let Some(base) = call.receiver.as_fixnum() else {
+                return Err(Error::NoDispatch {
+                    op: "Integer#**",
+                    operands: "a receiver that is not an Integer",
+                });
+            };
+            let Some(exponent) = call.args.first().and_then(|v| v.as_fixnum()) else {
+                return Err(Error::raise(
+                    "TypeError",
+                    "no implicit conversion into Integer",
+                ));
+            };
+            if exponent < 0 {
+                // `2 ** -1` is a Rational in Ruby, which this VM does not have.
+                return Err(Error::NoDispatch {
+                    op: "Integer#**",
+                    operands: "a negative exponent, which is a Rational",
+                });
+            }
+            let mut answer: i64 = 1;
+            for _ in 0..exponent {
+                answer = answer.checked_mul(base).ok_or(Error::NoDispatch {
+                    op: "Integer#**",
+                    operands: "a result wider than a fixnum",
+                })?;
+            }
+            stack.push(fixnum_or_refuse(answer, "Integer#**")?);
+            Ok(None)
+        }
+
+        Native::SymbolName { length } => {
+            let Some(id) = call.receiver.as_symbol() else {
+                return Err(Error::NoDispatch {
+                    op: "Symbol#to_s",
+                    operands: "a receiver that is not a Symbol",
+                });
+            };
+            let name = crate::shared::symbols::name(id).unwrap_or_default();
+            let value = if length {
+                // Characters, not bytes: `:"あab".length` is 3. A symbol's name
+                // is always valid UTF-8, because it came from source.
+                let characters = name.chars().count();
+                Value::fixnum(characters as i64).expect("a name length fits a fixnum")
+            } else {
+                string_new(scope, &name)
+            };
+            stack.push(value);
+            Ok(None)
+        }
+
+        Native::FloatToS => {
+            let Some(f) = call.receiver.as_flonum() else {
+                return Err(Error::NoDispatch {
+                    op: "Float#to_s",
+                    operands: "a receiver that is not a Float",
+                });
+            };
+            let text = float_to_s(f);
+            let value = string_new(scope, &text);
+            stack.push(value);
+            Ok(None)
+        }
+
+        Native::StringIndex => {
+            let Some(payload) = string_bytes(scope, call.receiver) else {
+                return Err(Error::NoDispatch {
+                    op: "String#[]",
+                    operands: "a receiver that is not a String",
+                });
+            };
+            let Ok(text) = std::str::from_utf8(&payload) else {
+                return Err(Error::Unknowable {
+                    what: "`[]` on a string that is not UTF-8",
+                    needs: "the Encoding slice, which gives a string an encoding",
+                });
+            };
+            // `s[range]`, `s["sub"]` and `s[/re/]` are three more operations
+            // with three more answers. Reading only the integer form and
+            // ignoring the rest would answer them wrongly.
+            let request = match call.args.as_slice() {
+                [start] => start.as_fixnum().map(|start| (start, 1, false)),
+                [start, count] => match (start.as_fixnum(), count.as_fixnum()) {
+                    (Some(start), Some(count)) => Some((start, count, true)),
+                    _ => None,
+                },
+                _ => None,
+            };
+            let Some((start, count, ranged)) = request else {
+                return Err(Error::NoDispatch {
+                    op: "String#[]",
+                    operands: "an index that is not an Integer",
+                });
+            };
+            let characters: Vec<char> = text.chars().collect();
+            let length = characters.len();
+            // `s[s.length]` is `""` for the two-argument form and `nil` for the
+            // one-argument form, which is Ruby and is measured, not guessed.
+            let start = if start < 0 {
+                start + length as i64
+            } else {
+                start
+            };
+            if start < 0 || start > length as i64 || (!ranged && start == length as i64) {
+                stack.push(Value::NIL);
+                return Ok(None);
+            }
+            if count < 0 {
+                stack.push(Value::NIL);
+                return Ok(None);
+            }
+            let start = start as usize;
+            let end = (start + count as usize).min(length);
+            let slice: String = characters[start..end].iter().collect();
+            let value = string_bytes_new(scope, slice.as_bytes());
+            stack.push(value);
+            Ok(None)
+        }
+
+        Native::StringCompare => {
+            let Some(left) = string_bytes(scope, call.receiver) else {
+                return Err(Error::NoDispatch {
+                    op: "String#<=>",
+                    operands: "a receiver that is not a String",
+                });
+            };
+            // `<=>` answers nil for anything that is not a String, which is
+            // what makes `Comparable` raise rather than guess.
+            let Some(right) = call.args.first().and_then(|&v| string_bytes(scope, v)) else {
+                stack.push(Value::NIL);
+                return Ok(None);
+            };
+            // Bytes, which is what Ruby compares: `"a" <=> "b"` does not decode.
+            let answer = match left.cmp(&right) {
+                std::cmp::Ordering::Less => -1,
+                std::cmp::Ordering::Equal => 0,
+                std::cmp::Ordering::Greater => 1,
+            };
+            stack.push(Value::fixnum(answer).expect("-1, 0 and 1 are fixnums"));
+            Ok(None)
+        }
+
+        Native::WriteString => {
+            let Some(bytes) = call.args.first().and_then(|&v| string_bytes(scope, v)) else {
+                return Err(Error::NoDispatch {
+                    op: "__write__",
+                    operands: "an argument that is not a String",
+                });
+            };
+            use std::io::Write as _;
+            // A closed or full stdout is a real error in Ruby (`EPIPE`), and IO
+            // is phase 3. Until there is an `IOError` to raise, a failed write
+            // is reported rather than swallowed.
+            std::io::stdout().write_all(&bytes).map_err(|err| {
+                Error::raise("RuntimeError", format!("cannot write to stdout: {err}"))
+            })?;
+            stack.push(Value::NIL);
+            Ok(None)
+        }
+
+        Native::HashValue => {
+            let mut hasher = std::hash::DefaultHasher::new();
+            hash_value(scope, call.receiver, &mut hasher, 0)?;
+            // Ruby's `hash` is a fixnum, so the top bits go: a fixnum is 62
+            // bits and the shift keeps the sign bit clear.
+            let bits = std::hash::Hasher::finish(&hasher) >> 2;
+            stack.push(Value::fixnum(bits as i64).unwrap_or(Value::NIL));
+            Ok(None)
+        }
+
+        Native::Mixin { prepend } => {
+            let Some(target) = class_id_of(scope, call.receiver) else {
+                return Err(Error::NoDispatch {
+                    op: "Module#include",
+                    operands: "a receiver that is not a Module",
+                });
+            };
+            // `include A, B` mixes them in *right to left*, so that `A` ends up
+            // nearer the class than `B`. Measured, not guessed: it is the order
+            // `Module#ancestors` reports afterwards.
+            if call.args.is_empty() {
+                return Err(Error::raise(
+                    "ArgumentError",
+                    "wrong number of arguments (given 0, expected 1+)",
+                ));
+            }
+            for &argument in call.args.iter().rev() {
+                let Some(module) = class_id_of(scope, argument) else {
+                    return Err(Error::raise(
+                        "TypeError",
+                        format!(
+                            "wrong argument type {} (expected Module)",
+                            class_name(scope, argument)
+                        ),
+                    ));
+                };
+                let how = if prepend {
+                    scope.classes_mut().prepend(target, module)
+                } else {
+                    scope.classes_mut().include(target, module)
+                };
+                if let Err(err) = how {
+                    return Err(match err {
+                        crate::class::MixinError::NotAModule => Error::raise(
+                            "TypeError",
+                            format!(
+                                "wrong argument type {} (expected Module)",
+                                class_name(scope, argument)
+                            ),
+                        ),
+                        crate::class::MixinError::Cyclic(_) => {
+                            Error::raise("ArgumentError", format!("cyclic {err} detected"))
+                        }
+                    });
+                }
+            }
+            // Ruby's `include` answers the receiver, which is what makes
+            // `include Foo` usable as the last expression of a class body.
+            stack.push(call.receiver);
+            Ok(None)
+        }
+
+        Native::Ancestors => {
+            let Some(id) = class_id_of(scope, call.receiver) else {
+                return Err(Error::NoDispatch {
+                    op: "Module#ancestors",
+                    operands: "a receiver that is not a Module",
+                });
+            };
+            let ids = scope.classes().ancestors(id);
+            let objects: Vec<Value> = ids
+                .into_iter()
+                .map(|id| scope.classes().object(id))
+                .collect();
+            let value = new_array(scope, &objects);
+            stack.push(value);
+            Ok(None)
+        }
+
+        Native::Superclass => {
+            let Some(id) = class_id_of(scope, call.receiver) else {
+                return Err(Error::NoDispatch {
+                    op: "Class#superclass",
+                    operands: "a receiver that is not a Class",
+                });
+            };
+            // `BasicObject.superclass` is nil, and so is a module's — but a
+            // module has no `superclass` method at all in Ruby, so saying nil
+            // for one would be answering a call that should not have arrived.
+            if scope.classes().kind(id) == Kind::Module {
+                return Err(Error::raise(
+                    "NoMethodError",
+                    format!(
+                        "undefined method 'superclass' for module {}",
+                        scope.classes().name(id).unwrap_or("an anonymous module")
+                    ),
+                ));
+            }
+            let value = match scope.classes().superclass(id) {
+                Some(parent) => scope.classes().object(parent),
+                None => Value::NIL,
+            };
+            stack.push(value);
+            Ok(None)
+        }
+
+        Native::MethodDefined => {
+            let Some(id) = class_id_of(scope, call.receiver) else {
+                return Err(Error::NoDispatch {
+                    op: "Module#method_defined?",
+                    operands: "a receiver that is not a Module",
+                });
+            };
+            let Some(name) = call.args.first().and_then(|&v| method_name_of(scope, v)) else {
+                return Err(Error::raise("TypeError", "is not a symbol nor a string"));
+            };
+            // ponytail: `method_defined?` excludes private methods in Ruby, and
+            // this table has no visibility (#161). It therefore answers true
+            // for a private method, which `respond_to?(:puts)` shows. The fix
+            // is a visibility field, not a special case here.
+            let symbol = crate::shared::symbols::intern(&name);
+            let found = scope.classes_mut().lookup(id, symbol).is_some();
+            stack.push(bool_value(found));
+            Ok(None)
+        }
+
+        Native::ModuleName => {
+            let Some(id) = class_id_of(scope, call.receiver) else {
+                return Err(Error::NoDispatch {
+                    op: "Module#name",
+                    operands: "a receiver that is not a Module",
+                });
+            };
+            let value = match scope.classes().name(id) {
+                Some(name) => {
+                    let name = name.to_owned();
+                    string_new(scope, &name)
+                }
+                // An anonymous module's `name` is nil, and its `to_s` is not —
+                // but `to_s` on one needs an object id in the text, which is
+                // `#inspect`'s job and not this primitive's.
+                None => Value::NIL,
+            };
+            stack.push(value);
             Ok(None)
         }
 
@@ -2917,8 +4024,94 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             Native::MatchEdge { end: true },
         ),
         (Builtin::MatchData, &["size", "length"], Native::MatchSize),
+        // `regexp` and `string` are the pattern and the subject the match was
+        // made against, in the slots `match_data_new` wrote them to. Reading a
+        // slot is what `Getter` is; `core/match_data.rb` builds `==` on them.
+        (
+            Builtin::MatchData,
+            &["regexp"],
+            Native::Getter(crate::regexp::MATCH_REGEXP as u16),
+        ),
+        (
+            Builtin::MatchData,
+            &["string"],
+            Native::Getter(crate::regexp::MATCH_SUBJECT as u16),
+        ),
         (Builtin::Kernel, &["equal?"], Native::Equal),
         (Builtin::Kernel, &["nil?"], Native::NilP),
+        // #15. Raw storage and allocation; the rest of these classes is Ruby.
+        (Builtin::Array, &["[]"], Native::ArrayIndex),
+        (Builtin::Array, &["[]="], Native::ArrayStore),
+        (Builtin::Array, &["size", "length"], Native::ArraySize),
+        (Builtin::Array, &["push", "append"], Native::ArrayPush),
+        (Builtin::Array, &["pop"], Native::ArrayPop),
+        (
+            Builtin::String,
+            &["length", "size"],
+            Native::StringSize { bytes: false },
+        ),
+        (
+            Builtin::String,
+            &["bytesize"],
+            Native::StringSize { bytes: true },
+        ),
+        (Builtin::String, &["+"], Native::StringConcat),
+        (Builtin::String, &["*"], Native::StringRepeat),
+        (Builtin::Class, &["allocate"], Native::Allocate),
+        (Builtin::Kernel, &["dup"], Native::Dup),
+        (Builtin::Kernel, &["freeze"], Native::Freeze),
+        (Builtin::Kernel, &["frozen?"], Native::FrozenP),
+        (Builtin::Kernel, &["object_id", "__id__"], Native::ObjectId),
+        (Builtin::Integer, &["&"], Native::IntBits(BitOp::And)),
+        (Builtin::Integer, &["|"], Native::IntBits(BitOp::Or)),
+        (Builtin::Integer, &["^"], Native::IntBits(BitOp::Xor)),
+        (Builtin::Integer, &["<<"], Native::IntBits(BitOp::Shl)),
+        (Builtin::Integer, &[">>"], Native::IntBits(BitOp::Shr)),
+        (Builtin::Integer, &["~"], Native::IntBits(BitOp::Not)),
+        (Builtin::Integer, &["**"], Native::IntPow),
+        (
+            Builtin::Symbol,
+            &["to_s", "name", "id2name"],
+            Native::SymbolName { length: false },
+        ),
+        (
+            Builtin::Symbol,
+            &["length", "size"],
+            Native::SymbolName { length: true },
+        ),
+        (Builtin::Module, &["name"], Native::ModuleName),
+        (Builtin::Kernel, &["hash"], Native::HashValue),
+        (
+            Builtin::Module,
+            &["include"],
+            Native::Mixin { prepend: false },
+        ),
+        (
+            Builtin::Module,
+            &["prepend"],
+            Native::Mixin { prepend: true },
+        ),
+        (Builtin::Module, &["ancestors"], Native::Ancestors),
+        (Builtin::Module, &["method_defined?"], Native::MethodDefined),
+        (Builtin::Class, &["superclass"], Native::Superclass),
+        (Builtin::Kernel, &["__write__"], Native::WriteString),
+        (Builtin::Float, &["to_s"], Native::FloatToS),
+        (Builtin::String, &["[]"], Native::StringIndex),
+        (Builtin::String, &["<=>"], Native::StringCompare),
+        // `core/hash.rb` keeps its association list, its default, and whether
+        // that default is a block in three slots. These are how it reaches
+        // them. #151's shapes turn all three into ordinary instance variables
+        // and delete this block.
+        (Builtin::Hash, &["__pairs__"], Native::Getter(0)),
+        (Builtin::Hash, &["__set_pairs__"], Native::Setter(0)),
+        (Builtin::Hash, &["__default__"], Native::Getter(1)),
+        (Builtin::Hash, &["__set_default__"], Native::Setter(1)),
+        (Builtin::Hash, &["__default_is_proc__"], Native::Getter(2)),
+        (
+            Builtin::Hash,
+            &["__set_default_is_proc__"],
+            Native::Setter(2),
+        ),
     ];
     for (builtin, names, native) in table {
         let body = scope.definitions_mut().add(Definition::Native(*native));
@@ -2967,13 +4160,16 @@ fn materialise<'h>(
             operands: "a value wider than a fixnum",
         }),
         Literal::Regexp { source, options } => regexp_literal(scope, source, *options),
-        Literal::Str(bytes) => {
+        Literal::Str(bytes) | Literal::FrozenStr(bytes) => {
             let len = u32::try_from(bytes.len()).map_err(|_| Error::NoDispatch {
                 op: "String",
                 operands: "a literal larger than 4 GiB",
             })?;
             let handle = scope.alloc(Some(string_class), Payload::Bytes, len);
             scope.bytes_mut(handle).copy_from_slice(bytes);
+            if matches!(literal, Literal::FrozenStr(_)) {
+                scope.freeze(handle);
+            }
             Ok(scope.get(handle))
         }
     }
@@ -3149,11 +4345,11 @@ pub fn ruby_eq(scope: &mut HandleScope<'_>, left: Value, right: Value) -> Result
                 return Ok(false);
             }
             let (a, b) = (scope.root(left), scope.root(right));
-            if scope.len(a) != scope.len(b) {
+            if array_len(scope, a) != array_len(scope, b) {
                 return Ok(false);
             }
-            for index in 0..scope.len(a) as usize {
-                let (x, y) = (scope.slot(a, index), scope.slot(b, index));
+            for index in 0..array_len(scope, a) {
+                let (x, y) = (array_get(scope, a, index), array_get(scope, b, index));
                 if !ruby_eq(scope, x, y)? {
                     return Ok(false);
                 }
@@ -3251,9 +4447,9 @@ pub fn inspect(scope: &mut HandleScope<'_>, value: Value) -> String {
             }
             Some(HeapKind::Array) => {
                 let handle = scope.root(value);
-                let items: Vec<String> = (0..scope.len(handle) as usize)
+                let items: Vec<String> = (0..array_len(scope, handle))
                     .map(|index| {
-                        let item = scope.slot(handle, index);
+                        let item = array_get(scope, handle, index);
                         inspect(scope, item)
                     })
                     .collect();
@@ -3333,6 +4529,9 @@ fn regexp_new(scope: &mut HandleScope<'_>, source: &str, options: i64) -> Result
     nested.set_slot(handle, crate::regexp::REGEXP_INDEX, index);
     let text = nested.get(text);
     nested.set_slot(handle, crate::regexp::REGEXP_SOURCE, text);
+    // A Regexp is frozen from birth in Ruby, which is what makes
+    // `Regexp#initialize` on one a FrozenError rather than a second compile.
+    nested.freeze(handle);
     nested.set_slot(
         handle,
         crate::regexp::REGEXP_OPTIONS,
@@ -3758,6 +4957,90 @@ mod tests {
             locals: vec!["slot".into()],
             max_stack,
             ..Iseq::default()
+        }
+    }
+
+    /// The property the two-slot representation exists for: growth replaces the
+    /// storage object and leaves the `Array` itself where it was, so `a << 1`
+    /// is visible through every reference to `a`.
+    #[test]
+    fn growing_an_array_keeps_its_identity() {
+        let mut heap = Heap::new();
+        let mut scope = heap.scope();
+        scope.bootstrap();
+
+        let array = new_array(&mut scope, &[]);
+        let handle = scope.root(array);
+        assert_eq!(array_len(&mut scope, handle), 0);
+
+        // Past the first capacity, so storage is reallocated at least twice.
+        for n in 0..40 {
+            let value = Value::fixnum(n).expect("small");
+            array_push(&mut scope, handle, value);
+        }
+        assert_eq!(array_len(&mut scope, handle), 40);
+        // Same `Value`: the caller's reference still names this array.
+        assert_eq!(scope.get(handle), array, "growth must not move the Array");
+        for n in 0..40 {
+            assert_eq!(
+                array_get(&mut scope, handle, n as usize),
+                Value::fixnum(n).expect("small"),
+                "element {n} survived the copies"
+            );
+        }
+    }
+
+    /// `Array#[]` past the end is `nil`, not whatever the storage object still
+    /// holds from before a `pop`.
+    #[test]
+    fn reading_past_the_length_is_nil_not_stale_storage() {
+        let mut heap = Heap::new();
+        let mut scope = heap.scope();
+        scope.bootstrap();
+
+        let array = new_array(&mut scope, &[Value::fixnum(7).expect("small")]);
+        let handle = scope.root(array);
+        array_set_len(&mut scope, handle, 0);
+        assert_eq!(array_get(&mut scope, handle, 0), Value::NIL);
+    }
+
+    /// Every value has a class, including the immediates. Before #15 four of
+    /// them did not, and `nil.to_s` had nowhere to dispatch.
+    #[test]
+    fn every_immediate_has_a_class() {
+        let mut heap = Heap::new();
+        let mut scope = heap.scope();
+        scope.bootstrap();
+        for (value, expected) in [
+            (Value::NIL, Builtin::NilClass),
+            (Value::TRUE, Builtin::TrueClass),
+            (Value::FALSE, Builtin::FalseClass),
+            (Value::fixnum(1).expect("small"), Builtin::Integer),
+            (Value::flonum(1.5).expect("flonum"), Builtin::Float),
+        ] {
+            assert_eq!(
+                class_of(&mut scope, value),
+                Some(expected.id()),
+                "{expected:?} is the class of {value:?}"
+            );
+        }
+    }
+
+    /// Measured against CRuby: the plain form inside `[1e-4, 1e15)` and the
+    /// exponent form outside it, with a two-digit signed exponent.
+    #[test]
+    fn float_to_s_matches_rubys_shape() {
+        for (value, expected) in [
+            (1.0, "1.0"),
+            (-0.0, "-0.0"),
+            (0.0001, "0.0001"),
+            (0.00001, "1.0e-05"),
+            (1e14, "100000000000000.0"),
+            (1e15, "1.0e+15"),
+            (1e20, "1.0e+20"),
+            (-1e15, "-1.0e+15"),
+        ] {
+            assert_eq!(float_to_s(value), expected, "{value}");
         }
     }
 

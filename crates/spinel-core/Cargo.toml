@@ -8,6 +8,8 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+spinel-ast.workspace = true
+spinel-parse.workspace = true
 spinel-vm.workspace = true
 
 [lints]

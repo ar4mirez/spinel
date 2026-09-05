@@ -10,4 +10,5 @@
 //! no Ractor can observe another's write as a *change*. The lock protects the
 //! append, not the reads that follow it.
 
+pub mod core_image;
 pub mod symbols;

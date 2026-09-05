@@ -281,6 +281,11 @@ impl Compiler {
             | Insn::JumpUnlessUndef(_)
             | Insn::BinOp(_)
             | Insn::CaseEq
+            // `LeaveThroughEnsure` stands exactly where a `Leave` stood, at a
+            // site that already emits the `PushNil` the linear depth model
+            // wants after it. Counting it anything but -1 would put the two
+            // arms of an `if` containing a `next` one slot apart.
+            | Insn::LeaveThroughEnsure
             | Insn::Leave => -1,
             Insn::GetLocal(_, _) | Insn::MakeProc(_, _) => 1,
             // `Return` pops its value at run time, but control does not fall
@@ -850,7 +855,13 @@ impl Compiler {
                 // value, which is what leaving a frame already does. `Return`
                 // is the non-local one that walks out to the enclosing method,
                 // and using it here made `y { |a| next a * 2 }` return from `y`.
-                self.emit(Insn::Leave);
+                // With an `ensure` open over the point, leaving has bodies to run
+                // first, and a plain `Leave` would step straight over them.
+                self.emit(if self.open_ensures == 0 {
+                    Insn::Leave
+                } else {
+                    Insn::LeaveThroughEnsure
+                });
                 // `Leave` pops at run time and does not fall through, but
                 // `next` is still an expression and the linear depth model
                 // needs one value here. The push after the jump is never
@@ -1228,7 +1239,8 @@ impl Compiler {
 
     /// Push one of `defined?`'s answer strings.
     fn push_word(&mut self, word: &str) -> Emit {
-        let index = self.literal(Literal::Str(word.as_bytes().into()));
+        // Frozen: `defined?` answers a frozen string in Ruby.
+        let index = self.literal(Literal::FrozenStr(word.as_bytes().into()));
         self.emit(Insn::PushLit(index));
         Ok(())
     }

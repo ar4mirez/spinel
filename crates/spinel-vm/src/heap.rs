@@ -66,6 +66,13 @@ const MIN_GC_BYTES: usize = 1024 * 1024;
 /// defined here because nothing can set them until #8.
 const MARKED: u8 = 0b1;
 
+/// Set by `Object#freeze`, and never cleared: Ruby has no `unfreeze`.
+///
+/// One of the two bits `docs/engine.md` reserves in the header. It lives on the
+/// object rather than in a side table because `frozen?` is asked on the hot
+/// path of every mutating method, and a side table would be a lookup there.
+const FROZEN: u8 = 0b10;
+
 /// Set from allocation until the cell is swept onto a free list.
 ///
 /// The collector never reads it. It exists so that storing a `Value` can assert, in
@@ -822,6 +829,30 @@ impl<'h> HandleScope<'h> {
     /// # Panics
     ///
     /// If the object holds slots.
+    /// The cell's address, which is what `Object#object_id` is derived from.
+    ///
+    /// Stable only while the collector does not move objects. Phase 6's moving
+    /// GC replaces this with a side table keyed by the id already handed out.
+    #[must_use]
+    pub fn address(&self, handle: Handle<'h>) -> usize {
+        self.object(handle).header() as usize
+    }
+
+    /// Mark the object frozen. Idempotent, and one-way: Ruby has no `unfreeze`.
+    pub fn freeze(&mut self, handle: Handle<'h>) {
+        let object = self.object(handle);
+        // SAFETY: `handle` is rooted, so the cell it names is live.
+        unsafe { (*object.header()).flags |= FROZEN };
+    }
+
+    /// Whether [`HandleScope::freeze`] has been called on this object.
+    #[must_use]
+    pub fn is_frozen(&self, handle: Handle<'h>) -> bool {
+        let object = self.object(handle);
+        // SAFETY: as above.
+        unsafe { (*object.header()).flags & FROZEN != 0 }
+    }
+
     pub fn bytes_mut(&mut self, handle: Handle<'h>) -> &mut [u8] {
         let object = self.object(handle);
         // SAFETY: the handle roots a live object of this heap.

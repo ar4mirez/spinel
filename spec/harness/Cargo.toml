@@ -18,6 +18,7 @@ path = "src/main.rs"
 clap.workspace = true
 spinel-ast.workspace = true
 spinel-parse.workspace = true
+spinel-core.workspace = true
 spinel-vm.workspace = true
 
 [lints]

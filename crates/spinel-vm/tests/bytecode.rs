@@ -167,3 +167,61 @@ fn a_local_keeps_its_slot_across_separately_compiled_expressions() {
     }
     assert_eq!(last, "1", "`a` should still hold 1 in the third statement");
 }
+
+/// `next` inside an `ensure` inside an `if` arm.
+///
+/// `next` from a block leaves the frame, and when an `ensure` is open over it
+/// that has to happen through the unwinder rather than through `Insn::Leave` —
+/// otherwise the `ensure` body is stepped over. The instruction that does it
+/// pops a value exactly as `Leave` does, and counting it any other way puts the
+/// two arms of the enclosing `if` one stack slot apart. `max_stack` is computed
+/// from those depths and the mismatch is a `debug_assert`, so this only fires
+/// in a debug build — which is the build CI tests in.
+#[test]
+fn next_through_an_ensure_keeps_both_if_arms_at_one_depth() {
+    let parsed = spinel_parse::parse(
+        b"[1, 2].each do |i|
+            if i == 1
+              begin
+                next
+              ensure
+                nil
+              end
+            else
+              i
+            end
+          end",
+    );
+    assert!(
+        parsed.is_ok(),
+        "the fixture is valid Ruby: {:?}",
+        parsed.errors
+    );
+    compile::program(&parsed.program).expect("should compile without a depth mismatch");
+}
+
+/// And it runs the `ensure` body, which is the behaviour the instruction exists
+/// for rather than the depth bookkeeping that goes with it.
+#[test]
+fn next_runs_the_ensure_it_leaves() {
+    let parsed = spinel_parse::parse(
+        b"log = []
+          [1].each do |i|
+            begin
+              log.push(:begin)
+              next
+            ensure
+              log.push(:ensure)
+            end
+          end
+          log",
+    );
+    let iseq = compile::program(&parsed.program).expect("should compile");
+    let mut heap = Heap::new();
+    let mut frame = interp::Frame::new(0);
+    let mut scope = heap.scope();
+    scope.bootstrap();
+    spinel_core::boot(&mut scope);
+    let value = interp::eval_in(&mut scope, &mut frame, &iseq).expect("should run");
+    assert_eq!(interp::inspect(&mut scope, value), "[:begin, :ensure]");
+}

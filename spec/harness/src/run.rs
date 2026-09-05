@@ -176,6 +176,10 @@ pub fn run(example: &Example) -> Outcome {
     let mut frame = interp::Frame::new(0);
     let mut scope = heap.scope();
     scope.bootstrap();
+    // The Ruby half of the core library. `bootstrap` makes the classes; this
+    // fills in their methods, and without it every example that calls one is
+    // blocked on a method that exists in `core/*.rb`.
+    spinel_core::boot(&mut scope);
     install_scratch_pad(&mut scope, &mut frame);
 
     // One slot map for the whole example: every statement is compiled against

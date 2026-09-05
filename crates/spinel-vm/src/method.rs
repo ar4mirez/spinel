@@ -121,6 +121,99 @@ pub enum Native {
     /// `Object#frozen?`, `Object#nil?`, `Object#!`. Cheap predicates the target
     /// specs reach for while checking something else.
     NilP,
+
+    // -- #15's core library. Each one is raw memory or allocation; everything
+    // -- else about these classes is Ruby, in `core/*.rb`.
+    /// `Array#[]` — reads a raw slot run.
+    ArrayIndex,
+    /// `Array#[]=` — writes one, and reallocates storage past the end.
+    ArrayStore,
+    /// `Array#size` — reads the length slot.
+    ArraySize,
+    /// `Array#push` — writes a raw slot, reallocating storage when full.
+    ArrayPush,
+    /// `Array#pop` — writes the length back.
+    ArrayPop,
+    /// `String#length` and `#size` (characters), and `#bytesize` (bytes).
+    /// One primitive, because both read the same byte payload's length; they
+    /// differ only in whether the bytes are decoded first.
+    StringSize {
+        bytes: bool,
+    },
+    /// `String#+` — allocates a byte payload.
+    StringConcat,
+    /// `String#*` — allocates a byte payload.
+    StringRepeat,
+    /// `Class#allocate` — allocation, and the shape is per class.
+    Allocate,
+    /// `Object#dup` — allocates a copy of a cell. `Array` overrides it in Ruby,
+    /// because a shallow copy of an `Array` would share its storage object.
+    Dup,
+    /// `Object#freeze` — sets a header flag bit.
+    Freeze,
+    /// `Object#frozen?` — reads it.
+    FrozenP,
+    /// `Object#object_id` — the object's address.
+    ObjectId,
+    /// `Integer#<<`, `#>>`, `#&`, `#|`, `#^`, `#~` — fixnum bit patterns, which
+    /// the JIT wants as intrinsics.
+    IntBits(BitOp),
+    /// `Integer#**` — repeated multiplication with an overflow check, so the
+    /// answer is a refusal rather than a wrapped one.
+    IntPow,
+    /// `Symbol#to_s`, `#name`, `#length` — reads the shared symbol table.
+    SymbolName {
+        length: bool,
+    },
+    /// `Module#name`, `Module#to_s` — reads the class table.
+    ModuleName,
+    /// `Object#hash` — a fixnum that is equal whenever `==` is.
+    ///
+    /// Content for a `String` and an `Array`, identity for everything else,
+    /// which is Ruby's own default. A primitive because it reads raw bytes and
+    /// raw slots, and because a `Hash` keyed on it wants it as an intrinsic.
+    HashValue,
+    /// `Module#include` and `Module#prepend` — splices a module into the
+    /// ancestor chain, which is a write to the class table.
+    ///
+    /// Without it `core/comparable.rb` is unreachable: `include Comparable` is
+    /// how every mixin in Ruby is used.
+    Mixin {
+        prepend: bool,
+    },
+    /// `Module#ancestors` — the linearised chain, which only the class table
+    /// knows. `is_a?`, `kind_of?`, `Module#===` and `Module#<` are Ruby on it.
+    Ancestors,
+    /// `Class#superclass` — one step up the same chain.
+    Superclass,
+    /// `Module#method_defined?` — a method-table lookup.
+    MethodDefined,
+    /// `Float#to_s` — the shortest decimal that reads back as the same float,
+    /// which is an algorithm (Ruby uses `dtoa`) and not a formatting rule.
+    FloatToS,
+    /// `String#[]` — allocates a substring out of a byte payload.
+    StringIndex,
+    /// `String#<=>` — compares two byte payloads.
+    StringCompare,
+    /// Writes a `String`'s bytes to stdout. A syscall, so Rust.
+    ///
+    /// Installed as `Kernel#__write__`, which is not a Ruby method name.
+    /// `docs/engine.md` spells a primitive `Primitive.write(...)`; there is no
+    /// `Primitive` module yet, and inventing one for a single entry would be a
+    /// module to name, bootstrap and document before anything needed it.
+    /// `puts`, `print` and `p` are Ruby on top of this.
+    WriteString,
+}
+
+/// The bitwise operators on `Integer`, which share one primitive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BitOp {
+    And,
+    Or,
+    Xor,
+    Shl,
+    Shr,
+    Not,
 }
 
 /// A method body.

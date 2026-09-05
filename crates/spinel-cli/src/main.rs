@@ -19,10 +19,11 @@ const MILESTONES: &str = "https://github.com/ar4mirez/spinel/milestones";
 /// Shown under the options list. States plainly what this build does and does
 /// not do, so nobody installs it and wonders why `spinel app.rb` does nothing.
 const AFTER_HELP: &str = "\
-This build does not run Ruby yet. It is the Phase 0 skeleton: it parses Ruby and
-prints the syntax tree, and it reports its version.
+This build runs Ruby. The core library is minimal — Kernel, Object, Integer,
+String, Symbol, Array, Hash, Comparable — and a program that reaches past it
+says which method is missing rather than failing quietly.
 
-Planned surface (docs/cli.md): run, x, init, install, add, remove, update, test, build.
+Planned surface (docs/cli.md): x, init, install, add, remove, update, test, build.
 Progress: https://github.com/ar4mirez/spinel/milestones";
 
 #[derive(Parser, Debug)]
@@ -52,6 +53,19 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
+    /// Run a Ruby file.
+    Run {
+        /// A Ruby file.
+        path: PathBuf,
+
+        /// Print the compiled bytecode instead of running it.
+        ///
+        /// The debugging window onto the compiler that `spinel parse` is onto
+        /// the syntax tree.
+        #[arg(long)]
+        dump_bytecode: bool,
+    },
+
     /// Parse Ruby and print the syntax tree.
     ///
     /// Give it a file to see one tree. Give it a directory to sweep every `.rb`
@@ -85,23 +99,25 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    if let Some(Command::Parse { path, format }) = cli.command {
-        return parse_command(&path, format);
+    match cli.command {
+        Some(Command::Parse { path, format }) => return parse_command(&path, format),
+        Some(Command::Run {
+            path,
+            dump_bytecode,
+        }) => return run_command(&path, dump_bytecode),
+        None => {}
     }
 
     if let Some(argument) = cli.file {
         // A Ruby file is the likeliest first thing a Ruby developer types; a
         // mistyped subcommand is the second. They need opposite answers, and
-        // telling a typo it "cannot be run yet" would send the reader hunting
-        // for a file that was never the point.
+        // running a typo as a filename would report "no such file" about a word
+        // that was never meant to be one.
         if looks_like_a_ruby_file(&argument) {
-            eprintln!("spinel: cannot run `{argument}` — this build has no VM yet.");
-            eprintln!("        Running Ruby lands in phase 1. Progress: {MILESTONES}");
-            eprintln!("        To see how Spinel reads the file: spinel parse {argument}");
-        } else {
-            eprintln!("spinel: unknown subcommand `{argument}`.");
-            eprintln!("        This build has one: parse. Try `spinel --help`.");
+            return run_command(Path::new(&argument), false);
         }
+        eprintln!("spinel: unknown subcommand `{argument}`.");
+        eprintln!("        This build has two: run, parse. Try `spinel --help`.");
         return ExitCode::from(EXIT_USAGE);
     }
 
@@ -114,6 +130,101 @@ fn main() -> ExitCode {
 fn looks_like_a_ruby_file(argument: &str) -> bool {
     let path = Path::new(argument);
     path.extension().is_some_and(|e| e == "rb") || path.is_file()
+}
+
+// ---------------------------------------------------------------------------
+// spinel run
+// ---------------------------------------------------------------------------
+
+/// Exit code for a Ruby program that ended in an uncaught exception. Ruby exits
+/// 1, and a script wrapping `spinel run` should not have to tell the two apart.
+const EXIT_RAISED: u8 = 1;
+
+fn run_command(path: &Path, dump_bytecode: bool) -> ExitCode {
+    let source = match std::fs::read(path) {
+        Ok(source) => source,
+        Err(err) => {
+            eprintln!("spinel: cannot read `{}`: {err}", path.display());
+            return ExitCode::from(EXIT_USAGE);
+        }
+    };
+
+    let parsed = spinel_parse::parse(&source);
+    let color = use_color();
+    for error in &parsed.errors {
+        eprintln!(
+            "{}",
+            render_diagnostic(path, &source, error, "error", color)
+        );
+    }
+    if !parsed.is_ok() {
+        return ExitCode::from(EXIT_SYNTAX);
+    }
+
+    let iseq = match spinel_vm::compile::program(&parsed.program) {
+        Ok(iseq) => iseq,
+        Err(unsupported) => {
+            // A construct the compiler does not implement yet is not a syntax
+            // error and must not be reported as one: the file is valid Ruby and
+            // Spinel is the thing that is unfinished. Saying which construct is
+            // what makes the next slice choosable.
+            eprintln!("spinel: cannot run `{}` yet: {unsupported}", path.display());
+            eprintln!("        Progress: {MILESTONES}");
+            return ExitCode::from(EXIT_USAGE);
+        }
+    };
+
+    if dump_bytecode {
+        let mut stdout = std::io::stdout().lock();
+        let _ = writeln!(stdout, "{iseq:#?}");
+        return ExitCode::SUCCESS;
+    }
+
+    let mut heap = spinel_vm::Heap::new();
+    let mut scope = heap.scope();
+    scope.bootstrap();
+    spinel_core::boot(&mut scope);
+
+    let mut frame = spinel_vm::interp::Frame::new(0);
+    match spinel_vm::interp::eval_in(&mut scope, &mut frame, &iseq) {
+        Ok(_) => ExitCode::SUCCESS,
+        Err(err) => {
+            // Ruby prints `file:line: message (Class)`. Spinel has no line
+            // numbers on a raise yet — backtraces are PRD 0012's non-goal — so
+            // the file is named and the line is not invented.
+            eprintln!("{}: {}", path.display(), describe_error(&err));
+            ExitCode::from(EXIT_RAISED)
+        }
+    }
+}
+
+/// One line for an error that ended the program.
+///
+/// A raise is Ruby's own `message (Class)`. Everything else is the VM saying it
+/// cannot run the program — a missing method, an unfinished construct — and
+/// those read as engine limits, with the milestone to follow.
+fn describe_error(err: &spinel_vm::Error) -> String {
+    match err {
+        // The exception object reached the top with no handler. This is the
+        // ordinary end of a Ruby program that raised, and reads as Ruby's does.
+        spinel_vm::Error::Uncaught { class, message } => format!("{message} ({class})"),
+        // The VM decided to raise and the unwinder never got to build an
+        // object — an arity error at the outermost frame, say. Same shape.
+        spinel_vm::Error::Raise { class, message } => format!("{message} ({class})"),
+        // A method this build does not have. Ruby's own wording, because that
+        // is what the reader is looking for, plus the one line that says the
+        // difference: this is Spinel being unfinished, not the program being
+        // wrong, and `rescue NoMethodError` deliberately did not catch it.
+        spinel_vm::Error::NoSuchMethod { name, class } => format!(
+            "undefined method '{name}' for an instance of {class} (NoMethodError)\n\
+             \x20       Spinel's core library is still minimal, so this may be Spinel \
+             rather than your program.\n\
+             \x20       What exists: {MILESTONES}"
+        ),
+        // Everything else is the engine saying it cannot run the program
+        // rather than the program failing, so it points at the milestones.
+        other => format!("{other} — see {MILESTONES}"),
+    }
 }
 
 // ---------------------------------------------------------------------------

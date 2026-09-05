@@ -252,6 +252,18 @@ impl Value {
         self.0.get()
     }
 
+    /// The raw tagged word, for the few callers outside this module that need a
+    /// value's identity as a number rather than as a `Value`.
+    ///
+    /// `Object#object_id` is the one today. Not a hash and not an address: two
+    /// `Value`s are the same object exactly when these are equal, which is the
+    /// property `object_id` needs and the only one this promises.
+    #[must_use]
+    #[inline]
+    pub const fn to_bits(self) -> u64 {
+        self.bits()
+    }
+
     #[inline]
     const fn from_bits(bits: u64) -> Value {
         match NonZeroU64::new(bits) {

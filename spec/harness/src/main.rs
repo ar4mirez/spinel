@@ -47,6 +47,12 @@ struct Cli {
     /// checked without reading the harness's source.
     #[arg(long)]
     list: bool,
+
+    /// How many "blocked by" reasons to rank. The default is a readable
+    /// summary; planning a slice wants the whole tail, so `--blocked 0` prints
+    /// every reason.
+    #[arg(long, value_name = "N", default_value_t = MAX_BLOCKED_REASONS)]
+    blocked: usize,
 }
 
 #[derive(Default)]
@@ -264,14 +270,18 @@ fn main() -> ExitCode {
         ranked.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
         println!();
         println!("blocked by, most examples first ({MILESTONES}):");
-        for (reason, count) in ranked.iter().take(MAX_BLOCKED_REASONS) {
+        // `--blocked 0` means "no cap": the whole tail, which is what planning
+        // the next slice reads.
+        let cap = if cli.blocked == 0 {
+            ranked.len()
+        } else {
+            cli.blocked
+        };
+        for (reason, count) in ranked.iter().take(cap) {
             println!("  {count:>5}  {reason}");
         }
-        if ranked.len() > MAX_BLOCKED_REASONS {
-            println!(
-                "  ... and {} more reasons",
-                ranked.len() - MAX_BLOCKED_REASONS
-            );
+        if ranked.len() > cap {
+            println!("  ... and {} more reasons", ranked.len() - cap);
         }
     }
 

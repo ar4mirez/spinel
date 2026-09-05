@@ -168,12 +168,20 @@ Optional and keyword defaults are code at the top of the body rather than someth
 
 Boot order:
 
-1. `spinel-vm` creates the heap and the bootstrap classes `BasicObject`, `Object`, `Module`, `Class`, `Kernel`, `Comparable`, `Enumerable`, `Numeric`, `Symbol`, `String`, `Integer`, `Array`, `Hash`, `Proc`, `Exception` as empty shells with the right ancestry. The three modules and `Numeric` are on the list because of "the right ancestry": without them `Integer.ancestors` is wrong from the first commit, and `core/*.rb` cannot fix an ancestry it is loaded into.
-2. Rust primitives are registered under a hidden `Primitive` module.
-3. `core.image` (precompiled `core/*.rb`) is loaded and executed, filling in every method.
+1. `spinel-vm` creates the heap and the bootstrap classes `BasicObject`, `Object`, `Module`, `Class`, `Kernel`, `Comparable`, `Enumerable`, `Numeric`, `Symbol`, `String`, `Integer`, `Array`, `Hash`, `Proc`, `Exception`, `Regexp`, `MatchData`, `NilClass`, `TrueClass`, `FalseClass`, `Float` as empty shells with the right ancestry. The three modules and `Numeric` are on the list because of "the right ancestry": without them `Integer.ancestors` is wrong from the first commit, and `core/*.rb` cannot fix an ancestry it is loaded into. The last four are on it because `nil`, `true`, `false` and a flonum are immediates whose class is decided in `class_of` rather than in a header, and a value with no class has nowhere to dispatch `to_s`.
+2. Rust primitives are registered on the classes they belong to.
+3. `core/*.rb` is loaded and executed, filling in every method.
 4. Core classes are marked shareable. Reopening them from user code is allowed only from the main Ractor, as in Ruby 4 (see "Ractors and threads").
 
-`core/*.rb` is compiled to bytecode at `cargo build` time by running the compiler on the host, so boot does not parse.
+Steps 2 and 3 are `spinel-core`'s, not `spinel-vm`'s, and the split is a layering one: compiling Ruby needs a parser, and `spinel-vm` does not depend on `spinel-parse` because Prism lives in exactly one crate. So the VM bootstraps *classes* and `spinel-core::boot` bootstraps their *methods*. Every embedder — the CLI, the spec harness — calls both, in that order.
+
+As of [#15](https://github.com/ar4mirez/spinel/issues/15) step 3 compiles `core/*.rb` on the first boot in a process and caches the `Iseq`s, rather than reading a precompiled image. Evaluating per heap is unavoidable — a method table belongs to a heap, and the spec harness makes one heap per example — but parsing per heap is not, and the cache is what keeps a 25,000-example run from paying for Prism 25,000 times. An `Iseq` is immutable and holds no `Value`, so the cache is the same category as `shared/symbols` rather than the process-global VM state `CLAUDE.md` forbids.
+
+`// ponytail:` that cache is `core.image` minus the serialisation. The ceiling is one parse and compile per process; the upgrade is a `build.rs` that serialises the `Iseq`s into the binary, worth writing when that parse shows up in a benchmark.
+
+**Primitives are installed under their Ruby names**, on the class that owns them, rather than under a hidden `Primitive` module. There is no `Primitive` module yet: it would need a name, a bootstrap entry and a documented surface before anything needed one, and every primitive so far *is* the Ruby method — `Array#[]` is the slot read, `String#+` is the allocation. The two that are not — `Kernel#__write__`, and `Hash`'s three slot accessors — carry `__` names and a comment naming what replaces them (`IO`, and #151's shapes).
+
+**`Array` is two slots: storage and length.** A heap cell cannot grow, so an array whose elements live in its own slots could only grow by becoming a different object and Ruby would see the identity change. The elements live in a separate `Payload::Slots` object instead, and growing replaces *that*; the `Array`'s own address never moves. This is `RARRAY`'s pointer and length, for the same reason. `String` has no such indirection yet, which is why `String#<<`, `#concat` and `#replace` are absent rather than approximated — a mutable string is the same change applied to a byte payload.
 
 Strings (default): byte vector plus encoding plus cached character count. UTF-8, US-ASCII, ASCII-8BIT first; other encodings via transcoding tables in a later phase. No ropes.
 
