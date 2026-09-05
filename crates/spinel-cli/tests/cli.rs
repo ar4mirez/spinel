@@ -217,6 +217,22 @@ fn a_missing_method_reads_like_ruby_and_says_who_is_unfinished() {
     );
 }
 
+/// The same missing method, caught. #170 made a failed dispatch an ordinary
+/// raise, so a program can `rescue` one and keep running — and `name` and
+/// `receiver` answer what CRuby's do.
+#[test]
+fn a_missing_method_can_be_rescued() {
+    let out = spinel(&["run", &fixture("run/rescued_missing_method.rb")]);
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    assert_eq!(
+        stdout(&out),
+        "NoMethodError\n\
+         undefined method 'upcase' for an instance of String\n\
+         :upcase\n\
+         spinel\n"
+    );
+}
+
 /// `--dump-bytecode` is to the compiler what `spinel parse` is to the tree.
 #[test]
 fn dump_bytecode_prints_instructions_without_running() {

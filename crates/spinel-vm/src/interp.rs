@@ -81,30 +81,6 @@ pub enum Error {
     /// the way out, and found none — so the class name may be one the program
     /// defined, which is why it is a `String` and not `&'static str`.
     Uncaught { class: String, message: String },
-    /// A method this heap has never been given.
-    ///
-    /// Deliberately *not* [`Error::Raise`], even though Ruby's answer for a
-    /// missing method is a `NoMethodError` a `rescue` can catch. The two are
-    /// indistinguishable from inside, and treating this one as catchable is
-    /// actively worse than reporting it: `core/array/reject_spec.rb` writes
-    ///
-    /// ```ruby
-    /// begin
-    ///   a.reject! { |x| raise StandardError if x == 3 }
-    /// rescue StandardError
-    /// end
-    /// a.should == [1, 3, 4]
-    /// ```
-    ///
-    /// and with a catchable `NoMethodError` the `rescue` swallows "Spinel has
-    /// no `reject!`", the example carries on down a branch Ruby never takes,
-    /// and the comparison fails for a reason that has nothing to do with the
-    /// behaviour under test. Before this slice nothing could catch anything, so
-    /// such an example was reported blocked; it still is.
-    ///
-    /// The wording matches [`Error::Raise`]'s so the blocked-reason ranking
-    /// that chooses the next slice reads the same as it did.
-    NoSuchMethod { name: String, class: String },
     /// A loop that ran past its budget. Guards the harness against a spec that
     /// depends on a construct the compiler silently made non-terminating.
     Budget,
@@ -140,10 +116,6 @@ impl std::fmt::Display for Error {
                 write!(f, "{class}")
             }
             Error::Uncaught { class, message } => write!(f, "{class}: {message}"),
-            Error::NoSuchMethod { name, class } => write!(
-                f,
-                "would raise NoMethodError: undefined method '{name}' for an instance of {class}"
-            ),
             Error::Budget => write!(f, "ran past the instruction budget"),
             Error::Unknowable { what, needs } => {
                 write!(f, "{what} cannot be answered before {needs}")
@@ -1348,14 +1320,12 @@ fn dispatch<'h>(
             // effect, so a `nil` here would turn every matcher this VM does not
             // implement into a spec that passes without asserting anything.
             let Some(method) = found else {
-                return Err(Error::NoSuchMethod {
-                    name: symbol_name(call.name).to_string(),
-                    class: scope
-                        .classes()
-                        .name(class)
-                        .unwrap_or("an anonymous class")
-                        .to_owned(),
-                });
+                // Ruby's answer for a method that is not there, as an ordinary
+                // raise a `rescue` can catch (#170). Built here, not in the
+                // loop's `Err` arm, because it carries the receiver — see
+                // `no_method_error`.
+                let exception = no_method_error(scope, call.receiver, call.name);
+                return Ok(Some(Unwind::Exception(exception)));
             };
             match scope.definitions().get(method.body).cloned() {
                 Some(Definition::Iseq(iseq)) => {
@@ -1776,6 +1746,20 @@ fn make_proc<'h>(
 const EXC_MESSAGE: &str = "@message";
 const EXC_BACKTRACE: &str = "@backtrace";
 
+/// `NameError#name` and `NameError#receiver`, over the same two slots.
+///
+/// Only a failed dispatch writes them. The `NameError`s the VM raises through
+/// [`Error::raise`] — an uninitialized constant, a bad ivar name — carry a
+/// message and nothing else, so `name` answers `nil` there where CRuby answers
+/// a symbol.
+///
+// ponytail: the ceiling is that `Error` holds `String`s, so a raise decided
+// inside `uninitialized` cannot carry the receiver. Lifting it means returning
+// an `Unwind` out of `const_base` and its callers, which is a slice of its own
+// (#170 asked for the dispatch failure) — see the scope note in PRD 0019.
+const EXC_NAME: &str = "@name";
+const EXC_RECEIVER: &str = "@receiver";
+
 /// A Ruby `String` holding `text`.
 fn string_new(scope: &mut HandleScope<'_>, text: &str) -> Value {
     let class = class_handle(scope, Builtin::String);
@@ -1817,6 +1801,73 @@ fn exception_new(scope: &mut HandleScope<'_>, class: &str, message: &str) -> Val
         .const_get_here(Builtin::Object.id(), symbol)
         .expect("every class the VM raises is bootstrapped");
     exception_of(scope, object, message)
+}
+
+/// The `NoMethodError` a call to a method the heap does not have raises.
+///
+/// Built here rather than in the interpreter loop's `Err` arm, where every
+/// [`Error::Raise`] becomes an object, because this one carries `@receiver` and
+/// an [`Error`] holds only `String`s. A `Value` parked in an `Error` would be
+/// unrooted for the whole unwind, and the first `rescue` that allocated would
+/// collect the receiver out from under `NameError#receiver`.
+fn no_method_error(scope: &mut HandleScope<'_>, receiver: Value, name: SymbolId) -> Value {
+    let method = symbol_name(name);
+    let message = format!(
+        "undefined method '{method}' for {}",
+        describe_receiver(scope, receiver)
+    );
+    // The heap remembers that a gap was raised for, so a spec that swallows it
+    // in a `rescue` and then fails is reported blocked rather than as a
+    // disagreement. See `Heap::missing_method`.
+    scope.note_missing_method(&message);
+    // Rooted across the allocations below. The collector is mark-sweep and does
+    // not move, so the `Value` read back stays valid; the handle is what keeps
+    // it from being swept while `exception_new` allocates.
+    let rooted = scope.root(receiver);
+    let object = exception_new(scope, "NoMethodError", &message);
+    let handle = scope.root(object);
+    let receiver = scope.get(rooted);
+    let object = scope.get(handle);
+    let set = |scope: &mut HandleScope<'_>, ivar, value| {
+        ivar_set(scope, object, symbol(ivar), value)
+            .expect("a fresh exception is unfrozen and holds instance variables");
+    };
+    set(scope, EXC_NAME, Value::symbol(name));
+    set(scope, EXC_RECEIVER, receiver);
+    object
+}
+
+/// How CRuby names a receiver in a `NoMethodError`, measured on ruby 4.0.6.
+///
+/// There is no one wording: `nil`, `true`, `false`, a class, and a module each
+/// read differently from an ordinary instance, and three of those are text a
+/// ruby/spec example asserts on. The rows are in
+/// `crates/spinel-vm/tests/eval.txt`, so `scripts/eval-oracle.rb` re-checks
+/// them against a real Ruby rather than against this comment.
+fn describe_receiver(scope: &mut HandleScope<'_>, receiver: Value) -> String {
+    use crate::value::Unpacked;
+    match receiver.unpack() {
+        Unpacked::Nil => return "nil".to_owned(),
+        Unpacked::True => return "true".to_owned(),
+        Unpacked::False => return "false".to_owned(),
+        _ => {}
+    }
+    // A class or module names itself; anything else names its class. CRuby
+    // writes `#<Class:0x0000…>` for an anonymous one and the address differs
+    // per run, so no table can hold it — Spinel keeps its own wording, which is
+    // what every other report in this file already says.
+    if let Some(id) = class_id_of(scope, receiver) {
+        let kind = scope.classes().kind(id);
+        let (word, fallback) = match kind {
+            crate::class::Kind::Module => ("module", "an anonymous module"),
+            crate::class::Kind::Class => ("class", "an anonymous class"),
+        };
+        return match scope.classes().name(id) {
+            Some(name) => format!("{word} {name}"),
+            None => fallback.to_owned(),
+        };
+    }
+    format!("an instance of {}", class_name_of(scope, receiver))
 }
 
 /// An exception's message, for a report. Empty when it is not one.

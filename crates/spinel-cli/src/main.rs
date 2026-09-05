@@ -201,30 +201,37 @@ fn run_command(path: &Path, dump_bytecode: bool) -> ExitCode {
 /// One line for an error that ended the program.
 ///
 /// A raise is Ruby's own `message (Class)`. Everything else is the VM saying it
-/// cannot run the program — a missing method, an unfinished construct — and
-/// those read as engine limits, with the milestone to follow.
+/// cannot run the program — an unfinished construct, a question it declines to
+/// guess at — and those read as engine limits, with the milestone to follow.
 fn describe_error(err: &spinel_vm::Error) -> String {
-    match err {
+    let raised = match err {
         // The exception object reached the top with no handler. This is the
         // ordinary end of a Ruby program that raised, and reads as Ruby's does.
-        spinel_vm::Error::Uncaught { class, message } => format!("{message} ({class})"),
+        spinel_vm::Error::Uncaught { class, message } => Some((class.as_str(), message.as_str())),
         // The VM decided to raise and the unwinder never got to build an
         // object — an arity error at the outermost frame, say. Same shape.
-        spinel_vm::Error::Raise { class, message } => format!("{message} ({class})"),
-        // A method this build does not have. Ruby's own wording, because that
-        // is what the reader is looking for, plus the one line that says the
-        // difference: this is Spinel being unfinished, not the program being
-        // wrong, and `rescue NoMethodError` deliberately did not catch it.
-        spinel_vm::Error::NoSuchMethod { name, class } => format!(
-            "undefined method '{name}' for an instance of {class} (NoMethodError)\n\
+        spinel_vm::Error::Raise { class, message } => Some((*class, message.as_str())),
+        // Everything else is the engine saying it cannot run the program
+        // rather than the program failing, so it points at the milestones.
+        _ => None,
+    };
+    let Some((class, message)) = raised else {
+        return format!("{err} — see {MILESTONES}");
+    };
+    let line = format!("{message} ({class})");
+    // Since #170 a missing method is an ordinary rescuable raise, so an
+    // uncaught one is indistinguishable from a program's own `NoMethodError`.
+    // The hint the issue asked to keep lives here, on the outcome rather than
+    // on an error variant: it says *may* be Spinel, which is the truth now.
+    if class == "NoMethodError" {
+        return format!(
+            "{line}\n\
              \x20       Spinel's core library is still minimal, so this may be Spinel \
              rather than your program.\n\
              \x20       What exists: {MILESTONES}"
-        ),
-        // Everything else is the engine saying it cannot run the program
-        // rather than the program failing, so it points at the milestones.
-        other => format!("{other} — see {MILESTONES}"),
+        );
     }
+    line
 }
 
 // ---------------------------------------------------------------------------

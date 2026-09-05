@@ -383,3 +383,42 @@ class Iv1; end; c = Iv1.new; before = c.respond_to?(:t); class Iv1; def t; 1; en
 class Iv2; end; d = Iv2.new; before = d.respond_to?(:t); def d.t; 1; end; [before, d.respond_to?(:t)]  #=> [false, true]
 class Iv3; end; e = Iv3.new; before = e.respond_to?(:t); module Iv3M; def t; 1; end; end; class Iv3; include Iv3M; end; [before, e.respond_to?(:t)]  #=> [false, true]
 class Iv4; def t; "own"; end; end; f = Iv4.new; before = f.t; module Iv4M; def t; "prepended"; end; end; class Iv4; prepend Iv4M; end; [before, f.t]  #=> ["own", "prepended"]
+
+# ---------------------------------------------- a missing method raises (#170)
+# A failed dispatch is an ordinary Ruby raise, so a `rescue` catches it. Before
+# #170 it was a Rust-level error that unwound past every handler, and none of
+# the rows below could be written at all.
+#
+# The message is not one wording: `nil`, `true`, `false`, a class, and a module
+# each read differently from an ordinary instance. That is measured here rather
+# than transcribed, because three of the five are text a spec asserts on and a
+# reading of CRuby's `error.c` is exactly where the wrong one comes from.
+#
+# Anonymous receivers are absent on purpose: CRuby writes the object's address
+# into the message, so no table can hold the answer.
+begin; Object.new.nope; rescue NoMethodError => e; e.class; end  #=> NoMethodError
+begin; Object.new.nope; rescue => e; e.class; end  #=> NoMethodError
+begin; Object.new.nope; rescue NoMethodError => e; e.is_a?(NameError); end  #=> true
+begin; Object.new.nope; rescue NoMethodError => e; e.is_a?(StandardError); end  #=> true
+begin; Object.new.nope; rescue NoMethodError => e; e.message; end  #=> "undefined method 'nope' for an instance of Object"
+begin; 1.nope; rescue NoMethodError => e; e.message; end  #=> "undefined method 'nope' for an instance of Integer"
+begin; :s.nope; rescue NoMethodError => e; e.message; end  #=> "undefined method 'nope' for an instance of Symbol"
+begin; nil.nope; rescue NoMethodError => e; e.message; end  #=> "undefined method 'nope' for nil"
+begin; true.nope; rescue NoMethodError => e; e.message; end  #=> "undefined method 'nope' for true"
+begin; false.nope; rescue NoMethodError => e; e.message; end  #=> "undefined method 'nope' for false"
+begin; Object.nope; rescue NoMethodError => e; e.message; end  #=> "undefined method 'nope' for class Object"
+begin; Comparable.nope; rescue NoMethodError => e; e.message; end  #=> "undefined method 'nope' for module Comparable"
+begin; Object.new.nope; rescue NoMethodError => e; e.name; end  #=> :nope
+begin; Object.new.nope(1, 2); rescue NoMethodError => e; e.name; end  #=> :nope
+o = Object.new; begin; o.nope; rescue NoMethodError => e; e.receiver.equal?(o); end  #=> true
+begin; nil.nope; rescue NoMethodError => e; e.receiver; end  #=> nil
+begin; 7.nope; rescue NoMethodError => e; e.receiver; end  #=> 7
+begin; Object.nope; rescue NoMethodError => e; e.receiver.equal?(Object); end  #=> true
+# The raise is a value like any other: it unwinds out of a method, and an
+# `ensure` on the way still runs.
+def m170; Object.new.nope; end; begin; m170; rescue NoMethodError => e; e.name; end  #=> :nope
+r170 = []; begin; begin; Object.new.nope; ensure; r170.push(1); end; rescue NoMethodError; r170; end  #=> [1]
+begin; Object.new.nope; rescue NoMethodError; "caught"; else; "no"; end  #=> "caught"
+# `respond_to?` still answers without raising, which is what the guards in
+# ruby/spec lean on.
+Object.new.respond_to?(:nope)  #=> false

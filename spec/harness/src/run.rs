@@ -192,134 +192,169 @@ pub fn run(example: &Example) -> Outcome {
         }
     }
 
-    let mut ran_something = false;
-    for statement in &example.body {
-        match classify(statement) {
-            Statement::Compare {
-                subject,
-                expected,
-                negated,
-            } => {
-                let actual = match eval(&mut scope, &mut frame, &mut locals, subject) {
-                    Ok(value) => value,
-                    Err(stop) => return Outcome::Blocked(stop.reason()),
-                };
-                let wanted = match eval(&mut scope, &mut frame, &mut locals, expected) {
-                    Ok(value) => value,
-                    Err(stop) => return Outcome::Blocked(stop.reason()),
-                };
-                let equal = match interp::ruby_eq(&mut scope, actual, wanted) {
-                    Ok(equal) => equal,
-                    Err(why) => return Outcome::Blocked(why.to_string()),
-                };
-                if equal == negated {
-                    let (actual, wanted) = (
-                        interp::inspect(&mut scope, actual),
-                        interp::inspect(&mut scope, wanted),
-                    );
-                    let expectation = if negated {
-                        "should not equal"
-                    } else {
-                        "should equal"
-                    };
-                    return Outcome::Failed(format!("{actual} {expectation} {wanted}"));
-                }
-                ran_something = true;
-            }
-            Statement::Raises {
-                subject,
-                expected,
-                negated,
-            } => {
-                // The class is evaluated first, and before the subject runs, so
-                // an example naming a class Spinel has never heard of is
-                // blocked rather than judged.
-                let wanted = match expected {
-                    Some(expr) => match eval(&mut scope, &mut frame, &mut locals, expr) {
-                        Ok(value) => Some(value),
-                        Err(stop) => return Outcome::Blocked(stop.reason()),
-                    },
-                    None => None,
-                };
-                let called = call_of(subject);
-                let outcome = eval(&mut scope, &mut frame, &mut locals, &called);
-                let raised = match outcome {
-                    Ok(_) => None,
-                    // A Ruby exception that no `rescue` wanted: exactly what
-                    // this matcher exists to see.
-                    Err(Stop::Stopped(interp::Error::Uncaught { class, .. })) => Some(class),
-                    // Anything else is a gap in Spinel, not an answer. Reported
-                    // blocked, never as a raise the example caught — which is
-                    // why `interp::Error` keeps the two apart at all.
-                    Err(stop) => return Outcome::Blocked(stop.reason()),
-                };
-                // A `NameError` about a constant this heap has never seen is
-                // almost always a fixture file the corpus `require`s and this
-                // harness cannot load — `ModuleSpecs`, `ClassSpecs` — rather
-                // than the behaviour under test. Ruby would have the constant,
-                // so the example did not run at all, and calling that a
-                // disagreement would be inventing a failure out of a gap. It
-                // stays a *failure* when the example asked for a `NameError`,
-                // because then the raise is the thing being checked and
-                // `scripts/verify-passes.rb` re-runs it on CRuby either way.
-                if let Some(class) = &raised
-                    && class == "NameError"
-                    && !matches!(&wanted, Some(value) if raised_matches(&mut scope, class, *value)
-                        .unwrap_or(false))
-                {
-                    return Outcome::Blocked(
-                        "a constant this heap has never seen; the corpus requires a fixture file"
-                            .to_owned(),
-                    );
-                }
-                let held = match (&raised, negated) {
-                    (None, true) => true,
-                    (None, false) => false,
-                    (Some(_), true) => false,
-                    (Some(class), false) => match wanted {
-                        Some(wanted) => match raised_matches(&mut scope, class, wanted) {
-                            Some(matched) => matched,
-                            // The raised class is not reachable by name, so
-                            // whether it is a subclass cannot be decided.
-                            None => {
-                                return Outcome::Blocked(format!(
-                                    "cannot tell whether {class} is the class this expects"
-                                ));
-                            }
-                        },
-                        // `should.raise` with no class: anything counts.
-                        None => true,
-                    },
-                };
-                if !held {
-                    let wanted = wanted.map_or_else(
-                        || "an exception".to_owned(),
-                        |value| interp::inspect(&mut scope, value),
-                    );
-                    return Outcome::Failed(match (&raised, negated) {
-                        (Some(class), true) => {
-                            format!("should not have raised, but raised {class}")
-                        }
-                        (Some(class), false) => format!("should raise {wanted}, raised {class}"),
-                        (None, _) => format!("should raise {wanted}, raised nothing"),
-                    });
-                }
-                ran_something = true;
-            }
+    // Boot and the scratch pad are not the example. Anything they raised for is
+    // not what the example swallowed.
+    scope.clear_missing_method();
 
-            Statement::Effect(expr) => {
-                if let Err(stop) = eval(&mut scope, &mut frame, &mut locals, expr) {
-                    return Outcome::Blocked(stop.reason());
+    // Since #170 a missing method is a rescuable raise, so an example can catch
+    // one and carry on down a branch Ruby never takes — `a.reject! { raise }`
+    // under a `rescue StandardError` is four of these in `core/array/`. It can
+    // also reach a `should raise_error` matcher as the wrong class. Either way
+    // the failure that follows is about Spinel's gap, not about Ruby.
+    //
+    // The VM cannot tell that gap from a program's own `NoMethodError`, and
+    // neither can this: what it can say is that a failure a missing method
+    // could explain is not evidence against Ruby. So a failing example that
+    // raised for one is reported blocked, naming the method, which is also how
+    // the next slice gets chosen.
+    //
+    // This one rule covers both shapes. A dedicated case in the `raises`
+    // matcher was written for the second and then deleted: breaking it
+    // deliberately changed nothing, because this already caught everything it
+    // did.
+    //
+    // A *passing* example is left alone. 43 of them raise for a gap and pass
+    // anyway, most being specs that assert `NoMethodError` on purpose; every
+    // directory where that happens is re-run on CRuby by
+    // `scripts/verify-passes.rb`, which is the check that they are real.
+    let outcome = (|| {
+        let mut ran_something = false;
+        for statement in &example.body {
+            match classify(statement) {
+                Statement::Compare {
+                    subject,
+                    expected,
+                    negated,
+                } => {
+                    let actual = match eval(&mut scope, &mut frame, &mut locals, subject) {
+                        Ok(value) => value,
+                        Err(stop) => return Outcome::Blocked(stop.reason()),
+                    };
+                    let wanted = match eval(&mut scope, &mut frame, &mut locals, expected) {
+                        Ok(value) => value,
+                        Err(stop) => return Outcome::Blocked(stop.reason()),
+                    };
+                    let equal = match interp::ruby_eq(&mut scope, actual, wanted) {
+                        Ok(equal) => equal,
+                        Err(why) => return Outcome::Blocked(why.to_string()),
+                    };
+                    if equal == negated {
+                        let (actual, wanted) = (
+                            interp::inspect(&mut scope, actual),
+                            interp::inspect(&mut scope, wanted),
+                        );
+                        let expectation = if negated {
+                            "should not equal"
+                        } else {
+                            "should equal"
+                        };
+                        return Outcome::Failed(format!("{actual} {expectation} {wanted}"));
+                    }
+                    ran_something = true;
                 }
-                ran_something = true;
+                Statement::Raises {
+                    subject,
+                    expected,
+                    negated,
+                } => {
+                    // The class is evaluated first, and before the subject runs, so
+                    // an example naming a class Spinel has never heard of is
+                    // blocked rather than judged.
+                    let wanted = match expected {
+                        Some(expr) => match eval(&mut scope, &mut frame, &mut locals, expr) {
+                            Ok(value) => Some(value),
+                            Err(stop) => return Outcome::Blocked(stop.reason()),
+                        },
+                        None => None,
+                    };
+                    let called = call_of(subject);
+                    let outcome = eval(&mut scope, &mut frame, &mut locals, &called);
+                    let raised = match outcome {
+                        Ok(_) => None,
+                        // A Ruby exception that no `rescue` wanted: exactly what
+                        // this matcher exists to see.
+                        Err(Stop::Stopped(interp::Error::Uncaught { class, .. })) => Some(class),
+                        // Anything else is a gap in Spinel, not an answer. Reported
+                        // blocked, never as a raise the example caught — which is
+                        // why `interp::Error` keeps the two apart at all.
+                        Err(stop) => return Outcome::Blocked(stop.reason()),
+                    };
+                    // A `NameError` about a constant this heap has never seen is
+                    // almost always a fixture file the corpus `require`s and this
+                    // harness cannot load — `ModuleSpecs`, `ClassSpecs` — rather
+                    // than the behaviour under test. Ruby would have the constant,
+                    // so the example did not run at all, and calling that a
+                    // disagreement would be inventing a failure out of a gap.
+                    // It stays a *failure* when the example asked for a `NameError`,
+                    // because then the raise is the thing being checked and
+                    // `scripts/verify-passes.rb` re-runs it on CRuby either way.
+                    if let Some(class) = &raised
+                        && class == "NameError"
+                        && !matches!(&wanted, Some(value) if raised_matches(&mut scope, class, *value)
+                            .unwrap_or(false))
+                    {
+                        return Outcome::Blocked(
+                            "a constant this heap has never seen; the corpus requires a fixture file"
+                                .to_owned(),
+                        );
+                    }
+                    let held = match (&raised, negated) {
+                        (None, true) => true,
+                        (None, false) => false,
+                        (Some(_), true) => false,
+                        (Some(class), false) => match wanted {
+                            Some(wanted) => match raised_matches(&mut scope, class, wanted) {
+                                Some(matched) => matched,
+                                // The raised class is not reachable by name, so
+                                // whether it is a subclass cannot be decided.
+                                None => {
+                                    return Outcome::Blocked(format!(
+                                        "cannot tell whether {class} is the class this expects"
+                                    ));
+                                }
+                            },
+                            // `should.raise` with no class: anything counts.
+                            None => true,
+                        },
+                    };
+                    if !held {
+                        let wanted = wanted.map_or_else(
+                            || "an exception".to_owned(),
+                            |value| interp::inspect(&mut scope, value),
+                        );
+                        return Outcome::Failed(match (&raised, negated) {
+                            (Some(class), true) => {
+                                format!("should not have raised, but raised {class}")
+                            }
+                            (Some(class), false) => {
+                                format!("should raise {wanted}, raised {class}")
+                            }
+                            (None, _) => format!("should raise {wanted}, raised nothing"),
+                        });
+                    }
+                    ran_something = true;
+                }
+
+                Statement::Effect(expr) => {
+                    if let Err(stop) = eval(&mut scope, &mut frame, &mut locals, expr) {
+                        return Outcome::Blocked(stop.reason());
+                    }
+                    ran_something = true;
+                }
             }
         }
-    }
 
-    if ran_something || example.body.is_empty() {
-        Outcome::Passed
-    } else {
-        Outcome::Blocked("nothing to run".to_owned())
+        if ran_something || example.body.is_empty() {
+            Outcome::Passed
+        } else {
+            Outcome::Blocked("nothing to run".to_owned())
+        }
+    })();
+    match (outcome, scope.missing_method()) {
+        (Outcome::Failed(why), Some(missing)) => Outcome::Blocked(format!(
+            "{missing}; the failure that followed is not a disagreement ({why})"
+        )),
+        (outcome, _) => outcome,
     }
 }
 
