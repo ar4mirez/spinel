@@ -3435,6 +3435,58 @@ fn native_call<'h>(
             Ok(None)
         }
 
+        Native::Mixin { prepend } => {
+            let Some(target) = class_id_of(scope, call.receiver) else {
+                return Err(Error::NoDispatch {
+                    op: "Module#include",
+                    operands: "a receiver that is not a Module",
+                });
+            };
+            // `include A, B` mixes them in *right to left*, so that `A` ends up
+            // nearer the class than `B`. Measured, not guessed: it is the order
+            // `Module#ancestors` reports afterwards.
+            if call.args.is_empty() {
+                return Err(Error::raise(
+                    "ArgumentError",
+                    "wrong number of arguments (given 0, expected 1+)",
+                ));
+            }
+            for &argument in call.args.iter().rev() {
+                let Some(module) = class_id_of(scope, argument) else {
+                    return Err(Error::raise(
+                        "TypeError",
+                        format!(
+                            "wrong argument type {} (expected Module)",
+                            class_name(scope, argument)
+                        ),
+                    ));
+                };
+                let how = if prepend {
+                    scope.classes_mut().prepend(target, module)
+                } else {
+                    scope.classes_mut().include(target, module)
+                };
+                if let Err(err) = how {
+                    return Err(match err {
+                        crate::class::MixinError::NotAModule => Error::raise(
+                            "TypeError",
+                            format!(
+                                "wrong argument type {} (expected Module)",
+                                class_name(scope, argument)
+                            ),
+                        ),
+                        crate::class::MixinError::Cyclic(_) => {
+                            Error::raise("ArgumentError", format!("cyclic {err} detected"))
+                        }
+                    });
+                }
+            }
+            // Ruby's `include` answers the receiver, which is what makes
+            // `include Foo` usable as the last expression of a class body.
+            stack.push(call.receiver);
+            Ok(None)
+        }
+
         Native::Ancestors => {
             let Some(id) = class_id_of(scope, call.receiver) else {
                 return Err(Error::NoDispatch {
@@ -4029,6 +4081,16 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         ),
         (Builtin::Module, &["name"], Native::ModuleName),
         (Builtin::Kernel, &["hash"], Native::HashValue),
+        (
+            Builtin::Module,
+            &["include"],
+            Native::Mixin { prepend: false },
+        ),
+        (
+            Builtin::Module,
+            &["prepend"],
+            Native::Mixin { prepend: true },
+        ),
         (Builtin::Module, &["ancestors"], Native::Ancestors),
         (Builtin::Module, &["method_defined?"], Native::MethodDefined),
         (Builtin::Class, &["superclass"], Native::Superclass),

@@ -173,6 +173,14 @@ pub enum Native {
     /// which is Ruby's own default. A primitive because it reads raw bytes and
     /// raw slots, and because a `Hash` keyed on it wants it as an intrinsic.
     HashValue,
+    /// `Module#include` and `Module#prepend` — splices a module into the
+    /// ancestor chain, which is a write to the class table.
+    ///
+    /// Without it `core/comparable.rb` is unreachable: `include Comparable` is
+    /// how every mixin in Ruby is used.
+    Mixin {
+        prepend: bool,
+    },
     /// `Module#ancestors` — the linearised chain, which only the class table
     /// knows. `is_a?`, `kind_of?`, `Module#===` and `Module#<` are Ruby on it.
     Ancestors,
