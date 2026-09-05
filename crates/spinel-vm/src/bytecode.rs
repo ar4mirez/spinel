@@ -182,6 +182,59 @@ pub enum Insn {
     /// [#12](https://github.com/ar4mirez/spinel/issues/12)'s work rather than
     /// silently returning from the wrong frame.
     Return,
+    /// `break` out of a block. Pops the value; ends the *call the block was
+    /// passed to*, which is a different frame from the one `Return` looks for.
+    ///
+    /// `break` inside a `while` in the same frame is an ordinary [`Insn::Jump`]
+    /// and never reaches here.
+    Break,
+
+    // -- unwinding ---------------------------------------------------------
+    /// Pops an exception and resumes unwinding with it. What a `rescue` whose
+    /// clauses all declined emits, and what a bare `raise` inside a `rescue`
+    /// body compiles to.
+    Raise,
+    /// Pops a class and peeks the exception beneath it; pushes whether the
+    /// exception is an instance of that class.
+    ///
+    /// Peeks rather than pops the exception because the next clause has to try
+    /// its own class against the same one, and the handler ends by either
+    /// binding it or re-raising it.
+    CheckMatch,
+    /// A jump within this frame that runs the `ensure` bodies it leaves.
+    ///
+    /// `break` and `next` inside a `while` are ordinary jumps — until the loop
+    /// body is wrapped in a `begin`/`ensure`, and then jumping straight to the
+    /// loop's end would step over the `ensure`, which is the one thing an
+    /// `ensure` may never allow. This goes out through the unwinder instead, so
+    /// the same search that runs them for a raise runs them for a jump.
+    ///
+    /// The displacement is relative, like [`Insn::Jump`], so the `Iseq` still
+    /// needs no relocating.
+    ///
+    /// Only the `ensure`s actually being left are run: the unwinder skips any
+    /// whose range still covers the *target*, which is what keeps
+    /// `begin; while c; next; end; ensure; E; end` from running `E` once per
+    /// iteration.
+    /// The second operand is the operand-stack depth to land at, because the
+    /// `ensure` bodies in between truncate to their own.
+    Goto(i32, u32),
+    /// [`Insn::Goto`] carrying a value: `break` out of a loop it is leaving an
+    /// `ensure` in.
+    ///
+    /// The value cannot ride the operand stack, because the first `ensure` on
+    /// the way out truncates to the depth its `begin` started at and would
+    /// discard it. It travels with the unwind instead and is pushed back once
+    /// the landing depth is restored.
+    GotoValue(i32, u32),
+    /// Enter an `ensure` body on the *normal* path: pops the protected body's
+    /// value and parks it on the frame, so the one copy of the body runs the
+    /// same way it does when an unwind put it there.
+    EnterEnsure,
+    /// Leave an `ensure` body: pops what [`Insn::EnterEnsure`] or the unwinder
+    /// parked. A parked value is pushed and execution falls through; a parked
+    /// unwind resumes.
+    LeaveEnsure,
 }
 
 /// The binary operators the compiler emits directly.
@@ -323,6 +376,52 @@ pub enum Literal {
     Str(Box<[u8]>),
 }
 
+/// What a [`CatchEntry`] does when control leaves its range abnormally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CatchKind {
+    /// `rescue`: entered only by an exception, and only if a clause matches.
+    /// The unwinder pushes the exception and jumps; the handler decides.
+    Rescue,
+    /// `ensure`: entered by *every* abnormal exit — exception, `throw`,
+    /// `break`, `return` — with the reason parked on the frame for
+    /// [`Insn::LeaveEnsure`] to resume.
+    Ensure,
+}
+
+/// One protected range of instructions.
+///
+/// # Why absolute indices here and relative displacements in jumps
+///
+/// The module's position-independence rule is that an `Iseq` never needs
+/// relocating. A jump is relative because the compiler moves instructions
+/// around as it lays code out. A catch entry is not an instruction: it
+/// describes a range *of this `Iseq`* and travels with the `Iseq` it belongs
+/// to, so absolute indices into `insns` are as position-independent as a
+/// displacement is — and far cheaper to search, which the unwinder does once
+/// per frame per raise. YARV and the JVM both make the same call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CatchEntry {
+    pub kind: CatchKind,
+    /// First protected instruction.
+    pub start: u32,
+    /// One past the last protected instruction.
+    pub end: u32,
+    /// Where to jump, as an index into `insns`.
+    pub target: u32,
+    /// What to truncate the operand stack to before jumping. A raise can happen
+    /// with a half-built expression on the stack, and the handler is compiled
+    /// against the depth the `begin` started at.
+    pub stack_depth: u32,
+}
+
+impl CatchEntry {
+    /// Whether `pc` — an index into `insns` — is inside the protected range.
+    #[must_use]
+    pub const fn covers(&self, pc: u32) -> bool {
+        self.start <= pc && pc < self.end
+    }
+}
+
 /// One compiled unit: a script, and later a method or a block body.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Iseq {
@@ -351,6 +450,13 @@ pub struct Iseq {
     pub definitions: Vec<(u32, u32)>,
     /// One entry per [`Insn::OpenClass`].
     pub class_defs: Vec<ClassDef>,
+    /// Protected instruction ranges, innermost first.
+    ///
+    /// Order is what makes the search a linear scan: the compiler appends an
+    /// entry when it *finishes* a `begin`, so a nested one is already in the
+    /// list when the outer one is added, and the first entry covering the
+    /// program counter is the innermost handler.
+    pub catch_table: Vec<CatchEntry>,
     /// A block body reads its enclosing frame's locals; a method body starts a
     /// new scope and must not. A `GetLocal` walking past this would be a
     /// compiler bug the interpreter cannot see, so the interpreter refuses.

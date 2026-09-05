@@ -90,7 +90,6 @@ fn a_construct_this_slice_does_not_compile_is_an_error_never_a_guess() {
         "{ a: 1 }",
         "(1..2)",
         "case 1; in Integer then 2; end",
-        "begin; 1; rescue; 2; end",
         "'a' + \"#{1}\"",
     ] {
         let parsed = spinel_parse::parse(source.as_bytes());

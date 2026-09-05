@@ -59,6 +59,25 @@ pub enum Native {
     New,
     /// `Object#equal?` — identity, which for this VM is `Value` equality.
     Equal,
+    /// `Array#+`: a new array with the two joined. Allocation, so Rust.
+    ArrayPlus,
+    /// Read slot `n` of the receiver. What `attr_reader` becomes when
+    /// `core/*.rb` can ask for one.
+    Getter(u16),
+    /// Write slot `n` of the receiver, answering the value written.
+    Setter(u16),
+    /// `Kernel#raise` and `Kernel#fail`. Does not return a value: it hands the
+    /// interpreter an unwind, which is why it lives here and not in Ruby.
+    Raise,
+    /// `Kernel#throw`. The other primitive that unwinds.
+    Throw,
+    /// `Kernel#catch`. Pushes a frame for the block and marks it as the
+    /// boundary a matching `throw` stops at.
+    Catch,
+    /// `Exception#message` and `#to_s`.
+    ExceptionMessage,
+    /// `Exception#backtrace`. Always `nil` — see PRD 0012's non-goals.
+    ExceptionBacktrace,
     /// `Object#frozen?`, `Object#nil?`, `Object#!`. Cheap predicates the target
     /// specs reach for while checking something else.
     NilP,

@@ -160,6 +160,23 @@ jobs:
           ruby-version: '4.0'
       - run: ruby scripts/ancestors-oracle.rb --check
 
+  # And the same again for #12's. `rescue TypeError` picks a handler by walking a
+  # superclass chain, so `crates/spinel-vm/src/exceptions.txt` has to be Ruby's
+  # chain and not a reading of `error.c`: which classes exist, what each inherits
+  # from, and which of them define an `initialize` of their own — the last is why
+  # `SignalException.new` refuses rather than answering as if it had validated
+  # the signal name it never looked at.
+  exceptions:
+    name: exceptions oracle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@v1
+        with:
+          # The language version this build implements.
+          ruby-version: '4.0'
+      - run: ruby scripts/exceptions-oracle.rb --check
+
   # The same arrangement for #10's answers. `crates/spinel-vm/tests/eval.txt` is
   # what CRuby prints for ~90 snippets of the Ruby this slice compiles, and
   # `tests/eval.rs` is what makes Spinel agree. This job checks the other half:
