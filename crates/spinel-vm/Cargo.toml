@@ -24,3 +24,12 @@ spinel-core.workspace = true
 
 [lints]
 workspace = true
+
+# `bench/` at the repo root, per CLAUDE.md, rather than the crate's own
+# `benches/`: the benchmarks describe the engine, not this one crate, and the
+# next one compares against system `ruby --yjit`. `harness = false` because the
+# built-in one is nightly-only and a `main` is enough to print three numbers.
+[[bench]]
+name = "method_cache"
+path = "../../bench/method_cache.rs"
+harness = false

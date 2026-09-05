@@ -21,10 +21,6 @@ module Kernel
     self.class.equal?(mod)
   end
 
-  def respond_to?(name, include_all = false)
-    self.class.method_defined?(name, include_all)
-  end
-
   # `eql?` is `hash`'s partner: two objects that are `eql?` must have the same
   # `hash`, and a `Hash` looks a key up by both. The default is identity, and
   # the classes whose `==` is by value override it below — with a class check,

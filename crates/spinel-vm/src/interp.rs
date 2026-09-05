@@ -2311,11 +2311,18 @@ fn singleton_of(scope: &mut HandleScope<'_>, receiver: Value) -> Result<ClassId,
         // A class or module: its singleton is where `def self.foo` goes.
         return Ok(scope.singleton_class(id));
     }
+    // `nil`, `true` and `false` are immediates that do have singleton classes:
+    // Ruby answers `NilClass`, `TrueClass` and `FalseClass`, which *are* the
+    // singleton, so a definition on one goes straight into that class. #15 is
+    // what this was waiting for, and #15 has landed.
+    match receiver.unpack() {
+        crate::value::Unpacked::Nil => return Ok(Builtin::NilClass.id()),
+        crate::value::Unpacked::True => return Ok(Builtin::TrueClass.id()),
+        crate::value::Unpacked::False => return Ok(Builtin::FalseClass.id()),
+        _ => {}
+    }
     if receiver.is_immediate() {
-        // Ruby's text exactly: no receiver in it, and no article. `nil`, `true`,
-        // and `false` are *not* here — they answer `NilClass` and friends, which
-        // this VM will have once `core/*.rb` does (#15); until then they fall
-        // through to `class_of` and report themselves undispatchable.
+        // Ruby's text exactly: no receiver in it, and no article.
         return Err(Error::raise("TypeError", "can't define singleton"));
     }
     let handle = scope.root(receiver);
@@ -4107,6 +4114,75 @@ fn native_call<'h>(
             Ok(None)
         }
 
+        Native::Extend => {
+            // `extend` takes at least one module, same as `include`.
+            if call.args.is_empty() {
+                return Err(Error::raise(
+                    "ArgumentError",
+                    "wrong number of arguments (given 0, expected 1+)",
+                ));
+            }
+            // Right to left, so `obj.extend(A, B)` leaves `A` nearer the
+            // singleton than `B` — measured against CRuby, the same order
+            // `include A, B` produces.
+            for &argument in call.args.iter().rev() {
+                // A Class is a Module in Ruby's hierarchy but not a legal
+                // argument here: `obj.extend(String)` is a TypeError naming
+                // Class, not a mixin of `String`'s methods.
+                let module = match class_id_of(scope, argument) {
+                    Some(id) if scope.classes().kind(id) == Kind::Module => id,
+                    _ => {
+                        return Err(Error::raise(
+                            "TypeError",
+                            format!(
+                                "wrong argument type {} (expected Module)",
+                                class_name(scope, argument)
+                            ),
+                        ));
+                    }
+                };
+                // `extend_object` decides the splice and `extended` observes
+                // it, and both are overridable — the same refusal `include`
+                // makes for `append_features` and `included`, for the same
+                // reason: splicing anyway would be a wrong ancestry rather
+                // than a missing one.
+                hook_refusal(
+                    scope,
+                    module,
+                    &[
+                        (
+                            "extend_object",
+                            "`extend_object`, which decides this splice",
+                        ),
+                        ("extended", "`extended`, which this extend would fire"),
+                    ],
+                )?;
+                // Allocating the singleton is the point, not a side effect:
+                // `extend` is defined as an include into it. `singleton_of` is
+                // what `def obj.foo` and `class << obj` already go through, so
+                // an immediate is refused here with the same `TypeError` and
+                // the same message rather than reaching the allocator.
+                let meta = singleton_of(scope, call.receiver)?;
+                if let Err(err) = scope.classes_mut().include(meta, module) {
+                    return Err(match err {
+                        crate::class::MixinError::NotAModule => Error::raise(
+                            "TypeError",
+                            format!(
+                                "wrong argument type {} (expected Module)",
+                                class_name(scope, argument)
+                            ),
+                        ),
+                        crate::class::MixinError::Cyclic(_) => {
+                            Error::raise("ArgumentError", format!("cyclic {err} detected"))
+                        }
+                    });
+                }
+            }
+            // Ruby's `extend` answers the receiver, which is what makes
+            // `obj.extend(M).foo` work.
+            stack.push(call.receiver);
+            Ok(None)
+        }
         Native::Ancestors => {
             let Some(id) = class_id_of(scope, call.receiver) else {
                 return Err(Error::NoDispatch {
@@ -4167,6 +4243,24 @@ fn native_call<'h>(
             // is a visibility field, not a special case here.
             let symbol = crate::shared::symbols::intern(&name);
             let found = scope.classes_mut().lookup(id, symbol).is_some();
+            stack.push(bool_value(found));
+            Ok(None)
+        }
+
+        Native::RespondTo => {
+            let Some(name) = call.args.first().and_then(|&v| method_name_of(scope, v)) else {
+                return Err(Error::raise("TypeError", "is not a symbol nor a string"));
+            };
+            // `class_of`, the same resolver `Target::Method` dispatch uses, so
+            // a singleton class counts. `class_id_of` would answer "is the
+            // receiver itself a module", which is a different question.
+            let class = class_of(scope, call.receiver).ok_or_else(|| no_class(call.receiver))?;
+            // ponytail: inherits `method_defined?`'s missing visibility (#161) —
+            // a private method answers true here where Ruby answers false
+            // unless `include_all`. The second argument is accepted and ignored
+            // for the same reason: there is nothing yet for it to select.
+            let symbol = crate::shared::symbols::intern(&name);
+            let found = scope.classes_mut().lookup(class, symbol).is_some();
             stack.push(bool_value(found));
             Ok(None)
         }
@@ -4837,6 +4931,10 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             &["prepend"],
             Native::Mixin { prepend: true },
         ),
+        // `Kernel`, not `Object`: CRuby defines `extend` on `Kernel`, so a
+        // `BasicObject` subclass that includes `Kernel` gets it too.
+        (Builtin::Kernel, &["extend"], Native::Extend),
+        (Builtin::Kernel, &["respond_to?"], Native::RespondTo),
         (Builtin::Module, &["ancestors"], Native::Ancestors),
         (Builtin::Module, &["method_defined?"], Native::MethodDefined),
         (Builtin::Class, &["superclass"], Native::Superclass),

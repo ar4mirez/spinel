@@ -248,17 +248,15 @@ lookup under a real workload, and the thing to measure it with is #10's interpre
 
 ## Open decisions for the owner
 
-1. **One serial for the whole table, not one per class.** engine.md describes a serial
-   that bumps on a definition in the class or its ancestors. A shared one is correct and
-   coarser: defining a method anywhere evicts every cached lookup, which is free at load
-   time and wrong in a program that defines methods while running. Per-class serials need a
-   subclass list and a descendant walk per definition, and that is
-   [#9](https://github.com/ar4mirez/spinel/issues/9) — which this slice leaves narrower
-   than it found it rather than closing.
-2. **The method cache is unbounded.** CRuby's global cache was a fixed-size direct-mapped
-   table that evicted rather than grew. This one is emptied by every definition, so it
-   cannot outgrow the `(class, name)` pairs a program actually calls between two of them —
-   but "between two definitions" is a program-shaped bound, not a number.
+1. ~~**One serial for the whole table, not one per class.**~~ **Settled by
+   [#9](https://github.com/ar4mirez/spinel/issues/9)**, which added the subclass list and
+   the descendant walk this predicted, and moved both the serial and the cache into the
+   class entry. The load-time cost it warned about is real and measured: roughly a quarter
+   more time to load `core/*.rb`. See PRD 0009.
+2. ~~**The method cache is unbounded.**~~ **Still unbounded, and now bounded per class
+   rather than per heap** — see PRD 0009's decision on it. The reasoning here was right and
+   the conclusion has not changed: a cap costs an eviction policy, and nothing yet measures
+   one as necessary.
 3. **A `ClassId` is an index, not branded to its heap.** Same shape as PRD 0007's third
    open decision about `Handle`, and the same trade: two heaps in one Rust function could
    pass an id between them, the index is bounds-checked, and the failure is a panic or the
