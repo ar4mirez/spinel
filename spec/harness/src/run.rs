@@ -198,15 +198,25 @@ pub fn run(example: &Example) -> Outcome {
 
     // Since #170 a missing method is a rescuable raise, so an example can catch
     // one and carry on down a branch Ruby never takes — `a.reject! { raise }`
-    // under a `rescue StandardError` is four of these in `core/array/`. The
-    // assertion after it then fails for a reason that is not a disagreement.
+    // under a `rescue StandardError` is four of these in `core/array/`. It can
+    // also reach a `should raise_error` matcher as the wrong class. Either way
+    // the failure that follows is about Spinel's gap, not about Ruby.
     //
     // The VM cannot tell that gap from a program's own `NoMethodError`, and
     // neither can this: what it can say is that a failure a missing method
     // could explain is not evidence against Ruby. So a failing example that
     // raised for one is reported blocked, naming the method, which is also how
-    // the next slice gets chosen. A *passing* example is left alone —
-    // `scripts/verify-passes.rb` re-runs those on CRuby either way.
+    // the next slice gets chosen.
+    //
+    // This one rule covers both shapes. A dedicated case in the `raises`
+    // matcher was written for the second and then deleted: breaking it
+    // deliberately changed nothing, because this already caught everything it
+    // did.
+    //
+    // A *passing* example is left alone. 43 of them raise for a gap and pass
+    // anyway, most being specs that assert `NoMethodError` on purpose; every
+    // directory where that happens is re-run on CRuby by
+    // `scripts/verify-passes.rb`, which is the check that they are real.
     let outcome = (|| {
         let mut ran_something = false;
         for statement in &example.body {
@@ -259,18 +269,11 @@ pub fn run(example: &Example) -> Outcome {
                     };
                     let called = call_of(subject);
                     let outcome = eval(&mut scope, &mut frame, &mut locals, &called);
-                    let mut raised_message = String::new();
                     let raised = match outcome {
                         Ok(_) => None,
                         // A Ruby exception that no `rescue` wanted: exactly what
                         // this matcher exists to see.
-                        Err(Stop::Stopped(interp::Error::Uncaught { class, message })) => {
-                            // The message is what makes the blocked reason rank:
-                            // "undefined method 'eval'" names the next slice, and a
-                            // bare "NoMethodError" would name nothing.
-                            raised_message = message;
-                            Some(class)
-                        }
+                        Err(Stop::Stopped(interp::Error::Uncaught { class, .. })) => Some(class),
                         // Anything else is a gap in Spinel, not an answer. Reported
                         // blocked, never as a raise the example caught — which is
                         // why `interp::Error` keeps the two apart at all.
@@ -282,34 +285,18 @@ pub fn run(example: &Example) -> Outcome {
                     // than the behaviour under test. Ruby would have the constant,
                     // so the example did not run at all, and calling that a
                     // disagreement would be inventing a failure out of a gap.
-                    //
-                    // Since [#170](https://github.com/ar4mirez/spinel/issues/170) a
-                    // `NoMethodError` is a rescuable raise like any other, which
-                    // means it now reaches this matcher instead of stopping the
-                    // example. It reads the same way: an example asking for a
-                    // `SyntaxError` that got `undefined method 'eval'` did not run
-                    // either — Ruby has `eval`, and Spinel's gap is not a
-                    // disagreement about `if`. That is the cost the deleted
-                    // `Error::NoSuchMethod` doc comment predicted, paid here, in
-                    // the one place that knows what the example expected.
-                    //
-                    // Both stay a *failure* when the example asked for that class,
+                    // It stays a *failure* when the example asked for a `NameError`,
                     // because then the raise is the thing being checked and
                     // `scripts/verify-passes.rb` re-runs it on CRuby either way.
                     if let Some(class) = &raised
-                        && matches!(class.as_str(), "NameError" | "NoMethodError")
+                        && class == "NameError"
                         && !matches!(&wanted, Some(value) if raised_matches(&mut scope, class, *value)
                             .unwrap_or(false))
                     {
-                        return Outcome::Blocked(match class.as_str() {
-                            "NoMethodError" => format!(
-                                "{raised_message}; a method this heap does not have rather than a \
-                                 disagreement"
-                            ),
-                            _ => "a constant this heap has never seen; the corpus requires a fixture \
-                                  file"
+                        return Outcome::Blocked(
+                            "a constant this heap has never seen; the corpus requires a fixture file"
                                 .to_owned(),
-                        });
+                        );
                     }
                     let held = match (&raised, negated) {
                         (None, true) => true,
@@ -365,7 +352,7 @@ pub fn run(example: &Example) -> Outcome {
     })();
     match (outcome, scope.missing_method()) {
         (Outcome::Failed(why), Some(missing)) => Outcome::Blocked(format!(
-            "{missing}; the example caught it and failed afterwards ({why})"
+            "{missing}; the failure that followed is not a disagreement ({why})"
         )),
         (outcome, _) => outcome,
     }

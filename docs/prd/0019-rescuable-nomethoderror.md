@@ -139,7 +139,7 @@ the rest.
 | `rescue NoMethodError` on a missing method | does not catch | catches |
 | `NameError#name` / `#receiver` | do not exist | measured against CRuby |
 | Oracles (`eval`, `exceptions`, `ancestors`, `anonymous`, `regexp`) | agree | agree |
-| `scripts/verify-passes.rb` | — | 688 passing examples re-run on ruby 4.0.6, all agree |
+| `scripts/verify-passes.rb` | — | 974 passing examples re-run on ruby 4.0.6, all agree |
 
 ### ruby/spec delta
 
@@ -152,6 +152,61 @@ Every directory that moved, and they sum to the +43 above:
 | `spec/ruby/core/module` | 51 | 60 (+9) |
 | `spec/ruby/core/kernel` | 79 | 81 (+2) |
 | `spec/ruby/library` | 4 | 6 (+2) |
+
+### Verified by mutation, not just by green
+
+Each half broken deliberately, with the narrowest check that should notice:
+
+| mutation | caught by |
+|---|---|
+| `nil`/`true`/`false` wording collapses to "an instance of" | `eval.txt` |
+| `@name` never written | `eval.txt` |
+| `@receiver` never written | `eval.txt` |
+| the miss is unrescuable again — the original bug | `eval.txt` |
+| the gap is not recorded — the five swallowed failures return | `scripts/spec.sh` |
+| the uncaught-`NoMethodError` diagnostic is dropped | `spinel-cli` tests |
+
+A seventh was **not** caught, and that was the useful one. The first draft
+answered the swallowed-gap problem twice: once generally, in `run`, and once
+with a dedicated `NoMethodError` case in the `raises` matcher for the
+unswallowed shape. Reverting the matcher case changed nothing — `0 failed` held
+— because the general rule already converted that example. Two mechanisms where
+one sufficed, and the mutation is what said so rather than review. Deleted; the
+surviving rule is reworded so it is true whether the example caught the raise or
+a matcher saw it.
+
+The harness that ran these was wrong on its first attempt, in a way worth
+naming: `set -o pipefail` with `cargo test … | grep -q` hands back *cargo's*
+non-zero exit rather than grep's, so every detector inverted and all seven
+mutations read as "not caught". A mutation suite that reports everything vacuous
+is reporting on itself.
+
+### All the passes that moved are re-run on CRuby
+
+`scripts/verify-passes.rb` defaults to `language/` — 688 examples, which is not
+the same as all 1291. Every directory this slice moved was run through it
+explicitly:
+
+| directory | passes re-run on ruby 4.0.6 |
+|---|---|
+| `language` | 688 · agree |
+| `core/array` | 139 · agree |
+| `core/module` | 60 · agree |
+| `core/kernel` | 81 · agree |
+| `library` | 6 · agree |
+
+That matters more than usual here. 43 examples pass *while a missing method was
+raised during them* — measured by temporarily reporting that combination as
+blocked, which moved the count 1291 → 1248, exactly the slice's delta. Most are
+specs that assert `NoMethodError` on purpose (`no_such_method`, `oops`); some
+raise for a real gap (`sort_by!`, `binding`) and pass anyway because the
+assertion did not depend on it.
+
+The harness cannot tell those apart — a `should raise_error(StandardError)` that
+Spinel satisfies with a `NoMethodError` and CRuby satisfies with something else
+would pass on both. That is a limit of corpus-as-oracle rather than anything
+this slice introduced, but re-running every moved directory on CRuby is the
+check available, and it agrees.
 
 ### The unblock revealed five old failures, as expected
 
@@ -183,11 +238,10 @@ That is the same judgement `Error::Unknowable` encodes elsewhere: a failure a
 missing method could explain is not evidence of a disagreement, so do not report
 it as one.
 
-The `Raises` matcher needed the matching rule for the case where the raise is
-not swallowed: an example asking for `SyntaxError` that got
-`undefined method 'eval'` did not run either. That extends the `NameError`
-fixture-file rule already there, to the same shape, in the one place that knows
-what the example expected.
+The unswallowed shape — an example asking for `SyntaxError` that got
+`undefined method 'eval'` — is the same rule and needs no second one. The first
+draft added a dedicated case in the `raises` matcher for it; see the mutation
+section for why it was deleted.
 
 ### Left for later
 
