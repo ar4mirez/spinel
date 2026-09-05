@@ -37,3 +37,22 @@ class Exception
     self.class.equal?(other.class) && message == other.message
   end
 end
+
+# NameError, and NoMethodError under it.
+#
+# The VM writes `@name` and `@receiver` when a dispatch fails, the same way it
+# writes `@message` when it raises, so these are two more ordinary readers over
+# ordinary instance variables.
+#
+# `NameError.new` is refused — `exceptions.txt` marks it `# own initialize` —
+# so every NameError that exists is one the VM built, and there is no
+# user-constructed one whose `receiver` should be CRuby's ArgumentError.
+class NameError
+  def name
+    @name
+  end
+
+  def receiver
+    @receiver
+  end
+end

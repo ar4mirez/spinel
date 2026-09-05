@@ -206,6 +206,23 @@ pub struct Heap {
     /// source: an entry is two integers and a `Method`, whose body is a
     /// fixnum definition id the collector never traces.
     call_caches: crate::callcache::CallCaches,
+    /// The first missing method a dispatch raised for since this was last
+    /// cleared, as its `NoMethodError` message.
+    ///
+    /// Since [#170](https://github.com/ar4mirez/spinel/issues/170) a missing
+    /// method is an ordinary rescuable raise, which is Ruby's behaviour and
+    /// also a way for a Spinel gap to vanish: `a.reject! { raise }` inside a
+    /// `rescue StandardError` swallows "Spinel has no `reject!`", and the
+    /// example carries on down a branch Ruby never takes. The assertion after
+    /// it then fails for a reason that has nothing to do with the behaviour
+    /// under test.
+    ///
+    /// The VM cannot tell that gap from a program's own `NoMethodError`, so it
+    /// does not try: it records that one happened and lets the spec harness
+    /// decide. A run that then *fails* is reported blocked and names this,
+    /// because a failure that a missing method could explain is not evidence of
+    /// a disagreement with Ruby. Nothing else reads it.
+    missing_method: Option<String>,
     regexps: crate::regexp::Regexps,
     /// The `MatchData` the last successful match produced, which is what `$~`
     /// and `$1` read.
@@ -251,6 +268,7 @@ impl Heap {
             shapes: Shapes::new(),
             definitions: crate::method::Definitions::new(),
             call_caches: crate::callcache::CallCaches::new(),
+            missing_method: None,
             regexps: crate::regexp::Regexps::new(),
             last_match: Value::NIL,
         }
@@ -299,6 +317,27 @@ impl Heap {
 
     pub fn call_caches_mut(&mut self) -> &mut crate::callcache::CallCaches {
         &mut self.call_caches
+    }
+
+    /// The first missing method raised for since [`Heap::clear_missing_method`],
+    /// if any. See the field.
+    #[must_use]
+    pub fn missing_method(&self) -> Option<&str> {
+        self.missing_method.as_deref()
+    }
+
+    /// Record a missing method, keeping the first — the one that explains the
+    /// rest, since a swallowed gap tends to produce more of them downstream.
+    pub fn note_missing_method(&mut self, message: &str) {
+        if self.missing_method.is_none() {
+            self.missing_method = Some(message.to_owned());
+        }
+    }
+
+    /// Forget it. The harness calls this between examples, so one example's
+    /// gap cannot explain away the next one's failure.
+    pub fn clear_missing_method(&mut self) {
+        self.missing_method = None;
     }
 
     pub fn classes_mut(&mut self) -> &mut Classes {
@@ -731,6 +770,19 @@ impl<'h> HandleScope<'h> {
 
     pub fn call_caches_mut(&mut self) -> &mut crate::callcache::CallCaches {
         self.heap.call_caches_mut()
+    }
+
+    pub fn note_missing_method(&mut self, message: &str) {
+        self.heap.note_missing_method(message);
+    }
+
+    #[must_use]
+    pub fn missing_method(&self) -> Option<&str> {
+        self.heap.missing_method()
+    }
+
+    pub fn clear_missing_method(&mut self) {
+        self.heap.clear_missing_method();
     }
 
     pub fn definitions_mut(&mut self) -> &mut crate::method::Definitions {

@@ -213,6 +213,14 @@ for R11 stated as a result rather than as a plan.
    comparison for a reason unrelated to the behaviour under test. It is now
    `Error::NoSuchMethod`, which no `rescue` can catch — restoring the property that
    held before this slice only because nothing could catch anything.
+
+   > Superseded by [PRD 0019](0019-rescuable-nomethoderror.md) (#170). Making a
+   > missing method uncatchable was the wrong half of the trade: CRuby's
+   > `NoMethodError` *is* rescuable, and 1,606 corpus examples blocked on one.
+   > `Error::NoSuchMethod` is gone. The swallowing problem described here is
+   > real and is answered by `Heap::missing_method` instead — the VM records
+   > that a gap was raised for, and the harness reports a failure it could
+   > explain as blocked rather than as a disagreement.
 3. **`defined?` did not look through parentheses** (#13). `defined?((a))` answered
    `"expression"` where Ruby says `"local-variable"`, and `defined?((a, b = 1, 2))`
    answered `"expression"` where Ruby says `"assignment"`. A wrong answer, not a
