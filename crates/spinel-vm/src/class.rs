@@ -201,6 +201,14 @@ pub enum Builtin {
     Exception,
     Regexp,
     MatchData,
+    /// The class of `nil`. Its one instance is an immediate, so it has no
+    /// allocator: `NilClass.new` raises in Ruby.
+    NilClass,
+    TrueClass,
+    FalseClass,
+    /// The class of a flonum. Boxed floats — NaN, the infinities, `-0.0` — are
+    /// not values this VM has yet; see `Literal::BoxedFloat`.
+    Float,
 }
 
 /// CRuby's exception hierarchy, measured rather than transcribed.
@@ -250,7 +258,7 @@ pub fn exception_defines_initialize(name: &str) -> bool {
 
 impl Builtin {
     /// In bootstrap order, which is what makes [`Builtin::id`] a cast.
-    pub const ALL: [Builtin; 17] = [
+    pub const ALL: [Builtin; 21] = [
         Builtin::BasicObject,
         Builtin::Object,
         Builtin::Module,
@@ -268,6 +276,14 @@ impl Builtin {
         Builtin::Exception,
         Builtin::Regexp,
         Builtin::MatchData,
+        // Appended rather than slotted in alphabetically or by hierarchy:
+        // `Builtin::id` is the enum discriminant, and inserting one in the
+        // middle would renumber every class after it — including the ids
+        // already written into every `Method` in the table.
+        Builtin::NilClass,
+        Builtin::TrueClass,
+        Builtin::FalseClass,
+        Builtin::Float,
     ];
 
     /// Every builtin is defined before anything else, in declaration order.
@@ -294,6 +310,10 @@ impl Builtin {
             Builtin::Exception => "Exception",
             Builtin::Regexp => "Regexp",
             Builtin::MatchData => "MatchData",
+            Builtin::NilClass => "NilClass",
+            Builtin::TrueClass => "TrueClass",
+            Builtin::FalseClass => "FalseClass",
+            Builtin::Float => "Float",
         }
     }
 
@@ -323,7 +343,7 @@ impl Builtin {
             Builtin::Object => Some(Builtin::BasicObject),
             Builtin::Module => Some(Builtin::Object),
             Builtin::Class => Some(Builtin::Module),
-            Builtin::Integer => Some(Builtin::Numeric),
+            Builtin::Integer | Builtin::Float => Some(Builtin::Numeric),
             _ => Some(Builtin::Object),
         }
     }

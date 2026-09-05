@@ -80,6 +80,6 @@ pub use class::{Builtin, ClassId, Classes, CrefId, Kind, Method, Mixin, MixinErr
 pub use compile::Unsupported;
 pub use heap::{Handle, HandleScope, Heap, Payload, Stats};
 pub use interp::{Error, Frame};
-pub use method::{Definition, Definitions, Native};
+pub use method::{BitOp, Definition, Definitions, Native};
 pub use regexp::Regexps;
 pub use value::{SymbolId, Unpacked, Value};

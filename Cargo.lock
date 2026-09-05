@@ -409,6 +409,7 @@ version = "0.0.1"
 dependencies = [
  "clap",
  "spinel-ast",
+ "spinel-core",
  "spinel-parse",
  "spinel-vm",
 ]
@@ -434,6 +435,8 @@ dependencies = [
 name = "spinel-core"
 version = "0.0.1"
 dependencies = [
+ "spinel-ast",
+ "spinel-parse",
  "spinel-vm",
 ]
 

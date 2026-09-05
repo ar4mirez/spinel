@@ -85,15 +85,19 @@ fn ruby_spelling_of_version_matches() {
 }
 
 #[test]
-fn help_explains_that_nothing_runs_ruby_yet() {
+fn help_says_what_this_build_runs() {
     let out = spinel(&["--help"]);
     assert!(out.status.success());
 
     let help = stdout(&out);
     assert!(help.contains("Usage:"), "help should show usage: {help}");
     assert!(
-        help.to_lowercase().contains("does not run ruby yet"),
-        "help should say the surface is not built yet: {help}"
+        help.to_lowercase().contains("runs ruby"),
+        "help should say the engine runs Ruby: {help}"
+    );
+    assert!(
+        help.to_lowercase().contains("core library is minimal"),
+        "help should say how far the core library goes: {help}"
     );
     assert!(
         help.contains("[OPTIONS]"),
@@ -113,7 +117,7 @@ fn bare_invocation_is_not_silent_success() {
 }
 
 #[test]
-fn running_a_file_explains_why_it_cannot_yet() {
+fn a_missing_file_names_it_rather_than_the_parser() {
     // The likeliest first thing a Ruby developer types. It must not read as a
     // parser complaint about an "unexpected argument".
     let out = spinel(&["app.rb"]);
@@ -125,11 +129,108 @@ fn running_a_file_explains_why_it_cannot_yet() {
         !err.contains("unexpected argument"),
         "error should answer the user, not describe the parser: {err}"
     );
-    assert!(
-        err.contains("phase 1"),
-        "error should say when it will work: {err}"
-    );
     assert!(stdout(&out).is_empty(), "errors belong on stderr");
+}
+
+// ---------------------------------------------------------------------------
+// spinel run — the definition of done for #15
+// ---------------------------------------------------------------------------
+
+/// #15's check: `spinel run hello.rb` works.
+///
+/// The expected output is checked in next to the fixture rather than written
+/// here, and it is CRuby's — produced by running the same file on a real Ruby.
+/// That makes the assertion "Spinel agrees with Ruby" rather than "Spinel
+/// agrees with what Spinel did when this test was written".
+#[test]
+fn run_evaluates_a_file_and_agrees_with_cruby() {
+    let out = spinel(&["run", &fixture("run/hello.rb")]);
+    assert!(
+        out.status.success(),
+        "hello.rb should run cleanly: {}",
+        stderr(&out)
+    );
+    let expected = std::fs::read_to_string(fixture("run/hello.expected"))
+        .expect("the expected output is checked in beside the fixture");
+    assert_eq!(stdout(&out), expected);
+}
+
+/// A bare file argument is the same as `run`, because that is what a Ruby
+/// developer types.
+#[test]
+fn a_bare_ruby_file_is_run() {
+    let out = spinel(&[&fixture("run/hello.rb")]);
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    assert!(stdout(&out).starts_with("hello\n"));
+}
+
+/// An uncaught exception is Ruby's shape — `message (Class)` — on stderr, with
+/// a non-zero exit, so a script wrapping `spinel run` can tell.
+#[test]
+fn an_uncaught_exception_exits_non_zero_and_names_the_class() {
+    let out = spinel(&["run", &fixture("run/raises.rb")]);
+    assert!(!out.status.success(), "a raise should not exit 0");
+    let err = stderr(&out);
+    assert!(
+        err.contains("boom (RuntimeError)"),
+        "error should be `message (Class)`: {err}"
+    );
+    assert!(
+        err.contains("raises.rb"),
+        "error should name the file: {err}"
+    );
+    assert_eq!(stdout(&out), "before\n", "output before the raise is kept");
+}
+
+/// A construct the compiler does not implement yet is not a syntax error, and
+/// saying so is what keeps a bug report pointed at the right place.
+#[test]
+fn an_unsupported_construct_says_so_rather_than_blaming_the_syntax() {
+    let out = spinel(&["run", &fixture("run/unsupported.rb")]);
+    assert!(!out.status.success());
+    let err = stderr(&out);
+    assert!(
+        err.contains("cannot run") && err.contains("yet"),
+        "error should say the engine is unfinished: {err}"
+    );
+    assert!(
+        !err.to_lowercase().contains("syntax"),
+        "valid Ruby must not be reported as a syntax error: {err}"
+    );
+}
+
+/// A method this build does not have reads as Ruby's `NoMethodError`, and says
+/// which side is unfinished — the commonest thing a user hits while the core
+/// library is minimal.
+#[test]
+fn a_missing_method_reads_like_ruby_and_says_who_is_unfinished() {
+    let out = spinel(&["run", &fixture("run/missing_method.rb")]);
+    assert!(!out.status.success());
+    let err = stderr(&out);
+    assert!(
+        err.contains("undefined method 'upcase' for an instance of String (NoMethodError)"),
+        "should be Ruby's wording: {err}"
+    );
+    assert!(
+        err.contains("core library is still minimal"),
+        "should say this may be Spinel rather than the program: {err}"
+    );
+}
+
+/// `--dump-bytecode` is to the compiler what `spinel parse` is to the tree.
+#[test]
+fn dump_bytecode_prints_instructions_without_running() {
+    let out = spinel(&["run", "--dump-bytecode", &fixture("run/hello.rb")]);
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    let dump = stdout(&out);
+    assert!(
+        dump.contains("insns") && dump.contains("Leave"),
+        "dump should show the instruction list: {dump}"
+    );
+    assert!(
+        !dump.starts_with("hello"),
+        "dump should not have run the program: {dump}"
+    );
 }
 
 #[test]

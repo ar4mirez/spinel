@@ -6,6 +6,10 @@
 #   scripts/spec.sh core/array             one directory
 #   scripts/spec.sh language/if_spec.rb    one file
 #   scripts/spec.sh --list core/array      print example names instead of counts
+#   scripts/spec.sh --blocked=0 language   rank every blocking reason, not the top 15
+#
+# Flags are passed to the harness untouched, and a bare word is read as a corpus
+# path — so a flag that takes a value is spelled `--flag=value`, not `--flag value`.
 #
 # Paths are relative to `spec/ruby`, which is where the ruby/spec submodule is
 # checked out, so the argument reads the way ruby/spec's own directories do. A

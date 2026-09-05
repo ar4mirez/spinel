@@ -126,6 +126,16 @@ pub enum Insn {
     /// Index into [`Iseq::call_sites`]; calls the current frame's block. The
     /// name in the site is unused, the arguments are not.
     Yield(u32),
+    /// `next` from a block that has an `ensure` open over it.
+    ///
+    /// [`Insn::Leave`] pops the frame outright, which steps straight over any
+    /// `ensure` body protecting the point — the same reason a jump inside a
+    /// frame uses [`Insn::Goto`] rather than [`Insn::Jump`]. This leaves the
+    /// frame through the unwinder instead, so the search runs the `ensure`s on
+    /// the way out. Emitted only when there is one; `next` is otherwise a
+    /// `Leave`, which costs nothing.
+    LeaveThroughEnsure,
+
     /// Index into [`Iseq::children`]: makes a `Proc` capturing this frame's
     /// environment. The flag is set for `->`, which is a lambda.
     MakeProc(u32, bool),
@@ -397,6 +407,13 @@ pub enum Literal {
     Float(f64),
     /// Ruby strings are byte strings, not UTF-8.
     Str(Box<[u8]>),
+    /// A string literal that is frozen the moment it is made.
+    ///
+    /// `defined?` answers one, and `defined_spec.rb` checks `.frozen?` on every
+    /// literal it asks about. A separate variant rather than a flag on `Str`
+    /// because freezing is the whole difference and a `bool` field would put a
+    /// branch in the hot path of every ordinary string literal.
+    FrozenStr(Box<[u8]>),
     /// A regexp literal: the pattern as written, plus the flags it carries.
     ///
     /// Held as source rather than as a compiled pattern because an `Iseq`
