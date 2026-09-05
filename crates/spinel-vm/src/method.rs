@@ -211,6 +211,22 @@ pub enum Native {
     Mixin {
         prepend: bool,
     },
+    /// `Kernel#respond_to?` — a lookup from the receiver's *dispatch* class.
+    ///
+    /// Not `self.class.method_defined?`, which is what `core/kernel.rb` had:
+    /// `Object#class` skips the singleton, by design, so that spelling could
+    /// never see a `def obj.foo` or an `extend`ed module. The question
+    /// `respond_to?` asks is the one dispatch asks, so it starts where dispatch
+    /// starts.
+    RespondTo,
+    /// `Object#extend` — an `include` into the receiver's singleton class,
+    /// which is the whole of what Ruby's `extend` is.
+    ///
+    /// A primitive rather than `singleton_class.include(m)` in Ruby, because
+    /// `Module#include` is private in Ruby and the singleton class of an
+    /// ordinary object is allocated by the *table*, not by anything `core/*.rb`
+    /// can reach.
+    Extend,
     /// `Module#ancestors` — the linearised chain, which only the class table
     /// knows. `is_a?`, `kind_of?`, `Module#===` and `Module#<` are Ruby on it.
     Ancestors,

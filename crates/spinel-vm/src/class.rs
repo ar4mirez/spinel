@@ -405,6 +405,29 @@ struct Entry {
     ///
     /// [Feature #9573]: https://bugs.ruby-lang.org/issues/9573
     includers: Vec<ClassId>,
+    /// Direct subclasses, the inverse of `superclass`. `includers` already
+    /// records who mixes a module in; this records who inherits from a class,
+    /// and the two together are what [`Classes::invalidate`] walks. Modules
+    /// keep an empty one: nothing inherits from a module.
+    subclasses: Vec<ClassId>,
+    /// Bumped whenever a lookup *starting at this class* could have changed —
+    /// a definition here or in any ancestor, or a mixin that moved the chain.
+    /// A call site that memoises a target guards it with this; see [#10].
+    ///
+    /// [#10]: https://github.com/ar4mirez/spinel/issues/10
+    serial: u64,
+    /// This class's answered lookups, `docs/engine.md`'s global method cache
+    /// split per class. Misses are cached as `None` too, so a name nothing
+    /// defines costs one chain walk rather than one per call.
+    ///
+    /// Living in the entry rather than in one table keyed by `(class, name)` is
+    /// what makes eviction precise: invalidating a class is clearing *its* map,
+    /// and no key has to be scanned to find out who it belonged to.
+    cache: HashMap<SymbolId, Option<Method>>,
+    /// Which walk last visited this entry, so [`Classes::invalidate`] can skip
+    /// a class it has already reached without carrying a set. A diamond — two
+    /// modules that both include a third — reaches the same entry twice.
+    visited: u64,
     /// Allocated by [`HandleScope::singleton_class`], never before.
     singleton: Option<ClassId>,
     is_singleton: bool,
@@ -424,29 +447,18 @@ struct Entry {
 #[derive(Default)]
 pub struct Classes {
     entries: Vec<Entry>,
-    /// Bumped by every change that can move a method: a definition, a removal,
-    /// an `include`, a `prepend`. Inline caches read it in [#10].
-    ///
-    // ponytail: one serial for the whole table, where engine.md describes one per
-    // class. A shared serial invalidates more than it must — defining a method on
-    // any class evicts every cached lookup — which is correct but coarse. Per-class
-    // serials need a subclass list and a descendant walk on every definition; the
-    // benchmark that would justify writing them arrives with the JIT.
-    //
-    /// [#10]: https://github.com/ar4mirez/spinel/issues/10
-    serial: u64,
-    /// `docs/engine.md`'s global method cache, keyed by the receiver's class and
-    /// the name. Misses are cached too: a `method_missing` dispatch should not
-    /// re-walk the chain on every call.
-    ///
-    // ponytail: unbounded, where CRuby's global cache was a fixed-size direct-
-    // mapped table. It is emptied by every definition, so it cannot outgrow the
-    // (class, name) pairs one program actually calls between two definitions;
-    // a cap costs an eviction policy, and phase 3 has the profiles to choose one.
-    cache: HashMap<(ClassId, SymbolId), Option<Method>>,
     /// Lexical scopes, as an arena of linked-list nodes. See [`CrefId`].
     /// `bootstrap` seeds node 0 with `Object`, which is [`CrefId::ROOT`].
     crefs: Vec<CrefNode>,
+    /// [`Classes::invalidate`]'s frontier, kept rather than allocated per call.
+    /// Loading `core/*.rb` runs one walk per definition, several hundred of
+    /// them, and a `Vec` and a `HashSet` per walk was measurably the whole cost
+    /// of the descendant walk — see `bench/method_cache.rs`.
+    walk: Vec<ClassId>,
+    /// Counts walks, and stamps the entries one visits. Wrapping is not a
+    /// correctness question the way a serial's would be: a stamp only has to
+    /// differ from the one the *previous* walk wrote.
+    walks: u64,
 }
 
 /// Where a splice starts, and what the target already counts as reaching.
@@ -548,9 +560,13 @@ impl Classes {
         Classes::default()
     }
 
-    /// Bumped by anything that can change what a name resolves to.
-    pub fn serial(&self) -> u64 {
-        self.serial
+    /// This class's invalidation serial: bumped by anything that can change what
+    /// a name resolves to *for this class*, and left alone by changes elsewhere.
+    ///
+    /// A definition on an unrelated class does not move it, which is the whole
+    /// point of the split — see [`Classes::invalidate`].
+    pub fn serial(&self, id: ClassId) -> u64 {
+        self.entry(id).serial
     }
 
     pub fn len(&self) -> usize {
@@ -637,14 +653,14 @@ impl Classes {
     /// Define a method that remembers the lexical scope its `def` appeared in.
     pub fn define_method_in(&mut self, id: ClassId, name: SymbolId, body: Value, cref: CrefId) {
         self.entry_mut(id).methods.insert(name, (body, cref));
-        self.bump();
+        self.invalidate(id);
     }
 
     /// `Module#remove_method`: true if there was one to remove.
     pub fn remove_method(&mut self, id: ClassId, name: SymbolId) -> bool {
         let removed = self.entry_mut(id).methods.remove(&name).is_some();
         if removed {
-            self.bump();
+            self.invalidate(id);
         }
         removed
     }
@@ -661,11 +677,11 @@ impl Classes {
     /// are cached as `None`, so a name nothing defines costs one chain walk
     /// rather than one per call.
     pub fn lookup(&mut self, id: ClassId, name: SymbolId) -> Option<Method> {
-        if let Some(&hit) = self.cache.get(&(id, name)) {
+        if let Some(&hit) = self.entry(id).cache.get(&name) {
             return hit;
         }
         let found = self.lookup_uncached(id, name);
-        self.cache.insert((id, name), found);
+        self.entry_mut(id).cache.insert(name, found);
         found
     }
 
@@ -855,7 +871,7 @@ impl Classes {
     /// How many lookups the cache is currently answering. For tests and, in
     /// phase 2, `RubyVM.stat`.
     pub fn cached_lookups(&self) -> usize {
-        self.cache.len()
+        self.entries.iter().map(|entry| entry.cache.len()).sum()
     }
 
     /// `Module#include`. Splices the module's whole run in behind the class.
@@ -903,7 +919,10 @@ impl Classes {
             self.splice(includer, site, module);
         }
 
-        self.bump();
+        // From `target`, not from `module`: it is `target`'s chain that grew, so
+        // `target` and everything downstream of it is what can now resolve a
+        // name differently. `module`'s own lookups are unchanged.
+        self.invalidate(target);
         Ok(())
     }
 
@@ -998,9 +1017,51 @@ impl Classes {
     /// The cache is cleared rather than stamped and left, because an entry can
     /// name a body that `remove_method` just dropped — the only reference the
     /// collector would still be tracing.
-    fn bump(&mut self) {
-        self.serial += 1;
-        self.cache.clear();
+    /// Bump the serial and empty the cache of every class a change in `id` can
+    /// reach: `id` itself, everything that inherits from it, everything that
+    /// mixes it in, and so on transitively.
+    ///
+    /// That set is exactly the set that could have cached an answer owned by
+    /// `id`, because a cached answer at `D` names a method found by walking
+    /// `D`'s chain — so only classes with `id` in their chain can hold one. A
+    /// class outside the set keeps its cache, which is the difference between
+    /// this and the one-serial-per-table version it replaces.
+    ///
+    /// The cache is emptied rather than stamped and left, because a stale entry
+    /// can name a body that `remove_method` just dropped — and the cache would
+    /// be the only thing still keeping it from the collector. A stamped cache is
+    /// a GC bug, not just a stale answer.
+    ///
+    // ponytail: the walk is a stack and a seen-set, allocated per invalidation.
+    // At load time the set is "every class" for a definition on `Object`, which
+    // is the cost of defining `core/*.rb`; measured in `bench/method_cache.rs`
+    // and small. If a program with thousands of classes makes it show up, the
+    // upgrade is a generation counter per class checked lazily on lookup, which
+    // trades the walk for a check on every hit.
+    fn invalidate(&mut self, id: ClassId) {
+        self.walks += 1;
+        let mark = self.walks;
+        // Out of `self` for the walk, so the frontier and the entries can be
+        // borrowed at once, and back at the end so the next walk reuses it.
+        let mut stack = std::mem::take(&mut self.walk);
+        stack.clear();
+        stack.push(id);
+        while let Some(c) = stack.pop() {
+            let entry = &mut self.entries[c.0 as usize];
+            if entry.visited == mark {
+                continue;
+            }
+            entry.visited = mark;
+            entry.serial += 1;
+            entry.cache.clear();
+            // Both edges, because both put `c` in someone's chain: a subclass
+            // reaches it through `superclass`, an includer through its own `own`
+            // run. A module has no subclasses and a class no includers, so one
+            // of the two is always empty.
+            stack.extend_from_slice(&entry.subclasses);
+            stack.extend_from_slice(&entry.includers);
+        }
+        self.walk = stack;
     }
 
     fn entry(&self, id: ClassId) -> &Entry {
@@ -1031,11 +1092,21 @@ impl Classes {
             origin: 0,
             methods: HashMap::new(),
             includers: Vec::new(),
+            subclasses: Vec::new(),
+            serial: 0,
+            cache: HashMap::new(),
+            visited: 0,
             singleton: None,
             is_singleton,
             constants: HashMap::new(),
         });
-        self.bump();
+        // The inverse edge, so a later definition on the superclass can find
+        // this class to invalidate. Nothing else needs invalidating here: a
+        // brand-new class is in nobody's chain yet, so no cached answer anywhere
+        // can be wrong because it exists.
+        if let Some(superclass) = superclass {
+            self.entry_mut(superclass).subclasses.push(id);
+        }
         id
     }
 
@@ -1064,8 +1135,7 @@ impl fmt::Debug for Classes {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Classes")
             .field("classes", &self.entries.len())
-            .field("serial", &self.serial)
-            .field("cached", &self.cache.len())
+            .field("cached", &self.cached_lookups())
             .finish()
     }
 }
@@ -1539,9 +1609,9 @@ mod tests {
         assert_eq!(classes.lookup(c, name).unwrap().owner, m1, "and reused");
 
         // A module included after the call has to be seen by the next one.
-        let serial = classes.serial();
+        let serial = classes.serial(c);
         classes.include(c, m2).unwrap();
-        assert!(classes.serial() > serial);
+        assert!(classes.serial(c) > serial);
         assert_eq!(classes.cached_lookups(), 0, "the cache went with it");
         assert_eq!(classes.lookup(c, name).unwrap().owner, m2);
 
@@ -1738,24 +1808,142 @@ mod tests {
         let name = SymbolId(4);
         let classes = scope.classes_mut();
 
-        let mut serial = classes.serial();
+        // Watched on `C`, because `C` is where the lookups a call site would
+        // memoise start. A trigger counts only if it moves the serial of the
+        // class doing the looking.
+        let mut serial = classes.serial(c);
         let mut moved = |classes: &Classes, what: &str| {
-            assert!(classes.serial() > serial, "{what} left the serial alone");
-            serial = classes.serial();
+            assert!(classes.serial(c) > serial, "{what} left C's serial alone");
+            serial = classes.serial(c);
         };
-        classes.define_method(m, name, Value::fixnum(1).unwrap());
+        classes.define_method(c, name, Value::fixnum(1).unwrap());
         moved(classes, "define_method");
+        classes.define_method(c, name, Value::fixnum(2).unwrap());
+        moved(classes, "redefinition");
         classes.include(c, m).unwrap();
         moved(classes, "include");
         classes.prepend(c, m).unwrap();
         moved(classes, "prepend");
+        // Now that `M` is in `C`'s chain, a definition on `M` is a definition
+        // `C` can see — the descendant walk is what carries it across.
+        classes.define_method(m, name, Value::fixnum(3).unwrap());
+        moved(classes, "define_method on an included module");
         classes.remove_method(m, name);
-        moved(classes, "remove_method");
+        moved(classes, "remove_method on an included module");
 
         // And not for a removal that removed nothing.
-        let before = classes.serial();
+        let before = classes.serial(c);
         assert!(!classes.remove_method(m, name));
-        assert_eq!(classes.serial(), before);
+        assert_eq!(classes.serial(c), before);
+    }
+
+    // T9: the half that one serial per table could not express. A definition
+    // somewhere unrelated used to evict every cached lookup in the heap.
+    #[test]
+    fn a_definition_on_an_unrelated_class_leaves_this_ones_serial_alone() {
+        let mut heap = booted();
+        let mut scope = heap.scope();
+        let c = scope.define_class(Some("C"), Some(Builtin::Object.id()));
+        let unrelated = scope.define_class(Some("Unrelated"), Some(Builtin::Object.id()));
+        let name = SymbolId(4);
+        let classes = scope.classes_mut();
+
+        classes.define_method(c, name, Value::fixnum(1).unwrap());
+        assert_eq!(classes.lookup(c, name).unwrap().owner, c);
+        let serial = classes.serial(c);
+        let cached = classes.cached_lookups();
+
+        classes.define_method(unrelated, name, Value::fixnum(2).unwrap());
+        assert_eq!(
+            classes.serial(c),
+            serial,
+            "C is not downstream of Unrelated"
+        );
+        assert_eq!(
+            classes.cached_lookups(),
+            cached,
+            "and kept its cached answer"
+        );
+        assert_eq!(classes.lookup(c, name).unwrap().owner, c, "still C's own");
+
+        // A definition on the shared superclass does reach both, because both
+        // are downstream of it.
+        let object = Builtin::Object.id();
+        classes.define_method(object, name, Value::fixnum(3).unwrap());
+        assert!(classes.serial(c) > serial, "Object is C's superclass");
+    }
+
+    // T9: the descendant walk, over the two edges that put a class in a chain.
+    #[test]
+    fn invalidation_reaches_subclasses_and_includers() {
+        let mut heap = booted();
+        let mut scope = heap.scope();
+        let base = scope.define_class(Some("Base"), Some(Builtin::Object.id()));
+        let middle = scope.define_class(Some("Middle"), Some(base));
+        let leaf = scope.define_class(Some("Leaf"), Some(middle));
+        let m = scope.define_module(Some("M"));
+        let host = scope.define_class(Some("Host"), Some(Builtin::Object.id()));
+        let name = SymbolId(4);
+        let classes = scope.classes_mut();
+        classes.include(host, m).unwrap();
+
+        // Two hops down the superclass chain: `Leaf` never names `Base`, it
+        // reaches it through `Middle`, so the walk has to be transitive.
+        assert_eq!(classes.lookup(leaf, name), None, "a cached miss");
+        let leaf_serial = classes.serial(leaf);
+        classes.define_method(base, name, Value::fixnum(1).unwrap());
+        assert!(classes.serial(leaf) > leaf_serial, "grandparent definition");
+        assert_eq!(
+            classes.lookup(leaf, name).unwrap().owner,
+            base,
+            "the cached miss did not survive the definition that answered it"
+        );
+
+        // And across the includer edge, which is the module's half of the walk.
+        // `Host` caches a miss first, so the definition on `M` has to evict it.
+        assert_eq!(classes.lookup(host, name), None);
+        let host_serial = classes.serial(host);
+        classes.define_method(m, name, Value::fixnum(2).unwrap());
+        assert!(classes.serial(host) > host_serial, "definition on M");
+        assert_eq!(classes.lookup(host, name).unwrap().owner, m, "M now wins");
+    }
+
+    // T9: `def obj.foo` and `obj.extend M` both mutate a singleton class, and
+    // both have to reach the lookups that start there.
+    #[test]
+    fn singleton_class_mutation_invalidates() {
+        let mut heap = booted();
+        let mut scope = heap.scope();
+        let c = scope.define_class(Some("C"), Some(Builtin::Object.id()));
+        let m = scope.define_module(Some("M"));
+        let name = SymbolId(4);
+        let meta = scope.singleton_class(c);
+
+        let classes = scope.classes_mut();
+        assert_eq!(classes.lookup(meta, name), None);
+        let serial = classes.serial(meta);
+
+        // `def self.foo`: a definition straight on the singleton.
+        classes.define_method(meta, name, Value::fixnum(1).unwrap());
+        assert!(classes.serial(meta) > serial, "definition on the singleton");
+        assert_eq!(classes.lookup(meta, name).unwrap().owner, meta);
+
+        // `C.extend M`: an `include` into the singleton, which is all `extend`
+        // is. `M` wins over nothing here, but the serial has to move either way.
+        let serial = classes.serial(meta);
+        classes.include(meta, m).unwrap();
+        assert!(classes.serial(meta) > serial, "extend");
+
+        // And a definition on the extended module reaches the singleton, since
+        // the include put the module in its chain.
+        let serial = classes.serial(meta);
+        let other = SymbolId(5);
+        classes.define_method(m, other, Value::fixnum(2).unwrap());
+        assert!(
+            classes.serial(meta) > serial,
+            "definition on an extended module"
+        );
+        assert_eq!(classes.lookup(meta, other).unwrap().owner, m);
     }
 
     #[test]
