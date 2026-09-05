@@ -313,6 +313,11 @@ struct Call {
     /// This `Iseq`'s symbol pool, interned once per frame rather than per
     /// instruction.
     symbols: Vec<SymbolId>,
+    /// Where this `Iseq`'s run of inline caches starts, resolved once per frame
+    /// for the same reason `symbols` is: the lookup is a hash probe, and it
+    /// belongs on frame entry rather than on every `Send`. A call-site id is
+    /// this plus the instruction's operand.
+    cache_base: u32,
     /// This frame's own locals.
     env: Value,
     receiver: Value,
@@ -474,9 +479,14 @@ pub fn eval_in(
     let proc_class = class_handle(scope, Builtin::Proc);
 
     let mut stack: Vec<Value> = Vec::with_capacity(iseq.max_stack);
+    // Owned before the frame is built so the call caches can key off the same
+    // `Arc` the frame holds.
+    let script = Arc::new(iseq.clone());
+    let cache_base = scope.call_caches_mut().base(&script);
     let mut frames: Vec<Call> = vec![Call {
-        iseq: Arc::new(iseq.clone()),
+        iseq: script,
         symbols: iseq.link(),
+        cache_base,
         env,
         receiver: frame.receiver,
         cref: frame.cref,
@@ -611,6 +621,13 @@ pub fn eval_in(
                         // lets `Array#+` and any user-defined operator work at all.
                         Err(Error::NoDispatch { .. }) => {
                             let call = Pending {
+                                // ponytail: `Insn::BinOp` has no call-site
+                                // index, so an operator that misses the fixnum
+                                // fast path pays the full probe. Give the
+                                // instruction a site when a benchmark shows
+                                // operator dispatch on user-defined classes
+                                // mattering.
+                                cache: None,
                                 name: crate::shared::symbols::intern(op.name()),
                                 receiver: left,
                                 args: vec![right],
@@ -809,7 +826,10 @@ pub fn eval_in(
                 Insn::Send(index) => {
                     let iseq = Arc::clone(&frames[top].iseq);
                     let site = &iseq.call_sites[index as usize];
-                    let call = pop_call(scope, &mut stack, site, &frames[top], proc_class, true)?;
+                    let mut call =
+                        pop_call(scope, &mut stack, site, &frames[top], proc_class, true)?;
+                    // The call-site id: this `Iseq`'s run, plus the operand.
+                    call.cache = Some(frames[top].cache_base + index);
                     if let Some(unwind) =
                         dispatch(scope, &mut stack, &mut frames, call, proc_class, &mut ids)?
                     {
@@ -1168,6 +1188,12 @@ struct Pending {
     /// method — and so the scope its `def` appeared in — is known.
     cref: CrefId,
     target: Target,
+    /// Which inline cache entry may answer this call, if any.
+    ///
+    /// `Some` only for `Insn::Send`. `Yield` resolves no name, and
+    /// `Native::Send` re-dispatches under a name the call site never mentioned,
+    /// so neither may borrow the site's entry.
+    cache: Option<u32>,
 }
 
 /// Take a call site's operands off the stack.
@@ -1237,6 +1263,9 @@ fn pop_call<'h>(
     };
 
     Ok(Pending {
+        // `Insn::Send` fills this in; `Insn::Yield` leaves it, having no name
+        // to resolve.
+        cache: None,
         name: frame.symbols[site.name as usize],
         receiver,
         args,
@@ -1290,7 +1319,30 @@ fn dispatch<'h>(
         }
         Target::Method => {
             let class = class_of(scope, call.receiver).ok_or_else(|| no_class(call.receiver))?;
-            let found = scope.classes_mut().lookup(class, call.name);
+            // The inline cache, in front of the per-class method cache, which is
+            // itself in front of the chain walk. A hit is two integer compares
+            // against a `Vec` entry; the probe it skips is what `bench/` calls
+            // the cached lookup.
+            //
+            // Only hits are memoised. A miss falls through to `lookup`, whose
+            // own memo answers it, and then goes on to build an exception or to
+            // find `method_missing` — not a path worth widening an entry for.
+            let found = match call.cache {
+                Some(slot) => {
+                    let serial = scope.classes().serial(class);
+                    match scope.call_caches().get(slot, class, serial) {
+                        hit @ Some(_) => hit,
+                        None => {
+                            let found = scope.classes_mut().lookup(class, call.name);
+                            if let Some(method) = found {
+                                scope.call_caches_mut().fill(slot, class, serial, method);
+                            }
+                            found
+                        }
+                    }
+                }
+                None => scope.classes_mut().lookup(class, call.name),
+            };
             // R8: an unknown method raises rather than answering `nil`. The
             // harness reports a statement that merely evaluates as a passing
             // effect, so a `nil` here would turn every matcher this VM does not
@@ -1394,6 +1446,8 @@ fn push_proc_frame(
         });
     };
     let call = Pending {
+        // A block, not a name: nothing to memoise.
+        cache: None,
         receiver,
         name: call.name,
         args: call.args.clone(),
@@ -1447,10 +1501,14 @@ fn push_frame(
 ) -> Result<(), Error> {
     let env = env_alloc(scope, outer, iseq.locals.len());
     let symbols = iseq.link();
+    // Beside `link`, and for the same reason: one hash probe on frame entry
+    // instead of one per `Send`.
+    let cache_base = scope.call_caches_mut().base(iseq);
     bind(scope, env, &iseq.params, &symbols, call, binding)?;
     frames.push(Call {
         iseq: Arc::clone(iseq),
         symbols,
+        cache_base,
         env,
         receiver: call.receiver,
         cref: call.cref,
@@ -1933,6 +1991,7 @@ fn open_class(
     let body = Arc::clone(&iseq.children[def.body as usize]);
     let env = env_alloc(scope, Value::NIL, body.locals.len());
     let symbols = body.link();
+    let cache_base = scope.call_caches_mut().base(&body);
     *ids += 1;
     let links = Links {
         id: *ids,
@@ -1942,6 +2001,7 @@ fn open_class(
     frames.push(Call {
         iseq: body,
         symbols,
+        cache_base,
         env,
         receiver,
         cref,
@@ -2126,6 +2186,7 @@ fn anonymous_module(
 
     let block = call.block;
     let inner = Pending {
+        cache: None,
         name: call.name,
         receiver: block,
         // Ruby yields the new module to the block as well as making it `self`,
@@ -3300,6 +3361,9 @@ fn native_call<'h>(
                 });
             };
             let forwarded = Pending {
+                // `send` resolves a name the call site never mentioned, so the
+                // site's entry is not about this call.
+                cache: None,
                 // `send` forwards whatever block it was given, and how that
                 // block was written travels with it.
                 block_is_literal: call.block_is_literal,
@@ -4477,6 +4541,7 @@ fn native_call<'h>(
             };
             let block = call.block;
             let inner = Pending {
+                cache: None,
                 name: call.name,
                 receiver: block,
                 args: vec![tag],

@@ -67,6 +67,7 @@ mod tests {
 }
 
 pub mod bytecode;
+pub mod callcache;
 pub mod class;
 pub mod compile;
 pub mod heap;

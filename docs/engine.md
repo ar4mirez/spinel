@@ -150,7 +150,11 @@ The cache is emptied rather than stamped and left, because a stale entry can nam
 
 The trade is measured in `bench/method_cache.rs`: precision costs a walk per definition, worst case every class in the heap when the definition is on `Object`, which shows up as roughly a quarter more time to load `core/*.rb`. It buys back a cached answer that survives an unrelated definition — 3.5x on a dispatch-while-defining workload, against a design where any definition evicted everything.
 
-Call sites carry a monomorphic inline cache `(class serial, target)`. Because bytecode is shared across Ractors, inline caches do not live in the bytecode; each heap owns a side table indexed by call-site id. Class serials are atomic integers on the shared class object so every heap sees an invalidation. These are day-one features because retrofitting them into a VM that assumed direct table lookups is painful.
+Call sites carry a monomorphic inline cache `(class, serial, target)`, landed in [#169](https://github.com/ar4mirez/spinel/issues/169). Because bytecode is shared across Ractors, inline caches do not live in the bytecode; each heap owns a side table indexed by call-site id. A call-site id is the `Iseq`'s run in that table plus the `Insn::Send` operand, and the run is found once per frame push, beside `Iseq::link` and for the same reason: the one hash probe the design needs belongs on frame entry, not on every send. Class serials are atomic integers on the shared class object so every heap sees an invalidation. These are day-one features because retrofitting them into a VM that assumed direct table lookups is painful.
+
+The thing an inline cache has to beat is not the chain walk but the *cached* lookup, because the per-class cache above already turns every chain depth into one hash probe. It does: two integer compares against a `Vec` entry, measured at 1ns against the probe's 8ns, and about 10% off a send-heavy loop end to end.
+
+Unlike the per-class cache, inline-cache entries are left to go stale rather than emptied. The reason that cache is emptied does not reach here: a `Method` is an owner id, a cref id, and a fixnum definition id — two indices into per-heap arenas that only grow, and a body the collector never traces — so a stale entry roots nothing, and the guard can be lazy. Only hits are stored; a miss falls through to the per-class cache, which memoises the `None` itself.
 
 ## Calling convention
 
