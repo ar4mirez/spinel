@@ -90,14 +90,20 @@ fn a_spec_file_reports_its_examples_and_succeeds() {
 }
 
 /// One example Spinel can run and one it cannot, in that order.
+///
+/// The unrunnable one has to keep moving as slices land: it was a method call
+/// until [#11](https://github.com/ar4mirez/spinel/issues/11) compiled those.
+/// What it tests is not the particular construct but the rule that an
+/// unimplemented one *blocks* rather than fails.
 const ONE_OF_EACH: &str = r##"
 describe "Something" do
   it "is runnable" do
     (1 + 1).should == 2
   end
 
-  it "needs a method call" do
-    [1, 2].size.should == 2
+  it "needs an instance variable" do
+    @a = 2
+    @a.should == 2
   end
 end
 "##;
@@ -120,7 +126,7 @@ fn an_example_it_cannot_run_is_blocked_and_never_failed() {
         "the report must say what blocked it:\n{text}"
     );
     assert!(
-        text.contains("a method call is not compiled yet"),
+        text.contains("an instance variable is not compiled yet"),
         "the reason must name the construct:\n{text}"
     );
 }

@@ -114,6 +114,14 @@ pub struct Example {
     /// Set when a guard excluded this example, or when the harness could not
     /// evaluate the guard and refused to guess.
     pub skipped: Option<String>,
+    /// Source spans of the `before` bodies prepended to `body`, outermost first.
+    ///
+    /// `scripts/verify-passes.rb` re-runs a passing example on real Ruby by
+    /// slicing it back out of the file, so it has to slice the same statements
+    /// that ran. Without these it would eval an example whose helper method was
+    /// defined in a hook it never saw, and report a false pass that is really a
+    /// disagreement between the harness and its own verifier.
+    pub setup_spans: Vec<Span>,
 }
 
 impl Example {
@@ -137,8 +145,11 @@ pub fn examples(program: &Program, target: &Target) -> Vec<Example> {
         target,
         group: Vec::new(),
         skipped: None,
+        setup: Vec::new(),
         out: Vec::new(),
     };
+    // A file's top level is a group like any other: `before` can live there.
+    walk.collect_setup(&program.body);
     walk.body(&program.body);
     walk.out
 }
@@ -148,7 +159,33 @@ struct Walk<'a> {
     group: Vec<String>,
     /// Reason the enclosing guard excluded everything below, if any.
     skipped: Option<String>,
+    /// `before` bodies from the enclosing groups, outermost first. Prepended to
+    /// every example in the group.
+    ///
+    /// `block_spec.rb` defines the method under test in one of these, so a
+    /// harness that walks past them can run almost none of that file:
+    ///
+    /// ```ruby
+    /// before :all do
+    ///   def m(a) yield a end
+    /// end
+    /// ```
+    ///
+    /// `before :all` is prepended per example rather than run once, which is
+    /// the only shape a fresh heap per example allows. An example that depended
+    /// on state accumulated across examples will *fail* rather than falsely
+    /// pass, which is the direction this harness errs in everywhere else too.
+    setup: Vec<Setup>,
     out: Vec<Example>,
+}
+
+/// One `before` block's body, the locals its own scope declared, and where in
+/// the file it came from.
+#[derive(Clone)]
+struct Setup {
+    body: Vec<Expr>,
+    locals: Vec<spinel_ast::Name>,
+    span: Span,
 }
 
 impl Walk<'_> {
@@ -189,7 +226,13 @@ impl Walk<'_> {
         match &*call.name {
             "describe" | "context" => {
                 self.group.push(argument_text(call).unwrap_or_default());
+                // Hooks first, whatever order they appear in: mspec runs a
+                // group's `before` for every example in it, including the ones
+                // written above the hook.
+                let depth = self.setup.len();
+                self.collect_setup(block);
                 self.body(block);
+                self.setup.truncate(depth);
                 self.group.pop();
             }
             "it" | "specify" => self.push(span, call, self.skipped.clone()),
@@ -212,15 +255,65 @@ impl Walk<'_> {
         }
     }
 
+    /// Find this group's `before` blocks and stack them for its examples.
+    fn collect_setup(&mut self, statements: &[Expr]) {
+        for statement in statements {
+            let ExprKind::Call(call) = &statement.kind else {
+                continue;
+            };
+            if call.receiver.is_some() || &*call.name != "before" {
+                continue;
+            }
+            if let Some(BlockArg::Block(block)) = call.block.as_ref()
+                && let (Some(first), Some(last)) = (block.body.first(), block.body.last())
+            {
+                self.setup.push(Setup {
+                    span: Span {
+                        start: first.span.start,
+                        end: last.span.end,
+                    },
+                    body: block.body.clone(),
+                    locals: block.locals.clone(),
+                });
+            }
+        }
+    }
+
     fn push(&mut self, span: Span, call: &Call, skipped: Option<String>) {
-        let (body, locals) = match call.block.as_ref() {
+        let (own_body, own_locals) = match call.block.as_ref() {
             Some(BlockArg::Block(block)) => (block.body.clone(), block.locals.clone()),
             _ => (Vec::new(), Vec::new()),
         };
+        // The hooks run first, outermost group first, then the example.
+        let mut body: Vec<Expr> = Vec::new();
+        let mut locals: Vec<spinel_ast::Name> = Vec::new();
+        for setup in &self.setup {
+            body.extend(setup.body.iter().cloned());
+            for name in &setup.locals {
+                if !locals.contains(name) {
+                    locals.push(name.clone());
+                }
+            }
+        }
+        let mut setup_spans: Vec<Span> = self.setup.iter().map(|s| s.span).collect();
+        // An example with no body of its own asserts nothing, and mspec passes
+        // it. Prepending hooks must not turn that into something that ran.
+        if own_body.is_empty() {
+            body.clear();
+            setup_spans.clear();
+        } else {
+            body.extend(own_body);
+        }
+        for name in own_locals {
+            if !locals.contains(&name) {
+                locals.push(name);
+            }
+        }
         self.out.push(Example {
             group: self.group.clone(),
             description: argument_text(call).unwrap_or_else(|| "<no description>".to_owned()),
             span,
+            setup_spans,
             body,
             locals,
             skipped,

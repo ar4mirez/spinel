@@ -186,6 +186,7 @@ pub struct Heap {
     total_allocated: u64,
     /// This Ractor's classes and modules. A root source: see [`Heap::mark`].
     classes: Classes,
+    definitions: crate::method::Definitions,
 }
 
 /// The class index for an object needing `bytes` in total, or `None` for large objects.
@@ -219,12 +220,23 @@ impl Heap {
             collections: 0,
             total_allocated: 0,
             classes: Classes::new(),
+            definitions: crate::method::Definitions::new(),
         }
     }
 
     /// This heap's classes and modules. [`HandleScope::bootstrap`] fills it.
     pub fn classes(&self) -> &Classes {
         &self.classes
+    }
+
+    /// The method bodies this heap's class table points at. Not traced: a
+    /// definition id is a fixnum, which is the point of it being one.
+    pub fn definitions(&self) -> &crate::method::Definitions {
+        &self.definitions
+    }
+
+    pub fn definitions_mut(&mut self) -> &mut crate::method::Definitions {
+        &mut self.definitions
     }
 
     pub fn classes_mut(&mut self) -> &mut Classes {
@@ -617,6 +629,15 @@ impl<'h> HandleScope<'h> {
 
     pub fn classes_mut(&mut self) -> &mut Classes {
         self.heap.classes_mut()
+    }
+
+    /// The method bodies this heap's class table points at.
+    pub fn definitions(&self) -> &crate::method::Definitions {
+        self.heap.definitions()
+    }
+
+    pub fn definitions_mut(&mut self) -> &mut crate::method::Definitions {
+        self.heap.definitions_mut()
     }
 
     /// Point a handle at a different object. The old one loses this root.

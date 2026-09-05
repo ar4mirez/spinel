@@ -171,12 +171,20 @@ fn main() -> ExitCode {
                     },
                     Outcome::Blocked(why) => format!("blocked: {why}"),
                 };
+                // Spans, comma-separated: the `before` bodies that ran first,
+                // then the example's own. `verify-passes.rb` concatenates them
+                // to rebuild exactly what was run.
+                let spans: Vec<String> = example
+                    .setup_spans
+                    .iter()
+                    .chain(std::iter::once(&example.span))
+                    .map(|span| format!("{}-{}", span.start, span.end))
+                    .collect();
                 println!(
-                    "{}\t{}\t{}-{}\t{}",
+                    "{}\t{}\t{}\t{}",
                     display_path(file),
                     outcome,
-                    example.span.start,
-                    example.span.end,
+                    spans.join(","),
                     example.full_description()
                 );
             }

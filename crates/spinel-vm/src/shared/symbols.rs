@@ -126,10 +126,16 @@ mod tests {
 
     #[test]
     fn the_table_only_grows() {
-        let before = len();
-        let _ = intern("grow_one");
-        let _ = intern("grow_one");
-        let _ = intern("grow_two");
-        assert_eq!(len(), before + 2);
+        // The property, stated so that a test running in parallel cannot
+        // disturb it: this table is process-global, so a `len()` read before
+        // and after would race any other test that interns — and since
+        // `bootstrap` interns the primitives' names, most of them do.
+        let first = intern("grow_one");
+        assert_eq!(intern("grow_one"), first, "interning is idempotent");
+        assert_ne!(intern("grow_two"), first, "a new name gets a new id");
+        assert_eq!(name(first).as_deref(), Some("grow_one"));
+        // Ids are indices into an append-only table, so one handed out earlier
+        // stays valid however much the table has grown since.
+        assert!(len() > first.0 as usize);
     }
 }
