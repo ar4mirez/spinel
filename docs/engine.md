@@ -103,9 +103,34 @@ The run is maintained by `include` and `prepend` rather than recomputed from a l
 
 These rules are CRuby's, and they were measured rather than read: `crates/spinel-vm/tests/ancestors.txt` is 42 hierarchies with the ancestors a real Ruby computes for them, `scripts/ancestors-oracle.rb` is what re-measures it in CI, and `tests/ancestors.rs` is what holds Spinel to it.
 
-Singleton classes are allocated on first ask, never at class creation. A class's singleton inherits from its superclass's, `BasicObject`'s inherits from `Class`, and a module's inherits from `Module` — the twist that puts `Class`, `Module`, `Object`, `Kernel`, and `BasicObject` at the end of every metaclass's ancestors. An ordinary object's singleton *becomes* its class, as in Ruby, so the header write is the whole mechanism.
+Singleton classes are allocated on first ask, with one exception: the `class` keyword builds a class's metaclass as it defines it, because `class B < A` with a `def self.m` on `A` reaches `m` through `#<Class:B> < #<Class:A>` and a `B` still pointing at `Class` would miss it. That is CRuby's `rb_define_class`, and `HandleScope::define_class` stays lazy for everything else. A class's singleton inherits from its superclass's, `BasicObject`'s inherits from `Class`, and a module's inherits from `Module` — the twist that puts `Class`, `Module`, `Object`, `Kernel`, and `BasicObject` at the end of every metaclass's ancestors. An ordinary object's singleton *becomes* its class, as in Ruby, so the header write is the whole mechanism.
 
-Method tables are Rust hash maps hanging off the class table, not object slots, so the class table is a root source in `Heap::mark`: it holds every class object and every method body.
+Method tables are Rust hash maps hanging off the class table, not object slots, so the class table is a root source in `Heap::mark`: it holds every class object, every method body, and every constant.
+
+## Constants and lexical scope
+
+Landed in [#13](https://github.com/ar4mirez/spinel/issues/13). A constant belongs to exactly one module and lives in a hash map on that module's class-table entry, beside its methods and rooted by the same walk.
+
+Lookup needs the chain of `class`/`module` bodies a reference was **written** inside, which is not the chain it **runs** inside:
+
+```ruby
+module A
+  X = 1
+  class B
+    def m = X          # A::X, though B.ancestors never reaches A
+  end
+end
+```
+
+The compiler cannot supply that chain — it knows `B` is one level deeper, but `B` is a `ClassId` that does not exist until the body runs — so it is built at runtime, as CRuby's cref is. A `CrefId` indexes a per-heap arena of `(class, parent)` nodes. It is an arena index rather than a heap object because a cref is unreachable from Ruby, never outlives the modules it names, and is read on the hot path of every constant reference; the `ClassId`s in it are already rooted by the class table.
+
+Three things carry one, because a reference resolves where it was written: a frame carries the scope that pushed it, a `Method` carries the scope its `def` appeared in, and a `Proc` carries the scope it was created in as a sixth slot.
+
+A bare `X` searches the cref chain innermost-first (own tables only), then the innermost scope's ancestors, then `Object` if the ancestors did not already reach it — which they do for a class body and do not for a module body. `A::X` is the ancestor walk alone, rooted at `A`, with no lexical scope and no `Object` fallback; Ruby removed that fallback in 2.5, so `Sub::TOP` for a top-level `TOP` is a `NameError`. `::X` is the ancestor walk rooted at `Object`.
+
+These rules are documented nowhere and read wrong from `variable.c`, so like the ancestor chain they are measured rather than believed: `crates/spinel-vm/tests/eval.txt` holds them and `scripts/eval-oracle.rb` re-measures them in CI.
+
+`defined?` reads the same tables and answers a table of Ruby's own strings. Where it *misses*, it does not answer Ruby's `nil`: a fresh bootstrap heap cannot tell "undefined" from "defined in a file `require` has not landed to load", and `nil` would pass a spec the VM had no right to. A miss is `Error::Unknowable` until [#39](https://github.com/ar4mirez/spinel/issues/39).
 
 ## Shapes and inline caches
 

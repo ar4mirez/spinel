@@ -131,7 +131,47 @@ pub enum Insn {
     MakeProc(u32, bool),
     /// Index into [`Iseq::definitions`]. Defines the method and pushes its name
     /// as a symbol, which is what `def` evaluates to.
+    ///
+    /// Takes no receiver: an instance method is defined on the frame's *lexical
+    /// scope*, not on `class_of(self)`. In a `class C` body `self` is `C` and
+    /// `class_of(C)` is `Class`, so a receiver would land every method on
+    /// `Class`. It looks right at the top level only because `class_of(main)`
+    /// happens to be `Object`, which is also the top-level scope.
     DefineMethod(u32),
+    /// Index into [`Iseq::definitions`]; pops the receiver. `def self.foo` and
+    /// `def obj.foo`, which define on the receiver's singleton class.
+    ///
+    /// A second opcode rather than a flag on [`Insn::DefineMethod`] because the
+    /// two leave the operand stack at different depths, and `max_stack` is
+    /// computed from the opcode.
+    DefineSingleton(u32),
+
+    // -- constants ---------------------------------------------------------
+    /// Index into [`Iseq::symbols`]; pushes the constant's value.
+    /// [`ConstScope::Qualified`] pops the module to look in.
+    GetConst(u32, ConstScope),
+    /// Index into [`Iseq::symbols`]; pops the value, then for
+    /// [`ConstScope::Qualified`] the module. Leaves the value on the stack,
+    /// because assignment is an expression.
+    SetConst(u32, ConstScope),
+    /// `defined?(A)`. Pushes `"constant"` or `nil`; never raises, where
+    /// [`Insn::GetConst`] would.
+    DefinedConst(u32, ConstScope),
+    /// Index into [`Iseq::class_defs`]. Opens a `class`, `module`, or
+    /// `class << obj` body in a new frame.
+    OpenClass(u32),
+
+    // -- defined? ----------------------------------------------------------
+    /// `defined?(recv.m)`. Pops the receiver; pushes `"method"` or `nil`.
+    ///
+    /// The receiver *is* evaluated — Ruby evaluates the whole chain but the last
+    /// name — which is why this is an instruction and not a compile-time answer.
+    DefinedMethod(u32),
+    /// `defined?(m)` with no receiver: the frame's `self`, including its private
+    /// methods. Pushes `"method"` or `nil`.
+    DefinedSelfMethod(u32),
+    /// `defined?(yield)`. Pushes `"yield"` when the frame has a block.
+    DefinedYield,
 
     // -- exit -------------------------------------------------------------
     /// Return the top of the stack from this frame.
@@ -212,6 +252,57 @@ impl BinOp {
     }
 }
 
+/// Which of Ruby's three constant lookups a reference is.
+///
+/// The three differ in what they search, not just where they start, so one flag
+/// is cheaper and clearer than three opcodes:
+///
+/// | form | searched |
+/// |---|---|
+/// | `X` | the lexical chain, then the innermost scope's ancestors, then `Object` |
+/// | `A::X` | `A`'s ancestors, and nothing else |
+/// | `::X` | `Object`'s ancestors, and nothing else |
+///
+/// `A::X` not falling back to `Object` is Ruby 2.5's change: `Sub::TOP` for a
+/// top-level `TOP` is a `NameError`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConstScope {
+    /// A bare `X`, resolved from the frame's lexical scope.
+    Lexical,
+    /// `A::X`. The module is on the stack.
+    Qualified,
+    /// `::X`.
+    Top,
+}
+
+/// What kind of body [`Insn::OpenClass`] opens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DefKind {
+    Class,
+    Module,
+    /// `class << obj`. The object is on the stack, and no constant is assigned.
+    Singleton,
+}
+
+/// Everything `class`, `module`, and `class <<` need that does not fit in an
+/// instruction.
+///
+/// The flags live here rather than in the opcode for the reason `CallSite` does:
+/// [`Insn`] stays `Copy` and 16 bytes, and the decode is a field read either way.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClassDef {
+    /// Index into [`Iseq::symbols`]. Unused for [`DefKind::Singleton`].
+    pub name: u32,
+    /// Index into [`Iseq::children`]: the body.
+    pub body: u32,
+    pub kind: DefKind,
+    /// `class A::B` — the module to define in is on the stack, under the
+    /// superclass. Without it the definee is the frame's innermost scope.
+    pub scoped: bool,
+    /// `class C < D` — the superclass is on top of the stack.
+    pub superclass: bool,
+}
+
 /// A literal, described rather than built.
 ///
 /// Never a [`Value`](crate::Value): a `Value` can be a pointer into one heap,
@@ -255,8 +346,11 @@ pub struct Iseq {
     /// self-contained, position-independent unit that phase 3 can cache whole.
     pub children: Vec<Arc<Iseq>>,
     pub call_sites: Vec<CallSite>,
-    /// `(symbol index, child index)` for each [`Insn::DefineMethod`].
+    /// `(symbol index, child index)` for each [`Insn::DefineMethod`] and
+    /// [`Insn::DefineSingleton`].
     pub definitions: Vec<(u32, u32)>,
+    /// One entry per [`Insn::OpenClass`].
+    pub class_defs: Vec<ClassDef>,
     /// A block body reads its enclosing frame's locals; a method body starts a
     /// new scope and must not. A `GetLocal` walking past this would be a
     /// compiler bug the interpreter cannot see, so the interpreter refuses.

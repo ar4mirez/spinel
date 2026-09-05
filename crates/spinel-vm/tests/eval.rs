@@ -75,10 +75,18 @@ fn a_construct_this_slice_does_not_compile_is_an_error_never_a_guess() {
     // The property the spec harness depends on: unsupported is loud.
     for source in [
         // `def` and a block literal moved to the other side of this list with
-        // #11; what stays is what later slices own.
+        // #11, and constants, class bodies, and `defined?` with #13; what stays
+        // is what later slices own.
         "@a = 1",
         "$a = 1",
-        "A = 1",
+        "@@a = 1",
+        // #13 answers `defined?` for the kinds it can mean, and refuses the
+        // kinds it cannot rather than answering Ruby's `nil` for the wrong
+        // reason. See `Compiler::defined`.
+        "defined?(@a)",
+        "defined?($a)",
+        "defined?(@@a)",
+        "A ||= 1",
         "{ a: 1 }",
         "(1..2)",
         "case 1; in Integer then 2; end",
@@ -91,6 +99,58 @@ fn a_construct_this_slice_does_not_compile_is_an_error_never_a_guess() {
             "{source:?} compiled, but this slice cannot mean it"
         );
     }
+}
+
+/// The cases `eval.txt` cannot hold, because the oracle only records values.
+///
+/// ruby/spec asserts on this text, so it is measured against `ruby 4.0.6` here
+/// rather than paraphrased. #12 turns each of these into a real exception
+/// object; the wording should already be right when it does.
+#[test]
+fn naming_errors_carry_rubys_own_message() {
+    for (source, want) in [
+        ("Nope", "uninitialized constant Nope"),
+        ("::Nope", "uninitialized constant Nope"),
+        ("module M; end; M::Nope", "uninitialized constant M::Nope"),
+        ("class C; end; C::Nope", "uninitialized constant C::Nope"),
+        // Ruby dropped `Object` as a fallback for a qualified lookup in 2.5, so
+        // a top-level constant is *not* reachable through a subclass.
+        (
+            "TOP = 1; class B; end; class S < B; end; S::TOP",
+            "uninitialized constant S::TOP",
+        ),
+        ("1::Nope", "1 is not a class/module"),
+        (
+            "class B; end; class S < B; end; class S < String; end",
+            "superclass mismatch for class S",
+        ),
+        (
+            "class S < 1; end",
+            "superclass must be an instance of Class (given an instance of Integer)",
+        ),
+        ("module M; end; class M; end", "M is not a class"),
+        ("class C; end; module C; end", "C is not a module"),
+        ("class << 1; end", "can't define singleton"),
+    ] {
+        let err = eval(source).unwrap_err();
+        assert!(
+            err.contains(want),
+            "{source:?}\n  want: {want}\n  got:  {err}"
+        );
+    }
+}
+
+/// `defined?` never runs what it is asked about, beyond a receiver chain.
+#[test]
+fn defined_does_not_evaluate_what_it_reports_on() {
+    // The assignment does not happen: Ruby answers `"assignment"` and leaves
+    // the local alone.
+    assert_eq!(eval("a = 1; defined?(a = 2); a").unwrap(), "1");
+    // The method is not called, though naming it is enough to answer.
+    assert_eq!(
+        eval("class C; def self.boom; raise 'never'; end; end; defined?(C.boom)").unwrap(),
+        "\"method\""
+    );
 }
 
 #[test]

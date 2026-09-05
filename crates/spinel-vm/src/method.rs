@@ -52,6 +52,11 @@ pub enum Native {
     BlockGiven,
     /// `Object#class`
     ClassOf,
+    /// `Class#new`: allocate, then run `initialize` if there is one.
+    ///
+    /// A primitive because it is allocation and dispatch, which `docs/engine.md`
+    /// reserves for Rust. Everything else `Class` will answer is `core/*.rb`'s.
+    New,
     /// `Object#equal?` — identity, which for this VM is `Value` equality.
     Equal,
     /// `Object#frozen?`, `Object#nil?`, `Object#!`. Cheap predicates the target
