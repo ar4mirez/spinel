@@ -412,9 +412,9 @@ struct Entry {
     subclasses: Vec<ClassId>,
     /// Bumped whenever a lookup *starting at this class* could have changed —
     /// a definition here or in any ancestor, or a mixin that moved the chain.
-    /// A call site that memoises a target guards it with this; see [#10].
+    /// A call site that memoises a target guards it with this; see [#169].
     ///
-    /// [#10]: https://github.com/ar4mirez/spinel/issues/10
+    /// [#169]: https://github.com/ar4mirez/spinel/issues/169
     serial: u64,
     /// This class's answered lookups, `docs/engine.md`'s global method cache
     /// split per class. Misses are cached as `None` too, so a name nothing

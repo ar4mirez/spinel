@@ -122,8 +122,11 @@ registers itself with its superclass.
 
 ## Non-goals
 
-- **Inline caches at call sites.** That is [#10](https://github.com/ar4mirez/spinel/issues/10),
-  and it is what `Classes::serial(id)` now exists to be guarded against. Nothing reads it yet.
+- **Inline caches at call sites.** That is [#169](https://github.com/ar4mirez/spinel/issues/169),
+  filed by this slice — `docs/engine.md` described the side table and the code comments
+  pointed at #10, which is the closed *bytecode* slice. #10 did create `Iseq::call_sites`;
+  it did not create the per-heap table that memoises a target against a serial, and nothing
+  tracked that. `Classes::serial(id)` now exists to be guarded against. Nothing reads it yet.
 - **Method visibility.** `respond_to?` inherits `method_defined?`'s missing `private`
   handling ([#161](https://github.com/ar4mirez/spinel/issues/161)) and ignores its second
   argument, because there is nothing yet for it to select.
@@ -238,11 +241,13 @@ VM that will run programs longer than it loads them.
    the serial and cache so the walk stops touching 90 scattered `Entry` structs, which is
    real work for a load-time-only win. Worth doing when boot shows up in a profile that is
    not the spec harness.
-2. **Nothing reads `serial(id)` yet.** It exists for [#10](https://github.com/ar4mirez/spinel/issues/10),
+2. **Nothing reads `serial(id)` yet.** It exists for [#169](https://github.com/ar4mirez/spinel/issues/169),
    and until that lands, the per-class serial is exercised only by tests — the *cache*
-   precision is what the benchmark measures. If #10 changes shape, the serial should be
+   precision is what the benchmark measures. If #169 changes shape, the serial should be
    re-litigated with it rather than treated as settled.
 3. **An `Error::NoDispatch` for an undefined method is not rescuable.** `begin; obj.nope;
    rescue NoMethodError; end` does not catch it, where CRuby does. Pre-existing on `main`,
-   unrelated to this slice, and worth its own issue — it is why the invalidation cases in
-   `eval.txt` are written with `respond_to?` rather than a rescue.
+   unrelated to this slice, filed as [#170](https://github.com/ar4mirez/spinel/issues/170)
+   — it is why the invalidation cases in `eval.txt` are written with `respond_to?` rather
+   than a rescue. It is also the corpus's top blocker: the two largest blocking reasons are
+   both a `NoMethodError` raised out of a spec helper, 1,606 examples between them.
