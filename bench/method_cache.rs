@@ -23,9 +23,11 @@
 
 use std::time::{Duration, Instant};
 
+use spinel_vm::bytecode::{BlockRef, CallSite, Iseq};
+use spinel_vm::callcache::CallCaches;
 use spinel_vm::shared::symbols;
 use spinel_vm::value::Value;
-use spinel_vm::{Builtin, ClassId, Heap, SymbolId};
+use spinel_vm::{Builtin, ClassId, Heap, SymbolId, compile, interp};
 
 /// Min of five runs of `iterations`, rather than a mean.
 ///
@@ -45,6 +47,30 @@ fn time(iterations: u32, mut body: impl FnMut()) -> Duration {
 }
 
 const N: u32 = 1_000_000;
+
+/// An `Iseq` with exactly one call site and nothing else. `CallCaches` counts
+/// sites and never reads one, so this is the whole of what it needs.
+fn one_call_site() -> std::sync::Arc<Iseq> {
+    std::sync::Arc::new(Iseq {
+        call_sites: vec![CallSite {
+            name: 0,
+            argc: 0,
+            splats: Vec::new(),
+            keywords: Vec::new(),
+            block: BlockRef::None,
+            implicit_self: false,
+        }],
+        ..Iseq::default()
+    })
+}
+
+/// Parse and compile once, outside the timed loop: this measures running Ruby,
+/// not compiling it.
+fn compiled(source: &str) -> Iseq {
+    let parsed = spinel_parse::parse(source.as_bytes());
+    assert!(parsed.errors.is_empty(), "the benchmark source parses");
+    compile::program(&parsed.program).expect("the benchmark source compiles")
+}
 
 /// One dispatch measurement: the cache in front of the walk, and the walk.
 fn dispatch(heap: &mut Heap, what: &str, id: ClassId, name: SymbolId) {
@@ -175,6 +201,96 @@ fn main() {
         println!("\ninvalidation, {count} classes in the heap");
         println!("  define on Object   {root:>8.1?}   (every class downstream)");
         println!("  define on a leaf   {leaf:>8.1?}   (nothing downstream)");
+    }
+
+    // The inline cache, in front of the method cache — #169. The number to beat
+    // is the *cached* lookup above, not the walk: the per-class cache already
+    // turns every chain depth into one hash probe, so an inline cache is only
+    // worth its guard if two integer compares beat that probe.
+
+    {
+        let mut scope = heap.scope();
+        let serial = scope.classes().serial(deep);
+        let method = scope
+            .classes_mut()
+            .lookup(deep, far)
+            .expect("`far` is on Object");
+
+        let mut caches = CallCaches::new();
+        let slot = caches.base(&one_call_site());
+        caches.fill(slot, deep, serial, method);
+
+        let probe = {
+            let classes = scope.classes_mut();
+            time(N, || {
+                std::hint::black_box(classes.lookup(std::hint::black_box(deep), far));
+            })
+        };
+        // The serial read is included because `dispatch` pays it: the guard is
+        // "this class, and this class has not changed", and the second half has
+        // to be fetched before it can be compared.
+        let guard = {
+            let classes = scope.classes();
+            time(N, || {
+                let now = classes.serial(std::hint::black_box(deep));
+                std::hint::black_box(caches.get(slot, std::hint::black_box(deep), now));
+            })
+        };
+        // A guard that fails costs the compare *and* the probe, which is what a
+        // polymorphic site pays on every call.
+        let missed = {
+            let classes = scope.classes();
+            time(N, || {
+                let now = classes.serial(std::hint::black_box(shallow));
+                std::hint::black_box(caches.get(slot, std::hint::black_box(shallow), now));
+            })
+        };
+
+        println!("\ninline cache vs the method cache it fronts");
+        println!("  cached lookup (hash probe)   {probe:>8.1?}");
+        println!(
+            "  inline cache hit             {guard:>8.1?}   ({:.1}x)",
+            probe.as_secs_f64() / guard.as_secs_f64().max(f64::MIN_POSITIVE)
+        );
+        println!("  inline cache miss (guard)    {missed:>8.1?}   (then pays the probe too)");
+    }
+
+    // End to end: the same send, through the interpreter, in a Ruby loop. The
+    // micro numbers above are the two paths; this is what the difference is
+    // worth once frame push, argument binding and the loop itself are in the
+    // way. Compare against the same figure on the parent commit.
+
+    {
+        const E: u32 = 200;
+        let iseq = compiled(
+            "
+            class C
+              def m; 1; end
+            end
+            def through(c); c.m; end
+            c = C.new
+            total = 0
+            i = 0
+            while i < 2000
+              total = total + through(c)
+              i = i + 1
+            end
+            total
+            ",
+        );
+        let elapsed = time(E, || {
+            let mut heap = Heap::new();
+            let mut frame = interp::Frame::new(iseq.locals.len());
+            let mut scope = heap.scope();
+            scope.bootstrap();
+            spinel_core::boot(&mut scope);
+            std::hint::black_box(
+                interp::eval_in(&mut scope, &mut frame, &iseq).expect("the loop runs"),
+            );
+        });
+        // Boot dominates a run this short, so the loop is reported net of it.
+        println!("\n2000 sends through one call site, end to end");
+        println!("  run (boot included)  {elapsed:>8.1?}");
     }
 
     // Boot: several hundred definitions, most of them on `Object` or `Kernel`.

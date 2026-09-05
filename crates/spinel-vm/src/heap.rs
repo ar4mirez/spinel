@@ -202,6 +202,10 @@ pub struct Heap {
     /// never leaves the heap that minted it.
     shapes: Shapes,
     definitions: crate::method::Definitions,
+    /// This heap's inline caches, indexed by call-site id. Not a root
+    /// source: an entry is two integers and a `Method`, whose body is a
+    /// fixnum definition id the collector never traces.
+    call_caches: crate::callcache::CallCaches,
     regexps: crate::regexp::Regexps,
     /// The `MatchData` the last successful match produced, which is what `$~`
     /// and `$1` read.
@@ -246,6 +250,7 @@ impl Heap {
             classes: Classes::new(),
             shapes: Shapes::new(),
             definitions: crate::method::Definitions::new(),
+            call_caches: crate::callcache::CallCaches::new(),
             regexps: crate::regexp::Regexps::new(),
             last_match: Value::NIL,
         }
@@ -284,6 +289,16 @@ impl Heap {
 
     pub fn definitions_mut(&mut self) -> &mut crate::method::Definitions {
         &mut self.definitions
+    }
+
+    /// What each call site last resolved to. Read on every `Send`, so the
+    /// accessors are the whole interface: see [`crate::callcache`].
+    pub fn call_caches(&self) -> &crate::callcache::CallCaches {
+        &self.call_caches
+    }
+
+    pub fn call_caches_mut(&mut self) -> &mut crate::callcache::CallCaches {
+        &mut self.call_caches
     }
 
     pub fn classes_mut(&mut self) -> &mut Classes {
@@ -707,6 +722,15 @@ impl<'h> HandleScope<'h> {
     /// The method bodies this heap's class table points at.
     pub fn definitions(&self) -> &crate::method::Definitions {
         self.heap.definitions()
+    }
+
+    /// What each call site last resolved to. See [`crate::callcache`].
+    pub fn call_caches(&self) -> &crate::callcache::CallCaches {
+        self.heap.call_caches()
+    }
+
+    pub fn call_caches_mut(&mut self) -> &mut crate::callcache::CallCaches {
+        self.heap.call_caches_mut()
     }
 
     pub fn definitions_mut(&mut self) -> &mut crate::method::Definitions {
