@@ -12,6 +12,10 @@ class Float
     to_s
   end
 
+  def eql?(other)
+    other.is_a?(Float) && self == other
+  end
+
   def to_f
     self
   end

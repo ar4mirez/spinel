@@ -16,6 +16,10 @@ class String
     raise TypeError, "no implicit conversion of " + other.class.name + " into String"
   end
 
+  def eql?(other)
+    other.is_a?(String) && self == other
+  end
+
   def to_str
     self
   end

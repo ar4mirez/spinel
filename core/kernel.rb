@@ -25,6 +25,14 @@ module Kernel
     self.class.method_defined?(name, include_all)
   end
 
+  # `eql?` is `hash`'s partner: two objects that are `eql?` must have the same
+  # `hash`, and a `Hash` looks a key up by both. The default is identity, and
+  # the classes whose `==` is by value override it below — with a class check,
+  # because `1.eql?(1.0)` is false where `1 == 1.0` is true.
+  def eql?(other)
+    equal?(other)
+  end
+
   def itself
     self
   end

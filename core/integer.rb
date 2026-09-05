@@ -75,6 +75,11 @@ class Integer
     self
   end
 
+  # `1.eql?(1.0)` is false: `eql?` does not convert, and `hash` must agree.
+  def eql?(other)
+    other.is_a?(Integer) && self == other
+  end
+
   def to_int
     self
   end

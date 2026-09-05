@@ -260,6 +260,10 @@ class Array
     out
   end
 
+  def eql?(other)
+    other.is_a?(Array) && self == other
+  end
+
   def to_a
     self
   end
