@@ -85,9 +85,9 @@ Landed in [#7](https://github.com/ar4mirez/spinel/issues/7). The object header i
 | 8 | `len` | `Value` slots, or bytes |
 | 12 | flags | mark bit; frozen and ractor-shareable join it with #8 |
 | 13 | payload kind | slots or bytes — whether the collector descends |
-| 14 | reserved | #8's shape id |
+| 14 | shape id | which instance variables the object holds, and where |
 
-Instance variables live in a slots array indexed by the shape; the shape tree is per heap.
+Instance variables live in a slots array indexed by the shape; the shape tree is per heap. Landed in [#151](https://github.com/ar4mirez/spinel/issues/151).
 
 Cells come from 64 KiB blocks, one size class per block: 32, 64, 128, 256, and 512 bytes, holding 2, 6, 14, 30, and 62 slots. Anything larger gets its own allocation in the large-object list. Sweeping rebuilds every free list from the unmarked cells, so a dead object and a cell that has never been used take the same path; blocks are zeroed on arrival so that an unused cell reads as unmarked rather than as uninitialised memory.
 
@@ -134,7 +134,15 @@ These rules are documented nowhere and read wrong from `variable.c`, so like the
 
 ## Shapes and inline caches
 
-Instance variables use hidden-class shapes (V8, YJIT). Method lookup uses a per-class method table plus a per-heap global cache keyed by `(class, method symbol)`, landed with #8; misses are cached too, so a `method_missing` dispatch does not re-walk the chain per call. Invalidation is a serial that bumps on any method definition, removal, `include`, or `prepend`. Today that serial is one per class *table* rather than one per class: correct, and coarser than it needs to be — a definition anywhere evicts every cached lookup. Per-class serials that bump on a definition in the class or its ancestors need a subclass list and a descendant walk per definition, and the benchmark that would justify writing them arrives with the JIT.
+Instance variables use hidden-class shapes (V8, YJIT), landed in [#151](https://github.com/ar4mirez/spinel/issues/151). A shape is a path from a per-heap root: each edge adds one name at one index, so two objects built the same way meet at one node and carry the same `u16` in the header's reserved bytes, while `@a` then `@b` and `@b` then `@a` are two shapes. That divergence is the mechanism, not a wart — it is what makes an index constant for every object wearing a shape.
+
+Where the values live is the same answer `Array` gives for its elements, for the same reason: a heap cell cannot grow, so an object that held its ivars directly could gain the fourth only by becoming a different cell, and Ruby would see `equal?` change. Slot 0 of an ivar-capable object points at a classless storage object that is *replaced* when it grows; the object's own address never moves, and the collector needs no new root because it already descends into slots.
+
+A shape id of zero is not the root — it means the object cannot hold instance variables at all. Slot 0 of an `Array` is its elements and slot 0 of a `Proc` is its iseq, so without a value that means "do not look", `@x = 1` on an array would overwrite the array. Those representations refuse an ivar with a reason naming the class rather than corrupting themselves; giving them one is a slot per object, decided when a workload asks.
+
+Three fixed-slot schemes were deleted rather than left beside it: a class object carries its table id as the hidden `@__id__`, an exception's message and backtrace are `@message` and `@backtrace`, and a `Hash`'s association list, default and default-is-a-block are three ordinary ivars that `core/hash.rb` reads directly. `attr_accessor` addresses a *name* for the same reason — which slot an ivar lands at is the shape's business, so a reader built on a fixed slot would be right for a class with one ivar and wrong for its second.
+
+Method lookup uses a per-class method table plus a per-heap global cache keyed by `(class, method symbol)`, landed with #8; misses are cached too, so a `method_missing` dispatch does not re-walk the chain per call. Invalidation is a serial that bumps on any method definition, removal, `include`, or `prepend`. Today that serial is one per class *table* rather than one per class: correct, and coarser than it needs to be — a definition anywhere evicts every cached lookup. Per-class serials that bump on a definition in the class or its ancestors need a subclass list and a descendant walk per definition, and the benchmark that would justify writing them arrives with the JIT.
 
 Call sites carry a monomorphic inline cache `(class serial, target)`. Because bytecode is shared across Ractors, inline caches do not live in the bytecode; each heap owns a side table indexed by call-site id. Class serials are atomic integers on the shared class object so every heap sees an invalidation. These are day-one features because retrofitting them into a VM that assumed direct table lookups is painful.
 
@@ -179,7 +187,7 @@ As of [#15](https://github.com/ar4mirez/spinel/issues/15) step 3 compiles `core/
 
 `// ponytail:` that cache is `core.image` minus the serialisation. The ceiling is one parse and compile per process; the upgrade is a `build.rs` that serialises the `Iseq`s into the binary, worth writing when that parse shows up in a benchmark.
 
-**Primitives are installed under their Ruby names**, on the class that owns them, rather than under a hidden `Primitive` module. There is no `Primitive` module yet: it would need a name, a bootstrap entry and a documented surface before anything needed one, and every primitive so far *is* the Ruby method — `Array#[]` is the slot read, `String#+` is the allocation. The two that are not — `Kernel#__write__`, and `Hash`'s three slot accessors — carry `__` names and a comment naming what replaces them (`IO`, and #151's shapes).
+**Primitives are installed under their Ruby names**, on the class that owns them, rather than under a hidden `Primitive` module. There is no `Primitive` module yet: it would need a name, a bootstrap entry and a documented surface before anything needed one, and every primitive so far *is* the Ruby method — `Array#[]` is the slot read, `String#+` is the allocation. The one that is not — `Kernel#__write__` — carries a `__` name and a comment naming what replaces it (`IO`). `Hash`'s three slot accessors were the other, and #151 deleted them: it reads its own instance variables now.
 
 **`Array` is two slots: storage and length.** A heap cell cannot grow, so an array whose elements live in its own slots could only grow by becoming a different object and Ruby would see the identity change. The elements live in a separate `Payload::Slots` object instead, and growing replaces *that*; the `Array`'s own address never moves. This is `RARRAY`'s pointer and length, for the same reason. `String` has no such indirection yet, which is why `String#<<`, `#concat` and `#replace` are absent rather than approximated — a mutable string is the same change applied to a byte payload.
 

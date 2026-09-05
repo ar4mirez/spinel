@@ -1505,14 +1505,17 @@ impl Lower {
 
         let rest = p.rest().map(|n| {
             let span = span_of(&n.location());
+            // `|a,|` and `def f(*)` both land here with nothing to name, and
+            // they do not mean the same thing — see `RestParam::implicit`.
+            let implicit = n.as_implicit_rest_node().is_some();
             RestParam {
                 span,
-                // `|a,|` and `def f(*)` both land here with nothing to name.
                 name: n
                     .as_rest_parameter_node()
                     .and_then(|r| r.name())
                     .as_ref()
                     .map(ident),
+                implicit,
             }
         });
 

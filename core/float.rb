@@ -40,8 +40,19 @@ class Float
     false
   end
 
+  # Ruby asks a non-Numeric to `coerce` itself before giving up, which is how
+  # a user-defined numeric type compares against a Float at all. A misbehaving
+  # `coerce` is a TypeError with Ruby's own wording, measured rather than
+  # guessed — `comparison_spec.rb` asserts on the text.
   def <=>(other)
-    return nil unless other.is_a?(Numeric)
+    unless other.is_a?(Numeric)
+      return nil unless other.respond_to?(:coerce)
+      pair = other.coerce(self)
+      unless pair.is_a?(Array) && pair.size == 2
+        raise TypeError, "coerce must return [x, y]"
+      end
+      return pair[0] <=> pair[1]
+    end
     return -1 if self < other
     return 1 if self > other
     0

@@ -1069,14 +1069,18 @@ impl fmt::Debug for Classes {
     }
 }
 
-/// A class object's slots. One for now: the id, so that an instance's header
-/// class pointer can be resolved back to a table entry.
+/// The hidden instance variable a class object carries its table id in, so
+/// that an instance's header class pointer can be resolved back to a table
+/// entry.
 ///
-// ponytail: an ivar in a fixed slot, because shapes are not here yet. When #151
-// lands the shape tree, this becomes an ordinary hidden instance variable and
-// `class_of` reads it through the shape.
-const SLOT_ID: usize = 0;
-const CLASS_SLOTS: u32 = 1;
+/// An ordinary ivar since #151, read through the shape like any other. It is
+/// the first one every class object receives, so the walk behind
+/// [`HandleScope::class_of`] is one link on the dispatch path.
+///
+/// `@__id__` is a legal name for Ruby code to use, so reading one is not proof
+/// of anything: [`HandleScope::class_id_of`] still round-trips the answer
+/// through [`Classes::object`] before believing it.
+const CLASS_ID_IVAR: &str = "@__id__";
 
 impl<'h> HandleScope<'h> {
     /// Create the classes `docs/engine.md`'s boot order step 1 asks for.
@@ -1206,7 +1210,7 @@ impl<'h> HandleScope<'h> {
             .then(|| scope.classes().object(meta.id()))
             .map(|object| scope.root(object));
 
-        let handle = scope.alloc(meta, Payload::Slots, CLASS_SLOTS);
+        let handle = crate::interp::alloc_ivar_object(&mut scope, meta);
         let object = scope.get(handle);
         // No allocation between here and the table entry, so the object cannot be
         // collected before the table is rooting it.
@@ -1214,7 +1218,13 @@ impl<'h> HandleScope<'h> {
             .classes_mut()
             .define(object, name, kind, superclass, is_singleton);
         let slot = Value::fixnum(i64::from(id.0)).expect("a class id fits in a fixnum");
-        scope.set_slot(handle, SLOT_ID, slot);
+        crate::interp::ivar_set(
+            &mut scope,
+            object,
+            crate::interp::symbol(CLASS_ID_IVAR),
+            slot,
+        )
+        .expect("a fresh class object is unfrozen and holds instance variables");
         id
     }
 
@@ -1294,15 +1304,18 @@ impl<'h> HandleScope<'h> {
     /// this an instance of"; this answers "is this a class, and which one" —
     /// the question `A::X`, `class A::B`, and `def self.foo` all ask.
     ///
-    /// A class object is exactly one `Slots` cell holding its own id, so the
-    /// check is a shape test plus a round-trip through [`Classes::object`]. The
-    /// round-trip is what rules out an ordinary one-slot object whose slot
-    /// happens to hold a small integer.
+    /// A class object holds its own id in [`CLASS_ID_IVAR`], so the check is
+    /// that ivar plus a round-trip through [`Classes::object`]. The round-trip
+    /// is what rules out an ordinary object that Ruby code gave an `@__id__`
+    /// holding a small integer.
     pub fn class_id_of(&mut self, handle: Handle<'h>) -> Option<ClassId> {
-        if self.payload(handle) != Payload::Slots || self.len(handle) != CLASS_SLOTS {
+        if self.payload(handle) != Payload::Slots {
             return None;
         }
-        let id = self.slot(handle, SLOT_ID).as_fixnum()?;
+        let object = self.get(handle);
+        let id = crate::interp::ivar_get(self, object, crate::interp::symbol(CLASS_ID_IVAR))
+            .ok()?
+            .as_fixnum()?;
         let id = ClassId(u32::try_from(id).ok()?);
         let value = self.get(handle);
         (id.index() < self.classes().len() && self.classes().object(id) == value).then_some(id)
@@ -1315,10 +1328,11 @@ impl<'h> HandleScope<'h> {
         // `expect` rather than `?`: `None` here would mean "this object has no
         // class", and an object whose header points at something that is not a
         // class is a bug in the caller, not an object without one.
-        let id = inner
-            .slot(class, SLOT_ID)
+        let class = inner.get(class);
+        let id = crate::interp::ivar_get(&mut inner, class, crate::interp::symbol(CLASS_ID_IVAR))
+            .expect("a class object holds instance variables")
             .as_fixnum()
-            .expect("a class object carries its id in slot 0");
+            .expect("a class object carries its id in `@__id__`");
         Some(ClassId(
             u32::try_from(id).expect("a class id was written from a `ClassId`"),
         ))

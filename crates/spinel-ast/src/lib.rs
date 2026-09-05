@@ -624,6 +624,12 @@ pub struct RestParam {
     pub span: Span,
     /// `None` is the anonymous `*`.
     pub name: Option<Name>,
+    /// True for the trailing comma in `|a,|`, which Prism spells
+    /// `ImplicitRestNode`. It is not a rest parameter: it turns off a block's
+    /// auto-splat while leaving the arity exactly what the named parameters
+    /// say, so `lambda { |a,| }.call(1, 2)` is an `ArgumentError` where
+    /// `lambda { |a, *| }.call(1, 2)` is not.
+    pub implicit: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -985,6 +991,7 @@ mod tests {
             rest: Some(RestParam {
                 span: sp(),
                 name: Some(n("rest")),
+                implicit: false,
             }),
             posts: vec![],
             keywords: vec![KeywordParam {

@@ -1,7 +1,8 @@
 # Hash.
 #
-# `Class#allocate` gives a Hash one slot holding an association list — an Array
-# of `[key, value]` pairs — and every method here is a linear walk over it.
+# `Class#allocate` gives a Hash three instance variables: `@pairs`, an
+# association list of `[key, value]` Arrays, plus the default and whether it is
+# a block. Every method here is a linear walk over `@pairs`.
 #
 # ponytail: O(n) lookup. A real Hash is an open-addressed table keyed by
 # `#hash`, and it is worth writing when a spec can construct a hash to measure:
@@ -21,21 +22,21 @@ class Hash
     if default.size > 1
       raise ArgumentError, "wrong number of arguments (given " + default.size.to_s + ", expected 0..1)"
     end
-    __set_default__(blk.nil? ? default[0] : blk)
-    __set_default_is_proc__(!blk.nil?)
+    @default = blk.nil? ? default[0] : blk
+    @default_is_proc = !blk.nil?
     self
   end
 
   def default
-    __default_is_proc__ ? nil : __default__
+    @default_is_proc ? nil : @default
   end
 
   def default_proc
-    __default_is_proc__ ? __default__ : nil
+    @default_is_proc ? @default : nil
   end
 
   def size
-    __pairs__.size
+    @pairs.size
   end
 
   def length
@@ -47,7 +48,7 @@ class Hash
   end
 
   def __index__(key)
-    pairs = __pairs__
+    pairs = @pairs
     i = 0
     while i < pairs.size
       return i if pairs[i][0] == key
@@ -58,9 +59,9 @@ class Hash
 
   def [](key)
     at = __index__(key)
-    return __pairs__[at][1] unless at.nil?
-    return __default__.call(self, key) if __default_is_proc__
-    __default__
+    return @pairs[at][1] unless at.nil?
+    return @default.call(self, key) if @default_is_proc
+    @default
   end
 
   # `fetch(k, nil)` answers nil; only `fetch(k)` with no block raises. So this
@@ -68,7 +69,7 @@ class Hash
   def fetch(*fallback)
     key = fallback[0]
     at = __index__(key)
-    return __pairs__[at][1] unless at.nil?
+    return @pairs[at][1] unless at.nil?
     return yield(key) if block_given?
     return fallback[1] if fallback.size > 1
     raise KeyError, "key not found: " + key.inspect
@@ -77,9 +78,9 @@ class Hash
   def []=(key, value)
     at = __index__(key)
     if at.nil?
-      __pairs__.push([key, value])
+      @pairs.push([key, value])
     else
-      __pairs__[at][1] = value
+      @pairs[at][1] = value
     end
     value
   end
@@ -109,20 +110,20 @@ class Hash
   end
 
   def keys
-    __pairs__.map { |pair| pair[0] }
+    @pairs.map { |pair| pair[0] }
   end
 
   def values
-    __pairs__.map { |pair| pair[1] }
+    @pairs.map { |pair| pair[1] }
   end
 
   def each
-    __pairs__.each { |pair| yield pair[0], pair[1] }
+    @pairs.each { |pair| yield pair[0], pair[1] }
     self
   end
 
   def each_pair
-    __pairs__.each { |pair| yield pair[0], pair[1] }
+    @pairs.each { |pair| yield pair[0], pair[1] }
     self
   end
 
@@ -139,7 +140,7 @@ class Hash
   def delete(key)
     at = __index__(key)
     return nil if at.nil?
-    pairs = __pairs__
+    pairs = @pairs
     gone = pairs[at][1]
     kept = []
     i = 0
@@ -147,18 +148,18 @@ class Hash
       kept.push(pairs[i]) unless i == at
       i = i + 1
     end
-    __set_pairs__(kept)
+    @pairs = kept
     gone
   end
 
   def to_a
-    __pairs__.map { |pair| [pair[0], pair[1]] }
+    @pairs.map { |pair| [pair[0], pair[1]] }
   end
 
   def inspect
     return "{}" if empty?
     out = "{"
-    pairs = __pairs__
+    pairs = @pairs
     i = 0
     while i < pairs.size
       out = out + pairs[i][0].inspect + " => " + pairs[i][1].inspect
