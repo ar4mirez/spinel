@@ -37,6 +37,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 use crate::heap::{Handle, HandleScope, Payload};
+use crate::shared::symbols::class_id_ivar;
 use crate::value::{SymbolId, Value};
 
 /// An index into one heap's [`Classes`] table.
@@ -1069,29 +1070,19 @@ impl fmt::Debug for Classes {
     }
 }
 
-/// The hidden instance variable a class object carries its table id in, so
-/// that an instance's header class pointer can be resolved back to a table
-/// entry.
-///
-/// An ordinary ivar since #151, read through the shape like any other. It is
-/// the first one every class object receives, so the walk behind
-/// [`HandleScope::class_of`] is one link on the dispatch path.
-///
-/// `@__id__` is a legal name for Ruby code to use, so reading one is not proof
-/// of anything: [`HandleScope::class_id_of`] still round-trips the answer
-/// through [`Classes::object`] before believing it.
-const CLASS_ID_IVAR: &str = "@__id__";
-
-/// `CLASS_ID_IVAR` interned once rather than per dispatch.
-///
-/// `class_of` runs on every method call, and `symbols::intern` is a read lock
-/// plus a hash lookup on a process-global table. Interning the same six
-/// characters on the hot path measured as ~4% of a tight dispatch loop, which
-/// is the whole cost of moving this id from a fixed slot to an ivar.
-fn class_id_ivar() -> SymbolId {
-    static ID: std::sync::OnceLock<SymbolId> = std::sync::OnceLock::new();
-    *ID.get_or_init(|| crate::interp::symbol(CLASS_ID_IVAR))
-}
+// A class object carries its table id in the hidden instance variable
+// `@__id__`, so that an instance's header class pointer can be resolved back to
+// a table entry. An ordinary ivar since #151, read through the shape like any
+// other — and the first one every class object receives, so the walk behind
+// `HandleScope::class_of` is one link on the dispatch path.
+//
+// `shared::symbols::class_id_ivar` owns both the name and the id and memoises
+// it, because `class_of` asks on every method call and process-global state
+// belongs in that directory.
+//
+// `@__id__` is a legal name for Ruby code to use, so reading one is not proof of
+// anything: `class_id_of` still round-trips the answer through
+// `Classes::object` before believing it.
 
 impl<'h> HandleScope<'h> {
     /// Create the classes `docs/engine.md`'s boot order step 1 asks for.
@@ -1310,7 +1301,7 @@ impl<'h> HandleScope<'h> {
     /// this an instance of"; this answers "is this a class, and which one" —
     /// the question `A::X`, `class A::B`, and `def self.foo` all ask.
     ///
-    /// A class object holds its own id in [`CLASS_ID_IVAR`], so the check is
+    /// A class object holds its own id in `@__id__`, so the check is
     /// that ivar plus a round-trip through [`Classes::object`]. The round-trip
     /// is what rules out an ordinary object that Ruby code gave an `@__id__`
     /// holding a small integer.
