@@ -22,7 +22,7 @@ Every bullet below is tracked as a GitHub issue, one milestone per phase: [miles
 - Exceptions, `ensure`, `retry`, `throw/catch`, non-local `break`/`return`. *Check:* `language/{rescue,ensure,throw,break,return,next,redo}_spec.rb`.
 - Constants, modules, `class`/`module` bodies, `self`, singleton classes, `defined?`. *Check:* no example in the corpus is blocked on a constant, a constant path, a class or module body, `defined?`, or a singleton method definition; `tests/eval.txt` holds the lookup order against CRuby.
 - Regex engine decision and integration (engine.md, "Regex"), `Regexp` and `MatchData` basics, `=~`, `case` with regex. *Check:* `language/regexp/`. **Done:** `spinel-regex`, this workspace's own engine; 0 to 152 of 283 passing, and `scripts/regexp-oracle.rb` keeps the dialect measured against CRuby.
-- `core/kernel.rb`, `core/object.rb`, minimal `Integer`, `String`, `Array`, `Hash`, `Symbol` in Ruby, enough to run the specs above. *Check:* `spinel run hello.rb` and the phase's spec directories. **Done:** `core/*.rb` loaded by `spinel-core`, a growable two-slot `Array`, `Class#allocate` per class, and `spinel run`; `language/` 545 to 619, the corpus 713 to 1,111.
+- `core/kernel.rb`, `core/object.rb`, minimal `Integer`, `String`, `Array`, `Hash`, `Symbol` in Ruby, enough to run the specs above. *Check:* `spinel run hello.rb` and the phase's spec directories. **Done:** `core/*.rb` loaded by `spinel-core`, a growable two-slot `Array`, `Class#allocate` per class, and `spinel run`; `language/` 545 to 619, the corpus 713 to 1,112.
 
 **Milestone:** `language/` passes above 90%.
 

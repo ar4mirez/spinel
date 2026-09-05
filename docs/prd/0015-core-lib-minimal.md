@@ -79,6 +79,7 @@ engine.md's rule is that a primitive is raw memory, allocation, encoding tables,
 | `Object#object_id` | the object's address |
 | `Object#hash` | reads raw bytes and raw slots |
 | `Module#ancestors`, `#method_defined?`, `Class#superclass` | reads the class table |
+| `Module#include`, `#prepend` | writes the ancestor chain in the class table |
 | `Float#to_s` | shortest round-tripping decimal is an algorithm, not a format |
 | `Kernel#__write__` | a syscall |
 
@@ -128,7 +129,7 @@ The spec delta:
 
 ```
 language/    545 -> 619 passed   (2145 -> 2067 blocked)
-corpus       713 -> 1111 passed  (23056 -> 22653 blocked)
+corpus       713 -> 1112 passed  (23056 -> 22652 blocked)
 ```
 
 Per directory, every one of which was at zero before this slice:
@@ -139,13 +140,15 @@ core/string      43    core/float       34    core/module      27    core/symbol
 core/proc        16    core/exception    9    core/hash         9
 ```
 
-`scripts/verify-passes.rb` re-ran all 1,111 of those passes on ruby 4.0.6 and all agree, so none of them is a pass Spinel had no right to.
+`scripts/verify-passes.rb` re-ran all 1,112 of those passes on ruby 4.0.6 and all agree, so none of them is a pass Spinel had no right to.
 
 ### Reflection was the gap the numbers did not show
 
 `language/` moved to 619 with `Kernel#is_a?`, `kind_of?`, `respond_to?`, `Module#===` and `Module#<` all *dead*: each is written in Ruby against `Module#ancestors` or `#method_defined?`, and neither existed. Nothing failed, because a missing method is reported blocked — the specs that would have caught it were blocked on something else first. It was found by running a handful of expressions through `spinel run` and diffing against CRuby, which is the check the spec numbers cannot be.
 
-`Module#ancestors`, `Class#superclass`, `Module#method_defined?` and `Object#hash` are the four primitives that answer it, and they took the corpus from 1,023 to 1,111, with `eql?` — `hash`'s partner, and the other half of what a real `Hash` keys on. The same pass then found four wrong answers in code the specs did not yet reach: `Hash#fetch(k, nil)` raised instead of answering nil, `1 <=> 1.5` was nil instead of -1, `BasicObject#!` asked the object's own `==` instead of testing identity, and `Array#initialize` appended where Ruby replaces.
+`Module#ancestors`, `Class#superclass`, `Module#method_defined?` and `Object#hash` are the four primitives that answer it, and they took the corpus from 1,023 to 1,112, with `eql?` — `hash`'s partner, and the other half of what a real `Hash` keys on. A second sweep over the same surface found `Module#include` missing, which made `core/comparable.rb` **unreachable**: `include Comparable` is how every mixin in Ruby is used, so the file shipped as code nothing could call. Adding it moves the corpus by one example — `core/comparable/`'s specs are blocked on fixture files that need `require` (#39) — and that is exactly why a pass count never surfaced it.
+
+The same pass then found four wrong answers in code the specs did not yet reach: `Hash#fetch(k, nil)` raised instead of answering nil, `1 <=> 1.5` was nil instead of -1, `BasicObject#!` asked the object's own `==` instead of testing identity, and `Array#initialize` appended where Ruby replaces.
 
 Making `respond_to?` answer also turned five refusals into failures, all of them real: `Array.new([1,2])` did not replace the receiver's contents, `Array.new(a, x)` raised `ArgumentError` where Ruby raises `TypeError`, `Array#shift` took any number of arguments, `Array#min`/`#max` ignored a comparison block, and `Array.new(n) { break :x }` answered the array rather than `:x` — that last one a `Class#new` bug, where the pre-placed object survived a `break` that named the frame.
 
