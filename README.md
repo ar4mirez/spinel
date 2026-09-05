@@ -51,4 +51,4 @@ CRuby carries thirty years of decisions that a new engine does not have to: a C 
 
 ## Status
 
-Phase 0. Progress is measured one way: ruby/spec pass counts per directory, published in `bench/spec-status.md` by CI. The corpus is in the tree and `scripts/spec.sh [dir]` counts it today; nothing passes yet, because there is no VM to run it.
+Phase 1. Progress is measured one way: ruby/spec pass counts per directory, published in `bench/spec-status.md` by CI. The corpus is in the tree and `scripts/spec.sh [dir]` counts it. There is a VM now — bytecode, a calling convention, classes and constants, and the exception unwinder — and **489 of 25,624 examples pass, 391 of them in `language/`**. Nothing is marked as an expected failure: an example either passes, fails, or names the construct that blocks it, and `scripts/verify-passes.rb` re-runs every claimed pass on a real Ruby so that a pass means what it says.

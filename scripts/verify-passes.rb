@@ -42,10 +42,56 @@ class ShouldProxy
     held = (@value == other)
     held = !held if @negated
     unless held
-      raise SpecFailure, "#{@value.inspect} should#{@negated ? " not" : ""} equal #{other.inspect}"
+      ::Kernel.raise SpecFailure,
+                     "#{@value.inspect} should#{@negated ? " not" : ""} equal #{other.inspect}"
     end
 
     true
+  end
+
+  # `-> { ... }.should.raise(ArgumentError)` — mspec's spelling, and the matcher
+  # `spec/harness` learned in #12. The two must agree about what an example
+  # asserts: a harness that grows a matcher this script does not have is a
+  # harness whose new passes nobody checks, which is the whole point of the file.
+  #
+  # `::Kernel.raise` throughout, because `raise` is this method's own name here.
+  def raise(*expected)
+    klass = expected.first
+    raised = nil
+    begin
+      @value.call
+    rescue Exception => e # rubocop:disable Lint/RescueException
+      raised = e
+    end
+
+    if @negated
+      unless raised.nil?
+        ::Kernel.raise SpecFailure, "should not have raised, but raised #{raised.class}"
+      end
+      return true
+    end
+
+    if raised.nil?
+      ::Kernel.raise SpecFailure, "should raise #{klass || "an exception"}, raised nothing"
+    end
+    if klass && !raised.is_a?(klass)
+      ::Kernel.raise SpecFailure, "should raise #{klass}, raised #{raised.class}"
+    end
+
+    true
+  end
+end
+
+# mspec's recorder, which `spec/harness` now provides too. This is the real one:
+# if an example depends on `<<` mutating the array `recorded` already handed out
+# — which the harness's copy-on-append version cannot do — it fails here, which
+# is exactly the check that makes that shortcut safe to have taken.
+class ScratchPad
+  class << self
+    def clear = @record = nil
+    def record(object) = @record = object
+    def recorded = @record
+    def <<(object) = @record << object
   end
 end
 

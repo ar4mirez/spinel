@@ -34,13 +34,14 @@
 use std::sync::Arc;
 
 use spinel_ast::{
-    Assign, AssignOp, BlockArg, Case, CaseBranches, Expr, ExprKind, If, IntValue, Logical,
-    LogicalOp, Name, ParamList, Params, Program, Span, StrPart, Target, TargetKind, VarRef, While,
+    Assign, AssignOp, Begin, BlockArg, Case, CaseBranches, Expr, ExprKind, If, IntValue, Logical,
+    LogicalOp, Name, ParamList, Params, Program, Rescue, RescueMod, Span, StrPart, Target,
+    TargetKind, VarRef, While,
 };
 
 use crate::bytecode::{
-    BinOp, BlockRef, CallSite, ClassDef, ConstScope, DefKind, Insn, Iseq, Keyword, Literal,
-    Optional, ParamSpec,
+    BinOp, BlockRef, CallSite, CatchEntry, CatchKind, ClassDef, ConstScope, DefKind, Insn, Iseq,
+    Keyword, Literal, Optional, ParamSpec,
 };
 use crate::value::Value;
 
@@ -122,6 +123,15 @@ pub fn declared_locals(statements: &[Expr]) -> Vec<Name> {
 // ---------------------------------------------------------------------------
 
 /// Where `break` and `next` go. Nested loops push and pop these.
+/// A `begin` body a `retry` inside its `rescue` can restart.
+struct Retry {
+    /// Where the protected body starts.
+    body_start: usize,
+    /// The stack depth it starts at, so `retry` can drop whatever a
+    /// half-finished expression left above it.
+    base_depth: usize,
+}
+
 struct Loop {
     /// The stack depth at the top of the loop.
     ///
@@ -136,6 +146,10 @@ struct Loop {
     /// Instruction index `next` jumps to: the predicate of a `while`, the body
     /// of a `begin ... end while`.
     next_target: usize,
+    /// Instruction index `redo` jumps to: the body, always. `redo` re-runs the
+    /// body *without* re-testing the condition, which is the one thing that
+    /// makes it different from `next`.
+    redo_target: usize,
     /// Jump instructions emitted by `break`, patched when the loop's end is
     /// known.
     breaks: Vec<usize>,
@@ -154,6 +168,20 @@ struct Compiler {
     call_sites: Vec<CallSite>,
     definitions: Vec<(u32, u32)>,
     class_defs: Vec<ClassDef>,
+    /// Protected ranges, appended as each `begin` finishes, so an inner one is
+    /// already in the list when its outer one arrives. The unwinder takes the
+    /// first entry covering the program counter, so that order *is* "innermost
+    /// handler wins".
+    catch_table: Vec<CatchEntry>,
+    /// The protected bodies a `retry` can restart, innermost last. Pushed only
+    /// while a `rescue` clause body is being compiled, which is the only place
+    /// Ruby allows the keyword.
+    retries: Vec<Retry>,
+    /// How many `begin`s with an `ensure` are open around the code being
+    /// compiled right now. Zero — the usual case — means a `break` or `next`
+    /// inside a loop is an ordinary jump; anything else has to leave through
+    /// the unwinder so the `ensure` bodies it crosses actually run.
+    open_ensures: usize,
     params: ParamSpec,
     /// A method body starts a new scope; a block body continues the enclosing
     /// one. `GetLocal` with a depth may not cross a barrier.
@@ -181,6 +209,9 @@ impl Compiler {
             call_sites: Vec::new(),
             definitions: Vec::new(),
             class_defs: Vec::new(),
+            catch_table: Vec::new(),
+            retries: Vec::new(),
+            open_ensures: 0,
             params: ParamSpec::default(),
             scope_barrier: true,
             is_lambda_body: false,
@@ -219,6 +250,7 @@ impl Compiler {
             call_sites: self.call_sites,
             definitions: self.definitions,
             class_defs: self.class_defs,
+            catch_table: self.catch_table,
             scope_barrier: self.scope_barrier,
         }
     }
@@ -255,7 +287,25 @@ impl Compiler {
             // linear depth model sane across the unreachable code after it,
             // and leaves `max_stack` one too large rather than one too small —
             // which is the safe direction for a frame's capacity.
-            Insn::Return => 0,
+            // Same reasoning for `Break` and `Raise`: both pop at run time and
+            // neither falls through.
+            // `GotoValue` pops the value it carries out, but like the others it
+            // does not fall through, and the one place that emits it accounts
+            // for the value itself — so counting it neutral here keeps a plain
+            // `Jump` and a `GotoValue` interchangeable for the depth model,
+            // which is exactly what `emit_goto` relies on.
+            Insn::Return
+            | Insn::Break
+            | Insn::Raise
+            | Insn::Goto(_, _)
+            | Insn::GotoValue(_, _) => 0,
+            // Pops the class it was handed and pushes the answer; the exception
+            // it matched against stays where it was for the next clause.
+            Insn::CheckMatch => 0,
+            // Parks the protected body's value on the frame...
+            Insn::EnterEnsure => -1,
+            // ...and puts it back when the `ensure` body is done.
+            Insn::LeaveEnsure => 1,
             Insn::Jump(_)
             | Insn::JumpUnlessKeep(_)
             | Insn::JumpIfKeep(_)
@@ -335,6 +385,8 @@ impl Compiler {
         let displacement = i32::try_from(displacement).expect("iseq larger than 2 GiB");
         self.insns[at] = match self.insns[at] {
             Insn::Jump(_) => Insn::Jump(displacement),
+            Insn::Goto(_, depth) => Insn::Goto(displacement, depth),
+            Insn::GotoValue(_, depth) => Insn::GotoValue(displacement, depth),
             Insn::JumpUnless(_) => Insn::JumpUnless(displacement),
             Insn::JumpIf(_) => Insn::JumpIf(displacement),
             Insn::JumpUnlessKeep(_) => Insn::JumpUnlessKeep(displacement),
@@ -342,6 +394,25 @@ impl Compiler {
             Insn::JumpIfKeep(_) => Insn::JumpIfKeep(displacement),
             other => unreachable!("{other:?} is not a jump"),
         };
+    }
+
+    /// A forward jump that runs any `ensure` bodies it is leaving.
+    ///
+    /// An ordinary [`Insn::Jump`] when nothing is protecting this point, which
+    /// is almost always — the unwinder is only worth entering when there is
+    /// something for it to run.
+    fn emit_goto(&mut self, depth: usize, carries: bool) -> usize {
+        if self.open_ensures == 0 {
+            return self.emit_jump(Insn::Jump);
+        }
+        let at = self.here();
+        let depth = u32::try_from(depth).expect("a stack deeper than 4 billion");
+        self.emit(if carries {
+            Insn::GotoValue(0, depth)
+        } else {
+            Insn::Goto(0, depth)
+        });
+        at
     }
 
     fn patch_here(&mut self, at: usize) {
@@ -487,6 +558,8 @@ impl Compiler {
             // A bare `begin ... end` is a grouping, not an exception handler,
             // and `begin ... end while c` is how Ruby spells a do-while. Only
             // the handler forms need #12.
+            // A bare `begin ... end` is a grouping — how Ruby spells do-while
+            // — and needs no handler machinery.
             ExprKind::Begin(node)
                 if node.rescues.is_empty()
                     && node.else_body.is_none()
@@ -494,6 +567,10 @@ impl Compiler {
             {
                 self.statements(&node.body, true)?;
             }
+            ExprKind::Begin(node) => self.begin_expr(node, span)?,
+            ExprKind::RescueMod(node) => self.rescue_mod(node, span)?,
+            ExprKind::Retry => self.retry_expr(span)?,
+            ExprKind::Redo => self.redo_expr(span)?,
 
             ExprKind::Break(value) => self.jump_out(value.as_deref(), true, span)?,
             ExprKind::Next(value) => self.jump_out(value.as_deref(), false, span)?,
@@ -505,7 +582,7 @@ impl Compiler {
             ExprKind::Class(class) => self.class_expr(class, span)?,
             ExprKind::Module(module) => self.module_expr(module, span)?,
             ExprKind::SingletonClass(singleton) => self.singleton_expr(singleton, span)?,
-            ExprKind::Defined(inner) => self.defined(inner, span)?,
+            ExprKind::Defined(inner) => self.swallowing(|c| c.defined(inner, span))?,
 
             ExprKind::Def(def) => self.def_expr(def, span)?,
             ExprKind::Yield(node) => self.yield_expr(node, span)?,
@@ -668,6 +745,9 @@ impl Compiler {
         self.loops.push(Loop {
             base_depth: self.depth,
             next_target: top,
+            // Filled in by `while_body` once the predicate has been emitted and
+            // the body's first instruction is known.
+            redo_target: top,
             breaks: Vec::new(),
         });
 
@@ -687,6 +767,9 @@ impl Compiler {
     fn while_body(&mut self, node: &While, test: fn(i32) -> Insn, top: usize) -> Emit {
         if node.post {
             let body = self.here();
+            if let Some(frame) = self.loops.last_mut() {
+                frame.redo_target = body;
+            }
             self.statements(&node.body, false)?;
             // `next` in a post-condition loop re-tests rather than re-running
             // the body, so the frame's target moves to the predicate.
@@ -704,6 +787,9 @@ impl Compiler {
         } else {
             self.expr(&node.predicate)?;
             let out = self.emit_jump(test);
+            if let Some(frame) = self.loops.last_mut() {
+                frame.redo_target = self.insns.len();
+            }
             self.statements(&node.body, false)?;
             let back = self.emit_jump(Insn::Jump);
             self.patch(back, top);
@@ -732,12 +818,31 @@ impl Compiler {
                     Some(value) => self.expr(value)?,
                     None => self.emit(Insn::PushNil),
                 }
-                self.emit(Insn::Return);
+                // `Leave`, not `Return`: `next` ends *this block's call* with a
+                // value, which is what leaving a frame already does. `Return`
+                // is the non-local one that walks out to the enclosing method,
+                // and using it here made `y { |a| next a * 2 }` return from `y`.
+                self.emit(Insn::Leave);
+                // `Leave` pops at run time and does not fall through, but
+                // `next` is still an expression and the linear depth model
+                // needs one value here. The push after the jump is never
+                // reached — the same trick `return` and `retry` use.
+                self.emit(Insn::PushNil);
+                return Ok(());
+            }
+            if is_break && !self.scope_barrier {
+                // Out of a block, `break` ends the *call the block was passed
+                // to*: a non-local exit the unwinder resolves by frame id.
+                match value {
+                    Some(value) => self.expr(value)?,
+                    None => self.emit(Insn::PushNil),
+                }
+                self.emit(Insn::Break);
                 return Ok(());
             }
             return Err(Unsupported::at(
                 if is_break {
-                    "`break` out of a block"
+                    "`break` outside a loop or block"
                 } else {
                     "`next` outside a loop or block"
                 },
@@ -755,7 +860,10 @@ impl Compiler {
                 Some(value) => self.expr(value)?,
                 None => self.emit(Insn::PushNil),
             }
-            let at = self.emit_jump(Insn::Jump);
+            // The value lands where the loop's own value does, so the jump
+            // carries it: any `ensure` on the way out truncates the stack to
+            // its own base and would otherwise drop it.
+            let at = self.emit_goto(base_depth, true);
             self.loops.last_mut().expect("loop frame").breaks.push(at);
             // The jump leaves for the loop's end, so the value goes with it.
             self.depth -= 1;
@@ -765,7 +873,7 @@ impl Compiler {
                 self.expr(value)?;
                 self.emit(Insn::Pop);
             }
-            let at = self.emit_jump(Insn::Jump);
+            let at = self.emit_goto(base_depth, false);
             self.patch(at, next_target);
         }
 
@@ -937,6 +1045,12 @@ impl Compiler {
             ExprKind::False => self.push_word("false"),
             ExprKind::SelfExpr => self.push_word("self"),
             ExprKind::Assign(_) => self.push_word("assignment"),
+            // Ruby looks *through* a single parenthesised expression rather
+            // than calling it one: `defined?((a))` is "local-variable" and
+            // `defined?((a = 1))` is "assignment", both measured. Without this
+            // every parenthesised form fell to the `_` arm below and answered
+            // "expression", which is a wrong answer rather than a missing one.
+            ExprKind::Parens(inner) if inner.len() == 1 => self.defined(&inner[0], inner[0].span),
             ExprKind::Var(VarRef::Local { .. } | VarRef::It) => self.push_word("local-variable"),
 
             ExprKind::Var(VarRef::Const(name)) => {
@@ -1049,6 +1163,38 @@ impl Compiler {
         }
         self.emit(Insn::PushNil);
         self.patch_here(done);
+        Ok(())
+    }
+
+    /// Run `inner`, and answer `nil` if it raises.
+    ///
+    /// This is `defined?`'s contract, and #13 could not honour it: Ruby
+    /// evaluates everything but the last name in `defined?(a.b.c)`, and rescues
+    /// anything that evaluation raises rather than letting it out. Without an
+    /// unwinder there was nothing to rescue *with*, so #13 reported such an
+    /// example blocked. It is a catch-table entry like any other now.
+    ///
+    /// It swallows only Ruby exceptions. A construct the VM cannot compile is
+    /// still an error, because `Error::NoDispatch` never becomes an exception —
+    /// which is what stops "not implemented" from being reported as `nil`, the
+    /// same answer Ruby gives for a name that genuinely is not defined.
+    fn swallowing(&mut self, inner: impl FnOnce(&mut Self) -> Emit) -> Emit {
+        let base = self.depth;
+        let start = self.here();
+        inner(self)?;
+        let done = self.emit_jump(Insn::Jump);
+        let handler = self.here();
+        self.depth = base + 1;
+        self.emit(Insn::Pop);
+        self.emit(Insn::PushNil);
+        self.patch_here(done);
+        self.catch_table.push(CatchEntry {
+            kind: CatchKind::Rescue,
+            start: start as u32,
+            end: done as u32,
+            target: handler as u32,
+            stack_depth: base as u32,
+        });
         Ok(())
     }
 
@@ -1560,10 +1706,232 @@ impl Compiler {
     /// [#12](https://github.com/ar4mirez/spinel/issues/12). The compiler knows
     /// which it is — a block body has no scope barrier — so it refuses the one
     /// it cannot mean rather than emitting a local return for it.
-    fn return_expr(&mut self, value: Option<&Expr>, span: Span) -> Emit {
-        if !self.scope_barrier && !self.is_lambda_body {
-            return Err(Unsupported::at("`return` from a block", span));
+    /// `begin ... rescue ... else ... ensure ... end`.
+    ///
+    /// One body, one set of handlers, and — unlike YARV — *one* copy of the
+    /// `ensure`:
+    ///
+    /// ```text
+    ///   body:    <body>              ┐ rescue range
+    ///                                ┘
+    ///            <else>              ; outside it: Ruby does not let a begin's
+    ///            Jump done           ; own rescue catch what its else raises
+    ///   rescue:  GetConst A          ┐
+    ///            CheckMatch          │ clause dispatch, entered by the
+    ///            JumpIf clause       │ unwinder with the exception on top
+    ///            ...                 │
+    ///            Raise               ┘ nothing matched: keep going out
+    ///   done:    EnterEnsure         ; park the value
+    ///   ensure:  <ensure>            ; the only copy
+    ///            Pop
+    ///            LeaveEnsure         ; unpark it, or resume the unwind
+    /// ```
+    ///
+    /// YARV compiles the `ensure` body twice, once inline for the normal path
+    /// and once as a handler, and pays for it with two versions of any `break`
+    /// or `return` written inside one. Entering it through the same door either
+    /// way costs two instructions instead, and makes "runs on every exit path"
+    /// true by construction rather than by keeping two copies in step.
+    fn begin_expr(&mut self, node: &Begin, span: Span) -> Emit {
+        let base = self.depth;
+        // Everything from here to the end of the last `rescue` clause is
+        // covered by the `ensure`, so a jump out of it has to run that body.
+        if node.ensure_body.is_some() {
+            self.open_ensures += 1;
         }
+        let body_start = self.here();
+        let body = self.statements(&node.body, true);
+        if body.is_err() && node.ensure_body.is_some() {
+            self.open_ensures -= 1;
+        }
+        body?;
+        let body_end = self.here();
+
+        if let Some(else_body) = &node.else_body {
+            self.emit(Insn::Pop);
+            self.statements(else_body, true)?;
+        }
+
+        let mut done = Vec::new();
+        if !node.rescues.is_empty() {
+            done.push(self.emit_jump(Insn::Jump));
+            let rescue_start = self.here();
+            // The unwinder jumps here having pushed the exception, so the
+            // handler starts one deeper than the `begin` did.
+            self.depth = base + 1;
+            self.max_stack = self.max_stack.max(self.depth);
+            self.rescue_clauses(&node.rescues, body_start, base, &mut done)?;
+            self.catch_table.push(CatchEntry {
+                kind: CatchKind::Rescue,
+                start: body_start as u32,
+                end: body_end as u32,
+                target: rescue_start as u32,
+                stack_depth: base as u32,
+            });
+        }
+        for at in done {
+            self.patch_here(at);
+        }
+        self.depth = base + 1;
+
+        if let Some(ensure_body) = &node.ensure_body {
+            // The `ensure` body itself is not protected by its own entry, so a
+            // jump written inside one is an ordinary jump again.
+            self.open_ensures -= 1;
+            let protected_end = self.here();
+            self.emit(Insn::EnterEnsure);
+            let ensure_start = self.here();
+            self.statements(ensure_body, true)?;
+            self.emit(Insn::Pop);
+            self.emit(Insn::LeaveEnsure);
+            // The range covers the rescue handlers too, so an exception raised
+            // *inside* a `rescue` clause still runs the `ensure`. It stops
+            // before `EnterEnsure`, so the body cannot catch itself.
+            self.catch_table.push(CatchEntry {
+                kind: CatchKind::Ensure,
+                start: body_start as u32,
+                end: protected_end as u32,
+                target: ensure_start as u32,
+                stack_depth: base as u32,
+            });
+        }
+        let _ = span;
+        Ok(())
+    }
+
+    /// The clause dispatch, entered with the exception on top of the stack.
+    fn rescue_clauses(
+        &mut self,
+        clauses: &[Rescue],
+        body_start: usize,
+        base: usize,
+        done: &mut Vec<usize>,
+    ) -> Emit {
+        for clause in clauses {
+            let mut hits = Vec::new();
+            if clause.exceptions.is_empty() {
+                // A bare `rescue` catches `StandardError`, not `Exception` —
+                // which is the entire reason `NoMemoryError` and `SystemExit`
+                // are not `StandardError` descendants in the oracle table.
+                let name = self.symbol("StandardError");
+                self.emit(Insn::GetConst(name, ConstScope::Top));
+                self.emit(Insn::CheckMatch);
+                hits.push(self.emit_jump(Insn::JumpIf));
+            } else {
+                for exception in &clause.exceptions {
+                    self.expr(exception)?;
+                    self.emit(Insn::CheckMatch);
+                    hits.push(self.emit_jump(Insn::JumpIf));
+                }
+            }
+            let miss = self.emit_jump(Insn::Jump);
+            for at in hits {
+                self.patch_here(at);
+            }
+            self.depth = base + 1;
+            match &clause.reference {
+                Some(target) => {
+                    let (slot, depth) = self.local_target(target)?;
+                    self.emit(Insn::SetLocal(slot, depth));
+                }
+                None => self.emit(Insn::Pop),
+            }
+            self.retries.push(Retry {
+                body_start,
+                base_depth: base,
+            });
+            let result = self.statements(&clause.body, true);
+            self.retries.pop();
+            result?;
+            done.push(self.emit_jump(Insn::Jump));
+            self.patch_here(miss);
+            self.depth = base + 1;
+        }
+        // Every clause declined. The exception is still on the stack and the
+        // search carries on in the frame above.
+        self.emit(Insn::Raise);
+        Ok(())
+    }
+
+    /// `expr rescue fallback`, which is `begin expr rescue fallback end`.
+    fn rescue_mod(&mut self, node: &RescueMod, span: Span) -> Emit {
+        let begin = Begin {
+            body: vec![node.value.clone()],
+            rescues: vec![Rescue {
+                span,
+                exceptions: Vec::new(),
+                reference: None,
+                body: vec![node.rescue_value.clone()],
+            }],
+            else_body: None,
+            ensure_body: None,
+        };
+        self.begin_expr(&begin, span)
+    }
+
+    /// `redo`: run the body again without re-testing anything.
+    ///
+    /// In a loop that is the body after the predicate; in a block it is the
+    /// block's own first instruction. Both are jumps inside one frame, and both
+    /// go out through the unwinder when an `ensure` is open, so that
+    /// `[1, 2].each { begin; redo; ensure; E; end }` runs `E`.
+    fn redo_expr(&mut self, span: Span) -> Emit {
+        let (target, base) = match self.loops.last() {
+            Some(&Loop {
+                redo_target,
+                base_depth,
+                ..
+            }) => (redo_target, base_depth),
+            // Outside a loop, `redo` re-runs the enclosing block from its first
+            // instruction. At the top level of a method there is nothing to
+            // re-run, which is Ruby's `LocalJumpError` and a compile-time
+            // refusal here rather than a jump to a body that is not one.
+            None if !self.scope_barrier => (0, 0),
+            None => return Err(Unsupported::at("`redo` outside a loop or block", span)),
+        };
+        for _ in base..self.depth {
+            self.emit(Insn::Pop);
+        }
+        let at = self.emit_goto(base, false);
+        self.patch(at, target);
+        // Never falls through; the push keeps the depth model honest.
+        self.emit(Insn::PushNil);
+        Ok(())
+    }
+
+    /// `retry`: run the protected body again.
+    ///
+    /// A backward jump in the same frame, with whatever a half-finished
+    /// expression left above the `begin`'s base dropped first. No catch-table
+    /// entry, because nothing is unwinding — `retry` is a `goto` that Ruby
+    /// happens to spell as a keyword.
+    fn retry_expr(&mut self, span: Span) -> Emit {
+        let Some(&Retry {
+            body_start,
+            base_depth,
+        }) = self.retries.last()
+        else {
+            return Err(Unsupported::at("`retry` outside a rescue clause", span));
+        };
+        for _ in base_depth..self.depth {
+            self.emit(Insn::Pop);
+        }
+        let at = self.emit_goto(base_depth, false);
+        self.patch(at, body_start);
+        // `retry` never falls through, but it is still an expression, and the
+        // linear depth model needs one value here. Emitting the push *after*
+        // the jump satisfies the model without ever running — the same trick
+        // `return` uses.
+        self.emit(Insn::PushNil);
+        Ok(())
+    }
+
+    fn return_expr(&mut self, value: Option<&Expr>, span: Span) -> Emit {
+        // A `return` in a block is legal and non-local: it leaves the method the
+        // block was *written* in, which the unwinder finds by the frame id the
+        // `Proc` recorded. A block whose method has already returned is Ruby's
+        // `LocalJumpError`, raised at the instruction rather than guessed here.
+        let _ = span;
         match value {
             Some(expr) => self.expr(expr)?,
             None => self.emit(Insn::PushNil),

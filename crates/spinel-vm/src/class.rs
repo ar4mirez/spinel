@@ -201,6 +201,51 @@ pub enum Builtin {
     Exception,
 }
 
+/// CRuby's exception hierarchy, measured rather than transcribed.
+///
+/// `rescue TypeError` picks a handler by walking a superclass chain, so the
+/// chain has to be Ruby's, and which class inherits from which is not something
+/// to read out of `error.c` and retype. `scripts/exceptions-oracle.rb` writes
+/// this file from a real Ruby's `ObjectSpace` and CI re-runs it with `--check`.
+const EXCEPTION_TABLE: &str = include_str!("exceptions.txt");
+
+/// Every core exception class below `Exception`, as `(name, superclass)`,
+/// parents first.
+///
+/// `Exception` itself is skipped: it is a [`Builtin`], bootstrapped before this
+/// is read. The table lists it anyway so the file is the whole hierarchy rather
+/// than the hierarchy minus its root.
+fn exception_hierarchy() -> impl Iterator<Item = (&'static str, &'static str)> {
+    EXCEPTION_TABLE
+        .lines()
+        .map(|line| line.split('#').next().unwrap_or("").trim())
+        .filter(|line| !line.is_empty())
+        .filter_map(|line| {
+            let (name, superclass) = line.split_once('<')?;
+            Some((name.trim(), superclass.trim()))
+        })
+        .filter(|&(name, _)| name != Builtin::Exception.name())
+}
+
+/// Whether the exception class `name` defines its own `initialize` in CRuby.
+///
+/// Spinel implements `Exception#initialize` and nothing else, so `new` on one
+/// of these would answer as though it had validated arguments it never looked
+/// at — `SignalException.new(:NOSIG)` raises in Ruby and would not here. The
+/// marker is measured by `scripts/exceptions-oracle.rb`, not judged.
+#[must_use]
+pub fn exception_defines_initialize(name: &str) -> bool {
+    EXCEPTION_TABLE.lines().any(|line| {
+        let Some((declaration, comment)) = line.split_once('#') else {
+            return false;
+        };
+        comment.trim() == "own initialize"
+            && declaration
+                .split_once('<')
+                .is_some_and(|(class, _)| class.trim() == name)
+    })
+}
+
 impl Builtin {
     /// In bootstrap order, which is what makes [`Builtin::id`] a cast.
     pub const ALL: [Builtin; 15] = [
@@ -988,6 +1033,32 @@ impl<'h> HandleScope<'h> {
             let object = self.classes().object(builtin.id());
             self.classes_mut()
                 .const_set(Builtin::Object.id(), name, object);
+        }
+
+        // The exception hierarchy, below the `Exception` the loop above just
+        // defined. Not builtins: a `ClassId` per exception class would be 35
+        // more enum variants for no gain, because `rescue` reaches them by
+        // constant lookup like every other class name. Parents come first in the
+        // table, so one pass never has to look ahead.
+        for (name, superclass) in exception_hierarchy() {
+            let superclass = self
+                .classes()
+                .const_get_here(
+                    Builtin::Object.id(),
+                    crate::shared::symbols::intern(superclass),
+                )
+                .and_then(|value| {
+                    let handle = self.root(value);
+                    self.class_id_of(handle)
+                })
+                .expect("the table lists parents before children");
+            // Defined after the metaclass patch-up above, so `define_class`
+            // finds `Class` already there and points each one at it itself.
+            let id = self.define_class(Some(name), Some(superclass));
+            let symbol = crate::shared::symbols::intern(name);
+            let object = self.classes().object(id);
+            self.classes_mut()
+                .const_set(Builtin::Object.id(), symbol, object);
         }
 
         // The handful of methods that are dispatch rather than Ruby. A heap

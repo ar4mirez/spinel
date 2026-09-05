@@ -308,3 +308,66 @@ def dm11; 1; end; defined?(dm11)  #=> "method"
 def dy12; defined?(yield); end; dy12  #=> nil
 def dy13; defined?(yield); end; dy13 { }  #=> "yield"
 class DC14; def self.boom; raise "never"; end; end; defined?(DC14.boom)  #=> "method"
+
+# --------------------------------------------------- exceptions (#12)
+# A raise that nothing catches is a Rust-side test, not a table entry: the
+# rule for this file is that a snippet terminates and does not raise. What
+# is measured here is what a *handled* raise evaluates to, which is where a
+# reading of the code goes wrong — a `begin` with an `else` answers the
+# `else`, and one with an `ensure` answers the body, not the `ensure`.
+begin; 1; end  #=> 1
+begin; 1 / 0; rescue ZeroDivisionError; :caught; end  #=> :caught
+begin; 1 / 0; rescue; :bare; end  #=> :bare
+begin; 1; rescue; :unreached; end  #=> 1
+begin; 1 / 0; rescue TypeError; :wrong; rescue ZeroDivisionError; :right; end  #=> :right
+begin; 1 / 0; rescue TypeError, ZeroDivisionError; :either; end  #=> :either
+begin; 1 / 0; rescue StandardError => e; e.class; end  #=> ZeroDivisionError
+begin; 1; rescue; :r; else; 2; end  #=> 2
+begin; 1; ensure; 2; end  #=> 1
+begin; 1 / 0; rescue; :r; ensure; :e; end  #=> :r
+begin; 1; rescue; :r; else; 2; ensure; 3; end  #=> 2
+1 / 0 rescue :modifier  #=> :modifier
+r = 0; begin; r = 1; ensure; r = 2; end; r  #=> 2
+r = 0; begin; begin; 1 / 0; ensure; r = 5; end; rescue; end; r  #=> 5
+r = 0; begin; begin; 1 / 0; rescue; r = 1; end; ensure; r = r + 10; end; r  #=> 11
+n = 2; begin; n = n + 1; 1 / (n - 3); rescue ZeroDivisionError; retry; end; n  #=> 4
+begin; begin; 1 / 0; rescue TypeError; :inner; end; rescue ZeroDivisionError; :outer; end  #=> :outer
+def em1; begin; return 1; ensure; end; end; em1  #=> 1
+r = 0; def em2(v); begin; return 1; ensure; v; end; end; em2(9)  #=> 1
+begin; raise "boom"; rescue => e; e.message; end  #=> "boom"
+begin; raise "boom"; rescue => e; e.class; end  #=> RuntimeError
+begin; raise ArgumentError; rescue => e; e.message; end  #=> "ArgumentError"
+begin; raise ArgumentError, "why"; rescue TypeError; :no; rescue ArgumentError => e; e.message; end  #=> "why"
+begin; raise TypeError.new("made"); rescue => e; e.message; end  #=> "made"
+StandardError.new.message  #=> "StandardError"
+StandardError.new("x").message  #=> "x"
+begin; begin; raise "a"; rescue => e; raise; end; rescue => f; f.message; end  #=> "a"
+catch(:tag) { throw :tag, 5 }  #=> 5
+catch(:tag) { 7 }  #=> 7
+catch { |t| throw t, 3 }  #=> 3
+r = 0; catch(:t) { begin; throw :t, 1; ensure; r = 9; end }; r  #=> 9
+begin; throw :nope; rescue UncaughtThrowError => e; e.message; end  #=> "uncaught throw :nope"
+def bmy; yield 1; yield 2; end; def bm1; bmy { |x| return x * 10 }; :not_here; end; bm1  #=> 10
+def bmy2; yield 1; yield 2; :after; end; def bm2; bmy2 { |x| break x * 5 }; end; bm2  #=> 5
+def bm3; begin; return 1; ensure; 2; end; end; bm3  #=> 1
+def bm4(&b); b.call; end; bm4 { 42 }  #=> 42
+r = 0; def bm5; yield; ensure; end; bm5 { 3 }  #=> 3
+def dboom; raise "no"; end; defined?(dboom.length)  #=> nil
+def dboom2; raise "no"; end; defined?(dboom2)  #=> "method"
+[1, 2] + [3]  #=> [1, 2, 3]
+[] + []  #=> []
+class OpP; def +(other); [:plus, other]; end; end; OpP.new + 7  #=> [:plus, 7]
+class OpL; def <(other); :less; end; end; OpL.new < 1  #=> :less
+n = 0; m = 0; while n < 3; n = n + 1; m = m + 1; redo if m == 2 && n == 2; end; m  #=> 3
+r = 0; n = 0; while n < 2; n = n + 1; begin; next; ensure; r = r + 1; end; end; r  #=> 2
+r = 0; n = 0; while n < 5; n = n + 1; begin; break; ensure; r = r + 1; end; end; r  #=> 1
+r = 0; n = 0; while n < 5; n = n + 1; begin; break 7; ensure; r = r + 1; end; end  #=> 7
+r = 0; begin; n = 0; while n < 2; n = n + 1; next; end; ensure; r = 1; end; r  #=> 1
+def ar1(a, b); [a, b]; end; begin; ar1(1); rescue ArgumentError => e; e.message; end  #=> "wrong number of arguments (given 1, expected 2)"
+def ar2(a); a; end; begin; ar2(1, 2); rescue ArgumentError => e; e.message; end  #=> "wrong number of arguments (given 2, expected 1)"
+def ar3(a, b); [a, b]; end; def ar3c; ar3(1, 2); end; ar3c  #=> [1, 2]
+def sp1; yield 1, 2; end; sp1 { |a| a }  #=> 1
+def sp2; yield [1, 2]; end; sp2 { |a, b| [a, b] }  #=> [1, 2]
+a = 1; defined?((a))  #=> "local-variable"
+defined?((1))  #=> "expression"
+a = 1; defined?((a = 2))  #=> "assignment"
