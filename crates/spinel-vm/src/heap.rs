@@ -187,6 +187,15 @@ pub struct Heap {
     /// This Ractor's classes and modules. A root source: see [`Heap::mark`].
     classes: Classes,
     definitions: crate::method::Definitions,
+    regexps: crate::regexp::Regexps,
+    /// The `MatchData` the last successful match produced, which is what `$~`
+    /// and `$1` read.
+    ///
+    /// ponytail: one per heap. Ruby scopes `$~` to the method frame and to the
+    /// thread; `back-references_spec.rb` has an example for the thread half.
+    /// Give it a frame slot when frames carry their own specials, and a
+    /// Ractor-local when threads arrive.
+    last_match: Value,
 }
 
 /// The class index for an object needing `bytes` in total, or `None` for large objects.
@@ -221,6 +230,8 @@ impl Heap {
             total_allocated: 0,
             classes: Classes::new(),
             definitions: crate::method::Definitions::new(),
+            regexps: crate::regexp::Regexps::new(),
+            last_match: Value::NIL,
         }
     }
 
@@ -233,6 +244,26 @@ impl Heap {
     /// definition id is a fixnum, which is the point of it being one.
     pub fn definitions(&self) -> &crate::method::Definitions {
         &self.definitions
+    }
+
+    /// The compiled patterns and the literal cache. Unlike `definitions`, the
+    /// cache *is* traced: a cached literal is reachable from nothing else, and
+    /// Ruby hands the same object back every time the literal is evaluated.
+    pub fn regexps(&self) -> &crate::regexp::Regexps {
+        &self.regexps
+    }
+
+    pub fn regexps_mut(&mut self) -> &mut crate::regexp::Regexps {
+        &mut self.regexps
+    }
+
+    /// The last successful match, or nil.
+    pub fn last_match(&self) -> Value {
+        self.last_match
+    }
+
+    pub fn set_last_match(&mut self, value: Value) {
+        self.last_match = value;
     }
 
     pub fn definitions_mut(&mut self) -> &mut crate::method::Definitions {
@@ -391,6 +422,12 @@ impl Heap {
         // would leave the heap with no classes at all.
         let (classes, mark_stack) = (&self.classes, &mut self.mark_stack);
         classes.each_root(|value| Heap::shade(mark_stack, value));
+
+        // Third root source: the regexp literal cache. `/foo/` evaluated twice
+        // answers one object, so that object outlives every handle to it.
+        let (regexps, mark_stack) = (&self.regexps, &mut self.mark_stack);
+        regexps.each_root(|value| Heap::shade(mark_stack, value));
+        Heap::shade(&mut self.mark_stack, self.last_match);
         // R3: a worklist, not recursion. A Ruby program can build a chain a million
         // objects deep, and a recursive tracer turns that into a stack overflow inside
         // the collector, with no Ruby frame to blame it on.
@@ -638,6 +675,23 @@ impl<'h> HandleScope<'h> {
 
     pub fn definitions_mut(&mut self) -> &mut crate::method::Definitions {
         self.heap.definitions_mut()
+    }
+
+    /// The heap's compiled patterns and literal cache.
+    pub fn regexps(&self) -> &crate::regexp::Regexps {
+        self.heap.regexps()
+    }
+
+    pub fn regexps_mut(&mut self) -> &mut crate::regexp::Regexps {
+        self.heap.regexps_mut()
+    }
+
+    pub fn last_match(&self) -> Value {
+        self.heap.last_match()
+    }
+
+    pub fn set_last_match(&mut self, value: Value) {
+        self.heap.set_last_match(value);
     }
 
     /// Point a handle at a different object. The old one loses this root.

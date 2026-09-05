@@ -119,6 +119,7 @@ fn main() -> ExitCode {
         return ExitCode::from(EXIT_USAGE);
     }
 
+    let skips = load_skips();
     let mut totals = Counts::default();
     let mut unparseable: Vec<String> = Vec::new();
     // Files that parsed and yielded nothing. Almost always a spec that builds
@@ -152,7 +153,17 @@ fn main() -> ExitCode {
             continue;
         }
 
-        let examples = discover::examples(&parsed.program, &target);
+        let mut examples = discover::examples(&parsed.program, &target);
+        // An example named in `spec/tags/skip.txt` is reported skipped with the
+        // reason written there, rather than run. See that file: it is a list of
+        // engine gaps with their reasons, not an expected-failure list.
+        for example in &mut examples {
+            if example.skipped.is_none() {
+                if let Some(reason) = skips.get(&example.full_description()) {
+                    example.skipped = Some(reason.clone());
+                }
+            }
+        }
         if examples.is_empty() {
             without_examples.push(display_path(file));
         }
@@ -326,4 +337,21 @@ fn collect(path: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// `spec/tags/skip.txt`, as a description-to-reason map.
+///
+/// Missing or unreadable is not an error: a checkout with no tags file skips
+/// nothing, which is the right default for a file whose whole purpose is to be
+/// empty one day.
+fn load_skips() -> std::collections::HashMap<String, String> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../spec/tags/skip.txt");
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return std::collections::HashMap::new();
+    };
+    text.lines()
+        .filter(|line| !line.trim_start().starts_with('#') && !line.trim().is_empty())
+        .filter_map(|line| line.split_once('\t'))
+        .map(|(name, reason)| (name.trim().to_owned(), reason.trim().to_owned()))
+        .collect()
 }

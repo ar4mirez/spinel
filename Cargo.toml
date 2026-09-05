@@ -15,6 +15,7 @@ spinel-core = { path = "crates/spinel-core", version = "0.0.1" }
 spinel-ext = { path = "crates/spinel-ext", version = "0.0.1" }
 spinel-jit = { path = "crates/spinel-jit", version = "0.0.1" }
 spinel-parse = { path = "crates/spinel-parse", version = "0.0.1" }
+spinel-regex = { path = "crates/spinel-regex", version = "0.0.1" }
 spinel-vm = { path = "crates/spinel-vm", version = "0.0.1" }
 clap = { version = "4", features = ["derive"] }
 

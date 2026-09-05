@@ -460,11 +460,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "spinel-regex"
+version = "0.0.1"
+
+[[package]]
 name = "spinel-vm"
 version = "0.0.1"
 dependencies = [
  "spinel-ast",
  "spinel-parse",
+ "spinel-regex",
 ]
 
 [[package]]

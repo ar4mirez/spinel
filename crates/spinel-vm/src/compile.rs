@@ -41,7 +41,7 @@ use spinel_ast::{
 
 use crate::bytecode::{
     BinOp, BlockRef, CallSite, CatchEntry, CatchKind, ClassDef, ConstScope, DefKind, Insn, Iseq,
-    Keyword, Literal, Optional, ParamSpec,
+    Keyword, Literal, MatchRef, Optional, ParamSpec,
 };
 use crate::value::Value;
 
@@ -272,6 +272,7 @@ impl Compiler {
             | Insn::PushInt(_)
             | Insn::PushLit(_)
             | Insn::PushSym(_)
+            | Insn::LastMatch(_)
             | Insn::Dup => 1,
             Insn::Pop
             | Insn::SetLocal(_, _)
@@ -525,6 +526,25 @@ impl Compiler {
                 self.emit(Insn::PushLit(index));
             }
 
+            ExprKind::Regexp(regexp) => {
+                // `/n`, `/e`, `/s`, `/u` set the pattern's encoding, which this
+                // engine does not model. Dropping them silently would answer
+                // `/é/n` as though it were `/é/`, so the literal is refused
+                // until the Encoding slice.
+                if regexp.flags.encoding != spinel_ast::RegexpEncoding::None {
+                    return Err(Unsupported::at("a regexp encoding modifier", span));
+                }
+                let bytes = flat_bytes(&regexp.parts)
+                    .ok_or_else(|| Unsupported::at("regexp interpolation", span))?;
+                let source = String::from_utf8(bytes.into_vec())
+                    .map_err(|_| Unsupported::at("a regexp source that is not UTF-8", span))?;
+                let index = self.literal(Literal::Regexp {
+                    source: source.into_boxed_str(),
+                    options: regexp_options(&regexp.flags),
+                });
+                self.emit(Insn::PushLit(index));
+            }
+
             ExprKind::Sym(symbol) => {
                 let bytes = flat_bytes(&symbol.parts)
                     .ok_or_else(|| Unsupported::at("symbol interpolation", span))?;
@@ -603,7 +623,15 @@ impl Compiler {
             }
             VarRef::Instance(_) => Err(Unsupported::at("an instance variable", span)),
             VarRef::Class(_) => Err(Unsupported::at("a class variable", span)),
-            VarRef::Global(_) => Err(Unsupported::at("a global variable", span)),
+            VarRef::Global(name) => match match_ref(name) {
+                Some(which) => {
+                    self.emit(Insn::LastMatch(which));
+                    Ok(())
+                }
+                // Every other global still needs a global table, which is not
+                // this slice. Named so the spec report says which one.
+                None => Err(Unsupported::at("a global variable", span)),
+            },
             VarRef::Const(name) => {
                 let symbol = self.symbol(name);
                 self.emit(Insn::GetConst(symbol, ConstScope::Lexical));
@@ -2066,7 +2094,8 @@ fn node_name(kind: &ExprKind) -> &'static str {
         ExprKind::For(_) => "a `for` loop",
         ExprKind::Hash(_) => "a hash literal",
         ExprKind::Range(_) => "a range literal",
-        ExprKind::Regexp(_) | ExprKind::MatchLastLine(_) => "a regexp",
+        // `if /a/` matches against `$_`, which needs the global table.
+        ExprKind::MatchLastLine(_) => "a regexp in condition position",
 
         ExprKind::Splat(_) => "a splat",
         ExprKind::Rational(_) | ExprKind::Imaginary(_) => "a rational or complex literal",
@@ -2090,5 +2119,44 @@ fn node_name(kind: &ExprKind) -> &'static str {
         ExprKind::Implicit(_) => "an elided hash value",
         ExprKind::Missing => "a syntax error",
         _ => "this expression",
+    }
+}
+
+/// A literal's flags, as the integer `Regexp#options` answers.
+///
+/// `/o` is not in the number: it says "interpolate once", which is a property
+/// of the literal site rather than of the pattern, and a non-interpolated
+/// literal is cached anyway. The encoding flags wait for the Encoding slice.
+fn regexp_options(flags: &spinel_ast::RegexpFlags) -> i64 {
+    let mut options = 0;
+    if flags.ignore_case {
+        options |= spinel_regex::Flags::IGNORECASE;
+    }
+    if flags.extended {
+        options |= spinel_regex::Flags::EXTENDED;
+    }
+    if flags.multi_line {
+        options |= spinel_regex::Flags::MULTILINE;
+    }
+    options
+}
+
+/// The regexp special variable a global's name refers to, if it is one.
+///
+/// `$~`, `$&`, `` $` ``, `$'` and `$1`..`$n`. Prism hands the name with its
+/// leading `$` still attached.
+fn match_ref(name: &str) -> Option<MatchRef> {
+    let rest = name.strip_prefix('$')?;
+    match rest {
+        "~" => Some(MatchRef::Data),
+        "&" => Some(MatchRef::Whole),
+        "`" => Some(MatchRef::Pre),
+        "'" => Some(MatchRef::Post),
+        digits if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) => {
+            // `$0` is the program name, not a capture group.
+            let n: u16 = digits.parse().ok()?;
+            (n > 0).then_some(MatchRef::Group(n))
+        }
+        _ => None,
     }
 }

@@ -179,7 +179,7 @@ Strings (default): byte vector plus encoding plus cached character count. UTF-8,
 
 Hash (default): insertion-ordered open addressing, keyed on `#hash`/`#eql?` with fast paths for Symbol, String, and fixnum keys.
 
-Regex is the open question (see below).
+Regex is `spinel-regex`, this engine's own (see below).
 
 ## Metaprogramming
 
@@ -223,8 +223,62 @@ Bytecode to Cranelift IR, method at a time, after a call count threshold, with i
 | JIT, phase 6 | faster than `ruby --yjit` on the same set |
 | boot | `spinel -e ''` under 10 ms; a 500-file app with warm bytecode cache under 100 ms |
 
+## Regex
+
+**Decision:** Spinel's own engine, `crates/spinel-regex`: a parser for Ruby's
+dialect and a backtracking matcher, in Rust, with no dependencies.
+
+Ruby's regexes are Onigmo's, which is neither PCRE nor Rust's `regex`. The
+decision was measured rather than argued. `scripts/regexp-oracle.rb` takes every
+regexp literal `ruby/spec`'s `language/regexp/` actually uses, runs each against
+a thirty-subject probe corpus on a real CRuby, and writes the answers to
+`crates/spinel-regex/tests/oracle.txt`. `crates/spinel-regex/tests/oracle.rs`
+replays the table through the engine on every `cargo test`, so the dialect is
+checked against Ruby continuously rather than at the moment somebody read a
+reference page.
+
+**Rejected: `fancy-regex`.** The obvious lazy answer, and the measurement is
+what ruled it out. Of 338 patterns CRuby accepts, replayed through `fancy-regex`
+with `(?m)` prepended — the fairest translation available, since Ruby's `^` and
+`$` are always line anchors — 281 agreed, 16 were rejected, and **41 gave a
+different answer**. Some of the 41 are reachable by a translation layer:
+
+| | Ruby | Rust's `regex` |
+|---|---|---|
+| `\w` `\d` `\s` | ASCII | Unicode |
+| `[[:alpha:]]` | Unicode | ASCII |
+| `/m` | dot matches newline | `^`/`$` match at line breaks |
+
+The rest are properties of the match engine and no wrapper reaches them:
+`/(a*)*/` against `"a"` leaves group 1 empty in Ruby and full in `fancy-regex`;
+`/(a|\2b|())*/` against `"ab"` matches two characters in Ruby and one in
+`fancy-regex`. A backend that silently answers differently for one pattern in
+eight is exactly the plausible-but-wrong answer this engine refuses, and closing
+the gap would need a list of patterns known to be wrong — which the conformance
+rule forbids.
+
+**Rejected: binding Onigmo.** It is the reference implementation, it is an
+independent library rather than CRuby lineage, and it would be correct on the
+whole dialect from the first commit. It also puts a C toolchain in every build,
+which costs the cross-compilation story and `spinel build --compile`'s
+single-static-binary promise, and it needs a wrapper across the GC and encoding
+boundary that is itself a source of divergence. The `spinel-regex` boundary is
+narrow — compile a pattern, match at an offset, read capture offsets — so Onigmo
+stays available as a drop-in if the remaining dialect proves more expensive than
+the toolchain.
+
+What the engine does not implement yet returns `Error::Unsupported`, which the
+VM turns into `Error::Unknowable` and the harness reports as *blocked*: never a
+pass, never a wrong answer. Today that is `(?~)`, `\g<>`, conditional groups,
+`\K`, `\R`, `\X`, `\p{}`, `\k<name+1>` level specifiers, and the encoding
+modifiers `/n` `/e` `/s` `/u`, which wait for the Encoding slice.
+
+Matching is byte-oriented over UTF-8 and reports byte offsets; `MatchData`
+converts to characters, because that is what `#begin` answers. `$~` is one slot
+per heap — Ruby scopes it per frame and per thread, which arrives with the
+frame specials and with Ractors.
+
 ## Open questions to settle when their slice arrives
 
-- **Regex.** Ruby's regex dialect is Onigmo with lookbehind, named captures, backreferences, `\p{}` and encoding awareness. A Rust regex crate does not cover backreferences or lookaround. Options: bind Onigmo (C, and the one piece of CRuby lineage that would be allowed since it is an independent library), write a backtracking engine in Rust, or start with the `fancy-regex` crate and measure. Decide at the end of phase 1, because `language/regexp/` and most of `core/string/` depend on it.
 - **Encoding coverage.** Beyond UTF-8/ASCII/binary, which of Ruby's 100+ encodings matter. Probably the transcoding set for Shift_JIS, EUC-JP, ISO-8859-x, UTF-16/32 first.
 - **Generational GC timing.** Only after allocation profiles from real gems exist.

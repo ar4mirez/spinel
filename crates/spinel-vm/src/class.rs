@@ -199,6 +199,8 @@ pub enum Builtin {
     Hash,
     Proc,
     Exception,
+    Regexp,
+    MatchData,
 }
 
 /// CRuby's exception hierarchy, measured rather than transcribed.
@@ -248,7 +250,7 @@ pub fn exception_defines_initialize(name: &str) -> bool {
 
 impl Builtin {
     /// In bootstrap order, which is what makes [`Builtin::id`] a cast.
-    pub const ALL: [Builtin; 15] = [
+    pub const ALL: [Builtin; 17] = [
         Builtin::BasicObject,
         Builtin::Object,
         Builtin::Module,
@@ -264,6 +266,8 @@ impl Builtin {
         Builtin::Hash,
         Builtin::Proc,
         Builtin::Exception,
+        Builtin::Regexp,
+        Builtin::MatchData,
     ];
 
     /// Every builtin is defined before anything else, in declaration order.
@@ -288,6 +292,8 @@ impl Builtin {
             Builtin::Hash => "Hash",
             Builtin::Proc => "Proc",
             Builtin::Exception => "Exception",
+            Builtin::Regexp => "Regexp",
+            Builtin::MatchData => "MatchData",
         }
     }
 

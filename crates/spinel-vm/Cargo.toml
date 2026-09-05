@@ -9,6 +9,7 @@ repository.workspace = true
 
 [dependencies]
 spinel-ast.workspace = true
+spinel-regex.workspace = true
 
 # Test-only, and not a layering violation: the tests read Ruby source, which
 # needs the parser, and `spinel-parse` depends on `spinel-ast` rather than on
