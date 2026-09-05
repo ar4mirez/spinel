@@ -39,7 +39,8 @@ use spinel_ast::{
 };
 
 use crate::bytecode::{
-    BinOp, BlockRef, CallSite, Insn, Iseq, Keyword, Literal, Optional, ParamSpec,
+    BinOp, BlockRef, CallSite, ClassDef, ConstScope, DefKind, Insn, Iseq, Keyword, Literal,
+    Optional, ParamSpec,
 };
 use crate::value::Value;
 
@@ -152,6 +153,7 @@ struct Compiler {
     children: Vec<Arc<Iseq>>,
     call_sites: Vec<CallSite>,
     definitions: Vec<(u32, u32)>,
+    class_defs: Vec<ClassDef>,
     params: ParamSpec,
     /// A method body starts a new scope; a block body continues the enclosing
     /// one. `GetLocal` with a depth may not cross a barrier.
@@ -178,6 +180,7 @@ impl Compiler {
             children: Vec::new(),
             call_sites: Vec::new(),
             definitions: Vec::new(),
+            class_defs: Vec::new(),
             params: ParamSpec::default(),
             scope_barrier: true,
             is_lambda_body: false,
@@ -215,6 +218,7 @@ impl Compiler {
             children: self.children,
             call_sites: self.call_sites,
             definitions: self.definitions,
+            class_defs: self.class_defs,
             scope_barrier: self.scope_barrier,
         }
     }
@@ -257,8 +261,32 @@ impl Compiler {
             | Insn::JumpIfKeep(_)
             | Insn::Neg
             | Insn::Not
-            // Pops the receiver the method is defined on, pushes the name.
-            | Insn::DefineMethod(_) => 0,
+            // Pops the receiver, pushes the name it defined.
+            | Insn::DefineSingleton(_)
+            // Pops the module, pushes the constant.
+            | Insn::GetConst(_, ConstScope::Qualified)
+            | Insn::DefinedConst(_, ConstScope::Qualified)
+            // Pops the receiver, pushes the answer.
+            | Insn::DefinedMethod(_) => 0,
+            // Defines on the lexical scope, so it takes no receiver; pushes the
+            // name it defined.
+            Insn::DefineMethod(_)
+            | Insn::GetConst(_, ConstScope::Lexical | ConstScope::Top)
+            | Insn::DefinedConst(_, ConstScope::Lexical | ConstScope::Top)
+            | Insn::DefinedSelfMethod(_)
+            | Insn::DefinedYield => 1,
+            // Leaves the assigned value, having consumed the module under it.
+            Insn::SetConst(_, ConstScope::Qualified) => -1,
+            Insn::SetConst(_, ConstScope::Lexical | ConstScope::Top) => 0,
+            // Pops a cbase and a superclass if the definition names them, and
+            // pushes what the body evaluated to.
+            Insn::OpenClass(index) => {
+                let def = &self.class_defs[index as usize];
+                let popped = isize::from(def.scoped)
+                    + isize::from(def.superclass)
+                    + isize::from(def.kind == DefKind::Singleton);
+                1 - popped
+            }
             // Pops `n`, pushes the array.
             Insn::NewArray(n) => 1 - n as isize,
             // A send pops the receiver, the arguments, and a passed block, and
@@ -340,6 +368,27 @@ impl Compiler {
         }
         self.locals.push(name.into());
         (self.locals.len() - 1) as u16
+    }
+
+    /// The slot the parameter at position `at` occupies.
+    ///
+    /// Normally `slot`: Prism lists a scope's parameters first and in binder
+    /// order, so the n-th parameter is already at index n. The exception is a
+    /// repeated name. Ruby allows one when it starts with an underscore —
+    /// `def m(_, _)` has arity 2, binds both, and `_` reads the first — and
+    /// Prism's scope list holds a single `_` for the pair. Reusing that slot
+    /// would bind two arguments to one local and leave `ParamSpec` claiming
+    /// more slots than the frame has.
+    ///
+    /// So a repeat takes a fresh slot under a name no source can mention, which
+    /// keeps the binder's positional arithmetic true and leaves `_` resolving to
+    /// the first, as Ruby does.
+    fn param_slot(&mut self, name: &str, at: usize) -> u16 {
+        let slot = self.slot(name);
+        if slot as usize == at {
+            return slot;
+        }
+        self.slot(&format!("{name} ({at})"))
     }
 
     // -- statements -------------------------------------------------------
@@ -449,6 +498,15 @@ impl Compiler {
             ExprKind::Break(value) => self.jump_out(value.as_deref(), true, span)?,
             ExprKind::Next(value) => self.jump_out(value.as_deref(), false, span)?,
 
+            ExprKind::ConstPath(path) => {
+                let (symbol, how) = self.const_path(path, span)?;
+                self.emit(Insn::GetConst(symbol, how));
+            }
+            ExprKind::Class(class) => self.class_expr(class, span)?,
+            ExprKind::Module(module) => self.module_expr(module, span)?,
+            ExprKind::SingletonClass(singleton) => self.singleton_expr(singleton, span)?,
+            ExprKind::Defined(inner) => self.defined(inner, span)?,
+
             ExprKind::Def(def) => self.def_expr(def, span)?,
             ExprKind::Yield(node) => self.yield_expr(node, span)?,
             ExprKind::Lambda(block) => self.lambda(block, span)?,
@@ -469,7 +527,11 @@ impl Compiler {
             VarRef::Instance(_) => Err(Unsupported::at("an instance variable", span)),
             VarRef::Class(_) => Err(Unsupported::at("a class variable", span)),
             VarRef::Global(_) => Err(Unsupported::at("a global variable", span)),
-            VarRef::Const(_) => Err(Unsupported::at("a constant", span)),
+            VarRef::Const(name) => {
+                let symbol = self.symbol(name);
+                self.emit(Insn::GetConst(symbol, ConstScope::Lexical));
+                Ok(())
+            }
             VarRef::It => {
                 let slot = self.slot(IT);
                 self.emit(Insn::GetLocal(slot, 0));
@@ -482,6 +544,18 @@ impl Compiler {
     }
 
     fn assign(&mut self, assign: &Assign, span: Span) -> Emit {
+        if let Some((name, how)) = self.const_target(&assign.target)? {
+            // `X = v`. A compound form (`X ||= v`, `X += v`) would have to read
+            // the constant first, and for `A::X` that means evaluating `A`
+            // twice or spilling it — neither is free, and nothing in the corpus
+            // asks. Refused rather than double-evaluated.
+            if assign.op != AssignOp::Assign {
+                return Err(Unsupported::at("a compound constant assignment", span));
+            }
+            self.expr(&assign.value)?;
+            self.emit(Insn::SetConst(name, how));
+            return Ok(());
+        }
         let (slot, depth) = self.local_target(&assign.target)?;
         match &assign.op {
             AssignOp::Assign => {
@@ -816,19 +890,306 @@ impl Compiler {
     /// cannot see the locals around the `def` — which is Ruby, and is the one
     /// place a nested scope differs from a block.
     fn def_expr(&mut self, def: &spinel_ast::Def, span: Span) -> Emit {
-        if def.receiver.is_some() {
-            // `def self.foo` needs a singleton class, which is #13's.
-            return Err(Unsupported::at("a singleton method definition", span));
-        }
         let child = self.child_iseq(&def.name, &def.params, &def.locals, &def.body, true, span)?;
         let name = self.symbol(&def.name);
         let index = self.push_child(child);
         let definition = self.definitions.len() as u32;
         self.definitions.push((name, index));
-        // The receiver is what the method is defined on. At the top level that
-        // is `self`, and `Object` is where it lands.
-        self.emit(Insn::PushSelf);
-        self.emit(Insn::DefineMethod(definition));
+        match &def.receiver {
+            // `def self.foo`, `def obj.foo`: the singleton of whatever the
+            // receiver evaluates to.
+            Some(receiver) => {
+                self.expr(receiver)?;
+                self.emit(Insn::DefineSingleton(definition));
+            }
+            // A plain `def` defines on the *lexical scope*, not on
+            // `class_of(self)`. See `Insn::DefineMethod`.
+            None => self.emit(Insn::DefineMethod(definition)),
+        }
+        Ok(())
+    }
+
+    // -- defined? --------------------------------------------------------
+
+    /// Compile `defined?(expr)`, leaving its answer — a `String` or `nil` — on
+    /// the stack.
+    ///
+    /// Ruby's answers are a table, not a rule, and the table was measured
+    /// against `ruby 4.0.6` rather than reasoned about. Two entries are worth
+    /// naming because they read wrong:
+    ///
+    /// - `nil`, `true`, and `false` answer `"nil"`, `"true"`, `"false"` — not
+    ///   `"expression"`.
+    /// - `!x` and `1 + 1` answer `"method"`, because `!` and `+` are methods.
+    ///
+    /// `defined?` recurses into exactly two kinds of position — a call's
+    /// receiver and arguments, and a collection literal's elements — so
+    /// `defined?([1, NoSuch])` is `nil` while `defined?(if NoSuch then 1 end)`
+    /// is `"expression"`. Nothing else is recursed into, which is CRuby's
+    /// `defined_expr0` and is not what the shape of the syntax suggests.
+    ///
+    /// Arguments are *checked* but never *evaluated*; only the receiver chain
+    /// runs. `defined?(D.any(D.side))` is `"method"` and calls neither.
+    fn defined(&mut self, expr: &Expr, span: Span) -> Emit {
+        match &expr.kind {
+            ExprKind::Nil => self.push_word("nil"),
+            ExprKind::True => self.push_word("true"),
+            ExprKind::False => self.push_word("false"),
+            ExprKind::SelfExpr => self.push_word("self"),
+            ExprKind::Assign(_) => self.push_word("assignment"),
+            ExprKind::Var(VarRef::Local { .. } | VarRef::It) => self.push_word("local-variable"),
+
+            ExprKind::Var(VarRef::Const(name)) => {
+                let symbol = self.symbol(name);
+                self.emit(Insn::DefinedConst(symbol, ConstScope::Lexical));
+                Ok(())
+            }
+            ExprKind::ConstPath(path) => {
+                let Some(name) = &path.name else {
+                    return Err(Unsupported::at("a syntax error", span));
+                };
+                let symbol = self.symbol(name);
+                match &path.parent {
+                    // `A::B` is `nil` when `A` itself is not defined, so the
+                    // parent is a guard before it is a receiver.
+                    Some(parent) => self.guarded(std::slice::from_ref(parent), |me| {
+                        me.expr(parent)?;
+                        me.emit(Insn::DefinedConst(symbol, ConstScope::Qualified));
+                        Ok(())
+                    }),
+                    None => {
+                        self.emit(Insn::DefinedConst(symbol, ConstScope::Top));
+                        Ok(())
+                    }
+                }
+            }
+
+            ExprKind::Yield(_) => {
+                self.emit(Insn::DefinedYield);
+                Ok(())
+            }
+
+            ExprKind::Call(call) => self.defined_call(call, span),
+
+            // Every element must be defined for the literal to be.
+            ExprKind::Array(elements) => {
+                self.guarded(elements, |me| me.push_word("expression"))
+            }
+
+            // A kind whose answer this VM cannot know. Ruby answers `nil` for an
+            // undefined instance variable, so answering `nil` here would pass
+            // `defined?(@nope).should be_nil` while the VM has no instance
+            // variables at all — a wrong answer wearing a passing spec.
+            ExprKind::Var(VarRef::Instance(_)) => {
+                Err(Unsupported::at("`defined?` on an instance variable", span))
+            }
+            ExprKind::Var(VarRef::Class(_)) => {
+                Err(Unsupported::at("`defined?` on a class variable", span))
+            }
+            ExprKind::Var(VarRef::Global(_)) => {
+                Err(Unsupported::at("`defined?` on a global variable", span))
+            }
+            ExprKind::Var(VarRef::BackRef(_) | VarRef::NumberedRef(_)) => {
+                Err(Unsupported::at("`defined?` on a back-reference", span))
+            }
+            ExprKind::Super(_) => Err(Unsupported::at("`defined?` on `super`", span)),
+
+            // Everything else is `"expression"` without being evaluated, so it
+            // is answerable even for a node this compiler could not run.
+            _ => self.push_word("expression"),
+        }
+    }
+
+    /// `defined?` of a call: the receiver and every argument must be defined,
+    /// then the method must exist.
+    fn defined_call(&mut self, call: &spinel_ast::Call, span: Span) -> Emit {
+        if call.block.is_some() {
+            // A block is not an operand, and Ruby still answers for the call.
+            // Refused rather than guessed: nothing in the corpus needs it and a
+            // guess here is a wrong answer that passes.
+            return Err(Unsupported::at("`defined?` on a call with a block", span));
+        }
+        let name = self.symbol(&call.name);
+        // Receiver before arguments, which is Ruby's evaluation order and the
+        // order the checks can have side effects in.
+        let mut guards: Vec<Expr> = call.receiver.iter().cloned().collect();
+        guards.extend(call.args.iter().cloned());
+        let receiver = call.receiver.clone();
+        self.guarded(&guards, move |me| {
+            match &receiver {
+                // The receiver runs; the arguments never do.
+                Some(receiver) => {
+                    me.expr(receiver)?;
+                    me.emit(Insn::DefinedMethod(name));
+                }
+                None => me.emit(Insn::DefinedSelfMethod(name)),
+            }
+            Ok(())
+        })
+    }
+
+    /// Emit `answer` guarded by a `defined?` check on each of `guards`.
+    ///
+    /// The first guard that answers `nil` is the answer for the whole
+    /// expression, which is a chain of `JumpUnless` — the same shape `&&` has.
+    fn guarded(
+        &mut self,
+        guards: &[Expr],
+        answer: impl FnOnce(&mut Self) -> Emit,
+    ) -> Emit {
+        let mut undefined = Vec::new();
+        for guard in guards {
+            self.defined(guard, guard.span)?;
+            undefined.push(self.emit_jump(Insn::JumpUnless));
+        }
+        answer(self)?;
+        if undefined.is_empty() {
+            return Ok(());
+        }
+        let done = self.emit_jump(Insn::Jump);
+        // Both arms leave exactly one value, so the merge point is at the same
+        // depth either way — which `emit` asserts.
+        self.depth -= 1;
+        for jump in undefined {
+            self.patch_here(jump);
+        }
+        self.emit(Insn::PushNil);
+        self.patch_here(done);
+        Ok(())
+    }
+
+    /// Push one of `defined?`'s answer strings.
+    fn push_word(&mut self, word: &str) -> Emit {
+        let index = self.literal(Literal::Str(word.as_bytes().into()));
+        self.emit(Insn::PushLit(index));
+        Ok(())
+    }
+
+    // -- constants, classes, and modules ---------------------------------
+
+    /// The symbol and lookup rule an `A::B` or `::B` names.
+    fn const_path(&mut self, path: &spinel_ast::ConstPath, span: Span) -> Result<(u32, ConstScope), Unsupported> {
+        let Some(name) = &path.name else {
+            // `A::` with nothing after it — a syntax error the parser kept so
+            // the rest of the tree survives.
+            return Err(Unsupported::at("a syntax error", span));
+        };
+        let how = match &path.parent {
+            Some(parent) => {
+                self.expr(parent)?;
+                ConstScope::Qualified
+            }
+            None => ConstScope::Top,
+        };
+        Ok((self.symbol(name), how))
+    }
+
+    /// Push the module a `class A::B` or `class ::B` is defined in.
+    ///
+    /// `::B` is `Object::B`, and `Object` is reachable as a top-level constant,
+    /// so the general instruction covers it and no opcode is needed for "push
+    /// `Object`".
+    fn const_target(&mut self, target: &Target) -> Result<Option<(u32, ConstScope)>, Unsupported> {
+        match &target.kind {
+            TargetKind::Var(VarRef::Const(name)) => {
+                Ok(Some((self.symbol(name), ConstScope::Lexical)))
+            }
+            TargetKind::ConstPath(path) => {
+                Ok(Some(self.const_path(path, target.span)?))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// The definee half of a `class`/`module` path: the symbol, and whether a
+    /// `cbase` was pushed for it.
+    fn class_path(&mut self, path: &Target) -> Result<(u32, bool), Unsupported> {
+        match self.const_target(path)? {
+            Some((symbol, ConstScope::Lexical)) => Ok((symbol, false)),
+            Some((symbol, ConstScope::Qualified)) => Ok((symbol, true)),
+            Some((symbol, ConstScope::Top)) => {
+                let object = self.symbol("Object");
+                self.emit(Insn::GetConst(object, ConstScope::Top));
+                Ok((symbol, true))
+            }
+            None => Err(Unsupported::at("a dynamic class name", path.span)),
+        }
+    }
+
+    fn class_expr(&mut self, class: &spinel_ast::Class, span: Span) -> Emit {
+        let (name, scoped) = self.class_path(&class.path)?;
+        if let Some(superclass) = &class.superclass {
+            self.expr(superclass)?;
+        }
+        self.open_class(
+            name,
+            DefKind::Class,
+            scoped,
+            class.superclass.is_some(),
+            &class.body,
+            &class.locals,
+            span,
+        )
+    }
+
+    fn module_expr(&mut self, module: &spinel_ast::Module, span: Span) -> Emit {
+        let (name, scoped) = self.class_path(&module.path)?;
+        self.open_class(
+            name,
+            DefKind::Module,
+            scoped,
+            false,
+            &module.body,
+            &module.locals,
+            span,
+        )
+    }
+
+    fn singleton_expr(&mut self, singleton: &spinel_ast::SingletonClass, span: Span) -> Emit {
+        self.expr(&singleton.expression)?;
+        self.open_class(
+            0,
+            DefKind::Singleton,
+            false,
+            false,
+            &singleton.body,
+            &singleton.locals,
+            span,
+        )
+    }
+
+    /// Compile a body and emit the instruction that opens it.
+    ///
+    /// The body is a barrier scope: `x = 1; class C; x; end` does not see `x`,
+    /// which is Ruby — a class body starts a fresh set of locals the way a
+    /// method body does.
+    #[allow(clippy::too_many_arguments)]
+    fn open_class(
+        &mut self,
+        name: u32,
+        kind: DefKind,
+        scoped: bool,
+        superclass: bool,
+        body: &[Expr],
+        locals: &[Name],
+        span: Span,
+    ) -> Emit {
+        let label = match kind {
+            DefKind::Module => "<module>",
+            DefKind::Singleton => "<singleton class>",
+            DefKind::Class => "<class>",
+        };
+        let child = self.child_iseq(label, &Params::None, locals, body, true, span)?;
+        let body = self.push_child(child);
+        let index = self.class_defs.len() as u32;
+        self.class_defs.push(ClassDef {
+            name,
+            body,
+            kind,
+            scoped,
+            superclass,
+        });
+        self.emit(Insn::OpenClass(index));
         Ok(())
     }
 
@@ -904,10 +1265,15 @@ impl Compiler {
         use spinel_ast::{KeywordRestKind, RequiredParamKind};
 
         let mut spec = ParamSpec::default();
+        // How many parameters have claimed a slot. The binder addresses them by
+        // position, so the n-th parameter owns slot n; `param_slot` holds that
+        // true even when Prism's scope list is shorter than the parameter list.
+        let mut at = 0usize;
         for required in &list.required {
             match &required.kind {
                 RequiredParamKind::Named(name) => {
-                    self.slot(name);
+                    self.param_slot(name, at);
+                    at += 1;
                     spec.required += 1;
                 }
                 // `{ |(a, b)| }` assigns through a multiple-assignment target,
@@ -918,17 +1284,20 @@ impl Compiler {
             }
         }
         for optional in &list.optional {
-            let slot = self.slot(&optional.name);
+            let slot = self.param_slot(&optional.name, at);
+            at += 1;
             spec.optional.push(Optional { slot });
         }
         if let Some(rest) = &list.rest {
             let name = rest.name.as_deref().unwrap_or("*");
-            spec.rest = Some(self.slot(name));
+            spec.rest = Some(self.param_slot(name, at));
+            at += 1;
         }
         for post in &list.posts {
             match &post.kind {
                 RequiredParamKind::Named(name) => {
-                    self.slot(name);
+                    self.param_slot(name, at);
+                    at += 1;
                     spec.post += 1;
                 }
                 RequiredParamKind::Destructure(_) => {
@@ -937,7 +1306,8 @@ impl Compiler {
             }
         }
         for keyword in &list.keywords {
-            let slot = self.slot(&keyword.name);
+            let slot = self.param_slot(&keyword.name, at);
+            at += 1;
             let name = self.symbol(&keyword.name);
             spec.keywords.push(Keyword {
                 name,
@@ -959,7 +1329,7 @@ impl Compiler {
         }
         if let Some(block) = &list.block {
             let name = block.name.as_deref().unwrap_or("&");
-            spec.block = Some(self.slot(name));
+            spec.block = Some(self.param_slot(name, at));
         }
         // `{ |a; b| }`: block-locals are ordinary locals of the block's own
         // scope, already in Prism's list for it. Naming them here only fixes
@@ -1321,9 +1691,7 @@ fn children(expr: &Expr) -> Vec<&Expr> {
 fn node_name(kind: &ExprKind) -> &'static str {
     match kind {
         ExprKind::Def(_) => "a method definition",
-        ExprKind::Class(_) | ExprKind::Module(_) | ExprKind::SingletonClass(_) => {
-            "a class or module body"
-        }
+
         ExprKind::Begin(_) | ExprKind::RescueMod(_) => "`begin`/`rescue`",
         ExprKind::Yield(_) => "`yield`",
         ExprKind::Super(_) => "`super`",
@@ -1335,8 +1703,7 @@ fn node_name(kind: &ExprKind) -> &'static str {
         ExprKind::Hash(_) => "a hash literal",
         ExprKind::Range(_) => "a range literal",
         ExprKind::Regexp(_) | ExprKind::MatchLastLine(_) => "a regexp",
-        ExprKind::Defined(_) => "`defined?`",
-        ExprKind::ConstPath(_) => "a constant path",
+
         ExprKind::Splat(_) => "a splat",
         ExprKind::Rational(_) | ExprKind::Imaginary(_) => "a rational or complex literal",
         ExprKind::XStr(_) => "a backtick command",

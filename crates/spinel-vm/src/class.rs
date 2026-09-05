@@ -47,6 +47,63 @@ use crate::value::{SymbolId, Value};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ClassId(u32);
 
+impl ClassId {
+    #[must_use]
+    pub const fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+/// One lexical scope, as an index into its heap's cref arena.
+///
+/// Ruby resolves a constant against the chain of `class`/`module` bodies it was
+/// *written* inside, which is not the chain it *runs* inside:
+///
+/// ```ruby
+/// module A
+///   X = 1
+///   class B
+///     def m = X          # A::X, though B.ancestors never reaches A
+///   end
+/// end
+/// ```
+///
+/// The compiler cannot supply that chain — it knows `B` is nested one level
+/// deeper, but `B` is a [`ClassId`] that does not exist until the body runs — so
+/// it is built at runtime, exactly as CRuby's cref is.
+///
+/// An arena index rather than a heap object because a cref is not reachable from
+/// Ruby, never outlives the modules it names (which the class table already
+/// roots), and is read on the hot path of every constant reference. It is `Copy`,
+/// so a frame, a [`Method`], and a `Proc` can each carry one by value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct CrefId(u32);
+
+impl CrefId {
+    /// The scope of a file's top level: `Object`, with nothing outside it.
+    /// Seeded by [`HandleScope::bootstrap`] as arena node 0.
+    pub const ROOT: CrefId = CrefId(0);
+
+    #[must_use]
+    pub const fn index(self) -> usize {
+        self.0 as usize
+    }
+
+    /// The inverse of [`CrefId::index`], for the slot a `Proc` stores one in.
+    #[must_use]
+    pub const fn from_index(index: usize) -> CrefId {
+        CrefId(index as u32)
+    }
+}
+
+/// One link of the lexical chain: a module, and the scope enclosing it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CrefNode {
+    class: ClassId,
+    /// `None` only for [`CrefId::ROOT`].
+    parent: Option<CrefId>,
+}
+
 /// Whether `include` accepts it, and whether it can have a superclass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -62,6 +119,11 @@ pub enum Kind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Method {
     pub owner: ClassId,
+    /// The lexical scope the `def` was written in. Carried on the method rather
+    /// than derived from `owner`, because a constant referenced in a body
+    /// resolves through the enclosing `module`s, which `owner`'s ancestors need
+    /// not reach. See [`CrefId`].
+    pub cref: CrefId,
     /// The definition. Opaque here — bytecode arrives with [#10].
     ///
     /// [#10]: https://github.com/ar4mirez/spinel/issues/10
@@ -240,7 +302,7 @@ struct Entry {
     own: Vec<ClassId>,
     /// Index of this class within `own`. CRuby's origin iclass.
     origin: usize,
-    methods: HashMap<SymbolId, Value>,
+    methods: HashMap<SymbolId, (Value, CrefId)>,
     /// Every class or module whose `own` holds this one. Flat, not just the
     /// direct includers, which is what lets a later `include` on a module reach
     /// everything that already mixed it in — Ruby 3.0's [Feature #9573] — in one
@@ -251,6 +313,10 @@ struct Entry {
     /// Allocated by [`HandleScope::singleton_class`], never before.
     singleton: Option<ClassId>,
     is_singleton: bool,
+    /// This module's own constants. Not the ancestors' — [`Classes::const_get`]
+    /// is the walk, and every rule Ruby has about which table wins depends on
+    /// this one holding only what was assigned *here*.
+    constants: HashMap<SymbolId, Value>,
 }
 
 /// One heap's classes and modules.
@@ -283,6 +349,9 @@ pub struct Classes {
     // (class, name) pairs one program actually calls between two definitions;
     // a cap costs an eviction policy, and phase 3 has the profiles to choose one.
     cache: HashMap<(ClassId, SymbolId), Option<Method>>,
+    /// Lexical scopes, as an arena of linked-list nodes. See [`CrefId`].
+    /// `bootstrap` seeds node 0 with `Object`, which is [`CrefId::ROOT`].
+    crefs: Vec<CrefNode>,
 }
 
 /// Where a splice starts, and what the target already counts as reaching.
@@ -441,9 +510,28 @@ impl Classes {
         id != module && self.ancestors(id).contains(&module)
     }
 
-    /// Define, redefine, or replace a method on this class or module.
+    /// Define, redefine, or replace a method on this class or module, in the
+    /// top-level lexical scope.
+    ///
+    /// The right call for a native primitive and for a test: neither resolves a
+    /// constant, so neither can tell [`CrefId::ROOT`] from the scope it was
+    /// really written in. A `def` compiled from Ruby source must use
+    /// [`Classes::define_method_in`] and pass its frame's scope, or a constant
+    /// in the body would resolve from `Object` instead of from the enclosing
+    /// `module`.
     pub fn define_method(&mut self, id: ClassId, name: SymbolId, body: Value) {
-        self.entry_mut(id).methods.insert(name, body);
+        self.define_method_in(id, name, body, CrefId::ROOT);
+    }
+
+    /// Define a method that remembers the lexical scope its `def` appeared in.
+    pub fn define_method_in(
+        &mut self,
+        id: ClassId,
+        name: SymbolId,
+        body: Value,
+        cref: CrefId,
+    ) {
+        self.entry_mut(id).methods.insert(name, (body, cref));
         self.bump();
     }
 
@@ -482,13 +570,140 @@ impl Classes {
         let mut cursor = Some(id);
         while let Some(c) = cursor {
             for &owner in &self.entry(c).own {
-                if let Some(&body) = self.entry(owner).methods.get(&name) {
-                    return Some(Method { owner, body });
+                if let Some(&(body, cref)) = self.entry(owner).methods.get(&name) {
+                    return Some(Method { owner, body, cref });
                 }
             }
             cursor = self.entry(c).superclass;
         }
         None
+    }
+
+    // -- constants -------------------------------------------------------
+
+    /// This module's own constant, ignoring every ancestor and every enclosing
+    /// scope. The building block the three lookup rules are written from, and
+    /// what `class C` itself checks when deciding to reopen or to create.
+    #[must_use]
+    pub fn const_get_here(&self, id: ClassId, name: SymbolId) -> Option<Value> {
+        self.entry(id).constants.get(&name).copied()
+    }
+
+    /// Assign, or reassign, a constant on this module.
+    ///
+    // ponytail: Ruby warns on reassignment ("already initialized constant C").
+    // Warning needs somewhere to warn *to*, which is #39's `$stderr`; the write
+    // itself is what every spec here checks.
+    pub fn const_set(&mut self, id: ClassId, name: SymbolId, value: Value) {
+        self.entry_mut(id).constants.insert(name, value);
+    }
+
+    /// `A::X`: `A`'s own table, then its ancestors' in order — skipping
+    /// `Object`.
+    ///
+    /// No lexical scope, and `Object` is passed over even though it sits in the
+    /// chain. That is Ruby 2.5's change and it is narrower than "no fallback":
+    /// `Object` alone is skipped, while `Kernel` and `BasicObject` are searched
+    /// like any other ancestor.
+    ///
+    /// ```ruby
+    /// TOP = 1
+    /// module Kernel; KC = 2; end
+    /// class S; end
+    /// S::TOP    # NameError — Object is skipped
+    /// S::KC     # 2         — Kernel is not
+    /// Object::TOP  # 1      — unless Object is the receiver
+    /// ```
+    #[must_use]
+    pub fn const_get_qualified(&self, id: ClassId, name: SymbolId) -> Option<Value> {
+        let object = Builtin::Object.id();
+        let skip_object = id != object;
+        self.ancestors(id)
+            .into_iter()
+            .filter(|&c| !(skip_object && c == object))
+            .find_map(|c| self.const_get_here(c, name))
+    }
+
+    /// A bare `X`, resolved from the scope it was written in.
+    ///
+    /// Ruby's order, which is documented nowhere and reads wrong from
+    /// `variable.c`, so `tests/constants.txt` measures every step of it:
+    ///
+    /// 1. each module in the cref chain, innermost first, **own table only**;
+    /// 2. the ancestors of the innermost cref, in order;
+    /// 3. `Object`, if step 2 did not already reach it.
+    ///
+    /// Step 3 fires for a module body and not for a class body, because a class
+    /// reaches `Object` through its superclass chain and a module does not.
+    #[must_use]
+    pub fn const_get(&self, cref: CrefId, name: SymbolId) -> Option<Value> {
+        let mut scope = Some(cref);
+        while let Some(c) = scope {
+            let node = self.cref(c);
+            if let Some(value) = self.const_get_here(node.class, name) {
+                return Some(value);
+            }
+            scope = node.parent;
+        }
+
+        // Step 2 searches the whole chain including `Object` — a class body
+        // does reach a top-level constant through its superclass — which is why
+        // this is not `const_get_qualified`, whose skip is `A::X`'s rule alone.
+        let innermost = self.cref(cref).class;
+        let object = Builtin::Object.id();
+        let ancestors = self.ancestors(innermost);
+        if let Some(value) = ancestors.iter().find_map(|&c| self.const_get_here(c, name)) {
+            return Some(value);
+        }
+
+        // Step 3. A class already reached `Object` above; a module did not.
+        if ancestors.contains(&object) {
+            return None;
+        }
+        self.const_get_here(object, name)
+    }
+
+    // -- lexical scopes --------------------------------------------------
+
+    /// The module a scope names. `Object` for [`CrefId::ROOT`].
+    #[must_use]
+    pub fn cref_class(&self, cref: CrefId) -> ClassId {
+        self.cref(cref).class
+    }
+
+    /// The scope enclosing this one; `None` at the top level.
+    #[must_use]
+    pub fn cref_parent(&self, cref: CrefId) -> Option<CrefId> {
+        self.cref(cref).parent
+    }
+
+    /// Open a scope for `class` nested inside `outer`.
+    ///
+    /// Nodes are never freed: a scope lives as long as the bodies compiled
+    /// inside it, which is as long as the heap. One `u64` per `class` keyword
+    /// executed, and `class` inside a loop reopens rather than re-pushing.
+    pub fn push_cref(&mut self, outer: CrefId, class: ClassId) -> CrefId {
+        let id = CrefId(self.crefs.len() as u32);
+        self.crefs.push(CrefNode {
+            class,
+            parent: Some(outer),
+        });
+        id
+    }
+
+    /// Install [`CrefId::ROOT`]. Called once, by `bootstrap`, before any Ruby
+    /// runs; `const_get` indexes the arena unconditionally and a heap with no
+    /// node 0 would panic rather than answer.
+    pub(crate) fn seed_root_cref(&mut self) {
+        assert!(self.crefs.is_empty(), "the root scope is already seeded");
+        self.crefs.push(CrefNode {
+            class: Builtin::Object.id(),
+            parent: None,
+        });
+    }
+
+    fn cref(&self, id: CrefId) -> &CrefNode {
+        &self.crefs[id.index()]
     }
 
     /// How many lookups the cache is currently answering. For tests and, in
@@ -672,6 +887,7 @@ impl Classes {
             includers: Vec::new(),
             singleton: None,
             is_singleton,
+            constants: HashMap::new(),
         });
         self.bump();
         id
@@ -688,8 +904,11 @@ impl Classes {
     pub(crate) fn each_root(&self, mut f: impl FnMut(Value)) {
         for entry in &self.entries {
             f(entry.object);
-            for &body in entry.methods.values() {
+            for &(body, _) in entry.methods.values() {
                 f(body);
+            }
+            for &value in entry.constants.values() {
+                f(value);
             }
         }
     }
@@ -762,6 +981,21 @@ impl<'h> HandleScope<'h> {
             let meta = scope.classes().object(meta.id());
             scope.set_class(handle, meta);
         }
+        // The top level's lexical scope, and the one every other scope is
+        // eventually nested inside. Seeded here so `CrefId::ROOT` is a constant
+        // that `Frame::new` can name without a heap.
+        self.classes_mut().seed_root_cref();
+
+        // Every bootstrap class is reachable by name from the top level, which
+        // means a constant on `Object`. Ruby's own `Object.const_get(:String)`
+        // resolves through exactly this table.
+        for builtin in Builtin::ALL {
+            let name = crate::shared::symbols::intern(builtin.name());
+            let object = self.classes().object(builtin.id());
+            self.classes_mut()
+                .const_set(Builtin::Object.id(), name, object);
+        }
+
         // The handful of methods that are dispatch rather than Ruby. A heap
         // with classes is one where a `Proc` can be called; everything else
         // waits for `core/*.rb`.
@@ -841,6 +1075,15 @@ impl<'h> HandleScope<'h> {
             .map(|name| format!("#<Class:{name}>"));
         let singleton = self.define(name.as_deref(), Kind::Class, superclass, true);
         self.classes_mut().entry_mut(id).singleton = Some(singleton);
+        // The same header write `singleton_class_of` makes for an ordinary
+        // object, and for the same reason: dispatch reads the header, so a
+        // metaclass the table knows about and the header does not is a
+        // metaclass no call can ever reach. `C.m` would look in `Class`.
+        let mut scope = self.nested();
+        let object = scope.classes().object(id);
+        let handle = scope.root(object);
+        let meta = scope.classes().object(singleton);
+        scope.set_class(handle, meta);
         singleton
     }
 
@@ -874,6 +1117,26 @@ impl<'h> HandleScope<'h> {
     /// Takes `&mut self` because reading the class object's slot means rooting
     /// it first, and that is a push onto the root stack. Reaching past the
     /// handle discipline to avoid it would be the one unsafe block in this file.
+    /// The table entry a value *is*, as opposed to the one it is an instance of.
+    ///
+    /// `Some` only for a class or module object. `class_of` answers "what is
+    /// this an instance of"; this answers "is this a class, and which one" —
+    /// the question `A::X`, `class A::B`, and `def self.foo` all ask.
+    ///
+    /// A class object is exactly one `Slots` cell holding its own id, so the
+    /// check is a shape test plus a round-trip through [`Classes::object`]. The
+    /// round-trip is what rules out an ordinary one-slot object whose slot
+    /// happens to hold a small integer.
+    pub fn class_id_of(&mut self, handle: Handle<'h>) -> Option<ClassId> {
+        if self.payload(handle) != Payload::Slots || self.len(handle) != CLASS_SLOTS {
+            return None;
+        }
+        let id = self.slot(handle, SLOT_ID).as_fixnum()?;
+        let id = ClassId(u32::try_from(id).ok()?);
+        let value = self.get(handle);
+        (id.index() < self.classes().len() && self.classes().object(id) == value).then_some(id)
+    }
+
     pub fn class_of(&mut self, handle: Handle<'h>) -> Option<ClassId> {
         let class = self.class(handle)?;
         let mut inner = self.nested();
@@ -1210,6 +1473,73 @@ mod tests {
         let body = scope.classes_mut().lookup(c, name).expect("survived").body;
         let body = scope.root(body);
         assert_eq!(scope.slot(body, 0), Value::fixnum(42).unwrap());
+    }
+
+    #[test]
+    fn the_collector_traces_constants() {
+        let mut heap = booted();
+        let mut scope = heap.scope();
+        let name = SymbolId(4);
+        let c = scope.define_class(Some("C"), Some(Builtin::Object.id()));
+
+        {
+            // Rooted by the constant table and nothing else once this drops. A
+            // `Classes::each_root` that walked methods but not constants would
+            // free this and leave `C::K` pointing at a reused cell.
+            let mut inner = scope.nested();
+            let value = inner.alloc(None, Payload::Slots, 1);
+            inner.set_slot(value, 0, Value::fixnum(7).unwrap());
+            let value = inner.get(value);
+            inner.classes_mut().const_set(c, name, value);
+        }
+        scope.collect();
+
+        let found = scope
+            .classes()
+            .const_get_here(c, name)
+            .expect("the constant survived");
+        let handle = scope.root(found);
+        assert_eq!(scope.slot(handle, 0), Value::fixnum(7).unwrap());
+    }
+
+    #[test]
+    fn a_scope_chain_reads_outward_and_object_is_its_end() {
+        let mut heap = booted();
+        let mut scope = heap.scope();
+        let outer = scope.define_module(Some("Outer"));
+        let inner = scope.define_class(Some("Inner"), Some(Builtin::Object.id()));
+
+        let outer_scope = scope.classes_mut().push_cref(CrefId::ROOT, outer);
+        let inner_scope = scope.classes_mut().push_cref(outer_scope, inner);
+
+        let name = SymbolId(5);
+        scope.classes_mut().const_set(outer, name, Value::fixnum(1).unwrap());
+        assert_eq!(
+            scope.classes().const_get(inner_scope, name),
+            Some(Value::fixnum(1).unwrap()),
+            "a lexically enclosing module is reached though `Inner`'s ancestors never touch it"
+        );
+
+        // The innermost scope's own table wins over the enclosing one.
+        scope.classes_mut().const_set(inner, name, Value::fixnum(2).unwrap());
+        assert_eq!(
+            scope.classes().const_get(inner_scope, name),
+            Some(Value::fixnum(2).unwrap())
+        );
+
+        // `Object` is the end of every chain, and is reached from a module body
+        // even though a module's ancestors do not include it.
+        let top = SymbolId(6);
+        scope
+            .classes_mut()
+            .const_set(Builtin::Object.id(), top, Value::fixnum(3).unwrap());
+        assert_eq!(
+            scope.classes().const_get(outer_scope, top),
+            Some(Value::fixnum(3).unwrap())
+        );
+        // A qualified lookup gets no such fallback: `Outer::TOP` is a NameError
+        // in Ruby, which is what removing it in 2.5 means.
+        assert_eq!(scope.classes().const_get_qualified(outer, top), None);
     }
 
     // T9

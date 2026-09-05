@@ -200,3 +200,111 @@ l = ->(a) { next a + 1 }; l.call(1)  #=> 2
 (def zz; 1; end)  #=> :zz
 def outer2; def inner2; 3; end; end; outer2; inner2  #=> 3
 def m; def m; 2; end; 1; end; [m, m]  #=> [1, 2]
+
+# #13 — constants, modules, class bodies, `self`, singleton classes, `defined?`.
+#
+# Constant lookup order is documented nowhere and reads wrong from `variable.c`,
+# so every rule below is a measurement rather than a reading. The two that catch
+# people: a lexically enclosing module beats an ancestor, and a qualified `A::X`
+# does *not* fall back to `Object` — Ruby removed that in 2.5.
+#
+# Every case names its own classes. The oracle runs these against one shared
+# top level where a constant outlives the line that set it, while Spinel gives
+# each line a fresh heap; a case that reused a neighbour's name would compare
+# two different programs.
+
+# -- reading and writing ---------------------------------------------------
+CW1 = 1; CW1  #=> 1
+CW2 = 1; ::CW2  #=> 1
+module CW3; end; CW3::B = 2; CW3::B  #=> 2
+class CW4; end; CW4::D = 3; CW4::D  #=> 3
+CW5 = 1; CW5 = 2; CW5  #=> 2
+CW6 = (1 + 2); CW6  #=> 3
+class CW7; end; CW7.class  #=> Class
+module CW8; end; CW8.class  #=> Module
+
+# -- lexical scope beats the ancestor chain --------------------------------
+class LB1; K = "ancestor"; end; module LO1; K = "lexical"; class LI1 < LB1; def self.k; K; end; end; end; LO1::LI1.k  #=> "lexical"
+class LB2; K = "ancestor"; end; module LO2; K = "lexical"; class LI2 < LB2; K = "own"; def self.k; K; end; end; end; LO2::LI2.k  #=> "own"
+class LB3; K = "ancestor"; end; module LO3; class LI3 < LB3; def self.k; K; end; end; end; LO3::LI3.k  #=> "ancestor"
+LT4 = "top"; module LM4; def self.t; LT4; end; end; LM4.t  #=> "top"
+module LA5; X = 1; class LB5; def m; X; end; end; end; LA5::LB5.new.m  #=> 1
+module LA6; X = 1; class LB6; def self.m; X; end; end; end; LA6::LB6.m  #=> 1
+module LA7; X = 1; module LM7; class LC7; def m; X; end; end; end; end; LA7::LM7::LC7.new.m  #=> 1
+
+# -- a block resolves constants where it was written ------------------------
+# `yield` rather than `Array#map`: the point is where the block's constants
+# resolve, and `map` is #15's.
+class BC1; X = 7; def self.each; yield; end; def self.m; each { X }; end; end; BC1.m  #=> 7
+module BA2; X = 1; class BB2; def each; yield; end; def m; each { X }; end; end; end; BA2::BB2.new.m  #=> 1
+
+# -- qualified lookup -------------------------------------------------------
+class QB1; I = "inherited"; end; class QS1 < QB1; end; QS1::I  #=> "inherited"
+module QM2; N = 1; end; QM2::N  #=> 1
+# `Object` alone is skipped by a qualified lookup, and only when it is not the
+# receiver. `Kernel` and `BasicObject` are searched like any other ancestor —
+# narrower than "no fallback", and the difference is a `NameError`.
+QT3 = "top"; module Kernel; QK3 = "kernel"; end; class QS3; end; [QS3::QK3, Object::QT3]  #=> ["kernel", "top"]
+
+# -- class and module bodies ------------------------------------------------
+class CB1; end  #=> nil
+class CB2; 42; end  #=> 42
+module CB3; 7; end  #=> 7
+class CB4; def m; 1; end; end; CB4.new.m  #=> 1
+class CB5; def self.m; 2; end; end; CB5.m  #=> 2
+class CB6; def m; 1; end; end; class CB6; def n; 2; end; end; c = CB6.new; [c.m, c.n]  #=> [1, 2]
+class CB7; end; class CD7 < CB7; def m; 5; end; end; CD7.new.m  #=> 5
+class CB8; def m; 1; end; end; class CD8 < CB8; end; CD8.new.m  #=> 1
+class CP9; class Inner; def m; :p; end; end; end; class CQ9 < CP9; class Inner; def m; :q; end; end; end; [CP9::Inner.new.m, CQ9::Inner.new.m]  #=> [:p, :q]
+module CN10; end; class CN10::Leaf; def m; 3; end; end; CN10::Leaf.new.m  #=> 3
+class CO11; X = 1; end; class CO11; def self.x; X; end; end; CO11.x  #=> 1
+
+# -- `self` -----------------------------------------------------------------
+class SC1; def self.who; self; end; end; SC1.who == SC1  #=> true
+module SM2; def self.who; self; end; end; SM2.who == SM2  #=> true
+class SC3; def who; self; end; end; c = SC3.new; c.who.equal?(c)  #=> true
+class SC4; def self.body; self; end; end; SC4.body.equal?(SC4)  #=> true
+
+# -- singleton classes ------------------------------------------------------
+class GC1; class << self; def m; 9; end; end; end; GC1.m  #=> 9
+class GC2; X = 3; class << self; def m; X; end; end; end; GC2.m  #=> 3
+o = Object.new; class << o; def m; 4; end; end; o.m  #=> 4
+o = Object.new; class << o; def m; self; end; end; o.m.equal?(o)  #=> true
+class GC5; end; class << GC5; def m; 6; end; end; GC5.m  #=> 6
+class GC6; def self.a; 1; end; def self.b; a + 1; end; end; GC6.b  #=> 2
+class GC7; def self.m; 1; end; end; class GC8 < GC7; end; GC8.m  #=> 1
+
+# -- `defined?`: the answer is a table, not a rule ---------------------------
+# Only the cases where this heap is the authority. A `defined?` that *misses* is
+# `NoDispatch` rather than Ruby's `nil`, because a fresh bootstrap heap cannot
+# tell "undefined" from "in a file `require` has not landed to load" — see
+# `interp::defined_answer`. Those cases arrive with #39.
+defined?(nil)  #=> "nil"
+defined?(true)  #=> "true"
+defined?(false)  #=> "false"
+defined?(self)  #=> "self"
+defined?(1)  #=> "expression"
+defined?("s")  #=> "expression"
+defined?(:s)  #=> "expression"
+defined?([1, 2])  #=> "expression"
+defined?(1..2)  #=> "expression"
+defined?(->{})  #=> "expression"
+defined?(if true then 1 end)  #=> "expression"
+defined?(while false do end)  #=> "expression"
+defined?(1 && 2)  #=> "expression"
+defined?(-1)  #=> "expression"
+a = 1; defined?(a)  #=> "local-variable"
+a = 1; defined?(a = 2)  #=> "assignment"
+a = 1; defined?(a = 2); a  #=> 1
+defined?(DA1 = 1)  #=> "assignment"
+DA2 = 1; defined?(DA2)  #=> "constant"
+module DM3; end; defined?(DM3)  #=> "constant"
+DA5 = 1; defined?(::DA5)  #=> "constant"
+defined?([1, 2, 3])  #=> "expression"
+class DC6; def m; 1; end; end; defined?(DC6.new.m)  #=> "method"
+class DC8; def self.m; 1; end; end; defined?(DC8.m)  #=> "method"
+class DC10; def self.m(*a); 1; end; end; defined?(DC10.m(1))  #=> "method"
+def dm11; 1; end; defined?(dm11)  #=> "method"
+def dy12; defined?(yield); end; dy12  #=> nil
+def dy13; defined?(yield); end; dy13 { }  #=> "yield"
+class DC14; def self.boom; raise "never"; end; end; defined?(DC14.boom)  #=> "method"

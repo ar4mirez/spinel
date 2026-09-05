@@ -20,7 +20,7 @@ Every bullet below is tracked as a GitHub issue, one milestone per phase: [miles
 - Bytecode + compiler for literals, locals, control flow, `while`/`until`, `case/when`. *Check:* `language/{if,unless,while,until,case}_spec.rb`.
 - Method definition and the full calling convention, `yield`, blocks, procs, lambdas. *Check:* `language/{def,block,lambda,proc,yield,send}_spec.rb`.
 - Exceptions, `ensure`, `retry`, `throw/catch`, non-local `break`/`return`. *Check:* `language/{rescue,ensure,throw,break,return,next,redo}_spec.rb`.
-- Constants, modules, `class`/`module` bodies, `self`, singleton classes, `defined?`. *Check:* `language/` minus `regexp/`.
+- Constants, modules, `class`/`module` bodies, `self`, singleton classes, `defined?`. *Check:* no example in the corpus is blocked on a constant, a constant path, a class or module body, `defined?`, or a singleton method definition; `tests/eval.txt` holds the lookup order against CRuby.
 - Regex engine decision and integration (engine.md, open questions), `Regexp` and `MatchData` basics, `=~`, `case` with regex. *Check:* `language/regexp/`.
 - `core/kernel.rb`, `core/object.rb`, minimal `Integer`, `String`, `Array`, `Hash`, `Symbol` in Ruby, enough to run the specs above. *Check:* `spinel run hello.rb` and the phase's spec directories.
 

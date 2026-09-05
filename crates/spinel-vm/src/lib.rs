@@ -75,7 +75,7 @@ pub mod method;
 pub mod shared;
 pub mod value;
 pub use bytecode::{BinOp, Insn, Iseq, Literal};
-pub use class::{Builtin, ClassId, Classes, Kind, Method, Mixin, MixinError};
+pub use class::{Builtin, ClassId, Classes, CrefId, Kind, Method, Mixin, MixinError};
 pub use compile::Unsupported;
 pub use heap::{Handle, HandleScope, Heap, Payload, Stats};
 pub use interp::{Error, Frame};

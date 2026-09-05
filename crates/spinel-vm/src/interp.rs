@@ -35,9 +35,11 @@
 
 use std::sync::Arc;
 
-use crate::bytecode::{BinOp, BlockRef, CallSite, Insn, Iseq, Literal, ParamSpec};
+use crate::bytecode::{
+    BinOp, BlockRef, CallSite, ClassDef, ConstScope, DefKind, Insn, Iseq, Literal, ParamSpec,
+};
 use crate::class::Builtin;
-use crate::class::ClassId;
+use crate::class::{ClassId, CrefId, Kind};
 use crate::heap::{Handle, HandleScope, Heap, Payload};
 use crate::method::{Definition, Native};
 use crate::value::SymbolId;
@@ -71,6 +73,22 @@ pub enum Error {
     /// A loop that ran past its budget. Guards the harness against a spec that
     /// depends on a construct the compiler silently made non-terminating.
     Budget,
+    /// A question this heap cannot answer, where the answer Ruby gives would be
+    /// indistinguishable from a wrong one.
+    ///
+    /// Distinct from [`Error::NoDispatch`], which is about an operand type, and
+    /// from [`Error::Raise`], which is Ruby's own behaviour. This is the VM
+    /// declining to guess: `defined?` on a name that is missing only because
+    /// nothing loaded the file that defines it would answer `nil`, and `nil` is
+    /// also Ruby's answer for a name that is genuinely undefined.
+    ///
+    /// It reads in the blocked-reason report, which is how the next slice gets
+    /// chosen, so the text names the question and the slice that settles it.
+    Unknowable {
+        what: &'static str,
+        /// The slice that makes the question answerable.
+        needs: &'static str,
+    },
 }
 
 impl std::fmt::Display for Error {
@@ -84,6 +102,9 @@ impl std::fmt::Display for Error {
             }
             Error::Raise { class, message } => write!(f, "would raise {class}: {message}"),
             Error::Budget => write!(f, "ran past the instruction budget"),
+            Error::Unknowable { what, needs } => {
+                write!(f, "{what} cannot be answered before {needs}")
+            }
         }
     }
 }
@@ -123,6 +144,10 @@ pub struct Frame {
     /// receiverless call has to dispatch on *something* and `nil` has no class
     /// yet — which is also true in Ruby, where `main` is an ordinary `Object`.
     receiver: Value,
+    /// The lexical scope statements run in. A file's top level is
+    /// [`CrefId::ROOT`], and a `class` body pushes its own; this is only ever
+    /// `ROOT` because the harness evaluates one top-level statement at a time.
+    cref: CrefId,
 }
 
 impl Frame {
@@ -133,6 +158,7 @@ impl Frame {
             env: Value::NIL,
             slots,
             receiver: Value::NIL,
+            cref: CrefId::ROOT,
         }
     }
 
@@ -251,11 +277,22 @@ struct Call {
     /// `yield` and by `block_given?`, and never by a slot, so an anonymous
     /// block costs nothing.
     block: Value,
+    /// The lexical scope this frame's code was written in: the enclosing
+    /// `class`/`module` chain, which is what a bare constant resolves against.
+    /// Inherited from the `Method` for a call, from the `Proc` for a block, and
+    /// pushed fresh by [`Insn::OpenClass`].
+    cref: CrefId,
     /// The block a `Proc` frame runs with is the one its *defining* frame had,
     /// which is what makes `yield` inside a block reach the method's block.
     pc: usize,
     /// Where this frame's operands start in the shared value stack.
     base: usize,
+    /// Leave the value already below `base` rather than what the body computed.
+    ///
+    /// Only `Class#new` sets it: `initialize` may return anything and `new`
+    /// still answers the object. A flag on the frame rather than a re-entrant
+    /// `eval`, so a Ruby `initialize` still costs no Rust stack.
+    keeps_receiver: bool,
 }
 
 /// Run `iseq` in `frame`, which may already hold locals from an earlier run.
@@ -287,9 +324,11 @@ pub fn eval_in(
         symbols: iseq.link(),
         env,
         receiver: frame.receiver,
+        cref: frame.cref,
         block: Value::NIL,
         pc: 0,
         base: 0,
+        keeps_receiver: false,
     }];
     let mut budget = BUDGET;
 
@@ -402,6 +441,7 @@ pub fn eval_in(
                     frames[top].receiver,
                     frames[top].block,
                     lambda,
+                    frames[top].cref,
                 );
                 stack.push(value);
             }
@@ -410,9 +450,90 @@ pub fn eval_in(
                 let (name, child) = frames[top].iseq.definitions[index as usize];
                 let iseq = Arc::clone(&frames[top].iseq.children[child as usize]);
                 let symbol = frames[top].symbols[name as usize];
-                let receiver = stack.pop().expect("definemethod on an empty stack");
-                define_method(scope, receiver, symbol, iseq)?;
+                let cref = frames[top].cref;
+                let owner = scope.classes().cref_class(cref);
+                define_method_on(scope, owner, symbol, iseq, cref);
                 stack.push(Value::symbol(symbol));
+            }
+
+            Insn::DefineSingleton(index) => {
+                let (name, child) = frames[top].iseq.definitions[index as usize];
+                let iseq = Arc::clone(&frames[top].iseq.children[child as usize]);
+                let symbol = frames[top].symbols[name as usize];
+                let cref = frames[top].cref;
+                let receiver = stack.pop().expect("a receiver to define on");
+                let owner = singleton_of(scope, receiver)?;
+                define_method_on(scope, owner, symbol, iseq, cref);
+                stack.push(Value::symbol(symbol));
+            }
+
+            Insn::GetConst(name, how) => {
+                let symbol = frames[top].symbols[name as usize];
+                let cref = frames[top].cref;
+                let from = const_base(scope, &mut stack, cref, how)?;
+                let found = match how {
+                    ConstScope::Lexical => scope.classes().const_get(cref, symbol),
+                    ConstScope::Qualified | ConstScope::Top => {
+                        scope.classes().const_get_qualified(from, symbol)
+                    }
+                };
+                let Some(value) = found else {
+                    return Err(uninitialized(scope, from, symbol, how));
+                };
+                stack.push(value);
+            }
+
+            Insn::SetConst(name, how) => {
+                let symbol = frames[top].symbols[name as usize];
+                let cref = frames[top].cref;
+                let value = stack.pop().expect("a value to assign");
+                let target = const_base(scope, &mut stack, cref, how)?;
+                scope.classes_mut().const_set(target, symbol, value);
+                // Assignment is an expression, and its value is what was
+                // assigned — not the module it landed on.
+                stack.push(value);
+            }
+
+            Insn::DefinedConst(name, how) => {
+                let symbol = frames[top].symbols[name as usize];
+                let cref = frames[top].cref;
+                let from = const_base(scope, &mut stack, cref, how)?;
+                let found = match how {
+                    ConstScope::Lexical => scope.classes().const_get(cref, symbol),
+                    ConstScope::Qualified | ConstScope::Top => {
+                        scope.classes().const_get_qualified(from, symbol)
+                    }
+                };
+                let value = defined_answer(scope, string_class, found.map(|_| "constant"))?;
+                stack.push(value);
+            }
+
+            Insn::DefinedMethod(name) | Insn::DefinedSelfMethod(name) => {
+                let symbol = frames[top].symbols[name as usize];
+                let receiver = match insn {
+                    Insn::DefinedMethod(_) => stack.pop().expect("a receiver to ask about"),
+                    _ => frames[top].receiver,
+                };
+                // `nil`, `true`, and `false` have no class yet, so "does it have
+                // this method" has no answer rather than the answer `no`.
+                let class = class_of(scope, receiver).ok_or_else(|| no_class(receiver))?;
+                let found = scope.classes_mut().lookup(class, symbol);
+                let value = defined_answer(scope, string_class, found.map(|_| "method"))?;
+                stack.push(value);
+            }
+
+            Insn::DefinedYield => {
+                // A frame either has a block or does not, and this heap is the
+                // authority on which. So `nil` here is an answer, not a gap.
+                let answer = (frames[top].block != Value::NIL).then_some("yield");
+                let value = defined_word(scope, string_class, answer);
+                stack.push(value);
+            }
+
+            Insn::OpenClass(index) => {
+                let iseq = Arc::clone(&frames[top].iseq);
+                let def = &iseq.class_defs[index as usize];
+                open_class(scope, &mut stack, &mut frames, def, &iseq)?;
             }
 
             Insn::Send(index) => {
@@ -450,7 +571,11 @@ pub fn eval_in(
                 if frames.is_empty() {
                     break value;
                 }
-                stack.push(value);
+                // `Class#new` left the object below the base; `initialize`'s own
+                // value is dropped.
+                if !done.keeps_receiver {
+                    stack.push(value);
+                }
             }
         }
     };
@@ -482,7 +607,11 @@ const PROC_ENV: usize = 1;
 const PROC_SELF: usize = 2;
 const PROC_LAMBDA: usize = 3;
 const PROC_BLOCK: usize = 4;
-const PROC_SLOTS: u32 = 5;
+/// The lexical scope the block was *written* in, as a fixnum [`CrefId`]. A block
+/// in a `class C` body resolves a bare constant against `C`, wherever it is
+/// later called from.
+const PROC_CREF: usize = 5;
+const PROC_SLOTS: u32 = 6;
 
 /// What a call is going to run.
 enum Target {
@@ -500,6 +629,10 @@ struct Pending {
     keywords: Vec<(SymbolId, Value)>,
     /// The block this call passes on, as a `Proc` or `nil`.
     block: Value,
+    /// The lexical scope the *callee's* body was written in. Filled by
+    /// `pop_call` with the caller's scope and overwritten by `dispatch` once the
+    /// method — and so the scope its `def` appeared in — is known.
+    cref: CrefId,
     target: Target,
 }
 
@@ -543,6 +676,7 @@ fn pop_call<'h>(
                 frame.receiver,
                 frame.block,
                 false,
+                frame.cref,
             )
         }
         BlockRef::None => Value::NIL,
@@ -573,6 +707,10 @@ fn pop_call<'h>(
         args,
         keywords,
         block,
+        // A placeholder: `dispatch` replaces it with the callee's own scope once
+        // the method is resolved. It only survives for a native method, which
+        // never looks a constant up.
+        cref: frame.cref,
         target: Target::Method,
     })
 }
@@ -629,6 +767,13 @@ fn dispatch<'h>(
             };
             match scope.definitions().get(method.body).cloned() {
                 Some(Definition::Iseq(iseq)) => {
+                    // The body resolves constants against the scope its `def`
+                    // was written in, which is not the caller's and need not be
+                    // reachable from `owner`'s ancestors.
+                    let call = Pending {
+                        cref: method.cref,
+                        ..call
+                    };
                     push_frame(scope, stack, frames, &call, &iseq, Value::NIL, false)
                 }
                 Some(Definition::Native(native)) => {
@@ -648,7 +793,7 @@ fn push_proc_frame(
     call: &Pending,
     block: Value,
 ) -> Result<(), Error> {
-    let Some((iseq, env, receiver, captured, lambda)) = proc_parts(scope, block) else {
+    let Some((iseq, env, receiver, captured, lambda, cref)) = proc_parts(scope, block) else {
         return Err(Error::NoDispatch {
             op: "call",
             operands: "a receiver that is not a Proc",
@@ -666,6 +811,9 @@ fn push_proc_frame(
         } else {
             call.block
         },
+        // A block resolves constants where it was written, not where it is
+        // called: `class C; X = 1; [1].each { X }; end` finds `C::X`.
+        cref,
         target: Target::Method,
     };
     push_frame(scope, stack, frames, &call, &iseq, env, lambda)
@@ -689,9 +837,11 @@ fn push_frame(
         symbols,
         env,
         receiver: call.receiver,
+        cref: call.cref,
         block: call.block,
         pc: 0,
         base: stack.len(),
+        keeps_receiver: false,
     });
     Ok(())
 }
@@ -892,6 +1042,7 @@ fn make_proc<'h>(
     receiver: Value,
     block: Value,
     lambda: bool,
+    cref: CrefId,
 ) -> Value {
     let body = scope
         .definitions_mut()
@@ -902,7 +1053,26 @@ fn make_proc<'h>(
     scope.set_slot(handle, PROC_SELF, receiver);
     scope.set_slot(handle, PROC_LAMBDA, bool_value(lambda));
     scope.set_slot(handle, PROC_BLOCK, block);
+    scope.set_slot(handle, PROC_CREF, cref_value(cref));
     scope.get(handle)
+}
+
+/// A [`CrefId`] as a `Value`, for the slots that must hold one.
+///
+/// A fixnum, the way a method body is a fixnum into `Definitions`: the arena
+/// index is meaningful only inside its own heap, and a `Proc` never outlives it.
+fn cref_value(cref: CrefId) -> Value {
+    Value::fixnum(cref.index() as i64).expect("a heap holds far under a fixnum of scopes")
+}
+
+/// Read a [`CrefId`] back out of a slot written by [`cref_value`].
+fn cref_from(value: Value) -> CrefId {
+    match value.unpack() {
+        crate::value::Unpacked::Fixnum(n) if n >= 0 => CrefId::from_index(n as usize),
+        // A `Proc` built before this slot existed, or a slot the collector has
+        // not written. The top level is the only scope that is always valid.
+        _ => CrefId::ROOT,
+    }
 }
 
 /// The definition id inside a `Proc`, or `None` if the value is not one.
@@ -922,7 +1092,7 @@ fn proc_body(scope: &mut HandleScope<'_>, value: Value) -> Option<Value> {
 fn proc_parts(
     scope: &mut HandleScope<'_>,
     value: Value,
-) -> Option<(Arc<Iseq>, Value, Value, Value, bool)> {
+) -> Option<(Arc<Iseq>, Value, Value, Value, bool, CrefId)> {
     let body = proc_body(scope, value)?;
     let iseq = match scope.definitions().get(body)? {
         Definition::Iseq(iseq) => Arc::clone(iseq),
@@ -935,27 +1105,326 @@ fn proc_parts(
         scope.slot(handle, PROC_SELF),
         scope.slot(handle, PROC_BLOCK),
         scope.slot(handle, PROC_LAMBDA).is_truthy(),
+        cref_from(scope.slot(handle, PROC_CREF)),
     ))
 }
 
-/// `def` at the top level defines a private method on `Object`, which is where
-/// Ruby puts it and what makes `def foo; end; foo` work.
-fn define_method(
+/// Open a `class`, `module`, or `class << obj` body in a new frame.
+///
+/// Three steps, in Ruby's order:
+///
+/// 1. find the definee — reopen it, or create it and bind the constant;
+/// 2. push a lexical scope inside the enclosing one;
+/// 3. push a frame whose `self` *is* the module, which is what makes `def`
+///    land on it and `def self.x` reach its singleton.
+///
+/// The body's value is the frame's value, so `x = class C; 42; end` is `42`.
+fn open_class(
     scope: &mut HandleScope<'_>,
-    receiver: Value,
+    stack: &mut Vec<Value>,
+    frames: &mut Vec<Call>,
+    def: &ClassDef,
+    iseq: &Arc<Iseq>,
+) -> Result<(), Error> {
+    let top = frames.len() - 1;
+    let outer = frames[top].cref;
+
+    let id = match def.kind {
+        DefKind::Singleton => {
+            let object = stack.pop().expect("an object to open the singleton of");
+            singleton_of(scope, object)?
+        }
+        kind => {
+            let superclass = def
+                .superclass
+                .then(|| stack.pop().expect("a superclass to inherit from"));
+            // `class A::B` names its definee; a plain `class B` uses the scope
+            // it is written in.
+            let cbase = match def.scoped {
+                true => {
+                    let value = stack.pop().expect("a module to define in");
+                    class_id_of(scope, value).ok_or_else(|| {
+                        Error::raise(
+                            "TypeError",
+                            format!("{} is not a class/module", inspect(scope, value)),
+                        )
+                    })?
+                }
+                false => scope.classes().cref_class(outer),
+            };
+            let name = frames[top].symbols[def.name as usize];
+            define_or_reopen(scope, cbase, name, kind, superclass)?
+        }
+    };
+
+    let cref = scope.classes_mut().push_cref(outer, id);
+    let receiver = scope.classes().object(id);
+    let body = Arc::clone(&iseq.children[def.body as usize]);
+    let env = env_alloc(scope, Value::NIL, body.locals.len());
+    let symbols = body.link();
+    frames.push(Call {
+        iseq: body,
+        symbols,
+        env,
+        receiver,
+        cref,
+        // A class body is not called with a block, so `yield` inside one is a
+        // `LocalJumpError` — which is Ruby.
+        block: Value::NIL,
+        pc: 0,
+        base: stack.len(),
+        keeps_receiver: false,
+    });
+    Ok(())
+}
+
+/// Find the module `name` names on `cbase`, or create it.
+///
+/// The existence check is `cbase`'s **own** table, never its ancestors, which is
+/// what makes this true:
+///
+/// ```ruby
+/// class P; class Inner; end; end
+/// class Q < P
+///   class Inner; end     # Q::Inner — a new class, not a reopening of P::Inner
+/// end
+/// ```
+fn define_or_reopen(
+    scope: &mut HandleScope<'_>,
+    cbase: ClassId,
+    name: SymbolId,
+    kind: DefKind,
+    superclass: Option<Value>,
+) -> Result<ClassId, Error> {
+    let wanted = match superclass {
+        None => None,
+        Some(value) => {
+            let id = class_id_of(scope, value).filter(|&id| scope.classes().kind(id) == Kind::Class);
+            let Some(id) = id else {
+                return Err(Error::raise(
+                    "TypeError",
+                    format!(
+                        "superclass must be an instance of Class (given an instance of {})",
+                        class_name(scope, value)
+                    ),
+                ));
+            };
+            Some(id)
+        }
+    };
+
+    if let Some(existing) = scope.classes().const_get_here(cbase, name) {
+        let Some(id) = class_id_of(scope, existing) else {
+            return Err(Error::raise(
+                "TypeError",
+                format!("{} is not a class", symbol_name(name)),
+            ));
+        };
+        let found = scope.classes().kind(id);
+        if found != kind_of(kind) {
+            let noun = match kind {
+                DefKind::Module => "module",
+                _ => "class",
+            };
+            return Err(Error::raise(
+                "TypeError",
+                format!("{} is not a {noun}", symbol_name(name)),
+            ));
+        }
+        // Reopening with an explicit superclass must name the same one. Ruby
+        // checks this before running a line of the body.
+        if let Some(wanted) = wanted
+            && scope.classes().superclass(id) != Some(wanted)
+        {
+            return Err(Error::raise(
+                "TypeError",
+                format!("superclass mismatch for class {}", symbol_name(name)),
+            ));
+        }
+        return Ok(id);
+    }
+
+    let path = qualified_name(scope, cbase, name);
+    let id = match kind {
+        DefKind::Module => scope.define_module(Some(&path)),
+        // No superclass named means `Object`, which is Ruby's default and is
+        // what makes a bare `class C` an `Object` subclass.
+        _ => scope.define_class(Some(&path), Some(wanted.unwrap_or(Builtin::Object.id()))),
+    };
+    // CRuby builds a class's metaclass in `rb_define_class`, not on first ask,
+    // and the reason is inheritance: `class B < A` with `def self.m` on `A`
+    // reaches `m` through `#<Class:B> < #<Class:A>`. Left lazy, `B` would still
+    // point at `Class` and the call would miss. `HandleScope::define_class`
+    // stays lazy; it is the `class` *keyword* that owes the link.
+    if kind != DefKind::Module {
+        scope.singleton_class(id);
+    }
+    let object = scope.classes().object(id);
+    scope.classes_mut().const_set(cbase, name, object);
+    Ok(id)
+}
+
+/// `Module#name`: `"A::B"` inside `A`, and `"B"` at the top level.
+fn qualified_name(scope: &mut HandleScope<'_>, cbase: ClassId, name: SymbolId) -> String {
+    let leaf = symbol_name(name);
+    match scope.classes().name(cbase) {
+        Some(outer) if cbase != Builtin::Object.id() => format!("{outer}::{leaf}"),
+        _ => leaf,
+    }
+}
+
+fn kind_of(kind: DefKind) -> Kind {
+    match kind {
+        DefKind::Module => Kind::Module,
+        _ => Kind::Class,
+    }
+}
+
+/// The name of a value's class, for a message that has to name a type.
+fn class_name(scope: &mut HandleScope<'_>, value: Value) -> String {
+    class_of(scope, value)
+        .and_then(|id| scope.classes().name(id).map(str::to_string))
+        .unwrap_or_else(|| inspect(scope, value))
+}
+
+/// Define a method, remembering the scope its `def` was written in.
+fn define_method_on(
+    scope: &mut HandleScope<'_>,
+    owner: ClassId,
     name: SymbolId,
     iseq: Arc<Iseq>,
-) -> Result<(), Error> {
-    let owner = if receiver == Value::NIL {
-        Builtin::Object.id()
-    } else {
-        class_of(scope, receiver).ok_or_else(|| no_class(receiver))?
-    };
+    cref: CrefId,
+) {
     let body = scope
         .definitions_mut()
         .intern_iseq(&iseq, Arc::as_ptr(&iseq) as usize);
-    scope.classes_mut().define_method(owner, name, body);
-    Ok(())
+    scope.classes_mut().define_method_in(owner, name, body, cref);
+}
+
+/// The singleton class of a value, allocating it on the first ask.
+///
+/// `def self.foo`, `def obj.foo`, and `class << obj` all land here. An immediate
+/// — a fixnum, a symbol, `nil` — has no singleton in Ruby either; the message is
+/// the one Ruby uses.
+fn singleton_of(scope: &mut HandleScope<'_>, receiver: Value) -> Result<ClassId, Error> {
+    if let Some(id) = class_id_of(scope, receiver) {
+        // A class or module: its singleton is where `def self.foo` goes.
+        return Ok(scope.singleton_class(id));
+    }
+    if receiver.is_immediate() {
+        // Ruby's text exactly: no receiver in it, and no article. `nil`, `true`,
+        // and `false` are *not* here — they answer `NilClass` and friends, which
+        // this VM will have once `core/*.rb` does (#15); until then they fall
+        // through to `class_of` and report themselves undispatchable.
+        return Err(Error::raise("TypeError", "can't define singleton"));
+    }
+    let handle = scope.root(receiver);
+    Ok(scope.singleton_class_of(handle))
+}
+
+/// The class table entry a value *is*, as opposed to the one it is an instance
+/// of. `Some` only for a class or module object.
+fn class_id_of(scope: &mut HandleScope<'_>, value: Value) -> Option<ClassId> {
+    if value.is_immediate() {
+        return None;
+    }
+    let handle = scope.root(value);
+    scope.class_id_of(handle)
+}
+
+/// Where a constant reference reads from, and what it pops to get there.
+fn const_base(
+    scope: &mut HandleScope<'_>,
+    stack: &mut Vec<Value>,
+    cref: CrefId,
+    how: ConstScope,
+) -> Result<ClassId, Error> {
+    match how {
+        // `const_get` walks the chain itself; the innermost scope is only what
+        // a `NameError` would name.
+        ConstScope::Lexical => Ok(scope.classes().cref_class(cref)),
+        ConstScope::Top => Ok(Builtin::Object.id()),
+        ConstScope::Qualified => {
+            let value = stack.pop().expect("a module to look the constant up in");
+            class_id_of(scope, value).ok_or_else(|| {
+                Error::raise(
+                    "TypeError",
+                    format!("{} is not a class/module", inspect(scope, value)),
+                )
+            })
+        }
+    }
+}
+
+/// Ruby's message for a constant that is not there. Qualified references name
+/// the module they searched; a bare one names only the constant.
+fn uninitialized(
+    scope: &mut HandleScope<'_>,
+    from: ClassId,
+    name: SymbolId,
+    how: ConstScope,
+) -> Error {
+    let constant = symbol_name(name);
+    match how {
+        ConstScope::Lexical | ConstScope::Top => {
+            Error::raise("NameError", format!("uninitialized constant {constant}"))
+        }
+        ConstScope::Qualified => {
+            let owner = scope
+                .classes()
+                .name(from)
+                .unwrap_or("an anonymous module")
+                .to_string();
+            Error::raise(
+                "NameError",
+                format!("uninitialized constant {owner}::{constant}"),
+            )
+        }
+    }
+}
+
+/// `defined?`'s answer for a *name*: the string, or a report that this heap
+/// cannot tell "undefined" from "never loaded".
+///
+/// Ruby answers `nil` for a name that is not defined. Spinel runs each example
+/// in a fresh heap holding only the bootstrap classes, so a miss means either
+/// "genuinely undefined" — Ruby's `nil` — or "defined in a file `require` has
+/// not landed to load", and nothing here can tell them apart. Answering `nil`
+/// would pass `defined?(SomeFixture).should be_nil` while the VM had simply
+/// never heard of the fixture: a wrong answer wearing a passing spec.
+///
+/// So a miss is [`Error::NoDispatch`] — *not yet knowable* rather than *no* —
+/// which `spec/harness` reports as blocked. It becomes `nil` on its own when
+/// [#39](https://github.com/ar4mirez/spinel/issues/39) can load the file that
+/// would have defined the name. This is R8 of PRD 0011 one layer down: an
+/// unknown name raises rather than answering `nil`.
+fn defined_answer<'h>(
+    scope: &mut HandleScope<'h>,
+    string_class: Handle<'h>,
+    answer: Option<&str>,
+) -> Result<Value, Error> {
+    let Some(answer) = answer else {
+        return Err(Error::Unknowable {
+            what: "`defined?` of a name this heap has never seen",
+            needs: "`require` can load the file that would define it (#39)",
+        });
+    };
+    Ok(defined_word(scope, string_class, Some(answer)))
+}
+
+/// `defined?`'s answer when this heap really is the authority: the string, or
+/// `nil` meaning `nil`.
+fn defined_word<'h>(
+    scope: &mut HandleScope<'h>,
+    string_class: Handle<'h>,
+    answer: Option<&str>,
+) -> Value {
+    let Some(answer) = answer else {
+        return Value::NIL;
+    };
+    let handle = scope.alloc(Some(string_class), Payload::Bytes, answer.len() as u32);
+    scope.bytes_mut(handle).copy_from_slice(answer.as_bytes());
+    scope.get(handle)
 }
 
 /// Why a receiver could not be dispatched on.
@@ -1065,6 +1534,7 @@ fn native_call<'h>(
                 args,
                 keywords: call.keywords,
                 block: call.block,
+                cref: call.cref,
                 target: Target::Method,
             };
             dispatch(scope, stack, frames, forwarded, proc_class)
@@ -1087,9 +1557,16 @@ fn native_call<'h>(
             Ok(())
         }
         Native::IsLambda => {
-            let handle = scope.root(call.receiver);
-            let lambda = scope.slot(handle, PROC_LAMBDA);
-            stack.push(lambda);
+            // Guarded like `Arity`, not indexed directly: `Proc#lambda?` is
+            // reachable on any receiver whose class is `Proc`, and reading slot
+            // 3 of something that is not one is a panic rather than an answer.
+            let Some((.., lambda, _)) = proc_parts(scope, call.receiver) else {
+                return Err(Error::NoDispatch {
+                    op: "lambda?",
+                    operands: "a receiver that is not a Proc",
+                });
+            };
+            stack.push(bool_value(lambda));
             Ok(())
         }
         Native::Arity => {
@@ -1109,8 +1586,94 @@ fn native_call<'h>(
             stack.push(bool_value(block != Value::NIL));
             Ok(())
         }
+        Native::New => {
+            let Some(id) = class_id_of(scope, call.receiver) else {
+                return Err(Error::raise(
+                    "NoMethodError",
+                    format!(
+                        "undefined method 'new' for an instance of {}",
+                        class_name(scope, call.receiver)
+                    ),
+                ));
+            };
+            // A bootstrap class other than `Object` has a representation this
+            // cannot build: a `Proc` is six slots, a `String` is bytes, and a
+            // bare zero-slot object wearing their class is a value every
+            // primitive on them would then misread — `Proc.new` used to reach
+            // `Proc#lambda?` and index past the end of the object. `Object` and
+            // `BasicObject` really are plain, so they are allowed.
+            let plain = matches!(
+                Builtin::ALL.get(id.index()),
+                None | Some(Builtin::Object | Builtin::BasicObject)
+            );
+            if !plain {
+                return Err(Error::Unknowable {
+                    what: "`new` on a built-in class",
+                    needs: "`core/*.rb` defines how one is allocated (#15)",
+                });
+            }
+            if scope.classes().kind(id) == Kind::Module {
+                return Err(Error::raise(
+                    "NoMethodError",
+                    format!(
+                        "undefined method 'new' for module {}",
+                        scope.classes().name(id).unwrap_or("an anonymous module")
+                    ),
+                ));
+            }
+            let class = scope.classes().object(id);
+            let class = scope.root(class);
+            // ponytail: no instance slots, because instance variables are
+            // #151's shape tree. A zero-slot object is enough to have an
+            // identity, a class, and singleton methods, which is what this
+            // slice's specs ask of it.
+            let handle = scope.alloc(Some(class), Payload::Slots, 0);
+            let object = scope.get(handle);
+            let initialize = crate::shared::symbols::intern("initialize");
+            match scope.classes_mut().lookup(id, initialize) {
+                None => {
+                    stack.push(object);
+                    Ok(())
+                }
+                Some(method) => {
+                    // `new` answers the object, never what `initialize`
+                    // returned. The object goes on the stack *below* the
+                    // frame's base and the frame is told to leave it there,
+                    // which keeps this a frame push rather than a re-entrant
+                    // `eval` — PRD 0011's R7.
+                    stack.push(object);
+                    let call = Pending {
+                        name: initialize,
+                        receiver: object,
+                        cref: method.cref,
+                        ..call
+                    };
+                    match scope.definitions().get(method.body).cloned() {
+                        Some(Definition::Iseq(iseq)) => {
+                            push_frame(scope, stack, frames, &call, &iseq, Value::NIL, false)?;
+                            let last = frames.len() - 1;
+                            frames[last].keeps_receiver = true;
+                            Ok(())
+                        }
+                        // A native `initialize` is `Object#initialize`, which
+                        // does nothing; there is no other one yet.
+                        _ => Ok(()),
+                    }
+                }
+            }
+        }
         Native::ClassOf => {
-            let class = class_of(scope, call.receiver).ok_or_else(|| no_class(call.receiver))?;
+            let mut class = class_of(scope, call.receiver).ok_or_else(|| no_class(call.receiver))?;
+            // `Object#class` skips singletons: `C.class` is `Class`, not
+            // `#<Class:C>`, and `obj.class` is unchanged by `class << obj`.
+            // The header points at the singleton once one exists, which is what
+            // makes dispatch find singleton methods, so the skip belongs here.
+            while scope.classes().is_singleton(class) {
+                class = scope
+                    .classes()
+                    .superclass(class)
+                    .expect("a singleton class has a superclass");
+            }
             stack.push(scope.classes().object(class));
             Ok(())
         }
@@ -1132,14 +1695,14 @@ fn relambda<'h>(
     proc_class: Handle<'h>,
     block: Value,
 ) -> Result<Value, Error> {
-    let Some((iseq, env, receiver, captured, _)) = proc_parts(scope, block) else {
+    let Some((iseq, env, receiver, captured, _, cref)) = proc_parts(scope, block) else {
         return Err(Error::NoDispatch {
             op: "lambda",
             operands: "a block that is not a Proc",
         });
     };
     Ok(make_proc(
-        scope, proc_class, &iseq, env, receiver, captured, true,
+        scope, proc_class, &iseq, env, receiver, captured, true, cref,
     ))
 }
 
@@ -1174,6 +1737,7 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         ),
         (Builtin::Kernel, &["block_given?"], Native::BlockGiven),
         (Builtin::Kernel, &["class"], Native::ClassOf),
+        (Builtin::Class, &["new"], Native::New),
         (Builtin::Kernel, &["equal?"], Native::Equal),
         (Builtin::Kernel, &["nil?"], Native::NilP),
     ];
@@ -1510,7 +2074,18 @@ pub fn inspect(scope: &mut HandleScope<'_>, value: Value) -> String {
                     .collect();
                 format!("[{}]", items.join(", "))
             }
-            None => "#<object>".to_owned(),
+            None => {
+                let handle = scope.root(value);
+                match scope.class_id_of(handle) {
+                    // `Module#inspect` is the module's name, which is how a
+                    // class reads in a spec's failure message and in `p C`.
+                    Some(id) => match scope.classes().name(id) {
+                        Some(name) => name.to_owned(),
+                        None => format!("#<Class:0x{:x}>", id.index()),
+                    },
+                    None => "#<object>".to_owned(),
+                }
+            }
         },
     }
 }
