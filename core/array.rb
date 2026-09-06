@@ -80,6 +80,52 @@ class Array
     count
   end
 
+  # The right-hand side of a multiple assignment, as an Array (#154).
+  #
+  # Ruby converts with `to_ary`, not `to_a`: an object that defines only `to_a`
+  # is *not* spread, it becomes the single value. Anything without `to_ary` is
+  # wrapped, which is why `a, b = nil` leaves both nil rather than raising.
+  def self.__masgn_array__(value)
+    return value if value.is_a?(Array)
+    return value.to_ary if value.respond_to?(:to_ary)
+    [value]
+  end
+
+  # Cut this array into one value per assignment target (#154).
+  #
+  # `befores` targets before the splat, `rest` whether there is one, `afters`
+  # targets after it. The answer always has `befores + (rest ? 1 : 0) + afters`
+  # entries, padded with nil, so the compiler can index it by target position
+  # without knowing how long the right-hand side turned out to be.
+  def __masgn_spread__(befores, rest, afters)
+    out = []
+    i = 0
+    while i < befores
+      out.push(self[i])
+      i = i + 1
+    end
+    # Where the targets after the splat start. When the right-hand side is
+    # shorter than the target list they fill from here rather than from the
+    # end, which is why `*a, b, c = [1]` leaves b as 1 and c as nil.
+    stop = size - afters
+    stop = befores if stop < befores
+    if rest
+      middle = []
+      j = befores
+      while j < stop
+        middle.push(self[j])
+        j = j + 1
+      end
+      out.push(middle)
+    end
+    k = 0
+    while k < afters
+      out.push(self[stop + k])
+      k = k + 1
+    end
+    out
+  end
+
   def __take__(from, wanted)
     out = []
     i = from
@@ -298,6 +344,26 @@ class Array
 
   def clear
     pop until empty?
+    self
+  end
+
+  # `[a, *b, c]` (#157). Appends the elements of `other` to this array and
+  # answers this array, so the compiler can chain one call per piece.
+  #
+  # The splat conversion lives here rather than in the lowering because it is
+  # Ruby's rule, not the compiler's: `*x` spreads what `x.to_a` gives, and
+  # wraps anything that has no `to_a` in a one-element array. `nil.to_a` is
+  # `[]`, which is why `[*nil]` is empty rather than `[nil]`.
+  def __concat_splat__(other)
+    spread = other.respond_to?(:to_a) ? other.to_a : [other]
+    unless spread.is_a?(Array)
+      raise TypeError, "can't convert " + other.class.to_s + " to Array"
+    end
+    i = 0
+    while i < spread.size
+      push(spread[i])
+      i = i + 1
+    end
     self
   end
 

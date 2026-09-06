@@ -28,6 +28,7 @@ use spinel_vm::class::Builtin;
 use spinel_vm::{ClassId, Definition, HandleScope, Heap, Native, Payload, Value, compile, interp};
 
 use crate::discover::Example;
+use crate::loader::Fixtures;
 
 /// What became of one example.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -165,7 +166,7 @@ fn call_of(subject: &Expr) -> Expr {
 /// objects and there is no other isolation yet. Bootstrapping one is a few
 /// hundred allocations; the whole `language/` corpus runs in well under a
 /// second, so the simple thing is also the fast enough thing.
-pub fn run(example: &Example) -> Outcome {
+pub fn run(example: &Example, fixtures: &Fixtures) -> Outcome {
     if example.skipped.is_some() {
         return Outcome::Skipped;
     }
@@ -180,6 +181,28 @@ pub fn run(example: &Example) -> Outcome {
     // fills in their methods, and without it every example that calls one is
     // blocked on a method that exists in `core/*.rb`.
     spinel_core::boot(&mut scope);
+
+    // The fixture files this spec file `require_relative`s, in Ruby's order
+    // (#183).
+    //
+    // A fixture that raises is left where it stopped, and whatever it managed
+    // to define stays defined. That is deliberate but not obviously safe: a
+    // half-built class can answer questions Ruby's version would refuse, and an
+    // example running against one can pass for the wrong reason. Blocking every
+    // example whose fixtures did not all finish was measured and costs 261 of
+    // the 263 examples this slice gained, because fixtures raise part way
+    // constantly and almost always past the part the example needed.
+    //
+    // What makes the lenient rule honest is `scripts/verify-passes.rb`, which
+    // re-runs every claimed pass on real Ruby. It found exactly one example
+    // passing off a partial fixture, that turned out to be an arity bug in
+    // `Exception.new` rather than a loading one, and reports none now. If it
+    // ever reports another, this is the first place to look.
+    for fixture in fixtures.iter() {
+        let mut fixture_frame = interp::Frame::new(0);
+        let _ = interp::eval_in(&mut scope, &mut fixture_frame, &fixture.iseq);
+    }
+
     install_scratch_pad(&mut scope, &mut frame);
 
     // One slot map for the whole example: every statement is compiled against

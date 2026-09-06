@@ -92,10 +92,18 @@ fn a_construct_this_slice_does_not_compile_is_an_error_never_a_guess() {
         "defined?($a)",
         "defined?(@@a)",
         "A ||= 1",
-        "{ a: 1 }",
-        "(1..2)",
+        // A hash literal, a range literal, an array splat, a multiple
+        // assignment and string interpolation left this list with #157 and
+        // #154. What replaces them is the call-convention half of the same
+        // syntax, which #11 owns: `CallSite::keywords` names each keyword by
+        // symbol, so a non-symbol key and a `**` argument have nowhere to go.
+        "f(\"a\" => 1)",
+        "f(**h)",
         "case 1; in Integer then 2; end",
-        "'a' + \"#{1}\"",
+        // A destructuring parameter binds several names in one slot, so
+        // anything after it would be bound to the wrong one. See
+        // `Compiler::spec_from_list`.
+        "proc { |(a, b), c| }",
     ] {
         let parsed = spinel_parse::parse(source.as_bytes());
         assert!(
