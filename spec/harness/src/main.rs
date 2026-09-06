@@ -228,7 +228,8 @@ fn main() -> ExitCode {
                 // byte range is what `scripts/verify-passes.rb` slices out of
                 // the file to replay an example on a real Ruby. Everything a
                 // reader wants is still on the line.
-                let outcome = match run::run(example, &fixtures) {
+                let ran = run::ran(example, &fixtures);
+                let outcome = match ran.outcome {
                     Outcome::Passed => "passed".to_owned(),
                     Outcome::Failed(why) => format!("failed: {why}"),
                     Outcome::Skipped => match &example.skipped {
@@ -240,8 +241,8 @@ fn main() -> ExitCode {
                 // Spans, comma-separated: the `before` bodies that ran first,
                 // then the example's own. `verify-passes.rb` concatenates them
                 // to rebuild exactly what was run.
-                let spans: Vec<String> = example
-                    .setup_spans
+                let spans: Vec<String> = ran
+                    .spans
                     .iter()
                     .chain(std::iter::once(&example.span))
                     .map(|span| format!("{}-{}", span.start, span.end))

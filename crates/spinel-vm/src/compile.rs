@@ -104,6 +104,31 @@ pub fn expression(name: &str, locals: &[Name], expr: &Expr) -> Result<Iseq, Unsu
     Ok(compiler.finish())
 }
 
+/// [`expression`], for a caller that has flattened several Ruby scopes into the
+/// one `locals` describes.
+///
+/// `spec/harness` is that caller and the only one (#164). ruby/spec declares a
+/// local in a `describe` body, assigns it in a `before`, and reads it in the
+/// example — three scopes, one variable — and the harness runs all three
+/// statements in a single frame so the value survives between them. Prism
+/// resolved those reads against the scopes *as written*, so they arrive here
+/// carrying a `depth` that counts scopes this caller has merged.
+///
+/// Under this flag a depth pointing past the enclosing scopes that actually
+/// exist resolves to the outermost one that does, rather than being refused.
+/// It is opt-in because for ordinary Ruby that same depth is a disagreement
+/// between Prism and this compiler about what a local is — a bug to hear about
+/// rather than a shape to lower — and [`expression`] still says so.
+///
+/// It does not cross a scope barrier: a `def` inside a flattened statement
+/// cannot see the flattened locals, exactly as it cannot in Ruby.
+pub fn flattened_expression(name: &str, locals: &[Name], expr: &Expr) -> Result<Iseq, Unsupported> {
+    let mut compiler = Compiler::new(name, locals);
+    compiler.flattened = true;
+    compiler.expr(expr)?;
+    Ok(compiler.finish())
+}
+
 /// Every local name that appears as an assignment target anywhere in `body`.
 ///
 /// The parser's own scope list is the authority and is used first; this is the
@@ -205,6 +230,9 @@ struct Compiler {
     /// `VarRef::Local { depth }` can be turned into a slot number. Prism has
     /// already done the hard half by deciding the depth; this is the lookup.
     outer: Vec<Vec<Box<str>>>,
+    /// The caller merged several Ruby scopes into [`Self::locals`], so a depth
+    /// may overshoot the chain. See [`flattened_expression`].
+    flattened: bool,
 }
 
 impl Compiler {
@@ -229,6 +257,7 @@ impl Compiler {
             scope_barrier: true,
             is_lambda_body: false,
             outer: Vec::new(),
+            flattened: false,
         }
     }
 
@@ -243,6 +272,9 @@ impl Compiler {
         if !barrier {
             compiler.outer.push(parent.locals.clone());
             compiler.outer.extend(parent.outer.iter().cloned());
+            // A block sees the flattened scopes its parent saw. A method body
+            // does not, which is what the barrier already says.
+            compiler.flattened = parent.flattened;
         }
         compiler
     }
@@ -289,6 +321,8 @@ impl Compiler {
             | Insn::GetIvar(_)
             | Insn::DefinedIvar(_)
             | Insn::Dup => 1,
+            // Pops the splatted array and pushes its snapshot: net zero.
+            Insn::CaptureSplat => 0,
             Insn::Pop
             | Insn::SetLocal(_, _)
             | Insn::SetIvar(_)
@@ -476,10 +510,30 @@ impl Compiler {
     /// So a repeat takes a fresh slot under a name no source can mention, which
     /// keeps the binder's positional arithmetic true and leaves `_` resolving to
     /// the first, as Ruby does.
+    ///
+    /// The other way to be out of position is to be *later* than index `at`,
+    /// and it is not a repeat but a displacement: a parameter's default may
+    /// declare a local, and Prism lists that local where it is written — before
+    /// the parameters that follow it.
+    ///
+    /// ```ruby
+    /// def m(a = (b = 1), d = 2)   # Prism's scope list: [a, b, d]
+    /// ```
+    ///
+    /// `d` is at index 2, so binding it at index 1 under a fresh name gave the
+    /// body a `d` nothing ever wrote — `m(9, 8)` answered `d == nil` with the
+    /// argument sitting in a slot no source can mention. Moving it into binder
+    /// position instead is safe here and nowhere else: parameters are lowered
+    /// before the body, so no emitted instruction yet names either slot, and
+    /// everything below `at` is a parameter already placed.
     fn param_slot(&mut self, name: &str, at: usize) -> u16 {
-        let slot = self.slot(name);
-        if slot as usize == at {
-            return slot;
+        let slot = self.slot(name) as usize;
+        if slot == at {
+            return slot as u16;
+        }
+        if slot > at {
+            self.locals.swap(at, slot);
+            return u16::try_from(at).unwrap_or(u16::MAX);
         }
         self.slot(&format!("{name} ({at})"))
     }
@@ -813,8 +867,8 @@ impl Compiler {
     fn var(&mut self, var: &VarRef, span: Span) -> Emit {
         match var {
             VarRef::Local { name, depth } => {
-                let slot = self.outer_slot(name, *depth, span)?;
-                self.emit(Insn::GetLocal(slot, *depth as u16));
+                let (slot, depth) = self.outer_slot(name, *depth, span)?;
+                self.emit(Insn::GetLocal(slot, depth));
                 Ok(())
             }
             VarRef::Instance(name) => {
@@ -1031,8 +1085,8 @@ impl Compiler {
     fn target_slot(&mut self, target: &Target) -> Result<Slot, Unsupported> {
         match &target.kind {
             TargetKind::Var(VarRef::Local { name, depth }) => {
-                let slot = self.outer_slot(name, *depth, target.span)?;
-                Ok(Slot::Local(slot, *depth as u16))
+                let (slot, depth) = self.outer_slot(name, *depth, target.span)?;
+                Ok(Slot::Local(slot, depth))
             }
             TargetKind::Var(VarRef::Instance(name)) => Ok(Slot::Ivar(self.symbol(name))),
             TargetKind::Var(VarRef::Class(_)) => {
@@ -1349,21 +1403,62 @@ impl Compiler {
     /// the time this block is compiled, and a name missing from it would mean
     /// Prism and this compiler disagreed about what a local is, which is a bug
     /// rather than a construct to lower.
-    fn outer_slot(&mut self, name: &str, depth: u32, span: Span) -> Result<u16, Unsupported> {
+    fn outer_slot(
+        &mut self,
+        name: &str,
+        depth: u32,
+        span: Span,
+    ) -> Result<(u16, u16), Unsupported> {
         if depth == 0 {
-            return Ok(self.slot(name));
+            return Ok((self.slot(name), 0));
         }
         // A method body cannot see the locals of the scope it was written in,
         // and the compiler never builds one that tries. A block nested in a
         // method that is nested in a block can, which is why this is a walk.
+        // A caller that flattened scopes hands over a depth counting scopes that
+        // no longer exist separately; the outermost one that does exist is
+        // where they all went. With no outer scope at all that is this one, and
+        // the name may be the first mention of a slot the flattening created.
+        // See `flattened_expression`.
+        // The depth is rewritten as well as the slot: it is what
+        // `Insn::GetLocal` walks at run time, and a frame that is one
+        // environment short of the depth it was handed does not fail, it reads
+        // whatever is there.
+        let effective = if self.flattened {
+            depth.min(self.outer.len() as u32)
+        } else {
+            depth
+        };
+        if effective == 0 {
+            // Resolved, never created. A name the flattening did not actually
+            // merge is a name from a scope that is still missing, and inventing
+            // a slot for it would bind `nil` rather than refuse:
+            //
+            // ```ruby
+            // symbols.each do |input, expected|
+            //   it "..." do input.inspect.should == expected end
+            // end
+            // ```
+            //
+            // `input` belongs to a block the harness does not run. Creating it
+            // turned `core/symbol/inspect_spec.rb` from blocked into a *failure*
+            // against two nils the harness had made up — and nothing about that
+            // guaranteed the failing direction rather than a false pass.
+            return self
+                .locals
+                .iter()
+                .position(|l| &**l == name)
+                .map(|index| (index as u16, 0))
+                .ok_or_else(|| Unsupported::at("a local variable from an enclosing scope", span));
+        }
         let scope = self
             .outer
-            .get(depth as usize - 1)
+            .get(effective as usize - 1)
             .ok_or_else(|| Unsupported::at("a local variable from an enclosing scope", span))?;
         scope
             .iter()
             .position(|l| &**l == name)
-            .map(|index| index as u16)
+            .map(|index| (index as u16, effective as u16))
             .ok_or_else(|| Unsupported::at("a local variable from an enclosing scope", span))
     }
 
@@ -2059,12 +2154,19 @@ impl Compiler {
             implicit_self: false,
         };
 
-        for arg in args {
+        for (index, arg) in args.iter().enumerate() {
             match &arg.kind {
                 ExprKind::Splat(Some(inner)) => {
                     self.expr(inner)?;
                     site.splats.push(site.argc);
                     site.argc += 1;
+                    // Ruby expands a splat where it is written; this convention
+                    // expands it when the call is made. Snapshot it so the two
+                    // agree, but only when something to the right can run Ruby
+                    // and change the array in between (#160).
+                    if mutable_after(args, index, block) {
+                        self.emit(Insn::CaptureSplat);
+                    }
                 }
                 ExprKind::Splat(None) => {
                     return Err(Unsupported::at("argument forwarding", arg.span));
@@ -2550,6 +2652,24 @@ fn node_name(kind: &ExprKind) -> &'static str {
         ExprKind::Missing => "a syntax error",
         _ => "this expression",
     }
+}
+
+/// Whether anything written to the right of argument `index` can run Ruby.
+///
+/// A splat only needs [`Insn::CaptureSplat`] when something after it could
+/// change the array before the call expands it. Nothing after it means nothing
+/// can: `m(*args)` is the overwhelming majority of splatted call sites and pays
+/// nothing.
+///
+/// A literal block is *not* something after it. `{ }` and `do end` build a
+/// `Proc` from a compiled child at call time and run no user code; `&expr` is a
+/// pass, and its expression is evaluated right there — which is the shape the
+/// issue was filed for, `m(*args, &args.pop)`.
+fn mutable_after(args: &[Expr], index: usize, block: Option<&BlockArg>) -> bool {
+    if index + 1 < args.len() {
+        return true;
+    }
+    matches!(block, Some(BlockArg::Pass(_)))
 }
 
 /// A literal's flags, as the integer `Regexp#options` answers.

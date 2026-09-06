@@ -23,7 +23,7 @@
 //! matchers that need method dispatch, and reports itself as the reason it was
 //! blocked so the next slice is chosen from data.
 
-use spinel_ast::{CallFlags, Expr, ExprKind, Name};
+use spinel_ast::{CallFlags, Expr, ExprKind, Name, Span};
 use spinel_vm::class::Builtin;
 use spinel_vm::{ClassId, Definition, HandleScope, Heap, Native, Payload, Value, compile, interp};
 
@@ -167,6 +167,27 @@ fn call_of(subject: &Expr) -> Expr {
 /// hundred allocations; the whole `language/` corpus runs in well under a
 /// second, so the simple thing is also the fast enough thing.
 pub fn run(example: &Example, fixtures: &Fixtures) -> Outcome {
+    ran(example, fixtures).outcome
+}
+
+/// What one example did, and the source it actually ran to do it.
+pub struct Ran {
+    pub outcome: Outcome,
+    /// The prepended statements that ran, in order, for
+    /// `scripts/verify-passes.rb` to slice back out of the file. A scope
+    /// statement Spinel could not run is absent, because a replay that
+    /// included it would be running a program Spinel never did.
+    pub spans: Vec<Span>,
+}
+
+/// [`run`], reporting the source that ran as well as the outcome.
+pub fn ran(example: &Example, fixtures: &Fixtures) -> Ran {
+    let mut spans: Vec<Span> = Vec::new();
+    let outcome = run_inner(example, fixtures, &mut spans);
+    Ran { outcome, spans }
+}
+
+fn run_inner(example: &Example, fixtures: &Fixtures, spans: &mut Vec<Span>) -> Outcome {
     if example.skipped.is_some() {
         return Outcome::Skipped;
     }
@@ -209,11 +230,44 @@ pub fn run(example: &Example, fixtures: &Fixtures) -> Outcome {
     // it and hands back the version it grew, so `a` is the same slot in the
     // statement that writes it and the one that reads it.
     let mut locals: Vec<Name> = example.locals.clone();
-    for name in compile::declared_locals(&example.body) {
+    for name in compile::declared_locals(&example.scope)
+        .into_iter()
+        .chain(compile::declared_locals(&example.body))
+    {
         if !locals.contains(&name) {
             locals.push(name);
         }
     }
+
+    // The statements of the groups enclosing this example (#164): the spec
+    // file's top level and the `describe` bodies, which Ruby runs when the file
+    // loads and the example then closes over.
+    //
+    // Run leniently, for the reason the fixture loop above gives. `send_spec.rb`
+    // opens `specs = LangSendSpecs`, and that fixture does not compile yet — so
+    // blocking on a raise here would take 11 examples that never mention
+    // `specs` down with it, which is the 261-of-263 mistake in a smaller shape.
+    //
+    // What keeps it honest is the same pair as everywhere else. A pass is
+    // re-run by `scripts/verify-passes.rb`, which slices these statements back
+    // out of the file — `setup_spans` covers them — and runs them on real Ruby,
+    // where the constant exists; an example that only passed because the setup
+    // was skipped fails there. And a *blocked* example reports this error
+    // rather than whatever it hit afterwards, because the first divergence from
+    // the program Ruby runs is the honest attribution and the one that
+    // aggregates: 76 examples naming the fixture, not 50 nil receivers.
+    let mut scope_error: Option<String> = None;
+    for (statement, span) in example.scope.iter().zip(&example.scope_spans) {
+        match eval(&mut scope, &mut frame, &mut locals, statement) {
+            Ok(_) => spans.push(*span),
+            Err(stop) => {
+                if scope_error.is_none() {
+                    scope_error = Some(stop.reason());
+                }
+            }
+        }
+    }
+    spans.extend(example.setup_spans.iter().copied());
 
     // Boot and the scratch pad are not the example. Anything they raised for is
     // not what the example swallowed.
@@ -373,10 +427,14 @@ pub fn run(example: &Example, fixtures: &Fixtures) -> Outcome {
             Outcome::Blocked("nothing to run".to_owned())
         }
     })();
-    match (outcome, scope.missing_method()) {
+    let outcome = match (outcome, scope.missing_method()) {
         (Outcome::Failed(why), Some(missing)) => Outcome::Blocked(format!(
             "{missing}; the failure that followed is not a disagreement ({why})"
         )),
+        (outcome, _) => outcome,
+    };
+    match (outcome, scope_error) {
+        (Outcome::Blocked(_), Some(why)) => Outcome::Blocked(why),
         (outcome, _) => outcome,
     }
 }
@@ -390,7 +448,10 @@ fn eval(
     locals: &mut Vec<Name>,
     expr: &Expr,
 ) -> Result<Value, Stop> {
-    let iseq = compile::expression("<example>", locals, expr)
+    // Flattened, because the statements handed here came from up to three Ruby
+    // scopes — a `describe` body, a `before`, the example — that this harness
+    // runs in one frame (#164).
+    let iseq = compile::flattened_expression("<example>", locals, expr)
         .map_err(|e| Stop::Unsupported(e.to_string()))?;
     // The compiler appends any local this expression introduced, and the next
     // one must see the same indices.

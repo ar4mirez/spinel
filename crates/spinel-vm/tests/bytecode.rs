@@ -225,3 +225,36 @@ fn next_runs_the_ensure_it_leaves() {
     let value = interp::eval_in(&mut scope, &mut frame, &iseq).expect("should run");
     assert_eq!(interp::inspect(&mut scope, value), "[:begin, :ensure]");
 }
+
+/// A call site that does not need the splat snapshot does not get one (#160).
+///
+/// The fix for argument evaluation order is an extra instruction, and the
+/// issue's second requirement is that it stays off the paths that cannot want
+/// it: an ordinary call, and a splat with nothing to its right. Only a splat
+/// followed by something that can run Ruby — another argument, or `&expr` —
+/// pays for it.
+#[test]
+fn only_a_splat_something_can_outrun_is_captured() {
+    let captures = |source: &str| {
+        iseq(source)
+            .insns
+            .iter()
+            .filter(|insn| matches!(insn, Insn::CaptureSplat))
+            .count()
+    };
+
+    // Nothing to the right: the array cannot change before the call expands it.
+    assert_eq!(captures("def m(*a); a; end; x = [1]; m(*x)"), 0);
+    assert_eq!(captures("def m(a); a; end; x = 1; m(x)"), 0);
+    // A literal block builds a `Proc` and runs no user code.
+    assert_eq!(captures("def m(*a); a; end; x = [1]; m(*x) { 1 }"), 0);
+
+    // A `&expr` block argument is evaluated at the call site, which is the
+    // shape #160 was filed for.
+    assert_eq!(captures("def m(*a, &b); a; end; x = [1]; m(*x, &x.pop)"), 1);
+    // So is any argument after the splat.
+    assert_eq!(captures("def m(*a); a; end; x = [1]; m(*x, x.pop)"), 1);
+    assert_eq!(captures("def m(*a); a; end; x = [1]; m(*x, 1, 2)"), 1);
+    // Two splats: the first can be outrun, the last cannot.
+    assert_eq!(captures("def m(*a); a; end; x = [1]; m(*x, *x)"), 1);
+}

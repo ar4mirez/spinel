@@ -77,9 +77,8 @@ fix is a different slice. The reason says which slice, by number.
 
 ## What is here now
 
-Twenty-one tags across sixteen files. Every one names the open issue that closes
-it: argument evaluation order (#160, twice), method visibility (#161, twice),
-fibers (#16, #26), `Kernel#Float` on a String (#181), structural `#hash`
+Seventeen tags across thirteen files. Every one names the open issue that closes
+it: fibers (#16, #26), `Kernel#Float` on a String (#181), structural `#hash`
 (#21, #22 three times, #23), the `Hash` table and its `inspect` format
 (#19, #20, #22 three times), Range-aware indexing in `MatchData` (#33), frozen
 string literals (#19), definition hooks (#28), and constant visibility (#185,
@@ -103,6 +102,13 @@ gone: `language/regexp/character_classes`, `language/regexp/empty_checks` and
 #181 was the one tag added between. It was filed before the tag was written,
 which is the order this file asks for — and #185 was filed the same way, before
 the four constant-visibility tags that name it.
+
+Method visibility (#161) and argument evaluation order (#160) are the most
+recent to be paid off rather than reworded, and between them they took four
+tags and three files: `language/def_tags.txt`, `language/defined_tags.txt` and
+`language/send_tags.txt` are gone, because each held only the tags that issue
+closed and an empty tag file is still a file. None of those four examples is
+skipped anywhere now.
 
 Each was surfaced by a slice that could not also fix it. The full history is in
 the PRD that added this directory, `docs/prd/0020-spec-tags.md`.

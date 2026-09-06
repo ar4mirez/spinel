@@ -150,6 +150,7 @@ mod tests {
     use super::*;
     use crate::Builtin;
     use crate::bytecode::{BlockRef, CallSite};
+    use crate::class::Visibility;
     use crate::heap::Heap;
     use crate::value::Value;
 
@@ -276,6 +277,50 @@ mod tests {
             d
         );
         assert!(caches.get(base, c, scope.classes().serial(c)).is_none());
+    }
+
+    /// Narrowing a method's visibility must invalidate a warm site (#161).
+    ///
+    /// Visibility lives on the memoised `Method`, so `private :m` on a method
+    /// some site has already called has to bump the serial the way a
+    /// redefinition does. Without it a site that called `obj.m` while it was
+    /// public keeps calling it — and so does every already-warm site in the
+    /// heap, which would look intermittent and receiver-dependent rather than
+    /// reproducible.
+    #[test]
+    fn narrowing_visibility_misses() {
+        let mut heap = booted();
+        let mut scope = heap.scope();
+        let name = crate::shared::symbols::intern("inline_cache_visibility_change");
+        let c = scope.define_class(Some("C"), Some(Builtin::Object.id()));
+        scope
+            .classes_mut()
+            .define_method(c, name, Value::fixnum(1).unwrap());
+        let public = scope.classes_mut().lookup(c, name).unwrap();
+        assert_eq!(public.visibility, Visibility::Public);
+
+        let mut caches = CallCaches::new();
+        let base = caches.base(&iseq_with(1));
+        let serial = scope.classes().serial(c);
+        caches.fill(base, c, serial, public);
+        assert!(caches.get(base, c, serial).is_some());
+
+        assert!(
+            scope
+                .classes_mut()
+                .set_visibility(c, name, Visibility::Private)
+        );
+        let bumped = scope.classes().serial(c);
+        assert!(bumped > serial, "`private :m` bumps `C`'s serial");
+        assert!(
+            caches.get(base, c, bumped).is_none(),
+            "the stale entry still says the method is public"
+        );
+        assert_eq!(
+            scope.classes_mut().lookup(c, name).unwrap().visibility,
+            Visibility::Private,
+            "and the lookup that re-fills carries the new visibility"
+        );
     }
 
     /// Guard failure 2: the class is right and its serial moved. A definition

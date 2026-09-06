@@ -40,7 +40,7 @@ use crate::bytecode::{
     MatchRef, ParamSpec,
 };
 use crate::class::Builtin;
-use crate::class::{ClassId, CrefId, Kind};
+use crate::class::{ClassId, CrefId, Kind, Method, Visibility};
 use crate::heap::{Handle, HandleScope, Heap, Payload};
 use crate::method::{BitOp, Definition, IvarOp, Native};
 use crate::shape::ShapeId;
@@ -297,6 +297,22 @@ struct Call {
     /// `yield` and by `block_given?`, and never by a slot, so an anonymous
     /// block costs nothing.
     block: Value,
+    /// The visibility a `def` in *this* scope gets — a bare `private` sets it
+    /// (#161). CRuby's `CREF_SCOPE_VISI`, kept on the frame rather than on the
+    /// scope because it belongs to one execution of a body:
+    ///
+    /// ```ruby
+    /// class A
+    ///   private
+    ///   [1].each { def in_block; end }   # private: a block shares the scope
+    ///   def outer; def nested; end; end  # public: a method body resets it
+    /// end
+    /// ```
+    ///
+    /// Both measured on ruby 4.0.6. A block takes the value from the frame it
+    /// was written in — the one its `home` link already names — and a method
+    /// body starts public, which is the whole difference between those lines.
+    scope_visibility: Visibility,
     /// The lexical scope this frame's code was written in: the enclosing
     /// `class`/`module` chain, which is what a bare constant resolves against.
     /// Inherited from the `Method` for a call, from the `Proc` for a block, and
@@ -375,6 +391,8 @@ struct Links {
     id: u64,
     home: u64,
     breaks: u64,
+    /// See [`Call::scope_visibility`].
+    scope_visibility: Visibility,
 }
 
 /// What one instruction did.
@@ -466,6 +484,10 @@ pub fn eval_in(
         pc: 0,
         base: 0,
         keeps_receiver: false,
+        // A `def` at a script's top level is a *private* instance method of
+        // `Object` — `def m; end; Object.new.m` raises. CRuby gives the top
+        // level cref `METHOD_VISI_PRIVATE`, and this is that (#161).
+        scope_visibility: Visibility::Private,
         // The outermost frame is its own `return` target and has no `break`
         // target: `return` at the top level ends the script, and `break` there
         // has no call to end.
@@ -520,6 +542,15 @@ pub fn eval_in(
                 Insn::Dup => {
                     let value = *stack.last().expect("dup on an empty stack");
                     stack.push(value);
+                }
+
+                Insn::CaptureSplat => {
+                    let value = stack.pop().expect("a splat to capture");
+                    let captured = match array_elements(scope, value) {
+                        Some(elements) => new_array(scope, &elements),
+                        None => value,
+                    };
+                    stack.push(captured);
                 }
 
                 Insn::GetIvar(name) => {
@@ -607,6 +638,8 @@ pub fn eval_in(
                                 block: Value::NIL,
                                 block_is_literal: false,
                                 cref: frames[top].cref,
+                                implicit_self: false,
+                                public_only: false,
                                 target: Target::Method,
                             };
                             if let Some(unwind) = dispatch(
@@ -674,6 +707,7 @@ pub fn eval_in(
                     let iseq = Arc::clone(&frames[top].iseq.children[child as usize]);
                     let symbol = frames[top].symbols[name as usize];
                     let cref = frames[top].cref;
+                    let visibility = frames[top].scope_visibility;
                     let owner = scope.classes().cref_class(cref);
                     hook_refusal(
                         scope,
@@ -683,7 +717,7 @@ pub fn eval_in(
                             "`method_added`, which this definition would fire",
                         )],
                     )?;
-                    define_method_on(scope, owner, symbol, iseq, cref);
+                    define_method_on(scope, owner, symbol, iseq, cref, visibility);
                     stack.push(Value::symbol(symbol));
                 }
 
@@ -710,7 +744,9 @@ pub fn eval_in(
                             needs: "the definition hooks (#28)",
                         });
                     }
-                    define_method_on(scope, owner, symbol, iseq, cref);
+                    // Always public: a bare `private` in the class body does
+                    // not reach `def self.m`, measured on ruby 4.0.6.
+                    define_method_on(scope, owner, symbol, iseq, cref, Visibility::Public);
                     stack.push(Value::symbol(symbol));
                 }
 
@@ -777,7 +813,31 @@ pub fn eval_in(
                     // this method" has no answer rather than the answer `no`.
                     let class = class_of(scope, receiver).ok_or_else(|| no_class(receiver))?;
                     let found = scope.classes_mut().lookup(class, symbol);
-                    let value = defined_answer(scope, string_class, found.map(|_| "method"))?;
+                    // A method this site could not call is not "method" (#161).
+                    // `defined?` refuses `self.priv` where the call allows it,
+                    // so `self_receiver_ok` is false here — measured, not
+                    // inferred.
+                    let implicit = matches!(insn, Insn::DefinedSelfMethod(_));
+                    let caller = frames[top].receiver;
+                    let refused = found.is_some_and(|method| {
+                        visibility_refusal_at(
+                            scope,
+                            method,
+                            implicit,
+                            receiver,
+                            Some(caller),
+                            false,
+                        )
+                        .is_some()
+                    });
+                    // A method that exists and this site may not call is a
+                    // definite `nil`, not an unknowable one: no `require` can
+                    // change the answer, so #39's refusal must not fire here.
+                    let value = if refused {
+                        defined_word(scope, string_class, None)
+                    } else {
+                        defined_answer(scope, string_class, found.map(|_| "method"))?
+                    };
                     stack.push(value);
                 }
 
@@ -1160,6 +1220,17 @@ struct Pending {
     /// method — and so the scope its `def` appeared in — is known.
     cref: CrefId,
     target: Target,
+    /// A receiverless send, so a private method is reachable (#161).
+    ///
+    /// `Kernel#send` sets it too: `send` calls a private method on purpose.
+    implicit_self: bool,
+    /// `public_send`: only a public method, with none of the exceptions.
+    ///
+    /// Not the same as `!implicit_self`. An ordinary `obj.m` still reaches a
+    /// protected method from inside the family and a private one through
+    /// `self`, and `public_send` refuses both — it is the strict form of the
+    /// question rather than the receiver-shaped one.
+    public_only: bool,
     /// Which inline cache entry may answer this call, if any.
     ///
     /// `Some` only for `Insn::Send`. `Yield` resolves no name, and
@@ -1248,6 +1319,8 @@ fn pop_call<'h>(
         // the method is resolved. It only survives for a native method, which
         // never looks a constant up.
         cref: frame.cref,
+        implicit_self: site.implicit_self,
+        public_only: false,
         target: Target::Method,
     })
 }
@@ -1335,6 +1408,14 @@ fn dispatch<'h>(
                 let exception = no_method_error(scope, call.receiver, call.name);
                 return Ok(Some(Unwind::Exception(exception)));
             };
+            // Visibility (#161). Read off the cached `Method`, so a warm site
+            // pays nothing for it and a `private :m` on an already-called
+            // method still takes effect — `set_visibility` bumps the class
+            // serial, which is what the entry re-checks.
+            if let Some(refused) = visibility_refusal(scope, frames, &call, method) {
+                let exception = visibility_error(scope, call.receiver, call.name, refused);
+                return Ok(Some(Unwind::Exception(exception)));
+            }
             match scope.definitions().get(method.body).cloned() {
                 Some(Definition::Iseq(iseq)) => {
                     // The body resolves constants against the scope its `def`
@@ -1353,6 +1434,9 @@ fn dispatch<'h>(
                         id: *ids,
                         home: *ids,
                         breaks: 0,
+                        // A method body starts public, whatever the class body
+                        // around it said.
+                        scope_visibility: Visibility::Public,
                     };
                     push_frame(
                         scope,
@@ -1441,17 +1525,29 @@ fn push_proc_frame(
         // A block resolves constants where it was written, not where it is
         // called: `class C; X = 1; [1].each { X }; end` finds `C::X`.
         cref,
+        implicit_self: call.implicit_self,
+        public_only: call.public_only,
         target: Target::Method,
     };
     // A block takes both links from the `Proc`: `return` leaves the method it
     // was *written* in, `break` ends the call it was *passed* to. A lambda is a
-    // method as far as `return` is concerned, so it homes to itself.
+    // method as far as *both* are concerned, so it homes to itself and breaks
+    // to itself — `-> { break :v }.call` is `:v`, not a `LocalJumpError`.
     let (home, breaks) = proc_links(scope, block);
+    // A block defines methods with the visibility of the scope it was *written*
+    // in, which is the frame `home` already names. A lambda is a method body as
+    // far as `return` and `break` go, but not for this: under a bare `private`,
+    // `-> { def m; end }` still defines a private `m`.
+    let scope_visibility = frames
+        .iter()
+        .find(|frame| frame.id == home)
+        .map_or(Visibility::Public, |frame| frame.scope_visibility);
     *ids += 1;
     let links = Links {
         id: *ids,
         home: if lambda { *ids } else { home },
-        breaks,
+        breaks: if lambda { *ids } else { breaks },
+        scope_visibility,
     };
     let binding = if lambda {
         Binding::Strict
@@ -1494,6 +1590,7 @@ fn push_frame(
         pc: 0,
         base: stack.len(),
         keeps_receiver: false,
+        scope_visibility: links.scope_visibility,
         id: links.id,
         home: links.home,
         breaks: links.breaks,
@@ -1818,6 +1915,136 @@ fn exception_new(scope: &mut HandleScope<'_>, class: &str, message: &str) -> Val
 /// an [`Error`] holds only `String`s. A `Value` parked in an `Error` would be
 /// unrooted for the whole unwind, and the first `rescue` that allocated would
 /// collect the receiver out from under `NameError#receiver`.
+/// `lookup`, honouring a `Module#method_defined?`-style `inherit` argument.
+///
+/// `inherit` defaults to true and is the *second* argument of the
+/// `*_method_defined?` family — not `respond_to?`'s `include_all`, which
+/// selects on visibility instead. Two different questions ruby/spec asks with
+/// the same shape, so they are answered apart.
+fn lookup_inherited(
+    scope: &mut HandleScope<'_>,
+    id: ClassId,
+    name: SymbolId,
+    inherit: Option<&Value>,
+) -> Option<Method> {
+    if inherit.is_some_and(|&v| !v.is_truthy()) {
+        return scope.classes().own_method(id, name);
+    }
+    scope.classes_mut().lookup(id, name)
+}
+
+/// Whether this call site may not reach `method`, and under which rule.
+///
+/// A private method is refused an explicit receiver, with the exception Ruby
+/// carved out for `self.m` — the receiver being the caller's own `self` is a
+/// call-site shape, not a fourth visibility. A protected method is reachable
+/// only while `self` is a kind of the class that owns it, which is what makes
+/// `a == b` work inside `Comparable` and not from outside.
+fn visibility_refusal(
+    scope: &mut HandleScope<'_>,
+    frames: &[Call],
+    call: &Pending,
+    method: Method,
+) -> Option<Visibility> {
+    if call.public_only {
+        return (method.visibility != Visibility::Public).then_some(method.visibility);
+    }
+    visibility_refusal_at(
+        scope,
+        method,
+        call.implicit_self,
+        call.receiver,
+        frames.last().map(|frame| frame.receiver),
+        // `self.m` reaches a private method (Ruby 2.7+), and `self.m = v`
+        // always could.
+        true,
+    )
+}
+
+/// The rule itself, without a [`Pending`] — `defined?` asks it too.
+///
+/// `self_receiver_ok` is what separates the two askers, and it is a measured
+/// quirk rather than a simplification. `self.priv` *runs*, and yet
+/// `defined?(self.priv)` is `nil` on ruby 4.0.6:
+///
+/// ```ruby
+/// class C
+///   private def priv; end
+///   def probe = [defined?(self.priv), defined?(priv)]   # [nil, "method"]
+/// end
+/// ```
+///
+/// So dispatch passes true and `defined?` passes false, and neither is
+/// guessing at the other's answer.
+fn visibility_refusal_at(
+    scope: &mut HandleScope<'_>,
+    method: Method,
+    implicit_self: bool,
+    receiver: Value,
+    caller: Option<Value>,
+    self_receiver_ok: bool,
+) -> Option<Visibility> {
+    match method.visibility {
+        Visibility::Public => None,
+        Visibility::Private => {
+            if implicit_self || (self_receiver_ok && caller == Some(receiver)) {
+                return None;
+            }
+            Some(Visibility::Private)
+        }
+        Visibility::Protected => {
+            if implicit_self {
+                return None;
+            }
+            let Some(caller) = caller else {
+                return Some(Visibility::Protected);
+            };
+            let reachable = class_of(scope, caller)
+                .is_some_and(|id| scope.classes().ancestors(id).contains(&method.owner));
+            (!reachable).then_some(Visibility::Protected)
+        }
+    }
+}
+
+/// Ruby's `NoMethodError` for a method that exists but this site may not call.
+///
+/// The class is the same one a missing method raises and the receiver half of
+/// the message is the same too; only the prefix differs, and ruby/spec asserts
+/// on both. Measured on ruby 4.0.6:
+///
+/// ```text
+/// private method 'p1' called for an instance of C
+/// undefined method 'p1' for an instance of C
+/// ```
+fn visibility_error(
+    scope: &mut HandleScope<'_>,
+    receiver: Value,
+    name: SymbolId,
+    visibility: Visibility,
+) -> Value {
+    let method = symbol_name(name);
+    let message = format!(
+        "{} method '{method}' called for {}",
+        visibility.name(),
+        describe_receiver(scope, receiver)
+    );
+    // Deliberately *not* `note_missing_method`: this is Ruby behaviour the spec
+    // may be checking, not a gap in Spinel, and marking it would report an
+    // example that asserts on it as blocked.
+    let rooted = scope.root(receiver);
+    let object = exception_new(scope, "NoMethodError", &message);
+    let handle = scope.root(object);
+    let receiver = scope.get(rooted);
+    let object = scope.get(handle);
+    let set = |scope: &mut HandleScope<'_>, ivar, value| {
+        ivar_set(scope, object, symbol(ivar), value)
+            .expect("a fresh exception is unfrozen and holds instance variables");
+    };
+    set(scope, EXC_NAME, Value::symbol(name));
+    set(scope, EXC_RECEIVER, receiver);
+    object
+}
+
 fn no_method_error(scope: &mut HandleScope<'_>, receiver: Value, name: SymbolId) -> Value {
     let method = symbol_name(name);
     let message = format!(
@@ -2056,6 +2283,9 @@ fn open_class(
         id: *ids,
         home: *ids,
         breaks: 0,
+        // A class body starts public every time it is entered, which is why
+        // reopening a class after a bare `private` is public again.
+        scope_visibility: Visibility::Public,
     };
     frames.push(Call {
         iseq: body,
@@ -2064,6 +2294,7 @@ fn open_class(
         env,
         receiver,
         cref,
+        scope_visibility: links.scope_visibility,
         // A class body is not called with a block, so `yield` inside one is a
         // `LocalJumpError` — which is Ruby.
         block: Value::NIL,
@@ -2255,6 +2486,8 @@ fn anonymous_module(
         block: Value::NIL,
         block_is_literal: false,
         cref: call.cref,
+        implicit_self: false,
+        public_only: false,
         target: Target::Block(block),
     };
     push_proc_frame(scope, stack, frames, &inner, block, ids)?;
@@ -2263,6 +2496,11 @@ fn anonymous_module(
     frames[last].receiver = object;
     frames[last].cref = cref;
     frames[last].keeps_receiver = true;
+    // `Class.new { ... }` runs its block as a *class body*, so it starts public
+    // however visible the scope that wrote the literal was — a top-level block
+    // would otherwise inherit the private default and give
+    // `Class.new { attr_writer :a }` a setter nobody can call.
+    frames[last].scope_visibility = Visibility::Public;
     Ok(None)
 }
 
@@ -2412,13 +2650,14 @@ fn define_method_on(
     name: SymbolId,
     iseq: Arc<Iseq>,
     cref: CrefId,
+    visibility: Visibility,
 ) {
     let body = scope
         .definitions_mut()
         .intern_iseq(&iseq, Arc::as_ptr(&iseq) as usize);
     scope
         .classes_mut()
-        .define_method_in(owner, name, body, cref);
+        .define_method_visibly(owner, name, body, cref, visibility);
 }
 
 /// The singleton class of a value, allocating it on the first ask.
@@ -3402,7 +3641,7 @@ fn native_call<'h>(
             push_proc_frame(scope, stack, frames, &call, call.receiver, ids)?;
             Ok(None)
         }
-        Native::Send => {
+        Native::Send { public_only } => {
             let mut args = call.args.clone();
             if args.is_empty() {
                 return Err(Error::raise(
@@ -3432,6 +3671,10 @@ fn native_call<'h>(
                 keywords: call.keywords,
                 block: call.block,
                 cref: call.cref,
+                // `send` is documented to reach a private method; `public_send`
+                // is the one that does not, and refuses protected too.
+                implicit_self: !public_only,
+                public_only,
                 target: Target::Method,
             };
             dispatch(scope, stack, frames, forwarded, proc_class, ids)
@@ -3629,6 +3872,7 @@ fn native_call<'h>(
                                 id: *ids,
                                 home: *ids,
                                 breaks: 0,
+                                scope_visibility: Visibility::Public,
                             };
                             push_frame(
                                 scope,
@@ -4365,6 +4609,153 @@ fn native_call<'h>(
             Ok(None)
         }
 
+        Native::SetVisibility(visibility) => {
+            let Some(id) = class_id_of(scope, call.receiver) else {
+                return Err(Error::NoDispatch {
+                    op: "Module#private",
+                    operands: "a receiver that is not a Module",
+                });
+            };
+            // Bare: the visibility every `def` below it in *this* body gets.
+            // It lives on the lexical scope, so reopening the class starts
+            // public again — measured, and the reason `push_cref` making a
+            // fresh node per body is load-bearing rather than incidental.
+            if call.args.is_empty() {
+                if let Some(frame) = frames.last_mut() {
+                    frame.scope_visibility = visibility;
+                }
+                stack.push(Value::NIL);
+                return Ok(None);
+            }
+            for &argument in &call.args {
+                let Some(name) = method_name_of(scope, argument) else {
+                    return Err(Error::raise("TypeError", "is not a symbol nor a string"));
+                };
+                let symbol = crate::shared::symbols::intern(&name);
+                // Narrowing an *inherited* method defines it here, and Ruby
+                // fires `method_added` for that definition — but not when the
+                // method was already this class's own. The condition is what
+                // makes `private :m` in the defining class stay quiet (#28).
+                if !scope.classes().method_defined_here(id, symbol) {
+                    hook_refusal(
+                        scope,
+                        id,
+                        &[(
+                            "method_added",
+                            "`method_added`, which narrowing an inherited method would fire",
+                        )],
+                    )?;
+                }
+                if !scope.classes_mut().set_visibility(id, symbol, visibility) {
+                    // Not `describe_receiver`: this wording quotes the name and
+                    // that one does not — "for class 'E'" here against "for
+                    // class E" in a `NoMethodError`. Both are measured on ruby
+                    // 4.0.6 and ruby/spec asserts on each.
+                    let kind = match scope.classes().kind(id) {
+                        Kind::Module => "module",
+                        Kind::Class => "class",
+                    };
+                    let owner = scope
+                        .classes()
+                        .name(id)
+                        .map_or_else(|| "?".to_owned(), ToOwned::to_owned);
+                    return Err(Error::raise(
+                        "NameError",
+                        format!("undefined method '{name}' for {kind} '{owner}'"),
+                    ));
+                }
+            }
+            // Ruby answers the arguments: one bare, several as an array. That
+            // is what makes `private def m; end` work — `def` answers a symbol.
+            let value = match call.args.as_slice() {
+                [only] => *only,
+                many => new_array(scope, many),
+            };
+            stack.push(value);
+            Ok(None)
+        }
+
+        Native::ModuleFunction => {
+            let Some(id) = class_id_of(scope, call.receiver) else {
+                return Err(Error::NoDispatch {
+                    op: "Module#module_function",
+                    operands: "a receiver that is not a Module",
+                });
+            };
+            if call.args.is_empty() {
+                // The bare form makes every `def` below it a module function,
+                // which needs a second piece of scope state and a branch in
+                // `Insn::DefineMethod`. Refused rather than silently ignored.
+                return Err(Error::NoDispatch {
+                    op: "Module#module_function",
+                    operands: "no arguments, which sets the mode for the rest of the body",
+                });
+            }
+            // The public copy is a new singleton definition, and Ruby fires
+            // `singleton_method_added` for it — measured in
+            // `core/module/method_added_spec.rb`. Refused rather than silently
+            // skipped, the same as every other definition here (#28).
+            hook_refusal(
+                scope,
+                id,
+                &[(
+                    "singleton_method_added",
+                    "`singleton_method_added`, which `module_function` would fire",
+                )],
+            )?;
+            let singleton = singleton_of(scope, call.receiver)?;
+            for &argument in &call.args {
+                let Some(name) = method_name_of(scope, argument) else {
+                    return Err(Error::raise("TypeError", "is not a symbol nor a string"));
+                };
+                let symbol = crate::shared::symbols::intern(&name);
+                let Some(method) = scope.classes_mut().lookup(id, symbol) else {
+                    let owner = scope
+                        .classes()
+                        .name(id)
+                        .map_or_else(|| "?".to_owned(), ToOwned::to_owned);
+                    return Err(Error::raise(
+                        "NameError",
+                        format!("undefined method '{name}' for module '{owner}'"),
+                    ));
+                };
+                // Public on the singleton, private as an instance method.
+                scope.classes_mut().define_method_visibly(
+                    singleton,
+                    symbol,
+                    method.body,
+                    method.cref,
+                    Visibility::Public,
+                );
+                scope
+                    .classes_mut()
+                    .set_visibility(id, symbol, Visibility::Private);
+            }
+            let value = match call.args.as_slice() {
+                [only] => *only,
+                many => new_array(scope, many),
+            };
+            stack.push(value);
+            Ok(None)
+        }
+
+        Native::VisibilityDefined(visibility) => {
+            let Some(id) = class_id_of(scope, call.receiver) else {
+                return Err(Error::NoDispatch {
+                    op: "Module#private_method_defined?",
+                    operands: "a receiver that is not a Module",
+                });
+            };
+            let Some(name) = call.args.first().and_then(|&v| method_name_of(scope, v)) else {
+                return Err(Error::raise("TypeError", "is not a symbol nor a string"));
+            };
+            let symbol = crate::shared::symbols::intern(&name);
+            let found = lookup_inherited(scope, id, symbol, call.args.get(1));
+            let matched = found.is_some_and(|method| method.visibility == visibility);
+            stack.push(bool_value(matched));
+            Ok(None)
+        }
+
         Native::MethodDefined => {
             let Some(id) = class_id_of(scope, call.receiver) else {
                 return Err(Error::NoDispatch {
@@ -4375,13 +4766,12 @@ fn native_call<'h>(
             let Some(name) = call.args.first().and_then(|&v| method_name_of(scope, v)) else {
                 return Err(Error::raise("TypeError", "is not a symbol nor a string"));
             };
-            // ponytail: `method_defined?` excludes private methods in Ruby, and
-            // this table has no visibility (#161). It therefore answers true
-            // for a private method, which `respond_to?(:puts)` shows. The fix
-            // is a visibility field, not a special case here.
+            // Public or protected, never private — measured on ruby 4.0.6.
+            // The second argument is `inherit`, not mspec's `include_all`.
             let symbol = crate::shared::symbols::intern(&name);
-            let found = scope.classes_mut().lookup(id, symbol).is_some();
-            stack.push(bool_value(found));
+            let found = lookup_inherited(scope, id, symbol, call.args.get(1));
+            let matched = found.is_some_and(|method| method.visibility != Visibility::Private);
+            stack.push(bool_value(matched));
             Ok(None)
         }
 
@@ -4393,12 +4783,16 @@ fn native_call<'h>(
             // a singleton class counts. `class_id_of` would answer "is the
             // receiver itself a module", which is a different question.
             let class = class_of(scope, call.receiver).ok_or_else(|| no_class(call.receiver))?;
-            // ponytail: inherits `method_defined?`'s missing visibility (#161) —
-            // a private method answers true here where Ruby answers false
-            // unless `include_all`. The second argument is accepted and ignored
-            // for the same reason: there is nothing yet for it to select.
+            // Public only, unless `include_all` — the second argument, and here
+            // it really is mspec's `include_all`, selecting on visibility,
+            // rather than `method_defined?`'s `inherit`, which selects on the
+            // ancestor chain. ruby/spec asks both with the same shape.
             let symbol = crate::shared::symbols::intern(&name);
-            let found = scope.classes_mut().lookup(class, symbol).is_some();
+            let include_all = call.args.get(1).is_some_and(|&v| v.is_truthy());
+            let found = scope
+                .classes_mut()
+                .lookup(class, symbol)
+                .is_some_and(|method| include_all || method.visibility == Visibility::Public);
             stack.push(bool_value(found));
             Ok(None)
         }
@@ -4487,6 +4881,14 @@ fn native_call<'h>(
                     ),
                 ));
             };
+            // The methods these create take the body's current visibility, the
+            // same as a `def` would: `private; attr_accessor :a` makes a
+            // private reader (#161). The scope is the caller's, because this
+            // native pushes no frame of its own.
+            let cref = frames.last().map_or(CrefId::ROOT, |frame| frame.cref);
+            let visibility = frames
+                .last()
+                .map_or(Visibility::Public, |frame| frame.scope_visibility);
             let mut defined: Vec<Value> = Vec::new();
             for &argument in &call.args {
                 let Some(name) = attribute_name(scope, argument) else {
@@ -4501,7 +4903,9 @@ fn native_call<'h>(
                         .definitions_mut()
                         .add(Definition::Native(Native::IvarReader(ivar)));
                     let getter = symbol(&name);
-                    scope.classes_mut().define_method(owner, getter, body);
+                    scope
+                        .classes_mut()
+                        .define_method_visibly(owner, getter, body, cref, visibility);
                     defined.push(Value::symbol(getter));
                 }
                 if writer {
@@ -4509,7 +4913,9 @@ fn native_call<'h>(
                         .definitions_mut()
                         .add(Definition::Native(Native::IvarWriter(ivar)));
                     let setter = symbol(&format!("{name}="));
-                    scope.classes_mut().define_method(owner, setter, body);
+                    scope
+                        .classes_mut()
+                        .define_method_visibly(owner, setter, body, cref, visibility);
                     defined.push(Value::symbol(setter));
                 }
             }
@@ -4623,6 +5029,8 @@ fn native_call<'h>(
                 block: Value::NIL,
                 block_is_literal: false,
                 cref: call.cref,
+                implicit_self: false,
+                public_only: false,
                 target: Target::Block(block),
             };
             push_proc_frame(scope, stack, frames, &inner, block, ids)?;
@@ -4887,8 +5295,13 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         (Builtin::Proc, &["arity"], Native::Arity),
         (
             Builtin::Kernel,
-            &["send", "__send__", "public_send"],
-            Native::Send,
+            &["send", "__send__"],
+            Native::Send { public_only: false },
+        ),
+        (
+            Builtin::Kernel,
+            &["public_send"],
+            Native::Send { public_only: true },
         ),
         (
             Builtin::Kernel,
@@ -5074,6 +5487,41 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         // `BasicObject` subclass that includes `Kernel` gets it too.
         (Builtin::Kernel, &["extend"], Native::Extend),
         (Builtin::Kernel, &["respond_to?"], Native::RespondTo),
+        (
+            Builtin::Module,
+            &["private"],
+            Native::SetVisibility(Visibility::Private),
+        ),
+        (
+            Builtin::Module,
+            &["public"],
+            Native::SetVisibility(Visibility::Public),
+        ),
+        (
+            Builtin::Module,
+            &["protected"],
+            Native::SetVisibility(Visibility::Protected),
+        ),
+        (
+            Builtin::Module,
+            &["private_method_defined?"],
+            Native::VisibilityDefined(Visibility::Private),
+        ),
+        (
+            Builtin::Module,
+            &["public_method_defined?"],
+            Native::VisibilityDefined(Visibility::Public),
+        ),
+        (
+            Builtin::Module,
+            &["protected_method_defined?"],
+            Native::VisibilityDefined(Visibility::Protected),
+        ),
+        (
+            Builtin::Module,
+            &["module_function"],
+            Native::ModuleFunction,
+        ),
         (Builtin::Module, &["ancestors"], Native::Ancestors),
         (Builtin::Module, &["method_defined?"], Native::MethodDefined),
         (Builtin::Class, &["superclass"], Native::Superclass),
@@ -5090,6 +5538,44 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
                 .classes_mut()
                 .define_method(builtin.id(), symbol, body);
         }
+    }
+
+    // The module functions (#161). `Kernel.private_instance_methods(false)` on
+    // ruby 4.0.6 is where this list comes from, not from taste: each is a
+    // method a program calls receiverless and Ruby refuses on a receiver, so
+    // `defined?(Object.print)` is `nil` rather than `"method"`.
+    //
+    // The Ruby-side half of the same list — `loop`, `p`, `print`, `puts` — is
+    // in `core/kernel.rb`, next to the definitions, where it reads as Ruby.
+    let kernel = Builtin::Kernel.id();
+    let kernel_object = scope.classes().object(kernel);
+    let singleton = singleton_of(scope, kernel_object)
+        .expect("the Kernel module object takes a singleton class");
+    for name in [
+        "block_given?",
+        "catch",
+        "fail",
+        "lambda",
+        "proc",
+        "raise",
+        "throw",
+    ] {
+        let symbol = crate::shared::symbols::intern(name);
+        // `module_function`, by hand: a public copy on `Kernel`'s singleton and
+        // a private instance method. `Kernel.raise` answers and
+        // `Object.new.raise` does not, which is the pair `defined?` asks about.
+        if let Some(method) = scope.classes_mut().lookup(kernel, symbol) {
+            scope.classes_mut().define_method_visibly(
+                singleton,
+                symbol,
+                method.body,
+                method.cref,
+                Visibility::Public,
+            );
+        }
+        scope
+            .classes_mut()
+            .set_visibility(kernel, symbol, Visibility::Private);
     }
 }
 

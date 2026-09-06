@@ -108,4 +108,12 @@ module Kernel
     return values[0] if values.size == 1
     values
   end
+
+  # The module functions (#161). Each becomes a private instance method and a
+  # public singleton method, which is why `defined?(Object.print)` is nil while
+  # `defined?(Kernel.puts)` is "method" — both measured on ruby 4.0.6.
+  # `Kernel.private_instance_methods(false)` is where the list comes from; the
+  # primitive half of it — `raise`, `proc`, `lambda`, `catch`, `throw`,
+  # `block_given?` — is marked in `interp.rs`, beside where those are defined.
+  module_function :loop, :p, :print, :puts
 end
