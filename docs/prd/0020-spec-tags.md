@@ -223,6 +223,24 @@ issue numbers and the named next slice all survive. That is the whole price of
 the format, it is paid once here, and from now on the reader refuses the
 rewording rather than letting anyone discover it after #145.
 
+### Three of the seven reasons named no issue
+
+Writing the README's line "the reason says which slice, by number" made it
+checkable, and three of the seven failed it. Two tags said "the rest of the
+dialect work" and one said "the coercion protocol" — true, and untracked by any
+open issue. Filed, and now named by the tags that wait on them:
+
+| tag | closes with |
+|---|---|
+| `language/regexp/empty_checks` | #177 — capture-restore records |
+| `language/regexp/character_classes` | #178 — the ASCII-only POSIX brackets |
+| `core/float/comparison` | #179 — `Numeric#coerce` and coerce-then-retry |
+
+The other four were pointed at the issues that already existed rather than at
+the slices that first noticed them: #160 for both `language/send` tags, #161 for
+`language/defined`. A reason naming "#11, the calling convention" describes
+history; one naming #160 describes work someone can pick up.
+
 ### Left for later
 
 - **An orphan `*_tags.txt` whose spec file was deleted.** Not built, argued

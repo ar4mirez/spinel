@@ -77,8 +77,16 @@ fix is a different slice. The reason says which slice, by number.
 
 ## What is here now
 
-Seven tags across six files. Every one names the slice that closes it:
-the calling convention (#11), method visibility (#13), the regexp dialect (#14),
-fibers (#16, #26), and the numeric coercion protocol. Each was surfaced by a
-slice that could not also fix it — the full history is in the PRD that added
-it, `docs/prd/0020-spec-tags.md`.
+Seven tags across six files. Every one names the open issue that closes it:
+argument evaluation order (#160, twice), method visibility (#161), regexp
+capture-restore records (#177), the ASCII-only POSIX brackets (#178), fibers
+(#16, #26), and the numeric coercion protocol (#179).
+
+That "every one" is not decoration. Three of the seven said "the dialect work"
+or "the coercion protocol" and named no issue, so nothing tracked closing them —
+#177, #178 and #179 were filed to fix that. A reason that names no issue is a
+debt nobody is carrying; if you cannot name one when writing a tag, file it
+first.
+
+Each was surfaced by a slice that could not also fix it. The full history is in
+the PRD that added this directory, `docs/prd/0020-spec-tags.md`.
