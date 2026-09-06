@@ -45,7 +45,10 @@ EXTRA = [
   '(a*)*', '(a*)+', '(?:(a)|b)\1', '(?=(a))', '(?>a+)ab', 'a++ab',
   '[a-z&&[^b]]', '[[:alpha:]]', '[[:digit:]]', '\h', '\H',
   'a{2}?', 'a{2}+', 'a{2,3}?', 'a{2,}?', '(?i:a)b', 'a(?i)b',
-  '(?<n>a)\k<n>', 'foo\Z', 'foo\z', '\Afoo', '^bar', 'foo$'
+  '(?<n>a)\k<n>', 'foo\Z', 'foo\z', '\Afoo', '^bar', 'foo$',
+  # #177: the two halves of the capture-restore rule, and two shapes that
+  # separate them.
+  '^(()|a)*?$', '(?:(a)x|ab)', '((a)x|a)*', '^((())|a)*?$'
 ].freeze
 
 # Patterns whose *meaning* is fine but whose timing is not: Ruby answers a

@@ -447,6 +447,32 @@ impl Program {
                             }
                             pc = *exit;
                         } else {
+                            // The iteration completed. Onigmo does not roll a
+                            // *completed* iteration's captures back when the
+                            // loop later backtracks out of it — which is why
+                            // `/^(()|a)*?$/ =~ "aa"` leaves `$2` as `""` and
+                            // not nil, even though the path that set it was
+                            // abandoned. Rolling back *within* an iteration
+                            // still happens: `/((a)x|a)*/ =~ "aa"` leaves `$2`
+                            // nil, because `(a)x` failed before this point was
+                            // ever reached.
+                            //
+                            // So the commit is here, at the bottom of the
+                            // iteration, and it reaches exactly the alternatives
+                            // this iteration opened: everything the mark did not
+                            // already see.
+                            //
+                            // ponytail: rewrites one capture vector per surviving
+                            // alternative, so a body with many alternatives pays
+                            // per iteration. Onigmo instead pushes a restore
+                            // record only for the groups that need one; narrow it
+                            // the same way if a real pattern makes this the hot
+                            // path.
+                            if let Some(mark) = &marks[*slot] {
+                                for entry in stack.iter_mut().skip(mark.depth) {
+                                    entry.saves.clone_from(&saves);
+                                }
+                            }
                             pc += 1;
                         }
                         continue;

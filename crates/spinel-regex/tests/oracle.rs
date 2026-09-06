@@ -119,14 +119,13 @@ fn answer(re: &Regex, subject: &str) -> String {
 /// the reason. Nothing is added here to make a run green: a divergence listed
 /// here is printed on every run, counted, and meant to be deleted.
 ///
-/// `^(()|a|())*?$` — Onigmo keeps a capture that an iteration set even after
-/// backtracking out of that iteration, but only inside a loop: at the top level
-/// `(?:(a)x|ab)` resets group 1, measured. This engine snapshots captures at
-/// every backtrack point, so it resets in both places. Closing it means
-/// modelling Onigmo's capture-restore records rather than whole snapshots,
-/// which is its own slice. Reachable only from a lazy repeat over empty
-/// alternations, which is `empty_checks_spec.rb` and not real Ruby code.
-const KNOWN_DIVERGENCES: &[&str] = &["\"^(()|a|())*?$\""];
+/// Empty since #177. It held `^(()|a|())*?$`: Onigmo keeps a capture that an
+/// iteration set even after backtracking out of that iteration, while a capture
+/// set outside a loop is rolled back, and this engine snapshotted at every
+/// backtrack point so it reset in both places. The machine now commits a
+/// completed iteration's captures instead, and `capture_restore_records` below
+/// is the pair of cases that pins the rule in both directions.
+const KNOWN_DIVERGENCES: &[&str] = &[];
 
 struct Tally {
     agreed: usize,
@@ -257,4 +256,37 @@ fn refusals_stay_within_their_budget() {
         tally.agreed,
         tally.refused.len()
     );
+}
+
+/// The two halves of Onigmo's capture-restore rule, which are only interesting
+/// together: an engine that rolls back everywhere fails the first pair, and one
+/// that rolls back nowhere fails the second.
+///
+/// Measured rather than reasoned — all four patterns are in `oracle.txt` too,
+/// against the full probe corpus. This test exists so the rule has a name in the
+/// file, and so a change that trades one case for the other says which.
+#[test]
+fn capture_restore_records() {
+    let caps = |pattern: &str, subject: &'static str| {
+        let re = Regex::new(pattern, Flags::default()).expect("compiles");
+        let m = re.find_at(subject, 0).expect("runs").expect("matches");
+        (1..=re.group_count())
+            .map(|g| m.group(g).map(|(s, e)| &subject[s..e]))
+            .collect::<Vec<_>>()
+    };
+
+    // Survives: the iteration that set `$2` completed, so abandoning it later in
+    // favour of matching `a` leaves `""` behind rather than nil.
+    assert_eq!(caps("^(()|a)*?$", "aa"), vec![Some("a"), Some("")]);
+    assert_eq!(
+        caps("^(()|a|())*?$", "aaa"),
+        vec![Some("a"), Some(""), None]
+    );
+
+    // Rolled back: `(a)` matched before `x` failed, and no iteration completed
+    // in between, so `$1` is nil once the alternation moves on to `ab`.
+    assert_eq!(caps("(?:(a)x|ab)", "ab"), vec![None]);
+    // The same rollback inside a loop, for the same reason: `(a)x` failed part
+    // way through the iteration, which therefore never committed.
+    assert_eq!(caps("((a)x|a)*", "aa"), vec![Some("a"), None]);
 }
