@@ -738,7 +738,18 @@ fn posix_matches(kind: Posix, c: char) -> bool {
         Posix::Upper => c.is_uppercase(),
         Posix::Lower => c.is_lowercase(),
         Posix::Space => c.is_whitespace(),
-        Posix::Blank => c == ' ' || c == '\t',
+        // Onigmo's `blank` is horizontal space: tab plus every Zs. Small
+        // enough to write out, and measured — `posix.txt`'s `blank` line is
+        // this list. `char::is_whitespace` is the near miss it replaces: that
+        // is Zs *plus* the line separators, so it says true for `\n`.
+        Posix::Blank => {
+            c == '\t'
+                || matches!(
+                    c,
+                    '\u{20}' | '\u{a0}' | '\u{1680}' | '\u{2000}'
+                        ..='\u{200a}' | '\u{202f}' | '\u{205f}' | '\u{3000}'
+                )
+        }
         Posix::Print => !c.is_control(),
         Posix::Graph => !c.is_control() && !c.is_whitespace(),
         Posix::Cntrl => c.is_control(),
@@ -751,5 +762,150 @@ fn posix_matches(kind: Posix, c: char) -> bool {
             c.is_ascii_punctuation()
                 || (!c.is_ascii() && !c.is_alphanumeric() && !c.is_whitespace() && !c.is_control())
         }
+    }
+}
+
+/// The POSIX brackets, replayed against CRuby over every scalar value.
+///
+/// A unit test rather than one under `tests/` because the thing being checked
+/// is [`posix_matches`] itself: going through the public API would compile a
+/// pattern and run the machine 1.1 million times per bracket, which is the same
+/// answer two orders of magnitude more slowly.
+#[cfg(test)]
+mod posix_oracle {
+    use super::{Posix, posix_matches};
+
+    /// Measured by `scripts/regexp-oracle.rb --generate`. CI re-checks it.
+    const TABLE: &str = include_str!("../tests/posix.txt");
+
+    fn kind(name: &str) -> Posix {
+        match name {
+            "alpha" => Posix::Alpha,
+            "digit" => Posix::Digit,
+            "alnum" => Posix::Alnum,
+            "upper" => Posix::Upper,
+            "lower" => Posix::Lower,
+            "space" => Posix::Space,
+            "blank" => Posix::Blank,
+            "print" => Posix::Print,
+            "graph" => Posix::Graph,
+            "cntrl" => Posix::Cntrl,
+            "xdigit" => Posix::XDigit,
+            "word" => Posix::Word,
+            "ascii" => Posix::Ascii,
+            "punct" => Posix::Punct,
+            other => panic!("posix.txt names a bracket the engine has no variant for: {other}"),
+        }
+    }
+
+    /// `LO-HI;LO;...` in hex, as a lookup keyed by codepoint.
+    fn ruby_set(fields: &str) -> Vec<bool> {
+        let mut set = vec![false; 0x11_0000];
+        for field in fields.split(';') {
+            let (lo, hi) = match field.split_once('-') {
+                Some((lo, hi)) => (lo, hi),
+                None => (field, field),
+            };
+            let lo = u32::from_str_radix(lo, 16).expect("hex low bound");
+            let hi = u32::from_str_radix(hi, 16).expect("hex high bound");
+            for cp in lo..=hi {
+                set[cp as usize] = true;
+            }
+        }
+        set
+    }
+
+    /// The brackets that still answer differently from CRuby, with the exact
+    /// number of codepoints each is wrong about, and why.
+    ///
+    /// All six are the same failure: `posix_matches` is built on `char`'s
+    /// predicates, and Rust's unions of Unicode general categories are not
+    /// Onigmo's. `Nd`, `M*`, `Pc`, `P*` and "assigned" are not reachable from
+    /// `std`, so closing these needs a table from somewhere — which is a
+    /// dependency decision rather than a session's, and is #180.
+    ///
+    /// Nothing is added here to make a run green. The list is printed on every
+    /// run, and the test fails if an entry is stale as well as if a new
+    /// disagreement appears: a bracket that has been fixed has to leave.
+    const KNOWN_DIVERGENCES: &[(&str, usize)] = &[
+        // In `posix.txt`'s own order, which is the order the test walks.
+        //
+        // `is_numeric` is Nd+Nl+No; Onigmo's digit is Nd alone.
+        ("digit", 1154),
+        // `is_alphanumeric` inherits that, so alnum is wrong wherever digit is.
+        ("alnum", 915),
+        // `!is_control` says an unassigned codepoint is printable. Ruby does
+        // not, and most of Unicode's space is unassigned.
+        ("print", 814732),
+        ("graph", 814730),
+        // Onigmo's word is Alphabetic + M* + Nd + Pc. Marks are the ones the
+        // engine misses; No and Nl are the ones it adds.
+        ("word", 2089),
+        // Onigmo's punct is P*. The engine's "not anything else" catches every
+        // symbol and every unassigned codepoint too.
+        ("punct", 962009),
+    ];
+
+    #[test]
+    fn every_bracket_agrees_with_cruby_on_every_codepoint() {
+        let mut reports = Vec::new();
+        let mut found: Vec<(String, usize)> = Vec::new();
+
+        for line in TABLE.lines() {
+            if line.starts_with('#') || line.trim().is_empty() {
+                continue;
+            }
+            let Some((name, fields)) = line.split_once('\t') else {
+                continue;
+            };
+            let want = ruby_set(fields);
+            let kind = kind(name);
+
+            let mut wrong = 0usize;
+            let mut first = Vec::new();
+            for cp in 0..=0x10_FFFFu32 {
+                // Not a scalar value: neither engine has an answer to compare.
+                let Some(c) = char::from_u32(cp) else {
+                    continue;
+                };
+                let got = posix_matches(kind, c);
+                if got != want[cp as usize] {
+                    wrong += 1;
+                    if first.len() < 8 {
+                        first.push(format!(
+                            "U+{cp:04X} ruby {} engine {}",
+                            want[cp as usize], got
+                        ));
+                    }
+                }
+            }
+            if wrong > 0 {
+                found.push((name.to_owned(), wrong));
+                reports.push(format!(
+                    "[[:{name}:]] disagrees on {wrong} codepoints\n    {}",
+                    first.join("\n    ")
+                ));
+            }
+        }
+
+        for (name, count) in KNOWN_DIVERGENCES {
+            println!("known divergence, still open (#180): [[:{name}:]] on {count} codepoints");
+        }
+
+        // One assertion covers all three ways this list can rot: a bracket that
+        // newly disagrees, a bracket that was fixed and not deleted from the
+        // list, and a count that drifted because Unicode moved under it.
+        let known: Vec<(String, usize)> = KNOWN_DIVERGENCES
+            .iter()
+            .map(|(n, c)| ((*n).to_owned(), *c))
+            .collect();
+        assert_eq!(
+            found,
+            known,
+            "the POSIX brackets that disagree with CRuby are not the ones #180 \
+             wrote down. Fix the bracket, or fix the list — do not widen it to \
+             make a run green.\n\n{}",
+            reports.join("\n\n")
+        );
     }
 }
