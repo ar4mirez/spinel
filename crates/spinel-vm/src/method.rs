@@ -50,7 +50,9 @@ pub enum Native {
     Call,
     /// `Object#send`, `__send__`, `public_send`. Re-dispatches under the name
     /// in the first argument. Pushes a frame when the target is Ruby.
-    Send,
+    Send {
+        public_only: bool,
+    },
     /// `Kernel#proc`, `Kernel#lambda`, `Proc.new`. Returns the block it was
     /// passed; `lambda` also marks it one.
     MakeProc {
@@ -232,6 +234,22 @@ pub enum Native {
     Ancestors,
     /// `Class#superclass` — one step up the same chain.
     Superclass,
+    /// `Module#private`, `#public`, `#protected` (#161).
+    ///
+    /// Bare, it sets the visibility the `def`s below it in the body get, which
+    /// lives on the lexical scope; with arguments it sets each named method's
+    /// and answers the arguments, so `private def m; end` works because `def`
+    /// answers a symbol.
+    SetVisibility(crate::class::Visibility),
+    /// `Module#module_function`, with arguments (#161).
+    ///
+    /// Two definitions, which is what the name hides: the instance method
+    /// becomes private, and a *public* copy lands on the module's singleton.
+    /// That is why `Kernel.puts` answers and `Object.print` does not, and it
+    /// cannot be modelled by visibility alone.
+    ModuleFunction,
+    /// `Module#private_method_defined?` and its two siblings (#161).
+    VisibilityDefined(crate::class::Visibility),
     /// `Module#method_defined?` — a method-table lookup.
     MethodDefined,
     /// `Float#to_s` — the shortest decimal that reads back as the same float,

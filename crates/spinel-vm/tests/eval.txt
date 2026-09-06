@@ -396,6 +396,44 @@ class Iv2; end; d = Iv2.new; before = d.respond_to?(:t); def d.t; 1; end; [befor
 class Iv3; end; e = Iv3.new; before = e.respond_to?(:t); module Iv3M; def t; 1; end; end; class Iv3; include Iv3M; end; [before, e.respond_to?(:t)]  #=> [false, true]
 class Iv4; def t; "own"; end; end; f = Iv4.new; before = f.t; module Iv4M; def t; "prepended"; end; end; class Iv4; prepend Iv4M; end; [before, f.t]  #=> ["own", "prepended"]
 
+# ------------------------------------------------- method visibility (#161)
+# A private method is refused an explicit receiver and found by a receiverless
+# call; a protected one is reachable while `self` is a kind of its owner. The
+# `NoMethodError` wording differs from the missing-method one above by its
+# prefix only, and ruby/spec asserts on both.
+class V1; private def m; :m; end; def viaself; self.m; end; def bare; m; end; end; [V1.new.viaself, V1.new.bare]  #=> [:m, :m]
+begin; class V2; private def m; end; end; V2.new.m; rescue NoMethodError => e; e.message; end  #=> "private method 'm' called for an instance of V2"
+begin; class V3; protected def m; end; end; V3.new.m; rescue NoMethodError => e; e.message; end  #=> "protected method 'm' called for an instance of V3"
+class V4; protected def m; :m; end; def peer(o); o.m; end; end; V4.new.peer(V4.new)  #=> :m
+class V5; private def m; :m; end; end; V5.new.send(:m)  #=> :m
+begin; class V6; private def m; end; end; V6.new.public_send(:m); rescue NoMethodError => e; e.message; end  #=> "private method 'm' called for an instance of V6"
+begin; class V7; protected def m; end; def go; public_send(:m); end; end; V7.new.go; rescue NoMethodError => e; e.class; end  #=> NoMethodError
+# The predicates. `method_defined?` is public-or-protected; the second argument
+# is `inherit`, not `respond_to?`'s `include_all`.
+class V8; def a; end; private def b; end; protected def c; end; end; [V8.method_defined?(:a), V8.method_defined?(:b), V8.method_defined?(:c)]  #=> [true, false, true]
+class V9; def a; end; private def b; end; protected def c; end; end; [V9.public_method_defined?(:a), V9.private_method_defined?(:b), V9.protected_method_defined?(:c)]  #=> [true, true, true]
+class VA; def a; end; private def b; end; end; [VA.public_method_defined?(:b), VA.private_method_defined?(:a)]  #=> [false, false]
+class VB; def m; end; end; class VC < VB; end; [VC.method_defined?(:m), VC.method_defined?(:m, false)]  #=> [true, false]
+class VD; def a; end; private def b; end; end; o = VD.new; [o.respond_to?(:a), o.respond_to?(:b), o.respond_to?(:b, true)]  #=> [true, false, true]
+# Where the scope visibility applies, and where it stops.
+class VE; private; def m; :m; end; end; VE.private_method_defined?(:m)  #=> true
+class VF; private; def m; end; end; class VF; def n; :n; end; end; VF.new.n  #=> :n
+class VG; private; [1].each { def m; end }; end; VG.private_method_defined?(:m)  #=> true
+class VH; private; def outer; def nested; :n; end; :o; end; end; h = VH.new; h.send(:outer); h.nested  #=> :n
+class VI; private; def self.s; :s; end; end; VI.s  #=> :s
+class VJ; def a; end; def b; end; end; [(class VJ; private :a; end), (class VJ; private :a, :b; end)]  #=> [:a, [:a, :b]]
+begin; class VK; private :nope; end; rescue NameError => e; e.message; end  #=> "undefined method 'nope' for class 'VK'"
+class VL; def m; :base; end; end; class VM < VL; private :m; end; VL.new.m  #=> :base
+# `module_function`: private instance method, public singleton copy. This is
+# what makes the two `defined?` answers differ.
+[defined?(Kernel.puts), defined?(Object.print)]  #=> ["method", nil]
+module VN; def f; :f; end; module_function :f; end; VN.f  #=> :f
+module VO; def f; end; module_function :f; end; VO.private_method_defined?(:f)  #=> true
+class VP; private def m; end; def probe; [defined?(self.m), defined?(m)]; end; end; VP.new.probe  #=> [nil, "method"]
+class VQ; private; attr_accessor :a; end; VQ.private_method_defined?(:a)  #=> true
+# A top-level `def` is a private instance method of `Object`.
+def toplevel_private_probe; :t; end; Object.private_method_defined?(:toplevel_private_probe)  #=> true
+
 # ---------------------------------------------- a missing method raises (#170)
 # A failed dispatch is an ordinary Ruby raise, so a `rescue` catches it. Before
 # #170 it was a Rust-level error that unwound past every handler, and none of

@@ -135,6 +135,33 @@ pub enum Kind {
     Module,
 }
 
+/// Who may call a method, and how.
+///
+/// The rule is about the *call site*, not the caller's identity: a private
+/// method is refused an explicit receiver and found by a receiverless call, and
+/// a protected one is reachable only while `self` is a kind of the class that
+/// owns it. `self.m` on a private method is the one exception Ruby carved out,
+/// and it is a call-site shape rather than a fourth rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Visibility {
+    #[default]
+    Public,
+    Private,
+    Protected,
+}
+
+impl Visibility {
+    /// The word Ruby puts in a `NoMethodError` and in `Method#inspect`.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Visibility::Public => "public",
+            Visibility::Private => "private",
+            Visibility::Protected => "protected",
+        }
+    }
+}
+
 /// A found method, and the class or module that defined it.
 ///
 /// `owner` is where `super` resumes from once [#11] gives it a caller.
@@ -152,6 +179,17 @@ pub struct Method {
     ///
     /// [#10]: https://github.com/ar4mirez/spinel/issues/10
     pub body: Value,
+    /// Who may call it, and how (#161).
+    ///
+    /// On the `Method` rather than looked up beside it, because the inline
+    /// caches from [#18] memoise this whole value and re-check only a class id
+    /// and a serial. A visibility read from anywhere else would cost a probe
+    /// per send and give back what those caches measured. What that buys is
+    /// paid for by [`Classes::set_visibility`] bumping the serial, exactly as
+    /// redefining a method does.
+    ///
+    /// [#18]: https://github.com/ar4mirez/spinel/issues/18
+    pub visibility: Visibility,
 }
 
 /// Which end of the class a module is being spliced onto.
@@ -397,7 +435,7 @@ struct Entry {
     own: Vec<ClassId>,
     /// Index of this class within `own`. CRuby's origin iclass.
     origin: usize,
-    methods: HashMap<SymbolId, (Value, CrefId)>,
+    methods: HashMap<SymbolId, (Value, CrefId, Visibility)>,
     /// Every class or module whose `own` holds this one. Flat, not just the
     /// direct includers, which is what lets a later `include` on a module reach
     /// everything that already mixed it in — Ruby 3.0's [Feature #9573] — in one
@@ -652,8 +690,62 @@ impl Classes {
 
     /// Define a method that remembers the lexical scope its `def` appeared in.
     pub fn define_method_in(&mut self, id: ClassId, name: SymbolId, body: Value, cref: CrefId) {
-        self.entry_mut(id).methods.insert(name, (body, cref));
+        self.define_method_visibly(id, name, body, cref, Visibility::default());
+    }
+
+    /// [`Classes::define_method_in`], with the visibility the class body was in
+    /// when the `def` ran — CRuby's `CREF_SCOPE_VISI` (#161).
+    pub fn define_method_visibly(
+        &mut self,
+        id: ClassId,
+        name: SymbolId,
+        body: Value,
+        cref: CrefId,
+        visibility: Visibility,
+    ) {
+        self.entry_mut(id)
+            .methods
+            .insert(name, (body, cref, visibility));
         self.invalidate(id);
+    }
+
+    /// `private :m`, `public :m`, `protected :m`. False if no `m` is reachable.
+    ///
+    /// A name defined by an ancestor rather than here gets a copy *here* with
+    /// the new visibility, which is what Ruby does and what makes
+    ///
+    /// ```ruby
+    /// class A; def m; 1; end; end
+    /// class B < A; private :m; end   # A#m stays public
+    /// ```
+    ///
+    /// leave `A` alone. CRuby stores a `ZSUPER` entry for this; a copy of the
+    /// body is the same answer for everything the engine can observe today,
+    /// and the difference — `B#m` not tracking a later redefinition of `A#m` —
+    /// is marked below.
+    //
+    // ponytail: a copy, not a delegating entry. Redefining `A#m` after
+    // `B` has narrowed it leaves `B#m` on the old body; CRuby re-resolves.
+    // Upgrade path is a `Body::ZSuper` variant that `lookup_uncached` follows.
+    pub fn set_visibility(
+        &mut self,
+        id: ClassId,
+        name: SymbolId,
+        visibility: Visibility,
+    ) -> bool {
+        if let Some(entry) = self.entry_mut(id).methods.get_mut(&name) {
+            entry.2 = visibility;
+            self.invalidate(id);
+            return true;
+        }
+        let Some(found) = self.lookup_uncached(id, name) else {
+            return false;
+        };
+        self.entry_mut(id)
+            .methods
+            .insert(name, (found.body, found.cref, visibility));
+        self.invalidate(id);
+        true
     }
 
     /// `Module#remove_method`: true if there was one to remove.
@@ -666,6 +758,23 @@ impl Classes {
     }
 
     /// Whether this class or module defines the method itself, ancestors aside.
+    /// The method `id` defines in its *own* run of the chain, ignoring
+    /// superclasses. `Module#method_defined?(name, false)` is this question.
+    #[must_use]
+    pub fn own_method(&self, id: ClassId, name: SymbolId) -> Option<Method> {
+        for &owner in &self.entry(id).own {
+            if let Some(&(body, cref, visibility)) = self.entry(owner).methods.get(&name) {
+                return Some(Method {
+                    owner,
+                    body,
+                    cref,
+                    visibility,
+                });
+            }
+        }
+        None
+    }
+
     pub fn method_defined_here(&self, id: ClassId, name: SymbolId) -> bool {
         self.entry(id).methods.contains_key(&name)
     }
@@ -691,8 +800,13 @@ impl Classes {
         let mut cursor = Some(id);
         while let Some(c) = cursor {
             for &owner in &self.entry(c).own {
-                if let Some(&(body, cref)) = self.entry(owner).methods.get(&name) {
-                    return Some(Method { owner, body, cref });
+                if let Some(&(body, cref, visibility)) = self.entry(owner).methods.get(&name) {
+                    return Some(Method {
+                        owner,
+                        body,
+                        cref,
+                        visibility,
+                    });
                 }
             }
             cursor = self.entry(c).superclass;
@@ -1121,7 +1235,7 @@ impl Classes {
     pub(crate) fn each_root(&self, mut f: impl FnMut(Value)) {
         for entry in &self.entries {
             f(entry.object);
-            for &(body, _) in entry.methods.values() {
+            for &(body, _, _) in entry.methods.values() {
                 f(body);
             }
             for &value in entry.constants.values() {

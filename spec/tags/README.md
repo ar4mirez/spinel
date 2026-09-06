@@ -77,13 +77,12 @@ fix is a different slice. The reason says which slice, by number.
 
 ## What is here now
 
-Twenty-one tags across sixteen files. Every one names the open issue that closes
-it: argument evaluation order (#160, twice), method visibility (#161, twice),
-fibers (#16, #26), `Kernel#Float` on a String (#181), structural `#hash`
-(#21, #22 three times, #23), the `Hash` table and its `inspect` format
-(#19, #20, #22 three times), Range-aware indexing in `MatchData` (#33), frozen
-string literals (#19), definition hooks (#28), and constant visibility (#185,
-four times).
+Nineteen tags across fourteen files. Every one names the open issue that closes
+it: argument evaluation order (#160, twice), fibers (#16, #26), `Kernel#Float`
+on a String (#181), structural `#hash` (#21, #22 three times, #23), the `Hash`
+table and its `inspect` format (#19, #20, #22 three times), Range-aware indexing
+in `MatchData` (#33), frozen string literals (#19), definition hooks (#28), and
+constant visibility (#185, four times).
 
 Sixteen of those arrived in one slice, and that is the shape to expect rather
 than a lapse. #183 taught the harness to load ruby/spec's fixtures and #157 and
@@ -103,6 +102,11 @@ gone: `language/regexp/character_classes`, `language/regexp/empty_checks` and
 #181 was the one tag added between. It was filed before the tag was written,
 which is the order this file asks for — and #185 was filed the same way, before
 the four constant-visibility tags that name it.
+
+Method visibility (#161) is the most recent to be paid off rather than
+reworded, and it took both of its tags with it: `language/def_tags.txt` and
+`language/defined_tags.txt` are gone, because each held only that one tag and an
+empty tag file is still a file. Neither example is skipped anywhere now.
 
 Each was surfaced by a slice that could not also fix it. The full history is in
 the PRD that added this directory, `docs/prd/0020-spec-tags.md`.
