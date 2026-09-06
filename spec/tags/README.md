@@ -77,16 +77,19 @@ fix is a different slice. The reason says which slice, by number.
 
 ## What is here now
 
-Seven tags across six files. Every one names the open issue that closes it:
-argument evaluation order (#160, twice), method visibility (#161), regexp
-capture-restore records (#177), the ASCII-only POSIX brackets (#178), fibers
-(#16, #26), and the numeric coercion protocol (#179).
+Five tags across four files. Every one names the open issue that closes it:
+argument evaluation order (#160, twice), method visibility (#161), fibers
+(#16, #26), and `Kernel#Float` on a String (#181).
 
-That "every one" is not decoration. Three of the seven said "the dialect work"
-or "the coercion protocol" and named no issue, so nothing tracked closing them —
-#177, #178 and #179 were filed to fix that. A reason that names no issue is a
-debt nobody is carrying; if you cannot name one when writing a tag, file it
-first.
+That "every one" is not decoration. Three of the original seven said "the
+dialect work", "the coercion protocol" or "the restore-record rewrite" and named
+no issue, so nothing tracked closing them — #177, #178 and #179 were filed to fix
+that, and all three have since been paid off rather than reworded. Their tags are
+gone: `language/regexp/character_classes`, `language/regexp/empty_checks` and
+`core/float/comparison` are no longer skipped anywhere.
+
+#181 is the one tag added since. It was filed before the tag was written, which
+is the order this file asks for.
 
 Each was surfaced by a slice that could not also fix it. The full history is in
 the PRD that added this directory, `docs/prd/0020-spec-tags.md`.
