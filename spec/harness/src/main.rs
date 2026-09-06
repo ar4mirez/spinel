@@ -11,6 +11,7 @@
 
 mod discover;
 mod run;
+mod tags;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -53,7 +54,17 @@ struct Cli {
     /// every reason.
     #[arg(long, value_name = "N", default_value_t = MAX_BLOCKED_REASONS)]
     blocked: usize,
+
+    /// Where `<path>_tags.txt` files live. The default is the repository's
+    /// `spec/tags/`, which is the only one anybody runs; the flag exists so a
+    /// test can point at a corpus of its own.
+    #[arg(long, value_name = "DIR", default_value = DEFAULT_TAGS)]
+    tags: PathBuf,
 }
+
+/// `spec/tags/`, relative to this crate. Resolved at compile time, like the
+/// corpus path in `scripts/spec.sh`, so the binary works from any directory.
+const DEFAULT_TAGS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../spec/tags");
 
 #[derive(Default)]
 struct Counts {
@@ -104,6 +115,11 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     let started = Instant::now();
     let target = Target::default();
+    // The default is written relative to this crate, so without this every tag
+    // problem would name `spec/harness/../../spec/tags/...`. A tags directory
+    // that is not there resolves to nothing and skips nothing, which is the
+    // right answer for a checkout that has none.
+    let tags_root = std::fs::canonicalize(&cli.tags).unwrap_or_else(|_| cli.tags.clone());
 
     let mut files = Vec::new();
     for path in &cli.paths {
@@ -125,7 +141,6 @@ fn main() -> ExitCode {
         return ExitCode::from(EXIT_USAGE);
     }
 
-    let skips = load_skips();
     let mut totals = Counts::default();
     let mut unparseable: Vec<String> = Vec::new();
     // Files that parsed and yielded nothing. Almost always a spec that builds
@@ -142,6 +157,11 @@ fn main() -> ExitCode {
     // order of how many examples it would unblock, from data rather than from a
     // guess about which corner of Ruby matters.
     let mut blocked_by: BTreeMap<String, usize> = BTreeMap::new();
+    // Everything wrong with a `spec/tags/` file: a line the reader cannot use, a
+    // tag with no reason, a tag naming an example that is no longer there. Each
+    // one is a skip that has silently stopped happening, so they fail the run
+    // rather than being reported and shrugged at.
+    let mut tag_problems: Vec<String> = Vec::new();
     // A single file needs no per-file line: the summary names it. Above the
     // cap the lines stop being a report and become a wall.
     let show_files = (2..=MAX_LISTED_FILES).contains(&files.len()) && !cli.list;
@@ -160,14 +180,39 @@ fn main() -> ExitCode {
         }
 
         let mut examples = discover::examples(&parsed.program, &target);
-        // An example named in `spec/tags/skip.txt` is reported skipped with the
-        // reason written there, rather than run. See that file: it is a list of
-        // engine gaps with their reasons, not an expected-failure list.
+        // An example named in this file's `spec/tags/<path>_tags.txt` is
+        // reported skipped with the reason written there, rather than run. A tag
+        // is a debt, not a result: see `spec/tags/README.md`.
+        let tag_file = tags::load(file, &tags_root);
+        let tags_path = display_path(&tags::path_for(file, &tags_root));
+        for problem in &tag_file.problems {
+            tag_problems.push(format!("{tags_path}: {problem}"));
+        }
+        let mut reached = vec![false; tag_file.tags.len()];
         for example in &mut examples {
-            if example.skipped.is_none() {
-                if let Some(reason) = skips.get(&example.full_description()) {
-                    example.skipped = Some(reason.clone());
+            let description = example.full_description();
+            for (tag, reached) in tag_file.tags.iter().zip(&mut reached) {
+                if tag.description == description {
+                    *reached = true;
+                    // A guard that already excluded this example keeps its own
+                    // reason: it is the more specific one, and the tag is still
+                    // reached, so it does not read as stale.
+                    if example.skipped.is_none() {
+                        example.skipped = Some(tag.reason.clone());
+                    }
                 }
+            }
+        }
+        // A tag naming an example that is not there any more skips nothing, and
+        // says it does. Upstream rewording one `it` is all it takes, which is why
+        // this is checked on every run rather than trusted to review.
+        for (tag, reached) in tag_file.tags.iter().zip(&reached) {
+            if !reached {
+                tag_problems.push(format!(
+                    "{tags_path}: no example named `{}` in {}",
+                    tag.description,
+                    display_path(file)
+                ));
             }
         }
         if examples.is_empty() {
@@ -244,6 +289,11 @@ fn main() -> ExitCode {
     report("could not be parsed", &unparseable, None);
     report("failed", &failures, None);
     report(
+        "tag problems",
+        &tag_problems,
+        Some("a tag is `fails(reason):full description` — see spec/tags/README.md"),
+    );
+    report(
         "no examples found",
         &without_examples,
         // Naming the cause matters more than the list. All three are Ruby that
@@ -285,7 +335,7 @@ fn main() -> ExitCode {
         }
     }
 
-    if totals.failed > 0 || !unparseable.is_empty() {
+    if totals.failed > 0 || !unparseable.is_empty() || !tag_problems.is_empty() {
         ExitCode::from(EXIT_FAILED)
     } else {
         ExitCode::SUCCESS
@@ -347,21 +397,4 @@ fn collect(path: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
         }
     }
     Ok(())
-}
-
-/// `spec/tags/skip.txt`, as a description-to-reason map.
-///
-/// Missing or unreadable is not an error: a checkout with no tags file skips
-/// nothing, which is the right default for a file whose whole purpose is to be
-/// empty one day.
-fn load_skips() -> std::collections::HashMap<String, String> {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../spec/tags/skip.txt");
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return std::collections::HashMap::new();
-    };
-    text.lines()
-        .filter(|line| !line.trim_start().starts_with('#') && !line.trim().is_empty())
-        .filter_map(|line| line.split_once('\t'))
-        .map(|(name, reason)| (name.trim().to_owned(), reason.trim().to_owned()))
-        .collect()
 }

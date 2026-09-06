@@ -173,6 +173,12 @@ core/module  28 → 44 passed        core/module/new_spec.rb   0/4  → 2/4
 | 1 | `Float#<=>` answered nil where `coerce` misbehaves | `spec/tags/skip.txt` |
 | 1 | `const_added` on the `class A::C` path | refuse |
 
+> Since [#146](https://github.com/ar4mirez/spinel/issues/146) this file is
+> `spec/tags/<path>_tags.txt`, one `fails(reason):description` per line in
+> mspec's own format. The entries named here moved with it, unchanged apart
+> from reasons holding a parenthesis, which mspec's tag parser cannot carry.
+> See `spec/tags/README.md`.
+
 The hook refusals generalise `inherited`'s decision into one `hook_refusal` helper covering every site where Spinel would define something Ruby would announce. They cost 14 blocked examples corpus-wide and no passes, and they are the list #28 deletes.
 
 `(a.b = v)` is Ruby's rule that an assignment-shaped call evaluates to the value assigned — `def b=(*) = 1` still makes `(a.b = "x")` answer `"x"`, while `a.send(:b=, "x")` answers 1. Prism already distinguishes them (`CallNode#is_attribute_write?`), so the fix is that flag plus stashing the value in a hidden `%attrN` local across the send. A stack rotate would have been tidier and is a new instruction; the local is not.

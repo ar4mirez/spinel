@@ -56,6 +56,27 @@ impl Fixture {
     fn path(&self) -> &str {
         self.0.to_str().expect("temp path should be UTF-8")
     }
+
+    /// Write this fixture's tag file into a `tags/` directory beside the spec,
+    /// and answer the arguments that run the harness against both.
+    ///
+    /// A spec file outside `spec/ruby` maps to its own name under the tags root,
+    /// so the directory is flat: `two_spec.rb` reads `tags/two_tags.txt`.
+    fn tagged(&self, name: &str, tags: &str) -> Vec<String> {
+        let root = self.0.join("tags");
+        std::fs::create_dir_all(&root).expect("tags directory should be creatable");
+        std::fs::write(root.join(format!("{name}_tags.txt")), tags)
+            .expect("tag file should be writable");
+        vec![
+            "--tags".to_owned(),
+            root.to_str().expect("temp path should be UTF-8").to_owned(),
+            self.0
+                .join(format!("{name}_spec.rb"))
+                .to_str()
+                .expect("temp path should be UTF-8")
+                .to_owned(),
+        ]
+    }
 }
 
 impl Drop for Fixture {
@@ -245,6 +266,159 @@ fn a_missing_path_is_a_usage_error() {
 }
 
 // ---------------------------------------------------------------------------
+// `spec/tags/` — see spec/tags/README.md
+// ---------------------------------------------------------------------------
+
+/// One example Spinel gets right and one it gets wrong. Without a tag the wrong
+/// one fails the run, which is what makes the tagged runs below mean something.
+const ONE_WRONG: &str = r##"
+describe "Tagged" do
+  it "agrees" do
+    1.should == 1
+  end
+
+  it "disagrees" do
+    1.should == 2
+  end
+end
+"##;
+
+fn run_owned(arguments: &[String]) -> Output {
+    let borrowed: Vec<&str> = arguments.iter().map(String::as_str).collect();
+    run(&borrowed)
+}
+
+#[test]
+fn a_tagged_example_is_skipped_with_its_reason_and_never_passed() {
+    let fixture = Fixture::new("tagged", ONE_WRONG);
+    let arguments = fixture.tagged(
+        "tagged",
+        "fails(the coercion protocol, #99, closes this):Tagged disagrees\n",
+    );
+    let output = run_owned(&arguments);
+    let text = stdout(&output);
+
+    assert!(
+        text.contains("2 examples · 1 passed · 0 failed · 0 blocked · 1 skipped"),
+        "a tag must skip, never pass and never fail:\n{text}"
+    );
+    assert!(output.status.success(), "a tagged run is clean:\n{text}");
+
+    // The reason has to reach the reader, or the tag is an unexplained skip.
+    let listed = stdout(&run_owned(
+        &[vec!["--list".to_owned()], arguments.clone()].concat(),
+    ));
+    assert!(
+        listed.contains("skipped: the coercion protocol, #99, closes this"),
+        "the reason must be reported:\n{listed}"
+    );
+}
+
+#[test]
+fn a_tag_without_a_reason_fails_the_run() {
+    // mspec's own tag files look like this and mspec accepts them. Spinel does
+    // not: a skip nobody wrote a reason for is a spec swept under the rug, and
+    // the old `skip.txt` reader dropped such a line in silence.
+    let fixture = Fixture::new("unreasoned", ONE_WRONG);
+    let output = run_owned(&fixture.tagged("unreasoned", "fails:Tagged disagrees\n"));
+    let text = stdout(&output);
+
+    assert!(!output.status.success(), "a reasonless tag fails the run");
+    assert!(
+        text.contains("tag problems") && text.contains("no reason"),
+        "the report must say what is wrong:\n{text}"
+    );
+    assert!(
+        text.contains("1 failed"),
+        "and the example must not be skipped by it:\n{text}"
+    );
+}
+
+#[test]
+fn a_tag_naming_no_example_fails_the_run() {
+    // The rot this exists to catch: upstream rewords one `it` and the tag goes
+    // on skipping nothing, in silence, forever.
+    let fixture = Fixture::new("stale", ONE_WRONG);
+    let output = run_owned(&fixture.tagged(
+        "stale",
+        "fails(a reason):Tagged disagreed under its old name\n",
+    ));
+    let text = stdout(&output);
+
+    assert!(!output.status.success(), "a stale tag fails the run");
+    assert!(
+        text.contains("no example named `Tagged disagreed under its old name`"),
+        "the report must name the dead tag:\n{text}"
+    );
+}
+
+#[test]
+fn a_reason_holding_a_parenthesis_fails_the_run() {
+    // mspec's tag parser closes the reason at the first `)`, fails to match the
+    // rest of the line, and drops the tag without a word. Loud here instead of
+    // silent after #145.
+    let fixture = Fixture::new("parens", ONE_WRONG);
+    let output = run_owned(&fixture.tagged(
+        "parens",
+        "fails(m(*a) must expand first):Tagged disagrees\n",
+    ));
+    let text = stdout(&output);
+
+    assert!(!output.status.success(), "a parenthesis fails the run");
+    assert!(
+        text.contains("parenthesis"),
+        "the report must say why:\n{text}"
+    );
+}
+
+#[test]
+fn an_unknown_tag_fails_the_run() {
+    let fixture = Fixture::new("unknown", ONE_WRONG);
+    let output = run_owned(&fixture.tagged("unknown", "slow(takes a while):Tagged disagrees\n"));
+
+    assert!(
+        !output.status.success(),
+        "a tag the harness ignores would look live and do nothing"
+    );
+    assert!(stdout(&output).contains("unknown tag `slow`"));
+}
+
+#[test]
+fn a_tag_problem_alone_fails_a_run_with_nothing_else_wrong() {
+    // The other tag tests all use a spec file with a disagreeing example in it,
+    // so their non-zero exit is also explained by `1 failed` — which means none
+    // of them can prove the exit code is wired to tag problems at all. Verified
+    // by mutation: deleting `!tag_problems.is_empty()` from the exit condition
+    // left every one of them green, and only this test red.
+    let fixture = Fixture::new("cleanbutstale", TWO_EXAMPLES);
+    let output = run_owned(&fixture.tagged(
+        "cleanbutstale",
+        "fails(a reason):Something that was renamed upstream\n",
+    ));
+    let text = stdout(&output);
+
+    assert!(
+        text.contains("2 passed · 0 failed"),
+        "nothing but the tag is wrong here:\n{text}"
+    );
+    assert!(
+        !output.status.success(),
+        "a tag problem must fail the run on its own:\n{text}"
+    );
+}
+
+#[test]
+fn a_spec_file_with_no_tag_file_is_not_a_problem() {
+    // Almost no spec has a tag, and the whole point of the directory is to be
+    // empty one day.
+    let fixture = Fixture::new("untagged", TWO_EXAMPLES);
+    let output = run(&[fixture.path()]);
+
+    assert!(output.status.success());
+    assert!(!stdout(&output).contains("tag problems"));
+}
+
+// ---------------------------------------------------------------------------
 // Against the real corpus
 // ---------------------------------------------------------------------------
 
@@ -292,9 +466,13 @@ fn the_whole_corpus_parses_and_reports() {
     let output = run(&[corpus.to_str().expect("corpus path should be UTF-8")]);
     let text = stdout(&output);
 
+    // Also the only full-corpus check that every `spec/tags/` file still points
+    // at a live example: the harness only reads the tag file of a spec file it
+    // runs, so a stale tag outside `language/` surfaces here and nowhere else.
     assert!(
         output.status.success(),
-        "every `*_spec.rb` in ruby/spec must parse:\n{text}"
+        "every `*_spec.rb` in ruby/spec must parse, and every tag must name an \
+         example that exists:\n{text}"
     );
     assert!(
         !text.contains("could not be parsed"),

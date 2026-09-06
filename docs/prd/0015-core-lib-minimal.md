@@ -166,6 +166,12 @@ Making the core library reachable turned three refusals into failures, which is 
 
 Five examples are in `spec/tags/skip.txt`, each naming a gap this slice does not own:
 
+> Since [#146](https://github.com/ar4mirez/spinel/issues/146) this file is
+> `spec/tags/<path>_tags.txt`, one `fails(reason):description` per line in
+> mspec's own format. The entries named here moved with it, unchanged apart
+> from reasons holding a parenthesis, which mspec's tag parser cannot carry.
+> See `spec/tags/README.md`.
+
 - `defined?` of a private method needs method visibility, which the class table does not have.
 - `[[:blank:]]` must match U+1680; `spinel-regex`'s POSIX brackets are still ASCII for that class. Visible rather than blocked now only because `nil.to_a` answers.
 - Two in `send_spec.rb`: `m(*args, &args.pop)` must expand the splat before evaluating the block argument, and Spinel expands splats after every argument is on the stack. Fixing it needs a dynamic argument count at the call site, which is the calling convention's ([#160](https://github.com/ar4mirez/spinel/issues/160)).
