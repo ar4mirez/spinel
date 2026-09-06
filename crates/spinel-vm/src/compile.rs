@@ -325,6 +325,8 @@ impl Compiler {
             | Insn::GetIvar(_)
             | Insn::DefinedIvar(_)
             | Insn::Dup => 1,
+            // Pops the splatted array and pushes its snapshot: net zero.
+            Insn::CaptureSplat => 0,
             Insn::Pop
             | Insn::SetLocal(_, _)
             | Insn::SetIvar(_)
@@ -2158,12 +2160,19 @@ impl Compiler {
             implicit_self: false,
         };
 
-        for arg in args {
+        for (index, arg) in args.iter().enumerate() {
             match &arg.kind {
                 ExprKind::Splat(Some(inner)) => {
                     self.expr(inner)?;
                     site.splats.push(site.argc);
                     site.argc += 1;
+                    // Ruby expands a splat where it is written; this convention
+                    // expands it when the call is made. Snapshot it so the two
+                    // agree, but only when something to the right can run Ruby
+                    // and change the array in between (#160).
+                    if mutable_after(args, index, block) {
+                        self.emit(Insn::CaptureSplat);
+                    }
                 }
                 ExprKind::Splat(None) => {
                     return Err(Unsupported::at("argument forwarding", arg.span));
@@ -2649,6 +2658,24 @@ fn node_name(kind: &ExprKind) -> &'static str {
         ExprKind::Missing => "a syntax error",
         _ => "this expression",
     }
+}
+
+/// Whether anything written to the right of argument `index` can run Ruby.
+///
+/// A splat only needs [`Insn::CaptureSplat`] when something after it could
+/// change the array before the call expands it. Nothing after it means nothing
+/// can: `m(*args)` is the overwhelming majority of splatted call sites and pays
+/// nothing.
+///
+/// A literal block is *not* something after it. `{ }` and `do end` build a
+/// `Proc` from a compiled child at call time and run no user code; `&expr` is a
+/// pass, and its expression is evaluated right there — which is the shape the
+/// issue was filed for, `m(*args, &args.pop)`.
+fn mutable_after(args: &[Expr], index: usize, block: Option<&BlockArg>) -> bool {
+    if index + 1 < args.len() {
+        return true;
+    }
+    matches!(block, Some(BlockArg::Pass(_)))
 }
 
 /// A literal's flags, as the integer `Regexp#options` answers.

@@ -396,6 +396,26 @@ class Iv2; end; d = Iv2.new; before = d.respond_to?(:t); def d.t; 1; end; [befor
 class Iv3; end; e = Iv3.new; before = e.respond_to?(:t); module Iv3M; def t; 1; end; end; class Iv3; include Iv3M; end; [before, e.respond_to?(:t)]  #=> [false, true]
 class Iv4; def t; "own"; end; end; f = Iv4.new; before = f.t; module Iv4M; def t; "prepended"; end; end; class Iv4; prepend Iv4M; end; [before, f.t]  #=> ["own", "prepended"]
 
+# --------------------------------------- argument evaluation order (#160)
+# Ruby expands a splat at the point it is *written*, before anything to its
+# right is evaluated. This convention keeps the array on the stack and expands
+# it at the call, so an argument to the right could change what the splat saw.
+# Most rows below are cases where the two orders give different answers; the
+# last few are the ones that must stay the same.
+def ao(*a) = a; x = [1, 2]; ao(*x, x.pop)  #=> [1, 2, 2]
+def ao(*a) = a; x = [1, 2]; ao(*x, x.push(9).size)  #=> [1, 2, 3]
+def ao(*a) = a; x = [1, 2]; ao(*x, *x)  #=> [1, 2, 1, 2]
+def ao(*a) = a; x = [1, 2]; ao(x.pop, *x)  #=> [2, 1]
+def ao(*a) = a; x = [1, 2]; ao(*x)  #=> [1, 2]
+def ao(*a) = a; x = [1, 2]; ao(*x, 3)  #=> [1, 2, 3]
+def aob(*a, &b) = [a, b]; x = [1, nil]; aob(*x, &x.pop)  #=> [[1, nil], nil]
+def aob(*a, &b) = [a, b]; x = [1, nil]; aob(*x, 2, &x.pop)  #=> [[1, nil, 2], nil]
+def aob(*a, &b) = a; x = [1, 2]; aob(*x) { 3 }  #=> [1, 2]
+# A splat of something that is not an Array is passed through unchanged, and
+# capturing it must not change that.
+def ao(*a) = a; x = 1; ao(*x, 2)  #=> [1, 2]
+def ao(*a) = a; x = nil; ao(*x, 2)  #=> [2]
+
 # ------------------------------------------------- method visibility (#161)
 # A private method is refused an explicit receiver and found by a receiverless
 # call; a protected one is reachable while `self` is a kind of its owner. The

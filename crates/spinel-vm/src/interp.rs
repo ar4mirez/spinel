@@ -544,6 +544,15 @@ pub fn eval_in(
                     stack.push(value);
                 }
 
+                Insn::CaptureSplat => {
+                    let value = stack.pop().expect("a splat to capture");
+                    let captured = match array_elements(scope, value) {
+                        Some(elements) => new_array(scope, &elements),
+                        None => value,
+                    };
+                    stack.push(captured);
+                }
+
                 Insn::GetIvar(name) => {
                     let symbol = frames[top].symbols[name as usize];
                     let receiver = frames[top].receiver;

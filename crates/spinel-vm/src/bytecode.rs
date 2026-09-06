@@ -61,6 +61,26 @@ pub enum Insn {
     // -- stack ------------------------------------------------------------
     Pop,
     Dup,
+    /// Replace a splatted argument with a copy of its elements (#160).
+    ///
+    /// Ruby expands a splat at the point it is *written*, before anything to
+    /// its right is evaluated, while this convention keeps the splatted array
+    /// on the stack and expands it when the call is made. Between those two
+    /// moments an argument to the right can change the array:
+    ///
+    /// ```ruby
+    /// def m(*a) = a
+    /// x = [1, 2]
+    /// m(*x, x.pop)   # [1, 2, 2] — the splat saw both elements
+    /// ```
+    ///
+    /// Taking a snapshot here makes the late expansion see what the early one
+    /// would have. Emitted only when something to the right could run Ruby, so
+    /// the ordinary `m(*args)` costs nothing.
+    ///
+    /// A value that is not an `Array` is left alone: expansion already passes
+    /// it through, and there is nothing to copy.
+    CaptureSplat,
 
     // -- locals -----------------------------------------------------------
     /// `(slot, depth)`. `depth` is how many lexical scopes up the slot lives:
