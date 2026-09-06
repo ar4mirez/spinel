@@ -168,6 +168,16 @@ The counts are deliberately unchanged. This slice moved where the seven skips
 are written and what the reader refuses; it did not change which examples run,
 which is the check that the migration lost nothing.
 
+### ruby/spec delta
+
+None. No directory newly passes and none regresses; the seven tagged examples
+skip exactly as before, with the same reasons reworded.
+
+`CLAUDE.md` makes a spec delta the definition of done for *engine* work, and
+this is infra — so the delta being empty is the result rather than a missing
+one. A slice that moved the skip mechanism and changed which examples run would
+have done two things at once, and the second would have been unreviewable.
+
 ### The definition of done
 
 - **`spec/tags/<path>_tags.txt`, laid out the way mspec's own tag files are.**
