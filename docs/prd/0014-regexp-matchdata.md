@@ -121,6 +121,12 @@ before. `spec/tags/skip.txt` now exists and the harness loads it. It holds one e
 its reason and the work that closes it. It is not an expected-failure list — an example
 there is reported *skipped*, never passed and never failed.
 
+> Since [#146](https://github.com/ar4mirez/spinel/issues/146) this file is
+> `spec/tags/<path>_tags.txt`, one `fails(reason):description` per line in
+> mspec's own format. The entries named here moved with it, unchanged apart
+> from reasons holding a parenthesis, which mspec's tag parser cannot carry.
+> See `spec/tags/README.md`.
+
 ## Definition of done
 
 - [x] Decision recorded in `docs/engine.md` with the rejected options and why.
