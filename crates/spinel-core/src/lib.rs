@@ -70,6 +70,7 @@ const SOURCES: &[(&str, &str)] = &[
     ("core/string.rb", include_str!("../../../core/string.rb")),
     ("core/array.rb", include_str!("../../../core/array.rb")),
     ("core/hash.rb", include_str!("../../../core/hash.rb")),
+    ("core/range.rb", include_str!("../../../core/range.rb")),
     ("core/regexp.rb", include_str!("../../../core/regexp.rb")),
     (
         "core/match_data.rb",

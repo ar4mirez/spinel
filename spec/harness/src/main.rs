@@ -10,6 +10,7 @@
 //! count — the project's progress bar — a lie.
 
 mod discover;
+mod loader;
 mod run;
 mod tags;
 
@@ -180,6 +181,9 @@ fn main() -> ExitCode {
         }
 
         let mut examples = discover::examples(&parsed.program, &target);
+        // `require_relative` is resolved and compiled once per spec file; every
+        // example in it evaluates the same `Iseq`s into its own heap (#183).
+        let fixtures = loader::preload(file, &parsed.program);
         // An example named in this file's `spec/tags/<path>_tags.txt` is
         // reported skipped with the reason written there, rather than run. A tag
         // is a debt, not a result: see `spec/tags/README.md`.
@@ -224,7 +228,7 @@ fn main() -> ExitCode {
                 // byte range is what `scripts/verify-passes.rb` slices out of
                 // the file to replay an example on a real Ruby. Everything a
                 // reader wants is still on the line.
-                let outcome = match run::run(example) {
+                let outcome = match run::run(example, &fixtures) {
                     Outcome::Passed => "passed".to_owned(),
                     Outcome::Failed(why) => format!("failed: {why}"),
                     Outcome::Skipped => match &example.skipped {
@@ -258,7 +262,7 @@ fn main() -> ExitCode {
             ..Counts::default()
         };
         for example in &examples {
-            match run::run(example) {
+            match run::run(example, &fixtures) {
                 Outcome::Passed => counts.passed += 1,
                 Outcome::Failed(why) => {
                     counts.failed += 1;

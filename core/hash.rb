@@ -27,6 +27,22 @@ class Hash
     self
   end
 
+  # What a hash literal is built from (#157). `allocate` rather than `new`: the
+  # literal has no arguments to check, and `Class#allocate` is already what
+  # gives a Hash its empty `@pairs`. `@default` and `@default_is_proc` are unset
+  # and so read as nil, which is the same answer `Hash.new` would have left.
+  def self.__literal__
+    allocate
+  end
+
+  # `{ **other }`. Ruby converts with `to_hash`, so a Hash is used as it is and
+  # anything else is asked to become one.
+  def __merge_literal__(other)
+    source = other.respond_to?(:to_hash) ? other.to_hash : other
+    source.each_pair { |key, value| self[key] = value }
+    self
+  end
+
   def default
     @default_is_proc ? nil : @default
   end
@@ -47,11 +63,15 @@ class Hash
     size == 0
   end
 
+  # Key identity is `eql?`, not `==`. The difference is what keeps `1` and
+  # `1.0` distinct keys: they are `==` but not `eql?`, and Ruby's Hash keeps
+  # both. Every lookup here goes through this one method, so `[]`, `[]=`,
+  # `key?`, `fetch` and `delete` all agree by construction.
   def __index__(key)
     pairs = @pairs
     i = 0
     while i < pairs.size
-      return i if pairs[i][0] == key
+      return i if pairs[i][0].eql?(key)
       i = i + 1
     end
     nil
@@ -67,6 +87,10 @@ class Hash
   # `fetch(k, nil)` answers nil; only `fetch(k)` with no block raises. So this
   # counts the arguments given rather than testing one for nil.
   def fetch(*fallback)
+    if fallback.size < 1 || fallback.size > 2
+      raise ArgumentError,
+            "wrong number of arguments (given " + fallback.size.to_s + ", expected 1..2)"
+    end
     key = fallback[0]
     at = __index__(key)
     return @pairs[at][1] unless at.nil?
@@ -137,9 +161,14 @@ class Hash
     self
   end
 
+  # A block is the "not found" answer, and it is called with the key — so
+  # `{}.delete(:x) { |k| 5 }` is 5 rather than nil.
   def delete(key)
     at = __index__(key)
-    return nil if at.nil?
+    if at.nil?
+      return yield(key) if block_given?
+      return nil
+    end
     pairs = @pairs
     gone = pairs[at][1]
     kept = []

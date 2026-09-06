@@ -1258,19 +1258,27 @@ fn pop_call<'h>(
 /// make `f(a, *b)` with an array `a` pass `a`'s elements as separate arguments,
 /// which is a wrong answer rather than a missing feature.
 ///
-// ponytail: a non-Array splat should call `to_a` first. Nothing has `to_a`
-// until #15, and passing the value through is what an object with no `to_a`
-// does anyway.
+/// `*nil` contributes nothing, because `nil.to_a` is `[]` — `f(*nil)` passes no
+/// arguments at all, and `yield(1, 2, *nil)` yields two.
+///
+// ponytail: any other non-Array splat is still passed through rather than sent
+// `to_a`, which is right for an object that has none and wrong for one that
+// does. Sending it means re-entering the interpreter from argument assembly;
+// the upgrade is to expand splats in the compiler instead, where a send is just
+// another instruction.
 fn expand_splats(scope: &mut HandleScope<'_>, args: Vec<Value>, splats: &[u16]) -> Vec<Value> {
     let mut out = Vec::with_capacity(args.len());
     for (index, arg) in args.into_iter().enumerate() {
-        match splats
-            .contains(&(index as u16))
-            .then(|| array_elements(scope, arg))
-        {
-            Some(Some(elements)) => out.extend(elements),
-            _ => out.push(arg),
+        if splats.contains(&(index as u16)) {
+            if arg == Value::NIL {
+                continue;
+            }
+            if let Some(elements) = array_elements(scope, arg) {
+                out.extend(elements);
+                continue;
+            }
         }
+        out.push(arg);
     }
     out
 }
@@ -3527,6 +3535,21 @@ fn native_call<'h>(
                         what: "`new` on an exception class with its own `initialize`",
                         needs: "`core/*.rb` defines that initialize (#15)",
                     });
+                }
+                // `Exception#initialize` takes 0..1 arguments, and an extra one
+                // is an error rather than something to ignore. Measured: a
+                // second argument raises `ArgumentError` in Ruby, and accepting
+                // it here let `NetHTTPExceptionsSpecs::Simple.new(msg, resp)`
+                // build an object Ruby refuses to build — a pass
+                // `scripts/verify-passes.rb` caught and this removes.
+                if call.args.len() > 1 {
+                    return Err(Error::raise(
+                        "ArgumentError",
+                        format!(
+                            "wrong number of arguments (given {}, expected 0..1)",
+                            call.args.len()
+                        ),
+                    ));
                 }
                 let message = match call.args.first() {
                     Some(&argument) => match string_bytes(scope, argument) {

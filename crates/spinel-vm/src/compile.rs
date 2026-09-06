@@ -35,8 +35,8 @@ use std::sync::Arc;
 
 use spinel_ast::{
     Assign, AssignOp, Begin, BlockArg, Case, CaseBranches, Expr, ExprKind, If, IntValue, Logical,
-    LogicalOp, Name, ParamList, Params, Program, Rescue, RescueMod, Span, StrPart, Target,
-    TargetKind, VarRef, While,
+    LogicalOp, MultiTarget, Name, ParamList, Params, Program, Rescue, RescueMod, Span, StrPart,
+    Target, TargetKind, VarRef, While,
 };
 
 use crate::bytecode::{
@@ -540,12 +540,13 @@ impl Compiler {
                 self.emit(Insn::PushLit(index));
             }
 
-            ExprKind::Str(string) => {
-                let bytes = flat_bytes(&string.parts)
-                    .ok_or_else(|| Unsupported::at("string interpolation", span))?;
-                let index = self.literal(Literal::Str(bytes));
-                self.emit(Insn::PushLit(index));
-            }
+            ExprKind::Str(string) => match flat_bytes(&string.parts) {
+                Some(bytes) => {
+                    let index = self.literal(Literal::Str(bytes));
+                    self.emit(Insn::PushLit(index));
+                }
+                None => self.interpolated(&string.parts)?,
+            },
 
             ExprKind::Regexp(regexp) => {
                 // `/n`, `/e`, `/s`, `/u` set the pattern's encoding, which this
@@ -575,17 +576,11 @@ impl Compiler {
                 self.emit(Insn::PushSym(index));
             }
 
-            ExprKind::Array(elements) => {
-                for element in elements {
-                    if matches!(element.kind, ExprKind::Splat(_)) {
-                        return Err(Unsupported::at("a splat in an array literal", element.span));
-                    }
-                    self.expr(element)?;
-                }
-                let count = u32::try_from(elements.len())
-                    .map_err(|_| Unsupported::at("an array literal this large", span))?;
-                self.emit(Insn::NewArray(count));
-            }
+            ExprKind::Array(elements) => self.array_literal(elements, span)?,
+
+            ExprKind::Hash(hash) => self.hash_literal(hash, span)?,
+
+            ExprKind::Range(range) => self.range_literal(range)?,
 
             ExprKind::Var(var) => self.var(var, span)?,
             ExprKind::Assign(assign) => self.assign(assign, span)?,
@@ -632,6 +627,186 @@ impl Compiler {
 
             other => return Err(Unsupported::at(node_name(other), span)),
         }
+        Ok(())
+    }
+
+    /// `"a#{b}c"`, and the heredoc that is the same node.
+    ///
+    /// Each part is appended to an accumulator with `String#+`, and an
+    /// interpolated part is asked for `to_s` first, which is what Ruby does.
+    /// The accumulator starts as an empty literal so that `"#{x}"` answers a
+    /// new, mutable `String` even when `x.to_s` returned a frozen one.
+    ///
+    /// ponytail: one allocation per part, because `String#+` copies. The
+    /// upgrade is a `ConcatStrings(n)` opcode joining the parts in one pass,
+    /// and it is worth writing when a benchmark shows interpolation in it.
+    fn interpolated(&mut self, parts: &[StrPart]) -> Emit {
+        let empty = self.literal(Literal::Str(Box::from(&b""[..])));
+        self.emit(Insn::PushLit(empty));
+        for part in parts {
+            match part {
+                StrPart::Bytes(bytes) => {
+                    let index = self.literal(Literal::Str(bytes.to_vec().into_boxed_slice()));
+                    self.emit(Insn::PushLit(index));
+                }
+                StrPart::Interp(exprs) => {
+                    self.statements(exprs, true)?;
+                    self.emit_send("to_s", 0);
+                }
+            }
+            self.emit_send("+", 1);
+        }
+        Ok(())
+    }
+
+    /// Push the value of a top-level constant by name.
+    ///
+    /// The lowerings below reach for `Hash` and `Range` the way written Ruby
+    /// would, so a program that has not shadowed the name gets the core class.
+    fn push_const_name(&mut self, name: &str) {
+        let symbol = self.symbol(name);
+        self.emit(Insn::GetConst(symbol, ConstScope::Lexical));
+    }
+
+    /// Send `name` with `argc` positional arguments, no block and no keywords.
+    ///
+    /// The receiver and the arguments are already on the stack, deepest first,
+    /// which is the shape [`Insn::Send`] wants.
+    fn emit_send(&mut self, name: &str, argc: u16) {
+        let symbol = self.symbol(name);
+        let site = self.push_site(
+            CallSite {
+                name: symbol,
+                argc,
+                splats: Vec::new(),
+                keywords: Vec::new(),
+                block: BlockRef::None,
+                implicit_self: false,
+            },
+            false,
+        );
+        self.emit(Insn::Send(site));
+    }
+
+    /// `[a, b]`, and `[a, *b, c]`.
+    ///
+    /// Without a splat this is one [`Insn::NewArray`] over the elements, which
+    /// is what it has always been. With one, the elements are compiled in runs:
+    /// each run becomes an `Array`, and every piece after the first is appended
+    /// to the first by `Array#__concat_splat__`, which is also where a splat's
+    /// `to_a` conversion lives. `NewArray` is reused rather than joined by a new
+    /// opcode because the concatenation is a method call in Ruby anyway.
+    fn array_literal(&mut self, elements: &[Expr], span: Span) -> Emit {
+        let splatted = elements
+            .iter()
+            .any(|element| matches!(element.kind, ExprKind::Splat(_)));
+        if !splatted {
+            for element in elements {
+                self.expr(element)?;
+            }
+            let count = u32::try_from(elements.len())
+                .map_err(|_| Unsupported::at("an array literal this large", span))?;
+            self.emit(Insn::NewArray(count));
+            return Ok(());
+        }
+
+        // `open` is whether the accumulator array is on the stack; `run` counts
+        // the plain elements pushed above it and not yet collected.
+        let mut open = false;
+        let mut run: u32 = 0;
+        for element in elements {
+            match &element.kind {
+                ExprKind::Splat(inner) => {
+                    if run > 0 || !open {
+                        self.emit(Insn::NewArray(run));
+                        run = 0;
+                        if open {
+                            self.emit_send("__concat_splat__", 1);
+                        } else {
+                            open = true;
+                        }
+                    }
+                    // A bare `*` in an array literal has nothing to spread; it
+                    // only appears where an anonymous rest parameter forwards,
+                    // which is #11's argument forwarding rather than a literal.
+                    let inner = inner
+                        .as_ref()
+                        .ok_or_else(|| Unsupported::at("an anonymous splat", element.span))?;
+                    self.expr(inner)?;
+                    self.emit_send("__concat_splat__", 1);
+                }
+                _ => {
+                    self.expr(element)?;
+                    run += 1;
+                }
+            }
+        }
+        if run > 0 || !open {
+            self.emit(Insn::NewArray(run));
+            if open {
+                self.emit_send("__concat_splat__", 1);
+            }
+        }
+        Ok(())
+    }
+
+    /// `{ k => v, sym: v, **other }`.
+    ///
+    /// An empty `Hash` is built by `Hash.__literal__` and then filled by `[]=`,
+    /// one send per pair, so insertion order and last-key-wins are whatever
+    /// `core/hash.rb` says they are and this lowering knows nothing about the
+    /// representation.
+    ///
+    /// ponytail: a send per pair, and a program that redefines `Hash#[]=`
+    /// changes what a literal means — CRuby's literal calls neither. The upgrade
+    /// is one `NewHash(n)` opcode building the object in Rust, and it is worth
+    /// writing when `Hash` stops being an association list (#22).
+    fn hash_literal(&mut self, hash: &spinel_ast::HashLit, _span: Span) -> Emit {
+        self.push_const_name("Hash");
+        self.emit_send("__literal__", 0);
+        for entry in &hash.entries {
+            match &entry.kind {
+                spinel_ast::HashEntryKind::Pair { key, value } => {
+                    self.emit(Insn::Dup);
+                    self.expr(key)?;
+                    self.expr(value)?;
+                    self.emit_send("[]=", 2);
+                    self.emit(Insn::Pop);
+                }
+                spinel_ast::HashEntryKind::Splat(Some(inner)) => {
+                    self.emit(Insn::Dup);
+                    self.expr(inner)?;
+                    self.emit_send("__merge_literal__", 1);
+                    self.emit(Insn::Pop);
+                }
+                // `**nil` is allowed and contributes nothing.
+                spinel_ast::HashEntryKind::Splat(None) => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// `a..b`, `a...b`, and the beginless and endless forms.
+    ///
+    /// `Range.new` rather than a direct allocation, because the endpoint check
+    /// a literal performs — `(1.."a")` raises `ArgumentError` — is the one
+    /// `initialize` already does.
+    fn range_literal(&mut self, range: &spinel_ast::RangeLit) -> Emit {
+        self.push_const_name("Range");
+        match &range.left {
+            Some(expr) => self.expr(expr)?,
+            None => self.emit(Insn::PushNil),
+        }
+        match &range.right {
+            Some(expr) => self.expr(expr)?,
+            None => self.emit(Insn::PushNil),
+        }
+        self.emit(if range.exclude_end {
+            Insn::PushTrue
+        } else {
+            Insn::PushFalse
+        });
+        self.emit_send("new", 3);
         Ok(())
     }
 
@@ -686,6 +861,15 @@ impl Compiler {
             self.emit(Insn::SetConst(name, how));
             return Ok(());
         }
+        // `a, b = ...`. A compound form has no multiple-assignment spelling in
+        // Ruby, so this only ever sees a plain `=`.
+        if let TargetKind::Multi(multi) = &assign.target.kind {
+            if assign.op != AssignOp::Assign {
+                return Err(Unsupported::at("a compound multiple assignment", span));
+            }
+            return self.multi_assign(multi, &assign.value, span);
+        }
+
         let slot = self.target_slot(&assign.target)?;
         match &assign.op {
             AssignOp::Assign => {
@@ -732,6 +916,118 @@ impl Compiler {
     /// `rescue => a` stay one piece of code each. All four read the target,
     /// write it, or both, and the only difference between a local and an ivar
     /// is which pair of instructions does that.
+    /// `a, b = 1, 2`, `a, *b = xs`, `a, (b, c) = 1, [2, 3]`.
+    ///
+    /// The right-hand side becomes one `Array`, `Array#__masgn_spread__` cuts it
+    /// into exactly one value per target — the rest target's slot holding an
+    /// `Array` — and each target is then an ordinary assignment. The spread
+    /// rules are Ruby's and live in `core/array.rb`, measured against CRuby,
+    /// rather than being open-coded here as jumps.
+    ///
+    /// The whole thing evaluates to the right-hand side array, which is what
+    /// `(a, b = 1, 2)` answers in Ruby.
+    fn multi_assign(&mut self, multi: &MultiTarget, value: &Expr, span: Span) -> Emit {
+        // An array literal on the right is already the array to spread; every
+        // other shape goes through `to_ary`, which is the conversion Ruby uses
+        // here and is *not* `to_a` — an object with only `to_a` is not spread.
+        self.expr(value)?;
+        self.emit(Insn::Dup);
+        // A multiple assignment evaluates to the right-hand side *as written* —
+        // `(a, b, c = 1)` is 1, not `[1]` — so the conversion applies to a copy
+        // and the original stays underneath as the expression's value. An array
+        // literal is already the array to spread and needs no copy converting.
+        if !matches!(value.kind, ExprKind::Array(_)) {
+            let slot = self.slot(&format!("%masgn{}", self.here()));
+            self.emit(Insn::SetLocal(slot, 0));
+            self.push_const_name("Array");
+            self.emit(Insn::GetLocal(slot, 0));
+            self.emit_send("__masgn_array__", 1);
+        }
+        self.spread_into(multi, span)?;
+        self.emit(Insn::Pop);
+        Ok(())
+    }
+
+    /// Spread the `Array` on top of the stack across `multi`'s targets, leaving
+    /// that array where it was.
+    fn spread_into(&mut self, multi: &MultiTarget, span: Span) -> Emit {
+        let befores = i64::try_from(multi.lefts.len())
+            .map_err(|_| Unsupported::at("a multiple assignment this wide", span))?;
+        let afters = i64::try_from(multi.rights.len())
+            .map_err(|_| Unsupported::at("a multiple assignment this wide", span))?;
+
+        self.emit(Insn::Dup);
+        self.emit(Insn::PushInt(befores));
+        self.emit(if multi.rest.is_some() {
+            Insn::PushTrue
+        } else {
+            Insn::PushFalse
+        });
+        self.emit(Insn::PushInt(afters));
+        self.emit_send("__masgn_spread__", 3);
+
+        let mut index = 0i64;
+        for target in &multi.lefts {
+            self.assign_from_spread(index, target, span)?;
+            index += 1;
+        }
+        if let Some(rest) = &multi.rest {
+            // `*a` binds the middle; a bare `*`, and the trailing comma in
+            // `a, = xs` that is spelled the same way, bind nothing.
+            match &rest.kind {
+                TargetKind::Splat(Some(inner)) => self.assign_from_spread(index, inner, span)?,
+                TargetKind::Splat(None) => {}
+                _ => self.assign_from_spread(index, rest, span)?,
+            }
+            index += 1;
+        }
+        for target in &multi.rights {
+            self.assign_from_spread(index, target, span)?;
+            index += 1;
+        }
+
+        self.emit(Insn::Pop);
+        Ok(())
+    }
+
+    /// Read one slot out of the spread array and assign it to `target`.
+    fn assign_from_spread(&mut self, index: i64, target: &Target, span: Span) -> Emit {
+        self.emit(Insn::Dup);
+        self.emit(Insn::PushInt(index));
+        self.emit_send("[]", 1);
+        self.assign_popped(target, span)
+    }
+
+    /// Assign the value on top of the stack to `target`, popping it.
+    fn assign_popped(&mut self, target: &Target, span: Span) -> Emit {
+        if let Some((name, how)) = self.const_target(target)? {
+            self.emit(Insn::SetConst(name, how));
+            self.emit(Insn::Pop);
+            return Ok(());
+        }
+        match &target.kind {
+            // `a, (b, c) = ...`. The value is already on the stack and
+            // `__masgn_array__` wants it above its receiver, so it is parked in
+            // a hidden local first — the same trick `a.b = v` uses, and for the
+            // same reason: there is no rotate instruction.
+            TargetKind::Multi(inner) => {
+                let slot = self.slot(&format!("%masgn{}", self.here()));
+                self.emit(Insn::SetLocal(slot, 0));
+                self.push_const_name("Array");
+                self.emit(Insn::GetLocal(slot, 0));
+                self.emit_send("__masgn_array__", 1);
+                self.spread_into(inner, span)?;
+                self.emit(Insn::Pop);
+                Ok(())
+            }
+            _ => {
+                let slot = self.target_slot(target)?;
+                self.emit_set(slot);
+                Ok(())
+            }
+        }
+    }
+
     fn target_slot(&mut self, target: &Target) -> Result<Slot, Unsupported> {
         match &target.kind {
             TargetKind::Var(VarRef::Local { name, depth }) => {
@@ -1502,10 +1798,33 @@ impl Compiler {
                     at += 1;
                     spec.required += 1;
                 }
-                // `{ |(a, b)| }` assigns through a multiple-assignment target,
-                // which the binder would have to run rather than fill.
+                // `{ |(a, b)| }` is one parameter that the body then spreads,
+                // and `emit_defaults` emits the spread. No slot is claimed
+                // here: Prism lists the *inner* names, so the binder's slot for
+                // this parameter is already the first of them, and the spread
+                // reads it before it writes to it.
+                //
+                // That only holds while nothing follows. A destructure that
+                // binds k names moves every later parameter k-1 slots along,
+                // and the binder addresses a parameter by its position, so
+                // `{ |(a, b), c| }` would put c's argument in b's slot. Refused
+                // rather than mis-bound; `ParamSpec` would have to carry a slot
+                // per parameter instead of a count to lift it.
                 RequiredParamKind::Destructure(_) => {
-                    return Err(Unsupported::at("a destructuring block parameter", span));
+                    let last = at + 1 == list.required.len();
+                    let alone = list.optional.is_empty()
+                        && list.rest.is_none()
+                        && list.posts.is_empty()
+                        && list.keywords.is_empty()
+                        && list.block.is_none();
+                    if !last || !alone {
+                        return Err(Unsupported::at(
+                            "a destructuring block parameter before another parameter",
+                            span,
+                        ));
+                    }
+                    at += 1;
+                    spec.required += 1;
                 }
             }
         }
@@ -1602,10 +1921,27 @@ impl Compiler {
     /// keywords take the same shape, and a default that calls a method works
     /// because it is ordinary code in the body rather than something the binder
     /// has to evaluate.
-    fn emit_defaults(&mut self, params: &Params, _span: Span) -> Emit {
+    fn emit_defaults(&mut self, params: &Params, span: Span) -> Emit {
         let Params::Explicit(list) = params else {
             return Ok(());
         };
+        // `{ |a, (b, c)| }`: destructuring the bound value is exactly the
+        // multiple assignment `(b, c) = value`. `spec_from_list` has already
+        // refused every shape where the parameter's slot is not its position.
+        for (at, required) in list.required.iter().enumerate() {
+            if let spinel_ast::RequiredParamKind::Destructure(multi) = &required.kind {
+                // The binder writes the n-th argument into slot n, and this is
+                // the n-th parameter, so the value is in slot `at` — which is
+                // also the first name the destructure binds. Read before write.
+                let slot = u16::try_from(at)
+                    .map_err(|_| Unsupported::at("a parameter list this long", span))?;
+                self.push_const_name("Array");
+                self.emit(Insn::GetLocal(slot, 0));
+                self.emit_send("__masgn_array__", 1);
+                self.spread_into(multi, span)?;
+                self.emit(Insn::Pop);
+            }
+        }
         let defaults: Vec<(Box<str>, &Expr)> =
             list.optional
                 .iter()
@@ -1737,13 +2073,24 @@ impl Compiler {
                     return Err(Unsupported::at("argument forwarding", arg.span));
                 }
                 // A trailing brace-less hash is Ruby's keyword syntax.
+                //
+                // `CallSite::keywords` names each keyword by symbol, so a
+                // non-symbol key and a `**` argument have nowhere to go. Both
+                // are call-convention gaps (#11) rather than hash literals —
+                // `{ "a" => 1 }` in expression position compiles — and they say
+                // so, because the reason is what picks the next slice.
                 ExprKind::Hash(hash) if !hash.braces => {
                     for pair in &hash.entries {
-                        let key = keyword_name(pair)
-                            .ok_or_else(|| Unsupported::at("a hash literal", arg.span))?;
+                        if matches!(pair.kind, spinel_ast::HashEntryKind::Splat(_)) {
+                            return Err(Unsupported::at("a double-splat argument", arg.span));
+                        }
+                        let key = keyword_name(pair).ok_or_else(|| {
+                            Unsupported::at("a non-symbol keyword argument", arg.span)
+                        })?;
                         let symbol = self.symbol(key);
-                        let value = pair_value(pair)
-                            .ok_or_else(|| Unsupported::at("a hash literal", arg.span))?;
+                        let value = pair_value(pair).ok_or_else(|| {
+                            Unsupported::at("a non-symbol keyword argument", arg.span)
+                        })?;
                         self.expr(value)?;
                         site.keywords.push(symbol);
                     }

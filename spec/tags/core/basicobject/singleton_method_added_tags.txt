@@ -1,0 +1,1 @@
+fails(Defining a singleton method does not call the `singleton_method_added` hook — Spinel has no definition hooks at all, so the recorder stays nil. The hooks are named in #28. Became visible rather than blocked when #183 taught the harness to load ruby/spec fixtures):BasicObject#singleton_method_added is called when a method is defined in the singleton class

@@ -77,9 +77,21 @@ fix is a different slice. The reason says which slice, by number.
 
 ## What is here now
 
-Five tags across four files. Every one names the open issue that closes it:
-argument evaluation order (#160, twice), method visibility (#161), fibers
-(#16, #26), and `Kernel#Float` on a String (#181).
+Twenty-one tags across sixteen files. Every one names the open issue that closes
+it: argument evaluation order (#160, twice), method visibility (#161, twice),
+fibers (#16, #26), `Kernel#Float` on a String (#181), structural `#hash`
+(#21, #22 three times, #23), the `Hash` table and its `inspect` format
+(#19, #20, #22 three times), Range-aware indexing in `MatchData` (#33), frozen
+string literals (#19), definition hooks (#28), and constant visibility (#185,
+four times).
+
+Sixteen of those arrived in one slice, and that is the shape to expect rather
+than a lapse. #183 taught the harness to load ruby/spec's fixtures and #157 and
+#154 landed the literals that build the values, so several thousand examples ran
+for the first time — and an example that has never run cannot have been
+disagreeing with Ruby yet. Every one of the sixteen is a subsystem that slice
+never touched, which is exactly what "expect this to reveal failures, not only
+passes" meant.
 
 That "every one" is not decoration. Three of the original seven said "the
 dialect work", "the coercion protocol" or "the restore-record rewrite" and named
@@ -88,8 +100,9 @@ that, and all three have since been paid off rather than reworded. Their tags ar
 gone: `language/regexp/character_classes`, `language/regexp/empty_checks` and
 `core/float/comparison` are no longer skipped anywhere.
 
-#181 is the one tag added since. It was filed before the tag was written, which
-is the order this file asks for.
+#181 was the one tag added between. It was filed before the tag was written,
+which is the order this file asks for — and #185 was filed the same way, before
+the four constant-visibility tags that name it.
 
 Each was surfaced by a slice that could not also fix it. The full history is in
 the PRD that added this directory, `docs/prd/0020-spec-tags.md`.
