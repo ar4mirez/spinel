@@ -84,11 +84,11 @@ class Integer
     self
   end
 
-  def <=>(other)
-    return nil unless other.is_a?(Numeric)
-    return -1 if self < other
-    return 1 if self > other
-    0
+  # Multiplying by a Float is what promotes, and the VM's fast path already
+  # does that without dispatching — so this is Ruby expressing a conversion
+  # rather than a primitive standing in for one.
+  def to_f
+    self * 1.0
   end
 
   DIGITS = "0123456789abcdefghijklmnopqrstuvwxyz"

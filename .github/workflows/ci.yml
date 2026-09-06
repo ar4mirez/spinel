@@ -212,6 +212,23 @@ jobs:
           ruby-version: '4.0'
       - run: ruby scripts/anonymous-oracle.rb --check
 
+  # Ruby's numeric operators do not fail on an operand they do not recognise:
+  # they ask it to `coerce` itself and retry on the pair it answers. The part
+  # worth measuring is where the three variants of that rule disagree — an
+  # operand with no `coerce` is a TypeError to `+`, `nil` to `<=>` and an
+  # ArgumentError to `<` — and none of that can be read off a reference page.
+  # `tests/coerce.rs` holds Spinel to the table; this job holds the table to Ruby.
+  coerce:
+    name: numeric coercion oracle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@v1
+        with:
+          # The language version this build implements.
+          ruby-version: '4.0'
+      - run: ruby scripts/coerce-oracle.rb --check
+
   # Ruby's regex dialect is Onigmo's, and the parts of it that matter are the
   # parts nobody would guess: `\w` is ASCII while `[[:alpha:]]` is not, `^` is a
   # line anchor that still does not match after a trailing newline, and an empty
