@@ -462,7 +462,11 @@ fn is_scope_statement(statement: &Expr) -> bool {
 fn is_blockless_dsl(name: &str) -> bool {
     matches!(
         name,
-        "it" | "specify" | "require" | "require_relative" | "it_behaves_like" | "it_should_behave_like"
+        "it" | "specify"
+            | "require"
+            | "require_relative"
+            | "it_behaves_like"
+            | "it_should_behave_like"
     )
 }
 

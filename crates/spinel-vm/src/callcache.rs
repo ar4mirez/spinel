@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::bytecode::Iseq;
-use crate::class::{ClassId, Method, Visibility};
+use crate::class::{ClassId, Method};
 
 /// What one call site last resolved, and what has to still be true to reuse it.
 ///
@@ -150,6 +150,7 @@ mod tests {
     use super::*;
     use crate::Builtin;
     use crate::bytecode::{BlockRef, CallSite};
+    use crate::class::Visibility;
     use crate::heap::Heap;
     use crate::value::Value;
 

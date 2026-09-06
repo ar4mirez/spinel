@@ -122,11 +122,7 @@ pub fn expression(name: &str, locals: &[Name], expr: &Expr) -> Result<Iseq, Unsu
 ///
 /// It does not cross a scope barrier: a `def` inside a flattened statement
 /// cannot see the flattened locals, exactly as it cannot in Ruby.
-pub fn flattened_expression(
-    name: &str,
-    locals: &[Name],
-    expr: &Expr,
-) -> Result<Iseq, Unsupported> {
+pub fn flattened_expression(name: &str, locals: &[Name], expr: &Expr) -> Result<Iseq, Unsupported> {
     let mut compiler = Compiler::new(name, locals);
     compiler.flattened = true;
     compiler.expr(expr)?;
@@ -1453,9 +1449,7 @@ impl Compiler {
                 .iter()
                 .position(|l| &**l == name)
                 .map(|index| (index as u16, 0))
-                .ok_or_else(|| {
-                    Unsupported::at("a local variable from an enclosing scope", span)
-                });
+                .ok_or_else(|| Unsupported::at("a local variable from an enclosing scope", span));
         }
         let scope = self
             .outer

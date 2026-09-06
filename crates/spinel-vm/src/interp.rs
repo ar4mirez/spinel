@@ -1413,8 +1413,7 @@ fn dispatch<'h>(
             // method still takes effect — `set_visibility` bumps the class
             // serial, which is what the entry re-checks.
             if let Some(refused) = visibility_refusal(scope, frames, &call, method) {
-                let exception =
-                    visibility_error(scope, call.receiver, call.name, refused);
+                let exception = visibility_error(scope, call.receiver, call.name, refused);
                 return Ok(Some(Unwind::Exception(exception)));
             }
             match scope.definitions().get(method.body).cloned() {
@@ -4771,8 +4770,7 @@ fn native_call<'h>(
             // The second argument is `inherit`, not mspec's `include_all`.
             let symbol = crate::shared::symbols::intern(&name);
             let found = lookup_inherited(scope, id, symbol, call.args.get(1));
-            let matched =
-                found.is_some_and(|method| method.visibility != Visibility::Private);
+            let matched = found.is_some_and(|method| method.visibility != Visibility::Private);
             stack.push(bool_value(matched));
             Ok(None)
         }
@@ -4905,9 +4903,9 @@ fn native_call<'h>(
                         .definitions_mut()
                         .add(Definition::Native(Native::IvarReader(ivar)));
                     let getter = symbol(&name);
-                    scope.classes_mut().define_method_visibly(
-                        owner, getter, body, cref, visibility,
-                    );
+                    scope
+                        .classes_mut()
+                        .define_method_visibly(owner, getter, body, cref, visibility);
                     defined.push(Value::symbol(getter));
                 }
                 if writer {
@@ -4915,9 +4913,9 @@ fn native_call<'h>(
                         .definitions_mut()
                         .add(Definition::Native(Native::IvarWriter(ivar)));
                     let setter = symbol(&format!("{name}="));
-                    scope.classes_mut().define_method_visibly(
-                        owner, setter, body, cref, visibility,
-                    );
+                    scope
+                        .classes_mut()
+                        .define_method_visibly(owner, setter, body, cref, visibility);
                     defined.push(Value::symbol(setter));
                 }
             }

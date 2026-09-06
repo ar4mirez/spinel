@@ -727,12 +727,7 @@ impl Classes {
     // ponytail: a copy, not a delegating entry. Redefining `A#m` after
     // `B` has narrowed it leaves `B#m` on the old body; CRuby re-resolves.
     // Upgrade path is a `Body::ZSuper` variant that `lookup_uncached` follows.
-    pub fn set_visibility(
-        &mut self,
-        id: ClassId,
-        name: SymbolId,
-        visibility: Visibility,
-    ) -> bool {
+    pub fn set_visibility(&mut self, id: ClassId, name: SymbolId, visibility: Visibility) -> bool {
         if let Some(entry) = self.entry_mut(id).methods.get_mut(&name) {
             entry.2 = visibility;
             self.invalidate(id);
