@@ -63,6 +63,7 @@ const SOURCES: &[(&str, &str)] = &[
         "core/false_class.rb",
         include_str!("../../../core/false_class.rb"),
     ),
+    ("core/numeric.rb", include_str!("../../../core/numeric.rb")),
     ("core/float.rb", include_str!("../../../core/float.rb")),
     ("core/integer.rb", include_str!("../../../core/integer.rb")),
     ("core/symbol.rb", include_str!("../../../core/symbol.rb")),

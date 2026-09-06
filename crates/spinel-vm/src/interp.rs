@@ -5236,7 +5236,16 @@ fn float_op(op: BinOp, a: f64, b: f64) -> Result<Value, Error> {
         BinOp::Sub => float(a - b),
         BinOp::Mul => float(a * b),
         BinOp::Div => float(a / b),
-        BinOp::Mod => float(a - b * (a / b).floor()),
+        // `%` by zero raises where `/` by zero answers Infinity — measured:
+        // `4.2 / 0` is Infinity, `4.2 % 0` and `4.2 % 0.0` are both
+        // ZeroDivisionError. `integer_op` has always checked this; the float
+        // path did not, and produced a NaN it then could not represent.
+        BinOp::Mod => {
+            if b == 0.0 {
+                return Err(Error::raise("ZeroDivisionError", "divided by 0"));
+            }
+            float(a - b * (a / b).floor())
+        }
         BinOp::Lt => Ok(bool_value(a < b)),
         BinOp::Le => Ok(bool_value(a <= b)),
         BinOp::Gt => Ok(bool_value(a > b)),
