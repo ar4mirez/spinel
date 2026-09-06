@@ -109,11 +109,27 @@ pub struct Example {
     /// is dropped once a file's examples are collected, and an example outlives
     /// it.
     pub body: Vec<Expr>,
+    /// The plain statements of the groups enclosing this example, outermost
+    /// first, to run before [`Self::body`].
+    ///
+    /// Kept apart from `body` rather than prepended to it because the two are
+    /// run under different rules: a statement the example itself cannot run
+    /// blocks it, while one of these that raises is tolerated. See
+    /// [`crate::run::run`].
+    pub scope: Vec<Expr>,
     /// The locals the parser assigned to the block's own scope, in slot order.
     pub locals: Vec<spinel_ast::Name>,
     /// Set when a guard excluded this example, or when the harness could not
     /// evaluate the guard and refused to guess.
     pub skipped: Option<String>,
+    /// Source spans of [`Self::scope`], one per statement, in the same order.
+    ///
+    /// Kept apart from [`Self::setup_spans`] because a scope statement is
+    /// allowed to fail without blocking the example, and a span list that
+    /// claimed one ran when it did not would have
+    /// `scripts/verify-passes.rb` replay a different program than Spinel did.
+    /// [`crate::run::run`] reports which of these actually ran.
+    pub scope_spans: Vec<Span>,
     /// Source spans of the `before` bodies prepended to `body`, outermost first.
     ///
     /// `scripts/verify-passes.rb` re-runs a passing example on real Ruby by
@@ -145,10 +161,13 @@ pub fn examples(program: &Program, target: &Target) -> Vec<Example> {
         target,
         group: Vec::new(),
         skipped: None,
+        scope: Vec::new(),
         setup: Vec::new(),
         out: Vec::new(),
     };
-    // A file's top level is a group like any other: `before` can live there.
+    // A file's top level is a group like any other: it can hold both `before`
+    // and the plain statements an example below it reads.
+    walk.collect_scope(&program.body);
     walk.collect_setup(&program.body);
     walk.body(&program.body);
     walk.out
@@ -159,6 +178,27 @@ struct Walk<'a> {
     group: Vec<String>,
     /// Reason the enclosing guard excluded everything below, if any.
     skipped: Option<String>,
+    /// The plain statements of the enclosing group bodies, outermost first.
+    ///
+    /// A `describe` body is ordinary Ruby that runs when the file loads, and a
+    /// local it assigns is one the examples below close over:
+    ///
+    /// ```ruby
+    /// specs = LangSendSpecs          # send_spec.rb, outside every describe
+    ///
+    /// describe "Invoking a method" do
+    ///   it "requires no arguments passed" do
+    ///     specs.fooM0.should == 100
+    /// ```
+    ///
+    /// The harness has one scope per example, so these are prepended rather
+    /// than closed over — flattening three scopes into one. That is the chosen
+    /// model and not an accident of the shape: a `before` that assigns a name
+    /// the `describe` declared writes *through* to the same slot here, which is
+    /// what Ruby does, because the write and the read agree on the name. What
+    /// it cannot model is a name deliberately shadowed at two depths, and
+    /// nothing in the corpus does that.
+    scope: Vec<Setup>,
     /// `before` bodies from the enclosing groups, outermost first. Prepended to
     /// every example in the group.
     ///
@@ -179,8 +219,9 @@ struct Walk<'a> {
     out: Vec<Example>,
 }
 
-/// One `before` block's body, the locals its own scope declared, and where in
-/// the file it came from.
+/// One prepended chunk — a `before` block's body, or a plain statement from an
+/// enclosing group — with the locals its own scope declared and where in the
+/// file it came from.
 #[derive(Clone)]
 struct Setup {
     body: Vec<Expr>,
@@ -230,9 +271,15 @@ impl Walk<'_> {
                 // group's `before` for every example in it, including the ones
                 // written above the hook.
                 let depth = self.setup.len();
+                let scope_depth = self.scope.len();
+                // The group body's own statements run before its hooks: Ruby
+                // runs the `describe` block when the file loads, and `before`
+                // only once an example is about to run.
+                self.collect_scope(block);
                 self.collect_setup(block);
                 self.body(block);
                 self.setup.truncate(depth);
+                self.scope.truncate(scope_depth);
                 self.group.pop();
             }
             "it" | "specify" => self.push(span, call, self.skipped.clone()),
@@ -265,9 +312,32 @@ impl Walk<'_> {
     /// be skipped visibly.
     fn nested(&mut self, statements: &[Expr]) {
         let depth = self.setup.len();
+        let scope_depth = self.scope.len();
+        self.collect_scope(statements);
         self.collect_setup(statements);
         self.body(statements);
         self.setup.truncate(depth);
+        self.scope.truncate(scope_depth);
+    }
+
+    /// Stack this group's plain statements for the examples below it.
+    ///
+    /// Everything that is not the DSL and does not itself build examples: an
+    /// assignment, a `class` or `module`, a `def`, a helper call. `require` and
+    /// `require_relative` are excluded because [`crate::loader`] already ran
+    /// them (#183) — prepending one would block every example below it on a
+    /// method the VM does not have.
+    fn collect_scope(&mut self, statements: &[Expr]) {
+        for statement in statements {
+            if !is_scope_statement(statement) {
+                continue;
+            }
+            self.scope.push(Setup {
+                span: statement.span,
+                body: vec![statement.clone()],
+                locals: Vec::new(),
+            });
+        }
     }
 
     /// Find this group's `before` blocks and stack them for its examples.
@@ -310,12 +380,24 @@ impl Walk<'_> {
                 }
             }
         }
+        let mut scope: Vec<Expr> = self
+            .scope
+            .iter()
+            .flat_map(|s| s.body.iter().cloned())
+            .collect();
+        // Same order as the bodies above: `scripts/verify-passes.rb`
+        // concatenates these spans to rebuild what ran, so a body and a span
+        // list that disagreed would re-run a different program than the one
+        // that passed.
+        let mut scope_spans: Vec<Span> = self.scope.iter().map(|s| s.span).collect();
         let mut setup_spans: Vec<Span> = self.setup.iter().map(|s| s.span).collect();
         // An example with no body of its own asserts nothing, and mspec passes
         // it. Prepending hooks must not turn that into something that ran.
         if own_body.is_empty() {
             body.clear();
             setup_spans.clear();
+            scope_spans.clear();
+            scope.clear();
         } else {
             body.extend(own_body);
         }
@@ -326,6 +408,8 @@ impl Walk<'_> {
         }
         self.out.push(Example {
             group: self.group.clone(),
+            scope,
+            scope_spans,
             description: argument_text(call).unwrap_or_else(|| "<no description>".to_owned()),
             span,
             setup_spans,
@@ -334,6 +418,52 @@ impl Walk<'_> {
             skipped,
         });
     }
+}
+
+/// Whether a statement in a group body is one to prepend to the examples below
+/// it, rather than one the walk descends into.
+///
+/// An assignment, a `def`, a `class` or `module` — anything that is not a call
+/// — is Ruby the group ran, and prepending it is the point of this stack.
+///
+/// A call is kept only when it takes no literal block. Every shape that would
+/// be wrong to *run* takes one: `describe` and `before` are structure this
+/// module reads, the guards are conditions it evaluates, mspec's `evaluate`
+/// builds an example out of a heredoc, and
+///
+/// ```ruby
+/// [1, 2].each do |n|
+///   it "handles #{n}" do; end
+/// end
+/// ```
+///
+/// would reach `it` at the VM. Running any of them blocks every example below
+/// on a method the VM has never had — `proc_spec.rb`'s two `evaluate` blocks
+/// cost all 38 of its examples before this rule said so. The cost of the rule
+/// is a group-level `each` that really was setup, which nothing in the corpus
+/// needs today.
+///
+/// The named list is then only the DSL that appears *without* a block:
+/// `it "is pending"` is mspec's pending marker, `it_behaves_like` takes plain
+/// arguments, and `require`/`require_relative` belong to [`crate::loader`]
+/// (#183) — which has already run them.
+fn is_scope_statement(statement: &Expr) -> bool {
+    let ExprKind::Call(call) = &statement.kind else {
+        return true;
+    };
+    if call.receiver.is_none() && is_blockless_dsl(&call.name) {
+        return false;
+    }
+    block_body(call).is_none()
+}
+
+/// ruby/spec's DSL as it is written with no block, which the block rule in
+/// [`is_scope_statement`] cannot catch.
+fn is_blockless_dsl(name: &str) -> bool {
+    matches!(
+        name,
+        "it" | "specify" | "require" | "require_relative" | "it_behaves_like" | "it_should_behave_like"
+    )
 }
 
 /// The body of a literal `do end` or `{ }` block, if the call has one.
@@ -685,6 +815,101 @@ mod tests {
             skips(source, &target("4.0.0", "darwin")),
             [Some("pending: no block".to_owned())]
         );
+    }
+
+    fn scope_text(source: &str, target: &Target) -> Vec<usize> {
+        examples(&parse(source), target)
+            .iter()
+            .map(|e| e.scope.len())
+            .collect()
+    }
+
+    #[test]
+    fn a_local_from_an_enclosing_scope_is_prepended_to_the_example() {
+        // #164: `send_spec.rb`'s shape. The assignment is outside every
+        // `describe`, and the example closes over it.
+        let source = r##"
+            specs = LangSendSpecs
+
+            describe "Invoking a method" do
+              it "requires no arguments passed" do
+                specs.fooM0.should == 100
+              end
+            end
+        "##;
+        let examples = examples(&parse(source), &target("4.0.0", "darwin"));
+        assert_eq!(examples.len(), 1);
+        assert_eq!(examples[0].scope.len(), 1);
+        // The span has to be there too, or `verify-passes.rb` replays an
+        // example without the local it reads.
+        assert_eq!(examples[0].scope_spans.len(), 1);
+    }
+
+    #[test]
+    fn a_describe_body_local_reaches_an_example_below_it() {
+        // The `core/comparable/equal_value_spec.rb` shape: declared in the
+        // `describe`, assigned in a `before`, read in the example.
+        let source = r##"
+            describe "Comparable#==" do
+              a = b = nil
+              before :each do
+                a = Weird.new(0)
+              end
+              it "returns true if other is the same as self" do
+                (a == a).should == true
+              end
+            end
+        "##;
+        let examples = examples(&parse(source), &target("4.0.0", "darwin"));
+        assert_eq!(examples[0].scope.len(), 1, "`a = b = nil` is the scope");
+        assert_eq!(examples[0].setup_spans.len(), 1, "the `before` is a hook");
+    }
+
+    #[test]
+    fn the_dsl_is_never_run_as_a_scope_statement() {
+        // Each of these blocked every example below it when it was prepended.
+        // `evaluate` cost `proc_spec.rb` all 38 of its examples, because its
+        // heredoc body reaches `**` at the VM.
+        let source = r##"
+            require_relative '../spec_helper'
+
+            describe "A Proc" do
+              evaluate <<-ruby do
+                @p = proc { |a| a }
+              ruby
+
+                @p.call(1).should == 1
+              end
+
+              it "is not given the DSL to run" do
+                @p.call(1).should == 1
+              end
+
+              [1, 2].each do |n|
+                it "handles #{n}" do; end
+              end
+            end
+        "##;
+        assert_eq!(
+            scope_text(source, &target("4.0.0", "darwin")),
+            [0, 0],
+            "neither `require_relative`, `evaluate`, nor the loop is scope"
+        );
+    }
+
+    #[test]
+    fn an_example_with_no_body_gets_no_scope() {
+        // An `it` that asserts nothing passes in mspec. Prepending a group's
+        // statements must not turn it into something that ran.
+        let source = r##"
+            describe "x" do
+              helper = 1
+              it "asserts nothing" do; end
+            end
+        "##;
+        let examples = examples(&parse(source), &target("4.0.0", "darwin"));
+        assert!(examples[0].scope.is_empty());
+        assert!(examples[0].scope_spans.is_empty());
     }
 
     #[test]

@@ -139,6 +139,18 @@ def dflt(a, b = a + 1); [a, b]; end; dflt(4)  #=> [4, 5]
 def splat(a, b); [a, b]; end; args = [1, 2]; splat(*args)  #=> [1, 2]
 def ret(a); return a; 99; end; ret(3)  #=> 3
 def calls(a); inner(a) + 1; end; def inner(a); a * 2; end; calls(5)  #=> 11
+# A default that declares a local displaces the parameters after it in Prism's
+# scope list, and the binder addresses by position (#164 surfaced this).
+def d(a = (b = 1), c = 2); [a, b, c]; end; d  #=> [1, 1, 2]
+def d(a = (b = 1), c = 2); [a, b, c]; end; d(9)  #=> [9, nil, 2]
+def d(a = (b = 1), c = 2); [a, b, c]; end; d(9, 8)  #=> [9, nil, 8]
+def d(a = b = c = 1, e = 2); [a, b, c, e]; end; d  #=> [1, 1, 1, 2]
+def d(a = b = c = 1, e = 2); [a, b, c, e]; end; d(3, 4)  #=> [3, nil, nil, 4]
+def d(a = (b = 1), c = (e = 2), f = 3); [a, b, c, e, f]; end; d  #=> [1, 1, 2, 2, 3]
+def d(a, b = (c = a + 1), e = 2); [a, b, c, e]; end; d(1)  #=> [1, 2, 2, 2]
+def d(a, b = (c = a + 1), e = 2); [a, b, c, e]; end; d(1, 5, 6)  #=> [1, 5, nil, 6]
+# A repeated underscore still takes a slot of its own and reads the first.
+def u(_, _); _; end; u(1, 2)  #=> 1
 
 # --------------------------------------------------------- blocks and yield
 def y1; yield 1; end; y1 { |a| a + 1 }  #=> 2
