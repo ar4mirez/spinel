@@ -586,3 +586,22 @@ __FILE__.frozen?  #=> false
 __FILE__.equal?(__FILE__)  #=> false
 defined?(__LINE__)  #=> "expression"
 defined?(__FILE__)  #=> "expression"
+
+# ---------------------------------------------------------------- globals
+# Distinct names per row on purpose: the oracle evaluates every snippet in one
+# CRuby process, where a global outlives the row that set it, while Spinel gives
+# each row a fresh heap. Sharing a name would make a row's answer depend on the
+# rows above it in one engine and not the other.
+($g1 = 1; $g1)  #=> 1
+$g_never_assigned  #=> nil
+defined?($g_never_asked)  #=> nil
+($g2 = 1; defined?($g2))  #=> "global-variable"
+($g3 = nil; defined?($g3))  #=> "global-variable"
+($g4 = 5)  #=> 5
+($g5 = 1; $g5 = 2; $g5)  #=> 2
+($g6 = nil; [1].each { $g6 = :set }; $g6)  #=> :set
+($g7 = 0; 3.times { $g7 = $g7 + 1 }; $g7)  #=> 3
+(def m8; $g8 = 7; end; m8; $g8)  #=> 7
+($g9 = [1]; $g9 << 2; $g9)  #=> [1, 2]
+($g10 = 1; $g11 = $g10 + 1; [$g10, $g11])  #=> [1, 2]
+defined?($~)  #=> "global-variable"

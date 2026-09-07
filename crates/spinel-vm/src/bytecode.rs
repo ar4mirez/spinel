@@ -202,6 +202,27 @@ pub enum Insn {
     /// `defined?(@a)`. Pushes `"instance-variable"` or `nil`.
     DefinedIvar(u32),
 
+    // -- global variables --------------------------------------------------
+    /// Index into [`Iseq::symbols`]; pushes the heap's global of that name, or
+    /// `nil` for one nothing has assigned. Reading an unset global is not an
+    /// error in Ruby.
+    ///
+    /// The regexp specials — `$~`, `$&`, `` $` ``, `$'`, `$1`.. — never reach
+    /// here: they are frame state read off the last match, and the compiler
+    /// claims them for [`Insn::LastMatch`] first. That is what keeps the global
+    /// table free of names no assignment ever writes.
+    GetGlobal(u32),
+    /// Index into [`Iseq::symbols`]; pops the value. Assignment is an
+    /// expression in Ruby, so the compiler emits `Dup` first where the value is
+    /// wanted — the same split [`Insn::SetLocal`] makes.
+    SetGlobal(u32),
+    /// `defined?($a)`. Pushes `"global-variable"` or `nil`.
+    ///
+    /// Presence, not truthiness: `$a = nil` makes `defined?($a)` answer
+    /// `"global-variable"`, which is why the table stores the assignment rather
+    /// than only a value.
+    DefinedGlobal(u32),
+
     // -- defined? ----------------------------------------------------------
     /// `defined?(recv.m)`. Pops the receiver; pushes `"method"` or `nil`.
     ///

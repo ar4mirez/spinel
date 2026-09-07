@@ -159,6 +159,8 @@ enum Slot {
     Local(u16, u16),
     /// An index into [`Iseq::symbols`].
     Ivar(u32),
+    /// An index into [`Iseq::symbols`], for [`Insn::SetGlobal`].
+    Global(u32),
 }
 
 /// A `begin` body a `retry` inside its `rescue` can restart.
@@ -320,12 +322,15 @@ impl Compiler {
             | Insn::LastMatch(_)
             | Insn::GetIvar(_)
             | Insn::DefinedIvar(_)
+            | Insn::GetGlobal(_)
+            | Insn::DefinedGlobal(_)
             | Insn::Dup => 1,
             // Pops the splatted array and pushes its snapshot: net zero.
             Insn::CaptureSplat => 0,
             Insn::Pop
             | Insn::SetLocal(_, _)
             | Insn::SetIvar(_)
+            | Insn::SetGlobal(_)
             | Insn::JumpUnless(_)
             | Insn::JumpIf(_)
             | Insn::JumpUnlessUndef(_)
@@ -894,9 +899,12 @@ impl Compiler {
                     self.emit(Insn::LastMatch(which));
                     Ok(())
                 }
-                // Every other global still needs a global table, which is not
-                // this slice. Named so the spec report says which one.
-                None => Err(Unsupported::at("a global variable", span)),
+                // Everything else is an ordinary global, in the heap's table.
+                None => {
+                    let symbol = self.symbol(name);
+                    self.emit(Insn::GetGlobal(symbol));
+                    Ok(())
+                }
             },
             VarRef::Const(name) => {
                 let symbol = self.symbol(name);
@@ -1104,9 +1112,14 @@ impl Compiler {
             TargetKind::Var(VarRef::Class(_)) => {
                 Err(Unsupported::at("assigning a class variable", target.span))
             }
-            TargetKind::Var(VarRef::Global(_)) => {
-                Err(Unsupported::at("assigning a global variable", target.span))
-            }
+            // Assigning a regexp special is not assigning a global: `$~ = m`
+            // writes the frame's last match, which is #14's business and not a
+            // table entry. Refused rather than quietly routed here, so a spec
+            // that writes one is reported instead of answered wrongly.
+            TargetKind::Var(VarRef::Global(name)) if match_ref(name).is_some() => Err(
+                Unsupported::at("assigning a regexp special variable", target.span),
+            ),
+            TargetKind::Var(VarRef::Global(name)) => Ok(Slot::Global(self.symbol(name))),
             TargetKind::Var(_) | TargetKind::ConstPath(_) => {
                 Err(Unsupported::at("assigning a constant", target.span))
             }
@@ -1125,6 +1138,7 @@ impl Compiler {
         match slot {
             Slot::Local(slot, depth) => self.emit(Insn::GetLocal(slot, depth)),
             Slot::Ivar(symbol) => self.emit(Insn::GetIvar(symbol)),
+            Slot::Global(symbol) => self.emit(Insn::GetGlobal(symbol)),
         }
     }
 
@@ -1134,6 +1148,7 @@ impl Compiler {
         match slot {
             Slot::Local(slot, depth) => self.emit(Insn::SetLocal(slot, depth)),
             Slot::Ivar(symbol) => self.emit(Insn::SetIvar(symbol)),
+            Slot::Global(symbol) => self.emit(Insn::SetGlobal(symbol)),
         }
     }
 
@@ -1584,8 +1599,23 @@ impl Compiler {
             ExprKind::Var(VarRef::Class(_)) => {
                 Err(Unsupported::at("`defined?` on a class variable", span))
             }
-            ExprKind::Var(VarRef::Global(_)) => {
-                Err(Unsupported::at("`defined?` on a global variable", span))
+            ExprKind::Var(VarRef::Global(name)) => {
+                // `defined?($~)` is "global-variable" whether or not anything
+                // has matched, while `defined?($&)` and `defined?($1)` are nil
+                // until one has. Measured on ruby 4.0.6, and the difference is
+                // why the specials cannot share the table's answer.
+                //
+                // Only `$~` reaches here as a global: Prism lowers the rest of
+                // the family to a back-reference node, which stays #14's.
+                match match_ref(name) {
+                    Some(MatchRef::Data) => self.push_word("global-variable"),
+                    Some(_) => Err(Unsupported::at("`defined?` on a back-reference", span)),
+                    None => {
+                        let symbol = self.symbol(name);
+                        self.emit(Insn::DefinedGlobal(symbol));
+                        Ok(())
+                    }
+                }
             }
             ExprKind::Var(VarRef::BackRef(_) | VarRef::NumberedRef(_)) => {
                 Err(Unsupported::at("`defined?` on a back-reference", span))

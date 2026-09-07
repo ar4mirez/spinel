@@ -1,0 +1,1 @@
+fails(`$!` is frame state, not a table global: it is the exception the enclosing `rescue` is handling, which the frame already carries. Routing it through #166's table would answer for the wrong scope, so it waits for #39. Became visible rather than blocked when `defined?` on a global started compiling):The defined? keyword for variables returns 'global-variable' for $!

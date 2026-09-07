@@ -578,6 +578,32 @@ pub fn eval_in(
                     stack.push(value);
                 }
 
+                // Globals (#166). One table per heap; the regexp specials
+                // never reach here — the compiler sends those to
+                // `Insn::LastMatch`, so a name in this table is always one an
+                // assignment put there.
+                Insn::GetGlobal(name) => {
+                    let symbol = frames[top].symbols[name as usize];
+                    // An unset global reads `nil` rather than raising: Ruby
+                    // warns under `-w` and answers nil, and the warning needs
+                    // #39's `$stderr`.
+                    stack.push(scope.global(symbol).unwrap_or(Value::NIL));
+                }
+                Insn::SetGlobal(name) => {
+                    let symbol = frames[top].symbols[name as usize];
+                    // Pops, like `SetLocal` and `SetIvar`: the callers that
+                    // want assignment to be an expression emit `Dup` first.
+                    let value = stack.pop().expect("setglobal on an empty stack");
+                    scope.set_global(symbol, value);
+                }
+                Insn::DefinedGlobal(name) => {
+                    let symbol = frames[top].symbols[name as usize];
+                    // Presence, not truthiness: `$a = nil` is defined.
+                    let held = scope.global(symbol).is_some();
+                    let value = defined_word(scope, string_class, held.then_some("global-variable"));
+                    stack.push(value);
+                }
+
                 Insn::GetLocal(slot, depth) => {
                     let env = env_outer(scope, frames[top].env, depth);
                     stack.push(env_get(scope, env, slot as usize));
