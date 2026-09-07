@@ -91,7 +91,7 @@ one the general error already uses.
 3. `Pending::keywords` keyed by `Value`; `pop_call` expands a `**` Hash. ✅
 4. `bind_keywords`: collect the leftovers, or raise the way Ruby does. ✅
 5. The key-error slot, opened only for a one-pattern form. ✅
-6. Oracle rows for the Ruby 3 separation cases; Rust tests for the raises. ✅
+6. Fifteen oracle rows for the Ruby 3 separation cases; Rust tests for the raises. ✅
 
 ## Results
 
