@@ -105,8 +105,6 @@ fn a_construct_this_slice_does_not_compile_is_an_error_never_a_guess() {
         // #154. What replaces them is the call-convention half of the same
         // syntax, which #11 owns: `CallSite::keywords` names each keyword by
         // symbol, so a non-symbol key and a `**` argument have nowhere to go.
-        "f(\"a\" => 1)",
-        "f(**h)",
         // A destructuring parameter binds several names in one slot, so
         // anything after it would be bound to the wrong one. See
         // `Compiler::spec_from_list`.
@@ -311,6 +309,54 @@ fn pattern_matching_protocols_and_raises() {
             "the message names the subject, which the spec asserts on: {error}"
         );
     }
+
+    // A hash pattern that fails on a *missing key* raises the key error rather
+    // than the general one — but only where CRuby names it, which is a form
+    // with one pattern. Measured on ruby 4.0.6; a second clause makes even the
+    // same failing pattern report generally.
+    for (source, want) in [
+        ("case({a: 1}); in {b: 2}; end", "NoMatchingPatternKeyError"),
+        ("{a: 1} => {b: 2}", "NoMatchingPatternKeyError"),
+        // Nested: the key is the inner one, the subject is still the outer.
+        (
+            "case({x: {a: 1}}); in {x: {b: 2}}; end",
+            "NoMatchingPatternKeyError",
+        ),
+        // A guard does not change which error the pattern failed with.
+        (
+            "case({a: 1}); in {b: 2} if true; end",
+            "NoMatchingPatternKeyError",
+        ),
+        // Two clauses: the general error, even though a key was missing.
+        (
+            "case({a: 1}); in {b: 2}; in {c: 3}; end",
+            "NoMatchingPatternError",
+        ),
+        (
+            "case({a: 1}); in [x]; in {b: 2}; end",
+            "NoMatchingPatternError",
+        ),
+        // The key was there; the value disagreed. Not a key error.
+        (
+            "case({a: 1}); in {a: String}; end",
+            "NoMatchingPatternError",
+        ),
+    ] {
+        let error = eval(source).expect_err("a pattern that matches nothing raises");
+        assert!(
+            error.contains(want),
+            "{source} should raise {want}, got: {error}"
+        );
+    }
+    // The last miss wins, which is what an alternative naming the *second*
+    // pattern's key means.
+    let error = eval("case({a: 1}); in {b: 2} | {c: 3}; end").expect_err("neither matches");
+    assert!(
+        error.contains("key not found: :c"),
+        "the message names the last key tried: {error}"
+    );
+    // `x in pat` answers false and never raises, so it reports no key at all.
+    assert_eq!(eval("{a: 1} in {b: 2}"), Ok("false".to_owned()));
 
     // `deconstruct` is called once per `case` subject, however many clauses
     // try it — observable on an object whose `deconstruct` has an effect.

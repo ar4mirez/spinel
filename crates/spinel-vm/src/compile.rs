@@ -239,6 +239,21 @@ struct Compiler {
     /// right now, so a nested one gets its own hidden locals rather than
     /// overwriting the locals the outer one is still using (#165).
     pattern_depth: usize,
+    /// A hidden local recording the key a hash pattern found missing, when the
+    /// enclosing form reports that specifically (#165).
+    ///
+    /// `Some` only for a `case`/`in` with exactly one clause and for the `=>`
+    /// form, because those are the only two where CRuby raises
+    /// `NoMatchingPatternKeyError` rather than the general error. Measured:
+    ///
+    /// ```ruby
+    /// case {a: 1}; in {b: 2}; end              # NoMatchingPatternKeyError
+    /// case {a: 1}; in {a: 2}; in {b: 2}; end   # NoMatchingPatternError
+    /// ```
+    ///
+    /// The last miss wins, which is what `in {b: 2} | {c: 3}` naming `:c`
+    /// means, and comes free from writing the slot at each one.
+    pattern_key: Option<u16>,
     /// A hidden local holding what `deconstruct` answered for the subject of
     /// the `case`/`in` being compiled, if any (#165).
     ///
@@ -327,6 +342,7 @@ impl Compiler {
             flattened: false,
             pattern_depth: 0,
             pattern_cache: None,
+            pattern_key: None,
             zsuper: None,
         }
     }
@@ -842,6 +858,7 @@ impl Compiler {
                 keywords: Vec::new(),
                 block: BlockRef::None,
                 implicit_self: true,
+                kwsplat: false,
             },
             true,
         );
@@ -858,6 +875,7 @@ impl Compiler {
                 keywords: Vec::new(),
                 block: BlockRef::None,
                 implicit_self: false,
+                kwsplat: false,
             },
             false,
         );
@@ -2115,12 +2133,16 @@ impl Compiler {
             });
         }
         if let Some(rest) = &list.keyword_rest {
-            match rest.kind {
-                // `**kw` collects into a Hash, and there is no Hash.
-                KeywordRestKind::Named(_) => {
-                    return Err(Unsupported::at("a keyword rest parameter", span));
+            match &rest.kind {
+                // `**kw`, and the anonymous `**`. Both collect; only the named
+                // one can be read, and the slot exists either way because the
+                // keywords have to stop being *unknown*.
+                KeywordRestKind::Named(name) => {
+                    let slot = self.param_slot(name.as_deref().unwrap_or("**"), at);
+                    at += 1;
+                    spec.kwrest = Some(slot);
                 }
-                KeywordRestKind::Forbidden => {}
+                KeywordRestKind::Forbidden => spec.no_keywords = true,
                 KeywordRestKind::Forwarding => {
                     return Err(Unsupported::at("argument forwarding", span));
                 }
@@ -2153,6 +2175,7 @@ impl Compiler {
                     .map(|o| o.slot as usize)
                     .chain(spec.rest.map(|slot| slot as usize))
                     .chain(spec.keywords.iter().map(|k| k.slot as usize))
+                    .chain(spec.kwrest.map(|slot| slot as usize))
                     .chain(spec.block.map(|slot| slot as usize))
                     .eq(binder_order(&spec)),
             "prism ordered {:?} against the binder's {:?}",
@@ -2173,6 +2196,17 @@ impl Compiler {
         let Params::Explicit(list) = params else {
             return Ok(());
         };
+        // `**kw` arrives as an `Array` of `[key, value]` pairs, because the
+        // binder is Rust and a `Hash` is `core/hash.rb` — building one there
+        // would mean sending from inside argument binding. The prologue turns
+        // it into the `Hash` the body expects, which is one send at a point
+        // where sending is already what the frame does.
+        if let Some(slot) = self.params.kwrest {
+            self.push_const_name("Hash");
+            self.emit(Insn::GetLocal(slot, 0));
+            self.emit_send("__from_pairs__", 1);
+            self.emit(Insn::SetLocal(slot, 0));
+        }
         // `{ |a, (b, c)| }`: destructuring the bound value is exactly the
         // multiple assignment `(b, c) = value`. `spec_from_list` has already
         // refused every shape where the parameter's slot is not its position.
@@ -2305,6 +2339,7 @@ impl Compiler {
             keywords: Vec::new(),
             block: BlockRef::None,
             implicit_self: false,
+            kwsplat: false,
         };
 
         for (index, arg) in args.iter().enumerate() {
@@ -2335,17 +2370,20 @@ impl Compiler {
                 // `{ "a" => 1 }` in expression position compiles — and they say
                 // so, because the reason is what picks the next slice.
                 ExprKind::Hash(hash) if !hash.braces => {
+                    // A `**splat` or a key that is not a symbol cannot ride the
+                    // symbol-keyed list, so the whole group becomes one hash
+                    // literal instead — the same lowering a braced `{}` gets.
+                    // Source order and last-key-wins then come from `Hash`
+                    // rather than from a merge rule written a second time here.
+                    if needs_keyword_hash(hash) {
+                        self.hash_literal(hash, arg.span)?;
+                        site.kwsplat = true;
+                        continue;
+                    }
                     for pair in &hash.entries {
-                        if matches!(pair.kind, spinel_ast::HashEntryKind::Splat(_)) {
-                            return Err(Unsupported::at("a double-splat argument", arg.span));
-                        }
-                        let key = keyword_name(pair).ok_or_else(|| {
-                            Unsupported::at("a non-symbol keyword argument", arg.span)
-                        })?;
+                        let key = keyword_name(pair).expect("checked by needs_keyword_hash");
                         let symbol = self.symbol(key);
-                        let value = pair_value(pair).ok_or_else(|| {
-                            Unsupported::at("a non-symbol keyword argument", arg.span)
-                        })?;
+                        let value = pair_value(pair).expect("checked by needs_keyword_hash");
                         self.expr(value)?;
                         site.keywords.push(symbol);
                     }
@@ -2464,6 +2502,7 @@ impl Compiler {
             keywords: Vec::new(),
             block: BlockRef::None,
             implicit_self: true,
+            kwsplat: false,
         };
         for &(slot, is_rest) in &forward.positional {
             self.emit(Insn::GetLocal(slot, forward.depth));
@@ -2511,6 +2550,8 @@ impl Compiler {
         self.emit(Insn::PushNil);
         self.emit(Insn::SetLocal(cache, 0));
         let outer_cache = self.pattern_cache.replace(cache);
+        // One clause is the only shape where CRuby names the missing key.
+        let outer_key = self.open_pattern_key(clauses.len() == 1);
 
         let tests_depth = self.depth;
         let mut bodies = Vec::with_capacity(clauses.len());
@@ -2544,13 +2585,7 @@ impl Compiler {
         debug_assert_eq!(self.depth, tests_depth);
         match &node.else_body {
             Some(body) => self.statements(body, true)?,
-            None => {
-                // `__pattern_fail__(subject)`, which raises. A receiverless
-                // send, so the private `Kernel` method is reachable.
-                self.emit(Insn::PushSelf);
-                self.emit(Insn::GetLocal(subject, 0));
-                self.emit_send_to_self("__pattern_fail__", 1);
-            }
+            None => self.emit_pattern_failure(subject),
         }
         let end_depth = self.depth;
         let mut to_end = vec![self.emit_jump(Insn::Jump)];
@@ -2571,7 +2606,51 @@ impl Compiler {
         }
         self.depth = end_depth;
         self.pattern_cache = outer_cache;
+        self.pattern_key = outer_key;
         Ok(())
+    }
+
+    /// Open a hidden slot for the key a hash pattern found missing, or not.
+    ///
+    /// Answers the slot that was in force, for the caller to put back.
+    fn open_pattern_key(&mut self, wanted: bool) -> Option<u16> {
+        if !wanted {
+            // Cleared rather than left alone: an inner `case`/`in` with two
+            // clauses must not write into an outer single-clause one's slot.
+            return self.pattern_key.take();
+        }
+        let slot = self.pattern_slot("missing key");
+        self.emit(Insn::PushNil);
+        self.emit(Insn::SetLocal(slot, 0));
+        self.pattern_key.replace(slot)
+    }
+
+    /// Raise for a pattern that matched nothing.
+    ///
+    /// `NoMatchingPatternKeyError` when a hash pattern was the reason and the
+    /// form is one that reports it; the general error otherwise. Both are
+    /// `core/kernel.rb`, and both raise, so nothing below them runs.
+    fn emit_pattern_failure(&mut self, subject: u16) {
+        let Some(key) = self.pattern_key else {
+            self.emit(Insn::PushSelf);
+            self.emit(Insn::GetLocal(subject, 0));
+            self.emit_send_to_self("__pattern_fail__", 1);
+            return;
+        };
+        let before = self.depth;
+        self.emit(Insn::GetLocal(key, 0));
+        let general = self.emit_jump(Insn::JumpUnless);
+        self.emit(Insn::PushSelf);
+        self.emit(Insn::GetLocal(subject, 0));
+        self.emit(Insn::GetLocal(key, 0));
+        self.emit_send_to_self("__pattern_key_fail__", 2);
+        let to_end = self.emit_jump(Insn::Jump);
+        self.patch_here(general);
+        self.depth = before;
+        self.emit(Insn::PushSelf);
+        self.emit(Insn::GetLocal(subject, 0));
+        self.emit_send_to_self("__pattern_fail__", 1);
+        self.patch_here(to_end);
     }
 
     /// `expr in pat` and `expr => pat`, the one-line forms.
@@ -2582,23 +2661,29 @@ impl Compiler {
     fn match_pattern(&mut self, node: &spinel_ast::MatchPattern) -> Emit {
         self.expr(&node.value)?;
         if !node.raises {
+            // `x in pat` answers false; nothing reports a key, so nothing
+            // records one.
+            let outer_key = self.open_pattern_key(false);
             self.pattern(&node.pattern)?;
+            self.pattern_key = outer_key;
             return Ok(());
         }
         let subject = self.pattern_slot("subject");
         self.emit(Insn::SetLocal(subject, 0));
+        // `x => pat` has one pattern, so a missing key is unambiguous and Ruby
+        // names it — measured, the same as a one-clause `case`/`in`.
+        let outer_key = self.open_pattern_key(true);
         let before = self.depth;
         self.emit(Insn::GetLocal(subject, 0));
         self.pattern(&node.pattern)?;
         let to_ok = self.emit_jump(Insn::JumpIf);
-        self.emit(Insn::PushSelf);
-        self.emit(Insn::GetLocal(subject, 0));
-        self.emit_send_to_self("__pattern_fail__", 1);
+        self.emit_pattern_failure(subject);
         // The call raises, so nothing below it runs; the `Pop` keeps the
         // linear depth model honest across the join.
         self.emit(Insn::Pop);
         self.patch_here(to_ok);
         self.depth = before;
+        self.pattern_key = outer_key;
         // `x => pat` evaluates to nil, measured.
         self.emit(Insn::PushNil);
         Ok(())
@@ -3004,7 +3089,21 @@ impl Compiler {
             self.emit(Insn::GetLocal(pairs, 0));
             self.emit(Insn::PushSym(key));
             self.emit_send("key?", 1);
-            fails.push(self.emit_jump(Insn::JumpUnless));
+            match self.pattern_key {
+                None => fails.push(self.emit_jump(Insn::JumpUnless)),
+                // The form reports which key was missing, so record it on the
+                // way out. Written at every miss, so the last one wins — which
+                // is what `in {b: 1} | {c: 2}` naming `:c` means.
+                Some(slot) => {
+                    let found = self.emit_jump(Insn::JumpIf);
+                    let missed = self.depth;
+                    self.emit(Insn::PushSym(key));
+                    self.emit(Insn::SetLocal(slot, 0));
+                    fails.push(self.emit_jump(Insn::Jump));
+                    self.patch_here(found);
+                    self.depth = missed;
+                }
+            }
 
             self.emit(Insn::GetLocal(pairs, 0));
             self.emit(Insn::PushSym(key));
@@ -3374,13 +3473,15 @@ fn binder_order(spec: &ParamSpec) -> impl Iterator<Item = usize> + '_ {
     // Post parameters sit between the splat and the keywords, and the binder
     // computes their base the same way.
     let keywords = rest.end + spec.post as usize;
+    let named = keywords..keywords + spec.keywords.len();
+    // `**kw` sits between the named keywords and the block (#193).
+    let kwrest = named.end..named.end + usize::from(spec.kwrest.is_some());
+    let block = kwrest.end..kwrest.end + usize::from(spec.block.is_some());
     optionals
         .chain(rest)
-        .chain(keywords..keywords + spec.keywords.len())
-        .chain(
-            (keywords + spec.keywords.len())
-                ..(keywords + spec.keywords.len() + usize::from(spec.block.is_some())),
-        )
+        .chain(named)
+        .chain(kwrest)
+        .chain(block)
 }
 
 /// The bytes of a literal with no interpolation, or `None` if it has any.
@@ -3444,6 +3545,19 @@ fn children(expr: &Expr) -> Vec<&Expr> {
         }
         _ => Vec::new(),
     }
+}
+
+/// Whether a call's keyword group has to be lowered to a `Hash` (#193).
+///
+/// True for a `**splat` and for any key that is not a plain symbol, which are
+/// the two shapes `CallSite::keywords` — a list of symbol indices — cannot
+/// hold. `m(k: 1)` is false and keeps the allocation-free path.
+fn needs_keyword_hash(hash: &spinel_ast::HashLit) -> bool {
+    hash.entries.iter().any(|pair| {
+        matches!(pair.kind, spinel_ast::HashEntryKind::Splat(_))
+            || keyword_name(pair).is_none()
+            || pair_value(pair).is_none()
+    })
 }
 
 /// The local a `*rest` or `**rest` in a pattern binds, if it names one.

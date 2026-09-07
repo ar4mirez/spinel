@@ -616,6 +616,15 @@ pub struct CallSite {
     /// A receiverless call — an implicit `self` send. Visibility checks and
     /// `super` both need to know.
     pub implicit_self: bool,
+    /// One more value on the stack, above the keyword values: a `Hash` whose
+    /// pairs are the call's keywords (#193).
+    ///
+    /// Set when the call writes a `**splat` or a key that is not a symbol, and
+    /// then [`CallSite::keywords`] is empty — the compiler lowers the whole
+    /// keyword group to one hash literal instead, so source order and
+    /// last-key-wins come from `Hash` rather than from a merge rule written
+    /// twice. An ordinary `m(k: 1)` is untouched and allocates nothing.
+    pub kwsplat: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -666,6 +675,18 @@ pub struct ParamSpec {
     /// added to `required`.
     pub post: u16,
     pub keywords: Vec<Keyword>,
+    /// `**kw`. The slot the keywords no named parameter claimed collect into
+    /// (#193).
+    ///
+    /// The binder writes an `Array` of `[key, value]` pairs there, and the
+    /// body's prologue turns it into a `Hash` — because a `Hash` is
+    /// `core/hash.rb` and the binder cannot send. `Some` even for an anonymous
+    /// `**`, which still collects and still has to stop the keywords being
+    /// unknown.
+    pub kwrest: Option<u16>,
+    /// `**nil`: the method accepts no keywords at all, and one is an
+    /// `ArgumentError` rather than something to collect.
+    pub no_keywords: bool,
     /// `&blk`. The block reaches the frame either way; this is the slot that
     /// also names it as a `Proc`.
     pub block: Option<u16>,
@@ -681,6 +702,7 @@ impl ParamSpec {
             + usize::from(self.rest.is_some())
             + self.post as usize
             + self.keywords.len()
+            + usize::from(self.kwrest.is_some())
             + usize::from(self.block.is_some())
     }
 
