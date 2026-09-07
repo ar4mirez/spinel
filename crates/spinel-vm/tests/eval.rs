@@ -304,10 +304,7 @@ fn pattern_matching_protocols_and_raises() {
     assert_eq!(eval("1 in [a]"), Ok("false".to_owned()));
 
     // `case`/`in` with nothing matching and no `else`, and the `=>` form.
-    for source in [
-        "case [0, 1]; in String then 1; end",
-        "[0, 1] => String",
-    ] {
+    for source in ["case [0, 1]; in String then 1; end", "[0, 1] => String"] {
         let error = eval(source).expect_err("a pattern that matches nothing raises");
         assert!(
             error.contains("NoMatchingPatternError") && error.contains("[0, 1]"),

@@ -34,10 +34,9 @@
 use std::sync::Arc;
 
 use spinel_ast::{
-    Guard, HashEntryKind, InClause, PatternRest,
-    Assign, AssignOp, Begin, BlockArg, Case, CaseBranches, Expr, ExprKind, If, IntValue, Logical,
-    LogicalOp, MultiTarget, Name, ParamList, Params, Program, Rescue, RescueMod, Span, StrPart,
-    Target, TargetKind, VarRef, While,
+    Assign, AssignOp, Begin, BlockArg, Case, CaseBranches, Expr, ExprKind, Guard, HashEntryKind,
+    If, InClause, IntValue, Logical, LogicalOp, MultiTarget, Name, ParamList, Params, PatternRest,
+    Program, Rescue, RescueMod, Span, StrPart, Target, TargetKind, VarRef, While,
 };
 
 use crate::bytecode::{
@@ -275,7 +274,9 @@ impl Zsuper {
             positional.push((rest, true));
         }
         // Post parameters follow the splat in the call, exactly as written.
-        let first_post = spec.slots() as u16 - spec.post - spec.keywords.len() as u16
+        let first_post = spec.slots() as u16
+            - spec.post
+            - spec.keywords.len() as u16
             - u16::from(spec.block.is_some());
         for offset in 0..spec.post {
             positional.push((first_post + offset, false));
@@ -2444,7 +2445,11 @@ impl Compiler {
     /// A snapshot taken on entry would forward 1, and CRuby documents this as
     /// the surprising half of the form. Reading the slots costs nothing extra
     /// and gets it right by construction.
-    fn zsuper_site(&mut self, block: Option<&BlockArg>, span: Span) -> Result<CallSite, Unsupported> {
+    fn zsuper_site(
+        &mut self,
+        block: Option<&BlockArg>,
+        span: Span,
+    ) -> Result<CallSite, Unsupported> {
         let Some(forward) = self.zsuper.clone() else {
             // Not inside a method body, and not inside a block written in one.
             // `super` there is a RuntimeError in Ruby, raised at run time; a
@@ -2476,7 +2481,6 @@ impl Compiler {
         self.attach_block(&mut site, block, span)?;
         Ok(site)
     }
-
 
     // -- pattern matching (#165) -------------------------------------------
 
@@ -2685,7 +2689,6 @@ impl Compiler {
         self.patch_here(to_end);
         Ok(())
     }
-
 
     /// `in [a, *rest, z]`, with an optional constant in front.
     ///
@@ -2965,7 +2968,10 @@ impl Compiler {
                 return Err(Unsupported::at("a non-symbol key in a pattern", key.span));
             };
             let Some(bytes) = flat_bytes(&symbol.parts) else {
-                return Err(Unsupported::at("an interpolated key in a pattern", key.span));
+                return Err(Unsupported::at(
+                    "an interpolated key in a pattern",
+                    key.span,
+                ));
             };
             let text = String::from_utf8(bytes.into_vec())
                 .map_err(|_| Unsupported::at("a key that is not UTF-8", key.span))?;

@@ -610,7 +610,8 @@ pub fn eval_in(
                     let symbol = frames[top].symbols[name as usize];
                     // Presence, not truthiness: `$a = nil` is defined.
                     let held = scope.global(symbol).is_some();
-                    let value = defined_word(scope, string_class, held.then_some("global-variable"));
+                    let value =
+                        defined_word(scope, string_class, held.then_some("global-variable"));
                     stack.push(value);
                 }
 
@@ -1567,9 +1568,7 @@ fn dispatch<'h>(
             //
             // `super` is exempt: it names no receiver and reaches a private
             // method the way a receiverless call does.
-            if !is_super
-                && let Some(refused) = visibility_refusal(scope, frames, &call, method)
-            {
+            if !is_super && let Some(refused) = visibility_refusal(scope, frames, &call, method) {
                 let exception = visibility_error(scope, call.receiver, call.name, refused);
                 return Ok(Some(Unwind::Exception(exception)));
             }

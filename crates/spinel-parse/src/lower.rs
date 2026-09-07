@@ -59,7 +59,8 @@ impl SourceOrigin<'_> {
     fn line(&self, offset: u32) -> u32 {
         // `partition_point` gives how many starts are at or before `offset`,
         // which is the line number: line 1 starts at 0.
-        u32::try_from(self.line_starts.partition_point(|&start| start <= offset)).unwrap_or(u32::MAX)
+        u32::try_from(self.line_starts.partition_point(|&start| start <= offset))
+            .unwrap_or(u32::MAX)
     }
 }
 
@@ -272,9 +273,7 @@ impl Lower<'_> {
             pm::Node::TrueNode { .. } => ExprKind::True,
             pm::Node::FalseNode { .. } => ExprKind::False,
             pm::Node::SelfNode { .. } => ExprKind::SelfExpr,
-            pm::Node::SourceLineNode { .. } => {
-                ExprKind::SourceLine(self.origin.line(span.start))
-            }
+            pm::Node::SourceLineNode { .. } => ExprKind::SourceLine(self.origin.line(span.start)),
             pm::Node::SourceEncodingNode { .. } => ExprKind::SourceEncoding,
             pm::Node::MissingNode { .. } => ExprKind::Missing,
             pm::Node::RedoNode { .. } => ExprKind::Redo,
