@@ -172,7 +172,7 @@ fn main() -> ExitCode {
             unparseable.push(format!("{}: cannot read", display_path(file)));
             continue;
         };
-        let parsed = spinel_parse::parse(&source);
+        let parsed = spinel_parse::parse_file(&file.to_string_lossy(), &source);
         // A `*_spec.rb` Spinel cannot parse is a parser bug, not a spec result,
         // so it is reported apart from the counts and fails the run.
         if let Some(error) = parsed.errors.first() {

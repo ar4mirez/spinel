@@ -128,8 +128,12 @@ pub enum ExprKind {
     SelfExpr,
     /// `__FILE__`
     SourceFile(Bytes),
-    /// `__LINE__`
-    SourceLine,
+    /// `__LINE__`, as the line the keyword was written on, counting from 1.
+    ///
+    /// Carried on the node rather than derived later because a [`Span`] is a
+    /// byte offset and only the parser still has the bytes to count newlines
+    /// in. `SourceFile` already works this way.
+    SourceLine(u32),
     /// `__ENCODING__`
     SourceEncoding,
     /// A node the parser could not build. Kept so that one syntax error does

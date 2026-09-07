@@ -809,6 +809,48 @@ impl Classes {
         None
     }
 
+    /// What `super` resolves to: the same name, one step further along the
+    /// receiver's ancestor chain than `owner` (#187).
+    ///
+    /// Not "start at the superclass". A method a module defines runs with the
+    /// *module* as its owner, and the chain continues from where the module
+    /// sits in the receiver's own linearisation:
+    ///
+    /// ```ruby
+    /// module M; def m = "M" + super; end
+    /// class A; def m = "A"; end
+    /// class B < A; include M; def m = "B" + super; end
+    /// B.new.m  #=> "BMA"
+    /// ```
+    ///
+    /// `B.ancestors` is `[B, M, A, ...]`, so `M#m`'s `super` finds `A#m` — a
+    /// class the module has never heard of. Starting at `M`'s superclass, or at
+    /// `B`'s, gets a different answer.
+    ///
+    /// Uncached: the answer depends on the pair, not on the receiver's class
+    /// alone, and `super` is rare next to an ordinary send. The inline caches
+    /// key off a call site's class and serial, which cannot express this.
+    #[must_use]
+    pub fn lookup_super(&self, id: ClassId, owner: ClassId, name: SymbolId) -> Option<Method> {
+        let chain = self.ancestors(id);
+        // `position` rather than an assumption that `owner` is on the chain at
+        // all: a method reached through a singleton class, or one whose owner
+        // was since removed from the chain, has no next step and `super` is a
+        // `NoMethodError` rather than a wrong answer.
+        let at = chain.iter().position(|&c| c == owner)?;
+        for &next in &chain[at + 1..] {
+            if let Some(&(body, cref, visibility)) = self.entry(next).methods.get(&name) {
+                return Some(Method {
+                    owner: next,
+                    body,
+                    cref,
+                    visibility,
+                });
+            }
+        }
+        None
+    }
+
     // -- constants -------------------------------------------------------
 
     /// This module's own constant, ignoring every ancestor and every enclosing

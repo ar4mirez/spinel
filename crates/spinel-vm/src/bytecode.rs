@@ -143,6 +143,20 @@ pub enum Insn {
     /// id — bytecode is shared between Ractors and a cache cannot be. Emitting
     /// the id now means that slice adds a table, not an instruction format.
     Send(u32),
+    /// Index into [`Iseq::call_sites`]; calls the same method one step further
+    /// along the receiver's ancestor chain than the one this frame is running.
+    ///
+    /// Both spellings. `super(...)` pushes the arguments the site names;
+    /// `super` — the zsuper form — pushes the frame's parameter locals *as
+    /// they stand now*, which the compiler emits as ordinary `GetLocal`s, so a
+    /// reassigned parameter forwards its new value the way Ruby's does.
+    ///
+    /// The name in the site is unused, like [`Insn::Yield`]'s: which method
+    /// this is only the frame knows, because `alias` and `define_method` can
+    /// make it something the call site never wrote. The receiver is the
+    /// frame's, and the block is the frame's too unless the site passes one —
+    /// `super` forwards the current block implicitly, measured.
+    Super(u32),
     /// Index into [`Iseq::call_sites`]; calls the current frame's block. The
     /// name in the site is unused, the arguments are not.
     Yield(u32),
@@ -201,6 +215,27 @@ pub enum Insn {
     SetIvar(u32),
     /// `defined?(@a)`. Pushes `"instance-variable"` or `nil`.
     DefinedIvar(u32),
+
+    // -- global variables --------------------------------------------------
+    /// Index into [`Iseq::symbols`]; pushes the heap's global of that name, or
+    /// `nil` for one nothing has assigned. Reading an unset global is not an
+    /// error in Ruby.
+    ///
+    /// The regexp specials — `$~`, `$&`, `` $` ``, `$'`, `$1`.. — never reach
+    /// here: they are frame state read off the last match, and the compiler
+    /// claims them for [`Insn::LastMatch`] first. That is what keeps the global
+    /// table free of names no assignment ever writes.
+    GetGlobal(u32),
+    /// Index into [`Iseq::symbols`]; pops the value. Assignment is an
+    /// expression in Ruby, so the compiler emits `Dup` first where the value is
+    /// wanted — the same split [`Insn::SetLocal`] makes.
+    SetGlobal(u32),
+    /// `defined?($a)`. Pushes `"global-variable"` or `nil`.
+    ///
+    /// Presence, not truthiness: `$a = nil` makes `defined?($a)` answer
+    /// `"global-variable"`, which is why the table stores the assignment rather
+    /// than only a value.
+    DefinedGlobal(u32),
 
     // -- defined? ----------------------------------------------------------
     /// `defined?(recv.m)`. Pops the receiver; pushes `"method"` or `nil`.

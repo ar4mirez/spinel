@@ -34,9 +34,9 @@
 use std::sync::Arc;
 
 use spinel_ast::{
-    Assign, AssignOp, Begin, BlockArg, Case, CaseBranches, Expr, ExprKind, If, IntValue, Logical,
-    LogicalOp, MultiTarget, Name, ParamList, Params, Program, Rescue, RescueMod, Span, StrPart,
-    Target, TargetKind, VarRef, While,
+    Assign, AssignOp, Begin, BlockArg, Case, CaseBranches, Expr, ExprKind, Guard, HashEntryKind,
+    If, InClause, IntValue, Logical, LogicalOp, MultiTarget, Name, ParamList, Params, PatternRest,
+    Program, Rescue, RescueMod, Span, StrPart, Target, TargetKind, VarRef, While,
 };
 
 use crate::bytecode::{
@@ -159,6 +159,8 @@ enum Slot {
     Local(u16, u16),
     /// An index into [`Iseq::symbols`].
     Ivar(u32),
+    /// An index into [`Iseq::symbols`], for [`Insn::SetGlobal`].
+    Global(u32),
 }
 
 /// A `begin` body a `retry` inside its `rescue` can restart.
@@ -233,6 +235,71 @@ struct Compiler {
     /// The caller merged several Ruby scopes into [`Self::locals`], so a depth
     /// may overshoot the chain. See [`flattened_expression`].
     flattened: bool,
+    /// How many compound patterns are open around the code being compiled
+    /// right now, so a nested one gets its own hidden locals rather than
+    /// overwriting the locals the outer one is still using (#165).
+    pattern_depth: usize,
+    /// A hidden local holding what `deconstruct` answered for the subject of
+    /// the `case`/`in` being compiled, if any (#165).
+    ///
+    /// Ruby calls `deconstruct` once per subject and reuses the result across
+    /// every clause, which an object with a side-effecting one can see. Set
+    /// while a clause's top-level pattern is compiled and cleared while its
+    /// *elements* are, because those have subjects of their own.
+    pattern_cache: Option<u16>,
+    /// What a bare `super` forwards, if this body is inside a method (#187).
+    ///
+    /// Carried rather than read off [`Self::params`] because a block written in
+    /// a method forwards *the method's* arguments, not its own — so a block
+    /// inherits this from its parent with the depth stepped up one, and a
+    /// method body replaces it with its own at depth zero.
+    zsuper: Option<Zsuper>,
+}
+
+impl Zsuper {
+    /// The parameters in the order a call takes them: required, optional,
+    /// rest, post, then keywords.
+    ///
+    /// Slot numbers rather than names, because that is what a `GetLocal` wants
+    /// and because an anonymous `*` still has a slot to forward. The block
+    /// parameter is deliberately absent: `super` forwards the frame's block
+    /// whether or not the method named it, which the interpreter does.
+    fn from_spec(spec: &ParamSpec) -> Zsuper {
+        let mut positional = Vec::new();
+        for slot in 0..spec.required {
+            positional.push((slot, false));
+        }
+        positional.extend(spec.optional.iter().map(|o| (o.slot, false)));
+        if let Some(rest) = spec.rest {
+            positional.push((rest, true));
+        }
+        // Post parameters follow the splat in the call, exactly as written.
+        let first_post = spec.slots() as u16
+            - spec.post
+            - spec.keywords.len() as u16
+            - u16::from(spec.block.is_some());
+        for offset in 0..spec.post {
+            positional.push((first_post + offset, false));
+        }
+        Zsuper {
+            positional,
+            keywords: spec.keywords.iter().map(|k| (k.name, k.slot)).collect(),
+            depth: 0,
+        }
+    }
+}
+
+/// The enclosing method's parameters, as a bare `super` has to push them.
+#[derive(Debug, Clone)]
+struct Zsuper {
+    /// `(slot, is_rest)` in the order the call takes them: required, optional,
+    /// rest, post. A rest parameter is one pushed value the site splats.
+    positional: Vec<(u16, bool)>,
+    /// `(symbol index, slot)` per declared keyword.
+    keywords: Vec<(u32, u16)>,
+    /// How many scopes up [`Self::positional`]'s slots live: zero in the method
+    /// body itself, one inside a block written in it, and so on.
+    depth: u16,
 }
 
 impl Compiler {
@@ -258,6 +325,9 @@ impl Compiler {
             is_lambda_body: false,
             outer: Vec::new(),
             flattened: false,
+            pattern_depth: 0,
+            pattern_cache: None,
+            zsuper: None,
         }
     }
 
@@ -275,6 +345,15 @@ impl Compiler {
             // A block sees the flattened scopes its parent saw. A method body
             // does not, which is what the barrier already says.
             compiler.flattened = parent.flattened;
+            // `super` inside a block forwards the *method's* arguments, one
+            // scope further out than the block's own locals. A method body
+            // takes none of this: `zsuper` stays `None` until its own
+            // parameters are bound, which is what makes `super` at the top
+            // level a refusal rather than a forward of nothing.
+            compiler.zsuper = parent.zsuper.clone().map(|mut z| {
+                z.depth += 1;
+                z
+            });
         }
         compiler
     }
@@ -320,12 +399,15 @@ impl Compiler {
             | Insn::LastMatch(_)
             | Insn::GetIvar(_)
             | Insn::DefinedIvar(_)
+            | Insn::GetGlobal(_)
+            | Insn::DefinedGlobal(_)
             | Insn::Dup => 1,
             // Pops the splatted array and pushes its snapshot: net zero.
             Insn::CaptureSplat => 0,
             Insn::Pop
             | Insn::SetLocal(_, _)
             | Insn::SetIvar(_)
+            | Insn::SetGlobal(_)
             | Insn::JumpUnless(_)
             | Insn::JumpIf(_)
             | Insn::JumpUnlessUndef(_)
@@ -402,6 +484,8 @@ impl Compiler {
             // `yield` is the same shape without a receiver: the block comes
             // from the frame.
             Insn::Yield(site) => 1 - self.site_operands(site, false),
+            // `super` too: the receiver is the frame's, never pushed.
+            Insn::Super(site) => 1 - self.site_operands(site, false),
         }
     }
 
@@ -571,6 +655,18 @@ impl Compiler {
             ExprKind::True => self.emit(Insn::PushTrue),
             ExprKind::False => self.emit(Insn::PushFalse),
             ExprKind::SelfExpr => self.emit(Insn::PushSelf),
+            // `__FILE__` and `__LINE__` are constants by the time the compiler
+            // sees them: the parser filled both in, because it is the last
+            // stage that still has the bytes a line number is counted in.
+            //
+            // A plain `Literal::Str`, not a frozen one: `__FILE__.frozen?` is
+            // false and `__FILE__.equal?(__FILE__)` is false, both measured, so
+            // each evaluation wants its own object.
+            ExprKind::SourceFile(path) => {
+                let index = self.literal(Literal::Str(path.to_vec().into_boxed_slice()));
+                self.emit(Insn::PushLit(index));
+            }
+            ExprKind::SourceLine(line) => self.emit(Insn::PushInt(i64::from(*line))),
 
             ExprKind::Int(int) => match &int.value {
                 IntValue::Small(n) => match Value::fixnum(*n) {
@@ -640,7 +736,11 @@ impl Compiler {
             ExprKind::Assign(assign) => self.assign(assign, span)?,
             ExprKind::If(node) => self.if_expr(node)?,
             ExprKind::While(node) => self.while_expr(node)?,
-            ExprKind::Case(node) => self.case_expr(node, span)?,
+            ExprKind::Case(node) => match &node.branches {
+                CaseBranches::When(_) => self.case_expr(node, span)?,
+                CaseBranches::In(clauses) => self.case_in(node, clauses, span)?,
+            },
+            ExprKind::MatchPattern(node) => self.match_pattern(node)?,
             ExprKind::Logical(node) => self.logical(node)?,
             ExprKind::Parens(statements) => self.statements(statements, true)?,
             ExprKind::Call(call) => self.call(call, span)?,
@@ -676,6 +776,7 @@ impl Compiler {
 
             ExprKind::Def(def) => self.def_expr(def, span)?,
             ExprKind::Yield(node) => self.yield_expr(node, span)?,
+            ExprKind::Super(node) => self.super_expr(node, span)?,
             ExprKind::Lambda(block) => self.lambda(block, span)?,
             ExprKind::Return(value) => self.return_expr(value.as_deref(), span)?,
 
@@ -726,6 +827,27 @@ impl Compiler {
     ///
     /// The receiver and the arguments are already on the stack, deepest first,
     /// which is the shape [`Insn::Send`] wants.
+    /// A receiverless send, which is how a private `Kernel` method is reached.
+    ///
+    /// The compiler pushes `self` itself, because the call still takes a
+    /// receiver at run time; `implicit_self` is what makes visibility let it
+    /// through (#161).
+    fn emit_send_to_self(&mut self, name: &str, argc: u16) {
+        let symbol = self.symbol(name);
+        let site = self.push_site(
+            CallSite {
+                name: symbol,
+                argc,
+                splats: Vec::new(),
+                keywords: Vec::new(),
+                block: BlockRef::None,
+                implicit_self: true,
+            },
+            true,
+        );
+        self.emit(Insn::Send(site));
+    }
+
     fn emit_send(&mut self, name: &str, argc: u16) {
         let symbol = self.symbol(name);
         let site = self.push_site(
@@ -882,9 +1004,12 @@ impl Compiler {
                     self.emit(Insn::LastMatch(which));
                     Ok(())
                 }
-                // Every other global still needs a global table, which is not
-                // this slice. Named so the spec report says which one.
-                None => Err(Unsupported::at("a global variable", span)),
+                // Everything else is an ordinary global, in the heap's table.
+                None => {
+                    let symbol = self.symbol(name);
+                    self.emit(Insn::GetGlobal(symbol));
+                    Ok(())
+                }
             },
             VarRef::Const(name) => {
                 let symbol = self.symbol(name);
@@ -1092,9 +1217,14 @@ impl Compiler {
             TargetKind::Var(VarRef::Class(_)) => {
                 Err(Unsupported::at("assigning a class variable", target.span))
             }
-            TargetKind::Var(VarRef::Global(_)) => {
-                Err(Unsupported::at("assigning a global variable", target.span))
-            }
+            // Assigning a regexp special is not assigning a global: `$~ = m`
+            // writes the frame's last match, which is #14's business and not a
+            // table entry. Refused rather than quietly routed here, so a spec
+            // that writes one is reported instead of answered wrongly.
+            TargetKind::Var(VarRef::Global(name)) if match_ref(name).is_some() => Err(
+                Unsupported::at("assigning a regexp special variable", target.span),
+            ),
+            TargetKind::Var(VarRef::Global(name)) => Ok(Slot::Global(self.symbol(name))),
             TargetKind::Var(_) | TargetKind::ConstPath(_) => {
                 Err(Unsupported::at("assigning a constant", target.span))
             }
@@ -1113,6 +1243,7 @@ impl Compiler {
         match slot {
             Slot::Local(slot, depth) => self.emit(Insn::GetLocal(slot, depth)),
             Slot::Ivar(symbol) => self.emit(Insn::GetIvar(symbol)),
+            Slot::Global(symbol) => self.emit(Insn::GetGlobal(symbol)),
         }
     }
 
@@ -1122,6 +1253,7 @@ impl Compiler {
         match slot {
             Slot::Local(slot, depth) => self.emit(Insn::SetLocal(slot, depth)),
             Slot::Ivar(symbol) => self.emit(Insn::SetIvar(symbol)),
+            Slot::Global(symbol) => self.emit(Insn::SetGlobal(symbol)),
         }
     }
 
@@ -1315,9 +1447,9 @@ impl Compiler {
         Ok(())
     }
 
-    fn case_expr(&mut self, node: &Case, span: Span) -> Emit {
+    fn case_expr(&mut self, node: &Case, _span: Span) -> Emit {
         let CaseBranches::When(clauses) = &node.branches else {
-            return Err(Unsupported::at("`case`/`in` pattern matching", span));
+            unreachable!("`case`/`in` is routed to `case_in` by the caller");
         };
 
         // With a subject, every test is `condition === subject` and the subject
@@ -1572,8 +1704,23 @@ impl Compiler {
             ExprKind::Var(VarRef::Class(_)) => {
                 Err(Unsupported::at("`defined?` on a class variable", span))
             }
-            ExprKind::Var(VarRef::Global(_)) => {
-                Err(Unsupported::at("`defined?` on a global variable", span))
+            ExprKind::Var(VarRef::Global(name)) => {
+                // `defined?($~)` is "global-variable" whether or not anything
+                // has matched, while `defined?($&)` and `defined?($1)` are nil
+                // until one has. Measured on ruby 4.0.6, and the difference is
+                // why the specials cannot share the table's answer.
+                //
+                // Only `$~` reaches here as a global: Prism lowers the rest of
+                // the family to a back-reference node, which stays #14's.
+                match match_ref(name) {
+                    Some(MatchRef::Data) => self.push_word("global-variable"),
+                    Some(_) => Err(Unsupported::at("`defined?` on a back-reference", span)),
+                    None => {
+                        let symbol = self.symbol(name);
+                        self.emit(Insn::DefinedGlobal(symbol));
+                        Ok(())
+                    }
+                }
             }
             ExprKind::Var(VarRef::BackRef(_) | VarRef::NumberedRef(_)) => {
                 Err(Unsupported::at("`defined?` on a back-reference", span))
@@ -1837,6 +1984,12 @@ impl Compiler {
         let mut child = Compiler::nested(name, locals, self, barrier);
         child.is_lambda_body = lambda;
         child.params = child.lower_params(params, span)?;
+        // A method body is where a bare `super`'s argument list comes from. A
+        // block keeps the one it inherited in `nested`, because `super` inside
+        // one forwards the enclosing method's arguments, not the block's.
+        if barrier {
+            child.zsuper = Some(Zsuper::from_spec(&child.params));
+        }
         // Optional defaults are emitted first, each at a known instruction, so
         // the binder can enter the body at the first default it has to compute
         // and fall through the rest. The body proper starts after them.
@@ -2204,6 +2357,20 @@ impl Compiler {
             }
         }
 
+        self.attach_block(&mut site, block, span)?;
+        Ok(site)
+    }
+
+    /// Put a call's block on the site, compiling a literal one as a child.
+    ///
+    /// Shared by an ordinary call and by `super`, which takes the same three
+    /// shapes.
+    fn attach_block(
+        &mut self,
+        site: &mut CallSite,
+        block: Option<&BlockArg>,
+        span: Span,
+    ) -> Result<(), Unsupported> {
         match block {
             None => {}
             Some(BlockArg::Block(block)) => {
@@ -2225,7 +2392,7 @@ impl Compiler {
                 return Err(Unsupported::at("an anonymous block parameter", span));
             }
         }
-        Ok(site)
+        Ok(())
     }
 
     fn push_site(&mut self, mut site: CallSite, implicit_self: bool) -> u32 {
@@ -2240,6 +2407,675 @@ impl Compiler {
         let site = self.push_site(site, true);
         self.emit(Insn::Yield(site));
         Ok(())
+    }
+
+    /// `super`, `super(...)`, and `super()` (#187).
+    ///
+    /// Which method this resolves to is the frame's business — `alias` and
+    /// `define_method` can make the running method's name something no call
+    /// site wrote — so the site carries arguments only, the way `yield`'s does.
+    ///
+    /// The two forms differ in one thing: what is pushed.
+    ///
+    /// | written | pushed |
+    /// |---|---|
+    /// | `super(a, b)` | what the argument list says |
+    /// | `super()` | nothing |
+    /// | `super` | the enclosing method's parameter locals, read now |
+    fn super_expr(&mut self, node: &spinel_ast::Super, span: Span) -> Emit {
+        let site = match &node.args {
+            Some(args) => self.arguments("super", args, node.block.as_ref(), span)?,
+            None => self.zsuper_site(node.block.as_ref(), span)?,
+        };
+        let site = self.push_site(site, true);
+        self.emit(Insn::Super(site));
+        Ok(())
+    }
+
+    /// The argument list bare `super` forwards.
+    ///
+    /// Ordinary `GetLocal`s over the enclosing method's parameter slots, which
+    /// is what makes a reassigned parameter forward its new value:
+    ///
+    /// ```ruby
+    /// class B < A; def m(a); a = a * 10; super; end; end
+    /// B.new.m(1)  # A#m sees 10
+    /// ```
+    ///
+    /// A snapshot taken on entry would forward 1, and CRuby documents this as
+    /// the surprising half of the form. Reading the slots costs nothing extra
+    /// and gets it right by construction.
+    fn zsuper_site(
+        &mut self,
+        block: Option<&BlockArg>,
+        span: Span,
+    ) -> Result<CallSite, Unsupported> {
+        let Some(forward) = self.zsuper.clone() else {
+            // Not inside a method body, and not inside a block written in one.
+            // `super` there is a RuntimeError in Ruby, raised at run time; a
+            // compiler that cannot see the parameters cannot even build the
+            // call, so it says so.
+            return Err(Unsupported::at("`super` outside a method", span));
+        };
+        let mut site = CallSite {
+            name: self.symbol("super"),
+            argc: 0,
+            splats: Vec::new(),
+            keywords: Vec::new(),
+            block: BlockRef::None,
+            implicit_self: true,
+        };
+        for &(slot, is_rest) in &forward.positional {
+            self.emit(Insn::GetLocal(slot, forward.depth));
+            if is_rest {
+                site.splats.push(site.argc);
+            }
+            site.argc += 1;
+        }
+        for &(name, slot) in &forward.keywords {
+            self.emit(Insn::GetLocal(slot, forward.depth));
+            site.keywords.push(name);
+        }
+        // An explicit `&b` on a bare `super` is legal Ruby and overrides the
+        // implicit forwarding the interpreter does.
+        self.attach_block(&mut site, block, span)?;
+        Ok(site)
+    }
+
+    // -- pattern matching (#165) -------------------------------------------
+
+    /// `case`/`in`: try each pattern against the subject, run the first body
+    /// that matches.
+    ///
+    /// The same two-pass shape [`Self::case_expr`] uses for `when` — tests
+    /// first, bodies after — with two differences Ruby makes. A pattern binds
+    /// locals as it tests, so its bindings are already in place when its guard
+    /// runs. And falling off the end with no `else` raises
+    /// `NoMatchingPatternError` rather than answering `nil`.
+    ///
+    /// The subject goes in a hidden local rather than staying on the stack:
+    /// each pattern consumes its copy, and the guard between the test and the
+    /// body would otherwise have to reach under itself for the next one.
+    /// Evaluated once, which `pattern_matching_spec.rb` asserts.
+    fn case_in(&mut self, node: &Case, clauses: &[InClause], span: Span) -> Emit {
+        let Some(predicate) = &node.predicate else {
+            // `case` with no subject takes `when`, never `in`; Prism would not
+            // build this. Refused rather than assumed.
+            return Err(Unsupported::at("`case`/`in` with no subject", span));
+        };
+        self.expr(predicate)?;
+        let subject = self.pattern_slot("subject");
+        self.emit(Insn::SetLocal(subject, 0));
+        // One `deconstruct` for the whole `case`, shared by every clause.
+        let cache = self.pattern_slot("deconstructed");
+        self.emit(Insn::PushNil);
+        self.emit(Insn::SetLocal(cache, 0));
+        let outer_cache = self.pattern_cache.replace(cache);
+
+        let tests_depth = self.depth;
+        let mut bodies = Vec::with_capacity(clauses.len());
+        for clause in clauses {
+            self.emit(Insn::GetLocal(subject, 0));
+            self.pattern(&clause.pattern)?;
+            let mut entries = vec![self.emit_jump(Insn::JumpIf)];
+            if let Some(guard) = &clause.guard {
+                // A guard is only reached when the pattern matched, so it runs
+                // with the bindings: `in n if n > 3` reads the `n` just bound.
+                // Which means the "matched" jump above has to land here rather
+                // than at the body, and the guard decides.
+                let to_body = entries.pop().expect("the pattern's own jump");
+                let skip = self.emit_jump(Insn::Jump);
+                self.patch_here(to_body);
+                self.depth = tests_depth;
+                self.expr(match guard {
+                    Guard::If(condition) | Guard::Unless(condition) => condition,
+                })?;
+                entries.push(self.emit_jump(match guard {
+                    Guard::If(_) => Insn::JumpIf as fn(i32) -> Insn,
+                    Guard::Unless(_) => Insn::JumpUnless as fn(i32) -> Insn,
+                }));
+                self.patch_here(skip);
+                self.depth = tests_depth;
+            }
+            bodies.push((entries, &clause.body));
+        }
+
+        // Nothing matched.
+        debug_assert_eq!(self.depth, tests_depth);
+        match &node.else_body {
+            Some(body) => self.statements(body, true)?,
+            None => {
+                // `__pattern_fail__(subject)`, which raises. A receiverless
+                // send, so the private `Kernel` method is reachable.
+                self.emit(Insn::PushSelf);
+                self.emit(Insn::GetLocal(subject, 0));
+                self.emit_send_to_self("__pattern_fail__", 1);
+            }
+        }
+        let end_depth = self.depth;
+        let mut to_end = vec![self.emit_jump(Insn::Jump)];
+
+        for (entries, body) in bodies {
+            let start = self.here();
+            for at in entries {
+                self.patch(at, start);
+            }
+            self.depth = tests_depth;
+            self.statements(body, true)?;
+            debug_assert_eq!(self.depth, end_depth, "`in` arms disagree about depth");
+            to_end.push(self.emit_jump(Insn::Jump));
+        }
+
+        for at in to_end {
+            self.patch_here(at);
+        }
+        self.depth = end_depth;
+        self.pattern_cache = outer_cache;
+        Ok(())
+    }
+
+    /// `expr in pat` and `expr => pat`, the one-line forms.
+    ///
+    /// They differ only in what a mismatch is: `in` answers `false`, `=>`
+    /// raises `NoMatchingPatternError`. A match answers `true` and `nil`
+    /// respectively, both measured.
+    fn match_pattern(&mut self, node: &spinel_ast::MatchPattern) -> Emit {
+        self.expr(&node.value)?;
+        if !node.raises {
+            self.pattern(&node.pattern)?;
+            return Ok(());
+        }
+        let subject = self.pattern_slot("subject");
+        self.emit(Insn::SetLocal(subject, 0));
+        let before = self.depth;
+        self.emit(Insn::GetLocal(subject, 0));
+        self.pattern(&node.pattern)?;
+        let to_ok = self.emit_jump(Insn::JumpIf);
+        self.emit(Insn::PushSelf);
+        self.emit(Insn::GetLocal(subject, 0));
+        self.emit_send_to_self("__pattern_fail__", 1);
+        // The call raises, so nothing below it runs; the `Pop` keeps the
+        // linear depth model honest across the join.
+        self.emit(Insn::Pop);
+        self.patch_here(to_ok);
+        self.depth = before;
+        // `x => pat` evaluates to nil, measured.
+        self.emit(Insn::PushNil);
+        Ok(())
+    }
+
+    /// A hidden local for a pattern's scratch value.
+    ///
+    /// Named so no Ruby program can mean one — a local cannot contain a space —
+    /// and numbered by nesting depth, because an inner pattern is compiled
+    /// while an outer one still needs its own.
+    fn pattern_slot(&mut self, what: &str) -> u16 {
+        let name = format!("pattern {what} {}", self.pattern_depth);
+        self.slot(&name)
+    }
+
+    /// Compile one pattern.
+    ///
+    /// The contract every arm keeps: the subject is on top of the stack on
+    /// entry, is consumed, and a boolean is left in its place. A compound
+    /// pattern spills the subject into a hidden local first, so every jump
+    /// inside it happens at one depth and the arms cannot drift apart.
+    fn pattern(&mut self, pat: &Expr) -> Emit {
+        match &pat.kind {
+            // A bare name always matches, and binds. `in x` is Ruby's way of
+            // saying "whatever this is, call it x".
+            ExprKind::Var(VarRef::Local { name, depth }) => {
+                let (slot, depth) = self.outer_slot(name, *depth, pat.span)?;
+                self.emit(Insn::SetLocal(slot, depth));
+                self.emit(Insn::PushTrue);
+                Ok(())
+            }
+            // `^expr`. The pin is what makes a pattern read a variable rather
+            // than bind one, and it compares with `===` like any other value
+            // pattern: `k = Integer; 1 in ^k` is true, measured.
+            ExprKind::Pin(inner) => self.value_pattern(inner),
+            ExprKind::AltPattern(alt) => self.alt_pattern(alt),
+            ExprKind::CapturePattern(capture) => self.capture_pattern(capture),
+            ExprKind::ArrayPattern(array) => self.array_pattern(array, pat.span),
+            ExprKind::FindPattern(find) => self.find_pattern(find, pat.span),
+            ExprKind::HashPattern(hash) => self.hash_pattern(hash, pat.span),
+            // Everything else is a value pattern, which is a `===` — the same
+            // question `when` asks, on the same instruction.
+            _ => self.value_pattern(pat),
+        }
+    }
+
+    /// `pattern === subject`, the test every value pattern is.
+    fn value_pattern(&mut self, pat: &Expr) -> Emit {
+        self.expr(pat)?;
+        self.emit(Insn::CaseEq);
+        Ok(())
+    }
+
+    /// `a | b`: the first alternative that matches wins.
+    ///
+    /// The subject is duplicated so the second alternative still has one after
+    /// the first consumed its copy.
+    fn alt_pattern(&mut self, alt: &spinel_ast::AltPattern) -> Emit {
+        self.emit(Insn::Dup);
+        self.pattern(&alt.left)?;
+        let to_right = self.emit_jump(Insn::JumpUnless);
+        let matched = self.depth;
+        // The left matched: drop the spare subject and answer true.
+        self.emit(Insn::Pop);
+        self.emit(Insn::PushTrue);
+        let to_end = self.emit_jump(Insn::Jump);
+        self.patch_here(to_right);
+        self.depth = matched;
+        self.pattern(&alt.right)?;
+        self.patch_here(to_end);
+        Ok(())
+    }
+
+    /// `pat => name`: match, then bind the *subject* to the name.
+    fn capture_pattern(&mut self, capture: &spinel_ast::CapturePattern) -> Emit {
+        self.emit(Insn::Dup);
+        self.pattern(&capture.value)?;
+        let to_fail = self.emit_jump(Insn::JumpUnless);
+        let held = self.depth;
+        let slot = self.target_slot(&capture.target)?;
+        self.emit_set(slot);
+        self.emit(Insn::PushTrue);
+        let to_end = self.emit_jump(Insn::Jump);
+        self.patch_here(to_fail);
+        self.depth = held;
+        self.emit(Insn::Pop);
+        self.emit(Insn::PushFalse);
+        self.patch_here(to_end);
+        Ok(())
+    }
+
+    /// `in [a, *rest, z]`, with an optional constant in front.
+    ///
+    /// The protocol half — is there a `deconstruct`, and did it answer an
+    /// Array — is `Kernel#__pattern_deconstruct__` in `core/kernel.rb`, because
+    /// it is two sends and a raise and `docs/engine.md` puts those in Ruby.
+    /// What is left here is arithmetic on indices, which is what a compiler is
+    /// for.
+    fn array_pattern(&mut self, node: &spinel_ast::ArrayPattern, span: Span) -> Emit {
+        self.pattern_depth += 1;
+        let result = self.array_pattern_inner(node, span);
+        self.pattern_depth -= 1;
+        result
+    }
+
+    fn array_pattern_inner(&mut self, node: &spinel_ast::ArrayPattern, span: Span) -> Emit {
+        let subject = self.pattern_slot("subject");
+        let parts = self.pattern_slot("parts");
+        let length = self.pattern_slot("length");
+        self.emit(Insn::SetLocal(subject, 0));
+        let base = self.depth;
+        let mut fails = Vec::new();
+
+        if let Some(constant) = &node.constant {
+            self.emit(Insn::GetLocal(subject, 0));
+            self.expr(constant)?;
+            self.emit(Insn::CaseEq);
+            fails.push(self.emit_jump(Insn::JumpUnless));
+        }
+
+        // `parts = __pattern_deconstruct__(subject)`; nil means the object has
+        // no `deconstruct`, which is a failed match rather than an error.
+        //
+        // A `case`/`in` computes it once for its subject and every clause
+        // reads the same answer — the whole of "calls #deconstruct once for
+        // multiple patterns", which an object with a side-effecting
+        // `deconstruct` can observe.
+        let cache = self.pattern_cache;
+        self.deconstruct_into(parts, subject, cache);
+        fails.push(self.emit_jump(Insn::JumpUnless));
+
+        // The elements have subjects of their own, so the cache is not theirs.
+        // Restored afterwards, because an alternative's other side is still
+        // matching against the same subject this one was.
+        self.pattern_cache = None;
+
+        self.emit(Insn::GetLocal(parts, 0));
+        self.emit_send("size", 0);
+        self.emit(Insn::SetLocal(length, 0));
+
+        let fixed = node.requireds.len() + node.posts.len();
+        let wanted = i64::try_from(fixed)
+            .map_err(|_| Unsupported::at("an array pattern this wide", span))?;
+        self.emit(Insn::GetLocal(length, 0));
+        self.emit(Insn::PushInt(wanted));
+        // With a rest the length is a floor; without one it is exact.
+        self.emit(Insn::BinOp(if node.rest.is_some() {
+            BinOp::Ge
+        } else {
+            BinOp::Eq
+        }));
+        fails.push(self.emit_jump(Insn::JumpUnless));
+
+        for (index, element) in node.requireds.iter().enumerate() {
+            self.emit(Insn::GetLocal(parts, 0));
+            self.emit(Insn::PushInt(index as i64));
+            self.emit_send("[]", 1);
+            self.pattern(element)?;
+            fails.push(self.emit_jump(Insn::JumpUnless));
+        }
+
+        // Posts are counted from the end, because the rest between them and
+        // the requireds has no fixed width.
+        for (index, element) in node.posts.iter().enumerate() {
+            let from_end = (node.posts.len() - index) as i64;
+            self.emit(Insn::GetLocal(parts, 0));
+            self.emit(Insn::GetLocal(length, 0));
+            self.emit(Insn::PushInt(from_end));
+            self.emit(Insn::BinOp(BinOp::Sub));
+            self.emit_send("[]", 1);
+            self.pattern(element)?;
+            fails.push(self.emit_jump(Insn::JumpUnless));
+        }
+
+        // `*` with no name still has to match; only a named one binds.
+        if let Some(rest) = &node.rest
+            && let Some((name, depth)) = rest_target(rest)
+        {
+            let from = node.requireds.len() as i64;
+            let drop = i64::try_from(fixed).expect("checked above");
+            self.emit(Insn::GetLocal(parts, 0));
+            self.emit(Insn::PushInt(from));
+            self.emit(Insn::GetLocal(length, 0));
+            self.emit(Insn::PushInt(drop));
+            self.emit(Insn::BinOp(BinOp::Sub));
+            self.emit_send("__take__", 2);
+            let (slot, depth) = self.outer_slot(name, depth, span)?;
+            self.emit(Insn::SetLocal(slot, depth));
+        }
+
+        self.pattern_cache = cache;
+        self.finish_pattern(base, fails);
+        Ok(())
+    }
+
+    /// Leave `subject.deconstruct` in `parts`, and a copy on the stack.
+    ///
+    /// With a cache slot, the send happens only when the slot is still `nil`.
+    /// A cached `nil` is a subject with no `deconstruct` at all, and asking
+    /// again would answer `nil` too — so it stays cached, which costs one
+    /// `respond_to?` nobody can observe.
+    fn deconstruct_into(&mut self, parts: u16, subject: u16, cache: Option<u16>) {
+        let Some(cache) = cache else {
+            self.emit(Insn::PushSelf);
+            self.emit(Insn::GetLocal(subject, 0));
+            self.emit_send_to_self("__pattern_deconstruct__", 1);
+            self.emit(Insn::Dup);
+            self.emit(Insn::SetLocal(parts, 0));
+            return;
+        };
+        let before = self.depth;
+        self.emit(Insn::GetLocal(cache, 0));
+        let hit = self.emit_jump(Insn::JumpIfKeep);
+        self.emit(Insn::Pop);
+        self.emit(Insn::PushSelf);
+        self.emit(Insn::GetLocal(subject, 0));
+        self.emit_send_to_self("__pattern_deconstruct__", 1);
+        self.emit(Insn::Dup);
+        self.emit(Insn::SetLocal(cache, 0));
+        self.patch_here(hit);
+        self.depth = before + 1;
+        self.emit(Insn::Dup);
+        self.emit(Insn::SetLocal(parts, 0));
+    }
+
+    /// `in [*, x, *]`: the requireds have to match *somewhere*, and the two
+    /// splats take what is left on each side.
+    ///
+    /// The only pattern that needs a loop, because the position is what is
+    /// being searched for. Emitted as one, over a hidden index local.
+    fn find_pattern(&mut self, node: &spinel_ast::FindPattern, span: Span) -> Emit {
+        self.pattern_depth += 1;
+        let result = self.find_pattern_inner(node, span);
+        self.pattern_depth -= 1;
+        result
+    }
+
+    fn find_pattern_inner(&mut self, node: &spinel_ast::FindPattern, _span: Span) -> Emit {
+        let subject = self.pattern_slot("subject");
+        let parts = self.pattern_slot("parts");
+        let length = self.pattern_slot("length");
+        let cursor = self.pattern_slot("cursor");
+        self.emit(Insn::SetLocal(subject, 0));
+        let base = self.depth;
+        let mut fails = Vec::new();
+
+        if let Some(constant) = &node.constant {
+            self.emit(Insn::GetLocal(subject, 0));
+            self.expr(constant)?;
+            self.emit(Insn::CaseEq);
+            fails.push(self.emit_jump(Insn::JumpUnless));
+        }
+
+        let cache = self.pattern_cache;
+        self.deconstruct_into(parts, subject, cache);
+        fails.push(self.emit_jump(Insn::JumpUnless));
+        self.pattern_cache = None;
+
+        self.emit(Insn::GetLocal(parts, 0));
+        self.emit_send("size", 0);
+        self.emit(Insn::SetLocal(length, 0));
+
+        let width = node.requireds.len() as i64;
+        self.emit(Insn::PushInt(0));
+        self.emit(Insn::SetLocal(cursor, 0));
+
+        // while cursor + width <= length
+        let top = self.here();
+        self.emit(Insn::GetLocal(cursor, 0));
+        self.emit(Insn::PushInt(width));
+        self.emit(Insn::BinOp(BinOp::Add));
+        self.emit(Insn::GetLocal(length, 0));
+        self.emit(Insn::BinOp(BinOp::Le));
+        fails.push(self.emit_jump(Insn::JumpUnless));
+
+        // Try the window at `cursor`; any element that disagrees moves it on.
+        let mut retry = Vec::new();
+        for (index, element) in node.requireds.iter().enumerate() {
+            self.emit(Insn::GetLocal(parts, 0));
+            self.emit(Insn::GetLocal(cursor, 0));
+            self.emit(Insn::PushInt(index as i64));
+            self.emit(Insn::BinOp(BinOp::Add));
+            self.emit_send("[]", 1);
+            self.pattern(element)?;
+            retry.push(self.emit_jump(Insn::JumpUnless));
+        }
+
+        // Matched here: the left splat is everything before, the right is
+        // everything after.
+        if let Some((name, depth)) = rest_target(&node.left) {
+            self.emit(Insn::GetLocal(parts, 0));
+            self.emit(Insn::PushInt(0));
+            self.emit(Insn::GetLocal(cursor, 0));
+            self.emit_send("__take__", 2);
+            let (slot, depth) = self.outer_slot(name, depth, node.left.span)?;
+            self.emit(Insn::SetLocal(slot, depth));
+        }
+        if let Some((name, depth)) = rest_target(&node.right) {
+            self.emit(Insn::GetLocal(parts, 0));
+            self.emit(Insn::GetLocal(cursor, 0));
+            self.emit(Insn::PushInt(width));
+            self.emit(Insn::BinOp(BinOp::Add));
+            self.emit(Insn::GetLocal(length, 0));
+            self.emit(Insn::GetLocal(cursor, 0));
+            self.emit(Insn::PushInt(width));
+            self.emit(Insn::BinOp(BinOp::Add));
+            self.emit(Insn::BinOp(BinOp::Sub));
+            self.emit_send("__take__", 2);
+            let (slot, depth) = self.outer_slot(name, depth, node.right.span)?;
+            self.emit(Insn::SetLocal(slot, depth));
+        }
+        let matched = self.emit_jump(Insn::Jump);
+
+        for at in retry {
+            self.patch_here(at);
+        }
+        self.depth = base;
+        self.emit(Insn::GetLocal(cursor, 0));
+        self.emit(Insn::PushInt(1));
+        self.emit(Insn::BinOp(BinOp::Add));
+        self.emit(Insn::SetLocal(cursor, 0));
+        let back = self.emit_jump(Insn::Jump);
+        self.patch(back, top);
+
+        self.patch_here(matched);
+        self.depth = base;
+        self.pattern_cache = cache;
+        self.finish_pattern(base, fails);
+        Ok(())
+    }
+
+    /// `in {a: Integer, **rest}`, with an optional constant in front.
+    ///
+    /// `deconstruct_keys` is handed the key list the pattern names, or `nil`
+    /// when a `**rest` means it may want all of them. Measured by giving an
+    /// object a `deconstruct_keys` that records its argument.
+    fn hash_pattern(&mut self, node: &spinel_ast::HashPattern, span: Span) -> Emit {
+        self.pattern_depth += 1;
+        let result = self.hash_pattern_inner(node, span);
+        self.pattern_depth -= 1;
+        result
+    }
+
+    fn hash_pattern_inner(&mut self, node: &spinel_ast::HashPattern, span: Span) -> Emit {
+        let subject = self.pattern_slot("subject");
+        let pairs = self.pattern_slot("pairs");
+        self.emit(Insn::SetLocal(subject, 0));
+        let base = self.depth;
+        let mut fails = Vec::new();
+
+        if let Some(constant) = &node.constant {
+            self.emit(Insn::GetLocal(subject, 0));
+            self.expr(constant)?;
+            self.emit(Insn::CaseEq);
+            fails.push(self.emit_jump(Insn::JumpUnless));
+        }
+
+        // The keys, in source order. Every entry of a hash pattern is a pair
+        // with a symbol key — `{"a" => x}` is not pattern syntax — so a
+        // non-symbol here is a lowering disagreement rather than a construct.
+        let mut keys = Vec::with_capacity(node.elements.len());
+        for entry in &node.elements {
+            let HashEntryKind::Pair { key, value } = &entry.kind else {
+                return Err(Unsupported::at("a splat in a hash pattern", entry.span));
+            };
+            let ExprKind::Sym(symbol) = &key.kind else {
+                return Err(Unsupported::at("a non-symbol key in a pattern", key.span));
+            };
+            let Some(bytes) = flat_bytes(&symbol.parts) else {
+                return Err(Unsupported::at(
+                    "an interpolated key in a pattern",
+                    key.span,
+                ));
+            };
+            let text = String::from_utf8(bytes.into_vec())
+                .map_err(|_| Unsupported::at("a key that is not UTF-8", key.span))?;
+            keys.push((self.symbol(&text), value));
+        }
+
+        self.emit(Insn::PushSelf);
+        self.emit(Insn::GetLocal(subject, 0));
+        // `nil` for the key list when a `**rest` may want everything.
+        match node.rest {
+            Some(PatternRest::Splat(_)) => self.emit(Insn::PushNil),
+            _ => {
+                for &(key, _) in &keys {
+                    self.emit(Insn::PushSym(key));
+                }
+                let count = u32::try_from(keys.len())
+                    .map_err(|_| Unsupported::at("a hash pattern this wide", span))?;
+                self.emit(Insn::NewArray(count));
+            }
+        }
+        self.emit_send_to_self("__pattern_deconstruct_keys__", 2);
+        self.emit(Insn::Dup);
+        self.emit(Insn::SetLocal(pairs, 0));
+        fails.push(self.emit_jump(Insn::JumpUnless));
+
+        // A value pattern's subject is not the `case`'s.
+        let cache = self.pattern_cache.take();
+
+        for &(key, value) in &keys {
+            self.emit(Insn::GetLocal(pairs, 0));
+            self.emit(Insn::PushSym(key));
+            self.emit_send("key?", 1);
+            fails.push(self.emit_jump(Insn::JumpUnless));
+
+            self.emit(Insn::GetLocal(pairs, 0));
+            self.emit(Insn::PushSym(key));
+            self.emit_send("[]", 1);
+            // `{a:}` — the value is elided, and the key names the local.
+            match &value.kind {
+                ExprKind::Implicit(inner) => self.pattern(inner)?,
+                _ => self.pattern(value)?,
+            }
+            fails.push(self.emit_jump(Insn::JumpUnless));
+        }
+
+        match &node.rest {
+            // `**nil`: no key the pattern did not name.
+            Some(PatternRest::Forbidden) => {
+                self.emit(Insn::GetLocal(pairs, 0));
+                self.emit_send("size", 0);
+                let count = i64::try_from(keys.len()).expect("checked above");
+                self.emit(Insn::PushInt(count));
+                self.emit(Insn::BinOp(BinOp::Eq));
+                fails.push(self.emit_jump(Insn::JumpUnless));
+            }
+            Some(PatternRest::Splat(Some(target))) => {
+                self.emit(Insn::PushSelf);
+                self.emit(Insn::GetLocal(pairs, 0));
+                for &(key, _) in &keys {
+                    self.emit(Insn::PushSym(key));
+                }
+                let count = u32::try_from(keys.len()).expect("checked above");
+                self.emit(Insn::NewArray(count));
+                self.emit_send_to_self("__pattern_rest__", 2);
+                if let Some((name, depth)) = rest_target(target) {
+                    let (slot, depth) = self.outer_slot(name, depth, span)?;
+                    self.emit(Insn::SetLocal(slot, depth));
+                } else {
+                    // A bare `**` collects nothing.
+                    self.emit(Insn::Pop);
+                }
+            }
+            // A bare `**` matches anything and binds nothing.
+            Some(PatternRest::Splat(None)) => {}
+            // `in {}` is the one hash pattern that does not tolerate extra
+            // keys: it matches empty hashes and nothing else, while `in {a:}`
+            // ignores whatever else is there and `in {**}` matches anything.
+            // Measured, and `pattern_matching_spec.rb` has it by name.
+            None if node.elements.is_empty() => {
+                self.emit(Insn::GetLocal(pairs, 0));
+                self.emit_send("size", 0);
+                self.emit(Insn::PushInt(0));
+                self.emit(Insn::BinOp(BinOp::Eq));
+                fails.push(self.emit_jump(Insn::JumpUnless));
+            }
+            None => {}
+        }
+
+        self.pattern_cache = cache;
+        self.finish_pattern(base, fails);
+        Ok(())
+    }
+
+    /// The tail every compound pattern shares: `true` on the way through,
+    /// `false` at every recorded failure.
+    fn finish_pattern(&mut self, base: usize, fails: Vec<usize>) {
+        self.emit(Insn::PushTrue);
+        let to_end = self.emit_jump(Insn::Jump);
+        for at in fails {
+            self.patch_here(at);
+        }
+        self.depth = base;
+        self.emit(Insn::PushFalse);
+        self.patch_here(to_end);
     }
 
     /// `-> { }`, which is a lambda: strict arity and a local `return`.
@@ -2610,6 +3446,23 @@ fn children(expr: &Expr) -> Vec<&Expr> {
     }
 }
 
+/// The local a `*rest` or `**rest` in a pattern binds, if it names one.
+///
+/// A bare `*` still has to be matched — it is what makes `[a, *]` accept a
+/// longer array — but there is nothing to write to. An array pattern wraps its
+/// rest in a `Splat`; a hash pattern's is the local itself.
+fn rest_target(node: &Expr) -> Option<(&Name, u32)> {
+    let inner = match &node.kind {
+        ExprKind::Splat(Some(inner)) => inner,
+        ExprKind::Splat(None) => return None,
+        _ => node,
+    };
+    match &inner.kind {
+        ExprKind::Var(VarRef::Local { name, depth }) => Some((name, *depth)),
+        _ => None,
+    }
+}
+
 /// What to call a node in the "not compiled yet" message. Reads as Ruby, not as
 /// an AST variant, because the reason lands in a spec report a human triages.
 fn node_name(kind: &ExprKind) -> &'static str {
@@ -2632,21 +3485,26 @@ fn node_name(kind: &ExprKind) -> &'static str {
         ExprKind::Splat(_) => "a splat",
         ExprKind::Rational(_) | ExprKind::Imaginary(_) => "a rational or complex literal",
         ExprKind::XStr(_) => "a backtick command",
+        // Not pattern matching, despite the name Prism gives the node:
+        // `/(?<a>.)/ =~ s` writes its named captures into locals, which is
+        // #14's regexp work and not #165's.
+        ExprKind::MatchWrite(_) => "a regexp that writes its named captures to locals",
+        // #165 compiles the rest of this family. A node still reaching here is
+        // one the lowering built in a shape the compiler does not expect.
         ExprKind::MatchPattern(_)
-        | ExprKind::MatchWrite(_)
         | ExprKind::ArrayPattern(_)
         | ExprKind::FindPattern(_)
         | ExprKind::HashPattern(_)
         | ExprKind::AltPattern(_)
         | ExprKind::CapturePattern(_)
-        | ExprKind::Pin(_) => "pattern matching",
+        | ExprKind::Pin(_) => "pattern matching outside a pattern",
         ExprKind::FlipFlop(_) => "a flip-flop",
         ExprKind::Alias(_) | ExprKind::Undef(_) => "`alias` or `undef`",
         ExprKind::Exec(_) => "`BEGIN`/`END`",
         ExprKind::ShareableConstant(_) => "a shareable-constant comment",
-        ExprKind::SourceFile(_) | ExprKind::SourceLine | ExprKind::SourceEncoding => {
-            "a source-position keyword"
-        }
+        // `__FILE__` and `__LINE__` compile (#174); this is the third keyword,
+        // which needs an object that does not exist yet.
+        ExprKind::SourceEncoding => "`__ENCODING__`, which waits for the Encoding class,",
         ExprKind::ForwardingArgs => "argument forwarding",
         ExprKind::Implicit(_) => "an elided hash value",
         ExprKind::Missing => "a syntax error",

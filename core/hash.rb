@@ -100,6 +100,7 @@ class Hash
   end
 
   def []=(key, value)
+    __check_frozen__
     at = __index__(key)
     if at.nil?
       @pairs.push([key, value])
@@ -164,6 +165,7 @@ class Hash
   # A block is the "not found" answer, and it is called with the key — so
   # `{}.delete(:x) { |k| 5 }` is 5 rather than nil.
   def delete(key)
+    __check_frozen__
     at = __index__(key)
     if at.nil?
       return yield(key) if block_given?
@@ -181,8 +183,21 @@ class Hash
     gone
   end
 
+  # A Hash is its own hash pattern subject (#165). The key list is ignored:
+  # Ruby's own `Hash#deconstruct_keys` answers the whole hash either way, and
+  # the pattern picks what it wants out of it.
+  def deconstruct_keys(keys)
+    self
+  end
+
   def to_a
     @pairs.map { |pair| [pair[0], pair[1]] }
+  end
+
+  # Every mutation checks first, the way `core/regexp.rb` and `core/range.rb`
+  # already do. Measured: "can't modify frozen Hash: {}".
+  def __check_frozen__
+    raise FrozenError, "can't modify frozen Hash: " + inspect if frozen?
   end
 
   def inspect

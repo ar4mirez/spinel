@@ -350,6 +350,12 @@ struct Call {
     /// frame is enough for what the keyword needs it for: a bare `raise` inside
     /// a `rescue` body re-raises what that body caught.
     rescued: Option<Value>,
+    /// The class this frame's method was found on, and the name it was found
+    /// under. `None` for a body that is not a method — the top level, a class
+    /// body — where `super` has nowhere to start (#187).
+    owner: Option<ClassId>,
+    /// See [`Call::owner`].
+    defined_as: Option<SymbolId>,
     /// Reasons parked by an `ensure` in this frame, innermost last.
     ///
     /// A `Vec` rather than one slot because an `ensure` body can contain
@@ -496,6 +502,10 @@ pub fn eval_in(
         breaks: 0,
         tag: None,
         rescued: None,
+        // The top level is not a method body, so `super` there has no owner to
+        // start from and raises rather than resolving to something.
+        owner: None,
+        defined_as: None,
         parked: Vec::new(),
     }];
     let mut budget = BUDGET;
@@ -578,6 +588,33 @@ pub fn eval_in(
                     stack.push(value);
                 }
 
+                // Globals (#166). One table per heap; the regexp specials
+                // never reach here — the compiler sends those to
+                // `Insn::LastMatch`, so a name in this table is always one an
+                // assignment put there.
+                Insn::GetGlobal(name) => {
+                    let symbol = frames[top].symbols[name as usize];
+                    // An unset global reads `nil` rather than raising: Ruby
+                    // warns under `-w` and answers nil, and the warning needs
+                    // #39's `$stderr`.
+                    stack.push(scope.global(symbol).unwrap_or(Value::NIL));
+                }
+                Insn::SetGlobal(name) => {
+                    let symbol = frames[top].symbols[name as usize];
+                    // Pops, like `SetLocal` and `SetIvar`: the callers that
+                    // want assignment to be an expression emit `Dup` first.
+                    let value = stack.pop().expect("setglobal on an empty stack");
+                    scope.set_global(symbol, value);
+                }
+                Insn::DefinedGlobal(name) => {
+                    let symbol = frames[top].symbols[name as usize];
+                    // Presence, not truthiness: `$a = nil` is defined.
+                    let held = scope.global(symbol).is_some();
+                    let value =
+                        defined_word(scope, string_class, held.then_some("global-variable"));
+                    stack.push(value);
+                }
+
                 Insn::GetLocal(slot, depth) => {
                     let env = env_outer(scope, frames[top].env, depth);
                     stack.push(env_get(scope, env, slot as usize));
@@ -641,6 +678,8 @@ pub fn eval_in(
                                 implicit_self: false,
                                 public_only: false,
                                 target: Target::Method,
+                                owner: None,
+                                defined_as: None,
                             };
                             if let Some(unwind) = dispatch(
                                 scope,
@@ -680,10 +719,47 @@ pub fn eval_in(
                 Insn::CaseEq => {
                     let condition = stack.pop().expect("caseeq on an empty stack");
                     let subject = stack.pop().expect("caseeq on an empty stack");
-                    // `when c` asks `c === subject`, receiver first. For every type
-                    // this slice has, `===` is `==`; for a Range, Class, Regexp, or
-                    // Proc it is not, and those say so rather than guessing.
-                    stack.push(bool_value(case_eq(scope, condition, subject)?));
+                    // `when c` and `in c` both ask `c === subject`, receiver
+                    // first. For an immediate, a String or an Array, `===` is
+                    // `==` and the fast path answers it.
+                    match case_eq(scope, condition, subject) {
+                        Ok(answer) => stack.push(bool_value(answer)),
+                        // The send behind the fast path, the same one
+                        // `Insn::BinOp` grew: a `Module`, a `Range` or a `Proc`
+                        // in condition position means something other than
+                        // `==`, and each of those defines the `===` that says
+                        // what. Refusing here instead was what made `when
+                        // Integer` — and every `in Integer` (#165) —
+                        // undispatchable.
+                        Err(Error::NoDispatch { .. }) => {
+                            let call = Pending {
+                                cache: None,
+                                name: crate::shared::symbols::intern("==="),
+                                receiver: condition,
+                                args: vec![subject],
+                                keywords: Vec::new(),
+                                block: Value::NIL,
+                                block_is_literal: false,
+                                cref: frames[top].cref,
+                                implicit_self: false,
+                                public_only: false,
+                                target: Target::Method,
+                                owner: None,
+                                defined_as: None,
+                            };
+                            if let Some(unwind) = dispatch(
+                                scope,
+                                &mut stack,
+                                &mut frames,
+                                call,
+                                proc_class,
+                                &mut ids,
+                            )? {
+                                return Ok(Step::Unwind(unwind));
+                            }
+                        }
+                        Err(other) => return Err(other),
+                    }
                 }
 
                 Insn::MakeProc(child, lambda) => {
@@ -882,6 +958,49 @@ pub fn eval_in(
                     }
                     call.receiver = block;
                     call.target = Target::Block(block);
+                    if let Some(unwind) =
+                        dispatch(scope, &mut stack, &mut frames, call, proc_class, &mut ids)?
+                    {
+                        return Ok(Step::Unwind(unwind));
+                    }
+                }
+
+                // `super` (#187). The receiver, the name, and the class to
+                // start past all come from the frame; the site carries only the
+                // arguments, which is why its own name is unused.
+                Insn::Super(index) => {
+                    let iseq = Arc::clone(&frames[top].iseq);
+                    let site = &iseq.call_sites[index as usize];
+                    let (owner, name) = (frames[top].owner, frames[top].defined_as);
+                    // Forward the frame's block only when the site passed none
+                    // at all. `super(&nil)` passes a block that is `nil`, which
+                    // is a different thing and means no block — asserted by
+                    // `super_spec.rb`'s "can pass no block using &nil".
+                    let frame_block = match site.block {
+                        BlockRef::None => frames[top].block,
+                        _ => Value::NIL,
+                    };
+                    let mut call =
+                        pop_call(scope, &mut stack, site, &frames[top], proc_class, false)?;
+                    let (Some(owner), Some(name)) = (owner, name) else {
+                        // A body that is not a method's and was not written in
+                        // one. Ruby raises here rather than at parse time.
+                        return Err(Error::raise(
+                            "RuntimeError",
+                            "super called outside of method",
+                        ));
+                    };
+                    call.name = name;
+                    call.target = Target::Super { owner };
+                    // `super` reaches a private method the way a receiverless
+                    // call does.
+                    call.implicit_self = true;
+                    // Both `super` and `super()` forward the current block:
+                    // measured, `B#m` calling `super` reaches an `A#m` that
+                    // yields. An explicit `&b` at the site wins.
+                    if call.block == Value::NIL {
+                        call.block = frame_block;
+                    }
                     if let Some(unwind) =
                         dispatch(scope, &mut stack, &mut frames, call, proc_class, &mut ids)?
                     {
@@ -1200,6 +1319,9 @@ enum Target {
     Method,
     /// Already resolved: a block or a `Proc`, called directly.
     Block(Value),
+    /// `super`: resolve `name` from one step past `owner` in the receiver's
+    /// ancestor chain, rather than from the top of it.
+    Super { owner: ClassId },
 }
 
 /// One call, assembled from the stack and not yet dispatched.
@@ -1237,6 +1359,15 @@ struct Pending {
     /// `Native::Send` re-dispatches under a name the call site never mentioned,
     /// so neither may borrow the site's entry.
     cache: Option<u32>,
+    /// The class the callee's method was found on, and the name it was found
+    /// under — what a `super` in its body starts from (#187).
+    ///
+    /// Filled by `dispatch` from the resolved `Method`, so it is the *running*
+    /// method's identity rather than the call site's: `alias` and
+    /// `define_method` make those two different things.
+    owner: Option<ClassId>,
+    /// See [`Pending::owner`]. Both or neither.
+    defined_as: Option<SymbolId>,
 }
 
 /// Take a call site's operands off the stack.
@@ -1322,6 +1453,10 @@ fn pop_call<'h>(
         implicit_self: site.implicit_self,
         public_only: false,
         target: Target::Method,
+        // `dispatch` fills both once the method — and so which class it was
+        // found on — is known.
+        owner: None,
+        defined_as: None,
     })
 }
 
@@ -1370,49 +1505,70 @@ fn dispatch<'h>(
             push_proc_frame(scope, stack, frames, &call, block, ids)?;
             Ok(None)
         }
-        Target::Method => {
+        Target::Method | Target::Super { .. } => {
             let class = class_of(scope, call.receiver).ok_or_else(|| no_class(call.receiver))?;
-            // The inline cache, in front of the per-class method cache, which is
-            // itself in front of the chain walk. A hit is two integer compares
-            // against a `Vec` entry; the probe it skips is what `bench/` calls
-            // the cached lookup.
-            //
-            // Only hits are memoised. A miss falls through to `lookup`, whose
-            // own memo answers it, and then goes on to build an exception or to
-            // find `method_missing` — not a path worth widening an entry for.
-            let found = match call.cache {
-                Some(slot) => {
-                    let serial = scope.classes().serial(class);
-                    match scope.call_caches().get(slot, class, serial) {
-                        hit @ Some(_) => hit,
-                        None => {
-                            let found = scope.classes_mut().lookup(class, call.name);
-                            if let Some(method) = found {
-                                scope.call_caches_mut().fill(slot, class, serial, method);
+            let found = match call.target {
+                // `super` starts one past the class the running method was
+                // found on, which is a question about a *pair* and so cannot
+                // use the inline caches: those key off the receiver's class and
+                // serial alone. Rare enough next to an ordinary send that the
+                // chain walk is the whole implementation.
+                Target::Super { owner } => scope.classes().lookup_super(class, owner, call.name),
+                // The inline cache, in front of the per-class method cache,
+                // which is itself in front of the chain walk. A hit is two
+                // integer compares against a `Vec` entry; the probe it skips is
+                // what `bench/` calls the cached lookup.
+                //
+                // Only hits are memoised. A miss falls through to `lookup`,
+                // whose own memo answers it, and then goes on to build an
+                // exception or to find `method_missing` — not a path worth
+                // widening an entry for.
+                _ => match call.cache {
+                    Some(slot) => {
+                        let serial = scope.classes().serial(class);
+                        match scope.call_caches().get(slot, class, serial) {
+                            hit @ Some(_) => hit,
+                            None => {
+                                let found = scope.classes_mut().lookup(class, call.name);
+                                if let Some(method) = found {
+                                    scope.call_caches_mut().fill(slot, class, serial, method);
+                                }
+                                found
                             }
-                            found
                         }
                     }
-                }
-                None => scope.classes_mut().lookup(class, call.name),
+                    None => scope.classes_mut().lookup(class, call.name),
+                },
             };
             // R8: an unknown method raises rather than answering `nil`. The
             // harness reports a statement that merely evaluates as a passing
             // effect, so a `nil` here would turn every matcher this VM does not
             // implement into a spec that passes without asserting anything.
+            let is_super = matches!(call.target, Target::Super { .. });
             let Some(method) = found else {
                 // Ruby's answer for a method that is not there, as an ordinary
                 // raise a `rescue` can catch (#170). Built here, not in the
                 // loop's `Err` arm, because it carries the receiver — see
                 // `no_method_error`.
-                let exception = no_method_error(scope, call.receiver, call.name);
+                //
+                // `super` off the end of the chain is the same class of error
+                // with its own message, measured:
+                // "super: no superclass method 'm' for an instance of Z".
+                let exception = if is_super {
+                    super_missing_error(scope, call.receiver, call.name)
+                } else {
+                    no_method_error(scope, call.receiver, call.name)
+                };
                 return Ok(Some(Unwind::Exception(exception)));
             };
             // Visibility (#161). Read off the cached `Method`, so a warm site
             // pays nothing for it and a `private :m` on an already-called
             // method still takes effect — `set_visibility` bumps the class
             // serial, which is what the entry re-checks.
-            if let Some(refused) = visibility_refusal(scope, frames, &call, method) {
+            //
+            // `super` is exempt: it names no receiver and reaches a private
+            // method the way a receiverless call does.
+            if !is_super && let Some(refused) = visibility_refusal(scope, frames, &call, method) {
                 let exception = visibility_error(scope, call.receiver, call.name, refused);
                 return Ok(Some(Unwind::Exception(exception)));
             }
@@ -1423,6 +1579,12 @@ fn dispatch<'h>(
                     // reachable from `owner`'s ancestors.
                     let call = Pending {
                         cref: method.cref,
+                        // Where a `super` in this body starts: the class the
+                        // method was actually found on, under the name it was
+                        // found by — not the call site's name, which `alias`
+                        // and `define_method` make a different thing.
+                        owner: Some(method.owner),
+                        defined_as: Some(call.name),
                         ..call
                     };
                     *ids += 1;
@@ -1528,6 +1690,10 @@ fn push_proc_frame(
         implicit_self: call.implicit_self,
         public_only: call.public_only,
         target: Target::Method,
+        // Filled from the home frame below: `super` inside a block resolves
+        // against the method the block was *written* in.
+        owner: None,
+        defined_as: None,
     };
     // A block takes both links from the `Proc`: `return` leaves the method it
     // was *written* in, `break` ends the call it was *passed* to. A lambda is a
@@ -1538,10 +1704,21 @@ fn push_proc_frame(
     // in, which is the frame `home` already names. A lambda is a method body as
     // far as `return` and `break` go, but not for this: under a bare `private`,
     // `-> { def m; end }` still defines a private `m`.
-    let scope_visibility = frames
-        .iter()
-        .find(|frame| frame.id == home)
-        .map_or(Visibility::Public, |frame| frame.scope_visibility);
+    let home_frame = frames.iter().find(|frame| frame.id == home);
+    let scope_visibility = home_frame.map_or(Visibility::Public, |frame| frame.scope_visibility);
+    // `super` inside a block resolves against the method the block was
+    // *written* in — the frame `home` already names, for the same reason
+    // `return` does.
+    //
+    // ponytail: a `Proc` that outlives its defining frame finds nothing here,
+    // and a `super` in it raises "outside a method" rather than resolving. Give
+    // the `Proc` two slots of its own, beside `PROC_HOME`, if a spec needs it.
+    let (owner, defined_as) = home_frame.map_or((None, None), |f| (f.owner, f.defined_as));
+    let call = Pending {
+        owner,
+        defined_as,
+        ..call
+    };
     *ids += 1;
     let links = Links {
         id: *ids,
@@ -1596,6 +1773,11 @@ fn push_frame(
         breaks: links.breaks,
         tag: None,
         rescued: None,
+        // What a `super` in this body starts from. Set for a method by
+        // `dispatch` and for a block by `push_proc_frame`; `None` everywhere
+        // else, where `super` has no method to be one step past.
+        owner: call.owner,
+        defined_as: call.defined_as,
         parked: Vec::new(),
     });
     Ok(())
@@ -2045,6 +2227,33 @@ fn visibility_error(
     object
 }
 
+/// `super` with nothing above it on the chain.
+///
+/// Its own message rather than `no_method_error`'s, because Ruby's names the
+/// keyword: "super: no superclass method 'm' for an instance of Z". A spec
+/// that asserts on the message is asserting on that word.
+fn super_missing_error(scope: &mut HandleScope<'_>, receiver: Value, name: SymbolId) -> Value {
+    let method = symbol_name(name);
+    let message = format!(
+        "super: no superclass method '{method}' for {}",
+        describe_receiver(scope, receiver)
+    );
+    // Not `note_missing_method`: this is Ruby behaviour a spec may be checking
+    // — `super_spec.rb` asserts on it — rather than a gap in Spinel.
+    let rooted = scope.root(receiver);
+    let object = exception_new(scope, "NoMethodError", &message);
+    let handle = scope.root(object);
+    let receiver = scope.get(rooted);
+    let object = scope.get(handle);
+    let set = |scope: &mut HandleScope<'_>, ivar, value| {
+        ivar_set(scope, object, symbol(ivar), value)
+            .expect("a fresh exception is unfrozen and holds instance variables");
+    };
+    set(scope, EXC_NAME, Value::symbol(name));
+    set(scope, EXC_RECEIVER, receiver);
+    object
+}
+
 fn no_method_error(scope: &mut HandleScope<'_>, receiver: Value, name: SymbolId) -> Value {
     let method = symbol_name(name);
     let message = format!(
@@ -2295,6 +2504,10 @@ fn open_class(
         receiver,
         cref,
         scope_visibility: links.scope_visibility,
+        // A class body is not a method body, so a `super` written directly in
+        // one has no owner to be a step past.
+        owner: None,
+        defined_as: None,
         // A class body is not called with a block, so `yield` inside one is a
         // `LocalJumpError` — which is Ruby.
         block: Value::NIL,
@@ -2489,6 +2702,8 @@ fn anonymous_module(
         implicit_self: false,
         public_only: false,
         target: Target::Block(block),
+        owner: None,
+        defined_as: None,
     };
     push_proc_frame(scope, stack, frames, &inner, block, ids)?;
     let cref = scope.classes_mut().push_eval_cref(inner.cref, id);
@@ -3676,6 +3891,8 @@ fn native_call<'h>(
                 implicit_self: !public_only,
                 public_only,
                 target: Target::Method,
+                owner: None,
+                defined_as: None,
             };
             dispatch(scope, stack, frames, forwarded, proc_class, ids)
         }
@@ -3860,6 +4077,14 @@ fn native_call<'h>(
                         name: initialize,
                         receiver: object,
                         cref: method.cref,
+                        // `super` inside `initialize` is ordinary: `def
+                        // initialize(*a); super(*a); end` on an `Enumerable`
+                        // fixture is all over the corpus. Reached through
+                        // `new`, so the owner has to be set here too — the
+                        // `dispatch` arm that usually does it is not on this
+                        // path.
+                        owner: Some(method.owner),
+                        defined_as: Some(initialize),
                         ..call
                     };
                     match scope.definitions().get(method.body).cloned() {
@@ -5032,6 +5257,8 @@ fn native_call<'h>(
                 implicit_self: false,
                 public_only: false,
                 target: Target::Block(block),
+                owner: None,
+                defined_as: None,
             };
             push_proc_frame(scope, stack, frames, &inner, block, ids)?;
             let last = frames.len() - 1;

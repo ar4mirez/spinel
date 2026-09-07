@@ -314,6 +314,11 @@ class Array
     self
   end
 
+  # An Array is its own array pattern subject (#165).
+  def deconstruct
+    self
+  end
+
   def to_ary
     self
   end

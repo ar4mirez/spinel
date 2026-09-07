@@ -334,7 +334,7 @@ fn expr(e: &Expr) -> Node {
         ExprKind::True => l("true"),
         ExprKind::False => l("false"),
         ExprKind::SelfExpr => l("self"),
-        ExprKind::SourceLine => l("__LINE__"),
+        ExprKind::SourceLine(line) => leaf(format!("__LINE__ {line}"), span),
         ExprKind::SourceEncoding => l("__ENCODING__"),
         ExprKind::Missing => l("missing"),
         ExprKind::ForwardingArgs => l("forward ..."),

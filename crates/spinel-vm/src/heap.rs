@@ -36,13 +36,14 @@
 //! | 16.. | `len` slots, or `len` bytes | — |
 
 use std::alloc;
+use std::collections::HashMap;
 use std::fmt;
 use std::marker::PhantomData;
 use std::ptr::{self, NonNull};
 
 use crate::class::Classes;
 use crate::shape::{ShapeId, Shapes};
-use crate::value::Value;
+use crate::value::{SymbolId, Value};
 
 /// Cell sizes, in bytes. Powers of two so the class index is one shift.
 const SIZE_CLASSES: [usize; 5] = [32, 64, 128, 256, 512];
@@ -232,6 +233,19 @@ pub struct Heap {
     /// Give it a frame slot when frames carry their own specials, and a
     /// Ractor-local when threads arrive.
     last_match: Value,
+    /// This Ractor's global variables, by name (#166). A root source: see
+    /// [`Heap::mark`].
+    ///
+    /// Per heap rather than process-global, which is `CLAUDE.md`'s rule and the
+    /// way `classes` already works. Two Ractors sharing one table is the shape
+    /// that makes a Ractor unsafe, and nothing in the corpus needs it.
+    ///
+    /// The regexp specials are deliberately absent: `$~` and its family are
+    /// read off `last_match` above, and the compiler routes them to
+    /// [`Insn::LastMatch`](crate::Insn::LastMatch) before this table is
+    /// reached. An entry here is therefore always something an assignment put
+    /// there, which is what makes presence the right answer for `defined?`.
+    globals: HashMap<SymbolId, Value>,
 }
 
 /// The class index for an object needing `bytes` in total, or `None` for large objects.
@@ -271,6 +285,7 @@ impl Heap {
             missing_method: None,
             regexps: crate::regexp::Regexps::new(),
             last_match: Value::NIL,
+            globals: HashMap::new(),
         }
     }
 
@@ -303,6 +318,18 @@ impl Heap {
 
     pub fn set_last_match(&mut self, value: Value) {
         self.last_match = value;
+    }
+
+    /// A global's value, or `None` for a name nothing has assigned.
+    ///
+    /// `None` rather than `NIL`, because `$a = nil` is a global that exists and
+    /// `defined?` has to tell the two apart.
+    pub fn global(&self, name: SymbolId) -> Option<Value> {
+        self.globals.get(&name).copied()
+    }
+
+    pub fn set_global(&mut self, name: SymbolId, value: Value) {
+        self.globals.insert(name, value);
     }
 
     pub fn definitions_mut(&mut self) -> &mut crate::method::Definitions {
@@ -509,6 +536,12 @@ impl Heap {
         let (regexps, mark_stack) = (&self.regexps, &mut self.mark_stack);
         regexps.each_root(|value| Heap::shade(mark_stack, value));
         Heap::shade(&mut self.mark_stack, self.last_match);
+        // Fourth root source: the global table. A global outlives every handle
+        // to what it holds, by definition — that is what a global is.
+        let (globals, mark_stack) = (&self.globals, &mut self.mark_stack);
+        for &value in globals.values() {
+            Heap::shade(mark_stack, value);
+        }
         // R3: a worklist, not recursion. A Ruby program can build a chain a million
         // objects deep, and a recursive tracer turns that into a stack overflow inside
         // the collector, with no Ruby frame to blame it on.
@@ -804,6 +837,16 @@ impl<'h> HandleScope<'h> {
 
     pub fn set_last_match(&mut self, value: Value) {
         self.heap.set_last_match(value);
+    }
+
+    /// This heap's global of that name, or `None` if nothing assigned it.
+    pub fn global(&self, name: SymbolId) -> Option<Value> {
+        self.heap.global(name)
+    }
+
+    pub fn set_global(&mut self, name: SymbolId, value: Value) {
+        self.storable(value);
+        self.heap.set_global(name, value);
     }
 
     /// Point a handle at a different object. The old one loses this root.

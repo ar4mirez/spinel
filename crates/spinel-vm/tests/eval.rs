@@ -28,7 +28,12 @@ const SEPARATOR: &str = "  #=> ";
 
 /// Compile and run `source`, and render the result the way a report would.
 fn eval(source: &str) -> Result<String, String> {
-    let parsed = spinel_parse::parse(source.as_bytes());
+    eval_in_file("(eval)", source)
+}
+
+/// The same, for source that came from a named file.
+fn eval_in_file(path: &str, source: &str) -> Result<String, String> {
+    let parsed = spinel_parse::parse_file(path, source.as_bytes());
     assert!(
         parsed.errors.is_empty(),
         "{source:?} did not parse: {:?}",
@@ -82,15 +87,18 @@ fn a_construct_this_slice_does_not_compile_is_an_error_never_a_guess() {
         // `def` and a block literal moved to the other side of this list with
         // #11, and constants, class bodies, and `defined?` with #13; what stays
         // is what later slices own.
-        "$a = 1",
         "@@a = 1",
         // #13 answers `defined?` for the kinds it can mean, and refuses the
         // kinds it cannot rather than answering Ruby's `nil` for the wrong
         // reason. See `Compiler::defined`. `defined?(@a)` left this list with
         // #151: an object with a shape can say whether it holds `@a`, so the
-        // `nil` is now an answer rather than a coincidence.
-        "defined?($a)",
+        // `nil` is now an answer rather than a coincidence, and `$a` with #166
+        // for the same reason: the heap's table knows whether one was assigned.
         "defined?(@@a)",
+        // A back-reference is read off the last match, not out of the global
+        // table, so #166 deliberately leaves it where #14 put it.
+        "defined?($&)",
+        "$~ = nil",
         "A ||= 1",
         // A hash literal, a range literal, an array splat, a multiple
         // assignment and string interpolation left this list with #157 and
@@ -99,7 +107,6 @@ fn a_construct_this_slice_does_not_compile_is_an_error_never_a_guess() {
         // symbol, so a non-symbol key and a `**` argument have nowhere to go.
         "f(\"a\" => 1)",
         "f(**h)",
-        "case 1; in Integer then 2; end",
         // A destructuring parameter binds several names in one slot, so
         // anything after it would be bound to the wrong one. See
         // `Compiler::spec_from_list`.
@@ -175,4 +182,143 @@ fn dividing_by_zero_says_what_ruby_would_raise() {
 fn a_loop_that_does_not_end_is_stopped_rather_than_hanging() {
     let err = eval("while true; end").unwrap_err();
     assert!(err.contains("budget"), "{err}");
+}
+
+/// `__FILE__` and `__LINE__` (#174).
+///
+/// Not rows in `eval.txt`: the oracle's `eval` answers `"(eval at ...)"` for
+/// `__FILE__`, which is a path into the oracle script and not a fact about
+/// Ruby that Spinel can be held to. The *rules* are what is measured here —
+/// the path the source was parsed with, and the line the keyword was written
+/// on — and both were checked against ruby 4.0.6 by running the same shapes
+/// from a file.
+#[test]
+fn source_position_keywords_answer_the_file_and_the_line() {
+    assert_eq!(
+        eval_in_file("lt.rb", "__FILE__"),
+        Ok("\"lt.rb\"".to_owned()),
+        "`__FILE__` is the path the source was parsed with"
+    );
+    assert_eq!(
+        eval_in_file("a/b.rb", "__FILE__"),
+        Ok("\"a/b.rb\"".to_owned()),
+        "as given, not resolved: `ruby lt.rb` answers \"lt.rb\""
+    );
+    // Source with no file. CRuby says "(eval at <where>)"; the part Spinel can
+    // agree with is that it names no file of the program's.
+    assert_eq!(eval("__FILE__"), Ok("\"(eval)\"".to_owned()));
+
+    // One row per line, so an off-by-one in either direction shows up.
+    assert_eq!(eval("__LINE__"), Ok("1".to_owned()));
+    assert_eq!(eval("\n__LINE__"), Ok("2".to_owned()));
+    assert_eq!(eval("nil\nnil\n__LINE__"), Ok("3".to_owned()));
+    assert_eq!(
+        eval("[__LINE__,\n __LINE__]"),
+        Ok("[1, 2]".to_owned()),
+        "each keyword answers its own line, not the expression's"
+    );
+    // A `\r\n` file counts the same lines: the offset table splits on `\n`.
+    assert_eq!(eval("nil\r\n__LINE__"), Ok("2".to_owned()));
+}
+
+/// `__ENCODING__` is deferred, and says so under its own name (#174).
+///
+/// Refusing beats answering: it needs an `Encoding` object, and a wrong one
+/// would make `__ENCODING__.name` a measurement coincidence.
+#[test]
+fn the_encoding_keyword_is_refused_under_its_own_reason() {
+    let error = eval("__ENCODING__").expect_err("`__ENCODING__` has no object yet");
+    assert!(
+        error.contains("Encoding"),
+        "the reason has to name what is missing, not the keyword family: {error}"
+    );
+}
+
+/// `super` off the end of the chain, and `super` where there is no method
+/// (#187).
+///
+/// Not rows in `eval.txt`: the table records values, and both of these raise.
+/// The messages are CRuby's, measured on ruby 4.0.6.
+#[test]
+fn super_with_nothing_above_it_raises_the_way_ruby_does() {
+    let error = eval("class ZZ; def m; super; end; end; ZZ.new.m")
+        .expect_err("`super` past the end of the chain raises");
+    assert!(
+        error.contains("super: no superclass method 'm'"),
+        "Ruby names the keyword in the message, and super_spec.rb asserts on \
+         it: {error}"
+    );
+
+    // Outside a method the compiler cannot even build the argument list, so it
+    // refuses rather than emitting a call that would raise at run time.
+    let error = eval("super").expect_err("`super` at the top level is not a call");
+    assert!(
+        error.contains("super"),
+        "the refusal has to name the keyword: {error}"
+    );
+}
+
+/// Pattern matching's two protocols and its two raises (#165).
+///
+/// Not rows in `eval.txt`: two of these answer a `Hash`, whose `inspect`
+/// Spinel still writes the pre-3.4 way, and two raise. The values are CRuby's,
+/// measured on ruby 4.0.6.
+#[test]
+fn pattern_matching_protocols_and_raises() {
+    // `**rest` binds what the pattern did not name.
+    assert_eq!(
+        eval("case({a: 1, b: 2}); in {a: Integer, **r} then r.keys; end"),
+        Ok("[:b]".to_owned())
+    );
+    // `deconstruct_keys` is handed the keys the pattern names, or `nil` when a
+    // `**rest` means it may want all of them.
+    assert_eq!(
+        eval(
+            "o = Object.new; def o.deconstruct_keys(k); $seen = k; {a: 1}; end; \
+             (o in {a: Integer}); $seen"
+        ),
+        Ok("[:a]".to_owned())
+    );
+    assert_eq!(
+        eval(
+            "o = Object.new; def o.deconstruct_keys(k); $seen = k; {a: 1}; end; \
+             (o in {a: Integer, **r}); $seen"
+        ),
+        Ok("nil".to_owned())
+    );
+    // An object with a `deconstruct` matches an array pattern...
+    assert_eq!(
+        eval("o = Object.new; def o.deconstruct; [1, 2]; end; o in [1, 2]"),
+        Ok("true".to_owned())
+    );
+    // ...and one whose `deconstruct` answers something else is an error, not a
+    // failed match.
+    let error = eval("o = Object.new; def o.deconstruct; 5; end; o in [1]")
+        .expect_err("a `deconstruct` that is not an Array raises");
+    assert!(
+        error.contains("deconstruct must return Array"),
+        "CRuby's own message: {error}"
+    );
+
+    // No `deconstruct` at all is a failed match rather than an error.
+    assert_eq!(eval("1 in [a]"), Ok("false".to_owned()));
+
+    // `case`/`in` with nothing matching and no `else`, and the `=>` form.
+    for source in ["case [0, 1]; in String then 1; end", "[0, 1] => String"] {
+        let error = eval(source).expect_err("a pattern that matches nothing raises");
+        assert!(
+            error.contains("NoMatchingPatternError") && error.contains("[0, 1]"),
+            "the message names the subject, which the spec asserts on: {error}"
+        );
+    }
+
+    // `deconstruct` is called once per `case` subject, however many clauses
+    // try it — observable on an object whose `deconstruct` has an effect.
+    assert_eq!(
+        eval(
+            "$n = 0; o = Object.new; def o.deconstruct; $n = $n + 1; [0, 1]; end; \
+             case o; in [1, 2] then :a; in [0, 1] then :b; end; $n"
+        ),
+        Ok("1".to_owned())
+    );
 }
