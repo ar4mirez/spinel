@@ -28,7 +28,12 @@ const SEPARATOR: &str = "  #=> ";
 
 /// Compile and run `source`, and render the result the way a report would.
 fn eval(source: &str) -> Result<String, String> {
-    let parsed = spinel_parse::parse(source.as_bytes());
+    eval_in_file("(eval)", source)
+}
+
+/// The same, for source that came from a named file.
+fn eval_in_file(path: &str, source: &str) -> Result<String, String> {
+    let parsed = spinel_parse::parse_file(path, source.as_bytes());
     assert!(
         parsed.errors.is_empty(),
         "{source:?} did not parse: {:?}",
@@ -175,4 +180,54 @@ fn dividing_by_zero_says_what_ruby_would_raise() {
 fn a_loop_that_does_not_end_is_stopped_rather_than_hanging() {
     let err = eval("while true; end").unwrap_err();
     assert!(err.contains("budget"), "{err}");
+}
+
+/// `__FILE__` and `__LINE__` (#174).
+///
+/// Not rows in `eval.txt`: the oracle's `eval` answers `"(eval at ...)"` for
+/// `__FILE__`, which is a path into the oracle script and not a fact about
+/// Ruby that Spinel can be held to. The *rules* are what is measured here —
+/// the path the source was parsed with, and the line the keyword was written
+/// on — and both were checked against ruby 4.0.6 by running the same shapes
+/// from a file.
+#[test]
+fn source_position_keywords_answer_the_file_and_the_line() {
+    assert_eq!(
+        eval_in_file("lt.rb", "__FILE__"),
+        Ok("\"lt.rb\"".to_owned()),
+        "`__FILE__` is the path the source was parsed with"
+    );
+    assert_eq!(
+        eval_in_file("a/b.rb", "__FILE__"),
+        Ok("\"a/b.rb\"".to_owned()),
+        "as given, not resolved: `ruby lt.rb` answers \"lt.rb\""
+    );
+    // Source with no file. CRuby says "(eval at <where>)"; the part Spinel can
+    // agree with is that it names no file of the program's.
+    assert_eq!(eval("__FILE__"), Ok("\"(eval)\"".to_owned()));
+
+    // One row per line, so an off-by-one in either direction shows up.
+    assert_eq!(eval("__LINE__"), Ok("1".to_owned()));
+    assert_eq!(eval("\n__LINE__"), Ok("2".to_owned()));
+    assert_eq!(eval("nil\nnil\n__LINE__"), Ok("3".to_owned()));
+    assert_eq!(
+        eval("[__LINE__,\n __LINE__]"),
+        Ok("[1, 2]".to_owned()),
+        "each keyword answers its own line, not the expression's"
+    );
+    // A `\r\n` file counts the same lines: the offset table splits on `\n`.
+    assert_eq!(eval("nil\r\n__LINE__"), Ok("2".to_owned()));
+}
+
+/// `__ENCODING__` is deferred, and says so under its own name (#174).
+///
+/// Refusing beats answering: it needs an `Encoding` object, and a wrong one
+/// would make `__ENCODING__.name` a measurement coincidence.
+#[test]
+fn the_encoding_keyword_is_refused_under_its_own_reason() {
+    let error = eval("__ENCODING__").expect_err("`__ENCODING__` has no object yet");
+    assert!(
+        error.contains("Encoding"),
+        "the reason has to name what is missing, not the keyword family: {error}"
+    );
 }

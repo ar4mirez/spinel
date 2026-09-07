@@ -571,6 +571,18 @@ impl Compiler {
             ExprKind::True => self.emit(Insn::PushTrue),
             ExprKind::False => self.emit(Insn::PushFalse),
             ExprKind::SelfExpr => self.emit(Insn::PushSelf),
+            // `__FILE__` and `__LINE__` are constants by the time the compiler
+            // sees them: the parser filled both in, because it is the last
+            // stage that still has the bytes a line number is counted in.
+            //
+            // A plain `Literal::Str`, not a frozen one: `__FILE__.frozen?` is
+            // false and `__FILE__.equal?(__FILE__)` is false, both measured, so
+            // each evaluation wants its own object.
+            ExprKind::SourceFile(path) => {
+                let index = self.literal(Literal::Str(path.to_vec().into_boxed_slice()));
+                self.emit(Insn::PushLit(index));
+            }
+            ExprKind::SourceLine(line) => self.emit(Insn::PushInt(i64::from(*line))),
 
             ExprKind::Int(int) => match &int.value {
                 IntValue::Small(n) => match Value::fixnum(*n) {
@@ -2644,9 +2656,9 @@ fn node_name(kind: &ExprKind) -> &'static str {
         ExprKind::Alias(_) | ExprKind::Undef(_) => "`alias` or `undef`",
         ExprKind::Exec(_) => "`BEGIN`/`END`",
         ExprKind::ShareableConstant(_) => "a shareable-constant comment",
-        ExprKind::SourceFile(_) | ExprKind::SourceLine | ExprKind::SourceEncoding => {
-            "a source-position keyword"
-        }
+        // `__FILE__` and `__LINE__` compile (#174); this is the third keyword,
+        // which needs an object that does not exist yet.
+        ExprKind::SourceEncoding => "`__ENCODING__`, which waits for the Encoding class,",
         ExprKind::ForwardingArgs => "argument forwarding",
         ExprKind::Implicit(_) => "an elided hash value",
         ExprKind::Missing => "a syntax error",

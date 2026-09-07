@@ -89,6 +89,19 @@ impl Parsed {
 /// a `String` literal in a binary-encoded file is still a valid Ruby String.
 #[must_use]
 pub fn parse(source: &[u8]) -> Parsed {
+    parse_file(EVAL, source)
+}
+
+/// What `__FILE__` answers for source that came from no file. CRuby's own
+/// answer for `eval`, measured: `eval("__FILE__")` is `"(eval at ...)"`.
+const EVAL: &str = "(eval)";
+
+/// Parse source that came from a file, so `__FILE__` can answer its path.
+///
+/// Prism is never told the path — `ruby-prism` exposes no parse options and
+/// `SourceFileNode::filepath()` is always empty — so lowering carries it.
+#[must_use]
+pub fn parse_file(path: &str, source: &[u8]) -> Parsed {
     let result = ruby_prism::parse(source);
 
     let to_diagnostic = |d: ruby_prism::Diagnostic<'_>| Diagnostic {
@@ -106,7 +119,13 @@ pub fn parse(source: &[u8]) -> Parsed {
         .as_program_node()
         .expect("prism roots every parse at a ProgramNode");
 
-    let (program, lowering_errors) = lower::program(&root);
+    let (program, lowering_errors) = lower::program(
+        &root,
+        lower::SourceOrigin {
+            path,
+            line_starts: &line_starts(source),
+        },
+    );
     errors.extend(lowering_errors);
 
     Parsed {
@@ -114,4 +133,19 @@ pub fn parse(source: &[u8]) -> Parsed {
         errors,
         warnings,
     }
+}
+
+/// The byte offset each line starts at, line 1 first.
+///
+/// One pass per file rather than a scan per `__LINE__`, which matters because
+/// the corpus reaches for the keyword in backtrace assertions across many
+/// files.
+fn line_starts(source: &[u8]) -> Vec<u32> {
+    let mut starts = vec![0u32];
+    for (index, &byte) in source.iter().enumerate() {
+        if byte == b'\n' {
+            starts.push(u32::try_from(index + 1).unwrap_or(u32::MAX));
+        }
+    }
+    starts
 }

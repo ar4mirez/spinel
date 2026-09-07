@@ -572,3 +572,17 @@ Object.new.respond_to?(:nope)  #=> false
 "#{[1, 2]}"  #=> "[1, 2]"
 ([[1, 2]].map { |(a, b)| a + b })  #=> [3]
 ([[1, [2, 3]]].map { |(a, (b, c))| [a, b, c] })  #=> [[1, 2, 3]]
+
+# ------------------------------------------------- source-position keywords
+# A snippet is one line, so `__LINE__` is 1 in the oracle's `eval` and 1 in
+# Spinel's `program`. What `__FILE__` *is* differs between the two — CRuby
+# answers "(eval at ...)" and Spinel answers "(eval)" — so only the properties
+# that hold for both are here, and the path itself is a Rust test (#174).
+__LINE__  #=> 1
+__LINE__ + 1  #=> 2
+[__LINE__, __LINE__]  #=> [1, 1]
+__FILE__.class  #=> String
+__FILE__.frozen?  #=> false
+__FILE__.equal?(__FILE__)  #=> false
+defined?(__LINE__)  #=> "expression"
+defined?(__FILE__)  #=> "expression"

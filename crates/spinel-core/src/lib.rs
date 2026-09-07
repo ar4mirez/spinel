@@ -93,7 +93,7 @@ fn image() -> &'static [Arc<Iseq>] {
         SOURCES
             .iter()
             .map(|(name, source)| {
-                let parsed = spinel_parse::parse(source.as_bytes());
+                let parsed = spinel_parse::parse_file(name, source.as_bytes());
                 // A syntax error in `core/*.rb` is a bug in this repository, not
                 // in a user's program. Panicking names the file and the message;
                 // a `Result` would only move the same panic one frame out, into

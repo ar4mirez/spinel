@@ -70,7 +70,7 @@ fn walk(from: &Path, program: &Program, seen: &mut HashSet<PathBuf>, out: &mut V
         let Ok(source) = std::fs::read(&path) else {
             continue;
         };
-        let parsed = spinel_parse::parse(&source);
+        let parsed = spinel_parse::parse_file(&path.to_string_lossy(), &source);
         if !parsed.errors.is_empty() {
             continue;
         }

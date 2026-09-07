@@ -149,7 +149,7 @@ fn run_command(path: &Path, dump_bytecode: bool) -> ExitCode {
         }
     };
 
-    let parsed = spinel_parse::parse(&source);
+    let parsed = spinel_parse::parse_file(&path.to_string_lossy(), &source);
     let color = use_color();
     for error in &parsed.errors {
         eprintln!(
@@ -260,7 +260,7 @@ fn parse_one(path: &Path, format: Format) -> ExitCode {
         }
     };
 
-    let parsed = spinel_parse::parse(&source);
+    let parsed = spinel_parse::parse_file(&path.to_string_lossy(), &source);
     let color = use_color();
 
     for warning in &parsed.warnings {
@@ -321,7 +321,7 @@ fn sweep(root: &Path) -> ExitCode {
             unreadable += 1;
             continue;
         };
-        let parsed = spinel_parse::parse(&source);
+        let parsed = spinel_parse::parse_file(&file.to_string_lossy(), &source);
         if parsed.is_ok() {
             continue;
         }

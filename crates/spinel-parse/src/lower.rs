@@ -23,8 +23,18 @@ use crate::{Diagnostic, Origin};
 // ---------------------------------------------------------------------------
 
 /// Lower a whole file. Returns the tree and any bug found lowering it.
-pub(crate) fn program(node: &pm::ProgramNode<'_>) -> (Program, Vec<Diagnostic>) {
-    let mut lower = Lower::default();
+///
+/// `origin` is what `__FILE__` and `__LINE__` answer. Prism is never told
+/// either: `ruby-prism` exposes no parse options, so `SourceFileNode::filepath`
+/// is always empty, and a `Location` carries offsets rather than lines.
+pub(crate) fn program(
+    node: &pm::ProgramNode<'_>,
+    origin: SourceOrigin<'_>,
+) -> (Program, Vec<Diagnostic>) {
+    let mut lower = Lower {
+        errors: Vec::new(),
+        origin,
+    };
     let statements = node.statements();
     let program = Program {
         span: span_of(&node.as_node().location()),
@@ -34,9 +44,28 @@ pub(crate) fn program(node: &pm::ProgramNode<'_>) -> (Program, Vec<Diagnostic>) 
     (program, lower.errors)
 }
 
-#[derive(Default)]
-struct Lower {
+/// Where the source came from, for the two keywords that name it.
+#[derive(Clone, Copy)]
+pub(crate) struct SourceOrigin<'a> {
+    /// What `__FILE__` answers.
+    pub(crate) path: &'a str,
+    /// Byte offset of the start of every line, so an offset becomes a line by
+    /// binary search. Built once per file rather than counted per keyword.
+    pub(crate) line_starts: &'a [u32],
+}
+
+impl SourceOrigin<'_> {
+    /// The 1-based line an offset falls on.
+    fn line(&self, offset: u32) -> u32 {
+        // `partition_point` gives how many starts are at or before `offset`,
+        // which is the line number: line 1 starts at 0.
+        u32::try_from(self.line_starts.partition_point(|&start| start <= offset)).unwrap_or(u32::MAX)
+    }
+}
+
+struct Lower<'a> {
     errors: Vec<Diagnostic>,
+    origin: SourceOrigin<'a>,
 }
 
 // ---------------------------------------------------------------------------
@@ -74,7 +103,7 @@ macro_rules! get {
     };
 }
 
-impl Lower {
+impl Lower<'_> {
     /// Record a lowering bug. Returns `Missing` so the caller can carry on and
     /// report every problem in a file rather than only the first.
     fn internal(&mut self, span: Span, what: &str) -> ExprKind {
@@ -225,7 +254,7 @@ macro_rules! index_write {
 // Expressions
 // ---------------------------------------------------------------------------
 
-impl Lower {
+impl Lower<'_> {
     fn expr(&mut self, node: &pm::Node<'_>) -> Expr {
         let span = span_of(&node.location());
         Expr::new(span, self.kind(node, span))
@@ -243,14 +272,18 @@ impl Lower {
             pm::Node::TrueNode { .. } => ExprKind::True,
             pm::Node::FalseNode { .. } => ExprKind::False,
             pm::Node::SelfNode { .. } => ExprKind::SelfExpr,
-            pm::Node::SourceLineNode { .. } => ExprKind::SourceLine,
+            pm::Node::SourceLineNode { .. } => {
+                ExprKind::SourceLine(self.origin.line(span.start))
+            }
             pm::Node::SourceEncodingNode { .. } => ExprKind::SourceEncoding,
             pm::Node::MissingNode { .. } => ExprKind::Missing,
             pm::Node::RedoNode { .. } => ExprKind::Redo,
             pm::Node::RetryNode { .. } => ExprKind::Retry,
             pm::Node::ForwardingArgumentsNode { .. } => ExprKind::ForwardingArgs,
+            // Prism's own `filepath()` is empty — it is never given one — so the
+            // path the caller parsed with is what the node carries.
             pm::Node::SourceFileNode { .. } => {
-                ExprKind::SourceFile(bytes(get!(node, as_source_file_node).filepath()))
+                ExprKind::SourceFile(bytes(self.origin.path.as_bytes()))
             }
 
             // -- numbers ----------------------------------------------------
@@ -1202,7 +1235,7 @@ impl Lower {
 // Targets
 // ---------------------------------------------------------------------------
 
-impl Lower {
+impl Lower<'_> {
     /// Record a lowering bug without producing a value.
     fn bug(&mut self, span: Span, message: String) {
         self.errors.push(Diagnostic {
@@ -1398,7 +1431,7 @@ impl Lower {
 // Blocks and parameters
 // ---------------------------------------------------------------------------
 
-impl Lower {
+impl Lower<'_> {
     fn block_arg(&mut self, node: &pm::Node<'_>) -> BlockArg {
         match node {
             pm::Node::BlockNode { .. } => {
@@ -1635,7 +1668,7 @@ fn empty_param_list(span: Span, locals: Vec<BlockLocal>) -> ParamList {
 // Literal parts, hashes, clauses
 // ---------------------------------------------------------------------------
 
-impl Lower {
+impl Lower<'_> {
     /// The pieces of an interpolated string, symbol, backtick, or regexp.
     ///
     /// Adjacent literals and heredoc lines nest in Prism; splicing keeps the
