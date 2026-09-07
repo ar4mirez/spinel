@@ -139,7 +139,7 @@ is where `CLAUDE.md` puts anything Ruby can express.
 | corpus passed | 1,608 | **1,798** |
 | corpus failed | 0 | **0** |
 | corpus skipped | 1,871 | 1,911 |
-| `language/` passed | — | **1,083** of 2,735 |
+| `language/` passed | 922 | **1,083** of 2,735 |
 | `verify-passes.rb` on `language/` | 922 agree | **1,083 agree** |
 | Rust tests | 263 | **267** |
 
