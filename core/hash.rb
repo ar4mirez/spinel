@@ -35,6 +35,22 @@ class Hash
     allocate
   end
 
+  # What a `**kw` parameter is handed (#193).
+  #
+  # The binder is Rust and cannot send, so it leaves the keywords no named
+  # parameter claimed as an `Array` of `[key, value]` pairs; the method's
+  # prologue calls this. In pair order, which is the call's source order.
+  def self.__from_pairs__(pairs)
+    out = allocate
+    i = 0
+    while i < pairs.size
+      pair = pairs[i]
+      out[pair[0]] = pair[1]
+      i = i + 1
+    end
+    out
+  end
+
   # `{ **other }`. Ruby converts with `to_hash`, so a Hash is used as it is and
   # anything else is asked to become one.
   def __merge_literal__(other)

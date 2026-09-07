@@ -170,6 +170,7 @@ mod tests {
             keywords: Vec::new(),
             block: BlockRef::None,
             implicit_self: false,
+            kwsplat: false,
         };
         Arc::new(Iseq {
             call_sites: vec![site; sites],

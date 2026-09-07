@@ -59,6 +59,7 @@ fn one_call_site() -> std::sync::Arc<Iseq> {
             keywords: Vec::new(),
             block: BlockRef::None,
             implicit_self: false,
+            kwsplat: false,
         }],
         ..Iseq::default()
     })

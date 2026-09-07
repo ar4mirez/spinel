@@ -168,18 +168,22 @@ is where `CLAUDE.md` puts anything Ruby can express.
 
 ### Not delivered, and why
 
+Two of these three were closed by the follow-up in PRD 0028; what is written
+here is what was true when this one landed.
+
 - **`language/fixtures/super.rb` still does not compile.** #187 names it in its
   definition of done, and it is not reachable from #187: the fixture uses
   `**kwrest` in 14 places, which is a different refusal — 101 examples corpus
   wide — that this slice does not own. `SuperSpecs` stays blocked. The other
   half of that requirement, `core/enumerable/fixtures/classes.rb`, does
-  compile, and it was the larger one at 394 examples.
+  compile, and it was the larger one at 394 examples. **Closed by #193 in PRD
+  0028.**
 - **`NoMatchingPatternKeyError`.** A hash pattern that fails on a missing key
   raises it only when it is the sole clause — measured, two clauses give the
   general error — so reporting it needs the failure *reason* to travel out of
-  the pattern and into the `case`. One example; tagged.
+  the pattern and into the `case`. One example; tagged. **Closed in PRD 0028.**
 - **`__ENCODING__`.** 3 examples, waiting on the `Encoding` class, which is
-  separately 632.
+  separately 632. Still open.
 
 ### Two things the unblocking revealed
 

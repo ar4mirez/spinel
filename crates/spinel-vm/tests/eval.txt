@@ -691,3 +691,33 @@ defined?($~)  #=> "global-variable"
 (1 => Integer)  #=> nil
 # A partial match leaves the bindings it managed before it failed.
 (([1, 2] in [w, 9]); w)  #=> 1
+
+# --------------------------------------------------------- keyword rest (#193)
+# Ruby 3 separated keywords from a positional Hash, and the corners are not what
+# reading suggests: a braced Hash argument stays positional, a brace-less one is
+# keywords, and `m(h)` passes the Hash positionally where Ruby 2 passed it as
+# keywords. Every row below was measured on ruby 4.0.6.
+#
+# A row's value is never a Hash: `Hash#inspect` still writes `{:a => 1}` where
+# ruby 4.0 writes `{a: 1}`, so such a row would measure that rather than the
+# keywords. `.keys`, `.values` and `[]` say the same thing without it.
+(def kr1(*a, **kw) = [a.size, kw.size]; kr1({"a" => 1}))  #=> [1, 0]
+(def kr2(*a, **kw) = [a.size, kw.size]; kr2("a" => 1))  #=> [0, 1]
+(def kr3(*a, **kw) = kw["a"]; kr3("a" => 1))  #=> 1
+(def kr4(*a, **kw) = kw.keys; h = {a: 1}; kr4(**h))  #=> [:a]
+(def kr5(*a, **kw) = [a.size, kw.size]; h = {a: 1}; kr5(h))  #=> [1, 0]
+(def kr6(*a, **kw) = [a, kw.keys]; kr6(1, k: 2))  #=> [[1], [:k]]
+# Order is the source's, and a duplicate key is the last one written.
+(def kr7(**kw) = kw.keys; kr7(**{a: 1}, **{b: 2}))  #=> [:a, :b]
+(def kr8(**kw) = kw.keys; kr8(k: 1, **{b: 2}))  #=> [:k, :b]
+(def kr9(**kw) = kw.keys; kr9(**{b: 2}, k: 1))  #=> [:b, :k]
+(def kra(**kw) = kw[:a]; kra(**{a: 1}, **{a: 2}))  #=> 2
+(def krb(**kw) = kw.size; krb(**{}))  #=> 0
+# A named keyword takes its own; `**rest` takes what is left.
+(def krc(a:, b: 9, **rest) = [a, b, rest.keys]; krc(a: 1))  #=> [1, 9, []]
+(def krd(a:, b: 9, **rest) = [a, b, rest.keys]; krd(a: 1, b: 2, c: 3))  #=> [1, 2, [:c]]
+# An anonymous `**` collects without binding, which is what stops the keywords
+# being unknown.
+(def kre(**) = :anon; kre(x: 1))  #=> :anon
+# `**nil` accepts none at all.
+(def krf(**nil) = :none; krf)  #=> :none

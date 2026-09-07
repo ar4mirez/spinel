@@ -1329,7 +1329,13 @@ struct Pending {
     name: SymbolId,
     receiver: Value,
     args: Vec<Value>,
-    keywords: Vec<(SymbolId, Value)>,
+    /// The keywords this call passes, in source order.
+    ///
+    /// The key is a `Value`, not a `SymbolId`: since #193 a call may write a
+    /// key that is not a symbol — `m("a" => 1)` — and it has to reach a `**kw`
+    /// intact. A symbol key is `Value::symbol`, an immediate, so matching a
+    /// declared keyword is still one integer compare.
+    keywords: Vec<(Value, Value)>,
     /// The block this call passes on, as a `Proc` or `nil`.
     block: Value,
     /// Whether that block was written as a literal `{ }` or `do end` rather than
@@ -1417,12 +1423,31 @@ fn pop_call<'h>(
         BlockRef::None => Value::NIL,
     };
 
-    let mut keywords = Vec::with_capacity(site.keywords.len());
-    for &name in site.keywords.iter().rev() {
-        let value = stack.pop().expect("keyword on an empty stack");
-        keywords.push((frame.symbols[name as usize], value));
-    }
-    keywords.reverse();
+    // A `**splat` or a non-symbol key arrives as one `Hash`, and the compiler
+    // leaves `site.keywords` empty when it does — the whole group became that
+    // hash, so its pairs are already in source order with duplicates resolved
+    // (#193). The two are never both present, which is what lets this pick one
+    // shape rather than inventing an order to merge them in: Ruby's depends on
+    // where the splat was written, and `Hash` is where that is decided.
+    let keywords = if site.kwsplat {
+        debug_assert!(
+            site.keywords.is_empty(),
+            "a keyword splat and named keywords on one site"
+        );
+        let hash = stack.pop().expect("a keyword splat on an empty stack");
+        hash_pairs(scope, hash).ok_or(Error::NoDispatch {
+            op: "**",
+            operands: "a keyword argument that is not a Hash",
+        })?
+    } else {
+        let mut named = Vec::with_capacity(site.keywords.len());
+        for &name in site.keywords.iter().rev() {
+            let value = stack.pop().expect("keyword on an empty stack");
+            named.push((Value::symbol(frame.symbols[name as usize]), value));
+        }
+        named.reverse();
+        named
+    };
 
     let at = stack.len() - site.argc as usize;
     let mut args: Vec<Value> = stack.drain(at..).collect();
@@ -1915,12 +1940,17 @@ fn bind_keywords(
     symbols: &[SymbolId],
     call: &Pending,
 ) -> Result<(), Error> {
+    // `def m(**nil)`: the method says it takes none, and one is an error rather
+    // than something to collect. Measured: "no keywords accepted".
+    if spec.no_keywords && !call.keywords.is_empty() {
+        return Err(Error::raise("ArgumentError", "no keywords accepted"));
+    }
     // A callee that declares no keywords at all does not *reject* them: Ruby
-    // packs them into a trailing positional Hash. There is no Hash, so this is
-    // not yet dispatchable — and saying `ArgumentError: unknown keyword` here
-    // would claim Ruby raises where Ruby does not, which is the one thing the
-    // blocked report must never do.
-    if spec.keywords.is_empty() && !call.keywords.is_empty() {
+    // packs them into a trailing positional Hash. Still not dispatchable —
+    // saying `ArgumentError: unknown keyword` here would claim Ruby raises
+    // where Ruby does not, which is the one thing the blocked report must
+    // never do.
+    if spec.keywords.is_empty() && spec.kwrest.is_none() && !call.keywords.is_empty() {
         return Err(Error::NoDispatch {
             op: "a keyword argument",
             operands: "a method with no keyword parameters, which needs a Hash",
@@ -1928,34 +1958,61 @@ fn bind_keywords(
     }
 
     for keyword in &spec.keywords {
-        let name = symbols[keyword.name as usize];
+        let name = Value::symbol(symbols[keyword.name as usize]);
         let supplied = call.keywords.iter().find(|(k, _)| *k == name);
         match (supplied, keyword.required) {
             (Some((_, value)), _) => env_set(scope, env, keyword.slot as usize, *value),
             (None, true) => {
                 return Err(Error::raise(
                     "ArgumentError",
-                    format!("missing keyword: :{}", symbol_name(name)),
+                    format!("missing keyword: :{}", keyword_label(name)),
                 ));
             }
             (None, false) => env_set(scope, env, keyword.slot as usize, Value::UNDEF),
         }
     }
-    // An unknown keyword is an error in Ruby unless the method collects them,
-    // and `**kw` is not compiled, so anything left over is unknown.
-    for (name, _) in &call.keywords {
-        if !spec
-            .keywords
+
+    // What no named parameter claimed. With `**kw` it collects; without one it
+    // is an unknown keyword, which is an error in Ruby.
+    let declared = |name: Value| {
+        spec.keywords
             .iter()
-            .any(|k| symbols[k.name as usize] == *name)
-        {
-            return Err(Error::raise(
-                "ArgumentError",
-                format!("unknown keyword: :{}", symbol_name(*name)),
-            ));
+            .any(|k| Value::symbol(symbols[k.name as usize]) == name)
+    };
+    let Some(slot) = spec.kwrest else {
+        for (name, _) in &call.keywords {
+            if !declared(*name) {
+                return Err(Error::raise(
+                    "ArgumentError",
+                    format!("unknown keyword: :{}", keyword_label(*name)),
+                ));
+            }
+        }
+        return Ok(());
+    };
+    // An `Array` of `[key, value]` pairs, which the body's prologue turns into
+    // a `Hash`. Built here rather than there because only the binder can see
+    // which keywords were left over, and built as an `Array` because a `Hash`
+    // is `core/hash.rb` and this cannot send. Duplicate keys cannot reach here:
+    // a call that could write one was lowered to a hash literal, which already
+    // resolved them.
+    let mut rest = Vec::new();
+    for (name, value) in &call.keywords {
+        if !declared(*name) {
+            rest.push(new_array(scope, &[*name, *value]));
         }
     }
+    let collected = new_array(scope, &rest);
+    env_set(scope, env, slot as usize, collected);
     Ok(())
+}
+
+/// How a keyword name reads in an `ArgumentError`.
+///
+/// Almost always a symbol; a non-symbol key can only reach a `**kw`, and one
+/// never reaches a message that names a *declared* keyword.
+fn keyword_label(name: Value) -> String {
+    name.as_symbol().map_or_else(|| "?".to_owned(), symbol_name)
 }
 
 fn check_arity(spec: &ParamSpec, given: usize) -> Result<(), Error> {
@@ -3799,6 +3856,28 @@ fn allocate_instance(scope: &mut HandleScope<'_>, id: ClassId) -> Result<Value, 
 }
 
 /// The elements of an `Array`, or `None` if the value is not one.
+/// A `Hash`'s pairs, for a `**` argument (#193).
+///
+/// Reads `@pairs` — the association list `core/hash.rb` keeps — rather than
+/// sending `each_pair`, because this runs from inside argument assembly and
+/// re-entering the interpreter there is what `expand_splats` already refuses to
+/// do. An ivar read is a shape lookup, not a call.
+///
+// ponytail: the one place outside `core/hash.rb` that knows the
+// representation, and that file's own note says nothing else should. Give
+// `Hash` a primitive that hands out its pairs when the open-addressed table
+// that note promises arrives, and this reads that instead.
+fn hash_pairs(scope: &mut HandleScope<'_>, value: Value) -> Option<Vec<(Value, Value)>> {
+    let pairs = ivar_get(scope, value, symbol("@pairs")).ok()?;
+    let mut out = Vec::new();
+    for pair in array_elements(scope, pairs)? {
+        let entry = array_elements(scope, pair)?;
+        let [key, value] = entry[..] else { return None };
+        out.push((key, value));
+    }
+    Some(out)
+}
+
 fn array_elements(scope: &mut HandleScope<'_>, value: Value) -> Option<Vec<Value>> {
     if heap_kind(scope, value) != Some(HeapKind::Array) {
         return None;
@@ -6915,6 +6994,7 @@ mod tests {
                 keywords: Vec::new(),
                 block: crate::bytecode::BlockRef::None,
                 implicit_self: true,
+                kwsplat: false,
             }],
             max_stack: 3,
             ..Iseq::default()
