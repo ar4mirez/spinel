@@ -132,4 +132,86 @@ is where `CLAUDE.md` puts anything Ruby can express.
 
 ## Results
 
-_Filled in as each step lands._
+### ruby/spec delta
+
+| | before | after |
+|---|---|---|
+| corpus passed | 1,608 | **1,798** |
+| corpus failed | 0 | **0** |
+| corpus skipped | 1,871 | 1,911 |
+| `language/` passed | — | **1,083** of 2,735 |
+| `verify-passes.rb` on `language/` | 922 agree | **1,083 agree** |
+| Rust tests | 263 | **267** |
+
+`+190` examples. Where each issue's share went:
+
+| issue | reason | before | after |
+|---|---|---|---|
+| #174 | `a source-position keyword` | 478 | **0** — 3 to `` `__ENCODING__` ``, the rest to their next real blocker |
+| #166 | the three global reasons | 382 | **0** |
+| #187 | `` `super` `` | 49 | **0** |
+| #187 | `uninitialized constant EnumerableSpecs` | 394 | **0** |
+| #187 | `uninitialized constant SuperSpecs` | 52 | 52 — see below |
+| #165 | `` `case`/`in` `` and `pattern matching` | 101 | **0** — 6 are `MatchWrite`, now named separately |
+
+`language/pattern_matching_spec.rb` goes 0 → **85 of 114** passing, and
+`language/super_spec.rb` 0 → 5.
+
+### Definition of done
+
+- [x] #174 — `__FILE__` is the path the `Iseq` was parsed with, `__LINE__` the source line; `__ENCODING__` deferred under its own reason
+- [x] #166 — read, assign and `defined?`; the specials stay on `Insn::LastMatch`
+- [x] #187 — `super`, `super(...)`, zsuper, the module lookup order, the block forwarding, and `super` inside a block
+- [x] #165 — every pattern form the spec file measures, both one-line spellings, and the two error classes
+- [x] `tests/eval.txt` gained 75 rows, every one measured by `scripts/eval-oracle.rb` against ruby 4.0.6
+- [x] Rust tests for what the table cannot hold: paths, lines, and every raise
+
+### Not delivered, and why
+
+- **`language/fixtures/super.rb` still does not compile.** #187 names it in its
+  definition of done, and it is not reachable from #187: the fixture uses
+  `**kwrest` in 14 places, which is a different refusal — 101 examples corpus
+  wide — that this slice does not own. `SuperSpecs` stays blocked. The other
+  half of that requirement, `core/enumerable/fixtures/classes.rb`, does
+  compile, and it was the larger one at 394 examples.
+- **`NoMatchingPatternKeyError`.** A hash pattern that fails on a missing key
+  raises it only when it is the sole clause — measured, two clauses give the
+  general error — so reporting it needs the failure *reason* to travel out of
+  the pattern and into the `case`. One example; tagged.
+- **`__ENCODING__`.** 3 examples, waiting on the `Encoding` class, which is
+  separately 632.
+
+### Two things the unblocking revealed
+
+Both are the shape `docs/roadmap.md` warns about: a slice that unblocks a lot
+makes old failures visible, and they arrive in subsystems it never touched.
+
+1. **38 predefined-global examples** were failing all along behind
+   "assigning a global variable". All three families #166 explicitly defers —
+   read-only and type-checked predefined globals, global aliases, and `$!` —
+   so they are tagged with reasons naming #39. Four more were genuine
+   core-library gaps and are fixed here: `Comparable#clamp`'s range check and
+   `Hash#delete`/`#[]=` on a frozen receiver. The fourth needs a `String`
+   subclass to hold bytes and is tagged.
+2. **`verify-passes.rb` could be poisoned by its own corpus.** It gave each
+   example a fresh *binding*, which isolates locals and nothing else.
+   `case_spec.rb` contains `case (def foo; 'foo'; end; 'f')`, whose top-level
+   `def` lands on `Object` and stays there; `super_spec.rb` then has a
+   `Class.new(sup) { def foo; super; end }` find it, and the example asserting
+   that `super` raises was reported as Spinel passing something Ruby does not.
+   Nothing was wrong with Spinel — it gives every example its own `Heap` — and
+   the script now forks per example, which is the same isolation. It could not
+   surface before because the two files had no passing examples in common.
+
+### Left for later
+
+- **A `Hash`-valued row cannot live in `eval.txt`.** `Hash#inspect` still
+  writes `{:a => 1}` where ruby 4.0 writes `{a: 1}`, so such a row would
+  measure that rather than the pattern. `**rest` and `deconstruct_keys` are
+  checked in `tests/eval.rs` instead.
+- **`NoMatchingPatternError`'s message** is the subject's `inspect`; CRuby
+  appends `": String === 1 does not return true"`. Every assertion in the spec
+  file is a regex over the `inspect` half, so nothing turns on it yet.
+- **A `Proc` that outlives its defining frame** loses its `super` target and
+  raises "outside a method". Marked `ponytail:` in `push_proc_frame`, with the
+  upgrade — two slots on the `Proc`, beside `PROC_HOME` — named.

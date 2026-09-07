@@ -159,6 +159,40 @@ end
 
 loaded_fixtures = {}
 sources = Hash.new { |cache, path| cache[path] = File.binread(path) }
+# Run one example in a child process, and answer what went wrong, or `nil`.
+#
+# The child writes its verdict down a pipe rather than using an exit status,
+# because the message is what makes a disagreement actionable.
+def run_isolated(text, path)
+  read, write = IO.pipe
+  pid = fork do
+    read.close
+    verdict =
+      begin
+        eval(text, TOPLEVEL_BINDING.dup, path, 1) # rubocop:disable Security/Eval
+        nil
+      rescue SpecFailure => e
+        "says #{e.message}"
+      rescue StandardError, SyntaxError, NotImplementedError => e
+        "raised #{e.class}: #{e.message}"
+      end
+    write.write(verdict.to_s)
+    write.close
+    # `exit!`, not `exit`: an example that installed an `at_exit` must not run
+    # it here, and the parent is the one that reports.
+    exit!(0)
+  end
+  write.close
+  verdict = read.read
+  read.close
+  Process.wait(pid)
+  # A child that died without writing — a segfault, an `exit!` inside the
+  # example — is itself a disagreement worth seeing.
+  return "left the process in #{$?.inspect}" unless $?.success?
+
+  verdict.empty? ? nil : verdict
+end
+
 checked = 0
 wrong = []
 
@@ -185,13 +219,21 @@ listing.each_line do |line|
   text = "#{magic_comments(source)}#{text}" unless magic_comments(source).empty?
   checked += 1
 
-  begin
-    # A fresh binding per example so one cannot leak a local into the next.
-    eval(text, TOPLEVEL_BINDING.dup, path, 1) # rubocop:disable Security/Eval
-  rescue SpecFailure => e
-    wrong << "#{path}: #{description}\n  spinel passed it; ruby says #{e.message}"
-  rescue StandardError, SyntaxError => e
-    wrong << "#{path}: #{description}\n  spinel passed it; ruby raised #{e.class}: #{e.message}"
+  # A process per example, not just a fresh binding.
+  #
+  # A binding isolates locals and nothing else, and ruby/spec is full of
+  # examples that write to the object space: `case_spec.rb` has
+  # `case (def foo; 'foo'; end; 'f')`, whose top-level `def` lands on `Object`
+  # and stays there. A later `Class.new(sup) { def foo; super; end }` in
+  # `super_spec.rb` then finds it, and the example that asserts `super` raises
+  # is reported as Spinel passing something Ruby does not — when what actually
+  # happened is that this script let one example rewrite another's world.
+  #
+  # Spinel gives every example a fresh `Heap`, so the leak is this script's
+  # alone. A fork per example is the same isolation, and the cost is a few
+  # seconds across the corpus.
+  if (message = run_isolated(text, path))
+    wrong << "#{path}: #{description}\n  spinel passed it; ruby #{message}"
   end
 end
 

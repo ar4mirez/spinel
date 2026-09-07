@@ -107,7 +107,6 @@ fn a_construct_this_slice_does_not_compile_is_an_error_never_a_guess() {
         // symbol, so a non-symbol key and a `**` argument have nowhere to go.
         "f(\"a\" => 1)",
         "f(**h)",
-        "case 1; in Integer then 2; end",
         // A destructuring parameter binds several names in one slot, so
         // anything after it would be bound to the wrong one. See
         // `Compiler::spec_from_list`.
@@ -256,5 +255,73 @@ fn super_with_nothing_above_it_raises_the_way_ruby_does() {
     assert!(
         error.contains("super"),
         "the refusal has to name the keyword: {error}"
+    );
+}
+
+/// Pattern matching's two protocols and its two raises (#165).
+///
+/// Not rows in `eval.txt`: two of these answer a `Hash`, whose `inspect`
+/// Spinel still writes the pre-3.4 way, and two raise. The values are CRuby's,
+/// measured on ruby 4.0.6.
+#[test]
+fn pattern_matching_protocols_and_raises() {
+    // `**rest` binds what the pattern did not name.
+    assert_eq!(
+        eval("case({a: 1, b: 2}); in {a: Integer, **r} then r.keys; end"),
+        Ok("[:b]".to_owned())
+    );
+    // `deconstruct_keys` is handed the keys the pattern names, or `nil` when a
+    // `**rest` means it may want all of them.
+    assert_eq!(
+        eval(
+            "o = Object.new; def o.deconstruct_keys(k); $seen = k; {a: 1}; end; \
+             (o in {a: Integer}); $seen"
+        ),
+        Ok("[:a]".to_owned())
+    );
+    assert_eq!(
+        eval(
+            "o = Object.new; def o.deconstruct_keys(k); $seen = k; {a: 1}; end; \
+             (o in {a: Integer, **r}); $seen"
+        ),
+        Ok("nil".to_owned())
+    );
+    // An object with a `deconstruct` matches an array pattern...
+    assert_eq!(
+        eval("o = Object.new; def o.deconstruct; [1, 2]; end; o in [1, 2]"),
+        Ok("true".to_owned())
+    );
+    // ...and one whose `deconstruct` answers something else is an error, not a
+    // failed match.
+    let error = eval("o = Object.new; def o.deconstruct; 5; end; o in [1]")
+        .expect_err("a `deconstruct` that is not an Array raises");
+    assert!(
+        error.contains("deconstruct must return Array"),
+        "CRuby's own message: {error}"
+    );
+
+    // No `deconstruct` at all is a failed match rather than an error.
+    assert_eq!(eval("1 in [a]"), Ok("false".to_owned()));
+
+    // `case`/`in` with nothing matching and no `else`, and the `=>` form.
+    for source in [
+        "case [0, 1]; in String then 1; end",
+        "[0, 1] => String",
+    ] {
+        let error = eval(source).expect_err("a pattern that matches nothing raises");
+        assert!(
+            error.contains("NoMatchingPatternError") && error.contains("[0, 1]"),
+            "the message names the subject, which the spec asserts on: {error}"
+        );
+    }
+
+    // `deconstruct` is called once per `case` subject, however many clauses
+    // try it — observable on an object whose `deconstruct` has an effect.
+    assert_eq!(
+        eval(
+            "$n = 0; o = Object.new; def o.deconstruct; $n = $n + 1; [0, 1]; end; \
+             case o; in [1, 2] then :a; in [0, 1] then :b; end; $n"
+        ),
+        Ok("1".to_owned())
     );
 }

@@ -636,3 +636,58 @@ defined?($~)  #=> "global-variable"
 (class SAf; def m(a); a; end; end; class SBf < SAf; def m(a); [1].map { super }; end; end; SBf.new.m(7))  #=> [7]
 # Through `new`, which reaches `initialize` off the native path.
 (class SAg; def initialize(*a); @a = a; end; attr_reader :a; end; class SBg < SAg; def initialize(*a); super(*a); end; end; SBg.new(1, 2).a)  #=> [1, 2]
+
+# -------------------------------------------------------- pattern matching
+# Every form `pattern_matching_spec.rb` measures, as values CRuby produced.
+# The two spellings differ in what a mismatch is — `in` answers false, `=>`
+# raises — so only the answering half is here; the raises are Rust tests.
+(case 1; in Integer then :int; end)  #=> :int
+(case 1; in 2 then :a; else :b; end)  #=> :b
+(case 5; in x then x; end)  #=> 5
+(case 1.0; in Integer then :i; in Float then :f; end)  #=> :f
+(case nil; in nil then :nil; end)  #=> :nil
+(case 5; in 1..10 then :range; end)  #=> :range
+# Array patterns: rest, pre and post, and a constant in front.
+(case [1, 2]; in [1, y] then y; end)  #=> 2
+(case [1, 2]; in [1] then :short; else :no; end)  #=> :no
+(case [1, 2, 3]; in [1, *r] then r; end)  #=> [2, 3]
+(case [1, 2, 3, 4]; in [a, *m, z] then [a, m, z]; end)  #=> [1, [2, 3], 4]
+(case []; in [] then :empty; end)  #=> :empty
+(case [1, 2]; in Array[1, 2] then :const; end)  #=> :const
+(case [1, 2]; in String[1, 2] then :s; else :no; end)  #=> :no
+(case [1, [2, 3]]; in [q, [w, r]] then [q, w, r]; end)  #=> [1, 2, 3]
+# A find pattern searches for the window, and the splats take each side.
+(case [1, 2, 3, 4]; in [*, 3, *] then :found; end)  #=> :found
+(case [1, 2, 3, 4]; in [*pre, 3, *post] then [pre, post]; end)  #=> [[1, 2], [4]]
+(case [1, 2]; in [*, 9, *] then :f; else :no; end)  #=> :no
+# Hash patterns tolerate extra keys — except the empty one, which does not.
+(case({a: 1}); in {a: Integer} then :h; end)  #=> :h
+(case({a: 1, b: 2}); in {a: Integer} then :extra_ok; end)  #=> :extra_ok
+(case({a: 1, b: 2}); in {a: Integer, **nil} then :n; else :other; end)  #=> :other
+(case({a: 5}); in {a:} then a; end)  #=> 5
+# A row whose value is a Hash cannot live here yet: Spinel's `Hash#inspect`
+# still writes `{:a => 1}` where ruby 4.0 writes `{a: 1}`, so the table would
+# be measuring that difference rather than the pattern. `**rest` binding and
+# `deconstruct_keys` are checked in `tests/eval.rs` instead.
+(case({}); in {} then :empty; else :no; end)  #=> :empty
+(case({a: 1}); in {} then :empty; else :no; end)  #=> :no
+(case({a: 1}); in {**} then :any; end)  #=> :any
+(case({a: 1}); in {b: Integer} then :b; else :no; end)  #=> :no
+# Alternatives, capture, pin, and guards.
+(case 2; in 1 | 2 | 3 then :alt; end)  #=> :alt
+(case 5; in Integer => n then n; end)  #=> 5
+(case 5; in n if n > 3 then [:g, n]; end)  #=> [:g, 5]
+(case 5; in n unless n > 3 then :a; else :b; end)  #=> :b
+(q = 5; case 5; in ^q then :pin; end)  #=> :pin
+(q = 5; case 6; in ^q then :pin; else :no; end)  #=> :no
+(k = Integer; case 1; in ^k then :pinned_class; end)  #=> :pinned_class
+# `deconstruct` and `deconstruct_keys` are the protocols, and an Array and a
+# Hash answer them for themselves.
+([1, 2].deconstruct)  #=> [1, 2]
+# The one-line forms.
+(1 in Integer)  #=> true
+(1 in String)  #=> false
+([1, 2] in [1, b])  #=> true
+(1 => Integer)  #=> nil
+# A partial match leaves the bindings it managed before it failed.
+(([1, 2] in [w, 9]); w)  #=> 1

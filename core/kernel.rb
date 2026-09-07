@@ -109,6 +109,56 @@ module Kernel
     values
   end
 
+  # -- pattern matching (#165) ------------------------------------------
+  #
+  # The compiler lowers a pattern to tests and jumps, and calls these for the
+  # parts that are protocol rather than control flow. Ruby rather than
+  # instructions because every one of them is a send and a comparison, which
+  # `docs/engine.md` says belongs in `core/*.rb`; the compiler emitting them
+  # inline would be ten instructions apiece for no gain.
+  #
+  # Private, and named so no program can mean them.
+
+  # `subject.deconstruct` for an array pattern, or `nil` when the object has
+  # none — which is a failed match, not an error. A `deconstruct` that answers
+  # something other than an Array *is* an error: measured,
+  # "deconstruct must return Array".
+  def __pattern_deconstruct__(subject)
+    return nil unless subject.respond_to?(:deconstruct)
+    parts = subject.deconstruct
+    raise TypeError, "deconstruct must return Array" unless parts.is_a?(Array)
+    parts
+  end
+
+  # The same for a hash pattern. `keys` is the list of keys the pattern names,
+  # or `nil` when it has a `**rest` and so may want all of them — which is what
+  # CRuby passes, measured by giving an object a `deconstruct_keys` that
+  # records its argument.
+  def __pattern_deconstruct_keys__(subject, keys)
+    return nil unless subject.respond_to?(:deconstruct_keys)
+    pairs = subject.deconstruct_keys(keys)
+    raise TypeError, "deconstruct_keys must return Hash" unless pairs.is_a?(Hash)
+    pairs
+  end
+
+  # What `**rest` binds: everything the pattern did not name.
+  def __pattern_rest__(pairs, named)
+    out = {}
+    pairs.each_pair { |key, value| out[key] = value unless named.include?(key) }
+    out
+  end
+
+  # `case`/`in` with no `else`, and the `=>` form, when nothing matched.
+  def __pattern_fail__(subject)
+    raise NoMatchingPatternError, subject.inspect
+  end
+
+  # The `=>` form again, for a key the subject does not have. A separate class
+  # in Ruby, and a separate message.
+  def __pattern_key_fail__(subject, key)
+    raise NoMatchingPatternKeyError, subject.inspect + ": key not found: " + key.inspect
+  end
+
   # The module functions (#161). Each becomes a private instance method and a
   # public singleton method, which is why `defined?(Object.print)` is nil while
   # `defined?(Kernel.puts)` is "method" — both measured on ruby 4.0.6.

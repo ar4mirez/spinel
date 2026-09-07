@@ -718,10 +718,47 @@ pub fn eval_in(
                 Insn::CaseEq => {
                     let condition = stack.pop().expect("caseeq on an empty stack");
                     let subject = stack.pop().expect("caseeq on an empty stack");
-                    // `when c` asks `c === subject`, receiver first. For every type
-                    // this slice has, `===` is `==`; for a Range, Class, Regexp, or
-                    // Proc it is not, and those say so rather than guessing.
-                    stack.push(bool_value(case_eq(scope, condition, subject)?));
+                    // `when c` and `in c` both ask `c === subject`, receiver
+                    // first. For an immediate, a String or an Array, `===` is
+                    // `==` and the fast path answers it.
+                    match case_eq(scope, condition, subject) {
+                        Ok(answer) => stack.push(bool_value(answer)),
+                        // The send behind the fast path, the same one
+                        // `Insn::BinOp` grew: a `Module`, a `Range` or a `Proc`
+                        // in condition position means something other than
+                        // `==`, and each of those defines the `===` that says
+                        // what. Refusing here instead was what made `when
+                        // Integer` — and every `in Integer` (#165) —
+                        // undispatchable.
+                        Err(Error::NoDispatch { .. }) => {
+                            let call = Pending {
+                                cache: None,
+                                name: crate::shared::symbols::intern("==="),
+                                receiver: condition,
+                                args: vec![subject],
+                                keywords: Vec::new(),
+                                block: Value::NIL,
+                                block_is_literal: false,
+                                cref: frames[top].cref,
+                                implicit_self: false,
+                                public_only: false,
+                                target: Target::Method,
+                                owner: None,
+                                defined_as: None,
+                            };
+                            if let Some(unwind) = dispatch(
+                                scope,
+                                &mut stack,
+                                &mut frames,
+                                call,
+                                proc_class,
+                                &mut ids,
+                            )? {
+                                return Ok(Step::Unwind(unwind));
+                            }
+                        }
+                        Err(other) => return Err(other),
+                    }
                 }
 
                 Insn::MakeProc(child, lambda) => {

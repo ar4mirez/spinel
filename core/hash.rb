@@ -183,6 +183,13 @@ class Hash
     gone
   end
 
+  # A Hash is its own hash pattern subject (#165). The key list is ignored:
+  # Ruby's own `Hash#deconstruct_keys` answers the whole hash either way, and
+  # the pattern picks what it wants out of it.
+  def deconstruct_keys(keys)
+    self
+  end
+
   def to_a
     @pairs.map { |pair| [pair[0], pair[1]] }
   end
