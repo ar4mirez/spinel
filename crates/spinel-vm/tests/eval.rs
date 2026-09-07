@@ -234,3 +234,27 @@ fn the_encoding_keyword_is_refused_under_its_own_reason() {
         "the reason has to name what is missing, not the keyword family: {error}"
     );
 }
+
+/// `super` off the end of the chain, and `super` where there is no method
+/// (#187).
+///
+/// Not rows in `eval.txt`: the table records values, and both of these raise.
+/// The messages are CRuby's, measured on ruby 4.0.6.
+#[test]
+fn super_with_nothing_above_it_raises_the_way_ruby_does() {
+    let error = eval("class ZZ; def m; super; end; end; ZZ.new.m")
+        .expect_err("`super` past the end of the chain raises");
+    assert!(
+        error.contains("super: no superclass method 'm'"),
+        "Ruby names the keyword in the message, and super_spec.rb asserts on \
+         it: {error}"
+    );
+
+    // Outside a method the compiler cannot even build the argument list, so it
+    // refuses rather than emitting a call that would raise at run time.
+    let error = eval("super").expect_err("`super` at the top level is not a call");
+    assert!(
+        error.contains("super"),
+        "the refusal has to name the keyword: {error}"
+    );
+}

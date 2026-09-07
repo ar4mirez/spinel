@@ -143,6 +143,20 @@ pub enum Insn {
     /// id — bytecode is shared between Ractors and a cache cannot be. Emitting
     /// the id now means that slice adds a table, not an instruction format.
     Send(u32),
+    /// Index into [`Iseq::call_sites`]; calls the same method one step further
+    /// along the receiver's ancestor chain than the one this frame is running.
+    ///
+    /// Both spellings. `super(...)` pushes the arguments the site names;
+    /// `super` — the zsuper form — pushes the frame's parameter locals *as
+    /// they stand now*, which the compiler emits as ordinary `GetLocal`s, so a
+    /// reassigned parameter forwards its new value the way Ruby's does.
+    ///
+    /// The name in the site is unused, like [`Insn::Yield`]'s: which method
+    /// this is only the frame knows, because `alias` and `define_method` can
+    /// make it something the call site never wrote. The receiver is the
+    /// frame's, and the block is the frame's too unless the site passes one —
+    /// `super` forwards the current block implicitly, measured.
+    Super(u32),
     /// Index into [`Iseq::call_sites`]; calls the current frame's block. The
     /// name in the site is unused, the arguments are not.
     Yield(u32),

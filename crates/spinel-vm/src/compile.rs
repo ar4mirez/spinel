@@ -235,6 +235,57 @@ struct Compiler {
     /// The caller merged several Ruby scopes into [`Self::locals`], so a depth
     /// may overshoot the chain. See [`flattened_expression`].
     flattened: bool,
+    /// What a bare `super` forwards, if this body is inside a method (#187).
+    ///
+    /// Carried rather than read off [`Self::params`] because a block written in
+    /// a method forwards *the method's* arguments, not its own — so a block
+    /// inherits this from its parent with the depth stepped up one, and a
+    /// method body replaces it with its own at depth zero.
+    zsuper: Option<Zsuper>,
+}
+
+impl Zsuper {
+    /// The parameters in the order a call takes them: required, optional,
+    /// rest, post, then keywords.
+    ///
+    /// Slot numbers rather than names, because that is what a `GetLocal` wants
+    /// and because an anonymous `*` still has a slot to forward. The block
+    /// parameter is deliberately absent: `super` forwards the frame's block
+    /// whether or not the method named it, which the interpreter does.
+    fn from_spec(spec: &ParamSpec) -> Zsuper {
+        let mut positional = Vec::new();
+        for slot in 0..spec.required {
+            positional.push((slot, false));
+        }
+        positional.extend(spec.optional.iter().map(|o| (o.slot, false)));
+        if let Some(rest) = spec.rest {
+            positional.push((rest, true));
+        }
+        // Post parameters follow the splat in the call, exactly as written.
+        let first_post = spec.slots() as u16 - spec.post - spec.keywords.len() as u16
+            - u16::from(spec.block.is_some());
+        for offset in 0..spec.post {
+            positional.push((first_post + offset, false));
+        }
+        Zsuper {
+            positional,
+            keywords: spec.keywords.iter().map(|k| (k.name, k.slot)).collect(),
+            depth: 0,
+        }
+    }
+}
+
+/// The enclosing method's parameters, as a bare `super` has to push them.
+#[derive(Debug, Clone)]
+struct Zsuper {
+    /// `(slot, is_rest)` in the order the call takes them: required, optional,
+    /// rest, post. A rest parameter is one pushed value the site splats.
+    positional: Vec<(u16, bool)>,
+    /// `(symbol index, slot)` per declared keyword.
+    keywords: Vec<(u32, u16)>,
+    /// How many scopes up [`Self::positional`]'s slots live: zero in the method
+    /// body itself, one inside a block written in it, and so on.
+    depth: u16,
 }
 
 impl Compiler {
@@ -260,6 +311,7 @@ impl Compiler {
             is_lambda_body: false,
             outer: Vec::new(),
             flattened: false,
+            zsuper: None,
         }
     }
 
@@ -277,6 +329,15 @@ impl Compiler {
             // A block sees the flattened scopes its parent saw. A method body
             // does not, which is what the barrier already says.
             compiler.flattened = parent.flattened;
+            // `super` inside a block forwards the *method's* arguments, one
+            // scope further out than the block's own locals. A method body
+            // takes none of this: `zsuper` stays `None` until its own
+            // parameters are bound, which is what makes `super` at the top
+            // level a refusal rather than a forward of nothing.
+            compiler.zsuper = parent.zsuper.clone().map(|mut z| {
+                z.depth += 1;
+                z
+            });
         }
         compiler
     }
@@ -407,6 +468,8 @@ impl Compiler {
             // `yield` is the same shape without a receiver: the block comes
             // from the frame.
             Insn::Yield(site) => 1 - self.site_operands(site, false),
+            // `super` too: the receiver is the frame's, never pushed.
+            Insn::Super(site) => 1 - self.site_operands(site, false),
         }
     }
 
@@ -693,6 +756,7 @@ impl Compiler {
 
             ExprKind::Def(def) => self.def_expr(def, span)?,
             ExprKind::Yield(node) => self.yield_expr(node, span)?,
+            ExprKind::Super(node) => self.super_expr(node, span)?,
             ExprKind::Lambda(block) => self.lambda(block, span)?,
             ExprKind::Return(value) => self.return_expr(value.as_deref(), span)?,
 
@@ -1879,6 +1943,12 @@ impl Compiler {
         let mut child = Compiler::nested(name, locals, self, barrier);
         child.is_lambda_body = lambda;
         child.params = child.lower_params(params, span)?;
+        // A method body is where a bare `super`'s argument list comes from. A
+        // block keeps the one it inherited in `nested`, because `super` inside
+        // one forwards the enclosing method's arguments, not the block's.
+        if barrier {
+            child.zsuper = Some(Zsuper::from_spec(&child.params));
+        }
         // Optional defaults are emitted first, each at a known instruction, so
         // the binder can enter the body at the first default it has to compute
         // and fall through the rest. The body proper starts after them.
@@ -2246,6 +2316,20 @@ impl Compiler {
             }
         }
 
+        self.attach_block(&mut site, block, span)?;
+        Ok(site)
+    }
+
+    /// Put a call's block on the site, compiling a literal one as a child.
+    ///
+    /// Shared by an ordinary call and by `super`, which takes the same three
+    /// shapes.
+    fn attach_block(
+        &mut self,
+        site: &mut CallSite,
+        block: Option<&BlockArg>,
+        span: Span,
+    ) -> Result<(), Unsupported> {
         match block {
             None => {}
             Some(BlockArg::Block(block)) => {
@@ -2267,7 +2351,7 @@ impl Compiler {
                 return Err(Unsupported::at("an anonymous block parameter", span));
             }
         }
-        Ok(site)
+        Ok(())
     }
 
     fn push_site(&mut self, mut site: CallSite, implicit_self: bool) -> u32 {
@@ -2282,6 +2366,75 @@ impl Compiler {
         let site = self.push_site(site, true);
         self.emit(Insn::Yield(site));
         Ok(())
+    }
+
+    /// `super`, `super(...)`, and `super()` (#187).
+    ///
+    /// Which method this resolves to is the frame's business — `alias` and
+    /// `define_method` can make the running method's name something no call
+    /// site wrote — so the site carries arguments only, the way `yield`'s does.
+    ///
+    /// The two forms differ in one thing: what is pushed.
+    ///
+    /// | written | pushed |
+    /// |---|---|
+    /// | `super(a, b)` | what the argument list says |
+    /// | `super()` | nothing |
+    /// | `super` | the enclosing method's parameter locals, read now |
+    fn super_expr(&mut self, node: &spinel_ast::Super, span: Span) -> Emit {
+        let site = match &node.args {
+            Some(args) => self.arguments("super", args, node.block.as_ref(), span)?,
+            None => self.zsuper_site(node.block.as_ref(), span)?,
+        };
+        let site = self.push_site(site, true);
+        self.emit(Insn::Super(site));
+        Ok(())
+    }
+
+    /// The argument list bare `super` forwards.
+    ///
+    /// Ordinary `GetLocal`s over the enclosing method's parameter slots, which
+    /// is what makes a reassigned parameter forward its new value:
+    ///
+    /// ```ruby
+    /// class B < A; def m(a); a = a * 10; super; end; end
+    /// B.new.m(1)  # A#m sees 10
+    /// ```
+    ///
+    /// A snapshot taken on entry would forward 1, and CRuby documents this as
+    /// the surprising half of the form. Reading the slots costs nothing extra
+    /// and gets it right by construction.
+    fn zsuper_site(&mut self, block: Option<&BlockArg>, span: Span) -> Result<CallSite, Unsupported> {
+        let Some(forward) = self.zsuper.clone() else {
+            // Not inside a method body, and not inside a block written in one.
+            // `super` there is a RuntimeError in Ruby, raised at run time; a
+            // compiler that cannot see the parameters cannot even build the
+            // call, so it says so.
+            return Err(Unsupported::at("`super` outside a method", span));
+        };
+        let mut site = CallSite {
+            name: self.symbol("super"),
+            argc: 0,
+            splats: Vec::new(),
+            keywords: Vec::new(),
+            block: BlockRef::None,
+            implicit_self: true,
+        };
+        for &(slot, is_rest) in &forward.positional {
+            self.emit(Insn::GetLocal(slot, forward.depth));
+            if is_rest {
+                site.splats.push(site.argc);
+            }
+            site.argc += 1;
+        }
+        for &(name, slot) in &forward.keywords {
+            self.emit(Insn::GetLocal(slot, forward.depth));
+            site.keywords.push(name);
+        }
+        // An explicit `&b` on a bare `super` is legal Ruby and overrides the
+        // implicit forwarding the interpreter does.
+        self.attach_block(&mut site, block, span)?;
+        Ok(site)
     }
 
     /// `-> { }`, which is a lambda: strict arity and a local `return`.

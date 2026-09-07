@@ -26,6 +26,12 @@ module Comparable
   end
 
   def clamp(low, high)
+    # Ruby checks the range before comparing self against it, so
+    # `1.clamp(3, 1)` raises whatever `self` is. Measured on ruby 4.0.6:
+    # "min argument must be less than or equal to max argument".
+    if (low <=> high) == 1
+      raise ArgumentError, "min argument must be less than or equal to max argument"
+    end
     return low if self < low
     return high if self > high
     self

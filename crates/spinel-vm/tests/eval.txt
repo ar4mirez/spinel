@@ -605,3 +605,34 @@ defined?($g_never_asked)  #=> nil
 ($g9 = [1]; $g9 << 2; $g9)  #=> [1, 2]
 ($g10 = 1; $g11 = $g10 + 1; [$g10, $g11])  #=> [1, 2]
 defined?($~)  #=> "global-variable"
+
+# ------------------------------------------------------------------- super
+# The lookup order, which is the whole of #187: `super` starts one step past
+# the class the running method was found on, in the *receiver's* ancestor
+# chain. A method a module defines is the case a "start at the superclass"
+# implementation gets wrong, so it is measured rather than reasoned about.
+#
+# Distinct class names per row, for the reason the globals rows have distinct
+# names: the oracle shares one CRuby process across every row.
+(class SA1; def m; 1; end; end; class SB1 < SA1; def m; super + 1; end; end; SB1.new.m)  #=> 2
+(module SM2; def m; "M" + super; end; end; class SA2; def m; "A"; end; end; class SB2 < SA2; include SM2; def m; "B" + super; end; end; SB2.new.m)  #=> "BMA"
+(module SM3; def m; "M" + super; end; end; class SA3; def m; "A"; end; end; class SB3 < SA3; include SM3; end; SB3.new.m)  #=> "MA"
+(class SA4; def m; "A"; end; end; module SM4; def m; "M" + super; end; end; class SB4 < SA4; prepend SM4; def m; "B"; end; end; SB4.new.m)  #=> "MB"
+(class SA5; def m(a); a * 2; end; end; class SB5 < SA5; def m(a); super(a + 1); end; end; SB5.new.m(1))  #=> 4
+(class SA6; def m(a, b = 2); [a, b]; end; end; class SB6 < SA6; def m(a, b = 2); super; end; end; SB6.new.m(1))  #=> [1, 2]
+# zsuper forwards the parameter locals as they stand *now*, reassignments
+# included — the half CRuby documents as surprising.
+(class SA7; def m(a); a; end; end; class SB7 < SA7; def m(a); a = a * 10; super; end; end; SB7.new.m(1))  #=> 10
+(class SA8; def m(*r); r; end; end; class SB8 < SA8; def m(*r); super; end; end; SB8.new.m(1, 2))  #=> [1, 2]
+(class SA9; def m(a, *r, z); [a, r, z]; end; end; class SB9 < SA9; def m(a, *r, z); super; end; end; SB9.new.m(1, 2, 3, 4))  #=> [1, [2, 3], 4]
+(class SAa; def m(k: 1); k; end; end; class SBa < SAa; def m(k: 1); super; end; end; SBa.new.m(k: 5))  #=> 5
+# `super()` passes nothing; `super` passes everything.
+(class SAb; def m(a = :d); a; end; end; class SBb < SAb; def m(a = :d); super(); end; end; SBb.new.m(1))  #=> :d
+# The block is forwarded implicitly by both spellings.
+(class SAc; def m; yield 1; end; end; class SBc < SAc; def m; super; end; end; SBc.new.m { |x| x + 1 })  #=> 2
+(class SAd; def m; yield 1; end; end; class SBd < SAd; def m; super(); end; end; SBd.new.m { |x| x + 1 })  #=> 2
+(class SAe; def m; block_given?; end; end; class SBe < SAe; def m; super(&nil); end; end; SBe.new.m { 1 })  #=> false
+# `super` inside a block forwards the enclosing *method's* arguments.
+(class SAf; def m(a); a; end; end; class SBf < SAf; def m(a); [1].map { super }; end; end; SBf.new.m(7))  #=> [7]
+# Through `new`, which reaches `initialize` off the native path.
+(class SAg; def initialize(*a); @a = a; end; attr_reader :a; end; class SBg < SAg; def initialize(*a); super(*a); end; end; SBg.new(1, 2).a)  #=> [1, 2]
