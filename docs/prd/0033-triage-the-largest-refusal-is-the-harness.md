@@ -154,6 +154,11 @@ filed, which changed two of them:
 | 5 | an anonymous block parameter | #233 | |
 | 4 | `alias` on a global variable | #234 | |
 
+Three of those were then triaged out of Phase 1 by their own analysis — #222
+waits on `Encoding`, #223 on `Process::Status`, #227 on `Rational`/`Complex` —
+because a Phase 1 list holding work Phase 1 cannot finish is the same shape of
+mistake #220 was filed about.
+
 Two rows were mis-stated by their own reason string, which is the same failure
 as the 310 in miniature:
 
@@ -199,7 +204,8 @@ delta is that the ranking now says which subsystem owns its largest row.
 - [x] A regression test asserts both strings against the shapes that produce them
 - [x] No example that passed before stopped passing
 - [x] Every filed row was reproduced as a plain `.rb` file first
-- [x] The milestone question is answered on #220
+- [x] The milestone question is answered on #220, and the measurement recorded in
+      `docs/roadmap.md` beside the target it gates
 
 ### Left for later
 

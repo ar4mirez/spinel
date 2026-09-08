@@ -26,6 +26,15 @@ Every bullet below is tracked as a GitHub issue, one milestone per phase: [miles
 
 **Milestone:** `language/` passes above 90%.
 
+**Gated, measured at 2256272 (#220).** `language/` is at 1312 / 2735 = 48%, and
+only 32% of what blocks the rest is owned by this phase. Fixing every one of the
+438 engine-owned blockers lands at 1750 / 2735 = **64%**; reaching 90% needs
+#145 (mspec on Spinel, 30% of the blockers) and #39 (`require`, with the fixture
+constants behind it, 16%), which are Phase 2 and Phase 3 work. So the target is
+not reachable from inside this phase, and the open issue list here should be read
+as the engine ceiling rather than as the milestone. Whether the target moves to
+Phase 2 or is restated at the ceiling is open on #220.
+
 ## Phase 2: core library
 
 One slice per class, each driven by `core/<class>/`: `Integer`, `Float`, `String` and `Encoding` (UTF-8/US-ASCII/binary), `Symbol`, `Array`, `Hash`, `Range`, `Comparable`, `Enumerable`, `Enumerator` (needs fibers), `Proc`/`Method`/`UnboundMethod`, `Module`/`Class` reflection (`define_method`, `instance_eval`, `method_missing`, hooks), `Exception` hierarchy with `caller_locations`, `Struct`, `Data`, `Time` (primitive clock), full `Regexp`/`MatchData`, `Rational`/`Complex` (Ruby), `Math`, `GC`/`ObjectSpace` with `WeakMap`, `WeakRef`, and finalizers, `Marshal`.
