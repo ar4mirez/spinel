@@ -84,6 +84,24 @@ the unit ruby/spec is organised in — 126 rows, one screen.
 `README.md` lost its hand-typed pass counts in the same change. They were already
 stale and rule 7 forbids them; the file now points at the table.
 
+### The table has to name a platform, which CI found and the laptop could not
+
+The first CI run failed the new staleness job, and the reason is the interesting
+part: ruby/spec's `platform_is` guards are answered against the *host*, so the
+same corpus reports a different split on `darwin` and on `linux` — 21,553 blocked
+and 1,913 skipped here, 21,547 and 1,919 there. Six examples, enough to make a
+committed file disagree with its own check forever.
+
+Generated-and-diffed only works if the generator is deterministic across the
+machines that run it, and this one was not. `--platform` pins it; the script
+passes `linux`, because that is where the CI job runs, and the file says so in
+its own header so nobody wonders why their laptop disagrees. A plain
+`scripts/spec.sh` still answers for the machine you are on, which is what someone
+debugging locally wants.
+
+Worth noting that no amount of local testing would have found this: it needed two
+platforms, which is what CI is.
+
 ### `return` in a `class << obj` body: the issue's second bullet was wrong
 
 The issue says a plain `class` body's `return` "stays a `LocalJumpError`".
