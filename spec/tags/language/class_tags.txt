@@ -1,1 +1,0 @@
-fails(#204: `return` inside a `class << obj` body ends the body and lets the enclosing method carry on, where Ruby returns from the method. A non-local return through a frame kind that does not take part in the unwind yet):A class definition extending an object (sclass) can use return to cause the enclosing method to return

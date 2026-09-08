@@ -953,3 +953,25 @@ def r213g; o = Object.new; def o.to_a; [1, 2]; end; return *o; end; r213g  #=> [
 def y213; yield; end; y213 { next *[1] }  #=> [1]
 def y213b; yield; end; y213b { next *[] }  #=> []
 def y213c; yield; end; y213c { next *[1, 2] }  #=> [1, 2]
+
+# ------------------- `return` in a singleton class body (#204)
+#
+# A `class << obj` body is transparent to `return`: it leaves the enclosing
+# method, not the body. Measured every way in: written in the body, reached
+# through a block or a `proc` inside it, and through a nested singleton body.
+#
+# Two shapes deliberately do *not* return from the method. A `def` inside the
+# body has its own `return`, and the body's value when nothing returns is still
+# the body's — a singleton body is transparent to `return`, not to everything.
+#
+# `return` written in a plain `class`/`module` body is not here: Prism refuses
+# it before the VM sees it — "Invalid return in class/module body" — and so does
+# Ruby. Reached through a block at the top level it is a `LocalJumpError`, which
+# is `tests/eval.rs`'s to check because this table's snippets must not raise.
+def sc1; class << Object.new; return :i; end; :o; end; sc1  #=> :i
+def sc2; x = (class << Object.new; 42; end); [x, :o]; end; sc2  #=> [42, :o]
+def sc3; class << Object.new; [1].each { return :i }; end; :o; end; sc3  #=> :i
+def sc4; class << Object.new; proc { return :i }.call; end; :o; end; sc4  #=> :i
+def sc5; class << Object.new; def self.f; return :f; end; end; :o; end; sc5  #=> :o
+def sc6; class << Object.new; class << Object.new; return :deep; end; end; :o; end; sc6  #=> :deep
+def sc7; [1].each { class << Object.new; return :i; end }; :o; end; sc7  #=> :i
