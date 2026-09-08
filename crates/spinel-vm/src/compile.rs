@@ -1762,10 +1762,32 @@ impl Compiler {
             ));
         };
 
-        debug_assert_eq!(
-            self.depth, base_depth,
-            "a jump out of a loop would leave a value behind"
+        // A `break` or `next` can sit inside a *partially evaluated* expression,
+        // and whatever that expression had already pushed is still on the stack:
+        //
+        //     while c
+        //       a[1] += (break if c; c = false)
+        //     end
+        //
+        // has the old `a[1]` under the jump, and `x += (break)` has the old `x`.
+        // The expression is abandoned, so those values are dropped here rather
+        // than left for the loop's end to inherit. Without this the jump leaves
+        // the stack one deep per abandoned operand — and only `Insn::Goto`
+        // truncates, so a loop with no `ensure` over it kept them at run time.
+        //
+        // Not an assertion. This used to be `debug_assert_eq!(self.depth,
+        // base_depth)`, which held only because every expression that pushes
+        // before its operand — a compound assignment — was refused for some
+        // other reason; `language/while_spec.rb` has eight examples of the
+        // shape and they all became reachable at once.
+        debug_assert!(
+            self.depth >= base_depth,
+            "a jump out of a loop cannot start below the loop's own depth"
         );
+        let entry = self.depth;
+        for _ in 0..(entry - base_depth) {
+            self.emit(Insn::Pop);
+        }
 
         if is_break {
             match value {
@@ -1793,6 +1815,13 @@ impl Compiler {
         // value for the statement list containing it, and keeping that true
         // keeps the depth arithmetic uniform for the code after the loop.
         self.emit(Insn::PushNil);
+        // And it must leave it *where the expression started*, not at the
+        // loop's base: the operands dropped above are gone at run time, but the
+        // code that follows this one is unreachable and the surrounding
+        // expression — an `if` whose other arm ran normally — still has them.
+        // Modelling the drop here would make the two arms disagree about a
+        // stack neither of them reaches.
+        self.depth = entry + 1;
         Ok(())
     }
 

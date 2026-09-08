@@ -1,6 +1,8 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
+require "set"
+
 # The anti-false-pass check.
 #
 # A spec runner's pass count is only worth anything if a pass means what it says.
@@ -128,12 +130,29 @@ end
 # `$LOAD_PATH` (#39), and `spec_helper.rb` reaching for mspec raises `LoadError`
 # here. Both mean the same thing — the example stays blocked in Spinel — so a
 # fixture that will not load is skipped rather than fatal.
+#
+# **Depth first, and transitively**, because `loader.rs` is: it walks what a
+# fixture itself requires before running the fixture's body, which is the order
+# Ruby gives it. Scanning only the spec file's own `require_relative` lines is
+# one level shallower than the harness, and the difference is not theoretical —
+# `core/range/case_compare_spec.rb` requires `shared/cover`, which requires
+# `fixtures/classes`, which is where `RangeSpecs` lives. Spinel loaded it and
+# passed the example; this script did not and reported a false pass against a
+# `NameError` of its own making.
 REQUIRE_RELATIVE = /^\s*require_relative\s+(["'])(.+?)\1/
-def load_fixtures(path)
+def load_fixtures(path, seen = Set.new)
+  seen << File.expand_path(path)
   File.binread(path).force_encoding("UTF-8").scan(REQUIRE_RELATIVE) do |_quote, target|
     fixture = File.expand_path(target, File.dirname(path))
     fixture += ".rb" unless fixture.end_with?(".rb")
     next unless File.file?(fixture)
+    # A diamond must not define anything twice and a cycle must not recurse
+    # for ever. One set covers both, exactly as `loader.rs`'s does.
+    next unless seen.add?(fixture)
+
+    # Depth first: what this fixture requires has to be defined before its own
+    # body runs.
+    load_fixtures(fixture, seen)
 
     begin
       # A fixture that gives up writes to stderr on the way out — `spec_helper`

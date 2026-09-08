@@ -348,8 +348,9 @@ Every refusal this PRD names is gone from the ranking:
    8  a class variable is not compiled yet                       → 0
 ```
 
-`scripts/verify-passes.rb` re-ran the 1220 claimed passes it covers on ruby
-4.0.6: all agree. `scripts/eval-oracle.rb --check` and
+`scripts/verify-passes.rb` re-ran **all 2051** claimed passes on ruby 4.0.6:
+all agree. It covered 1220 before — the gap was a bug in the script, fixed here
+and described below. `scripts/eval-oracle.rb --check` and
 `scripts/regexp-oracle.rb --check` both agree. `bench/method_cache.rs` is
 unchanged where #199 touched it — a cached lookup is 8.0ns and an inline-cache
 hit 3.0ns on both sides, because asking a class for its representation is one
@@ -367,6 +368,48 @@ two ivars and nothing else. The object was not a `Proc` — calling it would hav
 read past its end. It now refuses, along with `Proc.new` itself, which is the
 honest answer and what #199's third bullet asks for. A pass that measured a
 wrong answer became a blocked example that measures a missing one.
+
+### Two bugs CI found that a release build cannot
+
+Both were pre-existing, and both were reached for the first time by this
+branch. Neither shows up in `cargo test --release`.
+
+**A `break` inside a partially-evaluated expression left its operands on the
+stack.** `compile.rs` asserted `self.depth == base_depth` on the way out of a
+loop, which held only because every expression that pushes *before* its operand
+— a compound assignment — was refused for some other reason:
+
+```ruby
+while c
+  a[1] += (break if c; c = false)
+end
+```
+
+`language/while_spec.rb` has eight examples of that shape and #191 made all
+eight reachable at once. The assertion is a `debug_assert`, so it panicked the
+harness under `cargo test` and was invisible under `--release` — and the
+underlying bug is real either way: only `Insn::Goto` truncates the stack, so a
+loop with no `ensure` over it kept the abandoned operands at run time. The jump
+now drops them, and the compiler's linear depth model continues from where the
+expression started rather than from the loop's base, because the surrounding
+`if`'s other arm still has them.
+
+`x += (break)` with a plain local reproduces it on `main`, which is how it was
+confirmed pre-existing rather than introduced here.
+
+**`scripts/verify-passes.rb` was one level shallower than the harness.**
+`loader.rs` walks `require_relative` *transitively, depth first*; the script
+scanned only the spec file's own lines. `core/range/case_compare_spec.rb`
+requires `shared/cover`, which requires `fixtures/classes`, which is where
+`RangeSpecs` lives — so Spinel loaded it and passed the example while the script
+re-ran it without the fixture and reported a false pass against a `NameError` of
+its own making. It became reachable when `alias :== :eql?` in that fixture
+started compiling.
+
+The script now walks the same graph with the same diamond-and-cycle set, and the
+coverage it gains is the point: it verifies **2051** examples where it verified
+1220, so every pass this PR claims is re-run on real Ruby rather than four in
+five of them.
 
 ### Class variables were needed, and were not in any issue
 
