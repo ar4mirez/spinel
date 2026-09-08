@@ -1277,6 +1277,28 @@ pub fn eval_in(
                     stack.push(bool_value(matched));
                 }
 
+                Insn::CheckMatchAny => {
+                    let list = stack.pop().expect("a rescue class list on the stack");
+                    let exception = *stack.last().expect("an exception to match against");
+                    let mut matched = false;
+                    // Rooted and read one element at a time rather than collected:
+                    // `exception_matches` can allocate, and a `Value` held across
+                    // an allocation is exactly what the handle discipline is for.
+                    let list = scope.root(list);
+                    // In order, and stopping at the first hit. `exception_matches`
+                    // raises the `TypeError` for a non-`Module`, so stopping early
+                    // is also what keeps `rescue RuntimeError, *[42]` from raising
+                    // one when the `RuntimeError` already matched (measured).
+                    for index in 0..array_len(scope, list) {
+                        let class = array_get(scope, list, index);
+                        if exception_matches(scope, exception, class)? {
+                            matched = true;
+                            break;
+                        }
+                    }
+                    stack.push(bool_value(matched));
+                }
+
                 Insn::EnterEnsure => {
                     let value = stack.pop().unwrap_or(Value::NIL);
                     frames[top].parked.push(Parked::Value(value));
@@ -2780,9 +2802,31 @@ fn open_class(
     let symbols = body.link();
     let cache_base = scope.call_caches_mut().base(&body);
     *ids += 1;
+    // Which frame a `return` written in this body leaves.
+    //
+    // A `class`/`module` body is its own target, and Prism refuses a `return`
+    // written directly in one — "Invalid return in class/module body" — so this
+    // only ever answers a `return` reached through a block, where Ruby's answer
+    // is `LocalJumpError`. It is its own id for the same reason it always was:
+    // homing it outward would walk into the enclosing method instead.
+    //
+    // A `class << obj` body is *transparent* instead: `return` in one leaves the
+    // enclosing method, so it inherits whatever its opener would have returned
+    // from. Measured on ruby 4.0.6 — directly in the body, from a block or a
+    // `proc` inside it, and through a nested singleton body, all four return
+    // from the method (#204).
+    //
+    // Except at the top level, where there is no method to leave and Ruby raises
+    // `LocalJumpError` rather than ending the script. `home: 0` names no frame,
+    // which is how `break` outside a block already says the same thing.
+    let home = match def.kind {
+        DefKind::Singleton if frames[top].home != frames[0].id => frames[top].home,
+        DefKind::Singleton => 0,
+        _ => *ids,
+    };
     let links = Links {
         id: *ids,
-        home: *ids,
+        home,
         breaks: 0,
         // A class body starts public every time it is entered, which is why
         // reopening a class after a bare `private` is public again.
@@ -2806,11 +2850,11 @@ fn open_class(
         pc: 0,
         base: stack.len(),
         keeps_receiver: false,
-        // A class body is its own `return` target, like a method: `return` in
-        // one is a LocalJumpError in Ruby, and homing it here keeps the
-        // unwinder from walking out into the enclosing method instead.
+        // Where a `return` in this body goes — see `links` above, which is the
+        // one place that decides it. A `class`/`module` body is its own target;
+        // a `class << obj` body is transparent and inherits its opener's.
         id: links.id,
-        home: links.id,
+        home: links.home,
         breaks: 0,
         tag: None,
         rescued: None,

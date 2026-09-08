@@ -1,2 +1,0 @@
-fails(#205: `\k<0>` names the whole match rather than a group and Ruby refuses the pattern at compile time; spinel-regex accepts it. Became visible rather than blocked when #189 gave `Regexp.new` a String operand):Regexps with back-references 0 is not a valid backreference
-fails(#205: one named group makes every numeric backreference in the pattern a RegexpError, including one referring to an unnamed group declared earlier. spinel-regex does not enforce it):Regexps with back-references named capture groups invalidate numeric backreferences

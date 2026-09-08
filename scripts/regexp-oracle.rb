@@ -48,7 +48,16 @@ EXTRA = [
   '(?<n>a)\k<n>', 'foo\Z', 'foo\z', '\Afoo', '^bar', 'foo$',
   # #177: the two halves of the capture-restore rule, and two shapes that
   # separate them.
-  '^(()|a)*?$', '(?:(a)x|ab)', '((a)x|a)*', '^((())|a)*?$'
+  '^(()|a)*?$', '(?:(a)x|ab)', '((a)x|a)*', '^((())|a)*?$',
+  # #205: the two dialect rules the compiler has to enforce, and the shapes
+  # that bound them. `\k<0>` names the whole match rather than a group, and one
+  # named group anywhere makes every numeric backreference an error — before it
+  # as well as after, and for an unnamed group declared earlier. The last four
+  # are the ones Ruby still *accepts* with a named group present, so a check
+  # written too broadly fails here rather than in a spec months later.
+  '\k<0>', '(?<a>a)\1', '(?<a>a)\k<1>', '(a)(?<a>a)\1', '(a)(?<a>a)\k<1>',
+  '(a)\1(?<b>b)', '\1(?<a>a)', '(?<a>a)(?:\1)',
+  '(?<a>a)[\1]', '(?<a>a)\0', '(?<a>a)\10', '(a)\k<1>'
 ].freeze
 
 # Patterns whose *meaning* is fine but whose timing is not: Ruby answers a

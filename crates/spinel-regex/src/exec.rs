@@ -315,6 +315,13 @@ impl Compiler {
 /// ponytail: the captures are cloned once per iteration. Onigmo tracks only
 /// the groups that live inside the loop; narrow this the same way if a real
 /// pattern ever makes it the hot path.
+///
+/// Measured, and it is not the hot path yet — `bench/regex_captures.rs`, #184.
+/// The whole capture machinery, clone included, is 11% of a three-group match
+/// and 31% of the worst nine-group one; the same engine is 27x slower than
+/// `ruby --yjit` on that pattern for reasons this clone is not. Narrowing it
+/// buys back at most a third of a number that is off by more than an order of
+/// magnitude elsewhere.
 #[derive(Clone)]
 struct Mark {
     sp: usize,
@@ -467,7 +474,8 @@ impl Program {
                             // per iteration. Onigmo instead pushes a restore
                             // record only for the groups that need one; narrow it
                             // the same way if a real pattern makes this the hot
-                            // path.
+                            // path. Measured and deferred with the clone above —
+                            // see `bench/regex_captures.rs` and #184.
                             if let Some(mark) = &marks[*slot] {
                                 for entry in stack.iter_mut().skip(mark.depth) {
                                     entry.saves.clone_from(&saves);
@@ -753,14 +761,44 @@ fn perl_matches(kind: Perl, c: char) -> bool {
     }
 }
 
+// The six brackets whose meaning is a union of Unicode general categories, as
+// sorted range tables generated from the measured `tests/posix.txt`.
+//
+// `char`'s predicates cannot express them: they are unions Rust chose for
+// Rust's purposes, and Onigmo's are different ones — `Nd` alone rather than
+// `Nd + Nl + No`, `P*` rather than "not anything else", "assigned minus `C*`"
+// rather than "not a control". See `build.rs` for why this is generated from a
+// measurement rather than taken from a Unicode-tables crate (#180).
+include!(concat!(env!("OUT_DIR"), "/posix_tables.rs"));
+
+/// Whether a sorted, disjoint range table contains `c`.
+fn in_ranges(ranges: &[(u32, u32)], c: char) -> bool {
+    let c = c as u32;
+    ranges
+        .binary_search_by(|&(low, high)| {
+            if c < low {
+                std::cmp::Ordering::Greater
+            } else if c > high {
+                std::cmp::Ordering::Less
+            } else {
+                std::cmp::Ordering::Equal
+            }
+        })
+        .is_ok()
+}
+
 /// The POSIX brackets, which unlike the shorthands *are* Unicode-aware — the
-/// same divergence in the other direction. Built on `char`'s own tables, so
-/// they cost no dependency.
+/// same divergence in the other direction.
+///
+/// Eight of the fourteen are exact on `char`'s own predicates and stay there:
+/// cheaper than a binary search, and #178's audit measured them as agreeing on
+/// every one of the 1,114,112 scalar values. The other six are the tables
+/// above, because the unions Onigmo means are not ones `char` exposes.
 fn posix_matches(kind: Posix, c: char) -> bool {
     match kind {
         Posix::Alpha => c.is_alphabetic(),
-        Posix::Digit => c.is_numeric(),
-        Posix::Alnum => c.is_alphanumeric(),
+        Posix::Digit => in_ranges(DIGIT, c),
+        Posix::Alnum => in_ranges(ALNUM, c),
         Posix::Upper => c.is_uppercase(),
         Posix::Lower => c.is_lowercase(),
         Posix::Space => c.is_whitespace(),
@@ -776,18 +814,13 @@ fn posix_matches(kind: Posix, c: char) -> bool {
                         ..='\u{200a}' | '\u{202f}' | '\u{205f}' | '\u{3000}'
                 )
         }
-        Posix::Print => !c.is_control(),
-        Posix::Graph => !c.is_control() && !c.is_whitespace(),
+        Posix::Print => in_ranges(PRINT, c),
+        Posix::Graph => in_ranges(GRAPH, c),
         Posix::Cntrl => c.is_control(),
         Posix::XDigit => c.is_ascii_hexdigit(),
-        Posix::Word => c.is_alphanumeric() || c == '_',
+        Posix::Word => in_ranges(WORD, c),
         Posix::Ascii => c.is_ascii(),
-        // ponytail: ASCII punctuation plus "not anything else", which is the
-        // shape of Unicode's P* without carrying the table for it.
-        Posix::Punct => {
-            c.is_ascii_punctuation()
-                || (!c.is_ascii() && !c.is_alphanumeric() && !c.is_whitespace() && !c.is_control())
-        }
+        Posix::Punct => in_ranges(PUNCT, c),
     }
 }
 
@@ -844,33 +877,24 @@ mod posix_oracle {
     /// The brackets that still answer differently from CRuby, with the exact
     /// number of codepoints each is wrong about, and why.
     ///
-    /// All six are the same failure: `posix_matches` is built on `char`'s
-    /// predicates, and Rust's unions of Unicode general categories are not
-    /// Onigmo's. `Nd`, `M*`, `Pc`, `P*` and "assigned" are not reachable from
-    /// `std`, so closing these needs a table from somewhere — which is a
-    /// dependency decision rather than a session's, and is #180.
+    /// Empty since #180. All six entries that used to be here were the same
+    /// failure — `posix_matches` was built on `char`'s predicates, and Rust's
+    /// unions of Unicode general categories are not Onigmo's — and all six were
+    /// closed at once by generating range tables from this very file.
+    ///
+    /// Which makes the replay below partly a tautology, and it is worth saying
+    /// so plainly: six of the fourteen brackets are now checked against the
+    /// table they were generated from. The oracle that still bites is
+    /// `scripts/regexp-oracle.rb --check`, which CI runs against a live CRuby —
+    /// if Ruby's answer moves, `posix.txt` moves, the generated tables move with
+    /// it, and this test goes on passing because the engine followed. What this
+    /// test still catches on its own is the other eight, which are `char`
+    /// predicates and could drift with a Rust upgrade.
     ///
     /// Nothing is added here to make a run green. The list is printed on every
     /// run, and the test fails if an entry is stale as well as if a new
     /// disagreement appears: a bracket that has been fixed has to leave.
-    const KNOWN_DIVERGENCES: &[(&str, usize)] = &[
-        // In `posix.txt`'s own order, which is the order the test walks.
-        //
-        // `is_numeric` is Nd+Nl+No; Onigmo's digit is Nd alone.
-        ("digit", 1154),
-        // `is_alphanumeric` inherits that, so alnum is wrong wherever digit is.
-        ("alnum", 915),
-        // `!is_control` says an unassigned codepoint is printable. Ruby does
-        // not, and most of Unicode's space is unassigned.
-        ("print", 814732),
-        ("graph", 814730),
-        // Onigmo's word is Alphabetic + M* + Nd + Pc. Marks are the ones the
-        // engine misses; No and Nl are the ones it adds.
-        ("word", 2089),
-        // Onigmo's punct is P*. The engine's "not anything else" catches every
-        // symbol and every unassigned codepoint too.
-        ("punct", 962009),
-    ];
+    const KNOWN_DIVERGENCES: &[(&str, usize)] = &[];
 
     #[test]
     fn every_bracket_agrees_with_cruby_on_every_codepoint() {

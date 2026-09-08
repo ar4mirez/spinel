@@ -355,3 +355,32 @@ jobs:
             echo "::error::language/ has $failed failing example(s): a real disagreement with Ruby"
             exit 1
           fi
+
+  status:
+    name: spec status table
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: status
+
+      # The progress bar is regenerated, not checked against a rule: if the
+      # committed table is not what a run produces today, the diff says which
+      # directory moved and by how much. That is also the reconciliation — the
+      # rows and the total come out of one run, and the script asserts they add
+      # up before it writes anything.
+      - name: Regenerate bench/spec-status.md
+        run: ./scripts/spec-status.sh
+
+      - name: Fail if the committed table is stale
+        run: |
+          if ! git diff --exit-code -- bench/spec-status.md; then
+            echo "::error::bench/spec-status.md is stale — run scripts/spec-status.sh and commit the result"
+            exit 1
+          fi

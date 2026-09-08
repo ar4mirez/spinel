@@ -368,3 +368,42 @@ fn pattern_matching_protocols_and_raises() {
         Ok("1".to_owned())
     );
 }
+
+/// `return` through a singleton class body, in the two shapes `eval.txt` cannot
+/// hold: one that raises, and one Prism refuses before the VM sees it (#204).
+///
+/// The seven shapes that answer a value are in the table, measured. These two
+/// are here because the table's snippets must not raise.
+#[test]
+fn return_through_a_singleton_class_body_needs_a_method_to_leave() {
+    // A `class << obj` body is transparent to `return`, so at the top level the
+    // `return` walks out and finds no method. Ruby: `unexpected return
+    // (LocalJumpError)`, measured on 4.0.6. Reached through a block, because a
+    // `return` written directly in the body does not parse — see below.
+    let error = eval("o = Object.new; class << o; [1].each { return }; end")
+        .expect_err("no method to return from");
+    assert!(
+        error.contains("LocalJumpError") || error.contains("unexpected return"),
+        "Ruby raises LocalJumpError rather than ending the script: {error}"
+    );
+
+    // Written directly in a class, module, or singleton body at the top level,
+    // `return` is a parse error in Ruby and in Prism, so it never reaches the
+    // VM. Asserted here so the reason this case is missing from the table is
+    // recorded rather than assumed.
+    for source in [
+        "class RSC; return; end",
+        "module RSM; return; end",
+        "o = Object.new; class << o; return; end",
+    ] {
+        let parsed = spinel_parse::parse_file("(eval)", source.as_bytes());
+        assert!(
+            parsed
+                .errors
+                .iter()
+                .any(|e| e.message.contains("Invalid return in class/module body")),
+            "{source:?} should not parse: {:?}",
+            parsed.errors
+        );
+    }
+}

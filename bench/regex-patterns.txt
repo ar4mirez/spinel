@@ -1,0 +1,13 @@
+# Patterns for `bench/regex_captures.rs` and `scripts/bench.sh --ruby`.
+#
+# Both read this file so the two engines are timed on exactly the same work:
+# a pattern written out twice, once per language, drifts the moment one is
+# edited, and a benchmark whose two sides measure different things is worse
+# than none.
+#
+# One per line: name, tab, pattern, tab, subject. No escaping — the bytes
+# between the tabs are the pattern and the subject as they stand.
+date	^(\d{4})-(\d{2})-(\d{2})$	2026-09-08
+log line	^(\S+) (\S+) (\S+) \[([^\]]+)\] "(\S+) (\S+) (\S+)" (\d+) (\d+)$	127.0.0.1 - frank [10/Oct/2000:13:55:36 -0700] "GET /a HTTP/1.0" 200 2326
+nested alternation	^((foo|bar|baz)+)(qux|quux)$	foofoobarbazquux
+email-ish	^([^@\s]+)@([^@\s]+)\.([a-z]{2,})$	a.b@example.com

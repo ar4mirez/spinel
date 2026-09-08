@@ -277,6 +277,18 @@ pub enum Insn {
     /// its own class against the same one, and the handler ends by either
     /// binding it or re-raising it.
     CheckMatch,
+    /// Pops an array of classes and peeks the exception beneath it; pushes
+    /// whether the exception is an instance of *any* of them.
+    ///
+    /// What `rescue *classes` compiles to. A splat contributes a number of
+    /// classes known only at run time, so it cannot be the straight line of
+    /// `CheckMatch`es a literal list is. The array is built by the ordinary
+    /// array-literal path, which is what gives the splat its `to_a` conversion.
+    ///
+    /// Left to right and stopping at the first hit, because that is where a
+    /// `TypeError` for a non-`Module` is raised: `rescue RuntimeError, *[42]`
+    /// catches a `RuntimeError` and never looks at the 42 (measured).
+    CheckMatchAny,
 
     /// Push one of the regexp special variables, read off the last match.
     ///

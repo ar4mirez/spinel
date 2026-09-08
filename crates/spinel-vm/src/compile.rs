@@ -515,7 +515,9 @@ impl Compiler {
             | Insn::GotoValue(_, _) => 0,
             // Pops the class it was handed and pushes the answer; the exception
             // it matched against stays where it was for the next clause.
-            Insn::CheckMatch => 0,
+            // Both pop their operand and push a boolean, leaving the exception
+            // they peeked at where it was.
+            Insn::CheckMatch | Insn::CheckMatchAny => 0,
             // Parks the protected body's value on the frame...
             Insn::EnterEnsure => -1,
             // ...and puts it back when the `ensure` body is done.
@@ -1882,8 +1884,20 @@ impl Compiler {
         for clause in clauses {
             let mut entries = Vec::with_capacity(clause.conditions.len());
             for condition in &clause.conditions {
+                // Deliberately still refused after #215 gave `rescue *classes`
+                // its answer, and named apart from it so the ranking does not
+                // read the two as one slice. `rescue` matches with
+                // `exception_matches`, which is an ancestor walk the
+                // interpreter can do inside one instruction; `when` matches
+                // with `===`, which is a Ruby method a subject's class may
+                // override, and a send needs a frame. So `when *values` wants a
+                // compiled loop over the array rather than a `CaseEqAny`
+                // twin of `CheckMatchAny` — a different slice, 12 examples.
                 if matches!(condition.kind, ExprKind::Splat(_)) {
-                    return Err(Unsupported::at("a splat in `when`", condition.span));
+                    return Err(Unsupported::at(
+                        "a splat in `when`, which needs a compiled loop because `===` is a send",
+                        condition.span,
+                    ));
                 }
                 if subject {
                     self.emit(Insn::Dup);
@@ -3835,19 +3849,25 @@ impl Compiler {
                 hits.push(self.emit_jump(Insn::JumpIf));
             } else {
                 for exception in &clause.exceptions {
-                    // `rescue *classes` is a run-time number of `CheckMatch`es,
-                    // which this straight line of them cannot be. A different
-                    // construct from #213's splat-as-an-exit-value, and named
-                    // as one so the ranking says which is left — the same shape
-                    // `when` is refused in above.
+                    // `rescue *classes` contributes a number of classes known
+                    // only at run time, so it cannot be one `CheckMatch` in this
+                    // straight line. It becomes the one-element array literal
+                    // `[*classes]` and a `CheckMatchAny` over it — which is
+                    // where the splat's `to_a` conversion comes from, since it
+                    // is the array literal's own and not a rule invented here
+                    // (#215).
+                    //
+                    // Still one step in the line, rather than the whole list
+                    // becoming one array: Ruby tests the elements left to right
+                    // and stops at the first match, so `rescue A, *rest` does
+                    // not evaluate `rest` at all when `A` matched. Measured.
                     if matches!(exception.kind, ExprKind::Splat(_)) {
-                        return Err(Unsupported::at(
-                            "a splat in a `rescue` list",
-                            exception.span,
-                        ));
+                        self.array_literal(std::slice::from_ref(exception), exception.span)?;
+                        self.emit(Insn::CheckMatchAny);
+                    } else {
+                        self.expr(exception)?;
+                        self.emit(Insn::CheckMatch);
                     }
-                    self.expr(exception)?;
-                    self.emit(Insn::CheckMatch);
                     hits.push(self.emit_jump(Insn::JumpIf));
                 }
             }

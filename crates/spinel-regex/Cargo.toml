@@ -11,3 +11,11 @@ repository.workspace = true
 
 [lints]
 workspace = true
+
+# `bench/` at the repo root, per CLAUDE.md, for the reason `spinel-vm` gives:
+# the benchmarks describe the engine rather than one crate, and this one is
+# compared against system `ruby --yjit`.
+[[bench]]
+name = "regex_captures"
+path = "../../bench/regex_captures.rs"
+harness = false
