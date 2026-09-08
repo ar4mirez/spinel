@@ -209,6 +209,13 @@ pub enum Native {
     },
     /// `Module#name`, `Module#to_s` — reads the class table.
     ModuleName,
+    /// `Module#private_constant` — marks names in the module's own constant
+    /// table invisible to a qualified reference (#185).
+    ///
+    /// A primitive because the visibility it records is read by the constant
+    /// lookup, which is the class table's own walk and not something Ruby code
+    /// can reach.
+    PrivateConstant,
     /// `Object#hash` — a fixnum that is equal whenever `==` is.
     ///
     /// Content for a `String` and an `Array`, identity for everything else,

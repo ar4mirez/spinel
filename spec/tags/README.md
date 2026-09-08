@@ -77,14 +77,20 @@ fix is a different slice. The reason says which slice, by number.
 
 ## What is here now
 
-Seventeen tags across thirteen files. Every one names the open issue that closes
-it: fibers (#16, #26), `Kernel#Float` on a String (#181), structural `#hash`
-(#21, #22 three times, #23), the `Hash` table and its `inspect` format
-(#19, #20, #22 three times), Range-aware indexing in `MatchData` (#33), frozen
-string literals (#19), definition hooks (#28), and constant visibility (#185,
-four times).
+Sixty-one tags across twenty-two files, and thirty-seven of them are one thing:
+a global alias, where #166's table holds two names as two entries and making one
+the other's second spelling is #39's runtime state. They sit in
+`language/predefined_tags.txt`, `language/defined_tags.txt` and
+`library/English/English_tags.txt`. The remaining twenty-four name fibers
+(#16, #26), `Kernel#Float` on a String (#181), structural `#hash` (#21, #22,
+#23), the `Hash` table and its `inspect` format (#19, #20), Range-aware indexing
+in `MatchData` (#33), definition hooks (#28), and the literals (#157).
 
-Sixteen of those arrived in one slice, and that is the shape to expect rather
+Constant visibility was four of them and is none of them now: #185 deleted its
+tags rather than rewording them, which is what closing an issue behind a tag is
+supposed to look like.
+
+Sixteen of the original seventeen arrived in one slice, and that is the shape to expect rather
 than a lapse. #183 taught the harness to load ruby/spec's fixtures and #157 and
 #154 landed the literals that build the values, so several thousand examples ran
 for the first time — and an example that has never run cannot have been

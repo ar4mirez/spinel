@@ -343,6 +343,22 @@ pub enum Insn {
     /// answer nonsense rather than raise.
     SetLastMatch,
 
+    /// Push `$!`: the exception currently being handled, or nil (#206).
+    ///
+    /// Its own instruction rather than an entry in the global table, for the
+    /// same reason [`Insn::LastMatch`] is: nothing assigns it in the ordinary
+    /// way. The unwinder sets it where a handler takes an exception, and the
+    /// compiler pairs this with [`Insn::SetErrinfo`] to save and restore it
+    /// around a protected body.
+    Errinfo,
+
+    /// Write `$!`. Pops, like [`Insn::SetGlobal`].
+    ///
+    /// The compiler's own restore after a `begin`, not a Ruby assignment:
+    /// `$! = e` is a `NameError` in Ruby. It takes any value because what it
+    /// restores is whatever was there before the protected body.
+    SetErrinfo,
+
     /// `defined?` on a regexp special, which is not the same question as
     /// reading one.
     ///
@@ -734,8 +750,12 @@ pub struct Keyword {
 /// block — so [`Iseq::locals`] reads in that order too.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ParamSpec {
-    /// Leading required parameters, in slots `0..required`.
-    pub required: u16,
+    /// The slot each leading required parameter occupies, in order.
+    ///
+    /// A slot per parameter rather than a count, because a destructuring
+    /// parameter binds several names out of one argument and displaces every
+    /// parameter after it: `{ |(a, b), c| }` has `c` in slot 2, not slot 1.
+    pub required: Vec<u16>,
     pub optional: Vec<Optional>,
     /// `*rest`. `Some` even for an anonymous `*`, which still collects.
     pub rest: Option<u16>,
@@ -746,10 +766,10 @@ pub struct ParamSpec {
     /// exactly what the named parameters say, so `lambda { |a,| }.call(1, 2)`
     /// is an `ArgumentError` and `lambda { |a, *| }.call(1, 2)` is not.
     pub trailing_comma: bool,
-    /// Required parameters *after* the splat: `def f(a, *b, c)`. They are bound
-    /// from the right, which is why they are counted separately rather than
-    /// added to `required`.
-    pub post: u16,
+    /// The slot each required parameter *after* the splat occupies:
+    /// `def f(a, *b, c)`. They are bound from the right, which is why they are
+    /// held separately rather than appended to `required`.
+    pub post: Vec<u16>,
     pub keywords: Vec<Keyword>,
     /// `**kw`. The slot the keywords no named parameter claimed collect into
     /// (#193).
@@ -769,23 +789,27 @@ pub struct ParamSpec {
 }
 
 impl ParamSpec {
-    /// How many slots the parameters occupy, which is where the first
-    /// non-parameter local starts.
-    #[must_use]
-    pub fn slots(&self) -> usize {
-        self.required as usize
-            + self.optional.len()
-            + usize::from(self.rest.is_some())
-            + self.post as usize
-            + self.keywords.len()
-            + usize::from(self.kwrest.is_some())
-            + usize::from(self.block.is_some())
+    /// Every slot a parameter occupies, in binder order.
+    ///
+    /// Not a range: a destructuring parameter borrows the slot of the first
+    /// name it binds and leaves the rest of them in between, so the parameter
+    /// slots of `{ |(a, b), c| }` are 0 and 2 with 1 belonging to `b`.
+    pub fn slots(&self) -> impl Iterator<Item = u16> + '_ {
+        self.required
+            .iter()
+            .copied()
+            .chain(self.optional.iter().map(|o| o.slot))
+            .chain(self.rest)
+            .chain(self.post.iter().copied())
+            .chain(self.keywords.iter().map(|k| k.slot))
+            .chain(self.kwrest)
+            .chain(self.block)
     }
 
     /// The fewest positional arguments a lambda-arity call accepts.
     #[must_use]
     pub fn min_positional(&self) -> usize {
-        self.required as usize + self.post as usize
+        self.required.len() + self.post.len()
     }
 
     /// The most accepted, or `None` when a splat makes it unbounded.
@@ -805,7 +829,7 @@ impl ParamSpec {
     pub fn is_simple(&self) -> bool {
         self.optional.is_empty()
             && self.rest.is_none()
-            && self.post == 0
+            && self.post.is_empty()
             && self.keywords.is_empty()
     }
 

@@ -79,6 +79,9 @@ type Emit = Result<(), Unsupported>;
 /// sharing the name here cannot collide with a user's variable.
 const IT: &str = "it";
 
+/// `$!`, spelled the way Prism names a global: with the sigil.
+const ERRINFO: &str = "$!";
+
 /// Compile a whole parsed file.
 pub fn program(program: &Program) -> Result<Iseq, Unsupported> {
     body("<main>", &program.locals, &program.body)
@@ -303,21 +306,16 @@ impl Zsuper {
     /// whether or not the method named it, which the interpreter does.
     fn from_spec(spec: &ParamSpec) -> Zsuper {
         let mut positional = Vec::new();
-        for slot in 0..spec.required {
-            positional.push((slot, false));
-        }
+        positional.extend(spec.required.iter().map(|&slot| (slot, false)));
         positional.extend(spec.optional.iter().map(|o| (o.slot, false)));
         if let Some(rest) = spec.rest {
             positional.push((rest, true));
         }
         // Post parameters follow the splat in the call, exactly as written.
-        let first_post = spec.slots() as u16
-            - spec.post
-            - spec.keywords.len() as u16
-            - u16::from(spec.block.is_some());
-        for offset in 0..spec.post {
-            positional.push((first_post + offset, false));
-        }
+        // Their slots are recorded rather than derived: the old arithmetic
+        // counted back from the end of the parameter slots and forgot `**kw`,
+        // so `def m(a, *b, c, **k)` forwarded the wrong two.
+        positional.extend(spec.post.iter().map(|&slot| (slot, false)));
         Zsuper {
             positional,
             keywords: spec.keywords.iter().map(|k| (k.name, k.slot)).collect(),
@@ -444,6 +442,7 @@ impl Compiler {
             | Insn::DefinedGlobal(_)
             | Insn::GetCvar(_)
             | Insn::DefinedCvar(_)
+            | Insn::Errinfo
             | Insn::Dup => 1,
             // Pops the splatted array and pushes its snapshot: net zero.
             Insn::CaptureSplat => 0,
@@ -458,6 +457,7 @@ impl Compiler {
             | Insn::SetGlobal(_)
             | Insn::SetCvar(_)
             | Insn::SetLastMatch
+            | Insn::SetErrinfo
             | Insn::JumpUnless(_)
             | Insn::JumpIf(_)
             | Insn::JumpUnlessUndef(_)
@@ -1093,6 +1093,10 @@ impl Compiler {
                 self.emit(Insn::GetCvar(symbol));
                 Ok(())
             }
+            VarRef::Global(name) if name.as_ref() == ERRINFO => {
+                self.emit(Insn::Errinfo);
+                Ok(())
+            }
             VarRef::Global(name) => match match_ref(name) {
                 Some(which) => {
                     self.emit(Insn::LastMatch(which));
@@ -1483,6 +1487,14 @@ impl Compiler {
             // because they are read off that value rather than out of a table.
             // Only `$~` is writable — `$1 = x` is a syntax error in Ruby, so
             // no other ref can reach here.
+            // `$! = e` is a `NameError: $! is a read-only variable` in Ruby —
+            // measured on 4.0.6, and raised before the program runs — so no
+            // valid program contains one. Refused rather than written to the
+            // global table, where it would silently succeed and be invisible to
+            // the reads, which come off the cell (#206).
+            TargetKind::Var(VarRef::Global(name)) if name.as_ref() == ERRINFO => Err(
+                Unsupported::at("assigning `$!`, which Ruby rejects", target.span),
+            ),
             TargetKind::Var(VarRef::Global(name)) if match_ref(name).is_some() => {
                 match match_ref(name) {
                     Some(MatchRef::Data) => Ok(Slot::LastMatch),
@@ -2092,6 +2104,12 @@ impl Compiler {
                 //
                 // Only `$~` reaches here as a global: Prism lowers the rest of
                 // the family to a back-reference node, which stays #14's.
+                // `defined?($!)` is "global-variable" inside a `rescue` and
+                // outside one alike — measured on ruby 4.0.6 — so it is the
+                // constant answer rather than a question about the cell.
+                if name.as_ref() == ERRINFO {
+                    return self.push_word("global-variable");
+                }
                 match match_ref(name) {
                     Some(MatchRef::Data) => self.push_word("global-variable"),
                     Some(which) => {
@@ -2408,15 +2426,15 @@ impl Compiler {
             Params::Numbered(highest) => {
                 let mut spec = ParamSpec::default();
                 for index in 1..=u16::from(*highest) {
-                    self.slot(&format!("_{index}"));
-                    spec.required += 1;
+                    let slot = self.slot(&format!("_{index}"));
+                    spec.required.push(slot);
                 }
                 return Ok(spec);
             }
             Params::It => {
-                self.slot(IT);
+                let slot = self.slot(IT);
                 return Ok(ParamSpec {
-                    required: 1,
+                    required: vec![slot],
                     ..ParamSpec::default()
                 });
             }
@@ -2428,44 +2446,45 @@ impl Compiler {
         use spinel_ast::{KeywordRestKind, RequiredParamKind};
 
         let mut spec = ParamSpec::default();
-        // How many parameters have claimed a slot. The binder addresses them by
-        // position, so the n-th parameter owns slot n; `param_slot` holds that
-        // true even when Prism's scope list is shorter than the parameter list.
+        // How many *slots* the parameters so far have claimed. Usually one per
+        // parameter, so this is also the parameter's index; a destructure is
+        // the exception, and the reason `ParamSpec` records a slot per
+        // parameter rather than a count.
         let mut at = 0usize;
         for required in &list.required {
             match &required.kind {
                 RequiredParamKind::Named(name) => {
-                    self.param_slot(name, at);
+                    spec.required.push(self.param_slot(name, at));
                     at += 1;
-                    spec.required += 1;
                 }
                 // `{ |(a, b)| }` is one parameter that the body then spreads,
-                // and `emit_defaults` emits the spread. No slot is claimed
-                // here: Prism lists the *inner* names, so the binder's slot for
-                // this parameter is already the first of them, and the spread
-                // reads it before it writes to it.
+                // and `emit_defaults` emits the spread. It claims no slot of
+                // its own: Prism lists the *inner* names, so the parameter's
+                // slot is the first of them, and the spread reads it before it
+                // writes to it.
                 //
-                // That only holds while nothing follows. A destructure that
-                // binds k names moves every later parameter k-1 slots along,
-                // and the binder addresses a parameter by its position, so
-                // `{ |(a, b), c| }` would put c's argument in b's slot. Refused
-                // rather than mis-bound; `ParamSpec` would have to carry a slot
-                // per parameter instead of a count to lift it.
-                RequiredParamKind::Destructure(_) => {
-                    let last = at + 1 == list.required.len();
-                    let alone = list.optional.is_empty()
-                        && list.rest.is_none()
-                        && list.posts.is_empty()
-                        && list.keywords.is_empty()
-                        && list.block.is_none();
-                    if !last || !alone {
+                // The names after the first belong to the same one argument, so
+                // they are claimed here too and the cursor steps over all of
+                // them. That is what puts `c` of `{ |(a, b), c| }` in slot 2
+                // rather than in `b`'s.
+                RequiredParamKind::Destructure(multi) => {
+                    let mut names = Vec::new();
+                    destructure_names(multi, &mut names);
+                    // `{ |(*), c| }` binds nothing, so there is no first inner
+                    // name whose slot the parameter can borrow. Refused with
+                    // its own reason rather than given a slot that Prism's
+                    // scope list does not have.
+                    let Some(first) = names.first() else {
                         return Err(Unsupported::at(
-                            "a destructuring block parameter before another parameter",
+                            "a destructuring block parameter that binds no name",
                             span,
                         ));
+                    };
+                    spec.required.push(self.param_slot(first, at));
+                    for (offset, name) in names.iter().enumerate().skip(1) {
+                        self.param_slot(name, at + offset);
                     }
-                    at += 1;
-                    spec.required += 1;
+                    at += names.len();
                 }
             }
         }
@@ -2488,12 +2507,25 @@ impl Compiler {
         for post in &list.posts {
             match &post.kind {
                 RequiredParamKind::Named(name) => {
-                    self.param_slot(name, at);
+                    spec.post.push(self.param_slot(name, at));
                     at += 1;
-                    spec.post += 1;
                 }
-                RequiredParamKind::Destructure(_) => {
-                    return Err(Unsupported::at("a destructuring block parameter", span));
+                // A post destructure is the required one's rule again:
+                // `def m(a = 1, (b, c), d)` puts `d` two slots past `b`.
+                RequiredParamKind::Destructure(multi) => {
+                    let mut names = Vec::new();
+                    destructure_names(multi, &mut names);
+                    let Some(first) = names.first() else {
+                        return Err(Unsupported::at(
+                            "a destructuring block parameter that binds no name",
+                            span,
+                        ));
+                    };
+                    spec.post.push(self.param_slot(first, at));
+                    for (offset, name) in names.iter().enumerate().skip(1) {
+                        self.param_slot(name, at + offset);
+                    }
+                    at += names.len();
                 }
             }
         }
@@ -2534,25 +2566,23 @@ impl Compiler {
             self.slot(&local.name);
         }
 
-        // The binder derives the required and post slots by arithmetic —
-        // required is `0..required`, post starts after required, optional, and
-        // the splat — rather than storing them. That is only correct while
-        // Prism lists a scope's parameters in exactly that order, which it
-        // does, and which this asserts rather than assumes: a reordering
-        // upstream would otherwise bind the right values to the wrong names,
-        // and every test here would still pass on the shapes that happen to be
-        // symmetrical.
+        // Every parameter's slot is recorded rather than derived now, so what
+        // is left to check is that they are in binder order and inside the
+        // frame. Prism listing a scope's parameters out of that order would
+        // otherwise bind the right values to the wrong names, and every test
+        // here would still pass on the shapes that happen to be symmetrical.
+        // Strictly increasing rather than consecutive: a destructure leaves the
+        // names it binds after the first sitting in between.
         debug_assert!(
-            self.locals.len() >= spec.slots()
-                && spec
-                    .optional
-                    .iter()
-                    .map(|o| o.slot as usize)
-                    .chain(spec.rest.map(|slot| slot as usize))
-                    .chain(spec.keywords.iter().map(|k| k.slot as usize))
-                    .chain(spec.kwrest.map(|slot| slot as usize))
-                    .chain(spec.block.map(|slot| slot as usize))
-                    .eq(binder_order(&spec)),
+            {
+                let mut previous: Option<u16> = None;
+                spec.slots().all(|slot| {
+                    let ordered = (slot as usize) < self.locals.len()
+                        && previous.is_none_or(|earlier| earlier < slot);
+                    previous = Some(slot);
+                    ordered
+                })
+            },
             "prism ordered {:?} against the binder's {:?}",
             self.locals,
             spec,
@@ -2583,28 +2613,40 @@ impl Compiler {
             self.emit(Insn::SetLocal(slot, 0));
         }
         // `{ |a, (b, c)| }`: destructuring the bound value is exactly the
-        // multiple assignment `(b, c) = value`. `spec_from_list` has already
-        // refused every shape where the parameter's slot is not its position.
-        for (at, required) in list.required.iter().enumerate() {
-            if let spinel_ast::RequiredParamKind::Destructure(multi) = &required.kind {
-                // The binder writes the n-th argument into slot n, and this is
-                // the n-th parameter, so the value is in slot `at` — which is
-                // also the first name the destructure binds. Read before write.
-                let slot = u16::try_from(at)
-                    .map_err(|_| Unsupported::at("a parameter list this long", span))?;
-                // A destructuring parameter's targets are plain locals of the
-                // block's own frame — the parser rejects anything else there —
-                // so preparation emits nothing, but it still has to run to
-                // give the assignment pass its slots.
-                let mut prepared = Vec::new();
-                self.prepare_multi(multi, &mut prepared)?;
-                let mut prepared = prepared.into_iter();
-                self.push_const_name("Array");
-                self.emit(Insn::GetLocal(slot, 0));
-                self.emit_send("__masgn_array__", 1);
-                self.spread_into(multi, &mut prepared, span)?;
-                self.emit(Insn::Pop);
-            }
+        // multiple assignment `(b, c) = value`.
+        //
+        // Both lists, because `def m(a = 1, (b, c), d)` destructures in post
+        // position, which is the shape `language/fixtures/send.rb` is written
+        // on and the reason `send_spec.rb` never compiled.
+        // Paired with the slots `spec_from_list` recorded, because the binder
+        // wrote each argument into the slot its parameter owns rather than into
+        // the slot its position would suggest.
+        let destructures: Vec<(u16, &MultiTarget)> = list
+            .required
+            .iter()
+            .zip(&self.params.required)
+            .chain(list.posts.iter().zip(&self.params.post))
+            .filter_map(|(param, &slot)| match &param.kind {
+                spinel_ast::RequiredParamKind::Destructure(multi) => Some((slot, &**multi)),
+                spinel_ast::RequiredParamKind::Named(_) => None,
+            })
+            .collect();
+        for (slot, multi) in destructures {
+            // That slot is also the first name the destructure binds, so this
+            // reads it before it writes to it.
+            //
+            // A destructuring parameter's targets are plain locals of the
+            // block's own frame — the parser rejects anything else there — so
+            // preparation emits nothing, but it still has to run to give the
+            // assignment pass its slots.
+            let mut prepared = Vec::new();
+            self.prepare_multi(multi, &mut prepared)?;
+            let mut prepared = prepared.into_iter();
+            self.push_const_name("Array");
+            self.emit(Insn::GetLocal(slot, 0));
+            self.emit_send("__masgn_array__", 1);
+            self.spread_into(multi, &mut prepared, span)?;
+            self.emit(Insn::Pop);
         }
         let defaults: Vec<(Box<str>, &Expr)> =
             list.optional
@@ -3616,6 +3658,23 @@ impl Compiler {
         if node.ensure_body.is_some() {
             self.open_ensures += 1;
         }
+        // `$!` is restored on every path out of a `rescue`, so the cell is
+        // parked in a hidden local before the protected body and put back after
+        // the clauses — before the `ensure`, which Ruby runs with `$!` already
+        // restored on the paths that reach it normally. A `return` or a `break`
+        // out of a clause skips this, and `Call::errinfo_on_entry` covers those
+        // because both leave through a frame pop (#206).
+        //
+        // Only when there are clauses: an `ensure` on its own never sets the
+        // cell, and whatever encloses it restores what the unwinder set.
+        let errinfo = if node.rescues.is_empty() {
+            None
+        } else {
+            let slot = self.slot(&format!("%errinfo{}", self.here()));
+            self.emit(Insn::Errinfo);
+            self.emit(Insn::SetLocal(slot, 0));
+            Some(slot)
+        };
         let body_start = self.here();
         let body = self.statements(&node.body, true);
         if body.is_err() && node.ensure_body.is_some() {
@@ -3650,6 +3709,10 @@ impl Compiler {
             self.patch_here(at);
         }
         self.depth = base + 1;
+        if let Some(slot) = errinfo {
+            self.emit(Insn::GetLocal(slot, 0));
+            self.emit(Insn::SetErrinfo);
+        }
 
         if let Some(ensure_body) = &node.ensure_body {
             // The `ensure` body itself is not protected by its own entry, so a
@@ -3843,27 +3906,34 @@ fn pair_value(pair: &spinel_ast::HashEntry) -> Option<&Expr> {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// The slots the binder expects the non-required, non-post parameters to have,
-/// in the order `spec_from_list` names them.
+/// The local names a destructuring block parameter binds, in the order Prism
+/// lists them in the scope.
 ///
-/// Not `cfg(debug_assertions)`: `debug_assert!` still type-checks its argument
-/// in a release build, so a gated helper is a release-only compile error.
-fn binder_order(spec: &ParamSpec) -> impl Iterator<Item = usize> + '_ {
-    let required = spec.required as usize;
-    let optionals = required..required + spec.optional.len();
-    let rest = optionals.end..optionals.end + usize::from(spec.rest.is_some());
-    // Post parameters sit between the splat and the keywords, and the binder
-    // computes their base the same way.
-    let keywords = rest.end + spec.post as usize;
-    let named = keywords..keywords + spec.keywords.len();
-    // `**kw` sits between the named keywords and the block (#193).
-    let kwrest = named.end..named.end + usize::from(spec.kwrest.is_some());
-    let block = kwrest.end..kwrest.end + usize::from(spec.block.is_some());
-    optionals
-        .chain(rest)
-        .chain(named)
-        .chain(kwrest)
-        .chain(block)
+/// Only plain locals: the parser rejects everything else inside one, and an
+/// anonymous `*` binds nothing and so claims no slot. Deduplicated because a
+/// repeated name is one slot, which is what `param_slot` would resolve it to.
+fn destructure_names(multi: &MultiTarget, out: &mut Vec<Name>) {
+    fn walk(target: &Target, out: &mut Vec<Name>) {
+        match &target.kind {
+            TargetKind::Var(VarRef::Local { name, depth: 0 }) => {
+                if !out.contains(name) {
+                    out.push(name.clone());
+                }
+            }
+            TargetKind::Multi(inner) => destructure_names(inner, out),
+            TargetKind::Splat(Some(inner)) => walk(inner, out),
+            _ => {}
+        }
+    }
+    for target in &multi.lefts {
+        walk(target, out);
+    }
+    if let Some(rest) = &multi.rest {
+        walk(rest, out);
+    }
+    for target in &multi.rights {
+        walk(target, out);
+    }
 }
 
 /// The bytes of a literal with no interpolation, or `None` if it has any.

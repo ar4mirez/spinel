@@ -350,6 +350,12 @@ struct Call {
     /// frame is enough for what the keyword needs it for: a bare `raise` inside
     /// a `rescue` body re-raises what that body caught.
     rescued: Option<Value>,
+    /// `$!` as this frame found it, restored when the frame is popped (#206).
+    ///
+    /// A frame leaves the cell exactly as it found it, which is what makes a
+    /// `return` or a `break` out of a `rescue` clause restore it: neither runs
+    /// the compiler's own restore, and both go out through a `frames.pop()`.
+    errinfo_on_entry: Value,
     /// The class this frame's method was found on, and the name it was found
     /// under. `None` for a body that is not a method — the top level, a class
     /// body — where `super` has nowhere to start (#187).
@@ -502,6 +508,7 @@ pub fn eval_in(
         breaks: 0,
         tag: None,
         rescued: None,
+        errinfo_on_entry: Value::NIL,
         // The top level is not a method body, so `super` there has no owner to
         // start from and raises rather than resolving to something.
         owner: None,
@@ -726,6 +733,19 @@ pub fn eval_in(
                         ));
                     }
                     scope.set_last_match(value);
+                }
+
+                // `$!` (#206). The read is the cell; the write is the
+                // compiler's own restore after a `begin` and never a Ruby
+                // assignment, which is why it takes any value rather than only
+                // an exception — `$! = e` is a `NameError` in Ruby.
+                Insn::Errinfo => {
+                    let value = scope.errinfo();
+                    stack.push(value);
+                }
+                Insn::SetErrinfo => {
+                    let value = stack.pop().expect("seterrinfo on an empty stack");
+                    scope.set_errinfo(value);
                 }
                 Insn::DefinedMatch(which) => {
                     let held = defined_match(scope, &which);
@@ -1162,6 +1182,7 @@ pub fn eval_in(
                 Insn::Leave => {
                     let value = stack.pop().unwrap_or(Value::NIL);
                     let done = frames.pop().expect("a frame to leave");
+                    scope.set_errinfo(done.errinfo_on_entry);
                     stack.truncate(done.base);
                     if frames.is_empty() {
                         return Ok(Step::Done(value));
@@ -1341,11 +1362,24 @@ fn unwind_to_handler(
                         // Ruby's `$!`, scoped to the frame: what a bare `raise`
                         // inside this handler re-raises.
                         frames[top].rescued = Some(exception);
+                        // And `$!` proper, which is not frame-scoped: a method
+                        // called from inside the clause sees it (#206). The
+                        // clause's own bytecode restores it on the way out.
+                        scope.set_errinfo(exception);
                         stack.push(exception);
                     }
                     _ => unreachable!("a rescue entry only accepts an exception"),
                 },
-                CatchKind::Ensure => frames[top].parked.push(Parked::Unwind(unwind)),
+                CatchKind::Ensure => {
+                    // An `ensure` runs with `$!` set while an exception is
+                    // still propagating through it — measured — and with it
+                    // nil on every other path, including after a `rescue`
+                    // already handled one.
+                    if let Unwind::Exception(exception) = unwind {
+                        scope.set_errinfo(exception);
+                    }
+                    frames[top].parked.push(Parked::Unwind(unwind));
+                }
             }
             frames[top].pc = entry.target as usize;
             return Ok(None);
@@ -1355,6 +1389,9 @@ fn unwind_to_handler(
         // its own `ensure`s have already run — they are entries in the table
         // that was just searched.
         let done = frames.pop().expect("a frame to unwind out of");
+        // Nothing here wanted it, so this frame is done and gives `$!` back as
+        // it found it. Whichever frame does catch it sets the cell above.
+        scope.set_errinfo(done.errinfo_on_entry);
         stack.truncate(done.base);
         let landed = match unwind {
             Unwind::Break { frame, value } | Unwind::Return { frame, value } => {
@@ -1943,6 +1980,7 @@ fn push_frame(
         breaks: links.breaks,
         tag: None,
         rescued: None,
+        errinfo_on_entry: scope.errinfo(),
         // What a `super` in this body starts from. Set for a method by
         // `dispatch` and for a block by `push_proc_frame`; `None` everywhere
         // else, where `super` has no method to be one step past.
@@ -1997,8 +2035,8 @@ fn bind(
         check_arity(spec, args.len())?;
     }
 
-    let required = spec.required as usize;
-    let post = spec.post as usize;
+    let required = spec.required.len();
+    let post = spec.post.len();
     let optional = spec.optional.len();
 
     // Required from the left, post-required from the right, optionals from
@@ -2006,13 +2044,16 @@ fn bind(
     // counted separately rather than added to `required`.
     let available = args.len();
     let leading = required.min(available);
-    for (slot, value) in args.iter().take(leading).enumerate() {
-        env_set(scope, env, slot, *value);
+    // The slot a parameter owns rather than its position: a destructuring
+    // parameter binds several names out of one argument, so `{ |(a, b), c| }`
+    // writes the second argument to slot 2 and leaves slot 1 to `b` (#209).
+    for (index, value) in args.iter().take(leading).enumerate() {
+        env_set(scope, env, spec.required[index] as usize, *value);
     }
     // Ruby pads a block's missing required parameters with `nil`; a lambda
     // never gets here, because `check_arity` refused first.
-    for slot in leading..required {
-        env_set(scope, env, slot, Value::NIL);
+    for index in leading..required {
+        env_set(scope, env, spec.required[index] as usize, Value::NIL);
     }
 
     let after_required = available.saturating_sub(leading);
@@ -2051,14 +2092,13 @@ fn bind(
         cursor
     };
 
-    let post_base = required + optional + usize::from(spec.rest.is_some());
-    for index in 0..post {
+    for (index, &slot) in spec.post.iter().enumerate() {
         let value = if index < trailing {
             args[post_from + index]
         } else {
             Value::NIL
         };
-        env_set(scope, env, post_base + index, value);
+        env_set(scope, env, slot as usize, value);
     }
 
     bind_keywords(scope, env, spec, symbols, call)?;
@@ -2074,7 +2114,7 @@ fn bind(
 /// More than one place to put a value, or one place plus a splat: `{ |a, b| }`
 /// and `{ |a,| }` spread, `{ |a| }` and `{ |*a| }` and `{ |a = 1| }` do not.
 fn spreads(spec: &ParamSpec) -> bool {
-    let places = spec.required as usize + spec.optional.len() + spec.post as usize;
+    let places = spec.required.len() + spec.optional.len() + spec.post.len();
     places > 1 || ((spec.rest.is_some() || spec.trailing_comma) && places > 0)
 }
 
@@ -2698,6 +2738,14 @@ fn open_class(
                 false => scope.classes().cref_base(outer),
             };
             let name = frames[top].symbols[def.name as usize];
+            // `class A::B` is a qualified reference, so a private `B` is a
+            // `NameError` — while a plain `class B` written inside `A`'s own
+            // body reopens it, because that is the scope it is private to.
+            // Measured; the two "cannot be reopened" examples in
+            // `language/constants_spec.rb` are this (#185).
+            if def.scoped && scope.classes().const_is_private(cbase, name) {
+                return Err(uninitialized(scope, cbase, name, ConstScope::Qualified));
+            }
             define_or_reopen(scope, cbase, name, kind, superclass)?
         }
     };
@@ -2743,6 +2791,7 @@ fn open_class(
         breaks: 0,
         tag: None,
         rescued: None,
+        errinfo_on_entry: scope.errinfo(),
         parked: Vec::new(),
     });
     Ok(())
@@ -3254,6 +3303,14 @@ fn uninitialized(
                 .name(from)
                 .unwrap_or("an anonymous module")
                 .to_string();
+            // A name the walk found and refused reads differently from one it
+            // never found, and ruby/spec asserts on both (#185).
+            if scope.classes().const_private_qualified(from, name) {
+                return Error::raise(
+                    "NameError",
+                    format!("private constant {owner}::{constant} referenced"),
+                );
+            }
             Error::raise(
                 "NameError",
                 format!("uninitialized constant {owner}::{constant}"),
@@ -5513,6 +5570,46 @@ fn native_call<'h>(
             Ok(None)
         }
 
+        Native::PrivateConstant => {
+            let Some(id) = class_id_of(scope, call.receiver) else {
+                return Err(Error::NoDispatch {
+                    op: "Module#private_constant",
+                    operands: "a receiver that is not a Module",
+                });
+            };
+            // Every name is checked before any is marked, which is the order
+            // Ruby uses: `private_constant :Known, :Missing` leaves `Known`
+            // public. Measured.
+            let mut names = Vec::with_capacity(call.args.len());
+            for &argument in &call.args {
+                let Some(text) = method_name_of(scope, argument) else {
+                    return Err(Error::raise("TypeError", "is not a symbol nor a string"));
+                };
+                let symbol = crate::shared::symbols::intern(&text);
+                if scope.classes().const_get_here(id, symbol).is_none() {
+                    return Err(Error::raise(
+                        "NameError",
+                        format!(
+                            "constant {}::{} not defined",
+                            scope
+                                .classes()
+                                .name(id)
+                                .unwrap_or("an anonymous module")
+                                .to_owned(),
+                            text
+                        ),
+                    ));
+                }
+                names.push(symbol);
+            }
+            for symbol in names {
+                scope.classes_mut().mark_const_private(id, symbol);
+            }
+            // Ruby answers the module. Measured.
+            stack.push(call.receiver);
+            Ok(None)
+        }
+
         Native::ModuleName => {
             let Some(id) = class_id_of(scope, call.receiver) else {
                 return Err(Error::NoDispatch {
@@ -6194,6 +6291,11 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             Native::SymbolName { length: true },
         ),
         (Builtin::Module, &["name"], Native::ModuleName),
+        (
+            Builtin::Module,
+            &["private_constant"],
+            Native::PrivateConstant,
+        ),
         (Builtin::Kernel, &["hash"], Native::HashValue),
         (
             Builtin::Module,
@@ -7438,7 +7540,7 @@ mod tests {
         //   -> { m(1, 2) }.should raise_error(ArgumentError,
         //     "wrong number of arguments (given 2, expected 1)")
         let fixed = ParamSpec {
-            required: 1,
+            required: vec![0],
             ..ParamSpec::default()
         };
         assert_eq!(
@@ -7447,7 +7549,7 @@ mod tests {
         );
 
         let splat = ParamSpec {
-            required: 2,
+            required: vec![0, 1],
             rest: Some(2),
             ..ParamSpec::default()
         };
@@ -7457,7 +7559,7 @@ mod tests {
         );
 
         let optional = ParamSpec {
-            required: 1,
+            required: vec![0],
             optional: vec![crate::bytecode::Optional { slot: 1 }],
             ..ParamSpec::default()
         };
@@ -7484,11 +7586,11 @@ mod tests {
         // The rule most of `block_spec.rb` is a table of: `{ |a| }` takes the
         // Array whole, `{ |a, b| }` spreads it, `{ |*a| }` wraps it.
         let one = ParamSpec {
-            required: 1,
+            required: vec![0],
             ..ParamSpec::default()
         };
         let two = ParamSpec {
-            required: 2,
+            required: vec![0, 1],
             ..ParamSpec::default()
         };
         let splat = ParamSpec {
@@ -7496,7 +7598,7 @@ mod tests {
             ..ParamSpec::default()
         };
         let trailing_comma = ParamSpec {
-            required: 1,
+            required: vec![0],
             rest: Some(1),
             ..ParamSpec::default()
         };
@@ -7522,7 +7624,7 @@ mod tests {
             locals: vec!["a".into()],
             max_stack: 1,
             params: ParamSpec {
-                required: 1,
+                required: vec![0],
                 ..ParamSpec::default()
             },
             scope_barrier: true,

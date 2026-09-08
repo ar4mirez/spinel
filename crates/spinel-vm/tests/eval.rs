@@ -104,10 +104,11 @@ fn a_construct_this_slice_does_not_compile_is_an_error_never_a_guess() {
         // #154. What replaces them is the call-convention half of the same
         // syntax, which #11 owns: `CallSite::keywords` names each keyword by
         // symbol, so a non-symbol key and a `**` argument have nowhere to go.
-        // A destructuring parameter binds several names in one slot, so
-        // anything after it would be bound to the wrong one. See
+        // A destructuring parameter borrows the slot of the first name it
+        // binds, and this one binds none, so there is no slot for the argument
+        // to land in. Every other shape compiles since #209. See
         // `Compiler::spec_from_list`.
-        "proc { |(a, b), c| }",
+        "proc { |(*), c| }",
     ] {
         let parsed = spinel_parse::parse(source.as_bytes());
         assert!(
