@@ -872,3 +872,84 @@ class P185; XX = 1; end; XX = 2; class C185 < P185; def self.x; XX; end; end; C1
 module M185; YY = 1; end; YY = 2; class D185; include M185; def self.y; YY; end; end; D185.y  #=> 1
 module N185; def self.k; Kernel; end; end; N185.k.name  #=> "Kernel"
 class Q185; def self.k; Kernel; end; end; Q185.k.name  #=> "Kernel"
+
+# ------------------------------------------------------------------
+# #211: a bare `module_function` sets the mode for the rest of the body
+# ------------------------------------------------------------------
+module MF1; module_function; def a; :a; end; end; MF1.a  #=> :a
+# The instance copy stays, privately, which is what makes this not `def self.`:
+# an includer can call it receiverlessly and cannot call it with a receiver.
+module MF2; module_function; def a; :a; end; end; class MF2C; include MF2; def t; a; end; end; MF2C.new.t  #=> :a
+module MF3; module_function; def a; :a; end; end; class MF3C; include MF3; end; (MF3C.new.a rescue $!.class.name)  #=> "NoMethodError"
+# It answers nil, the same as a bare `private` does — not `self`, and not the
+# argument list the form with arguments answers.
+module MF4; x = module_function; x; end  #=> nil
+# The default is one field: whichever of the two was written last wins.
+module MF5; module_function; private; def b; :b; end; end; MF5.respond_to?(:b)  #=> false
+module MF6; private; module_function; def c; :c; end; end; MF6.c  #=> :c
+# A block shares the body's mode; a method body starts public again. Both are
+# `private`'s measured behaviour under #161, seen through the other mode.
+module MF7; module_function; [1].each { def d; :d; end }; end; MF7.d  #=> :d
+module MF8; module_function; def e; def f; :f; end; :e; end; end; MF8.e; MF8.respond_to?(:f)  #=> false
+# `attr_accessor` takes the visibility half only: a private reader, and no
+# singleton copy at all — unlike a `def` under the same mode.
+module MF9; module_function; attr_accessor :x; end; (MF9.x rescue $!.class.name)  #=> "NoMethodError"
+module MFA; module_function; attr_accessor :x; end; class MFAC; include MFA; def t; self.x = 5; x; end; end; MFAC.new.t  #=> 5
+# Reopening starts public again, because the default lives on the body.
+module MFB; module_function; def g; :g; end; end; module MFB; def h; :h; end; end; MFB.respond_to?(:h)  #=> false
+
+# ------------------------------------------------------------------
+# #212: `for`, which is not `each` because it does not open a scope
+# ------------------------------------------------------------------
+for i212 in [1, 2, 3]; end; i212  #=> 3
+# The variable is bound even when nothing ran, because it belongs to the
+# scope around the loop rather than to the loop.
+for e212 in []; end; [defined?(e212), e212]  #=> ["local-variable", nil]
+# The value is `each`'s. It only looks like the collection because
+# `Array#each` and `Range#each` answer `self`.
+(for a212 in [1, 2, 3]; end)  #=> [1, 2, 3]
+rg212 = (1..3); (for r212 in rg212; end).equal?(rg212)  #=> true
+class Cus212; def each; yield 1; :custom; end; end; (for c212 in Cus212.new; end)  #=> :custom
+# Destructuring is the assignment's, not a second rule: a one-parameter block
+# is handed the whole element.
+for p212, q212 in [[1, 2], [3, 4]]; end; [p212, q212]  #=> [3, 4]
+for s212 in [[1, 2]]; end; s212  #=> [1, 2]
+for m212 in {1 => 10}; end; m212  #=> [1, 10]
+for k212, v212 in {1 => 10, 2 => 20}; end; [k212, v212]  #=> [2, 20]
+for f212, *g212 in [[1, 2, 3]]; end; [f212, g212]  #=> [1, [2, 3]]
+for h212, *n212, o212 in [[1, 2, 3, 4]]; end; [h212, n212, o212]  #=> [1, [2, 3], 4]
+for (t212, u212) in [[1, 2, 3]]; end; [t212, u212]  #=> [1, 2]
+for w212, (x212, y212) in [[1, [2, 3]]]; end; [w212, x212, y212]  #=> [1, 2, 3]
+# `break`, `next` and `redo` mean in a `for` what they mean in a block.
+(for b212 in [1] do break 9 end)  #=> 9
+z212 = 0; for l212 in [1, 2, 3]; next if l212 == 2; z212 += l212; end; z212  #=> 4
+d212 = 0; for j212 in [1, 2]; d212 += 1; redo if d212 == 2 && j212 == 2 && d212 < 3; end; d212  #=> 3
+# Every target an assignment takes, a `for` takes.
+arr212 = [0, 0]; for arr212[1] in [9]; end; arr212  #=> [0, 9]
+class OF212; attr_accessor :t; end; of212 = OF212.new; for of212.t in [11]; end; of212.t  #=> 11
+def m212; z = 0; for v in [1, 2, 3]; z += v; end; [z, v]; end; m212  #=> [6, 3]
+# A `for` body's environment is not a Ruby scope, so a block written inside one
+# still reaches the locals around the loop — and a `for` nested in that block
+# reaches them too, one environment further out than Prism counted.
+o212 = []; for a in [1]; a1 = a; for b in [2]; o212 << proc { [a1, a, b, a1 + b] }.call; end; end; o212  #=> [[1, 1, 2, 3]]
+n212b = []; for a in [1]; for c in [3].map { |ev| n212b << a; ev }; n212b << [a, c]; end; end; n212b  #=> [1, [1, 3]]
+
+# ------------------------------------------------------------------
+# #213: a splat as the value of `return`, `break`, or `next`
+# ------------------------------------------------------------------
+# The splat always collects into an `Array`. There is no one-element unwrap:
+# `return *[1]` is `[1]`, which `return_spec.rb` spends an example on.
+def r213a; ary = []; return *ary; end; r213a  #=> []
+def r213b; ary = [1]; return *ary; end; r213b  #=> [1]
+def r213c; ary = [1, 2]; return *ary; end; r213c  #=> [1, 2]
+def r213d; value = 1; return *value; end; r213d  #=> [1]
+# `nil.to_a` is `[]`, which is why this is empty rather than `[nil]` — the
+# array literal's `to_a` conversion, reached from the exit.
+def r213e; nothing = nil; return *nothing; end; r213e  #=> []
+def r213f; return *[1], 2; end; r213f  #=> [1, 2]
+def r213g; o = Object.new; def o.to_a; [1, 2]; end; return *o; end; r213g  #=> [1, 2]
+[1, 2].each { |x| break *[9] }  #=> [9]
+[1, 2].each { |x| break *[] }  #=> []
+def y213; yield; end; y213 { next *[1] }  #=> [1]
+def y213b; yield; end; y213b { next *[] }  #=> []
+def y213c; yield; end; y213c { next *[1, 2] }  #=> [1, 2]
