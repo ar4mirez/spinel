@@ -36,7 +36,13 @@ scratch="$(mktemp)"
 trap 'rm -f "$scratch"' EXIT
 
 status=0
-"$repo_root/target/release/spec-harness" --by-directory "$corpus" > "$scratch" || status=$?
+# `--platform linux` is pinned, not the host: ruby/spec's `platform_is` guards
+# select a different set of examples per OS, so an unpinned table would differ
+# between a macOS laptop and the Linux job that checks it — a diff about nothing.
+# Linux because that is where the CI job runs. A plain `scripts/spec.sh` still
+# answers for the machine you are on.
+"$repo_root/target/release/spec-harness" --by-directory --platform linux "$corpus" \
+  > "$scratch" || status=$?
 if [[ $status -ne 0 ]]; then
   echo "spec-status.sh: the spec run reported failures, unreadable files, or tag" >&2
   echo "                problems. The table is only printed on a clean run — run" >&2
