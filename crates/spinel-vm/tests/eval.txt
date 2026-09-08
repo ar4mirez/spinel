@@ -721,3 +721,53 @@ defined?($~)  #=> "global-variable"
 (def kre(**) = :anon; kre(x: 1))  #=> :anon
 # `**nil` accepts none at all.
 (def krf(**nil) = :none; krf)  #=> :none
+
+# ------------------------------------------- regexp back-references (#197)
+# `$~` is defined whether or not anything matched; every ref derived from it is
+# nil until a match gives it a value, and nil again after one fails. Measured
+# one fresh process per line, because `$~` outlives the snippet that set it and
+# a shared process reports the first answer for every later one.
+defined?($~)  #=> "global-variable"
+defined?($&)  #=> nil
+defined?($1)  #=> nil
+defined?($+)  #=> nil
+("ab" =~ /(a)(b)/; [$1, $2, $3])  #=> ["a", "b", nil]
+("ab" =~ /(a)(b)/; [$&, $`, $'])  #=> ["ab", "", ""]
+("xaby" =~ /ab/; [$&, $`, $'])  #=> ["ab", "x", "y"]
+("ab" =~ /(a)(b)/; defined?($&))  #=> "global-variable"
+("ab" =~ /(a)(b)/; defined?($1))  #=> "global-variable"
+("ab" =~ /(a)(b)/; defined?($3))  #=> nil
+# A group the pattern declares but the match did not reach has no value, so
+# `defined?` is nil and `$+` skips it: the rule is participation, not arity.
+("a" =~ /(a)(b)?/; [$2, $+, defined?($2)])  #=> [nil, "a", nil]
+("ab" =~ /(a)(b)/; $+)  #=> "b"
+# A failed match clears them all — the last *successful* match is not kept.
+("a" =~ /a/; "z" =~ /q/; [$~, $&, defined?($&)])  #=> [nil, nil, nil]
+# Assigning `$~` moves what every derived ref answers, which is why it is the
+# frame's match and not a global-table entry.
+(m = /(x)/.match("x"); "ab" =~ /(a)(b)/; $~ = m; [$1, $2, $&])  #=> ["x", nil, "x"]
+("a" =~ /(a)/; $~ = nil; [$1, $&, defined?($1), defined?($~)])  #=> [nil, nil, nil, "global-variable"]
+
+# --------------------------- index and attribute assignment (#191)
+# The expression is the right-hand side, never what the setter returned. The
+# class below returns `:nope` from both writers, which is how ruby/spec checks
+# it and what a lowering that leaves the send's result would get wrong.
+(class E1; def initialize; @h = {}; end; def [](k) = @h[k]; def []=(k, v); @h[k] = v; :nope; end; def b = @b; def b=(v); @b = v; :nope; end; end; e = E1.new; e[0] = 5)  #=> 5
+(class E2; def initialize; @h = {}; end; def [](k) = @h[k]; def []=(k, v); @h[k] = v; :nope; end; end; e = E2.new; e[0] = 1; e[0] += 2)  #=> 3
+(class E3; def b = @b; def b=(v); @b = v; :nope; end; end; e = E3.new; e.b = 5)  #=> 5
+(class E4; def b = @b; def b=(v); @b = v; :nope; end; end; e = E4.new; e.b = 1; e.b += 2)  #=> 3
+# `||=` reads, and writes only where the read was falsy — so a truthy one never
+# reaches the setter at all.
+(class E5; def initialize(o); @o = o; end; def b = (@o << :get; @b); def b=(v); @o << :set; @b = v; end; end; o = []; e = E5.new(o); e.b = 1; o.clear; v = (e.b ||= 9); [v, o])  #=> [1, [:get]]
+(class E6; def initialize(o); @o = o; end; def b = (@o << :get; @b); def b=(v); @o << :set; @b = v; end; end; o = []; e = E6.new(o); v = (e.b ||= 9); [v, o])  #=> [9, [:get, :set]]
+# The receiver and the index are evaluated once, however many sends the form
+# makes: `a[i()] += 1` calls `i()` one time, not two.
+(n = 0; i = -> { n += 1; 0 }; a = [1, 2, 3]; a[i.call] += 5; [n, a])  #=> [1, [6, 2, 3]]
+(n = 0; i = -> { n += 1; 0 }; a = [nil]; a[i.call] ||= 7; [n, a])  #=> [1, [7]]
+# A multiple assignment evaluates its targets' receivers and indices, left to
+# right, *before* the right-hand side.
+(class E7; def initialize(o); @o = o; @a = [0, 0]; end; def []=(i, v); @o << [:set, i, v]; @a[i] = v; end; end; o = []; r = E7.new(o); r[(o << :i1; 0)], r[(o << :i2; 1)] = (o << :rhs; 5), 6; o)  #=> [:i1, :i2, :rhs, [:set, 0, 5], [:set, 1, 6]]
+(class E8; def initialize(o); @o = o; end; def b=(v); @o << [:set, v]; @b = v; end; end; o = []; e = E8.new(o); x, e.b = (o << :rhs; 1), 2; [x, o])  #=> [1, [:rhs, [:set, 2]]]
+# A private setter is reachable through an explicit `self`, which is the one
+# exception `self.attr = v` has always had.
+(class E9; def go; self.foo ||= 6; end; def foo = @foo; def foo=(v); @foo = v; end; private :foo=; end; E9.new.go)  #=> 6

@@ -42,7 +42,7 @@ use crate::bytecode::{
 use crate::class::Builtin;
 use crate::class::{ClassId, CrefId, Kind, Method, Visibility};
 use crate::heap::{Handle, HandleScope, Heap, Payload};
-use crate::method::{BitOp, Definition, IvarOp, Native};
+use crate::method::{BitOp, CvarOp, Definition, IvarOp, Native};
 use crate::shape::ShapeId;
 use crate::value::SymbolId;
 use crate::value::Value;
@@ -711,6 +711,28 @@ pub fn eval_in(
                     stack.push(value);
                 }
 
+                // `$~ = m`. Writes the frame's match, which is what makes
+                // `$1` and `$&` follow it. `nil` clears; anything that is not
+                // a `MatchData` is Ruby's `TypeError`, measured, because the
+                // readers above would otherwise treat a plain object as a
+                // match and answer nonsense.
+                Insn::SetLastMatch => {
+                    let value = stack.pop().expect("setlastmatch on an empty stack");
+                    if value != Value::NIL && !is_match_data(scope, value) {
+                        let got = class_name_of(scope, value);
+                        return Err(Error::raise(
+                            "TypeError",
+                            format!("wrong argument type {got} (expected MatchData)"),
+                        ));
+                    }
+                    scope.set_last_match(value);
+                }
+                Insn::DefinedMatch(which) => {
+                    let held = defined_match(scope, &which);
+                    let value =
+                        defined_word(scope, string_class, held.then_some("global-variable"));
+                    stack.push(value);
+                }
                 Insn::LastMatch(which) => {
                     let value = last_match_part(scope, &which)?;
                     stack.push(value);
@@ -797,6 +819,129 @@ pub fn eval_in(
                     stack.push(Value::symbol(symbol));
                 }
 
+                // `/a#{b}c/`. The source was concatenated on the stack; this
+                // compiles it. Deliberately not `regexp_literal`'s cache: two
+                // evaluations of an interpolated literal are two objects,
+                // measured, and a cache keyed by the built source would make
+                // them one.
+                Insn::NewRegexp(options) => {
+                    let source = stack.pop().expect("newregexp on an empty stack");
+                    let Some(text) = string_text(scope, source) else {
+                        return Err(Error::NoDispatch {
+                            op: "a regexp literal",
+                            operands: "an interpolation that is not a String",
+                        });
+                    };
+                    let value = regexp_new(scope, &text, options)?;
+                    stack.push(value);
+                }
+
+                // `/a#{b}c/o`. The source is still built every time — the
+                // flag changes what happens after, not before — and then the
+                // site's first answer is reused for ever. Measured.
+                Insn::NewRegexpOnce(options, site) => {
+                    let source = stack.pop().expect("newregexponce on an empty stack");
+                    let iseq = Arc::clone(&frames[top].iseq);
+                    if let Some(cached) = scope.regexps().once_cached(&iseq, site) {
+                        stack.push(cached);
+                    } else {
+                        let Some(text) = string_text(scope, source) else {
+                            return Err(Error::NoDispatch {
+                                op: "a regexp literal",
+                                operands: "an interpolation that is not a String",
+                            });
+                        };
+                        let value = regexp_new(scope, &text, options)?;
+                        scope.regexps_mut().cache_once(&iseq, site, value);
+                        stack.push(value);
+                    }
+                }
+
+                // Class variables (#188's enabling work). Read off the
+                // frame's cref, like `def`, then along that class's ancestors
+                // — never lexically, which is what separates one from a
+                // constant. A write lands on the ancestor that already holds
+                // the name, so a subclass assigning `@@a` changes the
+                // superclass's; measured.
+                Insn::GetCvar(name) => {
+                    let symbol = frames[top].symbols[name as usize];
+                    let owner = cvar_owner(scope, frames[top].cref)?;
+                    match cvar_read(scope, owner, symbol)? {
+                        Some(value) => stack.push(value),
+                        None => {
+                            let where_ = scope
+                                .classes()
+                                .name(owner)
+                                .map_or_else(|| "an anonymous class".to_owned(), str::to_owned);
+                            return Err(Error::raise(
+                                "NameError",
+                                format!(
+                                    "uninitialized class variable {} in {where_}",
+                                    symbol_name(symbol),
+                                ),
+                            ));
+                        }
+                    }
+                }
+                Insn::SetCvar(name) => {
+                    let symbol = frames[top].symbols[name as usize];
+                    let owner = cvar_owner(scope, frames[top].cref)?;
+                    let value = stack.pop().expect("setcvar on an empty stack");
+                    scope.classes_mut().cvar_set(owner, symbol, value);
+                }
+                Insn::DefinedCvar(name) => {
+                    let symbol = frames[top].symbols[name as usize];
+                    // `defined?` never raises, so a top-level `@@a` is `nil`
+                    // here rather than the `RuntimeError` reading one is.
+                    let held = match cvar_owner(scope, frames[top].cref) {
+                        Ok(owner) => scope.classes().cvar_defined(owner, symbol),
+                        Err(_) => false,
+                    };
+                    let value = defined_word(scope, string_class, held.then_some("class variable"));
+                    stack.push(value);
+                }
+
+                // `alias` and `undef` write into the frame's definee — the
+                // same cref `def` writes into, not `self`. A name nothing in
+                // the chain defines is Ruby's `NameError` in both.
+                Insn::Alias(new, old) => {
+                    let new = frames[top].symbols[new as usize];
+                    let old = frames[top].symbols[old as usize];
+                    let owner = scope.classes().cref_class(frames[top].cref);
+                    hook_refusal(
+                        scope,
+                        owner,
+                        &[(
+                            "method_added",
+                            "`method_added`, which this alias would fire",
+                        )],
+                    )?;
+                    if !scope.classes_mut().alias_method(owner, new, old) {
+                        return Err(Error::raise(
+                            "NameError",
+                            format!(
+                                "undefined method '{}' for {}",
+                                symbol_name(old),
+                                class_display_name(scope, owner),
+                            ),
+                        ));
+                    }
+                }
+                Insn::Undef(name) => {
+                    let symbol = frames[top].symbols[name as usize];
+                    let owner = scope.classes().cref_class(frames[top].cref);
+                    undef_hook_refusal(scope, owner)?;
+                    if !scope.classes_mut().undef_method(owner, symbol) {
+                        return Err(Error::raise(
+                            "NameError",
+                            format!(
+                                "undefined method '{}' for {}",
+                                symbol_name(symbol),
+                                class_display_name(scope, owner),
+                            ),
+                        ));
+                    }
+                }
                 Insn::DefineSingleton(index) => {
                     let (name, child) = frames[top].iseq.definitions[index as usize];
                     let iseq = Arc::clone(&frames[top].iseq.children[child as usize]);
@@ -2390,6 +2535,23 @@ fn exception_message(scope: &mut HandleScope<'_>, exception: Value) -> String {
 }
 
 /// The name of a value's class, for a report.
+/// `class 'Foo'` or `module 'Bar'`, the way `NameError` names an owner.
+///
+/// Measured: `class Zz; alias b nope; end` says `undefined method 'nope' for
+/// class 'Zz'`, and the same inside a `module` says `module 'Mm'`. An anonymous
+/// one gets `#<Class:0x...>`, which is `Module#to_s` and lives in Ruby, so this
+/// prints the name it has and leaves the address to a slice that can send.
+fn class_display_name(scope: &mut HandleScope<'_>, id: crate::class::ClassId) -> String {
+    let kind = match scope.classes().kind(id) {
+        crate::class::Kind::Class => "class",
+        crate::class::Kind::Module => "module",
+    };
+    match scope.classes().name(id) {
+        Some(name) => format!("{kind} '{name}'"),
+        None => format!("an anonymous {kind}"),
+    }
+}
+
 fn class_name_of(scope: &mut HandleScope<'_>, value: Value) -> String {
     class_of(scope, value)
         .and_then(|id| scope.classes().name(id).map(str::to_owned))
@@ -2461,8 +2623,10 @@ fn proc_body(scope: &mut HandleScope<'_>, value: Value) -> Option<Value> {
     if scope.payload(handle) != Payload::Slots || scope.len(handle) != PROC_SLOTS {
         return None;
     }
-    let class = scope.class(handle)?;
-    (class == scope.classes().object(Builtin::Proc.id())).then(|| scope.slot(handle, PROC_BODY))
+    // Likewise a subclass of `Proc`: the slot count above has already
+    // established the shape, and the representation is what says whose it is.
+    let class = scope.class_of(handle)?;
+    (scope.classes().repr(class) == Some(Builtin::Proc)).then(|| scope.slot(handle, PROC_BODY))
 }
 
 /// Everything needed to call a `Proc`.
@@ -2820,6 +2984,82 @@ fn superclass_of(scope: &mut HandleScope<'_>, value: Value) -> Result<ClassId, E
 /// `inherited`, the module for `method_added` and `const_added`, the module
 /// being mixed in for `included` and `prepended`. Costs one cached method
 /// lookup per definition, and only a heap where someone wrote a hook refuses.
+/// `@@a` from `id`'s ancestry, or Ruby's `RuntimeError` where two classes in it
+/// hold the name.
+fn cvar_read(
+    scope: &mut HandleScope<'_>,
+    id: ClassId,
+    name: SymbolId,
+) -> Result<Option<Value>, Error> {
+    match scope.classes().cvar_get(id, name) {
+        Ok(value) => Ok(value),
+        Err(overtaken) => {
+            let of = class_or_anonymous(scope, id);
+            let by = class_or_anonymous(scope, overtaken);
+            Err(Error::raise(
+                "RuntimeError",
+                format!(
+                    "class variable {} of {of} is overtaken by {by}",
+                    symbol_name(name)
+                ),
+            ))
+        }
+    }
+}
+
+fn class_or_anonymous(scope: &mut HandleScope<'_>, id: ClassId) -> String {
+    scope
+        .classes()
+        .name(id)
+        .map_or_else(|| "an anonymous class".to_owned(), str::to_owned)
+}
+
+/// The class a `@@a` in this frame belongs to.
+///
+/// The cref's class, the same one `def` writes into. At the top level there is
+/// no class to own one and Ruby raises rather than reaching for `Object`:
+/// `class variable access from toplevel`, measured.
+fn cvar_owner(scope: &mut HandleScope<'_>, cref: CrefId) -> Result<ClassId, Error> {
+    if cref == CrefId::ROOT {
+        return Err(Error::raise(
+            "RuntimeError",
+            "class variable access from toplevel",
+        ));
+    }
+    Ok(scope.classes().cref_class(cref))
+}
+
+/// The hooks an `undef` would fire.
+///
+/// `method_undefined` on the module, and `singleton_method_undefined` on the
+/// object behind a singleton class — `class << obj; undef_method :m; end` is
+/// the second, and ruby/spec has an example for it. Refused rather than
+/// undefined quietly, so a program that defines a hook is told the VM cannot
+/// run it instead of watching it never fire.
+fn undef_hook_refusal(scope: &mut HandleScope<'_>, owner: ClassId) -> Result<(), Error> {
+    hook_refusal(
+        scope,
+        owner,
+        &[(
+            "method_undefined",
+            "`method_undefined`, which this `undef` would fire",
+        )],
+    )?;
+    // `singleton_method_undefined` is defined on the *object* the singleton
+    // class belongs to, so it is an ordinary lookup on that class rather than a
+    // singleton one — `hook_refusal` asks the wrong question for it.
+    if scope.classes().is_singleton(owner) {
+        let hook = crate::shared::symbols::intern("singleton_method_undefined");
+        if scope.classes_mut().lookup(owner, hook).is_some() {
+            return Err(Error::Unknowable {
+                what: "`singleton_method_undefined`, which this `undef` would fire",
+                needs: "the definition hooks (#28)",
+            });
+        }
+    }
+    Ok(())
+}
+
 fn hook_refusal(
     scope: &mut HandleScope<'_>,
     owner: ClassId,
@@ -3603,7 +3843,11 @@ fn method_name_of(scope: &mut HandleScope<'_>, value: Value) -> Option<String> {
 /// A keyword — `encoding:`, `capacity:` — is refused rather than ignored: this
 /// VM's strings have no encoding to set, and answering as though one had been
 /// set would be wrong rather than missing.
-fn string_new_from(scope: &mut HandleScope<'_>, call: &Pending) -> Result<Value, Error> {
+fn string_new_from(
+    scope: &mut HandleScope<'_>,
+    id: ClassId,
+    call: &Pending,
+) -> Result<Value, Error> {
     if !call.keywords.is_empty() {
         return Err(Error::Unknowable {
             what: "`String.new` with `encoding:` or `capacity:`",
@@ -3611,9 +3855,9 @@ fn string_new_from(scope: &mut HandleScope<'_>, call: &Pending) -> Result<Value,
         });
     }
     match call.args.as_slice() {
-        [] => Ok(string_bytes_new(scope, b"")),
+        [] => Ok(string_bytes_of(scope, id, b"")),
         [source] => match string_bytes(scope, *source) {
-            Some(bytes) => Ok(string_bytes_new(scope, &bytes)),
+            Some(bytes) => Ok(string_bytes_of(scope, id, &bytes)),
             None => Err(Error::raise(
                 "TypeError",
                 format!(
@@ -3675,7 +3919,15 @@ fn float_to_s(f: f64) -> String {
 
 /// A new `String` with these bytes.
 fn string_bytes_new(scope: &mut HandleScope<'_>, bytes: &[u8]) -> Value {
-    let class = class_handle(scope, Builtin::String);
+    string_bytes_of(scope, Builtin::String.id(), bytes)
+}
+
+/// The same, wearing `id` rather than `String` — what a subclass of `String`
+/// allocates, so `MyString.new("b").class` is `MyString` and every `String`
+/// primitive still reads it.
+fn string_bytes_of(scope: &mut HandleScope<'_>, id: ClassId, bytes: &[u8]) -> Value {
+    let class = scope.classes().object(id);
+    let class = scope.root(class);
     let handle = scope.alloc(Some(class), Payload::Bytes, bytes.len() as u32);
     scope.bytes_mut(handle).copy_from_slice(bytes);
     scope.get(handle)
@@ -3786,7 +4038,12 @@ const fn allocate_refusal(builtin: Builtin) -> &'static str {
 /// zero-slot object wearing that class — which is what made `Proc#lambda?` read
 /// past the end of one before #13 closed the door.
 fn allocate_instance(scope: &mut HandleScope<'_>, id: ClassId) -> Result<Value, Error> {
-    match Builtin::ALL.get(id.index()) {
+    // The *representation*, not the class. A subclass of a built-in inherits
+    // the shape and keeps its own class object, so `MyString.new("b")` is a
+    // string that answers `MyString` — which is what asking `Builtin::ALL` by
+    // class id could not do, because a class the bootstrap did not create is
+    // `None` for its own id however built-in its ancestry.
+    match scope.classes().repr(id) {
         // A user-defined class, or `Object` itself: one slot, for the ivar
         // storage a shape transition will hang off it.
         None | Some(Builtin::Object | Builtin::BasicObject) => {
@@ -3796,10 +4053,10 @@ fn allocate_instance(scope: &mut HandleScope<'_>, id: ClassId) -> Result<Value, 
             Ok(scope.get(handle))
         }
         Some(Builtin::Array) => {
-            let handle = empty_array(scope);
+            let handle = empty_array_of(scope, id);
             Ok(scope.get(handle))
         }
-        Some(Builtin::String) => Ok(string_bytes_new(scope, b"")),
+        Some(Builtin::String) => Ok(string_bytes_of(scope, id, b"")),
         Some(Builtin::Hash) => {
             // Three ordinary instance variables: the association list, the
             // default, and whether that default is a block. They were three
@@ -3830,7 +4087,7 @@ fn allocate_instance(scope: &mut HandleScope<'_>, id: ClassId) -> Result<Value, 
             // is chosen and one bucket of every class tells nobody which to
             // write next.
             Err(Error::Unknowable {
-                what: allocate_refusal(*other),
+                what: allocate_refusal(other),
                 needs: match other {
                     // #162 made `Class.new` and `Module.new` real. What is left
                     // is `allocate` itself, which in Ruby answers a class that
@@ -3893,7 +4150,13 @@ fn array_elements(scope: &mut HandleScope<'_>, value: Value) -> Option<Vec<Value
 
 /// An empty `Array`, with storage left unallocated until something is written.
 fn empty_array<'h>(scope: &mut HandleScope<'h>) -> Handle<'h> {
-    let class = class_handle(scope, Builtin::Array);
+    empty_array_of(scope, Builtin::Array.id())
+}
+
+/// The same, wearing `id` — what a subclass of `Array` allocates.
+fn empty_array_of<'h>(scope: &mut HandleScope<'h>, id: ClassId) -> Handle<'h> {
+    let class = scope.classes().object(id);
+    let class = scope.root(class);
     let handle = scope.alloc(Some(class), Payload::Slots, ARRAY_SLOTS);
     scope.set_slot(handle, ARRAY_STORAGE, Value::NIL);
     array_set_len(scope, handle, 0);
@@ -4119,8 +4382,23 @@ fn native_call<'h>(
             // which `allocate` cannot do — it runs before the argument is seen,
             // and a `String`'s bytes cannot be grown afterwards. So `new` on
             // `String` answers here rather than through `initialize`.
-            if id == Builtin::String.id() {
-                let value = string_new_from(scope, &call)?;
+            // A subclass of `String` reaches this too, and wears its own
+            // class: the sizing is a property of the representation, not of
+            // which class object the result carries.
+            if scope.classes().repr(id) == Some(Builtin::String) {
+                let value = string_new_from(scope, id, &call)?;
+                stack.push(value);
+                return Ok(None);
+            }
+            // `Regexp.new(source)` for the same reason: `allocate` refuses on
+            // `Regexp` because a pattern cannot exist uninitialised, so there
+            // is nothing for allocate-then-initialize to allocate. Answered
+            // here rather than as a singleton method on the class, because
+            // building `Regexp`'s metaclass at bootstrap would build `Object`'s
+            // and `BasicObject`'s with it — a singleton class is observable,
+            // and none of the three should exist until something asks.
+            if scope.classes().repr(id) == Some(Builtin::Regexp) {
+                let value = regexp_new_from(scope, &call)?;
                 stack.push(value);
                 return Ok(None);
             }
@@ -5060,6 +5338,140 @@ fn native_call<'h>(
             Ok(None)
         }
 
+        // Class-variable reflection. The same table `@@a` uses, reached
+        // through a receiver rather than through the frame's cref — so
+        // `A.class_variable_get(:@@a)` asks about `A` wherever it is called
+        // from, which is the difference between these and the instructions.
+        Native::ClassVariable(op) => {
+            let Some(id) = class_id_of(scope, call.receiver) else {
+                return Err(Error::NoDispatch {
+                    op: "Module class-variable reflection",
+                    operands: "a receiver that is not a Module",
+                });
+            };
+            if matches!(op, CvarOp::Names) {
+                // `class_variables(false)` is this module's own; the default is
+                // own first, then the ancestors'. Measured: `B` under `A`
+                // answers `[:@@b, :@@a]`.
+                let inherit = !matches!(call.args.first(), Some(&Value::FALSE));
+                let names = if inherit {
+                    scope.classes().cvar_names(id)
+                } else {
+                    scope.classes().cvar_names_own(id)
+                };
+                let values: Vec<Value> = names.into_iter().map(Value::symbol).collect();
+                let value = new_array(scope, &values);
+                stack.push(value);
+                return Ok(None);
+            }
+            let Some(name) = call.args.first().and_then(|&v| method_name_of(scope, v)) else {
+                return Err(Error::raise("TypeError", "is not a symbol nor a string"));
+            };
+            // `A.class_variable_get(:z)` is a `NameError` about the *name*,
+            // which is a different message from the one about a missing
+            // variable. Measured.
+            if !name.starts_with("@@") {
+                return Err(Error::raise(
+                    "NameError",
+                    format!("'{name}' is not allowed as a class variable name"),
+                ));
+            }
+            let symbol = crate::shared::symbols::intern(&name);
+            match op {
+                CvarOp::Names => unreachable!("answered above"),
+                CvarOp::Defined => {
+                    let held = scope.classes().cvar_defined(id, symbol);
+                    stack.push(bool_value(held));
+                }
+                CvarOp::Get => match cvar_read(scope, id, symbol)? {
+                    Some(value) => stack.push(value),
+                    None => {
+                        let where_ = scope
+                            .classes()
+                            .name(id)
+                            .map_or_else(|| "an anonymous class".to_owned(), str::to_owned);
+                        return Err(Error::raise(
+                            "NameError",
+                            format!("uninitialized class variable {name} in {where_}"),
+                        ));
+                    }
+                },
+                CvarOp::Set => {
+                    // A frozen module takes no writes, class variables
+                    // included.
+                    frozen_check(scope, call.receiver, "class")?;
+                    let value = call.args.get(1).copied().unwrap_or(Value::NIL);
+                    scope.classes_mut().cvar_set(id, symbol, value);
+                    // `class_variable_set` answers the value it wrote.
+                    stack.push(value);
+                }
+            }
+            Ok(None)
+        }
+
+        // The send-shaped `alias` and `undef`. Same two table operations as
+        // `Insn::Alias` and `Insn::Undef`, but on the receiver rather than on
+        // the frame's definee — which is the whole difference between the
+        // statement and the method.
+        Native::AliasMethod | Native::UndefMethod => {
+            let aliasing = matches!(native, Native::AliasMethod);
+            let op = if aliasing {
+                "Module#alias_method"
+            } else {
+                "Module#undef_method"
+            };
+            let Some(id) = class_id_of(scope, call.receiver) else {
+                return Err(Error::NoDispatch {
+                    op,
+                    operands: "a receiver that is not a Module",
+                });
+            };
+            let Some(first) = call.args.first().and_then(|&v| method_name_of(scope, v)) else {
+                return Err(Error::raise("TypeError", "is not a symbol nor a string"));
+            };
+            let first = crate::shared::symbols::intern(&first);
+            if aliasing {
+                hook_refusal(
+                    scope,
+                    id,
+                    &[(
+                        "method_added",
+                        "`method_added`, which this alias would fire",
+                    )],
+                )?;
+            } else {
+                undef_hook_refusal(scope, id)?;
+            }
+            let (ok, missing) = if aliasing {
+                let Some(old) = call.args.get(1).and_then(|&v| method_name_of(scope, v)) else {
+                    return Err(Error::raise("TypeError", "is not a symbol nor a string"));
+                };
+                let old = crate::shared::symbols::intern(&old);
+                (scope.classes_mut().alias_method(id, first, old), old)
+            } else {
+                (scope.classes_mut().undef_method(id, first), first)
+            };
+            if !ok {
+                return Err(Error::raise(
+                    "NameError",
+                    format!(
+                        "undefined method '{}' for {}",
+                        symbol_name(missing),
+                        class_display_name(scope, id),
+                    ),
+                ));
+            }
+            // `alias_method` answers the new name; `undef_method` answers the
+            // module. Measured.
+            let answer = if aliasing {
+                Value::symbol(first)
+            } else {
+                call.receiver
+            };
+            stack.push(answer);
+            Ok(None)
+        }
+
         Native::MethodDefined => {
             let Some(id) = class_id_of(scope, call.receiver) else {
                 return Err(Error::NoDispatch {
@@ -5560,8 +5972,12 @@ fn string_bytes(scope: &mut HandleScope<'_>, value: Value) -> Option<Vec<u8>> {
     if scope.payload(handle) != Payload::Bytes {
         return None;
     }
-    let class = scope.class(handle)?;
-    (class == scope.classes().object(Builtin::String.id())).then(|| scope.bytes(handle).to_vec())
+    // The class's representation, so a subclass of `String` is a string here.
+    // The payload check above is what makes this safe to widen: an object
+    // wearing a `String` ancestry but holding slots would have been refused
+    // already.
+    let class = scope.class_of(handle)?;
+    (scope.classes().repr(class) == Some(Builtin::String)).then(|| scope.bytes(handle).to_vec())
 }
 
 /// `lambda { }` given a block: the same body, marked as a lambda.
@@ -5830,6 +6246,28 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         ),
         (Builtin::Module, &["ancestors"], Native::Ancestors),
         (Builtin::Module, &["method_defined?"], Native::MethodDefined),
+        (Builtin::Module, &["alias_method"], Native::AliasMethod),
+        (
+            Builtin::Module,
+            &["class_variables"],
+            Native::ClassVariable(CvarOp::Names),
+        ),
+        (
+            Builtin::Module,
+            &["class_variable_get"],
+            Native::ClassVariable(CvarOp::Get),
+        ),
+        (
+            Builtin::Module,
+            &["class_variable_set"],
+            Native::ClassVariable(CvarOp::Set),
+        ),
+        (
+            Builtin::Module,
+            &["class_variable_defined?"],
+            Native::ClassVariable(CvarOp::Defined),
+        ),
+        (Builtin::Module, &["undef_method"], Native::UndefMethod),
         (Builtin::Class, &["superclass"], Native::Superclass),
         (Builtin::Kernel, &["__write__"], Native::WriteString),
         (Builtin::Float, &["to_s"], Native::FloatToS),
@@ -6167,19 +6605,16 @@ fn heap_kind(scope: &mut HandleScope<'_>, value: Value) -> Option<HeapKind> {
     if value.is_immediate() {
         return None;
     }
-    // A nested scope so the handle pops immediately. This runs once per `==`,
-    // and a loop that compares a thousand times would otherwise leave a
-    // thousand roots behind until the whole evaluation ended.
-    let mut nested = scope.nested();
-    let handle = nested.root(value);
-    let class = nested.class(handle)?;
-    let classes = nested.classes();
-    if class == classes.object(Builtin::String.id()) {
-        Some(HeapKind::Str)
-    } else if class == classes.object(Builtin::Array.id()) {
-        Some(HeapKind::Array)
-    } else {
-        None
+    // The class's *representation*, not the class object. One table read where
+    // this was two comparisons, and it accepts a subclass — `MyString == "a"`
+    // is true in Ruby, and was a `NoDispatch` while this asked whether the
+    // class object was exactly `String`'s. `bench/method_cache.rs` is the check
+    // that the receiver question did not get more expensive; this runs on every
+    // `==`.
+    match class_of(scope, value).and_then(|id| scope.classes().repr(id)) {
+        Some(Builtin::String) => Some(HeapKind::Str),
+        Some(Builtin::Array) => Some(HeapKind::Array),
+        _ => None,
     }
 }
 
@@ -6283,7 +6718,70 @@ fn regexp_literal(scope: &mut HandleScope<'_>, source: &str, options: i64) -> Re
 }
 
 /// Compile `source` and wrap it in a `Regexp` object.
+/// `Regexp.new(source, options)`.
+///
+/// The literal path is [`Insn::NewRegexp`]; this is the same compile with its
+/// argument arriving as a value, which is the half `core/regexp.rb` said was
+/// missing. The object is **not** frozen, unlike a literal — measured.
+fn regexp_new_from(scope: &mut HandleScope<'_>, call: &Pending) -> Result<Value, Error> {
+    let Some(first) = call.args.first().copied() else {
+        return Err(Error::raise(
+            "ArgumentError",
+            "wrong number of arguments (given 0, expected 1..3)",
+        ));
+    };
+    // `Regexp.new(/a/i)` takes the pattern's own source *and* its options, and
+    // ignores a second argument. Measured.
+    let from_regexp = is_regexp(scope, first);
+    let (source, mut options) = if from_regexp {
+        let mut nested = scope.nested();
+        let handle = nested.root(first);
+        let text = nested.slot(handle, crate::regexp::REGEXP_SOURCE);
+        let opts = nested.slot(handle, crate::regexp::REGEXP_OPTIONS);
+        drop(nested);
+        let opts = match opts.unpack() {
+            crate::value::Unpacked::Fixnum(n) => n,
+            _ => 0,
+        };
+        (string_text(scope, text), opts)
+    } else {
+        (string_text(scope, first), 0)
+    };
+    let Some(source) = source else {
+        return Err(Error::raise(
+            "TypeError",
+            "no implicit conversion into String",
+        ));
+    };
+    if !from_regexp {
+        // Ruby takes an integer of flags, and treats any other truthy value as
+        // `IGNORECASE` — `Regexp.new("a", true).options` is 1. Measured.
+        options = match call.args.get(1).copied() {
+            None | Some(Value::NIL) | Some(Value::FALSE) => 0,
+            Some(v) => match v.unpack() {
+                crate::value::Unpacked::Fixnum(n) => n,
+                _ => spinel_regex::Flags::IGNORECASE,
+            },
+        };
+    }
+    regexp_build(scope, &source, options, false)
+}
+
 fn regexp_new(scope: &mut HandleScope<'_>, source: &str, options: i64) -> Result<Value, Error> {
+    regexp_build(scope, source, options, true)
+}
+
+/// The pattern behind both constructors.
+///
+/// A literal is frozen from birth, which is what makes `Regexp#initialize` on
+/// one a `FrozenError`; `Regexp.new("a").frozen?` is `false`. Measured, and the
+/// only difference between the two.
+fn regexp_build(
+    scope: &mut HandleScope<'_>,
+    source: &str,
+    options: i64,
+    frozen: bool,
+) -> Result<Value, Error> {
     let index = scope
         .regexps_mut()
         .add(source, options)
@@ -6299,9 +6797,9 @@ fn regexp_new(scope: &mut HandleScope<'_>, source: &str, options: i64) -> Result
     nested.set_slot(handle, crate::regexp::REGEXP_INDEX, index);
     let text = nested.get(text);
     nested.set_slot(handle, crate::regexp::REGEXP_SOURCE, text);
-    // A Regexp is frozen from birth in Ruby, which is what makes
-    // `Regexp#initialize` on one a FrozenError rather than a second compile.
-    nested.freeze(handle);
+    if frozen {
+        nested.freeze(handle);
+    }
     nested.set_slot(
         handle,
         crate::regexp::REGEXP_OPTIONS,
@@ -6310,8 +6808,15 @@ fn regexp_new(scope: &mut HandleScope<'_>, source: &str, options: i64) -> Result
     Ok(nested.get(handle))
 }
 
+/// Whether `value` has `builtin`'s **representation** — its own instances, and
+/// a subclass's.
+///
+/// The question a primitive asks about its receiver. Comparing class objects
+/// instead made `MyArray#size` a "receiver that is not an Array" while
+/// `MyArray.new.class` correctly answered `MyArray`, which is the pair of wrong
+/// answers #199 exists to remove.
 fn is_builtin(scope: &mut HandleScope<'_>, value: Value, builtin: Builtin) -> bool {
-    class_of(scope, value) == Some(builtin.id())
+    class_of(scope, value).is_some_and(|id| scope.classes().repr(id) == Some(builtin))
 }
 
 fn is_regexp(scope: &mut HandleScope<'_>, value: Value) -> bool {
@@ -6501,19 +7006,59 @@ fn last_match_part(scope: &mut HandleScope<'_>, which: &MatchRef) -> Result<Valu
     let Some((_, text, groups)) = match_parts(scope, data) else {
         return Ok(Value::NIL);
     };
-    let whole = groups.first().copied().flatten();
-    let slice = match which {
-        MatchRef::Data => unreachable!("answered above"),
-        MatchRef::Whole => whole,
-        MatchRef::Pre => whole.map(|(start, _)| (0, start)),
-        MatchRef::Post => whole.map(|(_, end)| (end, text.len())),
-        // `$10` is group 10 when the pattern has one, and nil otherwise.
-        MatchRef::Group(n) => groups.get(*n as usize).copied().flatten(),
-    };
+    let slice = match_slice(which, text.len(), &groups);
     Ok(match slice {
         Some((start, end)) => string_new(scope, &text[start..end]),
         None => Value::NIL,
     })
+}
+
+/// Which stretch of the subject a regexp special names, or `None` where it has
+/// no value — an unmatched group, or a `$&` on a match that did not happen.
+///
+/// Shared by [`Insn::LastMatch`] and [`Insn::DefinedMatch`] so the two cannot
+/// drift: `defined?($1)` is exactly "`$1` would answer a string", which is not
+/// the same as "the pattern has a group 1".
+fn match_slice(
+    which: &MatchRef,
+    text_len: usize,
+    groups: &[Option<(usize, usize)>],
+) -> Option<(usize, usize)> {
+    let whole = groups.first().copied().flatten();
+    match which {
+        MatchRef::Data => whole,
+        MatchRef::Whole => whole,
+        MatchRef::Pre => whole.map(|(start, _)| (0, start)),
+        MatchRef::Post => whole.map(|(_, end)| (end, text_len)),
+        // `$10` is group 10 when the pattern has one, and nil otherwise.
+        MatchRef::Group(n) => groups.get(*n as usize).copied().flatten(),
+        // `$+` is the last group that *participated*: `"a" =~ /(a)(b)?/`
+        // answers `"a"` and not `nil`, so this skips trailing unmatched groups
+        // rather than taking the highest number. Group 0 is the whole match and
+        // is not a group for this purpose.
+        MatchRef::LastGroup => groups.iter().skip(1).rev().find_map(|g| *g),
+    }
+}
+
+/// Whether `value` is a `MatchData`, the only thing `$~ = ` accepts besides nil.
+fn is_match_data(scope: &mut HandleScope<'_>, value: Value) -> bool {
+    class_of(scope, value) == Some(Builtin::MatchData.id())
+}
+
+/// `defined?($&)`, `defined?($1)`, `defined?($+)`.
+///
+/// `"global-variable"` where the ref has a value and `nil` where it does not.
+/// `$~` never reaches here: it is `"global-variable"` whether or not anything
+/// matched, so the compiler answers it with a constant.
+fn defined_match(scope: &mut HandleScope<'_>, which: &MatchRef) -> bool {
+    let data = scope.last_match();
+    if data == Value::NIL {
+        return false;
+    }
+    let Some((_, text, groups)) = match_parts(scope, data) else {
+        return false;
+    };
+    match_slice(which, text.len(), &groups).is_some()
 }
 
 /// Ruby reports match offsets in characters; the engine works in bytes.

@@ -1,0 +1,1 @@
+fails(#201: `dup` never sends `initialize_copy`, so the fixture's hook does not record the copy's `object_id`. Not a String question — `Exception#dup` fails the same two ways):String#dup calls #initialize_copy on the new instance

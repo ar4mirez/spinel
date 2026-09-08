@@ -326,6 +326,7 @@ class Array
   # `shift` answers the first element; `shift(n)` answers a new array of the
   # first n. Both leave the rest behind, in this same array.
   def shift(*count)
+    __check_frozen__
     if count.size > 1
       raise ArgumentError, "wrong number of arguments (given " + count.size.to_s + ", expected 0..1)"
     end
@@ -372,7 +373,14 @@ class Array
     self
   end
 
+  # A frozen Array refuses every mutator, including one that would not have
+  # changed anything: `[1].freeze.concat([])` is a FrozenError. Measured.
+  def __check_frozen__
+    raise FrozenError, "can't modify frozen Array: " + inspect if frozen?
+  end
+
   def concat(other)
+    __check_frozen__
     other.each { |element| push(element) }
     self
   end

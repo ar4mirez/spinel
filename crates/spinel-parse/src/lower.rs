@@ -206,6 +206,17 @@ macro_rules! const_path_write {
 /// `a.b ||= 1` and twins. Prism keeps both `read_name` (`b`) and `write_name`
 /// (`b=`); `Target` keeps the read name and the compiler appends `=`, which is
 /// the rule Prism itself applies.
+/// The reader behind a setter's name: `b=` becomes `b`.
+///
+/// [`CallTarget::name`] holds the reader, because a compound write needs both
+/// names and Prism hands over one or the other depending on the node. Only a
+/// setter can appear as an assignment target — `a.== = 1` is a syntax error —
+/// so the trailing `=` is never part of an operator's name here.
+fn reader_name(name: &Name) -> Name {
+    name.strip_suffix('=')
+        .map_or_else(|| name.clone(), Into::into)
+}
+
 macro_rules! call_write {
     ($self:ident, $node:expr, $as:ident, $op:expr) => {{
         let n = get!($node, $as);
@@ -1318,7 +1329,7 @@ impl Lower<'_> {
                 let receiver = self.expr(&n.receiver());
                 TargetKind::Call(Box::new(CallTarget {
                     receiver,
-                    name: ident(&n.name()),
+                    name: reader_name(&ident(&n.name())),
                     safe_nav: n.is_safe_navigation(),
                 }))
             }
@@ -1328,7 +1339,7 @@ impl Lower<'_> {
                 let receiver = n.receiver().map(|r| self.expr(&r));
                 TargetKind::Call(Box::new(CallTarget {
                     receiver: receiver.unwrap_or_else(|| Expr::new(span, ExprKind::SelfExpr)),
-                    name: ident(&n.name()),
+                    name: reader_name(&ident(&n.name())),
                     safe_nav: n.is_safe_navigation(),
                 }))
             }

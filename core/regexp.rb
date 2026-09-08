@@ -4,16 +4,27 @@
 # primitives: they run the engine in `spinel-regex` and read the compiled
 # pattern's table entry.
 #
-# `Regexp.new` is not here. Compiling a pattern from a value only known at run
-# time needs the per-heap pattern table to be writable from a name the compiler
-# never saw, and `allocate` refuses on `Regexp` until it is.
+# `Regexp.new` is a primitive too, and a singleton method rather than an
+# `initialize`: `Class#allocate` refuses on `Regexp` because a pattern cannot
+# exist uninitialised, so there is nothing for the usual allocate-then-initialize
+# to allocate. The object it builds is *not* frozen, which is the one way it
+# differs from a literal.
 class Regexp
-  # Reachable only through `send`: a Regexp literal is frozen from birth, and
-  # `Regexp.new` refuses before it gets here. Re-initialising a frozen one is
-  # what Ruby raises about, so that is the answer this can give honestly.
+  # The flag bits, as Ruby numbers them. `Regexp.new("a", IGNORECASE).options`
+  # is 1 and `/a/ix.options` is 3, so these are a public part of the interface
+  # rather than an internal encoding.
+  IGNORECASE = 1
+  EXTENDED = 2
+  MULTILINE = 4
+
+  # Reachable only through `send`: `Regexp.new` builds its object without going
+  # through `initialize`, so anything that gets here already holds a compiled
+  # pattern. A literal is frozen and Ruby raises `FrozenError`; an unfrozen one
+  # from `Regexp.new` raises `TypeError`. Measured on ruby 4.0.6 — 4.1 makes
+  # both `FrozenError`, and ruby/spec guards the two apart.
   def initialize(*args)
     raise FrozenError, "can't modify frozen Regexp: " + inspect if frozen?
-    raise ArgumentError, "Regexp.new is not implemented yet"
+    raise TypeError, "already initialized regexp"
   end
 
   def ==(other)

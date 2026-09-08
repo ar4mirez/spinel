@@ -469,6 +469,25 @@ struct Entry {
     /// Allocated by [`HandleScope::singleton_class`], never before.
     singleton: Option<ClassId>,
     is_singleton: bool,
+    /// The representation instances of this class have, where it is not the
+    /// plain object shape.
+    ///
+    /// `Builtin::ALL` is indexed by class id, so a class the bootstrap did not
+    /// create is `None` for its own id — and reading that as "a user class"
+    /// gave `MyString.new` the plain-object shape whatever it inherited from.
+    /// This is inherited from the superclass instead, so `class MyString <
+    /// String` allocates a string and still answers its own class.
+    ///
+    /// A *representation*, not a class: the class object stays this class's,
+    /// which is what the measurement in #199 says routing to the built-in's
+    /// class object gets wrong, at a cost of 45 examples.
+    repr: Option<Builtin>,
+    /// This module's own class variables, `@@a`. Separate from `constants`
+    /// because the lookup rule is different: a constant is found by a lexical
+    /// walk and then an ancestor walk, and a class variable only by the
+    /// ancestor walk — and a *write* to one an ancestor already holds lands on
+    /// the ancestor, which no constant does.
+    class_variables: HashMap<SymbolId, Value>,
     /// This module's own constants. Not the ancestors' — [`Classes::const_get`]
     /// is the walk, and every rule Ruby has about which table wins depends on
     /// this one holding only what was assigned *here*.
@@ -615,6 +634,18 @@ impl Classes {
         self.entries.is_empty()
     }
 
+    /// The representation instances of `id` have: its own if it is a built-in,
+    /// its nearest built-in ancestor's otherwise, and `None` for a plain
+    /// object.
+    ///
+    /// This is the question a primitive asks about its receiver. Asking "is the
+    /// class object exactly `String`'s" instead is what made `MyArray#size` a
+    /// "receiver that is not an Array".
+    #[must_use]
+    pub fn repr(&self, id: ClassId) -> Option<Builtin> {
+        self.entry(id).repr
+    }
+
     pub fn kind(&self, id: ClassId) -> Kind {
         self.entry(id).kind
     }
@@ -729,9 +760,14 @@ impl Classes {
     // Upgrade path is a `Body::ZSuper` variant that `lookup_uncached` follows.
     pub fn set_visibility(&mut self, id: ClassId, name: SymbolId, visibility: Visibility) -> bool {
         if let Some(entry) = self.entry_mut(id).methods.get_mut(&name) {
-            entry.2 = visibility;
-            self.invalidate(id);
-            return true;
+            // A tombstone is not a method to narrow. Falling through to the
+            // chain walk below finds nothing either, because the walk stops
+            // here — so `private :m` after `undef m` is Ruby's `NameError`.
+            if entry.0 != Value::UNDEF {
+                entry.2 = visibility;
+                self.invalidate(id);
+                return true;
+            }
         }
         let Some(found) = self.lookup_uncached(id, name) else {
             return false;
@@ -741,6 +777,140 @@ impl Classes {
             .insert(name, (found.body, found.cref, visibility));
         self.invalidate(id);
         true
+    }
+
+    /// `alias new old`, and `Module#alias_method`.
+    ///
+    /// A **copy**, taken now: redefining `old` afterwards leaves the alias on
+    /// the body it had at this point, which is Ruby's rule —
+    ///
+    /// ```ruby
+    /// c = Class.new { def a = :first; alias b a; def a = :second }
+    /// [c.new.b, c.new.a]   #=> [:first, :second]
+    /// ```
+    ///
+    /// — measured, and the reason this is not a second name pointing at one
+    /// entry. The visibility comes with the body: an alias of a private method
+    /// is private.
+    ///
+    /// False where nothing in the chain defines `old`, which is the caller's
+    /// `NameError`.
+    pub fn alias_method(&mut self, id: ClassId, new: SymbolId, old: SymbolId) -> bool {
+        let Some(found) = self.lookup_uncached(id, old) else {
+            return false;
+        };
+        self.entry_mut(id)
+            .methods
+            .insert(new, (found.body, found.cref, found.visibility));
+        self.invalidate(id);
+        true
+    }
+
+    /// `undef name`, and `Module#undef_method`.
+    ///
+    /// Not [`Classes::remove_method`]. Removing an entry lets the superclass's
+    /// method through and `undef` does not:
+    ///
+    /// ```ruby
+    /// sup = Class.new { def a = :sup }
+    /// Class.new(sup) { def a = :sub; remove_method :a }.new.a  #=> :sup
+    /// Class.new(sup) { undef a }.new.a                         #=> NoMethodError
+    /// ```
+    ///
+    /// So it writes a **tombstone** — an entry whose body is [`Value::UNDEF`] —
+    /// which the chain walk finds and reports as nothing found, stopping the
+    /// walk where a removal would have continued it. `respond_to?`,
+    /// `method_defined?` and the `NoMethodError` all fall out of that one
+    /// representation, and a later `def` overwrites it.
+    ///
+    /// False where nothing in the chain defines `name`: Ruby's `NameError`.
+    pub fn undef_method(&mut self, id: ClassId, name: SymbolId) -> bool {
+        if self.lookup_uncached(id, name).is_none() {
+            return false;
+        }
+        self.entry_mut(id)
+            .methods
+            .insert(name, (Value::UNDEF, CrefId::ROOT, Visibility::Public));
+        self.invalidate(id);
+        true
+    }
+
+    /// `@@a`, read from `id` or the first ancestor that holds one.
+    ///
+    /// Ancestors only — a class variable is not found lexically, which is what
+    /// separates it from a constant.
+    ///
+    /// `Err(overtaken)` where *two* classes in the chain hold the name. That
+    /// happens when a subclass sets one and the superclass sets it afterwards,
+    /// and Ruby refuses to guess which was meant:
+    ///
+    /// ```ruby
+    /// sub.class_variable_set(:@@a, :sub)
+    /// parent.class_variable_set(:@@a, :parent)
+    /// sub.class_variable_get(:@@a)
+    /// # RuntimeError: class variable @@a of Sub is overtaken by Parent
+    /// ```
+    ///
+    /// The `Ok` case answers the nearest, which is why the ordinary
+    /// write-through-to-the-ancestor rule can never produce two.
+    pub fn cvar_get(&self, id: ClassId, name: SymbolId) -> Result<Option<Value>, ClassId> {
+        let mut found: Option<ClassId> = None;
+        for owner in self.ancestors(id) {
+            if self.entry(owner).class_variables.contains_key(&name) {
+                match found {
+                    None => found = Some(owner),
+                    Some(_) => return Err(owner),
+                }
+            }
+        }
+        Ok(found.and_then(|owner| self.entry(owner).class_variables.get(&name).copied()))
+    }
+
+    /// `@@a = v`.
+    ///
+    /// Writes to the ancestor that already holds one, and to `id` where none
+    /// does. Measured, and it is the surprising half:
+    ///
+    /// ```ruby
+    /// class A; @@a = 1; def r = @@a; end
+    /// class B < A; def w; @@a = 2; end; end
+    /// B.new.w; [A.new.r, B.new.r]   #=> [2, 2]
+    /// ```
+    pub fn cvar_set(&mut self, id: ClassId, name: SymbolId, value: Value) {
+        let owner = self.cvar_owner(id, name).unwrap_or(id);
+        self.entry_mut(owner).class_variables.insert(name, value);
+    }
+
+    /// Whether `id` or an ancestor holds `@@a`: `defined?(@@a)`.
+    pub fn cvar_defined(&self, id: ClassId, name: SymbolId) -> bool {
+        self.cvar_owner(id, name).is_some()
+    }
+
+    /// `Module#class_variables`: this module's, then its ancestors', with each
+    /// name once. Measured order: own first — `B` under `A` answers
+    /// `[:@@b, :@@a]`.
+    pub fn cvar_names(&self, id: ClassId) -> Vec<SymbolId> {
+        let mut names = Vec::new();
+        for owner in self.ancestors(id) {
+            for &name in self.entry(owner).class_variables.keys() {
+                if !names.contains(&name) {
+                    names.push(name);
+                }
+            }
+        }
+        names
+    }
+
+    /// `Module#class_variables(false)`: only the ones defined on `id` itself.
+    pub fn cvar_names_own(&self, id: ClassId) -> Vec<SymbolId> {
+        self.entry(id).class_variables.keys().copied().collect()
+    }
+
+    /// The nearest ancestor of `id` holding `name`, `id` included.
+    fn cvar_owner(&self, id: ClassId, name: SymbolId) -> Option<ClassId> {
+        self.ancestors(id)
+            .into_iter()
+            .find(|&owner| self.entry(owner).class_variables.contains_key(&name))
     }
 
     /// `Module#remove_method`: true if there was one to remove.
@@ -759,6 +929,10 @@ impl Classes {
     pub fn own_method(&self, id: ClassId, name: SymbolId) -> Option<Method> {
         for &owner in &self.entry(id).own {
             if let Some(&(body, cref, visibility)) = self.entry(owner).methods.get(&name) {
+                // An `undef` tombstone is not a method this class owns.
+                if body == Value::UNDEF {
+                    return None;
+                }
                 return Some(Method {
                     owner,
                     body,
@@ -771,7 +945,10 @@ impl Classes {
     }
 
     pub fn method_defined_here(&self, id: ClassId, name: SymbolId) -> bool {
-        self.entry(id).methods.contains_key(&name)
+        self.entry(id)
+            .methods
+            .get(&name)
+            .is_some_and(|&(body, _, _)| body != Value::UNDEF)
     }
 
     /// Find `name` starting at `id`, through the global method cache.
@@ -796,6 +973,13 @@ impl Classes {
         while let Some(c) = cursor {
             for &owner in &self.entry(c).own {
                 if let Some(&(body, cref, visibility)) = self.entry(owner).methods.get(&name) {
+                    // A tombstone `undef` wrote. Found, and therefore the walk
+                    // stops — but nothing is there, so the superclass's method
+                    // is not reached. That is the whole difference between
+                    // `undef` and `remove_method`.
+                    if body == Value::UNDEF {
+                        return None;
+                    }
                     return Some(Method {
                         owner,
                         body,
@@ -840,6 +1024,11 @@ impl Classes {
         let at = chain.iter().position(|&c| c == owner)?;
         for &next in &chain[at + 1..] {
             if let Some(&(body, cref, visibility)) = self.entry(next).methods.get(&name) {
+                // `super` past an `undef` finds nothing, measured: the chain
+                // stops here rather than continuing to the next definition.
+                if body == Value::UNDEF {
+                    return None;
+                }
                 return Some(Method {
                     owner: next,
                     body,
@@ -1234,7 +1423,16 @@ impl Classes {
         is_singleton: bool,
     ) -> ClassId {
         let id = ClassId(u32::try_from(self.entries.len()).expect("a heap holds under 4B classes"));
+        // A built-in is its own representation — the bootstrap creates them in
+        // `Builtin` order, so a class whose id is one of theirs *is* that
+        // built-in. Everything else inherits its superclass's, which is what
+        // carries `String`'s shape down to `MyString` and stops at `Object`.
+        let repr = Builtin::ALL
+            .get(id.index())
+            .copied()
+            .or_else(|| superclass.and_then(|s| self.entry(s).repr));
         self.entries.push(Entry {
+            repr,
             object,
             name: name.map(Box::from),
             kind,
@@ -1250,6 +1448,7 @@ impl Classes {
             singleton: None,
             is_singleton,
             constants: HashMap::new(),
+            class_variables: HashMap::new(),
         });
         // The inverse edge, so a later definition on the superclass can find
         // this class to invalidate. Nothing else needs invalidating here: a
@@ -1276,6 +1475,9 @@ impl Classes {
                 f(body);
             }
             for &value in entry.constants.values() {
+                f(value);
+            }
+            for &value in entry.class_variables.values() {
                 f(value);
             }
         }

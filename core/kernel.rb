@@ -9,8 +9,17 @@ module Kernel
     self == other
   end
 
+  # `class or module required` rather than `false`: asking whether an object is
+  # a kind of `1` is a mistake in the caller, and Ruby says so. Measured.
+  #
+  # The check runs only when the answer would be false — a `mod` that is in the
+  # ancestry is a module already — so the common path costs what it always did.
+  # `mod.class.ancestors` rather than `mod.is_a?(Module)`, because this *is*
+  # `is_a?` and asking it here would not terminate.
   def is_a?(mod)
-    self.class.ancestors.include?(mod)
+    return true if self.class.ancestors.include?(mod)
+    raise TypeError, "class or module required" unless mod.class.ancestors.include?(Module)
+    false
   end
 
   def kind_of?(mod)
@@ -18,7 +27,9 @@ module Kernel
   end
 
   def instance_of?(mod)
-    self.class.equal?(mod)
+    return true if self.class.equal?(mod)
+    raise TypeError, "class or module required" unless mod.class.ancestors.include?(Module)
+    false
   end
 
   # `eql?` is `hash`'s partner: two objects that are `eql?` must have the same

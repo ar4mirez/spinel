@@ -9,8 +9,10 @@
 # absent one. `full_message` and `detailed_message` wait on the same thing,
 # which PRD 0012 named as a non-goal.
 class Exception
+  # `message` is `to_s`, not `@message`: a subclass that overrides `to_s` changes
+  # what `message` and `inspect` answer, which is what ruby/spec pins.
   def message
-    @message
+    to_s
   end
 
   def to_s
@@ -22,7 +24,7 @@ class Exception
   end
 
   def inspect
-    text = message
+    text = to_s
     text.empty? ? self.class.name : "#<" + self.class.name + ": " + text + ">"
   end
 
