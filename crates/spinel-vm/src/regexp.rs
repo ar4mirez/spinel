@@ -13,6 +13,7 @@
 //!
 //! [`Definitions`]: crate::method::Definitions
 
+use crate::bytecode::Iseq;
 use crate::{Payload, Value};
 use spinel_regex::{Flags, Regex};
 use std::collections::HashMap;
@@ -50,6 +51,14 @@ pub struct Regexps {
     compiled: Vec<Arc<Regex>>,
     /// `(source, options)` to the one `Regexp` object a literal answers with.
     cache: HashMap<(String, i64), Value>,
+    /// `/o` sites, keyed by the body they are in and their index within it.
+    ///
+    /// Not keyed by source: `/o` answers the *first* interpolation for ever, so
+    /// two calls with different values share one object. The `Arc<Iseq>` is
+    /// held rather than just its address — that is what makes the address a
+    /// unique key, because a body this map refers to cannot be dropped and have
+    /// another allocated where it was.
+    once: HashMap<(usize, u32), (Arc<Iseq>, Value)>,
 }
 
 impl Regexps {
@@ -58,6 +67,7 @@ impl Regexps {
         Regexps {
             compiled: Vec::new(),
             cache: HashMap::new(),
+            once: HashMap::new(),
         }
     }
 
@@ -93,6 +103,25 @@ impl Regexps {
         for value in self.cache.values() {
             f(*value);
         }
+        for (_, value) in self.once.values() {
+            f(*value);
+        }
+    }
+
+    /// What this `/o` site answered the first time it ran, if it has.
+    #[must_use]
+    pub fn once_cached(&self, iseq: &Arc<Iseq>, site: u32) -> Option<Value> {
+        self.once
+            .get(&(Arc::as_ptr(iseq) as usize, site))
+            .map(|&(_, value)| value)
+    }
+
+    /// Record what this `/o` site answers from now on.
+    pub fn cache_once(&mut self, iseq: &Arc<Iseq>, site: u32, value: Value) {
+        self.once.insert(
+            (Arc::as_ptr(iseq) as usize, site),
+            (Arc::clone(iseq), value),
+        );
     }
 }
 

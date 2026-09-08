@@ -124,9 +124,8 @@ describe "Something" do
     (1 + 1).should == 2
   end
 
-  it "needs a class variable" do
-    @@a = 2
-    @@a.should == 2
+  it "needs a subprocess" do
+    `echo hi`.should == "hi\n"
   end
 end
 "##;
@@ -149,7 +148,7 @@ fn an_example_it_cannot_run_is_blocked_and_never_failed() {
         "the report must say what blocked it:\n{text}"
     );
     assert!(
-        text.contains("a class variable is not compiled yet"),
+        text.contains("a backtick command is not compiled yet"),
         "the reason must name the construct:\n{text}"
     );
 }

@@ -21,6 +21,16 @@ use std::sync::Arc;
 use crate::bytecode::Iseq;
 use crate::value::{SymbolId, Value};
 
+/// Which of `Module`'s four class-variable reflection methods is being run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CvarOp {
+    Get,
+    Set,
+    Defined,
+    /// `Module#class_variables`: own first, then inherited. Measured.
+    Names,
+}
+
 /// Which of `Object`'s four instance-variable reflection methods is being run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IvarOp {
@@ -232,6 +242,17 @@ pub enum Native {
     /// `Module#ancestors` — the linearised chain, which only the class table
     /// knows. `is_a?`, `kind_of?`, `Module#===` and `Module#<` are Ruby on it.
     Ancestors,
+    /// `Module#class_variables`, `#class_variable_get`, `#class_variable_set`
+    /// and `#class_variable_defined?` — reflection over the same per-class
+    /// table `@@a` reads and writes.
+    ClassVariable(CvarOp),
+    /// `Module#alias_method`, the send-shaped spelling of the `alias`
+    /// statement — same table copy, on the receiver rather than on the frame's
+    /// definee. Answers the new name, measured.
+    AliasMethod,
+    /// `Module#undef_method`. Writes the tombstone `undef` writes, and answers
+    /// the module. Measured.
+    UndefMethod,
     /// `Class#superclass` — one step up the same chain.
     Superclass,
     /// `Module#private`, `#public`, `#protected` (#161).

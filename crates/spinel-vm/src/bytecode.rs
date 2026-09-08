@@ -284,7 +284,76 @@ pub enum Insn {
     /// successful match and read straight out of the `MatchData` the VM keeps.
     /// Giving them their own instruction keeps the global table free of names
     /// no assignment ever writes.
+    /// `/a#{b}c/`: compile a pattern from the `String` on top of the stack.
+    ///
+    /// An interpolated pattern cannot be an [`Iseq`] literal — literals are
+    /// immutable and shared across Ractors, and this one is not known until the
+    /// frame runs — so the source is built the way an interpolated string is
+    /// and this turns it into a `Regexp`. The operand is the literal's flags.
+    ///
+    /// Not the literal cache: `2.times { rs << /#{b}/ }` pushes two objects
+    /// where `2.times { rs << /a/ }` pushes one, measured. Frozen, like every
+    /// other `Regexp` literal, which is what `Regexp.new` is not.
+    NewRegexp(i64),
+
+    /// `/a#{b}c/o`: the same, interpolated **once** and cached per literal
+    /// site.
+    ///
+    /// Measured: a method holding one answers the same object on every call,
+    /// built from the first interpolation — `def f(b) = /#{b}/o` makes
+    /// `f(1).equal?(f(2))` true with `source` `"1"`. So the cache is keyed by
+    /// the site rather than by the source, and the operand is that site's index
+    /// within this `Iseq`.
+    ///
+    /// The cache is per heap, not in the `Iseq`: an `Iseq` is immutable and
+    /// shared across Ractors, and a `Regexp` is a heap object that cannot be.
+    NewRegexpOnce(i64, u32),
+
+    /// `@@a`, `@@a = v`, `defined?(@@a)`. The operand indexes
+    /// [`Iseq::symbols`].
+    ///
+    /// Read off the frame's cref, like a `def`, and then along that class's
+    /// ancestors — never lexically, which is what separates a class variable
+    /// from a constant.
+    GetCvar(u32),
+    SetCvar(u32),
+    DefinedCvar(u32),
+
+    /// `alias new old`: copy `old`'s entry into the frame's definee under
+    /// `new`. Both are indices into [`Iseq::symbols`].
+    ///
+    /// Not a send. `alias` writes into the same place `def` does — the frame's
+    /// cref — rather than into `self`, which is why it is an instruction and
+    /// `Module#alias_method`, which *is* a send and takes a receiver, is a
+    /// primitive beside it.
+    Alias(u32, u32),
+
+    /// `undef name`: write a tombstone into the frame's definee, so a later
+    /// call finds nothing rather than the superclass's method.
+    Undef(u32),
+
     LastMatch(MatchRef),
+
+    /// Write the frame's last match: `$~ = m`.
+    ///
+    /// Pops, like [`Insn::SetGlobal`]. Only `nil` and a `MatchData` are
+    /// accepted — Ruby raises `TypeError: wrong argument type Integer
+    /// (expected MatchData)` on anything else, measured — because the derived
+    /// globals read this value as a match, and a plain object would make `$1`
+    /// answer nonsense rather than raise.
+    SetLastMatch,
+
+    /// `defined?` on a regexp special, which is not the same question as
+    /// reading one.
+    ///
+    /// `defined?($~)` is `"global-variable"` whether or not anything has
+    /// matched, so the compiler answers that one with a constant and never
+    /// emits this. Every other ref is `nil` until a match gives it a value:
+    /// `defined?($&)` before any match, `defined?($2)` where the pattern has
+    /// one group, and both again after a match *fails* — all measured on ruby
+    /// 4.0.6, and all the reason these could not join #166's global table,
+    /// whose answer is presence in a map.
+    DefinedMatch(MatchRef),
     /// A jump within this frame that runs the `ensure` bodies it leaves.
     ///
     /// `break` and `next` inside a `while` are ordinary jumps — until the loop
@@ -415,6 +484,10 @@ pub enum MatchRef {
     Pre,
     /// `$'` — everything after it.
     Post,
+    /// `$+`, the text of the last group that *participated* in the match.
+    /// Measured: `"a" =~ /(a)(b)?/` leaves it `"a"`, not `nil`, so the rule is
+    /// the last non-nil group rather than the highest-numbered one.
+    LastGroup,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -562,6 +635,9 @@ pub struct Iseq {
     /// `(symbol index, child index)` for each [`Insn::DefineMethod`] and
     /// [`Insn::DefineSingleton`].
     pub definitions: Vec<(u32, u32)>,
+    /// How many `/o` regexp sites this body has, so a heap can size their
+    /// cache. One per [`Insn::NewRegexpOnce`].
+    pub once_regexps: u32,
     /// One entry per [`Insn::OpenClass`].
     pub class_defs: Vec<ClassDef>,
     /// Protected instruction ranges, innermost first.

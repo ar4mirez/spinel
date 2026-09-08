@@ -59,8 +59,12 @@ class Hash
     self
   end
 
-  def default
-    @default_is_proc ? nil : @default
+  # `default` and `default(key)` are the same method: with a key it runs the
+  # default block, without one it answers nil where a block is what was set.
+  # Measured — `Hash.new { |h, k| k }.default` is nil and `.default(:k)` is `:k`.
+  def default(*key)
+    return @default unless @default_is_proc
+    key.empty? ? nil : @default.call(self, key[0])
   end
 
   def default_proc
@@ -93,11 +97,13 @@ class Hash
     nil
   end
 
+  # A miss goes through `default`, which is a method rather than the ivar: a
+  # `Hash` subclass overriding `default(key)` is how ruby/spec's `DefaultHash`
+  # answers 100 for every key, and reading `@default` here would never see it.
   def [](key)
     at = __index__(key)
     return @pairs[at][1] unless at.nil?
-    return @default.call(self, key) if @default_is_proc
-    @default
+    default(key)
   end
 
   # `fetch(k, nil)` answers nil; only `fetch(k)` with no block raises. So this

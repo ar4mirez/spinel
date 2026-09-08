@@ -105,7 +105,11 @@ These rules are CRuby's, and they were measured rather than read: `crates/spinel
 
 Singleton classes are allocated on first ask, with one exception: the `class` keyword builds a class's metaclass as it defines it, because `class B < A` with a `def self.m` on `A` reaches `m` through `#<Class:B> < #<Class:A>` and a `B` still pointing at `Class` would miss it. That is CRuby's `rb_define_class`, and `HandleScope::define_class` stays lazy for everything else. A class's singleton inherits from its superclass's, `BasicObject`'s inherits from `Class`, and a module's inherits from `Module` — the twist that puts `Class`, `Module`, `Object`, `Kernel`, and `BasicObject` at the end of every metaclass's ancestors. An ordinary object's singleton *becomes* its class, as in Ruby, so the header write is the whole mechanism.
 
-Method tables are Rust hash maps hanging off the class table, not object slots, so the class table is a root source in `Heap::mark`: it holds every class object, every method body, and every constant.
+Method tables are Rust hash maps hanging off the class table, not object slots, so the class table is a root source in `Heap::mark`: it holds every class object, every method body, every constant, and every class variable.
+
+`undef` writes a **tombstone** rather than removing an entry: a body of `Value::UNDEF` that the chain walk finds and then reports as nothing found. That is what separates it from `remove_method`, which removes the entry and lets the superclass's method through — `Class.new(sup) { undef a }.new.a` is a `NoMethodError` where the same class with `remove_method :a` answers `sup`'s. `respond_to?`, `method_defined?` and the `NoMethodError` all fall out of the one representation, and a later `def` overwrites it. `alias` copies the entry it finds *now*, visibility included, so redefining the original afterwards does not move the alias.
+
+Each entry also carries a **representation**: the built-in whose shape its instances have, inherited from the superclass when the class is created ([#199](https://github.com/ar4mirez/spinel/issues/199)). `Builtin::ALL` is indexed by class id, so asking it about a user-defined class answers `None` however built-in that class's ancestry is — which gave `class MyString < String` the plain-object shape. The representation is the question `allocate` and every primitive asks about a receiver instead, so `MyString.new("b")` allocates a string, answers `MyString`, and is read by `String#size`; and a class whose representation has none that can be built — `Proc`, `Regexp` — still refuses, subclass included, rather than handing back a plain object wearing its class. Routing such a class to its built-in ancestor's *class object* was measured instead and costs 45 examples, because `MyString.new.class` then answers `String`.
 
 ## Constants and lexical scope
 
@@ -304,7 +308,21 @@ modifiers `/n` `/e` `/s` `/u`, which wait for the Encoding slice.
 Matching is byte-oriented over UTF-8 and reports byte offsets; `MatchData`
 converts to characters, because that is what `#begin` answers. `$~` is one slot
 per heap — Ruby scopes it per frame and per thread, which arrives with the
-frame specials and with Ractors.
+frame specials and with Ractors. The refs derived from it — `$1`, `$&`,
+`` $` ``, `$'`, `$+` — are read off that match rather than out of the global
+table, which is why `defined?($&)` is nil until something has matched while
+`defined?($~)` never is.
+
+A literal whose source is known at compile time is an `Iseq` literal, and two
+evaluations of one are the same object. An interpolated literal cannot be:
+literals are immutable and shared across Ractors, and this one is not known
+until the frame runs. So the source is concatenated at run time and compiled
+from the result, giving a fresh frozen `Regexp` each time — which is what Ruby
+does, measured. `/o` is the exception: it interpolates once and caches the
+*object* per literal site, so a method holding one answers the same `Regexp` on
+every call. That cache is per heap, keyed by the body and the site's index
+within it, and holds an `Arc` of the body so the address it is keyed by cannot
+be reused.
 
 ## Open questions to settle when their slice arrives
 

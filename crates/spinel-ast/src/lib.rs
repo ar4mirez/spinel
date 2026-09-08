@@ -473,6 +473,13 @@ pub enum TargetKind {
 #[derive(Debug, Clone, PartialEq)]
 pub struct CallTarget {
     pub receiver: Expr,
+    /// The *reader*'s name: `b` for `a.b = v`, not `b=`.
+    ///
+    /// A compound write (`a.b += v`) reads before it writes, so both names are
+    /// needed and only one of them can be stored. Prism spells this two ways —
+    /// `CallTargetNode` names the writer, `CallOperatorWriteNode` names the
+    /// reader — and the lowering normalises to the reader so the compiler can
+    /// append `=` rather than guess which it was handed.
     pub name: Name,
     /// `&.` rather than `.`
     pub safe_nav: bool,

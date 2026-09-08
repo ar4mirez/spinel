@@ -153,7 +153,7 @@ pub fn declared_locals(statements: &[Expr]) -> Vec<Name> {
 /// A local knows its slot and how many scopes up it lives; an instance
 /// variable knows only its name, because which index it lands at is the
 /// object's shape's business and is not known until the write runs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Slot {
     /// `(slot, depth)`, as [`Insn::GetLocal`] takes them.
     Local(u16, u16),
@@ -161,6 +161,26 @@ enum Slot {
     Ivar(u32),
     /// An index into [`Iseq::symbols`], for [`Insn::SetGlobal`].
     Global(u32),
+    /// `@@a`. An index into [`Iseq::symbols`].
+    Cvar(u32),
+    /// `$~`. Not a global: [`Insn::LastMatch`] and [`Insn::SetLastMatch`]
+    /// read and write the frame's match, which is what `$1` derives from.
+    LastMatch,
+    /// `a[i]` or `a.b`: a pair of sends rather than a place.
+    ///
+    /// The receiver and the index arguments have already been evaluated into
+    /// the hidden locals named here, so a read and the write that follows it
+    /// see them exactly once — which is Ruby's rule for `a[i()] += 1` and the
+    /// whole reason a target has to be *prepared* before it can be used.
+    Send {
+        /// The hidden local the receiver was parked in.
+        receiver: u16,
+        /// One hidden local per index argument, in source order. Empty for an
+        /// attribute target.
+        args: Vec<u16>,
+        /// `[]` or the attribute's name; `set` is the same name with `=`.
+        get: Box<str>,
+    },
 }
 
 /// A `begin` body a `retry` inside its `rescue` can restart.
@@ -208,6 +228,8 @@ struct Compiler {
     call_sites: Vec<CallSite>,
     definitions: Vec<(u32, u32)>,
     class_defs: Vec<ClassDef>,
+    /// How many `/o` sites this body has; each gets its own cache slot.
+    once_regexps: u32,
     /// Protected ranges, appended as each `begin` finishes, so an inner one is
     /// already in the list when its outer one arrives. The unwinder takes the
     /// first entry covering the program counter, so that order *is* "innermost
@@ -332,6 +354,7 @@ impl Compiler {
             call_sites: Vec::new(),
             definitions: Vec::new(),
             class_defs: Vec::new(),
+            once_regexps: 0,
             catch_table: Vec::new(),
             retries: Vec::new(),
             open_ensures: 0,
@@ -390,6 +413,7 @@ impl Compiler {
             call_sites: self.call_sites,
             definitions: self.definitions,
             class_defs: self.class_defs,
+            once_regexps: self.once_regexps,
             catch_table: self.catch_table,
             scope_barrier: self.scope_barrier,
         }
@@ -413,17 +437,27 @@ impl Compiler {
             | Insn::PushLit(_)
             | Insn::PushSym(_)
             | Insn::LastMatch(_)
+            | Insn::DefinedMatch(_)
             | Insn::GetIvar(_)
             | Insn::DefinedIvar(_)
             | Insn::GetGlobal(_)
             | Insn::DefinedGlobal(_)
+            | Insn::GetCvar(_)
+            | Insn::DefinedCvar(_)
             | Insn::Dup => 1,
             // Pops the splatted array and pushes its snapshot: net zero.
             Insn::CaptureSplat => 0,
+            // Pops the built source and pushes the pattern: net zero.
+            Insn::NewRegexp(_) | Insn::NewRegexpOnce(_, _) => 0,
+            // Both write into the frame's definee and leave the stack alone;
+            // the `nil` an `alias` expression is worth is pushed separately.
+            Insn::Alias(_, _) | Insn::Undef(_) => 0,
             Insn::Pop
             | Insn::SetLocal(_, _)
             | Insn::SetIvar(_)
             | Insn::SetGlobal(_)
+            | Insn::SetCvar(_)
+            | Insn::SetLastMatch
             | Insn::JumpUnless(_)
             | Insn::JumpIf(_)
             | Insn::JumpUnlessUndef(_)
@@ -722,15 +756,45 @@ impl Compiler {
                 if regexp.flags.encoding != spinel_ast::RegexpEncoding::None {
                     return Err(Unsupported::at("a regexp encoding modifier", span));
                 }
-                let bytes = flat_bytes(&regexp.parts)
-                    .ok_or_else(|| Unsupported::at("regexp interpolation", span))?;
-                let source = String::from_utf8(bytes.into_vec())
-                    .map_err(|_| Unsupported::at("a regexp source that is not UTF-8", span))?;
-                let index = self.literal(Literal::Regexp {
-                    source: source.into_boxed_str(),
-                    options: regexp_options(&regexp.flags),
-                });
-                self.emit(Insn::PushLit(index));
+                let options = regexp_options(&regexp.flags);
+                match flat_bytes(&regexp.parts) {
+                    // A pattern known at compile time is a literal, and two
+                    // evaluations of it are the *same* object — `2.times { rs
+                    // << /a/ }` pushes one twice, which `regexp_spec.rb` checks
+                    // with `equal?`.
+                    Some(bytes) => {
+                        let source = String::from_utf8(bytes.into_vec()).map_err(|_| {
+                            Unsupported::at("a regexp source that is not UTF-8", span)
+                        })?;
+                        let index = self.literal(Literal::Regexp {
+                            source: source.into_boxed_str(),
+                            options,
+                        });
+                        self.emit(Insn::PushLit(index));
+                    }
+                    // An interpolated one is built at run time — the same
+                    // concatenation #154 gave strings — and compiled from the
+                    // result. Interpolation sends `to_s`, so a `Regexp` operand
+                    // embeds its own options the way Ruby does, with no special
+                    // case here.
+                    None => {
+                        // `/o` interpolates once and caches the *object*: a
+                        // method holding one answers the same `Regexp` on every
+                        // call, built from the first interpolation. Measured.
+                        // The source is still built every time — the cache is
+                        // consulted after it, which is what keeps the
+                        // instruction's stack effect the same as the plain
+                        // form's.
+                        self.interpolated(&regexp.parts)?;
+                        if regexp.flags.once {
+                            let site = self.once_regexps;
+                            self.once_regexps += 1;
+                            self.emit(Insn::NewRegexpOnce(options, site));
+                        } else {
+                            self.emit(Insn::NewRegexp(options));
+                        }
+                    }
+                }
             }
 
             ExprKind::Sym(symbol) => {
@@ -749,6 +813,14 @@ impl Compiler {
             ExprKind::Range(range) => self.range_literal(range)?,
 
             ExprKind::Var(var) => self.var(var, span)?,
+            ExprKind::Alias(alias) => self.alias(alias, span)?,
+            ExprKind::Undef(names) => {
+                for name in names {
+                    let symbol = self.method_name(name, span)?;
+                    self.emit(Insn::Undef(symbol));
+                }
+                self.emit(Insn::PushNil);
+            }
             ExprKind::Assign(assign) => self.assign(assign, span)?,
             ExprKind::If(node) => self.if_expr(node)?,
             ExprKind::While(node) => self.while_expr(node)?,
@@ -1016,7 +1088,11 @@ impl Compiler {
                 self.emit(Insn::GetIvar(symbol));
                 Ok(())
             }
-            VarRef::Class(_) => Err(Unsupported::at("a class variable", span)),
+            VarRef::Class(name) => {
+                let symbol = self.symbol(name);
+                self.emit(Insn::GetCvar(symbol));
+                Ok(())
+            }
             VarRef::Global(name) => match match_ref(name) {
                 Some(which) => {
                     self.emit(Insn::LastMatch(which));
@@ -1039,10 +1115,53 @@ impl Compiler {
                 self.emit(Insn::GetLocal(slot, 0));
                 Ok(())
             }
-            VarRef::BackRef(_) | VarRef::NumberedRef(_) => {
-                Err(Unsupported::at("a regexp back-reference", span))
+            // Prism gives the regexp specials their own nodes rather than
+            // lowering them to a global, so they never reach the arm above.
+            // They are read off the last match, which is what #166 kept them
+            // out of the global table for.
+            VarRef::BackRef(name) => match match_ref(name) {
+                Some(which) => {
+                    self.emit(Insn::LastMatch(which));
+                    Ok(())
+                }
+                None => Err(Unsupported::at("this regexp back-reference", span)),
+            },
+            VarRef::NumberedRef(n) => {
+                let n = u16::try_from(*n)
+                    .map_err(|_| Unsupported::at("a capture group number this wide", span))?;
+                self.emit(Insn::LastMatch(MatchRef::Group(n)));
+                Ok(())
             }
         }
+    }
+
+    /// `alias new old`.
+    ///
+    /// Both names arrive as symbol literals — Ruby's grammar takes a bare word,
+    /// a symbol or an operator there, and Prism spells all three the same way —
+    /// so there is nothing to evaluate and the instruction carries two symbols.
+    /// `alias` evaluates to `nil`, measured.
+    fn alias(&mut self, alias: &spinel_ast::Alias, span: Span) -> Emit {
+        if alias.global {
+            return Err(Unsupported::at("`alias` on a global variable", span));
+        }
+        let new = self.method_name(&alias.new_name, span)?;
+        let old = self.method_name(&alias.old_name, span)?;
+        self.emit(Insn::Alias(new, old));
+        self.emit(Insn::PushNil);
+        Ok(())
+    }
+
+    /// The symbol a method name in an `alias` or `undef` names.
+    fn method_name(&mut self, expr: &Expr, span: Span) -> Result<u32, Unsupported> {
+        let ExprKind::Sym(symbol) = &expr.kind else {
+            return Err(Unsupported::at("a computed method name here", span));
+        };
+        let bytes = flat_bytes(&symbol.parts)
+            .ok_or_else(|| Unsupported::at("an interpolated method name here", span))?;
+        let name = String::from_utf8(bytes.into_vec())
+            .map_err(|_| Unsupported::at("a method name that is not UTF-8", span))?;
+        Ok(self.symbol(&name))
     }
 
     fn assign(&mut self, assign: &Assign, span: Span) -> Emit {
@@ -1072,16 +1191,16 @@ impl Compiler {
             AssignOp::Assign => {
                 self.expr(&assign.value)?;
                 self.emit(Insn::Dup);
-                self.emit_set(slot);
+                self.emit_set(&slot);
             }
             AssignOp::Binary(op) => {
                 let op = BinOp::from_name(op)
                     .ok_or_else(|| Unsupported::at("this compound assignment operator", span))?;
-                self.emit_get(slot);
+                self.emit_get(&slot);
                 self.expr(&assign.value)?;
                 self.emit(Insn::BinOp(op));
                 self.emit(Insn::Dup);
-                self.emit_set(slot);
+                self.emit_set(&slot);
             }
             // `a ||= v` reads `a`, and assigns only when it is falsy. The read
             // is safe before any write because a frame's locals start `nil`,
@@ -1092,12 +1211,27 @@ impl Compiler {
                 } else {
                     Insn::JumpUnlessKeep as fn(i32) -> Insn
                 };
-                self.emit_get(slot);
+                // A class variable is the one slot whose *read* raises when
+                // nothing has been assigned, so `@@a ||= 1` cannot start with
+                // one. Ruby guards it — `@@x ||= 7` is 7 where `@@x &&= 7` and
+                // `@@x += 1` are both `NameError`, measured — so the guard is
+                // here rather than in a second, quieter read instruction.
+                let unset = match (&slot, &assign.op) {
+                    (Slot::Cvar(symbol), AssignOp::Or) => {
+                        self.emit(Insn::DefinedCvar(*symbol));
+                        Some(self.emit_jump(Insn::JumpUnless))
+                    }
+                    _ => None,
+                };
+                self.emit_get(&slot);
                 let skip = self.emit_jump(keep);
                 self.emit(Insn::Pop);
+                if let Some(unset) = unset {
+                    self.patch_here(unset);
+                }
                 self.expr(&assign.value)?;
                 self.emit(Insn::Dup);
-                self.emit_set(slot);
+                self.emit_set(&slot);
                 self.patch_here(skip);
             }
         }
@@ -1124,6 +1258,21 @@ impl Compiler {
     /// The whole thing evaluates to the right-hand side array, which is what
     /// `(a, b = 1, 2)` answers in Ruby.
     fn multi_assign(&mut self, multi: &MultiTarget, value: &Expr, span: Span) -> Emit {
+        // Ruby evaluates every target's receiver and index, left to right,
+        // *before* the right-hand side:
+        //
+        //     r[(o << :i1; 0)], r[(o << :i2; 1)] = (o << :rhs; 5), 6
+        //     #=> [:i1, :i2, :rhs, [:set, 0, 5], [:set, 1, 6]]
+        //
+        // measured on ruby 4.0.6. So preparation is its own pass, and the
+        // slots it produces are handed to the assignment pass in the same
+        // order rather than re-prepared there — re-preparing would evaluate a
+        // receiver twice. It is a no-op for the local, ivar and global targets
+        // that make up almost every multiple assignment.
+        let mut prepared = Vec::new();
+        self.prepare_multi(multi, &mut prepared)?;
+        let mut prepared = prepared.into_iter();
+
         // An array literal on the right is already the array to spread; every
         // other shape goes through `to_ary`, which is the conversion Ruby uses
         // here and is *not* `to_a` — an object with only `to_a` is not spread.
@@ -1140,14 +1289,62 @@ impl Compiler {
             self.emit(Insn::GetLocal(slot, 0));
             self.emit_send("__masgn_array__", 1);
         }
-        self.spread_into(multi, span)?;
+        self.spread_into(multi, &mut prepared, span)?;
         self.emit(Insn::Pop);
         Ok(())
     }
 
+    /// Prepare every target in `multi`, in the order [`Self::spread_into`] will
+    /// assign them, appending one slot each.
+    ///
+    /// A nested `(a, b), c` contributes a `None` for the group itself and then
+    /// its own targets, which is exactly the order the assignment pass walks —
+    /// so the two stay in step without either one carrying an index.
+    fn prepare_multi(&mut self, multi: &MultiTarget, out: &mut Vec<Option<Slot>>) -> Emit {
+        for target in &multi.lefts {
+            self.prepare_target(target, out)?;
+        }
+        if let Some(rest) = &multi.rest {
+            match &rest.kind {
+                TargetKind::Splat(Some(inner)) => self.prepare_target(inner, out)?,
+                TargetKind::Splat(None) => {}
+                _ => self.prepare_target(rest, out)?,
+            }
+        }
+        for target in &multi.rights {
+            self.prepare_target(target, out)?;
+        }
+        Ok(())
+    }
+
+    fn prepare_target(&mut self, target: &Target, out: &mut Vec<Option<Slot>>) -> Emit {
+        // A constant target is written by `Insn::SetConst` and has nothing to
+        // evaluate first; a nested group is prepared through its own targets.
+        if self.const_target(target)?.is_some() {
+            out.push(None);
+            return Ok(());
+        }
+        match &target.kind {
+            TargetKind::Multi(inner) => {
+                out.push(None);
+                self.prepare_multi(inner, out)
+            }
+            _ => {
+                let slot = self.target_slot(target)?;
+                out.push(Some(slot));
+                Ok(())
+            }
+        }
+    }
+
     /// Spread the `Array` on top of the stack across `multi`'s targets, leaving
     /// that array where it was.
-    fn spread_into(&mut self, multi: &MultiTarget, span: Span) -> Emit {
+    fn spread_into(
+        &mut self,
+        multi: &MultiTarget,
+        prepared: &mut impl Iterator<Item = Option<Slot>>,
+        span: Span,
+    ) -> Emit {
         let befores = i64::try_from(multi.lefts.len())
             .map_err(|_| Unsupported::at("a multiple assignment this wide", span))?;
         let afters = i64::try_from(multi.rights.len())
@@ -1165,21 +1362,23 @@ impl Compiler {
 
         let mut index = 0i64;
         for target in &multi.lefts {
-            self.assign_from_spread(index, target, span)?;
+            self.assign_from_spread(index, target, prepared, span)?;
             index += 1;
         }
         if let Some(rest) = &multi.rest {
             // `*a` binds the middle; a bare `*`, and the trailing comma in
             // `a, = xs` that is spelled the same way, bind nothing.
             match &rest.kind {
-                TargetKind::Splat(Some(inner)) => self.assign_from_spread(index, inner, span)?,
+                TargetKind::Splat(Some(inner)) => {
+                    self.assign_from_spread(index, inner, prepared, span)?;
+                }
                 TargetKind::Splat(None) => {}
-                _ => self.assign_from_spread(index, rest, span)?,
+                _ => self.assign_from_spread(index, rest, prepared, span)?,
             }
             index += 1;
         }
         for target in &multi.rights {
-            self.assign_from_spread(index, target, span)?;
+            self.assign_from_spread(index, target, prepared, span)?;
             index += 1;
         }
 
@@ -1188,15 +1387,30 @@ impl Compiler {
     }
 
     /// Read one slot out of the spread array and assign it to `target`.
-    fn assign_from_spread(&mut self, index: i64, target: &Target, span: Span) -> Emit {
+    fn assign_from_spread(
+        &mut self,
+        index: i64,
+        target: &Target,
+        prepared: &mut impl Iterator<Item = Option<Slot>>,
+        span: Span,
+    ) -> Emit {
         self.emit(Insn::Dup);
         self.emit(Insn::PushInt(index));
         self.emit_send("[]", 1);
-        self.assign_popped(target, span)
+        self.assign_popped(target, prepared, span)
     }
 
     /// Assign the value on top of the stack to `target`, popping it.
-    fn assign_popped(&mut self, target: &Target, span: Span) -> Emit {
+    fn assign_popped(
+        &mut self,
+        target: &Target,
+        prepared: &mut impl Iterator<Item = Option<Slot>>,
+        span: Span,
+    ) -> Emit {
+        // Every target was prepared in `prepare_multi`, in this order.
+        let slot = prepared
+            .next()
+            .expect("a prepared slot for every target the assignment pass walks");
         if let Some((name, how)) = self.const_target(target)? {
             self.emit(Insn::SetConst(name, how));
             self.emit(Insn::Pop);
@@ -1213,18 +1427,45 @@ impl Compiler {
                 self.push_const_name("Array");
                 self.emit(Insn::GetLocal(slot, 0));
                 self.emit_send("__masgn_array__", 1);
-                self.spread_into(inner, span)?;
+                self.spread_into(inner, prepared, span)?;
                 self.emit(Insn::Pop);
                 Ok(())
             }
             _ => {
-                let slot = self.target_slot(target)?;
-                self.emit_set(slot);
+                let slot = slot.expect("a non-group target is prepared with a slot");
+                self.emit_set(&slot);
                 Ok(())
             }
         }
     }
 
+    /// Evaluate `expr` now and park it in a fresh hidden local, answering the
+    /// slot.
+    ///
+    /// The name is not a Ruby identifier, so it cannot collide with a
+    /// program's local, and it carries the offset, so it is per site: two
+    /// index targets in one multiple assignment park into two sets of locals
+    /// rather than clobbering one. The same trick, and the same reason, as the
+    /// `%attr` slot `a.b = v` has used since #26.
+    fn park(&mut self, expr: &Expr) -> Result<u16, Unsupported> {
+        self.expr(expr)?;
+        let slot = self.slot(&format!("%idx{}", self.here()));
+        self.emit(Insn::SetLocal(slot, 0));
+        Ok(slot)
+    }
+
+    /// Prepare `target` for reading and writing, and say where it lives.
+    ///
+    /// **This emits.** A local, an ivar, a global and `$~` are places the
+    /// instructions can name outright, so preparing them costs nothing. An
+    /// index or attribute target is a pair of sends over a receiver and some
+    /// arguments, and Ruby evaluates those exactly once however many times the
+    /// target is then read and written — so preparing one evaluates them here,
+    /// into hidden locals, and the slot that comes back can be used freely.
+    ///
+    /// Every caller therefore has to prepare *before* it evaluates the value
+    /// being assigned, which is Ruby's order: `r[(o << :idx; 0)] += (o << :rhs;
+    /// 2)` logs `idx`, the read, `rhs`, the write. Measured.
     fn target_slot(&mut self, target: &Target) -> Result<Slot, Unsupported> {
         match &target.kind {
             TargetKind::Var(VarRef::Local { name, depth }) => {
@@ -1232,22 +1473,69 @@ impl Compiler {
                 Ok(Slot::Local(slot, depth))
             }
             TargetKind::Var(VarRef::Instance(name)) => Ok(Slot::Ivar(self.symbol(name))),
-            TargetKind::Var(VarRef::Class(_)) => {
-                Err(Unsupported::at("assigning a class variable", target.span))
-            }
+            TargetKind::Var(VarRef::Class(name)) => Ok(Slot::Cvar(self.symbol(name))),
             // Assigning a regexp special is not assigning a global: `$~ = m`
             // writes the frame's last match, which is #14's business and not a
             // table entry. Refused rather than quietly routed here, so a spec
             // that writes one is reported instead of answered wrongly.
-            TargetKind::Var(VarRef::Global(name)) if match_ref(name).is_some() => Err(
-                Unsupported::at("assigning a regexp special variable", target.span),
-            ),
+            // Assigning a regexp special is not assigning a global: `$~ = m`
+            // writes the frame's last match, and `$1` and `$&` follow it
+            // because they are read off that value rather than out of a table.
+            // Only `$~` is writable — `$1 = x` is a syntax error in Ruby, so
+            // no other ref can reach here.
+            TargetKind::Var(VarRef::Global(name)) if match_ref(name).is_some() => {
+                match match_ref(name) {
+                    Some(MatchRef::Data) => Ok(Slot::LastMatch),
+                    _ => Err(Unsupported::at(
+                        "assigning this regexp special variable",
+                        target.span,
+                    )),
+                }
+            }
             TargetKind::Var(VarRef::Global(name)) => Ok(Slot::Global(self.symbol(name))),
             TargetKind::Var(_) | TargetKind::ConstPath(_) => {
                 Err(Unsupported::at("assigning a constant", target.span))
             }
-            TargetKind::Call(_) => Err(Unsupported::at("an attribute assignment", target.span)),
-            TargetKind::Index(_) => Err(Unsupported::at("an index assignment", target.span)),
+            // `a.b = v`, and the compound forms `a.b += v` and `a.b ||= v`.
+            // Prism gives a plain `a.b = v` a `CallNode` instead, which the
+            // send path already handles; what reaches here is a compound
+            // write, or a target inside a multiple assignment.
+            TargetKind::Call(call) => {
+                if call.safe_nav {
+                    return Err(Unsupported::at("a safe-navigation call", target.span));
+                }
+                let receiver = self.park(&call.receiver)?;
+                Ok(Slot::Send {
+                    receiver,
+                    args: Vec::new(),
+                    get: call.name.as_ref().into(),
+                })
+            }
+            TargetKind::Index(index) => {
+                if index.block.is_some() {
+                    return Err(Unsupported::at("a block on an index target", target.span));
+                }
+                let receiver = self.park(&index.receiver)?;
+                let mut args = Vec::with_capacity(index.args.len());
+                for arg in &index.args {
+                    // A splat or a keyword in an index target would change
+                    // what `[]=` is sent, and neither has a caller in the
+                    // corpus. Refused by name rather than dropped.
+                    if !matches!(arg.kind, ExprKind::Splat(_) | ExprKind::Hash(_)) {
+                        args.push(self.park(arg)?);
+                    } else {
+                        return Err(Unsupported::at(
+                            "a splat or keyword in an index target",
+                            target.span,
+                        ));
+                    }
+                }
+                Ok(Slot::Send {
+                    receiver,
+                    args,
+                    get: "[]".into(),
+                })
+            }
             TargetKind::Multi(_) | TargetKind::Splat(_) => {
                 Err(Unsupported::at("a multiple assignment", target.span))
             }
@@ -1257,21 +1545,64 @@ impl Compiler {
     /// Push what the target currently holds. Both kinds answer `nil` for a
     /// name never assigned, which is what makes `a ||= 1` safe to compile as a
     /// read followed by a conditional write.
-    fn emit_get(&mut self, slot: Slot) {
+    fn emit_get(&mut self, slot: &Slot) {
         match slot {
-            Slot::Local(slot, depth) => self.emit(Insn::GetLocal(slot, depth)),
-            Slot::Ivar(symbol) => self.emit(Insn::GetIvar(symbol)),
-            Slot::Global(symbol) => self.emit(Insn::GetGlobal(symbol)),
+            Slot::Local(slot, depth) => self.emit(Insn::GetLocal(*slot, *depth)),
+            Slot::Ivar(symbol) => self.emit(Insn::GetIvar(*symbol)),
+            Slot::Global(symbol) => self.emit(Insn::GetGlobal(*symbol)),
+            Slot::Cvar(symbol) => self.emit(Insn::GetCvar(*symbol)),
+            Slot::LastMatch => self.emit(Insn::LastMatch(MatchRef::Data)),
+            // The receiver and the arguments are already evaluated; reading is
+            // pushing them back and sending. Cheap to repeat, which is what
+            // lets `a[i] += 1` read and then write without a rotate.
+            Slot::Send {
+                receiver,
+                args,
+                get,
+            } => {
+                self.emit(Insn::GetLocal(*receiver, 0));
+                for arg in args {
+                    self.emit(Insn::GetLocal(*arg, 0));
+                }
+                let argc = args.len() as u16;
+                let get = get.clone();
+                self.emit_send(&get, argc);
+            }
         }
     }
 
     /// Pop into the target. Callers emit `Dup` first where the value is wanted,
     /// because assignment is an expression.
-    fn emit_set(&mut self, slot: Slot) {
+    fn emit_set(&mut self, slot: &Slot) {
         match slot {
-            Slot::Local(slot, depth) => self.emit(Insn::SetLocal(slot, depth)),
-            Slot::Ivar(symbol) => self.emit(Insn::SetIvar(symbol)),
-            Slot::Global(symbol) => self.emit(Insn::SetGlobal(symbol)),
+            Slot::Local(slot, depth) => self.emit(Insn::SetLocal(*slot, *depth)),
+            Slot::Ivar(symbol) => self.emit(Insn::SetIvar(*symbol)),
+            Slot::Global(symbol) => self.emit(Insn::SetGlobal(*symbol)),
+            Slot::Cvar(symbol) => self.emit(Insn::SetCvar(*symbol)),
+            Slot::LastMatch => self.emit(Insn::SetLastMatch),
+            // `a[i] = v` is `a.[]=(i, v)` and `a.b = v` is `a.b=(v)`, and in
+            // both the expression is `v` rather than what the setter returned
+            // — `def []=(*) = :other` still makes `(a[0] = 5)` five. So the
+            // value is parked, the send is made, and its result is dropped;
+            // every caller has already `Dup`ed the value it wants left behind,
+            // exactly as it does for a local.
+            Slot::Send {
+                receiver,
+                args,
+                get,
+            } => {
+                let parked = self.slot(&format!("%val{}", self.here()));
+                self.emit(Insn::SetLocal(parked, 0));
+                self.emit(Insn::GetLocal(*receiver, 0));
+                for arg in args {
+                    self.emit(Insn::GetLocal(*arg, 0));
+                }
+                self.emit(Insn::GetLocal(parked, 0));
+                let argc = args.len() as u16 + 1;
+                let set = format!("{get}=");
+                self.emit_send(&set, argc);
+                self.emit(Insn::Pop);
+            }
         }
     }
 
@@ -1431,10 +1762,32 @@ impl Compiler {
             ));
         };
 
-        debug_assert_eq!(
-            self.depth, base_depth,
-            "a jump out of a loop would leave a value behind"
+        // A `break` or `next` can sit inside a *partially evaluated* expression,
+        // and whatever that expression had already pushed is still on the stack:
+        //
+        //     while c
+        //       a[1] += (break if c; c = false)
+        //     end
+        //
+        // has the old `a[1]` under the jump, and `x += (break)` has the old `x`.
+        // The expression is abandoned, so those values are dropped here rather
+        // than left for the loop's end to inherit. Without this the jump leaves
+        // the stack one deep per abandoned operand — and only `Insn::Goto`
+        // truncates, so a loop with no `ensure` over it kept them at run time.
+        //
+        // Not an assertion. This used to be `debug_assert_eq!(self.depth,
+        // base_depth)`, which held only because every expression that pushes
+        // before its operand — a compound assignment — was refused for some
+        // other reason; `language/while_spec.rb` has eight examples of the
+        // shape and they all became reachable at once.
+        debug_assert!(
+            self.depth >= base_depth,
+            "a jump out of a loop cannot start below the loop's own depth"
         );
+        let entry = self.depth;
+        for _ in 0..(entry - base_depth) {
+            self.emit(Insn::Pop);
+        }
 
         if is_break {
             match value {
@@ -1462,6 +1815,13 @@ impl Compiler {
         // value for the statement list containing it, and keeping that true
         // keeps the depth arithmetic uniform for the code after the loop.
         self.emit(Insn::PushNil);
+        // And it must leave it *where the expression started*, not at the
+        // loop's base: the operands dropped above are gone at run time, but the
+        // code that follows this one is unreachable and the surrounding
+        // expression — an `if` whose other arm ran normally — still has them.
+        // Modelling the drop here would make the two arms disagree about a
+        // stack neither of them reaches.
+        self.depth = entry + 1;
         Ok(())
     }
 
@@ -1719,8 +2079,10 @@ impl Compiler {
                 self.emit(Insn::DefinedIvar(symbol));
                 Ok(())
             }
-            ExprKind::Var(VarRef::Class(_)) => {
-                Err(Unsupported::at("`defined?` on a class variable", span))
+            ExprKind::Var(VarRef::Class(name)) => {
+                let symbol = self.symbol(name);
+                self.emit(Insn::DefinedCvar(symbol));
+                Ok(())
             }
             ExprKind::Var(VarRef::Global(name)) => {
                 // `defined?($~)` is "global-variable" whether or not anything
@@ -1732,7 +2094,10 @@ impl Compiler {
                 // the family to a back-reference node, which stays #14's.
                 match match_ref(name) {
                     Some(MatchRef::Data) => self.push_word("global-variable"),
-                    Some(_) => Err(Unsupported::at("`defined?` on a back-reference", span)),
+                    Some(which) => {
+                        self.emit(Insn::DefinedMatch(which));
+                        Ok(())
+                    }
                     None => {
                         let symbol = self.symbol(name);
                         self.emit(Insn::DefinedGlobal(symbol));
@@ -1740,8 +2105,18 @@ impl Compiler {
                     }
                 }
             }
-            ExprKind::Var(VarRef::BackRef(_) | VarRef::NumberedRef(_)) => {
-                Err(Unsupported::at("`defined?` on a back-reference", span))
+            ExprKind::Var(VarRef::BackRef(name)) => match match_ref(name) {
+                Some(which) => {
+                    self.emit(Insn::DefinedMatch(which));
+                    Ok(())
+                }
+                None => Err(Unsupported::at("`defined?` on this back-reference", span)),
+            },
+            ExprKind::Var(VarRef::NumberedRef(n)) => {
+                let n = u16::try_from(*n)
+                    .map_err(|_| Unsupported::at("a capture group number this wide", span))?;
+                self.emit(Insn::DefinedMatch(MatchRef::Group(n)));
+                Ok(())
             }
             ExprKind::Super(_) => Err(Unsupported::at("`defined?` on `super`", span)),
 
@@ -2217,10 +2592,17 @@ impl Compiler {
                 // also the first name the destructure binds. Read before write.
                 let slot = u16::try_from(at)
                     .map_err(|_| Unsupported::at("a parameter list this long", span))?;
+                // A destructuring parameter's targets are plain locals of the
+                // block's own frame — the parser rejects anything else there —
+                // so preparation emits nothing, but it still has to run to
+                // give the assignment pass its slots.
+                let mut prepared = Vec::new();
+                self.prepare_multi(multi, &mut prepared)?;
+                let mut prepared = prepared.into_iter();
                 self.push_const_name("Array");
                 self.emit(Insn::GetLocal(slot, 0));
                 self.emit_send("__masgn_array__", 1);
-                self.spread_into(multi, span)?;
+                self.spread_into(multi, &mut prepared, span)?;
                 self.emit(Insn::Pop);
             }
         }
@@ -2764,7 +3146,7 @@ impl Compiler {
         let to_fail = self.emit_jump(Insn::JumpUnless);
         let held = self.depth;
         let slot = self.target_slot(&capture.target)?;
-        self.emit_set(slot);
+        self.emit_set(&slot);
         self.emit(Insn::PushTrue);
         let to_end = self.emit_jump(Insn::Jump);
         self.patch_here(to_fail);
@@ -3327,7 +3709,7 @@ impl Compiler {
             match &clause.reference {
                 Some(target) => {
                     let slot = self.target_slot(target)?;
-                    self.emit_set(slot);
+                    self.emit_set(&slot);
                 }
                 None => self.emit(Insn::Pop),
             }
@@ -3613,7 +3995,11 @@ fn node_name(kind: &ExprKind) -> &'static str {
         | ExprKind::CapturePattern(_)
         | ExprKind::Pin(_) => "pattern matching outside a pattern",
         ExprKind::FlipFlop(_) => "a flip-flop",
-        ExprKind::Alias(_) | ExprKind::Undef(_) => "`alias` or `undef`",
+        // Only the global form reaches here now: `alias $new $old` is a true
+        // alias — writing the new name changes the old one, measured — which a
+        // name-keyed table cannot express without a level of indirection, and
+        // one file in the corpus uses it.
+        ExprKind::Alias(_) => "`alias` on a global variable",
         ExprKind::Exec(_) => "`BEGIN`/`END`",
         ExprKind::ShareableConstant(_) => "a shareable-constant comment",
         // `__FILE__` and `__LINE__` compile (#174); this is the third keyword,
@@ -3674,6 +4060,9 @@ fn match_ref(name: &str) -> Option<MatchRef> {
         "&" => Some(MatchRef::Whole),
         "`" => Some(MatchRef::Pre),
         "'" => Some(MatchRef::Post),
+        // `$+` is the last group that *participated*, not the last one the
+        // pattern declares: `"a" =~ /(a)(b)?/` answers `"a"`. Measured.
+        "+" => Some(MatchRef::LastGroup),
         digits if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) => {
             // `$0` is the program name, not a capture group.
             let n: u16 = digits.parse().ok()?;
