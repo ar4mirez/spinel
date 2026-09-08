@@ -1277,6 +1277,28 @@ pub fn eval_in(
                     stack.push(bool_value(matched));
                 }
 
+                Insn::CheckMatchAny => {
+                    let list = stack.pop().expect("a rescue class list on the stack");
+                    let exception = *stack.last().expect("an exception to match against");
+                    let mut matched = false;
+                    // Rooted and read one element at a time rather than collected:
+                    // `exception_matches` can allocate, and a `Value` held across
+                    // an allocation is exactly what the handle discipline is for.
+                    let list = scope.root(list);
+                    // In order, and stopping at the first hit. `exception_matches`
+                    // raises the `TypeError` for a non-`Module`, so stopping early
+                    // is also what keeps `rescue RuntimeError, *[42]` from raising
+                    // one when the `RuntimeError` already matched (measured).
+                    for index in 0..array_len(scope, list) {
+                        let class = array_get(scope, list, index);
+                        if exception_matches(scope, exception, class)? {
+                            matched = true;
+                            break;
+                        }
+                    }
+                    stack.push(bool_value(matched));
+                }
+
                 Insn::EnterEnsure => {
                     let value = stack.pop().unwrap_or(Value::NIL);
                     frames[top].parked.push(Parked::Value(value));

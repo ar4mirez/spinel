@@ -975,3 +975,26 @@ def sc4; class << Object.new; proc { return :i }.call; end; :o; end; sc4  #=> :i
 def sc5; class << Object.new; def self.f; return :f; end; end; :o; end; sc5  #=> :o
 def sc6; class << Object.new; class << Object.new; return :deep; end; end; :o; end; sc6  #=> :deep
 def sc7; [1].each { class << Object.new; return :i; end }; :o; end; sc7  #=> :i
+
+# --------------------------------- a splat in a `rescue` list (#215)
+#
+# `rescue *classes` is the array literal `[*classes]` and one `CheckMatchAny`
+# over it, so the splat's conversion is the array literal's own: a bare class
+# splats to a one-element list, and an object that is not an Array goes through
+# `to_a`.
+#
+# Still one step in the straight line rather than the whole list becoming one
+# array, because Ruby tests left to right and stops at the first match. Both
+# `r215f` and `r215g` pin that: the second evaluates no splat operand at all,
+# and the first catches without ever reaching the 42 that would be a TypeError.
+CL215 = [ArgumentError, TypeError]; begin; raise TypeError; rescue *CL215; :caught; end  #=> :caught
+begin; raise 'x'; rescue *(RuntimeError) => e; :expected; end  #=> :expected
+begin; raise TypeError; rescue ArgumentError, *[TypeError]; :caught; end  #=> :caught
+o215 = Object.new; def o215.to_a; [RuntimeError]; end; begin; raise 'x'; rescue *o215; :caught; end  #=> :caught
+begin; (begin; raise ArgumentError; rescue *[TypeError]; :wrong; end); rescue ArgumentError; :declined; end  #=> :declined
+begin; raise RuntimeError; rescue RuntimeError, *[42]; :caught; end  #=> :caught
+$l215 = []; def f215(x); $l215 << x; x; end; begin; raise RuntimeError; rescue f215(RuntimeError), *f215([ArgumentError]); end; $l215.size  #=> 1
+begin; (begin; raise 'error'; rescue *[42]; end); rescue TypeError => e; e.message; end  #=> "class or module required for rescue clause"
+begin; (begin; raise 'x'; rescue *[[RuntimeError]]; end); rescue TypeError => e; e.message; end  #=> "class or module required for rescue clause"
+begin; raise RuntimeError; rescue *[RuntimeError, 42]; :caught; end  #=> :caught
+begin; (begin; raise RuntimeError; rescue *[42, RuntimeError]; end); rescue TypeError => e; e.message; end  #=> "class or module required for rescue clause"
