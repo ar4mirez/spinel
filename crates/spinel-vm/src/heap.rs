@@ -233,6 +233,17 @@ pub struct Heap {
     /// Give it a frame slot when frames carry their own specials, and a
     /// Ractor-local when threads arrive.
     last_match: Value,
+    /// `$!`: the exception currently being handled, or nil (#206).
+    ///
+    /// Beside `last_match` rather than in `globals` for the same reason: it is
+    /// not a value an assignment put in a map. The unwinder sets it where a
+    /// handler takes an exception, the compiler saves and restores it around a
+    /// protected body, and a frame restores it when it is popped — so a method
+    /// called from inside a `rescue` sees it and nothing after the clause does.
+    ///
+    /// ponytail: one per heap, like `last_match`. Ruby scopes it to the thread;
+    /// give it a Ractor-local when threads arrive.
+    errinfo: Value,
     /// This Ractor's global variables, by name (#166). A root source: see
     /// [`Heap::mark`].
     ///
@@ -285,6 +296,7 @@ impl Heap {
             missing_method: None,
             regexps: crate::regexp::Regexps::new(),
             last_match: Value::NIL,
+            errinfo: Value::NIL,
             globals: HashMap::new(),
         }
     }
@@ -318,6 +330,15 @@ impl Heap {
 
     pub fn set_last_match(&mut self, value: Value) {
         self.last_match = value;
+    }
+
+    /// `$!`: the exception being handled, or nil.
+    pub fn errinfo(&self) -> Value {
+        self.errinfo
+    }
+
+    pub fn set_errinfo(&mut self, value: Value) {
+        self.errinfo = value;
     }
 
     /// A global's value, or `None` for a name nothing has assigned.
@@ -536,6 +557,9 @@ impl Heap {
         let (regexps, mark_stack) = (&self.regexps, &mut self.mark_stack);
         regexps.each_root(|value| Heap::shade(mark_stack, value));
         Heap::shade(&mut self.mark_stack, self.last_match);
+        // `$!` outlives every handle to it the same way, and for the whole time
+        // a handler is running.
+        Heap::shade(&mut self.mark_stack, self.errinfo);
         // Fourth root source: the global table. A global outlives every handle
         // to what it holds, by definition — that is what a global is.
         let (globals, mark_stack) = (&self.globals, &mut self.mark_stack);
@@ -837,6 +861,14 @@ impl<'h> HandleScope<'h> {
 
     pub fn set_last_match(&mut self, value: Value) {
         self.heap.set_last_match(value);
+    }
+
+    pub fn errinfo(&self) -> Value {
+        self.heap.errinfo()
+    }
+
+    pub fn set_errinfo(&mut self, value: Value) {
+        self.heap.set_errinfo(value);
     }
 
     /// This heap's global of that name, or `None` if nothing assigned it.

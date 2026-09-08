@@ -492,6 +492,11 @@ struct Entry {
     /// is the walk, and every rule Ruby has about which table wins depends on
     /// this one holding only what was assigned *here*.
     constants: HashMap<SymbolId, Value>,
+    /// The names in `constants` that `Module#private_constant` marked (#185).
+    ///
+    /// A `Vec` rather than a set: a module with a private constant usually has
+    /// one or two of them, and this is read only on a qualified reference.
+    private_constants: Vec<SymbolId>,
 }
 
 /// One heap's classes and modules.
@@ -1077,12 +1082,58 @@ impl Classes {
     /// ```
     #[must_use]
     pub fn const_get_qualified(&self, id: ClassId, name: SymbolId) -> Option<Value> {
+        let (owner, value) = self.const_qualified_owner(id, name)?;
+        // `private_constant` hides it from every qualified reference, which is
+        // this walk and nothing else: the lexical one in `const_get` *is* the
+        // scope the constant is private to (#185).
+        if self.const_is_private(owner, name) {
+            return None;
+        }
+        Some(value)
+    }
+
+    /// Whether the qualified walk would have found `name` but for its being
+    /// private, which is the difference between Ruby's two messages:
+    /// `private constant A::X referenced` and `uninitialized constant A::X`.
+    #[must_use]
+    pub fn const_private_qualified(&self, id: ClassId, name: SymbolId) -> bool {
+        self.const_qualified_owner(id, name)
+            .is_some_and(|(owner, _)| self.const_is_private(owner, name))
+    }
+
+    /// Whether this module's *own* `name` is private. Not the ancestors':
+    /// `private_constant` marks an entry in one table.
+    #[must_use]
+    pub fn const_is_private(&self, id: ClassId, name: SymbolId) -> bool {
+        self.entry(id).private_constants.contains(&name)
+    }
+
+    /// Mark one of this module's own constants private.
+    ///
+    /// One direction only: `public_constant` is #28's reflection, and a
+    /// `private: bool` here would be a branch nothing takes. Ruby raises
+    /// `NameError: constant A::X not defined` for a name the module does not
+    /// hold, so the caller checks first and this only records.
+    pub fn mark_const_private(&mut self, id: ClassId, name: SymbolId) {
+        let entry = self.entry_mut(id);
+        if !entry.private_constants.contains(&name) {
+            entry.private_constants.push(name);
+        }
+    }
+
+    /// The first ancestor holding `name`, and the value, ignoring visibility.
+    ///
+    /// The walk `A::X` takes: `A`'s own table, then its ancestors' in order,
+    /// skipping `Object` unless `A` *is* `Object`. Ruby 2.5's change is
+    /// narrower than "no fallback": `Object` alone is skipped, while `Kernel`
+    /// and `BasicObject` are searched like any other ancestor.
+    fn const_qualified_owner(&self, id: ClassId, name: SymbolId) -> Option<(ClassId, Value)> {
         let object = Builtin::Object.id();
         let skip_object = id != object;
         self.ancestors(id)
             .into_iter()
             .filter(|&c| !(skip_object && c == object))
-            .find_map(|c| self.const_get_here(c, name))
+            .find_map(|c| self.const_get_here(c, name).map(|value| (c, value)))
     }
 
     /// A bare `X`, resolved from the scope it was written in.
@@ -1094,8 +1145,10 @@ impl Classes {
     /// 2. the ancestors of the innermost cref, in order;
     /// 3. `Object`, if step 2 did not already reach it.
     ///
-    /// Step 3 fires for a module body and not for a class body, because a class
-    /// reaches `Object` through its superclass chain and a module does not.
+    /// Step 3 fires for a module body and not for a class body. Usually that is
+    /// the same as "a class already reached `Object` through its superclass
+    /// chain", but not inside `BasicObject` or below it, where the chain never
+    /// reaches `Object` and the fallback still must not fire (#185).
     #[must_use]
     pub fn const_get(&self, cref: CrefId, name: SymbolId) -> Option<Value> {
         let mut scope = Some(cref);
@@ -1104,7 +1157,16 @@ impl Classes {
             // A node pushed by eval is a definee, not a lexical scope: the body
             // of `Class.new(P) { CV }` is a `NameError` even when `P::CV` is
             // there. See [`CrefNode::pushed_by_eval`].
-            if !node.pushed_by_eval
+            //
+            // The outermost node is skipped, because step 2 searches it *and*
+            // its ancestors and this step would reach it first with only its
+            // own table. CRuby spells the same exclusion as the loop condition
+            // `while (cref && CREF_NEXT(cref))`. It is what makes an ancestor's
+            // constant beat a top-level one of the same name, and what makes a
+            // bare constant inside `class Foo < BasicObject` a `NameError`
+            // rather than a hit on `Object`'s table (#185).
+            if node.parent.is_some()
+                && !node.pushed_by_eval
                 && let Some(value) = self.const_get_here(node.class, name)
             {
                 return Some(value);
@@ -1125,8 +1187,16 @@ impl Classes {
             return Some(value);
         }
 
-        // Step 3. A class already reached `Object` above; a module did not.
-        if ancestors.contains(&object) {
+        // Step 3, and the question is whether the scope is a *module*, not
+        // whether its ancestors happen to include `Object`. The two agree for
+        // every class whose chain reaches `Object` and disagree for the two
+        // that do not: `BasicObject` and anything below it. A constant
+        // referenced inside `class BasicObject` must not resolve through
+        // `Object`, because `BasicObject` is not below it (#185).
+        //
+        // CRuby asks it the same way: `rb_const_search` retries against
+        // `rb_cObject` only when `BUILTIN_TYPE(klass) == T_MODULE`.
+        if self.kind(innermost) == Kind::Class {
             return None;
         }
         self.const_get_here(object, name)
@@ -1448,6 +1518,7 @@ impl Classes {
             singleton: None,
             is_singleton,
             constants: HashMap::new(),
+            private_constants: Vec::new(),
             class_variables: HashMap::new(),
         });
         // The inverse edge, so a later definition on the superclass can find

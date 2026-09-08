@@ -771,3 +771,104 @@ defined?($+)  #=> nil
 # A private setter is reachable through an explicit `self`, which is the one
 # exception `self.attr = v` has always had.
 (class E9; def go; self.foo ||= 6; end; def foo = @foo; def foo=(v); @foo = v; end; private :foo=; end; E9.new.go)  #=> 6
+
+# ------------------------- a destructuring block parameter beside another (#209)
+#
+# `ParamSpec` carries a slot per required and post parameter rather than a
+# count, because a destructure binds several names out of one argument and
+# displaces every parameter after it. Before #209 every shape here but the last
+# two was refused rather than bound.
+proc { |(a, b), c| [a, b, c] }.call([1, 2], 3)  #=> [1, 2, 3]
+# One Array and two places, so the block spreads it: the destructure is handed
+# `1` and `(a, b) = 1` leaves `b` nil.
+proc { |(a, b), c| [a, b, c] }.call([1, 2])  #=> [1, nil, 2]
+proc { |(a, b), c = 9| [a, b, c] }.call([1, 2], [3, 4])  #=> [1, 2, [3, 4]]
+proc { |(a, b), *c| [a, b, c] }.call([1, 2], 3, 4)  #=> [1, 2, [3, 4]]
+proc { |(a, b), *c, d| [a, b, c, d] }.call([1, 2], 3, 4)  #=> [1, 2, [3], 4]
+proc { |(a, b), c: 7| [a, b, c] }.call([1, 2], c: 8)  #=> [1, 2, 8]
+proc { |(a, b), &c| [a, b, c] }.call([1, 2])  #=> [1, 2, nil]
+proc { |(a, b), (c, d)| [a, b, c, d] }.call([1, 2], [3, 4])  #=> [1, 2, 3, 4]
+proc { |((a, b), c), d| [a, b, c, d] }.call([[1, 2], 3], 4)  #=> [1, 2, 3, 4]
+proc { |(a, *b), c| [a, b, c] }.call([1, 2, 3], 4)  #=> [1, [2, 3], 4]
+# An anonymous `*` inside the destructure binds nothing, so the destructure
+# claims one slot and `c` still lands in the second.
+proc { |(a, *), c| [a, c] }.call([1, 2, 3], 4)  #=> [1, 4]
+lambda { |(a, b), c| [a, b, c] }.call([1, 2], 3)  #=> [1, 2, 3]
+# A destructure is one parameter to `arity`, however many names it binds.
+proc { |(a, b), c| [a, b, c] }.arity  #=> 2
+lambda { |(a, b), c| [a, b, c] }.arity  #=> 2
+# In post position, which is the shape `language/fixtures/send.rb` is written on.
+def m209a(a = 1, (b, c), d); [a, b, c, d]; end; m209a(9, [1, 2], 3)  #=> [9, 1, 2, 3]
+def m209b(a = 1, f = 2, (b, c), (d, e)); [a, f, b, c, d, e]; end; m209b(9, 8, [1, 2], [3, 4])  #=> [9, 8, 1, 2, 3, 4]
+def m209c(a = 1, (b, *c)); [a, b, c]; end; m209c(9, [1, 2, 3])  #=> [9, 1, [2, 3]]
+def m209d((a, b, *c, d, e)); [a, b, c, d, e]; end; m209d([1, 2, 3, 4, 5])  #=> [1, 2, [3], 4, 5]
+def m209e(a, (b, c), *d, (e, f)); [a, b, c, d, e, f]; end; m209e(1, [2, 3], 4, 5, [6, 7])  #=> [1, 2, 3, [4, 5], 6, 7]
+
+# ----------------------------------- `$!`, the exception being handled (#206)
+#
+# Not a frame's value and not an entry in the global table: one cell per heap,
+# set where a handler takes an exception and restored on every path out of the
+# clause. A method or block called from inside a `rescue` sees it, and nothing
+# after the clause does — including after a `return` or a `break` out of one.
+(raise("x") rescue $!.class)  #=> RuntimeError
+begin; raise "y"; rescue; $!.message; end  #=> "y"
+begin; raise "y"; rescue; $!.class; end  #=> RuntimeError
+# Outside any handler.
+$!.inspect  #=> "nil"
+begin; raise "t"; rescue; end; $!.inspect  #=> "nil"
+# A nested clause finishing restores the outer one, rather than leaving its
+# own exception behind.
+begin; raise "a"; rescue; (raise "b" rescue nil); $!.message; end  #=> "a"
+begin; raise "c"; rescue => e206; [$!.equal?(e206), $!.message]; end  #=> [true, "c"]
+begin; 1; rescue; 2; else; $!.inspect; end  #=> "nil"
+begin; raise "d"; rescue; [1].map { $!.message }.first; end  #=> "d"
+begin; begin; raise "p"; rescue; raise "q"; end; rescue; $!.message; end  #=> "q"
+# A re-raise caught by an outer clause in the same frame still restores.
+begin; begin; raise "o"; rescue; raise "i"; end; rescue; end; $!.inspect  #=> "nil"
+def s206; $!.inspect; end; begin; raise "x"; rescue; s206; end  #=> "#<RuntimeError: x>"
+# `return` and `break` out of a clause skip the compiler's restore, and the
+# frame gives the cell back as it found it.
+def r206; begin; raise "q"; rescue; return 1; end; end; r206; $!.inspect  #=> "nil"
+[1].each { begin; raise "b"; rescue; break; end }; $!.inspect  #=> "nil"
+def y206; begin; raise "z"; rescue; yield; end; end; y206 { $!.message }  #=> "z"
+# `defined?($!)` is the constant answer, inside a clause and outside one.
+defined?($!)  #=> "global-variable"
+begin; raise "w"; rescue; defined?($!); end  #=> "global-variable"
+# An `ensure` sees it while an exception is still propagating through it, and
+# nil on every other path — including after a `rescue` already handled one.
+begin; begin; raise "u"; ensure; $e206 = $!.message; end; rescue; $e206; end  #=> "u"
+begin; begin; raise "v"; ensure; end; rescue; end; $!.inspect  #=> "nil"
+begin; raise "h"; rescue; ensure; $f206 = $!.inspect; end; $f206  #=> "nil"
+
+# ---------------------------------------------- constant visibility (#185)
+#
+# `private_constant` hides a name from every *qualified* reference and from
+# nothing else: the module's own body and any scope nested inside it still see
+# it, because that is the scope it is private to.
+module MP; PX = 1; private_constant :PX; end; (MP::PX rescue $!.message)  #=> "private constant MP::PX referenced"
+module MP2; PY = 1; private_constant :PY; def self.here; PY; end; end; MP2.here  #=> 1
+module MP3; PZ = 1; private_constant :PZ; module In; def self.here; PZ; end; end; end; MP3::In.here  #=> 1
+module MP4; PW = 1; end; MP4::PW  #=> 1
+# A name the walk refused reads differently from one it never found.
+module MP5; PV = 1; private_constant :PV; end; (MP5::Nope rescue $!.message)  #=> "uninitialized constant MP5::Nope"
+module MP6; PU = 1; private_constant "PU"; end; (MP6::PU rescue $!.message)  #=> "private constant MP6::PU referenced"
+# It answers the module, takes strings as well as symbols, and refuses a name
+# the module does not hold.
+module MP7; PT = 1; end; MP7.private_constant(:PT).equal?(MP7)  #=> true
+module MP8; PS = 1; end; (MP8.private_constant(:Absent) rescue $!.message)  #=> "constant MP8::Absent not defined"
+module MP9; A9 = 1; private_constant :A9; module A9B; end; end; (module MP9::A9B; end rescue nil); "ok"  #=> "ok"
+# `module A::B` is a qualified reference, so reopening a private one raises —
+# while a plain `module B` inside `A`'s own body still reopens it.
+module MPA; module Sub; end; private_constant :Sub; end; (module MPA::Sub; end rescue $!.message)  #=> "private constant MPA::Sub referenced"
+module MPB; class Kl; end; private_constant :Kl; end; (class MPB::Kl; end rescue $!.message)  #=> "private constant MPB::Kl referenced"
+module MPC; module Sub2; end; private_constant :Sub2; module Sub2; QQ = 7; end; Sub2::QQ; end  #=> 7
+# `BasicObject` has an empty constant namespace: a bare name inside it does not
+# fall back to `Object`, though `::Kernel` still names the top level.
+class BO185 < BasicObject; def self.k; (::Kernel; "found") rescue "raised"; end; end; BO185.k  #=> "found"
+class BO186 < BasicObject; def self.k; Kernel rescue $!.class.name; end; end; BO186.k  #=> "NameError"
+# The same rule from the other side: the lexical walk skips its outermost
+# scope, so an ancestor's constant beats a top-level one of the same name.
+class P185; XX = 1; end; XX = 2; class C185 < P185; def self.x; XX; end; end; C185.x  #=> 1
+module M185; YY = 1; end; YY = 2; class D185; include M185; def self.y; YY; end; end; D185.y  #=> 1
+module N185; def self.k; Kernel; end; end; N185.k.name  #=> "Kernel"
+class Q185; def self.k; Kernel; end; end; Q185.k.name  #=> "Kernel"
