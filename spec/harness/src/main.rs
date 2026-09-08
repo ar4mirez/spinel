@@ -61,11 +61,23 @@ struct Cli {
     /// test can point at a corpus of its own.
     #[arg(long, value_name = "DIR", default_value = DEFAULT_TAGS)]
     tags: PathBuf,
+
+    /// Print `bench/spec-status.md` — one row per ruby/spec directory — instead
+    /// of the usual report. This is the project's progress bar, so it is
+    /// rendered here rather than assembled by a script: the counts and the table
+    /// come out of the same run, and `scripts/spec-status.sh` only redirects it.
+    #[arg(long)]
+    by_directory: bool,
 }
 
 /// `spec/tags/`, relative to this crate. Resolved at compile time, like the
 /// corpus path in `scripts/spec.sh`, so the binary works from any directory.
 const DEFAULT_TAGS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../spec/tags");
+
+/// The ruby/spec checkout, resolved the same way and for the same reason. A row
+/// in the status table is named the way ruby/spec's own directories are —
+/// `core/array`, not `spec/ruby/core/array` — so the prefix comes off here.
+const CORPUS_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../spec/ruby");
 
 #[derive(Default)]
 struct Counts {
@@ -96,6 +108,24 @@ impl Counts {
             self.examples, self.passed, self.failed, self.blocked, self.skipped
         )
     }
+
+    /// The status table's cells, in column order after the directory name.
+    ///
+    /// The percentage is what makes that file a progress bar rather than a pile
+    /// of numbers, and it is derived here so no reader has to divide. A
+    /// directory with no examples is an em dash, not `0%`: nothing there failed
+    /// to pass.
+    fn row(&self) -> String {
+        let rate = if self.examples == 0 {
+            "\u{2014}".to_owned()
+        } else {
+            format!("{:.0}%", 100.0 * self.passed as f64 / self.examples as f64)
+        };
+        format!(
+            "{} | {} | {} | {} | {} | {} | {rate}",
+            self.files, self.examples, self.passed, self.failed, self.blocked, self.skipped
+        )
+    }
 }
 
 /// How many per-file lines are worth printing before they stop being a report
@@ -121,6 +151,8 @@ fn main() -> ExitCode {
     // that is not there resolves to nothing and skips nothing, which is the
     // right answer for a checkout that has none.
     let tags_root = std::fs::canonicalize(&cli.tags).unwrap_or_else(|_| cli.tags.clone());
+    let corpus_root =
+        std::fs::canonicalize(CORPUS_ROOT).unwrap_or_else(|_| PathBuf::from(CORPUS_ROOT));
 
     let mut files = Vec::new();
     for path in &cli.paths {
@@ -143,6 +175,9 @@ fn main() -> ExitCode {
     }
 
     let mut totals = Counts::default();
+    // Per-directory counts for `--by-directory`. Always accumulated: the work is
+    // one map insert per file and it keeps the two code paths from drifting.
+    let mut per_directory: BTreeMap<String, Counts> = BTreeMap::new();
     let mut unparseable: Vec<String> = Vec::new();
     // Files that parsed and yielded nothing. Almost always a spec that builds
     // its examples inside an `eval` string, which is Ruby this harness can see
@@ -165,7 +200,8 @@ fn main() -> ExitCode {
     let mut tag_problems: Vec<String> = Vec::new();
     // A single file needs no per-file line: the summary names it. Above the
     // cap the lines stop being a report and become a wall.
-    let show_files = (2..=MAX_LISTED_FILES).contains(&files.len()) && !cli.list;
+    let show_files =
+        (2..=MAX_LISTED_FILES).contains(&files.len()) && !cli.list && !cli.by_directory;
 
     for file in &files {
         let Ok(source) = std::fs::read(file) else {
@@ -283,6 +319,10 @@ fn main() -> ExitCode {
         if show_files {
             println!("{} · {}", display_path(file), counts.line());
         }
+        per_directory
+            .entry(suite_directory(file, &corpus_root))
+            .or_default()
+            .add(&counts);
         totals.add(&counts);
     }
 
@@ -291,6 +331,19 @@ fn main() -> ExitCode {
     if show_files {
         println!();
     }
+    // The status table replaces the report rather than joining it: this run's
+    // stdout is redirected into `bench/spec-status.md`, so nothing else may go
+    // there. Problems still set the exit code, and the script says how to see
+    // them.
+    if cli.by_directory {
+        print_status(&per_directory, &totals);
+        return if totals.failed > 0 || !unparseable.is_empty() || !tag_problems.is_empty() {
+            ExitCode::from(EXIT_FAILED)
+        } else {
+            ExitCode::SUCCESS
+        };
+    }
+
     report("could not be parsed", &unparseable, None);
     report("failed", &failures, None);
     report(
@@ -359,6 +412,56 @@ fn display_path(path: &Path) -> String {
         .unwrap_or(path)
         .display()
         .to_string()
+}
+
+/// The row a spec file belongs to: its directory relative to ruby/spec, capped
+/// at two components.
+///
+/// Two, because that is the unit ruby/spec is organised in and the unit a reader
+/// tracks — `core/array`, `language/regexp`. Deeper directories exist
+/// (`core/array/pack`, `library/zlib/inflate`) but they are one class's specs
+/// split up for size, not separate suites, so they fold into their parent. A
+/// file directly under the corpus root would have no directory at all; there are
+/// none today, and `.` says so honestly rather than crashing.
+fn suite_directory(file: &Path, corpus_root: &Path) -> String {
+    // The corpus root is canonical, so the file has to be too before the
+    // prefixes can be compared: `scripts/spec.sh` passes absolute paths, but a
+    // relative one typed at the binary would otherwise fall through and put
+    // every row under `spec/ruby`.
+    let canonical = std::fs::canonicalize(file).unwrap_or_else(|_| file.to_path_buf());
+    let relative = canonical
+        .strip_prefix(corpus_root)
+        .unwrap_or_else(|_| file.strip_prefix(corpus_root).unwrap_or(file));
+    let parent = relative.parent().unwrap_or(Path::new("."));
+    let mut components = parent.components();
+    let mut row = PathBuf::new();
+    for component in components.by_ref().take(2) {
+        row.push(component);
+    }
+    if row.as_os_str().is_empty() {
+        ".".to_owned()
+    } else {
+        row.display().to_string()
+    }
+}
+
+/// `bench/spec-status.md`, whole. No date and no elapsed time: the file is
+/// committed and CI regenerates it to check it is current, so anything that
+/// changes without the results changing would make every run a diff.
+fn print_status(per_directory: &BTreeMap<String, Counts>, totals: &Counts) {
+    println!("# ruby/spec status");
+    println!();
+    println!(
+        "Regenerated by `scripts/spec-status.sh`. Never edited by hand — CI runs \
+         the script and fails if this file moved."
+    );
+    println!();
+    println!("| directory | files | examples | passed | failed | blocked | skipped | passed % |");
+    println!("|---|---:|---:|---:|---:|---:|---:|---:|");
+    for (directory, counts) in per_directory {
+        println!("| `{directory}` | {} |", counts.row());
+    }
+    println!("| **total** | {} |", totals.row());
 }
 
 /// A named list of problem files, capped so a broken corpus still fits a screen.
