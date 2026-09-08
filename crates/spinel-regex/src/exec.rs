@@ -315,6 +315,13 @@ impl Compiler {
 /// ponytail: the captures are cloned once per iteration. Onigmo tracks only
 /// the groups that live inside the loop; narrow this the same way if a real
 /// pattern ever makes it the hot path.
+///
+/// Measured, and it is not the hot path yet — `bench/regex_captures.rs`, #184.
+/// The whole capture machinery, clone included, is 11% of a three-group match
+/// and 31% of the worst nine-group one; the same engine is 27x slower than
+/// `ruby --yjit` on that pattern for reasons this clone is not. Narrowing it
+/// buys back at most a third of a number that is off by more than an order of
+/// magnitude elsewhere.
 #[derive(Clone)]
 struct Mark {
     sp: usize,
@@ -467,7 +474,8 @@ impl Program {
                             // per iteration. Onigmo instead pushes a restore
                             // record only for the groups that need one; narrow it
                             // the same way if a real pattern makes this the hot
-                            // path.
+                            // path. Measured and deferred with the clone above —
+                            // see `bench/regex_captures.rs` and #184.
                             if let Some(mark) = &marks[*slot] {
                                 for entry in stack.iter_mut().skip(mark.depth) {
                                     entry.saves.clone_from(&saves);
