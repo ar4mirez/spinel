@@ -150,11 +150,28 @@ pub fn parse(source: &str, flags: Flags) -> Result<Parsed, Error> {
         groups: 0,
         names: Vec::new(),
         name_index: HashMap::new(),
+        numeric_backref: false,
     };
     let ast = parser.alternation()?;
     if parser.pos < parser.chars.len() {
         // The only way to stop early is an unbalanced `)`.
         return Err(Error::Syntax("unmatched close parenthesis".into()));
+    }
+    // One named group anywhere in the pattern turns every numeric
+    // backreference into an error — including one that refers to an unnamed
+    // group declared before it, and one written before the named group is
+    // reached. That is Ruby, measured: `/(a)(?<b>b)\1/`, `/(a)\1(?<b>b)/` and
+    // `/\1(?<a>a)/` are all refused, while `/(a)\1/` is fine.
+    //
+    // The reason underneath is that a pattern with named groups does not number
+    // its unnamed ones at all — `/(a)(?<b>b)/.match("ab").to_a` is `["ab", "b"]`
+    // in Ruby — so a number has nothing to refer to. This engine still numbers
+    // them (#217), which is why the check is written against the named-group
+    // table rather than falling out of the numbering.
+    if parser.numeric_backref && !parser.name_index.is_empty() {
+        return Err(Error::Syntax(
+            "numbered backref/call is not allowed. (use name)".into(),
+        ));
     }
     Ok(Parsed {
         ast,
@@ -170,6 +187,14 @@ struct Parser {
     groups: usize,
     names: Vec<(String, usize)>,
     name_index: HashMap<String, usize>,
+    /// Whether a numeric backreference — `\1` or `\k<1>` — was written
+    /// anywhere in the pattern.
+    ///
+    /// Checked once at the end rather than where it is read, because the rule
+    /// it feeds is a property of the whole pattern: one named group makes every
+    /// numeric backreference an error, including one written *before* the named
+    /// group appears. Measured — `/\1(?<a>a)/` is refused too (#205).
+    numeric_backref: bool,
 }
 
 impl Parser {
@@ -610,6 +635,7 @@ impl Parser {
                     let ch = self.octal_escape()?;
                     return Ok(self.literal(ch));
                 }
+                self.numeric_backref = true;
                 Ast::Backref {
                     group: value,
                     icase: self.flags.icase,
@@ -642,6 +668,12 @@ impl Parser {
             return Err(Error::Unsupported("a \\k<> level specifier"));
         }
         let group = if let Ok(n) = name.parse::<usize>() {
+            // `\k<0>` names the whole match rather than a group, and Ruby
+            // refuses the pattern rather than matching nothing with it.
+            if n == 0 {
+                return Err(Error::Syntax(format!("invalid group name <{name}>")));
+            }
+            self.numeric_backref = true;
             n
         } else {
             *self
@@ -852,7 +884,13 @@ impl Parser {
             // Only reachable from inside a bracket class: outside one, `\b`
             // is a word boundary and never gets this far.
             'b' => '\x08',
-            '0' => {
+            // An octal escape, up to three digits. Only reachable from inside a
+            // bracket class for `1`-`7`: outside one those are backreferences
+            // and never get this far, which is the whole difference between
+            // `/(a)\1/` and `/[\1]/` — the second matches U+0001, measured.
+            // `\8` and `\9` are not octal digits and stay literal, also
+            // measured.
+            '0'..='7' => {
                 self.pos -= 1;
                 self.octal_escape()?
             }
