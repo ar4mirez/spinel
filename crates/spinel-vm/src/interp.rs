@@ -40,7 +40,7 @@ use crate::bytecode::{
     MatchRef, ParamSpec,
 };
 use crate::class::Builtin;
-use crate::class::{ClassId, CrefId, Kind, Method, Visibility};
+use crate::class::{ClassId, CrefId, Kind, Method, ScopeDefault, Visibility};
 use crate::heap::{Handle, HandleScope, Heap, Payload};
 use crate::method::{BitOp, CvarOp, Definition, IvarOp, Native};
 use crate::shape::ShapeId;
@@ -297,8 +297,8 @@ struct Call {
     /// `yield` and by `block_given?`, and never by a slot, so an anonymous
     /// block costs nothing.
     block: Value,
-    /// The visibility a `def` in *this* scope gets — a bare `private` sets it
-    /// (#161). CRuby's `CREF_SCOPE_VISI`, kept on the frame rather than on the
+    /// What a `def` in *this* scope becomes — a bare `private` sets it (#161),
+    /// and a bare `module_function` sets it too (#211). CRuby's `CREF_SCOPE_VISI`, kept on the frame rather than on the
     /// scope because it belongs to one execution of a body:
     ///
     /// ```ruby
@@ -312,7 +312,7 @@ struct Call {
     /// Both measured on ruby 4.0.6. A block takes the value from the frame it
     /// was written in — the one its `home` link already names — and a method
     /// body starts public, which is the whole difference between those lines.
-    scope_visibility: Visibility,
+    scope_default: ScopeDefault,
     /// The lexical scope this frame's code was written in: the enclosing
     /// `class`/`module` chain, which is what a bare constant resolves against.
     /// Inherited from the `Method` for a call, from the `Proc` for a block, and
@@ -403,8 +403,8 @@ struct Links {
     id: u64,
     home: u64,
     breaks: u64,
-    /// See [`Call::scope_visibility`].
-    scope_visibility: Visibility,
+    /// See [`Call::scope_default`].
+    scope_default: ScopeDefault,
 }
 
 /// What one instruction did.
@@ -499,7 +499,7 @@ pub fn eval_in(
         // A `def` at a script's top level is a *private* instance method of
         // `Object` — `def m; end; Object.new.m` raises. CRuby gives the top
         // level cref `METHOD_VISI_PRIVATE`, and this is that (#161).
-        scope_visibility: Visibility::Private,
+        scope_default: ScopeDefault::Private,
         // The outermost frame is its own `return` target and has no `break`
         // target: `return` at the top level ends the script, and `break` there
         // has no call to end.
@@ -825,7 +825,7 @@ pub fn eval_in(
                     let iseq = Arc::clone(&frames[top].iseq.children[child as usize]);
                     let symbol = frames[top].symbols[name as usize];
                     let cref = frames[top].cref;
-                    let visibility = frames[top].scope_visibility;
+                    let default = frames[top].scope_default;
                     let owner = scope.classes().cref_class(cref);
                     hook_refusal(
                         scope,
@@ -835,7 +835,30 @@ pub fn eval_in(
                             "`method_added`, which this definition would fire",
                         )],
                     )?;
-                    define_method_on(scope, owner, symbol, iseq, cref, visibility);
+                    define_method_on(
+                        scope,
+                        owner,
+                        symbol,
+                        Arc::clone(&iseq),
+                        cref,
+                        default.visibility(),
+                    );
+                    if default == ScopeDefault::ModuleFunction {
+                        // The public half. A second definition rather than a
+                        // move: the instance copy stays, privately, which is
+                        // what makes `module_function` different from
+                        // `def self.` (#211).
+                        let singleton = scope.singleton_class(owner);
+                        hook_refusal(
+                            scope,
+                            owner,
+                            &[(
+                                "singleton_method_added",
+                                "`singleton_method_added`, which `module_function` would fire",
+                            )],
+                        )?;
+                        define_method_on(scope, singleton, symbol, iseq, cref, Visibility::Public);
+                    }
                     stack.push(Value::symbol(symbol));
                 }
 
@@ -1805,7 +1828,7 @@ fn dispatch<'h>(
                         breaks: 0,
                         // A method body starts public, whatever the class body
                         // around it said.
-                        scope_visibility: Visibility::Public,
+                        scope_default: ScopeDefault::Public,
                     };
                     push_frame(
                         scope,
@@ -1912,7 +1935,7 @@ fn push_proc_frame(
     // far as `return` and `break` go, but not for this: under a bare `private`,
     // `-> { def m; end }` still defines a private `m`.
     let home_frame = frames.iter().find(|frame| frame.id == home);
-    let scope_visibility = home_frame.map_or(Visibility::Public, |frame| frame.scope_visibility);
+    let scope_default = home_frame.map_or(ScopeDefault::Public, |frame| frame.scope_default);
     // `super` inside a block resolves against the method the block was
     // *written* in — the frame `home` already names, for the same reason
     // `return` does.
@@ -1931,7 +1954,7 @@ fn push_proc_frame(
         id: *ids,
         home: if lambda { *ids } else { home },
         breaks: if lambda { *ids } else { breaks },
-        scope_visibility,
+        scope_default,
     };
     let binding = if lambda {
         Binding::Strict
@@ -1974,7 +1997,7 @@ fn push_frame(
         pc: 0,
         base: stack.len(),
         keeps_receiver: false,
-        scope_visibility: links.scope_visibility,
+        scope_default: links.scope_default,
         id: links.id,
         home: links.home,
         breaks: links.breaks,
@@ -2763,7 +2786,7 @@ fn open_class(
         breaks: 0,
         // A class body starts public every time it is entered, which is why
         // reopening a class after a bare `private` is public again.
-        scope_visibility: Visibility::Public,
+        scope_default: ScopeDefault::Public,
     };
     frames.push(Call {
         iseq: body,
@@ -2772,7 +2795,7 @@ fn open_class(
         env,
         receiver,
         cref,
-        scope_visibility: links.scope_visibility,
+        scope_default: links.scope_default,
         // A class body is not a method body, so a `super` written directly in
         // one has no owner to be a step past.
         owner: None,
@@ -2985,7 +3008,7 @@ fn anonymous_module(
     // however visible the scope that wrote the literal was — a top-level block
     // would otherwise inherit the private default and give
     // `Class.new { attr_writer :a }` a setter nobody can call.
-    frames[last].scope_visibility = Visibility::Public;
+    frames[last].scope_default = ScopeDefault::Public;
     Ok(None)
 }
 
@@ -4511,7 +4534,7 @@ fn native_call<'h>(
                                 id: *ids,
                                 home: *ids,
                                 breaks: 0,
-                                scope_visibility: Visibility::Public,
+                                scope_default: ScopeDefault::Public,
                             };
                             push_frame(
                                 scope,
@@ -5261,7 +5284,10 @@ fn native_call<'h>(
             // fresh node per body is load-bearing rather than incidental.
             if call.args.is_empty() {
                 if let Some(frame) = frames.last_mut() {
-                    frame.scope_visibility = visibility;
+                    // Replaces the default outright: after `module_function`, a
+                    // bare `private` leaves a private instance method with no
+                    // singleton copy. Measured on ruby 4.0.6 (#211).
+                    frame.scope_default = ScopeDefault::from(visibility);
                 }
                 stack.push(Value::NIL);
                 return Ok(None);
@@ -5322,13 +5348,16 @@ fn native_call<'h>(
                 });
             };
             if call.args.is_empty() {
-                // The bare form makes every `def` below it a module function,
-                // which needs a second piece of scope state and a branch in
-                // `Insn::DefineMethod`. Refused rather than silently ignored.
-                return Err(Error::NoDispatch {
-                    op: "Module#module_function",
-                    operands: "no arguments, which sets the mode for the rest of the body",
-                });
+                // The bare form is a mode, not an operation: it makes every
+                // `def` below it in this body a module function. It shares one
+                // field with bare `private` because a body is in exactly one
+                // default, and it answers `nil` — not `self`, and not the
+                // argument list the form below answers. Measured (#211).
+                if let Some(frame) = frames.last_mut() {
+                    frame.scope_default = ScopeDefault::ModuleFunction;
+                }
+                stack.push(Value::NIL);
+                return Ok(None);
             }
             // The public copy is a new singleton definition, and Ruby fires
             // `singleton_method_added` for it — measured in
@@ -5701,7 +5730,7 @@ fn native_call<'h>(
             let cref = frames.last().map_or(CrefId::ROOT, |frame| frame.cref);
             let visibility = frames
                 .last()
-                .map_or(Visibility::Public, |frame| frame.scope_visibility);
+                .map_or(Visibility::Public, |frame| frame.scope_default.visibility());
             let mut defined: Vec<Value> = Vec::new();
             for &argument in &call.args {
                 let Some(name) = attribute_name(scope, argument) else {

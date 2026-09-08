@@ -162,6 +162,53 @@ impl Visibility {
     }
 }
 
+/// What a bare `def` in this body becomes, before any explicit modifier.
+///
+/// `private`, `protected` and `module_function` written bare all set this, and a
+/// body is in exactly one of them at a time: `module_function` then `private`
+/// leaves a private instance method with no singleton copy, and `private` then
+/// `module_function` leaves a module function. Measured on ruby 4.0.6. That is
+/// why this is one field rather than a [`Visibility`] beside a flag, which could
+/// hold a state Ruby has no way to reach (#211).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ScopeDefault {
+    #[default]
+    Public,
+    Private,
+    Protected,
+    /// Every later `def` in this body becomes a public copy on the module's
+    /// singleton *and* a private instance method.
+    ModuleFunction,
+}
+
+impl ScopeDefault {
+    /// The visibility the definition itself is given.
+    ///
+    /// A module function's instance copy is private; its public half is a
+    /// separate definition on the singleton, which is why this is not the whole
+    /// rule for `def`. It is the whole rule for everything else that reads the
+    /// body's default — `module_function; attr_accessor :x` makes a private
+    /// reader and no singleton copy at all. Measured.
+    #[must_use]
+    pub const fn visibility(self) -> Visibility {
+        match self {
+            ScopeDefault::Public => Visibility::Public,
+            ScopeDefault::Private | ScopeDefault::ModuleFunction => Visibility::Private,
+            ScopeDefault::Protected => Visibility::Protected,
+        }
+    }
+}
+
+impl From<Visibility> for ScopeDefault {
+    fn from(visibility: Visibility) -> ScopeDefault {
+        match visibility {
+            Visibility::Public => ScopeDefault::Public,
+            Visibility::Private => ScopeDefault::Private,
+            Visibility::Protected => ScopeDefault::Protected,
+        }
+    }
+}
+
 /// A found method, and the class or module that defined it.
 ///
 /// `owner` is where `super` resumes from once [#11] gives it a caller.

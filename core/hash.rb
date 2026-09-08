@@ -164,13 +164,17 @@ class Hash
     @pairs.map { |pair| pair[1] }
   end
 
+  # Yields one value, the `[key, value]` pair — not two. Measured: a
+  # `{ |x| }` block over a hash binds `x` to the pair, and a `{ |k, v| }` one
+  # gets its two locals from the block's own auto-splat rather than from here.
+  # Yielding two would leave the first shape holding only the key.
   def each
-    @pairs.each { |pair| yield pair[0], pair[1] }
+    @pairs.each { |pair| yield pair }
     self
   end
 
   def each_pair
-    @pairs.each { |pair| yield pair[0], pair[1] }
+    @pairs.each { |pair| yield pair }
     self
   end
 

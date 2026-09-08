@@ -79,6 +79,13 @@ type Emit = Result<(), Unsupported>;
 /// sharing the name here cannot collide with a user's variable.
 const IT: &str = "it";
 
+/// The slot a `for` body's block is handed each element in.
+///
+/// Spelled the way the multiple-assignment temporaries are, with a leading `%`,
+/// because Ruby cannot produce that name — so it never collides with a local the
+/// loop body writes, and never appears in `local_variables`.
+const FOR_ELEMENT: &str = "%for";
+
 /// `$!`, spelled the way Prism names a global: with the sigil.
 const ERRINFO: &str = "$!";
 
@@ -257,6 +264,17 @@ struct Compiler {
     /// `VarRef::Local { depth }` can be turned into a slot number. Prism has
     /// already done the hard half by deciding the depth; this is the lookup.
     outer: Vec<Vec<Box<str>>>,
+    /// Which environments in the run-time chain — this scope first, then
+    /// [`Self::outer`] — are the synthetic one a `for` body runs in.
+    ///
+    /// `for` opens no Ruby scope, and is compiled as a block, which opens a
+    /// run-time one. So Prism's depths count fewer environments than exist, and
+    /// a depth becomes a slot only after skipping the environments Ruby cannot
+    /// see. See [`Self::real_depth`] (#212).
+    env_synthetic: Vec<bool>,
+    /// Whether [`Self::env_synthetic`] holds a `true` anywhere, which is the
+    /// question every local resolution asks and almost always answers no to.
+    has_synthetic_env: bool,
     /// The caller merged several Ruby scopes into [`Self::locals`], so a depth
     /// may overshoot the chain. See [`flattened_expression`].
     flattened: bool,
@@ -360,6 +378,8 @@ impl Compiler {
             scope_barrier: true,
             is_lambda_body: false,
             outer: Vec::new(),
+            env_synthetic: vec![false],
+            has_synthetic_env: false,
             flattened: false,
             pattern_depth: 0,
             pattern_cache: None,
@@ -379,6 +399,12 @@ impl Compiler {
         if !barrier {
             compiler.outer.push(parent.locals.clone());
             compiler.outer.extend(parent.outer.iter().cloned());
+            // The chain this scope's own environment sits at the head of. A
+            // method body takes none of it, which is what the barrier says.
+            compiler
+                .env_synthetic
+                .extend(parent.env_synthetic.iter().copied());
+            compiler.has_synthetic_env = parent.has_synthetic_env;
             // A block sees the flattened scopes its parent saw. A method body
             // does not, which is what the barrier already says.
             compiler.flattened = parent.flattened;
@@ -824,6 +850,7 @@ impl Compiler {
             ExprKind::Assign(assign) => self.assign(assign, span)?,
             ExprKind::If(node) => self.if_expr(node)?,
             ExprKind::While(node) => self.while_expr(node)?,
+            ExprKind::For(node) => self.for_expr(node, span)?,
             ExprKind::Case(node) => match &node.branches {
                 CaseBranches::When(_) => self.case_expr(node, span)?,
                 CaseBranches::In(clauses) => self.case_in(node, clauses, span)?,
@@ -1925,12 +1952,61 @@ impl Compiler {
     /// the time this block is compiled, and a name missing from it would mean
     /// Prism and this compiler disagreed about what a local is, which is a bug
     /// rather than a construct to lower.
+    /// Prism's depth, which counts Ruby scopes, as a run-time environment
+    /// depth, which also counts the environment a `for` body runs in.
+    ///
+    /// Walks outward and stops at the `depth`-th environment Ruby can see. With
+    /// no `for` anywhere in the chain every entry is visible and this is the
+    /// identity, which is every program that does not write one.
+    fn real_depth(&self, name: &str, depth: u32) -> Option<u32> {
+        // The overwhelmingly common answer, and this runs once per local
+        // mention while compiling: a chain with no `for` in it resolves the way
+        // it always did. Kept as a flag rather than a scan of `env_synthetic`
+        // because the spec harness boots a heap per example, so compile-time
+        // work here is paid 25k times over.
+        if !self.has_synthetic_env {
+            return Some(depth);
+        }
+        // The element slot is a real local of the synthetic environment, and is
+        // reached before the walk that skips that environment.
+        if self.env_synthetic.first() == Some(&true)
+            && depth == 0
+            && self.locals.iter().any(|local| &**local == name)
+        {
+            return Some(0);
+        }
+        let mut visible = 0;
+        for (index, &synthetic) in self.env_synthetic.iter().enumerate() {
+            if synthetic {
+                continue;
+            }
+            if visible == depth {
+                return u32::try_from(index).ok();
+            }
+            visible += 1;
+        }
+        None
+    }
+
     fn outer_slot(
         &mut self,
         name: &str,
         depth: u32,
         span: Span,
     ) -> Result<(u16, u16), Unsupported> {
+        // A `for` body's environment is not a Ruby scope, so Prism never
+        // counted it. Translate before resolving: inside one, a name Prism put
+        // at depth 0 lives one environment out, and the only name that is
+        // genuinely local here is the element slot, which Ruby cannot spell.
+        let depth = match self.real_depth(name, depth) {
+            Some(real) => real,
+            None => {
+                return Err(Unsupported::at(
+                    "a local variable from an enclosing scope",
+                    span,
+                ));
+            }
+        };
         if depth == 0 {
             return Ok((self.slot(name), 0));
         }
@@ -3759,6 +3835,17 @@ impl Compiler {
                 hits.push(self.emit_jump(Insn::JumpIf));
             } else {
                 for exception in &clause.exceptions {
+                    // `rescue *classes` is a run-time number of `CheckMatch`es,
+                    // which this straight line of them cannot be. A different
+                    // construct from #213's splat-as-an-exit-value, and named
+                    // as one so the ranking says which is left — the same shape
+                    // `when` is refused in above.
+                    if matches!(exception.kind, ExprKind::Splat(_)) {
+                        return Err(Unsupported::at(
+                            "a splat in a `rescue` list",
+                            exception.span,
+                        ));
+                    }
                     self.expr(exception)?;
                     self.emit(Insn::CheckMatch);
                     hits.push(self.emit_jump(Insn::JumpIf));
@@ -3863,6 +3950,89 @@ impl Compiler {
         // the jump satisfies the model without ever running — the same trick
         // `return` uses.
         self.emit(Insn::PushNil);
+        Ok(())
+    }
+
+    /// `for x in xs; body; end`.
+    ///
+    /// Lowered to `xs.each { |%for| x = %for; body }`, which is what CRuby does
+    /// and is *not* the same as writing that block, in one way ruby/spec asserts
+    /// on: `for` opens no scope, so `x` and anything the body assigns are locals
+    /// of the enclosing scope and outlive the loop. The block below is therefore
+    /// compiled as a synthetic environment — see [`Self::real_depth`] — holding
+    /// one local of its own.
+    ///
+    /// The value is `each`'s, not the collection's: `for x in obj` over an
+    /// object whose `each` answers `:custom` is `:custom`. It only *looks* like
+    /// the collection because `Array#each` and `Range#each` answer `self`.
+    /// Measured on ruby 4.0.6.
+    ///
+    /// `for a, b in pairs` destructures because the assignment does — a
+    /// one-parameter block is handed the whole element, and `a, b = element` is
+    /// already the spread. `for m in {a: 1}` binding `m` to `[:a, 1]` is the
+    /// same rule seen from the other side, and is measured too.
+    ///
+    /// `break`, `next` and `redo` need nothing here: they mean in this block
+    /// what they mean in any block, which is what Ruby says they mean in a
+    /// `for`.
+    fn for_expr(&mut self, node: &spinel_ast::For, span: Span) -> Emit {
+        let mut child = Compiler::nested("block in for", &[], self, false);
+        child.env_synthetic[0] = true;
+        child.has_synthetic_env = true;
+        let element = child.slot(FOR_ELEMENT);
+        child.params = ParamSpec {
+            required: vec![element],
+            ..ParamSpec::default()
+        };
+        child.assign_element(&node.index, element, span)?;
+        child.statements(&node.body, true)?;
+        let block = self.push_child(child.finish());
+
+        self.expr(&node.iterable)?;
+        let name = self.symbol("each");
+        let site = self.push_site(
+            CallSite {
+                name,
+                argc: 0,
+                splats: Vec::new(),
+                keywords: Vec::new(),
+                block: BlockRef::Literal(block),
+                implicit_self: false,
+                kwsplat: false,
+            },
+            false,
+        );
+        self.emit(Insn::Send(site));
+        Ok(())
+    }
+
+    /// Write the element a `for` body was handed into the loop's target.
+    ///
+    /// Every target shape a `for` accepts is a target an assignment accepts —
+    /// `for @var in m`, `for arr[1] in m`, `for (i, j), k in m` are all in
+    /// `for_spec.rb` — so this is the assignment path, reached with the element
+    /// already in a slot rather than with an expression to evaluate.
+    fn assign_element(&mut self, index: &Target, element: u16, span: Span) -> Emit {
+        if let TargetKind::Multi(multi) = &index.kind {
+            let mut prepared = Vec::new();
+            self.prepare_multi(multi, &mut prepared)?;
+            let mut prepared = prepared.into_iter();
+            self.emit(Insn::GetLocal(element, 0));
+            // `for a, b in pairs` spreads through `to_ary`, the same conversion
+            // `a, b = pair` uses, so the element goes through the multiple
+            // assignment's own array coercion rather than a second one.
+            let slot = self.slot(&format!("%masgn{}", self.here()));
+            self.emit(Insn::SetLocal(slot, 0));
+            self.push_const_name("Array");
+            self.emit(Insn::GetLocal(slot, 0));
+            self.emit_send("__masgn_array__", 1);
+            self.spread_into(multi, &mut prepared, span)?;
+            self.emit(Insn::Pop);
+            return Ok(());
+        }
+        let slot = self.target_slot(index)?;
+        self.emit(Insn::GetLocal(element, 0));
+        self.emit_set(&slot);
         Ok(())
     }
 

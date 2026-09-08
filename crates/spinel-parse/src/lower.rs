@@ -1825,13 +1825,25 @@ impl Lower<'_> {
     /// `break`, `next`, and `return` each take at most one value. Ruby's
     /// `break 1, 2` means `break [1, 2]`, so the extra arguments become the array
     /// the programmer wrote without brackets.
+    ///
+    /// A lone splat is that same array with one element in it: `return *ary`
+    /// answers `[*ary]`, which collects even when `ary` has exactly one element
+    /// — `ary = [1]; return *ary` is `[1]` and never `1`. Measured on ruby
+    /// 4.0.6; `return_spec.rb` spends an example on that case alone. Writing it
+    /// as an `Array` here rather than at each of the three exits reuses the
+    /// literal's `Array#__concat_splat__`, which is where `*x`'s `to_a` — and
+    /// so `[*nil] == []` — already lives (#213).
     fn jump_value(&mut self, args: Option<&pm::ArgumentsNode<'_>>) -> Option<Box<Expr>> {
         let node = args?;
         let span = span_of(&node.as_node().location());
         let mut values = self.args(Some(node));
+        let lone_splat = matches!(
+            values.as_slice(),
+            [only] if matches!(only.kind, ExprKind::Splat(_))
+        );
         match values.len() {
             0 => None,
-            1 => Some(Box::new(values.pop().expect("checked length"))),
+            1 if !lone_splat => Some(Box::new(values.pop().expect("checked length"))),
             _ => Some(Box::new(Expr::new(span, ExprKind::Array(values)))),
         }
     }
