@@ -2002,6 +2002,27 @@ impl Compiler {
         None
     }
 
+    /// The reason an outward resolution failed.
+    ///
+    /// Under `flattened` the miss is the harness's, not the compiler's: it
+    /// merged the scopes it could collect, and a name still missing belongs to
+    /// a block it never ran — the loop-parameter shape
+    /// `docs/prd/0024-harness-enclosing-scope.md` refuses on purpose, where
+    /// `each do |family, ip_address|` wraps a `describe`. Naming that
+    /// separately is what keeps the blocked ranking honest: one string for both
+    /// meanings read as a compiler gap twice, in #164 and again in #220, and
+    /// each time the plain `.rb` shape ran fine.
+    fn unresolved_local(&self, span: Span) -> Unsupported {
+        if self.flattened {
+            Unsupported::at(
+                "a local variable from a block the harness did not run",
+                span,
+            )
+        } else {
+            Unsupported::at("a local variable from an enclosing scope", span)
+        }
+    }
+
     fn outer_slot(
         &mut self,
         name: &str,
@@ -2061,17 +2082,17 @@ impl Compiler {
                 .iter()
                 .position(|l| &**l == name)
                 .map(|index| (index as u16, 0))
-                .ok_or_else(|| Unsupported::at("a local variable from an enclosing scope", span));
+                .ok_or_else(|| self.unresolved_local(span));
         }
         let scope = self
             .outer
             .get(effective as usize - 1)
-            .ok_or_else(|| Unsupported::at("a local variable from an enclosing scope", span))?;
+            .ok_or_else(|| self.unresolved_local(span))?;
         scope
             .iter()
             .position(|l| &**l == name)
             .map(|index| (index as u16, effective as u16))
-            .ok_or_else(|| Unsupported::at("a local variable from an enclosing scope", span))
+            .ok_or_else(|| self.unresolved_local(span))
     }
 
     // -- definitions ------------------------------------------------------

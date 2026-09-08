@@ -258,3 +258,45 @@ fn only_a_splat_something_can_outrun_is_captured() {
     // Two splats: the first can be outrun, the last cannot.
     assert_eq!(captures("def m(*a); a; end; x = [1]; m(*x, *x)"), 1);
 }
+
+/// A name the harness could not merge names the harness, not the compiler.
+///
+/// `outer_slot` refuses on four paths that once shared one string, "a local
+/// variable from an enclosing scope". Two of them are only reachable from
+/// `flattened_expression`, which only `spec/harness` calls, and there the miss
+/// means the harness never ran the loop that binds the name —
+/// `%w(x X).each do |x| it "..." do ... end end`. The other two mean Prism and
+/// this compiler disagree about what a local is, which is a bug.
+///
+/// Reading one string as the other put 310 examples under "the single largest
+/// compiler gap" in #220, and 406 under #164 before it, while the same shape as
+/// a plain `.rb` file ran fine. The ranking in `scripts/spec.sh --blocked=0`
+/// picks the next slice, so the two meanings have to be tellable apart in it.
+#[test]
+fn an_unmerged_local_blames_the_harness_and_a_real_one_blames_the_compiler() {
+    // Prism sees `x` as a local only because an enclosing scope assigns it, so
+    // the whole file is parsed and just the `each` statement is compiled — which
+    // is what the harness does with an example's body. Inside the block `x` is
+    // then a local one scope up, and that scope is not there.
+    let parsed = spinel_parse::parse(b"x = 1\n[1].each { puts x }");
+    assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+    let expr = &parsed.program.body[1];
+
+    let flattened = compile::flattened_expression("<example>", &[], expr)
+        .expect_err("an unmerged name cannot resolve");
+    assert_eq!(
+        flattened.node,
+        "a local variable from a block the harness did not run"
+    );
+
+    let plain = compile::expression("<main>", &[], expr)
+        .expect_err("the same depth is a disagreement outside the harness");
+    assert_eq!(plain.node, "a local variable from an enclosing scope");
+
+    // The compiler itself resolves enclosing locals fine — which is why the
+    // harness's miss must not be reported against it. Compiled whole, with the
+    // scope present, the same nesting raises nothing. See PRD 0024.
+    let whole = spinel_parse::parse(b"x = 1\n[1].each { [2].each { puts x } }");
+    assert!(whole.errors.is_empty(), "{:?}", whole.errors);
+    compile::program(&whole.program).expect("enclosing locals compile");
+}
