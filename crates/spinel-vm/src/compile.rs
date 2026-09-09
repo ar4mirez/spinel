@@ -474,6 +474,8 @@ impl Compiler {
             Insn::CaptureSplat => 0,
             // Pops the built source and pushes the pattern: net zero.
             Insn::NewRegexp(_) | Insn::NewRegexpOnce(_, _) => 0,
+            // Pops the built name and pushes the symbol: net zero.
+            Insn::Intern => 0,
             // Both write into the frame's definee and leave the stack alone;
             // the `nil` an `alias` expression is worth is pushed separately.
             Insn::Alias(_, _) | Insn::Undef(_) => 0,
@@ -525,6 +527,7 @@ impl Compiler {
             Insn::Jump(_)
             | Insn::JumpUnlessKeep(_)
             | Insn::JumpIfKeep(_)
+            | Insn::JumpIfNilKeep(_)
             | Insn::Neg
             | Insn::Not
             // Pops the receiver, pushes the name it defined.
@@ -610,6 +613,7 @@ impl Compiler {
             Insn::JumpUnlessKeep(_) => Insn::JumpUnlessKeep(displacement),
             Insn::JumpUnlessUndef(_) => Insn::JumpUnlessUndef(displacement),
             Insn::JumpIfKeep(_) => Insn::JumpIfKeep(displacement),
+            Insn::JumpIfNilKeep(_) => Insn::JumpIfNilKeep(displacement),
             other => unreachable!("{other:?} is not a jump"),
         };
     }
@@ -746,15 +750,35 @@ impl Compiler {
             }
             ExprKind::SourceLine(line) => self.emit(Insn::PushInt(i64::from(*line))),
 
+            // Past 2^62 an `Integer` is a heap cell. The literal carries the
+            // digits and the base it was written in, because `0xff` has to
+            // reprint as `0xff`, and `materialise` is the one place they turn
+            // into a value — so a wide literal and an overflowing sum reach the
+            // same normalisation.
             ExprKind::Int(int) => match &int.value {
                 IntValue::Small(n) => match Value::fixnum(*n) {
                     Some(_) => self.emit(Insn::PushInt(*n)),
-                    // Past 2^62 an Integer is a heap bignum, and there is no
-                    // bignum. Refusing beats a wrapped answer.
-                    None => return Err(Unsupported::at("an integer wider than a fixnum", span)),
+                    None => {
+                        let index = self.literal(Literal::BigInt(n.to_string().into()));
+                        self.emit(Insn::PushLit(index));
+                    }
                 },
-                IntValue::Big(_) => {
-                    return Err(Unsupported::at("an integer wider than a fixnum", span));
+                IntValue::Big(digits) => {
+                    let radix = match int.base {
+                        spinel_ast::IntBase::Binary => 2,
+                        spinel_ast::IntBase::Octal => 8,
+                        spinel_ast::IntBase::Decimal => 10,
+                        spinel_ast::IntBase::Hexadecimal => 16,
+                    };
+                    // Normalised to base 10 here rather than at run time, so
+                    // `materialise` has one parse and the iseq carries a number
+                    // rather than a notation.
+                    let decimal = num_bigint::BigInt::parse_bytes(digits.as_bytes(), radix)
+                        .ok_or_else(|| {
+                            Unsupported::at("an integer literal Prism mis-spelled", span)
+                        })?;
+                    let index = self.literal(Literal::BigInt(decimal.to_string().into()));
+                    self.emit(Insn::PushLit(index));
                 }
             },
 
@@ -825,14 +849,21 @@ impl Compiler {
                 }
             }
 
-            ExprKind::Sym(symbol) => {
-                let bytes = flat_bytes(&symbol.parts)
-                    .ok_or_else(|| Unsupported::at("symbol interpolation", span))?;
-                let name = String::from_utf8(bytes.into_vec())
-                    .map_err(|_| Unsupported::at("a symbol that is not UTF-8", span))?;
-                let index = self.symbol(&name);
-                self.emit(Insn::PushSym(index));
-            }
+            // An interpolated symbol builds the string the same way `"a#{b}"`
+            // does and interns the result at run time. It cannot go through the
+            // iseq's symbol table, which is fixed when the iseq is compiled.
+            ExprKind::Sym(symbol) => match flat_bytes(&symbol.parts) {
+                Some(bytes) => {
+                    let name = String::from_utf8(bytes.into_vec())
+                        .map_err(|_| Unsupported::at("a symbol that is not UTF-8", span))?;
+                    let index = self.symbol(&name);
+                    self.emit(Insn::PushSym(index));
+                }
+                None => {
+                    self.interpolated(&symbol.parts)?;
+                    self.emit(Insn::Intern);
+                }
+            },
 
             ExprKind::Array(elements) => self.array_literal(elements, span)?,
 
@@ -1074,8 +1105,21 @@ impl Compiler {
                     self.emit_send("__merge_literal__", 1);
                     self.emit(Insn::Pop);
                 }
-                // `**nil` is allowed and contributes nothing.
-                spinel_ast::HashEntryKind::Splat(None) => {}
+                // The anonymous `**` forwarded on: `def f(**) = e(**)`.
+                //
+                // Not `**nil`, despite what this arm used to say. Prism gives
+                // `**nil` an `AssocSplatNode` whose value is a `NilNode`, so it
+                // arrives as `Splat(Some(nil))` and merges nothing by way of
+                // `__merge_literal__`; only the anonymous `**` has no value at
+                // all. Treating the two as one silently answered `{}` where
+                // Ruby forwards the caller's keywords.
+                spinel_ast::HashEntryKind::Splat(None) => {
+                    let (slot, depth) = self.forwarded_slot("**", entry.span)?;
+                    self.emit(Insn::Dup);
+                    self.emit(Insn::GetLocal(slot, depth));
+                    self.emit_send("__merge_literal__", 1);
+                    self.emit(Insn::Pop);
+                }
             }
         }
         Ok(())
@@ -1219,7 +1263,7 @@ impl Compiler {
             return self.multi_assign(multi, &assign.value, span);
         }
 
-        let slot = self.target_slot(&assign.target)?;
+        let (slot, short_circuit) = self.target_slot_guarded(&assign.target)?;
         match &assign.op {
             AssignOp::Assign => {
                 self.expr(&assign.value)?;
@@ -1268,7 +1312,49 @@ impl Compiler {
                 self.patch_here(skip);
             }
         }
+        // `a&.b = v` and `a&.b += v` land here with a `nil` already on the
+        // stack and everything above skipped.
+        if let Some(nil) = short_circuit {
+            self.patch_here(nil);
+        }
         Ok(())
+    }
+
+    /// [`Compiler::target_slot`], and the `&.` guard when the target is one.
+    ///
+    /// Only [`Compiler::assign`] calls this, because `a&.b = v` and `a&.b += v`
+    /// are the two places a safe-navigation target has a whole expression to
+    /// short-circuit. A target inside a multiple assignment or a pattern
+    /// capture would have to skip something its caller owns, so those keep
+    /// refusing rather than quietly dropping the short circuit.
+    ///
+    /// The guard reads the parked receiver rather than re-evaluating it, so
+    /// `a()&.b += 1` calls `a` once — the same rule the parking is there for.
+    /// Measured: with a `nil` receiver neither the read, the operator, nor the
+    /// right-hand side runs, which is why the jump is emitted before any of
+    /// them.
+    fn target_slot_guarded(
+        &mut self,
+        target: &Target,
+    ) -> Result<(Slot, Option<usize>), Unsupported> {
+        let TargetKind::Call(call) = &target.kind else {
+            return Ok((self.target_slot(target)?, None));
+        };
+        if !call.safe_nav {
+            return Ok((self.target_slot(target)?, None));
+        }
+
+        let receiver = self.park(&call.receiver)?;
+        self.emit(Insn::GetLocal(receiver, 0));
+        let nil = self.emit_jump(Insn::JumpIfNilKeep);
+        // Not nil: drop the peeked receiver and assign as usual.
+        self.emit(Insn::Pop);
+        let slot = Slot::Send {
+            receiver,
+            args: Vec::new(),
+            get: call.name.as_ref().into(),
+        };
+        Ok((slot, Some(nil)))
     }
 
     /// Where an assignment writes: a local at whatever depth it was declared,
@@ -2095,6 +2181,33 @@ impl Compiler {
             .ok_or_else(|| self.unresolved_local(span))
     }
 
+    /// The slot an anonymous parameter — `*`, `**` or `&` — was bound to.
+    ///
+    /// Searched outward rather than resolved at a depth, because Prism hands
+    /// `...`, `*`, `**` and `&` in argument position with no scope depth on
+    /// them: there is no name for it to have counted. The search does not stop
+    /// at depth 0 because a block inside the method can forward — measured,
+    /// `def g(*) = [1].map { e(*) }` answers `[[7, 8]]` for `g(7, 8)` — and it
+    /// cannot run past the method, because a `def` body's compiler is built
+    /// with a scope barrier and so has no outer chain to walk.
+    ///
+    /// Absent means the program wrote `f(*)` in a method with no anonymous
+    /// rest, which CRuby rejects at parse time and Prism reports before this.
+    fn forwarded_slot(&mut self, name: &str, span: Span) -> Result<(u16, u16), Unsupported> {
+        if let Some(index) = self.locals.iter().position(|l| &**l == name) {
+            return Ok((index as u16, 0));
+        }
+        for (up, scope) in self.outer.iter().enumerate() {
+            if let Some(index) = scope.iter().position(|l| &**l == name) {
+                return Ok((index as u16, up as u16 + 1));
+            }
+        }
+        Err(Unsupported::at(
+            "argument forwarding with no matching parameter",
+            span,
+        ))
+    }
+
     // -- definitions ------------------------------------------------------
 
     /// `def name(params) body end`.
@@ -2661,8 +2774,22 @@ impl Compiler {
                     spec.kwrest = Some(slot);
                 }
                 KeywordRestKind::Forbidden => spec.no_keywords = true,
+                // `def a(...)` is `def a(*, **, &)`: measured, `...` forwards
+                // positional arguments, keywords and the block, and each of the
+                // three anonymous parameters forwards its own kind on its own.
+                //
+                // Declaring all three here rather than in the parser keeps the
+                // AST reprintable — `...` is one token and reprints as one —
+                // and the slots still land in binder order, because a signature
+                // with `...` in it can carry leading required parameters and
+                // nothing else: `...` *is* the rest, the keywords and the
+                // block, so `list.rest`, `list.keywords` and `list.block` are
+                // all empty when this branch runs.
                 KeywordRestKind::Forwarding => {
-                    return Err(Unsupported::at("argument forwarding", span));
+                    spec.rest = Some(self.param_slot("*", at));
+                    spec.kwrest = Some(self.param_slot("**", at + 1));
+                    spec.block = Some(self.param_slot("&", at + 2));
+                    at += 3;
                 }
             }
         }
@@ -2783,7 +2910,7 @@ impl Compiler {
     /// A call: the specialised operators when they apply, a real send otherwise.
     fn call(&mut self, call: &spinel_ast::Call, span: Span) -> Emit {
         if call.flags.safe_nav {
-            return Err(Unsupported::at("a safe-navigation call", span));
+            return self.safe_nav(call, span);
         }
         if self.try_operator(call)? {
             return Ok(());
@@ -2818,6 +2945,48 @@ impl Compiler {
             return Ok(());
         }
         self.emit(Insn::Send(site));
+        Ok(())
+    }
+
+    /// `a&.b`: the send, jumped around when the receiver is `nil`.
+    ///
+    /// Everything to the right of the receiver sits after the jump, which is
+    /// what makes the short circuit reach the arguments and the block as well
+    /// as the send. Measured: `nil&.foo(side += 1)` leaves `side` alone, and so
+    /// does `nil&.foo = (side += 1)`.
+    ///
+    /// The receiver is evaluated once and then peeked at rather than tested and
+    /// re-pushed, so a receiver with a side effect has it once — also measured,
+    /// with a counting lambda.
+    ///
+    /// No `try_operator` on this path. `a&.+(b)` is a legal safe-navigation
+    /// call, and letting it be an ordinary send costs one dispatch on a shape
+    /// nobody writes, where teaching the operator lowering to carry a jump
+    /// would cost a branch in every `+` in the corpus.
+    fn safe_nav(&mut self, call: &spinel_ast::Call, span: Span) -> Emit {
+        let receiver = call
+            .receiver
+            .as_ref()
+            .expect("`&.` does not parse without a receiver");
+        self.expr(receiver)?;
+        let nil = self.emit_jump(Insn::JumpIfNilKeep);
+
+        let site = self.arguments(&call.name, &call.args, call.block.as_ref(), span)?;
+        let site = self.push_site(site, false);
+        if call.flags.attribute_write {
+            let slot = self.slot(&format!("%attr{}", self.here()));
+            self.emit(Insn::Dup);
+            self.emit(Insn::SetLocal(slot, 0));
+            self.emit(Insn::Send(site));
+            self.emit(Insn::Pop);
+            self.emit(Insn::GetLocal(slot, 0));
+        } else {
+            self.emit(Insn::Send(site));
+        }
+
+        // Both arms leave one value: the jump kept the `nil`, and the send
+        // replaced the receiver with its result.
+        self.patch_here(nil);
         Ok(())
     }
 
@@ -2891,11 +3060,42 @@ impl Compiler {
                         self.emit(Insn::CaptureSplat);
                     }
                 }
+                // The anonymous `*` forwarded on: `def f(*) = e(*)`.
                 ExprKind::Splat(None) => {
-                    return Err(Unsupported::at("argument forwarding", arg.span));
+                    let (slot, depth) = self.forwarded_slot("*", arg.span)?;
+                    self.emit(Insn::GetLocal(slot, depth));
+                    site.splats.push(site.argc);
+                    site.argc += 1;
+                    if mutable_after(args, index, block) {
+                        self.emit(Insn::CaptureSplat);
+                    }
                 }
+                // `...`, which is the anonymous `*`, `**` and `&` at once —
+                // measured, and the reason all three parameters are declared
+                // for it. Ruby requires `...` to be the last argument, so
+                // pushing the block operand here leaves it exactly where
+                // `attach_block` would have.
+                //
+                // No empty keyword hash is manufactured when the caller passed
+                // none: `def f(...) = g(...)` reaching `def g(x)` answers 9 for
+                // `f(9)`, so the kwsplat rides the same empty-`**` path an
+                // explicit `**kw` would.
                 ExprKind::ForwardingArgs => {
-                    return Err(Unsupported::at("argument forwarding", arg.span));
+                    let (rest, rest_depth) = self.forwarded_slot("*", arg.span)?;
+                    self.emit(Insn::GetLocal(rest, rest_depth));
+                    site.splats.push(site.argc);
+                    site.argc += 1;
+                    if mutable_after(args, index, block) {
+                        self.emit(Insn::CaptureSplat);
+                    }
+
+                    let (kwrest, kwrest_depth) = self.forwarded_slot("**", arg.span)?;
+                    self.emit(Insn::GetLocal(kwrest, kwrest_depth));
+                    site.kwsplat = true;
+
+                    let (blk, blk_depth) = self.forwarded_slot("&", arg.span)?;
+                    self.emit(Insn::GetLocal(blk, blk_depth));
+                    site.block = BlockRef::Pass;
                 }
                 // A trailing brace-less hash is Ruby's keyword syntax.
                 //
@@ -2961,8 +3161,12 @@ impl Compiler {
                 self.expr(expr)?;
                 site.block = BlockRef::Pass;
             }
+            // The anonymous `&` forwarded on: `def f(&) = e(&)`. Its own slot,
+            // named `&`, was declared when the parameter was.
             Some(BlockArg::Pass(None)) => {
-                return Err(Unsupported::at("an anonymous block parameter", span));
+                let (slot, depth) = self.forwarded_slot("&", span)?;
+                self.emit(Insn::GetLocal(slot, depth));
+                site.block = BlockRef::Pass;
             }
         }
         Ok(())

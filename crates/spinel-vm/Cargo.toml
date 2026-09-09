@@ -8,6 +8,8 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+num-bigint = "0.4.8"
+num-traits = "0.2.19"
 spinel-ast.workspace = true
 spinel-regex.workspace = true
 

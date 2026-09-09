@@ -54,7 +54,16 @@ class Hash
   # `{ **other }`. Ruby converts with `to_hash`, so a Hash is used as it is and
   # anything else is asked to become one.
   def __merge_literal__(other)
+    # `**nil` contributes nothing, and so does a `**h` whose `h` is nil —
+    # measured, both answer `{}` rather than raising. Anything else that is not
+    # a Hash still raises, which is why this is a nil check and not a rescue:
+    # `{**5}` is `no implicit conversion of Integer into Hash`.
+    return self if other.nil?
+
     source = other.respond_to?(:to_hash) ? other.to_hash : other
+    unless source.is_a?(Hash)
+      raise TypeError, "no implicit conversion of " + other.class.name + " into Hash"
+    end
     source.each_pair { |key, value| self[key] = value }
     self
   end

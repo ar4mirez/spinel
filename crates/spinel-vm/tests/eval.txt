@@ -998,3 +998,123 @@ begin; (begin; raise 'error'; rescue *[42]; end); rescue TypeError => e; e.messa
 begin; (begin; raise 'x'; rescue *[[RuntimeError]]; end); rescue TypeError => e; e.message; end  #=> "class or module required for rescue clause"
 begin; raise RuntimeError; rescue *[RuntimeError, 42]; :caught; end  #=> :caught
 begin; (begin; raise RuntimeError; rescue *[42, RuntimeError]; end); rescue TypeError => e; e.message; end  #=> "class or module required for rescue clause"
+
+# --- #231, symbol interpolation -------------------------------------------
+#
+# `:"a#{b}"` builds the name the way `"a#{b}"` does and interns the result at
+# run time, because the iseq's symbol table is fixed when the iseq is compiled.
+#
+# `equal?` is the row that matters: an interpolated symbol must land in the same
+# process-wide table a literal one does, or `:"a#{b}" == :ac` would be true
+# while `equal?` was false and every method cache keyed on a symbol would be
+# wrong. Redefining `String#to_sym` deliberately does not appear: it does not
+# change what a dsym evaluates to, which is why the lowering is its own opcode
+# rather than a send.
+b231 = "c"; :"a#{b231}".to_s  #=> "ac"
+b231 = "c"; :"a#{b231}".equal?(:ac)  #=> true
+b231 = "c"; :"a#{b231}".class  #=> Symbol
+:"a#{1 + 1}b".to_s  #=> "a2b"
+:"#{nil}".size  #=> 0
+:"#{:sym}".to_s  #=> "sym"
+o231 = Object.new; def o231.to_s; "F"; end; :"a#{o231}".to_s  #=> "aF"
+b231 = "c"; { :"a#{b231}" => 1 }[:ac]  #=> 1
+b231 = "c"; :"a#{b231}" == :ac  #=> true
+b231 = "ac"; :"#{b231}".equal?(:"a#{"c"}")  #=> true
+
+# --- #224, safe navigation -------------------------------------------------
+#
+# `a&.b` is the send with a jump around it when the receiver is nil. Two rules
+# are easy to get backwards, so both are measured rather than believed.
+#
+# Only `nil` short-circuits. `false&.to_s` is `"false"`, not `nil`, which is why
+# the opcode tests for nil and not for truthiness.
+#
+# The short circuit reaches everything to the right of the receiver: arguments,
+# block, and — in the assignment forms — the right-hand side. The `side224`
+# rows are the ones that pin it, and they are the reason `a&.b += v` is a jump
+# emitted before the read rather than a `nil` check on the result.
+nil&.size  #=> nil
+"ab"&.size  #=> 2
+false&.to_s  #=> "false"
+nil&.a&.b  #=> nil
+[1, 2]&.map { |q| q * 2 }  #=> [2, 4]
+nil&.map { |q| q }  #=> nil
+$side224 = 0; nil&.foo($side224 += 1); $side224  #=> 0
+$n224 = 0; def cnt224; $n224 += 1; "ab"; end; cnt224&.size; $n224  #=> 1
+k224 = Class.new { attr_reader :m; def initialize; @m = 0; end; def m=(v); @m = v; 42; end }; o = k224.new; o&.m += 3; o.m  #=> 3
+k224b = Class.new { attr_reader :m; def initialize; @m = 0; end; def m=(v); @m = v; 42; end }; o = k224b.new; (o&.m = 9)  #=> 9
+o224 = nil; (o224&.m = 3)  #=> nil
+$side224b = 0; o = nil; (o&.m = ($side224b += 1)); $side224b  #=> 0
+$side224c = 0; h = nil; (h&.x += ($side224c += 1)); $side224c  #=> 0
+
+# --- #221, argument forwarding ---------------------------------------------
+#
+# `...` is the anonymous `*`, `**` and `&` at once. Every row below was run
+# against CRuby first, because two of the rules are ones a reasonable
+# implementation gets wrong in the same direction.
+#
+# No empty keyword hash is manufactured. `f221d(9)` reaching `def g221d(x)`
+# answers 9, not an ArgumentError about a stray `{}`, and `f221c(1, 2)` reaching
+# `def e221c(*args)` answers `[1, 2]`.
+#
+# Forwarding works from inside a block, `r221h` and `r221i`, which is why the
+# slot is searched outward instead of resolved at depth 0.
+#
+# `**` alone is the row that caught a silent wrong answer: it used to share an
+# arm with `**nil` and quietly forwarded nothing.
+def b221(x, k: 0); [x, k]; end; def a221(...); b221(...); end; a221(1, k: 2)  #=> [1, 2]
+def b221b(x, k: 0); [x, k]; end; def a221b(...); b221b(...); end; a221b(1)  #=> [1, 0]
+def t221(p1, p2, k: 0); [p1, p2, k]; end; def l221(x, ...); t221(x, ...); end; l221(1, 2, k: 3)  #=> [1, 2, 3]
+def c221(&blk); blk.call(5); end; def d221(...); c221(...); end; d221 { |v| v * 2 }  #=> 10
+def e221c(*args); args; end; def f221c(...); e221c(...); end; f221c(1, 2)  #=> [1, 2]
+def g221d(x); x; end; def f221d(...); g221d(...); end; f221d(9)  #=> 9
+def e221e(*a); a; end; def r221e(*); e221e(*); end; r221e(1, 2)  #=> [1, 2]
+def k221(**kw); kw; end; def r221f(**); k221(**); end; r221f(a: 1)[:a]  #=> 1
+def k221b(**kw); kw; end; def r221fb(**); k221b(**); end; r221fb(a: 1).size  #=> 1
+def bc221(&z); z.call(7); end; def r221g(&); bc221(&); end; r221g { |v| v + 1 }  #=> 8
+def e221h(*a, **k); [a, k]; end; def f221h(...); [1].map { e221h(...) }; end; f221h(1).first.first  #=> [1]
+def e221hb(*a, **k); [a, k]; end; def f221hb(...); [1].map { e221hb(...) }; end; f221hb(1, k: 2).first.last[:k]  #=> 2
+def e221i(*a); a; end; def g221i(*); [1].map { e221i(*) }; end; g221i(7, 8)  #=> [[7, 8]]
+def e221j(*a, **k); [a, k]; end; e221j(1, **nil).first  #=> [1]
+def e221jb(*a, **k); [a, k]; end; e221jb(1, **nil).last.size  #=> 0
+n221 = nil; ({ **n221 }).size  #=> 0
+n221b = { x: 1 }; ({ **n221b })[:x]  #=> 1
+
+# --- #225, an integer wider than a fixnum ----------------------------------
+#
+# Ruby has one `Integer` and no visible boundary, so the promotion has to be
+# invisible in both directions. `r225c` is the row that pins the second half:
+# `(2**70) - (2**70)` is `0`, the same value the literal is, not a heap cell
+# that merely prints as zero.
+#
+# `/` and `%` floor. `num-bigint` truncates the way Rust does, so the negative
+# rows are the ones that would catch the correction going missing — `-4` and
+# `1` for fixnums, and the same shape two powers of two apart.
+#
+# `false` for `2**70 == 2**70 + 1` is not the tautology it looks like: compared
+# as `f64` both sides round to the same double and it would be true.
+2**70  #=> 1180591620717411303424
+(2**70).class  #=> Integer
+(2**70) - (2**70)  #=> 0
+((2**70) - (2**70)).class  #=> Integer
+4611686018427387903 + 1  #=> 4611686018427387904
+4611686018427387903 * 2  #=> 9223372036854775806
+4611686018427387903 + 1 - 1  #=> 4611686018427387903
+(2**70) / (2**35)  #=> 34359738368
+(2**70) % 7  #=> 2
+(-(2**70)) / (2**35)  #=> -34359738368
+(-(2**70)) % 7  #=> 5
+(2**70).to_s  #=> "1180591620717411303424"
+(2**70) > (2**69)  #=> true
+2**70 == 2**70 + 1  #=> false
+12345678901234567890123456789 * 987654321  #=> 12193263112482853211248285321112635269
+1 << 70  #=> 1180591620717411303424
+(2**70) >> 65  #=> 32
+~(2**70)  #=> -1180591620717411303425
+(2**70) | 1  #=> 1180591620717411303425
+(2**70) ^ (2**70)  #=> 0
+0 - (2**70)  #=> -1180591620717411303424
+10**20  #=> 100000000000000000000
+(10**20) / 3  #=> 33333333333333333333
+0x8000000000000000  #=> 9223372036854775808
+0b1  #=> 1
