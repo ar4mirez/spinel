@@ -1,0 +1,1 @@
+fails(Asserts a side effect of the match, not the result: `grep` with a Regexp leaves `$~` set to the last MatchData, and reading `$~` in the caller needs the frame-local match global that Regexp owns. #33. Became visible rather than blocked when `grep` started existing):Enumerable#grep does not set $~ when given no block

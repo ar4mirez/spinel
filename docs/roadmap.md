@@ -37,7 +37,7 @@ Phase 2 or is restated at the ceiling is open on #220.
 
 ## Phase 2: core library
 
-One slice per class, each driven by `core/<class>/`: `Integer`, `Float`, `String` and `Encoding` (UTF-8/US-ASCII/binary), `Symbol`, `Array`, `Hash`, `Range`, `Comparable`, `Enumerable`, `Enumerator` (needs fibers), `Proc`/`Method`/`UnboundMethod`, `Module`/`Class` reflection (`define_method`, `instance_eval`, `method_missing`, hooks), `Exception` hierarchy with `caller_locations`, `Struct`, `Data`, `Time` (primitive clock), full `Regexp`/`MatchData`, `Rational`/`Complex` (Ruby), `Math`, `GC`/`ObjectSpace` with `WeakMap`, `WeakRef`, and finalizers, `Marshal`.
+One slice per class, each driven by `core/<class>/`: `Integer`, `Float`, `String` and `Encoding` (UTF-8/US-ASCII/binary), `Symbol`, `Array`, `Hash`, `Range`, `Comparable`, `Enumerable`, `Enumerator` (external iteration needs fibers; `to_enum` and the rest do not), `Proc`/`Method`/`UnboundMethod`, `Module`/`Class` reflection (`define_method`, `instance_eval`, `method_missing`, hooks), `Exception` hierarchy with `caller_locations`, `Struct`, `Data`, `Time` (primitive clock), full `Regexp`/`MatchData`, `Rational`/`Complex` (Ruby), `Math`, `GC`/`ObjectSpace` with `WeakMap`, `WeakRef`, and finalizers, `Marshal`.
 
 - Fibers on the non-recursive interpreter plus `corosensei` for re-entrant primitives. *Check:* `core/fiber/`, `core/enumerator/`.
 - String `eval`, `binding`, `instance_eval` with strings. *Check:* `core/kernel/eval_spec.rb`, `core/binding/`.
