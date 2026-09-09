@@ -111,6 +111,15 @@ pub enum Insn {
     JumpUnlessKeep(i32),
     /// Peeks; jumps when the value is truthy, leaving it on the stack. `||`.
     JumpIfKeep(i32),
+    /// Peeks; jumps when the value is `nil`, leaving it on the stack. `&.`
+    ///
+    /// Nil rather than falsy, and its own opcode rather than [`JumpUnlessKeep`]
+    /// for exactly that reason: `false&.to_s` is `"false"`, measured, so a
+    /// safe-navigation call on `false` is an ordinary send. Keeping the value
+    /// is what makes the whole expression answer `nil` without a second push.
+    ///
+    /// [`JumpUnlessKeep`]: Insn::JumpUnlessKeep
+    JumpIfNilKeep(i32),
     /// Pops; jumps unless the value is the "no argument was supplied" marker.
     ///
     /// How a default is run for exactly the parameters a call left out. The

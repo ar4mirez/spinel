@@ -66,6 +66,7 @@ mod tests {
     }
 }
 
+pub mod bignum;
 pub mod bytecode;
 pub mod callcache;
 pub mod class;

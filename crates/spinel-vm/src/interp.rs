@@ -675,6 +675,11 @@ pub fn eval_in(
                         frames[top].pc = jump(frames[top].pc, displacement);
                     }
                 }
+                Insn::JumpIfNilKeep(displacement) => {
+                    if *stack.last().expect("jump on an empty stack") == Value::NIL {
+                        frames[top].pc = jump(frames[top].pc, displacement);
+                    }
+                }
 
                 Insn::BinOp(op) => {
                     let right = stack.pop().expect("binop on an empty stack");
@@ -726,7 +731,8 @@ pub fn eval_in(
                 }
                 Insn::Neg => {
                     let value = stack.pop().expect("neg on an empty stack");
-                    stack.push(negate(value)?);
+                    let negated = negate(scope, value)?;
+                    stack.push(negated);
                 }
                 Insn::Not => {
                     let value = stack.pop().expect("not on an empty stack");
@@ -4920,6 +4926,17 @@ fn native_call<'h>(
         }
 
         Native::IntBits(op) => {
+            // A bignum on either side goes through `BigInt`, which has all six
+            // of these. Two's complement is what `&`, `|`, `^` and `~` mean in
+            // Ruby for a negative operand, and it is what `num-bigint`
+            // implements, so `~(2**70)` needs no sign fixup here.
+            if crate::bignum::is_big(scope, call.receiver)
+                || call.args.first().is_some_and(|v| crate::bignum::is_big(scope, *v))
+            {
+                let value = wide_bits(scope, op, call.receiver, call.args.first().copied())?;
+                stack.push(value);
+                return Ok(None);
+            }
             let Some(left) = call.receiver.as_fixnum() else {
                 return Err(Error::NoDispatch {
                     op: "Integer bit operation",
@@ -4951,25 +4968,24 @@ fn native_call<'h>(
                     } else {
                         (left_shift, right)
                     };
-                    if distance >= 64 {
-                        if left_shift {
+                    if left_shift {
+                        // A left shift is a multiplication by a power of two,
+                        // and Ruby lets it grow: `1 << 70` is a bignum. Done in
+                        // `BigInt` for any distance, because `checked_shl`
+                        // refuses at exactly the boundary this slice removed.
+                        let Ok(distance) = u32::try_from(distance) else {
                             return Err(Error::NoDispatch {
                                 op: "Integer#<<",
-                                operands: "a shift wider than a fixnum",
+                                operands: "a shift too large to allocate a result for",
                             });
-                        }
+                        };
+                        let shifted = num_bigint::BigInt::from(left) << distance;
+                        let value = crate::bignum::value(scope, &shifted);
+                        stack.push(value);
+                        return Ok(None);
+                    } else if distance >= 64 {
                         // Shifting right off the end is the sign bit, forever.
                         if left < 0 { -1 } else { 0 }
-                    } else if left_shift {
-                        match left.checked_shl(distance as u32) {
-                            Some(shifted) if (shifted >> distance) == left => shifted,
-                            _ => {
-                                return Err(Error::NoDispatch {
-                                    op: "Integer#<<",
-                                    operands: "a result wider than a fixnum",
-                                });
-                            }
-                        }
                     } else {
                         left >> distance
                     }
@@ -4999,14 +5015,21 @@ fn native_call<'h>(
                     operands: "a negative exponent, which is a Rational",
                 });
             }
-            let mut answer: i64 = 1;
-            for _ in 0..exponent {
-                answer = answer.checked_mul(base).ok_or(Error::NoDispatch {
+            // `2 ** 70` is the shape the whole bignum slice was filed for, so
+            // the exponent loop is `BigInt`'s rather than a `checked_mul` chain
+            // that refuses at 2^62. `pow` wants a `u32`; an exponent past that
+            // asks for a number with more digits than the heap has bytes, and
+            // CRuby warns and takes minutes rather than answering, so refusing
+            // is the honest answer and not a shortcut.
+            let Ok(exponent) = u32::try_from(exponent) else {
+                return Err(Error::NoDispatch {
                     op: "Integer#**",
-                    operands: "a result wider than a fixnum",
-                })?;
-            }
-            stack.push(fixnum_or_refuse(answer, "Integer#**")?);
+                    operands: "an exponent too large to allocate a result for",
+                });
+            };
+            let answer = num_bigint::BigInt::from(base).pow(exponent);
+            let value = crate::bignum::value(scope, &answer);
+            stack.push(value);
             Ok(None)
         }
 
@@ -6551,10 +6574,11 @@ fn materialise<'h>(
             op: "Float",
             operands: "a float outside flonum range",
         }),
-        Literal::BigInt(_) => Err(Error::NoDispatch {
-            op: "Integer",
-            operands: "a value wider than a fixnum",
-        }),
+        Literal::BigInt(digits) => {
+            let n = num_bigint::BigInt::parse_bytes(digits.as_bytes(), 10)
+                .expect("the compiler normalised the literal to base 10");
+            Ok(crate::bignum::value(scope, &n))
+        }
         Literal::Regexp { source, options } => regexp_literal(scope, source, *options),
         Literal::Str(bytes) | Literal::FrozenStr(bytes) => {
             let len = u32::try_from(bytes.len()).map_err(|_| Error::NoDispatch {
@@ -6601,6 +6625,14 @@ fn binop(
         _ => {}
     }
 
+    // An `Integer` past the fixnum range is a heap cell, so it never unpacks as
+    // a number. Routed before `num` rather than inside it because building the
+    // `BigInt` needs the heap, and because a pair of fixnums must not pay for
+    // the check on every `+` in the corpus.
+    if crate::bignum::is_big(scope, left) || crate::bignum::is_big(scope, right) {
+        return wide_op(scope, op, left, right);
+    }
+
     let (Some(left), Some(right)) = (num(left), num(right)) else {
         return Err(Error::NoDispatch {
             op: op.name(),
@@ -6609,7 +6641,7 @@ fn binop(
     };
 
     match (left, right) {
-        (Num::Int(a), Num::Int(b)) => integer_op(op, a, b),
+        (Num::Int(a), Num::Int(b)) => integer_op(scope, op, a, b),
         // Ruby promotes to Float when either side is one.
         (a, b) => float_op(op, as_float(a), as_float(b)),
     }
@@ -6622,11 +6654,146 @@ fn as_float(n: Num) -> f64 {
     }
 }
 
-fn integer_op(op: BinOp, a: i64, b: i64) -> Result<Value, Error> {
-    let overflow = || Error::NoDispatch {
-        op: op.name(),
-        operands: "integers that overflow a fixnum",
+/// The same operators with at least one operand wider than a fixnum.
+///
+/// A `Float` on either side still wins, exactly as it does for two fixnums:
+/// `(2**70) / 2.0` is a Float. The integer answers go back through
+/// [`crate::bignum::value`], so one that has come back inside the fixnum range
+/// is an immediate again — `(2**70) - (2**70)` is `0`, the same value the
+/// literal `0` is. Measured.
+fn wide_op(
+    scope: &mut HandleScope<'_>,
+    op: BinOp,
+    left: Value,
+    right: Value,
+) -> Result<Value, Error> {
+    use num_traits::ToPrimitive;
+
+    let pair = (
+        crate::bignum::read(scope, left),
+        crate::bignum::read(scope, right),
+    );
+    let (Some(a), Some(b)) = pair else {
+        // One side is a Float, or not a number at all. A Float promotes, and
+        // the conversion can lose precision — which is Ruby's answer too.
+        let widen = |v: Value, scope: &mut HandleScope<'_>| -> Option<f64> {
+            if let Some(f) = v.as_flonum() {
+                return Some(f);
+            }
+            crate::bignum::read(scope, v).and_then(|n| n.to_f64())
+        };
+        let a = widen(left, scope);
+        let b = widen(right, scope);
+        let (Some(a), Some(b)) = (a, b) else {
+            return Err(Error::NoDispatch {
+                op: op.name(),
+                operands: "operands that are not both numbers",
+            });
+        };
+        return float_op(op, a, b);
     };
+
+    let zero = num_bigint::BigInt::from(0);
+    match op {
+        BinOp::Add => Ok(crate::bignum::value(scope, &(a + b))),
+        BinOp::Sub => Ok(crate::bignum::value(scope, &(a - b))),
+        BinOp::Mul => Ok(crate::bignum::value(scope, &(a * b))),
+        // `num-bigint`'s `/` and `%` truncate the way Rust's do; Ruby floors.
+        // The same correction `floor_div` and `floor_mod` make for fixnums, and
+        // the reason neither of those is simply `a / b`.
+        BinOp::Div => {
+            if b == zero {
+                return Err(Error::raise("ZeroDivisionError", "divided by 0"));
+            }
+            let quotient = &a / &b;
+            let exact = &quotient * &b == a;
+            let negative = (a < zero) != (b < zero);
+            let floored = if exact || !negative {
+                quotient
+            } else {
+                quotient - 1
+            };
+            Ok(crate::bignum::value(scope, &floored))
+        }
+        BinOp::Mod => {
+            if b == zero {
+                return Err(Error::raise("ZeroDivisionError", "divided by 0"));
+            }
+            let remainder = &a % &b;
+            let cross = remainder != zero && ((remainder < zero) != (b < zero));
+            let floored = if cross { remainder + b } else { remainder };
+            Ok(crate::bignum::value(scope, &floored))
+        }
+        BinOp::Lt => Ok(bool_value(a < b)),
+        BinOp::Le => Ok(bool_value(a <= b)),
+        BinOp::Gt => Ok(bool_value(a > b)),
+        BinOp::Ge => Ok(bool_value(a >= b)),
+        BinOp::Eq => Ok(bool_value(a == b)),
+        BinOp::Neq => Ok(bool_value(a != b)),
+    }
+}
+
+/// `&`, `|`, `^`, `~`, `<<` and `>>` with a bignum on either side.
+///
+/// Separate from [`wide_op`] because these are `Native`s rather than `BinOp`
+/// instructions: Ruby's bit operators have no fast-path opcode, so they arrive
+/// through method dispatch with the receiver in `call.receiver`.
+fn wide_bits(
+    scope: &mut HandleScope<'_>,
+    op: BitOp,
+    receiver: Value,
+    argument: Option<Value>,
+) -> Result<Value, Error> {
+    use num_traits::ToPrimitive;
+
+    let Some(left) = crate::bignum::read(scope, receiver) else {
+        return Err(Error::NoDispatch {
+            op: "Integer bit operation",
+            operands: "a receiver that is not an Integer",
+        });
+    };
+    if op == BitOp::Not {
+        return Ok(crate::bignum::value(scope, &!left));
+    }
+    let Some(right) = argument.and_then(|v| crate::bignum::read(scope, v)) else {
+        return Err(Error::raise(
+            "TypeError",
+            "no implicit conversion into Integer",
+        ));
+    };
+    let answer = match op {
+        BitOp::And => left & right,
+        BitOp::Or => left | right,
+        BitOp::Xor => left ^ right,
+        BitOp::Not => unreachable!("handled above"),
+        BitOp::Shl | BitOp::Shr => {
+            // `a >> -n` is `a << n`, and the other way round.
+            let left_shift = (op == BitOp::Shl) == (right >= num_bigint::BigInt::from(0));
+            let Some(distance) = right.magnitude().to_u32() else {
+                return Err(Error::NoDispatch {
+                    op: "Integer shift",
+                    operands: "a shift too large to allocate a result for",
+                });
+            };
+            if left_shift {
+                left << distance
+            } else {
+                // An arithmetic shift: `num-bigint`'s `>>` already carries the
+                // sign, so a negative bignum shifted far enough lands on -1
+                // rather than 0, which is Ruby's answer.
+                left >> distance
+            }
+        }
+    };
+    Ok(crate::bignum::value(scope, &answer))
+}
+
+fn integer_op(
+    scope: &mut HandleScope<'_>,
+    op: BinOp,
+    a: i64,
+    b: i64,
+) -> Result<Value, Error> {
     let value = match op {
         BinOp::Add => a.checked_add(b),
         BinOp::Sub => a.checked_sub(b),
@@ -6651,9 +6818,21 @@ fn integer_op(op: BinOp, a: i64, b: i64) -> Result<Value, Error> {
         BinOp::Ge => return Ok(bool_value(a >= b)),
         BinOp::Eq | BinOp::Neq => unreachable!("handled before the numeric path"),
     };
-    // An Integer that leaves fixnum range promotes to a bignum, and there is no
-    // bignum. Refusing is right; wrapping would be a wrong answer.
-    value.and_then(Value::fixnum).ok_or_else(overflow)
+    // An `Integer` that leaves the fixnum range promotes, which is why this is
+    // the one arm that can allocate. A `checked_*` answering `None` above is
+    // the overflow signal, and the operands are redone as `BigInt` rather than
+    // a wrapped `i64` being repaired: `i64::MIN / -1` overflows with no wrapped
+    // value worth having.
+    match value.and_then(Value::fixnum) {
+        Some(fits) => Ok(fits),
+        None => {
+            let (a, b) = (
+                Value::fixnum(a).expect("a came from a fixnum"),
+                Value::fixnum(b).expect("b came from a fixnum"),
+            );
+            wide_op(scope, op, a, b)
+        }
+    }
 }
 
 fn floor_div(a: i64, b: i64) -> Option<i64> {
@@ -6704,11 +6883,17 @@ fn float_op(op: BinOp, a: f64, b: f64) -> Result<Value, Error> {
     }
 }
 
-fn negate(value: Value) -> Result<Value, Error> {
+fn negate(scope: &mut HandleScope<'_>, value: Value) -> Result<Value, Error> {
     let fail = || Error::NoDispatch {
         op: "-@",
         operands: "an operand that is not a number",
     };
+    // `-(2**70)`, and also `-4611686018427387904`: Prism gives a negative
+    // literal past the fixnum floor as a negation of a positive one, so the
+    // operand is already a heap cell by the time this runs.
+    if let Some(n) = crate::bignum::read(scope, value) {
+        return Ok(crate::bignum::value(scope, &-n));
+    }
     match num(value).ok_or_else(fail)? {
         Num::Int(i) => i.checked_neg().and_then(Value::fixnum).ok_or_else(fail),
         Num::Float(f) => Value::flonum(-f).ok_or_else(fail),
@@ -6729,6 +6914,18 @@ pub fn ruby_eq(scope: &mut HandleScope<'_>, left: Value, right: Value) -> Result
     // `1 == 1.0` is true in Ruby even though the words differ.
     if let (Some(a), Some(b)) = (num(left), num(right)) {
         return Ok(as_float(a) == as_float(b));
+    }
+    // A heap `Integer` is not immediate, so the bitwise test above missed it.
+    // Compared as integers rather than as floats: past 2^53 two different
+    // bignums round to the same `f64`, and `2**70 == 2**70 + 1` would be true.
+    if crate::bignum::is_big(scope, left) || crate::bignum::is_big(scope, right) {
+        let pair = (
+            crate::bignum::read(scope, left),
+            crate::bignum::read(scope, right),
+        );
+        if let (Some(a), Some(b)) = pair {
+            return Ok(a == b);
+        }
     }
     // Ruby dispatches `a == b` on `a`, so the *left* operand decides. Every
     // immediate's `==` is identity once the numeric case above is out of the
@@ -6842,6 +7039,16 @@ pub fn inspect(scope: &mut HandleScope<'_>, value: Value) -> String {
             Some(name) => format!(":{name}"),
             None => format!(":<symbol {}>", id.0),
         },
+        // A heap `Integer` renders as its digits, the same as a fixnum: the
+        // boundary is invisible from Ruby, so it must be invisible here too.
+        // Checked before `heap_kind`, which knows the `String`/`Array`/`Hash`
+        // cells and would call this one an anonymous object.
+        Unpacked::Heap(_) if crate::bignum::is_big(scope, value) => {
+            match crate::bignum::read(scope, value) {
+                Some(n) => n.to_string(),
+                None => unreachable!("`is_big` just said it was one"),
+            }
+        }
         Unpacked::Heap(_) => match heap_kind(scope, value) {
             Some(HeapKind::Str) => {
                 let handle = scope.root(value);
