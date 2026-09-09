@@ -140,7 +140,9 @@ class Array
   end
 
   def each
-    return to_enum(:each) unless block_given?
+    # The size block is what makes `[1, 2].each.size` answer 2 rather than nil,
+    # which is what `Enumerator::Chain#size` sums.
+    return to_enum(:each) { size } unless block_given?
     i = 0
     while i < size
       yield self[i]
