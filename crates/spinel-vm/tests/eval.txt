@@ -1145,6 +1145,47 @@ n221b = { x: 1 }; ({ **n221b })[:x]  #=> 1
 2**54 + 1 == (2**54).to_f  #=> false
 (2**54).to_f == 2**54 + 1  #=> false
 
+# --- PRD 0035: an Integer against a Float, past the fixnum boundary ---------
+#
+# The bignum half of the row above, which #238 filed. `2**70` is a heap cell,
+# so `num()` cannot answer for it and the pair never reached the exact mixed
+# arm: with the bignum on the left, `==` fell through to a send and found
+# `Comparable#==`, which asks `<=>`, which coerces *both sides to Float* and
+# answered 0. With it on the right, the same pair took the identity rule and
+# answered false. So `==` was asymmetric, and both halves of the asymmetry
+# were wrong for different reasons.
+#
+# The ordering operators had the same root: `wide_op` widened the bignum to an
+# `f64` before comparing, so every pair that lands on one float compared equal.
+# Ruby compares them exactly, which is why the `+ 1` rows below are the ones
+# that decide — they are the pairs that share an `f64` and are not the same
+# number.
+(2**70) == (2**70).to_f  #=> true
+(2**70).to_f == (2**70)  #=> true
+(2**70 + 1) == (2**70).to_f  #=> false
+(2**70).to_f == (2**70 + 1)  #=> false
+(2**70 + 1) != (2**70).to_f  #=> true
+(2**70 + 1) > (2**70).to_f  #=> true
+(2**70).to_f < (2**70 + 1)  #=> true
+(2**70).to_f > (2**70 + 1)  #=> false
+(2**70) < (2**70).to_f  #=> false
+(2**70) <= (2**70).to_f  #=> true
+(2**70) >= (2**70).to_f  #=> true
+(-(2**70)) == (-(2**70)).to_f  #=> true
+(-(2**70) - 1) < (-(2**70)).to_f  #=> true
+# A fraction breaks a tie only when the integer parts are equal, and it keeps
+# its sign: -2.5 is below -2, 2.5 is above 2.
+(2**70) == 2.5  #=> false
+(2**70) > 2.5  #=> true
+2.5 < (2**70)  #=> true
+# `Hash` looks a key up with `eql?`, not `==`, and `eql?` does not convert
+# across classes — so the Float that *is* `==` to the key still misses. The
+# oracle caught this row written the other way round.
+{ (2**70) => 1 }[(2**70).to_f]  #=> nil
+{ (2**70) => 1 }[(2**70 + 1)]  #=> nil
+{ (2**70) => 1 }[(2**70)]  #=> 1
+(2**70).eql?((2**70).to_f)  #=> false
+
 # --- PRD 0034 validation: Symbol#inspect quoting ----------------------------
 #
 # `#231` made a symbol whose name is not an identifier easy to build, and

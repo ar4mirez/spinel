@@ -6666,6 +6666,63 @@ fn int_eq_float(i: i64, f: f64) -> bool {
     f as i64 == i
 }
 
+/// A `BigInt` against an `f64`, exactly — the wide twin of [`int_eq_float`],
+/// and an ordering rather than just equality because `<` and `>` need it too.
+///
+/// `None` is NaN, which is unordered against every integer. Nothing else
+/// answers `None`: `f.trunc()` of a finite float is integer-valued, so its
+/// conversion to a `BigInt` cannot fail.
+///
+/// The float is never widened to a `BigInt`'s precision and the integer is
+/// never narrowed to an `f64`. Narrowing is what made `2**70 + 1 > (2**70).to_f`
+/// false: both sides land on the same `f64` past 2^53, and Ruby answers `true`
+/// because it compares them exactly. So the float is split at its decimal
+/// point, the two integer halves are compared as integers, and the fraction
+/// only breaks a tie.
+fn big_cmp_float(a: &num_bigint::BigInt, f: f64) -> Option<std::cmp::Ordering> {
+    use num_traits::FromPrimitive;
+    use std::cmp::Ordering;
+
+    if f.is_nan() {
+        return None;
+    }
+    if f == f64::INFINITY {
+        return Some(Ordering::Less);
+    }
+    if f == f64::NEG_INFINITY {
+        return Some(Ordering::Greater);
+    }
+    let whole = num_bigint::BigInt::from_f64(f.trunc())?;
+    Some(match a.cmp(&whole) {
+        // Equal integer parts, so the float's fraction decides: `2.5` is
+        // greater than `2` and `-2.5` is less than `-2`, because `f64` keeps
+        // the sign on the fraction as well as on the whole.
+        Ordering::Equal => match f.fract().partial_cmp(&0.0) {
+            Some(Ordering::Greater) => Ordering::Less,
+            Some(Ordering::Less) => Ordering::Greater,
+            _ => Ordering::Equal,
+        },
+        other => other,
+    })
+}
+
+/// One of the six comparison operators, answered from an [`Ordering`].
+///
+/// `None` for an operator that is not a comparison, so a caller can use this
+/// as the test for "is this op one of them" as well as for the answer.
+fn cmp_op(op: BinOp, ord: std::cmp::Ordering) -> Option<Value> {
+    use std::cmp::Ordering;
+    Some(bool_value(match op {
+        BinOp::Eq => ord == Ordering::Equal,
+        BinOp::Neq => ord != Ordering::Equal,
+        BinOp::Lt => ord == Ordering::Less,
+        BinOp::Le => ord != Ordering::Greater,
+        BinOp::Gt => ord == Ordering::Greater,
+        BinOp::Ge => ord != Ordering::Less,
+        _ => return None,
+    }))
+}
+
 fn as_float(n: Num) -> f64 {
     match n {
         Num::Int(i) => i as f64,
@@ -6693,8 +6750,28 @@ fn wide_op(
         crate::bignum::read(scope, right),
     );
     let (Some(a), Some(b)) = pair else {
-        // One side is a Float, or not a number at all. A Float promotes, and
-        // the conversion can lose precision — which is Ruby's answer too.
+        // One side is a Float, or not a number at all.
+        //
+        // A *comparison* answers exactly. Widening the integer is what made
+        // `2**70 + 1 > (2**70).to_f` false and `2**70 + 1 == (2**70).to_f`
+        // true: past 2^53 the two sides are the same `f64`, and Ruby says
+        // they are a different number. NaN answers `None` here and falls
+        // through to the widening path below, which is where every
+        // comparison against it is already false.
+        let exact = match (&pair.0, &pair.1) {
+            (Some(a), None) => right.as_flonum().and_then(|f| big_cmp_float(a, f)),
+            (None, Some(b)) => left
+                .as_flonum()
+                .and_then(|f| big_cmp_float(b, f))
+                .map(std::cmp::Ordering::reverse),
+            _ => None,
+        };
+        if let Some(value) = exact.and_then(|ord| cmp_op(op, ord)) {
+            return Ok(value);
+        }
+        // Arithmetic promotes to Float instead, and *that* conversion can
+        // lose precision — which is Ruby's answer too: `(2**70 + 1) / 2.0`
+        // and `(2**70) / 2.0` are the same Float in Ruby as well.
         let widen = |v: Value, scope: &mut HandleScope<'_>| -> Option<f64> {
             if let Some(f) = v.as_flonum() {
                 return Some(f);
@@ -6947,8 +7024,24 @@ pub fn ruby_eq(scope: &mut HandleScope<'_>, left: Value, right: Value) -> Result
             crate::bignum::read(scope, left),
             crate::bignum::read(scope, right),
         );
-        if let (Some(a), Some(b)) = pair {
-            return Ok(a == b);
+        match (&pair.0, &pair.1) {
+            (Some(a), Some(b)) => return Ok(a == b),
+            // A Float against a bignum, compared exactly for the same reason
+            // `int_eq_float` compares a Float against a fixnum exactly. Both
+            // orders reach this: with the bignum on the right the numeric
+            // fast path above skipped the pair, and with it on the left the
+            // identity rule below would have answered `false`.
+            (Some(a), None) => {
+                if let Some(f) = right.as_flonum() {
+                    return Ok(big_cmp_float(a, f) == Some(std::cmp::Ordering::Equal));
+                }
+            }
+            (None, Some(b)) => {
+                if let Some(f) = left.as_flonum() {
+                    return Ok(big_cmp_float(b, f) == Some(std::cmp::Ordering::Equal));
+                }
+            }
+            (None, None) => {}
         }
     }
     // Ruby dispatches `a == b` on `a`, so the *left* operand decides. Every
