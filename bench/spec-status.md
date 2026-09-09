@@ -30,7 +30,7 @@ Guards are answered for `linux`, which is what `scripts/spec-status.sh` pins so 
 | `core/float` | 50 | 234 | 42 | 0 | 191 | 1 | 18% |
 | `core/gc` | 18 | 44 | 0 | 0 | 39 | 5 | 0% |
 | `core/hash` | 69 | 460 | 65 | 0 | 388 | 7 | 14% |
-| `core/integer` | 70 | 526 | 76 | 0 | 445 | 5 | 14% |
+| `core/integer` | 70 | 526 | 154 | 0 | 367 | 5 | 29% |
 | `core/io` | 103 | 1095 | 0 | 0 | 1024 | 71 | 0% |
 | `core/kernel` | 118 | 1277 | 119 | 0 | 1099 | 59 | 9% |
 | `core/main` | 7 | 27 | 2 | 0 | 25 | 0 | 7% |
@@ -41,7 +41,7 @@ Guards are answered for `linux`, which is what `scripts/spec-status.sh` pins so 
 | `core/module` | 86 | 1021 | 109 | 0 | 877 | 35 | 11% |
 | `core/mutex` | 7 | 35 | 0 | 0 | 35 | 0 | 0% |
 | `core/nil` | 18 | 27 | 7 | 0 | 20 | 0 | 26% |
-| `core/numeric` | 46 | 132 | 8 | 0 | 123 | 1 | 6% |
+| `core/numeric` | 46 | 132 | 9 | 0 | 122 | 1 | 7% |
 | `core/objectspace` | 29 | 111 | 0 | 0 | 99 | 12 | 0% |
 | `core/proc` | 25 | 218 | 18 | 0 | 150 | 50 | 8% |
 | `core/process` | 92 | 420 | 0 | 0 | 305 | 115 | 0% |
@@ -131,4 +131,4 @@ Guards are answered for `linux`, which is what `scripts/spec-status.sh` pins so 
 | `optional/capi` | 47 | 1651 | 10 | 0 | 1561 | 80 | 1% |
 | `optional/thread_safety` | 1 | 5 | 0 | 0 | 4 | 1 | 0% |
 | `security` | 13 | 27 | 0 | 0 | 25 | 2 | 0% |
-| **total** | 3835 | 25624 | 2727 | 0 | 20975 | 1922 | 11% |
+| **total** | 3835 | 25624 | 2806 | 0 | 20896 | 1922 | 11% |
