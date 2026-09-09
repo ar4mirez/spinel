@@ -1314,7 +1314,11 @@ impl Compiler {
     /// [`Self::outer_slot`] ends at.
     fn flip_flop_slot(&mut self, span: Span) -> Result<(u16, u16), Unsupported> {
         let name = format!("%ff{}", span.start);
-        if let Some(index) = self.locals.iter().position(|local| &**local == name.as_str()) {
+        if let Some(index) = self
+            .locals
+            .iter()
+            .position(|local| &**local == name.as_str())
+        {
             return Ok((index as u16, 0));
         }
         for (hop, scope) in self.outer.iter().enumerate() {
@@ -1493,11 +1497,7 @@ impl Compiler {
     /// `None` for an interpolated name, whose bytes do not exist until the
     /// frame runs. Every other shape is an error here rather than a `None`,
     /// because it is not a name at all.
-    fn static_method_name(
-        &mut self,
-        expr: &Expr,
-        span: Span,
-    ) -> Result<Option<u32>, Unsupported> {
+    fn static_method_name(&mut self, expr: &Expr, span: Span) -> Result<Option<u32>, Unsupported> {
         let ExprKind::Sym(symbol) = &expr.kind else {
             return Err(Unsupported::at("a computed method name here", span));
         };
@@ -1537,13 +1537,7 @@ impl Compiler {
     /// ponytail: the write still does not warn "already initialized constant".
     /// That is `class.rs`'s existing shortcut and plain `X = 2` shares it; the
     /// specs asking for the warning are blocked on mspec's `complain`.
-    fn const_op_assign(
-        &mut self,
-        name: u32,
-        how: ConstScope,
-        assign: &Assign,
-        span: Span,
-    ) -> Emit {
+    fn const_op_assign(&mut self, name: u32, how: ConstScope, assign: &Assign, span: Span) -> Emit {
         let module = if how == ConstScope::Qualified {
             let slot = self.slot(&format!("%cbase{}", self.here()));
             self.emit(Insn::SetLocal(slot, 0));
@@ -4825,7 +4819,7 @@ fn flat_bytes(parts: &[StrPart]) -> Option<Box<[u8]>> {
 
 fn collect_flip_flops(expr: &Expr, out: &mut Vec<Name>) {
     if matches!(expr.kind, ExprKind::FlipFlop(_)) {
-        let name: Name = format!("%ff{}", expr.span.start).into_boxed_str().into();
+        let name: Name = format!("%ff{}", expr.span.start).into_boxed_str();
         if !out.contains(&name) {
             out.push(name);
         }

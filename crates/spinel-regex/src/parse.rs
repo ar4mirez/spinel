@@ -203,9 +203,8 @@ fn drop_unnamed_groups(
     // keep their relative order, which is source order.
     let mut named: Vec<usize> = names.iter().map(|(_, index)| *index).collect();
     named.sort_unstable();
-    let renumber = |old: usize| -> Option<usize> {
-        named.binary_search(&old).ok().map(|at| at + 1)
-    };
+    let renumber =
+        |old: usize| -> Option<usize> { named.binary_search(&old).ok().map(|at| at + 1) };
     renumber_groups(ast, &renumber);
     let names = names
         .into_iter()

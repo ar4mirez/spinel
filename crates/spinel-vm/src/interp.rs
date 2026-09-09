@@ -3432,7 +3432,10 @@ fn uninitialized(
 /// `Intern` over an interpolated one — so anything else is a compiler bug
 /// rather than a program error, and it is reported as a refusal instead of
 /// being guessed at.
-fn pop_name(stack: &mut Vec<Value>, keyword: &'static str) -> Result<crate::value::SymbolId, Error> {
+fn pop_name(
+    stack: &mut Vec<Value>,
+    keyword: &'static str,
+) -> Result<crate::value::SymbolId, Error> {
     let value = stack.pop().expect("a name to alias or undef");
     value.as_symbol().ok_or(Error::NoDispatch {
         op: keyword,
