@@ -47,7 +47,7 @@ list read top to bottom.
 | ~1,100 | **#19** — `Encoding` 580, `unpack` 78, `to_i` 65, `encode` 59, `force_encoding` 58, `[]=` 45 | yes, with new primitives |
 | ~500 | **#28** — `refine` 82, `public_methods` 56, `define_method` 51, `method` 49, `private_instance_methods` 47 | **partly — the hooks are blocked on #16** |
 | ~350 | **#21** — `pack` 146, `MyArray.[]` 52, `Array#[]=` splice 47 | yes |
-| ~300 | **#29** — `Errno` 210, exception `initialize`, `full_message` | yes |
+| ~60 | **#29** — `Errno` 32, exception `initialize` 27, `full_message` 12 | yes, but see the note below |
 | ~250 | **#22** — `compare_by_identity` 35, `merge`, `flatten`, `dig` | yes |
 | **213** | **#26** — `lazy` 133, `Product` 37, `Lazy` 19, `product` 10, `Chain` 8, `produce` 6 | **yes, and with no new machinery at all** |
 | ~93 | **#16** — `Fiber` | yes, large |
@@ -79,9 +79,19 @@ composed over `each`, which is Ruby over machinery `core/enumerator.rb` already
 has. At 213 examples for no new primitive it is the best value in the table, and
 it is the slice this PRD runs.
 
+**#29 is smaller than its `Errno` row suggests, and the row is why.** `Errno`
+blocks 210 examples under `core/`, but only **32 of them are in
+`core/exception`** — 167 are in `core/dir`, where defining the `Errno` classes
+is necessary and nowhere near sufficient, because the `Dir` operation that
+would raise one does not exist either. Counting a reason corpus-wide and
+crediting it to the issue whose class it names is the mistake PRD 0033 was
+written about; this table is grouped by *directory* for that reason, and #29's
+row was corrected after the fact when a per-directory check caught it.
+
 The resulting order: **#26 (this PR) → #29 → #22 → #21 → #16 → #28 → #19 → #145**,
 with #19 movable earlier if `Encoding` is split out of it — 580 of its 1,100 are
-that one constant.
+that one constant. #29 keeps its position on cheapness rather than size: at ~60
+reachable examples it is small, but it needs no engine work and no harness.
 
 ## What this slice writes
 
