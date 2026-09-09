@@ -98,7 +98,6 @@ fn a_construct_this_slice_does_not_compile_is_an_error_never_a_guess() {
         // A backtick command needs a subprocess, which is phase 3, so it is the
         // construct with no meaning here at all.
         "`echo hi`",
-        "A ||= 1",
         // A hash literal, a range literal, an array splat, a multiple
         // assignment and string interpolation left this list with #157 and
         // #154. What replaces them is the call-convention half of the same

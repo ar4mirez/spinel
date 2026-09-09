@@ -1145,6 +1145,47 @@ n221b = { x: 1 }; ({ **n221b })[:x]  #=> 1
 2**54 + 1 == (2**54).to_f  #=> false
 (2**54).to_f == 2**54 + 1  #=> false
 
+# --- PRD 0035: an Integer against a Float, past the fixnum boundary ---------
+#
+# The bignum half of the row above, which #238 filed. `2**70` is a heap cell,
+# so `num()` cannot answer for it and the pair never reached the exact mixed
+# arm: with the bignum on the left, `==` fell through to a send and found
+# `Comparable#==`, which asks `<=>`, which coerces *both sides to Float* and
+# answered 0. With it on the right, the same pair took the identity rule and
+# answered false. So `==` was asymmetric, and both halves of the asymmetry
+# were wrong for different reasons.
+#
+# The ordering operators had the same root: `wide_op` widened the bignum to an
+# `f64` before comparing, so every pair that lands on one float compared equal.
+# Ruby compares them exactly, which is why the `+ 1` rows below are the ones
+# that decide — they are the pairs that share an `f64` and are not the same
+# number.
+(2**70) == (2**70).to_f  #=> true
+(2**70).to_f == (2**70)  #=> true
+(2**70 + 1) == (2**70).to_f  #=> false
+(2**70).to_f == (2**70 + 1)  #=> false
+(2**70 + 1) != (2**70).to_f  #=> true
+(2**70 + 1) > (2**70).to_f  #=> true
+(2**70).to_f < (2**70 + 1)  #=> true
+(2**70).to_f > (2**70 + 1)  #=> false
+(2**70) < (2**70).to_f  #=> false
+(2**70) <= (2**70).to_f  #=> true
+(2**70) >= (2**70).to_f  #=> true
+(-(2**70)) == (-(2**70)).to_f  #=> true
+(-(2**70) - 1) < (-(2**70)).to_f  #=> true
+# A fraction breaks a tie only when the integer parts are equal, and it keeps
+# its sign: -2.5 is below -2, 2.5 is above 2.
+(2**70) == 2.5  #=> false
+(2**70) > 2.5  #=> true
+2.5 < (2**70)  #=> true
+# `Hash` looks a key up with `eql?`, not `==`, and `eql?` does not convert
+# across classes — so the Float that *is* `==` to the key still misses. The
+# oracle caught this row written the other way round.
+{ (2**70) => 1 }[(2**70).to_f]  #=> nil
+{ (2**70) => 1 }[(2**70 + 1)]  #=> nil
+{ (2**70) => 1 }[(2**70)]  #=> 1
+(2**70).eql?((2**70).to_f)  #=> false
+
 # --- PRD 0034 validation: Symbol#inspect quoting ----------------------------
 #
 # `#231` made a symbol whose name is not an identifier easy to build, and
@@ -1200,3 +1241,175 @@ def e225(&b) = b.call; def f225(&) = e225(&); f225 { 9 }  #=> 9
 def b226(x, &blk) = blk.call(x); def a226(...) = b226(...); a226(3) { |v| v * 2 }  #=> 6
 def b227(*a) = a; def a227(...) = b227(...); a227()  #=> []
 def b229(x, k: 0) = [x, k]; def c229(...) = b229(...); def a229(...) = c229(...); a229(1, k: 5)  #=> [1, 5]
+
+# --- PRD 0035 #219: a splat in a `when` list --------------------------------
+#
+# `when` matches with `===`, a send, so the list is walked by compiled code
+# rather than by an instruction the way #215's `rescue *classes` is.
+#
+# The lazy rows are the ones that pin the shape: a clause is left to right and
+# short-circuits *across* the splat, so an already-matched literal means the
+# splat expression is never evaluated at all — which rules out collecting the
+# clause into one array before testing it.
+case 2 when *[1, 2] then :caught end  #=> :caught
+case 9 when 1, *[2, 3] then :a when *[8, 9] then :b else :c end  #=> :b
+(l = []; case 1 when (l << 1; 1), *[(l << 2; 2)] then :a end; l)  #=> [1]
+(l = []; case 2 when *[(l << 1; 1)], (l << 2; 2) then :a end; l)  #=> [1, 2]
+# `*x` spreads `x.to_a`, wraps a value that has none, and `*nil` is empty —
+# `Array#__concat_splat__`'s rule, the same one an array literal's splat uses.
+case 1 when *(1) then :yes else :no end  #=> :yes
+case nil when *nil then :yes else :no end  #=> :no
+(o = Class.new { def to_a; [7]; end }.new; case 7 when *o then :yes else :no end)  #=> :yes
+# No subject, so the elements are truthiness tests rather than `===` receivers.
+case when *[false, true] then :yes else :no end  #=> :yes
+case when *[false, nil] then :yes else :no end  #=> :no
+# A splat element is still matched with `===`, which the subject's class may
+# override — the reason this is a compiled loop and not one instruction.
+(o = Class.new { def ===(x); x == 3; end }.new; case 3 when *[o] then :yes else :no end)  #=> :yes
+case 5 when *[] then :yes else :no end  #=> :no
+
+# --- PRD 0035 #229: a splat in an index op-assign target --------------------
+#
+# Plain `h[*k] = 2` already compiled; only the op-assign path refused, because
+# a prepared target parks one hidden local per subscript and a splat is not one
+# value. The array is parked whole and expanded by both sends, so the subscript
+# is evaluated exactly once — which is the property an op-assign target exists
+# for. Hashes are indexed rather than compared whole here: `Hash#inspect` still
+# disagrees with Ruby's 3.4 style (#216).
+(h = { a: 1 }; k = [:a]; h[*k] += 1; h[:a])  #=> 2
+(h = {}; h[*[:a]] ||= 9; h[:a])  #=> 9
+(h = { a: nil }; h[*[:a]] &&= 9; h[:a])  #=> nil
+(a = [[0, 0], [0, 0]]; i = [0]; a[*i][*[1]] += 7; a)  #=> [[0, 7], [0, 0]]
+# Evaluated once, in Ruby's order: subscripts, then the read, then the
+# right-hand side, then the write.
+(l = []; k = [(l << :x; :x)]; h = { x: 1 }; h[*k] += (l << :rhs; 1); l)  #=> [:x, :rhs]
+# A splat next to a plain argument expands only itself, which is why the call
+# site records positions rather than one flag.
+(o = Class.new { def [](*a); a; end }.new; o[[1], *[2]])  #=> [[1], 2]
+# `to_a` is called exactly once, which is why the *converted* array is what
+# gets parked: expanding the raw value in both the read and the write would
+# convert it twice. `optional_assignments_spec.rb` counts the calls.
+(l = []; k = Object.new; def k.to_a; $c << :to_a; [:k]; end; $c = l; h = {}; h[*k] ||= 20; [h[:k], l])  #=> [20, [:to_a]]
+
+# --- PRD 0035 #226: a compound constant assignment --------------------------
+#
+# The read and the write both consume the module for a qualified name, so it is
+# parked in a hidden local and pushed per use — which is also what makes the
+# parent expression run once. `||=` is the form that must not raise on an
+# undefined constant, so it asks `defined?` before reading; `+=` and `&&=` read
+# outright, and the `NameError` is Ruby's answer.
+#
+# A constant this heap has never seen is still refused rather than treated as
+# undefined: a fresh heap cannot tell "undefined" from "not required yet" (#39),
+# so these rows all name constants that exist.
+(K226A = 1; K226A += 1; K226A)  #=> 2
+(K226B = 1; K226B &&= 7)  #=> 7
+(K226C = nil; K226C ||= 5)  #=> 5
+(K226D = nil; K226D ||= 5; K226D ||= 9)  #=> 5
+# `**=` is still refused, under `this compound assignment operator` — `**` is
+# not one of the fast-path `BinOp`s, which is a different row in the ranking.
+# The parent of a qualified name is evaluated exactly once.
+(module M226; N = 1; end; l = []; d = Object.new; def d.go(l); l << :m; M226; end; d.go(l)::N += 1; [l, M226::N])  #=> [[:m], 2]
+(module P226; Q = nil; end; P226::Q ||= 3)  #=> 3
+(module R226; S = 4; end; R226::S += 1; R226::S)  #=> 5
+
+# --- PRD 0035 #228: an elided hash value ------------------------------------
+#
+# `{x:}` is `{x: x}`, and the elided value resolves as an ordinary name: a local
+# if one is in scope, otherwise a call on self. Prism has already made that
+# decision and hung the resolved expression under the node, so compiling it is
+# the resolution and nothing else.
+#
+# The issue expected `m(x:)` to be a second refusal site. Measured: it is the
+# same node, and one arm answered both.
+(x = 1; y = 2; h = { x:, y: }; [h[:x], h[:y]])  #=> [1, 2]
+(x = 5; { x: }[:x])  #=> 5
+(def m228(a:, b:); [a, b]; end; a = 10; b = 20; m228(a:, b:))  #=> [10, 20]
+(def z228; :called; end; { z228: }[:z228])  #=> :called
+
+# --- PRD 0035 #237: an interpolated method name in `alias` / `undef` --------
+#
+# #231 landed `Insn::Intern`, which is enough to *build* the symbol, but
+# `alias` and `undef` read a compile-time index into `Iseq::symbols` and never
+# receive a value. The dynamic pair pops its names instead.
+#
+# Measured: both forms evaluate to nil, an interpolated pair goes left to
+# right — new name first — and `undef` takes its names one at a time in order.
+(def m237; 5; end; alias :"m#{237}" :m237)  #=> nil
+(def m237b; 5; end; alias :"n#{237}" :m237b; n237)  #=> 5
+(l = []; d = Object.new; def d.o(l, x); l << x; x; end; def s237; 7; end; alias :"a#{d.o(l, 1)}" :"s#{d.o(l, 2) - 2 + 237}"; [l, a1])  #=> [[1, 2], 7]
+(def k237; 1; end; undef :"k#{237}")  #=> nil
+(def q237; 1; end; alias :"#{nil}" :q237; send(:""))  #=> 1
+# A name that is not interpolated still takes the static instruction, and the
+# two forms agree.
+(def r237; 3; end; alias t237 r237; t237)  #=> 3
+
+# --- PRD 0035 #232: a regexp that writes its named captures to locals -------
+#
+# Only `regexp-literal =~ string` does this, and only with the literal on the
+# left: `"ab" =~ /(?<y>a)/` assigns nothing, which the last row pins. Prism has
+# already decided which names become locals, so the compiler emits the writes
+# rather than discovering the names.
+#
+# A failed match assigns nil rather than leaving the local alone, so each write
+# is guarded — `$~` is nil there and `nil[:w]` would raise.
+#
+# Sits on #217: with a named group present the unnamed ones are not numbered,
+# so the name is the only way to reach the group at all.
+(/(?<w232>a)(?<z232>b)/ =~ "ab"; [w232, z232])  #=> ["a", "b"]
+(/(?<q232>a)/ =~ "zzz")  #=> nil
+(/(?<q232>a)/ =~ "zzz"; q232)  #=> nil
+(x232 = 5; /(?<x232>b)/ =~ "b"; x232)  #=> "b"
+(/(?<p232>a)/ =~ "a")  #=> 0
+(y232 = 1; "ab" =~ /(?<y232>a)/; y232)  #=> 1
+(/(?<a232>a)(b)/ =~ "ab"; [a232, $~.size])  #=> ["a", 2]
+
+# --- PRD 0035 #234: `alias` on a global variable ----------------------------
+#
+# A true alias, not a copy: the two names share one *cell*, so a later write
+# through either is visible through both. The table therefore maps a name to a
+# slot rather than to a value.
+#
+# The third row is the one that rules out resolving names instead of cells:
+# re-aliasing `$a` afterwards leaves `$b` on the storage `$a` used to name, so
+# `$b = 5` must not follow `$a` to its new home. Measured.
+($g234a = 1; alias $g234b $g234a; $g234b = 5; $g234a)  #=> 5
+($g234c = 1; alias $g234d $g234c; $g234c = 9; $g234d)  #=> 9
+($e234 = 1; $f234 = 9; alias $x234 $e234; alias $e234 $f234; $x234 = 5; [$e234, $x234, $f234])  #=> [9, 5, 9]
+($p234 = 1; alias $q234 $p234; alias $p234 $q234; $p234 = 3; [$p234, $q234])  #=> [3, 3]
+# Aliasing a name nothing has assigned still binds the two.
+(alias $s234 $t234; $t234 = 7; $s234)  #=> 7
+# A regexp special is derived rather than stored, so the alias records the
+# derivation: it tracks the *current* match, and it is read-only.
+("ab" =~ /a/; alias $amp234 $&; "zz" =~ /z/; $amp234)  #=> "z"
+(alias $amp235 $&; "ab" =~ /a/; (begin; $amp235 = ""; rescue NameError => e; e.message; end))  #=> "$amp235 is a read-only variable"
+(alias $pre234 $`; "abc" =~ /b/; $pre234)  #=> "a"
+
+# --- PRD 0035 #230: a flip-flop ---------------------------------------------
+#
+# A range literal in boolean position is a state machine: one bit per syntactic
+# occurrence. The issue guessed that bit belongs on the iseq. Measured, it does
+# not — it behaves exactly like a local of the *enclosing* scope:
+#
+#   * a flip-flop in a method resets on every call (the `f` row)
+#   * one in a block keeps its bit across the block's calls (the `each` row)
+#   * two procs made by two calls of one method have separate bits (`a`/`b`)
+#
+# So the parser declares `%ff<offset>` against the method or class body and the
+# compiler reads it like any other name.
+#
+# `..` tests the end condition on the same evaluation that turned the machine
+# on and `...` does not, which is the whole difference between the third and
+# fourth rows. A missing side is simply false.
+(def ff1(n); r = []; i = 0; while i < n; i += 1; r << i if (i == 3)..(i == 5); end; r; end; ff1(8))  #=> [3, 4, 5]
+(def ff2(n); r = []; i = 0; while i < n; i += 1; r << i if (i == 3)...(i == 5); end; r; end; ff2(8))  #=> [3, 4, 5]
+(def ff3(n); r = []; i = 0; while i < n; i += 1; r << i if (i == 3)..(i == 3); end; r; end; ff3(8))  #=> [3]
+(def ff4(n); r = []; i = 0; while i < n; i += 1; r << i if (i == 3)...(i == 3); end; r; end; ff4(8))  #=> [3, 4, 5, 6, 7, 8]
+(def ff5(n); r = []; i = 0; while i < n; i += 1; r << i if (i == 3)..; end; r; end; ff5(6))  #=> [3, 4, 5, 6]
+(def ff6(n); r = []; i = 0; while i < n; i += 1; r << i if ..(i == 3); end; r; end; ff6(6))  #=> []
+(def ff7(i); ((i == 2)..(i == 3)) ? :on : :off; end; [ff7(1), ff7(2), ff7(3), ff7(4), ff7(2), ff7(9)])  #=> [:off, :on, :off, :off, :on, :off]
+(def ff8; ->(i) { ((i == 2)..(i == 3)) ? :on : :off }; end; a = ff8; b = ff8; [a.call(2), b.call(9), a.call(9)])  #=> [:on, :off, :on]
+(r = []; [1, 2, 3, 4, 5, 6].each { |i| r << (((i == 2)..(i == 5)) ? :on : :off) }; r)  #=> [:off, :on, :on, :on, :on, :off]
+(def ff9(n); r = []; i = 0; while i < n; i += 1; r << i if (i == 4)...(i == 5) or (i == 7)...(i == 8); end; r; end; ff9(10))  #=> [4, 5, 7, 8]
+# Two flip-flops in one scope get two bits, keyed by source offset.
+(def ffa(n); r = []; i = 0; while i < n; i += 1; r << (((i == 2)..(i == 3)) ? :a : :-); r << (((i == 1)..(i == 1)) ? :b : :-); end; r; end; ffa(3))  #=> [:-, :b, :a, :-, :a, :-]

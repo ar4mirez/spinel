@@ -57,7 +57,16 @@ EXTRA = [
   # written too broadly fails here rather than in a spec months later.
   '\k<0>', '(?<a>a)\1', '(?<a>a)\k<1>', '(a)(?<a>a)\1', '(a)(?<a>a)\k<1>',
   '(a)\1(?<b>b)', '\1(?<a>a)', '(?<a>a)(?:\1)',
-  '(?<a>a)[\1]', '(?<a>a)\0', '(?<a>a)\10', '(a)\k<1>'
+  '(?<a>a)[\1]', '(?<a>a)\0', '(?<a>a)\10', '(a)\k<1>',
+
+  # #217: one named group anywhere stops the unnamed ones from being numbered
+  # at all, so `(a)` below captures nothing and group 1 is the *named* one.
+  # These are the patterns that pin which groups survive and in what order —
+  # including a group written before the parser could know a name was coming,
+  # and one in the arm of an alternation that did not run.
+  '(a)(?<b>b)', '(?<b>b)(a)', '(a)(?<b>b)(c)(?<d>d)', '(?<b>b)(?<a>a)',
+  '(?<x>a)(y)?', '(?:a)(?<b>b)', '(?<a>x)|(y)', '((?<b>b))',
+  '(?<b>(a))', '(a)(b)'
 ].freeze
 
 # Patterns whose *meaning* is fine but whose timing is not: Ruby answers a

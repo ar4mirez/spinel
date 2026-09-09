@@ -153,6 +153,28 @@ pub fn declared_locals(statements: &[Expr]) -> Vec<Name> {
     out
 }
 
+/// The flip-flop state locals `body` needs, for a caller that runs several
+/// Ruby scopes in one frame.
+///
+/// The parser declares these against the scope that encloses each site, and
+/// `spec/harness` never sees that scope: it collects an example's locals from
+/// the `it` block and its enclosing groups, which are all blocks. So the sites
+/// are re-found here and added to the merged list, where they land in the one
+/// frame the example runs in — which is the same environment the block chain
+/// would have closed over.
+///
+/// Descends into call blocks, unlike [`declared_locals`], because a flip-flop
+/// inside `10.times { }` belongs to the scope around it. It stops at a `def`
+/// for the same reason Ruby does — [`children`] does not cross one.
+#[must_use]
+pub fn declared_flip_flops(statements: &[Expr]) -> Vec<Name> {
+    let mut out: Vec<Name> = Vec::new();
+    for statement in statements {
+        collect_flip_flops(statement, &mut out);
+    }
+    out
+}
+
 // ---------------------------------------------------------------------------
 // The compiler
 // ---------------------------------------------------------------------------
@@ -188,6 +210,10 @@ enum Slot {
         /// One hidden local per index argument, in source order. Empty for an
         /// attribute target.
         args: Vec<u16>,
+        /// Positions in `args` that were written `*x`. The local holds the
+        /// array; the send expands it, so `h[*k] += 1` spreads the same
+        /// object into the read and the write it was evaluated once for.
+        splats: Vec<u16>,
         /// `[]` or the attribute's name; `set` is the same name with `=`.
         get: Box<str>,
     },
@@ -479,6 +505,12 @@ impl Compiler {
             // Both write into the frame's definee and leave the stack alone;
             // the `nil` an `alias` expression is worth is pushed separately.
             Insn::Alias(_, _) | Insn::Undef(_) => 0,
+            // The dynamic pair pops the names it was handed instead of
+            // indexing them, and pushes nothing for the same reason.
+            Insn::AliasFromStack => -2,
+            Insn::UndefFromStack => -1,
+            // Both names are known at compile time, so neither is popped.
+            Insn::AliasGlobal(_, _) | Insn::AliasGlobalSpecial(_, _) => 0,
             Insn::Pop
             | Insn::SetLocal(_, _)
             | Insn::SetIvar(_)
@@ -737,6 +769,12 @@ impl Compiler {
             ExprKind::True => self.emit(Insn::PushTrue),
             ExprKind::False => self.emit(Insn::PushFalse),
             ExprKind::SelfExpr => self.emit(Insn::PushSelf),
+            // `{x:}` and `m(x:)`. The parser has already decided what the
+            // elided value resolves to — a local if one is in scope, otherwise
+            // a call on self — and hung it under the node, so this is the
+            // resolution and nothing else: the hash and the keyword group are
+            // built by the code that was already going to build them.
+            ExprKind::Implicit(inner) => return self.expr(inner),
             // `__FILE__` and `__LINE__` are constants by the time the compiler
             // sees them: the parser filled both in, because it is the last
             // stage that still has the bytes a line number is counted in.
@@ -873,10 +911,19 @@ impl Compiler {
 
             ExprKind::Var(var) => self.var(var, span)?,
             ExprKind::Alias(alias) => self.alias(alias, span)?,
+            ExprKind::MatchWrite(node) => self.match_write(node, span)?,
+            ExprKind::FlipFlop(node) => self.flip_flop(node, span)?,
             ExprKind::Undef(names) => {
+                // Left to right, one name at a time: measured,
+                // `undef :"u#{o(1)}", :"u#{o(2)}"` logs 1 then 2.
                 for name in names {
-                    let symbol = self.method_name(name, span)?;
-                    self.emit(Insn::Undef(symbol));
+                    match self.static_method_name(name, span)? {
+                        Some(symbol) => self.emit(Insn::Undef(symbol)),
+                        None => {
+                            self.method_name_value(name, span)?;
+                            self.emit(Insn::UndefFromStack);
+                        }
+                    }
                 }
                 self.emit(Insn::PushNil);
             }
@@ -993,6 +1040,28 @@ impl Compiler {
                 kwsplat: false,
             },
             true,
+        );
+        self.emit(Insn::Send(site));
+    }
+
+    /// [`Self::emit_send`] with some of the pushed values marked as splats.
+    ///
+    /// `splats` holds argument positions, not a call-wide flag, for the reason
+    /// [`CallSite::splats`] gives: in `a[x, *k]` the value at 0 may itself be
+    /// an Array and must not expand.
+    fn emit_send_splatting(&mut self, name: &str, argc: u16, splats: Vec<u16>) {
+        let symbol = self.symbol(name);
+        let site = self.push_site(
+            CallSite {
+                name: symbol,
+                argc,
+                splats,
+                keywords: Vec::new(),
+                block: BlockRef::None,
+                implicit_self: false,
+                kwsplat: false,
+            },
+            false,
         );
         self.emit(Insn::Send(site));
     }
@@ -1218,41 +1287,328 @@ impl Compiler {
     /// a symbol or an operator there, and Prism spells all three the same way —
     /// so there is nothing to evaluate and the instruction carries two symbols.
     /// `alias` evaluates to `nil`, measured.
+    /// `if (i == 3)..(i == 5)` — a range literal in boolean position, which is
+    /// a state machine rather than a range.
+    ///
+    /// One bit of state per syntactic occurrence, and measurement says where it
+    /// lives: in the scope that encloses the flip-flop. A flip-flop written in
+    /// a method resets on every call; one written in a block keeps its bit
+    /// across the block's calls; two procs made by two calls of the same method
+    /// have separate bits. That is an ordinary local, so the parser declares
+    /// one — `%ff<offset>` — and this reads it like any other name.
+    ///
+    /// The two spellings differ in one place. `..` tests the end condition on
+    /// the same evaluation that turned the machine on, so `(i == 3)..(i == 3)`
+    /// matches only `3`; `...` does not, so `(i == 3)...(i == 3)` never turns
+    /// off again. Both measured.
+    ///
+    /// A missing side is simply false: `(i == 3)..` never turns off and
+    /// `..(i == 3)` never turns on. Measured.
+    /// Where this site's state bit lives, as `Insn::GetLocal` takes it.
+    ///
+    /// Searched by name rather than resolved from a depth, because there is no
+    /// depth to resolve: the parser declared the local against the enclosing
+    /// method or class body, and a flip-flop written inside a block is any
+    /// number of environments in from it. `self.outer[i]` is the scope at
+    /// runtime depth `i + 1`, which is the same correspondence
+    /// [`Self::outer_slot`] ends at.
+    fn flip_flop_slot(&mut self, span: Span) -> Result<(u16, u16), Unsupported> {
+        let name = format!("%ff{}", span.start);
+        if let Some(index) = self
+            .locals
+            .iter()
+            .position(|local| &**local == name.as_str())
+        {
+            return Ok((index as u16, 0));
+        }
+        for (hop, scope) in self.outer.iter().enumerate() {
+            if let Some(index) = scope.iter().position(|local| &**local == name.as_str()) {
+                return Ok((index as u16, (hop + 1) as u16));
+            }
+        }
+        // The parser declares one local per site it sees, so a miss means the
+        // site reached the compiler through a path the parser did not walk —
+        // refused rather than given a bit that resets.
+        Err(Unsupported::at(
+            "a flip-flop whose scope declared no state for it",
+            span,
+        ))
+    }
+
+    fn flip_flop(&mut self, node: &spinel_ast::FlipFlop, span: Span) -> Emit {
+        let (slot, depth) = self.flip_flop_slot(span)?;
+        let entry = self.depth;
+
+        // Each side is evaluated only when the machine asks: measured, a
+        // `collector[i]...false` logs its left-hand side exactly once.
+        let condition = |me: &mut Self, side: &Option<Expr>| -> Emit {
+            match side {
+                Some(expr) => me.expr(expr),
+                None => {
+                    me.emit(Insn::PushFalse);
+                    Ok(())
+                }
+            }
+        };
+
+        self.emit(Insn::GetLocal(slot, depth));
+        let already_on = self.emit_jump(Insn::JumpIf);
+
+        // Off: the left condition decides whether this evaluation turns it on.
+        condition(self, &node.left)?;
+        let stays_off = self.emit_jump(Insn::JumpUnless);
+        self.emit(Insn::PushTrue);
+        self.emit(Insn::SetLocal(slot, depth));
+        let mut on_result = Vec::new();
+        if !node.exclude_end {
+            condition(self, &node.right)?;
+            on_result.push(self.emit_jump(Insn::JumpUnless));
+            self.emit(Insn::PushFalse);
+            self.emit(Insn::SetLocal(slot, depth));
+        }
+        for at in on_result {
+            self.patch_here(at);
+        }
+        self.emit(Insn::PushTrue);
+        let mut to_end = vec![self.emit_jump(Insn::Jump)];
+
+        self.patch_here(stays_off);
+        self.depth = entry;
+        self.emit(Insn::PushFalse);
+        to_end.push(self.emit_jump(Insn::Jump));
+
+        // On: only the right condition runs, and the evaluation that turns it
+        // off is still a match.
+        self.patch_here(already_on);
+        self.depth = entry;
+        condition(self, &node.right)?;
+        let stays_on = self.emit_jump(Insn::JumpUnless);
+        self.emit(Insn::PushFalse);
+        self.emit(Insn::SetLocal(slot, depth));
+        self.patch_here(stays_on);
+        self.emit(Insn::PushTrue);
+
+        for at in to_end {
+            self.patch_here(at);
+        }
+        self.depth = entry + 1;
+        Ok(())
+    }
+
+    /// `/(?<w>a)/ =~ s`, which writes its named captures into locals.
+    ///
+    /// Only this shape does it, and only with the literal on the left: Prism
+    /// has already decided which names become locals and listed them in the
+    /// enclosing scope, so the job here is to emit the writes, not to discover
+    /// the names. `"ab" =~ /(?<n>a)/` builds no `MatchWrite` at all and
+    /// `defined?(n)` is nil there — measured.
+    ///
+    /// A failed match assigns `nil` rather than leaving the local alone, so
+    /// every write is guarded: `$~` is nil, and `nil[:w]` would raise.
+    fn match_write(&mut self, node: &spinel_ast::MatchWrite, span: Span) -> Emit {
+        self.expr(&node.call)?;
+        for target in &node.targets {
+            let TargetKind::Var(VarRef::Local { name, .. }) = &target.kind else {
+                // Prism only ever names locals here; anything else is a shape
+                // the lowering built that this does not expect.
+                return Err(Unsupported::at(
+                    "a named capture writing to something other than a local",
+                    span,
+                ));
+            };
+            let symbol = self.symbol(name);
+            let slot = self.target_slot(target)?;
+            self.emit(Insn::LastMatch(MatchRef::Data));
+            let no_match = self.emit_jump(Insn::JumpIfNilKeep);
+            self.emit(Insn::PushSym(symbol));
+            self.emit_send("[]", 1);
+            self.patch_here(no_match);
+            self.emit_set(&slot);
+        }
+        Ok(())
+    }
+
     fn alias(&mut self, alias: &spinel_ast::Alias, span: Span) -> Emit {
         if alias.global {
-            return Err(Unsupported::at("`alias` on a global variable", span));
+            return self.alias_global(alias, span);
         }
-        let new = self.method_name(&alias.new_name, span)?;
-        let old = self.method_name(&alias.old_name, span)?;
-        self.emit(Insn::Alias(new, old));
+        // Either both names are known now or neither is: the dynamic
+        // instruction pops two symbols, and mixing the forms would need a
+        // third. Measured, an interpolated pair evaluates left to right — new
+        // name first — which is the order they are pushed in.
+        match (
+            self.static_method_name(&alias.new_name, span)?,
+            self.static_method_name(&alias.old_name, span)?,
+        ) {
+            (Some(new), Some(old)) => self.emit(Insn::Alias(new, old)),
+            _ => {
+                self.method_name_value(&alias.new_name, span)?;
+                self.method_name_value(&alias.old_name, span)?;
+                self.emit(Insn::AliasFromStack);
+            }
+        }
         self.emit(Insn::PushNil);
         Ok(())
     }
 
-    /// The symbol a method name in an `alias` or `undef` names.
-    fn method_name(&mut self, expr: &Expr, span: Span) -> Result<u32, Unsupported> {
+    /// `alias $new $old`.
+    ///
+    /// A true alias rather than a copy: the two names share one cell, so a
+    /// later write through either is visible through both. Measured, and it is
+    /// the whole point of the construct — `$a = 1; alias $b $a; $b = 2` leaves
+    /// `$a` at 2.
+    ///
+    /// A regexp special on the right is not stored anywhere to share, so it
+    /// takes the other instruction: the new name records which derivation to
+    /// run and refuses writes, the way `$&` itself does.
+    fn alias_global(&mut self, alias: &spinel_ast::Alias, span: Span) -> Emit {
+        let new = self.global_name(&alias.new_name, span)?;
+        let old = self.global_name(&alias.old_name, span)?;
+        match match_ref(&old) {
+            Some(which) => {
+                let new = self.symbol(&new);
+                self.emit(Insn::AliasGlobalSpecial(new, which));
+            }
+            None => {
+                let (new, old) = (self.symbol(&new), self.symbol(&old));
+                self.emit(Insn::AliasGlobal(new, old));
+            }
+        }
+        self.emit(Insn::PushNil);
+        Ok(())
+    }
+
+    /// The name a `$`-variable in an `alias` names.
+    ///
+    /// `$&` and friends arrive as `BackRef` rather than `Global` — the parser
+    /// separates them because they are derived rather than stored — and `$1`
+    /// as `NumberedRef`. All three spell a name an alias can take.
+    fn global_name(&mut self, expr: &Expr, span: Span) -> Result<Box<str>, Unsupported> {
+        match &expr.kind {
+            ExprKind::Var(VarRef::Global(name) | VarRef::BackRef(name)) => Ok(name.as_ref().into()),
+            ExprKind::Var(VarRef::NumberedRef(n)) => Ok(format!("${n}").into()),
+            _ => Err(Unsupported::at("a computed global name here", span)),
+        }
+    }
+
+    /// The symbol a method name in an `alias` or `undef` names, when the
+    /// compiler can know it.
+    ///
+    /// `None` for an interpolated name, whose bytes do not exist until the
+    /// frame runs. Every other shape is an error here rather than a `None`,
+    /// because it is not a name at all.
+    fn static_method_name(&mut self, expr: &Expr, span: Span) -> Result<Option<u32>, Unsupported> {
         let ExprKind::Sym(symbol) = &expr.kind else {
             return Err(Unsupported::at("a computed method name here", span));
         };
-        let bytes = flat_bytes(&symbol.parts)
-            .ok_or_else(|| Unsupported::at("an interpolated method name here", span))?;
+        let Some(bytes) = flat_bytes(&symbol.parts) else {
+            return Ok(None);
+        };
         let name = String::from_utf8(bytes.into_vec())
             .map_err(|_| Unsupported::at("a method name that is not UTF-8", span))?;
-        Ok(self.symbol(&name))
+        Ok(Some(self.symbol(&name)))
+    }
+
+    /// Push a method name that is only known at run time.
+    ///
+    /// The symbol literal compiles to itself and an interpolated one to
+    /// `Insn::Intern` over the built string, which is #231's opcode — so the
+    /// name is interned into the same shared table a literal symbol lives in,
+    /// and `:"a#{b}".equal?(:ac)` stays true.
+    fn method_name_value(&mut self, expr: &Expr, span: Span) -> Emit {
+        let ExprKind::Sym(_) = &expr.kind else {
+            return Err(Unsupported::at("a computed method name here", span));
+        };
+        self.expr(expr)
+    }
+
+    /// `X += v`, `A::X ||= v`, `X &&= v`.
+    ///
+    /// [`Self::const_target`] has already emitted the module for a qualified
+    /// name, and both `GetConst` and `SetConst` consume one — so it is parked
+    /// in a hidden local and pushed again per use. That is also what makes the
+    /// parent expression run once, which Ruby requires: `m::N += 1` calls `m`
+    /// a single time. Measured.
+    ///
+    /// `||=` is the form that must not raise on an undefined constant, so it
+    /// asks `defined?` before it reads. `+=` and `&&=` do read, and the
+    /// `NameError` that comes back is Ruby's answer for both.
+    ///
+    /// ponytail: the write still does not warn "already initialized constant".
+    /// That is `class.rs`'s existing shortcut and plain `X = 2` shares it; the
+    /// specs asking for the warning are blocked on mspec's `complain`.
+    fn const_op_assign(&mut self, name: u32, how: ConstScope, assign: &Assign, span: Span) -> Emit {
+        let module = if how == ConstScope::Qualified {
+            let slot = self.slot(&format!("%cbase{}", self.here()));
+            self.emit(Insn::SetLocal(slot, 0));
+            Some(slot)
+        } else {
+            None
+        };
+        // Pushing the module is a local read, so every use costs the same and
+        // none of them re-runs the parent expression.
+        macro_rules! push_module {
+            () => {
+                if let Some(slot) = module {
+                    self.emit(Insn::GetLocal(slot, 0));
+                }
+            };
+        }
+
+        match &assign.op {
+            AssignOp::Assign => unreachable!("the plain form returned above"),
+            AssignOp::Binary(op) => {
+                let op = BinOp::from_name(op)
+                    .ok_or_else(|| Unsupported::at("this compound assignment operator", span))?;
+                push_module!();
+                push_module!();
+                self.emit(Insn::GetConst(name, how));
+                self.expr(&assign.value)?;
+                self.emit(Insn::BinOp(op));
+                self.emit(Insn::SetConst(name, how));
+            }
+            AssignOp::Or => {
+                // An undefined constant is not an error here — `Y ||= 5` is 5
+                // and warns about nothing — so the read is guarded rather than
+                // attempted. `defined?` answers without raising, which is the
+                // whole reason the instruction exists.
+                push_module!();
+                self.emit(Insn::DefinedConst(name, how));
+                let undefined = self.emit_jump(Insn::JumpUnless);
+                push_module!();
+                self.emit(Insn::GetConst(name, how));
+                let keep = self.emit_jump(Insn::JumpIfKeep);
+                self.emit(Insn::Pop);
+                self.patch_here(undefined);
+                push_module!();
+                self.expr(&assign.value)?;
+                self.emit(Insn::SetConst(name, how));
+                self.patch_here(keep);
+            }
+            AssignOp::And => {
+                // `W &&= 7` on an undefined constant raises `NameError`, so
+                // this one reads outright.
+                push_module!();
+                self.emit(Insn::GetConst(name, how));
+                let keep = self.emit_jump(Insn::JumpUnlessKeep);
+                self.emit(Insn::Pop);
+                push_module!();
+                self.expr(&assign.value)?;
+                self.emit(Insn::SetConst(name, how));
+                self.patch_here(keep);
+            }
+        }
+        Ok(())
     }
 
     fn assign(&mut self, assign: &Assign, span: Span) -> Emit {
         if let Some((name, how)) = self.const_target(&assign.target)? {
-            // `X = v`. A compound form (`X ||= v`, `X += v`) would have to read
-            // the constant first, and for `A::X` that means evaluating `A`
-            // twice or spilling it — neither is free, and nothing in the corpus
-            // asks. Refused rather than double-evaluated.
-            if assign.op != AssignOp::Assign {
-                return Err(Unsupported::at("a compound constant assignment", span));
+            if assign.op == AssignOp::Assign {
+                self.expr(&assign.value)?;
+                self.emit(Insn::SetConst(name, how));
+                return Ok(());
             }
-            self.expr(&assign.value)?;
-            self.emit(Insn::SetConst(name, how));
-            return Ok(());
+            return self.const_op_assign(name, how, assign, span);
         }
         // `a, b = ...`. A compound form has no multiple-assignment spelling in
         // Ruby, so this only ever sees a plain `=`.
@@ -1352,6 +1708,7 @@ impl Compiler {
         let slot = Slot::Send {
             receiver,
             args: Vec::new(),
+            splats: Vec::new(),
             get: call.name.as_ref().into(),
         };
         Ok((slot, Some(nil)))
@@ -1573,6 +1930,22 @@ impl Compiler {
         Ok(slot)
     }
 
+    /// [`Self::park`] for a `*x` argument: park the *converted* array.
+    ///
+    /// The conversion cannot be left to the sends. A prepared target is read
+    /// and then written, so expanding the raw value twice would call `to_a`
+    /// twice — and `optional_assignments_spec.rb` asks for exactly one, with a
+    /// `ScratchPad` that counts. Converting here also means both sends spread
+    /// the same object, which is what "evaluated once" means for a subscript.
+    fn park_splat(&mut self, expr: &Expr) -> Result<u16, Unsupported> {
+        self.emit(Insn::NewArray(0));
+        self.expr(expr)?;
+        self.emit_send("__concat_splat__", 1);
+        let slot = self.slot(&format!("%idx{}", self.here()));
+        self.emit(Insn::SetLocal(slot, 0));
+        Ok(slot)
+    }
+
     /// Prepare `target` for reading and writing, and say where it lives.
     ///
     /// **This emits.** A local, an ivar, a global and `$~` are places the
@@ -1635,6 +2008,7 @@ impl Compiler {
                 Ok(Slot::Send {
                     receiver,
                     args: Vec::new(),
+                    splats: Vec::new(),
                     get: call.name.as_ref().into(),
                 })
             }
@@ -1644,22 +2018,38 @@ impl Compiler {
                 }
                 let receiver = self.park(&index.receiver)?;
                 let mut args = Vec::with_capacity(index.args.len());
+                let mut splats = Vec::new();
                 for arg in &index.args {
-                    // A splat or a keyword in an index target would change
-                    // what `[]=` is sent, and neither has a caller in the
-                    // corpus. Refused by name rather than dropped.
-                    if !matches!(arg.kind, ExprKind::Splat(_) | ExprKind::Hash(_)) {
-                        args.push(self.park(arg)?);
-                    } else {
-                        return Err(Unsupported::at(
-                            "a splat or keyword in an index target",
-                            target.span,
-                        ));
+                    match &arg.kind {
+                        // `h[*k] += 1`. The array is parked like any other
+                        // argument and expanded by both sends, so the
+                        // subscript is evaluated exactly once — which is the
+                        // whole reason an op-assign target is prepared.
+                        ExprKind::Splat(inner) => {
+                            let inner = inner.as_ref().ok_or_else(|| {
+                                Unsupported::at("an anonymous splat in an index target", arg.span)
+                            })?;
+                            splats.push(args.len() as u16);
+                            args.push(self.park_splat(inner)?);
+                        }
+                        // Not a slice: `h[:a, b: 1] = 2` is a syntax error in
+                        // CRuby too ("keywords are not allowed in index
+                        // assignment expressions"), and the parser already
+                        // reports it as one. This arm is the *reads* that
+                        // reach here, which have no caller in the corpus.
+                        ExprKind::Hash(_) => {
+                            return Err(Unsupported::at(
+                                "a keyword in an index target",
+                                target.span,
+                            ));
+                        }
+                        _ => args.push(self.park(arg)?),
                     }
                 }
                 Ok(Slot::Send {
                     receiver,
                     args,
+                    splats,
                     get: "[]".into(),
                 })
             }
@@ -1685,6 +2075,7 @@ impl Compiler {
             Slot::Send {
                 receiver,
                 args,
+                splats,
                 get,
             } => {
                 self.emit(Insn::GetLocal(*receiver, 0));
@@ -1693,7 +2084,8 @@ impl Compiler {
                 }
                 let argc = args.len() as u16;
                 let get = get.clone();
-                self.emit_send(&get, argc);
+                let splats = splats.clone();
+                self.emit_send_splatting(&get, argc, splats);
             }
         }
     }
@@ -1716,6 +2108,7 @@ impl Compiler {
             Slot::Send {
                 receiver,
                 args,
+                splats,
                 get,
             } => {
                 let parked = self.slot(&format!("%val{}", self.here()));
@@ -1727,7 +2120,10 @@ impl Compiler {
                 self.emit(Insn::GetLocal(parked, 0));
                 let argc = args.len() as u16 + 1;
                 let set = format!("{get}=");
-                self.emit_send(&set, argc);
+                // The value is pushed last, so a splat position among the
+                // subscripts keeps the index it had in the read.
+                let splats = splats.clone();
+                self.emit_send_splatting(&set, argc, splats);
                 self.emit(Insn::Pop);
             }
         }
@@ -1952,6 +2348,61 @@ impl Compiler {
         Ok(())
     }
 
+    /// One `when *values` element list, walked by compiled code.
+    ///
+    /// The array is built the way an array literal's splat is, so `*x` spreads
+    /// `x.to_a`, wraps a value that has none, and `*nil` contributes nothing —
+    /// all of which is `Array#__concat_splat__`'s rule rather than a second
+    /// copy of it here.
+    ///
+    /// Both the array and the cursor live in hidden locals so the stack inside
+    /// the loop looks exactly like the stack outside it: the subject stays on
+    /// top, where the non-splat conditions around this one expect to `Dup` it.
+    ///
+    /// ponytail: `size` and `[]` are sends, so a program that redefines them on
+    /// `Array` changes what `when *values` iterates, which is not Ruby's rule.
+    /// Multiple assignment has read its spread array the same way since #26; an
+    /// element opcode would fix both at once, and neither has a spec asking.
+    fn when_splat(&mut self, inner: &Expr, subject: bool, entries: &mut Vec<usize>) -> Emit {
+        self.emit(Insn::NewArray(0));
+        self.expr(inner)?;
+        self.emit_send("__concat_splat__", 1);
+        let list = self.slot(&format!("%when{}", self.here()));
+        self.emit(Insn::SetLocal(list, 0));
+        let cursor = self.slot(&format!("%whenat{}", self.here()));
+        self.emit(Insn::PushInt(0));
+        self.emit(Insn::SetLocal(cursor, 0));
+
+        let top = self.here();
+        self.emit(Insn::GetLocal(cursor, 0));
+        self.emit(Insn::GetLocal(list, 0));
+        self.emit_send("size", 0);
+        self.emit(Insn::BinOp(BinOp::Lt));
+        let done = self.emit_jump(Insn::JumpUnless);
+
+        if subject {
+            self.emit(Insn::Dup);
+        }
+        self.emit(Insn::GetLocal(list, 0));
+        self.emit(Insn::GetLocal(cursor, 0));
+        self.emit_send("[]", 1);
+        if subject {
+            self.emit(Insn::CaseEq);
+        }
+        // Leaves for the clause body with the subject still under it, which is
+        // exactly what a non-splat condition's jump leaves.
+        entries.push(self.emit_jump(Insn::JumpIf));
+
+        self.emit(Insn::GetLocal(cursor, 0));
+        self.emit(Insn::PushInt(1));
+        self.emit(Insn::BinOp(BinOp::Add));
+        self.emit(Insn::SetLocal(cursor, 0));
+        let back = self.emit_jump(Insn::Jump);
+        self.patch(back, top);
+        self.patch_here(done);
+        Ok(())
+    }
+
     fn case_expr(&mut self, node: &Case, _span: Span) -> Emit {
         let CaseBranches::When(clauses) = &node.branches else {
             unreachable!("`case`/`in` is routed to `case_in` by the caller");
@@ -1970,20 +2421,23 @@ impl Compiler {
         for clause in clauses {
             let mut entries = Vec::with_capacity(clause.conditions.len());
             for condition in &clause.conditions {
-                // Deliberately still refused after #215 gave `rescue *classes`
-                // its answer, and named apart from it so the ranking does not
-                // read the two as one slice. `rescue` matches with
-                // `exception_matches`, which is an ancestor walk the
-                // interpreter can do inside one instruction; `when` matches
-                // with `===`, which is a Ruby method a subject's class may
-                // override, and a send needs a frame. So `when *values` wants a
-                // compiled loop over the array rather than a `CaseEqAny`
-                // twin of `CheckMatchAny` — a different slice, 12 examples.
-                if matches!(condition.kind, ExprKind::Splat(_)) {
-                    return Err(Unsupported::at(
-                        "a splat in `when`, which needs a compiled loop because `===` is a send",
-                        condition.span,
-                    ));
+                // `when *values` is a compiled loop rather than the
+                // `CaseEqAny` twin of #215's `CheckMatchAny`, because `when`
+                // matches with `===` — a Ruby method the subject's class may
+                // override — and a send needs a frame, while `rescue` matches
+                // with an ancestor walk the interpreter does inside one
+                // instruction.
+                //
+                // Lazily, one element at a time: measured, `when t(1), *[t(2)]`
+                // never evaluates `[t(2)]` once `t(1)` has matched. So the
+                // clause cannot be collected into one array up front, and each
+                // splat gets its own loop between its neighbours' tests.
+                if let ExprKind::Splat(inner) = &condition.kind {
+                    let inner = inner.as_ref().ok_or_else(|| {
+                        Unsupported::at("an anonymous splat in `when`", condition.span)
+                    })?;
+                    self.when_splat(inner, subject, &mut entries)?;
+                    continue;
                 }
                 if subject {
                     self.emit(Insn::Dup);
@@ -4363,6 +4817,25 @@ fn flat_bytes(parts: &[StrPart]) -> Option<Box<[u8]>> {
     Some(out.into_boxed_slice())
 }
 
+fn collect_flip_flops(expr: &Expr, out: &mut Vec<Name>) {
+    if matches!(expr.kind, ExprKind::FlipFlop(_)) {
+        let name: Name = format!("%ff{}", expr.span.start).into_boxed_str();
+        if !out.contains(&name) {
+            out.push(name);
+        }
+    }
+    if let ExprKind::Call(call) = &expr.kind
+        && let Some(BlockArg::Block(block)) = call.block.as_ref()
+    {
+        for statement in &block.body {
+            collect_flip_flops(statement, out);
+        }
+    }
+    for child in children(expr) {
+        collect_flip_flops(child, out);
+    }
+}
+
 fn collect_locals(expr: &Expr, out: &mut Vec<Name>) {
     if let ExprKind::Assign(assign) = &expr.kind
         && let TargetKind::Var(VarRef::Local { name, depth: 0 }) = &assign.target.kind
@@ -4466,10 +4939,6 @@ fn node_name(kind: &ExprKind) -> &'static str {
         ExprKind::Splat(_) => "a splat",
         ExprKind::Rational(_) | ExprKind::Imaginary(_) => "a rational or complex literal",
         ExprKind::XStr(_) => "a backtick command",
-        // Not pattern matching, despite the name Prism gives the node:
-        // `/(?<a>.)/ =~ s` writes its named captures into locals, which is
-        // #14's regexp work and not #165's.
-        ExprKind::MatchWrite(_) => "a regexp that writes its named captures to locals",
         // #165 compiles the rest of this family. A node still reaching here is
         // one the lowering built in a shape the compiler does not expect.
         ExprKind::MatchPattern(_)
@@ -4479,7 +4948,6 @@ fn node_name(kind: &ExprKind) -> &'static str {
         | ExprKind::AltPattern(_)
         | ExprKind::CapturePattern(_)
         | ExprKind::Pin(_) => "pattern matching outside a pattern",
-        ExprKind::FlipFlop(_) => "a flip-flop",
         // Only the global form reaches here now: `alias $new $old` is a true
         // alias — writing the new name changes the old one, measured — which a
         // name-keyed table cannot express without a level of indirection, and
@@ -4491,7 +4959,6 @@ fn node_name(kind: &ExprKind) -> &'static str {
         // which needs an object that does not exist yet.
         ExprKind::SourceEncoding => "`__ENCODING__`, which waits for the Encoding class,",
         ExprKind::ForwardingArgs => "argument forwarding",
-        ExprKind::Implicit(_) => "an elided hash value",
         ExprKind::Missing => "a syntax error",
         _ => "this expression",
     }
