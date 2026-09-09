@@ -121,6 +121,44 @@ class Range
     cover?(value)
   end
 
+  # The element count without iterating. Ruby 3.4's rule, measured rather than
+  # reasoned about — the *begin* decides, and it decides three different ways:
+  #
+  #   Integer begin      the count, or `Float::INFINITY` when the range is endless
+  #   Numeric or nil     TypeError "can't iterate from <Class>" — `(1.0..2.0)`,
+  #                      `(..1)` and `(1r..2r)` all raise
+  #   anything else      nil, because a generic Range has no length —
+  #                      `("a".."c").size` is nil, not an error
+  #
+  # A Float *end* against an Integer begin is 2 for `(1..2.5)`: the end is
+  # floored, and `exclude_end?` only takes one off when the end is a whole
+  # number, so `(1...2.5)` is also 2 while `(1...3.0)` is 2 rather than 3. That
+  # arithmetic is written but not reachable yet — there is no float-to-integer
+  # primitive, so `Float#floor` reports itself missing by name (#18).
+  #
+  # `Float::INFINITY` is mentioned rather than approximated: this VM has only
+  # flonums and an infinity needs a heap `Float` (#18), so an endless range
+  # reports that missing constant by name instead of answering a wrong number.
+  def size
+    from = @begin
+    unless from.is_a?(Integer)
+      if from.nil? || from.is_a?(Numeric)
+        raise TypeError, "can't iterate from " + from.class.to_s
+      end
+      return nil
+    end
+    return Float::INFINITY if @end.nil?
+    stop = @end
+    unless stop.is_a?(Integer)
+      return nil unless stop.is_a?(Numeric)
+      stop = stop.floor
+      stop = stop - 1 if @exclude_end && stop == @end
+      return stop < from ? 0 : stop - from + 1
+    end
+    stop = stop - 1 if @exclude_end
+    stop < from ? 0 : stop - from + 1
+  end
+
   # Iteration, by `succ` and `<=>`, which is the protocol Ruby uses. Only
   # `to_a` and the splat need it today; `step`, `map`, and the rest of
   # Enumerable are still #23's.

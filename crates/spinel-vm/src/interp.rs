@@ -2111,7 +2111,7 @@ fn bind(
             // a `#to_ary` that raises: `block_spec.rb` asserts on exactly that.
             return Err(Error::Unknowable {
                 what: "a block parameter list spreading an object with `#to_ary`",
-                needs: "the binder can call Ruby, which re-entrant primitives bring with fibers (#40)",
+                needs: "the binder can call Ruby, which re-entrant primitives bring with fibers (#16)",
             });
         }
     }

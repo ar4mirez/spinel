@@ -107,6 +107,20 @@ module Enumerable
     total.is_a?(Integer) ? total : nil
   end
 
+  # `lazy` starts a chain that defers every link until something forces it.
+  # The root passes the yielded values through untouched, so a multi-value
+  # `each` still reaches the first link with its original arity.
+  def lazy
+    Enumerator::Lazy.__link__(self, __known_size__, nil) do
+      ->(y, *values) { y.yield(*values) }
+    end
+  end
+
+  # `chain` reads several enumerables end to end without copying any of them.
+  def chain(*others)
+    Enumerator::Chain.new(self, *others)
+  end
+
   # --- mapping --------------------------------------------------------------
 
   def map
