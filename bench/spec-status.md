@@ -22,7 +22,7 @@ Guards are answered for `linux`, which is what `scripts/spec-status.sh` pins so 
 | `core/enumerable` | 61 | 446 | 289 | 0 | 153 | 4 | 65% |
 | `core/enumerator` | 73 | 390 | 120 | 0 | 269 | 1 | 31% |
 | `core/env` | 45 | 180 | 0 | 0 | 169 | 11 | 0% |
-| `core/exception` | 39 | 233 | 22 | 0 | 208 | 3 | 9% |
+| `core/exception` | 39 | 233 | 31 | 0 | 199 | 3 | 13% |
 | `core/false` | 9 | 13 | 3 | 0 | 10 | 0 | 23% |
 | `core/fiber` | 15 | 124 | 0 | 0 | 120 | 4 | 0% |
 | `core/file` | 111 | 622 | 0 | 0 | 543 | 79 | 0% |
@@ -58,7 +58,7 @@ Guards are answered for `linux`, which is what `scripts/spec-status.sh` pins so 
 | `core/string` | 151 | 1905 | 51 | 0 | 1747 | 107 | 3% |
 | `core/struct` | 30 | 148 | 1 | 0 | 147 | 0 | 1% |
 | `core/symbol` | 29 | 159 | 19 | 0 | 139 | 1 | 12% |
-| `core/systemexit` | 2 | 6 | 0 | 0 | 6 | 0 | 0% |
+| `core/systemexit` | 2 | 6 | 4 | 0 | 2 | 0 | 67% |
 | `core/thread` | 54 | 363 | 0 | 0 | 329 | 34 | 0% |
 | `core/threadgroup` | 5 | 8 | 0 | 0 | 8 | 0 | 0% |
 | `core/time` | 66 | 430 | 0 | 0 | 424 | 6 | 0% |
@@ -131,4 +131,4 @@ Guards are answered for `linux`, which is what `scripts/spec-status.sh` pins so 
 | `optional/capi` | 47 | 1651 | 10 | 0 | 1561 | 80 | 1% |
 | `optional/thread_safety` | 1 | 5 | 0 | 0 | 4 | 1 | 0% |
 | `security` | 13 | 27 | 0 | 0 | 25 | 2 | 0% |
-| **total** | 3835 | 25624 | 2901 | 0 | 20801 | 1922 | 11% |
+| **total** | 3835 | 25624 | 2914 | 0 | 20788 | 1922 | 11% |
