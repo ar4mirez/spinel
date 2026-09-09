@@ -483,6 +483,10 @@ impl Compiler {
             // Both write into the frame's definee and leave the stack alone;
             // the `nil` an `alias` expression is worth is pushed separately.
             Insn::Alias(_, _) | Insn::Undef(_) => 0,
+            // The dynamic pair pops the names it was handed instead of
+            // indexing them, and pushes nothing for the same reason.
+            Insn::AliasFromStack => -2,
+            Insn::UndefFromStack => -1,
             Insn::Pop
             | Insn::SetLocal(_, _)
             | Insn::SetIvar(_)
@@ -741,6 +745,12 @@ impl Compiler {
             ExprKind::True => self.emit(Insn::PushTrue),
             ExprKind::False => self.emit(Insn::PushFalse),
             ExprKind::SelfExpr => self.emit(Insn::PushSelf),
+            // `{x:}` and `m(x:)`. The parser has already decided what the
+            // elided value resolves to — a local if one is in scope, otherwise
+            // a call on self — and hung it under the node, so this is the
+            // resolution and nothing else: the hash and the keyword group are
+            // built by the code that was already going to build them.
+            ExprKind::Implicit(inner) => return self.expr(inner),
             // `__FILE__` and `__LINE__` are constants by the time the compiler
             // sees them: the parser filled both in, because it is the last
             // stage that still has the bytes a line number is counted in.
@@ -877,10 +887,18 @@ impl Compiler {
 
             ExprKind::Var(var) => self.var(var, span)?,
             ExprKind::Alias(alias) => self.alias(alias, span)?,
+            ExprKind::MatchWrite(node) => self.match_write(node, span)?,
             ExprKind::Undef(names) => {
+                // Left to right, one name at a time: measured,
+                // `undef :"u#{o(1)}", :"u#{o(2)}"` logs 1 then 2.
                 for name in names {
-                    let symbol = self.method_name(name, span)?;
-                    self.emit(Insn::Undef(symbol));
+                    match self.static_method_name(name, span)? {
+                        Some(symbol) => self.emit(Insn::Undef(symbol)),
+                        None => {
+                            self.method_name_value(name, span)?;
+                            self.emit(Insn::UndefFromStack);
+                        }
+                    }
                 }
                 self.emit(Insn::PushNil);
             }
@@ -1244,41 +1262,190 @@ impl Compiler {
     /// a symbol or an operator there, and Prism spells all three the same way —
     /// so there is nothing to evaluate and the instruction carries two symbols.
     /// `alias` evaluates to `nil`, measured.
+    /// `/(?<w>a)/ =~ s`, which writes its named captures into locals.
+    ///
+    /// Only this shape does it, and only with the literal on the left: Prism
+    /// has already decided which names become locals and listed them in the
+    /// enclosing scope, so the job here is to emit the writes, not to discover
+    /// the names. `"ab" =~ /(?<n>a)/` builds no `MatchWrite` at all and
+    /// `defined?(n)` is nil there — measured.
+    ///
+    /// A failed match assigns `nil` rather than leaving the local alone, so
+    /// every write is guarded: `$~` is nil, and `nil[:w]` would raise.
+    fn match_write(&mut self, node: &spinel_ast::MatchWrite, span: Span) -> Emit {
+        self.expr(&node.call)?;
+        for target in &node.targets {
+            let TargetKind::Var(VarRef::Local { name, .. }) = &target.kind else {
+                // Prism only ever names locals here; anything else is a shape
+                // the lowering built that this does not expect.
+                return Err(Unsupported::at(
+                    "a named capture writing to something other than a local",
+                    span,
+                ));
+            };
+            let symbol = self.symbol(name);
+            let slot = self.target_slot(target)?;
+            self.emit(Insn::LastMatch(MatchRef::Data));
+            let no_match = self.emit_jump(Insn::JumpIfNilKeep);
+            self.emit(Insn::PushSym(symbol));
+            self.emit_send("[]", 1);
+            self.patch_here(no_match);
+            self.emit_set(&slot);
+        }
+        Ok(())
+    }
+
     fn alias(&mut self, alias: &spinel_ast::Alias, span: Span) -> Emit {
         if alias.global {
             return Err(Unsupported::at("`alias` on a global variable", span));
         }
-        let new = self.method_name(&alias.new_name, span)?;
-        let old = self.method_name(&alias.old_name, span)?;
-        self.emit(Insn::Alias(new, old));
+        // Either both names are known now or neither is: the dynamic
+        // instruction pops two symbols, and mixing the forms would need a
+        // third. Measured, an interpolated pair evaluates left to right — new
+        // name first — which is the order they are pushed in.
+        match (
+            self.static_method_name(&alias.new_name, span)?,
+            self.static_method_name(&alias.old_name, span)?,
+        ) {
+            (Some(new), Some(old)) => self.emit(Insn::Alias(new, old)),
+            _ => {
+                self.method_name_value(&alias.new_name, span)?;
+                self.method_name_value(&alias.old_name, span)?;
+                self.emit(Insn::AliasFromStack);
+            }
+        }
         self.emit(Insn::PushNil);
         Ok(())
     }
 
-    /// The symbol a method name in an `alias` or `undef` names.
-    fn method_name(&mut self, expr: &Expr, span: Span) -> Result<u32, Unsupported> {
+    /// The symbol a method name in an `alias` or `undef` names, when the
+    /// compiler can know it.
+    ///
+    /// `None` for an interpolated name, whose bytes do not exist until the
+    /// frame runs. Every other shape is an error here rather than a `None`,
+    /// because it is not a name at all.
+    fn static_method_name(
+        &mut self,
+        expr: &Expr,
+        span: Span,
+    ) -> Result<Option<u32>, Unsupported> {
         let ExprKind::Sym(symbol) = &expr.kind else {
             return Err(Unsupported::at("a computed method name here", span));
         };
-        let bytes = flat_bytes(&symbol.parts)
-            .ok_or_else(|| Unsupported::at("an interpolated method name here", span))?;
+        let Some(bytes) = flat_bytes(&symbol.parts) else {
+            return Ok(None);
+        };
         let name = String::from_utf8(bytes.into_vec())
             .map_err(|_| Unsupported::at("a method name that is not UTF-8", span))?;
-        Ok(self.symbol(&name))
+        Ok(Some(self.symbol(&name)))
+    }
+
+    /// Push a method name that is only known at run time.
+    ///
+    /// The symbol literal compiles to itself and an interpolated one to
+    /// `Insn::Intern` over the built string, which is #231's opcode — so the
+    /// name is interned into the same shared table a literal symbol lives in,
+    /// and `:"a#{b}".equal?(:ac)` stays true.
+    fn method_name_value(&mut self, expr: &Expr, span: Span) -> Emit {
+        let ExprKind::Sym(_) = &expr.kind else {
+            return Err(Unsupported::at("a computed method name here", span));
+        };
+        self.expr(expr)
+    }
+
+    /// `X += v`, `A::X ||= v`, `X &&= v`.
+    ///
+    /// [`Self::const_target`] has already emitted the module for a qualified
+    /// name, and both `GetConst` and `SetConst` consume one — so it is parked
+    /// in a hidden local and pushed again per use. That is also what makes the
+    /// parent expression run once, which Ruby requires: `m::N += 1` calls `m`
+    /// a single time. Measured.
+    ///
+    /// `||=` is the form that must not raise on an undefined constant, so it
+    /// asks `defined?` before it reads. `+=` and `&&=` do read, and the
+    /// `NameError` that comes back is Ruby's answer for both.
+    ///
+    /// ponytail: the write still does not warn "already initialized constant".
+    /// That is `class.rs`'s existing shortcut and plain `X = 2` shares it; the
+    /// specs asking for the warning are blocked on mspec's `complain`.
+    fn const_op_assign(
+        &mut self,
+        name: u32,
+        how: ConstScope,
+        assign: &Assign,
+        span: Span,
+    ) -> Emit {
+        let module = if how == ConstScope::Qualified {
+            let slot = self.slot(&format!("%cbase{}", self.here()));
+            self.emit(Insn::SetLocal(slot, 0));
+            Some(slot)
+        } else {
+            None
+        };
+        // Pushing the module is a local read, so every use costs the same and
+        // none of them re-runs the parent expression.
+        macro_rules! push_module {
+            () => {
+                if let Some(slot) = module {
+                    self.emit(Insn::GetLocal(slot, 0));
+                }
+            };
+        }
+
+        match &assign.op {
+            AssignOp::Assign => unreachable!("the plain form returned above"),
+            AssignOp::Binary(op) => {
+                let op = BinOp::from_name(op)
+                    .ok_or_else(|| Unsupported::at("this compound assignment operator", span))?;
+                push_module!();
+                push_module!();
+                self.emit(Insn::GetConst(name, how));
+                self.expr(&assign.value)?;
+                self.emit(Insn::BinOp(op));
+                self.emit(Insn::SetConst(name, how));
+            }
+            AssignOp::Or => {
+                // An undefined constant is not an error here — `Y ||= 5` is 5
+                // and warns about nothing — so the read is guarded rather than
+                // attempted. `defined?` answers without raising, which is the
+                // whole reason the instruction exists.
+                push_module!();
+                self.emit(Insn::DefinedConst(name, how));
+                let undefined = self.emit_jump(Insn::JumpUnless);
+                push_module!();
+                self.emit(Insn::GetConst(name, how));
+                let keep = self.emit_jump(Insn::JumpIfKeep);
+                self.emit(Insn::Pop);
+                self.patch_here(undefined);
+                push_module!();
+                self.expr(&assign.value)?;
+                self.emit(Insn::SetConst(name, how));
+                self.patch_here(keep);
+            }
+            AssignOp::And => {
+                // `W &&= 7` on an undefined constant raises `NameError`, so
+                // this one reads outright.
+                push_module!();
+                self.emit(Insn::GetConst(name, how));
+                let keep = self.emit_jump(Insn::JumpUnlessKeep);
+                self.emit(Insn::Pop);
+                push_module!();
+                self.expr(&assign.value)?;
+                self.emit(Insn::SetConst(name, how));
+                self.patch_here(keep);
+            }
+        }
+        Ok(())
     }
 
     fn assign(&mut self, assign: &Assign, span: Span) -> Emit {
         if let Some((name, how)) = self.const_target(&assign.target)? {
-            // `X = v`. A compound form (`X ||= v`, `X += v`) would have to read
-            // the constant first, and for `A::X` that means evaluating `A`
-            // twice or spilling it — neither is free, and nothing in the corpus
-            // asks. Refused rather than double-evaluated.
-            if assign.op != AssignOp::Assign {
-                return Err(Unsupported::at("a compound constant assignment", span));
+            if assign.op == AssignOp::Assign {
+                self.expr(&assign.value)?;
+                self.emit(Insn::SetConst(name, how));
+                return Ok(());
             }
-            self.expr(&assign.value)?;
-            self.emit(Insn::SetConst(name, how));
-            return Ok(());
+            return self.const_op_assign(name, how, assign, span);
         }
         // `a, b = ...`. A compound form has no multiple-assignment spelling in
         // Ruby, so this only ever sees a plain `=`.
@@ -4590,10 +4757,6 @@ fn node_name(kind: &ExprKind) -> &'static str {
         ExprKind::Splat(_) => "a splat",
         ExprKind::Rational(_) | ExprKind::Imaginary(_) => "a rational or complex literal",
         ExprKind::XStr(_) => "a backtick command",
-        // Not pattern matching, despite the name Prism gives the node:
-        // `/(?<a>.)/ =~ s` writes its named captures into locals, which is
-        // #14's regexp work and not #165's.
-        ExprKind::MatchWrite(_) => "a regexp that writes its named captures to locals",
         // #165 compiles the rest of this family. A node still reaching here is
         // one the lowering built in a shape the compiler does not expect.
         ExprKind::MatchPattern(_)
@@ -4615,7 +4778,6 @@ fn node_name(kind: &ExprKind) -> &'static str {
         // which needs an object that does not exist yet.
         ExprKind::SourceEncoding => "`__ENCODING__`, which waits for the Encoding class,",
         ExprKind::ForwardingArgs => "argument forwarding",
-        ExprKind::Implicit(_) => "an elided hash value",
         ExprKind::Missing => "a syntax error",
         _ => "this expression",
     }

@@ -1290,3 +1290,76 @@ case 5 when *[] then :yes else :no end  #=> :no
 # gets parked: expanding the raw value in both the read and the write would
 # convert it twice. `optional_assignments_spec.rb` counts the calls.
 (l = []; k = Object.new; def k.to_a; $c << :to_a; [:k]; end; $c = l; h = {}; h[*k] ||= 20; [h[:k], l])  #=> [20, [:to_a]]
+
+# --- PRD 0035 #226: a compound constant assignment --------------------------
+#
+# The read and the write both consume the module for a qualified name, so it is
+# parked in a hidden local and pushed per use — which is also what makes the
+# parent expression run once. `||=` is the form that must not raise on an
+# undefined constant, so it asks `defined?` before reading; `+=` and `&&=` read
+# outright, and the `NameError` is Ruby's answer.
+#
+# A constant this heap has never seen is still refused rather than treated as
+# undefined: a fresh heap cannot tell "undefined" from "not required yet" (#39),
+# so these rows all name constants that exist.
+(K226A = 1; K226A += 1; K226A)  #=> 2
+(K226B = 1; K226B &&= 7)  #=> 7
+(K226C = nil; K226C ||= 5)  #=> 5
+(K226D = nil; K226D ||= 5; K226D ||= 9)  #=> 5
+# `**=` is still refused, under `this compound assignment operator` — `**` is
+# not one of the fast-path `BinOp`s, which is a different row in the ranking.
+# The parent of a qualified name is evaluated exactly once.
+(module M226; N = 1; end; l = []; d = Object.new; def d.go(l); l << :m; M226; end; d.go(l)::N += 1; [l, M226::N])  #=> [[:m], 2]
+(module P226; Q = nil; end; P226::Q ||= 3)  #=> 3
+(module R226; S = 4; end; R226::S += 1; R226::S)  #=> 5
+
+# --- PRD 0035 #228: an elided hash value ------------------------------------
+#
+# `{x:}` is `{x: x}`, and the elided value resolves as an ordinary name: a local
+# if one is in scope, otherwise a call on self. Prism has already made that
+# decision and hung the resolved expression under the node, so compiling it is
+# the resolution and nothing else.
+#
+# The issue expected `m(x:)` to be a second refusal site. Measured: it is the
+# same node, and one arm answered both.
+(x = 1; y = 2; h = { x:, y: }; [h[:x], h[:y]])  #=> [1, 2]
+(x = 5; { x: }[:x])  #=> 5
+(def m228(a:, b:); [a, b]; end; a = 10; b = 20; m228(a:, b:))  #=> [10, 20]
+(def z228; :called; end; { z228: }[:z228])  #=> :called
+
+# --- PRD 0035 #237: an interpolated method name in `alias` / `undef` --------
+#
+# #231 landed `Insn::Intern`, which is enough to *build* the symbol, but
+# `alias` and `undef` read a compile-time index into `Iseq::symbols` and never
+# receive a value. The dynamic pair pops its names instead.
+#
+# Measured: both forms evaluate to nil, an interpolated pair goes left to
+# right — new name first — and `undef` takes its names one at a time in order.
+(def m237; 5; end; alias :"m#{237}" :m237)  #=> nil
+(def m237b; 5; end; alias :"n#{237}" :m237b; n237)  #=> 5
+(l = []; d = Object.new; def d.o(l, x); l << x; x; end; def s237; 7; end; alias :"a#{d.o(l, 1)}" :"s#{d.o(l, 2) - 2 + 237}"; [l, a1])  #=> [[1, 2], 7]
+(def k237; 1; end; undef :"k#{237}")  #=> nil
+(def q237; 1; end; alias :"#{nil}" :q237; send(:""))  #=> 1
+# A name that is not interpolated still takes the static instruction, and the
+# two forms agree.
+(def r237; 3; end; alias t237 r237; t237)  #=> 3
+
+# --- PRD 0035 #232: a regexp that writes its named captures to locals -------
+#
+# Only `regexp-literal =~ string` does this, and only with the literal on the
+# left: `"ab" =~ /(?<y>a)/` assigns nothing, which the last row pins. Prism has
+# already decided which names become locals, so the compiler emits the writes
+# rather than discovering the names.
+#
+# A failed match assigns nil rather than leaving the local alone, so each write
+# is guarded — `$~` is nil there and `nil[:w]` would raise.
+#
+# Sits on #217: with a named group present the unnamed ones are not numbered,
+# so the name is the only way to reach the group at all.
+(/(?<w232>a)(?<z232>b)/ =~ "ab"; [w232, z232])  #=> ["a", "b"]
+(/(?<q232>a)/ =~ "zzz")  #=> nil
+(/(?<q232>a)/ =~ "zzz"; q232)  #=> nil
+(x232 = 5; /(?<x232>b)/ =~ "b"; x232)  #=> "b"
+(/(?<p232>a)/ =~ "a")  #=> 0
+(y232 = 1; "ab" =~ /(?<y232>a)/; y232)  #=> 1
+(/(?<a232>a)(b)/ =~ "ab"; [a232, $~.size])  #=> ["a", 2]

@@ -360,6 +360,18 @@ pub enum Insn {
     /// call finds nothing rather than the superclass's method.
     Undef(u32),
 
+    /// `alias :"m#{n}" :m`. The two names are on the stack as symbols — old on
+    /// top — rather than indexed out of [`Iseq::symbols`], because an
+    /// interpolated name does not exist until the frame runs.
+    ///
+    /// A separate opcode rather than a sentinel index on [`Insn::Alias`]: the
+    /// two differ in what they pop, which is the one thing the depth model
+    /// cannot read out of a field.
+    AliasFromStack,
+
+    /// `undef :"m#{n}"`. The name is on the stack as a symbol.
+    UndefFromStack,
+
     LastMatch(MatchRef),
 
     /// Write the frame's last match: `$~ = m`.

@@ -165,19 +165,85 @@ pub fn parse(source: &str, flags: Flags) -> Result<Parsed, Error> {
     //
     // The reason underneath is that a pattern with named groups does not number
     // its unnamed ones at all — `/(a)(?<b>b)/.match("ab").to_a` is `["ab", "b"]`
-    // in Ruby — so a number has nothing to refer to. This engine still numbers
-    // them (#217), which is why the check is written against the named-group
-    // table rather than falling out of the numbering.
+    // in Ruby — so a number has nothing to refer to. `drop_unnamed_groups`
+    // below is #217 making that true here as well, but the check still cannot
+    // fall out of it: after renumbering, `\1` in `/\1(?<a>a)/` *would* name a
+    // group that exists, and Ruby refuses it anyway.
     if parser.numeric_backref && !parser.name_index.is_empty() {
         return Err(Error::Syntax(
             "numbered backref/call is not allowed. (use name)".into(),
         ));
     }
-    Ok(Parsed {
-        ast,
-        groups: parser.groups,
-        names: parser.names,
-    })
+    let mut ast = ast;
+    let (groups, names) = drop_unnamed_groups(&mut ast, parser.groups, parser.names);
+    Ok(Parsed { ast, groups, names })
+}
+
+/// Ruby's rule: one named group anywhere makes every *unnamed* `(...)` a
+/// plain group rather than a capture.
+///
+/// `/(a)(?<b>b)/.match("ab").to_a` is `["ab", "b"]`, not `["ab", "a", "b"]`,
+/// and `MatchData#size` counts only the named ones. Measured. The remaining
+/// groups are then numbered 1..k in source order, so `$~[1]` is the *named*
+/// group — which is also why a numeric backreference is refused above: with
+/// the unnamed groups gone, a number has nothing left to refer to.
+///
+/// A pass rather than a rule inside the parser because it is a property of the
+/// whole pattern: `/(a)(?<b>b)/` un-numbers a group written before the parser
+/// had any way to know a name was coming.
+fn drop_unnamed_groups(
+    ast: &mut Ast,
+    groups: usize,
+    names: Vec<(String, usize)>,
+) -> (usize, Vec<(String, usize)>) {
+    if names.is_empty() {
+        return (groups, names);
+    }
+    // Old index to new, `None` for a group that stops being one. Named groups
+    // keep their relative order, which is source order.
+    let mut named: Vec<usize> = names.iter().map(|(_, index)| *index).collect();
+    named.sort_unstable();
+    let renumber = |old: usize| -> Option<usize> {
+        named.binary_search(&old).ok().map(|at| at + 1)
+    };
+    renumber_groups(ast, &renumber);
+    let names = names
+        .into_iter()
+        .map(|(name, index)| {
+            let index = renumber(index).expect("a named group is in the named list");
+            (name, index)
+        })
+        .collect();
+    (named.len(), names)
+}
+
+/// Rewrite every group index and backreference through `renumber`.
+fn renumber_groups(ast: &mut Ast, renumber: &impl Fn(usize) -> Option<usize>) {
+    match ast {
+        Ast::Group { index, body } => {
+            if let Some(old) = *index {
+                *index = renumber(old);
+            }
+            renumber_groups(body, renumber);
+        }
+        Ast::Backref { group, .. } => {
+            // A numeric backreference is already an error in a pattern with
+            // names, so this only ever resolves a `\k<name>` — which points at
+            // a named group and therefore always renumbers.
+            if let Some(new) = renumber(*group) {
+                *group = new;
+            }
+        }
+        Ast::Concat(parts) | Ast::Alt(parts) => {
+            for part in parts {
+                renumber_groups(part, renumber);
+            }
+        }
+        Ast::Atomic(body) | Ast::Repeat { body, .. } | Ast::Look { body, .. } => {
+            renumber_groups(body, renumber);
+        }
+        Ast::Empty | Ast::Literal { .. } | Ast::Class(_) | Ast::Any { .. } | Ast::Anchor(_) => {}
+    }
 }
 
 struct Parser {

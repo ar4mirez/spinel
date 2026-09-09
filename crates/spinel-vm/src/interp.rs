@@ -979,39 +979,26 @@ pub fn eval_in(
                     let new = frames[top].symbols[new as usize];
                     let old = frames[top].symbols[old as usize];
                     let owner = scope.classes().cref_class(frames[top].cref);
-                    hook_refusal(
-                        scope,
-                        owner,
-                        &[(
-                            "method_added",
-                            "`method_added`, which this alias would fire",
-                        )],
-                    )?;
-                    if !scope.classes_mut().alias_method(owner, new, old) {
-                        return Err(Error::raise(
-                            "NameError",
-                            format!(
-                                "undefined method '{}' for {}",
-                                symbol_name(old),
-                                class_display_name(scope, owner),
-                            ),
-                        ));
-                    }
+                    alias_into(scope, owner, new, old)?;
+                }
+                // `alias :"m#{n}" :m`. The names were built by the frame, old
+                // on top because it was pushed second — which is also Ruby's
+                // evaluation order for the pair.
+                Insn::AliasFromStack => {
+                    let old = pop_name(&mut stack, "alias")?;
+                    let new = pop_name(&mut stack, "alias")?;
+                    let owner = scope.classes().cref_class(frames[top].cref);
+                    alias_into(scope, owner, new, old)?;
                 }
                 Insn::Undef(name) => {
                     let symbol = frames[top].symbols[name as usize];
                     let owner = scope.classes().cref_class(frames[top].cref);
-                    undef_hook_refusal(scope, owner)?;
-                    if !scope.classes_mut().undef_method(owner, symbol) {
-                        return Err(Error::raise(
-                            "NameError",
-                            format!(
-                                "undefined method '{}' for {}",
-                                symbol_name(symbol),
-                                class_display_name(scope, owner),
-                            ),
-                        ));
-                    }
+                    undef_from(scope, owner, symbol)?;
+                }
+                Insn::UndefFromStack => {
+                    let symbol = pop_name(&mut stack, "undef")?;
+                    let owner = scope.classes().cref_class(frames[top].cref);
+                    undef_from(scope, owner, symbol)?;
                 }
                 Insn::DefineSingleton(index) => {
                     let (name, child) = frames[top].iseq.definitions[index as usize];
@@ -3412,6 +3399,68 @@ fn uninitialized(
             )
         }
     }
+}
+
+/// The symbol an `alias`/`undef` name was built into.
+///
+/// The compiler only ever pushes a symbol here — a symbol literal or #231's
+/// `Intern` over an interpolated one — so anything else is a compiler bug
+/// rather than a program error, and it is reported as a refusal instead of
+/// being guessed at.
+fn pop_name(stack: &mut Vec<Value>, keyword: &'static str) -> Result<crate::value::SymbolId, Error> {
+    let value = stack.pop().expect("a name to alias or undef");
+    value.as_symbol().ok_or(Error::NoDispatch {
+        op: keyword,
+        operands: "a method name that is not a Symbol",
+    })
+}
+
+/// `alias new old` in `owner`, however the two names were spelled.
+fn alias_into<'h>(
+    scope: &mut HandleScope<'h>,
+    owner: ClassId,
+    new: crate::value::SymbolId,
+    old: crate::value::SymbolId,
+) -> Result<(), Error> {
+    hook_refusal(
+        scope,
+        owner,
+        &[(
+            "method_added",
+            "`method_added`, which this alias would fire",
+        )],
+    )?;
+    if !scope.classes_mut().alias_method(owner, new, old) {
+        return Err(Error::raise(
+            "NameError",
+            format!(
+                "undefined method '{}' for {}",
+                symbol_name(old),
+                class_display_name(scope, owner),
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// `undef name` in `owner`, however the name was spelled.
+fn undef_from<'h>(
+    scope: &mut HandleScope<'h>,
+    owner: ClassId,
+    symbol: crate::value::SymbolId,
+) -> Result<(), Error> {
+    undef_hook_refusal(scope, owner)?;
+    if !scope.classes_mut().undef_method(owner, symbol) {
+        return Err(Error::raise(
+            "NameError",
+            format!(
+                "undefined method '{}' for {}",
+                symbol_name(symbol),
+                class_display_name(scope, owner),
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// `defined?`'s answer for a *name*: the string, or a report that this heap
