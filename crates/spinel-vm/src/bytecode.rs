@@ -372,6 +372,17 @@ pub enum Insn {
     /// `undef :"m#{n}"`. The name is on the stack as a symbol.
     UndefFromStack,
 
+    /// `alias $new $old`: point the new name at the cell the old one names,
+    /// so a later write through either is visible through both. Both indexes
+    /// are into [`Iseq::symbols`]; the names are always static, because Ruby
+    /// has no interpolated spelling for a global.
+    AliasGlobal(u32, u32),
+
+    /// `alias $new $&`: the old name is a regexp special, which is derived
+    /// from the last match rather than stored, so the new name records the
+    /// derivation and becomes read-only.
+    AliasGlobalSpecial(u32, MatchRef),
+
     LastMatch(MatchRef),
 
     /// Write the frame's last match: `$~ = m`.

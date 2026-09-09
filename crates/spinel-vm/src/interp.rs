@@ -623,13 +623,29 @@ pub fn eval_in(
                 // assignment put there.
                 Insn::GetGlobal(name) => {
                     let symbol = frames[top].symbols[name as usize];
-                    // An unset global reads `nil` rather than raising: Ruby
-                    // warns under `-w` and answers nil, and the warning needs
-                    // #39's `$stderr`.
-                    stack.push(scope.global(symbol).unwrap_or(Value::NIL));
+                    // A name aliased to a regexp special runs the derivation
+                    // rather than reading a cell, so it tracks the *current*
+                    // match: measured, a second `=~` moves it.
+                    let value = match scope.global_special(symbol) {
+                        Some(which) => last_match_part(scope, &which)?,
+                        // An unset global reads `nil` rather than raising:
+                        // Ruby warns under `-w` and answers nil, and the
+                        // warning needs #39's `$stderr`.
+                        None => scope.global(symbol).unwrap_or(Value::NIL),
+                    };
+                    stack.push(value);
                 }
                 Insn::SetGlobal(name) => {
                     let symbol = frames[top].symbols[name as usize];
+                    // `alias $x $&` makes `$x` read-only, and Ruby names the
+                    // alias rather than the special in the message. Measured.
+                    if scope.global_special(symbol).is_some() {
+                        return Err(Error::raise(
+                            "NameError",
+                            // `symbol_name` already carries the leading `$`.
+                            format!("{} is a read-only variable", symbol_name(symbol)),
+                        ));
+                    }
                     // Pops, like `SetLocal` and `SetIvar`: the callers that
                     // want assignment to be an expression emit `Dup` first.
                     let value = stack.pop().expect("setglobal on an empty stack");
@@ -999,6 +1015,15 @@ pub fn eval_in(
                     let symbol = pop_name(&mut stack, "undef")?;
                     let owner = scope.classes().cref_class(frames[top].cref);
                     undef_from(scope, owner, symbol)?;
+                }
+                Insn::AliasGlobal(new, old) => {
+                    let new = frames[top].symbols[new as usize];
+                    let old = frames[top].symbols[old as usize];
+                    scope.alias_global(new, old);
+                }
+                Insn::AliasGlobalSpecial(new, which) => {
+                    let new = frames[top].symbols[new as usize];
+                    scope.alias_global_special(new, which);
                 }
                 Insn::DefineSingleton(index) => {
                     let (name, child) = frames[top].iseq.definitions[index as usize];

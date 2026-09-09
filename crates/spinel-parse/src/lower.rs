@@ -34,12 +34,17 @@ pub(crate) fn program(
     let mut lower = Lower {
         errors: Vec::new(),
         origin,
+        flip_flops: Vec::new(),
     };
     let statements = node.statements();
+    lower.open_scope();
+    // The body first: it is what discovers the flip-flop sites the scope has
+    // to declare locals for.
+    let body = lower.stmts(Some(&statements));
     let program = Program {
         span: span_of(&node.as_node().location()),
-        locals: constants(&node.locals()),
-        body: lower.stmts(Some(&statements)),
+        locals: lower.close_scope(constants(&node.locals())),
+        body,
     };
     (program, lower.errors)
 }
@@ -67,6 +72,26 @@ impl SourceOrigin<'_> {
 struct Lower<'a> {
     errors: Vec<Diagnostic>,
     origin: SourceOrigin<'a>,
+    /// Flip-flop sites seen in each open Ruby scope, innermost last.
+    ///
+    /// A flip-flop holds one bit of state per syntactic occurrence, and
+    /// measurement says where: in the scope that *encloses* it. A flip-flop in
+    /// a method resets on every call, one in a block keeps its state across
+    /// iterations, and two procs made by two calls of the same method have
+    /// separate state — which is exactly how an ordinary local behaves.
+    ///
+    /// So the parser declares one, and the compiler reads it like any other
+    /// name. A block does not open an entry here, which is what makes the
+    /// state belong to the method around it rather than to the block.
+    flip_flops: Vec<Vec<u32>>,
+}
+
+/// The local a flip-flop site keeps its state in.
+///
+/// Named by source offset, so two flip-flops in one scope get two bits, and
+/// spelled with a `%` so no Ruby identifier can collide with it.
+fn flip_flop_local(start: u32) -> Name {
+    Name::from(format!("%ff{start}").into_boxed_str())
 }
 
 // ---------------------------------------------------------------------------
@@ -904,6 +929,12 @@ impl Lower<'_> {
             }
             pm::Node::FlipFlopNode { .. } => {
                 let n = get!(node, as_flip_flop_node);
+                // Recorded against the scope that is open now, which is the
+                // method or class body around it — a block opens none.
+                let start = span_of(&node.location()).start;
+                if let Some(scope) = self.flip_flops.last_mut() {
+                    scope.push(start);
+                }
                 let left = n.left().map(|l| self.expr(&l));
                 let right = n.right().map(|r| self.expr(&r));
                 ExprKind::FlipFlop(Box::new(FlipFlop {
@@ -960,14 +991,14 @@ impl Lower<'_> {
                 let params = n.parameters().map_or(Params::None, |p| {
                     Params::Explicit(Box::new(self.param_list(&p, Vec::new())))
                 });
-                let body = self.body(n.body());
+                let body = self.scoped_body(n.body());
                 ExprKind::Def(Box::new(Def {
                     name: ident(&n.name()),
                     name_span: span_of(&n.name_loc()),
                     receiver,
                     params,
                     body,
-                    locals: constants(&n.locals()),
+                    locals: self.close_scope(constants(&n.locals())),
                     endless: n.equal_loc().is_some(),
                 }))
             }
@@ -976,33 +1007,33 @@ impl Lower<'_> {
                 let path_node = n.constant_path();
                 let path = self.target(&path_node);
                 let superclass = n.superclass().map(|s| self.expr(&s));
-                let body = self.body(n.body());
+                let body = self.scoped_body(n.body());
                 ExprKind::Class(Box::new(Class {
                     path,
                     superclass,
                     body,
-                    locals: constants(&n.locals()),
+                    locals: self.close_scope(constants(&n.locals())),
                 }))
             }
             pm::Node::ModuleNode { .. } => {
                 let n = get!(node, as_module_node);
                 let path_node = n.constant_path();
                 let path = self.target(&path_node);
-                let body = self.body(n.body());
+                let body = self.scoped_body(n.body());
                 ExprKind::Module(Box::new(Module {
                     path,
                     body,
-                    locals: constants(&n.locals()),
+                    locals: self.close_scope(constants(&n.locals())),
                 }))
             }
             pm::Node::SingletonClassNode { .. } => {
                 let n = get!(node, as_singleton_class_node);
                 let expression = self.expr(&n.expression());
-                let body = self.body(n.body());
+                let body = self.scoped_body(n.body());
                 ExprKind::SingletonClass(Box::new(SingletonClass {
                     expression,
                     body,
-                    locals: constants(&n.locals()),
+                    locals: self.close_scope(constants(&n.locals())),
                 }))
             }
             pm::Node::AliasMethodNode { .. } => {
@@ -1462,6 +1493,29 @@ impl Lower<'_> {
 
     fn block_pass(&mut self, n: &pm::BlockArgumentNode<'_>) -> BlockArg {
         BlockArg::Pass(n.expression().map(|e| self.boxed(&e)))
+    }
+
+    /// [`Self::body`] inside a freshly opened scope. The caller closes it with
+    /// [`Self::close_scope`] when it builds the node's local list.
+    fn scoped_body(&mut self, body: Option<pm::Node<'_>>) -> Vec<Expr> {
+        self.open_scope();
+        self.body(body)
+    }
+
+    /// Open a Ruby scope that owns flip-flop state: a program, a method body,
+    /// or a class/module body. Not a block — a block shares the state of the
+    /// scope it was written in, which is what makes a flip-flop inside
+    /// `10.times { }` keep its bit across the ten calls.
+    fn open_scope(&mut self) {
+        self.flip_flops.push(Vec::new());
+    }
+
+    /// Close it, declaring one local per flip-flop site found inside.
+    fn close_scope(&mut self, mut locals: Vec<Name>) -> Vec<Name> {
+        for start in self.flip_flops.pop().unwrap_or_default() {
+            locals.push(flip_flop_local(start));
+        }
+        locals
     }
 
     fn block(&mut self, n: &pm::BlockNode<'_>) -> Block {

@@ -256,7 +256,20 @@ pub struct Heap {
     /// [`Insn::LastMatch`](crate::Insn::LastMatch) before this table is
     /// reached. An entry here is therefore always something an assignment put
     /// there, which is what makes presence the right answer for `defined?`.
-    globals: HashMap<SymbolId, Value>,
+    /// The name is the key and a *slot* is the value, so `alias $b $a` can
+    /// point two names at one cell. Ruby's global alias shares storage rather
+    /// than copying: a later write through either name is visible through both.
+    globals: HashMap<SymbolId, usize>,
+    /// The cells. Never shrinks — a global's storage outlives the name that
+    /// reached it, because an alias may still hold the slot after the original
+    /// name was pointed somewhere else. Measured: `$a = 1; alias $b $a; alias
+    /// $a $c; $b = 5` leaves `$b` on the cell `$a` used to name.
+    global_slots: Vec<Option<Value>>,
+    /// `alias $x $&`. A regexp special is not in the table above — it is
+    /// derived from the last match — so an alias to one records *which*
+    /// derivation, and reading the name runs it. Writing raises: these are
+    /// read-only, and Ruby names the alias in the message.
+    global_specials: HashMap<SymbolId, crate::bytecode::MatchRef>,
 }
 
 /// The class index for an object needing `bytes` in total, or `None` for large objects.
@@ -298,6 +311,8 @@ impl Heap {
             last_match: Value::NIL,
             errinfo: Value::NIL,
             globals: HashMap::new(),
+            global_slots: Vec::new(),
+            global_specials: HashMap::new(),
         }
     }
 
@@ -346,11 +361,47 @@ impl Heap {
     /// `None` rather than `NIL`, because `$a = nil` is a global that exists and
     /// `defined?` has to tell the two apart.
     pub fn global(&self, name: SymbolId) -> Option<Value> {
-        self.globals.get(&name).copied()
+        let slot = *self.globals.get(&name)?;
+        self.global_slots[slot]
     }
 
     pub fn set_global(&mut self, name: SymbolId, value: Value) {
-        self.globals.insert(name, value);
+        let slot = self.global_slot(name);
+        self.global_slots[slot] = Some(value);
+    }
+
+    /// The cell `name` reads and writes, created empty if it has none.
+    ///
+    /// A name that has never been assigned still gets a cell once something
+    /// asks for one, because `alias $b $a` on an unassigned `$a` still has to
+    /// bind the two together — measured, a later `$a = 1` is visible as `$b`.
+    fn global_slot(&mut self, name: SymbolId) -> usize {
+        if let Some(slot) = self.globals.get(&name) {
+            return *slot;
+        }
+        let slot = self.global_slots.len();
+        self.global_slots.push(None);
+        self.globals.insert(name, slot);
+        slot
+    }
+
+    /// `alias $new $old`: point `new` at the cell `old` names.
+    pub fn alias_global(&mut self, new: SymbolId, old: SymbolId) {
+        let slot = self.global_slot(old);
+        self.globals.insert(new, slot);
+        // An alias replaces any read-only derivation the name had.
+        self.global_specials.remove(&new);
+    }
+
+    /// `alias $new $&`: `new` reads the derivation and refuses writes.
+    pub fn alias_global_special(&mut self, new: SymbolId, which: crate::bytecode::MatchRef) {
+        self.global_specials.insert(new, which);
+        self.globals.remove(&new);
+    }
+
+    /// Which regexp special `name` was aliased to, if it was.
+    pub fn global_special(&self, name: SymbolId) -> Option<crate::bytecode::MatchRef> {
+        self.global_specials.get(&name).copied()
     }
 
     pub fn definitions_mut(&mut self) -> &mut crate::method::Definitions {
@@ -562,9 +613,9 @@ impl Heap {
         Heap::shade(&mut self.mark_stack, self.errinfo);
         // Fourth root source: the global table. A global outlives every handle
         // to what it holds, by definition — that is what a global is.
-        let (globals, mark_stack) = (&self.globals, &mut self.mark_stack);
-        for &value in globals.values() {
-            Heap::shade(mark_stack, value);
+        let (slots, mark_stack) = (&self.global_slots, &mut self.mark_stack);
+        for value in slots.iter().flatten() {
+            Heap::shade(mark_stack, *value);
         }
         // R3: a worklist, not recursion. A Ruby program can build a chain a million
         // objects deep, and a recursive tracer turns that into a stack overflow inside
@@ -879,6 +930,18 @@ impl<'h> HandleScope<'h> {
     pub fn set_global(&mut self, name: SymbolId, value: Value) {
         self.storable(value);
         self.heap.set_global(name, value);
+    }
+
+    pub fn alias_global(&mut self, new: SymbolId, old: SymbolId) {
+        self.heap.alias_global(new, old);
+    }
+
+    pub fn alias_global_special(&mut self, new: SymbolId, which: crate::bytecode::MatchRef) {
+        self.heap.alias_global_special(new, which);
+    }
+
+    pub fn global_special(&self, name: SymbolId) -> Option<crate::bytecode::MatchRef> {
+        self.heap.global_special(name)
     }
 
     /// Point a handle at a different object. The old one loses this root.

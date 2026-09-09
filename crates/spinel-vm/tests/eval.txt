@@ -1363,3 +1363,53 @@ case 5 when *[] then :yes else :no end  #=> :no
 (/(?<p232>a)/ =~ "a")  #=> 0
 (y232 = 1; "ab" =~ /(?<y232>a)/; y232)  #=> 1
 (/(?<a232>a)(b)/ =~ "ab"; [a232, $~.size])  #=> ["a", 2]
+
+# --- PRD 0035 #234: `alias` on a global variable ----------------------------
+#
+# A true alias, not a copy: the two names share one *cell*, so a later write
+# through either is visible through both. The table therefore maps a name to a
+# slot rather than to a value.
+#
+# The third row is the one that rules out resolving names instead of cells:
+# re-aliasing `$a` afterwards leaves `$b` on the storage `$a` used to name, so
+# `$b = 5` must not follow `$a` to its new home. Measured.
+($g234a = 1; alias $g234b $g234a; $g234b = 5; $g234a)  #=> 5
+($g234c = 1; alias $g234d $g234c; $g234c = 9; $g234d)  #=> 9
+($e234 = 1; $f234 = 9; alias $x234 $e234; alias $e234 $f234; $x234 = 5; [$e234, $x234, $f234])  #=> [9, 5, 9]
+($p234 = 1; alias $q234 $p234; alias $p234 $q234; $p234 = 3; [$p234, $q234])  #=> [3, 3]
+# Aliasing a name nothing has assigned still binds the two.
+(alias $s234 $t234; $t234 = 7; $s234)  #=> 7
+# A regexp special is derived rather than stored, so the alias records the
+# derivation: it tracks the *current* match, and it is read-only.
+("ab" =~ /a/; alias $amp234 $&; "zz" =~ /z/; $amp234)  #=> "z"
+(alias $amp235 $&; "ab" =~ /a/; (begin; $amp235 = ""; rescue NameError => e; e.message; end))  #=> "$amp235 is a read-only variable"
+(alias $pre234 $`; "abc" =~ /b/; $pre234)  #=> "a"
+
+# --- PRD 0035 #230: a flip-flop ---------------------------------------------
+#
+# A range literal in boolean position is a state machine: one bit per syntactic
+# occurrence. The issue guessed that bit belongs on the iseq. Measured, it does
+# not — it behaves exactly like a local of the *enclosing* scope:
+#
+#   * a flip-flop in a method resets on every call (the `f` row)
+#   * one in a block keeps its bit across the block's calls (the `each` row)
+#   * two procs made by two calls of one method have separate bits (`a`/`b`)
+#
+# So the parser declares `%ff<offset>` against the method or class body and the
+# compiler reads it like any other name.
+#
+# `..` tests the end condition on the same evaluation that turned the machine
+# on and `...` does not, which is the whole difference between the third and
+# fourth rows. A missing side is simply false.
+(def ff1(n); r = []; i = 0; while i < n; i += 1; r << i if (i == 3)..(i == 5); end; r; end; ff1(8))  #=> [3, 4, 5]
+(def ff2(n); r = []; i = 0; while i < n; i += 1; r << i if (i == 3)...(i == 5); end; r; end; ff2(8))  #=> [3, 4, 5]
+(def ff3(n); r = []; i = 0; while i < n; i += 1; r << i if (i == 3)..(i == 3); end; r; end; ff3(8))  #=> [3]
+(def ff4(n); r = []; i = 0; while i < n; i += 1; r << i if (i == 3)...(i == 3); end; r; end; ff4(8))  #=> [3, 4, 5, 6, 7, 8]
+(def ff5(n); r = []; i = 0; while i < n; i += 1; r << i if (i == 3)..; end; r; end; ff5(6))  #=> [3, 4, 5, 6]
+(def ff6(n); r = []; i = 0; while i < n; i += 1; r << i if ..(i == 3); end; r; end; ff6(6))  #=> []
+(def ff7(i); ((i == 2)..(i == 3)) ? :on : :off; end; [ff7(1), ff7(2), ff7(3), ff7(4), ff7(2), ff7(9)])  #=> [:off, :on, :off, :off, :on, :off]
+(def ff8; ->(i) { ((i == 2)..(i == 3)) ? :on : :off }; end; a = ff8; b = ff8; [a.call(2), b.call(9), a.call(9)])  #=> [:on, :off, :on]
+(r = []; [1, 2, 3, 4, 5, 6].each { |i| r << (((i == 2)..(i == 5)) ? :on : :off) }; r)  #=> [:off, :on, :on, :on, :on, :off]
+(def ff9(n); r = []; i = 0; while i < n; i += 1; r << i if (i == 4)...(i == 5) or (i == 7)...(i == 8); end; r; end; ff9(10))  #=> [4, 5, 7, 8]
+# Two flip-flops in one scope get two bits, keyed by source offset.
+(def ffa(n); r = []; i = 0; while i < n; i += 1; r << (((i == 2)..(i == 3)) ? :a : :-); r << (((i == 1)..(i == 1)) ? :b : :-); end; r; end; ffa(3))  #=> [:-, :b, :a, :-, :a, :-]

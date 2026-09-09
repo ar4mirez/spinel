@@ -233,6 +233,11 @@ fn run_inner(example: &Example, fixtures: &Fixtures, spans: &mut Vec<Span>) -> O
     for name in compile::declared_locals(&example.scope)
         .into_iter()
         .chain(compile::declared_locals(&example.body))
+        // A flip-flop's state is a local of the scope around it, and that
+        // scope is one of the ones merged here — so it belongs in this list
+        // rather than in any single statement's own frame.
+        .chain(compile::declared_flip_flops(&example.scope))
+        .chain(compile::declared_flip_flops(&example.body))
     {
         if !locals.contains(&name) {
             locals.push(name);

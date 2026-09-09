@@ -153,6 +153,28 @@ pub fn declared_locals(statements: &[Expr]) -> Vec<Name> {
     out
 }
 
+/// The flip-flop state locals `body` needs, for a caller that runs several
+/// Ruby scopes in one frame.
+///
+/// The parser declares these against the scope that encloses each site, and
+/// `spec/harness` never sees that scope: it collects an example's locals from
+/// the `it` block and its enclosing groups, which are all blocks. So the sites
+/// are re-found here and added to the merged list, where they land in the one
+/// frame the example runs in — which is the same environment the block chain
+/// would have closed over.
+///
+/// Descends into call blocks, unlike [`declared_locals`], because a flip-flop
+/// inside `10.times { }` belongs to the scope around it. It stops at a `def`
+/// for the same reason Ruby does — [`children`] does not cross one.
+#[must_use]
+pub fn declared_flip_flops(statements: &[Expr]) -> Vec<Name> {
+    let mut out: Vec<Name> = Vec::new();
+    for statement in statements {
+        collect_flip_flops(statement, &mut out);
+    }
+    out
+}
+
 // ---------------------------------------------------------------------------
 // The compiler
 // ---------------------------------------------------------------------------
@@ -487,6 +509,8 @@ impl Compiler {
             // indexing them, and pushes nothing for the same reason.
             Insn::AliasFromStack => -2,
             Insn::UndefFromStack => -1,
+            // Both names are known at compile time, so neither is popped.
+            Insn::AliasGlobal(_, _) | Insn::AliasGlobalSpecial(_, _) => 0,
             Insn::Pop
             | Insn::SetLocal(_, _)
             | Insn::SetIvar(_)
@@ -888,6 +912,7 @@ impl Compiler {
             ExprKind::Var(var) => self.var(var, span)?,
             ExprKind::Alias(alias) => self.alias(alias, span)?,
             ExprKind::MatchWrite(node) => self.match_write(node, span)?,
+            ExprKind::FlipFlop(node) => self.flip_flop(node, span)?,
             ExprKind::Undef(names) => {
                 // Left to right, one name at a time: measured,
                 // `undef :"u#{o(1)}", :"u#{o(2)}"` logs 1 then 2.
@@ -1262,6 +1287,110 @@ impl Compiler {
     /// a symbol or an operator there, and Prism spells all three the same way —
     /// so there is nothing to evaluate and the instruction carries two symbols.
     /// `alias` evaluates to `nil`, measured.
+    /// `if (i == 3)..(i == 5)` — a range literal in boolean position, which is
+    /// a state machine rather than a range.
+    ///
+    /// One bit of state per syntactic occurrence, and measurement says where it
+    /// lives: in the scope that encloses the flip-flop. A flip-flop written in
+    /// a method resets on every call; one written in a block keeps its bit
+    /// across the block's calls; two procs made by two calls of the same method
+    /// have separate bits. That is an ordinary local, so the parser declares
+    /// one — `%ff<offset>` — and this reads it like any other name.
+    ///
+    /// The two spellings differ in one place. `..` tests the end condition on
+    /// the same evaluation that turned the machine on, so `(i == 3)..(i == 3)`
+    /// matches only `3`; `...` does not, so `(i == 3)...(i == 3)` never turns
+    /// off again. Both measured.
+    ///
+    /// A missing side is simply false: `(i == 3)..` never turns off and
+    /// `..(i == 3)` never turns on. Measured.
+    /// Where this site's state bit lives, as `Insn::GetLocal` takes it.
+    ///
+    /// Searched by name rather than resolved from a depth, because there is no
+    /// depth to resolve: the parser declared the local against the enclosing
+    /// method or class body, and a flip-flop written inside a block is any
+    /// number of environments in from it. `self.outer[i]` is the scope at
+    /// runtime depth `i + 1`, which is the same correspondence
+    /// [`Self::outer_slot`] ends at.
+    fn flip_flop_slot(&mut self, span: Span) -> Result<(u16, u16), Unsupported> {
+        let name = format!("%ff{}", span.start);
+        if let Some(index) = self.locals.iter().position(|local| &**local == name.as_str()) {
+            return Ok((index as u16, 0));
+        }
+        for (hop, scope) in self.outer.iter().enumerate() {
+            if let Some(index) = scope.iter().position(|local| &**local == name.as_str()) {
+                return Ok((index as u16, (hop + 1) as u16));
+            }
+        }
+        // The parser declares one local per site it sees, so a miss means the
+        // site reached the compiler through a path the parser did not walk —
+        // refused rather than given a bit that resets.
+        Err(Unsupported::at(
+            "a flip-flop whose scope declared no state for it",
+            span,
+        ))
+    }
+
+    fn flip_flop(&mut self, node: &spinel_ast::FlipFlop, span: Span) -> Emit {
+        let (slot, depth) = self.flip_flop_slot(span)?;
+        let entry = self.depth;
+
+        // Each side is evaluated only when the machine asks: measured, a
+        // `collector[i]...false` logs its left-hand side exactly once.
+        let condition = |me: &mut Self, side: &Option<Expr>| -> Emit {
+            match side {
+                Some(expr) => me.expr(expr),
+                None => {
+                    me.emit(Insn::PushFalse);
+                    Ok(())
+                }
+            }
+        };
+
+        self.emit(Insn::GetLocal(slot, depth));
+        let already_on = self.emit_jump(Insn::JumpIf);
+
+        // Off: the left condition decides whether this evaluation turns it on.
+        condition(self, &node.left)?;
+        let stays_off = self.emit_jump(Insn::JumpUnless);
+        self.emit(Insn::PushTrue);
+        self.emit(Insn::SetLocal(slot, depth));
+        let mut on_result = Vec::new();
+        if !node.exclude_end {
+            condition(self, &node.right)?;
+            on_result.push(self.emit_jump(Insn::JumpUnless));
+            self.emit(Insn::PushFalse);
+            self.emit(Insn::SetLocal(slot, depth));
+        }
+        for at in on_result {
+            self.patch_here(at);
+        }
+        self.emit(Insn::PushTrue);
+        let mut to_end = vec![self.emit_jump(Insn::Jump)];
+
+        self.patch_here(stays_off);
+        self.depth = entry;
+        self.emit(Insn::PushFalse);
+        to_end.push(self.emit_jump(Insn::Jump));
+
+        // On: only the right condition runs, and the evaluation that turns it
+        // off is still a match.
+        self.patch_here(already_on);
+        self.depth = entry;
+        condition(self, &node.right)?;
+        let stays_on = self.emit_jump(Insn::JumpUnless);
+        self.emit(Insn::PushFalse);
+        self.emit(Insn::SetLocal(slot, depth));
+        self.patch_here(stays_on);
+        self.emit(Insn::PushTrue);
+
+        for at in to_end {
+            self.patch_here(at);
+        }
+        self.depth = entry + 1;
+        Ok(())
+    }
+
     /// `/(?<w>a)/ =~ s`, which writes its named captures into locals.
     ///
     /// Only this shape does it, and only with the literal on the left: Prism
@@ -1297,7 +1426,7 @@ impl Compiler {
 
     fn alias(&mut self, alias: &spinel_ast::Alias, span: Span) -> Emit {
         if alias.global {
-            return Err(Unsupported::at("`alias` on a global variable", span));
+            return self.alias_global(alias, span);
         }
         // Either both names are known now or neither is: the dynamic
         // instruction pops two symbols, and mixing the forms would need a
@@ -1316,6 +1445,46 @@ impl Compiler {
         }
         self.emit(Insn::PushNil);
         Ok(())
+    }
+
+    /// `alias $new $old`.
+    ///
+    /// A true alias rather than a copy: the two names share one cell, so a
+    /// later write through either is visible through both. Measured, and it is
+    /// the whole point of the construct — `$a = 1; alias $b $a; $b = 2` leaves
+    /// `$a` at 2.
+    ///
+    /// A regexp special on the right is not stored anywhere to share, so it
+    /// takes the other instruction: the new name records which derivation to
+    /// run and refuses writes, the way `$&` itself does.
+    fn alias_global(&mut self, alias: &spinel_ast::Alias, span: Span) -> Emit {
+        let new = self.global_name(&alias.new_name, span)?;
+        let old = self.global_name(&alias.old_name, span)?;
+        match match_ref(&old) {
+            Some(which) => {
+                let new = self.symbol(&new);
+                self.emit(Insn::AliasGlobalSpecial(new, which));
+            }
+            None => {
+                let (new, old) = (self.symbol(&new), self.symbol(&old));
+                self.emit(Insn::AliasGlobal(new, old));
+            }
+        }
+        self.emit(Insn::PushNil);
+        Ok(())
+    }
+
+    /// The name a `$`-variable in an `alias` names.
+    ///
+    /// `$&` and friends arrive as `BackRef` rather than `Global` — the parser
+    /// separates them because they are derived rather than stored — and `$1`
+    /// as `NumberedRef`. All three spell a name an alias can take.
+    fn global_name(&mut self, expr: &Expr, span: Span) -> Result<Box<str>, Unsupported> {
+        match &expr.kind {
+            ExprKind::Var(VarRef::Global(name) | VarRef::BackRef(name)) => Ok(name.as_ref().into()),
+            ExprKind::Var(VarRef::NumberedRef(n)) => Ok(format!("${n}").into()),
+            _ => Err(Unsupported::at("a computed global name here", span)),
+        }
     }
 
     /// The symbol a method name in an `alias` or `undef` names, when the
@@ -4654,6 +4823,25 @@ fn flat_bytes(parts: &[StrPart]) -> Option<Box<[u8]>> {
     Some(out.into_boxed_slice())
 }
 
+fn collect_flip_flops(expr: &Expr, out: &mut Vec<Name>) {
+    if matches!(expr.kind, ExprKind::FlipFlop(_)) {
+        let name: Name = format!("%ff{}", expr.span.start).into_boxed_str().into();
+        if !out.contains(&name) {
+            out.push(name);
+        }
+    }
+    if let ExprKind::Call(call) = &expr.kind
+        && let Some(BlockArg::Block(block)) = call.block.as_ref()
+    {
+        for statement in &block.body {
+            collect_flip_flops(statement, out);
+        }
+    }
+    for child in children(expr) {
+        collect_flip_flops(child, out);
+    }
+}
+
 fn collect_locals(expr: &Expr, out: &mut Vec<Name>) {
     if let ExprKind::Assign(assign) = &expr.kind
         && let TargetKind::Var(VarRef::Local { name, depth: 0 }) = &assign.target.kind
@@ -4766,7 +4954,6 @@ fn node_name(kind: &ExprKind) -> &'static str {
         | ExprKind::AltPattern(_)
         | ExprKind::CapturePattern(_)
         | ExprKind::Pin(_) => "pattern matching outside a pattern",
-        ExprKind::FlipFlop(_) => "a flip-flop",
         // Only the global form reaches here now: `alias $new $old` is a true
         // alias — writing the new name changes the old one, measured — which a
         // name-keyed table cannot express without a level of indirection, and
