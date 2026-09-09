@@ -4552,7 +4552,26 @@ fn native_call<'h>(
             // and `rescue Klass => e` are everywhere in the corpus, and the
             // representation is two slots this module owns rather than one
             // `core/*.rb` has yet to define.
-            if is_exception_class(scope, id) {
+            // A class whose `initialize` is written in Ruby is not this
+            // module's business at all: it falls through to the ordinary
+            // allocate-then-`initialize` path below and reaches
+            // `Exception#initialize` through `super`. That is what lets
+            // `core/exception.rb` own `SystemExit`, `NameError`, `KeyError`
+            // and the rest (#29) — the fast path here is for the classes
+            // that still have no Ruby `initialize` to dispatch to.
+            // Owned *below* `Exception`: since #29 `Exception#initialize` is
+            // itself Ruby, so "has a Ruby initialize" would be true of every
+            // exception class and would take `SignalException.new(:NOSIG)`
+            // off the refusal it still needs. What matters is whether the
+            // class or one of its ancestors under `Exception` wrote its own.
+            let written_in_ruby = {
+                let initialize = crate::shared::symbols::intern("initialize");
+                scope
+                    .classes()
+                    .lookup_uncached(id, initialize)
+                    .is_some_and(|method| method.owner != Builtin::Exception.id())
+            };
+            if is_exception_class(scope, id) && !written_in_ruby {
                 // ...unless CRuby gives it an `initialize` of its own, which
                 // Spinel does not have. `SignalException.new(:NOSIG)` raises
                 // there and would quietly succeed here, which is a wrong answer
