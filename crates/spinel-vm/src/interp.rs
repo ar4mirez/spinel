@@ -6650,6 +6650,22 @@ fn binop(
     }
 }
 
+/// `1 == 1.0`, exactly — the mixed arm of [`ruby_eq`].
+///
+/// Not `i as f64 == f`: past 2^53 the cast rounds, so `2**54 + 1 == (2**54).to_f`
+/// came out true. A float equals an integer only when it is finite, has no
+/// fractional part, and names that same integer. Every `f64` whose magnitude
+/// reaches 2^63 is already larger than any fixnum, so the comparison is
+/// decidable without widening either side to a bignum.
+fn int_eq_float(i: i64, f: f64) -> bool {
+    // 2^63, the first magnitude an `i64` cannot hold. Exact as an `f64`.
+    const OUT_OF_RANGE: f64 = 9_223_372_036_854_775_808.0;
+    if !f.is_finite() || f.fract() != 0.0 || f <= -OUT_OF_RANGE || f >= OUT_OF_RANGE {
+        return false;
+    }
+    f as i64 == i
+}
+
 fn as_float(n: Num) -> f64 {
     match n {
         Num::Int(i) => i as f64,
@@ -6909,9 +6925,19 @@ pub fn ruby_eq(scope: &mut HandleScope<'_>, left: Value, right: Value) -> Result
     if left == right {
         return Ok(true);
     }
-    // `1 == 1.0` is true in Ruby even though the words differ.
+    // `1 == 1.0` is true in Ruby even though the words differ. Two *integers*
+    // still compare as integers: past 2^53 two different `i64`s round to the
+    // same `f64`, which made `2**54 == 2**54 + 1` true and — because `Hash`
+    // looks a key up with `==` — `{2**54 => 1}[2**54 + 1]` answer `1`. The
+    // bignum arm below says the same thing for the wider type; this is the
+    // fixnum half of it, and `binop` already splits the pair this way for
+    // every other operator.
     if let (Some(a), Some(b)) = (num(left), num(right)) {
-        return Ok(as_float(a) == as_float(b));
+        return Ok(match (a, b) {
+            (Num::Int(x), Num::Int(y)) => x == y,
+            (Num::Int(i), Num::Float(f)) | (Num::Float(f), Num::Int(i)) => int_eq_float(i, f),
+            (Num::Float(x), Num::Float(y)) => x == y,
+        });
     }
     // A heap `Integer` is not immediate, so the bitwise test above missed it.
     // Compared as integers rather than as floats: past 2^53 two different
