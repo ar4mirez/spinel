@@ -188,6 +188,10 @@ enum Slot {
         /// One hidden local per index argument, in source order. Empty for an
         /// attribute target.
         args: Vec<u16>,
+        /// Positions in `args` that were written `*x`. The local holds the
+        /// array; the send expands it, so `h[*k] += 1` spreads the same
+        /// object into the read and the write it was evaluated once for.
+        splats: Vec<u16>,
         /// `[]` or the attribute's name; `set` is the same name with `=`.
         get: Box<str>,
     },
@@ -997,6 +1001,28 @@ impl Compiler {
         self.emit(Insn::Send(site));
     }
 
+    /// [`Self::emit_send`] with some of the pushed values marked as splats.
+    ///
+    /// `splats` holds argument positions, not a call-wide flag, for the reason
+    /// [`CallSite::splats`] gives: in `a[x, *k]` the value at 0 may itself be
+    /// an Array and must not expand.
+    fn emit_send_splatting(&mut self, name: &str, argc: u16, splats: Vec<u16>) {
+        let symbol = self.symbol(name);
+        let site = self.push_site(
+            CallSite {
+                name: symbol,
+                argc,
+                splats,
+                keywords: Vec::new(),
+                block: BlockRef::None,
+                implicit_self: false,
+                kwsplat: false,
+            },
+            false,
+        );
+        self.emit(Insn::Send(site));
+    }
+
     fn emit_send(&mut self, name: &str, argc: u16) {
         let symbol = self.symbol(name);
         let site = self.push_site(
@@ -1352,6 +1378,7 @@ impl Compiler {
         let slot = Slot::Send {
             receiver,
             args: Vec::new(),
+            splats: Vec::new(),
             get: call.name.as_ref().into(),
         };
         Ok((slot, Some(nil)))
@@ -1573,6 +1600,22 @@ impl Compiler {
         Ok(slot)
     }
 
+    /// [`Self::park`] for a `*x` argument: park the *converted* array.
+    ///
+    /// The conversion cannot be left to the sends. A prepared target is read
+    /// and then written, so expanding the raw value twice would call `to_a`
+    /// twice — and `optional_assignments_spec.rb` asks for exactly one, with a
+    /// `ScratchPad` that counts. Converting here also means both sends spread
+    /// the same object, which is what "evaluated once" means for a subscript.
+    fn park_splat(&mut self, expr: &Expr) -> Result<u16, Unsupported> {
+        self.emit(Insn::NewArray(0));
+        self.expr(expr)?;
+        self.emit_send("__concat_splat__", 1);
+        let slot = self.slot(&format!("%idx{}", self.here()));
+        self.emit(Insn::SetLocal(slot, 0));
+        Ok(slot)
+    }
+
     /// Prepare `target` for reading and writing, and say where it lives.
     ///
     /// **This emits.** A local, an ivar, a global and `$~` are places the
@@ -1635,6 +1678,7 @@ impl Compiler {
                 Ok(Slot::Send {
                     receiver,
                     args: Vec::new(),
+                    splats: Vec::new(),
                     get: call.name.as_ref().into(),
                 })
             }
@@ -1644,22 +1688,38 @@ impl Compiler {
                 }
                 let receiver = self.park(&index.receiver)?;
                 let mut args = Vec::with_capacity(index.args.len());
+                let mut splats = Vec::new();
                 for arg in &index.args {
-                    // A splat or a keyword in an index target would change
-                    // what `[]=` is sent, and neither has a caller in the
-                    // corpus. Refused by name rather than dropped.
-                    if !matches!(arg.kind, ExprKind::Splat(_) | ExprKind::Hash(_)) {
-                        args.push(self.park(arg)?);
-                    } else {
-                        return Err(Unsupported::at(
-                            "a splat or keyword in an index target",
-                            target.span,
-                        ));
+                    match &arg.kind {
+                        // `h[*k] += 1`. The array is parked like any other
+                        // argument and expanded by both sends, so the
+                        // subscript is evaluated exactly once — which is the
+                        // whole reason an op-assign target is prepared.
+                        ExprKind::Splat(inner) => {
+                            let inner = inner.as_ref().ok_or_else(|| {
+                                Unsupported::at("an anonymous splat in an index target", arg.span)
+                            })?;
+                            splats.push(args.len() as u16);
+                            args.push(self.park_splat(inner)?);
+                        }
+                        // Not a slice: `h[:a, b: 1] = 2` is a syntax error in
+                        // CRuby too ("keywords are not allowed in index
+                        // assignment expressions"), and the parser already
+                        // reports it as one. This arm is the *reads* that
+                        // reach here, which have no caller in the corpus.
+                        ExprKind::Hash(_) => {
+                            return Err(Unsupported::at(
+                                "a keyword in an index target",
+                                target.span,
+                            ));
+                        }
+                        _ => args.push(self.park(arg)?),
                     }
                 }
                 Ok(Slot::Send {
                     receiver,
                     args,
+                    splats,
                     get: "[]".into(),
                 })
             }
@@ -1685,6 +1745,7 @@ impl Compiler {
             Slot::Send {
                 receiver,
                 args,
+                splats,
                 get,
             } => {
                 self.emit(Insn::GetLocal(*receiver, 0));
@@ -1693,7 +1754,8 @@ impl Compiler {
                 }
                 let argc = args.len() as u16;
                 let get = get.clone();
-                self.emit_send(&get, argc);
+                let splats = splats.clone();
+                self.emit_send_splatting(&get, argc, splats);
             }
         }
     }
@@ -1716,6 +1778,7 @@ impl Compiler {
             Slot::Send {
                 receiver,
                 args,
+                splats,
                 get,
             } => {
                 let parked = self.slot(&format!("%val{}", self.here()));
@@ -1727,7 +1790,10 @@ impl Compiler {
                 self.emit(Insn::GetLocal(parked, 0));
                 let argc = args.len() as u16 + 1;
                 let set = format!("{get}=");
-                self.emit_send(&set, argc);
+                // The value is pushed last, so a splat position among the
+                // subscripts keeps the index it had in the read.
+                let splats = splats.clone();
+                self.emit_send_splatting(&set, argc, splats);
                 self.emit(Insn::Pop);
             }
         }

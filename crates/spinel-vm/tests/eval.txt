@@ -1267,3 +1267,26 @@ case when *[false, nil] then :yes else :no end  #=> :no
 # override — the reason this is a compiled loop and not one instruction.
 (o = Class.new { def ===(x); x == 3; end }.new; case 3 when *[o] then :yes else :no end)  #=> :yes
 case 5 when *[] then :yes else :no end  #=> :no
+
+# --- PRD 0035 #229: a splat in an index op-assign target --------------------
+#
+# Plain `h[*k] = 2` already compiled; only the op-assign path refused, because
+# a prepared target parks one hidden local per subscript and a splat is not one
+# value. The array is parked whole and expanded by both sends, so the subscript
+# is evaluated exactly once — which is the property an op-assign target exists
+# for. Hashes are indexed rather than compared whole here: `Hash#inspect` still
+# disagrees with Ruby's 3.4 style (#216).
+(h = { a: 1 }; k = [:a]; h[*k] += 1; h[:a])  #=> 2
+(h = {}; h[*[:a]] ||= 9; h[:a])  #=> 9
+(h = { a: nil }; h[*[:a]] &&= 9; h[:a])  #=> nil
+(a = [[0, 0], [0, 0]]; i = [0]; a[*i][*[1]] += 7; a)  #=> [[0, 7], [0, 0]]
+# Evaluated once, in Ruby's order: subscripts, then the read, then the
+# right-hand side, then the write.
+(l = []; k = [(l << :x; :x)]; h = { x: 1 }; h[*k] += (l << :rhs; 1); l)  #=> [:x, :rhs]
+# A splat next to a plain argument expands only itself, which is why the call
+# site records positions rather than one flag.
+(o = Class.new { def [](*a); a; end }.new; o[[1], *[2]])  #=> [[1], 2]
+# `to_a` is called exactly once, which is why the *converted* array is what
+# gets parked: expanding the raw value in both the read and the write would
+# convert it twice. `optional_assignments_spec.rb` counts the calls.
+(l = []; k = Object.new; def k.to_a; $c << :to_a; [:k]; end; $c = l; h = {}; h[*k] ||= 20; [h[:k], l])  #=> [20, [:to_a]]
