@@ -1241,3 +1241,29 @@ def e225(&b) = b.call; def f225(&) = e225(&); f225 { 9 }  #=> 9
 def b226(x, &blk) = blk.call(x); def a226(...) = b226(...); a226(3) { |v| v * 2 }  #=> 6
 def b227(*a) = a; def a227(...) = b227(...); a227()  #=> []
 def b229(x, k: 0) = [x, k]; def c229(...) = b229(...); def a229(...) = c229(...); a229(1, k: 5)  #=> [1, 5]
+
+# --- PRD 0035 #219: a splat in a `when` list --------------------------------
+#
+# `when` matches with `===`, a send, so the list is walked by compiled code
+# rather than by an instruction the way #215's `rescue *classes` is.
+#
+# The lazy rows are the ones that pin the shape: a clause is left to right and
+# short-circuits *across* the splat, so an already-matched literal means the
+# splat expression is never evaluated at all — which rules out collecting the
+# clause into one array before testing it.
+case 2 when *[1, 2] then :caught end  #=> :caught
+case 9 when 1, *[2, 3] then :a when *[8, 9] then :b else :c end  #=> :b
+(l = []; case 1 when (l << 1; 1), *[(l << 2; 2)] then :a end; l)  #=> [1]
+(l = []; case 2 when *[(l << 1; 1)], (l << 2; 2) then :a end; l)  #=> [1, 2]
+# `*x` spreads `x.to_a`, wraps a value that has none, and `*nil` is empty —
+# `Array#__concat_splat__`'s rule, the same one an array literal's splat uses.
+case 1 when *(1) then :yes else :no end  #=> :yes
+case nil when *nil then :yes else :no end  #=> :no
+(o = Class.new { def to_a; [7]; end }.new; case 7 when *o then :yes else :no end)  #=> :yes
+# No subject, so the elements are truthiness tests rather than `===` receivers.
+case when *[false, true] then :yes else :no end  #=> :yes
+case when *[false, nil] then :yes else :no end  #=> :no
+# A splat element is still matched with `===`, which the subject's class may
+# override — the reason this is a compiled loop and not one instruction.
+(o = Class.new { def ===(x); x == 3; end }.new; case 3 when *[o] then :yes else :no end)  #=> :yes
+case 5 when *[] then :yes else :no end  #=> :no

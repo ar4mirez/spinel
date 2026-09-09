@@ -1952,6 +1952,61 @@ impl Compiler {
         Ok(())
     }
 
+    /// One `when *values` element list, walked by compiled code.
+    ///
+    /// The array is built the way an array literal's splat is, so `*x` spreads
+    /// `x.to_a`, wraps a value that has none, and `*nil` contributes nothing —
+    /// all of which is `Array#__concat_splat__`'s rule rather than a second
+    /// copy of it here.
+    ///
+    /// Both the array and the cursor live in hidden locals so the stack inside
+    /// the loop looks exactly like the stack outside it: the subject stays on
+    /// top, where the non-splat conditions around this one expect to `Dup` it.
+    ///
+    /// ponytail: `size` and `[]` are sends, so a program that redefines them on
+    /// `Array` changes what `when *values` iterates, which is not Ruby's rule.
+    /// Multiple assignment has read its spread array the same way since #26; an
+    /// element opcode would fix both at once, and neither has a spec asking.
+    fn when_splat(&mut self, inner: &Expr, subject: bool, entries: &mut Vec<usize>) -> Emit {
+        self.emit(Insn::NewArray(0));
+        self.expr(inner)?;
+        self.emit_send("__concat_splat__", 1);
+        let list = self.slot(&format!("%when{}", self.here()));
+        self.emit(Insn::SetLocal(list, 0));
+        let cursor = self.slot(&format!("%whenat{}", self.here()));
+        self.emit(Insn::PushInt(0));
+        self.emit(Insn::SetLocal(cursor, 0));
+
+        let top = self.here();
+        self.emit(Insn::GetLocal(cursor, 0));
+        self.emit(Insn::GetLocal(list, 0));
+        self.emit_send("size", 0);
+        self.emit(Insn::BinOp(BinOp::Lt));
+        let done = self.emit_jump(Insn::JumpUnless);
+
+        if subject {
+            self.emit(Insn::Dup);
+        }
+        self.emit(Insn::GetLocal(list, 0));
+        self.emit(Insn::GetLocal(cursor, 0));
+        self.emit_send("[]", 1);
+        if subject {
+            self.emit(Insn::CaseEq);
+        }
+        // Leaves for the clause body with the subject still under it, which is
+        // exactly what a non-splat condition's jump leaves.
+        entries.push(self.emit_jump(Insn::JumpIf));
+
+        self.emit(Insn::GetLocal(cursor, 0));
+        self.emit(Insn::PushInt(1));
+        self.emit(Insn::BinOp(BinOp::Add));
+        self.emit(Insn::SetLocal(cursor, 0));
+        let back = self.emit_jump(Insn::Jump);
+        self.patch(back, top);
+        self.patch_here(done);
+        Ok(())
+    }
+
     fn case_expr(&mut self, node: &Case, _span: Span) -> Emit {
         let CaseBranches::When(clauses) = &node.branches else {
             unreachable!("`case`/`in` is routed to `case_in` by the caller");
@@ -1970,20 +2025,23 @@ impl Compiler {
         for clause in clauses {
             let mut entries = Vec::with_capacity(clause.conditions.len());
             for condition in &clause.conditions {
-                // Deliberately still refused after #215 gave `rescue *classes`
-                // its answer, and named apart from it so the ranking does not
-                // read the two as one slice. `rescue` matches with
-                // `exception_matches`, which is an ancestor walk the
-                // interpreter can do inside one instruction; `when` matches
-                // with `===`, which is a Ruby method a subject's class may
-                // override, and a send needs a frame. So `when *values` wants a
-                // compiled loop over the array rather than a `CaseEqAny`
-                // twin of `CheckMatchAny` — a different slice, 12 examples.
-                if matches!(condition.kind, ExprKind::Splat(_)) {
-                    return Err(Unsupported::at(
-                        "a splat in `when`, which needs a compiled loop because `===` is a send",
-                        condition.span,
-                    ));
+                // `when *values` is a compiled loop rather than the
+                // `CaseEqAny` twin of #215's `CheckMatchAny`, because `when`
+                // matches with `===` — a Ruby method the subject's class may
+                // override — and a send needs a frame, while `rescue` matches
+                // with an ancestor walk the interpreter does inside one
+                // instruction.
+                //
+                // Lazily, one element at a time: measured, `when t(1), *[t(2)]`
+                // never evaluates `[t(2)]` once `t(1)` has matched. So the
+                // clause cannot be collected into one array up front, and each
+                // splat gets its own loop between its neighbours' tests.
+                if let ExprKind::Splat(inner) = &condition.kind {
+                    let inner = inner.as_ref().ok_or_else(|| {
+                        Unsupported::at("an anonymous splat in `when`", condition.span)
+                    })?;
+                    self.when_splat(inner, subject, &mut entries)?;
+                    continue;
                 }
                 if subject {
                     self.emit(Insn::Dup);
