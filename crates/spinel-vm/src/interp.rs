@@ -4931,7 +4931,10 @@ fn native_call<'h>(
             // Ruby for a negative operand, and it is what `num-bigint`
             // implements, so `~(2**70)` needs no sign fixup here.
             if crate::bignum::is_big(scope, call.receiver)
-                || call.args.first().is_some_and(|v| crate::bignum::is_big(scope, *v))
+                || call
+                    .args
+                    .first()
+                    .is_some_and(|v| crate::bignum::is_big(scope, *v))
             {
                 let value = wide_bits(scope, op, call.receiver, call.args.first().copied())?;
                 stack.push(value);
@@ -6788,12 +6791,7 @@ fn wide_bits(
     Ok(crate::bignum::value(scope, &answer))
 }
 
-fn integer_op(
-    scope: &mut HandleScope<'_>,
-    op: BinOp,
-    a: i64,
-    b: i64,
-) -> Result<Value, Error> {
+fn integer_op(scope: &mut HandleScope<'_>, op: BinOp, a: i64, b: i64) -> Result<Value, Error> {
     let value = match op {
         BinOp::Add => a.checked_add(b),
         BinOp::Sub => a.checked_sub(b),

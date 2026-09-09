@@ -774,7 +774,9 @@ impl Compiler {
                     // `materialise` has one parse and the iseq carries a number
                     // rather than a notation.
                     let decimal = num_bigint::BigInt::parse_bytes(digits.as_bytes(), radix)
-                        .ok_or_else(|| Unsupported::at("an integer literal Prism mis-spelled", span))?;
+                        .ok_or_else(|| {
+                            Unsupported::at("an integer literal Prism mis-spelled", span)
+                        })?;
                     let index = self.literal(Literal::BigInt(decimal.to_string().into()));
                     self.emit(Insn::PushLit(index));
                 }
