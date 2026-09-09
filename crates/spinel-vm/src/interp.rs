@@ -552,6 +552,28 @@ pub fn eval_in(
                     let symbol = frames[top].symbols[index as usize];
                     stack.push(Value::symbol(symbol));
                 }
+                Insn::Intern => {
+                    let value = stack.pop().expect("a string to intern");
+                    // The parts were joined by `String#+`, so the only way this
+                    // is not a String is a program that redefined `+` to return
+                    // something else. CRuby raises `TypeError` there too.
+                    let Some(bytes) = string_bytes(scope, value) else {
+                        return Err(Error::raise("TypeError", "can't convert to Symbol"));
+                    };
+                    // ponytail: the symbol table is `String`-keyed, so a symbol
+                    // whose bytes are not UTF-8 cannot be interned. Ruby allows
+                    // one; reaching it needs binary string operations that wait
+                    // on the Encoding slice, and raising beats interning
+                    // something the program did not write. Upgrade with the
+                    // table: key it by bytes when `Encoding` lands.
+                    let Ok(name) = String::from_utf8(bytes) else {
+                        return Err(Error::raise(
+                            "ArgumentError",
+                            "a symbol that is not UTF-8 waits for the Encoding class",
+                        ));
+                    };
+                    stack.push(Value::symbol(crate::shared::symbols::intern(&name)));
+                }
 
                 Insn::Pop => {
                     stack.pop();

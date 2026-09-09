@@ -474,6 +474,8 @@ impl Compiler {
             Insn::CaptureSplat => 0,
             // Pops the built source and pushes the pattern: net zero.
             Insn::NewRegexp(_) | Insn::NewRegexpOnce(_, _) => 0,
+            // Pops the built name and pushes the symbol: net zero.
+            Insn::Intern => 0,
             // Both write into the frame's definee and leave the stack alone;
             // the `nil` an `alias` expression is worth is pushed separately.
             Insn::Alias(_, _) | Insn::Undef(_) => 0,
@@ -825,14 +827,21 @@ impl Compiler {
                 }
             }
 
-            ExprKind::Sym(symbol) => {
-                let bytes = flat_bytes(&symbol.parts)
-                    .ok_or_else(|| Unsupported::at("symbol interpolation", span))?;
-                let name = String::from_utf8(bytes.into_vec())
-                    .map_err(|_| Unsupported::at("a symbol that is not UTF-8", span))?;
-                let index = self.symbol(&name);
-                self.emit(Insn::PushSym(index));
-            }
+            // An interpolated symbol builds the string the same way `"a#{b}"`
+            // does and interns the result at run time. It cannot go through the
+            // iseq's symbol table, which is fixed when the iseq is compiled.
+            ExprKind::Sym(symbol) => match flat_bytes(&symbol.parts) {
+                Some(bytes) => {
+                    let name = String::from_utf8(bytes.into_vec())
+                        .map_err(|_| Unsupported::at("a symbol that is not UTF-8", span))?;
+                    let index = self.symbol(&name);
+                    self.emit(Insn::PushSym(index));
+                }
+                None => {
+                    self.interpolated(&symbol.parts)?;
+                    self.emit(Insn::Intern);
+                }
+            },
 
             ExprKind::Array(elements) => self.array_literal(elements, span)?,
 

@@ -998,3 +998,25 @@ begin; (begin; raise 'error'; rescue *[42]; end); rescue TypeError => e; e.messa
 begin; (begin; raise 'x'; rescue *[[RuntimeError]]; end); rescue TypeError => e; e.message; end  #=> "class or module required for rescue clause"
 begin; raise RuntimeError; rescue *[RuntimeError, 42]; :caught; end  #=> :caught
 begin; (begin; raise RuntimeError; rescue *[42, RuntimeError]; end); rescue TypeError => e; e.message; end  #=> "class or module required for rescue clause"
+
+# --- #231, symbol interpolation -------------------------------------------
+#
+# `:"a#{b}"` builds the name the way `"a#{b}"` does and interns the result at
+# run time, because the iseq's symbol table is fixed when the iseq is compiled.
+#
+# `equal?` is the row that matters: an interpolated symbol must land in the same
+# process-wide table a literal one does, or `:"a#{b}" == :ac` would be true
+# while `equal?` was false and every method cache keyed on a symbol would be
+# wrong. Redefining `String#to_sym` deliberately does not appear: it does not
+# change what a dsym evaluates to, which is why the lowering is its own opcode
+# rather than a send.
+b231 = "c"; :"a#{b231}".to_s  #=> "ac"
+b231 = "c"; :"a#{b231}".equal?(:ac)  #=> true
+b231 = "c"; :"a#{b231}".class  #=> Symbol
+:"a#{1 + 1}b".to_s  #=> "a2b"
+:"#{nil}".size  #=> 0
+:"#{:sym}".to_s  #=> "sym"
+o231 = Object.new; def o231.to_s; "F"; end; :"a#{o231}".to_s  #=> "aF"
+b231 = "c"; { :"a#{b231}" => 1 }[:ac]  #=> 1
+b231 = "c"; :"a#{b231}" == :ac  #=> true
+b231 = "ac"; :"#{b231}".equal?(:"a#{"c"}")  #=> true

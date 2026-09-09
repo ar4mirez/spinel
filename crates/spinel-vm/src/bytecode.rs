@@ -57,6 +57,13 @@ pub enum Insn {
     PushLit(u32),
     /// Index into [`Iseq::symbols`].
     PushSym(u32),
+    /// Pop a `String` and push the `Symbol` it interns to: `:"a#{b}"`.
+    ///
+    /// Its own opcode rather than a `to_sym` send because a program that
+    /// redefines `String#to_sym` does not change what `:"a#{b}"` evaluates to,
+    /// measured. The table it interns into is the process-wide one in
+    /// `shared::symbols`, which is how `:"a#{b}".equal?(:ac)` is true.
+    Intern,
 
     // -- stack ------------------------------------------------------------
     Pop,
