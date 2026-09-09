@@ -29,7 +29,7 @@ Guards are answered for `linux`, which is what `scripts/spec-status.sh` pins so 
 | `core/filetest` | 25 | 7 | 0 | 0 | 4 | 3 | 0% |
 | `core/float` | 50 | 234 | 42 | 0 | 191 | 1 | 18% |
 | `core/gc` | 18 | 44 | 0 | 0 | 39 | 5 | 0% |
-| `core/hash` | 69 | 460 | 65 | 0 | 388 | 7 | 14% |
+| `core/hash` | 69 | 460 | 153 | 0 | 300 | 7 | 33% |
 | `core/integer` | 70 | 526 | 154 | 0 | 367 | 5 | 29% |
 | `core/io` | 103 | 1095 | 0 | 0 | 1024 | 71 | 0% |
 | `core/kernel` | 118 | 1277 | 119 | 0 | 1099 | 59 | 9% |
@@ -131,4 +131,4 @@ Guards are answered for `linux`, which is what `scripts/spec-status.sh` pins so 
 | `optional/capi` | 47 | 1651 | 10 | 0 | 1561 | 80 | 1% |
 | `optional/thread_safety` | 1 | 5 | 0 | 0 | 4 | 1 | 0% |
 | `security` | 13 | 27 | 0 | 0 | 25 | 2 | 0% |
-| **total** | 3835 | 25624 | 2914 | 0 | 20788 | 1922 | 11% |
+| **total** | 3835 | 25624 | 3002 | 0 | 20700 | 1922 | 12% |
