@@ -112,7 +112,8 @@ not an open design question.
 - [x] 3. #221: `...` parameter, `*`/`**`/`&` argument sites; closes #233.
 - [x] 4. #225: bignum heap type, arithmetic, literal parsing, promote/demote.
 - [x] 5. Re-run the corpus, record the delta, tag any new failure with a reason.
-- [ ] 6. Triage the GitHub project and the issues.
+- [x] 6. Validate the four issues against their own "measure before writing" lists.
+- [x] 7. Triage the GitHub project and the issues.
 
 ## Definition of done
 
@@ -167,6 +168,106 @@ hides it — the next integer slice is a helper slice, not an engine one.
 `bench/spec-status.md` regenerated in this PR; it had been left stale by the
 first two commits, which CI would have caught as a `git diff --exit-code`
 failure.
+
+## Validation
+
+The four slices were re-checked against the "measure before writing" list in each
+issue rather than against the PRD's own summary — a differential oracle, every
+snippet run on CRuby 4.0.6 and on Spinel and the answers compared. 80 cases,
+72 agreeing; the 8 that do not are accounted for one by one below and none of
+them is one of these four slices.
+
+**All four refusals are confirmed gone.** `scripts/spec.sh --platform=linux
+--blocked=0 language` lists none of `argument forwarding`, `a safe-navigation
+call`, `an integer wider than a fixnum` or `symbol interpolation` at any count.
+Every "measure before writing" item in #221, #224 and #225 answers the way CRuby
+does, including the ones the issues singled out as easy to get wrong: `false&.x`
+sends rather than short-circuiting, the safe-navigation receiver is evaluated
+exactly once, nothing to the right of a nil receiver runs — argument, block, or
+the right-hand side of an assignment — and `a(1)` through `def a(...)` does not
+manufacture an empty keyword hash.
+
+The 49 rows added to `crates/spinel-vm/tests/eval.txt` are that check, kept.
+Verified by mutation rather than assumed: changing an expected answer makes
+`cargo test -p spinel-vm --test eval` fail on that line number, so the rows are
+read and not skipped.
+
+### Three defects the slice left behind
+
+The spec counts could not have found any of them. All three are wrong *answers*
+in examples that are blocked for an unrelated reason, and an example that never
+runs cannot fail — the same blind spot that hides a core method which raises.
+
+**1. `==` on integers past 2^53 (fixed here).** #225 gave bignums an integer
+comparison because "past 2^53 two different bignums round to the same f64". The
+identical bug was one arm away, in the *fixnum* path: `ruby_eq` compared every
+numeric pair as `f64`.
+
+```ruby
+2**54 == 2**54 + 1        # ruby => false   spinel was => true
+{2**54 => 1}[2**54 + 1]   # ruby => nil     spinel was => 1
+```
+
+The hash row is the one that matters: `Hash` looks a key up with `==`, so this
+was returning another key's value. `binop` already split the pair the right way
+for every other operator; `ruby_eq` now does too, and the mixed integer/float
+arm is exact rather than a cast.
+
+**2. `Symbol#inspect` never quoted (fixed here).** It was `":" + to_s`, so the
+PRD's own measured claim `:"#{nil}" #=> :""` printed as a lone colon. #231 is
+what makes this reachable — an interpolated symbol is the ordinary way to build
+a name that is not an identifier. The three bare shapes are measured, not
+recalled, and the sigil forms take no suffix: `:a?` is bare, `:"@a?"` is not.
+
+**3. `Float`/`Integer` `==` is asymmetric across the fixnum boundary (filed).**
+`(2**70) == (2**70).to_f` is true and `(2**70).to_f == (2**70)` is false. Needs
+the `BigInt` version of the exact comparison, so it is
+[#238](https://github.com/ar4mirez/spinel/issues/238) rather than a fourth fix
+here.
+
+Neither fix moves a spec count: `bench/spec-status.md` regenerates to the same
+2190 passed / 0 failed / 21515 blocked. That is the finding, not a
+disappointment — the progress bar is blind to a method that answers wrongly, and
+the oracle table is the instrument that is not.
+
+### The 8 that still disagree
+
+Every one is either an issue filed here or the documented minimal core library,
+and none is a wrong answer inside #221, #224, #225 or #231.
+
+| cases | disagreement | where it belongs |
+|---:|---|---|
+| 4 | `{a: 1}` printed as `{:a => 1}` | [#216](https://github.com/ar4mirez/spinel/issues/216), already open |
+| 1 | `alias :"m#{2}" :m1` refuses | [#237](https://github.com/ar4mirez/spinel/issues/237), filed |
+| 1 | `"ab"&.size&.+(1)` — the `.+()` send, not the `&.` | [#239](https://github.com/ar4mirez/spinel/issues/239), filed |
+| 2 | `Array#uniq`, `Integer#bit_length` undefined | core library is still minimal, by design |
+
+The two undefined methods are the expected state, not a defect: `spinel --help`
+says so, and an undefined method reports `NoMethodError` rather than answering
+wrongly. The four `Hash#inspect` rows are the reason the forwarding rows in
+`eval.txt` index the hash — `f224(a: 1)[:a]` — instead of comparing it whole.
+
+### #231's open question, answered
+
+The issue asked whether `an interpolated method name here` (4 examples) wanted
+the same run-time intern and might be one slice with it. Measured: **no.**
+`Insn::Intern` builds the symbol, but `alias` and `undef` never take a symbol as
+a value — `Alias(u32, u32)` and `Undef(u32)` index `Iseq::symbols` at compile
+time, so the intern opcode cannot reach them. It needs stack-operand forms of
+those two instructions, which is a separate small slice:
+[#237](https://github.com/ar4mirez/spinel/issues/237).
+
+### Also filed
+
+- [#239](https://github.com/ar4mirez/spinel/issues/239) — operators are not
+  dispatchable methods, so `2.+(1)`, `2.send(:+, 1)` and `2.respond_to?(:+)` all
+  fail. Found through `"ab"&.size&.+(1)`; the safe navigation was correct and the
+  send underneath it was not, so #224 is unaffected.
+- [#216](https://github.com/ar4mirez/spinel/issues/216) already had `Hash#inspect`
+  writing `{:b => 1}` where Ruby 3.4+ writes `{b: 1}`; commented with the measured
+  rule, which is a *different* predicate from `Symbol#inspect`'s, and with the
+  consequence that no `eval.txt` row can evaluate to a symbol-keyed hash until it
+  is fixed.
 
 ## Left for later
 
