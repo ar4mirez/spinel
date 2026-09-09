@@ -4258,9 +4258,14 @@ impl Compiler {
 
         self.emit(Insn::PushSelf);
         self.emit(Insn::GetLocal(subject, 0));
-        // `nil` for the key list when a `**rest` may want everything.
+        // `nil` for the key list only when a *named* `**rest` may want
+        // everything. A bare `**` binds nothing, so it cannot want a key the
+        // pattern did not name, and Ruby still hands over the named list —
+        // `in {a: 1, **}` passes `[:a]` where `in {a: 1, **rest}` passes nil.
+        // Measured by giving an object a `deconstruct_keys` that records its
+        // argument; the AST already tells the two apart.
         match node.rest {
-            Some(PatternRest::Splat(_)) => self.emit(Insn::PushNil),
+            Some(PatternRest::Splat(Some(_))) => self.emit(Insn::PushNil),
             _ => {
                 for &(key, _) in &keys {
                     self.emit(Insn::PushSym(key));

@@ -10,6 +10,8 @@
 # is `Hash.new` plus `[]=`. The upgrade is `core/hash.rb` and one hashing
 # primitive; nothing outside this file knows the representation.
 class Hash
+  include Enumerable
+
   # `Hash.new`, `Hash.new(0)`, `Hash.new { |h, k| ... }`, and the `capacity:`
   # keyword, which is a sizing hint this representation has no use for.
   def initialize(*default, capacity: 0, &blk)
@@ -165,6 +167,49 @@ class Hash
     values.include?(value)
   end
 
+  # `to_h` hands the block the key and the value as two arguments, where
+  # Enumerable's would hand it the one pair. Without a block it answers the
+  # receiver itself, not a copy. Measured.
+  def to_h
+    return self unless block_given?
+    out = {}
+    each_pair do |pair|
+      made = yield(pair[0], pair[1])
+      unless made.is_a?(Array)
+        raise TypeError, "wrong element type #{made.class} (expected array)"
+      end
+      unless made.size == 2
+        raise ArgumentError, "element has wrong array length (expected 2, was #{made.size})"
+      end
+      out[made[0]] = made[1]
+    end
+    out
+  end
+
+  # `select`, `filter` and `reject` answer a Hash, not the Array of pairs
+  # Enumerable would build. Hash overrides exactly these three — `find_all`,
+  # `filter_map`, `map` and `partition` all still answer Arrays. Measured.
+  def select
+    return to_enum(:select) unless block_given?
+    out = {}
+    each_pair { |pair| out[pair[0]] = pair[1] if yield(pair[0], pair[1]) }
+    out
+  end
+
+  def filter
+    return to_enum(:filter) unless block_given?
+    out = {}
+    each_pair { |pair| out[pair[0]] = pair[1] if yield(pair[0], pair[1]) }
+    out
+  end
+
+  def reject
+    return to_enum(:reject) unless block_given?
+    out = {}
+    each_pair { |pair| out[pair[0]] = pair[1] unless yield(pair[0], pair[1]) }
+    out
+  end
+
   def keys
     @pairs.map { |pair| pair[0] }
   end
@@ -178,21 +223,25 @@ class Hash
   # gets its two locals from the block's own auto-splat rather than from here.
   # Yielding two would leave the first shape holding only the key.
   def each
+    return to_enum(:each) unless block_given?
     @pairs.each { |pair| yield pair }
     self
   end
 
   def each_pair
+    return to_enum(:each_pair) unless block_given?
     @pairs.each { |pair| yield pair }
     self
   end
 
   def each_key
+    return to_enum(:each_key) unless block_given?
     keys.each { |key| yield key }
     self
   end
 
   def each_value
+    return to_enum(:each_value) unless block_given?
     values.each { |value| yield value }
     self
   end

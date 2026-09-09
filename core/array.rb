@@ -7,6 +7,8 @@
 # the array the caller is holding rather than allocating a new one. See
 # `interp.rs`, "Array".
 class Array
+  include Enumerable
+
   # `Array.new`, `Array.new(3)`, `Array.new(3, :x)`, `Array.new(3) { |i| ... }`,
   # and `Array.new([1, 2])`, which copies. Reachable as `initialize` too, where
   # the receiver may already hold elements — hence the `clear`: Ruby *replaces*
@@ -138,6 +140,7 @@ class Array
   end
 
   def each
+    return to_enum(:each) unless block_given?
     i = 0
     while i < size
       yield self[i]
@@ -147,6 +150,7 @@ class Array
   end
 
   def each_with_index
+    return to_enum(:each_with_index) unless block_given?
     i = 0
     while i < size
       yield self[i], i
@@ -156,6 +160,7 @@ class Array
   end
 
   def each_index
+    return to_enum(:each_index) unless block_given?
     i = 0
     while i < size
       yield i
@@ -165,30 +170,35 @@ class Array
   end
 
   def map
+    return to_enum(:map) unless block_given?
     out = []
     each { |element| out.push(yield(element)) }
     out
   end
 
   def collect
+    return to_enum(:collect) unless block_given?
     out = []
     each { |element| out.push(yield(element)) }
     out
   end
 
   def select
+    return to_enum(:select) unless block_given?
     out = []
     each { |element| out.push(element) if yield(element) }
     out
   end
 
   def filter
+    return to_enum(:filter) unless block_given?
     out = []
     each { |element| out.push(element) if yield(element) }
     out
   end
 
   def reject
+    return to_enum(:reject) unless block_given?
     out = []
     each { |element| out.push(element) unless yield(element) }
     out
@@ -223,60 +233,48 @@ class Array
     nil
   end
 
-  def any?
-    each { |element| return true if block_given? ? yield(element) : element }
-    false
+
+
+
+  # The bare count is the length, which Array knows without walking. Anything
+  # else — an item to match, or a block — is Enumerable's.
+  def count(*item)
+    return size if item.empty? && !block_given?
+    super
   end
 
-  def all?
-    each { |element| return false unless block_given? ? yield(element) : element }
-    true
-  end
-
-  def none?
-    !any? { |element| block_given? ? yield(element) : element }
-  end
-
-  def count
-    return size unless block_given?
-    n = 0
-    each { |element| n = n + 1 if yield(element) }
-    n
-  end
-
+  # Kahan-Babuska compensated summation once a Float enters the sum, which is
+  # what Ruby does and what makes `[2.78, 5.0, 2.5, ...].sum` answer 50.0 where
+  # a left fold answers 50.00000000000001. Integers stay exact and never enter
+  # the compensated path, so nothing is rounded that need not be.
   def sum(initial = 0)
     total = initial
-    each { |element| total = total + (block_given? ? yield(element) : element) }
-    total
+    compensation = 0.0
+    floating = total.is_a?(Float)
+    each do |element|
+      value = block_given? ? yield(element) : element
+      unless floating
+        unless value.is_a?(Float)
+          total = total + value
+          next
+        end
+        # First Float: carry the exact integer total over and start compensating.
+        floating = true
+        total = total + value
+        next
+      end
+      running = total + value
+      if total.abs >= value.abs
+        compensation = compensation + ((total - running) + value)
+      else
+        compensation = compensation + ((value - running) + total)
+      end
+      total = running
+    end
+    floating ? total + compensation : total
   end
 
-  # With a block, the block *is* the comparison — `min { |a, b| ... }` — and it
-  # is called with the candidate first and the incumbent second.
-  def min
-    return nil if empty?
-    best = self[0]
-    i = 1
-    while i < size
-      element = self[i]
-      order = block_given? ? yield(element, best) : (element <=> best)
-      best = element if order < 0
-      i = i + 1
-    end
-    best
-  end
 
-  def max
-    return nil if empty?
-    best = self[0]
-    i = 1
-    while i < size
-      element = self[i]
-      order = block_given? ? yield(element, best) : (element <=> best)
-      best = element if order > 0
-      i = i + 1
-    end
-    best
-  end
 
   def reverse
     out = []
@@ -288,14 +286,6 @@ class Array
     out
   end
 
-  def reverse_each
-    i = size - 1
-    while i >= 0
-      yield self[i]
-      i = i - 1
-    end
-    self
-  end
 
   # A shallow copy has to be built rather than copied: `Kernel#dup` copies the
   # cell, and an Array's cell holds a *pointer* to its storage, so the copy
@@ -304,6 +294,25 @@ class Array
     out = []
     each { |element| out.push(element) }
     out
+  end
+
+  # Element by element, then by length: the first pair that disagrees decides,
+  # and two arrays that agree as far as the shorter one goes are ordered by size.
+  # `nil` when the operand is not an array, or when any pair is not comparable —
+  # `[1] <=> [:a]` is nil, not an error, because `<=>` reports "no opinion"
+  # rather than raising. Measured on ruby 4.0.6.
+  def <=>(other)
+    return nil unless other.is_a?(Array)
+    return 0 if equal?(other)
+    shorter = size < other.size ? size : other.size
+    i = 0
+    while i < shorter
+      cmp = (self[i] <=> other[i])
+      return nil if cmp.nil?
+      return cmp unless cmp == 0
+      i = i + 1
+    end
+    size <=> other.size
   end
 
   def eql?(other)

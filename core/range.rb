@@ -4,10 +4,15 @@
 # this class exists for the literal to have something to be. It holds the three
 # things a literal carries and answers the questions that do not need iteration.
 #
-# ponytail: no `each`, `to_a`, `step`, `size`, or `sum`. Those need an iteration
-# protocol over the begin value and belong to the `Range` core-library slice
-# (#23); a call to one of them reports blocked, naming the method, which is how
-# the next slice gets chosen.
+# `include Enumerable` supplies most of the rest. The four methods below it —
+# `min`, `max`, `reverse_each` and `include?` — are Range's own because at an
+# open end the answer is a rule rather than a search, and a generic scan would
+# either guess or run forever.
+#
+# ponytail: no `step` or `size`. Both need an iteration protocol richer than
+# `succ` — a numeric stride, and a count that does not walk — and belong to the
+# `Range` slice (#23); a call to one reports blocked, naming the method, which
+# is how the next slice gets chosen.
 class Range
   include Enumerable
 
@@ -153,6 +158,135 @@ class Range
     cmp = (value <=> @end)
     return false if cmp.nil?
     @exclude_end ? cmp < 0 : cmp <= 0
+  end
+
+  # Range answers `min`, `max`, `reverse_each` and `include?` itself rather than
+  # letting Enumerable walk it, because at an open end the answer is a rule and
+  # not a search: the minimum of a beginless range is an error, not a scan, and
+  # Enumerable would either guess or iterate forever. Every case below is
+  # measured on ruby 4.0.6.
+
+  def min(*count, &block)
+    raise RangeError, "cannot get the minimum of beginless range" if @begin.nil?
+    unless __has_members__?
+      return count.empty? ? nil : []
+    end
+    return @begin if block.nil? && count.empty?
+    if @end.nil?
+      if block.nil? && count.size == 1
+        # An endless range is already ascending, so its smallest n are its first
+        # n — as long as it can be walked at all.
+        unless @begin.respond_to?(:succ)
+          raise TypeError, "can't iterate from " + @begin.class.to_s
+        end
+        return first(count[0])
+      end
+      raise RangeError, "cannot get the minimum of endless range with custom comparison method"
+    end
+    super
+  end
+
+  def max(*count, &block)
+    raise RangeError, "cannot get the maximum of endless range" if @end.nil?
+    if @begin.nil?
+      unless block.nil?
+        raise RangeError,
+              "cannot get the maximum of beginless range with custom comparison method"
+      end
+      return __last_member__ if count.empty?
+      # `max(n)` on a beginless range steps back from the end, so the end has to
+      # be something that can be stepped. Measured: the error names the nil
+      # begin, not the end that could not be decremented.
+      raise TypeError, "can't iterate from NilClass" unless @end.is_a?(Integer)
+      out = []
+      value = __last_member__
+      while out.size < count[0]
+        out.push(value)
+        value = value - 1
+      end
+      return out
+    end
+    unless __has_members__?
+      return count.empty? ? nil : []
+    end
+    return __last_member__ if block.nil? && count.empty?
+    super
+  end
+
+  # The largest member, which is the end itself unless the end is excluded — and
+  # an excluded end can only be stepped back from when it is an Integer.
+  def __last_member__
+    return @end unless @exclude_end
+    unless @end.is_a?(Integer)
+      raise TypeError, "cannot exclude non Integer end value"
+    end
+    @end - 1
+  end
+
+  # Whether the range holds anything at all: `(3..1)` holds nothing.
+  def __has_members__?
+    return true if @begin.nil? || @end.nil?
+    cmp = (@begin <=> @end)
+    return false if cmp.nil?
+    @exclude_end ? cmp < 0 : cmp <= 0
+  end
+
+  # Walking backwards needs an end to walk back from, so an endless range is a
+  # TypeError naming the nil — not the RangeError `to_a` would raise.
+  def reverse_each(&block)
+    if @end.nil?
+      raise TypeError, "can't iterate from NilClass"
+    end
+    return Enumerator.__for__(self, :reverse_each, [], proc { __reverse_size__ }) if block.nil?
+    to_a.reverse.each { |value| block.call(value) }
+    self
+  end
+
+  # The size a reversed range reports, and the errors asking for it raises.
+  #
+  # A non-numeric range has no size and says so with nil. A numeric one has to
+  # be steppable backwards from an Integer end, and when it is not the TypeError
+  # names the end's class — `(1.1..3)` raises "can't iterate from Integer".
+  # Measured; the class in the message is not the one that caused the problem.
+  def __reverse_size__
+    raise TypeError, "can't iterate from NilClass" if @end.nil?
+    return nil unless __numeric__?
+    unless @begin.nil? || @begin.is_a?(Integer)
+      raise TypeError, "can't iterate from " + @end.class.to_s
+    end
+    unless @end.is_a?(Integer)
+      raise TypeError, "can't iterate from " + @end.class.to_s
+    end
+    return nil if @begin.nil?
+    span = __last_member__ - @begin + 1
+    span < 0 ? 0 : span
+  end
+
+  def __numeric__?
+    return true if @begin.is_a?(Numeric)
+    @end.is_a?(Numeric)
+  end
+
+  # `include?` is `cover?` for the ranges Ruby treats as linear — numbers — and
+  # a walk for everything else, which an open end makes impossible.
+  def include?(value)
+    return cover?(value) if __linear__?
+    if @begin.nil? || @end.nil?
+      raise TypeError, "cannot determine inclusion in beginless/endless ranges"
+    end
+    each { |member| return true if member == value }
+    false
+  end
+
+  def member?(value)
+    include?(value)
+  end
+
+  def __linear__?
+    return false if @begin.nil? && @end.nil?
+    left = @begin.nil? || @begin.is_a?(Numeric)
+    right = @end.nil? || @end.is_a?(Numeric)
+    left && right
   end
 
   def to_s

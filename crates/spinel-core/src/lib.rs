@@ -49,6 +49,10 @@ const SOURCES: &[(&str, &str)] = &[
         "core/comparable.rb",
         include_str!("../../../core/comparable.rb"),
     ),
+    (
+        "core/enumerable.rb",
+        include_str!("../../../core/enumerable.rb"),
+    ),
     ("core/module.rb", include_str!("../../../core/module.rb")),
     ("core/class.rb", include_str!("../../../core/class.rb")),
     (
@@ -79,6 +83,10 @@ const SOURCES: &[(&str, &str)] = &[
     (
         "core/exception.rb",
         include_str!("../../../core/exception.rb"),
+    ),
+    (
+        "core/enumerator.rb",
+        include_str!("../../../core/enumerator.rb"),
     ),
 ];
 

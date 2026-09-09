@@ -170,6 +170,17 @@ module Kernel
     raise NoMatchingPatternKeyError, subject.inspect + ": key not found: " + key.inspect
   end
 
+  # `to_enum(:each_slice, 2)` remembers a call so it can be made later, which is
+  # what every Enumerable method without a block returns. `enum_for` is the same
+  # method under Ruby's other name for it.
+  def to_enum(method = :each, *arguments, &size)
+    Enumerator.__for__(self, method, arguments, size)
+  end
+
+  def enum_for(method = :each, *arguments, &size)
+    Enumerator.__for__(self, method, arguments, size)
+  end
+
   # The module functions (#161). Each becomes a private instance method and a
   # public singleton method, which is why `defined?(Object.print)` is nil while
   # `defined?(Kernel.puts)` is "method" — both measured on ruby 4.0.6.
