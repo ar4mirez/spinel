@@ -107,11 +107,11 @@ not an open design question.
 
 ## Plan
 
-- [ ] 1. #231: `Insn::Intern`, lowering, oracle table, spec delta.
-- [ ] 2. #224: nil-test-and-jump for call, assignment and op-assign forms.
-- [ ] 3. #221: `...` parameter, `*`/`**`/`&` argument sites; closes #233.
-- [ ] 4. #225: bignum heap type, arithmetic, literal parsing, promote/demote.
-- [ ] 5. Re-run the corpus, record the delta, tag any new failure with a reason.
+- [x] 1. #231: `Insn::Intern`, lowering, oracle table, spec delta.
+- [x] 2. #224: nil-test-and-jump for call, assignment and op-assign forms.
+- [x] 3. #221: `...` parameter, `*`/`**`/`&` argument sites; closes #233.
+- [x] 4. #225: bignum heap type, arithmetic, literal parsing, promote/demote.
+- [x] 5. Re-run the corpus, record the delta, tag any new failure with a reason.
 - [ ] 6. Triage the GitHub project and the issues.
 
 ## Definition of done
@@ -125,8 +125,55 @@ not an open design question.
 
 ## Results
 
-_To be filled in as the slices land._
+Measured with `scripts/spec-status.sh`, which pins `--platform=linux`, so these
+are the same numbers CI regenerates and diffs.
+
+| directory | passed before | passed after | delta |
+|---|---:|---:|---:|
+| `core/integer` | 64 | 76 | +12 |
+| `language` | 1144 | 1164 | +20 |
+| **total** | **2158** | **2190** | **+32** |
+
+`core/integer` is #225: the bignum heap type moves 12 examples out of
+`an integer wider than a fixnum`. The 20 in `language` are #221, #224 and #231
+together.
+
+Blocked falls by exactly the 32 that now pass — 21547 to 21515 — and `failed`
+stays 0 in every directory. No example that passed before stopped passing, and
+nothing landed in `failed`, so this slice owes no new `spec/tags/` entry.
+
+All four refusals are gone from the blocked ranking entirely — measured, not
+inferred: `scripts/spec.sh --platform=linux --blocked=0 language core/integer`
+no longer lists `argument forwarding`, `a safe-navigation call`,
+`an integer wider than a fixnum` or `symbol interpolation` at any count.
+
+So the 91 examples those refusals named did not all pass, but none of them is
+still waiting on this slice. They are blocked a second time, and the top
+blockers under that command's scope are now mspec's own helpers rather than
+compiler refusals:
+
+| examples | now blocked by |
+|---:|---|
+| 194 | `mock` |
+| 168 | `bignum_value` |
+| 80 + 63 | `eval` |
+| 72 | `defined?` before `require` (#39) |
+
+`bignum_value` is the one to note: #225 landed the heap type, and the remaining
+`core/integer` specs are held by the mspec *helper* of that name, not by the
+arithmetic. An undefined method reports blocked rather than failed, so a pass count alone
+hides it — the next integer slice is a helper slice, not an engine one.
+
+`bench/spec-status.md` regenerated in this PR; it had been left stale by the
+first two commits, which CI would have caught as a `git diff --exit-code`
+failure.
 
 ## Left for later
 
-_To be filled in._
+- The mspec helpers now at the top of the ranking — `mock` (194), `bignum_value`
+  (168) and `eval` (143 across two reasons). None is a compiler refusal, so they
+  do not belong to this PRD's phase; they need their own triage.
+- Per-file spec granularity. `CLAUDE.md` accepts "files or directories"; this
+  records directories, because per-file over ~1,932 files x 2 trees is dominated
+  by process startup. [#147](https://github.com/ar4mirez/spinel/issues/147) is
+  the issue for making CI publish it.
