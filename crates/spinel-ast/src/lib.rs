@@ -92,10 +92,60 @@ pub type Bytes = Box<[u8]>;
 // Root
 // ---------------------------------------------------------------------------
 
+/// Which file a tree came from, and where each of its lines starts.
+///
+/// A [`Span`] is a byte offset, and only the parser has the bytes to count
+/// newlines in. This is that count, done once per file and carried on the
+/// [`Program`], so the compiler can give each instruction a line (#29) without
+/// the source text — which is what a backtrace, `caller` and `__LINE__` need.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SourceMap {
+    /// What `__FILE__` answers, and what a backtrace names.
+    pub path: Box<str>,
+    /// Byte offset of the start of every line, line 1 first.
+    line_starts: Box<[u32]>,
+}
+
+impl SourceMap {
+    pub fn new(path: &str, line_starts: Vec<u32>) -> Self {
+        Self {
+            path: path.into(),
+            line_starts: line_starts.into_boxed_slice(),
+        }
+    }
+
+    /// A map for a tree built by hand rather than parsed: one line, no path.
+    pub fn empty() -> Self {
+        Self::new("", vec![0])
+    }
+
+    /// The 1-based line `offset` falls on.
+    pub fn line(&self, offset: u32) -> u32 {
+        // How many starts are at or before `offset` is the line number: line 1
+        // starts at 0.
+        u32::try_from(self.line_starts.partition_point(|&start| start <= offset))
+            .unwrap_or(u32::MAX)
+    }
+}
+
+// The line table is one entry per line of the file, which would drown
+// `spinel parse`'s tree dump; its length is what a reader wants.
+impl std::fmt::Debug for SourceMap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SourceMap")
+            .field("path", &self.path)
+            .field("lines", &self.line_starts.len())
+            .finish()
+    }
+}
+
 /// A whole parsed file.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
     pub span: Span,
+    /// The file this came from and its line table. Shared, because every
+    /// `Iseq` compiled out of the tree keeps a reference for its backtrace.
+    pub source: std::sync::Arc<SourceMap>,
     /// Local variables the parser assigned to the top-level scope, in slot order.
     pub locals: Vec<Name>,
     pub body: Vec<Expr>,
@@ -1066,6 +1116,7 @@ mod tests {
 
         let program = Program {
             span: sp(),
+            source: std::sync::Arc::new(SourceMap::empty()),
             locals: vec![],
             body: vec![e(ExprKind::Def(Box::new(def)))],
         };

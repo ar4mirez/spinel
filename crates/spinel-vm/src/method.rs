@@ -313,6 +313,27 @@ pub enum Native {
     /// Installed as `Kernel#__signal_list__`. `Signal.list` and
     /// `SignalException#initialize` are Ruby on top of it.
     SignalList,
+    /// The backtrace of the frames below the calling one, as
+    /// `[[path, line, label], ...]` innermost first (#29).
+    ///
+    /// Installed as `Kernel#__backtrace_here__`. The frame stack is the VM's,
+    /// so reading it is a primitive; `caller`, `caller_locations` and
+    /// `full_message`'s fallback position are Ruby on top. The calling frame —
+    /// the Ruby method that asked — is left out, so `caller(0)` written in
+    /// Ruby starts where Ruby's does.
+    BacktraceHere,
+    /// Whether standard error is a terminal: `Exception.to_tty?` (#29). A
+    /// syscall, so Rust.
+    StderrTty,
+    /// A path made absolute and resolved, or nil when it names no file:
+    /// `Thread::Backtrace::Location#absolute_path` (#29). A syscall, so Rust.
+    AbsolutePath,
+    /// `Kernel#__needs_threads__`: the VM declining to start a thread (#45).
+    ///
+    /// A refusal rather than a Ruby `NotImplementedError`, because a spec that
+    /// asserts `Thread.new` raises `ThreadError` would read a Ruby exception as
+    /// a wrong answer. This reads as "cannot be answered yet", which it is.
+    NeedsThreads,
 }
 
 /// The bitwise operators on `Integer`, which share one primitive.

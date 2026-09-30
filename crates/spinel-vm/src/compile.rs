@@ -36,7 +36,7 @@ use std::sync::Arc;
 use spinel_ast::{
     Assign, AssignOp, Begin, BlockArg, Case, CaseBranches, Expr, ExprKind, Guard, HashEntryKind,
     If, InClause, IntValue, Logical, LogicalOp, MultiTarget, Name, ParamList, Params, PatternRest,
-    Program, Rescue, RescueMod, Span, StrPart, Target, TargetKind, VarRef, While,
+    Program, Rescue, RescueMod, SourceMap, Span, StrPart, Target, TargetKind, VarRef, While,
 };
 
 use crate::bytecode::{
@@ -91,7 +91,10 @@ const ERRINFO: &str = "$!";
 
 /// Compile a whole parsed file.
 pub fn program(program: &Program) -> Result<Iseq, Unsupported> {
-    body("<main>", &program.locals, &program.body)
+    let mut compiler = Compiler::new("<main>", &program.locals);
+    compiler.source = Some(Arc::clone(&program.source));
+    compiler.statements(&program.body, true)?;
+    Ok(compiler.finish())
 }
 
 /// Compile a statement list that shares one scope: a script, or — until
@@ -133,7 +136,20 @@ pub fn expression(name: &str, locals: &[Name], expr: &Expr) -> Result<Iseq, Unsu
 /// It does not cross a scope barrier: a `def` inside a flattened statement
 /// cannot see the flattened locals, exactly as it cannot in Ruby.
 pub fn flattened_expression(name: &str, locals: &[Name], expr: &Expr) -> Result<Iseq, Unsupported> {
+    flattened_expression_in(None, name, locals, expr)
+}
+
+/// [`flattened_expression`] for an `expr` out of a parsed file, so its
+/// instructions carry that file's lines and a backtrace through it can name
+/// them (#29).
+pub fn flattened_expression_in(
+    source: Option<&Arc<SourceMap>>,
+    name: &str,
+    locals: &[Name],
+    expr: &Expr,
+) -> Result<Iseq, Unsupported> {
     let mut compiler = Compiler::new(name, locals);
+    compiler.source = source.cloned();
     compiler.flattened = true;
     compiler.expr(expr)?;
     Ok(compiler.finish())
@@ -253,6 +269,14 @@ struct Loop {
 
 struct Compiler {
     name: Box<str>,
+    /// Where this body was written, if the tree came with a line table (#29).
+    source: Option<Arc<SourceMap>>,
+    /// `(pc, line)` for [`Iseq::lines`], appended by `emit` when the line changes.
+    lines: Vec<(u32, u32)>,
+    /// The line the next emitted instruction belongs to; 0 before any is known.
+    line: u32,
+    /// See [`Iseq::block_level`].
+    block_level: u32,
     insns: Vec<Insn>,
     literals: Vec<Literal>,
     symbols: Vec<Box<str>>,
@@ -385,6 +409,10 @@ impl Compiler {
     fn new(name: &str, locals: &[Name]) -> Compiler {
         Compiler {
             name: name.into(),
+            source: None,
+            lines: Vec::new(),
+            line: 0,
+            block_level: 0,
             insns: Vec::new(),
             literals: Vec::new(),
             symbols: Vec::new(),
@@ -422,6 +450,9 @@ impl Compiler {
     fn nested(name: &str, locals: &[Name], parent: &Compiler, barrier: bool) -> Compiler {
         let mut compiler = Compiler::new(name, locals);
         compiler.scope_barrier = barrier;
+        compiler.source.clone_from(&parent.source);
+        compiler.line = parent.line;
+        compiler.block_level = if barrier { 0 } else { parent.block_level + 1 };
         if !barrier {
             compiler.outer.push(parent.locals.clone());
             compiler.outer.extend(parent.outer.iter().cloned());
@@ -466,6 +497,16 @@ impl Compiler {
             once_regexps: self.once_regexps,
             catch_table: self.catch_table,
             scope_barrier: self.scope_barrier,
+            path: self.source.as_ref().map(|source| Arc::from(&*source.path)),
+            lines: self.lines,
+            block_level: self.block_level,
+        }
+    }
+
+    /// Make `offset` the source position of what is emitted next.
+    fn at(&mut self, offset: u32) {
+        if let Some(source) = &self.source {
+            self.line = source.line(offset);
         }
     }
 
@@ -616,6 +657,10 @@ impl Compiler {
         debug_assert!(depth >= 0, "{insn:?} underflows the stack in {}", self.name);
         self.depth = depth.max(0) as usize;
         self.max_stack = self.max_stack.max(self.depth);
+        if self.line != 0 && self.lines.last().is_none_or(|&(_, line)| line != self.line) {
+            let pc = u32::try_from(self.insns.len()).unwrap_or(u32::MAX);
+            self.lines.push((pc, self.line));
+        }
         self.insns.push(insn);
     }
 
@@ -764,6 +809,7 @@ impl Compiler {
     /// Compile one expression. Always leaves exactly one value on the stack.
     fn expr(&mut self, expr: &Expr) -> Emit {
         let span = expr.span;
+        self.at(span.start);
         match &expr.kind {
             ExprKind::Nil => self.emit(Insn::PushNil),
             ExprKind::True => self.emit(Insn::PushTrue),
@@ -1234,6 +1280,24 @@ impl Compiler {
                 let symbol = self.symbol(name);
                 self.emit(Insn::GetCvar(symbol));
                 Ok(())
+            }
+            // `$@` is `$!`'s backtrace, and nil when `$!` is (#29): compiled as
+            // the `$!&.backtrace` it means, so an override of `backtrace` is
+            // seen, as it is in CRuby.
+            VarRef::Global(name) if name.as_ref() == "$@" => {
+                let errinfo = Expr::new(span, ExprKind::Var(VarRef::Global(ERRINFO.into())));
+                let call = spinel_ast::Call {
+                    receiver: Some(errinfo),
+                    name: "backtrace".into(),
+                    name_span: span,
+                    args: Vec::new(),
+                    block: None,
+                    flags: spinel_ast::CallFlags {
+                        safe_nav: true,
+                        ..spinel_ast::CallFlags::default()
+                    },
+                };
+                self.call(&call, span)
             }
             VarRef::Global(name) if name.as_ref() == ERRINFO => {
                 self.emit(Insn::Errinfo);
@@ -3027,12 +3091,19 @@ impl Compiler {
         locals: &[Name],
         span: Span,
     ) -> Emit {
+        // CRuby's labels, which a backtrace through the body prints:
+        // `<class:Foo>` names the constant as written, not its full path.
+        let written = self
+            .symbols
+            .get(name as usize)
+            .map_or("", |s| &**s)
+            .to_owned();
         let label = match kind {
-            DefKind::Module => "<module>",
-            DefKind::Singleton => "<singleton class>",
-            DefKind::Class => "<class>",
+            DefKind::Module => format!("<module:{written}>"),
+            DefKind::Singleton => "singleton class".to_owned(),
+            DefKind::Class => format!("<class:{written}>"),
         };
-        let child = self.child_iseq(label, &Params::None, locals, body, true, span)?;
+        let child = self.child_iseq(&label, &Params::None, locals, body, true, span)?;
         let body = self.push_child(child);
         let index = self.class_defs.len() as u32;
         self.class_defs.push(ClassDef {
@@ -3366,6 +3437,9 @@ impl Compiler {
         if call.flags.safe_nav {
             return self.safe_nav(call, span);
         }
+        // A call reports the line its *name* is on, measured: in
+        // `x = Foo\n  .new\n  .inst` a raise in `inst` names the third line.
+        self.at(call.name_span.start);
         if self.try_operator(call)? {
             return Ok(());
         }
@@ -3377,6 +3451,8 @@ impl Compiler {
         }
         let site = self.arguments(&call.name, &call.args, call.block.as_ref(), span)?;
         let site = self.push_site(site, call.receiver.is_none());
+        // The arguments may have moved the line on; the send is the name's.
+        self.at(call.name_span.start);
 
         // `a.b = v` and `a[k] = v` evaluate to `v`, never to what `b=` returned
         // — Ruby's rule, and `def b=(*) = 1` is exactly how ruby/spec checks it.
@@ -3427,6 +3503,7 @@ impl Compiler {
 
         let site = self.arguments(&call.name, &call.args, call.block.as_ref(), span)?;
         let site = self.push_site(site, false);
+        self.at(call.name_span.start);
         if call.flags.attribute_write {
             let slot = self.slot(&format!("%attr{}", self.here()));
             self.emit(Insn::Dup);
@@ -3456,10 +3533,12 @@ impl Compiler {
         match (&*call.name, call.args.len()) {
             ("!", 0) => {
                 self.expr(receiver)?;
+                self.at(call.name_span.start);
                 self.emit(Insn::Not);
             }
             ("-@", 0) => {
                 self.expr(receiver)?;
+                self.at(call.name_span.start);
                 self.emit(Insn::Neg);
             }
             ("+@", 0) => self.expr(receiver)?,
@@ -3472,6 +3551,7 @@ impl Compiler {
                 }
                 self.expr(receiver)?;
                 self.expr(&call.args[0])?;
+                self.at(call.name_span.start);
                 self.emit(Insn::BinOp(op));
             }
             _ => return Ok(false),
@@ -3601,8 +3681,11 @@ impl Compiler {
         match block {
             None => {}
             Some(BlockArg::Block(block)) => {
+                // Named after the body it is written in — a method, `<main>`,
+                // `<class:Foo>` — which is what a backtrace calls it "block in".
+                let base = self.name.clone();
                 let child = self.child_iseq(
-                    "block in <compiled>",
+                    &base,
                     &block.params,
                     &block.locals,
                     &block.body,
@@ -4377,8 +4460,9 @@ impl Compiler {
 
     /// `-> { }`, which is a lambda: strict arity and a local `return`.
     fn lambda(&mut self, block: &spinel_ast::Block, span: Span) -> Emit {
+        let base = self.name.clone();
         let child = self.child_iseq_as(
-            "lambda in <compiled>",
+            &base,
             &block.params,
             &block.locals,
             &block.body,

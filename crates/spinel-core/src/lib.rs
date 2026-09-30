@@ -85,6 +85,7 @@ const SOURCES: &[(&str, &str)] = &[
         include_str!("../../../core/exception.rb"),
     ),
     ("core/signal.rb", include_str!("../../../core/signal.rb")),
+    ("core/thread.rb", include_str!("../../../core/thread.rb")),
     (
         "core/enumerator.rb",
         include_str!("../../../core/enumerator.rb"),
@@ -102,7 +103,14 @@ fn image() -> &'static [Arc<Iseq>] {
         SOURCES
             .iter()
             .map(|(name, source)| {
-                let parsed = spinel_parse::parse_file(name, source.as_bytes());
+                // CRuby's spelling for a core file written in Ruby, and the
+                // mark a backtrace uses to tell a core frame from the program's
+                // own (#29): `<internal:array>`, never a path a user file has.
+                let path = format!(
+                    "<internal:{}>",
+                    name.trim_start_matches("core/").trim_end_matches(".rb")
+                );
+                let parsed = spinel_parse::parse_file(&path, source.as_bytes());
                 // A syntax error in `core/*.rb` is a bug in this repository, not
                 // in a user's program. Panicking names the file and the message;
                 // a `Result` would only move the same panic one frame out, into

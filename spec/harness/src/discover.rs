@@ -9,7 +9,9 @@
 //! What this module does *not* do is decide whether an example passes. That
 //! needs a VM, and is [`crate::Outcome::Blocked`] until phase 1.
 
-use spinel_ast::{BlockArg, Call, Expr, ExprKind, Program, Span, StrPart};
+use std::sync::Arc;
+
+use spinel_ast::{BlockArg, Call, Expr, ExprKind, Program, SourceMap, Span, StrPart};
 
 // ---------------------------------------------------------------------------
 // The target being specced
@@ -119,6 +121,9 @@ pub struct Example {
     pub scope: Vec<Expr>,
     /// The locals the parser assigned to the block's own scope, in slot order.
     pub locals: Vec<spinel_ast::Name>,
+    /// The spec file's line table, so a backtrace through the example names
+    /// the file and line it was written on (#29).
+    pub source: Arc<SourceMap>,
     /// Set when a guard excluded this example, or when the harness could not
     /// evaluate the guard and refused to guess.
     pub skipped: Option<String>,
@@ -159,6 +164,7 @@ impl Example {
 pub fn examples(program: &Program, target: &Target) -> Vec<Example> {
     let mut walk = Walk {
         target,
+        source: Arc::clone(&program.source),
         group: Vec::new(),
         skipped: None,
         scope: Vec::new(),
@@ -175,6 +181,7 @@ pub fn examples(program: &Program, target: &Target) -> Vec<Example> {
 
 struct Walk<'a> {
     target: &'a Target,
+    source: Arc<SourceMap>,
     group: Vec<String>,
     /// Reason the enclosing guard excluded everything below, if any.
     skipped: Option<String>,
@@ -415,6 +422,7 @@ impl Walk<'_> {
             setup_spans,
             body,
             locals,
+            source: Arc::clone(&self.source),
             skipped,
         });
     }

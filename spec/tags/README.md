@@ -77,14 +77,19 @@ fix is a different slice. The reason says which slice, by number.
 
 ## What is here now
 
-Sixty-one tags across twenty-two files, and thirty-seven of them are one thing:
+Sixty-three tags across twenty-five files, and thirty-seven of them are one thing:
 a global alias, where #166's table holds two names as two entries and making one
 the other's second spelling is #39's runtime state. They sit in
 `language/predefined_tags.txt`, `language/defined_tags.txt` and
 `library/English/English_tags.txt`. The remaining twenty-four name fibers
 (#16, #26), `Kernel#Float` on a String (#181), structural `#hash` (#21, #22,
 #23), the `Hash` table and its `inspect` format (#19, #20), Range-aware indexing
-in `MatchData` (#33), definition hooks (#28), and the literals (#157).
+in `MatchData` (#33), definition hooks (#28), and the literals (#157). The last
+two name the harness itself (#145): `language/ensure_tags.txt` and
+`language/rescue_tags.txt` hold one example each that defines a method inside
+the example, which mspec's `instance_exec` makes a singleton — labelled `foo`
+in a backtrace — and this harness, running the example on `main`, makes
+`Object#foo`. They ran for the first time when #29 gave `caller` a backtrace.
 
 Constant visibility was four of them and is none of them now: #185 deleted its
 tags rather than rewording them, which is what closing an issue behind a tag is

@@ -1384,6 +1384,12 @@ pub fn eval_in(
             Err(other) => return Err(other),
         };
 
+        // Where the exception starts is where its backtrace is taken: every
+        // raise, whether `raise` or the VM's own, comes through here with the
+        // raising frame still on the stack.
+        if let Unwind::Exception(exception) = unwind {
+            attach_backtrace(scope, &frames, exception);
+        }
         if let Some(value) = unwind_to_handler(scope, &mut stack, &mut frames, unwind)? {
             break value;
         }
@@ -1514,6 +1520,7 @@ fn unwind_to_handler(
                 let exception = stack
                     .pop()
                     .expect("`raise` left the exception below the base");
+                attach_backtrace(scope, frames, exception);
                 unwind = Unwind::Exception(exception);
                 continue;
             }
@@ -1929,7 +1936,22 @@ fn dispatch<'h>(
                     Ok(None)
                 }
                 Some(Definition::Native(native)) => {
-                    native_call(scope, stack, frames, call, native, proc_class, ids)
+                    let name = call.name;
+                    match native_call(scope, stack, frames, call, native, proc_class, ids) {
+                        // A primitive that raises is a frame in CRuby's
+                        // backtrace — "in 'Integer#/'" at the caller's line —
+                        // though it pushed none here. It becomes the exception
+                        // now, while which method it was is still known.
+                        Err(Error::Raise { class, message }) => {
+                            let exception = exception_new(scope, class, &message);
+                            let method_name =
+                                crate::shared::symbols::name(name).unwrap_or_default();
+                            let label = qualified_method_name(scope, method.owner, &method_name);
+                            attach_backtrace_from(scope, frames, exception, Some(label));
+                            Ok(Some(Unwind::Exception(exception)))
+                        }
+                        other => other,
+                    }
                 }
                 None => unreachable!("a method body that is not in the definition table"),
             }
@@ -2384,6 +2406,10 @@ fn make_proc<'h>(
 /// rather than an absent one — see the non-goals in PRD 0012.
 const EXC_MESSAGE: &str = "@message";
 const EXC_BACKTRACE: &str = "@backtrace";
+/// See [`attach_backtrace`].
+const EXC_LOCATIONS: &str = "@__backtrace_locations__";
+/// `Exception#cause`, set on the first raise. See [`attach_backtrace`].
+const EXC_CAUSE: &str = "@__cause__";
 
 /// `NameError#name` and `NameError#receiver`, over the same two slots.
 ///
@@ -2408,6 +2434,206 @@ fn string_new(scope: &mut HandleScope<'_>, text: &str) -> Value {
         .bytes_mut(handle)
         .copy_from_slice(&text.as_bytes()[..len as usize]);
     scope.get(handle)
+}
+
+/// One line of a backtrace: the file, the line, and what was running there.
+struct BacktraceLine {
+    path: Arc<str>,
+    line: u32,
+    label: String,
+}
+
+/// The backtrace of the frames on the stack, innermost first (#29).
+///
+/// `frames[i].pc` has already moved past the instruction each frame is in the
+/// middle of — the send that called the frame above, or the one that raised —
+/// so the line is the one before it.
+///
+/// Core-library frames follow CRuby 3.4, which prints a method written in Ruby
+/// inside the VM (`<internal:...>`) the way it prints one written in C: under
+/// its own label but at its caller's position, and only where the program
+/// called it. `[2].map { raise }` is "in 'block in <main>'", "in 'Array#map'",
+/// "in '<main>'" — not the `each` and the block `core/array.rb` runs `map` on.
+fn backtrace_of(scope: &mut HandleScope<'_>, frames: &[Call]) -> Vec<BacktraceLine> {
+    let raw: Vec<(bool, BacktraceLine)> = frames
+        .iter()
+        .rev()
+        .map(|frame| {
+            let path = frame.iseq.path.clone().unwrap_or_else(|| Arc::from(""));
+            let line = frame.iseq.line_at(frame.pc.saturating_sub(1)).unwrap_or(0);
+            let internal = path.starts_with("<internal:");
+            let label = frame_label(scope, frame);
+            (internal, BacktraceLine { path, line, label })
+        })
+        .collect();
+    let mut out = Vec::with_capacity(raw.len());
+    for (index, (internal, entry)) in raw.iter().enumerate() {
+        if !internal {
+            out.push(BacktraceLine {
+                path: Arc::clone(&entry.path),
+                line: entry.line,
+                label: entry.label.clone(),
+            });
+            continue;
+        }
+        // Only the core method the program itself called, at the program's
+        // position: the next frame out is where that call was written.
+        match raw.get(index + 1) {
+            Some((false, caller)) if !entry.label.starts_with("block ") => {
+                out.push(BacktraceLine {
+                    path: Arc::clone(&caller.path),
+                    line: caller.line,
+                    label: entry.label.clone(),
+                });
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// What CRuby 3.4 calls a frame: `Foo#bar`, `Foo.bar`, `block (2 levels) in
+/// Foo#bar`, `<main>`, `<class:Foo>`.
+fn frame_label(scope: &mut HandleScope<'_>, frame: &Call) -> String {
+    // A method frame is named after the `def`, and a block after the body it
+    // was written in, which the compiler already made its `Iseq`'s name.
+    let written = &*frame.iseq.name;
+    let base = match frame.owner {
+        Some(owner) => qualified_method_name(scope, owner, written),
+        None => written.to_owned(),
+    };
+    match frame.iseq.block_level {
+        0 => base,
+        1 => format!("block in {base}"),
+        levels => format!("block ({levels} levels) in {base}"),
+    }
+}
+
+/// `Foo#bar` for an instance method, `Foo.bar` for one on `Foo`'s singleton
+/// class, and a bare `bar` for one whose owner has no name — measured:
+/// `Class.new { def z = raise }.new.z` is "in 'z'".
+fn qualified_method_name(scope: &mut HandleScope<'_>, owner: ClassId, method: &str) -> String {
+    let classes = scope.classes();
+    let Some(name) = classes.name(owner) else {
+        return method.to_owned();
+    };
+    if classes.is_singleton(owner) {
+        // `#<Class:Foo>` for the singleton of a named module; anything else
+        // (`#<Class:#<Object:...>>`) is a singleton of an object.
+        return match name
+            .strip_prefix("#<Class:")
+            .and_then(|rest| rest.strip_suffix('>'))
+        {
+            Some(attached) if !attached.starts_with("#<") => format!("{attached}.{method}"),
+            _ => method.to_owned(),
+        };
+    }
+    format!("{name}#{method}")
+}
+
+/// `path:line:in 'label'`, CRuby 3.4's spelling of one backtrace line.
+fn backtrace_string(line: &BacktraceLine) -> String {
+    format!("{}:{}:in '{}'", line.path, line.line, line.label)
+}
+
+/// Give `exception` the backtrace of `frames`, unless it already has one.
+///
+/// An exception raised a second time keeps the backtrace of the first raise —
+/// `raise e` in a `rescue` is how a handler passes one on, and the position
+/// that matters is where it started. Two ivars: `@backtrace` is the Array of
+/// Strings `Exception#backtrace` answers, and `@__backtrace_locations__` is the
+/// same lines as `[path, line, label]` for `backtrace_locations`, which
+/// `core/exception.rb` turns into `Thread::Backtrace::Location`s on demand.
+fn attach_backtrace(scope: &mut HandleScope<'_>, frames: &[Call], exception: Value) {
+    attach_backtrace_from(scope, frames, exception, None);
+}
+
+/// [`attach_backtrace`], for an exception a primitive raised: `native` is its
+/// label, a frame of its own at the caller's position, as CRuby prints a
+/// method written in C.
+fn attach_backtrace_from(
+    scope: &mut HandleScope<'_>,
+    frames: &[Call],
+    exception: Value,
+    native: Option<String>,
+) {
+    if exception.is_immediate() || !is_exception(scope, exception) {
+        return;
+    }
+    let exception = scope.root(exception);
+    // `cause` is the exception being handled when this one is first raised —
+    // `$!` — and is decided once: a re-raise does not change it, and neither
+    // does raising it while it is itself `$!`. An explicit `raise ..., cause:`
+    // has already set it, which this leaves alone.
+    let object = scope.get(exception);
+    if !ivar_defined(scope, object, symbol(EXC_CAUSE)).unwrap_or(true) {
+        let current = scope.errinfo();
+        let cause = if current == object {
+            Value::NIL
+        } else {
+            current
+        };
+        let _ = ivar_set(scope, object, symbol(EXC_CAUSE), cause);
+    }
+    let object = scope.get(exception);
+    let Ok(existing) = ivar_get(scope, object, symbol(EXC_BACKTRACE)) else {
+        return;
+    };
+    if existing != Value::NIL {
+        return;
+    }
+    let mut lines = backtrace_of(scope, frames);
+    // Only a primitive the program called itself, like a core method written
+    // in Ruby: one `core/*.rb` called is its business, not the program's.
+    if let Some(label) = native
+        && let Some(caller) = frames.last()
+        && !caller
+            .iseq
+            .path
+            .as_deref()
+            .is_some_and(|p| p.starts_with("<internal:"))
+        && let Some(first) = lines.first()
+    {
+        let line = BacktraceLine {
+            path: Arc::clone(&first.path),
+            line: first.line,
+            label,
+        };
+        lines.insert(0, line);
+    }
+    let (strings, locations) = backtrace_values(scope, &lines);
+    let strings = scope.root(strings);
+    let locations = scope.root(locations);
+    let object = scope.get(exception);
+    let strings = scope.get(strings);
+    let locations = scope.get(locations);
+    // A frozen exception keeps no backtrace, as in CRuby; it is still raised.
+    let _ = ivar_set(scope, object, symbol(EXC_BACKTRACE), strings);
+    let _ = ivar_set(scope, object, symbol(EXC_LOCATIONS), locations);
+}
+
+/// The two Arrays a backtrace is kept as: Strings, and `[path, line, label]`.
+fn backtrace_values(scope: &mut HandleScope<'_>, lines: &[BacktraceLine]) -> (Value, Value) {
+    let mut strings = Vec::with_capacity(lines.len());
+    let mut triples = Vec::with_capacity(lines.len());
+    for line in lines {
+        let text = string_new(scope, &backtrace_string(line));
+        strings.push(scope.root(text));
+        let path = string_new(scope, &line.path);
+        let path = scope.root(path);
+        let label = string_new(scope, &line.label);
+        let label = scope.root(label);
+        let number = Value::fixnum(i64::from(line.line)).expect("a line number is a fixnum");
+        let parts = [scope.get(path), number, scope.get(label)];
+        let triple = new_array(scope, &parts);
+        triples.push(scope.root(triple));
+    }
+    let strings: Vec<Value> = strings.iter().map(|&h| scope.get(h)).collect();
+    let strings = new_array(scope, &strings);
+    let strings = scope.root(strings);
+    let triples: Vec<Value> = triples.iter().map(|&h| scope.get(h)).collect();
+    let triples = new_array(scope, &triples);
+    (scope.get(strings), triples)
 }
 
 /// An instance of `class`, an already-resolved exception class object.
@@ -3302,6 +3528,24 @@ fn qualified_name(scope: &mut HandleScope<'_>, cbase: ClassId, name: SymbolId) -
     let leaf = symbol_name(name);
     match scope.classes().name(cbase) {
         Some(outer) if cbase != Builtin::Object.id() => format!("{outer}::{leaf}"),
+        // Under an anonymous module the path starts with that module's
+        // `inspect`, measured: `m = Module.new; module m::N; end` names it
+        // "#<Module:0x...>::N" — the address being `object_id` in hex, which
+        // is what `Module#to_s` prints for `m` itself.
+        //
+        // ponytail: CRuby keeps that as a *temporary* name and renames `N` to
+        // "A::N" when `m` is later assigned to `A`. Here it is permanent;
+        // `set_temporary_name` and the rename belong to #28's reflection slice.
+        None if cbase != Builtin::Object.id() => {
+            let object = scope.classes().object(cbase);
+            let handle = scope.root(object);
+            let id = scope.address(handle) >> 4;
+            let noun = match scope.classes().kind(cbase) {
+                Kind::Module => "Module",
+                Kind::Class => "Class",
+            };
+            format!("#<{noun}:0x{id:x}>::{leaf}")
+        }
         _ => leaf,
     }
 }
@@ -4627,7 +4871,9 @@ fn native_call<'h>(
                         ),
                     ));
                 }
-                let message = match call.args.first() {
+                // A nil message is no message, measured:
+                // `RuntimeError.new(nil).message` is "RuntimeError".
+                let message = match call.args.first().filter(|&&v| v != Value::NIL) {
                     Some(&argument) => match string_bytes(scope, argument) {
                         Some(text) => String::from_utf8_lossy(&text).into_owned(),
                         None => inspect(scope, argument),
@@ -5345,6 +5591,41 @@ fn native_call<'h>(
             let limit = Value::fixnum(i64::from(crate::signal::LIMIT)).expect("NSIG is a fixnum");
             let pairs = new_array(scope, &entries);
             let value = new_array(scope, &[pairs, limit]);
+            stack.push(value);
+            Ok(None)
+        }
+
+        Native::BacktraceHere => {
+            let below = &frames[..frames.len().saturating_sub(1)];
+            let lines = backtrace_of(scope, below);
+            let (_, triples) = backtrace_values(scope, &lines);
+            stack.push(triples);
+            Ok(None)
+        }
+
+        Native::NeedsThreads => Err(Error::Unknowable {
+            what: "starting a `Thread`",
+            needs: "`Thread` on the per-Ractor lock (#45)",
+        }),
+
+        Native::StderrTty => {
+            use std::io::IsTerminal as _;
+            stack.push(bool_value(std::io::stderr().is_terminal()));
+            Ok(None)
+        }
+
+        Native::AbsolutePath => {
+            let Some(bytes) = call.args.first().and_then(|&v| string_bytes(scope, v)) else {
+                return Err(Error::NoDispatch {
+                    op: "__absolute_path__",
+                    operands: "an argument that is not a String",
+                });
+            };
+            let path = String::from_utf8_lossy(&bytes).into_owned();
+            let value = match std::fs::canonicalize(&path) {
+                Ok(resolved) => string_new(scope, &resolved.to_string_lossy()),
+                Err(_) => Value::NIL,
+            };
             stack.push(value);
             Ok(None)
         }
@@ -6122,7 +6403,30 @@ fn native_call<'h>(
                 return Ok(Some(Unwind::Exception(exception)));
             }
             let exception = raise_argument(scope, frames, &call.args)?;
-            Ok(Some(Unwind::Exception(exception)))
+            let exception = scope.root(exception);
+            // `raise Klass, msg, backtrace`: the third argument replaces the
+            // backtrace this raise would otherwise take. A String is one line.
+            if let Some(&given) = call.args.get(2) {
+                let lines = if string_bytes(scope, given).is_some() {
+                    new_array(scope, &[given])
+                } else {
+                    given
+                };
+                let object = scope.get(exception);
+                ivar_set(scope, object, symbol(EXC_BACKTRACE), lines)?;
+            }
+            // `raise ..., cause: c` names the cause outright, nil included,
+            // which is what keeps `attach_backtrace` from taking `$!`.
+            let cause_key = crate::shared::symbols::intern("cause");
+            if let Some(&(_, cause)) = call
+                .keywords
+                .iter()
+                .find(|&&(key, _)| key.as_symbol() == Some(cause_key))
+            {
+                let object = scope.get(exception);
+                ivar_set(scope, object, symbol(EXC_CAUSE), cause)?;
+            }
+            Ok(Some(Unwind::Exception(scope.get(exception))))
         }
 
         Native::Throw => {
@@ -6727,6 +7031,22 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         (Builtin::Kernel, &["__strerror__"], Native::Strerror),
         (Builtin::Kernel, &["__errno_class__"], Native::ErrnoClass),
         (Builtin::Kernel, &["__signal_list__"], Native::SignalList),
+        (
+            Builtin::Kernel,
+            &["__backtrace_here__"],
+            Native::BacktraceHere,
+        ),
+        (Builtin::Kernel, &["__stderr_tty__"], Native::StderrTty),
+        (
+            Builtin::Kernel,
+            &["__needs_threads__"],
+            Native::NeedsThreads,
+        ),
+        (
+            Builtin::Kernel,
+            &["__absolute_path__"],
+            Native::AbsolutePath,
+        ),
         (Builtin::Float, &["to_s"], Native::FloatToS),
         (Builtin::String, &["[]"], Native::StringIndex),
         (Builtin::String, &["<=>"], Native::StringCompare),

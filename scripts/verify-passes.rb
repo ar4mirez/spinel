@@ -18,7 +18,9 @@ require "set"
 # on snippets a human chose; this one checks it on every example it actually
 # claims, so a construct nobody thought to put in the table is still covered.
 
+require "fileutils"
 require "open3"
+require "tmpdir"
 
 ROOT = File.expand_path("..", __dir__)
 HARNESS = File.join(ROOT, "target", "release", "spec-harness")
@@ -51,6 +53,19 @@ class ShouldProxy
     unless held
       ::Kernel.raise SpecFailure,
                      "#{@value.inspect} should#{@negated ? " not" : ""} equal #{other.inspect}"
+    end
+
+    true
+  end
+
+  # `x.should =~ /re/` — mspec's match matcher, which `spec/harness` learned
+  # for #29: it holds when `x =~ re` is truthy.
+  def =~(other)
+    held = @value =~ other
+    held = !held if @negated
+    unless held
+      ::Kernel.raise SpecFailure,
+                     "#{@value.inspect} should#{@negated ? " not" : ""} match #{other.inspect}"
     end
 
     true
@@ -182,13 +197,25 @@ sources = Hash.new { |cache, path| cache[path] = File.binread(path) }
 #
 # The child writes its verdict down a pipe rather than using an exit status,
 # because the message is what makes a disagreement actionable.
+#
+# The example is `load`ed from a file rather than `eval`ed, because that is how
+# mspec runs a spec file and the difference is visible once backtraces are
+# (#29): a loaded file's top level is `<top (required)>`, an eval's is `<main>`,
+# and `Location#base_label` asserts on it. The file sits at the spec's own
+# relative path under a temporary directory, so a backtrace names
+# `backtrace_spec.rb` just as the real run's does.
 def run_isolated(text, path)
   read, write = IO.pipe
   pid = fork do
     read.close
     verdict =
       begin
-        eval(text, TOPLEVEL_BINDING.dup, path, 1) # rubocop:disable Security/Eval
+        Dir.mktmpdir("verify-passes") do |dir|
+          file = File.join(dir, path)
+          FileUtils.mkdir_p(File.dirname(file))
+          File.binwrite(file, text)
+          load file
+        end
         nil
       rescue SpecFailure => e
         "says #{e.message}"
@@ -227,15 +254,31 @@ listing.each_line do |line|
   full = File.join(ROOT, path)
   loaded_fixtures[full] ||= (load_fixtures(full) || true)
   source = sources[full]
-  text = span.split(",").map { |range|
-    first, last = range.split("-").map(&:to_i)
-    source.byteslice(first, last - first).force_encoding("UTF-8")
-  }.join("\n")
   # A magic comment governs its whole file, and slicing an example out of one
   # leaves it behind — which changes the answer rather than the syntax:
   # `(+s).equal?(s)` is true for a mutable literal and false for a frozen one.
-  # Ruby honours these at the top of an eval'd string, so carry them over.
-  text = "#{magic_comments(source)}#{text}" unless magic_comments(source).empty?
+  # Ruby honours these at the top of a file, so carry them over.
+  #
+  # Each slice is placed on the line it was written on, padding with blank
+  # lines, so a backtrace or `__LINE__` in the replay names the line Spinel's
+  # run did (#29). A slice that starts on a line already passed — a hook
+  # written below its example — follows on the next line instead.
+  text = +magic_comments(source)
+  line = text.count("\n") + 1
+  span.split(",").each do |range|
+    first, last = range.split("-").map(&:to_i)
+    slice = source.byteslice(first, last - first).force_encoding("UTF-8")
+    target = source.byteslice(0, first).count("\n") + 1
+    if target > line
+      text << "\n" * (target - line)
+      line = target
+    elsif !text.empty?
+      text << "\n"
+      line += 1
+    end
+    text << slice
+    line += slice.count("\n")
+  end
   checked += 1
 
   # A process per example, not just a fresh binding.
