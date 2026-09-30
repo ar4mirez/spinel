@@ -2,13 +2,15 @@
 #
 # `Class#allocate` gives a Hash three instance variables: `@pairs`, an
 # association list of `[key, value]` Arrays, plus the default and whether it is
-# a block. Every method here is a linear walk over `@pairs`.
+# a block. Two more arrive on use: `@hashes`, each key's hash code as it was
+# when stored (#22), and `@compare_by_identity`. Every method here is a linear
+# walk over `@pairs`.
 #
 # ponytail: O(n) lookup. A real Hash is an open-addressed table keyed by
-# `#hash`, and it is worth writing when a spec can construct a hash to measure:
-# hash literals are not compiled yet (#157), so today the only way to build one
-# is `Hash.new` plus `[]=`. The upgrade is `core/hash.rb` and one hashing
-# primitive; nothing outside this file knows the representation.
+# `#hash`, and `@hashes` is already the half of it that decides which slot. The
+# upgrade is this file and a primitive over it; outside it, only
+# `hash_pairs`, `hash_of_pairs` and `expand_splats` in `interp.rs` know the
+# representation, and each says so.
 class Hash
   include Enumerable
 
@@ -122,6 +124,9 @@ class Hash
     pairs = []
     other.each_pair { |key, value| pairs.push([key, value]) }
     @pairs = pairs
+    @hashes = nil
+    # Measured: `compare_by_identity` survives `dup` and `clone`.
+    @compare_by_identity = other.compare_by_identity?
     __copy_default_from__(other)
     self
   end
@@ -223,18 +228,69 @@ class Hash
     size == 0
   end
 
-  # Key identity is `eql?`, not `==`. The difference is what keeps `1` and
-  # `1.0` distinct keys: they are `==` but not `eql?`, and Ruby's Hash keeps
-  # both. Every lookup here goes through this one method, so `[]`, `[]=`,
-  # `key?`, `fetch` and `delete` all agree by construction.
+  # Key identity is `hash` then `eql?`, not `==`, which is CRuby's (#22): a
+  # candidate must have the same hash code *and* be `eql?` — asked of the key
+  # being looked up — or be the very same object. `1` and `1.0` stay distinct
+  # keys because they are `==` but not `eql?`, and a key class whose `hash`
+  # disagrees with its `eql?` is not found, as in Ruby. Every lookup here goes
+  # through this one method, so `[]`, `[]=`, `key?`, `fetch` and `delete` all
+  # agree by construction.
+  #
+  # A key's hash code is taken when it is stored, in `@hashes` beside
+  # `@pairs`, so a key mutated afterwards is not found until `rehash` — which
+  # is Ruby's behaviour and what `rehash_spec.rb` checks. `@hashes` is dropped
+  # (nil) by anything that rebuilds `@pairs`, and recomputed on demand.
+  #
+  # Under `compare_by_identity` the only question is identity, and `hash` is
+  # never called: measured.
   def __index__(key)
     pairs = @pairs
     i = 0
+    if @compare_by_identity
+      id = key.__id__
+      while i < pairs.size
+        return i if pairs[i][0].__id__ == id
+        i = i + 1
+      end
+      return nil
+    end
+    code = __element_hash__(key)
+    hashes = __hashes__
     while i < pairs.size
-      return i if pairs[i][0].eql?(key)
+      if hashes[i] == code
+        stored = pairs[i][0]
+        return i if stored.equal?(key) || key.eql?(stored)
+      end
       i = i + 1
     end
     nil
+  end
+
+  def __hashes__
+    @hashes ||= @pairs.map { |pair| __element_hash__(pair[0]) }
+  end
+
+  def compare_by_identity
+    raise FrozenError, "can't modify frozen Hash: " + inspect if frozen?
+    @compare_by_identity = true
+    @hashes = nil
+    self
+  end
+
+  def compare_by_identity?
+    @compare_by_identity == true
+  end
+
+  # Every key's hash code taken afresh. Two keys that have become `eql?` since
+  # they were stored collapse into the first one's position, keeping the later
+  # value — CRuby re-inserts in order. Measured.
+  def rehash
+    __check_frozen__
+    pairs = @pairs
+    @pairs = []
+    @hashes = []
+    pairs.each { |pair| self[pair[0]] = pair[1] }
+    self
   end
 
   # A miss goes through `default`, which is a method rather than the ivar: a
@@ -261,11 +317,18 @@ class Hash
     raise KeyError, "key not found: " + key.inspect
   end
 
+  # A String key that is not frozen is stored as a frozen copy, so mutating
+  # the caller's String cannot move it in the table — measured, and
+  # `compare_by_identity` is the one table that keeps the caller's own object.
   def []=(key, value)
     __check_frozen__
     at = __index__(key)
     if at.nil?
+      if !@compare_by_identity && key.is_a?(String) && !key.frozen?
+        key = key.dup.freeze
+      end
       @pairs.push([key, value])
+      @hashes.push(__element_hash__(key)) unless @hashes.nil? || @compare_by_identity
     else
       @pairs[at][1] = value
     end
@@ -320,21 +383,21 @@ class Hash
   # `filter_map`, `map` and `partition` all still answer Arrays. Measured.
   def select
     return to_enum(:select) unless block_given?
-    out = {}
+    out = __like_self__
     each_pair { |pair| out[pair[0]] = pair[1] if yield(pair[0], pair[1]) }
     out
   end
 
   def filter
     return to_enum(:filter) unless block_given?
-    out = {}
+    out = __like_self__
     each_pair { |pair| out[pair[0]] = pair[1] if yield(pair[0], pair[1]) }
     out
   end
 
   def reject
     return to_enum(:reject) unless block_given?
-    out = {}
+    out = __like_self__
     each_pair { |pair| out[pair[0]] = pair[1] unless yield(pair[0], pair[1]) }
     out
   end
@@ -393,6 +456,7 @@ class Hash
       i = i + 1
     end
     @pairs = kept
+    @hashes = nil
     gone
   end
 
@@ -463,6 +527,10 @@ class Hash
       raise TypeError, "no implicit conversion of " + other.class.name + " into Hash"
     end
     clear
+    # The argument's comparison comes over with its pairs, and the receiver's
+    # own is dropped: measured both ways.
+    @compare_by_identity = other.compare_by_identity?
+    @hashes = nil
     other.each_pair { |key, value| self[key] = value }
     __copy_default_from__(other)
     self
@@ -524,13 +592,19 @@ class Hash
   # `__index__` rather than `[]`: Ruby uses the regular reader even on a
   # subclass that overrides `[]`, which `slice_spec.rb` pins.
   def slice(*wanted)
-    out = {}
-    wanted.each { |key| out[key] = __index__(key) if key?(key) }
+    out = __like_self__
+    # The pair's value, read straight from the table: `__index__` is where the
+    # pair is, and a subclass's own `[]` is not consulted — measured, and
+    # `slice_spec.rb` pins it.
+    wanted.each do |key|
+      at = __index__(key)
+      out[key] = @pairs[at][1] unless at.nil?
+    end
     out
   end
 
   def except(*unwanted)
-    out = {}
+    out = __like_self__
     each_pair { |k, v| out[k] = v }
     unwanted.each { |key| out.delete(key) }
     out
@@ -583,7 +657,7 @@ class Hash
   end
 
   def compact
-    out = {}
+    out = __like_self__
     out.__copy_default_from__(self)
     each_pair { |k, v| out[k] = v unless v.nil? }
     out
@@ -633,7 +707,7 @@ class Hash
 
   def transform_values(&block)
     return to_enum(:transform_values) if block.nil?
-    out = {}
+    out = __like_self__
     each_pair { |k, v| out[k] = block.call(v) }
     out
   end
@@ -698,26 +772,28 @@ class Hash
     return false unless other.is_a?(Hash)
     __same_pairs__(other, true)
   end
-
-  # ponytail: `Hash#hash` is deliberately absent, so it stays `Kernel#hash`'s
-  # identity. A content digest is what `eql?` needs to be usable as a key, and
-  # writing one here hangs: `hash_spec.rb` builds `h[:a] = h` and asks for it,
-  # and a recursive walk over a self-referential table does not terminate.
-  # CRuby guards that with `rb_exec_recursive`; doing it in Ruby needs a
-  # threaded seen-list *and* an `Array#hash` to join it, because the spec also
-  # recurses through `h[:x] = [h]` — and `Array#hash` is #21's.
+  # Two empty hashes are equal whatever their comparison, and two non-empty
+  # ones that differ only in `compare_by_identity` are not. Measured.
   #
-  # A wrong-but-terminating digest would make `{a: 1}` findable as a key and
-  # break silently the first time two different hashes collided, so identity
-  # stays until both halves exist. `==` and `eql?` above terminate on the same
-  # structures only because they short-circuit on `equal?` first.
-
+  # A pair already being compared is taken as equal, which is how
+  # `h = {}; h[:x] = h; h == {x: h}` terminates and answers true, as CRuby's
+  # `rb_exec_recursive_paired` does. It shares the stack `Array#==` uses,
+  # because the recursion can run through either.
   def __same_pairs__(other, strict)
     return false unless size == other.size
-    each_pair do |key, value|
-      return false unless other.key?(key)
-      theirs = other[key]
-      return false unless strict ? value.eql?(theirs) : value == theirs
+    return true if empty?
+    return false unless compare_by_identity? == other.compare_by_identity?
+    comparing = Array.__comparing__
+    return true if comparing.any? { |a, b| a.equal?(self) && b.equal?(other) }
+    comparing.push([self, other])
+    begin
+      each_pair do |key, value|
+        return false unless other.key?(key)
+        theirs = other[key]
+        return false unless strict ? value.eql?(theirs) : value == theirs
+      end
+    ensure
+      comparing.pop
     end
     true
   end
@@ -737,5 +813,115 @@ class Hash
 
   def to_s
     inspect
+  end
+
+  # An empty Hash that compares keys the way this one does: `select`, `reject`,
+  # `slice`, `except`, `compact` and `transform_values` keep
+  # `compare_by_identity`, and `transform_keys` and `invert` drop it. Measured
+  # on ruby 4.0.7, one method at a time.
+  def __like_self__
+    out = {}
+    out.compare_by_identity if compare_by_identity?
+    out
+  end
+
+  # A content digest (#22): the same whatever order the pairs were added in —
+  # each pair's digest is summed — and the same for two hashes that are `eql?`,
+  # a self-containing one included, through `__recursive_hash__`.
+  def hash
+    __recursive_hash__(__hash_combine__(:__spinel_recursive_hash__, size)) do
+      sum = 0
+      each_pair do |key, value|
+        pair = __hash_combine__(__element_hash__(key), __element_hash__(value))
+        sum = (sum + pair) & 0x3fffffffffffffff
+      end
+      __hash_combine__(:__spinel_hash__, size, sum)
+    end
+  end
+
+  # The first pair, removed. Nil when there is none — measured, whatever the
+  # default says: `Hash.new(5).shift` is nil.
+  def shift
+    __check_frozen__
+    return nil if empty?
+    pair = @pairs[0]
+    delete(pair[0])
+    [pair[0], pair[1]]
+  end
+
+  # The subset order: `a <= b` when every pair of `a` is in `b`, by the same
+  # rules `==` uses — keys by the table, values by `==`.
+  def <=(other)
+    other = Hash.__convert__(other)
+    return false if size > other.size
+    each_pair do |key, value|
+      return false unless other.key?(key) && other[key] == value
+    end
+    true
+  end
+
+  def <(other)
+    other = Hash.__convert__(other)
+    size < other.size && self <= other
+  end
+
+  def >=(other)
+    Hash.__convert__(other) <= self
+  end
+
+  def >(other)
+    Hash.__convert__(other) < self
+  end
+
+  # The first key whose value is `==` to `value`; never the default.
+  def key(value)
+    each_pair { |k, v| return k if v == value }
+    nil
+  end
+
+  # In place, with CRuby's order: each original pair is removed — unless its
+  # key is one this call already produced — and its new key stored, so a new
+  # key never collides with an old one still waiting to be renamed. A Hash
+  # argument maps what it holds and leaves the rest to the block.
+  def transform_keys!(*mapping, &block)
+    if mapping.empty? && block.nil?
+      return to_enum(:transform_keys!) { size }
+    end
+    __check_frozen__
+    table = mapping.empty? ? nil : mapping[0]
+    if !mapping.empty? && table.nil?
+      raise TypeError, "no implicit conversion of nil into Hash"
+    end
+    produced = {}
+    to_a.each do |key, value|
+      delete(key) unless produced.key?(key)
+      new_key = if !table.nil? && table.key?(key)
+        table[key]
+      elsif !block.nil?
+        block.call(key)
+      else
+        key
+      end
+      self[new_key] = value
+      produced[new_key] = nil
+    end
+    self
+  end
+
+  # A Hash as is, anything with `to_hash` through it, and nil otherwise; a
+  # `to_hash` that answers something else is a TypeError. Measured.
+  def self.try_convert(value)
+    return value if value.is_a?(Hash)
+    return nil unless value.respond_to?(:to_hash)
+    converted = value.to_hash
+    return converted if converted.nil? || converted.is_a?(Hash)
+    raise TypeError,
+          "can't convert #{value.class} to Hash (#{value.class}#to_hash gives #{converted.class})"
+  end
+
+  def self.__convert__(value)
+    return value if value.is_a?(Hash)
+    raise TypeError, "no implicit conversion of #{value.class} into Hash" unless value.respond_to?(:to_hash)
+    value.to_hash
   end
 end

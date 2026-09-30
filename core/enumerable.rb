@@ -455,8 +455,9 @@ module Enumerable
     end
     each do |*a|
       item = __pack__(a)
-      seen = out[item]
-      out[item] = seen.nil? ? 1 : seen + 1
+      # `fetch`, not `[]`: the hash's default value or proc is not a count,
+      # measured — `tally(Hash.new(100))` starts every key at 1.
+      out[item] = out.fetch(item, 0) + 1
     end
     out
   end

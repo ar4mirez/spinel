@@ -168,6 +168,51 @@ fn classify(expr: &Expr) -> Statement<'_> {
     Statement::Effect(expr)
 }
 
+/// `actual == wanted`, dispatched: whether Ruby's `==` on `actual` holds.
+fn dispatch_eq(
+    scope: &mut HandleScope<'_>,
+    frame: &mut interp::Frame,
+    source: &Arc<SourceMap>,
+    locals: &mut Vec<Name>,
+    actual: Value,
+    wanted: Value,
+) -> Result<bool, Stop> {
+    let local = |locals: &mut Vec<Name>, name: &str| -> usize {
+        if let Some(index) = locals.iter().position(|n| &**n == name) {
+            return index;
+        }
+        locals.push(name.into());
+        locals.len() - 1
+    };
+    // Not Ruby identifiers, so no example's own local can collide with them.
+    let actual_slot = local(locals, "%actual");
+    let wanted_slot = local(locals, "%wanted");
+    frame.set_local(scope, actual_slot, actual);
+    frame.set_local(scope, wanted_slot, wanted);
+    let read = |name: &str| {
+        Expr::new(
+            Span::new(0, 0),
+            ExprKind::Var(spinel_ast::VarRef::Local {
+                name: name.into(),
+                depth: 0,
+            }),
+        )
+    };
+    let comparison = Expr::new(
+        Span::new(0, 0),
+        ExprKind::Call(Box::new(spinel_ast::Call {
+            receiver: Some(read("%actual")),
+            name: "==".into(),
+            name_span: Span::new(0, 0),
+            args: vec![read("%wanted")],
+            block: None,
+            flags: CallFlags::default(),
+        })),
+    );
+    let answer = eval(scope, frame, source, locals, &comparison)?;
+    Ok(answer != Value::NIL && answer != Value::FALSE)
+}
+
 /// `<subject> =~ <pattern>`, as an expression the compiler can be handed.
 fn match_of(subject: &Expr, pattern: &Expr) -> Expr {
     Expr::new(
@@ -276,6 +321,14 @@ fn run_inner(example: &Example, fixtures: &Fixtures, spans: &mut Vec<Span>) -> O
     // it and hands back the version it grew, so `a` is the same slot in the
     // statement that writes it and the one that reads it.
     let mut locals: Vec<Name> = example.locals.clone();
+    // The two slots `dispatch_eq` parks a comparison's values in, declared up
+    // front: adding a local later grows the frame into a new environment, and a
+    // block the example already made would keep reading the old one.
+    for hidden in ["%actual", "%wanted"] {
+        if !locals.iter().any(|n| &**n == hidden) {
+            locals.push(hidden.into());
+        }
+    }
     for name in compile::declared_locals(&example.scope)
         .into_iter()
         .chain(compile::declared_locals(&example.body))
@@ -380,9 +433,22 @@ fn run_inner(example: &Example, fixtures: &Fixtures, spans: &mut Vec<Span>) -> O
                         Ok(value) => value,
                         Err(stop) => return Outcome::Blocked(stop.reason()),
                     };
-                    let equal = match interp::ruby_eq(&mut scope, actual, wanted) {
+                    // `actual == wanted` dispatched as Ruby does, on `actual`:
+                    // mspec's `should ==` is exactly that call. The two values
+                    // are parked in hidden locals and the comparison compiled,
+                    // so a `Hash#==` written in `core/hash.rb` answers rather
+                    // than a Rust comparison that knows only Strings and
+                    // Arrays refusing (#22).
+                    let equal = match dispatch_eq(
+                        &mut scope,
+                        &mut frame,
+                        &example.source,
+                        &mut locals,
+                        actual,
+                        wanted,
+                    ) {
                         Ok(equal) => equal,
-                        Err(why) => return Outcome::Blocked(why.to_string()),
+                        Err(stop) => return Outcome::Blocked(stop.reason()),
                     };
                     if equal == negated {
                         let (actual, wanted) = (

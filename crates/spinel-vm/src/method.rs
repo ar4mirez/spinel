@@ -334,6 +334,13 @@ pub enum Native {
     /// asserts `Thread.new` raises `ThreadError` would read a Ruby exception as
     /// a wrong answer. This reads as "cannot be answered yet", which it is.
     NeedsThreads,
+    /// `Kernel#__hash_combine__(a, b)`: two hash values mixed into one (#22).
+    ///
+    /// The bit-mixing a content hash needs, which Ruby has no primitive for.
+    /// `Array#hash` and `Hash#hash` are Ruby folds over their elements' own
+    /// `hash` methods on top of it, so a key class with a custom `hash` is
+    /// honoured inside an Array or a Hash too.
+    HashCombine,
 }
 
 /// The bitwise operators on `Integer`, which share one primitive.

@@ -346,7 +346,7 @@ impl Program {
         let mut budget = MAX_STEPS;
         let mut at = start;
         loop {
-            if let Some(m) = self.run_from(haystack, at, &mut budget)? {
+            if let Some(m) = self.run_from(haystack, at, start, &mut budget)? {
                 return Ok(Some(m));
             }
             if at >= haystack.len() {
@@ -358,15 +358,19 @@ impl Program {
         }
     }
 
+    /// One attempt at `at`. `start` is where the whole search began, which is
+    /// what `\G` anchors to — not `at`: measured, `'hello'.match(/\Go/)` is
+    /// nil, and anchoring to the attempt matched the `o`.
     fn run_from(
         &self,
         haystack: &str,
         at: usize,
+        start: usize,
         budget: &mut u64,
     ) -> Result<Option<Match>, Error> {
         let saves = vec![None; (self.groups + 1) * 2];
         let marks = vec![None; self.marks];
-        let Some((_, saves)) = self.run(haystack, 0, at, at, saves, marks, budget)? else {
+        let Some((_, saves)) = self.run(haystack, 0, at, start, saves, marks, budget)? else {
             return Ok(None);
         };
         let caps = (0..=self.groups)

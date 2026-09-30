@@ -101,6 +101,43 @@ module Kernel
     @__inspecting__ ||= []
   end
 
+  # `hash` for a structure that may contain itself (#22), which is CRuby's
+  # `rb_exec_recursive_outer`: the block computes the real digest, and if any
+  # object meets itself anywhere below, the *outermost* call answers
+  # `recursive` instead — a value that depends only on the outer object's kind
+  # and size. That is what makes `rec = []; rec << rec` hash like `[rec]` and
+  # `[[rec]]`, which `eql?` says it must. Measured on ruby 4.0.7.
+  def __recursive_hash__(recursive)
+    stack = Kernel.__hashing__
+    throw :__spinel_hash_recursion__ if stack.any? { |seen| seen.equal?(self) }
+    outermost = stack.empty?
+    stack.push(self)
+    begin
+      return yield unless outermost
+      finished = false
+      value = catch(:__spinel_hash_recursion__) do
+        digest = yield
+        finished = true
+        digest
+      end
+      finished ? value : recursive
+    ensure
+      stack.pop
+    end
+  end
+
+  # The objects `hash` is part-way through, innermost last. Per heap.
+  def self.__hashing__
+    @__hashing__ ||= []
+  end
+
+  # An element's `hash`, through `to_int` when it answers something else — the
+  # conversion CRuby's `Array#hash` makes, and `array/hash_spec.rb` pins.
+  def __element_hash__(value)
+    code = value.hash
+    code.is_a?(Integer) ? code : code.to_int
+  end
+
   # `loop` stops on StopIteration rather than propagating it, which is what
   # makes `loop { enum.next }` end. Nothing raises it until Enumerator lands;
   # the rescue is the contract, not a placeholder.
