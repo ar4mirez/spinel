@@ -350,7 +350,7 @@ fn exception_hierarchy() -> impl Iterator<Item = (&'static str, &'static str)> {
 ///
 /// Spinel implements `Exception#initialize` and nothing else, so `new` on one
 /// of these would answer as though it had validated arguments it never looked
-/// at — `SignalException.new(:NOSIG)` raises in Ruby and would not here. The
+/// at — `UncaughtThrowError.new("x")` raises in Ruby and would not here. The
 /// marker is measured by `scripts/exceptions-oracle.rb`, not judged.
 #[must_use]
 pub fn exception_defines_initialize(name: &str) -> bool {
@@ -1713,11 +1713,58 @@ impl<'h> HandleScope<'h> {
             self.classes_mut()
                 .const_set(Builtin::Object.id(), symbol, object);
         }
+        self.bootstrap_errno();
 
         // The handful of methods that are dispatch rather than Ruby. A heap
         // with classes is one where a `Proc` can be called; everything else
         // waits for `core/*.rb`.
         crate::interp::install_primitives(self);
+    }
+
+    /// The `Errno` module and one `SystemCallError` subclass per error number
+    /// (#29), each carrying its number as the constant `Errno`.
+    ///
+    /// Two names with one number are one class, reachable under both: on Linux
+    /// `Errno::EWOULDBLOCK.equal?(Errno::EAGAIN)`, and `errno_spec.rb` pins it.
+    /// The first name in the table is the one the class is called by, which is
+    /// what `crate::errno::table`'s order is for.
+    fn bootstrap_errno(&mut self) {
+        let object = Builtin::Object.id();
+        let errno_module = self.define_module(Some("Errno"));
+        let module_object = self.classes().object(errno_module);
+        self.classes_mut().const_set(
+            object,
+            crate::shared::symbols::intern("Errno"),
+            module_object,
+        );
+        let system_call_error = self
+            .classes()
+            .const_get_here(object, crate::shared::symbols::intern("SystemCallError"))
+            .and_then(|value| {
+                let handle = self.root(value);
+                self.class_id_of(handle)
+            })
+            .expect("exceptions.txt defines SystemCallError");
+        let errno_constant = crate::shared::symbols::intern("Errno");
+        let mut by_number: Vec<(i32, Value)> = Vec::new();
+        for (name, number) in crate::errno::table() {
+            let class = match by_number.iter().find(|&&(known, _)| known == number) {
+                Some(&(_, class)) => class,
+                None => {
+                    let id =
+                        self.define_class(Some(&format!("Errno::{name}")), Some(system_call_error));
+                    let number_value = Value::fixnum(i64::from(number))
+                        .expect("an errno number is an i32, which is a fixnum");
+                    self.classes_mut()
+                        .const_set(id, errno_constant, number_value);
+                    let class = self.classes().object(id);
+                    by_number.push((number, class));
+                    class
+                }
+            };
+            self.classes_mut()
+                .const_set(errno_module, crate::shared::symbols::intern(name), class);
+        }
     }
 
     /// A new class. `superclass` is `None` only for `BasicObject`.

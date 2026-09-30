@@ -230,3 +230,93 @@ class SyntaxError
     @path
   end
 end
+
+# `SystemCallError` and the `Errno::E*` classes under it (#29).
+#
+# The classes, their `Errno` constants and the number-to-class map are the
+# platform's and come from bootstrap; the default message is `strerror(3)`
+# through `__strerror__`. Everything else is here.
+#
+# Called on `SystemCallError` itself the arguments are `(message, errno, func)`
+# and the answer is an instance of the `Errno` class that number belongs to —
+# `SystemCallError.new("m", 2)` is an `Errno::ENOENT`. CRuby does that by
+# changing the new object's class in the middle of `initialize`, which Ruby
+# cannot, so `new` picks the class first. Called on an `Errno` class the
+# arguments are `(message, func)` and the number is the class's own constant.
+class SystemCallError
+  def self.new(*given)
+    return super unless equal?(SystemCallError)
+    message, errno, func = __syserr_arguments__(given)
+    target = errno.nil? ? nil : __errno_class__(__syserr_long__(errno))
+    exception = (target || SystemCallError).allocate
+    exception.__send__(:__syserr_setup__, message, errno, func)
+    exception
+  end
+
+  def self.__syserr_arguments__(given)
+    if given.empty? || given.size > 3
+      raise ArgumentError, "wrong number of arguments (given #{given.size}, expected 1..3)"
+    end
+    message, errno, func = given
+    # A lone Integer is the errno, not the message: `SystemCallError.new(2)`.
+    if given.size == 1 && message.is_a?(Integer)
+      errno = message
+      message = nil
+    end
+    [message, errno, func]
+  end
+
+  # CRuby's `NUM2LONG`: an Integer as is, anything else through `to_int` or a
+  # TypeError. A Float truncates through `Float#to_int`, which is #18's.
+  def self.__syserr_long__(value)
+    return value if value.is_a?(Integer)
+    unless value.respond_to?(:to_int)
+      raise TypeError, "no implicit conversion of #{value.nil? ? "nil" : value.class} into Integer"
+    end
+    value.to_int
+  end
+
+  def initialize(*given)
+    if self.class.equal?(SystemCallError)
+      message, errno, func = SystemCallError.__syserr_arguments__(given)
+    else
+      if given.size > 2
+        raise ArgumentError, "wrong number of arguments (given #{given.size}, expected 0..2)"
+      end
+      message, func = given
+      errno = self.class::Errno
+    end
+    __syserr_setup__(message, errno, func)
+  end
+
+  def __syserr_setup__(message, errno, func)
+    text = errno.nil? ? "unknown error" : __strerror__(__syserr_int__(errno))
+    # `func` only appears beside a message: `Errno::EINVAL.new(nil, "loc")` is
+    # plain "Invalid argument". Measured.
+    unless message.nil?
+      unless message.is_a?(String)
+        raise TypeError, "no implicit conversion of #{message.class} into String"
+      end
+      text = text + " @ " + func.to_s unless func.nil?
+      text = text + " - " + message
+    end
+    @message = text
+    @errno = errno
+  end
+
+  # CRuby's `NUM2INT`, which is what `strerror` is called through: in range for
+  # a C `int` or a RangeError naming the value.
+  def __syserr_int__(value)
+    number = SystemCallError.__syserr_long__(value)
+    if number > 2147483647
+      raise RangeError, "integer #{number} too big to convert to 'int'"
+    elsif number < -2147483648
+      raise RangeError, "integer #{number} too small to convert to 'int'"
+    end
+    number
+  end
+
+  def errno
+    @errno
+  end
+end

@@ -295,6 +295,24 @@ pub enum Native {
     /// module to name, bootstrap and document before anything needed it.
     /// `puts`, `print` and `p` are Ruby on top of this.
     WriteString,
+    /// `strerror(3)` for an error number, as a String (#29).
+    ///
+    /// Installed as `Kernel#__strerror__`. It is the platform's message table,
+    /// which Ruby cannot reach: `SystemCallError#initialize` is Ruby on top of
+    /// it, and so is every `Errno::E*` default message.
+    Strerror,
+    /// The `Errno::E*` class for an error number, or nil (#29).
+    ///
+    /// Installed as `Kernel#__errno_class__`. `SystemCallError.new(msg, 2)`
+    /// answers an `Errno::ENOENT`, and which class a number belongs to is the
+    /// platform's table rather than anything Ruby can enumerate.
+    ErrnoClass,
+    /// The platform's signal table, as `[[name, number], ...]` in CRuby's
+    /// order, followed by `NSIG` (#29).
+    ///
+    /// Installed as `Kernel#__signal_list__`. `Signal.list` and
+    /// `SignalException#initialize` are Ruby on top of it.
+    SignalList,
 }
 
 /// The bitwise operators on `Integer`, which share one primitive.
