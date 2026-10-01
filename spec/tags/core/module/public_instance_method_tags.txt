@@ -1,0 +1,1 @@
+fails(#27: `Module#public_instance_method` answers an UnboundMethod, which is #27's):Module#public_instance_method is a public method

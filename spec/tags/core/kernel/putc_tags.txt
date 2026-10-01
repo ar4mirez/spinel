@@ -1,0 +1,1 @@
+fails(#41: `Kernel#putc` reads or writes an IO or a File, which do not exist yet):Kernel.putc is a public method

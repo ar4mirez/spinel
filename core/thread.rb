@@ -21,6 +21,11 @@ class Thread
     __needs_threads__
   end
 
+  # No Thread can exist yet, but the method does: `Thread#raise` is public.
+  def raise(*)
+    __needs_threads__
+  end
+
   # Measured: CRuby's `Thread` has no allocator.
   def self.allocate
     raise TypeError, "allocator undefined for Thread"

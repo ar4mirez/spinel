@@ -1,0 +1,2 @@
+fails(#44: `Kernel#trap` installs a signal handler, which is the signals slice):Kernel#trap is a private method
+fails(#44: `Kernel#trap` installs a signal handler, which is the signals slice):Kernel.trap is a public method

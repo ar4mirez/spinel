@@ -1,0 +1,1 @@
+fails(#39: the module fixtures stop at an `autoload` of a fixture file before the line that records the top-level `Module.nesting`):Module::Nesting returns the list of Modules nested at the point of call

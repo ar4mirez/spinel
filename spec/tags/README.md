@@ -77,27 +77,38 @@ fix is a different slice. The reason says which slice, by number.
 
 ## What is here now
 
-Seventy-two tags across twenty-nine files, and thirty-seven of them are one thing:
+A hundred and fifty-three tags across seventy-three files. Before #28 there were
+seventy-two across twenty-nine, and thirty-seven of those are one thing:
 a global alias, where #166's table holds two names as two entries and making one
 the other's second spelling is #39's runtime state. They sit in
 `language/predefined_tags.txt`, `language/defined_tags.txt` and
 `library/English/English_tags.txt`. The remaining twenty-four name fibers
 (#16, #26), `Kernel#Float` on a String (#181), structural `#hash` (#21, #22,
 #23), the `Hash` table and its `inspect` format (#19, #20), Range-aware indexing
-in `MatchData` (#33), definition hooks (#28), and the literals (#157). The last
+in `MatchData` (#33), and the literals (#157). The last
 two name the harness itself (#145): `language/ensure_tags.txt` and
 `language/rescue_tags.txt` hold one example each that defines a method inside
 the example, which mspec's `instance_exec` makes a singleton — labelled `foo`
 in a backtrace — and this harness, running the example on `main`, makes
 `Object#foo`. They ran for the first time when #29 gave `caller` a backtrace.
-`language/block_tags.txt` holds one for #28: a `to_ary` that only
-`method_missing` answers, which ran for the first time when the harness's
-`should ==` started dispatching `==` to Ruby (#22). Eight more arrived when the
+Eight more arrived when the
 harness learned mspec's `x.should.predicate?` form (#21): six global-alias and
 predefined-global examples in `language/predefined_tags.txt` and
 `library/English/alias_tags.txt`, which are #39's like their neighbours, and
-one each for `instance_exec` class variables and `define_singleton_method`
-with an UnboundMethod, which are #28's and #27's.
+one for `define_singleton_method` with an UnboundMethod, which is #27's.
+
+#28 removed the tags it owned — a `singleton_method_added` that never fired,
+`instance_exec` class variables, and a `to_ary` only `method_missing` answers
+(which now refuses, since the block binder cannot call Ruby) — and #202's two,
+which its `is_a?` fix paid off. It added eighty-six, nearly all one shape:
+`core/kernel/*_spec.rb` opens with "is a private method" and "`Kernel.X` is a
+public method", which ran for the first time when reflection did, and the
+method they ask about belongs to another slice — IO (#41), processes (#43),
+loading (#39), Binding (#38), `Random` (#249), `Rational`/`Complex` (#34),
+`Float` (#181), `Integer` (#17), tracing (#127), signals (#44). The rest are
+the predefined constants (#41, #44, #65, #38), `Proc#==` (#27), `Queue` (#46),
+four `Module` examples whose fixture stops at an `autoload` (#39), and one
+`is_a?` example whose String subclass never runs `initialize` (#19).
 
 Constant visibility was four of them and is none of them now: #185 deleted its
 tags rather than rewording them, which is what closing an issue behind a tag is

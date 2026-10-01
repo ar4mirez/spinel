@@ -1,0 +1,1 @@
+fails(#41: `Kernel#printf` reads or writes an IO or a File, which do not exist yet):Kernel.printf is a public method

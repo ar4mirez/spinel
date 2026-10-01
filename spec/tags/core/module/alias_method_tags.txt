@@ -1,0 +1,1 @@
+fails(#39: the module fixtures stop at an `autoload` of a fixture file before `Kernel` aliases the `Object` method this example reads):Module#alias_method accesses a method defined on Object from Kernel

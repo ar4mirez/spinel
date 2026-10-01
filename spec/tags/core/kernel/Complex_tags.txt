@@ -1,0 +1,2 @@
+fails(#34: `Kernel#Complex` does not exist until `Rational` and `Complex` do):Kernel#Complex is a private method
+fails(#34: `Kernel#Complex` does not exist until `Rational` and `Complex` do):Kernel.Complex is a public method

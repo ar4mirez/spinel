@@ -1,0 +1,2 @@
+fails(#249: `Kernel#rand` needs `Random`):Kernel#rand is a private method
+fails(#249: `Kernel#rand` needs `Random`):Kernel.rand is a public method

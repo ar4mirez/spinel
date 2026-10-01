@@ -1,0 +1,1 @@
+fails(#39: `Kernel#load` loads files, which is `require` and `$LOAD_PATH`):Kernel.load is a public method

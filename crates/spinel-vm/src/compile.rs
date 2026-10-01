@@ -389,6 +389,7 @@ impl Zsuper {
         Zsuper {
             positional,
             keywords: spec.keywords.iter().map(|k| (k.name, k.slot)).collect(),
+            kwrest: spec.kwrest,
             depth: 0,
         }
     }
@@ -402,6 +403,8 @@ struct Zsuper {
     positional: Vec<(u16, bool)>,
     /// `(symbol index, slot)` per declared keyword.
     keywords: Vec<(u32, u16)>,
+    /// The `**rest` parameter's slot, forwarded with the keywords.
+    kwrest: Option<u16>,
     /// How many scopes up [`Self::positional`]'s slots live: zero in the method
     /// body itself, one inside a block written in it, and so on.
     depth: u16,
@@ -3845,9 +3848,29 @@ impl Compiler {
             }
             site.argc += 1;
         }
-        for &(name, slot) in &forward.keywords {
-            self.emit(Insn::GetLocal(slot, forward.depth));
-            site.keywords.push(name);
+        if let Some(rest) = forward.kwrest {
+            // `**rest` forwards as one keyword hash: the named keywords
+            // first, then the rest merged in — the lowering a `**` argument
+            // gets, so an empty rest passes no keywords at all.
+            self.push_const_name("Hash");
+            self.emit_send("__literal__", 0);
+            for &(name, slot) in &forward.keywords {
+                self.emit(Insn::Dup);
+                self.emit(Insn::PushSym(name));
+                self.emit(Insn::GetLocal(slot, forward.depth));
+                self.emit_send("[]=", 2);
+                self.emit(Insn::Pop);
+            }
+            self.emit(Insn::Dup);
+            self.emit(Insn::GetLocal(rest, forward.depth));
+            self.emit_send("__merge_literal__", 1);
+            self.emit(Insn::Pop);
+            site.kwsplat = true;
+        } else {
+            for &(name, slot) in &forward.keywords {
+                self.emit(Insn::GetLocal(slot, forward.depth));
+                site.keywords.push(name);
+            }
         }
         // An explicit `&b` on a bare `super` is legal Ruby and overrides the
         // implicit forwarding the interpreter does.

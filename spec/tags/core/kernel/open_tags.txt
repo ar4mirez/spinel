@@ -1,0 +1,1 @@
+fails(#41: `Kernel#open` reads or writes an IO or a File, which do not exist yet):Kernel.open is a public method

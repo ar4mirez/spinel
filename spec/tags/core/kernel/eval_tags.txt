@@ -1,0 +1,1 @@
+fails(#38: `Kernel#eval` needs a Binding, which is string `eval`'s slice):Kernel#eval is a private method

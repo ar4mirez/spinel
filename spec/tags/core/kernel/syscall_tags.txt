@@ -1,0 +1,2 @@
+fails(#43: `Kernel#syscall` is a process operation — exit statuses, at-exit hooks, child processes — which the runtime does not have yet):Kernel#syscall is a private method
+fails(#43: `Kernel#syscall` is a process operation — exit statuses, at-exit hooks, child processes — which the runtime does not have yet):Kernel.syscall is a public method

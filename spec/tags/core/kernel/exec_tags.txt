@@ -1,0 +1,2 @@
+fails(#43: `Kernel#exec` is a process operation — exit statuses, at-exit hooks, child processes — which the runtime does not have yet):Kernel#exec is a private method
+fails(#43: `Kernel#exec` is a process operation — exit statuses, at-exit hooks, child processes — which the runtime does not have yet):Kernel.exec is a public method

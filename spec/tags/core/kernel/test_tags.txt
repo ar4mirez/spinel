@@ -1,0 +1,2 @@
+fails(#41: `Kernel#test` reads or writes an IO or a File, which do not exist yet):Kernel#test is a private method
+fails(#41: `Kernel#test` reads or writes an IO or a File, which do not exist yet):Kernel.test is a public method

@@ -1,0 +1,2 @@
+fails(#39: `Kernel#autoload` loads files, which is `require` and `$LOAD_PATH`):Kernel#autoload is a private method
+fails(#39: `autoload` registers a file to `require` on first reference, which is `require`'s slice):Kernel#autoload sets the autoload constant in Object's constant table

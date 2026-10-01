@@ -37,3 +37,28 @@ class Regexp
     self == other
   end
 end
+
+# `===` is Ruby so that a String-like object's `to_str` is asked (#28): a
+# Symbol matches as its name, anything else that converts matches as what it
+# converts to, and anything that does not is no match — `===` never raises for
+# that. Measured on ruby 4.0.7.
+class Regexp
+  def ===(other)
+    text = __case_text__(other)
+    if text.nil?
+      $~ = nil
+      return false
+    end
+    __case_eq__(text)
+  end
+
+  # What `===` matches `other` as, or nil when it is not String-like.
+  def __case_text__(other)
+    return other if other.is_a?(String)
+    return other.to_s if other.is_a?(Symbol)
+    return nil unless other.respond_to?(:to_str)
+    text = other.to_str
+    return text if text.is_a?(String)
+    raise TypeError, "can't convert #{other.class} to String (#{other.class}#to_str gives #{text.class})"
+  end
+end

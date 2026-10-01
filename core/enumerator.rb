@@ -653,6 +653,19 @@ class Enumerator
       self
     end
 
+    # The sources, shared rather than copied, as CRuby's `dup` does.
+    def initialize_copy(other)
+      return self if equal?(other)
+      super
+      raise ArgumentError, "uninitialized product" if other.__sources__.nil?
+      @sources = other.__sources__
+      self
+    end
+
+    def __sources__
+      @sources
+    end
+
     def each(&block)
       raise ArgumentError, "uninitialized product" if @sources.nil?
       return to_enum(:each) if block.nil?
