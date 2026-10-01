@@ -649,6 +649,7 @@ impl Compiler {
         isize::from(receiver)
             + site.argc as isize
             + site.keywords.len() as isize
+            + isize::from(site.kwsplat)
             + isize::from(site.block == BlockRef::Pass)
     }
 
@@ -2220,7 +2221,11 @@ impl Compiler {
             Some(body) => self.statements(body, true)?,
             None => self.emit(Insn::PushNil),
         }
-        debug_assert_eq!(self.depth, after_then, "if arms disagree about stack depth");
+        debug_assert_eq!(
+            self.depth, after_then,
+            "if arms disagree about stack depth in {} line {}",
+            self.name, self.line
+        );
         self.patch_here(to_end);
         Ok(())
     }
