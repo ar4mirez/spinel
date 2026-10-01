@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+libc = "0.2.189"
 num-bigint = "0.4.8"
 num-traits = "0.2.19"
 spinel-ast.workspace = true

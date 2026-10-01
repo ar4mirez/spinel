@@ -504,6 +504,7 @@ version = "0.0.1"
 name = "spinel-vm"
 version = "0.0.1"
 dependencies = [
+ "libc",
  "num-bigint",
  "num-traits",
  "spinel-ast",

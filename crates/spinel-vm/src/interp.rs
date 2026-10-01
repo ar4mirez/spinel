@@ -329,6 +329,14 @@ struct Call {
     /// still answers the object. A flag on the frame rather than a re-entrant
     /// `eval`, so a Ruby `initialize` still costs no Rust stack.
     keeps_receiver: bool,
+    /// Raise the value below `base` when this frame leaves, rather than
+    /// answering it.
+    ///
+    /// Set with `keeps_receiver` by `raise Klass, msg` when `Klass` has an
+    /// `initialize` written in Ruby: Ruby's `raise` is `Klass.exception(msg)`,
+    /// which is `new`, so that `initialize` has to run before anything is
+    /// raised — and a native cannot sequence the frame and then the raise.
+    raises_receiver: bool,
     /// This frame's identity, unique for the whole evaluation.
     ///
     /// `break` and `return` out of a block name the frame they end, and an
@@ -496,6 +504,7 @@ pub fn eval_in(
         pc: 0,
         base: 0,
         keeps_receiver: false,
+        raises_receiver: false,
         // A `def` at a script's top level is a *private* instance method of
         // `Object` — `def m; end; Object.new.m` raises. CRuby gives the top
         // level cref `METHOD_VISI_PRIVATE`, and this is that (#161).
@@ -1252,6 +1261,12 @@ pub fn eval_in(
                     }
                     // `Class#new` left the object below the base; `initialize`'s own
                     // value is dropped.
+                    if done.raises_receiver {
+                        let exception = stack
+                            .pop()
+                            .expect("`raise` left the exception below the base");
+                        return Ok(Step::Unwind(Unwind::Exception(exception)));
+                    }
                     if !done.keeps_receiver {
                         stack.push(value);
                     }
@@ -1393,7 +1408,7 @@ fn unwind_to_handler(
     scope: &mut HandleScope<'_>,
     stack: &mut Vec<Value>,
     frames: &mut Vec<Call>,
-    unwind: Unwind,
+    mut unwind: Unwind,
 ) -> Result<Option<Value>, Error> {
     loop {
         let top = frames.len() - 1;
@@ -1492,6 +1507,15 @@ fn unwind_to_handler(
         if let Some(value) = landed {
             if frames.is_empty() {
                 return Ok(Some(value));
+            }
+            if done.raises_receiver && matches!(unwind, Unwind::Return { .. }) {
+                // An explicit `return` out of an `initialize` that `raise` ran
+                // is still `initialize` finishing: the object is raised.
+                let exception = stack
+                    .pop()
+                    .expect("`raise` left the exception below the base");
+                unwind = Unwind::Exception(exception);
+                continue;
             }
             if done.keeps_receiver {
                 // `Class#new` left the object below this frame's base so that
@@ -2059,6 +2083,7 @@ fn push_frame(
         pc: 0,
         base: stack.len(),
         keeps_receiver: false,
+        raises_receiver: false,
         scope_default: links.scope_default,
         id: links.id,
         home: links.home,
@@ -2890,6 +2915,7 @@ fn open_class(
         pc: 0,
         base: stack.len(),
         keeps_receiver: false,
+        raises_receiver: false,
         // Where a `return` in this body goes — see `links` above, which is the
         // one place that decides it. A `class`/`module` body is its own target;
         // a `class << obj` body is transparent and inherits its opener's.
@@ -4561,7 +4587,7 @@ fn native_call<'h>(
             // that still have no Ruby `initialize` to dispatch to.
             // Owned *below* `Exception`: since #29 `Exception#initialize` is
             // itself Ruby, so "has a Ruby initialize" would be true of every
-            // exception class and would take `SignalException.new(:NOSIG)`
+            // exception class and would take `UncaughtThrowError.new("x")`
             // off the refusal it still needs. What matters is whether the
             // class or one of its ancestors under `Exception` wrote its own.
             let written_in_ruby = {
@@ -4573,7 +4599,7 @@ fn native_call<'h>(
             };
             if is_exception_class(scope, id) && !written_in_ruby {
                 // ...unless CRuby gives it an `initialize` of its own, which
-                // Spinel does not have. `SignalException.new(:NOSIG)` raises
+                // Spinel does not have. `UncaughtThrowError.new("x")` raises
                 // there and would quietly succeed here, which is a wrong answer
                 // rather than a missing one. Measured by the oracle, not judged.
                 if scope
@@ -5258,6 +5284,68 @@ fn native_call<'h>(
                 Error::raise("RuntimeError", format!("cannot write to stdout: {err}"))
             })?;
             stack.push(Value::NIL);
+            Ok(None)
+        }
+
+        Native::Strerror => {
+            let Some(number) = call.args.first().and_then(|v| v.as_fixnum()) else {
+                return Err(Error::NoDispatch {
+                    op: "__strerror__",
+                    operands: "an argument that is not an Integer",
+                });
+            };
+            // `core/exception.rb` range-checks to a C `int` before calling, as
+            // CRuby's `NUM2INT` does, so this never truncates a real errno.
+            let number = i32::try_from(number).map_err(|_| Error::NoDispatch {
+                op: "__strerror__",
+                operands: "an Integer outside a C int",
+            })?;
+            let value = string_new(scope, &crate::errno::message(number));
+            stack.push(value);
+            Ok(None)
+        }
+
+        Native::ErrnoClass => {
+            let Some(number) = call.args.first().and_then(|v| v.as_fixnum()) else {
+                return Err(Error::NoDispatch {
+                    op: "__errno_class__",
+                    operands: "an argument that is not an Integer",
+                });
+            };
+            // Resolved through the `Errno` module's constants by the table's
+            // own names, so the answer is whatever class bootstrap put there.
+            // 0 is in the table: measured, `SystemCallError.new(0)` is an
+            // `Errno::NOERROR` whose message is the platform's "Success".
+            let found = crate::errno::table().find(|&(_, known)| i64::from(known) == number);
+            let errno_module = scope
+                .classes()
+                .const_get_here(
+                    Builtin::Object.id(),
+                    crate::shared::symbols::intern("Errno"),
+                )
+                .and_then(|value| class_id_of(scope, value));
+            let class = match (found, errno_module) {
+                (Some((name, _)), Some(module)) => scope
+                    .classes()
+                    .const_get_here(module, crate::shared::symbols::intern(name))
+                    .unwrap_or(Value::NIL),
+                _ => Value::NIL,
+            };
+            stack.push(class);
+            Ok(None)
+        }
+
+        Native::SignalList => {
+            let mut entries = Vec::new();
+            for (name, number) in crate::signal::list() {
+                let name = string_new(scope, name);
+                let number = Value::fixnum(i64::from(number)).expect("a signal number is a fixnum");
+                entries.push(new_array(scope, &[name, number]));
+            }
+            let limit = Value::fixnum(i64::from(crate::signal::LIMIT)).expect("NSIG is a fixnum");
+            let pairs = new_array(scope, &entries);
+            let value = new_array(scope, &[pairs, limit]);
+            stack.push(value);
             Ok(None)
         }
 
@@ -6003,6 +6091,36 @@ fn native_call<'h>(
         }
 
         Native::Raise => {
+            // `raise Klass, msg` is `Klass.exception(msg)`, which is `new`. A
+            // class whose `initialize` is Ruby — `Errno::ENOENT`, or any user
+            // exception with its own — has to run it first, so this is `new`
+            // with its frame told to raise the object when it leaves.
+            if let Some(class) = ruby_initialized_exception(scope, &call.args) {
+                let depth = frames.len();
+                let new = Pending {
+                    name: crate::shared::symbols::intern("new"),
+                    receiver: class,
+                    // The third argument is a backtrace, which is not the
+                    // constructor's; this VM keeps none (PRD 0012).
+                    args: call.args.get(1).copied().into_iter().collect(),
+                    keywords: Vec::new(),
+                    block: Value::NIL,
+                    block_is_literal: false,
+                    ..call
+                };
+                if let Some(unwind) =
+                    native_call(scope, stack, frames, new, Native::New, proc_class, ids)?
+                {
+                    return Ok(Some(unwind));
+                }
+                if frames.len() > depth {
+                    let last = frames.len() - 1;
+                    frames[last].raises_receiver = true;
+                    return Ok(None);
+                }
+                let exception = stack.pop().expect("`new` answered the exception");
+                return Ok(Some(Unwind::Exception(exception)));
+            }
             let exception = raise_argument(scope, frames, &call.args)?;
             Ok(Some(Unwind::Exception(exception)))
         }
@@ -6204,6 +6322,23 @@ fn native_call<'h>(
 /// raise TypeError, "boom"      # both
 /// raise TypeError.new("boom")  # an instance, passed through
 /// ```
+/// The exception class `raise`'s first argument names, when that class's
+/// `initialize` is written in Ruby below `Exception` — the same test
+/// `Native::New` uses to decide it cannot build the object itself.
+fn ruby_initialized_exception(scope: &mut HandleScope<'_>, args: &[Value]) -> Option<Value> {
+    let &first = args.first()?;
+    let id = class_id_of(scope, first)?;
+    if !is_exception_class(scope, id) {
+        return None;
+    }
+    let initialize = crate::shared::symbols::intern("initialize");
+    scope
+        .classes()
+        .lookup_uncached(id, initialize)
+        .is_some_and(|method| method.owner != Builtin::Exception.id())
+        .then_some(first)
+}
+
 fn raise_argument(
     scope: &mut HandleScope<'_>,
     frames: &[Call],
@@ -6589,6 +6724,9 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         (Builtin::Module, &["undef_method"], Native::UndefMethod),
         (Builtin::Class, &["superclass"], Native::Superclass),
         (Builtin::Kernel, &["__write__"], Native::WriteString),
+        (Builtin::Kernel, &["__strerror__"], Native::Strerror),
+        (Builtin::Kernel, &["__errno_class__"], Native::ErrnoClass),
+        (Builtin::Kernel, &["__signal_list__"], Native::SignalList),
         (Builtin::Float, &["to_s"], Native::FloatToS),
         (Builtin::String, &["[]"], Native::StringIndex),
         (Builtin::String, &["<=>"], Native::StringCompare),
