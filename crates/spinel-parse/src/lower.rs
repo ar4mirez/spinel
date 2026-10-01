@@ -43,6 +43,10 @@ pub(crate) fn program(
     let body = lower.stmts(Some(&statements));
     let program = Program {
         span: span_of(&node.as_node().location()),
+        source: std::sync::Arc::new(spinel_ast::SourceMap::new(
+            lower.origin.path,
+            lower.origin.line_starts.to_vec(),
+        )),
         locals: lower.close_scope(constants(&node.locals())),
         body,
     };

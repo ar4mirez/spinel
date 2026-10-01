@@ -718,6 +718,26 @@ pub struct Iseq {
     /// new scope and must not. A `GetLocal` walking past this would be a
     /// compiler bug the interpreter cannot see, so the interpreter refuses.
     pub scope_barrier: bool,
+    /// The file this body was written in, for a backtrace (#29). `None` for a
+    /// body compiled from a tree with no [`spinel_ast::SourceMap`].
+    pub path: Option<Arc<str>>,
+    /// `(pc, line)`, one entry wherever the line changes, in pc order. The
+    /// line of an instruction is the last entry at or before it.
+    pub lines: Vec<(u32, u32)>,
+    /// How many blocks deep this body is inside its method or script: 0 for
+    /// those, 1 for a block written directly in one. A backtrace says
+    /// "block (2 levels) in ..." from it.
+    pub block_level: u32,
+}
+
+impl Iseq {
+    /// The source line the instruction at `pc` came from.
+    #[must_use]
+    pub fn line_at(&self, pc: usize) -> Option<u32> {
+        let pc = u32::try_from(pc).unwrap_or(u32::MAX);
+        let index = self.lines.partition_point(|&(start, _)| start <= pc);
+        index.checked_sub(1).map(|index| self.lines[index].1)
+    }
 }
 
 // ---------------------------------------------------------------------------

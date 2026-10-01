@@ -22,7 +22,7 @@ Guards are answered for `linux`, which is what `scripts/spec-status.sh` pins so 
 | `core/enumerable` | 61 | 446 | 289 | 0 | 153 | 4 | 65% |
 | `core/enumerator` | 73 | 390 | 120 | 0 | 269 | 1 | 31% |
 | `core/env` | 45 | 180 | 0 | 0 | 169 | 11 | 0% |
-| `core/exception` | 39 | 233 | 53 | 0 | 177 | 3 | 23% |
+| `core/exception` | 39 | 233 | 78 | 0 | 152 | 3 | 33% |
 | `core/false` | 9 | 13 | 3 | 0 | 10 | 0 | 23% |
 | `core/fiber` | 15 | 124 | 0 | 0 | 120 | 4 | 0% |
 | `core/file` | 111 | 622 | 0 | 0 | 543 | 79 | 0% |
@@ -32,13 +32,13 @@ Guards are answered for `linux`, which is what `scripts/spec-status.sh` pins so 
 | `core/hash` | 69 | 460 | 153 | 0 | 300 | 7 | 33% |
 | `core/integer` | 70 | 526 | 154 | 0 | 367 | 5 | 29% |
 | `core/io` | 103 | 1095 | 0 | 0 | 1024 | 71 | 0% |
-| `core/kernel` | 118 | 1277 | 119 | 0 | 1099 | 59 | 9% |
+| `core/kernel` | 118 | 1277 | 134 | 0 | 1084 | 59 | 10% |
 | `core/main` | 7 | 27 | 2 | 0 | 25 | 0 | 7% |
 | `core/marshal` | 6 | 330 | 0 | 0 | 324 | 6 | 0% |
 | `core/matchdata` | 30 | 191 | 56 | 0 | 115 | 20 | 29% |
 | `core/math` | 29 | 226 | 0 | 0 | 226 | 0 | 0% |
 | `core/method` | 26 | 155 | 0 | 0 | 154 | 1 | 0% |
-| `core/module` | 86 | 1021 | 109 | 0 | 877 | 35 | 11% |
+| `core/module` | 86 | 1021 | 112 | 0 | 874 | 35 | 11% |
 | `core/mutex` | 7 | 35 | 0 | 0 | 35 | 0 | 0% |
 | `core/nil` | 18 | 27 | 7 | 0 | 20 | 0 | 26% |
 | `core/numeric` | 46 | 132 | 9 | 0 | 122 | 1 | 7% |
@@ -59,14 +59,14 @@ Guards are answered for `linux`, which is what `scripts/spec-status.sh` pins so 
 | `core/struct` | 30 | 148 | 1 | 0 | 147 | 0 | 1% |
 | `core/symbol` | 29 | 159 | 19 | 0 | 139 | 1 | 12% |
 | `core/systemexit` | 2 | 6 | 4 | 0 | 2 | 0 | 67% |
-| `core/thread` | 54 | 363 | 0 | 0 | 329 | 34 | 0% |
+| `core/thread` | 54 | 363 | 21 | 0 | 308 | 34 | 6% |
 | `core/threadgroup` | 5 | 8 | 0 | 0 | 8 | 0 | 0% |
 | `core/time` | 66 | 430 | 0 | 0 | 424 | 6 | 0% |
 | `core/tracepoint` | 19 | 76 | 0 | 0 | 76 | 0 | 0% |
 | `core/true` | 9 | 13 | 3 | 0 | 10 | 0 | 23% |
 | `core/unboundmethod` | 20 | 80 | 0 | 0 | 77 | 3 | 0% |
 | `core/warning` | 5 | 31 | 0 | 0 | 28 | 3 | 0% |
-| `language` | 67 | 2464 | 1205 | 0 | 1194 | 65 | 49% |
+| `language` | 67 | 2464 | 1205 | 0 | 1192 | 67 | 49% |
 | `language/predefined` | 2 | 14 | 0 | 0 | 14 | 0 | 0% |
 | `language/regexp` | 11 | 257 | 168 | 0 | 87 | 2 | 65% |
 | `library/English` | 2 | 27 | 0 | 0 | 11 | 16 | 0% |
@@ -131,4 +131,4 @@ Guards are answered for `linux`, which is what `scripts/spec-status.sh` pins so 
 | `optional/capi` | 47 | 1651 | 10 | 0 | 1561 | 80 | 1% |
 | `optional/thread_safety` | 1 | 5 | 0 | 0 | 4 | 1 | 0% |
 | `security` | 13 | 27 | 0 | 0 | 25 | 2 | 0% |
-| **total** | 3835 | 25624 | 3030 | 0 | 20672 | 1922 | 12% |
+| **total** | 3835 | 25624 | 3094 | 0 | 20606 | 1924 | 12% |

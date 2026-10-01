@@ -23,7 +23,9 @@
 //! matchers that need method dispatch, and reports itself as the reason it was
 //! blocked so the next slice is chosen from data.
 
-use spinel_ast::{CallFlags, Expr, ExprKind, Name, Span};
+use std::sync::Arc;
+
+use spinel_ast::{CallFlags, Expr, ExprKind, Name, SourceMap, Span};
 use spinel_vm::class::Builtin;
 use spinel_vm::{ClassId, Definition, HandleScope, Heap, Native, Payload, Value, compile, interp};
 
@@ -49,6 +51,14 @@ enum Statement<'a> {
     Compare {
         subject: &'a Expr,
         expected: &'a Expr,
+        negated: bool,
+    },
+    /// `<subject>.should =~ <pattern>`, or `should_not`: mspec's `=~` matcher,
+    /// which holds when `subject =~ pattern` is truthy. Needed for #29, whose
+    /// backtrace examples all assert with it.
+    Matches {
+        subject: &'a Expr,
+        pattern: &'a Expr,
         negated: bool,
     },
     /// `<subject>.should.raise(<class>)`, or `should_not`.
@@ -90,6 +100,27 @@ impl Stop {
 /// `should.raise` — is a different shape and falls through to `Effect`, where it
 /// blocks on the method call it is.
 fn classify(expr: &Expr) -> Statement<'_> {
+    if let ExprKind::Call(outer) = &expr.kind
+        && &*outer.name == "=~"
+        && outer.args.len() == 1
+        && outer.block.is_none()
+        && let Some(receiver) = &outer.receiver
+        && let ExprKind::Call(inner) = &receiver.kind
+        && inner.args.is_empty()
+        && inner.block.is_none()
+        && let Some(subject) = &inner.receiver
+        && let negated = match &*inner.name {
+            "should" => false,
+            "should_not" => true,
+            _ => return Statement::Effect(expr),
+        }
+    {
+        return Statement::Matches {
+            subject,
+            pattern: &outer.args[0],
+            negated,
+        };
+    }
     if let ExprKind::Call(outer) = &expr.kind
         && &*outer.name == "=="
         && outer.args.len() == 1
@@ -135,6 +166,21 @@ fn classify(expr: &Expr) -> Statement<'_> {
         };
     }
     Statement::Effect(expr)
+}
+
+/// `<subject> =~ <pattern>`, as an expression the compiler can be handed.
+fn match_of(subject: &Expr, pattern: &Expr) -> Expr {
+    Expr::new(
+        subject.span,
+        ExprKind::Call(Box::new(spinel_ast::Call {
+            receiver: Some(subject.clone()),
+            name: "=~".into(),
+            name_span: subject.span,
+            args: vec![pattern.clone()],
+            block: None,
+            flags: CallFlags::default(),
+        })),
+    )
 }
 
 /// `<subject>.call`, as an expression the compiler can be handed.
@@ -263,7 +309,13 @@ fn run_inner(example: &Example, fixtures: &Fixtures, spans: &mut Vec<Span>) -> O
     // aggregates: 76 examples naming the fixture, not 50 nil receivers.
     let mut scope_error: Option<String> = None;
     for (statement, span) in example.scope.iter().zip(&example.scope_spans) {
-        match eval(&mut scope, &mut frame, &mut locals, statement) {
+        match eval(
+            &mut scope,
+            &mut frame,
+            &example.source,
+            &mut locals,
+            statement,
+        ) {
             Ok(_) => spans.push(*span),
             Err(stop) => {
                 if scope_error.is_none() {
@@ -308,11 +360,23 @@ fn run_inner(example: &Example, fixtures: &Fixtures, spans: &mut Vec<Span>) -> O
                     expected,
                     negated,
                 } => {
-                    let actual = match eval(&mut scope, &mut frame, &mut locals, subject) {
+                    let actual = match eval(
+                        &mut scope,
+                        &mut frame,
+                        &example.source,
+                        &mut locals,
+                        subject,
+                    ) {
                         Ok(value) => value,
                         Err(stop) => return Outcome::Blocked(stop.reason()),
                     };
-                    let wanted = match eval(&mut scope, &mut frame, &mut locals, expected) {
+                    let wanted = match eval(
+                        &mut scope,
+                        &mut frame,
+                        &example.source,
+                        &mut locals,
+                        expected,
+                    ) {
                         Ok(value) => value,
                         Err(stop) => return Outcome::Blocked(stop.reason()),
                     };
@@ -334,6 +398,40 @@ fn run_inner(example: &Example, fixtures: &Fixtures, spans: &mut Vec<Span>) -> O
                     }
                     ran_something = true;
                 }
+                Statement::Matches {
+                    subject,
+                    pattern,
+                    negated,
+                } => {
+                    // `subject =~ pattern`, dispatched as Ruby would: a String
+                    // subject and a Regexp pattern is `String#=~`.
+                    let test = match_of(subject, pattern);
+                    let answer =
+                        match eval(&mut scope, &mut frame, &example.source, &mut locals, &test) {
+                            Ok(value) => value,
+                            Err(stop) => return Outcome::Blocked(stop.reason()),
+                        };
+                    let matched = answer != Value::NIL && answer != Value::FALSE;
+                    if matched == negated {
+                        let actual = match eval(
+                            &mut scope,
+                            &mut frame,
+                            &example.source,
+                            &mut locals,
+                            subject,
+                        ) {
+                            Ok(value) => interp::inspect(&mut scope, value),
+                            Err(stop) => stop.reason(),
+                        };
+                        let expectation = if negated {
+                            "should not match"
+                        } else {
+                            "should match"
+                        };
+                        return Outcome::Failed(format!("{actual} {expectation} the pattern"));
+                    }
+                    ran_something = true;
+                }
                 Statement::Raises {
                     subject,
                     expected,
@@ -343,14 +441,22 @@ fn run_inner(example: &Example, fixtures: &Fixtures, spans: &mut Vec<Span>) -> O
                     // an example naming a class Spinel has never heard of is
                     // blocked rather than judged.
                     let wanted = match expected {
-                        Some(expr) => match eval(&mut scope, &mut frame, &mut locals, expr) {
-                            Ok(value) => Some(value),
-                            Err(stop) => return Outcome::Blocked(stop.reason()),
-                        },
+                        Some(expr) => {
+                            match eval(&mut scope, &mut frame, &example.source, &mut locals, expr) {
+                                Ok(value) => Some(value),
+                                Err(stop) => return Outcome::Blocked(stop.reason()),
+                            }
+                        }
                         None => None,
                     };
                     let called = call_of(subject);
-                    let outcome = eval(&mut scope, &mut frame, &mut locals, &called);
+                    let outcome = eval(
+                        &mut scope,
+                        &mut frame,
+                        &example.source,
+                        &mut locals,
+                        &called,
+                    );
                     let raised = match outcome {
                         Ok(_) => None,
                         // A Ruby exception that no `rescue` wanted: exactly what
@@ -418,7 +524,9 @@ fn run_inner(example: &Example, fixtures: &Fixtures, spans: &mut Vec<Span>) -> O
                 }
 
                 Statement::Effect(expr) => {
-                    if let Err(stop) = eval(&mut scope, &mut frame, &mut locals, expr) {
+                    if let Err(stop) =
+                        eval(&mut scope, &mut frame, &example.source, &mut locals, expr)
+                    {
                         return Outcome::Blocked(stop.reason());
                     }
                     ran_something = true;
@@ -450,13 +558,18 @@ fn run_inner(example: &Example, fixtures: &Fixtures, spans: &mut Vec<Span>) -> O
 fn eval(
     scope: &mut HandleScope<'_>,
     frame: &mut interp::Frame,
+    source: &Arc<SourceMap>,
     locals: &mut Vec<Name>,
     expr: &Expr,
 ) -> Result<Value, Stop> {
     // Flattened, because the statements handed here came from up to three Ruby
     // scopes — a `describe` body, a `before`, the example — that this harness
     // runs in one frame (#164).
-    let iseq = compile::flattened_expression("<example>", locals, expr)
+    // Named as mspec's frame is, whose example body is "block (2 levels) in
+    // <top (required)>": a backtrace's `base_label` for it is then the same
+    // (#29). The block levels are mspec's `describe`/`it` blocks, which this
+    // harness does not run as blocks.
+    let iseq = compile::flattened_expression_in(Some(source), "<top (required)>", locals, expr)
         .map_err(|e| Stop::Unsupported(e.to_string()))?;
     // The compiler appends any local this expression introduced, and the next
     // one must see the same indices.

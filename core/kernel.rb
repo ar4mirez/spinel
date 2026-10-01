@@ -58,16 +58,47 @@ module Kernel
   end
 
   # `self.class.to_s`, not `.name`: an instance of an anonymous class has a
-  # class whose `name` is nil, and `"#<" + nil` is a TypeError.
-  #
-  # ponytail: Ruby puts the address in here too — `#<Foo:0x...>`. #15 left that
-  # out rather than invent one, and this slice does not change it.
+  # class whose `name` is nil, and `"#<" + nil` is a TypeError. The address is
+  # `object_id` in hex, padded to sixteen digits as CRuby's is — the same
+  # number `Module#to_s` prints for an anonymous class.
   def to_s
-    "#<" + self.class.to_s + ">"
+    "#<" + self.class.to_s + ":0x" + __address__ + ">"
   end
 
+  # `to_s` plus the instance variables, measured on ruby 4.0.7:
+  # `#<Foo:0x... @a=1, @b="x">`. It never calls `to_s`, which a subclass may
+  # have overridden, and an object met again while inspecting itself prints as
+  # `#<Foo:0x... ...>`. Ruby 4.0 lets a class choose which variables to show
+  # with a private `instance_variables_to_inspect`.
   def inspect
-    to_s
+    head = "#<" + self.class.to_s + ":0x" + __address__
+    names = if respond_to?(:instance_variables_to_inspect, true)
+      __send__(:instance_variables_to_inspect)
+    else
+      instance_variables.reject { |name| name.to_s.start_with?("@__") && name.to_s.end_with?("__") }
+    end
+    return head + ">" if names.empty?
+    inspecting = Kernel.__inspecting__
+    return head + " ...>" if inspecting.any? { |seen| seen.equal?(self) }
+    inspecting.push(self)
+    begin
+      parts = names.map { |name| name.to_s + "=" + instance_variable_get(name).inspect }
+    ensure
+      inspecting.pop
+    end
+    head + " " + parts.join(", ") + ">"
+  end
+
+  def __address__
+    hex = object_id.to_s(16)
+    hex = "0" + hex while hex.length < 16
+    hex
+  end
+
+  # The objects `inspect` is part-way through, innermost last: what stops an
+  # object that holds itself from inspecting forever. Per heap, on `Kernel`.
+  def self.__inspecting__
+    @__inspecting__ ||= []
   end
 
   # `loop` stops on StopIteration rather than propagating it, which is what
@@ -88,15 +119,30 @@ module Kernel
       __write__("\n")
       return nil
     end
+    __puts_lines__(lines, [])
+    nil
+  end
+
+  # An Array argument is flattened into its elements, measured: `puts [1, [2]]`
+  # is two lines, `puts []` is none, and an Array that contains itself prints
+  # `[...]` where it recurs rather than looping.
+  def __puts_lines__(lines, seen)
     i = 0
     while i < lines.size
       line = lines[i]
-      text = line.nil? ? "" : line.to_s
-      __write__(text)
-      __write__("\n") unless text.end_with?("\n")
+      if line.is_a?(Array)
+        if seen.any? { |outer| outer.equal?(line) }
+          __write__("[...]\n")
+        else
+          __puts_lines__(line, seen + [line])
+        end
+      else
+        text = line.nil? ? "" : line.to_s
+        __write__(text)
+        __write__("\n") unless text.end_with?("\n")
+      end
       i = i + 1
     end
-    nil
   end
 
   def print(*parts)
