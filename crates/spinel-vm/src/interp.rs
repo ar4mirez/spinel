@@ -3578,15 +3578,37 @@ const EXC_CAUSE: &str = "@__cause__";
 const EXC_NAME: &str = "@name";
 const EXC_RECEIVER: &str = "@receiver";
 
-/// A Ruby `String` holding `text`.
+/// A Ruby `String` holding `text`, in UTF-8.
 fn string_new(scope: &mut HandleScope<'_>, text: &str) -> Value {
     let class = class_handle(scope, Builtin::String);
-    let len = u32::try_from(text.len()).unwrap_or(u32::MAX);
-    let handle = scope.alloc(Some(class), Payload::Bytes, len);
-    scope
-        .bytes_mut(handle)
-        .copy_from_slice(&text.as_bytes()[..len as usize]);
+    string_alloc(scope, class, text.as_bytes(), crate::strings::UTF_8)
+}
+
+/// A `String` of class `class` holding `bytes` in `encoding` — the one place a
+/// string is made. See `strings.rs` for the three slots.
+fn string_alloc<'h>(
+    scope: &mut HandleScope<'h>,
+    class: Handle<'h>,
+    bytes: &[u8],
+    encoding: u8,
+) -> Value {
+    let handle = scope.alloc(Some(class), Payload::Slots, crate::strings::SLOTS);
+    crate::strings::init(scope, handle, bytes, encoding);
     scope.get(handle)
+}
+
+/// Whether `value` is a `String` or an instance of a subclass of one.
+fn is_string(scope: &mut HandleScope<'_>, value: Value) -> bool {
+    heap_kind(scope, value) == Some(HeapKind::Str)
+}
+
+/// A `String`'s encoding index, or `None` when the value is not one.
+fn string_encoding(scope: &mut HandleScope<'_>, value: Value) -> Option<u8> {
+    if !is_string(scope, value) {
+        return None;
+    }
+    let handle = scope.root(value);
+    Some(crate::strings::encoding(scope, handle))
 }
 
 /// One line of a backtrace: the file, the line, and what was running there.
@@ -4056,11 +4078,10 @@ fn exception_message(scope: &mut HandleScope<'_>, exception: Value) -> String {
     if text.is_immediate() {
         return String::new();
     }
-    let text = scope.root(text);
-    if scope.payload(text) != Payload::Bytes {
-        return String::new();
+    match string_bytes(scope, text) {
+        Some(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        None => String::new(),
     }
-    String::from_utf8_lossy(scope.bytes(text)).into_owned()
 }
 
 /// The name of a value's class, for a report.
@@ -5118,12 +5139,17 @@ fn defined_word<'h>(
     let Some(answer) = answer else {
         return Value::NIL;
     };
-    let handle = scope.alloc(Some(string_class), Payload::Bytes, answer.len() as u32);
-    scope.bytes_mut(handle).copy_from_slice(answer.as_bytes());
+    let value = string_alloc(
+        scope,
+        string_class,
+        answer.as_bytes(),
+        crate::strings::UTF_8,
+    );
     // `defined?` answers a frozen string in Ruby, and `defined_spec.rb` asserts
     // it on every literal it asks about.
+    let handle = scope.root(value);
     scope.freeze(handle);
-    scope.get(handle)
+    value
 }
 
 /// Why a receiver could not be dispatched on.
@@ -5804,9 +5830,17 @@ fn hash_value(
     }
     match heap_kind(scope, value) {
         Some(HeapKind::Str) => {
+            // CRuby mixes the encoding in only for a string that is not pure
+            // ASCII, which is what keeps `hash` agreeing with `==`: `"a"` and
+            // `"a".b` are equal, `"é"` and `"é".b` are not.
             let handle = scope.root(value);
+            let bytes = crate::strings::bytes(scope, handle);
+            let encoding = crate::strings::encoding(scope, handle);
             0u8.hash(hasher);
-            scope.bytes(handle).hash(hasher);
+            bytes.hash(hasher);
+            if !(bytes.is_ascii() && crate::strings::ascii_compatible(encoding)) {
+                encoding.hash(hasher);
+            }
         }
         Some(HeapKind::Array) => {
             let handle = scope.root(value);
@@ -5926,11 +5960,14 @@ fn string_bytes_new(scope: &mut HandleScope<'_>, bytes: &[u8]) -> Value {
 /// allocates, so `MyString.new("b").class` is `MyString` and every `String`
 /// primitive still reads it.
 fn string_bytes_of(scope: &mut HandleScope<'_>, id: ClassId, bytes: &[u8]) -> Value {
+    string_bytes_in(scope, id, bytes, crate::strings::UTF_8)
+}
+
+/// The same, in `encoding`.
+fn string_bytes_in(scope: &mut HandleScope<'_>, id: ClassId, bytes: &[u8], encoding: u8) -> Value {
     let class = scope.classes().object(id);
     let class = scope.root(class);
-    let handle = scope.alloc(Some(class), Payload::Bytes, bytes.len() as u32);
-    scope.bytes_mut(handle).copy_from_slice(bytes);
-    scope.get(handle)
+    string_alloc(scope, class, bytes, encoding)
 }
 
 /// `Object#dup`: a shallow copy of the cell, unfrozen.
@@ -5961,6 +5998,11 @@ fn dup_value(scope: &mut HandleScope<'_>, value: Value) -> Result<Value, Error> 
             for index in 0..len as usize {
                 let slot = scope.slot(source, index);
                 scope.set_slot(copy, index, slot);
+            }
+            // A String's bytes live in a buffer its slots point at; the copy
+            // gets its own, or `s.dup << "x"` would change `s` too.
+            if is_string(scope, value) {
+                crate::strings::unshare(scope, copy);
             }
         }
     }
@@ -8803,16 +8845,12 @@ fn string_bytes(scope: &mut HandleScope<'_>, value: Value) -> Option<Vec<u8>> {
     if value.is_immediate() {
         return None;
     }
-    let handle = scope.root(value);
-    if scope.payload(handle) != Payload::Bytes {
+    // The class's representation, so a subclass of `String` is a string here.
+    if !is_string(scope, value) {
         return None;
     }
-    // The class's representation, so a subclass of `String` is a string here.
-    // The payload check above is what makes this safe to widen: an object
-    // wearing a `String` ancestry but holding slots would have been refused
-    // already.
-    let class = scope.class_of(handle)?;
-    (scope.classes().repr(class) == Some(Builtin::String)).then(|| scope.bytes(handle).to_vec())
+    let handle = scope.root(value);
+    Some(crate::strings::bytes(scope, handle))
 }
 
 /// `lambda { }` given a block: the same body, marked as a lambda.
@@ -9431,12 +9469,12 @@ fn materialise<'h>(
             {
                 return Ok(interned);
             }
-            let len = u32::try_from(bytes.len()).map_err(|_| Error::NoDispatch {
+            u32::try_from(bytes.len()).map_err(|_| Error::NoDispatch {
                 op: "String",
                 operands: "a literal larger than 4 GiB",
             })?;
-            let handle = scope.alloc(Some(string_class), Payload::Bytes, len);
-            scope.bytes_mut(handle).copy_from_slice(bytes);
+            let value = string_alloc(scope, string_class, bytes, crate::strings::UTF_8);
+            let handle = scope.root(value);
             if matches!(literal, Literal::FrozenStr(_)) {
                 scope.freeze(handle);
                 let value = scope.get(handle);
@@ -9909,7 +9947,16 @@ pub fn ruby_eq(scope: &mut HandleScope<'_>, left: Value, right: Value) -> Result
                 return Ok(false);
             }
             let (a, b) = (scope.root(left), scope.root(right));
-            Ok(scope.bytes(a) == scope.bytes(b))
+            let (a_bytes, b_bytes) = (
+                crate::strings::bytes(scope, a),
+                crate::strings::bytes(scope, b),
+            );
+            let (a_enc, b_enc) = (
+                crate::strings::encoding(scope, a),
+                crate::strings::encoding(scope, b),
+            );
+            Ok(a_bytes == b_bytes
+                && crate::strings::comparable((a_enc, &a_bytes), (b_enc, &b_bytes)))
         }
         Some(HeapKind::Array) => {
             if heap_kind(scope, right) != Some(HeapKind::Array) {
@@ -10021,7 +10068,8 @@ pub fn inspect(scope: &mut HandleScope<'_>, value: Value) -> String {
         Unpacked::Heap(_) => match heap_kind(scope, value) {
             Some(HeapKind::Str) => {
                 let handle = scope.root(value);
-                format!("{:?}", String::from_utf8_lossy(scope.bytes(handle)))
+                let bytes = crate::strings::bytes(scope, handle);
+                format!("{:?}", String::from_utf8_lossy(&bytes))
             }
             Some(HeapKind::Array) => {
                 let handle = scope.root(value);
