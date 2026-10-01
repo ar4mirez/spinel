@@ -24,7 +24,7 @@ Guards are answered for `linux`, which is what `scripts/spec-status.sh` pins so 
 | `core/env` | 45 | 180 | 0 | 0 | 169 | 11 | 0% |
 | `core/exception` | 39 | 233 | 91 | 0 | 139 | 3 | 39% |
 | `core/false` | 9 | 13 | 6 | 0 | 7 | 0 | 46% |
-| `core/fiber` | 15 | 124 | 0 | 0 | 120 | 4 | 0% |
+| `core/fiber` | 15 | 124 | 72 | 0 | 48 | 4 | 58% |
 | `core/file` | 111 | 622 | 0 | 0 | 543 | 79 | 0% |
 | `core/filetest` | 25 | 7 | 0 | 0 | 4 | 3 | 0% |
 | `core/float` | 50 | 234 | 45 | 0 | 188 | 1 | 19% |
@@ -66,7 +66,7 @@ Guards are answered for `linux`, which is what `scripts/spec-status.sh` pins so 
 | `core/true` | 9 | 13 | 6 | 0 | 7 | 0 | 46% |
 | `core/unboundmethod` | 20 | 80 | 0 | 0 | 77 | 3 | 0% |
 | `core/warning` | 5 | 31 | 0 | 0 | 28 | 3 | 0% |
-| `language` | 67 | 2464 | 1295 | 0 | 1097 | 72 | 53% |
+| `language` | 67 | 2464 | 1297 | 0 | 1095 | 72 | 53% |
 | `language/predefined` | 2 | 14 | 0 | 0 | 14 | 0 | 0% |
 | `language/regexp` | 11 | 257 | 174 | 0 | 81 | 2 | 68% |
 | `library/English` | 2 | 27 | 0 | 0 | 9 | 18 | 0% |
@@ -131,4 +131,4 @@ Guards are answered for `linux`, which is what `scripts/spec-status.sh` pins so 
 | `optional/capi` | 47 | 1651 | 10 | 0 | 1561 | 80 | 1% |
 | `optional/thread_safety` | 1 | 5 | 0 | 0 | 4 | 1 | 0% |
 | `security` | 13 | 27 | 0 | 0 | 25 | 2 | 0% |
-| **total** | 3835 | 25624 | 4178 | 0 | 19513 | 1933 | 16% |
+| **total** | 3835 | 25624 | 4252 | 0 | 19439 | 1933 | 17% |

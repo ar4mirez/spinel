@@ -86,6 +86,7 @@ const SOURCES: &[(&str, &str)] = &[
     ),
     ("core/signal.rb", include_str!("../../../core/signal.rb")),
     ("core/thread.rb", include_str!("../../../core/thread.rb")),
+    ("core/fiber.rb", include_str!("../../../core/fiber.rb")),
     (
         "core/enumerator.rb",
         include_str!("../../../core/enumerator.rb"),

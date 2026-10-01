@@ -225,6 +225,9 @@ pub struct Heap {
     /// a disagreement with Ruby. Nothing else reads it.
     missing_method: Option<String>,
     regexps: crate::regexp::Regexps,
+    /// Every fiber this heap has made, and the vectors of those not running
+    /// (#16). Traced: a suspended fiber's frames hold values nothing else does.
+    fibers: crate::interp::FiberTable,
     /// The `MatchData` the last successful match produced, which is what `$~`
     /// and `$1` read.
     ///
@@ -308,6 +311,7 @@ impl Heap {
             call_caches: crate::callcache::CallCaches::new(),
             missing_method: None,
             regexps: crate::regexp::Regexps::new(),
+            fibers: crate::interp::FiberTable::default(),
             last_match: Value::NIL,
             errinfo: Value::NIL,
             globals: HashMap::new(),
@@ -336,6 +340,14 @@ impl Heap {
 
     pub fn regexps_mut(&mut self) -> &mut crate::regexp::Regexps {
         &mut self.regexps
+    }
+
+    pub(crate) fn fibers(&self) -> &crate::interp::FiberTable {
+        &self.fibers
+    }
+
+    pub(crate) fn fibers_mut(&mut self) -> &mut crate::interp::FiberTable {
+        &mut self.fibers
     }
 
     /// The last successful match, or nil.
@@ -607,6 +619,9 @@ impl Heap {
         // answers one object, so that object outlives every handle to it.
         let (regexps, mark_stack) = (&self.regexps, &mut self.mark_stack);
         regexps.each_root(|value| Heap::shade(mark_stack, value));
+        // Fifth: the vectors of every fiber that is not running.
+        let (fibers, mark_stack) = (&self.fibers, &mut self.mark_stack);
+        fibers.each_root(|value| Heap::shade(mark_stack, value));
         Heap::shade(&mut self.mark_stack, self.last_match);
         // `$!` outlives every handle to it the same way, and for the whole time
         // a handler is running.
@@ -904,6 +919,14 @@ impl<'h> HandleScope<'h> {
 
     pub fn regexps_mut(&mut self) -> &mut crate::regexp::Regexps {
         self.heap.regexps_mut()
+    }
+
+    pub(crate) fn fibers(&self) -> &crate::interp::FiberTable {
+        self.heap.fibers()
+    }
+
+    pub(crate) fn fibers_mut(&mut self) -> &mut crate::interp::FiberTable {
+        self.heap.fibers_mut()
     }
 
     pub fn last_match(&self) -> Value {

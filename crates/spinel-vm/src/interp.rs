@@ -42,7 +42,7 @@ use crate::bytecode::{
 use crate::class::Builtin;
 use crate::class::{ClassId, CrefId, Kind, Method, ScopeDefault, Visibility};
 use crate::heap::{Handle, HandleScope, Heap, Payload};
-use crate::method::{BitOp, CvarOp, Definition, IvarOp, Native};
+use crate::method::{BitOp, CvarOp, Definition, FiberOp, IvarOp, Native};
 use crate::shape::ShapeId;
 use crate::value::SymbolId;
 use crate::value::Value;
@@ -470,6 +470,615 @@ enum Unwind {
     },
 }
 
+// ---------------------------------------------------------------------------
+// Fibers (#16)
+// ---------------------------------------------------------------------------
+//
+// The interpreter never recurses on the Rust stack for a Ruby call: a call is a
+// `Call` pushed onto `frames`, with its operands on `stack`. So a fiber is a
+// second pair of those two vectors, and switching fibers is swapping which pair
+// the loop is running. `resume`, `Fiber.yield`, `raise`, `kill` and `transfer`
+// are natives that do the swap through the `&mut` vectors every native is
+// handed; nothing above them knows a switch happened. A fiber whose last frame
+// returns hands its value to whoever resumed it, and one whose exception
+// reaches its last frame goes on unwinding there — `leave_fiber`.
+//
+// The vectors of a fiber that is not running live in `FiberTable`, per heap,
+// so a fiber can be resumed by a later evaluation than the one that made it —
+// the spec harness runs an example one statement at a time. They are traced by
+// the collector through `FiberTable::each_root`.
+
+/// The two vectors a fiber runs on.
+#[derive(Default)]
+pub(crate) struct Context {
+    stack: Vec<Value>,
+    frames: Vec<Call>,
+}
+
+enum FiberState {
+    /// Made and not yet resumed: its block has not started.
+    Created,
+    /// Running now: its vectors are the loop's.
+    Resumed,
+    /// Stopped at `Fiber.yield`, or transferred away from, with its vectors here.
+    Suspended(Context),
+    /// It resumed another fiber, which holds its vectors as that one's resumer.
+    Resuming,
+    /// Its block finished, raised out, or it was killed.
+    Terminated,
+}
+
+struct FiberEntry {
+    /// The Ruby `Fiber` object.
+    object: Value,
+    block: Value,
+    state: FiberState,
+    /// Who to return to when this one yields or ends: their vectors, and which
+    /// fiber they are (`None` for the root).
+    resumer: Option<(Context, Option<usize>)>,
+    /// Entered by `transfer` rather than `resume`: ending returns to the root,
+    /// as CRuby's transferred fiber does, and it cannot then be resumed.
+    transferred: bool,
+}
+
+/// Every fiber a heap has made, and which one is running.
+#[derive(Default)]
+pub(crate) struct FiberTable {
+    entries: Vec<FiberEntry>,
+    /// The running fiber; `None` is the root.
+    current: Option<usize>,
+    /// The root fiber's object, made the first time `Fiber.current` asks.
+    root: Option<Value>,
+    /// The root's vectors while a transferred-to fiber runs.
+    root_parked: Option<Context>,
+    /// Frame ids, handed out across evaluations so that a fiber resumed by a
+    /// later one cannot share an id with a frame that one makes.
+    frame_ids: u64,
+}
+
+impl FiberTable {
+    /// Every value a parked fiber's vectors hold, for the collector.
+    pub(crate) fn each_root(&self, mut f: impl FnMut(Value)) {
+        let mut context = |context: &Context| {
+            context.stack.iter().copied().for_each(&mut f);
+            for frame in &context.frames {
+                for value in [
+                    frame.env,
+                    frame.receiver,
+                    frame.block,
+                    frame.errinfo_on_entry,
+                    frame.rescued.unwrap_or(Value::NIL),
+                    frame.tag.unwrap_or(Value::NIL),
+                ] {
+                    f(value);
+                }
+                for parked in &frame.parked {
+                    match *parked {
+                        Parked::Value(value) => f(value),
+                        Parked::Unwind(unwind) => unwind_roots(unwind, &mut f),
+                    }
+                }
+            }
+        };
+        for entry in &self.entries {
+            if let FiberState::Suspended(saved) = &entry.state {
+                context(saved);
+            }
+            if let Some((saved, _)) = &entry.resumer {
+                context(saved);
+            }
+        }
+        if let Some(saved) = &self.root_parked {
+            context(saved);
+        }
+        for entry in &self.entries {
+            f(entry.object);
+            f(entry.block);
+        }
+        if let Some(root) = self.root {
+            f(root);
+        }
+    }
+
+    /// Leave the root running and every fiber that was mid-switch dead: the
+    /// end of an evaluation that stopped inside a fiber, where nothing is left
+    /// to return to.
+    fn abandon(&mut self) {
+        if self.current.is_none() && self.root_parked.is_none() {
+            return;
+        }
+        for entry in &mut self.entries {
+            if matches!(entry.state, FiberState::Resumed | FiberState::Resuming) {
+                entry.state = FiberState::Terminated;
+                entry.resumer = None;
+            }
+        }
+        self.current = None;
+        self.root_parked = None;
+    }
+}
+
+fn unwind_roots(unwind: Unwind, f: &mut impl FnMut(Value)) {
+    match unwind {
+        Unwind::Exception(value) => f(value),
+        Unwind::Throw { tag, value } => {
+            f(tag);
+            f(value);
+        }
+        Unwind::Break { value, .. } | Unwind::Return { value, .. } => f(value),
+        Unwind::Goto { value, .. } => {
+            if let Some(value) = value {
+                f(value);
+            }
+        }
+    }
+}
+
+/// How a fiber's last frame went.
+enum FiberExit {
+    Value(Value),
+    Unwind(Unwind),
+}
+
+/// The running fiber has no frames left: give control back to its resumer.
+///
+/// `Err(())` when the root is running — the caller's own end-of-evaluation
+/// applies. Otherwise the resumer's vectors are back in the loop's hands, and
+/// the answer is what to do there: nothing more (`None`, with the fiber's value
+/// pushed as `resume`'s result) or an unwind to carry on with. An exception
+/// keeps going in the resumer; `break` and `return` out of a fiber's block are
+/// LocalJumpErrors there, and a kill — a throw tagged with the fiber itself —
+/// answers the fiber. All measured.
+fn leave_fiber(
+    scope: &mut HandleScope<'_>,
+    stack: &mut Vec<Value>,
+    frames: &mut Vec<Call>,
+    exit: FiberExit,
+) -> Result<Option<Unwind>, ()> {
+    let Some(id) = scope.fibers().current else {
+        return Err(());
+    };
+    let fibers = scope.fibers_mut();
+    let entry = &mut fibers.entries[id];
+    entry.state = FiberState::Terminated;
+    let object = entry.object;
+    let back = entry.resumer.take();
+    let transferred = entry.transferred;
+    // A fiber with a resumer goes back to it, however it was entered since.
+    let _ = transferred;
+    let (context, resumer) = match back {
+        Some(back) => back,
+        // A transferred fiber that ends goes back to the root — and when the
+        // root is part-way through resuming a fiber that then transferred
+        // away, to that fiber: measured, `a = Fiber.new { b.transfer }`
+        // resumed from the root has `b`'s last value come back in `a`.
+        _ => {
+            let resumed_by_root = fibers.entries.iter().position(|e| {
+                matches!(e.state, FiberState::Suspended(_))
+                    && e.transferred
+                    && matches!(e.resumer, Some((_, None)))
+            });
+            match resumed_by_root {
+                Some(owner) => {
+                    let FiberState::Suspended(context) =
+                        std::mem::replace(&mut fibers.entries[owner].state, FiberState::Resumed)
+                    else {
+                        unreachable!("matched as suspended above")
+                    };
+                    fibers.entries[owner].transferred = false;
+                    (context, Some(owner))
+                }
+                None => (fibers.root_parked.take().unwrap_or_default(), None),
+            }
+        }
+    };
+    *stack = context.stack;
+    *frames = context.frames;
+    fibers.current = resumer;
+    if let Some(resumer) = resumer {
+        fibers.entries[resumer].state = FiberState::Resumed;
+    }
+    // Nothing to return to — every fiber above was abandoned — is the end of
+    // the evaluation, as the root's own last frame would be.
+    if frames.is_empty() {
+        return Err(());
+    }
+    match exit {
+        FiberExit::Value(value) => {
+            stack.push(value);
+            Ok(None)
+        }
+        FiberExit::Unwind(Unwind::Throw { tag, .. }) if tag == object => {
+            stack.push(object);
+            Ok(None)
+        }
+        FiberExit::Unwind(Unwind::Exception(exception)) => Ok(Some(Unwind::Exception(exception))),
+        FiberExit::Unwind(Unwind::Break { .. }) => Ok(Some(Unwind::Exception(exception_new(
+            scope,
+            "LocalJumpError",
+            "break from proc-closure",
+        )))),
+        FiberExit::Unwind(Unwind::Return { .. }) => Ok(Some(Unwind::Exception(exception_new(
+            scope,
+            "LocalJumpError",
+            "unexpected return",
+        )))),
+        FiberExit::Unwind(Unwind::Throw { tag, .. }) => {
+            let message = format!("uncaught throw {}", inspect(scope, tag));
+            Ok(Some(Unwind::Exception(exception_new(
+                scope,
+                "UncaughtThrowError",
+                &message,
+            ))))
+        }
+        FiberExit::Unwind(Unwind::Goto { .. }) => {
+            unreachable!("a goto never leaves its own frame")
+        }
+    }
+}
+
+/// Which fiber a `Fiber` object is: its table index, or `None` for the root.
+/// The index lives in the object's hidden `@__fiber__`; the root's is -1.
+fn fiber_index(scope: &mut HandleScope<'_>, object: Value) -> Result<Option<usize>, Error> {
+    let id = ivar_get(scope, object, symbol("@__fiber__"))?
+        .as_fixnum()
+        .ok_or_else(|| Error::raise("FiberError", "uninitialized fiber"))?;
+    Ok(usize::try_from(id).ok())
+}
+
+/// What a `resume` or `Fiber.yield` hands across: nothing is nil, one value is
+/// itself, several are an Array. Measured.
+fn fiber_pack(scope: &mut HandleScope<'_>, args: &[Value]) -> Value {
+    match args {
+        [] => Value::NIL,
+        [one] => *one,
+        many => new_array(scope, many),
+    }
+}
+
+/// The arguments a `core/fiber.rb` wrapper gathered into one Array.
+fn fiber_args(scope: &mut HandleScope<'_>, call: &Pending, index: usize) -> Vec<Value> {
+    call.args
+        .get(index)
+        .and_then(|&args| array_elements(scope, args))
+        .unwrap_or_default()
+}
+
+/// Hand the loop fiber `id`'s vectors, keeping the current ones as its
+/// resumer's. A fiber not yet started gets its block's frame, with `args` as
+/// the block's arguments; a suspended one gets its own vectors back and `then`
+/// decides what its `Fiber.yield` answers.
+#[allow(clippy::too_many_arguments)]
+fn fiber_enter(
+    scope: &mut HandleScope<'_>,
+    stack: &mut Vec<Value>,
+    frames: &mut Vec<Call>,
+    call: &Pending,
+    id: usize,
+    args: Vec<Value>,
+    transfer: bool,
+    ids: &mut u64,
+) -> Result<bool, Error> {
+    let saved = Context {
+        stack: std::mem::take(stack),
+        frames: std::mem::take(frames),
+    };
+    let fibers = scope.fibers_mut();
+    let previous = fibers.current;
+    if transfer {
+        // The one transferring away is parked where a later transfer back can
+        // find it: the root apart, a fiber keeps its own vectors.
+        match previous {
+            None => fibers.root_parked = Some(saved),
+            Some(from) => {
+                fibers.entries[from].state = FiberState::Suspended(saved);
+                fibers.entries[from].transferred = true;
+            }
+        }
+        fibers.entries[id].transferred = true;
+    } else {
+        if let Some(from) = previous {
+            fibers.entries[from].state = FiberState::Resuming;
+        }
+        fibers.entries[id].resumer = Some((saved, previous));
+    }
+    fibers.current = Some(id);
+    let state = std::mem::replace(&mut fibers.entries[id].state, FiberState::Resumed);
+    match state {
+        FiberState::Created => {
+            let block = scope.fibers().entries[id].block;
+            let inner = Pending {
+                cache: None,
+                name: call.name,
+                receiver: block,
+                args,
+                keywords: Vec::new(),
+                block: Value::NIL,
+                block_is_literal: false,
+                cref: call.cref,
+                implicit_self: false,
+                public_only: false,
+                target: Target::Block(block),
+                owner: None,
+                defined_as: None,
+            };
+            push_proc_frame(scope, stack, frames, &inner, block, ids)?;
+            Ok(true)
+        }
+        FiberState::Suspended(context) => {
+            *stack = context.stack;
+            *frames = context.frames;
+            Ok(false)
+        }
+        _ => unreachable!("callers check the state before entering"),
+    }
+}
+
+fn fiber_native(
+    scope: &mut HandleScope<'_>,
+    stack: &mut Vec<Value>,
+    frames: &mut Vec<Call>,
+    call: &Pending,
+    op: FiberOp,
+    ids: &mut u64,
+) -> Result<Option<Unwind>, Error> {
+    let fiber_error = |message: &str| Error::raise("FiberError", message.to_owned());
+    match op {
+        FiberOp::New => {
+            let object = call.args.first().copied().unwrap_or(Value::NIL);
+            let block = call.args.get(1).copied().unwrap_or(Value::NIL);
+            let fibers = scope.fibers_mut();
+            fibers.entries.push(FiberEntry {
+                object,
+                block,
+                state: FiberState::Created,
+                resumer: None,
+                transferred: false,
+            });
+            let id = fibers.entries.len() - 1;
+            let id = Value::fixnum(id as i64).expect("a fiber index is a fixnum");
+            ivar_set(scope, object, symbol("@__fiber__"), id)?;
+            stack.push(object);
+            Ok(None)
+        }
+
+        FiberOp::Current => {
+            let object = match scope.fibers().current {
+                Some(id) => scope.fibers().entries[id].object,
+                None => match scope.fibers().root {
+                    Some(root) => root,
+                    None => {
+                        // The root fiber is an ordinary `Fiber`, made the first
+                        // time anything asks for it.
+                        let class = scope
+                            .classes()
+                            .const_get_here(Builtin::Object.id(), symbol("Fiber"))
+                            .expect("core/fiber.rb defines Fiber");
+                        let class = scope.root(class);
+                        let handle = alloc_ivar_object(scope, Some(class));
+                        let root = scope.get(handle);
+                        let minus_one = Value::fixnum(-1).expect("-1 is a fixnum");
+                        ivar_set(scope, root, symbol("@__fiber__"), minus_one)?;
+                        scope.fibers_mut().root = Some(root);
+                        root
+                    }
+                },
+            };
+            stack.push(object);
+            Ok(None)
+        }
+
+        FiberOp::Alive | FiberOp::Status => {
+            let object = call.args.first().copied().unwrap_or(Value::NIL);
+            let state = match fiber_index(scope, object)? {
+                None => "resumed",
+                Some(id) => match scope.fibers().entries[id].state {
+                    FiberState::Created => "created",
+                    FiberState::Resumed | FiberState::Resuming => "resumed",
+                    FiberState::Suspended(_) => "suspended",
+                    FiberState::Terminated => "terminated",
+                },
+            };
+            let answer = if op == FiberOp::Alive {
+                bool_value(state != "terminated")
+            } else {
+                Value::symbol(crate::shared::symbols::intern(state))
+            };
+            stack.push(answer);
+            Ok(None)
+        }
+
+        FiberOp::Resume | FiberOp::Transfer => {
+            let object = call.args.first().copied().unwrap_or(Value::NIL);
+            let args = fiber_args(scope, call, 1);
+            let transfer = op == FiberOp::Transfer;
+            let Some(id) = fiber_index(scope, object)? else {
+                // The root: resuming it is always an error; transferring to it
+                // goes back to it, which is how a transferred fiber returns.
+                if !transfer {
+                    return Err(fiber_error(if scope.fibers().current.is_none() {
+                        "attempt to resume the current fiber"
+                    } else {
+                        "attempt to resume a resuming fiber"
+                    }));
+                }
+                let Some(context) = scope.fibers_mut().root_parked.take() else {
+                    let value = fiber_pack(scope, &args);
+                    stack.push(value);
+                    return Ok(None);
+                };
+                let saved = Context {
+                    stack: std::mem::take(stack),
+                    frames: std::mem::take(frames),
+                };
+                let fibers = scope.fibers_mut();
+                if let Some(from) = fibers.current {
+                    fibers.entries[from].state = FiberState::Suspended(saved);
+                    fibers.entries[from].transferred = true;
+                }
+                fibers.current = None;
+                *stack = context.stack;
+                *frames = context.frames;
+                let value = fiber_pack(scope, &args);
+                stack.push(value);
+                return Ok(None);
+            };
+            let entry = &scope.fibers().entries[id];
+            match (&entry.state, transfer) {
+                (FiberState::Terminated, false) => {
+                    return Err(fiber_error("attempt to resume a terminated fiber"));
+                }
+                (FiberState::Terminated, true) => {
+                    return Err(fiber_error("attempt to transfer to a terminated fiber"));
+                }
+                (FiberState::Resumed, false) => {
+                    return Err(fiber_error("attempt to resume the current fiber"));
+                }
+                (FiberState::Resuming, false) => {
+                    return Err(fiber_error("attempt to resume a resuming fiber"));
+                }
+                (FiberState::Resuming, true) => {
+                    return Err(fiber_error("attempt to transfer to a resuming fiber"));
+                }
+                (FiberState::Suspended(_), false) if entry.transferred => {
+                    return Err(fiber_error("attempt to resume a transferring fiber"));
+                }
+                (FiberState::Suspended(_), true) if !entry.transferred => {
+                    return Err(fiber_error("attempt to transfer to a yielding fiber"));
+                }
+                (FiberState::Resumed, true) => {
+                    // Transferring to the running fiber hands the value straight
+                    // back.
+                    let value = fiber_pack(scope, &args);
+                    stack.push(value);
+                    return Ok(None);
+                }
+                _ => {}
+            }
+            let started = fiber_enter(scope, stack, frames, call, id, args.clone(), transfer, ids)?;
+            if !started {
+                let value = fiber_pack(scope, &args);
+                stack.push(value);
+            }
+            Ok(None)
+        }
+
+        FiberOp::Yield => {
+            let args = fiber_args(scope, call, 0);
+            let Some(id) = scope.fibers().current else {
+                return Err(fiber_error("attempt to yield on a not resumed fiber"));
+            };
+            if scope.fibers().entries[id].resumer.is_none() {
+                return Err(fiber_error("attempt to yield on a not resumed fiber"));
+            }
+            let value = fiber_pack(scope, &args);
+            let suspended = Context {
+                stack: std::mem::take(stack),
+                frames: std::mem::take(frames),
+            };
+            let fibers = scope.fibers_mut();
+            let entry = &mut fibers.entries[id];
+            entry.state = FiberState::Suspended(suspended);
+            // Suspended by `yield`, whatever entered it: a transfer to it is now
+            // a FiberError, measured.
+            entry.transferred = false;
+            let (context, previous) = entry.resumer.take().expect("checked above");
+            *stack = context.stack;
+            *frames = context.frames;
+            fibers.current = previous;
+            if let Some(previous) = previous {
+                fibers.entries[previous].state = FiberState::Resumed;
+            }
+            stack.push(value);
+            Ok(None)
+        }
+
+        FiberOp::Raise | FiberOp::Kill => {
+            let object = call.args.first().copied().unwrap_or(Value::NIL);
+            let id = fiber_index(scope, object)?;
+            let running_here = id == scope.fibers().current;
+            // The unwind the fiber is entered with: the exception `raise`
+            // builds, or for `kill` a throw tagged with the fiber itself, which
+            // runs every `ensure` on the way out and no `rescue`.
+            let unwind = if op == FiberOp::Raise {
+                let args = fiber_args(scope, call, 1);
+                let args = if args.is_empty() {
+                    vec![string_new(scope, "unhandled exception")]
+                } else {
+                    args
+                };
+                Unwind::Exception(raise_argument(scope, frames, &args)?)
+            } else {
+                Unwind::Throw {
+                    tag: object,
+                    value: object,
+                }
+            };
+            if running_here {
+                return Ok(Some(unwind));
+            }
+            let Some(id) = id else {
+                return Err(fiber_error("attempt to resume a resuming fiber"));
+            };
+            match scope.fibers().entries[id].state {
+                FiberState::Created if op == FiberOp::Kill => {
+                    scope.fibers_mut().entries[id].state = FiberState::Terminated;
+                    stack.push(object);
+                    return Ok(None);
+                }
+                FiberState::Created => {
+                    return Err(fiber_error("cannot raise exception on unborn fiber"));
+                }
+                FiberState::Terminated if op == FiberOp::Kill => {
+                    stack.push(object);
+                    return Ok(None);
+                }
+                FiberState::Terminated => {
+                    return Err(fiber_error("attempt to resume a terminated fiber"));
+                }
+                FiberState::Resumed | FiberState::Suspended(_) | FiberState::Resuming => {}
+            }
+            // A fiber that is resuming another is reached through the fiber
+            // it resumed, and that one's, to the innermost: measured, raising
+            // on a parent from its child is the child's own `raise`.
+            let mut target = id;
+            while let Some(next) = scope
+                .fibers()
+                .entries
+                .iter()
+                .position(|e| matches!(e.resumer, Some((_, Some(r))) if r == target))
+            {
+                if !matches!(scope.fibers().entries[next].state, FiberState::Terminated) {
+                    target = next;
+                } else {
+                    break;
+                }
+            }
+            if Some(target) == scope.fibers().current {
+                return Ok(Some(unwind));
+            }
+            if !matches!(
+                scope.fibers().entries[target].state,
+                FiberState::Suspended(_)
+            ) {
+                return Err(fiber_error("attempt to resume a resuming fiber"));
+            }
+            let transfer = scope.fibers().entries[target].transferred;
+            fiber_enter(
+                scope,
+                stack,
+                frames,
+                call,
+                target,
+                Vec::new(),
+                transfer,
+                ids,
+            )?;
+            Ok(Some(unwind))
+        }
+    }
+}
+
 /// A reason an `ensure` body was entered, parked until it finishes.
 #[derive(Debug, Clone, Copy)]
 enum Parked {
@@ -541,433 +1150,414 @@ pub fn eval_in(
     let mut budget = BUDGET;
     // Frame ids, handed out in order. Zero means "no such frame", which is what
     // a body with nowhere to `break` to carries.
-    let mut ids: u64 = 1;
+    // Frame ids continue from the last evaluation: a fiber resumed here may
+    // hold frames an earlier one made, and an id must name one frame.
+    scope.fibers_mut().abandon();
+    let mut ids: u64 = scope.fibers().frame_ids.max(1);
+    frames[0].id = ids;
+    frames[0].home = ids;
 
-    let result = loop {
-        budget = budget.checked_sub(1).ok_or(Error::Budget)?;
-        let top = frames.len() - 1;
-        let insn = frames[top].iseq.insns[frames[top].pc];
-        frames[top].pc += 1;
+    let result = (|| -> Result<Value, Error> {
+        Ok(loop {
+            budget = budget.checked_sub(1).ok_or(Error::Budget)?;
+            let top = frames.len() - 1;
+            let insn = frames[top].iseq.insns[frames[top].pc];
+            frames[top].pc += 1;
 
-        // One instruction, run in a closure so that `?` still reads as it did
-        // before there was an unwinder. Everything Ruby would raise leaves here
-        // as an ordinary `Err`, and exactly one place below decides where it
-        // lands — which is what makes `1 / 0` inside a `begin` a catchable
-        // `ZeroDivisionError` rather than the end of the evaluation.
-        let stepped = (|| -> Result<Step, Error> {
-            match insn {
-                Insn::PushNil => stack.push(Value::NIL),
-                Insn::PushTrue => stack.push(Value::TRUE),
-                Insn::PushFalse => stack.push(Value::FALSE),
-                Insn::PushSelf => stack.push(frames[top].receiver),
-                Insn::PushInt(n) => {
-                    stack.push(Value::fixnum(n).ok_or(Error::NoDispatch {
-                        op: "Integer",
-                        operands: "a value wider than a fixnum",
-                    })?);
-                }
-                Insn::PushLit(index) => {
-                    let literal = frames[top].iseq.literals[index as usize].clone();
-                    let value = materialise(scope, &literal, string_class)?;
-                    stack.push(value);
-                }
-                Insn::PushSym(index) => {
-                    let symbol = frames[top].symbols[index as usize];
-                    stack.push(Value::symbol(symbol));
-                }
-                Insn::Intern => {
-                    let value = stack.pop().expect("a string to intern");
-                    // The parts were joined by `String#+`, so the only way this
-                    // is not a String is a program that redefined `+` to return
-                    // something else. CRuby raises `TypeError` there too.
-                    let Some(bytes) = string_bytes(scope, value) else {
-                        return Err(Error::raise("TypeError", "can't convert to Symbol"));
-                    };
-                    // ponytail: the symbol table is `String`-keyed, so a symbol
-                    // whose bytes are not UTF-8 cannot be interned. Ruby allows
-                    // one; reaching it needs binary string operations that wait
-                    // on the Encoding slice, and raising beats interning
-                    // something the program did not write. Upgrade with the
-                    // table: key it by bytes when `Encoding` lands.
-                    let Ok(name) = String::from_utf8(bytes) else {
-                        return Err(Error::raise(
-                            "ArgumentError",
-                            "a symbol that is not UTF-8 waits for the Encoding class",
-                        ));
-                    };
-                    stack.push(Value::symbol(crate::shared::symbols::intern(&name)));
-                }
-
-                Insn::Pop => {
-                    stack.pop();
-                }
-                Insn::Dup => {
-                    let value = *stack.last().expect("dup on an empty stack");
-                    stack.push(value);
-                }
-
-                Insn::CaptureSplat => {
-                    let value = stack.pop().expect("a splat to capture");
-                    let captured = match array_elements(scope, value) {
-                        Some(elements) => new_array(scope, &elements),
-                        None => value,
-                    };
-                    stack.push(captured);
-                }
-
-                Insn::GetIvar(name) => {
-                    let symbol = frames[top].symbols[name as usize];
-                    let receiver = frames[top].receiver;
-                    stack.push(ivar_get(scope, receiver, symbol)?);
-                }
-
-                Insn::SetIvar(name) => {
-                    let symbol = frames[top].symbols[name as usize];
-                    let receiver = frames[top].receiver;
-                    let value = stack.pop().expect("setivar on an empty stack");
-                    ivar_set(scope, receiver, symbol, value)?;
-                }
-
-                Insn::DefinedIvar(name) => {
-                    let symbol = frames[top].symbols[name as usize];
-                    let receiver = frames[top].receiver;
-                    // `defined_word`, not `defined_answer`: an object this
-                    // heap holds is the authority on which ivars it has, so a
-                    // miss really is Ruby's `nil` and not #39's "never seen".
-                    let held = ivar_defined(scope, receiver, symbol)?;
-                    let value =
-                        defined_word(scope, string_class, held.then_some("instance-variable"));
-                    stack.push(value);
-                }
-
-                // Globals (#166). One table per heap; the regexp specials
-                // never reach here — the compiler sends those to
-                // `Insn::LastMatch`, so a name in this table is always one an
-                // assignment put there.
-                Insn::GetGlobal(name) => {
-                    let symbol = frames[top].symbols[name as usize];
-                    // A name aliased to a regexp special runs the derivation
-                    // rather than reading a cell, so it tracks the *current*
-                    // match: measured, a second `=~` moves it.
-                    let value = match scope.global_special(symbol) {
-                        Some(which) => last_match_part(scope, &which)?,
-                        // An unset global reads `nil` rather than raising:
-                        // Ruby warns under `-w` and answers nil, and the
-                        // warning needs #39's `$stderr`.
-                        None => scope.global(symbol).unwrap_or(Value::NIL),
-                    };
-                    stack.push(value);
-                }
-                Insn::SetGlobal(name) => {
-                    let symbol = frames[top].symbols[name as usize];
-                    // `alias $x $&` makes `$x` read-only, and Ruby names the
-                    // alias rather than the special in the message. Measured.
-                    if scope.global_special(symbol).is_some() {
-                        return Err(Error::raise(
-                            "NameError",
-                            // `symbol_name` already carries the leading `$`.
-                            format!("{} is a read-only variable", symbol_name(symbol)),
-                        ));
+            // One instruction, run in a closure so that `?` still reads as it did
+            // before there was an unwinder. Everything Ruby would raise leaves here
+            // as an ordinary `Err`, and exactly one place below decides where it
+            // lands — which is what makes `1 / 0` inside a `begin` a catchable
+            // `ZeroDivisionError` rather than the end of the evaluation.
+            let stepped = (|| -> Result<Step, Error> {
+                match insn {
+                    Insn::PushNil => stack.push(Value::NIL),
+                    Insn::PushTrue => stack.push(Value::TRUE),
+                    Insn::PushFalse => stack.push(Value::FALSE),
+                    Insn::PushSelf => stack.push(frames[top].receiver),
+                    Insn::PushInt(n) => {
+                        stack.push(Value::fixnum(n).ok_or(Error::NoDispatch {
+                            op: "Integer",
+                            operands: "a value wider than a fixnum",
+                        })?);
                     }
-                    // Pops, like `SetLocal` and `SetIvar`: the callers that
-                    // want assignment to be an expression emit `Dup` first.
-                    let value = stack.pop().expect("setglobal on an empty stack");
-                    scope.set_global(symbol, value);
-                }
-                Insn::DefinedGlobal(name) => {
-                    let symbol = frames[top].symbols[name as usize];
-                    // Presence, not truthiness: `$a = nil` is defined.
-                    let held = scope.global(symbol).is_some();
-                    let value =
-                        defined_word(scope, string_class, held.then_some("global-variable"));
-                    stack.push(value);
-                }
+                    Insn::PushLit(index) => {
+                        let literal = frames[top].iseq.literals[index as usize].clone();
+                        let value = materialise(scope, &literal, string_class)?;
+                        stack.push(value);
+                    }
+                    Insn::PushSym(index) => {
+                        let symbol = frames[top].symbols[index as usize];
+                        stack.push(Value::symbol(symbol));
+                    }
+                    Insn::Intern => {
+                        let value = stack.pop().expect("a string to intern");
+                        // The parts were joined by `String#+`, so the only way this
+                        // is not a String is a program that redefined `+` to return
+                        // something else. CRuby raises `TypeError` there too.
+                        let Some(bytes) = string_bytes(scope, value) else {
+                            return Err(Error::raise("TypeError", "can't convert to Symbol"));
+                        };
+                        // ponytail: the symbol table is `String`-keyed, so a symbol
+                        // whose bytes are not UTF-8 cannot be interned. Ruby allows
+                        // one; reaching it needs binary string operations that wait
+                        // on the Encoding slice, and raising beats interning
+                        // something the program did not write. Upgrade with the
+                        // table: key it by bytes when `Encoding` lands.
+                        let Ok(name) = String::from_utf8(bytes) else {
+                            return Err(Error::raise(
+                                "ArgumentError",
+                                "a symbol that is not UTF-8 waits for the Encoding class",
+                            ));
+                        };
+                        stack.push(Value::symbol(crate::shared::symbols::intern(&name)));
+                    }
 
-                Insn::GetLocal(slot, depth) => {
-                    let env = env_outer(scope, frames[top].env, depth);
-                    stack.push(env_get(scope, env, slot as usize));
-                }
-                Insn::SetLocal(slot, depth) => {
-                    let value = stack.pop().expect("setlocal on an empty stack");
-                    let env = env_outer(scope, frames[top].env, depth);
-                    env_set(scope, env, slot as usize, value);
-                }
+                    Insn::Pop => {
+                        stack.pop();
+                    }
+                    Insn::Dup => {
+                        let value = *stack.last().expect("dup on an empty stack");
+                        stack.push(value);
+                    }
 
-                Insn::Jump(displacement) => frames[top].pc = jump(frames[top].pc, displacement),
-                Insn::JumpUnless(displacement) => {
-                    if !stack.pop().expect("jump on an empty stack").is_truthy() {
-                        frames[top].pc = jump(frames[top].pc, displacement);
+                    Insn::CaptureSplat => {
+                        let value = stack.pop().expect("a splat to capture");
+                        let captured = match array_elements(scope, value) {
+                            Some(elements) => new_array(scope, &elements),
+                            None => value,
+                        };
+                        stack.push(captured);
                     }
-                }
-                Insn::JumpIf(displacement) => {
-                    if stack.pop().expect("jump on an empty stack").is_truthy() {
-                        frames[top].pc = jump(frames[top].pc, displacement);
-                    }
-                }
-                Insn::JumpUnlessKeep(displacement) => {
-                    if !stack.last().expect("jump on an empty stack").is_truthy() {
-                        frames[top].pc = jump(frames[top].pc, displacement);
-                    }
-                }
-                Insn::JumpIfKeep(displacement) => {
-                    if stack.last().expect("jump on an empty stack").is_truthy() {
-                        frames[top].pc = jump(frames[top].pc, displacement);
-                    }
-                }
-                Insn::JumpIfNilKeep(displacement) => {
-                    if *stack.last().expect("jump on an empty stack") == Value::NIL {
-                        frames[top].pc = jump(frames[top].pc, displacement);
-                    }
-                }
 
-                Insn::BinOp(op) => {
-                    let right = stack.pop().expect("binop on an empty stack");
-                    let left = stack.pop().expect("binop on an empty stack");
-                    match binop(scope, op, left, right) {
-                        Ok(value) => stack.push(value),
-                        // The send behind the fast path. `BinOp`'s own docs have
-                        // said since #10 that one belongs here and that #11's
-                        // calling convention was what it waited for; #11 landed and
-                        // nothing wired it up. An operand the fast path does not
-                        // cover is an ordinary method call on the left-hand side,
-                        // which is what the operator *is* in Ruby — and it is what
-                        // lets `Array#+` and any user-defined operator work at all.
-                        Err(Error::NoDispatch { .. }) => {
-                            let call = Pending {
-                                // ponytail: `Insn::BinOp` has no call-site
-                                // index, so an operator that misses the fixnum
-                                // fast path pays the full probe. Give the
-                                // instruction a site when a benchmark shows
-                                // operator dispatch on user-defined classes
-                                // mattering.
-                                cache: None,
-                                name: crate::shared::symbols::intern(op.name()),
-                                receiver: left,
-                                args: vec![right],
-                                keywords: Vec::new(),
-                                block: Value::NIL,
-                                block_is_literal: false,
-                                cref: frames[top].cref,
-                                implicit_self: false,
-                                public_only: false,
-                                target: Target::Method,
-                                owner: None,
-                                defined_as: None,
-                            };
-                            if let Some(unwind) = dispatch(
-                                scope,
-                                &mut stack,
-                                &mut frames,
-                                call,
-                                proc_class,
-                                &mut ids,
-                            )? {
-                                return Ok(Step::Unwind(unwind));
-                            }
+                    Insn::GetIvar(name) => {
+                        let symbol = frames[top].symbols[name as usize];
+                        let receiver = frames[top].receiver;
+                        stack.push(ivar_get(scope, receiver, symbol)?);
+                    }
+
+                    Insn::SetIvar(name) => {
+                        let symbol = frames[top].symbols[name as usize];
+                        let receiver = frames[top].receiver;
+                        let value = stack.pop().expect("setivar on an empty stack");
+                        ivar_set(scope, receiver, symbol, value)?;
+                    }
+
+                    Insn::DefinedIvar(name) => {
+                        let symbol = frames[top].symbols[name as usize];
+                        let receiver = frames[top].receiver;
+                        // `defined_word`, not `defined_answer`: an object this
+                        // heap holds is the authority on which ivars it has, so a
+                        // miss really is Ruby's `nil` and not #39's "never seen".
+                        let held = ivar_defined(scope, receiver, symbol)?;
+                        let value =
+                            defined_word(scope, string_class, held.then_some("instance-variable"));
+                        stack.push(value);
+                    }
+
+                    // Globals (#166). One table per heap; the regexp specials
+                    // never reach here — the compiler sends those to
+                    // `Insn::LastMatch`, so a name in this table is always one an
+                    // assignment put there.
+                    Insn::GetGlobal(name) => {
+                        let symbol = frames[top].symbols[name as usize];
+                        // A name aliased to a regexp special runs the derivation
+                        // rather than reading a cell, so it tracks the *current*
+                        // match: measured, a second `=~` moves it.
+                        let value = match scope.global_special(symbol) {
+                            Some(which) => last_match_part(scope, &which)?,
+                            // An unset global reads `nil` rather than raising:
+                            // Ruby warns under `-w` and answers nil, and the
+                            // warning needs #39's `$stderr`.
+                            None => scope.global(symbol).unwrap_or(Value::NIL),
+                        };
+                        stack.push(value);
+                    }
+                    Insn::SetGlobal(name) => {
+                        let symbol = frames[top].symbols[name as usize];
+                        // `alias $x $&` makes `$x` read-only, and Ruby names the
+                        // alias rather than the special in the message. Measured.
+                        if scope.global_special(symbol).is_some() {
+                            return Err(Error::raise(
+                                "NameError",
+                                // `symbol_name` already carries the leading `$`.
+                                format!("{} is a read-only variable", symbol_name(symbol)),
+                            ));
                         }
-                        Err(other) => return Err(other),
+                        // Pops, like `SetLocal` and `SetIvar`: the callers that
+                        // want assignment to be an expression emit `Dup` first.
+                        let value = stack.pop().expect("setglobal on an empty stack");
+                        scope.set_global(symbol, value);
                     }
-                }
-                Insn::Neg => {
-                    let value = stack.pop().expect("neg on an empty stack");
-                    let negated = negate(scope, value)?;
-                    stack.push(negated);
-                }
-                Insn::Not => {
-                    let value = stack.pop().expect("not on an empty stack");
-                    stack.push(bool_value(!value.is_truthy()));
-                }
-
-                Insn::NewArray(count) => {
-                    let at = stack.len() - count as usize;
-                    let elements: Vec<Value> = stack.drain(at..).collect();
-                    let value = new_array(scope, &elements);
-                    stack.push(value);
-                }
-
-                // `$~ = m`. Writes the frame's match, which is what makes
-                // `$1` and `$&` follow it. `nil` clears; anything that is not
-                // a `MatchData` is Ruby's `TypeError`, measured, because the
-                // readers above would otherwise treat a plain object as a
-                // match and answer nonsense.
-                Insn::SetLastMatch => {
-                    let value = stack.pop().expect("setlastmatch on an empty stack");
-                    if value != Value::NIL && !is_match_data(scope, value) {
-                        let got = class_name_of(scope, value);
-                        return Err(Error::raise(
-                            "TypeError",
-                            format!("wrong argument type {got} (expected MatchData)"),
-                        ));
+                    Insn::DefinedGlobal(name) => {
+                        let symbol = frames[top].symbols[name as usize];
+                        // Presence, not truthiness: `$a = nil` is defined.
+                        let held = scope.global(symbol).is_some();
+                        let value =
+                            defined_word(scope, string_class, held.then_some("global-variable"));
+                        stack.push(value);
                     }
-                    scope.set_last_match(value);
-                }
 
-                // `$!` (#206). The read is the cell; the write is the
-                // compiler's own restore after a `begin` and never a Ruby
-                // assignment, which is why it takes any value rather than only
-                // an exception — `$! = e` is a `NameError` in Ruby.
-                Insn::Errinfo => {
-                    let value = scope.errinfo();
-                    stack.push(value);
-                }
-                Insn::SetErrinfo => {
-                    let value = stack.pop().expect("seterrinfo on an empty stack");
-                    scope.set_errinfo(value);
-                }
-                Insn::DefinedMatch(which) => {
-                    let held = defined_match(scope, &which);
-                    let value =
-                        defined_word(scope, string_class, held.then_some("global-variable"));
-                    stack.push(value);
-                }
-                Insn::LastMatch(which) => {
-                    let value = last_match_part(scope, &which)?;
-                    stack.push(value);
-                }
+                    Insn::GetLocal(slot, depth) => {
+                        let env = env_outer(scope, frames[top].env, depth);
+                        stack.push(env_get(scope, env, slot as usize));
+                    }
+                    Insn::SetLocal(slot, depth) => {
+                        let value = stack.pop().expect("setlocal on an empty stack");
+                        let env = env_outer(scope, frames[top].env, depth);
+                        env_set(scope, env, slot as usize, value);
+                    }
 
-                Insn::CaseEq => {
-                    let condition = stack.pop().expect("caseeq on an empty stack");
-                    let subject = stack.pop().expect("caseeq on an empty stack");
-                    // `when c` and `in c` both ask `c === subject`, receiver
-                    // first. For an immediate, a String or an Array, `===` is
-                    // `==` and the fast path answers it.
-                    match case_eq(scope, condition, subject) {
-                        Ok(answer) => stack.push(bool_value(answer)),
-                        // The send behind the fast path, the same one
-                        // `Insn::BinOp` grew: a `Module`, a `Range` or a `Proc`
-                        // in condition position means something other than
-                        // `==`, and each of those defines the `===` that says
-                        // what. Refusing here instead was what made `when
-                        // Integer` — and every `in Integer` (#165) —
-                        // undispatchable.
-                        Err(Error::NoDispatch { .. }) => {
-                            let call = Pending {
-                                cache: None,
-                                name: crate::shared::symbols::intern("==="),
-                                receiver: condition,
-                                args: vec![subject],
-                                keywords: Vec::new(),
-                                block: Value::NIL,
-                                block_is_literal: false,
-                                cref: frames[top].cref,
-                                implicit_self: false,
-                                public_only: false,
-                                target: Target::Method,
-                                owner: None,
-                                defined_as: None,
-                            };
-                            if let Some(unwind) = dispatch(
-                                scope,
-                                &mut stack,
-                                &mut frames,
-                                call,
-                                proc_class,
-                                &mut ids,
-                            )? {
-                                return Ok(Step::Unwind(unwind));
-                            }
+                    Insn::Jump(displacement) => frames[top].pc = jump(frames[top].pc, displacement),
+                    Insn::JumpUnless(displacement) => {
+                        if !stack.pop().expect("jump on an empty stack").is_truthy() {
+                            frames[top].pc = jump(frames[top].pc, displacement);
                         }
-                        Err(other) => return Err(other),
                     }
-                }
+                    Insn::JumpIf(displacement) => {
+                        if stack.pop().expect("jump on an empty stack").is_truthy() {
+                            frames[top].pc = jump(frames[top].pc, displacement);
+                        }
+                    }
+                    Insn::JumpUnlessKeep(displacement) => {
+                        if !stack.last().expect("jump on an empty stack").is_truthy() {
+                            frames[top].pc = jump(frames[top].pc, displacement);
+                        }
+                    }
+                    Insn::JumpIfKeep(displacement) => {
+                        if stack.last().expect("jump on an empty stack").is_truthy() {
+                            frames[top].pc = jump(frames[top].pc, displacement);
+                        }
+                    }
+                    Insn::JumpIfNilKeep(displacement) => {
+                        if *stack.last().expect("jump on an empty stack") == Value::NIL {
+                            frames[top].pc = jump(frames[top].pc, displacement);
+                        }
+                    }
 
-                Insn::MakeProc(child, lambda) => {
-                    let iseq = Arc::clone(&frames[top].iseq.children[child as usize]);
-                    let value = make_proc(
-                        scope,
-                        proc_class,
-                        &iseq,
-                        frames[top].env,
-                        frames[top].receiver,
-                        frames[top].block,
-                        lambda,
-                        frames[top].cref,
-                        frames[top].home,
-                    );
-                    stack.push(value);
-                }
+                    Insn::BinOp(op) => {
+                        let right = stack.pop().expect("binop on an empty stack");
+                        let left = stack.pop().expect("binop on an empty stack");
+                        match binop(scope, op, left, right) {
+                            Ok(value) => stack.push(value),
+                            // The send behind the fast path. `BinOp`'s own docs have
+                            // said since #10 that one belongs here and that #11's
+                            // calling convention was what it waited for; #11 landed and
+                            // nothing wired it up. An operand the fast path does not
+                            // cover is an ordinary method call on the left-hand side,
+                            // which is what the operator *is* in Ruby — and it is what
+                            // lets `Array#+` and any user-defined operator work at all.
+                            Err(Error::NoDispatch { .. }) => {
+                                let call = Pending {
+                                    // ponytail: `Insn::BinOp` has no call-site
+                                    // index, so an operator that misses the fixnum
+                                    // fast path pays the full probe. Give the
+                                    // instruction a site when a benchmark shows
+                                    // operator dispatch on user-defined classes
+                                    // mattering.
+                                    cache: None,
+                                    name: crate::shared::symbols::intern(op.name()),
+                                    receiver: left,
+                                    args: vec![right],
+                                    keywords: Vec::new(),
+                                    block: Value::NIL,
+                                    block_is_literal: false,
+                                    cref: frames[top].cref,
+                                    implicit_self: false,
+                                    public_only: false,
+                                    target: Target::Method,
+                                    owner: None,
+                                    defined_as: None,
+                                };
+                                if let Some(unwind) = dispatch(
+                                    scope,
+                                    &mut stack,
+                                    &mut frames,
+                                    call,
+                                    proc_class,
+                                    &mut ids,
+                                )? {
+                                    return Ok(Step::Unwind(unwind));
+                                }
+                            }
+                            Err(other) => return Err(other),
+                        }
+                    }
+                    Insn::Neg => {
+                        let value = stack.pop().expect("neg on an empty stack");
+                        let negated = negate(scope, value)?;
+                        stack.push(negated);
+                    }
+                    Insn::Not => {
+                        let value = stack.pop().expect("not on an empty stack");
+                        stack.push(bool_value(!value.is_truthy()));
+                    }
 
-                Insn::DefineMethod(index) => {
-                    let (name, child) = frames[top].iseq.definitions[index as usize];
-                    let iseq = Arc::clone(&frames[top].iseq.children[child as usize]);
-                    let symbol = frames[top].symbols[name as usize];
-                    let cref = frames[top].cref;
-                    let default = frames[top].scope_default;
-                    let owner = scope.classes().cref_class(cref);
-                    hook_refusal(
-                        scope,
-                        owner,
-                        &[(
-                            "method_added",
-                            "`method_added`, which this definition would fire",
-                        )],
-                    )?;
-                    define_method_on(
-                        scope,
-                        owner,
-                        symbol,
-                        Arc::clone(&iseq),
-                        cref,
-                        default.visibility(),
-                    );
-                    if default == ScopeDefault::ModuleFunction {
-                        // The public half. A second definition rather than a
-                        // move: the instance copy stays, privately, which is
-                        // what makes `module_function` different from
-                        // `def self.` (#211).
-                        let singleton = scope.singleton_class(owner);
+                    Insn::NewArray(count) => {
+                        let at = stack.len() - count as usize;
+                        let elements: Vec<Value> = stack.drain(at..).collect();
+                        let value = new_array(scope, &elements);
+                        stack.push(value);
+                    }
+
+                    // `$~ = m`. Writes the frame's match, which is what makes
+                    // `$1` and `$&` follow it. `nil` clears; anything that is not
+                    // a `MatchData` is Ruby's `TypeError`, measured, because the
+                    // readers above would otherwise treat a plain object as a
+                    // match and answer nonsense.
+                    Insn::SetLastMatch => {
+                        let value = stack.pop().expect("setlastmatch on an empty stack");
+                        if value != Value::NIL && !is_match_data(scope, value) {
+                            let got = class_name_of(scope, value);
+                            return Err(Error::raise(
+                                "TypeError",
+                                format!("wrong argument type {got} (expected MatchData)"),
+                            ));
+                        }
+                        scope.set_last_match(value);
+                    }
+
+                    // `$!` (#206). The read is the cell; the write is the
+                    // compiler's own restore after a `begin` and never a Ruby
+                    // assignment, which is why it takes any value rather than only
+                    // an exception — `$! = e` is a `NameError` in Ruby.
+                    Insn::Errinfo => {
+                        let value = scope.errinfo();
+                        stack.push(value);
+                    }
+                    Insn::SetErrinfo => {
+                        let value = stack.pop().expect("seterrinfo on an empty stack");
+                        scope.set_errinfo(value);
+                    }
+                    Insn::DefinedMatch(which) => {
+                        let held = defined_match(scope, &which);
+                        let value =
+                            defined_word(scope, string_class, held.then_some("global-variable"));
+                        stack.push(value);
+                    }
+                    Insn::LastMatch(which) => {
+                        let value = last_match_part(scope, &which)?;
+                        stack.push(value);
+                    }
+
+                    Insn::CaseEq => {
+                        let condition = stack.pop().expect("caseeq on an empty stack");
+                        let subject = stack.pop().expect("caseeq on an empty stack");
+                        // `when c` and `in c` both ask `c === subject`, receiver
+                        // first. For an immediate, a String or an Array, `===` is
+                        // `==` and the fast path answers it.
+                        match case_eq(scope, condition, subject) {
+                            Ok(answer) => stack.push(bool_value(answer)),
+                            // The send behind the fast path, the same one
+                            // `Insn::BinOp` grew: a `Module`, a `Range` or a `Proc`
+                            // in condition position means something other than
+                            // `==`, and each of those defines the `===` that says
+                            // what. Refusing here instead was what made `when
+                            // Integer` — and every `in Integer` (#165) —
+                            // undispatchable.
+                            Err(Error::NoDispatch { .. }) => {
+                                let call = Pending {
+                                    cache: None,
+                                    name: crate::shared::symbols::intern("==="),
+                                    receiver: condition,
+                                    args: vec![subject],
+                                    keywords: Vec::new(),
+                                    block: Value::NIL,
+                                    block_is_literal: false,
+                                    cref: frames[top].cref,
+                                    implicit_self: false,
+                                    public_only: false,
+                                    target: Target::Method,
+                                    owner: None,
+                                    defined_as: None,
+                                };
+                                if let Some(unwind) = dispatch(
+                                    scope,
+                                    &mut stack,
+                                    &mut frames,
+                                    call,
+                                    proc_class,
+                                    &mut ids,
+                                )? {
+                                    return Ok(Step::Unwind(unwind));
+                                }
+                            }
+                            Err(other) => return Err(other),
+                        }
+                    }
+
+                    Insn::MakeProc(child, lambda) => {
+                        let iseq = Arc::clone(&frames[top].iseq.children[child as usize]);
+                        let value = make_proc(
+                            scope,
+                            proc_class,
+                            &iseq,
+                            frames[top].env,
+                            frames[top].receiver,
+                            frames[top].block,
+                            lambda,
+                            frames[top].cref,
+                            frames[top].home,
+                        );
+                        stack.push(value);
+                    }
+
+                    Insn::DefineMethod(index) => {
+                        let (name, child) = frames[top].iseq.definitions[index as usize];
+                        let iseq = Arc::clone(&frames[top].iseq.children[child as usize]);
+                        let symbol = frames[top].symbols[name as usize];
+                        let cref = frames[top].cref;
+                        let default = frames[top].scope_default;
+                        let owner = scope.classes().cref_class(cref);
                         hook_refusal(
                             scope,
                             owner,
                             &[(
-                                "singleton_method_added",
-                                "`singleton_method_added`, which `module_function` would fire",
+                                "method_added",
+                                "`method_added`, which this definition would fire",
                             )],
                         )?;
-                        define_method_on(scope, singleton, symbol, iseq, cref, Visibility::Public);
+                        define_method_on(
+                            scope,
+                            owner,
+                            symbol,
+                            Arc::clone(&iseq),
+                            cref,
+                            default.visibility(),
+                        );
+                        if default == ScopeDefault::ModuleFunction {
+                            // The public half. A second definition rather than a
+                            // move: the instance copy stays, privately, which is
+                            // what makes `module_function` different from
+                            // `def self.` (#211).
+                            let singleton = scope.singleton_class(owner);
+                            hook_refusal(
+                                scope,
+                                owner,
+                                &[(
+                                    "singleton_method_added",
+                                    "`singleton_method_added`, which `module_function` would fire",
+                                )],
+                            )?;
+                            define_method_on(
+                                scope,
+                                singleton,
+                                symbol,
+                                iseq,
+                                cref,
+                                Visibility::Public,
+                            );
+                        }
+                        stack.push(Value::symbol(symbol));
                     }
-                    stack.push(Value::symbol(symbol));
-                }
 
-                // `/a#{b}c/`. The source was concatenated on the stack; this
-                // compiles it. Deliberately not `regexp_literal`'s cache: two
-                // evaluations of an interpolated literal are two objects,
-                // measured, and a cache keyed by the built source would make
-                // them one.
-                Insn::NewRegexp(options) => {
-                    let source = stack.pop().expect("newregexp on an empty stack");
-                    let Some(text) = string_text(scope, source) else {
-                        return Err(Error::NoDispatch {
-                            op: "a regexp literal",
-                            operands: "an interpolation that is not a String",
-                        });
-                    };
-                    let value = regexp_new(scope, &text, options)?;
-                    stack.push(value);
-                }
-
-                Insn::OnceGet(displacement, site) => {
-                    let iseq = Arc::clone(&frames[top].iseq);
-                    if let Some(cached) = scope.regexps().once_cached(&iseq, site) {
-                        stack.push(cached);
-                        frames[top].pc = jump(frames[top].pc, displacement);
-                    }
-                }
-                Insn::OnceSet(site) => {
-                    let value = *stack.last().expect("onceset on an empty stack");
-                    let iseq = Arc::clone(&frames[top].iseq);
-                    scope.regexps_mut().cache_once(&iseq, site, value);
-                }
-
-                // `/a#{b}c/o`. The source is still built every time — the
-                // flag changes what happens after, not before — and then the
-                // site's first answer is reused for ever. Measured.
-                Insn::NewRegexpOnce(options, site) => {
-                    let source = stack.pop().expect("newregexponce on an empty stack");
-                    let iseq = Arc::clone(&frames[top].iseq);
-                    if let Some(cached) = scope.regexps().once_cached(&iseq, site) {
-                        stack.push(cached);
-                    } else {
+                    // `/a#{b}c/`. The source was concatenated on the stack; this
+                    // compiles it. Deliberately not `regexp_literal`'s cache: two
+                    // evaluations of an interpolated literal are two objects,
+                    // measured, and a cache keyed by the built source would make
+                    // them one.
+                    Insn::NewRegexp(options) => {
+                        let source = stack.pop().expect("newregexp on an empty stack");
                         let Some(text) = string_text(scope, source) else {
                             return Err(Error::NoDispatch {
                                 op: "a regexp literal",
@@ -975,454 +1565,503 @@ pub fn eval_in(
                             });
                         };
                         let value = regexp_new(scope, &text, options)?;
-                        scope.regexps_mut().cache_once(&iseq, site, value);
                         stack.push(value);
                     }
-                }
 
-                // Class variables (#188's enabling work). Read off the
-                // frame's cref, like `def`, then along that class's ancestors
-                // — never lexically, which is what separates one from a
-                // constant. A write lands on the ancestor that already holds
-                // the name, so a subclass assigning `@@a` changes the
-                // superclass's; measured.
-                Insn::GetCvar(name) => {
-                    let symbol = frames[top].symbols[name as usize];
-                    let owner = cvar_owner(scope, frames[top].cref)?;
-                    match cvar_read(scope, owner, symbol)? {
-                        Some(value) => stack.push(value),
-                        None => {
-                            let where_ = scope
-                                .classes()
-                                .name(owner)
-                                .map_or_else(|| "an anonymous class".to_owned(), str::to_owned);
-                            return Err(Error::raise(
-                                "NameError",
-                                format!(
-                                    "uninitialized class variable {} in {where_}",
-                                    symbol_name(symbol),
-                                ),
-                            ));
+                    Insn::OnceGet(displacement, site) => {
+                        let iseq = Arc::clone(&frames[top].iseq);
+                        if let Some(cached) = scope.regexps().once_cached(&iseq, site) {
+                            stack.push(cached);
+                            frames[top].pc = jump(frames[top].pc, displacement);
                         }
                     }
-                }
-                Insn::SetCvar(name) => {
-                    let symbol = frames[top].symbols[name as usize];
-                    let owner = cvar_owner(scope, frames[top].cref)?;
-                    let value = stack.pop().expect("setcvar on an empty stack");
-                    scope.classes_mut().cvar_set(owner, symbol, value);
-                }
-                Insn::DefinedCvar(name) => {
-                    let symbol = frames[top].symbols[name as usize];
-                    // `defined?` never raises, so a top-level `@@a` is `nil`
-                    // here rather than the `RuntimeError` reading one is.
-                    let held = match cvar_owner(scope, frames[top].cref) {
-                        Ok(owner) => scope.classes().cvar_defined(owner, symbol),
-                        Err(_) => false,
-                    };
-                    let value = defined_word(scope, string_class, held.then_some("class variable"));
-                    stack.push(value);
-                }
-
-                // `alias` and `undef` write into the frame's definee — the
-                // same cref `def` writes into, not `self`. A name nothing in
-                // the chain defines is Ruby's `NameError` in both.
-                Insn::Alias(new, old) => {
-                    let new = frames[top].symbols[new as usize];
-                    let old = frames[top].symbols[old as usize];
-                    let owner = scope.classes().cref_class(frames[top].cref);
-                    alias_into(scope, owner, new, old)?;
-                }
-                // `alias :"m#{n}" :m`. The names were built by the frame, old
-                // on top because it was pushed second — which is also Ruby's
-                // evaluation order for the pair.
-                Insn::AliasFromStack => {
-                    let old = pop_name(&mut stack, "alias")?;
-                    let new = pop_name(&mut stack, "alias")?;
-                    let owner = scope.classes().cref_class(frames[top].cref);
-                    alias_into(scope, owner, new, old)?;
-                }
-                Insn::Undef(name) => {
-                    let symbol = frames[top].symbols[name as usize];
-                    let owner = scope.classes().cref_class(frames[top].cref);
-                    undef_from(scope, owner, symbol)?;
-                }
-                Insn::UndefFromStack => {
-                    let symbol = pop_name(&mut stack, "undef")?;
-                    let owner = scope.classes().cref_class(frames[top].cref);
-                    undef_from(scope, owner, symbol)?;
-                }
-                Insn::AliasGlobal(new, old) => {
-                    let new = frames[top].symbols[new as usize];
-                    let old = frames[top].symbols[old as usize];
-                    scope.alias_global(new, old);
-                }
-                Insn::AliasGlobalSpecial(new, which) => {
-                    let new = frames[top].symbols[new as usize];
-                    scope.alias_global_special(new, which);
-                }
-                Insn::DefineSingleton(index) => {
-                    let (name, child) = frames[top].iseq.definitions[index as usize];
-                    let iseq = Arc::clone(&frames[top].iseq.children[child as usize]);
-                    let symbol = frames[top].symbols[name as usize];
-                    let cref = frames[top].cref;
-                    let receiver = stack.pop().expect("a receiver to define on");
-                    // `def frozen_obj.m` raises: a singleton method is stored on
-                    // the object, and a frozen object does not take stores.
-                    frozen_check(scope, receiver, "object")?;
-                    let owner = singleton_of(scope, receiver)?;
-                    // Ruby calls `singleton_method_added` on the receiver here.
-                    // Spinel does not, and an object that defines the hook would
-                    // silently never see it — so it refuses rather than defining
-                    // the method and reporting a state the program did not reach.
-                    // The check costs a method lookup only when one is written,
-                    // and the hooks themselves belong to #28's reflection slice.
-                    let hook = crate::shared::symbols::intern("singleton_method_added");
-                    if scope.classes_mut().lookup(owner, hook).is_some() {
-                        return Err(Error::Unknowable {
-                            what: "`singleton_method_added`, which this definition would fire",
-                            needs: "the definition hooks (#28)",
-                        });
+                    Insn::OnceSet(site) => {
+                        let value = *stack.last().expect("onceset on an empty stack");
+                        let iseq = Arc::clone(&frames[top].iseq);
+                        scope.regexps_mut().cache_once(&iseq, site, value);
                     }
-                    // Always public: a bare `private` in the class body does
-                    // not reach `def self.m`, measured on ruby 4.0.6.
-                    define_method_on(scope, owner, symbol, iseq, cref, Visibility::Public);
-                    stack.push(Value::symbol(symbol));
-                }
 
-                Insn::GetConst(name, how) => {
-                    let symbol = frames[top].symbols[name as usize];
-                    let cref = frames[top].cref;
-                    let from = const_base(scope, &mut stack, cref, how)?;
-                    let found = match how {
-                        ConstScope::Lexical => scope.classes().const_get(cref, symbol),
-                        ConstScope::Qualified | ConstScope::Top => {
-                            scope.classes().const_get_qualified(from, symbol)
+                    // `/a#{b}c/o`. The source is still built every time — the
+                    // flag changes what happens after, not before — and then the
+                    // site's first answer is reused for ever. Measured.
+                    Insn::NewRegexpOnce(options, site) => {
+                        let source = stack.pop().expect("newregexponce on an empty stack");
+                        let iseq = Arc::clone(&frames[top].iseq);
+                        if let Some(cached) = scope.regexps().once_cached(&iseq, site) {
+                            stack.push(cached);
+                        } else {
+                            let Some(text) = string_text(scope, source) else {
+                                return Err(Error::NoDispatch {
+                                    op: "a regexp literal",
+                                    operands: "an interpolation that is not a String",
+                                });
+                            };
+                            let value = regexp_new(scope, &text, options)?;
+                            scope.regexps_mut().cache_once(&iseq, site, value);
+                            stack.push(value);
                         }
-                    };
-                    let Some(value) = found else {
-                        return Err(uninitialized(scope, from, symbol, how));
-                    };
-                    stack.push(value);
-                }
+                    }
 
-                Insn::SetConst(name, how) => {
-                    let symbol = frames[top].symbols[name as usize];
-                    let cref = frames[top].cref;
-                    let value = stack.pop().expect("a value to assign");
-                    let target = const_base(scope, &mut stack, cref, how)?;
-                    hook_refusal(
-                        scope,
-                        target,
-                        &[(
-                            "const_added",
-                            "`const_added`, which this assignment would fire",
-                        )],
-                    )?;
-                    scope.classes_mut().const_set(target, symbol, value);
-                    // `Foo = Class.new` is how an anonymous class gets a name,
-                    // and the only way one ever does. Only the first assignment
-                    // names it: `A = Class.new; B = A` leaves both `"A"`.
-                    name_if_anonymous(scope, target, symbol, value);
-                    // Assignment is an expression, and its value is what was
-                    // assigned — not the module it landed on.
-                    stack.push(value);
-                }
-
-                Insn::DefinedConst(name, how) => {
-                    let symbol = frames[top].symbols[name as usize];
-                    let cref = frames[top].cref;
-                    let from = const_base(scope, &mut stack, cref, how)?;
-                    let found = match how {
-                        ConstScope::Lexical => scope.classes().const_get(cref, symbol),
-                        ConstScope::Qualified | ConstScope::Top => {
-                            scope.classes().const_get_qualified(from, symbol)
+                    // Class variables (#188's enabling work). Read off the
+                    // frame's cref, like `def`, then along that class's ancestors
+                    // — never lexically, which is what separates one from a
+                    // constant. A write lands on the ancestor that already holds
+                    // the name, so a subclass assigning `@@a` changes the
+                    // superclass's; measured.
+                    Insn::GetCvar(name) => {
+                        let symbol = frames[top].symbols[name as usize];
+                        let owner = cvar_owner(scope, frames[top].cref)?;
+                        match cvar_read(scope, owner, symbol)? {
+                            Some(value) => stack.push(value),
+                            None => {
+                                let where_ = scope
+                                    .classes()
+                                    .name(owner)
+                                    .map_or_else(|| "an anonymous class".to_owned(), str::to_owned);
+                                return Err(Error::raise(
+                                    "NameError",
+                                    format!(
+                                        "uninitialized class variable {} in {where_}",
+                                        symbol_name(symbol),
+                                    ),
+                                ));
+                            }
                         }
-                    };
-                    let value = defined_answer(scope, string_class, found.map(|_| "constant"))?;
-                    stack.push(value);
-                }
+                    }
+                    Insn::SetCvar(name) => {
+                        let symbol = frames[top].symbols[name as usize];
+                        let owner = cvar_owner(scope, frames[top].cref)?;
+                        let value = stack.pop().expect("setcvar on an empty stack");
+                        scope.classes_mut().cvar_set(owner, symbol, value);
+                    }
+                    Insn::DefinedCvar(name) => {
+                        let symbol = frames[top].symbols[name as usize];
+                        // `defined?` never raises, so a top-level `@@a` is `nil`
+                        // here rather than the `RuntimeError` reading one is.
+                        let held = match cvar_owner(scope, frames[top].cref) {
+                            Ok(owner) => scope.classes().cvar_defined(owner, symbol),
+                            Err(_) => false,
+                        };
+                        let value =
+                            defined_word(scope, string_class, held.then_some("class variable"));
+                        stack.push(value);
+                    }
 
-                Insn::DefinedMethod(name) | Insn::DefinedSelfMethod(name) => {
-                    let symbol = frames[top].symbols[name as usize];
-                    let receiver = match insn {
-                        Insn::DefinedMethod(_) => stack.pop().expect("a receiver to ask about"),
-                        _ => frames[top].receiver,
-                    };
-                    // `nil`, `true`, and `false` have no class yet, so "does it have
-                    // this method" has no answer rather than the answer `no`.
-                    let class = class_of(scope, receiver).ok_or_else(|| no_class(receiver))?;
-                    let found = scope.classes_mut().lookup(class, symbol);
-                    // A method this site could not call is not "method" (#161).
-                    // `defined?` refuses `self.priv` where the call allows it,
-                    // so `self_receiver_ok` is false here — measured, not
-                    // inferred.
-                    let implicit = matches!(insn, Insn::DefinedSelfMethod(_));
-                    let caller = frames[top].receiver;
-                    let refused = found.is_some_and(|method| {
-                        visibility_refusal_at(
+                    // `alias` and `undef` write into the frame's definee — the
+                    // same cref `def` writes into, not `self`. A name nothing in
+                    // the chain defines is Ruby's `NameError` in both.
+                    Insn::Alias(new, old) => {
+                        let new = frames[top].symbols[new as usize];
+                        let old = frames[top].symbols[old as usize];
+                        let owner = scope.classes().cref_class(frames[top].cref);
+                        alias_into(scope, owner, new, old)?;
+                    }
+                    // `alias :"m#{n}" :m`. The names were built by the frame, old
+                    // on top because it was pushed second — which is also Ruby's
+                    // evaluation order for the pair.
+                    Insn::AliasFromStack => {
+                        let old = pop_name(&mut stack, "alias")?;
+                        let new = pop_name(&mut stack, "alias")?;
+                        let owner = scope.classes().cref_class(frames[top].cref);
+                        alias_into(scope, owner, new, old)?;
+                    }
+                    Insn::Undef(name) => {
+                        let symbol = frames[top].symbols[name as usize];
+                        let owner = scope.classes().cref_class(frames[top].cref);
+                        undef_from(scope, owner, symbol)?;
+                    }
+                    Insn::UndefFromStack => {
+                        let symbol = pop_name(&mut stack, "undef")?;
+                        let owner = scope.classes().cref_class(frames[top].cref);
+                        undef_from(scope, owner, symbol)?;
+                    }
+                    Insn::AliasGlobal(new, old) => {
+                        let new = frames[top].symbols[new as usize];
+                        let old = frames[top].symbols[old as usize];
+                        scope.alias_global(new, old);
+                    }
+                    Insn::AliasGlobalSpecial(new, which) => {
+                        let new = frames[top].symbols[new as usize];
+                        scope.alias_global_special(new, which);
+                    }
+                    Insn::DefineSingleton(index) => {
+                        let (name, child) = frames[top].iseq.definitions[index as usize];
+                        let iseq = Arc::clone(&frames[top].iseq.children[child as usize]);
+                        let symbol = frames[top].symbols[name as usize];
+                        let cref = frames[top].cref;
+                        let receiver = stack.pop().expect("a receiver to define on");
+                        // `def frozen_obj.m` raises: a singleton method is stored on
+                        // the object, and a frozen object does not take stores.
+                        frozen_check(scope, receiver, "object")?;
+                        let owner = singleton_of(scope, receiver)?;
+                        // Ruby calls `singleton_method_added` on the receiver here.
+                        // Spinel does not, and an object that defines the hook would
+                        // silently never see it — so it refuses rather than defining
+                        // the method and reporting a state the program did not reach.
+                        // The check costs a method lookup only when one is written,
+                        // and the hooks themselves belong to #28's reflection slice.
+                        let hook = crate::shared::symbols::intern("singleton_method_added");
+                        if scope.classes_mut().lookup(owner, hook).is_some() {
+                            return Err(Error::Unknowable {
+                                what: "`singleton_method_added`, which this definition would fire",
+                                needs: "the definition hooks (#28)",
+                            });
+                        }
+                        // Always public: a bare `private` in the class body does
+                        // not reach `def self.m`, measured on ruby 4.0.6.
+                        define_method_on(scope, owner, symbol, iseq, cref, Visibility::Public);
+                        stack.push(Value::symbol(symbol));
+                    }
+
+                    Insn::GetConst(name, how) => {
+                        let symbol = frames[top].symbols[name as usize];
+                        let cref = frames[top].cref;
+                        let from = const_base(scope, &mut stack, cref, how)?;
+                        let found = match how {
+                            ConstScope::Lexical => scope.classes().const_get(cref, symbol),
+                            ConstScope::Qualified | ConstScope::Top => {
+                                scope.classes().const_get_qualified(from, symbol)
+                            }
+                        };
+                        let Some(value) = found else {
+                            return Err(uninitialized(scope, from, symbol, how));
+                        };
+                        stack.push(value);
+                    }
+
+                    Insn::SetConst(name, how) => {
+                        let symbol = frames[top].symbols[name as usize];
+                        let cref = frames[top].cref;
+                        let value = stack.pop().expect("a value to assign");
+                        let target = const_base(scope, &mut stack, cref, how)?;
+                        hook_refusal(
                             scope,
-                            method,
-                            implicit,
-                            receiver,
-                            Some(caller),
-                            false,
-                        )
-                        .is_some()
-                    });
-                    // A method that exists and this site may not call is a
-                    // definite `nil`, not an unknowable one: no `require` can
-                    // change the answer, so #39's refusal must not fire here.
-                    let value = if refused {
-                        defined_word(scope, string_class, None)
-                    } else {
-                        defined_answer(scope, string_class, found.map(|_| "method"))?
-                    };
-                    stack.push(value);
-                }
-
-                Insn::DefinedYield => {
-                    // A frame either has a block or does not, and this heap is the
-                    // authority on which. So `nil` here is an answer, not a gap.
-                    let answer = (frames[top].block != Value::NIL).then_some("yield");
-                    let value = defined_word(scope, string_class, answer);
-                    stack.push(value);
-                }
-
-                Insn::OpenClass(index) => {
-                    let iseq = Arc::clone(&frames[top].iseq);
-                    let def = &iseq.class_defs[index as usize];
-                    open_class(scope, &mut stack, &mut frames, def, &iseq, &mut ids)?;
-                }
-
-                Insn::Send(index) => {
-                    let iseq = Arc::clone(&frames[top].iseq);
-                    let site = &iseq.call_sites[index as usize];
-                    let mut call =
-                        pop_call(scope, &mut stack, site, &frames[top], proc_class, true)?;
-                    // The call-site id: this `Iseq`'s run, plus the operand.
-                    call.cache = Some(frames[top].cache_base + index);
-                    if let Some(unwind) =
-                        dispatch(scope, &mut stack, &mut frames, call, proc_class, &mut ids)?
-                    {
-                        return Ok(Step::Unwind(unwind));
+                            target,
+                            &[(
+                                "const_added",
+                                "`const_added`, which this assignment would fire",
+                            )],
+                        )?;
+                        scope.classes_mut().const_set(target, symbol, value);
+                        // `Foo = Class.new` is how an anonymous class gets a name,
+                        // and the only way one ever does. Only the first assignment
+                        // names it: `A = Class.new; B = A` leaves both `"A"`.
+                        name_if_anonymous(scope, target, symbol, value);
+                        // Assignment is an expression, and its value is what was
+                        // assigned — not the module it landed on.
+                        stack.push(value);
                     }
-                }
 
-                Insn::Yield(index) => {
-                    let iseq = Arc::clone(&frames[top].iseq);
-                    let site = &iseq.call_sites[index as usize];
-                    // The block is a field of the frame rather than a slot, so an
-                    // anonymous block costs nothing and `yield` needs no name.
-                    let block = frames[top].block;
-                    let mut call =
-                        pop_call(scope, &mut stack, site, &frames[top], proc_class, false)?;
-                    if block == Value::NIL {
-                        return Err(Error::raise("LocalJumpError", "no block given (yield)"));
+                    Insn::DefinedConst(name, how) => {
+                        let symbol = frames[top].symbols[name as usize];
+                        let cref = frames[top].cref;
+                        let from = const_base(scope, &mut stack, cref, how)?;
+                        let found = match how {
+                            ConstScope::Lexical => scope.classes().const_get(cref, symbol),
+                            ConstScope::Qualified | ConstScope::Top => {
+                                scope.classes().const_get_qualified(from, symbol)
+                            }
+                        };
+                        let value = defined_answer(scope, string_class, found.map(|_| "constant"))?;
+                        stack.push(value);
                     }
-                    call.receiver = block;
-                    call.target = Target::Block(block);
-                    if let Some(unwind) =
-                        dispatch(scope, &mut stack, &mut frames, call, proc_class, &mut ids)?
-                    {
-                        return Ok(Step::Unwind(unwind));
-                    }
-                }
 
-                // `super` (#187). The receiver, the name, and the class to
-                // start past all come from the frame; the site carries only the
-                // arguments, which is why its own name is unused.
-                Insn::Super(index) => {
-                    let iseq = Arc::clone(&frames[top].iseq);
-                    let site = &iseq.call_sites[index as usize];
-                    let (owner, name) = (frames[top].owner, frames[top].defined_as);
-                    // Forward the frame's block only when the site passed none
-                    // at all. `super(&nil)` passes a block that is `nil`, which
-                    // is a different thing and means no block — asserted by
-                    // `super_spec.rb`'s "can pass no block using &nil".
-                    let frame_block = match site.block {
-                        BlockRef::None => frames[top].block,
-                        _ => Value::NIL,
-                    };
-                    let mut call =
-                        pop_call(scope, &mut stack, site, &frames[top], proc_class, false)?;
-                    let (Some(owner), Some(name)) = (owner, name) else {
-                        // A body that is not a method's and was not written in
-                        // one. Ruby raises here rather than at parse time.
-                        return Err(Error::raise(
-                            "RuntimeError",
-                            "super called outside of method",
-                        ));
-                    };
-                    call.name = name;
-                    call.target = Target::Super { owner };
-                    // `super` reaches a private method the way a receiverless
-                    // call does.
-                    call.implicit_self = true;
-                    // Both `super` and `super()` forward the current block:
-                    // measured, `B#m` calling `super` reaches an `A#m` that
-                    // yields. An explicit `&b` at the site wins.
-                    if call.block == Value::NIL {
-                        call.block = frame_block;
+                    Insn::DefinedMethod(name) | Insn::DefinedSelfMethod(name) => {
+                        let symbol = frames[top].symbols[name as usize];
+                        let receiver = match insn {
+                            Insn::DefinedMethod(_) => stack.pop().expect("a receiver to ask about"),
+                            _ => frames[top].receiver,
+                        };
+                        // `nil`, `true`, and `false` have no class yet, so "does it have
+                        // this method" has no answer rather than the answer `no`.
+                        let class = class_of(scope, receiver).ok_or_else(|| no_class(receiver))?;
+                        let found = scope.classes_mut().lookup(class, symbol);
+                        // A method this site could not call is not "method" (#161).
+                        // `defined?` refuses `self.priv` where the call allows it,
+                        // so `self_receiver_ok` is false here — measured, not
+                        // inferred.
+                        let implicit = matches!(insn, Insn::DefinedSelfMethod(_));
+                        let caller = frames[top].receiver;
+                        let refused = found.is_some_and(|method| {
+                            visibility_refusal_at(
+                                scope,
+                                method,
+                                implicit,
+                                receiver,
+                                Some(caller),
+                                false,
+                            )
+                            .is_some()
+                        });
+                        // A method that exists and this site may not call is a
+                        // definite `nil`, not an unknowable one: no `require` can
+                        // change the answer, so #39's refusal must not fire here.
+                        let value = if refused {
+                            defined_word(scope, string_class, None)
+                        } else {
+                            defined_answer(scope, string_class, found.map(|_| "method"))?
+                        };
+                        stack.push(value);
                     }
-                    if let Some(unwind) =
-                        dispatch(scope, &mut stack, &mut frames, call, proc_class, &mut ids)?
-                    {
-                        return Ok(Step::Unwind(unwind));
-                    }
-                }
 
-                Insn::JumpUnlessUndef(displacement) => {
-                    if stack.pop().expect("jump on an empty stack") != Value::UNDEF {
-                        frames[top].pc = jump(frames[top].pc, displacement);
+                    Insn::DefinedYield => {
+                        // A frame either has a block or does not, and this heap is the
+                        // authority on which. So `nil` here is an answer, not a gap.
+                        let answer = (frames[top].block != Value::NIL).then_some("yield");
+                        let value = defined_word(scope, string_class, answer);
+                        stack.push(value);
                     }
-                }
 
-                Insn::Leave => {
-                    let value = stack.pop().unwrap_or(Value::NIL);
-                    let done = frames.pop().expect("a frame to leave");
-                    scope.set_errinfo(done.errinfo_on_entry);
-                    stack.truncate(done.base);
-                    if frames.is_empty() {
-                        return Ok(Step::Done(value));
+                    Insn::OpenClass(index) => {
+                        let iseq = Arc::clone(&frames[top].iseq);
+                        let def = &iseq.class_defs[index as usize];
+                        open_class(scope, &mut stack, &mut frames, def, &iseq, &mut ids)?;
                     }
-                    // `Class#new` left the object below the base; `initialize`'s own
-                    // value is dropped.
-                    if done.raises_receiver {
-                        let exception = stack
-                            .pop()
-                            .expect("`raise` left the exception below the base");
+
+                    Insn::Send(index) => {
+                        let iseq = Arc::clone(&frames[top].iseq);
+                        let site = &iseq.call_sites[index as usize];
+                        let mut call =
+                            pop_call(scope, &mut stack, site, &frames[top], proc_class, true)?;
+                        // The call-site id: this `Iseq`'s run, plus the operand.
+                        call.cache = Some(frames[top].cache_base + index);
+                        if let Some(unwind) =
+                            dispatch(scope, &mut stack, &mut frames, call, proc_class, &mut ids)?
+                        {
+                            return Ok(Step::Unwind(unwind));
+                        }
+                    }
+
+                    Insn::Yield(index) => {
+                        let iseq = Arc::clone(&frames[top].iseq);
+                        let site = &iseq.call_sites[index as usize];
+                        // The block is a field of the frame rather than a slot, so an
+                        // anonymous block costs nothing and `yield` needs no name.
+                        let block = frames[top].block;
+                        let mut call =
+                            pop_call(scope, &mut stack, site, &frames[top], proc_class, false)?;
+                        if block == Value::NIL {
+                            return Err(Error::raise("LocalJumpError", "no block given (yield)"));
+                        }
+                        call.receiver = block;
+                        call.target = Target::Block(block);
+                        if let Some(unwind) =
+                            dispatch(scope, &mut stack, &mut frames, call, proc_class, &mut ids)?
+                        {
+                            return Ok(Step::Unwind(unwind));
+                        }
+                    }
+
+                    // `super` (#187). The receiver, the name, and the class to
+                    // start past all come from the frame; the site carries only the
+                    // arguments, which is why its own name is unused.
+                    Insn::Super(index) => {
+                        let iseq = Arc::clone(&frames[top].iseq);
+                        let site = &iseq.call_sites[index as usize];
+                        let (owner, name) = (frames[top].owner, frames[top].defined_as);
+                        // Forward the frame's block only when the site passed none
+                        // at all. `super(&nil)` passes a block that is `nil`, which
+                        // is a different thing and means no block — asserted by
+                        // `super_spec.rb`'s "can pass no block using &nil".
+                        let frame_block = match site.block {
+                            BlockRef::None => frames[top].block,
+                            _ => Value::NIL,
+                        };
+                        let mut call =
+                            pop_call(scope, &mut stack, site, &frames[top], proc_class, false)?;
+                        let (Some(owner), Some(name)) = (owner, name) else {
+                            // A body that is not a method's and was not written in
+                            // one. Ruby raises here rather than at parse time.
+                            return Err(Error::raise(
+                                "RuntimeError",
+                                "super called outside of method",
+                            ));
+                        };
+                        call.name = name;
+                        call.target = Target::Super { owner };
+                        // `super` reaches a private method the way a receiverless
+                        // call does.
+                        call.implicit_self = true;
+                        // Both `super` and `super()` forward the current block:
+                        // measured, `B#m` calling `super` reaches an `A#m` that
+                        // yields. An explicit `&b` at the site wins.
+                        if call.block == Value::NIL {
+                            call.block = frame_block;
+                        }
+                        if let Some(unwind) =
+                            dispatch(scope, &mut stack, &mut frames, call, proc_class, &mut ids)?
+                        {
+                            return Ok(Step::Unwind(unwind));
+                        }
+                    }
+
+                    Insn::JumpUnlessUndef(displacement) => {
+                        if stack.pop().expect("jump on an empty stack") != Value::UNDEF {
+                            frames[top].pc = jump(frames[top].pc, displacement);
+                        }
+                    }
+
+                    Insn::Leave => {
+                        let value = stack.pop().unwrap_or(Value::NIL);
+                        let done = frames.pop().expect("a frame to leave");
+                        scope.set_errinfo(done.errinfo_on_entry);
+                        stack.truncate(done.base);
+                        if frames.is_empty() {
+                            // A fiber's block returning is `resume` returning in
+                            // its resumer; only the root's last frame ends the run.
+                            return match leave_fiber(
+                                scope,
+                                &mut stack,
+                                &mut frames,
+                                FiberExit::Value(value),
+                            ) {
+                                Err(()) => Ok(Step::Done(value)),
+                                Ok(None) => Ok(Step::Next),
+                                Ok(Some(unwind)) => Ok(Step::Unwind(unwind)),
+                            };
+                        }
+                        // `Class#new` left the object below the base; `initialize`'s own
+                        // value is dropped.
+                        if done.raises_receiver {
+                            let exception = stack
+                                .pop()
+                                .expect("`raise` left the exception below the base");
+                            return Ok(Step::Unwind(Unwind::Exception(exception)));
+                        }
+                        if !done.keeps_receiver {
+                            stack.push(value);
+                        }
+                    }
+
+                    Insn::LeaveThroughEnsure => {
+                        let value = stack.pop().unwrap_or(Value::NIL);
+                        // The same unwind `return` uses, aimed at *this* frame
+                        // rather than the method the block was written in: the
+                        // search pops to it, running every `ensure` on the way, and
+                        // leaves `value` behind as the block's value.
+                        return Ok(Step::Unwind(Unwind::Return {
+                            frame: frames[top].id,
+                            value,
+                        }));
+                    }
+
+                    Insn::Return => {
+                        let value = stack.pop().unwrap_or(Value::NIL);
+                        let frame = frames[top].home;
+                        // A method or a lambda homes to itself, so this is the ordinary
+                        // case and the search below finds it immediately. A block homes
+                        // to the method it was written in, and if that method has
+                        // already returned there is nothing to return *from*.
+                        if !frames.iter().any(|call| call.id == frame) {
+                            return Err(Error::raise("LocalJumpError", "unexpected return"));
+                        }
+                        return Ok(Step::Unwind(Unwind::Return { frame, value }));
+                    }
+
+                    Insn::Break => {
+                        let value = stack.pop().unwrap_or(Value::NIL);
+                        let frame = frames[top].breaks;
+                        if frame == 0 || !frames.iter().any(|call| call.id == frame) {
+                            return Err(Error::raise("LocalJumpError", "break from proc-closure"));
+                        }
+                        return Ok(Step::Unwind(Unwind::Break { frame, value }));
+                    }
+
+                    Insn::Goto(displacement, depth) | Insn::GotoValue(displacement, depth) => {
+                        let value = match insn {
+                            Insn::GotoValue(_, _) => Some(stack.pop().unwrap_or(Value::NIL)),
+                            _ => None,
+                        };
+                        let target = jump(frames[top].pc, displacement);
+                        return Ok(Step::Unwind(Unwind::Goto {
+                            frame: frames[top].id,
+                            target,
+                            depth: depth as usize,
+                            value,
+                        }));
+                    }
+
+                    Insn::Raise => {
+                        let exception = stack.pop().expect("raise on an empty stack");
                         return Ok(Step::Unwind(Unwind::Exception(exception)));
                     }
-                    if !done.keeps_receiver {
-                        stack.push(value);
+
+                    Insn::CheckMatch => {
+                        let class = stack.pop().expect("a rescue class on the stack");
+                        let exception = *stack.last().expect("an exception to match against");
+                        let matched = exception_matches(scope, exception, class)?;
+                        stack.push(bool_value(matched));
                     }
-                }
 
-                Insn::LeaveThroughEnsure => {
-                    let value = stack.pop().unwrap_or(Value::NIL);
-                    // The same unwind `return` uses, aimed at *this* frame
-                    // rather than the method the block was written in: the
-                    // search pops to it, running every `ensure` on the way, and
-                    // leaves `value` behind as the block's value.
-                    return Ok(Step::Unwind(Unwind::Return {
-                        frame: frames[top].id,
-                        value,
-                    }));
-                }
-
-                Insn::Return => {
-                    let value = stack.pop().unwrap_or(Value::NIL);
-                    let frame = frames[top].home;
-                    // A method or a lambda homes to itself, so this is the ordinary
-                    // case and the search below finds it immediately. A block homes
-                    // to the method it was written in, and if that method has
-                    // already returned there is nothing to return *from*.
-                    if !frames.iter().any(|call| call.id == frame) {
-                        return Err(Error::raise("LocalJumpError", "unexpected return"));
+                    Insn::CheckMatchAny => {
+                        let list = stack.pop().expect("a rescue class list on the stack");
+                        let exception = *stack.last().expect("an exception to match against");
+                        let mut matched = false;
+                        // Rooted and read one element at a time rather than collected:
+                        // `exception_matches` can allocate, and a `Value` held across
+                        // an allocation is exactly what the handle discipline is for.
+                        let list = scope.root(list);
+                        // In order, and stopping at the first hit. `exception_matches`
+                        // raises the `TypeError` for a non-`Module`, so stopping early
+                        // is also what keeps `rescue RuntimeError, *[42]` from raising
+                        // one when the `RuntimeError` already matched (measured).
+                        for index in 0..array_len(scope, list) {
+                            let class = array_get(scope, list, index);
+                            if exception_matches(scope, exception, class)? {
+                                matched = true;
+                                break;
+                            }
+                        }
+                        stack.push(bool_value(matched));
                     }
-                    return Ok(Step::Unwind(Unwind::Return { frame, value }));
-                }
 
-                Insn::Break => {
-                    let value = stack.pop().unwrap_or(Value::NIL);
-                    let frame = frames[top].breaks;
-                    if frame == 0 || !frames.iter().any(|call| call.id == frame) {
-                        return Err(Error::raise("LocalJumpError", "break from proc-closure"));
+                    Insn::EnterEnsure => {
+                        let value = stack.pop().unwrap_or(Value::NIL);
+                        frames[top].parked.push(Parked::Value(value));
                     }
-                    return Ok(Step::Unwind(Unwind::Break { frame, value }));
-                }
 
-                Insn::Goto(displacement, depth) | Insn::GotoValue(displacement, depth) => {
-                    let value = match insn {
-                        Insn::GotoValue(_, _) => Some(stack.pop().unwrap_or(Value::NIL)),
-                        _ => None,
-                    };
-                    let target = jump(frames[top].pc, displacement);
-                    return Ok(Step::Unwind(Unwind::Goto {
-                        frame: frames[top].id,
-                        target,
-                        depth: depth as usize,
-                        value,
-                    }));
-                }
-
-                Insn::Raise => {
-                    let exception = stack.pop().expect("raise on an empty stack");
-                    return Ok(Step::Unwind(Unwind::Exception(exception)));
-                }
-
-                Insn::CheckMatch => {
-                    let class = stack.pop().expect("a rescue class on the stack");
-                    let exception = *stack.last().expect("an exception to match against");
-                    let matched = exception_matches(scope, exception, class)?;
-                    stack.push(bool_value(matched));
-                }
-
-                Insn::CheckMatchAny => {
-                    let list = stack.pop().expect("a rescue class list on the stack");
-                    let exception = *stack.last().expect("an exception to match against");
-                    let mut matched = false;
-                    // Rooted and read one element at a time rather than collected:
-                    // `exception_matches` can allocate, and a `Value` held across
-                    // an allocation is exactly what the handle discipline is for.
-                    let list = scope.root(list);
-                    // In order, and stopping at the first hit. `exception_matches`
-                    // raises the `TypeError` for a non-`Module`, so stopping early
-                    // is also what keeps `rescue RuntimeError, *[42]` from raising
-                    // one when the `RuntimeError` already matched (measured).
-                    for index in 0..array_len(scope, list) {
-                        let class = array_get(scope, list, index);
-                        if exception_matches(scope, exception, class)? {
-                            matched = true;
-                            break;
+                    Insn::LeaveEnsure => {
+                        match frames[top].parked.pop().expect("an ensure to leave") {
+                            Parked::Value(value) => stack.push(value),
+                            Parked::Unwind(unwind) => return Ok(Step::Unwind(unwind)),
                         }
                     }
-                    stack.push(bool_value(matched));
                 }
+                Ok(Step::Next)
+            })();
 
-                Insn::EnterEnsure => {
-                    let value = stack.pop().unwrap_or(Value::NIL);
-                    frames[top].parked.push(Parked::Value(value));
+            let unwind = match stepped {
+                Ok(Step::Next) => continue,
+                Ok(Step::Done(value)) => break value,
+                Ok(Step::Unwind(unwind)) => unwind,
+                // A raise becomes an object here and nowhere else, so every site
+                // that has been emitting `Error::Raise` since #11 starts being
+                // catchable without being touched.
+                Err(Error::Raise { class, message }) => {
+                    Unwind::Exception(exception_new(scope, class, &message))
                 }
+                // `NoDispatch`, `Budget`, and `Unknowable` are not Ruby semantics:
+                // they say this VM cannot run the program. A `rescue` must never
+                // turn "not implemented yet" into "caught", or the harness would
+                // report a missing feature as an exception a spec handled.
+                Err(other) => return Err(other),
+            };
 
-                Insn::LeaveEnsure => match frames[top].parked.pop().expect("an ensure to leave") {
-                    Parked::Value(value) => stack.push(value),
-                    Parked::Unwind(unwind) => return Ok(Step::Unwind(unwind)),
-                },
+            // Where the exception starts is where its backtrace is taken: every
+            // raise, whether `raise` or the VM's own, comes through here with the
+            // raising frame still on the stack.
+            if let Unwind::Exception(exception) = unwind {
+                attach_backtrace(scope, &frames, exception);
             }
-            Ok(Step::Next)
-        })();
-
-        let unwind = match stepped {
-            Ok(Step::Next) => continue,
-            Ok(Step::Done(value)) => break value,
-            Ok(Step::Unwind(unwind)) => unwind,
-            // A raise becomes an object here and nowhere else, so every site
-            // that has been emitting `Error::Raise` since #11 starts being
-            // catchable without being touched.
-            Err(Error::Raise { class, message }) => {
-                Unwind::Exception(exception_new(scope, class, &message))
+            if let Some(value) = unwind_to_handler(scope, &mut stack, &mut frames, unwind)? {
+                break value;
             }
-            // `NoDispatch`, `Budget`, and `Unknowable` are not Ruby semantics:
-            // they say this VM cannot run the program. A `rescue` must never
-            // turn "not implemented yet" into "caught", or the harness would
-            // report a missing feature as an exception a spec handled.
-            Err(other) => return Err(other),
-        };
+        })
+    })();
 
-        // Where the exception starts is where its backtrace is taken: every
-        // raise, whether `raise` or the VM's own, comes through here with the
-        // raising frame still on the stack.
-        if let Unwind::Exception(exception) = unwind {
-            attach_backtrace(scope, &frames, exception);
-        }
-        if let Some(value) = unwind_to_handler(scope, &mut stack, &mut frames, unwind)? {
-            break value;
-        }
-    };
-
-    Ok(result)
+    scope.fibers_mut().frame_ids = ids;
+    scope.fibers_mut().abandon();
+    result
 }
 
 /// Walk out through the frames until something wants this unwind.
@@ -1539,7 +2178,14 @@ fn unwind_to_handler(
         };
         if let Some(value) = landed {
             if frames.is_empty() {
-                return Ok(Some(value));
+                match leave_fiber(scope, stack, frames, FiberExit::Value(value)) {
+                    Err(()) => return Ok(Some(value)),
+                    Ok(None) => return Ok(None),
+                    Ok(Some(next)) => {
+                        unwind = next;
+                        continue;
+                    }
+                }
             }
             if done.raises_receiver && matches!(unwind, Unwind::Return { .. }) {
                 // An explicit `return` out of an `initialize` that `raise` ran
@@ -1567,7 +2213,20 @@ fn unwind_to_handler(
             return Ok(None);
         }
         if frames.is_empty() {
-            return Err(escaped(scope, unwind));
+            // Out of a fiber's last frame, the unwind carries on in its
+            // resumer — or becomes the LocalJumpError a `break` or `return`
+            // out of a fiber's block is there.
+            match leave_fiber(scope, stack, frames, FiberExit::Unwind(unwind)) {
+                Err(()) => return Err(escaped(scope, unwind)),
+                Ok(None) => return Ok(None),
+                Ok(Some(next)) => {
+                    if let Unwind::Exception(exception) = next {
+                        attach_backtrace(scope, frames, exception);
+                    }
+                    unwind = next;
+                    continue;
+                }
+            }
         }
     }
 }
@@ -6021,6 +6680,26 @@ fn native_call<'h>(
             Ok(None)
         }
 
+        Native::Fiber(op) => fiber_native(scope, stack, frames, &call, op, ids),
+
+        Native::ProcLocation => {
+            let block = call.args.first().copied().unwrap_or(Value::NIL);
+            let value = match proc_parts(scope, block) {
+                Some((iseq, ..)) if iseq.first_line > 0 => match &iseq.path {
+                    Some(path) => {
+                        let path = string_new(scope, path);
+                        let line = Value::fixnum(i64::from(iseq.first_line))
+                            .expect("a line number is a fixnum");
+                        new_array(scope, &[path, line])
+                    }
+                    None => Value::NIL,
+                },
+                _ => Value::NIL,
+            };
+            stack.push(value);
+            Ok(None)
+        }
+
         Native::NeedsThreads => Err(Error::Unknowable {
             what: "starting a `Thread`",
             needs: "`Thread` on the per-Ractor lock (#45)",
@@ -7121,8 +7800,13 @@ fn raise_argument(
         return Ok(first);
     }
 
-    // A String is a RuntimeError with that message.
+    // A String is a RuntimeError with that message — alone. A String with a
+    // second argument is a TypeError, measured: `raise "m", ["bt"]` is not a
+    // message and a backtrace, and is not taken as one.
     if let Some(text) = string_bytes(scope, first) {
+        if args.len() > 1 {
+            return Err(Error::raise("TypeError", "exception class/object expected"));
+        }
         let message = String::from_utf8_lossy(&text).into_owned();
         return Ok(exception_new(scope, "RuntimeError", &message));
     }
@@ -7511,6 +8195,56 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             Native::NeedsThreads,
         ),
         (Builtin::Kernel, &["__hash_combine__"], Native::HashCombine),
+        (
+            Builtin::Kernel,
+            &["__fiber_new__"],
+            Native::Fiber(FiberOp::New),
+        ),
+        (
+            Builtin::Kernel,
+            &["__fiber_resume__"],
+            Native::Fiber(FiberOp::Resume),
+        ),
+        (
+            Builtin::Kernel,
+            &["__fiber_yield__"],
+            Native::Fiber(FiberOp::Yield),
+        ),
+        (
+            Builtin::Kernel,
+            &["__fiber_raise__"],
+            Native::Fiber(FiberOp::Raise),
+        ),
+        (
+            Builtin::Kernel,
+            &["__fiber_kill__"],
+            Native::Fiber(FiberOp::Kill),
+        ),
+        (
+            Builtin::Kernel,
+            &["__fiber_transfer__"],
+            Native::Fiber(FiberOp::Transfer),
+        ),
+        (
+            Builtin::Kernel,
+            &["__fiber_current__"],
+            Native::Fiber(FiberOp::Current),
+        ),
+        (
+            Builtin::Kernel,
+            &["__fiber_alive__"],
+            Native::Fiber(FiberOp::Alive),
+        ),
+        (
+            Builtin::Kernel,
+            &["__fiber_status__"],
+            Native::Fiber(FiberOp::Status),
+        ),
+        (
+            Builtin::Kernel,
+            &["__proc_location__"],
+            Native::ProcLocation,
+        ),
         (
             Builtin::Kernel,
             &["__absolute_path__"],

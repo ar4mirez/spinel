@@ -277,6 +277,8 @@ struct Compiler {
     line: u32,
     /// See [`Iseq::block_level`].
     block_level: u32,
+    /// See [`Iseq::first_line`].
+    first_line: u32,
     insns: Vec<Insn>,
     literals: Vec<Literal>,
     symbols: Vec<Box<str>>,
@@ -413,6 +415,7 @@ impl Compiler {
             lines: Vec::new(),
             line: 0,
             block_level: 0,
+            first_line: 0,
             insns: Vec::new(),
             literals: Vec::new(),
             symbols: Vec::new(),
@@ -500,6 +503,7 @@ impl Compiler {
             path: self.source.as_ref().map(|source| Arc::from(&*source.path)),
             lines: self.lines,
             block_level: self.block_level,
+            first_line: self.first_line,
         }
     }
 
@@ -3178,6 +3182,9 @@ impl Compiler {
         span: Span,
     ) -> Result<Iseq, Unsupported> {
         let mut child = Compiler::nested(name, locals, self, barrier);
+        if let Some(source) = &self.source {
+            child.first_line = source.line(span.start);
+        }
         child.is_lambda_body = lambda;
         child.params = child.lower_params(params, span)?;
         // A method body is where a bare `super`'s argument list comes from. A

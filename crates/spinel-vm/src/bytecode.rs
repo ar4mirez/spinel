@@ -741,6 +741,9 @@ pub struct Iseq {
     /// those, 1 for a block written directly in one. A backtrace says
     /// "block (2 levels) in ..." from it.
     pub block_level: u32,
+    /// The line the body starts on — a block's `{` or `do`, a method's `def`
+    /// — for `Proc#source_location` and `Fiber#inspect`. 0 when unknown.
+    pub first_line: u32,
 }
 
 impl Iseq {
