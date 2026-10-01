@@ -157,7 +157,15 @@ jobs:
         with:
           # The language version this build implements, so `include` semantics
           # are the ones Spinel is targeting rather than an older release's.
-          ruby-version: '4.0'
+          #
+          # ponytail: pinned to 4.0.6 because 4.0.7 regressed one case in the
+          # table. After `include M` into `C` and two `M.prepend`s, 4.0.7
+          # answers `C.ancestors` as [C, P2, P1, M, P2, ...] — P2 twice — where
+          # 4.0.6 answers [C, P2, P1, M, Object, ...]. A module appearing twice
+          # in one chain is a bug, not a semantics change, so the table keeps
+          # 4.0.6's answer. Back to '4.0' once a 4.0.x release answers it
+          # without the duplicate again.
+          ruby-version: '4.0.6'
       - run: ruby scripts/ancestors-oracle.rb --check
 
   # And the same again for #12's. `rescue TypeError` picks a handler by walking a
