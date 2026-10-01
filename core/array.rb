@@ -383,8 +383,9 @@ class Array
     @__comparing__ ||= []
   end
 
+  # A subclass's instance answers a plain Array copy. Measured.
   def to_a
-    self
+    instance_of?(Array) ? self : Array.new(self)
   end
 
   # An Array is its own array pattern subject (#165).
@@ -482,5 +483,724 @@ class Array
 
   def to_s
     inspect
+  end
+end
+
+# The rest of `Array` (#21), all Ruby over `[]`, `[]=` and their slice forms.
+# Every rule below was measured against ruby 4.0.7; the ones that are not
+# obvious say so where they are applied.
+class Array
+  # `Array[1, 2]`, and `MyArray[1, 2]`, which answers an instance of the
+  # subclass.
+  def self.[](*items)
+    made = allocate
+    items.each { |item| made.push(item) }
+    made
+  end
+
+  # An Array as is, anything with `to_ary` through it, nil otherwise. A
+  # `to_ary` that answers something else is a TypeError naming both classes.
+  def self.try_convert(value)
+    return value if value.is_a?(Array)
+    return nil unless value.respond_to?(:to_ary)
+    converted = value.to_ary
+    return converted if converted.nil? || converted.is_a?(Array)
+    raise TypeError,
+          "can't convert #{value.class} to Array (#{value.class}#to_ary gives #{converted.class})"
+  end
+
+  # An operand that has to be an Array: itself, or its `to_ary`.
+  def self.__coerce__(value)
+    return value if value.is_a?(Array)
+    unless value.respond_to?(:to_ary)
+      raise TypeError, "no implicit conversion of #{value.nil? ? "nil" : value.class} into Array"
+    end
+    value.to_ary
+  end
+
+  # --- set arithmetic -------------------------------------------------------
+  # Membership is `hash` and `eql?`, a Hash's rule, which is what keeps `1` and
+  # `1.0` apart here as they are as keys.
+
+  def __member_table__(arrays)
+    table = {}
+    arrays.each { |array| array.each { |element| table[element] = true } }
+    table
+  end
+
+  def -(other)
+    exclude = __member_table__([Array.__coerce__(other)])
+    reject { |element| exclude.key?(element) }
+  end
+
+  def difference(*others)
+    exclude = __member_table__(others.map { |other| Array.__coerce__(other) })
+    reject { |element| exclude.key?(element) }
+  end
+
+  def &(other)
+    intersection(other)
+  end
+
+  def intersection(*others)
+    others = others.map { |other| Array.__coerce__(other) }
+    tables = others.map { |other| __member_table__([other]) }
+    seen = {}
+    out = []
+    each do |element|
+      next if seen.key?(element)
+      next unless tables.all? { |table| table.key?(element) }
+      seen[element] = true
+      out.push(element)
+    end
+    out
+  end
+
+  def intersect?(other)
+    table = __member_table__([Array.__coerce__(other)])
+    any? { |element| table.key?(element) }
+  end
+
+  def |(other)
+    union(other)
+  end
+
+  def union(*others)
+    seen = {}
+    out = []
+    ([self] + others.map { |other| Array.__coerce__(other) }).each do |array|
+      array.each do |element|
+        next if seen.key?(element)
+        seen[element] = true
+        out.push(element)
+      end
+    end
+    out
+  end
+
+  # A String joins, an Integer repeats; nothing else, and a negative count is
+  # an ArgumentError. Either way the answer is a plain Array.
+  def *(operand)
+    return join(operand) if operand.is_a?(String)
+    return join(operand.to_str) if operand.respond_to?(:to_str)
+    count = operand
+    unless count.is_a?(Integer)
+      unless count.respond_to?(:to_int)
+        raise TypeError, "no implicit conversion of #{count.nil? ? "nil" : count.class} into Integer"
+      end
+      count = count.to_int
+    end
+    raise ArgumentError, "negative argument" if count < 0
+    out = []
+    count.times { each { |element| out.push(element) } }
+    out
+  end
+
+  # --- rewriting in place ---------------------------------------------------
+
+  # Put `elements` where this array's contents were, keeping the object.
+  def __refill__(elements)
+    clear
+    elements.each { |element| push(element) }
+    self
+  end
+
+  def replace(other)
+    __check_frozen__
+    other = Array.__coerce__(other)
+    return self if other.equal?(self)
+    __refill__(other.dup)
+  end
+
+  def map!
+    return to_enum(:map!) { size } unless block_given?
+    __check_frozen__
+    i = 0
+    while i < size
+      self[i] = yield(self[i])
+      i = i + 1
+    end
+    self
+  end
+
+  def collect!(&block)
+    return to_enum(:collect!) { size } if block.nil?
+    map!(&block)
+  end
+
+  # Keep what the block says to keep. `select!`/`filter!` and `reject!` answer
+  # nil when nothing changed; `keep_if` and `delete_if` always answer self.
+  #
+  # In place and as it goes, as CRuby's `ary_reject_bang` is: if the block
+  # raises part-way, what was already dropped stays dropped and the rest —
+  # the element that raised included — stays. Measured.
+  def __keep__(keep)
+    before = size
+    read = 0
+    write = 0
+    begin
+      while read < size
+        element = self[read]
+        verdict = yield(element) ? true : false
+        read = read + 1
+        if verdict == keep
+          self[write] = element
+          write = write + 1
+        end
+      end
+    ensure
+      self[write, size - write] = __take__(read, size - read)
+    end
+    size != before
+  end
+
+  def select!(&block)
+    return to_enum(:select!) { size } if block.nil?
+    __check_frozen__
+    __keep__(true, &block) ? self : nil
+  end
+
+  def filter!(&block)
+    return to_enum(:filter!) { size } if block.nil?
+    select!(&block)
+  end
+
+  def keep_if(&block)
+    return to_enum(:keep_if) { size } if block.nil?
+    __check_frozen__
+    __keep__(true, &block)
+    self
+  end
+
+  def reject!(&block)
+    return to_enum(:reject!) { size } if block.nil?
+    __check_frozen__
+    __keep__(false, &block) ? self : nil
+  end
+
+  def delete_if(&block)
+    return to_enum(:delete_if) { size } if block.nil?
+    __check_frozen__
+    __keep__(false, &block)
+    self
+  end
+
+  # Every element `==` to `value` goes. The answer is the last element that
+  # went — the array's own, not the argument — or the block's value, or nil.
+  def delete(value)
+    found = nil
+    hit = false
+    kept = []
+    each do |element|
+      if element == value
+        found = element
+        hit = true
+      else
+        kept.push(element)
+      end
+    end
+    unless hit
+      return yield(value) if block_given?
+      return nil
+    end
+    __check_frozen__
+    __refill__(kept)
+    found
+  end
+
+  def delete_at(index)
+    __check_frozen__
+    index = __count_like__(index)
+    index = index + size if index < 0
+    return nil if index < 0 || index >= size
+    found = self[index]
+    self[index, 1] = []
+    found
+  end
+
+  def compact
+    reject { |element| element.nil? }
+  end
+
+  def compact!
+    __check_frozen__
+    __keep__(false) { |element| element.nil? } ? self : nil
+  end
+
+  def uniq!(&block)
+    __check_frozen__
+    kept = uniq(&block)
+    return nil if kept.size == size
+    __refill__(kept)
+  end
+
+  def reverse!
+    __check_frozen__
+    __refill__(reverse)
+  end
+
+  def sort!(&block)
+    __check_frozen__
+    __refill__(sort(&block))
+  end
+
+  def sort_by!(&block)
+    return to_enum(:sort_by!) { size } if block.nil?
+    __check_frozen__
+    __refill__(sort_by(&block))
+  end
+
+  def rotate(count = 1)
+    count = __count_like__(count)
+    return [] if empty?
+    shift = count % size
+    __take__(shift, size) + __take__(0, shift)
+  end
+
+  def rotate!(count = 1)
+    __check_frozen__
+    count = __count_like__(count)
+    return self if empty?
+    __refill__(rotate(count))
+  end
+
+  # `-1` is after the last element and a negative index counts from there, so
+  # the smallest allowed is `-(size + 1)`. Past the end pads with nil.
+  def insert(index, *items)
+    __check_frozen__
+    index = __count_like__(index)
+    return self if items.empty?
+    if index < 0
+      at = index + size + 1
+      if at < 0
+        raise IndexError, "index #{index} too small for array; minimum: -#{size + 1}"
+      end
+      index = at
+    end
+    self[index, 0] = items
+    self
+  end
+
+  # `fill(value)`, `fill(value, start, length)`, `fill(value, range)` and the
+  # same three with a block taking the index instead of a value. A start before
+  # the front clamps to 0; a range starting before it is a RangeError.
+  def fill(*given)
+    __check_frozen__
+    if block_given?
+      raise ArgumentError, "wrong number of arguments (given #{given.size}, expected 0..2)" if given.size > 2
+      value = nil
+      bounds = given
+    else
+      raise ArgumentError, "wrong number of arguments (given 0, expected 1..3)" if given.empty?
+      raise ArgumentError, "wrong number of arguments (given #{given.size}, expected 1..3)" if given.size > 3
+      value = given[0]
+      bounds = given.__take__(1, 2)
+    end
+    start = 0
+    count = nil
+    if bounds.size == 1 && bounds[0].is_a?(Range)
+      range = bounds[0]
+      start = range.begin.nil? ? 0 : __count_like__(range.begin)
+      start = start + size if start < 0
+      raise RangeError, "#{range.inspect} out of range" if start < 0
+      if range.end.nil?
+        count = size - start
+      else
+        stop = __count_like__(range.end)
+        stop = stop + size if stop < 0
+        stop = stop + 1 unless range.exclude_end?
+        count = stop - start
+      end
+    else
+      unless bounds.empty? || bounds[0].nil?
+        start = __count_like__(bounds[0])
+        start = start + size if start < 0
+        start = 0 if start < 0
+      end
+      count = __count_like__(bounds[1]) if bounds.size > 1 && !bounds[1].nil?
+      count = size - start if count.nil?
+    end
+    return self if count <= 0
+    i = start
+    stop = start + count
+    while i < stop
+      self[i] = block_given? ? yield(i) : value
+      i = i + 1
+    end
+    self
+  end
+
+  # An index argument: an Integer, or anything with `to_int`.
+  def __count_like__(value)
+    return value if value.is_a?(Integer)
+    unless value.respond_to?(:to_int)
+      raise TypeError, "no implicit conversion of #{value.nil? ? "nil" : value.class} into Integer"
+    end
+    value.to_int
+  end
+
+  # --- reading --------------------------------------------------------------
+
+  def prepend(*items)
+    unshift(*items)
+  end
+
+  def values_at(*selectors)
+    out = []
+    selectors.each do |selector|
+      if selector.is_a?(Range)
+        first = selector.begin.nil? ? 0 : __count_like__(selector.begin)
+        first = first + size if first < 0
+        raise RangeError, "#{selector.inspect} out of range" if first < 0
+        last = selector.end.nil? ? size - 1 : __count_like__(selector.end)
+        last = last + size if last < 0
+        last = last - 1 if selector.exclude_end? && !selector.end.nil?
+        i = first
+        while i <= last
+          out.push(self[i])
+          i = i + 1
+        end
+      else
+        out.push(self[__count_like__(selector)])
+      end
+    end
+    out
+  end
+
+  def fetch(*given)
+    if given.empty? || given.size > 2
+      raise ArgumentError, "wrong number of arguments (given #{given.size}, expected 1..2)"
+    end
+    index = __count_like__(given[0])
+    at = index < 0 ? index + size : index
+    return self[at] if at >= 0 && at < size
+    return yield(index) if block_given?
+    return given[1] if given.size == 2
+    raise IndexError, "index #{index} outside of array bounds: #{-size}...#{size}"
+  end
+
+  def fetch_values(*indexes, &block)
+    indexes.map { |index| block.nil? ? fetch(index) : fetch(index, &block) }
+  end
+
+  def dig(index, *rest)
+    value = self[index]
+    return value if rest.empty? || value.nil?
+    unless value.respond_to?(:dig)
+      raise TypeError, "#{value.class} does not have #dig method"
+    end
+    value.dig(*rest)
+  end
+
+  def assoc(key)
+    each do |element|
+      next unless element.is_a?(Array) || element.respond_to?(:to_ary)
+      element = Array.__coerce__(element)
+      return element if !element.empty? && element[0] == key
+    end
+    nil
+  end
+
+  def rassoc(value)
+    each do |element|
+      next unless element.is_a?(Array) || element.respond_to?(:to_ary)
+      element = Array.__coerce__(element)
+      return element if element.size > 1 && element[1] == value
+    end
+    nil
+  end
+
+  def rindex(*wanted)
+    i = size - 1
+    while i >= 0
+      if wanted.empty?
+        return to_enum(:rindex) unless block_given?
+        return i if yield(self[i])
+      elsif self[i] == wanted[0]
+        return i
+      end
+      i = i - 1
+      i = size - 1 if i >= size
+    end
+    nil
+  end
+
+  # `find` from the end (Ruby 4.0).
+  #
+  # The index is clamped to the array after every yield, so a block that
+  # shrinks the array ends the walk rather than reading past it. Measured.
+  def rfind(ifnone = nil)
+    return to_enum(:rfind, ifnone) unless block_given?
+    i = size - 1
+    while i >= 0
+      return self[i] if yield(self[i])
+      i = i - 1
+      i = size - 1 if i >= size
+    end
+    ifnone.nil? ? nil : ifnone.call
+  end
+
+  # From the end, CRuby's way: the position counts down and is clamped to the
+  # array after each yield, so one that grows keeps its place and one that
+  # shrinks is not read past.
+  def reverse_each
+    return to_enum(:reverse_each) { size } unless block_given?
+    i = size
+    while i > 0
+      i = i - 1
+      yield self[i]
+      i = size if size < i
+    end
+    self
+  end
+
+  def transpose
+    return [] if empty?
+    rows = map { |row| Array.__coerce__(row) }
+    width = rows[0].size
+    rows.each do |row|
+      unless row.size == width
+        raise IndexError, "element size differs (#{row.size} should be #{width})"
+      end
+    end
+    out = []
+    width.times { |column| out.push(rows.map { |row| row[column] }) }
+    out
+  end
+
+  # `level` deep, or all the way with a negative or no level. An Array that
+  # contains itself cannot be flattened all the way: ArgumentError, measured.
+  def flatten(level = -1)
+    level = __count_like__(level) unless level.nil?
+    level = -1 if level.nil?
+    out = []
+    __flatten_into__(out, self, level, [])
+    out
+  end
+
+  def flatten!(level = -1)
+    __check_frozen__
+    level = __count_like__(level) unless level.nil?
+    return nil if level == 0 || none? { |element| element.is_a?(Array) || element.respond_to?(:to_ary) }
+    __refill__(flatten(level))
+  end
+
+  def __flatten_into__(out, array, level, open)
+    if open.any? { |seen| seen.equal?(array) }
+      raise ArgumentError, "tried to flatten recursive array"
+    end
+    open.push(array)
+    array.each do |element|
+      nested = element.is_a?(Array) ? element : (element.respond_to?(:to_ary) ? element.to_ary : nil)
+      if !nested.nil? && level != 0
+        __flatten_into__(out, nested, level - 1, open)
+      else
+        out.push(element)
+      end
+    end
+    open.pop
+  end
+
+  # `slice!` is `slice`, and the part it answers is removed.
+  def slice!(*given)
+    __check_frozen__
+    part = self[*given]
+    return nil if part.nil?
+    if given.size == 1 && !given[0].is_a?(Range)
+      delete_at(given[0])
+      return part
+    end
+    start = given[0].is_a?(Range) ? (given[0].begin || 0) : given[0]
+    start = __count_like__(start)
+    start = start + size if start < 0
+    self[start, part.size] = []
+    part
+  end
+
+  # --- search ---------------------------------------------------------------
+
+  # Find-minimum mode when the block answers true/false/nil, find-any mode
+  # when it answers a number; anything else is a TypeError. Measured wording.
+  def bsearch(&block)
+    return to_enum(:bsearch) if block.nil?
+    at = bsearch_index(&block)
+    at.nil? ? nil : self[at]
+  end
+
+  def bsearch_index
+    return to_enum(:bsearch_index) unless block_given?
+    low = 0
+    high = size
+    found = nil
+    while low < high
+      mid = low + (high - low) / 2
+      verdict = yield(self[mid])
+      if verdict == true
+        found = mid
+        high = mid
+      elsif verdict.nil? || verdict == false
+        low = mid + 1
+      elsif verdict.is_a?(Integer) || verdict.is_a?(Float)
+        return mid if verdict == 0
+        if verdict < 0
+          high = mid
+        else
+          low = mid + 1
+        end
+      else
+        raise TypeError, "wrong argument type #{verdict.class} (must be numeric, true, false or nil)"
+      end
+    end
+    found
+  end
+
+  # --- combinatorics ----------------------------------------------------------
+  # Each takes a block or answers an Enumerator with its size, and iterates a
+  # snapshot: measured, changing the array inside the block does not change
+  # what is yielded.
+
+  def permutation(*given, &block)
+    count = given.empty? ? size : __count_like__(given[0])
+    return to_enum(:permutation, *given) { __permutation_size__(count) } if block.nil?
+    items = dup
+    __permute__(items, count, [], Array.new(items.size, false), block) if count >= 0 && count <= items.size
+    self
+  end
+
+  def __permutation_size__(count)
+    return 0 if count < 0 || count > size
+    total = 1
+    i = 0
+    while i < count
+      total = total * (size - i)
+      i = i + 1
+    end
+    total
+  end
+
+  def __permute__(items, count, chosen, used, block)
+    if chosen.size == count
+      block.call(chosen.dup)
+      return
+    end
+    i = 0
+    while i < items.size
+      unless used[i]
+        used[i] = true
+        chosen.push(items[i])
+        __permute__(items, count, chosen, used, block)
+        chosen.pop
+        used[i] = false
+      end
+      i = i + 1
+    end
+  end
+
+  def combination(count, &block)
+    count = __count_like__(count)
+    return to_enum(:combination, count) { __choose__(size, count) } if block.nil?
+    items = dup
+    __combine__(items, count, 0, [], block) if count >= 0 && count <= items.size
+    self
+  end
+
+  def __choose__(n, k)
+    return 0 if k < 0 || k > n
+    total = 1
+    i = 0
+    while i < k
+      total = total * (n - i) / (i + 1)
+      i = i + 1
+    end
+    total
+  end
+
+  def __combine__(items, count, from, chosen, block)
+    if chosen.size == count
+      block.call(chosen.dup)
+      return
+    end
+    i = from
+    while i < items.size
+      chosen.push(items[i])
+      __combine__(items, count, i + 1, chosen, block)
+      chosen.pop
+      i = i + 1
+    end
+  end
+
+  def repeated_combination(count, &block)
+    count = __count_like__(count)
+    if block.nil?
+      return to_enum(:repeated_combination, count) do
+        count < 0 ? 0 : (count == 0 ? 1 : __choose__(size + count - 1, count))
+      end
+    end
+    items = dup
+    if count == 0
+      block.call([])
+    elsif count > 0 && !items.empty?
+      __combine_again__(items, count, 0, [], block)
+    end
+    self
+  end
+
+  def __combine_again__(items, count, from, chosen, block)
+    if chosen.size == count
+      block.call(chosen.dup)
+      return
+    end
+    i = from
+    while i < items.size
+      chosen.push(items[i])
+      __combine_again__(items, count, i, chosen, block)
+      chosen.pop
+      i = i + 1
+    end
+  end
+
+  def repeated_permutation(count, &block)
+    count = __count_like__(count)
+    return to_enum(:repeated_permutation, count) { count < 0 ? 0 : size**count } if block.nil?
+    items = dup
+    if count == 0
+      block.call([])
+    elsif count > 0 && !items.empty?
+      __permute_again__(items, count, [], block)
+    end
+    self
+  end
+
+  def __permute_again__(items, count, chosen, block)
+    if chosen.size == count
+      block.call(chosen.dup)
+      return
+    end
+    items.each do |item|
+      chosen.push(item)
+      __permute_again__(items, count, chosen, block)
+      chosen.pop
+    end
+  end
+
+  # With a block, each combination is yielded and the receiver answered;
+  # without one, all of them as an Array.
+  def product(*others, &block)
+    lists = [dup] + others.map { |other| Array.__coerce__(other).dup }
+    out = block.nil? ? [] : nil
+    __product_into__(lists, 0, [], out, block)
+    block.nil? ? out : self
+  end
+
+  def __product_into__(lists, depth, chosen, out, block)
+    if depth == lists.size
+      block.nil? ? out.push(chosen.dup) : block.call(chosen.dup)
+      return
+    end
+    lists[depth].each do |item|
+      chosen.push(item)
+      __product_into__(lists, depth + 1, chosen, out, block)
+      chosen.pop
+    end
   end
 end

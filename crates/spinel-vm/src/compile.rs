@@ -541,6 +541,9 @@ impl Compiler {
             Insn::CaptureSplat => 0,
             // Pops the built source and pushes the pattern: net zero.
             Insn::NewRegexp(_) | Insn::NewRegexpOnce(_, _) => 0,
+            // The fall-through path, which goes on to build the value; the
+            // jump path pushes the cached one, and both meet one deeper.
+            Insn::OnceGet(_, _) | Insn::OnceSet(_) => 0,
             // Pops the built name and pushes the symbol: net zero.
             Insn::Intern => 0,
             // Both write into the frame's definee and leave the stack alone;
@@ -692,6 +695,7 @@ impl Compiler {
             Insn::JumpUnlessUndef(_) => Insn::JumpUnlessUndef(displacement),
             Insn::JumpIfKeep(_) => Insn::JumpIfKeep(displacement),
             Insn::JumpIfNilKeep(_) => Insn::JumpIfNilKeep(displacement),
+            Insn::OnceGet(_, site) => Insn::OnceGet(displacement, site),
             other => unreachable!("{other:?} is not a jump"),
         };
     }
@@ -878,6 +882,12 @@ impl Compiler {
             }
 
             ExprKind::Str(string) => match flat_bytes(&string.parts) {
+                // Under `# frozen_string_literal: true` a literal is frozen,
+                // and one object per content (#21).
+                Some(bytes) if string.frozen == Some(true) => {
+                    let index = self.literal(Literal::FrozenStr(bytes));
+                    self.emit(Insn::PushLit(index));
+                }
                 Some(bytes) => {
                     let index = self.literal(Literal::Str(bytes));
                     self.emit(Insn::PushLit(index));
@@ -1247,6 +1257,27 @@ impl Compiler {
     /// a literal performs — `(1.."a")` raises `ArgumentError` — is the one
     /// `initialize` already does.
     fn range_literal(&mut self, range: &spinel_ast::RangeLit) -> Emit {
+        // Literal Integer (or absent) ends make one object per site, built
+        // the first time and reused: CRuby's `(1..3)` is a frozen constant.
+        let literal_end = |end: &Option<Expr>| {
+            end.as_ref()
+                .is_none_or(|e| matches!(e.kind, ExprKind::Int(_)))
+        };
+        if literal_end(&range.left) && literal_end(&range.right) {
+            let site = self.once_regexps;
+            self.once_regexps += 1;
+            let cached = self.here();
+            self.emit(Insn::OnceGet(0, site));
+            self.range_construction(range)?;
+            self.emit(Insn::OnceSet(site));
+            // The jump path pushed one value where the fall-through built one.
+            self.patch_here(cached);
+            return Ok(());
+        }
+        self.range_construction(range)
+    }
+
+    fn range_construction(&mut self, range: &spinel_ast::RangeLit) -> Emit {
         self.push_const_name("Range");
         match &range.left {
             Some(expr) => self.expr(expr)?,
@@ -3442,6 +3473,20 @@ impl Compiler {
         if call.flags.safe_nav {
             return self.safe_nav(call, span);
         }
+        // `"abc".freeze` is the interned frozen String, not a copy frozen
+        // after the fact: measured, two of them are `equal?` (#21).
+        if &*call.name == "freeze"
+            && call.args.is_empty()
+            && call.block.is_none()
+            && !call.flags.safe_nav
+            && let Some(receiver) = &call.receiver
+            && let ExprKind::Str(string) = &receiver.kind
+            && let Some(bytes) = flat_bytes(&string.parts)
+        {
+            let index = self.literal(Literal::FrozenStr(bytes));
+            self.emit(Insn::PushLit(index));
+            return Ok(());
+        }
         // A call reports the line its *name* is on, measured: in
         // `x = Foo\n  .new\n  .inst` a raise in `inst` names the third line.
         self.at(call.name_span.start);
@@ -3546,7 +3591,8 @@ impl Compiler {
                 self.at(call.name_span.start);
                 self.emit(Insn::Neg);
             }
-            ("+@", 0) => self.expr(receiver)?,
+            // `+x` is not lowered to `x`: `String#+@` answers an unfrozen copy
+            // of a frozen String, so it is a send like any other method.
             (name, 1) => {
                 let Some(op) = BinOp::from_name(name) else {
                     return Ok(false);

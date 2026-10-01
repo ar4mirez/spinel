@@ -40,3 +40,16 @@ class Symbol
     to_s <=> other.to_s
   end
 end
+
+# `Symbol#name` is one frozen String per symbol, the same object every call —
+# measured — where `to_s` is a new, unfrozen one each time. The table is per
+# heap, on `Symbol`.
+class Symbol
+  def name
+    Symbol.__names__[self] ||= to_s.freeze
+  end
+
+  def self.__names__
+    @__names__ ||= {}
+  end
+end

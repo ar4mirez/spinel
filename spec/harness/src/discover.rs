@@ -169,6 +169,7 @@ pub fn examples(program: &Program, target: &Target) -> Vec<Example> {
         skipped: None,
         scope: Vec::new(),
         setup: Vec::new(),
+        carried: Vec::new(),
         out: Vec::new(),
     };
     // A file's top level is a group like any other: it can hold both `before`
@@ -223,6 +224,15 @@ struct Walk<'a> {
     /// on state accumulated across examples will *fail* rather than falsely
     /// pass, which is the direction this harness errs in everywhere else too.
     setup: Vec<Setup>,
+    /// `before :all` hooks of groups that have ended, in file order.
+    ///
+    /// mspec runs a whole file against one environment object, so an ivar a
+    /// `before :all` sets is still set in the `describe` blocks after it:
+    /// `array/fill_spec.rb` assigns `@never_passed` once, in its first group,
+    /// and passes it as `&@never_passed` in the next two. A fresh heap per
+    /// example has no such object, so the hooks are replayed instead, ahead of
+    /// the example's own group's (#21).
+    carried: Vec<Setup>,
     out: Vec<Example>,
 }
 
@@ -234,6 +244,8 @@ struct Setup {
     body: Vec<Expr>,
     locals: Vec<spinel_ast::Name>,
     span: Span,
+    /// `before :all`, which outlives its group: see [`Walk::carried`].
+    all: bool,
 }
 
 impl Walk<'_> {
@@ -285,7 +297,11 @@ impl Walk<'_> {
                 self.collect_scope(block);
                 self.collect_setup(block);
                 self.body(block);
-                self.setup.truncate(depth);
+                let ended = self.setup.split_off(depth);
+                if self.skipped.is_none() {
+                    self.carried
+                        .extend(ended.into_iter().filter(|hook| hook.all));
+                }
                 self.scope.truncate(scope_depth);
                 self.group.pop();
             }
@@ -343,6 +359,7 @@ impl Walk<'_> {
                 span: statement.span,
                 body: vec![statement.clone()],
                 locals: Vec::new(),
+                all: false,
             });
         }
     }
@@ -366,6 +383,11 @@ impl Walk<'_> {
                     },
                     body: block.body.clone(),
                     locals: block.locals.clone(),
+                    all: matches!(
+                        call.args.first().map(|arg| &arg.kind),
+                        Some(ExprKind::Sym(name))
+                            if matches!(name.parts.as_slice(), [StrPart::Bytes(b)] if &**b == b"all")
+                    ),
                 });
             }
         }
@@ -379,7 +401,7 @@ impl Walk<'_> {
         // The hooks run first, outermost group first, then the example.
         let mut body: Vec<Expr> = Vec::new();
         let mut locals: Vec<spinel_ast::Name> = Vec::new();
-        for setup in &self.setup {
+        for setup in self.carried.iter().chain(&self.setup) {
             body.extend(setup.body.iter().cloned());
             for name in &setup.locals {
                 if !locals.contains(name) {
@@ -397,7 +419,12 @@ impl Walk<'_> {
         // list that disagreed would re-run a different program than the one
         // that passed.
         let mut scope_spans: Vec<Span> = self.scope.iter().map(|s| s.span).collect();
-        let mut setup_spans: Vec<Span> = self.setup.iter().map(|s| s.span).collect();
+        let mut setup_spans: Vec<Span> = self
+            .carried
+            .iter()
+            .chain(&self.setup)
+            .map(|s| s.span)
+            .collect();
         // An example with no body of its own asserts nothing, and mspec passes
         // it. Prepending hooks must not turn that into something that ran.
         if own_body.is_empty() {

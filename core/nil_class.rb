@@ -1,7 +1,13 @@
 # NilClass — the class of `nil`, which is an immediate with exactly one value.
 class NilClass
+  # One frozen String, the same object every time: measured, and
+  # `nil/to_s_spec.rb` checks both.
   def to_s
-    ""
+    NilClass.__to_s__
+  end
+
+  def self.__to_s__
+    @__to_s__ ||= "".freeze
   end
 
   def to_a

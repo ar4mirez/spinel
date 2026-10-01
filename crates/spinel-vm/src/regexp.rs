@@ -59,6 +59,11 @@ pub struct Regexps {
     /// unique key, because a body this map refers to cannot be dropped and have
     /// another allocated where it was.
     once: HashMap<(usize, u32), (Arc<Iseq>, Value)>,
+    /// Interned frozen Strings, by content (#21): what `"abc".freeze` and a
+    /// literal under `# frozen_string_literal: true` answer, one object per
+    /// content — CRuby's fstring table. Here because this is the heap's traced
+    /// literal cache, and a frozen literal is a literal.
+    strings: HashMap<Vec<u8>, Value>,
 }
 
 impl Regexps {
@@ -68,6 +73,7 @@ impl Regexps {
             compiled: Vec::new(),
             cache: HashMap::new(),
             once: HashMap::new(),
+            strings: HashMap::new(),
         }
     }
 
@@ -106,6 +112,20 @@ impl Regexps {
         for (_, value) in self.once.values() {
             f(*value);
         }
+        for value in self.strings.values() {
+            f(*value);
+        }
+    }
+
+    /// The interned frozen String with these bytes, if one has been made.
+    #[must_use]
+    pub fn fstring(&self, bytes: &[u8]) -> Option<Value> {
+        self.strings.get(bytes).copied()
+    }
+
+    /// Make `value` the interned frozen String for its bytes.
+    pub fn intern_fstring(&mut self, bytes: &[u8], value: Value) {
+        self.strings.insert(bytes.to_vec(), value);
     }
 
     /// What this `/o` site answered the first time it ran, if it has.

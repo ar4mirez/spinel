@@ -7,8 +7,22 @@
 # `encode` and `b` belong to the Encoding slice, not to this one, and are absent
 # rather than approximated.
 class String
+  # A subclass's instance answers a plain String copy. Measured.
   def to_s
-    self
+    instance_of?(String) ? self : String.new(self)
+  end
+
+  # `+str` is the receiver unless it is frozen, and then an unfrozen copy.
+  def +@
+    frozen? ? dup : self
+  end
+
+  # With no arguments `initialize` changes nothing and answers the receiver,
+  # frozen or not — measured. With one it replaces the contents, which needs
+  # a mutable String; that is #19, and it says so rather than doing nothing.
+  def initialize(*given, **options)
+    return self if given.empty? && options.empty?
+    raise NotImplementedError, "String#initialize with contents mutates the receiver, which needs #19"
   end
 
   def __expect_string__(other)

@@ -6,14 +6,16 @@ class BasicObject
   def initialize
   end
 
+  # Identity, and not through `equal?`: measured, a class that overrides
+  # `equal?` to answer false still has `o == o` true.
   def ==(other)
-    equal?(other)
+    __identical__(other)
   end
 
   # Truthiness, by identity. `self == false` would ask the object's own `==`,
   # and an object that answers true to everything would then be falsy.
   def !
-    equal?(false) || equal?(nil)
+    __identical__(false) || __identical__(nil)
   end
 
   def !=(other)

@@ -23,40 +23,40 @@ class Range
   # beginless or endless range skips the check, because there is nothing to
   # compare against.
   def initialize(from, to, exclude_end = false)
-    # A Range is frozen once built, so `r.send(:initialize, ...)` on a live one
-    # is a mutation rather than a re-run. There is no `freeze` yet, so the flag
-    # stands in for the frozen bit.
-    #
-    # ponytail: this catches `initialize` only. Real freezing is one header bit
-    # and a check in `ivar_set`, and belongs with `Object#freeze`.
-    raise FrozenError, "can't modify frozen Range: " + inspect if @initialized
+    # Running `initialize` a second time is a FrozenError even on a subclass
+    # instance that is not frozen — measured — so the flag stays beside the
+    # real frozen bit below.
+    raise FrozenError, "can't modify frozen Range: " + inspect if @__initialized__
     if !from.nil? && !to.nil? && (from <=> to).nil?
       raise ArgumentError, "bad value for range"
     end
-    @begin = from
-    @end = to
-    @exclude_end = exclude_end ? true : false
-    @initialized = true
+    @__begin__ = from
+    @__end__ = to
+    @__exclude_end__ = exclude_end ? true : false
+    @__initialized__ = true
+    # A Range is frozen once built — a subclass's instances are not.
+    # Measured: `(1..2).frozen?` and `Range.new(1, 2).frozen?` are true.
+    freeze if instance_of?(Range)
     self
   end
 
   def begin
-    @begin
+    @__begin__
   end
 
   def end
-    @end
+    @__end__
   end
 
   def exclude_end?
-    @exclude_end
+    @__exclude_end__
   end
 
   # `first` and `last` with no argument are the endpoints. With a count they
   # take from the sequence, which needs iteration — see the note on the class.
   def first(*count)
-    raise RangeError, "cannot get the first element of beginless range" if @begin.nil?
-    return @begin if count.empty?
+    raise RangeError, "cannot get the first element of beginless range" if @__begin__.nil?
+    return @__begin__ if count.empty?
     wanted = __to_count__(count[0])
     raise ArgumentError, "negative array size (or size too big)" if wanted < 0
     out = []
@@ -69,8 +69,8 @@ class Range
   end
 
   def last(*count)
-    raise RangeError, "cannot get the last element of endless range" if @end.nil?
-    return @end if count.empty?
+    raise RangeError, "cannot get the last element of endless range" if @__end__.nil?
+    return @__end__ if count.empty?
     wanted = __to_count__(count[0])
     raise ArgumentError, "negative array size" if wanted < 0
     all = to_a
@@ -107,14 +107,14 @@ class Range
   # endpoint that is `nil` is unbounded on that side rather than a value to
   # compare against, which is what makes `(1..)` cover every Integer above 1.
   def cover?(value)
-    unless @begin.nil?
-      low = (@begin <=> value)
+    unless @__begin__.nil?
+      low = (@__begin__ <=> value)
       return false if low.nil? || low > 0
     end
-    return true if @end.nil?
-    high = (value <=> @end)
+    return true if @__end__.nil?
+    high = (value <=> @__end__)
     return false if high.nil?
-    @exclude_end ? high < 0 : high <= 0
+    @__exclude_end__ ? high < 0 : high <= 0
   end
 
   def ===(value)
@@ -140,22 +140,22 @@ class Range
   # flonums and an infinity needs a heap `Float` (#18), so an endless range
   # reports that missing constant by name instead of answering a wrong number.
   def size
-    from = @begin
+    from = @__begin__
     unless from.is_a?(Integer)
       if from.nil? || from.is_a?(Numeric)
         raise TypeError, "can't iterate from " + from.class.to_s
       end
       return nil
     end
-    return Float::INFINITY if @end.nil?
-    stop = @end
+    return Float::INFINITY if @__end__.nil?
+    stop = @__end__
     unless stop.is_a?(Integer)
       return nil unless stop.is_a?(Numeric)
       stop = stop.floor
-      stop = stop - 1 if @exclude_end && stop == @end
+      stop = stop - 1 if @__exclude_end__ && stop == @__end__
       return stop < from ? 0 : stop - from + 1
     end
-    stop = stop - 1 if @exclude_end
+    stop = stop - 1 if @__exclude_end__
     stop < from ? 0 : stop - from + 1
   end
 
@@ -168,11 +168,11 @@ class Range
   # has no `String#succ` yet, and this cannot tell "no succ in Ruby" from "no
   # succ here". The upgrade is `String#succ`; nothing in this file changes.
   def each
-    unless @begin.respond_to?(:succ)
-      raise TypeError, "can't iterate from " + @begin.class.to_s
+    unless @__begin__.respond_to?(:succ)
+      raise TypeError, "can't iterate from " + @__begin__.class.to_s
     end
-    current = @begin
-    while @end.nil? || __before_end__(current)
+    current = @__begin__
+    while @__end__.nil? || __before_end__(current)
       yield current
       current = current.succ
     end
@@ -180,7 +180,7 @@ class Range
   end
 
   def to_a
-    raise RangeError, "cannot convert endless range to an array" if @end.nil?
+    raise RangeError, "cannot convert endless range to an array" if @__end__.nil?
     out = []
     each { |value| out.push(value) }
     out
@@ -193,9 +193,9 @@ class Range
   # Whether iteration has not yet passed the end. Separate because `each` asks
   # it once per step and the exclusive flag is the only difference.
   def __before_end__(value)
-    cmp = (value <=> @end)
+    cmp = (value <=> @__end__)
     return false if cmp.nil?
-    @exclude_end ? cmp < 0 : cmp <= 0
+    @__exclude_end__ ? cmp < 0 : cmp <= 0
   end
 
   # Range answers `min`, `max`, `reverse_each` and `include?` itself rather than
@@ -205,17 +205,17 @@ class Range
   # measured on ruby 4.0.6.
 
   def min(*count, &block)
-    raise RangeError, "cannot get the minimum of beginless range" if @begin.nil?
+    raise RangeError, "cannot get the minimum of beginless range" if @__begin__.nil?
     unless __has_members__?
       return count.empty? ? nil : []
     end
-    return @begin if block.nil? && count.empty?
-    if @end.nil?
+    return @__begin__ if block.nil? && count.empty?
+    if @__end__.nil?
       if block.nil? && count.size == 1
         # An endless range is already ascending, so its smallest n are its first
         # n — as long as it can be walked at all.
-        unless @begin.respond_to?(:succ)
-          raise TypeError, "can't iterate from " + @begin.class.to_s
+        unless @__begin__.respond_to?(:succ)
+          raise TypeError, "can't iterate from " + @__begin__.class.to_s
         end
         return first(count[0])
       end
@@ -225,8 +225,8 @@ class Range
   end
 
   def max(*count, &block)
-    raise RangeError, "cannot get the maximum of endless range" if @end.nil?
-    if @begin.nil?
+    raise RangeError, "cannot get the maximum of endless range" if @__end__.nil?
+    if @__begin__.nil?
       unless block.nil?
         raise RangeError,
               "cannot get the maximum of beginless range with custom comparison method"
@@ -235,7 +235,7 @@ class Range
       # `max(n)` on a beginless range steps back from the end, so the end has to
       # be something that can be stepped. Measured: the error names the nil
       # begin, not the end that could not be decremented.
-      raise TypeError, "can't iterate from NilClass" unless @end.is_a?(Integer)
+      raise TypeError, "can't iterate from NilClass" unless @__end__.is_a?(Integer)
       out = []
       value = __last_member__
       while out.size < count[0]
@@ -254,25 +254,25 @@ class Range
   # The largest member, which is the end itself unless the end is excluded — and
   # an excluded end can only be stepped back from when it is an Integer.
   def __last_member__
-    return @end unless @exclude_end
-    unless @end.is_a?(Integer)
+    return @__end__ unless @__exclude_end__
+    unless @__end__.is_a?(Integer)
       raise TypeError, "cannot exclude non Integer end value"
     end
-    @end - 1
+    @__end__ - 1
   end
 
   # Whether the range holds anything at all: `(3..1)` holds nothing.
   def __has_members__?
-    return true if @begin.nil? || @end.nil?
-    cmp = (@begin <=> @end)
+    return true if @__begin__.nil? || @__end__.nil?
+    cmp = (@__begin__ <=> @__end__)
     return false if cmp.nil?
-    @exclude_end ? cmp < 0 : cmp <= 0
+    @__exclude_end__ ? cmp < 0 : cmp <= 0
   end
 
   # Walking backwards needs an end to walk back from, so an endless range is a
   # TypeError naming the nil — not the RangeError `to_a` would raise.
   def reverse_each(&block)
-    if @end.nil?
+    if @__end__.nil?
       raise TypeError, "can't iterate from NilClass"
     end
     return Enumerator.__for__(self, :reverse_each, [], proc { __reverse_size__ }) if block.nil?
@@ -287,29 +287,29 @@ class Range
   # names the end's class — `(1.1..3)` raises "can't iterate from Integer".
   # Measured; the class in the message is not the one that caused the problem.
   def __reverse_size__
-    raise TypeError, "can't iterate from NilClass" if @end.nil?
+    raise TypeError, "can't iterate from NilClass" if @__end__.nil?
     return nil unless __numeric__?
-    unless @begin.nil? || @begin.is_a?(Integer)
-      raise TypeError, "can't iterate from " + @end.class.to_s
+    unless @__begin__.nil? || @__begin__.is_a?(Integer)
+      raise TypeError, "can't iterate from " + @__end__.class.to_s
     end
-    unless @end.is_a?(Integer)
-      raise TypeError, "can't iterate from " + @end.class.to_s
+    unless @__end__.is_a?(Integer)
+      raise TypeError, "can't iterate from " + @__end__.class.to_s
     end
-    return nil if @begin.nil?
-    span = __last_member__ - @begin + 1
+    return nil if @__begin__.nil?
+    span = __last_member__ - @__begin__ + 1
     span < 0 ? 0 : span
   end
 
   def __numeric__?
-    return true if @begin.is_a?(Numeric)
-    @end.is_a?(Numeric)
+    return true if @__begin__.is_a?(Numeric)
+    @__end__.is_a?(Numeric)
   end
 
   # `include?` is `cover?` for the ranges Ruby treats as linear — numbers — and
   # a walk for everything else, which an open end makes impossible.
   def include?(value)
     return cover?(value) if __linear__?
-    if @begin.nil? || @end.nil?
+    if @__begin__.nil? || @__end__.nil?
       raise TypeError, "cannot determine inclusion in beginless/endless ranges"
     end
     each { |member| return true if member == value }
@@ -321,25 +321,25 @@ class Range
   end
 
   def __linear__?
-    return false if @begin.nil? && @end.nil?
-    left = @begin.nil? || @begin.is_a?(Numeric)
-    right = @end.nil? || @end.is_a?(Numeric)
+    return false if @__begin__.nil? && @__end__.nil?
+    left = @__begin__.nil? || @__begin__.is_a?(Numeric)
+    right = @__end__.nil? || @__end__.is_a?(Numeric)
     left && right
   end
 
   def to_s
-    left = @begin.nil? ? "" : @begin.to_s
-    right = @end.nil? ? "" : @end.to_s
-    left + (@exclude_end ? "..." : "..") + right
+    left = @__begin__.nil? ? "" : @__begin__.to_s
+    right = @__end__.nil? ? "" : @__end__.to_s
+    left + (@__exclude_end__ ? "..." : "..") + right
   end
 
   # `inspect` writes an omitted endpoint as nothing — `(1..)` is `"1.."` — but
   # a range with *both* ends nil as `"nil..nil"`, because `".."` alone would not
   # read as a range at all. Measured from CRuby, not reasoned about.
   def inspect
-    return "nil" + (@exclude_end ? "..." : "..") + "nil" if @begin.nil? && @end.nil?
-    left = @begin.nil? ? "" : @begin.inspect
-    right = @end.nil? ? "" : @end.inspect
-    left + (@exclude_end ? "..." : "..") + right
+    return "nil" + (@__exclude_end__ ? "..." : "..") + "nil" if @__begin__.nil? && @__end__.nil?
+    left = @__begin__.nil? ? "" : @__begin__.inspect
+    right = @__end__.nil? ? "" : @__end__.inspect
+    left + (@__exclude_end__ ? "..." : "..") + right
   end
 end

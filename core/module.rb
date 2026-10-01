@@ -41,3 +41,17 @@ class Module
     other <= self
   end
 end
+
+# `Module#name` is frozen, and the same String every call while the name stays
+# the same — measured. The VM's name can change once (an anonymous module
+# assigned to a constant), so the memo is checked against it.
+class Module
+  def name
+    current = __name__
+    return nil if current.nil?
+    cached = @__name__
+    return cached if !cached.nil? && cached == current
+    return current.freeze if frozen?
+    @__name__ = current.freeze
+  end
+end

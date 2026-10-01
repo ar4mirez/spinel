@@ -946,6 +946,19 @@ pub fn eval_in(
                     stack.push(value);
                 }
 
+                Insn::OnceGet(displacement, site) => {
+                    let iseq = Arc::clone(&frames[top].iseq);
+                    if let Some(cached) = scope.regexps().once_cached(&iseq, site) {
+                        stack.push(cached);
+                        frames[top].pc = jump(frames[top].pc, displacement);
+                    }
+                }
+                Insn::OnceSet(site) => {
+                    let value = *stack.last().expect("onceset on an empty stack");
+                    let iseq = Arc::clone(&frames[top].iseq);
+                    scope.regexps_mut().cache_once(&iseq, site, value);
+                }
+
                 // `/a#{b}c/o`. The source is still built every time — the
                 // flag changes what happens after, not before — and then the
                 // site's first answer is reused for ever. Measured.
@@ -1841,7 +1854,7 @@ fn expand_splats(
             match owner {
                 None => {}
                 Some(owner) if owner == Builtin::Hash.id() => {
-                    let pairs = ivar_get(scope, arg, symbol("@pairs"))?;
+                    let pairs = ivar_get(scope, arg, symbol("@__pairs__"))?;
                     let pairs = scope.root(pairs);
                     let count = array_elements(scope, scope.get(pairs)).map_or(0, |p| p.len());
                     for at in 0..count {
@@ -2407,9 +2420,9 @@ fn hash_of_pairs(scope: &mut HandleScope<'_>, pairs: &[(Value, Value)]) -> Resul
     let entries: Vec<Value> = entries.iter().map(|&h| scope.get(h)).collect();
     let list = new_array(scope, &entries);
     let object = scope.get(handle);
-    ivar_set(scope, object, symbol("@pairs"), list)?;
-    ivar_set(scope, object, symbol("@default"), Value::NIL)?;
-    ivar_set(scope, object, symbol("@default_is_proc"), Value::FALSE)?;
+    ivar_set(scope, object, symbol("@__pairs__"), list)?;
+    ivar_set(scope, object, symbol("@__default__"), Value::NIL)?;
+    ivar_set(scope, object, symbol("@__default_is_proc__"), Value::FALSE)?;
     Ok(object)
 }
 
@@ -4075,6 +4088,162 @@ fn resolve_index(index: i64, length: usize) -> Option<usize> {
     (index >= 0 && index < length).then_some(index as usize)
 }
 
+/// An index argument a native can read without sending `to_int`: an Integer,
+/// or a Float truncated toward zero as `Float#to_int` does.
+fn index_arg(value: Value) -> Option<i64> {
+    if let Some(n) = value.as_fixnum() {
+        return Some(n);
+    }
+    let f = value.as_flonum()?;
+    (f.is_finite() && f.abs() < 9.0e18).then(|| f.trunc() as i64)
+}
+
+/// `a[start, count]`'s window, or `None` for nil — CRuby's `rb_ary_subseq`: a
+/// negative start counts from the end, a start past the end or a negative
+/// count is nil, and a start exactly at the end is the empty Array.
+fn subseq_bounds(start: i64, count: i64, length: usize) -> Option<(usize, usize)> {
+    let length = length as i64;
+    let start = if start < 0 { start + length } else { start };
+    if start < 0 || start > length || count < 0 {
+        return None;
+    }
+    let count = count.min(length - start);
+    Some((start as usize, count as usize))
+}
+
+/// Whether `value` is a `Range`, or an instance of a subclass of one.
+fn is_range(scope: &mut HandleScope<'_>, value: Value) -> bool {
+    let Some(class) = class_of(scope, value) else {
+        return false;
+    };
+    let Some(range) = scope
+        .classes()
+        .const_get_here(
+            Builtin::Object.id(),
+            crate::shared::symbols::intern("Range"),
+        )
+        .and_then(|object| class_id_of(scope, object))
+    else {
+        return false;
+    };
+    scope.classes().ancestors(class).contains(&range)
+}
+
+/// A Range's ends as indexes — nil for a beginless or endless one — and
+/// whether it excludes its end. `None` when an end is something a native
+/// cannot read as an index.
+type RangeParts = (Option<i64>, Option<i64>, bool);
+
+fn range_parts(scope: &mut HandleScope<'_>, range: Value) -> Option<RangeParts> {
+    let first = ivar_get(scope, range, symbol("@__begin__")).ok()?;
+    let last = ivar_get(scope, range, symbol("@__end__")).ok()?;
+    let exclusive = ivar_get(scope, range, symbol("@__exclude_end__")).ok()? == Value::TRUE;
+    let first = if first == Value::NIL {
+        None
+    } else {
+        Some(index_arg(first)?)
+    };
+    let last = if last == Value::NIL {
+        None
+    } else {
+        Some(index_arg(last)?)
+    };
+    Some((first, last, exclusive))
+}
+
+/// CRuby's `rb_range_component_beg_len` over a sequence of `length`: the
+/// start and count a Range selects. For a read (`splice == false`) a range
+/// that starts outside is nil; for a splice it may start past the end, and one
+/// starting before the front is a RangeError naming the range.
+fn range_beg_len(
+    scope: &mut HandleScope<'_>,
+    range: Value,
+    (first, last, exclusive): RangeParts,
+    length: usize,
+    splice: bool,
+) -> Result<Option<(usize, usize)>, Error> {
+    let size = length as i64;
+    let mut start = first.unwrap_or(0);
+    let mut end = last.unwrap_or(size);
+    if start < 0 {
+        start += size;
+        if start < 0 {
+            return out_of_range(scope, range, splice);
+        }
+    }
+    if end < 0 {
+        end += size;
+    }
+    if last.is_some() && !exclusive {
+        end += 1;
+    }
+    if !splice {
+        if start > size {
+            return Ok(None);
+        }
+        end = end.min(size);
+    }
+    let count = (end - start).max(0);
+    Ok(Some((start as usize, count as usize)))
+}
+
+fn out_of_range(
+    scope: &mut HandleScope<'_>,
+    range: Value,
+    splice: bool,
+) -> Result<Option<(usize, usize)>, Error> {
+    if !splice {
+        return Ok(None);
+    }
+    let parts = range_parts(scope, range);
+    let text = match parts {
+        Some((first, last, exclusive)) => format!(
+            "{}{}{}",
+            first.map_or_else(String::new, |n| n.to_string()),
+            if exclusive { "..." } else { ".." },
+            last.map_or_else(String::new, |n| n.to_string())
+        ),
+        None => "range".to_owned(),
+    };
+    Err(Error::raise("RangeError", format!("{text} out of range")))
+}
+
+/// Replace `count` elements at `start` with `replacement`, padding with nil
+/// when `start` is past the end — `rb_ary_splice`. The Array object is kept;
+/// its storage is rewritten.
+fn array_splice<'h>(
+    scope: &mut HandleScope<'h>,
+    array: Handle<'h>,
+    start: usize,
+    count: usize,
+    replacement: &[Value],
+) {
+    let length = array_len(scope, array);
+    let mut elements: Vec<Value> = (0..length).map(|i| array_get(scope, array, i)).collect();
+    if start >= length {
+        elements.resize(start, Value::NIL);
+        elements.extend_from_slice(replacement);
+    } else {
+        let end = (start + count).min(length);
+        elements.splice(start..end, replacement.iter().copied());
+    }
+    // Every value here is reachable from the array or from the call's
+    // arguments, both rooted, so growing the storage cannot lose one.
+    array_reserve(scope, array, elements.len());
+    let storage = scope.slot(array, ARRAY_STORAGE);
+    let storage = scope.root(storage);
+    for (index, &value) in elements.iter().enumerate() {
+        scope.set_slot(storage, index, value);
+    }
+    // Slots past the new end let go of what they held, so a shrinking splice
+    // does not keep its removed elements alive.
+    let capacity = scope.len(storage) as usize;
+    for index in elements.len()..capacity.min(length) {
+        scope.set_slot(storage, index, Value::NIL);
+    }
+    array_set_len(scope, array, elements.len());
+}
+
 // ---------------------------------------------------------------------------
 // Instance variables
 // ---------------------------------------------------------------------------
@@ -4092,6 +4261,13 @@ fn resolve_index(index: i64, length: usize) -> Option<usize> {
 // `Heap::mark` needs no change for any of this. The storage hangs off a traced
 // slot of a `Payload::Slots` object, which is exactly what the collector
 // already descends into.
+
+/// Whether an ivar is the core library's own, spelled `@__name__`: hidden from
+/// `instance_variables`, as CRuby keeps the same state out of Ruby's sight.
+fn is_internal_ivar(name: SymbolId) -> bool {
+    crate::shared::symbols::name(name)
+        .is_some_and(|name| name.len() > 5 && name.starts_with("@__") && name.ends_with("__"))
+}
 
 /// Whether `name` spells an instance variable: `@` and then an identifier.
 ///
@@ -4658,16 +4834,16 @@ fn allocate_instance(scope: &mut HandleScope<'_>, id: ClassId) -> Result<Value, 
             // Three ordinary instance variables: the association list, the
             // default, and whether that default is a block. They were three
             // fixed slots with three `Getter`/`Setter` pairs in front of them
-            // until shapes landed; `core/hash.rb` now reads `@pairs` like any
+            // until shapes landed; `core/hash.rb` now reads `@__pairs__` like any
             // other Ruby class.
             let class = scope.classes().object(id);
             let class = scope.root(class);
             let handle = alloc_ivar_object(scope, Some(class));
             let object = scope.get(handle);
             let pairs = new_array(scope, &[]);
-            ivar_set(scope, object, symbol("@pairs"), pairs)?;
-            ivar_set(scope, object, symbol("@default"), Value::NIL)?;
-            ivar_set(scope, object, symbol("@default_is_proc"), Value::FALSE)?;
+            ivar_set(scope, object, symbol("@__pairs__"), pairs)?;
+            ivar_set(scope, object, symbol("@__default__"), Value::NIL)?;
+            ivar_set(scope, object, symbol("@__default_is_proc__"), Value::FALSE)?;
             Ok(object)
         }
         Some(other) => {
@@ -4712,7 +4888,7 @@ fn allocate_instance(scope: &mut HandleScope<'_>, id: ClassId) -> Result<Value, 
 /// The elements of an `Array`, or `None` if the value is not one.
 /// A `Hash`'s pairs, for a `**` argument (#193).
 ///
-/// Reads `@pairs` — the association list `core/hash.rb` keeps — rather than
+/// Reads `@__pairs__` — the association list `core/hash.rb` keeps — rather than
 /// sending `each_pair`, because this runs from inside argument assembly and
 /// re-entering the interpreter there is what `expand_splats` already refuses to
 /// do. An ivar read is a shape lookup, not a call.
@@ -4722,7 +4898,7 @@ fn allocate_instance(scope: &mut HandleScope<'_>, id: ClassId) -> Result<Value, 
 // `Hash` a primitive that hands out its pairs when the open-addressed table
 // that note promises arrives, and this reads that instead.
 fn hash_pairs(scope: &mut HandleScope<'_>, value: Value) -> Option<Vec<(Value, Value)>> {
-    let pairs = ivar_get(scope, value, symbol("@pairs")).ok()?;
+    let pairs = ivar_get(scope, value, symbol("@__pairs__")).ok()?;
     let mut out = Vec::new();
     for pair in array_elements(scope, pairs)? {
         let entry = array_elements(scope, pair)?;
@@ -5138,14 +5314,73 @@ fn native_call<'h>(
             // new array and answers a different shape entirely. Reading only
             // the first argument and ignoring the second would answer `a[1, 3]`
             // with one element, which is wrong rather than missing.
-            let index = match call.args.as_slice() {
-                [index] => index.as_fixnum(),
-                _ => None,
+            // Slices are answered here since #21: `a[start, length]` and
+            // `a[range]` with Integer (or nil) ends, CRuby's `rb_ary_subseq`
+            // and `rb_range_component_beg_len` rule for rule. A Float index is
+            // truncated, as `Float#to_int` would. An index that needs a Ruby
+            // `to_int` still refuses: the native cannot send it.
+            let slice = match call.args.as_slice() {
+                [start, count] => match (index_arg(*start), index_arg(*count)) {
+                    (Some(start), Some(count)) => Some(subseq_bounds(start, count, length)),
+                    _ => None,
+                },
+                [range] if is_range(scope, *range) => match range_parts(scope, *range) {
+                    Some(parts) => Some(range_beg_len(scope, *range, parts, length, false)?),
+                    None => None,
+                },
+                _ => {
+                    let single = match call.args.as_slice() {
+                        [index] => index_arg(*index),
+                        _ => None,
+                    };
+                    match single {
+                        Some(index) => {
+                            let value = match resolve_index(index, length) {
+                                Some(index) => array_get(scope, handle, index),
+                                None => Value::NIL,
+                            };
+                            stack.push(value);
+                            return Ok(None);
+                        }
+                        None => None,
+                    }
+                }
             };
-            let Some(index) = index else {
+            let Some(bounds) = slice else {
                 return Err(Error::NoDispatch {
                     op: "Array#[]",
-                    operands: "a slice, or an index that is not an Integer",
+                    operands: "an index that is not an Integer, Float or Range",
+                });
+            };
+            let value = match bounds {
+                Some((start, count)) => {
+                    let elements: Vec<Value> = (start..start + count)
+                        .map(|index| array_get(scope, handle, index))
+                        .collect();
+                    new_array(scope, &elements)
+                }
+                None => Value::NIL,
+            };
+            stack.push(value);
+            Ok(None)
+        }
+
+        Native::ArrayIndexSingle => {
+            let handle = expect_array(scope, call.receiver, "at")?;
+            let length = array_len(scope, handle);
+            if call.args.len() != 1 {
+                return Err(Error::raise(
+                    "ArgumentError",
+                    format!(
+                        "wrong number of arguments (given {}, expected 1)",
+                        call.args.len()
+                    ),
+                ));
+            }
+            let Some(index) = call.args.first().and_then(|&v| index_arg(v)) else {
+                return Err(Error::NoDispatch {
+                    op: "Array#[]",
+                    operands: "an index that is not an Integer",
                 });
             };
             let resolved = resolve_index(index, length);
@@ -5164,24 +5399,88 @@ fn native_call<'h>(
             // `a[i, n] = x` and `a[range] = x` splice, which is a different
             // operation on a different number of arguments. Three arguments
             // here is the splice form, not an index and a value.
+            // The splice forms since #21 — `a[start, length] = v` and
+            // `a[range] = v` — are CRuby's `rb_ary_splice`, errors included.
+            let splice = match call.args.as_slice() {
+                [start, count, value] => match (index_arg(*start), index_arg(*count)) {
+                    (Some(start), Some(count)) => {
+                        let at = if start < 0 {
+                            start + length as i64
+                        } else {
+                            start
+                        };
+                        if at < 0 {
+                            return Err(Error::raise(
+                                "IndexError",
+                                format!("index {start} too small for array; minimum: -{length}"),
+                            ));
+                        }
+                        if count < 0 {
+                            return Err(Error::raise(
+                                "IndexError",
+                                format!("negative length ({count})"),
+                            ));
+                        }
+                        Some((at as usize, count as usize, *value))
+                    }
+                    _ => None,
+                },
+                [range, value] if is_range(scope, *range) => match range_parts(scope, *range) {
+                    Some(parts) => {
+                        let (start, count) = range_beg_len(scope, *range, parts, length, true)?
+                            .expect("a splice range either raises or resolves");
+                        Some((start, count, *value))
+                    }
+                    None => None,
+                },
+                _ => None,
+            };
+            if let Some((start, count, value)) = splice {
+                // The replacement: an Array's elements, or the value itself as
+                // one element. Something with its own `to_ary` would need it
+                // called, which a native cannot.
+                let replacement = match array_elements(scope, value) {
+                    Some(elements) => elements,
+                    None if defines_to_ary(scope, value) => {
+                        return Err(Error::NoDispatch {
+                            op: "Array#[]=",
+                            operands: "a replacement with its own `to_ary`",
+                        });
+                    }
+                    None => vec![value],
+                };
+                let value = scope.root(value);
+                array_splice(scope, handle, start, count, &replacement);
+                stack.push(scope.get(value));
+                return Ok(None);
+            }
             let assignment = match call.args.as_slice() {
-                [index, value] => index.as_fixnum().map(|index| (index, *value)),
+                [index, value] => index_arg(*index).map(|index| (index, *value)),
                 _ => None,
             };
             let Some((index, value)) = assignment else {
                 return Err(Error::NoDispatch {
                     op: "Array#[]=",
-                    operands: "a splice, or an index that is not an Integer",
+                    operands: "an index that is not an Integer, Float or Range",
                 });
             };
             // A negative index past the front is an IndexError in Ruby, not a
-            // silent write at zero.
-            let Some(index) = resolve_index(index, length) else {
+            // silent write at zero. One past the end is not an error at all:
+            // the gap fills with nil, measured — `a = [1]; a[3] = 2` is
+            // `[1, nil, nil, 2]`. `resolve_index` is the *read* rule, which
+            // answers nil there, and was wrongly used here until #21.
+            let at = if index < 0 {
+                index + length as i64
+            } else {
+                index
+            };
+            if at < 0 {
                 return Err(Error::raise(
                     "IndexError",
                     format!("index {index} too small for array; minimum: -{length}"),
                 ));
-            };
+            }
+            let index = at as usize;
             array_set(scope, handle, index, value);
             stack.push(value);
             Ok(None)
@@ -5202,16 +5501,37 @@ fn native_call<'h>(
         Native::ArrayPop => {
             let handle = expect_array(scope, call.receiver, "pop")?;
             frozen_check(scope, call.receiver, "array")?;
-            // `pop(n)` answers a new *array* of the last n, which allocates and
-            // is a different operation. Answering the one-element form for it
-            // would be wrong rather than missing.
-            if !call.args.is_empty() {
-                return Err(Error::NoDispatch {
-                    op: "Array#pop",
-                    operands: "a count, which answers a new array",
-                });
-            }
             let length = array_len(scope, handle);
+            // `pop(n)` answers a new *array* of the last n (#21), however many
+            // there are: measured, `[1].pop(5)` is `[1]`.
+            if let Some(&count) = call.args.first() {
+                if call.args.len() > 1 {
+                    return Err(Error::raise(
+                        "ArgumentError",
+                        format!(
+                            "wrong number of arguments (given {}, expected 0..1)",
+                            call.args.len()
+                        ),
+                    ));
+                }
+                let Some(count) = index_arg(count) else {
+                    return Err(Error::NoDispatch {
+                        op: "Array#pop",
+                        operands: "a count that is not an Integer",
+                    });
+                };
+                if count < 0 {
+                    return Err(Error::raise("ArgumentError", "negative array size"));
+                }
+                let taken = (count as usize).min(length);
+                let elements: Vec<Value> = (length - taken..length)
+                    .map(|index| array_get(scope, handle, index))
+                    .collect();
+                let popped = new_array(scope, &elements);
+                array_set_len(scope, handle, length - taken);
+                stack.push(popped);
+                return Ok(None);
+            }
             if length == 0 {
                 stack.push(Value::NIL);
                 return Ok(None);
@@ -6435,8 +6755,13 @@ fn native_call<'h>(
         Native::InstanceVariable(op) => {
             let value = match op {
                 IvarOp::Names => {
+                    // `@__name__` is the core library's own state — a class's
+                    // table id, a Hash's pairs — which CRuby keeps where Ruby
+                    // cannot see it. `{}.instance_variables` is `[]` there, so
+                    // it is here: the spelling is the marker.
                     let names: Vec<Value> = ivar_names(scope, call.receiver)
                         .into_iter()
+                        .filter(|&name| !is_internal_ivar(name))
                         .map(Value::symbol)
                         .collect();
                     new_array(scope, &names)
@@ -7038,9 +7363,19 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             Native::Getter(crate::regexp::MATCH_SUBJECT as u16),
         ),
         (Builtin::Kernel, &["equal?"], Native::Equal),
+        // CRuby defines `equal?` and `__id__` on BasicObject, and `==` and `!`
+        // there are identity in C, untouched by an `equal?` override. The
+        // `__identical__` spelling is that C identity, for `core/basic_object.rb`.
+        (
+            Builtin::BasicObject,
+            &["equal?", "__identical__"],
+            Native::Equal,
+        ),
+        (Builtin::BasicObject, &["__id__"], Native::ObjectId),
         (Builtin::Kernel, &["nil?"], Native::NilP),
         // #15. Raw storage and allocation; the rest of these classes is Ruby.
-        (Builtin::Array, &["[]"], Native::ArrayIndex),
+        (Builtin::Array, &["[]", "slice"], Native::ArrayIndex),
+        (Builtin::Array, &["at"], Native::ArrayIndexSingle),
         (Builtin::Array, &["[]="], Native::ArrayStore),
         (Builtin::Array, &["size", "length"], Native::ArraySize),
         (Builtin::Array, &["push", "append"], Native::ArrayPush),
@@ -7071,7 +7406,7 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         (Builtin::Integer, &["**"], Native::IntPow),
         (
             Builtin::Symbol,
-            &["to_s", "name", "id2name"],
+            &["to_s", "id2name"],
             Native::SymbolName { length: false },
         ),
         (
@@ -7079,7 +7414,7 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             &["length", "size"],
             Native::SymbolName { length: true },
         ),
-        (Builtin::Module, &["name"], Native::ModuleName),
+        (Builtin::Module, &["__name__"], Native::ModuleName),
         (
             Builtin::Module,
             &["private_constant"],
@@ -7272,6 +7607,13 @@ fn materialise<'h>(
         }
         Literal::Regexp { source, options } => regexp_literal(scope, source, *options),
         Literal::Str(bytes) | Literal::FrozenStr(bytes) => {
+            // A frozen literal is interned by content, CRuby's fstring: every
+            // evaluation of every site with these bytes answers one object.
+            if matches!(literal, Literal::FrozenStr(_))
+                && let Some(interned) = scope.regexps().fstring(bytes)
+            {
+                return Ok(interned);
+            }
             let len = u32::try_from(bytes.len()).map_err(|_| Error::NoDispatch {
                 op: "String",
                 operands: "a literal larger than 4 GiB",
@@ -7280,6 +7622,8 @@ fn materialise<'h>(
             scope.bytes_mut(handle).copy_from_slice(bytes);
             if matches!(literal, Literal::FrozenStr(_)) {
                 scope.freeze(handle);
+                let value = scope.get(handle);
+                scope.regexps_mut().intern_fstring(bytes, value);
             }
             Ok(scope.get(handle))
         }
@@ -7686,8 +8030,11 @@ fn negate(scope: &mut HandleScope<'_>, value: Value) -> Result<Value, Error> {
 /// example the VM would fail.
 pub fn ruby_eq(scope: &mut HandleScope<'_>, left: Value, right: Value) -> Result<bool, Error> {
     // Bitwise equality is exactly Ruby's `equal?` for immediates, which is why
-    // #6 excluded NaN and -0.0 from the flonum range. It settles most pairs.
-    if left == right {
+    // #6 excluded NaN and -0.0 from the flonum range. It settles most pairs —
+    // but not for an object whose class may define its own `==`: identical
+    // operands still dispatch then, because `def ==(o) = false` is honoured
+    // even for `o1 == o1`. Measured; `kernel/case_compare_spec.rb` checks it.
+    if left == right && (left.is_immediate() || heap_kind(scope, left).is_some()) {
         return Ok(true);
     }
     // `1 == 1.0` is true in Ruby even though the words differ. Two *integers*
@@ -8158,6 +8505,24 @@ fn match_data_new(
     subject: Value,
     offsets: &[Value],
 ) -> Value {
+    // The subject is kept as a frozen copy unless it is frozen already, as
+    // CRuby's `rb_str_new_frozen` does: measured, `md.string` is frozen and is
+    // not the caller's String, so mutating that String later cannot change
+    // what the match reports.
+    let subject = match string_bytes(scope, subject) {
+        Some(bytes) => {
+            let original = scope.root(subject);
+            if scope.is_frozen(original) {
+                subject
+            } else {
+                let copy = string_bytes_new(scope, &bytes);
+                let copy = scope.root(copy);
+                scope.freeze(copy);
+                scope.get(copy)
+            }
+        }
+        None => subject,
+    };
     let array = new_array(scope, offsets);
     let class = class_handle(scope, Builtin::MatchData);
     let (payload, slots) = crate::regexp::match_shape();

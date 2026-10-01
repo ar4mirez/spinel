@@ -61,6 +61,14 @@ enum Statement<'a> {
         pattern: &'a Expr,
         negated: bool,
     },
+    /// `<subject>.should.<name>(<args>)`, or `should_not`: mspec's predicate
+    /// form, which holds when `subject.name(args)` is truthy — `x.should.
+    /// include?(y)`, `x.should.equal?(y)`, `x.should < 3` (#21).
+    Predicate {
+        subject: &'a Expr,
+        call: &'a spinel_ast::Call,
+        negated: bool,
+    },
     /// `<subject>.should.raise(<class>)`, or `should_not`.
     Raises {
         subject: &'a Expr,
@@ -162,6 +170,27 @@ fn classify(expr: &Expr) -> Statement<'_> {
         return Statement::Raises {
             subject,
             expected: outer.args.first(),
+            negated,
+        };
+    }
+    // Any other method on a bare `should` is a predicate. `should(matcher)`
+    // and `should_receive` are other shapes, and still block as the calls
+    // they are.
+    if let ExprKind::Call(outer) = &expr.kind
+        && let Some(receiver) = &outer.receiver
+        && let ExprKind::Call(inner) = &receiver.kind
+        && inner.args.is_empty()
+        && inner.block.is_none()
+        && let Some(subject) = &inner.receiver
+        && let negated = match &*inner.name {
+            "should" => false,
+            "should_not" => true,
+            _ => return Statement::Effect(expr),
+        }
+    {
+        return Statement::Predicate {
+            subject,
+            call: outer,
             negated,
         };
     }
@@ -461,6 +490,33 @@ fn run_inner(example: &Example, fixtures: &Fixtures, spans: &mut Vec<Span>) -> O
                             "should equal"
                         };
                         return Outcome::Failed(format!("{actual} {expectation} {wanted}"));
+                    }
+                    ran_something = true;
+                }
+                Statement::Predicate {
+                    subject,
+                    call,
+                    negated,
+                } => {
+                    let test = Expr::new(
+                        subject.span,
+                        ExprKind::Call(Box::new(spinel_ast::Call {
+                            receiver: Some(subject.clone()),
+                            ..call.clone()
+                        })),
+                    );
+                    let answer =
+                        match eval(&mut scope, &mut frame, &example.source, &mut locals, &test) {
+                            Ok(value) => value,
+                            Err(stop) => return Outcome::Blocked(stop.reason()),
+                        };
+                    let held = answer != Value::NIL && answer != Value::FALSE;
+                    if held == negated {
+                        let expectation = if negated { "should not" } else { "should" };
+                        return Outcome::Failed(format!(
+                            "{expectation} be `{}`, but was not",
+                            call.name
+                        ));
                     }
                     ran_something = true;
                 }
