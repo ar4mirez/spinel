@@ -122,12 +122,16 @@ fn number(name: &str) -> i32 {
 ///
 /// Through `std` rather than `libc::strerror_r`: glibc has two incompatible
 /// `strerror_r`s and `std` already picks the right one. `std` appends
-/// " (os error N)", which is its own and comes off.
+/// " (os error N)", which is its own and comes off — every copy of it, since
+/// miri's `strerror` shim answers with the suffix already on.
 #[must_use]
 pub fn message(number: i32) -> String {
-    let text = std::io::Error::from_raw_os_error(number).to_string();
+    let mut text = std::io::Error::from_raw_os_error(number).to_string();
     let suffix = format!(" (os error {number})");
-    text.strip_suffix(&suffix).unwrap_or(&text).to_owned()
+    while let Some(stripped) = text.strip_suffix(&suffix) {
+        text = stripped.to_owned();
+    }
+    text
 }
 
 #[cfg(test)]
