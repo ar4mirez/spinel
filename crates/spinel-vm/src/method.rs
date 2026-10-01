@@ -343,6 +343,28 @@ pub enum Native {
     /// `hash` methods on top of it, so a key class with a custom `hash` is
     /// honoured inside an Array or a Hash too.
     HashCombine,
+    /// The fiber primitives (#16), installed as `Kernel#__fiber_*__` and
+    /// wrapped by `core/fiber.rb`. Each that switches fibers does it by
+    /// swapping the vectors the interpreter loop runs on.
+    Fiber(FiberOp),
+    /// `Kernel#__proc_location__(proc)`: `[path, line]` where a block was
+    /// written, or nil — what `Fiber#inspect` names (#16) and
+    /// `Proc#source_location` will.
+    ProcLocation,
+}
+
+/// Which fiber primitive. See `interp.rs`, "Fibers".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FiberOp {
+    New,
+    Resume,
+    Yield,
+    Raise,
+    Kill,
+    Transfer,
+    Current,
+    Alive,
+    Status,
 }
 
 /// The bitwise operators on `Integer`, which share one primitive.

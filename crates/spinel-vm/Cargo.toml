@@ -36,3 +36,9 @@ workspace = true
 name = "method_cache"
 path = "../../bench/method_cache.rs"
 harness = false
+
+# The cost of one fiber switch (#16), against system `ruby --yjit`.
+[[bench]]
+name = "fiber_switch"
+path = "../../bench/fiber_switch.rs"
+harness = false
