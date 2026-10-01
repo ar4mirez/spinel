@@ -148,8 +148,10 @@ module Kernel
       while true
         yield
       end
-    rescue StopIteration
-      nil
+    rescue StopIteration => stop
+      # The finished iterator's own return value, measured: `loop { e.next }`
+      # answers what `e`'s `each` returned.
+      stop.result
     end
   end
 
