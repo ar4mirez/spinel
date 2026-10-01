@@ -166,8 +166,10 @@ pub enum Native {
 
     // -- #15's core library. Each one is raw memory or allocation; everything
     // -- else about these classes is Ruby, in `core/*.rb`.
-    /// `Array#[]` — reads a raw slot run.
+    /// `Array#[]` — reads a raw slot run, or copies one out for a slice.
     ArrayIndex,
+    /// `Array#at` — one index, never a slice (#21).
+    ArrayIndexSingle,
     /// `Array#[]=` — writes one, and reallocates storage past the end.
     ArrayStore,
     /// `Array#size` — reads the length slot.

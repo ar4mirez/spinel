@@ -337,6 +337,19 @@ pub enum Insn {
     /// shared across Ractors, and a `Regexp` is a heap object that cannot be.
     NewRegexpOnce(i64, u32),
 
+    /// A literal whose object is built once per site and reused for ever
+    /// (#21): `(1..3)` with literal ends is one frozen Range in CRuby, so
+    /// `2.times { a << (1..3) }` pushes the same object twice. Measured.
+    ///
+    /// When the site (numbered with the `/o` sites, in the same per-heap
+    /// cache) already has its object, this pushes it and jumps over the code
+    /// that builds it; otherwise it falls through to that code, which ends in
+    /// [`Insn::OnceSet`].
+    OnceGet(i32, u32),
+    /// Record the value on top of the stack as this site's object, leaving it
+    /// there. See [`Insn::OnceGet`].
+    OnceSet(u32),
+
     /// `@@a`, `@@a = v`, `defined?(@@a)`. The operand indexes
     /// [`Iseq::symbols`].
     ///

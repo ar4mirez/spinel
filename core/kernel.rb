@@ -5,8 +5,10 @@
 # primitives: each is dispatch, an allocation, a header bit, or a syscall.
 # Everything below is Ruby, because Ruby can say it.
 module Kernel
+  # The same object first, whatever `==` and `equal?` say — CRuby's
+  # `rb_equal` — and `==` otherwise. Measured with both overridden to false.
   def ===(other)
-    self == other
+    __id__ == other.__id__ || self == other ? true : false
   end
 
   # `class or module required` rather than `false`: asking whether an object is

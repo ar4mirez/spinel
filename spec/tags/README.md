@@ -77,7 +77,7 @@ fix is a different slice. The reason says which slice, by number.
 
 ## What is here now
 
-Sixty-four tags across twenty-six files, and thirty-seven of them are one thing:
+Seventy-two tags across twenty-nine files, and thirty-seven of them are one thing:
 a global alias, where #166's table holds two names as two entries and making one
 the other's second spelling is #39's runtime state. They sit in
 `language/predefined_tags.txt`, `language/defined_tags.txt` and
@@ -92,7 +92,12 @@ in a backtrace — and this harness, running the example on `main`, makes
 `Object#foo`. They ran for the first time when #29 gave `caller` a backtrace.
 `language/block_tags.txt` holds one for #28: a `to_ary` that only
 `method_missing` answers, which ran for the first time when the harness's
-`should ==` started dispatching `==` to Ruby (#22).
+`should ==` started dispatching `==` to Ruby (#22). Eight more arrived when the
+harness learned mspec's `x.should.predicate?` form (#21): six global-alias and
+predefined-global examples in `language/predefined_tags.txt` and
+`library/English/alias_tags.txt`, which are #39's like their neighbours, and
+one each for `instance_exec` class variables and `define_singleton_method`
+with an UnboundMethod, which are #28's and #27's.
 
 Constant visibility was four of them and is none of them now: #185 deleted its
 tags rather than rewording them, which is what closing an issue behind a tag is

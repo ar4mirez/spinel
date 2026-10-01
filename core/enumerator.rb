@@ -29,6 +29,7 @@ class Enumerator
     @object = nil
     @method = nil
     @arguments = nil
+    self
   end
 
   # `to_enum`'s form. Built with `allocate` rather than `new` because Ruby 4.0
@@ -218,6 +219,29 @@ class Enumerator
     # over the same elements, so `map` on it answers an Array again.
     def eager
       Enumerator.__for__(self, :each, [], @size)
+    end
+
+    # The grouping methods stay lazy, measured: `lazy.chunk { }` is a Lazy.
+    # Enumerable's versions already defer until iterated, so a lazy over what
+    # they answer is the same chain.
+    def chunk(*given, &block)
+      super.lazy
+    end
+
+    def chunk_while(*given, &block)
+      super.lazy
+    end
+
+    def slice_after(*given, &block)
+      super.lazy
+    end
+
+    def slice_before(*given, &block)
+      super.lazy
+    end
+
+    def slice_when(*given, &block)
+      super.lazy
     end
 
     # `to_enum` on a lazy stays lazy — that is the whole point of `eager`
@@ -500,6 +524,7 @@ class Enumerator
       @arguments = nil
       @producer = nil
       @size = nil
+      self
     end
 
     def each(&block)
@@ -546,6 +571,7 @@ class Enumerator
       @arguments = nil
       @producer = nil
       @size = nil
+      self
     end
 
     def each(&block)

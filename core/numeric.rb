@@ -170,3 +170,10 @@ class Numeric
     value.to_f
   end
 end
+
+class Numeric
+  # Unary plus is the number itself.
+  def +@
+    self
+  end
+end

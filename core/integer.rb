@@ -392,3 +392,16 @@ class Integer
     to_s
   end
 end
+
+# An Integer is a value: `dup` and `clone` answer it, a bignum included —
+# measured, `(2**100).dup.equal?` the receiver.
+class Integer
+  def dup
+    self
+  end
+
+  def clone(freeze: true)
+    raise ArgumentError, "can't unfreeze Integer" if freeze == false
+    self
+  end
+end

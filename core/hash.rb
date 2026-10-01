@@ -1,13 +1,13 @@
 # Hash.
 #
-# `Class#allocate` gives a Hash three instance variables: `@pairs`, an
+# `Class#allocate` gives a Hash three instance variables: `@__pairs__`, an
 # association list of `[key, value]` Arrays, plus the default and whether it is
-# a block. Two more arrive on use: `@hashes`, each key's hash code as it was
-# when stored (#22), and `@compare_by_identity`. Every method here is a linear
-# walk over `@pairs`.
+# a block. Two more arrive on use: `@__hashes__`, each key's hash code as it was
+# when stored (#22), and `@__identity__`. Every method here is a linear
+# walk over `@__pairs__`.
 #
 # ponytail: O(n) lookup. A real Hash is an open-addressed table keyed by
-# `#hash`, and `@hashes` is already the half of it that decides which slot. The
+# `#hash`, and `@__hashes__` is already the half of it that decides which slot. The
 # upgrade is this file and a primitive over it; outside it, only
 # `hash_pairs`, `hash_of_pairs` and `expand_splats` in `interp.rs` know the
 # representation, and each says so.
@@ -26,14 +26,14 @@ class Hash
     if default.size > 1
       raise ArgumentError, "wrong number of arguments (given " + default.size.to_s + ", expected 0..1)"
     end
-    @default = blk.nil? ? default[0] : blk
-    @default_is_proc = !blk.nil?
+    @__default__ = blk.nil? ? default[0] : blk
+    @__default_is_proc__ = !blk.nil?
     self
   end
 
   # What a hash literal is built from (#157). `allocate` rather than `new`: the
   # literal has no arguments to check, and `Class#allocate` is already what
-  # gives a Hash its empty `@pairs`. `@default` and `@default_is_proc` are unset
+  # gives a Hash its empty `@__pairs__`. `@__default__` and `@__default_is_proc__` are unset
   # and so read as nil, which is the same answer `Hash.new` would have left.
   # `Hash[...]` takes one Array of pairs, one Hash, or an even-length flat
   # argument list. An odd flat list is an ArgumentError, not a dropped value.
@@ -42,7 +42,9 @@ class Hash
     if given.size % 2 != 0
       raise ArgumentError, "odd number of arguments for Hash"
     end
-    out = {}
+    # An instance of the class it was called on, never initialized: measured,
+    # `MyHash[...]` is a MyHash and its `initialize` does not run.
+    out = allocate
     i = 0
     while i < given.size
       out[given[i]] = given[i + 1]
@@ -53,14 +55,14 @@ class Hash
 
   def self.__from_pairs_or_hash__(source)
     if source.is_a?(Hash)
-      out = {}
+      out = allocate
       source.each_pair { |k, v| out[k] = v }
       return out
     end
     unless source.is_a?(Array)
       raise ArgumentError, "odd number of arguments for Hash"
     end
-    out = {}
+    out = allocate
     source.each do |pair|
       unless pair.is_a?(Array) && pair.size >= 1 && pair.size <= 2
         raise ArgumentError, "invalid number of elements"
@@ -110,7 +112,7 @@ class Hash
   # `default` and `default(key)` are the same method: with a key it runs the
   # default block, without one it answers nil where a block is what was set.
   # Measured — `Hash.new { |h, k| k }.default` is nil and `.default(:k)` is `:k`.
-  # A copy has to get its own `@pairs`, and its own pair arrays inside it.
+  # A copy has to get its own `@__pairs__`, and its own pair arrays inside it.
   #
   # `Kernel#dup` is a shallow copy of the object's slots, which for `Array` is
   # its elements and for `Hash` is one ivar *pointing at* an Array — so without
@@ -123,10 +125,10 @@ class Hash
   def initialize_copy(other)
     pairs = []
     other.each_pair { |key, value| pairs.push([key, value]) }
-    @pairs = pairs
-    @hashes = nil
+    @__pairs__ = pairs
+    @__hashes__ = nil
     # Measured: `compare_by_identity` survives `dup` and `clone`.
-    @compare_by_identity = other.compare_by_identity?
+    @__identity__ = other.compare_by_identity?
     __copy_default_from__(other)
     self
   end
@@ -147,27 +149,27 @@ class Hash
   end
 
   def __init_copy_of__(other, keep_frozen)
-    @pairs = []
-    @default = nil
-    @default_is_proc = false
+    @__pairs__ = []
+    @__default__ = nil
+    @__default_is_proc__ = false
     initialize_copy(other)
     self
   end
 
   def default(*key)
-    return @default unless @default_is_proc
-    key.empty? ? nil : @default.call(self, key[0])
+    return @__default__ unless @__default_is_proc__
+    key.empty? ? nil : @__default__.call(self, key[0])
   end
 
   def default=(value)
     __check_frozen__
-    @default = value
-    @default_is_proc = false
+    @__default__ = value
+    @__default_is_proc__ = false
     value
   end
 
   def default_proc
-    @default_is_proc ? @default : nil
+    @__default_is_proc__ ? @__default__ : nil
   end
 
   # Two checks Ruby makes and the messages it makes them with, measured: a
@@ -178,8 +180,8 @@ class Hash
   def default_proc=(block)
     __check_frozen__
     if block.nil?
-      @default = nil
-      @default_is_proc = false
+      @__default__ = nil
+      @__default_is_proc__ = false
       return nil
     end
     unless block.is_a?(Proc)
@@ -194,8 +196,8 @@ class Hash
     if block.lambda? && block.arity != 2
       raise TypeError, "default_proc takes two arguments (2 for " + block.arity.to_s + ")"
     end
-    @default = block
-    @default_is_proc = true
+    @__default__ = block
+    @__default_is_proc__ = true
     block
   end
 
@@ -203,21 +205,21 @@ class Hash
   # the default; `Hash[]`, `except` and `slice` deliberately do not — measured,
   # and the reason those three build a fresh hash rather than `dup` one.
   def __copy_default_from__(other)
-    @default = other.__raw_default__
-    @default_is_proc = other.__default_is_proc__
+    @__default__ = other.__raw_default__
+    @__default_is_proc__ = other.__default_is_proc__
     self
   end
 
   def __raw_default__
-    @default
+    @__default__
   end
 
   def __default_is_proc__
-    @default_is_proc
+    @__default_is_proc__
   end
 
   def size
-    @pairs.size
+    @__pairs__.size
   end
 
   def length
@@ -236,17 +238,17 @@ class Hash
   # through this one method, so `[]`, `[]=`, `key?`, `fetch` and `delete` all
   # agree by construction.
   #
-  # A key's hash code is taken when it is stored, in `@hashes` beside
-  # `@pairs`, so a key mutated afterwards is not found until `rehash` — which
-  # is Ruby's behaviour and what `rehash_spec.rb` checks. `@hashes` is dropped
-  # (nil) by anything that rebuilds `@pairs`, and recomputed on demand.
+  # A key's hash code is taken when it is stored, in `@__hashes__` beside
+  # `@__pairs__`, so a key mutated afterwards is not found until `rehash` — which
+  # is Ruby's behaviour and what `rehash_spec.rb` checks. `@__hashes__` is dropped
+  # (nil) by anything that rebuilds `@__pairs__`, and recomputed on demand.
   #
   # Under `compare_by_identity` the only question is identity, and `hash` is
   # never called: measured.
   def __index__(key)
-    pairs = @pairs
+    pairs = @__pairs__
     i = 0
-    if @compare_by_identity
+    if @__identity__
       id = key.__id__
       while i < pairs.size
         return i if pairs[i][0].__id__ == id
@@ -267,18 +269,18 @@ class Hash
   end
 
   def __hashes__
-    @hashes ||= @pairs.map { |pair| __element_hash__(pair[0]) }
+    @__hashes__ ||= @__pairs__.map { |pair| __element_hash__(pair[0]) }
   end
 
   def compare_by_identity
     raise FrozenError, "can't modify frozen Hash: " + inspect if frozen?
-    @compare_by_identity = true
-    @hashes = nil
+    @__identity__ = true
+    @__hashes__ = nil
     self
   end
 
   def compare_by_identity?
-    @compare_by_identity == true
+    @__identity__ == true
   end
 
   # Every key's hash code taken afresh. Two keys that have become `eql?` since
@@ -286,19 +288,19 @@ class Hash
   # value — CRuby re-inserts in order. Measured.
   def rehash
     __check_frozen__
-    pairs = @pairs
-    @pairs = []
-    @hashes = []
+    pairs = @__pairs__
+    @__pairs__ = []
+    @__hashes__ = []
     pairs.each { |pair| self[pair[0]] = pair[1] }
     self
   end
 
   # A miss goes through `default`, which is a method rather than the ivar: a
   # `Hash` subclass overriding `default(key)` is how ruby/spec's `DefaultHash`
-  # answers 100 for every key, and reading `@default` here would never see it.
+  # answers 100 for every key, and reading `@__default__` here would never see it.
   def [](key)
     at = __index__(key)
-    return @pairs[at][1] unless at.nil?
+    return @__pairs__[at][1] unless at.nil?
     default(key)
   end
 
@@ -311,7 +313,7 @@ class Hash
     end
     key = fallback[0]
     at = __index__(key)
-    return @pairs[at][1] unless at.nil?
+    return @__pairs__[at][1] unless at.nil?
     return yield(key) if block_given?
     return fallback[1] if fallback.size > 1
     raise KeyError, "key not found: " + key.inspect
@@ -324,13 +326,13 @@ class Hash
     __check_frozen__
     at = __index__(key)
     if at.nil?
-      if !@compare_by_identity && key.is_a?(String) && !key.frozen?
+      if !@__identity__ && key.is_a?(String) && !key.frozen?
         key = key.dup.freeze
       end
-      @pairs.push([key, value])
-      @hashes.push(__element_hash__(key)) unless @hashes.nil? || @compare_by_identity
+      @__pairs__.push([key, value])
+      @__hashes__.push(__element_hash__(key)) unless @__hashes__.nil? || @__identity__
     else
-      @pairs[at][1] = value
+      @__pairs__[at][1] = value
     end
     value
   end
@@ -363,7 +365,15 @@ class Hash
   # Enumerable's would hand it the one pair. Without a block it answers the
   # receiver itself, not a copy. Measured.
   def to_h
-    return self unless block_given?
+    # A subclass answers a plain Hash copy, default included; a Hash answers
+    # itself. Measured.
+    unless block_given?
+      return self if instance_of?(Hash)
+      out = __like_self__
+      each_pair { |k, v| out[k] = v }
+      out.__copy_default_from__(self)
+      return out
+    end
     out = {}
     each_pair do |pair|
       made = yield(pair[0], pair[1])
@@ -403,11 +413,11 @@ class Hash
   end
 
   def keys
-    @pairs.map { |pair| pair[0] }
+    @__pairs__.map { |pair| pair[0] }
   end
 
   def values
-    @pairs.map { |pair| pair[1] }
+    @__pairs__.map { |pair| pair[1] }
   end
 
   # Yields one value, the `[key, value]` pair — not two. Measured: a
@@ -416,13 +426,13 @@ class Hash
   # Yielding two would leave the first shape holding only the key.
   def each
     return to_enum(:each) unless block_given?
-    @pairs.each { |pair| yield pair }
+    @__pairs__.each { |pair| yield pair }
     self
   end
 
   def each_pair
     return to_enum(:each_pair) unless block_given?
-    @pairs.each { |pair| yield pair }
+    @__pairs__.each { |pair| yield pair }
     self
   end
 
@@ -447,7 +457,7 @@ class Hash
       return yield(key) if block_given?
       return nil
     end
-    pairs = @pairs
+    pairs = @__pairs__
     gone = pairs[at][1]
     kept = []
     i = 0
@@ -455,8 +465,8 @@ class Hash
       kept.push(pairs[i]) unless i == at
       i = i + 1
     end
-    @pairs = kept
-    @hashes = nil
+    @__pairs__ = kept
+    @__hashes__ = nil
     gone
   end
 
@@ -468,7 +478,7 @@ class Hash
   end
 
   def to_a
-    @pairs.map { |pair| [pair[0], pair[1]] }
+    @__pairs__.map { |pair| [pair[0], pair[1]] }
   end
 
   # Every mutation checks first, the way `core/regexp.rb` and `core/range.rb`
@@ -529,8 +539,8 @@ class Hash
     clear
     # The argument's comparison comes over with its pairs, and the receiver's
     # own is dropped: measured both ways.
-    @compare_by_identity = other.compare_by_identity?
-    @hashes = nil
+    @__identity__ = other.compare_by_identity?
+    @__hashes__ = nil
     other.each_pair { |key, value| self[key] = value }
     __copy_default_from__(other)
     self
@@ -565,16 +575,13 @@ class Hash
       raise ArgumentError, "wrong number of arguments (given 0, expected 1+)"
     end
     value = self[path[0]]
-    i = 1
-    while i < path.size
-      return nil if value.nil?
-      unless value.respond_to?(:dig)
-        raise TypeError, value.class.name + " does not have #dig method"
-      end
-      value = value.dig(path[i])
-      i = i + 1
+    return value if path.size == 1 || value.nil?
+    unless value.respond_to?(:dig)
+      raise TypeError, value.class.name + " does not have #dig method"
     end
-    value
+    # The rest of the path goes to the inner object in one call, which does
+    # the rest itself: measured, an object's own `dig` is not recursed into.
+    value.dig(*path.__take__(1, path.size - 1))
   end
 
   def values_at(*wanted)
@@ -598,7 +605,7 @@ class Hash
     # `slice_spec.rb` pins it.
     wanted.each do |key|
       at = __index__(key)
-      out[key] = @pairs[at][1] unless at.nil?
+      out[key] = @__pairs__[at][1] unless at.nil?
     end
     out
   end
@@ -706,7 +713,7 @@ class Hash
   end
 
   def transform_values(&block)
-    return to_enum(:transform_values) if block.nil?
+    return to_enum(:transform_values) { size } if block.nil?
     out = __like_self__
     each_pair { |k, v| out[k] = block.call(v) }
     out
@@ -721,6 +728,7 @@ class Hash
   # With a Hash argument, a key it does not hold is left alone rather than
   # dropped: `{a: 1, b: 2}.transform_keys({a: :x})` is `{x: 1, b: 2}`.
   def transform_keys(*mapping, &block)
+    return to_enum(:transform_keys) { size } if block.nil? && mapping.empty?
     table = mapping.empty? ? nil : mapping[0]
     if !mapping.empty? && table.nil?
       raise TypeError, "no implicit conversion of nil into Hash"
@@ -801,7 +809,7 @@ class Hash
   def inspect
     return "{}" if empty?
     out = "{"
-    pairs = @pairs
+    pairs = @__pairs__
     i = 0
     while i < pairs.size
       out = out + pairs[i][0].inspect + " => " + pairs[i][1].inspect
@@ -844,7 +852,7 @@ class Hash
   def shift
     __check_frozen__
     return nil if empty?
-    pair = @pairs[0]
+    pair = @__pairs__[0]
     delete(pair[0])
     [pair[0], pair[1]]
   end

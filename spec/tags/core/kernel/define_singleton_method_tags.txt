@@ -1,0 +1,1 @@
+fails(define_singleton_method given an UnboundMethod needs Method and UnboundMethod objects, which are #27 and #28):Kernel#define_singleton_method when given an UnboundMethod adds the new method to the methods list

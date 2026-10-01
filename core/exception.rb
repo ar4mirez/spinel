@@ -37,7 +37,16 @@ class Exception
       raise ArgumentError, "wrong number of arguments (given #{given.size}, expected 0..1)"
     end
     return self if given.empty? || given[0].equal?(self)
-    self.class.new(given[0])
+    # A copy carrying the new message, not a new exception: CRuby clones and
+    # sets the message without running `initialize` again, so state the
+    # constructor set — `CustomArgumentError#val` — survives. Measured.
+    copy = clone
+    copy.__send__(:__replace_message__, given[0])
+    copy
+  end
+
+  def __replace_message__(text)
+    @message = text
   end
 
   def ==(other)

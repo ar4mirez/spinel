@@ -41,17 +41,40 @@ class SpecFailure < StandardError; end
 # `x.should == y` is `(x.should) == y`, so `should` returns something whose `==`
 # is the assertion. Exactly the shape the harness recognises, which is the point:
 # if the two disagree about what an example asserts, this catches it.
-class ShouldProxy
+#
+# A `BasicObject`, because `x.should.equal?(y)`, `x.should.frozen?` and every
+# other predicate mspec accepts on a bare `should` must reach `method_missing`
+# rather than find `Object`'s own method — `spec/harness` learned that form in
+# #21 and this shim has to agree with it.
+class ShouldProxy < BasicObject
   def initialize(value, negated)
     @value = value
     @negated = negated
   end
 
+  # `x.should.name(args)` holds when `x.name(args)` is truthy.
+  def method_missing(name, *args, &block)
+    held = @value.__send__(name, *args, &block) ? true : false
+    held = !held if @negated
+    unless held
+      ::Kernel.raise ::SpecFailure,
+                     "#{@value.inspect} should#{@negated ? " not" : ""} be #{name} #{args.inspect}"
+    end
+
+    true
+  end
+
+  def respond_to_missing?(_name, _include_all = false) = true
+
+  def equal?(other) = method_missing(:equal?, other)
+  def !=(other) = method_missing(:!=, other)
+  def !() = method_missing(:!)
+
   def ==(other)
     held = (@value == other)
     held = !held if @negated
     unless held
-      ::Kernel.raise SpecFailure,
+      ::Kernel.raise ::SpecFailure,
                      "#{@value.inspect} should#{@negated ? " not" : ""} equal #{other.inspect}"
     end
 
@@ -64,7 +87,7 @@ class ShouldProxy
     held = @value =~ other
     held = !held if @negated
     unless held
-      ::Kernel.raise SpecFailure,
+      ::Kernel.raise ::SpecFailure,
                      "#{@value.inspect} should#{@negated ? " not" : ""} match #{other.inspect}"
     end
 
@@ -82,22 +105,22 @@ class ShouldProxy
     raised = nil
     begin
       @value.call
-    rescue Exception => e # rubocop:disable Lint/RescueException
+    rescue ::Exception => e # rubocop:disable Lint/RescueException
       raised = e
     end
 
     if @negated
       unless raised.nil?
-        ::Kernel.raise SpecFailure, "should not have raised, but raised #{raised.class}"
+        ::Kernel.raise ::SpecFailure, "should not have raised, but raised #{raised.class}"
       end
       return true
     end
 
     if raised.nil?
-      ::Kernel.raise SpecFailure, "should raise #{klass || "an exception"}, raised nothing"
+      ::Kernel.raise ::SpecFailure, "should raise #{klass || "an exception"}, raised nothing"
     end
     if klass && !raised.is_a?(klass)
-      ::Kernel.raise SpecFailure, "should raise #{klass}, raised #{raised.class}"
+      ::Kernel.raise ::SpecFailure, "should raise #{klass}, raised #{raised.class}"
     end
 
     true
