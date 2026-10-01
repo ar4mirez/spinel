@@ -90,9 +90,20 @@ jobs:
         with:
           key: miri
 
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
       # The heap's tests scale themselves down under `cfg(miri)`: what is being checked
       # here is the pointer arithmetic, not ten million iterations of it.
-      - run: cargo miri test -p spinel-vm
+      #
+      # Through nextest, which runs each test in its own miri process, so the
+      # runner's cores share the work: interpreted, one heap bootstrap is ~20s
+      # and most tests do one, and `cargo miri test` runs them one at a time.
+      # nextest does not run doctests, so they keep a `cargo miri test` of
+      # their own.
+      - run: cargo miri nextest run -p spinel-vm
+      - run: cargo miri test -p spinel-vm --doc
 
   # Catches a dependency edge that architecture.md forbids, e.g. Prism escaping
   # spinel-parse, before it becomes load-bearing and expensive to unwind.
