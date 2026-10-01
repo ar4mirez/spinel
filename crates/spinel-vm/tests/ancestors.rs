@@ -65,6 +65,17 @@ fn spinel_agrees_with_the_ruby_ancestors_table() {
     );
     let mut checked = 0;
 
+    // Under miri, every eighth case — six, spread across the table. Each case
+    // builds and bootstraps a fresh heap, which is ~20s interpreted, and
+    // every case drives the same unsafe paths (allocation, bootstrap, class
+    // definition); what differs between them is ordering logic in safe Rust,
+    // which the ordinary `cargo test` jobs check in full.
+    #[cfg(not(miri))]
+    const STRIDE: usize = 1;
+    #[cfg(miri)]
+    const STRIDE: usize = 8;
+    let cases: Vec<_> = cases.into_iter().step_by(STRIDE).collect();
+
     for case in &cases {
         let mut heap = Heap::new();
         let mut scope = heap.scope();
