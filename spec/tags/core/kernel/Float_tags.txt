@@ -1,0 +1,2 @@
+fails(#181: `Kernel#Float` comes with `String#to_f`, so a String argument converts):Kernel#Float is a instance method
+fails(#181: `Kernel#Float` comes with `String#to_f`, so a String argument converts):Kernel.Float is a public method

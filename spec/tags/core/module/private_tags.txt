@@ -1,0 +1,1 @@
+fails(#39: the module fixtures stop at an `autoload` of a fixture file before they reach the methods this example reads — the `Object` methods exported to `Kernel` are defined after it):Module#private makes a public Object instance method private in Kernel

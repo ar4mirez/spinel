@@ -1,0 +1,1 @@
+fails(#46: `Queue` does not exist until the Queue and ConditionVariable slice):Thread::Queue is the same class as ::Queue

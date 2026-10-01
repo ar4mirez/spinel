@@ -1,0 +1,1 @@
+fails(#27: `Proc#==` compares bodies and captured scopes, which is the Proc slice; until then `==` is BasicObject's identity):Proc#== is a public method

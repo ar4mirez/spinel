@@ -247,6 +247,11 @@ pub struct Heap {
     /// ponytail: one per heap, like `last_match`. Ruby scopes it to the thread;
     /// give it a Ractor-local when threads arrive.
     errinfo: Value,
+    /// `main`, the top level's `self`: one per heap, so every evaluation —
+    /// the core library's and each of the program's — shares it, and the
+    /// singleton methods `core/object.rb` gives it (`to_s`, `include`) are
+    /// there for all of them. Nil until the first evaluation makes it.
+    main: Value,
     /// This Ractor's global variables, by name (#166). A root source: see
     /// [`Heap::mark`].
     ///
@@ -314,6 +319,7 @@ impl Heap {
             fibers: crate::interp::FiberTable::default(),
             last_match: Value::NIL,
             errinfo: Value::NIL,
+            main: Value::NIL,
             globals: HashMap::new(),
             global_slots: Vec::new(),
             global_specials: HashMap::new(),
@@ -366,6 +372,14 @@ impl Heap {
 
     pub fn set_errinfo(&mut self, value: Value) {
         self.errinfo = value;
+    }
+
+    pub fn main(&self) -> Value {
+        self.main
+    }
+
+    pub fn set_main(&mut self, value: Value) {
+        self.main = value;
     }
 
     /// A global's value, or `None` for a name nothing has assigned.
@@ -619,6 +633,9 @@ impl Heap {
         // answers one object, so that object outlives every handle to it.
         let (regexps, mark_stack) = (&self.regexps, &mut self.mark_stack);
         regexps.each_root(|value| Heap::shade(mark_stack, value));
+        // Sixth: the `Proc`s `define_method` turned into method bodies.
+        let (definitions, mark_stack) = (&self.definitions, &mut self.mark_stack);
+        definitions.each_root(|value| Heap::shade(mark_stack, value));
         // Fifth: the vectors of every fiber that is not running.
         let (fibers, mark_stack) = (&self.fibers, &mut self.mark_stack);
         fibers.each_root(|value| Heap::shade(mark_stack, value));
@@ -626,6 +643,7 @@ impl Heap {
         // `$!` outlives every handle to it the same way, and for the whole time
         // a handler is running.
         Heap::shade(&mut self.mark_stack, self.errinfo);
+        Heap::shade(&mut self.mark_stack, self.main);
         // Fourth root source: the global table. A global outlives every handle
         // to what it holds, by definition — that is what a global is.
         let (slots, mark_stack) = (&self.global_slots, &mut self.mark_stack);
@@ -943,6 +961,14 @@ impl<'h> HandleScope<'h> {
 
     pub fn set_errinfo(&mut self, value: Value) {
         self.heap.set_errinfo(value);
+    }
+
+    pub fn main(&self) -> Value {
+        self.heap.main()
+    }
+
+    pub fn set_main(&mut self, value: Value) {
+        self.heap.set_main(value);
     }
 
     /// This heap's global of that name, or `None` if nothing assigned it.

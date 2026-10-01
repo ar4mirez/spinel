@@ -1,1 +1,0 @@
-fails(a class variable written inside instance_exec lands on the receiver's class, which needs the cref instance_exec pushes: #28):BasicObject#instance_exec sets class variables in the receiver

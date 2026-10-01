@@ -246,11 +246,14 @@ module Enumerable
     nil
   end
 
+  # Without a block a Regexp pattern is matched as `match?` is, leaving `$~`
+  # alone — CRuby's shortcut, which ruby/spec asserts.
   def grep(pattern)
     out = []
+    quiet = !block_given? && pattern.is_a?(Regexp)
     each do |*a|
       item = __pack__(a)
-      next unless pattern === item
+      next unless quiet ? __grep_match__(pattern, item) : pattern === item
       out.push(block_given? ? yield(item) : item)
     end
     out
@@ -258,12 +261,18 @@ module Enumerable
 
   def grep_v(pattern)
     out = []
+    quiet = !block_given? && pattern.is_a?(Regexp)
     each do |*a|
       item = __pack__(a)
-      next if pattern === item
+      next if quiet ? __grep_match__(pattern, item) : pattern === item
       out.push(block_given? ? yield(item) : item)
     end
     out
+  end
+
+  def __grep_match__(regexp, item)
+    text = regexp.__case_text__(item)
+    !text.nil? && regexp.match?(text)
   end
 
   def compact

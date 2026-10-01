@@ -52,7 +52,7 @@ class Exception
   def ==(other)
     return true if equal?(other)
     return false unless other.is_a?(Exception)
-    self.class.equal?(other.class) && message == other.message
+    self.class.equal?(other.class) && message == other.message && backtrace == other.backtrace
   end
 end
 

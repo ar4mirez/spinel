@@ -1,0 +1,2 @@
+fails(#39: `Kernel#Pathname` comes with `require "pathname"`, which needs `require`):Kernel#Pathname is a private method
+fails(#39: `Kernel.Pathname` comes with `require "pathname"`, which needs `require`):Kernel.Pathname is a public method

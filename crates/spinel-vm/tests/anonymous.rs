@@ -175,14 +175,6 @@ const SKIPPED: &[(&str, &str)] = &[
         "a global variable is not compiled yet",
     ),
     (
-        "p1 = Class.new { def self.inherited",
-        "`inherited` refuses rather than firing — see `refusals_are_refusals`",
-    ),
-    (
-        "$oracle_pad = []",
-        "`inherited` refuses rather than firing — see `refusals_are_refusals`",
-    ),
-    (
         "Class.allocate",
         "`Class.allocate` answers an uninitialised class, which #13 shut the door on",
     ),
@@ -197,21 +189,9 @@ const SKIPPED: &[(&str, &str)] = &[
 ];
 
 /// What this slice will not answer, it refuses — it never guesses.
-///
-/// The `inherited` rows are the load-bearing ones. A VM that defined the class
-/// and skipped the hook would report a state the program never reached, which
-/// is the failure mode #15 named for `singleton_method_added`.
 #[test]
 fn refusals_are_refusals() {
     for (source, why) in [
-        (
-            "p1 = Class.new { def self.inherited(sub); end }; Class.new(p1)",
-            "`Class.new` with a hook on the superclass",
-        ),
-        (
-            "class P; def self.inherited(sub); end; end; class C < P; end",
-            "the `class` keyword with a hook on the superclass",
-        ),
         ("Class.allocate", "an uninitialised class"),
         ("Module.allocate", "an uninitialised module"),
     ] {
@@ -223,10 +203,23 @@ fn refusals_are_refusals() {
     }
 }
 
-/// Reopening a class does not fire `inherited`, so it must not refuse either —
+/// Reopening a class does not fire `inherited` —
 /// the guard is on definition, not on the `class` keyword.
 #[test]
 fn reopening_does_not_refuse() {
     let source = "class P; def self.inherited(sub); end; end; class P; def m; 1; end; end; P.new.m";
     assert_eq!(eval(source).as_deref(), Ok("1"));
+}
+
+/// `inherited` fires on definition, through both spellings, with the new
+/// class (#28). It used to be refused: skipping it would report a state the
+/// program never reached.
+#[test]
+fn inherited_fires() {
+    for source in [
+        "$s = []; p1 = Class.new { def self.inherited(sub) = $s << sub.superclass.equal?(self) }; Class.new(p1); $s",
+        "$s = []; class P; def self.inherited(sub) = $s << sub.superclass.equal?(self); end; class C < P; end; $s",
+    ] {
+        assert_eq!(eval(source), Ok("[true]".to_owned()), "{source:?}");
+    }
 }

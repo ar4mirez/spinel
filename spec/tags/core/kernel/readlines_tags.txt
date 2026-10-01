@@ -1,0 +1,2 @@
+fails(#41: `Kernel#readlines` reads or writes an IO or a File, which do not exist yet):Kernel#readlines is a private method
+fails(#41: `Kernel#readlines` reads or writes an IO or a File, which do not exist yet):Kernel.readlines is a public method

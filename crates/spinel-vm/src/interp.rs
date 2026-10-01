@@ -42,7 +42,7 @@ use crate::bytecode::{
 use crate::class::Builtin;
 use crate::class::{ClassId, CrefId, Kind, Method, ScopeDefault, Visibility};
 use crate::heap::{Handle, HandleScope, Heap, Payload};
-use crate::method::{BitOp, CvarOp, Definition, FiberOp, IvarOp, Native};
+use crate::method::{BitOp, CvarOp, Definition, FiberOp, IvarOp, Native, ReflectOp};
 use crate::shape::ShapeId;
 use crate::value::SymbolId;
 use crate::value::Value;
@@ -351,6 +351,15 @@ struct Call {
     /// which is `new`, so that `initialize` has to run before anything is
     /// raised — and a native cannot sequence the frame and then the raise.
     raises_receiver: bool,
+    /// Drop this frame's value when it leaves (#28): a definition hook —
+    /// `method_added`, `inherited`, `included` — runs as a frame pushed by the
+    /// instruction that defined something, and what the definition answers is
+    /// already on the stack below it.
+    discards_value: bool,
+    /// Answer `true` or `false` by this frame's value's truthiness (#28):
+    /// `respond_to?` answers what a program's `respond_to_missing?` did,
+    /// as a strict boolean. Measured.
+    booleanizes_value: bool,
     /// This frame's identity, unique for the whole evaluation.
     ///
     /// `break` and `return` out of a block name the frame they end, and an
@@ -715,6 +724,201 @@ fn leave_fiber(
             unreachable!("a goto never leaves its own frame")
         }
     }
+}
+
+/// The class-table reads and writes reflection is built on (#28). Every
+/// argument check and message is `core/module.rb`'s; these trust their input.
+fn reflect_native(
+    scope: &mut HandleScope<'_>,
+    stack: &mut Vec<Value>,
+    call: &Pending,
+    op: ReflectOp,
+) -> Result<Option<Unwind>, Error> {
+    let arg = |index: usize| call.args.get(index).copied().unwrap_or(Value::NIL);
+    let module_arg = |scope: &mut HandleScope<'_>, index: usize| {
+        class_id_of(scope, arg(index)).ok_or(Error::NoDispatch {
+            op: "reflection",
+            operands: "a receiver that is not a Module",
+        })
+    };
+    let symbol_arg = |index: usize| {
+        arg(index).as_symbol().ok_or(Error::NoDispatch {
+            op: "reflection",
+            operands: "a name that is not a Symbol",
+        })
+    };
+    let value = match op {
+        ReflectOp::ConstLookup => {
+            let module = module_arg(scope, 0)?;
+            let name = symbol_arg(1)?;
+            // `:qualified` is `A::B`'s walk — the ancestors without `Object`'s
+            // fallback — which `const_get` uses past a path's first segment.
+            if arg(2).as_symbol() == Some(symbol("qualified")) {
+                let found = scope.classes().const_get_qualified(module, name);
+                let value = match found {
+                    Some(value) => new_array(scope, &[value]),
+                    None => Value::NIL,
+                };
+                stack.push(value);
+                return Ok(None);
+            }
+            let inherit = arg(2).is_truthy();
+            let mut found = scope.classes().const_get_here(module, name);
+            if found.is_none() && inherit {
+                // The ancestors, and then — for a module, which has no
+                // `Object` in its chain — `Object`'s: `Comparable.const_get
+                // (:String)` is String. Measured.
+                for ancestor in scope.classes().ancestors(module) {
+                    if let Some(value) = scope.classes().const_get_here(ancestor, name) {
+                        found = Some(value);
+                        break;
+                    }
+                }
+                if found.is_none() && scope.classes().kind(module) == Kind::Module {
+                    for ancestor in scope.classes().ancestors(Builtin::Object.id()) {
+                        if let Some(value) = scope.classes().const_get_here(ancestor, name) {
+                            found = Some(value);
+                            break;
+                        }
+                    }
+                }
+            }
+            match found {
+                Some(value) => new_array(scope, &[value]),
+                None => Value::NIL,
+            }
+        }
+        ReflectOp::ConstSet => {
+            let module = module_arg(scope, 0)?;
+            let name = symbol_arg(1)?;
+            let value = arg(2);
+            scope.classes_mut().const_set(module, name, value);
+            // `m.const_set(:X, Module.new)` names the module, as `X = ...` would.
+            name_if_anonymous(scope, module, name, value);
+            value
+        }
+        ReflectOp::ConstNames => {
+            let module = module_arg(scope, 0)?;
+            let inherit = arg(1).is_truthy();
+            let mut tables = vec![module];
+            if inherit {
+                // Superclasses and mixins, stopping at `Object` when the walk
+                // only passes through it — so neither its table nor
+                // `Kernel`'s and `BasicObject`'s past it. CRuby's
+                // `rb_mod_const_of`, measured.
+                for ancestor in scope.classes().ancestors(module) {
+                    if ancestor == Builtin::Object.id() && module != ancestor {
+                        break;
+                    }
+                    if ancestor != module {
+                        tables.push(ancestor);
+                    }
+                }
+            }
+            let mut names: Vec<SymbolId> = Vec::new();
+            for table in tables {
+                for (name, private) in scope.classes().const_names(table) {
+                    if !private && !names.contains(&name) {
+                        names.push(name);
+                    }
+                }
+            }
+            let names: Vec<Value> = names.into_iter().map(Value::symbol).collect();
+            new_array(scope, &names)
+        }
+        ReflectOp::ConstRemove => {
+            let module = module_arg(scope, 0)?;
+            let name = symbol_arg(1)?;
+            match scope.classes_mut().const_remove(module, name) {
+                Some(value) => new_array(scope, &[value]),
+                None => Value::NIL,
+            }
+        }
+        ReflectOp::ConstPublic => {
+            let module = module_arg(scope, 0)?;
+            let name = symbol_arg(1)?;
+            let held = scope.classes().const_get_here(module, name).is_some();
+            scope.classes_mut().mark_const_public(module, name);
+            bool_value(held)
+        }
+        ReflectOp::MethodNames => {
+            let module = module_arg(scope, 0)?;
+            let inherit = arg(1).is_truthy();
+            let which = arg(2).as_fixnum().unwrap_or(0);
+            let chain = if inherit {
+                scope.classes().ancestors(module)
+            } else {
+                vec![module]
+            };
+            // The first definition along the chain decides: an `undef`, or a
+            // subclass narrowing a method to private, hides what is further
+            // up.
+            let mut seen: Vec<SymbolId> = Vec::new();
+            let mut names: Vec<Value> = Vec::new();
+            for class in chain {
+                let mut entries = scope.classes().own_method_entries(class);
+                entries.sort_by_key(|&(name, _, _)| crate::shared::symbols::name(name));
+                for (name, body, visibility) in entries {
+                    if seen.contains(&name) {
+                        continue;
+                    }
+                    seen.push(name);
+                    if body == Value::UNDEF || is_core_helper(name) {
+                        continue;
+                    }
+                    let wanted = match which {
+                        1 => visibility == Visibility::Public,
+                        2 => visibility == Visibility::Protected,
+                        3 => visibility == Visibility::Private,
+                        _ => visibility != Visibility::Private,
+                    };
+                    if wanted {
+                        names.push(Value::symbol(name));
+                    }
+                }
+            }
+            new_array(scope, &names)
+        }
+        ReflectOp::ClassOf => {
+            let class = class_of(scope, arg(0)).ok_or_else(|| no_class(arg(0)))?;
+            scope.classes().object(class)
+        }
+        ReflectOp::SingletonClass => {
+            let target = arg(0);
+            if let Some(n) = target.as_fixnum() {
+                let _ = n;
+                return Err(Error::raise("TypeError", "can't define singleton"));
+            }
+            if target.as_symbol().is_some() || target.as_flonum().is_some() {
+                return Err(Error::raise("TypeError", "can't define singleton"));
+            }
+            let class = singleton_of(scope, target)?;
+            scope.classes().object(class)
+        }
+        ReflectOp::RemoveMethod => {
+            let module = module_arg(scope, 0)?;
+            let name = symbol_arg(1)?;
+            let defined = scope.classes().method_defined_here(module, name);
+            bool_value(defined && scope.classes_mut().remove_method(module, name))
+        }
+        ReflectOp::IsSingleton => {
+            let module = module_arg(scope, 0)?;
+            bool_value(scope.classes().is_singleton(module))
+        }
+        ReflectOp::Attached => {
+            let module = module_arg(scope, 0)?;
+            singleton_attached(scope, module)
+        }
+        ReflectOp::ModuleKind => {
+            match class_id_of(scope, arg(0)).map(|id| scope.classes().kind(id)) {
+                Some(Kind::Class) => Value::symbol(symbol("class")),
+                Some(Kind::Module) => Value::symbol(symbol("module")),
+                None => Value::NIL,
+            }
+        }
+    };
+    stack.push(value);
+    Ok(None)
 }
 
 /// Which fiber a `Fiber` object is: its table index, or `None` for the root.
@@ -1099,10 +1303,15 @@ pub fn eval_in(
     if frame.receiver == Value::NIL {
         // `main`. A plain `Object`, as Ruby has it: `def` at the top level
         // lands on its class, a receiverless call finds it there, and `@a` at
-        // the top level is an ivar on this object like any other.
-        let object = class_handle(scope, Builtin::Object);
-        let handle = alloc_ivar_object(scope, Some(object));
-        frame.receiver = scope.get(handle);
+        // the top level is an ivar on this object like any other. One per
+        // heap, kept by it.
+        if scope.main() == Value::NIL {
+            let object = class_handle(scope, Builtin::Object);
+            let handle = alloc_ivar_object(scope, Some(object));
+            let main = scope.get(handle);
+            scope.set_main(main);
+        }
+        frame.receiver = scope.main();
     }
 
     // Rooted once rather than per allocation: `alloc` needs a handle to the
@@ -1128,6 +1337,8 @@ pub fn eval_in(
         base: 0,
         keeps_receiver: false,
         raises_receiver: false,
+        discards_value: false,
+        booleanizes_value: false,
         // A `def` at a script's top level is a *private* instance method of
         // `Object` — `def m; end; Object.new.m` raises. CRuby gives the top
         // level cref `METHOD_VISI_PRIVATE`, and this is that (#161).
@@ -1508,15 +1719,10 @@ pub fn eval_in(
                         let symbol = frames[top].symbols[name as usize];
                         let cref = frames[top].cref;
                         let default = frames[top].scope_default;
+                        if scope.classes().cref_refuses_def(cref) {
+                            return Err(Error::raise("TypeError", "can't define singleton"));
+                        }
                         let owner = scope.classes().cref_class(cref);
-                        hook_refusal(
-                            scope,
-                            owner,
-                            &[(
-                                "method_added",
-                                "`method_added`, which this definition would fire",
-                            )],
-                        )?;
                         define_method_on(
                             scope,
                             owner,
@@ -1531,14 +1737,6 @@ pub fn eval_in(
                             // what makes `module_function` different from
                             // `def self.` (#211).
                             let singleton = scope.singleton_class(owner);
-                            hook_refusal(
-                                scope,
-                                owner,
-                                &[(
-                                    "singleton_method_added",
-                                    "`singleton_method_added`, which `module_function` would fire",
-                                )],
-                            )?;
                             define_method_on(
                                 scope,
                                 singleton,
@@ -1549,6 +1747,43 @@ pub fn eval_in(
                             );
                         }
                         stack.push(Value::symbol(symbol));
+                        // The hooks (#28), after the definition and before the
+                        // next instruction. Frames run last-pushed first, so the
+                        // module function's `singleton_method_added` is pushed
+                        // first and `method_added` runs before it: CRuby's
+                        // order, measured.
+                        let module = scope.classes().object(owner);
+                        if default == ScopeDefault::ModuleFunction
+                            && let Some(unwind) = fire_hook(
+                                scope,
+                                &mut stack,
+                                &mut frames,
+                                proc_class,
+                                &mut ids,
+                                module,
+                                "singleton_method_added",
+                                vec![Value::symbol(symbol)],
+                            )?
+                        {
+                            return Ok(Step::Unwind(unwind));
+                        }
+                        let (hook, receiver) = if scope.classes().is_singleton(owner) {
+                            ("singleton_method_added", singleton_attached(scope, owner))
+                        } else {
+                            ("method_added", module)
+                        };
+                        if let Some(unwind) = fire_hook(
+                            scope,
+                            &mut stack,
+                            &mut frames,
+                            proc_class,
+                            &mut ids,
+                            receiver,
+                            hook,
+                            vec![Value::symbol(symbol)],
+                        )? {
+                            return Ok(Step::Unwind(unwind));
+                        }
                     }
 
                     // `/a#{b}c/`. The source was concatenated on the stack; this
@@ -1651,10 +1886,25 @@ pub fn eval_in(
                     // same cref `def` writes into, not `self`. A name nothing in
                     // the chain defines is Ruby's `NameError` in both.
                     Insn::Alias(new, old) => {
+                        if scope.classes().cref_refuses_def(frames[top].cref) {
+                            return Err(Error::raise("TypeError", "can't define singleton"));
+                        }
                         let new = frames[top].symbols[new as usize];
                         let old = frames[top].symbols[old as usize];
                         let owner = scope.classes().cref_class(frames[top].cref);
                         alias_into(scope, owner, new, old)?;
+                        if let Some(unwind) = fire_method_hook(
+                            scope,
+                            &mut stack,
+                            &mut frames,
+                            proc_class,
+                            &mut ids,
+                            owner,
+                            "added",
+                            new,
+                        )? {
+                            return Ok(Step::Unwind(unwind));
+                        }
                     }
                     // `alias :"m#{n}" :m`. The names were built by the frame, old
                     // on top because it was pushed second — which is also Ruby's
@@ -1664,16 +1914,52 @@ pub fn eval_in(
                         let new = pop_name(&mut stack, "alias")?;
                         let owner = scope.classes().cref_class(frames[top].cref);
                         alias_into(scope, owner, new, old)?;
+                        if let Some(unwind) = fire_method_hook(
+                            scope,
+                            &mut stack,
+                            &mut frames,
+                            proc_class,
+                            &mut ids,
+                            owner,
+                            "added",
+                            new,
+                        )? {
+                            return Ok(Step::Unwind(unwind));
+                        }
                     }
                     Insn::Undef(name) => {
                         let symbol = frames[top].symbols[name as usize];
                         let owner = scope.classes().cref_class(frames[top].cref);
                         undef_from(scope, owner, symbol)?;
+                        if let Some(unwind) = fire_method_hook(
+                            scope,
+                            &mut stack,
+                            &mut frames,
+                            proc_class,
+                            &mut ids,
+                            owner,
+                            "undefined",
+                            symbol,
+                        )? {
+                            return Ok(Step::Unwind(unwind));
+                        }
                     }
                     Insn::UndefFromStack => {
                         let symbol = pop_name(&mut stack, "undef")?;
                         let owner = scope.classes().cref_class(frames[top].cref);
                         undef_from(scope, owner, symbol)?;
+                        if let Some(unwind) = fire_method_hook(
+                            scope,
+                            &mut stack,
+                            &mut frames,
+                            proc_class,
+                            &mut ids,
+                            owner,
+                            "undefined",
+                            symbol,
+                        )? {
+                            return Ok(Step::Unwind(unwind));
+                        }
                     }
                     Insn::AliasGlobal(new, old) => {
                         let new = frames[top].symbols[new as usize];
@@ -1694,23 +1980,23 @@ pub fn eval_in(
                         // the object, and a frozen object does not take stores.
                         frozen_check(scope, receiver, "object")?;
                         let owner = singleton_of(scope, receiver)?;
-                        // Ruby calls `singleton_method_added` on the receiver here.
-                        // Spinel does not, and an object that defines the hook would
-                        // silently never see it — so it refuses rather than defining
-                        // the method and reporting a state the program did not reach.
-                        // The check costs a method lookup only when one is written,
-                        // and the hooks themselves belong to #28's reflection slice.
-                        let hook = crate::shared::symbols::intern("singleton_method_added");
-                        if scope.classes_mut().lookup(owner, hook).is_some() {
-                            return Err(Error::Unknowable {
-                                what: "`singleton_method_added`, which this definition would fire",
-                                needs: "the definition hooks (#28)",
-                            });
-                        }
                         // Always public: a bare `private` in the class body does
                         // not reach `def self.m`, measured on ruby 4.0.6.
                         define_method_on(scope, owner, symbol, iseq, cref, Visibility::Public);
                         stack.push(Value::symbol(symbol));
+                        // `singleton_method_added` on the receiver (#28).
+                        if let Some(unwind) = fire_hook(
+                            scope,
+                            &mut stack,
+                            &mut frames,
+                            proc_class,
+                            &mut ids,
+                            receiver,
+                            "singleton_method_added",
+                            vec![Value::symbol(symbol)],
+                        )? {
+                            return Ok(Step::Unwind(unwind));
+                        }
                     }
 
                     Insn::GetConst(name, how) => {
@@ -1734,14 +2020,6 @@ pub fn eval_in(
                         let cref = frames[top].cref;
                         let value = stack.pop().expect("a value to assign");
                         let target = const_base(scope, &mut stack, cref, how)?;
-                        hook_refusal(
-                            scope,
-                            target,
-                            &[(
-                                "const_added",
-                                "`const_added`, which this assignment would fire",
-                            )],
-                        )?;
                         scope.classes_mut().const_set(target, symbol, value);
                         // `Foo = Class.new` is how an anonymous class gets a name,
                         // and the only way one ever does. Only the first assignment
@@ -1750,6 +2028,20 @@ pub fn eval_in(
                         // Assignment is an expression, and its value is what was
                         // assigned — not the module it landed on.
                         stack.push(value);
+                        // `const_added` on the module it landed on (#28).
+                        let module = scope.classes().object(target);
+                        if let Some(unwind) = fire_hook(
+                            scope,
+                            &mut stack,
+                            &mut frames,
+                            proc_class,
+                            &mut ids,
+                            module,
+                            "const_added",
+                            vec![Value::symbol(symbol)],
+                        )? {
+                            return Ok(Step::Unwind(unwind));
+                        }
                     }
 
                     Insn::DefinedConst(name, how) => {
@@ -1815,7 +2107,17 @@ pub fn eval_in(
                     Insn::OpenClass(index) => {
                         let iseq = Arc::clone(&frames[top].iseq);
                         let def = &iseq.class_defs[index as usize];
-                        open_class(scope, &mut stack, &mut frames, def, &iseq, &mut ids)?;
+                        if let Some(unwind) = open_class(
+                            scope,
+                            &mut stack,
+                            &mut frames,
+                            def,
+                            &iseq,
+                            proc_class,
+                            &mut ids,
+                        )? {
+                            return Ok(Step::Unwind(unwind));
+                        }
                     }
 
                     Insn::Send(index) => {
@@ -1928,7 +2230,12 @@ pub fn eval_in(
                                 .expect("`raise` left the exception below the base");
                             return Ok(Step::Unwind(Unwind::Exception(exception)));
                         }
-                        if !done.keeps_receiver {
+                        let value = if done.booleanizes_value {
+                            bool_value(value.is_truthy())
+                        } else {
+                            value
+                        };
+                        if !done.keeps_receiver && !done.discards_value {
                             stack.push(value);
                         }
                     }
@@ -2207,7 +2514,7 @@ fn unwind_to_handler(
                     stack.pop();
                     stack.push(value);
                 }
-            } else {
+            } else if !done.discards_value {
                 stack.push(value);
             }
             return Ok(None);
@@ -2592,6 +2899,12 @@ fn dispatch<'h>(
             // implement into a spec that passes without asserting anything.
             let is_super = matches!(call.target, Target::Super { .. });
             let Some(method) = found else {
+                // A `method_missing` of the program's own answers instead
+                // (#28), which is also what keeps a missing method from
+                // being recorded as a gap: it is not one.
+                if !is_super && let Some(redirected) = to_method_missing(scope, class, &call) {
+                    return dispatch(scope, stack, frames, redirected, proc_class, ids);
+                }
                 // Ruby's answer for a method that is not there, as an ordinary
                 // raise a `rescue` can catch (#170). Built here, not in the
                 // loop's `Err` arm, because it carries the receiver — see
@@ -2615,6 +2928,11 @@ fn dispatch<'h>(
             // `super` is exempt: it names no receiver and reaches a private
             // method the way a receiverless call does.
             if !is_super && let Some(refused) = visibility_refusal(scope, frames, &call, method) {
+                // Measured: a private method called from outside goes to the
+                // program's `method_missing` too, when it has one.
+                if let Some(redirected) = to_method_missing(scope, class, &call) {
+                    return dispatch(scope, stack, frames, redirected, proc_class, ids);
+                }
                 let exception = visibility_error(scope, call.receiver, call.name, refused);
                 return Ok(Some(Unwind::Exception(exception)));
             }
@@ -2656,6 +2974,20 @@ fn dispatch<'h>(
                         Binding::Strict,
                         links,
                     )?;
+                    Ok(None)
+                }
+                Some(Definition::Proc(block)) => {
+                    // `define_method`'s body (#28): the `Proc` run as this
+                    // method, so `super` inside it starts from the class it was
+                    // found on, under the name it was found by.
+                    let call = Pending {
+                        owner: Some(method.owner),
+                        defined_as: Some(call.name),
+                        ..call
+                    };
+                    push_proc_frame_as(scope, stack, frames, &call, block, ids, ProcRole::Method)?;
+                    let last = frames.len() - 1;
+                    set_break_target(scope, call.block, frames[last].id);
                     Ok(None)
                 }
                 Some(Definition::Native(native)) => {
@@ -2724,12 +3056,60 @@ fn push_proc_frame(
     block: Value,
     ids: &mut u64,
 ) -> Result<(), Error> {
-    let Some((iseq, env, receiver, captured, lambda, cref)) = proc_parts(scope, block) else {
+    push_proc_frame_as(scope, stack, frames, call, block, ids, ProcRole::Block)
+}
+
+/// What a `Proc`'s body is being run as.
+#[derive(Clone, Copy)]
+enum ProcRole {
+    /// A block or a `Proc#call`: its own captured `self`.
+    Block,
+    /// A method `define_method` made of it (#28): `self` is the receiver,
+    /// arity is a method's, `return` and `break` leave the method, and `super`
+    /// starts from the method's owner — all taken from `call`.
+    Method,
+    /// `instance_eval`, `class_eval` and their `_exec` forms (#28): `self` is
+    /// `receiver`, and a `def` in the body lands on `definee`. Constants still
+    /// resolve where the block was written.
+    Eval {
+        receiver: Value,
+        definee: ClassId,
+        refuses_def: bool,
+    },
+}
+
+fn push_proc_frame_as(
+    scope: &mut HandleScope<'_>,
+    stack: &[Value],
+    frames: &mut Vec<Call>,
+    call: &Pending,
+    block: Value,
+    ids: &mut u64,
+    role: ProcRole,
+) -> Result<(), Error> {
+    let Some((iseq, env, captured_self, captured, lambda, cref)) = proc_parts(scope, block) else {
         return Err(Error::NoDispatch {
             op: "call",
             operands: "a receiver that is not a Proc",
         });
     };
+    let receiver = match role {
+        ProcRole::Block => captured_self,
+        ProcRole::Method => call.receiver,
+        ProcRole::Eval { receiver, .. } => receiver,
+    };
+    let cref = match role {
+        ProcRole::Eval {
+            definee,
+            refuses_def: true,
+            ..
+        } => scope
+            .classes_mut()
+            .push_eval_cref_refusing_def(cref, definee),
+        ProcRole::Eval { definee, .. } => scope.classes_mut().push_eval_cref(cref, definee),
+        _ => cref,
+    };
+    let method_owner = (call.owner, call.defined_as);
     let call = Pending {
         // A block, not a name: nothing to memoise.
         cache: None,
@@ -2766,7 +3146,11 @@ fn push_proc_frame(
     // far as `return` and `break` go, but not for this: under a bare `private`,
     // `-> { def m; end }` still defines a private `m`.
     let home_frame = frames.iter().find(|frame| frame.id == home);
-    let scope_default = home_frame.map_or(ScopeDefault::Public, |frame| frame.scope_default);
+    let scope_default = match role {
+        ProcRole::Block => home_frame.map_or(ScopeDefault::Public, |frame| frame.scope_default),
+        // A method body and a class body start public.
+        ProcRole::Method | ProcRole::Eval { .. } => ScopeDefault::Public,
+    };
     // `super` inside a block resolves against the method the block was
     // *written* in — the frame `home` already names, for the same reason
     // `return` does.
@@ -2774,20 +3158,26 @@ fn push_proc_frame(
     // ponytail: a `Proc` that outlives its defining frame finds nothing here,
     // and a `super` in it raises "outside a method" rather than resolving. Give
     // the `Proc` two slots of its own, beside `PROC_HOME`, if a spec needs it.
-    let (owner, defined_as) = home_frame.map_or((None, None), |f| (f.owner, f.defined_as));
+    let (owner, defined_as) = match role {
+        ProcRole::Method => method_owner,
+        _ => home_frame.map_or((None, None), |f| (f.owner, f.defined_as)),
+    };
     let call = Pending {
         owner,
         defined_as,
         ..call
     };
     *ids += 1;
+    // A method's body is its own `return` and `break` target, however the
+    // `Proc` was made.
+    let own_target = lambda || matches!(role, ProcRole::Method);
     let links = Links {
         id: *ids,
-        home: if lambda { *ids } else { home },
-        breaks: if lambda { *ids } else { breaks },
+        home: if own_target { *ids } else { home },
+        breaks: if own_target { *ids } else { breaks },
         scope_default,
     };
-    let binding = if lambda {
+    let binding = if lambda || matches!(role, ProcRole::Method) {
         Binding::Strict
     } else {
         Binding::Loose
@@ -2829,6 +3219,8 @@ fn push_frame(
         base: stack.len(),
         keeps_receiver: false,
         raises_receiver: false,
+        discards_value: false,
+        booleanizes_value: false,
         scope_default: links.scope_default,
         id: links.id,
         home: links.home,
@@ -3774,7 +4166,7 @@ fn proc_parts(
     let body = proc_body(scope, value)?;
     let iseq = match scope.definitions().get(body)? {
         Definition::Iseq(iseq) => Arc::clone(iseq),
-        Definition::Native(_) => return None,
+        Definition::Native(_) | Definition::Proc(_) => return None,
     };
     let handle = scope.root(value);
     Some((
@@ -3797,21 +4189,22 @@ fn proc_parts(
 ///    land on it and `def self.x` reach its singleton.
 ///
 /// The body's value is the frame's value, so `x = class C; 42; end` is `42`.
-fn open_class(
-    scope: &mut HandleScope<'_>,
+fn open_class<'h>(
+    scope: &mut HandleScope<'h>,
     stack: &mut Vec<Value>,
     frames: &mut Vec<Call>,
     def: &ClassDef,
     iseq: &Arc<Iseq>,
+    proc_class: Handle<'h>,
     ids: &mut u64,
-) -> Result<(), Error> {
+) -> Result<Option<Unwind>, Error> {
     let top = frames.len() - 1;
     let outer = frames[top].cref;
 
-    let id = match def.kind {
+    let (id, hooks) = match def.kind {
         DefKind::Singleton => {
             let object = stack.pop().expect("an object to open the singleton of");
-            singleton_of(scope, object)?
+            (singleton_of(scope, object)?, Vec::new())
         }
         kind => {
             let superclass = def
@@ -3903,6 +4296,8 @@ fn open_class(
         base: stack.len(),
         keeps_receiver: false,
         raises_receiver: false,
+        discards_value: false,
+        booleanizes_value: false,
         // Where a `return` in this body goes — see `links` above, which is the
         // one place that decides it. A `class`/`module` body is its own target;
         // a `class << obj` body is transparent and inherits its opener's.
@@ -3914,7 +4309,16 @@ fn open_class(
         errinfo_on_entry: scope.errinfo(),
         parked: Vec::new(),
     });
-    Ok(())
+    // A new definition's hooks run before its body: each is a frame above the
+    // body's, pushed last-first so they run in order.
+    for (receiver, name, args) in hooks.into_iter().rev() {
+        if let Some(unwind) =
+            fire_hook(scope, stack, frames, proc_class, ids, receiver, name, args)?
+        {
+            return Ok(Some(unwind));
+        }
+    }
+    Ok(None)
 }
 
 /// Find the module `name` names on `cbase`, or create it.
@@ -3928,13 +4332,16 @@ fn open_class(
 ///   class Inner; end     # Q::Inner — a new class, not a reopening of P::Inner
 /// end
 /// ```
+/// The hooks a definition owes, in the order they run: receiver, name, args.
+type Hooks = Vec<(Value, &'static str, Vec<Value>)>;
+
 fn define_or_reopen(
     scope: &mut HandleScope<'_>,
     cbase: ClassId,
     name: SymbolId,
     kind: DefKind,
     superclass: Option<Value>,
-) -> Result<ClassId, Error> {
+) -> Result<(ClassId, Hooks), Error> {
     let wanted = match superclass {
         None => None,
         Some(value) => {
@@ -3981,15 +4388,10 @@ fn define_or_reopen(
                 format!("superclass mismatch for class {}", symbol_name(name)),
             ));
         }
-        return Ok(id);
+        return Ok((id, Vec::new()));
     }
 
     let path = qualified_name(scope, cbase, name);
-    // Only a *new* class fires `inherited`; reopening one above did not, and
-    // returned before reaching here. A module has no superclass to fire on.
-    if kind != DefKind::Module {
-        inherited_refusal(scope, wanted.unwrap_or(Builtin::Object.id()))?;
-    }
     let id = match kind {
         DefKind::Module => scope.define_module(Some(&path)),
         // No superclass named means `Object`, which is Ruby's default and is
@@ -4004,20 +4406,25 @@ fn define_or_reopen(
     if kind != DefKind::Module {
         scope.singleton_class(id);
     }
-    // `class A::C` names the class by assigning `C` on `A`, which is a constant
-    // assignment like any other and fires `const_added` on `A`. `Insn::SetConst`
-    // guards the `X = v` form; this is the other way in.
-    hook_refusal(
-        scope,
-        cbase,
-        &[(
-            "const_added",
-            "`const_added`, which this definition would fire",
-        )],
-    )?;
     let object = scope.classes().object(id);
     scope.classes_mut().const_set(cbase, name, object);
-    Ok(id)
+    // The hooks a new definition owes (#28), in CRuby's order, measured:
+    // `const_added` on the module it is named in — `class A::C` is a constant
+    // assignment like any other — then, for a class, `inherited` on its
+    // superclass, both before the body runs. Reopening fires neither, and
+    // returned above.
+    let mut hooks: Hooks = vec![(
+        scope.classes().object(cbase),
+        "const_added",
+        vec![Value::symbol(name)],
+    )];
+    if kind != DefKind::Module {
+        let parent = scope
+            .classes()
+            .object(wanted.unwrap_or(Builtin::Object.id()));
+        hooks.push((parent, "inherited", vec![object]));
+    }
+    Ok((id, hooks))
 }
 
 /// `Module#name`: `"A::B"` inside `A`, and `"B"` at the top level.
@@ -4030,12 +4437,13 @@ fn define_or_reopen(
 /// [`CrefNode::pushed_by_eval`] and `crates/spinel-vm/tests/anonymous.txt`.
 ///
 /// [`CrefNode::pushed_by_eval`]: crate::class::CrefNode
-fn anonymous_module(
-    scope: &mut HandleScope<'_>,
+fn anonymous_module<'h>(
+    scope: &mut HandleScope<'h>,
     stack: &mut Vec<Value>,
     frames: &mut Vec<Call>,
     call: &Pending,
     receiver: ClassId,
+    proc_class: Handle<'h>,
     ids: &mut u64,
 ) -> Result<Option<Unwind>, Error> {
     let building_class = receiver == Builtin::Class.id();
@@ -4057,7 +4465,6 @@ fn anonymous_module(
             None => Builtin::Object.id(),
             Some(&value) => superclass_of(scope, value)?,
         };
-        inherited_refusal(scope, superclass)?;
         let id = scope.define_class(None, Some(superclass));
         // The same link `class C < A` owes: `#<Class:C> < #<Class:A>` is what
         // makes an inherited `def self.m` reachable. See `define_or_reopen`.
@@ -4073,7 +4480,29 @@ fn anonymous_module(
     // `new` uses to answer the object rather than what `initialize` returned.
     stack.push(object);
 
+    // `inherited` on the superclass (#28), before the block, measured — a
+    // frame above the block's, so it runs first.
+    let inherited = building_class.then(|| {
+        let parent = scope
+            .classes()
+            .superclass(id)
+            .unwrap_or(Builtin::Object.id());
+        scope.classes().object(parent)
+    });
+
     if call.block == Value::NIL {
+        if let Some(parent) = inherited {
+            return fire_hook(
+                scope,
+                stack,
+                frames,
+                proc_class,
+                ids,
+                parent,
+                "inherited",
+                vec![object],
+            );
+        }
         return Ok(None);
     }
 
@@ -4106,6 +4535,18 @@ fn anonymous_module(
     // would otherwise inherit the private default and give
     // `Class.new { attr_writer :a }` a setter nobody can call.
     frames[last].scope_default = ScopeDefault::Public;
+    if let Some(parent) = inherited {
+        return fire_hook(
+            scope,
+            stack,
+            frames,
+            proc_class,
+            ids,
+            parent,
+            "inherited",
+            vec![object],
+        );
+    }
     Ok(None)
 }
 
@@ -4189,81 +4630,188 @@ fn class_or_anonymous(scope: &mut HandleScope<'_>, id: ClassId) -> String {
 /// no class to own one and Ruby raises rather than reaching for `Object`:
 /// `class variable access from toplevel`, measured.
 fn cvar_owner(scope: &mut HandleScope<'_>, cref: CrefId) -> Result<ClassId, Error> {
+    let cref = scope.classes().lexical_cref(cref);
     if cref == CrefId::ROOT {
         return Err(Error::raise(
             "RuntimeError",
             "class variable access from toplevel",
         ));
     }
-    Ok(scope.classes().cref_class(cref))
-}
-
-/// The hooks an `undef` would fire.
-///
-/// `method_undefined` on the module, and `singleton_method_undefined` on the
-/// object behind a singleton class — `class << obj; undef_method :m; end` is
-/// the second, and ruby/spec has an example for it. Refused rather than
-/// undefined quietly, so a program that defines a hook is told the VM cannot
-/// run it instead of watching it never fire.
-fn undef_hook_refusal(scope: &mut HandleScope<'_>, owner: ClassId) -> Result<(), Error> {
-    hook_refusal(
-        scope,
-        owner,
-        &[(
-            "method_undefined",
-            "`method_undefined`, which this `undef` would fire",
-        )],
-    )?;
-    // `singleton_method_undefined` is defined on the *object* the singleton
-    // class belongs to, so it is an ordinary lookup on that class rather than a
-    // singleton one — `hook_refusal` asks the wrong question for it.
-    if scope.classes().is_singleton(owner) {
-        let hook = crate::shared::symbols::intern("singleton_method_undefined");
-        if scope.classes_mut().lookup(owner, hook).is_some() {
-            return Err(Error::Unknowable {
-                what: "`singleton_method_undefined`, which this `undef` would fire",
-                needs: "the definition hooks (#28)",
-            });
+    // `class << self; @@a = 1; end` writes the class's own `@@a`: through a
+    // singleton class to the module it belongs to, as CRuby does.
+    let mut class = scope.classes().cref_class(cref);
+    while scope.classes().is_singleton(class) {
+        let attached = singleton_attached(scope, class);
+        match class_id_of(scope, attached) {
+            Some(module) => class = module,
+            None => break,
         }
     }
-    Ok(())
+    Ok(class)
 }
 
-fn hook_refusal(
-    scope: &mut HandleScope<'_>,
-    owner: ClassId,
-    hooks: &[(&str, &'static str)],
-) -> Result<(), Error> {
-    // A hook is a singleton method, so a module with no singleton class has no
-    // hook. Asking `singleton_class` would *build* one — an allocation per
-    // definition, and an observable change: `Comparable`'s error messages start
-    // saying `#<Class:Comparable>` the moment one exists. Classes get theirs
-    // eagerly in `define_or_reopen`, so an inherited hook is still found.
-    let Some(meta) = scope.classes().singleton(owner) else {
-        return Ok(());
+/// Whether a method name is one of the core library's own `__name__` helpers,
+/// which reflection leaves out. CRuby's own five are real methods and stay.
+fn is_core_helper(name: SymbolId) -> bool {
+    let Some(text) = crate::shared::symbols::name(name) else {
+        return false;
     };
-    for (name, what) in hooks {
-        let symbol = crate::shared::symbols::intern(name);
-        if scope.classes_mut().lookup(meta, symbol).is_some() {
-            return Err(Error::Unknowable {
-                what,
-                needs: "the definition hooks (#28)",
-            });
-        }
-    }
-    Ok(())
+    text.len() > 4
+        && text.starts_with("__")
+        && text.ends_with("__")
+        && !matches!(
+            text.as_str(),
+            "__send__" | "__id__" | "__method__" | "__callee__" | "__dir__"
+        )
 }
 
-/// The hook `class C < P` and `Class.new(P)` would fire on `P`.
-fn inherited_refusal(scope: &mut HandleScope<'_>, superclass: ClassId) -> Result<(), Error> {
-    hook_refusal(
+/// The call re-aimed at the receiver's `method_missing`, when the program
+/// defines one (#28): the original name first, then the original arguments,
+/// keywords and block. `BasicObject#method_missing` — the default, which
+/// raises — does not count; the caller builds that error itself, with the
+/// frames it has in hand.
+fn to_method_missing(
+    scope: &mut HandleScope<'_>,
+    class: ClassId,
+    call: &Pending,
+) -> Option<Pending> {
+    let symbol = crate::shared::symbols::intern("method_missing");
+    let method = scope.classes_mut().lookup(class, symbol)?;
+    if method.owner == Builtin::BasicObject.id() {
+        return None;
+    }
+    let mut args = Vec::with_capacity(call.args.len() + 1);
+    args.push(Value::symbol(call.name));
+    args.extend_from_slice(&call.args);
+    Some(Pending {
+        cache: None,
+        name: symbol,
+        receiver: call.receiver,
+        args,
+        keywords: call.keywords.clone(),
+        block: call.block,
+        block_is_literal: call.block_is_literal,
+        cref: call.cref,
+        // `method_missing` is private, and calling it is the VM's doing, not
+        // the caller's.
+        implicit_self: true,
+        public_only: false,
+        target: Target::Method,
+        owner: None,
+        defined_as: None,
+    })
+}
+
+/// The object a singleton class belongs to, or nil for one that is not.
+fn singleton_attached(scope: &mut HandleScope<'_>, class: ClassId) -> Value {
+    scope.classes().attached(class).unwrap_or(Value::NIL)
+}
+
+/// `method_<event>` on `owner`, or `singleton_method_<event>` on the object
+/// behind it when `owner` is a singleton class — `added`, `removed` or
+/// `undefined`, after the change it reports.
+#[allow(clippy::too_many_arguments)]
+fn fire_method_hook<'h>(
+    scope: &mut HandleScope<'h>,
+    stack: &mut Vec<Value>,
+    frames: &mut Vec<Call>,
+    proc_class: Handle<'h>,
+    ids: &mut u64,
+    owner: ClassId,
+    event: &str,
+    symbol: crate::value::SymbolId,
+) -> Result<Option<Unwind>, Error> {
+    let (hook, receiver) = if scope.classes().is_singleton(owner) {
+        (
+            format!("singleton_method_{event}"),
+            singleton_attached(scope, owner),
+        )
+    } else {
+        (format!("method_{event}"), scope.classes().object(owner))
+    };
+    fire_hook(
         scope,
-        superclass,
-        &[(
-            "inherited",
-            "`inherited`, which this class definition would fire",
-        )],
+        stack,
+        frames,
+        proc_class,
+        ids,
+        receiver,
+        &hook,
+        vec![Value::symbol(symbol)],
     )
+}
+
+/// Run a definition hook (#28): `receiver.name(*args)`, when something
+/// overrides the core library's default.
+///
+/// The defaults are private no-ops in `core/*.rb` on `BasicObject`, `Module`
+/// and `Class`, so a hook only fires when the method found is not one of
+/// theirs — the common case, a class with no hook, costs one cached lookup.
+/// The hook runs as a frame on top of the stack, so it runs before the
+/// instruction that fired it carries on, and its value is discarded: what the
+/// definition answers is already below it. Hooks are private, so the call is
+/// receiverless.
+#[allow(clippy::too_many_arguments)]
+fn fire_hook<'h>(
+    scope: &mut HandleScope<'h>,
+    stack: &mut Vec<Value>,
+    frames: &mut Vec<Call>,
+    proc_class: Handle<'h>,
+    ids: &mut u64,
+    receiver: Value,
+    name: &str,
+    args: Vec<Value>,
+) -> Result<Option<Unwind>, Error> {
+    let symbol = crate::shared::symbols::intern(name);
+    let Some(class) = class_of(scope, receiver) else {
+        return Ok(None);
+    };
+    // An `undef` of the default sends the call on to `method_missing` or a
+    // NoMethodError, as in CRuby; no method at all is the core library still
+    // loading, before the defaults exist.
+    match scope.classes_mut().lookup(class, symbol) {
+        None if !scope.classes().undefined_along(class, symbol) => return Ok(None),
+        None => {}
+        Some(method) => {
+            let defaults = [
+                Builtin::BasicObject.id(),
+                Builtin::Module.id(),
+                Builtin::Class.id(),
+                Builtin::Kernel.id(),
+            ];
+            if defaults.contains(&method.owner) {
+                return Ok(None);
+            }
+        }
+    }
+    let cref = frames.last().map_or(CrefId::ROOT, |frame| frame.cref);
+    let call = Pending {
+        cache: None,
+        name: symbol,
+        receiver,
+        args,
+        keywords: Vec::new(),
+        block: Value::NIL,
+        block_is_literal: false,
+        cref,
+        implicit_self: true,
+        public_only: false,
+        target: Target::Method,
+        owner: None,
+        defined_as: None,
+    };
+    let (depth, height) = (frames.len(), stack.len());
+    if let Some(unwind) = dispatch(scope, stack, frames, call, proc_class, ids)? {
+        return Ok(Some(unwind));
+    }
+    if frames.len() > depth {
+        let last = frames.len() - 1;
+        frames[last].discards_value = true;
+    } else {
+        // A native hook answered on the stack; that answer is not wanted.
+        stack.truncate(height);
+    }
+    Ok(None)
 }
 
 /// Name a class or module that a constant assignment just gave a name to.
@@ -4474,6 +5022,22 @@ fn pop_name(
     })
 }
 
+/// A frozen module refuses a change to its method table, naming itself the
+/// way every mutator's `FrozenError` does: "can't modify frozen Class: C".
+fn module_frozen_check(scope: &mut HandleScope<'_>, id: ClassId) -> Result<(), Error> {
+    let object = scope.classes().object(id);
+    let handle = scope.root(object);
+    if scope.is_frozen(handle) {
+        let class = class_name(scope, object);
+        let shown = inspect(scope, object);
+        return Err(Error::raise(
+            "FrozenError",
+            format!("can't modify frozen {class}: {shown}"),
+        ));
+    }
+    Ok(())
+}
+
 /// `alias new old` in `owner`, however the two names were spelled.
 fn alias_into<'h>(
     scope: &mut HandleScope<'h>,
@@ -4481,14 +5045,7 @@ fn alias_into<'h>(
     new: crate::value::SymbolId,
     old: crate::value::SymbolId,
 ) -> Result<(), Error> {
-    hook_refusal(
-        scope,
-        owner,
-        &[(
-            "method_added",
-            "`method_added`, which this alias would fire",
-        )],
-    )?;
+    module_frozen_check(scope, owner)?;
     if !scope.classes_mut().alias_method(owner, new, old) {
         return Err(Error::raise(
             "NameError",
@@ -4508,7 +5065,7 @@ fn undef_from<'h>(
     owner: ClassId,
     symbol: crate::value::SymbolId,
 ) -> Result<(), Error> {
-    undef_hook_refusal(scope, owner)?;
+    module_frozen_check(scope, owner)?;
     if !scope.classes_mut().undef_method(owner, symbol) {
         return Err(Error::raise(
             "NameError",
@@ -4609,7 +5166,18 @@ fn class_of(scope: &mut HandleScope<'_>, value: Value) -> Option<ClassId> {
         Unpacked::Undef => None,
         Unpacked::Heap(_) => {
             let handle = scope.root(value);
-            scope.class_of(handle)
+            let class = scope.class_of(handle)?;
+            // A singleton class gets its own singleton on first dispatch,
+            // the way CRuby's `ENSURE_EIGENCLASS` does: without it, a call on
+            // `k.singleton_class` would skip `K`'s class methods, which its
+            // metaclass inherits. Other classes have theirs from the start.
+            if class == Builtin::Class.id()
+                && let Some(id) = class_id_of(scope, value)
+                && scope.classes().is_singleton(id)
+            {
+                return singleton_of(scope, value).ok();
+            }
+            Some(class)
         }
     }
 }
@@ -5736,6 +6304,12 @@ fn native_call<'h>(
                     ),
                 ));
             };
+            if scope.classes().is_singleton(id) {
+                return Err(Error::raise(
+                    "TypeError",
+                    "can't create instance of singleton class",
+                ));
+            }
             // A bootstrap class other than `Object` has a representation this
             // cannot build: a `Proc` is six slots, a `String` is bytes, and a
             // bare zero-slot object wearing their class is a value every
@@ -5748,7 +6322,7 @@ fn native_call<'h>(
             // raises is not called. They push a frame when given a block, so
             // they live here rather than in `allocate_instance`.
             if id == Builtin::Class.id() || id == Builtin::Module.id() {
-                return anonymous_module(scope, stack, frames, &call, id, ids);
+                return anonymous_module(scope, stack, frames, &call, id, proc_class, ids);
             }
 
             // An exception class is allocatable: `raise ArgumentError.new("x")`
@@ -6356,6 +6930,12 @@ fn native_call<'h>(
                     ),
                 ));
             };
+            if scope.classes().is_singleton(id) {
+                return Err(Error::raise(
+                    "TypeError",
+                    "can't create instance of singleton class",
+                ));
+            }
             // `Array.allocate(1)` raises in Ruby: `allocate` never takes
             // arguments, on any class.
             if !call.args.is_empty() || !call.keywords.is_empty() {
@@ -6681,6 +7261,258 @@ fn native_call<'h>(
         }
 
         Native::Fiber(op) => fiber_native(scope, stack, frames, &call, op, ids),
+        Native::Reflect(op) => reflect_native(scope, stack, &call, op),
+
+        Native::RaiseNoMethod => {
+            let name = call
+                .args
+                .first()
+                .and_then(|v| v.as_symbol())
+                .ok_or(Error::NoDispatch {
+                    op: "method_missing",
+                    operands: "a name that is not a Symbol",
+                })?;
+            let args = call.args.get(1).copied().unwrap_or(Value::NIL);
+            let exception = no_method_error(scope, call.receiver, name);
+            let exception = scope.root(exception);
+            let object = scope.get(exception);
+            ivar_set(scope, object, symbol("@args"), args)?;
+            Ok(Some(Unwind::Exception(scope.get(exception))))
+        }
+
+        Native::StringIntern => {
+            let Some(bytes) = string_bytes(scope, call.receiver) else {
+                return Err(Error::NoDispatch {
+                    op: "String#to_sym",
+                    operands: "a receiver that is not a String",
+                });
+            };
+            // As `:"..."` does: a symbol whose bytes are not UTF-8 waits for
+            // the Encoding slice, which keys the table by bytes.
+            let Ok(name) = String::from_utf8(bytes) else {
+                return Err(Error::Unknowable {
+                    what: "`to_sym` on a String that is not UTF-8",
+                    needs: "the Encoding slice (#19)",
+                });
+            };
+            stack.push(Value::symbol(crate::shared::symbols::intern(&name)));
+            Ok(None)
+        }
+
+        Native::DefineMethod { singleton } => {
+            let target = if singleton {
+                singleton_of(scope, call.receiver)?
+            } else {
+                class_id_of(scope, call.receiver).ok_or(Error::NoDispatch {
+                    op: "define_method",
+                    operands: "a receiver that is not a Module",
+                })?
+            };
+            let Some(&name_value) = call.args.first() else {
+                return Err(Error::raise(
+                    "ArgumentError",
+                    "wrong number of arguments (given 0, expected 1..2)",
+                ));
+            };
+            if call.args.len() > 2 {
+                return Err(Error::raise(
+                    "ArgumentError",
+                    format!(
+                        "wrong number of arguments (given {}, expected 1..2)",
+                        call.args.len()
+                    ),
+                ));
+            }
+            let Some(name) = method_name_of(scope, name_value) else {
+                let shown = inspect(scope, name_value);
+                return Err(Error::raise(
+                    "TypeError",
+                    format!("{shown} is not a symbol nor a string"),
+                ));
+            };
+            // The body: a Proc argument, or the block. Measured messages for
+            // neither and for the wrong kind.
+            let body_value = match call.args.get(1) {
+                Some(&given) => given,
+                None if call.block != Value::NIL => call.block,
+                None => {
+                    return Err(Error::raise(
+                        "ArgumentError",
+                        "tried to create Proc object without a block",
+                    ));
+                }
+            };
+            if proc_body(scope, body_value).is_none() {
+                let class = class_name(scope, body_value);
+                if class == "Method" || class == "UnboundMethod" {
+                    return Err(Error::NoDispatch {
+                        op: "define_method",
+                        operands: "a Method or UnboundMethod body, which is #27",
+                    });
+                }
+                return Err(Error::raise(
+                    "TypeError",
+                    format!("wrong argument type {class} (expected Proc/Method/UnboundMethod)"),
+                ));
+            }
+            let symbol = crate::shared::symbols::intern(&name);
+            // `initialize` and its siblings are private wherever they are
+            // defined; otherwise a call from the class's own body follows that
+            // body's default — `private; define_method(:b) {}` is private.
+            // Measured.
+            let always_private = matches!(
+                name.as_str(),
+                "initialize"
+                    | "initialize_copy"
+                    | "initialize_clone"
+                    | "initialize_dup"
+                    | "respond_to_missing?"
+            );
+            let visibility = if always_private {
+                Visibility::Private
+            } else if !singleton
+                && frames
+                    .last()
+                    .is_some_and(|frame| scope.classes().cref_class(frame.cref) == target)
+            {
+                frames
+                    .last()
+                    .map_or(Visibility::Public, |frame| frame.scope_default.visibility())
+            } else {
+                Visibility::Public
+            };
+            // A frozen module, or a frozen object's singleton: CRuby's
+            // message names the frozen object, measured.
+            let holder = if singleton {
+                call.receiver
+            } else {
+                scope.classes().object(target)
+            };
+            if !holder.is_immediate() {
+                let handle = scope.root(holder);
+                if scope.is_frozen(handle) {
+                    let class = class_name(scope, holder);
+                    let shown = inspect(scope, holder);
+                    return Err(Error::raise(
+                        "FrozenError",
+                        format!("can't modify frozen {class}: {shown}"),
+                    ));
+                }
+            }
+            // Under a bare `module_function` in the module's own body, the
+            // method is a module function too: private here, public on the
+            // singleton. Measured.
+            let module_function = !singleton
+                && frames.last().is_some_and(|frame| {
+                    frame.scope_default == ScopeDefault::ModuleFunction
+                        && scope.classes().cref_class(frame.cref) == target
+                });
+            let body = scope.definitions_mut().add(Definition::Proc(body_value));
+            scope
+                .classes_mut()
+                .define_method_visibly(target, symbol, body, call.cref, visibility);
+            stack.push(Value::symbol(symbol));
+            if module_function {
+                let meta = scope.singleton_class(target);
+                scope.classes_mut().define_method_visibly(
+                    meta,
+                    symbol,
+                    body,
+                    call.cref,
+                    Visibility::Public,
+                );
+                if let Some(unwind) =
+                    fire_method_hook(scope, stack, frames, proc_class, ids, meta, "added", symbol)?
+                {
+                    return Ok(Some(unwind));
+                }
+            }
+            fire_method_hook(
+                scope, stack, frames, proc_class, ids, target, "added", symbol,
+            )
+        }
+
+        Native::EvalBlock { module, exec } => {
+            if call.block == Value::NIL {
+                // A String body is string `eval`.
+                if exec {
+                    return Err(Error::raise("LocalJumpError", "no block given"));
+                }
+                if !call.args.is_empty() {
+                    return Err(Error::Unknowable {
+                        what: "`instance_eval` or `class_eval` of a String",
+                        needs: "string `eval` (#38)",
+                    });
+                }
+                return Err(Error::raise(
+                    "ArgumentError",
+                    "wrong number of arguments (given 0, expected 1..3)",
+                ));
+            }
+            if !exec && !call.args.is_empty() {
+                return Err(Error::raise(
+                    "ArgumentError",
+                    format!(
+                        "wrong number of arguments (given {}, expected 0)",
+                        call.args.len()
+                    ),
+                ));
+            }
+            // A Symbol or a number — a bignum and a heap Float included — cannot
+            // have a singleton class.
+            let numeric = class_of(scope, call.receiver).is_some_and(|class| {
+                matches!(
+                    scope.classes().repr(class),
+                    Some(Builtin::Integer | Builtin::Float)
+                )
+            });
+            let refuses_def = !module
+                && (numeric
+                    || (call.receiver.is_immediate()
+                        && !matches!(call.receiver, Value::NIL | Value::TRUE | Value::FALSE)));
+            let definee = if module {
+                class_id_of(scope, call.receiver).ok_or(Error::NoDispatch {
+                    op: "class_eval",
+                    operands: "a receiver that is not a Module",
+                })?
+            } else if refuses_def {
+                // An Integer cannot have a singleton class, so the eval node
+                // refuses `def` (`refuses_def`); everything else in the body
+                // runs against the class.
+                class_of(scope, call.receiver).ok_or_else(|| no_class(call.receiver))?
+            } else {
+                singleton_of(scope, call.receiver)?
+            };
+            let (receiver, block) = (call.receiver, call.block);
+            let args = if exec {
+                call.args.clone()
+            } else {
+                vec![receiver]
+            };
+            let keywords = if exec {
+                call.keywords.clone()
+            } else {
+                Vec::new()
+            };
+            let inner = Pending {
+                args,
+                keywords,
+                block: Value::NIL,
+                block_is_literal: false,
+                target: Target::Block(block),
+                ..call
+            };
+            let role = ProcRole::Eval {
+                receiver,
+                definee,
+                refuses_def,
+            };
+            // `break` in the block ends this call, whose frame is the block's
+            // own: the id it is about to be given.
+            set_break_target(scope, block, *ids + 1);
+            push_proc_frame_as(scope, stack, frames, &inner, block, ids, role)?;
+            Ok(None)
+        }
 
         Native::ProcLocation => {
             let block = call.args.first().copied().unwrap_or(Value::NIL);
@@ -6724,6 +7556,84 @@ fn native_call<'h>(
                 Err(_) => Value::NIL,
             };
             stack.push(value);
+            Ok(None)
+        }
+
+        Native::FrameMethod { callee } => {
+            // The caller's frame — a primitive pushes none of its own. A block
+            // carries its method's owner and name, so it answers too.
+            let value = match frames.last().map(|frame| (frame.owner, frame.defined_as)) {
+                Some((Some(_), Some(called))) if callee => Value::symbol(called),
+                Some((Some(owner), Some(called))) => {
+                    // `__method__` is the name the body was *defined* under:
+                    // through an alias that is the `def`'s own, which its
+                    // `Iseq` is named after. A `define_method` body is a Proc
+                    // whose `Iseq` is named after where it was written, so its
+                    // name is the one it was defined as.
+                    let body = scope
+                        .classes_mut()
+                        .lookup(owner, called)
+                        .map(|method| method.body);
+                    match body.and_then(|body| scope.definitions().get(body)) {
+                        Some(Definition::Iseq(iseq)) => Value::symbol(symbol(&iseq.name)),
+                        _ => Value::symbol(called),
+                    }
+                }
+                _ => Value::NIL,
+            };
+            stack.push(value);
+            Ok(None)
+        }
+
+        Native::FrameNesting => {
+            let cref = frames.last().map_or(CrefId::ROOT, |frame| frame.cref);
+            let scopes: Vec<Value> = scope
+                .classes()
+                .nesting(cref)
+                .into_iter()
+                .map(|id| scope.classes().object(id))
+                .collect();
+            let value = new_array(scope, &scopes);
+            stack.push(value);
+            Ok(None)
+        }
+
+        Native::FrameDir => {
+            let path = frames.last().and_then(|frame| frame.iseq.path.clone());
+            let value = match path {
+                Some(path) if !path.starts_with('<') && !path.starts_with('(') => {
+                    let parent = std::path::Path::new(&*path)
+                        .parent()
+                        .filter(|parent| !parent.as_os_str().is_empty())
+                        .unwrap_or(std::path::Path::new("."));
+                    let resolved =
+                        std::fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
+                    string_new(scope, &resolved.to_string_lossy())
+                }
+                _ => Value::NIL,
+            };
+            stack.push(value);
+            Ok(None)
+        }
+
+        Native::Sleep => {
+            let seconds = match call.args.first() {
+                Some(&value) => value
+                    .as_fixnum()
+                    .map(|n| n as f64)
+                    .or_else(|| value.as_flonum()),
+                None => None,
+            };
+            let Some(seconds) = seconds.filter(|s| s.is_finite() && *s >= 0.0) else {
+                return Err(Error::NoDispatch {
+                    op: "__sleep__",
+                    operands: "a duration that is not a non-negative number",
+                });
+            };
+            let start = std::time::Instant::now();
+            std::thread::sleep(std::time::Duration::from_secs_f64(seconds));
+            let slept = start.elapsed().as_secs_f64().round() as i64;
+            stack.push(Value::fixnum(slept).unwrap_or(Value::NIL));
             Ok(None)
         }
 
@@ -6774,29 +7684,6 @@ fn native_call<'h>(
                         ),
                     ));
                 };
-                // Ruby calls `module.append_features(target)` and then
-                // `module.included(target)` — `prepend_features`/`prepended`
-                // for the other end — and both are overridable, so a module
-                // that defines `append_features` decides its own splice.
-                // Splicing anyway would be a wrong ancestry, not a missing one.
-                let hooks: &[(&str, &'static str)] = if prepend {
-                    &[
-                        (
-                            "prepend_features",
-                            "`prepend_features`, which decides this splice",
-                        ),
-                        ("prepended", "`prepended`, which this prepend would fire"),
-                    ]
-                } else {
-                    &[
-                        (
-                            "append_features",
-                            "`append_features`, which decides this splice",
-                        ),
-                        ("included", "`included`, which this include would fire"),
-                    ]
-                };
-                hook_refusal(scope, module, hooks)?;
                 let how = if prepend {
                     scope.classes_mut().prepend(target, module)
                 } else {
@@ -6850,22 +7737,6 @@ fn native_call<'h>(
                         ));
                     }
                 };
-                // `extend_object` decides the splice and `extended` observes
-                // it, and both are overridable — the same refusal `include`
-                // makes for `append_features` and `included`, for the same
-                // reason: splicing anyway would be a wrong ancestry rather
-                // than a missing one.
-                hook_refusal(
-                    scope,
-                    module,
-                    &[
-                        (
-                            "extend_object",
-                            "`extend_object`, which decides this splice",
-                        ),
-                        ("extended", "`extended`, which this extend would fire"),
-                    ],
-                )?;
                 // Allocating the singleton is the point, not a side effect:
                 // `extend` is defined as an include into it. `singleton_of` is
                 // what `def obj.foo` and `class << obj` already go through, so
@@ -6937,12 +7808,9 @@ fn native_call<'h>(
         }
 
         Native::SetVisibility(visibility) => {
-            let Some(id) = class_id_of(scope, call.receiver) else {
-                return Err(Error::NoDispatch {
-                    op: "Module#private",
-                    operands: "a receiver that is not a Module",
-                });
-            };
+            // `main`'s `public`/`private` are these same primitives, and at
+            // the top level they act on `Object`.
+            let id = class_id_of(scope, call.receiver).unwrap_or(Builtin::Object.id());
             // Bare: the visibility every `def` below it in *this* body gets.
             // It lives on the lexical scope, so reopening the class starts
             // public again — measured, and the reason `push_cref` making a
@@ -6957,6 +7825,7 @@ fn native_call<'h>(
                 stack.push(Value::NIL);
                 return Ok(None);
             }
+            let mut narrowed = Vec::new();
             for &argument in &call.args {
                 let Some(name) = method_name_of(scope, argument) else {
                     return Err(Error::raise("TypeError", "is not a symbol nor a string"));
@@ -6967,14 +7836,7 @@ fn native_call<'h>(
                 // method was already this class's own. The condition is what
                 // makes `private :m` in the defining class stay quiet (#28).
                 if !scope.classes().method_defined_here(id, symbol) {
-                    hook_refusal(
-                        scope,
-                        id,
-                        &[(
-                            "method_added",
-                            "`method_added`, which narrowing an inherited method would fire",
-                        )],
-                    )?;
+                    narrowed.push(symbol);
                 }
                 if !scope.classes_mut().set_visibility(id, symbol, visibility) {
                     // Not `describe_receiver`: this wording quotes the name and
@@ -7002,6 +7864,15 @@ fn native_call<'h>(
                 many => new_array(scope, many),
             };
             stack.push(value);
+            // Last-pushed runs first, so reversed: the hooks run in argument
+            // order.
+            for &symbol in narrowed.iter().rev() {
+                if let Some(unwind) =
+                    fire_method_hook(scope, stack, frames, proc_class, ids, id, "added", symbol)?
+                {
+                    return Ok(Some(unwind));
+                }
+            }
             Ok(None)
         }
 
@@ -7024,18 +7895,6 @@ fn native_call<'h>(
                 stack.push(Value::NIL);
                 return Ok(None);
             }
-            // The public copy is a new singleton definition, and Ruby fires
-            // `singleton_method_added` for it — measured in
-            // `core/module/method_added_spec.rb`. Refused rather than silently
-            // skipped, the same as every other definition here (#28).
-            hook_refusal(
-                scope,
-                id,
-                &[(
-                    "singleton_method_added",
-                    "`singleton_method_added`, which `module_function` would fire",
-                )],
-            )?;
             let singleton = singleton_of(scope, call.receiver)?;
             for &argument in &call.args {
                 let Some(name) = method_name_of(scope, argument) else {
@@ -7069,6 +7928,21 @@ fn native_call<'h>(
                 many => new_array(scope, many),
             };
             stack.push(value);
+            // The public copy is a new singleton definition, and Ruby fires
+            // `singleton_method_added` for it — measured in
+            // `core/module/method_added_spec.rb`. Reversed so they run in
+            // argument order.
+            for &argument in call.args.iter().rev() {
+                let Some(name) = method_name_of(scope, argument) else {
+                    continue;
+                };
+                let symbol = crate::shared::symbols::intern(&name);
+                if let Some(unwind) = fire_method_hook(
+                    scope, stack, frames, proc_class, ids, singleton, "added", symbol,
+                )? {
+                    return Ok(Some(unwind));
+                }
+            }
             Ok(None)
         }
 
@@ -7177,49 +8051,60 @@ fn native_call<'h>(
                     operands: "a receiver that is not a Module",
                 });
             };
-            let Some(first) = call.args.first().and_then(|&v| method_name_of(scope, v)) else {
-                return Err(Error::raise("TypeError", "is not a symbol nor a string"));
-            };
-            let first = crate::shared::symbols::intern(&first);
-            if aliasing {
-                hook_refusal(
-                    scope,
-                    id,
-                    &[(
-                        "method_added",
-                        "`method_added`, which this alias would fire",
-                    )],
-                )?;
+            module_frozen_check(scope, id)?;
+            // `alias_method new, old` is one pair; `undef_method` takes any
+            // number of names, each undefined in turn.
+            let given = if aliasing {
+                &call.args[..call.args.len().min(1)]
             } else {
-                undef_hook_refusal(scope, id)?;
+                &call.args[..]
+            };
+            if aliasing && given.is_empty() {
+                return Err(Error::raise("TypeError", "is not a symbol nor a string"));
             }
-            let (ok, missing) = if aliasing {
-                let Some(old) = call.args.get(1).and_then(|&v| method_name_of(scope, v)) else {
+            let mut done = Vec::new();
+            for &argument in given {
+                let Some(name) = method_name_of(scope, argument) else {
                     return Err(Error::raise("TypeError", "is not a symbol nor a string"));
                 };
-                let old = crate::shared::symbols::intern(&old);
-                (scope.classes_mut().alias_method(id, first, old), old)
-            } else {
-                (scope.classes_mut().undef_method(id, first), first)
-            };
-            if !ok {
-                return Err(Error::raise(
-                    "NameError",
-                    format!(
-                        "undefined method '{}' for {}",
-                        symbol_name(missing),
-                        class_display_name(scope, id),
-                    ),
-                ));
+                let name = crate::shared::symbols::intern(&name);
+                let (ok, missing) = if aliasing {
+                    let Some(old) = call.args.get(1).and_then(|&v| method_name_of(scope, v)) else {
+                        return Err(Error::raise("TypeError", "is not a symbol nor a string"));
+                    };
+                    let old = crate::shared::symbols::intern(&old);
+                    (scope.classes_mut().alias_method(id, name, old), old)
+                } else {
+                    (scope.classes_mut().undef_method(id, name), name)
+                };
+                if !ok {
+                    return Err(Error::raise(
+                        "NameError",
+                        format!(
+                            "undefined method '{}' for {}",
+                            symbol_name(missing),
+                            class_display_name(scope, id),
+                        ),
+                    ));
+                }
+                done.push(name);
             }
             // `alias_method` answers the new name; `undef_method` answers the
             // module. Measured.
-            let answer = if aliasing {
-                Value::symbol(first)
-            } else {
-                call.receiver
+            let answer = match done.first() {
+                Some(&first) if aliasing => Value::symbol(first),
+                _ => call.receiver,
             };
             stack.push(answer);
+            // Reversed, so the hooks run in argument order.
+            let event = if aliasing { "added" } else { "undefined" };
+            for &name in done.iter().rev() {
+                if let Some(unwind) =
+                    fire_method_hook(scope, stack, frames, proc_class, ids, id, event, name)?
+                {
+                    return Ok(Some(unwind));
+                }
+            }
             Ok(None)
         }
 
@@ -7260,6 +8145,41 @@ fn native_call<'h>(
                 .classes_mut()
                 .lookup(class, symbol)
                 .is_some_and(|method| include_all || method.visibility == Visibility::Public);
+            // Not in the table: a program's `respond_to_missing?` decides
+            // (#28), as a frame whose answer comes back as a boolean.
+            let asks = crate::shared::symbols::intern("respond_to_missing?");
+            if !found
+                && let Some(method) = scope.classes_mut().lookup(class, asks)
+                && method.owner != Builtin::Kernel.id()
+                && method.owner != Builtin::BasicObject.id()
+            {
+                let ask = Pending {
+                    cache: None,
+                    name: asks,
+                    receiver: call.receiver,
+                    args: vec![Value::symbol(symbol), bool_value(include_all)],
+                    keywords: Vec::new(),
+                    block: Value::NIL,
+                    block_is_literal: false,
+                    cref: call.cref,
+                    implicit_self: true,
+                    public_only: false,
+                    target: Target::Method,
+                    owner: None,
+                    defined_as: None,
+                };
+                let depth = frames.len();
+                if let Some(unwind) = dispatch(scope, stack, frames, ask, proc_class, ids)? {
+                    return Ok(Some(unwind));
+                }
+                if frames.len() > depth {
+                    let last = frames.len() - 1;
+                    frames[last].booleanizes_value = true;
+                } else if let Some(answer) = stack.pop() {
+                    stack.push(bool_value(answer.is_truthy()));
+                }
+                return Ok(None);
+            }
             stack.push(bool_value(found));
             Ok(None)
         }
@@ -7668,7 +8588,18 @@ fn native_call<'h>(
             Ok(None)
         }
         Native::RegexpCaseEq => {
-            let data = regexp_match_value(scope, call.receiver, first_arg(&call))?;
+            // A Symbol is matched as its name; anything else that is not a
+            // String is simply not a match — `===` never raises. Measured.
+            let mut subject = first_arg(&call);
+            if let Some(name) = subject.as_symbol() {
+                let text = symbol_name(name);
+                subject = string_new(scope, &text);
+            } else if string_bytes(scope, subject).is_none() {
+                scope.set_last_match(Value::NIL);
+                stack.push(Value::FALSE);
+                return Ok(None);
+            }
+            let data = regexp_match_value(scope, call.receiver, subject)?;
             stack.push(bool_value(data != Value::NIL));
             Ok(None)
         }
@@ -7831,13 +8762,22 @@ fn raise_argument(
 }
 
 /// Whether `value`'s class defines `#to_ary`, which is what decides whether
-/// Ruby would spread it across a block's parameters.
+/// Ruby would spread it across a block's parameters — or might answer it
+/// through its own `respond_to_missing?`, which only running it can tell. The
+/// callers refuse either way rather than bind the object whole.
 fn defines_to_ary(scope: &mut HandleScope<'_>, value: Value) -> bool {
     let Some(class) = class_of(scope, value) else {
         return false;
     };
     let name = crate::shared::symbols::intern("to_ary");
-    scope.classes_mut().lookup(class, name).is_some()
+    if scope.classes_mut().lookup(class, name).is_some() {
+        return true;
+    }
+    let missing = crate::shared::symbols::intern("respond_to_missing?");
+    scope
+        .classes_mut()
+        .lookup(class, missing)
+        .is_some_and(|method| method.owner != Builtin::Kernel.id())
 }
 
 /// Whether the class `id` names is `Exception` or below it.
@@ -7940,7 +8880,7 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         (Builtin::Regexp, &["=~"], Native::RegexpMatchOp),
         (Builtin::Regexp, &["match"], Native::RegexpMatch),
         (Builtin::Regexp, &["match?"], Native::RegexpMatchP),
-        (Builtin::Regexp, &["==="], Native::RegexpCaseEq),
+        (Builtin::Regexp, &["__case_eq__"], Native::RegexpCaseEq),
         (Builtin::Regexp, &["source"], Native::RegexpSource),
         (Builtin::Regexp, &["options"], Native::RegexpOptions),
         (
@@ -8107,17 +9047,17 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         (Builtin::Kernel, &["hash"], Native::HashValue),
         (
             Builtin::Module,
-            &["include"],
+            &["__include__"],
             Native::Mixin { prepend: false },
         ),
         (
             Builtin::Module,
-            &["prepend"],
+            &["__prepend__"],
             Native::Mixin { prepend: true },
         ),
-        // `Kernel`, not `Object`: CRuby defines `extend` on `Kernel`, so a
-        // `BasicObject` subclass that includes `Kernel` gets it too.
-        (Builtin::Kernel, &["extend"], Native::Extend),
+        // The splices under `include`, `prepend` and `extend`, which are Ruby
+        // in `core/module.rb` and `core/kernel.rb` so their hooks run.
+        (Builtin::Kernel, &["__extend__"], Native::Extend),
         (Builtin::Kernel, &["respond_to?"], Native::RespondTo),
         (
             Builtin::Module,
@@ -8244,6 +9184,149 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             Builtin::Kernel,
             &["__proc_location__"],
             Native::ProcLocation,
+        ),
+        (
+            Builtin::Module,
+            &["define_method"],
+            Native::DefineMethod { singleton: false },
+        ),
+        (
+            Builtin::Kernel,
+            &["define_singleton_method"],
+            Native::DefineMethod { singleton: true },
+        ),
+        (
+            Builtin::BasicObject,
+            &["instance_eval"],
+            Native::EvalBlock {
+                module: false,
+                exec: false,
+            },
+        ),
+        (
+            Builtin::BasicObject,
+            &["instance_exec"],
+            Native::EvalBlock {
+                module: false,
+                exec: true,
+            },
+        ),
+        (
+            Builtin::Module,
+            &["class_eval", "module_eval"],
+            Native::EvalBlock {
+                module: true,
+                exec: false,
+            },
+        ),
+        (
+            Builtin::Module,
+            &["class_exec", "module_exec"],
+            Native::EvalBlock {
+                module: true,
+                exec: true,
+            },
+        ),
+        (
+            Builtin::Kernel,
+            &["__reflect_const_lookup__"],
+            Native::Reflect(ReflectOp::ConstLookup),
+        ),
+        (
+            Builtin::Kernel,
+            &["__reflect_const_set__"],
+            Native::Reflect(ReflectOp::ConstSet),
+        ),
+        (
+            Builtin::Kernel,
+            &["__reflect_const_names__"],
+            Native::Reflect(ReflectOp::ConstNames),
+        ),
+        (
+            Builtin::Kernel,
+            &["__reflect_const_remove__"],
+            Native::Reflect(ReflectOp::ConstRemove),
+        ),
+        (
+            Builtin::Kernel,
+            &["__reflect_const_public__"],
+            Native::Reflect(ReflectOp::ConstPublic),
+        ),
+        (
+            Builtin::Kernel,
+            &["__reflect_method_names__"],
+            Native::Reflect(ReflectOp::MethodNames),
+        ),
+        (
+            Builtin::Kernel,
+            &["__reflect_class_of__"],
+            Native::Reflect(ReflectOp::ClassOf),
+        ),
+        (
+            Builtin::Kernel,
+            &["__reflect_singleton_class__"],
+            Native::Reflect(ReflectOp::SingletonClass),
+        ),
+        (
+            Builtin::Kernel,
+            &["__reflect_remove_method__"],
+            Native::Reflect(ReflectOp::RemoveMethod),
+        ),
+        (
+            Builtin::Kernel,
+            &["__reflect_is_singleton__"],
+            Native::Reflect(ReflectOp::IsSingleton),
+        ),
+        (
+            Builtin::Kernel,
+            &["__reflect_module_kind__"],
+            Native::Reflect(ReflectOp::ModuleKind),
+        ),
+        (
+            Builtin::Kernel,
+            &["__reflect_attached__"],
+            Native::Reflect(ReflectOp::Attached),
+        ),
+        (
+            Builtin::Kernel,
+            &["__method__"],
+            Native::FrameMethod { callee: false },
+        ),
+        (
+            Builtin::Kernel,
+            &["__callee__"],
+            Native::FrameMethod { callee: true },
+        ),
+        (Builtin::Kernel, &["__dir__"], Native::FrameDir),
+        (
+            Builtin::Kernel,
+            &["__module_nesting__"],
+            Native::FrameNesting,
+        ),
+        // `main`'s `public` and `private`, aliased onto its singleton by
+        // `core/object.rb` so a bare one reaches the top-level frame.
+        (
+            Builtin::Kernel,
+            &["__main_public__"],
+            Native::SetVisibility(Visibility::Public),
+        ),
+        (
+            Builtin::Kernel,
+            &["__main_private__"],
+            Native::SetVisibility(Visibility::Private),
+        ),
+        (Builtin::Kernel, &["__sleep__"], Native::Sleep),
+        (Builtin::String, &["to_sym", "intern"], Native::StringIntern),
+        (
+            Builtin::BasicObject,
+            &["__raise_no_method__"],
+            Native::RaiseNoMethod,
+        ),
+        // `__send__` is BasicObject's, where a blank slate still has it.
+        (
+            Builtin::BasicObject,
+            &["__send__"],
+            Native::Send { public_only: false },
         ),
         (
             Builtin::Kernel,

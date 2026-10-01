@@ -16,11 +16,12 @@ module Kernel
   #
   # The check runs only when the answer would be false — a `mod` that is in the
   # ancestry is a module already — so the common path costs what it always did.
-  # `mod.class.ancestors` rather than `mod.is_a?(Module)`, because this *is*
-  # `is_a?` and asking it here would not terminate.
+  #
+  # The ancestry is the object's real one, singleton class first (#202): a
+  # module it was `extend`ed with counts, and an overridden `class` does not.
   def is_a?(mod)
-    return true if self.class.ancestors.include?(mod)
-    raise TypeError, "class or module required" unless mod.class.ancestors.include?(Module)
+    return true if __reflect_class_of__(self).ancestors.include?(mod)
+    raise TypeError, "class or module required" if __reflect_module_kind__(mod).nil?
     false
   end
 
@@ -75,7 +76,12 @@ module Kernel
   def inspect
     head = "#<" + self.class.to_s + ":0x" + __address__
     names = if respond_to?(:instance_variables_to_inspect, true)
-      __send__(:instance_variables_to_inspect)
+      chosen = __send__(:instance_variables_to_inspect)
+      unless chosen.nil? || chosen.is_a?(Array)
+        raise TypeError, "Expected #instance_variables_to_inspect to return an Array or nil, " \
+                         "but it returned #{chosen.class}"
+      end
+      chosen.nil? ? instance_variables.reject { |name| name.to_s.start_with?("@__") && name.to_s.end_with?("__") } : chosen
     else
       instance_variables.reject { |name| name.to_s.start_with?("@__") && name.to_s.end_with?("__") }
     end
@@ -275,4 +281,166 @@ module Kernel
   # primitive half of it — `raise`, `proc`, `lambda`, `catch`, `throw`,
   # `block_given?` — is marked in `interp.rs`, beside where those are defined.
   module_function :loop, :p, :print, :puts
+end
+
+# Object-side reflection (#28), over the same `__reflect_*__` primitives as
+# `core/module.rb`.
+module Kernel
+  def singleton_class
+    __reflect_singleton_class__(self)
+  end
+
+  # Public and protected methods; `methods(false)` is the singleton ones.
+  def methods(regular = true)
+    return singleton_methods(false) unless regular
+    __reflect_method_names__(__reflect_class_of__(self), true, 0)
+  end
+
+  def public_methods(all = true)
+    __reflect_method_names__(__reflect_class_of__(self), all, 1)
+  end
+
+  def protected_methods(all = true)
+    __reflect_method_names__(__reflect_class_of__(self), all, 2)
+  end
+
+  def private_methods(all = true)
+    __reflect_method_names__(__reflect_class_of__(self), all, 3)
+  end
+
+  # The methods on this object's own singleton class — and with `all`, those
+  # of modules it was extended with and, for a class, its superclasses'
+  # singleton methods. Measured.
+  def singleton_methods(all = true)
+    klass = __reflect_class_of__(self)
+    return [] unless __reflect_is_singleton__(klass)
+    names = __reflect_method_names__(klass, false, 0)
+    return names unless all
+    klass.ancestors.each do |ancestor|
+      next if ancestor.equal?(klass)
+      break unless ancestor.instance_of?(Module) || __reflect_is_singleton__(ancestor)
+      __reflect_method_names__(ancestor, false, 0).each { |name| names.push(name) unless names.include?(name) }
+    end
+    names
+  end
+end
+
+# The copy hooks (#28), private as in CRuby. `initialize_dup` and
+# `initialize_clone` call `initialize_copy`, which does nothing by default.
+module Kernel
+  def initialize_copy(original)
+    return self if equal?(original)
+    Kernel.__check_frozen__(self)
+    unless original.class.equal?(self.class)
+      raise TypeError, "initialize_copy should take same class object"
+    end
+    self
+  end
+
+  # The `FrozenError` every mutator raises: the class, then `inspect`.
+  def self.__check_frozen__(object)
+    return unless object.frozen?
+    raise FrozenError.new("can't modify frozen #{object.class}: #{object.inspect}", receiver: object)
+  end
+
+  def initialize_dup(original)
+    initialize_copy(original)
+  end
+
+  def initialize_clone(original, freeze: nil)
+    initialize_copy(original)
+  end
+
+  # What a program's own `respond_to_missing?` overrides; the VM only asks one
+  # that is not this.
+  def respond_to_missing?(name, include_all)
+    false
+  end
+
+  private :initialize_copy, :initialize_dup, :initialize_clone, :respond_to_missing?
+end
+
+# `extend` is Ruby so that `extend_object` and `extended` run (#28); `Kernel`,
+# not `Object`, so a `BasicObject` subclass that includes `Kernel` gets it.
+module Kernel
+  def extend(*modules)
+    Module.__check_mixins__(modules)
+    i = modules.size
+    while i > 0
+      i -= 1
+      modules[i].__send__(:extend_object, self)
+      modules[i].__send__(:extended, self)
+    end
+    self
+  end
+end
+
+# The conversion functions (#28). Each tries the implicit conversion first and
+# the explicit one second, privately — `respond_to?(name, true)` and
+# `__send__` — because Ruby's do too. Every message measured on ruby 4.0.7.
+module Kernel
+  def Array(object)
+    return object if Array === object
+    return [] if object.nil?
+    [:to_ary, :to_a].each do |name|
+      next unless object.respond_to?(name, true)
+      converted = object.__send__(name)
+      return converted if Array === converted
+      next if converted.nil?
+      raise TypeError,
+            "can't convert #{object.class} to Array (#{object.class}##{name} gives #{converted.class})"
+    end
+    [object]
+  end
+
+  def Hash(object)
+    return {} if object.nil?
+    return object if Hash === object
+    if object.respond_to?(:to_hash, true)
+      converted = object.__send__(:to_hash)
+      return converted if Hash === converted
+      raise TypeError,
+            "can't convert #{object.class} to Hash (#{object.class}#to_hash gives #{converted.class})"
+    end
+    return {} if Array === object && object.empty?
+    raise TypeError, "can't convert #{object.class} into Hash"
+  end
+
+  def String(object)
+    return object if String === object
+    [:to_str, :to_s].each do |name|
+      next unless object.respond_to?(name, true)
+      converted = object.__send__(name)
+      return converted if String === converted
+      next if name == :to_str && converted.nil?
+      raise TypeError,
+            "can't convert #{object.class} to String (#{object.class}##{name} gives #{converted.class})"
+    end
+    raise TypeError, "can't convert #{object.class} into String"
+  end
+
+  # Whole seconds slept, rounded. A Rational — anything with `divmod` — is
+  # read through `divmod(1)`; no duration at all would wait for a wakeup from
+  # another thread, which needs threads (#45).
+  def sleep(*args)
+    if args.size > 1
+      raise ArgumentError, "wrong number of arguments (given #{args.size}, expected 0..1)"
+    end
+    duration = args[0]
+    __needs_threads__ if duration.nil?
+    seconds =
+      if Integer === duration || Float === duration
+        duration.to_f
+      elsif !(String === duration) && duration.respond_to?(:divmod)
+        whole, fraction = duration.divmod(1)
+        whole.to_f + fraction.to_f
+      else
+        raise TypeError, "can't convert #{duration.class} into time interval"
+      end
+    raise ArgumentError, "time interval must not be negative" if seconds < 0
+    __sleep__(seconds)
+  end
+
+  # `Kernel`'s functions: private instance methods, public on `Kernel` itself.
+  module_function :Array, :Hash, :String, :sleep, :__method__, :__callee__, :__dir__
 end

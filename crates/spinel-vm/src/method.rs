@@ -330,6 +330,19 @@ pub enum Native {
     /// A path made absolute and resolved, or nil when it names no file:
     /// `Thread::Backtrace::Location#absolute_path` (#29). A syscall, so Rust.
     AbsolutePath,
+    /// `Kernel#__method__` and, with `callee`, `#__callee__` (#28): the
+    /// running method's name, which only the frames know.
+    FrameMethod {
+        callee: bool,
+    },
+    /// `Kernel#__dir__`: the directory of the file the caller was written in.
+    FrameDir,
+    /// `Module.nesting`: the caller's lexical scopes, which only its frame
+    /// knows.
+    FrameNesting,
+    /// `Kernel#__sleep__(seconds)`: block the thread, answer the whole
+    /// seconds slept. `Kernel#sleep` is Ruby around it.
+    Sleep,
     /// `Kernel#__needs_threads__`: the VM declining to start a thread (#45).
     ///
     /// A refusal rather than a Ruby `NotImplementedError`, because a spec that
@@ -351,6 +364,61 @@ pub enum Native {
     /// written, or nil — what `Fiber#inspect` names (#16) and
     /// `Proc#source_location` will.
     ProcLocation,
+    /// `Module#define_method`, and `Kernel#define_singleton_method` when
+    /// `singleton` (#28): a `Proc` becomes a method body.
+    DefineMethod {
+        singleton: bool,
+    },
+    /// `instance_eval`/`instance_exec` (`module: false`) and
+    /// `class_eval`/`module_eval`/`class_exec`/`module_exec` (`module: true`)
+    /// with a block (#28). The `_exec` forms pass their arguments; the `_eval`
+    /// forms pass the receiver. A String body is #38's.
+    EvalBlock {
+        module: bool,
+        exec: bool,
+    },
+    /// Reads and writes of the class table that `core/module.rb` and
+    /// `core/kernel.rb` build reflection on (#28). Installed as
+    /// `Kernel#__reflect_*__`.
+    Reflect(ReflectOp),
+    /// `String#to_sym` and `#intern`: the symbol table is the VM's.
+    StringIntern,
+    /// `Kernel#__raise_no_method__(name, args)`: the NoMethodError the VM
+    /// raises for a missing method, raised on purpose — what
+    /// `BasicObject#method_missing` does when called directly (#28).
+    RaiseNoMethod,
+}
+
+/// Which class-table operation. See `interp.rs`, `reflect_native`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReflectOp {
+    /// `(mod, name, inherit)` → `[value]`, or nil when there is none.
+    ConstLookup,
+    /// `(mod, name, value)` → value, naming an anonymous module it holds.
+    ConstSet,
+    /// `(mod, inherit)` → the public constant names, definition order.
+    ConstNames,
+    /// `(mod, name)` → `[value]` removed, or nil.
+    ConstRemove,
+    /// `(mod, name)` → whether the module holds it; makes it public.
+    ConstPublic,
+    /// `(class, inherit, which)` → method names: `which` 0 is public and
+    /// protected, 1 public, 2 protected, 3 private.
+    MethodNames,
+    /// `(object)` → its class, singleton included if it has one.
+    ClassOf,
+    /// `(object)` → its singleton class, made if need be.
+    SingletonClass,
+    /// `(mod, name)` → whether `mod` defined it and it is now gone.
+    RemoveMethod,
+    /// `(mod)` → whether it is a singleton class.
+    IsSingleton,
+    /// `(object)` → `:class`, `:module`, or nil for anything else. What
+    /// `include` checks its arguments with while the core library is still
+    /// loading and `is_a?` cannot yet run.
+    ModuleKind,
+    /// `(singleton class)` → the object it belongs to.
+    Attached,
 }
 
 /// Which fiber primitive. See `interp.rs`, "Fibers".
@@ -386,6 +454,11 @@ pub enum Definition {
     /// bytecode between Ractors.
     Iseq(Arc<Iseq>),
     Native(Native),
+    /// A `Proc` made a method by `define_method` (#28): its body runs with the
+    /// receiver as `self`, a method's arity and `return`, and the method's
+    /// owner for `super`. Traced by the collector through
+    /// [`Definitions::each_root`], since nothing else may hold the `Proc`.
+    Proc(Value),
 }
 
 /// One heap's method bodies, indexed by the fixnum in [`Method::body`].
@@ -456,6 +529,16 @@ impl Definitions {
     #[must_use]
     pub fn len(&self) -> usize {
         self.entries.len()
+    }
+
+    /// Every heap value a definition holds: the `Proc`s `define_method` made
+    /// into methods.
+    pub fn each_root(&self, mut f: impl FnMut(Value)) {
+        for definition in &self.entries {
+            if let Definition::Proc(block) = definition {
+                f(*block);
+            }
+        }
     }
 
     #[must_use]

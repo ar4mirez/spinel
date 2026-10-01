@@ -1,0 +1,2 @@
+fails(#41: `Kernel#warn` reads or writes an IO or a File, which do not exist yet):Kernel#warn is a private method
+fails(#41: `Kernel#warn` reads or writes an IO or a File, which do not exist yet):Kernel.warn is a public method

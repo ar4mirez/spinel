@@ -1,0 +1,2 @@
+fails(#127: `Kernel#trace_var` is tracing, which comes with `TracePoint`):Kernel#trace_var is a private method
+fails(#127: `Kernel#trace_var` is tracing, which comes with `TracePoint`):Kernel.trace_var is a public method

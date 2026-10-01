@@ -24,3 +24,13 @@ fails(A predefined global with an assignment rule of its own. #166 gave the lang
 fails(A global alias. #166 gave the language a global table, in which two names are two entries; making one name another's second spelling is #39's, along with the runtime state most of these alias. Became visible rather than blocked when the harness learned mspec's should.predicate form):Predefined global $/ changes $-0
 fails(A predefined global with an assignment rule of its own. #166 gave the language a global table; a name the VM owns — read-only, type-checked, or initialised by the runtime — needs the runtime that owns it, which is #39. Became visible rather than blocked when the harness learned mspec's should.predicate form):Predefined global $-0 makes a new frozen String if it's not frozen
 fails(A global alias. #166 gave the language a global table, in which two names are two entries; making one name another's second spelling is #39's, along with the runtime state most of these alias. Became visible rather than blocked when the harness learned mspec's should.predicate form):Predefined global $-0 changes $/
+fails(#41: `ARGF` reads the files named on the command line, which needs IO and File):The predefined standard objects includes ARGF
+fails(#44: `ARGV` is the ENV, ARGV and signals slice):The predefined standard objects includes ARGV
+fails(#44: `ENV` is the ENV, ARGV and signals slice):The predefined standard objects includes a hash-like object ENV
+fails(#41: `STDIN` is an IO, which does not exist yet):The predefined global constants includes STDIN
+fails(#41: `STDOUT` is an IO, which does not exist yet):The predefined global constants includes STDOUT
+fails(#41: `STDERR` is an IO, which does not exist yet):The predefined global constants includes STDERR
+fails(#65: `RUBY_VERSION` is how Spinel identifies itself, which is its own slice):The predefined global constants includes RUBY_VERSION
+fails(#65: `RUBY_RELEASE_DATE` is how Spinel identifies itself, which is its own slice):The predefined global constants includes RUBY_RELEASE_DATE
+fails(#65: `RUBY_PLATFORM` is how Spinel identifies itself, which is its own slice):The predefined global constants includes RUBY_PLATFORM
+fails(#38: `TOPLEVEL_BINDING` is a Binding, which is string eval's slice):The predefined global constants includes TOPLEVEL_BINDING

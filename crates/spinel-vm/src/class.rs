@@ -126,6 +126,23 @@ struct CrefNode {
     /// That is CRuby's `CREF_PUSHED_BY_EVAL`, and it is the same flag for the
     /// same reason.
     pushed_by_eval: bool,
+    /// An eval node with no definee: `1.instance_eval { def m; end }` is a
+    /// TypeError, because an Integer cannot have a singleton class. The node's
+    /// `class` is the receiver's class, which everything else may still use.
+    refuses_def: bool,
+}
+
+/// The names Ruby makes private on definition, whatever the scope's default.
+fn is_always_private(name: SymbolId) -> bool {
+    [
+        "initialize",
+        "initialize_copy",
+        "initialize_clone",
+        "initialize_dup",
+        "respond_to_missing?",
+    ]
+    .into_iter()
+    .any(|private| crate::shared::symbols::intern(private) == name)
 }
 
 /// Whether `include` accepts it, and whether it can have a superclass.
@@ -516,6 +533,9 @@ struct Entry {
     /// Allocated by [`HandleScope::singleton_class`], never before.
     singleton: Option<ClassId>,
     is_singleton: bool,
+    /// For a singleton class, the object it belongs to (#28):
+    /// `singleton_method_added` is sent to it. Traced with the table.
+    attached: Option<Value>,
     /// The representation instances of this class have, where it is not the
     /// plain object shape.
     ///
@@ -535,10 +555,16 @@ struct Entry {
     /// ancestor walk — and a *write* to one an ancestor already holds lands on
     /// the ancestor, which no constant does.
     class_variables: HashMap<SymbolId, Value>,
+    /// The names in `class_variables`, in the order they were first set:
+    /// `Module#class_variables` answers in definition order.
+    cvar_order: Vec<SymbolId>,
     /// This module's own constants. Not the ancestors' — [`Classes::const_get`]
     /// is the walk, and every rule Ruby has about which table wins depends on
     /// this one holding only what was assigned *here*.
     constants: HashMap<SymbolId, Value>,
+    /// The names in `constants`, in the order they were first assigned:
+    /// `Module#constants` answers in definition order (#28).
+    constant_order: Vec<SymbolId>,
     /// The names in `constants` that `Module#private_constant` marked (#185).
     ///
     /// A `Vec` rather than a set: a module with a private constant usually has
@@ -742,6 +768,12 @@ impl Classes {
         self.entry(id).is_singleton
     }
 
+    /// The object a singleton class belongs to; `None` for any other class.
+    #[must_use]
+    pub fn attached(&self, id: ClassId) -> Option<Value> {
+        self.entry(id).attached
+    }
+
     /// `Module#ancestors`: this class's run, then its superclass's, and so on.
     pub fn ancestors(&self, id: ClassId) -> Vec<ClassId> {
         let mut out = Vec::new();
@@ -786,6 +818,13 @@ impl Classes {
         cref: CrefId,
         visibility: Visibility,
     ) {
+        // `initialize` and its siblings are private wherever and however they
+        // are defined — `def`, `define_method`, a primitive. Measured.
+        let visibility = if is_always_private(name) {
+            Visibility::Private
+        } else {
+            visibility
+        };
         self.entry_mut(id)
             .methods
             .insert(name, (body, cref, visibility));
@@ -810,6 +849,19 @@ impl Classes {
     // ponytail: a copy, not a delegating entry. Redefining `A#m` after
     // `B` has narrowed it leaves `B#m` on the old body; CRuby re-resolves.
     // Upgrade path is a `Body::ZSuper` variant that `lookup_uncached` follows.
+    /// A lookup from `id`, falling back to `Object` for a module, which has
+    /// none in its chain: `alias`/`alias_method` and `public :m` in a module
+    /// find `Object#m` — `rb_alias`'s and `rb_export_method`'s fallback.
+    fn lookup_for_module(&mut self, id: ClassId, name: SymbolId) -> Option<Method> {
+        self.lookup_uncached(id, name).or_else(|| {
+            if self.kind(id) == Kind::Module {
+                self.lookup_uncached(Builtin::Object.id(), name)
+            } else {
+                None
+            }
+        })
+    }
+
     pub fn set_visibility(&mut self, id: ClassId, name: SymbolId, visibility: Visibility) -> bool {
         if let Some(entry) = self.entry_mut(id).methods.get_mut(&name) {
             // A tombstone is not a method to narrow. Falling through to the
@@ -821,7 +873,8 @@ impl Classes {
                 return true;
             }
         }
-        let Some(found) = self.lookup_uncached(id, name) else {
+        // A module finds `Object#m` too; see `lookup_for_module`.
+        let Some(found) = self.lookup_for_module(id, name) else {
             return false;
         };
         self.entry_mut(id)
@@ -848,12 +901,18 @@ impl Classes {
     /// False where nothing in the chain defines `old`, which is the caller's
     /// `NameError`.
     pub fn alias_method(&mut self, id: ClassId, new: SymbolId, old: SymbolId) -> bool {
-        let Some(found) = self.lookup_uncached(id, old) else {
+        let Some(found) = self.lookup_for_module(id, old) else {
             return false;
+        };
+        // An alias named `initialize` is as private as a `def` of it.
+        let visibility = if is_always_private(new) {
+            Visibility::Private
+        } else {
+            found.visibility
         };
         self.entry_mut(id)
             .methods
-            .insert(new, (found.body, found.cref, found.visibility));
+            .insert(new, (found.body, found.cref, visibility));
         self.invalidate(id);
         true
     }
@@ -930,7 +989,10 @@ impl Classes {
     /// ```
     pub fn cvar_set(&mut self, id: ClassId, name: SymbolId, value: Value) {
         let owner = self.cvar_owner(id, name).unwrap_or(id);
-        self.entry_mut(owner).class_variables.insert(name, value);
+        let entry = self.entry_mut(owner);
+        if entry.class_variables.insert(name, value).is_none() {
+            entry.cvar_order.push(name);
+        }
     }
 
     /// Whether `id` or an ancestor holds `@@a`: `defined?(@@a)`.
@@ -944,7 +1006,7 @@ impl Classes {
     pub fn cvar_names(&self, id: ClassId) -> Vec<SymbolId> {
         let mut names = Vec::new();
         for owner in self.ancestors(id) {
-            for &name in self.entry(owner).class_variables.keys() {
+            for &name in &self.entry(owner).cvar_order {
                 if !names.contains(&name) {
                     names.push(name);
                 }
@@ -955,7 +1017,7 @@ impl Classes {
 
     /// `Module#class_variables(false)`: only the ones defined on `id` itself.
     pub fn cvar_names_own(&self, id: ClassId) -> Vec<SymbolId> {
-        self.entry(id).class_variables.keys().copied().collect()
+        self.entry(id).cvar_order.clone()
     }
 
     /// The nearest ancestor of `id` holding `name`, `id` included.
@@ -974,26 +1036,22 @@ impl Classes {
         removed
     }
 
-    /// Whether this class or module defines the method itself, ancestors aside.
-    /// The method `id` defines in its *own* run of the chain, ignoring
-    /// superclasses. `Module#method_defined?(name, false)` is this question.
+    /// The method `id` itself defines — not its mixins', not its
+    /// superclasses'. `Module#method_defined?(name, false)` is this question,
+    /// and ruby/spec asserts an included module's method is not the answer.
     #[must_use]
     pub fn own_method(&self, id: ClassId, name: SymbolId) -> Option<Method> {
-        for &owner in &self.entry(id).own {
-            if let Some(&(body, cref, visibility)) = self.entry(owner).methods.get(&name) {
-                // An `undef` tombstone is not a method this class owns.
-                if body == Value::UNDEF {
-                    return None;
-                }
-                return Some(Method {
-                    owner,
-                    body,
-                    cref,
-                    visibility,
-                });
-            }
+        let &(body, cref, visibility) = self.entry(id).methods.get(&name)?;
+        // An `undef` tombstone is not a method this class owns.
+        if body == Value::UNDEF {
+            return None;
         }
-        None
+        Some(Method {
+            owner: id,
+            body,
+            cref,
+            visibility,
+        })
     }
 
     pub fn method_defined_here(&self, id: ClassId, name: SymbolId) -> bool {
@@ -1108,7 +1166,60 @@ impl Classes {
     // Warning needs somewhere to warn *to*, which is #39's `$stderr`; the write
     // itself is what every spec here checks.
     pub fn const_set(&mut self, id: ClassId, name: SymbolId, value: Value) {
-        self.entry_mut(id).constants.insert(name, value);
+        let entry = self.entry_mut(id);
+        if entry.constants.insert(name, value).is_none() {
+            entry.constant_order.push(name);
+        }
+    }
+
+    /// This module's own constant names, in definition order, with whether
+    /// each is private.
+    #[must_use]
+    pub fn const_names(&self, id: ClassId) -> Vec<(SymbolId, bool)> {
+        let entry = self.entry(id);
+        entry
+            .constant_order
+            .iter()
+            .map(|&name| (name, entry.private_constants.contains(&name)))
+            .collect()
+    }
+
+    /// `Module#remove_const`: take one of this module's own constants away,
+    /// answering its value.
+    pub fn const_remove(&mut self, id: ClassId, name: SymbolId) -> Option<Value> {
+        let entry = self.entry_mut(id);
+        let value = entry.constants.remove(&name)?;
+        entry.constant_order.retain(|&n| n != name);
+        entry.private_constants.retain(|&n| n != name);
+        Some(value)
+    }
+
+    /// `Module#public_constant`: the inverse of [`Classes::mark_const_private`].
+    pub fn mark_const_public(&mut self, id: ClassId, name: SymbolId) {
+        self.entry_mut(id).private_constants.retain(|&n| n != name);
+    }
+
+    /// Whether the first entry for `name` along `id`'s ancestors is an
+    /// `undef` — "undefined on purpose", as against never defined.
+    #[must_use]
+    pub fn undefined_along(&self, id: ClassId, name: SymbolId) -> bool {
+        self.ancestors(id).into_iter().find_map(|class| {
+            self.entry(class)
+                .methods
+                .get(&name)
+                .map(|&(body, _, _)| body == Value::UNDEF)
+        }) == Some(true)
+    }
+
+    /// The methods this class or module defines itself, as name, body and
+    /// visibility — an `undef` tombstone's body is `Value::UNDEF`. Unordered.
+    #[must_use]
+    pub fn own_method_entries(&self, id: ClassId) -> Vec<(SymbolId, Value, Visibility)> {
+        self.entry(id)
+            .methods
+            .iter()
+            .map(|(&name, &(body, _, visibility))| (name, body, visibility))
+            .collect()
     }
 
     /// `A::X`: `A`'s own table, then its ancestors' in order — skipping
@@ -1299,12 +1410,57 @@ impl Classes {
         self.push_cref_node(outer, class, true)
     }
 
+    /// An eval node over an object that cannot have a singleton class. See
+    /// [`CrefNode::refuses_def`].
+    pub fn push_eval_cref_refusing_def(&mut self, outer: CrefId, class: ClassId) -> CrefId {
+        let id = self.push_cref_node(outer, class, true);
+        self.crefs[id.0 as usize].refuses_def = true;
+        id
+    }
+
+    /// `Module.nesting`: the lexical scopes from `cref` outwards, innermost
+    /// first, without eval nodes and without the top level.
+    #[must_use]
+    pub fn nesting(&self, cref: CrefId) -> Vec<ClassId> {
+        let mut scopes = Vec::new();
+        let mut at = Some(cref);
+        while let Some(c) = at {
+            let node = self.cref(c);
+            if node.parent.is_some() && !node.pushed_by_eval {
+                scopes.push(node.class);
+            }
+            at = node.parent;
+        }
+        scopes
+    }
+
+    #[must_use]
+    pub fn cref_refuses_def(&self, cref: CrefId) -> bool {
+        self.cref(cref).refuses_def
+    }
+
+    /// The innermost scope that is not an eval node: where a class variable
+    /// resolves, since `@@a` in an `instance_eval` or `class_eval` block is the
+    /// block's own scope's. Measured.
+    #[must_use]
+    pub fn lexical_cref(&self, cref: CrefId) -> CrefId {
+        let mut scope = cref;
+        loop {
+            let node = self.cref(scope);
+            match node.parent {
+                Some(parent) if node.pushed_by_eval => scope = parent,
+                _ => return scope,
+            }
+        }
+    }
+
     fn push_cref_node(&mut self, outer: CrefId, class: ClassId, pushed_by_eval: bool) -> CrefId {
         let id = CrefId(self.crefs.len() as u32);
         self.crefs.push(CrefNode {
             class,
             parent: Some(outer),
             pushed_by_eval,
+            refuses_def: false,
         });
         id
     }
@@ -1318,6 +1474,7 @@ impl Classes {
             class: Builtin::Object.id(),
             parent: None,
             pushed_by_eval: false,
+            refuses_def: false,
         });
     }
 
@@ -1564,9 +1721,12 @@ impl Classes {
             visited: 0,
             singleton: None,
             is_singleton,
+            attached: None,
             constants: HashMap::new(),
+            constant_order: Vec::new(),
             private_constants: Vec::new(),
             class_variables: HashMap::new(),
+            cvar_order: Vec::new(),
         });
         // The inverse edge, so a later definition on the superclass can find
         // this class to invalidate. Nothing else needs invalidating here: a
@@ -1589,6 +1749,9 @@ impl Classes {
     pub(crate) fn each_root(&self, mut f: impl FnMut(Value)) {
         for entry in &self.entries {
             f(entry.object);
+            if let Some(attached) = entry.attached {
+                f(attached);
+            }
             for &(body, _, _) in entry.methods.values() {
                 f(body);
             }
@@ -1841,6 +2004,8 @@ impl<'h> HandleScope<'h> {
             .map(|name| format!("#<Class:{name}>"));
         let singleton = self.define(name.as_deref(), Kind::Class, superclass, true);
         self.classes_mut().entry_mut(id).singleton = Some(singleton);
+        let owner = self.classes().object(id);
+        self.classes_mut().entry_mut(singleton).attached = Some(owner);
         // The same header write `singleton_class_of` makes for an ordinary
         // object, and for the same reason: dispatch reads the header, so a
         // metaclass the table knows about and the header does not is a
@@ -1873,6 +2038,8 @@ impl<'h> HandleScope<'h> {
         }
         // Anonymous: naming it needs `inspect` on the object it belongs to.
         let singleton = self.define(None, Kind::Class, Some(class), true);
+        let owner = self.get(handle);
+        self.classes_mut().entry_mut(singleton).attached = Some(owner);
         let object = self.classes().object(singleton);
         self.set_class(handle, object);
         singleton
