@@ -124,29 +124,95 @@ class Enumerator
     inspect
   end
 
+  # External iteration (#26), on a Fiber (#16): the fiber runs `each`, and
+  # every element `each` yields suspends it until the next `next`. That is what
+  # a buffer of `to_a` cannot do — `Enumerator.new { loop { y << rand } }.next`
+  # has no end to buffer to.
+  #
+  # `next_values` is the element as the Array of what was yielded — `[]`, `[1]`,
+  # `[1, 2]`; `next` unwraps one value and leaves several as the Array. At the
+  # end both raise StopIteration carrying `each`'s own return value, and keep
+  # raising it until `rewind`. Every rule here was measured on ruby 4.0.7.
   def next
-    __needs_fibers__("next")
-  end
-
-  def peek
-    __needs_fibers__("peek")
-  end
-
-  def rewind
-    __needs_fibers__("rewind")
+    values = next_values
+    values.size <= 1 ? values[0] : values
   end
 
   def next_values
-    __needs_fibers__("next_values")
+    unless @__peeked__.nil?
+      values = @__peeked__
+      @__peeked__ = nil
+      return values
+    end
+    __raise_stop__ if @__finished__
+    @__runner__ ||= __runner__
+    # A producer that raises ends that iteration, and the next `next` starts a
+    # new one: measured, the same exception twice for `2.times { e.next }`.
+    begin
+      kind, payload = @__runner__.resume
+    rescue Exception
+      @__runner__ = nil
+      raise
+    end
+    if kind == :done
+      @__finished__ = true
+      @__result__ = payload
+      __raise_stop__
+    end
+    payload
+  end
+
+  def peek
+    values = peek_values
+    values.size <= 1 ? values[0] : values
   end
 
   def peek_values
-    __needs_fibers__("peek_values")
+    @__peeked__ = next_values if @__peeked__.nil?
+    @__peeked__.dup
   end
 
-  def __needs_fibers__(name)
-    raise NotImplementedError,
-          "Enumerator##{name} suspends the producing call, which needs fibers (#16)"
+  # Start again from the first element, and tell the source to as well if it
+  # can: `rewind` is passed on to an object that has one. Answers self.
+  def rewind
+    @__runner__ = nil
+    @__peeked__ = nil
+    @__finished__ = nil
+    @__result__ = nil
+    @__feed__ = nil
+    @__fed__ = nil
+    @object.rewind if !@object.nil? && @object.respond_to?(:rewind)
+    self
+  end
+
+  # What the producer's `yield` answers the next time `next` resumes it —
+  # once; a second `feed` before that is a TypeError.
+  def feed(value)
+    raise TypeError, "feed value already set" if @__fed__
+    @__feed__ = value
+    @__fed__ = true
+    nil
+  end
+
+  # The fiber that drives `each`, answering `[:value, args]` for every element
+  # and `[:done, result]` at the end.
+  def __runner__
+    Fiber.new do
+      result = each do |*args|
+        Fiber.yield([:value, args])
+        fed = @__feed__
+        @__feed__ = nil
+        @__fed__ = nil
+        fed
+      end
+      [:done, result]
+    end
+  end
+
+  def __raise_stop__
+    stop = StopIteration.new("iteration reached an end")
+    stop.instance_variable_set(:@result, @__result__)
+    raise stop
   end
 
   # `Enumerator::Lazy` — the chain that does not run until something forces it.
@@ -530,7 +596,10 @@ class Enumerator
     def each(&block)
       raise ArgumentError, "uninitialized chain" if @sources.nil?
       return to_enum(:each) if block.nil?
-      @sources.each { |source| source.each { |*values| block.call(*values) } }
+      @sources.each_with_index do |source, index|
+        @__started__ = index + 1 if (@__started__ || 0) < index + 1
+        source.each { |*values| block.call(*values) }
+      end
       self
     end
 
@@ -548,9 +617,19 @@ class Enumerator
       total
     end
 
+    # The sources iterated so far, last first, each that has a `rewind`.
+    # Measured: a chain never run rewinds nothing.
     def rewind
-      __needs_fibers__("rewind")
+      started = @__started__ || 0
+      @sources.__take__(0, started).reverse_each do |source|
+        source.rewind if source.respond_to?(:rewind)
+      end
+      @__started__ = 0
+      self
     end
+
+    # A chain is iterated with `each`; CRuby undefines external iteration.
+    undef_method :next, :peek, :next_values, :peek_values, :feed
 
     def inspect
       return "#<Enumerator::Chain: uninitialized>" if @sources.nil?
@@ -607,9 +686,13 @@ class Enumerator
       total
     end
 
+    # Every source that has a `rewind`, in order. Measured.
     def rewind
-      __needs_fibers__("rewind")
+      @sources.each { |source| source.rewind if source.respond_to?(:rewind) }
+      self
     end
+
+    undef_method :next, :peek, :next_values, :peek_values, :feed
 
     def inspect
       return "#<Enumerator::Product: uninitialized>" if @sources.nil?
@@ -679,15 +762,12 @@ class Enumerator
       self
     end
 
-    # `yield` forwards every value and answers nil — unlike `<<`, which chains.
+    # `yield` forwards every value and answers what the consuming block did —
+    # unlike `<<`, which chains. Measured: `Enumerator.new { |y| p y.yield(1) }
+    # .each { :z }` prints `:z`, and it is how `feed` reaches the producer.
+    # (There is no `Yielder#call` in CRuby.)
     def yield(*values)
       @block.call(*values)
-      nil
-    end
-
-    def call(*values)
-      @block.call(*values)
-      nil
     end
 
     def to_proc

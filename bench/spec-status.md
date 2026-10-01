@@ -20,7 +20,7 @@ Guards are answered for `linux`, which is what `scripts/spec-status.sh` pins so 
 | `core/dir` | 34 | 231 | 0 | 0 | 192 | 39 | 0% |
 | `core/encoding` | 45 | 319 | 0 | 0 | 309 | 10 | 0% |
 | `core/enumerable` | 61 | 446 | 348 | 0 | 94 | 4 | 78% |
-| `core/enumerator` | 73 | 390 | 170 | 0 | 219 | 1 | 44% |
+| `core/enumerator` | 73 | 390 | 216 | 0 | 173 | 1 | 55% |
 | `core/env` | 45 | 180 | 0 | 0 | 169 | 11 | 0% |
 | `core/exception` | 39 | 233 | 91 | 0 | 139 | 3 | 39% |
 | `core/false` | 9 | 13 | 6 | 0 | 7 | 0 | 46% |
@@ -32,7 +32,7 @@ Guards are answered for `linux`, which is what `scripts/spec-status.sh` pins so 
 | `core/hash` | 69 | 460 | 335 | 0 | 118 | 7 | 73% |
 | `core/integer` | 70 | 526 | 172 | 0 | 349 | 5 | 33% |
 | `core/io` | 103 | 1095 | 0 | 0 | 1024 | 71 | 0% |
-| `core/kernel` | 118 | 1277 | 166 | 0 | 1051 | 60 | 13% |
+| `core/kernel` | 118 | 1277 | 168 | 0 | 1049 | 60 | 13% |
 | `core/main` | 7 | 27 | 2 | 0 | 25 | 0 | 7% |
 | `core/marshal` | 6 | 330 | 0 | 0 | 324 | 6 | 0% |
 | `core/matchdata` | 30 | 191 | 64 | 0 | 107 | 20 | 34% |
@@ -131,4 +131,4 @@ Guards are answered for `linux`, which is what `scripts/spec-status.sh` pins so 
 | `optional/capi` | 47 | 1651 | 10 | 0 | 1561 | 80 | 1% |
 | `optional/thread_safety` | 1 | 5 | 0 | 0 | 4 | 1 | 0% |
 | `security` | 13 | 27 | 0 | 0 | 25 | 2 | 0% |
-| **total** | 3835 | 25624 | 4252 | 0 | 19439 | 1933 | 17% |
+| **total** | 3835 | 25624 | 4300 | 0 | 19391 | 1933 | 17% |

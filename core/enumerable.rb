@@ -30,7 +30,12 @@ module Enumerable
 
   def to_a(*args)
     out = []
-    each(*args) { |*a| out.push(__pack__(a)) }
+    # The block answers nil, as CRuby's C collector does: a producer reading
+    # `y.yield`'s value sees nil, measured, not the Array being built.
+    each(*args) do |*a|
+      out.push(__pack__(a))
+      nil
+    end
     out
   end
 
