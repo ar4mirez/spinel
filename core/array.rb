@@ -317,8 +317,70 @@ class Array
     size <=> other.size
   end
 
+  # Element by element with each element's own `eql?`, so `[1].eql?([1.0])` is
+  # false where `==` is true. Same recursion rule as `==`.
   def eql?(other)
-    other.is_a?(Array) && self == other
+    return true if equal?(other)
+    return false unless other.is_a?(Array) && size == other.size
+    comparing = Array.__comparing__
+    return true if comparing.any? { |a, b| a.equal?(self) && b.equal?(other) }
+    comparing.push([self, other])
+    begin
+      i = 0
+      while i < size
+        return false unless self[i].eql?(other[i])
+        i = i + 1
+      end
+    ensure
+      comparing.pop
+    end
+    true
+  end
+
+  # A fold of the elements' own `hash` (#22), so an Array holding a Hash, or a
+  # key class with a custom `hash`, digests by content the way `eql?` compares.
+  # The class is not in it: measured, a subclass hashes like a plain Array.
+  def hash
+    __recursive_hash__(__hash_combine__(:__spinel_recursive_array__, size)) do
+      digest = __hash_combine__(:__spinel_array__, size)
+      i = 0
+      while i < size
+        digest = __hash_combine__(digest, __element_hash__(self[i]))
+        i = i + 1
+      end
+      digest
+    end
+  end
+
+  # Element by element, each compared with its own `==` — which is what lets an
+  # Array of Hashes compare, now that `Hash#==` is Ruby (#22). Measured on ruby
+  # 4.0.7: a non-Array that has `to_ary` is asked `other == self`, and two
+  # Arrays that contain themselves compare equal rather than recursing forever.
+  def ==(other)
+    return true if equal?(other)
+    unless other.is_a?(Array)
+      return false unless other.respond_to?(:to_ary)
+      return other == self ? true : false
+    end
+    return false unless size == other.size
+    comparing = Array.__comparing__
+    return true if comparing.any? { |a, b| a.equal?(self) && b.equal?(other) }
+    comparing.push([self, other])
+    begin
+      i = 0
+      while i < size
+        return false unless self[i] == other[i]
+        i = i + 1
+      end
+    ensure
+      comparing.pop
+    end
+    true
+  end
+
+  # The pairs `==` is part-way through, innermost last. Per heap, on `Array`.
+  def self.__comparing__
+    @__comparing__ ||= []
   end
 
   def to_a

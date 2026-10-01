@@ -206,7 +206,8 @@ class Enumerator
 
     def size
       raise ArgumentError, "uninitialized enumerator" if @setup.nil?
-      @size
+      # A Proc size is asked each time, as `Enumerator#size` asks it.
+      @size.respond_to?(:call) ? @size.call : @size
     end
 
     def lazy
@@ -594,7 +595,10 @@ class Enumerator
     end
   end
 
-  def self.product(*sources, &block)
+  # No keywords, but it takes `**` so that one is reported by name rather than
+  # arriving as a trailing Hash to multiply by. Measured wording.
+  def self.product(*sources, **unknown, &block)
+    Enumerator.__unknown_keywords__(unknown)
     made = Product.new(*sources)
     return made if block.nil?
     made.each(&block)
@@ -605,12 +609,16 @@ class Enumerator
   # `loop` swallows. Its `size` is `Float::INFINITY` in Ruby and this VM has
   # only flonums, so `size` is left to report the missing constant by name
   # rather than answering `nil`, which would be a wrong answer (#18).
-  def self.produce(*initial, &block)
+  #
+  # Ruby 4.0 takes `size:`, which is the size the enumerator reports.
+  def self.produce(*initial, size: :__spinel_no_size__, **unknown, &block)
+    Enumerator.__unknown_keywords__(unknown)
     raise ArgumentError, "no block given" if block.nil?
     if initial.size > 1
       raise ArgumentError, "wrong number of arguments (given #{initial.size}, expected 0..1)"
     end
-    new do |y|
+    sized = size.equal?(:__spinel_no_size__) ? [] : [size]
+    new(*sized) do |y|
       value = initial.empty? ? block.call(nil) : initial[0]
       loop do
         y.yield(value)
@@ -621,6 +629,12 @@ class Enumerator
 
   def +(other)
     Chain.new(self, other)
+  end
+
+  def self.__unknown_keywords__(unknown)
+    return if unknown.empty?
+    names = unknown.keys.map(&:inspect).join(", ")
+    raise ArgumentError, (unknown.size == 1 ? "unknown keyword: " : "unknown keywords: ") + names
   end
 
   # The object a generator block writes into. `y << v` and `y.yield v` both

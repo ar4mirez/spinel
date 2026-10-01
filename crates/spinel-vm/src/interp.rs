@@ -186,6 +186,20 @@ impl Frame {
         self.slots = self.slots.max(slots);
     }
 
+    /// Write `value` into local `slot`, growing the frame to hold it.
+    ///
+    /// The harness parks a value it already computed here so a compiled
+    /// expression can read it back by name — which is how `x.should == y`
+    /// dispatches `==` to Ruby without evaluating `x` a second time.
+    pub fn set_local(&mut self, scope: &mut HandleScope<'_>, slot: usize, value: Value) {
+        let value = scope.root(value);
+        self.reserve(slot + 1);
+        let env = self.env(scope);
+        let env = scope.root(env);
+        let value = scope.get(value);
+        scope.set_slot(env, ENV_HEADER + slot, value);
+    }
+
     /// This frame's environment, allocated or grown to fit `slots`.
     fn env(&mut self, scope: &mut HandleScope<'_>) -> Value {
         let needed = self.slots;
@@ -1750,7 +1764,7 @@ fn pop_call<'h>(
     let at = stack.len() - site.argc as usize;
     let mut args: Vec<Value> = stack.drain(at..).collect();
     if !site.splats.is_empty() {
-        args = expand_splats(scope, args, &site.splats);
+        args = expand_splats(scope, args, &site.splats)?;
     }
 
     let receiver = if has_receiver {
@@ -1792,26 +1806,63 @@ fn pop_call<'h>(
 /// `*nil` contributes nothing, because `nil.to_a` is `[]` — `f(*nil)` passes no
 /// arguments at all, and `yield(1, 2, *nil)` yields two.
 ///
-// ponytail: any other non-Array splat is still passed through rather than sent
-// `to_a`, which is right for an object that has none and wrong for one that
-// does. Sending it means re-entering the interpreter from argument assembly;
-// the upgrade is to expand splats in the compiler instead, where a send is just
-// another instruction.
-fn expand_splats(scope: &mut HandleScope<'_>, args: Vec<Value>, splats: &[u16]) -> Vec<Value> {
+/// A `Hash` whose `to_a` is still `core/hash.rb`'s is spliced as its pairs,
+/// read straight from the table — `f(*{a: 1})` passes `[:a, 1]`, measured —
+/// which is that method's answer without a Ruby call. An object without `to_a`
+/// is passed as itself, which is Ruby.
+///
+// ponytail: any other object that *has* a `to_a` is refused rather than sent
+// it: sending means re-entering the interpreter from argument assembly, and
+// passing it through was a wrong answer. The upgrade is to expand splats in the
+// compiler instead, where a send is just another instruction.
+fn expand_splats(
+    scope: &mut HandleScope<'_>,
+    args: Vec<Value>,
+    splats: &[u16],
+) -> Result<Vec<Value>, Error> {
+    let to_a = crate::shared::symbols::intern("to_a");
+    // Rooted, every one: the arguments have left the stack, and copying a
+    // Hash's pairs allocates, which may collect.
+    let args: Vec<_> = args.into_iter().map(|arg| scope.root(arg)).collect();
     let mut out = Vec::with_capacity(args.len());
     for (index, arg) in args.into_iter().enumerate() {
+        let arg = scope.get(arg);
         if splats.contains(&(index as u16)) {
             if arg == Value::NIL {
                 continue;
             }
             if let Some(elements) = array_elements(scope, arg) {
-                out.extend(elements);
+                out.extend(elements.into_iter().map(|e| scope.root(e)));
                 continue;
             }
+            let owner = class_of(scope, arg)
+                .and_then(|class| scope.classes_mut().lookup(class, to_a))
+                .map(|method| method.owner);
+            match owner {
+                None => {}
+                Some(owner) if owner == Builtin::Hash.id() => {
+                    let pairs = ivar_get(scope, arg, symbol("@pairs"))?;
+                    let pairs = scope.root(pairs);
+                    let count = array_elements(scope, scope.get(pairs)).map_or(0, |p| p.len());
+                    for at in 0..count {
+                        let pair = array_get(scope, pairs, at);
+                        let parts = array_elements(scope, pair).unwrap_or_default();
+                        let copy = new_array(scope, &parts);
+                        out.push(scope.root(copy));
+                    }
+                    continue;
+                }
+                Some(_) => {
+                    return Err(Error::NoDispatch {
+                        op: "*",
+                        operands: "a splatted argument whose `to_a` is Ruby",
+                    });
+                }
+            }
         }
-        out.push(arg);
+        out.push(scope.root(arg));
     }
-    out
+    Ok(out.into_iter().map(|handle| scope.get(handle)).collect())
 }
 
 /// Push a frame for the call, or compute it outright when it is a primitive.
@@ -2143,6 +2194,21 @@ fn bind(
     let lambda = binding == Binding::Strict;
     let mut args = call.args.clone();
 
+    // A callee that declares no keywords takes keywords as one trailing
+    // positional Hash (#22): `def m(h) = h; m(a: 1)` is `{a: 1}`, and it counts
+    // toward the arity like any argument. `**nil` is the one callee that
+    // refuses instead, which `bind_keywords` says.
+    if !spec.no_keywords
+        && spec.keywords.is_empty()
+        && spec.kwrest.is_none()
+        && !call.keywords.is_empty()
+    {
+        let rooted: Vec<_> = args.iter().map(|&arg| scope.root(arg)).collect();
+        let hash = hash_of_pairs(scope, &call.keywords)?;
+        args = rooted.iter().map(|&handle| scope.get(handle)).collect();
+        args.push(hash);
+    }
+
     // A block with room for more than one value spreads a single Array across
     // its parameters; `{ |a| }` and `{ |*a| }` do not. This is most of what
     // `block_spec.rb` checks.
@@ -2263,15 +2329,9 @@ fn bind_keywords(
         return Err(Error::raise("ArgumentError", "no keywords accepted"));
     }
     // A callee that declares no keywords at all does not *reject* them: Ruby
-    // packs them into a trailing positional Hash. Still not dispatchable —
-    // saying `ArgumentError: unknown keyword` here would claim Ruby raises
-    // where Ruby does not, which is the one thing the blocked report must
-    // never do.
-    if spec.keywords.is_empty() && spec.kwrest.is_none() && !call.keywords.is_empty() {
-        return Err(Error::NoDispatch {
-            op: "a keyword argument",
-            operands: "a method with no keyword parameters, which needs a Hash",
-        });
+    // packs them into a trailing positional Hash, which `bind` already did.
+    if spec.keywords.is_empty() && spec.kwrest.is_none() {
+        return Ok(());
     }
 
     for keyword in &spec.keywords {
@@ -2322,6 +2382,35 @@ fn bind_keywords(
     let collected = new_array(scope, &rest);
     env_set(scope, env, slot as usize, collected);
     Ok(())
+}
+
+/// A `Hash` holding `pairs`, built the way `Hash.allocate` builds one: the
+/// three ivars `core/hash.rb` reads. The binder cannot send `Hash.[]`, and a
+/// Hash is only these ivars, so it writes them.
+///
+// ponytail: the second place outside `core/hash.rb` that knows the
+// representation, beside `hash_pairs`; both move behind a primitive when the
+// open-addressed table arrives.
+fn hash_of_pairs(scope: &mut HandleScope<'_>, pairs: &[(Value, Value)]) -> Result<Value, Error> {
+    let rooted: Vec<_> = pairs
+        .iter()
+        .map(|&(key, value)| (scope.root(key), scope.root(value)))
+        .collect();
+    let class = class_handle(scope, Builtin::Hash);
+    let handle = alloc_ivar_object(scope, Some(class));
+    let mut entries = Vec::with_capacity(rooted.len());
+    for &(key, value) in &rooted {
+        let parts = [scope.get(key), scope.get(value)];
+        let entry = new_array(scope, &parts);
+        entries.push(scope.root(entry));
+    }
+    let entries: Vec<Value> = entries.iter().map(|&h| scope.get(h)).collect();
+    let list = new_array(scope, &entries);
+    let object = scope.get(handle);
+    ivar_set(scope, object, symbol("@pairs"), list)?;
+    ivar_set(scope, object, symbol("@default"), Value::NIL)?;
+    ivar_set(scope, object, symbol("@default_is_proc"), Value::FALSE)?;
+    Ok(object)
 }
 
 /// How a keyword name reads in an `ArgumentError`.
@@ -4301,6 +4390,15 @@ fn hash_value(
             needs: "cycle detection, which this VM does not track",
         });
     }
+    // A bignum is a heap object with content equality, so it hashes by value:
+    // `(2**70).hash == (2**70).hash` although the two are different objects.
+    if crate::bignum::is_big(scope, value)
+        && let Some(n) = crate::bignum::read(scope, value)
+    {
+        3u8.hash(hasher);
+        n.hash(hasher);
+        return Ok(());
+    }
     match heap_kind(scope, value) {
         Some(HeapKind::Str) => {
             let handle = scope.root(value);
@@ -5630,6 +5728,17 @@ fn native_call<'h>(
             Ok(None)
         }
 
+        Native::HashCombine => {
+            let mut hasher = std::hash::DefaultHasher::new();
+            for &value in &call.args {
+                hash_value(scope, value, &mut hasher, 0)?;
+            }
+            // A fixnum, as `hash` always is: the same shift `HashValue` uses.
+            let bits = std::hash::Hasher::finish(&hasher) >> 2;
+            stack.push(Value::fixnum(bits as i64).unwrap_or(Value::NIL));
+            Ok(None)
+        }
+
         Native::HashValue => {
             let mut hasher = std::hash::DefaultHasher::new();
             hash_value(scope, call.receiver, &mut hasher, 0)?;
@@ -6527,6 +6636,30 @@ fn native_call<'h>(
                 _ => (first_arg(&call), call.receiver),
             };
             let data = regexp_match_from(scope, regexp, subject, nth_arg(&call, 1))?;
+            // With a block, a match is yielded and the block's value is the
+            // answer; no match yields nothing and answers nil. Measured. The
+            // block's frame is pushed here rather than from a Ruby wrapper so
+            // `$~` stays set in the caller's frame, where Ruby puts it.
+            if call.block != Value::NIL && data != Value::NIL {
+                let block = call.block;
+                let inner = Pending {
+                    cache: None,
+                    name: call.name,
+                    receiver: block,
+                    args: vec![data],
+                    keywords: Vec::new(),
+                    block: Value::NIL,
+                    block_is_literal: false,
+                    cref: call.cref,
+                    implicit_self: false,
+                    public_only: false,
+                    target: Target::Block(block),
+                    owner: None,
+                    defined_as: None,
+                };
+                push_proc_frame(scope, stack, frames, &inner, block, ids)?;
+                return Ok(None);
+            }
             stack.push(data);
             Ok(None)
         }
@@ -7042,6 +7175,7 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             &["__needs_threads__"],
             Native::NeedsThreads,
         ),
+        (Builtin::Kernel, &["__hash_combine__"], Native::HashCombine),
         (
             Builtin::Kernel,
             &["__absolute_path__"],

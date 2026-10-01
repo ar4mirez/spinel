@@ -1,0 +1,1 @@
+fails(a to_ary answered by method_missing and respond_to_missing? is not seen, because neither is dispatched yet: #28):A block yielded a single Object calls #to_ary on the object when it is defined dynamically

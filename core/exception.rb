@@ -28,9 +28,16 @@ class Exception
     text.empty? ? self.class.name : "#<" + self.class.name + ": " + text + ">"
   end
 
-  def exception(text = nil)
-    return self if text.nil?
-    self.class.new(text)
+  # No argument, or the exception itself, is the exception itself — CRuby's
+  # `exc_exception` checks identity before anything else. Anything else, nil
+  # included, is a new one of the same class carrying that message: measured,
+  # `e.exception(nil)` is a different object whose message is the class name.
+  def exception(*given)
+    if given.size > 1
+      raise ArgumentError, "wrong number of arguments (given #{given.size}, expected 0..1)"
+    end
+    return self if given.empty? || given[0].equal?(self)
+    self.class.new(given[0])
   end
 
   def ==(other)
