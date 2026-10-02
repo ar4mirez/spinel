@@ -208,7 +208,7 @@ fn a_missing_method_reads_like_ruby_and_says_who_is_unfinished() {
     assert!(!out.status.success());
     let err = stderr(&out);
     assert!(
-        err.contains("undefined method 'upcase' for an instance of String (NoMethodError)"),
+        err.contains("undefined method 'crypt' for an instance of String (NoMethodError)"),
         "should be Ruby's wording: {err}"
     );
     assert!(
@@ -227,8 +227,8 @@ fn a_missing_method_can_be_rescued() {
     assert_eq!(
         stdout(&out),
         "NoMethodError\n\
-         undefined method 'upcase' for an instance of String\n\
-         :upcase\n\
+         undefined method 'crypt' for an instance of String\n\
+         :crypt\n\
          spinel\n"
     );
 }

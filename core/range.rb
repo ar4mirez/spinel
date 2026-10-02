@@ -309,6 +309,7 @@ class Range
   # a walk for everything else, which an open end makes impossible.
   def include?(value)
     return cover?(value) if __linear__?
+    return __string_include__(value) if @__begin__.is_a?(String) && @__end__.is_a?(String)
     if @__begin__.nil? || @__end__.nil?
       raise TypeError, "cannot determine inclusion in beginless/endless ranges"
     end
@@ -318,6 +319,21 @@ class Range
 
   def member?(value)
     include?(value)
+  end
+
+  # CRuby's `rb_str_include_range_p`: the argument as a String (anything
+  # that does not convert is simply not a member), then the `upto` walk.
+  def __string_include__(value)
+    unless value.is_a?(String)
+      return false unless value.respond_to?(:to_str)
+      converted = value.to_str
+      unless converted.is_a?(String)
+        raise TypeError, "can't convert #{value.class} to String (#{value.class}#to_str gives #{converted.class})"
+      end
+      value = converted
+    end
+    @__begin__.upto(@__end__, exclude_end?) { |member| return true if member == value }
+    false
   end
 
   def __linear__?

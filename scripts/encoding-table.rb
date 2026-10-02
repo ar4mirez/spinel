@@ -1,7 +1,8 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# The oracle behind `crates/spinel-vm/src/encoding_table.rs` (#19).
+# The oracle behind `crates/spinel-vm/src/encoding_table.rs` (#19): CRuby's
+# encodings, and the Unicode character classes `String#succ` steps within.
 #
 # Spinel's `Encoding` objects are CRuby's list: every name, in CRuby's index
 # order, with its aliases and its two flags. The table is generated from a real
@@ -18,7 +19,30 @@
 TABLE = File.expand_path("../crates/spinel-vm/src/encoding_table.rs", __dir__)
 RUNTIME_ALIASES = %w[locale external filesystem internal].freeze
 
+# Codepoint ranges Onigmo's `[[:alpha:]]` or `[[:digit:]]` matches in UTF-8:
+# the character classes `String#succ` steps within (#19), as CRuby's Unicode
+# version has them.
+def ranges(pattern)
+  out = []
+  start = nil
+  last = nil
+  (0..0x10FFFF).each do |code|
+    next if code >= 0xD800 && code <= 0xDFFF
+    if code.chr(Encoding::UTF_8).match?(pattern)
+      start ||= code
+      last = code
+    elsif start
+      out << [start, last]
+      start = nil
+    end
+  end
+  out << [start, last] if start
+  out.map { |(first, final)| format("    (0x%X, 0x%X),", first, final) }
+end
+
 def render
+  alpha = ranges(/\A[[:alpha:]]\z/)
+  digit = ranges(/\A[[:digit:]]\z/)
   aliases = Hash.new { |h, k| h[k] = [] }
   Encoding.aliases.each do |name, target|
     aliases[target] << name unless RUNTIME_ALIASES.include?(name)
@@ -50,6 +74,19 @@ def render
     #[rustfmt::skip]
     pub const CONSTANTS: &[(&str, u8)] = &[
     #{constants.join("\n")}
+    ];
+
+    /// Unicode #{RbConfig::CONFIG["UNICODE_VERSION"]} codepoint ranges that are alphabetic, as
+    /// Onigmo's `[[:alpha:]]` decides — what `String#succ` treats as a letter.
+    #[rustfmt::skip]
+    pub const ALPHA: &[(u32, u32)] = &[
+    #{alpha.join("\n")}
+    ];
+
+    /// The decimal digits (`[[:digit:]]`): what `String#succ` treats as a digit.
+    #[rustfmt::skip]
+    pub const DIGIT: &[(u32, u32)] = &[
+    #{digit.join("\n")}
     ];
   RUST
 end

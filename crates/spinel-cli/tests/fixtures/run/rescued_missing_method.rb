@@ -2,7 +2,7 @@
 # one. Before that it was a Rust-level error that unwound past every handler and
 # ended the run, and this file printed nothing.
 begin
-  "spinel".upcase
+  "spinel".crypt("ab")
 rescue NoMethodError => e
   puts e.class
   puts e.message

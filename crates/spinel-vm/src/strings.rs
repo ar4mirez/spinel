@@ -255,6 +255,425 @@ pub fn index_named(name: &str) -> Option<u8> {
         .and_then(|index| u8::try_from(index).ok())
 }
 
+/// What `enc_succ_char` and `enc_pred_char` report: a neighbour of the same
+/// length, a wrap past the end of that length, or nothing usable.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Neighbor {
+    Found,
+    Wrapped,
+    NotChar,
+}
+
+/// A character's class for `succ`: Onigmo's `[[:digit:]]` or `[[:alpha:]]`,
+/// Unicode's in UTF-8 and ASCII's in a byte encoding.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Ctype {
+    Digit,
+    Alpha,
+}
+
+fn in_ranges(ranges: &[(u32, u32)], code: u32) -> bool {
+    ranges
+        .binary_search_by(|&(first, last)| {
+            if code < first {
+                std::cmp::Ordering::Greater
+            } else if code > last {
+                std::cmp::Ordering::Less
+            } else {
+                std::cmp::Ordering::Equal
+            }
+        })
+        .is_ok()
+}
+
+fn ctype_of(encoding: u8, code: u32) -> Option<Ctype> {
+    if encoding == UTF_8 {
+        if in_ranges(crate::encoding_table::DIGIT, code) {
+            return Some(Ctype::Digit);
+        }
+        return in_ranges(crate::encoding_table::ALPHA, code).then_some(Ctype::Alpha);
+    }
+    match u8::try_from(code).ok()? {
+        b if b.is_ascii_digit() => Some(Ctype::Digit),
+        b if b.is_ascii_alphabetic() => Some(Ctype::Alpha),
+        _ => None,
+    }
+}
+
+fn utf8_len(code: u32) -> usize {
+    match code {
+        0..=0x7f => 1,
+        0x80..=0x7ff => 2,
+        0x800..=0xffff => 3,
+        _ => 4,
+    }
+}
+
+/// The next character of the same byte length: a UTF-8 codepoint skipping
+/// the surrogates, or a byte. Past the end of the length it wraps to the
+/// lowest character of that length.
+fn succ_char(encoding: u8, code: u32, len: usize) -> (Neighbor, u32) {
+    if encoding != UTF_8 {
+        return if code >= 0xff {
+            (Neighbor::Wrapped, 0)
+        } else {
+            (Neighbor::Found, code + 1)
+        };
+    }
+    let mut next = code + 1;
+    if (0xd800..=0xdfff).contains(&next) {
+        next = 0xe000;
+    }
+    if next > 0x10_ffff || utf8_len(next) != len {
+        let lowest = [0, 0x80, 0x800, 0x1_0000][len - 1];
+        return (Neighbor::Wrapped, lowest);
+    }
+    (Neighbor::Found, next)
+}
+
+fn pred_char(encoding: u8, code: u32, len: usize) -> Option<u32> {
+    if code == 0 {
+        return None;
+    }
+    let mut previous = code - 1;
+    if encoding == UTF_8 && (0xd800..=0xdfff).contains(&previous) {
+        previous = 0xd7ff;
+    }
+    (encoding != UTF_8 || utf8_len(previous) == len).then_some(previous)
+}
+
+/// `enc_succ_alnum_char`: the next character of the same class, allowing one
+/// gap; or, at the end of a run of that class, the run's first character and
+/// the carry to insert — the first again for letters, the second for digits
+/// (`z` wraps to `a` carrying `a`, `9` to `0` carrying `1`).
+fn succ_alnum_char(encoding: u8, code: u32, len: usize) -> (Neighbor, u32, u32) {
+    let Some(class) = ctype_of(encoding, code) else {
+        return (Neighbor::NotChar, code, code);
+    };
+    let mut probe = code;
+    for _ in 0..=1 {
+        let (found, next) = succ_char(encoding, probe, len);
+        probe = next;
+        if found == Neighbor::Found && ctype_of(encoding, next) == Some(class) {
+            return (Neighbor::Found, next, next);
+        }
+    }
+    let mut first = code;
+    let mut range = 1;
+    while let Some(previous) = pred_char(encoding, first, len) {
+        if ctype_of(encoding, previous) != Some(class) {
+            break;
+        }
+        first = previous;
+        range += 1;
+    }
+    if range == 1 {
+        return (Neighbor::NotChar, code, code);
+    }
+    let carry = match class {
+        Ctype::Alpha => first,
+        Ctype::Digit => succ_char(encoding, first, len).1,
+    };
+    (Neighbor::Wrapped, first, carry)
+}
+
+fn encode_char(encoding: u8, code: u32) -> Vec<u8> {
+    if encoding != UTF_8 {
+        return vec![code as u8];
+    }
+    let mut buffer = [0u8; 4];
+    char::from_u32(code).map_or_else(Vec::new, |c| c.encode_utf8(&mut buffer).as_bytes().to_vec())
+}
+
+/// CRuby's `str_succ`, ported: the rightmost alphanumeric — Unicode's
+/// letters and digits in UTF-8 — steps within its class, wrapping and
+/// carrying leftward over the others; a non-alphanumeric between a letter and
+/// a digit stops the carry (`"a.9"` → `"a.10"`), and a carry off the left
+/// inserts a new first character. With no alphanumerics the last character
+/// steps, wrapping bytewise. `None` for an encoding this VM cannot walk.
+#[must_use]
+pub fn succ(encoding: u8, bytes: &[u8]) -> Option<Vec<u8>> {
+    if bytes.is_empty() {
+        return Some(Vec::new());
+    }
+    let offsets = char_offsets(encoding, bytes)?;
+    // Each character as (start, len, code), or None for an invalid byte,
+    // which `succ` steps over.
+    let chars: Vec<Option<(usize, usize, u32)>> = offsets
+        .windows(2)
+        .map(|w| {
+            let piece = &bytes[w[0]..w[1]];
+            if encoding == UTF_8 {
+                std::str::from_utf8(piece)
+                    .ok()
+                    .and_then(|text| text.chars().next())
+                    .map(|c| (w[0], piece.len(), u32::from(c)))
+            } else {
+                Some((w[0], 1, u32::from(piece[0])))
+            }
+        })
+        .collect();
+    let mut out = bytes.to_vec();
+    let mut neighbor = Neighbor::Found;
+    let mut last_alnum: Option<u8> = None;
+    let mut any_alnum = false;
+    let mut carry: Vec<u8> = vec![1];
+    let mut carry_pos = 0;
+    for &entry in chars.iter().rev() {
+        let Some((start, len, code)) = entry else {
+            continue;
+        };
+        if neighbor == Neighbor::NotChar
+            && let Some(last) = last_alnum
+        {
+            let first = u32::from(out[start]);
+            let alpha = |b: u32| u8::try_from(b).is_ok_and(|b| b.is_ascii_alphabetic());
+            let digit = |b: u32| u8::try_from(b).is_ok_and(|b| b.is_ascii_digit());
+            let last = u32::from(last);
+            if (alpha(last) && digit(first)) || (digit(last) && alpha(first)) {
+                break;
+            }
+        }
+        let (result, next, carried) = succ_alnum_char(encoding, code, len);
+        neighbor = result;
+        match result {
+            Neighbor::NotChar => continue,
+            Neighbor::Found => {
+                out.splice(start..start + len, encode_char(encoding, next));
+                return Some(out);
+            }
+            Neighbor::Wrapped => {
+                let wrapped = encode_char(encoding, next);
+                last_alnum = wrapped.first().copied();
+                out.splice(start..start + len, wrapped);
+                any_alnum = true;
+                carry_pos = start;
+                carry = encode_char(encoding, carried);
+            }
+        }
+    }
+    if !any_alnum {
+        for &entry in chars.iter().rev() {
+            let Some((start, len, code)) = entry else {
+                continue;
+            };
+            let (result, next) = succ_char(encoding, code, len);
+            out.splice(start..start + len, encode_char(encoding, next));
+            if result == Neighbor::Found {
+                return Some(out);
+            }
+            carry_pos = start;
+            carry = vec![1];
+        }
+    }
+    out.splice(carry_pos..carry_pos, carry);
+    Some(out)
+}
+
+/// The first `needle` in `haystack` at or after byte `start`.
+#[must_use]
+pub fn find(haystack: &[u8], needle: &[u8], start: usize) -> Option<usize> {
+    if start > haystack.len() {
+        return None;
+    }
+    if needle.is_empty() {
+        return Some(start);
+    }
+    haystack[start..]
+        .windows(needle.len())
+        .position(|window| window == needle)
+        .map(|at| at + start)
+}
+
+/// The last `needle` in `haystack` starting at or before byte `start`.
+#[must_use]
+pub fn rfind(haystack: &[u8], needle: &[u8], start: usize) -> Option<usize> {
+    if needle.len() > haystack.len() {
+        return None;
+    }
+    let last = start.min(haystack.len() - needle.len());
+    (0..=last)
+        .rev()
+        .find(|&at| &haystack[at..at + needle.len()] == needle)
+}
+
+/// Case mapping (#19): kind 0 upcase, 1 downcase, 2 swapcase, 3 capitalize,
+/// 4 fold. Full Unicode mapping for UTF-8 — Rust's, which is Unicode's,
+/// `"ß".upcase` is `"SS"` — and ASCII letters only for `ascii_only`, for
+/// US-ASCII and BINARY, and for an invalid UTF-8 string's bytes. `None` for an
+/// encoding this VM cannot walk.
+#[must_use]
+pub fn case_map(
+    encoding: u8,
+    bytes: &[u8],
+    kind: u8,
+    ascii_only: bool,
+    turkic: bool,
+) -> Option<Vec<u8>> {
+    let ascii = |b: u8, first: bool| -> u8 {
+        match kind {
+            0 => b.to_ascii_uppercase(),
+            1 | 4 => b.to_ascii_lowercase(),
+            2 if b.is_ascii_uppercase() => b.to_ascii_lowercase(),
+            2 => b.to_ascii_uppercase(),
+            _ if first => b.to_ascii_uppercase(),
+            _ => b.to_ascii_lowercase(),
+        }
+    };
+    let text = match encoding {
+        UTF_8 if !ascii_only => std::str::from_utf8(bytes).ok(),
+        UTF_8 | BINARY | US_ASCII => None,
+        _ => return None,
+    };
+    let Some(text) = text else {
+        return Some(
+            bytes
+                .iter()
+                .enumerate()
+                .map(|(i, &b)| ascii(b, i == 0))
+                .collect(),
+        );
+    };
+    let mut out = String::with_capacity(text.len());
+    for (i, c) in text.chars().enumerate() {
+        let upper = |out: &mut String, c: char| match c {
+            'i' if turkic => out.push('İ'),
+            _ => out.extend(c.to_uppercase()),
+        };
+        let lower = |out: &mut String, c: char| match c {
+            'I' if turkic => out.push('ı'),
+            'İ' if turkic => out.push('i'),
+            _ => out.extend(c.to_lowercase()),
+        };
+        match kind {
+            0 => upper(&mut out, c),
+            1 => lower(&mut out, c),
+            4 => match c {
+                // Case folding is lowercasing plus the few characters whose
+                // fold differs: the sharp s folds to "ss".
+                'ß' => out.push_str("ss"),
+                _ => lower(&mut out, c),
+            },
+            2 if c.is_uppercase() => lower(&mut out, c),
+            2 if c.is_lowercase() => upper(&mut out, c),
+            2 => out.push(c),
+            // Titlecase, which for a character whose uppercase is several
+            // (`ß` → `SS`) is the first of them followed by the rest
+            // lowercased: `"ß".capitalize` is `"Ss"`.
+            _ if i == 0 => match titlecase(c) {
+                Some(title) => out.push(title),
+                None => {
+                    let mut up = String::new();
+                    upper(&mut up, c);
+                    let mut chars = up.chars();
+                    if let Some(first) = chars.next() {
+                        out.push(first);
+                    }
+                    for rest in chars {
+                        out.extend(rest.to_lowercase());
+                    }
+                }
+            },
+            _ => lower(&mut out, c),
+        }
+    }
+    Some(out.into_bytes())
+}
+
+/// The few characters whose titlecase is not their uppercase: the Latin
+/// digraphs, `ǆ` capitalizing to `ǅ`. Unicode's whole list of them.
+fn titlecase(c: char) -> Option<char> {
+    match c {
+        'Ǆ' | 'ǅ' | 'ǆ' => Some('ǅ'),
+        'Ǉ' | 'ǈ' | 'ǉ' => Some('ǈ'),
+        'Ǌ' | 'ǋ' | 'ǌ' => Some('ǋ'),
+        'Ǳ' | 'ǲ' | 'ǳ' => Some('ǲ'),
+        _ => None,
+    }
+}
+
+/// A non-negative float's digits as C's printf writes them for `%f`, `%e`
+/// and `%g` (capitals for the uppercase forms), at `precision`. `alternate`
+/// is `#`: a decimal point always, and `%g` keeps its trailing zeros. `None`
+/// for any other conversion.
+#[must_use]
+pub fn format_float(f: f64, conversion: u8, precision: usize, alternate: bool) -> Option<String> {
+    let upper = conversion.is_ascii_uppercase();
+    let text = match conversion.to_ascii_lowercase() {
+        b'f' => {
+            let mut text = format!("{f:.precision$}");
+            if alternate && precision == 0 {
+                text.push('.');
+            }
+            text
+        }
+        b'e' => exponent_form(f, precision, alternate),
+        b'g' => {
+            let p = precision.max(1);
+            let exponent = if f == 0.0 {
+                0
+            } else {
+                // The exponent `%e` would print after rounding to `p` digits.
+                let rounded = format!("{:.*e}", p - 1, f);
+                rounded
+                    .rsplit('e')
+                    .next()
+                    .and_then(|e| e.parse::<i32>().ok())
+                    .unwrap_or(0)
+            };
+            let mut text = if exponent < -4 || exponent >= p as i32 {
+                exponent_form(f, p - 1, alternate)
+            } else {
+                let decimals = (p as i32 - 1 - exponent).max(0) as usize;
+                let mut text = format!("{f:.decimals$}");
+                if alternate && !text.contains('.') {
+                    text.push('.');
+                }
+                text
+            };
+            if !alternate {
+                text = strip_fraction_zeros(&text);
+            }
+            text
+        }
+        _ => return None,
+    };
+    Some(if upper {
+        text.to_ascii_uppercase()
+    } else {
+        text
+    })
+}
+
+/// `1.234568e+04`: the mantissa at `precision` and a signed exponent of at
+/// least two digits.
+fn exponent_form(f: f64, precision: usize, alternate: bool) -> String {
+    let raw = format!("{f:.precision$e}");
+    let (mantissa, exponent) = raw.split_once('e').unwrap_or((&raw, "0"));
+    let exponent: i32 = exponent.parse().unwrap_or(0);
+    let mut mantissa = mantissa.to_owned();
+    if alternate && precision == 0 {
+        mantissa.push('.');
+    }
+    let sign = if exponent < 0 { '-' } else { '+' };
+    format!("{mantissa}e{sign}{:02}", exponent.abs())
+}
+
+/// `%g`'s trailing-zero rule: zeros after the point go, and the point with
+/// them; an exponent part is left alone.
+fn strip_fraction_zeros(text: &str) -> String {
+    let (number, exponent) = match text.find('e') {
+        Some(at) => (&text[..at], &text[at..]),
+        None => (text, ""),
+    };
+    let number = if number.contains('.') {
+        number.trim_end_matches('0').trim_end_matches('.')
+    } else {
+        number
+    };
+    format!("{number}{exponent}")
+}
+
 /// An encoding's canonical name, for messages.
 #[must_use]
 pub fn name(encoding: u8) -> &'static str {

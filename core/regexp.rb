@@ -62,3 +62,32 @@ class Regexp
     raise TypeError, "can't convert #{other.class} to String (#{other.class}#to_str gives #{text.class})"
   end
 end
+
+class Regexp
+  # Every metacharacter backslashed, the whitespace escapes spelled out, and
+  # `/` left alone — CRuby's set, measured. US-ASCII when the result is ASCII.
+  def self.escape(text)
+    text = text.to_s if text.is_a?(Symbol)
+    text = String.__coerce__(text)
+    out = String.new(encoding: text.encoding)
+    text.each_char do |c|
+      case c
+      when " " then out << "\\ "
+      when "\n" then out << "\\n"
+      when "\t" then out << "\\t"
+      when "\r" then out << "\\r"
+      when "\f" then out << "\\f"
+      when "\v" then out << "\\v"
+      when ".", "*", "?", "+", "^", "$", "|", "(", ")", "[", "]", "{", "}", "\\", "-", "#"
+        out << "\\" << c
+      else out << c
+      end
+    end
+    out.force_encoding(Encoding::US_ASCII) if out.ascii_only?
+    out
+  end
+
+  class << self
+    alias quote escape
+  end
+end
