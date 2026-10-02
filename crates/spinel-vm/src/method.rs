@@ -342,6 +342,14 @@ pub enum Native {
     FrameNesting,
     /// `binding`, string `eval` and a `Binding`'s locals (#38).
     Binding(BindingOp),
+    /// `Kernel#__load_file__(path, wrap)`: parse, compile and run a file at
+    /// the top level, in a frame of its own (#39). `require` and `load` are
+    /// Ruby around it.
+    LoadFile,
+    /// `Kernel#__freeze_global__(*names)`: those globals refuse assignment.
+    FreezeGlobal,
+    /// The file system calls `File` and `Dir` are Ruby over (#39).
+    Fs(FsOp),
     /// `Kernel#__sleep__(seconds)`: block the thread, answer the whole
     /// seconds slept. `Kernel#sleep` is Ruby around it.
     Sleep,
@@ -399,6 +407,26 @@ pub enum Native {
     /// raises for a missing method, raised on purpose — what
     /// `BasicObject#method_missing` does when called directly (#28).
     RaiseNoMethod,
+}
+
+/// Which file system call. Each answers an Integer errno on failure, for the
+/// Ruby side to raise as `SystemCallError`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FsOp {
+    /// `__fs_kind__(path, follow)`: `:file`, `:directory`, `:link`, `:other`,
+    /// or nil when there is nothing there.
+    Kind,
+    /// `__fs_realpath__(path)`: every link resolved.
+    Realpath,
+    /// `__fs_getcwd__`.
+    Getcwd,
+    /// `__fs_chdir__(path)`: true.
+    Chdir,
+    /// `__fs_read__(path)`: the bytes, as a BINARY String.
+    Read,
+    /// `__fs_constants__`: `[name, value]` pairs for `File::Constants`, from
+    /// the target's libc.
+    Constants,
 }
 
 /// Which `Binding` operation. See `interp.rs`, `binding_native`.

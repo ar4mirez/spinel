@@ -231,18 +231,39 @@ sources = Hash.new { |cache, path| cache[path] = File.binread(path) }
 # and `Location#base_label` asserts on it. The file sits at the spec's own
 # relative path under a temporary directory, so a backtrace names
 # `backtrace_spec.rb` just as the real run's does.
+#
+# The directory stands in for the spec's own, beside it in the real tree, with
+# the spec's neighbours symlinked in: an example that loads a file relative to
+# its spec — `require_relative "../../fixtures/..."`, `load` of a path built
+# from `__FILE__` — reaches the real file under its real path, as it does in
+# Spinel's run and under mspec (#39). A path through a symlinked parent would
+# land in `$LOADED_FEATURES` spelled differently from the realpath the spec
+# compares it with. One stand-in per spec file, removed at exit.
+STAND_INS = {}
+at_exit { STAND_INS.each_value { |dir| FileUtils.rm_rf(dir) } }
+
+def stand_in_for(path)
+  STAND_INS[path] ||= begin
+    real = File.join(ROOT, File.dirname(path))
+    dir = Dir.mktmpdir(".verify-passes-", File.dirname(real))
+    Dir.each_child(real) do |entry|
+      next if entry == File.basename(path)
+      File.symlink(File.join(real, entry), File.join(dir, entry))
+    end
+    dir
+  end
+end
+
 def run_isolated(text, path)
+  dir = stand_in_for(path)
   read, write = IO.pipe
   pid = fork do
     read.close
     verdict =
       begin
-        Dir.mktmpdir("verify-passes") do |dir|
-          file = File.join(dir, path)
-          FileUtils.mkdir_p(File.dirname(file))
-          File.binwrite(file, text)
-          load file
-        end
+        file = File.join(dir, File.basename(path))
+        File.binwrite(file, text)
+        load file
         nil
       rescue SpecFailure => e
         "says #{e.message}"

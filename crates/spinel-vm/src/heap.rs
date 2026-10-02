@@ -272,6 +272,9 @@ pub struct Heap {
     /// `spinel_core::boot`. This crate does not depend on Prism, so without
     /// one `eval` of a String is refused.
     parser: Option<Parser>,
+    /// Whether code this heap was meant to run did not all run — see
+    /// [`HandleScope::mark_partial`].
+    partial: bool,
     /// This Ractor's global variables, by name (#166). A root source: see
     /// [`Heap::mark`].
     ///
@@ -298,6 +301,9 @@ pub struct Heap {
     /// derivation, and reading the name runs it. Writing raises: these are
     /// read-only, and Ruby names the alias in the message.
     global_specials: HashMap<SymbolId, crate::bytecode::MatchRef>,
+    /// Globals the runtime owns and a program may not assign: `$:` and
+    /// `$LOADED_FEATURES` (#39). By name, so an alias is marked separately.
+    readonly_globals: std::collections::HashSet<SymbolId>,
 }
 
 /// The class index for an object needing `bytes` in total, or `None` for large objects.
@@ -341,9 +347,11 @@ impl Heap {
             errinfo: Value::NIL,
             main: Value::NIL,
             parser: None,
+            partial: false,
             globals: HashMap::new(),
             global_slots: Vec::new(),
             global_specials: HashMap::new(),
+            readonly_globals: std::collections::HashSet::new(),
         }
     }
 
@@ -449,6 +457,15 @@ impl Heap {
     /// Which regexp special `name` was aliased to, if it was.
     pub fn global_special(&self, name: SymbolId) -> Option<crate::bytecode::MatchRef> {
         self.global_specials.get(&name).copied()
+    }
+
+    /// Make `name` refuse assignment from now on.
+    pub fn freeze_global(&mut self, name: SymbolId) {
+        self.readonly_globals.insert(name);
+    }
+
+    pub fn global_is_readonly(&self, name: SymbolId) -> bool {
+        self.readonly_globals.contains(&name)
     }
 
     pub fn definitions_mut(&mut self) -> &mut crate::method::Definitions {
@@ -989,6 +1006,17 @@ impl<'h> HandleScope<'h> {
         self.heap.parser
     }
 
+    /// Record that a file this heap was meant to load did not finish, so a
+    /// name it would have defined may be missing. `spec/harness` marks a heap
+    /// whose fixture failed; `defined?` then refuses rather than answer `nil`.
+    pub fn mark_partial(&mut self) {
+        self.heap.partial = true;
+    }
+
+    pub(crate) fn partial(&self) -> bool {
+        self.heap.partial
+    }
+
     pub fn set_errinfo(&mut self, value: Value) {
         self.heap.set_errinfo(value);
     }
@@ -1021,6 +1049,14 @@ impl<'h> HandleScope<'h> {
 
     pub fn global_special(&self, name: SymbolId) -> Option<crate::bytecode::MatchRef> {
         self.heap.global_special(name)
+    }
+
+    pub fn freeze_global(&mut self, name: SymbolId) {
+        self.heap.freeze_global(name);
+    }
+
+    pub fn global_is_readonly(&self, name: SymbolId) -> bool {
+        self.heap.global_is_readonly(name)
     }
 
     /// Point a handle at a different object. The old one loses this root.

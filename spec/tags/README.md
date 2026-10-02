@@ -77,7 +77,8 @@ fix is a different slice. The reason says which slice, by number.
 
 ## What is here now
 
-A hundred and sixty-two tags across seventy-eight files — #38 added three, examples
+A hundred and fifty-five tags across seventy-eight files — #39 removed seven, the
+read-only globals in `language/predefined_tags.txt`. #38 added three, examples
 string `eval` made reachable that belong elsewhere: `Hash#inspect` read back by
 `eval` (#216), an unknown POSIX bracket class (#33), and `+@` on a chilled
 literal (#263). #19 added six: `` Kernel#` ``,

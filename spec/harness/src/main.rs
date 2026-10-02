@@ -226,7 +226,10 @@ fn main() -> ExitCode {
             unparseable.push(format!("{}: cannot read", display_path(file)));
             continue;
         };
-        let parsed = spinel_parse::parse_file(&file.to_string_lossy(), &source);
+        // `__FILE__` is absolute, as mspec loads it: a spec resolving a path
+        // against its own file must not depend on where the runner started.
+        let absolute = std::path::absolute(file).unwrap_or_else(|_| file.clone());
+        let parsed = spinel_parse::parse_file(&absolute.to_string_lossy(), &source);
         // A `*_spec.rb` Spinel cannot parse is a parser bug, not a spec result,
         // so it is reported apart from the counts and fails the run.
         if let Some(error) = parsed.errors.first() {

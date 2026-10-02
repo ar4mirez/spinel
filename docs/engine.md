@@ -134,7 +134,7 @@ A bare `X` searches the cref chain innermost-first (own tables only) **except it
 
 These rules are documented nowhere and read wrong from `variable.c`, so like the ancestor chain they are measured rather than believed: `crates/spinel-vm/tests/eval.txt` holds them and `scripts/eval-oracle.rb` re-measures them in CI.
 
-`defined?` reads the same tables and answers a table of Ruby's own strings. Where it *misses*, it does not answer Ruby's `nil`: a fresh bootstrap heap cannot tell "undefined" from "defined in a file `require` has not landed to load", and `nil` would pass a spec the VM had no right to. A miss is `Error::Unknowable` until [#39](https://github.com/ar4mirez/spinel/issues/39).
+`defined?` reads the same tables and answers a table of Ruby's own strings. Where it *misses* it answers Ruby's `nil`, since `require` landed (#39) and a program can load what it needs — except in a heap marked partial, where a file meant to run did not finish: `spec/harness` marks one whose fixture failed, and there a miss is `Error::Unknowable`, because `nil` would pass a spec the VM had no right to.
 
 ## Shapes and inline caches
 

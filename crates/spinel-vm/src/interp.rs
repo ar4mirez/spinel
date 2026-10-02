@@ -33,6 +33,8 @@
 //! and engine.md puts the VM stack in the Ractor where fibers need it, so it
 //! lands with fibers rather than here.
 
+use std::os::unix::ffi::OsStringExt as _;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::bytecode::{
@@ -43,7 +45,7 @@ use crate::class::Builtin;
 use crate::class::{ClassId, CrefId, Kind, Method, ScopeDefault, Visibility};
 use crate::heap::{Handle, HandleScope, Heap, Payload};
 use crate::method::{
-    BindingOp, BitOp, CvarOp, Definition, FiberOp, IvarOp, Native, ReflectOp, StrOp,
+    BindingOp, BitOp, CvarOp, Definition, FiberOp, FsOp, IvarOp, Native, ReflectOp, StrOp,
 };
 use crate::shape::ShapeId;
 use crate::value::SymbolId;
@@ -1846,7 +1848,9 @@ pub fn eval_in(
                         let symbol = frames[top].symbols[name as usize];
                         // `alias $x $&` makes `$x` read-only, and Ruby names the
                         // alias rather than the special in the message. Measured.
-                        if scope.global_special(symbol).is_some() {
+                        if scope.global_special(symbol).is_some()
+                            || scope.global_is_readonly(symbol)
+                        {
                             return Err(Error::raise(
                                 "NameError",
                                 // `symbol_name` already carries the leading `$`.
@@ -5485,33 +5489,30 @@ fn undef_from<'h>(
     Ok(())
 }
 
-/// `defined?`'s answer for a *name*: the string, or a report that this heap
-/// cannot tell "undefined" from "never loaded".
+/// `defined?`'s answer for a *name*: the string, `nil`, or a report that this
+/// heap cannot tell "undefined" from "never loaded".
 ///
-/// Ruby answers `nil` for a name that is not defined. Spinel runs each example
-/// in a fresh heap holding only the bootstrap classes, so a miss means either
-/// "genuinely undefined" — Ruby's `nil` — or "defined in a file `require` has
-/// not landed to load", and nothing here can tell them apart. Answering `nil`
-/// would pass `defined?(SomeFixture).should be_nil` while the VM had simply
-/// never heard of the fixture: a wrong answer wearing a passing spec.
-///
-/// So a miss is [`Error::NoDispatch`] — *not yet knowable* rather than *no* —
-/// which `spec/harness` reports as blocked. It becomes `nil` on its own when
-/// [#39](https://github.com/ar4mirez/spinel/issues/39) can load the file that
-/// would have defined the name. This is R8 of PRD 0011 one layer down: an
-/// unknown name raises rather than answering `nil`.
+/// Ruby answers `nil` for a name that is not defined, and since `require`
+/// landed (#39) so does Spinel — a program loads what it needs. The exception
+/// is a heap marked partial: `spec/harness` preloads a spec's fixtures itself,
+/// skipping one it cannot compile and leaving one that raised half-run, and
+/// there a miss may be a name the skipped part would have defined. Answering
+/// `nil` would pass `defined?(SomeFixture).should be_nil` while the VM had
+/// simply never heard of the fixture: a wrong answer wearing a passing spec.
+/// So in a partial heap a miss is *not yet knowable* rather than *no*. This is
+/// R8 of PRD 0011 one layer down.
 fn defined_answer<'h>(
     scope: &mut HandleScope<'h>,
     string_class: Handle<'h>,
     answer: Option<&str>,
 ) -> Result<Value, Error> {
-    let Some(answer) = answer else {
+    if answer.is_none() && scope.partial() {
         return Err(Error::Unknowable {
-            what: "`defined?` of a name this heap has never seen",
-            needs: "`require` can load the file that would define it (#39)",
+            what: "`defined?` of a name a fixture that did not load may define",
+            needs: "mspec loading the fixtures itself (#145)",
         });
-    };
-    Ok(defined_word(scope, string_class, Some(answer)))
+    }
+    Ok(defined_word(scope, string_class, answer))
 }
 
 /// `defined?`'s answer when this heap really is the authority: the string, or
@@ -8024,6 +8025,15 @@ fn native_call<'h>(
         }
 
         Native::Binding(op) => binding_native(scope, stack, frames, &call, op, ids),
+        Native::LoadFile => load_file(scope, stack, frames, &call, ids),
+        Native::FreezeGlobal => {
+            for name in call.args.iter().filter_map(|v| v.as_symbol()) {
+                scope.freeze_global(name);
+            }
+            stack.push(Value::NIL);
+            Ok(None)
+        }
+        Native::Fs(op) => fs_native(scope, stack, &call, op),
 
         Native::FrameNesting => {
             let cref = frames.last().map_or(CrefId::ROOT, |frame| frame.cref);
@@ -9594,6 +9604,14 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         ),
         (
             Builtin::Kernel,
+            &["__needs_kernel_clone__"],
+            Native::Refuse {
+                what: "`clone` of an object with singleton methods",
+                needs: "`Kernel#clone` (#201)",
+            },
+        ),
+        (
+            Builtin::Kernel,
             &["__needs_stderr__"],
             Native::Refuse {
                 what: "writing to `$stderr`",
@@ -9810,6 +9828,30 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             Builtin::Kernel,
             &["__binding_receiver_set__"],
             Native::Binding(BindingOp::SetReceiver),
+        ),
+        (Builtin::Kernel, &["__load_file__"], Native::LoadFile),
+        (
+            Builtin::Kernel,
+            &["__freeze_global__"],
+            Native::FreezeGlobal,
+        ),
+        (Builtin::Kernel, &["__fs_kind__"], Native::Fs(FsOp::Kind)),
+        (
+            Builtin::Kernel,
+            &["__fs_realpath__"],
+            Native::Fs(FsOp::Realpath),
+        ),
+        (
+            Builtin::Kernel,
+            &["__fs_getcwd__"],
+            Native::Fs(FsOp::Getcwd),
+        ),
+        (Builtin::Kernel, &["__fs_chdir__"], Native::Fs(FsOp::Chdir)),
+        (Builtin::Kernel, &["__fs_read__"], Native::Fs(FsOp::Read)),
+        (
+            Builtin::Kernel,
+            &["__fs_constants__"],
+            Native::Fs(FsOp::Constants),
         ),
         (
             Builtin::Kernel,
@@ -11814,6 +11856,235 @@ fn binding_eval(
         let env = frames.last().expect("just pushed").env;
         binding_push(scope, binding, &iseq, env);
     }
+    Ok(None)
+}
+
+// ---------------------------------------------------------------------------
+// Loading files and the file system (#39)
+// ---------------------------------------------------------------------------
+
+/// A path argument as the OS takes it.
+fn path_arg(scope: &mut HandleScope<'_>, call: &Pending, index: usize) -> Result<PathBuf, Error> {
+    let Some(bytes) = call.args.get(index).and_then(|&v| string_bytes(scope, v)) else {
+        return Err(Error::NoDispatch {
+            op: "a file system call",
+            operands: "a path that is not a String",
+        });
+    };
+    Ok(PathBuf::from(std::ffi::OsString::from_vec(bytes)))
+}
+
+/// An `io::Error` as the errno the Ruby side raises `SystemCallError` with.
+fn errno_value(error: &std::io::Error) -> Value {
+    let errno = error.raw_os_error().unwrap_or(libc::EIO);
+    Value::fixnum(i64::from(errno)).expect("an errno is a fixnum")
+}
+
+fn fs_native(
+    scope: &mut HandleScope<'_>,
+    stack: &mut Vec<Value>,
+    call: &Pending,
+    op: FsOp,
+) -> Result<Option<Unwind>, Error> {
+    let value = match op {
+        FsOp::Kind => {
+            let path = path_arg(scope, call, 0)?;
+            let follow = call.args.get(1).is_some_and(|v| v.is_truthy());
+            let metadata = if follow {
+                std::fs::metadata(&path)
+            } else {
+                std::fs::symlink_metadata(&path)
+            };
+            match metadata {
+                Ok(m) if m.file_type().is_symlink() => Value::symbol(symbol("link")),
+                Ok(m) if m.is_file() => Value::symbol(symbol("file")),
+                Ok(m) if m.is_dir() => Value::symbol(symbol("directory")),
+                Ok(_) => Value::symbol(symbol("other")),
+                Err(_) => Value::NIL,
+            }
+        }
+        FsOp::Realpath => {
+            let path = path_arg(scope, call, 0)?;
+            match std::fs::canonicalize(&path) {
+                Ok(resolved) => os_string(scope, resolved.into_os_string()),
+                Err(error) => errno_value(&error),
+            }
+        }
+        FsOp::Getcwd => match std::env::current_dir() {
+            Ok(dir) => os_string(scope, dir.into_os_string()),
+            Err(error) => errno_value(&error),
+        },
+        FsOp::Chdir => {
+            let path = path_arg(scope, call, 0)?;
+            // ponytail: the working directory is the process's, shared by every
+            // heap in it. One Ractor runs Ruby today; per-Ractor directories are
+            // CRuby's rule too, so this stays process-wide when #117 lands.
+            match std::env::set_current_dir(&path) {
+                Ok(()) => Value::TRUE,
+                Err(error) => errno_value(&error),
+            }
+        }
+        FsOp::Constants => {
+            let common: &[(&str, i32)] = &[
+                ("RDONLY", libc::O_RDONLY),
+                ("WRONLY", libc::O_WRONLY),
+                ("RDWR", libc::O_RDWR),
+                ("APPEND", libc::O_APPEND),
+                ("CREAT", libc::O_CREAT),
+                ("EXCL", libc::O_EXCL),
+                ("NONBLOCK", libc::O_NONBLOCK),
+                ("TRUNC", libc::O_TRUNC),
+                ("NOCTTY", libc::O_NOCTTY),
+                ("SYNC", libc::O_SYNC),
+                ("DSYNC", libc::O_DSYNC),
+                ("NOFOLLOW", libc::O_NOFOLLOW),
+                ("LOCK_SH", libc::LOCK_SH),
+                ("LOCK_EX", libc::LOCK_EX),
+                ("LOCK_NB", libc::LOCK_NB),
+                ("LOCK_UN", libc::LOCK_UN),
+            ];
+            #[cfg(target_os = "linux")]
+            let platform: &[(&str, i32)] = &[
+                ("DIRECT", libc::O_DIRECT),
+                ("NOATIME", libc::O_NOATIME),
+                ("RSYNC", libc::O_RSYNC),
+                ("TMPFILE", libc::O_TMPFILE),
+            ];
+            #[cfg(not(target_os = "linux"))]
+            let platform: &[(&str, i32)] = &[];
+            let mut out = Vec::with_capacity(common.len() + platform.len());
+            for &(name, value) in common.iter().chain(platform) {
+                let name = string_new(scope, name);
+                let name = scope.root(name);
+                let value = Value::fixnum(i64::from(value)).expect("a flag is a fixnum");
+                let name = scope.get(name);
+                let pair = new_array(scope, &[name, value]);
+                out.push(scope.root(pair));
+            }
+            let out: Vec<Value> = out.into_iter().map(|h| scope.get(h)).collect();
+            new_array(scope, &out)
+        }
+        FsOp::Read => {
+            let path = path_arg(scope, call, 0)?;
+            match std::fs::read(&path) {
+                Ok(bytes) => {
+                    let class = class_handle(scope, Builtin::String);
+                    string_alloc(scope, class, &bytes, crate::strings::BINARY)
+                }
+                Err(error) => errno_value(&error),
+            }
+        }
+    };
+    stack.push(value);
+    Ok(None)
+}
+
+/// A path the OS handed back, as a UTF-8 String.
+fn os_string(scope: &mut HandleScope<'_>, text: std::ffi::OsString) -> Value {
+    let class = class_handle(scope, Builtin::String);
+    string_alloc(scope, class, &text.into_vec(), crate::strings::UTF_8)
+}
+
+/// `__load_file__(path, wrap, self)`: run a file's top level in a frame of
+/// its own, with `self` as `main` unless a wrapped `load` made another.
+/// The frame's value arrives when it leaves; a file that cannot be read is
+/// a `LoadError`.
+fn load_file(
+    scope: &mut HandleScope<'_>,
+    stack: &[Value],
+    frames: &mut Vec<Call>,
+    call: &Pending,
+    ids: &mut u64,
+) -> Result<Option<Unwind>, Error> {
+    let Some(parser) = scope.parser() else {
+        return Err(Error::Unknowable {
+            what: "loading a file",
+            needs: "a parser, which `spinel_core::boot` installs",
+        });
+    };
+    let path = path_arg(scope, call, 0)?;
+    let source = match std::fs::read(&path) {
+        Ok(source) => source,
+        Err(_) => {
+            return Err(Error::raise(
+                "LoadError",
+                format!("cannot load such file -- {}", path.display()),
+            ));
+        }
+    };
+    let name = path.to_string_lossy().into_owned();
+    let program = match parser(&name, &source, 1, false) {
+        Ok(program) => program,
+        Err(crate::heap::ParseFailure::Syntax(message)) => {
+            return Err(Error::raise("SyntaxError", message));
+        }
+        Err(crate::heap::ParseFailure::Unsupported) => {
+            return Err(Error::Unknowable {
+                what: "a file the parser cannot lower",
+                needs: "the lowering to cover it",
+            });
+        }
+    };
+    let iseq = match crate::compile::program(&program) {
+        Ok(iseq) => Arc::new(Iseq {
+            name: "<top (required)>".into(),
+            ..iseq
+        }),
+        Err(unsupported) => {
+            return Err(Error::Unknowable {
+                what: unsupported.node,
+                needs: "the compiler to lower it in a required file",
+            });
+        }
+    };
+    // `load(file, true)`: the file's constants and methods land in an
+    // anonymous module rather than at the top level.
+    let wrap = call
+        .args
+        .get(1)
+        .copied()
+        .and_then(|module| class_id_of(scope, module));
+    let cref = match wrap {
+        Some(module) => scope.classes_mut().push_cref(CrefId::ROOT, module),
+        None => CrefId::ROOT,
+    };
+    let receiver = match call.args.get(2) {
+        Some(&receiver) if receiver != Value::NIL => receiver,
+        _ => scope.main(),
+    };
+    let pending = Pending {
+        cache: None,
+        receiver,
+        name: call.name,
+        args: Vec::new(),
+        keywords: Vec::new(),
+        block: Value::NIL,
+        block_is_literal: false,
+        cref,
+        implicit_self: false,
+        public_only: false,
+        target: Target::Method,
+        owner: None,
+        defined_as: None,
+    };
+    *ids += 1;
+    let links = Links {
+        id: *ids,
+        home: *ids,
+        breaks: 0,
+        // A `def` at a file's top level is private, as in the main script.
+        scope_default: ScopeDefault::Private,
+    };
+    push_frame(
+        scope,
+        stack,
+        frames,
+        &pending,
+        &iseq,
+        Value::NIL,
+        Binding::Strict,
+        links,
+    )?;
     Ok(None)
 }
 
