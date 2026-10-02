@@ -178,6 +178,22 @@ pub struct Stats {
 /// fn needs_sync<T: Sync>() {}
 /// needs_sync::<spinel_vm::Heap>();
 /// ```
+/// Parse a string `eval` was handed: its source, the file name and first
+/// line it is reported at.
+///
+/// The flag says whether the string runs inside a method, where a `yield`
+/// at its top level is valid.
+pub type Parser = fn(&str, &[u8], i64, bool) -> Result<spinel_ast::Program, ParseFailure>;
+
+/// Why a [`Parser`] produced no tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParseFailure {
+    /// A `SyntaxError`, with its message.
+    Syntax(String),
+    /// The parser has no lowering for something in the string yet.
+    Unsupported,
+}
+
 pub struct Heap {
     /// The root set. A [`HandleScope`] owns a contiguous run of it and truncates back
     /// to its base on drop, so this is `docs/engine.md`'s linked list of scopes with
@@ -252,6 +268,10 @@ pub struct Heap {
     /// singleton methods `core/object.rb` gives it (`to_s`, `include`) are
     /// there for all of them. Nil until the first evaluation makes it.
     main: Value,
+    /// How a string `eval` parses (#38), installed by whoever has a parser —
+    /// `spinel_core::boot`. This crate does not depend on Prism, so without
+    /// one `eval` of a String is refused.
+    parser: Option<Parser>,
     /// This Ractor's global variables, by name (#166). A root source: see
     /// [`Heap::mark`].
     ///
@@ -320,6 +340,7 @@ impl Heap {
             last_match: Value::NIL,
             errinfo: Value::NIL,
             main: Value::NIL,
+            parser: None,
             globals: HashMap::new(),
             global_slots: Vec::new(),
             global_specials: HashMap::new(),
@@ -957,6 +978,15 @@ impl<'h> HandleScope<'h> {
 
     pub fn errinfo(&self) -> Value {
         self.heap.errinfo()
+    }
+
+    /// Install what string `eval` parses with (#38).
+    pub fn set_parser(&mut self, parser: Parser) {
+        self.heap.parser = Some(parser);
+    }
+
+    pub(crate) fn parser(&self) -> Option<Parser> {
+        self.heap.parser
     }
 
     pub fn set_errinfo(&mut self, value: Value) {

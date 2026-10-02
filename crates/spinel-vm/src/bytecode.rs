@@ -737,20 +737,28 @@ pub struct Iseq {
     pub path: Option<Arc<str>>,
     /// `(pc, line)`, one entry wherever the line changes, in pc order. The
     /// line of an instruction is the last entry at or before it.
-    pub lines: Vec<(u32, u32)>,
+    pub lines: Vec<(u32, i32)>,
     /// How many blocks deep this body is inside its method or script: 0 for
     /// those, 1 for a block written directly in one. A backtrace says
     /// "block (2 levels) in ..." from it.
     pub block_level: u32,
     /// The line the body starts on — a block's `{` or `do`, a method's `def`
     /// — for `Proc#source_location` and `Fiber#inspect`. 0 when unknown.
-    pub first_line: u32,
+    pub first_line: i32,
+    /// The local names of every environment this body's own sits inside,
+    /// innermost first: what `GetLocal` with a depth walks. Empty for a method,
+    /// a class body or a script. `binding` and string `eval` read it (#38),
+    /// because an environment at run time is only slots.
+    pub outer: Vec<Vec<Box<str>>>,
+    /// Compiled from a string `eval`, whose `path` is the name it was given
+    /// rather than a file on disk: `__dir__` does not resolve it.
+    pub from_eval: bool,
 }
 
 impl Iseq {
     /// The source line the instruction at `pc` came from.
     #[must_use]
-    pub fn line_at(&self, pc: usize) -> Option<u32> {
+    pub fn line_at(&self, pc: usize) -> Option<i32> {
         let pc = u32::try_from(pc).unwrap_or(u32::MAX);
         let index = self.lines.partition_point(|&(start, _)| start <= pc);
         index.checked_sub(1).map(|index| self.lines[index].1)

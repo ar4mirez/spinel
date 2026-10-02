@@ -41,12 +41,11 @@ pub(crate) fn program(
     // The body first: it is what discovers the flip-flop sites the scope has
     // to declare locals for.
     let body = lower.stmts(Some(&statements));
+    let mut map = spinel_ast::SourceMap::new(lower.origin.path, lower.origin.line_starts.to_vec());
+    map.first_line = lower.origin.first_line;
     let program = Program {
         span: span_of(&node.as_node().location()),
-        source: std::sync::Arc::new(spinel_ast::SourceMap::new(
-            lower.origin.path,
-            lower.origin.line_starts.to_vec(),
-        )),
+        source: std::sync::Arc::new(map),
         locals: lower.close_scope(constants(&node.locals())),
         body,
     };
@@ -61,15 +60,18 @@ pub(crate) struct SourceOrigin<'a> {
     /// Byte offset of the start of every line, so an offset becomes a line by
     /// binary search. Built once per file rather than counted per keyword.
     pub(crate) line_starts: &'a [u32],
+    /// What line 1 is numbered: `eval`'s `lineno` (#38).
+    pub(crate) first_line: i64,
 }
 
 impl SourceOrigin<'_> {
-    /// The 1-based line an offset falls on.
-    fn line(&self, offset: u32) -> u32 {
+    /// The line an offset falls on, as `__LINE__` answers it: `eval`'s
+    /// `lineno` can make it zero or negative.
+    fn signed_line(&self, offset: u32) -> i64 {
         // `partition_point` gives how many starts are at or before `offset`,
         // which is the line number: line 1 starts at 0.
-        u32::try_from(self.line_starts.partition_point(|&start| start <= offset))
-            .unwrap_or(u32::MAX)
+        let line = self.line_starts.partition_point(|&start| start <= offset) as i64;
+        line + self.first_line - 1
     }
 }
 
@@ -313,7 +315,9 @@ impl Lower<'_> {
             pm::Node::TrueNode { .. } => ExprKind::True,
             pm::Node::FalseNode { .. } => ExprKind::False,
             pm::Node::SelfNode { .. } => ExprKind::SelfExpr,
-            pm::Node::SourceLineNode { .. } => ExprKind::SourceLine(self.origin.line(span.start)),
+            pm::Node::SourceLineNode { .. } => {
+                ExprKind::SourceLine(self.origin.signed_line(span.start))
+            }
             pm::Node::SourceEncodingNode { .. } => ExprKind::SourceEncoding,
             pm::Node::MissingNode { .. } => ExprKind::Missing,
             pm::Node::RedoNode { .. } => ExprKind::Redo,

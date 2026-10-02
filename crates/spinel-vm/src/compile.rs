@@ -155,6 +155,37 @@ pub fn flattened_expression_in(
     Ok(compiler.finish())
 }
 
+/// Compile a string `eval` (#38) whose environment sits inside one whose
+/// locals are `chain`, innermost first.
+///
+/// Prism parsed the string as a file and did not know those names, so a bare
+/// `a` arrived as a method call and `a = 1` as a new local. The compiler
+/// resolves both against `chain` instead: a name the caller has is the
+/// caller's. Locals the string declares that the caller does not have are its
+/// own, in the program's slot list.
+///
+/// `name` and `block_level` are the caller's body's, so a backtrace labels the
+/// string's frame the way it labels the frame `eval` was called from.
+pub fn eval(
+    program: &Program,
+    chain: Vec<Vec<Box<str>>>,
+    name: &str,
+    block_level: u32,
+) -> Result<Iseq, Unsupported> {
+    let mut compiler = Compiler::new(name, &program.locals);
+    compiler.block_level = block_level;
+    compiler.source = Some(Arc::clone(&program.source));
+    compiler.scope_barrier = false;
+    compiler.env_synthetic = vec![false; chain.len() + 1];
+    compiler.outer = chain;
+    compiler.eval_visible = 1;
+    compiler.from_eval = true;
+    compiler.eval_phantoms = vec![Vec::new()];
+    compiler.find_eval_phantoms();
+    compiler.statements(&program.body, true)?;
+    Ok(compiler.finish())
+}
+
 /// Every local name that appears as an assignment target anywhere in `body`.
 ///
 /// The parser's own scope list is the authority and is used first; this is the
@@ -272,13 +303,13 @@ struct Compiler {
     /// Where this body was written, if the tree came with a line table (#29).
     source: Option<Arc<SourceMap>>,
     /// `(pc, line)` for [`Iseq::lines`], appended by `emit` when the line changes.
-    lines: Vec<(u32, u32)>,
+    lines: Vec<(u32, i32)>,
     /// The line the next emitted instruction belongs to; 0 before any is known.
-    line: u32,
+    line: i32,
     /// See [`Iseq::block_level`].
     block_level: u32,
     /// See [`Iseq::first_line`].
-    first_line: u32,
+    first_line: i32,
     insns: Vec<Insn>,
     literals: Vec<Literal>,
     symbols: Vec<Box<str>>,
@@ -364,6 +395,16 @@ struct Compiler {
     /// inherits this from its parent with the depth stepped up one, and a
     /// method body replaces it with its own at depth zero.
     zsuper: Option<Zsuper>,
+    /// Inside a string `eval` (#38): how many environments, from this one
+    /// outward, Prism could see. The rest of the chain is the caller's, whose
+    /// locals Prism was never told about. 0 outside an eval.
+    eval_visible: usize,
+    /// For each environment Prism could see, innermost first: the names it
+    /// declared there only because it did not know the caller already had
+    /// them. `eval("a = 2")` assigns the caller's `a`; Prism made it a new one.
+    eval_phantoms: Vec<Vec<Box<str>>>,
+    /// See [`Iseq::from_eval`].
+    from_eval: bool,
 }
 
 impl Zsuper {
@@ -445,6 +486,9 @@ impl Compiler {
             pattern_cache: None,
             pattern_key: None,
             zsuper: None,
+            eval_visible: 0,
+            eval_phantoms: Vec::new(),
+            from_eval: false,
         }
     }
 
@@ -479,6 +523,7 @@ impl Compiler {
         compiler.source.clone_from(&parent.source);
         compiler.line = parent.line;
         compiler.block_level = if barrier { 0 } else { parent.block_level + 1 };
+        compiler.from_eval = parent.from_eval;
         if !barrier {
             compiler.outer.push(parent.locals.clone());
             compiler.outer.extend(parent.outer.iter().cloned());
@@ -500,8 +545,51 @@ impl Compiler {
                 z.depth += 1;
                 z
             });
+            if parent.eval_visible > 0 {
+                compiler.eval_visible = parent.eval_visible + 1;
+                compiler.eval_phantoms.push(Vec::new());
+                compiler
+                    .eval_phantoms
+                    .extend(parent.eval_phantoms.iter().cloned());
+            }
         }
         compiler
+    }
+
+    /// Where `name` lives in the caller's part of the chain, inside an `eval`.
+    fn caller_local(&self, name: &str) -> Option<(u16, u16)> {
+        if self.eval_visible == 0 {
+            return None;
+        }
+        self.outer
+            .iter()
+            .enumerate()
+            .skip(self.eval_visible - 1)
+            .find_map(|(up, scope)| {
+                let index = scope.iter().position(|l| &**l == name)?;
+                Some((index as u16, up as u16 + 1))
+            })
+    }
+
+    /// Record which of this scope's locals are the caller's, once its
+    /// parameters have their slots: a parameter is always its own.
+    fn find_eval_phantoms(&mut self) {
+        if self.eval_visible == 0 {
+            return;
+        }
+        let params: Vec<u16> = self.params.slots().collect();
+        let phantoms: Vec<usize> = (0..self.locals.len())
+            .filter(|&slot| {
+                !params.contains(&(slot as u16)) && self.caller_local(&self.locals[slot]).is_some()
+            })
+            .collect();
+        // The slot stays, so no index moves, under a name Ruby cannot spell:
+        // a binding that keeps this scope must not find a second `a` in it.
+        for slot in phantoms {
+            let name = std::mem::replace(&mut self.locals[slot], "%".into());
+            self.locals[slot] = format!("%{name}").into();
+            self.eval_phantoms[0].push(name);
+        }
     }
 
     fn finish(mut self) -> Iseq {
@@ -527,6 +615,8 @@ impl Compiler {
             lines: self.lines,
             block_level: self.block_level,
             first_line: self.first_line,
+            outer: self.outer,
+            from_eval: self.from_eval,
         }
     }
 
@@ -867,7 +957,7 @@ impl Compiler {
                 ));
                 self.emit(Insn::PushLit(index));
             }
-            ExprKind::SourceLine(line) => self.emit(Insn::PushInt(i64::from(*line))),
+            ExprKind::SourceLine(line) => self.emit(Insn::PushInt(*line)),
             // The file's source encoding, as an `Encoding` (#19).
             ExprKind::SourceEncoding => {
                 self.push_const_name("Encoding");
@@ -2724,6 +2814,12 @@ impl Compiler {
                 ));
             }
         };
+        if let Some(phantoms) = self.eval_phantoms.get(depth as usize)
+            && phantoms.iter().any(|p| &**p == name)
+            && let Some(found) = self.caller_local(name)
+        {
+            return Ok(found);
+        }
         if depth == 0 {
             return Ok((self.slot(name), 0));
         }
@@ -2967,6 +3063,9 @@ impl Compiler {
     /// `defined?` of a call: the receiver and every argument must be defined,
     /// then the method must exist.
     fn defined_call(&mut self, call: &spinel_ast::Call, span: Span) -> Emit {
+        if call.flags.variable_call && self.caller_local(&call.name).is_some() {
+            return self.push_word("local-variable");
+        }
         if call.block.is_some() {
             // A block is not an operand, and Ruby still answers for the call.
             // Refused rather than guessed: nothing in the corpus needs it and a
@@ -3228,6 +3327,7 @@ impl Compiler {
         }
         child.is_lambda_body = lambda;
         child.params = child.lower_params(params, span)?;
+        child.find_eval_phantoms();
         // A method body is where a bare `super`'s argument list comes from. A
         // block keeps the one it inherited in `nested`, because `super` inside
         // one forwards the enclosing method's arguments, not the block's.
@@ -3507,6 +3607,10 @@ impl Compiler {
             let slot = self.slot(&name);
             self.emit(Insn::GetLocal(slot, 0));
             let supplied = self.emit_jump(Insn::JumpUnlessUndef);
+            // The parameter is nil while its own default runs: `def m(a = a)`
+            // answers nil. Measured.
+            self.emit(Insn::PushNil);
+            self.emit(Insn::SetLocal(slot, 0));
             self.expr(default)?;
             self.emit(Insn::SetLocal(slot, 0));
             self.patch_here(supplied);
@@ -3518,6 +3622,14 @@ impl Compiler {
 
     /// A call: the specialised operators when they apply, a real send otherwise.
     fn call(&mut self, call: &spinel_ast::Call, span: Span) -> Emit {
+        // Inside an `eval`, a bare name Prism could not resolve may be one of
+        // the caller's locals.
+        if call.flags.variable_call
+            && let Some((slot, depth)) = self.caller_local(&call.name)
+        {
+            self.emit(Insn::GetLocal(slot, depth));
+            return Ok(());
+        }
         if call.flags.safe_nav {
             return self.safe_nav(call, span);
         }
