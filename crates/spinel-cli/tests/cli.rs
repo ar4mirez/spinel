@@ -167,6 +167,19 @@ fn a_program_requires_and_loads_other_files() {
     assert_eq!(stdout(&out), expected);
 }
 
+/// What mspec needs from the process it runs in (#145): arguments after the
+/// file as `ARGV`, `$stdout` and `$stderr`, `ENV`, `at_exit` blocks run in
+/// reverse, and `exit`'s status as the process's. Stdout is CRuby's.
+#[test]
+fn a_program_sees_its_arguments_and_sets_its_exit_status() {
+    let out = spinel(&["run", &fixture("run/program.rb"), "one", "--two"]);
+    assert_eq!(out.status.code(), Some(3), "stderr: {}", stderr(&out));
+    let expected = std::fs::read_to_string(fixture("run/program.expected"))
+        .expect("the expected output is checked in beside the fixture");
+    assert_eq!(stdout(&out), expected);
+    assert_eq!(stderr(&out), "to stderr\n");
+}
+
 /// A bare file argument is the same as `run`, because that is what a Ruby
 /// developer types.
 #[test]

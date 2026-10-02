@@ -348,8 +348,20 @@ pub enum Native {
     LoadFile,
     /// `Kernel#__freeze_global__(*names)`: those globals refuse assignment.
     FreezeGlobal,
+    /// `Kernel#__argv__`: `[$0, *ARGV]` as the embedder set them.
+    Argv,
+    /// `Kernel#__ruby_constants__`: `RUBY_VERSION` and its neighbours, as a
+    /// flat `[name, value, ...]` Array, from the constants `--version` prints.
+    RubyConstants,
+    /// `Kernel#__environ__`: the process environment, as a flat
+    /// `[name, value, ...]` Array.
+    Environ,
+    /// `Kernel#__getenv__(name)`: one variable, or nil.
+    Getenv,
     /// The file system calls `File` and `Dir` are Ruby over (#39).
     Fs(FsOp),
+    /// The process's identity and clocks, for `Process` (#145).
+    Sys(SysOp),
     /// `Kernel#__sleep__(seconds)`: block the thread, answer the whole
     /// seconds slept. `Kernel#sleep` is Ruby around it.
     Sleep,
@@ -420,6 +432,11 @@ pub enum FsOp {
     Realpath,
     /// `__fs_getcwd__`.
     Getcwd,
+    /// `__fs_isatty__(fd)`.
+    Isatty,
+    /// `__fs_access__(path, mode)`: whether `access(2)` allows it, for
+    /// `File.readable?`, `writable?` and `executable?`.
+    Access,
     /// `__fs_chdir__(path)`: true.
     Chdir,
     /// `__fs_read__(path)`: the bytes, as a BINARY String.
@@ -427,6 +444,18 @@ pub enum FsOp {
     /// `__fs_constants__`: `[name, value]` pairs for `File::Constants`, from
     /// the target's libc.
     Constants,
+}
+
+/// Which process query. See `interp.rs`, `sys_native`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SysOp {
+    /// `__sys_ids__`: `[pid, ppid, uid, euid, gid, egid]`.
+    Ids,
+    /// `__sys_clock__(id)`: `[seconds, nanoseconds]` of that `clockid_t`, or
+    /// an errno.
+    Clock,
+    /// `__sys_clock_ids__`: `[name, id]` pairs for `Process::CLOCK_*`.
+    ClockIds,
 }
 
 /// Which `Binding` operation. See `interp.rs`, `binding_native`.

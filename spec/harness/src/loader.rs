@@ -77,7 +77,13 @@ fn registration(fixtures: &[Fixture]) -> Option<Fixture> {
     if paths.is_empty() {
         return None;
     }
-    let source = format!("$LOADED_FEATURES.push({})", paths.join(", "));
+    // `MSPEC_RUNNER` is what mspec sets for the processes it runs: without
+    // it `spec_helper.rb` tries to load mspec itself and prints a usage line
+    // when it cannot.
+    let source = format!(
+        "ENV['MSPEC_RUNNER'] = '1'\n$LOADED_FEATURES.push({})",
+        paths.join(", ")
+    );
     let parsed = spinel_parse::parse_file("<harness>", source.as_bytes());
     let iseq = compile::program(&parsed.program).ok()?;
     Some(Fixture {

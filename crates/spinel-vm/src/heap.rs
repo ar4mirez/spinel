@@ -275,6 +275,13 @@ pub struct Heap {
     /// Whether code this heap was meant to run did not all run — see
     /// [`HandleScope::mark_partial`].
     partial: bool,
+    /// The program's name and arguments, as the embedder was given them:
+    /// `$0` and `ARGV`.
+    argv: Vec<String>,
+    program_name: String,
+    /// How many instructions one evaluation may run; `None` for no limit.
+    /// See [`crate::interp::BUDGET`].
+    budget: Option<u64>,
     /// This Ractor's global variables, by name (#166). A root source: see
     /// [`Heap::mark`].
     ///
@@ -348,6 +355,9 @@ impl Heap {
             main: Value::NIL,
             parser: None,
             partial: false,
+            argv: Vec::new(),
+            program_name: String::new(),
+            budget: Some(crate::interp::BUDGET),
             globals: HashMap::new(),
             global_slots: Vec::new(),
             global_specials: HashMap::new(),
@@ -1015,6 +1025,28 @@ impl<'h> HandleScope<'h> {
 
     pub(crate) fn partial(&self) -> bool {
         self.heap.partial
+    }
+
+    /// The program name and arguments `$0` and `ARGV` start as. Set before
+    /// `spinel_core::boot`, which reads them.
+    pub fn set_argv(&mut self, program_name: &str, argv: &[String]) {
+        self.heap.program_name = program_name.to_owned();
+        self.heap.argv = argv.to_vec();
+    }
+
+    /// Limit each evaluation to `budget` instructions, or lift the limit.
+    /// A spec runner keeps the default, so a loop that never ends is a
+    /// reported failure; a program runs without one.
+    pub fn set_budget(&mut self, budget: Option<u64>) {
+        self.heap.budget = budget;
+    }
+
+    pub(crate) fn budget(&self) -> Option<u64> {
+        self.heap.budget
+    }
+
+    pub(crate) fn argv(&self) -> (String, Vec<String>) {
+        (self.heap.program_name.clone(), self.heap.argv.clone())
     }
 
     pub fn set_errinfo(&mut self, value: Value) {

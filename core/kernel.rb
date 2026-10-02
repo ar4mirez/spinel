@@ -180,58 +180,6 @@ module Kernel
     end
   end
 
-  def puts(*lines)
-    if lines.size == 0
-      __write__("\n")
-      return nil
-    end
-    __puts_lines__(lines, [])
-    nil
-  end
-
-  # An Array argument is flattened into its elements, measured: `puts [1, [2]]`
-  # is two lines, `puts []` is none, and an Array that contains itself prints
-  # `[...]` where it recurs rather than looping.
-  def __puts_lines__(lines, seen)
-    i = 0
-    while i < lines.size
-      line = lines[i]
-      if line.is_a?(Array)
-        if seen.any? { |outer| outer.equal?(line) }
-          __write__("[...]\n")
-        else
-          __puts_lines__(line, seen + [line])
-        end
-      else
-        text = line.nil? ? "" : line.to_s
-        __write__(text)
-        __write__("\n") unless text.end_with?("\n")
-      end
-      i = i + 1
-    end
-  end
-
-  def print(*parts)
-    i = 0
-    while i < parts.size
-      __write__(parts[i].to_s)
-      i = i + 1
-    end
-    nil
-  end
-
-  def p(*values)
-    i = 0
-    while i < values.size
-      __write__(values[i].inspect)
-      __write__("\n")
-      i = i + 1
-    end
-    return nil if values.size == 0
-    return values[0] if values.size == 1
-    values
-  end
-
   # -- pattern matching (#165) ------------------------------------------
   #
   # The compiler lowers a pattern to tests and jumps, and calls these for the
@@ -299,7 +247,7 @@ module Kernel
   # `Kernel.private_instance_methods(false)` is where the list comes from; the
   # primitive half of it — `raise`, `proc`, `lambda`, `catch`, `throw`,
   # `block_given?` — is marked in `interp.rs`, beside where those are defined.
-  module_function :loop, :p, :print, :puts
+  module_function :loop
 end
 
 # Object-side reflection (#28), over the same `__reflect_*__` primitives as
@@ -437,6 +385,47 @@ module Kernel
     raise TypeError, "can't convert #{object.class} into Hash"
   end
 
+  def Integer(object, base = nil, exception: true)
+    unless exception == true || exception == false
+      raise ArgumentError, "expected true or false as exception: #{exception.inspect}"
+    end
+    return Kernel.__integer__(object, base) if exception
+    begin
+      Kernel.__integer__(object, base)
+    rescue ArgumentError, TypeError, FloatDomainError
+      nil
+    end
+  end
+
+  def self.__integer__(object, base)
+    unless base.nil?
+      raise ArgumentError, "base specified for non string value" unless String === object
+      base = Integer.__index__(base)
+      raise ArgumentError, "invalid radix #{base}" if base < 0 || base == 1 || base > 36
+    end
+    case object
+    when Integer then object
+    when String
+      value = object.__strict_integer__(base || 0)
+      raise ArgumentError, "invalid value for Integer(): #{object.inspect}" if value.nil?
+      value
+    when Float then __float_to_i__(object)
+    when nil then raise TypeError, "can't convert nil into Integer"
+    else
+      if object.respond_to?(:to_int, true)
+        converted = object.__send__(:to_int)
+        return converted if Integer === converted
+      end
+      if object.respond_to?(:to_i, true)
+        converted = object.__send__(:to_i)
+        return converted if Integer === converted
+        raise TypeError,
+              "can't convert #{object.class} to Integer (#{object.class}#to_i gives #{converted.class})"
+      end
+      raise TypeError, "can't convert #{object.class} into Integer"
+    end
+  end
+
   def String(object)
     return object if String === object
     [:to_str, :to_s].each do |name|
@@ -473,7 +462,7 @@ module Kernel
   end
 
   # `Kernel`'s functions: private instance methods, public on `Kernel` itself.
-  module_function :Array, :Hash, :String, :sleep, :__method__, :__callee__, :__dir__
+  module_function :Array, :Hash, :Integer, :String, :sleep, :__method__, :__callee__, :__dir__
 end
 
 # `Proc#to_s`: the address, where the block was written, and `(lambda)` for

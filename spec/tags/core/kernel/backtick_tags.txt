@@ -1,1 +1,0 @@
-fails(#223: `Kernel#`` runs a shell command, which is the backtick slice and needs a process):Kernel#` is a private method

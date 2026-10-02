@@ -673,6 +673,32 @@ class String
     end
   end
 
+  # A copy without the prefix or suffix, always a plain String; the bang forms
+  # answer nil when there was none. Measured.
+  def delete_prefix(prefix)
+    prefix = String.__coerce__(prefix)
+    start_with?(prefix) ? __byteslice__(prefix.bytesize, bytesize - prefix.bytesize) : __byteslice__(0, bytesize)
+  end
+
+  def delete_suffix(suffix)
+    suffix = String.__coerce__(suffix)
+    end_with?(suffix) ? __byteslice__(0, bytesize - suffix.bytesize) : __byteslice__(0, bytesize)
+  end
+
+  def delete_prefix!(prefix)
+    __modify__
+    prefix = String.__coerce__(prefix)
+    return nil if prefix.empty? || !start_with?(prefix)
+    replace(delete_prefix(prefix))
+  end
+
+  def delete_suffix!(suffix)
+    __modify__
+    suffix = String.__coerce__(suffix)
+    return nil if suffix.empty? || !end_with?(suffix)
+    replace(delete_suffix(suffix))
+  end
+
   def partition(pattern)
     if pattern.is_a?(Regexp)
       match = pattern.match(self)
@@ -1519,6 +1545,68 @@ class String
 
   def chr
     empty? ? String.new(encoding: encoding) : self[0]
+  end
+
+  # `Kernel#Integer`'s parse: the whole String, or nil. Whitespace around it,
+  # a sign, a prefix where the base allows one, and digits with single
+  # underscores between them — nothing else, not even a NUL. Measured.
+  def __strict_integer__(base)
+    n = bytesize
+    i = 0
+    i += 1 while i < n && __strippable__(__getbyte__(i)) && __getbyte__(i) != 0
+    negative = false
+    if i < n && (__getbyte__(i) == 0x2d || __getbyte__(i) == 0x2b)
+      negative = __getbyte__(i) == 0x2d
+      i += 1
+    end
+    # Whether the last thing read was a digit: an underscore needs one on
+    # each side.
+    after_digit = false
+    if i + 1 < n && __getbyte__(i) == 0x30
+      prefixed =
+        case __getbyte__(i + 1) | 0x20
+        when 0x78 then 16
+        when 0x62 then 2
+        when 0x6f then 8
+        when 0x64 then 10
+        end
+      if prefixed && (base == 0 || base == prefixed)
+        base = prefixed
+        i += 2
+      elsif base == 0
+        # A bare leading zero is octal, and is a digit itself.
+        base = 8
+        i += 1
+        after_digit = true
+      end
+    end
+    base = 10 if base == 0
+    value = 0
+    digits = after_digit ? 1 : 0
+    while i < n
+      byte = __getbyte__(i)
+      if byte == 0x5f
+        return nil unless after_digit
+        after_digit = false
+        i += 1
+        next
+      end
+      digit =
+        if byte >= 0x30 && byte <= 0x39 then byte - 0x30
+        elsif byte >= 0x61 && byte <= 0x7a then byte - 0x61 + 10
+        elsif byte >= 0x41 && byte <= 0x5a then byte - 0x41 + 10
+        end
+      break if digit.nil?
+      return nil if digit >= base
+      value = value * base + digit
+      digits += 1
+      after_digit = true
+      i += 1
+    end
+    return nil if digits == 0 || !after_digit
+    i += 1 while i < n && __strippable__(__getbyte__(i)) && __getbyte__(i) != 0
+    return nil unless i == n
+    negative ? -value : value
   end
 end
 

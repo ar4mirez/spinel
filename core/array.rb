@@ -226,14 +226,24 @@ class Array
     false
   end
 
-  def index(wanted)
+  def index(*wanted)
+    if wanted.size > 1
+      raise ArgumentError, "wrong number of arguments (given #{wanted.size}, expected 0..1)"
+    end
+    return to_enum(:index) if wanted.empty? && !block_given?
     i = 0
     while i < size
-      return i if self[i] == wanted
+      if wanted.empty?
+        return i if yield(self[i])
+      elsif self[i] == wanted[0]
+        return i
+      end
       i = i + 1
     end
     nil
   end
+
+  alias find_index index
 
 
 

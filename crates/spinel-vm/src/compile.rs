@@ -1026,6 +1026,32 @@ impl Compiler {
                 }
             },
 
+            // `` `cmd` `` is a call to `Kernel#`` with the command as a String,
+            // so a class that defines its own `` ` `` is asked — Ruby's rule,
+            // and how ruby/spec checks it (#223).
+            ExprKind::XStr(command) => {
+                self.emit(Insn::PushSelf);
+                let string = Expr {
+                    span,
+                    kind: ExprKind::Str(command.clone()),
+                };
+                self.expr(&string)?;
+                let symbol = self.symbol("`");
+                let site = self.push_site(
+                    CallSite {
+                        name: symbol,
+                        argc: 1,
+                        splats: Vec::new(),
+                        keywords: Vec::new(),
+                        block: BlockRef::None,
+                        implicit_self: true,
+                        kwsplat: false,
+                    },
+                    true,
+                );
+                self.emit(Insn::Send(site));
+            }
+
             ExprKind::Regexp(regexp) => {
                 // `/n`, `/e`, `/s`, `/u` set the pattern's encoding, which this
                 // engine does not model. Dropping them silently would answer
@@ -5259,7 +5285,6 @@ fn node_name(kind: &ExprKind) -> &'static str {
 
         ExprKind::Splat(_) => "a splat",
         ExprKind::Rational(_) | ExprKind::Imaginary(_) => "a rational or complex literal",
-        ExprKind::XStr(_) => "a backtick command",
         // #165 compiles the rest of this family. A node still reaching here is
         // one the lowering built in a shape the compiler does not expect.
         ExprKind::MatchPattern(_)

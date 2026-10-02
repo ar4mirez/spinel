@@ -2,16 +2,6 @@
 # file, in Ruby over five file system primitives. Reading and writing through
 # an `IO` is #41's, so `IO` is only the superclass here.
 
-class IO
-  include Enumerable
-
-  SEEK_SET = 0
-  SEEK_CUR = 1
-  SEEK_END = 2
-  SEEK_DATA = 3
-  SEEK_HOLE = 4
-end
-
 class File < IO
   # The open and lock flags are the platform's; the `fnmatch` flags are
   # Ruby's own numbering.
@@ -176,6 +166,11 @@ class File < IO
   def self.directory?(path)
     __fs_kind__(__path__(path), true) == :directory
   end
+
+  # `access(2)` with the real ids, as CRuby's `rb_eaccess` falls back to.
+  def self.readable?(path) = __fs_access__(__path__(path), 4)
+  def self.writable?(path) = __fs_access__(__path__(path), 2)
+  def self.executable?(path) = __fs_access__(__path__(path), 1)
 
   def self.symlink?(path)
     __fs_kind__(__path__(path), false) == :link

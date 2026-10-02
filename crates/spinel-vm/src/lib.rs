@@ -90,6 +90,7 @@ pub use heap::{Handle, HandleScope, Heap, ParseFailure, Parser, Payload, Stats};
 pub use interp::{Error, Frame};
 pub use method::{
     BindingOp, BitOp, Definition, Definitions, FiberOp, FsOp, IvarOp, Native, ReflectOp, StrOp,
+    SysOp,
 };
 pub use regexp::Regexps;
 pub use shape::{ShapeId, Shapes};

@@ -14,6 +14,22 @@ class NilClass
     []
   end
 
+  def to_h
+    {}
+  end
+
+  def to_i
+    0
+  end
+
+  def to_f
+    0.0
+  end
+
+  def =~(other)
+    nil
+  end
+
   def inspect
     "nil"
   end
