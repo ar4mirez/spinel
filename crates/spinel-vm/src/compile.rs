@@ -448,6 +448,26 @@ impl Compiler {
         }
     }
 
+    /// The encoding a string literal is in: the one an escape forced, or the
+    /// file's source encoding (#19).
+    fn literal_encoding(&self, forced: spinel_ast::ForcedEncoding) -> u8 {
+        match forced {
+            spinel_ast::ForcedEncoding::Utf8 => crate::strings::UTF_8,
+            spinel_ast::ForcedEncoding::Binary => crate::strings::BINARY,
+            spinel_ast::ForcedEncoding::UsAscii => crate::strings::US_ASCII,
+            spinel_ast::ForcedEncoding::None => self.source_encoding(),
+        }
+    }
+
+    /// The file's magic-comment encoding, or UTF-8.
+    fn source_encoding(&self) -> u8 {
+        self.source
+            .as_ref()
+            .and_then(|map| map.encoding.as_deref())
+            .and_then(crate::strings::index_named)
+            .unwrap_or(crate::strings::UTF_8)
+    }
+
     /// A compiler for a nested scope: a method body, a block, or a lambda.
     ///
     /// `barrier` is the difference between the two kinds. A method body cannot
@@ -841,10 +861,19 @@ impl Compiler {
             // false and `__FILE__.equal?(__FILE__)` is false, both measured, so
             // each evaluation wants its own object.
             ExprKind::SourceFile(path) => {
-                let index = self.literal(Literal::Str(path.to_vec().into_boxed_slice()));
+                let index = self.literal(Literal::Str(
+                    path.to_vec().into_boxed_slice(),
+                    crate::strings::UTF_8,
+                ));
                 self.emit(Insn::PushLit(index));
             }
             ExprKind::SourceLine(line) => self.emit(Insn::PushInt(i64::from(*line))),
+            // The file's source encoding, as an `Encoding` (#19).
+            ExprKind::SourceEncoding => {
+                self.push_const_name("Encoding");
+                self.emit(Insn::PushInt(i64::from(self.source_encoding())));
+                self.emit_send("__at__", 1);
+            }
 
             // Past 2^62 an `Integer` is a heap cell. The literal carries the
             // digits and the base it was written in, because `0xff` has to
@@ -892,14 +921,19 @@ impl Compiler {
                 // Under `# frozen_string_literal: true` a literal is frozen,
                 // and one object per content (#21).
                 Some(bytes) if string.frozen == Some(true) => {
-                    let index = self.literal(Literal::FrozenStr(bytes));
+                    let encoding = self.literal_encoding(string.encoding);
+                    let index = self.literal(Literal::FrozenStr(bytes, encoding));
                     self.emit(Insn::PushLit(index));
                 }
                 Some(bytes) => {
-                    let index = self.literal(Literal::Str(bytes));
+                    let encoding = self.literal_encoding(string.encoding);
+                    let index = self.literal(Literal::Str(bytes, encoding));
                     self.emit(Insn::PushLit(index));
                 }
-                None => self.interpolated(&string.parts)?,
+                None => {
+                    let encoding = self.literal_encoding(string.encoding);
+                    self.interpolated(&string.parts, encoding)?;
+                }
             },
 
             ExprKind::Regexp(regexp) => {
@@ -939,7 +973,7 @@ impl Compiler {
                         // consulted after it, which is what keeps the
                         // instruction's stack effect the same as the plain
                         // form's.
-                        self.interpolated(&regexp.parts)?;
+                        self.interpolated(&regexp.parts, self.source_encoding())?;
                         if regexp.flags.once {
                             let site = self.once_regexps;
                             self.once_regexps += 1;
@@ -962,7 +996,7 @@ impl Compiler {
                     self.emit(Insn::PushSym(index));
                 }
                 None => {
-                    self.interpolated(&symbol.parts)?;
+                    self.interpolated(&symbol.parts, self.source_encoding())?;
                     self.emit(Insn::Intern);
                 }
             },
@@ -1054,13 +1088,14 @@ impl Compiler {
     /// ponytail: one allocation per part, because `String#+` copies. The
     /// upgrade is a `ConcatStrings(n)` opcode joining the parts in one pass,
     /// and it is worth writing when a benchmark shows interpolation in it.
-    fn interpolated(&mut self, parts: &[StrPart]) -> Emit {
-        let empty = self.literal(Literal::Str(Box::from(&b""[..])));
+    fn interpolated(&mut self, parts: &[StrPart], encoding: u8) -> Emit {
+        let empty = self.literal(Literal::Str(Box::from(&b""[..]), encoding));
         self.emit(Insn::PushLit(empty));
         for part in parts {
             match part {
                 StrPart::Bytes(bytes) => {
-                    let index = self.literal(Literal::Str(bytes.to_vec().into_boxed_slice()));
+                    let index =
+                        self.literal(Literal::Str(bytes.to_vec().into_boxed_slice(), encoding));
                     self.emit(Insn::PushLit(index));
                 }
                 StrPart::Interp(exprs) => {
@@ -3018,7 +3053,10 @@ impl Compiler {
     /// Push one of `defined?`'s answer strings.
     fn push_word(&mut self, word: &str) -> Emit {
         // Frozen: `defined?` answers a frozen string in Ruby.
-        let index = self.literal(Literal::FrozenStr(word.as_bytes().into()));
+        let index = self.literal(Literal::FrozenStr(
+            word.as_bytes().into(),
+            crate::strings::US_ASCII,
+        ));
         self.emit(Insn::PushLit(index));
         Ok(())
     }
@@ -3493,7 +3531,8 @@ impl Compiler {
             && let ExprKind::Str(string) = &receiver.kind
             && let Some(bytes) = flat_bytes(&string.parts)
         {
-            let index = self.literal(Literal::FrozenStr(bytes));
+            let encoding = self.literal_encoding(string.encoding);
+            let index = self.literal(Literal::FrozenStr(bytes, encoding));
             self.emit(Insn::PushLit(index));
             return Ok(());
         }
@@ -5125,9 +5164,6 @@ fn node_name(kind: &ExprKind) -> &'static str {
         ExprKind::Alias(_) => "`alias` on a global variable",
         ExprKind::Exec(_) => "`BEGIN`/`END`",
         ExprKind::ShareableConstant(_) => "a shareable-constant comment",
-        // `__FILE__` and `__LINE__` compile (#174); this is the third keyword,
-        // which needs an object that does not exist yet.
-        ExprKind::SourceEncoding => "`__ENCODING__`, which waits for the Encoding class,",
         ExprKind::ForwardingArgs => "argument forwarding",
         ExprKind::Missing => "a syntax error",
         _ => "this expression",

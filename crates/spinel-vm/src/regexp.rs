@@ -63,7 +63,7 @@ pub struct Regexps {
     /// literal under `# frozen_string_literal: true` answer, one object per
     /// content — CRuby's fstring table. Here because this is the heap's traced
     /// literal cache, and a frozen literal is a literal.
-    strings: HashMap<Vec<u8>, Value>,
+    strings: HashMap<(Vec<u8>, u8), Value>,
 }
 
 impl Regexps {
@@ -119,13 +119,14 @@ impl Regexps {
 
     /// The interned frozen String with these bytes, if one has been made.
     #[must_use]
-    pub fn fstring(&self, bytes: &[u8]) -> Option<Value> {
-        self.strings.get(bytes).copied()
+    pub fn fstring(&self, bytes: &[u8], encoding: u8) -> Option<Value> {
+        self.strings.get(&(bytes.to_vec(), encoding)).copied()
     }
 
-    /// Make `value` the interned frozen String for its bytes.
-    pub fn intern_fstring(&mut self, bytes: &[u8], value: Value) {
-        self.strings.insert(bytes.to_vec(), value);
+    /// Make `value` the interned frozen String for its bytes and encoding:
+    /// `"a"` in UTF-8 and in US-ASCII are two literals, and two objects (#19).
+    pub fn intern_fstring(&mut self, bytes: &[u8], encoding: u8, value: Value) {
+        self.strings.insert((bytes.to_vec(), encoding), value);
     }
 
     /// What this `/o` site answered the first time it ran, if it has.

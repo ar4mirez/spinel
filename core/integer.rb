@@ -378,14 +378,17 @@ class Integer
     if base < 2 || base > 36
       raise ArgumentError, "invalid radix " + base.to_s
     end
-    return "0" if self == 0
+    # US-ASCII, measured; digits appended least significant first and the
+    # buffer reversed once, rather than prepending a copy per digit.
+    out = "".b.__force_encoding__(2)
+    return out << "0" if self == 0
     n = abs
-    out = ""
     while n > 0
-      out = DIGITS[n % base] + out
+      out << DIGITS[n % base]
       n = n / base
     end
-    self < 0 ? "-" + out : out
+    out << "-" if self < 0
+    out.reverse
   end
 
   def inspect
@@ -403,5 +406,69 @@ class Integer
   def clone(freeze: true)
     raise ArgumentError, "can't unfreeze Integer" if freeze == false
     self
+  end
+end
+
+# Byte- and codepoint-level helpers for `core/string.rb` (#19), built on the
+# String primitives alone so they do not depend on the methods they serve.
+class Integer
+  # An index argument: an Integer, or anything with `to_int`.
+  def self.__index__(value)
+    return value if value.is_a?(Integer)
+    unless value.respond_to?(:to_int)
+      raise TypeError, "no implicit conversion of #{value.nil? ? "nil" : value.class} into Integer"
+    end
+    value.to_int
+  end
+
+  # A one-byte BINARY String.
+  def self.__byte_string__(byte)
+    string = "\0".b
+    string.__setbyte__(0, byte)
+    string
+  end
+
+  # `code`'s UTF-8 encoding, as a UTF-8 String.
+  def self.__utf8__(code)
+    bytes =
+      if code < 0x80
+        [code]
+      elsif code < 0x800
+        [0xc0 | (code >> 6), 0x80 | (code & 0x3f)]
+      elsif code < 0x10000
+        [0xe0 | (code >> 12), 0x80 | ((code >> 6) & 0x3f), 0x80 | (code & 0x3f)]
+      else
+        [0xf0 | (code >> 18), 0x80 | ((code >> 12) & 0x3f), 0x80 | ((code >> 6) & 0x3f), 0x80 | (code & 0x3f)]
+      end
+    string = "".b
+    bytes.each { |byte| string.__splice__(string.bytesize, 0, __byte_string__(byte)) }
+    string.__force_encoding__(1)
+  end
+
+  # The codepoint of one valid UTF-8 character's bytes.
+  def self.__utf8_decode__(bytes)
+    first = bytes[0]
+    return first if first < 0x80
+    count = bytes.size
+    code = first & (0xff >> (count + 1))
+    i = 1
+    while i < count
+      code = (code << 6) | (bytes[i] & 0x3f)
+      i += 1
+    end
+    code
+  end
+
+  HEX_DIGITS = "0123456789ABCDEF"
+
+  # `n` in uppercase hex, zero-padded to `width` digits.
+  def self.__hex__(n, width)
+    digits = +""
+    while n > 0 || digits.empty?
+      digits.insert(0, HEX_DIGITS[n & 0xf])
+      n = n >> 4
+    end
+    digits.insert(0, "0") while digits.length < width
+    digits
   end
 end

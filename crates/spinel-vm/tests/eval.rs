@@ -218,16 +218,14 @@ fn source_position_keywords_answer_the_file_and_the_line() {
     assert_eq!(eval("nil\r\n__LINE__"), Ok("2".to_owned()));
 }
 
-/// `__ENCODING__` is deferred, and says so under its own name (#174).
-///
-/// Refusing beats answering: it needs an `Encoding` object, and a wrong one
-/// would make `__ENCODING__.name` a measurement coincidence.
+/// `__ENCODING__` is the file's source encoding (#19): UTF-8 unless a magic
+/// comment names another, and the encoding a plain literal there is in.
 #[test]
-fn the_encoding_keyword_is_refused_under_its_own_reason() {
-    let error = eval("__ENCODING__").expect_err("`__ENCODING__` has no object yet");
-    assert!(
-        error.contains("Encoding"),
-        "the reason has to name what is missing, not the keyword family: {error}"
+fn the_encoding_keyword_is_the_source_encoding() {
+    assert_eq!(eval("__ENCODING__.name"), Ok("\"UTF-8\"".to_owned()));
+    assert_eq!(
+        eval("# encoding: us-ascii\n[__ENCODING__.name, \"a\".encoding.name]"),
+        Ok("[\"US-ASCII\", \"US-ASCII\"]".to_owned())
     );
 }
 

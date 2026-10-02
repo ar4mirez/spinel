@@ -807,16 +807,18 @@ class Hash
   end
 
   def inspect
-    return "{}" if empty?
-    out = "{"
-    pairs = @__pairs__
-    i = 0
-    while i < pairs.size
-      out = out + pairs[i][0].inspect + " => " + pairs[i][1].inspect
-      out = out + ", " if i < pairs.size - 1
-      i = i + 1
+    return "{}".b.__force_encoding__(2) if empty?
+    Kernel.__inspect_guard__(self, "{...}") do
+      out = "{".b.__force_encoding__(2)
+      pairs = @__pairs__
+      i = 0
+      while i < pairs.size
+        out << ", " if i > 0
+        out << pairs[i][0].inspect << " => " << pairs[i][1].inspect
+        i += 1
+      end
+      out << "}"
     end
-    out + "}"
   end
 
   def to_s

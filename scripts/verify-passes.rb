@@ -150,12 +150,13 @@ def it(_description = nil, &block) = block.call
 
 # The magic comments in a file's leading comment block, as lines to re-emit.
 #
-# Only the ones that change the meaning of code rather than the parse: an
-# `encoding` comment would also matter, but the corpus is UTF-8 throughout and
-# `eval` of a UTF-8 String is already UTF-8.
-MAGIC = /\A#\s*frozen_string_literal:\s*(?:true|false)\s*\z/
+# Both kinds that change what code means: `frozen_string_literal`, and an
+# `encoding`/`coding` comment, which sets every plain literal's encoding —
+# ruby/spec's files are mostly `# -*- encoding: us-ascii -*-`, and since #19
+# Spinel honours that, so a replay without it compares different programs.
+MAGIC = /\A#.*(?:\bfrozen_string_literal:\s*(?:true|false)|\b(?:en)?coding[:=]\s*[\w.-]+)/
 def magic_comments(source)
-  source.force_encoding("UTF-8").lines.take(5).grep(MAGIC).join
+  source.dup.force_encoding("UTF-8").scrub.lines.take(5).grep(MAGIC).join
 end
 
 # `spec/harness` resolves `require_relative` against the requiring file's own
@@ -180,7 +181,10 @@ end
 REQUIRE_RELATIVE = /^\s*require_relative\s+(["'])(.+?)\1/
 def load_fixtures(path, seen = Set.new)
   seen << File.expand_path(path)
-  File.binread(path).force_encoding("UTF-8").scan(REQUIRE_RELATIVE) do |_quote, target|
+  # Scrubbed: some fixtures are in other encodings on purpose
+  # (`iso-8859-9-encoding.rb`), and only the ASCII `require_relative` lines
+  # matter here.
+  File.binread(path).force_encoding("UTF-8").scrub.scan(REQUIRE_RELATIVE) do |_quote, target|
     fixture = File.expand_path(target, File.dirname(path))
     fixture += ".rb" unless fixture.end_with?(".rb")
     next unless File.file?(fixture)
