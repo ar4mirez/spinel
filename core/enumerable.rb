@@ -81,14 +81,15 @@ module Enumerable
   # `wanted == item`, not `item == wanted`. This is CRuby's `rb_equal(arg, e)`,
   # and the direction is observable: an argument with a bespoke `==` has it
   # called, with the element as its operand.
+  # The element is the receiver of `==`, as CRuby's `rb_equal(element, obj)`
+  # has it: an element whose `==` is its own decides. Measured.
   def include?(wanted)
-    each { |*a| return true if wanted == __pack__(a) }
+    each { |*a| return true if __pack__(a) == wanted }
     false
   end
 
   def member?(wanted)
-    each { |*a| return true if wanted == __pack__(a) }
-    false
+    include?(wanted)
   end
 
   # `each_slice(3.3)` is legal: a non-Integer size is converted with `to_int`.
@@ -604,8 +605,9 @@ module Enumerable
     end
     keyed = []
     each { |*a| item = __pack__(a); keyed.push([yield(item), item]) }
-    sorted = __merge_sort__(keyed, proc { |x, y| x[0] <=> y[0] })
-    sorted = sorted.reverse if want > 0
+    # Sorted descending for `max`, rather than ascending and reversed, so a
+    # tie keeps the order of `each`: the first such element wins. Measured.
+    sorted = __merge_sort__(keyed, proc { |x, y| want > 0 ? y[0] <=> x[0] : x[0] <=> y[0] })
     if count.size == 1 && !count[0].nil?
       out = []
       sorted.__take__(0, count[0]).each { |pair| out.push(pair[1]) }

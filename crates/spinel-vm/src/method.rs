@@ -421,6 +421,26 @@ pub enum StrOp {
     CharOffsets,
     /// `(string)` → the encoding index the two would combine in, or nil.
     Compatible,
+    /// `(needle, byte_start)` → the byte offset of the first `needle` at or
+    /// after `byte_start`, or nil.
+    ByteIndex,
+    /// `(needle, byte_start)` → the byte offset of the last `needle` starting
+    /// at or before `byte_start`, or nil.
+    ByteRindex,
+    /// `(kind, ascii_only, turkic)` → a new String, case-mapped: kind 0 is
+    /// upcase, 1 downcase, 2 swapcase, 3 capitalize, 4 fold. Unicode for a
+    /// UTF-8 string, ASCII for US-ASCII and BINARY.
+    CaseMap,
+    /// `()` → the receiver's successor, as `String#succ` defines it.
+    Succ,
+    /// `()` → never answers: the refusal for a character in an encoding
+    /// whose table this VM does not have, raised where Ruby would otherwise
+    /// have to guess (`0xA4A2.chr("EUC-JP")`).
+    NeedsCharTable,
+    /// `Float#__format__(conversion, precision, alternate)`: the digits of
+    /// the receiver's magnitude for `%f`, `%e` or `%g` (or their capitals),
+    /// as C's printf writes them. Sign, width and padding are `format`'s.
+    FloatFormat,
     /// `()` on `Encoding`: build every encoding object, `Encoding::LIST`, and
     /// every constant, at once. Boot runs this per heap, and the same work as
     /// a Ruby loop was a measurable share of every spec example's start-up.

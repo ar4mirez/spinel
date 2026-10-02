@@ -746,6 +746,36 @@ fn str_native(
             operands: "an index that is not an Integer",
         })
     };
+    if op == StrOp::NeedsCharTable {
+        return Err(unknown_encoding("a character in this encoding"));
+    }
+    if op == StrOp::FloatFormat {
+        let Some(f) = call.receiver.as_flonum() else {
+            return Err(Error::NoDispatch {
+                op: "Float#__format__",
+                operands: "a Float that is not an immediate",
+            });
+        };
+        let conversion = index_arg(0)?;
+        let precision = usize::try_from(index_arg(1)?).unwrap_or(6);
+        let alternate = arg(2).is_truthy();
+        let Some(text) =
+            crate::strings::format_float(f.abs(), conversion as u8, precision, alternate)
+        else {
+            return Err(Error::NoDispatch {
+                op: "format",
+                operands: "a float conversion other than f, e and g",
+            });
+        };
+        let value = string_bytes_in(
+            scope,
+            Builtin::String.id(),
+            text.as_bytes(),
+            crate::strings::US_ASCII,
+        );
+        stack.push(value);
+        return Ok(None);
+    }
     // The install primitive is asked of `Encoding`, not of a string.
     if op == StrOp::EncodingInstall {
         let Some(class_id) = class_id_of(scope, call.receiver) else {
@@ -882,6 +912,36 @@ fn str_native(
             }
             None => return Err(unknown_encoding("a character operation")),
         },
+        StrOp::ByteIndex | StrOp::ByteRindex => {
+            let Some(needle) = string_bytes(scope, arg(0)) else {
+                return Err(Error::NoDispatch {
+                    op: "String search",
+                    operands: "a needle that is not a String",
+                });
+            };
+            let start = usize::try_from(index_arg(1)?).unwrap_or(0);
+            let found = if op == StrOp::ByteIndex {
+                crate::strings::find(&bytes, &needle, start)
+            } else {
+                crate::strings::rfind(&bytes, &needle, start)
+            };
+            found.map_or(Value::NIL, |at| fixnum(at as i64))
+        }
+        StrOp::Succ => {
+            let Some(next) = strings::succ(encoding, &bytes) else {
+                return Err(unknown_encoding("`succ`"));
+            };
+            string_bytes_in(scope, Builtin::String.id(), &next, encoding)
+        }
+        StrOp::CaseMap => {
+            let kind = u8::try_from(index_arg(0)?).unwrap_or(0);
+            let ascii_only = arg(1).is_truthy();
+            let turkic = arg(2).is_truthy();
+            let Some(mapped) = strings::case_map(encoding, &bytes, kind, ascii_only, turkic) else {
+                return Err(unknown_encoding("case mapping"));
+            };
+            string_bytes_in(scope, Builtin::String.id(), &mapped, encoding)
+        }
         StrOp::Compatible => {
             let other = arg(0);
             let (Some(other_bytes), Some(other_enc)) =
@@ -895,7 +955,7 @@ fn str_native(
             strings::compatible((encoding, &bytes), (other_enc, &other_bytes))
                 .map_or(Value::NIL, |index| fixnum(i64::from(index)))
         }
-        StrOp::EncodingInstall => {
+        StrOp::EncodingInstall | StrOp::FloatFormat | StrOp::NeedsCharTable => {
             unreachable!("answered above")
         }
     };
@@ -1755,7 +1815,28 @@ pub fn eval_in(
                     Insn::BinOp(op) => {
                         let right = stack.pop().expect("binop on an empty stack");
                         let left = stack.pop().expect("binop on an empty stack");
-                        match binop(scope, op, left, right) {
+                        // `1 == obj` for an object that is not a number: CRuby's
+                        // `num_equal` asks the object, `obj == 1`, so a class's
+                        // own `==` decides. Measured.
+                        let swapped = op == BinOp::Eq
+                            && !right.is_immediate()
+                            && (num(left).is_some() || crate::bignum::is_big(scope, left))
+                            && heap_kind(scope, right).is_none()
+                            && !crate::bignum::is_big(scope, right);
+                        let result = if swapped {
+                            Err(Error::NoDispatch {
+                                op: "==",
+                                operands: "a number and an object that decides",
+                            })
+                        } else {
+                            binop(scope, op, left, right)
+                        };
+                        let (left, right) = if swapped {
+                            (right, left)
+                        } else {
+                            (left, right)
+                        };
+                        match result {
                             Ok(value) => stack.push(value),
                             // The send behind the fast path. `BinOp`'s own docs have
                             // said since #10 that one belongs here and that #11's
@@ -9561,6 +9642,32 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             Native::Str(StrOp::ForceEncoding),
         ),
         (Builtin::String, &["__splice__"], Native::Str(StrOp::Splice)),
+        (
+            Builtin::String,
+            &["__byte_index__"],
+            Native::Str(StrOp::ByteIndex),
+        ),
+        (
+            Builtin::String,
+            &["__byte_rindex__"],
+            Native::Str(StrOp::ByteRindex),
+        ),
+        (
+            Builtin::String,
+            &["__case_map__"],
+            Native::Str(StrOp::CaseMap),
+        ),
+        (Builtin::String, &["succ", "next"], Native::Str(StrOp::Succ)),
+        (
+            Builtin::Float,
+            &["__format__"],
+            Native::Str(StrOp::FloatFormat),
+        ),
+        (
+            Builtin::Kernel,
+            &["__needs_char_table__"],
+            Native::Str(StrOp::NeedsCharTable),
+        ),
         (
             Builtin::String,
             &["__getbyte__"],

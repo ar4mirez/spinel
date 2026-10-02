@@ -472,3 +472,28 @@ class Integer
     digits
   end
 end
+
+class Integer
+  # Below 128 a US-ASCII character, below 256 a BINARY byte, and with an
+  # encoding the codepoint in it. Measured.
+  def chr(encoding = nil)
+    if encoding.nil?
+      raise RangeError, "#{self} out of char range" if self < 0 || self > 255
+      return Integer.__byte_string__(self).__force_encoding__(self < 128 ? 2 : 0)
+    end
+    encoding = Encoding.find(encoding)
+    case encoding.__index__
+    when 1
+      out = String.new(encoding: encoding)
+      out << self
+      out
+    when 0, 2
+      limit = encoding.__index__ == 2 ? 127 : 255
+      raise RangeError, "#{self} out of char range" if self < 0 || self > limit
+      Integer.__byte_string__(self).__force_encoding__(encoding.__index__)
+    else
+      # Which codepoints EUC-JP or Shift_JIS has is their table's question.
+      __needs_char_table__
+    end
+  end
+end

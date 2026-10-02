@@ -82,7 +82,12 @@ module Kernel
         raise TypeError, "Expected #instance_variables_to_inspect to return an Array or nil, " \
                          "but it returned #{chosen.class}"
       end
-      chosen.nil? ? instance_variables.reject { |name| name.to_s.start_with?("@__") && name.to_s.end_with?("__") } : chosen
+      # Names it lists that the object does not have are left out. Measured.
+      if chosen.nil?
+        instance_variables.reject { |name| name.to_s.start_with?("@__") && name.to_s.end_with?("__") }
+      else
+        chosen.select { |name| instance_variable_defined?(name) }
+      end
     else
       instance_variables.reject { |name| name.to_s.start_with?("@__") && name.to_s.end_with?("__") }
     end
@@ -469,4 +474,20 @@ module Kernel
 
   # `Kernel`'s functions: private instance methods, public on `Kernel` itself.
   module_function :Array, :Hash, :String, :sleep, :__method__, :__callee__, :__dir__
+end
+
+# `Proc#to_s`: the address, where the block was written, and `(lambda)` for
+# a lambda — BINARY, as `Kernel#to_s` is. Measured.
+class Proc
+  def to_s
+    text = "#<Proc:0x" + __address__
+    location = __proc_location__(self)
+    text = text + " " + location[0] + ":" + location[1].to_s unless location.nil?
+    text = text + " (lambda)" if lambda?
+    (text + ">").__force_encoding__(0)
+  end
+
+  def inspect
+    to_s
+  end
 end
