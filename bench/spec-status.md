@@ -32,7 +32,7 @@ Guards are answered for `linux`, which is what `scripts/spec-status.sh` pins so 
 | `core/hash` | 69 | 460 | 343 | 0 | 109 | 8 | 75% |
 | `core/integer` | 70 | 526 | 189 | 0 | 332 | 5 | 36% |
 | `core/io` | 103 | 1095 | 9 | 0 | 1015 | 71 | 1% |
-| `core/kernel` | 118 | 1277 | 489 | 0 | 664 | 124 | 38% |
+| `core/kernel` | 118 | 1277 | 490 | 0 | 664 | 123 | 38% |
 | `core/main` | 7 | 27 | 4 | 0 | 23 | 0 | 15% |
 | `core/marshal` | 6 | 330 | 0 | 0 | 324 | 6 | 0% |
 | `core/matchdata` | 30 | 191 | 70 | 0 | 101 | 20 | 37% |
@@ -131,4 +131,4 @@ Guards are answered for `linux`, which is what `scripts/spec-status.sh` pins so 
 | `optional/capi` | 47 | 1651 | 10 | 0 | 1561 | 80 | 1% |
 | `optional/thread_safety` | 1 | 5 | 0 | 0 | 4 | 1 | 0% |
 | `security` | 13 | 27 | 0 | 0 | 25 | 2 | 0% |
-| **total** | 3835 | 25624 | 7238 | 0 | 16368 | 2018 | 28% |
+| **total** | 3835 | 25624 | 7239 | 0 | 16368 | 2017 | 28% |
