@@ -40,7 +40,9 @@ pub struct Fixture {
     /// on a constant a fixture should have defined, this is the file to open.
     #[allow(dead_code)]
     pub path: PathBuf,
-    pub iseq: Arc<Iseq>,
+    /// `None` for a fixture that could not be read, parsed or compiled: the
+    /// heap it should have run in is then partial (#39).
+    pub iseq: Option<Arc<Iseq>>,
 }
 
 /// Compile everything `file` reaches through `require_relative`, depth first.
@@ -54,7 +56,34 @@ pub fn preload(file: &Path, program: &Program) -> Fixtures {
     seen.insert(key(file));
     let mut out = Vec::new();
     walk(file, program, &mut seen, &mut out);
+    if let Some(register) = registration(&out) {
+        out.insert(0, register);
+    }
     Arc::new(out)
+}
+
+/// Record every preloaded fixture in `$LOADED_FEATURES` before any runs (#39).
+///
+/// A fixture's own `require_relative` lines run with it now that Spinel has
+/// a `require`, and each one names a file this loader has already evaluated
+/// in the same heap. Marking them loaded is what makes those lines the no-op
+/// they are in Ruby, where the file was required once, rather than a second
+/// evaluation of it.
+fn registration(fixtures: &[Fixture]) -> Option<Fixture> {
+    let paths: Vec<String> = fixtures
+        .iter()
+        .map(|fixture| format!("{:?}", key(&fixture.path).to_string_lossy()))
+        .collect();
+    if paths.is_empty() {
+        return None;
+    }
+    let source = format!("$LOADED_FEATURES.push({})", paths.join(", "));
+    let parsed = spinel_parse::parse_file("<harness>", source.as_bytes());
+    let iseq = compile::program(&parsed.program).ok()?;
+    Some(Fixture {
+        path: PathBuf::from("<harness>"),
+        iseq: Some(Arc::new(iseq)),
+    })
 }
 
 fn walk(from: &Path, program: &Program, seen: &mut HashSet<PathBuf>, out: &mut Vec<Fixture>) {
@@ -68,21 +97,20 @@ fn walk(from: &Path, program: &Program, seen: &mut HashSet<PathBuf>, out: &mut V
             continue;
         }
         let Ok(source) = std::fs::read(&path) else {
+            out.push(Fixture { path, iseq: None });
             continue;
         };
-        let parsed = spinel_parse::parse_file(&path.to_string_lossy(), &source);
+        let absolute = std::path::absolute(&path).unwrap_or_else(|_| path.clone());
+        let parsed = spinel_parse::parse_file(&absolute.to_string_lossy(), &source);
         if !parsed.errors.is_empty() {
+            out.push(Fixture { path, iseq: None });
             continue;
         }
         // Depth first: what a fixture requires has to be defined before the
         // fixture's own body runs, which is the order Ruby gives it.
         walk(&path, &parsed.program, seen, out);
-        if let Ok(iseq) = compile::program(&parsed.program) {
-            out.push(Fixture {
-                path,
-                iseq: Arc::new(iseq),
-            });
-        }
+        let iseq = compile::program(&parsed.program).ok().map(Arc::new);
+        out.push(Fixture { path, iseq });
     }
 }
 

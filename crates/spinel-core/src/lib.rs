@@ -90,6 +90,8 @@ const SOURCES: &[(&str, &str)] = &[
         include_str!("../../../core/encoding.rb"),
     ),
     ("core/binding.rb", include_str!("../../../core/binding.rb")),
+    ("core/file.rb", include_str!("../../../core/file.rb")),
+    ("core/load.rb", include_str!("../../../core/load.rb")),
     ("core/pack.rb", include_str!("../../../core/pack.rb")),
     (
         "core/transcode.rb",

@@ -298,6 +298,15 @@ class Array
     out
   end
 
+  # ponytail: the frozen state and not the singleton class, as `Hash#clone`
+  # does and for its reason; both go with #201's `Kernel#clone`.
+  def clone(freeze: nil)
+    __needs_kernel_clone__ unless singleton_methods.empty?
+    copy = dup
+    copy.freeze if freeze.nil? ? frozen? : freeze
+    copy
+  end
+
   # Element by element, then by length: the first pair that disagrees decides,
   # and two arrays that agree as far as the shorter one goes are ordered by size.
   # `nil` when the operand is not an array, or when any pair is not comparable —

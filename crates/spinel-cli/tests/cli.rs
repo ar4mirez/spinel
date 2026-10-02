@@ -155,6 +155,18 @@ fn run_evaluates_a_file_and_agrees_with_cruby() {
     assert_eq!(stdout(&out), expected);
 }
 
+/// `require_relative`, `require` on `$LOAD_PATH`, and `load` (#39): a file is
+/// required once and loaded every time, against CRuby's output for the same
+/// script.
+#[test]
+fn a_program_requires_and_loads_other_files() {
+    let out = spinel(&["run", &fixture("run/requires.rb")]);
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    let expected = std::fs::read_to_string(fixture("run/requires.expected"))
+        .expect("the expected output is checked in beside the fixture");
+    assert_eq!(stdout(&out), expected);
+}
+
 /// A bare file argument is the same as `run`, because that is what a Ruby
 /// developer types.
 #[test]

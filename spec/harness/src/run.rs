@@ -339,9 +339,18 @@ fn run_inner(example: &Example, fixtures: &Fixtures, spans: &mut Vec<Span>) -> O
     // passing off a partial fixture, that turned out to be an arity bug in
     // `Exception.new` rather than a loading one, and reports none now. If it
     // ever reports another, this is the first place to look.
+    //
+    // Either way the heap is marked partial, so `defined?` refuses rather than
+    // answering `nil` for a name the unfinished part would have defined.
     for fixture in fixtures.iter() {
+        let Some(iseq) = &fixture.iseq else {
+            scope.mark_partial();
+            continue;
+        };
         let mut fixture_frame = interp::Frame::new(0);
-        let _ = interp::eval_in(&mut scope, &mut fixture_frame, &fixture.iseq);
+        if interp::eval_in(&mut scope, &mut fixture_frame, iseq).is_err() {
+            scope.mark_partial();
+        }
     }
 
     install_scratch_pad(&mut scope, &mut frame);
