@@ -8,7 +8,7 @@ Guards are answered for `linux`, which is what `scripts/spec-status.sh` pins so 
 |---|---:|---:|---:|---:|---:|---:|---:|
 | `command_line` | 32 | 169 | 0 | 0 | 159 | 10 | 0% |
 | `core/argf` | 35 | 104 | 0 | 0 | 102 | 2 | 0% |
-| `core/array` | 132 | 1229 | 796 | 0 | 418 | 15 | 65% |
+| `core/array` | 132 | 1229 | 899 | 0 | 315 | 15 | 73% |
 | `core/basicobject` | 14 | 108 | 65 | 0 | 42 | 1 | 60% |
 | `core/binding` | 12 | 53 | 0 | 0 | 53 | 0 | 0% |
 | `core/builtin_constants` | 1 | 27 | 0 | 0 | 27 | 0 | 0% |
@@ -18,7 +18,7 @@ Guards are answered for `linux`, which is what `scripts/spec-status.sh` pins so 
 | `core/conditionvariable` | 4 | 11 | 0 | 0 | 11 | 0 | 0% |
 | `core/data` | 13 | 88 | 0 | 0 | 87 | 1 | 0% |
 | `core/dir` | 34 | 231 | 0 | 0 | 192 | 39 | 0% |
-| `core/encoding` | 45 | 319 | 64 | 0 | 245 | 10 | 20% |
+| `core/encoding` | 45 | 319 | 174 | 0 | 135 | 10 | 55% |
 | `core/enumerable` | 61 | 446 | 363 | 0 | 79 | 4 | 81% |
 | `core/enumerator` | 73 | 390 | 231 | 0 | 158 | 1 | 59% |
 | `core/env` | 45 | 180 | 0 | 0 | 169 | 11 | 0% |
@@ -50,14 +50,14 @@ Guards are answered for `linux`, which is what `scripts/spec-status.sh` pins so 
 | `core/range` | 35 | 468 | 155 | 0 | 270 | 43 | 33% |
 | `core/rational` | 32 | 149 | 0 | 0 | 143 | 6 | 0% |
 | `core/refinement` | 8 | 26 | 0 | 0 | 25 | 1 | 0% |
-| `core/regexp` | 24 | 181 | 48 | 0 | 115 | 18 | 27% |
+| `core/regexp` | 24 | 181 | 50 | 0 | 111 | 20 | 28% |
 | `core/ruby` | 1 | 2 | 0 | 0 | 0 | 2 | 0% |
 | `core/set` | 57 | 191 | 0 | 0 | 175 | 16 | 0% |
 | `core/signal` | 3 | 47 | 7 | 0 | 40 | 0 | 15% |
 | `core/sizedqueue` | 16 | 5 | 0 | 0 | 5 | 0 | 0% |
-| `core/string` | 151 | 1905 | 988 | 0 | 810 | 107 | 52% |
+| `core/string` | 151 | 1905 | 1209 | 0 | 586 | 110 | 63% |
 | `core/struct` | 30 | 148 | 1 | 0 | 147 | 0 | 1% |
-| `core/symbol` | 29 | 159 | 24 | 0 | 134 | 1 | 15% |
+| `core/symbol` | 29 | 159 | 25 | 0 | 133 | 1 | 16% |
 | `core/systemexit` | 2 | 6 | 6 | 0 | 0 | 0 | 100% |
 | `core/thread` | 54 | 363 | 26 | 0 | 303 | 34 | 7% |
 | `core/threadgroup` | 5 | 8 | 0 | 0 | 8 | 0 | 0% |
@@ -66,7 +66,7 @@ Guards are answered for `linux`, which is what `scripts/spec-status.sh` pins so 
 | `core/true` | 9 | 13 | 6 | 0 | 7 | 0 | 46% |
 | `core/unboundmethod` | 20 | 80 | 0 | 0 | 77 | 3 | 0% |
 | `core/warning` | 5 | 31 | 0 | 0 | 28 | 3 | 0% |
-| `language` | 67 | 2464 | 1469 | 0 | 914 | 81 | 60% |
+| `language` | 67 | 2464 | 1470 | 0 | 913 | 81 | 60% |
 | `language/predefined` | 2 | 14 | 0 | 0 | 14 | 0 | 0% |
 | `language/regexp` | 11 | 257 | 175 | 0 | 80 | 2 | 68% |
 | `library/English` | 2 | 27 | 0 | 0 | 9 | 18 | 0% |
@@ -131,4 +131,4 @@ Guards are answered for `linux`, which is what `scripts/spec-status.sh` pins so 
 | `optional/capi` | 47 | 1651 | 10 | 0 | 1561 | 80 | 1% |
 | `optional/thread_safety` | 1 | 5 | 0 | 0 | 4 | 1 | 0% |
 | `security` | 13 | 27 | 0 | 0 | 25 | 2 | 0% |
-| **total** | 3835 | 25624 | 6108 | 0 | 17501 | 2015 | 24% |
+| **total** | 3835 | 25624 | 6546 | 0 | 17058 | 2020 | 26% |

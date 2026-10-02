@@ -431,6 +431,19 @@ pub enum StrOp {
     /// upcase, 1 downcase, 2 swapcase, 3 capitalize, 4 fold. Unicode for a
     /// UTF-8 string, ASCII for US-ASCII and BINARY.
     CaseMap,
+    /// `()` → never answers: `pack`/`unpack`'s `p` and `P` read and write
+    /// raw pointers, which a Spinel program has no way to hold.
+    NeedsPointers,
+    /// `Float#__bits__(width)` → the IEEE 754 bits of the receiver at 32 or
+    /// 64 bits, as an Integer: what `pack` writes for `e`, `g`, `d` and kin.
+    FloatBits,
+    /// `Integer#__float_from_bits__(width)` → the Float those bits are, at 32 or 64.
+    FloatFromBits,
+    /// `(source, destination, start)` → one transcoding step from byte
+    /// `start`: `[output, stop, error_bytes, readagain_bytes, next,
+    /// codepoint]`, stop being `:done`, `:invalid`, `:incomplete` or
+    /// `:undefined`; or nil when the pair is not one this VM converts.
+    Transcode,
     /// `()` → the receiver's successor, as `String#succ` defines it.
     Succ,
     /// `()` → never answers: the refusal for a character in an encoding

@@ -1,0 +1,3 @@
+fails(#145: the shared group reads `@method`, which mspec's `it_behaves_like` sets and this harness does not, so the format it builds is empty):string_unpack_8bit decodes one byte for a single format character
+fails(#145: the shared group reads `@method`, which mspec's `it_behaves_like` sets and this harness does not, so the format it builds is empty):string_unpack_8bit decodes two bytes for two format characters
+fails(#145: the shared group reads `@method`, which mspec's `it_behaves_like` sets and this harness does not, so the format it builds is empty):string_unpack_8bit ignores spaces between directives
