@@ -11925,7 +11925,7 @@ fn fs_native(
             }
         }
         FsOp::Constants => {
-            let mut pairs: Vec<(&str, i32)> = vec![
+            let common: &[(&str, i32)] = &[
                 ("RDONLY", libc::O_RDONLY),
                 ("WRONLY", libc::O_WRONLY),
                 ("RDWR", libc::O_RDWR),
@@ -11944,14 +11944,16 @@ fn fs_native(
                 ("LOCK_UN", libc::LOCK_UN),
             ];
             #[cfg(target_os = "linux")]
-            pairs.extend([
+            let platform: &[(&str, i32)] = &[
                 ("DIRECT", libc::O_DIRECT),
                 ("NOATIME", libc::O_NOATIME),
                 ("RSYNC", libc::O_RSYNC),
                 ("TMPFILE", libc::O_TMPFILE),
-            ]);
-            let mut out = Vec::with_capacity(pairs.len());
-            for (name, value) in pairs {
+            ];
+            #[cfg(not(target_os = "linux"))]
+            let platform: &[(&str, i32)] = &[];
+            let mut out = Vec::with_capacity(common.len() + platform.len());
+            for &(name, value) in common.iter().chain(platform) {
                 let name = string_new(scope, name);
                 let name = scope.root(name);
                 let value = Value::fixnum(i64::from(value)).expect("a flag is a fixnum");
