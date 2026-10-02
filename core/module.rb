@@ -21,7 +21,7 @@ class Module
     end
     n = name
     return n unless n.nil?
-    "#<" + self.class.name + ":0x" + __address__ + ">"
+    ("#<" + self.class.name + ":0x" + __address__ + ">").__force_encoding__(0)
   end
 
   # A singleton class is frozen with the object it belongs to.

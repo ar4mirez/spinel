@@ -709,7 +709,9 @@ class Enumerator
 
     def inspect
       return "#<Enumerator::Product: uninitialized>" if @sources.nil?
-      "#<Enumerator::Product: #{@sources.inspect}>"
+      Kernel.__inspect_guard__(self, "#<Enumerator::Product: ...>") do
+        "#<Enumerator::Product: #{@sources.inspect}>"
+      end
     end
 
     def to_s

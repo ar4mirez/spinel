@@ -104,6 +104,11 @@ pub struct SourceMap {
     pub path: Box<str>,
     /// Byte offset of the start of every line, line 1 first.
     line_starts: Box<[u32]>,
+    /// The file's `encoding:`/`coding:` magic comment, as written, or `None`
+    /// for UTF-8: the encoding a literal with no forced encoding is in (#19).
+    /// Here rather than on `Program` because every scope compiled out of the
+    /// file — a block, a method, the harness's one expression — carries this.
+    pub encoding: Option<Box<str>>,
 }
 
 impl SourceMap {
@@ -111,6 +116,7 @@ impl SourceMap {
         Self {
             path: path.into(),
             line_starts: line_starts.into_boxed_slice(),
+            encoding: None,
         }
     }
 
@@ -135,6 +141,7 @@ impl std::fmt::Debug for SourceMap {
         f.debug_struct("SourceMap")
             .field("path", &self.path)
             .field("lines", &self.line_starts.len())
+            .field("encoding", &self.encoding)
             .finish()
     }
 }

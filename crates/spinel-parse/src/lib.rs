@@ -127,12 +127,30 @@ pub fn parse_file(path: &str, source: &[u8]) -> Parsed {
         },
     );
     errors.extend(lowering_errors);
+    let mut program = program;
+    if let Some(map) = std::sync::Arc::get_mut(&mut program.source) {
+        map.encoding = magic_encoding(&result).map(String::into_boxed_str);
+    }
 
     Parsed {
         program,
         errors,
         warnings,
     }
+}
+
+/// The value of an `encoding:` or `coding:` magic comment, which names the
+/// encoding a literal without a forced one is in. Prism finds both the plain
+/// and the Emacs `-*- ... -*-` forms; the key is matched as CRuby matches it,
+/// ignoring case.
+fn magic_encoding(result: &ruby_prism::ParseResult<'_>) -> Option<String> {
+    result
+        .magic_comments()
+        .find(|comment| {
+            let key = comment.key().to_ascii_lowercase();
+            key == b"encoding" || key == b"coding"
+        })
+        .map(|comment| String::from_utf8_lossy(comment.value()).into_owned())
 }
 
 /// The byte offset each line starts at, line 1 first.

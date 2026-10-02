@@ -624,15 +624,16 @@ pub enum Literal {
     /// because `Insn` stays `Copy` and small either way, and this keeps one
     /// materialisation path.
     Float(f64),
-    /// Ruby strings are byte strings, not UTF-8.
-    Str(Box<[u8]>),
+    /// Ruby strings are byte strings, not UTF-8: the bytes, and the index of
+    /// the encoding they are in (#19).
+    Str(Box<[u8]>, u8),
     /// A string literal that is frozen the moment it is made.
     ///
     /// `defined?` answers one, and `defined_spec.rb` checks `.frozen?` on every
     /// literal it asks about. A separate variant rather than a flag on `Str`
     /// because freezing is the whole difference and a `bool` field would put a
     /// branch in the hot path of every ordinary string literal.
-    FrozenStr(Box<[u8]>),
+    FrozenStr(Box<[u8]>, u8),
     /// A regexp literal: the pattern as written, plus the flags it carries.
     ///
     /// Held as source rather than as a compiled pattern because an `Iseq`

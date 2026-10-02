@@ -84,6 +84,10 @@ const SOURCES: &[(&str, &str)] = &[
         "core/exception.rb",
         include_str!("../../../core/exception.rb"),
     ),
+    (
+        "core/encoding.rb",
+        include_str!("../../../core/encoding.rb"),
+    ),
     ("core/signal.rb", include_str!("../../../core/signal.rb")),
     ("core/thread.rb", include_str!("../../../core/thread.rb")),
     ("core/fiber.rb", include_str!("../../../core/fiber.rb")),

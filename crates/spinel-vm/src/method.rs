@@ -381,12 +381,50 @@ pub enum Native {
     /// `core/kernel.rb` build reflection on (#28). Installed as
     /// `Kernel#__reflect_*__`.
     Reflect(ReflectOp),
+    /// The `String` and `Encoding` primitives `core/string.rb` and
+    /// `core/encoding.rb` build on (#19). Bytes and encoding indexes only; every
+    /// rule about which encoding wins, and every argument check, is Ruby.
+    Str(StrOp),
     /// `String#to_sym` and `#intern`: the symbol table is the VM's.
     StringIntern,
     /// `Kernel#__raise_no_method__(name, args)`: the NoMethodError the VM
     /// raises for a missing method, raised on purpose — what
     /// `BasicObject#method_missing` does when called directly (#28).
     RaiseNoMethod,
+}
+
+/// Which `String`/`Encoding` operation. See `interp.rs`, `str_native`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StrOp {
+    /// `()` → the receiver's encoding index.
+    EncodingIndex,
+    /// `(index)` → the receiver, now tagged with that encoding. No
+    /// conversion: `force_encoding` only relabels.
+    ForceEncoding,
+    /// `(byte_start, byte_len, string)` → the receiver, with those bytes
+    /// replaced by the string's: every in-place change is one of these.
+    Splice,
+    /// `(index)` → the byte there, or nil past either end.
+    GetByte,
+    /// `(index, byte)` → the byte, written; the index is already checked.
+    SetByte,
+    /// `(byte_start, byte_len)` → a new String of those bytes, same encoding;
+    /// the range is already clamped.
+    ByteSlice,
+    /// `()` → every byte, as an Array of Integers.
+    Bytes,
+    /// `()` → whether the bytes are valid in the receiver's encoding.
+    ValidEncoding,
+    /// `()` → whether the receiver is ASCII in an ASCII-compatible encoding.
+    AsciiOnly,
+    /// `()` → each character's starting byte offset, then the bytesize.
+    CharOffsets,
+    /// `(string)` → the encoding index the two would combine in, or nil.
+    Compatible,
+    /// `()` on `Encoding`: build every encoding object, `Encoding::LIST`, and
+    /// every constant, at once. Boot runs this per heap, and the same work as
+    /// a Ruby loop was a measurable share of every spec example's start-up.
+    EncodingInstall,
 }
 
 /// Which class-table operation. See `interp.rs`, `reflect_native`.

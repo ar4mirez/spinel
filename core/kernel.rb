@@ -64,8 +64,9 @@ module Kernel
   # class whose `name` is nil, and `"#<" + nil` is a TypeError. The address is
   # `object_id` in hex, padded to sixteen digits as CRuby's is — the same
   # number `Module#to_s` prints for an anonymous class.
+  # BINARY, as CRuby's `rb_any_to_s` answers. Measured.
   def to_s
-    "#<" + self.class.to_s + ":0x" + __address__ + ">"
+    ("#<" + self.class.to_s + ":0x" + __address__ + ">").__force_encoding__(0)
   end
 
   # `to_s` plus the instance variables, measured on ruby 4.0.7:
@@ -85,7 +86,7 @@ module Kernel
     else
       instance_variables.reject { |name| name.to_s.start_with?("@__") && name.to_s.end_with?("__") }
     end
-    return head + ">" if names.empty?
+    return (head + ">").__force_encoding__(0) if names.empty?
     inspecting = Kernel.__inspecting__
     return head + " ...>" if inspecting.any? { |seen| seen.equal?(self) }
     inspecting.push(self)
@@ -107,6 +108,19 @@ module Kernel
   # object that holds itself from inspecting forever. Per heap, on `Kernel`.
   def self.__inspecting__
     @__inspecting__ ||= []
+  end
+
+  # Run the block unless `object` is already being inspected further out,
+  # and answer `placeholder` if it is: `[1, [...]]`, `{x: {...}}`.
+  def self.__inspect_guard__(object, placeholder)
+    inspecting = __inspecting__
+    return placeholder if inspecting.any? { |seen| seen.equal?(object) }
+    inspecting.push(object)
+    begin
+      yield
+    ensure
+      inspecting.pop
+    end
   end
 
   # `hash` for a structure that may contain itself (#22), which is CRuby's
@@ -297,15 +311,27 @@ module Kernel
   end
 
   def public_methods(all = true)
-    __reflect_method_names__(__reflect_class_of__(self), all, 1)
+    all ? __reflect_method_names__(__reflect_class_of__(self), true, 1) : __own_method_names__(1)
   end
 
   def protected_methods(all = true)
-    __reflect_method_names__(__reflect_class_of__(self), all, 2)
+    all ? __reflect_method_names__(__reflect_class_of__(self), true, 2) : __own_method_names__(2)
   end
 
   def private_methods(all = true)
-    __reflect_method_names__(__reflect_class_of__(self), all, 3)
+    all ? __reflect_method_names__(__reflect_class_of__(self), true, 3) : __own_method_names__(3)
+  end
+
+  # Without `all`, the singleton class's methods and then the object's own
+  # class's, but no ancestor's: `Class.private_methods(false)` lists
+  # `Class#initialize`. Measured.
+  def __own_method_names__(which)
+    klass = __reflect_class_of__(self)
+    names = __reflect_method_names__(klass, false, which)
+    if __reflect_is_singleton__(klass)
+      __reflect_method_names__(self.class, false, which).each { |name| names.push(name) unless names.include?(name) }
+    end
+    names
   end
 
   # The methods on this object's own singleton class — and with `all`, those

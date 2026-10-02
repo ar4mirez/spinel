@@ -209,7 +209,7 @@ As of [#15](https://github.com/ar4mirez/spinel/issues/15) step 3 compiles `core/
 
 **`Array` is two slots: storage and length.** A heap cell cannot grow, so an array whose elements live in its own slots could only grow by becoming a different object and Ruby would see the identity change. The elements live in a separate `Payload::Slots` object instead, and growing replaces *that*; the `Array`'s own address never moves. This is `RARRAY`'s pointer and length, for the same reason. `String` has no such indirection yet, which is why `String#<<`, `#concat` and `#replace` are absent rather than approximated — a mutable string is the same change applied to a byte payload.
 
-Strings (default): byte vector plus encoding plus cached character count. UTF-8, US-ASCII, ASCII-8BIT first; other encodings via transcoding tables in a later phase. No ropes.
+Strings (default): a byte buffer, a byte count and an encoding index (`strings.rs`, #19) — the buffer is a separate object so a String grows in place. UTF-8, US-ASCII, ASCII-8BIT first: characters in any other encoding are refused until transcoding tables arrive. No cached character count yet: `length` walks the bytes, which is the first thing to add when a benchmark asks. No ropes.
 
 Hash (default): insertion-ordered open addressing, keyed on `#hash`/`#eql?` with fast paths for Symbol, String, and fixnum keys.
 

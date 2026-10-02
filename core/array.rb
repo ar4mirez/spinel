@@ -459,26 +459,65 @@ class Array
     self
   end
 
+  # Nested Arrays join flat, with the same separator; an Array that holds
+  # itself is an ArgumentError. The result starts US-ASCII and takes each
+  # part's encoding as `<<` negotiates it, so incompatible parts raise
+  # `Encoding::CompatibilityError`. Measured.
   def join(separator = "")
-    out = ""
-    i = 0
-    while i < size
-      out = out + self[i].to_s
-      out = out + separator if i < size - 1
-      i = i + 1
-    end
+    separator = String.__coerce__(separator) unless separator.nil?
+    out = "".b.__force_encoding__(2)
+    __join_into__(out, separator, [], [true])
     out
   end
 
-  def inspect
-    out = "["
+  # `first` is a one-element flag: CRuby copies the first part's encoding
+  # onto the result before appending, so an ASCII-only UTF-8 first part
+  # makes the whole join UTF-8.
+  def __join_into__(out, separator, seen, first)
+    raise ArgumentError, "recursive array join" if seen.any? { |outer| outer.equal?(self) }
+    seen.push(self)
     i = 0
     while i < size
-      out = out + self[i].inspect
-      out = out + ", " if i < size - 1
-      i = i + 1
+      out << separator if i > 0 && !separator.nil?
+      item = self[i]
+      if item.is_a?(Array)
+        item.__join_into__(out, separator, seen, first)
+      elsif !item.is_a?(String) && !item.respond_to?(:to_str) && item.respond_to?(:to_ary) &&
+            (converted = item.to_ary).is_a?(Array)
+        converted.__join_into__(out, separator, seen, first)
+      else
+        part = item.is_a?(String) ? item : (item.respond_to?(:to_str) ? item.to_str : item.to_s)
+        if first[0]
+          out.__force_encoding__(part.__encoding_index__)
+          first[0] = false
+        end
+        out << part
+      end
+      i += 1
     end
-    out + "]"
+    seen.pop
+  end
+
+  # In the first element's `inspect` encoding, negotiating as it appends; an
+  # empty Array is US-ASCII, and one that holds itself shows `[...]` there.
+  # Measured.
+  def inspect
+    return "[]".b.__force_encoding__(2) if empty?
+    Kernel.__inspect_guard__(self, "[...]") do
+      out = "[".b.__force_encoding__(2)
+      i = 0
+      while i < size
+        part = self[i].inspect
+        if i == 0
+          out.__force_encoding__(part.__encoding_index__)
+        else
+          out << ", "
+        end
+        out << part
+        i += 1
+      end
+      out << "]"
+    end
   end
 
   def to_s

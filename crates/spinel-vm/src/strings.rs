@@ -196,13 +196,71 @@ pub fn ascii_compatible(encoding: u8) -> bool {
 #[must_use]
 pub fn comparable(left: (u8, &[u8]), right: (u8, &[u8])) -> bool {
     let ((left_enc, left_bytes), (right_enc, right_bytes)) = (left, right);
-    if left_enc == right_enc {
+    // An empty string compares with anything, whatever the encodings.
+    if left_enc == right_enc || left_bytes.is_empty() || right_bytes.is_empty() {
         return true;
     }
     let left_ascii = ascii_compatible(left_enc) && left_bytes.is_ascii();
     let right_ascii = ascii_compatible(right_enc) && right_bytes.is_ascii();
     (left_ascii && (right_ascii || ascii_compatible(right_enc)))
         || (right_ascii && ascii_compatible(left_enc))
+}
+
+/// CRuby's `rb_enc_compatible` for two strings: the encoding their
+/// concatenation is in, or `None` when they cannot be combined.
+///
+/// The same encoding is that encoding. An empty side takes the other's —
+/// except that an empty left keeps its own when the right is ASCII it can
+/// hold. Otherwise both must be ASCII-compatible, and a pure-ASCII side
+/// yields to the other.
+#[must_use]
+pub fn compatible(left: (u8, &[u8]), right: (u8, &[u8])) -> Option<u8> {
+    let ((left_enc, left_bytes), (right_enc, right_bytes)) = (left, right);
+    if left_enc == right_enc {
+        return Some(left_enc);
+    }
+    if right_bytes.is_empty() {
+        return Some(left_enc);
+    }
+    if left_bytes.is_empty() {
+        return Some(if ascii_compatible(left_enc) && right_bytes.is_ascii() {
+            left_enc
+        } else {
+            right_enc
+        });
+    }
+    if !ascii_compatible(left_enc) || !ascii_compatible(right_enc) {
+        return None;
+    }
+    if right_bytes.is_ascii() {
+        return Some(left_enc);
+    }
+    if left_bytes.is_ascii() {
+        return Some(right_enc);
+    }
+    None
+}
+
+/// The index of the encoding `name` names, ignoring ASCII case — how a magic
+/// comment's value is read. `None` for a name CRuby does not have.
+#[must_use]
+pub fn index_named(name: &str) -> Option<u8> {
+    crate::encoding_table::ENCODINGS
+        .iter()
+        .position(|&(names, _, _)| {
+            names
+                .iter()
+                .any(|candidate| candidate.eq_ignore_ascii_case(name))
+        })
+        .and_then(|index| u8::try_from(index).ok())
+}
+
+/// An encoding's canonical name, for messages.
+#[must_use]
+pub fn name(encoding: u8) -> &'static str {
+    crate::encoding_table::ENCODINGS
+        .get(usize::from(encoding))
+        .map_or("?", |&(names, _, _)| names[0])
 }
 
 fn fixnum(n: usize) -> Value {

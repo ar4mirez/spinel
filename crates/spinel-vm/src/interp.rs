@@ -42,7 +42,7 @@ use crate::bytecode::{
 use crate::class::Builtin;
 use crate::class::{ClassId, CrefId, Kind, Method, ScopeDefault, Visibility};
 use crate::heap::{Handle, HandleScope, Heap, Payload};
-use crate::method::{BitOp, CvarOp, Definition, FiberOp, IvarOp, Native, ReflectOp};
+use crate::method::{BitOp, CvarOp, Definition, FiberOp, IvarOp, Native, ReflectOp, StrOp};
 use crate::shape::ShapeId;
 use crate::value::SymbolId;
 use crate::value::Value;
@@ -724,6 +724,212 @@ fn leave_fiber(
             unreachable!("a goto never leaves its own frame")
         }
     }
+}
+
+/// The `String` and `Encoding` primitives (#19). See [`StrOp`].
+///
+/// Thin on purpose: these read and write bytes and encoding indexes, and
+/// `core/string.rb` and `core/encoding.rb` do the argument conversion, the
+/// frozen checks and every rule about encodings.
+fn str_native(
+    scope: &mut HandleScope<'_>,
+    stack: &mut Vec<Value>,
+    call: &Pending,
+    op: crate::method::StrOp,
+) -> Result<Option<Unwind>, Error> {
+    use crate::method::StrOp;
+    use crate::strings;
+    let arg = |index: usize| call.args.get(index).copied().unwrap_or(Value::NIL);
+    let index_arg = |index: usize| -> Result<i64, Error> {
+        arg(index).as_fixnum().ok_or(Error::NoDispatch {
+            op: "a String primitive",
+            operands: "an index that is not an Integer",
+        })
+    };
+    // The install primitive is asked of `Encoding`, not of a string.
+    if op == StrOp::EncodingInstall {
+        let Some(class_id) = class_id_of(scope, call.receiver) else {
+            return Err(Error::NoDispatch {
+                op: "__encoding_install__",
+                operands: "a receiver that is not Encoding",
+            });
+        };
+        let class = scope.root(call.receiver);
+        let mut list = Vec::with_capacity(crate::encoding_table::ENCODINGS.len());
+        for (index, &(names, compatible, dummy)) in
+            crate::encoding_table::ENCODINGS.iter().enumerate()
+        {
+            let mut name_values = Vec::with_capacity(names.len());
+            for name in names {
+                let value = string_bytes_in(
+                    scope,
+                    Builtin::String.id(),
+                    name.as_bytes(),
+                    crate::strings::US_ASCII,
+                );
+                let handle = scope.root(value);
+                scope.freeze(handle);
+                name_values.push(value);
+            }
+            let names_array = new_array(scope, &name_values);
+            let names_handle = scope.root(names_array);
+            scope.freeze(names_handle);
+            let object = alloc_ivar_object(scope, Some(class));
+            let object = scope.get(object);
+            let index = Value::fixnum(index as i64).expect("an index is a fixnum");
+            ivar_set(scope, object, symbol("@__index__"), index)?;
+            ivar_set(scope, object, symbol("@__names__"), names_array)?;
+            ivar_set(
+                scope,
+                object,
+                symbol("@__ascii_compatible__"),
+                bool_value(compatible),
+            )?;
+            ivar_set(scope, object, symbol("@__dummy__"), bool_value(dummy))?;
+            let handle = scope.root(object);
+            scope.freeze(handle);
+            list.push(object);
+        }
+        let list_value = new_array(scope, &list);
+        let list_handle = scope.root(list_value);
+        scope.freeze(list_handle);
+        scope
+            .classes_mut()
+            .const_set(class_id, symbol("LIST"), list_value);
+        for &(name, index) in crate::encoding_table::CONSTANTS {
+            scope
+                .classes_mut()
+                .const_set(class_id, symbol(name), list[usize::from(index)]);
+        }
+        stack.push(Value::NIL);
+        return Ok(None);
+    }
+    if !is_string(scope, call.receiver) {
+        return Err(Error::NoDispatch {
+            op: "a String primitive",
+            operands: "a receiver that is not a String",
+        });
+    }
+    let receiver = scope.root(call.receiver);
+    let bytes = strings::bytes(scope, receiver);
+    let encoding = strings::encoding(scope, receiver);
+    let fixnum = |n: i64| Value::fixnum(n).expect("a string offset fits a fixnum");
+    let value = match op {
+        StrOp::EncodingIndex => fixnum(i64::from(encoding)),
+        StrOp::ForceEncoding => {
+            let index = u8::try_from(index_arg(0)?).map_err(|_| Error::NoDispatch {
+                op: "force_encoding",
+                operands: "an encoding index out of range",
+            })?;
+            strings::set_encoding(scope, receiver, index);
+            call.receiver
+        }
+        StrOp::Splice => {
+            let start = usize::try_from(index_arg(0)?).unwrap_or(0);
+            let len = usize::try_from(index_arg(1)?).unwrap_or(0);
+            let Some(with) = string_bytes(scope, arg(2)) else {
+                return Err(Error::NoDispatch {
+                    op: "String splice",
+                    operands: "a replacement that is not a String",
+                });
+            };
+            strings::splice(scope, receiver, start, len, &with);
+            call.receiver
+        }
+        StrOp::GetByte => {
+            let index = index_arg(0)?;
+            let index = if index < 0 {
+                index + bytes.len() as i64
+            } else {
+                index
+            };
+            usize::try_from(index)
+                .ok()
+                .and_then(|i| bytes.get(i))
+                .map_or(Value::NIL, |&b| fixnum(i64::from(b)))
+        }
+        StrOp::SetByte => {
+            let index = usize::try_from(index_arg(0)?).unwrap_or(usize::MAX);
+            let byte = index_arg(1)?;
+            if index >= bytes.len() {
+                return Err(Error::NoDispatch {
+                    op: "String setbyte",
+                    operands: "an index the Ruby side did not check",
+                });
+            }
+            strings::splice(scope, receiver, index, 1, &[(byte & 0xff) as u8]);
+            arg(1)
+        }
+        StrOp::ByteSlice => {
+            let start = usize::try_from(index_arg(0)?).unwrap_or(0).min(bytes.len());
+            let len = usize::try_from(index_arg(1)?).unwrap_or(0);
+            let end = (start + len).min(bytes.len());
+            string_bytes_in(scope, Builtin::String.id(), &bytes[start..end], encoding)
+        }
+        StrOp::Bytes => {
+            let items: Vec<Value> = bytes.iter().map(|&b| fixnum(i64::from(b))).collect();
+            new_array(scope, &items)
+        }
+        StrOp::ValidEncoding => match strings::valid(encoding, &bytes) {
+            Some(valid) => bool_value(valid),
+            None => return Err(unknown_encoding("`valid_encoding?`")),
+        },
+        StrOp::AsciiOnly => bool_value(strings::ascii_compatible(encoding) && bytes.is_ascii()),
+        StrOp::CharOffsets => match strings::char_offsets(encoding, &bytes) {
+            Some(offsets) => {
+                let items: Vec<Value> = offsets.iter().map(|&o| fixnum(o as i64)).collect();
+                new_array(scope, &items)
+            }
+            None => return Err(unknown_encoding("a character operation")),
+        },
+        StrOp::Compatible => {
+            let other = arg(0);
+            let (Some(other_bytes), Some(other_enc)) =
+                (string_bytes(scope, other), string_encoding(scope, other))
+            else {
+                return Err(Error::NoDispatch {
+                    op: "Encoding.compatible?",
+                    operands: "an argument that is not a String",
+                });
+            };
+            strings::compatible((encoding, &bytes), (other_enc, &other_bytes))
+                .map_or(Value::NIL, |index| fixnum(i64::from(index)))
+        }
+        StrOp::EncodingInstall => {
+            unreachable!("answered above")
+        }
+    };
+    stack.push(value);
+    Ok(None)
+}
+
+/// The refusal for a character operation in an encoding whose boundaries this
+/// VM does not know: a wrong character count would be worse than none.
+fn unknown_encoding(what: &'static str) -> Error {
+    Error::Unknowable {
+        what,
+        needs: "character boundaries for an encoding other than UTF-8, US-ASCII and BINARY (#19)",
+    }
+}
+
+/// `Encoding::CompatibilityError`'s message: CRuby names BINARY as
+/// `BINARY (ASCII-8BIT)` there, as `inspect` does.
+fn incompatible_encodings(left: u8, right: u8) -> Error {
+    let show = |index: u8| {
+        if index == crate::strings::BINARY {
+            "BINARY (ASCII-8BIT)".to_owned()
+        } else {
+            crate::strings::name(index).to_owned()
+        }
+    };
+    Error::raise(
+        "Encoding::CompatibilityError",
+        format!(
+            "incompatible character encodings: {} and {}",
+            show(left),
+            show(right)
+        ),
+    )
 }
 
 /// The class-table reads and writes reflection is built on (#28). Every
@@ -3835,11 +4041,17 @@ fn exception_of(scope: &mut HandleScope<'_>, class: Value, message: &str) -> Val
 /// already correct — measured against CRuby where ruby/spec asserts on them —
 /// so nothing here has to rediscover Ruby's wording.
 fn exception_new(scope: &mut HandleScope<'_>, class: &str, message: &str) -> Value {
-    let symbol = crate::shared::symbols::intern(class);
-    let object = scope
-        .classes()
-        .const_get_here(Builtin::Object.id(), symbol)
-        .expect("every class the VM raises is bootstrapped");
+    // A path walks from `Object`: `Encoding::CompatibilityError` is defined by
+    // `core/encoding.rb`, under a class the exception table does not list.
+    let mut object = scope.classes().object(Builtin::Object.id());
+    for segment in class.split("::") {
+        let owner = class_id_of(scope, object).expect("a path segment names a module");
+        let symbol = crate::shared::symbols::intern(segment);
+        object = scope
+            .classes()
+            .const_get_here(owner, symbol)
+            .expect("every class the VM raises is defined");
+    }
     exception_of(scope, object, message)
 }
 
@@ -5872,44 +6084,6 @@ fn method_name_of(scope: &mut HandleScope<'_>, value: Value) -> Option<String> {
     string_bytes(scope, value).and_then(|bytes| String::from_utf8(bytes).ok())
 }
 
-/// `String.new`, `String.new(str)`.
-///
-/// A keyword — `encoding:`, `capacity:` — is refused rather than ignored: this
-/// VM's strings have no encoding to set, and answering as though one had been
-/// set would be wrong rather than missing.
-fn string_new_from(
-    scope: &mut HandleScope<'_>,
-    id: ClassId,
-    call: &Pending,
-) -> Result<Value, Error> {
-    if !call.keywords.is_empty() {
-        return Err(Error::Unknowable {
-            what: "`String.new` with `encoding:` or `capacity:`",
-            needs: "the Encoding slice, which gives a string an encoding",
-        });
-    }
-    match call.args.as_slice() {
-        [] => Ok(string_bytes_of(scope, id, b"")),
-        [source] => match string_bytes(scope, *source) {
-            Some(bytes) => Ok(string_bytes_of(scope, id, &bytes)),
-            None => Err(Error::raise(
-                "TypeError",
-                format!(
-                    "no implicit conversion of {} into String",
-                    class_name(scope, *source)
-                ),
-            )),
-        },
-        args => Err(Error::raise(
-            "ArgumentError",
-            format!(
-                "wrong number of arguments (given {}, expected 0..1)",
-                args.len()
-            ),
-        )),
-    }
-}
-
 /// `Float#to_s`, in Ruby's shape.
 ///
 /// Two rules, both measured against CRuby rather than reasoned about: a float
@@ -5951,19 +6125,7 @@ fn float_to_s(f: f64) -> String {
     format!("{mantissa}e{sign}{digits:0>2}")
 }
 
-/// A new `String` with these bytes.
-fn string_bytes_new(scope: &mut HandleScope<'_>, bytes: &[u8]) -> Value {
-    string_bytes_of(scope, Builtin::String.id(), bytes)
-}
-
-/// The same, wearing `id` rather than `String` — what a subclass of `String`
-/// allocates, so `MyString.new("b").class` is `MyString` and every `String`
-/// primitive still reads it.
-fn string_bytes_of(scope: &mut HandleScope<'_>, id: ClassId, bytes: &[u8]) -> Value {
-    string_bytes_in(scope, id, bytes, crate::strings::UTF_8)
-}
-
-/// The same, in `encoding`.
+/// A new `String` of class `id` holding `bytes` in `encoding`.
 fn string_bytes_in(scope: &mut HandleScope<'_>, id: ClassId, bytes: &[u8], encoding: u8) -> Value {
     let class = scope.classes().object(id);
     let class = scope.root(class);
@@ -6098,7 +6260,9 @@ fn allocate_instance(scope: &mut HandleScope<'_>, id: ClassId) -> Result<Value, 
             let handle = empty_array_of(scope, id);
             Ok(scope.get(handle))
         }
-        Some(Builtin::String) => Ok(string_bytes_of(scope, id, b"")),
+        // Empty and BINARY, which is what `String.new` with no arguments
+        // answers; `initialize` sets contents and encoding from there (#19).
+        Some(Builtin::String) => Ok(string_bytes_in(scope, id, b"", crate::strings::BINARY)),
         Some(Builtin::Hash) => {
             // Three ordinary instance variables: the association list, the
             // default, and whether that default is a block. They were three
@@ -6446,18 +6610,6 @@ fn native_call<'h>(
                         scope.classes().name(id).unwrap_or("an anonymous module")
                     ),
                 ));
-            }
-            // `String.new(str)` allocates a payload sized from its argument,
-            // which `allocate` cannot do — it runs before the argument is seen,
-            // and a `String`'s bytes cannot be grown afterwards. So `new` on
-            // `String` answers here rather than through `initialize`.
-            // A subclass of `String` reaches this too, and wears its own
-            // class: the sizing is a property of the representation, not of
-            // which class object the result carries.
-            if scope.classes().repr(id) == Some(Builtin::String) {
-                let value = string_new_from(scope, id, &call)?;
-                stack.push(value);
-                return Ok(None);
             }
             // `Regexp.new(source)` for the same reason: `allocate` refuses on
             // `Regexp` because a pattern cannot exist uninitialised, so there
@@ -6827,18 +6979,16 @@ fn native_call<'h>(
             let length = if bytes {
                 payload.len()
             } else {
-                // Characters, and a character is a UTF-8 codepoint because
-                // UTF-8 is the source encoding every string in this corpus is
-                // written in. A payload that is not UTF-8 has a length only an
-                // Encoding can answer, so it refuses rather than counting bytes
-                // and calling them characters.
-                let Ok(text) = std::str::from_utf8(&payload) else {
-                    return Err(Error::Unknowable {
-                        what: "`length` of a string that is not UTF-8",
-                        needs: "the Encoding slice, which gives a string an encoding",
-                    });
-                };
-                text.chars().count()
+                // Characters, by the receiver's encoding: an invalid UTF-8
+                // byte is a character of its own, and an encoding whose
+                // boundaries this VM does not know refuses rather than
+                // counting bytes and calling them characters.
+                let encoding =
+                    string_encoding(scope, call.receiver).unwrap_or(crate::strings::UTF_8);
+                match crate::strings::char_offsets(encoding, &payload) {
+                    Some(offsets) => offsets.len() - 1,
+                    None => return Err(unknown_encoding("`length`")),
+                }
             };
             stack.push(Value::fixnum(length as i64).expect("a length fits a fixnum"));
             Ok(None)
@@ -6857,8 +7007,18 @@ fn native_call<'h>(
                     "no implicit conversion of nil into String",
                 ));
             };
+            let left_enc = string_encoding(scope, call.receiver).unwrap_or(crate::strings::UTF_8);
+            let right_enc = call
+                .args
+                .first()
+                .and_then(|&v| string_encoding(scope, v))
+                .unwrap_or(crate::strings::UTF_8);
+            let Some(encoding) = crate::strings::compatible((left_enc, &left), (right_enc, &right))
+            else {
+                return Err(incompatible_encodings(left_enc, right_enc));
+            };
             left.extend_from_slice(&right);
-            let value = string_bytes_new(scope, &left);
+            let value = string_bytes_in(scope, Builtin::String.id(), &left, encoding);
             stack.push(value);
             Ok(None)
         }
@@ -6879,7 +7039,13 @@ fn native_call<'h>(
             if count < 0 {
                 return Err(Error::raise("ArgumentError", "negative argument"));
             }
-            let value = string_bytes_new(scope, &bytes.repeat(count as usize));
+            let encoding = string_encoding(scope, call.receiver).unwrap_or(crate::strings::UTF_8);
+            let value = string_bytes_in(
+                scope,
+                Builtin::String.id(),
+                &bytes.repeat(count as usize),
+                encoding,
+            );
             stack.push(value);
             Ok(None)
         }
@@ -7117,7 +7283,13 @@ fn native_call<'h>(
                 let characters = name.chars().count();
                 Value::fixnum(characters as i64).expect("a name length fits a fixnum")
             } else {
-                string_new(scope, &name)
+                // US-ASCII for an ASCII name, UTF-8 otherwise — measured.
+                let encoding = if name.is_ascii() {
+                    crate::strings::US_ASCII
+                } else {
+                    crate::strings::UTF_8
+                };
+                string_bytes_in(scope, Builtin::String.id(), name.as_bytes(), encoding)
             };
             stack.push(value);
             Ok(None)
@@ -7130,8 +7302,14 @@ fn native_call<'h>(
                     operands: "a receiver that is not a Float",
                 });
             };
+            // US-ASCII, as every number's `to_s` is. Measured.
             let text = float_to_s(f);
-            let value = string_new(scope, &text);
+            let value = string_bytes_in(
+                scope,
+                Builtin::String.id(),
+                text.as_bytes(),
+                crate::strings::US_ASCII,
+            );
             stack.push(value);
             Ok(None)
         }
@@ -7143,11 +7321,9 @@ fn native_call<'h>(
                     operands: "a receiver that is not a String",
                 });
             };
-            let Ok(text) = std::str::from_utf8(&payload) else {
-                return Err(Error::Unknowable {
-                    what: "`[]` on a string that is not UTF-8",
-                    needs: "the Encoding slice, which gives a string an encoding",
-                });
+            let encoding = string_encoding(scope, call.receiver).unwrap_or(crate::strings::UTF_8);
+            let Some(offsets) = crate::strings::char_offsets(encoding, &payload) else {
+                return Err(unknown_encoding("`[]`"));
             };
             // `s[range]`, `s["sub"]` and `s[/re/]` are three more operations
             // with three more answers. Reading only the integer form and
@@ -7166,8 +7342,7 @@ fn native_call<'h>(
                     operands: "an index that is not an Integer",
                 });
             };
-            let characters: Vec<char> = text.chars().collect();
-            let length = characters.len();
+            let length = offsets.len() - 1;
             // `s[s.length]` is `""` for the two-argument form and `nil` for the
             // one-argument form, which is Ruby and is measured, not guessed.
             let start = if start < 0 {
@@ -7185,8 +7360,8 @@ fn native_call<'h>(
             }
             let start = start as usize;
             let end = (start + count as usize).min(length);
-            let slice: String = characters[start..end].iter().collect();
-            let value = string_bytes_new(scope, slice.as_bytes());
+            let slice = &payload[offsets[start]..offsets[end]];
+            let value = string_bytes_in(scope, Builtin::String.id(), slice, encoding);
             stack.push(value);
             Ok(None)
         }
@@ -7205,8 +7380,25 @@ fn native_call<'h>(
                 return Ok(None);
             };
             // Bytes, which is what Ruby compares: `"a" <=> "b"` does not decode.
+            // Equal bytes in encodings that cannot be compared order by
+            // encoding index — CRuby's `rb_str_cmp`, measured.
+            let left_enc = string_encoding(scope, call.receiver).unwrap_or(crate::strings::UTF_8);
+            let right_enc = call
+                .args
+                .first()
+                .and_then(|&v| string_encoding(scope, v))
+                .unwrap_or(crate::strings::UTF_8);
             let answer = match left.cmp(&right) {
                 std::cmp::Ordering::Less => -1,
+                std::cmp::Ordering::Equal
+                    if !crate::strings::comparable((left_enc, &left), (right_enc, &right)) =>
+                {
+                    if left_enc > right_enc {
+                        1
+                    } else {
+                        -1
+                    }
+                }
                 std::cmp::Ordering::Equal => 0,
                 std::cmp::Ordering::Greater => 1,
             };
@@ -7304,6 +7496,7 @@ fn native_call<'h>(
 
         Native::Fiber(op) => fiber_native(scope, stack, frames, &call, op, ids),
         Native::Reflect(op) => reflect_native(scope, stack, &call, op),
+        Native::Str(op) => str_native(scope, stack, &call, op),
 
         Native::RaiseNoMethod => {
             let name = call
@@ -9355,6 +9548,60 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         ),
         (Builtin::Kernel, &["__sleep__"], Native::Sleep),
         (Builtin::String, &["to_sym", "intern"], Native::StringIntern),
+        // #19's byte and encoding primitives; `core/string.rb` and
+        // `core/encoding.rb` are the methods.
+        (
+            Builtin::String,
+            &["__encoding_index__"],
+            Native::Str(StrOp::EncodingIndex),
+        ),
+        (
+            Builtin::String,
+            &["__force_encoding__"],
+            Native::Str(StrOp::ForceEncoding),
+        ),
+        (Builtin::String, &["__splice__"], Native::Str(StrOp::Splice)),
+        (
+            Builtin::String,
+            &["__getbyte__"],
+            Native::Str(StrOp::GetByte),
+        ),
+        (
+            Builtin::String,
+            &["__setbyte__"],
+            Native::Str(StrOp::SetByte),
+        ),
+        (
+            Builtin::String,
+            &["__byteslice__"],
+            Native::Str(StrOp::ByteSlice),
+        ),
+        (Builtin::String, &["__bytes__"], Native::Str(StrOp::Bytes)),
+        (
+            Builtin::String,
+            &["valid_encoding?"],
+            Native::Str(StrOp::ValidEncoding),
+        ),
+        (
+            Builtin::String,
+            &["ascii_only?"],
+            Native::Str(StrOp::AsciiOnly),
+        ),
+        (
+            Builtin::String,
+            &["__char_offsets__"],
+            Native::Str(StrOp::CharOffsets),
+        ),
+        (
+            Builtin::String,
+            &["__compatible__"],
+            Native::Str(StrOp::Compatible),
+        ),
+        (
+            Builtin::Kernel,
+            &["__encoding_install__"],
+            Native::Str(StrOp::EncodingInstall),
+        ),
         (
             Builtin::BasicObject,
             &["__raise_no_method__"],
@@ -9372,7 +9619,7 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             Native::AbsolutePath,
         ),
         (Builtin::Float, &["to_s"], Native::FloatToS),
-        (Builtin::String, &["[]"], Native::StringIndex),
+        (Builtin::String, &["__index__"], Native::StringIndex),
         (Builtin::String, &["<=>"], Native::StringCompare),
     ];
     for (builtin, names, native) in table {
@@ -9461,11 +9708,12 @@ fn materialise<'h>(
             Ok(crate::bignum::value(scope, &n))
         }
         Literal::Regexp { source, options } => regexp_literal(scope, source, *options),
-        Literal::Str(bytes) | Literal::FrozenStr(bytes) => {
+        Literal::Str(bytes, encoding) | Literal::FrozenStr(bytes, encoding) => {
+            let encoding = *encoding;
             // A frozen literal is interned by content, CRuby's fstring: every
             // evaluation of every site with these bytes answers one object.
-            if matches!(literal, Literal::FrozenStr(_))
-                && let Some(interned) = scope.regexps().fstring(bytes)
+            if matches!(literal, Literal::FrozenStr(..))
+                && let Some(interned) = scope.regexps().fstring(bytes, encoding)
             {
                 return Ok(interned);
             }
@@ -9473,12 +9721,12 @@ fn materialise<'h>(
                 op: "String",
                 operands: "a literal larger than 4 GiB",
             })?;
-            let value = string_alloc(scope, string_class, bytes, crate::strings::UTF_8);
+            let value = string_alloc(scope, string_class, bytes, encoding);
             let handle = scope.root(value);
-            if matches!(literal, Literal::FrozenStr(_)) {
+            if matches!(literal, Literal::FrozenStr(..)) {
                 scope.freeze(handle);
                 let value = scope.get(handle);
-                scope.regexps_mut().intern_fstring(bytes, value);
+                scope.regexps_mut().intern_fstring(bytes, encoding, value);
             }
             Ok(scope.get(handle))
         }
@@ -10297,6 +10545,28 @@ fn regexp_match_from(
         scope.set_last_match(Value::NIL);
         return Ok(Value::NIL);
     }
+    // A String whose bytes are not valid in its own encoding cannot be
+    // matched, and says so; a valid one that is not UTF-8 is a real subject
+    // the regex engine cannot read yet (#19, #33).
+    if let (Some(bytes), Some(encoding)) = (
+        string_bytes(scope, subject),
+        string_encoding(scope, subject),
+    ) && std::str::from_utf8(&bytes).is_err()
+    {
+        if crate::strings::valid(encoding, &bytes) != Some(true) {
+            return Err(Error::raise(
+                "ArgumentError",
+                format!(
+                    "invalid byte sequence in {}",
+                    crate::strings::name(encoding)
+                ),
+            ));
+        }
+        return Err(Error::Unknowable {
+            what: "matching a regexp against a string that is not UTF-8 text",
+            needs: "a regex engine that reads bytes in the string's encoding (#33)",
+        });
+    }
     let Some(text) = string_text(scope, subject) else {
         return Err(Error::Raise {
             class: "TypeError",
@@ -10380,7 +10650,8 @@ fn match_data_new(
             if scope.is_frozen(original) {
                 subject
             } else {
-                let copy = string_bytes_new(scope, &bytes);
+                let encoding = string_encoding(scope, subject).unwrap_or(crate::strings::UTF_8);
+                let copy = string_bytes_in(scope, Builtin::String.id(), &bytes, encoding);
                 let copy = scope.root(copy);
                 scope.freeze(copy);
                 scope.get(copy)
@@ -10401,9 +10672,32 @@ fn match_data_new(
     nested.get(handle)
 }
 
-/// A `MatchData`'s three parts: its regexp, its subject text, and the byte
-/// range each group covered.
-type MatchParts = (Value, String, Vec<Option<(usize, usize)>>);
+/// A `MatchData`'s three parts: its regexp, its subject, and the byte range
+/// each group covered.
+type MatchParts = (Value, Subject, Vec<Option<(usize, usize)>>);
+
+/// A match's subject: its bytes, and the encoding every piece of it keeps —
+/// `$&`, `pre_match`, a group — as CRuby's do (#19).
+struct Subject {
+    bytes: Vec<u8>,
+    encoding: u8,
+}
+
+impl Subject {
+    fn len(&self) -> usize {
+        self.bytes.len()
+    }
+
+    /// Bytes `start..end` as a new String in the subject's encoding.
+    fn part(&self, scope: &mut HandleScope<'_>, start: usize, end: usize) -> Value {
+        string_bytes_in(
+            scope,
+            Builtin::String.id(),
+            &self.bytes[start..end],
+            self.encoding,
+        )
+    }
+}
 
 /// A `MatchData`'s three parts: its regexp, its subject text, and its offsets.
 fn match_parts(scope: &mut HandleScope<'_>, value: Value) -> Option<MatchParts> {
@@ -10419,7 +10713,10 @@ fn match_parts(scope: &mut HandleScope<'_>, value: Value) -> Option<MatchParts> 
             nested.slot(handle, crate::regexp::MATCH_OFFSETS),
         )
     };
-    let text = string_text(scope, subject)?;
+    let text = Subject {
+        bytes: string_bytes(scope, subject)?,
+        encoding: string_encoding(scope, subject)?,
+    };
     let raw = array_elements(scope, offsets)?;
     let groups = raw
         .chunks(2)
@@ -10447,7 +10744,7 @@ fn last_match_part(scope: &mut HandleScope<'_>, which: &MatchRef) -> Result<Valu
     };
     let slice = match_slice(which, text.len(), &groups);
     Ok(match slice {
-        Some((start, end)) => string_new(scope, &text[start..end]),
+        Some((start, end)) => text.part(scope, start, end),
         None => Value::NIL,
     })
 }
@@ -10500,9 +10797,13 @@ fn defined_match(scope: &mut HandleScope<'_>, which: &MatchRef) -> bool {
     match_slice(which, text.len(), &groups).is_some()
 }
 
-/// Ruby reports match offsets in characters; the engine works in bytes.
-fn char_offset(text: &str, byte: usize) -> i64 {
-    i64::try_from(text[..byte.min(text.len())].chars().count()).unwrap_or(i64::MAX)
+/// Ruby reports match offsets in characters of the subject's encoding; the
+/// engine works in bytes.
+fn char_offset(text: &Subject, byte: usize) -> i64 {
+    let prefix = &text.bytes[..byte.min(text.len())];
+    let count = crate::strings::char_offsets(text.encoding, prefix)
+        .map_or(prefix.len(), |offsets| offsets.len() - 1);
+    i64::try_from(count).unwrap_or(i64::MAX)
 }
 
 /// The first argument of a call, or nil when it was given none.
@@ -10541,7 +10842,7 @@ fn match_answer(
     native: Native,
     call: &Pending,
     regexp: Value,
-    text: &str,
+    text: &Subject,
     groups: &[Option<(usize, usize)>],
 ) -> Result<Value, Error> {
     let whole = groups.first().copied().flatten();
@@ -10578,7 +10879,7 @@ fn match_answer(
                 (Some((start, _)), false) => (0, start),
                 (None, _) => return Ok(Value::NIL),
             };
-            Ok(string_new(scope, &text[slice.0..slice.1]))
+            Ok(text.part(scope, slice.0, slice.1))
         }
 
         Native::MatchEdge { end } => {
@@ -10607,7 +10908,7 @@ fn match_answer(
                 .iter()
                 .skip(skip)
                 .map(|group| match group {
-                    Some((start, end)) => string_new(scope, &text[*start..*end]),
+                    Some((start, end)) => text.part(scope, *start, *end),
                     None => Value::NIL,
                 })
                 .collect();
@@ -10635,7 +10936,7 @@ fn match_answer(
                 let elements: Vec<Value> = groups[from as usize..upto as usize]
                     .iter()
                     .map(|group| match group {
-                        Some((s, e)) => string_new(scope, &text[*s..*e]),
+                        Some((s, e)) => text.part(scope, *s, *e),
                         None => Value::NIL,
                     })
                     .collect();
@@ -10643,7 +10944,7 @@ fn match_answer(
             }
             let index = match_group_index(scope, call, regexp)?;
             Ok(match groups.get(index).copied().flatten() {
-                Some((start, end)) => string_new(scope, &text[start..end]),
+                Some((start, end)) => text.part(scope, start, end),
                 None => Value::NIL,
             })
         }
@@ -10831,7 +11132,7 @@ mod tests {
                 Insn::GetLocal(0, 0),
                 Insn::Leave,
             ],
-            vec![Literal::Str(Box::from(&b"hi"[..]))],
+            vec![Literal::Str(Box::from(&b"hi"[..]), crate::strings::UTF_8)],
             3,
         );
 
@@ -10855,7 +11156,10 @@ mod tests {
                 Insn::NewArray(2),
                 Insn::Leave,
             ],
-            vec![Literal::Str(Box::from(&b"survivor"[..]))],
+            vec![Literal::Str(
+                Box::from(&b"survivor"[..]),
+                crate::strings::UTF_8,
+            )],
             3,
         );
 

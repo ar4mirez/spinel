@@ -23,6 +23,10 @@ def render
   Encoding.aliases.each do |name, target|
     aliases[target] << name unless RUNTIME_ALIASES.include?(name)
   end
+  constants = Encoding.constants.sort.filter_map do |name|
+    value = Encoding.const_get(name)
+    format("    (%s, %d),", name.to_s.inspect, Encoding.list.index(value)) if value.is_a?(Encoding)
+  end
   rows = Encoding.list.map do |encoding|
     names = [encoding.name] + aliases[encoding.name].sort
     format("    (%s, %s, %s),", names.map(&:inspect).join(", ").then { |n| "&[#{n}]" },
@@ -38,6 +42,14 @@ def render
     #[rustfmt::skip]
     pub const ENCODINGS: &[(&[&str], bool, bool)] = &[
     #{rows.join("\n")}
+    ];
+
+    /// Every constant CRuby defines on `Encoding` for an encoding, and the
+    /// index it names. CRuby derives them from the names by rules of its own
+    /// (`EUC_JP`, `EUCJP` and `EucJP` are one encoding); this is the result.
+    #[rustfmt::skip]
+    pub const CONSTANTS: &[(&str, u8)] = &[
+    #{constants.join("\n")}
     ];
   RUST
 end
