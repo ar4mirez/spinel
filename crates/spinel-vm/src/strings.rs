@@ -128,7 +128,7 @@ pub fn char_len(encoding: u8, bytes: &[u8], at: usize) -> Option<usize> {
     match encoding {
         BINARY | US_ASCII => Some(1),
         UTF_8 => Some(utf8_char_len(&bytes[at..])),
-        _ => None,
+        _ => crate::transcode::char_len(encoding, bytes, at),
     }
 }
 
@@ -177,7 +177,7 @@ pub fn valid(encoding: u8, bytes: &[u8]) -> Option<bool> {
         BINARY => Some(true),
         US_ASCII => Some(bytes.is_ascii()),
         UTF_8 => Some(std::str::from_utf8(bytes).is_ok()),
-        _ => None,
+        _ => crate::transcode::valid(encoding, bytes),
     }
 }
 

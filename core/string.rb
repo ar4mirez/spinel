@@ -433,6 +433,7 @@ class String
   # control characters as `\uXXXX` in a Unicode string, and any byte that is
   # not a printable character of the encoding as `\xHH`.
   def inspect
+    return __wide_inspect__ if [3, 4, 5, 6].include?(__encoding_index__)
     unicode = __encoding_index__ == 1
     out = +"\""
     offsets = __char_offsets__
@@ -451,6 +452,37 @@ class String
     return @__escapes__ unless @__escapes__.nil?
     @__escapes__ = { "\"" => "\\\"", "\\" => "\\\\", "\n" => "\\n", "\r" => "\\r", "\t" => "\\t",
                    "\f" => "\\f", "\v" => "\\v", "\b" => "\\b", "\a" => "\\a", "\e" => "\\e" }.freeze
+  end
+
+  # A UTF-16 or UTF-32 string, through its codepoints: ASCII as itself or its
+  # named escape, everything else `\uXXXX` or `\u{XXXXX}`, and an invalid
+  # character as its bytes. Measured.
+  def __wide_inspect__
+    out = +"\""
+    each_char do |char|
+      unless char.valid_encoding?
+        char.__bytes__.each { |b| out << "\\x" << Integer.__hex__(b, 2) }
+        next
+      end
+      code = char.encode(Encoding::UTF_8).ord
+      if code < 0x80
+        ascii = Integer.__byte_string__(code).__force_encoding__(1)
+        named = String.__escapes__[ascii]
+        if named
+          out << named
+        elsif code >= 0x20 && code < 0x7f
+          out << ascii
+        else
+          out << "\\u" << Integer.__hex__(code, 4)
+        end
+      elsif code > 0xffff
+        out << "\\u{" << Integer.__hex__(code, 1) << "}"
+      else
+        out << "\\u" << Integer.__hex__(code, 4)
+      end
+    end
+    out << "\""
+    out
   end
 
   def __inspect_char__(char, unicode, offsets, i)
@@ -735,6 +767,7 @@ class String
     raise ArgumentError, "wrong number of arguments (given #{args.size}, expected 0..1)" if args.size > 1
     separator = args.empty? ? ($/ || "\n") : args[0]
     return dup if separator.nil?
+    return __wide_chomp__(separator) unless encoding.ascii_compatible?
     separator = String.__coerce__(separator)
     return dup if empty?
     if separator == "\n"
@@ -760,8 +793,27 @@ class String
     __bang__(chomp(*args))
   end
 
+  # `chomp` in an encoding whose newline is not the byte 0x0A — UTF-16 and
+  # UTF-32 — by characters rather than bytes.
+  def __wide_chomp__(separator)
+    separator = String.__coerce__(separator)
+    lf = "\n".encode(encoding)
+    cr = "\r".encode(encoding)
+    unless separator == "\n" || separator == lf
+      __combined_encoding__(separator)
+      return end_with?(separator) ? self[0, length - separator.length] : dup
+    end
+    return self[0, length - 2] if length >= 2 && self[-2] == cr && self[-1] == lf
+    return self[0, length - 1] if !empty? && (self[-1] == lf || self[-1] == cr)
+    dup
+  end
+
   def chop
     return dup if empty?
+    unless encoding.ascii_compatible?
+      return self[0, length - 2] if length >= 2 && self[-2] == "\r".encode(encoding) && self[-1] == "\n".encode(encoding)
+      return self[0, length - 1]
+    end
     if bytesize >= 2 && __getbyte__(bytesize - 1) == 0x0a && __getbyte__(bytesize - 2) == 0x0d
       return __byteslice__(0, bytesize - 2)
     end

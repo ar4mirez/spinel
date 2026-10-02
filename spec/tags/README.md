@@ -77,8 +77,9 @@ fix is a different slice. The reason says which slice, by number.
 
 ## What is here now
 
-A hundred and fifty-four tags across seventy-four files — #19 added one, `` Kernel#` ``,
-which is #223's. Before #28 there were
+A hundred and fifty-nine tags across seventy-six files — #19 added six: `` Kernel#` ``,
+which is #223's, three `unpack` examples the harness runs without their shared
+group's argument (#145), and two `Regexp.union` encoding checks (#33). Before #28 there were
 seventy-two across twenty-nine, and thirty-seven of those are one thing:
 a global alias, where #166's table holds two names as two entries and making one
 the other's second spelling is #39's runtime state. They sit in

@@ -749,6 +749,50 @@ fn str_native(
     if op == StrOp::NeedsCharTable {
         return Err(unknown_encoding("a character in this encoding"));
     }
+    if op == StrOp::NeedsPointers {
+        return Err(Error::Unknowable {
+            what: "`pack`/`unpack` with `p` or `P`, which move raw pointers",
+            needs: "a foreign-memory API, which is `Spinel::FFI`'s (#105)",
+        });
+    }
+    if op == StrOp::FloatBits || op == StrOp::FloatFromBits {
+        let wide = index_arg(0)? == 64;
+        let value = if op == StrOp::FloatBits {
+            let Some(f) = call.receiver.as_flonum() else {
+                return Err(Error::NoDispatch {
+                    op: "Float#__bits__",
+                    operands: "a Float that is not an immediate",
+                });
+            };
+            let bits = if wide {
+                f.to_bits()
+            } else {
+                u64::from((f as f32).to_bits())
+            };
+            crate::bignum::value(scope, &num_bigint::BigInt::from(bits))
+        } else {
+            let bits = match call.receiver.as_fixnum() {
+                Some(n) => n as u64,
+                None => crate::bignum::read(scope, call.receiver)
+                    .and_then(|big| u64::try_from(big).ok())
+                    .ok_or(Error::NoDispatch {
+                        op: "Integer#__float_from_bits__",
+                        operands: "bits that are not an unsigned 64-bit Integer",
+                    })?,
+            };
+            let f = if wide {
+                f64::from_bits(bits)
+            } else {
+                f64::from(f32::from_bits(bits as u32))
+            };
+            Value::flonum(f).ok_or(Error::Unknowable {
+                what: "a Float that needs the heap — NaN, Infinity, -0.0 or an extreme",
+                needs: "boxed Floats (#18)",
+            })?
+        };
+        stack.push(value);
+        return Ok(None);
+    }
     if op == StrOp::FloatFormat {
         let Some(f) = call.receiver.as_flonum() else {
             return Err(Error::NoDispatch {
@@ -927,6 +971,47 @@ fn str_native(
             };
             found.map_or(Value::NIL, |at| fixnum(at as i64))
         }
+        StrOp::Transcode => {
+            let source = u8::try_from(index_arg(0)?).unwrap_or(0);
+            let destination = u8::try_from(index_arg(1)?).unwrap_or(0);
+            let start = usize::try_from(index_arg(2)?).unwrap_or(0).min(bytes.len());
+            if !crate::transcode::supported(source) || !crate::transcode::supported(destination) {
+                stack.push(Value::NIL);
+                return Ok(None);
+            }
+            let step = crate::transcode::step(source, destination, &bytes, start);
+            let (stop, code) = match step.stop {
+                crate::transcode::Stop::Done => ("done", None),
+                crate::transcode::Stop::Invalid => ("invalid", None),
+                crate::transcode::Stop::Incomplete => ("incomplete", None),
+                crate::transcode::Stop::Undefined(code) => ("undefined", code),
+            };
+            let output = string_bytes_in(scope, Builtin::String.id(), &step.output, destination);
+            let error = string_bytes_in(
+                scope,
+                Builtin::String.id(),
+                &step.error,
+                crate::strings::BINARY,
+            );
+            let readagain = string_bytes_in(
+                scope,
+                Builtin::String.id(),
+                &step.readagain,
+                crate::strings::BINARY,
+            );
+            let code = code.map_or(Value::NIL, |c| fixnum(i64::from(c)));
+            new_array(
+                scope,
+                &[
+                    output,
+                    Value::symbol(symbol(stop)),
+                    error,
+                    readagain,
+                    fixnum(step.next as i64),
+                    code,
+                ],
+            )
+        }
         StrOp::Succ => {
             let Some(next) = strings::succ(encoding, &bytes) else {
                 return Err(unknown_encoding("`succ`"));
@@ -955,7 +1040,12 @@ fn str_native(
             strings::compatible((encoding, &bytes), (other_enc, &other_bytes))
                 .map_or(Value::NIL, |index| fixnum(i64::from(index)))
         }
-        StrOp::EncodingInstall | StrOp::FloatFormat | StrOp::NeedsCharTable => {
+        StrOp::EncodingInstall
+        | StrOp::FloatFormat
+        | StrOp::NeedsCharTable
+        | StrOp::NeedsPointers
+        | StrOp::FloatBits
+        | StrOp::FloatFromBits => {
             unreachable!("answered above")
         }
     };
@@ -9659,9 +9749,25 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         ),
         (Builtin::String, &["succ", "next"], Native::Str(StrOp::Succ)),
         (
+            Builtin::String,
+            &["__transcode__"],
+            Native::Str(StrOp::Transcode),
+        ),
+        (
             Builtin::Float,
             &["__format__"],
             Native::Str(StrOp::FloatFormat),
+        ),
+        (Builtin::Float, &["__bits__"], Native::Str(StrOp::FloatBits)),
+        (
+            Builtin::Integer,
+            &["__float_from_bits__"],
+            Native::Str(StrOp::FloatFromBits),
+        ),
+        (
+            Builtin::Kernel,
+            &["__needs_pointers__"],
+            Native::Str(StrOp::NeedsPointers),
         ),
         (
             Builtin::Kernel,
@@ -10651,6 +10757,27 @@ fn regexp_match_from(
     if subject == Value::NIL {
         scope.set_last_match(Value::NIL);
         return Ok(Value::NIL);
+    }
+    // A UTF-16 or UTF-32 subject cannot meet an ASCII-based pattern at all:
+    // CRuby's CompatibilityError, naming the regexp's encoding — US-ASCII for
+    // an ASCII source, UTF-8 otherwise, until regexps carry their own (#33).
+    if let Some(encoding) = string_encoding(scope, subject)
+        && !crate::strings::ascii_compatible(encoding)
+    {
+        let source = {
+            let mut nested = scope.nested();
+            let handle = nested.root(regexp);
+            nested.slot(handle, crate::regexp::REGEXP_SOURCE)
+        };
+        let ascii = string_bytes(scope, source).is_some_and(|bytes| bytes.is_ascii());
+        return Err(Error::raise(
+            "Encoding::CompatibilityError",
+            format!(
+                "incompatible encoding regexp match ({} regexp with {} string)",
+                if ascii { "US-ASCII" } else { "UTF-8" },
+                crate::strings::name(encoding)
+            ),
+        ));
     }
     // A String whose bytes are not valid in its own encoding cannot be
     // matched, and says so; a valid one that is not UTF-8 is a real subject
