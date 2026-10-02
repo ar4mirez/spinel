@@ -86,9 +86,11 @@ pub mod value;
 pub use bytecode::{BinOp, Insn, Iseq, Literal};
 pub use class::{Builtin, ClassId, Classes, CrefId, Kind, Method, Mixin, MixinError};
 pub use compile::Unsupported;
-pub use heap::{Handle, HandleScope, Heap, Payload, Stats};
+pub use heap::{Handle, HandleScope, Heap, ParseFailure, Parser, Payload, Stats};
 pub use interp::{Error, Frame};
-pub use method::{BitOp, Definition, Definitions, FiberOp, IvarOp, Native, ReflectOp, StrOp};
+pub use method::{
+    BindingOp, BitOp, Definition, Definitions, FiberOp, IvarOp, Native, ReflectOp, StrOp,
+};
 pub use regexp::Regexps;
 pub use shape::{ShapeId, Shapes};
 pub use value::{SymbolId, Unpacked, Value};

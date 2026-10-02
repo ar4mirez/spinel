@@ -130,6 +130,10 @@ struct CrefNode {
     /// TypeError, because an Integer cannot have a singleton class. The node's
     /// `class` is the receiver's class, which everything else may still use.
     refuses_def: bool,
+    /// An eval node a constant still resolves in, though a class variable
+    /// does not: a *string* `instance_eval`'s (#38). See
+    /// [`Classes::push_constant_scope`].
+    consts_only: bool,
 }
 
 /// The names Ruby makes private on definition, whatever the scope's default.
@@ -1324,7 +1328,7 @@ impl Classes {
             // bare constant inside `class Foo < BasicObject` a `NameError`
             // rather than a hit on `Object`'s table (#185).
             if node.parent.is_some()
-                && !node.pushed_by_eval
+                && (!node.pushed_by_eval || node.consts_only)
                 && let Some(value) = self.const_get_here(node.class, name)
             {
                 return Some(value);
@@ -1384,7 +1388,7 @@ impl Classes {
         let mut scope = Some(cref);
         while let Some(c) = scope {
             let node = self.cref(c);
-            if !node.pushed_by_eval {
+            if !node.pushed_by_eval || node.consts_only {
                 return node.class;
             }
             scope = node.parent;
@@ -1408,6 +1412,17 @@ impl Classes {
     /// [`CrefNode::pushed_by_eval`].
     pub fn push_eval_cref(&mut self, outer: CrefId, class: ClassId) -> CrefId {
         self.push_cref_node(outer, class, true)
+    }
+
+    /// The scope a *string* `instance_eval` resolves constants in (#38),
+    /// beneath the eval node it defines methods through. Measured on 4.0.7:
+    /// a constant resolves in the receiver's singleton class if it already
+    /// has one and in its class if not, then in the caller's scopes; a class
+    /// variable resolves in the caller's alone.
+    pub fn push_constant_scope(&mut self, outer: CrefId, class: ClassId) -> CrefId {
+        let id = self.push_cref_node(outer, class, true);
+        self.crefs[id.0 as usize].consts_only = true;
+        id
     }
 
     /// An eval node over an object that cannot have a singleton class. See
@@ -1461,6 +1476,7 @@ impl Classes {
             parent: Some(outer),
             pushed_by_eval,
             refuses_def: false,
+            consts_only: false,
         });
         id
     }
@@ -1475,6 +1491,7 @@ impl Classes {
             parent: None,
             pushed_by_eval: false,
             refuses_def: false,
+            consts_only: false,
         });
     }
 

@@ -42,7 +42,9 @@ use crate::bytecode::{
 use crate::class::Builtin;
 use crate::class::{ClassId, CrefId, Kind, Method, ScopeDefault, Visibility};
 use crate::heap::{Handle, HandleScope, Heap, Payload};
-use crate::method::{BitOp, CvarOp, Definition, FiberOp, IvarOp, Native, ReflectOp, StrOp};
+use crate::method::{
+    BindingOp, BitOp, CvarOp, Definition, FiberOp, IvarOp, Native, ReflectOp, StrOp,
+};
 use crate::shape::ShapeId;
 use crate::value::SymbolId;
 use crate::value::Value;
@@ -3991,7 +3993,7 @@ fn string_encoding(scope: &mut HandleScope<'_>, value: Value) -> Option<u8> {
 /// One line of a backtrace: the file, the line, and what was running there.
 struct BacktraceLine {
     path: Arc<str>,
-    line: u32,
+    line: i32,
     label: String,
 }
 
@@ -7839,23 +7841,26 @@ fn native_call<'h>(
         }
 
         Native::EvalBlock { module, exec } => {
-            if call.block == Value::NIL {
-                // A String body is string `eval`.
+            // No block: the body is a String, and this is string `eval`.
+            let string_body = call.block == Value::NIL;
+            // The class a string body's constants resolve in, read before
+            // anything below makes a singleton class.
+            let constant_class = class_of(scope, call.receiver);
+            if string_body {
                 if exec {
                     return Err(Error::raise("LocalJumpError", "no block given"));
                 }
-                if !call.args.is_empty() {
-                    return Err(Error::Unknowable {
-                        what: "`instance_eval` or `class_eval` of a String",
-                        needs: "string `eval` (#38)",
-                    });
+                if call.args.is_empty() || call.args.len() > 3 {
+                    return Err(Error::raise(
+                        "ArgumentError",
+                        format!(
+                            "wrong number of arguments (given {}, expected 1..3)",
+                            call.args.len()
+                        ),
+                    ));
                 }
-                return Err(Error::raise(
-                    "ArgumentError",
-                    "wrong number of arguments (given 0, expected 1..3)",
-                ));
             }
-            if !exec && !call.args.is_empty() {
+            if !string_body && !exec && !call.args.is_empty() {
                 return Err(Error::raise(
                     "ArgumentError",
                     format!(
@@ -7889,6 +7894,31 @@ fn native_call<'h>(
             } else {
                 singleton_of(scope, call.receiver)?
             };
+            if string_body {
+                let cref = frames.last().map_or(CrefId::ROOT, |frame| frame.cref);
+                let cref = if module {
+                    // A string `class_eval` is the class body reopened.
+                    scope.classes_mut().push_cref(cref, definee)
+                } else {
+                    let constants = constant_class.unwrap_or(definee);
+                    let cref = scope.classes_mut().push_constant_scope(cref, constants);
+                    if refuses_def {
+                        scope
+                            .classes_mut()
+                            .push_eval_cref_refusing_def(cref, definee)
+                    } else {
+                        scope.classes_mut().push_eval_cref(cref, definee)
+                    }
+                };
+                let binding = capture_binding(scope, frames, frames.len().checked_sub(1))?;
+                let handle = scope.root(binding);
+                scope.set_slot(handle, BINDING_SELF, call.receiver);
+                scope.set_slot(handle, BINDING_CREF, cref_value(cref));
+                // A body of its own, so `def` starts public.
+                scope.set_slot(handle, BINDING_VISIBILITY, Value::fixnum(0).expect("small"));
+                let binding = scope.get(handle);
+                return binding_eval(scope, stack, frames, &call, binding, ids);
+            }
             let (receiver, block) = (call.receiver, call.block);
             let args = if exec {
                 call.args.clone()
@@ -7937,6 +7967,8 @@ fn native_call<'h>(
             stack.push(value);
             Ok(None)
         }
+
+        Native::Refuse { what, needs } => Err(Error::Unknowable { what, needs }),
 
         Native::NeedsThreads => Err(Error::Unknowable {
             what: "starting a `Thread`",
@@ -7991,6 +8023,8 @@ fn native_call<'h>(
             Ok(None)
         }
 
+        Native::Binding(op) => binding_native(scope, stack, frames, &call, op, ids),
+
         Native::FrameNesting => {
             let cref = frames.last().map_or(CrefId::ROOT, |frame| frame.cref);
             let scopes: Vec<Value> = scope
@@ -8006,7 +8040,21 @@ fn native_call<'h>(
 
         Native::FrameDir => {
             let path = frames.last().and_then(|frame| frame.iseq.path.clone());
+            let from_eval = frames.last().is_some_and(|frame| frame.iseq.from_eval);
             let value = match path {
+                // An `eval`'s file is a name, not a path to resolve: CRuby
+                // answers its `dirname`, or nil when none was given.
+                Some(path) if from_eval => {
+                    if path.starts_with("(eval at ") {
+                        Value::NIL
+                    } else {
+                        let parent = std::path::Path::new(&*path)
+                            .parent()
+                            .filter(|parent| !parent.as_os_str().is_empty())
+                            .unwrap_or(std::path::Path::new("."));
+                        string_new(scope, &parent.to_string_lossy())
+                    }
+                }
                 Some(path) if !path.starts_with('<') && !path.starts_with('(') => {
                     let parent = std::path::Path::new(&*path)
                         .parent()
@@ -9536,6 +9584,22 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             &["__needs_threads__"],
             Native::NeedsThreads,
         ),
+        (
+            Builtin::Kernel,
+            &["__needs_process__"],
+            Native::Refuse {
+                what: "starting or ending a process",
+                needs: "`Process` (#43)",
+            },
+        ),
+        (
+            Builtin::Kernel,
+            &["__needs_stderr__"],
+            Native::Refuse {
+                what: "writing to `$stderr`",
+                needs: "`IO` (#41)",
+            },
+        ),
         (Builtin::Kernel, &["__hash_combine__"], Native::HashCombine),
         (
             Builtin::Kernel,
@@ -9700,6 +9764,53 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             Native::FrameMethod { callee: true },
         ),
         (Builtin::Kernel, &["__dir__"], Native::FrameDir),
+        (
+            Builtin::Kernel,
+            &["binding"],
+            Native::Binding(BindingOp::Capture { caller: false }),
+        ),
+        (
+            Builtin::Kernel,
+            &["__caller_binding__"],
+            Native::Binding(BindingOp::Capture { caller: true }),
+        ),
+        // A `Binding`'s own primitives, on Kernel because `Binding` is a class
+        // `core/binding.rb` defines; each checks its receiver is one.
+        (
+            Builtin::Kernel,
+            &["__binding_eval__"],
+            Native::Binding(BindingOp::Eval),
+        ),
+        (
+            Builtin::Kernel,
+            &["__binding_get__"],
+            Native::Binding(BindingOp::Get),
+        ),
+        (
+            Builtin::Kernel,
+            &["__binding_set__"],
+            Native::Binding(BindingOp::Set),
+        ),
+        (
+            Builtin::Kernel,
+            &["__binding_names__"],
+            Native::Binding(BindingOp::Names),
+        ),
+        (
+            Builtin::Kernel,
+            &["__binding_receiver__"],
+            Native::Binding(BindingOp::Receiver),
+        ),
+        (
+            Builtin::Kernel,
+            &["__binding_location__"],
+            Native::Binding(BindingOp::Location),
+        ),
+        (
+            Builtin::Kernel,
+            &["__binding_receiver_set__"],
+            Native::Binding(BindingOp::SetReceiver),
+        ),
         (
             Builtin::Kernel,
             &["__module_nesting__"],
@@ -11244,6 +11355,466 @@ fn match_group_index(
                 .find(|&g| groups.get(g).copied().flatten().is_some())
         });
     Ok(matched.unwrap_or_else(|| candidates.last().copied().expect("just checked non-empty")))
+}
+
+// ---------------------------------------------------------------------------
+// Bindings and string `eval` (#38)
+// ---------------------------------------------------------------------------
+
+/// A `Binding`'s slots. `BODY` names an `Iseq` whose `locals` and `outer`
+/// name every environment from `ENV` outward — the caller's own at capture,
+/// and the last `eval` that declared a local after it, so a later `eval`
+/// through the same binding sees it.
+const BINDING_BODY: usize = 0;
+const BINDING_ENV: usize = 1;
+const BINDING_SELF: usize = 2;
+const BINDING_CREF: usize = 3;
+const BINDING_BLOCK: usize = 4;
+/// The frame a `return` inside an `eval` leaves: the captured frame's.
+const BINDING_HOME: usize = 5;
+const BINDING_FILE: usize = 6;
+const BINDING_LINE: usize = 7;
+/// The method the frame was running, for `__method__` and `super` in an
+/// `eval`: its owner as a class object, and the name it was called by.
+const BINDING_OWNER: usize = 8;
+const BINDING_METHOD: usize = 9;
+/// What a `def` in the string defaults to: the frame's `private` or
+/// `module_function`, as a block would inherit it.
+const BINDING_VISIBILITY: usize = 10;
+const BINDING_SLOTS: u32 = 11;
+
+/// The class `core/binding.rb` defines.
+fn binding_class(scope: &mut HandleScope<'_>) -> Option<Value> {
+    let object = Builtin::Object.id();
+    let symbol = crate::shared::symbols::intern("Binding");
+    scope.classes().const_get_here(object, symbol)
+}
+
+fn is_binding(scope: &mut HandleScope<'_>, value: Value) -> bool {
+    let Some(class) = binding_class(scope).and_then(|c| class_id_of(scope, c)) else {
+        return false;
+    };
+    if value.is_immediate() || class_of(scope, value) != Some(class) {
+        return false;
+    }
+    let handle = scope.root(value);
+    scope.payload(handle) == Payload::Slots && scope.len(handle) == BINDING_SLOTS
+}
+
+/// The local names of each environment from a binding's outward, innermost
+/// first.
+fn binding_chain(scope: &mut HandleScope<'_>, binding: Value) -> Vec<Vec<Box<str>>> {
+    let handle = scope.root(binding);
+    let body = scope.slot(handle, BINDING_BODY);
+    match scope.definitions().get(body) {
+        Some(Definition::Iseq(iseq)) => {
+            let mut chain = vec![iseq.locals.clone()];
+            chain.extend(iseq.outer.iter().cloned());
+            chain
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// `(slot, depth)` of `name` in a binding, innermost wins.
+fn binding_find(chain: &[Vec<Box<str>>], name: &str) -> Option<(usize, u16)> {
+    chain.iter().enumerate().find_map(|(depth, names)| {
+        let slot = names.iter().position(|n| &**n == name)?;
+        Some((slot, depth as u16))
+    })
+}
+
+/// Point a binding at a new innermost environment, named by `iseq`.
+fn binding_push(scope: &mut HandleScope<'_>, binding: Value, iseq: &Arc<Iseq>, env: Value) {
+    let body = scope
+        .definitions_mut()
+        .intern_iseq(iseq, Arc::as_ptr(iseq) as usize);
+    let (binding, env) = (scope.root(binding), scope.root(env));
+    let env = scope.get(env);
+    scope.set_slot(binding, BINDING_BODY, body);
+    scope.set_slot(binding, BINDING_ENV, env);
+}
+
+fn binding_native(
+    scope: &mut HandleScope<'_>,
+    stack: &mut Vec<Value>,
+    frames: &mut Vec<Call>,
+    call: &Pending,
+    op: BindingOp,
+    ids: &mut u64,
+) -> Result<Option<Unwind>, Error> {
+    if let BindingOp::Capture { caller } = op {
+        let index = frames.len().checked_sub(if caller { 2 } else { 1 });
+        let binding = capture_binding(scope, frames, index)?;
+        stack.push(binding);
+        return Ok(None);
+    }
+    binding_op(scope, stack, frames, call, op, ids)
+}
+
+/// A `Binding` of `frames[index]`: its locals, `self`, lexical scope, block,
+/// and where it is.
+fn capture_binding(
+    scope: &mut HandleScope<'_>,
+    frames: &[Call],
+    index: Option<usize>,
+) -> Result<Value, Error> {
+    let Some(frame) = index.and_then(|index| frames.get(index)) else {
+        return Err(Error::NoDispatch {
+            op: "binding",
+            operands: "no Ruby frame to capture",
+        });
+    };
+    let line = frame.iseq.line_at(frame.pc.saturating_sub(1)).unwrap_or(0);
+    let path = frame.iseq.path.clone();
+    let (iseq, env, receiver, cref, block, home) = (
+        Arc::clone(&frame.iseq),
+        frame.env,
+        frame.receiver,
+        frame.cref,
+        frame.block,
+        frame.home,
+    );
+    let owner = frame
+        .owner
+        .map_or(Value::NIL, |owner| scope.classes().object(owner));
+    let method = frame.defined_as.map_or(Value::NIL, Value::symbol);
+    let visibility = match frame.scope_default {
+        ScopeDefault::Public => 0,
+        ScopeDefault::Private => 1,
+        ScopeDefault::Protected => 2,
+        ScopeDefault::ModuleFunction => 3,
+    };
+    let Some(class) = binding_class(scope) else {
+        return Err(Error::Unknowable {
+            what: "`binding` before `core/binding.rb` loads",
+            needs: "the core library",
+        });
+    };
+    let (env, receiver, block) = (scope.root(env), scope.root(receiver), scope.root(block));
+    let class = scope.root(class);
+    let file = match path {
+        Some(path) => string_new(scope, &path),
+        None => Value::NIL,
+    };
+    let file = scope.root(file);
+    let handle = scope.alloc(Some(class), Payload::Slots, BINDING_SLOTS);
+    let body = scope
+        .definitions_mut()
+        .intern_iseq(&iseq, Arc::as_ptr(&iseq) as usize);
+    let values = [
+        (BINDING_BODY, body),
+        (BINDING_ENV, scope.get(env)),
+        (BINDING_SELF, scope.get(receiver)),
+        (BINDING_CREF, cref_value(cref)),
+        (BINDING_BLOCK, scope.get(block)),
+        (
+            BINDING_HOME,
+            Value::fixnum(home as i64).expect("a frame id fits in a fixnum"),
+        ),
+        (BINDING_FILE, scope.get(file)),
+        (BINDING_OWNER, owner),
+        (BINDING_METHOD, method),
+        (
+            BINDING_VISIBILITY,
+            Value::fixnum(visibility).expect("small"),
+        ),
+        (
+            BINDING_LINE,
+            Value::fixnum(i64::from(line)).expect("a line number is a fixnum"),
+        ),
+    ];
+    for (slot, value) in values {
+        scope.set_slot(handle, slot, value);
+    }
+    Ok(scope.get(handle))
+}
+
+fn binding_op(
+    scope: &mut HandleScope<'_>,
+    stack: &mut Vec<Value>,
+    frames: &mut Vec<Call>,
+    call: &Pending,
+    op: BindingOp,
+    ids: &mut u64,
+) -> Result<Option<Unwind>, Error> {
+    let binding = call.receiver;
+    if !is_binding(scope, binding) {
+        return Err(Error::NoDispatch {
+            op: "Binding",
+            operands: "a receiver that is not a Binding",
+        });
+    }
+    let handle = scope.root(binding);
+    let symbol_arg = |index: usize| -> Option<String> {
+        call.args
+            .get(index)
+            .and_then(|v| v.as_symbol())
+            .and_then(crate::shared::symbols::name)
+    };
+    match op {
+        BindingOp::Capture { .. } => unreachable!("answered above"),
+        BindingOp::Receiver => {
+            stack.push(scope.slot(handle, BINDING_SELF));
+            Ok(None)
+        }
+        BindingOp::SetReceiver => {
+            let receiver = call.args.first().copied().unwrap_or(Value::NIL);
+            scope.set_slot(handle, BINDING_SELF, receiver);
+            stack.push(binding);
+            Ok(None)
+        }
+        BindingOp::Location => {
+            let file = scope.slot(handle, BINDING_FILE);
+            let line = scope.slot(handle, BINDING_LINE);
+            let value = new_array(scope, &[file, line]);
+            stack.push(value);
+            Ok(None)
+        }
+        BindingOp::Names => {
+            let chain = binding_chain(scope, binding);
+            let mut seen: Vec<&str> = Vec::new();
+            for name in chain.iter().flatten() {
+                if spellable_local(name) && !seen.contains(&&**name) {
+                    seen.push(name);
+                }
+            }
+            let names: Vec<Value> = seen.iter().map(|n| Value::symbol(symbol(n))).collect();
+            let value = new_array(scope, &names);
+            stack.push(value);
+            Ok(None)
+        }
+        BindingOp::Get => {
+            let Some(name) = symbol_arg(0) else {
+                return Err(Error::NoDispatch {
+                    op: "local_variable_get",
+                    operands: "a name that is not a Symbol",
+                });
+            };
+            let chain = binding_chain(scope, binding);
+            let value = match binding_find(&chain, &name) {
+                Some((slot, depth)) => {
+                    let env = scope.slot(handle, BINDING_ENV);
+                    let env = env_outer(scope, env, depth);
+                    let value = env_get(scope, env, slot);
+                    new_array(scope, &[value])
+                }
+                None => Value::NIL,
+            };
+            stack.push(value);
+            Ok(None)
+        }
+        BindingOp::Set => {
+            let (Some(name), Some(&value)) = (symbol_arg(0), call.args.get(1)) else {
+                return Err(Error::NoDispatch {
+                    op: "local_variable_set",
+                    operands: "a name that is not a Symbol",
+                });
+            };
+            let chain = binding_chain(scope, binding);
+            let env = scope.slot(handle, BINDING_ENV);
+            if let Some((slot, depth)) = binding_find(&chain, &name) {
+                let env = env_outer(scope, env, depth);
+                env_set(scope, env, slot, value);
+            } else {
+                // A new local lives in an environment of its own inside the
+                // captured one, so the frame it came from never sees it —
+                // which is Ruby's rule — and a later `eval` through this
+                // binding does.
+                let body = scope.slot(handle, BINDING_BODY);
+                let (label, level) = match scope.definitions().get(body) {
+                    Some(Definition::Iseq(iseq)) => (iseq.name.clone(), iseq.block_level),
+                    _ => ("<main>".into(), 0),
+                };
+                let iseq = Arc::new(Iseq {
+                    name: label,
+                    block_level: level,
+                    locals: vec![name.into_boxed_str()],
+                    outer: chain,
+                    ..Iseq::default()
+                });
+                let value = scope.root(value);
+                let layer = env_alloc(scope, env, 1);
+                let value = scope.get(value);
+                env_set(scope, layer, 0, value);
+                binding_push(scope, binding, &iseq, layer);
+            }
+            stack.push(value);
+            Ok(None)
+        }
+        BindingOp::Eval => binding_eval(scope, stack, frames, call, binding, ids),
+    }
+}
+
+/// Whether a slot name is one Ruby can see: the compiler's own temporaries
+/// start with `%`, and a numbered or `it` parameter is not a local.
+fn spellable_local(name: &str) -> bool {
+    let numbered = name.len() == 2 && name.starts_with('_') && name.as_bytes()[1].is_ascii_digit();
+    !(name.starts_with('%') || numbered || name == "it")
+}
+
+fn binding_eval(
+    scope: &mut HandleScope<'_>,
+    stack: &[Value],
+    frames: &mut Vec<Call>,
+    call: &Pending,
+    binding: Value,
+    ids: &mut u64,
+) -> Result<Option<Unwind>, Error> {
+    let Some(parser) = scope.parser() else {
+        return Err(Error::Unknowable {
+            what: "string `eval`",
+            needs: "a parser, which `spinel_core::boot` installs",
+        });
+    };
+    // `Kernel#eval` and `Binding#eval` convert their arguments in Ruby first;
+    // `instance_eval` and `class_eval` are natives, and calling `to_str` or
+    // `to_int` from one is a frame it cannot sequence.
+    // ponytail: a String or Integer only, here; the upgrade is a Ruby
+    // `instance_eval` around a native that captures its caller's frame.
+    let convertible = |scope: &mut HandleScope<'_>, index: usize, integer: bool| {
+        call.args.get(index).is_none_or(|&v| {
+            v == Value::NIL
+                || if integer {
+                    v.as_fixnum().is_some()
+                } else {
+                    is_string(scope, v)
+                }
+        })
+    };
+    if !convertible(scope, 0, false)
+        || !convertible(scope, 1, false)
+        || !convertible(scope, 2, true)
+    {
+        return Err(Error::Unknowable {
+            what: "`instance_eval` or `class_eval` with an argument to convert",
+            needs: "a Ruby `instance_eval` around the native",
+        });
+    }
+    let source = call.args.first().and_then(|&v| string_bytes(scope, v));
+    let Some(source) = source else {
+        return Err(Error::NoDispatch {
+            op: "eval",
+            operands: "source that is not a String",
+        });
+    };
+    let path = match call.args.get(1).and_then(|&v| string_bytes(scope, v)) {
+        Some(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        // CRuby names an `eval` after where it was written.
+        None => {
+            let handle = scope.root(binding);
+            let file = scope.slot(handle, BINDING_FILE);
+            let line = scope.slot(handle, BINDING_LINE).as_fixnum().unwrap_or(0);
+            match string_bytes(scope, file) {
+                Some(file) => format!("(eval at {}:{line})", String::from_utf8_lossy(&file)),
+                None => "(eval)".to_owned(),
+            }
+        }
+    };
+    let line = call.args.get(2).and_then(|v| v.as_fixnum()).unwrap_or(1);
+    let handle = scope.root(binding);
+    let in_method = scope.slot(handle, BINDING_OWNER) != Value::NIL;
+    let program = match parser(&path, &source, line, in_method) {
+        Ok(mut program) => {
+            // With no magic comment, the string's own encoding is the source
+            // encoding its literals take.
+            let encoding = call.args.first().and_then(|&v| string_encoding(scope, v));
+            if let Some(map) = Arc::get_mut(&mut program.source)
+                && map.encoding.is_none()
+                && let Some(encoding) = encoding.filter(|&e| e != crate::strings::UTF_8)
+            {
+                map.encoding = Some(crate::strings::name(encoding).into());
+            }
+            program
+        }
+        Err(crate::heap::ParseFailure::Syntax(message)) => {
+            return Err(Error::raise("SyntaxError", message));
+        }
+        Err(crate::heap::ParseFailure::Unsupported) => {
+            return Err(Error::Unknowable {
+                what: "an `eval` string the parser cannot lower",
+                needs: "the lowering to cover it",
+            });
+        }
+    };
+    let chain = binding_chain(scope, binding);
+    // A backtrace names an `eval`'s frame after the body it runs in.
+    let (name, level) = {
+        let handle = scope.root(binding);
+        let body = scope.slot(handle, BINDING_BODY);
+        match scope.definitions().get(body) {
+            Some(Definition::Iseq(iseq)) => (iseq.name.clone(), iseq.block_level),
+            _ => ("<main>".into(), 0),
+        }
+    };
+    let iseq = match crate::compile::eval(&program, chain, &name, level) {
+        Ok(iseq) => Arc::new(iseq),
+        Err(unsupported) => {
+            return Err(Error::Unknowable {
+                what: unsupported.node,
+                needs: "the compiler to lower it inside an `eval`",
+            });
+        }
+    };
+    let handle = scope.root(binding);
+    let outer = scope.slot(handle, BINDING_ENV);
+    let receiver = scope.slot(handle, BINDING_SELF);
+    let cref = cref_from(scope.slot(handle, BINDING_CREF));
+    let block = scope.slot(handle, BINDING_BLOCK);
+    let home = scope
+        .slot(handle, BINDING_HOME)
+        .as_fixnum()
+        .map_or(0, |id| id as u64);
+    // `super` and `__method__` inside the string answer for the method the
+    // binding was taken in.
+    let owner = scope.slot(handle, BINDING_OWNER);
+    let owner = class_id_of(scope, owner);
+    let defined_as = scope.slot(handle, BINDING_METHOD).as_symbol();
+    let pending = Pending {
+        cache: None,
+        receiver,
+        name: call.name,
+        args: Vec::new(),
+        keywords: Vec::new(),
+        block,
+        block_is_literal: false,
+        cref,
+        implicit_self: false,
+        public_only: false,
+        target: Target::Method,
+        owner,
+        defined_as,
+    };
+    *ids += 1;
+    let scope_default = match scope.slot(handle, BINDING_VISIBILITY).as_fixnum() {
+        Some(1) => ScopeDefault::Private,
+        Some(2) => ScopeDefault::Protected,
+        Some(3) => ScopeDefault::ModuleFunction,
+        _ => ScopeDefault::Public,
+    };
+    let links = Links {
+        id: *ids,
+        home,
+        breaks: 0,
+        scope_default,
+    };
+    push_frame(
+        scope,
+        stack,
+        frames,
+        &pending,
+        &iseq,
+        outer,
+        Binding::Loose,
+        links,
+    )?;
+    // A local the string declared stays visible to the next `eval` through
+    // this binding.
+    if iseq.locals.iter().any(|name| spellable_local(name)) {
+        let env = frames.last().expect("just pushed").env;
+        binding_push(scope, binding, &iseq, env);
+    }
+    Ok(None)
 }
 
 #[cfg(test)]

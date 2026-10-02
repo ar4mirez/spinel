@@ -104,6 +104,9 @@ pub struct SourceMap {
     pub path: Box<str>,
     /// Byte offset of the start of every line, line 1 first.
     line_starts: Box<[u32]>,
+    /// What the first line is numbered: 1 for a file, and whatever `eval`'s
+    /// `lineno` argument said for a string (#38).
+    pub first_line: i64,
     /// The file's `encoding:`/`coding:` magic comment, as written, or `None`
     /// for UTF-8: the encoding a literal with no forced encoding is in (#19).
     /// Here rather than on `Program` because every scope compiled out of the
@@ -116,6 +119,7 @@ impl SourceMap {
         Self {
             path: path.into(),
             line_starts: line_starts.into_boxed_slice(),
+            first_line: 1,
             encoding: None,
         }
     }
@@ -126,11 +130,11 @@ impl SourceMap {
     }
 
     /// The 1-based line `offset` falls on.
-    pub fn line(&self, offset: u32) -> u32 {
+    pub fn line(&self, offset: u32) -> i32 {
         // How many starts are at or before `offset` is the line number: line 1
         // starts at 0.
-        u32::try_from(self.line_starts.partition_point(|&start| start <= offset))
-            .unwrap_or(u32::MAX)
+        let line = self.line_starts.partition_point(|&start| start <= offset) as i64;
+        i32::try_from(line + self.first_line - 1).unwrap_or(0)
     }
 }
 
@@ -190,7 +194,7 @@ pub enum ExprKind {
     /// Carried on the node rather than derived later because a [`Span`] is a
     /// byte offset and only the parser still has the bytes to count newlines
     /// in. `SourceFile` already works this way.
-    SourceLine(u32),
+    SourceLine(i64),
     /// `__ENCODING__`
     SourceEncoding,
     /// A node the parser could not build. Kept so that one syntax error does

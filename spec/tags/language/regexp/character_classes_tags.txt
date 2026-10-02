@@ -1,0 +1,1 @@
+fails(#33: an unknown POSIX bracket such as `[:etc:]` is a SyntaxError when the literal is compiled, and Spinel's regexp engine accepts it. Blocked until string `eval` #38 landed):Regexp with character classes supports [[:alpha:][:digit:][:etc:]] (predefined character classes)

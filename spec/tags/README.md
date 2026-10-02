@@ -77,7 +77,10 @@ fix is a different slice. The reason says which slice, by number.
 
 ## What is here now
 
-A hundred and fifty-nine tags across seventy-six files — #19 added six: `` Kernel#` ``,
+A hundred and sixty-two tags across seventy-eight files — #38 added three, examples
+string `eval` made reachable that belong elsewhere: `Hash#inspect` read back by
+`eval` (#216), an unknown POSIX bracket class (#33), and `+@` on a chilled
+literal (#263). #19 added six: `` Kernel#` ``,
 which is #223's, three `unpack` examples the harness runs without their shared
 group's argument (#145), and two `Regexp.union` encoding checks (#33). Before #28 there were
 seventy-two across twenty-nine, and thirty-seven of those are one thing:

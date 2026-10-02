@@ -340,6 +340,8 @@ pub enum Native {
     /// `Module.nesting`: the caller's lexical scopes, which only its frame
     /// knows.
     FrameNesting,
+    /// `binding`, string `eval` and a `Binding`'s locals (#38).
+    Binding(BindingOp),
     /// `Kernel#__sleep__(seconds)`: block the thread, answer the whole
     /// seconds slept. `Kernel#sleep` is Ruby around it.
     Sleep,
@@ -349,6 +351,12 @@ pub enum Native {
     /// asserts `Thread.new` raises `ThreadError` would read a Ruby exception as
     /// a wrong answer. This reads as "cannot be answered yet", which it is.
     NeedsThreads,
+    /// A primitive that only refuses, for a method whose real work belongs to
+    /// a later issue: `fork` before `Process` (#43).
+    Refuse {
+        what: &'static str,
+        needs: &'static str,
+    },
     /// `Kernel#__hash_combine__(a, b)`: two hash values mixed into one (#22).
     ///
     /// The bit-mixing a content hash needs, which Ruby has no primitive for.
@@ -391,6 +399,31 @@ pub enum Native {
     /// raises for a missing method, raised on purpose — what
     /// `BasicObject#method_missing` does when called directly (#28).
     RaiseNoMethod,
+}
+
+/// Which `Binding` operation. See `interp.rs`, `binding_native`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BindingOp {
+    /// `Kernel#binding`: the caller's frame. With `caller`, the frame below
+    /// it — what `Kernel#eval`, written in Ruby, was called from.
+    Capture { caller: bool },
+    /// `Binding#__eval__(source, file, line)`: compile against the binding's
+    /// locals and run in a frame inside its environment.
+    Eval,
+    /// `Binding#__local_get__(name)`: the value, or `undefined` when there
+    /// is no such local — the Ruby side raises.
+    Get,
+    /// `Binding#__local_set__(name, value)`, declaring it if new.
+    Set,
+    /// `Binding#local_variables`, innermost first, without duplicates.
+    Names,
+    /// `Binding#receiver`.
+    Receiver,
+    /// `Binding#__binding_receiver_set__(self)`: `Kernel.eval` runs with
+    /// its receiver as `self`.
+    SetReceiver,
+    /// `Binding#source_location`.
+    Location,
 }
 
 /// Which `String`/`Encoding` operation. See `interp.rs`, `str_native`.

@@ -32,7 +32,8 @@
 
 use std::sync::Arc;
 
-use spinel_vm::{HandleScope, Iseq, compile, interp, shared};
+use spinel_ast::Program;
+use spinel_vm::{HandleScope, Iseq, ParseFailure, compile, interp, shared};
 
 /// The core library sources, in load order.
 ///
@@ -88,6 +89,7 @@ const SOURCES: &[(&str, &str)] = &[
         "core/encoding.rb",
         include_str!("../../../core/encoding.rb"),
     ),
+    ("core/binding.rb", include_str!("../../../core/binding.rb")),
     ("core/pack.rb", include_str!("../../../core/pack.rb")),
     (
         "core/transcode.rb",
@@ -148,6 +150,7 @@ fn image() -> &'static [Arc<Iseq>] {
 /// Call once, after [`HandleScope::bootstrap`] has created the classes this
 /// fills in. Panics if `core/*.rb` raises, for the same reason the compile does.
 pub fn boot(scope: &mut HandleScope<'_>) {
+    scope.set_parser(parse_eval);
     for (index, iseq) in image().iter().enumerate() {
         let mut frame = interp::Frame::new(0);
         if let Err(err) = interp::eval_in(scope, &mut frame, iseq) {
@@ -155,6 +158,27 @@ pub fn boot(scope: &mut HandleScope<'_>) {
             panic!("{name} raised while loading the core library: {err:?}");
         }
     }
+}
+
+/// What string `eval` parses with (#38): the VM has no parser of its own.
+fn parse_eval(
+    path: &str,
+    source: &[u8],
+    line: i64,
+    in_method: bool,
+) -> Result<Program, ParseFailure> {
+    let parsed = spinel_parse::parse_eval(path, source, line, in_method);
+    if let Some(error) = parsed.syntax_errors().next() {
+        let at = parsed.program.source.line(error.span.start);
+        return Err(ParseFailure::Syntax(format!(
+            "{path}:{at}: {}",
+            error.message
+        )));
+    }
+    if parsed.lowering_bugs().next().is_some() {
+        return Err(ParseFailure::Unsupported);
+    }
+    Ok(parsed.program)
 }
 
 #[cfg(test)]

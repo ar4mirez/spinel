@@ -102,6 +102,57 @@ const EVAL: &str = "(eval)";
 /// `SourceFileNode::filepath()` is always empty — so lowering carries it.
 #[must_use]
 pub fn parse_file(path: &str, source: &[u8]) -> Parsed {
+    parse_at(path, source, 1, false)
+}
+
+/// Parse a string handed to `eval` (#38): `path` and `first_line` are its
+/// `file` and `lineno` arguments.
+///
+/// Prism parses it as a file, because `ruby-prism` takes no options, so it
+/// cannot be told the string runs inside a method (`in_method`): a `yield`
+/// there is valid and answers the method's block, unless a `class` or
+/// `module` body in the string encloses it. Those diagnostics are dropped.
+/// The caller's locals are the compiler's business — see `compile::eval`.
+#[must_use]
+pub fn parse_eval(path: &str, source: &[u8], first_line: i64, in_method: bool) -> Parsed {
+    parse_at(path, source, first_line, in_method)
+}
+
+/// The `yield`s outside any `class`, `module` or `class <<` body, by offset.
+#[derive(Default)]
+struct OpenYields {
+    bodies: usize,
+    starts: Vec<u32>,
+}
+
+impl<'pr> ruby_prism::Visit<'pr> for OpenYields {
+    fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'pr>) {
+        self.bodies += 1;
+        ruby_prism::visit_class_node(self, node);
+        self.bodies -= 1;
+    }
+
+    fn visit_module_node(&mut self, node: &ruby_prism::ModuleNode<'pr>) {
+        self.bodies += 1;
+        ruby_prism::visit_module_node(self, node);
+        self.bodies -= 1;
+    }
+
+    fn visit_singleton_class_node(&mut self, node: &ruby_prism::SingletonClassNode<'pr>) {
+        self.bodies += 1;
+        ruby_prism::visit_singleton_class_node(self, node);
+        self.bodies -= 1;
+    }
+
+    fn visit_yield_node(&mut self, node: &ruby_prism::YieldNode<'pr>) {
+        if self.bodies == 0 {
+            self.starts.push(lower::span_of(&node.location()).start);
+        }
+        ruby_prism::visit_yield_node(self, node);
+    }
+}
+
+fn parse_at(path: &str, source: &[u8], first_line: i64, yield_allowed: bool) -> Parsed {
     let result = ruby_prism::parse(source);
 
     let to_diagnostic = |d: ruby_prism::Diagnostic<'_>| Diagnostic {
@@ -119,11 +170,18 @@ pub fn parse_file(path: &str, source: &[u8]) -> Parsed {
         .as_program_node()
         .expect("prism roots every parse at a ProgramNode");
 
+    if yield_allowed && errors.iter().any(|d| d.message == "Invalid yield") {
+        let mut open = OpenYields::default();
+        ruby_prism::Visit::visit_program_node(&mut open, &root);
+        errors.retain(|d| d.message != "Invalid yield" || !open.starts.contains(&d.span.start));
+    }
+
     let (program, lowering_errors) = lower::program(
         &root,
         lower::SourceOrigin {
             path,
             line_starts: &line_starts(source),
+            first_line,
         },
     );
     errors.extend(lowering_errors);

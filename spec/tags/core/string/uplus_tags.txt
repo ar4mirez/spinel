@@ -1,0 +1,1 @@
+fails(#263: a literal in a file with no magic comment is chilled in Ruby 3.4, so `+@` copies it; Spinel has no chilled strings yet. Blocked until string `eval` #38 landed):String#+@ if file has no frozen_string_literal magic comment returns mutable copy of a literal

@@ -491,3 +491,40 @@ class Proc
     to_s
   end
 end
+
+# `exit` and `abort` only raise `SystemExit`, which is the whole of what
+# happens until something rescues it. The rest of process control is
+# `Process` (#43); the methods exist so a class can name them.
+module Kernel
+  def exit(status = true)
+    raise SystemExit.new(Kernel.__exit_status__(status), "exit")
+  end
+
+  def abort(message = nil)
+    return raise(SystemExit.new(1, "exit")) if message.nil?
+    raise TypeError, "no implicit conversion of #{message.class} into String" unless String === message || message.respond_to?(:to_str)
+    __needs_stderr__
+  end
+
+  def exit!(status = false)
+    __needs_process__
+  end
+
+  def fork
+    __needs_process__
+  end
+
+  def system(*)
+    __needs_process__
+  end
+
+  module_function :exit, :abort, :exit!, :fork, :system
+
+  def self.__exit_status__(status)
+    return 0 if status == true
+    return 1 if status == false
+    return status if Integer === status
+    raise TypeError, "no implicit conversion of #{status.nil? ? "nil" : status.class} into Integer" unless status.respond_to?(:to_int)
+    status.to_int
+  end
+end
