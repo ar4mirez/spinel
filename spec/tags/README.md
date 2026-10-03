@@ -77,7 +77,11 @@ fix is a different slice. The reason says which slice, by number.
 
 ## What is here now
 
-A hundred and fifty-five tags across seventy-eight files — #39 removed seven, the
+A hundred and fifty-six tags across seventy-nine files. Running mspec (#145)
+added two that are the harness's own — an example expecting mspec's runner in
+its backtrace, and one reading an ivar a previous group's hook set, which
+mspec's shared context carries over — and removed `` Kernel#` ``'s, now that a
+backtick compiles to a call. #39 removed seven, the
 read-only globals in `language/predefined_tags.txt`. #38 added three, examples
 string `eval` made reachable that belong elsewhere: `Hash#inspect` read back by
 `eval` (#216), an unknown POSIX bracket class (#33), and `+@` on a chilled

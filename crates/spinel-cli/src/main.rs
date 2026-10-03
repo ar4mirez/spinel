@@ -49,6 +49,10 @@ struct Cli {
     /// only to turn `spinel app.rb` from "unexpected argument" into a real answer.
     #[arg(hide = true)]
     file: Option<String>,
+
+    /// Arguments after a bare file: the program's `ARGV`.
+    #[arg(hide = true, trailing_var_arg = true, allow_hyphen_values = true)]
+    args: Vec<String>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -57,6 +61,10 @@ enum Command {
     Run {
         /// A Ruby file.
         path: PathBuf,
+
+        /// Arguments for the program: its `ARGV`.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
 
         /// Print the compiled bytecode instead of running it.
         ///
@@ -103,8 +111,9 @@ fn main() -> ExitCode {
         Some(Command::Parse { path, format }) => return parse_command(&path, format),
         Some(Command::Run {
             path,
+            args,
             dump_bytecode,
-        }) => return run_command(&path, dump_bytecode),
+        }) => return run_command(&path, &args, dump_bytecode),
         None => {}
     }
 
@@ -114,7 +123,7 @@ fn main() -> ExitCode {
         // running a typo as a filename would report "no such file" about a word
         // that was never meant to be one.
         if looks_like_a_ruby_file(&argument) {
-            return run_command(Path::new(&argument), false);
+            return run_command(Path::new(&argument), &cli.args, false);
         }
         eprintln!("spinel: unknown subcommand `{argument}`.");
         eprintln!("        This build has two: run, parse. Try `spinel --help`.");
@@ -140,7 +149,7 @@ fn looks_like_a_ruby_file(argument: &str) -> bool {
 /// 1, and a script wrapping `spinel run` should not have to tell the two apart.
 const EXIT_RAISED: u8 = 1;
 
-fn run_command(path: &Path, dump_bytecode: bool) -> ExitCode {
+fn run_command(path: &Path, args: &[String], dump_bytecode: bool) -> ExitCode {
     let source = match std::fs::read(path) {
         Ok(source) => source,
         Err(err) => {
@@ -183,19 +192,29 @@ fn run_command(path: &Path, dump_bytecode: bool) -> ExitCode {
     let mut heap = spinel_vm::Heap::new();
     let mut scope = heap.scope();
     scope.bootstrap();
+    scope.set_argv(&path.to_string_lossy(), args);
+    scope.set_budget(None);
     spinel_core::boot(&mut scope);
 
     let mut frame = spinel_vm::interp::Frame::new(0);
-    match spinel_vm::interp::eval_in(&mut scope, &mut frame, &iseq) {
-        Ok(_) => ExitCode::SUCCESS,
-        Err(err) => {
-            // Ruby prints `file:line: message (Class)`. Spinel has no line
-            // numbers on a raise yet — backtraces are PRD 0012's non-goal — so
-            // the file is named and the line is not invented.
-            eprintln!("{}: {}", path.display(), describe_error(&err));
-            ExitCode::from(EXIT_RAISED)
-        }
+    let outcome = spinel_vm::interp::eval_in(&mut scope, &mut frame, &iseq);
+    // `exit` is a `SystemExit` that nothing rescued: not an error to report,
+    // and its status is the process's.
+    let exited = matches!(
+        &outcome,
+        Err(spinel_vm::Error::Uncaught { class, .. }) if class == "SystemExit"
+    );
+    if let Err(err) = &outcome
+        && !exited
+    {
+        // Ruby prints `file:line: message (Class)`. Spinel has no line
+        // numbers on a raise yet — backtraces are PRD 0012's non-goal — so
+        // the file is named and the line is not invented.
+        eprintln!("{}: {}", path.display(), describe_error(err));
     }
+    // The `at_exit` blocks run last, and may change the status.
+    let status = spinel_core::exit_status(&mut scope, outcome.is_err());
+    ExitCode::from(status.unwrap_or(if outcome.is_ok() { 0 } else { EXIT_RAISED }))
 }
 
 /// One line for an error that ended the program.

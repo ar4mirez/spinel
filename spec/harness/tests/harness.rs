@@ -147,9 +147,11 @@ fn an_example_it_cannot_run_is_blocked_and_never_failed() {
         text.contains("blocked by, most examples first"),
         "the report must say what blocked it:\n{text}"
     );
+    // A backtick compiles to a call to `Kernel#`` since #145; running the
+    // command is what Spinel cannot do yet, and the reason says so.
     assert!(
-        text.contains("a backtick command is not compiled yet"),
-        "the reason must name the construct:\n{text}"
+        text.contains("starting or ending a process cannot be answered before `Process` (#43)"),
+        "the reason must name what is missing:\n{text}"
     );
 }
 

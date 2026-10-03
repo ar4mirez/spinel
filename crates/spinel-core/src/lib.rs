@@ -90,8 +90,11 @@ const SOURCES: &[(&str, &str)] = &[
         include_str!("../../../core/encoding.rb"),
     ),
     ("core/binding.rb", include_str!("../../../core/binding.rb")),
+    ("core/io.rb", include_str!("../../../core/io.rb")),
     ("core/file.rb", include_str!("../../../core/file.rb")),
     ("core/load.rb", include_str!("../../../core/load.rb")),
+    ("core/process.rb", include_str!("../../../core/process.rb")),
+    ("core/time.rb", include_str!("../../../core/time.rb")),
     ("core/pack.rb", include_str!("../../../core/pack.rb")),
     (
         "core/transcode.rb",
@@ -160,6 +163,23 @@ pub fn boot(scope: &mut HandleScope<'_>) {
             panic!("{name} raised while loading the core library: {err:?}");
         }
     }
+}
+
+/// End the program: run its `at_exit` blocks and answer its exit status —
+/// `SystemExit#status` when `exit` ended it, 1 for another uncaught
+/// exception (left in `$!` by the VM), 0 otherwise. `None` when the status
+/// cannot be worked out, which is a refusal inside an `at_exit` block.
+pub fn exit_status(scope: &mut HandleScope<'_>, raised: bool) -> Option<u8> {
+    let source: &[u8] = if raised {
+        b"Kernel.__exit__($! || RuntimeError.new)"
+    } else {
+        b"Kernel.__exit__(nil)"
+    };
+    let parsed = spinel_parse::parse_file("<exit>", source);
+    let iseq = compile::program(&parsed.program).ok()?;
+    let mut frame = interp::Frame::new(0);
+    let status = interp::eval_in(scope, &mut frame, &iseq).ok()?;
+    status.as_fixnum().map(|status| (status & 0xff) as u8)
 }
 
 /// What string `eval` parses with (#38): the VM has no parser of its own.

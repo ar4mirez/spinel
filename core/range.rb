@@ -338,8 +338,10 @@ class Range
 
   def __linear__?
     return false if @__begin__.nil? && @__end__.nil?
-    left = @__begin__.nil? || @__begin__.is_a?(Numeric)
-    right = @__end__.nil? || @__end__.is_a?(Numeric)
+    # An end that converts with `to_int` counts as a number, measured:
+    # CRuby's `range_include_internal` asks `rb_check_to_integer`.
+    left = @__begin__.nil? || @__begin__.is_a?(Numeric) || @__begin__.respond_to?(:to_int)
+    right = @__end__.nil? || @__end__.is_a?(Numeric) || @__end__.respond_to?(:to_int)
     left && right
   end
 

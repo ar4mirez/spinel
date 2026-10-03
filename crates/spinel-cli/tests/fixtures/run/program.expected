@@ -1,0 +1,7 @@
+["one", "--two"]
+"program.rb"
+to stdout
+true
+nil
+and in reverse
+at_exit runs last

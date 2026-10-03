@@ -12,6 +12,51 @@ module Signal
     table
   end
 
+  # ponytail: a handler is recorded, answered back by the next `trap`, and
+  # never run: delivering a signal means an OS handler and a safe point in
+  # the interpreter loop, which is `Process` (#43) along with `Process.kill`.
+  #
+  # What `trap` answers is CRuby's, measured on 4.0.7, by signal number so an
+  # alias shares its handler: the signals Ruby reserves start "DEFAULT",
+  # SIGPIPE is ignored, ABRT and SYS hold a C handler (nil), and the rest
+  # start at the operating system's "SYSTEM_DEFAULT".
+  RESERVED = %w[HUP INT QUIT ALRM TERM CHLD USR1 USR2].freeze
+  
+  def self.trap(signal, command = nil, &block)
+    name =
+      case signal
+      when Integer then signal == 0 ? "EXIT" : (signame(signal) || raise(ArgumentError, "invalid signal number (#{signal})"))
+      when Symbol, String then signal.to_s.delete_prefix("SIG")
+      else raise ArgumentError, "bad signal type #{signal.class}"
+      end
+    number = name == "EXIT" ? 0 : list[name]
+    raise ArgumentError, "unsupported signal 'SIG#{name}'" if number.nil?
+    if %w[KILL STOP SEGV BUS ILL FPE VTALRM].include?(name)
+      raise ArgumentError, "can't trap reserved signal: SIG#{name}" unless %w[KILL STOP].include?(name)
+      raise Errno::EINVAL, "SIG#{name}"
+    end
+    handler = block || command
+    handler = handler.to_s if Symbol === handler
+    handler =
+      case handler
+      when "DEFAULT", "SIG_DFL"
+        RESERVED.include?(signame(number) || name) ? "DEFAULT" : "SYSTEM_DEFAULT"
+      when "IGNORE", "SIG_IGN", "" then "IGNORE"
+      else handler
+      end
+    handlers = (@__handlers__ ||= {})
+    previous = handlers.key?(number) ? handlers[number] : __initial_handler__(number)
+    handlers[number] = handler
+    previous
+  end
+  
+  def self.__initial_handler__(number)
+    name = signame(number)
+    return nil if number == 0 || name == "ABRT" || name == "SYS"
+    return "IGNORE" if name == "PIPE"
+    RESERVED.include?(name) ? "DEFAULT" : "SYSTEM_DEFAULT"
+  end
+  
   # The first name for `number` — "ABRT", not "IOT" — or nil.
   def self.signame(number)
     # CRuby's `NUM2INT`: through `to_int`, and a TypeError for anything that
@@ -94,4 +139,12 @@ class Interrupt
     end
     super(Signal.list["INT"], given.empty? ? "Interrupt" : given[0])
   end
+end
+
+module Kernel
+  def trap(signal, command = nil, &block)
+    Signal.trap(signal, command, &block)
+  end
+
+  module_function :trap
 end

@@ -45,7 +45,7 @@ use crate::class::Builtin;
 use crate::class::{ClassId, CrefId, Kind, Method, ScopeDefault, Visibility};
 use crate::heap::{Handle, HandleScope, Heap, Payload};
 use crate::method::{
-    BindingOp, BitOp, CvarOp, Definition, FiberOp, FsOp, IvarOp, Native, ReflectOp, StrOp,
+    BindingOp, BitOp, CvarOp, Definition, FiberOp, FsOp, IvarOp, Native, ReflectOp, StrOp, SysOp,
 };
 use crate::shape::ShapeId;
 use crate::value::SymbolId;
@@ -144,7 +144,7 @@ impl std::error::Error for Error {}
 ///
 /// Generous enough that no ruby/spec example approaches it, small enough that a
 /// non-terminating loop is a reported failure rather than a hung run.
-const BUDGET: u64 = 50_000_000;
+pub const BUDGET: u64 = 50_000_000;
 
 /// The top-level scope an evaluation runs in.
 ///
@@ -1718,7 +1718,9 @@ pub fn eval_in(
         defined_as: None,
         parked: Vec::new(),
     }];
-    let mut budget = BUDGET;
+    // `u64::MAX` is no budget at all: what `spinel run` asks for, since a
+    // program is allowed to run for as long as it runs.
+    let mut budget = scope.budget().unwrap_or(u64::MAX);
     // Frame ids, handed out in order. Zero means "no such frame", which is what
     // a body with nowhere to `break` to carries.
     // Frame ids continue from the last evaluation: a fiber resumed here may
@@ -2924,10 +2926,15 @@ fn unwind_to_handler(
 /// What an unwind that left the outermost frame is, as a reportable error.
 fn escaped(scope: &mut HandleScope<'_>, unwind: Unwind) -> Error {
     match unwind {
-        Unwind::Exception(exception) => Error::Uncaught {
-            class: class_name_of(scope, exception),
-            message: exception_message(scope, exception),
-        },
+        Unwind::Exception(exception) => {
+            // Left in `$!`, so the embedder can ask what ended the program —
+            // `SystemExit#status` is the process's exit status.
+            scope.set_errinfo(exception);
+            Error::Uncaught {
+                class: class_name_of(scope, exception),
+                message: exception_message(scope, exception),
+            }
+        }
         Unwind::Throw { tag, .. } => Error::Uncaught {
             class: "UncaughtThrowError".to_owned(),
             message: format!("uncaught throw {}", inspect(scope, tag)),
@@ -7590,10 +7597,14 @@ fn native_call<'h>(
             use std::io::Write as _;
             // A closed or full stdout is a real error in Ruby (`EPIPE`), and IO
             // is phase 3. Until there is an `IOError` to raise, a failed write
-            // is reported rather than swallowed.
-            std::io::stdout().write_all(&bytes).map_err(|err| {
-                Error::raise("RuntimeError", format!("cannot write to stdout: {err}"))
-            })?;
+            // is reported rather than swallowed. The second argument is the
+            // descriptor: 2 is stderr, anything else stdout.
+            let written = if call.args.get(1).and_then(|v| v.as_fixnum()) == Some(2) {
+                std::io::stderr().write_all(&bytes)
+            } else {
+                std::io::stdout().write_all(&bytes)
+            };
+            written.map_err(|err| Error::raise("RuntimeError", format!("cannot write: {err}")))?;
             stack.push(Value::NIL);
             Ok(None)
         }
@@ -8026,6 +8037,68 @@ fn native_call<'h>(
 
         Native::Binding(op) => binding_native(scope, stack, frames, &call, op, ids),
         Native::LoadFile => load_file(scope, stack, frames, &call, ids),
+        Native::Getenv => {
+            let value = match call.args.first().and_then(|&v| string_bytes(scope, v)) {
+                Some(name) if !name.is_empty() && !name.contains(&b'=') && !name.contains(&0) => {
+                    match std::env::var_os(std::ffi::OsString::from_vec(name)) {
+                        Some(value) => os_string(scope, value),
+                        None => Value::NIL,
+                    }
+                }
+                _ => Value::NIL,
+            };
+            stack.push(value);
+            Ok(None)
+        }
+        Native::Environ => {
+            let mut values = Vec::new();
+            for (name, value) in std::env::vars_os() {
+                let name = os_string(scope, name);
+                let name = scope.root(name);
+                let value = os_string(scope, value);
+                let value = scope.root(value);
+                values.push((name, value));
+            }
+            let flat: Vec<Value> = values
+                .into_iter()
+                .flat_map(|(n, v)| [scope.get(n), scope.get(v)])
+                .collect();
+            let value = new_array(scope, &flat);
+            stack.push(value);
+            Ok(None)
+        }
+        Native::RubyConstants => {
+            let pairs = [
+                ("RUBY_VERSION", crate::LANGUAGE_VERSION.to_owned()),
+                ("RUBY_ENGINE", crate::ENGINE.to_owned()),
+                ("RUBY_ENGINE_VERSION", crate::ENGINE_VERSION.to_owned()),
+                ("RUBY_PLATFORM", crate::platform()),
+                ("RUBY_DESCRIPTION", crate::description()),
+            ];
+            let mut flat = Vec::new();
+            for (name, value) in pairs {
+                let name = string_new(scope, name);
+                flat.push(scope.root(name));
+                let value = string_new(scope, &value);
+                flat.push(scope.root(value));
+            }
+            let flat: Vec<Value> = flat.into_iter().map(|h| scope.get(h)).collect();
+            let value = new_array(scope, &flat);
+            stack.push(value);
+            Ok(None)
+        }
+        Native::Argv => {
+            let (name, args) = scope.argv();
+            let mut values = Vec::with_capacity(args.len() + 1);
+            for text in std::iter::once(&name).chain(&args) {
+                let value = string_new(scope, text);
+                values.push(scope.root(value));
+            }
+            let values: Vec<Value> = values.into_iter().map(|h| scope.get(h)).collect();
+            let value = new_array(scope, &values);
+            stack.push(value);
+            Ok(None)
+        }
         Native::FreezeGlobal => {
             for name in call.args.iter().filter_map(|v| v.as_symbol()) {
                 scope.freeze_global(name);
@@ -8034,6 +8107,7 @@ fn native_call<'h>(
             Ok(None)
         }
         Native::Fs(op) => fs_native(scope, stack, &call, op),
+        Native::Sys(op) => sys_native(scope, stack, &call, op),
 
         Native::FrameNesting => {
             let cref = frames.last().map_or(CrefId::ROOT, |frame| frame.cref);
@@ -9604,6 +9678,14 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         ),
         (
             Builtin::Kernel,
+            &["__needs_time__"],
+            Native::Refuse {
+                what: "`Time` arithmetic and calendars",
+                needs: "`Time` (#32)",
+            },
+        ),
+        (
+            Builtin::Kernel,
             &["__needs_kernel_clone__"],
             Native::Refuse {
                 what: "`clone` of an object with singleton methods",
@@ -9835,6 +9917,14 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             &["__freeze_global__"],
             Native::FreezeGlobal,
         ),
+        (Builtin::Kernel, &["__argv__"], Native::Argv),
+        (
+            Builtin::Kernel,
+            &["__ruby_constants__"],
+            Native::RubyConstants,
+        ),
+        (Builtin::Kernel, &["__environ__"], Native::Environ),
+        (Builtin::Kernel, &["__getenv__"], Native::Getenv),
         (Builtin::Kernel, &["__fs_kind__"], Native::Fs(FsOp::Kind)),
         (
             Builtin::Kernel,
@@ -9848,6 +9938,27 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         ),
         (Builtin::Kernel, &["__fs_chdir__"], Native::Fs(FsOp::Chdir)),
         (Builtin::Kernel, &["__fs_read__"], Native::Fs(FsOp::Read)),
+        (
+            Builtin::Kernel,
+            &["__fs_isatty__"],
+            Native::Fs(FsOp::Isatty),
+        ),
+        (
+            Builtin::Kernel,
+            &["__fs_access__"],
+            Native::Fs(FsOp::Access),
+        ),
+        (Builtin::Kernel, &["__sys_ids__"], Native::Sys(SysOp::Ids)),
+        (
+            Builtin::Kernel,
+            &["__sys_clock__"],
+            Native::Sys(SysOp::Clock),
+        ),
+        (
+            Builtin::Kernel,
+            &["__sys_clock_ids__"],
+            Native::Sys(SysOp::ClockIds),
+        ),
         (
             Builtin::Kernel,
             &["__fs_constants__"],
@@ -11910,6 +12021,29 @@ fn fs_native(
                 Err(error) => errno_value(&error),
             }
         }
+        FsOp::Access => {
+            let path = path_arg(scope, call, 0)?;
+            let mode = call.args.get(1).and_then(|v| v.as_fixnum()).unwrap_or(0);
+            let allowed = std::ffi::CString::new(path.into_os_string().into_vec())
+                .ok()
+                .zip(i32::try_from(mode).ok())
+                // SAFETY: `path` is a NUL-terminated string that outlives the
+                // call, and `access` only reads it.
+                .is_some_and(|(path, mode)| unsafe { libc::access(path.as_ptr(), mode) } == 0);
+            bool_value(allowed)
+        }
+        FsOp::Isatty => {
+            use std::io::IsTerminal as _;
+            // The three standard streams: the only descriptors an `IO` holds
+            // until #41 opens files.
+            let tty = match call.args.first().and_then(|v| v.as_fixnum()) {
+                Some(0) => std::io::stdin().is_terminal(),
+                Some(1) => std::io::stdout().is_terminal(),
+                Some(2) => std::io::stderr().is_terminal(),
+                _ => false,
+            };
+            bool_value(tty)
+        }
         FsOp::Getcwd => match std::env::current_dir() {
             Ok(dir) => os_string(scope, dir.into_os_string()),
             Err(error) => errno_value(&error),
@@ -12085,6 +12219,87 @@ fn load_file(
         Binding::Strict,
         links,
     )?;
+    Ok(None)
+}
+
+// ---------------------------------------------------------------------------
+// The process's identity and clocks (#145)
+// ---------------------------------------------------------------------------
+
+fn sys_native(
+    scope: &mut HandleScope<'_>,
+    stack: &mut Vec<Value>,
+    call: &Pending,
+    op: SysOp,
+) -> Result<Option<Unwind>, Error> {
+    let int = |n: i64| Value::fixnum(n).expect("an id or a clock reading is a fixnum");
+    let value = match op {
+        SysOp::Ids => {
+            // SAFETY: these six take no arguments, cannot fail, and only read
+            // the calling process's credentials.
+            let ids = unsafe {
+                [
+                    i64::from(libc::getpid()),
+                    i64::from(libc::getppid()),
+                    i64::from(libc::getuid()),
+                    i64::from(libc::geteuid()),
+                    i64::from(libc::getgid()),
+                    i64::from(libc::getegid()),
+                ]
+            };
+            let values: Vec<Value> = ids.into_iter().map(int).collect();
+            new_array(scope, &values)
+        }
+        SysOp::Clock => {
+            let Some(id) = call
+                .args
+                .first()
+                .and_then(|v| v.as_fixnum())
+                .and_then(|id| libc::clockid_t::try_from(id).ok())
+            else {
+                return Err(Error::NoDispatch {
+                    op: "__sys_clock__",
+                    operands: "a clock id that is not an Integer",
+                });
+            };
+            let mut now = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
+            // SAFETY: `now` is a valid, writable `timespec` for the duration
+            // of the call, and an unknown clock id is reported as EINVAL.
+            let status = unsafe { libc::clock_gettime(id, &raw mut now) };
+            if status == 0 {
+                // `time_t` and `c_long` are `i64` on the 64-bit targets CI
+                // builds and narrower elsewhere, so the conversion is kept.
+                #[allow(clippy::useless_conversion)]
+                let (seconds, nanoseconds) = (i64::from(now.tv_sec), i64::from(now.tv_nsec));
+                new_array(scope, &[int(seconds), int(nanoseconds)])
+            } else {
+                let errno = std::io::Error::last_os_error();
+                errno_value(&errno)
+            }
+        }
+        SysOp::ClockIds => {
+            let ids: &[(&str, libc::clockid_t)] = &[
+                ("CLOCK_REALTIME", libc::CLOCK_REALTIME),
+                ("CLOCK_MONOTONIC", libc::CLOCK_MONOTONIC),
+                ("CLOCK_PROCESS_CPUTIME_ID", libc::CLOCK_PROCESS_CPUTIME_ID),
+                ("CLOCK_THREAD_CPUTIME_ID", libc::CLOCK_THREAD_CPUTIME_ID),
+            ];
+            let mut pairs = Vec::with_capacity(ids.len());
+            for &(name, id) in ids {
+                let name = string_new(scope, name);
+                let name = scope.root(name);
+                let name = scope.get(name);
+                let pair = new_array(scope, &[name, int(i64::from(id))]);
+                pairs.push(scope.root(pair));
+            }
+            let pairs: Vec<Value> = pairs.into_iter().map(|h| scope.get(h)).collect();
+            new_array(scope, &pairs)
+        }
+    };
+    stack.push(value);
     Ok(None)
 }
 
