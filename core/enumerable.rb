@@ -409,14 +409,16 @@ module Enumerable
     end
   end
 
+  # `Array#sum`'s, over the values: the Kahan-Babuska compensation for
+  # Floats lives there, and Ruby applies it to any Enumerable. Measured.
   def sum(initial = 0)
-    total = initial
+    values = []
     if block_given?
-      each { |*a| total = total + yield(__pack__(a)) }
+      each { |*a| values << yield(__pack__(a)) }
     else
-      each { |*a| total = total + __pack__(a) }
+      each { |*a| values << __pack__(a) }
     end
-    total
+    values.sum(initial)
   end
 
   # --- grouping -------------------------------------------------------------

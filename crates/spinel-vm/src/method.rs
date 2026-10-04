@@ -205,6 +205,10 @@ pub enum Native {
     /// `Integer#**` — repeated multiplication with an overflow check, so the
     /// answer is a refusal rather than a wrapped one.
     IntPow,
+    /// `Integer#__to_s_radix__(base)`: the digits in `base`, 2 to 36, as a
+    /// US-ASCII String. A primitive because building them in Ruby divides the
+    /// whole number once per digit, which is quadratic on a bignum.
+    IntToSRadix,
     /// `Symbol#to_s`, `#name`, `#length` — reads the shared symbol table.
     SymbolName {
         length: bool,
@@ -346,10 +350,19 @@ pub enum Native {
     /// the top level, in a frame of its own (#39). `require` and `load` are
     /// Ruby around it.
     LoadFile,
+    /// `Kernel#__refusal_boundary__(limit) { ... }`: run the block with a
+    /// budget of `limit` instructions. A refusal inside it — something this
+    /// VM cannot run yet, or running past the budget — ends the block and
+    /// answers the reason as a String instead of ending the evaluation. No
+    /// `rescue` sees it. A spec runner wraps each example in one (#145).
+    RefusalBoundary,
     /// `Kernel#__freeze_global__(*names)`: those globals refuse assignment.
     FreezeGlobal,
     /// `Kernel#__argv__`: `[$0, *ARGV]` as the embedder set them.
     Argv,
+    /// `Kernel#__mark_partial__`: a file this heap was meant to load did not
+    /// finish. See `HandleScope::mark_partial`.
+    MarkPartial,
     /// `Kernel#__ruby_constants__`: `RUBY_VERSION` and its neighbours, as a
     /// flat `[name, value, ...]` Array, from the constants `--version` prints.
     RubyConstants,
@@ -441,6 +454,9 @@ pub enum FsOp {
     Chdir,
     /// `__fs_read__(path)`: the bytes, as a BINARY String.
     Read,
+    /// `__fs_children__(path)`: a directory's entry names, sorted, without
+    /// `.` and `..`.
+    Children,
     /// `__fs_constants__`: `[name, value]` pairs for `File::Constants`, from
     /// the target's libc.
     Constants,

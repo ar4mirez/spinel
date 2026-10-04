@@ -403,6 +403,8 @@ struct Compiler {
     /// declared there only because it did not know the caller already had
     /// them. `eval("a = 2")` assigns the caller's `a`; Prism made it a new one.
     eval_phantoms: Vec<Vec<Box<str>>>,
+    /// See [`Iseq::refusals`].
+    refusals: Vec<&'static str>,
     /// See [`Iseq::from_eval`].
     from_eval: bool,
 }
@@ -488,6 +490,7 @@ impl Compiler {
             zsuper: None,
             eval_visible: 0,
             eval_phantoms: Vec::new(),
+            refusals: Vec::new(),
             from_eval: false,
         }
     }
@@ -617,6 +620,7 @@ impl Compiler {
             first_line: self.first_line,
             outer: self.outer,
             from_eval: self.from_eval,
+            refusals: self.refusals,
         }
     }
 
@@ -653,7 +657,10 @@ impl Compiler {
             | Insn::GetCvar(_)
             | Insn::DefinedCvar(_)
             | Insn::Errinfo
-            | Insn::Dup => 1,
+            | Insn::Dup
+            // Never continues, but `Leave` follows it, and the depth model reads
+            // it as the value the body would have left.
+            | Insn::Refuse(_) => 1,
             // Pops the splatted array and pushes its snapshot: net zero.
             Insn::CaptureSplat => 0,
             // Pops the built source and pushes the pattern: net zero.
@@ -3338,6 +3345,62 @@ impl Compiler {
 
     #[allow(clippy::too_many_arguments)]
     fn child_iseq_as(
+        &mut self,
+        name: &str,
+        params: &Params,
+        locals: &[Name],
+        body: &[Expr],
+        barrier: bool,
+        lambda: bool,
+        span: Span,
+    ) -> Result<Iseq, Unsupported> {
+        match self.compile_child(name, params, locals, body, barrier, lambda, span) {
+            Ok(iseq) => Ok(iseq),
+            Err(unsupported) => {
+                Ok(self.refusing_child(name, params, locals, barrier, lambda, span, unsupported))
+            }
+        }
+    }
+
+    /// A body this compiler cannot lower yet, as one that says so when it
+    /// runs (#145): the rest of the file still compiles, and only a call that
+    /// reaches the construct refuses — the granularity `spec/harness` had when
+    /// it compiled each example on its own. Its parameters are the real ones
+    /// when they lower, and a catch-all rest otherwise, so a call still binds.
+    #[allow(clippy::too_many_arguments)]
+    fn refusing_child(
+        &mut self,
+        name: &str,
+        params: &Params,
+        locals: &[Name],
+        barrier: bool,
+        lambda: bool,
+        span: Span,
+        unsupported: Unsupported,
+    ) -> Iseq {
+        let mut child = Compiler::nested(name, locals, self, barrier);
+        if let Some(source) = &self.source {
+            child.first_line = source.line(span.start);
+        }
+        child.is_lambda_body = lambda;
+        child.params = match child.lower_params(params, span) {
+            Ok(spec) => spec,
+            Err(_) => {
+                let rest = child.slot("%refused");
+                ParamSpec {
+                    rest: Some(rest),
+                    ..ParamSpec::default()
+                }
+            }
+        };
+        child.at(unsupported.span.start);
+        child.refusals.push(unsupported.node);
+        child.emit(Insn::Refuse((child.refusals.len() - 1) as u16));
+        child.finish()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn compile_child(
         &mut self,
         name: &str,
         params: &Params,

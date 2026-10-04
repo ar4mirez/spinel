@@ -46,8 +46,23 @@ module Kernel
 
   module_function :require, :require_relative, :load
 
+  # What CRuby has loaded before a program starts, so `require` of one
+  # answers false rather than looking for a file: here, the core classes
+  # Spinel defines in `core/`.
+  BUILTIN_FEATURES = %w[
+    enumerator enumerator.so thread thread.rb fiber fiber.so rbconfig rbconfig.rb
+  ].freeze
+
   def self.__require__(name)
     name = File.__path__(name)
+    return false if BUILTIN_FEATURES.include?(name)
+    # A C extension in CRuby whose whole effect is one constant.
+    if name == "rbconfig/sizeof"
+      return false if RbConfig.const_defined?(:SIZEOF, false)
+      RbConfig.__define_sizeof__
+      $LOADED_FEATURES.push("rbconfig/sizeof.so")
+      return true
+    end
     path = __find_feature__(name)
     real = __fs_realpath__(path)
     real = path if Integer === real

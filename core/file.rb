@@ -181,6 +181,109 @@ class File < IO
     bytes = __check__(__fs_read__(path), path, "rb_sysopen")
     bytes.force_encoding(Encoding.default_external)
   end
+
+  def self.readlines(path, separator = $/, chomp: false)
+    open(path) { |file| file.readlines(separator, chomp: chomp) }
+  end
+
+  def self.foreach(path, separator = $/, chomp: false, &block)
+    return enum_for(:foreach, path, separator, chomp: chomp) unless block
+    open(path) { |file| file.each_line(separator, chomp: chomp, &block) }
+    nil
+  end
+
+  # ponytail: reading only, and the whole file at once. A `File` here is the
+  # contents and a position; descriptors, writing, and the rest of `IO` are
+  # #41's, and a write mode refuses rather than pretending.
+  def self.open(path, mode = "r", **options)
+    file = new(path, mode, **options)
+    return file unless block_given?
+    begin
+      yield file
+    ensure
+      file.close
+    end
+  end
+
+  def initialize(path, mode = "r", **options)
+    @path = File.__path__(path)
+    mode = mode.to_s
+    __needs_io__ unless mode.start_with?("r") && !mode.include?("+")
+    encoding = mode.split(":")[1]
+    @contents = File.read(@path)
+    @contents.force_encoding(encoding) if encoding
+    @position = 0
+    @closed = false
+    @fileno = nil
+    @sync = false
+  end
+
+  def path = @path
+  alias to_path path
+
+  def closed? = @closed
+
+  def close
+    @closed = true
+    nil
+  end
+
+  def __check_open__
+    raise IOError, "closed stream" if @closed
+  end
+
+  def read(length = nil)
+    __check_open__
+    rest = @contents.byteslice(@position, @contents.bytesize - @position)
+    if length.nil?
+      @position = @contents.bytesize
+      return rest
+    end
+    return nil if rest.empty? && length > 0
+    chunk = rest.byteslice(0, length)
+    @position += chunk.bytesize
+    chunk.force_encoding(Encoding::BINARY)
+  end
+
+  def gets(separator = $/, chomp: false)
+    __check_open__
+    return nil if @position >= @contents.bytesize
+    rest = @contents.byteslice(@position, @contents.bytesize - @position)
+    at = separator.nil? ? nil : rest.index(separator)
+    line = at.nil? ? rest : rest[0, at + separator.size]
+    @position += line.bytesize
+    line = line.chomp(separator) if chomp && separator
+    $_ = line
+  end
+
+  def each_line(separator = $/, chomp: false)
+    return enum_for(:each_line, separator) unless block_given? || chomp
+    return enum_for(:each_line, separator, chomp: chomp) unless block_given?
+    while (line = gets(separator, chomp: chomp))
+      yield line
+    end
+    self
+  end
+
+  def readlines(separator = $/, chomp: false)
+    each_line(separator, chomp: chomp).to_a
+  end
+
+  def eof?
+    __check_open__
+    @position >= @contents.bytesize
+  end
+
+  alias eof eof?
+
+  def rewind
+    @position = 0
+    0
+  end
+
+  def write(*)
+    __needs_io__
+  end
 end
 
 class IO
@@ -207,6 +310,160 @@ class Dir
     File.directory?(path)
   end
 
+  def self.children(path)
+    path = File.__path__(path)
+    File.__check__(__fs_children__(path), path, "dir_initialize")
+  end
+
+  def self.entries(path)
+    [".", ".."] + children(path)
+  end
+
+  def self.each_child(path, &block)
+    return enum_for(:each_child, path) unless block
+    children(path).each(&block)
+    nil
+  end
+
+  def self.[](*patterns, base: nil, sort: true)
+    glob(patterns, base: base)
+  end
+
+  # `*`, `?`, `[...]`, `{a,b}` and `**/`, matched a segment at a time; a name
+  # starting with `.` only by a pattern that does too. Results are sorted
+  # within each directory, and a brace's alternatives keep their order,
+  # measured. Flags are not supported yet.
+  def self.glob(patterns, flags = 0, base: nil, sort: true, &block)
+    raise NotImplementedError, "Dir.glob flags" unless flags == 0
+    results = []
+    Array(patterns).each do |pattern|
+      __expand_braces__(File.__path__(pattern)).each do |expanded|
+        results.concat(__glob__(expanded, base.nil? ? nil : File.__path__(base)))
+      end
+    end
+    return results unless block
+    results.each(&block)
+    nil
+  end
+
+  def self.__expand_braces__(pattern)
+    open = pattern.index("{")
+    return [pattern] if open.nil?
+    depth = 0
+    i = open
+    while i < pattern.size
+      depth += 1 if pattern[i] == "{"
+      depth -= 1 if pattern[i] == "}"
+      break if depth == 0
+      i += 1
+    end
+    return [pattern] if depth != 0
+    inner = pattern[open + 1...i]
+    alternatives = []
+    current = +""
+    level = 0
+    inner.each_char do |c|
+      if c == "," && level == 0
+        alternatives << current
+        current = +""
+      else
+        level += 1 if c == "{"
+        level -= 1 if c == "}"
+        current << c
+      end
+    end
+    alternatives << current
+    head = pattern[0...open]
+    tail = pattern[i + 1..]
+    alternatives.flat_map { |alt| __expand_braces__(head + alt + tail) }
+  end
+
+  def self.__glob__(pattern, base)
+    absolute = pattern.start_with?("/")
+    segments = pattern.split("/", -1)
+    segments.shift if absolute
+    paths = [absolute ? "/" : ""]
+    root = base || "."
+    segments.each_with_index do |segment, index|
+      last = index == segments.size - 1
+      if segment.empty?
+        # A trailing `/`: directories only.
+        paths = paths.select { |path| File.directory?(__on_disk__(path, root)) }.map { |path| path + "/" } if last
+        next
+      end
+      if segment == "**"
+        paths = paths.flat_map { |path| [path] + __descendants__(path, root) }
+        next
+      end
+      if segment.match?(/[*?\[]/)
+        matcher = __segment_regexp__(segment)
+        paths = paths.flat_map do |path|
+          dir = __on_disk__(path, root)
+          next [] unless File.directory?(dir)
+          children = __fs_children__(dir)
+          next [] if Integer === children
+          children.select { |name| matcher.match?(name) && (!name.start_with?(".") || segment.start_with?(".")) }
+                  .map { |name| __join__(path, name) }
+        end
+      else
+        paths = paths.map { |path| __join__(path, segment) }
+                     .select { |path| File.exist?(__on_disk__(path, root)) || File.symlink?(__on_disk__(path, root)) }
+      end
+    end
+    paths
+  end
+
+  def self.__join__(path, name)
+    path.empty? ? name : (path.end_with?("/") ? path + name : path + "/" + name)
+  end
+
+  def self.__on_disk__(path, root)
+    return path if path.start_with?("/")
+    path.empty? ? root : File.join(root, path)
+  end
+
+  # Every directory below `path`, depth first in sorted order, skipping
+  # names that start with `.`, as `**/` does.
+  def self.__descendants__(path, root)
+    dir = __on_disk__(path, root)
+    children = __fs_children__(dir)
+    return [] if Integer === children
+    children.flat_map do |name|
+      next [] if name.start_with?(".")
+      child = __join__(path, name)
+      next [] unless File.directory?(__on_disk__(child, root)) && !File.symlink?(__on_disk__(child, root))
+      [child] + __descendants__(child, root)
+    end
+  end
+
+  def self.__segment_regexp__(segment)
+    source = +"\\A"
+    i = 0
+    while i < segment.size
+      c = segment[i]
+      case c
+      when "*" then source << "[^/]*"
+      when "?" then source << "[^/]"
+      when "["
+        close = segment.index("]", i + 1)
+        if close
+          body = segment[i + 1...close]
+          body = "^" + body[1..] if body.start_with?("!")
+          source << "[" << body << "]"
+          i = close
+        else
+          source << "\\["
+        end
+      when "\\"
+        i += 1
+        source << Regexp.escape(segment[i].to_s)
+      else source << Regexp.escape(c)
+      end
+      i += 1
+    end
+    Regexp.new(source + "\\z")
+  end
+  
   def self.chdir(path = nil)
     path = File.__path__(path)
     unless block_given?

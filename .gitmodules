@@ -2,3 +2,7 @@
 	path = spec/ruby
 	url = https://github.com/ruby/spec.git
 	branch = master
+[submodule "spec/mspec"]
+	path = spec/mspec
+	url = https://github.com/ruby/mspec.git
+	branch = master

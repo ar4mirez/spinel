@@ -19,7 +19,7 @@ Guards are answered for `linux`, which is what `scripts/spec-status.sh` pins so 
 | `core/data` | 13 | 88 | 0 | 0 | 87 | 1 | 0% |
 | `core/dir` | 34 | 231 | 2 | 0 | 190 | 39 | 1% |
 | `core/encoding` | 45 | 319 | 175 | 0 | 134 | 10 | 55% |
-| `core/enumerable` | 61 | 446 | 363 | 0 | 79 | 4 | 81% |
+| `core/enumerable` | 61 | 446 | 364 | 0 | 78 | 4 | 82% |
 | `core/enumerator` | 73 | 390 | 231 | 0 | 158 | 1 | 59% |
 | `core/env` | 45 | 180 | 49 | 0 | 120 | 11 | 27% |
 | `core/exception` | 39 | 233 | 125 | 0 | 105 | 3 | 54% |
@@ -31,7 +31,7 @@ Guards are answered for `linux`, which is what `scripts/spec-status.sh` pins so 
 | `core/gc` | 18 | 44 | 0 | 0 | 39 | 5 | 0% |
 | `core/hash` | 69 | 460 | 343 | 0 | 109 | 8 | 75% |
 | `core/integer` | 70 | 526 | 189 | 0 | 332 | 5 | 36% |
-| `core/io` | 103 | 1095 | 9 | 0 | 1015 | 71 | 1% |
+| `core/io` | 103 | 1095 | 10 | 0 | 1014 | 71 | 1% |
 | `core/kernel` | 118 | 1277 | 490 | 0 | 664 | 123 | 38% |
 | `core/main` | 7 | 27 | 4 | 0 | 23 | 0 | 15% |
 | `core/marshal` | 6 | 330 | 0 | 0 | 324 | 6 | 0% |
@@ -66,7 +66,7 @@ Guards are answered for `linux`, which is what `scripts/spec-status.sh` pins so 
 | `core/true` | 9 | 13 | 6 | 0 | 7 | 0 | 46% |
 | `core/unboundmethod` | 20 | 80 | 0 | 0 | 77 | 3 | 0% |
 | `core/warning` | 5 | 31 | 0 | 0 | 28 | 3 | 0% |
-| `language` | 67 | 2464 | 1626 | 0 | 763 | 75 | 66% |
+| `language` | 67 | 2464 | 1716 | 0 | 673 | 75 | 70% |
 | `language/predefined` | 2 | 14 | 0 | 0 | 14 | 0 | 0% |
 | `language/regexp` | 11 | 257 | 182 | 0 | 72 | 3 | 71% |
 | `library/English` | 2 | 27 | 0 | 0 | 9 | 18 | 0% |
@@ -106,7 +106,7 @@ Guards are answered for `linux`, which is what `scripts/spec-status.sh` pins so 
 | `library/pp` | 1 | 3 | 0 | 0 | 3 | 0 | 0% |
 | `library/prime` | 11 | 41 | 0 | 0 | 41 | 0 | 0% |
 | `library/random` | 1 | 8 | 0 | 0 | 8 | 0 | 0% |
-| `library/rbconfig` | 5 | 33 | 0 | 0 | 22 | 11 | 0% |
+| `library/rbconfig` | 5 | 33 | 4 | 0 | 18 | 11 | 12% |
 | `library/readline` | 25 | 44 | 0 | 0 | 0 | 44 | 0% |
 | `library/resolv` | 4 | 6 | 0 | 0 | 6 | 0 | 0% |
 | `library/ripper` | 2 | 2 | 0 | 0 | 2 | 0 | 0% |
@@ -131,4 +131,4 @@ Guards are answered for `linux`, which is what `scripts/spec-status.sh` pins so 
 | `optional/capi` | 47 | 1651 | 10 | 0 | 1561 | 80 | 1% |
 | `optional/thread_safety` | 1 | 5 | 0 | 0 | 4 | 1 | 0% |
 | `security` | 13 | 27 | 0 | 0 | 25 | 2 | 0% |
-| **total** | 3835 | 25624 | 7239 | 0 | 16368 | 2017 | 28% |
+| **total** | 3835 | 25624 | 7335 | 0 | 16272 | 2017 | 29% |

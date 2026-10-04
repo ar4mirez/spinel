@@ -282,16 +282,23 @@ fn an_unmerged_local_blames_the_harness_and_a_real_one_blames_the_compiler() {
     assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
     let expr = &parsed.program.body[1];
 
+    // The miss is inside a block, and since #145 a block body that does not
+    // compile becomes one that refuses when it runs: the reason travels in
+    // its `refusals`.
+    let refusal = |iseq: spinel_vm::Iseq| iseq.children[0].refusals.first().copied();
+
     let flattened = compile::flattened_expression("<example>", &[], expr)
-        .expect_err("an unmerged name cannot resolve");
+        .expect("the block compiles to a refusal");
     assert_eq!(
-        flattened.node,
-        "a local variable from a block the harness did not run"
+        refusal(flattened),
+        Some("a local variable from a block the harness did not run")
     );
 
-    let plain = compile::expression("<main>", &[], expr)
-        .expect_err("the same depth is a disagreement outside the harness");
-    assert_eq!(plain.node, "a local variable from an enclosing scope");
+    let plain = compile::expression("<main>", &[], expr).expect("the block compiles to a refusal");
+    assert_eq!(
+        refusal(plain),
+        Some("a local variable from an enclosing scope")
+    );
 
     // The compiler itself resolves enclosing locals fine — which is why the
     // harness's miss must not be reported against it. Compiled whole, with the

@@ -107,6 +107,10 @@ pub enum Insn {
     JumpUnless(i32),
     /// Pops; jumps when the value is truthy.
     JumpIf(i32),
+    /// A construct the compiler cannot lower yet: running it is a refusal,
+    /// [`crate::interp::Error::NotCompiled`], naming [`Iseq::refusals`] at
+    /// this index. The rest of the file around it still runs.
+    Refuse(u16),
     /// Peeks; jumps when the value is falsy, leaving it on the stack. `&&`.
     JumpUnlessKeep(i32),
     /// Peeks; jumps when the value is truthy, leaving it on the stack. `||`.
@@ -753,6 +757,9 @@ pub struct Iseq {
     /// Compiled from a string `eval`, whose `path` is the name it was given
     /// rather than a file on disk: `__dir__` does not resolve it.
     pub from_eval: bool,
+    /// The constructs [`Insn::Refuse`] names: what the compiler could not
+    /// lower in this body, which it compiled to a refusal instead.
+    pub refusals: Vec<&'static str>,
 }
 
 impl Iseq {

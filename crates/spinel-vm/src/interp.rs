@@ -88,6 +88,9 @@ pub enum Error {
     /// A loop that ran past its budget. Guards the harness against a spec that
     /// depends on a construct the compiler silently made non-terminating.
     Budget,
+    /// A construct the compiler could not lower, reached at run time. See
+    /// [`crate::bytecode::Insn::Refuse`].
+    NotCompiled(&'static str),
     /// A question this heap cannot answer, where the answer Ruby gives would be
     /// indistinguishable from a wrong one.
     ///
@@ -121,6 +124,7 @@ impl std::fmt::Display for Error {
             }
             Error::Uncaught { class, message } => write!(f, "{class}: {message}"),
             Error::Budget => write!(f, "ran past the instruction budget"),
+            Error::NotCompiled(node) => write!(f, "{node} is not compiled yet"),
             Error::Unknowable { what, needs } => {
                 write!(f, "{what} cannot be answered before {needs}")
             }
@@ -403,6 +407,11 @@ struct Call {
     /// another `begin`/`ensure`, and the outer reason has to survive the inner
     /// one running to completion.
     parked: Vec<Parked>,
+    /// Nonzero for the block of a refusal boundary (#145): how many
+    /// instructions it may run. A refusal — or running past that — inside it
+    /// unwinds to here and becomes the call's value, rather than ending the
+    /// evaluation. See `Native::RefusalBoundary`.
+    boundary_limit: u64,
 }
 
 /// How a callee takes the arguments it was handed.
@@ -1717,6 +1726,7 @@ pub fn eval_in(
         owner: None,
         defined_as: None,
         parked: Vec::new(),
+        boundary_limit: 0,
     }];
     // `u64::MAX` is no budget at all: what `spinel run` asks for, since a
     // program is allowed to run for as long as it runs.
@@ -1730,9 +1740,35 @@ pub fn eval_in(
     frames[0].id = ids;
     frames[0].home = ids;
 
+    // The refusal boundaries on the stack, innermost last, as
+    // `(frame index, frame id, budget deadline)`. Refreshed only when the frame
+    // count changes, so the instruction loop pays one comparison for them.
+    let mut boundaries: Vec<Boundary> = Vec::new();
+    let mut seen_frames = frames.len();
+    let mut deadline: u64 = 0;
+
     let result = (|| -> Result<Value, Error> {
         Ok(loop {
-            budget = budget.checked_sub(1).ok_or(Error::Budget)?;
+            if frames.len() != seen_frames {
+                seen_frames = frames.len();
+                deadline = refresh_boundaries(scope, &frames, &mut boundaries, budget);
+            }
+            budget = budget.saturating_sub(1);
+            if budget <= deadline {
+                // Out of budget: the whole evaluation's, or a boundary's.
+                let unwind = refuse(
+                    scope,
+                    &mut stack,
+                    &mut frames,
+                    &mut boundaries,
+                    Error::Budget,
+                )?;
+                seen_frames = usize::MAX;
+                if let Some(value) = unwind_to_handler(scope, &mut stack, &mut frames, unwind)? {
+                    break value;
+                }
+                continue;
+            }
             let top = frames.len() - 1;
             let insn = frames[top].iseq.insns[frames[top].pc];
             frames[top].pc += 1;
@@ -1884,6 +1920,11 @@ pub fn eval_in(
                     }
 
                     Insn::Jump(displacement) => frames[top].pc = jump(frames[top].pc, displacement),
+                    Insn::Refuse(index) => {
+                        return Err(Error::NotCompiled(
+                            frames[top].iseq.refusals[index as usize],
+                        ));
+                    }
                     Insn::JumpUnless(displacement) => {
                         if !stack.pop().expect("jump on an empty stack").is_truthy() {
                             frames[top].pc = jump(frames[top].pc, displacement);
@@ -2735,8 +2776,13 @@ pub fn eval_in(
                 // `NoDispatch`, `Budget`, and `Unknowable` are not Ruby semantics:
                 // they say this VM cannot run the program. A `rescue` must never
                 // turn "not implemented yet" into "caught", or the harness would
-                // report a missing feature as an exception a spec handled.
-                Err(other) => return Err(other),
+                // report a missing feature as an exception a spec handled. A
+                // refusal boundary is not a `rescue`: it ends the block it ran
+                // and answers why, and nothing else sees it (#145).
+                Err(other) => {
+                    seen_frames = usize::MAX;
+                    refuse(scope, &mut stack, &mut frames, &mut boundaries, other)?
+                }
             };
 
             // Where the exception starts is where its backtrace is taken: every
@@ -2754,6 +2800,132 @@ pub fn eval_in(
     scope.fibers_mut().frame_ids = ids;
     scope.fibers_mut().abandon();
     result
+}
+
+/// A refusal boundary on some stack of frames: which fiber's (`None` for the
+/// root), which frame, and the budget it may not run below.
+struct Boundary {
+    fiber: Option<usize>,
+    index: usize,
+    id: u64,
+    deadline: u64,
+}
+
+/// Drop the boundaries whose frames have left, register one whose block has
+/// just started, and answer the innermost deadline — 0 when there is none.
+fn refresh_boundaries(
+    scope: &HandleScope<'_>,
+    frames: &[Call],
+    boundaries: &mut Vec<Boundary>,
+    budget: u64,
+) -> u64 {
+    prune_boundaries(scope, frames, boundaries);
+    let fiber = scope.fibers().current;
+    if let Some(top) = frames.len().checked_sub(1) {
+        let frame = &frames[top];
+        let known = boundaries
+            .iter()
+            .any(|b| b.fiber == fiber && b.id == frame.id);
+        if frame.boundary_limit != 0 && !known {
+            boundaries.push(Boundary {
+                fiber,
+                index: top,
+                id: frame.id,
+                deadline: budget.saturating_sub(frame.boundary_limit),
+            });
+        }
+    }
+    // The running stack's innermost boundary binds; with none, the root's.
+    boundaries
+        .iter()
+        .rev()
+        .find(|b| b.fiber == fiber)
+        .or_else(|| boundaries.iter().rev().find(|b| b.fiber.is_none()))
+        .map_or(0, |b| b.deadline)
+}
+
+/// Forget the boundaries whose frames have left: on the running stack, by
+/// looking; on a fiber that has finished, all of them. A suspended stack's
+/// boundaries wait for it.
+fn prune_boundaries(scope: &HandleScope<'_>, frames: &[Call], boundaries: &mut Vec<Boundary>) {
+    let fibers = scope.fibers();
+    let current = fibers.current;
+    boundaries.retain(|b| {
+        if b.fiber == current {
+            frames.get(b.index).is_some_and(|frame| frame.id == b.id)
+        } else {
+            b.fiber
+                .is_none_or(|f| !matches!(fibers.entries[f].state, FiberState::Terminated))
+        }
+    });
+}
+
+/// [`catch_refusal`], across fibers: a fiber is its own stack of frames, and
+/// one with no boundary on it ends where it refused — terminated, as an
+/// exception would leave it — so its resumer's boundary can take the refusal.
+fn refuse(
+    scope: &mut HandleScope<'_>,
+    stack: &mut Vec<Value>,
+    frames: &mut Vec<Call>,
+    boundaries: &mut Vec<Boundary>,
+    error: Error,
+) -> Result<Unwind, Error> {
+    let mut error = error;
+    loop {
+        match catch_refusal(scope, frames, boundaries, error) {
+            Ok(unwind) => return Ok(unwind),
+            Err(unhandled) => {
+                let refusal = matches!(
+                    unhandled,
+                    Error::NoDispatch { .. }
+                        | Error::Unknowable { .. }
+                        | Error::Budget
+                        | Error::NotCompiled(_)
+                );
+                if !refusal || scope.fibers().current.is_none() {
+                    return Err(unhandled);
+                }
+                if leave_fiber(scope, stack, frames, FiberExit::Value(Value::NIL)).is_err() {
+                    return Err(unhandled);
+                }
+                error = unhandled;
+            }
+        }
+    }
+}
+
+/// End the innermost refusal boundary's block with `error`'s reason as its
+/// value, or answer `error` when no boundary is open.
+///
+/// The ending is a `return` aimed at the boundary's frame: every `ensure` on
+/// the way out runs — mspec's output matchers put `$stdout` back in one — and
+/// no `rescue` matches, because it is not an exception. The boundary stops
+/// being one first, so an `ensure` that runs out of budget too answers to the
+/// boundary outside it rather than to this one again.
+fn catch_refusal(
+    scope: &mut HandleScope<'_>,
+    frames: &mut [Call],
+    boundaries: &mut Vec<Boundary>,
+    error: Error,
+) -> Result<Unwind, Error> {
+    if !matches!(
+        error,
+        Error::NoDispatch { .. } | Error::Unknowable { .. } | Error::Budget | Error::NotCompiled(_)
+    ) {
+        return Err(error);
+    }
+    prune_boundaries(scope, frames, boundaries);
+    let fiber = scope.fibers().current;
+    let Some(position) = boundaries.iter().rposition(|b| b.fiber == fiber) else {
+        return Err(error);
+    };
+    let Boundary { index, id, .. } = boundaries.remove(position);
+    frames[index].boundary_limit = 0;
+    let reason = string_new(scope, &error.to_string());
+    Ok(Unwind::Return {
+        frame: id,
+        value: reason,
+    })
 }
 
 /// Walk out through the frames until something wants this unwind.
@@ -3624,6 +3796,7 @@ fn push_frame(
         owner: call.owner,
         defined_as: call.defined_as,
         parked: Vec::new(),
+        boundary_limit: 0,
     });
     Ok(())
 }
@@ -4725,6 +4898,7 @@ fn open_class<'h>(
         rescued: None,
         errinfo_on_entry: scope.errinfo(),
         parked: Vec::new(),
+        boundary_limit: 0,
     });
     // A new definition's hooks run before its body: each is a frame above the
     // body's, pushed last-first so they run in order.
@@ -7412,6 +7586,23 @@ fn native_call<'h>(
             Ok(None)
         }
 
+        Native::IntToSRadix => {
+            let n = crate::bignum::read(scope, call.receiver)
+                .or_else(|| call.receiver.as_fixnum().map(num_bigint::BigInt::from));
+            let base = call.args.first().and_then(|v| v.as_fixnum());
+            let (Some(n), Some(base @ 2..=36)) = (n, base) else {
+                return Err(Error::NoDispatch {
+                    op: "Integer#to_s",
+                    operands: "a receiver that is not an Integer, or a radix outside 2..36",
+                });
+            };
+            let digits = n.to_str_radix(base as u32);
+            let class = class_handle(scope, Builtin::String);
+            let value = string_alloc(scope, class, digits.as_bytes(), crate::strings::US_ASCII);
+            stack.push(value);
+            Ok(None)
+        }
+
         Native::IntPow => {
             let Some(base) = call.receiver.as_fixnum() else {
                 return Err(Error::NoDispatch {
@@ -7444,6 +7635,14 @@ fn native_call<'h>(
                     operands: "an exponent too large to allocate a result for",
                 });
             };
+            // CRuby 3.4 refuses a result past 16G bits up front, rather than
+            // trying to allocate it. Measured: `100000000 ** 1000000000` is an
+            // ArgumentError, `2 ** 40000000` an Integer.
+            const LIMIT_BITS: u64 = 16 << 30;
+            let base_bits = u64::from(64 - base.unsigned_abs().leading_zeros());
+            if base_bits > 1 && base_bits.saturating_mul(u64::from(exponent)) > LIMIT_BITS {
+                return Err(Error::raise("ArgumentError", "exponent is too large"));
+            }
             let answer = num_bigint::BigInt::from(base).pow(exponent);
             let value = crate::bignum::value(scope, &answer);
             stack.push(value);
@@ -8037,6 +8236,27 @@ fn native_call<'h>(
 
         Native::Binding(op) => binding_native(scope, stack, frames, &call, op, ids),
         Native::LoadFile => load_file(scope, stack, frames, &call, ids),
+        Native::RefusalBoundary => {
+            let limit = call.args.first().and_then(|v| v.as_fixnum()).unwrap_or(0);
+            if call.block == Value::NIL || limit <= 0 {
+                return Err(Error::raise(
+                    "ArgumentError",
+                    "a refusal boundary takes a positive budget and a block",
+                ));
+            }
+            let block = call.block;
+            let inner = Pending {
+                args: Vec::new(),
+                keywords: Vec::new(),
+                block: Value::NIL,
+                block_is_literal: false,
+                ..call
+            };
+            push_proc_frame(scope, stack, frames, &inner, block, ids)?;
+            let last = frames.len() - 1;
+            frames[last].boundary_limit = limit as u64;
+            Ok(None)
+        }
         Native::Getenv => {
             let value = match call.args.first().and_then(|&v| string_bytes(scope, v)) {
                 Some(name) if !name.is_empty() && !name.contains(&b'=') && !name.contains(&0) => {
@@ -8097,6 +8317,11 @@ fn native_call<'h>(
             let values: Vec<Value> = values.into_iter().map(|h| scope.get(h)).collect();
             let value = new_array(scope, &values);
             stack.push(value);
+            Ok(None)
+        }
+        Native::MarkPartial => {
+            scope.mark_partial();
+            stack.push(Value::NIL);
             Ok(None)
         }
         Native::FreezeGlobal => {
@@ -9562,6 +9787,7 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         (Builtin::Integer, &[">>"], Native::IntBits(BitOp::Shr)),
         (Builtin::Integer, &["~"], Native::IntBits(BitOp::Not)),
         (Builtin::Integer, &["**"], Native::IntPow),
+        (Builtin::Integer, &["__to_s_radix__"], Native::IntToSRadix),
         (
             Builtin::Symbol,
             &["to_s", "id2name"],
@@ -9698,6 +9924,14 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             Native::Refuse {
                 what: "writing to `$stderr`",
                 needs: "`IO` (#41)",
+            },
+        ),
+        (
+            Builtin::Kernel,
+            &["__needs_io__"],
+            Native::Refuse {
+                what: "a `File` opened for writing",
+                needs: "`IO` and `File` (#41)",
             },
         ),
         (Builtin::Kernel, &["__hash_combine__"], Native::HashCombine),
@@ -9914,10 +10148,16 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         (Builtin::Kernel, &["__load_file__"], Native::LoadFile),
         (
             Builtin::Kernel,
+            &["__refusal_boundary__"],
+            Native::RefusalBoundary,
+        ),
+        (
+            Builtin::Kernel,
             &["__freeze_global__"],
             Native::FreezeGlobal,
         ),
         (Builtin::Kernel, &["__argv__"], Native::Argv),
+        (Builtin::Kernel, &["__mark_partial__"], Native::MarkPartial),
         (
             Builtin::Kernel,
             &["__ruby_constants__"],
@@ -9938,6 +10178,11 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         ),
         (Builtin::Kernel, &["__fs_chdir__"], Native::Fs(FsOp::Chdir)),
         (Builtin::Kernel, &["__fs_read__"], Native::Fs(FsOp::Read)),
+        (
+            Builtin::Kernel,
+            &["__fs_children__"],
+            Native::Fs(FsOp::Children),
+        ),
         (
             Builtin::Kernel,
             &["__fs_isatty__"],
@@ -10609,6 +10854,18 @@ fn negate(scope: &mut HandleScope<'_>, value: Value) -> Result<Value, Error> {
 /// compares a matcher's two sides with it — so the harness cannot pass an
 /// example the VM would fail.
 pub fn ruby_eq(scope: &mut HandleScope<'_>, left: Value, right: Value) -> Result<bool, Error> {
+    ruby_eq_in(scope, left, right, &mut Vec::new())
+}
+
+/// [`ruby_eq`], with the pairs of arrays it is part-way through comparing: a
+/// pair met again is equal so far, which is how `Array#==` ends on an array
+/// that contains itself rather than recursing until the Rust stack runs out.
+fn ruby_eq_in(
+    scope: &mut HandleScope<'_>,
+    left: Value,
+    right: Value,
+    comparing: &mut Vec<(Value, Value)>,
+) -> Result<bool, Error> {
     // Bitwise equality is exactly Ruby's `equal?` for immediates, which is why
     // #6 excluded NaN and -0.0 from the flonum range. It settles most pairs —
     // but not for an object whose class may define its own `==`: identical
@@ -10691,12 +10948,18 @@ pub fn ruby_eq(scope: &mut HandleScope<'_>, left: Value, right: Value) -> Result
             if array_len(scope, a) != array_len(scope, b) {
                 return Ok(false);
             }
+            if comparing.contains(&(left, right)) {
+                return Ok(true);
+            }
+            comparing.push((left, right));
             for index in 0..array_len(scope, a) {
                 let (x, y) = (array_get(scope, a, index), array_get(scope, b, index));
-                if !ruby_eq(scope, x, y)? {
+                if !ruby_eq_in(scope, x, y, comparing)? {
+                    comparing.pop();
                     return Ok(false);
                 }
             }
+            comparing.pop();
             Ok(true)
         }
         // A class object, or anything else whose `==` is a method that does not
@@ -12097,6 +12360,25 @@ fn fs_native(
             }
             let out: Vec<Value> = out.into_iter().map(|h| scope.get(h)).collect();
             new_array(scope, &out)
+        }
+        FsOp::Children => {
+            let path = path_arg(scope, call, 0)?;
+            match std::fs::read_dir(&path) {
+                Ok(entries) => {
+                    let mut names: Vec<std::ffi::OsString> = entries
+                        .filter_map(|e| e.ok().map(|e| e.file_name()))
+                        .collect();
+                    names.sort();
+                    let mut values = Vec::with_capacity(names.len());
+                    for name in names {
+                        let value = os_string(scope, name);
+                        values.push(scope.root(value));
+                    }
+                    let values: Vec<Value> = values.into_iter().map(|h| scope.get(h)).collect();
+                    new_array(scope, &values)
+                }
+                Err(error) => errno_value(&error),
+            }
         }
         FsOp::Read => {
             let path = path_arg(scope, call, 0)?;
