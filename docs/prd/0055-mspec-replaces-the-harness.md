@@ -91,9 +91,12 @@ The whole corpus, 3835 files:
 |---|---:|---:|---:|---:|---:|
 | `spec/harness` | 25624 | 7335 | 0 | 16272 | 2017 |
 | mspec, PRD 0054 | 25517 | 13423 | 351 | 11743 | — |
-| mspec, this slice | 30900 | **14186** | **0** | 16412 | 302 |
+| mspec, this slice | 30902 | **14186** | **0** | 16414 | 302 |
 
-`examples` counts skipped ones too, as the harness did. The harness skipped
+`examples` counts skipped ones too, as the harness did. The counts are CI's:
+a machine without IPv6 skips two `library/socket` examples behind
+`SocketSpecs.ipv6_available?`, which is why `bench/spec-status.md` is
+generated on CI's Linux. The harness skipped
 2017 examples it could not expand (`it_behaves_like`, `eval`, runtime `if`);
 mspec runs them all. Blocked rose by the groups that used to vanish while
 loading, 307 examples. Of the 351, most were fixed and the rest tagged: tags
