@@ -215,6 +215,12 @@ class Integer
   # positive one exactly.
   def bit_length
     n = self < 0 ? ~self : self
+    # A bignum by its hex digits: shifting one bit at a time allocates a new
+    # bignum per bit, and `2 ** 40000000` has forty million of them.
+    if n > 0xFFFF_FFFF
+      hex = n.to_s(16)
+      return (hex.size - 1) * 4 + hex[0].to_i(16).bit_length
+    end
     count = 0
     while n > 0
       n = n >> 1
@@ -378,17 +384,8 @@ class Integer
     if base < 2 || base > 36
       raise ArgumentError, "invalid radix " + base.to_s
     end
-    # US-ASCII, measured; digits appended least significant first and the
-    # buffer reversed once, rather than prepending a copy per digit.
-    out = "".b.__force_encoding__(2)
-    return out << "0" if self == 0
-    n = abs
-    while n > 0
-      out << DIGITS[n % base]
-      n = n / base
-    end
-    out << "-" if self < 0
-    out.reverse
+    # US-ASCII, measured.
+    __to_s_radix__(base)
   end
 
   def inspect

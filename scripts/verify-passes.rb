@@ -23,6 +23,11 @@ require "open3"
 require "tmpdir"
 
 ROOT = File.expand_path("..", __dir__)
+
+# What mspec sets for the processes it runs, and the harness sets in every
+# heap: without it `spec_helper.rb` loads mspec itself from `spec/mspec` —
+# present since #145 — and mspec's `describe`/`it` replace this script's.
+ENV["MSPEC_RUNNER"] = "1"
 HARNESS = File.join(ROOT, "target", "release", "spec-harness")
 
 abort "build the harness first: cargo build --release -p spec-harness" unless File.executable?(HARNESS)

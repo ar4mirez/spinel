@@ -180,6 +180,20 @@ fn a_program_sees_its_arguments_and_sets_its_exit_status() {
     assert_eq!(stderr(&out), "to stderr\n");
 }
 
+/// A method this build cannot compile does not stop the file: the program runs
+/// until it calls the method, and then says which construct is missing (#145).
+#[test]
+fn an_uncompiled_method_refuses_only_when_it_is_called() {
+    let out = spinel(&["run", &fixture("run/refuses_late.rb")]);
+    assert!(!out.status.success(), "the call should end the program");
+    assert_eq!(stdout(&out), "before\n", "what ran before the call is kept");
+    assert!(
+        stderr(&out).contains("a rational or complex literal is not compiled yet"),
+        "the refusal names the construct: {}",
+        stderr(&out)
+    );
+}
+
 /// A bare file argument is the same as `run`, because that is what a Ruby
 /// developer types.
 #[test]

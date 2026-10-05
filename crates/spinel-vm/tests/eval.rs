@@ -108,12 +108,16 @@ fn a_construct_this_slice_does_not_compile_is_an_error_never_a_guess() {
         // binds, and this one binds none, so there is no slot for the argument
         // to land in. Every other shape compiles since #209. See
         // `Compiler::spec_from_list`.
-        "proc { |(*), c| }",
+        //
+        // Since #145 a block or method body that does not compile becomes one
+        // that refuses when it runs, so the rest of its file still runs; the
+        // property is now that *running* it is an error, never a value.
+        "proc { |(*), c| }.call(1, 2)",
     ] {
-        let parsed = spinel_parse::parse(source.as_bytes());
+        let outcome = eval(source);
         assert!(
-            compile::program(&parsed.program).is_err(),
-            "{source:?} compiled, but this slice cannot mean it"
+            outcome.is_err(),
+            "{source:?} answered {outcome:?}, but this slice cannot mean it"
         );
     }
 }
