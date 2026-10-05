@@ -1,0 +1,1 @@
+fails(#268: Spinel prints no warnings yet, and this example expects one):The if expression with a boolean range ('flip-flop' operator) warns when Integer literals are used instead of predicates

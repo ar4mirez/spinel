@@ -120,8 +120,9 @@ class Hash
   # `h`. Silently, with the right-looking answer for every read.
   #
   # ponytail: `dup` and `clone` are overridden to call this because
-  # `Kernel#dup` does not call `initialize_copy` yet (#201). When it does, both
-  # overrides delete and this method stays exactly as it is.
+  # `Kernel#clone` does not call `initialize_copy` yet (#201); `Kernel#dup`
+  # does since #145. When both do, both overrides delete and this method
+  # stays exactly as it is.
   def initialize_copy(other)
     pairs = []
     other.each_pair { |key, value| pairs.push([key, value]) }
@@ -361,6 +362,9 @@ class Hash
     values.include?(value)
   end
 
+  # The implicit conversion: the receiver, a subclass's included. Measured.
+  def to_hash = self
+
   # `to_h` hands the block the key and the value as two arguments, where
   # Enumerable's would hand it the one pair. Without a block it answers the
   # receiver itself, not a copy. Measured.
@@ -392,21 +396,21 @@ class Hash
   # Enumerable would build. Hash overrides exactly these three — `find_all`,
   # `filter_map`, `map` and `partition` all still answer Arrays. Measured.
   def select
-    return to_enum(:select) unless block_given?
+    return to_enum(:select) { size } unless block_given?
     out = __like_self__
     each_pair { |pair| out[pair[0]] = pair[1] if yield(pair[0], pair[1]) }
     out
   end
 
   def filter
-    return to_enum(:filter) unless block_given?
+    return to_enum(:filter) { size } unless block_given?
     out = __like_self__
     each_pair { |pair| out[pair[0]] = pair[1] if yield(pair[0], pair[1]) }
     out
   end
 
   def reject
-    return to_enum(:reject) unless block_given?
+    return to_enum(:reject) { size } unless block_given?
     out = __like_self__
     each_pair { |pair| out[pair[0]] = pair[1] unless yield(pair[0], pair[1]) }
     out
@@ -425,25 +429,25 @@ class Hash
   # gets its two locals from the block's own auto-splat rather than from here.
   # Yielding two would leave the first shape holding only the key.
   def each
-    return to_enum(:each) unless block_given?
+    return to_enum(:each) { size } unless block_given?
     @__pairs__.each { |pair| yield pair }
     self
   end
 
   def each_pair
-    return to_enum(:each_pair) unless block_given?
+    return to_enum(:each_pair) { size } unless block_given?
     @__pairs__.each { |pair| yield pair }
     self
   end
 
   def each_key
-    return to_enum(:each_key) unless block_given?
+    return to_enum(:each_key) { size } unless block_given?
     keys.each { |key| yield key }
     self
   end
 
   def each_value
-    return to_enum(:each_value) unless block_given?
+    return to_enum(:each_value) { size } unless block_given?
     values.each { |value| yield value }
     self
   end
@@ -623,21 +627,21 @@ class Hash
   # while `delete_if` and `keep_if` always answer self. That is the only
   # difference between the two pairs, and it is measured rather than guessed.
   def reject!(&block)
-    return to_enum(:reject!) if block.nil?
+    return to_enum(:reject!) { size } if block.nil?
     __check_frozen__
     removed = __remove_where__(block, true)
     removed ? self : nil
   end
 
   def delete_if(&block)
-    return to_enum(:delete_if) if block.nil?
+    return to_enum(:delete_if) { size } if block.nil?
     __check_frozen__
     __remove_where__(block, true)
     self
   end
 
   def select!(&block)
-    return to_enum(:select!) if block.nil?
+    return to_enum(:select!) { size } if block.nil?
     __check_frozen__
     removed = __remove_where__(block, false)
     removed ? self : nil
@@ -648,7 +652,7 @@ class Hash
   end
 
   def keep_if(&block)
-    return to_enum(:keep_if) if block.nil?
+    return to_enum(:keep_if) { size } if block.nil?
     __check_frozen__
     __remove_where__(block, false)
     self
@@ -814,11 +818,26 @@ class Hash
       i = 0
       while i < pairs.size
         out << ", " if i > 0
-        out << pairs[i][0].inspect << " => " << pairs[i][1].inspect
+        key = pairs[i][0]
+        if key.is_a?(Symbol)
+          out << Hash.__symbol_key__(key) << " " << pairs[i][1].inspect
+        else
+          out << key.inspect << " => " << pairs[i][1].inspect
+        end
         i += 1
       end
       out << "}"
     end
+  end
+
+  # Ruby 3.4's form for a Symbol key: `name:` when the name is a plain
+  # identifier the default external encoding can show, and a quoted
+  # `"name":` otherwise. Measured.
+  def self.__symbol_key__(key)
+    name = key.to_s
+    plain = name.match?(/\A[A-Za-z_\u0080-\u{10FFFF}][A-Za-z0-9_\u0080-\u{10FFFF}]*[?!]?\z/) &&
+            (name.ascii_only? || Encoding.default_external == name.encoding)
+    plain ? "#{name}:" : "#{name.inspect}:"
   end
 
   def to_s

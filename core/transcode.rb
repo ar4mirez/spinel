@@ -71,7 +71,12 @@ class String
       end
     text = __decorate_source__(self, source, options)
     if target.equal?(source) && options[:invalid] != :replace
-      result = text.dup
+      xml = options[:xml]
+      if xml && !(xml == :text || xml == :attr)
+        raise ArgumentError, "unexpected value for xml option: #{xml.inspect}"
+      end
+      # `xml:` escapes even when nothing is transcoded. Measured.
+      result = xml ? String.__escape_xml__(text, xml) : text.dup
       result = __decorate_output__(result, options)
       return result.force_encoding(target)
     end

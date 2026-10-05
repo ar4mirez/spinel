@@ -1,0 +1,1 @@
+fails(#268: Spinel prints no warnings yet, and this example expects one):Enumerable#any? when given a pattern argument ignores the block if there is an argument

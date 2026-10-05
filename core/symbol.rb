@@ -23,7 +23,11 @@ class Symbol
   # it becomes one, the fix is a primitive, not a public constant.
   def inspect
     name = to_s
-    bare = /\A(?:[[:alpha:]_][[:alnum:]_]*[?!=]?|@@?[[:alpha:]_][[:alnum:]_]*|\$(?:[[:alpha:]_][[:alnum:]_]*|[0-9]+))\z/.match?(name) ||
+    # A name is bare when it could be written as a symbol literal: an
+    # identifier (any non-ASCII character counts as a letter), an instance or
+    # class variable, a global — including the one-character specials and `$-w`
+    # style flags — or an operator. Measured.
+    bare = /\A(?:[A-Za-z_\u0080-\u{10FFFF}][A-Za-z0-9_\u0080-\u{10FFFF}]*[?!=]?|@@?[A-Za-z_\u0080-\u{10FFFF}][A-Za-z0-9_\u0080-\u{10FFFF}]*|\$(?:[A-Za-z_\u0080-\u{10FFFF}][A-Za-z0-9_\u0080-\u{10FFFF}]*|[0-9]+|[~*$?!@\/\\;,.=:<>"&`'+0]|-[A-Za-z0-9_]))\z/.match?(name) ||
            ["+", "-", "*", "/", "%", "**", "==", "!=", ">", ">=", "<", "<=",
             "<=>", "===", "=~", "!~", "!", "~", "[]", "[]=", "<<", ">>", "&",
             "|", "^", "+@", "-@", "`"].include?(name)

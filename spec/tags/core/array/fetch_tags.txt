@@ -1,0 +1,2 @@
+fails(#268: Spinel prints no warnings yet, and this example expects one):Array#fetch gives precedence to the default block over the default argument
+fails(#21: an Array edge case newly visible under mspec: pack's nibble and count rules for H, h, m and U, and to_ary or Integer conversion details):Array#fetch passes the original index argument object to the block, not the converted Integer

@@ -1,0 +1,1 @@
+fails(#18: with_index converts a Float offset with to_int, which Float does not have yet):Enumerator#with_index coerces the given numeric argument to an Integer

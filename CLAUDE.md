@@ -26,6 +26,6 @@ Read `README.md`, then `docs/engine.md` if touching the VM, or the subsystem doc
 ```sh
 cargo build --release          # target/release/spinel
 cargo test                     # Rust unit tests + tooling integration tests
-scripts/spec.sh [dir]          # ruby/spec: spec/harness before phase 2, mspec on Spinel after (submodule: spec/ruby)
+scripts/spec.sh [dir]          # ruby/spec under mspec, running on Spinel (submodules: spec/ruby, spec/mspec)
 scripts/bench.sh               # bench/ benchmarks; --ruby compares against system ruby --yjit
 ```

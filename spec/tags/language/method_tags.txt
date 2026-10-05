@@ -1,0 +1,4 @@
+fails(#268: Spinel prints no warnings yet, and this example expects one):warning about not used block argument warns when passing a block argument to a method that never uses it
+fails(#268: Spinel prints no warnings yet, and this example expects one):warning about not used block argument warns when passing a block argument to a method that calls #block_given?
+fails(#268: Spinel prints no warnings yet, and this example expects one):warning about not used block argument warns only once per call site
+fails(#268: Spinel prints no warnings yet, and Kernel#warn does not take every form):warning about not used block argument can be disabled with :strict_unused_block warning category

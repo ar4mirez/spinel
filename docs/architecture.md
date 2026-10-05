@@ -82,9 +82,10 @@ stdlib/                    vendored pure-Ruby stdlib: ruby/ruby `lib/` at a pinn
 shims/                     setup.rb, test_worker.rb, gemfile_eval.rb
 spec/
   ruby/                    git submodule: ruby/spec
+  mspec/                   git submodule: ruby/mspec, the runner, which runs on Spinel
+  spinel.mspec, spinel/    mspec's configuration and formatter for Spinel; verify.mspec is the same corpus on a real Ruby
   tags/                    skipped specs with reasons
-  harness/                 minimal runner used before mspec itself runs on Spinel (a workspace member, and the only crate outside crates/: it ships to nobody and is deleted in phase 2)
-scripts/                   spec.sh, spec-status.sh, bench.sh, release.sh, vendor-stdlib.sh
+scripts/                   spec.sh, spec-report.sh, spec-status.sh, verify-passes.rb, bench.sh, release.sh, vendor-stdlib.sh
 crates/spinel-cli/tests/   tooling integration tests + fixtures/
 bench/                     engine benchmarks (method_cache, regex_captures) and spec-status.md, the CI-generated progress bar; the yjit-bench subset joins them in phase 3
 docs/

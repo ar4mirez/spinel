@@ -668,7 +668,7 @@ class Enumerator
 
     def each(&block)
       raise ArgumentError, "uninitialized product" if @sources.nil?
-      return to_enum(:each) if block.nil?
+      return to_enum(:each) { size } if block.nil?
       __walk__(0, [], block)
       self
     end

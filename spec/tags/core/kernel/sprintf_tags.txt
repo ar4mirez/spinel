@@ -1,1 +1,1 @@
-fails(#19: `Kernel#sprintf` is `String#%`, which is the String slice):Kernel.sprintf is a public method
+fails(#268: Spinel prints no warnings yet, and this example expects one):Kernel#sprintf when $VERBOSE is true warns if too many arguments are passed

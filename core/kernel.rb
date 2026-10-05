@@ -1,8 +1,8 @@
 # Kernel — the methods every object has.
 #
 # `send`, `raise`, `throw`, `catch`, `block_given?`, `proc`, `lambda`, `class`,
-# `equal?`, `nil?`, `dup`, `freeze`, `frozen?`, `object_id` and `__write__` are
-# primitives: each is dispatch, an allocation, a header bit, or a syscall.
+# `equal?`, `nil?`, `__dup__` (the copy under `dup`), `freeze`, `frozen?`,
+# `object_id` and `__write__` are primitives: each is dispatch, an allocation, a header bit, or a syscall.
 # Everything below is Ruby, because Ruby can say it.
 module Kernel
   # The same object first, whatever `==` and `equal?` say — CRuby's
@@ -322,6 +322,16 @@ module Kernel
     raise FrozenError.new("can't modify frozen #{object.class}: #{object.inspect}", receiver: object)
   end
 
+  # The copy is the primitive's; what it means for the class is
+  # `initialize_copy`'s, which a program overrides — mspec's `ContextState`
+  # drops its cached hook lists there, and a copy that skipped it ran one
+  # shared group's hooks for the next.
+  def dup
+    copy = __dup__
+    copy.__send__(:initialize_dup, self) unless copy.equal?(self)
+    copy
+  end
+  
   def initialize_dup(original)
     initialize_copy(original)
   end
@@ -492,7 +502,9 @@ module Kernel
   def abort(message = nil)
     return raise(SystemExit.new(1, "exit")) if message.nil?
     raise TypeError, "no implicit conversion of #{message.class} into String" unless String === message || message.respond_to?(:to_str)
-    __needs_stderr__
+    message = message.to_str unless String === message
+    $stderr.puts(message)
+    raise SystemExit.new(1, message)
   end
 
   def exit!(status = false)

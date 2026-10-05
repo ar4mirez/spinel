@@ -124,6 +124,8 @@ $stderr = STDERR
 alias $> $stdout
 # `-W1`, which is the default: `warn` prints, and verbose-only warnings do not.
 $VERBOSE = false
+alias $-v $VERBOSE
+alias $-w $VERBOSE
 # The input record separator: what `gets` and `each_line` split on.
 $/ = "\n"
 

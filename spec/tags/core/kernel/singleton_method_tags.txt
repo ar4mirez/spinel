@@ -1,0 +1,2 @@
+fails(#27: Method objects from method, public_method and singleton_method, and super through an aliased one):Kernel#singleton_method only looks at singleton methods and not at methods in the class
+fails(#27: Method objects from method, public_method and singleton_method, and super through an aliased one):Kernel#singleton_method raises a NameError if there is no such method

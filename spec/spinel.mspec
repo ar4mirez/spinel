@@ -17,6 +17,13 @@ class MSpecScript
     [/_spec\.rb$/, "_tags.txt"],
   ]
   set :xtags, ["fails"]
+
+  # `SPINEL_SPEC_TAGGED=1` runs only the tagged examples instead: one that
+  # passes is a tag to delete.
+  if ENV["SPINEL_SPEC_TAGGED"]
+    set :xtags, []
+    set :tags, ["fails"]
+  end
 end
 
 require_relative "spinel/runner"

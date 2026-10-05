@@ -1,0 +1,1 @@
+fails(#21: an Array edge case newly visible under mspec: pack's nibble and count rules for H, h, m and U, and to_ary or Integer conversion details):Array#pack with format 'm' implicitly has a count of 45 when passed '*', 1, 2 or no count modifier

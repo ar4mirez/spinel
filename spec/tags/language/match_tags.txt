@@ -1,1 +1,0 @@
-fails(#145: the example reads @obj, which the previous group's before hook sets; mspec runs every group on one object so it carries over, and the harness gives each example a fresh one):The =~ operator calls the =~ method

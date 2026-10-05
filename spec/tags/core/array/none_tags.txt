@@ -1,0 +1,1 @@
+fails(#268: Spinel prints no warnings yet, and this example expects one):Array#none? ignores the block if there is an argument

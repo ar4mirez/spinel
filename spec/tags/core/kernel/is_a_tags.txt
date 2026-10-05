@@ -1,1 +1,0 @@
-fails(#19: `new` on a String subclass does not run its Ruby `initialize`, so the fixture never reaches the `extend` it makes there):Kernel#is_a? returns true if given a Module that object has been extended with

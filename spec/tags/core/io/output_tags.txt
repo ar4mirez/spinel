@@ -1,0 +1,1 @@
+fails(#41: File and IO here are a read-only stand-in that does not track $. or $_, honour open modes, or transcode):IO#<< returns self

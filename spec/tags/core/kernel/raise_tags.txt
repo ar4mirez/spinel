@@ -1,0 +1,2 @@
+fails(#29: raise with only an exception class, and a nil :cause on a re-raise):Kernel#raise passes no arguments to the constructor when given only an exception class
+fails(#29: raise with only an exception class, and a nil :cause on a re-raise):Kernel#raise with previously rescued exception re-raises a previously rescued exception without overwriting the cause when it's explicitly specified with a :cause option that has nil value

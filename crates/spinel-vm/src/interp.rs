@@ -9111,6 +9111,16 @@ fn native_call<'h>(
             }
             let value = new_array(scope, &defined);
             stack.push(value);
+            // `method_added` for each, as a `def` fires it. Each hook is a
+            // frame and the last pushed runs first, so they go on in reverse
+            // to run in definition order. Measured.
+            for name in defined.iter().rev().filter_map(|v| v.as_symbol()) {
+                if let Some(unwind) =
+                    fire_method_hook(scope, stack, frames, proc_class, ids, owner, "added", name)?
+                {
+                    return Ok(Some(unwind));
+                }
+            }
             Ok(None)
         }
 
@@ -9706,7 +9716,7 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         ),
         (
             Builtin::Module,
-            &["attr_accessor", "attr"],
+            &["attr_accessor"],
             Native::AttrDefine {
                 reader: true,
                 writer: true,
@@ -9761,7 +9771,11 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         (Builtin::Array, &["at"], Native::ArrayIndexSingle),
         (Builtin::Array, &["[]="], Native::ArrayStore),
         (Builtin::Array, &["size", "length"], Native::ArraySize),
-        (Builtin::Array, &["push", "append"], Native::ArrayPush),
+        (
+            Builtin::Array,
+            &["push", "append", "__append__"],
+            Native::ArrayPush,
+        ),
         (Builtin::Array, &["pop"], Native::ArrayPop),
         (
             Builtin::String,
@@ -9776,7 +9790,7 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         (Builtin::String, &["+"], Native::StringConcat),
         (Builtin::String, &["*"], Native::StringRepeat),
         (Builtin::Class, &["allocate"], Native::Allocate),
-        (Builtin::Kernel, &["dup"], Native::Dup),
+        (Builtin::Kernel, &["__dup__"], Native::Dup),
         (Builtin::Kernel, &["freeze"], Native::Freeze),
         (Builtin::Kernel, &["frozen?"], Native::FrozenP),
         (Builtin::Kernel, &["object_id", "__id__"], Native::ObjectId),
@@ -9916,14 +9930,6 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             Native::Refuse {
                 what: "`clone` of an object with singleton methods",
                 needs: "`Kernel#clone` (#201)",
-            },
-        ),
-        (
-            Builtin::Kernel,
-            &["__needs_stderr__"],
-            Native::Refuse {
-                what: "writing to `$stderr`",
-                needs: "`IO` (#41)",
             },
         ),
         (
@@ -10203,6 +10209,11 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             Builtin::Kernel,
             &["__sys_clock_ids__"],
             Native::Sys(SysOp::ClockIds),
+        ),
+        (
+            Builtin::Kernel,
+            &["__sys_process_constants__"],
+            Native::Sys(SysOp::ProcessConstants),
         ),
         (
             Builtin::Kernel,
@@ -10821,7 +10832,15 @@ fn float_op(op: BinOp, a: f64, b: f64) -> Result<Value, Error> {
             if b == 0.0 {
                 return Err(Error::raise("ZeroDivisionError", "divided by 0"));
             }
-            float(a - b * (a / b).floor())
+            // CRuby's `flodivmod`: `fmod`, which is exact, then the divisor's
+            // sign. `a - b * floor(a / b)` loses the remainder once `a / b`
+            // passes 2^53 — `2**70 % 3.0` came out 0.0 rather than 1.0.
+            let modulus = a % b;
+            float(if b * modulus < 0.0 {
+                modulus + b
+            } else {
+                modulus
+            })
         }
         BinOp::Lt => Ok(bool_value(a < b)),
         BinOp::Le => Ok(bool_value(a <= b)),
@@ -12441,11 +12460,8 @@ fn load_file(
             });
         }
     };
-    let iseq = match crate::compile::program(&program) {
-        Ok(iseq) => Arc::new(Iseq {
-            name: "<top (required)>".into(),
-            ..iseq
-        }),
+    let iseq = match crate::compile::program_as(&program, "<top (required)>") {
+        Ok(iseq) => Arc::new(iseq),
         Err(unsupported) => {
             return Err(Error::Unknowable {
                 what: unsupported.node,
@@ -12561,6 +12577,50 @@ fn sys_native(
                 let errno = std::io::Error::last_os_error();
                 errno_value(&errno)
             }
+        }
+        SysOp::ProcessConstants => {
+            // The rlimit resources are an `int` on some libcs and an unsigned
+            // enum on glibc; the limits are `rlim_t`. Every value is small or
+            // `RLIM_INFINITY`, which fits a fixnum's 62 bits only as a bignum,
+            // so the values go through `bignum::value`.
+            // `mut` only where the Linux-only pair below is added.
+            #[allow(clippy::unnecessary_cast)]
+            #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
+            let mut pairs: Vec<(&str, i128)> = vec![
+                ("WNOHANG", libc::WNOHANG as i128),
+                ("WUNTRACED", libc::WUNTRACED as i128),
+                ("PRIO_PROCESS", libc::PRIO_PROCESS as i128),
+                ("PRIO_PGRP", libc::PRIO_PGRP as i128),
+                ("PRIO_USER", libc::PRIO_USER as i128),
+                ("RLIMIT_CPU", libc::RLIMIT_CPU as i128),
+                ("RLIMIT_FSIZE", libc::RLIMIT_FSIZE as i128),
+                ("RLIMIT_DATA", libc::RLIMIT_DATA as i128),
+                ("RLIMIT_STACK", libc::RLIMIT_STACK as i128),
+                ("RLIMIT_CORE", libc::RLIMIT_CORE as i128),
+                ("RLIMIT_RSS", libc::RLIMIT_RSS as i128),
+                ("RLIMIT_NPROC", libc::RLIMIT_NPROC as i128),
+                ("RLIMIT_NOFILE", libc::RLIMIT_NOFILE as i128),
+                ("RLIMIT_MEMLOCK", libc::RLIMIT_MEMLOCK as i128),
+                ("RLIMIT_AS", libc::RLIMIT_AS as i128),
+                ("RLIM_INFINITY", libc::RLIM_INFINITY as i128),
+            ];
+            #[cfg(target_os = "linux")]
+            pairs.extend([
+                ("RLIM_SAVED_MAX", libc::RLIM_SAVED_MAX as i128),
+                ("RLIM_SAVED_CUR", libc::RLIM_SAVED_CUR as i128),
+            ]);
+            let mut out = Vec::with_capacity(pairs.len());
+            for (name, value) in pairs {
+                let name = string_new(scope, name);
+                let name = scope.root(name);
+                let value = crate::bignum::value(scope, &num_bigint::BigInt::from(value));
+                let value = scope.root(value);
+                let (name, value) = (scope.get(name), scope.get(value));
+                let pair = new_array(scope, &[name, value]);
+                out.push(scope.root(pair));
+            }
+            let out: Vec<Value> = out.into_iter().map(|h| scope.get(h)).collect();
+            new_array(scope, &out)
         }
         SysOp::ClockIds => {
             let ids: &[(&str, libc::clockid_t)] = &[

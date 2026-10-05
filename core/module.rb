@@ -74,6 +74,15 @@ end
 # the same — measured. The VM's name can change once (an anonymous module
 # assigned to a constant), so the memo is checked against it.
 class Module
+  # Readers only, since Ruby 3 — except the obsolete `attr(name, true)`,
+  # which still makes a writer too. Measured.
+  def attr(*names)
+    if names.size == 2 && (names[1] == true || names[1] == false)
+      return names[1] ? attr_accessor(names[0]) : attr_reader(names[0])
+    end
+    attr_reader(*names)
+  end
+
   def name
     return nil if singleton_class?
     current = __name__

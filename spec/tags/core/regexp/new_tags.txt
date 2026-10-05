@@ -1,0 +1,7 @@
+fails(#268: Spinel prints no warnings yet, and this example expects one):Regexp.new given a String does not try to convert the second argument to Integer with #to_int method call
+fails(#268: Spinel prints no warnings yet, and this example expects one):Regexp.new given a String warns any non-Integer, non-nil, non-false second argument
+fails(#268: Spinel prints no warnings yet, and this example expects one):Regexp.new given a Regexp does not honour options given as additional arguments
+fails(#33: Regexp subclassing, string flags, US-ASCII source encoding, to_s option groups, and out-of-range numbered references):Regexp.new works by default for subclasses with overridden #initialize
+fails(#33: Regexp subclassing, string flags, US-ASCII source encoding, to_s option groups, and out-of-range numbered references):Regexp.new given a String accepts a String of supported flags as the second argument
+fails(#33: Regexp has no encoding yet, so an ASCII-only source keeps its literal's UTF-8 rather than becoming US-ASCII):Regexp.new given a String with escaped characters returns a Regexp with source String having US-ASCII encoding if only 7-bit ASCII characters are present regardless of the input String's encoding
+fails(#33: Regexp has no encoding yet, so an ASCII-only source keeps its literal's UTF-8 rather than becoming US-ASCII):Regexp.new given a String with escaped characters returns a Regexp with source String having US-ASCII encoding if UTF-8 escape sequences using only 7-bit ASCII are present

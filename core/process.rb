@@ -259,6 +259,14 @@ end
 # and signalling other processes is the rest of `Process`, which is #43.
 module Process
   __sys_clock_ids__.each { |name, id| const_set(name, id) }
+  __sys_process_constants__.each { |name, value| const_set(name, value) }
+
+  # `Process.exit` and friends are the Kernel functions on the module.
+  def self.exit(status = true) = Kernel.exit(status)
+  def self.exit!(status = false) = Kernel.exit!(status)
+  def self.abort(*message) = Kernel.abort(*message)
+  def self.fork(...) = __needs_process__
+  def self._fork = __needs_process__
 
   def self.pid = __sys_ids__[0]
   def self.ppid = __sys_ids__[1]

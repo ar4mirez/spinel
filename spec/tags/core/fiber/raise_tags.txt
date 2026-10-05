@@ -1,0 +1,4 @@
+fails(#16: Fiber#raise does not pass keyword arguments or an exception class alone through to the exception the way Kernel#raise does):Fiber#raise allows the message parameter to be a hash
+fails(#16: Fiber#raise does not pass keyword arguments or an exception class alone through to the exception the way Kernel#raise does):Fiber#raise allows extra keyword arguments for compatibility
+fails(#16: Fiber#raise does not pass keyword arguments or an exception class alone through to the exception the way Kernel#raise does):Fiber#raise passes no arguments to the constructor when given only an exception class
+fails(#16: Fiber#raise does not pass keyword arguments or an exception class alone through to the exception the way Kernel#raise does):Fiber#raise accepts error class with error message and backtrace information

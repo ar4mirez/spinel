@@ -1,0 +1,1 @@
+fails(#268: Spinel prints no warnings yet, and this example expects one):ENV.fetch warns on block and default parameter given
