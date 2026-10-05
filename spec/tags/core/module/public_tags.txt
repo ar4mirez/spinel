@@ -1,1 +1,2 @@
 fails(#39: the module fixtures stop at an `autoload` of a fixture file before they reach the methods this example reads — the `Object` methods exported to `Kernel` are defined after it):Module#public makes a private Object instance method public in Kernel
+fails(#28: a visibility change in a subclass to the same visibility copies the method, and a bare private inside a closure changes the enclosing scope):Module#public with argument does not clone method from the ancestor when setting to the same visibility in a child

@@ -1,0 +1,2 @@
+fails(#33: Regexp subclassing, string flags, US-ASCII source encoding, to_s option groups, and out-of-range numbered references):Regexp#to_s displays single group with same options as main regex as the main regex
+fails(#33: Regexp subclassing, string flags, US-ASCII source encoding, to_s option groups, and out-of-range numbered references):Regexp#to_s handles abusive option groups

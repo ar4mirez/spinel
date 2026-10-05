@@ -1,0 +1,1 @@
+fails(#268: Spinel prints no warnings yet, and this example expects one):Regexps with repetition does not treat {m,n}+ as possessive

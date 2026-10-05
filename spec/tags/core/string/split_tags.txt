@@ -1,0 +1,1 @@
+fails(#268: Spinel prints no warnings yet, and this example expects one):String#split with String when $; is not nil warns

@@ -1,2 +1,0 @@
-fails(#43: `Kernel#at_exit` is a process operation — exit statuses, at-exit hooks, child processes — which the runtime does not have yet):Kernel#at_exit is a private method
-fails(#43: `Kernel#at_exit` is a process operation — exit statuses, at-exit hooks, child processes — which the runtime does not have yet):Kernel.at_exit is a public method

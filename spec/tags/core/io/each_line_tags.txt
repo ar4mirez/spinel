@@ -1,0 +1,3 @@
+fails(#41: File and IO here are a read-only stand-in that does not track $. or $_, honour open modes, or transcode):IO#each_line with no separator does not change $_
+fails(#41: File and IO here are a read-only stand-in that does not track $. or $_, honour open modes, or transcode):IO#each_line with no separator makes line count accessible via $.
+fails(#41: File and IO here are a read-only stand-in that does not track $. or $_, honour open modes, or transcode):IO#each_line when passed a String containing one space as a separator does not change $_

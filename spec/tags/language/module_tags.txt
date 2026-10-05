@@ -1,0 +1,1 @@
+fails(#28: a module nested in an anonymous one is not renamed when the outer one is named):Assigning an anonymous module to a constant sets the name of contained modules when assigning a toplevel anonymous module

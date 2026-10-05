@@ -1,2 +1,0 @@
-fails(#38: `Kernel#local_variables` needs a Binding, which is string `eval`'s slice):Kernel#local_variables is a private method
-fails(#38: `Kernel#local_variables` needs a Binding, which is string `eval`'s slice):Kernel.local_variables is a public method

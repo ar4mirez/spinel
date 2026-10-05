@@ -91,7 +91,14 @@ const ERRINFO: &str = "$!";
 
 /// Compile a whole parsed file.
 pub fn program(program: &Program) -> Result<Iseq, Unsupported> {
-    let mut compiler = Compiler::new("<main>", &program.locals);
+    program_as(program, "<main>")
+}
+
+/// [`program`], for a file whose top level a backtrace names otherwise: a
+/// required or loaded one is `<top (required)>`, and its blocks are blocks
+/// in that.
+pub fn program_as(program: &Program, name: &str) -> Result<Iseq, Unsupported> {
+    let mut compiler = Compiler::new(name, &program.locals);
     compiler.source = Some(Arc::clone(&program.source));
     compiler.statements(&program.body, true)?;
     Ok(compiler.finish())
@@ -907,7 +914,16 @@ impl Compiler {
             self.locals.swap(at, slot);
             return u16::try_from(at).unwrap_or(u16::MAX);
         }
-        self.slot(&format!("{name} ({at})"))
+        // A repeat. Its fresh slot is appended, past any parameter Prism
+        // listed after the single `_`, so it is moved into binder position
+        // the same way: `|_, _, d|` lists `[_, d]`, and leaving the fresh
+        // slot at the end bound `d`'s argument to it and left `d` nil.
+        let fresh = self.slot(&format!("{name} ({at})")) as usize;
+        if fresh > at {
+            self.locals.swap(at, fresh);
+            return u16::try_from(at).unwrap_or(u16::MAX);
+        }
+        fresh as u16
     }
 
     // -- statements -------------------------------------------------------
@@ -1038,9 +1054,15 @@ impl Compiler {
             // and how ruby/spec checks it (#223).
             ExprKind::XStr(command) => {
                 self.emit(Insn::PushSelf);
+                // The command is a frozen String when it has no
+                // interpolation, measured: `` def `(s) = s.frozen? `` is true.
+                let mut literal = command.clone();
+                if literal.frozen.is_none() && flat_bytes(&literal.parts).is_some() {
+                    literal.frozen = Some(true);
+                }
                 let string = Expr {
                     span,
-                    kind: ExprKind::Str(command.clone()),
+                    kind: ExprKind::Str(literal),
                 };
                 self.expr(&string)?;
                 let symbol = self.symbol("`");

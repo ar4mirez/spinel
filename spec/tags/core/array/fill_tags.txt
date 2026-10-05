@@ -1,0 +1,1 @@
+fails(#21: an Array edge case newly visible under mspec: pack's nibble and count rules for H, h, m and U, and to_ary or Integer conversion details):Array#fill with (filler, index, length) raises an ArgumentError or RangeError for too-large sizes

@@ -1,0 +1,2 @@
+fails(#41: File and IO here are a read-only stand-in that does not track $. or $_, honour open modes, or transcode):IO#readlines when passed no arguments does not change $_
+fails(#41: File and IO here are a read-only stand-in that does not track $. or $_, honour open modes, or transcode):IO#readlines when passed a separator does not change $_

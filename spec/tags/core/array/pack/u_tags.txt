@@ -1,0 +1,1 @@
+fails(#21: an Array edge case newly visible under mspec: pack's nibble and count rules for H, h, m and U, and to_ary or Integer conversion details):Array#pack with format 'U' encodes values larger than UTF-8 max codepoints

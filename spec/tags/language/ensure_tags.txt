@@ -1,1 +1,0 @@
-fails(the harness runs an example on main, so its def makes Object#foo where mspec's instance_exec makes a singleton labelled foo: #145):An ensure block inside 'do end' block does not introduce extra backtrace entries

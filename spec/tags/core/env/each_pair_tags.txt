@@ -1,0 +1,1 @@
+fails(#43: ENV is a per-heap stand-in that applies a merge! atomically and cannot transcode to a table-driven encoding):ENV.each_pair with encoding transcodes from the locale encoding to Encoding.default_internal if set

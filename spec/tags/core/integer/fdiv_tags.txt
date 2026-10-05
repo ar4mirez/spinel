@@ -1,0 +1,1 @@
+fails(#18: converting an object through to_f needs Float's own conversions):Integer#fdiv follows the coercion protocol

@@ -1,9 +1,7 @@
 fails(A global alias. #166 gave the language a global table, in which two names are two entries; making one name another's second spelling is #39's, along with the runtime state most of these alias. Became visible rather than blocked when assignment started compiling):Global variable $-d is an alias of $DEBUG
-fails(A predefined global with an assignment rule of its own. #166 gave the language a global table; a name the VM owns — read-only, type-checked, or initialised by the runtime — needs the runtime that owns it, which is #39. Became visible rather than blocked when assignment started compiling):Execution variable $: is initialized to an array of strings
 fails(A predefined global with an assignment rule of its own. #166 gave the language a global table; a name the VM owns — read-only, type-checked, or initialised by the runtime — needs the runtime that owns it, which is #39. Became visible rather than blocked when assignment started compiling):Global variable $0 raises a TypeError when not given an object that can be coerced to a String
 fails(A predefined global with an assignment rule of its own. #166 gave the language a global table; a name the VM owns — read-only, type-checked, or initialised by the runtime — needs the runtime that owns it, which is #39. Became visible rather than blocked when assignment started compiling):Global variable $< is read-only
 fails(A predefined global with an assignment rule of its own. #166 gave the language a global table; a name the VM owns — read-only, type-checked, or initialised by the runtime — needs the runtime that owns it, which is #39. Became visible rather than blocked when assignment started compiling):Global variable $FILENAME is read-only
-fails(A predefined global with an assignment rule of its own. #166 gave the language a global table; a name the VM owns — read-only, type-checked, or initialised by the runtime — needs the runtime that owns it, which is #39. Became visible rather than blocked when assignment started compiling):Global variable $VERBOSE is false by default
 fails(A predefined global with an assignment rule of its own. #166 gave the language a global table; a name the VM owns — read-only, type-checked, or initialised by the runtime — needs the runtime that owns it, which is #39. Became visible rather than blocked when assignment started compiling):Predefined global $, raises TypeError if assigned a non-String
 fails(A predefined global with an assignment rule of its own. #166 gave the language a global table; a name the VM owns — read-only, type-checked, or initialised by the runtime — needs the runtime that owns it, which is #39. Became visible rather than blocked when assignment started compiling):Predefined global $-0 raises a TypeError if assigned a boolean
 fails(A predefined global with an assignment rule of its own. #166 gave the language a global table; a name the VM owns — read-only, type-checked, or initialised by the runtime — needs the runtime that owns it, which is #39. Became visible rather than blocked when assignment started compiling):Predefined global $-0 raises a TypeError if assigned an Integer
@@ -18,12 +16,21 @@ fails(A global alias. #166 gave the language a global table, in which two names 
 fails(A predefined global with an assignment rule of its own. #166 gave the language a global table; a name the VM owns — read-only, type-checked, or initialised by the runtime — needs the runtime that owns it, which is #39. Became visible rather than blocked when the harness learned mspec's should.predicate form):Predefined global $-0 makes a new frozen String if it's not frozen
 fails(A global alias. #166 gave the language a global table, in which two names are two entries; making one name another's second spelling is #39's, along with the runtime state most of these alias. Became visible rather than blocked when the harness learned mspec's should.predicate form):Predefined global $-0 changes $/
 fails(#41: `ARGF` reads the files named on the command line, which needs IO and File):The predefined standard objects includes ARGF
-fails(#44: `ARGV` is the ENV, ARGV and signals slice):The predefined standard objects includes ARGV
-fails(#44: `ENV` is the ENV, ARGV and signals slice):The predefined standard objects includes a hash-like object ENV
-fails(#41: `STDIN` is an IO, which does not exist yet):The predefined global constants includes STDIN
-fails(#41: `STDOUT` is an IO, which does not exist yet):The predefined global constants includes STDOUT
-fails(#41: `STDERR` is an IO, which does not exist yet):The predefined global constants includes STDERR
-fails(#65: `RUBY_VERSION` is how Spinel identifies itself, which is its own slice):The predefined global constants includes RUBY_VERSION
-fails(#65: `RUBY_RELEASE_DATE` is how Spinel identifies itself, which is its own slice):The predefined global constants includes RUBY_RELEASE_DATE
-fails(#65: `RUBY_PLATFORM` is how Spinel identifies itself, which is its own slice):The predefined global constants includes RUBY_PLATFORM
 fails(#38: `TOPLEVEL_BINDING` is a Binding, which is string eval's slice):The predefined global constants includes TOPLEVEL_BINDING
+fails(#268: Spinel prints no warnings yet, and $VERBOSE has no assignment hook):Predefined global $/ warns if assigned non-nil
+fails(#268: Spinel prints no warnings yet, and $VERBOSE has no assignment hook):Predefined global $-0 warns if assigned non-nil
+fails(#268: Spinel prints no warnings yet, and $VERBOSE has no assignment hook):Predefined global $\ warns if assigned non-nil
+fails(#268: Spinel prints no warnings yet, and $VERBOSE has no assignment hook):Predefined global $, warns if assigned non-nil
+fails(#268: Spinel prints no warnings yet, and $VERBOSE has no assignment hook):Predefined global $; warns if assigned non-nil
+fails(#268: Spinel prints no warnings yet, and $VERBOSE has no assignment hook):Global variable $VERBOSE converts truthy values to true
+fails(#268: Spinel prints no warnings yet, and $VERBOSE has no assignment hook):Predefined global $= warns when accessed
+fails(#268: Spinel prints no warnings yet, and $VERBOSE has no assignment hook):Predefined global $= warns when assigned
+fails(#29: assigning $@ sets the backtrace of $!, and $! is restored after a rescue that returns):Predefined global $! should be set to the value of $! before the begin after a rescue which returns
+fails(#29: assigning $@ sets the backtrace of $!, and $! is restored after a rescue that returns):Predefined global $@ is not read-only
+fails(#29: assigning $@ sets the backtrace of $!, and $! is restored after a rescue that returns):Predefined global $@ accepts an Array of Strings
+fails(#29: assigning $@ sets the backtrace of $!, and $! is restored after a rescue that returns):Predefined global $@ allows the user to set the backtrace from a rescued exception
+fails(#29: assigning $@ sets the backtrace of $!, and $! is restored after a rescue that returns):Predefined global $@ allows the user to set backtrace locations from a rescued exception
+fails(#29: assigning $@ sets the backtrace of $!, and $! is restored after a rescue that returns):Predefined global $@ accepts an empty Array
+fails(#29: assigning $@ sets the backtrace of $!, and $! is restored after a rescue that returns):Predefined global $@ accepts a String
+fails(#29: assigning $@ sets the backtrace of $!, and $! is restored after a rescue that returns):Predefined global $@ accepts nil
+fails(#39: the default $LOAD_PATH is RubyGems' and carries its prelude marker):Execution variable $: default $LOAD_PATH entries until sitelibdir included have @gem_prelude_index set

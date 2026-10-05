@@ -1,0 +1,5 @@
+fails(#41: File and IO here are a read-only stand-in that does not track $. or $_, honour open modes, or transcode):IO#read in binary mode does not transcode file contents when Encoding.default_internal is set
+fails(#41: File and IO here are a read-only stand-in that does not track $. or $_, honour open modes, or transcode):IO#read with internal encoding specified by open mode sets the String encoding to the internal encoding
+fails(#41: File and IO here are a read-only stand-in that does not track $. or $_, honour open modes, or transcode):IO#read with internal encoding specified by mode: option returns a transcoded String
+fails(#41: File and IO here are a read-only stand-in that does not track $. or $_, honour open modes, or transcode):IO#read with internal encoding specified by internal_encoding: option returns a transcoded String
+fails(#41: File and IO here are a read-only stand-in that does not track $. or $_, honour open modes, or transcode):IO#read with internal encoding specified by encoding: option returns a transcoded String

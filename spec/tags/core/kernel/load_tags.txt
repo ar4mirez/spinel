@@ -1,1 +1,1 @@
-fails(#39: `Kernel#load` loads files, which is `require` and `$LOAD_PATH`):Kernel.load is a public method
+fails(#268: Spinel prints no warnings yet, and this example expects one):Kernel#load loads a file that recursively requires itself

@@ -1,0 +1,7 @@
+fails(#268: Spinel prints no warnings yet, and this example expects one):chilled String chilled string literals mutation emits a warning
+fails(#268: Spinel prints no warnings yet, and this example expects one):chilled String chilled string literals mutation emits a warning for concatenated strings
+fails(#268: Spinel prints no warnings yet, and this example expects one):chilled String chilled string literals mutation emits a warning on singleton_class creation
+fails(#268: Spinel prints no warnings yet, and this example expects one):chilled String chilled strings returned by Symbol#to_s mutation emits a warning
+fails(#268: Spinel prints no warnings yet, and this example expects one):chilled String chilled strings returned by Symbol#to_s mutation emits a warning on singleton_class creation
+fails(#263: a literal in a file with no magic comment is chilled in Ruby 3.4, and Spinel has no chilled strings yet):chilled String chilled string literals #+@ returns a different instance
+fails(#263: a literal in a file with no magic comment is chilled in Ruby 3.4, and Spinel has no chilled strings yet):chilled String chilled strings returned by Symbol#to_s #+@ returns a different instance

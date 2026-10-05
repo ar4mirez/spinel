@@ -187,7 +187,7 @@ fn parse_at(path: &str, source: &[u8], first_line: i64, yield_allowed: bool) -> 
     errors.extend(lowering_errors);
     let mut program = program;
     if let Some(map) = std::sync::Arc::get_mut(&mut program.source) {
-        map.encoding = magic_encoding(&result).map(String::into_boxed_str);
+        map.encoding = magic_encoding(source).map(String::into_boxed_str);
     }
 
     Parsed {
@@ -197,18 +197,47 @@ fn parse_at(path: &str, source: &[u8], first_line: i64, yield_allowed: bool) -> 
     }
 }
 
-/// The value of an `encoding:` or `coding:` magic comment, which names the
-/// encoding a literal without a forced one is in. Prism finds both the plain
-/// and the Emacs `-*- ... -*-` forms; the key is matched as CRuby matches it,
-/// ignoring case.
-fn magic_encoding(result: &ruby_prism::ParseResult<'_>) -> Option<String> {
-    result
-        .magic_comments()
-        .find(|comment| {
-            let key = comment.key().to_ascii_lowercase();
-            key == b"encoding" || key == b"coding"
-        })
-        .map(|comment| String::from_utf8_lossy(comment.value()).into_owned())
+/// The file's source encoding from its magic comment, CRuby's rule: only the
+/// first line, or the second after a `#!` line, and only a comment that is
+/// the line's first token. Anywhere in it, `coding` followed by `:` or `=`
+/// names the encoding — which is what makes the emacs (`-*- coding: x -*-`)
+/// and vim (`fileencoding=x`) styles work as well as `# encoding: x`.
+fn magic_encoding(source: &[u8]) -> Option<String> {
+    let mut lines = source.split(|&b| b == b'\n');
+    let first = lines.next()?;
+    let line = if first.starts_with(b"#!") {
+        lines.next()?
+    } else {
+        first
+    };
+    let text = line.trim_ascii_start();
+    if !text.starts_with(b"#") {
+        return None;
+    }
+    let lower = text.to_ascii_lowercase();
+    let mut at = 0;
+    while let Some(found) = lower[at..].windows(6).position(|w| w == b"coding") {
+        let mut i = at + found + 6;
+        at = i;
+        if !matches!(text.get(i), Some(b':' | b'=')) {
+            continue;
+        }
+        i += 1;
+        while text.get(i).is_some_and(|b| b.is_ascii_whitespace()) {
+            i += 1;
+        }
+        let start = i;
+        while text
+            .get(i)
+            .is_some_and(|&b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+        {
+            i += 1;
+        }
+        if i > start {
+            return Some(String::from_utf8_lossy(&text[start..i]).into_owned());
+        }
+    }
+    None
 }
 
 /// The byte offset each line starts at, line 1 first.

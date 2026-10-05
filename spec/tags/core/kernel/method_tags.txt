@@ -1,0 +1,1 @@
+fails(#27: Method objects from method, public_method and singleton_method, and super through an aliased one):Kernel#method changes the method called for super on a target aliased method

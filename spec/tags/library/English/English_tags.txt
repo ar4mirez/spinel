@@ -12,3 +12,11 @@ fails(A global alias. #166 gave the language a global table, in which two names 
 fails(A global alias. #166 gave the language a global table, in which two names are two entries; making one name another's second spelling is #39's, along with the runtime state most of these alias. Became visible rather than blocked when assignment started compiling):English aliases $PREMATCH to $`
 fails(A global alias. #166 gave the language a global table, in which two names are two entries; making one name another's second spelling is #39's, along with the runtime state most of these alias. Became visible rather than blocked when assignment started compiling):English aliases $PROCESS_ID to $$
 fails(A global alias. #166 gave the language a global table, in which two names are two entries; making one name another's second spelling is #39's, along with the runtime state most of these alias. Became visible rather than blocked when assignment started compiling):English aliases $RS to $/
+fails(#39: English aliases $!, $@, $; , $, and $\, which the global table cannot alias yet):English aliases $ERROR_INFO to $!
+fails(#39: English aliases $!, $@, $; , $, and $\, which the global table cannot alias yet):English aliases $ERROR_POSITION to $@
+fails(#39: English aliases $!, $@, $; , $, and $\, which the global table cannot alias yet):English aliases $FS to $;
+fails(#39: English aliases $!, $@, $; , $, and $\, which the global table cannot alias yet):English aliases $FIELD_SEPARATOR to $;
+fails(#39: English aliases $!, $@, $; , $, and $\, which the global table cannot alias yet):English aliases $OFS to $,
+fails(#39: English aliases $!, $@, $; , $, and $\, which the global table cannot alias yet):English aliases $OUTPUT_FIELD_SEPARATOR to $,
+fails(#39: English aliases $!, $@, $; , $, and $\, which the global table cannot alias yet):English aliases $ORS to $\
+fails(#39: English aliases $!, $@, $; , $, and $\, which the global table cannot alias yet):English aliases $OUTPUT_RECORD_SEPARATOR to $\

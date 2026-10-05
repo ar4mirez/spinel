@@ -223,7 +223,10 @@ pub fn compatible(left: (u8, &[u8]), right: (u8, &[u8])) -> Option<u8> {
         return Some(left_enc);
     }
     if left_bytes.is_empty() {
-        return Some(if ascii_compatible(left_enc) && right_bytes.is_ascii() {
+        // ASCII-only is a property of the string, not its bytes: `"x"` in
+        // UTF-16LE is `x\0`, ASCII bytes, and not ASCII-only. Measured.
+        let right_ascii_only = ascii_compatible(right_enc) && right_bytes.is_ascii();
+        return Some(if ascii_compatible(left_enc) && right_ascii_only {
             left_enc
         } else {
             right_enc

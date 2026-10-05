@@ -35,10 +35,11 @@ them, so a note written there is a note no tool will ever read again.
 
 ## What the reader enforces
 
-`spec/harness` reads these files today and mspec reads them after
-[#145](https://github.com/ar4mirez/spinel/issues/145). Each of these fails the
-run rather than being skipped over, because every one of them is a tag that has
-silently stopped skipping anything:
+mspec reads these files, on Spinel, since
+[#145](https://github.com/ar4mirez/spinel/issues/145) replaced `spec/harness`;
+`spec/spinel/report.rb` checks them, for every spec file in the run, and keeps
+the harness's rules. Each of these fails the run rather than being skipped over,
+because every one of them is a tag that has silently stopped skipping anything:
 
 - **A tag needs a reason.** mspec treats the parenthesised part as an optional
   comment and never writes one. Here it is required — a skip nobody wrote a
@@ -49,13 +50,17 @@ silently stopped skipping anything:
   immediate one. Colons, `#` and backticks are fine; the description may contain
   anything.
 - **The tag must be `fails`.** mspec also defines `critical`, `slow`, `unstable`
-  and others. A tag this harness ignores would look live and do nothing.
+  and others. A tag Spinel ignores would look live and do nothing.
 - **A tag must name an example that exists.** Upstream rewording one `it` is all
-  it takes to leave a tag skipping nothing, so this is checked on every run.
+  it takes to leave a tag skipping nothing, so this is checked on every run —
+  except in a file that stopped while loading, where the examples after the
+  stop were never defined and existence cannot be told.
+  `scripts/spec.sh --tagged` runs only the tagged examples, which is how a tag
+  whose example now passes is found.
 
 A tagged example is reported `skipped` with its reason — never `passed`, never
 `failed`. `scripts/verify-passes.rb` does not read this directory and must not:
-it re-runs what Spinel *claims*, and a tag is a claim about what Spinel does not
+it re-runs on Ruby what Spinel *claims*, and a tag is a claim about what Spinel does not
 claim. Keeping the two apart is what stops a tag from being able to manufacture
 a pass.
 
@@ -77,7 +82,21 @@ fix is a different slice. The reason says which slice, by number.
 
 ## What is here now
 
-A hundred and fifty-six tags across seventy-nine files. Running mspec (#145)
+Three hundred and six tags across a hundred and thirty-five files. Replacing
+`spec/harness` with mspec (#145) roughly doubled them, and that is the shape
+to expect: mspec runs what the harness never could — shared groups, examples
+built at run time, every matcher — and the 351 disagreements that surfaced were
+fixed where the fix was small and tagged where it is another slice's. The
+largest share is warnings, seventy-three examples expecting one Spinel does not
+print yet (#268); then `IO` (#41), loading (#39), backtraces (#29), `Struct`
+(#173), reflection (#28) and regexp encodings (#33). The five that named the
+harness itself are gone, because the harness is: under mspec those examples
+pass. Two unrelated paydays came with it — `Kernel#dup` now calls
+`initialize_copy`, and `Hash#to_hash` exists — and the `--tagged` run found
+three tags whose examples now pass.
+
+Before #145's last slice there were a hundred and fifty-six across
+seventy-nine files. Running mspec (#145)
 added two that are the harness's own — an example expecting mspec's runner in
 its backtrace, and one reading an ivar a previous group's hook set, which
 mspec's shared context carries over — and removed `` Kernel#` ``'s, now that a

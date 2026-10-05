@@ -1,0 +1,1 @@
+fails(#33: Regexp subclassing, string flags, US-ASCII source encoding, to_s option groups, and out-of-range numbered references):Regexp#source has US-ASCII encoding when created from an ASCII-only \u{} literal

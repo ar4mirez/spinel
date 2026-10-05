@@ -1,2 +1,0 @@
-fails(#17: `Kernel#Integer` parses Strings with radix prefixes and underscores, which is `Integer`'s slice):Kernel#Integer is a private method
-fails(#17: `Kernel#Integer` parses Strings with radix prefixes and underscores, which is `Integer`'s slice):Kernel.Integer is a public method

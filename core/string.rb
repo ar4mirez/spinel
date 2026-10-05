@@ -702,12 +702,12 @@ class String
   def partition(pattern)
     if pattern.is_a?(Regexp)
       match = pattern.match(self)
-      return [dup, "", ""] if match.nil?
+      return [__byteslice__(0, bytesize), "", ""] if match.nil?
       return [match.pre_match, match[0], match.post_match]
     end
     pattern = String.__coerce__(pattern)
     at = index(pattern)
-    return [dup, String.new("", encoding: encoding), String.new("", encoding: encoding)] if at.nil?
+    return [__byteslice__(0, bytesize), String.new("", encoding: encoding), String.new("", encoding: encoding)] if at.nil?
     # The middle is the pattern itself, in its own encoding. Measured.
     [self[0, at], pattern.dup, self[at + pattern.length..]]
   end
@@ -715,13 +715,13 @@ class String
   def rpartition(pattern)
     if pattern.is_a?(Regexp)
       at = rindex(pattern)
-      return ["", "", dup] if at.nil?
+      return ["", "", __byteslice__(0, bytesize)] if at.nil?
       match = pattern.match(self, at)
       return [self[0, at], match[0], self[at + match[0].length..]]
     end
     pattern = String.__coerce__(pattern)
     at = rindex(pattern)
-    return [String.new("", encoding: encoding), String.new("", encoding: encoding), dup] if at.nil?
+    return [String.new("", encoding: encoding), String.new("", encoding: encoding), __byteslice__(0, bytesize)] if at.nil?
     [self[0, at], pattern.dup, self[at + pattern.length..]]
   end
 
@@ -791,7 +791,7 @@ class String
   # The default separator is `$/`, which is "\n" until a program changes it.
   def chomp(*args)
     raise ArgumentError, "wrong number of arguments (given #{args.size}, expected 0..1)" if args.size > 1
-    separator = args.empty? ? ($/ || "\n") : args[0]
+    separator = args.empty? ? $/ : args[0]
     return dup if separator.nil?
     return __wide_chomp__(separator) unless encoding.ascii_compatible?
     separator = String.__coerce__(separator)
@@ -997,7 +997,7 @@ class String
       if empty?
         []
       elsif lim == 1
-        [dup]
+        [__byteslice__(0, bytesize)]
       elsif pattern.nil? || (pattern.is_a?(String) && pattern == " ")
         __split_awk__(lim)
       elsif pattern.is_a?(Regexp)
@@ -1119,13 +1119,13 @@ class String
     pieces
   end
 
-  def each_line(separator = ($/ || "\n"), chomp: false, &block)
+  def each_line(separator = $/, chomp: false, &block)
     return to_enum(:each_line, separator, chomp: chomp) if block.nil?
     __lines__(separator, chomp).each(&block)
     self
   end
 
-  def lines(separator = ($/ || "\n"), chomp: false, &block)
+  def lines(separator = $/, chomp: false, &block)
     return each_line(separator, chomp: chomp, &block) unless block.nil?
     __lines__(separator, chomp)
   end
@@ -1141,16 +1141,31 @@ class String
     at = 0
     while at < bytesize
       found = __byte_index__(separator, at)
+      width = separator.bytesize
+      # A paragraph also ends at a newline followed by a CRLF blank line.
+      # Measured: `"a\r\n\r\nb".lines("")` is `["a\r\n\r\n", "b"]`.
+      if paragraph
+        crlf = __byte_index__("\n\r\n", at)
+        found, width = crlf, 3 if crlf && (found.nil? || crlf < found)
+      end
       if found.nil?
         lines.push(__byteslice__(at, bytesize - at))
         break
       end
-      stop = found + separator.bytesize
+      stop = found + width
       line = __byteslice__(at, (chomp ? found : stop) - at)
       line = line.__byteslice__(0, line.bytesize - 1) if chomp && !paragraph && separator == "\n" && line.end_with?("\r")
       lines.push(line)
       # Paragraph mode swallows the rest of a blank run without keeping it.
-      stop += 1 while paragraph && stop < bytesize && __getbyte__(stop) == 0x0a
+      while paragraph && stop < bytesize
+        if __getbyte__(stop) == 0x0a
+          stop += 1
+        elsif __getbyte__(stop) == 0x0d && stop + 1 < bytesize && __getbyte__(stop + 1) == 0x0a
+          stop += 2
+        else
+          break
+        end
+      end
       at = stop
     end
     lines
@@ -1310,7 +1325,9 @@ class String
   # ranges `a-z`, a leading `^` (when there is more after it), and `\` escaping
   # the next character. A descending range is CRuby's ArgumentError.
   def self.__char_set__(spec)
-    chars = String.__coerce__(spec).chars
+    spec = String.__coerce__(spec)
+    raise ArgumentError, "invalid byte sequence in #{spec.encoding}" unless spec.valid_encoding?
+    chars = spec.chars
     negated = chars.size > 1 && chars[0] == "^"
     chars = chars.drop(1) if negated
     out = []
@@ -1672,7 +1689,8 @@ class String
       hash = hash_argument
       key = name.to_sym
       unless hash.key?(key)
-        return hash.default unless hash.default.nil? && hash.default_proc.nil?
+        # A default or a default proc answers, through `[]`. Measured.
+        return hash[key] unless hash.default.nil? && hash.default_proc.nil?
         raise KeyError.new("key<#{name}> not found", receiver: hash, key: key)
       end
       hash[key]
@@ -1742,6 +1760,7 @@ class String
           close = (i...chars.size).find { |j| chars[j] == "}" }
           raise ArgumentError, "malformed name - unmatched parenthesis" if close.nil?
           text = named(chars[i + 1...close].join).to_s
+          text = text[0, precision] if precision
           out << pad(text, width, flags, false)
           return close + 1
         when "%"
@@ -1830,12 +1849,16 @@ class String
         end
         digits = ".." + digits
       else
-        digits = n.abs.to_s(base)
+        # A zero at precision 0 is no digits at all. Measured.
+        # except that `#` keeps octal's leading zero.
+        digits = n == 0 && precision == 0 && !(base == 8 && flags.include?("#")) ? "" : n.abs.to_s(base)
       end
       digits = "0" * (precision - digits.length) + digits if precision && !complement && digits.length < precision
       if flags.include?("#") && n != 0
         prefix = { 16 => "0x", 8 => "0", 2 => "0b" }[base]
-        digits = prefix + digits if prefix && !(base == 8 && digits.start_with?("0"))
+        # Octal's prefix is a leading zero, which a two's complement
+        # (`..7651`) does not take. Measured.
+        digits = prefix + digits if prefix && !(base == 8 && (digits.start_with?("0") || complement))
       end
       digits = digits.upcase if upper
       sign = n < 0 && !complement ? "-" : (flags.include?("+") ? "+" : (flags.include?(" ") ? " " : ""))

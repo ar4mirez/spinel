@@ -107,14 +107,54 @@ class Range
   # endpoint that is `nil` is unbounded on that side rather than a value to
   # compare against, which is what makes `(1..)` cover every Integer above 1.
   def cover?(value)
-    unless @__begin__.nil?
-      low = (@__begin__ <=> value)
-      return false if low.nil? || low > 0
-    end
+    return __cover_range__(value) if value.is_a?(Range)
+    __covers__(value)
+  end
+
+  # CRuby's `r_cover_p`.
+  def __covers__(value)
+    return false unless @__begin__.nil? || Range.__less__(@__begin__, value) <= 0
     return true if @__end__.nil?
-    high = (value <=> @__end__)
-    return false if high.nil?
-    @__exclude_end__ ? high < 0 : high <= 0
+    Range.__less__(value, @__end__) <= (@__exclude_end__ ? -1 : 0)
+  end
+
+  # CRuby's `r_cover_range_p`: every element of `other` is in this range.
+  # Ported, because which comparisons it makes in which order is what the
+  # spec checks.
+  def __cover_range__(other)
+    low = other.begin
+    high = other.end
+    return false if !@__end__.nil? && high.nil?
+    return false if !@__begin__.nil? && low.nil?
+    if !low.nil? && !high.nil? && Range.__less__(low, high) > (other.exclude_end? ? -1 : 0)
+      return false
+    end
+    return false if !low.nil? && !__covers__(low)
+    compared = Range.__less__(@__end__, high)
+    if @__exclude_end__ == other.exclude_end?
+      return compared >= 0
+    elsif @__exclude_end__
+      return compared > 0
+    elsif compared >= 0
+      return true
+    end
+    # An inclusive self against an exclusive other ending past it: what
+    # matters is other's last element, if it has one.
+    last = begin
+      other.max
+    rescue TypeError
+      nil
+    end
+    return false if last.nil?
+    Range.__less__(@__end__, last) >= 0
+  end
+
+  # CRuby's `r_less`: `<=>` as an Integer, and incomparable as greater than
+  # anything, so a check that needs "less" fails.
+  def self.__less__(a, b)
+    result = a <=> b
+    return 2**31 - 1 if result.nil?
+    result <=> 0
   end
 
   def ===(value)
@@ -247,7 +287,11 @@ class Range
     unless __has_members__?
       return count.empty? ? nil : []
     end
-    return __last_member__ if block.nil? && count.empty?
+    # An excluded end that is not a number is found by walking: CRuby's
+    # `range_max` hands it to `Enumerable#max`. Measured.
+    if block.nil? && count.empty? && !(@__exclude_end__ && !@__end__.is_a?(Numeric))
+      return __last_member__
+    end
     super
   end
 

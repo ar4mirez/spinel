@@ -1,0 +1,2 @@
+fails(#45: Thread#raise needs a Thread):Thread#raise re-raises a previously rescued exception without overwriting the backtrace
+fails(#45: Thread#raise needs a Thread):Thread#raise re-raises a previously rescued exception with cleaned backtrace and sets a new backtrace

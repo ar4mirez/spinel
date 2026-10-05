@@ -1,0 +1,2 @@
+fails(#38: a Binding taken inside a block using it treats it as a local):The `it` parameter does not affect binding local variables setting
+fails(#38: a Binding taken inside a block using it treats it as a local):The `it` parameter does not affect binding local variables definition check

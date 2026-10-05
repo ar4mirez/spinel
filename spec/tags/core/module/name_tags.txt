@@ -1,0 +1,3 @@
+fails(#28: a module nested in an anonymous one is not renamed when the outer one is named):Module#name changes when the module is reachable through a constant path
+fails(#28: a module nested in an anonymous one is not renamed when the outer one is named):Module#name is set when the anonymous outer module name is set (module in one single constant)
+fails(#28: a module nested in an anonymous one is not renamed when the outer one is named):Module#name is set when the anonymous outer module name is set (module in several constants)

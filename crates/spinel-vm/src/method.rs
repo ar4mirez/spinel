@@ -472,6 +472,9 @@ pub enum SysOp {
     Clock,
     /// `__sys_clock_ids__`: `[name, id]` pairs for `Process::CLOCK_*`.
     ClockIds,
+    /// `__sys_process_constants__`: `[name, value]` pairs for the rest of
+    /// `Process`'s constants — `WNOHANG`, `PRIO_*`, `RLIMIT_*`, `RLIM_*`.
+    ProcessConstants,
 }
 
 /// Which `Binding` operation. See `interp.rs`, `binding_native`.

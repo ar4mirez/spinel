@@ -1,0 +1,1 @@
+fails(#21: an Array edge case newly visible under mspec: pack's nibble and count rules for H, h, m and U, and to_ary or Integer conversion details):Array#flatten with a non-Array object in the Array calls respond_to_missing?(:to_ary, true) to try coercing

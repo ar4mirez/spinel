@@ -5,8 +5,8 @@
 #   scripts/spec-status.sh
 #
 # One row per ruby/spec directory, pass/fail/blocked/skip. The table is written
-# by the harness itself, not assembled here: the counts and the markdown come
-# out of the same run, so a row can never disagree with the total it is part of.
+# by `scripts/spec-report.sh` from the same records as the report, not
+# assembled here, so a row can never disagree with the total it is part of.
 #
 # The file is committed, and CI runs this script and then `git diff --exit-code`.
 # That is the whole staleness check — there is no `--check` mode, because a
@@ -27,8 +27,6 @@ if [[ ! -e "$corpus/spec_helper.rb" ]]; then
   exit 2
 fi
 
-cargo build --release -p spec-harness --quiet
-
 mkdir -p "$(dirname "$out")"
 # Written to a temporary file first: a run that fails part way through must not
 # leave a truncated progress bar behind that CI would then report as a diff.
@@ -36,16 +34,14 @@ scratch="$(mktemp)"
 trap 'rm -f "$scratch"' EXIT
 
 status=0
-# `--platform linux` is pinned, not the host: ruby/spec's `platform_is` guards
-# select a different set of examples per OS, so an unpinned table would differ
-# between a macOS laptop and the Linux job that checks it — a diff about nothing.
-# Linux because that is where the CI job runs. A plain `scripts/spec.sh` still
-# answers for the machine you are on.
-"$repo_root/target/release/spec-harness" --by-directory --platform linux "$corpus" \
-  > "$scratch" || status=$?
+# Guards are answered for the platform the run is on — ruby/spec's
+# `platform_is` selects a different set of examples per OS — and the harness's
+# `--platform linux` pin has no mspec counterpart. CI generates the table on
+# Linux, so regenerate it there; a macOS run differs for that reason alone.
+"$repo_root/scripts/spec.sh" --table > "$scratch" || status=$?
 if [[ $status -ne 0 ]]; then
-  echo "spec-status.sh: the spec run reported failures, unreadable files, or tag" >&2
-  echo "                problems. The table is only printed on a clean run — run" >&2
+  echo "spec-status.sh: the spec run reported failures, or a process stopped before" >&2
+  echo "                reporting. The table is only written on a clean run — run" >&2
   echo "                scripts/spec.sh to see what went wrong." >&2
   exit "$status"
 fi

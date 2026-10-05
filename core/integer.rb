@@ -394,8 +394,17 @@ class Integer
 end
 
 # An Integer is a value: `dup` and `clone` answer it, a bignum included —
-# measured, `(2**100).dup.equal?` the receiver.
+# measured, `(2**100).dup.equal?` the receiver. And always frozen, a bignum
+# included, though it is a heap object here.
 class Integer
+  def frozen?
+    true
+  end
+
+  def freeze
+    self
+  end
+
   def dup
     self
   end

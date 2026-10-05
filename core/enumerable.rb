@@ -107,6 +107,16 @@ module Enumerable
 
   # An enumerable that answers `size` with an Integer knows its length without
   # iterating, which is what lets `each_slice` hand its enumerator a size.
+  # `cycle`'s size: the receiver's times the count, none for a count of zero
+  # or less, and endless without one. Measured.
+  def __cycle_size__(count)
+    known = __known_size__
+    return nil if known.nil?
+    return known == 0 ? 0 : Float::INFINITY if count.nil?
+    count = __to_int__(count)
+    count <= 0 ? 0 : known * count
+  end
+
   def __known_size__
     return nil unless respond_to?(:size)
     total = size
@@ -130,21 +140,21 @@ module Enumerable
   # --- mapping --------------------------------------------------------------
 
   def map
-    return to_enum(:map) unless block_given?
+    return to_enum(:map) { __known_size__ } unless block_given?
     out = []
     each { |*a| out.push(yield(*a)) }
     out
   end
 
   def collect
-    return to_enum(:collect) unless block_given?
+    return to_enum(:collect) { __known_size__ } unless block_given?
     out = []
     each { |*a| out.push(yield(*a)) }
     out
   end
 
   def flat_map
-    return to_enum(:flat_map) unless block_given?
+    return to_enum(:flat_map) { __known_size__ } unless block_given?
     out = []
     each do |*a|
       value = yield(*a)
@@ -158,7 +168,7 @@ module Enumerable
   end
 
   def collect_concat
-    return to_enum(:collect_concat) unless block_given?
+    return to_enum(:collect_concat) { __known_size__ } unless block_given?
     out = []
     each do |*a|
       value = yield(*a)
@@ -172,7 +182,7 @@ module Enumerable
   end
 
   def filter_map
-    return to_enum(:filter_map) unless block_given?
+    return to_enum(:filter_map) { __known_size__ } unless block_given?
     out = []
     each do |*a|
       value = yield(*a)
@@ -184,28 +194,28 @@ module Enumerable
   # --- filtering ------------------------------------------------------------
 
   def select
-    return to_enum(:select) unless block_given?
+    return to_enum(:select) { __known_size__ } unless block_given?
     out = []
     each { |*a| item = __pack__(a); out.push(item) if yield(item) }
     out
   end
 
   def filter
-    return to_enum(:filter) unless block_given?
+    return to_enum(:filter) { __known_size__ } unless block_given?
     out = []
     each { |*a| item = __pack__(a); out.push(item) if yield(item) }
     out
   end
 
   def find_all
-    return to_enum(:find_all) unless block_given?
+    return to_enum(:find_all) { __known_size__ } unless block_given?
     out = []
     each { |*a| item = __pack__(a); out.push(item) if yield(item) }
     out
   end
 
   def reject
-    return to_enum(:reject) unless block_given?
+    return to_enum(:reject) { __known_size__ } unless block_given?
     out = []
     each { |*a| item = __pack__(a); out.push(item) unless yield(item) }
     out
@@ -424,7 +434,7 @@ module Enumerable
   # --- grouping -------------------------------------------------------------
 
   def group_by
-    return to_enum(:group_by) unless block_given?
+    return to_enum(:group_by) { __known_size__ } unless block_given?
     out = {}
     each do |*a|
       item = __pack__(a)
@@ -440,7 +450,7 @@ module Enumerable
   end
 
   def partition
-    return to_enum(:partition) unless block_given?
+    return to_enum(:partition) { __known_size__ } unless block_given?
     yes = []
     no = []
     each do |*a|
@@ -508,7 +518,7 @@ module Enumerable
   end
 
   def sort_by
-    return to_enum(:sort_by) unless block_given?
+    return to_enum(:sort_by) { __known_size__ } unless block_given?
     keyed = []
     each { |*a| item = __pack__(a); keyed.push([yield(item), item]) }
     sorted = __merge_sort__(keyed, proc { |x, y| x[0] <=> y[0] })
@@ -591,12 +601,12 @@ module Enumerable
   end
 
   def min_by(*count)
-    return to_enum(:min_by) unless block_given?
+    return to_enum(:min_by) { __known_size__ } unless block_given?
     __extreme_by__(count, -1) { |item| yield(item) }
   end
 
   def max_by(*count)
-    return to_enum(:max_by) unless block_given?
+    return to_enum(:max_by) { __known_size__ } unless block_given?
     __extreme_by__(count, 1) { |item| yield(item) }
   end
 
@@ -624,7 +634,7 @@ module Enumerable
   end
 
   def minmax_by(&block)
-    return to_enum(:minmax_by) if block.nil?
+    return to_enum(:minmax_by) { __known_size__ } if block.nil?
     [min_by { |item| block.call(item) }, max_by { |item| block.call(item) }]
   end
 
@@ -718,7 +728,7 @@ module Enumerable
   end
 
   def each_with_index(*args)
-    return to_enum(:each_with_index, *args) unless block_given?
+    return to_enum(:each_with_index, *args) { __known_size__ } unless block_given?
     i = 0
     each(*args) do |*a|
       yield __pack__(a), i
@@ -728,13 +738,13 @@ module Enumerable
   end
 
   def each_with_object(memo)
-    return to_enum(:each_with_object, memo) unless block_given?
+    return to_enum(:each_with_object, memo) { __known_size__ } unless block_given?
     each { |*a| yield __pack__(a), memo }
     memo
   end
 
   def each_entry(*args)
-    return to_enum(:each_entry, *args) unless block_given?
+    return to_enum(:each_entry, *args) { __known_size__ } unless block_given?
     each(*args) { |*a| yield __pack__(a) }
     self
   end
@@ -750,7 +760,7 @@ module Enumerable
   # `cycle` with no count repeats forever, which is a legal thing to ask for:
   # the block is expected to break out.
   def cycle(count = nil)
-    return to_enum(:cycle, count) unless block_given?
+    return to_enum(:cycle, count) { __cycle_size__(count) } unless block_given?
     unless count.nil?
       count = __to_int__(count)
       return nil if count <= 0

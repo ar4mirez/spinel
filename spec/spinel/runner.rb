@@ -19,6 +19,7 @@
 
 require "mspec/runner/mspec"
 require "mspec/runner/formatters/base"
+require_relative "report"
 
 module SpinelRunner
   # Per example, as the harness had it per evaluation: enough for any example
@@ -109,46 +110,51 @@ module Kernel
   end
 end
 
-class SpinelFormatter < BaseFormatter
-  MILESTONES = "https://github.com/ar4mirez/spinel/milestones"
+# mspec writes a failure's values with `pretty_inspect`, which is `pp`'s, and
+# `pp` is a library this VM cannot load yet. `inspect` is what it prints for
+# every value small enough to fit a line, which a failure message's are.
+module Kernel
+  def pretty_inspect
+    "#{inspect}\n"
+  end
+end unless Kernel.method_defined?(:pretty_inspect)
 
+class SpinelFormatter < BaseFormatter
   def initialize(out = nil)
     super
-    @passed = 0
-    @failed = []
-    @blocked = Hash.new(0)
-    # Files whose loading a refusal stopped: their examples never registered,
-    # so they are named here rather than counted.
-    @unloaded = []
-    @fixtures = {}
-    @reason = nil
-    @files = {}
-    # `SPINEL_SPEC_LIST=1` prints one `LIST<TAB>outcome<TAB>file<TAB>description`
-    # line per example after the report: what `scripts/verify-passes.rb`
-    # re-runs on CRuby. Printed rather than written to a file because writing
-    # a file is #41's.
+    # One record per outcome, `[kind, file, description, detail]` — the kinds
+    # are listed in `spec/spinel/report.rb`. `SpinelReport` makes the report
+    # from them, and `SPINEL_SPEC_LIST=1` prints them instead, for
+    # `scripts/spec-report.sh` to merge across processes.
+    @records = []
     @list = ENV["SPINEL_SPEC_LIST"]
-    @listed = []
+    @fixtures = {}
     SpinelRunner.formatter = self
-  end
-
-  def __list__(outcome, state)
-    return unless @list
-    file = MSpec.instance_variable_get(:@file).to_s.sub(%r{\A.*?spec/ruby/}, "spec/ruby/")
-    @listed << "#{outcome}\t#{file}\t#{state.description}"
   end
 
   def register
     super
     MSpec.register :load, self
+    MSpec.register :tagged, self
+  end
+
+  def __file__
+    MSpec.instance_variable_get(:@file).to_s.sub(%r{\A.*?spec/ruby/}, "spec/ruby/")
+  end
+
+  def __record__(kind, description = "", detail = "", file = __file__)
+    @records << [kind, file, description, detail.to_s.tr("\t\n", "  ")]
   end
 
   def load
-    file = MSpec.instance_variable_get(:@file)
-    @files[file] = true
+    __record__("file")
     # `SPINEL_SPEC_TRACE=1` names each file as it starts, for finding the one
     # that takes the process down.
-    $stderr.puts "loading #{file}" if ENV["SPINEL_SPEC_TRACE"]
+    $stderr.puts "loading #{MSpec.instance_variable_get(:@file)}" if ENV["SPINEL_SPEC_TRACE"]
+  end
+
+  def tagged(state)
+    __record__("skipped", state.description)
   end
 
   def before(state = nil)
@@ -159,17 +165,41 @@ class SpinelFormatter < BaseFormatter
   end
 
   def fixture_stopped(path, reason)
-    @fixtures[path.sub(%r{\A.*?spec/ruby/}, "spec/ruby/")] ||= reason
+    path = path.sub(%r{\A.*?spec/ruby/}, "spec/ruby/")
+    return if @fixtures.key?(path)
+    @fixtures[path] = true
+    __record__("fixture", "", reason, path)
   end
 
-  # A refusal. In `before :all`, nothing in the group runs, so every example
-  # in it is blocked; anywhere else it is the current example's.
+  # Every example of the group a `before :all` was running for: none of them
+  # will run.
+  def __block_group__(reason)
+    MSpec.current.examples.each { |example| __record__("blocked", example.description, reason) }
+  end
+
+  # Whether mspec is still running a `describe` body to collect its examples.
+  # One that stops there — a `guard` whose lambda raises, a refusal — is not
+  # processed at all, so without this its examples vanish from every count.
+  def __parsing__
+    MSpec.current && !MSpec.current.instance_variable_get(:@parsed)
+  end
+
+  # The examples it collected before it stopped are blocked; the ones after
+  # were never defined, and the group is reported as stopped while loading.
+  def __stop_group__(reason)
+    __record__("unloaded", "", "#{MSpec.current.description}: #{reason}")
+    __block_group__(reason)
+  end
+
+  # A refusal. While a file loads, the rest of it does not; in `before :all`,
+  # nothing in the group runs; anywhere else it is the current example's.
   def blocked(location, reason)
     if location.to_s.start_with?("loading ")
-      file = location.to_s.delete_prefix("loading ").sub(%r{\A.*?spec/ruby/}, "spec/ruby/")
-      @unloaded << "#{file}: #{reason}"
+      __record__("unloaded", "", reason)
+    elsif __parsing__
+      __stop_group__(reason)
     elsif location == "before :all" && MSpec.current
-      MSpec.current.examples.size.times { @blocked[reason] += 1 }
+      __block_group__(reason)
     else
       @reason ||= reason
     end
@@ -181,14 +211,14 @@ class SpinelFormatter < BaseFormatter
       return
     end
     error = exception.exception
-    reason = "#{error.class}: #{error.message.to_s.split("\n").first.to_s}"
-    if exception.description.start_with?("An exception occurred during: loading ")
-      file = exception.description.split("\n").first.to_s
-                      .delete_prefix("An exception occurred during: loading ")
-                      .sub(%r{\A.*?spec/ruby/}, "spec/ruby/")
-      @unloaded << "#{file}: #{reason}"
-    elsif exception.description.start_with?("An exception occurred during: before :all") && MSpec.current
-      MSpec.current.examples.size.times { @blocked[reason] += 1 }
+    reason = "#{error.class}: #{error.message.to_s.split("\n").first}"
+    where = exception.description.split("\n").first.to_s
+    if where.start_with?("An exception occurred during: loading ")
+      __record__("unloaded", "", reason)
+    elsif __parsing__
+      __stop_group__(reason)
+    elsif where.start_with?("An exception occurred during: before :all") && MSpec.current
+      __block_group__(reason)
     else
       @reason ||= reason
     end
@@ -197,54 +227,27 @@ class SpinelFormatter < BaseFormatter
   def after(state = nil)
     return super if state.nil?
     if @reason
-      @blocked[@reason] += 1
-      __list__("blocked", state)
-      print "B"
+      __record__("blocked", state.description, @reason)
+      print "B" unless @list
     elsif @failure_message
-      __list__("failed", state)
-      file = MSpec.instance_variable_get(:@file).to_s.sub(%r{\A.*?spec/ruby/}, "spec/ruby/")
-      @failed << "#{file} #{state.description}: #{@failure_message}"
-      print "F"
+      __record__("failed", state.description, @failure_message)
+      print "F" unless @list
     else
-      @passed += 1
-      __list__("passed", state)
-      print "."
+      __record__("passed", state.description)
+      print "." unless @list
     end
     super
   end
 
   def finish
-    blocked = @blocked.values.sum
-    examples = @passed + @failed.size + blocked
-    tagged = @tally.counter.tagged
-    print "\n\n"
-    unless @failed.empty?
-      print "failed (#{@failed.size}):\n"
-      @failed.each { |line| print "  #{line}\n" }
-      print "\n"
+    @records.concat(SpinelReport.tag_problems(@records, File.expand_path("../..", __dir__)))
+    failed = @records.count { |r| r[0] == "failed" || r[0] == "tag" }
+    if @list
+      @records.each { |record| print "LIST\t#{record.join("\t")}\n" }
+    else
+      print "\n\n"
+      print SpinelReport.report(@records, "#{@timer.format.split(" ")[2]}s")
     end
-    print "#{@files.size} files · #{examples} examples · #{@passed} passed · " \
-          "#{@failed.size} failed · #{blocked} blocked · #{tagged} skipped · #{@timer.format.split(" ")[2]}s\n"
-    unless @fixtures.empty?
-      print "\nfixtures that stopped part way (#{@fixtures.size}):\n"
-      @fixtures.each { |path, reason| print "  #{path}: #{reason}\n" }
-    end
-    unless @unloaded.empty?
-      print "\nstopped while loading (#{@unloaded.size}):\n"
-      @unloaded.each { |line| print "  #{line}\n" }
-    end
-    unless @blocked.empty?
-      print "\nblocked by, most examples first (#{MILESTONES}):\n"
-      @blocked.sort_by { |reason, count| [-count, reason] }.first(20).each do |reason, count|
-        print "#{count.to_s.rjust(7)}  #{reason}\n"
-      end
-      print "  ... and #{@blocked.size - 20} more reasons\n" if @blocked.size > 20
-    end
-    MSpec.register_exit(@failed.empty? ? 0 : 1)
-    __write_list__ if @list
-  end
-
-  def __write_list__
-    @listed.each { |line| print "LIST\t#{line}\n" }
+    MSpec.register_exit(failed.zero? ? 0 : 1)
   end
 end

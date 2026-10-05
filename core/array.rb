@@ -152,7 +152,7 @@ class Array
   end
 
   def each_with_index
-    return to_enum(:each_with_index) unless block_given?
+    return to_enum(:each_with_index) { size } unless block_given?
     i = 0
     while i < size
       yield self[i], i
@@ -162,7 +162,7 @@ class Array
   end
 
   def each_index
-    return to_enum(:each_index) unless block_given?
+    return to_enum(:each_index) { size } unless block_given?
     i = 0
     while i < size
       yield i
@@ -172,35 +172,35 @@ class Array
   end
 
   def map
-    return to_enum(:map) unless block_given?
+    return to_enum(:map) { size } unless block_given?
     out = []
     each { |element| out.push(yield(element)) }
     out
   end
 
   def collect
-    return to_enum(:collect) unless block_given?
+    return to_enum(:collect) { size } unless block_given?
     out = []
     each { |element| out.push(yield(element)) }
     out
   end
 
   def select
-    return to_enum(:select) unless block_given?
+    return to_enum(:select) { size } unless block_given?
     out = []
     each { |element| out.push(element) if yield(element) }
     out
   end
 
   def filter
-    return to_enum(:filter) unless block_given?
+    return to_enum(:filter) { size } unless block_given?
     out = []
     each { |element| out.push(element) if yield(element) }
     out
   end
 
   def reject
-    return to_enum(:reject) unless block_given?
+    return to_enum(:reject) { size } unless block_given?
     out = []
     each { |element| out.push(element) unless yield(element) }
     out
@@ -303,8 +303,9 @@ class Array
   # cell, and an Array's cell holds a *pointer* to its storage, so the copy
   # would share it and `b << 1` would show up in `a`.
   def dup
-    out = []
-    each { |element| out.push(element) }
+    # The receiver's class, a subclass included, without its `initialize`.
+    out = self.class.allocate
+    each { |element| out.__append__(element) }
     out
   end
 
@@ -482,7 +483,9 @@ class Array
   # itself is an ArgumentError. The result starts US-ASCII and takes each
   # part's encoding as `<<` negotiates it, so incompatible parts raise
   # `Encoding::CompatibilityError`. Measured.
-  def join(separator = "")
+  # `$,` is the default separator, nil for none. Measured.
+  def join(separator = $,)
+    separator = $, if separator.nil?
     separator = String.__coerce__(separator) unless separator.nil?
     out = "".b.__force_encoding__(2)
     __join_into__(out, separator, [], [true])

@@ -1,1 +1,0 @@
-fails(#38: `Kernel#binding` needs a Binding, which is string `eval`'s slice):Kernel.binding is a public method
