@@ -91,6 +91,7 @@ const SOURCES: &[(&str, &str)] = &[
     ("core/binding.rb", include_str!("../../../core/binding.rb")),
     ("core/io.rb", include_str!("../../../core/io.rb")),
     ("core/warning.rb", include_str!("../../../core/warning.rb")),
+    ("core/method.rb", include_str!("../../../core/method.rb")),
     ("core/file.rb", include_str!("../../../core/file.rb")),
     ("core/load.rb", include_str!("../../../core/load.rb")),
     ("core/process.rb", include_str!("../../../core/process.rb")),
@@ -111,6 +112,8 @@ const SOURCES: &[(&str, &str)] = &[
         "core/enumerator.rb",
         include_str!("../../../core/enumerator.rb"),
     ),
+    // Last: it re-points names the files above defined twice.
+    ("core/aliases.rb", include_str!("../../../core/aliases.rb")),
 ];
 
 /// The compiled core library, one [`Iseq`] per file.

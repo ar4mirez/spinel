@@ -1501,3 +1501,26 @@ n = "/tmp/spinel-eval-#{Process.pid}-a"; File.open(n, "w") { |f| f.write("one\n"
 n = "/tmp/spinel-eval-#{Process.pid}-b"; r = File.open(n, "w+") { |f| f.write("abcdef"); f.rewind; a = f.read(2); f.seek(-2, IO::SEEK_END); [a, f.read, f.pos, f.eof?, f.read, f.read(1)] }; File.delete(n); r  #=> ["ab", "ef", 6, true, "", nil]
 n = "/tmp/spinel-eval-#{Process.pid}-c"; File.write(n, "x\ny\n"); r = File.open(n) { |f| [f.gets, f.lineno, f.gets(chomp: true), f.gets, (f.write("z") rescue $!.message)] }; s = File.stat(n); r += [s.file?, s.directory?, s.size, s.ftype]; File.delete(n); r  #=> ["x\n", 1, "y", nil, "not opened for writing", true, false, 4, "file"]
 d = "/tmp/spinel-eval-#{Process.pid}-d"; r = [Dir.mkdir(d), File.directory?(d), (Dir.mkdir(d) rescue $!.class), Dir.rmdir(d), File.exist?(d), (File.open("#{d}/x") rescue $!.class)]; r  #=> [0, true, Errno::EEXIST, 0, false, Errno::ENOENT]
+
+# ------------------------------------------- Method, UnboundMethod and `&` (#27)
+# A method taken out of its class is the body it held: equal to its alias,
+# callable on its receiver, and rebindable. `&obj` sends `to_proc`.
+[1, 2].map(&:to_s)  #=> ["1", "2"]
+[1, 2, 3].reduce(&:+)  #=> 6
+pr = :upcase.to_proc; [pr.call("a"), pr.lambda?]  #=> ["A", true]
+(:upcase.to_proc.call rescue $!.message)  #=> "no receiver given"
+o = Object.new; def o.to_proc; proc { |x| x * 2 }; end; [1, 2].map(&o)  #=> [2, 4]
+([1].map(&1) rescue $!.message)  #=> "no implicit conversion of Integer into Proc"
+class MoA; def foo(a, b = 1); [:A, a, b]; end; def bar; :bar; end; private def priv; :priv; end; end; m = MoA.new.method(:foo); [m.call(1), m.(2, 3), m[4], m.name, m.owner, m.arity, m.receiver.class]  #=> [[:A, 1, 1], [:A, 2, 3], [:A, 4, 1], :foo, MoA, -2, MoA]
+class MoB; def bar; :bar; end; private def priv; :priv; end; end; b = MoB.new; [b.method(:priv).call, (b.public_method(:priv) rescue $!.message), (b.method(:nope) rescue $!.message)]  #=> [:priv, "method 'priv' for class 'MoB' is private", "undefined method 'nope' for class 'MoB'"]
+class MoC; def foo(a); [:C, a]; end; end; class MoD < MoC; def foo(a); [:D, a, super]; end; end; m = MoD.new.method(:foo); [m.call(1), m.owner, m.super_method.owner, m.super_method.call(9), m.super_method.super_method]  #=> [[:D, 1, [:C, 1]], MoD, MoC, [:C, 9], nil]
+class MoE; def foo(a); [:E, a]; end; end; class MoF < MoE; end; u = MoE.instance_method(:foo); [u.class, u.owner, u.bind(MoF.new).call(5), u.bind_call(MoE.new, 6), (u.bind(Object.new) rescue $!.message)]  #=> [UnboundMethod, MoE, [:E, 5], [:E, 6], "bind argument must be an instance of MoE"]
+class MoG; def foo; end; alias_method :foo2, :foo; def bar; end; end; a = MoG.new; [a.method(:foo) == a.method(:foo), a.method(:foo) == a.method(:foo2), a.method(:foo) == a.method(:bar), a.method(:foo) == MoG.new.method(:foo), a.method(:foo2).original_name, a.method(:foo).hash == a.method(:foo2).hash]  #=> [true, true, false, false, :foo, true]
+o = Object.new; def o.a; end; def o.b(x); end; def o.c(*x); end; def o.d(x, y = 1); end; def o.e(x, k:); end; def o.f(k: 1); end; def o.g(a, b = 1, k:); end; %i[a b c d e f g].map { |n| o.method(n).arity }  #=> [0, 1, -1, -2, 2, -1, -3]
+o = Object.new; def o.m(a, b = 1, *c, d, e:, f: 2, **g, &h); end; o.method(:m).parameters  #=> [[:req, :a], [:opt, :b], [:rest, :c], [:req, :d], [:keyreq, :e], [:key, :f], [:keyrest, :g], [:block, :h]]
+[1.method(:+).call(2), 1.method(:+).owner, 1.method(:+).arity, Comparable.instance_method(:clamp).bind(5).call(1, 3)]  #=> [3, Integer, 1, 3]
+class MoH; def bar; :bar; end; define_method(:baz, instance_method(:bar)); end; [MoH.new.baz, MoH.instance_method(:baz) == MoH.instance_method(:bar)]  #=> [:bar, true]
+[Array.instance_method(:collect) == Array.instance_method(:map), Hash.instance_method(:length) == Hash.instance_method(:size), Array.instance_method(:map) == Array.instance_method(:each)]  #=> [true, true, false]
+f = 2.method(:+); g = 3.method(:*); [(f >> g).call(1), (f << g).call(1), f.to_proc.lambda?, f.curry[5]]  #=> [9, 5, true, 7]
+add = lambda { |a, b, c| a + b + c }; [add.curry[1][2][3], add.curry[1, 2][3], add.curry.lambda?, proc { |a, b| }.curry.lambda?]  #=> [6, 6, true, false]
+o = Object.new; def o.y; yield 1; end; def o.k(a, b: 2); [a, b]; end; [o.method(:y).call { |v| v + 1 }, o.method(:k).call(1), o.method(:k).call(1, b: 3)]  #=> [2, [1, 2], [1, 3]]

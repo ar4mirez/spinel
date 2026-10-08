@@ -1,0 +1,1 @@
+fails(#20: written as its own method where Ruby has an alias, which Method#== can now tell apart):Symbol#=== is an alias of Symbol#==

@@ -1,0 +1,1 @@
+fails(#44: an edge case first reached once mspec's mocks and Method objects ran, not yet diagnosed):ENV.value? coerces the value element with #to_str

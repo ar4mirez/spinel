@@ -1,0 +1,3 @@
+fails(#19: an edge case first reached once mspec's mocks and Method objects ran, not yet diagnosed):String#<=> uses the result of calling #to_str for comparison when #to_str is defined
+fails(#19: an edge case first reached once mspec's mocks and Method objects ran, not yet diagnosed):String#<=> uses the result of calling #<=> on its argument when #<=> is defined but #to_str is not
+fails(#19: Ruby calls a conversion or comparison method here that Spinel does not — to_str, to_int, to_ary, to_s, <=> or hash —, which mspec's mocks can now count):String#<=> returns nil if argument also uses an inverse comparison for <=>

@@ -209,6 +209,9 @@ pub enum Native {
     NumOp(crate::bytecode::BinOp),
     /// `Integer#-@` and `Float#-@`.
     NumNeg,
+    /// `__method_call__(owner, name, receiver, *args, &block)`: `Method#call`.
+    /// Pushes a frame.
+    MethodCall,
     /// `Integer#**` — repeated multiplication with an overflow check, so the
     /// answer is a refusal rather than a wrapped one.
     IntPow,
@@ -642,6 +645,10 @@ pub enum ReflectOp {
     ModuleKind,
     /// `(singleton class)` → the object it belongs to.
     Attached,
+    /// `(object, module, name, past)` → `[owner, arity, visibility, path,
+    /// line]` for the method a lookup finds, or nil. What `Kernel#method` and
+    /// `Module#instance_method` are made from.
+    MethodLookup,
     /// `(object, name)` → the arity of the method a send would find, -1 for
     /// one with no fixed count, or nil when there is none. What `Kernel#warn`
     /// asks of `Warning.warn` before passing it a keyword.

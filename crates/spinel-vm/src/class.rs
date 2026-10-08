@@ -1252,6 +1252,22 @@ impl Classes {
         None
     }
 
+    /// The method `owner` itself defines under `name`, with no walk: what a
+    /// `Method` object captured (#27). An `undef` there is nothing.
+    #[must_use]
+    pub fn method_at(&self, owner: ClassId, name: SymbolId) -> Option<Method> {
+        let &(body, cref, visibility) = self.entry(owner).methods.get(&name)?;
+        if body == Value::UNDEF {
+            return None;
+        }
+        Some(Method {
+            owner,
+            body,
+            cref,
+            visibility,
+        })
+    }
+
     // -- constants -------------------------------------------------------
 
     /// This module's own constant, ignoring every ancestor and every enclosing

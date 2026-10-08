@@ -550,9 +550,9 @@ class Array
     end
   end
 
-  def to_s
-    inspect
-  end
+  # An alias, as in CRuby: a subclass's own `inspect` does not change `to_s`,
+  # and the two are one method to `Method#==`.
+  alias to_s inspect
 end
 
 # The rest of `Array` (#21), all Ruby over `[]`, `[]=` and their slice forms.

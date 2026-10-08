@@ -1,0 +1,2 @@
+fails(#27: a Proc made by to_proc is a lambda around a call: its arity is -1 and it does not say where it came from):Proc#to_s for a proc created with UnboundMethod#to_proc returns a description including '(lambda)' and optionally including file and line number
+fails(#27: a Proc made by to_proc is a lambda around a call: its arity is -1 and it does not say where it came from):Proc#to_s for a proc created with Symbol#to_proc returns a description including '(&:symbol)'

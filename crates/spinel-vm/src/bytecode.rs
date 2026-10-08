@@ -143,6 +143,10 @@ pub enum Insn {
     Neg,
     /// `!`. Truthiness, unless the operand's class defines a `!` of its own.
     Not,
+    /// The value under `&` in `f(&value)`, made into what a call can take as
+    /// its block: `nil` and a `Proc` are left alone, and anything else is
+    /// sent `to_proc` (#27). `map(&:name)` is this and `Symbol#to_proc`.
+    BlockToProc,
 
     // -- aggregates -------------------------------------------------------
     /// Pops `n` values into a new `Array`.
@@ -947,6 +951,22 @@ impl ParamSpec {
         } else {
             required
         }
+    }
+}
+
+impl ParamSpec {
+    /// `Method#arity`, which counts keywords where a `Proc`'s does not: the
+    /// required arguments, plus one when a keyword is required, and negative
+    /// (less one) when anything beyond that is accepted. CRuby's
+    /// `method_def_min_max_arity`, measured.
+    #[must_use]
+    pub fn method_arity(&self) -> i64 {
+        let required_keyword = self.keywords.iter().any(|k| k.required);
+        let required = self.min_positional() as i64 + i64::from(required_keyword);
+        let open = self.rest.is_some()
+            || !self.optional.is_empty()
+            || (!required_keyword && (!self.keywords.is_empty() || self.kwrest.is_some()));
+        if open { -(required + 1) } else { required }
     }
 }
 

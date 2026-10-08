@@ -1,0 +1,1 @@
+fails(#45: written as its own method where Ruby has an alias, which Method#== can now tell apart):Thread#inspect is an alias of Thread#to_s

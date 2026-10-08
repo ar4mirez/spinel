@@ -815,9 +815,7 @@ class Hash
     plain ? "#{name}:" : "#{name.inspect}:"
   end
 
-  def to_s
-    inspect
-  end
+  alias to_s inspect
 
   # An empty Hash that compares keys the way this one does: `select`, `reject`,
   # `slice`, `except`, `compact` and `transform_values` keep

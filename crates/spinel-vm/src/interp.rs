@@ -1310,6 +1310,86 @@ fn reflect_native(
             }
             Value::NIL
         }
+        ReflectOp::MethodLookup => {
+            // `(object, module, name, past)`: the method `name` resolves to on
+            // `object`'s class when there is an object, on `module` when there
+            // is not, and with `past` from one step beyond `module` in the
+            // object's ancestry — which is `Method#super_method`.
+            let name = symbol_arg(2)?;
+            let object = arg(0);
+            let found = if arg(3).is_truthy() {
+                let owner = module_arg(scope, 1)?;
+                class_of(scope, object)
+                    .and_then(|class| scope.classes().lookup_super(class, owner, name))
+            } else if arg(1) == Value::NIL {
+                class_of(scope, object).and_then(|class| scope.classes_mut().lookup(class, name))
+            } else {
+                let module = module_arg(scope, 1)?;
+                scope.classes_mut().lookup(module, name)
+            };
+            match found {
+                None => Value::NIL,
+                Some(method) => {
+                    let definition = scope.definitions().get(method.body).cloned();
+                    // A `define_method` body is a Proc: its block is the
+                    // method, so the block's parameters are the method's.
+                    let body_iseq = match &definition {
+                        Some(Definition::Iseq(iseq)) => Some(Arc::clone(iseq)),
+                        Some(Definition::Proc(body)) => {
+                            proc_parts(scope, *body).map(|(iseq, ..)| iseq)
+                        }
+                        _ => None,
+                    };
+                    // The name it was defined under, which an alias keeps.
+                    let original = match &definition {
+                        Some(Definition::Iseq(iseq)) => Value::symbol(symbol(&iseq.name)),
+                        _ => Value::NIL,
+                    };
+                    let (arity, path, line) = match &definition {
+                        _ if body_iseq.is_some() => {
+                            let iseq = body_iseq.as_ref().expect("checked");
+                            (
+                                iseq.params.method_arity(),
+                                iseq.path.clone(),
+                                i64::from(iseq.first_line),
+                            )
+                        }
+                        // The operators take what the operator takes.
+                        Some(Definition::Native(Native::NumOp(_))) => (1, None, 0),
+                        Some(Definition::Native(Native::NumNeg)) => (0, None, 0),
+                        // Any other primitive, or a `define_method` body: no
+                        // fixed count to report and no line it was written on.
+                        _ => (-1, None, 0),
+                    };
+                    let parameters = match &body_iseq {
+                        Some(iseq) => parameters_value(scope, iseq),
+                        None => Value::NIL,
+                    };
+                    let parameters = scope.root(parameters);
+                    let owner = scope.classes().object(method.owner);
+                    let owner = scope.root(owner);
+                    let path = match path {
+                        Some(path) if line > 0 => string_new(scope, &path),
+                        _ => Value::NIL,
+                    };
+                    let path = scope.root(path);
+                    let visibility = Value::symbol(symbol(method.visibility.name()));
+                    let fields = [
+                        scope.get(owner),
+                        Value::fixnum(arity).expect("an arity fits a fixnum"),
+                        visibility,
+                        scope.get(path),
+                        Value::fixnum(line).expect("a line fits a fixnum"),
+                        scope.get(parameters),
+                        // The definition itself, as the number the class
+                        // table holds: two names for one body are equal.
+                        method.body,
+                        original,
+                    ];
+                    new_array(scope, &fields)
+                }
+            }
+        }
         ReflectOp::ModuleKind => {
             match class_id_of(scope, arg(0)).map(|id| scope.classes().kind(id)) {
                 Some(Kind::Class) => Value::symbol(symbol("class")),
@@ -2224,6 +2304,52 @@ pub fn eval_in(
                             }
                         } else {
                             stack.push(bool_value(!value.is_truthy()));
+                        }
+                    }
+
+                    Insn::BlockToProc => {
+                        let value = *stack.last().expect("a block argument to convert");
+                        if value != Value::NIL && proc_body(scope, value).is_none() {
+                            stack.pop();
+                            let name = crate::shared::symbols::intern("to_proc");
+                            let converts = class_of(scope, value)
+                                .and_then(|class| scope.classes_mut().lookup(class, name))
+                                .is_some();
+                            if !converts {
+                                return Err(Error::raise(
+                                    "TypeError",
+                                    format!(
+                                        "no implicit conversion of {} into Proc",
+                                        class_name_of(scope, value)
+                                    ),
+                                ));
+                            }
+                            let call = Pending {
+                                cache: None,
+                                name,
+                                receiver: value,
+                                args: Vec::new(),
+                                keywords: Vec::new(),
+                                block: Value::NIL,
+                                block_is_literal: false,
+                                cref: frames[top].cref,
+                                // A private `to_proc` is still asked, measured.
+                                implicit_self: true,
+                                public_only: false,
+                                target: Target::Method,
+                                owner: None,
+                                defined_as: None,
+                            };
+                            if let Some(unwind) = dispatch(
+                                scope,
+                                &mut stack,
+                                &mut frames,
+                                call,
+                                proc_class,
+                                &mut ids,
+                            )? {
+                                return Ok(Step::Unwind(unwind));
+                            }
                         }
                     }
 
@@ -3421,6 +3547,9 @@ enum Target {
     /// `super`: resolve `name` from one step past `owner` in the receiver's
     /// ancestor chain, rather than from the top of it.
     Super { owner: ClassId },
+    /// A `Method` object's call (#27): the method `owner` itself defines,
+    /// whatever the receiver's class resolves the name to.
+    At { owner: ClassId },
 }
 
 /// One call, assembled from the stack and not yet dispatched.
@@ -3497,12 +3626,13 @@ fn pop_call<'h>(
             } else if proc_body(scope, value).is_some() {
                 value
             } else {
-                // `&obj` calls `obj.to_proc`, which needs a method that does
-                // not exist yet.
-                return Err(Error::NoDispatch {
-                    op: "&",
-                    operands: "a block argument that is not a Proc",
-                });
+                // `Insn::BlockToProc` already sent `to_proc`; what is here is
+                // what that answered, and it was not a Proc.
+                let class = class_name_of(scope, value);
+                return Err(Error::raise(
+                    "TypeError",
+                    format!("can't convert {class} to Proc ({class}#to_proc gives {class})"),
+                ));
             }
         }
         BlockRef::Literal(child) => {
@@ -3666,9 +3796,10 @@ fn dispatch<'h>(
             push_proc_frame(scope, stack, frames, &call, block, ids)?;
             Ok(None)
         }
-        Target::Method | Target::Super { .. } => {
+        Target::Method | Target::Super { .. } | Target::At { .. } => {
             let class = class_of(scope, call.receiver).ok_or_else(|| no_class(call.receiver))?;
             let found = match call.target {
+                Target::At { owner } => scope.classes().method_at(owner, call.name),
                 // `super` starts one past the class the running method was
                 // found on, which is a question about a *pair* and so cannot
                 // use the inline caches: those key off the receiver's class and
@@ -7869,6 +8000,43 @@ fn native_call<'h>(
             Ok(None)
         }
 
+        Native::MethodCall => {
+            // `__method_call__(owner, name, receiver, *args, &block)`: run the
+            // method `owner` itself defines under `name`, on `receiver`. What
+            // a `Method` object's `call` is: the body it captured, whatever a
+            // subclass has defined under that name since.
+            let mut args = call.args.clone();
+            if args.len() < 3 {
+                return Err(Error::raise(
+                    "ArgumentError",
+                    "a method call needs an owner, a name and a receiver",
+                ));
+            }
+            let owner = class_id_of(scope, args[0]);
+            let name = args[1].as_symbol();
+            let receiver = args[2];
+            let (Some(owner), Some(name)) = (owner, name) else {
+                return Err(Error::NoDispatch {
+                    op: "__method_call__",
+                    operands: "an owner that is not a Module, or a name that is not a Symbol",
+                });
+            };
+            args.drain(..3);
+            let forwarded = Pending {
+                cache: None,
+                name,
+                receiver,
+                args,
+                implicit_self: true,
+                public_only: false,
+                target: Target::At { owner },
+                owner: None,
+                defined_as: None,
+                ..call
+            };
+            dispatch(scope, stack, frames, forwarded, proc_class, ids)
+        }
+
         Native::NumOp(op) => {
             if call.args.len() != 1 {
                 return Err(Error::raise(
@@ -8373,18 +8541,24 @@ fn native_call<'h>(
                     ));
                 }
             };
+            // A `Method` or an `UnboundMethod` gives the body it holds (#27):
+            // the method its owner defines under its name.
+            let mut captured = None;
             if proc_body(scope, body_value).is_none() {
                 let class = class_name(scope, body_value);
                 if class == "Method" || class == "UnboundMethod" {
-                    return Err(Error::NoDispatch {
-                        op: "define_method",
-                        operands: "a Method or UnboundMethod body, which is #27",
-                    });
+                    let owner = ivar_get(scope, body_value, symbol("@__owner__"))?;
+                    let held = ivar_get(scope, body_value, symbol("@__name__"))?;
+                    captured = class_id_of(scope, owner)
+                        .zip(held.as_symbol())
+                        .and_then(|(owner, held)| scope.classes().method_at(owner, held));
                 }
-                return Err(Error::raise(
-                    "TypeError",
-                    format!("wrong argument type {class} (expected Proc/Method/UnboundMethod)"),
-                ));
+                if captured.is_none() {
+                    return Err(Error::raise(
+                        "TypeError",
+                        format!("wrong argument type {class} (expected Proc/Method/UnboundMethod)"),
+                    ));
+                }
             }
             let symbol = crate::shared::symbols::intern(&name);
             // `initialize` and its siblings are private wherever they are
@@ -8438,10 +8612,16 @@ fn native_call<'h>(
                     frame.scope_default == ScopeDefault::ModuleFunction
                         && scope.classes().cref_class(frame.cref) == target
                 });
-            let body = scope.definitions_mut().add(Definition::Proc(body_value));
+            let (body, cref) = match captured {
+                Some(method) => (method.body, method.cref),
+                None => (
+                    scope.definitions_mut().add(Definition::Proc(body_value)),
+                    call.cref,
+                ),
+            };
             scope
                 .classes_mut()
-                .define_method_visibly(target, symbol, body, call.cref, visibility);
+                .define_method_visibly(target, symbol, body, cref, visibility);
             stack.push(Value::symbol(symbol));
             if module_function {
                 let meta = scope.singleton_class(target);
@@ -8449,7 +8629,7 @@ fn native_call<'h>(
                     meta,
                     symbol,
                     body,
-                    call.cref,
+                    cref,
                     Visibility::Public,
                 );
                 if let Some(unwind) =
@@ -10526,6 +10706,12 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             &["__reflect_attached__"],
             Native::Reflect(ReflectOp::Attached),
         ),
+        (
+            Builtin::Kernel,
+            &["__reflect_method_lookup__"],
+            Native::Reflect(ReflectOp::MethodLookup),
+        ),
+        (Builtin::Kernel, &["__method_call__"], Native::MethodCall),
         (
             Builtin::Kernel,
             &["__reflect_method_arity__"],
@@ -12845,6 +13031,71 @@ fn fd_arg(call: &Pending) -> Result<libc::c_int, Error> {
             op: "a descriptor call",
             operands: "a descriptor that is not an Integer",
         })
+}
+
+/// `Method#parameters` for a compiled body: `[[:req, :a], [:opt, :b], ...]`,
+/// in the order they were written.
+fn parameters_value(scope: &mut HandleScope<'_>, iseq: &Iseq) -> Value {
+    let params = &iseq.params;
+    let mut entries: Vec<(&str, Option<String>)> = Vec::new();
+    // A slot's name, when it is one a program could have written: a
+    // destructuring parameter and the compiler's own temporaries have none.
+    // A core method written in Ruby reports as the C one it stands for does:
+    // the kinds, without names.
+    let internal = iseq
+        .path
+        .as_deref()
+        .is_some_and(|path| path.starts_with("<internal:"));
+    let named = |slot: u16| {
+        iseq.locals
+            .get(slot as usize)
+            // A second `_` is kept apart as `_ (n)`; Ruby shows it as `_`.
+            .map(|name| match name.split_once(" (") {
+                Some(("_", _)) => "_".to_owned(),
+                _ => name.to_string(),
+            })
+            .filter(|name| !internal && !name.starts_with('%'))
+    };
+    for &slot in &params.required {
+        entries.push(("req", named(slot)));
+    }
+    for optional in &params.optional {
+        entries.push(("opt", named(optional.slot)));
+    }
+    if let Some(slot) = params.rest {
+        entries.push(("rest", named(slot)));
+    }
+    for &slot in &params.post {
+        entries.push(("req", named(slot)));
+    }
+    for keyword in &params.keywords {
+        let name = iseq
+            .symbols
+            .get(keyword.name as usize)
+            .map(|n| n.to_string())
+            .filter(|_| !internal);
+        entries.push((if keyword.required { "keyreq" } else { "key" }, name));
+    }
+    if let Some(slot) = params.kwrest {
+        entries.push(("keyrest", named(slot)));
+    }
+    if params.no_keywords {
+        entries.push(("nokey", None));
+    }
+    if let Some(slot) = params.block {
+        entries.push(("block", named(slot)));
+    }
+    let mut pairs = Vec::with_capacity(entries.len());
+    for (kind, name) in entries {
+        let kind = Value::symbol(symbol(kind));
+        let pair = match name {
+            Some(name) => new_array(scope, &[kind, Value::symbol(symbol(&name))]),
+            None => new_array(scope, &[kind]),
+        };
+        pairs.push(scope.root(pair));
+    }
+    let pairs: Vec<Value> = pairs.into_iter().map(|h| scope.get(h)).collect();
+    new_array(scope, &pairs)
 }
 
 fn fs_native(

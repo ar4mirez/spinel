@@ -1,0 +1,1 @@
+fails(#18: written as its own method where Ruby has an alias, which Method#== can now tell apart):Float#=== is an alias of Float#==

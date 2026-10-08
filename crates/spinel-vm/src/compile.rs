@@ -636,6 +636,7 @@ impl Compiler {
             | Insn::JumpIfNilKeep(_)
             | Insn::Neg
             | Insn::Not
+            | Insn::BlockToProc
             // Pops the receiver, pushes the name it defined.
             | Insn::DefineSingleton(_)
             // Pops the module, pushes the constant.
@@ -3874,6 +3875,7 @@ impl Compiler {
             }
             Some(BlockArg::Pass(Some(expr))) => {
                 self.expr(expr)?;
+                self.emit(Insn::BlockToProc);
                 site.block = BlockRef::Pass;
             }
             // The anonymous `&` forwarded on: `def f(&) = e(&)`. Its own slot,

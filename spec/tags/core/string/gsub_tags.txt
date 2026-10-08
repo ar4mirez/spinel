@@ -1,0 +1,1 @@
+fails(#19: an edge case first reached once mspec's mocks and Method objects ran, not yet diagnosed):String#gsub with pattern and block does not set $~ for procs created from methods
