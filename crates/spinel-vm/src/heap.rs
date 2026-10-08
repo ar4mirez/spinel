@@ -183,7 +183,17 @@ pub struct Stats {
 ///
 /// The flag says whether the string runs inside a method, where a `yield`
 /// at its top level is valid.
-pub type Parser = fn(&str, &[u8], i64, bool) -> Result<spinel_ast::Program, ParseFailure>;
+pub type Parser = fn(&str, &[u8], i64, bool) -> Result<ParsedSource, ParseFailure>;
+
+/// What a [`Parser`] produced: the tree, and what the parser had to say about
+/// the source on the way (#268).
+#[derive(Debug, Clone)]
+pub struct ParsedSource {
+    pub program: spinel_ast::Program,
+    /// Each warning as the line Ruby prints — `path:line: warning: message`,
+    /// newline included — and whether only `-w` prints it.
+    pub warnings: Vec<(String, bool)>,
+}
 
 /// Why a [`Parser`] produced no tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -311,6 +321,10 @@ pub struct Heap {
     /// Globals the runtime owns and a program may not assign: `$:` and
     /// `$LOADED_FEATURES` (#39). By name, so an alias is marked separately.
     readonly_globals: std::collections::HashSet<SymbolId>,
+    /// Globals whose assignment, or read, is a Ruby method rather than a cell
+    /// (#268): bit 0 for writes, bit 1 for reads. `$,` warns when set, `$=`
+    /// when read.
+    hooked_globals: std::collections::HashMap<SymbolId, u8>,
 }
 
 /// The class index for an object needing `bytes` in total, or `None` for large objects.
@@ -362,6 +376,7 @@ impl Heap {
             global_slots: Vec::new(),
             global_specials: HashMap::new(),
             readonly_globals: std::collections::HashSet::new(),
+            hooked_globals: std::collections::HashMap::new(),
         }
     }
 
@@ -476,6 +491,17 @@ impl Heap {
 
     pub fn global_is_readonly(&self, name: SymbolId) -> bool {
         self.readonly_globals.contains(&name)
+    }
+
+    /// Route `name` through `Kernel#__global_assign__`, and through
+    /// `__global_read__` too when `reads`.
+    pub fn hook_global(&mut self, name: SymbolId, reads: bool) {
+        self.hooked_globals.insert(name, if reads { 3 } else { 1 });
+    }
+
+    /// Which of `name`'s accesses are hooked: bit 0 writes, bit 1 reads.
+    pub fn global_hooks(&self, name: SymbolId) -> u8 {
+        self.hooked_globals.get(&name).copied().unwrap_or(0)
     }
 
     pub fn definitions_mut(&mut self) -> &mut crate::method::Definitions {
@@ -1089,6 +1115,14 @@ impl<'h> HandleScope<'h> {
 
     pub fn global_is_readonly(&self, name: SymbolId) -> bool {
         self.heap.global_is_readonly(name)
+    }
+
+    pub fn hook_global(&mut self, name: SymbolId, reads: bool) {
+        self.heap.hook_global(name, reads);
+    }
+
+    pub fn global_hooks(&self, name: SymbolId) -> u8 {
+        self.heap.global_hooks(name)
     }
 
     /// Point a handle at a different object. The old one loses this root.

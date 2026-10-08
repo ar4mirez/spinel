@@ -126,6 +126,7 @@ class << ENV
   end
 
   def fetch(name, *default)
+    __warning__("block supersedes default value argument") if !default.empty? && block_given?
     name = __name__(name)
     value = __lookup__(name)
     return value unless value.nil?

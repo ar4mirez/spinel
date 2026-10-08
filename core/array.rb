@@ -17,6 +17,10 @@ class Array
     if given.size > 2
       raise ArgumentError, "wrong number of arguments (given " + given.size.to_s + ", expected 0..2)"
     end
+    if block_given?
+      __warning__("given block not used", true) if given.empty?
+      __warning__("block supersedes default value argument") if given.size == 2
+    end
     size = given.size > 0 ? given[0] : 0
     default = given.size > 1 ? given[1] : nil
     if size.is_a?(Array)
@@ -231,6 +235,7 @@ class Array
       raise ArgumentError, "wrong number of arguments (given #{wanted.size}, expected 0..1)"
     end
     return to_enum(:index) if wanted.empty? && !block_given?
+    __warning__("given block not used") if !wanted.empty? && block_given?
     i = 0
     while i < size
       if wanted.empty?
@@ -484,8 +489,11 @@ class Array
   # part's encoding as `<<` negotiates it, so incompatible parts raise
   # `Encoding::CompatibilityError`. Measured.
   # `$,` is the default separator, nil for none. Measured.
-  def join(separator = $,)
-    separator = $, if separator.nil?
+  def join(separator = nil)
+    if separator.nil? && !$,.nil?
+      __warning__("$, is set to non-nil value", false, :deprecated)
+      separator = $,
+    end
     separator = String.__coerce__(separator) unless separator.nil?
     out = "".b.__force_encoding__(2)
     __join_into__(out, separator, [], [true])
@@ -932,6 +940,7 @@ class Array
     if given.empty? || given.size > 2
       raise ArgumentError, "wrong number of arguments (given #{given.size}, expected 1..2)"
     end
+    __warning__("block supersedes default value argument") if given.size == 2 && block_given?
     index = __count_like__(given[0])
     at = index < 0 ? index + size : index
     return self[at] if at >= 0 && at < size
@@ -972,6 +981,7 @@ class Array
   end
 
   def rindex(*wanted)
+    __warning__("given block not used") if !wanted.empty? && block_given?
     i = size - 1
     while i >= 0
       if wanted.empty?

@@ -312,6 +312,7 @@ class Hash
       raise ArgumentError,
             "wrong number of arguments (given " + fallback.size.to_s + ", expected 1..2)"
     end
+    __warning__("block supersedes default value argument") if fallback.size > 1 && block_given?
     key = fallback[0]
     at = __index__(key)
     return @__pairs__[at][1] unless at.nil?

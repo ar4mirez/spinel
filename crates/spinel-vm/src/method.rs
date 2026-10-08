@@ -365,6 +365,14 @@ pub enum Native {
     RefusalBoundary,
     /// `Kernel#__freeze_global__(*names)`: those globals refuse assignment.
     FreezeGlobal,
+    /// `__hook_global__(reads, *names)`: assignments to each name, and reads
+    /// when `reads`, go through `Kernel#__global_assign__` and
+    /// `#__global_read__`.
+    HookGlobal,
+    /// `__global_store__(name, value)`: the cell itself, past any hook.
+    GlobalStore,
+    /// `__global_fetch__(name)`: the cell itself, nil when never assigned.
+    GlobalFetch,
     /// `Kernel#__argv__`: `[$0, *ARGV]` as the embedder set them.
     Argv,
     /// `Kernel#__mark_partial__`: a file this heap was meant to load did not
@@ -606,6 +614,14 @@ pub enum ReflectOp {
     ModuleKind,
     /// `(singleton class)` → the object it belongs to.
     Attached,
+    /// `(object, name)` → the arity of the method a send would find, -1 for
+    /// one with no fixed count, or nil when there is none. What `Kernel#warn`
+    /// asks of `Warning.warn` before passing it a keyword.
+    MethodArity,
+    /// `(mod, name, mark)` → with `mark`, deprecates the constant; without,
+    /// the module holding the deprecated constant that `mod.const_get(name)`
+    /// finds, or nil.
+    ConstDeprecated,
 }
 
 /// Which fiber primitive. See `interp.rs`, "Fibers".

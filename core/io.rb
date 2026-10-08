@@ -128,6 +128,7 @@ alias $-v $VERBOSE
 alias $-w $VERBOSE
 # The input record separator: what `gets` and `each_line` split on.
 $/ = "\n"
+alias $-0 $/
 
 module Kernel
   def puts(*lines)
@@ -154,8 +155,43 @@ module Kernel
       category = category.to_sym
     end
     return nil if $VERBOSE.nil? || messages.empty?
-    $stderr.puts(*messages)
+    return nil if !category.nil? && !Warning[category]
+    text = +""
+    unless uplevel.nil?
+      # Entry 0 is this method, at the line that called it, so the caller
+      # `uplevel` frames out is one further down. Past the end of the stack
+      # there is nothing to name, and Ruby says only `warning: `.
+      here = __backtrace_here__[level + 1]
+      text << (here.nil? ? "warning: " : "#{here[0]}:#{here[1]}: warning: ")
+    end
+    __warn_lines__(messages, text, [])
+    # `Kernel#warn` bound to `Warning` itself writes rather than asking
+    # `Warning.warn`, which is what ends the recursion when a program's
+    # `Warning#warn` calls `super`.
+    if Warning.equal?(self)
+      $stderr.write(text)
+    else
+      __warning_send__(text, category)
+    end
     nil
+  end
+
+  # `IO#puts`'s line rules, into a String: an Array is its elements, and a
+  # line gets a newline unless it ends in one.
+  def __warn_lines__(messages, text, seen)
+    messages.each do |message|
+      if message.is_a?(Array)
+        if seen.any? { |outer| outer.equal?(message) }
+          text << "[...]\n"
+        else
+          __warn_lines__(message, text, seen + [message])
+        end
+      else
+        line = message.nil? ? "" : message.to_s
+        text << line
+        text << "\n" unless line.end_with?("\n")
+      end
+    end
   end
 
   module_function :puts, :print, :p, :warn

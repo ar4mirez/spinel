@@ -1,1 +1,0 @@
-fails(#268: Spinel prints no warnings yet, and Kernel#warn does not take every form):Kernel#warn writes each array element on a line when passes an array

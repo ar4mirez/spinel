@@ -605,6 +605,10 @@ pub struct Classes {
     /// Cleared by every [`Classes::invalidate`], so the guards are re-read only
     /// after something was defined somewhere.
     operators_fresh: bool,
+    /// `deprecate_constant`'s names, by the module that holds each (#268).
+    /// One list rather than a field per entry: it is empty in almost every
+    /// program, and a constant read asks only whether it is.
+    deprecated_constants: Vec<(ClassId, SymbolId)>,
 }
 
 /// One numeric class's operators: the bodies the VM installed, and which of
@@ -1260,9 +1264,8 @@ impl Classes {
 
     /// Assign, or reassign, a constant on this module.
     ///
-    // ponytail: Ruby warns on reassignment ("already initialized constant C").
-    // Warning needs somewhere to warn *to*, which is #39's `$stderr`; the write
-    // itself is what every spec here checks.
+    /// Reassignment is the caller's to warn about: `Insn::SetConst` and
+    /// `Module#const_set` both ask [`Classes::const_get_here`] first (#268).
     pub fn const_set(&mut self, id: ClassId, name: SymbolId, value: Value) {
         let entry = self.entry_mut(id);
         if entry.constants.insert(name, value).is_none() {
@@ -1284,7 +1287,28 @@ impl Classes {
 
     /// `Module#remove_const`: take one of this module's own constants away,
     /// answering its value.
+    /// `Module#deprecate_constant`: reading `name` on `id` warns from now on.
+    pub fn deprecate_const(&mut self, id: ClassId, name: SymbolId) {
+        if !self.deprecated_constants.contains(&(id, name)) {
+            self.deprecated_constants.push((id, name));
+        }
+    }
+
+    /// The module whose deprecated `name` a read that found `value` reached,
+    /// if it reached one. Matched by the value the read found, which is what
+    /// lets every kind of lookup — lexical, qualified, `const_get` — ask the
+    /// same question without each reporting where it stopped.
+    #[must_use]
+    pub fn deprecated_const(&self, name: SymbolId, value: Value) -> Option<ClassId> {
+        self.deprecated_constants
+            .iter()
+            .find(|&&(id, n)| n == name && self.const_get_here(id, name) == Some(value))
+            .map(|&(id, _)| id)
+    }
+
     pub fn const_remove(&mut self, id: ClassId, name: SymbolId) -> Option<Value> {
+        self.deprecated_constants
+            .retain(|&(i, n)| (i, n) != (id, name));
         let entry = self.entry_mut(id);
         let value = entry.constants.remove(&name)?;
         entry.constant_order.retain(|&n| n != name);

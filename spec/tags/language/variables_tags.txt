@@ -1,1 +1,0 @@
-fails(#268: Spinel prints no warnings yet, and this example expects one):Instance variables global variable when global variable is uninitialized warns about accessing uninitialized global variable in verbose mode

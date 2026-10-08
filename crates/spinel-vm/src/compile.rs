@@ -1946,6 +1946,13 @@ impl Compiler {
                         self.emit(Insn::DefinedCvar(*symbol));
                         Some(self.emit_jump(Insn::JumpUnless))
                     }
+                    // A global reads nil when unset and says so under `-w`;
+                    // `$a ||= 1` on an unset one is not a read, and Ruby is
+                    // quiet about it. Measured (#268).
+                    (Slot::Global(symbol), AssignOp::Or) => {
+                        self.emit(Insn::DefinedGlobal(*symbol));
+                        Some(self.emit_jump(Insn::JumpUnless))
+                    }
                     _ => None,
                 };
                 self.emit_get(&slot);

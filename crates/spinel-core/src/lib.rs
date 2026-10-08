@@ -32,8 +32,7 @@
 
 use std::sync::Arc;
 
-use spinel_ast::Program;
-use spinel_vm::{HandleScope, Iseq, ParseFailure, compile, interp, shared};
+use spinel_vm::{HandleScope, Iseq, ParseFailure, ParsedSource, compile, interp, shared};
 
 /// The core library sources, in load order.
 ///
@@ -91,6 +90,7 @@ const SOURCES: &[(&str, &str)] = &[
     ),
     ("core/binding.rb", include_str!("../../../core/binding.rb")),
     ("core/io.rb", include_str!("../../../core/io.rb")),
+    ("core/warning.rb", include_str!("../../../core/warning.rb")),
     ("core/file.rb", include_str!("../../../core/file.rb")),
     ("core/load.rb", include_str!("../../../core/load.rb")),
     ("core/process.rb", include_str!("../../../core/process.rb")),
@@ -192,7 +192,7 @@ fn parse_eval(
     source: &[u8],
     line: i64,
     in_method: bool,
-) -> Result<Program, ParseFailure> {
+) -> Result<ParsedSource, ParseFailure> {
     let parsed = spinel_parse::parse_eval(path, source, line, in_method);
     if let Some(error) = parsed.syntax_errors().next() {
         let at = parsed.program.source.line(error.span.start);
@@ -204,7 +204,25 @@ fn parse_eval(
     if parsed.lowering_bugs().next().is_some() {
         return Err(ParseFailure::Unsupported);
     }
-    Ok(parsed.program)
+    let warnings = parsed
+        .warnings
+        .iter()
+        // ponytail: Ruby says "assigned but unused variable" for a file and
+        // never for an `eval` string, and this hook is not told which it is
+        // parsing. Dropped for both until it is.
+        .filter(|warning| !warning.message.starts_with("assigned but unused variable"))
+        .map(|warning| {
+            let at = parsed.program.source.line(warning.span.start);
+            (
+                format!("{path}:{at}: warning: {}\n", warning.message),
+                spinel_parse::is_verbose_warning(&warning.message),
+            )
+        })
+        .collect();
+    Ok(ParsedSource {
+        program: parsed.program,
+        warnings,
+    })
 }
 
 #[cfg(test)]

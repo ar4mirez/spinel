@@ -17,14 +17,6 @@ fails(A predefined global with an assignment rule of its own. #166 gave the lang
 fails(A global alias. #166 gave the language a global table, in which two names are two entries; making one name another's second spelling is #39's, along with the runtime state most of these alias. Became visible rather than blocked when the harness learned mspec's should.predicate form):Predefined global $-0 changes $/
 fails(#41: `ARGF` reads the files named on the command line, which needs IO and File):The predefined standard objects includes ARGF
 fails(#38: `TOPLEVEL_BINDING` is a Binding, which is string eval's slice):The predefined global constants includes TOPLEVEL_BINDING
-fails(#268: Spinel prints no warnings yet, and $VERBOSE has no assignment hook):Predefined global $/ warns if assigned non-nil
-fails(#268: Spinel prints no warnings yet, and $VERBOSE has no assignment hook):Predefined global $-0 warns if assigned non-nil
-fails(#268: Spinel prints no warnings yet, and $VERBOSE has no assignment hook):Predefined global $\ warns if assigned non-nil
-fails(#268: Spinel prints no warnings yet, and $VERBOSE has no assignment hook):Predefined global $, warns if assigned non-nil
-fails(#268: Spinel prints no warnings yet, and $VERBOSE has no assignment hook):Predefined global $; warns if assigned non-nil
-fails(#268: Spinel prints no warnings yet, and $VERBOSE has no assignment hook):Global variable $VERBOSE converts truthy values to true
-fails(#268: Spinel prints no warnings yet, and $VERBOSE has no assignment hook):Predefined global $= warns when accessed
-fails(#268: Spinel prints no warnings yet, and $VERBOSE has no assignment hook):Predefined global $= warns when assigned
 fails(#29: assigning $@ sets the backtrace of $!, and $! is restored after a rescue that returns):Predefined global $! should be set to the value of $! before the begin after a rescue which returns
 fails(#29: assigning $@ sets the backtrace of $!, and $! is restored after a rescue that returns):Predefined global $@ is not read-only
 fails(#29: assigning $@ sets the backtrace of $!, and $! is restored after a rescue that returns):Predefined global $@ accepts an Array of Strings

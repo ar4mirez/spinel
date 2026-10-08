@@ -1278,6 +1278,38 @@ fn reflect_native(
             let module = module_arg(scope, 0)?;
             singleton_attached(scope, module)
         }
+        ReflectOp::MethodArity => {
+            let found = match (class_of(scope, arg(0)), arg(1).as_symbol()) {
+                (Some(class), Some(name)) => scope.classes_mut().lookup(class, name),
+                _ => None,
+            };
+            match found.and_then(|method| scope.definitions().get(method.body).cloned()) {
+                Some(Definition::Iseq(iseq)) => {
+                    Value::fixnum(iseq.params.arity()).expect("an arity fits a fixnum")
+                }
+                // A primitive or a `define_method` body: not a fixed count the
+                // caller can rely on.
+                Some(_) => Value::fixnum(-1).expect("-1 is a fixnum"),
+                None => Value::NIL,
+            }
+        }
+        ReflectOp::ConstDeprecated => {
+            let module = module_arg(scope, 0)?;
+            let name = symbol_arg(1)?;
+            if arg(2).is_truthy() {
+                scope.classes_mut().deprecate_const(module, name);
+                Value::NIL
+            } else {
+                let found = scope
+                    .classes()
+                    .const_get_here(module, name)
+                    .or_else(|| scope.classes().const_get_qualified(module, name));
+                match found.and_then(|value| scope.classes().deprecated_const(name, value)) {
+                    Some(holder) => scope.classes().object(holder),
+                    None => Value::NIL,
+                }
+            }
+        }
         ReflectOp::ModuleKind => {
             match class_id_of(scope, arg(0)).map(|id| scope.classes().kind(id)) {
                 Some(Kind::Class) => Value::symbol(symbol("class")),
@@ -1873,12 +1905,68 @@ pub fn eval_in(
                         // A name aliased to a regexp special runs the derivation
                         // rather than reading a cell, so it tracks the *current*
                         // match: measured, a second `=~` moves it.
+                        if scope.global_hooks(symbol) & 2 != 0 {
+                            // A read that is a method (#268): `$=` warns.
+                            let call = Pending {
+                                cache: None,
+                                name: crate::shared::symbols::intern("__global_read__"),
+                                receiver: scope.classes().object(Builtin::Kernel.id()),
+                                args: vec![Value::symbol(symbol)],
+                                keywords: Vec::new(),
+                                block: Value::NIL,
+                                block_is_literal: false,
+                                cref: frames[top].cref,
+                                implicit_self: true,
+                                public_only: false,
+                                target: Target::Method,
+                                owner: None,
+                                defined_as: None,
+                            };
+                            if let Some(unwind) = dispatch(
+                                scope,
+                                &mut stack,
+                                &mut frames,
+                                call,
+                                proc_class,
+                                &mut ids,
+                            )? {
+                                return Ok(Step::Unwind(unwind));
+                            }
+                            return Ok(Step::Next);
+                        }
                         let value = match scope.global_special(symbol) {
                             Some(which) => last_match_part(scope, &which)?,
-                            // An unset global reads `nil` rather than raising:
-                            // Ruby warns under `-w` and answers nil, and the
-                            // warning needs #39's `$stderr`.
-                            None => scope.global(symbol).unwrap_or(Value::NIL),
+                            // An unset global reads `nil` rather than raising.
+                            None => match scope.global(symbol) {
+                                Some(value) => value,
+                                None => {
+                                    stack.push(Value::NIL);
+                                    // Ruby says so under `-w` (#268). Asked
+                                    // here rather than in Ruby so that a read
+                                    // of a global that is set costs nothing.
+                                    let verbose = crate::shared::symbols::intern("$VERBOSE");
+                                    if scope.global(verbose) == Some(Value::TRUE)
+                                        && warns_when_unset(&symbol_name(symbol))
+                                    {
+                                        let message = format!(
+                                            "global variable '{}' not initialized",
+                                            symbol_name(symbol)
+                                        );
+                                        if let Some(unwind) = vm_warn(
+                                            scope,
+                                            &mut stack,
+                                            &mut frames,
+                                            proc_class,
+                                            &mut ids,
+                                            &message,
+                                            true,
+                                        )? {
+                                            return Ok(Step::Unwind(unwind));
+                                        }
+                                    }
+                                    return Ok(Step::Next);
+                                }
+                            },
                         };
                         stack.push(value);
                     }
@@ -1898,6 +1986,25 @@ pub fn eval_in(
                         // Pops, like `SetLocal` and `SetIvar`: the callers that
                         // want assignment to be an expression emit `Dup` first.
                         let value = stack.pop().expect("setglobal on an empty stack");
+                        if scope.global_hooks(symbol) & 1 != 0 {
+                            // An assignment that is a method (#268): `$, = "x"`
+                            // warns, `$VERBOSE = 1` stores `true`. The method
+                            // stores, through `__global_store__`.
+                            let kernel = scope.classes().object(Builtin::Kernel.id());
+                            if let Some(unwind) = call_discarded(
+                                scope,
+                                &mut stack,
+                                &mut frames,
+                                proc_class,
+                                &mut ids,
+                                kernel,
+                                crate::shared::symbols::intern("__global_assign__"),
+                                vec![Value::symbol(symbol), value],
+                            )? {
+                                return Ok(Step::Unwind(unwind));
+                            }
+                            return Ok(Step::Next);
+                        }
                         scope.set_global(symbol, value);
                     }
                     Insn::DefinedGlobal(name) => {
@@ -2529,6 +2636,30 @@ pub fn eval_in(
                             return Err(uninitialized(scope, from, symbol, how));
                         };
                         stack.push(value);
+                        // `deprecate_constant` (#268). The list is empty unless
+                        // a program called it, so a read costs one length check.
+                        if let Some(holder) = scope.classes().deprecated_const(symbol, value) {
+                            let message = format!(
+                                "constant {} is deprecated",
+                                qualified_name(scope, holder, symbol)
+                            );
+                            let text = string_new(scope, &message);
+                            let kernel = scope.classes().object(Builtin::Kernel.id());
+                            let category =
+                                Value::symbol(crate::shared::symbols::intern("deprecated"));
+                            if let Some(unwind) = call_discarded(
+                                scope,
+                                &mut stack,
+                                &mut frames,
+                                proc_class,
+                                &mut ids,
+                                kernel,
+                                crate::shared::symbols::intern("__warning__"),
+                                vec![text, Value::FALSE, category],
+                            )? {
+                                return Ok(Step::Unwind(unwind));
+                            }
+                        }
                     }
 
                     Insn::SetConst(name, how) => {
@@ -2536,6 +2667,7 @@ pub fn eval_in(
                         let cref = frames[top].cref;
                         let value = stack.pop().expect("a value to assign");
                         let target = const_base(scope, &mut stack, cref, how)?;
+                        let redefined = scope.classes().const_get_here(target, symbol).is_some();
                         scope.classes_mut().const_set(target, symbol, value);
                         // `Foo = Class.new` is how an anonymous class gets a name,
                         // and the only way one ever does. Only the first assignment
@@ -2557,6 +2689,30 @@ pub fn eval_in(
                             vec![Value::symbol(symbol)],
                         )? {
                             return Ok(Step::Unwind(unwind));
+                        }
+                        // Reassigning is allowed and Ruby says so (#268). The
+                        // frame is pushed last, so it runs first.
+                        //
+                        // ponytail: CRuby follows with "previous definition
+                        // of X was here", at the first assignment's line. A
+                        // constant does not record where it was assigned;
+                        // that is `const_source_location`'s table (#128).
+                        if redefined {
+                            let message = format!(
+                                "already initialized constant {}",
+                                qualified_name(scope, target, symbol)
+                            );
+                            if let Some(unwind) = vm_warn(
+                                scope,
+                                &mut stack,
+                                &mut frames,
+                                proc_class,
+                                &mut ids,
+                                &message,
+                                false,
+                            )? {
+                                return Ok(Step::Unwind(unwind));
+                            }
                         }
                     }
 
@@ -5465,6 +5621,26 @@ fn fire_hook<'h>(
             }
         }
     }
+    call_discarded(
+        scope, stack, frames, proc_class, ids, receiver, symbol, args,
+    )
+}
+
+/// `receiver.name(*args)` as a frame on top of the stack whose value nobody
+/// wants: a hook, a warning, a hooked global's setter. It runs before the
+/// instruction that pushed it carries on. The call is receiverless, so a
+/// private method is reached.
+#[allow(clippy::too_many_arguments)]
+fn call_discarded<'h>(
+    scope: &mut HandleScope<'h>,
+    stack: &mut Vec<Value>,
+    frames: &mut Vec<Call>,
+    proc_class: Handle<'h>,
+    ids: &mut u64,
+    receiver: Value,
+    symbol: SymbolId,
+    args: Vec<Value>,
+) -> Result<Option<Unwind>, Error> {
     let cref = frames.last().map_or(CrefId::ROOT, |frame| frame.cref);
     let call = Pending {
         cache: None,
@@ -5493,6 +5669,62 @@ fn fire_hook<'h>(
         stack.truncate(height);
     }
     Ok(None)
+}
+
+/// Say `message` as a warning, at the line the running frame is on (#268).
+///
+/// The text, the position and the decision to print are `Kernel#__warning__`,
+/// in Ruby, because the last step is `Warning.warn` and a program may have
+/// its own. `verbose` is a warning only `-w` prints. Sent to the `Kernel`
+/// module object, which is always there and always has the method — the
+/// frame's own `self` may be a `BasicObject`.
+#[allow(clippy::too_many_arguments)]
+fn vm_warn<'h>(
+    scope: &mut HandleScope<'h>,
+    stack: &mut Vec<Value>,
+    frames: &mut Vec<Call>,
+    proc_class: Handle<'h>,
+    ids: &mut u64,
+    message: &str,
+    verbose: bool,
+) -> Result<Option<Unwind>, Error> {
+    let text = string_new(scope, message);
+    let kernel = scope.classes().object(Builtin::Kernel.id());
+    call_discarded(
+        scope,
+        stack,
+        frames,
+        proc_class,
+        ids,
+        kernel,
+        crate::shared::symbols::intern("__warning__"),
+        vec![text, bool_value(verbose)],
+    )
+}
+
+/// Whether reading the unset global `name` is worth a `-w` warning.
+///
+/// Only a name a program made up. The punctuation globals and the ones the
+/// runtime owns are nil until something sets them, and Ruby does not call
+/// that uninitialized: `$,`, `$_` and `$stdin` are always there.
+fn warns_when_unset(name: &str) -> bool {
+    const RUNTIME: &[&str] = &[
+        "$DEBUG",
+        "$FILENAME",
+        "$LOAD_PATH",
+        "$LOADED_FEATURES",
+        "$PROGRAM_NAME",
+        "$VERBOSE",
+        "$stdin",
+        "$stdout",
+        "$stderr",
+        "$_",
+    ];
+    let mut chars = name.chars().skip(1);
+    let made_up = chars
+        .next()
+        .is_some_and(|first| first.is_alphabetic() || first == '_');
+    made_up && !RUNTIME.contains(&name)
 }
 
 /// Name a class or module that a constant assignment just gave a name to.
@@ -7066,6 +7298,42 @@ fn native_call<'h>(
             if scope.classes().repr(id) == Some(Builtin::Regexp) {
                 let value = regexp_new_from(scope, &call)?;
                 stack.push(value);
+                // The two things `Regexp.new` says about a second argument it
+                // is not going to use as given (#268): flags beside a Regexp
+                // are ignored, and anything but an Integer, a String, true,
+                // false or nil is read as "ignore case" — under `-w` only, and
+                // with the argument's `inspect`, which is why that one is Ruby.
+                let first = call.args.first().copied().unwrap_or(Value::NIL);
+                let second = call.args.get(1).copied();
+                if is_regexp(scope, first) {
+                    if second.is_some() {
+                        return vm_warn(
+                            scope,
+                            stack,
+                            frames,
+                            proc_class,
+                            ids,
+                            "flags ignored",
+                            false,
+                        );
+                    }
+                } else if let Some(flag) = second
+                    && !flag.is_immediate()
+                    && !crate::bignum::is_big(scope, flag)
+                    && string_text(scope, flag).is_none()
+                {
+                    let kernel = scope.classes().object(Builtin::Kernel.id());
+                    return call_discarded(
+                        scope,
+                        stack,
+                        frames,
+                        proc_class,
+                        ids,
+                        kernel,
+                        crate::shared::symbols::intern("__regexp_flag_warning__"),
+                        vec![flag],
+                    );
+                }
                 return Ok(None);
             }
             // Since #15 the shape per class lives in one place, and `new` is
@@ -8475,6 +8743,35 @@ fn native_call<'h>(
                 scope.freeze_global(name);
             }
             stack.push(Value::NIL);
+            Ok(None)
+        }
+        Native::HookGlobal => {
+            let reads = call.args.first().is_some_and(|v| v.is_truthy());
+            for name in call.args.iter().skip(1).filter_map(|v| v.as_symbol()) {
+                scope.hook_global(name, reads);
+            }
+            stack.push(Value::NIL);
+            Ok(None)
+        }
+        Native::GlobalStore => {
+            let (Some(name), Some(&value)) = (
+                call.args.first().and_then(|v| v.as_symbol()),
+                call.args.get(1),
+            ) else {
+                return Err(Error::raise("ArgumentError", "a global name and a value"));
+            };
+            scope.set_global(name, value);
+            stack.push(value);
+            Ok(None)
+        }
+        Native::GlobalFetch => {
+            let value = call
+                .args
+                .first()
+                .and_then(|v| v.as_symbol())
+                .and_then(|name| scope.global(name))
+                .unwrap_or(Value::NIL);
+            stack.push(value);
             Ok(None)
         }
         Native::Fs(op) => fs_native(scope, stack, &call, op),
@@ -10241,6 +10538,16 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         ),
         (
             Builtin::Kernel,
+            &["__reflect_method_arity__"],
+            Native::Reflect(ReflectOp::MethodArity),
+        ),
+        (
+            Builtin::Kernel,
+            &["__reflect_const_deprecated__"],
+            Native::Reflect(ReflectOp::ConstDeprecated),
+        ),
+        (
+            Builtin::Kernel,
             &["__method__"],
             Native::FrameMethod { callee: false },
         ),
@@ -10308,6 +10615,9 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             &["__freeze_global__"],
             Native::FreezeGlobal,
         ),
+        (Builtin::Kernel, &["__hook_global__"], Native::HookGlobal),
+        (Builtin::Kernel, &["__global_store__"], Native::GlobalStore),
+        (Builtin::Kernel, &["__global_fetch__"], Native::GlobalFetch),
         (Builtin::Kernel, &["__argv__"], Native::Argv),
         (Builtin::Kernel, &["__mark_partial__"], Native::MarkPartial),
         (
@@ -12307,7 +12617,7 @@ fn spellable_local(name: &str) -> bool {
 
 fn binding_eval(
     scope: &mut HandleScope<'_>,
-    stack: &[Value],
+    stack: &mut Vec<Value>,
     frames: &mut Vec<Call>,
     call: &Pending,
     binding: Value,
@@ -12366,8 +12676,11 @@ fn binding_eval(
     let line = call.args.get(2).and_then(|v| v.as_fixnum()).unwrap_or(1);
     let handle = scope.root(binding);
     let in_method = scope.slot(handle, BINDING_OWNER) != Value::NIL;
-    let program = match parser(&path, &source, line, in_method) {
-        Ok(mut program) => {
+    let (program, warnings) = match parser(&path, &source, line, in_method) {
+        Ok(crate::heap::ParsedSource {
+            mut program,
+            warnings,
+        }) => {
             // With no magic comment, the string's own encoding is the source
             // encoding its literals take.
             let encoding = call.args.first().and_then(|&v| string_encoding(scope, v));
@@ -12377,7 +12690,7 @@ fn binding_eval(
             {
                 map.encoding = Some(crate::strings::name(encoding).into());
             }
-            program
+            (program, warnings)
         }
         Err(crate::heap::ParseFailure::Syntax(message)) => {
             return Err(Error::raise("SyntaxError", message));
@@ -12466,7 +12779,7 @@ fn binding_eval(
         let env = frames.last().expect("just pushed").env;
         binding_push(scope, binding, &iseq, env);
     }
-    Ok(None)
+    parse_warnings(scope, stack, frames, ids, &warnings)
 }
 
 // ---------------------------------------------------------------------------
@@ -12643,7 +12956,7 @@ fn os_string(scope: &mut HandleScope<'_>, text: std::ffi::OsString) -> Value {
 /// a `LoadError`.
 fn load_file(
     scope: &mut HandleScope<'_>,
-    stack: &[Value],
+    stack: &mut Vec<Value>,
     frames: &mut Vec<Call>,
     call: &Pending,
     ids: &mut u64,
@@ -12665,8 +12978,8 @@ fn load_file(
         }
     };
     let name = path.to_string_lossy().into_owned();
-    let program = match parser(&name, &source, 1, false) {
-        Ok(program) => program,
+    let (program, warnings) = match parser(&name, &source, 1, false) {
+        Ok(parsed) => (parsed.program, parsed.warnings),
         Err(crate::heap::ParseFailure::Syntax(message)) => {
             return Err(Error::raise("SyntaxError", message));
         }
@@ -12734,6 +13047,36 @@ fn load_file(
         Binding::Strict,
         links,
     )?;
+    parse_warnings(scope, stack, frames, ids, &warnings)
+}
+
+/// Print what the parser said about a source that is about to run (#268).
+///
+/// Each is a frame on top of the one just pushed, so they run first and in
+/// order, and each ends in `Warning.warn` — which is how a program that
+/// redefines it hears about a duplicated hash key in an `eval`.
+fn parse_warnings(
+    scope: &mut HandleScope<'_>,
+    stack: &mut Vec<Value>,
+    frames: &mut Vec<Call>,
+    ids: &mut u64,
+    warnings: &[(String, bool)],
+) -> Result<Option<Unwind>, Error> {
+    if warnings.is_empty() {
+        return Ok(None);
+    }
+    let proc_class = class_handle(scope, Builtin::Proc);
+    let kernel = scope.classes().object(Builtin::Kernel.id());
+    let name = crate::shared::symbols::intern("__parse_warning__");
+    for (text, verbose) in warnings.iter().rev() {
+        let text = string_new(scope, text);
+        let args = vec![text, bool_value(*verbose)];
+        if let Some(unwind) =
+            call_discarded(scope, stack, frames, proc_class, ids, kernel, name, args)?
+        {
+            return Ok(Some(unwind));
+        }
+    }
     Ok(None)
 }
 

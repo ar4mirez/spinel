@@ -1,2 +1,1 @@
-fails(#268: Spinel prints no warnings yet, and this example expects one):Module#const_set when overwriting an existing constant warns if the previous value was a normal value
 fails(#28: a module nested in an anonymous one is not renamed when the outer one is named):Module#const_set sets the name of contained modules when assigning a toplevel anonymous module
