@@ -212,6 +212,9 @@ pub enum Native {
     /// `__method_call__(owner, name, receiver, *args, &block)`: `Method#call`.
     /// Pushes a frame.
     MethodCall,
+    /// `__math__(:name, x, y = nil)`: one libm function, or `Float`'s
+    /// truncation to an Integer. `Math` and the rounding half of `Float`.
+    Math,
     /// `Integer#**` — repeated multiplication with an overflow check, so the
     /// answer is a refusal rather than a wrapped one.
     IntPow,

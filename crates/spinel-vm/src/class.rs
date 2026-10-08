@@ -336,8 +336,9 @@ pub enum Builtin {
     NilClass,
     TrueClass,
     FalseClass,
-    /// The class of a flonum. Boxed floats — NaN, the infinities, `-0.0` — are
-    /// not values this VM has yet; see `Literal::BoxedFloat`.
+    /// The class of every Float: a flonum, and a boxed one — NaN, the
+    /// infinities, `-0.0`, the extremes — which is a heap cell of this class
+    /// (`crate::float`).
     Float,
 }
 

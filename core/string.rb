@@ -1876,9 +1876,14 @@ class String
     end
 
     def float(f, conversion, flags, width, precision)
-      # ponytail: NaN and Infinity print as "NaN" and "Inf" in CRuby. Only
-      # immediate floats exist here, and none of them is either; boxed floats
-      # (#18) bring them, and their branch, back.
+      # NaN and the infinities are words, not digits, whatever the
+      # conversion: no exponent, no precision, and padded with spaces even
+      # under a `0` flag. Measured.
+      unless f.finite?
+        negative = !f.nan? && f < 0
+        sign = negative ? "-" : (flags.include?("+") ? "+" : (flags.include?(" ") ? " " : ""))
+        return pad(sign + (f.nan? ? "NaN" : "Inf"), width, flags - ["0"], true)
+      end
       digits = f.__format__(conversion.ord, precision || 6, flags.include?("#"))
       negative = f < 0 || (f == 0.0 && f.to_s.start_with?("-"))
       sign = negative ? "-" : (flags.include?("+") ? "+" : (flags.include?(" ") ? " " : ""))
@@ -1920,9 +1925,8 @@ module Kernel
   # wide enough that rounding cannot carry into the integer part, cut at the
   # point. (`Float#to_i` is #18's.)
   def self.__float_to_i__(value)
-    digits = value.__format__(102, 17, false)
-    whole = digits[0, digits.index(".") || digits.length].to_i
-    value < 0 ? -whole : whole
+    # NaN and the infinities raise `FloatDomainError` there.
+    value.to_i
   end
 
   def self.__format_float__(value)

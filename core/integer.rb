@@ -156,11 +156,14 @@ class Integer
   end
 
   # Float division. `to_f` first so an Integer operand does not floor.
-  #
-  # ponytail: `1.fdiv(0)` is Infinity in Ruby and reports a missing `Float#/`
-  # here, because this VM has only flonums and no boxed infinity — #18. Every
-  # finite case is right.
+  # Two Integers too wide for a Float still have a quotient that fits one:
+  # both are shifted down by the same amount first, which leaves the ratio
+  # alone to within the last bit.
   def fdiv(other)
+    if other.is_a?(Integer) && other != 0
+      spare = (bit_length < other.bit_length ? bit_length : other.bit_length) - 1000
+      return (self >> spare).to_f / (other >> spare).to_f if spare > 0
+    end
     to_f / other
   end
 

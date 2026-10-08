@@ -1,1 +1,3 @@
 fails(#18: converting an object through to_f needs Float's own conversions):Integer#fdiv follows the coercion protocol
+fails(#17: Integer#fdiv of two bignums shifts both to fit a Float rather than dividing exactly, so the last bit and a subnormal quotient are wrong):Integer#fdiv rounds to the correct value for bignums
+fails(#17: Integer#fdiv of two bignums shifts both to fit a Float rather than dividing exactly, so the last bit and a subnormal quotient are wrong):Integer#fdiv rounds to the correct float for bignum denominators

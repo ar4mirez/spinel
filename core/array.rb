@@ -280,6 +280,12 @@ class Array
         total = total + value
         next
       end
+      # An infinity or a NaN has no rounding error to carry, and compensating
+      # for one turns Infinity into NaN.
+      if (value.is_a?(Float) && !value.finite?) || !total.finite?
+        total = total + value
+        next
+      end
       running = total + value
       if total.abs >= value.abs
         compensation = compensation + ((total - running) + value)

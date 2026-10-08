@@ -627,7 +627,7 @@ pub enum Literal {
     /// bignums exist.
     BigInt(Box<str>),
     /// Outside flonum range — NaN, the infinities, `-0.0`, the extremes — so it
-    /// needs the heap.
+    /// is boxed: a fresh heap cell each time the literal is evaluated.
     BoxedFloat(f64),
     /// A float that fits an immediate. Held here rather than in the instruction
     /// because `Insn` stays `Copy` and small either way, and this keeps one

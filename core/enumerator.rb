@@ -611,7 +611,8 @@ class Enumerator
       @sources.each do |source|
         return nil unless source.respond_to?(:size)
         part = source.size
-        return nil unless part.is_a?(Integer)
+        # The first link without a count decides: nil, or Infinity.
+        return part unless part.is_a?(Integer)
         total = total + part
       end
       total
@@ -690,13 +691,18 @@ class Enumerator
     def size
       raise ArgumentError, "uninitialized product" if @sources.nil?
       total = 1
+      endless = false
       @sources.each do |source|
         return nil unless source.respond_to?(:size)
         part = source.size
+        if part.is_a?(Float) && part.infinite?
+          endless = true
+          next
+        end
         return nil unless part.is_a?(Integer)
         total = total * part
       end
-      total
+      endless ? Float::INFINITY : total
     end
 
     # Every source that has a `rewind`, in order. Measured.
@@ -730,9 +736,7 @@ class Enumerator
   end
 
   # `produce` has no end unless the block raises `StopIteration`, which is what
-  # `loop` swallows. Its `size` is `Float::INFINITY` in Ruby and this VM has
-  # only flonums, so `size` is left to report the missing constant by name
-  # rather than answering `nil`, which would be a wrong answer (#18).
+  # `loop` swallows, so its `size` is `Float::INFINITY`.
   #
   # Ruby 4.0 takes `size:`, which is the size the enumerator reports.
   def self.produce(*initial, size: :__spinel_no_size__, **unknown, &block)
@@ -741,7 +745,7 @@ class Enumerator
     if initial.size > 1
       raise ArgumentError, "wrong number of arguments (given #{initial.size}, expected 0..1)"
     end
-    sized = size.equal?(:__spinel_no_size__) ? [] : [size]
+    sized = size.equal?(:__spinel_no_size__) ? [Float::INFINITY] : [size]
     new(*sized) do |y|
       value = initial.empty? ? block.call(nil) : initial[0]
       loop do
