@@ -14,8 +14,8 @@
 //!
 //! # Compiled once, evaluated per heap
 //!
-//! [`boot`] is called once per [`Heap`], and the spec harness makes one heap per
-//! example — 25,000 of them in a corpus run. Evaluating per heap is unavoidable,
+//! [`boot`] is called once per [`Heap`], and a corpus run under mspec starts a
+//! few hundred processes, each with its own. Evaluating per heap is unavoidable,
 //! because a method table belongs to a heap. Parsing per heap is not, so the
 //! compile happens on the first call and the resulting [`Iseq`]s are cached.
 //!

@@ -295,7 +295,7 @@ fn main() {
     }
 
     // Boot: several hundred definitions, most of them on `Object` or `Kernel`.
-    // The spec harness pays this once per example, 25,624 times.
+    // Every `spinel` process pays this once, and a corpus run starts hundreds.
     const B: u32 = 200;
     let boot = time(B, || {
         let mut heap = Heap::new();

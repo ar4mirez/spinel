@@ -15,7 +15,7 @@
 //!
 //! Ranges rather than a bitset: 2,353 of them across the six, sorted, so a
 //! lookup is a binary search over ~19 KB of `.rodata` and costs nothing at boot
-//! — which matters, because the spec harness boots one heap per example.
+//! — which matters, because every `spinel` process boots a heap.
 
 use std::fmt::Write as _;
 use std::path::PathBuf;

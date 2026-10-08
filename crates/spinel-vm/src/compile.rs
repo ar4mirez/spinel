@@ -9,7 +9,7 @@
 //! # `Unsupported` is the whole safety property
 //!
 //! A node this slice does not implement returns an error naming the node and its
-//! span. It never compiles to something approximate. `spec/harness` turns that
+//! span. It never compiles to something approximate. A spec run turns that
 //! error into a `blocked` example, so there is no path from an unimplemented
 //! construct to a *passing* spec — which is the reason
 //! [#5](https://github.com/ar4mirez/spinel/issues/5) shipped a `blocked` column
@@ -47,7 +47,7 @@ use crate::value::Value;
 
 /// A node this slice does not compile.
 ///
-/// Carries what it was and where, because the harness prints it as the reason
+/// Carries what it was and where, because a spec run prints it as the reason
 /// an example is blocked and that reason is how the next slice is chosen.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Unsupported {
@@ -104,64 +104,6 @@ pub fn program_as(program: &Program, name: &str) -> Result<Iseq, Unsupported> {
     Ok(compiler.finish())
 }
 
-/// Compile a statement list that shares one scope: a script, or — until
-/// [#11](https://github.com/ar4mirez/spinel/issues/11) — a block body the
-/// harness runs directly.
-pub fn body(name: &str, locals: &[Name], statements: &[Expr]) -> Result<Iseq, Unsupported> {
-    let mut compiler = Compiler::new(name, locals);
-    compiler.statements(statements, true)?;
-    Ok(compiler.finish())
-}
-
-/// Compile one expression against a known set of local slots.
-///
-/// The harness uses this to evaluate the two halves of `x.should == y` in a
-/// frame both halves share, which is what keeps an example's locals alive from
-/// one statement to the next without the VM knowing what a matcher is.
-pub fn expression(name: &str, locals: &[Name], expr: &Expr) -> Result<Iseq, Unsupported> {
-    let mut compiler = Compiler::new(name, locals);
-    compiler.expr(expr)?;
-    Ok(compiler.finish())
-}
-
-/// [`expression`], for a caller that has flattened several Ruby scopes into the
-/// one `locals` describes.
-///
-/// `spec/harness` is that caller and the only one (#164). ruby/spec declares a
-/// local in a `describe` body, assigns it in a `before`, and reads it in the
-/// example — three scopes, one variable — and the harness runs all three
-/// statements in a single frame so the value survives between them. Prism
-/// resolved those reads against the scopes *as written*, so they arrive here
-/// carrying a `depth` that counts scopes this caller has merged.
-///
-/// Under this flag a depth pointing past the enclosing scopes that actually
-/// exist resolves to the outermost one that does, rather than being refused.
-/// It is opt-in because for ordinary Ruby that same depth is a disagreement
-/// between Prism and this compiler about what a local is — a bug to hear about
-/// rather than a shape to lower — and [`expression`] still says so.
-///
-/// It does not cross a scope barrier: a `def` inside a flattened statement
-/// cannot see the flattened locals, exactly as it cannot in Ruby.
-pub fn flattened_expression(name: &str, locals: &[Name], expr: &Expr) -> Result<Iseq, Unsupported> {
-    flattened_expression_in(None, name, locals, expr)
-}
-
-/// [`flattened_expression`] for an `expr` out of a parsed file, so its
-/// instructions carry that file's lines and a backtrace through it can name
-/// them (#29).
-pub fn flattened_expression_in(
-    source: Option<&Arc<SourceMap>>,
-    name: &str,
-    locals: &[Name],
-    expr: &Expr,
-) -> Result<Iseq, Unsupported> {
-    let mut compiler = Compiler::new(name, locals);
-    compiler.source = source.cloned();
-    compiler.flattened = true;
-    compiler.expr(expr)?;
-    Ok(compiler.finish())
-}
-
 /// Compile a string `eval` (#38) whose environment sits inside one whose
 /// locals are `chain`, innermost first.
 ///
@@ -191,42 +133,6 @@ pub fn eval(
     compiler.find_eval_phantoms();
     compiler.statements(&program.body, true)?;
     Ok(compiler.finish())
-}
-
-/// Every local name that appears as an assignment target anywhere in `body`.
-///
-/// The parser's own scope list is the authority and is used first; this is the
-/// belt to its braces, and it is also what lets the harness pre-size a frame
-/// that several separately compiled expressions share.
-#[must_use]
-pub fn declared_locals(statements: &[Expr]) -> Vec<Name> {
-    let mut out: Vec<Name> = Vec::new();
-    for statement in statements {
-        collect_locals(statement, &mut out);
-    }
-    out
-}
-
-/// The flip-flop state locals `body` needs, for a caller that runs several
-/// Ruby scopes in one frame.
-///
-/// The parser declares these against the scope that encloses each site, and
-/// `spec/harness` never sees that scope: it collects an example's locals from
-/// the `it` block and its enclosing groups, which are all blocks. So the sites
-/// are re-found here and added to the merged list, where they land in the one
-/// frame the example runs in — which is the same environment the block chain
-/// would have closed over.
-///
-/// Descends into call blocks, unlike [`declared_locals`], because a flip-flop
-/// inside `10.times { }` belongs to the scope around it. It stops at a `def`
-/// for the same reason Ruby does — [`children`] does not cross one.
-#[must_use]
-pub fn declared_flip_flops(statements: &[Expr]) -> Vec<Name> {
-    let mut out: Vec<Name> = Vec::new();
-    for statement in statements {
-        collect_flip_flops(statement, &mut out);
-    }
-    out
 }
 
 // ---------------------------------------------------------------------------
@@ -365,9 +271,6 @@ struct Compiler {
     /// Whether [`Self::env_synthetic`] holds a `true` anywhere, which is the
     /// question every local resolution asks and almost always answers no to.
     has_synthetic_env: bool,
-    /// The caller merged several Ruby scopes into [`Self::locals`], so a depth
-    /// may overshoot the chain. See [`flattened_expression`].
-    flattened: bool,
     /// How many compound patterns are open around the code being compiled
     /// right now, so a nested one gets its own hidden locals rather than
     /// overwriting the locals the outer one is still using (#165).
@@ -490,7 +393,6 @@ impl Compiler {
             outer: Vec::new(),
             env_synthetic: vec![false],
             has_synthetic_env: false,
-            flattened: false,
             pattern_depth: 0,
             pattern_cache: None,
             pattern_key: None,
@@ -543,9 +445,6 @@ impl Compiler {
                 .env_synthetic
                 .extend(parent.env_synthetic.iter().copied());
             compiler.has_synthetic_env = parent.has_synthetic_env;
-            // A block sees the flattened scopes its parent saw. A method body
-            // does not, which is what the barrier already says.
-            compiler.flattened = parent.flattened;
             // `super` inside a block forwards the *method's* arguments, one
             // scope further out than the block's own locals. A method body
             // takes none of this: `zsuper` stays `None` until its own
@@ -2818,9 +2717,8 @@ impl Compiler {
     fn real_depth(&self, name: &str, depth: u32) -> Option<u32> {
         // The overwhelmingly common answer, and this runs once per local
         // mention while compiling: a chain with no `for` in it resolves the way
-        // it always did. Kept as a flag rather than a scan of `env_synthetic`
-        // because the spec harness boots a heap per example, so compile-time
-        // work here is paid 25k times over.
+        // it always did. Kept as a flag rather than a scan of `env_synthetic`,
+        // which would be paid on every local in every file compiled.
         if !self.has_synthetic_env {
             return Some(depth);
         }
@@ -2843,27 +2741,6 @@ impl Compiler {
             visible += 1;
         }
         None
-    }
-
-    /// The reason an outward resolution failed.
-    ///
-    /// Under `flattened` the miss is the harness's, not the compiler's: it
-    /// merged the scopes it could collect, and a name still missing belongs to
-    /// a block it never ran — the loop-parameter shape
-    /// `docs/prd/0024-harness-enclosing-scope.md` refuses on purpose, where
-    /// `each do |family, ip_address|` wraps a `describe`. Naming that
-    /// separately is what keeps the blocked ranking honest: one string for both
-    /// meanings read as a compiler gap twice, in #164 and again in #220, and
-    /// each time the plain `.rb` shape ran fine.
-    fn unresolved_local(&self, span: Span) -> Unsupported {
-        if self.flattened {
-            Unsupported::at(
-                "a local variable from a block the harness did not run",
-                span,
-            )
-        } else {
-            Unsupported::at("a local variable from an enclosing scope", span)
-        }
     }
 
     fn outer_slot(
@@ -2897,51 +2774,13 @@ impl Compiler {
         // A method body cannot see the locals of the scope it was written in,
         // and the compiler never builds one that tries. A block nested in a
         // method that is nested in a block can, which is why this is a walk.
-        // A caller that flattened scopes hands over a depth counting scopes that
-        // no longer exist separately; the outermost one that does exist is
-        // where they all went. With no outer scope at all that is this one, and
-        // the name may be the first mention of a slot the flattening created.
-        // See `flattened_expression`.
-        // The depth is rewritten as well as the slot: it is what
-        // `Insn::GetLocal` walks at run time, and a frame that is one
-        // environment short of the depth it was handed does not fail, it reads
-        // whatever is there.
-        let effective = if self.flattened {
-            depth.min(self.outer.len() as u32)
-        } else {
-            depth
-        };
-        if effective == 0 {
-            // Resolved, never created. A name the flattening did not actually
-            // merge is a name from a scope that is still missing, and inventing
-            // a slot for it would bind `nil` rather than refuse:
-            //
-            // ```ruby
-            // symbols.each do |input, expected|
-            //   it "..." do input.inspect.should == expected end
-            // end
-            // ```
-            //
-            // `input` belongs to a block the harness does not run. Creating it
-            // turned `core/symbol/inspect_spec.rb` from blocked into a *failure*
-            // against two nils the harness had made up — and nothing about that
-            // guaranteed the failing direction rather than a false pass.
-            return self
-                .locals
-                .iter()
-                .position(|l| &**l == name)
-                .map(|index| (index as u16, 0))
-                .ok_or_else(|| self.unresolved_local(span));
-        }
-        let scope = self
-            .outer
-            .get(effective as usize - 1)
-            .ok_or_else(|| self.unresolved_local(span))?;
+        let missing = || Unsupported::at("a local variable from an enclosing scope", span);
+        let scope = self.outer.get(depth as usize - 1).ok_or_else(missing)?;
         scope
             .iter()
             .position(|l| &**l == name)
-            .map(|index| (index as u16, effective as u16))
-            .ok_or_else(|| self.unresolved_local(span))
+            .map(|index| (index as u16, depth as u16))
+            .ok_or_else(missing)
     }
 
     /// The slot an anonymous parameter — `*`, `**` or `&` — was bound to.
@@ -3402,8 +3241,8 @@ impl Compiler {
 
     /// A body this compiler cannot lower yet, as one that says so when it
     /// runs (#145): the rest of the file still compiles, and only a call that
-    /// reaches the construct refuses — the granularity `spec/harness` had when
-    /// it compiled each example on its own. Its parameters are the real ones
+    /// reaches the construct refuses, so one example blocks rather than its
+    /// whole file. Its parameters are the real ones
     /// when they lower, and a catch-all rest otherwise, so a call still binds.
     #[allow(clippy::too_many_arguments)]
     fn refusing_child(
@@ -5263,76 +5102,6 @@ fn flat_bytes(parts: &[StrPart]) -> Option<Box<[u8]>> {
         }
     }
     Some(out.into_boxed_slice())
-}
-
-fn collect_flip_flops(expr: &Expr, out: &mut Vec<Name>) {
-    if matches!(expr.kind, ExprKind::FlipFlop(_)) {
-        let name: Name = format!("%ff{}", expr.span.start).into_boxed_str();
-        if !out.contains(&name) {
-            out.push(name);
-        }
-    }
-    if let ExprKind::Call(call) = &expr.kind
-        && let Some(BlockArg::Block(block)) = call.block.as_ref()
-    {
-        for statement in &block.body {
-            collect_flip_flops(statement, out);
-        }
-    }
-    for child in children(expr) {
-        collect_flip_flops(child, out);
-    }
-}
-
-fn collect_locals(expr: &Expr, out: &mut Vec<Name>) {
-    if let ExprKind::Assign(assign) = &expr.kind
-        && let TargetKind::Var(VarRef::Local { name, depth: 0 }) = &assign.target.kind
-        && !out.iter().any(|existing| existing == name)
-    {
-        out.push(name.clone());
-    }
-    for child in children(expr) {
-        collect_locals(child, out);
-    }
-}
-
-/// The sub-expressions of a node, for the local scan. Deliberately shallow:
-/// only the forms this slice compiles can introduce a local it will read.
-fn children(expr: &Expr) -> Vec<&Expr> {
-    match &expr.kind {
-        ExprKind::Assign(assign) => vec![&assign.value],
-        ExprKind::If(node) => node
-            .then_body
-            .iter()
-            .chain(node.else_body.iter().flatten())
-            .chain(std::iter::once(&node.predicate))
-            .collect(),
-        ExprKind::While(node) => node
-            .body
-            .iter()
-            .chain(std::iter::once(&node.predicate))
-            .collect(),
-        ExprKind::Case(node) => {
-            let mut out: Vec<&Expr> = node.predicate.iter().collect();
-            if let CaseBranches::When(clauses) = &node.branches {
-                for clause in clauses {
-                    out.extend(clause.conditions.iter());
-                    out.extend(clause.body.iter());
-                }
-            }
-            out.extend(node.else_body.iter().flatten());
-            out
-        }
-        ExprKind::Logical(node) => vec![&node.left, &node.right],
-        ExprKind::Parens(statements) => statements.iter().collect(),
-        ExprKind::Begin(node) => node.body.iter().collect(),
-        ExprKind::Array(elements) => elements.iter().collect(),
-        ExprKind::Call(call) => call.receiver.iter().chain(call.args.iter()).collect(),
-        ExprKind::Break(value) | ExprKind::Next(value) | ExprKind::Return(value) => {
-            value.iter().map(|v| &**v).collect()
-        }
-        _ => Vec::new(),
-    }
 }
 
 /// Whether a call's keyword group has to be lowered to a `Hash` (#193).

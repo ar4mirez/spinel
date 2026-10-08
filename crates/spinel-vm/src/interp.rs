@@ -85,8 +85,8 @@ pub enum Error {
     /// the way out, and found none — so the class name may be one the program
     /// defined, which is why it is a `String` and not `&'static str`.
     Uncaught { class: String, message: String },
-    /// A loop that ran past its budget. Guards the harness against a spec that
-    /// depends on a construct the compiler silently made non-terminating.
+    /// A loop that ran past its budget. Guards a spec run against an example
+    /// that depends on a construct the compiler silently made non-terminating.
     Budget,
     /// A construct the compiler could not lower, reached at run time. See
     /// [`crate::bytecode::Insn::Refuse`].
@@ -152,11 +152,10 @@ pub const BUDGET: u64 = 50_000_000;
 
 /// The top-level scope an evaluation runs in.
 ///
-/// The harness keeps one across an example's statements, which is how `a = 1` in
-/// the first line is visible to `a.should == 1` in the last without the VM
-/// knowing what a matcher is. Its locals live in a heap environment like every
-/// other scope's, so a block written at the top level captures them for real
-/// rather than seeing a copy.
+/// A caller may keep one across several evaluations, and a local the first
+/// assigned is then visible to the next. Its locals live in a heap environment
+/// like every other scope's, so a block written at the top level captures them
+/// for real rather than seeing a copy.
 #[derive(Debug, Clone)]
 pub struct Frame {
     /// The environment holding this scope's locals. `NIL` until the first
@@ -168,8 +167,8 @@ pub struct Frame {
     /// yet — which is also true in Ruby, where `main` is an ordinary `Object`.
     receiver: Value,
     /// The lexical scope statements run in. A file's top level is
-    /// [`CrefId::ROOT`], and a `class` body pushes its own; this is only ever
-    /// `ROOT` because the harness evaluates one top-level statement at a time.
+    /// [`CrefId::ROOT`], and a `class` body pushes its own onto the frames it
+    /// runs in, so this one stays `ROOT`.
     cref: CrefId,
 }
 
@@ -187,25 +186,11 @@ impl Frame {
 
     /// Grow to hold at least `slots` locals, keeping the ones already set.
     ///
-    /// The harness compiles an example's statements separately against one
-    /// shared slot map, and a later statement may be the first to mention a
-    /// local; the frame follows rather than being rebuilt.
-    pub fn reserve(&mut self, slots: usize) {
+    /// [`eval_in`] calls this with the `Iseq` it is about to run, so a frame
+    /// made with `Frame::new(0)` — which is how `spinel run` and the core
+    /// library's loader make theirs — fits whatever it is handed.
+    fn reserve(&mut self, slots: usize) {
         self.slots = self.slots.max(slots);
-    }
-
-    /// Write `value` into local `slot`, growing the frame to hold it.
-    ///
-    /// The harness parks a value it already computed here so a compiled
-    /// expression can read it back by name — which is how `x.should == y`
-    /// dispatches `==` to Ruby without evaluating `x` a second time.
-    pub fn set_local(&mut self, scope: &mut HandleScope<'_>, slot: usize, value: Value) {
-        let value = scope.root(value);
-        self.reserve(slot + 1);
-        let env = self.env(scope);
-        let env = scope.root(env);
-        let value = scope.get(value);
-        scope.set_slot(env, ENV_HEADER + slot, value);
     }
 
     /// This frame's environment, allocated or grown to fit `slots`.
@@ -424,8 +409,8 @@ struct Call {
 /// so `def foo(a, b); end; foo(1)` answered `nil` instead of raising
 /// `ArgumentError`. Nothing caught it because nothing could *catch*: the
 /// example that asserts on it is `-> { foo 1 }.should.raise(ArgumentError)`,
-/// which was reported blocked until the matcher in `spec/harness` could run a
-/// proc and look at what came out. A named type rather than a second `bool`,
+/// which was reported blocked until a spec runner could run a proc and look at
+/// what came out. A named type rather than a second `bool`,
 /// because the reason the first one was wrong is that its name described one of
 /// the two rules and was read as describing the other.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -506,9 +491,8 @@ enum Unwind {
 // reaches its last frame goes on unwinding there — `leave_fiber`.
 //
 // The vectors of a fiber that is not running live in `FiberTable`, per heap,
-// so a fiber can be resumed by a later evaluation than the one that made it —
-// the spec harness runs an example one statement at a time. They are traced by
-// the collector through `FiberTable::each_root`.
+// so a fiber can be resumed by a later evaluation than the one that made it.
+// They are traced by the collector through `FiberTable::each_root`.
 
 /// The two vectors a fiber runs on.
 #[derive(Default)]
@@ -3021,7 +3005,7 @@ pub fn eval_in(
                 }
                 // `NoDispatch`, `Budget`, and `Unknowable` are not Ruby semantics:
                 // they say this VM cannot run the program. A `rescue` must never
-                // turn "not implemented yet" into "caught", or the harness would
+                // turn "not implemented yet" into "caught", or a spec run would
                 // report a missing feature as an exception a spec handled. A
                 // refusal boundary is not a `rescue`: it ends the block it ran
                 // and answers why, and nothing else sees it (#145).
@@ -3701,10 +3685,9 @@ fn dispatch<'h>(
                     None => scope.classes_mut().lookup(class, call.name),
                 },
             };
-            // R8: an unknown method raises rather than answering `nil`. The
-            // harness reports a statement that merely evaluates as a passing
-            // effect, so a `nil` here would turn every matcher this VM does not
-            // implement into a spec that passes without asserting anything.
+            // R8: an unknown method raises rather than answering `nil`. A
+            // `nil` here would turn every matcher this VM does not implement
+            // into a spec that passes without asserting anything.
             let is_super = matches!(call.target, Target::Super { .. });
             let Some(method) = found else {
                 // A `method_missing` of the program's own answers instead
@@ -4778,9 +4761,6 @@ fn visibility_error(
         visibility.name(),
         describe_receiver(scope, receiver)
     );
-    // Deliberately *not* `note_missing_method`: this is Ruby behaviour the spec
-    // may be checking, not a gap in Spinel, and marking it would report an
-    // example that asserts on it as blocked.
     let rooted = scope.root(receiver);
     let object = exception_new(scope, "NoMethodError", &message);
     let handle = scope.root(object);
@@ -4806,8 +4786,6 @@ fn super_missing_error(scope: &mut HandleScope<'_>, receiver: Value, name: Symbo
         "super: no superclass method '{method}' for {}",
         describe_receiver(scope, receiver)
     );
-    // Not `note_missing_method`: this is Ruby behaviour a spec may be checking
-    // — `super_spec.rb` asserts on it — rather than a gap in Spinel.
     let rooted = scope.root(receiver);
     let object = exception_new(scope, "NoMethodError", &message);
     let handle = scope.root(object);
@@ -4828,10 +4806,6 @@ fn no_method_error(scope: &mut HandleScope<'_>, receiver: Value, name: SymbolId)
         "undefined method '{method}' for {}",
         describe_receiver(scope, receiver)
     );
-    // The heap remembers that a gap was raised for, so a spec that swallows it
-    // in a `rescue` and then fails is reported blocked rather than as a
-    // disagreement. See `Heap::missing_method`.
-    scope.note_missing_method(&message);
     // Rooted across the allocations below. The collector is mark-sweep and does
     // not move, so the `Value` read back stays valid; the handle is what keeps
     // it from being swept while `exception_new` allocates.
@@ -5997,9 +5971,9 @@ fn undef_from<'h>(
 ///
 /// Ruby answers `nil` for a name that is not defined, and since `require`
 /// landed (#39) so does Spinel — a program loads what it needs. The exception
-/// is a heap marked partial: `spec/harness` preloads a spec's fixtures itself,
-/// skipping one it cannot compile and leaving one that raised half-run, and
-/// there a miss may be a name the skipped part would have defined. Answering
+/// is a heap marked partial: `spec/spinel/runner.rb` marks one where a fixture
+/// could not be compiled or raised half-run, and there a miss may be a name
+/// the skipped part would have defined. Answering
 /// `nil` would pass `defined?(SomeFixture).should be_nil` while the VM had
 /// simply never heard of the fixture: a wrong answer wearing a passing spec.
 /// So in a partial heap a miss is *not yet knowable* rather than *no*. This is
@@ -11396,10 +11370,9 @@ fn negate(scope: &mut HandleScope<'_>, value: Value) -> Result<Value, Error> {
 
 /// Ruby `==`, for the types this slice can produce.
 ///
-/// The same function [`Insn::BinOp`] uses, exported because `spec/harness`
-/// compares a matcher's two sides with it — so the harness cannot pass an
-/// example the VM would fail.
-pub fn ruby_eq(scope: &mut HandleScope<'_>, left: Value, right: Value) -> Result<bool, Error> {
+/// What [`Insn::BinOp`] answers `==` from, and what the `==` behind `case`
+/// and `Array#==` is built on.
+fn ruby_eq(scope: &mut HandleScope<'_>, left: Value, right: Value) -> Result<bool, Error> {
     ruby_eq_in(scope, left, right, &mut Vec::new())
 }
 
@@ -11649,7 +11622,7 @@ fn regexp_error(error: &spinel_regex::Error) -> Error {
             class: "RegexpError",
             message: message.clone(),
         },
-        // Never a wrong answer: the harness reports the example blocked.
+        // Never a wrong answer: a spec run reports the example blocked.
         spinel_regex::Error::Unsupported(what) => Error::Unknowable {
             what,
             needs: "the rest of the Onigmo dialect",
