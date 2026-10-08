@@ -1470,3 +1470,26 @@ v = $VERBOSE; $VERBOSE = 1; r = $VERBOSE; $VERBOSE = v; r  #=> true
 [Warning[:experimental], Warning[:performance], Warning.categories.include?(:deprecated)]  #=> [true, false, true]
 (Warning[:nope] rescue $!.message)  #=> "unknown category: nope"
 e = Object.new; def e.write(*a); (@a ||= []).concat(a); 0; end; def e.got; @a || []; end; o = $stderr; $stderr = e; begin; Warning.warn("raw\n"); warn("off", category: :performance); ensure; $stderr = o; end; e.got  #=> ["raw\n"]
+
+# ------------------------------------------------- `dup` and `clone` (#201)
+# `clone` is `dup` plus the frozen state and the singleton class, and both
+# call the copy's hooks. An Array's copy has storage of its own.
+class DcA; attr_accessor :v, :log; def initialize_copy(o); @log = [:copy, o.equal?(self)]; end; end; a = DcA.new; a.v = 1; d = a.dup; [d.v, d.log, d.equal?(a)]  #=> [1, [:copy, false], false]
+class DcB; attr_accessor :v, :log; def initialize_copy(o); @log = [:copy, o.equal?(self)]; end; end; a = DcB.new; a.v = 1; d = a.clone; [d.v, d.log, d.equal?(a)]  #=> [1, [:copy, false], false]
+class DcC; attr_accessor :log; def initialize_clone(o, freeze: nil); @log = [:clone, freeze]; super; end; def initialize_copy(o); @log << :copy; end; end; [DcC.new.clone.log, DcC.new.clone(freeze: false).log, DcC.new.clone(freeze: true).log]  #=> [[:clone, nil, :copy], [:clone, false, :copy], [:clone, true, :copy]]
+class DcD; end; a = DcD.new.freeze; [a.dup.frozen?, a.clone.frozen?, a.clone(freeze: false).frozen?, DcD.new.clone(freeze: true).frozen?]  #=> [false, true, false, true]
+class DcE; end; a = DcE.new; def a.hi; :hi; end; [a.clone.hi, a.dup.respond_to?(:hi)]  #=> [:hi, false]
+class DcF; end; m = Module.new { def yo; :yo; end }; a = DcF.new; a.extend(m); [a.clone.yo, a.clone.singleton_class.include?(m), a.dup.respond_to?(:yo)]  #=> [:yo, true, false]
+a = Object.new; class << a; DCX = 1; end; a.clone.singleton_class.const_get(:DCX)  #=> 1
+a = [1, 2]; b = a.dup; b[0] = 9; b << 3; [a, b]  #=> [[1, 2], [9, 2, 3]]
+a = [1]; def a.hi; 1; end; c = a.clone; c << 2; [a, c, c.hi]  #=> [[1], [1, 2], 1]
+a = [1].freeze; [a.clone.frozen?, a.dup.frozen?]  #=> [true, false]
+h = {a: 1}; def h.hi; 1; end; c = h.clone; c[:b] = 2; [h.inspect, c.inspect, c.hi]  #=> ["{a: 1}", "{a: 1, b: 2}", 1]
+h = {a: 1}; h.default = 5; d = h.dup; d[:b] = 2; [h.inspect, d.inspect, d[:zz]]  #=> ["{a: 1}", "{a: 1, b: 2}", 5]
+h = {}.compare_by_identity; [h.dup.compare_by_identity?, h.clone.compare_by_identity?]  #=> [true, true]
+class DcH < Hash; attr_accessor :x; def initialize_copy(o); super; @x = :copied; end; end; a = DcH.new; a[:k] = 1; d = a.clone; [d.inspect, d.class, d.x]  #=> ["{k: 1}", DcH, :copied]
+s = "a".freeze; d = s.clone; [d, d.frozen?, d.equal?(s)]  #=> ["a", true, false]
+[1.clone, 1.dup, :a.clone, nil.clone, true.dup]  #=> [1, 1, :a, nil, true]
+e = RuntimeError.new("m"); n = e.exception("n"); [n.message, n.equal?(e), e.message]  #=> ["n", false, "m"]
+(Object.new.clone(freeze: 1) rescue $!.message)  #=> "unexpected value for freeze: Integer"
+(1.clone(freeze: false) rescue $!.message)  #=> "can't unfreeze Integer"

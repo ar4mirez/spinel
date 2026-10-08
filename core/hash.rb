@@ -119,10 +119,7 @@ class Hash
   # this the copy and the original share one table and `h.dup[:b] = 2` mutates
   # `h`. Silently, with the right-looking answer for every read.
   #
-  # ponytail: `dup` and `clone` are overridden to call this because
-  # `Kernel#clone` does not call `initialize_copy` yet (#201); `Kernel#dup`
-  # does since #145. When both do, both overrides delete and this method
-  # stays exactly as it is.
+  # `Kernel#dup` and `Kernel#clone` both call this (#201).
   def initialize_copy(other)
     pairs = []
     other.each_pair { |key, value| pairs.push([key, value]) }
@@ -131,29 +128,6 @@ class Hash
     # Measured: `compare_by_identity` survives `dup` and `clone`.
     @__identity__ = other.compare_by_identity?
     __copy_default_from__(other)
-    self
-  end
-
-  def dup
-    self.class.allocate.__init_copy_of__(self, false)
-  end
-
-  # ponytail: `clone` carries the frozen state and not the singleton class.
-  # `Kernel#clone` copies both, and this cannot reach the second — a copy that
-  # shares its table is a worse answer than one that loses a singleton method,
-  # and both go away with #201, when `Kernel#clone` calls `initialize_copy` and
-  # these two overrides delete.
-  def clone(freeze: nil)
-    copy = self.class.allocate.__init_copy_of__(self, true)
-    copy.freeze if freeze.nil? ? frozen? : freeze
-    copy
-  end
-
-  def __init_copy_of__(other, keep_frozen)
-    @__pairs__ = []
-    @__default__ = nil
-    @__default_is_proc__ = false
-    initialize_copy(other)
     self
   end
 

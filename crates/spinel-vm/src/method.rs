@@ -622,6 +622,9 @@ pub enum ReflectOp {
     /// the module holding the deprecated constant that `mod.const_get(name)`
     /// finds, or nil.
     ConstDeprecated,
+    /// `(from, to)` → nil; gives `to` a copy of `from`'s singleton class when
+    /// it has one. `Kernel#clone`'s half that Ruby cannot reach.
+    CopySingleton,
 }
 
 /// Which fiber primitive. See `interp.rs`, "Fibers".

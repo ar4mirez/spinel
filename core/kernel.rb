@@ -338,6 +338,32 @@ module Kernel
     copy.__send__(:initialize_dup, self) unless copy.equal?(self)
     copy
   end
+
+  # `dup`, and the two things `dup` leaves behind (#201): the singleton class
+  # — its methods, its constants, the modules the object was extended with —
+  # and the frozen state. `freeze:` overrides the second, and is passed on to
+  # `initialize_clone` only when it was given, which is what lets a class
+  # written before the keyword existed keep its one-argument hook.
+  def clone(freeze: nil)
+    unless freeze.nil? || freeze == true || freeze == false
+      raise ArgumentError, "unexpected value for freeze: #{freeze.class}"
+    end
+    copy = __dup__
+    if copy.equal?(self)
+      # An immediate is itself, and is always frozen.
+      raise ArgumentError, "can't unfreeze #{self.class}" if freeze == false
+      return self
+    end
+    __reflect_copy_singleton__(self, copy)
+    if freeze.nil?
+      copy.__send__(:initialize_clone, self)
+      copy.freeze if frozen?
+    else
+      copy.__send__(:initialize_clone, self, freeze: freeze)
+      copy.freeze if freeze
+    end
+    copy
+  end
   
   def initialize_dup(original)
     initialize_copy(original)

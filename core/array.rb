@@ -304,24 +304,24 @@ class Array
   end
 
 
-  # A shallow copy has to be built rather than copied: `Kernel#dup` copies the
-  # cell, and an Array's cell holds a *pointer* to its storage, so the copy
-  # would share it and `b << 1` would show up in `a`.
-  def dup
-    # The receiver's class, a subclass included, without its `initialize`.
-    out = self.class.allocate
-    each { |element| out.__append__(element) }
-    out
+  # What `dup` and `clone` call on the copy, which arrives empty: `Kernel#dup`
+  # copies the cell, and an Array's cell holds a *pointer* to its storage, so
+  # the primitive hands over a copy with storage of its own and this fills
+  # it. Element by element rather than through `replace`, which takes a `dup`
+  # of its argument and would come straight back here.
+  def initialize_copy(other)
+    return self if equal?(other)
+    __check_frozen__
+    other = Array.__coerce__(other)
+    clear
+    i = 0
+    while i < other.size
+      __append__(other[i])
+      i = i + 1
+    end
+    self
   end
-
-  # ponytail: the frozen state and not the singleton class, as `Hash#clone`
-  # does and for its reason; both go with #201's `Kernel#clone`.
-  def clone(freeze: nil)
-    __needs_kernel_clone__ unless singleton_methods.empty?
-    copy = dup
-    copy.freeze if freeze.nil? ? frozen? : freeze
-    copy
-  end
+  private :initialize_copy
 
   # Element by element, then by length: the first pair that disagrees decides,
   # and two arrays that agree as far as the shorter one goes are ordered by size.
