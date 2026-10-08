@@ -2,8 +2,9 @@
 //!
 //! `core/*.rb` is Ruby, and every heap needs its methods defined in it: a method
 //! table belongs to a heap. What no heap needs twice is the *parse and compile*.
-//! The spec harness makes one heap per example and there are 25,624 of them, so
-//! compiling per heap would multiply a corpus run by the cost of Prism.
+//! A process may make several heaps — the tests make one per case, and a
+//! Ractor will have its own — so compiling per heap would multiply that by the
+//! cost of Prism.
 //!
 //! # Why this is allowed here
 //!

@@ -25,7 +25,7 @@
 //!
 //! Constructs this engine does not implement yet return [`Error::Unsupported`]
 //! rather than a guess. The VM turns that into `Error::Unknowable`, and the
-//! spec harness reports the example *blocked* — never passed, never failed.
+//! spec run reports the example *blocked* — never passed, never failed.
 //! Today that is `(?~)`, `\g<>`, conditional groups, `\K`, `\R`, `\X`, `\p{}`
 //! and `\k<name+1>` level specifiers.
 //!

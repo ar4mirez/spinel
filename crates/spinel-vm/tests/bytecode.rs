@@ -146,28 +146,6 @@ fn every_iseq_ends_by_leaving() {
     }
 }
 
-#[test]
-fn a_local_keeps_its_slot_across_separately_compiled_expressions() {
-    // What the spec harness depends on: it compiles an example's statements one
-    // at a time against a shared slot map, and `a` must be the same slot in the
-    // statement that writes it and the one that reads it.
-    let parsed = spinel_parse::parse(b"a = 1\nb = 2\na");
-    let mut locals: Vec<spinel_ast::Name> = Vec::new();
-    let mut heap = Heap::new();
-    let mut frame = interp::Frame::new(0);
-    let mut scope = heap.scope();
-    scope.bootstrap();
-
-    let mut last = String::new();
-    for statement in &parsed.program.body {
-        let iseq = compile::expression("<test>", &locals, statement).expect("should compile");
-        locals.clone_from(&iseq.locals);
-        let value = interp::eval_in(&mut scope, &mut frame, &iseq).expect("should run");
-        last = interp::inspect(&mut scope, value);
-    }
-    assert_eq!(last, "1", "`a` should still hold 1 in the third statement");
-}
-
 /// `next` inside an `ensure` inside an `if` arm.
 ///
 /// `next` from a block leaves the frame, and when an `ensure` is open over it
@@ -257,53 +235,4 @@ fn only_a_splat_something_can_outrun_is_captured() {
     assert_eq!(captures("def m(*a); a; end; x = [1]; m(*x, 1, 2)"), 1);
     // Two splats: the first can be outrun, the last cannot.
     assert_eq!(captures("def m(*a); a; end; x = [1]; m(*x, *x)"), 1);
-}
-
-/// A name the harness could not merge names the harness, not the compiler.
-///
-/// `outer_slot` refuses on four paths that once shared one string, "a local
-/// variable from an enclosing scope". Two of them are only reachable from
-/// `flattened_expression`, which only `spec/harness` calls, and there the miss
-/// means the harness never ran the loop that binds the name —
-/// `%w(x X).each do |x| it "..." do ... end end`. The other two mean Prism and
-/// this compiler disagree about what a local is, which is a bug.
-///
-/// Reading one string as the other put 310 examples under "the single largest
-/// compiler gap" in #220, and 406 under #164 before it, while the same shape as
-/// a plain `.rb` file ran fine. The ranking in `scripts/spec.sh --blocked=0`
-/// picks the next slice, so the two meanings have to be tellable apart in it.
-#[test]
-fn an_unmerged_local_blames_the_harness_and_a_real_one_blames_the_compiler() {
-    // Prism sees `x` as a local only because an enclosing scope assigns it, so
-    // the whole file is parsed and just the `each` statement is compiled — which
-    // is what the harness does with an example's body. Inside the block `x` is
-    // then a local one scope up, and that scope is not there.
-    let parsed = spinel_parse::parse(b"x = 1\n[1].each { puts x }");
-    assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
-    let expr = &parsed.program.body[1];
-
-    // The miss is inside a block, and since #145 a block body that does not
-    // compile becomes one that refuses when it runs: the reason travels in
-    // its `refusals`.
-    let refusal = |iseq: spinel_vm::Iseq| iseq.children[0].refusals.first().copied();
-
-    let flattened = compile::flattened_expression("<example>", &[], expr)
-        .expect("the block compiles to a refusal");
-    assert_eq!(
-        refusal(flattened),
-        Some("a local variable from a block the harness did not run")
-    );
-
-    let plain = compile::expression("<main>", &[], expr).expect("the block compiles to a refusal");
-    assert_eq!(
-        refusal(plain),
-        Some("a local variable from an enclosing scope")
-    );
-
-    // The compiler itself resolves enclosing locals fine — which is why the
-    // harness's miss must not be reported against it. Compiled whole, with the
-    // scope present, the same nesting raises nothing. See PRD 0024.
-    let whole = spinel_parse::parse(b"x = 1\n[1].each { [2].each { puts x } }");
-    assert!(whole.errors.is_empty(), "{:?}", whole.errors);
-    compile::program(&whole.program).expect("enclosing locals compile");
 }

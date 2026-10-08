@@ -6,8 +6,8 @@
 //! `docs/engine.md` will not accept from a regex backend.
 //!
 //! A pattern this engine *refuses* is not a disagreement: it is counted,
-//! reported, and held below a ceiling, because a refusal reaches the spec
-//! harness as "blocked" rather than as a pass. Silence is what is forbidden,
+//! reported, and held below a ceiling, because a refusal reaches a spec run
+//! as "blocked" rather than as a pass. Silence is what is forbidden,
 //! not incompleteness.
 
 use spinel_regex::{Error, Flags, Regex};

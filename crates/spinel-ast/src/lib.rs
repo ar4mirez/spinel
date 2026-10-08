@@ -110,7 +110,7 @@ pub struct SourceMap {
     /// The file's `encoding:`/`coding:` magic comment, as written, or `None`
     /// for UTF-8: the encoding a literal with no forced encoding is in (#19).
     /// Here rather than on `Program` because every scope compiled out of the
-    /// file — a block, a method, the harness's one expression — carries this.
+    /// file — a block, a method, an `eval` string — carries this.
     pub encoding: Option<Box<str>>,
 }
 

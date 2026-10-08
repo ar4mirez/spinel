@@ -82,7 +82,7 @@ fn spinel_agrees_with_the_ruby_that_measured_the_table() {
 
 #[test]
 fn a_construct_this_slice_does_not_compile_is_an_error_never_a_guess() {
-    // The property the spec harness depends on: unsupported is loud.
+    // The property a spec run depends on: unsupported is loud.
     for source in [
         // `def` and a block literal moved to the other side of this list with
         // #11, and constants, class bodies, and `defined?` with #13; what stays
