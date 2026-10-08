@@ -1,1 +1,0 @@
-fails(#268: Spinel prints no warnings yet, and this example expects one):File#printf when $VERBOSE is true warns if too many arguments are passed

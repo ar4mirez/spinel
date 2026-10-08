@@ -1,5 +1,2 @@
-fails(#268: Spinel prints no warnings yet, and this example expects one):Literal (A::X) constant resolution with dynamically assigned constants returns the updated value when a constant is reassigned
-fails(#268: Spinel prints no warnings yet, and this example expects one):Constant resolution within methods with dynamically assigned constants returns the updated value when a constant is reassigned
-fails(#268: Spinel prints no warnings yet, and this example expects one):Module#private_constant marked constants remain private even when updated
 fails(#173: NameError#name and #receiver are not set for this kind of error yet):Module#private_constant marked constants NameError by #private_constant has :receiver and :name attributes
 fails(#173: NameError#name and #receiver are not set for this kind of error yet):Module#private_constant marked constants NameError by #private_constant has the defined class as the :name attribute

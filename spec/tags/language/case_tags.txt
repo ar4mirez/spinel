@@ -1,1 +1,0 @@
-fails(#268: Spinel prints no warnings yet, and this example expects one):The 'case'-construct warns if there are identical when clauses

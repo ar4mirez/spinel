@@ -1,1 +1,0 @@
-fails(#268: Spinel prints no warnings yet, and this example expects one):Module#const_get with dynamically assigned constants returns the updated value of a constant

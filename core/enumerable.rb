@@ -49,6 +49,7 @@ module Enumerable
     end
     n = 0
     if item.size == 1
+      __warning__("given block not used") if block_given?
       wanted = item[0]
       each { |*a| n = n + 1 if __pack__(a) == wanted }
     elsif block_given?
@@ -243,6 +244,7 @@ module Enumerable
     return to_enum(:find_index) if wanted.empty? && !block_given?
     i = 0
     if wanted.size == 1
+      __warning__("given block not used") if block_given?
       target = wanted[0]
       each do |*a|
         return i if __pack__(a) == target
@@ -315,6 +317,7 @@ module Enumerable
       raise ArgumentError, "wrong number of arguments (given #{pattern.size}, expected 0..1)"
     end
     if pattern.size == 1
+      __warning__("given block not used") if block_given?
       matcher = pattern[0]
       each { |*a| return false unless matcher === __pack__(a) }
     elsif block_given?
@@ -330,6 +333,7 @@ module Enumerable
       raise ArgumentError, "wrong number of arguments (given #{pattern.size}, expected 0..1)"
     end
     if pattern.size == 1
+      __warning__("given block not used") if block_given?
       matcher = pattern[0]
       each { |*a| return true if matcher === __pack__(a) }
     elsif block_given?
@@ -345,6 +349,7 @@ module Enumerable
       raise ArgumentError, "wrong number of arguments (given #{pattern.size}, expected 0..1)"
     end
     if pattern.size == 1
+      __warning__("given block not used") if block_given?
       matcher = pattern[0]
       each { |*a| return false if matcher === __pack__(a) }
     elsif block_given?
@@ -361,6 +366,7 @@ module Enumerable
     end
     seen = 0
     if pattern.size == 1
+      __warning__("given block not used") if block_given?
       matcher = pattern[0]
       each { |*a| seen = seen + 1 if matcher === __pack__(a); return false if seen > 1 }
     elsif block_given?
@@ -386,6 +392,7 @@ module Enumerable
     accumulator = nil
     started = false
     if given.size == 2
+      __warning__("given block not used", true) if block_given?
       accumulator = given[0]
       started = true
       operation = given[1]

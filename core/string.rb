@@ -983,7 +983,10 @@ class String
     if lim > 2147483647 || lim < -2147483648
       raise RangeError, "integer #{lim} too big to convert to 'int'"
     end
-    pattern = $; if pattern.nil?
+    if pattern.nil? && !$;.nil?
+      __warning__("$; is set to non-nil value", false, :deprecated)
+      pattern = $;
+    end
     unless pattern.nil? || pattern.is_a?(Regexp)
       pattern = String.__coerce__(pattern)
       unless pattern.valid_encoding?
@@ -1644,6 +1647,7 @@ class String
       @next = 0
       @numbered = false
       @unnumbered = false
+      @named = false
     end
 
     def run
@@ -1658,6 +1662,11 @@ class String
           next
         end
         i = directive(chars, i + 1, out)
+      end
+      # CRuby's check, under `-w` only: positional arguments left over, unless
+      # the one argument is the Hash a `%{name}` would have read.
+      if !@numbered && !@named && @next < @args.size && !(@args.size == 1 && @args[0].is_a?(Hash))
+        __warning__("too many arguments for format string", true)
       end
       out
     end
@@ -1679,6 +1688,7 @@ class String
     end
 
     def hash_argument
+      @named = true
       unless @args.size == 1 && @args[0].is_a?(Hash)
         raise ArgumentError, "one hash required"
       end

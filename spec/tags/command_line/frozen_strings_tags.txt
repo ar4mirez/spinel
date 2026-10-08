@@ -1,1 +1,1 @@
-fails(#268: Spinel prints no warnings yet, and this example expects one):With neither --enable-frozen-string-literal nor --disable-frozen-string-literal flag set if file has no frozen_string_literal comment complain about modification of produced mutable strings
+fails(#263: a chilled string does not warn when it is mutated):With neither --enable-frozen-string-literal nor --disable-frozen-string-literal flag set if file has no frozen_string_literal comment complain about modification of produced mutable strings

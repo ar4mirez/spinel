@@ -67,15 +67,25 @@ module Kernel
     real = __fs_realpath__(path)
     real = path if Integer === real
     features = $LOADED_FEATURES
-    return false if features.include?(path) || features.include?(real)
+    loading = (@__loading__ ||= [])
+    if features.include?(path) || features.include?(real)
+      # Still running: the file, or one it required, asked for it again.
+      if loading.include?(path)
+        __warning__("loading in progress, circular require considered harmful - #{path}", true)
+      end
+      return false
+    end
     # Recorded before the file runs, so a file requiring itself while it
     # loads answers false rather than recursing; removed again if it raises.
     features.push(path)
+    loading.push(path)
     begin
       __load_file__(path, nil)
     rescue Exception
       features.delete(path)
       raise
+    ensure
+      loading.delete(path)
     end
     true
   end

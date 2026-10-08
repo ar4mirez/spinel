@@ -161,7 +161,7 @@ fn parse_at(path: &str, source: &[u8], first_line: i64, yield_allowed: bool) -> 
         origin: Origin::Syntax,
     };
     let mut errors: Vec<Diagnostic> = result.errors().map(to_diagnostic).collect();
-    let warnings: Vec<Diagnostic> = result.warnings().map(to_diagnostic).collect();
+    let mut warnings: Vec<Diagnostic> = result.warnings().map(to_diagnostic).collect();
 
     let node = result.node();
     // Prism roots every parse at a ProgramNode, including a parse that failed
@@ -169,6 +169,15 @@ fn parse_at(path: &str, source: &[u8], first_line: i64, yield_allowed: bool) -> 
     let root = node
         .as_program_node()
         .expect("prism roots every parse at a ProgramNode");
+
+    // Prism is not told whether the source is a script or an `eval` string, and
+    // treats the last statement as one whose value nothing reads. Ruby reads
+    // it — it is what `eval` and `require` answer — and does not warn.
+    if let Some(last) = root.statements().body().iter().last() {
+        let start = lower::span_of(&last.location()).start;
+        warnings
+            .retain(|d| d.span.start < start || !d.message.starts_with("possibly useless use of "));
+    }
 
     if yield_allowed && errors.iter().any(|d| d.message == "Invalid yield") {
         let mut open = OpenYields::default();
@@ -253,4 +262,31 @@ fn line_starts(source: &[u8]) -> Vec<u32> {
         }
     }
     starts
+}
+
+/// Whether Ruby prints a parser warning only under `-w`.
+///
+/// Prism gives every warning a level, and the Rust binding does not expose
+/// it, so this is `PM_WARNING_LEVEL_DEFAULT`'s list from Prism's
+/// `diagnostic.c` by message: the ones `ruby -c` prints with no flags. Every
+/// other warning is verbose.
+#[must_use]
+pub fn is_verbose_warning(message: &str) -> bool {
+    const DEFAULT: &[&str] = &[
+        "... at EOL, should be parenthesized?",
+        "END in method; use at_exit",
+        "integer literal in flip-flop",
+        "shebang line ending with \\r may cause problems",
+        "encountered \\r in middle of line, treated as a mere space",
+    ];
+    let default = DEFAULT.contains(&message)
+        || (message.starts_with("key ")
+            && message.contains(" is duplicated and overwritten on line "))
+        || message.starts_with("found '= literal' in conditional")
+        || message.starts_with("found `= literal' in conditional")
+        || message.starts_with("invalid character syntax; use ")
+        || message.ends_with(" is too big for a number variable, always nil")
+        || message.starts_with("string literal in ")
+        || message.starts_with("regex literal in ");
+    !default
 }

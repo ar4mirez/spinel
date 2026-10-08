@@ -1,4 +1,0 @@
-fails(#268: Spinel prints no warnings yet, and this example expects one):Module#deprecate_constant accepts multiple symbols and strings as constant names
-fails(#268: Spinel prints no warnings yet, and this example expects one):Module#deprecate_constant when accessing the deprecated module passes the accessing
-fails(#268: Spinel prints no warnings yet, and this example expects one):Module#deprecate_constant when accessing the deprecated module warns with a message
-fails(#268: Spinel prints no warnings yet, and this example expects one):Module#deprecate_constant when removing the deprecated module warns with a message

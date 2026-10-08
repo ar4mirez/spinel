@@ -78,6 +78,7 @@ class Module
   # which still makes a writer too. Measured.
   def attr(*names)
     if names.size == 2 && (names[1] == true || names[1] == false)
+      __warning__("optional boolean argument is obsoleted", true)
       return names[1] ? attr_accessor(names[0]) : attr_reader(names[0])
     end
     attr_reader(*names)
@@ -163,7 +164,10 @@ class Module
     end
     symbol = __const_name__(name)
     found = __reflect_const_lookup__(self, symbol, inherit)
-    return found[0] unless found.nil?
+    unless found.nil?
+      __const_deprecation__(symbol)
+      return found[0]
+    end
     const_missing(symbol)
   end
 
@@ -189,7 +193,11 @@ class Module
   def const_set(name, value)
     symbol = __const_name__(name)
     raise FrozenError, "can't modify frozen #{self.class}: #{inspect}" if frozen?
+    redefined = !__reflect_const_lookup__(self, symbol, false).nil?
     __reflect_const_set__(self, symbol, value)
+    if redefined
+      __warning__("already initialized constant #{equal?(Object) ? symbol : "#{inspect}::#{symbol}"}")
+    end
     __send__(:const_added, symbol)
     value
   end
@@ -200,6 +208,7 @@ class Module
 
   def remove_const(name)
     symbol = __const_name__(name)
+    __const_deprecation__(symbol)
     removed = __reflect_const_remove__(self, symbol)
     if removed.nil?
       raise NameError.new("constant #{inspect}::#{symbol} not defined", symbol)
@@ -207,6 +216,15 @@ class Module
     removed[0]
   end
   private :remove_const
+
+  # Say so if `symbol`, as `const_get` would find it from here, was marked by
+  # `deprecate_constant`.
+  def __const_deprecation__(symbol)
+    holder = __reflect_const_deprecated__(self, symbol, false)
+    return if holder.nil?
+    __warning__("constant #{holder.inspect}::#{symbol} is deprecated", false, :deprecated)
+  end
+  private :__const_deprecation__
 
   def public_constant(*names)
     names.each do |name|
@@ -227,6 +245,7 @@ class Module
       if __reflect_const_lookup__(self, symbol, false).nil?
         raise NameError.new("constant #{inspect}::#{symbol} not defined", symbol)
       end
+      __reflect_const_deprecated__(self, symbol, true)
     end
     self
   end

@@ -1,2 +1,0 @@
-fails(#268: Spinel prints no warnings yet, and this example expects one):Optional variable assignments using compounded constants with &&= assignments
-fails(#268: Spinel prints no warnings yet, and this example expects one):Optional variable assignments using compounded constants with operator assignments

@@ -1,2 +1,0 @@
-fails(#268: Spinel prints no warnings yet, and this example expects one):Array#initialize with no arguments does not use the given block
-fails(#268: Spinel prints no warnings yet, and this example expects one):Array#initialize with (size, object=nil) uses the block value instead of using the default value

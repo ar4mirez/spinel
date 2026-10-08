@@ -87,8 +87,8 @@ Three hundred and six tags across a hundred and thirty-five files. Replacing
 to expect: mspec runs what the harness never could — shared groups, examples
 built at run time, every matcher — and the 351 disagreements that surfaced were
 fixed where the fix was small and tagged where it is another slice's. The
-largest share is warnings, seventy-three examples expecting one Spinel does not
-print yet (#268); then `IO` (#41), loading (#39), backtraces (#29), `Struct`
+largest share was warnings, seventy-three examples expecting one Spinel did not
+print, until #268 printed them; what is left is `IO` (#41), loading (#39), backtraces (#29), `Struct`
 (#173), reflection (#28) and regexp encodings (#33). The five that named the
 harness itself are gone, because the harness is: under mspec those examples
 pass. Two unrelated paydays came with it — `Kernel#dup` now calls

@@ -1454,3 +1454,19 @@ class Integer; alias_method :op_old_add, :+; def +(o); 42; end; end; r = [1 + 1,
 class Integer; alias_method :op_old_neg, :-@; def -@; :neg; end; end; y = 3; r = [-y, -3]; Integer.alias_method(:-@, :op_old_neg); r << -y  #=> [:neg, -3, -3]
 class Integer; alias_method :op_old_lt, :<; def <(o); :lt; end; end; r = [[1, 2].each_with_index.to_a, 1 < 2]; Integer.alias_method(:<, :op_old_lt); r  #=> [[[1, 0], [2, 1]], :lt]
 a = []; defined?(a << 1); a  #=> []
+
+# ------------------------------------------------------------- warnings (#268)
+# Each row swaps `$stderr` for an object that keeps what it is written and
+# strips the position, which is the oracle's own file here and `(eval)` there.
+e = Object.new; def e.write(*a); (@a ||= []).concat(a); 0; end; def e.got; (@a || []).map { |s| s.sub(/\A.*?: warning: /, "") }; end; o = $stderr; $stderr = e; begin; [1].all?(1) { }; ensure; $stderr = o; end; e.got  #=> ["given block not used\n"]
+e = Object.new; def e.write(*a); (@a ||= []).concat(a); 0; end; def e.got; (@a || []).map { |s| s.sub(/\A.*?: warning: /, "") }; end; o = $stderr; $stderr = e; begin; {}.fetch(1, 2) { 3 }; ensure; $stderr = o; end; e.got  #=> ["block supersedes default value argument\n"]
+e = Object.new; def e.write(*a); (@a ||= []).concat(a); 0; end; def e.got; (@a || []).map { |s| s.sub(/\A.*?: warning: /, "") }; end; o = $stderr; $stderr = e; begin; Object.const_set(:WarnQ1, 1); Object.const_set(:WarnQ1, 2); ensure; $stderr = o; end; e.got.first  #=> "already initialized constant WarnQ1\n"
+e = Object.new; def e.write(*a); (@a ||= []).concat(a); 0; end; def e.got; (@a || []).map { |s| s.sub(/\A.*?: warning: /, "") }; end; o = $stderr; $stderr = e; begin; eval("{a: 1, a: 2}"); ensure; $stderr = o; end; e.got  #=> ["key :a is duplicated and overwritten on line 1\n"]
+e = Object.new; def e.write(*a); (@a ||= []).concat(a); 0; end; def e.got; @a || []; end; o = $stderr; $stderr = e; begin; warn("a", ["b", "c\n"]); ensure; $stderr = o; end; e.got  #=> ["a\nb\nc\n"]
+e = Object.new; def e.write(*a); (@a ||= []).concat(a); 0; end; def e.got; @a || []; end; o = $stderr; $stderr = e; begin; sprintf("%d", 1, 2); Regexp.new("a", Object.new); $warn_q_unset; ensure; $stderr = o; end; e.got  #=> []
+e = Object.new; def e.write(*a); (@a ||= []).concat(a); 0; end; def e.got; (@a || []).map { |s| s.sub(/\A.*?: warning: /, "") }; end; o = $stderr; v = $VERBOSE; $stderr = e; $VERBOSE = true; begin; sprintf("%d", 1, 2); [1, 2].inject(1, :+) { }; ensure; $stderr = o; $VERBOSE = v; end; e.got  #=> ["too many arguments for format string\n", "given block not used\n"]
+e = Object.new; def e.write(*a); (@a ||= []).concat(a); 0; end; def e.got; @a || []; end; o = $stderr; v = $VERBOSE; $stderr = e; $VERBOSE = nil; begin; [1].all?(1) { }; warn("x"); ensure; $stderr = o; $VERBOSE = v; end; e.got  #=> []
+v = $VERBOSE; $VERBOSE = 1; r = $VERBOSE; $VERBOSE = v; r  #=> true
+[Warning[:experimental], Warning[:performance], Warning.categories.include?(:deprecated)]  #=> [true, false, true]
+(Warning[:nope] rescue $!.message)  #=> "unknown category: nope"
+e = Object.new; def e.write(*a); (@a ||= []).concat(a); 0; end; def e.got; @a || []; end; o = $stderr; $stderr = e; begin; Warning.warn("raw\n"); warn("off", category: :performance); ensure; $stderr = o; end; e.got  #=> ["raw\n"]
