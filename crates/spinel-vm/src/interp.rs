@@ -755,7 +755,7 @@ fn str_native(
     if op == StrOp::FloatBits || op == StrOp::FloatFromBits {
         let wide = index_arg(0)? == 64;
         let value = if op == StrOp::FloatBits {
-            let Some(f) = call.receiver.as_flonum() else {
+            let Some(f) = crate::float::read(scope, call.receiver) else {
                 return Err(Error::NoDispatch {
                     op: "Float#__bits__",
                     operands: "a Float that is not an immediate",
@@ -782,16 +782,13 @@ fn str_native(
             } else {
                 f64::from(f32::from_bits(bits as u32))
             };
-            Value::flonum(f).ok_or(Error::Unknowable {
-                what: "a Float that needs the heap — NaN, Infinity, -0.0 or an extreme",
-                needs: "boxed Floats (#18)",
-            })?
+            crate::float::value(scope, f)
         };
         stack.push(value);
         return Ok(None);
     }
     if op == StrOp::FloatFormat {
-        let Some(f) = call.receiver.as_flonum() else {
+        let Some(f) = crate::float::read(scope, call.receiver) else {
             return Err(Error::NoDispatch {
                 op: "Float#__format__",
                 operands: "a Float that is not an immediate",
@@ -2146,9 +2143,10 @@ pub fn eval_in(
                         // own `==` decides. Measured.
                         let swapped = op == BinOp::Eq
                             && !right.is_immediate()
-                            && (num(left).is_some() || crate::bignum::is_big(scope, left))
+                            && (num(scope, left).is_some() || crate::bignum::is_big(scope, left))
                             && heap_kind(scope, right).is_none()
-                            && !crate::bignum::is_big(scope, right);
+                            && !crate::bignum::is_big(scope, right)
+                            && crate::float::read(scope, right).is_none();
                         let result = if swapped {
                             Err(Error::NoDispatch {
                                 op: "==",
@@ -5961,7 +5959,12 @@ fn singleton_of(scope: &mut HandleScope<'_>, receiver: Value) -> Result<ClassId,
         crate::value::Unpacked::False => return Ok(Builtin::FalseClass.id()),
         _ => {}
     }
-    if receiver.is_immediate() {
+    if receiver.is_immediate()
+        // A number is a number whichever way it is stored: a boxed Float and
+        // a bignum take no singleton class either.
+        || crate::float::read(scope, receiver).is_some()
+        || crate::bignum::is_big(scope, receiver)
+    {
         // Ruby's text exactly: no receiver in it, and no article.
         return Err(Error::raise("TypeError", "can't define singleton"));
     }
@@ -6889,6 +6892,12 @@ fn method_name_of(scope: &mut HandleScope<'_>, value: Value) -> Option<String> {
 /// outside `[1e-4, 1e15)` is written in exponent form (`1.0e+20`, `1.0e-05`)
 /// with a two-digit, signed exponent.
 fn float_to_s(f: f64) -> String {
+    if f.is_nan() {
+        return "NaN".to_owned();
+    }
+    if f.is_infinite() {
+        return if f > 0.0 { "Infinity" } else { "-Infinity" }.to_owned();
+    }
     if f == 0.0 {
         // `-0.0` prints its sign, and `0.0.fract()` is 0 either way.
         return if f.is_sign_negative() {
@@ -8037,6 +8046,115 @@ fn native_call<'h>(
             dispatch(scope, stack, frames, forwarded, proc_class, ids)
         }
 
+        Native::Math => {
+            // `__math__(:name, x, y = nil)`: one libm call. The Ruby side has
+            // already converted the arguments and checked the domain, so what
+            // arrives is a number and what leaves is whatever libm says.
+            let name = call.args.first().and_then(|v| v.as_symbol());
+            let mut operand = |index: usize| -> Option<f64> {
+                let value = *call.args.get(index)?;
+                if let Some(n) = value.as_fixnum() {
+                    return Some(n as f64);
+                }
+                if let Some(f) = crate::float::read(scope, value) {
+                    return Some(f);
+                }
+                use num_traits::ToPrimitive as _;
+                crate::bignum::read(scope, value).and_then(|n| n.to_f64())
+            };
+            let (x, y) = (operand(1), operand(2));
+            let (Some(name), Some(x)) = (name, x) else {
+                return Err(Error::NoDispatch {
+                    op: "__math__",
+                    operands: "an operation that is not a Symbol, or an operand that is not a number",
+                });
+            };
+            let name = symbol_name(name);
+            let second = y.unwrap_or(0.0);
+            let value = match name.as_str() {
+                "sin" => x.sin(),
+                "cos" => x.cos(),
+                "tan" => x.tan(),
+                "asin" => x.asin(),
+                "acos" => x.acos(),
+                "atan" => x.atan(),
+                "atan2" => x.atan2(second),
+                "sinh" => x.sinh(),
+                "cosh" => x.cosh(),
+                "tanh" => x.tanh(),
+                "asinh" => x.asinh(),
+                "acosh" => x.acosh(),
+                "atanh" => x.atanh(),
+                "exp" => x.exp(),
+                "expm1" => x.exp_m1(),
+                "log" => x.ln(),
+                "log2" => x.log2(),
+                "log10" => x.log10(),
+                "log1p" => x.ln_1p(),
+                "sqrt" => x.sqrt(),
+                "cbrt" => x.cbrt(),
+                "hypot" => x.hypot(second),
+                "pow" => x.powf(second),
+                "floor" => x.floor(),
+                "ceil" => x.ceil(),
+                // Half away from zero, and half to even: both exact.
+                "round" => x.round(),
+                "round_even" => x.round_ties_even(),
+                // SAFETY: each takes doubles by value and an `int` by value,
+                // touches no memory, and is in the libm every target links.
+                "erf" => unsafe { libm_erf(x) },
+                "erfc" => unsafe { libm_erfc(x) },
+                "gamma" => unsafe { libm_tgamma(x) },
+                "ldexp" => unsafe { libm_ldexp(x, second as libc::c_int) },
+                "lgamma" => {
+                    let mut sign: libc::c_int = 0;
+                    // SAFETY: `sign` is a live `int` for the call to write.
+                    let value = unsafe { libm_lgamma_r(x, &mut sign) };
+                    let value = crate::float::value(scope, value);
+                    let sign = Value::fixnum(if sign < 0 { -1 } else { 1 }).expect("a sign");
+                    let pair = new_array(scope, &[value, sign]);
+                    stack.push(pair);
+                    return Ok(None);
+                }
+                "frexp" => {
+                    let mut exponent: libc::c_int = 0;
+                    // SAFETY: `exponent` is a live `int` for the call to write.
+                    let fraction = unsafe { libm_frexp(x, &mut exponent) };
+                    let fraction = crate::float::value(scope, fraction);
+                    let exponent = Value::fixnum(i64::from(exponent)).expect("an exponent");
+                    let pair = new_array(scope, &[fraction, exponent]);
+                    stack.push(pair);
+                    return Ok(None);
+                }
+                // `Float#to_i`: toward zero, as an Integer of any size.
+                "truncate" => {
+                    use num_traits::FromPrimitive as _;
+                    let Some(whole) = num_bigint::BigInt::from_f64(x.trunc()) else {
+                        let shown = if x.is_nan() {
+                            "NaN"
+                        } else if x > 0.0 {
+                            "Infinity"
+                        } else {
+                            "-Infinity"
+                        };
+                        return Err(Error::raise("FloatDomainError", shown));
+                    };
+                    let value = crate::bignum::value(scope, &whole);
+                    stack.push(value);
+                    return Ok(None);
+                }
+                _ => {
+                    return Err(Error::NoDispatch {
+                        op: "__math__",
+                        operands: "an operation it does not have",
+                    });
+                }
+            };
+            let value = crate::float::value(scope, value);
+            stack.push(value);
+            Ok(None)
+        }
+
         Native::NumOp(op) => {
             if call.args.len() != 1 {
                 return Err(Error::raise(
@@ -8058,7 +8176,7 @@ fn native_call<'h>(
                 // under the operator's own name rather than the call's, which
                 // an `alias_method :old_plus, :+` makes a different one.
                 Err(Error::NoDispatch { .. }) => {
-                    let owner = if call.receiver.as_flonum().is_some() {
+                    let owner = if crate::float::read(scope, call.receiver).is_some() {
                         Builtin::Float.id()
                     } else {
                         Builtin::Integer.id()
@@ -8256,7 +8374,7 @@ fn native_call<'h>(
         }
 
         Native::FloatToS => {
-            let Some(f) = call.receiver.as_flonum() else {
+            let Some(f) = crate::float::read(scope, call.receiver) else {
                 return Err(Error::NoDispatch {
                     op: "Float#to_s",
                     operands: "a receiver that is not a Float",
@@ -10712,6 +10830,7 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             Native::Reflect(ReflectOp::MethodLookup),
         ),
         (Builtin::Kernel, &["__method_call__"], Native::MethodCall),
+        (Builtin::Kernel, &["__math__"], Native::Math),
         (
             Builtin::Kernel,
             &["__reflect_method_arity__"],
@@ -11144,10 +11263,8 @@ fn materialise<'h>(
 ) -> Result<Value, Error> {
     match literal {
         Literal::Float(f) => Ok(Value::flonum(*f).expect("checked at compile time")),
-        Literal::BoxedFloat(_) => Err(Error::NoDispatch {
-            op: "Float",
-            operands: "a float outside flonum range",
-        }),
+        // A fresh cell per evaluation, as a String literal is.
+        Literal::BoxedFloat(f) => Ok(crate::float::value(scope, *f)),
         Literal::BigInt(digits) => {
             let n = num_bigint::BigInt::parse_bytes(digits.as_bytes(), 10)
                 .expect("the compiler normalised the literal to base 10");
@@ -11190,11 +11307,13 @@ enum Num {
     Float(f64),
 }
 
-fn num(value: Value) -> Option<Num> {
-    value
-        .as_fixnum()
-        .map(Num::Int)
-        .or_else(|| value.as_flonum().map(Num::Float))
+/// A fixnum or a Float. An immediate answers without the heap; a boxed
+/// Float costs the one look at its cell that tells it from anything else.
+fn num(scope: &mut HandleScope<'_>, value: Value) -> Option<Num> {
+    if let Some(n) = value.as_fixnum() {
+        return Some(Num::Int(n));
+    }
+    crate::float::read(scope, value).map(Num::Float)
 }
 
 /// [`Classes::seal_operator`]'s number for `-@`: one past the last [`BinOp`].
@@ -11219,6 +11338,8 @@ fn operator_fast_path(scope: &mut HandleScope<'_>, left: Value, op: usize, frame
         1
     } else if crate::bignum::is_big(scope, left) {
         0
+    } else if crate::float::read(scope, left).is_some() {
+        1
     } else {
         return true;
     };
@@ -11250,7 +11371,7 @@ fn binop(
         return wide_op(scope, op, left, right);
     }
 
-    let (Some(left), Some(right)) = (num(left), num(right)) else {
+    let (Some(left), Some(right)) = (num(scope, left), num(scope, right)) else {
         return Err(Error::NoDispatch {
             op: op.name(),
             operands: "operands that are not both numbers",
@@ -11260,7 +11381,7 @@ fn binop(
     match (left, right) {
         (Num::Int(a), Num::Int(b)) => integer_op(scope, op, a, b),
         // Ruby promotes to Float when either side is one.
-        (a, b) => float_op(op, as_float(a), as_float(b)),
+        (a, b) => float_op(scope, op, as_float(a), as_float(b)),
     }
 }
 
@@ -11373,9 +11494,8 @@ fn wide_op(
         // through to the widening path below, which is where every
         // comparison against it is already false.
         let exact = match (&pair.0, &pair.1) {
-            (Some(a), None) => right.as_flonum().and_then(|f| big_cmp_float(a, f)),
-            (None, Some(b)) => left
-                .as_flonum()
+            (Some(a), None) => crate::float::read(scope, right).and_then(|f| big_cmp_float(a, f)),
+            (None, Some(b)) => crate::float::read(scope, left)
                 .and_then(|f| big_cmp_float(b, f))
                 .map(std::cmp::Ordering::reverse),
             _ => None,
@@ -11387,7 +11507,7 @@ fn wide_op(
         // lose precision — which is Ruby's answer too: `(2**70 + 1) / 2.0`
         // and `(2**70) / 2.0` are the same Float in Ruby as well.
         let widen = |v: Value, scope: &mut HandleScope<'_>| -> Option<f64> {
-            if let Some(f) = v.as_flonum() {
+            if let Some(f) = crate::float::read(scope, v) {
                 return Some(f);
             }
             crate::bignum::read(scope, v).and_then(|n| n.to_f64())
@@ -11400,7 +11520,7 @@ fn wide_op(
                 operands: "operands that are not both numbers",
             });
         };
-        return float_op(op, a, b);
+        return float_op(scope, op, a, b);
     };
 
     let zero = num_bigint::BigInt::from(0);
@@ -11558,13 +11678,9 @@ fn floor_mod(a: i64, b: i64) -> Option<i64> {
     }
 }
 
-fn float_op(op: BinOp, a: f64, b: f64) -> Result<Value, Error> {
-    let float = |f: f64| {
-        Value::flonum(f).ok_or(Error::NoDispatch {
-            op: op.name(),
-            operands: "a result outside flonum range",
-        })
-    };
+fn float_op(scope: &mut HandleScope<'_>, op: BinOp, a: f64, b: f64) -> Result<Value, Error> {
+    // Any double is a Float: what does not fit a flonum is boxed (#18).
+    let mut float = |f: f64| -> Result<Value, Error> { Ok(crate::float::value(scope, f)) };
     match op {
         BinOp::Add => float(a + b),
         BinOp::Sub => float(a - b),
@@ -11607,9 +11723,9 @@ fn negate(scope: &mut HandleScope<'_>, value: Value) -> Result<Value, Error> {
     if let Some(n) = crate::bignum::read(scope, value) {
         return Ok(crate::bignum::value(scope, &-n));
     }
-    match num(value).ok_or_else(fail)? {
+    match num(scope, value).ok_or_else(fail)? {
         Num::Int(i) => i.checked_neg().and_then(Value::fixnum).ok_or_else(fail),
-        Num::Float(f) => Value::flonum(-f).ok_or_else(fail),
+        Num::Float(f) => Ok(crate::float::value(scope, -f)),
     }
 }
 
@@ -11645,7 +11761,7 @@ fn ruby_eq_in(
     // bignum arm below says the same thing for the wider type; this is the
     // fixnum half of it, and `binop` already splits the pair this way for
     // every other operator.
-    if let (Some(a), Some(b)) = (num(left), num(right)) {
+    if let (Some(a), Some(b)) = (num(scope, left), num(scope, right)) {
         return Ok(match (a, b) {
             (Num::Int(x), Num::Int(y)) => x == y,
             (Num::Int(i), Num::Float(f)) | (Num::Float(f), Num::Int(i)) => int_eq_float(i, f),
@@ -11668,12 +11784,12 @@ fn ruby_eq_in(
             // fast path above skipped the pair, and with it on the left the
             // identity rule below would have answered `false`.
             (Some(a), None) => {
-                if let Some(f) = right.as_flonum() {
+                if let Some(f) = crate::float::read(scope, right) {
                     return Ok(big_cmp_float(a, f) == Some(std::cmp::Ordering::Equal));
                 }
             }
             (None, Some(b)) => {
-                if let Some(f) = left.as_flonum() {
+                if let Some(f) = crate::float::read(scope, left) {
                     return Ok(big_cmp_float(b, f) == Some(std::cmp::Ordering::Equal));
                 }
             }
@@ -11718,6 +11834,12 @@ fn ruby_eq_in(
             comparing.push((left, right));
             for index in 0..array_len(scope, a) {
                 let (x, y) = (array_get(scope, a, index), array_get(scope, b, index));
+                // The same object is equal without being asked — CRuby's
+                // `rb_equal` — which is how `[nan] == [nan]` is true for one
+                // NaN though `nan == nan` is not.
+                if x == y {
+                    continue;
+                }
                 if !ruby_eq_in(scope, x, y, comparing)? {
                     comparing.pop();
                     return Ok(false);
@@ -11795,14 +11917,8 @@ pub fn inspect(scope: &mut HandleScope<'_>, value: Value) -> String {
         Unpacked::False => "false".to_owned(),
         Unpacked::Undef => "undefined".to_owned(),
         Unpacked::Fixnum(n) => n.to_string(),
-        // Ruby prints a float with a fractional part always: `1.0`, not `1`.
-        Unpacked::Flonum(f) => {
-            if f.fract() == 0.0 && f.is_finite() {
-                format!("{f:.1}")
-            } else {
-                f.to_string()
-            }
-        }
+        // As `Float#to_s` prints it, which is the one rule for every Float.
+        Unpacked::Flonum(f) => float_to_s(f),
         Unpacked::Symbol(id) => match crate::shared::symbols::name(id) {
             Some(name) => format!(":{name}"),
             None => format!(":<symbol {}>", id.0),
@@ -11816,6 +11932,11 @@ pub fn inspect(scope: &mut HandleScope<'_>, value: Value) -> String {
                 Some(n) => n.to_string(),
                 None => unreachable!("`is_big` just said it was one"),
             }
+        }
+        // A boxed Float is a Float: the boundary is invisible from Ruby here
+        // as well.
+        Unpacked::Heap(_) if crate::float::read(scope, value).is_some() => {
+            float_to_s(crate::float::read(scope, value).expect("just read"))
         }
         Unpacked::Heap(_) => match heap_kind(scope, value) {
             Some(HeapKind::Str) => {
@@ -13031,6 +13152,24 @@ fn fd_arg(call: &Pending) -> Result<libc::c_int, Error> {
             op: "a descriptor call",
             operands: "a descriptor that is not an Integer",
         })
+}
+
+// The five libm functions `std` does not wrap. Declared here rather than
+// taken from a crate: `std` already links libm on every target Spinel
+// builds for, so this adds no dependency.
+unsafe extern "C" {
+    #[link_name = "erf"]
+    fn libm_erf(x: f64) -> f64;
+    #[link_name = "erfc"]
+    fn libm_erfc(x: f64) -> f64;
+    #[link_name = "tgamma"]
+    fn libm_tgamma(x: f64) -> f64;
+    #[link_name = "lgamma_r"]
+    fn libm_lgamma_r(x: f64, sign: *mut libc::c_int) -> f64;
+    #[link_name = "frexp"]
+    fn libm_frexp(x: f64, exponent: *mut libc::c_int) -> f64;
+    #[link_name = "ldexp"]
+    fn libm_ldexp(x: f64, exponent: libc::c_int) -> f64;
 }
 
 /// `Method#parameters` for a compiled body: `[[:req, :a], [:opt, :b], ...]`,

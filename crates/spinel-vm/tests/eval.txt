@@ -1524,3 +1524,27 @@ class MoH; def bar; :bar; end; define_method(:baz, instance_method(:bar)); end; 
 f = 2.method(:+); g = 3.method(:*); [(f >> g).call(1), (f << g).call(1), f.to_proc.lambda?, f.curry[5]]  #=> [9, 5, true, 7]
 add = lambda { |a, b, c| a + b + c }; [add.curry[1][2][3], add.curry[1, 2][3], add.curry.lambda?, proc { |a, b| }.curry.lambda?]  #=> [6, 6, true, false]
 o = Object.new; def o.y; yield 1; end; def o.k(a, b: 2); [a, b]; end; [o.method(:y).call { |v| v + 1 }, o.method(:k).call(1), o.method(:k).call(1, b: 3)]  #=> [2, [1, 2], [1, 3]]
+
+# --------------------------------------- every double is a Float, and Math (#18, #35)
+# A float that does not fit an immediate is boxed, and nothing can tell: it
+# compares, hashes, freezes and prints as a Float. `Math` is libm with Ruby's
+# domain rules.
+[1 / 0.0, -1 / 0.0, (0.0 / 0.0).nan?, 1e200 * 1e200, 1e100, 1e-100, -0.0]  #=> [Infinity, -Infinity, true, Infinity, 1.0e+100, 1.0e-100, -0.0]
+[Float::NAN == Float::NAN, Float::INFINITY > 1e308, Float::INFINITY.infinite?, (-Float::INFINITY).infinite?, 1.0.infinite?, 1.0.finite?, Float::NAN.finite?]  #=> [false, true, 1, -1, nil, true, false]
+[Float::MAX, Float::MIN, Float::EPSILON, Float::DIG]  #=> [1.7976931348623157e+308, 2.2250738585072014e-308, 2.220446049250313e-16, 15]
+h = {1e300 => :a, 0.0 => :z}; [h[1e300], h[-0.0], [1e300, 1e300].uniq.size, 1e300.frozen?, 1e300.class, 1e300.eql?(1e300), 1e300.equal?(1e300)]  #=> [:a, :z, 1, true, Float, true, false]
+[1e300 <=> 1, Float::NAN <=> 1, 1 <=> Float::INFINITY, (2**70) <=> Float::INFINITY, [1e300, 1.0, -Float::INFINITY].min, 1e300 + 1, 1 + 1e300, -0.0.abs]  #=> [1, nil, -1, -1, -Infinity, 1.0e+300, 1.0e+300, 0.0]
+n = Float::NAN; [[n] == [n], [n] == [Float::NAN], [n] == [0.0 / 0.0], n == n]  #=> [true, true, false, false]
+[3.7.to_i, -3.7.to_i, 1e20.to_i, (Float::NAN.to_i rescue $!.message), (Float::INFINITY.to_i rescue $!.message)]  #=> [3, -3, 100000000000000000000, "NaN", "Infinity"]
+[2.5.round, 3.5.round, -2.5.round, 2.5.round(half: :even), 2.5.round(half: :down), 1.234567.round(2), 1234.5.round(-2), 1.5.floor, -1.5.ceil, 1.25.floor(1), 1.25.ceil(1), 12345.6.floor(-2)]  #=> [3, 4, -3, 2, 2, 1.23, 1200, 1, -1, 1.2, 1.3, 12300]
+[767573.1875850001.round(5), 767573.1875850001.round(5, half: :down), 0.49999999999999994.round, -0.49999999999999994.round, -0.0.round(1)]  #=> [767573.18759, 767573.18759, 0, 0, -0.0]
+[7.5.divmod(2), -7.5.divmod(2), 7.5.div(2), 1.0.fdiv(0), 2.0 ** 10, 2 ** 0.5, 4.0 ** 0.5]  #=> [[3, 1.5], [-4, 0.5], 3, Infinity, 1024.0, 1.4142135623730951, 2.0]
+["%f" % Float::INFINITY, "%e" % -Float::INFINITY, "%5.1f|" % Float::NAN, "%010.2f" % Float::INFINITY, [1.0, Float::INFINITY].sum, [Float::INFINITY, -Float::INFINITY].sum.nan?]  #=> ["Inf", "-Inf", "  NaN|", "       Inf", Infinity, true]
+[Math.sqrt(4), Math.sin(0), Math.cos(0), Math.atan2(1, 1), Math.hypot(3, 4), Math.cbrt(27), Math.exp(1) == Math::E, Math::PI]  #=> [2.0, 0.0, 1.0, 0.7853981633974483, 5.0, 3.0, true, 3.141592653589793]
+[Math.log(1), Math.log(8, 2), Math.log2(8), Math.log10(1000), Math.log(0), Math.log1p(0), Math.log(2**2000).round(6)]  #=> [0.0, 3.0, 3.0, 3.0, -Infinity, 0.0, 1386.294361]
+[(Math.sqrt(-1) rescue $!.message), (Math.log(-1) rescue $!.message), (Math.acos(2) rescue $!.class), (Math.atanh(2) rescue $!.class), (Math.acosh(0) rescue $!.class), (Math.gamma(-1) rescue $!.message)]  #=> ["Numerical argument is out of domain - sqrt", "Numerical argument is out of domain - log", Math::DomainError, Math::DomainError, Math::DomainError, "Numerical argument is out of domain - gamma"]
+[(Math.sqrt("x") rescue $!.message), (Math.sqrt(nil) rescue $!.message), (Math.sqrt(true) rescue $!.message), (Math.sqrt(Object.new) rescue $!.message)]  #=> ["can't convert String into Float", "can't convert nil into Float", "can't convert true into Float", "can't convert Object into Float"]
+[Math.sqrt(Float::NAN).nan?, Math.acos(Float::NAN).nan?, Math.sqrt(Float::INFINITY), Math.exp(-Float::INFINITY), Math.atanh(1), Math.atanh(-1)]  #=> [true, true, Infinity, 0.0, Infinity, -Infinity]
+[Math.gamma(5), Math.gamma(23), Math.gamma(0.0), Math.gamma(-0.0), Math.lgamma(-0.0), Math.lgamma(3)[1], Math.erf(0), Math.erfc(0)]  #=> [24.0, 1.1240007277776077e+21, Infinity, -Infinity, [Infinity, -1], 1, 0.0, 1.0]
+[Math.frexp(1234.0), Math.ldexp(0.6025390625, 11), Math.ldexp(1, 3.9), (Math.ldexp(1, "x") rescue $!.class)]  #=> [[0.6025390625, 11], 1234.0, 8.0, TypeError]
+o = Object.new; o.extend(Math); [o.send(:sqrt, 9), (o.sqrt(9) rescue $!.class), Math.respond_to?(:sqrt)]  #=> [3.0, NoMethodError, true]

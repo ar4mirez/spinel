@@ -1,3 +1,4 @@
 fails(#28: an edge case first reached once mspec's mocks and Method objects ran, not yet diagnosed):Kernel#warn :uplevel keyword argument prepends a message with specified line from the backtrace
 fails(#28: an edge case first reached once mspec's mocks and Method objects ran, not yet diagnosed):Kernel#warn :uplevel keyword argument converts first arg using to_s
 fails(#28: an edge case first reached once mspec's mocks and Method objects ran, not yet diagnosed):Kernel#warn :uplevel keyword argument prepends even if a message is empty or nil
+fails(#28: an edge case first reached once mspec's mocks and Method objects ran, not yet diagnosed):Kernel#warn :uplevel keyword argument converts value to Integer

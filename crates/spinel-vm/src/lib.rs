@@ -73,6 +73,7 @@ pub mod class;
 pub mod compile;
 pub mod encoding_table;
 pub mod errno;
+pub mod float;
 pub mod heap;
 pub mod interp;
 pub mod method;

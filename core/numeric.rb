@@ -95,7 +95,8 @@ class Numeric
     if other.is_a?(Numeric)
       return -1 if self < other
       return 1 if self > other
-      return 0
+      # Neither less, greater nor equal is NaN, which is not comparable.
+      return self == other ? 0 : nil
     end
     pair = __coerce_pair__(other, false)
     return nil if pair.nil?

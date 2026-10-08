@@ -172,13 +172,7 @@ class Range
   #
   # A Float *end* against an Integer begin is 2 for `(1..2.5)`: the end is
   # floored, and `exclude_end?` only takes one off when the end is a whole
-  # number, so `(1...2.5)` is also 2 while `(1...3.0)` is 2 rather than 3. That
-  # arithmetic is written but not reachable yet — there is no float-to-integer
-  # primitive, so `Float#floor` reports itself missing by name (#18).
-  #
-  # `Float::INFINITY` is mentioned rather than approximated: this VM has only
-  # flonums and an infinity needs a heap `Float` (#18), so an endless range
-  # reports that missing constant by name instead of answering a wrong number.
+  # number, so `(1...2.5)` is also 2 while `(1...3.0)` is 2 rather than 3.
   def size
     from = @__begin__
     unless from.is_a?(Integer)
