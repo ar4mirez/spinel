@@ -5,11 +5,12 @@
 # operator on that pair. `1 + obj` is not "Integer#+ with a bad argument"; it is
 # "ask obj for a pair of numbers, then add those".
 #
-# Every method here is reached only after the VM's fast path has declined.
-# `Insn::BinOp` answers fixnum and flonum pairs without dispatching at all, and
-# falls back to an ordinary send when it cannot — so by the time one of these
-# runs, the pair is either not both numbers, or is a pair this VM has no
-# representation for. Those two cases are told apart below, because they need
+# Every method here is reached only after the VM's own arithmetic has declined.
+# `Insn::BinOp` answers a pair of numbers without dispatching at all, and sends
+# when it cannot; the send finds `Integer#+` or `Float#+`, a primitive that is
+# the same arithmetic under a method's name (#239), and that primitive calls
+# the operator here as its `super` — so by the time one of these runs, the pair
+# is either not both numbers, or is a pair this VM has no representation for. Those two cases are told apart below, because they need
 # opposite answers: one coerces, the other must refuse.
 #
 # The protocol has one asymmetry, and it is not a wart to be smoothed over:
@@ -27,11 +28,11 @@ class Numeric
 
   # The ten operators, written out rather than routed through one `send`.
   #
-  # The retry has to be the operator *syntax*: `pair[0] + pair[1]` compiles to
-  # `Insn::BinOp`, whose fast path adds two numbers without dispatching, while
-  # `pair[0].send(:+, pair[1])` would come straight back here and recurse. It is
-  # also what makes the retry land on the right receiver — `"a" + "b"` when
-  # `coerce` answered a pair of Strings.
+  # The retry is the operator *syntax*: `pair[0] + pair[1]` compiles to
+  # `Insn::BinOp`, whose fast path adds two numbers without dispatching, where a
+  # `send` would pay for a lookup to reach the same arithmetic. It is also what
+  # makes the retry land on the right receiver — `"a" + "b"` when `coerce`
+  # answered a pair of Strings.
   def +(other)
     pair = __coerce_bin__(other, :+)
     pair[0] + pair[1]
@@ -110,7 +111,7 @@ class Numeric
   def __coerce_pair__(other, strict)
     unless other.respond_to?(:coerce)
       return nil unless strict
-      raise TypeError, other.class.to_s + " can't be coerced into " + self.class.to_s
+      raise TypeError, __operand_name__(other) + " can't be coerced into " + self.class.to_s
     end
     pair = other.coerce(self)
     return nil if pair.nil? && !strict

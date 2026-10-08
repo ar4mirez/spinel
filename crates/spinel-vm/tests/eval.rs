@@ -409,3 +409,22 @@ fn return_through_a_singleton_class_body_needs_a_method_to_leave() {
         );
     }
 }
+
+#[test]
+fn an_operator_instruction_hears_a_prepend_and_an_undef() {
+    // The two redefinitions `eval.txt` cannot hold, because the oracle runs
+    // every row in one Ruby and neither can be taken back there (#239). Each
+    // was measured on ruby 4.0.6 by hand.
+    for (source, want) in [
+        (
+            "module OpPre; def *(o); :pre; end; end; Integer.prepend(OpPre); [2 * 3, 2.0 * 3]",
+            "[:pre, 6.0]",
+        ),
+        (
+            "class Float; undef_method :<; end; begin; 1.0 < 2; rescue NoMethodError => e; e.message; end",
+            "\"undefined method '<' for an instance of Float\"",
+        ),
+    ] {
+        assert_eq!(eval(source).as_deref(), Ok(want), "{source}");
+    }
+}

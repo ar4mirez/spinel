@@ -139,9 +139,9 @@ pub enum Insn {
     /// One of Ruby's specialised binary operators. See [`BinOp`] for the
     /// fast-path-with-a-send-behind-it story.
     BinOp(BinOp),
-    /// `-@`
+    /// `-@`, on the same terms: a number is negated here, anything else is sent.
     Neg,
-    /// `!`
+    /// `!`. Truthiness, unless the operand's class defines a `!` of its own.
     Not,
 
     // -- aggregates -------------------------------------------------------
@@ -476,17 +476,18 @@ pub enum Insn {
 
 /// The binary operators the compiler emits directly.
 ///
-/// These are method calls in Ruby, and compiling them as calls needs
-/// [#11][issue-11]'s calling convention. Emitting them as instructions is what
-/// YARV does too (`opt_plus`, `opt_lt`, …): a fast path for the immediate types,
-/// with a real send behind it when the fast path does not apply.
+/// These are method calls in Ruby. Emitting them as instructions is what YARV
+/// does too (`opt_plus`, `opt_lt`, …): a fast path for a pair of numbers, with
+/// a real send behind it when the fast path does not apply.
 ///
-/// The send behind it does not exist yet. Until #11, an operand the fast path
-/// does not cover is [`Error::NoDispatch`][nd] — *not yet dispatchable*, rather
-/// than wrong — and the spec that needed it stays blocked.
+/// The method is in the table as well (#239): `Integer#+` and `Float#+` are
+/// [`Native::NumOp`][num], the same function under the name a `send` or an
+/// `inject(:+)` looks up. The instruction answers by itself only while that
+/// name still resolves to it — a program that redefines `Integer#+` is sent to
+/// instead — and `==` and `!=` are the exception, answered for every type the
+/// VM can compare without asking.
 ///
-/// [issue-11]: https://github.com/ar4mirez/spinel/issues/11
-/// [nd]: crate::interp::Error::NoDispatch
+/// [num]: crate::method::Native::NumOp
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinOp {
     Add,

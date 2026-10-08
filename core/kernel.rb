@@ -11,6 +11,13 @@ module Kernel
     __id__ == other.__id__ || self == other ? true : false
   end
 
+  # The negation of the receiver's own `=~`, as a method of its own (#239):
+  # `defined?(x !~ y)` is "method" and `x.send(:!~, y)` answers. An object with
+  # no `=~` raises from here, since Ruby 3.2 took `Object#=~` away.
+  def !~(other)
+    (self =~ other) ? false : true
+  end
+
   # `class or module required` rather than `false`: asking whether an object is
   # a kind of `1` is a mistake in the caller, and Ruby says so. Measured.
   #

@@ -39,12 +39,16 @@ on disk and shared between Ractors:
   string literal a fresh object per evaluation, as Ruby requires.
 
 Arithmetic and comparison are instructions rather than sends — `opt_plus` and
-friends, as YARV has them: a fast path for fixnums and flonums with a real send
-behind it. The send behind it arrives with the calling convention in #11. Until
-then an operand off the fast path is *not yet dispatchable* rather than wrong,
-and the spec that needed it stays blocked. Integer overflow is the same answer:
-Ruby promotes to a bignum, there is no bignum, and a wrapped result would be a
-wrong answer where a blocked spec is merely an incomplete one.
+friends, as YARV has them: a fast path for a pair of numbers with a real send
+behind it for any other operand. The operators are in the method table too:
+`Integer#+`, `Float#<` and the rest are primitives over the same function the
+instruction calls, so `2.send(:+, 1)`, `respond_to?(:+)` and `inject(:+)` agree
+with `2 + 1`, and `Numeric`'s coercing operator is their `super`. The
+instruction keeps its fast path only while the name still resolves to that
+primitive: the class table records the bodies it installed and re-reads them
+after any definition, so `class Integer; def +(o) = 42; end` is heard at the
+next `1 + 1` (#239, PRD 0056). Code in `core/*.rb` is exempt, as C is in CRuby.
+Integer overflow promotes to a bignum.
 
 ## Values
 

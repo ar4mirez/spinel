@@ -1,3 +1,1 @@
 fails(#268: Spinel prints no warnings yet, and this example expects one):The defined? keyword when called with a method name in a void context warns about the void context when parsing it
-fails(#239: defined? on an operator call such as !~, and defined? in a void context evaluating its receiver):The defined? keyword when called with a method name in a void context does not execute the receiver
-fails(#239: defined? on an operator call such as !~, and defined? in a void context evaluating its receiver):The defined? keyword for an expression returns 'method' for an expression with '!~'

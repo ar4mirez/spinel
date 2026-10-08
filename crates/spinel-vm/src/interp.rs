@@ -1967,6 +1967,13 @@ pub fn eval_in(
                                 op: "==",
                                 operands: "a number and an object that decides",
                             })
+                        } else if !matches!(op, BinOp::Eq | BinOp::Neq)
+                            && !operator_fast_path(scope, left, op as usize, &frames[top])
+                        {
+                            Err(Error::NoDispatch {
+                                op: op.name(),
+                                operands: "a number whose class redefined the operator",
+                            })
                         } else {
                             binop(scope, op, left, right)
                         };
@@ -2022,12 +2029,95 @@ pub fn eval_in(
                     }
                     Insn::Neg => {
                         let value = stack.pop().expect("neg on an empty stack");
-                        let negated = negate(scope, value)?;
-                        stack.push(negated);
+                        let result = if operator_fast_path(scope, value, NEG_GUARD, &frames[top]) {
+                            negate(scope, value)
+                        } else {
+                            Err(Error::NoDispatch {
+                                op: "-@",
+                                operands: "a number whose class redefined the operator",
+                            })
+                        };
+                        match result {
+                            Ok(negated) => stack.push(negated),
+                            // The send behind the fast path, as `Insn::BinOp`
+                            // has: `-x` is `x.-@`, for whatever `x` defines one.
+                            Err(Error::NoDispatch { .. }) => {
+                                let call = Pending {
+                                    cache: None,
+                                    name: crate::shared::symbols::intern("-@"),
+                                    receiver: value,
+                                    args: Vec::new(),
+                                    keywords: Vec::new(),
+                                    block: Value::NIL,
+                                    block_is_literal: false,
+                                    cref: frames[top].cref,
+                                    implicit_self: false,
+                                    public_only: false,
+                                    target: Target::Method,
+                                    owner: None,
+                                    defined_as: None,
+                                };
+                                if let Some(unwind) = dispatch(
+                                    scope,
+                                    &mut stack,
+                                    &mut frames,
+                                    call,
+                                    proc_class,
+                                    &mut ids,
+                                )? {
+                                    return Ok(Step::Unwind(unwind));
+                                }
+                            }
+                            Err(other) => return Err(other),
+                        }
                     }
                     Insn::Not => {
                         let value = stack.pop().expect("not on an empty stack");
-                        stack.push(bool_value(!value.is_truthy()));
+                        // `!x` is `x.!`, and a class may define one (#239). The
+                        // instruction answers itself while the method a send
+                        // would find is still `BasicObject#!`.
+                        //
+                        // ponytail: an immediate is answered without the
+                        // lookup, so a `!` defined on `NilClass`, `Integer` or
+                        // `Symbol` is not seen. Route those through the lookup
+                        // too if a program turns out to define one.
+                        let bang = crate::shared::symbols::intern("!");
+                        let redefined = !value.is_immediate()
+                            && class_of(scope, value).is_some_and(|class| {
+                                scope
+                                    .classes_mut()
+                                    .lookup(class, bang)
+                                    .is_some_and(|m| m.owner != Builtin::BasicObject.id())
+                            });
+                        if redefined {
+                            let call = Pending {
+                                cache: None,
+                                name: bang,
+                                receiver: value,
+                                args: Vec::new(),
+                                keywords: Vec::new(),
+                                block: Value::NIL,
+                                block_is_literal: false,
+                                cref: frames[top].cref,
+                                implicit_self: false,
+                                public_only: false,
+                                target: Target::Method,
+                                owner: None,
+                                defined_as: None,
+                            };
+                            if let Some(unwind) = dispatch(
+                                scope,
+                                &mut stack,
+                                &mut frames,
+                                call,
+                                proc_class,
+                                &mut ids,
+                            )? {
+                                return Ok(Step::Unwind(unwind));
+                            }
+                        } else {
+                            stack.push(bool_value(!value.is_truthy()));
+                        }
                     }
 
                     Insn::NewArray(count) => {
@@ -7513,6 +7603,62 @@ fn native_call<'h>(
             Ok(None)
         }
 
+        Native::NumOp(op) => {
+            if call.args.len() != 1 {
+                return Err(Error::raise(
+                    "ArgumentError",
+                    format!(
+                        "wrong number of arguments (given {}, expected 1)",
+                        call.args.len()
+                    ),
+                ));
+            }
+            match binop(scope, op, call.receiver, call.args[0]) {
+                Ok(value) => {
+                    stack.push(value);
+                    Ok(None)
+                }
+                // Not a pair of numbers, so `Numeric`'s operator of the same
+                // name decides: it asks the operand to `coerce`. Reached as
+                // `super` from the class this primitive is defined on, and
+                // under the operator's own name rather than the call's, which
+                // an `alias_method :old_plus, :+` makes a different one.
+                Err(Error::NoDispatch { .. }) => {
+                    let owner = if call.receiver.as_flonum().is_some() {
+                        Builtin::Float.id()
+                    } else {
+                        Builtin::Integer.id()
+                    };
+                    let forwarded = Pending {
+                        cache: None,
+                        name: crate::shared::symbols::intern(op.name()),
+                        implicit_self: true,
+                        public_only: false,
+                        target: Target::Super { owner },
+                        owner: None,
+                        defined_as: None,
+                        ..call
+                    };
+                    dispatch(scope, stack, frames, forwarded, proc_class, ids)
+                }
+                Err(other) => Err(other),
+            }
+        }
+        Native::NumNeg => {
+            if !call.args.is_empty() {
+                return Err(Error::raise(
+                    "ArgumentError",
+                    format!(
+                        "wrong number of arguments (given {}, expected 0)",
+                        call.args.len()
+                    ),
+                ));
+            }
+            let value = negate(scope, call.receiver)?;
+            stack.push(value);
+            Ok(None)
+        }
+
         Native::IntBits(op) => {
             // A bignum on either side goes through `BigInt`, which has all six
             // of these. Two's complement is what `&`, `|`, `^` and `~` mean in
@@ -10365,6 +10511,44 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         }
     }
 
+    // The operators as methods (#239). `Insn::BinOp` and `Insn::Neg` answer a
+    // pair of numbers without dispatching; these are the same functions under
+    // the names a `send`, a `respond_to?` or an `inject(:+)` looks up. Sealed,
+    // so the instructions can tell when a program has put something else there.
+    for (which, class) in [Builtin::Integer.id(), Builtin::Float.id()]
+        .into_iter()
+        .enumerate()
+    {
+        for op in [
+            BinOp::Add,
+            BinOp::Sub,
+            BinOp::Mul,
+            BinOp::Div,
+            BinOp::Mod,
+            BinOp::Lt,
+            BinOp::Le,
+            BinOp::Gt,
+            BinOp::Ge,
+        ] {
+            let body = scope
+                .definitions_mut()
+                .add(Definition::Native(Native::NumOp(op)));
+            let symbol = crate::shared::symbols::intern(op.name());
+            scope.classes_mut().define_method(class, symbol, body);
+            scope
+                .classes_mut()
+                .seal_operator(which, class, op as usize, symbol, body);
+        }
+        let body = scope
+            .definitions_mut()
+            .add(Definition::Native(Native::NumNeg));
+        let symbol = crate::shared::symbols::intern("-@");
+        scope.classes_mut().define_method(class, symbol, body);
+        scope
+            .classes_mut()
+            .seal_operator(which, class, NEG_GUARD, symbol, body);
+    }
+
     // The module functions (#161). `Kernel.private_instance_methods(false)` on
     // ruby 4.0.6 is where this list comes from, not from taste: each is a
     // method a program calls receiverless and Ruby refuses on a receiver, so
@@ -10482,6 +10666,39 @@ fn num(value: Value) -> Option<Num> {
         .as_fixnum()
         .map(Num::Int)
         .or_else(|| value.as_flonum().map(Num::Float))
+}
+
+/// [`Classes::seal_operator`]'s number for `-@`: one past the last [`BinOp`].
+///
+/// [`Classes::seal_operator`]: crate::class::Classes::seal_operator
+const NEG_GUARD: usize = BinOp::Ge as usize + 1;
+
+/// Whether an operator instruction may answer `left`'s operator itself.
+///
+/// It may unless `left` is a number whose class no longer has the VM's own
+/// method under that name — `class Integer; def +(o) = 42; end` makes `1 + 1`
+/// 42, measured, so the instruction has to send (#239).
+///
+/// Code in `core/*.rb` is exempt. It stands where CRuby has C, and C adds two
+/// integers without asking `Integer#+`: `[1, 2].each_with_index` still counts
+/// from zero after that redefinition.
+#[inline]
+fn operator_fast_path(scope: &mut HandleScope<'_>, left: Value, op: usize, frame: &Call) -> bool {
+    let which = if left.as_fixnum().is_some() {
+        0
+    } else if left.as_flonum().is_some() {
+        1
+    } else if crate::bignum::is_big(scope, left) {
+        0
+    } else {
+        return true;
+    };
+    scope.classes_mut().operator_is_native(which, op)
+        || frame
+            .iseq
+            .path
+            .as_deref()
+            .is_some_and(|path| path.starts_with("<internal:"))
 }
 
 fn binop(

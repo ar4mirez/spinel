@@ -598,6 +598,28 @@ pub struct Classes {
     /// correctness question the way a serial's would be: a stamp only has to
     /// differ from the one the *previous* walk wrote.
     walks: u64,
+    /// Whether `Integer`'s and `Float`'s operators are still the VM's own, which
+    /// is the question an operator instruction asks before it answers without
+    /// dispatching (#239). See [`Classes::operator_is_native`].
+    operator_guards: [OperatorGuard; 2],
+    /// Cleared by every [`Classes::invalidate`], so the guards are re-read only
+    /// after something was defined somewhere.
+    operators_fresh: bool,
+}
+
+/// One numeric class's operators: the bodies the VM installed, and which of
+/// them a lookup still finds.
+///
+/// `native` is only as fresh as `serial`. A definition anywhere in the class's
+/// ancestry moves the class serial, and the next question re-resolves all of
+/// the names — a dozen cached lookups per definition, against one integer
+/// compare per operator instruction.
+#[derive(Debug, Clone, Default)]
+struct OperatorGuard {
+    class: Option<ClassId>,
+    sealed: Vec<(usize, SymbolId, Value)>,
+    serial: u64,
+    native: u32,
 }
 
 /// Where a splice starts, and what the target already counts as reaching.
@@ -706,6 +728,78 @@ impl Classes {
     /// point of the split — see [`Classes::invalidate`].
     pub fn serial(&self, id: ClassId) -> u64 {
         self.entry(id).serial
+    }
+
+    /// Record that `name` on `class` is the primitive behind operator number
+    /// `op`, so [`Classes::operator_is_native`] has something to compare with.
+    ///
+    /// `which` is 0 for `Integer` and 1 for `Float`: the two classes whose
+    /// instances an operator instruction answers for without a send.
+    pub fn seal_operator(
+        &mut self,
+        which: usize,
+        class: ClassId,
+        op: usize,
+        name: SymbolId,
+        body: Value,
+    ) {
+        let guard = &mut self.operator_guards[which];
+        guard.class = Some(class);
+        guard.sealed.push((op, name, body));
+        // Stale on purpose: the first question recomputes.
+        guard.serial = u64::MAX;
+        self.operators_fresh = false;
+    }
+
+    /// Whether operator `op` on numeric class `which` still resolves to the
+    /// primitive [`Classes::seal_operator`] recorded.
+    ///
+    /// False after `class Integer; def +(o) = 42; end`, a `prepend` that puts a
+    /// `+` in front, or an `undef` — anything that makes a send land somewhere
+    /// other than where the instruction's fast path computes. True again once
+    /// the original is aliased back, because the body is what is compared.
+    ///
+    /// One flag and one mask while nothing has been defined since the last
+    /// question, which is the state every arithmetic instruction in a running
+    /// loop finds.
+    #[inline]
+    pub fn operator_is_native(&mut self, which: usize, op: usize) -> bool {
+        if !self.operators_fresh {
+            self.refresh_operators();
+        }
+        self.operator_guards[which].native & (1 << op) != 0
+    }
+
+    /// Re-resolve the sealed names of each numeric class whose serial moved.
+    #[cold]
+    fn refresh_operators(&mut self) {
+        for which in 0..self.operator_guards.len() {
+            let Some(class) = self.operator_guards[which].class else {
+                // Nothing sealed: a table with no primitives has nothing a
+                // program could have replaced.
+                self.operator_guards[which].native = u32::MAX;
+                continue;
+            };
+            let serial = self.entry(class).serial;
+            if self.operator_guards[which].serial == serial {
+                continue;
+            }
+            let sealed = std::mem::take(&mut self.operator_guards[which].sealed);
+            let mut native = 0u32;
+            for &(op, name, body) in &sealed {
+                if self
+                    .lookup(class, name)
+                    .is_some_and(|m| m.owner == class && m.body == body)
+                {
+                    native |= 1 << op;
+                }
+            }
+            let guard = &mut self.operator_guards[which];
+            guard.sealed = sealed;
+            guard.native = native;
+            guard.serial = serial;
+        }
+        self.operators_fresh = true;
     }
 
     pub fn len(&self) -> usize {
@@ -1670,6 +1764,7 @@ impl Classes {
     // upgrade is a generation counter per class checked lazily on lookup, which
     // trades the walk for a check on every hit.
     fn invalidate(&mut self, id: ClassId) {
+        self.operators_fresh = false;
         self.walks += 1;
         let mark = self.walks;
         // Out of `self` for the walk, so the frontier and the entries can be
