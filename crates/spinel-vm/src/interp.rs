@@ -1294,6 +1294,22 @@ fn reflect_native(
                 }
             }
         }
+        ReflectOp::CopySingleton => {
+            let (from, to) = (arg(0), arg(1));
+            // A class's own singleton is its metaclass, which `Module#dup`
+            // would have to copy along with the method table; an immediate
+            // has none to copy.
+            if !from.is_immediate()
+                && !to.is_immediate()
+                && class_id_of(scope, from).is_none()
+                && let Some(class) = class_of(scope, from)
+                && scope.classes().is_singleton(class)
+            {
+                let target = singleton_of(scope, to)?;
+                scope.classes_mut().copy_singleton(class, target);
+            }
+            Value::NIL
+        }
         ReflectOp::ModuleKind => {
             match class_id_of(scope, arg(0)).map(|id| scope.classes().kind(id)) {
                 Some(Kind::Class) => Value::symbol(symbol("class")),
@@ -6817,6 +6833,14 @@ fn dup_value(scope: &mut HandleScope<'_>, value: Value) -> Result<Value, Error> 
             if is_string(scope, value) {
                 crate::strings::unshare(scope, copy);
             }
+            // An Array's elements live in storage its cell points at, so a
+            // copied cell would share them: `b = a.dup; b[0] = 9` changed
+            // `a`. The copy starts empty instead, as CRuby's allocator leaves
+            // it, and `Array#initialize_copy` fills it (#201).
+            if is_builtin(scope, value, Builtin::Array) {
+                scope.set_slot(copy, ARRAY_STORAGE, Value::NIL);
+                array_set_len(scope, copy, 0);
+            }
         }
     }
     // The shape travels with the slots, and the ivar storage is copied rather
@@ -10343,14 +10367,6 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         ),
         (
             Builtin::Kernel,
-            &["__needs_kernel_clone__"],
-            Native::Refuse {
-                what: "`clone` of an object with singleton methods",
-                needs: "`Kernel#clone` (#201)",
-            },
-        ),
-        (
-            Builtin::Kernel,
             &["__needs_io__"],
             Native::Refuse {
                 what: "a `File` opened for writing",
@@ -10519,6 +10535,11 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             Builtin::Kernel,
             &["__reflect_const_deprecated__"],
             Native::Reflect(ReflectOp::ConstDeprecated),
+        ),
+        (
+            Builtin::Kernel,
+            &["__reflect_copy_singleton__"],
+            Native::Reflect(ReflectOp::CopySingleton),
         ),
         (
             Builtin::Kernel,

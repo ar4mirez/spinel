@@ -8,9 +8,9 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 |---|---:|---:|---:|---:|---:|---:|---:|
 | `command_line` | 32 | 175 | 1 | 0 | 173 | 1 | 1% |
 | `core/argf` | 35 | 139 | 0 | 0 | 139 | 0 | 0% |
-| `core/array` | 132 | 2898 | 2670 | 0 | 220 | 8 | 92% |
+| `core/array` | 132 | 2898 | 2671 | 0 | 219 | 8 | 92% |
 | `core/basicobject` | 14 | 172 | 155 | 0 | 17 | 0 | 90% |
-| `core/binding` | 12 | 98 | 53 | 0 | 45 | 0 | 54% |
+| `core/binding` | 12 | 98 | 56 | 0 | 42 | 0 | 57% |
 | `core/builtin_constants` | 1 | 27 | 17 | 0 | 10 | 0 | 63% |
 | `core/class` | 8 | 54 | 36 | 0 | 18 | 0 | 67% |
 | `core/comparable` | 7 | 54 | 28 | 0 | 26 | 0 | 52% |
@@ -22,7 +22,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/enumerable` | 61 | 536 | 488 | 0 | 47 | 1 | 91% |
 | `core/enumerator` | 73 | 431 | 294 | 0 | 128 | 9 | 68% |
 | `core/env` | 45 | 193 | 116 | 0 | 76 | 1 | 60% |
-| `core/exception` | 39 | 250 | 182 | 0 | 42 | 26 | 73% |
+| `core/exception` | 39 | 250 | 185 | 0 | 40 | 25 | 74% |
 | `core/false` | 9 | 13 | 9 | 0 | 4 | 0 | 69% |
 | `core/fiber` | 15 | 189 | 127 | 0 | 58 | 4 | 67% |
 | `core/file` | 111 | 913 | 137 | 0 | 776 | 0 | 15% |
@@ -47,7 +47,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/process` | 92 | 423 | 82 | 0 | 341 | 0 | 19% |
 | `core/queue` | 15 | 46 | 0 | 0 | 46 | 0 | 0% |
 | `core/random` | 10 | 61 | 0 | 0 | 61 | 0 | 0% |
-| `core/range` | 35 | 606 | 362 | 0 | 243 | 1 | 60% |
+| `core/range` | 35 | 606 | 364 | 0 | 241 | 1 | 60% |
 | `core/rational` | 32 | 160 | 2 | 0 | 158 | 0 | 1% |
 | `core/refinement` | 8 | 25 | 0 | 0 | 25 | 0 | 0% |
 | `core/regexp` | 24 | 256 | 77 | 0 | 170 | 9 | 30% |
@@ -55,7 +55,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/set` | 57 | 175 | 0 | 0 | 175 | 0 | 0% |
 | `core/signal` | 3 | 53 | 37 | 0 | 16 | 0 | 70% |
 | `core/sizedqueue` | 16 | 61 | 0 | 0 | 61 | 0 | 0% |
-| `core/string` | 151 | 3906 | 3251 | 0 | 644 | 11 | 83% |
+| `core/string` | 151 | 3906 | 3251 | 0 | 643 | 12 | 83% |
 | `core/struct` | 30 | 163 | 1 | 0 | 162 | 0 | 1% |
 | `core/symbol` | 29 | 270 | 120 | 0 | 149 | 1 | 44% |
 | `core/systemexit` | 2 | 6 | 6 | 0 | 0 | 0 | 100% |
@@ -66,7 +66,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/true` | 9 | 13 | 10 | 0 | 3 | 0 | 77% |
 | `core/unboundmethod` | 20 | 92 | 1 | 0 | 91 | 0 | 1% |
 | `core/warning` | 5 | 31 | 22 | 0 | 9 | 0 | 71% |
-| `language` | 67 | 2568 | 2159 | 0 | 370 | 39 | 84% |
+| `language` | 67 | 2568 | 2162 | 0 | 367 | 39 | 84% |
 | `language/predefined` | 2 | 14 | 0 | 0 | 14 | 0 | 0% |
 | `language/regexp` | 11 | 257 | 198 | 0 | 56 | 3 | 77% |
 | `library/English` | 2 | 27 | 1 | 0 | 1 | 25 | 4% |
@@ -131,4 +131,4 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `optional/capi` | 47 | 0 | 0 | 0 | 0 | 0 | — |
 | `optional/thread_safety` | 1 | 5 | 0 | 0 | 5 | 0 | 0% |
 | `security` | 13 | 34 | 0 | 0 | 34 | 0 | 0% |
-| **total** | 3835 | 30902 | 14302 | 0 | 16359 | 241 | 46% |
+| **total** | 3835 | 30902 | 14314 | 0 | 16347 | 241 | 46% |

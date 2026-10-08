@@ -1,1 +1,0 @@
-fails(#201: Exception#exception with a message is clone, and Kernel#clone does not exist yet):Exception#exception when raised will be rescued as the new exception

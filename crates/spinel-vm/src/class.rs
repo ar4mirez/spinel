@@ -1285,8 +1285,6 @@ impl Classes {
             .collect()
     }
 
-    /// `Module#remove_const`: take one of this module's own constants away,
-    /// answering its value.
     /// `Module#deprecate_constant`: reading `name` on `id` warns from now on.
     pub fn deprecate_const(&mut self, id: ClassId, name: SymbolId) {
         if !self.deprecated_constants.contains(&(id, name)) {
@@ -1306,6 +1304,32 @@ impl Classes {
             .map(|&(id, _)| id)
     }
 
+    /// Make singleton class `to` what `from` is: its methods, its constants,
+    /// and the modules it was extended with. What `Kernel#clone` carries
+    /// across and `dup` does not (#201).
+    pub fn copy_singleton(&mut self, from: ClassId, to: ClassId) {
+        let source = self.entry(from);
+        let methods = source.methods.clone();
+        let constants = source.constants.clone();
+        let constant_order = source.constant_order.clone();
+        let private_constants = source.private_constants.clone();
+        // `own` is the class itself and then what was mixed in, nearest first;
+        // including them farthest first rebuilds the same order.
+        let mixins: Vec<ClassId> = source.own.iter().copied().filter(|&c| c != from).collect();
+        for module in mixins.into_iter().rev() {
+            // A module already in the chain is not an error here.
+            let _ = self.include(to, module);
+        }
+        let target = self.entry_mut(to);
+        target.methods = methods;
+        target.constants = constants;
+        target.constant_order = constant_order;
+        target.private_constants = private_constants;
+        self.invalidate(to);
+    }
+
+    /// `Module#remove_const`: take one of this module's own constants away,
+    /// answering its value.
     pub fn const_remove(&mut self, id: ClassId, name: SymbolId) -> Option<Value> {
         self.deprecated_constants
             .retain(|&(i, n)| (i, n) != (id, name));

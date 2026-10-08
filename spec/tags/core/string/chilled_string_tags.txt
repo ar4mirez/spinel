@@ -5,3 +5,5 @@ fails(#263: a chilled string does not warn when it is mutated):chilled String ch
 fails(#263: a chilled string does not warn when it is mutated):chilled String chilled strings returned by Symbol#to_s mutation emits a warning on singleton_class creation
 fails(#263: a literal in a file with no magic comment is chilled in Ruby 3.4, and Spinel has no chilled strings yet):chilled String chilled string literals #+@ returns a different instance
 fails(#263: a literal in a file with no magic comment is chilled in Ruby 3.4, and Spinel has no chilled strings yet):chilled String chilled strings returned by Symbol#to_s #+@ returns a different instance
+fails(#263: a literal in a file with no magic comment is chilled in Ruby 3.4, and Spinel has no chilled strings yet):chilled String chilled string literals #clone preserves chilled status
+fails(#263: a literal in a file with no magic comment is chilled in Ruby 3.4, and Spinel has no chilled strings yet):chilled String chilled strings returned by Symbol#to_s #clone preserves chilled status
