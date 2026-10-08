@@ -939,8 +939,17 @@ impl Compiler {
             return Ok(());
         };
         for statement in rest {
+            // `defined?` whose answer nothing reads is not evaluated at all,
+            // receiver included: `defined?(a.b / 2); c` never calls `a.b`.
+            // Measured, and `language/defined_spec.rb` checks it.
+            if matches!(statement.kind, ExprKind::Defined(_)) {
+                continue;
+            }
             self.expr(statement)?;
             self.emit(Insn::Pop);
+        }
+        if !keep && matches!(last.kind, ExprKind::Defined(_)) {
+            return Ok(());
         }
         self.expr(last)?;
         if !keep {

@@ -202,6 +202,13 @@ pub enum Native {
     /// `Integer#<<`, `#>>`, `#&`, `#|`, `#^`, `#~` — fixnum bit patterns, which
     /// the JIT wants as intrinsics.
     IntBits(BitOp),
+    /// `Integer#+` and `Float#+`, and the other eight arithmetic and relational
+    /// operators: the method an explicit `2.send(:+, 1)` finds (#239). The same
+    /// function [`Insn::BinOp`][crate::bytecode::Insn::BinOp] answers from, with
+    /// `Numeric`'s coercing operator behind it as `super` when that declines.
+    NumOp(crate::bytecode::BinOp),
+    /// `Integer#-@` and `Float#-@`.
+    NumNeg,
     /// `Integer#**` — repeated multiplication with an overflow check, so the
     /// answer is a refusal rather than a wrapped one.
     IntPow,

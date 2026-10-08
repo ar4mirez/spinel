@@ -1413,3 +1413,44 @@ case 5 when *[] then :yes else :no end  #=> :no
 (def ff9(n); r = []; i = 0; while i < n; i += 1; r << i if (i == 4)...(i == 5) or (i == 7)...(i == 8); end; r; end; ff9(10))  #=> [4, 5, 7, 8]
 # Two flip-flops in one scope get two bits, keyed by source offset.
 (def ffa(n); r = []; i = 0; while i < n; i += 1; r << (((i == 2)..(i == 3)) ? :a : :-); r << (((i == 1)..(i == 1)) ? :b : :-); end; r; end; ffa(3))  #=> [:-, :b, :a, :-, :a, :-]
+
+# ------------------------------------------------- operators as methods (#239)
+# An operator instruction answers a pair of numbers without dispatching, and a
+# method of the same name is what a send finds. The two have to agree, and a
+# program that redefines the method has to be heard by the instruction.
+2.send(:+, 1)  #=> 3
+2.public_send(:-, 1)  #=> 1
+2.5.__send__(:*, 2)  #=> 5.0
+7.send(:/, 2)  #=> 3
+7.send(:%, 2)  #=> 1
+2.send(:<, 3)  #=> true
+2.5.send(:>=, 3)  #=> false
+1.send(:+, 2.5)  #=> 3.5
+1.send(:+, 2**70)  #=> 1180591620717411303425
+(2**70).send(:-, 1)  #=> 1180591620717411303423
+"ab"&.size&.+(1)  #=> 3
+2.respond_to?(:+)  #=> true
+2.respond_to?(:-@)  #=> true
+2.send(:-@)  #=> -2
+2.5.send(:-@)  #=> -2.5
+Integer.method_defined?(:+)  #=> true
+Integer.public_instance_methods(false).include?(:+)  #=> true
+Float.public_instance_methods(false).include?(:<)  #=> true
+[1, 2, 3].inject(:+)  #=> 6
+[1, 2, 3].inject(10, :*)  #=> 60
+[1, 2.5].inject(:+)  #=> 3.5
+class Integer; alias_method :op_plus, :+; end; 2.op_plus(3)  #=> 5
+class Integer; alias_method :op_plus2, :+; end; 2.op_plus2(2.5)  #=> 4.5
+class OpA; def +(o); "a+#{o}"; end; end; OpA.new.send(:+, 1)  #=> "a+1"
+class OpB; def -@; "neg"; end; end; -OpB.new  #=> "neg"
+class OpC; def !; "not"; end; end; !OpC.new  #=> "not"
+class OpD; def !; "not"; end; end; (not OpD.new)  #=> "not"
+class OpE; def ==(o); true; end; end; OpE.new != 1  #=> false
+class OpF; def =~(o); true; end; end; OpF.new !~ 1  #=> false
+"a" !~ /b/  #=> true
+"a".send(:!~, /a/)  #=> false
+x = 42; defined?(x !~ 2)  #=> "method"
+class Integer; alias_method :op_old_add, :+; def +(o); 42; end; end; r = [1 + 1, 1.send(:+, 1), [1, 2].inject(:+), 1.0 + 1]; Integer.alias_method(:+, :op_old_add); r << 1 + 1  #=> [42, 42, 42, 2.0, 2]
+class Integer; alias_method :op_old_neg, :-@; def -@; :neg; end; end; y = 3; r = [-y, -3]; Integer.alias_method(:-@, :op_old_neg); r << -y  #=> [:neg, -3, -3]
+class Integer; alias_method :op_old_lt, :<; def <(o); :lt; end; end; r = [[1, 2].each_with_index.to_a, 1 < 2]; Integer.alias_method(:<, :op_old_lt); r  #=> [[[1, 0], [2, 1]], :lt]
+a = []; defined?(a << 1); a  #=> []
