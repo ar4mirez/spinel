@@ -1493,3 +1493,11 @@ s = "a".freeze; d = s.clone; [d, d.frozen?, d.equal?(s)]  #=> ["a", true, false]
 e = RuntimeError.new("m"); n = e.exception("n"); [n.message, n.equal?(e), e.message]  #=> ["n", false, "m"]
 (Object.new.clone(freeze: 1) rescue $!.message)  #=> "unexpected value for freeze: Integer"
 (1.clone(freeze: false) rescue $!.message)  #=> "can't unfreeze Integer"
+
+# ------------------------------------------------------ files (#41, first slice)
+# A `File` is a descriptor: what is written is there to read back, a position
+# is the descriptor's, and a missing file is the errno the OS gave.
+n = "/tmp/spinel-eval-#{Process.pid}-a"; File.open(n, "w") { |f| f.write("one\n", "two\n"); f.puts(3) }; r = [File.read(n), File.size(n), File.readlines(n, chomp: true)]; File.delete(n); r << File.exist?(n)  #=> ["one\ntwo\n3\n", 10, ["one", "two", "3"], false]
+n = "/tmp/spinel-eval-#{Process.pid}-b"; r = File.open(n, "w+") { |f| f.write("abcdef"); f.rewind; a = f.read(2); f.seek(-2, IO::SEEK_END); [a, f.read, f.pos, f.eof?, f.read, f.read(1)] }; File.delete(n); r  #=> ["ab", "ef", 6, true, "", nil]
+n = "/tmp/spinel-eval-#{Process.pid}-c"; File.write(n, "x\ny\n"); r = File.open(n) { |f| [f.gets, f.lineno, f.gets(chomp: true), f.gets, (f.write("z") rescue $!.message)] }; s = File.stat(n); r += [s.file?, s.directory?, s.size, s.ftype]; File.delete(n); r  #=> ["x\n", 1, "y", nil, "not opened for writing", true, false, 4, "file"]
+d = "/tmp/spinel-eval-#{Process.pid}-d"; r = [Dir.mkdir(d), File.directory?(d), (Dir.mkdir(d) rescue $!.class), Dir.rmdir(d), File.exist?(d), (File.open("#{d}/x") rescue $!.class)]; r  #=> [0, true, Errno::EEXIST, 0, false, Errno::ENOENT]

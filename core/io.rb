@@ -194,5 +194,22 @@ module Kernel
     end
   end
 
-  module_function :puts, :print, :p, :warn
+  def printf(*args)
+    return nil if args.empty?
+    target = args[0].is_a?(String) ? $stdout : args.shift
+    target.write(Kernel.format(*args))
+    nil
+  end
+
+  def putc(char)
+    $stdout.putc(char)
+  end
+
+  # ponytail: a path only. `open("|command")` is a process (#43), and an
+  # object with `to_open` is asked nothing yet.
+  def open(path, *rest, **options, &block)
+    File.open(path, *rest, **options, &block)
+  end
+
+  module_function :puts, :print, :p, :warn, :printf, :putc, :open
 end

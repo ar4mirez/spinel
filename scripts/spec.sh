@@ -102,7 +102,14 @@ cargo build --release -p spinel-cli --quiet
 spinel="$repo_root/target/release/spinel"
 
 scratch="$(mktemp -d)"
-trap 'rm -rf "$scratch"' EXIT
+# Where the specs keep their files (mspec's `tmp`): a directory per process,
+# so two of them cannot hand out the same name, under `target/` so it is on
+# the repository's file system and ignored by git, and removed with the run.
+# An example that blocks part way never reaches its own cleanup, so without
+# this every run leaves a `rubyspec_temp/` behind in the working directory.
+spec_tmp="$repo_root/target/spec-tmp/$$"
+mkdir -p "$spec_tmp"
+trap 'rm -rf "$scratch" "$spec_tmp"' EXIT
 
 # The files are split into processes of `SPEC_CHUNK` (default 16), run
 # `SPEC_JOBS` at a time (default every core). Chunks, not directories: a slow
@@ -122,8 +129,8 @@ if [[ -n "$tagged" ]]; then export SPINEL_SPEC_TAGGED=1; fi
 for index in "${!units[@]}"; do
   printf '%s\0' "$index"
 done | xargs -0 -n 1 -P "${SPEC_JOBS:-$(getconf _NPROCESSORS_ONLN)}" \
-  sh -c 'status=0; "$0" run "$1" -B "$2" $(cat "$3/$4.files") > "$3/$4.out" 2> "$3/$4.err" || status=$?; echo "$status" > "$3/$4.status"' \
-  "$spinel" "$mspec/bin/mspec-run" "$repo_root/spec/spinel.mspec" "$scratch"
+  sh -c 'status=0; SPEC_TEMP_DIR="$4/$5" "$0" run "$1" -B "$2" $(cat "$3/$5.files") > "$3/$5.out" 2> "$3/$5.err" || status=$?; echo "$status" > "$3/$5.status"' \
+  "$spinel" "$mspec/bin/mspec-run" "$repo_root/spec/spinel.mspec" "$scratch" "$spec_tmp"
 
 
 # mspec exits 0, or 1 when an example failed. Anything else, or no records at

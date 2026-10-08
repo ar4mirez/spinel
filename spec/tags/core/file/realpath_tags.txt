@@ -1,0 +1,1 @@
+fails(#41: a path is not transcoded to the default internal encoding):File.realpath forces the encoding of the path when encoding conversion fails
