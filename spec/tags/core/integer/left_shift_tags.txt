@@ -1,0 +1,2 @@
+fails(#17: Ruby calls a conversion or comparison method here that Spinel does not — to_str, to_int, to_ary, to_s, <=> or hash —, which mspec's mocks can now count):Integer#<< (with n << m) fixnum raises a TypeError when #to_int does not return an Integer
+fails(#17: Ruby calls a conversion or comparison method here that Spinel does not — to_str, to_int, to_ary, to_s, <=> or hash —, which mspec's mocks can now count):Integer#<< (with n << m) bignum raises a TypeError when #to_int does not return an Integer

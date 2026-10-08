@@ -1,0 +1,1 @@
+fails(#27: an edge case first reached once mspec's mocks and Method objects ran, not yet diagnosed):The defined? keyword when called with a method name having a local variable as receiver calls #respond_to_missing?

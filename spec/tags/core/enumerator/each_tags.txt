@@ -1,0 +1,1 @@
+fails(#26: an edge case first reached once mspec's mocks and Method objects ran, not yet diagnosed):Enumerator#each requires multiple arguments

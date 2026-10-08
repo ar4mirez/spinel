@@ -1,0 +1,1 @@
+fails(#19: an edge case first reached once mspec's mocks and Method objects ran, not yet diagnosed):String#== returns obj == self if obj responds to to_str

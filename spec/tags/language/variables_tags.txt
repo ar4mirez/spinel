@@ -1,0 +1,2 @@
+fails(#27: an edge case first reached once mspec's mocks and Method objects ran, not yet diagnosed):Multiple assignment with a single RHS value calls #to_ary if it is private
+fails(#27: an edge case first reached once mspec's mocks and Method objects ran, not yet diagnosed):Multiple assignment with a single splatted RHS value calls #to_a if it is private

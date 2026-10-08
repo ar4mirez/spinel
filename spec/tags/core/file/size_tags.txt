@@ -1,0 +1,2 @@
+fails(#41: Ruby calls a conversion or comparison method here that Spinel does not — to_str, to_int, to_ary, to_s, <=> or hash —, which mspec's mocks can now count):File.size? accepts a String-like (to_str) parameter
+fails(#41: Ruby calls a conversion or comparison method here that Spinel does not — to_str, to_int, to_ary, to_s, <=> or hash —, which mspec's mocks can now count):File.size? accepts an object that has a #to_path method

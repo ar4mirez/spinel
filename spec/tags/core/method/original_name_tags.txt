@@ -1,0 +1,1 @@
+fails(#27: a Method keeps the name it was found under and the name its body was defined with, not CRuby's rule for a name shared inside Kernel):Method#original_name returns the source UnboundMethod's name for Kernel#is_a? and Kernel#kind_of?

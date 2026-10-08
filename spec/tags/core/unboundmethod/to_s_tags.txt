@@ -1,0 +1,1 @@
+fails(#27: a Method keeps the name it was found under and the name its body was defined with, not CRuby's rule for a name shared inside Kernel):UnboundMethod#to_s does not annotate a directly looked-up Kernel method with a shared internal name

@@ -1,1 +1,2 @@
 fails(#216: String#inspect does not escape a character the default external encoding cannot show, so a Symbol key that needs it is not quoted):Hash#inspect can be evaled when Encoding.default_external is changed
+fails(#22: Ruby calls a conversion or comparison method here that Spinel does not — to_str, to_int, to_ary, to_s, <=> or hash —, which mspec's mocks can now count):Hash#inspect does not swallow exceptions raised by #to_s

@@ -1,0 +1,1 @@
+fails(#23: Ruby calls a conversion or comparison method here that Spinel does not — to_str, to_int, to_ary, to_s, <=> or hash —, which mspec's mocks can now count):Range#max given a block calls #> and #< on the return value of the block

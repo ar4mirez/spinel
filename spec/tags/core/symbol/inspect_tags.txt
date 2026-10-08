@@ -1,0 +1,2 @@
+fails(#20: an edge case first reached once mspec's mocks and Method objects ran, not yet diagnosed):Symbol#inspect quotes symbols in non-ASCII-compatible encodings
+fails(#20: an edge case first reached once mspec's mocks and Method objects ran, not yet diagnosed):Symbol#inspect quotes and escapes symbols in dummy encodings

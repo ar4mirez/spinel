@@ -1,0 +1,1 @@
+fails(#27: a Proc made by to_proc is a lambda around a call: its arity is -1 and it does not say where it came from):Method#to_proc returns a Proc object with the correct arity

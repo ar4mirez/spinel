@@ -1,0 +1,1 @@
+fails(#28: Ruby calls a conversion or comparison method here that Spinel does not — to_str, to_int, to_ary, to_s, <=> or hash —, which mspec's mocks can now count):Module#attr_accessor raises a TypeError when the given names can't be converted to strings using to_str

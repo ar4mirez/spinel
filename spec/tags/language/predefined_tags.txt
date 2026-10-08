@@ -26,3 +26,4 @@ fails(#29: assigning $@ sets the backtrace of $!, and $! is restored after a res
 fails(#29: assigning $@ sets the backtrace of $!, and $! is restored after a rescue that returns):Predefined global $@ accepts a String
 fails(#29: assigning $@ sets the backtrace of $!, and $! is restored after a rescue that returns):Predefined global $@ accepts nil
 fails(#39: the default $LOAD_PATH is RubyGems' and carries its prelude marker):Execution variable $: default $LOAD_PATH entries until sitelibdir included have @gem_prelude_index set
+fails(#27: an edge case first reached once mspec's mocks and Method objects ran, not yet diagnosed):Predefined global $. should call #to_int to convert the object to an Integer

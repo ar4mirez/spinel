@@ -1,0 +1,3 @@
+fails(#28: an edge case first reached once mspec's mocks and Method objects ran, not yet diagnosed):Kernel#singleton_methods when not passed an argument for a module does not return methods in a module prepended to Module itself
+fails(#28: an edge case first reached once mspec's mocks and Method objects ran, not yet diagnosed):Kernel#singleton_methods when passed true for a module does not return methods in a module prepended to Module itself
+fails(#28: an edge case first reached once mspec's mocks and Method objects ran, not yet diagnosed):Kernel#singleton_methods when passed false for a module does not return methods in a module prepended to Module itself

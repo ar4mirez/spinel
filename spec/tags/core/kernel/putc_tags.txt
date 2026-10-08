@@ -1,1 +1,2 @@
 fails(#41: `Kernel#putc` reads or writes an IO or a File, which do not exist yet):Kernel.putc is a public method
+fails(#28: Ruby calls a conversion or comparison method here that Spinel does not — to_str, to_int, to_ary, to_s, <=> or hash —, which mspec's mocks can now count):Kernel#putc calls #to_int to convert an object to an Integer

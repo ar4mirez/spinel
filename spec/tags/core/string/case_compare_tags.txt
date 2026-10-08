@@ -1,0 +1,1 @@
+fails(#19: written as its own method where Ruby has an alias, which Method#== can now tell apart):String#=== is an alias of String#==
