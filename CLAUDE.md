@@ -1,6 +1,6 @@
 # Spinel: notes for AI coding sessions
 
-Read `README.md`, then `docs/engine.md` if touching the VM, or the subsystem doc otherwise. `docs/roadmap.md` lists work as small verifiable slices. Do one slice per session.
+Read `README.md`, then `docs/engine.md` if touching the VM, or the subsystem doc otherwise. `docs/roadmap.md` lists work as small verifiable slices. A session may take several slices in a row; keep each one its own branch and pull request, with its own check.
 
 ## Fixed decisions (settled with the owner; do not relitigate in a session)
 

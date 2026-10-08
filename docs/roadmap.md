@@ -1,6 +1,6 @@
 # Roadmap
 
-Each phase ends with something runnable. Each bullet is one slice: one AI session, with a named check that proves it. Engine slices are measured in ruby/spec files that newly pass; the check names the directory. No dates. The progress bar is `bench/spec-status.md`.
+Each phase ends with something runnable. Each bullet is one slice, with a named check that proves it. Engine slices are measured in ruby/spec files that newly pass; the check names the directory. No dates. The progress bar is `bench/spec-status.md`.
 
 Every bullet below is tracked as a GitHub issue, one milestone per phase: [milestones](https://github.com/ar4mirez/spinel/milestones). Issues carry a priority (`P0` critical path, `P1` needed for the milestone, `P2` can slip), a size (`size:S` one session, `size:M` two or three, `size:L` more), and an `area:` label. When a slice here and its issue disagree, fix both in the same PR.
 
@@ -103,7 +103,7 @@ The package-manager.md, cli.md, test-runner.md and build.md designs. Slices as l
 
 ## How to vibecode this
 
-1. One slice per session. Paste the bullet and the relevant doc section; the check is the definition of done.
+1. One slice per pull request. A session may take several in a row; for each, paste the bullet and the relevant doc section, and the check is the definition of done.
 2. Engine slices: run the named spec directory before and after; the PR states the delta. A slice that adds no passing specs is not done.
 3. Tooling slices: the check is an integration test in `crates/spinel-cli/tests/` that shells out to the built binary. It lives inside `spinel-cli` rather than a top-level `tests/` because Cargo only guarantees a freshly rebuilt binary, via `CARGO_BIN_EXE_spinel`, to tests in the binary's own package.
 4. Never mark a failing spec as expected. Skip with a reason in `spec/tags/` or fix it.
