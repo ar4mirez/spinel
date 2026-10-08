@@ -1,0 +1,1 @@
+fails(#29: a backtrace location resolves its absolute path when asked, not when the frame ran, so a file removed since has none):Thread::Backtrace::Location#absolute_path canonicalization returns a canonical path without symlinks, even when __FILE__ is removed

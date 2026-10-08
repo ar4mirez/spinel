@@ -1,0 +1,1 @@
+fails(#42: directory entries are not transcoded to the default internal encoding):Dir.entries returns entries transcoded to the default internal encoding

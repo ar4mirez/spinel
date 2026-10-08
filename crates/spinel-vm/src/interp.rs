@@ -10635,6 +10635,44 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         ),
         (Builtin::Kernel, &["__fs_chdir__"], Native::Fs(FsOp::Chdir)),
         (Builtin::Kernel, &["__fs_read__"], Native::Fs(FsOp::Read)),
+        (Builtin::Kernel, &["__fs_umask__"], Native::Fs(FsOp::Umask)),
+        (Builtin::Kernel, &["__fs_mkdir__"], Native::Fs(FsOp::Mkdir)),
+        (Builtin::Kernel, &["__fs_rmdir__"], Native::Fs(FsOp::Rmdir)),
+        (
+            Builtin::Kernel,
+            &["__fs_unlink__"],
+            Native::Fs(FsOp::Unlink),
+        ),
+        (
+            Builtin::Kernel,
+            &["__fs_rename__"],
+            Native::Fs(FsOp::Rename),
+        ),
+        (
+            Builtin::Kernel,
+            &["__fs_symlink__"],
+            Native::Fs(FsOp::Symlink),
+        ),
+        (
+            Builtin::Kernel,
+            &["__fs_readlink__"],
+            Native::Fs(FsOp::Readlink),
+        ),
+        (Builtin::Kernel, &["__fs_chmod__"], Native::Fs(FsOp::Chmod)),
+        (Builtin::Kernel, &["__fs_stat__"], Native::Fs(FsOp::Stat)),
+        (Builtin::Kernel, &["__fd_open__"], Native::Fs(FsOp::Open)),
+        (Builtin::Kernel, &["__fd_read__"], Native::Fs(FsOp::FdRead)),
+        (
+            Builtin::Kernel,
+            &["__fd_write__"],
+            Native::Fs(FsOp::FdWrite),
+        ),
+        (Builtin::Kernel, &["__fd_seek__"], Native::Fs(FsOp::FdSeek)),
+        (
+            Builtin::Kernel,
+            &["__fd_close__"],
+            Native::Fs(FsOp::FdClose),
+        ),
         (
             Builtin::Kernel,
             &["__fs_children__"],
@@ -12797,6 +12835,18 @@ fn errno_value(error: &std::io::Error) -> Value {
     Value::fixnum(i64::from(errno)).expect("an errno is a fixnum")
 }
 
+/// The descriptor a `__fd_*__` call was handed.
+fn fd_arg(call: &Pending) -> Result<libc::c_int, Error> {
+    call.args
+        .first()
+        .and_then(|v| v.as_fixnum())
+        .and_then(|fd| libc::c_int::try_from(fd).ok())
+        .ok_or(Error::NoDispatch {
+            op: "a descriptor call",
+            operands: "a descriptor that is not an Integer",
+        })
+}
+
 fn fs_native(
     scope: &mut HandleScope<'_>,
     stack: &mut Vec<Value>,
@@ -12921,6 +12971,235 @@ fn fs_native(
                     new_array(scope, &values)
                 }
                 Err(error) => errno_value(&error),
+            }
+        }
+        FsOp::Umask => {
+            // `umask(2)` only answers by being set, so reading it is setting
+            // it twice. Process-wide, as the working directory is.
+            let wanted = call.args.first().and_then(|v| v.as_fixnum());
+            // SAFETY: `umask` takes a mode, cannot fail, and touches no memory.
+            let old = unsafe {
+                match wanted {
+                    Some(mask) => libc::umask(mask as libc::mode_t),
+                    None => {
+                        let old = libc::umask(0);
+                        libc::umask(old);
+                        old
+                    }
+                }
+            };
+            Value::fixnum(i64::from(old)).expect("a mode is a fixnum")
+        }
+        FsOp::Mkdir => {
+            use std::os::unix::fs::DirBuilderExt as _;
+            let path = path_arg(scope, call, 0)?;
+            let mode = call
+                .args
+                .get(1)
+                .and_then(|v| v.as_fixnum())
+                .unwrap_or(0o777);
+            match std::fs::DirBuilder::new().mode(mode as u32).create(&path) {
+                Ok(()) => Value::TRUE,
+                Err(error) => errno_value(&error),
+            }
+        }
+        FsOp::Rmdir => {
+            let path = path_arg(scope, call, 0)?;
+            match std::fs::remove_dir(&path) {
+                Ok(()) => Value::TRUE,
+                Err(error) => errno_value(&error),
+            }
+        }
+        FsOp::Unlink => {
+            let path = path_arg(scope, call, 0)?;
+            match std::fs::remove_file(&path) {
+                Ok(()) => Value::TRUE,
+                Err(error) => errno_value(&error),
+            }
+        }
+        FsOp::Rename => {
+            let from = path_arg(scope, call, 0)?;
+            let to = path_arg(scope, call, 1)?;
+            match std::fs::rename(&from, &to) {
+                Ok(()) => Value::TRUE,
+                Err(error) => errno_value(&error),
+            }
+        }
+        FsOp::Symlink => {
+            let target = path_arg(scope, call, 0)?;
+            let link = path_arg(scope, call, 1)?;
+            match std::os::unix::fs::symlink(&target, &link) {
+                Ok(()) => Value::TRUE,
+                Err(error) => errno_value(&error),
+            }
+        }
+        FsOp::Readlink => {
+            let path = path_arg(scope, call, 0)?;
+            match std::fs::read_link(&path) {
+                Ok(target) => os_string(scope, target.into_os_string()),
+                Err(error) => errno_value(&error),
+            }
+        }
+        FsOp::Chmod => {
+            use std::os::unix::fs::PermissionsExt as _;
+            let path = path_arg(scope, call, 0)?;
+            let mode = call.args.get(1).and_then(|v| v.as_fixnum()).unwrap_or(0);
+            match std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode as u32)) {
+                Ok(()) => Value::TRUE,
+                Err(error) => errno_value(&error),
+            }
+        }
+        FsOp::Stat => {
+            use std::os::unix::fs::MetadataExt as _;
+            let path = path_arg(scope, call, 0)?;
+            let follow = call.args.get(1).is_some_and(|v| v.is_truthy());
+            let metadata = if follow {
+                std::fs::metadata(&path)
+            } else {
+                std::fs::symlink_metadata(&path)
+            };
+            match metadata {
+                Ok(m) => {
+                    let fields = [
+                        m.dev() as i64,
+                        m.ino() as i64,
+                        i64::from(m.mode()),
+                        m.nlink() as i64,
+                        i64::from(m.uid()),
+                        i64::from(m.gid()),
+                        m.rdev() as i64,
+                        m.size() as i64,
+                        m.blksize() as i64,
+                        m.blocks() as i64,
+                        m.atime(),
+                        m.atime_nsec(),
+                        m.mtime(),
+                        m.mtime_nsec(),
+                        m.ctime(),
+                        m.ctime_nsec(),
+                    ];
+                    let mut values = Vec::with_capacity(fields.len());
+                    for field in fields {
+                        let value = match Value::fixnum(field) {
+                            Some(value) => value,
+                            None => crate::bignum::value(scope, &num_bigint::BigInt::from(field)),
+                        };
+                        values.push(scope.root(value));
+                    }
+                    let values: Vec<Value> = values.into_iter().map(|h| scope.get(h)).collect();
+                    new_array(scope, &values)
+                }
+                Err(error) => errno_value(&error),
+            }
+        }
+        // The descriptor calls. Each success is something that is not an
+        // Integer — a one-element Array around a count or a position — because
+        // an Integer is how every `FsOp` answers an errno.
+        FsOp::Open => {
+            let path = path_arg(scope, call, 0)?;
+            let flags = call.args.get(1).and_then(|v| v.as_fixnum()).unwrap_or(0);
+            let perm = call
+                .args
+                .get(2)
+                .and_then(|v| v.as_fixnum())
+                .unwrap_or(0o666);
+            let fd = match std::ffi::CString::new(path.into_os_string().into_vec()) {
+                // SAFETY: `path` is NUL-terminated and outlives the call;
+                // `open` reads it and answers a descriptor or -1.
+                Ok(path) => unsafe {
+                    libc::open(
+                        path.as_ptr(),
+                        flags as libc::c_int | libc::O_CLOEXEC,
+                        perm as libc::c_uint,
+                    )
+                },
+                // A NUL inside a path names nothing.
+                Err(_) => {
+                    stack.push(Value::fixnum(i64::from(libc::EINVAL)).expect("an errno"));
+                    return Ok(None);
+                }
+            };
+            if fd < 0 {
+                errno_value(&std::io::Error::last_os_error())
+            } else {
+                let fd = Value::fixnum(i64::from(fd)).expect("a descriptor is a fixnum");
+                new_array(scope, &[fd])
+            }
+        }
+        FsOp::FdRead => {
+            let fd = fd_arg(call)?;
+            let wanted = call
+                .args
+                .get(1)
+                .and_then(|v| v.as_fixnum())
+                .unwrap_or(0)
+                .max(0);
+            let mut buffer = vec![0u8; wanted as usize];
+            // SAFETY: `buffer` is `wanted` writable bytes for the length of
+            // the call, and `read` writes at most that many.
+            let got = unsafe { libc::read(fd, buffer.as_mut_ptr().cast(), buffer.len()) };
+            if got < 0 {
+                errno_value(&std::io::Error::last_os_error())
+            } else {
+                buffer.truncate(got as usize);
+                let class = class_handle(scope, Builtin::String);
+                string_alloc(scope, class, &buffer, crate::strings::BINARY)
+            }
+        }
+        FsOp::FdWrite => {
+            let fd = fd_arg(call)?;
+            let Some(bytes) = call.args.get(1).and_then(|&v| string_bytes(scope, v)) else {
+                return Err(Error::NoDispatch {
+                    op: "__fd_write__",
+                    operands: "an argument that is not a String",
+                });
+            };
+            let mut written = 0usize;
+            let mut failed = None;
+            while written < bytes.len() {
+                let rest = &bytes[written..];
+                // SAFETY: `rest` is readable for its length, and `write`
+                // reads at most that many bytes.
+                let n = unsafe { libc::write(fd, rest.as_ptr().cast(), rest.len()) };
+                if n < 0 {
+                    let error = std::io::Error::last_os_error();
+                    if error.kind() == std::io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    failed = Some(error);
+                    break;
+                }
+                written += n as usize;
+            }
+            match failed {
+                Some(error) => errno_value(&error),
+                None => {
+                    let count = Value::fixnum(written as i64).expect("a byte count is a fixnum");
+                    new_array(scope, &[count])
+                }
+            }
+        }
+        FsOp::FdSeek => {
+            let fd = fd_arg(call)?;
+            let offset = call.args.get(1).and_then(|v| v.as_fixnum()).unwrap_or(0);
+            let whence = call.args.get(2).and_then(|v| v.as_fixnum()).unwrap_or(0);
+            // SAFETY: `lseek` takes three integers and touches no memory.
+            let at = unsafe { libc::lseek(fd, offset as libc::off_t, whence as libc::c_int) };
+            if at < 0 {
+                errno_value(&std::io::Error::last_os_error())
+            } else {
+                let at = Value::fixnum(at as i64).expect("a file position is a fixnum");
+                new_array(scope, &[at])
+            }
+        }
+        FsOp::FdClose => {
+            let fd = fd_arg(call)?;
+            // SAFETY: `close` takes a descriptor and touches no memory. The
+            // Ruby side closes each one once.
+            if unsafe { libc::close(fd) } < 0 {
+                errno_value(&std::io::Error::last_os_error())
+            } else {
+                Value::TRUE
             }
         }
         FsOp::Read => {

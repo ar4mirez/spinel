@@ -1,0 +1,2 @@
+fails(#41: an IO does not transcode what it writes to its external encoding):IO#write on a file uses the encoding from the given option for non-ascii encoding
+fails(#41: an IO does not transcode what it writes to its external encoding):IO#write on a file uses the encoding from the given option for non-ascii encoding when multiple arguments passes

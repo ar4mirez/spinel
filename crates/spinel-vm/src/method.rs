@@ -475,6 +475,34 @@ pub enum FsOp {
     /// `__fs_constants__`: `[name, value]` pairs for `File::Constants`, from
     /// the target's libc.
     Constants,
+    /// `__fs_umask__(mask = nil)`: the mask before the call.
+    Umask,
+    /// `__fs_mkdir__(path, mode)`, `__fs_rmdir__(path)`, `__fs_unlink__(path)`,
+    /// `__fs_rename__(from, to)`, `__fs_symlink__(target, link)` and
+    /// `__fs_chmod__(path, mode)`: true.
+    Mkdir,
+    Rmdir,
+    Unlink,
+    Rename,
+    Symlink,
+    Chmod,
+    /// `__fs_readlink__(path)`: where the link points.
+    Readlink,
+    /// `__fs_stat__(path, follow)`: `stat(2)`'s fields as sixteen Integers —
+    /// dev, ino, mode, nlink, uid, gid, rdev, size, blksize, blocks, then
+    /// seconds and nanoseconds for atime, mtime and ctime.
+    Stat,
+    /// `__fd_open__(path, flags, perm)`: `[fd]`.
+    Open,
+    /// `__fd_read__(fd, count)`: up to `count` bytes as a BINARY String, empty
+    /// at the end of the file.
+    FdRead,
+    /// `__fd_write__(fd, string)`: `[bytes written]`, all of them.
+    FdWrite,
+    /// `__fd_seek__(fd, offset, whence)`: `[position]`.
+    FdSeek,
+    /// `__fd_close__(fd)`: true.
+    FdClose,
 }
 
 /// Which process query. See `interp.rs`, `sys_native`.

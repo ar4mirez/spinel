@@ -1,0 +1,17 @@
+fails(#42: Dir.glob does not yet match escaped characters, special characters in names, or the dot entries the way Ruby does):Dir.glob returns empty array when empty pattern provided
+fails(#42: Dir.glob does not yet match escaped characters, special characters in names, or the dot entries the way Ruby does):Dir.glob matches directories with special characters when escaped
+fails(#42: Dir.glob does not yet match escaped characters, special characters in names, or the dot entries the way Ruby does):Dir.glob matches files with backslashes in their name
+fails(#42: Dir.glob does not yet match escaped characters, special characters in names, or the dot entries the way Ruby does):Dir.glob matches directory with special characters in their name in complex patterns
+fails(#42: Dir.glob does not yet match escaped characters, special characters in names, or the dot entries the way Ruby does):Dir.glob matches regexp special {
+fails(#42: Dir.glob does not yet match escaped characters, special characters in names, or the dot entries the way Ruby does):Dir.glob matches regexp special }
+fails(#42: Dir.glob does not yet match escaped characters, special characters in names, or the dot entries the way Ruby does):Dir.glob matches paths with glob patterns
+fails(#42: Dir.glob does not yet match escaped characters, special characters in names, or the dot entries the way Ruby does):Dir.glob matches dotfiles except .. with '.*'
+fails(#42: Dir.glob does not yet match escaped characters, special characters in names, or the dot entries the way Ruby does):Dir.glob matches non-dotfiles in the current directory with '**'
+fails(#42: Dir.glob does not yet match escaped characters, special characters in names, or the dot entries the way Ruby does):Dir.glob matches dotfiles in the current directory except .. with '.**'
+fails(#42: Dir.glob does not yet match escaped characters, special characters in names, or the dot entries the way Ruby does):Dir.glob recursively matches any nondot subdirectories with '**/'
+fails(#42: Dir.glob does not yet match escaped characters, special characters in names, or the dot entries the way Ruby does):Dir.glob recursively matches any subdirectories including ./ with '.**/'
+fails(#42: Dir.glob does not yet match escaped characters, special characters in names, or the dot entries the way Ruby does):Dir.glob matches special characters by escaping with a backslash with '\<character>'
+fails(#42: Dir.glob does not yet match escaped characters, special characters in names, or the dot entries the way Ruby does):Dir.glob :base option passed handles '' as current directory path
+fails(#42: Dir.glob does not yet match escaped characters, special characters in names, or the dot entries the way Ruby does):Dir.glob preserves multiple /s before a **
+fails(#42: Dir.glob does not yet match escaped characters, special characters in names, or the dot entries the way Ruby does):Dir.glob matches nothing when given an empty list of paths
+fails(#42: Dir.glob does not yet match escaped characters, special characters in names, or the dot entries the way Ruby does):Dir.glob handles **/** with base keyword argument

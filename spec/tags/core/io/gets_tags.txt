@@ -5,3 +5,4 @@ fails(#41: File and IO here are a read-only stand-in that does not track $. or $
 fails(#41: File and IO here are a read-only stand-in that does not track $. or $_, honour open modes, or transcode):IO#gets with an empty String separator reads until the beginning of the next paragraph
 fails(#41: File and IO here are a read-only stand-in that does not track $. or $_, honour open modes, or transcode):IO#gets with an empty String separator updates $. with each invocation
 fails(#41: File and IO here are a read-only stand-in that does not track $. or $_, honour open modes, or transcode):IO#gets with an arbitrary String separator updates $. with each invocation
+fails(#41: an IO does not transcode from its external encoding to an internal one):IO#gets transcodes into the default internal encoding
