@@ -1,1 +1,2 @@
 fails(#38: `Kernel#eval` needs a Binding, which is string `eval`'s slice):Kernel#eval is a private method
+fails(#27: eval reached through Method#call takes its default definee from the frame of Method#call, not from the scope that called it, so a def lands on Object):Kernel#eval has the correct default definee when called through Method#call

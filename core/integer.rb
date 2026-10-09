@@ -427,7 +427,11 @@ class Integer
     unless value.respond_to?(:to_int)
       raise TypeError, "no implicit conversion of #{value.nil? ? "nil" : value.class} into Integer"
     end
-    value.to_int
+    converted = value.to_int
+    unless converted.is_a?(Integer)
+      raise TypeError, "can't convert #{value.class} to Integer (#{value.class}#to_int gives #{converted.class})"
+    end
+    converted
   end
 
   # A one-byte BINARY String.
