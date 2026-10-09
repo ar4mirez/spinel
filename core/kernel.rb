@@ -589,3 +589,12 @@ module Kernel
     name.to_str
   end
 end
+
+module Kernel
+  # Any object is comparable with itself and with what it is `==` to, and with
+  # nothing else. It is what a class with no ordering answers, and what the
+  # reversed comparisons in `String#<=>` and `Time#<=>` find to ask.
+  def <=>(other)
+    equal?(other) || self == other ? 0 : nil
+  end
+end

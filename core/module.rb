@@ -419,3 +419,15 @@ end
 class << Module
   alias nesting __module_nesting__
 end
+
+class Module
+  # A module is below what it inherits from or includes and above what
+  # inherits from it; two unrelated ones, or a module and anything else, are
+  # not comparable.
+  def <=>(other)
+    return 0 if equal?(other)
+    return nil unless other.is_a?(Module)
+    return -1 if self < other
+    other < self ? 1 : nil
+  end
+end
