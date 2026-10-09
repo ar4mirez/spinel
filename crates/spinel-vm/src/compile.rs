@@ -902,32 +902,18 @@ impl Compiler {
             // reprint as `0xff`, and `materialise` is the one place they turn
             // into a value — so a wide literal and an overflowing sum reach the
             // same normalisation.
-            ExprKind::Int(int) => match &int.value {
-                IntValue::Small(n) => match Value::fixnum(*n) {
-                    Some(_) => self.emit(Insn::PushInt(*n)),
-                    None => {
-                        let index = self.literal(Literal::BigInt(n.to_string().into()));
-                        self.emit(Insn::PushLit(index));
-                    }
-                },
-                IntValue::Big(digits) => {
-                    let radix = match int.base {
-                        spinel_ast::IntBase::Binary => 2,
-                        spinel_ast::IntBase::Octal => 8,
-                        spinel_ast::IntBase::Decimal => 10,
-                        spinel_ast::IntBase::Hexadecimal => 16,
-                    };
-                    // Normalised to base 10 here rather than at run time, so
-                    // `materialise` has one parse and the iseq carries a number
-                    // rather than a notation.
-                    let decimal = num_bigint::BigInt::parse_bytes(digits.as_bytes(), radix)
-                        .ok_or_else(|| {
-                            Unsupported::at("an integer literal Prism mis-spelled", span)
-                        })?;
-                    let index = self.literal(Literal::BigInt(decimal.to_string().into()));
-                    self.emit(Insn::PushLit(index));
-                }
-            },
+            ExprKind::Int(int) => self.int_literal(&int.value, int.base, span)?,
+
+            // `3r`, `1.5r`: Prism has already made the two Integers. They are
+            // handed to `Rational`, which reduces them — `Rational.new` does
+            // not exist, and `Kernel#Rational` can be redefined (#227).
+            ExprKind::Rational(rational) => {
+                let name = self.symbol("Rational");
+                self.emit(Insn::GetConst(name, ConstScope::Top));
+                self.int_literal(&rational.numerator, rational.base, span)?;
+                self.int_literal(&rational.denominator, rational.base, span)?;
+                self.emit_send("__literal__", 2);
+            }
 
             ExprKind::Float(f) => {
                 let literal = if Value::flonum(*f).is_some() {
@@ -1167,6 +1153,36 @@ impl Compiler {
     ///
     /// The lowerings below reach for `Hash` and `Range` the way written Ruby
     /// would, so a program that has not shadowed the name gets the core class.
+    /// An Integer literal's value, small or wide, in whatever base it was
+    /// written.
+    fn int_literal(&mut self, value: &IntValue, base: spinel_ast::IntBase, span: Span) -> Emit {
+        match value {
+            IntValue::Small(n) => match Value::fixnum(*n) {
+                Some(_) => self.emit(Insn::PushInt(*n)),
+                None => {
+                    let index = self.literal(Literal::BigInt(n.to_string().into()));
+                    self.emit(Insn::PushLit(index));
+                }
+            },
+            IntValue::Big(digits) => {
+                let radix = match base {
+                    spinel_ast::IntBase::Binary => 2,
+                    spinel_ast::IntBase::Octal => 8,
+                    spinel_ast::IntBase::Decimal => 10,
+                    spinel_ast::IntBase::Hexadecimal => 16,
+                };
+                // Normalised to base 10 here rather than at run time, so
+                // `materialise` has one parse and the iseq carries a number
+                // rather than a notation.
+                let decimal = num_bigint::BigInt::parse_bytes(digits.as_bytes(), radix)
+                    .ok_or_else(|| Unsupported::at("an integer literal Prism mis-spelled", span))?;
+                let index = self.literal(Literal::BigInt(decimal.to_string().into()));
+                self.emit(Insn::PushLit(index));
+            }
+        }
+        Ok(())
+    }
+
     fn push_const_name(&mut self, name: &str) {
         let symbol = self.symbol(name);
         self.emit(Insn::GetConst(symbol, ConstScope::Lexical));
@@ -5165,7 +5181,8 @@ fn node_name(kind: &ExprKind) -> &'static str {
         ExprKind::MatchLastLine(_) => "a regexp in condition position",
 
         ExprKind::Splat(_) => "a splat",
-        ExprKind::Rational(_) | ExprKind::Imaginary(_) => "a rational or complex literal",
+        ExprKind::Imaginary(_) => "a complex literal",
+        ExprKind::Rational(_) => "a rational literal",
         // #165 compiles the rest of this family. A node still reaching here is
         // one the lowering built in a shape the compiler does not expect.
         ExprKind::MatchPattern(_)

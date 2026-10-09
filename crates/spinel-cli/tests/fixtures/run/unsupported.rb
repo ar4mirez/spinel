@@ -3,6 +3,7 @@
 # silently checking nothing.
 #
 # It was `case`/`in` until #165 compiled it, a class variable until #188's
-# fixtures needed them, and a backtick command until #145 compiled it to a
-# call. A rational literal is next: it waits on `Rational` (#227).
-p 3r
+# fixtures needed them, a backtick command until #145 compiled it to a call,
+# and a rational literal until `Rational` existed. A complex literal is next:
+# it waits on `Complex` (#227).
+p 3i

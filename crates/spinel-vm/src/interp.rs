@@ -7169,7 +7169,10 @@ fn allocate_instance(scope: &mut HandleScope<'_>, id: ClassId) -> Result<Value, 
     match scope.classes().repr(id) {
         // A user-defined class, or `Object` itself: one slot, for the ivar
         // storage a shape transition will hang off it.
-        None | Some(Builtin::Object | Builtin::BasicObject) => {
+        // `Numeric` too: it has no representation of its own, and a class
+        // written under it — `Rational`, or a program's — keeps its parts in
+        // instance variables like any other.
+        None | Some(Builtin::Object | Builtin::BasicObject | Builtin::Numeric) => {
             let class = scope.classes().object(id);
             let class = scope.root(class);
             let handle = alloc_ivar_object(scope, Some(class));

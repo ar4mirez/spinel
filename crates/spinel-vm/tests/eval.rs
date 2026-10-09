@@ -97,8 +97,9 @@ fn a_construct_this_slice_does_not_compile_is_an_error_never_a_guess() {
         //
         // A backtick command left this list with #145: it compiles to a call to
         // `Kernel#``, and running the command is what refuses. A rational
-        // literal needs `Rational` (#227), which has no meaning here yet.
-        "3r",
+        // literal left with `Rational` itself; the complex one still needs
+        // `Complex` (#227).
+        "3i",
         // A hash literal, a range literal, an array splat, a multiple
         // assignment and string interpolation left this list with #157 and
         // #154. What replaces them is the call-convention half of the same

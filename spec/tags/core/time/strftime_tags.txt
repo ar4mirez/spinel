@@ -1,0 +1,2 @@
+fails(#288: a Time keeps nanoseconds and a whole-second UTC offset where Ruby keeps Rationals, so what is finer than a nanosecond or a fractional offset is lost):Time#strftime rounds an offset to the nearest second when formatting with %z
+fails(#288: a Time keeps nanoseconds and a whole-second UTC offset where Ruby keeps Rationals, so what is finer than a nanosecond or a fractional offset is lost):Time#strftime with %N formats the picoseconds of the second with %12N

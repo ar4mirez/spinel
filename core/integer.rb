@@ -69,6 +69,7 @@ class Integer
   def abs
     self < 0 ? -self : self
   end
+  alias magnitude abs
 
   def integer?
     true

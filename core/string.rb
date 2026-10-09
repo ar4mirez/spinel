@@ -94,21 +94,8 @@ class String
     nil
   end
 
-  def <(other)
-    (self <=> other) < 0
-  end
-
-  def >(other)
-    (self <=> other) > 0
-  end
-
-  def <=(other)
-    (self <=> other) <= 0
-  end
-
-  def >=(other)
-    (self <=> other) >= 0
-  end
+  # `<`, `<=`, `>` and `>=` are Comparable's, which raises when `<=>` has no
+  # answer rather than asking nil whether it is less than zero.
 end
 
 # Encodings, bytes and in-place change (#19). Every mutator goes through
