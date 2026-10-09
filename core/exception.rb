@@ -15,8 +15,9 @@ class Exception
     to_s
   end
 
+  # The message as a String: whatever was given is asked for its `to_s`.
   def to_s
-    @message
+    @message.is_a?(String) ? @message : @message.to_s
   end
 
   def backtrace

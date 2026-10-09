@@ -1,1 +1,1 @@
-fails(#28: an edge case first reached once mspec's mocks and Method objects ran, not yet diagnosed):Kernel#load when passed true for 'wrap' includes modules included in main's singleton class in self's class
+fails(#28: load with wrap gives the file an anonymous module but does not carry over what main's singleton class includes):Kernel#load when passed true for 'wrap' includes modules included in main's singleton class in self's class

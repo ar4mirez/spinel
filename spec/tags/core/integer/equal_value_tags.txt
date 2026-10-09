@@ -1,1 +1,0 @@
-fails(#17: an edge case first reached once mspec's mocks and Method objects ran, not yet diagnosed):Integer#== bignum returns the result of 'other == self' as a boolean

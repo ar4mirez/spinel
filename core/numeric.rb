@@ -179,3 +179,12 @@ class Numeric
     self
   end
 end
+
+class Numeric
+  # `1 == obj`, for an object that is not a number: the object is asked,
+  # `obj == 1`, and whatever it answers is made true or false. CRuby's
+  # `num_equal`. The VM sends this in place of `==` for that pair.
+  def __eq_other__(other)
+    other == self ? true : false
+  end
+end

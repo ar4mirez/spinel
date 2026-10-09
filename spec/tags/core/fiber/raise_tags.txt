@@ -2,4 +2,4 @@ fails(#16: Fiber#raise does not pass keyword arguments or an exception class alo
 fails(#16: Fiber#raise does not pass keyword arguments or an exception class alone through to the exception the way Kernel#raise does):Fiber#raise allows extra keyword arguments for compatibility
 fails(#16: Fiber#raise does not pass keyword arguments or an exception class alone through to the exception the way Kernel#raise does):Fiber#raise passes no arguments to the constructor when given only an exception class
 fails(#16: Fiber#raise does not pass keyword arguments or an exception class alone through to the exception the way Kernel#raise does):Fiber#raise accepts error class with error message and backtrace information
-fails(#16: an edge case first reached once mspec's mocks and Method objects ran, not yet diagnosed):Fiber#raise allows Exception, message, and backtrace_locations parameters
+fails(#16: Fiber#raise does not take a third argument of backtrace locations, so the exception keeps the backtrace of where it was raised):Fiber#raise allows Exception, message, and backtrace_locations parameters

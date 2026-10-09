@@ -1,1 +1,1 @@
-fails(#19: an edge case first reached once mspec's mocks and Method objects ran, not yet diagnosed):String#gsub with pattern and block does not set $~ for procs created from methods
+fails(#19: the last match is one slot per heap, so a block made from a method sees the match its caller set where Ruby gives a method its own):String#gsub with pattern and block does not set $~ for procs created from methods

@@ -72,6 +72,7 @@ method Ruby calls and Spinel does not (`to_str`, `to_int`, `to_ary`, `<=>`),
 which the mock counts. Each is tagged for the issue that owns its class.
 Roughly thirty are tagged "not yet diagnosed": they are real, small and
 unrelated to one another, and want a triage pass of their own.
+*That pass is PRD 0062: twenty fixed, seventeen given a cause.*
 
 ## Not in this slice
 

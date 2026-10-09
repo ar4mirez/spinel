@@ -53,8 +53,14 @@ class Time
     end
   end
 
+  # Against what is not a Time, the other side is asked and its answer is
+  # turned round: CRuby's `rb_invcmp`. Measured.
   def <=>(other)
-    return nil unless Time === other
+    unless Time === other
+      order = other <=> self
+      return nil if order.nil?
+      return order > 0 ? -1 : (order < 0 ? 1 : 0)
+    end
     [@seconds, @nanoseconds] <=> [other.to_i, other.nsec]
   end
 

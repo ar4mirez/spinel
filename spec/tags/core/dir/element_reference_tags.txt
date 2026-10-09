@@ -12,4 +12,4 @@ fails(#42: Dir.glob does not yet match escaped characters, special characters in
 fails(#42: Dir.glob does not yet match escaped characters, special characters in names, or the dot entries the way Ruby does):Dir.[] recursively matches any subdirectories including ./ with '.**/'
 fails(#42: Dir.glob does not yet match escaped characters, special characters in names, or the dot entries the way Ruby does):Dir.[] matches special characters by escaping with a backslash with '\<character>'
 fails(#42: Dir.glob does not yet match escaped characters, special characters in names, or the dot entries the way Ruby does):Dir.[] :base option passed handles '' as current directory path
-fails(#42: an edge case first reached once mspec's mocks and Method objects ran, not yet diagnosed):Dir.[] matches dot or non-dotfiles with '{,.}*'
+fails(#42: a glob pattern that may begin with a dot does not match the . entry itself):Dir.[] matches dot or non-dotfiles with '{,.}*'

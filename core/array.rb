@@ -93,7 +93,15 @@ class Array
   # wrapped, which is why `a, b = nil` leaves both nil rather than raising.
   def self.__masgn_array__(value)
     return value if value.is_a?(Array)
-    return value.to_ary if value.respond_to?(:to_ary)
+    # A private `to_ary` counts, and one that answers nil declines.
+    if value.respond_to?(:to_ary, true)
+      spread = value.__send__(:to_ary)
+      return spread if spread.is_a?(Array)
+      unless spread.nil?
+        raise TypeError, "can't convert " + value.class.to_s + " to Array (" +
+                         value.class.to_s + "#to_ary gives " + spread.class.to_s + ")"
+      end
+    end
     [value]
   end
 
@@ -387,6 +395,20 @@ class Array
   # Array of Hashes compare, now that `Hash#==` is Ruby (#22). Measured on ruby
   # 4.0.7: a non-Array that has `to_ary` is asked `other == self`, and two
   # Arrays that contain themselves compare equal rather than recursing forever.
+  # `min`, `max` and `minmax` are Array's own in Ruby, not Enumerable's:
+  # `Array.instance_method(:min).owner` is Array. The work is the same.
+  def min(*count, &block)
+    super
+  end
+
+  def max(*count, &block)
+    super
+  end
+
+  def minmax(&block)
+    super
+  end
+
   def ==(other)
     return true if equal?(other)
     unless other.is_a?(Array)
@@ -466,7 +488,8 @@ class Array
   # wraps anything that has no `to_a` in a one-element array. `nil.to_a` is
   # `[]`, which is why `[*nil]` is empty rather than `[nil]`.
   def __concat_splat__(other)
-    spread = other.respond_to?(:to_a) ? other.to_a : [other]
+    # A private `to_a` counts: the conversion is the language's, not a caller's.
+    spread = other.respond_to?(:to_a, true) ? other.__send__(:to_a) : [other]
     unless spread.is_a?(Array)
       raise TypeError, "can't convert " + other.class.to_s + " to Array"
     end

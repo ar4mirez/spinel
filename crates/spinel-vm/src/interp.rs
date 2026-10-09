@@ -2164,11 +2164,6 @@ pub fn eval_in(
                         } else {
                             binop(scope, op, left, right)
                         };
-                        let (left, right) = if swapped {
-                            (right, left)
-                        } else {
-                            (left, right)
-                        };
                         match result {
                             Ok(value) => stack.push(value),
                             // The send behind the fast path. `BinOp`'s own docs have
@@ -2187,7 +2182,13 @@ pub fn eval_in(
                                     // operator dispatch on user-defined classes
                                     // mattering.
                                     cache: None,
-                                    name: crate::shared::symbols::intern(op.name()),
+                                    // The object decides, and its answer is
+                                    // made a boolean: `Numeric#__eq_other__`.
+                                    name: crate::shared::symbols::intern(if swapped {
+                                        "__eq_other__"
+                                    } else {
+                                        op.name()
+                                    }),
                                     receiver: left,
                                     args: vec![right],
                                     keywords: Vec::new(),
@@ -4134,7 +4135,15 @@ fn push_proc_frame_as(
     } else {
         Binding::Loose
     };
-    push_frame(scope, stack, frames, &call, &iseq, env, binding, links)
+    push_frame(scope, stack, frames, &call, &iseq, env, binding, links)?;
+    // A block passed to this body binds its `&b` and nothing else: `yield`
+    // and `block_given?` inside a block mean the block of the method it was
+    // *written* in, and a `define_method` body written in a class has none.
+    // Measured.
+    if let Some(frame) = frames.last_mut() {
+        frame.block = captured;
+    }
+    Ok(())
 }
 
 /// Bind the arguments and push the frame.
@@ -7465,7 +7474,17 @@ fn native_call<'h>(
                     .lookup_uncached(id, initialize)
                     .is_some_and(|method| method.owner != Builtin::Exception.id())
             };
-            if is_exception_class(scope, id) && !written_in_ruby {
+            // A message that is not a String is asked for its `to_s`, which is
+            // a send: that one goes to `Exception#initialize`, in Ruby.
+            let plain_message = call
+                .args
+                .first()
+                .is_none_or(|&v| v == Value::NIL || string_bytes(scope, v).is_some());
+            let refused = scope
+                .classes()
+                .name(id)
+                .is_some_and(crate::class::exception_defines_initialize);
+            if is_exception_class(scope, id) && !written_in_ruby && (plain_message || refused) {
                 // ...unless CRuby gives it an `initialize` of its own, which
                 // Spinel does not have. `UncaughtThrowError.new("x")` raises
                 // there and would quietly succeed here, which is a wrong answer
@@ -8563,8 +8582,24 @@ fn native_call<'h>(
             // `<=>` answers nil for anything that is not a String, which is
             // what makes `Comparable` raise rather than guess.
             let Some(right) = call.args.first().and_then(|&v| string_bytes(scope, v)) else {
-                stack.push(Value::NIL);
-                return Ok(None);
+                // An immediate is not comparable and has nothing to ask. Any
+                // other object may convert or compare, and Ruby asks it: that
+                // is `String#__cmp_other__`, in Ruby. Two Strings never leave
+                // this primitive, which is what a sort calls.
+                let other = first_arg(&call);
+                if other.is_immediate() {
+                    stack.push(Value::NIL);
+                    return Ok(None);
+                }
+                let forwarded = Pending {
+                    cache: None,
+                    name: crate::shared::symbols::intern("__cmp_other__"),
+                    target: Target::Method,
+                    owner: None,
+                    defined_as: None,
+                    ..call
+                };
+                return dispatch(scope, stack, frames, forwarded, proc_class, ids);
             };
             // Bytes, which is what Ruby compares: `"a" <=> "b"` does not decode.
             // Equal bytes in encodings that cannot be compared order by
@@ -11962,7 +11997,7 @@ fn ruby_eq_in(
     match heap_kind(scope, left) {
         Some(HeapKind::Str) => {
             if heap_kind(scope, right) != Some(HeapKind::Str) {
-                return Ok(false);
+                return unlike_eq(scope, right);
             }
             let (a, b) = (scope.root(left), scope.root(right));
             let (a_bytes, b_bytes) = (
@@ -11978,7 +12013,7 @@ fn ruby_eq_in(
         }
         Some(HeapKind::Array) => {
             if heap_kind(scope, right) != Some(HeapKind::Array) {
-                return Ok(false);
+                return unlike_eq(scope, right);
             }
             let (a, b) = (scope.root(left), scope.root(right));
             if array_len(scope, a) != array_len(scope, b) {
@@ -12012,6 +12047,25 @@ fn ruby_eq_in(
             operands: "an object whose class has no methods yet",
         }),
     }
+}
+
+/// A String or an Array against something that is not one.
+///
+/// An immediate, a String, an Array or a number is simply unequal. Any other
+/// object may have `to_str` or `to_ary`, and then Ruby asks *it* — `obj ==
+/// str` — so the pair is left to `String#==` and `Array#==`, which do.
+fn unlike_eq(scope: &mut HandleScope<'_>, right: Value) -> Result<bool, Error> {
+    if right.is_immediate()
+        || heap_kind(scope, right).is_some()
+        || crate::bignum::is_big(scope, right)
+        || crate::float::read(scope, right).is_some()
+    {
+        return Ok(false);
+    }
+    Err(Error::NoDispatch {
+        op: "==",
+        operands: "a String or Array and an object that may convert",
+    })
 }
 
 /// `===`, which is `==` for every type this slice has and is deliberately *not*

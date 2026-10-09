@@ -15,4 +15,4 @@ fails(#42: Dir.glob does not yet match escaped characters, special characters in
 fails(#42: Dir.glob does not yet match escaped characters, special characters in names, or the dot entries the way Ruby does):Dir.glob preserves multiple /s before a **
 fails(#42: Dir.glob does not yet match escaped characters, special characters in names, or the dot entries the way Ruby does):Dir.glob matches nothing when given an empty list of paths
 fails(#42: Dir.glob does not yet match escaped characters, special characters in names, or the dot entries the way Ruby does):Dir.glob handles **/** with base keyword argument
-fails(#42: an edge case first reached once mspec's mocks and Method objects ran, not yet diagnosed):Dir.glob matches dot or non-dotfiles with '{,.}*'
+fails(#42: a glob pattern that may begin with a dot does not match the . entry itself):Dir.glob matches dot or non-dotfiles with '{,.}*'

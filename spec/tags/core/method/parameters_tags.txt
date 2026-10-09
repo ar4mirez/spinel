@@ -1,1 +1,1 @@
-fails(#27: an edge case first reached once mspec's mocks and Method objects ran, not yet diagnosed):Method#parameters returns [[:req]] for each parameter for core methods with fixed-length argument lists
+fails(#27: a primitive records no parameter list, so its Method reports one rest parameter):Method#parameters returns [[:req]] for each parameter for core methods with fixed-length argument lists
