@@ -47,7 +47,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/process` | 92 | 423 | 83 | 0 | 340 | 0 | 20% |
 | `core/queue` | 15 | 46 | 0 | 0 | 46 | 0 | 0% |
 | `core/random` | 10 | 61 | 0 | 0 | 61 | 0 | 0% |
-| `core/range` | 35 | 606 | 378 | 0 | 223 | 5 | 62% |
+| `core/range` | 35 | 606 | 382 | 0 | 219 | 5 | 63% |
 | `core/rational` | 32 | 160 | 2 | 0 | 158 | 0 | 1% |
 | `core/refinement` | 8 | 25 | 0 | 0 | 25 | 0 | 0% |
 | `core/regexp` | 24 | 256 | 79 | 0 | 168 | 9 | 31% |
@@ -61,12 +61,12 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/systemexit` | 2 | 6 | 6 | 0 | 0 | 0 | 100% |
 | `core/thread` | 54 | 377 | 62 | 0 | 310 | 5 | 16% |
 | `core/threadgroup` | 5 | 8 | 0 | 0 | 8 | 0 | 0% |
-| `core/time` | 66 | 650 | 16 | 0 | 632 | 2 | 2% |
+| `core/time` | 66 | 652 | 533 | 0 | 117 | 2 | 82% |
 | `core/tracepoint` | 19 | 76 | 0 | 0 | 76 | 0 | 0% |
 | `core/true` | 9 | 13 | 11 | 0 | 2 | 0 | 85% |
 | `core/unboundmethod` | 20 | 92 | 76 | 0 | 14 | 2 | 83% |
 | `core/warning` | 5 | 31 | 22 | 0 | 9 | 0 | 71% |
-| `language` | 67 | 2568 | 2202 | 0 | 335 | 31 | 86% |
+| `language` | 67 | 2568 | 2203 | 0 | 334 | 31 | 86% |
 | `language/predefined` | 2 | 14 | 0 | 0 | 14 | 0 | 0% |
 | `language/regexp` | 11 | 257 | 198 | 0 | 56 | 3 | 77% |
 | `library/English` | 2 | 27 | 1 | 0 | 1 | 25 | 4% |
@@ -131,4 +131,4 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `optional/capi` | 47 | 0 | 0 | 0 | 0 | 0 | — |
 | `optional/thread_safety` | 1 | 5 | 0 | 0 | 5 | 0 | 0% |
 | `security` | 13 | 34 | 0 | 0 | 34 | 0 | 0% |
-| **total** | 3835 | 30993 | 16764 | 0 | 13898 | 331 | 54% |
+| **total** | 3835 | 30995 | 17286 | 0 | 13378 | 331 | 56% |
