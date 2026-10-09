@@ -1,7 +1,7 @@
 # Time — an instant, and the calendar it is read on (#32).
 #
-# An instant is two Integers: seconds since 1970-01-01 UTC and nanoseconds
-# into that second. Everything else a Time answers — the year, the weekday,
+# An instant is whole seconds since 1970-01-01 UTC and nanoseconds into that
+# second — an Integer of them, or a Rational when the instant is finer (#288). Everything else a Time answers — the year, the weekday,
 # the zone's name — is arithmetic on those two and a UTC offset, and all of it
 # is Ruby. The one thing Ruby cannot do is read the clock, and that is the one
 # primitive (`__sys_clock__`).
@@ -15,10 +15,6 @@
 # The local zone comes from `TZ`, or from /etc/localtime, and is worked out by
 # `Time::Zone` below from the same files the C library reads.
 #
-# ponytail: nanoseconds are the finest grain kept. Ruby keeps a Rational, so
-# `Time.at(0.1)` there remembers the float's whole binary expansion; here it
-# is cut at the ninth digit. `Rational` does not exist yet, and `subsec` and
-# `to_r` wait for it.
 class Time
   include Comparable
 
@@ -67,37 +63,46 @@ class Time
                 else raise ArgumentError, "unexpected unit: " + unit.to_s
                 end
         extra, sub = __split__(fraction)
-        nanoseconds = nanoseconds + extra * scale + (sub * scale) / 1_000_000_000
+        nanoseconds = nanoseconds + extra * scale + Rational(sub * scale, 1_000_000_000)
         whole = whole + nanoseconds.div(1_000_000_000)
-        nanoseconds = nanoseconds % 1_000_000_000
+        nanoseconds = __exact__(nanoseconds % 1_000_000_000)
       end
       time = __at__(whole, nanoseconds)
     end
     zone.nil? ? time : time.__send__(:__in_zone__, zone)
   end
 
-  # A number of seconds as whole seconds and nanoseconds, both Integers.
+  # A number of seconds as whole seconds and the nanoseconds past them,
+  # exactly: the nanoseconds are an Integer when they are whole and a Rational
+  # when the number is finer than that.
   def self.__split__(value)
     return [value, 0] if value.is_a?(Integer)
     if value.is_a?(Float)
       raise FloatDomainError, value.to_s if value.nan? || value.infinite?
-      # Exactly: a Float is an integer times a power of two, and the
-      # nanoseconds are that product floored. Float arithmetic would round
-      # `-1.3 + 2` to 0.7 and lose the nanosecond Ruby keeps.
-      mantissa, exponent = Math.frexp(value)
-      scaled = (mantissa * 9_007_199_254_740_992).to_i * 1_000_000_000
-      shift = 53 - exponent
-      total = shift > 0 ? scaled.div(2**shift) : scaled * 2**-shift
-      return [total.div(1_000_000_000), total % 1_000_000_000]
+      # A Float is an integer times a power of two, and is taken as that.
+      # Float arithmetic would round `-1.3 + 2` to 0.7.
+      value = value.to_r
     end
-    if value.is_a?(Rational)
-      whole = value.floor
-      return [whole, ((value - whole) * 1_000_000_000).floor]
+    unless value.is_a?(Rational)
+      if value.nil? || value.is_a?(String)
+        raise TypeError, "can't convert " + (value.nil? ? "nil" : value.class.to_s) + " into an exact number"
+      end
+      if value.respond_to?(:to_r)
+        value = value.to_r
+      elsif value.respond_to?(:to_int)
+        return [value.to_int, 0]
+      else
+        raise TypeError, "can't convert " + value.class.to_s + " into an exact number"
+      end
+      return [value, 0] if value.is_a?(Integer)
     end
-    if value.nil? || value.is_a?(String) || !value.respond_to?(:to_int)
-      raise TypeError, "can't convert " + (value.nil? ? "nil" : value.class.to_s) + " into an exact number"
-    end
-    [value.to_int, 0]
+    whole = value.floor
+    [whole, __exact__((value - whole) * 1_000_000_000)]
+  end
+
+  # A Rational that is a whole number, as the Integer it is.
+  def self.__exact__(value)
+    value.is_a?(Rational) && value.denominator == 1 ? value.numerator : value
   end
 
   def self.utc(*args)
@@ -118,7 +123,7 @@ class Time
   # where.
   def self.new(*args, in: nil, precision: 9)
     zone = binding.local_variable_get(:in)
-    Integer.__index__(precision) unless precision.nil?
+    precision = Integer.__index__(precision) unless precision.nil?
     if args.empty?
       seconds, nanoseconds = __sys_clock__(Process::CLOCK_REALTIME)
       time = allocate
@@ -130,7 +135,7 @@ class Time
       raise ArgumentError, "wrong number of arguments (given " + args.size.to_s + ", expected 0..7)"
     end
     if args.size == 1 && args[0].is_a?(String)
-      return __from_string__(args[0], zone)
+      return __from_string__(args[0], zone, precision)
     end
     unless args[6].nil?
       raise ArgumentError, "timezone argument given as positional and keyword arguments" unless zone.nil?
@@ -157,8 +162,8 @@ class Time
   # A zone that is an object rather than an offset: it converts between
   # local and UTC itself, with `local_to_utc` and `utc_to_local`.
   def self.__zone_object?(zone)
-    return false if zone.nil? || zone.is_a?(String) || zone.is_a?(Integer)
-    return false if zone.respond_to?(:to_str) || zone.respond_to?(:to_int)
+    return false if zone.nil? || zone.is_a?(String) || zone.is_a?(Numeric)
+    return false if zone.respond_to?(:to_str) || zone.respond_to?(:to_int) || zone.respond_to?(:to_r)
     true
   end
 
@@ -178,7 +183,7 @@ class Time
     find_timezone(zone)
   end
 
-  def self.__from_string__(text, zone)
+  def self.__from_string__(text, zone, precision = 9)
     match = /\A\s*(-?\d{4,})(?:-(\d\d)-(\d\d)(?:[ T](\d\d):(\d\d):(\d\d)(?:\.(\d+))?\s*(Z|UTC|[+-]\d\d(?::?\d\d(?::?\d\d)?)?)?)?)?\s*\z/.match(text)
     if match.nil?
       if text =~ /\A\s*-?\d{4,}-\d\d\s*\z/ || text =~ /\A\s*-?\d{4,}-\d\d-\d\d[ T]\d\d(:\d\d)?\s*\z/
@@ -189,8 +194,16 @@ class Time
     fields = [match[1].to_i, (match[2] || 1).to_i, (match[3] || 1).to_i,
               (match[4] || 0).to_i, (match[5] || 0).to_i, (match[6] || 0).to_i, 0]
     unless match[7].nil?
-      digits = (match[7] + "000000000")[0, 9]
-      fields[6] = digits.to_i
+      # As many digits as `precision` asks for, nine unless it says; nil or
+      # a negative number keeps them all.
+      digits = match[7]
+      # No digits asked for, and yet a dot: there is nothing to read past it.
+      if precision == 0
+        raise ArgumentError, "subsecond expected after dot: " + match[4] + ":" + match[5] + ":" +
+                             match[6] + "." + digits[0, 1]
+      end
+      digits = digits[0, precision] unless precision.nil? || precision < 0
+      fields[6] = digits.empty? ? 0 : __exact__(Rational(digits.to_i * 1_000_000_000, 10**digits.size))
     end
     __check_civil__(fields)
     zone = match[8] unless match[8].nil?
@@ -220,7 +233,7 @@ class Time
     unless args[6].nil?
       # Microseconds given on their own replace the second's fraction.
       micro, sub = __split__(args[6])
-      fields[6] = micro * 1_000 + sub / 1_000_000
+      fields[6] = __exact__(micro * 1_000 + Rational(sub, 1_000_000))
     end
     time = allocate
     time.__send__(:__set_civil__, fields, mode, 0, prefer)
@@ -292,6 +305,11 @@ class Time
     unless zone.is_a?(String)
       if zone.respond_to?(:to_str)
         zone = zone.to_str
+      elsif zone.is_a?(Rational) || zone.is_a?(Float) || zone.respond_to?(:to_r)
+        # An offset may have a fraction of a second, and keeps it.
+        offset = __exact__(zone.to_r)
+        raise ArgumentError, "utc_offset out of range" if offset <= -86400 || offset >= 86400
+        return offset
       elsif zone.respond_to?(:to_int)
         return __utc_offset__(zone.to_int)
       else
@@ -382,8 +400,15 @@ class Time
     if mode == :utc
       @seconds = wall
     elsif mode == :fixed
-      @seconds = wall - offset
       @offset = offset
+      if offset.is_a?(Integer)
+        @seconds = wall - offset
+      else
+        # The fraction of the offset comes off the instant exactly.
+        total = Rational(wall * 1_000_000_000, 1) + @nanoseconds - offset * 1_000_000_000
+        @seconds = total.div(1_000_000_000)
+        @nanoseconds = Time.__exact__(total % 1_000_000_000)
+      end
     else
       @seconds = Zone.local.instant_of(wall, prefer)
       # Read now: the zone is the one in force when the Time was made, not
@@ -531,8 +556,12 @@ class Time
   # -- the calendar ---------------------------------------------------------
 
   # Seconds since the epoch on this Time's own wall clock.
+  # With an offset that has a fraction, the reading is the exact sum floored;
+  # the fraction of a second shown is still the instant's own. Measured.
   def __wall__
-    @seconds + utc_offset
+    offset = utc_offset
+    return @seconds + offset if offset.is_a?(Integer)
+    (@seconds + offset + Rational(@nanoseconds, 1_000_000_000)).floor
   end
   private :__wall__
 
@@ -551,10 +580,13 @@ class Time
   def min = (__wall__ % 3_600) / 60
   def sec = __wall__ % 60
 
-  def nsec = @nanoseconds
+  def nsec = @nanoseconds.floor
+
+  # The nanoseconds as they are kept, whole or not.
+  def __nanoseconds__ = @nanoseconds
   alias tv_nsec nsec
 
-  def usec = @nanoseconds / 1000
+  def usec = @nanoseconds.floor / 1000
   alias tv_usec usec
 
   def to_i = @seconds
@@ -565,7 +597,7 @@ class Time
   end
 
   def to_r
-    Rational(@seconds * 1_000_000_000 + @nanoseconds, 1_000_000_000)
+    Rational(@seconds, 1) + Rational(@nanoseconds, 1_000_000_000)
   end
 
   def subsec
@@ -615,7 +647,7 @@ class Time
 
   def __shifted__(seconds, nanoseconds)
     seconds = seconds + nanoseconds.div(1_000_000_000)
-    time = Time.__at__(seconds, nanoseconds % 1_000_000_000)
+    time = Time.__at__(seconds, Time.__exact__(nanoseconds % 1_000_000_000))
     time.__send__(:__copy_zone__, self)
   end
   private :__shifted__
@@ -628,7 +660,7 @@ class Time
 
   def -(other)
     if other.is_a?(Time)
-      return (@seconds - other.to_i) + (@nanoseconds - other.nsec) / 1_000_000_000.0
+      return (@seconds - other.to_i) + (@nanoseconds - other.__nanoseconds__) / 1_000_000_000.0
     end
     whole, nanoseconds = Time.__split__(other)
     __shifted__(@seconds - whole, @nanoseconds - nanoseconds)
@@ -642,15 +674,15 @@ class Time
       return nil if order.nil?
       return order > 0 ? -1 : (order < 0 ? 1 : 0)
     end
-    [@seconds, @nanoseconds] <=> [other.to_i, other.nsec]
+    [@seconds, @nanoseconds] <=> [other.to_i, other.__nanoseconds__]
   end
 
   def ==(other)
-    Time === other && @seconds == other.to_i && @nanoseconds == other.nsec
+    Time === other && @seconds == other.to_i && @nanoseconds == other.__nanoseconds__
   end
 
   def eql?(other)
-    Time === other && @seconds == other.to_i && @nanoseconds == other.nsec
+    Time === other && @seconds == other.to_i && @nanoseconds == other.__nanoseconds__
   end
 
   def hash
@@ -673,10 +705,9 @@ class Time
   def __rounded__(digits, how)
     digits = Integer.__index__(digits)
     raise ArgumentError, "negative ndigits given" if digits < 0
-    return __shifted__(@seconds, @nanoseconds) if digits >= 9
-    grain = 10**(9 - digits)
+    grain = digits > 9 ? Rational(1, 10**(digits - 9)) : 10**(9 - digits)
     rest = @nanoseconds % grain
-    down = @nanoseconds - rest
+    down = Time.__exact__(@nanoseconds - rest)
     up = how == 2 ? rest > 0 : (how == 1 && rest * 2 >= grain)
     __shifted__(@seconds, up ? down + grain : down)
   end
@@ -685,18 +716,30 @@ class Time
   # -- as text ----------------------------------------------------------------
 
   def to_s
-    strftime(utc? ? "%Y-%m-%d %H:%M:%S UTC" : "%Y-%m-%d %H:%M:%S %z")
+    strftime(utc? ? "%Y-%m-%d %H:%M:%S UTC" : "%Y-%m-%d %H:%M:%S %z").force_encoding(Encoding::US_ASCII)
   end
 
   # `to_s`, with the fraction of a second when there is one.
   def inspect
+    __inspect__.force_encoding(Encoding::US_ASCII)
+  end
+
+  def __inspect__
     text = strftime("%Y-%m-%d %H:%M:%S")
-    if @nanoseconds > 0
-      digits = @nanoseconds.to_s.rjust(9, "0")
-      digits = digits[0, digits.size - 1] while digits.end_with?("0")
-      text = text + "." + digits
+    if @nanoseconds.is_a?(Integer)
+      if @nanoseconds > 0
+        digits = @nanoseconds.to_s.rjust(9, "0")
+        digits = digits[0, digits.size - 1] while digits.end_with?("0")
+        text = text + "." + digits
+      end
+    else
+      # Finer than a nanosecond: the fraction, as the fraction it is.
+      text = text + " " + subsec.to_s
     end
-    text + (utc? ? " UTC" : strftime(" %z"))
+    return text + " UTC" if utc?
+    # An offset with seconds in it shows them.
+    offset = utc_offset
+    text + (offset.round % 60 == 0 ? strftime(" %z") : strftime(" %::z").delete(":"))
   end
 
   def ctime
@@ -708,7 +751,7 @@ class Time
     digits = Integer.__index__(digits)
     text = strftime("%Y-%m-%dT%H:%M:%S")
     if digits > 0
-      text = text + "." + (@nanoseconds.to_s.rjust(9, "0") + "0" * digits)[0, digits]
+      text = text + "." + __fraction__(digits)
     end
     text + (utc? ? "Z" : strftime("%:z"))
   end
@@ -847,11 +890,13 @@ class Time
   end
   private :__directive__
 
-  # The first `digits` digits of the fraction of a second, with zeros past
-  # the ninth: the instant has no more to give.
+  # The first `digits` digits of the fraction of a second.
   def __fraction__(digits)
-    text = @nanoseconds.to_s.rjust(9, "0")
-    digits <= 9 ? text[0, digits] : text + "0" * (digits - 9)
+    if @nanoseconds.is_a?(Integer)
+      text = @nanoseconds.to_s.rjust(9, "0")
+      return digits <= 9 ? text[0, digits] : text + "0" * (digits - 9)
+    end
+    (subsec * 10**digits).floor.to_s.rjust(digits, "0")
   end
   private :__fraction__
 
@@ -883,7 +928,9 @@ class Time
     # RFC 3339's `-0000`, "UTC, and the local offset is not known": what
     # `-` asks for on a UTC time.
     sign = offset < 0 || (utc? && flags.include?("-")) ? "-" : "+"
+    # To the nearest second, a half going up.
     offset = offset.abs
+    offset = (offset + Rational(1, 2)).floor unless offset.is_a?(Integer)
     hours = offset / 3_600
     minutes = (offset % 3_600) / 60
     seconds = offset % 60

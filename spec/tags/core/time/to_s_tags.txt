@@ -1,1 +1,0 @@
-fails(#32: Time#inspect and #to_s, which this Time stand-in does not have):Time#to_s returns a US-ASCII encoded string
