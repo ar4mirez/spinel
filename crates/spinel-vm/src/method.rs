@@ -138,7 +138,6 @@ pub enum Native {
     /// `String#=~`, `String#match`, `String#match?` — the same three matchers
     /// with the operands the other way round.
     StringMatchOp,
-    StringMatch,
     StringMatchP,
     /// `MatchData#[]`, by group number or by capture name.
     MatchIndex,

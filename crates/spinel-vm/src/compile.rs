@@ -983,6 +983,7 @@ impl Compiler {
                         keywords: Vec::new(),
                         block: BlockRef::None,
                         implicit_self: true,
+                        variable_call: false,
                         kwsplat: false,
                     },
                     true,
@@ -1190,6 +1191,7 @@ impl Compiler {
                 keywords: Vec::new(),
                 block: BlockRef::None,
                 implicit_self: true,
+                variable_call: false,
                 kwsplat: false,
             },
             true,
@@ -1212,6 +1214,7 @@ impl Compiler {
                 keywords: Vec::new(),
                 block: BlockRef::None,
                 implicit_self: false,
+                variable_call: false,
                 kwsplat: false,
             },
             false,
@@ -1229,6 +1232,7 @@ impl Compiler {
                 keywords: Vec::new(),
                 block: BlockRef::None,
                 implicit_self: false,
+                variable_call: false,
                 kwsplat: false,
             },
             false,
@@ -3628,6 +3632,8 @@ impl Compiler {
             None => self.emit(Insn::PushSelf),
         }
         let site = self.arguments(&call.name, &call.args, call.block.as_ref(), span)?;
+        let mut site = site;
+        site.variable_call = call.flags.variable_call;
         let site = self.push_site(site, call.receiver.is_none());
         // The arguments may have moved the line on; the send is the name's.
         self.at(call.name_span.start);
@@ -3756,6 +3762,7 @@ impl Compiler {
             keywords: Vec::new(),
             block: BlockRef::None,
             implicit_self: false,
+            variable_call: false,
             kwsplat: false,
         };
 
@@ -3958,6 +3965,7 @@ impl Compiler {
             keywords: Vec::new(),
             block: BlockRef::None,
             implicit_self: true,
+            variable_call: false,
             kwsplat: false,
         };
         for &(slot, is_rest) in &forward.positional {
@@ -4986,6 +4994,7 @@ impl Compiler {
                 keywords: Vec::new(),
                 block: BlockRef::Literal(block),
                 implicit_self: false,
+                variable_call: false,
                 kwsplat: false,
             },
             false,

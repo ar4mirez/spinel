@@ -248,7 +248,7 @@ class Hash
   end
 
   def compare_by_identity
-    raise FrozenError, "can't modify frozen Hash: " + inspect if frozen?
+    raise FrozenError.new("can't modify frozen Hash: " + inspect, receiver: self) if frozen?
     @__identity__ = true
     @__hashes__ = nil
     self
@@ -738,7 +738,7 @@ class Hash
   end
 
   def __check_frozen__
-    raise FrozenError, "can't modify frozen Hash: " + inspect if frozen?
+    raise FrozenError.new("can't modify frozen Hash: " + inspect, receiver: self) if frozen?
   end
 
   # Keys are matched by the table's own rule — `eql?` and `hash` — while values

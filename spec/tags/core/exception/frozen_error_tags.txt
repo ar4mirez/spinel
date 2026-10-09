@@ -1,1 +1,0 @@
-fails(#173: NameError#name and #receiver, and FrozenError#receiver, are not set for this kind of error yet):FrozenError#receiver should return frozen object that modification was attempted on

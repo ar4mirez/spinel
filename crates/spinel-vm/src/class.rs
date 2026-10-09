@@ -1448,7 +1448,7 @@ impl Classes {
     /// skipping `Object` unless `A` *is* `Object`. Ruby 2.5's change is
     /// narrower than "no fallback": `Object` alone is skipped, while `Kernel`
     /// and `BasicObject` are searched like any other ancestor.
-    fn const_qualified_owner(&self, id: ClassId, name: SymbolId) -> Option<(ClassId, Value)> {
+    pub fn const_qualified_owner(&self, id: ClassId, name: SymbolId) -> Option<(ClassId, Value)> {
         let object = Builtin::Object.id();
         let skip_object = id != object;
         self.ancestors(id)

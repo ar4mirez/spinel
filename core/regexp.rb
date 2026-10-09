@@ -23,7 +23,7 @@ class Regexp
   # from `Regexp.new` raises `TypeError`. Measured on ruby 4.0.6 — 4.1 makes
   # both `FrozenError`, and ruby/spec guards the two apart.
   def initialize(*args)
-    raise FrozenError, "can't modify frozen Regexp: " + inspect if frozen?
+    raise FrozenError.new("can't modify frozen Regexp: " + inspect, receiver: self) if frozen?
     raise TypeError, "already initialized regexp"
   end
 

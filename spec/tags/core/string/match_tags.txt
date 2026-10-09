@@ -1,1 +1,0 @@
-fails(#203: `String#match` runs the regexp engine directly instead of sending `match` to its argument, so a Regexp subclass that overrides `match` is never called. Ruby defines it as a send to the pattern with the string as the argument):String#match calls match on the regular expression

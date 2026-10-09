@@ -256,6 +256,16 @@ pub struct Heap {
     /// ponytail: one per heap, like `last_match`. Ruby scopes it to the thread;
     /// give it a Ractor-local when threads arrive.
     errinfo: Value,
+    /// What the `NameError` now on its way out is about: its message, then
+    /// `@name` and `@receiver` (#173).
+    ///
+    /// An `Error` holds only `String`s, because a `Value` parked in one is
+    /// unrooted for the whole unwind. So the site that raises leaves the two
+    /// values here, where the collector sees them, and the one place an
+    /// `Error` becomes an object takes them back. The message is the claim
+    /// check: an error swallowed in Rust leaves its note behind, and a later
+    /// raise with different text must not inherit it.
+    name_error: Option<(String, Value, Value)>,
     /// `main`, the top level's `self`: one per heap, so every evaluation —
     /// the core library's and each of the program's — shares it, and the
     /// singleton methods `core/object.rb` gives it (`to_s`, `include`) are
@@ -347,6 +357,7 @@ impl Heap {
             regexps: crate::regexp::Regexps::new(),
             fibers: crate::interp::FiberTable::default(),
             last_match: Value::NIL,
+            name_error: None,
             errinfo: Value::NIL,
             main: Value::NIL,
             parser: None,
@@ -399,6 +410,17 @@ impl Heap {
 
     pub fn set_last_match(&mut self, value: Value) {
         self.last_match = value;
+    }
+
+    pub fn set_name_error(&mut self, message: &str, name: Value, receiver: Value) {
+        self.name_error = Some((message.to_owned(), name, receiver));
+    }
+
+    /// The note for `message`, if the last one left was for it. Cleared either
+    /// way.
+    pub fn take_name_error(&mut self, message: &str) -> Option<(Value, Value)> {
+        let (text, name, receiver) = self.name_error.take()?;
+        (text == message).then_some((name, receiver))
     }
 
     /// `$!`: the exception being handled, or nil.
@@ -675,6 +697,10 @@ impl Heap {
         let (fibers, mark_stack) = (&self.fibers, &mut self.mark_stack);
         fibers.each_root(|value| Heap::shade(mark_stack, value));
         Heap::shade(&mut self.mark_stack, self.last_match);
+        if let Some((_, name, receiver)) = self.name_error {
+            Heap::shade(&mut self.mark_stack, name);
+            Heap::shade(&mut self.mark_stack, receiver);
+        }
         // `$!` outlives every handle to it the same way, and for the whole time
         // a handler is running.
         Heap::shade(&mut self.mark_stack, self.errinfo);
@@ -975,6 +1001,14 @@ impl<'h> HandleScope<'h> {
 
     pub fn set_last_match(&mut self, value: Value) {
         self.heap.set_last_match(value);
+    }
+
+    pub fn set_name_error(&mut self, message: &str, name: Value, receiver: Value) {
+        self.heap.set_name_error(message, name, receiver);
+    }
+
+    pub fn take_name_error(&mut self, message: &str) -> Option<(Value, Value)> {
+        self.heap.take_name_error(message)
     }
 
     pub fn errinfo(&self) -> Value {
