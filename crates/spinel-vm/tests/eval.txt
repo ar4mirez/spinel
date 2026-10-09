@@ -1548,3 +1548,22 @@ n = Float::NAN; [[n] == [n], [n] == [Float::NAN], [n] == [0.0 / 0.0], n == n]  #
 [Math.gamma(5), Math.gamma(23), Math.gamma(0.0), Math.gamma(-0.0), Math.lgamma(-0.0), Math.lgamma(3)[1], Math.erf(0), Math.erfc(0)]  #=> [24.0, 1.1240007277776077e+21, Infinity, -Infinity, [Infinity, -1], 1, 0.0, 1.0]
 [Math.frexp(1234.0), Math.ldexp(0.6025390625, 11), Math.ldexp(1, 3.9), (Math.ldexp(1, "x") rescue $!.class)]  #=> [[0.6025390625, 11], 1234.0, 8.0, TypeError]
 o = Object.new; o.extend(Math); [o.send(:sqrt, 9), (o.sqrt(9) rescue $!.class), Math.respond_to?(:sqrt)]  #=> [3.0, NoMethodError, true]
+
+# ------------------------------------------------------------------ Set (#48)
+# A core class since Ruby 4.0. Elements are distinct as Hash keys are, and
+# keep the order they went in.
+[Set.new, Set.new([1, 2, 2]), Set.new(1..3), Set.new([1, 2]) { |x| x * 2 }, Set[3, 1, 3], Set.new(nil)].map(&:inspect)  #=> ["Set[]", "Set[1, 2]", "Set[1, 2, 3]", "Set[2, 4]", "Set[3, 1]", "Set[]"]
+[(Set.new(1) rescue $!.message), (Set[1] | 1 rescue $!.message), (Set[1].subset?([1]) rescue $!.message)]  #=> ["value must be enumerable", "value must be enumerable", "value must be a set"]
+s = Set[1]; s << s; [s.inspect, (s.flatten rescue $!.message), Set[Set[1]].inspect]  #=> ["Set[1, Set[...]]", "tried to flatten recursive Set", "Set[Set[1]]"]
+s = Set[1]; [s.add(2).equal?(s), s.add?(2), s.add?(4).equal?(s), s.size, s.delete?(9), s.delete(1).to_a, s.include?(2), s === 4, s.empty?]  #=> [true, nil, true, 3, nil, [2, 4], true, true, false]
+a = Set[1, 2, 3]; b = Set[2, 3, 4]; [a | b, a + b, a - b, a & b, a ^ b, a ^ [1, 7], a.union([9]), a.intersection([3, 5])].map(&:to_a)  #=> [[1, 2, 3, 4], [1, 2, 3, 4], [1], [2, 3], [1, 4], [2, 3, 7], [1, 2, 3, 9], [3]]
+a = Set[1, 2]; b = Set[1, 2, 3]; [a.subset?(b), a <= b, a < b, a < a, b >= a, b > a, a <=> b, b <=> a, a <=> a, a <=> Set[5], a <=> 1]  #=> [true, true, true, false, true, true, -1, 1, 0, nil, nil]
+[Set[1, 2] == Set[2, 1], Set[1] == [1], Set[1].eql?(Set[1]), Set[1, 2].hash == Set[2, 1].hash, Set[1] == Set[1.0], {Set[1] => :a}[Set[1]]]  #=> [true, false, true, true, false, :a]
+s = Set[1, 2, 3, 4]; [s.delete_if { |x| x.even? }.to_a, s.reject! { |x| x > 9 }, s.select! { |x| x < 9 }, s.keep_if { |x| x == 1 }.to_a, s.map! { |x| x + 1 }.to_a]  #=> [[1, 3], nil, nil, [1], [2]]
+s = Set[1]; [s.merge([2, 3], Set[4]).to_a, s.subtract([1, 2]).to_a, s.replace([7, 8]).to_a, s.clear.to_a]  #=> [[1, 2, 3, 4], [3, 4], [7, 8], []]
+[Set[1, 2, 3, 4].classify { |x| x.even? }.inspect, Set[1, 3, 4, 6, 9, 10, 11].divide { |i, j| (i - j).abs == 1 }.inspect, Set[1, Set[2, Set[3]], 4].flatten.inspect]  #=> ["{false => Set[1, 3], true => Set[2, 4]}", "Set[Set[1], Set[3, 4], Set[6], Set[9, 10, 11]]", "Set[1, 2, 3, 4]"]
+s = Set.new.compare_by_identity; a = "a"; s << a << a.dup << a; [s.size, s.compare_by_identity?, Set[].compare_by_identity?, s == Set["a", "a"], (s ^ []).compare_by_identity?, (s & ["a"]).compare_by_identity?]  #=> [2, true, false, false, true, false]
+s = Set[1].freeze; d = s.dup; c = s.clone; d << 2; [s.to_a, d.to_a, d.frozen?, c.frozen?, (s << 3 rescue $!.message)]  #=> [[1], [1, 2], false, true, "can't modify frozen Set: Set[1]"]
+s = Set[1]; [s.to_set.equal?(s), [1, 1, 2].to_set.to_a, (1..3).to_set.to_a, {a: 1}.to_set.to_a, [1, 2].to_set { |x| x * 2 }.to_a]  #=> [true, [1, 2], [1, 2, 3], [[:a, 1]], [2, 4]]
+s = Set[3, 1, 2]; [s.to_a, s.first, s.first(2), s.min, s.sort, s.select(&:odd?).class, s.sum, s.join("-"), (case 2 when Set[1, 2] then :in else :out end)]  #=> [[3, 1, 2], 3, [3, 1], 1, [1, 2, 3], Array, 6, "3-1-2", :in]
+c = Class.new(Set); s = c[1, 2]; [(s | [3]).class == c, (s + s).class == c, s.dup.class == c, s.to_set.equal?(s), s.to_set.class, Set.instance_method(:member?) == Set.instance_method(:include?)]  #=> [true, true, true, false, Set, true]
