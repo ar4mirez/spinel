@@ -120,6 +120,10 @@ const SOURCES: &[(&str, &str)] = &[
         "core/enumerator.rb",
         include_str!("../../../core/enumerator.rb"),
     ),
+    (
+        "core/arithmetic_sequence.rb",
+        include_str!("../../../core/arithmetic_sequence.rb"),
+    ),
     // Last: it re-points names the files above defined twice.
     ("core/aliases.rb", include_str!("../../../core/aliases.rb")),
 ];
