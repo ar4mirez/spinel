@@ -348,7 +348,9 @@ class Struct
       members.each_with_index do |member, index|
         parts.push(member.to_s + "=" + __struct_values__[index].inspect)
       end
-      (head + parts.join(", ")).rstrip + ">"
+      # A named one with no members has no space to close; an anonymous
+      # one keeps it: `#<data >`. Measured.
+      (name.nil? ? head + parts.join(", ") : (head + parts.join(", ")).rstrip) + ">"
     end
   end
   alias to_s inspect
