@@ -90,6 +90,10 @@ class Time
       total = shift > 0 ? scaled.div(2**shift) : scaled * 2**-shift
       return [total.div(1_000_000_000), total % 1_000_000_000]
     end
+    if value.is_a?(Rational)
+      whole = value.floor
+      return [whole, ((value - whole) * 1_000_000_000).floor]
+    end
     if value.nil? || value.is_a?(String) || !value.respond_to?(:to_int)
       raise TypeError, "can't convert " + (value.nil? ? "nil" : value.class.to_s) + " into an exact number"
     end
@@ -558,6 +562,10 @@ class Time
 
   def to_f
     @seconds + @nanoseconds / 1_000_000_000.0
+  end
+
+  def to_r
+    Rational(@seconds * 1_000_000_000 + @nanoseconds, 1_000_000_000)
   end
 
   def subsec

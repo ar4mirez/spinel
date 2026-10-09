@@ -190,6 +190,35 @@ class Integer
 
   def **(other)
     return to_f**other if Float === other
+    if Integer === other
+      # A negative power is one over the positive one: a Rational.
+      return __wide_pow__(other) if other >= 0
+      raise ZeroDivisionError, "divided by 0" if self == 0
+      return Rational.__make__(1, 1) / __wide_pow__(-other)
+    end
+    return Rational.__make__(self, 1)**other if Rational === other
     __integer_pow__(other)
+  end
+
+  # A non-negative whole power. The primitive takes a base that fits a word
+  # and an exponent that fits thirty-two bits; a wider base is squared and
+  # multiplied here, and a wider exponent has an answer only for 0, 1 and -1.
+  def __wide_pow__(exponent)
+    if exponent > 4_294_967_295
+      return self if self == 0 || self == 1
+      return exponent.even? ? 1 : -1 if self == -1
+      raise ArgumentError, "exponent is too large"
+    end
+    if self <= 4_611_686_018_427_387_903 && self >= -4_611_686_018_427_387_904
+      return __integer_pow__(exponent)
+    end
+    answer = 1
+    base = self
+    while exponent > 0
+      answer = answer * base if exponent.odd?
+      exponent = exponent / 2
+      base = base * base if exponent > 0
+    end
+    answer
   end
 end

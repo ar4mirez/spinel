@@ -60,7 +60,7 @@ module Comparable
   # refuses to convert.
   def __operand_name__(other)
     if other.nil? || true.equal?(other) || false.equal?(other) ||
-       other.is_a?(Symbol) || other.is_a?(Numeric)
+       other.is_a?(Symbol) || other.is_a?(Integer) || other.is_a?(Float)
       other.inspect
     else
       other.class.to_s

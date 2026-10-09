@@ -54,6 +54,7 @@ class Numeric
   end
 
   def %(other)
+    return self - other * div(other) unless Integer === self || Float === self
     pair = __coerce_bin__(other, :%)
     pair[0] % pair[1]
   end
@@ -67,21 +68,25 @@ class Numeric
   end
 
   def <(other)
+    return super unless Integer === self || Float === self
     pair = __coerce_relop__(other, :<)
     __relop_answer__(pair.nil? ? nil : pair[0] < pair[1], other)
   end
 
   def <=(other)
+    return super unless Integer === self || Float === self
     pair = __coerce_relop__(other, :<=)
     __relop_answer__(pair.nil? ? nil : pair[0] <= pair[1], other)
   end
 
   def >(other)
+    return super unless Integer === self || Float === self
     pair = __coerce_relop__(other, :>)
     __relop_answer__(pair.nil? ? nil : pair[0] > pair[1], other)
   end
 
   def >=(other)
+    return super unless Integer === self || Float === self
     pair = __coerce_relop__(other, :>=)
     __relop_answer__(pair.nil? ? nil : pair[0] >= pair[1], other)
   end
@@ -92,6 +97,9 @@ class Numeric
   # is the whole of the difference between `rb_num_coerce_cmp` and
   # `rb_num_coerce_bin`, and it is measured, not inferred.
   def <=>(other)
+    # A number that is neither Integer nor Float has no order of its own:
+    # it is itself, and comparable with nothing else. Measured.
+    return equal?(other) ? 0 : nil unless Integer === self || Float === self
     if other.is_a?(Numeric)
       return -1 if self < other
       return 1 if self > other
@@ -123,6 +131,11 @@ class Numeric
   end
 
   def __coerce_bin__(other, op)
+    # These operators are Integer's and Float's. A class under Numeric that
+    # reaches one by inheritance has not defined it, which is what Ruby says.
+    unless Integer === self || Float === self
+      raise NoMethodError, "undefined method '" + op.to_s + "' for an instance of " + self.class.to_s
+    end
     __refuse_unrepresentable__(other, op)
     __coerce_pair__(other, true)
   end
@@ -142,17 +155,13 @@ class Numeric
     answer
   end
 
-  # Both operands are numbers and the fast path still declined, so the pair has
-  # no representation here: an Integer wider than a fixnum, or a result outside
-  # flonum range. `coerce` would hand the same pair straight back and this
-  # method would call itself forever, so it refuses instead — with the very
-  # error the VM raised before this file existed, which is what keeps those
-  # examples reported *blocked* rather than silently wrong.
-  #
-  # ponytail: the ceiling is the missing bignum and boxed-float; when those
-  # land this guard goes, because the fast path will stop declining.
+  # Both operands are Integers or Floats and the fast path still declined.
+  # `coerce` would hand the same pair straight back and this method would call
+  # itself forever, so it refuses instead. Any other `Numeric` — a Rational, or
+  # a class a program wrote — is not the fast path's to answer, and goes on to
+  # `coerce`.
   def __refuse_unrepresentable__(other, op)
-    if other.is_a?(Numeric)
+    if other.is_a?(Integer) || other.is_a?(Float)
       raise NoMethodError,
             "undefined method '" + op.to_s + "' for an instance of " + self.class.to_s
     end
@@ -187,4 +196,102 @@ class Numeric
   def __eq_other__(other)
     other == self ? true : false
   end
+end
+
+# What every number has, written over the operators a class under Numeric
+# defines for itself. Integer and Float have their own of most of these; a
+# Rational, or a program's number, gets these.
+class Numeric
+  # A number is immutable, so a copy is the number.
+  def dup
+    self
+  end
+
+  def clone(freeze: true)
+    raise ArgumentError, "can't unfreeze " + self.class.to_s if freeze == false
+    self
+  end
+
+  def eql?(other)
+    other.class.equal?(self.class) && self == other
+  end
+
+  def integer? = false
+  def real? = true
+  def real = self
+  def finite? = true
+  def infinite? = nil
+
+  def zero?
+    self == 0
+  end
+
+  def nonzero?
+    zero? ? nil : self
+  end
+
+  def positive?
+    self > 0
+  end
+
+  def negative?
+    self < 0
+  end
+
+  # Zero is asked to join this number, and this number is taken from it.
+  def -@
+    pair = coerce(0)
+    pair[0] - pair[1]
+  end
+
+  def abs
+    self < 0 ? -self : self
+  end
+  alias magnitude abs
+
+  def abs2
+    self * self
+  end
+
+  def to_int
+    self.to_i
+  end
+
+  def div(other)
+    raise ZeroDivisionError, "divided by 0" if other == 0
+    (self / other).floor
+  end
+
+  alias modulo %
+
+  def divmod(other)
+    [div(other), self % other]
+  end
+
+  # `%`, moved back across zero when the two signs differ. What is not a
+  # number is asked to `coerce` first. CRuby's `num_remainder`.
+  def remainder(other)
+    left = self
+    unless other.is_a?(Numeric)
+      pair = __coerce_pair__(other, true)
+      left = pair[0]
+      other = pair[1]
+    end
+    mod = left % other
+    if !(mod == 0) && ((left < 0 && other > 0) || (left > 0 && other < 0))
+      return left if other.is_a?(Float) && !other.infinite?.nil?
+      mod - other
+    else
+      mod
+    end
+  end
+
+  def fdiv(other)
+    __to_float__(self) / other
+  end
+
+  def floor(*digits) = __to_float__(self).floor(*digits)
+  def ceil(*digits) = __to_float__(self).ceil(*digits)
+  def round(*digits) = __to_float__(self).round(*digits)
+  def truncate(*digits) = __to_float__(self).truncate(*digits)
 end
