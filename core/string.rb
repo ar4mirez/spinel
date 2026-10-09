@@ -26,6 +26,17 @@ class String
     other.is_a?(String) && self == other
   end
 
+  # Two Strings are compared by the operator itself and never arrive here
+  # through `==`; a send does, and so does anything that is not a String.
+  # One with `to_str` is asked, `other == self`, and its answer is made a
+  # boolean. Measured.
+  def ==(other)
+    return self == other if other.is_a?(String)
+    return false unless other.respond_to?(:to_str)
+    other == self ? true : false
+  end
+  alias === ==
+
   def to_str
     self
   end
@@ -1970,5 +1981,21 @@ class String
   def =~(other)
     return __match_op__(other) if other.is_a?(Regexp) || other.is_a?(String)
     other =~ self
+  end
+end
+
+class String
+  # Two Strings are compared by the primitive, which sends anything else
+  # here. It is converted with `to_str` if it has one, and otherwise asked —
+  # `other <=> self` — with its answer turned round. Measured.
+  def __cmp_other__(other)
+    if other.respond_to?(:to_str)
+      converted = other.to_str
+      return converted.is_a?(String) ? self <=> converted : nil
+    end
+    return nil unless other.respond_to?(:<=>)
+    order = other <=> self
+    return nil if order.nil?
+    order > 0 ? -1 : (order < 0 ? 1 : 0)
   end
 end

@@ -165,6 +165,7 @@ class << ENV
 
   def value?(value)
     return nil unless String === value || value.respond_to?(:to_str)
+    value = value.to_str unless String === value
     __table__.value?(value)
   end
 

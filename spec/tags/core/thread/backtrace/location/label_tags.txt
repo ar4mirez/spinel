@@ -1,1 +1,1 @@
-fails(#45: an edge case first reached once mspec's mocks and Method objects ran, not yet diagnosed):Thread::Backtrace::Location#label is Module#method for a core method defined natively
+fails(#45: a primitive pushes no frame, so it has no backtrace location to label):Thread::Backtrace::Location#label is Module#method for a core method defined natively

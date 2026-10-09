@@ -158,10 +158,9 @@ module Kernel
     return nil if !category.nil? && !Warning[category]
     text = +""
     unless uplevel.nil?
-      # Entry 0 is this method, at the line that called it, so the caller
       # `uplevel` frames out is one further down. Past the end of the stack
       # there is nothing to name, and Ruby says only `warning: `.
-      here = __backtrace_here__[level + 1]
+      here = __backtrace_here__[level]
       text << (here.nil? ? "warning: " : "#{here[0]}:#{here[1]}: warning: ")
     end
     __warn_lines__(messages, text, [])

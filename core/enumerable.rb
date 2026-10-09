@@ -159,8 +159,11 @@ module Enumerable
     out = []
     each do |*a|
       value = yield(*a)
-      if value.is_a?(Array)
-        value.each { |element| out.push(element) }
+      # What converts with `to_ary` is spread like an Array; a `to_ary` that
+      # answers nil leaves the object as it is.
+      spread = value.is_a?(Array) ? value : (value.respond_to?(:to_ary) ? value.to_ary : nil)
+      if spread.is_a?(Array)
+        spread.each { |element| out.push(element) }
       else
         out.push(value)
       end

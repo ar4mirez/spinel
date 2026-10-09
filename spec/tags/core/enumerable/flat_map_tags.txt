@@ -1,2 +1,0 @@
-fails(#25: an edge case first reached once mspec's mocks and Method objects ran, not yet diagnosed):Enumerable#flat_map concatenates the result of calling #to_ary if it returns an Array
-fails(#25: Ruby calls a conversion or comparison method here that Spinel does not — to_str, to_int, to_ary, to_s, <=> or hash —, which mspec's mocks can now count):Enumerable#flat_map appends an element that defines #to_ary that returns nil

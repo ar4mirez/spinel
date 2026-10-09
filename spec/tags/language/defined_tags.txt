@@ -1,1 +1,1 @@
-fails(#27: an edge case first reached once mspec's mocks and Method objects ran, not yet diagnosed):The defined? keyword when called with a method name having a local variable as receiver calls #respond_to_missing?
+fails(#27: defined? of a method on a local receiver is refused as a name a fixture may define, a refusal left from before mspec loaded the fixtures):The defined? keyword when called with a method name having a local variable as receiver calls #respond_to_missing?

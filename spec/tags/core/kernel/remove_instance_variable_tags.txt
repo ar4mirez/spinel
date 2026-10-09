@@ -1,1 +1,1 @@
-fails(#28: an edge case first reached once mspec's mocks and Method objects ran, not yet diagnosed):Kernel#remove_instance_variable is a public method
+fails(#28: Kernel#remove_instance_variable does not exist; an object's shape has no transition that removes an ivar):Kernel#remove_instance_variable is a public method

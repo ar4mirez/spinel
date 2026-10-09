@@ -1,2 +1,2 @@
-fails(#20: an edge case first reached once mspec's mocks and Method objects ran, not yet diagnosed):Symbol#inspect quotes symbols in non-ASCII-compatible encodings
-fails(#20: an edge case first reached once mspec's mocks and Method objects ran, not yet diagnosed):Symbol#inspect quotes and escapes symbols in dummy encodings
+fails(#20: a Symbol does not carry its encoding, so one made from a UTF-16 String inspects as raw bytes):Symbol#inspect quotes symbols in non-ASCII-compatible encodings
+fails(#20: a Symbol does not carry its encoding, so one in a dummy encoding inspects as plain ASCII):Symbol#inspect quotes and escapes symbols in dummy encodings

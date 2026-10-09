@@ -57,9 +57,15 @@ class Enumerator
   # `[1, 2, 3].select.each_with_index { false }` is `[]` only because `select`
   # saw that false. Routing it through a Yielder would swallow both, since
   # `Yielder#yield` answers nil by definition.
-  def each(&block)
-    return self if block.nil?
-    return @object.send(@method, *@arguments, &block) if @producer.nil?
+  # Arguments given here are appended to the ones the enumerator was made
+  # with: with a block they go to the method, without one they make a new
+  # enumerator that holds them.
+  def each(*extra, &block)
+    if block.nil?
+      return self if extra.empty? || !@producer.nil?
+      return Enumerator.__for__(@object, @method, @arguments + extra, nil)
+    end
+    return @object.send(@method, *@arguments, *extra, &block) if @producer.nil?
     @producer.call(Yielder.new(&block))
   end
 

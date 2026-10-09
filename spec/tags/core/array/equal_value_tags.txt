@@ -1,1 +1,0 @@
-fails(#21: an edge case first reached once mspec's mocks and Method objects ran, not yet diagnosed):Array#== compares with an equivalent Array-like object using #to_ary
