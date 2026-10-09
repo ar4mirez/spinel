@@ -1,2 +1,0 @@
-fails(#173: NameError#name and #receiver are not set for this kind of error yet):Module#private_constant marked constants NameError by #private_constant has :receiver and :name attributes
-fails(#173: NameError#name and #receiver are not set for this kind of error yet):Module#private_constant marked constants NameError by #private_constant has the defined class as the :name attribute

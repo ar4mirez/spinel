@@ -1479,6 +1479,7 @@ fn fiber_enter(
                 block_is_literal: false,
                 cref: call.cref,
                 implicit_self: false,
+                variable_call: false,
                 public_only: false,
                 target: Target::Block(block),
                 owner: None,
@@ -1994,6 +1995,7 @@ pub fn eval_in(
                                 block_is_literal: false,
                                 cref: frames[top].cref,
                                 implicit_self: true,
+                                variable_call: false,
                                 public_only: false,
                                 target: Target::Method,
                                 owner: None,
@@ -2193,6 +2195,7 @@ pub fn eval_in(
                                     block_is_literal: false,
                                     cref: frames[top].cref,
                                     implicit_self: false,
+                                    variable_call: false,
                                     public_only: false,
                                     target: Target::Method,
                                     owner: None,
@@ -2237,6 +2240,7 @@ pub fn eval_in(
                                     block_is_literal: false,
                                     cref: frames[top].cref,
                                     implicit_self: false,
+                                    variable_call: false,
                                     public_only: false,
                                     target: Target::Method,
                                     owner: None,
@@ -2285,6 +2289,7 @@ pub fn eval_in(
                                 block_is_literal: false,
                                 cref: frames[top].cref,
                                 implicit_self: false,
+                                variable_call: false,
                                 public_only: false,
                                 target: Target::Method,
                                 owner: None,
@@ -2333,6 +2338,7 @@ pub fn eval_in(
                                 cref: frames[top].cref,
                                 // A private `to_proc` is still asked, measured.
                                 implicit_self: true,
+                                variable_call: false,
                                 public_only: false,
                                 target: Target::Method,
                                 owner: None,
@@ -2424,6 +2430,7 @@ pub fn eval_in(
                                     block_is_literal: false,
                                     cref: frames[top].cref,
                                     implicit_self: false,
+                                    variable_call: false,
                                     public_only: false,
                                     target: Target::Method,
                                     owner: None,
@@ -2600,12 +2607,15 @@ pub fn eval_in(
                                     .classes()
                                     .name(owner)
                                     .map_or_else(|| "an anonymous class".to_owned(), str::to_owned);
-                                return Err(Error::raise(
-                                    "NameError",
+                                let receiver = scope.classes().object(owner);
+                                return Err(name_error(
+                                    scope,
                                     format!(
                                         "uninitialized class variable {} in {where_}",
                                         symbol_name(symbol),
                                     ),
+                                    Value::symbol(symbol),
+                                    receiver,
                                 ));
                             }
                         }
@@ -3578,6 +3588,8 @@ struct Pending {
     ///
     /// `Kernel#send` sets it too: `send` calls a private method on purpose.
     implicit_self: bool,
+    /// The site was a bare name: see `CallSite::variable_call`.
+    variable_call: bool,
     /// `public_send`: only a public method, with none of the exceptions.
     ///
     /// Not the same as `!implicit_self`. An ordinary `obj.m` still reaches a
@@ -3703,6 +3715,7 @@ fn pop_call<'h>(
         // never looks a constant up.
         cref: frame.cref,
         implicit_self: site.implicit_self,
+        variable_call: site.variable_call,
         public_only: false,
         target: Target::Method,
         // `dispatch` fills both once the method — and so which class it was
@@ -3851,6 +3864,8 @@ fn dispatch<'h>(
                 // "super: no superclass method 'm' for an instance of Z".
                 let exception = if is_super {
                     super_missing_error(scope, call.receiver, call.name)
+                } else if call.variable_call {
+                    undefined_name_error(scope, call.receiver, call.name)
                 } else {
                     no_method_error(scope, call.receiver, call.name)
                 };
@@ -4065,6 +4080,7 @@ fn push_proc_frame_as(
         // called: `class C; X = 1; [1].each { X }; end` finds `C::X`.
         cref,
         implicit_self: call.implicit_self,
+        variable_call: false,
         public_only: call.public_only,
         target: Target::Method,
         // Filled from the home frame below: `super` inside a block resolves
@@ -4503,15 +4519,11 @@ const EXC_CAUSE: &str = "@__cause__";
 
 /// `NameError#name` and `NameError#receiver`, over the same two slots.
 ///
-/// Only a failed dispatch writes them. The `NameError`s the VM raises through
-/// [`Error::raise`] — an uninitialized constant, a bad ivar name — carry a
-/// message and nothing else, so `name` answers `nil` there where CRuby answers
-/// a symbol.
-///
-// ponytail: the ceiling is that `Error` holds `String`s, so a raise decided
-// inside `uninitialized` cannot carry the receiver. Lifting it means returning
-// an `Unwind` out of `const_base` and its callers, which is a slice of its own
-// (#170 asked for the dispatch failure) — see the scope note in PRD 0019.
+/// A failed dispatch writes them where it builds its exception. The
+/// `NameError`s the VM raises through [`Error::raise`] — an uninitialized
+/// constant or class variable, a bad ivar name — go through [`name_error`],
+/// which leaves the two values on the heap for [`exception_new`] to collect
+/// (#173): an `Error` holds `String`s, and a `Value` in one would be unrooted.
 const EXC_NAME: &str = "@name";
 const EXC_RECEIVER: &str = "@receiver";
 
@@ -4783,7 +4795,34 @@ fn exception_new(scope: &mut HandleScope<'_>, class: &str, message: &str) -> Val
             .const_get_here(owner, symbol)
             .expect("every class the VM raises is defined");
     }
-    exception_of(scope, object, message)
+    // Taken whatever the class, so a note never outlives the raise after it.
+    let note = scope.take_name_error(message);
+    let exception = exception_of(scope, object, message);
+    if let Some((name, receiver)) = note {
+        // A `FrozenError` has a receiver and no name.
+        let ivars = [(EXC_RECEIVER, receiver), (EXC_NAME, name)];
+        let wanted = if class == "FrozenError" { 1 } else { 2 };
+        for (ivar, value) in ivars.into_iter().take(wanted) {
+            ivar_set(scope, exception, symbol(ivar), value)
+                .expect("a fresh exception is unfrozen and holds instance variables");
+        }
+    }
+    exception
+}
+
+/// A `FrozenError` that knows which object refused: `e.receiver`. The same
+/// heap note as [`name_error`], with no name in it.
+fn frozen_error(scope: &mut HandleScope<'_>, message: String, receiver: Value) -> Error {
+    scope.set_name_error(&message, Value::NIL, receiver);
+    Error::raise("FrozenError", message)
+}
+
+/// A `NameError` that knows what it is about: `e.name` and `e.receiver`.
+///
+/// The two values wait on the heap, not in the `Error` — see [`EXC_NAME`].
+fn name_error(scope: &mut HandleScope<'_>, message: String, name: Value, receiver: Value) -> Error {
+    scope.set_name_error(&message, name, receiver);
+    Error::raise("NameError", message)
 }
 
 /// The `NoMethodError` a call to a method the heap does not have raises.
@@ -4945,6 +4984,26 @@ fn super_missing_error(scope: &mut HandleScope<'_>, receiver: Value, name: Symbo
     object
 }
 
+/// A bare name that is neither a local nor a method: a `NameError`, not the
+/// `NoMethodError` that `nope()` or `self.nope` is. Measured.
+fn undefined_name_error(scope: &mut HandleScope<'_>, receiver: Value, name: SymbolId) -> Value {
+    let message = format!(
+        "undefined local variable or method '{}' for {}",
+        symbol_name(name),
+        describe_receiver(scope, receiver)
+    );
+    let rooted = scope.root(receiver);
+    let object = exception_new(scope, "NameError", &message);
+    let handle = scope.root(object);
+    let receiver = scope.get(rooted);
+    let object = scope.get(handle);
+    for (ivar, value) in [(EXC_NAME, Value::symbol(name)), (EXC_RECEIVER, receiver)] {
+        ivar_set(scope, object, symbol(ivar), value)
+            .expect("a fresh exception is unfrozen and holds instance variables");
+    }
+    object
+}
+
 fn no_method_error(scope: &mut HandleScope<'_>, receiver: Value, name: SymbolId) -> Value {
     let method = symbol_name(name);
     let message = format!(
@@ -4983,6 +5042,10 @@ fn describe_receiver(scope: &mut HandleScope<'_>, receiver: Value) -> String {
         Unpacked::False => return "false".to_owned(),
         _ => {}
     }
+    // The top level's `self` is named, not classed: "for main". Measured.
+    if receiver == scope.main() {
+        return "main".to_owned();
+    }
     // A class or module names itself; anything else names its class. CRuby
     // writes `#<Class:0x0000…>` for an anonymous one and the address differs
     // per run, so no table can hold it — Spinel keeps its own wording, which is
@@ -4998,7 +5061,9 @@ fn describe_receiver(scope: &mut HandleScope<'_>, receiver: Value) -> String {
             None => fallback.to_owned(),
         };
     }
-    format!("an instance of {}", class_name_of(scope, receiver))
+    // `class_name`, which looks past a singleton class: an object that has
+    // one is still "an instance of Object".
+    format!("an instance of {}", class_name(scope, receiver))
 }
 
 /// An exception's message, for a report. Empty when it is not one.
@@ -5475,6 +5540,7 @@ fn anonymous_module<'h>(
         block_is_literal: false,
         cref: call.cref,
         implicit_self: false,
+        variable_call: false,
         public_only: false,
         target: Target::Block(block),
         owner: None,
@@ -5651,6 +5717,7 @@ fn to_method_missing(
         // `method_missing` is private, and calling it is the VM's doing, not
         // the caller's.
         implicit_self: true,
+        variable_call: false,
         public_only: false,
         target: Target::Method,
         owner: None,
@@ -5771,6 +5838,7 @@ fn call_discarded<'h>(
         block_is_literal: false,
         cref,
         implicit_self: true,
+        variable_call: false,
         public_only: false,
         target: Target::Method,
         owner: None,
@@ -6016,9 +6084,21 @@ fn uninitialized(
     how: ConstScope,
 ) -> Error {
     let constant = symbol_name(name);
+    // The receiver is the module that was asked: `Object` for a bare name at
+    // the top level, the cref's class inside one. Measured.
+    let receiver = scope.classes().object(from);
+    let name_value = Value::symbol(name);
     match how {
+        // A bare name inside a class names the class it was asked of:
+        // `uninitialized constant K::Nope`. At the top level it stands alone.
         ConstScope::Lexical | ConstScope::Top => {
-            Error::raise("NameError", format!("uninitialized constant {constant}"))
+            let message = match scope.classes().name(from) {
+                Some(owner) if from != Builtin::Object.id() => {
+                    format!("uninitialized constant {owner}::{constant}")
+                }
+                _ => format!("uninitialized constant {constant}"),
+            };
+            name_error(scope, message, name_value, receiver)
         }
         ConstScope::Qualified => {
             let owner = scope
@@ -6028,15 +6108,29 @@ fn uninitialized(
                 .to_string();
             // A name the walk found and refused reads differently from one it
             // never found, and ruby/spec asserts on both (#185).
-            if scope.classes().const_private_qualified(from, name) {
-                return Error::raise(
-                    "NameError",
+            // The module that *holds* the private name is the one named and
+            // the receiver, not the subclass it was asked through. Measured.
+            if let Some((holder, _)) = scope.classes().const_qualified_owner(from, name)
+                && scope.classes().const_is_private(holder, name)
+            {
+                let owner = scope
+                    .classes()
+                    .name(holder)
+                    .unwrap_or("an anonymous module")
+                    .to_string();
+                let receiver = scope.classes().object(holder);
+                return name_error(
+                    scope,
                     format!("private constant {owner}::{constant} referenced"),
+                    name_value,
+                    receiver,
                 );
             }
-            Error::raise(
-                "NameError",
+            name_error(
+                scope,
                 format!("uninitialized constant {owner}::{constant}"),
+                name_value,
+                receiver,
             )
         }
     }
@@ -6067,9 +6161,10 @@ fn module_frozen_check(scope: &mut HandleScope<'_>, id: ClassId) -> Result<(), E
     if scope.is_frozen(handle) {
         let class = class_name(scope, object);
         let shown = inspect(scope, object);
-        return Err(Error::raise(
-            "FrozenError",
+        return Err(frozen_error(
+            scope,
             format!("can't modify frozen {class}: {shown}"),
+            object,
         ));
     }
     Ok(())
@@ -6681,10 +6776,8 @@ pub(crate) fn ivar_set(
     // every immediate is frozen. That is a real answer rather than a refusal,
     // so it is given.
     if object.is_immediate() {
-        return Err(Error::raise(
-            "FrozenError",
-            format!("can't modify frozen {}", class_name(scope, object)),
-        ));
+        let message = format!("can't modify frozen {}", class_name(scope, object));
+        return Err(frozen_error(scope, message, object));
     }
     let mut nested = scope.nested();
     let handle = nested.root(object);
@@ -6693,9 +6786,10 @@ pub(crate) fn ivar_set(
     // every write would make writing that very ivar a regress.
     if nested.is_frozen(handle) {
         let class = class_name(&mut nested, object);
-        return Err(Error::raise(
-            "FrozenError",
+        return Err(frozen_error(
+            &mut nested,
             format!("can't modify frozen {class}"),
+            object,
         ));
     }
     let shape = nested.shape(handle);
@@ -6789,9 +6883,10 @@ fn frozen_check(scope: &mut HandleScope<'_>, value: Value, what: &str) -> Result
     }
     let handle = scope.root(value);
     if scope.is_frozen(handle) {
-        return Err(Error::raise(
-            "FrozenError",
+        return Err(frozen_error(
+            scope,
             format!("can't modify frozen {what}"),
+            value,
         ));
     }
     Ok(())
@@ -7252,6 +7347,7 @@ fn native_call<'h>(
                 // `send` is documented to reach a private method; `public_send`
                 // is the one that does not, and refuses protected too.
                 implicit_self: !public_only,
+                variable_call: false,
                 public_only,
                 target: Target::Method,
                 owner: None,
@@ -7435,6 +7531,17 @@ fn native_call<'h>(
             // and none of the three should exist until something asks.
             if scope.classes().repr(id) == Some(Builtin::Regexp) {
                 let value = regexp_new_from(scope, &call)?;
+                // A subclass's `new` answers one of its own, which is what
+                // lets it override `match` and be asked (#203).
+                //
+                // ponytail: the subclass's `initialize` is not called. The
+                // pattern is compiled before there is an object to call it on.
+                if Builtin::Regexp.id() != id {
+                    let class = scope.classes().object(id);
+                    let mut nested = scope.nested();
+                    let handle = nested.root(value);
+                    nested.set_class(handle, class);
+                }
                 stack.push(value);
                 // The two things `Regexp.new` says about a second argument it
                 // is not going to use as given (#268): flags beside a Regexp
@@ -8037,6 +8144,7 @@ fn native_call<'h>(
                 receiver,
                 args,
                 implicit_self: true,
+                variable_call: false,
                 public_only: false,
                 target: Target::At { owner },
                 owner: None,
@@ -8185,6 +8293,7 @@ fn native_call<'h>(
                         cache: None,
                         name: crate::shared::symbols::intern(op.name()),
                         implicit_self: true,
+                        variable_call: false,
                         public_only: false,
                         target: Target::Super { owner },
                         owner: None,
@@ -8716,9 +8825,10 @@ fn native_call<'h>(
                 if scope.is_frozen(handle) {
                     let class = class_name(scope, holder);
                     let shown = inspect(scope, holder);
-                    return Err(Error::raise(
-                        "FrozenError",
+                    return Err(frozen_error(
+                        scope,
                         format!("can't modify frozen {class}: {shown}"),
+                        holder,
                     ));
                 }
             }
@@ -9498,9 +9608,12 @@ fn native_call<'h>(
             // which is a different message from the one about a missing
             // variable. Measured.
             if !name.starts_with("@@") {
-                return Err(Error::raise(
-                    "NameError",
+                let argument = first_arg(&call);
+                return Err(name_error(
+                    scope,
                     format!("'{name}' is not allowed as a class variable name"),
+                    argument,
+                    call.receiver,
                 ));
             }
             let symbol = crate::shared::symbols::intern(&name);
@@ -9517,9 +9630,11 @@ fn native_call<'h>(
                             .classes()
                             .name(id)
                             .map_or_else(|| "an anonymous class".to_owned(), str::to_owned);
-                        return Err(Error::raise(
-                            "NameError",
+                        return Err(name_error(
+                            scope,
                             format!("uninitialized class variable {name} in {where_}"),
+                            Value::symbol(symbol),
+                            call.receiver,
                         ));
                     }
                 },
@@ -9665,6 +9780,7 @@ fn native_call<'h>(
                     block_is_literal: false,
                     cref: call.cref,
                     implicit_self: true,
+                    variable_call: false,
                     public_only: false,
                     target: Target::Method,
                     owner: None,
@@ -9889,9 +10005,13 @@ fn native_call<'h>(
                     // that is not an ivar name is a `NameError` whether or not
                     // the receiver holds anything.
                     if !is_ivar_name(&name) {
-                        return Err(Error::raise(
-                            "NameError",
+                        // `e.name` is the argument as it was passed, String
+                        // or Symbol. Measured.
+                        return Err(name_error(
+                            scope,
                             format!("'{name}' is not allowed as an instance variable name"),
+                            argument,
+                            call.receiver,
                         ));
                     }
                     let ivar = symbol(&name);
@@ -10027,6 +10147,7 @@ fn native_call<'h>(
                 block_is_literal: false,
                 cref: call.cref,
                 implicit_self: false,
+                variable_call: false,
                 public_only: false,
                 target: Target::Block(block),
                 owner: None,
@@ -10066,11 +10187,8 @@ fn native_call<'h>(
             stack.push(answer);
             Ok(None)
         }
-        Native::RegexpMatch | Native::StringMatch => {
-            let (regexp, subject) = match native {
-                Native::RegexpMatch => (call.receiver, first_arg(&call)),
-                _ => (first_arg(&call), call.receiver),
-            };
+        Native::RegexpMatch => {
+            let (regexp, subject) = (call.receiver, first_arg(&call));
             let data = regexp_match_from(scope, regexp, subject, nth_arg(&call, 1))?;
             // With a block, a match is yielded and the block's value is the
             // answer; no match yields nothing and answers nil. Measured. The
@@ -10088,6 +10206,7 @@ fn native_call<'h>(
                     block_is_literal: false,
                     cref: call.cref,
                     implicit_self: false,
+                    variable_call: false,
                     public_only: false,
                     target: Target::Block(block),
                     owner: None,
@@ -10402,7 +10521,6 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             Native::RegexpToS { inspect: true },
         ),
         (Builtin::String, &["=~"], Native::StringMatchOp),
-        (Builtin::String, &["match"], Native::StringMatch),
         (Builtin::String, &["match?"], Native::StringMatchP),
         (Builtin::MatchData, &["[]"], Native::MatchIndex),
         (
@@ -11378,6 +11496,19 @@ fn binop(
         });
     };
 
+    // A fixnum against a Float is *compared* exactly (#242). Widening the
+    // integer puts `2**54 + 1` and `(2**54).to_f` on one `f64`, so `>` between
+    // them was false. NaN answers `None` and falls through to the float path,
+    // where every comparison against it is already false.
+    let exact = match (left, right) {
+        (Num::Int(i), Num::Float(f)) => int_cmp_float(i, f),
+        (Num::Float(f), Num::Int(i)) => int_cmp_float(i, f).map(std::cmp::Ordering::reverse),
+        _ => None,
+    };
+    if let Some(value) = exact.and_then(|ord| cmp_op(op, ord)) {
+        return Ok(value);
+    }
+
     match (left, right) {
         (Num::Int(a), Num::Int(b)) => integer_op(scope, op, a, b),
         // Ruby promotes to Float when either side is one.
@@ -11399,6 +11530,31 @@ fn int_eq_float(i: i64, f: f64) -> bool {
         return false;
     }
     f as i64 == i
+}
+
+/// A fixnum against an `f64`, exactly: the ordering [`int_eq_float`] is the
+/// equality of. `None` is NaN.
+///
+/// The float is split at its decimal point; the integer halves are compared as
+/// integers, and the fraction only breaks a tie. A float at or past 2^63 in
+/// magnitude is beyond every fixnum, so nothing is widened to a bignum.
+fn int_cmp_float(i: i64, f: f64) -> Option<std::cmp::Ordering> {
+    use std::cmp::Ordering;
+    const OUT_OF_RANGE: f64 = 9_223_372_036_854_775_808.0;
+    if f.is_nan() {
+        return None;
+    }
+    if f >= OUT_OF_RANGE {
+        return Some(Ordering::Less);
+    }
+    if f < -OUT_OF_RANGE {
+        return Some(Ordering::Greater);
+    }
+    let whole = f.trunc();
+    Some(i.cmp(&(whole as i64)).then_with(|| {
+        // Equal integer parts: `3` is below `3.5`, and `-3` above `-3.5`.
+        0.0_f64.partial_cmp(&(f - whole)).unwrap_or(Ordering::Equal)
+    }))
 }
 
 /// A `BigInt` against an `f64`, exactly — the wide twin of [`int_eq_float`],
@@ -13084,6 +13240,7 @@ fn binding_eval(
         block_is_literal: false,
         cref,
         implicit_self: false,
+        variable_call: false,
         public_only: false,
         target: Target::Method,
         owner,
@@ -13687,6 +13844,7 @@ fn load_file(
         block_is_literal: false,
         cref,
         implicit_self: false,
+        variable_call: false,
         public_only: false,
         target: Target::Method,
         owner: None,
@@ -14138,6 +14296,7 @@ mod tests {
                 keywords: Vec::new(),
                 block: crate::bytecode::BlockRef::None,
                 implicit_self: true,
+                variable_call: false,
                 kwsplat: false,
             }],
             max_stack: 3,

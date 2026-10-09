@@ -562,3 +562,30 @@ module Kernel
     status.to_int
   end
 end
+
+module Kernel
+  # An ivar name may be anything that converts with `to_str`, and it is judged
+  # as a name only after it has: `"c"` from a `to_str` is a NameError, where an
+  # object with no `to_str` is a TypeError (#207). The primitives take a Symbol
+  # or a String, so the conversion is here.
+  alias __ivar_get__ instance_variable_get
+  alias __ivar_set__ instance_variable_set
+  alias __ivar_defined__ instance_variable_defined?
+
+  def instance_variable_get(name)
+    __ivar_get__(__ivar_name__(name))
+  end
+
+  def instance_variable_set(name, value)
+    __ivar_set__(__ivar_name__(name), value)
+  end
+
+  def instance_variable_defined?(name)
+    __ivar_defined__(__ivar_name__(name))
+  end
+
+  def __ivar_name__(name)
+    return name if name.is_a?(Symbol) || name.is_a?(String) || !name.respond_to?(:to_str)
+    name.to_str
+  end
+end

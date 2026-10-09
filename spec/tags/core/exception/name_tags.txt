@@ -1,5 +1,0 @@
-fails(#173: NameError#name and #receiver, and FrozenError#receiver, are not set for this kind of error yet):NameError#name returns a constant name as a symbol
-fails(#173: NameError#name and #receiver, and FrozenError#receiver, are not set for this kind of error yet):NameError#name returns a constant name without namespace as a symbol
-fails(#173: NameError#name and #receiver, and FrozenError#receiver, are not set for this kind of error yet):NameError#name returns a class variable name as a symbol
-fails(#173: NameError#name and #receiver, and FrozenError#receiver, are not set for this kind of error yet):NameError#name returns the first argument passed to the method when a NameError is raised from #instance_variable_get
-fails(#173: NameError#name and #receiver, and FrozenError#receiver, are not set for this kind of error yet):NameError#name returns the first argument passed to the method when a NameError is raised from #class_variable_get

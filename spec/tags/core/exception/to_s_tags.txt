@@ -1,2 +1,1 @@
-fails(#29: a NameError's message is built from the class table when raised, not from the receiver's own name and inspect, and a missing local reads as a missing method):NameError#to_s raises its own message for an undefined variable
 fails(#29: an edge case first reached once mspec's mocks and Method objects ran, not yet diagnosed):Exception#to_s calls #to_s on the message

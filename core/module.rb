@@ -192,7 +192,7 @@ class Module
 
   def const_set(name, value)
     symbol = __const_name__(name)
-    raise FrozenError, "can't modify frozen #{self.class}: #{inspect}" if frozen?
+    raise FrozenError.new("can't modify frozen #{self.class}: #{inspect}", receiver: self) if frozen?
     redefined = !__reflect_const_lookup__(self, symbol, false).nil?
     __reflect_const_set__(self, symbol, value)
     if redefined

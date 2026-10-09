@@ -1940,3 +1940,35 @@ module Kernel
     end
   end
 end
+
+class String
+  # `str.match(pattern)` is `pattern.match(str)`: a send, so a Regexp whose
+  # `match` is its own is the one that answers (#203). What is not a Regexp is
+  # made one first, from a String or what converts to one.
+  def match(pattern, *rest, &block)
+    __pattern__(pattern).match(self, *rest, &block)
+  end
+
+  # `match?` asks the engine itself, override or not. Measured.
+  alias __match_p__ match?
+  def match?(pattern, *rest)
+    __match_p__(__pattern__(pattern), *rest)
+  end
+
+  def __pattern__(pattern)
+    return pattern if pattern.is_a?(Regexp)
+    source = pattern.is_a?(String) ? pattern : (pattern.respond_to?(:to_str) ? pattern.to_str : nil)
+    unless source.is_a?(String)
+      raise TypeError, "wrong argument type " + pattern.class.to_s + " (expected Regexp)"
+    end
+    Regexp.new(source)
+  end
+
+  # `=~` matches a Regexp itself, refuses a String, and asks anything else:
+  # `str =~ obj` is `obj =~ str`. Measured.
+  alias __match_op__ =~
+  def =~(other)
+    return __match_op__(other) if other.is_a?(Regexp) || other.is_a?(String)
+    other =~ self
+  end
+end

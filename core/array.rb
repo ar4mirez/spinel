@@ -481,7 +481,7 @@ class Array
   # A frozen Array refuses every mutator, including one that would not have
   # changed anything: `[1].freeze.concat([])` is a FrozenError. Measured.
   def __check_frozen__
-    raise FrozenError, "can't modify frozen Array: " + inspect if frozen?
+    raise FrozenError.new("can't modify frozen Array: " + inspect, receiver: self) if frozen?
   end
 
   def concat(other)

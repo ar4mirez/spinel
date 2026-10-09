@@ -248,6 +248,7 @@ section for why it was deleted.
 - `NameError#name` and `#receiver` on an *uninitialized constant* or a bad ivar
   name still answer `nil` where CRuby answers a symbol. Those raises go through
   `Error::raise`, which carries no name. Filed.
+  *Done in PRD 0061 (#173): the values wait on the heap, not in the `Error`.*
 - `method_missing` is not consulted before the raise. Filed.
 - The four `core/array/` examples above stay blocked until `reject!`,
   `delete_if`, `fill`, and `map!` exist. They are now blocked with the method

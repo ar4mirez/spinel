@@ -816,6 +816,10 @@ pub struct CallSite {
     /// A receiverless call — an implicit `self` send. Visibility checks and
     /// `super` both need to know.
     pub implicit_self: bool,
+    /// A bare name: no receiver, no arguments, no parentheses. One that finds
+    /// no method is a `NameError` about a local variable *or* method, where
+    /// `nope()` is a `NoMethodError`.
+    pub variable_call: bool,
     /// One more value on the stack, above the keyword values: a `Hash` whose
     /// pairs are the call's keywords (#193).
     ///

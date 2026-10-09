@@ -26,7 +26,7 @@ class Range
     # Running `initialize` a second time is a FrozenError even on a subclass
     # instance that is not frozen — measured — so the flag stays beside the
     # real frozen bit below.
-    raise FrozenError, "can't modify frozen Range: " + inspect if @__initialized__
+    raise FrozenError.new("can't modify frozen Range: " + inspect, receiver: self) if @__initialized__
     if !from.nil? && !to.nil? && (from <=> to).nil?
       raise ArgumentError, "bad value for range"
     end
