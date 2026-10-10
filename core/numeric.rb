@@ -100,6 +100,8 @@ class Numeric
     # A number that is neither Integer nor Float has no order of its own:
     # it is itself, and comparable with nothing else. Measured.
     return equal?(other) ? 0 : nil unless Integer === self || Float === self
+    # A Complex has an order only on the real line.
+    return other.imaginary == 0 ? self <=> other.real : nil if Complex === other
     if other.is_a?(Numeric)
       return -1 if self < other
       return 1 if self > other
@@ -289,6 +291,20 @@ class Numeric
   def fdiv(other)
     __to_float__(self) / other
   end
+
+  # The division that does not truncate: as a Rational, unless by a Float.
+  def quo(other)
+    return fdiv(other) if other.is_a?(Float)
+    exact = self.to_r
+    unless exact.is_a?(Rational)
+      raise TypeError, "can't convert " + self.class.to_s + " to Rational (" +
+                       self.class.to_s + "#to_r gives " + exact.class.to_s + ")"
+    end
+    exact / other
+  end
+
+  def numerator = self.to_r.numerator
+  def denominator = self.to_r.denominator
 
   def floor(*digits) = __to_float__(self).floor(*digits)
   def ceil(*digits) = __to_float__(self).ceil(*digits)

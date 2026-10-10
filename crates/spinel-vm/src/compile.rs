@@ -915,6 +915,15 @@ impl Compiler {
                 self.emit_send("__literal__", 2);
             }
 
+            // `3i`, `2.5i`, `3ri`: the number inside is compiled as itself and
+            // handed to `Complex` as the imaginary part (#227).
+            ExprKind::Imaginary(inner) => {
+                let name = self.symbol("Complex");
+                self.emit(Insn::GetConst(name, ConstScope::Top));
+                self.expr(inner)?;
+                self.emit_send("__literal__", 1);
+            }
+
             ExprKind::Float(f) => {
                 let literal = if Value::flonum(*f).is_some() {
                     Literal::Float(*f)

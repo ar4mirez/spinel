@@ -99,6 +99,7 @@ const SOURCES: &[(&str, &str)] = &[
         "core/rational.rb",
         include_str!("../../../core/rational.rb"),
     ),
+    ("core/complex.rb", include_str!("../../../core/complex.rb")),
     ("core/data.rb", include_str!("../../../core/data.rb")),
     ("core/file.rb", include_str!("../../../core/file.rb")),
     ("core/load.rb", include_str!("../../../core/load.rb")),

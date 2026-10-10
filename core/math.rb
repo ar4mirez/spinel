@@ -197,6 +197,7 @@ class Integer
       return Rational.__make__(1, 1) / __wide_pow__(-other)
     end
     return Rational.__make__(self, 1)**other if Rational === other
+    return Complex.__make__(self, 0)**other if Complex === other
     __integer_pow__(other)
   end
 
