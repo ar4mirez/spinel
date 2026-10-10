@@ -207,6 +207,7 @@ class Rational < Numeric
       raise ZeroDivisionError, "divided by 0" if @numerator == 0
       return Rational.__make__(@denominator**-other, @numerator**-other)
     end
+    return Complex.__make__(self, 0)**other if other.is_a?(Complex)
     if other.is_a?(Float) || other.is_a?(Rational)
       return Rational.__make__(1, 1) if self == 1
       return to_f**other.to_f
