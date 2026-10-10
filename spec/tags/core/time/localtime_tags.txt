@@ -1,1 +1,0 @@
-fails(#288: a Time keeps nanoseconds and a whole-second UTC offset where Ruby keeps Rationals, so what is finer than a nanosecond or a fractional offset is lost):Time#localtime returns a Time with a UTC offset of the specified number of Rational seconds
