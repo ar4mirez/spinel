@@ -598,3 +598,31 @@ module Kernel
     equal?(other) || self == other ? 0 : nil
   end
 end
+
+module Kernel
+  # `Float(value)`: the Float it is, or — unlike `to_f` — an error when it is
+  # not one. A String must be a number from end to end.
+  def Float(value, exception: true)
+    begin
+      case value
+      when Float then value
+      when Integer, Rational then value.to_f
+      when String then Kernel.__strict_float__(value)
+      when nil then raise TypeError, "can't convert nil into Float"
+      else
+        unless value.respond_to?(:to_f)
+          raise TypeError, "can't convert " + value.class.to_s + " into Float"
+        end
+        converted = value.to_f
+        unless converted.is_a?(Float)
+          raise TypeError, "can't convert " + value.class.to_s + " to Float (" +
+                           value.class.to_s + "#to_f gives " + converted.class.to_s + ")"
+        end
+        converted
+      end
+    rescue TypeError, ArgumentError
+      raise if exception
+      nil
+    end
+  end
+end

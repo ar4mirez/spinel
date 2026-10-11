@@ -57,7 +57,7 @@ to a power that is not whole answers a Complex; `1 <=> Complex(2, 0)` is -1.
 
 - `Complex#*` and `#/` do not have CRuby's special cases for an infinity or a
   NaN in one part.
-- A Float prints with a different last digit from CRuby when two shortest
+- *(Done since, in PRD 0070.)* A Float prints with a different last digit from CRuby when two shortest
   spellings are equally close to it: `900719925474099.25` is `…99.2` there
   and `…99.3` here. It is the same Float. Found measuring; it is the Float
   printer's, not this slice's.

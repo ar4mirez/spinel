@@ -1927,17 +1927,28 @@ module Kernel
     value.to_i
   end
 
-  # A String as `Kernel#Float` reads one: the whole of it must be a number,
-  # and a hexadecimal Integer counts.
-  #
-  # ponytail: `Kernel#Float` itself does not exist yet; when it does, this is
-  # its String half, and wants the hexadecimal fraction and exponent too.
+  # A String as `Kernel#Float` reads one: the whole of it must be a number.
+  # Decimal, with single underscores between digits, or hexadecimal with an
+  # optional fraction and a power of two.
   def self.__strict_float__(text)
-    if text =~ /\A\s*[+-]?0[xX]\h+(?:_\h+)*\s*\z/
-      return Integer(text.strip).to_f
+    raise ArgumentError, "string for Float contains null byte" if text.include?("\0")
+    hex = /\A\s*([+-]?)0[xX](\h+(?:_\h+)*)(?:\.(\h+(?:_\h+)*))?(?:[pP]([+-]?\d+(?:_\d+)*))?\s*\z/.match(text)
+    unless hex.nil?
+      whole = hex[2].delete("_")
+      fraction = hex[3].nil? ? "" : hex[3].delete("_")
+      power = (hex[4].nil? ? 0 : hex[4].delete("_").to_i) - 4 * fraction.size
+      digits = (whole + fraction).to_i(16)
+      value = if digits == 0
+                0.0
+              elsif power >= 0
+                power > 2000 ? Float::INFINITY : (digits * 2**power).to_f
+              else
+                -power > 3000 ? 0.0 : String.__ratio__(digits, 2**-power)
+              end
+      return hex[1] == "-" ? -value : value
     end
-    if text =~ /\A\s*[+-]?(?:\d+(?:_\d+)*(?:\.\d+(?:_\d+)*)?|\.\d+(?:_\d+)*)(?:[eE][+-]?\d+(?:_\d+)*)?\s*\z/
-      return text.to_f
+    if text =~ /\A\s*[+-]?(?:\d+(?:_\d+)*(?:\.(?:\d+(?:_\d+)*)?)?|\.\d+(?:_\d+)*)(?:[eE][+-]?\d+(?:_\d+)*)?\s*\z/
+      return String.__to_f__(text)
     end
     raise ArgumentError, "invalid value for Float(): " + text.inspect
   end
@@ -2009,7 +2020,13 @@ class String
   # The digits are an Integer over a power of ten, and that ratio is rounded
   # to the nearest Float exactly, whatever its size.
   def to_f
-    match = /\A\s*([+-]?)(\d+(?:_\d+)*)?(?:\.(\d+(?:_\d+)*)?)?(?:[eE]([+-]?\d+(?:_\d+)*))?/.match(self)
+    String.__to_f__(self)
+  end
+
+  # The reading itself, apart from the method: `Kernel#Float` wants it for a
+  # String subclass that has a `to_f` of its own.
+  def self.__to_f__(text)
+    match = /\A\s*([+-]?)(\d+(?:_\d+)*)?(?:\.(\d+(?:_\d+)*)?)?(?:[eE]([+-]?\d+(?:_\d+)*))?/.match(text)
     return 0.0 if match.nil? || (match[2].nil? && match[3].nil?)
     # A point with no digits before it needs digits after it, and an
     # exponent needs a number to belong to.

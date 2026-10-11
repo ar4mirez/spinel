@@ -7010,30 +7010,70 @@ fn float_to_s(f: f64) -> String {
             "0.0".to_owned()
         };
     }
-    let magnitude = f.abs();
-    if (1e-4..1e15).contains(&magnitude) {
-        let plain = if f.fract() == 0.0 {
-            format!("{f:.1}")
-        } else {
-            f.to_string()
-        };
-        return plain;
-    }
-    // `{:e}` gives `1e20`; Ruby wants `1.0e+20`.
-    let scientific = format!("{f:e}");
+    // The shortest digits that read back as this Float, and the power of ten
+    // of the first. Rust finds them; the layout below is Ruby's.
+    let scientific = format!("{:e}", f.abs());
     let (mantissa, exponent) = scientific
         .split_once('e')
         .expect("`{:e}` always writes an exponent");
-    let mantissa = if mantissa.contains('.') {
-        mantissa.to_owned()
-    } else {
-        format!("{mantissa}.0")
-    };
-    let (sign, digits) = match exponent.strip_prefix('-') {
-        Some(digits) => ("-", digits),
-        None => ("+", exponent),
-    };
-    format!("{mantissa}e{sign}{digits:0>2}")
+    let exponent: i32 = exponent.parse().expect("a decimal exponent");
+    let mut digits: String = mantissa.chars().filter(char::is_ascii_digit).collect();
+
+    // Two shortest spellings can be equally close: 900719925474099.25 is as
+    // near `…99.2` as `…99.3`. Rust takes the upper and CRuby the even one, so
+    // an exact tie that ended on an odd digit is redone downward — if the
+    // lower spelling still reads back as the same Float. Measured.
+    let count = digits.len();
+    let exact = format!("{:.*e}", count + 30, f.abs());
+    let exact: String = exact
+        .split_once('e')
+        .map_or("", |(m, _)| m)
+        .chars()
+        .filter(char::is_ascii_digit)
+        .collect();
+    let tail = &exact[count.min(exact.len())..];
+    let tie = tail.starts_with('5') && tail[1..].bytes().all(|b| b == b'0');
+    let last_is_odd = digits
+        .as_bytes()
+        .last()
+        .is_some_and(|b| (b - b'0') % 2 == 1);
+    if tie && last_is_odd {
+        let lower = &exact[..count];
+        let spelled = format!("{}.{}e{exponent}", &lower[..1], &lower[1..]);
+        if spelled.parse::<f64>().ok() == Some(f.abs()) {
+            digits = lower.trim_end_matches('0').to_owned();
+            if digits.is_empty() {
+                digits.push('0');
+            }
+        }
+    }
+
+    let sign = if f < 0.0 { "-" } else { "" };
+    // Plain digits from 0.0001 up to sixteen digits before the point — but the
+    // sixteenth only when there is a fraction after it: `1151450203773890.8`
+    // is plain and `1.0e+15` is not. CRuby's `flo_to_s`, measured.
+    let plain = (-4..=14).contains(&exponent) || (exponent == 15 && digits.len() > 16);
+    if plain {
+        if exponent >= 0 {
+            let whole = exponent as usize + 1;
+            let mut integer: String = digits.chars().take(whole).collect();
+            while integer.len() < whole {
+                integer.push('0');
+            }
+            let fraction: String = digits.chars().skip(whole).collect();
+            let fraction = if fraction.is_empty() { "0" } else { &fraction };
+            return format!("{sign}{integer}.{fraction}");
+        }
+        let zeros = "0".repeat((-exponent - 1) as usize);
+        return format!("{sign}0.{zeros}{digits}");
+    }
+    let rest = if digits.len() > 1 { &digits[1..] } else { "0" };
+    let exponent_sign = if exponent < 0 { "-" } else { "+" };
+    format!(
+        "{sign}{}.{rest}e{exponent_sign}{:0>2}",
+        &digits[..1],
+        exponent.abs()
+    )
 }
 
 /// A new `String` of class `id` holding `bytes` in `encoding`.
@@ -14186,6 +14226,14 @@ mod tests {
             (1e15, "1.0e+15"),
             (1e20, "1.0e+20"),
             (-1e15, "-1.0e+15"),
+            // Sixteen digits before the point are plain only with a fraction.
+            (1_151_450_203_773_890.8, "1151450203773890.8"),
+            (9_007_199_254_740_992.0, "9.007199254740992e+15"),
+            // An exact tie between two shortest spellings goes to the even.
+            (3_602_879_701_896_397.0 / 4.0, "900719925474099.2"),
+            (-3_602_879_701_896_397.0 / 4.0, "-900719925474099.2"),
+            (5e-324, "5.0e-324"),
+            (0.1 + 0.2, "0.30000000000000004"),
         ] {
             assert_eq!(float_to_s(value), expected, "{value}");
         }
