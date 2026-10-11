@@ -321,3 +321,9 @@ class Range
     step(stride)
   end
 end
+
+# There is no walking from one point on a plane toward another in steps of a
+# third. Here, because `step` is defined in this file.
+class Complex
+  undef_method :step
+end

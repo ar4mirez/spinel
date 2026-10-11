@@ -1927,11 +1927,27 @@ module Kernel
     value.to_i
   end
 
+  # A String as `Kernel#Float` reads one: the whole of it must be a number,
+  # and a hexadecimal Integer counts.
+  #
+  # ponytail: `Kernel#Float` itself does not exist yet; when it does, this is
+  # its String half, and wants the hexadecimal fraction and exponent too.
+  def self.__strict_float__(text)
+    if text =~ /\A\s*[+-]?0[xX]\h+(?:_\h+)*\s*\z/
+      return Integer(text.strip).to_f
+    end
+    if text =~ /\A\s*[+-]?(?:\d+(?:_\d+)*(?:\.\d+(?:_\d+)*)?|\.\d+(?:_\d+)*)(?:[eE][+-]?\d+(?:_\d+)*)?\s*\z/
+      return text.to_f
+    end
+    raise ArgumentError, "invalid value for Float(): " + text.inspect
+  end
+
   def self.__format_float__(value)
     case value
     when Float then value
     when Integer then value.to_f
     when nil then raise TypeError, "can't convert nil into Float"
+    when String then __strict_float__(value)
     else
       raise TypeError, "can't convert #{value.class} into Float" unless value.respond_to?(:to_f)
       value.to_f
@@ -1984,5 +2000,52 @@ class String
     order = other <=> self
     return nil if order.nil?
     order > 0 ? -1 : (order < 0 ? 1 : 0)
+  end
+end
+
+class String
+  # What leads the string, read as a decimal number; 0.0 when nothing does.
+  #
+  # The digits are an Integer over a power of ten, and that ratio is rounded
+  # to the nearest Float exactly, whatever its size.
+  def to_f
+    match = /\A\s*([+-]?)(\d+(?:_\d+)*)?(?:\.(\d+(?:_\d+)*)?)?(?:[eE]([+-]?\d+(?:_\d+)*))?/.match(self)
+    return 0.0 if match.nil? || (match[2].nil? && match[3].nil?)
+    # A point with no digits before it needs digits after it, and an
+    # exponent needs a number to belong to.
+    whole = match[2].nil? ? "" : match[2].delete("_")
+    fraction = match[2].nil? || !match[3].nil? ? (match[3] || "").delete("_") : ""
+    exponent = match[4].nil? ? 0 : match[4].delete("_").to_i
+    digits = (whole + fraction).to_i
+    shift = exponent - fraction.size
+    value = if digits == 0
+              0.0
+            elsif shift >= 0
+              shift > 400 ? Float::INFINITY : (digits * 10**shift).to_f
+            else
+              -shift > 800 ? 0.0 : String.__ratio__(digits, 10**-shift)
+            end
+    match[1] == "-" ? -value : value
+  end
+
+  # Two positive Integers' quotient as the nearest Float, a tie going to the
+  # even one. The quotient is taken to fifty-five bits with a note of whether
+  # anything was left over, which is enough to round fifty-three correctly.
+  def self.__ratio__(top, bottom)
+    shift = 55 - (top.bit_length - bottom.bit_length)
+    if shift > 0
+      quotient, rest = (top * 2**shift).divmod(bottom)
+    else
+      quotient, rest = top.divmod(bottom * 2**-shift)
+    end
+    extra = quotient.bit_length - 53
+    unit = 2**extra
+    low = quotient % unit
+    quotient = quotient / unit
+    half = unit / 2
+    if low > half || (low == half && (rest > 0 || quotient.odd?))
+      quotient = quotient + 1
+    end
+    Math.ldexp(quotient.to_f, extra - shift)
   end
 end

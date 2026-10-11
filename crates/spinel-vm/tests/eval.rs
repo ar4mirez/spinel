@@ -96,10 +96,10 @@ fn a_construct_this_slice_does_not_compile_is_an_error_never_a_guess() {
         // table one too.
         //
         // A backtick command left this list with #145: it compiles to a call to
-        // `Kernel#``, and running the command is what refuses. A rational
-        // literal left with `Rational` itself; the complex one still needs
-        // `Complex` (#227).
-        "3i",
+        // `Kernel#``, and running the command is what refuses. The rational
+        // and complex literals left with their classes (#227). A regexp alone
+        // in condition position matches against `$_`, which is not compiled.
+        "1 if /a/",
         // A hash literal, a range literal, an array splat, a multiple
         // assignment and string interpolation left this list with #157 and
         // #154. What replaces them is the call-convention half of the same

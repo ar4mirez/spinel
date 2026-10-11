@@ -159,7 +159,13 @@ class Float
   end
 
   def **(other)
-    __math__(:pow, self, Math.__float__(other))
+    return Complex.__make__(self, 0)**other if Complex === other
+    power = Math.__float__(other)
+    # A negative number to a power that is not whole leaves the real line.
+    if self < 0 && power.finite? && power != power.floor
+      return Complex.__make__(self, 0)**power
+    end
+    __math__(:pow, self, power)
   end
   alias pow **
   def inspect

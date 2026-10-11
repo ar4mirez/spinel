@@ -188,7 +188,7 @@ fn an_uncompiled_method_refuses_only_when_it_is_called() {
     assert!(!out.status.success(), "the call should end the program");
     assert_eq!(stdout(&out), "before\n", "what ran before the call is kept");
     assert!(
-        stderr(&out).contains("a complex literal is not compiled yet"),
+        stderr(&out).contains("a regexp in condition position is not compiled yet"),
         "the refusal names the construct: {}",
         stderr(&out)
     );
