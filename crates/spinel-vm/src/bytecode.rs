@@ -945,12 +945,32 @@ impl ParamSpec {
             && self.keywords.is_empty()
     }
 
-    /// Ruby's `Proc#arity`: negative when the count is not fixed, and then the
-    /// magnitude is one more than the required count.
+    /// The positional arguments alone, keywords not counted: negative when the
+    /// count is open. Not a Ruby arity — it is what the core library asks to
+    /// tell `warn(message)` from `warn(message, category:)`.
     #[must_use]
-    pub fn arity(&self) -> i64 {
+    pub fn positional_arity(&self) -> i64 {
         let required = self.min_positional() as i64;
         if self.rest.is_some() || !self.optional.is_empty() {
+            -(required + 1)
+        } else {
+            required
+        }
+    }
+
+    /// Ruby's `Proc#arity`. A lambda counts as a method does. A plain proc
+    /// does not mind missing arguments, so only a rest parameter makes its
+    /// count open: `proc { |a = 1| }` is 0 where the lambda is -1. A required
+    /// keyword counts as one argument either way. CRuby's `rb_proc_arity`,
+    /// measured.
+    #[must_use]
+    pub fn arity(&self, lambda: bool) -> i64 {
+        if lambda {
+            return self.method_arity();
+        }
+        let required_keyword = self.keywords.iter().any(|k| k.required);
+        let required = self.min_positional() as i64 + i64::from(required_keyword);
+        if self.rest.is_some() {
             -(required + 1)
         } else {
             required

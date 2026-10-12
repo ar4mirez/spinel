@@ -21,6 +21,11 @@ The description is the name mspec prints: every enclosing `describe`, then the
 `it`, joined by spaces. `scripts/spec.sh --list <path>` prints it for every
 example, which is where to copy it from.
 
+A description that runs over several lines — `evaluate`'s examples carry their
+source in theirs — is written on one, in double quotes, with each newline as
+`\n`. That is mspec's own spelling, and `--list` prints it the same way, so it
+is still copied as it stands.
+
 The file lives at the spec file's own path with `spec/ruby/` swapped for
 `spec/tags/` and `_spec.rb` for `_tags.txt` — mspec's documented rewrite:
 

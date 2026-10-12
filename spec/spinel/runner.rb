@@ -142,7 +142,12 @@ class SpinelFormatter < BaseFormatter
     MSpec.instance_variable_get(:@file).to_s.sub(%r{\A.*?spec/ruby/}, "spec/ruby/")
   end
 
+  # A description that runs over several lines — `evaluate`'s examples carry
+  # their source — is written on one, quoted and with its newlines escaped:
+  # the form mspec itself writes one in a tags file, so a tag and the record
+  # of its example are the same text.
   def __record__(kind, description = "", detail = "", file = __file__)
+    description = %["#{description.gsub("\n", '\n')}"] if description.include?("\n")
     @records << [kind, file, description, detail.to_s.tr("\t\n", "  ")]
   end
 

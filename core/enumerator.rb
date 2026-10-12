@@ -35,15 +35,19 @@ class Enumerator
   # `to_enum`'s form. Built with `allocate` rather than `new` because Ruby 4.0
   # removed the public receiver/method constructor: `Enumerator.new(1, :upto, 3)`
   # has to raise, and this has to not.
-  def self.__for__(object, method, arguments, size)
-    allocate.__init_for__(object, method, arguments, size)
+  def self.__for__(object, method, arguments, size, keywords = nil)
+    allocate.__init_for__(object, method, arguments, size, keywords)
   end
 
-  def __init_for__(object, method, arguments, size)
+  # The keywords of the remembered call are kept apart from its positional
+  # arguments, so they are keywords again when the call is made: replayed as
+  # a trailing Hash, `each_line(chomp: true)` would be two arguments.
+  def __init_for__(object, method, arguments, size, keywords = nil)
     @producer = nil
     @object = object
     @method = method
     @arguments = arguments
+    @keywords = keywords.nil? || keywords.empty? ? nil : keywords
     @size = size
     self
   end
@@ -63,9 +67,12 @@ class Enumerator
   def each(*extra, &block)
     if block.nil?
       return self if extra.empty? || !@producer.nil?
-      return Enumerator.__for__(@object, @method, @arguments + extra, nil)
+      return Enumerator.__for__(@object, @method, @arguments + extra, nil, @keywords)
     end
-    return @object.send(@method, *@arguments, *extra, &block) if @producer.nil?
+    if @producer.nil?
+      return @object.send(@method, *@arguments, *extra, &block) if @keywords.nil?
+      return @object.send(@method, *@arguments, *extra, **@keywords, &block)
+    end
     @producer.call(Yielder.new(&block))
   end
 
@@ -113,7 +120,7 @@ class Enumerator
     return "#<Enumerator: uninitialized>" if @object.nil? && @producer.nil?
     if @object.nil?
       "#<Enumerator: #<Enumerator::Generator>:each>"
-    elsif @arguments.nil? || @arguments.empty?
+    elsif (@arguments.nil? || @arguments.empty?) && @keywords.nil?
       "#<Enumerator: #{@object.inspect}:#{@method}>"
     else
       "#<Enumerator: #{@object.inspect}:#{@method}(#{__argument_list__})>"
@@ -123,6 +130,7 @@ class Enumerator
   def __argument_list__
     parts = []
     @arguments.each { |argument| parts.push(argument.inspect) }
+    @keywords.each { |key, value| parts.push(key.to_s + ": " + value.inspect) } unless @keywords.nil?
     parts.join(", ")
   end
 

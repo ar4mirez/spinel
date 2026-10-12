@@ -24,6 +24,12 @@ module SpinelVerify
     PASSES[file] << description
   end
 
+  # A description as Spinel's records spell it: one that runs over several
+  # lines is quoted, with its newlines escaped.
+  def self.spell(description)
+    description.include?("\n") ? %["#{description.gsub("\n", '\n')}"] : description
+  end
+
   # The spec file running now, spelled the way Spinel's records spell it.
   def self.file
     MSpec.instance_variable_get(:@file).to_s.sub(%r{\A.*?spec/ruby/}, "spec/ruby/")
@@ -32,7 +38,7 @@ module SpinelVerify
   # An `:add` listener: an example defined under a guard this Ruby skips.
   class Guarded
     def add(state)
-      print "RUBY_BUG\t#{SpinelVerify.file}\t#{state.description}\n" if MSpec.guarded?
+      print "RUBY_BUG\t#{SpinelVerify.file}\t#{SpinelVerify.spell(state.description)}\n" if MSpec.guarded?
     end
 
     def register
@@ -43,7 +49,7 @@ module SpinelVerify
   # An `:include` filter: an example runs when Spinel passed it.
   class Filter
     def ===(description)
-      PASSES.key?(SpinelVerify.file) && PASSES[SpinelVerify.file].include?(description)
+      PASSES.key?(SpinelVerify.file) && PASSES[SpinelVerify.file].include?(SpinelVerify.spell(description))
     end
 
     def register
@@ -77,7 +83,7 @@ class SpinelVerifyFormatter < BaseFormatter
   def after(state = nil)
     super
     return if state.nil?
-    print "VERIFY\t#{SpinelVerify.file}\t#{state.description}\t#{@verdict.to_s.tr("\t\n", "  ")}\n"
+    print "VERIFY\t#{SpinelVerify.file}\t#{SpinelVerify.spell(state.description)}\t#{@verdict.to_s.tr("\t\n", "  ")}\n"
   end
 
   def finish

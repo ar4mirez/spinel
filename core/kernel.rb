@@ -240,12 +240,12 @@ module Kernel
   # `to_enum(:each_slice, 2)` remembers a call so it can be made later, which is
   # what every Enumerable method without a block returns. `enum_for` is the same
   # method under Ruby's other name for it.
-  def to_enum(method = :each, *arguments, &size)
-    Enumerator.__for__(self, method, arguments, size)
+  def to_enum(method = :each, *arguments, **keywords, &size)
+    Enumerator.__for__(self, method, arguments, size, keywords)
   end
 
-  def enum_for(method = :each, *arguments, &size)
-    Enumerator.__for__(self, method, arguments, size)
+  def enum_for(method = :each, *arguments, **keywords, &size)
+    Enumerator.__for__(self, method, arguments, size, keywords)
   end
 
   # The module functions (#161). Each becomes a private instance method and a

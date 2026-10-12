@@ -1120,8 +1120,15 @@ class String
     pieces
   end
 
-  def each_line(separator = $/, chomp: false, &block)
-    return to_enum(:each_line, separator, chomp: chomp) if block.nil?
+  def each_line(*given, chomp: false, &block)
+    if given.size > 1
+      raise ArgumentError, "wrong number of arguments (given " + given.size.to_s + ", expected 0..1)"
+    end
+    if block.nil?
+      # Remembered as it was written, which is what the enumerator shows.
+      return chomp ? to_enum(:each_line, *given, chomp: chomp) : to_enum(:each_line, *given)
+    end
+    separator = given.empty? ? $/ : given[0]
     __lines__(separator, chomp).each(&block)
     self
   end
