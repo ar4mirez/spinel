@@ -37,13 +37,13 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/marshal` | 6 | 217 | 0 | 0 | 217 | 0 | 0% |
 | `core/matchdata` | 30 | 186 | 75 | 0 | 110 | 1 | 40% |
 | `core/math` | 29 | 243 | 243 | 0 | 0 | 0 | 100% |
-| `core/method` | 26 | 182 | 94 | 0 | 85 | 3 | 52% |
+| `core/method` | 26 | 199 | 111 | 0 | 85 | 3 | 56% |
 | `core/module` | 86 | 1036 | 699 | 0 | 308 | 29 | 67% |
 | `core/mutex` | 7 | 35 | 0 | 0 | 35 | 0 | 0% |
 | `core/nil` | 18 | 27 | 25 | 0 | 2 | 0 | 93% |
 | `core/numeric` | 46 | 326 | 324 | 0 | 2 | 0 | 99% |
 | `core/objectspace` | 29 | 108 | 1 | 0 | 107 | 0 | 1% |
-| `core/proc` | 25 | 184 | 64 | 0 | 116 | 4 | 35% |
+| `core/proc` | 25 | 247 | 124 | 0 | 116 | 7 | 50% |
 | `core/process` | 92 | 423 | 83 | 0 | 340 | 0 | 20% |
 | `core/queue` | 15 | 46 | 0 | 0 | 46 | 0 | 0% |
 | `core/random` | 10 | 61 | 0 | 0 | 61 | 0 | 0% |
@@ -55,7 +55,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/set` | 57 | 175 | 169 | 0 | 6 | 0 | 97% |
 | `core/signal` | 3 | 53 | 38 | 0 | 15 | 0 | 72% |
 | `core/sizedqueue` | 16 | 61 | 0 | 0 | 61 | 0 | 0% |
-| `core/string` | 151 | 3906 | 3407 | 0 | 480 | 19 | 87% |
+| `core/string` | 151 | 3906 | 3410 | 0 | 477 | 19 | 87% |
 | `core/struct` | 30 | 170 | 167 | 0 | 3 | 0 | 98% |
 | `core/symbol` | 29 | 270 | 128 | 0 | 137 | 5 | 47% |
 | `core/systemexit` | 2 | 6 | 6 | 0 | 0 | 0 | 100% |
@@ -64,9 +64,9 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/time` | 66 | 652 | 620 | 0 | 32 | 0 | 95% |
 | `core/tracepoint` | 19 | 76 | 0 | 0 | 76 | 0 | 0% |
 | `core/true` | 9 | 13 | 11 | 0 | 2 | 0 | 85% |
-| `core/unboundmethod` | 20 | 92 | 76 | 0 | 14 | 2 | 83% |
+| `core/unboundmethod` | 20 | 109 | 93 | 0 | 14 | 2 | 85% |
 | `core/warning` | 5 | 31 | 22 | 0 | 9 | 0 | 71% |
-| `language` | 67 | 2568 | 2216 | 0 | 321 | 31 | 86% |
+| `language` | 67 | 2668 | 2345 | 0 | 292 | 31 | 88% |
 | `language/predefined` | 2 | 14 | 0 | 0 | 14 | 0 | 0% |
 | `language/regexp` | 11 | 257 | 198 | 0 | 56 | 3 | 77% |
 | `library/English` | 2 | 27 | 1 | 0 | 1 | 25 | 4% |
@@ -131,4 +131,4 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `optional/capi` | 47 | 0 | 0 | 0 | 0 | 0 | — |
 | `optional/thread_safety` | 1 | 5 | 0 | 0 | 5 | 0 | 0% |
 | `security` | 13 | 34 | 0 | 0 | 34 | 0 | 0% |
-| **total** | 3835 | 31060 | 18540 | 0 | 12191 | 329 | 60% |
+| **total** | 3835 | 31257 | 18766 | 0 | 12159 | 332 | 60% |

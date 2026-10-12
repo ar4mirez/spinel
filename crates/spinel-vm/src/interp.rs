@@ -1266,7 +1266,7 @@ fn reflect_native(
             };
             match found.and_then(|method| scope.definitions().get(method.body).cloned()) {
                 Some(Definition::Iseq(iseq)) => {
-                    Value::fixnum(iseq.params.arity()).expect("an arity fits a fixnum")
+                    Value::fixnum(iseq.params.positional_arity()).expect("an arity fits a fixnum")
                 }
                 // A primitive or a `define_method` body: not a fixed count the
                 // caller can rely on.
@@ -4069,13 +4069,11 @@ fn push_proc_frame_as(
         name: call.name,
         args: call.args.clone(),
         keywords: call.keywords.clone(),
-        // The block this body sees is the one its *defining* scope had, not the
-        // one the caller has. See `PROC_BLOCK`.
-        block: if call.block == Value::NIL {
-            captured
-        } else {
-            call.block
-        },
+        // What was passed, and nothing when nothing was: this is what `&b`
+        // binds, so a lambda called without a block has a nil `b`. The block
+        // `yield` and `block_given?` mean is the defining scope's, which the
+        // frame is given once it is pushed. See `PROC_BLOCK`.
+        block: call.block,
         block_is_literal: call.block_is_literal,
         // A block resolves constants where it was written, not where it is
         // called: `class C; X = 1; [1].each { X }; end` finds `C::X`.
@@ -7447,13 +7445,13 @@ fn native_call<'h>(
             Ok(None)
         }
         Native::Arity => {
-            let Some((iseq, ..)) = proc_parts(scope, call.receiver) else {
+            let Some((iseq, _, _, _, lambda, _)) = proc_parts(scope, call.receiver) else {
                 return Err(Error::NoDispatch {
                     op: "arity",
                     operands: "a receiver that is not a Proc",
                 });
             };
-            stack.push(Value::fixnum(iseq.params.arity()).expect("an arity fits a fixnum"));
+            stack.push(Value::fixnum(iseq.params.arity(lambda)).expect("an arity fits a fixnum"));
             Ok(None)
         }
         Native::BlockGiven => {
