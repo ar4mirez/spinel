@@ -27,12 +27,12 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/fiber` | 15 | 189 | 129 | 0 | 55 | 5 | 68% |
 | `core/file` | 111 | 913 | 449 | 0 | 460 | 4 | 49% |
 | `core/filetest` | 25 | 11 | 9 | 0 | 2 | 0 | 82% |
-| `core/float` | 50 | 261 | 229 | 0 | 31 | 1 | 88% |
+| `core/float` | 50 | 261 | 240 | 0 | 20 | 1 | 92% |
 | `core/gc` | 18 | 41 | 2 | 0 | 39 | 0 | 5% |
 | `core/hash` | 69 | 562 | 500 | 0 | 59 | 3 | 89% |
 | `core/integer` | 70 | 598 | 498 | 0 | 90 | 10 | 83% |
 | `core/io` | 103 | 1596 | 285 | 0 | 1282 | 29 | 18% |
-| `core/kernel` | 118 | 2216 | 1444 | 0 | 711 | 61 | 65% |
+| `core/kernel` | 118 | 2216 | 1542 | 0 | 613 | 61 | 70% |
 | `core/main` | 7 | 27 | 4 | 0 | 23 | 0 | 15% |
 | `core/marshal` | 6 | 217 | 0 | 0 | 217 | 0 | 0% |
 | `core/matchdata` | 30 | 186 | 75 | 0 | 110 | 1 | 40% |
@@ -55,7 +55,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/set` | 57 | 175 | 169 | 0 | 6 | 0 | 97% |
 | `core/signal` | 3 | 53 | 38 | 0 | 15 | 0 | 72% |
 | `core/sizedqueue` | 16 | 61 | 0 | 0 | 61 | 0 | 0% |
-| `core/string` | 151 | 3906 | 3402 | 0 | 485 | 19 | 87% |
+| `core/string` | 151 | 3906 | 3407 | 0 | 480 | 19 | 87% |
 | `core/struct` | 30 | 170 | 167 | 0 | 3 | 0 | 98% |
 | `core/symbol` | 29 | 270 | 128 | 0 | 137 | 5 | 47% |
 | `core/systemexit` | 2 | 6 | 6 | 0 | 0 | 0 | 100% |
@@ -131,4 +131,4 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `optional/capi` | 47 | 0 | 0 | 0 | 0 | 0 | — |
 | `optional/thread_safety` | 1 | 5 | 0 | 0 | 5 | 0 | 0% |
 | `security` | 13 | 34 | 0 | 0 | 34 | 0 | 0% |
-| **total** | 3835 | 31060 | 18426 | 0 | 12305 | 329 | 59% |
+| **total** | 3835 | 31060 | 18540 | 0 | 12191 | 329 | 60% |

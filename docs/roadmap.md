@@ -74,6 +74,7 @@ One slice per class, each driven by `core/<class>/`: `Integer`, `Float`, `String
 - **Done for `step`:** `Numeric#step`, `Range#step`, `Range#%` and `Enumerator::ArithmeticSequence`, one walk in Ruby used four ways. Exact numbers are stepped by adding; with a Float the number of terms is worked out first and each is `begin + i * step`, as CRuby does. PRD 0067.
 - **Done for a Time that keeps what it was given (#288):** the fraction of a second is an Integer of nanoseconds or a Rational when the instant is finer, and a UTC offset may be a Rational. `Time.at(0.1)` remembers the Float exactly. PRD 0068.
 - **Done for `Complex` (#34, #227):** two real numbers kept as given, in Ruby with no new primitive; `Kernel#Complex`, `Complex.rect` and `.polar`, the `3i` literal, and the side of `Numeric` that only means something beside it. A negative number to a power that is not whole answers one. `String#to_f` came with it, rounding exactly. PRD 0069.
+- **Done for a Float, in and out:** `Kernel#Float`, strict about a String and reading hexadecimal; and two places where a Float printed differently from CRuby — where plain digits give way to an exponent, and which of two equally near shortest spellings is taken. PRD 0070.
 - String `eval`, `binding`, `instance_eval` with strings. *Check:* `core/kernel/eval_spec.rb`, `core/binding/`.
 
 **Milestone:** `core/` passes above 80%, `mspec` itself runs on Spinel and replaces `spec/harness/`.
