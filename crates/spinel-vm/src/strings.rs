@@ -169,6 +169,15 @@ pub fn char_offsets(encoding: u8, bytes: &[u8]) -> Option<Vec<usize>> {
     Some(offsets)
 }
 
+/// Whether every character of `bytes` is one byte, so that a character index
+/// *is* a byte index: a single-byte encoding, or nothing but ASCII in an
+/// ASCII-compatible one. What lets `s[i]` and a match's offsets skip the
+/// table of every character's position.
+#[must_use]
+pub fn single_byte(encoding: u8, bytes: &[u8]) -> bool {
+    encoding == BINARY || encoding == US_ASCII || (ascii_compatible(encoding) && bytes.is_ascii())
+}
+
 /// Whether every byte sequence is a character of `encoding`; `None` when this
 /// VM cannot tell.
 #[must_use]

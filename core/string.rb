@@ -216,7 +216,10 @@ class String
 
   # --- characters ---------------------------------------------------------
 
-  def [](*args)
+  # `s[i]` and `s[i, n]` with Integers are the primitive's, and never arrive
+  # here: it is what every loop over a String asks. A Range, a String, a
+  # Regexp, or an index that needs converting is sent on to this.
+  def __aref__(*args)
     start, len, single = __char_range__(args)
     return start if start.nil? || !start.is_a?(Integer)
     __index__(start, len)
@@ -348,7 +351,10 @@ class String
     __splice__(0, bytesize, "")
   end
 
-  def <<(other)
+  # `<<` with a String that can be appended as it stands is the primitive's.
+  # An Integer code point, what needs `to_str`, a frozen receiver, and two
+  # encodings that have to be reconciled come here.
+  def __append__(other)
     __modify__
     return __append_codepoint__(other) if other.is_a?(Integer)
     other = String.__coerce__(other)
@@ -1252,6 +1258,9 @@ class String
     end
     hash = replacement.size == 1 && replacement[0].is_a?(Hash) ? replacement[0] : nil
     template = replacement.size == 1 && hash.nil? ? String.__coerce__(replacement[0]) : nil
+    # A replacement with no backslash in it is itself, which is most of them:
+    # asked once, not once a match.
+    literal = !template.nil? && !template.include?("\\")
     source = dup
     size = source.length
     out = String.new(encoding: encoding)
@@ -1268,7 +1277,7 @@ class String
         if hash
           hash[match[0]].to_s
         elsif template
-          __expand_template__(template, match)
+          literal ? template : __expand_template__(template, match)
         else
           $~ = match
           answer = block.call(match[0]).to_s
