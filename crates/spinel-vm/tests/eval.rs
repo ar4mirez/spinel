@@ -102,18 +102,12 @@ fn a_construct_this_slice_does_not_compile_is_an_error_never_a_guess() {
         "1 if /a/",
         // A hash literal, a range literal, an array splat, a multiple
         // assignment and string interpolation left this list with #157 and
-        // #154. What replaces them is the call-convention half of the same
-        // syntax, which #11 owns: `CallSite::keywords` names each keyword by
-        // symbol, so a non-symbol key and a `**` argument have nowhere to go.
-        // A destructuring parameter borrows the slot of the first name it
-        // binds, and this one binds none, so there is no slot for the argument
-        // to land in. Every other shape compiles since #209. See
-        // `Compiler::spec_from_list`.
+        // #154, and a destructuring parameter that binds no name with #294.
         //
         // Since #145 a block or method body that does not compile becomes one
         // that refuses when it runs, so the rest of its file still runs; the
         // property is now that *running* it is an error, never a value.
-        "proc { |(*), c| }.call(1, 2)",
+        "BEGIN { 1 }",
     ] {
         let outcome = eval(source);
         assert!(

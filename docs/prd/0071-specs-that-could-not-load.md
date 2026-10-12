@@ -54,7 +54,7 @@ mspec's own spelling in a tags file — in the records and in the verifier.
 
 ## Not done
 
-- A destructuring parameter that binds no name — `proc { |(*), c| }` — still
+- *(Done since: #294.)* A destructuring parameter that binds no name — `proc { |(*), c| }` — still
   does not compile. Three `Proc#arity` examples reach it and are tagged to
   #294, filed with this slice.
 

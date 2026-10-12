@@ -3344,7 +3344,7 @@ impl Compiler {
     }
 
     /// `spinel_ast::Params` → [`ParamSpec`], allocating slots in binder order.
-    fn lower_params(&mut self, params: &Params, span: Span) -> Result<ParamSpec, Unsupported> {
+    fn lower_params(&mut self, params: &Params, _span: Span) -> Result<ParamSpec, Unsupported> {
         let list = match params {
             Params::None => return Ok(ParamSpec::default()),
             Params::Explicit(list) => list,
@@ -3368,10 +3368,10 @@ impl Compiler {
                 });
             }
         };
-        self.spec_from_list(list, span)
+        self.spec_from_list(list)
     }
 
-    fn spec_from_list(&mut self, list: &ParamList, span: Span) -> Result<ParamSpec, Unsupported> {
+    fn spec_from_list(&mut self, list: &ParamList) -> Result<ParamSpec, Unsupported> {
         use spinel_ast::{KeywordRestKind, RequiredParamKind};
 
         let mut spec = ParamSpec::default();
@@ -3400,14 +3400,14 @@ impl Compiler {
                     let mut names = Vec::new();
                     destructure_names(multi, &mut names);
                     // `{ |(*), c| }` binds nothing, so there is no first inner
-                    // name whose slot the parameter can borrow. Refused with
-                    // its own reason rather than given a slot that Prism's
-                    // scope list does not have.
+                    // name whose slot the parameter can borrow. It takes a
+                    // hidden one of its own: the argument has to land
+                    // somewhere to be spread and thrown away (#294).
                     let Some(first) = names.first() else {
-                        return Err(Unsupported::at(
-                            "a destructuring block parameter that binds no name",
-                            span,
-                        ));
+                        let hidden = format!("%destructure{at}");
+                        spec.required.push(self.param_slot(&hidden, at));
+                        at += 1;
+                        continue;
                     };
                     spec.required.push(self.param_slot(first, at));
                     for (offset, name) in names.iter().enumerate().skip(1) {
@@ -3445,10 +3445,10 @@ impl Compiler {
                     let mut names = Vec::new();
                     destructure_names(multi, &mut names);
                     let Some(first) = names.first() else {
-                        return Err(Unsupported::at(
-                            "a destructuring block parameter that binds no name",
-                            span,
-                        ));
+                        let hidden = format!("%destructure{at}");
+                        spec.post.push(self.param_slot(&hidden, at));
+                        at += 1;
+                        continue;
                     };
                     spec.post.push(self.param_slot(first, at));
                     for (offset, name) in names.iter().enumerate().skip(1) {
