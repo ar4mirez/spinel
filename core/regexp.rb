@@ -91,3 +91,158 @@ class Regexp
     alias quote escape
   end
 end
+
+# The rest of the class's surface (#33): what a pattern says about itself,
+# and the ways of making one that are not a literal.
+class Regexp
+  FIXEDENCODING = 16
+  NOENCODING = 32
+
+  def casefold?
+    options & IGNORECASE != 0
+  end
+
+  # The names its groups declare, each once, in order of first appearance.
+  def names
+    out = []
+    table = __name_table__
+    index = 0
+    while index < table.size
+      out.push(table[index]) unless out.include?(table[index])
+      index = index + 2
+    end
+    out
+  end
+
+  # Each name and the numbers of the groups it labels.
+  def named_captures
+    out = {}
+    table = __name_table__
+    index = 0
+    while index < table.size
+      (out[table[index]] ||= []).push(table[index + 1])
+      index = index + 2
+    end
+    out
+  end
+
+  # ponytail: a pattern carries no encoding of its own yet. An ASCII source
+  # is US-ASCII and any other is UTF-8, which is what a literal in a UTF-8
+  # file is; the `n`, `e`, `s` and `u` modifiers wait for the encoding work.
+  def encoding
+    fixed_encoding? ? Encoding::UTF_8 : Encoding::US_ASCII
+  end
+
+  def fixed_encoding?
+    # The source is US-ASCII exactly when nothing in it is past ASCII — not a
+    # character, and not a `\u` escape that names one.
+    source.encoding != Encoding::US_ASCII || options & FIXEDENCODING != 0
+  end
+
+  # `~re` matches against `$_`, the last line read.
+  def ~
+    line = $_
+    return nil unless line.is_a?(String)
+    self =~ line
+  end
+
+  class << self
+    # The pattern may be anything that converts with `to_str`, which is a
+    # send: it is converted here, and the primitive takes a String or a
+    # Regexp.
+    alias __new__ new
+    def new(*args, timeout: nil)
+      unless args.empty? || args[0].is_a?(String) || args[0].is_a?(Regexp)
+        pattern = args[0]
+        unless pattern.respond_to?(:to_str)
+          raise TypeError, "no implicit conversion of " + (pattern.nil? ? "nil" : pattern.class.to_s) + " into String"
+        end
+        text = pattern.to_str
+        unless text.is_a?(String)
+          raise TypeError, "can't convert " + pattern.class.to_s + " to String (" +
+                           pattern.class.to_s + "#to_str gives " + text.class.to_s + ")"
+        end
+        args = [text] + args[1, args.size - 1]
+      end
+      __new__(*args)
+    end
+
+    def compile(*args)
+      new(*args)
+    end
+
+    # One pattern that matches what any of these does. A String is matched
+    # literally; a Regexp keeps its own options, inside a group.
+    def union(*patterns)
+      patterns = patterns[0] if patterns.size == 1 && patterns[0].is_a?(Array)
+      return /(?!)/ if patterns.empty?
+      if patterns.size == 1
+        only = patterns[0]
+        return only if only.is_a?(Regexp)
+      end
+      parts = patterns.map do |pattern|
+        if pattern.is_a?(Regexp)
+          pattern.to_s
+        else
+          unless pattern.is_a?(String)
+            unless pattern.respond_to?(:to_str)
+              raise TypeError, "no implicit conversion of " + pattern.class.to_s + " into String"
+            end
+            pattern = pattern.to_str
+          end
+          escape(pattern)
+        end
+      end
+      new(parts.join("|"))
+    end
+
+    def try_convert(object)
+      return object if object.is_a?(Regexp)
+      return nil unless object.respond_to?(:to_regexp)
+      converted = object.to_regexp
+      return converted if converted.nil? || converted.is_a?(Regexp)
+      raise TypeError, "can't convert " + object.class.to_s + " to Regexp (" +
+                       object.class.to_s + "#to_regexp gives " + converted.class.to_s + ")"
+    end
+
+    # Whether matching is guaranteed linear in the subject. A backreference
+    # is what takes that away.
+    def linear_time?(pattern, *options)
+      if pattern.is_a?(Regexp)
+        __send__(:__warning__, "flags ignored") unless options.empty?
+      else
+        pattern = new(pattern, *options)
+      end
+      !pattern.source.match?(/\\[1-9]|\\k</)
+    end
+
+    def timeout
+      @__timeout__
+    end
+
+    # ponytail: kept and answered, and not enforced. This engine has no
+    # deadline to check a match against.
+    def timeout=(seconds)
+      unless seconds.nil?
+        unless seconds.is_a?(Numeric)
+          raise TypeError, "can't convert " + seconds.class.to_s + " into Float"
+        end
+        raise ArgumentError, "invalid timeout: " + seconds.to_s if seconds <= 0
+        seconds = seconds.to_f
+      end
+      @__timeout__ = seconds
+    end
+
+    # `$~`, or one group of it.
+    def last_match(*group)
+      if group.size > 1
+        raise ArgumentError, "wrong number of arguments (given " + group.size.to_s + ", expected 0..1)"
+      end
+      found = $~
+      return found if group.empty? || found.nil?
+      key = group[0]
+      return found[key] if key.is_a?(Symbol) || key.is_a?(String)
+      found[Integer.__index__(key)]
+    end
+  end
+end

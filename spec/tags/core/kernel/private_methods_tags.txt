@@ -1,0 +1,2 @@
+fails(#28: private_methods without ancestors leaves out the methods of the object's singleton class's own superclass chain, so a class's inherited singleton methods are missing):Kernel#private_methods when passed false returns a list of private methods in without its ancestors
+fails(#28: private_methods without ancestors leaves out the methods of the object's singleton class's own superclass chain, so a class's inherited singleton methods are missing):Kernel#private_methods when passed nil returns a list of private methods in without its ancestors

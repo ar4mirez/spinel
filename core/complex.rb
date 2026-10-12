@@ -97,18 +97,18 @@ class Complex < Numeric
       raise ArgumentError, "string contains null byte" if strict && text.include?("\0")
       tail = strict ? '\s*\z' : ""
       head = '\A\s*'
-      if (match = Regexp.new(head + '([+-]?' + NUMBER + ')@([+-]?' + NUMBER + ')' + tail).match(text))
+      if (match = Regexp.new(head + '([+-]?' + NUMBER + ')@([+-]?' + NUMBER + ')' + tail).__match__(text))
         return polar(__number__(match[1]), __number__(match[2]))
       end
-      if (match = Regexp.new(head + '([+-]?' + NUMBER + ')([+-])(' + NUMBER + ')?[ijIJ]' + tail).match(text))
+      if (match = Regexp.new(head + '([+-]?' + NUMBER + ')([+-])(' + NUMBER + ')?[ijIJ]' + tail).__match__(text))
         imaginary = match[3].nil? ? 1 : __number__(match[3])
         return __make__(__number__(match[1]), match[2] == "-" ? -imaginary : imaginary)
       end
-      if (match = Regexp.new(head + '([+-]?)(' + NUMBER + ')?[ijIJ]' + tail).match(text))
+      if (match = Regexp.new(head + '([+-]?)(' + NUMBER + ')?[ijIJ]' + tail).__match__(text))
         imaginary = match[2].nil? ? 1 : __number__(match[2])
         return __make__(0, match[1] == "-" ? -imaginary : imaginary)
       end
-      if (match = Regexp.new(head + '([+-]?' + NUMBER + ')' + tail).match(text))
+      if (match = Regexp.new(head + '([+-]?' + NUMBER + ')' + tail).__match__(text))
         return __make__(__number__(match[1]), 0)
       end
       nil

@@ -10310,6 +10310,13 @@ fn native_call<'h>(
             stack.push(bool_value(data != Value::NIL));
             Ok(None)
         }
+        Native::RegexpQuietMatch => {
+            let saved = scope.last_match();
+            let data = regexp_match_from(scope, call.receiver, first_arg(&call), Value::NIL)?;
+            scope.set_last_match(saved);
+            stack.push(data);
+            Ok(None)
+        }
         Native::RegexpMatchP | Native::StringMatchP => {
             let (regexp, subject) = match native {
                 Native::RegexpMatchP => (call.receiver, first_arg(&call)),
@@ -10321,6 +10328,30 @@ fn native_call<'h>(
             let data = regexp_match_from(scope, regexp, subject, nth_arg(&call, 1))?;
             scope.set_last_match(saved);
             stack.push(bool_value(data != Value::NIL));
+            Ok(None)
+        }
+        Native::RegexpNameTable => {
+            let Some(program) = regexp_program(scope, call.receiver) else {
+                return Err(Error::NoDispatch {
+                    op: "names",
+                    operands: "a receiver that is not a Regexp",
+                });
+            };
+            let pairs: Vec<(String, usize)> = program
+                .names()
+                .iter()
+                .map(|(name, index)| (name.clone(), *index))
+                .collect();
+            let mut flat = Vec::with_capacity(pairs.len() * 2);
+            for (name, index) in pairs {
+                flat.push(string_new(scope, &name));
+                flat.push(
+                    Value::fixnum(i64::try_from(index).unwrap_or(i64::MAX))
+                        .expect("a group index fits a fixnum"),
+                );
+            }
+            let value = new_array(scope, &flat);
+            stack.push(value);
             Ok(None)
         }
         Native::RegexpSource | Native::RegexpOptions => {
@@ -10376,7 +10407,36 @@ fn native_call<'h>(
         | Native::MatchAround { .. }
         | Native::MatchEdge { .. }
         | Native::MatchNames
+        | Native::MatchOffsets
         | Native::MatchSize => {
+            // A group is named here by a number or a name, which is every call
+            // `gsub`, `scan` and `split` make. Anything else — a Range, or an
+            // object that converts with `to_int` — needs a send to read, and
+            // goes to the Ruby half of the method.
+            if matches!(native, Native::MatchIndex | Native::MatchEdge { .. })
+                && call.args.len() == 1
+            {
+                let key = first_arg(&call);
+                let plain = key.as_fixnum().is_some()
+                    || key.as_symbol().is_some()
+                    || string_bytes(scope, key).is_some();
+                if !plain {
+                    let name = match native {
+                        Native::MatchIndex => "__at_other__",
+                        Native::MatchEdge { end: false } => "__begin_other__",
+                        _ => "__end_other__",
+                    };
+                    let forwarded = Pending {
+                        cache: None,
+                        name: crate::shared::symbols::intern(name),
+                        target: Target::Method,
+                        owner: None,
+                        defined_as: None,
+                        ..call
+                    };
+                    return dispatch(scope, stack, frames, forwarded, proc_class, ids);
+                }
+            }
             let Some((regexp, text, groups)) = match_parts(scope, call.receiver) else {
                 return Err(Error::NoDispatch {
                     op: "[]",
@@ -10631,6 +10691,13 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         ),
         (Builtin::MatchData, &["size", "length"], Native::MatchSize),
         (Builtin::MatchData, &["names"], Native::MatchNames),
+        (Builtin::MatchData, &["__offsets__"], Native::MatchOffsets),
+        (
+            Builtin::Regexp,
+            &["__name_table__"],
+            Native::RegexpNameTable,
+        ),
+        (Builtin::Regexp, &["__match__"], Native::RegexpQuietMatch),
         (
             Builtin::Module,
             &["attr_reader"],
@@ -12248,6 +12315,87 @@ fn regexp_error(error: &spinel_regex::Error) -> Error {
     }
 }
 
+/// Whether an ASCII regexp source has a `\uHHHH` or `\u{H…}` escape for a
+/// character past ASCII.
+fn names_non_ascii(source: &str) -> bool {
+    let bytes = source.as_bytes();
+    let mut at = 0;
+    while at + 1 < bytes.len() {
+        if bytes[at] != b'\\' {
+            at += 1;
+            continue;
+        }
+        if bytes[at + 1] != b'u' {
+            // An escaped backslash, or any other escape: skip both bytes.
+            at += 2;
+            continue;
+        }
+        let after = &source[at + 2..];
+        let codes: Vec<&str> = match after.strip_prefix('{') {
+            Some(inner) => inner
+                .split('}')
+                .next()
+                .unwrap_or("")
+                .split_whitespace()
+                .collect(),
+            None => vec![after.get(..4).unwrap_or("")],
+        };
+        if codes
+            .iter()
+            .any(|code| u32::from_str_radix(code, 16).is_ok_and(|n| n > 0x7F))
+        {
+            return true;
+        }
+        at += 2;
+    }
+    false
+}
+
+/// [`regexp_error`] for a pattern made from a run-time String, where Ruby's
+/// message names the pattern — `premature end of char-class: /[/` — and says
+/// which of three things was wrong with a `\u` escape. Measured.
+fn regexp_source_error(error: &spinel_regex::Error, source: &str) -> Error {
+    let spinel_regex::Error::Syntax(message) = error else {
+        return regexp_error(error);
+    };
+    let message = if message == "invalid unicode escape" {
+        // The first `\u` that is not a well-formed escape decides.
+        let mut verdict = "invalid Unicode escape";
+        let mut rest = source;
+        while let Some(at) = rest.find("\\u") {
+            let after = &rest[at + 2..];
+            if let Some(inner) = after.strip_prefix('{') {
+                let body = inner.split('}').next().unwrap_or("");
+                let codes: Vec<&str> = body.split_whitespace().collect();
+                if codes.is_empty()
+                    || codes
+                        .iter()
+                        .any(|c| !c.bytes().all(|b| b.is_ascii_hexdigit()))
+                {
+                    verdict = "invalid Unicode list";
+                    break;
+                }
+                if codes.iter().any(|c| {
+                    c.len() > 6 || u32::from_str_radix(c, 16).is_ok_and(|n| n > 0x0010_FFFF)
+                }) {
+                    verdict = "invalid Unicode range";
+                    break;
+                }
+            } else if after.bytes().take(4).filter(u8::is_ascii_hexdigit).count() < 4 {
+                break;
+            }
+            rest = after;
+        }
+        verdict.to_owned()
+    } else {
+        message.clone()
+    };
+    Error::Raise {
+        class: "RegexpError",
+        message: format!("{message}: /{source}/"),
+    }
+}
+
 /// A regexp literal, compiled once and cached.
 ///
 /// Ruby answers the *same* object every time a literal without interpolation is
@@ -12305,7 +12453,28 @@ fn regexp_new_from(scope: &mut HandleScope<'_>, call: &Pending) -> Result<Value,
             None | Some(Value::NIL) | Some(Value::FALSE) => 0,
             Some(v) => match v.unpack() {
                 crate::value::Unpacked::Fixnum(n) => n,
-                _ => spinel_regex::Flags::IGNORECASE,
+                // A String spells the flags out: `"imx"`, any of them, and
+                // nothing else. Measured.
+                _ => match string_text(scope, v) {
+                    Some(letters) => {
+                        let mut flags = 0;
+                        for letter in letters.chars() {
+                            flags |= match letter {
+                                'i' => spinel_regex::Flags::IGNORECASE,
+                                'x' => spinel_regex::Flags::EXTENDED,
+                                'm' => spinel_regex::Flags::MULTILINE,
+                                _ => {
+                                    return Err(Error::raise(
+                                        "ArgumentError",
+                                        format!("unknown regexp option: {letters}"),
+                                    ));
+                                }
+                            };
+                        }
+                        flags
+                    }
+                    None => spinel_regex::Flags::IGNORECASE,
+                },
             },
         };
     }
@@ -12330,8 +12499,16 @@ fn regexp_build(
     let index = scope
         .regexps_mut()
         .add(source, options)
-        .map_err(|e| regexp_error(&e))?;
-    let text = string_new(scope, source);
+        .map_err(|e| regexp_source_error(&e, source))?;
+    // An ASCII source is US-ASCII whatever the String it came from. Measured.
+    // — unless a `\u` escape in it names a character that is not ASCII, which
+    // makes the pattern UTF-8 as much as writing the character would.
+    let text = if source.is_ascii() && !names_non_ascii(source) {
+        let string = class_handle(scope, Builtin::String);
+        string_alloc(scope, string, source.as_bytes(), crate::strings::US_ASCII)
+    } else {
+        string_new(scope, source)
+    };
     let class = class_handle(scope, Builtin::Regexp);
     let (payload, slots) = crate::regexp::regexp_shape();
     let mut nested = scope.nested();
@@ -12421,6 +12598,14 @@ fn regexp_match_from(
         scope.set_last_match(Value::NIL);
         return Ok(Value::NIL);
     }
+    // A Symbol is matched as its name.
+    let subject = match subject.as_symbol() {
+        Some(name) => {
+            let text = symbol_name(name);
+            string_new(scope, &text)
+        }
+        None => subject,
+    };
     // A UTF-16 or UTF-32 subject cannot meet an ASCII-based pattern at all:
     // CRuby's CompatibilityError, naming the regexp's encoding — US-ASCII for
     // an ASCII source, UTF-8 otherwise, until regexps carry their own (#33).
@@ -12765,6 +12950,24 @@ fn match_answer(
             Ok(new_array(scope, &names))
         }
 
+        Native::MatchOffsets => {
+            let mut flat = Vec::with_capacity(groups.len() * 2);
+            for group in groups {
+                match group {
+                    Some((start, end)) => {
+                        for at in [*start, *end] {
+                            flat.push(
+                                Value::fixnum(i64::try_from(at).unwrap_or(i64::MAX))
+                                    .expect("a byte offset fits a fixnum"),
+                            );
+                        }
+                    }
+                    None => flat.extend([Value::NIL, Value::NIL]),
+                }
+            }
+            Ok(new_array(scope, &flat))
+        }
+
         Native::MatchSize => Ok(
             Value::fixnum(i64::try_from(groups.len()).unwrap_or(i64::MAX))
                 .expect("a group count fits a fixnum"),
@@ -12838,6 +13041,20 @@ fn match_answer(
                     })
                     .collect();
                 return Ok(new_array(scope, &elements));
+            }
+            // A negative number counts back from the last group, and never
+            // reaches the whole match: `m[-m.size]` is nil. Measured.
+            if let Some(n) = first_arg(call).as_fixnum()
+                && n < 0
+            {
+                let index = n + groups.len() as i64;
+                if index <= 0 {
+                    return Ok(Value::NIL);
+                }
+                return Ok(match groups.get(index as usize).copied().flatten() {
+                    Some((start, end)) => text.part(scope, start, end),
+                    None => Value::NIL,
+                });
             }
             let index = match_group_index(scope, call, regexp)?;
             Ok(match groups.get(index).copied().flatten() {
