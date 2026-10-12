@@ -235,9 +235,14 @@ class String
       if args[0].is_a?(Regexp)
         match = args[0].match(self)
         return [nil] if match.nil?
-        part = match[args[1]]
+        # The group is read once: what converts with `to_int` is asked once.
+        group = args[1]
+        unless group.is_a?(Integer) || group.is_a?(String) || group.is_a?(Symbol)
+          group = Integer.__index__(group)
+        end
+        part = match[group]
         return [nil] if part.nil?
-        return [match.begin(args[1]), part.length]
+        return [match.begin(group), part.length]
       end
       start = Integer.__index__(args[0])
       len = Integer.__index__(args[1])
@@ -1939,7 +1944,7 @@ module Kernel
   # optional fraction and a power of two.
   def self.__strict_float__(text)
     raise ArgumentError, "string for Float contains null byte" if text.include?("\0")
-    hex = /\A\s*([+-]?)0[xX](\h+(?:_\h+)*)(?:\.(\h+(?:_\h+)*))?(?:[pP]([+-]?\d+(?:_\d+)*))?\s*\z/.match(text)
+    hex = /\A\s*([+-]?)0[xX](\h+(?:_\h+)*)(?:\.(\h+(?:_\h+)*))?(?:[pP]([+-]?\d+(?:_\d+)*))?\s*\z/.__match__(text)
     unless hex.nil?
       whole = hex[2].delete("_")
       fraction = hex[3].nil? ? "" : hex[3].delete("_")
@@ -1954,7 +1959,7 @@ module Kernel
               end
       return hex[1] == "-" ? -value : value
     end
-    if text =~ /\A\s*[+-]?(?:\d+(?:_\d+)*(?:\.(?:\d+(?:_\d+)*)?)?|\.\d+(?:_\d+)*)(?:[eE][+-]?\d+(?:_\d+)*)?\s*\z/
+    if text.match?(/\A\s*[+-]?(?:\d+(?:_\d+)*(?:\.(?:\d+(?:_\d+)*)?)?|\.\d+(?:_\d+)*)(?:[eE][+-]?\d+(?:_\d+)*)?\s*\z/)
       return String.__to_f__(text)
     end
     raise ArgumentError, "invalid value for Float(): " + text.inspect
@@ -2033,7 +2038,7 @@ class String
   # The reading itself, apart from the method: `Kernel#Float` wants it for a
   # String subclass that has a `to_f` of its own.
   def self.__to_f__(text)
-    match = /\A\s*([+-]?)(\d+(?:_\d+)*)?(?:\.(\d+(?:_\d+)*)?)?(?:[eE]([+-]?\d+(?:_\d+)*))?/.match(text)
+    match = /\A\s*([+-]?)(\d+(?:_\d+)*)?(?:\.(\d+(?:_\d+)*)?)?(?:[eE]([+-]?\d+(?:_\d+)*))?/.__match__(text)
     return 0.0 if match.nil? || (match[2].nil? && match[3].nil?)
     # A point with no digits before it needs digits after it, and an
     # exponent needs a number to belong to.

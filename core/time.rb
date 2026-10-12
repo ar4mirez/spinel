@@ -179,14 +179,14 @@ class Time
   # class knows how: `find_timezone`.
   def self.__zone_object__(zone)
     return zone unless zone.is_a?(String) && respond_to?(:find_timezone)
-    return zone if zone == "UTC" || zone == "Z" || zone =~ /\A[A-IK-Z]\z/ || zone =~ /\A[+-]\d/
+    return zone if zone == "UTC" || zone == "Z" || zone.match?(/\A[A-IK-Z]\z/) || zone.match?(/\A[+-]\d/)
     find_timezone(zone)
   end
 
   def self.__from_string__(text, zone, precision = 9)
-    match = /\A\s*(-?\d{4,})(?:-(\d\d)-(\d\d)(?:[ T](\d\d):(\d\d):(\d\d)(?:\.(\d+))?\s*(Z|UTC|[+-]\d\d(?::?\d\d(?::?\d\d)?)?)?)?)?\s*\z/.match(text)
+    match = /\A\s*(-?\d{4,})(?:-(\d\d)-(\d\d)(?:[ T](\d\d):(\d\d):(\d\d)(?:\.(\d+))?\s*(Z|UTC|[+-]\d\d(?::?\d\d(?::?\d\d)?)?)?)?)?\s*\z/.__match__(text)
     if match.nil?
-      if text =~ /\A\s*-?\d{4,}-\d\d\s*\z/ || text =~ /\A\s*-?\d{4,}-\d\d-\d\d[ T]\d\d(:\d\d)?\s*\z/
+      if text.match?(/\A\s*-?\d{4,}-\d\d\s*\z/) || text.match?(/\A\s*-?\d{4,}-\d\d-\d\d[ T]\d\d(:\d\d)?\s*\z/)
         raise ArgumentError, "no time information"
       end
       raise ArgumentError, "can't parse: " + text.inspect
@@ -273,7 +273,7 @@ class Time
     return value if value.is_a?(Integer)
     return value.floor if value.is_a?(Float)
     if value.is_a?(String)
-      unless value =~ /\A\s*[+-]?\d+\s*\z/
+      unless value.match?(/\A\s*[+-]?\d+\s*\z/)
         raise ArgumentError, "invalid value for Integer(): " + value.inspect
       end
       return value.to_i
@@ -317,13 +317,13 @@ class Time
       end
     end
     return nil if zone == "UTC" || zone == "Z" || zone == "-00:00"
-    if zone.size == 1 && zone =~ /\A[A-IK-Z]\z/
+    if zone.size == 1 && zone.match?(/\A[A-IK-Z]\z/)
       letter = zone.getbyte(0)
       return (letter - 64) * 3600 if letter <= 73
       return (letter - 65) * 3600 if letter <= 77
       return (77 - letter) * 3600
     end
-    match = /\A([+-])(\d\d)(?::?(\d\d)(?::?(\d\d))?)?\z/.match(zone)
+    match = /\A([+-])(\d\d)(?::?(\d\d)(?::?(\d\d))?)?\z/.__match__(zone)
     if !match.nil? && match[2].to_i > 23
       raise ArgumentError, "utc_offset out of range"
     end
@@ -1093,20 +1093,20 @@ class Time
     def self.__rule__(text)
       name = /\A(?:<([^>]+)>|([A-Za-z]{3,}))/
       clock = /\A([+-]?)(\d{1,3})(?::(\d{1,2})(?::(\d{1,2}))?)?/
-      match = name.match(text)
+      match = name.__match__(text)
       return nil if match.nil?
       standard = match[1] || match[2]
       rest = match.post_match
-      match = clock.match(rest)
+      match = clock.__match__(rest)
       return [standard, 0, nil, 0, nil, nil] if match.nil?
       offset = -__clock__(match)
       rest = match.post_match
-      match = name.match(rest)
+      match = name.__match__(rest)
       return [standard, offset, nil, 0, nil, nil] if match.nil?
       summer = match[1] || match[2]
       rest = match.post_match
       summer_offset = offset + 3_600
-      match = clock.match(rest)
+      match = clock.__match__(rest)
       unless match.nil?
         summer_offset = -__clock__(match)
         rest = match.post_match
@@ -1132,15 +1132,15 @@ class Time
       date, time = text.split("/")
       at = 7_200
       unless time.nil?
-        match = /\A([+-]?)(\d{1,3})(?::(\d{1,2})(?::(\d{1,2}))?)?\z/.match(time)
+        match = /\A([+-]?)(\d{1,3})(?::(\d{1,2})(?::(\d{1,2}))?)?\z/.__match__(time)
         return nil if match.nil?
         at = __clock__(match)
       end
-      if (match = /\AM(\d{1,2})\.(\d)\.(\d)\z/.match(date))
+      if (match = /\AM(\d{1,2})\.(\d)\.(\d)\z/.__match__(date))
         [:month, match[1].to_i, match[2].to_i, match[3].to_i, at]
-      elsif (match = /\AJ(\d{1,3})\z/.match(date))
+      elsif (match = /\AJ(\d{1,3})\z/.__match__(date))
         [:julian, match[1].to_i, 0, 0, at]
-      elsif (match = /\A(\d{1,3})\z/.match(date))
+      elsif (match = /\A(\d{1,3})\z/.__match__(date))
         [:day, match[1].to_i, 0, 0, at]
       end
     end

@@ -71,9 +71,9 @@ class Rational < Numeric
     # answers nil only when nothing does.
     def __parse__(text, strict)
       pattern = /\A\s*([+-]?)(?:(\d+(?:_\d+)*)(?:\.(\d+(?:_\d+)*))?|\.(\d+(?:_\d+)*))(?:[eE]([+-]?\d+(?:_\d+)*))?(?:\/(\d+(?:_\d+)*))?/
-      match = pattern.match(text)
+      match = pattern.__match__(text)
       return nil if match.nil?
-      return nil if strict && match.post_match !~ /\A\s*\z/
+      return nil if strict && !match.post_match.match?(/\A\s*\z/)
       return nil if strict && text.include?("\0")
       # `.5` has no whole part and is still a number.
       whole = match[2].nil? ? "0" : match[2].delete("_")

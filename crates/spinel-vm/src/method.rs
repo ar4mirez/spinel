@@ -125,6 +125,10 @@ pub enum Native {
     RegexpMatch,
     /// `Regexp#match?` — a boolean, and the one matcher that leaves `$~` alone.
     RegexpMatchP,
+    /// `Regexp#__match__`: `match`, leaving `$~` as it was. What the core
+    /// library matches with, so that reading a number out of a String does
+    /// not change the caller's last match.
+    RegexpQuietMatch,
     /// `Regexp#===`, which is what `when /re/` runs.
     RegexpCaseEq,
     /// `Regexp#source`
@@ -159,6 +163,12 @@ pub enum Native {
     /// `MatchData#names` — the capture names the pattern declares, in group
     /// order and without repeats. What `MatchData#inspect` branches on.
     MatchNames,
+    /// `MatchData#__offsets__`: the byte offsets the engine recorded, start
+    /// and end per group, nil for a group that took no part.
+    MatchOffsets,
+    /// `Regexp#__name_table__`: each group name and the group it labels, in
+    /// group order.
+    RegexpNameTable,
     /// `Object#frozen?`, `Object#nil?`, `Object#!`. Cheap predicates the target
     /// specs reach for while checking something else.
     NilP,

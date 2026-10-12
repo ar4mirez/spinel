@@ -39,7 +39,7 @@ class Struct
     struct = Class.new(self)
     struct.__define_struct__(members, keyword_init)
     unless name.nil?
-      unless name =~ /\A[A-Z]\w*\z/
+      unless name.match?(/\A[A-Z]\w*\z/)
         raise NameError.new("identifier " + name + " needs to be constant", name.to_sym, receiver: self)
       end
       # Under the receiver: `Struct::Name` for `Struct.new`, and a subclass's
