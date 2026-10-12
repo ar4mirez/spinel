@@ -318,10 +318,25 @@ class Integer
   #
   # `round` goes half away from zero — `25.round(-1)` is 30, not the 20 a
   # banker's rule would give. Measured.
-  def round(digits = 0)
+  #
+  # `half:` says what a tie does instead: `:even` to the even neighbour,
+  # `:down` toward zero. It is read only when there is rounding to do.
+  def round(digits = 0, half: nil)
     digits = __round_digits__(digits)
     return self if digits >= 0
+    half = half.to_sym if half.is_a?(String)
+    unless half.nil? || half == :up || half == :even || half == :down
+      raise ArgumentError, "invalid rounding mode: " + half.to_s
+    end
     step = 10 ** (-digits)
+    unless half.nil? || half == :up
+      magnitude = abs
+      quotient = magnitude / step
+      twice = (magnitude - quotient * step) * 2
+      quotient = quotient + 1 if twice > step || (twice == step && half == :even && quotient.odd?)
+      rounded = quotient * step
+      return self < 0 ? -rounded : rounded
+    end
     # On the magnitude, then signed back. Shifting the signed value by half and
     # floor-dividing looks equivalent and is not: it rounds -42 to -10**100
     # rather than 0, because floor division of a negative already rounds away.
@@ -356,11 +371,22 @@ class Integer
   # in the C int CRuby converts it to.
   def __round_digits__(digits)
     unless digits.is_a?(Integer)
-      raise TypeError, "no implicit conversion of #{digits.class} into Integer"
+      raise TypeError, "no implicit conversion from nil to integer" if digits.nil?
+      if digits == true || digits == false
+        raise TypeError, "no implicit conversion of #{digits} into Integer"
+      end
+      unless digits.respond_to?(:to_int) && !digits.is_a?(String)
+        raise TypeError, "no implicit conversion of #{digits.class} into Integer"
+      end
+      digits = digits.to_int
     end
-    if digits >= 2147483648 || digits < -2147483648
-      raise RangeError, "integer #{digits} too big to convert to 'int'"
+    # Past a machine word it is a bignum, and CRuby says so; past a C int and
+    # short of that, it says the other thing. Measured.
+    if digits >= 4611686018427387904 || digits < -4611686018427387904
+      raise RangeError, "bignum too big to convert into 'long'"
     end
+    raise RangeError, "integer #{digits} too big to convert to 'int'" if digits >= 2147483648
+    raise RangeError, "integer #{digits} too small to convert to 'int'" if digits < -2147483648
     digits
   end
 

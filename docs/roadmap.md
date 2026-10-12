@@ -77,6 +77,7 @@ One slice per class, each driven by `core/<class>/`: `Integer`, `Float`, `String
 - **Done for a Float, in and out:** `Kernel#Float`, strict about a String and reading hexadecimal; and two places where a Float printed differently from CRuby — where plain digits give way to an exponent, and which of two equally near shortest spellings is taken. PRD 0070.
 - **Done for the examples that could not load:** an Enumerator replayed the keywords of the call it remembered as a positional Hash, which stopped mspec's `evaluate` helper and sixty-three examples with it. Keywords are kept apart now. Behind them: `Proc#arity` counts keywords and tells a proc from a lambda, and `&b` is only the block that was passed. PRD 0071.
 - **Done for a destructuring parameter that binds no name (#294):** `proc { |(*), c| }` takes a hidden slot for the argument it spreads and throws away, where it had no slot to borrow and did not compile. No PRD: the change is the paragraph in `Compiler::spec_from_list`.
+- **Done for `Integer#round(half:)`:** `:even` and `:down` beside the default, read only when there is rounding to do; and the digit count `round`, `floor`, `ceil` and `truncate` take is converted with `to_int` and refused in CRuby's words. No PRD: it is one method and one helper in `core/integer.rb`.
 - String `eval`, `binding`, `instance_eval` with strings. *Check:* `core/kernel/eval_spec.rb`, `core/binding/`.
 
 **Milestone:** `core/` passes above 80%, `mspec` itself runs on Spinel and replaces `spec/harness/`.
