@@ -730,13 +730,14 @@ impl Heap {
             // SAFETY: only live objects of this heap are ever shaded, and `shade` marked
             // this one before pushing it.
             let header = unsafe { &*obj.header() };
+            // Everything is read before anything is shaded: shading writes a
+            // header's flags, and this object may be the one shaded.
             let (class, len, payload) = (header.class, header.len, header.payload);
+            let side = header.flags & SIDE_IVARS != 0;
             if let Some(class) = class {
                 Heap::shade(&mut self.mark_stack, class);
             }
-            if header.flags & SIDE_IVARS != 0
-                && let Some(storage) = self.side_ivars.get(&(obj.0.as_ptr() as usize))
-            {
+            if side && let Some(storage) = self.side_ivars.get(&(obj.0.as_ptr() as usize)) {
                 Heap::shade(&mut self.mark_stack, *storage);
             }
             if payload == Payload::Slots {
