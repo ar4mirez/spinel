@@ -2500,6 +2500,13 @@ pub fn eval_in(
                                 cref,
                                 Visibility::Public,
                             );
+                            // Public even for `initialize` and its siblings, which a
+                            // definition makes private: a module function is the exception.
+                            scope.classes_mut().set_visibility(
+                                singleton,
+                                symbol,
+                                Visibility::Public,
+                            );
                         }
                         stack.push(Value::symbol(symbol));
                         // The hooks (#28), after the definition and before the
@@ -6804,6 +6811,67 @@ pub(crate) fn ivar_set(
     Ok(value)
 }
 
+/// Take `name` off `object` and answer what it held.
+///
+/// A shape only ever grows, so there is no transition that removes a name.
+/// The object goes back to the root shape with no storage and is given the
+/// names it keeps again, in the order it had them — which lands it on the
+/// shape of an object that never had the one removed.
+fn ivar_remove(
+    scope: &mut HandleScope<'_>,
+    object: Value,
+    name: SymbolId,
+    given: Value,
+) -> Result<Value, Error> {
+    if object.is_immediate() {
+        let message = format!("can't modify frozen {}", class_name(scope, object));
+        return Err(frozen_error(scope, message, object));
+    }
+    let mut nested = scope.nested();
+    let handle = nested.root(object);
+    if nested.is_frozen(handle) {
+        let class = class_name(&mut nested, object);
+        return Err(frozen_error(
+            &mut nested,
+            format!("can't modify frozen {class}"),
+            object,
+        ));
+    }
+    let shape = nested.shape(handle);
+    let names = if shape == ShapeId::NONE {
+        Vec::new()
+    } else {
+        nested.shapes().names(shape)
+    };
+    if !names.contains(&name) {
+        let text = crate::shared::symbols::name(name).unwrap_or_default();
+        return Err(name_error(
+            &mut nested,
+            format!("instance variable {text} not defined"),
+            given,
+            object,
+        ));
+    }
+    let mut kept = Vec::with_capacity(names.len());
+    let mut removed = Value::NIL;
+    for &held in &names {
+        let value = ivar_get(&mut nested, object, held)?;
+        if held == name {
+            removed = value;
+        }
+        kept.push((held, nested.root(value)));
+    }
+    set_ivar_storage(&mut nested, handle, Value::NIL);
+    nested.set_shape(handle, ShapeId::ROOT);
+    for (held, value) in kept {
+        if held != name {
+            let value = nested.get(value);
+            ivar_set(&mut nested, object, held, value)?;
+        }
+    }
+    Ok(removed)
+}
+
 /// The object holding `object`'s instance variables, or nil: its first slot,
 /// or its side-table entry where the payload is a representation of its own.
 fn ivar_storage<'h>(scope: &HandleScope<'h>, object: Handle<'h>) -> Value {
@@ -9087,6 +9155,9 @@ fn native_call<'h>(
                     cref,
                     Visibility::Public,
                 );
+                scope
+                    .classes_mut()
+                    .set_visibility(meta, symbol, Visibility::Public);
                 if let Some(unwind) =
                     fire_method_hook(scope, stack, frames, proc_class, ids, meta, "added", symbol)?
                 {
@@ -9760,6 +9831,9 @@ fn native_call<'h>(
                 );
                 scope
                     .classes_mut()
+                    .set_visibility(singleton, symbol, Visibility::Public);
+                scope
+                    .classes_mut()
                     .set_visibility(id, symbol, Visibility::Private);
             }
             let value = match call.args.as_slice() {
@@ -10255,6 +10329,7 @@ fn native_call<'h>(
                             let to = call.args.get(1).copied().unwrap_or(Value::NIL);
                             ivar_set(scope, call.receiver, ivar, to)?
                         }
+                        IvarOp::Remove => ivar_remove(scope, call.receiver, ivar, argument)?,
                         IvarOp::Names => unreachable!("handled above"),
                     }
                 }
@@ -10892,6 +10967,11 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             Builtin::Kernel,
             &["instance_variable_set"],
             Native::InstanceVariable(IvarOp::Set),
+        ),
+        (
+            Builtin::Kernel,
+            &["__ivar_remove__"],
+            Native::InstanceVariable(IvarOp::Remove),
         ),
         (
             Builtin::Kernel,

@@ -39,6 +39,8 @@ pub enum IvarOp {
     Defined,
     /// `Object#instance_variables`, in the order the object acquired them.
     Names,
+    /// `Object#remove_instance_variable`: the value it held.
+    Remove,
 }
 
 /// An operation the VM performs itself.

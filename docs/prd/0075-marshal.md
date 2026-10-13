@@ -77,8 +77,8 @@ variable; five examples tagged there.
 - A Float's trailing mantissa bytes from a 1.8 dump are skipped; the digits
   before them already read back as the nearest Float.
 - A Time outside 1900..67435 is refused rather than extended.
-- `Random`, `StringIO`, `Mutex`, `ObjectSpace`, `Thread.current` and
-  `remove_instance_variable` do not exist yet; one example each waits on them.
+- `Random`, `StringIO`, `Mutex`, `ObjectSpace` and `Thread.current` do not
+  exist yet; one example each waits on them.
 
 ## Check
 

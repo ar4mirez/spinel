@@ -589,6 +589,15 @@ module Kernel
     __ivar_set__(__ivar_name__(name), value)
   end
 
+  # The spelling is checked before the object, and a frozen object before
+  # whether it holds the name. Measured.
+  def remove_instance_variable(name)
+    name = __ivar_name__(name)
+    __ivar_defined__(name)
+    raise FrozenError.new("can't modify frozen #{self.class}: #{inspect}", receiver: self) if frozen?
+    __ivar_remove__(name)
+  end
+
   def instance_variable_defined?(name)
     __ivar_defined__(__ivar_name__(name))
   end
