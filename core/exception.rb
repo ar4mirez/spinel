@@ -1,15 +1,15 @@
 # Exception.
 #
-# The VM writes `@message` when it raises, so everything here is ordinary Ruby
+# The VM writes `@__message__` when it raises, so everything here is ordinary Ruby
 # reading an ordinary instance variable. It was two primitives over two fixed
 # slots until #151 gave objects a shape to hold ivars in.
 #
-# `backtrace` is `@backtrace`, which the VM fills in when the exception is
+# `backtrace` is `@__backtrace__`, which the VM fills in when the exception is
 # first raised (#29): the compiler records a line per instruction, and the
 # frame stack at the raise is the backtrace. `full_message`, `cause` and the
 # rest are at the end of this file.
 class Exception
-  # `message` is `to_s`, not `@message`: a subclass that overrides `to_s` changes
+  # `message` is `to_s`, not `@__message__`: a subclass that overrides `to_s` changes
   # what `message` and `inspect` answer, which is what ruby/spec pins.
   def message
     to_s
@@ -17,11 +17,12 @@ class Exception
 
   # The message as a String: whatever was given is asked for its `to_s`.
   def to_s
-    @message.is_a?(String) ? @message : @message.to_s
+    return self.class.name if @__message__.nil?
+    @__message__.is_a?(String) ? @__message__ : @__message__.to_s
   end
 
   def backtrace
-    @backtrace
+    @__backtrace__
   end
 
   def inspect
@@ -47,7 +48,7 @@ class Exception
   end
 
   def __replace_message__(text)
-    @message = text
+    @__message__ = text
   end
 
   def ==(other)
@@ -60,7 +61,7 @@ end
 # NameError, and NoMethodError under it.
 #
 # The VM writes `@name` and `@receiver` when a dispatch fails, the same way it
-# writes `@message` when it raises, so these are two more ordinary readers over
+# writes `@__message__` when it raises, so these are two more ordinary readers over
 # ordinary instance variables.
 #
 # `NameError.new` is refused — `exceptions.txt` marks it `# own initialize` —
@@ -77,7 +78,7 @@ class NameError
 end
 
 # `Exception#initialize` is Ruby now, which is what lets the subclasses below
-# have their own and reach this through `super`. The VM still writes `@message`
+# have their own and reach this through `super`. The VM still writes `@__message__`
 # directly on the path where *it* raises; this is the path where a program
 # builds one with `new`.
 #
@@ -85,7 +86,7 @@ end
 # message is the class name rather than nil, and a non-String is converted.
 class Exception
   def initialize(message = nil)
-    @message = message.nil? ? self.class.name : message.to_s
+    @__message__ = message.nil? ? nil : message.to_s
   end
 end
 
@@ -317,7 +318,7 @@ class SystemCallError
       text = text + " @ " + func.to_s unless func.nil?
       text = text + " - " + message
     end
-    @message = text
+    @__message__ = text
     @errno = errno
   end
 
@@ -341,7 +342,7 @@ end
 # Backtraces, `cause`, and the messages built from them (#29).
 #
 # The VM records a backtrace when an exception is first raised, as two ivars:
-# `@backtrace`, the Strings, and `@__backtrace_locations__`, the same lines as
+# `@__backtrace__`, the Strings, and `@__backtrace_locations__`, the same lines as
 # `[path, line, label]`. `@__cause__` is the `$!` of that first raise. Every
 # method here is Ruby over those three.
 class Exception
@@ -361,18 +362,18 @@ class Exception
   def set_backtrace(backtrace)
     message = "backtrace must be an Array of String or an Array of Thread::Backtrace::Location"
     if backtrace.nil?
-      @backtrace = nil
+      @__backtrace__ = nil
     elsif backtrace.is_a?(String)
-      @backtrace = [backtrace]
+      @__backtrace__ = [backtrace]
     elsif backtrace.is_a?(Array)
       if !backtrace.empty? && backtrace.all? { |line| line.is_a?(Thread::Backtrace::Location) }
-        @backtrace = backtrace.map(&:to_s)
+        @__backtrace__ = backtrace.map(&:to_s)
         @__backtrace_locations__ = backtrace.map { |l| [l.path, l.lineno, l.label] }
         @__locations__ = nil
         return backtrace
       end
       raise TypeError, message unless backtrace.all? { |line| line.is_a?(String) }
-      @backtrace = backtrace
+      @__backtrace__ = backtrace
     else
       raise TypeError, message
     end

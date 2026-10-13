@@ -1758,7 +1758,7 @@ impl Compiler {
     /// ponytail: the write still does not warn "already initialized constant".
     /// That is `class.rs`'s existing shortcut and plain `X = 2` shares it; the
     /// specs asking for the warning are blocked on mspec's `complain`.
-    fn const_op_assign(&mut self, name: u32, how: ConstScope, assign: &Assign, span: Span) -> Emit {
+    fn const_op_assign(&mut self, name: u32, how: ConstScope, assign: &Assign) -> Emit {
         let module = if how == ConstScope::Qualified {
             let slot = self.slot(&format!("%cbase{}", self.here()));
             self.emit(Insn::SetLocal(slot, 0));
@@ -1779,13 +1779,14 @@ impl Compiler {
         match &assign.op {
             AssignOp::Assign => unreachable!("the plain form returned above"),
             AssignOp::Binary(op) => {
-                let op = BinOp::from_name(op)
-                    .ok_or_else(|| Unsupported::at("this compound assignment operator", span))?;
                 push_module!();
                 push_module!();
                 self.emit(Insn::GetConst(name, how));
                 self.expr(&assign.value)?;
-                self.emit(Insn::BinOp(op));
+                match BinOp::from_name(op) {
+                    Some(op) => self.emit(Insn::BinOp(op)),
+                    None => self.emit_send(op, 1),
+                };
                 self.emit(Insn::SetConst(name, how));
             }
             AssignOp::Or => {
@@ -1829,7 +1830,7 @@ impl Compiler {
                 self.emit(Insn::SetConst(name, how));
                 return Ok(());
             }
-            return self.const_op_assign(name, how, assign, span);
+            return self.const_op_assign(name, how, assign);
         }
         // `a, b = ...`. A compound form has no multiple-assignment spelling in
         // Ruby, so this only ever sees a plain `=`.
@@ -1847,12 +1848,15 @@ impl Compiler {
                 self.emit(Insn::Dup);
                 self.emit_set(&slot);
             }
+            // `a |= v`, `a <<= v` and the rest are `a = a.op(v)`: a send like
+            // any other, where the arithmetic ones have an instruction.
             AssignOp::Binary(op) => {
-                let op = BinOp::from_name(op)
-                    .ok_or_else(|| Unsupported::at("this compound assignment operator", span))?;
                 self.emit_get(&slot);
                 self.expr(&assign.value)?;
-                self.emit(Insn::BinOp(op));
+                match BinOp::from_name(op) {
+                    Some(op) => self.emit(Insn::BinOp(op)),
+                    None => self.emit_send(op, 1),
+                };
                 self.emit(Insn::Dup);
                 self.emit_set(&slot);
             }

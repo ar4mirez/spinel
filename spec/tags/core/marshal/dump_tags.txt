@@ -1,0 +1,4 @@
+fails(a Symbol has no encoding of its own yet and is written as UTF-8 - #19):Marshal.dump with a Symbol dumps a binary encoded Symbol
+fails(a Regexp answers UTF-8 for a binary source - #33):Marshal.dump with a Regexp dumps a binary Regexp
+fails(a Regexp does not keep the encoding of a fixed-encoding source - #33):Marshal.dump with a Regexp dumps an ascii-compatible Regexp
+fails(a Regexp does not keep the encoding of a fixed-encoding source - #33):Marshal.dump with a Regexp dumps a Regexp in another encoding

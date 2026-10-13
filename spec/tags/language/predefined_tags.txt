@@ -19,3 +19,5 @@ fails(#29: assigning $@ sets the backtrace of $!, and $! is restored after a res
 fails(#29: assigning $@ sets the backtrace of $!, and $! is restored after a rescue that returns):Predefined global $@ accepts nil
 fails(#39: the default $LOAD_PATH is RubyGems' and carries its prelude marker):Execution variable $: default $LOAD_PATH entries until sitelibdir included have @gem_prelude_index set
 fails(#41: $. is an ordinary global here; it is not converted with to_int on assignment and not tied to the last read line):Predefined global $. should call #to_int to convert the object to an Integer
+fails(the frozen copy keeps the instance variables of the String it was made from):Predefined global $/ makes a new frozen String from the assigned String
+fails(the frozen copy keeps the instance variables of the String it was made from):Predefined global $-0 makes a new frozen String from the assigned String

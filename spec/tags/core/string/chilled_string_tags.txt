@@ -7,3 +7,5 @@ fails(#263: a literal in a file with no magic comment is chilled in Ruby 3.4, an
 fails(#263: a literal in a file with no magic comment is chilled in Ruby 3.4, and Spinel has no chilled strings yet):chilled String chilled strings returned by Symbol#to_s #+@ returns a different instance
 fails(#263: a literal in a file with no magic comment is chilled in Ruby 3.4, and Spinel has no chilled strings yet):chilled String chilled string literals #clone preserves chilled status
 fails(#263: a literal in a file with no magic comment is chilled in Ruby 3.4, and Spinel has no chilled strings yet):chilled String chilled strings returned by Symbol#to_s #clone preserves chilled status
+fails(a chilled String does not warn when it is given an instance variable):chilled String chilled string literals mutation emits a warning on instance variable assignment
+fails(a chilled String does not warn when it is given an instance variable):chilled String chilled strings returned by Symbol#to_s mutation emits a warning on instance variable assignment

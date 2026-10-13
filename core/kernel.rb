@@ -511,6 +511,14 @@ end
 # `Proc#to_s`: the address, where the block was written, and `(lambda)` for
 # a lambda — BINARY, as `Kernel#to_s` is. Measured.
 class Proc
+  # `Proc.new { }` is the block it was given. A subclass still needs an
+  # instance of its own, which `allocate` cannot make yet.
+  def self.new(*args, &block)
+    raise ArgumentError, "tried to create Proc object without a block" if block.nil?
+    return super unless equal?(Proc)
+    block
+  end
+
   def to_s
     text = "#<Proc:0x" + __address__
     location = __proc_location__(self)

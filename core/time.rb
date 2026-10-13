@@ -6,7 +6,7 @@
 # is Ruby. The one thing Ruby cannot do is read the clock, and that is the one
 # primitive (`__sys_clock__`).
 #
-# A Time is read one of three ways, kept in `@mode`:
+# A Time is read one of three ways, kept in `@__mode__`:
 #
 #   :utc    offset 0, zone "UTC"
 #   :fixed  an offset given by the program ("+09:00"), and no zone name
@@ -30,15 +30,6 @@ class Time
     time = __at__(seconds, nanoseconds)
     zone = binding.local_variable_get(:in)
     zone.nil? ? time : time.__send__(:__in_zone__, zone)
-  end
-
-  class << self
-    private
-
-    # ponytail: `Marshal` does not exist, so there is nothing to load from.
-    def _load(*)
-      __needs_time__
-    end
   end
 
   def self.__at__(seconds, nanoseconds)
@@ -361,10 +352,10 @@ class Time
   end
 
   def __set__(seconds, nanoseconds)
-    @seconds = seconds
-    @nanoseconds = nanoseconds
-    @mode = :local
-    @offset = nil
+    @__seconds__ = seconds
+    @__nanoseconds__ = nanoseconds
+    @__mode__ = :local
+    @__offset__ = nil
     self
   end
 
@@ -372,17 +363,18 @@ class Time
   # Time and answers the instant, as a Time or as anything with `to_i`.
   def __set_civil_in__(fields, zone)
     __set_civil__(fields, :utc, 0)
-    wall = @seconds
+    wall = @__seconds__
     if zone.respond_to?(:local_to_utc)
-      answer = zone.local_to_utc(Time.__at__(wall, @nanoseconds).utc)
+      answer = zone.local_to_utc(Time.__at__(wall, @__nanoseconds__).utc)
       # The instant it names: a Time's own, offset and all.
-      @seconds = answer.is_a?(Integer) ? answer : answer.to_i
+      @__seconds__ = answer.is_a?(Integer) ? answer : answer.to_i
     end
-    offset = wall - @seconds
+    offset = wall - @__seconds__
     raise ArgumentError, "utc_offset out of range" if offset <= -86_400 || offset >= 86_400
-    @mode = :fixed
-    @offset = offset
-    @tz = zone
+    @__mode__ = :fixed
+    @__offset__ = offset
+    @__tz__ = zone
+    @__abbr__ = nil
     self
   end
   private :__set_civil_in__
@@ -392,25 +384,25 @@ class Time
   def __set_civil__(fields, mode, offset, prefer = nil)
     days = Time.__days__(fields[0], fields[1], 1) + fields[2] - 1
     wall = days * 86_400 + fields[3] * 3_600 + fields[4] * 60 + fields[5]
-    @nanoseconds = fields[6]
-    @mode = mode
-    @offset = nil
-    @zone = nil
-    @dst = nil
+    @__nanoseconds__ = fields[6]
+    @__mode__ = mode
+    @__offset__ = nil
+    @__zone__ = nil
+    @__dst__ = nil
     if mode == :utc
-      @seconds = wall
+      @__seconds__ = wall
     elsif mode == :fixed
-      @offset = offset
+      @__offset__ = offset
       if offset.is_a?(Integer)
-        @seconds = wall - offset
+        @__seconds__ = wall - offset
       else
         # The fraction of the offset comes off the instant exactly.
-        total = Rational(wall * 1_000_000_000, 1) + @nanoseconds - offset * 1_000_000_000
-        @seconds = total.div(1_000_000_000)
-        @nanoseconds = Time.__exact__(total % 1_000_000_000)
+        total = Rational(wall * 1_000_000_000, 1) + @__nanoseconds__ - offset * 1_000_000_000
+        @__seconds__ = total.div(1_000_000_000)
+        @__nanoseconds__ = Time.__exact__(total % 1_000_000_000)
       end
     else
-      @seconds = Zone.local.instant_of(wall, prefer)
+      @__seconds__ = Zone.local.instant_of(wall, prefer)
       # Read now: the zone is the one in force when the Time was made, not
       # whatever `TZ` says when it is next asked.
       __local__
@@ -420,48 +412,57 @@ class Time
   private :__set_civil__
 
   def __copy_zone__(other)
-    @zone = nil
-    @dst = nil
+    @__zone__ = nil
+    @__dst__ = nil
     tz = other.__tz__
     return __in_zone__(tz) unless tz.nil?
-    @mode = other.__mode__
-    @offset = other.__mode__ == :fixed ? other.utc_offset : nil
+    @__mode__ = other.__mode__
+    @__offset__ = other.__mode__ == :fixed ? other.utc_offset : nil
+    @__abbr__ = other.__mode__ == :fixed ? other.__send__(:__abbr__) : nil
     self
   end
   private :__copy_zone__
 
   def __mode__
-    @mode
+    @__mode__
   end
 
   def __tz__
-    @tz
+    @__tz__
   end
 
+  # The name a zone had when this Time was written by `Marshal`.
+  def __abbr__
+    @__abbr__
+  end
+  private :__abbr__
+
   def __in_zone__(zone)
-    @zone = nil
-    @dst = nil
-    @tz = nil
+    @__zone__ = nil
+    @__dst__ = nil
+    @__tz__ = nil
+    @__abbr__ = nil
     zone = self.class.__zone_object__(zone)
     if Time.__zone_object?(zone)
       offset = 0
       if zone.respond_to?(:utc_to_local)
-        answer = zone.utc_to_local(Time.__at__(@seconds, @nanoseconds).utc)
-        offset = Time.__reading__(answer) - @seconds
+        answer = zone.utc_to_local(Time.__at__(@__seconds__, @__nanoseconds__).utc)
+        offset = Time.__reading__(answer) - @__seconds__
         raise ArgumentError, "utc_offset out of range" if offset <= -86_400 || offset >= 86_400
       end
-      @mode = :fixed
-      @offset = offset
-      @tz = zone
+      @__mode__ = :fixed
+      @__offset__ = offset
+      @__tz__ = zone
+      @__abbr__ = nil
       return self
     end
     offset = Time.__utc_offset__(zone)
     if offset.nil?
-      @mode = :utc
-      @offset = nil
+      @__mode__ = :utc
+      @__offset__ = nil
     else
-      @mode = :fixed
-      @offset = offset
+      @__mode__ = :fixed
+      @__offset__ = offset
     end
     self
   end
@@ -473,70 +474,72 @@ class Time
   # time, and the abbreviation. Asked once and kept, since every field needs
   # the offset.
   def __local__
-    return [@offset, @dst, @zone] unless @zone.nil?
-    found = Zone.local.at(@seconds)
+    return [@__offset__, @__dst__, @__zone__] unless @__zone__.nil?
+    found = Zone.local.at(@__seconds__)
     found = [found[0], found[1], found[2].dup.force_encoding(Encoding::US_ASCII)]
     # A frozen Time is asked afresh each time rather than written to.
     unless frozen?
-      @offset = found[0]
-      @dst = found[1]
-      @zone = found[2]
+      @__offset__ = found[0]
+      @__dst__ = found[1]
+      @__zone__ = found[2]
     end
     found
   end
   private :__local__
 
   def utc_offset
-    return 0 if @mode == :utc
-    return __local__[0] if @mode == :local
-    @offset
+    return 0 if @__mode__ == :utc
+    return __local__[0] if @__mode__ == :local
+    @__offset__
   end
   alias gmt_offset utc_offset
   alias gmtoff utc_offset
 
   def utc?
-    @mode == :utc
+    @__mode__ == :utc
   end
   alias gmt? utc?
 
   # "UTC", the local zone's abbreviation, the zone object a Time was given,
   # or nil for a bare offset.
   def zone
-    return "UTC" if @mode == :utc
-    return @tz if @mode == :fixed
+    return "UTC".encode(Encoding::US_ASCII) if @__mode__ == :utc
+    return @__tz__.nil? ? @__abbr__ : @__tz__ if @__mode__ == :fixed
     __local__[2]
   end
 
   def isdst
-    if @mode == :fixed
-      return false if @tz.nil? || !@tz.respond_to?(:dst?)
-      return @tz.dst?(self) ? true : false
+    if @__mode__ == :fixed
+      return false if @__tz__.nil? || !@__tz__.respond_to?(:dst?)
+      return @__tz__.dst?(self) ? true : false
     end
-    return false unless @mode == :local
+    return false unless @__mode__ == :local
     __local__[1]
   end
   alias dst? isdst
 
   def utc
-    return self if @mode == :utc
-    @mode = :utc
-    @offset = nil
-    @zone = nil
-    @dst = nil
-    @tz = nil
+    return self if @__mode__ == :utc
+    @__mode__ = :utc
+    @__offset__ = nil
+    @__zone__ = nil
+    @__dst__ = nil
+    @__tz__ = nil
+    @__abbr__ = nil
     self
   end
   alias gmtime utc
 
   def localtime(offset = nil)
     # Already local is already done: the zone it was read in stays.
-    return self if offset.nil? && @mode == :local
-    @zone = nil
-    @dst = nil
+    return self if offset.nil? && @__mode__ == :local
+    @__zone__ = nil
+    @__dst__ = nil
     if offset.nil?
-      @mode = :local
-      @offset = nil
-      @tz = nil
+      @__mode__ = :local
+      @__offset__ = nil
+      @__tz__ = nil
+      @__abbr__ = nil
       __local__
     else
       __in_zone__(offset)
@@ -545,12 +548,12 @@ class Time
   end
 
   def getutc
-    Time.__at__(@seconds, @nanoseconds).utc
+    Time.__at__(@__seconds__, @__nanoseconds__).utc
   end
   alias getgm getutc
 
   def getlocal(offset = nil)
-    Time.__at__(@seconds, @nanoseconds).localtime(offset)
+    Time.__at__(@__seconds__, @__nanoseconds__).localtime(offset)
   end
 
   # -- the calendar ---------------------------------------------------------
@@ -560,8 +563,8 @@ class Time
   # the fraction of a second shown is still the instant's own. Measured.
   def __wall__
     offset = utc_offset
-    return @seconds + offset if offset.is_a?(Integer)
-    (@seconds + offset + Rational(@nanoseconds, 1_000_000_000)).floor
+    return @__seconds__ + offset if offset.is_a?(Integer)
+    (@__seconds__ + offset + Rational(@__nanoseconds__, 1_000_000_000)).floor
   end
   private :__wall__
 
@@ -580,28 +583,28 @@ class Time
   def min = (__wall__ % 3_600) / 60
   def sec = __wall__ % 60
 
-  def nsec = @nanoseconds.floor
+  def nsec = @__nanoseconds__.floor
 
   # The nanoseconds as they are kept, whole or not.
-  def __nanoseconds__ = @nanoseconds
+  def __nanoseconds__ = @__nanoseconds__
   alias tv_nsec nsec
 
-  def usec = @nanoseconds.floor / 1000
+  def usec = @__nanoseconds__.floor / 1000
   alias tv_usec usec
 
-  def to_i = @seconds
+  def to_i = @__seconds__
   alias tv_sec to_i
 
   def to_f
-    @seconds + @nanoseconds / 1_000_000_000.0
+    @__seconds__ + @__nanoseconds__ / 1_000_000_000.0
   end
 
   def to_r
-    Rational(@seconds, 1) + Rational(@nanoseconds, 1_000_000_000)
+    Rational(@__seconds__, 1) + Rational(@__nanoseconds__, 1_000_000_000)
   end
 
   def subsec
-    @nanoseconds == 0 ? 0 : Rational(@nanoseconds, 1_000_000_000)
+    @__nanoseconds__ == 0 ? 0 : Rational(@__nanoseconds__, 1_000_000_000)
   end
 
   def wday
@@ -655,15 +658,15 @@ class Time
   def +(other)
     raise TypeError, "time + time?" if other.is_a?(Time)
     whole, nanoseconds = Time.__split__(other)
-    __shifted__(@seconds + whole, @nanoseconds + nanoseconds)
+    __shifted__(@__seconds__ + whole, @__nanoseconds__ + nanoseconds)
   end
 
   def -(other)
     if other.is_a?(Time)
-      return (@seconds - other.to_i) + (@nanoseconds - other.__nanoseconds__) / 1_000_000_000.0
+      return (@__seconds__ - other.to_i) + (@__nanoseconds__ - other.__nanoseconds__) / 1_000_000_000.0
     end
     whole, nanoseconds = Time.__split__(other)
-    __shifted__(@seconds - whole, @nanoseconds - nanoseconds)
+    __shifted__(@__seconds__ - whole, @__nanoseconds__ - nanoseconds)
   end
 
   # Against what is not a Time, the other side is asked and its answer is
@@ -674,19 +677,19 @@ class Time
       return nil if order.nil?
       return order > 0 ? -1 : (order < 0 ? 1 : 0)
     end
-    [@seconds, @nanoseconds] <=> [other.to_i, other.__nanoseconds__]
+    [@__seconds__, @__nanoseconds__] <=> [other.to_i, other.__nanoseconds__]
   end
 
   def ==(other)
-    Time === other && @seconds == other.to_i && @nanoseconds == other.__nanoseconds__
+    Time === other && @__seconds__ == other.to_i && @__nanoseconds__ == other.__nanoseconds__
   end
 
   def eql?(other)
-    Time === other && @seconds == other.to_i && @nanoseconds == other.__nanoseconds__
+    Time === other && @__seconds__ == other.to_i && @__nanoseconds__ == other.__nanoseconds__
   end
 
   def hash
-    [@seconds, @nanoseconds].hash
+    [@__seconds__, @__nanoseconds__].hash
   end
 
   # To `digits` places of a second: half away from zero, down, or up.
@@ -706,10 +709,10 @@ class Time
     digits = Integer.__index__(digits)
     raise ArgumentError, "negative ndigits given" if digits < 0
     grain = digits > 9 ? Rational(1, 10**(digits - 9)) : 10**(9 - digits)
-    rest = @nanoseconds % grain
-    down = Time.__exact__(@nanoseconds - rest)
+    rest = @__nanoseconds__ % grain
+    down = Time.__exact__(@__nanoseconds__ - rest)
     up = how == 2 ? rest > 0 : (how == 1 && rest * 2 >= grain)
-    __shifted__(@seconds, up ? down + grain : down)
+    __shifted__(@__seconds__, up ? down + grain : down)
   end
   private :__rounded__
 
@@ -726,9 +729,9 @@ class Time
 
   def __inspect__
     text = strftime("%Y-%m-%d %H:%M:%S")
-    if @nanoseconds.is_a?(Integer)
-      if @nanoseconds > 0
-        digits = @nanoseconds.to_s.rjust(9, "0")
+    if @__nanoseconds__.is_a?(Integer)
+      if @__nanoseconds__ > 0
+        digits = @__nanoseconds__.to_s.rjust(9, "0")
         digits = digits[0, digits.size - 1] while digits.end_with?("0")
         text = text + "." + digits
       end
@@ -851,7 +854,7 @@ class Time
     when "S" then __number__(sec, 2, "0", flags, width)
     when "L" then __fraction__(width || 3)
     when "N" then __fraction__(width || 9)
-    when "s" then __number__(@seconds, 1, "0", flags, width)
+    when "s" then __number__(@__seconds__, 1, "0", flags, width)
     when "u" then __number__(wday == 0 ? 7 : wday, 1, "0", flags, width)
     when "w" then __number__(wday, 1, "0", flags, width)
     when "U" then __number__((yday + 6 - wday) / 7, 2, "0", flags, width)
@@ -869,10 +872,10 @@ class Time
       __text__(text, flags.delete("#"), width)
     when "P" then __text__(hour < 12 ? "am" : "pm", flags, width)
     when "Z"
-      text = if @tz.nil?
+      text = if @__tz__.nil?
                zone.to_s
              else
-               @tz.respond_to?(:abbr) ? @tz.abbr(self).to_s : ""
+               @__tz__.respond_to?(:abbr) ? @__tz__.abbr(self).to_s : ""
              end
       text = text.downcase if flags.include?("#") && !flags.include?("^")
       __text__(text, flags.delete("#"), width)
@@ -892,8 +895,8 @@ class Time
 
   # The first `digits` digits of the fraction of a second.
   def __fraction__(digits)
-    if @nanoseconds.is_a?(Integer)
-      text = @nanoseconds.to_s.rjust(9, "0")
+    if @__nanoseconds__.is_a?(Integer)
+      text = @__nanoseconds__.to_s.rjust(9, "0")
       return digits <= 9 ? text[0, digits] : text + "0" * (digits - 9)
     end
     (subsec * 10**digits).floor.to_s.rjust(digits, "0")
@@ -960,16 +963,16 @@ class Time
 
     def self.local
       name = ENV["TZ"]
-      @zones ||= {}
+      @__zones__ ||= {}
       key = name.nil? ? :system : name
-      @zones[key] ||= new(name)
+      @__zones__[key] ||= new(name)
     end
 
     def initialize(name)
-      @transitions = []
-      @types = []
-      @rule = nil
-      @fallback = [0, false, "UTC"]
+      @__transitions__ = []
+      @__types__ = []
+      @__rule__ = nil
+      @__fallback__ = [0, false, "UTC"]
       if name.nil? || name.empty?
         __load__("/etc/localtime") if File.exist?("/etc/localtime")
         return
@@ -984,30 +987,30 @@ class Time
           end
         end
       end
-      @rule = Zone.__rule__(name)
+      @__rule__ = Zone.__rule__(name)
     end
 
     # Offset, summer time and abbreviation at an instant.
     def at(seconds)
-      unless @transitions.empty?
-        if seconds < @transitions[0][0]
-          return @first unless @first.nil?
-        elsif @rule.nil? || seconds < @transitions[@transitions.size - 1][0]
+      unless @__transitions__.empty?
+        if seconds < @__transitions__[0][0]
+          return @__first__ unless @__first__.nil?
+        elsif @__rule__.nil? || seconds < @__transitions__[@__transitions__.size - 1][0]
           low = 0
-          high = @transitions.size - 1
+          high = @__transitions__.size - 1
           while low < high
             middle = (low + high + 1) / 2
-            if @transitions[middle][0] <= seconds
+            if @__transitions__[middle][0] <= seconds
               low = middle
             else
               high = middle - 1
             end
           end
-          return @types[@transitions[low][1]]
+          return @__types__[@__transitions__[low][1]]
         end
       end
-      return @fallback if @rule.nil?
-      Zone.__apply__(@rule, seconds)
+      return @__fallback__ if @__rule__.nil?
+      Zone.__apply__(@__rule__, seconds)
     end
 
     # The instant a wall-clock reading names. A reading that happens twice,
@@ -1057,19 +1060,19 @@ class Time
       at = at + types * 6
       names = data[at, chars]
       at = at + chars + leaps * (step + 4) + isstd + isut
-      @types = raw.map do |offset, dst, name_at|
+      @__types__ = raw.map do |offset, dst, name_at|
         stop = name_at
         stop = stop + 1 while stop < names.bytesize && names.getbyte(stop) != 0
         [offset, dst, names[name_at, stop - name_at]]
       end
-      @transitions = (0...times).map { |i| [instants[i], indexes[i]] }
-      @first = @types.find { |type| !type[1] } || @types[0]
-      @fallback = @transitions.empty? ? (@types[0] || @fallback) : @types[@transitions[times - 1][1]]
+      @__transitions__ = (0...times).map { |i| [instants[i], indexes[i]] }
+      @__first__ = @__types__.find { |type| !type[1] } || @__types__[0]
+      @__fallback__ = @__transitions__.empty? ? (@__types__[0] || @__fallback__) : @__types__[@__transitions__[times - 1][1]]
       if wide && data.getbyte(at) == 10
         stop = at + 1
         stop = stop + 1 while stop < data.bytesize && data.getbyte(stop) != 10
         footer = data[at + 1, stop - at - 1]
-        @rule = Zone.__rule__(footer) unless footer.empty?
+        @__rule__ = Zone.__rule__(footer) unless footer.empty?
       end
     end
 

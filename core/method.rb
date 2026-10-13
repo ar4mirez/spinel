@@ -77,6 +77,10 @@ class Method
   end
 
   def call(*args, **keywords, &block)
+    # A name the receiver only answers through `method_missing`.
+    if @__found__[6].is_a?(Symbol)
+      return @__receiver__.__send__(:method_missing, @__name__, *args, **keywords, &block)
+    end
     __method_call__(@__found__[0], @__name__, @__receiver__, *args, **keywords, &block)
   end
   alias [] call
@@ -197,6 +201,12 @@ module Kernel
     name = Kernel.__method_name__(name)
     found = __reflect_method_lookup__(self, nil, name, false)
     if found.nil?
+      # A name `respond_to_missing?` claims is a method all the same: one
+      # that calls `method_missing`, takes anything, and is equal to another
+      # of the same name. Its place in the lookup is the name itself.
+      if respond_to_missing?(name, true)
+        return Method.__make__(self, name, [self.class, -1, :public, nil, nil, nil, name, name])
+      end
       raise NameError.new("undefined method '#{name}' for #{Kernel.__method_home__(self)}", name, receiver: self)
     end
     Method.__make__(self, name, found)

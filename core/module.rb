@@ -115,7 +115,8 @@ class Module
     else
       raise TypeError, "no implicit conversion of #{name.nil? ? "nil" : name.class} into String"
     end
-    unless symbol.to_s.match?(/\A[A-Z][A-Za-z0-9_]*\z/)
+    # A capital, then word characters — which past ASCII is any character.
+    unless symbol.to_s.match?(/\A[A-Z](?:[A-Za-z0-9_]|[^\x00-\x7F])*\z/)
       raise NameError.new("wrong constant name #{symbol}", symbol)
     end
     symbol

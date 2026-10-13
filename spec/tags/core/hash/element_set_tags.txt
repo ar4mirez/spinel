@@ -1,0 +1,1 @@
+fails(an Array key is hashed by its contents without calling its own hash method):Hash#[]= stores unequal keys that hash to the same value
