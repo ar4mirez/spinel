@@ -1098,7 +1098,38 @@ class String
 
   # Character positions, as `MatchData` answers them; an empty match at the
   # current start is skipped once and then splits off one character.
+  # The split, over matches already found. An empty match where the last
+  # piece ended divides nothing and is passed over; any other ends a piece.
+  # `$~` is left as it was, as Ruby's `split` leaves it.
+  def __split_matches__(all, lim)
+    pieces = []
+    size = length
+    beg = 0
+    count = 1
+    all.each do |match|
+      first = match.begin(0)
+      last = match.end(0)
+      next if first == beg && last == first
+      pieces.push(self[beg, first - beg])
+      beg = last
+      index = 1
+      groups = match.size
+      while index < groups
+        pieces.push(match[index]) unless match.begin(index).nil?
+        index = index + 1
+      end
+      count = count + 1
+      break if lim > 0 && lim <= count
+    end
+    if lim > 0 || size > beg || lim < 0
+      pieces.push(beg >= size ? String.new(encoding: encoding) : self[beg, size - beg])
+    end
+    pieces
+  end
+
   def __split_regexp__(pattern, lim)
+    all = pattern.__match_all__(self)
+    return __split_matches__(all, lim) unless all.nil?
     pieces = []
     size = length
     beg = 0
@@ -1194,6 +1225,23 @@ class String
 
   def scan(pattern, &block)
     pattern = Regexp.new(Regexp.escape(String.__coerce__(pattern))) unless pattern.is_a?(Regexp)
+    # Every match in one reading of the String, when the engine can give
+    # them; the loop below is for a subject it cannot.
+    all = pattern.__match_all__(self)
+    unless all.nil?
+      found = []
+      all.each do |match|
+        item = match.size > 1 ? match.captures : match[0]
+        if block.nil?
+          found.push(item)
+        else
+          $~ = match
+          block.call(item)
+        end
+      end
+      $~ = all.last
+      return block.nil? ? found : self
+    end
     found = []
     at = 0
     last_match = nil
@@ -1267,6 +1315,33 @@ class String
     at = 0
     copied = 0
     last_match = nil
+    # Every match in one reading of the String, for a global substitution the
+    # engine can do that for. What lies between two matches is copied as it
+    # is, which is also what carries the character after an empty match.
+    all = global ? pattern.__match_all__(source) : nil
+    unless all.nil?
+      all.each do |match|
+        on_match&.call
+        first = match.begin(0)
+        out << source[copied, first - copied] if first > copied
+        piece =
+          if hash
+            hash[match[0]].to_s
+          elsif template
+            literal ? template : __expand_template__(template, match)
+          else
+            $~ = match
+            answer = block.call(match[0]).to_s
+            raise RuntimeError, "string modified" if bang && self != source
+            answer
+          end
+        out << piece
+        copied = match.end(0)
+      end
+      out << source[copied, size - copied] if copied < size
+      $~ = all.last
+      return out
+    end
     while at <= size
       match = pattern.match(source, at)
       break if match.nil?
