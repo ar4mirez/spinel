@@ -282,14 +282,15 @@ module Kernel
     all ? __reflect_method_names__(__reflect_class_of__(self), true, 3) : __own_method_names__(3)
   end
 
-  # Without `all`, the singleton class's methods and then the object's own
-  # class's, but no ancestor's: `Class.private_methods(false)` lists
-  # `Class#initialize`. Measured.
+  # Without `all`, every singleton class on the way up and every module
+  # mixed into one, and then the first ordinary class and no further:
+  # `F.public_methods(false)` lists the singleton methods of F's superclass,
+  # and `Class.private_methods(false)` lists `Class#initialize`. Measured.
   def __own_method_names__(which)
-    klass = __reflect_class_of__(self)
-    names = __reflect_method_names__(klass, false, which)
-    if __reflect_is_singleton__(klass)
-      __reflect_method_names__(self.class, false, which).each { |name| names.push(name) unless names.include?(name) }
+    names = []
+    __reflect_class_of__(self).ancestors.each do |ancestor|
+      __reflect_method_names__(ancestor, false, which).each { |name| names.push(name) unless names.include?(name) }
+      break if ancestor.instance_of?(Class) && !__reflect_is_singleton__(ancestor)
     end
     names
   end

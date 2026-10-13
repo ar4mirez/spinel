@@ -7,6 +7,19 @@ class Symbol
     self
   end
 
+  # Matching is the name's: the Symbol is its String for the purpose.
+  def =~(pattern)
+    to_s =~ pattern
+  end
+
+  def match(*args, &block)
+    to_s.match(*args, &block)
+  end
+
+  def match?(*args)
+    to_s.match?(*args)
+  end
+
   # `:"a b"` and `:ab` are the same kind of object but do not print the same
   # way: a name that could not be written bare after a colon is quoted, and
   # `:"#{nil}"` is `:""` rather than a lone colon.

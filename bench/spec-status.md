@@ -32,7 +32,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/hash` | 69 | 562 | 506 | 0 | 52 | 4 | 90% |
 | `core/integer` | 70 | 598 | 501 | 0 | 87 | 10 | 84% |
 | `core/io` | 103 | 1629 | 284 | 0 | 1316 | 29 | 17% |
-| `core/kernel` | 118 | 2216 | 1555 | 0 | 594 | 67 | 70% |
+| `core/kernel` | 118 | 2216 | 1561 | 0 | 594 | 61 | 70% |
 | `core/main` | 7 | 27 | 4 | 0 | 23 | 0 | 15% |
 | `core/marshal` | 6 | 475 | 452 | 0 | 18 | 5 | 95% |
 | `core/matchdata` | 30 | 186 | 170 | 0 | 15 | 1 | 91% |
@@ -57,7 +57,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/sizedqueue` | 16 | 61 | 0 | 0 | 61 | 0 | 0% |
 | `core/string` | 151 | 3906 | 3456 | 0 | 429 | 21 | 88% |
 | `core/struct` | 30 | 170 | 167 | 0 | 3 | 0 | 98% |
-| `core/symbol` | 29 | 270 | 128 | 0 | 137 | 5 | 47% |
+| `core/symbol` | 29 | 270 | 140 | 0 | 125 | 5 | 52% |
 | `core/systemexit` | 2 | 6 | 6 | 0 | 0 | 0 | 100% |
 | `core/thread` | 54 | 377 | 62 | 0 | 310 | 5 | 16% |
 | `core/threadgroup` | 5 | 8 | 0 | 0 | 8 | 0 | 0% |
@@ -131,4 +131,4 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `optional/capi` | 47 | 0 | 0 | 0 | 0 | 0 | — |
 | `optional/thread_safety` | 1 | 5 | 0 | 0 | 5 | 0 | 0% |
 | `security` | 13 | 34 | 1 | 0 | 33 | 0 | 3% |
-| **total** | 3835 | 31548 | 19616 | 0 | 11574 | 358 | 62% |
+| **total** | 3835 | 31548 | 19634 | 0 | 11562 | 352 | 62% |
