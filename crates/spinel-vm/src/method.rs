@@ -125,6 +125,11 @@ pub enum Native {
     RegexpMatch,
     /// `Regexp#match?` — a boolean, and the one matcher that leaves `$~` alone.
     RegexpMatchP,
+    /// `Regexp#__match_all__(string)`: every match, left to right, as
+    /// MatchData — one reading of the subject for all of them, where asking
+    /// `match(string, at)` again and again reads it once a match. Leaves `$~`
+    /// alone. nil for a subject it cannot read, and the caller loops instead.
+    RegexpMatchAll,
     /// `Integer#<=>` between two numbers the VM holds unboxed, which is what
     /// a sort asks a hundred thousand times. Anything else — a bignum, a
     /// Rational, an object that coerces — is `Numeric#<=>`'s, in Ruby.

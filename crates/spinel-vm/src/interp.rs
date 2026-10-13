@@ -10422,6 +10422,11 @@ fn native_call<'h>(
             stack.push(bool_value(data != Value::NIL));
             Ok(None)
         }
+        Native::RegexpMatchAll => {
+            let value = regexp_match_all(scope, call.receiver, first_arg(&call))?;
+            stack.push(value);
+            Ok(None)
+        }
         Native::RegexpQuietMatch => {
             let saved = scope.last_match();
             let data = regexp_match_from(scope, call.receiver, first_arg(&call), Value::NIL)?;
@@ -10810,6 +10815,7 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             Native::RegexpNameTable,
         ),
         (Builtin::Regexp, &["__match__"], Native::RegexpQuietMatch),
+        (Builtin::Regexp, &["__match_all__"], Native::RegexpMatchAll),
         (
             Builtin::Module,
             &["attr_reader"],
@@ -12904,6 +12910,86 @@ fn regexp_match_from(
     let data = match_data_new(scope, regexp, subject, &offsets);
     scope.set_last_match(data);
     Ok(data)
+}
+
+/// [`Native::RegexpMatchAll`]: the matches `gsub` and `scan` walk.
+///
+/// After a match, the next search starts where it ended; after an empty one,
+/// a character further on, so the walk always moves. An empty match right
+/// after a non-empty one is found, as Ruby finds it.
+fn regexp_match_all(
+    scope: &mut HandleScope<'_>,
+    regexp: Value,
+    subject: Value,
+) -> Result<Value, Error> {
+    let Some(program) = regexp_program(scope, regexp) else {
+        return Ok(Value::NIL);
+    };
+    // Only a subject the engine reads as it stands. Anything else — invalid
+    // bytes, another encoding — is the one-at-a-time path's to refuse.
+    let ascii_based = string_encoding(scope, subject).is_some_and(crate::strings::ascii_compatible);
+    let Some(text) = string_text(scope, subject).filter(|_| ascii_based) else {
+        return Ok(Value::NIL);
+    };
+    // One frozen copy for every match to share. `match_data_new` would make
+    // one each, which is the whole subject again per match.
+    let subject = {
+        let original = scope.root(subject);
+        if scope.is_frozen(original) {
+            subject
+        } else {
+            let encoding = string_encoding(scope, subject).unwrap_or(crate::strings::UTF_8);
+            let copy = string_bytes_in(scope, Builtin::String.id(), text.as_bytes(), encoding);
+            let copy = scope.root(copy);
+            scope.freeze(copy);
+            scope.get(copy)
+        }
+    };
+    let subject = {
+        let handle = scope.root(subject);
+        scope.get(handle)
+    };
+    let mut found = Vec::new();
+    let mut start = 0;
+    while start <= text.len() {
+        let Some(caps) = program
+            .find_at(&text, start)
+            .map_err(|e| regexp_error(&e))?
+        else {
+            break;
+        };
+        let mut offsets = Vec::with_capacity(caps.len() * 2);
+        for group in 0..caps.len() {
+            match caps.group(group) {
+                Some((from, to)) => {
+                    for at in [from, to] {
+                        offsets.push(
+                            Value::fixnum(i64::try_from(at).unwrap_or(i64::MAX))
+                                .expect("an offset fits a fixnum"),
+                        );
+                    }
+                }
+                None => offsets.extend([Value::NIL, Value::NIL]),
+            }
+        }
+        let Some((from, to)) = caps.group(0) else {
+            break;
+        };
+        let data = match_data_new(scope, regexp, subject, &offsets);
+        // Rooted: the next match allocates.
+        found.push(scope.root(data));
+        start = if to > from {
+            to
+        } else {
+            // One character on, which is more than one byte past ASCII.
+            match text[to..].chars().next() {
+                Some(c) => to + c.len_utf8(),
+                None => break,
+            }
+        };
+    }
+    let values: Vec<Value> = found.iter().map(|handle| scope.get(*handle)).collect();
+    Ok(new_array(scope, &values))
 }
 
 fn match_data_new(
