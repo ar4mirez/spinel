@@ -451,8 +451,10 @@ class Integer
   # An index argument: an Integer, or anything with `to_int`.
   def self.__index__(value)
     return value if value.is_a?(Integer)
+    # CRuby words nil's refusal its own way. Measured.
+    raise TypeError, "no implicit conversion from nil to integer" if value.nil?
     unless value.respond_to?(:to_int)
-      raise TypeError, "no implicit conversion of #{value.nil? ? "nil" : value.class} into Integer"
+      raise TypeError, "no implicit conversion of #{value.class} into Integer"
     end
     converted = value.to_int
     unless converted.is_a?(Integer)

@@ -125,6 +125,19 @@ pub enum Native {
     RegexpMatch,
     /// `Regexp#match?` — a boolean, and the one matcher that leaves `$~` alone.
     RegexpMatchP,
+    /// `Integer#<=>` between two numbers the VM holds unboxed, which is what
+    /// a sort asks a hundred thousand times. Anything else — a bignum, a
+    /// Rational, an object that coerces — is `Numeric#<=>`'s, in Ruby.
+    NumCompare,
+    /// `Array#__sort_plain__`: the array sorted, when every element is a
+    /// fixnum or every element is a plain String in one encoding and neither
+    /// class has had its `<=>` replaced; nil otherwise, and the Ruby sort
+    /// takes over.
+    SortPlain,
+    /// `String#<<` for the case every loop that builds a String is in: an
+    /// unfrozen receiver and a String argument whose bytes can be appended
+    /// as they are. Anything else is the Ruby half's, `String#__append__`.
+    StringAppend,
     /// `Regexp#__match__`: `match`, leaving `$~` as it was. What the core
     /// library matches with, so that reading a number out of a String does
     /// not change the caller's last match.

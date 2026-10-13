@@ -524,17 +524,42 @@ module Enumerable
   # shows up in a benchmark, the upgrade path is a primitive on the Array
   # storage, not a cleverer algorithm here.
   def sort(&block)
-    __merge_sort__(to_a, block)
+    list = to_a
+    if block.nil?
+      # All fixnums, or all plain Strings: a primitive sorts those.
+      plain = list.__sort_plain__
+      return plain unless plain.nil?
+    end
+    __merge_sort__(list, block)
   end
 
   def sort_by
     return to_enum(:sort_by) { __known_size__ } unless block_given?
+    keys = []
+    items = []
+    each { |*a| item = __pack__(a); keys.push(yield(item)); items.push(item) }
+    # Keys that are all fixnums, or all plain Strings: a primitive orders the
+    # items by them.
+    plain = items.__sort_plain__(keys)
+    return plain unless plain.nil?
     keyed = []
-    each { |*a| item = __pack__(a); keyed.push([yield(item), item]) }
-    sorted = __merge_sort__(keyed, proc { |x, y| x[0] <=> y[0] })
+    index = 0
+    while index < items.size
+      keyed.push([keys[index], items[index]])
+      index = index + 1
+    end
+    # The keys are what is compared, and what a failure names.
+    sorted = __merge_sort__(keyed, proc { |x, y| (x[0] <=> y[0]) || __sort_failed__(x[0], y[0]) })
     out = []
     sorted.each { |pair| out.push(pair[1]) }
     out
+  end
+
+  # CRuby names nil, true, false and a number by what it is, and anything
+  # else by its class. Measured.
+  def __sort_failed__(a, b)
+    shown = b.nil? || b == true || b == false || b.is_a?(Integer) || b.is_a?(Float) ? b.inspect : b.class.to_s
+    raise ArgumentError, "comparison of #{a.class} with #{shown} failed"
   end
 
   def __merge_sort__(list, comparator)
@@ -550,7 +575,7 @@ module Enumerable
       b = right[j]
       cmp = comparator.nil? ? (a <=> b) : comparator.call(a, b)
       if cmp.nil?
-        raise ArgumentError, "comparison of #{a.class} with #{b.class} failed"
+        __sort_failed__(a, b)
       end
       if cmp <= 0
         out.push(a)

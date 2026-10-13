@@ -311,3 +311,9 @@ class Numeric
   def round(*digits) = __to_float__(self).round(*digits)
   def truncate(*digits) = __to_float__(self).truncate(*digits)
 end
+
+class Numeric
+  # What `Integer#<=>` falls back on for anything but two numbers the VM
+  # holds unboxed: the method above, under the name the primitive sends.
+  alias __cmp_slow__ <=>
+end

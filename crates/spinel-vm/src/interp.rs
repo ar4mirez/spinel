@@ -8003,9 +8003,15 @@ fn native_call<'h>(
                 // counting bytes and calling them characters.
                 let encoding =
                     string_encoding(scope, call.receiver).unwrap_or(crate::strings::UTF_8);
-                match crate::strings::char_offsets(encoding, &payload) {
-                    Some(offsets) => offsets.len() - 1,
-                    None => return Err(unknown_encoding("`length`")),
+                // Counted without a table of where each one starts, when one
+                // byte is one character.
+                if crate::strings::single_byte(encoding, &payload) {
+                    payload.len()
+                } else {
+                    match crate::strings::char_offsets(encoding, &payload) {
+                        Some(offsets) => offsets.len() - 1,
+                        None => return Err(unknown_encoding("`length`")),
+                    }
                 }
             };
             stack.push(Value::fixnum(length as i64).expect("a length fits a fixnum"));
@@ -8569,8 +8575,15 @@ fn native_call<'h>(
                 });
             };
             let encoding = string_encoding(scope, call.receiver).unwrap_or(crate::strings::UTF_8);
-            let Some(offsets) = crate::strings::char_offsets(encoding, &payload) else {
-                return Err(unknown_encoding("`[]`"));
+            // One byte per character needs no table: the index is the offset.
+            let single = crate::strings::single_byte(encoding, &payload);
+            let offsets = if single {
+                Vec::new()
+            } else {
+                let Some(offsets) = crate::strings::char_offsets(encoding, &payload) else {
+                    return Err(unknown_encoding("`[]`"));
+                };
+                offsets
             };
             // `s[range]`, `s["sub"]` and `s[/re/]` are three more operations
             // with three more answers. Reading only the integer form and
@@ -8583,13 +8596,23 @@ fn native_call<'h>(
                 },
                 _ => None,
             };
+            // Anything but Integers is the Ruby half's: `String#__aref__`.
             let Some((start, count, ranged)) = request else {
-                return Err(Error::NoDispatch {
-                    op: "String#[]",
-                    operands: "an index that is not an Integer",
-                });
+                let forwarded = Pending {
+                    cache: None,
+                    name: crate::shared::symbols::intern("__aref__"),
+                    target: Target::Method,
+                    owner: None,
+                    defined_as: None,
+                    ..call
+                };
+                return dispatch(scope, stack, frames, forwarded, proc_class, ids);
             };
-            let length = offsets.len() - 1;
+            let length = if single {
+                payload.len()
+            } else {
+                offsets.len() - 1
+            };
             // `s[s.length]` is `""` for the two-argument form and `nil` for the
             // one-argument form, which is Ruby and is measured, not guessed.
             let start = if start < 0 {
@@ -8607,7 +8630,11 @@ fn native_call<'h>(
             }
             let start = start as usize;
             let end = (start + count as usize).min(length);
-            let slice = &payload[offsets[start]..offsets[end]];
+            let slice = if single {
+                &payload[start..end]
+            } else {
+                &payload[offsets[start]..offsets[end]]
+            };
             let value = string_bytes_in(scope, Builtin::String.id(), slice, encoding);
             stack.push(value);
             Ok(None)
@@ -8764,6 +8791,91 @@ fn native_call<'h>(
         Native::Fiber(op) => fiber_native(scope, stack, frames, &call, op, ids),
         Native::Reflect(op) => reflect_native(scope, stack, &call, op),
         Native::Str(op) => str_native(scope, stack, &call, op),
+        Native::NumCompare => {
+            let other = first_arg(&call);
+            let pair = if call.args.len() == 1 {
+                match (num(scope, call.receiver), num(scope, other)) {
+                    (Some(a), Some(b)) => Some((a, b)),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            let Some((a, b)) = pair else {
+                let forwarded = Pending {
+                    cache: None,
+                    name: crate::shared::symbols::intern("__cmp_slow__"),
+                    target: Target::Method,
+                    owner: None,
+                    defined_as: None,
+                    ..call
+                };
+                return dispatch(scope, stack, frames, forwarded, proc_class, ids);
+            };
+            let order = match (a, b) {
+                (Num::Int(x), Num::Int(y)) => Some(x.cmp(&y)),
+                (Num::Int(i), Num::Float(f)) => int_cmp_float(i, f),
+                (Num::Float(f), Num::Int(i)) => {
+                    int_cmp_float(i, f).map(std::cmp::Ordering::reverse)
+                }
+                (Num::Float(x), Num::Float(y)) => x.partial_cmp(&y),
+            };
+            stack.push(match order {
+                Some(std::cmp::Ordering::Less) => Value::fixnum(-1).expect("a fixnum"),
+                Some(std::cmp::Ordering::Equal) => Value::fixnum(0).expect("a fixnum"),
+                Some(std::cmp::Ordering::Greater) => Value::fixnum(1).expect("a fixnum"),
+                // NaN is not comparable.
+                None => Value::NIL,
+            });
+            Ok(None)
+        }
+        Native::SortPlain => {
+            // With an argument, that Array is the keys and the receiver is
+            // what they order: `sort_by`.
+            let keys = call.args.first().copied();
+            let sorted = sort_plain(scope, call.receiver, keys);
+            stack.push(sorted);
+            Ok(None)
+        }
+        Native::StringAppend => {
+            let other = first_arg(&call);
+            let plain = call.args.len() == 1
+                && !call.receiver.is_immediate()
+                && heap_kind(scope, call.receiver) == Some(HeapKind::Str)
+                && heap_kind(scope, other) == Some(HeapKind::Str)
+                && {
+                    let handle = scope.root(call.receiver);
+                    !scope.is_frozen(handle)
+                };
+            if plain {
+                let mine = string_encoding(scope, call.receiver).unwrap_or(crate::strings::UTF_8);
+                let theirs = string_encoding(scope, other).unwrap_or(crate::strings::UTF_8);
+                let bytes = string_bytes(scope, other).unwrap_or_default();
+                // The same encoding, or ASCII into anything ASCII-compatible:
+                // the receiver's encoding stands and the bytes go on the end.
+                // Both sides ASCII-compatible: UTF-16 text can be all bytes
+                // below 0x80 and is not ASCII for that.
+                let ascii = bytes.is_ascii()
+                    && crate::strings::ascii_compatible(mine)
+                    && crate::strings::ascii_compatible(theirs);
+                if mine == theirs || ascii {
+                    let receiver = scope.root(call.receiver);
+                    let at = crate::strings::bytes(scope, receiver).len();
+                    crate::strings::splice(scope, receiver, at, 0, &bytes);
+                    stack.push(call.receiver);
+                    return Ok(None);
+                }
+            }
+            let forwarded = Pending {
+                cache: None,
+                name: crate::shared::symbols::intern("__append__"),
+                target: Target::Method,
+                owner: None,
+                defined_as: None,
+                ..call
+            };
+            dispatch(scope, stack, frames, forwarded, proc_class, ids)
+        }
 
         Native::RaiseNoMethod => {
             let name = call
@@ -11307,6 +11419,9 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             Native::Str(StrOp::ForceEncoding),
         ),
         (Builtin::String, &["__splice__"], Native::Str(StrOp::Splice)),
+        (Builtin::String, &["<<"], Native::StringAppend),
+        (Builtin::Integer, &["<=>"], Native::NumCompare),
+        (Builtin::Array, &["__sort_plain__"], Native::SortPlain),
         (
             Builtin::String,
             &["__byte_index__"],
@@ -11407,7 +11522,7 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             Native::AbsolutePath,
         ),
         (Builtin::Float, &["to_s"], Native::FloatToS),
-        (Builtin::String, &["__index__"], Native::StringIndex),
+        (Builtin::String, &["__index__", "[]"], Native::StringIndex),
         (Builtin::String, &["<=>"], Native::StringCompare),
     ];
     for (builtin, names, native) in table {
@@ -11673,6 +11788,77 @@ fn int_eq_float(i: i64, f: f64) -> bool {
         return false;
     }
     f as i64 == i
+}
+
+/// Whether `builtin`'s `name` is still the primitive `wanted`: a program that
+/// has written its own `<=>` must be asked.
+fn still_native(scope: &mut HandleScope<'_>, builtin: Builtin, name: &str, wanted: Native) -> bool {
+    let symbol = crate::shared::symbols::intern(name);
+    let Some(method) = scope.classes_mut().lookup(builtin.id(), symbol) else {
+        return false;
+    };
+    matches!(
+        scope.definitions().get(method.body),
+        Some(Definition::Native(native)) if *native == wanted
+    )
+}
+
+/// [`Native::SortPlain`]: a new, sorted Array for the two shapes worth a
+/// primitive, and nil for every other.
+///
+/// Stable, so equal Strings — which are different objects — keep their order,
+/// as the Ruby merge sort this stands in for keeps it.
+fn sort_plain(scope: &mut HandleScope<'_>, array: Value, keys: Option<Value>) -> Value {
+    let Some(carried) = array_elements(scope, array) else {
+        return Value::NIL;
+    };
+    // What is compared: the elements themselves, or one key each.
+    let elements = match keys {
+        Some(keys) => match array_elements(scope, keys) {
+            Some(keys) if keys.len() == carried.len() => keys,
+            _ => return Value::NIL,
+        },
+        None => carried.clone(),
+    };
+    if elements.len() < 2 {
+        return Value::NIL;
+    }
+    if elements.iter().all(|v| v.as_fixnum().is_some()) {
+        if !still_native(scope, Builtin::Integer, "<=>", Native::NumCompare) {
+            return Value::NIL;
+        }
+        let mut order: Vec<usize> = (0..elements.len()).collect();
+        order.sort_by_key(|&at| elements[at].as_fixnum().unwrap_or(0));
+        let sorted: Vec<Value> = order.into_iter().map(|at| carried[at]).collect();
+        return new_array(scope, &sorted);
+    }
+    if !still_native(scope, Builtin::String, "<=>", Native::StringCompare) {
+        return Value::NIL;
+    }
+    let mut keyed: Vec<(Vec<u8>, Value)> = Vec::with_capacity(elements.len());
+    let mut encoding = None;
+    for (at, &element) in elements.iter().enumerate() {
+        // A plain String, of class String itself: a subclass, or one with a
+        // singleton class, may have its own `<=>`.
+        if element.is_immediate()
+            || heap_kind(scope, element) != Some(HeapKind::Str)
+            || class_of(scope, element) != Some(Builtin::String.id())
+        {
+            return Value::NIL;
+        }
+        let this = string_encoding(scope, element);
+        if encoding.is_some_and(|seen| seen != this) {
+            return Value::NIL;
+        }
+        encoding = Some(this);
+        let Some(bytes) = string_bytes(scope, element) else {
+            return Value::NIL;
+        };
+        keyed.push((bytes, carried[at]));
+    }
+    keyed.sort_by(|a, b| a.0.cmp(&b.0));
+    let sorted: Vec<Value> = keyed.into_iter().map(|(_, value)| value).collect();
+    new_array(scope, &sorted)
 }
 
 /// A fixnum against an `f64`, exactly: the ordering [`int_eq_float`] is the
@@ -12673,7 +12859,11 @@ fn regexp_match_from(
                     ),
                 });
             };
-            let chars = text.chars().count() as i64;
+            let chars = if text.is_ascii() {
+                text.len()
+            } else {
+                text.chars().count()
+            } as i64;
             let from = if n < 0 { chars + n } else { n };
             if from < 0 || from > chars {
                 scope.set_last_match(Value::NIL);
@@ -12883,8 +13073,18 @@ fn defined_match(scope: &mut HandleScope<'_>, which: &MatchRef) -> bool {
 /// engine works in bytes.
 fn char_offset(text: &Subject, byte: usize) -> i64 {
     let prefix = &text.bytes[..byte.min(text.len())];
-    let count = crate::strings::char_offsets(text.encoding, prefix)
-        .map_or(prefix.len(), |offsets| offsets.len() - 1);
+    // Counted, not tabulated: one byte per character is the byte itself, and
+    // UTF-8 is counted without keeping where each character was.
+    let count = if crate::strings::single_byte(text.encoding, prefix) {
+        prefix.len()
+    } else if text.encoding == crate::strings::UTF_8
+        && let Ok(valid) = std::str::from_utf8(prefix)
+    {
+        valid.chars().count()
+    } else {
+        crate::strings::char_offsets(text.encoding, prefix)
+            .map_or(prefix.len(), |offsets| offsets.len() - 1)
+    };
     i64::try_from(count).unwrap_or(i64::MAX)
 }
 
