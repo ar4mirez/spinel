@@ -7354,6 +7354,35 @@ fn native_call<'h>(
     proc_class: Handle<'h>,
     ids: &mut u64,
 ) -> Result<Option<Unwind>, Error> {
+    // A method or variable name that is neither a Symbol nor a String is
+    // asked for its `to_str`, once, and that is a send — so the call goes to
+    // `Module#__names_then__`, which converts and calls back here with names
+    // these primitives can read. Measured: `attr_reader o` calls `o.to_str`.
+    let names = match native {
+        Native::AttrDefine { .. } | Native::ModuleFunction => call.args.len(),
+        Native::ClassVariable(CvarOp::Get | CvarOp::Set | CvarOp::Defined)
+        | Native::MethodDefined => call.args.len().min(1),
+        _ => 0,
+    };
+    if call.args[..names]
+        .iter()
+        .any(|&v| v.as_symbol().is_none() && string_bytes(scope, v).is_none())
+    {
+        let mut args = Vec::with_capacity(call.args.len() + 2);
+        args.push(Value::symbol(call.name));
+        args.push(Value::fixnum(names as i64).unwrap_or(Value::NIL));
+        args.extend_from_slice(&call.args);
+        let forwarded = Pending {
+            cache: None,
+            name: crate::shared::symbols::intern("__names_then__"),
+            target: Target::Method,
+            owner: None,
+            defined_as: None,
+            args,
+            ..call
+        };
+        return dispatch(scope, stack, frames, forwarded, proc_class, ids);
+    }
     match native {
         // Two that push a frame rather than returning a value, which is why
         // `Native` is an enum the loop matches and not a function pointer.

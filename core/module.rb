@@ -80,6 +80,28 @@ end
 class Module
   # Readers only, since Ruby 3 — except the obsolete `attr(name, true)`,
   # which still makes a writer too. Measured.
+  # Where a primitive that takes names sends a call holding one that is
+  # neither a Symbol nor a String: each such name is converted with `to_str`,
+  # once, and the call made again.
+  #
+  # ponytail: the second call is made from here, so an `attr_reader` given
+  # such a name takes this frame's default visibility, which is public,
+  # rather than the class body's.
+  def __names_then__(method, count, *args, &block)
+    converted = []
+    args.each_with_index do |name, index|
+      converted.push(index < count ? Module.__name_arg__(name) : name)
+    end
+    __send__(method, *converted, &block)
+  end
+
+  def self.__name_arg__(name)
+    return name if name.is_a?(Symbol) || name.is_a?(String)
+    converted = name.respond_to?(:to_str) ? name.to_str : nil
+    return converted if converted.is_a?(String)
+    raise TypeError, "#{name.inspect} is not a symbol nor a string"
+  end
+
   def attr(*names)
     if names.size == 2 && (names[1] == true || names[1] == false)
       __warning__("optional boolean argument is obsoleted", true)
@@ -146,6 +168,7 @@ class Module
   end
 
   def const_get(name, inherit = true)
+    name = name.to_str if !name.is_a?(Symbol) && !name.is_a?(String) && name.respond_to?(:to_str)
     path = __const_path?(name)
     unless path.nil?
       top, parts = __const_path__(path)
@@ -182,6 +205,7 @@ class Module
   end
 
   def const_defined?(name, inherit = true)
+    name = name.to_str if !name.is_a?(Symbol) && !name.is_a?(String) && name.respond_to?(:to_str)
     path = __const_path?(name)
     unless path.nil?
       top, parts = __const_path__(path)
