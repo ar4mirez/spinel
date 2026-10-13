@@ -1,0 +1,1 @@
+fails(a Method keeps the owner and the name rather than the definition, so a visibility change on a subclass is taken for a method of its own):Method#super_method after changing an inherited methods visibility returns the expected super_method

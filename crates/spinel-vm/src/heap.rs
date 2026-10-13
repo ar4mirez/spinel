@@ -75,6 +75,12 @@ const MARKED: u8 = 0b1;
 /// path of every mutating method, and a side table would be a lookup there.
 const FROZEN: u8 = 0b10;
 
+/// Set on an object whose instance variables live in the heap's side table
+/// rather than in its first slot — a `String`, an `Array`, anything whose
+/// payload is its own representation. Gates the lookup, so tracing an object
+/// that holds none stays a flag test.
+const SIDE_IVARS: u8 = 0b100;
+
 /// Set from allocation until the cell is swept onto a free list.
 ///
 /// The collector never reads it. It exists so that storing a `Value` can assert, in
@@ -245,6 +251,11 @@ pub struct Heap {
     /// Give it a frame slot when frames carry their own specials, and a
     /// Ractor-local when threads arrive.
     last_match: Value,
+    /// Instance-variable storage for the objects flagged `SIDE_IVARS`, by
+    /// address. An entry lives exactly as long as its object: traced from it
+    /// in `mark`, dropped with it before `sweep`. Addresses are stable
+    /// because the collector does not move.
+    side_ivars: HashMap<usize, Value>,
     /// `$!`: the exception currently being handled, or nil (#206).
     ///
     /// Beside `last_match` rather than in `globals` for the same reason: it is
@@ -357,6 +368,7 @@ impl Heap {
             regexps: crate::regexp::Regexps::new(),
             fibers: crate::interp::FiberTable::default(),
             last_match: Value::NIL,
+            side_ivars: HashMap::new(),
             name_error: None,
             errinfo: Value::NIL,
             main: Value::NIL,
@@ -722,6 +734,11 @@ impl Heap {
             if let Some(class) = class {
                 Heap::shade(&mut self.mark_stack, class);
             }
+            if header.flags & SIDE_IVARS != 0
+                && let Some(storage) = self.side_ivars.get(&(obj.0.as_ptr() as usize))
+            {
+                Heap::shade(&mut self.mark_stack, *storage);
+            }
             if payload == Payload::Slots {
                 let slots = obj.slots();
                 for i in 0..len as usize {
@@ -754,6 +771,14 @@ impl Heap {
 
     /// Rebuild every free list from the unmarked cells, and free unmarked large objects.
     fn sweep(&mut self) {
+        // Before any cell is relinked or freed: an entry whose object did not
+        // survive goes with it, so a later object at the same address does
+        // not inherit its instance variables.
+        self.side_ivars.retain(|&address, _| {
+            // SAFETY: an entry is only ever made for a live object of this
+            // heap, and nothing has been freed yet in this cycle.
+            unsafe { (*(address as *const Header)).flags & MARKED != 0 }
+        });
         self.free = [ptr::null_mut(); CLASS_COUNT];
         let mut live_bytes = 0;
         let mut live_objects = 0;
@@ -1185,6 +1210,34 @@ impl<'h> HandleScope<'h> {
         unsafe { (*self.object(handle).header()).shape }
     }
 
+    /// Whether the object's instance variables are kept in the side table.
+    pub(crate) fn has_side_ivars(&self, handle: Handle<'h>) -> bool {
+        // SAFETY: as above.
+        unsafe { (*self.object(handle).header()).flags & SIDE_IVARS != 0 }
+    }
+
+    /// The storage object behind a side-table object's instance variables,
+    /// or nil before the first is written.
+    pub(crate) fn side_ivars(&self, handle: Handle<'h>) -> Value {
+        let address = self.object(handle).0.as_ptr() as usize;
+        self.heap
+            .side_ivars
+            .get(&address)
+            .copied()
+            .unwrap_or(Value::NIL)
+    }
+
+    /// Give the object side-table storage. Cannot collect.
+    pub(crate) fn set_side_ivars(&mut self, handle: Handle<'h>, storage: Value) {
+        self.storable(storage);
+        let object = self.object(handle);
+        // SAFETY: as above.
+        unsafe { (*object.header()).flags |= SIDE_IVARS }
+        self.heap
+            .side_ivars
+            .insert(object.0.as_ptr() as usize, storage);
+    }
+
     /// Record a transition. Cannot collect; the caller has already written the
     /// value the new shape describes.
     pub fn set_shape(&mut self, handle: Handle<'h>, shape: ShapeId) {
@@ -1353,6 +1406,37 @@ mod tests {
             assert!(cell >= size_of::<Header>() + size_of::<Value>(), "{cell}");
             assert_eq!(cell % 16, 0, "{cell} would misalign the next cell");
         }
+    }
+
+    /// Side-table instance variables live exactly as long as their object: the
+    /// storage is traced from an owner that holds bytes and has no slot to
+    /// reach it by, and the entry goes when the owner does — so the next
+    /// object at that address starts with none.
+    #[test]
+    fn side_ivars_are_traced_from_their_object_and_dropped_with_it() {
+        let mut heap = Heap::new();
+        let mut scope = heap.scope();
+        let kept = scope.alloc(None, Payload::Bytes, 8);
+        {
+            let mut inner = scope.nested();
+            let storage = inner.alloc(None, Payload::Slots, 2);
+            inner.set_slot(storage, 0, Value::TRUE);
+            let storage = inner.get(storage);
+            inner.set_side_ivars(kept, storage);
+            // A second owner that nothing keeps.
+            let lost = inner.alloc(None, Payload::Bytes, 8);
+            let storage = inner.alloc(None, Payload::Slots, 2);
+            let storage = inner.get(storage);
+            inner.set_side_ivars(lost, storage);
+        }
+        assert_eq!(scope.heap.side_ivars.len(), 2);
+        scope.collect();
+        assert_eq!(scope.heap.side_ivars.len(), 1);
+        assert_eq!(scope.stats().live_objects, 2);
+        assert!(scope.has_side_ivars(kept));
+        let storage = scope.side_ivars(kept);
+        let storage = scope.root(storage);
+        assert_eq!(scope.slot(storage, 0), Value::TRUE);
     }
 
     // T2

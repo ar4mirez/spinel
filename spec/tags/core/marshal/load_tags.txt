@@ -1,0 +1,1 @@
+fails(a Regexp does not keep the encoding of a source that is not ASCII-compatible - #33):Marshal.load for a Regexp preserves Regexp encoding

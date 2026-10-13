@@ -4514,11 +4514,11 @@ fn make_proc<'h>(
 /// are: there was nowhere else to put them. Now that there is, `Exception`'s
 /// accessors are three lines of `core/exception.rb` rather than two natives.
 ///
-/// `@backtrace` is always `nil`. A real backtrace needs source positions the
+/// `@__backtrace__` is always `nil`. A real backtrace needs source positions the
 /// compiler does not record, and `[]` would be a plausible-but-wrong answer
 /// rather than an absent one — see the non-goals in PRD 0012.
-const EXC_MESSAGE: &str = "@message";
-const EXC_BACKTRACE: &str = "@backtrace";
+const EXC_MESSAGE: &str = "@__message__";
+const EXC_BACKTRACE: &str = "@__backtrace__";
 /// See [`attach_backtrace`].
 const EXC_LOCATIONS: &str = "@__backtrace_locations__";
 /// `Exception#cause`, set on the first raise. See [`attach_backtrace`].
@@ -4671,7 +4671,7 @@ fn backtrace_string(line: &BacktraceLine) -> String {
 ///
 /// An exception raised a second time keeps the backtrace of the first raise —
 /// `raise e` in a `rescue` is how a handler passes one on, and the position
-/// that matters is where it started. Two ivars: `@backtrace` is the Array of
+/// that matters is where it started. Two ivars: `@__backtrace__` is the Array of
 /// Strings `Exception#backtrace` answers, and `@__backtrace_locations__` is the
 /// same lines as `[path, line, label]` for `backtrace_locations`, which
 /// `core/exception.rb` turns into `Thread::Backtrace::Location`s on demand.
@@ -5081,6 +5081,10 @@ fn exception_message(scope: &mut HandleScope<'_>, exception: Value) -> String {
     let Ok(text) = ivar_get(scope, exception, symbol(EXC_MESSAGE)) else {
         return String::new();
     };
+    // No message was given, and then it is the class name: `raise Foo`.
+    if text == Value::NIL {
+        return class_name(scope, exception);
+    }
     if text.is_immediate() {
         return String::new();
     }
@@ -6692,36 +6696,6 @@ pub(crate) fn alloc_ivar_object<'h>(
     handle
 }
 
-/// Why this object cannot hold an instance variable.
-///
-/// Named per representation rather than bucketed, because the blocked-reason
-/// ranking is how the next slice gets chosen and one bucket for every built-in
-/// tells nobody which representation to give a slot to first.
-fn ivar_refusal(scope: &mut HandleScope<'_>, value: Value) -> Error {
-    let mut nested = scope.nested();
-    let handle = nested.root(value);
-    let class = nested.class(handle);
-    let classes = nested.classes();
-    let named = |builtin: Builtin| class == Some(classes.object(builtin.id()));
-    let what = if named(Builtin::Array) {
-        "an instance variable on an `Array`"
-    } else if named(Builtin::String) {
-        "an instance variable on a `String`"
-    } else if named(Builtin::Proc) {
-        "an instance variable on a `Proc`"
-    } else if named(Builtin::Regexp) {
-        "an instance variable on a `Regexp`"
-    } else if named(Builtin::MatchData) {
-        "an instance variable on a `MatchData`"
-    } else {
-        "an instance variable on a built-in with a representation of its own"
-    };
-    Error::Unknowable {
-        what,
-        needs: "that representation reserves an ivar slot (#151)",
-    }
-}
-
 /// The value of `name` on `object`, or `nil` — which is Ruby's answer for an
 /// instance variable that was never assigned.
 ///
@@ -6741,12 +6715,12 @@ pub(crate) fn ivar_get(
     let handle = nested.root(object);
     let shape = nested.shape(handle);
     if shape == ShapeId::NONE {
-        return Err(ivar_refusal(&mut nested, object));
+        return Ok(Value::NIL);
     }
     let Some(index) = nested.shapes().index_of(shape, name) else {
         return Ok(Value::NIL);
     };
-    let storage = nested.slot(handle, SLOT_IVARS);
+    let storage = ivar_storage(&nested, handle);
     debug_assert!(storage != Value::NIL, "a shape with no storage behind it");
     let storage = nested.root(storage);
     Ok(nested.slot(storage, index as usize))
@@ -6765,10 +6739,7 @@ fn ivar_defined(scope: &mut HandleScope<'_>, object: Value, name: SymbolId) -> R
     let mut nested = scope.nested();
     let handle = nested.root(object);
     let shape = nested.shape(handle);
-    if shape == ShapeId::NONE {
-        return Err(ivar_refusal(&mut nested, object));
-    }
-    Ok(nested.shapes().index_of(shape, name).is_some())
+    Ok(shape != ShapeId::NONE && nested.shapes().index_of(shape, name).is_some())
 }
 
 /// Set `name` on `object` to `value`, transitioning its shape if this is the
@@ -6799,9 +6770,14 @@ pub(crate) fn ivar_set(
             object,
         ));
     }
-    let shape = nested.shape(handle);
+    let mut shape = nested.shape(handle);
     if shape == ShapeId::NONE {
-        return Err(ivar_refusal(&mut nested, object));
+        // An object whose payload is its own representation — a `String`, an
+        // `Array` — has no slot to spare, so its storage goes in the heap's
+        // side table. From here on it wears a shape like any other.
+        nested.set_side_ivars(handle, Value::NIL);
+        nested.set_shape(handle, ShapeId::ROOT);
+        shape = ShapeId::ROOT;
     }
     let (index, value) = match nested.shapes().index_of(shape, name) {
         Some(index) => (index, value),
@@ -6822,10 +6798,28 @@ pub(crate) fn ivar_set(
             (index, value)
         }
     };
-    let storage = nested.slot(handle, SLOT_IVARS);
+    let storage = ivar_storage(&nested, handle);
     let storage = nested.root(storage);
     nested.set_slot(storage, index as usize, value);
     Ok(value)
+}
+
+/// The object holding `object`'s instance variables, or nil: its first slot,
+/// or its side-table entry where the payload is a representation of its own.
+fn ivar_storage<'h>(scope: &HandleScope<'h>, object: Handle<'h>) -> Value {
+    if scope.has_side_ivars(object) {
+        scope.side_ivars(object)
+    } else {
+        scope.slot(object, SLOT_IVARS)
+    }
+}
+
+fn set_ivar_storage<'h>(scope: &mut HandleScope<'h>, object: Handle<'h>, storage: Value) {
+    if scope.has_side_ivars(object) {
+        scope.set_side_ivars(object, storage);
+    } else {
+        scope.set_slot(object, SLOT_IVARS, storage);
+    }
 }
 
 /// Storage room for at least `wanted` instance variables, copying the ones
@@ -6840,7 +6834,7 @@ fn ivar_reserve<'h>(
     wanted: u16,
     keep: Value,
 ) -> Value {
-    let current = scope.slot(object, SLOT_IVARS);
+    let current = ivar_storage(scope, object);
     let capacity = if current == Value::NIL {
         0
     } else {
@@ -6864,7 +6858,7 @@ fn ivar_reserve<'h>(
         }
     }
     let fresh = scope.get(fresh);
-    scope.set_slot(object, SLOT_IVARS, fresh);
+    set_ivar_storage(scope, object, fresh);
     scope.get(keep)
 }
 
@@ -7132,7 +7126,10 @@ fn dup_value(scope: &mut HandleScope<'_>, value: Value) -> Result<Value, Error> 
     let shape = scope.shape(source);
     scope.set_shape(copy, shape);
     if shape != ShapeId::NONE {
-        let storage = scope.slot(source, SLOT_IVARS);
+        if scope.has_side_ivars(source) {
+            scope.set_side_ivars(copy, Value::NIL);
+        }
+        let storage = ivar_storage(scope, source);
         if storage != Value::NIL {
             let storage = scope.root(storage);
             let capacity = scope.len(storage);
@@ -7142,7 +7139,7 @@ fn dup_value(scope: &mut HandleScope<'_>, value: Value) -> Result<Value, Error> 
                 scope.set_slot(fresh, index, ivar);
             }
             let fresh = scope.get(fresh);
-            scope.set_slot(copy, SLOT_IVARS, fresh);
+            set_ivar_storage(scope, copy, fresh);
         }
     }
     Ok(scope.get(copy))
@@ -7570,6 +7567,19 @@ fn native_call<'h>(
                 };
                 let class = scope.classes().object(id);
                 let exception = exception_of(scope, class, &message);
+                // No message is kept as none: `to_s` answers the class name,
+                // and `Marshal` writes the nil. A String is kept as the
+                // object it is, encoding and all — measured:
+                // `Exception.new(s).message.equal?(s)`.
+                match call.args.first().copied() {
+                    None | Some(Value::NIL) => {
+                        ivar_set(scope, exception, symbol(EXC_MESSAGE), Value::NIL)?;
+                    }
+                    Some(given) if string_bytes(scope, given).is_some() => {
+                        ivar_set(scope, exception, symbol(EXC_MESSAGE), given)?;
+                    }
+                    Some(_) => {}
+                }
                 stack.push(exception);
                 return Ok(None);
             }
@@ -10642,7 +10652,11 @@ fn raise_argument(
             .map_or_else(String::new, str::to_owned),
     };
     let class = scope.classes().object(id);
-    Ok(exception_of(scope, class, &message))
+    let exception = exception_of(scope, class, &message);
+    if args.len() < 2 {
+        ivar_set(scope, exception, symbol(EXC_MESSAGE), Value::NIL)?;
+    }
+    Ok(exception)
 }
 
 /// Whether `value`'s class defines `#to_ary`, which is what decides whether
