@@ -986,6 +986,11 @@ impl Classes {
         let Some(found) = self.lookup_for_module(id, name) else {
             return false;
         };
+        // Already so in the ancestor: nothing changes, and no copy is made
+        // here to say it again. Measured.
+        if found.visibility == visibility {
+            return true;
+        }
         self.entry_mut(id)
             .methods
             .insert(name, (found.body, found.cref, visibility));
