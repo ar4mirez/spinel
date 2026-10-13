@@ -852,6 +852,12 @@ impl Classes {
         true
     }
 
+    /// Replace a temporary name — the `#<Module:0x...>::N` a module gets
+    /// under an anonymous one — with the path it is reachable by now.
+    pub fn rename(&mut self, id: ClassId, name: &str) {
+        self.entry_mut(id).name = Some(Box::from(name));
+    }
+
     pub fn superclass(&self, id: ClassId) -> Option<ClassId> {
         self.entry(id).superclass
     }
