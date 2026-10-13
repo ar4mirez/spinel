@@ -9768,6 +9768,18 @@ fn native_call<'h>(
                     // bare `private` leaves a private instance method with no
                     // singleton copy. Measured on ruby 4.0.6 (#211).
                     frame.scope_default = ScopeDefault::from(visibility);
+                    // Written in a block, it is the enclosing body's all the
+                    // same: `1.times { private }` makes the `def`s after the
+                    // block private. The body is the frames of this lexical
+                    // scope. Measured. An `eval` shares that scope and is the
+                    // exception: a `private` in the string stays in the string.
+                    let cref = frame.cref;
+                    let evaluated = frame.iseq.from_eval;
+                    for outer in frames.iter_mut() {
+                        if outer.cref == cref && !evaluated {
+                            outer.scope_default = ScopeDefault::from(visibility);
+                        }
+                    }
                 }
                 stack.push(Value::NIL);
                 return Ok(None);
