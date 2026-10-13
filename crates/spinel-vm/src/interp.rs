@@ -5940,15 +5940,54 @@ fn warns_when_unset(name: &str) -> bool {
 ///
 /// A no-op for anything that is not a class, and for a class that already has a
 /// name — including one this heap named a moment ago through another constant.
+///
+/// A name under an anonymous module — `#<Module:0x...>::N` — is temporary:
+/// it gives way to the first real path, and when the anonymous module itself
+/// is named, the modules its constants hold are renamed under it, and theirs
+/// under them. Measured: `m::N = Module.new; A = m` makes it `A::N`.
 fn name_if_anonymous(scope: &mut HandleScope<'_>, cbase: ClassId, name: SymbolId, value: Value) {
     let Some(id) = class_id_of(scope, value) else {
         return;
     };
-    if scope.classes().name(id).is_some() {
+    let held = scope.classes().name(id).map(str::to_owned);
+    if held.as_deref().is_some_and(|held| !is_temporary_name(held)) {
         return;
     }
     let path = qualified_name(scope, cbase, name);
-    scope.classes_mut().name_if_anonymous(id, &path);
+    if is_temporary_name(&path) {
+        scope.classes_mut().name_if_anonymous(id, &path);
+        return;
+    }
+    if scope.classes().is_singleton(id) {
+        return;
+    }
+    scope.classes_mut().rename(id, &path);
+    // A worklist, and only ever onto a module whose name is still temporary:
+    // two modules that hold each other are each renamed once.
+    let mut pending = vec![(id, path)];
+    while let Some((outer, path)) = pending.pop() {
+        for (constant, _) in scope.classes().const_names(outer) {
+            let Some(inner) = scope.classes().const_get_here(outer, constant) else {
+                continue;
+            };
+            let Some(inner) = class_id_of(scope, inner) else {
+                continue;
+            };
+            if scope.classes().is_singleton(inner)
+                || !scope.classes().name(inner).is_some_and(is_temporary_name)
+            {
+                continue;
+            }
+            let path = format!("{path}::{}", symbol_name(constant));
+            scope.classes_mut().rename(inner, &path);
+            pending.push((inner, path));
+        }
+    }
+}
+
+/// Whether a module's name is one it has only until a constant path reaches it.
+fn is_temporary_name(name: &str) -> bool {
+    name.starts_with("#<")
 }
 
 fn qualified_name(scope: &mut HandleScope<'_>, cbase: ClassId, name: SymbolId) -> String {
@@ -5960,9 +5999,7 @@ fn qualified_name(scope: &mut HandleScope<'_>, cbase: ClassId, name: SymbolId) -
         // "#<Module:0x...>::N" — the address being `object_id` in hex, which
         // is what `Module#to_s` prints for `m` itself.
         //
-        // ponytail: CRuby keeps that as a *temporary* name and renames `N` to
-        // "A::N" when `m` is later assigned to `A`. Here it is permanent;
-        // `set_temporary_name` and the rename belong to #28's reflection slice.
+        // That name is temporary: see [`name_if_anonymous`].
         None if cbase != Builtin::Object.id() => {
             let object = scope.classes().object(cbase);
             let handle = scope.root(object);
