@@ -1,1 +1,0 @@
-fails(#28: warn with a non-Integer uplevel is not reached; the example stops earlier in its setup):Kernel#warn :uplevel keyword argument converts value to Integer

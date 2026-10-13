@@ -120,11 +120,15 @@ module Kernel
     nil
   end
 
-  # The `self` of a wrapped `load`: `main` again, but with the wrapper
+  # The `self` of a wrapped `load`: a stand-in for `main`, with the wrapper
   # extended into it, so a top-level `include` lands in the wrapper rather
   # than in `Object`.
   def self.__wrapped_main__(wrapper)
     main = Object.new
+    # What the real `main` was extended with comes along, behind the wrapper.
+    real = __main__
+    extended = real.singleton_class.ancestors.drop(1).take_while { |ancestor| !ancestor.equal?(Object) }
+    extended.reverse_each { |mod| main.extend(mod) }
     main.extend(wrapper)
     main.define_singleton_method(:to_s) { "main" }
     main.define_singleton_method(:inspect) { "main" }

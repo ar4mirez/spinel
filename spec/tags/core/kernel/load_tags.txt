@@ -1,1 +1,0 @@
-fails(#28: load with wrap gives the file an anonymous module but does not carry over what main's singleton class includes):Kernel#load when passed true for 'wrap' includes modules included in main's singleton class in self's class
