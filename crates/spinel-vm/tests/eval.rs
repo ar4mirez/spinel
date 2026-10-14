@@ -198,6 +198,20 @@ fn garbage_made_in_a_loop_is_collected_while_it_runs() {
     );
 }
 
+/// Coming back from a fiber, the frames returned to are kept alive (#299).
+/// The fiber runs long enough for the loop to release its roots, which keeps
+/// only the fiber's own frames; the two big Strings then make the collector
+/// run before the loop releases again. Before `adopt_roots` that collection
+/// freed the top level's environment, and a debug build says so.
+#[test]
+fn the_frames_a_fiber_returns_to_survive_a_collection() {
+    let source = "keep = 'kept' * 3; holder = [keep, {a: 'b' * 4}]; \
+                  f = Fiber.new { loop { i = 0; while i < 3000; s = 'x' * 8; i += 1; end; Fiber.yield 1 } }; \
+                  5.times { f.resume; big = 'z' * 600_000; big2 = 'q' * 600_000 }; \
+                  [holder[0], holder[1], keep.size]";
+    assert_eq!(eval(source).unwrap(), "[\"keptkeptkept\", #<object>, 12]");
+}
+
 #[test]
 fn dividing_by_zero_says_what_ruby_would_raise() {
     let err = eval("1 / 0").unwrap_err();

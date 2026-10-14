@@ -669,6 +669,7 @@ fn leave_fiber(
     if let Some(resumer) = resumer {
         fibers.entries[resumer].state = FiberState::Resumed;
     }
+    adopt_roots(scope, stack, frames);
     // Nothing to return to — every fiber above was abandoned — is the end of
     // the evaluation, as the root's own last frame would be.
     if frames.is_empty() {
@@ -1476,6 +1477,7 @@ fn fiber_enter(
         FiberState::Suspended(context) => {
             *stack = context.stack;
             *frames = context.frames;
+            adopt_roots(scope, stack, frames);
             Ok(false)
         }
         _ => unreachable!("callers check the state before entering"),
@@ -1587,6 +1589,7 @@ fn fiber_native(
                 fibers.current = None;
                 *stack = context.stack;
                 *frames = context.frames;
+                adopt_roots(scope, stack, frames);
                 let value = fiber_pack(scope, &args);
                 stack.push(value);
                 return Ok(None);
@@ -1657,6 +1660,7 @@ fn fiber_native(
             if let Some(previous) = previous {
                 fibers.entries[previous].state = FiberState::Resumed;
             }
+            adopt_roots(scope, stack, frames);
             stack.push(value);
             Ok(None)
         }
@@ -3300,6 +3304,25 @@ const ROOT_SLACK: usize = 4096;
 /// bound, and the collector had nothing it was allowed to free.
 fn release_roots(scope: &mut HandleScope<'_>, stack: &[Value], frames: &[Call], floor: usize) {
     scope.release_roots(floor);
+    let mut keep = |value: Value| {
+        if !value.is_immediate() {
+            scope.root(value);
+        }
+    };
+    stack.iter().copied().for_each(&mut keep);
+    for frame in frames {
+        frame_roots(frame, &mut keep);
+    }
+}
+
+/// Root the vectors a fiber switch has just made the running ones.
+///
+/// While they were parked the collector traced them through the fiber table;
+/// now they are the loop's, and the loop's own vectors are kept alive only by
+/// what `release_roots` last rooted — which was the *other* fiber's. Without
+/// this, a collection before the next release frees the frames the program
+/// has just returned to.
+fn adopt_roots(scope: &mut HandleScope<'_>, stack: &[Value], frames: &[Call]) {
     let mut keep = |value: Value| {
         if !value.is_immediate() {
             scope.root(value);
