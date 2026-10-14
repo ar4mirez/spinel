@@ -24,14 +24,14 @@
 //! allocated through the [`HandleScope`] it was handed, so the collector can see
 //! all of them for as long as the scope lives.
 //!
-//! ponytail: that also means an object allocated inside a loop is not reclaimed
-//! until the whole evaluation ends — the scope only pops on drop — and #11 added
-//! an environment per call to what accumulates there. Releasing a frame's roots
-//! on return needs the operand stack to be a root source first, or a returned
-//! value would be unrooted while still on the stack. That is the same fix
-//! [#7](https://github.com/ar4mirez/spinel/issues/7) shaped `shade` to accept,
-//! and engine.md puts the VM stack in the Ractor where fibers need it, so it
-//! lands with fibers rather than here.
+//! Between two instructions the loop holds nothing but its operand stack and
+//! its frames, so that is where handles are released: every few thousand of
+//! them, the root stack is cut back to where the loop started and the values
+//! in those two vectors are rooted again (`release_roots`, #299). A handle
+//! taken while running one instruction is therefore good until that
+//! instruction ends and no longer, which is all any of them is used for. A
+//! parked fiber's vectors are a root source of their own
+//! (`FiberTable::each_root`).
 
 use std::os::unix::ffi::OsStringExt as _;
 use std::path::PathBuf;
@@ -548,22 +548,7 @@ impl FiberTable {
         let mut context = |context: &Context| {
             context.stack.iter().copied().for_each(&mut f);
             for frame in &context.frames {
-                for value in [
-                    frame.env,
-                    frame.receiver,
-                    frame.block,
-                    frame.errinfo_on_entry,
-                    frame.rescued.unwrap_or(Value::NIL),
-                    frame.tag.unwrap_or(Value::NIL),
-                ] {
-                    f(value);
-                }
-                for parked in &frame.parked {
-                    match *parked {
-                        Parked::Value(value) => f(value),
-                        Parked::Unwind(unwind) => unwind_roots(unwind, &mut f),
-                    }
-                }
+                frame_roots(frame, &mut f);
             }
         };
         for entry in &self.entries {
@@ -1857,8 +1842,17 @@ pub fn eval_in(
     let mut seen_frames = frames.len();
     let mut deadline: u64 = 0;
 
+    // Everything the loop roots from here on is released between
+    // instructions, a batch at a time: see `release_roots`.
+    let floor = scope.rooted();
+    let mut root_limit = floor + ROOT_SLACK;
+
     let result = (|| -> Result<Value, Error> {
         Ok(loop {
+            if scope.rooted() > root_limit {
+                release_roots(scope, &stack, &frames, floor);
+                root_limit = floor + ROOT_SLACK.max(2 * (scope.rooted() - floor));
+            }
             if frames.len() != seen_frames {
                 seen_frames = frames.len();
                 deadline = refresh_boundaries(scope, &frames, &mut boundaries, budget);
@@ -1882,6 +1876,108 @@ pub fn eval_in(
             let top = frames.len() - 1;
             let insn = frames[top].iseq.insns[frames[top].pc];
             frames[top].pc += 1;
+
+            // The instructions a loop is mostly made of, answered here rather
+            // than in the closure below. That closure holds every instruction
+            // there is, and entering it costs more than these do: a stack
+            // frame the size of all its arms' locals together, set up for
+            // each `Pop`. Each arm is the closure's own arm, word for word,
+            // for the cases that can neither fail nor leave the frame.
+            match insn {
+                Insn::PushNil => {
+                    stack.push(Value::NIL);
+                    continue;
+                }
+                Insn::PushTrue => {
+                    stack.push(Value::TRUE);
+                    continue;
+                }
+                Insn::PushFalse => {
+                    stack.push(Value::FALSE);
+                    continue;
+                }
+                Insn::PushSelf => {
+                    stack.push(frames[top].receiver);
+                    continue;
+                }
+                Insn::PushInt(n) => {
+                    if let Some(value) = Value::fixnum(n) {
+                        stack.push(value);
+                        continue;
+                    }
+                }
+                Insn::Pop => {
+                    stack.pop();
+                    continue;
+                }
+                Insn::Dup => {
+                    let value = *stack.last().expect("dup on an empty stack");
+                    stack.push(value);
+                    continue;
+                }
+                Insn::GetLocal(slot, depth) => {
+                    let env = env_outer(scope, frames[top].env, depth);
+                    stack.push(env_get(scope, env, slot as usize));
+                    continue;
+                }
+                Insn::SetLocal(slot, depth) => {
+                    let value = stack.pop().expect("setlocal on an empty stack");
+                    let env = env_outer(scope, frames[top].env, depth);
+                    env_set(scope, env, slot as usize, value);
+                    continue;
+                }
+                Insn::Jump(displacement) => {
+                    frames[top].pc = jump(frames[top].pc, displacement);
+                    continue;
+                }
+                Insn::JumpUnless(displacement) => {
+                    if !stack.pop().expect("jump on an empty stack").is_truthy() {
+                        frames[top].pc = jump(frames[top].pc, displacement);
+                    }
+                    continue;
+                }
+                Insn::JumpIf(displacement) => {
+                    if stack.pop().expect("jump on an empty stack").is_truthy() {
+                        frames[top].pc = jump(frames[top].pc, displacement);
+                    }
+                    continue;
+                }
+                // Two fixnums whose answer is a fixnum or a boolean, under an
+                // operator the program has not redefined. Anything else —
+                // overflow, a Float, a division — is the closure's.
+                Insn::BinOp(op) => {
+                    let depth = stack.len();
+                    if depth >= 2
+                        && let (Some(a), Some(b)) =
+                            (stack[depth - 2].as_fixnum(), stack[depth - 1].as_fixnum())
+                        && (matches!(op, BinOp::Eq | BinOp::Neq)
+                            || operator_fast_path(
+                                scope,
+                                stack[depth - 2],
+                                op as usize,
+                                &frames[top],
+                            ))
+                    {
+                        let answer = match op {
+                            BinOp::Add => a.checked_add(b).and_then(Value::fixnum),
+                            BinOp::Sub => a.checked_sub(b).and_then(Value::fixnum),
+                            BinOp::Lt => Some(bool_value(a < b)),
+                            BinOp::Le => Some(bool_value(a <= b)),
+                            BinOp::Gt => Some(bool_value(a > b)),
+                            BinOp::Ge => Some(bool_value(a >= b)),
+                            BinOp::Eq => Some(bool_value(a == b)),
+                            BinOp::Neq => Some(bool_value(a != b)),
+                            BinOp::Mul | BinOp::Div | BinOp::Mod => None,
+                        };
+                        if let Some(value) = answer {
+                            stack.truncate(depth - 2);
+                            stack.push(value);
+                            continue;
+                        }
+                    }
+                }
+                _ => {}
+            }
 
             // One instruction, run in a closure so that `?` still reads as it did
             // before there was an unwinder. Everything Ruby would raise leaves here
@@ -3188,6 +3284,51 @@ pub fn eval_in(
     scope.fibers_mut().frame_ids = ids;
     scope.fibers_mut().abandon();
     result
+}
+
+/// How many handles the loop lets pile up before it releases them.
+const ROOT_SLACK: usize = 4096;
+
+/// Let go of every handle the loop has taken, and root again what it still
+/// holds: the operand stack and each frame's values.
+///
+/// A handle taken while running one instruction is not used by the next, so
+/// between two instructions the only things the loop keeps alive are in these
+/// two vectors. Without this every object a program ever made stayed rooted
+/// until the evaluation ended, and the root stack grew by a few entries per
+/// instruction: a loop that allocated nothing still used memory without
+/// bound, and the collector had nothing it was allowed to free.
+fn release_roots(scope: &mut HandleScope<'_>, stack: &[Value], frames: &[Call], floor: usize) {
+    scope.release_roots(floor);
+    let mut keep = |value: Value| {
+        if !value.is_immediate() {
+            scope.root(value);
+        }
+    };
+    stack.iter().copied().for_each(&mut keep);
+    for frame in frames {
+        frame_roots(frame, &mut keep);
+    }
+}
+
+/// Every value one frame holds, for whoever has to keep them alive.
+fn frame_roots(frame: &Call, f: &mut impl FnMut(Value)) {
+    for value in [
+        frame.env,
+        frame.receiver,
+        frame.block,
+        frame.errinfo_on_entry,
+        frame.rescued.unwrap_or(Value::NIL),
+        frame.tag.unwrap_or(Value::NIL),
+    ] {
+        f(value);
+    }
+    for parked in &frame.parked {
+        match *parked {
+            Parked::Value(value) => f(value),
+            Parked::Unwind(unwind) => unwind_roots(unwind, f),
+        }
+    }
 }
 
 /// A refusal boundary on some stack of frames: which fiber's (`None` for the
