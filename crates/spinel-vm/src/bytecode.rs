@@ -766,29 +766,7 @@ pub struct Iseq {
     /// lower in this body, which it compiled to a refusal instead.
     pub refusals: Vec<&'static str>,
     /// [`Iseq::linked`]'s answer, kept: see [`Linked`].
-    pub linked: Linked,
-}
-
-/// An `Iseq`'s symbols as ids, resolved the first time a frame runs it.
-///
-/// The symbol table is one per process and only grows, so a name's id is the
-/// same for as long as the process lives and one resolution serves every
-/// call. It is not part of what the unit *is* — two units with the same
-/// instructions are equal whether or not either has run, and a clone starts
-/// unresolved — so equality ignores it.
-#[derive(Debug, Default)]
-pub struct Linked(std::sync::OnceLock<Arc<[SymbolId]>>);
-
-impl Clone for Linked {
-    fn clone(&self) -> Linked {
-        Linked::default()
-    }
-}
-
-impl PartialEq for Linked {
-    fn eq(&self, _: &Linked) -> bool {
-        true
-    }
+    pub linked: symbols::Linked,
 }
 
 impl Iseq {
@@ -797,7 +775,7 @@ impl Iseq {
     /// name.
     #[must_use]
     pub fn linked(&self) -> Arc<[SymbolId]> {
-        Arc::clone(self.linked.0.get_or_init(|| self.link().into()))
+        self.linked.get_or_resolve(|| self.link())
     }
 
     /// The source line the instruction at `pc` came from.
