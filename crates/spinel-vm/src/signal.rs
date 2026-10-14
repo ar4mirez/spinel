@@ -110,6 +110,25 @@ pub fn list() -> impl Iterator<Item = (&'static str, i32)> {
     LIST.iter().copied()
 }
 
+/// End this process by the signal a `SignalException` named — its message,
+/// `SIGTERM` or `TERM` — as CRuby does when one reaches the top: the
+/// handler back to the default, then the signal sent to itself, so the
+/// parent's `waitpid` sees a death by that signal. Answers false, and does
+/// nothing, for a name that is no signal.
+pub fn die_by(name: &str) -> bool {
+    let bare = name.strip_prefix("SIG").unwrap_or(name);
+    let Some((_, number)) = list().find(|&(n, _)| n == bare) else {
+        return false;
+    };
+    // SAFETY: resetting one disposition and signalling this process; both
+    // take integers only.
+    unsafe {
+        libc::signal(number, libc::SIG_DFL);
+        libc::kill(libc::getpid(), number);
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

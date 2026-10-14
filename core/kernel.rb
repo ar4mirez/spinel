@@ -540,8 +540,8 @@ class Proc
 end
 
 # `exit` and `abort` only raise `SystemExit`, which is the whole of what
-# happens until something rescues it. The rest of process control is
-# `Process` (#43); the methods exist so a class can name them.
+# happens until something rescues it. The rest of process control —
+# `exit!`, `fork`, `system` and the like — is `core/process.rb`'s.
 module Kernel
   def exit(status = true)
     raise SystemExit.new(Kernel.__exit_status__(status), "exit")
@@ -555,19 +555,7 @@ module Kernel
     raise SystemExit.new(1, message)
   end
 
-  def exit!(status = false)
-    __needs_process__
-  end
-
-  def fork
-    __needs_process__
-  end
-
-  def system(*)
-    __needs_process__
-  end
-
-  module_function :exit, :abort, :exit!, :fork, :system
+  module_function :exit, :abort
 
   def self.__exit_status__(status)
     return 0 if status == true

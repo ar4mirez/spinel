@@ -583,6 +583,41 @@ pub enum SysOp {
     /// `__sys_process_constants__`: `[name, value]` pairs for the rest of
     /// `Process`'s constants — `WNOHANG`, `PRIO_*`, `RLIMIT_*`, `RLIM_*`.
     ProcessConstants,
+    /// `__sys_spawn__(path, argv, envp, fds, chdir, pgroup, umask, replace)`:
+    /// start `path` with `argv` and `envp` (Strings) in a child — or, with
+    /// `replace`, in this process — after making each `fds` pair
+    /// `[child_fd, parent_fd]` (flattened; a parent fd of -1 closes it).
+    /// `[pid]`, or the errno of the step that failed.
+    Spawn,
+    /// `__sys_waitpid__(pid, flags)`: `[pid, raw status]`, `[0, nil]` when
+    /// `WNOHANG` found nothing, or an errno.
+    Waitpid,
+    /// `__sys_kill__(signal, pid)`: true, or an errno.
+    Kill,
+    /// `__sys_fork__`: `[pid]`, 0 in the child, or an errno.
+    Fork,
+    /// `__sys_exit__(status)`: `_exit(2)`, with nothing run on the way out.
+    Exit,
+    /// `__sys_pgid__(op, a, b)`: `getpgid`, `setpgid`, `getsid`, `setsid`
+    /// and `getpgrp` (ops 0 to 4): `[answer]` or an errno.
+    Pgid,
+    /// `__sys_rlimit__(resource, cur = nil, max = nil)`: `[cur, max]` from
+    /// `getrlimit`, or with limits `setrlimit` and true; an errno either way.
+    Rlimit,
+    /// `__sys_priority__(which, who, value = nil)`: `[priority]`, or with a
+    /// value `setpriority` and true.
+    Priority,
+    /// `__sys_times__`: `[utime, stime, cutime, cstime]` in seconds, Floats,
+    /// from `getrusage` of this process and of its waited-for children.
+    Times,
+    /// `__sys_clock_res__(id)`: `[seconds, nanoseconds]` or an errno.
+    ClockRes,
+    /// `__sys_set_id__(op, a, b)`: `setuid`, `setgid`, `seteuid`, `setegid`,
+    /// `setreuid`, `setregid` (ops 0 to 5): true or an errno.
+    SetId,
+    /// `__sys_groups__`: the supplementary group ids, then `NGROUPS_MAX`
+    /// last.
+    Groups,
 }
 
 /// Which `Binding` operation. See `interp.rs`, `binding_native`.

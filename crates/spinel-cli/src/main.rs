@@ -133,7 +133,10 @@ fn main() -> ExitCode {
         // mistyped subcommand is the second. They need opposite answers, and
         // running a typo as a filename would report "no such file" about a word
         // that was never meant to be one.
-        if looks_like_a_ruby_file(&argument) {
+        // A word a couple of keystrokes from a subcommand is taken for a typo
+        // of it; anything else is a script, as `ruby` takes it, and a missing
+        // one is `ruby`'s LoadError.
+        if looks_like_a_ruby_file(&argument) || !looks_like_a_subcommand_typo(&argument) {
             let mut words = vec![argument];
             words.extend(cli.args);
             return ruby_command(&words);
@@ -149,6 +152,29 @@ fn main() -> ExitCode {
 /// Whether a bare argument is a Ruby file rather than a mistyped subcommand.
 /// Named `.rb`, or on disk under any name — `spinel Rakefile` should be read as
 /// a file, and `spinel pasre` should not.
+fn looks_like_a_subcommand_typo(argument: &str) -> bool {
+    ["run", "parse", "help"]
+        .iter()
+        .any(|name| edit_distance(argument, name) <= 2)
+}
+
+/// Levenshtein distance, over characters.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut previous: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut current = vec![i + 1; b.len() + 1];
+        for (j, &cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != cb);
+            current[j + 1] = (previous[j] + cost)
+                .min(previous[j + 1] + 1)
+                .min(current[j] + 1);
+        }
+        previous = current;
+    }
+    previous[b.len()]
+}
+
 fn looks_like_a_ruby_file(argument: &str) -> bool {
     let path = Path::new(argument);
     path.extension().is_some_and(|e| e == "rb") || path.is_file()
@@ -272,35 +298,19 @@ fn run_program(
     prelude: Option<&str>,
 ) -> ExitCode {
     let source = source.to_vec();
-    let parsed = spinel_parse::parse_file(&path.to_string_lossy(), &source);
-    let color = use_color();
-    for error in &parsed.errors {
-        eprintln!(
-            "{}",
-            render_diagnostic(path, &source, error, "error", color)
-        );
-    }
-    if !parsed.is_ok() {
-        return ExitCode::from(EXIT_SYNTAX);
-    }
-
-    let iseq = match spinel_vm::compile::program(&parsed.program) {
-        Ok(iseq) => iseq,
-        Err(unsupported) => {
-            // A construct the compiler does not implement yet is not a syntax
-            // error and must not be reported as one: the file is valid Ruby and
-            // Spinel is the thing that is unfinished. Saying which construct is
-            // what makes the next slice choosable.
-            eprintln!("spinel: cannot run `{}` yet: {unsupported}", path.display());
-            eprintln!("        Progress: {MILESTONES}");
-            return ExitCode::from(EXIT_USAGE);
-        }
-    };
-
     if dump_bytecode {
-        let mut stdout = std::io::stdout().lock();
-        let _ = writeln!(stdout, "{iseq:#?}");
-        return ExitCode::SUCCESS;
+        let parsed = spinel_parse::parse_file(&path.to_string_lossy(), &source);
+        if !report_syntax_errors(path, &source, &parsed) {
+            return ExitCode::from(EXIT_SYNTAX);
+        }
+        return match spinel_vm::compile::program(&parsed.program) {
+            Ok(iseq) => {
+                let mut stdout = std::io::stdout().lock();
+                let _ = writeln!(stdout, "{iseq:#?}");
+                ExitCode::SUCCESS
+            }
+            Err(unsupported) => cannot_run(path, &unsupported),
+        };
     }
 
     let mut heap = spinel_vm::Heap::new();
@@ -310,9 +320,11 @@ fn run_program(
     scope.set_budget(None);
     spinel_core::boot(&mut scope);
 
+    // The flags' meaning runs first, as `ruby` runs `-r` before it reads the
+    // program: an `at_exit` a required file registers runs even when the
+    // program does not parse.
     let mut outcome = Ok(spinel_vm::Value::NIL);
     if let Some(prelude) = prelude.filter(|p| !p.is_empty()) {
-        // The flags' meaning, run in the program's heap before it. It is
         // Spinel's own Ruby, so failing to compile it is a bug, not the
         // program's.
         let parsed = spinel_parse::parse_file("<flags>", prelude.as_bytes());
@@ -322,28 +334,85 @@ fn run_program(
         outcome = spinel_vm::interp::eval_in(&mut scope, &mut frame, &compiled)
             .map(|_| spinel_vm::Value::NIL);
     }
+    let mut syntax_error = false;
     if outcome.is_ok() {
-        let mut frame = spinel_vm::interp::Frame::new(0);
-        outcome = spinel_vm::interp::eval_in(&mut scope, &mut frame, &iseq)
-            .map(|_| spinel_vm::Value::NIL);
+        let parsed = spinel_parse::parse_file(&path.to_string_lossy(), &source);
+        if !report_syntax_errors(path, &source, &parsed) {
+            syntax_error = true;
+        } else {
+            let iseq = match spinel_vm::compile::program(&parsed.program) {
+                Ok(iseq) => iseq,
+                Err(unsupported) => return cannot_run(path, &unsupported),
+            };
+            let mut frame = spinel_vm::interp::Frame::new(0);
+            outcome = spinel_vm::interp::eval_in(&mut scope, &mut frame, &iseq)
+                .map(|_| spinel_vm::Value::NIL);
+        }
     }
+    // The `at_exit` blocks run before the error is reported, as CRuby runs
+    // them: one may `exit!`, and then nothing is printed.
+    let failed = outcome.is_err() || syntax_error;
+    let status = spinel_core::exit_status(&mut scope, failed);
     // `exit` is a `SystemExit` that nothing rescued: not an error to report,
-    // and its status is the process's.
-    let exited = matches!(
+    // and its status is the process's. A `SignalException` ends the process
+    // by its signal, below, and CRuby prints nothing for one.
+    let quiet = matches!(
         &outcome,
-        Err(spinel_vm::Error::Uncaught { class, .. }) if class == "SystemExit"
+        Err(spinel_vm::Error::Uncaught { class, .. }) if class == "SystemExit" || class == "SignalException"
     );
     if let Err(err) = &outcome
-        && !exited
+        && !quiet
     {
-        // Ruby prints `file:line: message (Class)`. Spinel has no line
-        // numbers on a raise yet — backtraces are PRD 0012's non-goal — so
-        // the file is named and the line is not invented.
         eprintln!("{}: {}", path.display(), describe_error(err));
     }
-    // The `at_exit` blocks run last, and may change the status.
-    let status = spinel_core::exit_status(&mut scope, outcome.is_err());
-    ExitCode::from(status.unwrap_or(if outcome.is_ok() { 0 } else { EXIT_RAISED }))
+    // A `SignalException` that reached the top ends the process by its
+    // signal, so whoever waits for it sees that, not an exit status.
+    if let Err(spinel_vm::Error::Uncaught { class, message }) = &outcome {
+        let name = match class.as_str() {
+            "Interrupt" => Some("INT"),
+            "SignalException" => Some(message.as_str()),
+            _ => None,
+        };
+        if let Some(name) = name {
+            spinel_vm::signal::die_by(name);
+        }
+    }
+    let fallback = if syntax_error {
+        EXIT_SYNTAX
+    } else if outcome.is_ok() {
+        0
+    } else {
+        EXIT_RAISED
+    };
+    ExitCode::from(status.unwrap_or(fallback))
+}
+
+/// Print a parse's errors, `ruby`'s one-line summary first; true when there
+/// were none.
+fn report_syntax_errors(path: &Path, source: &[u8], parsed: &spinel_parse::Parsed) -> bool {
+    if parsed.is_ok() {
+        return true;
+    }
+    let color = use_color();
+    if let Some(first) = parsed.errors.first() {
+        let line = render_diagnostic(path, source, first, "error", false);
+        let at = line.split(": error:").next().unwrap_or("").to_owned();
+        eprintln!("{}: {at}: syntax error found (SyntaxError)", path.display());
+    }
+    for error in &parsed.errors {
+        eprintln!("{}", render_diagnostic(path, source, error, "error", color));
+    }
+    false
+}
+
+/// A construct the compiler does not implement yet is not a syntax error
+/// and must not be reported as one: the file is valid Ruby and Spinel is the
+/// thing that is unfinished. Saying which construct is what makes the next
+/// slice choosable.
+fn cannot_run(path: &Path, unsupported: &impl std::fmt::Display) -> ExitCode {
+    eprintln!("spinel: cannot run `{}` yet: {unsupported}", path.display());
+    eprintln!("        Progress: {MILESTONES}");
+    ExitCode::from(EXIT_USAGE)
 }
 
 /// One line for an error that ended the program.

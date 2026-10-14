@@ -1,0 +1,2 @@
+fails(#44: signal handlers that run: newly run since #43 let ruby_exe start Spinel, and it disagrees):Interrupt is raised on the main Thread by the default SIGINT handler
+fails(#44: signal handlers that run: newly run since #43 let ruby_exe start Spinel, and it disagrees):Interrupt shows the backtrace and has a signaled exit status

@@ -1,0 +1,1 @@
+fails(#29: $! and backtraces at exit: newly run since #43 let ruby_exe start Spinel, and it disagrees):Kernel#at_exit gives access to an exception raised in a previous handler

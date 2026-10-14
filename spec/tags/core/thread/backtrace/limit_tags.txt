@@ -1,0 +1,2 @@
+fails(#45: Thread: newly run since #43 let ruby_exe start Spinel, and it disagrees):Thread::Backtrace.limit returns maximum backtrace length set by --backtrace-limit command-line option
+fails(#45: Thread: newly run since #43 let ruby_exe start Spinel, and it disagrees):Thread::Backtrace.limit returns -1 when --backtrace-limit command-line option is not set

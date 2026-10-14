@@ -1,0 +1,7 @@
+fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The --enable and --disable flags can be used with gems
+fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The --enable and --disable flags can be used with gem
+fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The --enable and --disable flags can be used with did_you_mean
+fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The --enable and --disable flags can be used with rubyopt
+fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The --enable and --disable flags can be used with frozen-string-literal
+fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The --enable and --disable flags can be used with all for enable
+fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The --enable and --disable flags prints a warning for unknown features

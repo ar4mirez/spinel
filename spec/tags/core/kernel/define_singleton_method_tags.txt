@@ -1,2 +1,1 @@
-fails(define_singleton_method given an UnboundMethod needs Method and UnboundMethod objects, which are #27 and #28):Kernel#define_singleton_method when given an UnboundMethod adds the new method to the methods list
 fails(#28: Module and Class reflection: an expectation about an error, newly reported since PRD 0077 let mspec's raise matcher run inside its BasicObject proxy):Kernel#define_singleton_method when given an UnboundMethod will raise when attempting to define an object's singleton method from another object's singleton method

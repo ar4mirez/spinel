@@ -1,1 +1,2 @@
 fails(#45: a primitive pushes no frame, so it has no backtrace location to label):Thread::Backtrace::Location#label is Module#method for a core method defined natively
+fails(#45: Thread: newly run since #43 let ruby_exe start Spinel, and it disagrees):Thread::Backtrace::Location#label sets the location label for a top-level block differently depending on it being in the main file or a required file

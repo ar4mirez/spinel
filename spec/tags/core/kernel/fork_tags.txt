@@ -1,1 +1,0 @@
-fails(#43: `Kernel#fork` is a process operation — exit statuses, at-exit hooks, child processes — which the runtime does not have yet):Kernel#fork is a private method

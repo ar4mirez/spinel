@@ -294,6 +294,19 @@ pub fn prelude(args: &RubyArgs) -> String {
              end\n",
         );
     }
+    if args.loop_mode.is_some() {
+        // With `-n` or `-p`, and only then, `Kernel` has the four that work on
+        // `$_`, private as functions and public on the module.
+        out.push_str(
+            "module Kernel\n\
+             \x20 def chomp(*args) = $_ = $_.chomp(*args)\n\
+             \x20 def chop = $_ = $_.chop\n\
+             \x20 def sub(*args, &block) = $_ = $_.sub(*args, &block)\n\
+             \x20 def gsub(*args, &block) = $_ = $_.gsub(*args, &block)\n\
+             \x20 module_function :chomp, :chop, :sub, :gsub\n\
+             end\n",
+        );
+    }
     for library in &args.requires {
         let _ = writeln!(out, "require {}", lit(library));
     }

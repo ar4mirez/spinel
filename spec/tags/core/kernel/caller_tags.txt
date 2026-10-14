@@ -1,0 +1,1 @@
+fails(#29: $! and backtraces at exit: newly run since #43 let ruby_exe start Spinel, and it disagrees):Kernel#caller returns an Array with the block given to #at_exit at the base of the stack

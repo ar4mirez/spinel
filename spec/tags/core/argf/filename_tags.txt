@@ -1,0 +1,1 @@
+fails(#41: ARGF: newly run since #43 let ruby_exe start Spinel, and it disagrees):ARGF.filename sets the $FILENAME global variable with the current file name on each file

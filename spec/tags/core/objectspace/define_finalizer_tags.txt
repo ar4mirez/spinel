@@ -1,0 +1,11 @@
+fails(#36: ObjectSpace and finalizers: newly run since #43 let ruby_exe start Spinel, and it disagrees):ObjectSpace.define_finalizer calls finalizer on process termination
+fails(#36: ObjectSpace and finalizers: newly run since #43 let ruby_exe start Spinel, and it disagrees):ObjectSpace.define_finalizer warns if the finalizer has the object as the receiver
+fails(#36: ObjectSpace and finalizers: newly run since #43 let ruby_exe start Spinel, and it disagrees):ObjectSpace.define_finalizer warns if the finalizer is a method bound to the receiver
+fails(#36: ObjectSpace and finalizers: newly run since #43 let ruby_exe start Spinel, and it disagrees):ObjectSpace.define_finalizer warns if the finalizer was a block in the receiver
+fails(#36: ObjectSpace and finalizers: newly run since #43 let ruby_exe start Spinel, and it disagrees):ObjectSpace.define_finalizer calls a finalizer at exit even if it is self-referencing
+fails(#36: ObjectSpace and finalizers: newly run since #43 let ruby_exe start Spinel, and it disagrees):ObjectSpace.define_finalizer calls a finalizer at exit even if it is indirectly self-referencing
+fails(#36: ObjectSpace and finalizers: newly run since #43 let ruby_exe start Spinel, and it disagrees):ObjectSpace.define_finalizer calls a finalizer defined in a finalizer running at exit
+fails(#36: ObjectSpace and finalizers: newly run since #43 let ruby_exe start Spinel, and it disagrees):ObjectSpace.define_finalizer allows multiple finalizers with different 'callables' to be defined
+fails(#36: ObjectSpace and finalizers: newly run since #43 let ruby_exe start Spinel, and it disagrees):ObjectSpace.define_finalizer defines same finalizer only once
+fails(#36: ObjectSpace and finalizers: newly run since #43 let ruby_exe start Spinel, and it disagrees):ObjectSpace.define_finalizer when $VERBOSE is not nil warns if an exception is raised in finalizer
+fails(#36: ObjectSpace and finalizers: newly run since #43 let ruby_exe start Spinel, and it disagrees):ObjectSpace.define_finalizer when $VERBOSE is nil does not warn even if an exception is raised in finalizer

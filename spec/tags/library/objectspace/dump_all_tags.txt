@@ -1,0 +1,6 @@
+fails(#36: ObjectSpace and finalizers: newly run since #43 let ruby_exe start Spinel, and it disagrees):ObjectSpace.dump_all dumps Ruby heap to string when passed output: :string
+fails(#36: ObjectSpace and finalizers: newly run since #43 let ruby_exe start Spinel, and it disagrees):ObjectSpace.dump_all dumps Ruby heap to a temporary file when passed output: :file
+fails(#36: ObjectSpace and finalizers: newly run since #43 let ruby_exe start Spinel, and it disagrees):ObjectSpace.dump_all dumps Ruby heap to a temporary file when :output not specified
+fails(#36: ObjectSpace and finalizers: newly run since #43 let ruby_exe start Spinel, and it disagrees):ObjectSpace.dump_all dumps Ruby heap to a temporary file when passed output: :nil
+fails(#36: ObjectSpace and finalizers: newly run since #43 let ruby_exe start Spinel, and it disagrees):ObjectSpace.dump_all dumps Ruby heap to stdout when passed output: :stdout
+fails(#36: ObjectSpace and finalizers: newly run since #43 let ruby_exe start Spinel, and it disagrees):ObjectSpace.dump_all dumps Ruby heap to provided IO when passed output: IO

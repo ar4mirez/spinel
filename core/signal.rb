@@ -50,6 +50,12 @@ module Signal
     previous
   end
   
+  # What would run for `number` now: a trapped handler, or the one it starts with.
+  def self.__handler_for__(number)
+    handlers = (@__handlers__ ||= {})
+    handlers.key?(number) ? handlers[number] : __initial_handler__(number)
+  end
+
   def self.__initial_handler__(number)
     name = signame(number)
     return nil if number == 0 || name == "ABRT" || name == "SYS"

@@ -1,0 +1,1 @@
+fails(#43: the child is given a closed stderr, and Rust's runtime reopens a closed standard descriptor on /dev/null before main runs, which CRuby does not):Process.spawn closes STDERR in the child if :err => :close

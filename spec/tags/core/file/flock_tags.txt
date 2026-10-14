@@ -1,0 +1,1 @@
+fails(#41: IO: newly run since #43 let ruby_exe start Spinel, and it disagrees):File#flock blocks if trying to lock an exclusively locked file

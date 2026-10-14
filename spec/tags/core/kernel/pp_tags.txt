@@ -1,0 +1,1 @@
+fails(#47: a vendored standard library: newly run since #43 let ruby_exe start Spinel, and it disagrees):Kernel#pp lazily loads the 'pp' library and delegates the call to that library
