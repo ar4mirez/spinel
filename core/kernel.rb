@@ -303,9 +303,15 @@ module Kernel
     return [] unless __reflect_is_singleton__(klass)
     names = __reflect_method_names__(klass, false, 0)
     return names unless all
-    klass.ancestors.each do |ancestor|
+    # Up to the first ordinary class, and not into what was prepended to it:
+    # a module prepended to `Module` comes before it in a module's chain and
+    # is every module's, not this one's. Measured.
+    chain = klass.ancestors
+    ordinary = chain.find { |ancestor| Class === ancestor && !__reflect_is_singleton__(ancestor) }
+    before = ordinary.nil? ? [] : ordinary.ancestors.take_while { |ancestor| !ancestor.equal?(ordinary) }
+    chain.each do |ancestor|
       next if ancestor.equal?(klass)
-      break unless ancestor.instance_of?(Module) || __reflect_is_singleton__(ancestor)
+      break if ancestor.equal?(ordinary) || before.any? { |prepended| prepended.equal?(ancestor) }
       __reflect_method_names__(ancestor, false, 0).each { |name| names.push(name) unless names.include?(name) }
     end
     names

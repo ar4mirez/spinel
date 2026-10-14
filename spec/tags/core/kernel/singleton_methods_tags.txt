@@ -1,3 +1,0 @@
-fails(#28: singleton_methods lists methods of a module prepended to Module, which belong to every module and not to this one):Kernel#singleton_methods when not passed an argument for a module does not return methods in a module prepended to Module itself
-fails(#28: singleton_methods lists methods of a module prepended to Module, which belong to every module and not to this one):Kernel#singleton_methods when passed true for a module does not return methods in a module prepended to Module itself
-fails(#28: singleton_methods lists methods of a module prepended to Module, which belong to every module and not to this one):Kernel#singleton_methods when passed false for a module does not return methods in a module prepended to Module itself

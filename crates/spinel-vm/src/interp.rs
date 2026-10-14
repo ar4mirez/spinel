@@ -10192,6 +10192,12 @@ fn native_call<'h>(
             Ok(None)
         }
 
+        Native::Main => {
+            let main = scope.main();
+            stack.push(main);
+            Ok(None)
+        }
+
         Native::ModuleName => {
             let Some(id) = class_id_of(scope, call.receiver) else {
                 return Err(Error::NoDispatch {
@@ -11103,6 +11109,7 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             Native::SymbolName { length: true },
         ),
         (Builtin::Module, &["__name__"], Native::ModuleName),
+        (Builtin::Kernel, &["__main__"], Native::Main),
         (
             Builtin::Module,
             &["private_constant"],
