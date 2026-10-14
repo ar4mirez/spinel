@@ -191,6 +191,10 @@ pub struct Stats {
 /// at its top level is valid.
 pub type Parser = fn(&str, &[u8], i64, bool) -> Result<ParsedSource, ParseFailure>;
 
+/// The libraries shipped inside the binary, by the name `require` is given:
+/// the Ruby source, or `None` for a name that is not one of them.
+pub type Libraries = fn(&str) -> Option<&'static str>;
+
 /// What a [`Parser`] produced: the tree, and what the parser had to say about
 /// the source on the way (#268).
 #[derive(Debug, Clone)]
@@ -286,6 +290,8 @@ pub struct Heap {
     /// `spinel_core::boot`. This crate does not depend on Prism, so without
     /// one `eval` of a String is refused.
     parser: Option<Parser>,
+    /// See [`Libraries`]. Installed by `spinel_core::boot`, beside the parser.
+    libraries: Option<Libraries>,
     /// Whether code this heap was meant to run did not all run — see
     /// [`HandleScope::mark_partial`].
     partial: bool,
@@ -373,6 +379,7 @@ impl Heap {
             errinfo: Value::NIL,
             main: Value::NIL,
             parser: None,
+            libraries: None,
             partial: false,
             argv: Vec::new(),
             program_name: String::new(),
@@ -1048,6 +1055,15 @@ impl<'h> HandleScope<'h> {
 
     pub(crate) fn parser(&self) -> Option<Parser> {
         self.heap.parser
+    }
+
+    /// Install the table of libraries shipped inside the binary.
+    pub fn set_libraries(&mut self, libraries: Libraries) {
+        self.heap.libraries = Some(libraries);
+    }
+
+    pub(crate) fn library(&self, name: &str) -> Option<&'static str> {
+        self.heap.libraries.and_then(|find| find(name))
     }
 
     /// Record that a file this heap was meant to load did not finish, so a

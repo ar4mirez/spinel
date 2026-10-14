@@ -56,6 +56,22 @@ module Kernel
   def self.__require__(name)
     name = File.__path__(name)
     return false if BUILTIN_FEATURES.include?(name)
+    # A built-in gem: its source is in the binary, and it is recorded the way
+    # CRuby records the extension it stands in for.
+    shipped = name.end_with?(".so") ? name[0, name.length - 3] : name
+    source = __library__(shipped)
+    unless source.nil?
+      feature = shipped + ".so"
+      return false if $LOADED_FEATURES.include?(feature)
+      $LOADED_FEATURES.push(feature)
+      begin
+        __load_file__("<internal:" + shipped + ">", nil, nil, source)
+      rescue Exception
+        $LOADED_FEATURES.delete(feature)
+        raise
+      end
+      return true
+    end
     # A C extension in CRuby whose whole effect is one constant.
     if name == "rbconfig/sizeof"
       return false if RbConfig.const_defined?(:SIZEOF, false)

@@ -17,6 +17,25 @@ class String
     frozen? ? dup : self
   end
 
+  # `-str`: a frozen String with the same content and encoding, and the same
+  # one each time it is asked for. ponytail: the table holds what it is given
+  # for good, where CRuby's lets go of a String nothing else references; a
+  # weak table needs `ObjectSpace::WeakMap` (#36).
+  def -@
+    # One with instance variables is its own: a frozen copy, kept nowhere.
+    return frozen? ? self : String.new(self).freeze unless instance_variables.empty?
+    table = String.__interned__
+    found = table[self]
+    return found if !found.nil? && found.encoding == encoding
+    kept = frozen? && instance_of?(String) ? self : String.new(self).freeze
+    table[kept] = kept
+  end
+  alias dedup -@
+
+  def self.__interned__
+    @__interned__ ||= {}
+  end
+
   def __expect_string__(other)
     return if other.is_a?(String)
     raise TypeError, "no implicit conversion of " + other.class.name + " into String"

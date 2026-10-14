@@ -171,12 +171,26 @@ fn image() -> &'static [Arc<Iseq>] {
     })
 }
 
+/// The libraries `require` finds inside the binary rather than on the load
+/// path: the built-in gems whose C half is Spinel's to write, in Ruby where
+/// Ruby can say it (`docs/engine.md`, "Built-in gems"). Loaded on `require`,
+/// not at boot, as CRuby loads them.
+const LIBRARIES: &[(&str, &str)] = &[("stringio", include_str!("../../../lib/stringio.rb"))];
+
+fn library(name: &str) -> Option<&'static str> {
+    LIBRARIES
+        .iter()
+        .find(|(known, _)| *known == name)
+        .map(|(_, source)| *source)
+}
+
 /// Define the core library's methods in this heap.
 ///
 /// Call once, after [`HandleScope::bootstrap`] has created the classes this
 /// fills in. Panics if `core/*.rb` raises, for the same reason the compile does.
 pub fn boot(scope: &mut HandleScope<'_>) {
     scope.set_parser(parse_eval);
+    scope.set_libraries(library);
     for (index, iseq) in image().iter().enumerate() {
         let mut frame = interp::Frame::new(0);
         if let Err(err) = interp::eval_in(scope, &mut frame, iseq) {
