@@ -96,6 +96,7 @@ One slice per class, each driven by `core/<class>/`: `Integer`, `Float`, `String
 - Vendored pure-Ruby stdlib extracted on first run: `optparse`, `erb`, `fileutils`, `time`, `net/http`, `webrick` (a gem, vendored for the phase 4 milestone). *Check:* `library/` for each. Not `set`: it is a core class as of Ruby 4.0 (`set.c`, no `lib/set.rb`), so it belongs to phase 2.
 - Built-in gems whose C parts become primitives: `json` (Ruby half + Rust parser), `stringio`, `strscan`, `digest`, `zlib`, `date`, `socket`. *Check:* `library/` for each; the built-in versions match the gem versions Spinel claims.
 - `ruby -e`, `-r`, `-I`, `-w`, `$0` parity so scripts and gems' shell-outs behave. *Check:* `command_line/`.
+- **Done for `ruby`'s command line (#62):** `spinel` given a first word that starts with `-` parses it as `ruby.c`'s `proc_options` does, and the flags become a prelude of Ruby run before the program — `$VERBOSE`, `$LOAD_PATH`, `require`, `$/`, `-s`'s globals — with `-n`/`-p` wrapping the program in `ruby`'s loop. `Kernel#gets` reads `ARGV`'s files or standard input, the reading half of `ARGF`. Checked by `crates/spinel-cli/tests/ruby_flags.rs` against ruby 4.0.6; `command_line/` itself waits on `IO.popen` (#43), which `ruby_exe` runs through (PRD 0078).
 - yjit-bench subset runs; record interpreter numbers. *Check:* `bench/README.md` table, target within 1.5× of `ruby --disable-yjit`.
 
 **Milestone:** `rake`, `minitest`, `rspec-core` run their own test suites on Spinel.

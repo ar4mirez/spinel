@@ -5,6 +5,7 @@
 //! later phase is built through. Subcommands land one issue at a time; see
 //! `docs/cli.md` for the full surface.
 
+mod ruby_args;
 mod tree;
 
 use std::io::{IsTerminal, Write};
@@ -98,6 +99,16 @@ enum Format {
 }
 
 fn main() -> ExitCode {
+    // `spinel -e CODE`, `spinel -w script.rb`: a `ruby` command line, parsed
+    // as `ruby` parses one (#62). `spinel`'s own `-h` and `-V` stay clap's.
+    let words: Vec<String> = std::env::args().skip(1).collect();
+    if words
+        .first()
+        .is_some_and(|first| ruby_args::is_ruby_invocation(first))
+    {
+        return ruby_command(&words);
+    }
+
     // `arg_required_else_help` means a bare `spinel` never reaches this point: clap
     // prints help and exits non-zero, so a typo is never a silent success.
     let cli = Cli::parse();
@@ -123,7 +134,9 @@ fn main() -> ExitCode {
         // running a typo as a filename would report "no such file" about a word
         // that was never meant to be one.
         if looks_like_a_ruby_file(&argument) {
-            return run_command(Path::new(&argument), &cli.args, false);
+            let mut words = vec![argument];
+            words.extend(cli.args);
+            return ruby_command(&words);
         }
         eprintln!("spinel: unknown subcommand `{argument}`.");
         eprintln!("        This build has two: run, parse. Try `spinel --help`.");
@@ -157,7 +170,108 @@ fn run_command(path: &Path, args: &[String], dump_bytecode: bool) -> ExitCode {
             return ExitCode::from(EXIT_USAGE);
         }
     };
+    run_program(path, &source, args, dump_bytecode, None)
+}
 
+/// `spinel` given `ruby`'s flags: the prelude they mean, then the program
+/// from `-e`, standard input or a file, as `ruby` would run it.
+fn ruby_command(words: &[String]) -> ExitCode {
+    let args = match ruby_args::parse(words) {
+        Ok(args) => args,
+        Err(message) => {
+            eprintln!("spinel: {message} (RuntimeError)");
+            return ExitCode::from(EXIT_RAISED);
+        }
+    };
+    if args.help {
+        eprintln!("Usage: spinel [switches] [--] [programfile] [arguments]");
+        eprintln!("       spinel --help for Spinel's own commands");
+        return ExitCode::SUCCESS;
+    }
+    if args.print_version {
+        println!("{}", spinel_vm::description());
+        if args.version_only {
+            return ExitCode::SUCCESS;
+        }
+    }
+    // `-C` changes directory before the program is even read.
+    if let Some(dir) = &args.chdir
+        && let Err(err) = std::env::set_current_dir(dir)
+    {
+        eprintln!("spinel: Can't chdir to {dir} ({err}) (fatal)");
+        return ExitCode::from(EXIT_RAISED);
+    }
+    let (name, mut source) = if let Some(code) = &args.code {
+        ("-e".to_owned(), code.clone().into_bytes())
+    } else {
+        let script = args.script.clone().unwrap_or_else(|| "-".to_owned());
+        let read = if script == "-" {
+            let mut bytes = Vec::new();
+            std::io::Read::read_to_end(&mut std::io::stdin(), &mut bytes).map(|_| bytes)
+        } else {
+            std::fs::read(&script)
+        };
+        match read {
+            Ok(bytes) => (script, bytes),
+            Err(_) => {
+                eprintln!("spinel: No such file or directory -- {script} (LoadError)");
+                return ExitCode::from(EXIT_RAISED);
+            }
+        }
+    };
+    if let Some(dir) = &args.skip_to_ruby {
+        // `-x`: everything before the `#!` line naming ruby is not the program.
+        let text = String::from_utf8_lossy(&source).into_owned();
+        let mut offset = 0;
+        let mut found = None;
+        for line in text.split_inclusive('\n') {
+            if line.starts_with("#!") && line.contains("ruby") {
+                found = Some(offset);
+                break;
+            }
+            offset += line.len();
+        }
+        let Some(start) = found else {
+            eprintln!("spinel: no Ruby script found in input (LoadError)");
+            return ExitCode::from(EXIT_RAISED);
+        };
+        source = source[start..].to_vec();
+        if let Some(dir) = dir
+            && let Err(err) = std::env::set_current_dir(dir)
+        {
+            eprintln!("spinel: Can't chdir to {dir} ({err}) (fatal)");
+            return ExitCode::from(EXIT_RAISED);
+        }
+    }
+    if args.syntax_only {
+        let parsed = spinel_parse::parse_file(&name, &source);
+        if parsed.is_ok() {
+            println!("Syntax OK");
+            return ExitCode::SUCCESS;
+        }
+        let color = use_color();
+        for error in &parsed.errors {
+            eprintln!(
+                "{}",
+                render_diagnostic(Path::new(&name), &source, error, "error", color)
+            );
+        }
+        return ExitCode::from(EXIT_SYNTAX);
+    }
+    let source = ruby_args::wrap(&args, &source);
+    let prelude = ruby_args::prelude(&args);
+    run_program(Path::new(&name), &source, &args.argv, false, Some(&prelude))
+}
+
+/// Compile and run one program, after `prelude` when there is one.
+fn run_program(
+    path: &Path,
+    source: &[u8],
+    args: &[String],
+    dump_bytecode: bool,
+    prelude: Option<&str>,
+) -> ExitCode {
+    let source = source.to_vec();
     let parsed = spinel_parse::parse_file(&path.to_string_lossy(), &source);
     let color = use_color();
     for error in &parsed.errors {
@@ -196,8 +310,23 @@ fn run_command(path: &Path, args: &[String], dump_bytecode: bool) -> ExitCode {
     scope.set_budget(None);
     spinel_core::boot(&mut scope);
 
-    let mut frame = spinel_vm::interp::Frame::new(0);
-    let outcome = spinel_vm::interp::eval_in(&mut scope, &mut frame, &iseq);
+    let mut outcome = Ok(spinel_vm::Value::NIL);
+    if let Some(prelude) = prelude.filter(|p| !p.is_empty()) {
+        // The flags' meaning, run in the program's heap before it. It is
+        // Spinel's own Ruby, so failing to compile it is a bug, not the
+        // program's.
+        let parsed = spinel_parse::parse_file("<flags>", prelude.as_bytes());
+        let compiled = spinel_vm::compile::program(&parsed.program)
+            .expect("the prelude the flags make compiles");
+        let mut frame = spinel_vm::interp::Frame::new(0);
+        outcome = spinel_vm::interp::eval_in(&mut scope, &mut frame, &compiled)
+            .map(|_| spinel_vm::Value::NIL);
+    }
+    if outcome.is_ok() {
+        let mut frame = spinel_vm::interp::Frame::new(0);
+        outcome = spinel_vm::interp::eval_in(&mut scope, &mut frame, &iseq)
+            .map(|_| spinel_vm::Value::NIL);
+    }
     // `exit` is a `SystemExit` that nothing rescued: not an error to report,
     // and its status is the process's.
     let exited = matches!(
