@@ -764,7 +764,9 @@ class File < IO
     def world_writable? = mode & 0002 == 0 ? nil : mode & 0777
 
     def owned? = uid == Process.euid
-    def grpowned? = gid == Process.egid
+    # The effective group, or any of the supplementary ones, as CRuby's
+    # `rb_group_member` asks.
+    def grpowned? = gid == Process.egid || Process.groups.include?(gid)
 
     # CRuby's `rb_stat_r` and friends: the owner's bits for the owner, the
     # group's for the group, everyone's otherwise, and root may read and
