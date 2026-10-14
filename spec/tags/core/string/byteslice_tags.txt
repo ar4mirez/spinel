@@ -1,0 +1,4 @@
+fails(#19: String: an expectation about an error, newly reported since PRD 0077 let mspec's raise matcher run inside its BasicObject proxy):String#byteslice raises a RangeError if the index is too big
+fails(#19: String: an expectation about an error, newly reported since PRD 0077 let mspec's raise matcher run inside its BasicObject proxy):String#byteslice with index, length raises a RangeError if the index or length is too big
+fails(#19: String: an expectation about an error, newly reported since PRD 0077 let mspec's raise matcher run inside its BasicObject proxy):String#byteslice with index, length raises a RangeError if the index or length is too small
+fails(#19: String: an expectation about an error, newly reported since PRD 0077 let mspec's raise matcher run inside its BasicObject proxy):String#byteslice with Range raises a RangeError if one of the bound is too big

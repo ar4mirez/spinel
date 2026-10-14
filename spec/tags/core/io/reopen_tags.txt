@@ -1,0 +1,1 @@
+fails(#41: reopen keeps the receiver class; CRuby changes it to the class of the IO it reopens with, which needs a primitive Ruby does not have):IO#reopen with an IO does not call #to_io

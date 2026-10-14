@@ -1,0 +1,1 @@
+fails(#41: to_ary is asked only of an object that responds to it; CRuby rb_check_funcall also tries a method_missing of the object own):IO#puts calls :to_ary before writing non-string objects, regardless of it being implemented in the receiver

@@ -1,0 +1,1 @@
+fails(#32: Time: an expectation about an error, newly reported since PRD 0077 let mspec's raise matcher run inside its BasicObject proxy):Time.now Timezone object raises TypeError if timezone does not implement #utc_to_local method

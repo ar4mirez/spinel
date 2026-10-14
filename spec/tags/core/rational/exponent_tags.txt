@@ -1,0 +1,1 @@
+fails(#34: Rational and Complex: an expectation about an error, newly reported since PRD 0077 let mspec's raise matcher run inside its BasicObject proxy):Rational#** raises ZeroDivisionError for Rational(0, 1) passed a negative Rational

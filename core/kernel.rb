@@ -2,7 +2,7 @@
 #
 # `send`, `raise`, `throw`, `catch`, `block_given?`, `proc`, `lambda`, `class`,
 # `equal?`, `nil?`, `__dup__` (the copy under `dup`), `freeze`, `frozen?`,
-# `object_id` and `__write__` are primitives: each is dispatch, an allocation, a header bit, or a syscall.
+# and `object_id` are primitives: each is dispatch, an allocation or a header bit.
 # Everything below is Ruby, because Ruby can say it.
 module Kernel
   # The same object first, whatever `==` and `equal?` say — CRuby's

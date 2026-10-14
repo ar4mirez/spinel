@@ -1,0 +1,2 @@
+fails(#47: the library does not load yet, and a should_not raise around it now reports the NameError):Logger#new receives a frequency rotation as second argument
+fails(#47: the library does not load yet, and a should_not raise around it now reports the NameError):Logger#new also receives a number of log files to keep as second argument

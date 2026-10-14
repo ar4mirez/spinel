@@ -340,14 +340,6 @@ pub enum Native {
     StringIndex,
     /// `String#<=>` — compares two byte payloads.
     StringCompare,
-    /// Writes a `String`'s bytes to stdout. A syscall, so Rust.
-    ///
-    /// Installed as `Kernel#__write__`, which is not a Ruby method name.
-    /// `docs/engine.md` spells a primitive `Primitive.write(...)`; there is no
-    /// `Primitive` module yet, and inventing one for a single entry would be a
-    /// module to name, bootstrap and document before anything needed it.
-    /// `puts`, `print` and `p` are Ruby on top of this.
-    WriteString,
     /// `strerror(3)` for an error number, as a String (#29).
     ///
     /// Installed as `Kernel#__strerror__`. It is the platform's message table,
@@ -502,8 +494,9 @@ pub enum FsOp {
     Getcwd,
     /// `__fs_isatty__(fd)`.
     Isatty,
-    /// `__fs_access__(path, mode)`: whether `access(2)` allows it, for
-    /// `File.readable?`, `writable?` and `executable?`.
+    /// `__fs_access__(path, mode, effective)`: whether `access(2)` allows
+    /// it, by the effective ids when `effective` is true, for
+    /// `File.readable?`, `writable?`, `executable?` and their `_real` forms.
     Access,
     /// `__fs_chdir__(path)`: true.
     Chdir,
@@ -528,7 +521,8 @@ pub enum FsOp {
     Chmod,
     /// `__fs_readlink__(path)`: where the link points.
     Readlink,
-    /// `__fs_stat__(path, follow)`: `stat(2)`'s fields as sixteen Integers —
+    /// `__fs_stat__(path, follow)`: `stat(2)`'s fields — `fstat(2)`'s when
+    /// the path is an Integer descriptor — as sixteen Integers:
     /// dev, ino, mode, nlink, uid, gid, rdev, size, blksize, blocks, then
     /// seconds and nanoseconds for atime, mtime and ctime.
     Stat,
@@ -543,6 +537,37 @@ pub enum FsOp {
     FdSeek,
     /// `__fd_close__(fd)`: true.
     FdClose,
+    /// `__fd_pipe__`: `[read_fd, write_fd]`, both close-on-exec.
+    Pipe,
+    /// `__fd_dup__(fd)`: `[new_fd]`, close-on-exec.
+    FdDup,
+    /// `__fd_dup2__(fd, onto)`: `[onto]`, now naming what `fd` names.
+    FdDup2,
+    /// `__fd_pread__(fd, count, offset)`: like `__fd_read__`, at an offset
+    /// and without moving the descriptor.
+    FdPread,
+    /// `__fd_pwrite__(fd, string, offset)`: `[bytes written]`.
+    FdPwrite,
+    /// `__fd_fcntl__(fd, command, argument)`: `[what fcntl answered]`.
+    FdFcntl,
+    /// `__fd_fcntl_constants__`: `[name, value]` pairs for `Fcntl` and the
+    /// descriptor flags `IO` reads.
+    FcntlConstants,
+    /// `__fd_flock__(fd, operation)`: true.
+    FdFlock,
+    /// `__fd_fsync__(fd, data_only)`: true.
+    FdFsync,
+    /// `__fs_truncate__(path_or_fd, length)`: true.
+    Truncate,
+    /// `__fs_link__(target, link)`: true.
+    Link,
+    /// `__fs_mkfifo__(path, mode)`: true.
+    Mkfifo,
+    /// `__fs_utime__(path, atime_s, atime_ns, mtime_s, mtime_ns, follow)`:
+    /// true. A nil seconds is now.
+    Utime,
+    /// `__fs_chown__(path, uid, gid, follow)`: true. -1 leaves one alone.
+    Chown,
 }
 
 /// Which process query. See `interp.rs`, `sys_native`.

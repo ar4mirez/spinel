@@ -1,0 +1,1 @@
+fails(#41: a pipe here is a blocking descriptor; CRuby makes both ends O_NONBLOCK and waits for them in the VM, which needs a poll primitive):IO#nonblock? returns true for pipe by default

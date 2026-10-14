@@ -1193,9 +1193,15 @@ impl Compiler {
         Ok(())
     }
 
+    /// A core class the compiled code needs that the program did not name:
+    /// `Array` for a multiple assignment's conversion, `Hash` for keywords.
+    /// Always `::X`. Looked up lexically it was not found inside a
+    /// `BasicObject` subclass, whose constants do not reach `Object`'s, and
+    /// a program's own `X` in an enclosing module would have been taken
+    /// instead. CRuby's equivalents are C calls that look up nothing.
     fn push_const_name(&mut self, name: &str) {
         let symbol = self.symbol(name);
-        self.emit(Insn::GetConst(symbol, ConstScope::Lexical));
+        self.emit(Insn::GetConst(symbol, ConstScope::Top));
     }
 
     /// Send `name` with `argc` positional arguments, no block and no keywords.

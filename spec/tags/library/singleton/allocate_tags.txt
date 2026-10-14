@@ -1,0 +1,1 @@
+fails(#28: Singleton makes allocate private through reflection: an expectation about an error, newly reported since PRD 0077 let mspec's raise matcher run inside its BasicObject proxy):Singleton.allocate is a private method

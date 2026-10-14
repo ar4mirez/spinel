@@ -1,0 +1,1 @@
+fails(#181: Kernel#Float: an expectation about an error, newly reported since PRD 0077 let mspec's raise matcher run inside its BasicObject proxy):Numeric#coerce raises an ArgumentError when passed a non-numeric String

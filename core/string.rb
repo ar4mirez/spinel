@@ -1827,9 +1827,18 @@ class String
       precision_set = false
       value = nil
       have_value = false
+      start = i
+      digits_last = false
       loop do
-        raise ArgumentError, "incomplete format specifier; use %% (double %) instead" if i >= chars.size
+        # Ruby 3.4's wordings, measured: nothing after the `%` is incomplete,
+        # and a directive the string ends inside is malformed.
+        if i >= chars.size
+          raise ArgumentError, "incomplete format specifier; use %% (double %) instead" if i == start
+          raise ArgumentError, "malformed format string - %*[0-9]" if digits_last
+          raise ArgumentError, "malformed format string"
+        end
         c = chars[i]
+        digits_last = false
         case c
         when "-", "+", " ", "0", "#"
           flags.push(c)
@@ -1857,6 +1866,7 @@ class String
           else
             raise ArgumentError, "width given twice" unless width.nil?
             width = number
+            digits_last = true
           end
           i = chars[after] == "$" ? after + 1 : after
         when "."
@@ -1890,8 +1900,7 @@ class String
           out << "%"
           return i + 1
         when "\n", "\0"
-          out << "%" << c
-          return i + 1
+          raise ArgumentError, "malformed format string"
         else
           value = take unless have_value || !"diuxXobBcsfeEgGaAp".include?(c)
           raise ArgumentError, "malformed format string - %#{c}" unless "diuxXobBcsfeEgGaAp".include?(c)

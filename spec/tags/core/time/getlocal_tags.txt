@@ -1,0 +1,2 @@
+fails(#32: Time: an expectation about an error, newly reported since PRD 0077 let mspec's raise matcher run inside its BasicObject proxy):Time#getlocal with a timezone argument raises TypeError if timezone does not implement #utc_to_local method
+fails(#32: Time: an expectation about an error, newly reported since PRD 0077 let mspec's raise matcher run inside its BasicObject proxy):Time#getlocal with a timezone argument subject's class implements .find_timezone method does not call .find_timezone if passed any not string/numeric/timezone timezone argument

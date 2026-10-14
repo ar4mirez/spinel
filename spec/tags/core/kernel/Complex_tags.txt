@@ -1,2 +1,4 @@
 fails(#34: `Kernel#Complex` does not exist until `Rational` and `Complex` do):Kernel#Complex is a private method
 fails(#34: `Kernel#Complex` does not exist until `Rational` and `Complex` do):Kernel.Complex is a public method
+fails(#34: Rational and Complex: an expectation about an error, newly reported since PRD 0077 let mspec's raise matcher run inside its BasicObject proxy):Kernel#Complex raises an ArgumentError if exception: is not true or false
+fails(#34: Rational and Complex: an expectation about an error, newly reported since PRD 0077 let mspec's raise matcher run inside its BasicObject proxy):Kernel#Complex when passed exception: false and [non-Numeric, Numeric] argument throws a TypeError

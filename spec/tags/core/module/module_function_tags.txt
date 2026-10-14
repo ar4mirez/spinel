@@ -1,0 +1,1 @@
+fails(#28: Module and Class reflection: an expectation about an error, newly reported since PRD 0077 let mspec's raise matcher run inside its BasicObject proxy):Module#module_function on Class raises a TypeError if calling after rebinded to Class

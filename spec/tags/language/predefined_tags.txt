@@ -21,3 +21,9 @@ fails(#39: the default $LOAD_PATH is RubyGems' and carries its prelude marker):E
 fails(#41: $. is an ordinary global here; it is not converted with to_int on assignment and not tied to the last read line):Predefined global $. should call #to_int to convert the object to an Integer
 fails(the frozen copy keeps the instance variables of the String it was made from):Predefined global $/ makes a new frozen String from the assigned String
 fails(the frozen copy keeps the instance variables of the String it was made from):Predefined global $-0 makes a new frozen String from the assigned String
+fails(#41: the IO globals: an expectation about an error, newly reported since PRD 0077 let mspec's raise matcher run inside its BasicObject proxy):Predefined global $stdout raises TypeError error if assigned to object that doesn't respond to #write
+fails(#29: the $@ global: an expectation about an error, newly reported since PRD 0077 let mspec's raise matcher run inside its BasicObject proxy):Predefined global $@ raises a TypeError when passed a Symbol
+fails(#29: the $@ global: an expectation about an error, newly reported since PRD 0077 let mspec's raise matcher run inside its BasicObject proxy):Predefined global $@ raises a TypeError when the Array contains a Symbol
+fails(#29: the $@ global: an expectation about an error, newly reported since PRD 0077 let mspec's raise matcher run inside its BasicObject proxy):Predefined global $@ raises a TypeError when the array contains nil
+fails(#29: the $@ global: an expectation about an error, newly reported since PRD 0077 let mspec's raise matcher run inside its BasicObject proxy):Predefined global $@ raises a TypeError when the argument is a nested array
+fails(#41: the IO globals: an expectation about an error, newly reported since PRD 0077 let mspec's raise matcher run inside its BasicObject proxy):Predefined global $. raises TypeError if object can't be converted to an Integer

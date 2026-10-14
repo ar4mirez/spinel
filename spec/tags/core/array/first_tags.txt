@@ -1,0 +1,1 @@
+fails(#21: Array: an expectation about an error, newly reported since PRD 0077 let mspec's raise matcher run inside its BasicObject proxy):Array#first raises a RangeError when count is a Bignum

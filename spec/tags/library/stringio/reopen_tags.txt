@@ -1,0 +1,1 @@
+fails(#56: StringIO: an expectation about an error, newly reported since PRD 0077 let mspec's raise matcher run inside its BasicObject proxy):StringIO#reopen when passed [Object] does not try to convert the passed Object to a String using #to_str

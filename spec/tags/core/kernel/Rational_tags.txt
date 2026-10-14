@@ -1,2 +1,4 @@
 fails(#34: `Kernel#Rational` does not exist until `Rational` and `Complex` do):Kernel#Rational is a private method
 fails(#34: `Kernel#Rational` does not exist until `Rational` and `Complex` do):Kernel.Rational is a public method
+fails(#34: Rational and Complex: an expectation about an error, newly reported since PRD 0077 let mspec's raise matcher run inside its BasicObject proxy):Kernel#Rational raises an ArgumentError if exception: is not true or false
+fails(#34: Rational and Complex: an expectation about an error, newly reported since PRD 0077 let mspec's raise matcher run inside its BasicObject proxy):Kernel#Rational when passed a Complex [Complex] raises a RangeError if the imaginary part is not 0
