@@ -78,7 +78,7 @@ descriptor finds `/dev/null` there, because Rust's runtime opens one before
 | | passed | failed | blocked |
 |---|---:|---:|---:|
 | corpus before | 22,043 | 0 | 9,114 |
-| this slice | **22,687** | **0** | 8,306 |
+| this slice | **22,689** | **0** | 8,306 |
 
 `core/` goes from 81.0% to **83.2%**; `core/process` from 83 to 384 of
 430 passing, `core/kernel` from 1,874 to 1,947.

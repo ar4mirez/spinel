@@ -25,7 +25,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/exception` | 39 | 250 | 215 | 0 | 14 | 21 | 86% |
 | `core/false` | 9 | 13 | 11 | 0 | 2 | 0 | 85% |
 | `core/fiber` | 15 | 189 | 130 | 0 | 54 | 5 | 69% |
-| `core/file` | 111 | 920 | 862 | 0 | 55 | 3 | 94% |
+| `core/file` | 111 | 922 | 864 | 0 | 55 | 3 | 94% |
 | `core/filetest` | 25 | 11 | 9 | 0 | 2 | 0 | 82% |
 | `core/float` | 50 | 261 | 240 | 0 | 20 | 1 | 92% |
 | `core/gc` | 18 | 41 | 2 | 0 | 39 | 0 | 5% |
@@ -131,4 +131,4 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `optional/capi` | 47 | 0 | 0 | 0 | 0 | 0 | — |
 | `optional/thread_safety` | 1 | 5 | 0 | 0 | 5 | 0 | 0% |
 | `security` | 13 | 34 | 11 | 0 | 19 | 4 | 32% |
-| **total** | 3835 | 31581 | 22687 | 0 | 8306 | 588 | 72% |
+| **total** | 3835 | 31583 | 22689 | 0 | 8306 | 588 | 72% |
