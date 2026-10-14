@@ -1,0 +1,1 @@
+fails(#36: ObjectSpace and finalizers: newly run since #43 let ruby_exe start Spinel, and it disagrees):ObjectSpace.dump dumps to stdout when passed output: :stdout

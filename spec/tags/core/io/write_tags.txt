@@ -1,0 +1,1 @@
+fails(#41: IO: newly run since #43 let ruby_exe start Spinel, and it disagrees):IO#write on STDOUT raises SignalException SIGPIPE if the stream is closed instead of Errno::EPIPE like other IOs

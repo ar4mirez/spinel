@@ -1,0 +1,1 @@
+fails(#47: a vendored standard library: newly run since #43 let ruby_exe start Spinel, and it disagrees):Net::FTP#default_passive is true by default

@@ -1,0 +1,1 @@
+fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):Warning.[] returns default values for categories :deprecated and :experimental

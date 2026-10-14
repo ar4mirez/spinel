@@ -1,0 +1,2 @@
+fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The -d command line option sets $VERBOSE to true
+fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The -d command line option sets $-d to true

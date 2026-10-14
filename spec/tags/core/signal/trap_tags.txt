@@ -1,0 +1,3 @@
+fails(#44: signal handlers that run: newly run since #43 let ruby_exe start Spinel, and it disagrees):Signal.trap accepts 'SYSTEM_DEFAULT' and uses the OS handler for SIGPIPE
+fails(#44: signal handlers that run: newly run since #43 let ruby_exe start Spinel, and it disagrees):Signal.trap the special EXIT signal code accepts the EXIT code
+fails(#44: signal handlers that run: newly run since #43 let ruby_exe start Spinel, and it disagrees):Signal.trap the special EXIT signal code runs the proc before at_exit handlers

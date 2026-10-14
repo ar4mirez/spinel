@@ -1,0 +1,3 @@
+fails(#41: ARGF: newly run since #43 let ruby_exe start Spinel, and it disagrees):ARGF.read reads a number of bytes from stdin
+fails(#41: ARGF: newly run since #43 let ruby_exe start Spinel, and it disagrees):ARGF.read reads the contents of stdin
+fails(#41: ARGF: newly run since #43 let ruby_exe start Spinel, and it disagrees):ARGF.read reads the contents of one file and stdin

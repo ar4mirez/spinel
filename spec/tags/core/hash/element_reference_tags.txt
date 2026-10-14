@@ -1,0 +1,1 @@
+fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):Hash#[] does not dispatch to hash for Boolean, Integer, Float, String, or Symbol

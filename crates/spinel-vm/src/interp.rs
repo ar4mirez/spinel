@@ -7739,12 +7739,18 @@ fn native_call<'h>(
                 ));
             }
             let name = args.remove(0);
-            let Some(name) = name.as_symbol() else {
-                // `send("name")` also works in Ruby, once a String can be
-                // turned into a symbol without a method call.
+            // A String names the method as well as a Symbol does.
+            let interned = name.as_symbol().or_else(|| {
+                string_bytes(scope, name)
+                    .and_then(|bytes| String::from_utf8(bytes).ok())
+                    .map(|text| symbol(&text))
+            });
+            let Some(name) = interned else {
+                // Anything else is a TypeError naming it by `inspect`, which
+                // is a method call this primitive cannot make.
                 return Err(Error::NoDispatch {
                     op: "send",
-                    operands: "a method name that is not a Symbol",
+                    operands: "a method name that is not a Symbol or a String",
                 });
             };
             let forwarded = Pending {
@@ -11435,10 +11441,10 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         ),
         (
             Builtin::Kernel,
-            &["__needs_process__"],
+            &["__needs_signals__"],
             Native::Refuse {
-                what: "starting or ending a process",
-                needs: "`Process` (#43)",
+                what: "a signal sent to this process",
+                needs: "signal handlers that run (#44)",
             },
         ),
         (
@@ -11840,6 +11846,50 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             Builtin::Kernel,
             &["__sys_process_constants__"],
             Native::Sys(SysOp::ProcessConstants),
+        ),
+        (
+            Builtin::Kernel,
+            &["__sys_spawn__"],
+            Native::Sys(SysOp::Spawn),
+        ),
+        (
+            Builtin::Kernel,
+            &["__sys_waitpid__"],
+            Native::Sys(SysOp::Waitpid),
+        ),
+        (Builtin::Kernel, &["__sys_kill__"], Native::Sys(SysOp::Kill)),
+        (Builtin::Kernel, &["__sys_fork__"], Native::Sys(SysOp::Fork)),
+        (Builtin::Kernel, &["__sys_exit__"], Native::Sys(SysOp::Exit)),
+        (Builtin::Kernel, &["__sys_pgid__"], Native::Sys(SysOp::Pgid)),
+        (
+            Builtin::Kernel,
+            &["__sys_rlimit__"],
+            Native::Sys(SysOp::Rlimit),
+        ),
+        (
+            Builtin::Kernel,
+            &["__sys_priority__"],
+            Native::Sys(SysOp::Priority),
+        ),
+        (
+            Builtin::Kernel,
+            &["__sys_times__"],
+            Native::Sys(SysOp::Times),
+        ),
+        (
+            Builtin::Kernel,
+            &["__sys_clock_res__"],
+            Native::Sys(SysOp::ClockRes),
+        ),
+        (
+            Builtin::Kernel,
+            &["__sys_set_id__"],
+            Native::Sys(SysOp::SetId),
+        ),
+        (
+            Builtin::Kernel,
+            &["__sys_groups__"],
+            Native::Sys(SysOp::Groups),
         ),
         (
             Builtin::Kernel,
@@ -14350,6 +14400,222 @@ fn errno_value(error: &std::io::Error) -> Value {
     Value::fixnum(i64::from(errno)).expect("an errno is a fixnum")
 }
 
+/// What `__sys_spawn__` was asked to start, resolved by `core/process.rb`:
+/// the program's path is already searched for, the environment already built.
+struct SpawnRequest {
+    path: Vec<u8>,
+    argv: Vec<Vec<u8>>,
+    envp: Vec<Vec<u8>>,
+    /// `(child_fd, parent_fd)`; a parent fd below zero closes the child's.
+    fds: Vec<(i64, i64)>,
+    chdir: Option<Vec<u8>>,
+    pgroup: Option<i64>,
+    umask: Option<i64>,
+    /// `exec`: set up and replace this process instead of a child.
+    replace: bool,
+    /// Close every descriptor from 3 up that `fds` did not make, inheritable
+    /// or not.
+    close_others: bool,
+}
+
+/// `fork` and `execve`, as CRuby's `rb_fork_async_signal_safe` does them:
+/// everything the child needs is made before the fork, and the child calls
+/// only async-signal-safe functions. A failure in the child is its errno,
+/// written down a close-on-exec pipe that `execve` closes on success.
+fn spawn_process(
+    request: &SpawnRequest,
+) -> Result<libc::pid_t, (Option<libc::pid_t>, libc::c_int)> {
+    use std::ffi::CString;
+    let cstring = |bytes: &[u8]| CString::new(bytes).map_err(|_| (None, libc::EINVAL));
+    let path = cstring(&request.path)?;
+    let argv: Vec<CString> = request
+        .argv
+        .iter()
+        .map(|a| cstring(a))
+        .collect::<Result<_, _>>()?;
+    let envp: Vec<CString> = request
+        .envp
+        .iter()
+        .map(|e| cstring(e))
+        .collect::<Result<_, _>>()?;
+    let chdir = request.chdir.as_deref().map(cstring).transpose()?;
+    let mut argv_ptrs: Vec<*const libc::c_char> = argv.iter().map(|a| a.as_ptr()).collect();
+    argv_ptrs.push(std::ptr::null());
+    let mut envp_ptrs: Vec<*const libc::c_char> = envp.iter().map(|e| e.as_ptr()).collect();
+    envp_ptrs.push(std::ptr::null());
+    let fds: Vec<(libc::c_int, libc::c_int)> = request
+        .fds
+        .iter()
+        .map(|&(child, parent)| (child as libc::c_int, parent as libc::c_int))
+        .collect();
+    // Every source is first copied above every fd named, so that making one
+    // child fd cannot overwrite the source of another.
+    let above = fds.iter().map(|&(c, p)| c.max(p)).max().unwrap_or(2).max(2) + 1;
+    let mut scratch: Vec<libc::c_int> = vec![-1; fds.len()];
+    let kept: Vec<libc::c_int> = fds
+        .iter()
+        .filter(|&&(_, p)| p >= 0)
+        .map(|&(c, _)| c)
+        .collect();
+    // The highest descriptor there could be, read before the fork.
+    // SAFETY: `sysconf` takes an integer and touches no memory.
+    let open_max = match unsafe { libc::sysconf(libc::_SC_OPEN_MAX) } {
+        n if n > 0 => n.min(65536) as libc::c_int,
+        _ => 1024,
+    };
+
+    let mut report = [-1 as libc::c_int; 2];
+    if !request.replace {
+        // SAFETY: `report` is room for the two descriptors `pipe` writes.
+        if unsafe { libc::pipe(report.as_mut_ptr()) } < 0 {
+            return Err((
+                None,
+                std::io::Error::last_os_error()
+                    .raw_os_error()
+                    .unwrap_or(libc::EIO),
+            ));
+        }
+        set_cloexec(report[0]);
+        set_cloexec(report[1]);
+    }
+    // The child's errno goes down this; `close_others` must leave it open.
+    let report_fd = report[1];
+
+    // The child's whole job, in this process or the child.
+    // SAFETY (for every call below): async-signal-safe functions on integers
+    // and on memory prepared above, which outlives the calls.
+    let setup = |scratch: &mut [libc::c_int]| -> Result<(), libc::c_int> {
+        unsafe {
+            if let Some(group) = request.pgroup
+                && libc::setpgid(0, group as libc::pid_t) < 0
+            {
+                return Err(child_errno());
+            }
+            for (i, &(_, parent)) in fds.iter().enumerate() {
+                if parent >= 0 {
+                    scratch[i] = libc::fcntl(parent, libc::F_DUPFD_CLOEXEC, above);
+                    if scratch[i] < 0 {
+                        return Err(child_errno());
+                    }
+                }
+            }
+            for (i, &(child, parent)) in fds.iter().enumerate() {
+                if parent < 0 {
+                    libc::close(child);
+                } else if libc::dup2(scratch[i], child) < 0 {
+                    return Err(child_errno());
+                }
+            }
+            for &fd in scratch.iter() {
+                if fd >= 0 {
+                    libc::close(fd);
+                }
+            }
+            if request.close_others {
+                for fd in 3..open_max {
+                    if !kept.contains(&fd) && fd != report_fd {
+                        libc::close(fd);
+                    }
+                }
+            }
+            if let Some(mask) = request.umask {
+                libc::umask(mask as libc::mode_t);
+            }
+            if let Some(dir) = &chdir
+                && libc::chdir(dir.as_ptr()) < 0
+            {
+                return Err(child_errno());
+            }
+            // Rust starts every program with SIGPIPE ignored, and an ignored
+            // signal stays ignored across `execve`: `yes | head` would never
+            // end. The child gets the default back.
+            libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+            libc::execve(path.as_ptr(), argv_ptrs.as_ptr(), envp_ptrs.as_ptr());
+            Err(child_errno())
+        }
+    };
+
+    if request.replace {
+        return setup(&mut scratch)
+            .map(|()| 0)
+            .map_err(|errno| (None, errno));
+    }
+
+    // SAFETY: see `Fork`: one thread runs Ruby, and the child only runs
+    // `setup` and then `_exit`.
+    let pid = unsafe { libc::fork() };
+    if pid < 0 {
+        let errno = std::io::Error::last_os_error()
+            .raw_os_error()
+            .unwrap_or(libc::EIO);
+        // SAFETY: closing two descriptors this function opened.
+        unsafe {
+            libc::close(report[0]);
+            libc::close(report[1]);
+        }
+        return Err((None, errno));
+    }
+    if pid == 0 {
+        let errno = setup(&mut scratch).err().unwrap_or(libc::EIO);
+        // SAFETY: writing four bytes from a live int, then ending the child.
+        unsafe {
+            libc::write(report[1], (&errno as *const libc::c_int).cast(), 4);
+            libc::_exit(127);
+        }
+    }
+    // SAFETY: the parent closes its copy of the write end, then reads at most
+    // four bytes into a live int.
+    unsafe {
+        libc::close(report[1]);
+        let mut errno: libc::c_int = 0;
+        let got = loop {
+            let got = libc::read(report[0], (&mut errno as *mut libc::c_int).cast(), 4);
+            if got < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted
+            {
+                continue;
+            }
+            break got;
+        };
+        libc::close(report[0]);
+        if got == 4 {
+            // The child never became the program: reap it, and answer why.
+            let mut status = 0;
+            libc::waitpid(pid, &mut status, 0);
+            return Err((Some(pid), errno));
+        }
+    }
+    Ok(pid)
+}
+
+/// `errno`, read the async-signal-safe way: `io::Error::last_os_error` may
+/// allocate, which a forked child must not.
+fn child_errno() -> libc::c_int {
+    // SAFETY: each returns a pointer to this thread's errno, valid to read.
+    unsafe {
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        let at = libc::__errno_location();
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        let at = libc::__error();
+        *at
+    }
+}
+
+/// Set this thread's errno, for a call whose failure answer is also a value.
+///
+/// # Safety
+///
+/// Only writes this thread's own errno.
+unsafe fn set_errno(value: libc::c_int) {
+    // SAFETY: each returns a pointer to this thread's errno, valid to write.
+    unsafe {
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        let at = libc::__errno_location();
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        let at = libc::__error();
+        *at = value;
+    }
+}
+
 /// An Integer argument, if that is what was passed.
 fn int_arg(call: &Pending, index: usize) -> Option<i64> {
     call.args.get(index).and_then(|v| v.as_fixnum())
@@ -15339,6 +15605,11 @@ fn sys_native(
             pairs.extend([
                 ("RLIM_SAVED_MAX", libc::RLIM_SAVED_MAX as i128),
                 ("RLIM_SAVED_CUR", libc::RLIM_SAVED_CUR as i128),
+                ("RLIMIT_MSGQUEUE", libc::RLIMIT_MSGQUEUE as i128),
+                ("RLIMIT_NICE", libc::RLIMIT_NICE as i128),
+                ("RLIMIT_RTPRIO", libc::RLIMIT_RTPRIO as i128),
+                ("RLIMIT_RTTIME", libc::RLIMIT_RTTIME as i128),
+                ("RLIMIT_SIGPENDING", libc::RLIMIT_SIGPENDING as i128),
             ]);
             let mut out = Vec::with_capacity(pairs.len());
             for (name, value) in pairs {
@@ -15352,6 +15623,255 @@ fn sys_native(
             }
             let out: Vec<Value> = out.into_iter().map(|h| scope.get(h)).collect();
             new_array(scope, &out)
+        }
+        SysOp::Spawn => {
+            let strings = |scope: &mut HandleScope<'_>, index: usize| -> Option<Vec<Vec<u8>>> {
+                let items = array_elements(scope, *call.args.get(index)?)?;
+                items.into_iter().map(|v| string_bytes(scope, v)).collect()
+            };
+            let path = call.args.first().and_then(|&v| string_bytes(scope, v));
+            let (Some(path), Some(argv), Some(envp)) = (path, strings(scope, 1), strings(scope, 2))
+            else {
+                return Err(Error::NoDispatch {
+                    op: "__sys_spawn__",
+                    operands: "a path, argv and envp that are not Strings",
+                });
+            };
+            let fds: Vec<i64> = call
+                .args
+                .get(3)
+                .and_then(|&v| array_elements(scope, v))
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|v| v.as_fixnum())
+                .collect();
+            let chdir = call.args.get(4).and_then(|&v| string_bytes(scope, v));
+            let request = SpawnRequest {
+                path,
+                argv,
+                envp,
+                fds: fds
+                    .chunks(2)
+                    .filter(|p| p.len() == 2)
+                    .map(|p| (p[0], p[1]))
+                    .collect(),
+                chdir,
+                pgroup: int_arg(call, 5),
+                umask: int_arg(call, 6),
+                replace: call.args.get(7).is_some_and(|v| v.is_truthy()),
+                close_others: call.args.get(8).is_some_and(|v| v.is_truthy()),
+            };
+            match spawn_process(&request) {
+                Ok(pid) => new_array(scope, &[int(i64::from(pid))]),
+                // A child that could not become the program: its pid, reaped,
+                // and why, so `$?` can say exit 127 as CRuby's does.
+                Err((Some(pid), errno)) => {
+                    new_array(scope, &[int(i64::from(pid)), int(i64::from(errno))])
+                }
+                Err((None, errno)) => int(i64::from(errno)),
+            }
+        }
+        SysOp::Waitpid => {
+            let pid = int_arg(call, 0).unwrap_or(-1) as libc::pid_t;
+            let flags = int_arg(call, 1).unwrap_or(0) as libc::c_int;
+            let mut status: libc::c_int = 0;
+            let got = loop {
+                // SAFETY: `status` is a valid, writable int for the call.
+                let got = unsafe { libc::waitpid(pid, &mut status, flags) };
+                if got < 0
+                    && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted
+                {
+                    continue;
+                }
+                break got;
+            };
+            if got < 0 {
+                errno_value(&std::io::Error::last_os_error())
+            } else if got == 0 {
+                new_array(scope, &[int(0), Value::NIL])
+            } else {
+                new_array(scope, &[int(i64::from(got)), int(i64::from(status))])
+            }
+        }
+        SysOp::Kill => {
+            let signal = int_arg(call, 0).unwrap_or(0) as libc::c_int;
+            let pid = int_arg(call, 1).unwrap_or(0) as libc::pid_t;
+            // SAFETY: `kill` takes two integers and touches no memory.
+            if unsafe { libc::kill(pid, signal) } < 0 {
+                errno_value(&std::io::Error::last_os_error())
+            } else {
+                Value::TRUE
+            }
+        }
+        SysOp::Fork => {
+            // ponytail: one Ractor runs Ruby, so there is no other thread of
+            // the VM for the child to lose. When Ractors run in parallel
+            // (#119) this refuses unless the main Ractor is the only one, as
+            // CRuby does.
+            // SAFETY: the VM holds no lock another thread could own, and the
+            // child goes on running this same single thread.
+            let pid = unsafe { libc::fork() };
+            if pid < 0 {
+                errno_value(&std::io::Error::last_os_error())
+            } else {
+                new_array(scope, &[int(i64::from(pid))])
+            }
+        }
+        SysOp::Exit => {
+            let status = int_arg(call, 0).unwrap_or(0) as libc::c_int;
+            // Rust's stdout is not used for Ruby's output, but anything the
+            // runtime wrote to it is flushed before the process goes.
+            use std::io::Write as _;
+            let _ = std::io::stdout().flush();
+            // SAFETY: `_exit` ends the process; nothing after it runs.
+            unsafe { libc::_exit(status) }
+        }
+        SysOp::Pgid => {
+            let a = int_arg(call, 1).unwrap_or(0) as libc::pid_t;
+            let b = int_arg(call, 2).unwrap_or(0) as libc::pid_t;
+            // SAFETY: each takes integers and touches no memory.
+            let answer = unsafe {
+                match int_arg(call, 0) {
+                    Some(0) => libc::getpgid(a),
+                    Some(1) => libc::setpgid(a, b),
+                    Some(2) => libc::getsid(a),
+                    Some(3) => libc::setsid(),
+                    _ => libc::getpgrp(),
+                }
+            };
+            fd_result(scope, i64::from(answer))
+        }
+        SysOp::Rlimit => {
+            let resource = int_arg(call, 0).unwrap_or(-1);
+            let limit = |scope: &mut HandleScope<'_>, index: usize| -> Option<libc::rlim_t> {
+                let value = *call.args.get(index)?;
+                if let Some(n) = value.as_fixnum() {
+                    return Some(n as libc::rlim_t);
+                }
+                crate::bignum::read(scope, value)
+                    .and_then(|n| u64::try_from(n).ok())
+                    .map(|n| n as libc::rlim_t)
+            };
+            #[allow(clippy::useless_conversion)]
+            let resource = resource as _;
+            if call.args.len() >= 3 {
+                let (Some(cur), Some(max)) = (limit(scope, 1), limit(scope, 2)) else {
+                    return Err(Error::NoDispatch {
+                        op: "__sys_rlimit__",
+                        operands: "limits that are not Integers",
+                    });
+                };
+                let wanted = libc::rlimit {
+                    rlim_cur: cur,
+                    rlim_max: max,
+                };
+                // SAFETY: `wanted` is a valid rlimit for the call.
+                unit_result(unsafe { libc::setrlimit(resource, &wanted) })
+            } else {
+                let mut got = libc::rlimit {
+                    rlim_cur: 0,
+                    rlim_max: 0,
+                };
+                // SAFETY: `got` is a valid, writable rlimit for the call.
+                if unsafe { libc::getrlimit(resource, &mut got) } < 0 {
+                    errno_value(&std::io::Error::last_os_error())
+                } else {
+                    let cur = crate::bignum::value(scope, &num_bigint::BigInt::from(got.rlim_cur));
+                    let cur = scope.root(cur);
+                    let max = crate::bignum::value(scope, &num_bigint::BigInt::from(got.rlim_max));
+                    let cur = scope.get(cur);
+                    new_array(scope, &[cur, max])
+                }
+            }
+        }
+        SysOp::Priority => {
+            #[allow(clippy::useless_conversion)]
+            let which = int_arg(call, 0).unwrap_or(0) as _;
+            let who = int_arg(call, 1).unwrap_or(0) as libc::id_t;
+            if let Some(value) = int_arg(call, 2) {
+                // SAFETY: integers only.
+                unit_result(unsafe { libc::setpriority(which, who, value as libc::c_int) })
+            } else {
+                // -1 is a priority as well as the failure, so errno decides.
+                // SAFETY: errno is this thread's, and `getpriority` takes
+                // integers only.
+                let got = unsafe {
+                    set_errno(0);
+                    libc::getpriority(which, who)
+                };
+                if got == -1 && child_errno() != 0 {
+                    errno_value(&std::io::Error::last_os_error())
+                } else {
+                    new_array(scope, &[int(i64::from(got))])
+                }
+            }
+        }
+        SysOp::Times => {
+            let seconds = |tv: libc::timeval| tv.tv_sec as f64 + tv.tv_usec as f64 / 1e6;
+            let usage = |who: libc::c_int| {
+                // SAFETY: a zeroed rusage is a valid one to fill.
+                let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+                // SAFETY: `usage` is valid and writable for the call.
+                unsafe { libc::getrusage(who, &mut usage) };
+                usage
+            };
+            let me = usage(libc::RUSAGE_SELF);
+            let children = usage(libc::RUSAGE_CHILDREN);
+            let times = [
+                seconds(me.ru_utime),
+                seconds(me.ru_stime),
+                seconds(children.ru_utime),
+                seconds(children.ru_stime),
+            ];
+            let mut values = Vec::with_capacity(4);
+            for t in times {
+                let value = crate::float::value(scope, t);
+                values.push(scope.root(value));
+            }
+            let values: Vec<Value> = values.into_iter().map(|h| scope.get(h)).collect();
+            new_array(scope, &values)
+        }
+        SysOp::ClockRes => {
+            let id = int_arg(call, 0).unwrap_or(0) as libc::clockid_t;
+            let mut res = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
+            // SAFETY: `res` is valid and writable for the call.
+            if unsafe { libc::clock_getres(id, &mut res) } < 0 {
+                errno_value(&std::io::Error::last_os_error())
+            } else {
+                new_array(scope, &[int(res.tv_sec), int(res.tv_nsec)])
+            }
+        }
+        SysOp::SetId => {
+            let a = int_arg(call, 1).unwrap_or(-1);
+            let b = int_arg(call, 2).unwrap_or(-1);
+            // SAFETY: each takes integers and touches no memory.
+            let done = unsafe {
+                match int_arg(call, 0) {
+                    Some(0) => libc::setuid(a as libc::uid_t),
+                    Some(1) => libc::setgid(a as libc::gid_t),
+                    Some(2) => libc::seteuid(a as libc::uid_t),
+                    Some(3) => libc::setegid(a as libc::gid_t),
+                    Some(4) => libc::setreuid(a as libc::uid_t, b as libc::uid_t),
+                    _ => libc::setregid(a as libc::gid_t, b as libc::gid_t),
+                }
+            };
+            unit_result(done)
+        }
+        SysOp::Groups => {
+            // SAFETY: a zero-length query writes nothing and answers the count.
+            let count = unsafe { libc::getgroups(0, std::ptr::null_mut()) }.max(0);
+            let mut groups = vec![0 as libc::gid_t; count as usize];
+            // SAFETY: `groups` has room for `count` ids.
+            let got = unsafe { libc::getgroups(count, groups.as_mut_ptr()) }.max(0);
+            groups.truncate(got as usize);
+            // SAFETY: `sysconf` takes an integer.
+            let max = unsafe { libc::sysconf(libc::_SC_NGROUPS_MAX) }.max(0);
+            let mut values: Vec<Value> = groups.into_iter().map(|g| int(i64::from(g))).collect();
+            values.push(int(max as i64));
+            new_array(scope, &values)
         }
         SysOp::ClockIds => {
             let ids: &[(&str, libc::clockid_t)] = &[

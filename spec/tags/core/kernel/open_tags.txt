@@ -1,1 +1,1 @@
-fails(#41: `Kernel#open` reads or writes an IO or a File, which do not exist yet):Kernel.open is a public method
+fails(#47: a vendored standard library: newly run since #43 let ruby_exe start Spinel, and it disagrees):Kernel#open is not redefined by open-uri

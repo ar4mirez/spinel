@@ -1,0 +1,4 @@
+fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):Integer#hash with a small value resists CVE-2011-4815 by having different hash codes in different processes
+fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):Integer#hash with a large value resists CVE-2011-4815 by having different hash codes in different processes
+fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):Float#hash resists CVE-2011-4815 by having different hash codes in different processes
+fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):String#hash resists CVE-2011-4815 by having different hash codes in different processes

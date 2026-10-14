@@ -1,0 +1,5 @@
+fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The RUBYLIB environment variable adds a directory to $LOAD_PATH
+fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The RUBYLIB environment variable adds a File::PATH_SEPARATOR-separated list of directories to $LOAD_PATH
+fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The RUBYLIB environment variable adds the directory after directories added by -I
+fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The RUBYLIB environment variable adds the directory after directories added by -I within RUBYOPT
+fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The RUBYLIB environment variable keeps spaces in the value

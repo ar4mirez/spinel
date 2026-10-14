@@ -1,0 +1,1 @@
+fails(#47: a vendored standard library: newly run since #43 let ruby_exe start Spinel, and it disagrees):Readline.readline returns the input string

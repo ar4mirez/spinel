@@ -1,0 +1,6 @@
+fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The -S command line option runs launcher found in RUBYPATH, but only code after the first /#!.*ruby.*/-ish line in target file
+fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The -S command line option runs launcher found in PATH, but only code after the first /#!.*ruby.*/-ish line in target file
+fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The -S command line option runs launcher found in RUBYPATH
+fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The -S command line option runs launcher found in PATH
+fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The -S command line option runs launcher found in RUBYPATH and sets the exit status to 1 if it fails
+fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The -S command line option runs launcher found in PATH and sets the exit status to 1 if it fails

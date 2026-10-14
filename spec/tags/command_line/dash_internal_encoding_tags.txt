@@ -1,0 +1,1 @@
+fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The --internal-encoding command line option sets Encoding.default_internal if given an encoding as a separate argument

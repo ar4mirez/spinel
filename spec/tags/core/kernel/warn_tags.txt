@@ -1,0 +1,1 @@
+fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):Kernel#warn :uplevel keyword argument shows the caller of #require and not #require itself with RubyGems loaded

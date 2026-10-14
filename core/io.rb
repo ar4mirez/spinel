@@ -372,22 +372,49 @@ end
     value
   end
 
+  # A child's IO (`IO.popen`) waits for the child once it is closed, and
+  # `$?` is how it went.
   def close
     return nil if @closed
     @closed = true
     @rbuf = "".b
-    IO.__check__(__fd_close__(@fileno), @path) if @autoclose
+    __fd_close__(@wfileno) unless @wfileno.nil? || @wclosed
+    IO.__check__(__fd_close__(@fileno), @path) if @autoclose && !@rclosed
+    __reap__
     nil
   end
 
+  def __reap__
+    return if @pid.nil?
+    pid = @pid
+    @pid = nil
+    status = Process::Status.wait(pid)
+    __global_store__(:$?, status) unless status.nil?
+  end
+
+  # The descriptor writes go to: a duplex child's own write end, or the one.
+  def __wfd__ = @wfileno || @fileno
+
   def close_read
     return nil if @closed
+    unless @wfileno.nil?
+      __fd_close__(@fileno) unless @rclosed
+      @rclosed = true
+      @access = 1
+      return @wclosed ? close : nil
+    end
     raise IOError, "closing non-duplex IO for reading" unless @access == 0
     close
   end
 
   def close_write
     return nil if @closed
+    unless @wfileno.nil?
+      __fd_close__(@wfileno) unless @wclosed
+      @wclosed = true
+      @access = 0
+      return @rclosed ? close : nil
+    end
     raise IOError, "closing non-duplex IO for writing" unless @access == 1
     close
   end
@@ -426,7 +453,16 @@ end
     raise NotImplementedError, "ioctl() function is unimplemented on this machine"
   end
 
-  def pid = nil
+  def pid
+    __check_open__
+    @pid
+  end
+
+  def __pid__(pid, writer = nil)
+    @pid = pid
+    @wfileno = writer
+    self
+  end
 
   def path
     @path.nil? ? nil : @path.dup
@@ -1115,8 +1151,8 @@ end
     return 0 if objects.all? { |object| String === object && object.empty? }
     __writable__
     # Bytes read ahead are bytes the descriptor has moved past; a write
-    # belongs where the reader is.
-    seek(0, IO::SEEK_CUR) unless @rbuf.empty?
+    # belongs where the reader is. A pipe cannot seek, and has no such place.
+    __unread__ unless @rbuf.empty? || !@wfileno.nil?
     return 0 if objects.empty?
     if objects.size == 1
       text = objects[0]
@@ -1130,13 +1166,13 @@ end
         text << __encode_out__(object).b
       end
     end
-    IO.__check__(__fd_write__(@fileno, text), @path)[0]
+    IO.__check__(__fd_write__(__wfd__, text), @path)[0]
   end
 
   def syswrite(object)
     __writable__
     text = String === object ? object : object.to_s
-    IO.__check__(__fd_write__(@fileno, text), @path)[0]
+    IO.__check__(__fd_write__(__wfd__, text), @path)[0]
   end
 
   def write_nonblock(object, exception: true)
@@ -1144,7 +1180,7 @@ end
     IO.__exception_flag__(exception)
     __nonblock__
     text = String === object ? object : object.to_s
-    result = __fd_write__(@fileno, text)
+    result = __fd_write__(__wfd__, text)
     if result == IO.__eagain__
       return :wait_writable unless exception
       raise IO::EAGAINWaitWritable, "write would block"
@@ -1160,7 +1196,7 @@ end
   def pwrite(object, offset)
     __writable__
     text = String === object ? object : object.to_s
-    IO.__check__(__fd_pwrite__(@fileno, text, Integer.__index__(offset)), @path)[0]
+    IO.__check__(__fd_pwrite__(__wfd__, text, Integer.__index__(offset)), @path)[0]
   end
 
   def <<(object)
@@ -1295,6 +1331,76 @@ end
     pos
   rescue Errno::ESPIPE
     nil
+  end
+
+  # --- a child on the other end ----------------------------------------------
+
+  # A command's standard output to read, its standard input to write, or
+  # both, as one IO; `close` waits for it. The command is what `spawn` takes,
+  # an Array holding its own options and environment included.
+  # ponytail: `"-"`, which forks and runs the block on both sides, refuses.
+  def self.popen(*args, **options, &block)
+    env = Hash === args.first ? args.shift : {}
+    # The options may come as a last positional Hash, as they did before
+    # keywords.
+    options = args.pop.merge(options) if args.size > 1 && Hash === args.last
+    command = args.shift
+    mode = args.shift
+    raise ArgumentError, "wrong number of arguments (given 0, expected 1+)" if command.nil?
+    mode = options.delete(:mode) if mode.nil? && options.key?(:mode)
+    mode = "r" if mode.nil?
+    # Converted once, here: it is read twice below.
+    mode = mode.to_str unless String === mode || Integer === mode
+    if command == "-"
+      raise NotImplementedError, "IO.popen(\"-\"): a fork with the block on both sides is not supported yet"
+    end
+    spawn_args = Array === command ? command.dup : [IO.__str__(command)]
+    command_options = Hash === spawn_args.last ? spawn_args.pop : {}
+    if Hash === spawn_args.first
+      env = env.merge(spawn_args.shift)
+    end
+    flags, = IO.__parse_mode__(mode)
+    access = flags & 3
+    io_keys = %i[external_encoding internal_encoding encoding textmode binmode autoclose invalid undef replace newline universal_newline crlf_newline cr_newline lf_newline xml]
+    io_options = options.select { |key, _| io_keys.include?(key) }
+    spawn_options = command_options.merge(options.reject { |key, _| io_keys.include?(key) })
+    child_in = child_out = parent_r = parent_w = nil
+    if access != 1
+      parent_r, child_out = IO.__check__(__fd_pipe__)
+    end
+    if access != 0
+      child_in, parent_w = IO.__check__(__fd_pipe__)
+    end
+    extra = []
+    extra << [0, child_in] unless child_in.nil?
+    extra << [1, child_out] unless child_out.nil?
+    begin
+      pid = Process::Spawn.start([env] + spawn_args + [spawn_options], extra, name: "popen")
+    ensure
+      __fd_close__(child_in) unless child_in.nil?
+      __fd_close__(child_out) unless child_out.nil?
+    end
+    io = allocate
+    if access == 2
+      io.__setup__(parent_r, "r+", io_options)
+      io.__pid__(pid, parent_w)
+    elsif access == 1
+      io.__setup__(parent_w, mode, io_options)
+      io.__pid__(pid)
+    else
+      io.__setup__(parent_r, mode, io_options)
+      io.__pid__(pid)
+    end
+    io.sync = true if access != 0
+    return io unless block
+    begin
+      yield io
+    ensure
+      io.close unless io.closed?
+    end
+  rescue SystemCallError
+    [parent_r, parent_w].each { |fd| __fd_close__(fd) unless fd.nil? } if pid.nil?
+    raise
   end
 
   # --- reading and writing whole files -------------------------------------

@@ -1,0 +1,3 @@
+fails(#41: ARGF: newly run since #43 let ruby_exe start Spinel, and it disagrees):ARGF.read_nonblock reads a number of bytes from stdin
+fails(#41: ARGF: newly run since #43 let ruby_exe start Spinel, and it disagrees):ARGF.read_nonblock reads up to the given bytes from STDIN
+fails(#41: ARGF: newly run since #43 let ruby_exe start Spinel, and it disagrees):ARGF.read_nonblock reads up to the given bytes from a file when a file and STDIN are present

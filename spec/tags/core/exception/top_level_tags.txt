@@ -1,0 +1,5 @@
+fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):An Exception reaching the top level is printed on STDERR
+fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):An Exception reaching the top level the Exception#cause is printed to STDERR with backtraces
+fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):An Exception reaching the top level with a custom backtrace is printed on STDERR
+fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):An Exception reaching the top level kills all threads and fibers, ensure clauses are only run for threads current fibers, not for suspended fibers with ensure on the root fiber
+fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):An Exception reaching the top level kills all threads and fibers, ensure clauses are only run for threads current fibers, not for suspended fibers with ensure on non-root fiber
