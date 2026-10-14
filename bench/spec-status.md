@@ -114,7 +114,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `library/securerandom` | 5 | 14 | 0 | 0 | 14 | 0 | 0% |
 | `library/shellwords` | 1 | 7 | 0 | 0 | 7 | 0 | 0% |
 | `library/singleton` | 7 | 14 | 0 | 0 | 13 | 1 | 0% |
-| `library/socket` | 188 | 915 | 0 | 0 | 915 | 0 | 0% |
+| `library/socket` | 188 | 917 | 0 | 0 | 917 | 0 | 0% |
 | `library/stringio` | 64 | 674 | 627 | 0 | 44 | 3 | 93% |
 | `library/stringscanner` | 44 | 162 | 0 | 0 | 162 | 0 | 0% |
 | `library/syslog` | 20 | 75 | 0 | 0 | 75 | 0 | 0% |
@@ -131,4 +131,4 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `optional/capi` | 47 | 0 | 0 | 0 | 0 | 0 | — |
 | `optional/thread_safety` | 1 | 5 | 0 | 0 | 5 | 0 | 0% |
 | `security` | 13 | 34 | 5 | 0 | 29 | 0 | 15% |
-| **total** | 3835 | 31552 | 22043 | 0 | 9112 | 397 | 70% |
+| **total** | 3835 | 31554 | 22043 | 0 | 9114 | 397 | 70% |

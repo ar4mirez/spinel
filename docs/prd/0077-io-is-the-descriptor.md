@@ -105,7 +105,7 @@ Each of these is tagged or blocked with its reason.
 | `core/io` + `core/file` before | 733 | 0 | 1,776 |
 | this slice | **2,112** | **0** | 423 |
 | corpus before | 20,597 | 0 | 10,634 |
-| this slice | **22,043** | **0** | 9,112 |
+| this slice | **22,043** | **0** | 9,114 |
 
 `core/` as a whole goes from 74.9% to **81.0%**, past the Phase 2
 milestone's 80%.
