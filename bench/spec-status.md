@@ -32,7 +32,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/hash` | 69 | 562 | 506 | 0 | 52 | 4 | 90% |
 | `core/integer` | 70 | 598 | 501 | 0 | 87 | 10 | 84% |
 | `core/io` | 103 | 1629 | 284 | 0 | 1316 | 29 | 17% |
-| `core/kernel` | 118 | 2216 | 1575 | 0 | 586 | 55 | 71% |
+| `core/kernel` | 118 | 2216 | 1851 | 0 | 310 | 55 | 84% |
 | `core/main` | 7 | 27 | 4 | 0 | 23 | 0 | 15% |
 | `core/marshal` | 6 | 475 | 453 | 0 | 17 | 5 | 95% |
 | `core/matchdata` | 30 | 186 | 170 | 0 | 15 | 1 | 91% |
@@ -55,7 +55,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/set` | 57 | 175 | 169 | 0 | 6 | 0 | 97% |
 | `core/signal` | 3 | 53 | 38 | 0 | 15 | 0 | 72% |
 | `core/sizedqueue` | 16 | 61 | 0 | 0 | 61 | 0 | 0% |
-| `core/string` | 151 | 3906 | 3456 | 0 | 429 | 21 | 88% |
+| `core/string` | 151 | 3906 | 3465 | 0 | 419 | 22 | 89% |
 | `core/struct` | 30 | 170 | 167 | 0 | 3 | 0 | 98% |
 | `core/symbol` | 29 | 270 | 140 | 0 | 125 | 5 | 52% |
 | `core/systemexit` | 2 | 6 | 6 | 0 | 0 | 0 | 100% |
@@ -66,7 +66,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/true` | 9 | 13 | 11 | 0 | 2 | 0 | 85% |
 | `core/unboundmethod` | 20 | 109 | 95 | 0 | 12 | 2 | 87% |
 | `core/warning` | 5 | 31 | 22 | 0 | 9 | 0 | 71% |
-| `language` | 67 | 2668 | 2354 | 0 | 282 | 32 | 88% |
+| `language` | 67 | 2668 | 2356 | 0 | 280 | 32 | 88% |
 | `language/predefined` | 2 | 14 | 0 | 0 | 14 | 0 | 0% |
 | `language/regexp` | 11 | 257 | 200 | 0 | 54 | 3 | 78% |
 | `library/English` | 2 | 27 | 1 | 0 | 1 | 25 | 4% |
@@ -95,7 +95,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `library/mkmf` | 1 | 1 | 0 | 0 | 1 | 0 | 0% |
 | `library/monitor` | 6 | 12 | 0 | 0 | 12 | 0 | 0% |
 | `library/net-ftp` | 56 | 427 | 1 | 0 | 426 | 0 | 0% |
-| `library/net-http` | 131 | 374 | 2 | 0 | 372 | 0 | 1% |
+| `library/net-http` | 131 | 371 | 2 | 0 | 369 | 0 | 1% |
 | `library/objectspace` | 7 | 46 | 0 | 0 | 46 | 0 | 0% |
 | `library/observer` | 5 | 8 | 0 | 0 | 8 | 0 | 0% |
 | `library/open3` | 11 | 14 | 10 | 0 | 4 | 0 | 71% |
@@ -115,7 +115,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `library/shellwords` | 1 | 7 | 0 | 0 | 7 | 0 | 0% |
 | `library/singleton` | 7 | 14 | 0 | 0 | 14 | 0 | 0% |
 | `library/socket` | 188 | 917 | 0 | 0 | 917 | 0 | 0% |
-| `library/stringio` | 64 | 665 | 0 | 0 | 665 | 0 | 0% |
+| `library/stringio` | 64 | 674 | 625 | 0 | 49 | 0 | 93% |
 | `library/stringscanner` | 44 | 162 | 0 | 0 | 162 | 0 | 0% |
 | `library/syslog` | 20 | 75 | 0 | 0 | 75 | 0 | 0% |
 | `library/tempfile` | 10 | 45 | 0 | 0 | 45 | 0 | 0% |
@@ -131,4 +131,4 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `optional/capi` | 47 | 0 | 0 | 0 | 0 | 0 | — |
 | `optional/thread_safety` | 1 | 5 | 0 | 0 | 5 | 0 | 0% |
 | `security` | 13 | 34 | 1 | 0 | 33 | 0 | 3% |
-| **total** | 3835 | 31548 | 19685 | 0 | 11541 | 322 | 62% |
+| **total** | 3835 | 31554 | 20597 | 0 | 10634 | 323 | 65% |

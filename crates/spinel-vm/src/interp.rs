@@ -10333,6 +10333,21 @@ fn native_call<'h>(
             Ok(None)
         }
 
+        Native::Library => {
+            let source = call
+                .args
+                .first()
+                .and_then(|&v| string_bytes(scope, v))
+                .and_then(|name| String::from_utf8(name).ok())
+                .and_then(|name| scope.library(&name));
+            let value = match source {
+                Some(source) => string_new(scope, source),
+                None => Value::NIL,
+            };
+            stack.push(value);
+            Ok(None)
+        }
+
         Native::Main => {
             let main = scope.main();
             stack.push(main);
@@ -11251,6 +11266,7 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         ),
         (Builtin::Module, &["__name__"], Native::ModuleName),
         (Builtin::Kernel, &["__main__"], Native::Main),
+        (Builtin::Kernel, &["__library__"], Native::Library),
         (
             Builtin::Module,
             &["private_constant"],
@@ -14706,7 +14722,10 @@ fn load_file(
         });
     };
     let path = path_arg(scope, call, 0)?;
-    let source = match std::fs::read(&path) {
+    // A library shipped inside the binary comes with its source: see
+    // `Kernel.__library__`.
+    let shipped = call.args.get(3).and_then(|&v| string_bytes(scope, v));
+    let source = match shipped.map_or_else(|| std::fs::read(&path), Ok) {
         Ok(source) => source,
         Err(_) => {
             return Err(Error::raise(

@@ -259,6 +259,9 @@ pub enum Native {
     ModuleName,
     /// `Kernel#__main__`: the top-level `self`, which the heap holds.
     Main,
+    /// `Kernel#__library__`: the source of a library shipped inside the
+    /// binary, or nil.
+    Library,
     /// `Module#private_constant` — marks names in the module's own constant
     /// table invisible to a qualified reference (#185).
     ///
