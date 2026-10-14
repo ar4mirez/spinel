@@ -169,6 +169,35 @@ fn defined_does_not_evaluate_what_it_reports_on() {
     );
 }
 
+/// What a loop makes and drops is collected while the loop runs, and the
+/// handles the loop takes do not pile up (#299). Before, both lasted until
+/// the evaluation ended: this program kept every one of its Strings alive
+/// and held a root for every instruction it ran.
+#[test]
+fn garbage_made_in_a_loop_is_collected_while_it_runs() {
+    let source = "i = 0; kept = nil; while i < 300_000; kept = 'x' * 20; i += 1; end; kept.size";
+    let parsed = spinel_parse::parse_file("(eval)", source.as_bytes());
+    let iseq = compile::program(&parsed.program).expect("a loop compiles");
+    let mut heap = Heap::new();
+    let mut frame = interp::Frame::new(iseq.locals.len());
+    let mut scope = heap.scope();
+    scope.bootstrap();
+    spinel_core::boot(&mut scope);
+    scope.set_budget(None);
+    let before = scope.rooted();
+    let value = interp::eval_in(&mut scope, &mut frame, &iseq).expect("the loop runs");
+    assert_eq!(interp::inspect(&mut scope, value), "20");
+    let stats = scope.stats();
+    assert!(stats.total_allocated > 300_000, "{stats:?}");
+    assert!(stats.collections > 0, "{stats:?}");
+    assert!(stats.live_objects < 150_000, "{stats:?}");
+    assert!(
+        scope.rooted() - before < 50_000,
+        "{} roots",
+        scope.rooted() - before
+    );
+}
+
 #[test]
 fn dividing_by_zero_says_what_ruby_would_raise() {
     let err = eval("1 / 0").unwrap_err();

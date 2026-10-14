@@ -1175,6 +1175,19 @@ impl<'h> HandleScope<'h> {
         self.heap.stats()
     }
 
+    /// Forget every handle past the first `len`, as dropping a nested scope
+    /// would. The interpreter loop uses it between instructions, where no
+    /// handle it took is still in use, and roots what its stack and frames
+    /// hold again straight after.
+    ///
+    /// # Panics
+    ///
+    /// If `len` is below this scope's own base: those handles are a parent's.
+    pub(crate) fn release_roots(&mut self, len: usize) {
+        assert!(len >= self.base, "releasing a parent scope's handles");
+        self.heap.roots.truncate(len);
+    }
+
     /// How many handles are rooted, across every open scope.
     pub fn rooted(&self) -> usize {
         self.heap.roots.len()
