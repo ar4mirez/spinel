@@ -765,9 +765,19 @@ pub struct Iseq {
     /// The constructs [`Insn::Refuse`] names: what the compiler could not
     /// lower in this body, which it compiled to a refusal instead.
     pub refusals: Vec<&'static str>,
+    /// [`Iseq::linked`]'s answer, kept: see [`Linked`].
+    pub linked: symbols::Linked,
 }
 
 impl Iseq {
+    /// [`Iseq::link`], resolved once and shared by every frame that runs this
+    /// unit: a call costs a reference count rather than a table lookup per
+    /// name.
+    #[must_use]
+    pub fn linked(&self) -> Arc<[SymbolId]> {
+        self.linked.get_or_resolve(|| self.link())
+    }
+
     /// The source line the instruction at `pc` came from.
     #[must_use]
     pub fn line_at(&self, pc: usize) -> Option<i32> {

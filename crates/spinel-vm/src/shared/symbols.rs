@@ -157,3 +157,38 @@ mod tests {
         assert!(len() > first.0 as usize);
     }
 }
+
+/// A compiled unit's symbols as ids, resolved the first time a frame runs it.
+///
+/// It lives here because it is this table's answer, kept: the table is one per
+/// process and only grows, so a name's id is the same for as long as the
+/// process lives and one resolution serves every call. It holds ids and no
+/// `Value`, and nothing can change it once set.
+///
+/// It is not part of what the unit *is* — two units with the same
+/// instructions are equal whether or not either has run, and a clone starts
+/// unresolved — so equality ignores it.
+#[derive(Debug, Default)]
+pub struct Linked(OnceLock<std::sync::Arc<[SymbolId]>>);
+
+impl Linked {
+    /// The ids, from `resolve` the first time and from memory after.
+    pub fn get_or_resolve(
+        &self,
+        resolve: impl FnOnce() -> Vec<SymbolId>,
+    ) -> std::sync::Arc<[SymbolId]> {
+        std::sync::Arc::clone(self.0.get_or_init(|| resolve().into()))
+    }
+}
+
+impl Clone for Linked {
+    fn clone(&self) -> Linked {
+        Linked::default()
+    }
+}
+
+impl PartialEq for Linked {
+    fn eq(&self, _: &Linked) -> bool {
+        true
+    }
+}

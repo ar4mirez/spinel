@@ -527,6 +527,7 @@ impl Compiler {
             outer: self.outer,
             from_eval: self.from_eval,
             refusals: self.refusals,
+            linked: crate::shared::symbols::Linked::default(),
         }
     }
 

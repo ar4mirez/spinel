@@ -291,7 +291,7 @@ struct Call {
     iseq: Arc<Iseq>,
     /// This `Iseq`'s symbol pool, interned once per frame rather than per
     /// instruction.
-    symbols: Vec<SymbolId>,
+    symbols: Arc<[SymbolId]>,
     /// Where this `Iseq`'s run of inline caches starts, resolved once per frame
     /// for the same reason `symbols` is: the lookup is a hash probe, and it
     /// belongs on frame entry rather than on every `Send`. A call-site id is
@@ -1791,7 +1791,7 @@ pub fn eval_in(
     let cache_base = scope.call_caches_mut().base(&script);
     let mut frames: Vec<Call> = vec![Call {
         iseq: script,
-        symbols: iseq.link(),
+        symbols: iseq.linked(),
         cache_base,
         env,
         receiver: frame.receiver,
@@ -4309,7 +4309,7 @@ fn push_frame(
     links: Links,
 ) -> Result<(), Error> {
     let env = env_alloc(scope, outer, iseq.locals.len());
-    let symbols = iseq.link();
+    let symbols = iseq.linked();
     // Beside `link`, and for the same reason: one hash probe on frame entry
     // instead of one per `Send`.
     let cache_base = scope.call_caches_mut().base(iseq);
@@ -5423,7 +5423,7 @@ fn open_class<'h>(
     let receiver = scope.classes().object(id);
     let body = Arc::clone(&iseq.children[def.body as usize]);
     let env = env_alloc(scope, Value::NIL, body.locals.len());
-    let symbols = body.link();
+    let symbols = body.linked();
     let cache_base = scope.call_caches_mut().base(&body);
     *ids += 1;
     // Which frame a `return` written in this body leaves.
