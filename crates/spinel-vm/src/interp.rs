@@ -497,7 +497,7 @@ enum Unwind {
 /// The two vectors a fiber runs on.
 #[derive(Default)]
 pub(crate) struct Context {
-    stack: Vec<Value>,
+    stack: Stack,
     frames: Vec<Call>,
 }
 
@@ -622,7 +622,7 @@ enum FiberExit {
 /// answers the fiber. All measured.
 fn leave_fiber(
     scope: &mut HandleScope<'_>,
-    stack: &mut Vec<Value>,
+    stack: &mut Stack,
     frames: &mut Vec<Call>,
     exit: FiberExit,
 ) -> Result<Option<Unwind>, ()> {
@@ -716,7 +716,7 @@ fn leave_fiber(
 /// frozen checks and every rule about encodings.
 fn str_native(
     scope: &mut HandleScope<'_>,
-    stack: &mut Vec<Value>,
+    stack: &mut Stack,
     call: &Pending,
     op: crate::method::StrOp,
 ) -> Result<Option<Unwind>, Error> {
@@ -1066,7 +1066,7 @@ fn incompatible_encodings(left: u8, right: u8) -> Error {
 /// argument check and message is `core/module.rb`'s; these trust their input.
 fn reflect_native(
     scope: &mut HandleScope<'_>,
-    stack: &mut Vec<Value>,
+    stack: &mut Stack,
     call: &Pending,
     op: ReflectOp,
 ) -> Result<Option<Unwind>, Error> {
@@ -1419,7 +1419,7 @@ fn fiber_args(scope: &mut HandleScope<'_>, call: &Pending, index: usize) -> Vec<
 #[allow(clippy::too_many_arguments)]
 fn fiber_enter(
     scope: &mut HandleScope<'_>,
-    stack: &mut Vec<Value>,
+    stack: &mut Stack,
     frames: &mut Vec<Call>,
     call: &Pending,
     id: usize,
@@ -1486,7 +1486,7 @@ fn fiber_enter(
 
 fn fiber_native(
     scope: &mut HandleScope<'_>,
-    stack: &mut Vec<Value>,
+    stack: &mut Stack,
     frames: &mut Vec<Call>,
     call: &Pending,
     op: FiberOp,
@@ -1788,7 +1788,7 @@ pub fn eval_in(
     let string_class = class_handle(scope, Builtin::String);
     let proc_class = class_handle(scope, Builtin::Proc);
 
-    let mut stack: Vec<Value> = Vec::with_capacity(iseq.max_stack);
+    let mut stack = Stack::with_capacity(iseq.max_stack);
     // Owned before the frame is built so the call caches can key off the same
     // `Arc` the frame holds.
     let script = Arc::new(iseq.clone());
@@ -1853,8 +1853,15 @@ pub fn eval_in(
 
     let result = (|| -> Result<Value, Error> {
         Ok(loop {
+            // What the last instruction left on the stack is rooted before the
+            // next one runs: see `Stack`.
+            for &value in stack.fresh() {
+                if !value.is_immediate() {
+                    scope.root(value);
+                }
+            }
             if scope.rooted() > root_limit {
-                release_roots(scope, &stack, &frames, floor);
+                release_roots(scope, &mut stack, &frames, floor);
                 root_limit = floor + ROOT_SLACK.max(2 * (scope.rooted() - floor));
             }
             if frames.len() != seen_frames {
@@ -3290,6 +3297,71 @@ pub fn eval_in(
     result
 }
 
+/// The loop's operand stack: a `Vec` that remembers how far down it has been
+/// popped since the loop last looked.
+///
+/// The collector does not see this vector. What keeps its values alive is
+/// the root stack, so the loop roots every value an instruction leaves here
+/// before running the next — `fresh` names them: everything above the lowest
+/// point the stack was popped to. A value that only ever lived on the stack
+/// — a method's return value, an element `Hash#delete` took out — is then
+/// rooted from the instruction after it arrived until the next release, and
+/// a release roots the whole stack again.
+#[derive(Default)]
+pub(crate) struct Stack {
+    values: Vec<Value>,
+    low: usize,
+}
+
+impl Stack {
+    fn with_capacity(capacity: usize) -> Stack {
+        Stack {
+            values: Vec::with_capacity(capacity),
+            low: 0,
+        }
+    }
+
+    fn push(&mut self, value: Value) {
+        self.values.push(value);
+    }
+
+    fn pop(&mut self) -> Option<Value> {
+        let value = self.values.pop();
+        self.low = self.low.min(self.values.len());
+        value
+    }
+
+    fn truncate(&mut self, len: usize) {
+        self.values.truncate(len);
+        self.low = self.low.min(self.values.len());
+    }
+
+    fn drain(&mut self, range: std::ops::RangeFrom<usize>) -> std::vec::Drain<'_, Value> {
+        self.low = self.low.min(range.start);
+        self.values.drain(range)
+    }
+
+    /// What arrived since the last look, and the look.
+    fn fresh(&mut self) -> &[Value] {
+        let from = self.low.min(self.values.len());
+        self.low = self.values.len();
+        &self.values[from..]
+    }
+
+    /// Everything on the stack has just been rooted.
+    fn settle(&mut self) {
+        self.low = self.values.len();
+    }
+}
+
+impl std::ops::Deref for Stack {
+    type Target = [Value];
+
+    fn deref(&self) -> &[Value] {
+        &self.values
+    }
+}
+
 /// How many handles the loop lets pile up before it releases them.
 const ROOT_SLACK: usize = 4096;
 
@@ -3302,7 +3374,7 @@ const ROOT_SLACK: usize = 4096;
 /// until the evaluation ended, and the root stack grew by a few entries per
 /// instruction: a loop that allocated nothing still used memory without
 /// bound, and the collector had nothing it was allowed to free.
-fn release_roots(scope: &mut HandleScope<'_>, stack: &[Value], frames: &[Call], floor: usize) {
+fn release_roots(scope: &mut HandleScope<'_>, stack: &mut Stack, frames: &[Call], floor: usize) {
     scope.release_roots(floor);
     let mut keep = |value: Value| {
         if !value.is_immediate() {
@@ -3313,6 +3385,7 @@ fn release_roots(scope: &mut HandleScope<'_>, stack: &[Value], frames: &[Call], 
     for frame in frames {
         frame_roots(frame, &mut keep);
     }
+    stack.settle();
 }
 
 /// Root the vectors a fiber switch has just made the running ones.
@@ -3322,7 +3395,7 @@ fn release_roots(scope: &mut HandleScope<'_>, stack: &[Value], frames: &[Call], 
 /// what `release_roots` last rooted — which was the *other* fiber's. Without
 /// this, a collection before the next release frees the frames the program
 /// has just returned to.
-fn adopt_roots(scope: &mut HandleScope<'_>, stack: &[Value], frames: &[Call]) {
+fn adopt_roots(scope: &mut HandleScope<'_>, stack: &mut Stack, frames: &[Call]) {
     let mut keep = |value: Value| {
         if !value.is_immediate() {
             scope.root(value);
@@ -3332,6 +3405,7 @@ fn adopt_roots(scope: &mut HandleScope<'_>, stack: &[Value], frames: &[Call]) {
     for frame in frames {
         frame_roots(frame, &mut keep);
     }
+    stack.settle();
 }
 
 /// Every value one frame holds, for whoever has to keep them alive.
@@ -3417,7 +3491,7 @@ fn prune_boundaries(scope: &HandleScope<'_>, frames: &[Call], boundaries: &mut V
 /// exception would leave it — so its resumer's boundary can take the refusal.
 fn refuse(
     scope: &mut HandleScope<'_>,
-    stack: &mut Vec<Value>,
+    stack: &mut Stack,
     frames: &mut Vec<Call>,
     boundaries: &mut Vec<Boundary>,
     error: Error,
@@ -3494,7 +3568,7 @@ fn catch_refusal(
 /// — a `return` at the top level. `Err` means nothing wanted it.
 fn unwind_to_handler(
     scope: &mut HandleScope<'_>,
-    stack: &mut Vec<Value>,
+    stack: &mut Stack,
     frames: &mut Vec<Call>,
     mut unwind: Unwind,
 ) -> Result<Option<Value>, Error> {
@@ -3792,7 +3866,7 @@ struct Pending {
 /// values, then positional arguments, then the receiver.
 fn pop_call<'h>(
     scope: &mut HandleScope<'h>,
-    stack: &mut Vec<Value>,
+    stack: &mut Stack,
     site: &CallSite,
     frame: &Call,
     proc_class: Handle<'h>,
@@ -3968,7 +4042,7 @@ fn expand_splats(
 /// Push a frame for the call, or compute it outright when it is a primitive.
 fn dispatch<'h>(
     scope: &mut HandleScope<'h>,
-    stack: &mut Vec<Value>,
+    stack: &mut Stack,
     frames: &mut Vec<Call>,
     call: Pending,
     proc_class: Handle<'h>,
@@ -5393,7 +5467,7 @@ fn proc_parts(
 /// The body's value is the frame's value, so `x = class C; 42; end` is `42`.
 fn open_class<'h>(
     scope: &mut HandleScope<'h>,
-    stack: &mut Vec<Value>,
+    stack: &mut Stack,
     frames: &mut Vec<Call>,
     def: &ClassDef,
     iseq: &Arc<Iseq>,
@@ -5642,7 +5716,7 @@ fn define_or_reopen(
 /// [`CrefNode::pushed_by_eval`]: crate::class::CrefNode
 fn anonymous_module<'h>(
     scope: &mut HandleScope<'h>,
-    stack: &mut Vec<Value>,
+    stack: &mut Stack,
     frames: &mut Vec<Call>,
     call: &Pending,
     receiver: ClassId,
@@ -5918,7 +5992,7 @@ fn singleton_attached(scope: &mut HandleScope<'_>, class: ClassId) -> Value {
 #[allow(clippy::too_many_arguments)]
 fn fire_method_hook<'h>(
     scope: &mut HandleScope<'h>,
-    stack: &mut Vec<Value>,
+    stack: &mut Stack,
     frames: &mut Vec<Call>,
     proc_class: Handle<'h>,
     ids: &mut u64,
@@ -5959,7 +6033,7 @@ fn fire_method_hook<'h>(
 #[allow(clippy::too_many_arguments)]
 fn fire_hook<'h>(
     scope: &mut HandleScope<'h>,
-    stack: &mut Vec<Value>,
+    stack: &mut Stack,
     frames: &mut Vec<Call>,
     proc_class: Handle<'h>,
     ids: &mut u64,
@@ -6001,7 +6075,7 @@ fn fire_hook<'h>(
 #[allow(clippy::too_many_arguments)]
 fn call_discarded<'h>(
     scope: &mut HandleScope<'h>,
-    stack: &mut Vec<Value>,
+    stack: &mut Stack,
     frames: &mut Vec<Call>,
     proc_class: Handle<'h>,
     ids: &mut u64,
@@ -6050,7 +6124,7 @@ fn call_discarded<'h>(
 #[allow(clippy::too_many_arguments)]
 fn vm_warn<'h>(
     scope: &mut HandleScope<'h>,
-    stack: &mut Vec<Value>,
+    stack: &mut Stack,
     frames: &mut Vec<Call>,
     proc_class: Handle<'h>,
     ids: &mut u64,
@@ -6272,7 +6346,7 @@ fn class_id_of(scope: &mut HandleScope<'_>, value: Value) -> Option<ClassId> {
 /// Where a constant reference reads from, and what it pops to get there.
 fn const_base(
     scope: &mut HandleScope<'_>,
-    stack: &mut Vec<Value>,
+    stack: &mut Stack,
     cref: CrefId,
     how: ConstScope,
 ) -> Result<ClassId, Error> {
@@ -6361,10 +6435,7 @@ fn uninitialized(
 /// `Intern` over an interpolated one — so anything else is a compiler bug
 /// rather than a program error, and it is reported as a refusal instead of
 /// being guessed at.
-fn pop_name(
-    stack: &mut Vec<Value>,
-    keyword: &'static str,
-) -> Result<crate::value::SymbolId, Error> {
+fn pop_name(stack: &mut Stack, keyword: &'static str) -> Result<crate::value::SymbolId, Error> {
     let value = stack.pop().expect("a name to alias or undef");
     value.as_symbol().ok_or(Error::NoDispatch {
         op: keyword,
@@ -7616,7 +7687,7 @@ fn new_array(scope: &mut HandleScope<'_>, elements: &[Value]) -> Value {
 /// The operations Ruby cannot define in Ruby. See [`Native`].
 fn native_call<'h>(
     scope: &mut HandleScope<'h>,
-    stack: &mut Vec<Value>,
+    stack: &mut Stack,
     frames: &mut Vec<Call>,
     call: Pending,
     native: Native,
@@ -13851,7 +13922,7 @@ fn binding_push(scope: &mut HandleScope<'_>, binding: Value, iseq: &Arc<Iseq>, e
 
 fn binding_native(
     scope: &mut HandleScope<'_>,
-    stack: &mut Vec<Value>,
+    stack: &mut Stack,
     frames: &mut Vec<Call>,
     call: &Pending,
     op: BindingOp,
@@ -13946,7 +14017,7 @@ fn capture_binding(
 
 fn binding_op(
     scope: &mut HandleScope<'_>,
-    stack: &mut Vec<Value>,
+    stack: &mut Stack,
     frames: &mut Vec<Call>,
     call: &Pending,
     op: BindingOp,
@@ -14069,7 +14140,7 @@ fn spellable_local(name: &str) -> bool {
 
 fn binding_eval(
     scope: &mut HandleScope<'_>,
-    stack: &mut Vec<Value>,
+    stack: &mut Stack,
     frames: &mut Vec<Call>,
     call: &Pending,
     binding: Value,
@@ -14353,7 +14424,7 @@ fn parameters_value(scope: &mut HandleScope<'_>, iseq: &Iseq) -> Value {
 
 fn fs_native(
     scope: &mut HandleScope<'_>,
-    stack: &mut Vec<Value>,
+    stack: &mut Stack,
     call: &Pending,
     op: FsOp,
 ) -> Result<Option<Unwind>, Error> {
@@ -14733,7 +14804,7 @@ fn os_string(scope: &mut HandleScope<'_>, text: std::ffi::OsString) -> Value {
 /// a `LoadError`.
 fn load_file(
     scope: &mut HandleScope<'_>,
-    stack: &mut Vec<Value>,
+    stack: &mut Stack,
     frames: &mut Vec<Call>,
     call: &Pending,
     ids: &mut u64,
@@ -14838,7 +14909,7 @@ fn load_file(
 /// redefines it hears about a duplicated hash key in an `eval`.
 fn parse_warnings(
     scope: &mut HandleScope<'_>,
-    stack: &mut Vec<Value>,
+    stack: &mut Stack,
     frames: &mut Vec<Call>,
     ids: &mut u64,
     warnings: &[(String, bool)],
@@ -14867,7 +14938,7 @@ fn parse_warnings(
 
 fn sys_native(
     scope: &mut HandleScope<'_>,
-    stack: &mut Vec<Value>,
+    stack: &mut Stack,
     call: &Pending,
     op: SysOp,
 ) -> Result<Option<Unwind>, Error> {
