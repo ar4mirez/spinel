@@ -1527,5 +1527,58 @@ module Kernel
     File.open(path, *rest, **options, &block)
   end
 
-  module_function :puts, :print, :p, :warn, :printf, :putc, :open
+  # The next line of the files named in `ARGV`, each taken off as it is
+  # opened, or of standard input when there are none: what `ruby -n` loops
+  # over.
+  # ponytail: the reading half of `ARGF` only, enough for `gets`; `ARGF`
+  # itself, with `lineno`, `filename`, `skip` and in-place editing, is #41's.
+  def gets(*args, **options)
+    loop do
+      source = Kernel.__argf_source__
+      return $_ = nil if source.nil?
+      line = source.gets(*args, **options)
+      unless line.nil?
+        $. = Kernel.__argf_lineno__ += 1
+        return $_ = line
+      end
+      return $_ = nil if source.equal?($stdin)
+      source.close
+      Kernel.__argf_current__ = nil
+    end
+  end
+
+  def readline(*args, **options)
+    line = gets(*args, **options)
+    raise EOFError, "end of file reached" if line.nil?
+    line
+  end
+
+  def readlines(*args, **options)
+    lines = []
+    while (line = gets(*args, **options))
+      lines << line
+    end
+    lines
+  end
+
+  class << self
+    attr_accessor :__argf_current__
+    attr_writer :__argf_lineno__
+
+    def __argf_lineno__ = @__argf_lineno__ || 0
+
+    def __argf_source__
+      return @__argf_current__ unless @__argf_current__.nil?
+      if ARGV.empty?
+        return nil if @__argf_read_stdin__
+        @__argf_read_stdin__ = true
+        return @__argf_current__ = $stdin
+      end
+      name = ARGV.shift
+      @__argf_read_stdin__ = true
+      @__argf_current__ = name == "-" ? $stdin : File.open(name)
+    end
+  end
+
+  module_function :puts, :print, :p, :warn, :printf, :putc, :open, :gets, :readline, :readlines
 end
