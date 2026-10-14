@@ -1,25 +1,9 @@
-# `File` and `Dir`: paths (#39), and since the first slice of #41 a `File`
-# that is a real descriptor — opened, read, written, sought and closed — with
-# `File::Stat` and the directory and link calls beside it. All Ruby, over
-# primitives that each make one system call and answer an errno on failure.
+# `File` and `Dir`: paths (#39), and since #41 a `File` that is an `IO` whose
+# descriptor came from opening a path, with `File::Stat`, `fnmatch` and the
+# directory and link calls beside it. All Ruby, over primitives that each make
+# one system call and answer an errno on failure.
 
 class File < IO
-  # The open and lock flags are the platform's; the `fnmatch` flags are
-  # Ruby's own numbering.
-  module Constants
-    __fs_constants__.each { |name, value| const_set(name, value) }
-    BINARY = 0
-    SHARE_DELETE = 0
-    FNM_SYSCASE = 0
-    FNM_SHORTNAME = 0
-    FNM_NOESCAPE = 1
-    FNM_PATHNAME = 2
-    FNM_DOTMATCH = 4
-    FNM_CASEFOLD = 8
-    FNM_EXTGLOB = 16
-    NULL = "/dev/null"
-  end
-
   SEPARATOR = "/"
   Separator = SEPARATOR
   ALT_SEPARATOR = nil
@@ -27,9 +11,30 @@ class File < IO
 
   # A path argument: a String, or what `to_path` or `to_str` makes of one.
   def self.__path__(path)
-    return path if String === path
-    return path.to_path if path.respond_to?(:to_path)
-    return path.to_str if path.respond_to?(:to_str)
+    return __path_check__(path) if String === path
+    __path_check__(__path_of__(path))
+  end
+
+  def self.__path_check__(path)
+    unless path.encoding.ascii_compatible?
+      raise Encoding::CompatibilityError, "path name must be ASCII-compatible (#{path.encoding}): #{path.inspect}"
+    end
+    raise ArgumentError, "path name contains null byte" if path.include?("\0")
+    path
+  end
+
+  def self.__path_of__(path)
+    if path.respond_to?(:to_path)
+      # Measured: what `to_path` answers is held to being a String, so a
+      # `to_path` of 1 cannot open descriptor 1.
+      path = path.to_path
+      return path if String === path
+    end
+    if path.respond_to?(:to_str)
+      converted = path.to_str
+      return converted if String === converted
+      raise TypeError, "can't convert #{path.class} to String (#{path.class}#to_str gives #{converted.class})"
+    end
     raise TypeError, "no implicit conversion of #{path.nil? ? "nil" : path.class} into String"
   end
 
@@ -60,7 +65,8 @@ class File < IO
         seen.pop
         next
       end
-      part = __path__(part)
+      part = __path_of__(part) unless String === part
+      raise ArgumentError, "string contains null byte" if part.include?("\0")
       if first
         out << part
       elsif out.end_with?("/") && part.start_with?("/")
@@ -126,8 +132,11 @@ class File < IO
   def self.expand_path(path, dir = nil)
     path = __path__(path)
     if path.start_with?("~")
-      home = Dir.home
-      path = path == "~" ? home : (path.start_with?("~/") ? home + path[1..] : (raise ArgumentError, "user #{path[1..]} doesn't exist"))
+      slash = path.index("/")
+      user = slash.nil? ? path[1..] : path[1...slash]
+      home = user.empty? ? Dir.home : Dir.home(user)
+      raise ArgumentError, "non-absolute home" unless home.start_with?("/")
+      path = home + (slash.nil? ? "" : path[slash..])
     end
     __normalize__(path.start_with?("/") ? path : join(dir.nil? ? Dir.pwd : expand_path(dir), path))
   end
@@ -138,17 +147,21 @@ class File < IO
   end
 
   # `.` and `..` resolved lexically, separators collapsed.
+  # Measured: the run of separators a path starts with is kept as written,
+  # `//a` and `////a` included, until a `..` climbs back past it.
   def self.__normalize__(path)
+    root = path[/\A\/+/] || "/"
     parts = []
     path.split("/").each do |part|
       next if part.empty? || part == "."
       if part == ".."
+        root = "/" unless parts.empty?
         parts.pop
       else
         parts.push(part)
       end
     end
-    "/" + parts.join("/")
+    root + parts.join("/")
   end
 
   def self.realpath(path, dir = nil)
@@ -177,70 +190,103 @@ class File < IO
   end
 
   # `access(2)` with the real ids, as CRuby's `rb_eaccess` falls back to.
-  def self.readable?(path) = __fs_access__(__path__(path), 4)
-  def self.writable?(path) = __fs_access__(__path__(path), 2)
-  def self.executable?(path) = __fs_access__(__path__(path), 1)
+  def self.readable?(path) = __fs_access__(__path__(path), 4, true)
+  def self.writable?(path) = __fs_access__(__path__(path), 2, true)
+  def self.executable?(path) = __fs_access__(__path__(path), 1, true)
+  def self.readable_real?(path) = __fs_access__(__path__(path), 4, false)
+  def self.writable_real?(path) = __fs_access__(__path__(path), 2, false)
+  def self.executable_real?(path) = __fs_access__(__path__(path), 1, false)
 
   def self.symlink?(path)
     __fs_kind__(__path__(path), false) == :link
   end
 
-  def self.read(path)
-    path = __path__(path)
-    bytes = __check__(__fs_read__(path), path, "rb_sysopen")
-    bytes.force_encoding(Encoding.default_external)
-  end
-
-  def self.readlines(path, separator = $/, chomp: false)
-    open(path) { |file| file.readlines(separator, chomp: chomp) }
-  end
-
-  def self.foreach(path, separator = $/, chomp: false, &block)
-    return enum_for(:foreach, path, separator, chomp: chomp) unless block
-    open(path) { |file| file.each_line(separator, chomp: chomp, &block) }
-    nil
-  end
-
-  # --- the descriptor half (#41, first slice) --------------------------------
+  # --- the descriptor half (#41) ---------------------------------------------
   #
-  # A `File` is a descriptor from `open(2)` and a read buffer. Writes go
-  # straight out; reads fill the buffer a block at a time, which is what lets
-  # `gets` look for a separator without reading the file a byte at a time.
-  #
-  # ponytail: no write buffer, no transcoding on the way in or out, and no
-  # `flock`, `truncate` or times. Those are the rest of #41.
+  # A `File` is an `IO` whose descriptor came from opening a path; reading,
+  # writing and positions are all `IO`'s. What is here is what a path adds.
 
-  def self.open(path, mode = "r", perm = nil, **options)
-    file = new(path, mode, perm, **options)
-    return file unless block_given?
+  def initialize(path, mode = nil, perm = nil, **options)
+    # A descriptor something else opened.
+    return super(path, mode, **options) if Integer === path
+    raise ArgumentError, "mode specified twice" if !mode.nil? && options.key?(:mode)
+    path = File.__path__(path)
+    given = mode.nil? ? options.fetch(:mode, "r") : mode
+    flags = IO.__parse_mode__(given)[0]
+    flags |= Integer.__index__(options[:flags]) if options[:flags]
+    perm = options[:perm] if perm.nil?
+    perm = perm.nil? ? 0666 : Integer.__index__(perm)
+    fd = IO.__check__(__fd_open__(path, flags, perm), path, "rb_sysopen")[0]
+    @path = path.dup
+    options = options.reject { |key, _| key == :perm }
     begin
-      yield file
-    ensure
-      file.close unless file.closed?
+      __setup__(fd, mode, options)
+    rescue Exception
+      __fd_close__(fd)
+      raise
     end
   end
 
-  # `open(2)`'s flags for a mode: an Integer is already that, and a String is
-  # one of six letters with `b`, `t` and an `:encoding` to set aside.
-  def self.__mode_flags__(mode)
-    return mode if Integer === mode
-    letters = mode.to_s.split(":")[0].to_s.delete("bt")
-    case letters
-    when "r" then RDONLY
-    when "r+" then RDWR
-    when "w" then WRONLY | CREAT | TRUNC
-    when "w+" then RDWR | CREAT | TRUNC
-    when "a" then WRONLY | CREAT | APPEND
-    when "a+" then RDWR | CREAT | APPEND
-    else raise ArgumentError, "invalid access mode #{mode}"
-    end
+  def size
+    __check_open__
+    stat.size
+  end
+
+  def lstat
+    __check_open__
+    File.lstat(@path)
+  end
+
+  def chmod(mode)
+    __check_open__
+    IO.__check__(__fs_chmod__(@path, IO.__c_uint__(mode)), @path)
+    0
+  end
+
+  def chown(owner, group)
+    __check_open__
+    File.chown(owner, group, @path)
+    0
+  end
+
+  def truncate(length)
+    __writable__
+    IO.__check__(__fs_truncate__(@fileno, Integer.__index__(length)), @path)
+    0
+  end
+
+  # `flock(2)`. With `LOCK_NB`, a lock someone else holds is `false`.
+  def flock(operation)
+    __check_open__
+    result = __fd_flock__(@fileno, Integer.__index__(operation))
+    return false if result == Errno::EWOULDBLOCK::Errno && Integer.__index__(operation) & LOCK_NB != 0
+    IO.__check__(result, @path)
+    0
+  end
+
+  def atime = stat.atime
+  def mtime = stat.mtime
+  def ctime = stat.ctime
+
+  def birthtime
+    __check_open__
+    raise NotImplementedError, "birthtime() function is unimplemented on this machine"
+  end
+
+  # --- what a path names -------------------------------------------------------
+
+  def self.path(path) = __path__(path).dup
+
+  def self.split(path)
+    path = __path__(path)
+    [dirname(path), basename(path)]
   end
 
   def self.umask(*mask)
     if mask.size > 1
       raise ArgumentError, "wrong number of arguments (given #{mask.size}, expected 0..1)"
     end
-    __fs_umask__(mask.empty? ? nil : Integer.__index__(mask[0]))
+    __fs_umask__(mask.empty? ? nil : IO.__c_uint__(mask[0]))
   end
 
   def self.delete(*paths)
@@ -255,19 +301,33 @@ class File < IO
     delete(*paths)
   end
 
+  # The calls that name two paths name both in their error, in parentheses.
+  def self.__check_two__(result, from, to, where)
+    raise SystemCallError.new("(#{from}, #{to})", result, where) if Integer === result
+    0
+  end
+
   def self.rename(from, to)
     from = __path__(from)
     to = __path__(to)
-    result = __fs_rename__(from, to)
-    raise SystemCallError.new("(#{from}, #{to})", result, "rb_file_s_rename") if Integer === result
-    0
+    __check_two__(__fs_rename__(from, to), from, to, "rb_file_s_rename")
   end
 
   def self.symlink(target, link)
     target = __path__(target)
     link = __path__(link)
-    result = __fs_symlink__(target, link)
-    raise SystemCallError.new("(#{target}, #{link})", result, "rb_file_s_symlink") if Integer === result
+    __check_two__(__fs_symlink__(target, link), target, link, "rb_file_s_symlink")
+  end
+
+  def self.link(target, link)
+    target = __path__(target)
+    link = __path__(link)
+    __check_two__(__fs_link__(target, link), target, link, "rb_file_s_link")
+  end
+
+  def self.mkfifo(path, mode = 0666)
+    path = __path__(path)
+    __check__(__fs_mkfifo__(path, Integer.__index__(mode)), path, "rb_file_s_mkfifo")
     0
   end
 
@@ -277,12 +337,56 @@ class File < IO
   end
 
   def self.chmod(mode, *paths)
-    mode = Integer.__index__(mode)
+    mode = IO.__c_uint__(mode)
     paths.each do |path|
       path = __path__(path)
       __check__(__fs_chmod__(path, mode), path, "apply2files")
     end
     paths.size
+  end
+
+  # A nil owner or group, or -1, leaves that one as it is.
+  def self.__chown__(owner, group, paths, follow)
+    owner = owner.nil? ? -1 : Integer.__index__(owner)
+    group = group.nil? ? -1 : Integer.__index__(group)
+    paths.each do |path|
+      path = __path__(path)
+      __check__(__fs_chown__(path, owner, group, follow), path, "apply2files")
+    end
+    paths.size
+  end
+
+  def self.chown(owner, group, *paths) = __chown__(owner, group, paths, true)
+  def self.lchown(owner, group, *paths) = __chown__(owner, group, paths, false)
+
+  # A time for `utime`: nil is now, a Time its seconds and nanoseconds, a
+  # number seconds since the epoch.
+  def self.__utime_parts__(time)
+    return [nil, nil] if time.nil?
+    return [time.to_i, time.nsec] if Time === time
+    time = Time.at(time)
+    [time.to_i, time.nsec]
+  end
+
+  def self.__utime__(atime, mtime, paths, follow)
+    # Measured: one nil is now for both.
+    atime, mtime = Time.now, Time.now if atime.nil? && mtime.nil?
+    a = __utime_parts__(atime)
+    m = __utime_parts__(mtime)
+    paths.each do |path|
+      path = __path__(path)
+      __check__(__fs_utime__(path, a[0], a[1], m[0], m[1], follow), path, "rb_file_s_utime")
+    end
+    paths.size
+  end
+
+  def self.utime(atime, mtime, *paths) = __utime__(atime, mtime, paths, true)
+  def self.lutime(atime, mtime, *paths) = __utime__(atime, mtime, paths, false)
+
+  def self.truncate(path, length)
+    path = __path__(path)
+    __check__(__fs_truncate__(path, Integer.__index__(length)), path, "rb_file_s_truncate")
+    0
   end
 
   def self.stat(path)
@@ -293,371 +397,264 @@ class File < IO
     Stat.__lstat__(path)
   end
 
+  # A path, or an IO, which is asked about its descriptor.
+  def self.__stat_of__(path)
+    return path.stat if IO === path
+    return path.to_io.stat if !(String === path) && path.respond_to?(:to_io)
+    stat(path)
+  end
+
+  def self.__stat_or_nil__(path)
+    __stat_of__(path)
+  rescue SystemCallError
+    nil
+  end
+
   def self.size(path)
-    path = path.path if File === path
-    stat(path).size
+    __stat_of__(path).size
   end
 
   def self.size?(path)
-    return nil unless exist?(path)
-    size = size(path)
-    size == 0 ? nil : size
+    stat = __stat_or_nil__(path)
+    stat.nil? || stat.size == 0 ? nil : stat.size
   end
 
   def self.zero?(path)
-    exist?(path) && size(path) == 0
+    stat = __stat_or_nil__(path)
+    !stat.nil? && stat.size == 0
   end
 
   def self.empty?(path)
     zero?(path)
   end
 
-  def self.write(path, data, mode: "w", perm: nil)
-    open(path, mode, perm) { |file| file.write(data) }
+  def self.atime(path) = __stat_of__(path).atime
+  def self.mtime(path) = __stat_of__(path).mtime
+  def self.ctime(path) = __stat_of__(path).ctime
+
+  def self.birthtime(path)
+    __stat_of__(path)
+    raise NotImplementedError, "birthtime() function is unimplemented on this machine"
   end
 
-  def initialize(path, mode = "r", perm = nil, **options)
-    __warning__("File::new() does not take block; use File::open() instead") if block_given?
-    mode = options[:mode] if options.key?(:mode)
-    if Integer === path
-      # A descriptor something else opened.
-      @path = nil
-      @fileno = path
-      flags = File.__mode_flags__(mode)
-    else
-      @path = File.__path__(path)
-      flags = File.__mode_flags__(mode)
-      flags = flags | options[:flags] if options[:flags]
-      perm = Integer.__index__(perm) unless perm.nil?
-      @fileno = File.__check__(__fd_open__(@path, flags, perm || 0666), @path, "rb_sysopen")[0]
+  def self.ftype(path)
+    lstat(path).ftype
+  end
+
+  def self.identical?(first, second)
+    a = __stat_or_nil__(first)
+    b = __stat_or_nil__(second)
+    !a.nil? && !b.nil? && a.dev == b.dev && a.ino == b.ino
+  end
+
+  # The questions `File::Stat` answers, asked of a path that may not exist.
+  %i[pipe? socket? blockdev? chardev? setuid? setgid? sticky? owned? grpowned?
+     world_readable? world_writable?].each do |name|
+    define_singleton_method(name) do |path|
+      stat = __stat_or_nil__(path)
+      stat.nil? ? (name.to_s.start_with?("world") ? nil : false) : stat.__send__(name)
     end
-    # 0 reads, 1 writes, 2 does both: `O_ACCMODE`, the same on every target.
-    @access = flags & 3
-    @external = nil
-    unless Integer === mode
-      text = mode.to_s
-      named = text.split(":")[1]
-      if named
-        @external = Encoding.find(named.split("|")[0].sub(/\Abom\|/i, ""))
-      elsif text.include?("b")
-        @external = Encoding::BINARY
+  end
+
+  # --- `fnmatch` ---------------------------------------------------------------
+  #
+  # CRuby's `fnmatch_helper`, `fnmatch` and `bracket` from `dir.c`, ported
+  # over the pattern's and the path's characters, with nil past the end
+  # where C has the terminating NUL.
+
+  def self.fnmatch(pattern, path, flags = 0)
+    pattern = __path__(pattern)
+    path = __path__(path)
+    flags = Integer.__index__(flags)
+    if flags & FNM_EXTGLOB != 0
+      return __brace_expand__(pattern.chars, flags).any? { |one| __fnmatch__(one, path.chars, flags) }
+    end
+    __fnmatch__(pattern.chars, path.chars, flags)
+  end
+
+  singleton_class.alias_method :fnmatch?, :fnmatch
+
+  # CRuby's `ruby_brace_expand`: every pattern a `{a,b}` stands for, nested
+  # ones included, with a backslash keeping the next character literal. A
+  # `{` without its `}` stands for nothing.
+  def self.__brace_expand__(chars, flags)
+    escape = flags & FNM_NOESCAPE == 0
+    lbrace = rbrace = nil
+    nest = 0
+    p = 0
+    while p < chars.size
+      if chars[p] == "{"
+        lbrace = p if nest == 0
+        nest += 1
       end
-    end
-    named = options[:external_encoding] || options[:encoding]
-    @external = Encoding === named ? named : Encoding.find(named.to_s.split(":")[0]) if named
-    @external = Encoding::BINARY if options[:binmode]
-    # With an internal encoding set, a file opened without an encoding takes
-    # the external one as it is now, and keeps it.
-    @external_default = Encoding.default_internal.nil? ? nil : Encoding.default_external
-    @rbuf = "".b
-    @lineno = 0
-    @closed = false
-    @sync = false
-  end
-
-  # A new String each time, measured: the caller may change what it is given.
-  def path
-    @path.nil? ? nil : @path.dup
-  end
-  alias to_path path
-
-  def closed? = @closed
-
-  def close
-    return nil if @closed
-    @closed = true
-    File.__check__(__fd_close__(@fileno), @path)
-    nil
-  end
-
-  def fileno
-    __check_open__
-    @fileno
-  end
-  alias to_i fileno
-
-  def __check_open__
-    raise IOError, "closed stream" if @closed
-  end
-
-  def __readable__
-    __check_open__
-    raise IOError, "not opened for reading" if @access == 1
-  end
-
-  def __writable__
-    __check_open__
-    raise IOError, "not opened for writing" if @access == 0
-  end
-
-  # Pull up to `want` more bytes into the buffer; false at the end of the file.
-  def __fill__(want = 65536)
-    chunk = File.__check__(__fd_read__(@fileno, want), @path)
-    return false if chunk.empty?
-    @rbuf << chunk
-    true
-  end
-
-  def __take__(count)
-    taken = @rbuf.byteslice(0, count)
-    @rbuf = @rbuf.byteslice(count, @rbuf.bytesize - count)
-    taken
-  end
-
-  def __encoding__
-    @external || Encoding.default_external
-  end
-
-  # Whether the first `cut` buffered bytes end part way through a UTF-8
-  # character: a lead byte with fewer bytes after it than it announces.
-  def __partial_character__(cut)
-    back = 1
-    while back <= 4 && back <= cut
-      byte = @rbuf.getbyte(cut - back)
-      if byte & 0xC0 != 0x80
-        return false if byte < 0xC0
-        needed = byte >= 0xF0 ? 4 : (byte >= 0xE0 ? 3 : 2)
-        return back < needed
-      end
-      back += 1
-    end
-    false
-  end
-
-  def read(length = nil, buffer = nil)
-    __readable__
-    if length.nil?
-      nil while __fill__
-      out = __take__(@rbuf.bytesize).force_encoding(__encoding__)
-    else
-      length = Integer.__index__(length)
-      raise ArgumentError, "negative length #{length} given" if length < 0
-      while @rbuf.bytesize < length
-        break unless __fill__(length - @rbuf.bytesize)
-      end
-      if @rbuf.empty? && length > 0
-        buffer.clear unless buffer.nil?
-        return nil
-      end
-      out = __take__(length)
-    end
-    return out if buffer.nil?
-    # A sized read fills the caller's buffer and leaves its encoding alone.
-    encoding = buffer.encoding
-    buffer.replace(out)
-    buffer.force_encoding(encoding) unless length.nil?
-    buffer
-  end
-
-  def gets(separator = $/, limit = nil, chomp: false)
-    __readable__
-    if Integer === separator && limit.nil?
-      limit = separator
-      separator = $/
-    end
-    return "" if limit == 0
-    if separator.nil? && limit.nil?
-      line = read
-      return $_ = nil if line.empty?
-      @lineno += 1
-      return $_ = line
-    end
-    # An empty separator is paragraph mode: a blank line ends the record.
-    paragraph = !separator.nil? && separator.empty?
-    # Blank lines before a record are not part of it.
-    __take__(1) while paragraph && (@rbuf.empty? ? __fill__ : true) && @rbuf.getbyte(0) == 10
-    wanted = separator.nil? ? nil : (paragraph ? "\n\n" : separator).b
-    from = 0
-    cut = nil
-    while cut.nil?
-      at = wanted.nil? ? nil : @rbuf.index(wanted, from)
-      if at
-        cut = at + wanted.bytesize
-      elsif !limit.nil? && limit > 0 && @rbuf.bytesize >= limit
-        cut = limit
-      else
-        from = @rbuf.bytesize - (wanted.nil? ? 0 : wanted.bytesize) + 1
-        from = 0 if from < 0
-        cut = @rbuf.bytesize unless __fill__
-      end
-    end
-    if !limit.nil? && limit > 0 && limit <= cut
-      cut = limit
-      # A limit that lands inside a character takes the rest of it: Ruby
-      # does not hand back half a character. UTF-8 only, where the bytes
-      # that continue one are recognisable.
-      if __encoding__ == Encoding::UTF_8
-        extra = 0
-        while extra < 16 && __partial_character__(cut) && (cut < @rbuf.bytesize || __fill__)
-          cut += 1
-          extra += 1
+      if chars[p] == "}" && !lbrace.nil?
+        nest -= 1
+        if nest == 0
+          rbrace = p
+          break
         end
       end
+      if chars[p] == "\\" && escape
+        p += 1
+        break if p >= chars.size
+      end
+      p += 1
     end
-    return $_ = nil if cut == 0
-    line = __take__(cut).force_encoding(__encoding__)
-    if paragraph
-      # The blank lines between records belong to neither.
-      __take__(1) while (@rbuf.empty? ? __fill__ : true) && @rbuf.getbyte(0) == 10
+    return [chars] if lbrace.nil?
+    return [] if rbrace.nil?
+    head = chars[0, lbrace]
+    tail = chars[rbrace + 1..]
+    out = []
+    p = lbrace
+    while p < rbrace
+      p += 1
+      start = p
+      nest = 0
+      while p < rbrace && !(chars[p] == "," && nest == 0)
+        nest += 1 if chars[p] == "{"
+        nest -= 1 if chars[p] == "}"
+        if chars[p] == "\\" && escape
+          p += 1
+          break if p == rbrace
+        end
+        p += 1
+      end
+      out.concat(__brace_expand__(head + chars[start...p] + tail, flags))
     end
-    # In paragraph mode `chomp` takes the blank line that ended the record and
-    # nothing else: the last record keeps its own newline. Measured.
-    line = line.chomp(paragraph ? "\n\n" : separator) if chomp && !separator.nil?
-    @lineno += 1
-    $. = @lineno
-    $_ = line
+    out
   end
 
-  def readline(separator = $/, limit = nil, chomp: false)
-    line = gets(separator, limit, chomp: chomp)
-    raise EOFError, "end of file reached" if line.nil?
-    line
-  end
-
-  def each_line(separator = $/, limit = nil, chomp: false)
-    # Without `chomp:` unless it was asked for: the enumerator hands keywords
-    # back as a trailing Hash, which is one argument too many here.
-    return enum_for(:each_line, separator, limit) unless block_given? || chomp
-    return enum_for(:each_line, separator, limit, chomp: chomp) unless block_given?
-    while (line = gets(separator, limit, chomp: chomp))
-      yield line
+  def self.__fnmatch__(pc, sc, flags)
+    return __fnmatch_helper__(pc, 0, sc, 0, flags)[0] if flags & FNM_PATHNAME == 0
+    period = flags & FNM_DOTMATCH == 0
+    p = s = 0
+    ptmp = stmp = nil
+    loop do
+      if pc[p] == "*" && pc[p + 1] == "*" && pc[p + 2] == "/"
+        p += 3 while pc[p] == "*" && pc[p + 1] == "*" && pc[p + 2] == "/"
+        ptmp = p
+        stmp = s
+      end
+      matched, p, s = __fnmatch_helper__(pc, p, sc, s, flags)
+      if matched
+        s += 1 while !sc[s].nil? && sc[s] != "/"
+        if !pc[p].nil? && !sc[s].nil?
+          p += 1
+          s += 1
+          next
+        end
+        return true if pc[p].nil? && sc[s].nil?
+      end
+      # Failed: let `**/` swallow one more directory.
+      if !ptmp.nil? && !(period && sc[stmp] == ".")
+        stmp += 1 while !sc[stmp].nil? && sc[stmp] != "/"
+        unless sc[stmp].nil?
+          p = ptmp
+          stmp += 1
+          s = stmp
+          next
+        end
+      end
+      return false
     end
-    self
-  end
-  alias each each_line
-
-  def readlines(separator = $/, limit = nil, chomp: false)
-    lines = []
-    each_line(separator, limit, chomp: chomp) { |line| lines.push(line) }
-    lines
   end
 
-  def getbyte
-    __readable__
-    return nil if @rbuf.empty? && !__fill__
-    __take__(1).getbyte(0)
-  end
-
-  def readbyte
-    byte = getbyte
-    raise EOFError, "end of file reached" if byte.nil?
-    byte
-  end
-
-  def each_byte
-    return enum_for(:each_byte) unless block_given?
-    while (byte = getbyte)
-      yield byte
+  # One segment of the path, or all of it without `FNM_PATHNAME`. Answers
+  # whether it matched and where each side stopped.
+  def self.__fnmatch_helper__(pc, p, sc, s, flags)
+    period = flags & FNM_DOTMATCH == 0
+    pathname = flags & FNM_PATHNAME != 0
+    escape = flags & FNM_NOESCAPE == 0
+    nocase = flags & FNM_CASEFOLD != 0
+    unescape = ->(i) { escape && pc[i] == "\\" ? i + 1 : i }
+    at_end = ->(chars, i) { chars[i].nil? || (pathname && chars[i] == "/") }
+    # A leading period is matched only by one.
+    return [false, p, s] if period && sc[s] == "." && pc[unescape.(p)] != "."
+    ptmp = stmp = nil
+    loop do
+      failed = false
+      case pc[p]
+      when "*"
+        p += 1 while pc[p] == "*"
+        return [true, unescape.(p), s] if at_end.(pc, unescape.(p))
+        return [false, p, s] if at_end.(sc, s)
+        ptmp = p
+        stmp = s
+        next
+      when "?"
+        return [false, p, s] if at_end.(sc, s)
+        p += 1
+        s += 1
+        next
+      when "["
+        return [false, p, s] if at_end.(sc, s)
+        after = __fnmatch_bracket__(pc, p + 1, sc[s], flags)
+        if after
+          p = after
+          s += 1
+          next
+        end
+        failed = true
+      end
+      unless failed
+        p = unescape.(p)
+        return [at_end.(pc, p), p, s] if at_end.(sc, s)
+        if !at_end.(pc, p) && (pc[p] == sc[s] || (nocase && pc[p].upcase == sc[s].upcase))
+          p += 1
+          s += 1
+          next
+        end
+      end
+      # Try the last `*` one character further on.
+      return [false, p, s] if ptmp.nil?
+      p = ptmp
+      stmp += 1
+      s = stmp
     end
-    self
   end
 
-  def eof?
-    __readable__
-    @rbuf.empty? && !__fill__
-  end
-  alias eof eof?
-
-  def lineno
-    __readable__
-    @lineno
-  end
-
-  def lineno=(number)
-    __readable__
-    @lineno = Integer.__index__(number)
-  end
-
-  def seek(offset, whence = IO::SEEK_SET)
-    __check_open__
-    whence = { SET: IO::SEEK_SET, CUR: IO::SEEK_CUR, END: IO::SEEK_END }.fetch(whence, whence) if Symbol === whence
-    offset = Integer.__index__(offset)
-    # The descriptor is ahead of the reader by what is buffered.
-    offset -= @rbuf.bytesize if whence == IO::SEEK_CUR
-    File.__check__(__fd_seek__(@fileno, offset, whence), @path)
-    @rbuf = "".b
-    0
-  end
-
-  def rewind
-    seek(0)
-    @lineno = 0
-    0
-  end
-
-  def pos
-    __check_open__
-    File.__check__(__fd_seek__(@fileno, 0, IO::SEEK_CUR), @path)[0] - @rbuf.bytesize
-  end
-  alias tell pos
-
-  def pos=(position)
-    seek(position)
-    position
-  end
-
-  def write(*objects)
-    __writable__
-    # Bytes read ahead are bytes the descriptor has moved past; a write
-    # belongs where the reader is.
-    seek(0, IO::SEEK_CUR) unless @rbuf.empty?
-    written = 0
-    objects.each do |object|
-      text = String === object ? object : object.to_s
-      written += File.__check__(__fd_write__(@fileno, text), @path)[0]
+  # A `[...]` at `p`, which is just past the `[`, against one character:
+  # where the pattern goes on after the `]`, or nil when it does not match.
+  def self.__fnmatch_bracket__(pc, p, char, flags)
+    nocase = flags & FNM_CASEFOLD != 0
+    escape = flags & FNM_NOESCAPE == 0
+    return nil if pc[p].nil?
+    ok = false
+    negated = false
+    if pc[p] == "!" || pc[p] == "^"
+      negated = true
+      p += 1
     end
-    written
-  end
-
-  def flush
-    __check_open__
-    self
-  end
-
-  def binmode
-    __check_open__
-    @external = Encoding::BINARY
-    self
-  end
-
-  # The encoding the file was opened with. A file that can be written has
-  # one only when it was given one; a file that can only be read falls back
-  # to the default. CRuby's `io_encoding_get`.
-  def external_encoding
-    __check_open__
-    return @external unless @external.nil?
-    return @external_default unless @external_default.nil?
-    @access == 0 ? Encoding.default_external : nil
-  end
-
-  def size
-    __check_open__
-    File.size(@path)
-  end
-
-  def stat
-    __check_open__
-    File.stat(@path)
-  end
-
-  def lstat
-    __check_open__
-    File.lstat(@path)
-  end
-
-  def chmod(mode)
-    __check_open__
-    File.chmod(mode, @path)
-    0
-  end
-
-  def tty?
-    false
-  end
-  alias isatty tty?
-
-  def inspect
-    @closed ? "#<File:#{@path} (closed)>" : "#<File:#{@path}>"
+    fold = ->(c) { nocase ? c.upcase.ord : c.ord }
+    while pc[p] != "]"
+      t1 = p
+      t1 += 1 if escape && pc[t1] == "\\"
+      return nil if pc[t1].nil?
+      p = t1 + 1
+      return nil if pc[p].nil?
+      if pc[p] == "-" && pc[p + 1] != "]"
+        t2 = p + 1
+        t2 += 1 if escape && pc[t2] == "\\"
+        return nil if pc[t2].nil?
+        p = t2 + 1
+        next if ok
+        if pc[t1] == char || pc[t2] == char
+          ok = true
+          next
+        end
+        c = fold.(char)
+        next if c < fold.(pc[t1]) || c > fold.(pc[t2])
+      else
+        next if ok
+        if pc[t1] == char
+          ok = true
+          next
+        end
+        next unless nocase && pc[t1].upcase == char.upcase
+      end
+      ok = true
+    end
+    ok == negated ? nil : p + 1
   end
 
   # What `stat(2)` says about a path, as it was when asked.
@@ -671,14 +668,24 @@ class File < IO
 
     def self.__lstat__(path)
       path = File.__path__(path)
+      __from__(File.__check__(__fs_stat__(path, false), path, "rb_file_s_lstat"))
+    end
+
+    def self.__from__(fields)
       stat = allocate
-      stat.__fields__(File.__check__(__fs_stat__(path, false), path, "rb_file_s_lstat"))
+      stat.__fields__(fields)
       stat
     end
 
     def __fields__(fields)
       @fields = fields
     end
+
+    def initialize_copy(other)
+      @fields = other.__fields_of__.dup
+    end
+
+    def __fields_of__ = @fields
 
     def dev = @fields[0]
     def ino = @fields[1]
@@ -690,6 +697,36 @@ class File < IO
     def size = @fields[7]
     def blksize = @fields[8]
     def blocks = @fields[9]
+
+    def atime = Time.at(@fields[10], @fields[11], :nanosecond)
+    def mtime = Time.at(@fields[12], @fields[13], :nanosecond)
+    def ctime = Time.at(@fields[14], @fields[15], :nanosecond)
+
+    def birthtime
+      raise NotImplementedError, "birthtime() function is unimplemented on this machine"
+    end
+
+    def <=>(other)
+      return nil unless Stat === other
+      mtime <=> other.mtime
+    end
+
+    # How the platform packs a device number: glibc's `major`/`minor` on
+    # Linux, the BSDs' everywhere else.
+    def self.__major__(dev)
+      return ((dev >> 8) & 0xfff) | ((dev >> 32) & ~0xfff) if RUBY_PLATFORM.include?("linux")
+      (dev >> 24) & 0xff
+    end
+
+    def self.__minor__(dev)
+      return (dev & 0xff) | ((dev >> 12) & ~0xff) if RUBY_PLATFORM.include?("linux")
+      dev & 0xffffff
+    end
+
+    def dev_major = Stat.__major__(dev)
+    def dev_minor = Stat.__minor__(dev)
+    def rdev_major = Stat.__major__(rdev)
+    def rdev_minor = Stat.__minor__(rdev)
 
     # The file type bits of `st_mode`, which POSIX numbers the same everywhere.
     def __type__ = mode & 0170000
@@ -729,15 +766,32 @@ class File < IO
     def owned? = uid == Process.euid
     def grpowned? = gid == Process.egid
 
+    # CRuby's `rb_stat_r` and friends: the owner's bits for the owner, the
+    # group's for the group, everyone's otherwise, and root may read and
+    # write anything and execute what anyone may.
+    def __may__(bit, user, group)
+      if user == 0
+        return true unless bit == 0100
+        return mode & 0111 != 0 || directory?
+      end
+      return mode & bit != 0 if uid == user
+      return mode & (bit >> 3) != 0 if gid == group
+      mode & (bit >> 6) != 0
+    end
+
+    def readable? = __may__(0400, Process.euid, Process.egid)
+    def writable? = __may__(0200, Process.euid, Process.egid)
+    def executable? = __may__(0100, Process.euid, Process.egid)
+    def readable_real? = __may__(0400, Process.uid, Process.gid)
+    def writable_real? = __may__(0200, Process.uid, Process.gid)
+    def executable_real? = __may__(0100, Process.uid, Process.gid)
+
     def inspect
       "#<File::Stat dev=0x#{dev.to_s(16)}, ino=#{ino}, mode=0#{mode.to_s(8)}, nlink=#{nlink}, " \
-        "uid=#{uid}, gid=#{gid}, rdev=0x#{rdev.to_s(16)}, size=#{size}, blksize=#{blksize}, blocks=#{blocks}>"
+        "uid=#{uid}, gid=#{gid}, rdev=0x#{rdev.to_s(16)}, size=#{size}, blksize=#{blksize}, blocks=#{blocks}, " \
+        "atime=#{atime.inspect}, mtime=#{mtime.inspect}, ctime=#{ctime.inspect}>"
     end
   end
-end
-
-class IO
-  include File::Constants
 end
 
 class Dir
@@ -751,10 +805,34 @@ class Dir
     pwd
   end
 
-  # ponytail: `HOME` is the environment, which is `ENV` and `Process` (#43).
-  def self.home
-    __needs_process__
+# `HOME`, or the user's entry in the password database; with a name, that
+# user's entry. Measured: a relative `HOME` is answered as it is.
+def self.home(user = nil)
+  if user.nil?
+    home = ENV["HOME"]
+    home = __passwd_home__(nil, Process.uid) if home.nil?
+    raise ArgumentError, "couldn't find login name -- expanding '~'" if home.nil?
+    return home.dup
   end
+  user = IO.__str__(user)
+  home = __passwd_home__(user, nil)
+  raise ArgumentError, "user #{user} doesn't exist" if home.nil?
+  home
+end
+
+# `getpwnam(3)` and `getpwuid(3)`, read from `/etc/passwd`.
+# ponytail: only the users that file lists. One that NSS finds elsewhere
+# (LDAP, systemd-homed) needs the libc call, which is `etc`'s (#111).
+def self.__passwd_home__(user, uid)
+  File.foreach("/etc/passwd") do |line|
+    fields = line.chomp.split(":")
+    next if fields.size < 6
+    return fields[5] if user.nil? ? fields[2].to_i == uid : fields[0] == user
+  end
+  nil
+rescue SystemCallError
+  nil
+end
 
   def self.exist?(path)
     File.directory?(path)
@@ -940,7 +1018,8 @@ class Dir
     begin
       yield path
     ensure
-      __fs_chdir__(before)
+      # Measured: an original directory that is gone by now is an error.
+      File.__check__(__fs_chdir__(before), before, "rb_dir_chdir")
     end
   end
 end

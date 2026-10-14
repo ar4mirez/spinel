@@ -1,0 +1,1 @@
+fails(#48: Set: an expectation about an error, newly reported since PRD 0077 let mspec's raise matcher run inside its BasicObject proxy):Set#add? raises RuntimeError when called during iteration

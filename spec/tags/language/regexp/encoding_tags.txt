@@ -1,0 +1,2 @@
+fails(#33: Regexp: an expectation about an error, newly reported since PRD 0077 let mspec's raise matcher run inside its BasicObject proxy):Regexps with encoding modifiers raises Encoding::CompatibilityError when the regexp has a fixed, non-ASCII-compatible encoding
+fails(#33: Regexp: an expectation about an error, newly reported since PRD 0077 let mspec's raise matcher run inside its BasicObject proxy):Regexps with encoding modifiers raises Encoding::CompatibilityError when the regexp has a fixed encoding and the match string has non-ASCII characters

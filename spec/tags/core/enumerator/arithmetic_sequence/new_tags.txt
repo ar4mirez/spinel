@@ -1,0 +1,1 @@
+fails(#26: Enumerable and Enumerator: an expectation about an error, newly reported since PRD 0077 let mspec's raise matcher run inside its BasicObject proxy):Enumerator::ArithmeticSequence.allocate is not defined

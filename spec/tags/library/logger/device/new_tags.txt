@@ -1,0 +1,1 @@
+fails(#47: the library does not load yet, and a should_not raise around it now reports the NameError):Logger::LogDevice#new receives options via a hash as second argument

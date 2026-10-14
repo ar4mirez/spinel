@@ -1,0 +1,1 @@
+fails(#26: Enumerable and Enumerator: an expectation about an error, newly reported since PRD 0077 let mspec's raise matcher run inside its BasicObject proxy):Enumerable#flat_map raises a TypeError if an element defining #to_ary does not return an Array or nil

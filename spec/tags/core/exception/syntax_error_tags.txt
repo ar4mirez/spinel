@@ -1,0 +1,1 @@
+fails(#29: Exception: an expectation about an error, newly reported since PRD 0077 let mspec's raise matcher run inside its BasicObject proxy):SyntaxError#path returns the file path that raised an exception

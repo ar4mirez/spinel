@@ -1,0 +1,1 @@
+fails(#41: there is no ARGF yet, and a should_not raise around it now reports the NameError):ARGF.skip has no effect when nothing has been processed yet

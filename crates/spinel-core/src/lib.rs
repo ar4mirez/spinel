@@ -175,7 +175,11 @@ fn image() -> &'static [Arc<Iseq>] {
 /// path: the built-in gems whose C half is Spinel's to write, in Ruby where
 /// Ruby can say it (`docs/engine.md`, "Built-in gems"). Loaded on `require`,
 /// not at boot, as CRuby loads them.
-const LIBRARIES: &[(&str, &str)] = &[("stringio", include_str!("../../../lib/stringio.rb"))];
+const LIBRARIES: &[(&str, &str)] = &[
+    ("stringio", include_str!("../../../lib/stringio.rb")),
+    ("fcntl", include_str!("../../../lib/fcntl.rb")),
+    ("io/nonblock", include_str!("../../../lib/io/nonblock.rb")),
+];
 
 fn library(name: &str) -> Option<&'static str> {
     LIBRARIES

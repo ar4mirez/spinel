@@ -1,0 +1,1 @@
+fails(#28: Module and Class reflection: an expectation about an error, newly reported since PRD 0077 let mspec's raise matcher run inside its BasicObject proxy):Numeric#singleton_method_added raises a TypeError when trying to define a singleton method on a Numeric

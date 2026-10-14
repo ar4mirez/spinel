@@ -1,0 +1,1 @@
+fails(#17: Integer: an expectation about an error, newly reported since PRD 0077 let mspec's raise matcher run inside its BasicObject proxy):Integer#round raises ArgumentError for an unknown rounding mode

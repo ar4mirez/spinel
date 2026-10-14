@@ -1,0 +1,1 @@
+fails(#28: Module and Class reflection: an expectation about an error, newly reported since PRD 0077 let mspec's raise matcher run inside its BasicObject proxy):main.using does not raise error when wrapped with module

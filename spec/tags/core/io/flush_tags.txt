@@ -1,0 +1,1 @@
+fails(#41: there is no write buffer, so a write to a pipe with no reader fails at write, not at flush):IO#flush on a pipe raises Errno::EPIPE if sync=false and the read end is closed

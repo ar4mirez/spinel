@@ -1,0 +1,1 @@
+fails(#41: there is no write buffer, so no write is ever buffered for syswrite to warn about):IO#syswrite on a file warns if called immediately after a buffered IO#write

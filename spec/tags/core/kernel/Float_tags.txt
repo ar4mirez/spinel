@@ -1,2 +1,3 @@
 fails(#181: `Kernel#Float` comes with `String#to_f`, so a String argument converts):Kernel#Float is a instance method
 fails(#181: `Kernel#Float` comes with `String#to_f`, so a String argument converts):Kernel.Float is a public method
+fails(#181: Kernel#Float: an expectation about an error, newly reported since PRD 0077 let mspec's raise matcher run inside its BasicObject proxy):Kernel#Float raises an ArgumentError if exception: is not true or false

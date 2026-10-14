@@ -9075,28 +9075,6 @@ fn native_call<'h>(
             Ok(None)
         }
 
-        Native::WriteString => {
-            let Some(bytes) = call.args.first().and_then(|&v| string_bytes(scope, v)) else {
-                return Err(Error::NoDispatch {
-                    op: "__write__",
-                    operands: "an argument that is not a String",
-                });
-            };
-            use std::io::Write as _;
-            // A closed or full stdout is a real error in Ruby (`EPIPE`), and IO
-            // is phase 3. Until there is an `IOError` to raise, a failed write
-            // is reported rather than swallowed. The second argument is the
-            // descriptor: 2 is stderr, anything else stdout.
-            let written = if call.args.get(1).and_then(|v| v.as_fixnum()) == Some(2) {
-                std::io::stderr().write_all(&bytes)
-            } else {
-                std::io::stdout().write_all(&bytes)
-            };
-            written.map_err(|err| Error::raise("RuntimeError", format!("cannot write: {err}")))?;
-            stack.push(Value::NIL);
-            Ok(None)
-        }
-
         Native::Strerror => {
             let Some(number) = call.args.first().and_then(|v| v.as_fixnum()) else {
                 return Err(Error::NoDispatch {
@@ -11441,7 +11419,6 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         ),
         (Builtin::Module, &["undef_method"], Native::UndefMethod),
         (Builtin::Class, &["superclass"], Native::Superclass),
-        (Builtin::Kernel, &["__write__"], Native::WriteString),
         (Builtin::Kernel, &["__strerror__"], Native::Strerror),
         (Builtin::Kernel, &["__errno_class__"], Native::ErrnoClass),
         (Builtin::Kernel, &["__signal_list__"], Native::SignalList),
@@ -11787,6 +11764,52 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             &["__fd_close__"],
             Native::Fs(FsOp::FdClose),
         ),
+        (Builtin::Kernel, &["__fd_pipe__"], Native::Fs(FsOp::Pipe)),
+        (Builtin::Kernel, &["__fd_dup__"], Native::Fs(FsOp::FdDup)),
+        (Builtin::Kernel, &["__fd_dup2__"], Native::Fs(FsOp::FdDup2)),
+        (
+            Builtin::Kernel,
+            &["__fd_pread__"],
+            Native::Fs(FsOp::FdPread),
+        ),
+        (
+            Builtin::Kernel,
+            &["__fd_pwrite__"],
+            Native::Fs(FsOp::FdPwrite),
+        ),
+        (
+            Builtin::Kernel,
+            &["__fd_fcntl__"],
+            Native::Fs(FsOp::FdFcntl),
+        ),
+        (
+            Builtin::Kernel,
+            &["__fd_fcntl_constants__"],
+            Native::Fs(FsOp::FcntlConstants),
+        ),
+        (
+            Builtin::Kernel,
+            &["__fd_flock__"],
+            Native::Fs(FsOp::FdFlock),
+        ),
+        (
+            Builtin::Kernel,
+            &["__fd_fsync__"],
+            Native::Fs(FsOp::FdFsync),
+        ),
+        (
+            Builtin::Kernel,
+            &["__fs_truncate__"],
+            Native::Fs(FsOp::Truncate),
+        ),
+        (Builtin::Kernel, &["__fs_link__"], Native::Fs(FsOp::Link)),
+        (
+            Builtin::Kernel,
+            &["__fs_mkfifo__"],
+            Native::Fs(FsOp::Mkfifo),
+        ),
+        (Builtin::Kernel, &["__fs_utime__"], Native::Fs(FsOp::Utime)),
+        (Builtin::Kernel, &["__fs_chown__"], Native::Fs(FsOp::Chown)),
         (
             Builtin::Kernel,
             &["__fs_children__"],
@@ -14327,6 +14350,64 @@ fn errno_value(error: &std::io::Error) -> Value {
     Value::fixnum(i64::from(errno)).expect("an errno is a fixnum")
 }
 
+/// An Integer argument, if that is what was passed.
+fn int_arg(call: &Pending, index: usize) -> Option<i64> {
+    call.args.get(index).and_then(|v| v.as_fixnum())
+}
+
+/// A system call's `-1`-or-an-answer: an errno, or `[answer]`.
+fn fd_result(scope: &mut HandleScope<'_>, answer: i64) -> Value {
+    if answer < 0 {
+        errno_value(&std::io::Error::last_os_error())
+    } else {
+        let answer = Value::fixnum(answer).expect("a descriptor or a count is a fixnum");
+        new_array(scope, &[answer])
+    }
+}
+
+/// A system call that answers 0 or -1: true, or an errno.
+fn unit_result(answer: libc::c_int) -> Value {
+    if answer < 0 {
+        errno_value(&std::io::Error::last_os_error())
+    } else {
+        Value::TRUE
+    }
+}
+
+/// `f` on `path` as a C string. A NUL inside a path names nothing.
+fn with_cpath(path: PathBuf, f: impl FnOnce(&std::ffi::CStr) -> Value) -> Value {
+    match std::ffi::CString::new(path.into_os_string().into_vec()) {
+        Ok(path) => f(&path),
+        Err(_) => Value::fixnum(i64::from(libc::EINVAL)).expect("an errno"),
+    }
+}
+
+fn set_cloexec(fd: libc::c_int) {
+    // SAFETY: integer `fcntl`s on a descriptor this process owns.
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFD);
+        if flags >= 0 {
+            libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
+        }
+    }
+}
+
+/// `fstat(2)` on a descriptor, as the `Metadata` `std` gives for a path.
+fn fd_metadata(fd: i64) -> std::io::Result<std::fs::Metadata> {
+    use std::os::fd::{FromRawFd as _, IntoRawFd as _};
+    let fd =
+        libc::c_int::try_from(fd).map_err(|_| std::io::Error::from_raw_os_error(libc::EBADF))?;
+    if fd < 0 {
+        return Err(std::io::Error::from_raw_os_error(libc::EBADF));
+    }
+    // SAFETY: the `File` borrows `fd` only for the `metadata` call, and
+    // `into_raw_fd` hands it back so it is not closed here.
+    let file = unsafe { std::fs::File::from_raw_fd(fd) };
+    let metadata = file.metadata();
+    let _ = file.into_raw_fd();
+    metadata
+}
+
 /// The descriptor a `__fd_*__` call was handed.
 fn fd_arg(call: &Pending) -> Result<libc::c_int, Error> {
     call.args
@@ -14455,25 +14536,25 @@ fn fs_native(
         FsOp::Access => {
             let path = path_arg(scope, call, 0)?;
             let mode = call.args.get(1).and_then(|v| v.as_fixnum()).unwrap_or(0);
+            let flags = if call.args.get(2).is_some_and(|v| v.is_truthy()) {
+                libc::AT_EACCESS
+            } else {
+                0
+            };
             let allowed = std::ffi::CString::new(path.into_os_string().into_vec())
                 .ok()
                 .zip(i32::try_from(mode).ok())
                 // SAFETY: `path` is a NUL-terminated string that outlives the
-                // call, and `access` only reads it.
-                .is_some_and(|(path, mode)| unsafe { libc::access(path.as_ptr(), mode) } == 0);
+                // call, and `faccessat` only reads it.
+                .is_some_and(|(path, mode)| unsafe {
+                    libc::faccessat(libc::AT_FDCWD, path.as_ptr(), mode, flags) == 0
+                });
             bool_value(allowed)
         }
         FsOp::Isatty => {
-            use std::io::IsTerminal as _;
-            // The three standard streams: the only descriptors an `IO` holds
-            // until #41 opens files.
-            let tty = match call.args.first().and_then(|v| v.as_fixnum()) {
-                Some(0) => std::io::stdin().is_terminal(),
-                Some(1) => std::io::stdout().is_terminal(),
-                Some(2) => std::io::stderr().is_terminal(),
-                _ => false,
-            };
-            bool_value(tty)
+            let fd = fd_arg(call)?;
+            // SAFETY: `isatty` takes a descriptor and touches no memory.
+            bool_value(unsafe { libc::isatty(fd) } == 1)
         }
         FsOp::Getcwd => match std::env::current_dir() {
             Ok(dir) => os_string(scope, dir.into_os_string()),
@@ -14626,12 +14707,15 @@ fn fs_native(
         }
         FsOp::Stat => {
             use std::os::unix::fs::MetadataExt as _;
-            let path = path_arg(scope, call, 0)?;
-            let follow = call.args.get(1).is_some_and(|v| v.is_truthy());
-            let metadata = if follow {
-                std::fs::metadata(&path)
+            let metadata = if let Some(fd) = int_arg(call, 0) {
+                fd_metadata(fd)
             } else {
-                std::fs::symlink_metadata(&path)
+                let path = path_arg(scope, call, 0)?;
+                if call.args.get(1).is_some_and(|v| v.is_truthy()) {
+                    std::fs::metadata(&path)
+                } else {
+                    std::fs::symlink_metadata(&path)
+                }
             };
             match metadata {
                 Ok(m) => {
@@ -14776,6 +14860,241 @@ fn fs_native(
             } else {
                 Value::TRUE
             }
+        }
+        FsOp::Pipe => {
+            let mut fds = [0 as libc::c_int; 2];
+            // SAFETY: `fds` is room for the two descriptors `pipe` writes.
+            if unsafe { libc::pipe(fds.as_mut_ptr()) } < 0 {
+                errno_value(&std::io::Error::last_os_error())
+            } else {
+                for fd in fds {
+                    set_cloexec(fd);
+                }
+                let [r, w] = fds.map(|fd| Value::fixnum(i64::from(fd)).expect("a descriptor"));
+                new_array(scope, &[r, w])
+            }
+        }
+        FsOp::FdDup => {
+            let fd = fd_arg(call)?;
+            // SAFETY: `fcntl` with `F_DUPFD_CLOEXEC` takes integers only.
+            fd_result(
+                scope,
+                i64::from(unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) }),
+            )
+        }
+        FsOp::FdDup2 => {
+            let fd = fd_arg(call)?;
+            let onto = int_arg(call, 1).unwrap_or(-1) as libc::c_int;
+            // SAFETY: `dup2` takes two descriptors and touches no memory.
+            let got = unsafe { libc::dup2(fd, onto) };
+            // The standard streams are inherited by what this process starts,
+            // as CRuby's `reopen` leaves them; every other descriptor is not.
+            if got > 2 {
+                set_cloexec(got);
+            }
+            fd_result(scope, i64::from(got))
+        }
+        FsOp::FdPread => {
+            let fd = fd_arg(call)?;
+            let wanted = int_arg(call, 1).unwrap_or(0).max(0);
+            let offset = int_arg(call, 2).unwrap_or(0);
+            let mut buffer = vec![0u8; wanted as usize];
+            // SAFETY: `buffer` is `wanted` writable bytes for the call, and
+            // `pread` writes at most that many.
+            let got = unsafe {
+                libc::pread(
+                    fd,
+                    buffer.as_mut_ptr().cast(),
+                    buffer.len(),
+                    offset as libc::off_t,
+                )
+            };
+            if got < 0 {
+                errno_value(&std::io::Error::last_os_error())
+            } else {
+                buffer.truncate(got as usize);
+                let class = class_handle(scope, Builtin::String);
+                string_alloc(scope, class, &buffer, crate::strings::BINARY)
+            }
+        }
+        FsOp::FdPwrite => {
+            let fd = fd_arg(call)?;
+            let Some(bytes) = call.args.get(1).and_then(|&v| string_bytes(scope, v)) else {
+                return Err(Error::NoDispatch {
+                    op: "__fd_pwrite__",
+                    operands: "an argument that is not a String",
+                });
+            };
+            let offset = int_arg(call, 2).unwrap_or(0);
+            // SAFETY: `bytes` is readable for its length, and `pwrite` reads
+            // at most that many.
+            let n = unsafe {
+                libc::pwrite(
+                    fd,
+                    bytes.as_ptr().cast(),
+                    bytes.len(),
+                    offset as libc::off_t,
+                )
+            };
+            fd_result(scope, n as i64)
+        }
+        FsOp::FdFcntl => {
+            let fd = fd_arg(call)?;
+            let command = int_arg(call, 1).unwrap_or(-1) as libc::c_int;
+            let argument = int_arg(call, 2).unwrap_or(0) as libc::c_int;
+            // Only the commands that take an integer reach here: `core/io.rb`
+            // refuses a String argument, which would be a pointer.
+            // SAFETY: an integer `fcntl` touches no memory of ours.
+            fd_result(
+                scope,
+                i64::from(unsafe { libc::fcntl(fd, command, argument) }),
+            )
+        }
+        FsOp::FcntlConstants => {
+            // The lock types are a `c_short` on macOS and a `c_int` on Linux,
+            // so the conversion is needed on one and useless on the other.
+            #[allow(clippy::useless_conversion)]
+            let pairs: &[(&str, i32)] = &[
+                ("F_DUPFD", libc::F_DUPFD),
+                ("F_GETFD", libc::F_GETFD),
+                ("F_SETFD", libc::F_SETFD),
+                ("F_GETFL", libc::F_GETFL),
+                ("F_SETFL", libc::F_SETFL),
+                ("F_GETLK", libc::F_GETLK),
+                ("F_SETLK", libc::F_SETLK),
+                ("F_SETLKW", libc::F_SETLKW),
+                ("F_RDLCK", i32::from(libc::F_RDLCK)),
+                ("F_WRLCK", i32::from(libc::F_WRLCK)),
+                ("F_UNLCK", i32::from(libc::F_UNLCK)),
+                ("F_DUPFD_CLOEXEC", libc::F_DUPFD_CLOEXEC),
+                ("FD_CLOEXEC", libc::FD_CLOEXEC),
+                ("O_CREAT", libc::O_CREAT),
+                ("O_EXCL", libc::O_EXCL),
+                ("O_NOCTTY", libc::O_NOCTTY),
+                ("O_TRUNC", libc::O_TRUNC),
+                ("O_APPEND", libc::O_APPEND),
+                ("O_NONBLOCK", libc::O_NONBLOCK),
+                ("O_NDELAY", libc::O_NONBLOCK),
+                ("O_RDONLY", libc::O_RDONLY),
+                ("O_RDWR", libc::O_RDWR),
+                ("O_WRONLY", libc::O_WRONLY),
+                ("O_ACCMODE", libc::O_ACCMODE),
+            ];
+            #[cfg(target_os = "linux")]
+            let platform: &[(&str, i32)] = &[
+                ("F_GETPIPE_SZ", libc::F_GETPIPE_SZ),
+                ("F_SETPIPE_SZ", libc::F_SETPIPE_SZ),
+            ];
+            #[cfg(not(target_os = "linux"))]
+            let platform: &[(&str, i32)] = &[];
+            let mut out = Vec::with_capacity(pairs.len() + platform.len());
+            for &(name, value) in pairs.iter().chain(platform) {
+                let name = string_new(scope, name);
+                let value = Value::fixnum(i64::from(value)).expect("a flag is a fixnum");
+                let pair = new_array(scope, &[name, value]);
+                out.push(scope.root(pair));
+            }
+            let out: Vec<Value> = out.into_iter().map(|h| scope.get(h)).collect();
+            new_array(scope, &out)
+        }
+        FsOp::FdFlock => {
+            let fd = fd_arg(call)?;
+            let operation = int_arg(call, 1).unwrap_or(0) as libc::c_int;
+            // SAFETY: `flock` takes two integers and touches no memory.
+            unit_result(unsafe { libc::flock(fd, operation) })
+        }
+        FsOp::FdFsync => {
+            let fd = fd_arg(call)?;
+            let data_only = call.args.get(1).is_some_and(|v| v.is_truthy());
+            // `fdatasync` is not on every target Spinel builds for; where it
+            // is missing, `fsync` does what it would have and more.
+            #[cfg(target_os = "linux")]
+            // SAFETY: both take a descriptor and touch no memory.
+            let done = unsafe {
+                if data_only {
+                    libc::fdatasync(fd)
+                } else {
+                    libc::fsync(fd)
+                }
+            };
+            #[cfg(not(target_os = "linux"))]
+            let done = {
+                let _ = data_only;
+                // SAFETY: as above.
+                unsafe { libc::fsync(fd) }
+            };
+            unit_result(done)
+        }
+        FsOp::Truncate => {
+            let length = int_arg(call, 1).unwrap_or(0) as libc::off_t;
+            if let Some(fd) = int_arg(call, 0) {
+                // SAFETY: `ftruncate` takes integers and touches no memory.
+                unit_result(unsafe { libc::ftruncate(fd as libc::c_int, length) })
+            } else {
+                let path = path_arg(scope, call, 0)?;
+                with_cpath(path, |path| {
+                    // SAFETY: `path` is NUL-terminated and outlives the call.
+                    unit_result(unsafe { libc::truncate(path.as_ptr(), length) })
+                })
+            }
+        }
+        FsOp::Link => {
+            let target = path_arg(scope, call, 0)?;
+            let link = path_arg(scope, call, 1)?;
+            match std::fs::hard_link(&target, &link) {
+                Ok(()) => Value::TRUE,
+                Err(error) => errno_value(&error),
+            }
+        }
+        FsOp::Mkfifo => {
+            let path = path_arg(scope, call, 0)?;
+            let mode = int_arg(call, 1).unwrap_or(0o666) as libc::mode_t;
+            with_cpath(path, |path| {
+                // SAFETY: `path` is NUL-terminated and outlives the call.
+                unit_result(unsafe { libc::mkfifo(path.as_ptr(), mode) })
+            })
+        }
+        FsOp::Utime => {
+            let path = path_arg(scope, call, 0)?;
+            let time = |seconds: usize, nanos: usize| match int_arg(call, seconds) {
+                Some(s) => libc::timespec {
+                    tv_sec: s as libc::time_t,
+                    tv_nsec: int_arg(call, nanos).unwrap_or(0) as _,
+                },
+                None => libc::timespec {
+                    tv_sec: 0,
+                    tv_nsec: libc::UTIME_NOW as _,
+                },
+            };
+            let times = [time(1, 2), time(3, 4)];
+            let flags = if call.args.get(5).is_some_and(|v| v.is_truthy()) {
+                0
+            } else {
+                libc::AT_SYMLINK_NOFOLLOW
+            };
+            with_cpath(path, |path| {
+                // SAFETY: `path` is NUL-terminated and `times` is two
+                // timespecs, both outliving the call; `utimensat` reads them.
+                unit_result(unsafe {
+                    libc::utimensat(libc::AT_FDCWD, path.as_ptr(), times.as_ptr(), flags)
+                })
+            })
+        }
+        FsOp::Chown => {
+            let path = path_arg(scope, call, 0)?;
+            let uid = int_arg(call, 1).unwrap_or(-1) as libc::uid_t;
+            let gid = int_arg(call, 2).unwrap_or(-1) as libc::gid_t;
+            let follow = call.args.get(3).is_some_and(|v| v.is_truthy());
+            with_cpath(path, |path| {
+                // SAFETY: `path` is NUL-terminated and outlives the call.
+                unit_result(unsafe {
+                    if follow {
+                        libc::chown(path.as_ptr(), uid, gid)
+                    } else {
+                        libc::lchown(path.as_ptr(), uid, gid)
+                    }
+                })
+            })
         }
         FsOp::Read => {
             let path = path_arg(scope, call, 0)?;

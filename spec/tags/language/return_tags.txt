@@ -1,0 +1,1 @@
+fails(#28: a return in a block in a class body: an expectation about an error, newly reported since PRD 0077 let mspec's raise matcher run inside its BasicObject proxy):The return keyword at top level within a block within a class is not allowed

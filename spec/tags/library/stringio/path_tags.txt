@@ -1,0 +1,1 @@
+fails(#56: StringIO: an expectation about an error, newly reported since PRD 0077 let mspec's raise matcher run inside its BasicObject proxy):StringIO#path is not defined
