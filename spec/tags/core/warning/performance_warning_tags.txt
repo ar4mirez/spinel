@@ -1,1 +1,1 @@
-fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):Performance warnings when redefined optimised methods emits performance warning for redefining Integer#+
+fails(#320: redefining an optimised method gives no performance warning):Performance warnings when redefined optimised methods emits performance warning for redefining Integer#+

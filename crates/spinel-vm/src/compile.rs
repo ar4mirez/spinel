@@ -1618,6 +1618,20 @@ impl Compiler {
         // `collector[i]...false` logs its left-hand side exactly once.
         let condition = |me: &mut Self, side: &Option<Expr>| -> Emit {
             match side {
+                // An Integer literal is the line number: `print if 2..3` under
+                // `ruby -n` prints lines two and three. `$. == n`, measured.
+                Some(expr) if matches!(expr.kind, ExprKind::Int(_)) => {
+                    let line = Expr::new(expr.span, ExprKind::Var(VarRef::Global("$.".into())));
+                    let compare = spinel_ast::Call {
+                        receiver: Some(line),
+                        name: "==".into(),
+                        name_span: expr.span,
+                        args: vec![expr.clone()],
+                        block: None,
+                        flags: spinel_ast::CallFlags::default(),
+                    };
+                    me.call(&compare, expr.span)
+                }
                 Some(expr) => me.expr(expr),
                 None => {
                     me.emit(Insn::PushFalse);

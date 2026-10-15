@@ -1,1 +1,1 @@
-fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The END keyword gives access to an exception raised in a previous handler
+fails(#29: an at_exit handler does not see the exception the one before it raised as $!):The END keyword gives access to an exception raised in a previous handler

@@ -1,1 +1,1 @@
-fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):Digest::SHA256.file when passed a path to a file that exists can be used with frozen-string-literal
+fails(#58: digest is not built in):Digest::SHA256.file when passed a path to a file that exists can be used with frozen-string-literal
