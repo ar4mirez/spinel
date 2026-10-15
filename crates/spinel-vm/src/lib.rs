@@ -77,6 +77,7 @@ pub mod float;
 pub mod heap;
 pub mod interp;
 pub mod method;
+pub mod mt;
 pub mod regexp;
 pub mod shape;
 pub mod shared;

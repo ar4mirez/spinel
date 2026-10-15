@@ -485,6 +485,13 @@ pub enum Native {
     /// raises for a missing method, raised on purpose — what
     /// `BasicObject#method_missing` does when called directly (#28).
     RaiseNoMethod,
+    /// `Kernel#__mt_new__(key, single)`: a Mersenne Twister's state, as a
+    /// BINARY String, from a key of 32-bit words — `init_genrand` of the one
+    /// word when `single`, `init_by_array` otherwise (#249).
+    MtNew,
+    /// `Kernel#__mt_next__(state, count)`: the next `count` 32-bit outputs as
+    /// an Array of Integers, the state String updated in place.
+    MtNext,
     /// `Kernel#__digest__(algorithm, string)`: the digest of the bytes, as a
     /// BINARY String — MD5, SHA1, SHA256, SHA384, SHA512 or RMD160 (#58).
     Digest,
