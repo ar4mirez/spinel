@@ -9240,6 +9240,48 @@ fn native_call<'h>(
             dispatch(scope, stack, frames, forwarded, proc_class, ids)
         }
 
+        Native::MtNew => {
+            let words: Vec<u32> = call
+                .args
+                .first()
+                .and_then(|&v| array_elements(scope, v))
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|v| v.as_fixnum())
+                .map(|w| w as u32)
+                .collect();
+            let single = call.args.get(1).is_some_and(|v| v.is_truthy());
+            let state = crate::mt::Mt::new(&words, single);
+            let class = class_handle(scope, Builtin::String);
+            let value = string_alloc(scope, class, &state.to_bytes(), crate::strings::BINARY);
+            stack.push(value);
+            Ok(None)
+        }
+        Native::MtNext => {
+            let Some(&state) = call.args.first() else {
+                return Err(Error::NoDispatch {
+                    op: "__mt_next__",
+                    operands: "no generator state",
+                });
+            };
+            let handle = scope.root(state);
+            let bytes = crate::strings::bytes(scope, handle);
+            let Some(mut mt) = crate::mt::Mt::from_bytes(&bytes) else {
+                return Err(Error::NoDispatch {
+                    op: "__mt_next__",
+                    operands: "a String that is not a generator's state",
+                });
+            };
+            let count = int_arg(&call, 1).unwrap_or(1).max(0) as usize;
+            let outputs: Vec<Value> = (0..count)
+                .map(|_| Value::fixnum(i64::from(mt.next_u32())).expect("a u32 is a fixnum"))
+                .collect();
+            let len = crate::strings::bytesize(scope, handle);
+            crate::strings::splice(scope, handle, 0, len, &mt.to_bytes());
+            let value = new_array(scope, &outputs);
+            stack.push(value);
+            Ok(None)
+        }
         Native::Digest => {
             use sha2::Digest as _;
             let name = call.args.first().and_then(|&v| string_bytes(scope, v));
@@ -12102,6 +12144,8 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             Native::Str(StrOp::EncodingInstall),
         ),
         (Builtin::Kernel, &["__digest__"], Native::Digest),
+        (Builtin::Kernel, &["__mt_new__"], Native::MtNew),
+        (Builtin::Kernel, &["__mt_next__"], Native::MtNext),
         (
             Builtin::BasicObject,
             &["__raise_no_method__"],

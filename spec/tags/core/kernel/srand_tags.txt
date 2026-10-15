@@ -1,1 +1,0 @@
-fails(#249: `Kernel#srand` needs `Random`):Kernel.srand is a public method
