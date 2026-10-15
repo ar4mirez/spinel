@@ -60,9 +60,10 @@ while a Ractor is one OS thread (#119). `BasicSocket#ioctl` waits on
 **1,695** of 1,814 examples passing here, 0 failing. The 119 still blocked:
 96 start a `Thread` (#45), 16 need the vendored `ipaddr` (#47), 6 connect to
 192.0.2.1 to time out where this machine answers "no route" at once —
-CRuby fails them the same way here — and one is `ioctl`.
+CRuby fails them the same way here — and one is `ioctl`. On CI, whose
+network lets those run, it is **1,705** of 1,818.
 
-Corpus 23,356 to **25,104** passing, 0 failed. Compared example by example
+Corpus 23,356 to **25,114** passing on CI, 0 failed. Compared example by example
 with `main`, 886 blocked examples pass — `library/socket`, and `core/io`,
 `core/file` and `library/io-wait` through `IO.select` and `IO#wait` — and
 none that passed fails; the rest of the gain is socket examples that never
