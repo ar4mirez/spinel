@@ -6,6 +6,7 @@
 //! `docs/cli.md` for the full surface.
 
 mod ruby_args;
+mod stdlib;
 mod tree;
 
 use std::io::{IsTerminal, Write};
@@ -402,6 +403,23 @@ struct Around<'a> {
     frozen_string_literal: bool,
 }
 
+/// The vendored standard library on `$LOAD_PATH`, last, as CRuby has its
+/// `rubylibdir`; the flags' `-I` directories go before it.
+fn library_path(scope: &mut spinel_vm::HandleScope<'_>) {
+    let Some(dir) = stdlib::directory() else {
+        return;
+    };
+    // Rust's escapes are Ruby's too, once `#` cannot start an
+    // interpolation.
+    let literal = format!("{:?}", dir.to_string_lossy()).replace('#', "\\#");
+    let code = format!("$LOAD_PATH.push({literal}.freeze)");
+    let parsed = spinel_parse::parse_file("<stdlib>", code.as_bytes());
+    let compiled =
+        spinel_vm::compile::program(&parsed.program).expect("a push onto $LOAD_PATH compiles");
+    let mut frame = spinel_vm::interp::Frame::new(0);
+    let _ = spinel_vm::interp::eval_in(scope, &mut frame, &compiled);
+}
+
 /// Compile and run one program, after the prelude when there is one.
 fn run_program(
     path: &Path,
@@ -440,6 +458,7 @@ fn run_program(
     scope.set_budget(None);
     spinel_core::boot(&mut scope);
     scope.set_frozen_string_literal(frozen_string_literal);
+    library_path(&mut scope);
 
     // The flags' meaning runs first, as `ruby` runs `-r` before it reads the
     // program: an `at_exit` a required file registers runs even when the

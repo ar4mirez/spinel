@@ -754,6 +754,9 @@ module Kernel
   # True when the command succeeded, false when it ran and failed, and nil
   # when it could not be started — unless `exception: true` asks for errors.
   def system(*args, exception: false, **options)
+    unless exception.nil? || true.equal?(exception) || false.equal?(exception)
+      raise ArgumentError, "expected true or false as exception: #{exception.inspect}"
+    end
     args = args + [options] unless options.empty?
     begin
       pid = Process::Spawn.start(args, name: "system")

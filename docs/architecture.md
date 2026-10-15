@@ -22,7 +22,7 @@
                      │ writes                                       │ reads
                      ▼                                              ▼
    ~/.spinel/                                        project/
-     stdlib/<spinel-ver>/          extracted once      Gemfile, Gemfile.lock      (Bundler-compatible)
+     stdlib/<ver>-<digest>/        extracted once      Gemfile, Gemfile.lock      (Bundler-compatible)
      store/gems/<name>-<ver>/                          .spinel/gem_home/          (standard RubyGems layout)
      store/ext/<name>-<ver>-<abi>/                     .spinel/bytecode/          (compiled .rb cache)
      index/<host>/
@@ -54,7 +54,7 @@ honest as Ruby grows syntax.
 The release binary is Rust code plus an embedded zstd archive:
 
 - `core.image`: the precompiled bytecode of `core/*.rb`, loaded at boot instead of parsing (this is the startup trick; there is no snapshot of a heap, only of bytecode)
-- `stdlib/**/*.rb`: the pure-Ruby standard library, vendored from Ruby's repository (Ruby license / BSD-2, per-file terms in `stdlib/LICENSE/LEGAL`). `erb`, `optparse`, `fileutils`, `json`'s Ruby half, `net/http`, and so on. `set` is not among them: it is a core class as of Ruby 4.0. Extracted once to `~/.spinel/stdlib/<ver>/`.
+- `stdlib/**/*.rb`: the pure-Ruby standard library, vendored from Ruby's repository (Ruby license / BSD-2, per-file terms in `stdlib/LICENSE/LEGAL`). `erb`, `optparse`, `fileutils`, `json`'s Ruby half, `net/http`, and so on. `set` is not among them: it is a core class as of Ruby 4.0. Extracted once to `~/.spinel/stdlib/<ver>-<digest>/` (`$SPINEL_HOME` for `~/.spinel`), the digest the archive's own so two builds never share a copy, and put on `$LOAD_PATH` after `-I` and `RUBYLIB`, where CRuby has its `rubylibdir` (`crates/spinel-cli/src/stdlib.rs`).
 - `shims/*.rb`: Spinel's setup, test worker, Gemfile evaluator (cli.md)
 
 Default gems whose parts are C in CRuby (`json` parser, `openssl`, `zlib`, `socket`, `io-console`, `digest`, `date`, `bigdecimal`, `psych`, `etc`, `fiddle`, `monitor`) ship as built-in gems: their Ruby halves in the asset archive, their C halves as Spinel primitives. See engine.md, "Built-in gems".
