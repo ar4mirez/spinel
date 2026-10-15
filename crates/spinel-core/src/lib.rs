@@ -221,6 +221,19 @@ pub fn exit_status(scope: &mut HandleScope<'_>, raised: bool) -> Option<u8> {
     status.as_fixnum().map(|status| (status & 0xff) as u8)
 }
 
+/// Print the exception that ended the program as CRuby's top level prints
+/// it — `full_message`, with its cause and backtrace — unless it is one CRuby
+/// keeps quiet about. Answers false when there was nothing to print it from,
+/// so the caller can say something itself.
+pub fn report_uncaught(scope: &mut HandleScope<'_>) -> bool {
+    let parsed = spinel_parse::parse_file("<exit>", b"Kernel.__report__");
+    let Ok(iseq) = compile::program(&parsed.program) else {
+        return false;
+    };
+    let mut frame = interp::Frame::new(0);
+    interp::eval_in(scope, &mut frame, &iseq).is_ok_and(|value| value.is_truthy())
+}
+
 /// What string `eval` parses with (#38): the VM has no parser of its own.
 fn parse_eval(
     path: &str,

@@ -25,6 +25,34 @@ module Kernel
 
   module_function :at_exit
 
+  # `END { }` compiles to this call: the block runs at exit like an `at_exit`
+  # one, but each `END` registers once however often it is reached. A block
+  # is told apart by where it was written: the file the caller is in, and
+  # the offset in it the compiler passes.
+  def __end_block__(offset, &block)
+    sites = (Kernel.__end_sites__ ||= {})
+    site = [__backtrace_here__[0]&.first, offset]
+    return nil if sites.key?(site)
+    sites[site] = true
+    Kernel.__at_exit__.push(block)
+    nil
+  end
+
+  private :__end_block__
+
+  # The CLI makes this the main script's first call: its frame is the
+  # top level every file shares.
+  def __toplevel_binding__(binding)
+    Object.const_set(:TOPLEVEL_BINDING, binding) unless Object.const_defined?(:TOPLEVEL_BINDING, false)
+    nil
+  end
+
+  private :__toplevel_binding__
+
+  class << self
+    attr_accessor :__end_sites__
+  end
+
   def self.__at_exit__
     @__at_exit__ ||= []
   end
@@ -33,6 +61,9 @@ module Kernel
   # A block that raises `SystemExit` changes the status; any other exception
   # is reported and the rest still run. Answers the exit status.
   def self.__exit__(error)
+    # Kept for `__report__`, which runs after the handlers have run and
+    # `$!` has gone back to nil.
+    @__uncaught__ = error
     status = error.nil? ? 0 : __status_of__(error)
     handlers = __at_exit__
     until handlers.empty?
@@ -47,6 +78,17 @@ module Kernel
       end
     end
     status
+  end
+
+  # The top level's report of the exception that ended the program: nothing
+  # for a `SystemExit` or a signal, and `full_message` for anything else.
+  def self.__report__(error = @__uncaught__)
+    return false if error.nil?
+    return true if SystemExit === error || (SignalException === error && !(Interrupt === error))
+    $stderr.write(error.full_message(highlight: false))
+    true
+  rescue Exception
+    false
   end
 
   def self.__status_of__(error)

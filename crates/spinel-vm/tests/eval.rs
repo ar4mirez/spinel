@@ -81,6 +81,8 @@ fn spinel_agrees_with_the_ruby_that_measured_the_table() {
 }
 
 #[test]
+// A list that shrinks as slices land, and is down to one for now.
+#[allow(clippy::single_element_loop)]
 fn a_construct_this_slice_does_not_compile_is_an_error_never_a_guess() {
     // The property a spec run depends on: unsupported is loud.
     for source in [
@@ -107,7 +109,7 @@ fn a_construct_this_slice_does_not_compile_is_an_error_never_a_guess() {
         // Since #145 a block or method body that does not compile becomes one
         // that refuses when it runs, so the rest of its file still runs; the
         // property is now that *running* it is an error, never a value.
-        "BEGIN { 1 }",
+        // `BEGIN` and `END` left this list with #314.
     ] {
         let outcome = eval(source);
         assert!(

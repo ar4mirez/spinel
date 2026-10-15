@@ -1,3 +1,0 @@
-fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The -n command line option only evaluates BEGIN blocks once
-fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The -n command line option only evaluates END blocks once
-fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The -n command line option allows summing over a whole file

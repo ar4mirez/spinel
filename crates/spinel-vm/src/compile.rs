@@ -100,8 +100,28 @@ pub fn program(program: &Program) -> Result<Iseq, Unsupported> {
 pub fn program_as(program: &Program, name: &str) -> Result<Iseq, Unsupported> {
     let mut compiler = Compiler::new(name, &program.locals);
     compiler.source = Some(Arc::clone(&program.source));
-    compiler.statements(&program.body, true)?;
+    compiler.statements(&hoist_begin(&program.body), true)?;
     Ok(compiler.finish())
+}
+
+/// The program with every `BEGIN { }` body moved to the front, in order:
+/// they run before anything else in the file, in its own scope. A `BEGIN`
+/// is only ever at the top level; Prism refuses one anywhere else.
+fn hoist_begin(body: &[Expr]) -> std::borrow::Cow<'_, [Expr]> {
+    let is_begin = |e: &Expr| matches!(&e.kind, ExprKind::Exec(exec) if exec.kind == spinel_ast::ExecKind::Pre);
+    if !body.iter().any(is_begin) {
+        return std::borrow::Cow::Borrowed(body);
+    }
+    let mut hoisted = Vec::with_capacity(body.len());
+    for expr in body {
+        if let ExprKind::Exec(exec) = &expr.kind
+            && exec.kind == spinel_ast::ExecKind::Pre
+        {
+            hoisted.extend(exec.body.iter().cloned());
+        }
+    }
+    hoisted.extend(body.iter().filter(|e| !is_begin(e)).cloned());
+    std::borrow::Cow::Owned(hoisted)
 }
 
 /// Compile a string `eval` (#38) whose environment sits inside one whose
@@ -131,7 +151,8 @@ pub fn eval(
     compiler.from_eval = true;
     compiler.eval_phantoms = vec![Vec::new()];
     compiler.find_eval_phantoms();
-    compiler.statements(&program.body, true)?;
+    // An `eval` string is a code unit of its own: its `BEGIN`s run first in it.
+    compiler.statements(&hoist_begin(&program.body), true)?;
     Ok(compiler.finish())
 }
 
@@ -1088,6 +1109,11 @@ impl Compiler {
             ExprKind::Logical(node) => self.logical(node)?,
             ExprKind::Parens(statements) => self.statements(statements, true)?,
             ExprKind::Call(call) => self.call(call, span)?,
+            ExprKind::Exec(exec) if exec.kind == spinel_ast::ExecKind::Post => {
+                self.end_expr(&exec.body, span)?
+            }
+            // `BEGIN { }` was hoisted to the top of the program, where it ran.
+            ExprKind::Exec(_) => self.emit(Insn::PushNil),
 
             // A bare `begin ... end` is a grouping, not an exception handler,
             // and `begin ... end while c` is how Ruby spells a do-while. Only
@@ -5007,6 +5033,38 @@ impl Compiler {
     /// `break`, `next` and `redo` need nothing here: they mean in this block
     /// what they mean in any block, which is what Ruby says they mean in a
     /// `for`.
+    /// `END { }`: a closure handed to `Kernel#__end_block__`, which registers
+    /// it to run at exit the first time this one is reached. The `END`'s
+    /// place in the file is what tells one from another.
+    ///
+    /// Prism resolves the body's names as though no scope opened, as for a
+    /// `for` body, so the block's environment is a synthetic one too.
+    fn end_expr(&mut self, body: &[Expr], span: Span) -> Emit {
+        let mut child = Compiler::nested(&format!("block in {}", self.name), &[], self, false);
+        child.env_synthetic[0] = true;
+        child.has_synthetic_env = true;
+        child.statements(body, true)?;
+        let block = self.push_child(child.finish());
+        self.emit(Insn::PushSelf);
+        self.emit(Insn::PushInt(i64::from(span.start)));
+        let name = self.symbol("__end_block__");
+        let site = self.push_site(
+            CallSite {
+                name,
+                argc: 1,
+                splats: Vec::new(),
+                keywords: Vec::new(),
+                block: BlockRef::Literal(block),
+                implicit_self: true,
+                variable_call: false,
+                kwsplat: false,
+            },
+            false,
+        );
+        self.emit(Insn::Send(site));
+        Ok(())
+    }
+
     fn for_expr(&mut self, node: &spinel_ast::For, span: Span) -> Emit {
         let mut child = Compiler::nested("block in for", &[], self, false);
         child.env_synthetic[0] = true;

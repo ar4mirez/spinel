@@ -196,7 +196,7 @@ fn run_command(path: &Path, args: &[String], dump_bytecode: bool) -> ExitCode {
             return ExitCode::from(EXIT_USAGE);
         }
     };
-    run_program(path, &source, args, dump_bytecode, None, None)
+    run_program(path, &source, args, dump_bytecode, Around::default())
 }
 
 /// `spinel` given `ruby`'s flags: the prelude they mean, then the program
@@ -296,6 +296,8 @@ fn ruby_command(words: &[String]) -> ExitCode {
     {
         args.skip_to_ruby = Some(None);
     }
+    let source_before_skip = source.clone();
+    let mut skipped = 0;
     if args.skip_to_ruby.is_some() {
         // `-x`: everything before the `#!` line naming ruby is not the program.
         let text = String::from_utf8_lossy(&source).into_owned();
@@ -313,6 +315,7 @@ fn ruby_command(words: &[String]) -> ExitCode {
             return ExitCode::from(EXIT_RAISED);
         };
         source = source[start..].to_vec();
+        skipped = start;
     }
     if args.syntax_only {
         let parsed = spinel_parse::parse_file(&name, &source);
@@ -329,27 +332,65 @@ fn ruby_command(words: &[String]) -> ExitCode {
         }
         return ExitCode::from(EXIT_SYNTAX);
     }
-    let source = ruby_args::wrap(&args, &source);
+    // `DATA` is the main script's file, read from just past `__END__`.
+    let data = (args.code.is_none() && name != "-")
+        .then(|| data_offset(&source_before_skip))
+        .flatten()
+        .map(|offset| (name.clone(), offset + skipped));
+    // `-n` and `-p`: a program that parses on its own is put in the loop
+    // after parsing, its `BEGIN`s outside it; one that does not — a bare
+    // `next` at the top level is a syntax error without the loop — is
+    // wrapped as text first.
+    let mut around = ruby_args::loop_template(&args);
+    let source = if around.is_some() && !spinel_parse::parse_file(&name, &source).is_ok() {
+        around = None;
+        ruby_args::wrap(&args, &source)
+    } else {
+        source
+    };
     let prelude = ruby_args::prelude(&args);
     run_program(
         Path::new(&name),
         &source,
         &args.argv,
         false,
-        Some(&prelude),
-        args.source_encoding.as_deref(),
+        Around {
+            prelude: Some(&prelude),
+            source_encoding: args.source_encoding.as_deref(),
+            data,
+            loop_template: around.as_deref(),
+        },
     )
 }
 
-/// Compile and run one program, after `prelude` when there is one.
+/// What a `ruby` command line adds around a program; all of it absent for
+/// `spinel run`.
+#[derive(Default)]
+struct Around<'a> {
+    /// Ruby the flags mean, run first.
+    prelude: Option<&'a str>,
+    /// `-K`'s source encoding, for a script without a magic comment.
+    source_encoding: Option<&'a str>,
+    /// The file `DATA` reads and the offset it starts at.
+    data: Option<(String, usize)>,
+    /// The `-n`/`-p` loop to put the program in.
+    loop_template: Option<&'a str>,
+}
+
+/// Compile and run one program, after the prelude when there is one.
 fn run_program(
     path: &Path,
     source: &[u8],
     args: &[String],
     dump_bytecode: bool,
-    prelude: Option<&str>,
-    source_encoding: Option<&str>,
+    around: Around<'_>,
 ) -> ExitCode {
+    let Around {
+        prelude,
+        source_encoding,
+        data,
+        loop_template,
+    } = around;
     let source = source.to_vec();
     if dump_bytecode {
         let parsed = spinel_parse::parse_file(&path.to_string_lossy(), &source);
@@ -397,6 +438,32 @@ fn run_program(
         {
             map.encoding = Some(encoding.into());
         }
+        if let Some(template) = loop_template
+            && parsed.is_ok()
+        {
+            loop_around(&mut parsed.program, template);
+        }
+        // `TOPLEVEL_BINDING` is the main script's own frame, so the call that
+        // records it is the first thing the script does.
+        let here = spinel_ast::Span { start: 0, end: 0 };
+        let capture = |name: &str, args: Vec<spinel_ast::Expr>| {
+            spinel_ast::Expr::new(
+                here,
+                spinel_ast::ExprKind::Call(Box::new(spinel_ast::Call {
+                    receiver: None,
+                    name: name.into(),
+                    name_span: here,
+                    args,
+                    block: None,
+                    flags: spinel_ast::CallFlags::default(),
+                })),
+            )
+        };
+        let binding = capture("binding", Vec::new());
+        parsed
+            .program
+            .body
+            .insert(0, capture("__toplevel_binding__", vec![binding]));
         if !report_syntax_errors(path, &source, &parsed) {
             syntax_error = true;
         } else {
@@ -404,9 +471,22 @@ fn run_program(
                 Ok(iseq) => iseq,
                 Err(unsupported) => return cannot_run(path, &unsupported),
             };
-            let mut frame = spinel_vm::interp::Frame::new(0);
-            outcome = spinel_vm::interp::eval_in(&mut scope, &mut frame, &iseq)
-                .map(|_| spinel_vm::Value::NIL);
+            if let Some((file, offset)) = &data {
+                let define = format!(
+                    "DATA = File.open({file:?}, \"rb:\" + Encoding.default_external.name)\nDATA.seek({offset})\n"
+                );
+                let parsed = spinel_parse::parse_file("<data>", define.as_bytes());
+                let compiled = spinel_vm::compile::program(&parsed.program)
+                    .expect("the DATA definition compiles");
+                let mut frame = spinel_vm::interp::Frame::new(0);
+                outcome = spinel_vm::interp::eval_in(&mut scope, &mut frame, &compiled)
+                    .map(|_| spinel_vm::Value::NIL);
+            }
+            if outcome.is_ok() {
+                let mut frame = spinel_vm::interp::Frame::new(0);
+                outcome = spinel_vm::interp::eval_in(&mut scope, &mut frame, &iseq)
+                    .map(|_| spinel_vm::Value::NIL);
+            }
         }
     }
     // The `at_exit` blocks run before the error is reported, as CRuby runs
@@ -420,10 +500,24 @@ fn run_program(
         &outcome,
         Err(spinel_vm::Error::Uncaught { class, .. }) if class == "SystemExit" || class == "SignalException"
     );
+    // An exception is reported by Ruby, as CRuby's top level reports it;
+    // anything else is the engine saying it could not go on.
     if let Err(err) = &outcome
         && !quiet
     {
-        eprintln!("{}: {}", path.display(), describe_error(err));
+        if matches!(err, spinel_vm::Error::Uncaught { .. })
+            && spinel_core::report_uncaught(&mut scope)
+        {
+            // The one hint Spinel adds to Ruby's report: a missing method may
+            // be its own, while the core library is still growing.
+            if matches!(err, spinel_vm::Error::Uncaught { class, .. } if class == "NoMethodError") {
+                eprintln!(
+                    "        Spinel's core library is still minimal, so this may be Spinel rather than your program.\n        What exists: {MILESTONES}"
+                );
+            }
+        } else {
+            eprintln!("{}: {}", path.display(), describe_error(err));
+        }
     }
     // A `SignalException` that reached the top ends the process by its
     // signal, so whoever waits for it sees that, not an exit status.
@@ -445,6 +539,51 @@ fn run_program(
         EXIT_RAISED
     };
     ExitCode::from(status.unwrap_or(fallback))
+}
+
+/// Put a program's statements in the `-n`/`-p` loop `template` holds, its
+/// `BEGIN`s first and outside it, where they run once.
+fn loop_around(program: &mut spinel_ast::Program, template: &str) {
+    let parsed = spinel_parse::parse_file("<loop>", template.as_bytes());
+    let Some(mut looped) = parsed.program.body.into_iter().next() else {
+        return;
+    };
+    let body = std::mem::take(&mut program.body);
+    let (begins, rest): (Vec<_>, Vec<_>) = body.into_iter().partition(|expr| {
+        matches!(&expr.kind, spinel_ast::ExprKind::Exec(exec) if exec.kind == spinel_ast::ExecKind::Pre)
+    });
+    if let spinel_ast::ExprKind::While(node) = &mut looped.kind {
+        let mut statements = Vec::with_capacity(node.body.len() + rest.len());
+        let mut rest = Some(rest);
+        for statement in node.body.drain(..) {
+            let placeholder = matches!(&statement.kind, spinel_ast::ExprKind::Call(call) if call.name.as_ref() == "__spinel_body__");
+            if placeholder {
+                statements.extend(rest.take().unwrap_or_default());
+            } else {
+                statements.push(statement);
+            }
+        }
+        node.body = statements;
+    }
+    program.body = begins;
+    program.body.push(looped);
+}
+
+/// Where a script's data starts: just past its `__END__` line, the newline
+/// included when there is one.
+/// ponytail: a line, not a token, so an `__END__` line inside a heredoc counts;
+/// Prism knows the real one and `spinel_parse` does not hand it over yet.
+fn data_offset(source: &[u8]) -> Option<usize> {
+    let mut start = 0;
+    for line in source.split_inclusive(|&b| b == b'\n') {
+        let bare = line.strip_suffix(b"\n").unwrap_or(line);
+        let bare = bare.strip_suffix(b"\r").unwrap_or(bare);
+        if bare == b"__END__" {
+            return Some(start + line.len());
+        }
+        start += line.len();
+    }
+    None
 }
 
 /// Print a parse's errors, `ruby`'s one-line summary first; true when there

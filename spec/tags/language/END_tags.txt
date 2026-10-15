@@ -1,14 +1,2 @@
-fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The END keyword runs after all other code
-fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The END keyword runs in reverse order of registration
-fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The END keyword allows calling exit inside a handler
-fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The END keyword gives access to the last raised exception - global variables $! and $@
 fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The END keyword gives access to an exception raised in a previous handler
-fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The END keyword both exceptions in a handler and in the main script are printed
-fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The END keyword decides the exit status if both at_exit and the main script raise SystemExit
-fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The END keyword runs all handlers even if some raise exceptions
-fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The END keyword runs handlers even if the main script fails to parse
-fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The END keyword calls the nested handler right after the outer one if a handler is nested into another handler
-fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The END keyword runs only once for multiple calls
-fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The END keyword is affected by the toplevel assignment
 fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The END keyword warns when END is used in a method
-fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The END keyword END blocks and at_exit callbacks are mixed runs them all in reverse order of registration
