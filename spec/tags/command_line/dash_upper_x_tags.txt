@@ -1,3 +1,0 @@
-fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The -X command line option changes the PWD when using a file
-fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The -X command line option does not need a space after -C for the argument
-fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The -X command line option changes the PWD when using -e

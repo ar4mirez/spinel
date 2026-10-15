@@ -1,2 +1,0 @@
-fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The -x command line option changes the working directory when given
-fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The -x command line option behaves as -x was set when non-ruby shebang is encountered on first line

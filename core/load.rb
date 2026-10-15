@@ -13,6 +13,9 @@ alias $" $LOADED_FEATURES
 $-a = false
 $-l = false
 $-p = false
+# `$DEBUG`, and `$-d` its other name: `-d` sets it.
+$DEBUG = false
+alias $-d $DEBUG
 # `$?` is the last child's status, nil until `Process` (#43) starts one.
 __freeze_global__(:$LOAD_PATH, :$:, :$-I, :$LOADED_FEATURES, :$", :$-a, :$-l, :$-p, :$?)
 

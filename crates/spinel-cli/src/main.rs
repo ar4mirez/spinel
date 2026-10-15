@@ -196,19 +196,37 @@ fn run_command(path: &Path, args: &[String], dump_bytecode: bool) -> ExitCode {
             return ExitCode::from(EXIT_USAGE);
         }
     };
-    run_program(path, &source, args, dump_bytecode, None)
+    run_program(path, &source, args, dump_bytecode, None, None)
 }
 
 /// `spinel` given `ruby`'s flags: the prelude they mean, then the program
 /// from `-e`, standard input or a file, as `ruby` would run it.
 fn ruby_command(words: &[String]) -> ExitCode {
-    let args = match ruby_args::parse(words) {
+    let parsed = ruby_args::parse(words).and_then(|mut args| {
+        // `RUBYOPT`'s switches come after the command line's, and
+        // `RUBYLIB`'s directories after every `-I`.
+        if let Ok(value) = std::env::var("RUBYOPT") {
+            ruby_args::apply_rubyopt(&mut args, &value)?;
+        }
+        if let Ok(value) = std::env::var("RUBYLIB") {
+            args.library_path = value
+                .split(':')
+                .filter(|d| !d.is_empty())
+                .map(str::to_owned)
+                .collect();
+        }
+        Ok(args)
+    });
+    let mut args = match parsed {
         Ok(args) => args,
         Err(message) => {
             eprintln!("spinel: {message} (RuntimeError)");
             return ExitCode::from(EXIT_RAISED);
         }
     };
+    for warning in &args.warnings {
+        eprintln!("spinel: {warning}");
+    }
     if args.help {
         eprintln!("Usage: spinel [switches] [--] [programfile] [arguments]");
         eprintln!("       spinel --help for Spinel's own commands");
@@ -220,6 +238,13 @@ fn ruby_command(words: &[String]) -> ExitCode {
             return ExitCode::SUCCESS;
         }
     }
+    // `-x dir`, like `-C`, changes directory before the program is read.
+    if let Some(Some(dir)) = &args.skip_to_ruby
+        && let Err(err) = std::env::set_current_dir(dir)
+    {
+        eprintln!("spinel: Can't chdir to {dir} ({err}) (fatal)");
+        return ExitCode::from(EXIT_RAISED);
+    }
     // `-C` changes directory before the program is even read.
     if let Some(dir) = &args.chdir
         && let Err(err) = std::env::set_current_dir(dir)
@@ -230,7 +255,21 @@ fn ruby_command(words: &[String]) -> ExitCode {
     let (name, mut source) = if let Some(code) = &args.code {
         ("-e".to_owned(), code.clone().into_bytes())
     } else {
-        let script = args.script.clone().unwrap_or_else(|| "-".to_owned());
+        let mut script = args.script.clone().unwrap_or_else(|| "-".to_owned());
+        // `-S`: a bare name is looked for on `RUBYPATH`, then `PATH`.
+        if args.search_path && !script.contains('/') && script != "-" {
+            let dirs = ["RUBYPATH", "PATH"]
+                .iter()
+                .filter_map(|name| std::env::var(name).ok())
+                .flat_map(|value| value.split(':').map(str::to_owned).collect::<Vec<_>>());
+            for dir in dirs {
+                let candidate = Path::new(if dir.is_empty() { "." } else { &dir }).join(&script);
+                if candidate.is_file() {
+                    script = candidate.to_string_lossy().into_owned();
+                    break;
+                }
+            }
+        }
         let read = if script == "-" {
             let mut bytes = Vec::new();
             std::io::Read::read_to_end(&mut std::io::stdin(), &mut bytes).map(|_| bytes)
@@ -245,7 +284,19 @@ fn ruby_command(words: &[String]) -> ExitCode {
             }
         }
     };
-    if let Some(dir) = &args.skip_to_ruby {
+    // A first line that is a `#!` for something other than ruby means the
+    // program starts further down, as if `-x` had been given.
+    if args.skip_to_ruby.is_none()
+        && args.code.is_none()
+        && source.starts_with(b"#!")
+        && !source
+            .split(|&b| b == b'\n')
+            .next()
+            .is_some_and(|line| line.windows(4).any(|w| w == b"ruby"))
+    {
+        args.skip_to_ruby = Some(None);
+    }
+    if args.skip_to_ruby.is_some() {
         // `-x`: everything before the `#!` line naming ruby is not the program.
         let text = String::from_utf8_lossy(&source).into_owned();
         let mut offset = 0;
@@ -262,12 +313,6 @@ fn ruby_command(words: &[String]) -> ExitCode {
             return ExitCode::from(EXIT_RAISED);
         };
         source = source[start..].to_vec();
-        if let Some(dir) = dir
-            && let Err(err) = std::env::set_current_dir(dir)
-        {
-            eprintln!("spinel: Can't chdir to {dir} ({err}) (fatal)");
-            return ExitCode::from(EXIT_RAISED);
-        }
     }
     if args.syntax_only {
         let parsed = spinel_parse::parse_file(&name, &source);
@@ -286,7 +331,14 @@ fn ruby_command(words: &[String]) -> ExitCode {
     }
     let source = ruby_args::wrap(&args, &source);
     let prelude = ruby_args::prelude(&args);
-    run_program(Path::new(&name), &source, &args.argv, false, Some(&prelude))
+    run_program(
+        Path::new(&name),
+        &source,
+        &args.argv,
+        false,
+        Some(&prelude),
+        args.source_encoding.as_deref(),
+    )
 }
 
 /// Compile and run one program, after `prelude` when there is one.
@@ -296,6 +348,7 @@ fn run_program(
     args: &[String],
     dump_bytecode: bool,
     prelude: Option<&str>,
+    source_encoding: Option<&str>,
 ) -> ExitCode {
     let source = source.to_vec();
     if dump_bytecode {
@@ -336,7 +389,14 @@ fn run_program(
     }
     let mut syntax_error = false;
     if outcome.is_ok() {
-        let parsed = spinel_parse::parse_file(&path.to_string_lossy(), &source);
+        let mut parsed = spinel_parse::parse_file(&path.to_string_lossy(), &source);
+        // `-K`: the source encoding of a script with no magic comment.
+        if let Some(encoding) = source_encoding
+            && let Some(map) = std::sync::Arc::get_mut(&mut parsed.program.source)
+            && map.encoding.is_none()
+        {
+            map.encoding = Some(encoding.into());
+        }
         if !report_syntax_errors(path, &source, &parsed) {
             syntax_error = true;
         } else {
