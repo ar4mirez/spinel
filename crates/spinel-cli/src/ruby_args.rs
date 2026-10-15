@@ -551,6 +551,27 @@ pub fn wrap(args: &RubyArgs, source: &[u8]) -> Vec<u8> {
     out
 }
 
+/// The loop `-n` and `-p` put a program in, as a program of its own with
+/// `__spinel_body__` where the program's statements go: what the CLI wraps
+/// around a program that parses on its own, so a `BEGIN` in it stays at the
+/// top level.
+pub fn loop_template(args: &RubyArgs) -> Option<String> {
+    let mode = args.loop_mode?;
+    let mut out = String::from("while gets\n");
+    if args.line_ending {
+        out.push_str("$_.chomp!\n");
+    }
+    if args.autosplit {
+        out.push_str("$F = $_.split($;)\n");
+    }
+    out.push_str("__spinel_body__\n");
+    if mode == LoopMode::Print {
+        out.push_str("print $_\n");
+    }
+    out.push_str("end\n");
+    Some(out)
+}
+
 /// A Ruby String literal for `text`, escaping as `inspect` would.
 fn ruby_string(text: &str) -> String {
     let mut out = String::from("\"");
