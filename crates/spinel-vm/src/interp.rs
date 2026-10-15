@@ -9240,6 +9240,35 @@ fn native_call<'h>(
             dispatch(scope, stack, frames, forwarded, proc_class, ids)
         }
 
+        Native::Digest => {
+            use sha2::Digest as _;
+            let name = call.args.first().and_then(|&v| string_bytes(scope, v));
+            let data = call.args.get(1).and_then(|&v| string_bytes(scope, v));
+            let (Some(name), Some(data)) = (name, data) else {
+                return Err(Error::NoDispatch {
+                    op: "__digest__",
+                    operands: "an algorithm and data that are not Strings",
+                });
+            };
+            let digest: Vec<u8> = match name.as_slice() {
+                b"MD5" => md5::Md5::digest(&data).to_vec(),
+                b"SHA1" => sha1::Sha1::digest(&data).to_vec(),
+                b"SHA256" => sha2::Sha256::digest(&data).to_vec(),
+                b"SHA384" => sha2::Sha384::digest(&data).to_vec(),
+                b"SHA512" => sha2::Sha512::digest(&data).to_vec(),
+                b"RMD160" => ripemd::Ripemd160::digest(&data).to_vec(),
+                _ => {
+                    return Err(Error::NoDispatch {
+                        op: "__digest__",
+                        operands: "an algorithm Spinel does not have",
+                    });
+                }
+            };
+            let class = class_handle(scope, Builtin::String);
+            let value = string_alloc(scope, class, &digest, crate::strings::BINARY);
+            stack.push(value);
+            Ok(None)
+        }
         Native::RaiseNoMethod => {
             let name = call
                 .args
@@ -12072,6 +12101,7 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             &["__encoding_install__"],
             Native::Str(StrOp::EncodingInstall),
         ),
+        (Builtin::Kernel, &["__digest__"], Native::Digest),
         (
             Builtin::BasicObject,
             &["__raise_no_method__"],

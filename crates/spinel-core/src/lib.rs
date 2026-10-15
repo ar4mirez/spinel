@@ -179,6 +179,18 @@ const LIBRARIES: &[(&str, &str)] = &[
     ("stringio", include_str!("../../../lib/stringio.rb")),
     ("fcntl", include_str!("../../../lib/fcntl.rb")),
     ("strscan", include_str!("../../../lib/strscan.rb")),
+    ("digest", include_str!("../../../lib/digest.rb")),
+    ("digest/md5", include_str!("../../../lib/digest/md5.rb")),
+    ("digest/sha1", include_str!("../../../lib/digest/sha1.rb")),
+    ("digest/sha2", include_str!("../../../lib/digest/sha2.rb")),
+    (
+        "digest/rmd160",
+        include_str!("../../../lib/digest/rmd160.rb"),
+    ),
+    (
+        "digest/bubblebabble",
+        include_str!("../../../lib/digest/bubblebabble.rb"),
+    ),
     ("io/nonblock", include_str!("../../../lib/io/nonblock.rb")),
 ];
 

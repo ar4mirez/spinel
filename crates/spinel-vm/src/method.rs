@@ -485,6 +485,9 @@ pub enum Native {
     /// raises for a missing method, raised on purpose — what
     /// `BasicObject#method_missing` does when called directly (#28).
     RaiseNoMethod,
+    /// `Kernel#__digest__(algorithm, string)`: the digest of the bytes, as a
+    /// BINARY String — MD5, SHA1, SHA256, SHA384, SHA512 or RMD160 (#58).
+    Digest,
 }
 
 /// Which file system call. Each answers an Integer errno on failure, for the

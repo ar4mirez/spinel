@@ -79,7 +79,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `library/date` | 111 | 350 | 53 | 0 | 297 | 0 | 15% |
 | `library/datetime` | 36 | 197 | 20 | 0 | 177 | 0 | 10% |
 | `library/delegate` | 24 | 74 | 0 | 0 | 74 | 0 | 0% |
-| `library/digest` | 68 | 114 | 0 | 0 | 113 | 1 | 0% |
+| `library/digest` | 68 | 129 | 129 | 0 | 0 | 0 | 100% |
 | `library/drb` | 1 | 2 | 0 | 0 | 2 | 0 | 0% |
 | `library/erb` | 13 | 53 | 2 | 0 | 51 | 0 | 4% |
 | `library/etc` | 19 | 50 | 0 | 0 | 50 | 0 | 0% |
@@ -131,4 +131,4 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `optional/capi` | 47 | 0 | 0 | 0 | 0 | 0 | — |
 | `optional/thread_safety` | 1 | 5 | 0 | 0 | 5 | 0 | 0% |
 | `security` | 13 | 34 | 15 | 0 | 19 | 0 | 44% |
-| **total** | 3835 | 31661 | 23093 | 0 | 8105 | 463 | 73% |
+| **total** | 3835 | 31676 | 23222 | 0 | 7992 | 462 | 73% |
