@@ -46,7 +46,7 @@ use crate::class::{ClassId, CrefId, Kind, Method, ScopeDefault, Visibility};
 use crate::heap::{Handle, HandleScope, Heap, Payload};
 use crate::method::{
     BindingOp, BitOp, CvarOp, Definition, FiberOp, FsOp, IvarOp, Native, ReflectOp, SockOp, StrOp,
-    SysOp,
+    SysOp, ThreadOp,
 };
 use crate::shape::ShapeId;
 use crate::value::SymbolId;
@@ -478,6 +478,9 @@ enum Unwind {
     },
 }
 
+#[path = "threads.rs"]
+mod threads;
+
 // ---------------------------------------------------------------------------
 // Fibers (#16)
 // ---------------------------------------------------------------------------
@@ -541,6 +544,8 @@ pub(crate) struct FiberTable {
     /// Frame ids, handed out across evaluations so that a fiber resumed by a
     /// later one cannot share an id with a frame that one makes.
     frame_ids: u64,
+    /// The heap's threads (#45), each with fiber bookkeeping of its own.
+    pub(crate) threads: threads::ThreadTable,
 }
 
 impl FiberTable {
@@ -570,12 +575,14 @@ impl FiberTable {
         if let Some(root) = self.root {
             f(root);
         }
+        self.threads.each_root(&mut f);
     }
 
     /// Leave the root running and every fiber that was mid-switch dead: the
     /// end of an evaluation that stopped inside a fiber, where nothing is left
     /// to return to.
     fn abandon(&mut self) {
+        self.threads.abandon();
         if self.current.is_none() && self.root_parked.is_none() {
             return;
         }
@@ -628,6 +635,14 @@ fn leave_fiber(
     exit: FiberExit,
 ) -> Result<Option<Unwind>, ()> {
     let Some(id) = scope.fibers().current else {
+        // A thread's own root fiber is out of frames: the thread is over,
+        // and another runs. `core/thread.rb` ends every thread before this,
+        // so what reaches here — an exception its last `ensure` raised — is
+        // dropped with it, as CRuby's thread would end on it.
+        if !scope.fibers().threads.entries.is_empty() && scope.fibers().threads.current != 0 {
+            let _ = exit;
+            return Ok(threads::switch(scope, stack, frames, threads::Leave::Exit));
+        }
         return Err(());
     };
     let fibers = scope.fibers_mut();
@@ -1485,6 +1500,137 @@ fn fiber_enter(
     }
 }
 
+/// The thread primitives (#45): the scheduler in `threads.rs`, under
+/// `core/thread.rb`.
+fn thread_native(
+    scope: &mut HandleScope<'_>,
+    stack: &mut Stack,
+    frames: &mut Vec<Call>,
+    call: &Pending,
+    op: ThreadOp,
+    ids: &mut u64,
+) -> Result<Option<Unwind>, Error> {
+    let index = |i: usize| {
+        call.args
+            .get(i)
+            .and_then(|v| v.as_fixnum())
+            .map(|n| n as usize)
+    };
+    let int = |n: usize| Value::fixnum(n as i64).expect("a thread index is a fixnum");
+    let value = match op {
+        ThreadOp::New => {
+            let object = call.args.first().copied().unwrap_or(Value::NIL);
+            let block = call.args.get(1).copied().unwrap_or(Value::NIL);
+            int(threads::spawn(scope, call, object, block, ids)?)
+        }
+        ThreadOp::Current => int(threads::current(scope)),
+        ThreadOp::Object => threads::object(scope, index(0).unwrap_or(0)),
+        ThreadOp::SetObject => {
+            let object = call.args.get(1).copied().unwrap_or(Value::NIL);
+            threads::set_object(scope, index(0).unwrap_or(0), object);
+            Value::NIL
+        }
+        ThreadOp::Status => Value::symbol(crate::shared::symbols::intern(threads::status(
+            scope,
+            index(0).unwrap_or(0),
+        ))),
+        ThreadOp::Others => {
+            threads::current(scope);
+            bool_value(scope.fibers().threads.others())
+        }
+        ThreadOp::Backtrace => match threads::take_frames(scope, index(0).unwrap_or(usize::MAX)) {
+            None => Value::NIL,
+            Some(saved) => {
+                let lines = backtrace_of(scope, &saved);
+                threads::give_frames(scope, index(0).unwrap_or(usize::MAX), saved);
+                let (strings, triples) = backtrace_values(scope, &lines);
+                new_array(scope, &[strings, triples])
+            }
+        },
+        ThreadOp::Forked => {
+            threads::forked(scope);
+            Value::NIL
+        }
+        ThreadOp::Wakeup => {
+            let woken = Value::symbol(crate::shared::symbols::intern("woken"));
+            bool_value(threads::wakeup(
+                scope,
+                index(0).unwrap_or(usize::MAX),
+                woken,
+            ))
+        }
+        ThreadOp::Block => {
+            let seconds = call.args.first().copied().unwrap_or(Value::NIL);
+            let seconds = if let Some(n) = seconds.as_fixnum() {
+                Some(n as f64)
+            } else {
+                crate::float::read(scope, seconds)
+            };
+            // One descriptor and its events, or an Array of `[fd, events]`.
+            let events = call.args.get(2).and_then(|v| v.as_fixnum()).unwrap_or(0);
+            let mut fds = Vec::new();
+            match call.args.get(1).copied() {
+                Some(v) if v.as_fixnum().is_some() => {
+                    fds.push((
+                        v.as_fixnum().unwrap_or(-1) as libc::c_int,
+                        events as libc::c_short,
+                    ));
+                }
+                Some(v) => {
+                    for pair in array_elements(scope, v).unwrap_or_default() {
+                        let parts = array_elements(scope, pair).unwrap_or_default();
+                        let fd = parts.first().and_then(|p| p.as_fixnum()).unwrap_or(-1);
+                        let bits = parts.get(1).and_then(|p| p.as_fixnum()).unwrap_or(0);
+                        fds.push((fd as libc::c_int, bits as libc::c_short));
+                    }
+                }
+                None => {}
+            }
+            let deadlockable = call.args.get(3).is_some_and(|v| v.is_truthy());
+            let leave = threads::Leave::Block {
+                deadline: seconds.and_then(threads::deadline),
+                fds,
+                deadlockable,
+            };
+            return Ok(threads::switch(scope, stack, frames, leave));
+        }
+        ThreadOp::Pass => {
+            return Ok(threads::switch(
+                scope,
+                stack,
+                frames,
+                threads::Leave::Ready(Some(Value::NIL)),
+            ));
+        }
+        ThreadOp::Exit => {
+            return Ok(threads::switch(scope, stack, frames, threads::Leave::Exit));
+        }
+        ThreadOp::Interrupt => {
+            let target = index(0).unwrap_or(usize::MAX);
+            let exception = call.args.get(1).copied().unwrap_or(Value::NIL);
+            let unwind = if exception.is_nil() {
+                // A kill is a throw tagged with the thread, which runs every
+                // `ensure` on the way out and no `rescue`: `core/thread.rb`
+                // catches it at the bottom of the thread.
+                let object = threads::object(scope, target);
+                Unwind::Throw {
+                    tag: object,
+                    value: object,
+                }
+            } else {
+                Unwind::Exception(exception)
+            };
+            if target == threads::current(scope) {
+                return Ok(Some(unwind));
+            }
+            threads::interrupt(scope, target, unwind);
+            Value::NIL
+        }
+    };
+    stack.push(value);
+    Ok(None)
+}
+
 fn fiber_native(
     scope: &mut HandleScope<'_>,
     stack: &mut Stack,
@@ -1846,6 +1992,10 @@ pub fn eval_in(
     let mut boundaries: Vec<Boundary> = Vec::new();
     let mut seen_frames = frames.len();
     let mut deadline: u64 = 0;
+    // Where the running thread's turn is next checked (#45): every
+    // `SLICE_INSNS` instructions, on the same compare as the budget.
+    let mut slice_end: u64 = budget.saturating_sub(threads::SLICE_INSNS);
+    let mut limit = deadline.max(slice_end);
 
     // Everything the loop roots from here on is released between
     // instructions, a batch at a time: see `release_roots`.
@@ -1868,9 +2018,23 @@ pub fn eval_in(
             if frames.len() != seen_frames {
                 seen_frames = frames.len();
                 deadline = refresh_boundaries(scope, &frames, &mut boundaries, budget);
+                limit = deadline.max(slice_end);
             }
             budget = budget.saturating_sub(1);
-            if budget <= deadline {
+            if budget <= limit {
+                if budget <= slice_end && budget > deadline {
+                    // A turn check, not the budget: another thread may run.
+                    slice_end = budget.saturating_sub(threads::SLICE_INSNS);
+                    limit = deadline.max(slice_end);
+                    seen_frames = usize::MAX;
+                    if let Some(unwind) = threads::preempt(scope, &mut stack, &mut frames)?
+                        && let Some(value) =
+                            unwind_to_handler(scope, &mut stack, &mut frames, unwind)?
+                    {
+                        break value;
+                    }
+                    continue;
+                }
                 // Out of budget: the whole evaluation's, or a boundary's.
                 let unwind = refuse(
                     scope,
@@ -3432,6 +3596,9 @@ fn frame_roots(frame: &Call, f: &mut impl FnMut(Value)) {
 /// A refusal boundary on some stack of frames: which fiber's (`None` for the
 /// root), which frame, and the budget it may not run below.
 struct Boundary {
+    /// The thread whose frames these are (#45): each thread's root fiber is
+    /// `None` alike, so the fiber alone does not say whose stack it is.
+    thread: usize,
     fiber: Option<usize>,
     index: usize,
     id: u64,
@@ -3448,13 +3615,15 @@ fn refresh_boundaries(
 ) -> u64 {
     prune_boundaries(scope, frames, boundaries);
     let fiber = scope.fibers().current;
+    let thread = scope.fibers().threads.current;
     if let Some(top) = frames.len().checked_sub(1) {
         let frame = &frames[top];
         let known = boundaries
             .iter()
-            .any(|b| b.fiber == fiber && b.id == frame.id);
+            .any(|b| b.thread == thread && b.fiber == fiber && b.id == frame.id);
         if frame.boundary_limit != 0 && !known {
             boundaries.push(Boundary {
+                thread,
                 fiber,
                 index: top,
                 id: frame.id,
@@ -3466,8 +3635,13 @@ fn refresh_boundaries(
     boundaries
         .iter()
         .rev()
-        .find(|b| b.fiber == fiber)
-        .or_else(|| boundaries.iter().rev().find(|b| b.fiber.is_none()))
+        .find(|b| b.thread == thread && b.fiber == fiber)
+        .or_else(|| {
+            boundaries
+                .iter()
+                .rev()
+                .find(|b| b.thread == thread && b.fiber.is_none())
+        })
         .map_or(0, |b| b.deadline)
 }
 
@@ -3477,7 +3651,16 @@ fn refresh_boundaries(
 fn prune_boundaries(scope: &HandleScope<'_>, frames: &[Call], boundaries: &mut Vec<Boundary>) {
     let fibers = scope.fibers();
     let current = fibers.current;
+    let thread = fibers.threads.current;
     boundaries.retain(|b| {
+        if b.thread != thread {
+            // Another thread's: kept while that thread lives.
+            return fibers
+                .threads
+                .entries
+                .get(b.thread)
+                .is_some_and(|t| !matches!(t.state, threads::ThreadState::Dead));
+        }
         if b.fiber == current {
             frames.get(b.index).is_some_and(|frame| frame.id == b.id)
         } else {
@@ -3509,6 +3692,18 @@ fn refuse(
                         | Error::Budget
                         | Error::NotCompiled(_)
                 );
+                if refusal
+                    && scope.fibers().current.is_none()
+                    && !scope.fibers().threads.entries.is_empty()
+                    && scope.fibers().threads.current != 0
+                {
+                    // A thread cannot go on, and nothing in it can say so: it
+                    // ends, and the main thread meets the refusal where it is
+                    // waiting, which is the example that started it.
+                    threads::abort_to_main(scope, stack, frames);
+                    error = unhandled;
+                    continue;
+                }
                 if !refusal || scope.fibers().current.is_none() {
                     return Err(unhandled);
                 }
@@ -3543,7 +3738,11 @@ fn catch_refusal(
     }
     prune_boundaries(scope, frames, boundaries);
     let fiber = scope.fibers().current;
-    let Some(position) = boundaries.iter().rposition(|b| b.fiber == fiber) else {
+    let thread = scope.fibers().threads.current;
+    let Some(position) = boundaries
+        .iter()
+        .rposition(|b| b.thread == thread && b.fiber == fiber)
+    else {
         return Err(error);
     };
     let Boundary { index, id, .. } = boundaries.remove(position);
@@ -7586,7 +7785,11 @@ fn allocate_instance(scope: &mut HandleScope<'_>, id: ClassId) -> Result<Value, 
         Some(other) => {
             if is_exception_class(scope, id) {
                 let class = scope.classes().object(id);
-                return Ok(exception_of(scope, class, ""));
+                // Allocated with no message, as CRuby's: `to_s` answers the class
+                // when an `initialize` never set one.
+                let exception = exception_of(scope, class, "");
+                ivar_set(scope, exception, symbol(EXC_MESSAGE), Value::NIL)?;
+                return Ok(exception);
             }
             // `Proc.new` without a block, `Integer.new`, `Symbol.new` all raise
             // in Ruby. Saying so needs each class's rule; refusing says the VM
@@ -9159,6 +9362,7 @@ fn native_call<'h>(
         }
 
         Native::Fiber(op) => fiber_native(scope, stack, frames, &call, op, ids),
+        Native::Thread(op) => thread_native(scope, stack, frames, &call, op, ids),
         Native::Reflect(op) => reflect_native(scope, stack, &call, op),
         Native::Str(op) => str_native(scope, stack, &call, op),
         Native::NumCompare => {
@@ -11640,6 +11844,71 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             Builtin::Kernel,
             &["__fiber_status__"],
             Native::Fiber(FiberOp::Status),
+        ),
+        (
+            Builtin::Kernel,
+            &["__thread_new__"],
+            Native::Thread(ThreadOp::New),
+        ),
+        (
+            Builtin::Kernel,
+            &["__thread_current__"],
+            Native::Thread(ThreadOp::Current),
+        ),
+        (
+            Builtin::Kernel,
+            &["__thread_object__"],
+            Native::Thread(ThreadOp::Object),
+        ),
+        (
+            Builtin::Kernel,
+            &["__thread_set_object__"],
+            Native::Thread(ThreadOp::SetObject),
+        ),
+        (
+            Builtin::Kernel,
+            &["__thread_block__"],
+            Native::Thread(ThreadOp::Block),
+        ),
+        (
+            Builtin::Kernel,
+            &["__thread_wakeup__"],
+            Native::Thread(ThreadOp::Wakeup),
+        ),
+        (
+            Builtin::Kernel,
+            &["__thread_pass__"],
+            Native::Thread(ThreadOp::Pass),
+        ),
+        (
+            Builtin::Kernel,
+            &["__thread_exit__"],
+            Native::Thread(ThreadOp::Exit),
+        ),
+        (
+            Builtin::Kernel,
+            &["__thread_interrupt__"],
+            Native::Thread(ThreadOp::Interrupt),
+        ),
+        (
+            Builtin::Kernel,
+            &["__thread_status__"],
+            Native::Thread(ThreadOp::Status),
+        ),
+        (
+            Builtin::Kernel,
+            &["__thread_others__"],
+            Native::Thread(ThreadOp::Others),
+        ),
+        (
+            Builtin::Kernel,
+            &["__thread_backtrace__"],
+            Native::Thread(ThreadOp::Backtrace),
+        ),
+        (
+            Builtin::Kernel,
+            &["__thread_forked__"],
+            Native::Thread(ThreadOp::Forked),
         ),
         (
             Builtin::Kernel,

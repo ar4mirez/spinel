@@ -1,0 +1,1 @@
+fails(#328: every thread of a Ractor runs on its one OS thread, so they share its id):Thread#native_thread_id each thread has different native thread id

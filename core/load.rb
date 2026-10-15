@@ -94,6 +94,13 @@ module Kernel
     real = path if Integer === real
     features = $LOADED_FEATURES
     loading = (@__loading__ ||= [])
+    # Another thread is part-way through loading it: wait for it to finish,
+    # as CRuby does, rather than answer as if it had (#45).
+    loaders = (@__loaders__ ||= {})
+    me = __thread_current__
+    while (owner = loaders[path]) && owner != me && __thread_status__(owner) != :dead
+      sleep(0.001)
+    end
     if features.include?(path) || features.include?(real)
       # Still running: the file, or one it required, asked for it again.
       if loading.include?(path)
@@ -105,6 +112,7 @@ module Kernel
     # loads answers false rather than recursing; removed again if it raises.
     features.push(path)
     loading.push(path)
+    loaders[path] = me
     begin
       __load_file__(path, nil)
     rescue Exception
@@ -112,6 +120,7 @@ module Kernel
       raise
     ensure
       loading.delete(path)
+      loaders.delete(path)
     end
     true
   end

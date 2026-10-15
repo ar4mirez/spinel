@@ -1,2 +1,3 @@
-fails(#45: Thread#raise needs a Thread):Thread#raise re-raises a previously rescued exception without overwriting the backtrace
-fails(#45: Thread#raise needs a Thread):Thread#raise re-raises a previously rescued exception with cleaned backtrace and sets a new backtrace
+fails(#328: the exception is built in the calling thread, not again in the target):Thread#raise on a sleeping thread raises the given exception and the backtrace is the one of the interrupted thread
+fails(#328: the exception is built in the calling thread, not again in the target):Thread#raise on a sleeping thread calls #exception in both the caller and in the target thread
+fails(#328: the exception is built in the calling thread, not again in the target):Thread#raise on a sleeping thread calls #set_backtrace only in the caller thread

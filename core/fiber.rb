@@ -14,15 +14,24 @@ class Fiber
     # a Hash is used as given, once checked.
     @__storage__ = storage == true ? Fiber.current.__storage_copy__ : Fiber.__check_storage__(storage)
     @__block__ = block
+    @__thread__ = __thread_current__
     __fiber_new__(self, block)
   end
 
   def resume(*args)
+    __check_thread__
     __fiber_resume__(self, args)
   end
 
   def transfer(*args)
+    __check_thread__
     __fiber_transfer__(self, args)
+  end
+
+  # Measured: a fiber made in one thread cannot be run from another.
+  def __check_thread__
+    return if @__thread__.nil? || @__thread__ == __thread_current__
+    Kernel.raise FiberError, "fiber called across threads"
   end
 
   def self.yield(*args)

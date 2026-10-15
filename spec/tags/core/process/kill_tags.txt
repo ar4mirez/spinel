@@ -1,0 +1,12 @@
+fails(#44: the child kill.rb traps a signal, and a trap cannot run before signal handlers do):Process.kill accepts a Symbol as a signal name
+fails(#44: the child kill.rb traps a signal, and a trap cannot run before signal handlers do):Process.kill accepts a String as signal name
+fails(#44: the child kill.rb traps a signal, and a trap cannot run before signal handlers do):Process.kill accepts a signal name without the 'SIG' prefix
+fails(#44: the child kill.rb traps a signal, and a trap cannot run before signal handlers do):Process.kill accepts a signal name with the 'SIG' prefix
+fails(#44: the child kill.rb traps a signal, and a trap cannot run before signal handlers do):Process.kill accepts an Integer as a signal value
+fails(#44: the child kill.rb traps a signal, and a trap cannot run before signal handlers do):Process.kill calls #to_int to coerce the pid to an Integer
+fails(#44: the child kill.rb traps a signal, and a trap cannot run before signal handlers do):Process.kill signals multiple processes
+fails(#44: the child kill.rb traps a signal, and a trap cannot run before signal handlers do):Process.kill returns the number of processes signaled
+fails(#44: the child kill.rb traps a signal, and a trap cannot run before signal handlers do):Process.kill signals the process group if the PID is zero
+fails(#44: the child kill.rb traps a signal, and a trap cannot run before signal handlers do):Process.kill signals the process group if the signal number is negative
+fails(#44: the child kill.rb traps a signal, and a trap cannot run before signal handlers do):Process.kill signals the process group if the short signal name starts with a minus sign
+fails(#44: the child kill.rb traps a signal, and a trap cannot run before signal handlers do):Process.kill signals the process group if the full signal name starts with a minus sign

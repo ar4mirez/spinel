@@ -17,7 +17,7 @@ class Exception
 
   # The message as a String: whatever was given is asked for its `to_s`.
   def to_s
-    return self.class.name if @__message__.nil?
+    return self.class.name || self.class.inspect if @__message__.nil?
     @__message__.is_a?(String) ? @__message__ : @__message__.to_s
   end
 

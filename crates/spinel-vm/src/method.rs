@@ -457,6 +457,8 @@ pub enum Native {
     /// wrapped by `core/fiber.rb`. Each that switches fibers does it by
     /// swapping the vectors the interpreter loop runs on.
     Fiber(FiberOp),
+    /// The thread scheduler under `core/thread.rb` (#45). See `threads.rs`.
+    Thread(ThreadOp),
     /// `Kernel#__proc_location__(proc)`: `[path, line]` where a block was
     /// written, or nil — what `Fiber#inspect` names (#16) and
     /// `Proc#source_location` will.
@@ -866,6 +868,43 @@ pub enum FiberOp {
     Current,
     Alive,
     Status,
+}
+
+/// Which thread primitive. See `threads.rs` for the scheduler and
+/// `interp.rs`, `thread_native`, for what each takes and answers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThreadOp {
+    /// `__thread_new__(thread, block)`: its index; it runs when scheduled.
+    New,
+    /// `__thread_current__`: the running thread's index.
+    Current,
+    /// `__thread_object__(index)`: its `Thread`, nil for an unnamed main.
+    Object,
+    /// `__thread_set_object__(index, thread)`: name the main thread's.
+    SetObject,
+    /// `__thread_block__(seconds, fd, events, deadlockable)`: wait for the
+    /// first of them or a wakeup; answers `:timeout`, `:ready`, `:woken`,
+    /// `:interrupted` or `:deadlock`.
+    Block,
+    /// `__thread_wakeup__(index)`: whether it was waiting.
+    Wakeup,
+    /// `__thread_pass__`: let another thread run first.
+    Pass,
+    /// `__thread_exit__`: the running thread is done; never answers.
+    Exit,
+    /// `__thread_interrupt__(index, exception)`: raise it in that thread when
+    /// it next runs; nil kills it.
+    Interrupt,
+    /// `__thread_status__(index)`: `:run`, `:sleep` or `:dead`.
+    Status,
+    /// `__thread_others__`: whether another thread is alive.
+    Others,
+    /// `__thread_backtrace__(index)`: `[strings, [path, line, label]...]` for
+    /// a thread that is not running, or nil.
+    Backtrace,
+    /// `__thread_forked__`: in a child after `fork`, only the forking thread
+    /// is left; the rest are dead.
+    Forked,
 }
 
 /// The bitwise operators on `Integer`, which share one primitive.

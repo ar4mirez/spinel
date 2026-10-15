@@ -82,12 +82,14 @@ class IO
   # `poll(2)` over `[io, events]` pairs: the events each is ready for, or
   # nil when the timeout passed first. A reader with bytes buffered is ready
   # without asking.
-  def self.__wait__(pairs, timeout)
+  def self.__wait__(pairs, timeout, descriptor_only = false)
     unless timeout.nil?
       timeout = Float === timeout || Integer === timeout ? timeout : Float(timeout)
       raise ArgumentError, "time interval must not be negative" if timeout < 0
     end
-    buffered = pairs.map { |io, events| events & IO::READABLE != 0 && io.__buffered__? ? IO::READABLE : 0 }
+    buffered = pairs.map do |io, events|
+      !descriptor_only && events & IO::READABLE != 0 && io.__buffered__? ? IO::READABLE : 0
+    end
     return buffered if buffered.any? { |b| b != 0 }
     polls = pairs.map do |io, events|
       bits = 0
@@ -99,7 +101,19 @@ class IO
     deadline = timeout && Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
     loop do
       ms = deadline.nil? ? -1 : ((deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)) * 1000).ceil.clamp(0, 2**31 - 1)
-      revents = __fd_poll__(polls, ms)
+      # With another thread alive, the wait is the scheduler's, so that one
+      # runs meanwhile (#45): a look now, then a wait for any of them.
+      if __thread_others__
+        revents = __fd_poll__(polls, 0)
+        if Array === revents && revents.all?(0)
+          return nil if ms == 0
+          Thread.__before_wait__
+          __thread_block__(deadline && ms / 1000.0, polls, 0, false)
+          next
+        end
+      else
+        revents = __fd_poll__(polls, ms)
+      end
       if Integer === revents
         next if revents == Errno::EINTR::Errno
         __check__(revents, nil, "poll(2)")
@@ -128,9 +142,15 @@ class IO
     [IO::READABLE, IO::WRITABLE, IO::PRIORITY].each_with_index do |bit, i|
       ios[i].each { |io| pairs << [io, bit] }
     end
+    unless timeout.nil?
+      unless Numeric === timeout
+        raise TypeError, "can't convert #{timeout.class} into time interval"
+      end
+      raise RangeError, "NaN out of Time range" if Float === timeout && timeout.nan?
+      raise ArgumentError, "time interval must not be negative" if timeout < 0
+    end
     if pairs.empty?
-      sleep(timeout) unless timeout.nil? || (raise(ArgumentError, "time interval must not be negative") if timeout < 0)
-      sleep if timeout.nil?
+      timeout.nil? ? sleep : sleep(timeout)
       return nil
     end
     ready = __wait__(pairs, timeout)
@@ -857,6 +877,11 @@ end
   # CRuby does for the sockets it makes nonblocking.
   def __read_wait__(want)
     loop do
+      # A blocking descriptor would stop every thread: wait for it first.
+      if __thread_others__
+        IO.__wait__([[self, IO::READABLE]], @timeout, true) || raise(IO::TimeoutError, "Blocking operation timed out!")
+        raise IOError, "stream closed in another thread" if @closed
+      end
       chunk = __fd_read__(@fileno, want)
       return chunk unless chunk == IO.__eagain__
       IO.__wait__([[self, IO::READABLE]], @timeout) || raise(IO::TimeoutError, "Blocking operation timed out!")
@@ -867,6 +892,7 @@ end
   def __write_all__(text)
     total = text.bytesize
     loop do
+      IO.__wait__([[self, IO::WRITABLE]], @timeout, true) || raise(IO::TimeoutError, "Blocking operation timed out!") if __thread_others__
       result = __fd_write__(__wfd__, text)
       if result == IO.__eagain__
         IO.__wait__([[self, IO::WRITABLE]], @timeout) || raise(IO::TimeoutError, "Blocking operation timed out!")
