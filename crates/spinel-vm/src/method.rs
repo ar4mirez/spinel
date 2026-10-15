@@ -132,6 +132,12 @@ pub enum Native {
     /// `match(string, at)` again and again reads it once a match. Leaves `$~`
     /// alone. nil for a subject it cannot read, and the caller loops instead.
     RegexpMatchAll,
+    /// `Regexp#__match_at__(string, byte, anchored)`: the match starting at
+    /// that byte, or with `anchored` false the first at or after it, as a flat
+    /// Array of each group's byte start and end (nil for one that did not
+    /// take part), or nil. Leaves `$~` alone: what `StringScanner` (#57) is
+    /// built on.
+    RegexpMatchAt,
     /// `Integer#<=>` between two numbers the VM holds unboxed, which is what
     /// a sort asks a hundred thousand times. Anything else — a bignum, a
     /// Rational, an object that coerces — is `Numeric#<=>`'s, in Ruby.

@@ -10830,6 +10830,58 @@ fn native_call<'h>(
             stack.push(value);
             Ok(None)
         }
+        Native::RegexpMatchAt => {
+            let Some(program) = regexp_program(scope, call.receiver) else {
+                return Err(Error::NoDispatch {
+                    op: "__match_at__",
+                    operands: "a receiver that is not a Regexp",
+                });
+            };
+            let subject = first_arg(&call);
+            let Some(text) = string_text(scope, subject) else {
+                return Err(Error::Unknowable {
+                    what: "matching a regexp against a string that is not UTF-8 text",
+                    needs: "a regex engine that reads bytes in the string's encoding (#33)",
+                });
+            };
+            let at = nth_arg(&call, 1).as_fixnum().unwrap_or(0).max(0) as usize;
+            let anchored = nth_arg(&call, 2).is_truthy();
+            if at > text.len() || !text.is_char_boundary(at) {
+                stack.push(Value::NIL);
+                return Ok(None);
+            }
+            let found = if anchored {
+                program.match_at(&text, at)
+            } else {
+                program.find_at(&text, at)
+            }
+            .map_err(|e| regexp_error(&e))?;
+            let value = match found {
+                None => Value::NIL,
+                Some(caps) => {
+                    let mut offsets = Vec::with_capacity(caps.len() * 2);
+                    for group in 0..caps.len() {
+                        match caps.group(group) {
+                            Some((start, end)) => {
+                                offsets.push(
+                                    Value::fixnum(start as i64).expect("an offset fits a fixnum"),
+                                );
+                                offsets.push(
+                                    Value::fixnum(end as i64).expect("an offset fits a fixnum"),
+                                );
+                            }
+                            None => {
+                                offsets.push(Value::NIL);
+                                offsets.push(Value::NIL);
+                            }
+                        }
+                    }
+                    new_array(scope, &offsets)
+                }
+            };
+            stack.push(value);
+            Ok(None)
+        }
         Native::RegexpQuietMatch => {
             let saved = scope.last_match();
             let data = regexp_match_from(scope, call.receiver, first_arg(&call), Value::NIL)?;
@@ -11223,6 +11275,7 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         ),
         (Builtin::Regexp, &["__match__"], Native::RegexpQuietMatch),
         (Builtin::Regexp, &["__match_all__"], Native::RegexpMatchAll),
+        (Builtin::Regexp, &["__match_at__"], Native::RegexpMatchAt),
         (
             Builtin::Module,
             &["attr_reader"],

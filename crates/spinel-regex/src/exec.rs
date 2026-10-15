@@ -358,6 +358,13 @@ impl Program {
         }
     }
 
+    /// One attempt at `start` and nowhere else, with `\G` anchored there:
+    /// what `StringScanner#scan` asks.
+    pub fn match_at(&self, haystack: &str, start: usize) -> Result<Option<Match>, Error> {
+        let mut budget = MAX_STEPS;
+        self.run_from(haystack, start, start, &mut budget)
+    }
+
     /// One attempt at `at`. `start` is where the whole search began, which is
     /// what `\G` anchors to — not `at`: measured, `'hello'.match(/\Go/)` is
     /// nil, and anchoring to the attempt matched the `o`.

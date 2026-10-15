@@ -224,6 +224,18 @@ impl Regex {
             .map(|m| Captures { caps: m.caps }))
     }
 
+    /// A match that starts exactly at byte offset `start`, or none.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Budget`] if backtracking ran past its step budget.
+    pub fn match_at(&self, haystack: &str, start: usize) -> Result<Option<Captures>, Error> {
+        Ok(self
+            .program
+            .match_at(haystack, start)?
+            .map(|m| Captures { caps: m.caps }))
+    }
+
     /// Whether the pattern matches anywhere in `haystack`, which is what
     /// `Regexp#match?` answers without building a `MatchData`.
     ///
