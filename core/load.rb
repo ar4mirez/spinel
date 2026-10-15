@@ -59,6 +59,13 @@ module Kernel
   def self.__require__(name)
     name = File.__path__(name)
     return false if BUILTIN_FEATURES.include?(name)
+    # ponytail: RubyGems is vendored with the rest of the stdlib (#47) but
+    # cannot load yet — it wants `Module#autoload`, `Monitor` and a `Mutex`
+    # (#319, #45) — and code that probes for it rescues the LoadError a Ruby
+    # without it raises. Until it loads, requiring it is that LoadError.
+    if name == "rubygems" || name == "rubygems.rb"
+      raise LoadError.__cannot_load__(name)
+    end
     # A built-in gem: its source is in the binary, and it is recorded the way
     # CRuby records the extension it stands in for.
     shipped = name.end_with?(".so") ? name[0, name.length - 3] : name

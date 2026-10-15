@@ -19,6 +19,10 @@ spinel-ext.workspace = true
 spinel-jit.workspace = true
 spinel-parse.workspace = true
 spinel-vm.workspace = true
+zstd = "0.13"
+
+[build-dependencies]
+zstd = "0.13"
 
 [lints]
 workspace = true

@@ -382,7 +382,9 @@ class Socket < BasicSocket
     address = IO.__str__(address).b
     family = family.nil? ? (address.bytesize == 16 ? AF_INET6 : AF_INET) : __family__(family)
     sockaddr = __sockaddr_in__(address, 0, 0, 0)
-    raise SocketError, "unknown address family" if sockaddr.nil?
+    # An address of the other family's length names no host.
+    wanted = { AF_INET => 4, AF_INET6 => 16 }[family]
+    raise SocketError, "host not found" if sockaddr.nil? || wanted != address.bytesize
     host = __getnameinfo__(sockaddr, NI_NAMEREQD)[0]
     [host, [], family, address]
   end

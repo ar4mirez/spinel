@@ -6883,6 +6883,12 @@ fn array_splice<'h>(
     // arguments, both rooted, so growing the storage cannot lose one.
     array_reserve(scope, array, elements.len());
     let storage = scope.slot(array, ARRAY_STORAGE);
+    // An Array that never held anything has no storage yet, and splicing
+    // nothing into it gives it none.
+    if storage.as_heap().is_none() {
+        array_set_len(scope, array, elements.len());
+        return;
+    }
     let storage = scope.root(storage);
     for (index, &value) in elements.iter().enumerate() {
         scope.set_slot(storage, index, value);
@@ -14728,6 +14734,13 @@ fn spawn_process(
     argv_ptrs.push(std::ptr::null());
     let mut envp_ptrs: Vec<*const libc::c_char> = envp.iter().map(|e| e.as_ptr()).collect();
     envp_ptrs.push(std::ptr::null());
+    // A file `execve` will not run, having no `#!`, is a shell script: CRuby
+    // runs it with `/bin/sh` then, as the shells do. Made before the fork,
+    // which may not allocate.
+    let shell = c"/bin/sh";
+    let mut shell_ptrs: Vec<*const libc::c_char> = vec![shell.as_ptr(), path.as_ptr()];
+    shell_ptrs.extend(argv.iter().skip(1).map(|a| a.as_ptr()));
+    shell_ptrs.push(std::ptr::null());
     let fds: Vec<(libc::c_int, libc::c_int)> = request
         .fds
         .iter()
@@ -14816,6 +14829,9 @@ fn spawn_process(
             // end. The child gets the default back.
             libc::signal(libc::SIGPIPE, libc::SIG_DFL);
             libc::execve(path.as_ptr(), argv_ptrs.as_ptr(), envp_ptrs.as_ptr());
+            if child_errno() == libc::ENOEXEC {
+                libc::execve(shell.as_ptr(), shell_ptrs.as_ptr(), envp_ptrs.as_ptr());
+            }
             Err(child_errno())
         }
     };

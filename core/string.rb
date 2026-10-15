@@ -122,6 +122,17 @@ end
 # `__splice__`, which replaces a byte range; the encoding rules are
 # `Encoding.compatible?`'s, raised with CRuby's message.
 class String
+  # A String as is, anything with `to_str` through it, nil otherwise; a
+  # `to_str` that answers something else is a TypeError naming both classes.
+  def self.try_convert(value)
+    return value if value.is_a?(String)
+    return nil unless value.respond_to?(:to_str)
+    converted = value.to_str
+    return converted if converted.nil? || converted.is_a?(String)
+    raise TypeError,
+          "can't convert #{value.class} to String (#{value.class}#to_str gives #{converted.class})"
+  end
+
   def initialize(*given, encoding: nil, capacity: nil)
     if given.size > 1
       raise ArgumentError, "wrong number of arguments (given #{given.size}, expected 0..1)"
@@ -1252,6 +1263,13 @@ class String
   # paragraph mode, splitting on runs of blank lines.
   def __lines__(separator, chomp)
     return [chomp ? self.chomp : dup] if separator.nil?
+    # The default separator, in an encoding that is not ASCII's, is first
+    # converted to it, as CRuby's `rb_str_enumerate_lines` does: UTF-16LE's
+    # "\n\0", a dummy UTF-16's that has a BOM and so never matches, and no
+    # converter at all for UTF-7.
+    if separator.equal?($/) && separator == "\n" && !encoding.ascii_compatible? && !empty?
+      separator = separator.encode(encoding)
+    end
     separator = String.__coerce__(separator)
     paragraph = separator.empty?
     separator = "\n\n" if paragraph
