@@ -1123,7 +1123,9 @@ mod tests {
         assert_eq!((port, addr), (80, [127, 0, 0, 1]));
     }
 
+    // Miri cannot call into libc.
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn text_addresses_are_inet_ntop_and_pton() {
         let addr = pton(libc::AF_INET6, b"::1").expect("an address");
         assert_eq!(ntop(&addr).as_deref(), Some("::1"));
