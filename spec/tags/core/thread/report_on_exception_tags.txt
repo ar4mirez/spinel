@@ -1,1 +1,1 @@
-fails(#45: Thread: newly run since #43 let ruby_exe start Spinel, and it disagrees):Thread.report_on_exception defaults to true
+fails(#328: a kill right after Thread#raise ends the thread before the exception is reported):Thread#report_on_exception= when set to true prints the backtrace even if the thread was killed just after Thread#raise

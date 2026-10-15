@@ -497,9 +497,10 @@ module Kernel
       raise ArgumentError, "wrong number of arguments (given #{args.size}, expected 0..1)"
     end
     duration = args[0]
-    __needs_threads__ if duration.nil?
     seconds =
-      if Integer === duration || Float === duration
+      if duration.nil?
+        nil
+      elsif Integer === duration || Float === duration
         duration.to_f
       elsif !(String === duration) && duration.respond_to?(:divmod)
         whole, fraction = duration.divmod(1)
@@ -507,8 +508,14 @@ module Kernel
       else
         raise TypeError, "can't convert #{duration.class} into time interval"
       end
-    raise ArgumentError, "time interval must not be negative" if seconds < 0
-    __sleep__(seconds)
+    raise RangeError, "NaN out of Time range" if seconds&.nan?
+    raise ArgumentError, "time interval must not be negative" if seconds && seconds < 0
+    # Through the scheduler, so another thread runs meanwhile, and so
+    # `Thread#wakeup` ends it early, as CRuby's does.
+    started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    Thread.__before_wait__
+    __thread_block__(seconds, nil, 0, false)
+    (Process.clock_gettime(Process::CLOCK_MONOTONIC) - started).round
   end
 
   # `Kernel`'s functions: private instance methods, public on `Kernel` itself.

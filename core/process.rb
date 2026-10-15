@@ -354,7 +354,7 @@ module Process
     end
 
     def self.wait(pid = -1, flags = 0)
-      result = __sys_waitpid__(Integer.__index__(pid), Integer.__index__(flags))
+      result = Process.__waitpid__(Integer.__index__(pid), Integer.__index__(flags))
       return nil if Integer === result && result == Errno::ECHILD::Errno
       raise SystemCallError.new(nil, result) if Integer === result
       return nil if result[0] == 0
@@ -436,7 +436,7 @@ module Process
   def self.waitall
     all = []
     loop do
-      result = __sys_waitpid__(-1, 0)
+      result = __waitpid__(-1, 0)
       break if Integer === result && result == Errno::ECHILD::Errno
       raise SystemCallError.new(nil, result) if Integer === result
       status = Status.__make__(result[0], result[1])
@@ -448,8 +448,21 @@ module Process
 
   # `waitpid(2)`, raising `ECHILD` as `Process.wait` does and
   # `Process::Status.wait` does not. Nil when `WNOHANG` found nothing.
+  # `waitpid(2)` that lets other threads run while it waits (#45): with
+  # another thread alive, `WNOHANG` and a nap between looks, so the child
+  # it waits for can be fed by one of them.
+  def self.__waitpid__(pid, flags)
+    nohang = Process::WNOHANG
+    return __sys_waitpid__(pid, flags) if flags & nohang != 0 || !__thread_others__
+    loop do
+      result = __sys_waitpid__(pid, flags | nohang)
+      return result unless Array === result && result[0] == 0
+      sleep(0.002)
+    end
+  end
+
   def self.__wait__(pid, flags)
-    result = __sys_waitpid__(Integer.__index__(pid), Integer.__index__(flags))
+    result = __waitpid__(Integer.__index__(pid), Integer.__index__(flags))
     raise SystemCallError.new(nil, result) if Integer === result
     return nil if result[0] == 0
     status = Status.__make__(result[0], result[1])
@@ -457,10 +470,12 @@ module Process
     status
   end
 
-  # ponytail: CRuby answers a Thread that waits for the child, and there is
-  # no `Thread` yet (#45).
   def self.detach(pid)
-    Thread.new { Process.wait(pid) }
+    pid = Integer.__index__(pid)
+    waiter = Waiter.new { Process::Status.wait(pid) }
+    waiter[:pid] = pid
+    waiter.__pid__ = pid
+    waiter
   end
 
   # A signal by number, by name with or without `SIG`, or as a Symbol; a
@@ -508,7 +523,10 @@ module Process
   def self._fork
     result = __sys_fork__
     raise SystemCallError.new("fork(2)", result) if Integer === result
-    __global_store__(:$$, Process.pid) if result[0] == 0
+    if result[0] == 0
+      __global_store__(:$$, Process.pid)
+      Thread.__forked__
+    end
     result[0]
   end
 

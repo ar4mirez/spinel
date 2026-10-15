@@ -1,1 +1,0 @@
-fails(#45: Thread: newly run since #43 let ruby_exe start Spinel, and it disagrees):Process.exit! exits when called from a thread

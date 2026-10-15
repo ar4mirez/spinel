@@ -436,7 +436,7 @@ class Socket < BasicSocket
 
   def recvfrom(length, flags = 0)
     data, from = __recv__(length, flags, nil)
-    return [data, nil] if data.nil?
+    return nil if data.nil?
     [data, Addrinfo.__from__(from, local_address)]
   end
 
@@ -1699,7 +1699,7 @@ class IPSocket < BasicSocket
 
   def recvfrom(length, flags = 0)
     data, from = __recv__(length, flags, nil)
-    return [data, nil] if data.nil?
+    return nil if data.nil?
     parsed = Socket.__sockaddr_parse__(from)
     return [data, nil] if parsed.nil? || parsed.size < 3
     [data, __describe__(from, nil)]

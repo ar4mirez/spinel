@@ -1,0 +1,1 @@
+fails(#328: open of a FIFO blocks in the kernel until its other end opens, and with every thread on one OS thread the other end never does):File.open on a FIFO opens it as a normal file
