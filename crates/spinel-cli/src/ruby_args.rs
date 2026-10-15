@@ -21,7 +21,7 @@ pub struct RubyArgs {
     pub argv: Vec<String>,
     pub requires: Vec<String>,
     pub includes: Vec<String>,
-    /// `$VERBOSE`: `-W0` nil, `-W1` false, `-w`/`-W`/`-W2`/`-v` true.
+    /// `$VERBOSE`: `-W0` nil, `-W1` false, `-w`/`-W`/`-W2`/`-v`/`-d` true.
     pub verbose: Option<Verbose>,
     /// `-W:no-deprecated` and the like: `[category, enabled]`.
     pub warning_categories: Vec<(String, bool)>,
@@ -37,13 +37,23 @@ pub struct RubyArgs {
     pub chdir: Option<String>,
     /// `-x`: skip to the `#!ruby` line, after `chdir` into the directory given.
     pub skip_to_ruby: Option<Option<String>>,
+    /// `-S`: look for the script on `RUBYPATH`, then `PATH`.
+    pub search_path: bool,
     pub syntax_only: bool,
     /// `-v`: the version banner first, and with no program nothing else.
     pub print_version: bool,
     pub version_only: bool,
     pub external_encoding: Option<String>,
     pub internal_encoding: Option<String>,
+    /// `-K`: the main script's source encoding, when it has no magic comment.
+    pub source_encoding: Option<String>,
     pub backtrace_limit: Option<String>,
+    /// `--enable`/`--disable` features, in the order given: `(name, on)`.
+    pub features: Vec<(String, bool)>,
+    /// Warnings `ruby` prints about the command line, `warning:` and all.
+    pub warnings: Vec<String>,
+    /// `RUBYLIB`'s directories, which go after `-I`'s.
+    pub library_path: Vec<String>,
     pub help: bool,
 }
 
@@ -62,6 +72,18 @@ pub enum LoopMode {
     Print,
 }
 
+/// The features `--enable` and `--disable` know, as `ruby` lists them.
+const FEATURES: &[&str] = &[
+    "gems",
+    "error_highlight",
+    "did_you_mean",
+    "syntax_suggest",
+    "rubyopt",
+    "frozen_string_literal",
+    "yjit",
+    "zjit",
+];
+
 /// Whether a command line is a `ruby` one: a flag that is not one of
 /// `spinel`'s own, or `-` for a script on standard input.
 pub fn is_ruby_invocation(first: &str) -> bool {
@@ -72,6 +94,81 @@ pub fn is_ruby_invocation(first: &str) -> bool {
 pub fn parse(args: &[String]) -> Result<RubyArgs, String> {
     let mut out = RubyArgs::default();
     let mut code: Vec<String> = Vec::new();
+    let i = options(args, &mut out, &mut code, false)?;
+    let mut i = i;
+    if !code.is_empty() {
+        out.code = Some(code.join("\n"));
+    } else if i < args.len() {
+        out.script = Some(args[i].clone());
+        i += 1;
+    } else if out.print_version {
+        out.version_only = true;
+    } else {
+        out.script = Some("-".to_owned());
+    }
+    out.argv = args[i..].to_vec();
+    Ok(out)
+}
+
+/// `RUBYOPT`'s switches, after the command line's: its `-I` and `-r` come
+/// after theirs. Only the switches that change how a program runs are
+/// allowed, and a word without its `-` is given one. Nothing is done when
+/// `--disable=rubyopt` (or `all`) was given.
+pub fn apply_rubyopt(out: &mut RubyArgs, value: &str) -> Result<(), String> {
+    if !feature_enabled(out, "rubyopt", true) {
+        return Ok(());
+    }
+    let words: Vec<String> = value
+        .split_whitespace()
+        .map(|w| {
+            if w.starts_with('-') {
+                w.to_owned()
+            } else {
+                format!("-{w}")
+            }
+        })
+        .collect();
+    let mut code = Vec::new();
+    let mut extra = RubyArgs::default();
+    options(&words, &mut extra, &mut code, true)?;
+    out.includes.extend(extra.includes);
+    out.requires.extend(extra.requires);
+    out.verbose = out.verbose.or(extra.verbose);
+    out.warning_categories.extend(extra.warning_categories);
+    out.debug |= extra.debug;
+    if extra.print_version && !out.print_version {
+        out.print_version = true;
+    }
+    out.external_encoding = out.external_encoding.take().or(extra.external_encoding);
+    if extra.internal_encoding.is_some() && out.internal_encoding.is_none() {
+        out.internal_encoding = extra.internal_encoding;
+    }
+    out.source_encoding = out.source_encoding.take().or(extra.source_encoding);
+    out.features.extend(extra.features);
+    out.warnings.extend(extra.warnings);
+    Ok(())
+}
+
+/// Whether a feature is on: the last `--enable`/`--disable` naming it, or
+/// `all`, wins.
+pub fn feature_enabled(args: &RubyArgs, feature: &str, default: bool) -> bool {
+    let mut on = default;
+    for (name, enabled) in &args.features {
+        if name == feature || name == "all" {
+            on = *enabled;
+        }
+    }
+    on
+}
+
+/// The switches in `args`, up to the script; the index where they end.
+/// `rubyopt` refuses the ones `RUBYOPT` may not carry.
+fn options(
+    args: &[String],
+    out: &mut RubyArgs,
+    code: &mut Vec<String>,
+    rubyopt: bool,
+) -> Result<usize, String> {
     let mut i = 0;
     while i < args.len() {
         let arg = &args[i];
@@ -83,7 +180,28 @@ pub fn parse(args: &[String]) -> Result<RubyArgs, String> {
             break;
         }
         if let Some(long) = arg.strip_prefix("--") {
-            parse_long(long, &mut out)?;
+            let name = long.split(['=']).next().unwrap_or("");
+            if rubyopt
+                && ![
+                    "debug",
+                    "verbose",
+                    "encoding",
+                    "external-encoding",
+                    "internal-encoding",
+                    "backtrace-limit",
+                ]
+                .contains(&name)
+                && !name.starts_with("disable")
+                && !name.starts_with("enable")
+                && !name.starts_with("jit")
+                && !name.starts_with("yjit")
+            {
+                return Err(format!("invalid switch in RUBYOPT: --{name}"));
+            }
+            let next = args.get(i + 1);
+            if parse_long(long, next, out)? {
+                i += 1;
+            }
             i += 1;
             continue;
         }
@@ -93,11 +211,17 @@ pub fn parse(args: &[String]) -> Result<RubyArgs, String> {
         let mut j = 0;
         while j < chars.len() {
             let c = chars[j];
+            if rubyopt && !"dEIKrUvwWT".contains(c) {
+                return Err(format!("invalid switch in RUBYOPT: -{c}"));
+            }
             let rest: String = chars[j + 1..].iter().collect();
             match c {
                 'a' => out.autosplit = true,
                 'c' => out.syntax_only = true,
-                'd' => out.debug = true,
+                'd' => {
+                    out.debug = true;
+                    out.verbose = Some(Verbose::True);
+                }
                 'l' => out.line_ending = true,
                 'n' => {
                     if out.loop_mode.is_none() {
@@ -106,7 +230,8 @@ pub fn parse(args: &[String]) -> Result<RubyArgs, String> {
                 }
                 'p' => out.loop_mode = Some(LoopMode::Print),
                 's' => out.switches = true,
-                'S' | 'y' => {}
+                'S' => out.search_path = true,
+                'y' => {}
                 'v' => {
                     out.print_version = true;
                     out.verbose = Some(Verbose::True);
@@ -129,7 +254,7 @@ pub fn parse(args: &[String]) -> Result<RubyArgs, String> {
                     }
                     break;
                 }
-                'e' | 'r' | 'I' | 'C' | 'E' => {
+                'e' | 'r' | 'I' | 'C' | 'X' | 'E' => {
                     let value = if !rest.is_empty() {
                         rest
                     } else {
@@ -142,8 +267,8 @@ pub fn parse(args: &[String]) -> Result<RubyArgs, String> {
                         'e' => code.push(value),
                         'r' => out.requires.push(value),
                         'I' => out.includes.push(value),
-                        'C' => out.chdir = Some(value),
-                        _ => set_encodings(&value, &mut out),
+                        'C' | 'X' => out.chdir = Some(value),
+                        _ => set_encodings(&value, "-E", out)?,
                     }
                     break;
                 }
@@ -161,8 +286,26 @@ pub fn parse(args: &[String]) -> Result<RubyArgs, String> {
                     j += 1 + digits.len();
                     continue;
                 }
-                'K' | 'U' | 'T' => {
-                    // Source and locale encodings `ruby` once had; nothing to do.
+                'K' => {
+                    // The Ruby 1.8 codes: the main script's source encoding,
+                    // and the default external encoding with it.
+                    let name = match rest.chars().next() {
+                        Some('a' | 'A' | 'n' | 'N') => Some("ASCII-8BIT"),
+                        Some('e' | 'E') => Some("EUC-JP"),
+                        Some('s' | 'S') => Some("Windows-31J"),
+                        Some('u' | 'U') => Some("UTF-8"),
+                        _ => None,
+                    };
+                    if let Some(name) = name {
+                        out.source_encoding = Some(name.to_owned());
+                        out.external_encoding = Some(name.to_owned());
+                    }
+                    j += 2;
+                    continue;
+                }
+                'U' => set_internal(out, "UTF-8")?,
+                'T' => {
+                    // `$SAFE` is gone; `-T` and its level are accepted.
                     break;
                 }
                 _ => {
@@ -175,24 +318,24 @@ pub fn parse(args: &[String]) -> Result<RubyArgs, String> {
         }
         i += 1;
     }
-    if !code.is_empty() {
-        out.code = Some(code.join("\n"));
-    } else if i < args.len() {
-        out.script = Some(args[i].clone());
-        i += 1;
-    } else if out.print_version {
-        out.version_only = true;
-    } else {
-        out.script = Some("-".to_owned());
-    }
-    out.argv = args[i..].to_vec();
-    Ok(out)
+    Ok(i)
 }
 
-fn parse_long(long: &str, out: &mut RubyArgs) -> Result<(), String> {
+/// One `--name[=value]`. Answers whether it took `next` as its value.
+fn parse_long(long: &str, next: Option<&String>, out: &mut RubyArgs) -> Result<bool, String> {
     let (name, value) = match long.split_once('=') {
-        Some((name, value)) => (name, Some(value)),
+        Some((name, value)) => (name, Some(value.to_owned())),
         None => (long, None),
+    };
+    // The three encoding switches take their value as the next word too.
+    let mut took_next = false;
+    let mut valued = || -> Result<String, String> {
+        if let Some(value) = &value {
+            return Ok(value.clone());
+        }
+        took_next = true;
+        next.cloned()
+            .ok_or_else(|| format!("missing argument for --{name}"))
     };
     match name {
         "version" => {
@@ -200,17 +343,51 @@ fn parse_long(long: &str, out: &mut RubyArgs) -> Result<(), String> {
             out.version_only = true;
         }
         "verbose" => out.verbose = Some(Verbose::True),
-        "debug" => out.debug = true,
+        "debug" => {
+            out.debug = true;
+            out.verbose = Some(Verbose::True);
+        }
         "help" => out.help = true,
-        "encoding" => set_encodings(value.unwrap_or(""), out),
-        "external-encoding" => out.external_encoding = value.map(str::to_owned),
-        "internal-encoding" => out.internal_encoding = value.map(str::to_owned),
-        "backtrace-limit" => out.backtrace_limit = value.map(str::to_owned),
-        // Features Spinel has none of, or always has: gems, did_you_mean,
-        // error_highlight, rubyopt, frozen-string-literal, the JITs.
-        _ if name.starts_with("disable")
-            || name.starts_with("enable")
-            || name.starts_with("yjit")
+        "encoding" => {
+            let value = valued()?;
+            set_encodings(&value, "--encoding", out)?;
+        }
+        "external-encoding" => out.external_encoding = Some(valued()?),
+        "internal-encoding" => {
+            let value = valued()?;
+            set_internal(out, &value)?;
+        }
+        "backtrace-limit" => out.backtrace_limit = value.clone(),
+        _ if name.starts_with("enable") || name.starts_with("disable") => {
+            let on = name.starts_with("enable");
+            let verb = if on { "enable" } else { "disable" };
+            // `--enable=a,b`, `--enable-a`, and `--enable a`.
+            let list = match value.clone() {
+                Some(list) => list,
+                None => match name
+                    .strip_prefix(verb)
+                    .and_then(|rest| rest.strip_prefix('-'))
+                {
+                    Some(feature) => feature.to_owned(),
+                    None => valued()?,
+                },
+            };
+            for feature in list.split(',').filter(|f| !f.is_empty()) {
+                let feature = feature.replace('-', "_");
+                if feature != "all" && !FEATURES.contains(&feature.as_str()) {
+                    out.warnings.push(format!(
+                        "warning: unknown argument for --{verb}: '{feature}'"
+                    ));
+                    out.warnings
+                        .push(format!("warning: features are [{}].", FEATURES.join(", ")));
+                    continue;
+                }
+                out.features.push((feature, on));
+            }
+        }
+        // The JITs, dumps and the like Spinel has nothing behind.
+        _ if name.starts_with("yjit")
+            || name.starts_with("zjit")
             || name.starts_with("rjit")
             || name.starts_with("jit")
             || name.starts_with("dump")
@@ -223,20 +400,36 @@ fn parse_long(long: &str, out: &mut RubyArgs) -> Result<(), String> {
             ));
         }
     }
-    Ok(())
+    Ok(took_next)
 }
 
-fn set_encodings(value: &str, out: &mut RubyArgs) {
-    let (external, internal) = match value.split_once(':') {
-        Some((external, internal)) => (external, Some(internal)),
-        None => (value, None),
-    };
+/// `-E ext:int` and `--encoding ext:int`; a third part is refused.
+fn set_encodings(value: &str, switch: &str, out: &mut RubyArgs) -> Result<(), String> {
+    let mut parts = value.splitn(3, ':');
+    let external = parts.next().unwrap_or("");
+    let internal = parts.next();
+    if let Some(extra) = parts.next() {
+        return Err(format!("extra argument for {switch}: {extra}"));
+    }
     if !external.is_empty() {
         out.external_encoding = Some(external.to_owned());
     }
     if let Some(internal) = internal.filter(|i| !i.is_empty()) {
-        out.internal_encoding = Some(internal.to_owned());
+        set_internal(out, internal)?;
     }
+    Ok(())
+}
+
+/// Two switches naming different internal encodings is an error, measured:
+/// `-Eascii:ascii -U` says the first one won.
+fn set_internal(out: &mut RubyArgs, name: &str) -> Result<(), String> {
+    if let Some(existing) = &out.internal_encoding
+        && !existing.eq_ignore_ascii_case(name)
+    {
+        return Err(format!("default_internal already set to {existing}"));
+    }
+    out.internal_encoding = Some(name.to_owned());
+    Ok(())
 }
 
 /// The Ruby that runs before the program, saying what the flags meant.
@@ -249,11 +442,26 @@ pub fn prelude(args: &RubyArgs) -> String {
         Some(Verbose::True) => out.push_str("$VERBOSE = true\n"),
         None => {}
     }
+    // `-w` and the levels that mean it turn the deprecation warnings on, as
+    // `ruby` does; a category named with `-W:` is its own, and wins.
+    if args.verbose == Some(Verbose::True) {
+        out.push_str("Warning[:deprecated] = true\n");
+    }
     for (category, enabled) in &args.warning_categories {
         let _ = writeln!(out, "Warning[:{category}] = {enabled} rescue nil");
     }
     if args.debug {
         out.push_str("$DEBUG = true\n");
+    }
+    // The switches that are read-only globals as well as behaviour.
+    for (global, on) in [
+        ("$-a", args.autosplit),
+        ("$-l", args.line_ending),
+        ("$-p", args.loop_mode == Some(LoopMode::Print)),
+    ] {
+        if on {
+            let _ = writeln!(out, "__global_store__(:{global:?}, true)");
+        }
     }
     if let Some(external) = &args.external_encoding {
         let _ = writeln!(out, "Encoding.default_external = {}", lit(external));
@@ -263,14 +471,15 @@ pub fn prelude(args: &RubyArgs) -> String {
     }
     if let Some(digits) = &args.record_separator {
         let value = u32::from_str_radix(digits, 8).unwrap_or(0);
+        // Frozen, as `ruby` makes it.
         if digits.is_empty() {
-            out.push_str("$/ = \"\\0\"\n");
+            out.push_str("$/ = \"\\0\".freeze\n");
         } else if value == 0 {
-            out.push_str("$/ = \"\"\n");
+            out.push_str("$/ = \"\".freeze\n");
         } else if value > 0o377 {
             out.push_str("$/ = nil\n");
         } else {
-            let _ = writeln!(out, "$/ = {value}.chr");
+            let _ = writeln!(out, "$/ = {value}.chr.freeze");
         }
     }
     if let Some(pattern) = &args.split_pattern {
@@ -279,8 +488,15 @@ pub fn prelude(args: &RubyArgs) -> String {
     if args.line_ending {
         out.push_str("$\\ = $/\n");
     }
-    for dir in args.includes.iter().rev() {
-        let _ = writeln!(out, "$LOAD_PATH.unshift(File.expand_path({}))", lit(dir));
+    // `-I`'s directories, then `RUBYLIB`'s, ahead of the defaults.
+    let mut dirs: Vec<String> = args
+        .includes
+        .iter()
+        .map(|dir| format!("File.expand_path({})", lit(dir)))
+        .collect();
+    dirs.extend(args.library_path.iter().map(|dir| lit(dir)));
+    if !dirs.is_empty() {
+        let _ = writeln!(out, "$LOAD_PATH.unshift({})", dirs.join(", "));
     }
     if args.switches {
         // `-s`: leading `-name` and `-name=value` words are globals, up to a

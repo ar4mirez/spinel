@@ -1,2 +1,1 @@
 fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The -l command line option chomps last line based on $/
-fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The -l command line option sets $-l

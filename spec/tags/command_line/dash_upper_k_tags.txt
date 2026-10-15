@@ -1,8 +1,0 @@
-fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The -K command line option sets __ENCODING__ and Encoding.default_external to Encoding::BINARY with -Ka
-fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The -K command line option sets __ENCODING__ and Encoding.default_external to Encoding::BINARY with -KA
-fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The -K command line option sets __ENCODING__ and Encoding.default_external to Encoding::BINARY with -Kn
-fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The -K command line option sets __ENCODING__ and Encoding.default_external to Encoding::BINARY with -KN
-fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The -K command line option sets __ENCODING__ and Encoding.default_external to Encoding::EUC_JP with -Ke
-fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The -K command line option sets __ENCODING__ and Encoding.default_external to Encoding::EUC_JP with -KE
-fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The -K command line option sets __ENCODING__ and Encoding.default_external to Encoding::Windows_31J with -Ks
-fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The -K command line option sets __ENCODING__ and Encoding.default_external to Encoding::Windows_31J with -KS

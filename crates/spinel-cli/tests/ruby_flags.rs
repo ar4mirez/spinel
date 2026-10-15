@@ -153,3 +153,108 @@ fn an_unknown_flag_is_refused() {
     assert_eq!(output.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&output.stderr).contains("invalid option -q"));
 }
+
+fn run_env(args: &[&str], env: &[(&str, &str)]) -> Output {
+    Command::new(SPINEL)
+        .args(args)
+        .env_remove("RUBYOPT")
+        .env_remove("RUBYLIB")
+        .envs(env.iter().copied())
+        .current_dir(fixtures())
+        .output()
+        .expect("spinel runs")
+}
+
+fn out_env(args: &[&str], env: &[(&str, &str)]) -> String {
+    let output = Command::new(SPINEL)
+        .args(args)
+        .env_remove("RUBYOPT")
+        .env_remove("RUBYLIB")
+        .envs(env.iter().copied())
+        .current_dir(fixtures())
+        .output()
+        .expect("spinel runs");
+    assert!(
+        output.status.success(),
+        "spinel {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("stdout is utf-8")
+}
+
+#[test]
+fn rubyopt_adds_switches_after_the_command_line() {
+    assert_eq!(
+        out_env(&["-e", "p $VERBOSE"], &[("RUBYOPT", "-w")]),
+        "true\n"
+    );
+    assert_eq!(
+        out_env(&["-e", "p $VERBOSE"], &[("RUBYOPT", "w")]),
+        "true\n"
+    );
+    let refused = run_env(&["-e", "1"], &[("RUBYOPT", "-a")]);
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&refused.stderr)
+            .contains("invalid switch in RUBYOPT: -a (RuntimeError)")
+    );
+}
+
+#[test]
+fn rubylib_comes_after_the_include_flags() {
+    assert_eq!(
+        out_env(
+            &["-I/i", "-e", "p $LOAD_PATH.first(2)"],
+            &[("RUBYLIB", "/l")]
+        ),
+        "[\"/i\", \"/l\"]\n"
+    );
+}
+
+#[test]
+fn encodings() {
+    assert_eq!(
+        out(&["-Ke", "-e", "p __ENCODING__"]),
+        "#<Encoding:EUC-JP>\n"
+    );
+    assert_eq!(
+        out(&["-U", "-e", "p Encoding.default_internal"]),
+        "#<Encoding:UTF-8>\n"
+    );
+    assert_eq!(
+        out(&["--encoding", "ascii", "-e", "p Encoding.default_external"]),
+        "#<Encoding:US-ASCII>\n"
+    );
+    let clash = run(&["-Eascii:ascii", "-U", "-e", "1"], "");
+    assert_eq!(clash.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&clash.stderr)
+            .contains("default_internal already set to ascii (RuntimeError)")
+    );
+}
+
+#[test]
+fn switches_that_are_globals() {
+    assert_eq!(
+        out(&["-a", "-l", "-e", "p [$-a, $-l, $-p]"]),
+        "[true, true, false]\n"
+    );
+    assert_eq!(
+        out(&["-d", "-e", "p [$-d, $DEBUG, $VERBOSE]"]),
+        "[true, true, true]\n"
+    );
+}
+
+#[test]
+fn directories_and_the_path() {
+    assert_eq!(
+        out(&["-Xlib", "-e", "p Dir.pwd.end_with?(%q(lib))"]),
+        "true\n"
+    );
+    assert_eq!(
+        out_env(&["-S", "searched.rb"], &[("RUBYPATH", "lib")]),
+        "found on the path\n"
+    );
+    // A `#!` line for something other than ruby is skipped to the ruby one.
+    assert_eq!(out(&["launcher.sh"]), "the ruby part\n");
+}

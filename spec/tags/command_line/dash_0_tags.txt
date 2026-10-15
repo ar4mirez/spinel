@@ -1,1 +1,0 @@
-fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The -0 command line option sets $/ and $-0 as a frozen string

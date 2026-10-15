@@ -6,7 +6,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 
 | directory | files | examples | passed | failed | blocked | skipped | passed % |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| `command_line` | 32 | 175 | 80 | 0 | 1 | 94 | 46% |
+| `command_line` | 32 | 175 | 156 | 0 | 0 | 19 | 89% |
 | `core/argf` | 35 | 139 | 0 | 0 | 120 | 19 | 0% |
 | `core/array` | 132 | 2898 | 2755 | 0 | 129 | 14 | 95% |
 | `core/basicobject` | 14 | 172 | 163 | 0 | 9 | 0 | 95% |
@@ -65,8 +65,8 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/tracepoint` | 19 | 76 | 0 | 0 | 76 | 0 | 0% |
 | `core/true` | 9 | 13 | 11 | 0 | 2 | 0 | 85% |
 | `core/unboundmethod` | 20 | 109 | 95 | 0 | 10 | 4 | 87% |
-| `core/warning` | 5 | 31 | 29 | 0 | 0 | 2 | 94% |
-| `language` | 67 | 2668 | 2434 | 0 | 171 | 63 | 91% |
+| `core/warning` | 5 | 31 | 30 | 0 | 0 | 1 | 97% |
+| `language` | 67 | 2668 | 2435 | 0 | 171 | 62 | 91% |
 | `language/predefined` | 2 | 14 | 2 | 0 | 0 | 12 | 14% |
 | `language/regexp` | 11 | 257 | 200 | 0 | 52 | 5 | 78% |
 | `library/English` | 2 | 27 | 1 | 0 | 0 | 26 | 4% |
@@ -131,4 +131,4 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `optional/capi` | 47 | 0 | 0 | 0 | 0 | 0 | — |
 | `optional/thread_safety` | 1 | 5 | 0 | 0 | 5 | 0 | 0% |
 | `security` | 13 | 34 | 11 | 0 | 19 | 4 | 32% |
-| **total** | 3835 | 31583 | 22689 | 0 | 8306 | 588 | 72% |
+| **total** | 3835 | 31583 | 22767 | 0 | 8305 | 511 | 72% |
