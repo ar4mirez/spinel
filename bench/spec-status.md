@@ -55,7 +55,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/set` | 57 | 175 | 170 | 0 | 2 | 3 | 97% |
 | `core/signal` | 3 | 53 | 40 | 0 | 10 | 3 | 75% |
 | `core/sizedqueue` | 16 | 61 | 0 | 0 | 61 | 0 | 0% |
-| `core/string` | 151 | 3906 | 3470 | 0 | 399 | 37 | 89% |
+| `core/string` | 151 | 3906 | 3486 | 0 | 383 | 37 | 89% |
 | `core/struct` | 30 | 170 | 167 | 0 | 3 | 0 | 98% |
 | `core/symbol` | 29 | 270 | 140 | 0 | 125 | 5 | 52% |
 | `core/systemexit` | 2 | 6 | 6 | 0 | 0 | 0 | 100% |
@@ -116,7 +116,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `library/singleton` | 7 | 14 | 0 | 0 | 13 | 1 | 0% |
 | `library/socket` | 188 | 917 | 0 | 0 | 917 | 0 | 0% |
 | `library/stringio` | 64 | 674 | 627 | 0 | 44 | 3 | 93% |
-| `library/stringscanner` | 44 | 162 | 0 | 0 | 162 | 0 | 0% |
+| `library/stringscanner` | 44 | 240 | 239 | 0 | 1 | 0 | 100% |
 | `library/syslog` | 20 | 75 | 0 | 0 | 75 | 0 | 0% |
 | `library/tempfile` | 10 | 45 | 0 | 0 | 45 | 0 | 0% |
 | `library/thread` | 2 | 2 | 0 | 0 | 0 | 2 | 0% |
@@ -131,4 +131,4 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `optional/capi` | 47 | 0 | 0 | 0 | 0 | 0 | — |
 | `optional/thread_safety` | 1 | 5 | 0 | 0 | 5 | 0 | 0% |
 | `security` | 13 | 34 | 15 | 0 | 19 | 0 | 44% |
-| **total** | 3835 | 31583 | 22838 | 0 | 8282 | 463 | 72% |
+| **total** | 3835 | 31661 | 23093 | 0 | 8105 | 463 | 73% |

@@ -460,6 +460,55 @@ class String
   # CRuby's `rb_str_inspect`: the named escapes, `\#` before `{`, `$` and `@`,
   # control characters as `\uXXXX` in a Unicode string, and any byte that is
   # not a printable character of the encoding as `\xHH`.
+  # CRuby's `rb_str_dump`: ASCII only, every other character escaped — a
+  # UTF-8 one as `\u`, anything else byte by byte as `\x` — and an encoding
+  # that is not ASCII-compatible named in a `force_encoding` after it.
+  # The escape for a byte `dump` spells by name, or nil. A method rather
+  # than a Hash: `core/hash.rb` loads after this file.
+  def __dump_escape__(byte)
+    case byte
+    when 0x22 then %q(\")
+    when 0x5c then %q(\\\\)
+    when 0x0a then %q(\n)
+    when 0x0d then %q(\r)
+    when 0x09 then %q(\t)
+    when 0x0c then %q(\f)
+    when 0x0b then %q(\v)
+    when 0x08 then %q(\b)
+    when 0x07 then %q(\a)
+    when 0x1b then %q(\e)
+    end
+  end
+
+  def dump
+    out = +"\""
+    bytes = self.bytes
+    utf8 = encoding == Encoding::UTF_8 && valid_encoding?
+    i = 0
+    while i < bytes.size
+      byte = bytes[i]
+      if (escape = __dump_escape__(byte))
+        out << escape
+      elsif byte == 0x23 && [0x7b, 0x24, 0x40].include?(bytes[i + 1])
+        out << '\#'
+      elsif byte >= 0x20 && byte < 0x7f
+        out << byte.chr
+      elsif utf8 && byte >= 0x80
+        length = byte >= 0xf0 ? 4 : (byte >= 0xe0 ? 3 : 2)
+        point = byteslice(i, length).ord
+        out << (point > 0xffff ? format('\u{%X}', point) : format('\u%04X', point))
+        i += length
+        next
+      else
+        out << format('\x%02X', byte)
+      end
+      i += 1
+    end
+    out << "\""
+    out << ".dup.force_encoding(\"#{encoding}\")" unless encoding.ascii_compatible?
+    out.force_encoding(encoding.ascii_compatible? ? encoding : Encoding::US_ASCII)
+  end
+
   def inspect
     return __wide_inspect__ if [3, 4, 5, 6].include?(__encoding_index__)
     unicode = __encoding_index__ == 1
