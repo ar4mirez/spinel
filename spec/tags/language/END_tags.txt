@@ -1,2 +1,1 @@
 fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The END keyword gives access to an exception raised in a previous handler
-fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The END keyword warns when END is used in a method

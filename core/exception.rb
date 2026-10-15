@@ -418,6 +418,11 @@ class Exception
   # detailed message, then one "from" line per remaining frame — and then the
   # same for each `cause`, outermost first. `order: :bottom` reverses both and
   # numbers the frames. Every string here was measured against ruby 4.0.7.
+  class << self
+    # `--backtrace-limit`, or nil for none.
+    attr_accessor :__backtrace_limit__
+  end
+
   def full_message(highlight: __no_highlight__, order: :top, **options)
     highlight = Exception.to_tty? if highlight.equal?(__no_highlight__) || highlight.nil?
     __check_highlight__(highlight)
@@ -455,9 +460,18 @@ class Exception
     head = position.nil? ? detailed : position + ": " + detailed
     head = head + "\n" unless head.end_with?("\n")
     rest = lines.nil? ? [] : lines.__take__(1, lines.size - 1)
+    # `--backtrace-limit`: that many lines after the first, then how many
+    # more there were, worded as CRuby words it.
+    limit = Exception.__backtrace_limit__
+    hidden = 0
+    if !limit.nil? && limit >= 0 && rest.size > limit
+      hidden = rest.size - limit
+      rest = rest.__take__(0, limit)
+    end
     if order == :top
       out = head
       rest.each { |line| out = out + "\tfrom " + line + "\n" }
+      out = out + "\t ... #{hidden} levels...\n" if hidden > 0
       out
     else
       width = rest.size.to_s.length

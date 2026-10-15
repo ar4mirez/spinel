@@ -98,7 +98,18 @@ pub fn program(program: &Program) -> Result<Iseq, Unsupported> {
 /// required or loaded one is `<top (required)>`, and its blocks are blocks
 /// in that.
 pub fn program_as(program: &Program, name: &str) -> Result<Iseq, Unsupported> {
+    program_with(program, name, false)
+}
+
+/// [`program_as`], with string literals frozen where the file does not say,
+/// as `--enable=frozen-string-literal` asks.
+pub fn program_with(
+    program: &Program,
+    name: &str,
+    frozen_default: bool,
+) -> Result<Iseq, Unsupported> {
     let mut compiler = Compiler::new(name, &program.locals);
+    compiler.frozen_default = frozen_default;
     compiler.source = Some(Arc::clone(&program.source));
     compiler.statements(&hoist_begin(&program.body), true)?;
     Ok(compiler.finish())
@@ -140,8 +151,10 @@ pub fn eval(
     chain: Vec<Vec<Box<str>>>,
     name: &str,
     block_level: u32,
+    frozen_default: bool,
 ) -> Result<Iseq, Unsupported> {
     let mut compiler = Compiler::new(name, &program.locals);
+    compiler.frozen_default = frozen_default;
     compiler.block_level = block_level;
     compiler.source = Some(Arc::clone(&program.source));
     compiler.scope_barrier = false;
@@ -338,6 +351,9 @@ struct Compiler {
     refusals: Vec<&'static str>,
     /// See [`Iseq::from_eval`].
     from_eval: bool,
+    /// `--enable=frozen-string-literal`: a literal in a file that says
+    /// nothing about it is frozen, as one under the magic comment is.
+    frozen_default: bool,
 }
 
 impl Zsuper {
@@ -422,6 +438,7 @@ impl Compiler {
             eval_phantoms: Vec::new(),
             refusals: Vec::new(),
             from_eval: false,
+            frozen_default: false,
         }
     }
 
@@ -457,6 +474,7 @@ impl Compiler {
         compiler.line = parent.line;
         compiler.block_level = if barrier { 0 } else { parent.block_level + 1 };
         compiler.from_eval = parent.from_eval;
+        compiler.frozen_default = parent.frozen_default;
         if !barrier {
             compiler.outer.push(parent.locals.clone());
             compiler.outer.extend(parent.outer.iter().cloned());
@@ -959,7 +977,10 @@ impl Compiler {
             ExprKind::Str(string) => match flat_bytes(&string.parts) {
                 // Under `# frozen_string_literal: true` a literal is frozen,
                 // and one object per content (#21).
-                Some(bytes) if string.frozen == Some(true) => {
+                Some(bytes)
+                    if string.frozen == Some(true)
+                        || (string.frozen.is_none() && self.frozen_default) =>
+                {
                     let encoding = self.literal_encoding(string.encoding);
                     let index = self.literal(Literal::FrozenStr(bytes, encoding));
                     self.emit(Insn::PushLit(index));
@@ -5133,6 +5154,22 @@ impl Compiler {
         // `Proc` recorded. A block whose method has already returned is Ruby's
         // `LocalJumpError`, raised at the instruction rather than guessed here.
         let _ = span;
+        // A top-level `return`'s argument goes nowhere; CRuby says so.
+        // ponytail: when it runs, where CRuby's warning is the parser's.
+        let top_level = self.block_level == 0
+            && (self.name.as_ref() == "<main>" || self.name.as_ref() == "<top (required)>");
+        if top_level && value.is_some() {
+            self.emit(Insn::PushSelf);
+            let message = self.literal(Literal::Str(
+                b"argument of top-level return is ignored"
+                    .to_vec()
+                    .into_boxed_slice(),
+                crate::strings::UTF_8,
+            ));
+            self.emit(Insn::PushLit(message));
+            self.emit_send_to_self("__warning__", 1);
+            self.emit(Insn::Pop);
+        }
         match value {
             Some(expr) => self.expr(expr)?,
             None => self.emit(Insn::PushNil),
