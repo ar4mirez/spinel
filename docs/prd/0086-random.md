@@ -33,6 +33,6 @@ of one, two and many words, Integer, Float and range limits, and `bytes`.
 
 `core/random`, `Kernel#rand` and `Kernel#srand` all **127** pass. Corpus
 23,222 to **23,356** passing, 0 failed; compared example by example with
-`main`, 104 blocked and 4 failed examples pass — `core/file` among them,
-whose temp names draw from `Random` — and none that passed fails. Every
+`main`, 104 blocked and 4 failed examples pass (six of them in
+`core/file`), and none that passed fails. Every
 pass agrees with ruby 4.0.6.
