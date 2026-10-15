@@ -25,5 +25,5 @@ fails(#29: the $@ global: an expectation about an error, newly reported since PR
 fails(#29: the $@ global: an expectation about an error, newly reported since PRD 0077 let mspec's raise matcher run inside its BasicObject proxy):Predefined global $@ raises a TypeError when the array contains nil
 fails(#29: the $@ global: an expectation about an error, newly reported since PRD 0077 let mspec's raise matcher run inside its BasicObject proxy):Predefined global $@ raises a TypeError when the argument is a nested array
 fails(#41: the IO globals: an expectation about an error, newly reported since PRD 0077 let mspec's raise matcher run inside its BasicObject proxy):Predefined global $. raises TypeError if object can't be converted to an Integer
-fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):Global variable $0 actually sets the program name
-fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The predefined global constant STDOUT has the encodings set by #set_encoding
+fails(#44: setting $0 does not rename the process):Global variable $0 actually sets the program name
+fails(#41: STDOUT does not keep the encodings set_encoding gives it across a ruby_exe child):The predefined global constant STDOUT has the encodings set by #set_encoding

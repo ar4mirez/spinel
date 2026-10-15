@@ -101,12 +101,21 @@ enum Format {
 fn main() -> ExitCode {
     // `spinel -e CODE`, `spinel -w script.rb`: a `ruby` command line, parsed
     // as `ruby` parses one (#62). `spinel`'s own `-h` and `-V` stay clap's.
-    let words: Vec<String> = std::env::args().skip(1).collect();
+    // The words as bytes, so a `-e` in another encoding arrives unmangled,
+    // and as UTF-8 for everything else.
+    let raw: Vec<Vec<u8>> = std::env::args_os()
+        .skip(1)
+        .map(std::os::unix::ffi::OsStringExt::into_vec)
+        .collect();
+    let words: Vec<String> = raw
+        .iter()
+        .map(|w| String::from_utf8_lossy(w).into_owned())
+        .collect();
     if words
         .first()
         .is_some_and(|first| ruby_args::is_ruby_invocation(first))
     {
-        return ruby_command(&words);
+        return ruby_command(&words, &raw);
     }
 
     // `arg_required_else_help` means a bare `spinel` never reaches this point: clap
@@ -139,7 +148,8 @@ fn main() -> ExitCode {
         if looks_like_a_ruby_file(&argument) || !looks_like_a_subcommand_typo(&argument) {
             let mut words = vec![argument];
             words.extend(cli.args);
-            return ruby_command(&words);
+            let raw: Vec<Vec<u8>> = words.iter().map(|w| w.clone().into_bytes()).collect();
+            return ruby_command(&words, &raw);
         }
         eprintln!("spinel: unknown subcommand `{argument}`.");
         eprintln!("        This build has two: run, parse. Try `spinel --help`.");
@@ -201,7 +211,7 @@ fn run_command(path: &Path, args: &[String], dump_bytecode: bool) -> ExitCode {
 
 /// `spinel` given `ruby`'s flags: the prelude they mean, then the program
 /// from `-e`, standard input or a file, as `ruby` would run it.
-fn ruby_command(words: &[String]) -> ExitCode {
+fn ruby_command(words: &[String], raw: &[Vec<u8>]) -> ExitCode {
     let parsed = ruby_args::parse(words).and_then(|mut args| {
         // `RUBYOPT`'s switches come after the command line's, and
         // `RUBYLIB`'s directories after every `-I`.
@@ -252,8 +262,16 @@ fn ruby_command(words: &[String]) -> ExitCode {
         eprintln!("spinel: Can't chdir to {dir} ({err}) (fatal)");
         return ExitCode::from(EXIT_RAISED);
     }
-    let (name, mut source) = if let Some(code) = &args.code {
-        ("-e".to_owned(), code.clone().into_bytes())
+    let (name, mut source) = if args.code.is_some() {
+        // Each `-e` line's own bytes, joined as `ruby` joins them.
+        let mut code = Vec::new();
+        for (index, &(word, at)) in args.code_at.iter().enumerate() {
+            if index > 0 {
+                code.push(b'\n');
+            }
+            code.extend_from_slice(raw.get(word).and_then(|w| w.get(at..)).unwrap_or_default());
+        }
+        ("-e".to_owned(), code)
     } else {
         let mut script = args.script.clone().unwrap_or_else(|| "-".to_owned());
         // `-S`: a bare name is looked for on `RUBYPATH`, then `PATH`.
@@ -486,9 +504,18 @@ fn run_program(
             };
             // The parser's warnings about the main script, through the same
             // `Warning.warn` a required file's go through.
+            // The literal-in-condition warnings are not given for a program
+            // from `-e`, as CRuby's `e_option_supplied` leaves them out.
+            let from_e = path.as_os_str() == "-e";
             let warnings: String = parsed
                 .warnings
                 .iter()
+                .filter(|warning| {
+                    !(from_e
+                        && (warning.message == "integer literal in flip-flop"
+                            || warning.message.starts_with("string literal in ")
+                            || warning.message.starts_with("regex literal in ")))
+                })
                 .map(|warning| {
                     let at = parsed.program.source.line(warning.span.start);
                     let text = format!("{}:{at}: warning: {}\n", path.display(), warning.message);

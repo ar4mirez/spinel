@@ -1,2 +1,2 @@
 fails(an Array key is hashed by its contents without calling its own hash method):Hash#[]= stores unequal keys that hash to the same value
-fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):Hash#[]= does not dispatch to hash for Boolean, Integer, Float, String, or Symbol
+fails(#320: a key of a core class is hashed by calling its hash method):Hash#[]= does not dispatch to hash for Boolean, Integer, Float, String, or Symbol

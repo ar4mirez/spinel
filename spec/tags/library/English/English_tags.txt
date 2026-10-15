@@ -20,4 +20,4 @@ fails(#39: English aliases $!, $@, $; , $, and $\, which the global table cannot
 fails(#39: English aliases $!, $@, $; , $, and $\, which the global table cannot alias yet):English aliases $OUTPUT_FIELD_SEPARATOR to $,
 fails(#39: English aliases $!, $@, $; , $, and $\, which the global table cannot alias yet):English aliases $ORS to $\
 fails(#39: English aliases $!, $@, $; , $, and $\, which the global table cannot alias yet):English aliases $OUTPUT_RECORD_SEPARATOR to $\
-fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):English aliases $CHILD_STATUS to $?
+fails(#47: English is not vendored):English aliases $CHILD_STATUS to $?

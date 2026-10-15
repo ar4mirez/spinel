@@ -1,2 +1,2 @@
-fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The TOPLEVEL_BINDING constant has no local variables in files required before the main script
-fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The TOPLEVEL_BINDING constant merges local variables of the main script with dynamically-defined Binding variables
+fails(#38: the main script does not run inside TOPLEVEL_BINDING, so files required before it cannot see it):The TOPLEVEL_BINDING constant has no local variables in files required before the main script
+fails(#38: the main script does not run inside TOPLEVEL_BINDING, so files required before it cannot see it):The TOPLEVEL_BINDING constant merges local variables of the main script with dynamically-defined Binding variables

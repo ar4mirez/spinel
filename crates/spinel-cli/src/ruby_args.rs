@@ -15,6 +15,10 @@ use std::fmt::Write as _;
 pub struct RubyArgs {
     /// `-e` lines, joined by newlines; when there are any, there is no script.
     pub code: Option<String>,
+    /// Where each `-e` line was: the word, and the byte it starts at. The
+    /// words reach the parser as UTF-8, and a line in another encoding is
+    /// taken from the word's own bytes by these.
+    pub code_at: Vec<(usize, usize)>,
     /// The script, or `-` for standard input.
     pub script: Option<String>,
     /// What the program sees as `ARGV`.
@@ -255,6 +259,15 @@ fn options(
                     break;
                 }
                 'e' | 'r' | 'I' | 'C' | 'X' | 'E' => {
+                    if c == 'e' && !rubyopt {
+                        // The flags before `e` are ASCII, so its value starts
+                        // that many bytes in, after the `-`.
+                        out.code_at.push(if rest.is_empty() {
+                            (i + 1, 0)
+                        } else {
+                            (i, j + 2)
+                        });
+                    }
                     let value = if !rest.is_empty() {
                         rest
                     } else {
