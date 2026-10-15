@@ -72,6 +72,140 @@ class IO
     include IO::WaitWritable
   end
 
+  class TimeoutError < IOError
+  end
+
+  def self.__poll__(name)
+    (@__poll__ ||= __poll_constants__.to_h)[name]
+  end
+
+  # `poll(2)` over `[io, events]` pairs: the events each is ready for, or
+  # nil when the timeout passed first. A reader with bytes buffered is ready
+  # without asking.
+  def self.__wait__(pairs, timeout)
+    unless timeout.nil?
+      timeout = Float === timeout || Integer === timeout ? timeout : Float(timeout)
+      raise ArgumentError, "time interval must not be negative" if timeout < 0
+    end
+    buffered = pairs.map { |io, events| events & IO::READABLE != 0 && io.__buffered__? ? IO::READABLE : 0 }
+    return buffered if buffered.any? { |b| b != 0 }
+    polls = pairs.map do |io, events|
+      bits = 0
+      bits |= __poll__("POLLIN") if events & IO::READABLE != 0
+      bits |= __poll__("POLLOUT") if events & IO::WRITABLE != 0
+      bits |= __poll__("POLLPRI") if events & IO::PRIORITY != 0
+      [io.__poll_fd__(events), bits]
+    end
+    deadline = timeout && Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
+    loop do
+      ms = deadline.nil? ? -1 : ((deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)) * 1000).ceil.clamp(0, 2**31 - 1)
+      revents = __fd_poll__(polls, ms)
+      if Integer === revents
+        next if revents == Errno::EINTR::Errno
+        __check__(revents, nil, "poll(2)")
+      end
+      return nil if revents.all?(0)
+      done = __poll__("POLLERR") | __poll__("POLLHUP") | __poll__("POLLNVAL")
+      return revents.each_with_index.map do |bits, i|
+        events = pairs[i][1]
+        ready = 0
+        ready |= IO::READABLE if events & IO::READABLE != 0 && bits & (__poll__("POLLIN") | done) != 0
+        ready |= IO::WRITABLE if events & IO::WRITABLE != 0 && bits & (__poll__("POLLOUT") | done) != 0
+        ready |= IO::PRIORITY if events & IO::PRIORITY != 0 && bits & __poll__("POLLPRI") != 0
+        ready
+      end
+    end
+  end
+
+  def self.select(reads, writes = nil, errors = nil, timeout = nil)
+    sets = [reads, writes, errors].map do |set|
+      next [] if set.nil?
+      Array.try_convert(set) || raise(TypeError, "no implicit conversion of #{set.class} into Array")
+    end
+    ios = sets.map { |set| set.map { |item| IO.__to_io__(item) } }
+    ios.each { |set| set.each(&:__check_open__) }
+    pairs = []
+    [IO::READABLE, IO::WRITABLE, IO::PRIORITY].each_with_index do |bit, i|
+      ios[i].each { |io| pairs << [io, bit] }
+    end
+    if pairs.empty?
+      sleep(timeout) unless timeout.nil? || (raise(ArgumentError, "time interval must not be negative") if timeout < 0)
+      sleep if timeout.nil?
+      return nil
+    end
+    ready = __wait__(pairs, timeout)
+    return nil if ready.nil?
+    out = [[], [], []]
+    k = 0
+    [0, 1, 2].each do |i|
+      sets[i].each_with_index do |item, j|
+        out[i] << item if ready[k] != 0
+        k += 1
+      end
+    end
+    out
+  end
+
+  def self.__to_io__(item)
+    return item if IO === item
+    io = item.respond_to?(:to_io) ? item.to_io : nil
+    raise TypeError, "no implicit conversion of #{item.class} into IO" unless IO === io
+    io
+  end
+
+  def __buffered__? = !@rbuf.empty?
+
+  # The descriptor to poll: a duplex child's write end for writing.
+  def __poll_fd__(events) = events == IO::WRITABLE ? __wfd__ : @fileno
+
+  def timeout = @timeout
+
+  def timeout=(value)
+    @timeout = value
+  end
+
+  def wait(*args)
+    __check_open__
+    if args.size == 2 || (args.size == 1 && Integer === args[0] && !(Float === args[0]))
+      events = Integer.__index__(args[0])
+      raise ArgumentError, "Events must be positive integer!" if events <= 0
+      ready = IO.__wait__([[self, events]], args[1])
+      return ready.nil? ? nil : ready[0]
+    end
+    # The old form: a timeout, and modes as Symbols.
+    events = 0
+    timeout = nil
+    args.each do |arg|
+      case arg
+      when :r, :read, :readable then events |= IO::READABLE
+      when :w, :write, :writable then events |= IO::WRITABLE
+      when :rw, :read_write, :readable_writable then events |= IO::READABLE | IO::WRITABLE
+      when Symbol then raise ArgumentError, "unsupported mode: #{arg}"
+      else
+        raise ArgumentError, "timeout given more than once" unless timeout.nil?
+        timeout = arg
+      end
+    end
+    events = IO::READABLE if events == 0
+    ready = IO.__wait__([[self, events]], timeout)
+    ready.nil? ? nil : self
+  end
+
+  def wait_readable(timeout = nil)
+    __check_open__
+    IO.__wait__([[self, IO::READABLE]], timeout).nil? ? nil : self
+  end
+
+  def wait_writable(timeout = nil)
+    __check_open__
+    IO.__wait__([[self, IO::WRITABLE]], timeout).nil? ? nil : self
+  end
+
+  def wait_priority(timeout = nil)
+    __check_open__
+    IO.__wait__([[self, IO::PRIORITY]], timeout).nil? ? nil : self
+  end
+
   # `fcntl(2)`'s commands and flags, which are the platform's.
   def self.__fcntl__(name)
     (@__fcntl__ ||= __fd_fcntl_constants__.to_h)[name]
@@ -713,10 +847,35 @@ end
 
   # Pull up to `want` more bytes into the buffer; false at the end of the file.
   def __fill__(want = 65536)
-    chunk = IO.__check__(__fd_read__(@fileno, want), @path)
+    chunk = IO.__check__(__read_wait__(want), @path)
     return false if chunk.empty?
     @rbuf << chunk
     true
+  end
+
+  # A read that waits for a nonblocking descriptor to have something, as
+  # CRuby does for the sockets it makes nonblocking.
+  def __read_wait__(want)
+    loop do
+      chunk = __fd_read__(@fileno, want)
+      return chunk unless chunk == IO.__eagain__
+      IO.__wait__([[self, IO::READABLE]], @timeout) || raise(IO::TimeoutError, "Blocking operation timed out!")
+    end
+  end
+
+  # Every byte of `text`, waiting whenever a nonblocking descriptor is full.
+  def __write_all__(text)
+    total = text.bytesize
+    loop do
+      result = __fd_write__(__wfd__, text)
+      if result == IO.__eagain__
+        IO.__wait__([[self, IO::WRITABLE]], @timeout) || raise(IO::TimeoutError, "Blocking operation timed out!")
+        next
+      end
+      written = IO.__check__(result, @path)[0]
+      return total if written >= text.bytesize
+      text = text.byteslice(written, text.bytesize - written)
+    end
   end
 
   def __take__(count)
@@ -800,7 +959,7 @@ end
       return buffer || ""
     end
     if @rbuf.empty?
-      chunk = __fd_read__(@fileno, length)
+      chunk = blocking ? __read_wait__(length) : __fd_read__(@fileno, length)
       return :wait_readable if !blocking && chunk == IO.__eagain__
       IO.__check__(chunk, @path)
       if chunk.empty?
@@ -1166,7 +1325,7 @@ end
         text << __encode_out__(object).b
       end
     end
-    IO.__check__(__fd_write__(__wfd__, text), @path)[0]
+    __write_all__(text)
   end
 
   def syswrite(object)

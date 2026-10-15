@@ -82,6 +82,7 @@ pub mod regexp;
 pub mod shape;
 pub mod shared;
 pub mod signal;
+pub mod socket;
 pub mod strings;
 pub mod transcode;
 pub mod value;

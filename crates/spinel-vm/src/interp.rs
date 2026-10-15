@@ -45,7 +45,8 @@ use crate::class::Builtin;
 use crate::class::{ClassId, CrefId, Kind, Method, ScopeDefault, Visibility};
 use crate::heap::{Handle, HandleScope, Heap, Payload};
 use crate::method::{
-    BindingOp, BitOp, CvarOp, Definition, FiberOp, FsOp, IvarOp, Native, ReflectOp, StrOp, SysOp,
+    BindingOp, BitOp, CvarOp, Definition, FiberOp, FsOp, IvarOp, Native, ReflectOp, SockOp, StrOp,
+    SysOp,
 };
 use crate::shape::ShapeId;
 use crate::value::SymbolId;
@@ -9807,6 +9808,7 @@ fn native_call<'h>(
         }
         Native::Fs(op) => fs_native(scope, stack, &call, op),
         Native::Sys(op) => sys_native(scope, stack, &call, op),
+        Native::Sock(op) => sock_native(scope, stack, &call, op),
 
         Native::FrameNesting => {
             let cref = frames.last().map_or(CrefId::ROOT, |frame| frame.cref);
@@ -11895,6 +11897,156 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             Native::Fs(FsOp::FdClose),
         ),
         (Builtin::Kernel, &["__fd_pipe__"], Native::Fs(FsOp::Pipe)),
+        (
+            Builtin::Kernel,
+            &["__sock_socket__"],
+            Native::Sock(SockOp::Socket),
+        ),
+        (
+            Builtin::Kernel,
+            &["__sock_pair__"],
+            Native::Sock(SockOp::Pair),
+        ),
+        (
+            Builtin::Kernel,
+            &["__sock_bind__"],
+            Native::Sock(SockOp::Bind),
+        ),
+        (
+            Builtin::Kernel,
+            &["__sock_connect__"],
+            Native::Sock(SockOp::Connect),
+        ),
+        (
+            Builtin::Kernel,
+            &["__sock_listen__"],
+            Native::Sock(SockOp::Listen),
+        ),
+        (
+            Builtin::Kernel,
+            &["__sock_accept__"],
+            Native::Sock(SockOp::Accept),
+        ),
+        (
+            Builtin::Kernel,
+            &["__sock_name__"],
+            Native::Sock(SockOp::Name),
+        ),
+        (
+            Builtin::Kernel,
+            &["__sock_getopt__"],
+            Native::Sock(SockOp::GetOpt),
+        ),
+        (
+            Builtin::Kernel,
+            &["__sock_setopt__"],
+            Native::Sock(SockOp::SetOpt),
+        ),
+        (
+            Builtin::Kernel,
+            &["__sock_send__"],
+            Native::Sock(SockOp::Send),
+        ),
+        (
+            Builtin::Kernel,
+            &["__sock_recv__"],
+            Native::Sock(SockOp::Recv),
+        ),
+        (
+            Builtin::Kernel,
+            &["__sock_shutdown__"],
+            Native::Sock(SockOp::Shutdown),
+        ),
+        (
+            Builtin::Kernel,
+            &["__sock_sendmsg__"],
+            Native::Sock(SockOp::SendMsg),
+        ),
+        (
+            Builtin::Kernel,
+            &["__sock_recvmsg__"],
+            Native::Sock(SockOp::RecvMsg),
+        ),
+        (
+            Builtin::Kernel,
+            &["__sock_getaddrinfo__"],
+            Native::Sock(SockOp::GetAddrInfo),
+        ),
+        (
+            Builtin::Kernel,
+            &["__sock_getnameinfo__"],
+            Native::Sock(SockOp::GetNameInfo),
+        ),
+        (
+            Builtin::Kernel,
+            &["__sock_hostname__"],
+            Native::Sock(SockOp::Hostname),
+        ),
+        (
+            Builtin::Kernel,
+            &["__sock_servport__"],
+            Native::Sock(SockOp::ServPort),
+        ),
+        (
+            Builtin::Kernel,
+            &["__sock_servname__"],
+            Native::Sock(SockOp::ServName),
+        ),
+        (
+            Builtin::Kernel,
+            &["__sock_ifindex__"],
+            Native::Sock(SockOp::IfIndex),
+        ),
+        (
+            Builtin::Kernel,
+            &["__sock_ifname__"],
+            Native::Sock(SockOp::IfName),
+        ),
+        (
+            Builtin::Kernel,
+            &["__sock_ifaddrs__"],
+            Native::Sock(SockOp::IfAddrs),
+        ),
+        (
+            Builtin::Kernel,
+            &["__sockaddr_in__"],
+            Native::Sock(SockOp::SockaddrIn),
+        ),
+        (
+            Builtin::Kernel,
+            &["__sockaddr_un__"],
+            Native::Sock(SockOp::SockaddrUn),
+        ),
+        (
+            Builtin::Kernel,
+            &["__sockaddr_parse__"],
+            Native::Sock(SockOp::Parse),
+        ),
+        (
+            Builtin::Kernel,
+            &["__inet_ntop__"],
+            Native::Sock(SockOp::Ntop),
+        ),
+        (
+            Builtin::Kernel,
+            &["__inet_pton__"],
+            Native::Sock(SockOp::Pton),
+        ),
+        (
+            Builtin::Kernel,
+            &["__sock_constants__"],
+            Native::Sock(SockOp::Constants),
+        ),
+        (
+            Builtin::Kernel,
+            &["__fd_poll__"],
+            Native::Sock(SockOp::Poll),
+        ),
+        (
+            Builtin::Kernel,
+            &["__poll_constants__"],
+            Native::Sock(SockOp::PollConstants),
+        ),
         (Builtin::Kernel, &["__fd_dup__"], Native::Fs(FsOp::FdDup)),
         (Builtin::Kernel, &["__fd_dup2__"], Native::Fs(FsOp::FdDup2)),
         (
@@ -15224,6 +15376,11 @@ fn fs_native(
                     if error.kind() == std::io::ErrorKind::Interrupted {
                         continue;
                     }
+                    // A nonblocking descriptor that took some: the count, for
+                    // the Ruby side to wait and write the rest, or to answer.
+                    if error.kind() == std::io::ErrorKind::WouldBlock && written > 0 {
+                        break;
+                    }
                     failed = Some(error);
                     break;
                 }
@@ -16045,6 +16202,426 @@ fn sys_native(
             }
             let pairs: Vec<Value> = pairs.into_iter().map(|h| scope.get(h)).collect();
             new_array(scope, &pairs)
+        }
+    };
+    stack.push(value);
+    Ok(None)
+}
+
+/// A BINARY String of `bytes`.
+fn binary_value(scope: &mut HandleScope<'_>, bytes: &[u8]) -> Value {
+    let class = class_handle(scope, Builtin::String);
+    string_alloc(scope, class, bytes, crate::strings::BINARY)
+}
+
+/// The bytes of the String at `index`, or a refusal naming `op`.
+fn bytes_at(
+    scope: &mut HandleScope<'_>,
+    call: &Pending,
+    index: usize,
+    op: &'static str,
+) -> Result<Vec<u8>, Error> {
+    call.args
+        .get(index)
+        .and_then(|&v| string_bytes(scope, v))
+        .ok_or(Error::NoDispatch {
+            op,
+            operands: "an argument that is not a String",
+        })
+}
+
+/// The bytes of the String at `index`, None for nil.
+fn bytes_or_nil(
+    scope: &mut HandleScope<'_>,
+    call: &Pending,
+    index: usize,
+    op: &'static str,
+) -> Result<Option<Vec<u8>>, Error> {
+    match call.args.get(index) {
+        None => Ok(None),
+        Some(v) if v.is_nil() => Ok(None),
+        Some(_) => bytes_at(scope, call, index, op).map(Some),
+    }
+}
+
+/// An Array of what `items` makes of each element, each rooted until the
+/// Array holds it.
+fn rooted_array<T>(
+    scope: &mut HandleScope<'_>,
+    items: impl IntoIterator<Item = T>,
+    mut each: impl FnMut(&mut HandleScope<'_>, T) -> Value,
+) -> Value {
+    let mut handles = Vec::new();
+    for item in items {
+        let value = each(scope, item);
+        handles.push(scope.root(value));
+    }
+    let values: Vec<Value> = handles.into_iter().map(|h| scope.get(h)).collect();
+    new_array(scope, &values)
+}
+
+fn sockaddr_value(scope: &mut HandleScope<'_>, bytes: Option<Vec<u8>>) -> Value {
+    match bytes {
+        None => Value::NIL,
+        Some(bytes) => binary_value(scope, &bytes),
+    }
+}
+
+/// The socket calls `lib/socket.rb` is Ruby over (#61); `socket.rs` makes
+/// them. Each answers an errno on failure, as the descriptor calls do.
+fn sock_native(
+    scope: &mut HandleScope<'_>,
+    stack: &mut Stack,
+    call: &Pending,
+    op: SockOp,
+) -> Result<Option<Unwind>, Error> {
+    use crate::socket as sock;
+    let int = |n: i64| Value::fixnum(n).expect("a socket answer is a fixnum");
+    let arg = |index: usize| int_arg(call, index).unwrap_or(0) as i32;
+    let errno = |error: std::io::Error| errno_value(&error);
+    let value = match op {
+        SockOp::Socket => match sock::socket(arg(0), arg(1), arg(2)) {
+            Ok(fd) => new_array(scope, &[int(i64::from(fd))]),
+            Err(error) => errno(error),
+        },
+        SockOp::Pair => match sock::socketpair(arg(0), arg(1), arg(2)) {
+            Ok([a, b]) => new_array(scope, &[int(i64::from(a)), int(i64::from(b))]),
+            Err(error) => errno(error),
+        },
+        SockOp::Bind | SockOp::Connect => {
+            let fd = fd_arg(call)?;
+            let address = bytes_at(scope, call, 1, "__sock_bind__")?;
+            let done = if op == SockOp::Bind {
+                sock::bind(fd, &address)
+            } else {
+                sock::connect(fd, &address)
+            };
+            done.map_or_else(errno, |()| Value::TRUE)
+        }
+        SockOp::Listen => {
+            let fd = fd_arg(call)?;
+            sock::listen(fd, arg(1)).map_or_else(errno, |()| Value::TRUE)
+        }
+        SockOp::Accept => {
+            let fd = fd_arg(call)?;
+            match sock::accept(fd) {
+                Ok((client, address)) => {
+                    let address = binary_value(scope, &address);
+                    new_array(scope, &[int(i64::from(client)), address])
+                }
+                Err(error) => errno(error),
+            }
+        }
+        SockOp::Name => {
+            let fd = fd_arg(call)?;
+            let peer = call.args.get(1).is_some_and(|v| v.is_truthy());
+            match sock::name(fd, peer) {
+                Ok(address) => binary_value(scope, &address),
+                Err(error) => errno(error),
+            }
+        }
+        SockOp::GetOpt => {
+            let fd = fd_arg(call)?;
+            match sock::getsockopt(fd, arg(1), arg(2)) {
+                Ok(data) => binary_value(scope, &data),
+                Err(error) => errno(error),
+            }
+        }
+        SockOp::SetOpt => {
+            let fd = fd_arg(call)?;
+            let data = bytes_at(scope, call, 3, "__sock_setopt__")?;
+            sock::setsockopt(fd, arg(1), arg(2), &data).map_or_else(errno, |()| Value::TRUE)
+        }
+        SockOp::Send => {
+            let fd = fd_arg(call)?;
+            let data = bytes_at(scope, call, 1, "__sock_send__")?;
+            let to = bytes_or_nil(scope, call, 3, "__sock_send__")?;
+            match sock::send(fd, &data, arg(2), to.as_deref()) {
+                Ok(n) => new_array(scope, &[int(n as i64)]),
+                Err(error) => errno(error),
+            }
+        }
+        SockOp::Recv => {
+            let fd = fd_arg(call)?;
+            let max = int_arg(call, 1).unwrap_or(0).max(0) as usize;
+            match sock::recv(fd, max, arg(2)) {
+                Ok((data, from)) => {
+                    let data = {
+                        let value = binary_value(scope, &data);
+                        scope.root(value)
+                    };
+                    let from = binary_value(scope, &from);
+                    let data = scope.get(data);
+                    new_array(scope, &[data, from])
+                }
+                Err(error) => errno(error),
+            }
+        }
+        SockOp::Shutdown => {
+            let fd = fd_arg(call)?;
+            sock::shutdown(fd, arg(1)).map_or_else(errno, |()| Value::TRUE)
+        }
+        SockOp::SendMsg => {
+            let fd = fd_arg(call)?;
+            let data = bytes_at(scope, call, 1, "__sock_sendmsg__")?;
+            let to = bytes_or_nil(scope, call, 3, "__sock_sendmsg__")?;
+            let mut controls = Vec::new();
+            let list = call.args.get(4).copied().unwrap_or(Value::NIL);
+            for entry in array_elements(scope, list).unwrap_or_default() {
+                let parts = array_elements(scope, entry).unwrap_or_default();
+                let (Some(level), Some(kind), Some(&data)) = (
+                    parts.first().and_then(|v| v.as_fixnum()),
+                    parts.get(1).and_then(|v| v.as_fixnum()),
+                    parts.get(2),
+                ) else {
+                    return Err(Error::NoDispatch {
+                        op: "__sock_sendmsg__",
+                        operands: "a control message that is not [level, type, data]",
+                    });
+                };
+                let data = string_bytes(scope, data).unwrap_or_default();
+                controls.push((level as i32, kind as i32, data));
+            }
+            match sock::sendmsg(fd, &data, arg(2), to.as_deref(), &controls) {
+                Ok(n) => new_array(scope, &[int(n as i64)]),
+                Err(error) => errno(error),
+            }
+        }
+        SockOp::RecvMsg => {
+            let fd = fd_arg(call)?;
+            let max = int_arg(call, 1).unwrap_or(0).max(0) as usize;
+            let control_max = int_arg(call, 3).unwrap_or(0).max(0) as usize;
+            match sock::recvmsg(fd, max, arg(2), control_max) {
+                Ok((data, from, flags, controls)) => {
+                    let data = {
+                        let value = binary_value(scope, &data);
+                        scope.root(value)
+                    };
+                    let from = {
+                        let value = binary_value(scope, &from);
+                        scope.root(value)
+                    };
+                    let controls = rooted_array(scope, controls, |scope, (level, kind, data)| {
+                        let data = binary_value(scope, &data);
+                        new_array(scope, &[int(i64::from(level)), int(i64::from(kind)), data])
+                    });
+                    let (data, from) = (scope.get(data), scope.get(from));
+                    new_array(scope, &[data, from, int(i64::from(flags)), controls])
+                }
+                Err(error) => errno(error),
+            }
+        }
+        SockOp::GetAddrInfo => {
+            let host = bytes_or_nil(scope, call, 0, "__sock_getaddrinfo__")?;
+            let service = bytes_or_nil(scope, call, 1, "__sock_getaddrinfo__")?;
+            match sock::getaddrinfo(
+                host.as_deref(),
+                service.as_deref(),
+                arg(2),
+                arg(3),
+                arg(4),
+                arg(5),
+            ) {
+                Ok(list) => rooted_array(
+                    scope,
+                    list,
+                    |scope, (family, kind, protocol, address, canonical)| {
+                        let address = {
+                            let value = binary_value(scope, &address);
+                            scope.root(value)
+                        };
+                        let canonical = match canonical {
+                            Some(name) => binary_value(scope, &name),
+                            None => Value::NIL,
+                        };
+                        let address = scope.get(address);
+                        new_array(
+                            scope,
+                            &[
+                                int(i64::from(family)),
+                                int(i64::from(kind)),
+                                int(i64::from(protocol)),
+                                address,
+                                canonical,
+                            ],
+                        )
+                    },
+                ),
+                Err((code, message)) => {
+                    let message = string_new(scope, &message);
+                    new_array(scope, &[int(i64::from(code)), message])
+                }
+            }
+        }
+        SockOp::GetNameInfo => {
+            let address = bytes_at(scope, call, 0, "__sock_getnameinfo__")?;
+            match sock::getnameinfo(&address, arg(1)) {
+                Ok((host, service)) => {
+                    let host = {
+                        let value = binary_value(scope, &host);
+                        scope.root(value)
+                    };
+                    let service = binary_value(scope, &service);
+                    let host = scope.get(host);
+                    new_array(scope, &[host, service])
+                }
+                Err((code, message)) => {
+                    let message = string_new(scope, &message);
+                    new_array(scope, &[int(i64::from(code)), message])
+                }
+            }
+        }
+        SockOp::Hostname => match sock::gethostname() {
+            Ok(name) => binary_value(scope, &name),
+            Err(error) => errno(error),
+        },
+        SockOp::ServPort => {
+            let name = bytes_at(scope, call, 0, "__sock_servport__")?;
+            let protocol = bytes_at(scope, call, 1, "__sock_servport__")?;
+            sock::service_port(&name, &protocol).map_or(Value::NIL, |port| int(i64::from(port)))
+        }
+        SockOp::ServName => {
+            let port = int_arg(call, 0).unwrap_or(0) as u16;
+            let protocol = bytes_at(scope, call, 1, "__sock_servname__")?;
+            match sock::service_name(port, &protocol) {
+                Some(name) => binary_value(scope, &name),
+                None => Value::NIL,
+            }
+        }
+        SockOp::IfIndex => {
+            let name = bytes_at(scope, call, 0, "__sock_ifindex__")?;
+            int(i64::from(sock::if_nametoindex(&name)))
+        }
+        SockOp::IfName => match sock::if_indextoname(int_arg(call, 0).unwrap_or(0) as u32) {
+            Some(name) => binary_value(scope, &name),
+            None => Value::NIL,
+        },
+        SockOp::IfAddrs => match sock::getifaddrs() {
+            Ok(list) => rooted_array(
+                scope,
+                list,
+                |scope, (name, flags, index, addr, mask, broad, dest)| {
+                    let fields = [Some(name), addr, mask, broad, dest];
+                    let mut handles = Vec::new();
+                    for field in fields {
+                        let value = sockaddr_value(scope, field);
+                        handles.push(scope.root(value));
+                    }
+                    let mut values: Vec<Value> =
+                        handles.into_iter().map(|h| scope.get(h)).collect();
+                    values.insert(1, int(i64::from(flags)));
+                    values.insert(2, int(i64::from(index)));
+                    new_array(scope, &values)
+                },
+            ),
+            Err(error) => errno(error),
+        },
+        SockOp::SockaddrIn => {
+            let addr = bytes_at(scope, call, 0, "__sockaddr_in__")?;
+            let port = int_arg(call, 1).unwrap_or(0) as u16;
+            let flowinfo = int_arg(call, 2).unwrap_or(0) as u32;
+            let scope_id = int_arg(call, 3).unwrap_or(0) as u32;
+            let address = sock::sockaddr_in(&addr, port, flowinfo, scope_id);
+            sockaddr_value(scope, address)
+        }
+        SockOp::SockaddrUn => {
+            let path = bytes_at(scope, call, 0, "__sockaddr_un__")?;
+            let address = sock::sockaddr_un(&path);
+            sockaddr_value(scope, address)
+        }
+        SockOp::Parse => {
+            let bytes = bytes_at(scope, call, 0, "__sockaddr_parse__")?;
+            match sock::parse(&bytes) {
+                None => Value::NIL,
+                Some(sock::Parsed::Inet { port, addr }) => {
+                    let addr = binary_value(scope, &addr);
+                    new_array(
+                        scope,
+                        &[int(i64::from(libc::AF_INET)), int(i64::from(port)), addr],
+                    )
+                }
+                Some(sock::Parsed::Inet6 {
+                    port,
+                    addr,
+                    flowinfo,
+                    scope_id,
+                }) => {
+                    let addr = binary_value(scope, &addr);
+                    new_array(
+                        scope,
+                        &[
+                            int(i64::from(libc::AF_INET6)),
+                            int(i64::from(port)),
+                            addr,
+                            int(i64::from(flowinfo)),
+                            int(i64::from(scope_id)),
+                        ],
+                    )
+                }
+                Some(sock::Parsed::Unix(path)) => {
+                    let path = binary_value(scope, &path);
+                    new_array(scope, &[int(i64::from(libc::AF_UNIX)), path])
+                }
+                Some(sock::Parsed::Other(family)) => new_array(scope, &[int(i64::from(family))]),
+            }
+        }
+        SockOp::Ntop => {
+            let addr = bytes_at(scope, call, 0, "__inet_ntop__")?;
+            match sock::ntop(&addr) {
+                Some(text) => string_new(scope, &text),
+                None => Value::NIL,
+            }
+        }
+        SockOp::Pton => {
+            let text = bytes_at(scope, call, 1, "__inet_pton__")?;
+            match sock::pton(arg(0), &text) {
+                Some(addr) => binary_value(scope, &addr),
+                None => Value::NIL,
+            }
+        }
+        SockOp::Constants => rooted_array(scope, sock::constants(), |scope, (name, value)| {
+            let name = string_new(scope, name);
+            new_array(scope, &[name, int(value)])
+        }),
+        SockOp::Poll => {
+            // `[fd, events]` pairs and a timeout in milliseconds, -1 for none:
+            // the `revents` of each, in order.
+            let list = call.args.first().copied().unwrap_or(Value::NIL);
+            let mut fds = Vec::new();
+            for pair in array_elements(scope, list).unwrap_or_default() {
+                let parts = array_elements(scope, pair).unwrap_or_default();
+                let fd = parts.first().and_then(|v| v.as_fixnum()).unwrap_or(-1);
+                let events = parts.get(1).and_then(|v| v.as_fixnum()).unwrap_or(0);
+                fds.push(libc::pollfd {
+                    fd: fd as libc::c_int,
+                    events: events as libc::c_short,
+                    revents: 0,
+                });
+            }
+            let timeout = int_arg(call, 1).unwrap_or(-1) as libc::c_int;
+            // SAFETY: `fds` is `fds.len()` `pollfd`s, which `poll` reads and
+            // writes the `revents` of.
+            let ready = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout) };
+            if ready < 0 {
+                errno(std::io::Error::last_os_error())
+            } else {
+                let revents: Vec<Value> = fds.iter().map(|p| int(i64::from(p.revents))).collect();
+                new_array(scope, &revents)
+            }
+        }
+        SockOp::PollConstants => {
+            let pairs: &[(&str, i64)] = &[
+                ("POLLIN", i64::from(libc::POLLIN)),
+                ("POLLPRI", i64::from(libc::POLLPRI)),
+                ("POLLOUT", i64::from(libc::POLLOUT)),
+                ("POLLERR", i64::from(libc::POLLERR)),
+                ("POLLHUP", i64::from(libc::POLLHUP)),
+                ("POLLNVAL", i64::from(libc::POLLNVAL)),
+            ];
+            rooted_array(scope, pairs.iter(), |scope, &(name, value)| {
+                let name = string_new(scope, name);
+                new_array(scope, &[name, int(value)])
+            })
         }
     };
     stack.push(value);
