@@ -193,6 +193,7 @@ const LIBRARIES: &[(&str, &str)] = &[
         include_str!("../../../lib/digest/bubblebabble.rb"),
     ),
     ("io/nonblock", include_str!("../../../lib/io/nonblock.rb")),
+    ("socket", include_str!("../../../lib/socket.rb")),
 ];
 
 fn library(name: &str) -> Option<&'static str> {

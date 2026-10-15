@@ -428,6 +428,9 @@ pub enum Native {
     Fs(FsOp),
     /// The process's identity and clocks, for `Process` (#145).
     Sys(SysOp),
+    /// The socket calls `lib/socket.rb` is Ruby over, and `poll(2)` for
+    /// `IO.select` (#61).
+    Sock(SockOp),
     /// `Kernel#__sleep__(seconds)`: block the thread, answer the whole
     /// seconds slept. `Kernel#sleep` is Ruby around it.
     Sleep,
@@ -584,6 +587,79 @@ pub enum FsOp {
     Utime,
     /// `__fs_chown__(path, uid, gid, follow)`: true. -1 leaves one alone.
     Chown,
+}
+
+/// Which socket call. See `socket.rs` for the calls and `interp.rs`,
+/// `sock_native`, for what each takes and answers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SockOp {
+    /// `__sock_socket__(domain, type, protocol)`: `[fd]`.
+    Socket,
+    /// `__sock_pair__(domain, type, protocol)`: `[fd, fd]`.
+    Pair,
+    /// `__sock_bind__(fd, sockaddr)`: true.
+    Bind,
+    /// `__sock_connect__(fd, sockaddr)`: true.
+    Connect,
+    /// `__sock_listen__(fd, backlog)`: true.
+    Listen,
+    /// `__sock_accept__(fd)`: `[fd, sockaddr]`.
+    Accept,
+    /// `__sock_name__(fd, peer)`: the local or the peer's sockaddr.
+    Name,
+    /// `__sock_getopt__(fd, level, option)`: the value's bytes.
+    GetOpt,
+    /// `__sock_setopt__(fd, level, option, bytes)`: true.
+    SetOpt,
+    /// `__sock_send__(fd, data, flags, sockaddr or nil)`: `[sent]`.
+    Send,
+    /// `__sock_recv__(fd, max, flags)`: `[data, sender sockaddr]`.
+    Recv,
+    /// `__sock_shutdown__(fd, how)`: true.
+    Shutdown,
+    /// `__sock_sendmsg__(fd, data, flags, sockaddr or nil, controls)`:
+    /// `[sent]`, each control `[level, type, data]`.
+    SendMsg,
+    /// `__sock_recvmsg__(fd, max, flags, control max)`: `[data, sender,
+    /// msg_flags, controls]`.
+    RecvMsg,
+    /// `__sock_getaddrinfo__(host, service, family, type, protocol, flags)`:
+    /// `[[family, type, protocol, sockaddr, canonname], ...]`, or
+    /// `[code, message]` on failure.
+    GetAddrInfo,
+    /// `__sock_getnameinfo__(sockaddr, flags)`: `[host, service]`, or
+    /// `[code, message]`.
+    GetNameInfo,
+    /// `__sock_hostname__`: `gethostname(3)`.
+    Hostname,
+    /// `__sock_servport__(name, protocol)`: the port, or nil.
+    ServPort,
+    /// `__sock_servname__(port, protocol)`: the name, or nil.
+    ServName,
+    /// `__sock_ifindex__(name)`: the index, 0 for none.
+    IfIndex,
+    /// `__sock_ifname__(index)`: the name, or nil.
+    IfName,
+    /// `__sock_ifaddrs__`: `[name, flags, index, addr, netmask, broadaddr,
+    /// dstaddr]` for each, the addresses sockaddrs or nil.
+    IfAddrs,
+    /// `__sockaddr_in__(addr bytes, port, flowinfo, scope_id)`.
+    SockaddrIn,
+    /// `__sockaddr_un__(path)`, or nil when it is too long.
+    SockaddrUn,
+    /// `__sockaddr_parse__(sockaddr)`: `[AF_INET, port, addr]`, `[AF_INET6,
+    /// port, addr, flowinfo, scope_id]`, `[AF_UNIX, path]` or `[family]`.
+    Parse,
+    /// `__inet_ntop__(addr bytes)`: text, or nil.
+    Ntop,
+    /// `__inet_pton__(family, text)`: the bytes, or nil.
+    Pton,
+    /// `__sock_constants__`: `[name, value]` pairs for `Socket::Constants`.
+    Constants,
+    /// `__fd_poll__([[fd, events], ...], timeout_ms)`: each one's revents.
+    Poll,
+    /// `__poll_constants__`: `[name, value]` pairs for the `POLL*` bits.
+    PollConstants,
 }
 
 /// Which process query. See `interp.rs`, `sys_native`.
