@@ -9804,7 +9804,7 @@ fn native_call<'h>(
         }
 
         Native::HashCombine => {
-            let mut hasher = std::hash::DefaultHasher::new();
+            let mut hasher = crate::shared::hash_seed::hasher();
             for &value in &call.args {
                 hash_value(scope, value, &mut hasher, 0)?;
             }
@@ -9815,7 +9815,7 @@ fn native_call<'h>(
         }
 
         Native::HashValue => {
-            let mut hasher = std::hash::DefaultHasher::new();
+            let mut hasher = crate::shared::hash_seed::hasher();
             hash_value(scope, call.receiver, &mut hasher, 0)?;
             // Ruby's `hash` is a fixnum, so the top bits go: a fixnum is 62
             // bits and the shift keeps the sign bit clear.
@@ -11890,6 +11890,11 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             Builtin::Kernel,
             &["__sys_groups__"],
             Native::Sys(SysOp::Groups),
+        ),
+        (
+            Builtin::Kernel,
+            &["__sys_locale_charmap__"],
+            Native::Sys(SysOp::LocaleCharmap),
         ),
         (
             Builtin::Kernel,
@@ -14308,7 +14313,8 @@ fn binding_eval(
             _ => ("<main>".into(), 0),
         }
     };
-    let iseq = match crate::compile::eval(&program, chain, &name, level) {
+    let frozen = scope.frozen_string_literal();
+    let iseq = match crate::compile::eval(&program, chain, &name, level, frozen) {
         Ok(iseq) => Arc::new(iseq),
         Err(unsupported) => {
             return Err(Error::Unknowable {
@@ -15426,7 +15432,8 @@ fn load_file(
             });
         }
     };
-    let iseq = match crate::compile::program_as(&program, "<top (required)>") {
+    let frozen = scope.frozen_string_literal();
+    let iseq = match crate::compile::program_with(&program, "<top (required)>", frozen) {
         Ok(iseq) => Arc::new(iseq),
         Err(unsupported) => {
             return Err(Error::Unknowable {
@@ -15872,6 +15879,27 @@ fn sys_native(
             let mut values: Vec<Value> = groups.into_iter().map(|g| int(i64::from(g))).collect();
             values.push(int(max as i64));
             new_array(scope, &values)
+        }
+        SysOp::LocaleCharmap => {
+            // The character type the environment's locale names, then back
+            // to the C locale, so nothing else in the process sees a change.
+            // SAFETY: `setlocale` and `nl_langinfo` are called with valid
+            // arguments, and the codeset is copied before the locale changes
+            // back, which may free it.
+            let codeset = unsafe {
+                libc::setlocale(libc::LC_CTYPE, c"".as_ptr());
+                let name = libc::nl_langinfo(libc::CODESET);
+                let codeset = if name.is_null() {
+                    String::new()
+                } else {
+                    std::ffi::CStr::from_ptr(name)
+                        .to_string_lossy()
+                        .into_owned()
+                };
+                libc::setlocale(libc::LC_CTYPE, c"C".as_ptr());
+                codeset
+            };
+            string_new(scope, &codeset)
         }
         SysOp::ClockIds => {
             let ids: &[(&str, libc::clockid_t)] = &[

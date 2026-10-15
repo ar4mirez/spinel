@@ -32,6 +32,9 @@ class Thread
   end
 
   module Backtrace
+    # `--backtrace-limit`, or -1 for none.
+    def self.limit = Exception.__backtrace_limit__ || -1
+
     # One frame of a backtrace. Built by `core/exception.rb` and `Kernel` from
     # the `[path, line, label]` triples the VM records, never by a program:
     # CRuby gives this class no allocator.

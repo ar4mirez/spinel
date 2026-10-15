@@ -359,6 +359,11 @@ fn ruby_command(words: &[String]) -> ExitCode {
             source_encoding: args.source_encoding.as_deref(),
             data,
             loop_template: around.as_deref(),
+            frozen_string_literal: ruby_args::feature_enabled(
+                &args,
+                "frozen_string_literal",
+                false,
+            ),
         },
     )
 }
@@ -375,6 +380,8 @@ struct Around<'a> {
     data: Option<(String, usize)>,
     /// The `-n`/`-p` loop to put the program in.
     loop_template: Option<&'a str>,
+    /// `--enable=frozen-string-literal`.
+    frozen_string_literal: bool,
 }
 
 /// Compile and run one program, after the prelude when there is one.
@@ -390,6 +397,7 @@ fn run_program(
         source_encoding,
         data,
         loop_template,
+        frozen_string_literal,
     } = around;
     let source = source.to_vec();
     if dump_bytecode {
@@ -413,6 +421,7 @@ fn run_program(
     scope.set_argv(&path.to_string_lossy(), args);
     scope.set_budget(None);
     spinel_core::boot(&mut scope);
+    scope.set_frozen_string_literal(frozen_string_literal);
 
     // The flags' meaning runs first, as `ruby` runs `-r` before it reads the
     // program: an `at_exit` a required file registers runs even when the
@@ -467,10 +476,37 @@ fn run_program(
         if !report_syntax_errors(path, &source, &parsed) {
             syntax_error = true;
         } else {
-            let iseq = match spinel_vm::compile::program(&parsed.program) {
+            let iseq = match spinel_vm::compile::program_with(
+                &parsed.program,
+                "<main>",
+                frozen_string_literal,
+            ) {
                 Ok(iseq) => iseq,
                 Err(unsupported) => return cannot_run(path, &unsupported),
             };
+            // The parser's warnings about the main script, through the same
+            // `Warning.warn` a required file's go through.
+            let warnings: String = parsed
+                .warnings
+                .iter()
+                .map(|warning| {
+                    let at = parsed.program.source.line(warning.span.start);
+                    let text = format!("{}:{at}: warning: {}\n", path.display(), warning.message);
+                    let verbose = spinel_parse::is_verbose_warning(&warning.message);
+                    format!(
+                        "Kernel.__send__(:__parse_warning__, {}, {verbose})\n",
+                        ruby_args::ruby_string(&text)
+                    )
+                })
+                .collect();
+            if !warnings.is_empty() {
+                let parsed = spinel_parse::parse_file("<warnings>", warnings.as_bytes());
+                if let Ok(compiled) = spinel_vm::compile::program(&parsed.program) {
+                    let mut frame = spinel_vm::interp::Frame::new(0);
+                    outcome = spinel_vm::interp::eval_in(&mut scope, &mut frame, &compiled)
+                        .map(|_| spinel_vm::Value::NIL);
+                }
+            }
             if let Some((file, offset)) = &data {
                 let define = format!(
                     "DATA = File.open({file:?}, \"rb:\" + Encoding.default_external.name)\nDATA.seek({offset})\n"

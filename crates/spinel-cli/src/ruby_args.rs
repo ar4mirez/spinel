@@ -453,6 +453,13 @@ pub fn prelude(args: &RubyArgs) -> String {
     if args.debug {
         out.push_str("$DEBUG = true\n");
     }
+    if let Some(limit) = &args.backtrace_limit {
+        let _ = writeln!(
+            out,
+            "Exception.__backtrace_limit__ = Integer({})",
+            ruby_string(limit)
+        );
+    }
     // The switches that are read-only globals as well as behaviour.
     for (global, on) in [
         ("$-a", args.autosplit),
@@ -573,7 +580,7 @@ pub fn loop_template(args: &RubyArgs) -> Option<String> {
 }
 
 /// A Ruby String literal for `text`, escaping as `inspect` would.
-fn ruby_string(text: &str) -> String {
+pub fn ruby_string(text: &str) -> String {
     let mut out = String::from("\"");
     for c in text.chars() {
         match c {

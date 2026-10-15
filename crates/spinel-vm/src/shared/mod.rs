@@ -3,7 +3,8 @@
 //! `CLAUDE.md` forbids `static mut`, `lazy_static` with interior mutability, and
 //! thread-locals holding VM objects, because one `Heap` per Ractor is what makes
 //! Ractors parallel. The exception it names is this directory: **immutable,
-//! append-only tables** — symbols, and later frozen string literals.
+//! append-only tables** — symbols, and later frozen string literals — and
+//! values made once and never changed, as the hash seed is.
 //!
 //! Append-only is what makes them safe to share. An entry is never mutated and
 //! never removed, so an index handed out at any moment stays valid forever and
@@ -11,4 +12,5 @@
 //! append, not the reads that follow it.
 
 pub mod core_image;
+pub mod hash_seed;
 pub mod symbols;

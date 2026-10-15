@@ -1,1 +1,0 @@
-fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):Encoding.locale_charmap when setting LC_ALL=C returns a value based on the LC_ALL environment variable

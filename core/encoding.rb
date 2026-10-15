@@ -139,8 +139,10 @@ class Encoding
       @__default_internal__ = encoding.nil? ? nil : find(encoding)
     end
 
+    # Read once, as CRuby reads it at startup: a later `ENV["LC_ALL"] =`
+    # changes nothing.
     def locale_charmap
-      "UTF-8"
+      @__locale_charmap__ ||= __sys_locale_charmap__.freeze
     end
 
     # CRuby's `enc_compatible_latter`, ported line for line — including that

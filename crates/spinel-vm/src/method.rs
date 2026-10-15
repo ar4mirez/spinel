@@ -618,6 +618,9 @@ pub enum SysOp {
     /// `__sys_groups__`: the supplementary group ids, then `NGROUPS_MAX`
     /// last.
     Groups,
+    /// `__sys_locale_charmap__`: `nl_langinfo(CODESET)` for the locale the
+    /// environment names, as CRuby reads it at startup.
+    LocaleCharmap,
 }
 
 /// Which `Binding` operation. See `interp.rs`, `binding_native`.

@@ -1,6 +1,3 @@
 fails(#263: a chilled string does not warn when it is mutated):With neither --enable-frozen-string-literal nor --disable-frozen-string-literal flag set if file has no frozen_string_literal comment complain about modification of produced mutable strings
-fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The --enable-frozen-string-literal flag causes string literals to produce the same object each time
-fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The --enable-frozen-string-literal flag causes string literals to produce the same object for literals with the same content
-fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The --enable-frozen-string-literal flag causes string literals to produce the same object for literals with the same content in different files
-fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The --debug flag produces debugging info on attempted frozen string modification
-fails(#314: a whole program: newly run since #43 let ruby_exe start Spinel, and it disagrees):The --debug flag produces debugging info on mutating chilled string
+fails(#263: chilled string literals, and --debug recording where a frozen one was created):The --debug flag produces debugging info on attempted frozen string modification
+fails(#263: chilled string literals, and --debug recording where a frozen one was created):The --debug flag produces debugging info on mutating chilled string
