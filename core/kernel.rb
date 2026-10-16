@@ -519,6 +519,35 @@ module Kernel
   end
 
   # `Kernel`'s functions: private instance methods, public on `Kernel` itself.
+  # A constant's value under `# shareable_constant_value:`, made shareable:
+  # frozen, and everything in it, as `Ractor.make_shareable` does.
+  def __make_shareable__(object)
+    case object
+    when Array then object.each { |item| __make_shareable__(item) }
+    when Hash
+      object.each do |key, value|
+        __make_shareable__(key)
+        __make_shareable__(value)
+      end
+    when Range
+      __make_shareable__(object.begin)
+      __make_shareable__(object.end)
+    end
+    object.freeze
+  end
+
+  # `experimental_copy`: a deep copy of it, made shareable.
+  def __make_shareable_copy__(object)
+    copy = case object
+           when Array then object.map { |item| __make_shareable_copy__(item) }
+           when Hash then object.to_h { |key, value| [__make_shareable_copy__(key), __make_shareable_copy__(value)] }
+           when String then object.dup
+           else object
+           end
+    __make_shareable__(copy)
+  end
+  private :__make_shareable__, :__make_shareable_copy__
+
   module_function :Array, :Hash, :Integer, :String, :sleep, :__method__, :__callee__, :__dir__
 end
 

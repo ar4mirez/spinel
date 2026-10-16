@@ -1118,6 +1118,7 @@ impl Compiler {
                 }
                 self.emit(Insn::PushNil);
             }
+            ExprKind::ShareableConstant(node) => self.expr(&shareable_write(node))?,
             ExprKind::Assign(assign) => self.assign(assign, span)?,
             ExprKind::If(node) => self.if_expr(node)?,
             ExprKind::While(node) => self.while_expr(node)?,
@@ -5327,7 +5328,6 @@ fn node_name(kind: &ExprKind) -> &'static str {
         // one file in the corpus uses it.
         ExprKind::Alias(_) => "`alias` on a global variable",
         ExprKind::Exec(_) => "`BEGIN`/`END`",
-        ExprKind::ShareableConstant(_) => "a shareable-constant comment",
         ExprKind::ForwardingArgs => "argument forwarding",
         ExprKind::Missing => "a syntax error",
         _ => "this expression",
@@ -5391,5 +5391,77 @@ fn match_ref(name: &str) -> Option<MatchRef> {
             (n > 0).then_some(MatchRef::Group(n))
         }
         _ => None,
+    }
+}
+
+/// The write a `# shareable_constant_value:` comment governs, its value made
+/// shareable — deep-frozen — when the mode says to: always for the two
+/// experimental modes, and for a literal one under `literal`, as CRuby's
+/// `compile_shareable_constant_value` does.
+///
+/// ponytail: under `literal`, a value that is not a literal is left as it
+/// is, where CRuby checks that it is already shareable and raises
+/// `Ractor::IsolationError` if not. The check waits on Ractors (#117).
+fn shareable_write(node: &spinel_ast::ShareableConstant) -> Expr {
+    let ExprKind::Assign(assign) = &node.write.kind else {
+        return node.write.clone();
+    };
+    let freeze = match node.mode {
+        spinel_ast::ShareableMode::Literal => shareable_literal(&assign.value),
+        spinel_ast::ShareableMode::ExperimentalEverything
+        | spinel_ast::ShareableMode::ExperimentalCopy => true,
+    };
+    if !freeze {
+        return node.write.clone();
+    }
+    let name = if node.mode == spinel_ast::ShareableMode::ExperimentalCopy {
+        "__make_shareable_copy__"
+    } else {
+        "__make_shareable__"
+    };
+    let span = assign.value.span;
+    let value = Expr::new(
+        span,
+        ExprKind::Call(Box::new(spinel_ast::Call {
+            receiver: None,
+            name: name.into(),
+            name_span: span,
+            args: vec![assign.value.clone()],
+            block: None,
+            flags: spinel_ast::CallFlags::default(),
+        })),
+    );
+    let mut assign = (**assign).clone();
+    assign.value = value;
+    Expr::new(node.write.span, ExprKind::Assign(Box::new(assign)))
+}
+
+/// Whether CRuby's `literal` mode counts this as a literal: a number, a
+/// String, Symbol or Regexp written out, nil, true, false, or an Array, Hash
+/// or Range of those.
+fn shareable_literal(expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::Nil
+        | ExprKind::True
+        | ExprKind::False
+        | ExprKind::Int(_)
+        | ExprKind::Float(_)
+        | ExprKind::Rational(_)
+        | ExprKind::Imaginary(_)
+        | ExprKind::Str(_)
+        | ExprKind::Sym(_)
+        | ExprKind::Regexp(_) => true,
+        ExprKind::Array(items) => items.iter().all(shareable_literal),
+        ExprKind::Hash(hash) => hash.entries.iter().all(|entry| match &entry.kind {
+            spinel_ast::HashEntryKind::Pair { key, value } => {
+                shareable_literal(key) && shareable_literal(value)
+            }
+            _ => false,
+        }),
+        ExprKind::Range(range) => {
+            range.left.as_ref().is_none_or(shareable_literal)
+                && range.right.as_ref().is_none_or(shareable_literal)
+        }
+        _ => false,
     }
 }

@@ -130,7 +130,7 @@ class Float
   # this is an infinity and the other says whether it is one, which is how a
   # user-defined number sits beside Infinity. CRuby's `flo_cmp`, measured.
   def <=>(other)
-    return super if other.is_a?(Numeric)
+    return super if Integer === other || Float === other
     if !infinite?.nil? && other.respond_to?(:infinite?)
       sign = other.infinite?
       positive = self > 0.0

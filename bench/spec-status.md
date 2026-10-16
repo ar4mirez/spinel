@@ -76,8 +76,8 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `library/cgi` | 88 | 43 | 32 | 0 | 11 | 0 | 74% |
 | `library/coverage` | 5 | 53 | 0 | 0 | 53 | 0 | 0% |
 | `library/csv` | 42 | 68 | 38 | 0 | 30 | 0 | 56% |
-| `library/date` | 111 | 344 | 53 | 0 | 291 | 0 | 15% |
-| `library/datetime` | 36 | 193 | 20 | 0 | 173 | 0 | 10% |
+| `library/date` | 111 | 350 | 350 | 0 | 0 | 0 | 100% |
+| `library/datetime` | 36 | 197 | 197 | 0 | 0 | 0 | 100% |
 | `library/delegate` | 24 | 74 | 0 | 0 | 74 | 0 | 0% |
 | `library/digest` | 68 | 129 | 129 | 0 | 0 | 0 | 100% |
 | `library/drb` | 1 | 2 | 0 | 0 | 2 | 0 | 0% |
@@ -120,7 +120,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `library/syslog` | 20 | 75 | 0 | 0 | 75 | 0 | 0% |
 | `library/tempfile` | 10 | 42 | 0 | 0 | 42 | 0 | 0% |
 | `library/thread` | 2 | 2 | 0 | 0 | 0 | 2 | 0% |
-| `library/time` | 6 | 6 | 0 | 0 | 6 | 0 | 0% |
+| `library/time` | 6 | 7 | 7 | 0 | 0 | 0 | 100% |
 | `library/timeout` | 2 | 7 | 7 | 0 | 0 | 0 | 100% |
 | `library/tmpdir` | 2 | 10 | 10 | 0 | 0 | 0 | 100% |
 | `library/uri` | 105 | 196 | 101 | 0 | 95 | 0 | 52% |
@@ -131,4 +131,4 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `optional/capi` | 47 | 0 | 0 | 0 | 0 | 0 | — |
 | `optional/thread_safety` | 1 | 5 | 0 | 0 | 5 | 0 | 0% |
 | `security` | 13 | 26 | 16 | 0 | 10 | 0 | 62% |
-| **total** | 3835 | 32496 | 25874 | 0 | 6150 | 472 | 80% |
+| **total** | 3835 | 32507 | 26355 | 0 | 5680 | 472 | 81% |

@@ -194,6 +194,8 @@ const LIBRARIES: &[(&str, &str)] = &[
     ),
     ("io/nonblock", include_str!("../../../lib/io/nonblock.rb")),
     ("socket", include_str!("../../../lib/socket.rb")),
+    ("date", include_str!("../../../lib/date.rb")),
+    ("date_core", include_str!("../../../lib/date_core.rb")),
 ];
 
 fn library(name: &str) -> Option<&'static str> {
