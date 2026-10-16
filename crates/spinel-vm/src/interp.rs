@@ -3047,7 +3047,52 @@ pub fn eval_in(
                             }
                         };
                         let Some(value) = found else {
-                            return Err(uninitialized(scope, from, symbol, how));
+                            // An autoload, or a `const_missing` of the
+                            // program's, gets its turn: `Module#__const_missing__`
+                            // answers the value, or has the `NameError` raised
+                            // below raised after all (#39).
+                            let module = scope.classes().object(from);
+                            let how_name = match how {
+                                ConstScope::Lexical => "lexical",
+                                ConstScope::Qualified => "qualified",
+                                ConstScope::Top => "top",
+                            };
+                            let nesting: Vec<Value> = if how == ConstScope::Lexical {
+                                scope
+                                    .classes()
+                                    .nesting(cref)
+                                    .into_iter()
+                                    .map(|id| scope.classes().object(id))
+                                    .collect()
+                            } else {
+                                Vec::new()
+                            };
+                            let nesting = new_array(scope, &nesting);
+                            let hook = crate::shared::symbols::intern("__const_missing__");
+                            let defined = class_of(scope, module).is_some_and(|class| {
+                                scope.classes_mut().lookup(class, hook).is_some()
+                            });
+                            if !defined {
+                                return Err(uninitialized(scope, from, symbol, how));
+                            }
+                            let args = vec![
+                                Value::symbol(symbol),
+                                Value::symbol(crate::shared::symbols::intern(how_name)),
+                                nesting,
+                            ];
+                            if let Some(unwind) = call_kept(
+                                scope,
+                                &mut stack,
+                                &mut frames,
+                                proc_class,
+                                &mut ids,
+                                module,
+                                hook,
+                                args,
+                            )? {
+                                return Ok(Step::Unwind(unwind));
+                            }
+                            return Ok(Step::Next);
                         };
                         stack.push(value);
                         // `deprecate_constant` (#268). The list is empty unless
@@ -6312,6 +6357,39 @@ fn call_discarded<'h>(
         stack.truncate(height);
     }
     Ok(None)
+}
+
+/// Call a method from inside an instruction and leave what it answers on the
+/// stack, as the instruction's own value: the frame it pushes returns there.
+#[allow(clippy::too_many_arguments)]
+fn call_kept<'h>(
+    scope: &mut HandleScope<'h>,
+    stack: &mut Stack,
+    frames: &mut Vec<Call>,
+    proc_class: Handle<'h>,
+    ids: &mut u64,
+    receiver: Value,
+    symbol: SymbolId,
+    args: Vec<Value>,
+) -> Result<Option<Unwind>, Error> {
+    let cref = frames.last().map_or(CrefId::ROOT, |frame| frame.cref);
+    let call = Pending {
+        cache: None,
+        name: symbol,
+        receiver,
+        args,
+        keywords: Vec::new(),
+        block: Value::NIL,
+        block_is_literal: false,
+        cref,
+        implicit_self: true,
+        variable_call: false,
+        public_only: false,
+        target: Target::Method,
+        owner: None,
+        defined_as: None,
+    };
+    dispatch(scope, stack, frames, call, proc_class, ids)
 }
 
 /// Say `message` as a warning, at the line the running frame is on (#268).
@@ -9837,6 +9915,42 @@ fn native_call<'h>(
 
         Native::Refuse { what, needs } => Err(Error::Unknowable { what, needs }),
 
+        Native::CallerCrefBase => {
+            // The frame below the core method that asked: a method's own
+            // class — which a method defined in a `Class.new` block has where
+            // its lexical scope is the top level — or else its lexical scope.
+            let caller = frames.len().checked_sub(2).map(|at| &frames[at]);
+            let cref = caller.map_or(CrefId::ROOT, |frame| frame.cref);
+            let owner = caller
+                .and_then(|frame| frame.owner)
+                .filter(|&owner| !scope.classes().is_singleton(owner));
+            let base = owner.unwrap_or_else(|| scope.classes().cref_base(cref));
+            let value = scope.classes().object(base);
+            stack.push(value);
+            Ok(None)
+        }
+        Native::ConstUninitialized => {
+            let module = call.args.first().copied().unwrap_or(Value::NIL);
+            let name = call.args.get(1).and_then(|v| v.as_symbol());
+            let how = match call
+                .args
+                .get(2)
+                .and_then(|v| v.as_symbol())
+                .map(symbol_name)
+                .as_deref()
+            {
+                Some("lexical") => ConstScope::Lexical,
+                Some("top") => ConstScope::Top,
+                _ => ConstScope::Qualified,
+            };
+            let (Some(from), Some(name)) = (class_id_of(scope, module), name) else {
+                return Err(Error::NoDispatch {
+                    op: "__const_uninitialized__",
+                    operands: "a module and a constant name",
+                });
+            };
+            Err(uninitialized(scope, from, name, how))
+        }
         Native::NeedsThreads => Err(Error::Unknowable {
             what: "starting a `Thread`",
             needs: "`Thread` on the per-Ractor lock (#45)",
@@ -11237,11 +11351,20 @@ fn native_call<'h>(
             let text = if inspect {
                 // `%r{/foo/bar}.inspect` is `/\/foo\/bar/`: a slash that the
                 // source did not escape has to be escaped now, or the result
-                // does not read back as the same literal.
+                // does not read back as the same literal. `/n` says so too.
+                let options = {
+                    let mut nested = scope.nested();
+                    let handle = nested.root(call.receiver);
+                    nested
+                        .slot(handle, crate::regexp::REGEXP_OPTIONS)
+                        .as_fixnum()
+                        .unwrap_or(0)
+                };
                 format!(
-                    "/{}/{}",
+                    "/{}/{}{}",
                     escape_slashes(program.source()),
-                    program.flags().to_letters()
+                    program.flags().to_letters(),
+                    if options & 32 != 0 { "n" } else { "" }
                 )
             } else {
                 // `(?mix-mix:source)`: every flag named, on one side or the
@@ -11774,6 +11897,16 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             Builtin::Kernel,
             &["__needs_threads__"],
             Native::NeedsThreads,
+        ),
+        (
+            Builtin::Kernel,
+            &["__const_uninitialized__"],
+            Native::ConstUninitialized,
+        ),
+        (
+            Builtin::Kernel,
+            &["__caller_cref_base__"],
+            Native::CallerCrefBase,
         ),
         (
             Builtin::Kernel,

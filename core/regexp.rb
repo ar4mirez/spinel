@@ -30,12 +30,15 @@ class Regexp
   def ==(other)
     return true if equal?(other)
     return false unless other.is_a?(Regexp)
-    source == other.source && options == other.options
+    # `/n` is not part of what a pattern is: `/a/n == /a/`, measured.
+    source == other.source && (options & ~NOENCODING) == (other.options & ~NOENCODING)
   end
 
   def eql?(other)
     self == other
   end
+
+  def hash = [source, options & ~NOENCODING].hash
 end
 
 # `===` is Ruby so that a String-like object's `to_str` is asked (#28): a
@@ -213,7 +216,7 @@ class Regexp
       else
         pattern = new(pattern, *options)
       end
-      !pattern.source.match?(/\\[1-9]|\\k</)
+      !pattern.source.match?(/\\[1-9]|\\k<|\\g</)
     end
 
     def timeout

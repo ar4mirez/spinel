@@ -1030,14 +1030,23 @@ impl Compiler {
             }
 
             ExprKind::Regexp(regexp) => {
-                // `/n`, `/e`, `/s`, `/u` set the pattern's encoding, which this
-                // engine does not model. Dropping them silently would answer
-                // `/é/n` as though it were `/é/`, so the literal is refused
-                // until the Encoding slice.
-                if regexp.flags.encoding != spinel_ast::RegexpEncoding::None {
-                    return Err(Unsupported::at("a regexp encoding modifier", span));
+                // `/u` fixes the pattern to UTF-8, which every pattern here
+                // already matches in; `/n` on an ASCII pattern is one that
+                // matches in any ASCII-compatible encoding, as an unmarked
+                // ASCII pattern does, and says so in its options (#222). `/n`
+                // with a byte past ASCII, and `/e` and `/s`, need patterns over
+                // other encodings' characters, which wait for #19.
+                let mut options = regexp_options(&regexp.flags);
+                match regexp.flags.encoding {
+                    spinel_ast::RegexpEncoding::None => {}
+                    spinel_ast::RegexpEncoding::Utf8 => options |= 16,
+                    spinel_ast::RegexpEncoding::Ascii8Bit
+                        if flat_bytes(&regexp.parts).is_some_and(|bytes| bytes.is_ascii()) =>
+                    {
+                        options |= 32;
+                    }
+                    _ => return Err(Unsupported::at("a regexp encoding modifier", span)),
                 }
-                let options = regexp_options(&regexp.flags);
                 match flat_bytes(&regexp.parts) {
                     // A pattern known at compile time is a literal, and two
                     // evaluations of it are the *same* object — `2.times { rs

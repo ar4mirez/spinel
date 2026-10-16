@@ -53,7 +53,7 @@ module Kernel
   # answers false rather than looking for a file: here, the core classes
   # Spinel defines in `core/`.
   BUILTIN_FEATURES = %w[
-    enumerator enumerator.so thread thread.rb fiber fiber.so rbconfig rbconfig.rb set set.rb
+    enumerator enumerator.so thread thread.rb fiber fiber.so rbconfig rbconfig.rb set set.rb io/wait io/wait.so
   ].freeze
 
   def self.__require__(name)

@@ -548,6 +548,16 @@ module Kernel
   end
   private :__make_shareable__, :__make_shareable_copy__
 
+  # An autoload belongs to the module the calling code defines constants
+  # in: `Object` at the top level, a method's own class or module inside one.
+  def autoload(name, path) = __caller_cref_base__.autoload(name, path)
+  def autoload?(name, inherit = true) = __caller_cref_base__.autoload?(name, inherit)
+  private :autoload, :autoload?
+
+  # `Kernel.autoload` too: the caller's module, not `Kernel`.
+  def self.autoload(name, path) = __caller_cref_base__.autoload(name, path)
+  def self.autoload?(name, inherit = true) = __caller_cref_base__.autoload?(name, inherit)
+
   module_function :Array, :Hash, :Integer, :String, :sleep, :__method__, :__callee__, :__dir__
 end
 
