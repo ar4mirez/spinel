@@ -434,6 +434,14 @@ pub enum Native {
     /// `Kernel#__sleep__(seconds)`: block the thread, answer the whole
     /// seconds slept. `Kernel#sleep` is Ruby around it.
     Sleep,
+    /// `Kernel#__const_uninitialized__(module, name, how)`: raise the
+    /// `NameError` a failed constant reference raises, when
+    /// `Module#__const_missing__` found no autoload and no `const_missing`.
+    ConstUninitialized,
+    /// `Kernel#__caller_cref_base__`: the module the calling method's
+    /// constants are defined in — CRuby's `rb_vm_cbase` from where the core
+    /// method was called, which `Kernel#autoload` registers on.
+    CallerCrefBase,
     /// `Kernel#__needs_threads__`: the VM declining to start a thread (#45).
     ///
     /// A refusal rather than a Ruby `NotImplementedError`, because a spec that

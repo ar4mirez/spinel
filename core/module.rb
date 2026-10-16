@@ -196,7 +196,7 @@ class Module
       __const_deprecation__(symbol)
       return found[0]
     end
-    const_missing(symbol)
+    __const_missing__(symbol, :qualified, [])
   end
 
   def const_missing(name)
@@ -216,7 +216,12 @@ class Module
       end
       return true
     end
-    !__reflect_const_lookup__(self, __const_name__(name), inherit).nil?
+    symbol = __const_name__(name)
+    return true unless __reflect_const_lookup__(self, symbol, inherit).nil?
+    # A constant an autoload will define is defined, as CRuby has it.
+    owners = inherit ? ancestors : [self]
+    owners += [Object] if inherit && instance_of?(Module)
+    owners.any? { |owner| !owner.__autoload_entry__(symbol).nil? }
   end
 
   def const_set(name, value)
@@ -232,8 +237,99 @@ class Module
   end
 
   def constants(inherit = true)
-    __reflect_const_names__(self, inherit)
+    names = __reflect_const_names__(self, inherit)
+    owners = inherit ? ancestors : [self]
+    owners.each do |owner|
+      entries = owner.instance_variable_get(:@__autoloads__)
+      entries&.each_key { |name| names << name unless names.include?(name) }
+    end
+    names
   end
+
+  # --- autoload (#39) ----------------------------------------------------------
+  #
+  # A name and the file that defines it, kept on the module until the first
+  # reference to the name requires the file. The VM sends a reference it
+  # cannot resolve to `__const_missing__`, which is where that happens.
+
+  def autoload(name, path)
+    symbol = Symbol === name ? name : IO.__str__(name).to_sym
+    unless symbol.to_s.match?(/\A[A-Z]/)
+      raise NameError.new("autoload must be constant name: #{symbol}", symbol)
+    end
+    path = path.respond_to?(:to_path) && !(String === path) ? path.to_path : IO.__str__(path)
+    raise ArgumentError, "empty feature name" if path.empty?
+    return nil unless __reflect_const_lookup__(self, symbol, false).nil?
+    # A file already required, or being required now, is not autoloaded:
+    # CRuby treats the constant as loaded.
+    feature = begin
+      Kernel.__find_feature__(path)
+    rescue LoadError
+      nil
+    end
+    return nil if feature && $LOADED_FEATURES.include?(feature)
+    entries = instance_variable_get(:@__autoloads__) || instance_variable_set(:@__autoloads__, {})
+    entries[symbol] = path.dup.freeze
+    __send__(:const_added, symbol)
+    nil
+  end
+
+  def autoload?(name, inherit = true)
+    symbol = Symbol === name ? name : IO.__str__(name).to_sym
+    owners = inherit ? ancestors : [self]
+    owners.each do |owner|
+      path = owner.__autoload_entry__(symbol)
+      return path unless path.nil?
+    end
+    nil
+  end
+
+  def __autoload_entry__(symbol)
+    entries = instance_variable_get(:@__autoloads__)
+    entries && entries[symbol]
+  end
+
+  # Require what an autoload names, and answer the constant it defined.
+  def __autoload__(symbol, path)
+    require path
+    @__autoloads__&.delete(symbol)
+    found = __reflect_const_lookup__(self, symbol, false)
+    return found[0] unless found.nil?
+    nil
+  end
+
+  # A constant the VM did not find (#39): an autoload for the name, where the
+  # reference would have looked — the lexical scopes, the ancestors, `Object`
+  # — then the program's `const_missing`, then the `NameError` the VM would
+  # have raised itself.
+  def __const_missing__(name, how, nesting)
+    owners = case how
+             when :lexical then nesting + (nesting.first || self).ancestors + [Object]
+             when :top then Object.ancestors
+             else ancestors + (instance_of?(Module) ? [] : [])
+             end
+    owners = owners.uniq
+    owners.each do |owner|
+      path = owner.__autoload_entry__(name)
+      next if path.nil?
+      if owner.__autoload__(name, path).nil? && __reflect_const_lookup__(owner, name, false).nil?
+        full = owner.equal?(Object) ? name.to_s : "#{owner.inspect}::#{name}"
+        __warning__("Expected #{path} to define #{full} but it didn't", true)
+      end
+      # The original lookup again: what the file defined may be anywhere it
+      # would have looked, an outer scope as well as the one it was declared in.
+      owners.each do |scope|
+        found = __reflect_const_lookup__(scope, name, false)
+        return found[0] unless found.nil?
+      end
+    end
+    location = method(:const_missing).source_location
+    unless location.nil? || location[0].start_with?("<internal:")
+      return const_missing(name)
+    end
+    __const_uninitialized__(self, name, how)
+  end
+  private :__const_missing__
 
   def remove_const(name)
     symbol = __const_name__(name)

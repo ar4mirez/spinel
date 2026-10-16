@@ -1,1 +1,2 @@
 fails(#39: the module fixtures stop at an `autoload` of a fixture file before they reach the methods this example reads — the `Object` methods exported to `Kernel` are defined after it):Module#public makes a private Object instance method public in Kernel
+fails(#28: public on an inherited private method copies it rather than delegating to whatever the superclass defines later):Module#public on a superclass method calls the redefined method

@@ -309,7 +309,7 @@ the toolchain.
 
 What the engine does not implement yet returns `Error::Unsupported`, which the
 VM turns into `Error::Unknowable` and the spec runner reports as *blocked*: never a
-pass, never a wrong answer. Today that is `(?~)`, `\g<>`, conditional groups,
+pass, never a wrong answer. Today that is `(?~)`, a recursive `\g<>` call, conditional groups,
 `\K`, `\R`, `\X`, `\p{}`, `\k<name+1>` level specifiers, and the encoding
 modifiers `/n` `/e` `/s` `/u`, which wait for the Encoding slice.
 

@@ -132,6 +132,8 @@ impl Compiler {
         self.too_large()?;
         match ast {
             Ast::Empty => {}
+            // The parser has replaced every call with the group it calls.
+            Ast::Call(_) => unreachable!("a subexpression call left unresolved"),
             Ast::Literal { ch, icase } => {
                 self.emit(Inst::Char {
                     ch: *ch,

@@ -60,6 +60,9 @@ pub enum Ast {
         negate: bool,
         body: Box<Ast>,
     },
+    /// `\g<name>` or `\g<1>` as written; [`parse`] replaces every one with a
+    /// copy of the group it calls before the matcher sees the tree.
+    Call(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -175,6 +178,7 @@ pub fn parse(source: &str, flags: Flags) -> Result<Parsed, Error> {
         ));
     }
     let mut ast = ast;
+    resolve_calls(&mut ast, &parser.name_index)?;
     let (groups, names) = drop_unnamed_groups(&mut ast, parser.groups, parser.names);
     Ok(Parsed { ast, groups, names })
 }
@@ -216,6 +220,112 @@ fn drop_unnamed_groups(
     (named.len(), names)
 }
 
+/// Replace every subexpression call with a copy of the group it calls —
+/// capturing, so that the group's capture is the call's when the call matched
+/// last, as Onigmo has it.
+///
+/// A call into a group that, through calls, reaches itself is recursion, which
+/// a copy cannot express; that is refused. Every call the standard library
+/// makes — URI's RFC 3986 grammar is built of them — calls a group that does
+/// not.
+fn resolve_calls(ast: &mut Ast, names: &HashMap<String, usize>) -> Result<(), Error> {
+    if !contains_call(ast) {
+        return Ok(());
+    }
+    let mut groups: HashMap<usize, Ast> = HashMap::new();
+    collect_groups(ast, &mut groups);
+    let mut calling = Vec::new();
+    inline_calls(ast, names, &groups, &mut calling)
+}
+
+fn contains_call(ast: &Ast) -> bool {
+    match ast {
+        Ast::Call(_) => true,
+        Ast::Concat(parts) | Ast::Alt(parts) => parts.iter().any(contains_call),
+        Ast::Group { body, .. }
+        | Ast::Atomic(body)
+        | Ast::Repeat { body, .. }
+        | Ast::Look { body, .. } => contains_call(body),
+        _ => false,
+    }
+}
+
+fn collect_groups(ast: &Ast, groups: &mut HashMap<usize, Ast>) {
+    match ast {
+        Ast::Group { index, body } => {
+            if let Some(index) = index {
+                groups.insert(*index, ast.clone());
+            }
+            collect_groups(body, groups);
+        }
+        Ast::Concat(parts) | Ast::Alt(parts) => {
+            parts.iter().for_each(|part| collect_groups(part, groups))
+        }
+        Ast::Atomic(body) | Ast::Repeat { body, .. } | Ast::Look { body, .. } => {
+            collect_groups(body, groups)
+        }
+        _ => {}
+    }
+}
+
+fn inline_calls(
+    ast: &mut Ast,
+    names: &HashMap<String, usize>,
+    groups: &HashMap<usize, Ast>,
+    calling: &mut Vec<usize>,
+) -> Result<(), Error> {
+    match ast {
+        Ast::Call(name) => {
+            let index = match name.parse::<usize>() {
+                Ok(0) => return Err(Error::Unsupported("a \\g<0> call of the whole pattern")),
+                Ok(n) => n,
+                Err(_) if name.starts_with('-') || name.starts_with('+') => {
+                    return Err(Error::Unsupported("a relative \\g<> subexpression call"));
+                }
+                Err(_) => *names
+                    .get(name.as_str())
+                    .ok_or_else(|| Error::Syntax(format!("undefined name <{name}> reference")))?,
+            };
+            let Some(group) = groups.get(&index) else {
+                return Err(Error::Syntax(format!("undefined group <{name}> reference")));
+            };
+            if calling.contains(&index) {
+                return Err(Error::Unsupported("a recursive \\g<> subexpression call"));
+            }
+            let mut copy = group.clone();
+            calling.push(index);
+            let result = inline_calls(&mut copy, names, groups, calling);
+            calling.pop();
+            result?;
+            *ast = copy;
+            Ok(())
+        }
+        Ast::Group { index, body } => {
+            // A group's own body runs as part of a call into it, so a call it
+            // makes back to itself is recursion here too.
+            let pushed = index.is_some_and(|i| {
+                calling.push(i);
+                true
+            });
+            let result = inline_calls(body, names, groups, calling);
+            if pushed {
+                calling.pop();
+            }
+            result
+        }
+        Ast::Concat(parts) | Ast::Alt(parts) => {
+            for part in parts {
+                inline_calls(part, names, groups, calling)?;
+            }
+            Ok(())
+        }
+        Ast::Atomic(body) | Ast::Repeat { body, .. } | Ast::Look { body, .. } => {
+            inline_calls(body, names, groups, calling)
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Rewrite every group index and backreference through `renumber`.
 fn renumber_groups(ast: &mut Ast, renumber: &impl Fn(usize) -> Option<usize>) {
     match ast {
@@ -241,7 +351,12 @@ fn renumber_groups(ast: &mut Ast, renumber: &impl Fn(usize) -> Option<usize>) {
         Ast::Atomic(body) | Ast::Repeat { body, .. } | Ast::Look { body, .. } => {
             renumber_groups(body, renumber);
         }
-        Ast::Empty | Ast::Literal { .. } | Ast::Class(_) | Ast::Any { .. } | Ast::Anchor(_) => {}
+        Ast::Empty
+        | Ast::Literal { .. }
+        | Ast::Class(_)
+        | Ast::Any { .. }
+        | Ast::Anchor(_)
+        | Ast::Call(_) => {}
     }
 }
 
@@ -671,7 +786,7 @@ impl Parser {
             'G' => Ast::Anchor(Anchor::MatchStart),
             'w' | 'W' | 'd' | 'D' | 's' | 'S' | 'h' | 'H' => Ast::Class(self.shorthand_class(c)),
             'k' => return self.named_backref(),
-            'g' => return Err(Error::Unsupported("a \\g<> subexpression call")),
+            'g' => return self.subexpression_call(),
             'K' => return Err(Error::Unsupported("the \\K keep operator")),
             'R' => return Err(Error::Unsupported("the \\R line break escape")),
             'X' => return Err(Error::Unsupported("the \\X grapheme cluster escape")),
@@ -711,6 +826,28 @@ impl Parser {
                 self.literal(ch)
             }
         })
+    }
+
+    /// `\g<name>` or `\g'name'`: kept as written until the whole pattern is
+    /// read, since it may call a group defined after it.
+    fn subexpression_call(&mut self) -> Result<Ast, Error> {
+        let close = match self.next() {
+            Some('<') => '>',
+            Some('\'') => '\'',
+            _ => return Err(Error::Syntax("invalid group name <>".into())),
+        };
+        let mut name = String::new();
+        loop {
+            match self.next() {
+                Some(c) if c == close => break,
+                Some(c) => name.push(c),
+                None => return Err(Error::Syntax("invalid group name <>".into())),
+            }
+        }
+        if name.parse::<usize>().is_ok() || name.starts_with('-') || name.starts_with('+') {
+            self.numeric_backref = true;
+        }
+        Ok(Ast::Call(name))
     }
 
     fn named_backref(&mut self) -> Result<Ast, Error> {
@@ -1155,7 +1292,7 @@ mod tests {
 
     #[test]
     fn onigmo_only_constructs_refuse_rather_than_guess() {
-        for source in ["(?~foo)", "\\g<name>", "a\\Kb", "\\R", "\\p{Alpha}"] {
+        for source in ["(?~foo)", "(?<a>a\\g<a>?)", "a\\Kb", "\\R", "\\p{Alpha}"] {
             assert!(
                 matches!(parse(source, Flags::default()), Err(Error::Unsupported(_))),
                 "{source} should refuse"

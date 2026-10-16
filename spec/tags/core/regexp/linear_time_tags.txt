@@ -1,1 +1,2 @@
 fails(#33: guarded to regexp engines other than CRuby, so CRuby never runs it and cannot confirm the answer; the spec says not to rely on it):Regexp.linear_time? returns true for positive lookahead with capture group
+fails(#33: spinel-regex backtracks as CRuby's does, so like CRuby it does not call a subexpression call linear time):Regexp.linear_time? returns true for non-recursive subexpression call

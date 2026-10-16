@@ -310,6 +310,32 @@ mod tests {
     }
 
     #[test]
+    fn a_subexpression_call_matches_the_group_again() {
+        assert_eq!(
+            find("\\A(?<d>\\d)(?:\\.\\g<d>){3}\\z", "1.2.3.4"),
+            Some((0, 7))
+        );
+        // A call may come before the group it calls.
+        assert_eq!(find("\\g<p>(?<p>xy)", "xyxy"), Some((0, 4)));
+        let re = Regex::new("\\A(?<x>a.)-\\g<x>\\z", Flags::default()).expect("compiles");
+        let caps = re.find_at("ab-ac", 0).expect("runs").expect("matches");
+        // The group holds what the call matched, which came last.
+        assert_eq!(caps.group(1), Some((3, 5)));
+    }
+
+    #[test]
+    fn a_recursive_or_unknown_call_is_refused() {
+        assert!(matches!(
+            Regex::new("(?<a>a\\g<a>?)", Flags::default()),
+            Err(Error::Unsupported(_))
+        ));
+        assert!(matches!(
+            Regex::new("\\g<b>", Flags::default()),
+            Err(Error::Syntax(_))
+        ));
+    }
+
+    #[test]
     fn literals_and_alternation() {
         assert_eq!(find("foo", "a foo b"), Some((2, 5)));
         assert_eq!(find("foo|bar", "a bar"), Some((2, 5)));
