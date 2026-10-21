@@ -12,9 +12,10 @@ class String
     instance_of?(String) ? self : String.new(self)
   end
 
-  # `+str` is the receiver unless it is frozen, and then an unfrozen copy.
+  # `+str` is the receiver unless it is frozen or chilled (#263), and then an
+  # unfrozen copy.
   def +@
-    frozen? ? dup : self
+    frozen? || __chilled__(self) ? dup : self
   end
 
   # `-str`: a frozen String with the same content and encoding, and the same
@@ -388,7 +389,7 @@ class String
   end
 
   # `<<` with a String that can be appended as it stands is the primitive's.
-  # An Integer code point, what needs `to_str`, a frozen receiver, and two
+  # An Integer code point, what needs `to_str`, a frozen or chilled receiver, and two
   # encodings that have to be reconciled come here.
   def __append__(other)
     __modify__

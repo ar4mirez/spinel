@@ -9238,7 +9238,12 @@ fn native_call<'h>(
                 } else {
                     crate::strings::UTF_8
                 };
-                string_bytes_in(scope, Builtin::String.id(), name.as_bytes(), encoding)
+                let string =
+                    string_bytes_in(scope, Builtin::String.id(), name.as_bytes(), encoding);
+                // Chilled (#263), until 4.1 freezes it.
+                let handle = scope.root(string);
+                scope.chill(handle, true);
+                scope.get(handle)
             };
             stack.push(value);
             Ok(None)
@@ -9530,7 +9535,7 @@ fn native_call<'h>(
                 && heap_kind(scope, other) == Some(HeapKind::Str)
                 && {
                     let handle = scope.root(call.receiver);
-                    !scope.is_frozen(handle)
+                    !scope.is_frozen(handle) && scope.chilled(handle).is_none()
                 };
             if plain {
                 let mine = string_encoding(scope, call.receiver).unwrap_or(crate::strings::UTF_8);
@@ -9988,6 +9993,36 @@ fn native_call<'h>(
             what: "starting a `Thread`",
             needs: "`Thread` on the per-Ractor lock (#45)",
         }),
+
+        Native::Chilled | Native::Unchill => {
+            let object = first_arg(&call);
+            let was = if object.is_immediate() {
+                None
+            } else {
+                let handle = scope.root(object);
+                if matches!(native, Native::Unchill) {
+                    scope.unchill(handle)
+                } else {
+                    scope.chilled(handle)
+                }
+            };
+            stack.push(match was {
+                None => Value::NIL,
+                Some(false) => Value::symbol(symbol("literal")),
+                Some(true) => Value::symbol(symbol("symbol")),
+            });
+            Ok(None)
+        }
+
+        Native::Chill => {
+            let object = first_arg(&call);
+            if heap_kind(scope, object) == Some(HeapKind::Str) {
+                let handle = scope.root(object);
+                scope.chill(handle, nth_arg(&call, 1).is_truthy());
+            }
+            stack.push(object);
+            Ok(None)
+        }
 
         Native::StderrTty => {
             use std::io::IsTerminal as _;
@@ -11942,6 +11977,9 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             Native::BacktraceHere,
         ),
         (Builtin::Kernel, &["__stderr_tty__"], Native::StderrTty),
+        (Builtin::Kernel, &["__chilled__"], Native::Chilled),
+        (Builtin::Kernel, &["__unchill__"], Native::Unchill),
+        (Builtin::Kernel, &["__chill__"], Native::Chill),
         (
             Builtin::Kernel,
             &["__needs_threads__"],
@@ -12897,7 +12935,9 @@ fn materialise<'h>(
             Ok(crate::bignum::value(scope, &n))
         }
         Literal::Regexp { source, options } => regexp_literal(scope, source, *options),
-        Literal::Str(bytes, encoding) | Literal::FrozenStr(bytes, encoding) => {
+        Literal::Str(bytes, encoding)
+        | Literal::FrozenStr(bytes, encoding)
+        | Literal::ChilledStr(bytes, encoding) => {
             let encoding = *encoding;
             // A frozen literal is interned by content, CRuby's fstring: every
             // evaluation of every site with these bytes answers one object.
@@ -12916,6 +12956,8 @@ fn materialise<'h>(
                 scope.freeze(handle);
                 let value = scope.get(handle);
                 scope.regexps_mut().intern_fstring(bytes, encoding, value);
+            } else if matches!(literal, Literal::ChilledStr(..)) {
+                scope.chill(handle, false);
             }
             Ok(scope.get(handle))
         }

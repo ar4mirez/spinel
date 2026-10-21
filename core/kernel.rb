@@ -261,6 +261,7 @@ end
 # `core/module.rb`.
 module Kernel
   def singleton_class
+    Kernel.__thaw__(self)
     __reflect_singleton_class__(self)
   end
 
@@ -330,10 +331,32 @@ module Kernel
     self
   end
 
-  # The `FrozenError` every mutator raises: the class, then `inspect`.
+  # The `FrozenError` every mutator raises: the class, then `inspect`. An
+  # object that may be changed is thawed, in case it is chilled.
   def self.__check_frozen__(object)
-    return unless object.frozen?
-    raise FrozenError.new("can't modify frozen #{object.class}: #{object.inspect}", receiver: object)
+    if object.frozen?
+      raise FrozenError.new("can't modify frozen #{object.class}: #{object.inspect}", receiver: object)
+    end
+    __thaw__(object)
+  end
+
+  # A chilled String (#263) — a literal in a file with no
+  # `frozen_string_literal` comment, or what `Symbol#to_s` answers — is
+  # mutable, and says so the first time it is changed: the deprecation
+  # warning, once, and it is an ordinary String after that.
+  #
+  # ponytail: only mutation that passes through Ruby thaws. `def s.m`,
+  # `class << s` and `@x =` in a String method go through the VM, whose
+  # warnings carry no category yet; #341 moves the thaw there.
+  def self.__thaw__(object)
+    case __unchill__(object)
+    when :literal
+      __warning__("literal string will be frozen in the future " \
+                  "(run with --debug-frozen-string-literal for more information)", false, :deprecated)
+    when :symbol
+      __warning__("string returned by :#{object}.to_s will be frozen in the future", false, :deprecated)
+    end
+    nil
   end
 
   # The copy is the primitive's; what it means for the class is
@@ -365,6 +388,9 @@ module Kernel
     if freeze.nil?
       copy.__send__(:initialize_clone, self)
       copy.freeze if frozen?
+      # A chilled String's copy is chilled too; `freeze: false` thaws it.
+      chilled = __chilled__(self)
+      __chill__(copy, chilled == :symbol) unless chilled.nil?
     else
       copy.__send__(:initialize_clone, self, freeze: freeze)
       copy.freeze if freeze
@@ -626,7 +652,9 @@ module Kernel
   end
 
   def instance_variable_set(name, value)
-    __ivar_set__(__ivar_name__(name), value)
+    name = __ivar_name__(name)
+    Kernel.__thaw__(self) unless frozen?
+    __ivar_set__(name, value)
   end
 
   # The spelling is checked before the object, and a frozen object before

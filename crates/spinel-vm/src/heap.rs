@@ -81,6 +81,15 @@ const FROZEN: u8 = 0b10;
 /// that holds none stays a flag test.
 const SIDE_IVARS: u8 = 0b100;
 
+/// Set on a *chilled* String (#263): a literal in a file with no
+/// `frozen_string_literal` comment. `frozen?` is false, but the first mutation
+/// clears it and warns that the literal will be frozen in the future.
+const CHILLED: u8 = 0b1000;
+
+/// [`CHILLED`]'s twin for what `Symbol#to_s` answers, which warns in other
+/// words.
+const CHILLED_SYMBOL: u8 = 0b1_0000;
+
 /// Set from allocation until the cell is swept onto a free list.
 ///
 /// The collector never reads it. It exists so that storing a `Value` can assert, in
@@ -1381,10 +1390,42 @@ impl<'h> HandleScope<'h> {
     }
 
     /// Mark the object frozen. Idempotent, and one-way: Ruby has no `unfreeze`.
+    /// A frozen String is no longer chilled.
     pub fn freeze(&mut self, handle: Handle<'h>) {
         let object = self.object(handle);
         // SAFETY: `handle` is rooted, so the cell it names is live.
-        unsafe { (*object.header()).flags |= FROZEN };
+        let flags = unsafe { &mut (*object.header()).flags };
+        *flags = (*flags | FROZEN) & !(CHILLED | CHILLED_SYMBOL);
+    }
+
+    /// Mark a String chilled (#263): by a literal, or by `Symbol#to_s` when
+    /// `symbol` is set.
+    pub fn chill(&mut self, handle: Handle<'h>, symbol: bool) {
+        let object = self.object(handle);
+        let bit = if symbol { CHILLED_SYMBOL } else { CHILLED };
+        // SAFETY: `handle` is rooted, so the cell it names is live.
+        unsafe { (*object.header()).flags |= bit };
+    }
+
+    /// Clear the object's chilled mark, answering what it was: `None` for an
+    /// object that was not chilled, `Some(true)` for one `Symbol#to_s` made.
+    pub fn unchill(&mut self, handle: Handle<'h>) -> Option<bool> {
+        let object = self.object(handle);
+        // SAFETY: as above.
+        let flags = unsafe { &mut (*object.header()).flags };
+        let was = *flags & (CHILLED | CHILLED_SYMBOL);
+        *flags &= !(CHILLED | CHILLED_SYMBOL);
+        (was != 0).then_some(was & CHILLED_SYMBOL != 0)
+    }
+
+    /// Whether the object is chilled, and so `+@` copies it: `None` when it
+    /// is not, `Some(true)` when `Symbol#to_s` made it.
+    #[must_use]
+    pub fn chilled(&self, handle: Handle<'h>) -> Option<bool> {
+        let object = self.object(handle);
+        // SAFETY: as above.
+        let flags = unsafe { (*object.header()).flags };
+        (flags & (CHILLED | CHILLED_SYMBOL) != 0).then_some(flags & CHILLED_SYMBOL != 0)
     }
 
     /// Whether [`HandleScope::freeze`] has been called on this object.
