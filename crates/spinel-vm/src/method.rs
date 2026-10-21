@@ -785,9 +785,9 @@ pub enum BindingOp {
     SetReceiver,
     /// `Binding#source_location`.
     Location,
-    /// `Binding#__binding_location_set__(file, line)`: a method's proc
-    /// reports where the method was written.
-    SetLocation,
+    /// `Binding#__binding_place_set__(cref, file, line)`: a method's proc
+    /// has the method's lexical scope and reports where it was written.
+    SetPlace,
 }
 
 /// Which `String`/`Encoding` operation. See `interp.rs`, `str_native`.

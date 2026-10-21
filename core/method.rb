@@ -92,8 +92,9 @@ class Method
   end
 
   def super_method
-    found = __reflect_method_lookup__(@__receiver__, @__found__[0], @__name__, true)
-    found.nil? ? nil : Method.__make__(@__receiver__, @__found__[7] || @__name__, found)
+    name = original_name
+    found = __reflect_method_lookup__(@__receiver__, @__found__[0], name, true)
+    found.nil? ? nil : Method.__make__(@__receiver__, name, found)
   end
 
   # A lambda, as CRuby's is, that calls through to this and reports this
@@ -101,7 +102,7 @@ class Method
   def to_proc
     method = self
     made = lambda { |*args, **keywords, &block| method.call(*args, **keywords, &block) }
-    Proc.__stands_for__(made, arity, parameters, source_location, nil, @__receiver__)
+    Proc.__stands_for__(made, arity, parameters, source_location, nil, self)
   end
 
   def curry(*arity)
@@ -192,8 +193,9 @@ class UnboundMethod
   end
 
   def super_method
-    found = __reflect_method_lookup__(nil, @__found__[0], @__name__, true, @__from__)
-    found.nil? ? nil : UnboundMethod.__make__(@__found__[7] || @__name__, found, @__from__)
+    name = original_name
+    found = __reflect_method_lookup__(nil, @__found__[0], name, true, @__from__)
+    found.nil? ? nil : UnboundMethod.__make__(name, found, @__from__)
   end
 
   def ==(other)
@@ -317,9 +319,9 @@ class Proc
   # `Method#to_proc`, `Symbol#to_proc` — is a C function's proc in CRuby. It
   # reports what it stands for rather than the Ruby block it is here: an
   # arity, a parameter list, a location, a label for `inspect`, and the
-  # receiver of a method, which is the only one with a binding.
-  def self.__stands_for__(made, arity, parameters, location, label = nil, receiver = nil)
-    made.__ivar_set__(:@__callable__, [arity, parameters, location, label, receiver])
+  # Method it calls, if it calls one, which is the only one with a binding.
+  def self.__stands_for__(made, arity, parameters, location, label = nil, method = nil)
+    made.__ivar_set__(:@__callable__, [arity, parameters, location, label, method])
     made
   end
 
@@ -352,13 +354,14 @@ class Proc
   def binding
     callable = @__callable__
     return __proc_binding__(self) if callable.nil?
-    receiver = callable[4]
-    raise ArgumentError, "Can't create Binding from C level Proc" if receiver.nil?
-    location = callable[2] || ["(binding)", 1]
-    Proc.__empty_binding__.__binding_receiver_set__(receiver).__binding_location_set__(*location)
+    method = callable[4]
+    raise ArgumentError, "Can't create Binding from C level Proc" if method.nil?
+    file, line = callable[2] || ["(binding)", 1]
+    binding = Proc.__empty_binding__.__binding_receiver_set__(method.receiver)
+    binding.__binding_place_set__(method.__found__[8], file, line)
   end
 
-  # A binding with no locals, for a method's proc to lend its receiver to.
+  # A binding with no locals, for a method's proc to lend its scope to.
   def self.__empty_binding__ = __proc_binding__(proc {})
 
   def to_proc = self
