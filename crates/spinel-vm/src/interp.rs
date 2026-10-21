@@ -701,22 +701,22 @@ fn leave_fiber(
             Ok(None)
         }
         FiberExit::Unwind(Unwind::Exception(exception)) => Ok(Some(Unwind::Exception(exception))),
-        FiberExit::Unwind(Unwind::Break { .. }) => Ok(Some(Unwind::Exception(exception_new(
-            scope,
-            "LocalJumpError",
-            "break from proc-closure",
-        )))),
-        FiberExit::Unwind(Unwind::Return { .. }) => Ok(Some(Unwind::Exception(exception_new(
-            scope,
-            "LocalJumpError",
-            "unexpected return",
-        )))),
-        FiberExit::Unwind(Unwind::Throw { tag, .. }) => {
-            let message = format!("uncaught throw {}", inspect(scope, tag));
+        // Each becomes the exception it would have been without the fiber,
+        // carrying the same values: `exception_new` collects the note.
+        FiberExit::Unwind(
+            unwind @ (Unwind::Break { .. } | Unwind::Return { .. } | Unwind::Throw { .. }),
+        ) => {
+            let raised = match unwind {
+                Unwind::Break { value, .. } => local_jump_error(scope, "break", value),
+                Unwind::Return { value, .. } => local_jump_error(scope, "return", value),
+                Unwind::Throw { tag, value } => uncaught_throw(scope, tag, value),
+                _ => unreachable!("matched above"),
+            };
+            let Error::Raise { class, message } = raised else {
+                unreachable!("each of the three is a raise")
+            };
             Ok(Some(Unwind::Exception(exception_new(
-                scope,
-                "UncaughtThrowError",
-                &message,
+                scope, class, &message,
             ))))
         }
         FiberExit::Unwind(Unwind::Goto { .. }) => {
@@ -2759,6 +2759,7 @@ pub fn eval_in(
                             return Err(Error::raise("TypeError", "can't define singleton"));
                         }
                         let owner = scope.classes().cref_class(cref);
+                        module_frozen_check(scope, owner)?;
                         define_method_on(
                             scope,
                             owner,
@@ -3033,8 +3034,9 @@ pub fn eval_in(
                         let receiver = stack.pop().expect("a receiver to define on");
                         // `def frozen_obj.m` raises: a singleton method is stored on
                         // the object, and a frozen object does not take stores.
-                        frozen_check(scope, receiver, "object")?;
+                        frozen_check(scope, receiver)?;
                         let owner = singleton_of(scope, receiver)?;
+                        module_frozen_check(scope, owner)?;
                         // Always public: a bare `private` in the class body does
                         // not reach `def self.m`, measured on ruby 4.0.6.
                         define_method_on(scope, owner, symbol, iseq, cref, Visibility::Public);
@@ -3409,7 +3411,7 @@ pub fn eval_in(
                         // to the method it was written in, and if that method has
                         // already returned there is nothing to return *from*.
                         if !frames.iter().any(|call| call.id == frame) {
-                            return Err(Error::raise("LocalJumpError", "unexpected return"));
+                            return Err(local_jump_error(scope, "return", value));
                         }
                         return Ok(Step::Unwind(Unwind::Return { frame, value }));
                     }
@@ -3418,7 +3420,7 @@ pub fn eval_in(
                         let value = stack.pop().unwrap_or(Value::NIL);
                         let frame = frames[top].breaks;
                         if frame == 0 || !frames.iter().any(|call| call.id == frame) {
-                            return Err(Error::raise("LocalJumpError", "break from proc-closure"));
+                            return Err(local_jump_error(scope, "break", value));
                         }
                         return Ok(Step::Unwind(Unwind::Break { frame, value }));
                     }
@@ -4372,11 +4374,11 @@ fn dispatch<'h>(
                 // with its own message, measured:
                 // "super: no superclass method 'm' for an instance of Z".
                 let exception = if is_super {
-                    super_missing_error(scope, call.receiver, call.name)
+                    super_missing_error(scope, call.receiver, call.name, &call.args)
                 } else if call.variable_call {
                     undefined_name_error(scope, call.receiver, call.name)
                 } else {
-                    no_method_error(scope, call.receiver, call.name)
+                    no_method_error(scope, call.receiver, call.name, &call.args)
                 };
                 return Ok(Some(Unwind::Exception(exception)));
             };
@@ -4393,7 +4395,8 @@ fn dispatch<'h>(
                 if let Some(redirected) = to_method_missing(scope, class, &call) {
                     return dispatch(scope, stack, frames, redirected, proc_class, ids);
                 }
-                let exception = visibility_error(scope, call.receiver, call.name, refused);
+                let exception =
+                    visibility_error(scope, call.receiver, call.name, refused, &call.args);
                 return Ok(Some(Unwind::Exception(exception)));
             }
             match scope.definitions().get(method.body).cloned() {
@@ -5326,23 +5329,94 @@ fn exception_new(scope: &mut HandleScope<'_>, class: &str, message: &str) -> Val
     // Taken whatever the class, so a note never outlives the raise after it.
     let note = scope.take_name_error(message);
     let exception = exception_of(scope, object, message);
-    if let Some((name, receiver)) = note {
-        // A `FrozenError` has a receiver and no name.
-        let ivars = [(EXC_RECEIVER, receiver), (EXC_NAME, name)];
-        let wanted = if class == "FrozenError" { 1 } else { 2 };
-        for (ivar, value) in ivars.into_iter().take(wanted) {
+    if let Some((first, second)) = note {
+        // The note's two values are whatever this class keeps: a `FrozenError`
+        // has a receiver and no name.
+        let ivars: &[(&str, Value)] = match class {
+            "FrozenError" => &[(EXC_RECEIVER, second)],
+            "UncaughtThrowError" => &[("@tag", first), ("@value", second)],
+            "LocalJumpError" => &[("@exit_value", second), ("@reason", first)],
+            "SyntaxError" => &[("@path", first)],
+            _ => &[(EXC_RECEIVER, second), (EXC_NAME, first)],
+        };
+        for &(ivar, value) in ivars {
             ivar_set(scope, exception, symbol(ivar), value)
                 .expect("a fresh exception is unfrozen and holds instance variables");
+        }
+        // CRuby's message ends with the object's `inspect`, which is Ruby, so
+        // `FrozenError#to_s` adds it — see `EXC_MESSAGE_HEAD`.
+        if class == "FrozenError" {
+            set_message_head(scope, exception, message);
         }
     }
     exception
 }
 
+/// `@__message_head__`: the part of a message the VM can write, where Ruby
+/// writes the rest when the message is read (#29).
+///
+/// CRuby builds a `NameError`'s message lazily — "undefined method 'm' for "
+/// then the receiver, named by sending it `name` or `inspect` — and ends a
+/// `FrozenError`'s with the object's `inspect`. Both are sends, which a
+/// primitive cannot make, so `NameError#to_s` and `FrozenError#to_s` in
+/// `core/exception.rb` finish them. `@__message__` keeps the VM's own
+/// rendering, for a report that never reaches Ruby.
+const EXC_MESSAGE_HEAD: &str = "@__message_head__";
+
+fn set_message_head(scope: &mut HandleScope<'_>, exception: Value, head: &str) {
+    let handle = scope.root(exception);
+    let text = string_new(scope, head);
+    let exception = scope.get(handle);
+    ivar_set(scope, exception, symbol(EXC_MESSAGE_HEAD), text)
+        .expect("a fresh exception is unfrozen and holds instance variables");
+}
+
+/// `NoMethodError#args`: the arguments the failed call was given.
+fn set_args(scope: &mut HandleScope<'_>, exception: Value, args: &[Value]) {
+    let handle = scope.root(exception);
+    let array = new_array(scope, args);
+    let exception = scope.get(handle);
+    ivar_set(scope, exception, symbol("@args"), array)
+        .expect("a fresh exception is unfrozen and holds instance variables");
+}
+
 /// A `FrozenError` that knows which object refused: `e.receiver`. The same
 /// heap note as [`name_error`], with no name in it.
-fn frozen_error(scope: &mut HandleScope<'_>, message: String, receiver: Value) -> Error {
+///
+/// One wording for every refusal, measured on ruby 4.0.7: "can't modify
+/// frozen Array: [1]", the object's class and then its `inspect`, which
+/// `FrozenError#to_s` adds — see [`EXC_MESSAGE_HEAD`].
+fn frozen_error(scope: &mut HandleScope<'_>, receiver: Value) -> Error {
+    let message = format!("can't modify frozen {}", class_name(scope, receiver));
     scope.set_name_error(&message, Value::NIL, receiver);
     Error::raise("FrozenError", message)
+}
+
+/// Source that did not parse: `e.path` is the file, or the name `eval` was
+/// given.
+fn syntax_error(scope: &mut HandleScope<'_>, message: String, path: &str) -> Error {
+    let path = string_new(scope, path);
+    scope.set_name_error(&message, path, Value::NIL);
+    Error::raise("SyntaxError", message)
+}
+
+/// `throw` with no `catch` for its tag: `e.tag` and `e.value`.
+fn uncaught_throw(scope: &mut HandleScope<'_>, tag: Value, value: Value) -> Error {
+    let message = format!("uncaught throw {}", inspect(scope, tag));
+    scope.set_name_error(&message, tag, value);
+    Error::raise("UncaughtThrowError", message)
+}
+
+/// A `return` or `break` with nowhere to go: `e.reason` is `:return` or
+/// `:break`, and `e.exit_value` the value it carried.
+fn local_jump_error(scope: &mut HandleScope<'_>, reason: &str, value: Value) -> Error {
+    let message = match reason {
+        "return" => "unexpected return",
+        _ => "break from proc-closure",
+    };
+    let reason = Value::symbol(crate::shared::symbols::intern(reason));
+    scope.set_name_error(message, reason, value);
+    Error::raise("LocalJumpError", message)
 }
 
 /// A `NameError` that knows what it is about: `e.name` and `e.receiver`.
@@ -5466,13 +5540,11 @@ fn visibility_error(
     receiver: Value,
     name: SymbolId,
     visibility: Visibility,
+    args: &[Value],
 ) -> Value {
     let method = symbol_name(name);
-    let message = format!(
-        "{} method '{method}' called for {}",
-        visibility.name(),
-        describe_receiver(scope, receiver)
-    );
+    let head = format!("{} method '{method}' called", visibility.name());
+    let message = format!("{head} for {}", describe_receiver(scope, receiver));
     let rooted = scope.root(receiver);
     let object = exception_new(scope, "NoMethodError", &message);
     let handle = scope.root(object);
@@ -5484,7 +5556,13 @@ fn visibility_error(
     };
     set(scope, EXC_NAME, Value::symbol(name));
     set(scope, EXC_RECEIVER, receiver);
-    object
+    // `main` reads "main" however it is asked, so the VM's message is
+    // already the whole of it.
+    if receiver != scope.main() {
+        set_message_head(scope, object, &head);
+    }
+    set_args(scope, object, args);
+    scope.get(handle)
 }
 
 /// `super` with nothing above it on the chain.
@@ -5492,12 +5570,15 @@ fn visibility_error(
 /// Its own message rather than `no_method_error`'s, because Ruby's names the
 /// keyword: "super: no superclass method 'm' for an instance of Z". A spec
 /// that asserts on the message is asserting on that word.
-fn super_missing_error(scope: &mut HandleScope<'_>, receiver: Value, name: SymbolId) -> Value {
+fn super_missing_error(
+    scope: &mut HandleScope<'_>,
+    receiver: Value,
+    name: SymbolId,
+    args: &[Value],
+) -> Value {
     let method = symbol_name(name);
-    let message = format!(
-        "super: no superclass method '{method}' for {}",
-        describe_receiver(scope, receiver)
-    );
+    let head = format!("super: no superclass method '{method}'");
+    let message = format!("{head} for {}", describe_receiver(scope, receiver));
     let rooted = scope.root(receiver);
     let object = exception_new(scope, "NoMethodError", &message);
     let handle = scope.root(object);
@@ -5509,17 +5590,20 @@ fn super_missing_error(scope: &mut HandleScope<'_>, receiver: Value, name: Symbo
     };
     set(scope, EXC_NAME, Value::symbol(name));
     set(scope, EXC_RECEIVER, receiver);
-    object
+    // `main` reads "main" however it is asked, so the VM's message is
+    // already the whole of it.
+    if receiver != scope.main() {
+        set_message_head(scope, object, &head);
+    }
+    set_args(scope, object, args);
+    scope.get(handle)
 }
 
 /// A bare name that is neither a local nor a method: a `NameError`, not the
 /// `NoMethodError` that `nope()` or `self.nope` is. Measured.
 fn undefined_name_error(scope: &mut HandleScope<'_>, receiver: Value, name: SymbolId) -> Value {
-    let message = format!(
-        "undefined local variable or method '{}' for {}",
-        symbol_name(name),
-        describe_receiver(scope, receiver)
-    );
+    let head = format!("undefined local variable or method '{}'", symbol_name(name));
+    let message = format!("{head} for {}", describe_receiver(scope, receiver));
     let rooted = scope.root(receiver);
     let object = exception_new(scope, "NameError", &message);
     let handle = scope.root(object);
@@ -5529,15 +5613,23 @@ fn undefined_name_error(scope: &mut HandleScope<'_>, receiver: Value, name: Symb
         ivar_set(scope, object, symbol(ivar), value)
             .expect("a fresh exception is unfrozen and holds instance variables");
     }
-    object
+    // `main` reads "main" however it is asked, so the VM's message is
+    // already the whole of it.
+    if receiver != scope.main() {
+        set_message_head(scope, object, &head);
+    }
+    scope.get(handle)
 }
 
-fn no_method_error(scope: &mut HandleScope<'_>, receiver: Value, name: SymbolId) -> Value {
+fn no_method_error(
+    scope: &mut HandleScope<'_>,
+    receiver: Value,
+    name: SymbolId,
+    args: &[Value],
+) -> Value {
     let method = symbol_name(name);
-    let message = format!(
-        "undefined method '{method}' for {}",
-        describe_receiver(scope, receiver)
-    );
+    let head = format!("undefined method '{method}'");
+    let message = format!("{head} for {}", describe_receiver(scope, receiver));
     // Rooted across the allocations below. The collector is mark-sweep and does
     // not move, so the `Value` read back stays valid; the handle is what keeps
     // it from being swept while `exception_new` allocates.
@@ -5552,7 +5644,13 @@ fn no_method_error(scope: &mut HandleScope<'_>, receiver: Value, name: SymbolId)
     };
     set(scope, EXC_NAME, Value::symbol(name));
     set(scope, EXC_RECEIVER, receiver);
-    object
+    // `main` reads "main" however it is asked, so the VM's message is
+    // already the whole of it.
+    if receiver != scope.main() {
+        set_message_head(scope, object, &head);
+    }
+    set_args(scope, object, args);
+    scope.get(handle)
 }
 
 /// How CRuby names a receiver in a `NoMethodError`, measured on ruby 4.0.6.
@@ -5574,10 +5672,10 @@ fn describe_receiver(scope: &mut HandleScope<'_>, receiver: Value) -> String {
     if receiver == scope.main() {
         return "main".to_owned();
     }
-    // A class or module names itself; anything else names its class. CRuby
-    // writes `#<Class:0x0000…>` for an anonymous one and the address differs
-    // per run, so no table can hold it — Spinel keeps its own wording, which is
-    // what every other report in this file already says.
+    // A class or module names itself; anything else names its class. This is
+    // the VM's own rendering, kept in `@__message__` for a report that never
+    // reaches Ruby: the message a program reads is `NameError#to_s`'s, which
+    // sends `name` and `inspect` as CRuby does — see `EXC_MESSAGE_HEAD`.
     if let Some(id) = class_id_of(scope, receiver) {
         let kind = scope.classes().kind(id);
         let (word, fallback) = match kind {
@@ -6866,17 +6964,30 @@ fn pop_name(stack: &mut Stack, keyword: &'static str) -> Result<crate::value::Sy
 
 /// A frozen module refuses a change to its method table, naming itself the
 /// way every mutator's `FrozenError` does: "can't modify frozen Class: C".
+/// A singleton class names the object it belongs to instead, as CRuby's
+/// `rb_class_modify_check` does, and is frozen whenever that object is: `class
+/// << frozen; def m; end; end` refuses.
 fn module_frozen_check(scope: &mut HandleScope<'_>, id: ClassId) -> Result<(), Error> {
     let object = scope.classes().object(id);
     let handle = scope.root(object);
+    let attached = scope
+        .classes()
+        .attached(id)
+        .filter(|_| scope.classes().is_singleton(id));
+    if let Some(attached) = attached {
+        let frozen = scope.is_frozen(handle)
+            || (!attached.is_immediate() && {
+                let owner = scope.root(attached);
+                scope.is_frozen(owner)
+            });
+        return if frozen {
+            Err(frozen_error(scope, attached))
+        } else {
+            Ok(())
+        };
+    }
     if scope.is_frozen(handle) {
-        let class = class_name(scope, object);
-        let shown = inspect(scope, object);
-        return Err(frozen_error(
-            scope,
-            format!("can't modify frozen {class}: {shown}"),
-            object,
-        ));
+        return Err(frozen_error(scope, object));
     }
     Ok(())
 }
@@ -7460,8 +7571,7 @@ pub(crate) fn ivar_set(
     // every immediate is frozen. That is a real answer rather than a refusal,
     // so it is given.
     if object.is_immediate() {
-        let message = format!("can't modify frozen {}", class_name(scope, object));
-        return Err(frozen_error(scope, message, object));
+        return Err(frozen_error(scope, object));
     }
     let mut nested = scope.nested();
     let handle = nested.root(object);
@@ -7469,12 +7579,7 @@ pub(crate) fn ivar_set(
     // class object's own `@__id__` through this function — asking for it on
     // every write would make writing that very ivar a regress.
     if nested.is_frozen(handle) {
-        let class = class_name(&mut nested, object);
-        return Err(frozen_error(
-            &mut nested,
-            format!("can't modify frozen {class}"),
-            object,
-        ));
+        return Err(frozen_error(&mut nested, object));
     }
     let mut shape = nested.shape(handle);
     if shape == ShapeId::NONE {
@@ -7523,18 +7628,12 @@ fn ivar_remove(
     given: Value,
 ) -> Result<Value, Error> {
     if object.is_immediate() {
-        let message = format!("can't modify frozen {}", class_name(scope, object));
-        return Err(frozen_error(scope, message, object));
+        return Err(frozen_error(scope, object));
     }
     let mut nested = scope.nested();
     let handle = nested.root(object);
     if nested.is_frozen(handle) {
-        let class = class_name(&mut nested, object);
-        return Err(frozen_error(
-            &mut nested,
-            format!("can't modify frozen {class}"),
-            object,
-        ));
+        return Err(frozen_error(&mut nested, object));
     }
     let shape = nested.shape(handle);
     let names = if shape == ShapeId::NONE {
@@ -7645,17 +7744,13 @@ fn ivar_names(scope: &mut HandleScope<'_>, object: Value) -> Vec<SymbolId> {
 }
 
 /// Refuse to mutate a frozen object, the way Ruby does.
-fn frozen_check(scope: &mut HandleScope<'_>, value: Value, what: &str) -> Result<(), Error> {
+fn frozen_check(scope: &mut HandleScope<'_>, value: Value) -> Result<(), Error> {
     if value.is_immediate() {
         return Ok(());
     }
     let handle = scope.root(value);
     if scope.is_frozen(handle) {
-        return Err(frozen_error(
-            scope,
-            format!("can't modify frozen {what}"),
-            value,
-        ));
+        return Err(frozen_error(scope, value));
     }
     Ok(())
 }
@@ -8655,7 +8750,7 @@ fn native_call<'h>(
 
         Native::ArrayStore => {
             let handle = expect_array(scope, call.receiver, "[]=")?;
-            frozen_check(scope, call.receiver, "array")?;
+            frozen_check(scope, call.receiver)?;
             let length = array_len(scope, handle);
             // `a[i, n] = x` and `a[range] = x` splice, which is a different
             // operation on a different number of arguments. Three arguments
@@ -8749,7 +8844,7 @@ fn native_call<'h>(
 
         Native::ArrayPush => {
             let handle = expect_array(scope, call.receiver, "push")?;
-            frozen_check(scope, call.receiver, "array")?;
+            frozen_check(scope, call.receiver)?;
             for &value in &call.args {
                 array_push(scope, handle, value);
             }
@@ -8761,7 +8856,7 @@ fn native_call<'h>(
 
         Native::ArrayPop => {
             let handle = expect_array(scope, call.receiver, "pop")?;
-            frozen_check(scope, call.receiver, "array")?;
+            frozen_check(scope, call.receiver)?;
             let length = array_len(scope, handle);
             // `pop(n)` answers a new *array* of the last n (#21), however many
             // there are: measured, `[1].pop(5)` is `[1]`.
@@ -9800,7 +9895,7 @@ fn native_call<'h>(
                     operands: "a name that is not a Symbol",
                 })?;
             let args = call.args.get(1).copied().unwrap_or(Value::NIL);
-            let exception = no_method_error(scope, call.receiver, name);
+            let exception = no_method_error(scope, call.receiver, name, &[]);
             let exception = scope.root(exception);
             let object = scope.get(exception);
             ivar_set(scope, object, symbol("@args"), args)?;
@@ -9924,13 +10019,7 @@ fn native_call<'h>(
             if !holder.is_immediate() {
                 let handle = scope.root(holder);
                 if scope.is_frozen(handle) {
-                    let class = class_name(scope, holder);
-                    let shown = inspect(scope, holder);
-                    return Err(frozen_error(
-                        scope,
-                        format!("can't modify frozen {class}: {shown}"),
-                        holder,
-                    ));
+                    return Err(frozen_error(scope, holder));
                 }
             }
             // Under a bare `module_function` in the module's own body, the
@@ -10852,7 +10941,7 @@ fn native_call<'h>(
                 CvarOp::Set => {
                     // A frozen module takes no writes, class variables
                     // included.
-                    frozen_check(scope, call.receiver, "class")?;
+                    frozen_check(scope, call.receiver)?;
                     let value = call.args.get(1).copied().unwrap_or(Value::NIL);
                     scope.classes_mut().cvar_set(id, symbol, value);
                     // `class_variable_set` answers the value it wrote.
@@ -11348,8 +11437,7 @@ fn native_call<'h>(
             // and `UncaughtThrowError` is an ordinary rescuable exception — so
             // it is decided here rather than at the top of the unwind.
             if !frames.iter().any(|frame| frame.tag == Some(tag)) {
-                let message = format!("uncaught throw {}", inspect(scope, tag));
-                return Err(Error::raise("UncaughtThrowError", message));
+                return Err(uncaught_throw(scope, tag, value));
             }
             Ok(Some(Unwind::Throw { tag, value }))
         }
@@ -15488,7 +15576,7 @@ fn binding_eval(
             (program, warnings)
         }
         Err(crate::heap::ParseFailure::Syntax(message)) => {
-            return Err(Error::raise("SyntaxError", message));
+            return Err(syntax_error(scope, message, &path));
         }
         Err(crate::heap::ParseFailure::Unsupported) => {
             return Err(Error::Unknowable {
@@ -16632,7 +16720,7 @@ fn load_file(
     let (program, warnings) = match parser(&name, &source, 1, false) {
         Ok(parsed) => (parsed.program, parsed.warnings),
         Err(crate::heap::ParseFailure::Syntax(message)) => {
-            return Err(Error::raise("SyntaxError", message));
+            return Err(syntax_error(scope, message, &name));
         }
         Err(crate::heap::ParseFailure::Unsupported) => {
             return Err(Error::Unknowable {

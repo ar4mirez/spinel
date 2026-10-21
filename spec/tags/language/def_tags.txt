@@ -1,2 +1,0 @@
-fails(#28: Module and Class reflection: an expectation about an error, newly reported since PRD 0077 let mspec's raise matcher run inside its BasicObject proxy):An instance method raises FrozenError with the correct class name
-fails(#28: Module and Class reflection: an expectation about an error, newly reported since PRD 0077 let mspec's raise matcher run inside its BasicObject proxy):A method definition inside a metaclass scope raises FrozenError if frozen
