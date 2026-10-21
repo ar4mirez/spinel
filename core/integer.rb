@@ -202,17 +202,21 @@ class Integer
 
   # Float division. `to_f` first so an Integer operand does not floor.
   #
-  # Two Integers that are not both exact as Floats are divided exactly instead,
-  # and the quotient rounded once: converting each first rounds twice, which
-  # is off by the last bit, and loses a quotient that only a subnormal holds.
+  # An Integer divisor goes CRuby's way: both sides are reduced by their gcd,
+  # two fixnums are then converted and divided, rounding twice as CRuby does,
+  # and a bignum on either side is divided exactly and rounded once, which
+  # keeps the last bit and a quotient that only a subnormal holds.
   # Anything that is not a number is asked to `coerce`.
   def fdiv(other)
     if other.is_a?(Integer)
-      limit = 9_007_199_254_740_992
-      if other == 0 || (self <= limit && self >= -limit && other <= limit && other >= -limit)
-        return to_f / other
-      end
-      return Integer.__exact_fdiv__(self, other)
+      return to_f / other if other == 0
+      g = gcd(other)
+      n = self / g
+      d = other / g
+      min = -4_611_686_018_427_387_904
+      max = 4_611_686_018_427_387_903
+      return n.to_f / d.to_f if n >= min && n <= max && d >= min && d <= max
+      return Integer.__exact_fdiv__(n, d)
     end
     return to_f / other if other.is_a?(Float)
     pair = __coerce_bin__(other, :fdiv)

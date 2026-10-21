@@ -13518,11 +13518,6 @@ fn wide_op(
     }
 }
 
-/// `&`, `|`, `^`, `~`, `<<` and `>>` with a bignum on either side.
-///
-/// Separate from [`wide_op`] because these are `Native`s rather than `BinOp`
-/// instructions: Ruby's bit operators have no fast-path opcode, so they arrive
-/// through method dispatch with the receiver in `call.receiver`.
 /// A left shift by 2^32 bits or more. Zero stays zero; anything else would
 /// need more memory than there is, and Ruby says so rather than trying.
 /// CRuby's own limit is higher (2^67, ruby/spec says, citing
@@ -13535,6 +13530,11 @@ fn huge_left_shift(zero: bool) -> Result<Value, Error> {
     Err(Error::raise("RangeError", "shift width too big"))
 }
 
+/// `&`, `|`, `^`, `~`, `<<` and `>>` with a bignum on either side.
+///
+/// Separate from [`wide_op`] because these are `Native`s rather than `BinOp`
+/// instructions: Ruby's bit operators have no fast-path opcode, so they arrive
+/// through method dispatch with the receiver in `call.receiver`.
 fn wide_bits(
     scope: &mut HandleScope<'_>,
     op: BitOp,
