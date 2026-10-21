@@ -1,1 +1,1 @@
-fails(#18: written as its own method where Ruby has an alias, which Method#== can now tell apart):Float#=== is an alias of Float#==
+fails(#349: Float has no == of its own, so an alias of it would alias Comparable#==; it wants == as a primitive with === the same method):Float#=== is an alias of Float#==

@@ -9196,6 +9196,7 @@ fn native_call<'h>(
                 "erfc" => unsafe { libm_erfc(x) },
                 "gamma" => unsafe { libm_tgamma(x) },
                 "ldexp" => unsafe { libm_ldexp(x, second as libc::c_int) },
+                "nextafter" => unsafe { libm_nextafter(x, second) },
                 "lgamma" => {
                     let mut sign: libc::c_int = 0;
                     // SAFETY: `sign` is a live `int` for the call to write.
@@ -15989,7 +15990,7 @@ fn fd_arg(call: &Pending) -> Result<libc::c_int, Error> {
         })
 }
 
-// The five libm functions `std` does not wrap. Declared here rather than
+// The libm functions `std` does not wrap. Declared here rather than
 // taken from a crate: `std` already links libm on every target Spinel
 // builds for, so this adds no dependency.
 unsafe extern "C" {
@@ -16005,6 +16006,8 @@ unsafe extern "C" {
     fn libm_frexp(x: f64, exponent: *mut libc::c_int) -> f64;
     #[link_name = "ldexp"]
     fn libm_ldexp(x: f64, exponent: libc::c_int) -> f64;
+    #[link_name = "nextafter"]
+    fn libm_nextafter(x: f64, toward: f64) -> f64;
 }
 
 /// `Method#parameters` for a compiled body: `[[:req, :a], [:opt, :b], ...]`,
