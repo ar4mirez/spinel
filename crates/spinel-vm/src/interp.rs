@@ -4538,7 +4538,9 @@ fn dispatch<'h>(
                     // Said on top of the frame, so it prints before the body
                     // runs, as CRuby's does.
                     if let Some((text, relieved)) = unused {
-                        scope.definitions_mut().mark_unused_block_warned(method.body);
+                        scope
+                            .definitions_mut()
+                            .mark_unused_block_warned(method.body);
                         let text = string_new(scope, &text);
                         let kernel = scope.classes().object(Builtin::Kernel.id());
                         return call_discarded(
