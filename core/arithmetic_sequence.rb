@@ -261,11 +261,14 @@ class Range
     if numeric
       how = stride.nil? ? :step_default : :step
       stride = 1 if stride.nil?
-      # What is not a number is asked to become one beside one.
+      # What is not a number is asked to become one beside one — but only to
+      # walk: without a block it is a plain Enumerator of unknown size, since
+      # Ruby 3.4.
       unless stride.is_a?(Numeric)
         if first.nil?
           raise ArgumentError, "#step for non-numeric beginless ranges is meaningless"
         end
+        return to_enum(:step, stride) { nil } if block.nil?
         unless stride.respond_to?(:coerce)
           raise TypeError, "no implicit conversion of " + stride.class.to_s + " into Integer"
         end
@@ -295,7 +298,11 @@ class Range
       return self
     end
     raise ArgumentError, "step is required for non-numeric ranges" if stride.nil?
-    return to_enum(:step, stride) if block.nil?
+    if block.nil?
+      # A generic Enumerator from a beginless range could never start.
+      raise ArgumentError, "#step for non-numeric beginless ranges is meaningless" if first.nil?
+      return to_enum(:step, stride)
+    end
     raise ArgumentError, "#step iteration for beginless ranges is meaningless" if first.nil?
     term = first
     if last.nil?
