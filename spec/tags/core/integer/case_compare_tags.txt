@@ -1,1 +1,1 @@
-fails(#17: written as its own method where Ruby has an alias, which Method#== can now tell apart):Integer#=== is an alias of Integer#==
+fails(#345: Integer has no == of its own, so an alias of it would alias Comparable#==, and a == written in Ruby does not return):Integer#=== is an alias of Integer#==

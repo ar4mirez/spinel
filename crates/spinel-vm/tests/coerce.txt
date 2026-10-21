@@ -88,3 +88,41 @@
 1.0 <=> "1"  #=> nil
 1.0 <=> :one  #=> nil
 1.0 <=> true  #=> nil
+
+# -- `&`, `|`, `^`: coerce, then the pair's own operator ------------------
+#
+# The retry needs the first of the pair to have the operator; a Float's
+# `coerce` answers Floats, which do not, and the error names the operand.
+
+6 & Class.new { def coerce(n); [n, 3]; end }.new  #=> 2
+6 | Class.new { def coerce(n); [n, 3]; end }.new  #=> 7
+(2**64) ^ Class.new { def coerce(n); [n, 3]; end }.new  #=> 18446744073709551619
+6 & Class.new { private def coerce(n); [n, 3]; end }.new  #=> 2
+6 + Class.new { private def coerce(n); [n, 3]; end }.new  #=> 9
+3 & 3.4  #=> !TypeError: 3.4 can't be coerced into Integer
+(2**64) & 2.5  #=> !TypeError: 2.5 can't be coerced into Integer
+6 & "x"  #=> !TypeError: String can't be coerced into Integer
+6 & nil  #=> !TypeError: nil can't be coerced into Integer
+6 & :sym  #=> !TypeError: :sym can't be coerced into Integer
+6 & Class.new { def coerce(n); [n.to_f, 2.0]; end }.new  #=> !TypeError: #<Class:0xXX> can't be coerced into Integer
+6 & Class.new { def coerce(n); 5; end }.new  #=> !TypeError: coerce must return [x, y]
+
+# -- `<<` and `>>` convert with `to_int` instead --------------------------
+
+6 << Class.new { def to_int; 2; end }.new  #=> 24
+6 >> Class.new { def to_int; 2; end }.new  #=> 1
+6 << 2.5  #=> 24
+6 << "x"  #=> !TypeError: no implicit conversion of String into Integer
+6 << nil  #=> !TypeError: no implicit conversion of nil into Integer
+1 >> (2**64)  #=> 0
+-1 >> (2**64)  #=> -1
+0 << (2**64)  #=> 0
+1 << -(2**64)  #=> 0
+-(2**64) << -(2**40)  #=> -1
+
+# -- `**` coerces too -----------------------------------------------------
+
+2 ** Class.new { def coerce(n); [n.to_f, 2.0]; end }.new  #=> 4.0
+2 ** "x"  #=> !TypeError: String can't be coerced into Integer
+(2**64) ** :s  #=> !TypeError: :s can't be coerced into Integer
+2 ** Class.new { def coerce(n); ["a", "b"]; end }.new  #=> !NoMethodError: undefined method '**' for an instance of String

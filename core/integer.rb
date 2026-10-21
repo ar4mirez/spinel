@@ -109,7 +109,16 @@ class Integer
     end
     return __bit_field__(index, length[0]) unless length.empty?
     if index.is_a?(Range)
+      # Every bit below the end, out to minus infinity: zero is the only answer
+      # that has a value, and any set bit in the range makes it infinite. An
+      # end below zero holds no bits at all. Measured.
       if index.begin.nil?
+        last = index.end
+        return 0 if last.nil? ? self == 0 : last < 0
+        unless last.nil?
+          width = last + (index.exclude_end? ? 0 : 1)
+          return 0 if (self & ((1 << width) - 1)) == 0
+        end
         raise ArgumentError, "The beginless range for Integer#[] results in infinity"
       end
       last = index.end
@@ -149,23 +158,93 @@ class Integer
   end
 
   def __to_index__(value)
-    return value if value.is_a?(Integer)
-    unless value.respond_to?(:to_int)
-      raise TypeError, "no implicit conversion of #{value.nil? ? "nil" : value.class} into Integer"
+    Integer.__to_int__(value)
+  end
+
+  # `&`, `|`, `^`, `<<` and `>>` with an operand that is not an Integer: the
+  # primitive sends this rather than answering. A shift converts the distance
+  # with `to_int`; the other three ask the operand to `coerce` and retry on the
+  # pair, as long as its first half has the operator. When it does not — a
+  # Float, whose `coerce` answers Floats — the error names the operand, not the
+  # pair. Measured.
+  def __bits_other__(other, op)
+    return __send__(op, Integer.__to_int__(other)) if op == :<< || op == :>>
+    pair = __coerce_pair__(other, true)
+    unless pair[0].respond_to?(op, true)
+      raise TypeError, __operand_name__(other) + " can't be coerced into Integer"
     end
-    value.to_int
+    pair[0].__send__(op, pair[1])
+  end
+
+  def allbits?(mask)
+    mask = Integer.__to_int__(mask)
+    (self & mask) == mask
+  end
+
+  def anybits?(mask)
+    (self & Integer.__to_int__(mask)) != 0
+  end
+
+  def nobits?(mask)
+    (self & Integer.__to_int__(mask)) == 0
+  end
+
+  # Division rounded up, which is floored division of the negated divisor,
+  # negated back. CRuby's own definition, so a Float or Rational divisor works
+  # the way `div` does.
+  def ceildiv(other)
+    -div(0 - other)
+  end
+
+  def ord
+    self
   end
 
   # Float division. `to_f` first so an Integer operand does not floor.
-  # Two Integers too wide for a Float still have a quotient that fits one:
-  # both are shifted down by the same amount first, which leaves the ratio
-  # alone to within the last bit.
+  #
+  # Two Integers that are not both exact as Floats are divided exactly instead,
+  # and the quotient rounded once: converting each first rounds twice, which
+  # is off by the last bit, and loses a quotient that only a subnormal holds.
+  # Anything that is not a number is asked to `coerce`.
   def fdiv(other)
-    if other.is_a?(Integer) && other != 0
-      spare = (bit_length < other.bit_length ? bit_length : other.bit_length) - 1000
-      return (self >> spare).to_f / (other >> spare).to_f if spare > 0
+    if other.is_a?(Integer)
+      limit = 9_007_199_254_740_992
+      if other == 0 || (self <= limit && self >= -limit && other <= limit && other >= -limit)
+        return to_f / other
+      end
+      return Integer.__exact_fdiv__(self, other)
     end
-    to_f / other
+    return to_f / other if other.is_a?(Float)
+    pair = __coerce_bin__(other, :fdiv)
+    pair[0].fdiv(pair[1])
+  end
+
+  # `n / d` rounded to the nearest Float, ties to even, for Integers with `d`
+  # not zero. The quotient is taken with two bits more than the 53 a Float
+  # keeps — fewer for a subnormal, whose last bit is 2**-1074 — and the
+  # remainder decides a tie, so the rounding happens once. `ldexp` of a
+  # mantissa that already fits is exact.
+  def self.__exact_fdiv__(n, d)
+    negative = (n < 0) != (d < 0)
+    n = n.abs
+    d = d.abs
+    return negative ? -0.0 : 0.0 if n == 0
+    shift = d.bit_length - n.bit_length + 54
+    if shift >= 0
+      q, r = (n << shift).divmod(d)
+    else
+      q, r = n.divmod(d << -shift)
+    end
+    bits = q.bit_length
+    drop = bits - 53
+    drop = shift - 1074 if shift - 1074 > drop
+    return negative ? -0.0 : 0.0 if drop > bits
+    kept = q >> drop
+    rest = q & ((1 << drop) - 1)
+    half = 1 << (drop - 1)
+    kept += 1 if rest > half || (rest == half && (r != 0 || kept.odd?))
+    answer = Math.ldexp(kept.to_f, drop - shift)
+    negative ? -answer : answer
   end
 
   # Euclid. `gcd` is always positive, and `gcd(0)` is the other operand's
@@ -196,14 +275,10 @@ class Integer
 
   # Least significant digit first. `0.digits` is `[0]`, not `[]`.
   def digits(base = 10)
-    unless base.is_a?(Integer)
-      raise TypeError, "no implicit conversion of #{base.class} into Integer"
-    end
+    base = Integer.__to_int__(base)
     raise ArgumentError, "negative radix" if base < 0
     raise ArgumentError, "invalid radix #{base}" if base < 2
-    if self < 0
-      raise ArgumentError, "digits of a negative number are out of domain"
-    end
+    raise Math::DomainError, "out of domain" if self < 0
     return [0] if self == 0
     out = []
     n = self
@@ -245,7 +320,10 @@ class Integer
       raise ZeroDivisionError, "divided by 0"
     end
     return self / other if other.is_a?(Integer)
-    (self / other).floor
+    return (self / other).floor if other.is_a?(Float)
+    # Anything else is asked to `coerce`, and the pair's own `div` answers.
+    pair = __coerce_bin__(other, :div)
+    pair[0].div(pair[1])
   end
 
   def divmod(other)
@@ -258,6 +336,10 @@ class Integer
 
   # Sign of the receiver, unlike `%`, which takes the sign of the divisor.
   def remainder(other)
+    unless other.is_a?(Numeric)
+      pair = __coerce_pair__(other, true)
+      return pair[0].remainder(pair[1])
+    end
     if other == 0
       raise ZeroDivisionError, "divided by 0"
     end
@@ -320,14 +402,20 @@ class Integer
   # banker's rule would give. Measured.
   #
   # `half:` says what a tie does instead: `:even` to the even neighbour,
-  # `:down` toward zero. It is read only when there is rounding to do.
-  def round(digits = 0, half: nil)
-    digits = __round_digits__(digits)
-    return self if digits >= 0
+  # `:down` toward zero. With no digit count it is not looked at; with one it
+  # is checked, even a count that leaves nothing to round. Measured:
+  # `25.round(half: :foo)` is 25 and `25.round(1, half: :foo)` raises.
+  def round(*digits, half: nil)
+    if digits.size > 1
+      raise ArgumentError, "wrong number of arguments (given #{digits.size}, expected 0..1)"
+    end
+    return self if digits.empty?
+    digits = __round_digits__(digits[0])
     half = half.to_sym if half.is_a?(String)
     unless half.nil? || half == :up || half == :even || half == :down
       raise ArgumentError, "invalid rounding mode: " + half.to_s
     end
+    return self if digits >= 0
     step = 10 ** (-digits)
     unless half.nil? || half == :up
       magnitude = abs
@@ -375,10 +463,10 @@ class Integer
       if digits == true || digits == false
         raise TypeError, "no implicit conversion of #{digits} into Integer"
       end
-      unless digits.respond_to?(:to_int) && !digits.is_a?(String)
+      if digits.is_a?(String)
         raise TypeError, "no implicit conversion of #{digits.class} into Integer"
       end
-      digits = digits.to_int
+      digits = Integer.__to_int__(digits)
     end
     # Past a machine word it is a bignum, and CRuby says so; past a C int and
     # short of that, it says the other thing. Measured.
@@ -392,11 +480,9 @@ class Integer
 
   # Integer square root by Newton's method: the largest n with n*n <= self.
   def self.sqrt(value)
-    unless value.is_a?(Integer)
-      raise TypeError, "no implicit conversion of #{value.class} into Integer"
-    end
+    value = Integer.__to_int__(value)
     if value < 0
-      raise ArgumentError, "Numerical argument is out of domain - \"isqrt\""
+      raise Math::DomainError, "Numerical argument is out of domain - \"isqrt\""
     end
     return value if value < 2
     guess = value
@@ -463,6 +549,36 @@ class Integer
     converted
   end
 
+  # `rb_to_int`: an Integer, or what the object's `to_int` answers when that is
+  # one. The message for a `to_int` that answers something else is CRuby 4.1's,
+  # `into` where 4.0 said `to` (bugs.ruby-lang.org/issues/21864), which
+  # ruby/spec checks on every engine but CRuby before 4.1.
+  def self.__to_int__(value)
+    return value if value.is_a?(Integer)
+    unless value.respond_to?(:to_int, true)
+      shown = value.nil? || true.equal?(value) || false.equal?(value) ? value.inspect : value.class.to_s
+      raise TypeError, "no implicit conversion of #{shown} into Integer"
+    end
+    converted = value.__send__(:to_int)
+    return converted if converted.is_a?(Integer)
+    __to_int_failed__(value, converted)
+  end
+
+  def self.__to_int_failed__(value, converted)
+    raise TypeError,
+          "can't convert #{value.class} into Integer (#{value.class}#to_int gives #{converted.class})"
+  end
+
+  # Like `__to_int__`, but an object with no `to_int`, or one answering nil, is
+  # nil rather than an error.
+  def self.try_convert(value)
+    return value if value.is_a?(Integer)
+    return nil unless value.respond_to?(:to_int, true)
+    converted = value.__send__(:to_int)
+    return converted if converted.nil? || converted.is_a?(Integer)
+    __to_int_failed__(value, converted)
+  end
+
   # A one-byte BINARY String.
   def self.__byte_string__(byte)
     string = "\0".b
@@ -519,8 +635,15 @@ class Integer
   # Below 128 a US-ASCII character, below 256 a BINARY byte, and with an
   # encoding the codepoint in it. Measured.
   def chr(encoding = nil)
+    if encoding.nil? && self > 255 && !Encoding.default_internal.nil?
+      encoding = Encoding.default_internal
+    end
     if encoding.nil?
-      raise RangeError, "#{self} out of char range" if self < 0 || self > 255
+      if self < 0 || self > 255
+        # A bignum is not named, measured.
+        shown = self < -4611686018427387904 || self > 4611686018427387903 ? "bignum" : to_s
+        raise RangeError, "#{shown} out of char range"
+      end
       return Integer.__byte_string__(self).__force_encoding__(self < 128 ? 2 : 0)
     end
     encoding = Encoding.find(encoding)
