@@ -404,9 +404,22 @@ class Thread
   # CRuby's `rb_exec_recursive` bookkeeping, per fiber like the locals but
   # under no key a program can see. Only ever asked of `Thread.current`.
   def __recursive__
-    all = (@__s.recursive ||= {}.compare_by_identity)
+    (@__s.recursive ||= {}.compare_by_identity)[__fiber_key__] ||= {}
+  end
+
+  # Drops `name` once its outermost call is over, and the fiber's table with
+  # it when that was the last, so a finished fiber leaves nothing behind.
+  def __recursive_done__(name)
+    all = @__s.recursive
+    key = __fiber_key__
+    table = all[key]
+    table.delete(name)
+    all.delete(key) if table.empty?
+  end
+
+  def __fiber_key__
     fiber = Fiber.current
-    all[fiber.__root__? ? :root : fiber] ||= {}
+    fiber.__root__? ? :root : fiber
   end
 
   def [](key) = __locals__[Thread.__key__(key)]

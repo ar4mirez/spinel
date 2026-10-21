@@ -23,6 +23,7 @@ module Comparable
       finished && equal
     ensure
       comparing.pop
+      Thread.current.__recursive_done__(:comparable) if outermost
     end
   end
 
