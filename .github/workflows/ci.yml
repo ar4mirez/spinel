@@ -29,7 +29,7 @@ jobs:
     steps:
       # `spec/ruby` is the ruby/spec submodule and `spec/mspec` the runner;
       # tests read the corpus, so a shallow checkout without them fails.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: true
 
@@ -55,7 +55,7 @@ jobs:
     name: fmt + clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -80,7 +80,7 @@ jobs:
     name: miri
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@nightly
         with:
@@ -111,7 +111,7 @@ jobs:
     name: crate layering
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -151,7 +151,7 @@ jobs:
     name: stdlib drift
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: ./scripts/vendor-stdlib.sh --check
 
   # `crates/spinel-vm/src/encoding_table.rs` is CRuby's encoding list — names,
@@ -161,7 +161,7 @@ jobs:
     name: encoding oracle
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: '4.0'
@@ -176,7 +176,7 @@ jobs:
     name: ancestors oracle
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: ruby/setup-ruby@v1
         with:
           # The language version this build implements, so `include` semantics
@@ -202,7 +202,7 @@ jobs:
     name: exceptions oracle
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: ruby/setup-ruby@v1
         with:
           # The language version this build implements.
@@ -220,7 +220,7 @@ jobs:
     name: eval oracle
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: ruby/setup-ruby@v1
         with:
           # The language version this build implements.
@@ -237,7 +237,7 @@ jobs:
     name: anonymous class oracle
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: ruby/setup-ruby@v1
         with:
           # The language version this build implements.
@@ -254,7 +254,7 @@ jobs:
     name: numeric coercion oracle
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: ruby/setup-ruby@v1
         with:
           # The language version this build implements.
@@ -272,7 +272,7 @@ jobs:
     name: regexp oracle
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: true
       - uses: ruby/setup-ruby@v1
@@ -291,7 +291,7 @@ jobs:
     name: verify passes on real ruby
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: true
       - uses: ruby/setup-ruby@v1
@@ -315,7 +315,7 @@ jobs:
     name: lower a real corpus
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: true
 
@@ -345,7 +345,7 @@ jobs:
     name: ruby/spec on mspec
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: true
 
@@ -390,7 +390,7 @@ jobs:
     name: spec status table
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: true
 
