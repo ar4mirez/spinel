@@ -87,8 +87,10 @@ class Enumerator
     __with_index__(0, &block)
   end
 
+  # Shared by both, not reached through `with_index`: a Lazy overrides that
+  # lazily, and `lazy.each_with_index` must still iterate, as CRuby's does.
   def __with_index__(offset)
-    i = offset.nil? ? 0 : __to_int__(offset)
+    i =offset.nil? ? 0 : __to_int__(offset)
     # The block's value is the value the driven method sees, and `each` answers
     # what that method answered: `[1, 2, 3].select.each_with_index { false }` is
     # `[]` because `select` got the false and returned its own empty result.
