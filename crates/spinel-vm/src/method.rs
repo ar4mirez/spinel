@@ -1016,7 +1016,9 @@ pub struct Definitions {
     /// The names of the program's methods whose bodies use a block — CRuby's
     /// duck-typing relief outside `Warning[:strict_unused_block]`: a block
     /// passed to one `m` that ignores it may be meant for another `m` that
-    /// does not. The core library's are left out, as CRuby's C methods are.
+    /// does not. Filled when a file or `eval` string is loaded, as CRuby fills
+    /// its table when it compiles one, so a `def` that has not run yet counts.
+    /// The core library's are left out, as CRuby's C methods are.
     block_users: std::collections::HashSet<SymbolId>,
 }
 
@@ -1032,11 +1034,19 @@ impl Definitions {
         }
     }
 
-    /// Whether this is the first call to pass `body` a block it ignores —
-    /// see [`Definitions::unused_block_warned`].
-    pub fn first_unused_block(&mut self, body: Value) -> bool {
+    /// Whether a call has already warned about passing `body` a block it
+    /// ignores — see [`Definitions::unused_block_warned`].
+    #[must_use]
+    pub fn unused_block_warned(&self, body: Value) -> bool {
         body.as_fixnum()
-            .is_some_and(|id| self.unused_block_warned.insert(id))
+            .is_some_and(|id| self.unused_block_warned.contains(&id))
+    }
+
+    /// Record that a call has warned about passing `body` a block it ignores.
+    pub fn mark_unused_block_warned(&mut self, body: Value) {
+        if let Some(id) = body.as_fixnum() {
+            self.unused_block_warned.insert(id);
+        }
     }
 
     /// Record that a method named `name` uses its block.

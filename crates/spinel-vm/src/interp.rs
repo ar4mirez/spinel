@@ -1960,6 +1960,7 @@ pub fn eval_in(
     frame: &mut Frame,
     iseq: &Iseq,
 ) -> Result<Value, Error> {
+    note_block_users(scope, iseq);
     frame.reserve(iseq.locals.len());
     let env = frame.env(scope);
     if frame.receiver == Value::NIL {
@@ -4537,6 +4538,7 @@ fn dispatch<'h>(
                     // Said on top of the frame, so it prints before the body
                     // runs, as CRuby's does.
                     if let Some((text, relieved)) = unused {
+                        scope.definitions_mut().mark_unused_block_warned(method.body);
                         let text = string_new(scope, &text);
                         let kernel = scope.classes().object(Builtin::Kernel.id());
                         return call_discarded(
@@ -4626,7 +4628,7 @@ fn unused_block_warning(
         return None;
     }
     let caller = frames.last()?;
-    if is_internal(&caller.iseq) || !scope.definitions_mut().first_unused_block(method.body) {
+    if is_internal(&caller.iseq) || scope.definitions().unused_block_warned(method.body) {
         return None;
     }
     let path = caller.iseq.path.as_deref().unwrap_or("");
@@ -4644,6 +4646,24 @@ fn unused_block_warning(
         .definitions()
         .is_block_user(crate::shared::symbols::intern(&iseq.name));
     Some((text, relieved))
+}
+
+/// Record the names of the methods `iseq` defines, at any depth, whose bodies
+/// use a block (#273): what [`unused_block_warning`]'s relief reads, filled
+/// when a file or `eval` string is loaded rather than when its `def`s run.
+fn note_block_users(scope: &mut HandleScope<'_>, iseq: &Iseq) {
+    if is_internal(iseq) {
+        return;
+    }
+    for &(symbol, child) in &iseq.definitions {
+        if iseq.children[child as usize].uses_block {
+            let name = crate::shared::symbols::intern(&iseq.symbols[symbol as usize]);
+            scope.definitions_mut().note_block_user(name);
+        }
+    }
+    for child in &iseq.children {
+        note_block_users(scope, child);
+    }
 }
 
 /// The frames a block body inherits from its `Proc`: where `return` goes, and
@@ -6996,9 +7016,6 @@ fn define_method_on(
     let body = scope
         .definitions_mut()
         .intern_iseq(&iseq, Arc::as_ptr(&iseq) as usize);
-    if iseq.uses_block && !is_internal(&iseq) {
-        scope.definitions_mut().note_block_user(name);
-    }
     scope
         .classes_mut()
         .define_method_visibly(owner, name, body, cref, visibility);
@@ -16016,6 +16033,7 @@ fn binding_eval(
             });
         }
     };
+    note_block_users(scope, &iseq);
     let handle = scope.root(binding);
     let outer = scope.slot(handle, BINDING_ENV);
     let receiver = scope.slot(handle, BINDING_SELF);
@@ -17160,6 +17178,7 @@ fn load_file(
             });
         }
     };
+    note_block_users(scope, &iseq);
     // `load(file, true)`: the file's constants and methods land in an
     // anonymous module rather than at the top level.
     let wrap = call
