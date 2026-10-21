@@ -77,6 +77,9 @@ module Kernel
         $stderr.write(e.full_message)
       end
     end
+    # Then the finalizers of every object still alive (#36), as CRuby
+    # runs them once the `at_exit` blocks are done.
+    ObjectSpace.__finalize_all__
     status
   end
 

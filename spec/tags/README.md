@@ -87,7 +87,14 @@ fix is a different slice. The reason says which slice, by number.
 
 ## What is here now
 
-Three hundred and six tags across a hundred and thirty-five files. Replacing
+Three hundred and sixty-three tags across a hundred and sixty-one files.
+#36 removed fifteen, and all three of `core/objectspace`'s files: the
+finalizer examples that run a child `spinel` and the `garbage_collect` ones
+that found no `ObjectSpace`, which pass now that the collector is reachable
+from Ruby.
+
+The rest of this section is the history as of three hundred and six tags
+across a hundred and thirty-five files. Replacing
 `spec/harness` with mspec (#145) roughly doubled them, and that is the shape
 to expect: mspec runs what the harness never could — shared groups, examples
 built at run time, every matcher — and the 351 disagreements that surfaced were

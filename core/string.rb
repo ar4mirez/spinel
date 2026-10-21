@@ -19,9 +19,8 @@ class String
   end
 
   # `-str`: a frozen String with the same content and encoding, and the same
-  # one each time it is asked for. ponytail: the table holds what it is given
-  # for good, where CRuby's lets go of a String nothing else references; a
-  # weak table needs `ObjectSpace::WeakMap` (#36).
+  # one each time it is asked for. The table holds each one weakly (#36), as
+  # CRuby's does: one that nothing else references is let go.
   def -@
     # One with instance variables is its own: a frozen copy, kept nowhere.
     return frozen? ? self : String.new(self).freeze unless instance_variables.empty?
@@ -34,7 +33,7 @@ class String
   alias dedup -@
 
   def self.__interned__
-    @__interned__ ||= {}
+    @__interned__ ||= ObjectSpace::WeakKeyMap.new
   end
 
   def __expect_string__(other)

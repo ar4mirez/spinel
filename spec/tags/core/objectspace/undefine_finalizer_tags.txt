@@ -1,2 +1,0 @@
-fails(#36: ObjectSpace and finalizers: newly run since #43 let ruby_exe start Spinel, and it disagrees):ObjectSpace.undefine_finalizer removes finalizers for an object
-fails(#36: ObjectSpace and finalizers: newly run since #43 let ruby_exe start Spinel, and it disagrees):ObjectSpace.undefine_finalizer should not remove finalizers for a frozen object

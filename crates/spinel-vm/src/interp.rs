@@ -45,8 +45,8 @@ use crate::class::Builtin;
 use crate::class::{ClassId, CrefId, Kind, Method, ScopeDefault, Visibility};
 use crate::heap::{Handle, HandleScope, Heap, Payload};
 use crate::method::{
-    BindingOp, BitOp, CvarOp, Definition, FiberOp, FsOp, IvarOp, Native, ReflectOp, SockOp, StrOp,
-    SysOp, ThreadOp,
+    BindingOp, BitOp, CvarOp, Definition, FiberOp, FsOp, GcOp, IvarOp, Native, ReflectOp, SockOp,
+    StrOp, SysOp, ThreadOp,
 };
 use crate::shape::ShapeId;
 use crate::value::SymbolId;
@@ -2064,6 +2064,34 @@ pub fn eval_in(
                 root_limit = floor + ROOT_SLACK.max(2 * (scope.rooted() - floor));
             }
             if frames.len() != seen_frames {
+                // A call or a return (#36). `GC.start` collects here rather
+                // than inside its native, once the handles taken for
+                // finished instructions are let go, so an object only they
+                // named is freed. Finalizers a collection queued run here
+                // too, as a call pushed on top of whatever was running.
+                if scope.take_collection_request() {
+                    release_roots(scope, &mut stack, &frames, floor);
+                    root_limit = floor + ROOT_SLACK.max(2 * (scope.rooted() - floor));
+                    scope.collect();
+                }
+                if scope.has_pending_finalizers() {
+                    let list = take_finalizers(scope, false);
+                    let kernel = scope.classes().object(Builtin::Kernel.id());
+                    if let Some(unwind) = call_discarded(
+                        scope,
+                        &mut stack,
+                        &mut frames,
+                        proc_class,
+                        &mut ids,
+                        kernel,
+                        crate::shared::symbols::intern("__run_finalizers__"),
+                        vec![list],
+                    )? && let Some(value) =
+                        unwind_to_handler(scope, &mut stack, &mut frames, unwind)?
+                    {
+                        break value;
+                    }
+                }
                 seen_frames = frames.len();
                 deadline = refresh_boundaries(scope, &frames, &mut boundaries, budget);
                 limit = deadline.max(slice_end);
@@ -9270,9 +9298,7 @@ fn native_call<'h>(
                 }
                 Unpacked::Heap(_) => {
                     let handle = scope.root(call.receiver);
-                    // The address, shifted past the alignment bits that are
-                    // zero on every cell.
-                    i64::try_from(scope.address(handle) >> 4).ok()
+                    Some(crate::heap::object_id(scope.address(handle)))
                 }
             };
             stack.push(id.and_then(Value::fixnum).unwrap_or(Value::NIL));
@@ -9971,6 +9997,11 @@ fn native_call<'h>(
 
         Native::Fiber(op) => fiber_native(scope, stack, frames, &call, op, ids),
         Native::Thread(op) => thread_native(scope, stack, frames, &call, op, ids),
+        Native::Gc(op) => {
+            let value = gc_native(scope, &call, op);
+            stack.push(value);
+            Ok(None)
+        }
         Native::Reflect(op) => reflect_native(scope, stack, &call, op),
         Native::Str(op) => str_native(scope, stack, &call, op),
         Native::NumCompare => {
@@ -12547,6 +12578,90 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         (Builtin::Kernel, &["__strerror__"], Native::Strerror),
         (Builtin::Kernel, &["__errno_class__"], Native::ErrnoClass),
         (Builtin::Kernel, &["__signal_list__"], Native::SignalList),
+        (Builtin::Kernel, &["__gc_start__"], Native::Gc(GcOp::Start)),
+        (Builtin::Kernel, &["__gc_stat__"], Native::Gc(GcOp::Stat)),
+        (
+            Builtin::Kernel,
+            &["__gc_disable__"],
+            Native::Gc(GcOp::Disable),
+        ),
+        (
+            Builtin::Kernel,
+            &["__gc_stress__"],
+            Native::Gc(GcOp::Stress),
+        ),
+        (Builtin::Kernel, &["__gc_time__"], Native::Gc(GcOp::Time)),
+        (
+            Builtin::Kernel,
+            &["__weak_init__"],
+            Native::Gc(GcOp::WeakInit),
+        ),
+        (
+            Builtin::Kernel,
+            &["__weak_get__"],
+            Native::Gc(GcOp::WeakGet),
+        ),
+        (
+            Builtin::Kernel,
+            &["__weak_set__"],
+            Native::Gc(GcOp::WeakSet),
+        ),
+        (
+            Builtin::Kernel,
+            &["__weak_delete__"],
+            Native::Gc(GcOp::WeakDelete),
+        ),
+        (
+            Builtin::Kernel,
+            &["__weak_pairs__"],
+            Native::Gc(GcOp::WeakPairs),
+        ),
+        (
+            Builtin::Kernel,
+            &["__weak_size__"],
+            Native::Gc(GcOp::WeakSize),
+        ),
+        (
+            Builtin::Kernel,
+            &["__weak_clear__"],
+            Native::Gc(GcOp::WeakClear),
+        ),
+        (
+            Builtin::Kernel,
+            &["__weak_hashed__"],
+            Native::Gc(GcOp::WeakHashed),
+        ),
+        (
+            Builtin::Kernel,
+            &["__finalizer_list__"],
+            Native::Gc(GcOp::FinalizerList),
+        ),
+        (
+            Builtin::Kernel,
+            &["__finalizer_add__"],
+            Native::Gc(GcOp::FinalizerAdd),
+        ),
+        (
+            Builtin::Kernel,
+            &["__finalizer_remove__"],
+            Native::Gc(GcOp::FinalizerRemove),
+        ),
+        (
+            Builtin::Kernel,
+            &["__finalizer_take__"],
+            Native::Gc(GcOp::FinalizerTake),
+        ),
+        (
+            Builtin::Kernel,
+            &["__each_object__"],
+            Native::Gc(GcOp::EachObject),
+        ),
+        (Builtin::Kernel, &["__id2ref__"], Native::Gc(GcOp::Id2Ref)),
+        (
+            Builtin::Kernel,
+            &["__immediate__"],
+            Native::Gc(GcOp::Immediate),
+        ),
         (
             Builtin::Kernel,
             &["__backtrace_here__"],
@@ -15298,6 +15413,240 @@ fn char_offset(text: &Subject, byte: usize) -> i64 {
             .map_or(prefix.len(), |offsets| offsets.len() - 1)
     };
     i64::try_from(count).unwrap_or(i64::MAX)
+}
+
+// ---------------------------------------------------------------------------
+// The collector (#36)
+// ---------------------------------------------------------------------------
+//
+// `GC`, `ObjectSpace`, its weak maps and finalizers are Ruby, in `core/gc.rb`;
+// these are what that file cannot say. A weak map's entries live in the
+// heap, keyed by the map object, because an entry the collector traced like
+// a slot would not be weak. See `heap.rs`, `trace_weak`.
+
+/// One collector primitive. See [`GcOp`] for each one's arguments.
+fn gc_native(scope: &mut HandleScope<'_>, call: &Pending, op: GcOp) -> Value {
+    let arg = |n| nth_arg(call, n);
+    let count =
+        |n: usize| Value::fixnum(i64::try_from(n).unwrap_or(i64::MAX)).unwrap_or(Value::NIL);
+    match op {
+        GcOp::Start => {
+            scope.request_collection();
+            Value::NIL
+        }
+        GcOp::Stat => gc_stat(scope),
+        GcOp::Disable => bool_value(scope.set_gc_disabled(arg(0).is_truthy())),
+        GcOp::Stress => {
+            if !call.args.is_empty() {
+                scope.set_gc_stress(arg(0).is_truthy());
+            }
+            bool_value(scope.gc_stress())
+        }
+        GcOp::Time => {
+            let nanos = scope.gc_stat().time.as_nanos();
+            Value::fixnum(i64::try_from(nanos).unwrap_or(i64::MAX)).unwrap_or(Value::NIL)
+        }
+        GcOp::FinalizerList | GcOp::FinalizerAdd | GcOp::FinalizerRemove => {
+            let object = arg(0);
+            if object.is_immediate() {
+                return Value::NIL;
+            }
+            let handle = scope.root(object);
+            match op {
+                GcOp::FinalizerList => {
+                    let callables = scope.finalizers(handle).to_vec();
+                    new_array(scope, &callables)
+                }
+                GcOp::FinalizerAdd => {
+                    scope.add_finalizer(handle, arg(1));
+                    Value::NIL
+                }
+                _ => {
+                    scope.remove_finalizers(handle);
+                    Value::NIL
+                }
+            }
+        }
+        GcOp::FinalizerTake => take_finalizers(scope, arg(0).is_truthy()),
+        GcOp::EachObject => each_object(scope, arg(0)),
+        GcOp::Immediate => bool_value(arg(0).is_immediate()),
+        GcOp::Id2Ref => {
+            let found = arg(0).as_fixnum().and_then(|id| {
+                scope.objects().into_iter().find(|&object| {
+                    let handle = scope.root(object);
+                    crate::heap::object_id(scope.address(handle)) == id
+                })
+            });
+            found.unwrap_or(arg(1))
+        }
+        _ => {
+            let map = call.receiver;
+            if map.is_immediate() {
+                return Value::NIL;
+            }
+            let map = scope.root(map);
+            match op {
+                GcOp::WeakInit => {
+                    scope.weak_table(map, arg(0).is_truthy()).clear();
+                    Value::NIL
+                }
+                GcOp::WeakGet => scope.weak_table(map, false).get(arg(0)).unwrap_or(arg(1)),
+                GcOp::WeakSet => {
+                    let hash = arg(2).as_fixnum().unwrap_or(0);
+                    scope.weak_table(map, false).insert(arg(0), arg(1), hash);
+                    arg(1)
+                }
+                GcOp::WeakDelete => scope
+                    .weak_table(map, false)
+                    .remove(arg(0))
+                    .unwrap_or(arg(1)),
+                GcOp::WeakSize => count(scope.weak_table(map, false).len()),
+                GcOp::WeakClear => {
+                    scope.weak_table(map, false).clear();
+                    Value::NIL
+                }
+                GcOp::WeakPairs => {
+                    let flat: Vec<Value> = scope
+                        .weak_table(map, false)
+                        .pairs()
+                        .flat_map(|(key, value)| [key, value])
+                        .collect();
+                    // Rooted: the table holds them weakly, and the array
+                    // that is about to hold them strongly may collect first.
+                    for &value in &flat {
+                        scope.root(value);
+                    }
+                    new_array(scope, &flat)
+                }
+                GcOp::WeakHashed => {
+                    let hash = arg(0).as_fixnum().unwrap_or(0);
+                    let keys: Vec<Value> =
+                        scope.weak_table(map, true).keys_with_hash(hash).collect();
+                    for &key in &keys {
+                        scope.root(key);
+                    }
+                    new_array(scope, &keys)
+                }
+                _ => unreachable!("every other collector op is answered above"),
+            }
+        }
+    }
+}
+
+/// The finalizers to run now, as `[id, [callable, ...], ...]`: the ones a
+/// collection queued, and with `everything` every one still registered.
+fn take_finalizers(scope: &mut HandleScope<'_>, everything: bool) -> Value {
+    let taken = scope.take_finalizers(everything);
+    // Every callable is rooted before the first array is made: the heap has
+    // let go of them, and making one may collect.
+    for callable in taken.iter().flat_map(|(_, callables)| callables) {
+        scope.root(*callable);
+    }
+    let mut flat = Vec::with_capacity(taken.len() * 2);
+    for (id, callables) in &taken {
+        let list = new_array(scope, callables);
+        scope.root(list);
+        flat.push(Value::fixnum(*id).unwrap_or(Value::NIL));
+        flat.push(list);
+    }
+    new_array(scope, &flat)
+}
+
+/// `GC.stat`'s keys, CRuby 4.0's in its order, with what this collector can
+/// say for each. It has one generation and never compacts, so the
+/// generational and compaction counters are zero and every collection is a
+/// major one.
+fn gc_stat(scope: &mut HandleScope<'_>) -> Value {
+    let stat = scope.gc_stat();
+    let stats = stat.stats;
+    let free = stat.available_slots.saturating_sub(stat.live_slots);
+    let millis = u64::try_from(stat.time.as_millis()).unwrap_or(u64::MAX);
+    let freed = stats.total_allocated.saturating_sub(stat.live_slots as u64);
+    let as_u64 = |n: usize| n as u64;
+    let entries: [(&str, u64); 30] = [
+        ("count", stats.collections),
+        ("time", millis),
+        ("marking_time", millis),
+        ("sweeping_time", 0),
+        ("heap_allocated_pages", as_u64(stats.blocks)),
+        ("heap_empty_pages", 0),
+        ("heap_allocatable_slots", 0),
+        ("heap_available_slots", as_u64(stat.available_slots)),
+        ("heap_live_slots", as_u64(stat.live_slots)),
+        ("heap_free_slots", as_u64(free)),
+        ("heap_final_slots", 0),
+        ("heap_marked_slots", as_u64(stats.live_objects)),
+        ("heap_eden_pages", as_u64(stats.blocks)),
+        ("total_allocated_pages", as_u64(stats.blocks)),
+        ("total_freed_pages", 0),
+        ("total_allocated_objects", stats.total_allocated),
+        ("total_freed_objects", freed),
+        ("malloc_increase_bytes", 0),
+        ("malloc_increase_bytes_limit", 0),
+        ("minor_gc_count", 0),
+        ("major_gc_count", stats.collections),
+        ("compact_count", 0),
+        ("read_barrier_faults", 0),
+        ("total_moved_objects", 0),
+        ("remembered_wb_unprotected_objects", 0),
+        ("remembered_wb_unprotected_objects_limit", 0),
+        ("old_objects", 0),
+        ("old_objects_limit", 0),
+        ("oldmalloc_increase_bytes", 0),
+        ("oldmalloc_increase_bytes_limit", 0),
+    ];
+    let mut flat = Vec::with_capacity(entries.len() * 2);
+    for (name, number) in entries {
+        flat.push(Value::symbol(crate::shared::symbols::intern(name)));
+        let number = i64::try_from(number).unwrap_or(i64::MAX);
+        flat.push(Value::fixnum(number).unwrap_or(Value::NIL));
+    }
+    new_array(scope, &flat)
+}
+
+/// `ObjectSpace.each_object(module)`'s objects: every one whose class has
+/// `module` among its ancestors, read off the header so asking creates no
+/// singleton class.
+///
+/// A singleton class of a singleton class is left out. CRuby makes those
+/// only when it must, and hides them from this walk; here one is made the
+/// first time a singleton class is dispatched on, so it is the walk that
+/// has to skip it.
+fn each_object(scope: &mut HandleScope<'_>, module: Value) -> Value {
+    let Some(module) = class_id_of(scope, module) else {
+        return new_array(scope, &[]);
+    };
+    let objects = scope.objects();
+    let mut kinds: std::collections::HashMap<u64, bool> = std::collections::HashMap::new();
+    let mut found = Vec::new();
+    for object in objects {
+        let handle = scope.root(object);
+        let Some(class) = scope.class(handle) else {
+            continue;
+        };
+        let is_kind = match kinds.get(&class.to_bits()) {
+            Some(&answer) => answer,
+            None => {
+                let answer = scope
+                    .class_of(handle)
+                    .is_some_and(|id| scope.classes().ancestors(id).contains(&module));
+                kinds.insert(class.to_bits(), answer);
+                answer
+            }
+        };
+        if !is_kind {
+            continue;
+        }
+        if let Some(id) = scope.class_id_of(handle)
+            && scope.classes().is_singleton(id)
+            && let Some(attached) = scope.classes().attached(id)
+            && class_id_of(scope, attached).is_some_and(|inner| scope.classes().is_singleton(inner))
+        {
+            continue;
+        }
+        found.push(object);
+    }
+    new_array(scope, &found)
 }
 
 /// The first argument of a call, or nil when it was given none.

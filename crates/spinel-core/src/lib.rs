@@ -117,6 +117,7 @@ const SOURCES: &[(&str, &str)] = &[
         include_str!("../../../core/transcode.rb"),
     ),
     ("core/signal.rb", include_str!("../../../core/signal.rb")),
+    ("core/gc.rb", include_str!("../../../core/gc.rb")),
     ("core/thread.rb", include_str!("../../../core/thread.rb")),
     ("core/fiber.rb", include_str!("../../../core/fiber.rb")),
     (

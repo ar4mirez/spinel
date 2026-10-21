@@ -1,2 +1,0 @@
-fails(#36: there is no ObjectSpace yet, and a should_not raise around it now reports the NameError):ObjectSpace.garbage_collect can be invoked without any exceptions
-fails(#36: there is no ObjectSpace yet, and a should_not raise around it now reports the NameError):ObjectSpace.garbage_collect ignores the supplied block
