@@ -372,6 +372,33 @@ class Proc
 
   def to_proc = self
 
+  # Only a Ruby block with a rest parameter, no post parameters and no
+  # keywords can take the flag; anything else is warned about and left alone,
+  # with the reason CRuby gives. Measured.
+  #
+  # ponytail: the flag is checked for but not recorded, so a final hash
+  # collected into the rest parameter is not marked and `Hash.ruby2_keywords_hash?`
+  # does not exist. The upgrade is a flag on the block's iseq, set here and on
+  # `Module#ruby2_keywords`, that marks the hash on entry, with `f(*args)`
+  # passing a marked final hash as keywords.
+  def ruby2_keywords
+    raise FrozenError.new("can't modify frozen Proc: " + inspect, receiver: self) if frozen?
+    callable = @__callable__
+    unless callable.nil?
+      reason = callable[4].nil? ? "proc not defined in Ruby" : "proc created from method"
+      __warning__("Skipping set of ruby2_keywords flag for proc (#{reason})")
+      return self
+    end
+    kinds = parameters.map { |pair| pair[0] }
+    rest = kinds.index(:rest)
+    keywords = !(kinds & [:key, :keyreq, :keyrest]).empty?
+    if rest.nil? || keywords || kinds.__take__(rest + 1, kinds.size - rest - 1).include?(:req)
+      __warning__("Skipping set of ruby2_keywords flag for proc " \
+                  "(proc accepts keywords or post arguments or proc does not accept argument splat)")
+    end
+    self
+  end
+
   # Equal procs are one body in one environment, so where it was written
   # and which rule it calls by agree whenever `==` does.
   def hash
