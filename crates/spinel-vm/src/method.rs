@@ -504,6 +504,8 @@ pub enum Native {
     Fiber(FiberOp),
     /// The thread scheduler under `core/thread.rb` (#45). See `threads.rs`.
     Thread(ThreadOp),
+    /// The collector, weak maps and finalizers under `core/gc.rb` (#36).
+    Gc(GcOp),
     /// `Kernel#__proc_location__(proc)`: `[path, line]` where a block was
     /// written, or nil — what `Fiber#inspect` names (#16) and
     /// `Proc#source_location` will.
@@ -923,6 +925,56 @@ pub enum FiberOp {
     Current,
     Alive,
     Status,
+}
+
+/// Which collector primitive (#36), installed as `Kernel#__gc_*__`,
+/// `__weak_*__` and `__finalizer_*__` and wrapped by `core/gc.rb`. The weak
+/// operations act on their receiver, the map, whose entries the heap keeps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GcOp {
+    /// `__gc_start__`: nil; collects at the next call or return.
+    Start,
+    /// `__gc_stat__`: `[name, count, ...]`, flat, every key `GC.stat` has.
+    Stat,
+    /// `__gc_disable__(flag)`: whether collection was disabled before.
+    Disable,
+    /// `__gc_stress__(flag)`: sets stress mode when given an argument, and
+    /// answers whether it is on.
+    Stress,
+    /// `__gc_time__`: nanoseconds spent collecting.
+    Time,
+    /// `__weak_init__`: gives the receiver an empty table, an ephemeron one
+    /// when it is a `WeakKeyMap`.
+    WeakInit,
+    /// `__weak_get__(key, missing)`: the value, by identity, or `missing`.
+    WeakGet,
+    /// `__weak_set__(key, value, hash)`: the value.
+    WeakSet,
+    /// `__weak_delete__(key, missing)`: the value it held, or `missing`.
+    WeakDelete,
+    /// `__weak_pairs__`: `[key, value, ...]`, flat.
+    WeakPairs,
+    /// `__weak_size__`.
+    WeakSize,
+    /// `__weak_clear__`.
+    WeakClear,
+    /// `__weak_hashed__(hash)`: the keys stored under `hash`.
+    WeakHashed,
+    /// `__finalizer_list__(object)`: its finalizers, oldest first.
+    FinalizerList,
+    /// `__finalizer_add__(object, callable)`.
+    FinalizerAdd,
+    /// `__finalizer_remove__(object)`.
+    FinalizerRemove,
+    /// `__finalizer_take__(everything)`: `[id, [callable, ...], ...]`, flat.
+    FinalizerTake,
+    /// `__each_object__(module)`: every object that is a kind of `module`.
+    EachObject,
+    /// `__id2ref__(id, missing)`: the heap object with that `object_id`.
+    Id2Ref,
+    /// `__immediate__(object)`: whether it is a value rather than an object
+    /// on the heap — one the collector can never collect.
+    Immediate,
 }
 
 /// Which thread primitive. See `threads.rs` for the scheduler and

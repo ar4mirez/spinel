@@ -28,13 +28,13 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/file` | 111 | 922 | 875 | 0 | 43 | 4 | 95% |
 | `core/filetest` | 25 | 11 | 9 | 0 | 2 | 0 | 82% |
 | `core/float` | 50 | 261 | 260 | 0 | 0 | 1 | 100% |
-| `core/gc` | 18 | 41 | 2 | 0 | 39 | 0 | 5% |
+| `core/gc` | 18 | 41 | 41 | 0 | 0 | 0 | 100% |
 | `core/hash` | 69 | 562 | 529 | 0 | 29 | 4 | 94% |
 | `core/integer` | 70 | 598 | 588 | 0 | 9 | 1 | 98% |
 | `core/io` | 103 | 1631 | 1360 | 0 | 265 | 6 | 83% |
 | `core/kernel` | 118 | 2241 | 2047 | 0 | 150 | 44 | 91% |
 | `core/main` | 7 | 27 | 15 | 0 | 11 | 1 | 56% |
-| `core/marshal` | 6 | 475 | 460 | 0 | 10 | 5 | 97% |
+| `core/marshal` | 6 | 475 | 461 | 0 | 9 | 5 | 97% |
 | `core/matchdata` | 30 | 186 | 185 | 0 | 1 | 0 | 99% |
 | `core/math` | 29 | 243 | 243 | 0 | 0 | 0 | 100% |
 | `core/method` | 26 | 199 | 196 | 0 | 1 | 2 | 98% |
@@ -42,7 +42,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/mutex` | 7 | 35 | 34 | 0 | 0 | 1 | 97% |
 | `core/nil` | 18 | 27 | 25 | 0 | 2 | 0 | 93% |
 | `core/numeric` | 46 | 326 | 324 | 0 | 0 | 2 | 99% |
-| `core/objectspace` | 29 | 108 | 1 | 0 | 92 | 15 | 1% |
+| `core/objectspace` | 29 | 108 | 108 | 0 | 0 | 0 | 100% |
 | `core/proc` | 25 | 247 | 243 | 0 | 2 | 2 | 98% |
 | `core/process` | 92 | 430 | 390 | 0 | 27 | 13 | 91% |
 | `core/queue` | 15 | 46 | 40 | 0 | 6 | 0 | 87% |
@@ -131,4 +131,4 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `optional/capi` | 47 | 0 | 0 | 0 | 0 | 0 | — |
 | `optional/thread_safety` | 1 | 5 | 0 | 0 | 5 | 0 | 0% |
 | `security` | 13 | 26 | 19 | 0 | 7 | 0 | 73% |
-| **total** | 3835 | 32586 | 27737 | 0 | 4470 | 379 | 85% |
+| **total** | 3835 | 32586 | 27884 | 0 | 4338 | 364 | 86% |

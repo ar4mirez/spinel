@@ -362,6 +362,198 @@ pub struct Heap {
     /// (#268): bit 0 for writes, bit 1 for reads. `$,` warns when set, `$=`
     /// when read.
     hooked_globals: std::collections::HashMap<SymbolId, u8>,
+    /// `GC.disable`: an allocation past the threshold does not collect. An
+    /// explicit collection still does, as CRuby's `GC.start` does (#36).
+    gc_disabled: bool,
+    /// `GC.stress`: every allocation collects first.
+    gc_stress: bool,
+    /// `GC.start` asked for a collection. The interpreter loop runs it at
+    /// the next call or return, where it can let go of the handles it took
+    /// for instructions that have finished — collecting inside the native
+    /// would keep alive everything those stale handles still name.
+    gc_requested: bool,
+    /// Time spent collecting, for `GC.total_time` and `GC.stat(:time)`.
+    gc_time: std::time::Duration,
+    /// Objects allocated as of the last collection, so `GC.stat` can count
+    /// what has been allocated since without walking the blocks.
+    allocated_at_gc: u64,
+    /// The entries of every `ObjectSpace::WeakMap` and `WeakKeyMap`, by the
+    /// map object's address (#36). Held weakly, which is what makes them
+    /// weak: `mark` never traces an entry, except the value of a
+    /// `WeakKeyMap` entry whose key is alive. After marking, each live map
+    /// drops the entries whose referents did not survive; a table goes with
+    /// its map before `sweep`, as `side_ivars` does.
+    weak: HashMap<usize, WeakTable>,
+    /// `ObjectSpace.define_finalizer`'s callables, by the address of the
+    /// object they finalize. The callables are roots; the object is not.
+    finalizers: HashMap<usize, Vec<Value>>,
+    /// Finalizers whose object a collection found dead, with its
+    /// `object_id`, waiting for the interpreter to run them. The object is
+    /// already swept: a finalizer is handed the id and never the object, so
+    /// running one cannot resurrect it.
+    pending_finalizers: Vec<(i64, Vec<Value>)>,
+}
+
+/// One weak map's entries (#36): the identity of each key, its value, and
+/// the `hash` a `WeakKeyMap` looked it up by.
+#[derive(Debug, Default)]
+pub(crate) struct WeakTable {
+    /// A `WeakKeyMap`: the value is held for as long as its key lives — an
+    /// ephemeron. A `WeakMap` holds both halves weakly, and an entry goes
+    /// when either does.
+    ephemeron: bool,
+    entries: Vec<WeakEntry>,
+    /// Where each key's entry is, by the key's bits: identity, which is
+    /// stable because the collector does not move objects.
+    by_key: HashMap<u64, usize>,
+    /// Where the entries stored under each `hash` are, for a `WeakKeyMap`
+    /// lookup; empty for a `WeakMap`, which never looks one up.
+    by_hash: HashMap<i64, Vec<usize>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct WeakEntry {
+    key: Value,
+    value: Value,
+    hash: i64,
+}
+
+impl WeakTable {
+    pub(crate) fn get(&self, key: Value) -> Option<Value> {
+        self.by_key
+            .get(&key.to_bits())
+            .map(|&index| self.entries[index].value)
+    }
+
+    pub(crate) fn insert(&mut self, key: Value, value: Value, hash: i64) {
+        let entry = WeakEntry { key, value, hash };
+        match self.by_key.get(&key.to_bits()) {
+            Some(&index) => {
+                let old = std::mem::replace(&mut self.entries[index], entry);
+                if self.ephemeron && old.hash != hash {
+                    self.unindex(old.hash, index);
+                    self.by_hash.entry(hash).or_default().push(index);
+                }
+            }
+            None => {
+                let index = self.entries.len();
+                self.by_key.insert(key.to_bits(), index);
+                if self.ephemeron {
+                    self.by_hash.entry(hash).or_default().push(index);
+                }
+                self.entries.push(entry);
+            }
+        }
+    }
+
+    pub(crate) fn remove(&mut self, key: Value) -> Option<Value> {
+        let index = self.by_key.remove(&key.to_bits())?;
+        let removed = self.entries.swap_remove(index);
+        self.unindex(removed.hash, index);
+        if let Some(moved) = self.entries.get(index).copied() {
+            let from = self.entries.len();
+            self.by_key.insert(moved.key.to_bits(), index);
+            if let Some(slot) = self
+                .by_hash
+                .get_mut(&moved.hash)
+                .and_then(|bucket| bucket.iter_mut().find(|slot| **slot == from))
+            {
+                *slot = index;
+            }
+        }
+        Some(removed.value)
+    }
+
+    /// Take `index` out of the bucket for `hash`, and the bucket with it
+    /// once it is empty.
+    fn unindex(&mut self, hash: i64, index: usize) {
+        if let Some(bucket) = self.by_hash.get_mut(&hash) {
+            bucket.retain(|&slot| slot != index);
+            if bucket.is_empty() {
+                self.by_hash.remove(&hash);
+            }
+        }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.entries.clear();
+        self.by_key.clear();
+        self.by_hash.clear();
+    }
+
+    /// Every entry, in the order they were added, apart from deletions.
+    pub(crate) fn pairs(&self) -> impl Iterator<Item = (Value, Value)> + '_ {
+        self.entries.iter().map(|entry| (entry.key, entry.value))
+    }
+
+    /// The keys a `WeakKeyMap` stored under `hash`.
+    pub(crate) fn keys_with_hash(&self, hash: i64) -> impl Iterator<Item = Value> + '_ {
+        self.by_hash
+            .get(&hash)
+            .into_iter()
+            .flatten()
+            .map(|&index| self.entries[index].key)
+    }
+
+    /// Drop the entries a collection left dangling.
+    fn retain_live(&mut self) {
+        let ephemeron = self.ephemeron;
+        let before = self.entries.len();
+        self.entries
+            .retain(|entry| survived(entry.key) && (ephemeron || survived(entry.value)));
+        if self.entries.len() != before {
+            self.by_key.clear();
+            self.by_hash.clear();
+            for (index, entry) in self.entries.iter().enumerate() {
+                self.by_key.insert(entry.key.to_bits(), index);
+                if ephemeron {
+                    self.by_hash.entry(entry.hash).or_default().push(index);
+                }
+            }
+        }
+    }
+}
+
+/// Whether `value` came through the mark phase alive: an immediate always
+/// does, and a heap object does when it is marked.
+fn survived(value: Value) -> bool {
+    match value.as_heap() {
+        // SAFETY: called between marking and sweeping, on values the heap
+        // still holds, so the cell is one this heap allocated and has not
+        // freed.
+        Some(pointer) => unsafe { (*pointer.cast::<Header>().as_ptr()).flags & MARKED != 0 },
+        None => true,
+    }
+}
+
+/// `Object#object_id` for the object at `address`: the address, shifted past
+/// the alignment bits that are zero on every cell.
+pub(crate) fn object_id(address: usize) -> i64 {
+    i64::try_from(address >> 4).expect("a cell address shifted by four fits in an i64")
+}
+
+/// What `GC.stat` reports (#36), beside [`Stats`]: the counts it derives.
+#[derive(Debug, Clone, Copy)]
+pub struct GcStat {
+    pub stats: Stats,
+    /// Cells every block holds, used or not.
+    pub available_slots: usize,
+    /// Objects allocated and not yet found dead: the last collection's
+    /// survivors and everything allocated since.
+    pub live_slots: usize,
+    pub time: std::time::Duration,
+}
+
+/// Whether the object at `address` is marked, between marking and sweeping.
+fn address_marked(address: usize) -> bool {
+    // SAFETY: every address a side table keys is one of this heap's live
+    // objects as of the previous cycle, and nothing has been freed yet in
+    // this one.
+    unsafe { (*(address as *const Header)).flags & MARKED != 0 }
 }
 
 /// The class index for an object needing `bytes` in total, or `None` for large objects.
@@ -418,6 +610,14 @@ impl Heap {
             readonly_globals: std::collections::HashSet::new(),
             frozen_string_literal: None,
             hooked_globals: std::collections::HashMap::new(),
+            gc_disabled: false,
+            gc_stress: false,
+            gc_requested: false,
+            gc_time: std::time::Duration::ZERO,
+            allocated_at_gc: 0,
+            weak: HashMap::new(),
+            finalizers: HashMap::new(),
+            pending_finalizers: Vec::new(),
         }
     }
 
@@ -629,7 +829,7 @@ impl Heap {
     /// the thing the caller is about to be handed.
     fn allocate(&mut self, class: Option<Value>, payload: Payload, len: u32) -> Value {
         let size = Heap::object_size(payload, len);
-        if self.bytes_since_gc >= self.next_gc {
+        if !self.gc_disabled && (self.gc_stress || self.bytes_since_gc >= self.next_gc) {
             self.collect();
         }
         self.bytes_since_gc += size;
@@ -720,8 +920,13 @@ impl Heap {
 
     /// Mark every object reachable from the roots, then reclaim the rest.
     pub fn collect(&mut self) {
+        let started = std::time::Instant::now();
         self.mark();
+        self.trace_weak();
+        self.queue_finalizers();
         self.sweep();
+        self.gc_time += started.elapsed();
+        self.allocated_at_gc = self.total_allocated;
         self.collections += 1;
         self.bytes_since_gc = 0;
         self.next_gc = self.live_bytes.saturating_mul(2).max(MIN_GC_BYTES);
@@ -767,6 +972,22 @@ impl Heap {
         for value in slots.iter().flatten() {
             Heap::shade(mark_stack, *value);
         }
+        // Seventh: finalizers, registered and queued. A finalizer that holds
+        // its own object keeps it alive, which is CRuby's rule too; it runs
+        // at exit instead.
+        let (finalizers, mark_stack) = (&self.finalizers, &mut self.mark_stack);
+        for value in finalizers.values().flatten() {
+            Heap::shade(mark_stack, *value);
+        }
+        let (pending, mark_stack) = (&self.pending_finalizers, &mut self.mark_stack);
+        for value in pending.iter().flat_map(|(_, callables)| callables) {
+            Heap::shade(mark_stack, *value);
+        }
+        self.drain();
+    }
+
+    /// Trace everything the mark stack reaches.
+    fn drain(&mut self) {
         // R3: a worklist, not recursion. A Ruby program can build a chain a million
         // objects deep, and a recursive tracer turns that into a stack overflow inside
         // the collector, with no Ruby frame to blame it on.
@@ -792,6 +1013,59 @@ impl Heap {
                     let slot = unsafe { ptr::read(slots.add(i)) };
                     Heap::shade(&mut self.mark_stack, slot);
                 }
+            }
+        }
+    }
+
+    /// The second root pass weak maps need (#36), after the strong one has
+    /// drained.
+    ///
+    /// First the ephemerons: a `WeakKeyMap` value is reachable through its
+    /// key, so one whose key survived is marked and traced — and tracing it
+    /// may bring another map's key to life, which is why this repeats until
+    /// a pass marks nothing. Then every surviving map lets go of the entries
+    /// whose referents did not survive, so nothing reads a cell `sweep` is
+    /// about to free.
+    fn trace_weak(&mut self) {
+        loop {
+            let mut shaded = false;
+            let (weak, mark_stack) = (&self.weak, &mut self.mark_stack);
+            for (&owner, table) in weak {
+                if !table.ephemeron || !address_marked(owner) {
+                    continue;
+                }
+                for entry in &table.entries {
+                    if survived(entry.key) && !survived(entry.value) {
+                        Heap::shade(mark_stack, entry.value);
+                        shaded = true;
+                    }
+                }
+            }
+            if !shaded {
+                break;
+            }
+            self.drain();
+        }
+        for (&owner, table) in &mut self.weak {
+            if address_marked(owner) {
+                table.retain_live();
+            }
+        }
+    }
+
+    /// Move the finalizers of every object that did not survive onto the
+    /// queue the interpreter drains, with the id the object answered to.
+    fn queue_finalizers(&mut self) {
+        let dead: Vec<usize> = self
+            .finalizers
+            .keys()
+            .copied()
+            .filter(|&address| !address_marked(address))
+            .collect();
+        for address in dead {
+            if let Some(callables) = self.finalizers.remove(&address) {
+                self.pending_finalizers
+                    .push((object_id(address), callables));
             }
         }
     }
@@ -824,6 +1098,8 @@ impl Heap {
             // heap, and nothing has been freed yet in this cycle.
             unsafe { (*(address as *const Header)).flags & MARKED != 0 }
         });
+        // A weak map's table goes with the map, for the same reason.
+        self.weak.retain(|&address, _| address_marked(address));
         self.free = [ptr::null_mut(); CLASS_COUNT];
         let mut live_bytes = 0;
         let mut live_objects = 0;
@@ -844,9 +1120,9 @@ impl Heap {
                     live_bytes += cell_size;
                     live_objects += 1;
                 } else {
-                    // ponytail: a dead object is reclaimed by being relinked, and
-                    // nothing runs. `ObjectSpace.define_finalizer` is phase 2 in
-                    // engine.md and queues the finalizer here.
+                    // A finalizer was queued before this loop began
+                    // (`queue_finalizers`), so relinking the cell is all
+                    // that is left: nothing runs here.
                     unsafe { (*header).flags = 0 };
                     unsafe { ptr::write(cell.cast::<*mut u8>(), self.free[class_index]) };
                     self.free[class_index] = cell;
@@ -1247,6 +1523,132 @@ impl<'h> HandleScope<'h> {
         self.heap.stats()
     }
 
+    /// `GC.stat`'s numbers (#36).
+    pub fn gc_stat(&self) -> GcStat {
+        let heap = &*self.heap;
+        let since = heap.total_allocated - heap.allocated_at_gc;
+        GcStat {
+            stats: heap.stats(),
+            available_slots: heap
+                .blocks
+                .iter()
+                .map(|block| BLOCK_SIZE / block.cell_size)
+                .sum(),
+            live_slots: heap.live_objects + usize::try_from(since).unwrap_or(usize::MAX),
+            time: heap.gc_time,
+        }
+    }
+
+    /// `GC.start`: collect at the interpreter's next call or return, where
+    /// the loop can first let go of handles it no longer needs.
+    pub(crate) fn request_collection(&mut self) {
+        self.heap.gc_requested = true;
+    }
+
+    /// Whether a collection was asked for, forgetting that it was.
+    pub(crate) fn take_collection_request(&mut self) -> bool {
+        std::mem::take(&mut self.heap.gc_requested)
+    }
+
+    /// `GC.disable` with `true`, `GC.enable` with `false`; answers whether
+    /// collection was disabled before.
+    pub(crate) fn set_gc_disabled(&mut self, disabled: bool) -> bool {
+        std::mem::replace(&mut self.heap.gc_disabled, disabled)
+    }
+
+    pub(crate) fn set_gc_stress(&mut self, stress: bool) {
+        self.heap.gc_stress = stress;
+    }
+
+    pub(crate) fn gc_stress(&self) -> bool {
+        self.heap.gc_stress
+    }
+
+    /// The weak table of the map object `owner`, made empty on first use.
+    pub(crate) fn weak_table(&mut self, owner: Handle<'h>, ephemeron: bool) -> &mut WeakTable {
+        let address = self.address(owner);
+        self.heap.weak.entry(address).or_insert_with(|| WeakTable {
+            ephemeron,
+            ..WeakTable::default()
+        })
+    }
+
+    /// The callables finalizing `object`, oldest first; empty when it has none.
+    pub(crate) fn finalizers(&self, object: Handle<'h>) -> &[Value] {
+        self.heap
+            .finalizers
+            .get(&self.address(object))
+            .map_or(&[], Vec::as_slice)
+    }
+
+    pub(crate) fn add_finalizer(&mut self, object: Handle<'h>, callable: Value) {
+        let address = self.address(object);
+        self.heap
+            .finalizers
+            .entry(address)
+            .or_default()
+            .push(callable);
+    }
+
+    /// `ObjectSpace.undefine_finalizer`.
+    pub(crate) fn remove_finalizers(&mut self, object: Handle<'h>) {
+        let address = self.address(object);
+        self.heap.finalizers.remove(&address);
+    }
+
+    pub(crate) fn has_pending_finalizers(&self) -> bool {
+        !self.heap.pending_finalizers.is_empty()
+    }
+
+    /// The finalizers a collection queued, with the id each is handed —
+    /// and, when `everything` is set, every one still registered, which is
+    /// what the program's end runs. Either way the heap forgets them.
+    pub(crate) fn take_finalizers(&mut self, everything: bool) -> Vec<(i64, Vec<Value>)> {
+        let mut taken = std::mem::take(&mut self.heap.pending_finalizers);
+        if everything {
+            let mut registered: Vec<_> = self.heap.finalizers.drain().collect();
+            // By address, so a run at exit is the same from one run to the next.
+            registered.sort_by_key(|&(address, _)| address);
+            taken.extend(
+                registered
+                    .into_iter()
+                    .map(|(address, callables)| (object_id(address), callables)),
+            );
+        }
+        taken
+    }
+
+    /// Every object this heap holds that Ruby can see — one with a class —
+    /// in no promised order, for `ObjectSpace.each_object` (#36).
+    ///
+    /// Not only the live ones: an object that became garbage after the last
+    /// collection is still in its cell, intact, and is reported, as CRuby's
+    /// walk reports one. The caller roots what it keeps before allocating,
+    /// since a collection would free those.
+    pub(crate) fn objects(&self) -> Vec<Value> {
+        let heap = &*self.heap;
+        let mut out = Vec::new();
+        let mut visit = |header: *mut Header| {
+            // SAFETY: a block is zeroed on arrival and a swept cell has its
+            // flags cleared, so `ALLOCATED` says the header was written by
+            // `allocate` and the cell has not been freed since.
+            let header = unsafe { &*header };
+            if header.flags & ALLOCATED != 0 && header.class.is_some() {
+                out.push(Value::heap(NonNull::from(header).cast::<()>()));
+            }
+        };
+        for block in &heap.blocks {
+            for i in 0..BLOCK_SIZE / block.cell_size {
+                // SAFETY: `i * cell_size` stays inside the block by construction.
+                visit(unsafe { block.memory.as_ptr().add(i * block.cell_size) }.cast());
+            }
+        }
+        for &(pointer, _) in &heap.large {
+            visit(pointer.as_ptr());
+        }
+        out
+    }
+
     /// Forget every handle past the first `len`, as dropping a nested scope
     /// would. The interpreter loop uses it between instructions, where no
     /// handle it took is still in use, and roots what its stack and frames
@@ -1571,6 +1973,120 @@ mod tests {
         let storage = scope.side_ivars(kept);
         let storage = scope.root(storage);
         assert_eq!(scope.slot(storage, 0), Value::TRUE);
+    }
+
+    /// A weak map lets go of an entry once either half is unreachable, keeps
+    /// one whose halves are both held or are immediates, and goes with its
+    /// map (#36).
+    #[test]
+    fn weak_entries_clear_when_a_half_dies() {
+        let mut heap = Heap::new();
+        let mut scope = heap.scope();
+        let map = scope.alloc(None, Payload::Slots, 1);
+        let key = scope.alloc(None, Payload::Slots, 1);
+        let value = scope.alloc(None, Payload::Slots, 1);
+        let (key_value, value_value) = (scope.get(key), scope.get(value));
+        {
+            let mut inner = scope.nested();
+            let lost_key = inner.alloc(None, Payload::Slots, 1);
+            let lost_value = inner.alloc(None, Payload::Slots, 1);
+            let (lost_key, lost_value) = (inner.get(lost_key), inner.get(lost_value));
+            let table = inner.weak_table(map, false);
+            table.insert(key_value, value_value, 0);
+            table.insert(lost_key, value_value, 0);
+            table.insert(key_value, value_value, 0);
+            table.insert(Value::TRUE, lost_value, 0);
+            table.insert(Value::NIL, Value::FALSE, 0);
+            assert_eq!(table.len(), 4);
+            // A second map that nothing keeps.
+            let lost_map = inner.alloc(None, Payload::Slots, 1);
+            inner
+                .weak_table(lost_map, false)
+                .insert(key_value, value_value, 0);
+        }
+        assert_eq!(scope.heap.weak.len(), 2);
+        scope.collect();
+        assert_eq!(scope.heap.weak.len(), 1);
+        let table = scope.weak_table(map, false);
+        assert_eq!(table.len(), 2);
+        assert_eq!(table.get(key_value), Some(value_value));
+        assert_eq!(table.get(Value::NIL), Some(Value::FALSE));
+        assert_eq!(table.get(Value::TRUE), None);
+        assert_eq!(scope.stats().live_objects, 3);
+    }
+
+    /// A `WeakKeyMap` value lives as long as its key, even when nothing else
+    /// holds it — and through a chain, where one map's value is another's
+    /// key, which is what the repeated pass in `trace_weak` is for.
+    #[test]
+    fn ephemeron_values_live_as_long_as_their_keys() {
+        let mut heap = Heap::new();
+        let mut scope = heap.scope();
+        let first = scope.alloc(None, Payload::Slots, 1);
+        let second = scope.alloc(None, Payload::Slots, 1);
+        let key = scope.alloc(None, Payload::Slots, 1);
+        let key_value = scope.get(key);
+        let (middle, last) = {
+            let mut inner = scope.nested();
+            let middle = inner.alloc(None, Payload::Slots, 1);
+            let last = inner.alloc(None, Payload::Slots, 1);
+            let (middle, last) = (inner.get(middle), inner.get(last));
+            // Added to the second map first, so one pass over the maps in
+            // either order still has to come back for it.
+            inner.weak_table(second, true).insert(middle, last, 7);
+            inner.weak_table(first, true).insert(key_value, middle, 3);
+            let dead_key = inner.alloc(None, Payload::Slots, 1);
+            let dead_value = inner.alloc(None, Payload::Slots, 1);
+            let (dead_key, dead_value) = (inner.get(dead_key), inner.get(dead_value));
+            inner
+                .weak_table(first, true)
+                .insert(dead_key, dead_value, 3);
+            (middle, last)
+        };
+        scope.collect();
+        // The two maps, the key, and the chain it holds up.
+        assert_eq!(scope.stats().live_objects, 5);
+        assert_eq!(scope.weak_table(first, true).get(key_value), Some(middle));
+        assert_eq!(scope.weak_table(first, true).len(), 1);
+        assert_eq!(scope.weak_table(second, true).get(middle), Some(last));
+        let hashed: Vec<Value> = scope.weak_table(first, true).keys_with_hash(3).collect();
+        assert_eq!(hashed, [key_value]);
+    }
+
+    /// A finalizer is queued once its object is collected, with the id the
+    /// object answered to, and the callable outlives the object: it is a
+    /// root, the object is not. An object a finalizer holds is kept alive.
+    #[test]
+    fn finalizers_are_queued_once_their_object_is_collected() {
+        let mut heap = Heap::new();
+        let mut scope = heap.scope();
+        let callable = scope.alloc(None, Payload::Slots, 1);
+        let callable_value = scope.get(callable);
+        let held = scope.alloc(None, Payload::Slots, 1);
+        let id = {
+            let mut inner = scope.nested();
+            let doomed = inner.alloc(None, Payload::Slots, 1);
+            inner.add_finalizer(doomed, callable_value);
+            // Held only by its own finalizer.
+            let selfish = inner.alloc(None, Payload::Slots, 1);
+            let selfish_value = inner.get(selfish);
+            inner.add_finalizer(selfish, selfish_value);
+            inner.add_finalizer(held, callable_value);
+            object_id(inner.address(doomed))
+        };
+        assert!(!scope.has_pending_finalizers());
+        scope.collect();
+        // The callable, the object kept by a handle, and the one its own
+        // finalizer holds.
+        assert_eq!(scope.stats().live_objects, 3);
+        assert!(scope.has_pending_finalizers());
+        let taken = scope.take_finalizers(false);
+        assert_eq!(taken, [(id, vec![callable_value])]);
+        // At exit, the rest: every one still registered.
+        let mut rest = scope.take_finalizers(true);
+        rest.sort_by_key(|(id, _)| *id);
+        assert_eq!(rest.len(), 2);
+        assert!(scope.take_finalizers(true).is_empty());
     }
 
     // T2
