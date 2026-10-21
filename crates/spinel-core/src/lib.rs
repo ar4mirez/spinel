@@ -128,6 +128,10 @@ const SOURCES: &[(&str, &str)] = &[
         "core/arithmetic_sequence.rb",
         include_str!("../../../core/arithmetic_sequence.rb"),
     ),
+    (
+        "core/pathname.rb",
+        include_str!("../../../core/pathname.rb"),
+    ),
     // Last: it re-points names the files above defined twice.
     ("core/aliases.rb", include_str!("../../../core/aliases.rb")),
 ];
