@@ -119,7 +119,7 @@ class Data
     end
     text = key.to_str
     unless text.is_a?(String)
-      raise TypeError, "can't convert " + key.class.to_s + " to String (" +
+      raise TypeError, "can't convert " + key.class.to_s + " into String (" +
                        key.class.to_s + "#to_str gives " + text.class.to_s + ")"
     end
     text.to_sym
