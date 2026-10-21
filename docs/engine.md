@@ -318,7 +318,8 @@ in one of two ways, `spinel_regex::Encoding`: as UTF-8, or a character per
 byte with only ASCII's classes and cases, which is BINARY and US-ASCII. A
 `Regexp` carries its own encoding as CRuby does, in its source String: `/u`,
 `/e` and `/s` fix it to UTF-8, EUC-JP and Windows-31J, `/n` makes it BINARY
-when the source names a byte past ASCII, and an ASCII pattern is US-ASCII and
+when the source names a byte past ASCII (a raw one only from a BINARY String;
+any other is a `RegexpError`, as in CRuby), and an ASCII pattern is US-ASCII and
 free to match in the subject's encoding. Which encoding a match uses, and when
 the two cannot meet, is `rb_reg_prepare_enc`'s decision, ported. The program
 does not depend on the encoding, so one compiled pattern serves every subject;
