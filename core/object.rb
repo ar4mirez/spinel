@@ -11,8 +11,8 @@ class Object
 end
 
 # `main`, the top level's `self`: an Object whose singleton answers `to_s` as
-# "main" and forwards `include`, `define_method`, `public` and `private` to
-# `Object`, privately — CRuby's set, measured. `public` and `private` are the
+# "main" and forwards `include`, `define_method`, `ruby2_keywords`, `public`
+# and `private` to `Object`, privately — CRuby's set, measured. `public` and `private` are the
 # primitives themselves, so a bare one sets the top-level frame's default.
 class << self
   def to_s
@@ -28,8 +28,12 @@ class << self
     Object.__send__(:define_method, *args, &block)
   end
 
+  def ruby2_keywords(*names)
+    Object.__send__(:ruby2_keywords, *names)
+  end
+
   alias public __main_public__
   alias private __main_private__
 
-  private :include, :define_method, :public, :private
+  private :include, :define_method, :ruby2_keywords, :public, :private
 end

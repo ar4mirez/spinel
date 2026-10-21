@@ -902,6 +902,13 @@ pub enum ReflectOp {
     /// `(from, to)` → nil; gives `to` a copy of `from`'s singleton class when
     /// it has one. `Kernel#clone`'s half that Ruby cannot reach.
     CopySingleton,
+    /// `(body)` → marks the `Iseq` a method body or a `Proc` runs as
+    /// `ruby2_keywords` (#200); false when it runs none, true otherwise.
+    /// Whether its parameters allow it is the Ruby caller's question.
+    Ruby2Keywords,
+    /// `(hash, mark)` → whether `hash` is a keywords hash, marking it first
+    /// when `mark` is truthy (#200).
+    KeywordsHash,
 }
 
 /// Which fiber primitive. See `interp.rs`, "Fibers".
@@ -997,6 +1004,11 @@ pub struct Definitions {
     /// alive by the `Iseq` that owns it as a child, which outlives the frame
     /// that could look it up.
     interned: std::collections::HashMap<usize, Value>,
+    /// The `Iseq`s `ruby2_keywords` marked (#200), by address: a method and
+    /// its aliases share one body, and a `define_method` body and the block
+    /// it was made from share one `Iseq`, which is where CRuby keeps the flag
+    /// too. Safe as a key for the reason `interned` is — marking interns.
+    ruby2_keywords: std::collections::HashSet<usize>,
 }
 
 impl Definitions {
@@ -1005,7 +1017,22 @@ impl Definitions {
         Definitions {
             entries: Vec::new(),
             interned: std::collections::HashMap::new(),
+            ruby2_keywords: std::collections::HashSet::new(),
         }
+    }
+
+    /// Mark `iseq` as taking a caller's keywords into a flagged `Hash` (#200).
+    pub fn mark_ruby2_keywords(&mut self, iseq: &Arc<Iseq>) {
+        let key = Arc::as_ptr(iseq) as usize;
+        // Interned first, so the table holds the `Arc` and the address cannot
+        // be reused by another `Iseq` while the mark remembers it.
+        self.intern_iseq(iseq, key);
+        self.ruby2_keywords.insert(key);
+    }
+
+    #[must_use]
+    pub fn is_ruby2_keywords(&self, iseq: &Arc<Iseq>) -> bool {
+        self.ruby2_keywords.contains(&(Arc::as_ptr(iseq) as usize))
     }
 
     /// The body id for a compiled `Iseq`, added once per distinct `Iseq`.

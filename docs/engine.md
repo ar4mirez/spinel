@@ -90,7 +90,7 @@ Landed in [#7](https://github.com/ar4mirez/spinel/issues/7). The object header i
 |---|---|---|
 | 0 | class pointer | `Option<Value>`; also the free-list link while the cell is free |
 | 8 | `len` | `Value` slots, or bytes |
-| 12 | flags | mark bit; frozen and ractor-shareable join it with #8; side-table ivars; chilled, for a String literal or `Symbol#to_s` that warns when first mutated (#263) |
+| 12 | flags | mark bit; frozen and ractor-shareable join it with #8; side-table ivars; chilled, for a String literal or `Symbol#to_s` that warns when first mutated (#263); keywords, for a Hash `ruby2_keywords` collected (#200) |
 | 13 | payload kind | slots or bytes — whether the collector descends |
 | 14 | shape id | which instance variables the object holds, and where |
 
@@ -180,6 +180,8 @@ A method or lambda and a block differ in exactly two places, and both are the bi
 A call site is a table entry rather than an instruction operand: `Insn::Send(u32)` indexes `Iseq::call_sites`, which carries the name, the positional count, the keyword names, and what block the call passes. That is where the inline caches above go, since they are per heap and bytecode is not.
 
 `for` is compiled as `each` with a block and is *not* a block, because `for` opens no Ruby scope: its variable and its body's locals belong to the scope around the loop and outlive it ([#212](https://github.com/ar4mirez/spinel/issues/212)). The block's environment is marked synthetic, and Prism's depths — which count Ruby scopes — are translated into run-time environment depths before a depth becomes a slot, skipping the environments Ruby cannot see. That translation is what lets a block written inside a `for` body reach the locals around the loop, and a `for` nested inside *that* block reach them one environment further out than Prism counted; `for_spec.rb` asserts on exactly that shape. The block holds one local of its own, the element, under a name Ruby cannot spell.
+
+`ruby2_keywords`, the bridge Ruby 3 left for Ruby 2's convention, is two reads of one flag ([#200](https://github.com/ar4mirez/spinel/issues/200)). Marking a method or a `Proc` records its `Iseq` in the heap's `Definitions`, so an alias and every proc of one block literal share the mark, as they share CRuby's iseq flag. `bind` asks only when a call passes keywords to a body with a rest parameter, and then sets a header bit on the Hash those keywords become. `pop_call` reads the bit after expanding a call's splats: a flagged final Hash, on a site that writes no keywords of its own, leaves the positional arguments and becomes the call's keywords. A bit rather than an ivar because `inspect` must not show it and a copy must not carry it — measured, CRuby's `dup` leaves the flag behind.
 
 Optional and keyword defaults are code at the top of the body rather than something the binder evaluates. The binder writes an undef marker into the slots a call left out, and each default is guarded by a `JumpUnlessUndef`. That handles a default that calls a method, and it handles keywords — which are independent rather than a fall-through chain, so a per-parameter entry offset would not.
 

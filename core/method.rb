@@ -282,6 +282,37 @@ class Module
     UnboundMethod.__make__(name, found, self)
   end
 
+  # Marks each named method so that the keywords its rest parameter collects
+  # arrive as a Hash flagged to be passed on as keywords again (#200). The flag
+  # is on the body: an alias shares it whichever side of the mark it was made
+  # on. A module's lookup falls back to `Object`'s, and only the module that
+  # defines the method may mark it. CRuby's checks and warnings, measured.
+  def ruby2_keywords(*names)
+    names.each do |name|
+      name = Kernel.__method_name__(name)
+      found = __reflect_method_lookup__(nil, self, name, false)
+      found = __reflect_method_lookup__(nil, Object, name, false) if found.nil? && !(Class === self)
+      if found.nil?
+        raise NameError.new("undefined method '#{name}' for #{Kernel.__method_home__(self)}", name, receiver: self)
+      end
+      reason =
+        if !found[0].equal?(self)
+          "can only set in method defining module"
+        elsif found[5].nil?
+          "method not defined in Ruby"
+        else
+          Proc.__ruby2_keywords_refusal__(found[5], "method")
+        end
+      if reason.nil?
+        __reflect_ruby2_keywords__(found[6])
+      else
+        __warning__("Skipping set of ruby2_keywords flag for #{name} (#{reason})")
+      end
+    end
+    nil
+  end
+  private :ruby2_keywords
+
   def public_instance_method(name)
     name = Kernel.__method_name__(name)
     found = __reflect_method_lookup__(nil, self, name, false)
@@ -374,13 +405,9 @@ class Proc
 
   # Only a Ruby block with a rest parameter, no post parameters and no
   # keywords can take the flag; anything else is warned about and left alone,
-  # with the reason CRuby gives. Measured.
-  #
-  # ponytail: the flag is checked for but not recorded, so a final hash
-  # collected into the rest parameter is not marked and `Hash.ruby2_keywords_hash?`
-  # does not exist. The upgrade is a flag on the block's iseq, set here and on
-  # `Module#ruby2_keywords`, that marks the hash on entry, with `f(*args)`
-  # passing a marked final hash as keywords.
+  # with the reason CRuby gives. Measured. The flag is on the block's body, so
+  # a `dup` made before or after shares it, as every proc of one literal does
+  # (#200).
   def ruby2_keywords
     raise FrozenError.new("can't modify frozen Proc: " + inspect, receiver: self) if frozen?
     callable = @__callable__
@@ -389,14 +416,26 @@ class Proc
       __warning__("Skipping set of ruby2_keywords flag for proc (#{reason})")
       return self
     end
+    reason = Proc.__ruby2_keywords_refusal__(parameters, "proc")
+    if reason.nil?
+      __reflect_ruby2_keywords__(self)
+    else
+      __warning__("Skipping set of ruby2_keywords flag for proc (#{reason})")
+    end
+    self
+  end
+
+  # Why a body with these `parameters` cannot take the `ruby2_keywords` flag,
+  # or nil when it can: it needs a rest parameter, and no post parameters or
+  # keywords. A post parameter is whatever follows the rest, which a proc
+  # reports as `:opt`. CRuby's wording, `what` being "method" or "proc".
+  def self.__ruby2_keywords_refusal__(parameters, what)
     kinds = parameters.map { |pair| pair[0] }
     rest = kinds.index(:rest)
     keywords = !(kinds & [:key, :keyreq, :keyrest]).empty?
-    if rest.nil? || keywords || kinds.__take__(rest + 1, kinds.size - rest - 1).include?(:req)
-      __warning__("Skipping set of ruby2_keywords flag for proc " \
-                  "(proc accepts keywords or post arguments or proc does not accept argument splat)")
-    end
-    self
+    post = !rest.nil? && !(kinds.__take__(rest + 1, kinds.size - rest - 1) & [:req, :opt]).empty?
+    return nil unless rest.nil? || keywords || post
+    "#{what} accepts keywords or post arguments or #{what} does not accept argument splat"
   end
 
   # Equal procs are one body in one environment, so where it was written

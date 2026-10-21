@@ -734,6 +734,34 @@ defined?($~)  #=> "global-variable"
 # `**nil` accepts none at all.
 (def krf(**nil) = :none; krf)  #=> :none
 
+# ------------------------------------------------------ ruby2_keywords (#200)
+# The Ruby 2 to 3 bridge. A marked method's `*args` collects its caller's
+# keywords into a flagged Hash, and a call that splats that Hash back out —
+# writing no keywords of its own — passes it as keywords. Unmarked, the same
+# Hash stays positional; the negative rows are the point. Measured on
+# ruby 4.0.7.
+(c = Class.new { def t(*a, **kw) = [a.size, kw.keys]; def m(*a) = t(*a) }; c.new.m(k: 1))  #=> [1, []]
+(c = Class.new { def t(*a, **kw) = [a.size, kw.keys]; def m(*a) = t(*a); ruby2_keywords :m }; c.new.m(k: 1))  #=> [0, [:k]]
+(c = Class.new { def t(*a, **kw) = [a.size, kw.keys]; def m(*a) = t(*a); ruby2_keywords :m }; c.new.m({k: 1}))  #=> [1, []]
+(c = Class.new { def m(*a) = a.last; ruby2_keywords :m }; Hash.ruby2_keywords_hash?(c.new.m(k: 1)))  #=> true
+(c = Class.new { def m(*a) = a.last }; Hash.ruby2_keywords_hash?(c.new.m(k: 1)))  #=> false
+# The mark is on the body, so an alias made before it shares it.
+(c = Class.new { def m(*a) = a.last; alias_method :n, :m; ruby2_keywords :m }; Hash.ruby2_keywords_hash?(c.new.n(k: 1)))  #=> true
+# One unmarked method in a chain of forwards drops the flag for good.
+(c = Class.new { def t(*a, **kw) = [a.size, kw.keys]; def n(*a) = t(*a); def m(*a) = n(*a); ruby2_keywords :m }; c.new.m(k: 1))  #=> [1, []]
+# Only a splat reads the flag, wherever the Hash came from; `**{}` is keywords
+# of the call's own, and an empty flagged Hash passes nothing.
+(def r2s(*a, **kw) = [a.size, kw.keys]; h = Hash.ruby2_keywords_hash({k: 1}); [r2s(*[h]), r2s(h), r2s(*[], h), r2s(*[h], **{})])  #=> [[0, [:k]], [1, []], [0, [:k]], [1, []]]
+(def r2e(*a, **kw) = [a.size, kw.keys]; r2e(*[1, Hash.ruby2_keywords_hash({})]))  #=> [1, []]
+# A copy is never marked, and passing the Hash positionally neither copies nor
+# unmarks it.
+(h = Hash.ruby2_keywords_hash({k: 1}); [Hash.ruby2_keywords_hash?(h), Hash.ruby2_keywords_hash?(h.dup), Hash.ruby2_keywords_hash?(h.merge({}))])  #=> [true, false, false]
+(def r2p(x) = x; h = Hash.ruby2_keywords_hash({k: 1}); [r2p(h).equal?(h), Hash.ruby2_keywords_hash?(r2p(h))])  #=> [true, true]
+# Splatted into a method without the mark, it arrives as a fresh, unmarked Hash.
+(def r2u(*a) = a.last; h = Hash.ruby2_keywords_hash({k: 1}); x = r2u(*[h]); [x.equal?(h), Hash.ruby2_keywords_hash?(x), x.keys])  #=> [false, false, [:k]]
+(f = proc { |*a| a.last }; f.ruby2_keywords; Hash.ruby2_keywords_hash?(f.call(k: 1)))  #=> true
+(f = proc { |*a| a.last }; Hash.ruby2_keywords_hash?(f.call(k: 1)))  #=> false
+
 # ------------------------------------------- regexp back-references (#197)
 # `$~` is defined whether or not anything matched; every ref derived from it is
 # nil until a match gives it a value, and nil again after one fails. Measured

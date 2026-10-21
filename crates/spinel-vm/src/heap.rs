@@ -90,6 +90,12 @@ const CHILLED: u8 = 0b1000;
 /// words.
 const CHILLED_SYMBOL: u8 = 0b1_0000;
 
+/// Set on a `Hash` a `ruby2_keywords` method collected from its caller's
+/// keywords (#200), so that splatting it back out passes them as keywords.
+/// A header bit rather than an ivar because `Hash#inspect` must not show it
+/// and `dup` must not copy it: the copy is a fresh cell, measured unmarked.
+const KEYWORDS: u8 = 0b10_0000;
+
 /// Set from allocation until the cell is swept onto a free list.
 ///
 /// The collector never reads it. It exists so that storing a `Value` can assert, in
@@ -1430,6 +1436,22 @@ impl<'h> HandleScope<'h> {
         // SAFETY: as above.
         let flags = unsafe { (*object.header()).flags };
         (flags & (CHILLED | CHILLED_SYMBOL) != 0).then_some(flags & CHILLED_SYMBOL != 0)
+    }
+
+    /// Mark a `Hash` as a keywords hash (#200). One-way: a marked hash is
+    /// only ever unmarked by being copied.
+    pub fn mark_keywords(&mut self, handle: Handle<'h>) {
+        let object = self.object(handle);
+        // SAFETY: `handle` is rooted, so the cell it names is live.
+        unsafe { (*object.header()).flags |= KEYWORDS };
+    }
+
+    /// Whether [`HandleScope::mark_keywords`] has been called on this object.
+    #[must_use]
+    pub fn is_keywords(&self, handle: Handle<'h>) -> bool {
+        let object = self.object(handle);
+        // SAFETY: as above.
+        unsafe { (*object.header()).flags & KEYWORDS != 0 }
     }
 
     /// Whether [`HandleScope::freeze`] has been called on this object.
