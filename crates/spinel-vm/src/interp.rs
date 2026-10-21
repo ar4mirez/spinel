@@ -5327,12 +5327,15 @@ fn exception_new(scope: &mut HandleScope<'_>, class: &str, message: &str) -> Val
             .expect("every class the VM raises is defined");
     }
     // Taken whatever the class, so a note never outlives the raise after it.
-    let note = scope.take_name_error(message);
+    let note = scope
+        .take_name_error(message)
+        .map(|(first, second)| (scope.root(first), scope.root(second)));
     let exception = exception_of(scope, object, message);
     if let Some((first, second)) = note {
+        let handle = scope.root(exception);
         // The note's two values are whatever this class keeps: a `FrozenError`
         // has a receiver and no name.
-        let ivars: &[(&str, Value)] = match class {
+        let ivars: &[(&str, Handle<'_>)] = match class {
             "FrozenError" => &[(EXC_RECEIVER, second)],
             "UncaughtThrowError" => &[("@tag", first), ("@value", second)],
             "LocalJumpError" => &[("@exit_value", second), ("@reason", first)],
@@ -5340,9 +5343,11 @@ fn exception_new(scope: &mut HandleScope<'_>, class: &str, message: &str) -> Val
             _ => &[(EXC_RECEIVER, second), (EXC_NAME, first)],
         };
         for &(ivar, value) in ivars {
+            let (exception, value) = (scope.get(handle), scope.get(value));
             ivar_set(scope, exception, symbol(ivar), value)
                 .expect("a fresh exception is unfrozen and holds instance variables");
         }
+        let exception = scope.get(handle);
         // CRuby's message ends with the object's `inspect`, which is Ruby, so
         // `FrozenError#to_s` adds it — see `EXC_MESSAGE_HEAD`.
         if class == "FrozenError" {
