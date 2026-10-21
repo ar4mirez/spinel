@@ -198,7 +198,9 @@ class Integer
     end
     return Rational.__make__(self, 1)**other if Rational === other
     return Complex.__make__(self, 0)**other if Complex === other
-    __integer_pow__(other)
+    # Anything else is asked to `coerce`, and the pair raised as it stands.
+    pair = __coerce_bin__(other, :**)
+    pair[0]**pair[1]
   end
 
   # A non-negative whole power. The primitive takes a base that fits a word

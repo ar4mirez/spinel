@@ -110,6 +110,20 @@ module Kernel
   end
 end
 
+# mspec's `fixnum_max` and `fixnum_min` are per engine, and one it does not
+# know raises. Spinel's fixnum is CRuby's 64-bit one, 62 bits and a sign
+# (`Value::FIXNUM_MAX`), so these are mspec's own answers for that. Loaded
+# here first so the spec helper's later `require` cannot redefine them.
+require "mspec/helpers/numeric"
+
+def fixnum_max
+  (2**62) - 1
+end
+
+def fixnum_min
+  -(2**62)
+end
+
 # mspec writes a failure's values with `pretty_inspect`, which is `pp`'s, and
 # `pp` is a library this VM cannot load yet. `inspect` is what it prints for
 # every value small enough to fit a line, which a failure message's are.

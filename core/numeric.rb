@@ -119,12 +119,15 @@ class Numeric
   # answer means: an error for the arithmetic operators, "no opinion" for `<=>`
   # and the relational ones. A `coerce` that answers the wrong *shape* is a
   # TypeError either way — that is a broken object, not a refusal to compare.
+  #
+  # A private `coerce` is called too: CRuby reaches it the way it reaches a
+  # conversion method, not as a public send. Measured.
   def __coerce_pair__(other, strict)
-    unless other.respond_to?(:coerce)
+    unless other.respond_to?(:coerce, true)
       return nil unless strict
       raise TypeError, __operand_name__(other) + " can't be coerced into " + self.class.to_s
     end
-    pair = other.coerce(self)
+    pair = other.__send__(:coerce, self)
     return nil if pair.nil? && !strict
     unless pair.is_a?(Array) && pair.size == 2
       raise TypeError, "coerce must return [x, y]"

@@ -9203,6 +9203,40 @@ fn native_call<'h>(
         }
 
         Native::IntBits(op) => {
+            // An operand that is not an Integer is Ruby's to convert: `&`, `|`
+            // and `^` ask it to `coerce`, the shifts call its `to_int`. Both
+            // live in `core/integer.rb` as `__bits_other__`, which retries the
+            // operator on what it converted to.
+            if op != crate::method::BitOp::Not
+                && call.args.len() == 1
+                && (call.receiver.as_fixnum().is_some()
+                    || crate::bignum::is_big(scope, call.receiver))
+                && call.args[0].as_fixnum().is_none()
+                && !crate::bignum::is_big(scope, call.args[0])
+            {
+                let name = match op {
+                    crate::method::BitOp::And => "&",
+                    crate::method::BitOp::Or => "|",
+                    crate::method::BitOp::Xor => "^",
+                    crate::method::BitOp::Shl => "<<",
+                    crate::method::BitOp::Shr => ">>",
+                    crate::method::BitOp::Not => unreachable!("checked above"),
+                };
+                let operand = call.args[0];
+                let forwarded = Pending {
+                    cache: None,
+                    name: crate::shared::symbols::intern("__bits_other__"),
+                    args: vec![operand, Value::symbol(crate::shared::symbols::intern(name))],
+                    implicit_self: true,
+                    variable_call: false,
+                    public_only: false,
+                    target: Target::Method,
+                    owner: None,
+                    defined_as: None,
+                    ..call
+                };
+                return dispatch(scope, stack, frames, forwarded, proc_class, ids);
+            }
             // A bignum on either side goes through `BigInt`, which has all six
             // of these. Two's complement is what `&`, `|`, `^` and `~` mean in
             // Ruby for a negative operand, and it is what `num-bigint`
@@ -9254,10 +9288,8 @@ fn native_call<'h>(
                         // `BigInt` for any distance, because `checked_shl`
                         // refuses at exactly the boundary this slice removed.
                         let Ok(distance) = u32::try_from(distance) else {
-                            return Err(Error::NoDispatch {
-                                op: "Integer#<<",
-                                operands: "a shift too large to allocate a result for",
-                            });
+                            stack.push(huge_left_shift(left == 0)?);
+                            return Ok(None);
                         };
                         let shifted = num_bigint::BigInt::from(left) << distance;
                         let value = crate::bignum::value(scope, &shifted);
@@ -13486,6 +13518,18 @@ fn wide_op(
     }
 }
 
+/// A left shift by 2^32 bits or more. Zero stays zero; anything else would
+/// need more memory than there is, and Ruby says so rather than trying.
+/// CRuby's own limit is higher (2^67, ruby/spec says, citing
+/// bugs.ruby-lang.org/issues/18518), and the spec lets another implementation
+/// draw the line at 2^32.
+fn huge_left_shift(zero: bool) -> Result<Value, Error> {
+    if zero {
+        return Ok(Value::fixnum(0).expect("0 is a fixnum"));
+    }
+    Err(Error::raise("RangeError", "shift width too big"))
+}
+
 /// `&`, `|`, `^`, `~`, `<<` and `>>` with a bignum on either side.
 ///
 /// Separate from [`wide_op`] because these are `Native`s rather than `BinOp`
@@ -13523,10 +13567,16 @@ fn wide_bits(
             // `a >> -n` is `a << n`, and the other way round.
             let left_shift = (op == BitOp::Shl) == (right >= num_bigint::BigInt::from(0));
             let Some(distance) = right.magnitude().to_u32() else {
-                return Err(Error::NoDispatch {
-                    op: "Integer shift",
-                    operands: "a shift too large to allocate a result for",
-                });
+                if left_shift {
+                    return huge_left_shift(left == num_bigint::BigInt::from(0));
+                }
+                // Every bit is shifted out, which leaves the sign.
+                let sign = if left < num_bigint::BigInt::from(0) {
+                    -1
+                } else {
+                    0
+                };
+                return Ok(Value::fixnum(sign).expect("-1 and 0 are fixnums"));
             };
             if left_shift {
                 left << distance
