@@ -4447,7 +4447,11 @@ fn dispatch<'h>(
                 }
                 Some(Definition::Native(native)) => {
                     let name = call.name;
-                    match native_call(scope, stack, frames, call, native, proc_class, ids) {
+                    let result = native_call(scope, stack, frames, call, native, proc_class, ids);
+                    if result.is_err() {
+                        scope.take_pending_warning();
+                    }
+                    match result {
                         // A primitive that raises is a frame in CRuby's
                         // backtrace — "in 'Integer#/'" at the caller's line —
                         // though it pushed none here. It becomes the exception
@@ -13614,7 +13618,11 @@ fn case_eq(scope: &mut HandleScope<'_>, condition: Value, subject: Value) -> Res
     // `when /re/` is `Regexp#===`, which matches and sets `$~` rather than
     // comparing. The first `when` condition in this VM that is not `==`.
     if is_regexp(scope, condition) {
-        return Ok(regexp_match_value(scope, condition, subject)? != Value::NIL);
+        let found = regexp_match_value(scope, condition, subject);
+        if found.is_err() {
+            scope.take_pending_warning();
+        }
+        return Ok(found? != Value::NIL);
     }
     if !condition.is_immediate() && heap_kind(scope, condition).is_none() {
         // A Range, Class, Regexp, or Proc in `when` position means something
@@ -14026,6 +14034,23 @@ fn regexp_build(
     fixed: Option<u8>,
     frozen: bool,
 ) -> Result<Value, Error> {
+    // `/n` reads a raw byte past ASCII only from a BINARY String: written in
+    // any other encoding it is a character, which CRuby refuses. Measured.
+    if options & crate::regexp::NOENCODING != 0
+        && fixed.is_none()
+        && !source.is_ascii()
+        && encoding != crate::strings::BINARY
+    {
+        let message = "/.../n has a non escaped non ASCII character in non ASCII-8BIT script";
+        return Err(Error::raise(
+            "RegexpError",
+            if frozen {
+                message.to_owned()
+            } else {
+                format!("{message}: /{}/", String::from_utf8_lossy(source))
+            },
+        ));
+    }
     let (encoding, options) = regexp_encoding(source, encoding, options, fixed);
     // The engine reads a binary pattern a byte to a character, so its source
     // goes over as the characters with those numbers. Anything else it reads
