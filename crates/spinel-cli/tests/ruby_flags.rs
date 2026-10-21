@@ -66,6 +66,26 @@ fn warning_levels_set_verbose() {
 }
 
 #[test]
+fn unused_block_warnings() {
+    let warned = |source: &str| {
+        let output = run(&["-w", "-e", source], "");
+        assert!(output.status.success(), "{source:?} failed");
+        String::from_utf8(output.stderr).expect("stderr is utf-8")
+    };
+    // A block-using `k` written later in the file relieves the earlier call,
+    // as CRuby's table is filled when the file is compiled (ruby 4.0.7).
+    assert_eq!(
+        warned("class A; def k; end; end\nA.new.k { }\nclass B; def k; yield; end; end"),
+        ""
+    );
+    // A call that fails to bind leaves the next one free to warn.
+    assert_eq!(
+        warned("def m; end\nbegin; m(1) { }; rescue ArgumentError; end\nm { }\nm { }"),
+        "-e:3: warning: the block passed to 'Object#m' defined at -e:1 may be ignored\n"
+    );
+}
+
+#[test]
 fn load_path_and_requires() {
     assert_eq!(
         out(&["-Ilib", "-rgreeting", "-e", "puts Greeting.hello"]),

@@ -1960,6 +1960,7 @@ pub fn eval_in(
     frame: &mut Frame,
     iseq: &Iseq,
 ) -> Result<Value, Error> {
+    note_block_users(scope, iseq);
     frame.reserve(iseq.locals.len());
     let env = frame.env(scope);
     if frame.receiver == Value::NIL {
@@ -4510,6 +4511,7 @@ fn dispatch<'h>(
                         defined_as: Some(call.name),
                         ..call
                     };
+                    let unused = unused_block_warning(scope, frames, &call, &method, &iseq);
                     *ids += 1;
                     // This frame is what a `break` in the block it was handed
                     // ends, so the block learns its target here — the first
@@ -4533,6 +4535,25 @@ fn dispatch<'h>(
                         Binding::Strict,
                         links,
                     )?;
+                    // Said on top of the frame, so it prints before the body
+                    // runs, as CRuby's does.
+                    if let Some((text, relieved)) = unused {
+                        scope
+                            .definitions_mut()
+                            .mark_unused_block_warned(method.body);
+                        let text = string_new(scope, &text);
+                        let kernel = scope.classes().object(Builtin::Kernel.id());
+                        return call_discarded(
+                            scope,
+                            stack,
+                            frames,
+                            proc_class,
+                            ids,
+                            kernel,
+                            crate::shared::symbols::intern("__unused_block_warning__"),
+                            vec![text, bool_value(relieved)],
+                        );
+                    }
                     Ok(None)
                 }
                 Some(Definition::Proc(block)) => {
@@ -4583,6 +4604,67 @@ fn dispatch<'h>(
                 None => unreachable!("a method body that is not in the definition table"),
             }
         }
+    }
+}
+
+/// The warning a call owes for passing a block to a method whose body never
+/// uses one (#273), the first time anything does: the whole line, and whether
+/// another method of that name uses its block, which quiets it outside
+/// `Warning[:strict_unused_block]`. `Kernel#__unused_block_warning__` decides
+/// whether it prints.
+///
+/// Only a call the program wrote, as CRuby's: `super` passing its block on
+/// is exempt, and so is a core-library body, either end, since CRuby's are C.
+///
+/// ponytail: only an `Insn::Send` site; `Method#call` and `public_send`,
+/// which warn in CRuby, do not here, and `send`, which does not, matches by
+/// accident. Mark the dispatching primitives when one of those matters.
+fn unused_block_warning(
+    scope: &mut HandleScope<'_>,
+    frames: &[Call],
+    call: &Pending,
+    method: &Method,
+    iseq: &Iseq,
+) -> Option<(String, bool)> {
+    if call.block == Value::NIL || iseq.uses_block || call.cache.is_none() || is_internal(iseq) {
+        return None;
+    }
+    let caller = frames.last()?;
+    if is_internal(&caller.iseq) || scope.definitions().unused_block_warned(method.body) {
+        return None;
+    }
+    let path = caller.iseq.path.as_deref().unwrap_or("");
+    let line = caller
+        .iseq
+        .line_at(caller.pc.saturating_sub(1))
+        .unwrap_or(0);
+    let name = qualified_method_name(scope, method.owner, &iseq.name);
+    let defined = iseq.path.as_deref().unwrap_or("");
+    let text = format!(
+        "{path}:{line}: warning: the block passed to '{name}' defined at {defined}:{} may be ignored\n",
+        iseq.first_line
+    );
+    let relieved = scope
+        .definitions()
+        .is_block_user(crate::shared::symbols::intern(&iseq.name));
+    Some((text, relieved))
+}
+
+/// Record the names of the methods `iseq` defines, at any depth, whose bodies
+/// use a block (#273): what [`unused_block_warning`]'s relief reads, filled
+/// when a file or `eval` string is loaded rather than when its `def`s run.
+fn note_block_users(scope: &mut HandleScope<'_>, iseq: &Iseq) {
+    if is_internal(iseq) {
+        return;
+    }
+    for &(symbol, child) in &iseq.definitions {
+        if iseq.children[child as usize].uses_block {
+            let name = crate::shared::symbols::intern(&iseq.symbols[symbol as usize]);
+            scope.definitions_mut().note_block_user(name);
+        }
+    }
+    for child in &iseq.children {
+        note_block_users(scope, child);
     }
 }
 
@@ -15953,6 +16035,7 @@ fn binding_eval(
             });
         }
     };
+    note_block_users(scope, &iseq);
     let handle = scope.root(binding);
     let outer = scope.slot(handle, BINDING_ENV);
     let receiver = scope.slot(handle, BINDING_SELF);
@@ -17097,6 +17180,7 @@ fn load_file(
             });
         }
     };
+    note_block_users(scope, &iseq);
     // `load(file, true)`: the file's constants and methods land in an
     // anonymous module rather than at the top level.
     let wrap = call

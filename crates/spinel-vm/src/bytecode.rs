@@ -773,6 +773,14 @@ pub struct Iseq {
     /// The constructs [`Insn::Refuse`] names: what the compiler could not
     /// lower in this body, which it compiled to a refusal instead.
     pub refusals: Vec<&'static str>,
+    /// Whether this body can use the block its method was called with (#273):
+    /// a `&blk`, `&` or `...` parameter of a method's own, or a `yield`,
+    /// `defined?(yield)` or `super` here or in a block written inside it.
+    /// `block_given?`, `binding` and `eval` do not count, measured on ruby
+    /// 4.0.7. A call that passes a block to a method without it warns that the
+    /// block may be ignored. A refused body counts, since what it would have
+    /// done with one is not known.
+    pub uses_block: bool,
     /// [`Iseq::linked`]'s answer, kept: see [`Linked`].
     pub linked: symbols::Linked,
 }
