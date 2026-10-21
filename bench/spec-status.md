@@ -43,7 +43,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/nil` | 18 | 27 | 25 | 0 | 2 | 0 | 93% |
 | `core/numeric` | 46 | 326 | 324 | 0 | 0 | 2 | 99% |
 | `core/objectspace` | 29 | 108 | 1 | 0 | 92 | 15 | 1% |
-| `core/proc` | 25 | 247 | 236 | 0 | 9 | 2 | 96% |
+| `core/proc` | 25 | 247 | 241 | 0 | 4 | 2 | 98% |
 | `core/process` | 92 | 430 | 390 | 0 | 27 | 13 | 91% |
 | `core/queue` | 15 | 46 | 40 | 0 | 6 | 0 | 87% |
 | `core/random` | 10 | 87 | 87 | 0 | 0 | 0 | 100% |
@@ -131,4 +131,4 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `optional/capi` | 47 | 0 | 0 | 0 | 0 | 0 | — |
 | `optional/thread_safety` | 1 | 5 | 0 | 0 | 5 | 0 | 0% |
 | `security` | 13 | 26 | 19 | 0 | 7 | 0 | 73% |
-| **total** | 3835 | 32571 | 27685 | 0 | 4496 | 390 | 85% |
+| **total** | 3835 | 32571 | 27690 | 0 | 4491 | 390 | 85% |
