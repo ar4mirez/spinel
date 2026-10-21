@@ -301,7 +301,7 @@ module ObjectSpace
     include Enumerable
 
     def initialize
-      __weak_init__(false)
+      __weak_init__
     end
 
     MISSING = Object.new
@@ -388,7 +388,7 @@ module ObjectSpace
   # the collector can collect, so an immediate is refused.
   class WeakKeyMap
     def initialize
-      __weak_init__(true)
+      __weak_init__
     end
 
     def [](key)

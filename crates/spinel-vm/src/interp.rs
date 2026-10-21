@@ -15485,29 +15485,41 @@ fn gc_native(scope: &mut HandleScope<'_>, call: &Pending, op: GcOp) -> Value {
                 return Value::NIL;
             }
             let map = scope.root(map);
+            let ephemeron = scope.class_of(map).is_some_and(|class| {
+                let classes = scope.classes();
+                classes
+                    .ancestors(class)
+                    .into_iter()
+                    .any(|ancestor| classes.name(ancestor) == Some("ObjectSpace::WeakKeyMap"))
+            });
             match op {
                 GcOp::WeakInit => {
-                    scope.weak_table(map, arg(0).is_truthy()).clear();
+                    scope.weak_table(map, ephemeron).clear();
                     Value::NIL
                 }
-                GcOp::WeakGet => scope.weak_table(map, false).get(arg(0)).unwrap_or(arg(1)),
+                GcOp::WeakGet => scope
+                    .weak_table(map, ephemeron)
+                    .get(arg(0))
+                    .unwrap_or(arg(1)),
                 GcOp::WeakSet => {
                     let hash = arg(2).as_fixnum().unwrap_or(0);
-                    scope.weak_table(map, false).insert(arg(0), arg(1), hash);
+                    scope
+                        .weak_table(map, ephemeron)
+                        .insert(arg(0), arg(1), hash);
                     arg(1)
                 }
                 GcOp::WeakDelete => scope
-                    .weak_table(map, false)
+                    .weak_table(map, ephemeron)
                     .remove(arg(0))
                     .unwrap_or(arg(1)),
-                GcOp::WeakSize => count(scope.weak_table(map, false).len()),
+                GcOp::WeakSize => count(scope.weak_table(map, ephemeron).len()),
                 GcOp::WeakClear => {
-                    scope.weak_table(map, false).clear();
+                    scope.weak_table(map, ephemeron).clear();
                     Value::NIL
                 }
                 GcOp::WeakPairs => {
                     let flat: Vec<Value> = scope
-                        .weak_table(map, false)
+                        .weak_table(map, ephemeron)
                         .pairs()
                         .flat_map(|(key, value)| [key, value])
                         .collect();
@@ -15520,8 +15532,10 @@ fn gc_native(scope: &mut HandleScope<'_>, call: &Pending, op: GcOp) -> Value {
                 }
                 GcOp::WeakHashed => {
                     let hash = arg(0).as_fixnum().unwrap_or(0);
-                    let keys: Vec<Value> =
-                        scope.weak_table(map, true).keys_with_hash(hash).collect();
+                    let keys: Vec<Value> = scope
+                        .weak_table(map, ephemeron)
+                        .keys_with_hash(hash)
+                        .collect();
                     for &key in &keys {
                         scope.root(key);
                     }

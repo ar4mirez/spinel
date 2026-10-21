@@ -406,6 +406,9 @@ pub(crate) struct WeakTable {
     /// Where each key's entry is, by the key's bits: identity, which is
     /// stable because the collector does not move objects.
     by_key: HashMap<u64, usize>,
+    /// Where the entries stored under each `hash` are, for a `WeakKeyMap`
+    /// lookup; empty for a `WeakMap`, which never looks one up.
+    by_hash: HashMap<i64, Vec<usize>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -425,9 +428,19 @@ impl WeakTable {
     pub(crate) fn insert(&mut self, key: Value, value: Value, hash: i64) {
         let entry = WeakEntry { key, value, hash };
         match self.by_key.get(&key.to_bits()) {
-            Some(&index) => self.entries[index] = entry,
+            Some(&index) => {
+                let old = std::mem::replace(&mut self.entries[index], entry);
+                if self.ephemeron && old.hash != hash {
+                    self.unindex(old.hash, index);
+                    self.by_hash.entry(hash).or_default().push(index);
+                }
+            }
             None => {
-                self.by_key.insert(key.to_bits(), self.entries.len());
+                let index = self.entries.len();
+                self.by_key.insert(key.to_bits(), index);
+                if self.ephemeron {
+                    self.by_hash.entry(hash).or_default().push(index);
+                }
                 self.entries.push(entry);
             }
         }
@@ -436,10 +449,30 @@ impl WeakTable {
     pub(crate) fn remove(&mut self, key: Value) -> Option<Value> {
         let index = self.by_key.remove(&key.to_bits())?;
         let removed = self.entries.swap_remove(index);
-        if let Some(moved) = self.entries.get(index) {
+        self.unindex(removed.hash, index);
+        if let Some(moved) = self.entries.get(index).copied() {
+            let from = self.entries.len();
             self.by_key.insert(moved.key.to_bits(), index);
+            if let Some(slot) = self
+                .by_hash
+                .get_mut(&moved.hash)
+                .and_then(|bucket| bucket.iter_mut().find(|slot| **slot == from))
+            {
+                *slot = index;
+            }
         }
         Some(removed.value)
+    }
+
+    /// Take `index` out of the bucket for `hash`, and the bucket with it
+    /// once it is empty.
+    fn unindex(&mut self, hash: i64, index: usize) {
+        if let Some(bucket) = self.by_hash.get_mut(&hash) {
+            bucket.retain(|&slot| slot != index);
+            if bucket.is_empty() {
+                self.by_hash.remove(&hash);
+            }
+        }
     }
 
     pub(crate) fn len(&self) -> usize {
@@ -449,6 +482,7 @@ impl WeakTable {
     pub(crate) fn clear(&mut self) {
         self.entries.clear();
         self.by_key.clear();
+        self.by_hash.clear();
     }
 
     /// Every entry, in the order they were added, apart from deletions.
@@ -457,14 +491,12 @@ impl WeakTable {
     }
 
     /// The keys a `WeakKeyMap` stored under `hash`.
-    ///
-    /// ponytail: a scan of every entry, comparing integers. A bucket index
-    /// by hash is the upgrade, worth it when a benchmark holds a large map.
     pub(crate) fn keys_with_hash(&self, hash: i64) -> impl Iterator<Item = Value> + '_ {
-        self.entries
-            .iter()
-            .filter(move |entry| entry.hash == hash)
-            .map(|entry| entry.key)
+        self.by_hash
+            .get(&hash)
+            .into_iter()
+            .flatten()
+            .map(|&index| self.entries[index].key)
     }
 
     /// Drop the entries a collection left dangling.
@@ -475,8 +507,12 @@ impl WeakTable {
             .retain(|entry| survived(entry.key) && (ephemeron || survived(entry.value)));
         if self.entries.len() != before {
             self.by_key.clear();
+            self.by_hash.clear();
             for (index, entry) in self.entries.iter().enumerate() {
                 self.by_key.insert(entry.key.to_bits(), index);
+                if ephemeron {
+                    self.by_hash.entry(entry.hash).or_default().push(index);
+                }
             }
         }
     }

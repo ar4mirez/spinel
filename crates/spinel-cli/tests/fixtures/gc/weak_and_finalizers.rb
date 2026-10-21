@@ -28,6 +28,22 @@ puts "after: #{map.size} #{keys.inspect[/size=\d+/]}"
 p map[kept].equal?(kept)
 p keys[key].class
 
+# A WeakKeyMap holds its values by its keys even when `initialize` never ran,
+# whichever method touches it first.
+class Uninitialized < ObjectSpace::WeakKeyMap
+  def initialize; end
+end
+
+def keep_value(keys, key)
+  keys[key] = Object.new
+end
+
+keys = Uninitialized.new
+keys.clear
+keep_value(keys, key)
+GC.start
+p keys[key].class
+
 # Made away from the object, so the block's environment does not hold it.
 def recorder(map, seen)
   ->(id) { seen << [id, map.size] }

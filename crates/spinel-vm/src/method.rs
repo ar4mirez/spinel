@@ -943,7 +943,8 @@ pub enum GcOp {
     Stress,
     /// `__gc_time__`: nanoseconds spent collecting.
     Time,
-    /// `__weak_init__(ephemeron)`: gives the receiver an empty table.
+    /// `__weak_init__`: gives the receiver an empty table, an ephemeron one
+    /// when it is a `WeakKeyMap`.
     WeakInit,
     /// `__weak_get__(key, missing)`: the value, by identity, or `missing`.
     WeakGet,

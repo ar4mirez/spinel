@@ -28,6 +28,6 @@ fn weak_references_clear_and_finalizers_run_after_collection() {
     );
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "before: 4 size=4\nafter: 1 size=1\ntrue\nObject\ntrue\nat_exit\nfinalizer at exit\n"
+        "before: 4 size=4\nafter: 1 size=1\ntrue\nObject\nObject\ntrue\nat_exit\nfinalizer at exit\n"
     );
 }
