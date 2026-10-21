@@ -30,15 +30,17 @@ class Regexp
   def ==(other)
     return true if equal?(other)
     return false unless other.is_a?(Regexp)
-    # `/n` is not part of what a pattern is: `/a/n == /a/`, measured.
-    source == other.source && (options & ~NOENCODING) == (other.options & ~NOENCODING)
+    # `/n` is not part of what a pattern is: `/a/n == /a/`, measured. Its
+    # encoding is: `/a/e == /a/s` is false, though both answer 16.
+    source == other.source && (options & ~NOENCODING) == (other.options & ~NOENCODING) &&
+      encoding == other.encoding
   end
 
   def eql?(other)
     self == other
   end
 
-  def hash = [source, options & ~NOENCODING].hash
+  def hash = [source, options & ~NOENCODING, encoding].hash
 end
 
 # `===` is Ruby so that a String-like object's `to_str` is asked (#28): a
@@ -129,17 +131,15 @@ class Regexp
     out
   end
 
-  # ponytail: a pattern carries no encoding of its own yet. An ASCII source
-  # is US-ASCII and any other is UTF-8, which is what a literal in a UTF-8
-  # file is; the `n`, `e`, `s` and `u` modifiers wait for the encoding work.
+  # The source String is in the pattern's encoding, as CRuby keeps it: US-ASCII
+  # for an ASCII pattern free to match in any ASCII-compatible encoding, and
+  # the one a modifier, `/n` past ASCII, or the source itself fixed it to.
   def encoding
-    fixed_encoding? ? Encoding::UTF_8 : Encoding::US_ASCII
+    source.encoding
   end
 
   def fixed_encoding?
-    # The source is US-ASCII exactly when nothing in it is past ASCII — not a
-    # character, and not a `\u` escape that names one.
-    source.encoding != Encoding::US_ASCII || options & FIXEDENCODING != 0
+    options & FIXEDENCODING != 0
   end
 
   # `~re` matches against `$_`, the last line read.

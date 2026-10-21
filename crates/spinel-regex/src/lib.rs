@@ -136,10 +136,31 @@ impl Flags {
     }
 }
 
+/// How a pattern reads characters out of the bytes it is matched against.
+///
+/// Ruby compiles a pattern for an encoding, and a pattern without a fixed one
+/// is compiled again for each subject's. This engine's programs do not depend
+/// on the encoding — only how a character is read does — so the encoding is
+/// chosen per match, and the one a pattern was *parsed* in only decides what a
+/// `\xff` escape means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Encoding {
+    /// UTF-8: a character is a scalar value, and the POSIX brackets and case
+    /// folding are Unicode's.
+    #[default]
+    Utf8,
+    /// One character per byte, with only ASCII's classes and cases: BINARY and
+    /// US-ASCII. A byte past ASCII is carried as the `char` with the same
+    /// number, so a source written in this encoding spells byte `0xff` as
+    /// `'\u{ff}'`, and so does the escape `\xff`.
+    Binary,
+}
+
 /// One compiled pattern.
 pub struct Regex {
     source: String,
     flags: Flags,
+    encoding: Encoding,
     program: exec::Program,
     names: Vec<(String, usize)>,
 }
@@ -159,11 +180,23 @@ impl Regex {
     /// [`Error::Unsupported`] for a construct this engine refuses rather than
     /// approximates.
     pub fn new(source: &str, flags: Flags) -> Result<Regex, Error> {
-        let parsed = parse::parse(source, flags)?;
+        Regex::with_encoding(source, flags, Encoding::Utf8)
+    }
+
+    /// Compile `source`, written in `encoding`, under `flags`. In
+    /// [`Encoding::Binary`] a `\x` escape past ASCII is the byte it names;
+    /// in UTF-8 it is refused, because a byte is not a character there.
+    ///
+    /// # Errors
+    ///
+    /// As [`Regex::new`].
+    pub fn with_encoding(source: &str, flags: Flags, encoding: Encoding) -> Result<Regex, Error> {
+        let parsed = parse::parse(source, flags, encoding)?;
         let program = exec::compile(&parsed.ast, parsed.groups)?;
         Ok(Regex {
             source: source.to_owned(),
             flags,
+            encoding,
             program,
             names: parsed.names,
         })
@@ -178,6 +211,12 @@ impl Regex {
     #[must_use]
     pub fn flags(&self) -> Flags {
         self.flags
+    }
+
+    /// The encoding the source was parsed in.
+    #[must_use]
+    pub fn encoding(&self) -> Encoding {
+        self.encoding
     }
 
     /// How many capturing groups the pattern has, not counting the whole match.
@@ -218,9 +257,28 @@ impl Regex {
     ///
     /// [`Error::Budget`] if backtracking ran past its step budget.
     pub fn find_at(&self, haystack: &str, start: usize) -> Result<Option<Captures>, Error> {
+        self.find_in(haystack.as_bytes(), start, Encoding::Utf8)
+    }
+
+    /// The leftmost match at or after byte offset `start`, reading `haystack`
+    /// as `encoding`. A UTF-8 haystack must be valid UTF-8.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Budget`] if backtracking ran past its step budget.
+    pub fn find_in(
+        &self,
+        haystack: &[u8],
+        start: usize,
+        encoding: Encoding,
+    ) -> Result<Option<Captures>, Error> {
+        let subject = exec::Subject {
+            bytes: haystack,
+            enc: encoding,
+        };
         Ok(self
             .program
-            .find_at(haystack, start)?
+            .find_at(subject, start)?
             .map(|m| Captures { caps: m.caps }))
     }
 
@@ -230,9 +288,27 @@ impl Regex {
     ///
     /// [`Error::Budget`] if backtracking ran past its step budget.
     pub fn match_at(&self, haystack: &str, start: usize) -> Result<Option<Captures>, Error> {
+        self.match_in(haystack.as_bytes(), start, Encoding::Utf8)
+    }
+
+    /// [`Regex::match_at`], reading `haystack` as `encoding`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Budget`] if backtracking ran past its step budget.
+    pub fn match_in(
+        &self,
+        haystack: &[u8],
+        start: usize,
+        encoding: Encoding,
+    ) -> Result<Option<Captures>, Error> {
+        let subject = exec::Subject {
+            bytes: haystack,
+            enc: encoding,
+        };
         Ok(self
             .program
-            .match_at(haystack, start)?
+            .match_at(subject, start)?
             .map(|m| Captures { caps: m.caps }))
     }
 
@@ -307,6 +383,53 @@ mod tests {
             .find_at(haystack, 0)
             .expect("runs")
             .and_then(|c| c.group(0))
+    }
+
+    fn find_binary(pattern: &str, haystack: &[u8]) -> Option<(usize, usize)> {
+        Regex::with_encoding(pattern, Flags::default(), Encoding::Binary)
+            .expect("compiles")
+            .find_in(haystack, 0, Encoding::Binary)
+            .expect("runs")
+            .and_then(|c| c.group(0))
+    }
+
+    #[test]
+    fn a_binary_subject_is_a_character_per_byte() {
+        // `/./n.match("\303\251")` is the first byte, not the character the
+        // two would be in UTF-8.
+        assert_eq!(find_binary(".", b"\xc3\xa9"), Some((0, 1)));
+        assert_eq!(find_binary("\\xff", b"a\xff"), Some((1, 2)));
+        assert_eq!(find_binary("[\\xe0-\\xff]+", b"ab\xe1\xf0c"), Some((2, 4)));
+        // An unmarked ASCII pattern runs in either encoding.
+        let re = Regex::new("b$", Flags::default()).expect("compiles");
+        let caps = re.find_in(b"\xffab", 0, Encoding::Binary).expect("runs");
+        assert_eq!(caps.and_then(|c| c.group(0)), Some((2, 3)));
+    }
+
+    #[test]
+    fn a_byte_past_ascii_has_no_class_and_no_case() {
+        // Onigmo's ASCII-8BIT: 0xe9 is no letter and no graphic, though é is.
+        assert_eq!(find_binary("[[:graph:]]", b"\xe9"), None);
+        assert_eq!(find_binary("[[:alpha:]]", b"\xe9"), None);
+        let icase = Flags {
+            icase: true,
+            ..Flags::default()
+        };
+        let re = Regex::with_encoding("\\xc9", icase, Encoding::Binary).expect("compiles");
+        let caps = re.find_in(b"\xe9", 0, Encoding::Binary).expect("runs");
+        assert_eq!(caps, None);
+    }
+
+    #[test]
+    fn a_byte_escape_is_refused_in_utf8() {
+        assert!(matches!(
+            Regex::new("\\xff", Flags::default()),
+            Err(Error::Unsupported(_))
+        ));
+        assert!(matches!(
+            Regex::with_encoding("\\u00e9", Flags::default(), Encoding::Binary),
+            Err(Error::Unsupported(_))
+        ));
     }
 
     #[test]

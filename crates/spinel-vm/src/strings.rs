@@ -33,6 +33,10 @@ pub const BINARY: u8 = 0;
 pub const UTF_8: u8 = 1;
 /// `US-ASCII`: what `Integer#to_s` and `Symbol#to_s` of an ASCII name answer.
 pub const US_ASCII: u8 = 2;
+/// `EUC-JP`, which a regexp's `/e` fixes it to.
+pub const EUC_JP: u8 = 10;
+/// `Windows-31J`, which a regexp's `/s` fixes it to.
+pub const WINDOWS_31J: u8 = 11;
 
 /// Fill a freshly allocated `String` object (of `SLOTS` slots) with `bytes` in
 /// `encoding`.

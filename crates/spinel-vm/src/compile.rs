@@ -1030,22 +1030,24 @@ impl Compiler {
             }
 
             ExprKind::Regexp(regexp) => {
-                // `/u` fixes the pattern to UTF-8, which every pattern here
-                // already matches in; `/n` on an ASCII pattern is one that
-                // matches in any ASCII-compatible encoding, as an unmarked
-                // ASCII pattern does, and says so in its options (#222). `/n`
-                // with a byte past ASCII, and `/e` and `/s`, need patterns over
-                // other encodings' characters, which wait for #19.
+                // `/u`, `/e` and `/s` fix the pattern to an encoding, which
+                // rides above Ruby's own bits for the constructor to take off;
+                // `/n` is Ruby's own bit, and the constructor decides from the
+                // source whether it makes the pattern BINARY or US-ASCII
+                // (#222).
                 let mut options = regexp_options(&regexp.flags);
-                match regexp.flags.encoding {
-                    spinel_ast::RegexpEncoding::None => {}
-                    spinel_ast::RegexpEncoding::Utf8 => options |= 16,
-                    spinel_ast::RegexpEncoding::Ascii8Bit
-                        if flat_bytes(&regexp.parts).is_some_and(|bytes| bytes.is_ascii()) =>
-                    {
-                        options |= 32;
+                let fixed = match regexp.flags.encoding {
+                    spinel_ast::RegexpEncoding::None => None,
+                    spinel_ast::RegexpEncoding::Ascii8Bit => {
+                        options |= crate::regexp::NOENCODING;
+                        None
                     }
-                    _ => return Err(Unsupported::at("a regexp encoding modifier", span)),
+                    spinel_ast::RegexpEncoding::Utf8 => Some(crate::strings::UTF_8),
+                    spinel_ast::RegexpEncoding::EucJp => Some(crate::strings::EUC_JP),
+                    spinel_ast::RegexpEncoding::Windows31J => Some(crate::strings::WINDOWS_31J),
+                };
+                if let Some(encoding) = fixed {
+                    options |= (i64::from(encoding) + 1) << crate::regexp::LITERAL_ENCODING_SHIFT;
                 }
                 match flat_bytes(&regexp.parts) {
                     // A pattern known at compile time is a literal, and two
@@ -5365,7 +5367,7 @@ fn mutable_after(args: &[Expr], index: usize, block: Option<&BlockArg>) -> bool 
 ///
 /// `/o` is not in the number: it says "interpolate once", which is a property
 /// of the literal site rather than of the pattern, and a non-interpolated
-/// literal is cached anyway. The encoding flags wait for the Encoding slice.
+/// literal is cached anyway. The encoding modifiers are added by the caller.
 fn regexp_options(flags: &spinel_ast::RegexpFlags) -> i64 {
     let mut options = 0;
     if flags.ignore_case {

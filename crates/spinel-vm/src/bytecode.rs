@@ -325,7 +325,9 @@ pub enum Insn {
     /// An interpolated pattern cannot be an [`Iseq`] literal — literals are
     /// immutable and shared across Ractors, and this one is not known until the
     /// frame runs — so the source is built the way an interpolated string is
-    /// and this turns it into a `Regexp`. The operand is the literal's flags.
+    /// and this turns it into a `Regexp`. The operand is the literal's flags,
+    /// with the encoding a `/u`, `/e` or `/s` fixed above Ruby's own bits
+    /// ([`crate::regexp::LITERAL_ENCODING_SHIFT`]).
     ///
     /// Not the literal cache: `2.times { rs << /#{b}/ }` pushes two objects
     /// where `2.times { rs << /a/ }` pushes one, measured. Frozen, like every
@@ -643,7 +645,8 @@ pub enum Literal {
     /// because freezing is the whole difference and a `bool` field would put a
     /// branch in the hot path of every ordinary string literal.
     FrozenStr(Box<[u8]>, u8),
-    /// A regexp literal: the pattern as written, plus the flags it carries.
+    /// A regexp literal: the pattern as written, plus the flags it carries —
+    /// [`Insn::NewRegexp`]'s operand, encoding bits and all.
     ///
     /// Held as source rather than as a compiled pattern because an `Iseq`
     /// outlives any one heap, and the compiled form lives in the heap's own

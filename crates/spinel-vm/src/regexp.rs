@@ -45,6 +45,17 @@ pub use match_slot::{OFFSETS as MATCH_OFFSETS, REGEXP as MATCH_REGEXP, SUBJECT a
 pub use regexp_slot::COUNT as REGEXP_SLOTS;
 pub use regexp_slot::{INDEX as REGEXP_INDEX, OPTIONS as REGEXP_OPTIONS, SOURCE as REGEXP_SOURCE};
 
+/// `Regexp::FIXEDENCODING`: the pattern matches only in its own encoding.
+pub const FIXEDENCODING: i64 = 16;
+/// `Regexp::NOENCODING`: the `/n` flag.
+pub const NOENCODING: i64 = 32;
+
+/// Where a regexp literal's options carry the encoding its `/u`, `/e` or `/s`
+/// fixed it to, as the encoding's index plus one, so a literal and an
+/// interpolation hand the constructor one integer. Never stored: the
+/// constructor takes these bits off before `Regexp#options` can see them.
+pub const LITERAL_ENCODING_SHIFT: u32 = 8;
+
 /// Every pattern this heap has compiled, plus the literal cache.
 #[derive(Default)]
 pub struct Regexps {
@@ -84,8 +95,13 @@ impl Regexps {
     ///
     /// Whatever [`Regex::new`] refuses: a syntax error, or a construct the
     /// engine will not guess at.
-    pub fn add(&mut self, source: &str, options: i64) -> Result<usize, spinel_regex::Error> {
-        let regex = Regex::new(source, Flags::from_options(options))?;
+    pub fn add(
+        &mut self,
+        source: &str,
+        options: i64,
+        encoding: spinel_regex::Encoding,
+    ) -> Result<usize, spinel_regex::Error> {
+        let regex = Regex::with_encoding(source, Flags::from_options(options), encoding)?;
         self.compiled.push(Arc::new(regex));
         Ok(self.compiled.len() - 1)
     }
