@@ -37,9 +37,10 @@ class Float
   end
 
   # By value, as `eql?` is: two boxed floats holding one number are one key,
-  # and `0.0` and `-0.0` are `eql?`, so they hash alike. CRuby's `rb_dbl_hash`.
+  # and `0.0` and `-0.0` are `eql?`, so they hash alike. CRuby's `rb_dbl_hash`,
+  # and the code a Hash gives a Float key without calling this.
   def hash
-    (self == 0.0 ? 0.0 : self).__bits__(64).hash
+    __any_hash__(self)
   end
 
   # Toward zero, as an Integer of whatever size it takes. NaN and the

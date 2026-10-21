@@ -295,6 +295,14 @@ pub enum Native {
     /// which is Ruby's own default. A primitive because it reads raw bytes and
     /// raw slots, and because a `Hash` keyed on it wants it as an intrinsic.
     HashValue,
+    /// `__any_hash__(value)` — a `Hash` key's code, for the kinds CRuby's
+    /// `any_hash` hashes itself: nil, true, false, an Integer, a Float, a
+    /// Symbol and any String, a subclass's included. `nil` for anything else,
+    /// whose own `hash` the caller then asks (#320).
+    ///
+    /// A primitive because the point is not to dispatch: a program that
+    /// redefines `Integer#hash` does not move its Integer keys.
+    KeyHash,
     /// `Module#include` and `Module#prepend` — splices a module into the
     /// ancestor chain, which is a write to the class table.
     ///

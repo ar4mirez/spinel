@@ -2827,6 +2827,11 @@ pub fn eval_in(
                         )? {
                             return Ok(Step::Unwind(unwind));
                         }
+                        if let Some(unwind) =
+                            warn_redefined(scope, &mut stack, &mut frames, proc_class, &mut ids)?
+                        {
+                            return Ok(Step::Unwind(unwind));
+                        }
                     }
 
                     // `/a#{b}c/`. The source was concatenated on the stack; this
@@ -4464,12 +4469,15 @@ fn dispatch<'h>(
                             attach_backtrace_from(scope, frames, exception, Some(label));
                             Ok(Some(Unwind::Exception(exception)))
                         }
-                        Ok(None) => match scope.take_pending_warning() {
-                            Some(text) => {
-                                vm_warn(scope, stack, frames, proc_class, ids, &text, false)
+                        Ok(None) => {
+                            if let Some(text) = scope.take_pending_warning()
+                                && let Some(unwind) =
+                                    vm_warn(scope, stack, frames, proc_class, ids, &text, false)?
+                            {
+                                return Ok(Some(unwind));
                             }
-                            None => Ok(None),
-                        },
+                            warn_redefined(scope, stack, frames, proc_class, ids)
+                        }
                         other => other,
                     }
                 }
@@ -6276,7 +6284,7 @@ fn fire_method_hook<'h>(
     } else {
         (format!("method_{event}"), scope.classes().object(owner))
     };
-    fire_hook(
+    if let Some(unwind) = fire_hook(
         scope,
         stack,
         frames,
@@ -6285,7 +6293,119 @@ fn fire_method_hook<'h>(
         receiver,
         &hook,
         vec![Value::symbol(symbol)],
-    )
+    )? {
+        return Ok(Some(unwind));
+    }
+    warn_redefined(scope, stack, frames, proc_class, ids)
+}
+
+/// The methods CRuby's interpreter and JIT optimise, by the class that owns
+/// each (#320). Redefining one — `def`, `define_method`, `alias_method` onto
+/// it, `undef`, `remove_method`, a visibility change, a `prepend` that shadows
+/// it — is what `Warning[:performance]` reports. Measured on ruby 4.0.7: every
+/// method each core class defines, redefined in a fresh process.
+const OPTIMISED_METHODS: &[(Builtin, &[&str])] = &[
+    (
+        Builtin::Integer,
+        &[
+            "-@", "<=>", "<=", "===", ">=", "==", "<<", ">>", "[]", "%", "&", "*", "+", "-", "/",
+            "<", ">", "succ", "size", "|",
+        ],
+    ),
+    (
+        Builtin::Float,
+        &[
+            "-@", "<=>", "<=", ">=", "==", "===", "%", "*", "+", "-", "hash", "/", "<", ">",
+        ],
+    ),
+    (
+        Builtin::String,
+        &[
+            "%", "*", "+", "-@", "<=>", "<<", "==", "===", "=~", "[]", "[]=", "empty?", "hash",
+            "freeze", "length", "size", "succ",
+        ],
+    ),
+    (
+        Builtin::Array,
+        &[
+            "&", "*", "+", "-", "|", "<=>", "<<", "==", "[]", "[]=", "include?", "empty?", "max",
+            "hash", "freeze", "min", "length", "size", "pack",
+        ],
+    ),
+    (
+        Builtin::Hash,
+        &[
+            "==", "[]", "[]=", "<=", ">=", "empty?", "hash", "freeze", "<", "length", "size", ">",
+            "default",
+        ],
+    ),
+    (
+        Builtin::Symbol,
+        &[
+            "succ", "size", "<=>", "==", "===", "=~", "[]", "empty?", "length",
+        ],
+    ),
+    (Builtin::Regexp, &["==", "===", "hash", "=~"]),
+    (Builtin::NilClass, &["&", "===", "=~", "nil?", "|"]),
+    (Builtin::TrueClass, &["|", "===", "&"]),
+    (Builtin::FalseClass, &["|", "===", "&"]),
+    (Builtin::Proc, &["<<", "===", "hash", "==", "[]", "call"]),
+];
+
+/// Start watching [`OPTIMISED_METHODS`]: what each class owns now is the body
+/// a program's change is measured against. The embedder calls this once the
+/// core library has loaded, so its own definitions are not a program's.
+pub fn watch_optimised(scope: &mut HandleScope<'_>) {
+    let methods: Vec<(ClassId, SymbolId)> = OPTIMISED_METHODS
+        .iter()
+        .flat_map(|&(class, names)| {
+            names
+                .iter()
+                .map(move |name| (class.id(), crate::shared::symbols::intern(name)))
+        })
+        .collect();
+    scope.classes_mut().watch_optimised(&methods);
+}
+
+/// `Warning[:performance]`'s "Redefining 'Integer#+' disables interpreter and
+/// JIT optimizations", for each optimised method changed since the last ask
+/// (#320). CRuby's wording; Spinel's own fast paths (#239) re-check the same
+/// redefinition, so the warning is as true here as there. Pushed last-first,
+/// so they run in the order the changes were made, and before any hook the
+/// change fired.
+fn warn_redefined<'h>(
+    scope: &mut HandleScope<'h>,
+    stack: &mut Stack,
+    frames: &mut Vec<Call>,
+    proc_class: Handle<'h>,
+    ids: &mut u64,
+) -> Result<Option<Unwind>, Error> {
+    if !scope.classes().has_redefined() {
+        return Ok(None);
+    }
+    let kernel = scope.classes().object(Builtin::Kernel.id());
+    let category = Value::symbol(crate::shared::symbols::intern("performance"));
+    for (owner, name) in scope.classes_mut().take_redefined().into_iter().rev() {
+        let method = crate::shared::symbols::name(name).unwrap_or_default();
+        let message = format!(
+            "Redefining '{}' disables interpreter and JIT optimizations",
+            qualified_method_name(scope, owner, &method)
+        );
+        let text = string_new(scope, &message);
+        if let Some(unwind) = call_discarded(
+            scope,
+            stack,
+            frames,
+            proc_class,
+            ids,
+            kernel,
+            crate::shared::symbols::intern("__warning__"),
+            vec![text, Value::FALSE, category],
+        )? {
+            return Ok(Some(unwind));
+        }
+    }
+    Ok(None)
 }
 
 /// Run a definition hook (#28): `receiver.name(*args)`, when something
@@ -10289,6 +10409,31 @@ fn native_call<'h>(
             Ok(None)
         }
 
+        Native::KeyHash => {
+            let value = call.args.first().copied().unwrap_or(Value::NIL);
+            let mut hasher = crate::shared::hash_seed::hasher();
+            if let Some(f) = crate::float::read(scope, value) {
+                // By value, a boxed Float and an immediate one alike, and with
+                // `-0.0` folded into `0.0` because the two are `eql?`.
+                use std::hash::Hash as _;
+                4u8.hash(&mut hasher);
+                (if f == 0.0 { 0.0f64 } else { f })
+                    .to_bits()
+                    .hash(&mut hasher);
+            } else if value.is_immediate()
+                || crate::bignum::is_big(scope, value)
+                || heap_kind(scope, value) == Some(HeapKind::Str)
+            {
+                hash_value(scope, value, &mut hasher, 0)?;
+            } else {
+                stack.push(Value::NIL);
+                return Ok(None);
+            }
+            let bits = std::hash::Hasher::finish(&hasher) >> 2;
+            stack.push(Value::fixnum(bits as i64).unwrap_or(Value::NIL));
+            Ok(None)
+        }
+
         Native::Mixin { prepend } => {
             let Some(target) = class_id_of(scope, call.receiver) else {
                 return Err(Error::NoDispatch {
@@ -11894,6 +12039,7 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             Native::PrivateConstant,
         ),
         (Builtin::Kernel, &["hash"], Native::HashValue),
+        (Builtin::Kernel, &["__any_hash__"], Native::KeyHash),
         (
             Builtin::Module,
             &["__include__"],
