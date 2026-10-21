@@ -49,6 +49,7 @@ class Exception
 
   def __replace_message__(text)
     @__message__ = text
+    @__message_head__ = nil
   end
 
   def ==(other)
@@ -63,10 +64,6 @@ end
 # The VM writes `@name` and `@receiver` when a dispatch fails, the same way it
 # writes `@__message__` when it raises, so these are two more ordinary readers over
 # ordinary instance variables.
-#
-# `NameError.new` is refused — `exceptions.txt` marks it `# own initialize` —
-# so every NameError that exists is one the VM built, and there is no
-# user-constructed one whose `receiver` should be CRuby's ArgumentError.
 class NameError
   def name
     @name
@@ -87,6 +84,12 @@ end
 class Exception
   def initialize(message = nil)
     @__message__ = message.nil? ? nil : message.to_s
+  end
+
+  # `Exception.exception` is `new`, on every exception class: CRuby defines
+  # it as the same function.
+  def self.exception(*args, **options, &block)
+    new(*args, **options, &block)
   end
 end
 
@@ -149,6 +152,76 @@ class NameError
   end
 end
 
+# A `NameError` the VM raised finishes its message here, when it is read, as
+# CRuby's does: the VM leaves "undefined method 'm'" in `@__message_head__`
+# and the receiver is named now, by sending it `name` or `inspect` — which a
+# primitive cannot do. Measured on ruby 4.0.7, the receiver reads as:
+#
+#   nil, true, false            the literal
+#   a class or module           "class C", "module #<Module:0x...>"
+#   main                        "main", which the VM's message already says
+#   an object with a singleton  its `Kernel#to_s`, "#<C:0x...>"
+#   any other object            "an instance of C"
+#
+# The receiver itself is never sent `inspect`, only its class.
+class NameError
+  def to_s
+    head = @__message_head__
+    return super if head.nil?
+    "#{head} for #{NameError.__describe__(@receiver)}"
+  end
+
+  def self.__describe__(object)
+    return "nil" if NilClass === object
+    return "true" if TrueClass === object
+    return "false" if FalseClass === object
+    if Module === object
+      return "#{Class === object ? "class" : "module"} #{__receiver_name__(object)}"
+    end
+    klass = __reflect_class_of__(object)
+    unless klass.singleton_class? && !__bare_singleton__(klass)
+      klass = klass.superclass while klass.singleton_class?
+      return "an instance of #{__receiver_name__(klass)}"
+    end
+    # `Kernel#to_s`'s text, built without sending the object anything: it
+    # may be a `BasicObject`, or have undefined `class`.
+    klass = klass.superclass while klass.singleton_class?
+    hex = object.__id__.to_s(16)
+    hex = "0" + hex while hex.length < 16
+    "#<#{__receiver_name__(klass)}:0x#{hex}>"
+  end
+
+  # Whether a singleton class holds nothing of its own.
+  #
+  # ponytail: CRuby asks only whether the object has a singleton class, and
+  # Spinel's `instance_eval` makes one where CRuby's does not, so an empty one
+  # counts as none — wrong only after a bare `obj.singleton_class`. The
+  # upgrade is an `instance_eval` that allocates the singleton on its first
+  # `def`, as CRuby's does.
+  def self.__bare_singleton__(klass)
+    klass.instance_methods(false).empty? &&
+      klass.private_instance_methods(false).empty? &&
+      klass.constants(false).empty? &&
+      klass.ancestors.size == klass.superclass.ancestors.size + 1
+  end
+
+  # A module's `name`, or its `inspect` when it has none — or when either
+  # raises, which CRuby swallows.
+  def self.__receiver_name__(mod)
+    name = begin
+      mod.name
+    rescue StandardError
+      nil
+    end
+    return name if name.is_a?(String)
+    begin
+      mod.inspect
+    rescue StandardError
+      Kernel.instance_method(:to_s).bind_call(mod)
+    end
+  end
+end
+
 # `NoMethodError` adds the call's arguments and whether it was a private call.
 class NoMethodError
   def initialize(message = nil, name = nil, args = nil, private_call = false, receiver: __no_receiver__)
@@ -168,10 +241,31 @@ end
 
 # `FrozenError` carries the object that was frozen, under the same
 # absent-is-an-error rule as `NameError#receiver`.
+#
+# One the VM raised ends its message with the object's `inspect`: "can't
+# modify frozen Array: [1]". The VM writes the head and this adds the rest.
+# An `inspect` that itself modifies the frozen object raises again inside
+# here, and CRuby's answer for that is " ..." in place of the inspection.
+#
+# ponytail: CRuby inspects when it raises, and this inspects when the message
+# is read — so an unread message never runs `inspect`, and one read later sees
+# the object as it is then. The upgrade is a VM that can send from the
+# instruction that refuses.
 class FrozenError
   def initialize(message = nil, receiver: __no_receiver__)
     super(message)
     @receiver = receiver
+  end
+
+  def to_s
+    head = @__message_head__
+    return super if head.nil?
+    shown = begin
+      @receiver.inspect
+    rescue FrozenError
+      " ..."
+    end
+    "#{head}: #{shown}"
   end
 
   def __no_receiver__
@@ -225,6 +319,42 @@ class NoMatchingPatternKeyError
 
   def key
     @key
+  end
+end
+
+# `UncaughtThrowError` carries the tag and value of the `throw` nothing
+# caught. Built with `new`, its message is a format the tag is put into:
+# `UncaughtThrowError.new(:a, 1, "no %p").message` is "no :a". Measured.
+class UncaughtThrowError
+  def initialize(tag, value, message = "uncaught throw %p")
+    super(message)
+    @tag = tag
+    @value = value
+    @__format__ = true
+  end
+
+  def tag
+    @tag
+  end
+
+  def value
+    @value
+  end
+
+  def to_s
+    @__format__ ? format(super, @tag) : super
+  end
+end
+
+# `LocalJumpError` says which jump had nowhere to go — `:return` or `:break`
+# — and the value it carried.
+class LocalJumpError
+  def reason
+    @reason
+  end
+
+  def exit_value
+    @exit_value
   end
 end
 

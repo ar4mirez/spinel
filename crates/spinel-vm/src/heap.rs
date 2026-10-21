@@ -280,8 +280,10 @@ pub struct Heap {
     /// ponytail: one per heap, like `last_match`. Ruby scopes it to the thread;
     /// give it a Ractor-local when threads arrive.
     errinfo: Value,
-    /// What the `NameError` now on its way out is about: its message, then
-    /// `@name` and `@receiver` (#173).
+    /// What the exception now on its way out is about: its message, then two
+    /// values — a `NameError`'s `@name` and `@receiver` (#173), a
+    /// `FrozenError`'s receiver, an `UncaughtThrowError`'s tag and value, a
+    /// `LocalJumpError`'s reason and exit value (#29).
     ///
     /// An `Error` holds only `String`s, because a `Value` parked in one is
     /// unrooted for the whole unwind. So the site that raises leaves the two

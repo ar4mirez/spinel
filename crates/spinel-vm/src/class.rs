@@ -2292,6 +2292,11 @@ impl<'h> HandleScope<'h> {
             }),
             Kind::Module => Some(Builtin::Module.id()),
         };
+        // Making the superclass's may have made this one already: it links the
+        // subclasses that exist, and this class is one of them.
+        if let Some(singleton) = self.classes().singleton(id) {
+            return singleton;
+        }
         let name = self
             .classes()
             .name(id)
@@ -2309,6 +2314,19 @@ impl<'h> HandleScope<'h> {
         let handle = scope.root(object);
         let meta = scope.classes().object(singleton);
         scope.set_class(handle, meta);
+        // A subclass that already exists without a metaclass dispatches to
+        // `Class` and so misses every class method this one now has: the
+        // exception classes bootstrap defines, before `core/exception.rb` gives
+        // `Exception` its `exception` (#29). CRuby gives every class its
+        // metaclass when it is defined, so the subclasses get theirs now.
+        let subclasses = scope.classes().entry(id).subclasses.clone();
+        for subclass in subclasses {
+            if scope.classes().kind(subclass) == Kind::Class
+                && !scope.classes().is_singleton(subclass)
+            {
+                scope.singleton_class(subclass);
+            }
+        }
         singleton
     }
 
@@ -2479,6 +2497,7 @@ mod tests {
         let mut scope = heap.scope();
         let a = scope.define_class(Some("A"), Some(Builtin::Object.id()));
         let b = scope.define_class(Some("B"), Some(a));
+        let c = scope.define_class(Some("C"), Some(a));
 
         let before = scope.classes().len();
         assert_eq!(scope.classes().singleton(b), None, "nothing yet");
@@ -2487,13 +2506,19 @@ mod tests {
         let singleton = scope.singleton_class(b);
         assert_eq!(scope.classes().singleton(b), Some(singleton));
         assert!(scope.classes().is_singleton(singleton));
-        // `B`'s, `A`'s, `Object`'s, and `BasicObject`'s: exactly the four the
-        // answer contains, and not one speculative metaclass more.
-        assert_eq!(scope.classes().len(), before + 4);
+        // `B`'s chain has its metaclasses, and so does every class already
+        // below one of them: `C`, a sibling, inherits `A`'s class methods only
+        // through `#<Class:C> < #<Class:A>` (#29).
+        let c_singleton = scope.classes().singleton(c).expect("a subclass of A");
+        assert_eq!(
+            scope.classes().superclass(c_singleton),
+            scope.classes().singleton(a)
+        );
 
+        let allocated = scope.classes().len();
         let again = scope.singleton_class(b);
         assert_eq!(again, singleton, "and the second ask allocates nothing");
-        assert_eq!(scope.classes().len(), before + 4);
+        assert_eq!(scope.classes().len(), allocated);
     }
 
     // T4 — an object's class *becoming* its singleton, which is Ruby's mechanism
