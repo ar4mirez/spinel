@@ -12,16 +12,19 @@
 # lexical scope its constants resolve in. The definition is what `call` runs,
 # so a method redefined after it was captured still runs the body it was.
 class Method
-  def self.__make__(receiver, name, found)
+  # `klass` is the class `inspect` shows it was looked up from, when that is
+  # not the receiver's: `super_method` finds it in the owner.
+  def self.__make__(receiver, name, found, klass = nil)
     method = allocate
-    method.__setup__(receiver, name, found)
+    method.__setup__(receiver, name, found, klass)
     method
   end
 
   # Hidden names, so `instance_variables` on a Method is the program's own.
-  def __setup__(receiver, name, found)
+  def __setup__(receiver, name, found, klass = nil)
     @__receiver__ = receiver
     @__name__ = name
+    @__klass__ = klass
     # Also read by `define_method`, which takes the definition it holds.
     @__found__ = found
   end
@@ -94,7 +97,7 @@ class Method
   def super_method
     name = original_name
     found = __reflect_method_lookup__(@__receiver__, @__found__[0], name, true)
-    found.nil? ? nil : Method.__make__(@__receiver__, name, found)
+    found.nil? ? nil : Method.__make__(@__receiver__, name, found, found[0])
   end
 
   # A lambda, as CRuby's is, that calls through to this and reports this
@@ -137,8 +140,11 @@ class Method
     if __reflect_is_singleton__(owner)
       text = "#{@__receiver__.inspect}."
     else
-      klass = __reflect_class_of__(@__receiver__)
-      klass = Kernel.__class_of__(@__receiver__) unless Module === @__receiver__
+      klass = @__klass__
+      if klass.nil?
+        klass = __reflect_class_of__(@__receiver__)
+        klass = Kernel.__class_of__(@__receiver__) unless Module === @__receiver__
+      end
       text = klass.equal?(owner) ? "#{owner}#" : "#{klass}(#{owner})#"
     end
     Method.__inspect__("Method", text, @__name__, @__found__)
