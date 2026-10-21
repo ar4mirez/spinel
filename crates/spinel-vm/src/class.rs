@@ -1763,15 +1763,18 @@ impl Classes {
     /// One module: Ruby's `Module#include(*modules)` is this applied right to
     /// left, which is why `include A, B` leaves `A` closer than `B`.
     pub fn include(&mut self, target: ClassId, module: ClassId) -> Result<(), MixinError> {
-        self.mixin(target, module, Mixin::Include)
+        self.mixin(target, module, Mixin::Include).map(|_| ())
     }
 
     /// `Module#prepend`. Splices it in front of the class, where it wins lookup.
     pub fn prepend(&mut self, target: ClassId, module: ClassId) -> Result<(), MixinError> {
-        self.mixin(target, module, Mixin::Prepend)?;
+        if !self.mixin(target, module, Mixin::Prepend)? {
+            return Ok(());
+        }
         // A prepended module that defines an optimised name puts itself in
-        // front of it. Measured: `include` does not count, and the class's
-        // own body stays, so a second `prepend` counts again.
+        // front of it. Measured: `include` does not count, a `prepend` that
+        // inserts nothing does not either, and the class's own body stays, so
+        // a second module's `prepend` counts again.
         let shadowed: Vec<SymbolId> = self
             .optimised
             .iter()
@@ -1786,7 +1789,9 @@ impl Classes {
         Ok(())
     }
 
-    fn mixin(&mut self, target: ClassId, module: ClassId, how: Mixin) -> Result<(), MixinError> {
+    /// True if `target`'s own run grew, as CRuby's `include_modules_at`
+    /// reports `changed`.
+    fn mixin(&mut self, target: ClassId, module: ClassId, how: Mixin) -> Result<bool, MixinError> {
         if self.entry(module).kind == Kind::Class {
             return Err(MixinError::NotAModule);
         }
@@ -1800,7 +1805,7 @@ impl Classes {
             Mixin::Include => Site::include(self.entry(target)),
             Mixin::Prepend => Site::prepend(self.entry(target)),
         };
-        self.splice(target, site, module);
+        let changed = self.splice(target, site, module);
 
         // Everything that already reaches `target` gets the same modules at its
         // own copy of it. `includers` is flat, so a module three levels down is
@@ -1822,7 +1827,7 @@ impl Classes {
         // `target` and everything downstream of it is what can now resolve a
         // name differently. `module`'s own lookups are unchanged.
         self.invalidate(target);
-        Ok(())
+        Ok(changed)
     }
 
     /// Splice `source`'s run into `target`'s at `site`, skipping every module
@@ -1831,11 +1836,12 @@ impl Classes {
     /// The insertion point walks forward past each module it inserts, and *also*
     /// past each one it finds already in place — which is the rule that puts a
     /// shared module behind the modules that were there before it rather than
-    /// dragging it forward.
-    fn splice(&mut self, target: ClassId, mut site: Site, source: ClassId) {
+    /// dragging it forward. True if it inserted any.
+    fn splice(&mut self, target: ClassId, mut site: Site, source: ClassId) -> bool {
         // `source`'s run can change under us only through `target`, and a mixin
         // that would let that happen was rejected as cyclic above.
         let chain = self.entry(source).own.clone();
+        let mut inserted = false;
         for module in chain {
             match self.find(target, module, &site) {
                 Some(Found::Own(q)) if site.behind.is_none_or(|behind| q >= behind) => {
@@ -1845,6 +1851,7 @@ impl Classes {
                 Some(Found::Own(_) | Found::Super) => {}
                 None => {
                     self.insert(target, site.at, module);
+                    inserted = true;
                     site.behind = Some(site.at);
                     if site.at <= site.scan_to {
                         site.scan_to += 1;
@@ -1853,6 +1860,7 @@ impl Classes {
                 }
             }
         }
+        inserted
     }
 
     /// Where `module`'s run starts inside `target`, given where `module` itself
@@ -2796,6 +2804,10 @@ mod tests {
         classes.set_visibility(c, name, Visibility::Private);
         classes.prepend(c, m).unwrap();
         assert_eq!(classes.take_redefined(), vec![(c, name), (c, name)]);
+
+        // Prepending it again inserts nothing, so it is no change.
+        classes.prepend(c, m).unwrap();
+        assert!(classes.take_redefined().is_empty());
 
         // A new body counts once; what happens to it afterwards does not.
         classes.define_method(c, name, Value::fixnum(2).unwrap());
