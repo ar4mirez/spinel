@@ -916,6 +916,9 @@ pub struct ParamSpec {
     /// `&blk`. The block reaches the frame either way; this is the slot that
     /// also names it as a `Proc`.
     pub block: Option<u16>,
+    /// The required and post slots `parameters` reports without a name: a
+    /// destructure, which borrows its first inner name's slot, and `it`.
+    pub unnamed: Vec<u16>,
 }
 
 impl ParamSpec {

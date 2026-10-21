@@ -37,7 +37,7 @@ module Kernel
   end
 
   def instance_of?(mod)
-    return true if self.class.equal?(mod)
+    return true if Kernel.__class_of__(self).equal?(mod)
     raise TypeError, "class or module required" unless mod.class.ancestors.include?(Module)
     false
   end
@@ -114,6 +114,14 @@ module Kernel
     hex = object_id.to_s(16)
     hex = "0" + hex while hex.length < 16
     hex
+  end
+
+  # `object.class`, read without sending to it: a `BasicObject` that a
+  # Kernel method is bound to has neither `class` nor the primitives.
+  def self.__class_of__(object)
+    klass = __reflect_class_of__(object)
+    klass = klass.superclass while __reflect_is_singleton__(klass)
+    klass
   end
 
   # The objects `inspect` is part-way through, innermost last: what stops an
@@ -586,30 +594,6 @@ module Kernel
   def self.autoload?(name, inherit = true) = __caller_cref_base__.autoload?(name, inherit)
 
   module_function :Array, :Hash, :Integer, :String, :sleep, :__method__, :__callee__, :__dir__
-end
-
-# `Proc#to_s`: the address, where the block was written, and `(lambda)` for
-# a lambda — BINARY, as `Kernel#to_s` is. Measured.
-class Proc
-  # `Proc.new { }` is the block it was given. A subclass still needs an
-  # instance of its own, which `allocate` cannot make yet.
-  def self.new(*args, &block)
-    raise ArgumentError, "tried to create Proc object without a block" if block.nil?
-    return super unless equal?(Proc)
-    block
-  end
-
-  def to_s
-    text = "#<Proc:0x" + __address__
-    location = __proc_location__(self)
-    text = text + " " + location[0] + ":" + location[1].to_s unless location.nil?
-    text = text + " (lambda)" if lambda?
-    (text + ">").__force_encoding__(0)
-  end
-
-  def inspect
-    to_s
-  end
 end
 
 # `exit` and `abort` only raise `SystemExit`, which is the whole of what

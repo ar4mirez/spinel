@@ -1,5 +1,0 @@
-fails(Method#inspect names the owner alone, not the receiver's class with the owner beside it):Method#to_s returns a String containing the Module the method is referenced from
-fails(Method#inspect names the owner alone, not the receiver's class with the owner beside it):Method#to_s returns a String including all details
-fails(Method#inspect names the owner alone, not the receiver's class with the owner beside it):Method#to_s returns a String containing the Module containing the method if object has a singleton class but method is not defined in the singleton class
-fails(Method#inspect names the owner alone, not the receiver's class with the owner beside it):Method#to_s shows the metaclass and the owner for a Module instance method retrieved from a class
-fails(an alias written in the core library is reported under the name it aliases):Method#to_s does not annotate a directly looked-up Kernel method with a shared internal name

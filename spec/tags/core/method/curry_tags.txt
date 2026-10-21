@@ -1,2 +1,0 @@
-fails(#27: Proc and Method: an expectation about an error, newly reported since PRD 0077 let mspec's raise matcher run inside its BasicObject proxy):Method#curry with optional arity argument raises ArgumentError when the method requires less arguments than the given arity
-fails(#27: Proc and Method: an expectation about an error, newly reported since PRD 0077 let mspec's raise matcher run inside its BasicObject proxy):Method#curry with optional arity argument raises ArgumentError when the method requires more arguments than the given arity
