@@ -261,6 +261,9 @@ pub enum Native {
     SymbolName {
         length: bool,
     },
+    /// `Kernel#__all_symbols__`: every symbol in the shared table, as an
+    /// Array. `Symbol.all_symbols` is Ruby on top of it.
+    AllSymbols,
     /// `Module#name`, `Module#to_s` — reads the class table.
     ModuleName,
     /// `Kernel#__main__`: the top-level `self`, which the heap holds.

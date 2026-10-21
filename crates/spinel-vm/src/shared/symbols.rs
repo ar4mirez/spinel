@@ -109,6 +109,16 @@ pub fn len() -> usize {
     lock!(read).names.len()
 }
 
+/// Every id interned so far, oldest first — `Symbol.all_symbols`.
+///
+/// An id is an index that is never reused, so the ids are `0..len()`; the
+/// table is not read beyond its length.
+#[must_use]
+pub fn all() -> Vec<SymbolId> {
+    let count = u32::try_from(len()).expect("symbol table overflow");
+    (0..count).map(SymbolId).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -155,6 +165,12 @@ mod tests {
         // Ids are indices into an append-only table, so one handed out earlier
         // stays valid however much the table has grown since.
         assert!(len() > first.0 as usize);
+    }
+
+    #[test]
+    fn all_names_every_interned_id() {
+        let id = intern("listed_by_all");
+        assert!(all().contains(&id));
     }
 }
 

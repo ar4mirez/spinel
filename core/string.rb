@@ -273,6 +273,12 @@ class String
         unless group.is_a?(Integer) || group.is_a?(String) || group.is_a?(Symbol)
           group = Integer.__index__(group)
         end
+        # A negative group counts back from the last, and reaching the whole
+        # match that way is no group at all — `rb_reg_nth_match`.
+        if group.is_a?(Integer) && group < 0
+          group += match.size
+          return [nil] if group <= 0
+        end
         part = match[group]
         return [nil] if part.nil?
         return [match.begin(group), part.length]

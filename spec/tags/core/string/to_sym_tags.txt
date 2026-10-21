@@ -1,0 +1,2 @@
+fails(#333: a Symbol does not carry its encoding, so a binary String with non-ASCII bytes interns as a UTF-8 Symbol):String#to_sym returns a binary Symbol for a binary String containing non US-ASCII characters
+fails(#333: a Symbol does not carry its encoding, so names with equal bytes in two encodings are one UTF-8 Symbol):String#to_sym ignores existing symbols with different encoding
