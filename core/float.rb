@@ -203,4 +203,25 @@ class Float
   def integer?
     false
   end
+
+  # One representable step either way, as C's `nextafter`: `-0.0` and `0.0`
+  # step to the same place, an infinity steps no further outward, and NaN
+  # stays NaN.
+  def next_float
+    __math__(:nextafter, self, INFINITY)
+  end
+
+  def prev_float
+    __math__(:nextafter, self, -INFINITY)
+  end
+
+  # A Float exists only as a value: `Float.allocate` raises and `Float.new`
+  # is not there to call.
+  def self.allocate
+    raise TypeError, "allocator undefined for #{self}"
+  end
+
+  class << self
+    undef_method :new
+  end
 end
