@@ -22,6 +22,23 @@
 1.5.coerce(2.5)  #=> [2.5, 1.5]
 1.coerce(nil)  #=> !TypeError: can't convert nil into Float
 1.coerce(Object.new)  #=> !TypeError: can't convert Object into Float
+1.coerce(true)  #=> !TypeError: can't convert true into Float
+1.coerce(:sym)  #=> !TypeError: can't convert Symbol into Float
+1.coerce("2")  #=> [2.0, 1.0]
+1.coerce("-2")  #=> [-2.0, 1.0]
+1.0.coerce("2.5")  #=> [2.5, 1.0]
+1.coerce(" 1_000.5e-1 ")  #=> [100.05, 1.0]
+1.coerce("0x1p3")  #=> [8.0, 1.0]
+1.coerce(":)")  #=> !ArgumentError: invalid value for Float(): ":)"
+1.coerce("2.5abc")  #=> !ArgumentError: invalid value for Float(): "2.5abc"
+1.coerce("")  #=> !ArgumentError: invalid value for Float(): ""
+1.coerce("1__0")  #=> !ArgumentError: invalid value for Float(): "1__0"
+1.coerce("0.1").first == 0.1  #=> true
+1.coerce("2.2250738585072011e-308").first.to_s  #=> "2.225073858507201e-308"
+1.coerce("2.4703282292062328e-324").first.to_s  #=> "5.0e-324"
+1.coerce("1#{"0" * 400}e-500").first.to_s  #=> "1.0e-100"
+1.coerce("0x1.000000000000081p0").first.to_s  #=> "1.0"
+1.coerce(Class.new { def to_f; "0"; end }.new)  #=> !TypeError: can't convert #<Class:0xXX> to Float (#<Class:0xXX>#to_f gives String)
 
 # -- the operand has no `coerce` at all ---------------------------------
 

@@ -674,6 +674,9 @@ module Kernel
   # `Float(value)`: the Float it is, or — unlike `to_f` — an error when it is
   # not one. A String must be a number from end to end.
   def Float(value, exception: true)
+    unless exception == true || exception == false
+      raise ArgumentError, "expected true or false as exception: #{exception.inspect}"
+    end
     begin
       case value
       when Float then value
@@ -682,7 +685,9 @@ module Kernel
       when nil then raise TypeError, "can't convert nil into Float"
       else
         unless value.respond_to?(:to_f)
-          raise TypeError, "can't convert " + value.class.to_s + " into Float"
+          # `true` and `false` are named by themselves, as nil is.
+          name = true.equal?(value) || false.equal?(value) ? value.inspect : value.class.to_s
+          raise TypeError, "can't convert " + name + " into Float"
         end
         converted = value.to_f
         unless converted.is_a?(Float)
@@ -696,4 +701,6 @@ module Kernel
       nil
     end
   end
+
+  module_function :Float
 end

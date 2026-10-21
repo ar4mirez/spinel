@@ -30,9 +30,9 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/float` | 50 | 261 | 260 | 0 | 0 | 1 | 100% |
 | `core/gc` | 18 | 41 | 2 | 0 | 39 | 0 | 5% |
 | `core/hash` | 69 | 562 | 518 | 0 | 40 | 4 | 92% |
-| `core/integer` | 70 | 598 | 586 | 0 | 9 | 3 | 98% |
+| `core/integer` | 70 | 598 | 588 | 0 | 9 | 1 | 98% |
 | `core/io` | 103 | 1631 | 1360 | 0 | 265 | 6 | 83% |
-| `core/kernel` | 118 | 2241 | 2043 | 0 | 151 | 47 | 91% |
+| `core/kernel` | 118 | 2241 | 2046 | 0 | 151 | 44 | 91% |
 | `core/main` | 7 | 27 | 14 | 0 | 11 | 2 | 52% |
 | `core/marshal` | 6 | 475 | 460 | 0 | 10 | 5 | 97% |
 | `core/matchdata` | 30 | 186 | 185 | 0 | 1 | 0 | 99% |
@@ -131,4 +131,4 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `optional/capi` | 47 | 0 | 0 | 0 | 0 | 0 | — |
 | `optional/thread_safety` | 1 | 5 | 0 | 0 | 5 | 0 | 0% |
 | `security` | 13 | 26 | 19 | 0 | 7 | 0 | 73% |
-| **total** | 3835 | 32571 | 27690 | 0 | 4491 | 390 | 85% |
+| **total** | 3835 | 32571 | 27695 | 0 | 4491 | 385 | 85% |

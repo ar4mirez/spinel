@@ -2140,16 +2140,41 @@ module Kernel
     raise ArgumentError, "string for Float contains null byte" if text.include?("\0")
     hex = /\A\s*([+-]?)0[xX](\h+(?:_\h+)*)(?:\.(\h+(?:_\h+)*))?(?:[pP]([+-]?\d+(?:_\d+)*))?\s*\z/.__match__(text)
     unless hex.nil?
-      whole = hex[2].delete("_")
+      # CRuby's `ruby_strtod` adds the digits up in a Float, one at a time,
+      # each worth a sixteenth of the one before, and scales the sum by the
+      # power at the end. Every addition rounds, so past fifty-three bits the
+      # answer is that sum's, not the nearest Float to the number written:
+      # `Float("0x1.000000000000081p0")` is 1.0. The sum is made the same way
+      # here, so it rounds where CRuby's does.
+      whole = hex[2].delete("_").sub(/\A0+/, "")
       fraction = hex[3].nil? ? "" : hex[3].delete("_")
-      power = (hex[4].nil? ? 0 : hex[4].delete("_").to_i) - 4 * fraction.size
-      digits = (whole + fraction).to_i(16)
-      value = if digits == 0
+      exponent = hex[4].nil? ? 0 : hex[4].delete("_").to_i
+      sum = 0.0
+      place = 1.0
+      power = -4
+      whole.each_char do |digit|
+        sum += place * digit.hex
+        power += 4
+        place /= 16
+      end
+      if whole.empty?
+        # Leading zeros after the point move the power, not the sum.
+        zeros = fraction.size - fraction.sub(/\A0+/, "").size
+        fraction = fraction[zeros..]
+        power -= 4 * zeros
+      end
+      fraction.each_char do |digit|
+        sum += place * digit.hex
+        place /= 16
+        break if place == 0.0
+      end
+      scale = power + exponent
+      value = if sum == 0.0 || scale < -2000
                 0.0
-              elsif power >= 0
-                power > 2000 ? Float::INFINITY : (digits * 2**power).to_f
+              elsif scale > 2000
+                Float::INFINITY
               else
-                -power > 3000 ? 0.0 : String.__ratio__(digits, 2**-power)
+                Math.ldexp(sum, scale)
               end
       return hex[1] == "-" ? -value : value
     end
@@ -2241,12 +2266,17 @@ class String
     exponent = match[4].nil? ? 0 : match[4].delete("_").to_i
     digits = (whole + fraction).to_i
     shift = exponent - fraction.size
-    value = if digits == 0
+    # The number has about this many digits before its point, which is all
+    # it takes to know it is past the largest Float or under the smallest.
+    magnitude = digits.to_s.size + shift
+    value = if digits == 0 || magnitude < -330
               0.0
+            elsif magnitude > 310
+              Float::INFINITY
             elsif shift >= 0
-              shift > 400 ? Float::INFINITY : (digits * 10**shift).to_f
+              (digits * 10**shift).to_f
             else
-              -shift > 800 ? 0.0 : String.__ratio__(digits, 10**-shift)
+              String.__ratio__(digits, 10**-shift)
             end
     match[1] == "-" ? -value : value
   end
@@ -2254,6 +2284,11 @@ class String
   # Two positive Integers' quotient as the nearest Float, a tie going to the
   # even one. The quotient is taken to fifty-five bits with a note of whether
   # anything was left over, which is enough to round fifty-three correctly.
+  #
+  # Under the smallest normal Float there are fewer than fifty-three bits to
+  # keep, the last one worth 2**-1074, so the rounding happens there instead.
+  # Rounding to fifty-three first and letting `ldexp` round again would be
+  # rounding twice, which is wrong in the last bit.
   def self.__ratio__(top, bottom)
     shift = 55 - (top.bit_length - bottom.bit_length)
     if shift > 0
@@ -2262,6 +2297,7 @@ class String
       quotient, rest = top.divmod(bottom * 2**-shift)
     end
     extra = quotient.bit_length - 53
+    extra = shift - 1074 if shift - 1074 > extra
     unit = 2**extra
     low = quotient % unit
     quotient = quotient / unit

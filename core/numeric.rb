@@ -23,7 +23,7 @@ class Numeric
   # `1.coerce(2)` a pair of Integers rather than a pair of Floats.
   def coerce(other)
     return [other, self] if other.class.equal?(self.class)
-    [__to_float__(other), __to_float__(self)]
+    [Float(other), Float(self)]
   end
 
   # The ten operators, written out rather than routed through one `send`.
@@ -171,20 +171,6 @@ class Numeric
             "undefined method '" + op.to_s + "' for an instance of " + self.class.to_s
     end
   end
-
-  # `Float(value)`, for the types this VM has. An object with no `to_f` cannot
-  # be made a Float, and neither can nil, which has one and still refuses.
-  #
-  # ponytail: CRuby's `Float()` parses a String strictly — `Float(":)")` is an
-  # ArgumentError where `":)".to_f` is 0.0 — so `String` will need naming here
-  # rather than falling through to `to_f` once `String#to_f` exists.
-  def __to_float__(value)
-    return value if value.is_a?(Float)
-    if value.nil? || !value.respond_to?(:to_f)
-      raise TypeError, "can't convert " + __operand_name__(value) + " into Float"
-    end
-    value.to_f
-  end
 end
 
 class Numeric
@@ -292,7 +278,7 @@ class Numeric
   end
 
   def fdiv(other)
-    __to_float__(self) / other
+    Float(self) / other
   end
 
   # The division that does not truncate: as a Rational, unless by a Float.
@@ -309,10 +295,10 @@ class Numeric
   def numerator = self.to_r.numerator
   def denominator = self.to_r.denominator
 
-  def floor(*digits) = __to_float__(self).floor(*digits)
-  def ceil(*digits) = __to_float__(self).ceil(*digits)
-  def round(*digits) = __to_float__(self).round(*digits)
-  def truncate(*digits) = __to_float__(self).truncate(*digits)
+  def floor(*digits) = Float(self).floor(*digits)
+  def ceil(*digits) = Float(self).ceil(*digits)
+  def round(*digits) = Float(self).round(*digits)
+  def truncate(*digits) = Float(self).truncate(*digits)
 end
 
 class Numeric
