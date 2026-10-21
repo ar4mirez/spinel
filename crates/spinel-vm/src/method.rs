@@ -259,7 +259,8 @@ pub enum Native {
     /// Pushes a frame.
     MethodCall,
     /// `__math__(:name, x, y = nil)`: one libm function, or `Float`'s
-    /// truncation to an Integer. `Math` and the rounding half of `Float`.
+    /// truncation to an Integer. `Math`, the rounding half of `Float`, and
+    /// `Float#next_float`/`#prev_float`.
     Math,
     /// `Integer#**` — repeated multiplication with an overflow check, so the
     /// answer is a refusal rather than a wrapped one.
