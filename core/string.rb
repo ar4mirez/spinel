@@ -1667,12 +1667,20 @@ class String
       end
       return self
     end
+    # CRuby's `rb_str_upto_each`: a start past the end yields nothing, and
+    # otherwise the start is always yielded — `"az".upto("b")` yields "az" —
+    # with the walk stopping once a value grows longer than the end.
+    order = self <=> max
+    return self if order > 0 || (exclusive && order == 0)
+    after_end = max.succ
     current = dup
-    while current.length <= max.length
-      break if exclusive && current == max
+    until current == after_end
+      following = exclusive || current != max ? current.succ : nil
       block.call(current)
-      break if current == max
-      current = current.succ
+      break if following.nil?
+      current = following
+      break if exclusive && current == max
+      break if current.length > max.length || current.empty?
     end
     self
   end

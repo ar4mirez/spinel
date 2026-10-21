@@ -632,6 +632,9 @@ module Enumerable
       if cmp.nil?
         raise ArgumentError, "comparison of #{item.class} with #{best.class} failed"
       end
+      # Read as `rb_cmpint` reads it: an answer that is not an Integer is asked
+      # `> 0` and then `< 0`, whichever extreme is wanted.
+      cmp = cmp > 0 ? 1 : (cmp < 0 ? -1 : 0) unless cmp.is_a?(Integer)
       best = item if (want > 0 && cmp > 0) || (want < 0 && cmp < 0)
     end
     best

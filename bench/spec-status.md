@@ -47,7 +47,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/process` | 92 | 430 | 390 | 0 | 27 | 13 | 91% |
 | `core/queue` | 15 | 46 | 40 | 0 | 6 | 0 | 87% |
 | `core/random` | 10 | 87 | 87 | 0 | 0 | 0 | 100% |
-| `core/range` | 35 | 606 | 478 | 0 | 120 | 8 | 79% |
+| `core/range` | 35 | 606 | 606 | 0 | 0 | 0 | 100% |
 | `core/rational` | 32 | 160 | 159 | 0 | 0 | 1 | 99% |
 | `core/refinement` | 8 | 25 | 0 | 0 | 25 | 0 | 0% |
 | `core/regexp` | 24 | 256 | 212 | 0 | 31 | 13 | 83% |
@@ -131,4 +131,4 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `optional/capi` | 47 | 0 | 0 | 0 | 0 | 0 | — |
 | `optional/thread_safety` | 1 | 5 | 0 | 0 | 5 | 0 | 0% |
 | `security` | 13 | 26 | 19 | 0 | 7 | 0 | 73% |
-| **total** | 3835 | 32571 | 27440 | 0 | 4706 | 425 | 84% |
+| **total** | 3835 | 32571 | 27568 | 0 | 4586 | 417 | 85% |

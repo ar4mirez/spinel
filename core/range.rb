@@ -4,15 +4,14 @@
 # this class exists for the literal to have something to be. It holds the three
 # things a literal carries and answers the questions that do not need iteration.
 #
-# `include Enumerable` supplies most of the rest. The four methods below it —
-# `min`, `max`, `reverse_each` and `include?` — are Range's own because at an
-# open end the answer is a rule rather than a search, and a generic scan would
-# either guess or run forever.
+# `include Enumerable` supplies most of the rest. `min`, `max`, `count`,
+# `reverse_each` and `include?` are Range's own because at an open end the
+# answer is a rule rather than a search, and a generic scan would either guess
+# or run forever. `step` and `%` are in `core/arithmetic_sequence.rb`, beside
+# the sequence they build.
 #
-# ponytail: no `step` or `size`. Both need an iteration protocol richer than
-# `succ` — a numeric stride, and a count that does not walk — and belong to the
-# `Range` slice (#23); a call to one reports blocked, naming the method, which
-# is how the next slice gets chosen.
+# Most methods here are ports of CRuby's `range.c`, because which comparisons
+# and conversions they make, in which order, is what ruby/spec checks.
 class Range
   include Enumerable
 
@@ -57,38 +56,58 @@ class Range
   def first(*count)
     raise RangeError, "cannot get the first element of beginless range" if @__begin__.nil?
     return @__begin__ if count.empty?
-    wanted = __to_count__(count[0])
+    Range.__arity__(count, 1)
+    __take_from__(:each, count[0])
+  end
+
+  # CRuby's `first_i` loop, shared by `first(n)` and `max(n)`: the count is
+  # converted before anything is walked — `(1..5).first(nil)` is a TypeError,
+  # not an ArgumentError about arity — and the walk starts even for a count of
+  # zero, so `(1.0..2.0).first(0)` still says Float cannot be iterated.
+  def __take_from__(walk, count)
+    wanted = Integer.__index__(count)
     raise ArgumentError, "negative array size (or size too big)" if wanted < 0
     out = []
-    return out if wanted == 0
-    each do |value|
-      out.push(value)
+    __send__(walk) do |value|
       break if out.size >= wanted
+      out.push(value)
     end
     out
   end
 
+  # An Integer range's last n are counted back from the end, without the walk
+  # `to_a` would make — `(0...2**64).last(2)` answers. CRuby's
+  # `rb_int_range_last`, and only while `each` is Range's own.
   def last(*count)
     raise RangeError, "cannot get the last element of endless range" if @__end__.nil?
     return @__end__ if count.empty?
-    wanted = __to_count__(count[0])
+    Range.__arity__(count, 1)
+    from = @__begin__
+    to = @__end__
+    unless (from.nil? || from.is_a?(Integer)) && to.is_a?(Integer) &&
+           method(:each).owner.equal?(Range)
+      return to_a.last(count[0])
+    end
+    to = to - 1 if @__exclude_end__
+    length = from.nil? ? nil : to - from + 1
+    return [] if !length.nil? && length <= 0
+    wanted = Integer.__index__(count[0])
     raise ArgumentError, "negative array size" if wanted < 0
-    all = to_a
-    from = all.size - wanted
-    from = 0 if from < 0
-    all.__take__(from, wanted)
+    wanted = length if !length.nil? && wanted > length
+    out = []
+    value = to - wanted
+    while out.size < wanted
+      value = value + 1
+      out.push(value)
+    end
+    out
   end
 
-  # `first(n)` and `last(n)` take a count, and Ruby converts it with `to_int`
-  # before it counts anything — `(1..5).first(nil)` is a TypeError, not an
-  # ArgumentError about arity.
-  def __to_count__(value)
-    return value if value.is_a?(Integer)
-    raise TypeError, "no implicit conversion from nil to integer" if value.nil?
-    unless value.respond_to?(:to_int)
-      raise TypeError, "no implicit conversion of " + value.class.to_s + " into Integer"
-    end
-    value.to_int
+  # `rb_scan_args` with one optional argument, for the methods that take
+  # their count through `*count` so they can tell "none" from nil.
+  def self.__arity__(given, most)
+    return if given.size <= most
+    raise ArgumentError, "wrong number of arguments (given #{given.size}, expected 0..#{most})"
   end
 
   def ==(other)
@@ -161,12 +180,75 @@ class Range
     cover?(value)
   end
 
-  # The element count without iterating. Ruby 3.4's rule, measured rather than
-  # reasoned about — the *begin* decides, and it decides three different ways:
+  # CRuby's `range_hash`: the endpoints' own hashes and the exclusive flag, so
+  # two ranges that are `eql?` hash alike.
+  def hash
+    flag = @__exclude_end__ ? 1 : 0
+    digest = __hash_combine__(:__spinel_range__, flag)
+    digest = __hash_combine__(digest, __element_hash__(@__begin__))
+    digest = __hash_combine__(digest, __element_hash__(@__end__))
+    __hash_combine__(digest, flag << 24)
+  end
+
+  # CRuby's `range_overlap`. Only an empty range is ruled out by its own
+  # endpoints; a beginless one is never assumed empty, whatever its end.
+  def overlap?(other)
+    unless other.is_a?(Range)
+      raise TypeError, "wrong argument type #{other.class} (expected Range)"
+    end
+    from = @__begin__
+    to = @__end__
+    other_from = other.begin
+    other_to = other.end
+    return false if Range.__empty_region__?(from, other_to, other.exclude_end?)
+    return false if Range.__empty_region__?(other_from, to, @__exclude_end__)
+    if !from.nil? && !other_from.nil?
+      order = from <=> other_from
+      return false if order.nil?
+      return true if Range.__less__(from, other_from) == 0
+    elsif from.nil? && !to.nil? && other_from.nil? && !other_to.nil?
+      return !(to <=> other_to).nil?
+    end
+    return false if Range.__empty_region__?(from, to, @__exclude_end__)
+    return false if Range.__empty_region__?(other_from, other_to, other.exclude_end?)
+    true
+  end
+
+  def self.__empty_region__?(from, to, exclude)
+    return false if from.nil? || to.nil?
+    less = __less__(from, to)
+    less > 0 || (exclude && less == 0)
+  end
+
+  # `count` with neither an argument nor a block is a size, never a walk: an
+  # open end is infinitely many, measured as CRuby's `range_count` answers it.
+  def count(*item, &block)
+    return super unless item.empty? && block.nil?
+    return Float::INFINITY if @__begin__.nil? || @__end__.nil?
+    if Range.__integer_like__?(@__begin__)
+      known = size
+      return known unless known.nil?
+    end
+    super
+  end
+
+  def to_set(*given, &block)
+    raise RangeError, "cannot convert endless range to a set" if @__end__.nil?
+    super
+  end
+
+  # CRuby's `is_integer_p`: an Integer, or anything whose `integer?` says so.
+  def self.__integer_like__?(value)
+    return true if value.is_a?(Integer)
+    value.respond_to?(:integer?) && value.integer? ? true : false
+  end
+
+  # The element count without iterating. CRuby's `range_size` — the *begin*
+  # decides, and it decides three different ways:
   #
   #   Integer begin      the count, or `Float::INFINITY` when the range is endless
-  #   Numeric or nil     TypeError "can't iterate from <Class>" — `(1.0..2.0)`,
-  #                      `(..1)` and `(1r..2r)` all raise
+  #   no `succ`          TypeError "can't iterate from <Class>" — `(1.0..2.0)`,
+  #                      `(..1)` and `(Time.now..)` all raise
   #   anything else      nil, because a generic Range has no length —
   #                      `("a".."c").size` is nil, not an error
   #
@@ -175,8 +257,8 @@ class Range
   # number, so `(1...2.5)` is also 2 while `(1...3.0)` is 2 rather than 3.
   def size
     from = @__begin__
-    unless from.is_a?(Integer)
-      if from.nil? || from.is_a?(Numeric)
+    unless from.is_a?(Integer) && (@__end__.nil? || @__end__.is_a?(Numeric))
+      unless from.respond_to?(:succ)
         raise TypeError, "can't iterate from " + from.class.to_s
       end
       return nil
@@ -184,7 +266,6 @@ class Range
     return Float::INFINITY if @__end__.nil?
     stop = @__end__
     unless stop.is_a?(Integer)
-      return nil unless stop.is_a?(Numeric)
       # An infinite end has no floor; `ruby_float_step_size` counts it as
       # infinitely many steps forward and none backward.
       if stop.is_a?(Float) && stop.infinite?
@@ -198,22 +279,41 @@ class Range
     stop < from ? 0 : stop - from + 1
   end
 
-  # Iteration, by `succ` and `<=>`, which is the protocol Ruby uses. Only
-  # `to_a` and the splat need it today; `step`, `map`, and the rest of
-  # Enumerable are still #23's.
+  # Iteration, by `succ` and `<=>`, which is the protocol Ruby uses. A String
+  # or Symbol range walks as `String#upto` does — `(:A..:z)` is 58 symbols,
+  # where `succ` alone would run from `:Z` on to `:AA` and never reach `:z`.
   #
-  # ponytail: a begin whose class has no `succ` raises `TypeError`, which is
-  # Ruby's answer for `(1.0..3.0)` and the wrong one for `("a".."c")` — Spinel
-  # has no `String#succ` yet, and this cannot tell "no succ in Ruby" from "no
-  # succ here". The upgrade is `String#succ`; nothing in this file changes.
+  # An inclusive walk stops on reaching the end, without asking the end for its
+  # `succ`: CRuby's `range_each_func`, and what lets a Time with a `succ` of its
+  # own end on one that has none.
   def each
     return to_enum(:each) { size } unless block_given?
-    unless @__begin__.respond_to?(:succ)
-      raise TypeError, "can't iterate from " + @__begin__.class.to_s
+    from = @__begin__
+    to = @__end__
+    if from.is_a?(Symbol) && (to.nil? || to.is_a?(Symbol))
+      unless to.nil?
+        from.to_s.upto(to.to_s, @__exclude_end__) { |name| yield name.to_sym }
+        return self
+      end
+    elsif from.is_a?(String) && to.is_a?(String)
+      from.upto(to, @__exclude_end__) { |text| yield text }
+      return self
     end
-    current = @__begin__
-    while @__end__.nil? || __before_end__(current)
+    unless from.respond_to?(:succ)
+      raise TypeError, "can't iterate from " + from.class.to_s
+    end
+    current = from
+    if to.nil?
+      while true
+        yield current
+        current = current.succ
+      end
+    end
+    while true
+      order = Range.__less__(current, to)
+      break if order > 0 || (@__exclude_end__ && order == 0)
       yield current
+      break if order == 0
       current = current.succ
     end
     self
@@ -230,131 +330,134 @@ class Range
     to_a
   end
 
-  # Whether iteration has not yet passed the end. Separate because `each` asks
-  # it once per step and the exclusive flag is the only difference.
-  def __before_end__(value)
-    cmp = (value <=> @__end__)
-    return false if cmp.nil?
-    @__exclude_end__ ? cmp < 0 : cmp <= 0
-  end
-
   # Range answers `min`, `max`, `reverse_each` and `include?` itself rather than
   # letting Enumerable walk it, because at an open end the answer is a rule and
   # not a search: the minimum of a beginless range is an error, not a scan, and
-  # Enumerable would either guess or iterate forever. Every case below is
-  # measured on ruby 4.0.6.
+  # Enumerable would either guess or iterate forever. CRuby's `range_min` and
+  # `range_max`.
 
   def min(*count, &block)
     raise RangeError, "cannot get the minimum of beginless range" if @__begin__.nil?
-    unless __has_members__?
-      return count.empty? ? nil : []
-    end
-    return @__begin__ if block.nil? && count.empty?
-    if @__end__.nil?
-      if block.nil? && count.size == 1
-        # An endless range is already ascending, so its smallest n are its first
-        # n — as long as it can be walked at all.
-        unless @__begin__.respond_to?(:succ)
-          raise TypeError, "can't iterate from " + @__begin__.class.to_s
-        end
-        return first(count[0])
+    unless block.nil?
+      if @__end__.nil?
+        raise RangeError, "cannot get the minimum of endless range with custom comparison method"
       end
-      raise RangeError, "cannot get the minimum of endless range with custom comparison method"
+      return super
     end
-    super
+    # The smallest n of an ascending walk are its first n.
+    return first(*count) unless count.empty?
+    return @__begin__ if @__end__.nil?
+    order = Range.__cmp__(@__begin__, @__end__)
+    return nil if order > 0 || (order == 0 && @__exclude_end__)
+    @__begin__
   end
 
   def max(*count, &block)
-    raise RangeError, "cannot get the maximum of endless range" if @__end__.nil?
-    if @__begin__.nil?
-      unless block.nil?
+    to = @__end__
+    raise RangeError, "cannot get the maximum of endless range" if to.nil?
+    from = @__begin__
+    # An excluded end that is not a number is found by walking.
+    if !block.nil? || (@__exclude_end__ && !to.is_a?(Numeric))
+      if from.nil?
         raise RangeError,
               "cannot get the maximum of beginless range with custom comparison method"
       end
-      return __last_member__ if count.empty?
-      # `max(n)` on a beginless range steps back from the end, so the end has to
-      # be something that can be stepped. Measured: the error names the nil
-      # begin, not the end that could not be decremented.
-      raise TypeError, "can't iterate from NilClass" unless @__end__.is_a?(Integer)
-      out = []
-      value = __last_member__
-      while out.size < count[0]
-        out.push(value)
-        value = value - 1
+      return super
+    end
+    unless count.empty?
+      # The largest n of an ascending walk are the first n of it reversed.
+      Range.__arity__(count, 1)
+      return __take_from__(:reverse_each, count[0])
+    end
+    order = from.nil? ? -1 : Range.__cmp__(from, to)
+    return nil if order > 0
+    return to unless @__exclude_end__
+    raise TypeError, "cannot exclude non Integer end value" unless to.is_a?(Integer)
+    return nil if order == 0
+    unless from.nil? || from.is_a?(Integer)
+      raise TypeError, "cannot exclude end value with non Integer begin value"
+    end
+    to - 1
+  end
+
+  # With a block, one walk feeds both answers — Enumerable's `min` then `max`
+  # would ask every element for its `succ` twice. Without one, CRuby's
+  # `range_minmax` is the two rules above, and walks nothing.
+  def minmax(&block)
+    return [min, max] if block.nil?
+    members = to_a
+    [members.min(&block), members.max(&block)]
+  end
+
+  # `OPTIMIZED_CMP`: `<=>` read as `rb_cmpint` reads it, so an answer of nil is
+  # the comparison failing rather than a quiet false.
+  def self.__cmp__(a, b)
+    order = a <=> b
+    if order.nil?
+      raise ArgumentError, "comparison of #{a.class} with #{b.inspect} failed"
+    end
+    return order <=> 0 if order.is_a?(Integer)
+    return 1 if order > 0
+    return -1 if order < 0
+    0
+  end
+
+  # Walking backwards needs an end to walk back from, so an endless range is a
+  # TypeError naming the nil — not the RangeError `to_a` would raise. An
+  # Integer end is counted down, beginless or not; anything else is
+  # Enumerable's walk forwards, reversed. CRuby's `range_reverse_each`.
+  def reverse_each(&block)
+    return Enumerator.__for__(self, :reverse_each, [], proc { __reverse_size__ }) if block.nil?
+    to = @__end__
+    raise TypeError, "can't iterate from NilClass" if to.nil?
+    from = @__begin__
+    if (from.nil? || from.is_a?(Integer)) && to.is_a?(Integer)
+      to = to - 1 if @__exclude_end__
+      while from.nil? || to >= from
+        block.call(to)
+        to = to - 1
       end
-      return out
-    end
-    unless __has_members__?
-      return count.empty? ? nil : []
-    end
-    # An excluded end that is not a number is found by walking: CRuby's
-    # `range_max` hands it to `Enumerable#max`. Measured.
-    if block.nil? && count.empty? && !(@__exclude_end__ && !@__end__.is_a?(Numeric))
-      return __last_member__
+      return self
     end
     super
   end
 
-  # The largest member, which is the end itself unless the end is excluded — and
-  # an excluded end can only be stepped back from when it is an Integer.
-  def __last_member__
-    return @__end__ unless @__exclude_end__
-    unless @__end__.is_a?(Integer)
-      raise TypeError, "cannot exclude non Integer end value"
-    end
-    @__end__ - 1
-  end
-
-  # Whether the range holds anything at all: `(3..1)` holds nothing.
-  def __has_members__?
-    return true if @__begin__.nil? || @__end__.nil?
-    cmp = (@__begin__ <=> @__end__)
-    return false if cmp.nil?
-    @__exclude_end__ ? cmp < 0 : cmp <= 0
-  end
-
-  # Walking backwards needs an end to walk back from, so an endless range is a
-  # TypeError naming the nil — not the RangeError `to_a` would raise.
-  def reverse_each(&block)
-    if @__end__.nil?
-      raise TypeError, "can't iterate from NilClass"
-    end
-    return Enumerator.__for__(self, :reverse_each, [], proc { __reverse_size__ }) if block.nil?
-    to_a.reverse.each { |value| block.call(value) }
-    self
-  end
-
   # The size a reversed range reports, and the errors asking for it raises.
-  #
-  # A non-numeric range has no size and says so with nil. A numeric one has to
-  # be steppable backwards from an Integer end, and when it is not the TypeError
-  # names the end's class — `(1.1..3)` raises "can't iterate from Integer".
-  # Measured; the class in the message is not the one that caused the problem.
+  # CRuby's `range_reverse_size`: an Integer begin counts as `size` does, a
+  # beginless Integer range is infinite, and a range that cannot be walked
+  # backwards says so naming the *end's* class — `(1.1..3)` raises "can't
+  # iterate from Integer". Measured; the class in the message is not the one
+  # that caused the problem.
   def __reverse_size__
-    raise TypeError, "can't iterate from NilClass" if @__end__.nil?
-    return nil unless __numeric__?
-    unless @__begin__.nil? || @__begin__.is_a?(Integer)
-      raise TypeError, "can't iterate from " + @__end__.class.to_s
+    from = @__begin__
+    to = @__end__
+    raise TypeError, "can't iterate from NilClass" if to.nil?
+    if from.is_a?(Integer)
+      return size if to.is_a?(Numeric)
+      raise TypeError, "can't iterate from " + to.class.to_s
     end
-    unless @__end__.is_a?(Integer)
-      raise TypeError, "can't iterate from " + @__end__.class.to_s
+    if from.nil?
+      return Float::INFINITY if to.is_a?(Integer)
+      raise TypeError, "can't iterate from " + to.class.to_s
     end
-    return nil if @__begin__.nil?
-    span = __last_member__ - @__begin__ + 1
-    span < 0 ? 0 : span
+    raise TypeError, "can't iterate from " + to.class.to_s unless from.respond_to?(:succ)
+    nil
   end
 
-  def __numeric__?
-    return true if @__begin__.is_a?(Numeric)
-    @__end__.is_a?(Numeric)
-  end
-
-  # `include?` is `cover?` for the ranges Ruby treats as linear — numbers — and
-  # a walk for everything else, which an open end makes impossible.
+  # `include?` is `cover?` for the ranges Ruby treats as linear — numbers and
+  # Times — and a walk for everything else, which an open end makes
+  # impossible. CRuby's `range_include_internal`. A Range argument is compared
+  # as a value, not covered: `(1..10).include?(2..3)` is false.
   def include?(value)
-    return cover?(value) if __linear__?
-    return __string_include__(value) if @__begin__.is_a?(String) && @__end__.is_a?(String)
-    if @__begin__.nil? || @__end__.nil?
+    from = @__begin__
+    to = @__end__
+    if Range.__linear__?(from) || Range.__linear__?(to) ||
+       Range.__to_integer__?(from) || Range.__to_integer__?(to)
+      return __covers__(value)
+    end
+    return __string_include__(value) if from.is_a?(String) && to.is_a?(String)
+    return true if from.nil? && to.nil? && Range.__linear__?(value)
+    if from.nil? || to.nil?
       raise TypeError, "cannot determine inclusion in beginless/endless ranges"
     end
     each { |member| return true if member == value }
@@ -380,13 +483,136 @@ class Range
     false
   end
 
-  def __linear__?
-    return false if @__begin__.nil? && @__end__.nil?
-    # An end that converts with `to_int` counts as a number, measured:
-    # CRuby's `range_include_internal` asks `rb_check_to_integer`.
-    left = @__begin__.nil? || @__begin__.is_a?(Numeric) || @__begin__.respond_to?(:to_int)
-    right = @__end__.nil? || @__end__.is_a?(Numeric) || @__end__.respond_to?(:to_int)
-    left && right
+  # CRuby's `linear_object_p`: a number or a Time, whose members are every
+  # value between the ends rather than the ones `succ` reaches.
+  def self.__linear__?(value)
+    value.is_a?(Numeric) || value.is_a?(Time)
+  end
+
+  # `rb_check_to_integer`: whether `to_int` answers an Integer. An end that
+  # converts counts as a number, measured.
+  def self.__to_integer__?(value)
+    return false unless value.respond_to?(:to_int)
+    value.to_int.is_a?(Integer)
+  end
+
+  # CRuby's `range_bsearch`. Integers are bisected directly, Floats through
+  # their bit patterns — read as signed 64-bit integers, which order the same
+  # way the Floats do — and an open Integer end is found first by doubling a
+  # stride until the block's answer changes sign.
+  def bsearch(&block)
+    from = @__begin__
+    to = @__end__
+    if Range.__fixnum__?(from) && Range.__fixnum__?(to)
+      return to_enum(:bsearch) if block.nil?
+      return Range.__bisect__(from, to, @__exclude_end__, true, nil, block)
+    elsif from.is_a?(Float) || to.is_a?(Float)
+      low = Range.__float_bits__(from.nil? ? -Float::INFINITY : Float(from))
+      high = Range.__float_bits__(to.nil? ? Float::INFINITY : Float(to))
+      return to_enum(:bsearch) if block.nil?
+      return Range.__bisect__(low, high, @__exclude_end__, true, nil, block) do |bits|
+        Range.__bits_float__(bits)
+      end
+    elsif Range.__integer_like__?(from) && Range.__integer_like__?(to)
+      return to_enum(:bsearch) if block.nil?
+      return Range.__bisect__(Integer.__to_int__(from), Integer.__to_int__(to),
+                              @__exclude_end__, false, nil, block)
+    elsif Range.__integer_like__?(from) && to.nil?
+      return to_enum(:bsearch) if block.nil?
+      stride = 1
+      satisfied = nil
+      while true
+        probe = from + stride
+        verdict = Range.__bsearch_verdict__(block.call(probe))
+        return probe if verdict == :hit
+        satisfied = probe if verdict == :satisfied
+        if verdict != :larger
+          fixnums = Range.__fixnum__?(from) && Range.__fixnum__?(probe)
+          return Range.__bisect__(from, probe, false, fixnums, fixnums ? satisfied : nil, block)
+        end
+        stride = stride * 2
+        from = probe
+      end
+    elsif from.nil? && Range.__integer_like__?(to)
+      return to_enum(:bsearch) if block.nil?
+      stride = -1
+      satisfied = nil
+      while true
+        probe = to + stride
+        verdict = Range.__bsearch_verdict__(block.call(probe))
+        return probe if verdict == :hit
+        satisfied = probe if verdict == :satisfied
+        if verdict == :larger
+          fixnums = Range.__fixnum__?(probe) && Range.__fixnum__?(to)
+          return Range.__bisect__(probe, to, false, fixnums, fixnums ? satisfied : nil, block)
+        end
+        stride = stride * 2
+        to = probe
+      end
+    end
+    raise TypeError, "can't do binary search for #{from.class}"
+  end
+
+  # The half-open interval (low, high] holds the target; it shrinks until the
+  # two are adjacent. `convert` turns a point into the value the block sees.
+  # A fixnum midpoint rounds toward zero, as C's division does, which decides
+  # which of several zero answers is found; a bignum one rounds down, as
+  # `Integer#div` does.
+  def self.__bisect__(low, high, exclude, fixnums, satisfied, block, &convert)
+    high = high + 1 unless exclude
+    low = low - 1
+    while low + 1 < high
+      if !fixnums || (high < 0) == (low < 0)
+        mid = fixnums ? low + (high - low) / 2 : (high + low).div(2)
+      else
+        sum = low + high
+        mid = sum < 0 ? -(-sum / 2) : sum / 2
+      end
+      value = convert.nil? ? mid : convert.call(mid)
+      verdict = __bsearch_verdict__(block.call(value))
+      return value if verdict == :hit
+      satisfied = value if verdict == :satisfied
+      if verdict == :larger
+        low = mid
+      else
+        high = mid
+      end
+    end
+    satisfied
+  end
+
+  # CRuby's `BSEARCH_CHECK`: what the block's answer says about the target.
+  # :hit is found, :satisfied and :smaller are at or below, :larger above.
+  def self.__bsearch_verdict__(answer)
+    if answer.is_a?(Integer)
+      return :hit if answer == 0
+      return answer < 0 ? :smaller : :larger
+    end
+    return :satisfied if true.equal?(answer)
+    return :larger unless answer
+    if answer.is_a?(Numeric)
+      order = __cmp__(answer, 0)
+      return :hit if order == 0
+      return order < 0 ? :smaller : :larger
+    end
+    raise TypeError, "wrong argument type #{answer.class} (must be numeric, true, false or nil)"
+  end
+
+  def self.__fixnum__?(value)
+    value.is_a?(Integer) && value >= -4611686018427387904 && value <= 4611686018427387903
+  end
+
+  # `double_as_int64`: a Float's bits as a signed integer, negated for a
+  # negative Float so the order is kept. `-0.0` maps where `0.0` does, so a
+  # search never yields it.
+  def self.__float_bits__(value)
+    bits = [value.abs].pack("D").unpack1("q")
+    value < 0 ? -bits : bits
+  end
+
+  def self.__bits_float__(bits)
+    return -([-bits].pack("q").unpack1("D")) if bits < 0
+    [bits].pack("q").unpack1("D")
   end
 
   def to_s
