@@ -524,6 +524,20 @@ Object.new.respond_to?(:nope)  #=> false
 ((1..5) == (1...5))  #=> false
 {}.size  #=> 0
 {}.inspect  #=> "{}"
+# A Symbol key is written as a label where its spelling can be one, quoted as
+# a label where it cannot, and the hashrocket stays for every other key. The
+# rule is the Symbol's spelling, not its class, and this block is its table.
+{b: 1, "s" => 2, 3 => 4}.inspect  #=> "{b: 1, \"s\" => 2, 3 => 4}"
+{"odd key": 1, "1": 2, "": 3, nil => 4}.inspect  #=> "{\"odd key\": 1, \"1\": 2, \"\": 3, nil => 4}"
+[:+, :-, :[], :[]=, :==, :<=>, :!, :"?", :-@].map { |k| {k => 1, 2 => 3}.inspect }  #=> ["{\"+\": 1, 2 => 3}", "{\"-\": 1, 2 => 3}", "{\"[]\": 1, 2 => 3}", "{\"[]=\": 1, 2 => 3}", "{\"==\": 1, 2 => 3}", "{\"<=>\": 1, 2 => 3}", "{\"!\": 1, 2 => 3}", "{\"?\": 1, 2 => 3}", "{\"-@\": 1, 2 => 3}"]
+[:a?, :a!, :A?, :_?, :a=, :"a?b", :"a!?", :"a??", :"a?="].map { |k| {k => 1, "a" => 2}.inspect }  #=> ["{a?: 1, \"a\" => 2}", "{a!: 1, \"a\" => 2}", "{A?: 1, \"a\" => 2}", "{_?: 1, \"a\" => 2}", "{\"a=\": 1, \"a\" => 2}", "{\"a?b\": 1, \"a\" => 2}", "{\"a!?\": 1, \"a\" => 2}", "{\"a??\": 1, \"a\" => 2}", "{\"a?=\": 1, \"a\" => 2}"]
+[:@ivar, :@@cvar, :$gvar, :$1, :Const, :_, :__, :a_1, :"9a", :"a-b", :"a.b", :":a", :"\n"].map { |k| {k => 1, 1.5 => 2}.inspect }  #=> ["{\"@ivar\": 1, 1.5 => 2}", "{\"@@cvar\": 1, 1.5 => 2}", "{\"$gvar\": 1, 1.5 => 2}", "{\"$1\": 1, 1.5 => 2}", "{Const: 1, 1.5 => 2}", "{_: 1, 1.5 => 2}", "{__: 1, 1.5 => 2}", "{a_1: 1, 1.5 => 2}", "{\"9a\": 1, 1.5 => 2}", "{\"a-b\": 1, 1.5 => 2}", "{\"a.b\": 1, 1.5 => 2}", "{\":a\": 1, 1.5 => 2}", "{\"\\n\": 1, 1.5 => 2}"]
+[:nil, :if, :self, :class, :end, :BEGIN, :__FILE__, :__method__].map { |k| {k => 1}.inspect }  #=> ["{nil: 1}", "{if: 1}", "{self: 1}", "{class: 1}", "{end: 1}", "{BEGIN: 1}", "{__FILE__: 1}", "{__method__: 1}"]
+[:é, :Été, :"é?", :"aあ", :"\u{1F600}", :"a b"].map { |k| {k => 1}.inspect }  #=> ["{é: 1}", "{Été: 1}", "{é?: 1}", "{aあ: 1}", "{😀: 1}", "{\"a b\": 1}"]
+({b: 1}.to_s)  #=> "{b: 1}"
+{1 => {b: 1}, [:c] => {"d" => :e}}.inspect  #=> "{1 => {b: 1}, [:c] => {\"d\" => :e}}"
+(h = {}; h[:x] = h; h.inspect)  #=> "{x: {...}}"
+(h = {a: 1}; h[:b] = [{c: h}]; h.inspect)  #=> "{a: 1, b: [{c: {...}}]}"
 {a: 1, b: 2}.size  #=> 2
 {a: 1, b: 2}[:a]  #=> 1
 {'x' => 9}['x']  #=> 9
@@ -666,10 +680,7 @@ defined?($~)  #=> "global-variable"
 (case({a: 1, b: 2}); in {a: Integer} then :extra_ok; end)  #=> :extra_ok
 (case({a: 1, b: 2}); in {a: Integer, **nil} then :n; else :other; end)  #=> :other
 (case({a: 5}); in {a:} then a; end)  #=> 5
-# A row whose value is a Hash cannot live here yet: Spinel's `Hash#inspect`
-# still writes `{:a => 1}` where ruby 4.0 writes `{a: 1}`, so the table would
-# be measuring that difference rather than the pattern. `**rest` binding and
-# `deconstruct_keys` are checked in `tests/eval.rs` instead.
+(case({a: 1, b: 2}); in {a: Integer, **rest} then rest.inspect; end)  #=> "{b: 2}"
 (case({}); in {} then :empty; else :no; end)  #=> :empty
 (case({a: 1}); in {} then :empty; else :no; end)  #=> :no
 (case({a: 1}); in {**} then :any; end)  #=> :any
@@ -1273,9 +1284,7 @@ case 5 when *[] then :yes else :no end  #=> :no
 # Plain `h[*k] = 2` already compiled; only the op-assign path refused, because
 # a prepared target parks one hidden local per subscript and a splat is not one
 # value. The array is parked whole and expanded by both sends, so the subscript
-# is evaluated exactly once — which is the property an op-assign target exists
-# for. Hashes are indexed rather than compared whole here: `Hash#inspect` still
-# disagrees with Ruby's 3.4 style (#216).
+# is evaluated exactly once — which is the property an op-assign target exists for.
 (h = { a: 1 }; k = [:a]; h[*k] += 1; h[:a])  #=> 2
 (h = {}; h[*[:a]] ||= 9; h[:a])  #=> 9
 (h = { a: nil }; h[*[:a]] &&= 9; h[:a])  #=> nil
