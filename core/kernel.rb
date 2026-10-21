@@ -116,8 +116,6 @@ module Kernel
     hex
   end
 
-  # The objects `inspect` is part-way through, innermost last: what stops an
-  # object that holds itself from inspecting forever. Per heap, on `Kernel`.
   # `object.class`, read without sending to it: a `BasicObject` that a
   # Kernel method is bound to has neither `class` nor the primitives.
   def self.__class_of__(object)
@@ -126,6 +124,8 @@ module Kernel
     klass
   end
 
+  # The objects `inspect` is part-way through, innermost last: what stops an
+  # object that holds itself from inspecting forever. Per heap, on `Kernel`.
   def self.__inspecting__
     @__inspecting__ ||= []
   end

@@ -11146,7 +11146,8 @@ fn native_call<'h>(
                         return Err(Error::raise("TypeError", "is not a symbol nor a string"));
                     };
                     let old = crate::shared::symbols::intern(&old);
-                    (scope.classes_mut().alias_method(id, name, old, false), old)
+                    let core = frames.last().is_some_and(|frame| is_internal(&frame.iseq));
+                    (scope.classes_mut().alias_method(id, name, old, core), old)
                 } else {
                     (scope.classes_mut().undef_method(id, name), name)
                 };

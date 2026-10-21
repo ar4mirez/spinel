@@ -93,7 +93,7 @@ class Method
 
   def super_method
     found = __reflect_method_lookup__(@__receiver__, @__found__[0], @__name__, true)
-    found.nil? ? nil : Method.__make__(@__receiver__, found[7] || @__name__, found)
+    found.nil? ? nil : Method.__make__(@__receiver__, @__found__[7] || @__name__, found)
   end
 
   # A lambda, as CRuby's is, that calls through to this and reports this
@@ -193,7 +193,7 @@ class UnboundMethod
 
   def super_method
     found = __reflect_method_lookup__(nil, @__found__[0], @__name__, true, @__from__)
-    found.nil? ? nil : UnboundMethod.__make__(found[7] || @__name__, found, @__from__)
+    found.nil? ? nil : UnboundMethod.__make__(@__found__[7] || @__name__, found, @__from__)
   end
 
   def ==(other)
@@ -354,8 +354,11 @@ class Proc
     return __proc_binding__(self) if callable.nil?
     receiver = callable[4]
     raise ArgumentError, "Can't create Binding from C level Proc" if receiver.nil?
-    __proc_binding__(self).__binding_receiver_set__(receiver)
+    Proc.__empty_binding__.__binding_receiver_set__(receiver)
   end
+
+  # A binding with no locals, for a method's proc to lend its receiver to.
+  def self.__empty_binding__ = __proc_binding__(proc {})
 
   def to_proc = self
 
@@ -416,10 +419,11 @@ class Proc
     required = arity < 0 ? -arity - 1 : arity
     wanted = given.empty? ? required : Integer.__index__(given[0])
     if lambda? && !given.empty?
-      # Optional parameters raise the most it may be asked for; a rest
-      # parameter takes the bound away.
+      # Optional parameters raise the most it may be asked for, and keywords
+      # one more, for the hash; a rest parameter takes the bound away.
       kinds = parameters.map { |pair| pair[0] }
-      most = kinds.include?(:rest) ? nil : required + kinds.count(:opt)
+      keywords = (kinds & [:key, :keyreq, :keyrest]).empty? ? 0 : 1
+      most = kinds.include?(:rest) ? nil : kinds.count(:req) + kinds.count(:opt) + keywords
       if wanted < required || (!most.nil? && wanted > most)
         expected = if most.nil? then "#{required}+"
                    elsif most == required then required.to_s
