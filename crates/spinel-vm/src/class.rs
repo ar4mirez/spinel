@@ -258,7 +258,37 @@ pub struct Method {
     ///
     /// [#18]: https://github.com/ar4mirez/spinel/issues/18
     pub visibility: Visibility,
+    /// Where the body was defined, when this entry stands in for it: `public
+    /// :m` on an inherited method, or an `alias`. `None` for a `def` here.
+    pub origin: Option<Origin>,
 }
+
+impl Method {
+    /// Where `super` in this body continues from, and under which name: the
+    /// definition it stands in for, or this entry found under `name` (#27).
+    #[must_use]
+    pub fn origin_or(&self, name: SymbolId) -> Origin {
+        self.origin.unwrap_or(Origin {
+            owner: self.owner,
+            name,
+        })
+    }
+}
+
+/// The class and name a method was defined under. CRuby keeps it on a
+/// `ZSUPER` entry, which `public :m` writes for an inherited `m`, and on an
+/// alias: `super` in the body resolves from there, under that name, so a
+/// method narrowed or renamed in a subclass still reaches what its own
+/// definition would.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Origin {
+    pub owner: ClassId,
+    pub name: SymbolId,
+}
+
+/// One method table entry: the body, the scope its `def` was written in, its
+/// visibility, and where it was defined if it stands in for another entry.
+type MethodEntry = (Value, CrefId, Visibility, Option<Origin>);
 
 /// Which end of the class a module is being spliced onto.
 ///
@@ -504,7 +534,7 @@ struct Entry {
     own: Vec<ClassId>,
     /// Index of this class within `own`. CRuby's origin iclass.
     origin: usize,
-    methods: HashMap<SymbolId, (Value, CrefId, Visibility)>,
+    methods: HashMap<SymbolId, MethodEntry>,
     /// Every class or module whose `own` holds this one. Flat, not just the
     /// direct includers, which is what lets a later `include` on a module reach
     /// everything that already mixed it in — Ruby 3.0's [Feature #9573] — in one
@@ -936,6 +966,21 @@ impl Classes {
         cref: CrefId,
         visibility: Visibility,
     ) {
+        self.define_method_from(id, name, body, cref, visibility, None);
+    }
+
+    /// [`Classes::define_method_visibly`] for a body taken from another
+    /// method — `define_method(:m, other_method)` — which remembers the name
+    /// that body was defined under.
+    pub fn define_method_from(
+        &mut self,
+        id: ClassId,
+        name: SymbolId,
+        body: Value,
+        cref: CrefId,
+        visibility: Visibility,
+        origin: Option<Origin>,
+    ) {
         // `initialize` and its siblings are private wherever and however they
         // are defined — `def`, `define_method`, a primitive. Measured.
         let visibility = if is_always_private(name) {
@@ -946,7 +991,7 @@ impl Classes {
         self.note_redefinition(id, name, Some(body), true);
         self.entry_mut(id)
             .methods
-            .insert(name, (body, cref, visibility));
+            .insert(name, (body, cref, visibility, origin));
         self.invalidate(id);
     }
 
@@ -960,10 +1005,11 @@ impl Classes {
     /// class B < A; private :m; end   # A#m stays public
     /// ```
     ///
-    /// leave `A` alone. CRuby stores a `ZSUPER` entry for this; a copy of the
-    /// body is the same answer for everything the engine can observe today,
-    /// and the difference — `B#m` not tracking a later redefinition of `A#m` —
-    /// is marked below.
+    /// leave `A` alone. CRuby stores a `ZSUPER` entry for this. Here it is a
+    /// copy of the body that remembers its [`Origin`], so `super` in it
+    /// continues from `A` rather than finding the copy's own class again
+    /// (#27); the difference left — `B#m` not tracking a later redefinition
+    /// of `A#m` — is marked below.
     //
     // ponytail: a copy, not a delegating entry. Redefining `A#m` after
     // `B` has narrowed it leaves `B#m` on the old body; CRuby re-resolves.
@@ -1006,9 +1052,10 @@ impl Classes {
             return true;
         }
         self.note_redefinition(id, name, None, false);
+        let origin = found.origin_or(name);
         self.entry_mut(id)
             .methods
-            .insert(name, (found.body, found.cref, visibility));
+            .insert(name, (found.body, found.cref, visibility, Some(origin)));
         self.invalidate(id);
         true
     }
@@ -1029,7 +1076,17 @@ impl Classes {
     ///
     /// False where nothing in the chain defines `old`, which is the caller's
     /// `NameError`.
-    pub fn alias_method(&mut self, id: ClassId, new: SymbolId, old: SymbolId) -> bool {
+    ///
+    /// `as_own` is for the core library, whose aliases stand for a C method
+    /// CRuby defines twice under two names: each is its own definition, with
+    /// no origin, so `original_name` is the name it is found by (#27).
+    pub fn alias_method(
+        &mut self,
+        id: ClassId,
+        new: SymbolId,
+        old: SymbolId,
+        as_own: bool,
+    ) -> bool {
         let Some(found) = self.lookup_for_module(id, old) else {
             return false;
         };
@@ -1040,9 +1097,10 @@ impl Classes {
             found.visibility
         };
         self.note_redefinition(id, new, Some(found.body), true);
+        let origin = (!as_own).then(|| found.origin_or(old));
         self.entry_mut(id)
             .methods
-            .insert(new, (found.body, found.cref, visibility));
+            .insert(new, (found.body, found.cref, visibility, origin));
         self.invalidate(id);
         true
     }
@@ -1072,7 +1130,7 @@ impl Classes {
         self.note_redefinition(id, name, Some(Value::UNDEF), true);
         self.entry_mut(id)
             .methods
-            .insert(name, (Value::UNDEF, CrefId::ROOT, Visibility::Public));
+            .insert(name, (Value::UNDEF, CrefId::ROOT, Visibility::Public, None));
         self.invalidate(id);
         true
     }
@@ -1175,7 +1233,7 @@ impl Classes {
     /// and ruby/spec asserts an included module's method is not the answer.
     #[must_use]
     pub fn own_method(&self, id: ClassId, name: SymbolId) -> Option<Method> {
-        let &(body, cref, visibility) = self.entry(id).methods.get(&name)?;
+        let &(body, cref, visibility, origin) = self.entry(id).methods.get(&name)?;
         // An `undef` tombstone is not a method this class owns.
         if body == Value::UNDEF {
             return None;
@@ -1185,6 +1243,7 @@ impl Classes {
             body,
             cref,
             visibility,
+            origin,
         })
     }
 
@@ -1192,7 +1251,7 @@ impl Classes {
         self.entry(id)
             .methods
             .get(&name)
-            .is_some_and(|&(body, _, _)| body != Value::UNDEF)
+            .is_some_and(|&(body, _, _, _)| body != Value::UNDEF)
     }
 
     /// Find `name` starting at `id`, through the global method cache.
@@ -1216,7 +1275,9 @@ impl Classes {
         let mut cursor = Some(id);
         while let Some(c) = cursor {
             for &owner in &self.entry(c).own {
-                if let Some(&(body, cref, visibility)) = self.entry(owner).methods.get(&name) {
+                if let Some(&(body, cref, visibility, origin)) =
+                    self.entry(owner).methods.get(&name)
+                {
                     // A tombstone `undef` wrote. Found, and therefore the walk
                     // stops — but nothing is there, so the superclass's method
                     // is not reached. That is the whole difference between
@@ -1229,6 +1290,7 @@ impl Classes {
                         body,
                         cref,
                         visibility,
+                        origin,
                     });
                 }
             }
@@ -1264,10 +1326,17 @@ impl Classes {
         // `position` rather than an assumption that `owner` is on the chain at
         // all: a method reached through a singleton class, or one whose owner
         // was since removed from the chain, has no next step and `super` is a
-        // `NoMethodError` rather than a wrong answer.
-        let at = chain.iter().position(|&c| c == owner)?;
-        for &next in &chain[at + 1..] {
-            if let Some(&(body, cref, visibility)) = self.entry(next).methods.get(&name) {
+        // `NoMethodError` rather than a wrong answer. A module's method bound
+        // to an object whose class never included it is the exception: CRuby
+        // runs it from an iclass in front of that class, so `super` searches
+        // the whole chain (#27).
+        let at = match chain.iter().position(|&c| c == owner) {
+            Some(at) => at + 1,
+            None if self.kind(owner) == Kind::Module => 0,
+            None => return None,
+        };
+        for &next in &chain[at..] {
+            if let Some(&(body, cref, visibility, origin)) = self.entry(next).methods.get(&name) {
                 // `super` past an `undef` finds nothing, measured: the chain
                 // stops here rather than continuing to the next definition.
                 if body == Value::UNDEF {
@@ -1278,17 +1347,26 @@ impl Classes {
                     body,
                     cref,
                     visibility,
+                    origin,
                 });
             }
         }
         None
     }
 
+    /// Where `super` from the method `owner` holds under `name` continues:
+    /// the definition that entry stands in for, if it stands in for one (#27).
+    #[must_use]
+    pub fn super_origin(&self, owner: ClassId, name: SymbolId) -> Origin {
+        self.method_at(owner, name)
+            .map_or(Origin { owner, name }, |method| method.origin_or(name))
+    }
+
     /// The method `owner` itself defines under `name`, with no walk: what a
     /// `Method` object captured (#27). An `undef` there is nothing.
     #[must_use]
     pub fn method_at(&self, owner: ClassId, name: SymbolId) -> Option<Method> {
-        let &(body, cref, visibility) = self.entry(owner).methods.get(&name)?;
+        let &(body, cref, visibility, origin) = self.entry(owner).methods.get(&name)?;
         if body == Value::UNDEF {
             return None;
         }
@@ -1297,6 +1375,7 @@ impl Classes {
             body,
             cref,
             visibility,
+            origin,
         })
     }
 
@@ -1464,7 +1543,7 @@ impl Classes {
             self.entry(class)
                 .methods
                 .get(&name)
-                .map(|&(body, _, _)| body == Value::UNDEF)
+                .map(|&(body, _, _, _)| body == Value::UNDEF)
         }) == Some(true)
     }
 
@@ -1475,7 +1554,7 @@ impl Classes {
         self.entry(id)
             .methods
             .iter()
-            .map(|(&name, &(body, _, visibility))| (name, body, visibility))
+            .map(|(&name, &(body, _, visibility, _))| (name, body, visibility))
             .collect()
     }
 
@@ -2046,7 +2125,7 @@ impl Classes {
             if let Some(attached) = entry.attached {
                 f(attached);
             }
-            for &(body, _, _) in entry.methods.values() {
+            for &(body, _, _, _) in entry.methods.values() {
                 f(body);
             }
             for &value in entry.constants.values() {
@@ -2820,7 +2899,7 @@ mod tests {
         // The same body back, `include`, and an alias *of* it are no change.
         classes.define_method(c, name, boot);
         classes.include(c, m).unwrap();
-        classes.alias_method(c, SymbolId(5), name);
+        classes.alias_method(c, SymbolId(5), name, false);
         assert!(classes.take_redefined().is_empty());
 
         // A visibility change and a shadowing `prepend` count, and keep the

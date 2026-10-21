@@ -1309,9 +1309,19 @@ fn reflect_native(
             let name = symbol_arg(2)?;
             let object = arg(0);
             let found = if arg(3).is_truthy() {
+                // The chain is the receiver's, or for an `UnboundMethod` that
+                // of the module it was taken from, given fifth.
                 let owner = module_arg(scope, 1)?;
-                class_of(scope, object)
-                    .and_then(|class| scope.classes().lookup_super(class, owner, name))
+                let origin = scope.classes().super_origin(owner, name);
+                let start = match call.args.get(4) {
+                    Some(&from) if from != Value::NIL => class_id_of(scope, from),
+                    _ => class_of(scope, object),
+                };
+                start.and_then(|class| {
+                    scope
+                        .classes()
+                        .lookup_super(class, origin.owner, origin.name)
+                })
             } else if arg(1) == Value::NIL {
                 class_of(scope, object).and_then(|class| scope.classes_mut().lookup(class, name))
             } else {
@@ -1331,9 +1341,14 @@ fn reflect_native(
                         }
                         _ => None,
                     };
-                    // The name it was defined under, which an alias keeps.
-                    let original = match &definition {
-                        Some(Definition::Iseq(iseq)) => Value::symbol(symbol(&iseq.name)),
+                    // The name it was defined under, which an alias keeps. A
+                    // core method stands for a C one, which knows no other
+                    // name than the one it is found by.
+                    let original = match (&definition, method.origin) {
+                        (_, Some(origin)) => Value::symbol(origin.name),
+                        (Some(Definition::Iseq(iseq)), None) if !is_internal(iseq) => {
+                            Value::symbol(symbol(&iseq.name))
+                        }
                         _ => Value::NIL,
                     };
                     let (arity, path, line) = match &definition {
@@ -1345,9 +1360,19 @@ fn reflect_native(
                                 i64::from(iseq.first_line),
                             )
                         }
-                        // The operators take what the operator takes.
-                        Some(Definition::Native(Native::NumOp(_))) => (1, None, 0),
-                        Some(Definition::Native(Native::NumNeg)) => (0, None, 0),
+                        // The operators take what the operator takes, and an
+                        // attribute what reading or writing it does.
+                        Some(Definition::Native(
+                            Native::NumOp(_)
+                            | Native::Setter(_)
+                            | Native::IvarWriter(_)
+                            | Native::StringConcat
+                            | Native::ArrayPlus
+                            | Native::ProcEq,
+                        )) => (1, None, 0),
+                        Some(Definition::Native(
+                            Native::NumNeg | Native::Getter(_) | Native::IvarReader(_),
+                        )) => (0, None, 0),
                         // Any other primitive, or a `define_method` body: no
                         // fixed count to report and no line it was written on.
                         _ => (-1, None, 0),
@@ -1376,6 +1401,9 @@ fn reflect_native(
                         // table holds: two names for one body are equal.
                         method.body,
                         original,
+                        // Where its constants resolve, which running the
+                        // definition later needs with it.
+                        cref_value(method.cref),
                     ];
                     new_array(scope, &fields)
                 }
@@ -2948,7 +2976,8 @@ pub fn eval_in(
                         let new = frames[top].symbols[new as usize];
                         let old = frames[top].symbols[old as usize];
                         let owner = scope.classes().cref_class(frames[top].cref);
-                        alias_into(scope, owner, new, old)?;
+                        let core = is_internal(&frames[top].iseq);
+                        alias_into(scope, owner, new, old, core)?;
                         if let Some(unwind) = fire_method_hook(
                             scope,
                             &mut stack,
@@ -2969,7 +2998,8 @@ pub fn eval_in(
                         let old = pop_name(&mut stack, "alias")?;
                         let new = pop_name(&mut stack, "alias")?;
                         let owner = scope.classes().cref_class(frames[top].cref);
-                        alias_into(scope, owner, new, old)?;
+                        let core = is_internal(&frames[top].iseq);
+                        alias_into(scope, owner, new, old, core)?;
                         if let Some(unwind) = fire_method_hook(
                             scope,
                             &mut stack,
@@ -3330,8 +3360,14 @@ pub fn eval_in(
                                 "super called outside of method",
                             ));
                         };
-                        call.name = name;
-                        call.target = Target::Super { owner };
+                        // An entry that stands in for another definition —
+                        // `public :m` on an inherited `m`, an alias — resumes
+                        // from that definition, under its own name.
+                        let origin = scope.classes().super_origin(owner, name);
+                        call.name = origin.name;
+                        call.target = Target::Super {
+                            owner: origin.owner,
+                        };
                         // `super` reaches a private method the way a receiverless
                         // call does.
                         call.implicit_self = true;
@@ -4066,9 +4102,14 @@ enum Target {
     /// `super`: resolve `name` from one step past `owner` in the receiver's
     /// ancestor chain, rather than from the top of it.
     Super { owner: ClassId },
-    /// A `Method` object's call (#27): the method `owner` itself defines,
-    /// whatever the receiver's class resolves the name to.
-    At { owner: ClassId },
+    /// A `Method` object's call (#27): the definition it captured from
+    /// `owner`, whatever the receiver's class resolves the name to now and
+    /// whatever `owner` has redefined it as since.
+    At {
+        owner: ClassId,
+        body: Value,
+        cref: CrefId,
+    },
 }
 
 /// One call, assembled from the stack and not yet dispatched.
@@ -4321,7 +4362,13 @@ fn dispatch<'h>(
         Target::Method | Target::Super { .. } | Target::At { .. } => {
             let class = class_of(scope, call.receiver).ok_or_else(|| no_class(call.receiver))?;
             let found = match call.target {
-                Target::At { owner } => scope.classes().method_at(owner, call.name),
+                Target::At { owner, body, cref } => Some(Method {
+                    owner,
+                    body,
+                    cref,
+                    visibility: Visibility::Public,
+                    origin: None,
+                }),
                 // `super` starts one past the class the running method was
                 // found on, which is a question about a *pair* and so cannot
                 // use the inline caches: those key off the receiver's class and
@@ -6997,15 +7044,17 @@ fn module_frozen_check(scope: &mut HandleScope<'_>, id: ClassId) -> Result<(), E
     Ok(())
 }
 
-/// `alias new old` in `owner`, however the two names were spelled.
+/// `alias new old` in `owner`, however the two names were spelled. `core` is
+/// an alias the core library makes; see [`Classes::alias_method`].
 fn alias_into<'h>(
     scope: &mut HandleScope<'h>,
     owner: ClassId,
     new: crate::value::SymbolId,
     old: crate::value::SymbolId,
+    core: bool,
 ) -> Result<(), Error> {
     module_frozen_check(scope, owner)?;
-    if !scope.classes_mut().alias_method(owner, new, old) {
+    if !scope.classes_mut().alias_method(owner, new, old, core) {
         return Err(Error::raise(
             "NameError",
             format!(
@@ -8103,6 +8152,21 @@ fn allocate_instance(scope: &mut HandleScope<'_>, id: ClassId) -> Result<Value, 
             ivar_set(scope, object, symbol("@__default_is_proc__"), Value::FALSE)?;
             Ok(object)
         }
+        // CRuby undefines `Proc`'s allocator: a `Proc` is only ever a block,
+        // which `Proc.new` copies into a subclass with `__proc_with_class__`.
+        Some(Builtin::Proc) => {
+            let name = match scope.classes().name(id) {
+                Some(name) => name.to_owned(),
+                None => {
+                    let class = scope.classes().object(id);
+                    inspect(scope, class)
+                }
+            };
+            Err(Error::raise(
+                "TypeError",
+                format!("allocator undefined for {name}"),
+            ))
+        }
         Some(other) => {
             if is_exception_class(scope, id) {
                 let class = scope.classes().object(id);
@@ -8131,7 +8195,6 @@ fn allocate_instance(scope: &mut HandleScope<'_>, id: ClassId) -> Result<Value, 
                     // hazard #13 shut the door on, so it stays shut.
                     Builtin::Class => "a class can exist uninitialised (#28)",
                     Builtin::Module => "`Module.allocate` is a `NoMethodError` in Ruby (#28)",
-                    Builtin::Proc => "`Proc.new` can be given the block it is",
                     Builtin::Regexp => "a pattern can be compiled from a run-time value",
                     Builtin::Integer | Builtin::Symbol | Builtin::Float => {
                         "the rule by which Ruby refuses it too"
@@ -8312,8 +8375,13 @@ fn native_call<'h>(
         Native::MakeProc { lambda } => {
             // Ruby 3.0 made `lambda` require a literal block: `lambda(&a_proc)`
             // raises rather than converting, because the conversion would
-            // silently change what `return` inside that proc means.
+            // silently change what `return` inside that proc means. A block
+            // that already is a lambda changes nothing, and is answered as is.
             if lambda && !call.block_is_literal && call.block != Value::NIL {
+                if proc_parts(scope, call.block).is_some_and(|(.., is_lambda, _)| is_lambda) {
+                    stack.push(call.block);
+                    return Ok(None);
+                }
                 return Err(Error::raise(
                     "ArgumentError",
                     "the lambda method requires a literal block",
@@ -8355,6 +8423,23 @@ fn native_call<'h>(
                 });
             };
             stack.push(Value::fixnum(iseq.params.arity(lambda)).expect("an arity fits a fixnum"));
+            Ok(None)
+        }
+        Native::ProcEq => {
+            let other = call.args.first().copied().unwrap_or(Value::NIL);
+            let equal = call.receiver == other || {
+                let same_class = class_of(scope, call.receiver) == class_of(scope, other);
+                match (proc_body(scope, call.receiver), proc_body(scope, other)) {
+                    (Some(a), Some(b)) if same_class && a == b => {
+                        let (this, that) = (scope.root(call.receiver), scope.root(other));
+                        [PROC_ENV, PROC_SELF, PROC_LAMBDA, PROC_BLOCK]
+                            .into_iter()
+                            .all(|slot| scope.slot(this, slot) == scope.slot(that, slot))
+                    }
+                    _ => false,
+                }
+            };
+            stack.push(bool_value(equal));
             Ok(None)
         }
         Native::BlockGiven => {
@@ -9053,16 +9138,8 @@ fn native_call<'h>(
                     needs: "a copy of its method table, which is `Module#dup`",
                 });
             }
-            // A copy of a `Proc` must be `==` to the original — CRuby special-
-            // cases it — and `Proc#==` here would be comparing six slots whose
-            // equality is not the same question. Copying the cell and letting
-            // `==` answer false would be a wrong answer, not a missing one.
-            if is_builtin(scope, call.receiver, Builtin::Proc) {
-                return Err(Error::Unknowable {
-                    what: "`dup` on a Proc",
-                    needs: "`Proc#==`, which compares bodies rather than identity",
-                });
-            }
+            // A copy of a `Proc` is its slots, so it is `==` to the original:
+            // `Proc#==` compares what they hold (#27).
             let value = dup_value(scope, call.receiver)?;
             stack.push(value);
             Ok(None)
@@ -9099,27 +9176,37 @@ fn native_call<'h>(
         }
 
         Native::MethodCall => {
-            // `__method_call__(owner, name, receiver, *args, &block)`: run the
-            // method `owner` itself defines under `name`, on `receiver`. What
-            // a `Method` object's `call` is: the body it captured, whatever a
-            // subclass has defined under that name since.
+            // `__method_call__(owner, name, receiver, body, cref, *args,
+            // &block)`: run the definition `body` that a lookup found on
+            // `owner` under `name`, on `receiver`, with constants resolving
+            // in `cref`. What a `Method` object's `call` is: the body it
+            // captured, whatever a subclass — or `owner` itself — has defined
+            // under that name since.
             let mut args = call.args.clone();
-            if args.len() < 3 {
+            if args.len() < 5 {
                 return Err(Error::raise(
                     "ArgumentError",
-                    "a method call needs an owner, a name and a receiver",
+                    "a method call needs an owner, a name, a receiver, a body and a scope",
                 ));
             }
             let owner = class_id_of(scope, args[0]);
             let name = args[1].as_symbol();
             let receiver = args[2];
+            let body = args[3];
+            let cref = cref_from(args[4]);
             let (Some(owner), Some(name)) = (owner, name) else {
                 return Err(Error::NoDispatch {
                     op: "__method_call__",
                     operands: "an owner that is not a Module, or a name that is not a Symbol",
                 });
             };
-            args.drain(..3);
+            if scope.definitions().get(body).is_none() {
+                return Err(Error::NoDispatch {
+                    op: "__method_call__",
+                    operands: "a body that is not a definition",
+                });
+            }
+            args.drain(..5);
             let forwarded = Pending {
                 cache: None,
                 name,
@@ -9128,7 +9215,7 @@ fn native_call<'h>(
                 implicit_self: true,
                 variable_call: false,
                 public_only: false,
-                target: Target::At { owner },
+                target: Target::At { owner, body, cref },
                 owner: None,
                 defined_as: None,
                 ..call
@@ -9973,14 +10060,28 @@ fn native_call<'h>(
             // A `Method` or an `UnboundMethod` gives the body it holds (#27):
             // the method its owner defines under its name.
             let mut captured = None;
+            let mut source_name = None;
             if proc_body(scope, body_value).is_none() {
                 let class = class_name(scope, body_value);
                 if class == "Method" || class == "UnboundMethod" {
-                    let owner = ivar_get(scope, body_value, symbol("@__owner__"))?;
+                    // What its lookup found: the owner, the definition and
+                    // the scope it resolves constants in, and the name it was
+                    // defined under — `Method`'s `@__found__`.
+                    let found = ivar_get(scope, body_value, symbol("@__found__"))?;
                     let held = ivar_get(scope, body_value, symbol("@__name__"))?;
-                    captured = class_id_of(scope, owner)
-                        .zip(held.as_symbol())
-                        .and_then(|(owner, held)| scope.classes().method_at(owner, held));
+                    let found = array_elements(scope, found).unwrap_or_default();
+                    let field = |index: usize| found.get(index).copied().unwrap_or(Value::NIL);
+                    source_name = field(7).as_symbol().or(held.as_symbol());
+                    let (owner, body, cref) = (field(0), field(6), field(8));
+                    if scope.definitions().get(body).is_some() {
+                        captured = class_id_of(scope, owner).map(|owner| Method {
+                            owner,
+                            body,
+                            cref: cref_from(cref),
+                            visibility: Visibility::Public,
+                            origin: None,
+                        });
+                    }
                 }
                 if captured.is_none() {
                     return Err(Error::raise(
@@ -10036,16 +10137,26 @@ fn native_call<'h>(
                     frame.scope_default == ScopeDefault::ModuleFunction
                         && scope.classes().cref_class(frame.cref) == target
                 });
-            let (body, cref) = match captured {
-                Some(method) => (method.body, method.cref),
+            // A method's body keeps the name it was defined under, which
+            // `original_name` reports and `super` in it looks for.
+            let (body, cref, origin) = match captured {
+                Some(method) => {
+                    let defined = method.origin_or(source_name.unwrap_or(symbol)).name;
+                    let origin = crate::class::Origin {
+                        owner: target,
+                        name: defined,
+                    };
+                    (method.body, method.cref, Some(origin))
+                }
                 None => (
                     scope.definitions_mut().add(Definition::Proc(body_value)),
                     call.cref,
+                    None,
                 ),
             };
             scope
                 .classes_mut()
-                .define_method_visibly(target, symbol, body, cref, visibility);
+                .define_method_from(target, symbol, body, cref, visibility, origin);
             stack.push(Value::symbol(symbol));
             if module_function {
                 let meta = scope.singleton_class(target);
@@ -10195,6 +10306,45 @@ fn native_call<'h>(
                 _ => Value::NIL,
             };
             stack.push(value);
+            Ok(None)
+        }
+
+        Native::ProcParameters => {
+            let block = call.args.first().copied().unwrap_or(Value::NIL);
+            let value = match proc_parts(scope, block) {
+                Some((iseq, ..)) => parameters_value(scope, &iseq),
+                None => Value::NIL,
+            };
+            stack.push(value);
+            Ok(None)
+        }
+
+        Native::ProcWithClass => {
+            let block = call.args.first().copied().unwrap_or(Value::NIL);
+            let class = call.args.get(1).copied().unwrap_or(Value::NIL);
+            let wanted = class_id_of(scope, class);
+            if proc_body(scope, block).is_none()
+                || wanted.is_none_or(|id| scope.classes().repr(id) != Some(Builtin::Proc))
+            {
+                return Err(Error::NoDispatch {
+                    op: "__proc_with_class__",
+                    operands: "a block that is not a Proc, or a class that is not one of Proc's",
+                });
+            }
+            let (source, class) = (scope.root(block), scope.root(class));
+            let copy = scope.alloc(Some(class), Payload::Slots, PROC_SLOTS);
+            for index in 0..PROC_SLOTS as usize {
+                let slot = scope.slot(source, index);
+                scope.set_slot(copy, index, slot);
+            }
+            stack.push(scope.get(copy));
+            Ok(None)
+        }
+
+        Native::ProcBinding => {
+            let block = call.args.first().copied().unwrap_or(Value::NIL);
+            let binding = proc_binding(scope, block)?;
+            stack.push(binding);
             Ok(None)
         }
 
@@ -10996,7 +11146,7 @@ fn native_call<'h>(
                         return Err(Error::raise("TypeError", "is not a symbol nor a string"));
                     };
                     let old = crate::shared::symbols::intern(&old);
-                    (scope.classes_mut().alias_method(id, name, old), old)
+                    (scope.classes_mut().alias_method(id, name, old, false), old)
                 } else {
                     (scope.classes_mut().undef_method(id, name), name)
                 };
@@ -11949,6 +12099,7 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         ),
         (Builtin::Proc, &["lambda?"], Native::IsLambda),
         (Builtin::Proc, &["arity"], Native::Arity),
+        (Builtin::Proc, &["==", "eql?"], Native::ProcEq),
         (
             Builtin::Kernel,
             &["send", "__send__"],
@@ -12407,6 +12558,17 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             &["__proc_location__"],
             Native::ProcLocation,
         ),
+        (
+            Builtin::Kernel,
+            &["__proc_parameters__"],
+            Native::ProcParameters,
+        ),
+        (
+            Builtin::Kernel,
+            &["__proc_with_class__"],
+            Native::ProcWithClass,
+        ),
+        (Builtin::Kernel, &["__proc_binding__"], Native::ProcBinding),
         (
             Builtin::Module,
             &["define_method"],
@@ -15295,7 +15457,20 @@ fn binding_native(
     ids: &mut u64,
 ) -> Result<Option<Unwind>, Error> {
     if let BindingOp::Capture { caller } = op {
-        let index = frames.len().checked_sub(if caller { 2 } else { 1 });
+        // The caller is the nearest frame that is not the core library's:
+        // `method(:eval).call(...)` runs `eval` from `Method#call`, which in
+        // CRuby is C and has no frame to be the caller (#27).
+        let index = if caller {
+            let below = frames.len().checked_sub(2);
+            below.map(|below| {
+                (0..=below)
+                    .rev()
+                    .find(|&at| !is_internal(&frames[at].iseq))
+                    .unwrap_or(below)
+            })
+        } else {
+            frames.len().checked_sub(1)
+        };
         let binding = capture_binding(scope, frames, index)?;
         stack.push(binding);
         return Ok(None);
@@ -15317,15 +15492,6 @@ fn capture_binding(
         });
     };
     let line = frame.iseq.line_at(frame.pc.saturating_sub(1)).unwrap_or(0);
-    let path = frame.iseq.path.clone();
-    let (iseq, env, receiver, cref, block, home) = (
-        Arc::clone(&frame.iseq),
-        frame.env,
-        frame.receiver,
-        frame.cref,
-        frame.block,
-        frame.home,
-    );
     let owner = frame
         .owner
         .map_or(Value::NIL, |owner| scope.classes().object(owner));
@@ -15336,16 +15502,60 @@ fn capture_binding(
         ScopeDefault::Protected => 2,
         ScopeDefault::ModuleFunction => 3,
     };
+    let parts = BindingParts {
+        iseq: Arc::clone(&frame.iseq),
+        env: frame.env,
+        receiver: frame.receiver,
+        cref: frame.cref,
+        block: frame.block,
+        home: frame.home,
+        owner,
+        method,
+        visibility,
+        line,
+    };
+    make_binding(scope, parts)
+}
+
+/// What a `Binding` holds, read off a frame or a `Proc`.
+struct BindingParts {
+    /// Names the innermost environment and every one outside it.
+    iseq: Arc<Iseq>,
+    env: Value,
+    receiver: Value,
+    cref: CrefId,
+    block: Value,
+    home: u64,
+    owner: Value,
+    method: Value,
+    visibility: i64,
+    line: i32,
+}
+
+fn make_binding(scope: &mut HandleScope<'_>, parts: BindingParts) -> Result<Value, Error> {
     let Some(class) = binding_class(scope) else {
         return Err(Error::Unknowable {
             what: "`binding` before `core/binding.rb` loads",
             needs: "the core library",
         });
     };
+    let BindingParts {
+        iseq,
+        env,
+        receiver,
+        cref,
+        block,
+        home,
+        owner,
+        method,
+        visibility,
+        line,
+    } = parts;
     let (env, receiver, block) = (scope.root(env), scope.root(receiver), scope.root(block));
+    let (owner, method) = (scope.root(owner), scope.root(method));
     let class = scope.root(class);
-    let file = match path {
-        Some(path) => string_new(scope, &path),
+    let file = match &iseq.path {
+        Some(path) => string_new(scope, path),
         None => Value::NIL,
     };
     let file = scope.root(file);
@@ -15364,8 +15574,8 @@ fn capture_binding(
             Value::fixnum(home as i64).expect("a frame id fits in a fixnum"),
         ),
         (BINDING_FILE, scope.get(file)),
-        (BINDING_OWNER, owner),
-        (BINDING_METHOD, method),
+        (BINDING_OWNER, scope.get(owner)),
+        (BINDING_METHOD, scope.get(method)),
         (
             BINDING_VISIBILITY,
             Value::fixnum(visibility).expect("small"),
@@ -15379,6 +15589,42 @@ fn capture_binding(
         scope.set_slot(handle, slot, value);
     }
     Ok(scope.get(handle))
+}
+
+/// `Proc#binding`: the scope the block was written in, which is the
+/// environment it captured — named by the first of the block's `outer` lists,
+/// since the block's own locals are its parameters and not the scope's.
+fn proc_binding(scope: &mut HandleScope<'_>, block: Value) -> Result<Value, Error> {
+    let Some((iseq, env, receiver, captured, _, cref)) = proc_parts(scope, block) else {
+        return Err(Error::NoDispatch {
+            op: "__proc_binding__",
+            operands: "a block that is not a Proc",
+        });
+    };
+    let (home, _) = proc_links(scope, block);
+    let mut chain = iseq.outer.iter().cloned();
+    let scope_iseq = Arc::new(Iseq {
+        name: iseq.name.clone(),
+        block_level: iseq.block_level.saturating_sub(1),
+        locals: chain.next().unwrap_or_default(),
+        outer: chain.collect(),
+        path: iseq.path.clone(),
+        first_line: iseq.first_line,
+        ..Iseq::default()
+    });
+    let parts = BindingParts {
+        iseq: scope_iseq,
+        env,
+        receiver,
+        cref,
+        block: captured,
+        home,
+        owner: Value::NIL,
+        method: Value::NIL,
+        visibility: 0,
+        line: iseq.first_line,
+    };
+    make_binding(scope, parts)
 }
 
 fn binding_op(
@@ -16010,6 +16256,13 @@ unsafe extern "C" {
     fn libm_nextafter(x: f64, toward: f64) -> f64;
 }
 
+/// Whether a body is the core library's, compiled from `core/*.rb`.
+fn is_internal(iseq: &Iseq) -> bool {
+    iseq.path
+        .as_deref()
+        .is_some_and(|path| path.starts_with("<internal:"))
+}
+
 /// `Method#parameters` for a compiled body: `[[:req, :a], [:opt, :b], ...]`,
 /// in the order they were written.
 fn parameters_value(scope: &mut HandleScope<'_>, iseq: &Iseq) -> Value {
@@ -16032,6 +16285,7 @@ fn parameters_value(scope: &mut HandleScope<'_>, iseq: &Iseq) -> Value {
                 _ => name.to_string(),
             })
             .filter(|name| !internal && !name.starts_with('%'))
+            .filter(|_| !params.unnamed.contains(&slot))
     };
     for &slot in &params.required {
         entries.push(("req", named(slot)));

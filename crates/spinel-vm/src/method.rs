@@ -74,6 +74,20 @@ pub enum Native {
     IsLambda,
     /// `Proc#arity`
     Arity,
+    /// `Proc#==` and `Proc#eql?` (#27): one body, captured in one environment,
+    /// on one `self`, and a lambda only if the other is — which is what a
+    /// `dup` keeps and two evaluations of a literal in two calls do not.
+    ProcEq,
+    /// `Kernel#__proc_parameters__(proc)` (#27): what a block's parameter list
+    /// declares, as `Method#parameters` reports it, or nil for something that
+    /// is not a compiled block. Which of them a proc makes optional is Ruby.
+    ProcParameters,
+    /// `Kernel#__proc_with_class__(proc, class)` (#27): a copy of the block
+    /// wearing `class` — what `Proc.new` on a subclass answers.
+    ProcWithClass,
+    /// `Kernel#__proc_binding__(proc)` (#27): a `Binding` of the scope a block
+    /// was written in, which `Proc#binding` answers.
+    ProcBinding,
     /// `Kernel#block_given?`
     BlockGiven,
     /// `Object#class`
@@ -255,8 +269,8 @@ pub enum Native {
     NumOp(crate::bytecode::BinOp),
     /// `Integer#-@` and `Float#-@`.
     NumNeg,
-    /// `__method_call__(owner, name, receiver, *args, &block)`: `Method#call`.
-    /// Pushes a frame.
+    /// `__method_call__(owner, name, receiver, body, cref, *args, &block)`:
+    /// `Method#call`, running the definition it captured. Pushes a frame.
     MethodCall,
     /// `__math__(:name, x, y = nil)`: one libm function, or `Float`'s
     /// truncation to an Integer. `Math`, the rounding half of `Float`, and

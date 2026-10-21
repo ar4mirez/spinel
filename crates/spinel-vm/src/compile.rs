@@ -3483,6 +3483,7 @@ impl Compiler {
                 let slot = self.slot(IT);
                 return Ok(ParamSpec {
                     required: vec![slot],
+                    unnamed: vec![slot],
                     ..ParamSpec::default()
                 });
             }
@@ -3528,7 +3529,9 @@ impl Compiler {
                         at += 1;
                         continue;
                     };
-                    spec.required.push(self.param_slot(first, at));
+                    let slot = self.param_slot(first, at);
+                    spec.required.push(slot);
+                    spec.unnamed.push(slot);
                     for (offset, name) in names.iter().enumerate().skip(1) {
                         self.param_slot(name, at + offset);
                     }
@@ -3569,7 +3572,9 @@ impl Compiler {
                         at += 1;
                         continue;
                     };
-                    spec.post.push(self.param_slot(first, at));
+                    let slot = self.param_slot(first, at);
+                    spec.post.push(slot);
+                    spec.unnamed.push(slot);
                     for (offset, name) in names.iter().enumerate().skip(1) {
                         self.param_slot(name, at + offset);
                     }

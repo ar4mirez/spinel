@@ -2,18 +2,15 @@
 #
 # Both are Ruby over two primitives. `__reflect_method_lookup__` answers what
 # a name resolves to: the module that owns it, its arity, its visibility and
-# where it was written. `__method_call__` runs the method that owner itself
-# defines, on a receiver, whatever the receiver's class would now find under
-# the name — which is what makes `super_method` and a rebound
-# `UnboundMethod` call the body they say they hold.
-#
-# ponytail: a method redefined on its owner after it was captured runs the
-# new body, because what is kept is the owner and the name, not the body.
-# CRuby keeps the body. `original_name` is the name it was found under, so an
-# alias reports itself. Both go when a Method holds its definition.
+# where it was written. `__method_call__` runs the definition the lookup
+# found, on a receiver, whatever the receiver's class — or the owner itself —
+# would now find under the name: which is what makes `super_method` and a
+# rebound `UnboundMethod` call the body they say they hold.
 
 # What a lookup found: owner, arity, visibility, path, line, parameters, the
-# definition's own number, and the name it was first defined under.
+# definition's own number, the name it was first defined under, and the
+# lexical scope its constants resolve in. The definition is what `call` runs,
+# so a method redefined after it was captured still runs the body it was.
 class Method
   def self.__make__(receiver, name, found)
     method = allocate
@@ -25,9 +22,8 @@ class Method
   def __setup__(receiver, name, found)
     @__receiver__ = receiver
     @__name__ = name
+    # Also read by `define_method`, which takes the definition it holds.
     @__found__ = found
-    # Read by `define_method`, which takes the body this names.
-    @__owner__ = found[0]
   end
 
   def __found__ = @__found__
@@ -81,7 +77,8 @@ class Method
     if @__found__[6].is_a?(Symbol)
       return @__receiver__.__send__(:method_missing, @__name__, *args, **keywords, &block)
     end
-    __method_call__(@__found__[0], @__name__, @__receiver__, *args, **keywords, &block)
+    found = @__found__
+    __method_call__(found[0], @__name__, @__receiver__, found[6], found[8], *args, **keywords, &block)
   end
   alias [] call
   alias === call
@@ -91,18 +88,20 @@ class Method
   end
 
   def unbind
-    UnboundMethod.__make__(@__name__, @__found__)
+    UnboundMethod.__make__(@__name__, @__found__, __reflect_class_of__(@__receiver__))
   end
 
   def super_method
     found = __reflect_method_lookup__(@__receiver__, @__found__[0], @__name__, true)
-    found.nil? ? nil : Method.__make__(@__receiver__, @__name__, found)
+    found.nil? ? nil : Method.__make__(@__receiver__, found[7] || @__name__, found)
   end
 
-  # A lambda, as CRuby's is, that calls through to this.
+  # A lambda, as CRuby's is, that calls through to this and reports this
+  # method's arity, parameters and location as its own.
   def to_proc
     method = self
-    lambda { |*args, **keywords, &block| method.call(*args, **keywords, &block) }
+    made = lambda { |*args, **keywords, &block| method.call(*args, **keywords, &block) }
+    Proc.__stands_for__(made, arity, parameters, source_location, nil, @__receiver__)
   end
 
   def curry(*arity)
@@ -130,24 +129,35 @@ class Method
 
   def inspect
     # A method on the receiver's own singleton class is written `recv.name`.
+    # Otherwise the class it was looked up from, and the owner beside it when
+    # that is another module: a singleton class only when it is a class's or
+    # a module's, since an object's is not where its methods were found.
     owner = @__found__[0]
-    text = __reflect_is_singleton__(owner) ? "#{@__receiver__.inspect}." : "#{owner}#"
+    if __reflect_is_singleton__(owner)
+      text = "#{@__receiver__.inspect}."
+    else
+      klass = __reflect_class_of__(@__receiver__)
+      klass = Kernel.__class_of__(@__receiver__) unless Module === @__receiver__
+      text = klass.equal?(owner) ? "#{owner}#" : "#{klass}(#{owner})#"
+    end
     Method.__inspect__("Method", text, @__name__, @__found__)
   end
   alias to_s inspect
 end
 
 class UnboundMethod
-  def self.__make__(name, found)
+  # `from` is the module the lookup started at, whose ancestry
+  # `super_method` walks: the owner's own may not hold what `super` reaches.
+  def self.__make__(name, found, from = found[0])
     method = allocate
-    method.__setup__(name, found)
+    method.__setup__(name, found, from)
     method
   end
 
-  def __setup__(name, found)
+  def __setup__(name, found, from)
     @__name__ = name
     @__found__ = found
-    @__owner__ = found[0]
+    @__from__ = from
   end
 
   def __found__ = @__found__
@@ -179,6 +189,11 @@ class UnboundMethod
 
   def bind_call(receiver, *args, **keywords, &block)
     bind(receiver).call(*args, **keywords, &block)
+  end
+
+  def super_method
+    found = __reflect_method_lookup__(nil, @__found__[0], @__name__, true, @__from__)
+    found.nil? ? nil : UnboundMethod.__make__(found[7] || @__name__, found, @__from__)
   end
 
   def ==(other)
@@ -256,7 +271,7 @@ class Module
     if found.nil?
       raise NameError.new("undefined method '#{name}' for #{Kernel.__method_home__(self)}", name, receiver: self)
     end
-    UnboundMethod.__make__(name, found)
+    UnboundMethod.__make__(name, found, self)
   end
 
   def public_instance_method(name)
@@ -268,7 +283,7 @@ class Module
     unless found[2] == :public
       raise NameError.new("method '#{name}' for #{Kernel.__method_home__(self)} is #{found[2]}", name, receiver: self)
     end
-    UnboundMethod.__make__(name, found)
+    UnboundMethod.__make__(name, found, self)
   end
 end
 
@@ -277,26 +292,106 @@ class Symbol
   # public call: `:puts.to_proc.call(1)` is a NoMethodError.
   def to_proc
     name = self
-    lambda do |*args, **keywords, &block|
+    made = lambda do |*args, **keywords, &block|
       raise ArgumentError, "no receiver given" if args.empty?
       receiver = args[0]
       rest = args.__take__(1, args.size - 1)
       receiver.public_send(name, *rest, **keywords, &block)
     end
+    Proc.__stands_for__(made, -2, [[:req], [:rest]], nil, "(&#{inspect})")
   end
 end
 
 class Proc
+  # `Proc.new { }` is the block it was given, and on a subclass a copy of it
+  # wearing the subclass — unless it already is one. `initialize` runs either
+  # way, on what is answered, and is not what makes it a Proc.
+  def self.new(*args, &block)
+    raise ArgumentError, "tried to create Proc object without a block" if block.nil?
+    made = block.instance_of?(self) ? block : __proc_with_class__(block, self)
+    made.__send__(:initialize, *args, &block)
+    made
+  end
+
+  # A proc the core library builds around another callable — `curry`, `>>`,
+  # `Method#to_proc`, `Symbol#to_proc` — is a C function's proc in CRuby. It
+  # reports what it stands for rather than the Ruby block it is here: an
+  # arity, a parameter list, a location, a label for `inspect`, and the
+  # receiver of a method, which is the only one with a binding.
+  def self.__stands_for__(made, arity, parameters, location, label = nil, receiver = nil)
+    made.__ivar_set__(:@__callable__, [arity, parameters, location, label, receiver])
+    made
+  end
+
+  alias __arity__ arity
+  private :__arity__
+
+  def arity
+    callable = @__callable__
+    callable.nil? ? __arity__ : callable[0]
+  end
+
+  # A proc's required parameters are optional ones, since it fills in what it
+  # is not given; `lambda:` says which rule to report by. A destructured
+  # parameter has no name of its own.
+  def parameters(lambda: nil)
+    callable = @__callable__
+    return callable[1].map { |pair| pair.dup } unless callable.nil?
+    list = __proc_parameters__(self)
+    strict = lambda.nil? ? lambda? : lambda
+    return list if strict
+    list.map { |pair| pair[0] == :req ? [:opt, *pair.__take__(1, pair.size - 1)] : pair }
+  end
+
+  def source_location
+    callable = @__callable__
+    location = callable.nil? ? __proc_location__(self) : callable[2]
+    location.nil? ? nil : location.dup
+  end
+
+  def binding
+    callable = @__callable__
+    return __proc_binding__(self) if callable.nil?
+    receiver = callable[4]
+    raise ArgumentError, "Can't create Binding from C level Proc" if receiver.nil?
+    __proc_binding__(self).__binding_receiver_set__(receiver)
+  end
+
+  def to_proc = self
+
+  # Equal procs are one body in one environment, so where it was written
+  # and which rule it calls by agree whenever `==` does.
+  def hash
+    [source_location, lambda?].hash
+  end
+
+  # The address, where the block was written, and `(lambda)` for a lambda —
+  # BINARY, as `Kernel#to_s` is. Measured.
+  def to_s
+    text = "#<Proc:0x" + __address__
+    callable = @__callable__
+    if callable.nil?
+      location = __proc_location__(self)
+      text = text + " " + location[0] + ":" + location[1].to_s unless location.nil?
+    else
+      # What it stands for is not where it was written: no location.
+      text = text + callable[3] unless callable[3].nil?
+    end
+    text = text + " (lambda)" if lambda?
+    (text + ">").__force_encoding__(0)
+  end
+
   # `f >> g` calls `f` and hands what it answers to `g`; `f << g` the other
   # way round. The result is a lambda when the receiver is.
   def >>(other)
     raise TypeError, "callable object is expected" unless other.respond_to?(:call)
     first = self
-    if lambda?
+    made = if lambda?
       lambda { |*args, **keywords, &block| other.call(first.call(*args, **keywords, &block)) }
     else
       proc { |*args, **keywords, &block| other.call(first.call(*args, **keywords, &block)) }
     end
+    Proc.__stands_for__(made, -1, [[:rest]], nil)
   end
 
   def <<(other)
@@ -304,11 +399,12 @@ class Proc
     last = self
     # The lambda-ness of whichever runs first, which here is `other`: anything
     # callable that is not a plain proc counts as a lambda. Measured.
-    if !other.instance_of?(Proc) || other.lambda?
+    made = if !other.instance_of?(Proc) || other.lambda?
       lambda { |*args, **keywords, &block| last.call(other.call(*args, **keywords, &block)) }
     else
       proc { |*args, **keywords, &block| last.call(other.call(*args, **keywords, &block)) }
     end
+    Proc.__stands_for__(made, -1, [[:rest]], nil)
   end
 
   # A lambda that collects arguments until it has `arity` of them and then
@@ -320,8 +416,15 @@ class Proc
     required = arity < 0 ? -arity - 1 : arity
     wanted = given.empty? ? required : Integer.__index__(given[0])
     if lambda? && !given.empty?
-      if arity >= 0 ? wanted != arity : wanted < required
-        expected = arity >= 0 ? arity.to_s : "#{required}+"
+      # Optional parameters raise the most it may be asked for; a rest
+      # parameter takes the bound away.
+      kinds = parameters.map { |pair| pair[0] }
+      most = kinds.include?(:rest) ? nil : required + kinds.count(:opt)
+      if wanted < required || (!most.nil? && wanted > most)
+        expected = if most.nil? then "#{required}+"
+                   elsif most == required then required.to_s
+                   else "#{required}..#{most}"
+                   end
         raise ArgumentError, "wrong number of arguments (given #{wanted}, expected #{expected})"
       end
     end
@@ -330,7 +433,7 @@ class Proc
 
   # Curried, it is what it was: a lambda stays one and a proc stays a proc.
   def self.__curry__(callable, wanted, held)
-    if callable.lambda?
+    made = if callable.lambda?
       lambda do |*more, &block|
         all = held + more
         all.size >= wanted ? callable.call(*all, &block) : Proc.__curry__(callable, wanted, all)
@@ -341,5 +444,6 @@ class Proc
         all.size >= wanted ? callable.call(*all, &block) : Proc.__curry__(callable, wanted, all)
       end
     end
+    Proc.__stands_for__(made, -1, [[:rest]], nil)
   end
 end

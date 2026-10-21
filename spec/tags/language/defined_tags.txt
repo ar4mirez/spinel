@@ -1,1 +1,1 @@
-fails(#27: defined? of a method on a local receiver is refused as a name a fixture may define, a refusal left from before mspec loaded the fixtures):The defined? keyword when called with a method name having a local variable as receiver calls #respond_to_missing?
+fails(#28: defined? of a method a receiver does not define answers nil without asking respond_to_missing?, which needs the instruction to call Ruby):The defined? keyword when called with a method name having a local variable as receiver calls #respond_to_missing?

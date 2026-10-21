@@ -1,1 +1,0 @@
-fails(#27: Proc and Method: an expectation about an error, newly reported since PRD 0077 let mspec's raise matcher run inside its BasicObject proxy):Proc#curry with arity argument raises an ArgumentError if called on a lambda that requires fewer than _arity_ arguments
