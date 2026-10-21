@@ -203,9 +203,10 @@ class Integer
   # Float division. `to_f` first so an Integer operand does not floor.
   #
   # An Integer divisor goes CRuby's way: both sides are reduced by their gcd,
-  # two fixnums are then converted and divided, rounding twice as CRuby does,
-  # and a bignum on either side is divided exactly and rounded once, which
-  # keeps the last bit and a quotient that only a subnormal holds.
+  # a fixnum over a divisor below 2**53 is then converted and divided,
+  # rounding twice as CRuby does, and anything wider is divided exactly and
+  # rounded once, which keeps the last bit and a quotient that only a
+  # subnormal holds.
   # Anything that is not a number is asked to `coerce`.
   def fdiv(other)
     if other.is_a?(Integer)
@@ -213,9 +214,10 @@ class Integer
       g = gcd(other)
       n = self / g
       d = other / g
-      min = -4_611_686_018_427_387_904
-      max = 4_611_686_018_427_387_903
-      return n.to_f / d.to_f if n >= min && n <= max && d >= min && d <= max
+      limit = 9_007_199_254_740_992
+      if n >= -4_611_686_018_427_387_904 && n <= 4_611_686_018_427_387_903 && d < limit && d > -limit
+        return n.to_f / d.to_f
+      end
       return Integer.__exact_fdiv__(n, d)
     end
     return to_f / other if other.is_a?(Float)
