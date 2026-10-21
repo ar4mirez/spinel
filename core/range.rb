@@ -185,6 +185,11 @@ class Range
     stop = @__end__
     unless stop.is_a?(Integer)
       return nil unless stop.is_a?(Numeric)
+      # An infinite end has no floor; `ruby_float_step_size` counts it as
+      # infinitely many steps forward and none backward.
+      if stop.is_a?(Float) && stop.infinite?
+        return stop > 0 ? Float::INFINITY : 0
+      end
       stop = stop.floor
       stop = stop - 1 if @__exclude_end__ && stop == @__end__
       return stop < from ? 0 : stop - from + 1
@@ -202,6 +207,7 @@ class Range
   # has no `String#succ` yet, and this cannot tell "no succ in Ruby" from "no
   # succ here". The upgrade is `String#succ`; nothing in this file changes.
   def each
+    return to_enum(:each) { size } unless block_given?
     unless @__begin__.respond_to?(:succ)
       raise TypeError, "can't iterate from " + @__begin__.class.to_s
     end

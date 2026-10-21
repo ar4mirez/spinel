@@ -9,12 +9,8 @@
 # forwards each yield. Ruby 4.0 removed the public `Enumerator.new(obj, meth)`
 # constructor, so `new` requires a block and `__for__` is what `to_enum` calls.
 #
-# ponytail: internal iteration only. `next`, `peek` and `rewind` hand a value
-# back to the *caller* mid-iteration, which needs the producing call to suspend
-# with its stack intact — fibers, #16. They raise NotImplementedError naming
-# that issue rather than being faked with a `to_a` buffer, because a buffer
-# answers `next` correctly and `Enumerator.new { loop { y << rand } }.next`
-# wrongly, and a wrong answer is worse than a refusal.
+# External iteration — `next`, `peek`, `rewind` — runs `each` on a Fiber; see
+# `next` below.
 class Enumerator
   include Enumerable
 
@@ -35,7 +31,11 @@ class Enumerator
   # `to_enum`'s form. Built with `allocate` rather than `new` because Ruby 4.0
   # removed the public receiver/method constructor: `Enumerator.new(1, :upto, 3)`
   # has to raise, and this has to not.
+  #
+  # An enumerator over a Lazy is a Lazy, as `rb_enumeratorize_with_size` makes
+  # it, so `lazy.each_slice(2)` and `lazy.with_object(o)` stay in the chain.
   def self.__for__(object, method, arguments, size, keywords = nil)
+    return Lazy.__over__(object, method, arguments, size, keywords) if object.is_a?(Lazy)
     allocate.__init_for__(object, method, arguments, size, keywords)
   end
 
@@ -76,9 +76,21 @@ class Enumerator
     @producer.call(Yielder.new(&block))
   end
 
-  def with_index(offset = 0)
-    return Enumerator.__for__(self, :with_index, [offset], size) unless block_given?
-    i = offset
+  # A nil offset is no offset; anything else is converted with `to_int`.
+  def with_index(offset = 0, &block)
+    return Enumerator.__for__(self, :with_index, [offset], size) if block.nil?
+    __with_index__(offset, &block)
+  end
+
+  def each_with_index(&block)
+    return Enumerator.__for__(self, :each_with_index, [], size) if block.nil?
+    __with_index__(0, &block)
+  end
+
+  # Shared by both, not reached through `with_index`: a Lazy overrides that
+  # lazily, and `lazy.each_with_index` must still iterate, as CRuby's does.
+  def __with_index__(offset)
+    i =offset.nil? ? 0 : __to_int__(offset)
     # The block's value is the value the driven method sees, and `each` answers
     # what that method answered: `[1, 2, 3].select.each_with_index { false }` is
     # `[]` because `select` got the false and returned its own empty result.
@@ -87,11 +99,6 @@ class Enumerator
       i = i + 1
       answer
     end
-  end
-
-  def each_with_index(&block)
-    return Enumerator.__for__(self, :each_with_index, [], size) if block.nil?
-    with_index(0, &block)
   end
 
   def with_object(memo)
@@ -246,6 +253,9 @@ class Enumerator
   #
   # `drop_while` packs eagerly and passes through lazily; `uniq` does the
   # reverse. Every fixture that yields one value per iteration hides both.
+  #
+  # That table is what a link's *block* sees. What a chain yields to the block
+  # that consumes it is packed, whichever link is last — see `__packs__`.
   class Lazy < Enumerator
     # The public constructor: the block is a link, called with the yielder and
     # whatever the source yielded, and writes onward with `y << v` or `y.yield`.
@@ -260,29 +270,80 @@ class Enumerator
       allocate.__init_link__(source, size, description, &setup)
     end
 
+    # The other shape: a call remembered, as `to_enum` makes it, with no link.
+    # `each` makes the call with the driving block itself, so the block's value
+    # reaches the method and the method's value comes back, as it does for an
+    # ordinary Enumerator. `Enumerable#lazy` is this over `each`, which is why
+    # `(1..3).lazy.each {}` answers the Range.
+    def self.__over__(source, method, arguments, size, keywords = nil, description = :__call__)
+      allocate.__init_over__(source, method, arguments, size, keywords, description)
+    end
+
+    def __init_over__(source, method, arguments, size, keywords, description)
+      __init_link__(source, size, nil) { nil }
+      @method = method
+      @arguments = arguments
+      @keywords = keywords.nil? || keywords.empty? ? nil : keywords
+      @description = description == :__call__ ? __call_description__ : description
+      self
+    end
+
+    def __call_description__
+      return @method.to_s if @arguments.empty? && @keywords.nil?
+      "#{@method}(#{__argument_list__})"
+    end
+
     def __init_link__(source, size, description, &setup)
       @source = source
       @size = size
       @description = description
       @setup = setup
+      @packs = false
       @object = nil
       @method = nil
-      @arguments = nil
       @producer = nil
       self
     end
 
-    # Drives the source through this run's link. The `catch` is what lets a
-    # link stop iteration from arbitrarily deep inside a nested chain, which a
-    # `return` cannot do: it would leave the link, not the enumeration.
-    def each(&block)
+    # A link a method made, as opposed to one `Lazy.new` was given. CRuby
+    # packs what such a chain yields, measured on 4.0.7: inside the chain a
+    # link sees `yield` as nil and `yield 1, 2` as two values, and the block
+    # that finally consumes it sees one value, `nil` or `[1, 2]`.
+    def __packs__
+      @packs = true
+      self
+    end
+
+    # Arguments go to the source's `each`, as the generator CRuby builds passes
+    # them; a link answers nil, as that generator does.
+    def each(*extra, &block)
       raise ArgumentError, "uninitialized enumerator" if @setup.nil?
       return self if block.nil?
+      return __drive__(extra, &block) unless @packs
+      __drive__(extra) { |*values| block.call(__pack__(values)) }
+    end
+
+    # Drives the source through this run's link, without the packing `each`
+    # does at the end, which is what a link above this one wants. The `catch`
+    # is what lets a link stop iteration from arbitrarily deep inside a nested
+    # chain, which a `return` cannot do: it would leave the link, not the
+    # enumeration.
+    def __drive__(extra, &block)
+      unless @method.nil?
+        return @source.send(@method, *@arguments, *extra, &block) if @keywords.nil?
+        return @source.send(@method, *@arguments, *extra, **@keywords, &block)
+      end
       tag = Object.new
       link = @setup.call(tag)
       yielder = Yielder.new(&block)
-      catch(tag) { @source.each { |*values| link.call(yielder, *values) } }
-      self
+      packs = @packs
+      feed = proc do |*values|
+        values = [nil] if packs && values.empty?
+        link.call(yielder, *values)
+      end
+      source = @source
+      catch(tag) { source.is_a?(Lazy) ? source.__drive__(extra, &feed) : source.each(*extra, &feed) }
+      nil
     end
 
     def size
@@ -298,7 +359,7 @@ class Enumerator
     # `eager` is the one link that leaves the chain: an ordinary Enumerator
     # over the same elements, so `map` on it answers an Array again.
     def eager
-      Enumerator.__for__(self, :each, [], @size)
+      Enumerator.allocate.__init_for__(self, :each, [], @size)
     end
 
     # The grouping methods stay lazy, measured: `lazy.chunk { }` is a Lazy.
@@ -324,21 +385,32 @@ class Enumerator
       super.lazy
     end
 
+    # The methods this class makes lazy, under the names CRuby gives their
+    # eager originals. `to_enum(:with_index, 10)` names one of them, and means
+    # the eager method — driving the lazy `with_index` would only build another
+    # link — so `to_enum` swaps the name, as `lazy_use_super_method` does.
+    ENUMERABLE_METHODS = %i[
+      map collect flat_map collect_concat select find_all filter filter_map
+      reject grep grep_v zip take take_while drop drop_while uniq with_index
+    ]
+    ENUMERABLE_METHODS.each { |name| alias_method(:"_enumerable_#{name}", name) }
+    private(*ENUMERABLE_METHODS.map { |name| :"_enumerable_#{name}" })
+
     # `to_enum` on a lazy stays lazy — that is the whole point of `eager`
     # existing as the way out. A named method is honoured rather than ignored:
     # `(1..6).lazy.to_enum(:each_slice, 2).first(2)` is `[[1, 2], [3, 4]]`, so
-    # the link drives that method and not `each`.
-    def to_enum(method = :each, *arguments)
-      source = self
-      size = method == :each && arguments.empty? ? @size : nil
-      Lazy.__link__(Enumerator.__for__(source, method, arguments, size), size, nil) do
-        ->(y, *values) { y.yield(*values) }
-      end
+    # the lazy drives that method and not `each`. Its size is the block's,
+    # called with the arguments, or not known.
+    def to_enum(method = :each, *arguments, **keywords, &size_block)
+      method = :"_enumerable_#{method}" if ENUMERABLE_METHODS.include?(method)
+      size = size_block.nil? ? nil : -> { size_block.call(*arguments) }
+      Lazy.__over__(self, method, arguments, size, keywords)
     end
 
-    def enum_for(method = :each, *arguments)
-      to_enum(method, *arguments)
+    def enum_for(method = :each, *arguments, **keywords, &size_block)
+      to_enum(method, *arguments, **keywords, &size_block)
     end
+
 
     def force(*arguments)
       to_a(*arguments)
@@ -381,11 +453,18 @@ class Enumerator
       __step__(nil, "collect_concat") { ->(y, *values) { __spread__(y, block.call(*values)) } }
     end
 
+    # `lazy_flat_map_proc`: an Array is spread, so is anything answering both
+    # `force` and `each` — a lazy — and then anything with a `to_ary`.
     def __spread__(yielder, value)
-      if value.is_a?(Array)
+      if !value.is_a?(Array) && value.respond_to?(:force) && value.respond_to?(:each)
         value.each { |element| yielder.yield(element) }
-      else
+        return
+      end
+      list = value.is_a?(Array) ? value : Array.try_convert(value)
+      if list.nil?
         yielder.yield(value)
+      else
+        list.each { |element| yielder.yield(element) }
       end
     end
 
@@ -512,9 +591,12 @@ class Enumerator
       end
     end
 
+    # Asked when the size is, not when the link is made: `lazy_take_size`.
     def __take_size__(wanted)
-      return nil if @size.nil?
-      @size < wanted ? @size : wanted
+      -> do
+        known = size
+        known.nil? || (known.is_a?(Integer) && known < wanted) ? known : wanted
+      end
     end
 
     def drop(n)
@@ -530,8 +612,12 @@ class Enumerator
     end
 
     def __drop_size__(dropped_count)
-      return nil if @size.nil?
-      @size > dropped_count ? @size - dropped_count : 0
+      -> do
+        known = size
+        next known if known.nil?
+        next known - dropped_count unless known.is_a?(Integer)
+        known > dropped_count ? known - dropped_count : 0
+      end
     end
 
     # With a block, the block runs for its side effect and its value is
@@ -540,7 +626,7 @@ class Enumerator
     # in Ruby, where mapping the block's value would answer `["X", "X", "X"]`.
     # Without a block the element becomes the `[item, index]` pair instead.
     def with_index(offset = 0, &block)
-      start = __to_int__(offset)
+      start = offset.nil? ? 0 : __to_int__(offset)
       __step__(@size, "with_index(#{start})") do
         at = start
         ->(y, *values) do
@@ -556,18 +642,38 @@ class Enumerator
       end
     end
 
-    def each_with_index(&block)
-      with_index(0, &block)
-    end
-
+    # Arrays are indexed; anything else is read with `next`, one external
+    # iterator per run, and a finished one answers nil from then on.
     def zip(*others)
-      return super if others.any? { |other| !other.is_a?(Array) }
-      __step__(@size, "zip") do
-        at = 0
+      return super if block_given?
+      description = "zip(#{others.map(&:inspect).join(", ")})"
+      if others.all? { |other| other.is_a?(Array) }
+        return __step__(@size, description) do
+          at = 0
+          ->(y, *values) do
+            row = [__pack__(values)]
+            others.each { |other| row.push(other[at]) }
+            at = at + 1
+            y.yield(row)
+          end
+        end
+      end
+      others.each do |other|
+        next if other.respond_to?(:each)
+        raise TypeError, "wrong argument type #{other.class} (must respond to :each)"
+      end
+      __step__(@size, description) do
+        iterators = nil
         ->(y, *values) do
+          iterators = others.map { |other| other.to_enum(:each) } if iterators.nil?
           row = [__pack__(values)]
-          others.each { |other| row.push(other[at]) }
-          at = at + 1
+          iterators.each do |iterator|
+            begin
+              row.push(iterator.next)
+            rescue StopIteration
+              row.push(nil)
+            end
+          end
           y.yield(row)
         end
       end
@@ -576,11 +682,11 @@ class Enumerator
     # --- plumbing --------------------------------------------------------------
 
     def __step__(size, description, &setup)
-      Lazy.__link__(self, size, description) { |_tag| setup.call }
+      Lazy.__link__(self, size, description) { |_tag| setup.call }.__packs__
     end
 
     def __bounded__(size, description, &setup)
-      Lazy.__link__(self, size, description) { |tag| setup.call(tag) }
+      Lazy.__link__(self, size, description) { |tag| setup.call(tag) }.__packs__
     end
 
     def inspect
@@ -695,7 +801,7 @@ class Enumerator
         block.call(row.dup)
         return
       end
-      @sources[at].each do |value|
+      @sources[at].each_entry do |value|
         row.push(value)
         __walk__(at + 1, row, block)
         row.pop

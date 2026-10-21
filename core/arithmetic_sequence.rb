@@ -11,9 +11,17 @@ class Enumerator
     class << self
       undef_method :new
 
+      # CRuby undefines the allocator, so only `step` and `%` make one; the
+      # original is kept under another name for `__make__`.
+      alias_method :__allocate__, :allocate
+
+      def allocate
+        raise TypeError, "allocator undefined for Enumerator::ArithmeticSequence"
+      end
+
       # `how` is what `inspect` needs to print the call that made it.
       def __make__(first, last, step, exclude_end, how)
-        allocate.__init_sequence__(first, last, step, exclude_end, how)
+        __allocate__.__init_sequence__(first, last, step, exclude_end, how)
       end
 
       # How many Float terms there are, allowing for the error the division

@@ -1054,6 +1054,40 @@ class Array
     self
   end
 
+  # Each argument gives only as many items as the receiver has, read with
+  # `each` and broken off — `take_items` — so an endless one is fine.
+  # ponytail: an empty receiver takes nothing, where `take_items` counts down
+  # past zero and reads the argument to its end, endlessly for an endless one.
+  def zip(*others)
+    wanted = size
+    lists = others.map do |other|
+      list = Array.try_convert(other)
+      next list.first(wanted) unless list.nil?
+      unless other.respond_to?(:each)
+        raise TypeError, "wrong argument type #{other.class} (must respond to :each)"
+      end
+      taken = []
+      if wanted > 0
+        other.each do |*a|
+          taken.push(__pack__(a))
+          break if taken.size >= wanted
+        end
+      end
+      taken
+    end
+    rows = []
+    each_with_index do |item, i|
+      row = [item]
+      lists.each { |list| row.push(list[i]) }
+      if block_given?
+        yield row
+      else
+        rows.push(row)
+      end
+    end
+    block_given? ? nil : rows
+  end
+
   def transpose
     return [] if empty?
     rows = map { |row| Array.__coerce__(row) }
