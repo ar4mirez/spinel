@@ -9221,6 +9221,16 @@ fn native_call<'h>(
             Ok(None)
         }
 
+        Native::AllSymbols => {
+            let symbols: Vec<Value> = crate::shared::symbols::all()
+                .into_iter()
+                .map(Value::symbol)
+                .collect();
+            let value = new_array(scope, &symbols);
+            stack.push(value);
+            Ok(None)
+        }
+
         Native::FloatToS => {
             let Some(f) = crate::float::read(scope, call.receiver) else {
                 return Err(Error::NoDispatch {
@@ -11801,6 +11811,7 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             &["length", "size"],
             Native::SymbolName { length: true },
         ),
+        (Builtin::Kernel, &["__all_symbols__"], Native::AllSymbols),
         (Builtin::Module, &["__name__"], Native::ModuleName),
         (Builtin::Kernel, &["__main__"], Native::Main),
         (Builtin::Kernel, &["__library__"], Native::Library),

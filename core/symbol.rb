@@ -56,6 +56,84 @@ class Symbol
     return nil unless other.is_a?(Symbol)
     to_s <=> other.to_s
   end
+
+  # Identity: one name is one Symbol. Ruby defines it on Symbol rather than
+  # leaving it to Comparable, so `===` can be its alias. The VM compares two
+  # symbols without sending this; it is here for `send` and reflection.
+  def ==(other)
+    equal?(other)
+  end
+  alias === ==
+
+  alias intern to_sym
+
+  # The rest read the name as a String, which is what Ruby's own definitions
+  # do (`rb_sym2str` then the String method): indexing answers a String, the
+  # case methods and `succ` answer the Symbol of the String they answer.
+  def [](*args)
+    to_s[*args]
+  end
+  alias slice []
+
+  def start_with?(*prefixes)
+    to_s.start_with?(*prefixes)
+  end
+
+  def end_with?(*suffixes)
+    to_s.end_with?(*suffixes)
+  end
+
+  def encoding
+    to_s.encoding
+  end
+
+  def capitalize(*options)
+    to_s.capitalize(*options).to_sym
+  end
+
+  def downcase(*options)
+    to_s.downcase(*options).to_sym
+  end
+
+  def upcase(*options)
+    to_s.upcase(*options).to_sym
+  end
+
+  def swapcase(*options)
+    to_s.swapcase(*options).to_sym
+  end
+
+  def succ
+    to_s.succ.to_sym
+  end
+  alias next succ
+
+  # A Symbol against anything else is nil, not a TypeError: `String#casecmp`
+  # would convert a String argument, and `:a.casecmp("a")` is nil.
+  def casecmp(other)
+    return nil unless other.is_a?(Symbol)
+    to_s.casecmp(other.to_s)
+  end
+
+  def casecmp?(other)
+    return nil unless other.is_a?(Symbol)
+    to_s.casecmp?(other.to_s)
+  end
+
+  # Every Symbol is interned in the one shared table, which this reads.
+  def self.all_symbols
+    __all_symbols__
+  end
+
+  # A Symbol exists only by being interned: `Symbol.allocate` raises and
+  # `Symbol.new` is not there to call.
+  def self.allocate
+    raise TypeError, "allocator undefined for Symbol"
+  end
+
+  class << self
+    undef_method :new
+  end
 end
 
 # `Symbol#name` is one frozen String per symbol, the same object every call —
