@@ -105,14 +105,20 @@ pub fn program_as(program: &Program, name: &str) -> Result<Iseq, Unsupported> {
 }
 
 /// A program's own file: [`program_as`], with a string literal the file says
-/// nothing about chilled (#263) — or frozen, when `frozen_default` is set, as
-/// `--enable=frozen-string-literal` asks.
+/// nothing about chilled (#263) — or frozen when `frozen_string_literal` is
+/// `Some(true)`, as `--enable=frozen-string-literal` asks, and plain when it
+/// is `Some(false)`, as `--disable=frozen-string-literal` asks.
 pub fn program_with(
     program: &Program,
     name: &str,
-    frozen_default: bool,
+    frozen_string_literal: Option<bool>,
 ) -> Result<Iseq, Unsupported> {
-    file(program, name, frozen_default, true)
+    file(
+        program,
+        name,
+        frozen_string_literal == Some(true),
+        frozen_string_literal.is_none(),
+    )
 }
 
 fn file(
@@ -165,11 +171,11 @@ pub fn eval(
     chain: Vec<Vec<Box<str>>>,
     name: &str,
     block_level: u32,
-    frozen_default: bool,
+    frozen_string_literal: Option<bool>,
 ) -> Result<Iseq, Unsupported> {
     let mut compiler = Compiler::new(name, &program.locals);
-    compiler.frozen_default = frozen_default;
-    compiler.chill = true;
+    compiler.frozen_default = frozen_string_literal == Some(true);
+    compiler.chill = frozen_string_literal.is_none();
     compiler.block_level = block_level;
     compiler.source = Some(Arc::clone(&program.source));
     compiler.scope_barrier = false;
@@ -370,8 +376,9 @@ struct Compiler {
     /// nothing about it is frozen, as one under the magic comment is.
     frozen_default: bool,
     /// A literal in a file that says nothing about it is chilled (#263). Set
-    /// for a program's own files and `eval` strings, and not for Spinel's
-    /// `core/*.rb`, whose literals stand in for CRuby's C and never warn.
+    /// for a program's own files and `eval` strings unless a flag settles
+    /// `frozen_string_literal`, and not for Spinel's `core/*.rb`, whose
+    /// literals stand in for CRuby's C and never warn.
     chill: bool,
 }
 

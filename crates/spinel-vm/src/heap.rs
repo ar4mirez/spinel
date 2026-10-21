@@ -347,8 +347,9 @@ pub struct Heap {
     /// Globals the runtime owns and a program may not assign: `$:` and
     /// `$LOADED_FEATURES` (#39). By name, so an alias is marked separately.
     readonly_globals: std::collections::HashSet<SymbolId>,
-    /// `--enable=frozen-string-literal`, for every compile after it is set.
-    frozen_string_literal: bool,
+    /// `--enable=frozen-string-literal` or `--disable=frozen-string-literal`,
+    /// for every compile after it is set; `None` when neither was given.
+    frozen_string_literal: Option<bool>,
     /// Globals whose assignment, or read, is a Ruby method rather than a cell
     /// (#268): bit 0 for writes, bit 1 for reads. `$,` warns when set, `$=`
     /// when read.
@@ -407,7 +408,7 @@ impl Heap {
             global_slots: Vec::new(),
             global_specials: HashMap::new(),
             readonly_globals: std::collections::HashSet::new(),
-            frozen_string_literal: false,
+            frozen_string_literal: None,
             hooked_globals: std::collections::HashMap::new(),
         }
     }
@@ -1086,12 +1087,13 @@ impl<'h> HandleScope<'h> {
 
     /// Install what string `eval` parses with (#38).
     /// `--enable=frozen-string-literal`: every file and `eval` compiled from
-    /// now on freezes the literals it does not say anything about.
-    pub fn set_frozen_string_literal(&mut self, on: bool) {
-        self.heap.frozen_string_literal = on;
+    /// now on freezes the literals it does not say anything about;
+    /// `--disable=frozen-string-literal` leaves them plain, not chilled.
+    pub fn set_frozen_string_literal(&mut self, setting: Option<bool>) {
+        self.heap.frozen_string_literal = setting;
     }
 
-    pub fn frozen_string_literal(&self) -> bool {
+    pub fn frozen_string_literal(&self) -> Option<bool> {
         self.heap.frozen_string_literal
     }
 
