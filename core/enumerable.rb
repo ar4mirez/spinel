@@ -127,10 +127,12 @@ module Enumerable
   # `lazy` starts a chain that defers every link until something forces it.
   # The root passes the yielded values through untouched, so a multi-value
   # `each` still reaches the first link with its original arity.
+  # Its size is the receiver's, asked when the lazy is, and whatever it is —
+  # an endless Range's is `Float::INFINITY`.
   def lazy
-    Enumerator::Lazy.__link__(self, __known_size__, nil) do
-      ->(y, *values) { y.yield(*values) }
-    end
+    source = self
+    size = -> { source.respond_to?(:size) ? source.size : nil }
+    Enumerator::Lazy.__over__(self, :each, [], size, nil, nil)
   end
 
   # `chain` reads several enumerables end to end without copying any of them.
@@ -826,22 +828,33 @@ module Enumerable
     nil
   end
 
+  # Arrays, and what converts to one, are indexed; anything else is read with
+  # `next`, so an endless argument is fine, and a finished one answers nil.
   def zip(*others)
-    lists = []
-    others.each do |other|
-      if other.is_a?(Array)
-        lists.push(other)
-      elsif other.respond_to?(:to_ary)
-        lists.push(other.to_ary)
-      else
-        lists.push(other.to_a)
+    lists = others.map { |other| Array.try_convert(other) }
+    unless lists.all?
+      lists = others.map do |other|
+        unless other.respond_to?(:each)
+          raise TypeError, "wrong argument type #{other.class} (must respond to :each)"
+        end
+        other.to_enum(:each)
       end
     end
     out = []
     i = 0
     each do |*a|
       row = [__pack__(a)]
-      lists.each { |list| row.push(list[i]) }
+      lists.each do |list|
+        if list.is_a?(Array)
+          row.push(list[i])
+        else
+          begin
+            row.push(list.next)
+          rescue StopIteration
+            row.push(nil)
+          end
+        end
+      end
       if block_given?
         yield row
       else
@@ -917,9 +930,7 @@ module Enumerable
     unless given.empty?
       raise ArgumentError, "wrong number of arguments (given #{given.size}, expected 0)"
     end
-    unless block_given?
-      raise ArgumentError, "tried to create Proc object without a block"
-    end
+    return to_enum(:chunk) { respond_to?(:size) ? size : nil } unless block_given?
     Enumerator.new do |collector|
       run = nil
       key = nil

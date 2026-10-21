@@ -185,6 +185,11 @@ class Range
     stop = @__end__
     unless stop.is_a?(Integer)
       return nil unless stop.is_a?(Numeric)
+      # An infinite end has no floor; `ruby_float_step_size` counts it as
+      # infinitely many steps forward and none backward.
+      if stop.is_a?(Float) && stop.infinite?
+        return stop > 0 ? Float::INFINITY : 0
+      end
       stop = stop.floor
       stop = stop - 1 if @__exclude_end__ && stop == @__end__
       return stop < from ? 0 : stop - from + 1
@@ -205,6 +210,7 @@ class Range
     unless @__begin__.respond_to?(:succ)
       raise TypeError, "can't iterate from " + @__begin__.class.to_s
     end
+    return to_enum(:each) { size } unless block_given?
     current = @__begin__
     while @__end__.nil? || __before_end__(current)
       yield current

@@ -176,6 +176,7 @@ module Kernel
   # makes `loop { enum.next }` end. Nothing raises it until Enumerator lands;
   # the rescue is the contract, not a placeholder.
   def loop
+    return to_enum(:loop) { Float::INFINITY } unless block_given?
     begin
       while true
         yield
