@@ -1,1 +1,0 @@
-fails(#24: Comparable: an expectation about an error, newly reported since PRD 0077 let mspec's raise matcher run inside its BasicObject proxy):Comparable#clamp raises an Argument error unless the 2 parameters are correctly ordered
