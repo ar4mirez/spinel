@@ -610,6 +610,15 @@ pub struct Classes {
     /// One list rather than a field per entry: it is empty in almost every
     /// program, and a constant read asks only whether it is.
     deprecated_constants: Vec<(ClassId, SymbolId)>,
+    /// The methods CRuby's interpreter and JIT optimise, with the body each
+    /// class owned when the core library finished loading (#320). A program
+    /// that changes one while it is still that body has disabled an
+    /// optimisation, which `Warning[:performance]` reports. Empty until
+    /// [`Classes::watch_optimised`], so the core library's own definitions
+    /// never count.
+    optimised: Vec<(ClassId, SymbolId, Option<Value>)>,
+    /// The ones changed since [`Classes::take_redefined`] last asked.
+    redefined: Vec<(ClassId, SymbolId)>,
 }
 
 /// One numeric class's operators: the bodies the VM installed, and which of
@@ -934,6 +943,7 @@ impl Classes {
         } else {
             visibility
         };
+        self.note_redefinition(id, name, Some(body), true);
         self.entry_mut(id)
             .methods
             .insert(name, (body, cref, visibility));
@@ -977,7 +987,11 @@ impl Classes {
             // chain walk below finds nothing either, because the walk stops
             // here — so `private :m` after `undef m` is Ruby's `NameError`.
             if entry.0 != Value::UNDEF {
+                let changed = entry.2 != visibility;
                 entry.2 = visibility;
+                if changed {
+                    self.note_redefinition(id, name, None, false);
+                }
                 self.invalidate(id);
                 return true;
             }
@@ -991,6 +1005,7 @@ impl Classes {
         if found.visibility == visibility {
             return true;
         }
+        self.note_redefinition(id, name, None, false);
         self.entry_mut(id)
             .methods
             .insert(name, (found.body, found.cref, visibility));
@@ -1024,6 +1039,7 @@ impl Classes {
         } else {
             found.visibility
         };
+        self.note_redefinition(id, new, Some(found.body), true);
         self.entry_mut(id)
             .methods
             .insert(new, (found.body, found.cref, visibility));
@@ -1053,6 +1069,7 @@ impl Classes {
         if self.lookup_uncached(id, name).is_none() {
             return false;
         }
+        self.note_redefinition(id, name, Some(Value::UNDEF), true);
         self.entry_mut(id)
             .methods
             .insert(name, (Value::UNDEF, CrefId::ROOT, Visibility::Public));
@@ -1143,6 +1160,9 @@ impl Classes {
 
     /// `Module#remove_method`: true if there was one to remove.
     pub fn remove_method(&mut self, id: ClassId, name: SymbolId) -> bool {
+        if self.entry(id).methods.contains_key(&name) {
+            self.note_redefinition(id, name, None, true);
+        }
         let removed = self.entry_mut(id).methods.remove(&name).is_some();
         if removed {
             self.invalidate(id);
@@ -1311,6 +1331,69 @@ impl Classes {
             .iter()
             .map(|&name| (name, entry.private_constants.contains(&name)))
             .collect()
+    }
+
+    /// Start watching the optimised methods (#320): each `(class, name)` with
+    /// the body the class owns now, which is what a later change is measured
+    /// against. Called once, when the core library has finished loading.
+    pub fn watch_optimised(&mut self, methods: &[(ClassId, SymbolId)]) {
+        self.optimised = methods
+            .iter()
+            .map(|&(class, name)| {
+                let body = self.entry(class).methods.get(&name).map(|entry| entry.0);
+                (class, name, body)
+            })
+            .collect();
+    }
+
+    /// The optimised methods a program has changed since the last call, in
+    /// the order it changed them; the caller's to warn about.
+    pub fn take_redefined(&mut self) -> Vec<(ClassId, SymbolId)> {
+        std::mem::take(&mut self.redefined)
+    }
+
+    /// Whether [`Classes::take_redefined`] has anything, for a caller that
+    /// asks after every primitive.
+    #[must_use]
+    pub fn has_redefined(&self) -> bool {
+        !self.redefined.is_empty()
+    }
+
+    /// `id`'s `name` is about to change to `body` — `None` for a change that
+    /// keeps the body, a visibility or a prepend. It counts only while the
+    /// class still owns the body it had at boot, as CRuby's
+    /// `rb_vm_check_redefinition_opt_method` asks of the entry it replaces, and
+    /// putting the same body back is no change (`define_method(:+,
+    /// instance_method(:+))`, measured). `replaces` drops the watch: the body
+    /// is gone, and nothing done to its successor counts.
+    fn note_redefinition(
+        &mut self,
+        id: ClassId,
+        name: SymbolId,
+        body: Option<Value>,
+        replaces: bool,
+    ) {
+        if self.optimised.is_empty() {
+            return;
+        }
+        let Some(at) = self
+            .optimised
+            .iter()
+            .position(|&(class, n, _)| class == id && n == name)
+        else {
+            return;
+        };
+        let original = self.optimised[at].2;
+        if self.entry(id).methods.get(&name).map(|entry| entry.0) != original {
+            return;
+        }
+        if body.is_some() && body == original {
+            return;
+        }
+        if replaces {
+            self.optimised.swap_remove(at);
+        }
+        self.redefined.push((id, name));
     }
 
     /// `Module#deprecate_constant`: reading `name` on `id` warns from now on.
@@ -1685,7 +1768,22 @@ impl Classes {
 
     /// `Module#prepend`. Splices it in front of the class, where it wins lookup.
     pub fn prepend(&mut self, target: ClassId, module: ClassId) -> Result<(), MixinError> {
-        self.mixin(target, module, Mixin::Prepend)
+        self.mixin(target, module, Mixin::Prepend)?;
+        // A prepended module that defines an optimised name puts itself in
+        // front of it. Measured: `include` does not count, and the class's
+        // own body stays, so a second `prepend` counts again.
+        let shadowed: Vec<SymbolId> = self
+            .optimised
+            .iter()
+            .filter(|&&(class, name, _)| {
+                class == target && self.lookup_uncached(module, name).is_some()
+            })
+            .map(|&(_, name, _)| name)
+            .collect();
+        for name in shadowed {
+            self.note_redefinition(target, name, None, false);
+        }
+        Ok(())
     }
 
     fn mixin(&mut self, target: ClassId, module: ClassId, how: Mixin) -> Result<(), MixinError> {
@@ -2669,6 +2767,41 @@ mod tests {
         // A qualified lookup gets no such fallback: `Outer::TOP` is a NameError
         // in Ruby, which is what removing it in 2.5 means.
         assert_eq!(scope.classes().const_get_qualified(outer, top), None);
+    }
+
+    #[test]
+    fn a_watched_method_counts_while_it_keeps_its_boot_body() {
+        let mut heap = booted();
+        let mut scope = heap.scope();
+        let c = scope.define_class(Some("C"), Some(Builtin::Object.id()));
+        let m = scope.define_module(Some("M"));
+        let name = SymbolId(4);
+        let classes = scope.classes_mut();
+        let boot = Value::fixnum(1).unwrap();
+        classes.define_method(c, name, boot);
+        classes.define_method(m, name, Value::fixnum(9).unwrap());
+        // Nothing is watched yet: the core library's own definitions.
+        assert!(!classes.has_redefined());
+        classes.watch_optimised(&[(c, name)]);
+
+        // The same body back, `include`, and an alias *of* it are no change.
+        classes.define_method(c, name, boot);
+        classes.include(c, m).unwrap();
+        classes.alias_method(c, SymbolId(5), name);
+        assert!(classes.take_redefined().is_empty());
+
+        // A visibility change and a shadowing `prepend` count, and keep the
+        // watch: the body is still the original.
+        classes.set_visibility(c, name, Visibility::Private);
+        classes.set_visibility(c, name, Visibility::Private);
+        classes.prepend(c, m).unwrap();
+        assert_eq!(classes.take_redefined(), vec![(c, name), (c, name)]);
+
+        // A new body counts once; what happens to it afterwards does not.
+        classes.define_method(c, name, Value::fixnum(2).unwrap());
+        classes.define_method(c, name, Value::fixnum(3).unwrap());
+        classes.remove_method(c, name);
+        assert_eq!(classes.take_redefined(), vec![(c, name)]);
     }
 
     // T9

@@ -231,7 +231,7 @@ class Hash
       end
       return nil
     end
-    code = __element_hash__(key)
+    code = __key_hash__(key)
     hashes = __hashes__
     while i < pairs.size
       if hashes[i] == code
@@ -244,7 +244,16 @@ class Hash
   end
 
   def __hashes__
-    @__hashes__ ||= @__pairs__.map { |pair| __element_hash__(pair[0]) }
+    @__hashes__ ||= @__pairs__.map { |pair| __key_hash__(pair[0]) }
+  end
+
+  # A key's hash code. CRuby's `any_hash` hashes nil, true, false, an Integer,
+  # a Float, a Symbol and any String itself, a String subclass's included, and
+  # calls `hash` only for the rest: a program that redefines `Integer#hash` does
+  # not move its keys (#320). Measured on ruby 4.0.7.
+  def __key_hash__(key)
+    code = __any_hash__(key)
+    code.nil? ? __element_hash__(key) : code
   end
 
   def compare_by_identity
@@ -306,7 +315,7 @@ class Hash
         key = key.dup.freeze
       end
       @__pairs__.push([key, value])
-      @__hashes__.push(__element_hash__(key)) unless @__hashes__.nil? || @__identity__
+      @__hashes__.push(__key_hash__(key)) unless @__hashes__.nil? || @__identity__
     else
       @__pairs__[at][1] = value
     end

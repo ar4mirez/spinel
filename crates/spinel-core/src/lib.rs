@@ -219,6 +219,7 @@ pub fn boot(scope: &mut HandleScope<'_>) {
             panic!("{name} raised while loading the core library: {err:?}");
         }
     }
+    interp::watch_optimised(scope);
 }
 
 /// End the program: run its `at_exit` blocks and answer its exit status —
