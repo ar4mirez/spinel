@@ -593,10 +593,13 @@ module Process
         line = File.__path_of__(args[0]) unless String === args[0]
         line ||= args[0]
         raise ArgumentError, "string contains null byte" if line.include?("\0")
-        words = line.split(/[ \t]+/).reject(&:empty?)
+        # Read as bytes, as CRuby does: a line that is not valid in its
+        # encoding is still a command.
+        bytes = line.b
+        words = bytes.split(/[ \t]+/).reject(&:empty?).map { |word| word.force_encoding(line.encoding) }
         # Measured: nothing to run is no file, not an empty shell.
         raise Errno::ENOENT, line if words.empty?
-        if line.match?(META) || words.empty? || RESERVED.include?(words[0]) || BUILTINS.include?(words[0]) || words[0].include?("=")
+        if bytes.match?(META) || words.empty? || RESERVED.include?(words[0]) || BUILTINS.include?(words[0]) || words[0].include?("=")
           return ["/bin/sh", ["sh", "-c", line], line]
         end
         return [find(words[0]), words, words[0]]
