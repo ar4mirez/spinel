@@ -99,6 +99,9 @@ later because `":)".to_f` is `0.0` where `Float(":)")` raises. That is
 [#181](https://github.com/ar4mirez/spinel/issues/181), with a tag and a
 `ponytail` comment pointing at it.
 
+#181 has since closed it: `coerce` converts through `Float()`, and the tag and the
+`ponytail` comment are gone.
+
 ## Plan
 
 1. `core/numeric.rb`: `coerce`, the ten operators, the shared helpers. — **done**
