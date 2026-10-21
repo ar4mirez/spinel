@@ -6,8 +6,8 @@
 //! and recursive only for lookaround and atomic groups, whose nesting depth is
 //! a property of the pattern rather than of the subject.
 
-use crate::Error;
 use crate::parse::{Anchor, Ast, Class, ClassItem, Perl, Posix};
+use crate::{Encoding, Error};
 
 #[derive(Debug, Clone)]
 enum Inst {
@@ -344,7 +344,7 @@ type SubMatch = (usize, Vec<Option<usize>>);
 
 impl Program {
     /// The leftmost match at or after `start`, which is what Ruby's `=~` wants.
-    pub fn find_at(&self, haystack: &str, start: usize) -> Result<Option<Match>, Error> {
+    pub fn find_at(&self, haystack: Subject<'_>, start: usize) -> Result<Option<Match>, Error> {
         let mut budget = MAX_STEPS;
         let mut at = start;
         loop {
@@ -356,13 +356,13 @@ impl Program {
             }
             // Advance one character, never one byte: a match can only begin on
             // a character boundary.
-            at += haystack[at..].chars().next().map_or(1, char::len_utf8);
+            at += haystack.next_char(at).map_or(1, |(_, width)| width);
         }
     }
 
     /// One attempt at `start` and nowhere else, with `\G` anchored there:
     /// what `StringScanner#scan` asks.
-    pub fn match_at(&self, haystack: &str, start: usize) -> Result<Option<Match>, Error> {
+    pub fn match_at(&self, haystack: Subject<'_>, start: usize) -> Result<Option<Match>, Error> {
         let mut budget = MAX_STEPS;
         self.run_from(haystack, start, start, &mut budget)
     }
@@ -372,7 +372,7 @@ impl Program {
     /// nil, and anchoring to the attempt matched the `o`.
     fn run_from(
         &self,
-        haystack: &str,
+        haystack: Subject<'_>,
         at: usize,
         start: usize,
         budget: &mut u64,
@@ -396,7 +396,7 @@ impl Program {
     #[allow(clippy::too_many_arguments)]
     fn run(
         &self,
-        haystack: &str,
+        haystack: Subject<'_>,
         mut pc: usize,
         mut sp: usize,
         anchor: usize,
@@ -415,14 +415,14 @@ impl Program {
 
                 let advanced = match &self.insts[pc] {
                     Inst::Match | Inst::Accept => return Ok(Some((sp, saves))),
-                    Inst::Char { ch, icase } => match next_char(haystack, sp) {
-                        Some((c, width)) if chars_equal(c, *ch, *icase) => {
+                    Inst::Char { ch, icase } => match haystack.next_char(sp) {
+                        Some((c, width)) if chars_equal(c, *ch, *icase, haystack.enc) => {
                             sp += width;
                             true
                         }
                         _ => false,
                     },
-                    Inst::Any { nl } => match next_char(haystack, sp) {
+                    Inst::Any { nl } => match haystack.next_char(sp) {
                         Some((c, width)) if *nl || c != '\n' => {
                             sp += width;
                             true
@@ -431,8 +431,8 @@ impl Program {
                     },
                     Inst::Class(index) => {
                         let class = &self.classes[*index as usize];
-                        match next_char(haystack, sp) {
-                            Some((c, width)) if class_matches(class, c) => {
+                        match haystack.next_char(sp) {
+                            Some((c, width)) if class_matches(class, c, haystack.enc) => {
                                 sp += width;
                                 true
                             }
@@ -518,7 +518,7 @@ impl Program {
                             saves.get(group * 2 + 1).copied().flatten(),
                         ) {
                             (Some(s), Some(e)) => {
-                                let text = haystack[s..e].to_owned();
+                                let text = haystack.bytes[s..e].to_owned();
                                 if text_at(haystack, sp, &text, *icase) {
                                     sp += text.len();
                                     true
@@ -619,7 +619,7 @@ impl Program {
     #[allow(clippy::too_many_arguments)]
     fn look_behind(
         &self,
-        haystack: &str,
+        haystack: Subject<'_>,
         start: usize,
         sp: usize,
         anchor: usize,
@@ -654,37 +654,100 @@ impl Program {
     }
 }
 
-fn next_char(haystack: &str, sp: usize) -> Option<(char, usize)> {
-    if sp >= haystack.len() {
-        return None;
+/// The bytes a pattern runs over, and how to read characters out of them.
+#[derive(Clone, Copy)]
+pub struct Subject<'a> {
+    pub bytes: &'a [u8],
+    pub enc: Encoding,
+}
+
+impl Subject<'_> {
+    fn len(&self) -> usize {
+        self.bytes.len()
     }
-    haystack[sp..].chars().next().map(|c| (c, c.len_utf8()))
+
+    fn is_char_boundary(&self, at: usize) -> bool {
+        match self.enc {
+            Encoding::Binary => true,
+            Encoding::Utf8 => self.bytes.get(at).is_none_or(|&b| b & 0xc0 != 0x80),
+        }
+    }
+
+    /// The character at `sp` and how many bytes it takes. A byte that does
+    /// not start a valid UTF-8 sequence is never handed over by the VM, which
+    /// refuses a broken subject before matching; it reads as one character
+    /// that matches nothing a pattern can spell.
+    fn next_char(&self, sp: usize) -> Option<(char, usize)> {
+        let first = *self.bytes.get(sp)?;
+        match self.enc {
+            // One character per byte, and the character *is* the byte: a
+            // binary pattern's `\xff` is U+00FF to the parser, so the two meet.
+            Encoding::Binary => Some((char::from(first), 1)),
+            Encoding::Utf8 => {
+                let width = match first {
+                    0x00..=0x7f => 1,
+                    0xc0..=0xdf => 2,
+                    0xe0..=0xef => 3,
+                    _ => 4,
+                };
+                let end = (sp + width).min(self.bytes.len());
+                match std::str::from_utf8(&self.bytes[sp..end]) {
+                    Ok(text) => text.chars().next().map(|c| (c, c.len_utf8())),
+                    Err(_) => Some(('\u{fffd}', 1)),
+                }
+            }
+        }
+    }
+
+    fn prev_char(&self, sp: usize) -> Option<char> {
+        if sp == 0 {
+            return None;
+        }
+        let mut from = sp - 1;
+        while from > 0 && !self.is_char_boundary(from) {
+            from -= 1;
+        }
+        self.next_char(from).map(|(c, _)| c)
+    }
 }
 
-fn prev_char(haystack: &str, sp: usize) -> Option<char> {
-    haystack[..sp].chars().next_back()
+/// Whether a character's classes are Unicode's or only ASCII's.
+///
+/// In a binary subject a byte past ASCII is no letter, no space and no case
+/// of anything — Onigmo's ASCII-8BIT answers false for every ctype above 0x7f
+/// — even though the `char` it is carried as here would say otherwise.
+fn ascii_only(c: char, enc: Encoding) -> bool {
+    enc == Encoding::Binary && !c.is_ascii()
 }
 
-fn chars_equal(a: char, b: char, icase: bool) -> bool {
+fn chars_equal(a: char, b: char, icase: bool, enc: Encoding) -> bool {
     if a == b {
         return true;
+    }
+    if ascii_only(a, enc) || ascii_only(b, enc) {
+        return false;
     }
     // ponytail: simple case folding, one character to one character. Full
     // Unicode folding (ß to ss) needs a table; add it with the Encoding slice.
     icase && a.to_lowercase().eq(b.to_lowercase())
 }
 
-fn text_at(haystack: &str, sp: usize, text: &str, icase: bool) -> bool {
-    let rest = &haystack[sp..];
+fn text_at(haystack: Subject<'_>, sp: usize, text: &[u8], icase: bool) -> bool {
+    let rest = &haystack.bytes[sp..];
     if !icase {
         return rest.starts_with(text);
     }
-    let mut got = rest.chars();
-    for want in text.chars() {
-        match got.next() {
-            Some(c) if chars_equal(c, want, true) => {}
+    let want = Subject {
+        bytes: text,
+        enc: haystack.enc,
+    };
+    let (mut at, mut got) = (0, sp);
+    while let Some((w, width)) = want.next_char(at) {
+        match haystack.next_char(got) {
+            Some((c, used)) if chars_equal(c, w, true, haystack.enc) => got += used,
             _ => return false,
         }
+        at += width;
     }
     true
 }
@@ -694,12 +757,13 @@ fn is_word(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_'
 }
 
-fn anchor_holds(anchor: Anchor, haystack: &str, sp: usize, start: usize) -> bool {
+fn anchor_holds(anchor: Anchor, haystack: Subject<'_>, sp: usize, start: usize) -> bool {
+    let bytes = haystack.bytes;
     match anchor {
         Anchor::TextStart => sp == 0,
         Anchor::TextEnd => sp == haystack.len(),
         Anchor::TextEndNewline => {
-            sp == haystack.len() || (haystack[sp..].starts_with('\n') && sp + 1 == haystack.len())
+            sp == haystack.len() || (bytes[sp..].starts_with(b"\n") && sp + 1 == haystack.len())
         }
         Anchor::MatchStart => sp == start,
         // Always a line anchor, with no flag to say otherwise. The difference
@@ -707,31 +771,29 @@ fn anchor_holds(anchor: Anchor, haystack: &str, sp: usize, start: usize) -> bool
         //
         // The end of the subject is not the start of a line even when the
         // subject ends in a newline: "does not match ^ after trailing \n".
-        Anchor::LineStart => {
-            sp == 0 || (sp < haystack.len() && prev_char(haystack, sp) == Some('\n'))
-        }
-        Anchor::LineEnd => sp == haystack.len() || haystack[sp..].starts_with('\n'),
+        Anchor::LineStart => sp == 0 || (sp < haystack.len() && bytes[sp - 1] == b'\n'),
+        Anchor::LineEnd => sp == haystack.len() || bytes[sp..].starts_with(b"\n"),
         Anchor::WordBoundary | Anchor::NotWordBoundary => {
-            let before = prev_char(haystack, sp).is_some_and(is_word);
-            let after = next_char(haystack, sp).is_some_and(|(c, _)| is_word(c));
+            let before = haystack.prev_char(sp).is_some_and(is_word);
+            let after = haystack.next_char(sp).is_some_and(|(c, _)| is_word(c));
             (before != after) == matches!(anchor, Anchor::WordBoundary)
         }
     }
 }
 
-fn class_matches(class: &Class, c: char) -> bool {
+fn class_matches(class: &Class, c: char, enc: Encoding) -> bool {
     let mut held = class
         .items
         .iter()
-        .any(|item| item_matches(item, c, class.icase));
+        .any(|item| item_matches(item, c, class.icase, enc));
     // Case folding inside a class: `[a]` under `/i` also matches `A`.
-    if !held && class.icase {
+    if !held && class.icase && !ascii_only(c, enc) {
         held = c.to_lowercase().chain(c.to_uppercase()).any(|folded| {
             folded != c
                 && class
                     .items
                     .iter()
-                    .any(|item| item_matches(item, folded, false))
+                    .any(|item| item_matches(item, folded, false, enc))
         });
     }
     // `[a-z&&[^b]]`: every intersected branch has to agree, and the `^`
@@ -739,26 +801,33 @@ fn class_matches(class: &Class, c: char) -> bool {
     // precedence, and the reason `[a-z&&[^d-i&&[^d-f]]]+` matches "abcdef"
     // rather than "abc" — `regexp_spec.rb`, "supports character class
     // composition".
-    held = held && class.intersect.iter().all(|other| class_matches(other, c));
+    held = held
+        && class
+            .intersect
+            .iter()
+            .all(|other| class_matches(other, c, enc));
     if class.negated {
         held = !held;
     }
     held
 }
 
-fn item_matches(item: &ClassItem, c: char, icase: bool) -> bool {
+fn item_matches(item: &ClassItem, c: char, icase: bool, enc: Encoding) -> bool {
     match item {
-        ClassItem::Char(want) => chars_equal(c, *want, icase),
+        ClassItem::Char(want) => chars_equal(c, *want, icase, enc),
         ClassItem::Range(low, high) => {
             (*low..=*high).contains(&c)
                 || (icase
+                    && !ascii_only(c, enc)
                     && c.to_lowercase()
                         .chain(c.to_uppercase())
                         .any(|f| (*low..=*high).contains(&f)))
         }
         ClassItem::Perl(kind, negated) => perl_matches(*kind, c) != *negated,
-        ClassItem::Posix(kind, negated) => posix_matches(*kind, c) != *negated,
-        ClassItem::Nested(inner) => class_matches(inner, c),
+        ClassItem::Posix(kind, negated) => {
+            (!ascii_only(c, enc) && posix_matches(*kind, c)) != *negated
+        }
+        ClassItem::Nested(inner) => class_matches(inner, c, enc),
     }
 }
 

@@ -281,6 +281,13 @@ pub struct Heap {
     /// check: an error swallowed in Rust leaves its note behind, and a later
     /// raise with different text must not inherit it.
     name_error: Option<(String, Value, Value)>,
+    /// A warning a primitive owes, said once the primitive returns (#222).
+    ///
+    /// Saying one is a call to `Kernel#__warning__`, which needs the frame
+    /// stack a primitive does not see from deep inside a helper — the regexp
+    /// matcher is reached from half a dozen of them. So the helper leaves the
+    /// text here and the dispatcher, which has the stack, says it.
+    pending_warning: Option<String>,
     /// `main`, the top level's `self`: one per heap, so every evaluation —
     /// the core library's and each of the program's — shares it, and the
     /// singleton methods `core/object.rb` gives it (`to_s`, `include`) are
@@ -378,6 +385,7 @@ impl Heap {
             last_match: Value::NIL,
             side_ivars: HashMap::new(),
             name_error: None,
+            pending_warning: None,
             errinfo: Value::NIL,
             main: Value::NIL,
             parser: None,
@@ -443,6 +451,14 @@ impl Heap {
     pub fn take_name_error(&mut self, message: &str) -> Option<(Value, Value)> {
         let (text, name, receiver) = self.name_error.take()?;
         (text == message).then_some((name, receiver))
+    }
+
+    pub fn set_pending_warning(&mut self, message: String) {
+        self.pending_warning = Some(message);
+    }
+
+    pub fn take_pending_warning(&mut self) -> Option<String> {
+        self.pending_warning.take()
     }
 
     /// `$!`: the exception being handled, or nil.
@@ -1045,6 +1061,14 @@ impl<'h> HandleScope<'h> {
 
     pub fn take_name_error(&mut self, message: &str) -> Option<(Value, Value)> {
         self.heap.take_name_error(message)
+    }
+
+    pub fn set_pending_warning(&mut self, message: String) {
+        self.heap.set_pending_warning(message);
+    }
+
+    pub fn take_pending_warning(&mut self) -> Option<String> {
+        self.heap.take_pending_warning()
     }
 
     pub fn errinfo(&self) -> Value {

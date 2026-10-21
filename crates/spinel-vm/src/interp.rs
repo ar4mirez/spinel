@@ -1058,22 +1058,14 @@ fn unknown_encoding(what: &'static str) -> Error {
     }
 }
 
-/// `Encoding::CompatibilityError`'s message: CRuby names BINARY as
-/// `BINARY (ASCII-8BIT)` there, as `inspect` does.
+/// `Encoding::CompatibilityError`'s message for two Strings.
 fn incompatible_encodings(left: u8, right: u8) -> Error {
-    let show = |index: u8| {
-        if index == crate::strings::BINARY {
-            "BINARY (ASCII-8BIT)".to_owned()
-        } else {
-            crate::strings::name(index).to_owned()
-        }
-    };
     Error::raise(
         "Encoding::CompatibilityError",
         format!(
             "incompatible character encodings: {} and {}",
-            show(left),
-            show(right)
+            encoding_label(left),
+            encoding_label(right)
         ),
     )
 }
@@ -2684,7 +2676,24 @@ pub fn eval_in(
                         // first. For an immediate, a String or an Array, `===` is
                         // `==` and the fast path answers it.
                         match case_eq(scope, condition, subject) {
-                            Ok(answer) => stack.push(bool_value(answer)),
+                            Ok(answer) => {
+                                stack.push(bool_value(answer));
+                                // `when /a/n` against UTF-8 text warns, as
+                                // any other match would.
+                                if let Some(message) = scope.take_pending_warning()
+                                    && let Some(unwind) = vm_warn(
+                                        scope,
+                                        &mut stack,
+                                        &mut frames,
+                                        proc_class,
+                                        &mut ids,
+                                        &message,
+                                        false,
+                                    )?
+                                {
+                                    return Ok(Step::Unwind(unwind));
+                                }
+                            }
                             // The send behind the fast path, the same one
                             // `Insn::BinOp` grew: a `Module`, a `Range` or a `Proc`
                             // in condition position means something other than
@@ -2827,13 +2836,15 @@ pub fn eval_in(
                     // them one.
                     Insn::NewRegexp(options) => {
                         let source = stack.pop().expect("newregexp on an empty stack");
-                        let Some(text) = string_text(scope, source) else {
+                        let (Some(bytes), Some(encoding)) =
+                            (string_bytes(scope, source), string_encoding(scope, source))
+                        else {
                             return Err(Error::NoDispatch {
                                 op: "a regexp literal",
                                 operands: "an interpolation that is not a String",
                             });
                         };
-                        let value = regexp_new(scope, &text, options)?;
+                        let value = regexp_new(scope, &bytes, encoding, options)?;
                         stack.push(value);
                     }
 
@@ -2859,13 +2870,15 @@ pub fn eval_in(
                         if let Some(cached) = scope.regexps().once_cached(&iseq, site) {
                             stack.push(cached);
                         } else {
-                            let Some(text) = string_text(scope, source) else {
+                            let (Some(bytes), Some(encoding)) =
+                                (string_bytes(scope, source), string_encoding(scope, source))
+                            else {
                                 return Err(Error::NoDispatch {
                                     op: "a regexp literal",
                                     operands: "an interpolation that is not a String",
                                 });
                             };
-                            let value = regexp_new(scope, &text, options)?;
+                            let value = regexp_new(scope, &bytes, encoding, options)?;
                             scope.regexps_mut().cache_once(&iseq, site, value);
                             stack.push(value);
                         }
@@ -4447,6 +4460,12 @@ fn dispatch<'h>(
                             attach_backtrace_from(scope, frames, exception, Some(label));
                             Ok(Some(Unwind::Exception(exception)))
                         }
+                        Ok(None) => match scope.take_pending_warning() {
+                            Some(text) => {
+                                vm_warn(scope, stack, frames, proc_class, ids, &text, false)
+                            }
+                            None => Ok(None),
+                        },
                         other => other,
                     }
                 }
@@ -11245,22 +11264,20 @@ fn native_call<'h>(
                 });
             };
             let subject = first_arg(&call);
-            let Some(text) = string_text(scope, subject) else {
-                return Err(Error::Unknowable {
-                    what: "matching a regexp against a string that is not UTF-8 text",
-                    needs: "a regex engine that reads bytes in the string's encoding (#33)",
-                });
-            };
+            let engine = regexp_match_encoding(scope, call.receiver, subject)?;
+            let text = string_bytes(scope, subject).unwrap_or_default();
             let at = nth_arg(&call, 1).as_fixnum().unwrap_or(0).max(0) as usize;
             let anchored = nth_arg(&call, 2).is_truthy();
-            if at > text.len() || !text.is_char_boundary(at) {
+            let boundary = engine == spinel_regex::Encoding::Binary
+                || text.get(at).is_none_or(|&b| b & 0xc0 != 0x80);
+            if at > text.len() || !boundary {
                 stack.push(Value::NIL);
                 return Ok(None);
             }
             let found = if anchored {
-                program.match_at(&text, at)
+                program.match_in(&text, at, engine)
             } else {
-                program.find_at(&text, at)
+                program.find_in(&text, at, engine)
             }
             .map_err(|e| regexp_error(&e))?;
             let value = match found {
@@ -11358,6 +11375,23 @@ fn native_call<'h>(
                     operands: "a receiver that is not a Regexp",
                 });
             };
+            // A binary pattern's source reaches the engine a byte to a
+            // character; shown, a byte past ASCII is its escape, as CRuby
+            // shows it: `/\xE9/n`.
+            let source: String = match program.encoding() {
+                spinel_regex::Encoding::Binary => program
+                    .source()
+                    .chars()
+                    .map(|c| {
+                        if c.is_ascii() {
+                            c.to_string()
+                        } else {
+                            format!("\\x{:02X}", u32::from(c))
+                        }
+                    })
+                    .collect(),
+                spinel_regex::Encoding::Utf8 => program.source().to_owned(),
+            };
             let text = if inspect {
                 // `%r{/foo/bar}.inspect` is `/\/foo\/bar/`: a slash that the
                 // source did not escape has to be escaped now, or the result
@@ -11372,7 +11406,7 @@ fn native_call<'h>(
                 };
                 format!(
                     "/{}/{}{}",
-                    escape_slashes(program.source()),
+                    escape_slashes(&source),
                     program.flags().to_letters(),
                     if options & 32 != 0 { "n" } else { "" }
                 )
@@ -11382,7 +11416,7 @@ fn native_call<'h>(
                 let on = program.flags().to_letters();
                 let off: String = "mix".chars().filter(|c| !on.contains(*c)).collect();
                 let dash = if off.is_empty() { "" } else { "-" };
-                format!("(?{on}{dash}{off}:{})", program.source())
+                format!("(?{on}{dash}{off}:{source})")
             };
             let value = string_new(scope, &text);
             stack.push(value);
@@ -13749,6 +13783,80 @@ fn names_non_ascii(source: &str) -> bool {
     false
 }
 
+/// Whether an ASCII regexp source has a `\xHH` or octal escape for a byte past
+/// ASCII, which under `/n` makes the pattern BINARY: `/\xff/n.encoding`.
+fn escapes_a_byte(source: &[u8]) -> bool {
+    let mut at = 0;
+    while at + 1 < source.len() {
+        if source[at] != b'\\' {
+            at += 1;
+            continue;
+        }
+        let rest = &source[at + 1..];
+        let byte = if rest[0] == b'x' {
+            let hex: Vec<u8> = rest[1..]
+                .iter()
+                .take(2)
+                .copied()
+                .take_while(u8::is_ascii_hexdigit)
+                .collect();
+            std::str::from_utf8(&hex)
+                .ok()
+                .and_then(|h| u32::from_str_radix(h, 16).ok())
+        } else {
+            let octal: Vec<u8> = rest
+                .iter()
+                .take(3)
+                .copied()
+                .take_while(|b| (b'0'..=b'7').contains(b))
+                .collect();
+            (octal.len() == 3)
+                .then(|| std::str::from_utf8(&octal).ok())
+                .flatten()
+                .and_then(|o| u32::from_str_radix(o, 8).ok())
+        };
+        if byte.is_some_and(|b| b > 0x7f) {
+            return true;
+        }
+        at += 2;
+    }
+    false
+}
+
+/// A regexp's encoding and the options it answers, from its source and the
+/// options it was asked for: CRuby's `rb_reg_initialize`, measured (#222).
+///
+/// A modifier fixes the encoding outright. `/n` is US-ASCII for a source that
+/// is ASCII through and through and BINARY, fixed, for one that names a byte
+/// past it. `FIXEDENCODING` asked for keeps the source String's encoding. And
+/// otherwise an ASCII source is US-ASCII and free to match in any
+/// ASCII-compatible encoding, while one past ASCII is fixed to its own.
+fn regexp_encoding(source: &[u8], encoding: u8, options: i64, fixed: Option<u8>) -> (u8, i64) {
+    use crate::regexp::{FIXEDENCODING, NOENCODING};
+    let text = std::str::from_utf8(source).unwrap_or("");
+    let names_unicode = source.is_ascii() && names_non_ascii(text);
+    let ascii = source.is_ascii() && !names_unicode && !escapes_a_byte(source);
+    if let Some(encoding) = fixed {
+        (encoding, options | FIXEDENCODING)
+    } else if options & NOENCODING != 0 {
+        if ascii {
+            (crate::strings::US_ASCII, options)
+        } else {
+            (crate::strings::BINARY, options | FIXEDENCODING)
+        }
+    } else if names_unicode {
+        // A `\u` escape past ASCII makes the pattern UTF-8 as much as writing
+        // the character would.
+        (crate::strings::UTF_8, options | FIXEDENCODING)
+    } else if options & FIXEDENCODING != 0 {
+        (encoding, options)
+    } else if ascii {
+        (crate::strings::US_ASCII, options)
+    } else {
+        (encoding, options | FIXEDENCODING)
+    }
+}
+
 /// [`regexp_error`] for a pattern made from a run-time String, where Ruby's
 /// message names the pattern — `premature end of char-class: /[/` — and says
 /// which of three things was wrong with a `\u` escape. Measured.
@@ -13803,7 +13911,7 @@ fn regexp_literal(scope: &mut HandleScope<'_>, source: &str, options: i64) -> Re
     if let Some(cached) = scope.regexps().cached(source, options) {
         return Ok(cached);
     }
-    let value = regexp_new(scope, source, options)?;
+    let value = regexp_new(scope, source.as_bytes(), crate::strings::UTF_8, options)?;
     scope.regexps_mut().cache(source, options, value);
     Ok(value)
 }
@@ -13834,11 +13942,13 @@ fn regexp_new_from(scope: &mut HandleScope<'_>, call: &Pending) -> Result<Value,
             crate::value::Unpacked::Fixnum(n) => n,
             _ => 0,
         };
-        (string_text(scope, text), opts)
+        (text, opts)
     } else {
-        (string_text(scope, first), 0)
+        (first, 0)
     };
-    let Some(source) = source else {
+    let (Some(bytes), Some(encoding)) =
+        (string_bytes(scope, source), string_encoding(scope, source))
+    else {
         return Err(Error::raise(
             "TypeError",
             "no implicit conversion into String",
@@ -13876,11 +13986,31 @@ fn regexp_new_from(scope: &mut HandleScope<'_>, call: &Pending) -> Result<Value,
             },
         };
     }
-    regexp_build(scope, &source, options, false)
+    // Only Ruby's own bits: anything above them is not an option at all, and
+    // must not be read as an encoding a literal fixed.
+    let options = options & ((1 << crate::regexp::LITERAL_ENCODING_SHIFT) - 1);
+    regexp_build(scope, &bytes, encoding, options, None, false)
 }
 
-fn regexp_new(scope: &mut HandleScope<'_>, source: &str, options: i64) -> Result<Value, Error> {
-    regexp_build(scope, source, options, true)
+/// A literal's pattern: its options may carry the encoding a modifier fixed.
+fn regexp_new(
+    scope: &mut HandleScope<'_>,
+    source: &[u8],
+    encoding: u8,
+    options: i64,
+) -> Result<Value, Error> {
+    let shift = crate::regexp::LITERAL_ENCODING_SHIFT;
+    let fixed = u8::try_from(options >> shift)
+        .ok()
+        .and_then(|index| index.checked_sub(1));
+    regexp_build(
+        scope,
+        source,
+        encoding,
+        options & ((1 << shift) - 1),
+        fixed,
+        true,
+    )
 }
 
 /// The pattern behind both constructors.
@@ -13890,23 +14020,40 @@ fn regexp_new(scope: &mut HandleScope<'_>, source: &str, options: i64) -> Result
 /// only difference between the two.
 fn regexp_build(
     scope: &mut HandleScope<'_>,
-    source: &str,
+    source: &[u8],
+    encoding: u8,
     options: i64,
+    fixed: Option<u8>,
     frozen: bool,
 ) -> Result<Value, Error> {
+    let (encoding, options) = regexp_encoding(source, encoding, options, fixed);
+    // The engine reads a binary pattern a byte to a character, so its source
+    // goes over as the characters with those numbers. Anything else it reads
+    // as UTF-8, which an ASCII source in any encoding already is.
+    let (pattern, engine) = if encoding == crate::strings::BINARY {
+        let latin: String = source.iter().map(|&b| char::from(b)).collect();
+        (latin, spinel_regex::Encoding::Binary)
+    } else {
+        match std::str::from_utf8(source) {
+            Ok(text) if encoding == crate::strings::UTF_8 || text.is_ascii() => {
+                (text.to_owned(), spinel_regex::Encoding::Utf8)
+            }
+            _ => {
+                return Err(Error::Unknowable {
+                    what: "a regexp source with characters past ASCII in an encoding other than UTF-8 and BINARY",
+                    needs: "a regex engine that reads characters in other encodings, EUC-JP and Windows-31J first (#339)",
+                });
+            }
+        }
+    };
     let index = scope
         .regexps_mut()
-        .add(source, options)
-        .map_err(|e| regexp_source_error(&e, source))?;
-    // An ASCII source is US-ASCII whatever the String it came from. Measured.
-    // — unless a `\u` escape in it names a character that is not ASCII, which
-    // makes the pattern UTF-8 as much as writing the character would.
-    let text = if source.is_ascii() && !names_non_ascii(source) {
-        let string = class_handle(scope, Builtin::String);
-        string_alloc(scope, string, source.as_bytes(), crate::strings::US_ASCII)
-    } else {
-        string_new(scope, source)
-    };
+        .add(&pattern, options, engine)
+        .map_err(|e| regexp_source_error(&e, &pattern))?;
+    // The source String is in the pattern's encoding, as CRuby's is: that is
+    // what `Regexp#encoding` reads.
+    let string = class_handle(scope, Builtin::String);
+    let text = string_alloc(scope, string, source, encoding);
     let class = class_handle(scope, Builtin::Regexp);
     let (payload, slots) = crate::regexp::regexp_shape();
     let mut nested = scope.nested();
@@ -13975,6 +14122,115 @@ fn regexp_match_value(
     regexp_match_from(scope, regexp, subject, Value::NIL)
 }
 
+/// How the engine is to read `subject` for `regexp`, or why the two cannot
+/// meet: CRuby's `rb_reg_prepare_enc`, step for step (#222).
+///
+/// A broken subject is an `ArgumentError` before anything else. A pattern in
+/// the subject's own encoding, or a US-ASCII one against ASCII text, reads it
+/// as it stands. A subject in an encoding that is not ASCII-compatible meets
+/// nothing. A fixed pattern meets another encoding only where the subject is
+/// ASCII. And a free pattern takes the subject's encoding — warning, for a
+/// `/n` one, when that is not BINARY and the subject is past ASCII.
+fn regexp_match_encoding(
+    scope: &mut HandleScope<'_>,
+    regexp: Value,
+    subject: Value,
+) -> Result<spinel_regex::Encoding, Error> {
+    use crate::strings::{BINARY, US_ASCII, UTF_8};
+    let (source, options) = {
+        let mut nested = scope.nested();
+        let handle = nested.root(regexp);
+        (
+            nested.slot(handle, crate::regexp::REGEXP_SOURCE),
+            nested
+                .slot(handle, crate::regexp::REGEXP_OPTIONS)
+                .as_fixnum()
+                .unwrap_or(0),
+        )
+    };
+    let pattern = string_encoding(scope, source).unwrap_or(US_ASCII);
+    let (Some(bytes), Some(theirs)) = (
+        string_bytes(scope, subject),
+        string_encoding(scope, subject),
+    ) else {
+        return Err(Error::Raise {
+            class: "TypeError",
+            message: format!(
+                "no implicit conversion of {} into String",
+                class_name_of(scope, subject)
+            ),
+        });
+    };
+    let ascii = crate::strings::ascii_compatible(theirs) && bytes.is_ascii();
+    match crate::strings::valid(theirs, &bytes) {
+        Some(false) => {
+            return Err(Error::raise(
+                "ArgumentError",
+                format!("invalid byte sequence in {}", crate::strings::name(theirs)),
+            ));
+        }
+        // Whether it is broken decides between two errors and an answer.
+        None if !ascii => {
+            return Err(Error::Unknowable {
+                what: "matching a regexp against a string with characters past ASCII in an encoding other than UTF-8, US-ASCII and BINARY",
+                needs: "a regex engine that reads characters in other encodings, EUC-JP and Windows-31J first (#339)",
+            });
+        }
+        _ => {}
+    }
+    let incompatible = || {
+        Error::raise(
+            "Encoding::CompatibilityError",
+            format!(
+                "incompatible encoding regexp match ({} regexp with {} string)",
+                encoding_label(pattern),
+                encoding_label(theirs)
+            ),
+        )
+    };
+    let fixed = options & crate::regexp::FIXEDENCODING != 0;
+    let chosen = if pattern == theirs {
+        theirs
+    } else if ascii && pattern == US_ASCII {
+        pattern
+    } else if !crate::strings::ascii_compatible(theirs) {
+        return Err(incompatible());
+    } else if fixed {
+        if !ascii || !crate::strings::ascii_compatible(pattern) {
+            return Err(incompatible());
+        }
+        pattern
+    } else {
+        if options & crate::regexp::NOENCODING != 0 && theirs != BINARY && !ascii {
+            scope.set_pending_warning(format!(
+                "historical binary regexp match /.../n against {} string",
+                crate::strings::name(theirs)
+            ));
+        }
+        theirs
+    };
+    match chosen {
+        BINARY | US_ASCII => Ok(spinel_regex::Encoding::Binary),
+        UTF_8 => Ok(spinel_regex::Encoding::Utf8),
+        // ASCII text reads the same in every ASCII-compatible encoding.
+        _ if ascii => Ok(spinel_regex::Encoding::Utf8),
+        _ => Err(Error::Unknowable {
+            what: "matching a regexp against a string with characters past ASCII in an encoding other than UTF-8, US-ASCII and BINARY",
+            needs: "a regex engine that reads characters in other encodings, EUC-JP and Windows-31J first (#339)",
+        }),
+    }
+}
+
+/// An encoding's name as CRuby's error messages spell it: BINARY is
+/// `BINARY (ASCII-8BIT)` there, as `inspect` has it.
+fn encoding_label(index: u8) -> String {
+    if index == crate::strings::BINARY {
+        "BINARY (ASCII-8BIT)".to_owned()
+    } else {
+        crate::strings::name(index).to_owned()
+    }
+}
+
 /// The same, from a starting position.
 ///
 /// `pos` is in *characters* and may be negative, counting back from the end —
@@ -14004,50 +14260,7 @@ fn regexp_match_from(
         }
         None => subject,
     };
-    // A UTF-16 or UTF-32 subject cannot meet an ASCII-based pattern at all:
-    // CRuby's CompatibilityError, naming the regexp's encoding — US-ASCII for
-    // an ASCII source, UTF-8 otherwise, until regexps carry their own (#33).
-    if let Some(encoding) = string_encoding(scope, subject)
-        && !crate::strings::ascii_compatible(encoding)
-    {
-        let source = {
-            let mut nested = scope.nested();
-            let handle = nested.root(regexp);
-            nested.slot(handle, crate::regexp::REGEXP_SOURCE)
-        };
-        let ascii = string_bytes(scope, source).is_some_and(|bytes| bytes.is_ascii());
-        return Err(Error::raise(
-            "Encoding::CompatibilityError",
-            format!(
-                "incompatible encoding regexp match ({} regexp with {} string)",
-                if ascii { "US-ASCII" } else { "UTF-8" },
-                crate::strings::name(encoding)
-            ),
-        ));
-    }
-    // A String whose bytes are not valid in its own encoding cannot be
-    // matched, and says so; a valid one that is not UTF-8 is a real subject
-    // the regex engine cannot read yet (#19, #33).
-    if let (Some(bytes), Some(encoding)) = (
-        string_bytes(scope, subject),
-        string_encoding(scope, subject),
-    ) && std::str::from_utf8(&bytes).is_err()
-    {
-        if crate::strings::valid(encoding, &bytes) != Some(true) {
-            return Err(Error::raise(
-                "ArgumentError",
-                format!(
-                    "invalid byte sequence in {}",
-                    crate::strings::name(encoding)
-                ),
-            ));
-        }
-        return Err(Error::Unknowable {
-            what: "matching a regexp against a string that is not UTF-8 text",
-            needs: "a regex engine that reads bytes in the string's encoding (#33)",
-        });
-    }
-    let Some(text) = string_text(scope, subject) else {
+    let Some(bytes) = string_bytes(scope, subject) else {
         return Err(Error::Raise {
             class: "TypeError",
             message: format!(
@@ -14056,6 +14269,7 @@ fn regexp_match_from(
             ),
         });
     };
+    let engine = regexp_match_encoding(scope, regexp, subject)?;
 
     // A position past either end of the subject is no match at all, rather
     // than an error.
@@ -14071,8 +14285,14 @@ fn regexp_match_from(
                     ),
                 });
             };
-            let chars = if text.is_ascii() {
-                text.len()
+            let single = engine == spinel_regex::Encoding::Binary || bytes.is_ascii();
+            let text = if single {
+                ""
+            } else {
+                std::str::from_utf8(&bytes).unwrap_or("")
+            };
+            let chars = if single {
+                bytes.len()
             } else {
                 text.chars().count()
             } as i64;
@@ -14081,12 +14301,16 @@ fn regexp_match_from(
                 scope.set_last_match(Value::NIL);
                 return Ok(Value::NIL);
             }
-            byte_offset(&text, from as usize)
+            if single {
+                from as usize
+            } else {
+                byte_offset(text, from as usize)
+            }
         }
     };
 
     let found = program
-        .find_at(&text, start)
+        .find_in(&bytes, start, engine)
         .map_err(|e| regexp_error(&e))?;
     let Some(caps) = found else {
         scope.set_last_match(Value::NIL);
@@ -14131,10 +14355,13 @@ fn regexp_match_all(
     let Some(program) = regexp_program(scope, regexp) else {
         return Ok(Value::NIL);
     };
-    // Only a subject the engine reads as it stands. Anything else — invalid
-    // bytes, another encoding — is the one-at-a-time path's to refuse.
-    let ascii_based = string_encoding(scope, subject).is_some_and(crate::strings::ascii_compatible);
-    let Some(text) = string_text(scope, subject).filter(|_| ascii_based) else {
+    // Only a subject the engine reads without complaint. Anything else — an
+    // error, or a warning to say — is the one-at-a-time path's to report.
+    let engine = match regexp_match_encoding(scope, regexp, subject) {
+        Ok(engine) if scope.take_pending_warning().is_none() => engine,
+        _ => return Ok(Value::NIL),
+    };
+    let Some(text) = string_bytes(scope, subject) else {
         return Ok(Value::NIL);
     };
     // One frozen copy for every match to share. `match_data_new` would make
@@ -14145,7 +14372,7 @@ fn regexp_match_all(
             subject
         } else {
             let encoding = string_encoding(scope, subject).unwrap_or(crate::strings::UTF_8);
-            let copy = string_bytes_in(scope, Builtin::String.id(), text.as_bytes(), encoding);
+            let copy = string_bytes_in(scope, Builtin::String.id(), &text, encoding);
             let copy = scope.root(copy);
             scope.freeze(copy);
             scope.get(copy)
@@ -14159,7 +14386,7 @@ fn regexp_match_all(
     let mut start = 0;
     while start <= text.len() {
         let Some(caps) = program
-            .find_at(&text, start)
+            .find_in(&text, start, engine)
             .map_err(|e| regexp_error(&e))?
         else {
             break;
@@ -14188,10 +14415,16 @@ fn regexp_match_all(
             to
         } else {
             // One character on, which is more than one byte past ASCII.
-            match text[to..].chars().next() {
-                Some(c) => to + c.len_utf8(),
-                None => break,
+            if to >= text.len() {
+                break;
             }
+            let width = match engine {
+                spinel_regex::Encoding::Binary => 1,
+                spinel_regex::Encoding::Utf8 => {
+                    crate::strings::char_len(crate::strings::UTF_8, &text, to).unwrap_or(1)
+                }
+            };
+            to + width
         };
     }
     let values: Vec<Value> = found.iter().map(|handle| scope.get(*handle)).collect();

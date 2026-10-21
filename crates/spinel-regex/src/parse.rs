@@ -14,7 +14,7 @@
 //! the parser writes into the nodes that follow it, so the matcher never has to
 //! carry a flag register. That is also what makes `(?i:a)b` mean what it says.
 
-use crate::{Error, Flags};
+use crate::{Encoding, Error, Flags};
 use std::collections::HashMap;
 
 /// One parsed node.
@@ -145,11 +145,12 @@ pub struct Parsed {
     pub names: Vec<(String, usize)>,
 }
 
-pub fn parse(source: &str, flags: Flags) -> Result<Parsed, Error> {
+pub fn parse(source: &str, flags: Flags, encoding: Encoding) -> Result<Parsed, Error> {
     let mut parser = Parser {
         chars: source.chars().collect(),
         pos: 0,
         flags,
+        encoding,
         groups: 0,
         names: Vec::new(),
         name_index: HashMap::new(),
@@ -364,6 +365,8 @@ struct Parser {
     chars: Vec<char>,
     pos: usize,
     flags: Flags,
+    /// What the source is written in, which decides what `\xff` is.
+    encoding: Encoding,
     groups: usize,
     names: Vec<(String, usize)>,
     name_index: HashMap<String, usize>,
@@ -1075,7 +1078,7 @@ impl Parser {
 
     /// The character an escape stands for, for the escapes that stand for one.
     fn escaped_char(&mut self, c: char) -> Result<char, Error> {
-        Ok(match c {
+        let ch = match c {
             'n' => '\n',
             't' => '\t',
             'r' => '\r',
@@ -1118,10 +1121,12 @@ impl Parser {
                     }
                     let n = u32::from_str_radix(&hex, 16)
                         .map_err(|_| Error::Syntax("invalid hex escape".into()))?;
-                    // A byte above ASCII is not a codepoint: it makes the
-                    // pattern ASCII-8BIT, and matching a binary pattern
-                    // against a UTF-8 subject is the Encoding slice's problem.
-                    if n > 0x7f {
+                    // A byte above ASCII is not a codepoint. In a binary
+                    // pattern it is the byte, which the matcher carries as the
+                    // `char` with the same number; in UTF-8 it would be part
+                    // of a multibyte sequence, which waits for the rest of the
+                    // Onigmo dialect.
+                    if n > 0x7f && self.encoding != Encoding::Binary {
                         return Err(Error::Unsupported("a non-ASCII \\x byte escape"));
                     }
                     char::from_u32(n).ok_or_else(|| Error::Syntax("invalid hex escape".into()))?
@@ -1179,7 +1184,15 @@ impl Parser {
             // "allows any character to be escaped": an escape with no special
             // meaning is the character itself.
             other => other,
-        })
+        };
+        // A binary pattern's characters are bytes, so a character past ASCII
+        // named by its codepoint has no meaning in one.
+        if c == 'u' && !ch.is_ascii() && self.encoding == Encoding::Binary {
+            return Err(Error::Unsupported(
+                "a non-ASCII \\u escape in a binary pattern",
+            ));
+        }
+        Ok(ch)
     }
 }
 
@@ -1193,7 +1206,9 @@ mod tests {
     use super::*;
 
     fn ast(source: &str) -> Ast {
-        parse(source, Flags::default()).expect("parses").ast
+        parse(source, Flags::default(), Encoding::Utf8)
+            .expect("parses")
+            .ast
     }
 
     #[test]
@@ -1281,11 +1296,11 @@ mod tests {
     #[test]
     fn unmatched_paren_is_a_syntax_error() {
         assert!(matches!(
-            parse("(", Flags::default()),
+            parse("(", Flags::default(), Encoding::Utf8),
             Err(Error::Syntax(_))
         ));
         assert!(matches!(
-            parse(")", Flags::default()),
+            parse(")", Flags::default(), Encoding::Utf8),
             Err(Error::Syntax(_))
         ));
     }
@@ -1294,7 +1309,10 @@ mod tests {
     fn onigmo_only_constructs_refuse_rather_than_guess() {
         for source in ["(?~foo)", "(?<a>a\\g<a>?)", "a\\Kb", "\\R", "\\p{Alpha}"] {
             assert!(
-                matches!(parse(source, Flags::default()), Err(Error::Unsupported(_))),
+                matches!(
+                    parse(source, Flags::default(), Encoding::Utf8),
+                    Err(Error::Unsupported(_))
+                ),
                 "{source} should refuse"
             );
         }
@@ -1302,8 +1320,8 @@ mod tests {
 
     #[test]
     fn group_names_reject_a_leading_digit() {
-        assert!(parse("(?<1a>x)", Flags::default()).is_err());
-        assert!(parse("(?<a1>x)", Flags::default()).is_ok());
+        assert!(parse("(?<1a>x)", Flags::default(), Encoding::Utf8).is_err());
+        assert!(parse("(?<a1>x)", Flags::default(), Encoding::Utf8).is_ok());
     }
 
     #[test]
@@ -1312,7 +1330,7 @@ mod tests {
             extended: true,
             ..Flags::default()
         };
-        let parsed = parse("a b # trailing\nc", flags).expect("parses");
+        let parsed = parse("a b # trailing\nc", flags, Encoding::Utf8).expect("parses");
         let Ast::Concat(items) = parsed.ast else {
             panic!("expected a concatenation")
         };
