@@ -87,7 +87,7 @@ fix is a different slice. The reason says which slice, by number.
 
 ## What is here now
 
-Three hundred and sixty-three tags across a hundred and sixty-one files.
+Three hundred and sixty-two tags across a hundred and sixty files.
 #36 removed fifteen, and all three of `core/objectspace`'s files: the
 finalizer examples that run a child `spinel` and the `garbage_collect` ones
 that found no `ObjectSpace`, which pass now that the collector is reachable
