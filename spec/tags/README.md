@@ -108,7 +108,7 @@ mspec's shared context carries over — and removed `` Kernel#` ``'s, now that a
 backtick compiles to a call. #39 removed seven, the
 read-only globals in `language/predefined_tags.txt`. #38 added three, examples
 string `eval` made reachable that belong elsewhere: `Hash#inspect` read back by
-`eval` (#216), an unknown POSIX bracket class (#33), and `+@` on a chilled
+`eval` (#216, now #337), an unknown POSIX bracket class (#33), and `+@` on a chilled
 literal (#263). #19 added six: `` Kernel#` ``,
 which is #223's, three `unpack` examples the harness runs without their shared
 group's argument (#145), and two `Regexp.union` encoding checks (#33). Before #28 there were

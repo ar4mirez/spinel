@@ -807,7 +807,8 @@ class Hash
 
   # Ruby 3.4's form for a Symbol key: `name:` when the name is a plain
   # identifier the default external encoding can show, and a quoted
-  # `"name":` otherwise. Measured.
+  # `"name":` otherwise. Measured: the Symbol-key block in
+  # `crates/spinel-vm/tests/eval.txt` is the table this answers to.
   def self.__symbol_key__(key)
     name = key.to_s
     plain = name.match?(/\A[A-Za-z_\u0080-\u{10FFFF}][A-Za-z0-9_\u0080-\u{10FFFF}]*[?!]?\z/) &&
