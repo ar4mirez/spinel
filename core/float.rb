@@ -218,7 +218,7 @@ class Float
   # A Float exists only as a value: `Float.allocate` raises and `Float.new`
   # is not there to call.
   def self.allocate
-    raise TypeError, "allocator undefined for Float"
+    raise TypeError, "allocator undefined for #{self}"
   end
 
   class << self
