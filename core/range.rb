@@ -207,10 +207,10 @@ class Range
   # has no `String#succ` yet, and this cannot tell "no succ in Ruby" from "no
   # succ here". The upgrade is `String#succ`; nothing in this file changes.
   def each
+    return to_enum(:each) { size } unless block_given?
     unless @__begin__.respond_to?(:succ)
       raise TypeError, "can't iterate from " + @__begin__.class.to_s
     end
-    return to_enum(:each) { size } unless block_given?
     current = @__begin__
     while @__end__.nil? || __before_end__(current)
       yield current

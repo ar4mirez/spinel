@@ -77,8 +77,17 @@ class Enumerator
   end
 
   # A nil offset is no offset; anything else is converted with `to_int`.
-  def with_index(offset = 0)
-    return Enumerator.__for__(self, :with_index, [offset], size) unless block_given?
+  def with_index(offset = 0, &block)
+    return Enumerator.__for__(self, :with_index, [offset], size) if block.nil?
+    __with_index__(offset, &block)
+  end
+
+  def each_with_index(&block)
+    return Enumerator.__for__(self, :each_with_index, [], size) if block.nil?
+    __with_index__(0, &block)
+  end
+
+  def __with_index__(offset)
     i = offset.nil? ? 0 : __to_int__(offset)
     # The block's value is the value the driven method sees, and `each` answers
     # what that method answered: `[1, 2, 3].select.each_with_index { false }` is
@@ -88,11 +97,6 @@ class Enumerator
       i = i + 1
       answer
     end
-  end
-
-  def each_with_index(&block)
-    return Enumerator.__for__(self, :each_with_index, [], size) if block.nil?
-    with_index(0, &block)
   end
 
   def with_object(memo)
