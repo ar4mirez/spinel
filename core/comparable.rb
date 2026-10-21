@@ -8,7 +8,7 @@ module Comparable
   # a pair meets itself, the outermost comparison of it answers false.
   def ==(other)
     return true if equal?(other)
-    comparing = Comparable.__comparing__
+    comparing = (Thread.current.__recursive__[:comparable] ||= [])
     throw :__spinel_comparable_recursion__ if comparing.any? { |a, b| a.equal?(self) && b.equal?(other) }
     outermost = comparing.empty?
     comparing.push([self, other])
@@ -24,11 +24,6 @@ module Comparable
     ensure
       comparing.pop
     end
-  end
-
-  # The pairs `==` is part-way through comparing, innermost last. Per heap.
-  def self.__comparing__
-    @__comparing__ ||= []
   end
 
   def <(other)
@@ -51,14 +46,17 @@ module Comparable
     self >= low && self <= high
   end
 
-  # CRuby's `cmp_clamp`: two bounds or one Range, and a nil bound (or an
+  # CRuby's `cmp_clamp`: two bounds or one Range (or, as `rb_range_values`
+  # takes it, anything answering `begin`, `end` and `exclude_end?`), and a nil bound (or an
   # endless or beginless Range) leaves that side open. The bounds are checked
   # against each other before `self` is compared with either, so
   # `1.clamp(3, 1)` raises whatever `self` is.
   def clamp(*args)
     if args.size == 1
       range = args[0]
-      unless range.is_a?(Range)
+      unless range.is_a?(Range) ||
+             (!range.is_a?(Enumerator::ArithmeticSequence) && range.respond_to?(:begin) &&
+              range.respond_to?(:end) && range.respond_to?(:exclude_end?))
         raise TypeError, "wrong argument type " + __builtin_class_name__(range) + " (expected Range)"
       end
       low = range.begin

@@ -32,7 +32,7 @@ class Thread
     attr_accessor :args, :block, :locals, :variables, :joiners, :mutexes, :report_on_exception,
                   :abort_on_exception, :priority, :name, :group, :exception, :value, :dead, :killing,
                   :location,
-                  :started, :deferred, :masks, :pending, :storage
+                  :started, :deferred, :masks, :pending, :storage, :recursive
   end
   private_constant :State
 
@@ -399,6 +399,14 @@ class Thread
     fiber = equal?(Thread.current) ? Fiber.current : nil
     key = fiber.nil? || fiber.__root__? ? :root : fiber
     all[key] ||= {}
+  end
+
+  # CRuby's `rb_exec_recursive` bookkeeping, per fiber like the locals but
+  # under no key a program can see. Only ever asked of `Thread.current`.
+  def __recursive__
+    all = (@__s.recursive ||= {}.compare_by_identity)
+    fiber = Fiber.current
+    all[fiber.__root__? ? :root : fiber] ||= {}
   end
 
   def [](key) = __locals__[Thread.__key__(key)]
