@@ -1,1 +1,0 @@
-fails(#200: main has no private ruby2_keywords; newly run since TOPLEVEL_BINDING exists):main.ruby2_keywords is the same as Object.ruby2_keywords

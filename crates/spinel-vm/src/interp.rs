@@ -1409,6 +1409,33 @@ fn reflect_native(
                 }
             }
         }
+        ReflectOp::Ruby2Keywords => {
+            let target = arg(0);
+            let iseq = match scope.definitions().get(target).cloned() {
+                _ if target.as_fixnum().is_none() => {
+                    proc_parts(scope, target).map(|(iseq, ..)| iseq)
+                }
+                Some(Definition::Iseq(iseq)) => Some(iseq),
+                Some(Definition::Proc(body)) => proc_parts(scope, body).map(|(iseq, ..)| iseq),
+                _ => None,
+            };
+            if let Some(iseq) = &iseq {
+                scope.definitions_mut().mark_ruby2_keywords(iseq);
+            }
+            bool_value(iseq.is_some())
+        }
+        ReflectOp::KeywordsHash => {
+            let hash = arg(0);
+            if hash.is_immediate() {
+                Value::FALSE
+            } else {
+                let handle = scope.root(hash);
+                if arg(1).is_truthy() {
+                    scope.mark_keywords(handle);
+                }
+                bool_value(scope.is_keywords(handle))
+            }
+        }
         ReflectOp::ModuleKind => {
             match class_id_of(scope, arg(0)).map(|id| scope.classes().kind(id)) {
                 Some(Kind::Class) => Value::symbol(symbol("class")),
@@ -4220,7 +4247,7 @@ fn pop_call<'h>(
     // (#193). The two are never both present, which is what lets this pick one
     // shape rather than inventing an order to merge them in: Ruby's depends on
     // where the splat was written, and `Hash` is where that is decided.
-    let keywords = if site.kwsplat {
+    let mut keywords = if site.kwsplat {
         debug_assert!(
             site.keywords.is_empty(),
             "a keyword splat and named keywords on one site"
@@ -4244,6 +4271,19 @@ fn pop_call<'h>(
     let mut args: Vec<Value> = stack.drain(at..).collect();
     if !site.splats.is_empty() {
         args = expand_splats(scope, args, &site.splats)?;
+        // A final Hash a `ruby2_keywords` method collected from keywords is
+        // passed on as keywords again, when the call that splats it out writes
+        // none of its own — `**{}` counts as writing some (#200). Measured:
+        // only with a splat on the site, wherever the Hash came from, and an
+        // empty one passes nothing.
+        if site.keywords.is_empty()
+            && !site.kwsplat
+            && let Some(&last) = args.last()
+            && is_keywords_hash(scope, last)
+        {
+            args.pop();
+            keywords = hash_pairs(scope, last).unwrap_or_default();
+        }
     }
 
     let receiver = if has_receiver {
@@ -4275,6 +4315,15 @@ fn pop_call<'h>(
         owner: None,
         defined_as: None,
     })
+}
+
+/// Whether `value` is a `Hash` `ruby2_keywords` marked (#200).
+fn is_keywords_hash(scope: &mut HandleScope<'_>, value: Value) -> bool {
+    if value.is_immediate() {
+        return false;
+    }
+    let handle = scope.root(value);
+    scope.is_keywords(handle)
 }
 
 /// `f(a, *b)`: splice the elements of the splatted arguments into the list.
@@ -4736,7 +4785,19 @@ fn push_frame(
     // Beside `link`, and for the same reason: one hash probe on frame entry
     // instead of one per `Send`.
     let cache_base = scope.call_caches_mut().base(iseq);
-    bind(scope, env, &iseq.params, &symbols, call, binding)?;
+    // Asked only when it could matter, so an ordinary call pays nothing.
+    let ruby2_keywords = !call.keywords.is_empty()
+        && iseq.params.rest.is_some()
+        && scope.definitions().is_ruby2_keywords(iseq);
+    bind(
+        scope,
+        env,
+        &iseq.params,
+        &symbols,
+        call,
+        binding,
+        ruby2_keywords,
+    )?;
     frames.push(Call {
         iseq: Arc::clone(iseq),
         symbols,
@@ -4778,6 +4839,10 @@ fn push_frame(
 /// R2 and R3: one function, and the only difference between a method or lambda
 /// and a block is `lambda` — whether a count mismatch raises or is padded, and
 /// whether a lone `Array` is spread across the parameters.
+///
+/// `ruby2_keywords` is a body `Module#ruby2_keywords` or `Proc#ruby2_keywords`
+/// marked: the Hash its caller's keywords become is flagged, so that splatting
+/// it out again passes them as keywords (#200).
 fn bind(
     scope: &mut HandleScope<'_>,
     env: Value,
@@ -4785,6 +4850,7 @@ fn bind(
     symbols: &[SymbolId],
     call: &Pending,
     binding: Binding,
+    ruby2_keywords: bool,
 ) -> Result<(), Error> {
     let lambda = binding == Binding::Strict;
     let mut args = call.args.clone();
@@ -4800,6 +4866,10 @@ fn bind(
     {
         let rooted: Vec<_> = args.iter().map(|&arg| scope.root(arg)).collect();
         let hash = hash_of_pairs(scope, &call.keywords)?;
+        if ruby2_keywords {
+            let handle = scope.root(hash);
+            scope.mark_keywords(handle);
+        }
         args = rooted.iter().map(|&handle| scope.get(handle)).collect();
         args.push(hash);
     }
@@ -12693,6 +12763,16 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             Builtin::Kernel,
             &["__reflect_copy_singleton__"],
             Native::Reflect(ReflectOp::CopySingleton),
+        ),
+        (
+            Builtin::Kernel,
+            &["__reflect_ruby2_keywords__"],
+            Native::Reflect(ReflectOp::Ruby2Keywords),
+        ),
+        (
+            Builtin::Kernel,
+            &["__reflect_keywords_hash__"],
+            Native::Reflect(ReflectOp::KeywordsHash),
         ),
         (
             Builtin::Kernel,

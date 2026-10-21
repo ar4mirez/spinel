@@ -130,6 +130,34 @@ class Hash
     __copy_default_from__(other)
     self
   end
+  # `Hash.ruby2_keywords_hash` copies as CRuby's `rb_hash_dup` does, without a
+  # subclass's own `initialize_copy`.
+  alias __copy_table__ initialize_copy
+
+  # `ruby2_keywords` (#200). The flag is a header bit that only the binder and
+  # `ruby2_keywords_hash` set, so every other copy — `dup`, `merge` — is
+  # unmarked, and `inspect` never shows it. Measured.
+  def self.ruby2_keywords_hash?(hash)
+    __check_hash__(hash)
+    __reflect_keywords_hash__(hash, false)
+  end
+
+  # A marked copy: the class, the instance variables, the default and
+  # `compare_by_identity` carry over, and the frozen state does not.
+  def self.ruby2_keywords_hash(hash)
+    __check_hash__(hash)
+    copy = hash.__dup__
+    copy.__send__(:__copy_table__, hash)
+    __reflect_keywords_hash__(copy, true)
+    copy
+  end
+
+  # CRuby's `Check_Type`, which names `nil`, `true` and `false` themselves.
+  def self.__check_hash__(hash)
+    return if Hash === hash
+    type = hash.nil? || true.equal?(hash) || false.equal?(hash) ? hash.inspect : hash.class
+    raise TypeError, "wrong argument type #{type} (expected Hash)"
+  end
 
   def default(*key)
     return @__default__ unless @__default_is_proc__
