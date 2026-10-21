@@ -56,8 +56,11 @@ choice for `Data`.
 `respond_to?(:coerce, true)` and `__send__`, as CRuby's `rb_check_funcall`
 does. `**`, `div`, `fdiv` and `remainder` coerce through it.
 
-**`fdiv` rounds once.** Two Integers that are not both exact as Floats are
-divided exactly. The quotient is taken to two bits past the 53 a Float keeps, or
+**`fdiv` follows `rb_int_fdiv_double`.** Both Integers are first divided by
+their gcd. A fixnum over a fixnum below 2^53 in magnitude is `to_f / to_f`,
+rounding twice as `fix_fdiv_double` does: `(2**54+3).fdiv(3)` is
+6.004799503160663e+15 on ruby 4.0.7. Every other pair, a bignum on either side
+or a divisor of 2^53 or more, is divided exactly and rounds once. The quotient is taken to two bits past the 53 a Float keeps, or
 fewer bits for a subnormal, with the remainder settling a tie, and is then built
 with `Math.ldexp`. The old shift-both-then-divide rounded twice and lost
 `1.fdiv(10**323)`.
