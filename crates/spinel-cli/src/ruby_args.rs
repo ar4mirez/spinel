@@ -156,10 +156,15 @@ pub fn apply_rubyopt(out: &mut RubyArgs, value: &str) -> Result<(), String> {
 /// Whether a feature is on: the last `--enable`/`--disable` naming it, or
 /// `all`, wins.
 pub fn feature_enabled(args: &RubyArgs, feature: &str, default: bool) -> bool {
-    let mut on = default;
+    feature_setting(args, feature).unwrap_or(default)
+}
+
+/// [`feature_enabled`], with `None` when no flag names the feature.
+pub fn feature_setting(args: &RubyArgs, feature: &str) -> Option<bool> {
+    let mut on = None;
     for (name, enabled) in &args.features {
         if name == feature || name == "all" {
-            on = *enabled;
+            on = Some(*enabled);
         }
     }
     on

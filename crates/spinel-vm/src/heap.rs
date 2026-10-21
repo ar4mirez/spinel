@@ -81,6 +81,15 @@ const FROZEN: u8 = 0b10;
 /// that holds none stays a flag test.
 const SIDE_IVARS: u8 = 0b100;
 
+/// Set on a *chilled* String (#263): a literal in a file with no
+/// `frozen_string_literal` comment. `frozen?` is false, but the first mutation
+/// clears it and warns that the literal will be frozen in the future.
+const CHILLED: u8 = 0b1000;
+
+/// [`CHILLED`]'s twin for what `Symbol#to_s` answers, which warns in other
+/// words.
+const CHILLED_SYMBOL: u8 = 0b1_0000;
+
 /// Set from allocation until the cell is swept onto a free list.
 ///
 /// The collector never reads it. It exists so that storing a `Value` can assert, in
@@ -338,8 +347,9 @@ pub struct Heap {
     /// Globals the runtime owns and a program may not assign: `$:` and
     /// `$LOADED_FEATURES` (#39). By name, so an alias is marked separately.
     readonly_globals: std::collections::HashSet<SymbolId>,
-    /// `--enable=frozen-string-literal`, for every compile after it is set.
-    frozen_string_literal: bool,
+    /// `--enable=frozen-string-literal` or `--disable=frozen-string-literal`,
+    /// for every compile after it is set; `None` when neither was given.
+    frozen_string_literal: Option<bool>,
     /// Globals whose assignment, or read, is a Ruby method rather than a cell
     /// (#268): bit 0 for writes, bit 1 for reads. `$,` warns when set, `$=`
     /// when read.
@@ -398,7 +408,7 @@ impl Heap {
             global_slots: Vec::new(),
             global_specials: HashMap::new(),
             readonly_globals: std::collections::HashSet::new(),
-            frozen_string_literal: false,
+            frozen_string_literal: None,
             hooked_globals: std::collections::HashMap::new(),
         }
     }
@@ -1077,12 +1087,13 @@ impl<'h> HandleScope<'h> {
 
     /// Install what string `eval` parses with (#38).
     /// `--enable=frozen-string-literal`: every file and `eval` compiled from
-    /// now on freezes the literals it does not say anything about.
-    pub fn set_frozen_string_literal(&mut self, on: bool) {
-        self.heap.frozen_string_literal = on;
+    /// now on freezes the literals it does not say anything about;
+    /// `--disable=frozen-string-literal` leaves them plain, not chilled.
+    pub fn set_frozen_string_literal(&mut self, setting: Option<bool>) {
+        self.heap.frozen_string_literal = setting;
     }
 
-    pub fn frozen_string_literal(&self) -> bool {
+    pub fn frozen_string_literal(&self) -> Option<bool> {
         self.heap.frozen_string_literal
     }
 
@@ -1381,10 +1392,42 @@ impl<'h> HandleScope<'h> {
     }
 
     /// Mark the object frozen. Idempotent, and one-way: Ruby has no `unfreeze`.
+    /// A frozen String is no longer chilled.
     pub fn freeze(&mut self, handle: Handle<'h>) {
         let object = self.object(handle);
         // SAFETY: `handle` is rooted, so the cell it names is live.
-        unsafe { (*object.header()).flags |= FROZEN };
+        let flags = unsafe { &mut (*object.header()).flags };
+        *flags = (*flags | FROZEN) & !(CHILLED | CHILLED_SYMBOL);
+    }
+
+    /// Mark a String chilled (#263): by a literal, or by `Symbol#to_s` when
+    /// `symbol` is set.
+    pub fn chill(&mut self, handle: Handle<'h>, symbol: bool) {
+        let object = self.object(handle);
+        let bit = if symbol { CHILLED_SYMBOL } else { CHILLED };
+        // SAFETY: `handle` is rooted, so the cell it names is live.
+        unsafe { (*object.header()).flags |= bit };
+    }
+
+    /// Clear the object's chilled mark, answering what it was: `None` for an
+    /// object that was not chilled, `Some(true)` for one `Symbol#to_s` made.
+    pub fn unchill(&mut self, handle: Handle<'h>) -> Option<bool> {
+        let object = self.object(handle);
+        // SAFETY: as above.
+        let flags = unsafe { &mut (*object.header()).flags };
+        let was = *flags & (CHILLED | CHILLED_SYMBOL);
+        *flags &= !(CHILLED | CHILLED_SYMBOL);
+        (was != 0).then_some(was & CHILLED_SYMBOL != 0)
+    }
+
+    /// Whether the object is chilled, and so `+@` copies it: `None` when it
+    /// is not, `Some(true)` when `Symbol#to_s` made it.
+    #[must_use]
+    pub fn chilled(&self, handle: Handle<'h>) -> Option<bool> {
+        let object = self.object(handle);
+        // SAFETY: as above.
+        let flags = unsafe { (*object.header()).flags };
+        (flags & (CHILLED | CHILLED_SYMBOL) != 0).then_some(flags & CHILLED_SYMBOL != 0)
     }
 
     /// Whether [`HandleScope::freeze`] has been called on this object.

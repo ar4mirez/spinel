@@ -87,7 +87,7 @@ Landed in [#7](https://github.com/ar4mirez/spinel/issues/7). The object header i
 |---|---|---|
 | 0 | class pointer | `Option<Value>`; also the free-list link while the cell is free |
 | 8 | `len` | `Value` slots, or bytes |
-| 12 | flags | mark bit; frozen and ractor-shareable join it with #8 |
+| 12 | flags | mark bit; frozen and ractor-shareable join it with #8; side-table ivars; chilled, for a String literal or `Symbol#to_s` that warns when first mutated (#263) |
 | 13 | payload kind | slots or bytes — whether the collector descends |
 | 14 | shape id | which instance variables the object holds, and where |
 

@@ -97,19 +97,39 @@ pub fn program(program: &Program) -> Result<Iseq, Unsupported> {
 /// [`program`], for a file whose top level a backtrace names otherwise: a
 /// required or loaded one is `<top (required)>`, and its blocks are blocks
 /// in that.
+///
+/// Its string literals are plain mutable Strings, never chilled: this is how
+/// Spinel compiles its own Ruby.
 pub fn program_as(program: &Program, name: &str) -> Result<Iseq, Unsupported> {
-    program_with(program, name, false)
+    file(program, name, false, false)
 }
 
-/// [`program_as`], with string literals frozen where the file does not say,
-/// as `--enable=frozen-string-literal` asks.
+/// A program's own file: [`program_as`], with a string literal the file says
+/// nothing about chilled (#263) — or frozen when `frozen_string_literal` is
+/// `Some(true)`, as `--enable=frozen-string-literal` asks, and plain when it
+/// is `Some(false)`, as `--disable=frozen-string-literal` asks.
 pub fn program_with(
     program: &Program,
     name: &str,
+    frozen_string_literal: Option<bool>,
+) -> Result<Iseq, Unsupported> {
+    file(
+        program,
+        name,
+        frozen_string_literal == Some(true),
+        frozen_string_literal.is_none(),
+    )
+}
+
+fn file(
+    program: &Program,
+    name: &str,
     frozen_default: bool,
+    chill: bool,
 ) -> Result<Iseq, Unsupported> {
     let mut compiler = Compiler::new(name, &program.locals);
     compiler.frozen_default = frozen_default;
+    compiler.chill = chill;
     compiler.source = Some(Arc::clone(&program.source));
     compiler.statements(&hoist_begin(&program.body), true)?;
     Ok(compiler.finish())
@@ -151,10 +171,11 @@ pub fn eval(
     chain: Vec<Vec<Box<str>>>,
     name: &str,
     block_level: u32,
-    frozen_default: bool,
+    frozen_string_literal: Option<bool>,
 ) -> Result<Iseq, Unsupported> {
     let mut compiler = Compiler::new(name, &program.locals);
-    compiler.frozen_default = frozen_default;
+    compiler.frozen_default = frozen_string_literal == Some(true);
+    compiler.chill = frozen_string_literal.is_none();
     compiler.block_level = block_level;
     compiler.source = Some(Arc::clone(&program.source));
     compiler.scope_barrier = false;
@@ -354,6 +375,11 @@ struct Compiler {
     /// `--enable=frozen-string-literal`: a literal in a file that says
     /// nothing about it is frozen, as one under the magic comment is.
     frozen_default: bool,
+    /// A literal in a file that says nothing about it is chilled (#263). Set
+    /// for a program's own files and `eval` strings unless a flag settles
+    /// `frozen_string_literal`, and not for Spinel's `core/*.rb`, whose
+    /// literals stand in for CRuby's C and never warn.
+    chill: bool,
 }
 
 impl Zsuper {
@@ -439,6 +465,7 @@ impl Compiler {
             refusals: Vec::new(),
             from_eval: false,
             frozen_default: false,
+            chill: false,
         }
     }
 
@@ -475,6 +502,7 @@ impl Compiler {
         compiler.block_level = if barrier { 0 } else { parent.block_level + 1 };
         compiler.from_eval = parent.from_eval;
         compiler.frozen_default = parent.frozen_default;
+        compiler.chill = parent.chill;
         if !barrier {
             compiler.outer.push(parent.locals.clone());
             compiler.outer.extend(parent.outer.iter().cloned());
@@ -983,6 +1011,13 @@ impl Compiler {
                 {
                     let encoding = self.literal_encoding(string.encoding);
                     let index = self.literal(Literal::FrozenStr(bytes, encoding));
+                    self.emit(Insn::PushLit(index));
+                }
+                // Chilled where the file says nothing; mutable as ever under
+                // `# frozen_string_literal: false`.
+                Some(bytes) if string.frozen.is_none() && self.chill => {
+                    let encoding = self.literal_encoding(string.encoding);
+                    let index = self.literal(Literal::ChilledStr(bytes, encoding));
                     self.emit(Insn::PushLit(index));
                 }
                 Some(bytes) => {

@@ -645,6 +645,11 @@ pub enum Literal {
     /// because freezing is the whole difference and a `bool` field would put a
     /// branch in the hot path of every ordinary string literal.
     FrozenStr(Box<[u8]>, u8),
+    /// A string literal in a file with no `frozen_string_literal` comment:
+    /// *chilled* (#263), a new unfrozen String each evaluation that warns the
+    /// first time it is changed. A variant of its own for the reason
+    /// `FrozenStr` is one.
+    ChilledStr(Box<[u8]>, u8),
     /// A regexp literal: the pattern as written, plus the flags it carries —
     /// [`Insn::NewRegexp`]'s operand, encoding bits and all.
     ///

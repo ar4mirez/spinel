@@ -138,6 +138,36 @@ fn features_spinel_does_not_have_are_accepted() {
 }
 
 #[test]
+fn frozen_string_literal_flags_settle_what_literals_are() {
+    let chilled = run(&["-W:deprecated", "literals.rb"], "");
+    assert!(chilled.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&chilled.stdout),
+        "[false, false, false]\n"
+    );
+    assert!(
+        String::from_utf8_lossy(&chilled.stderr)
+            .contains("literal string will be frozen in the future")
+    );
+    for disable in [
+        "--disable-frozen-string-literal",
+        "--disable=frozen-string-literal",
+    ] {
+        let plain = run(&["-W:deprecated", disable, "literals.rb"], "");
+        assert!(plain.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&plain.stdout),
+            "[false, true, true]\n"
+        );
+        assert_eq!(String::from_utf8_lossy(&plain.stderr), "");
+    }
+    assert_eq!(
+        out(&["--enable=frozen-string-literal", "literals.rb"]),
+        "[true, false, false]\n"
+    );
+}
+
+#[test]
 fn a_missing_script_is_a_load_error() {
     let output = run(&["missing.rb"], "");
     assert_eq!(output.status.code(), Some(1));

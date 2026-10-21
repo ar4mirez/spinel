@@ -378,11 +378,7 @@ fn ruby_command(words: &[String], raw: &[Vec<u8>]) -> ExitCode {
             source_encoding: args.source_encoding.as_deref(),
             data,
             loop_template: around.as_deref(),
-            frozen_string_literal: ruby_args::feature_enabled(
-                &args,
-                "frozen_string_literal",
-                false,
-            ),
+            frozen_string_literal: ruby_args::feature_setting(&args, "frozen_string_literal"),
         },
     )
 }
@@ -399,8 +395,9 @@ struct Around<'a> {
     data: Option<(String, usize)>,
     /// The `-n`/`-p` loop to put the program in.
     loop_template: Option<&'a str>,
-    /// `--enable=frozen-string-literal`.
-    frozen_string_literal: bool,
+    /// `--enable=frozen-string-literal` or `--disable=frozen-string-literal`;
+    /// `None` when neither is given.
+    frozen_string_literal: Option<bool>,
 }
 
 /// The vendored standard library on `$LOAD_PATH`, last, as CRuby has its

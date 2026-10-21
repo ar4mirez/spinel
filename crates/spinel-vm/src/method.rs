@@ -147,8 +147,19 @@ pub enum Native {
     /// class has had its `<=>` replaced; nil otherwise, and the Ruby sort
     /// takes over.
     SortPlain,
+    /// `Kernel#__chilled__(object)`: whether `object` is a chilled String
+    /// (#263), which `+@` copies though `frozen?` is false — nil, `:literal`,
+    /// or `:symbol` for one `Symbol#to_s` made.
+    Chilled,
+    /// `Kernel#__unchill__(object)`: clear `object`'s chilled mark, answering
+    /// what it was, as `__chilled__` does, so the Ruby that is about to mutate
+    /// it can say so.
+    Unchill,
+    /// `Kernel#__chill__(object, symbol)`: mark a String chilled, as `clone`
+    /// keeps a chilled original's mark.
+    Chill,
     /// `String#<<` for the case every loop that builds a String is in: an
-    /// unfrozen receiver and a String argument whose bytes can be appended
+    /// unfrozen, unchilled receiver and a String argument whose bytes can be appended
     /// as they are. Anything else is the Ruby half's, `String#__append__`.
     StringAppend,
     /// `Regexp#__match__`: `match`, leaving `$~` as it was. What the core
