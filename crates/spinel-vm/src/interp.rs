@@ -12752,6 +12752,11 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             &["__binding_receiver_set__"],
             Native::Binding(BindingOp::SetReceiver),
         ),
+        (
+            Builtin::Kernel,
+            &["__binding_location_set__"],
+            Native::Binding(BindingOp::SetLocation),
+        ),
         (Builtin::Kernel, &["__load_file__"], Native::LoadFile),
         (
             Builtin::Kernel,
@@ -15659,6 +15664,14 @@ fn binding_op(
         BindingOp::SetReceiver => {
             let receiver = call.args.first().copied().unwrap_or(Value::NIL);
             scope.set_slot(handle, BINDING_SELF, receiver);
+            stack.push(binding);
+            Ok(None)
+        }
+        BindingOp::SetLocation => {
+            let file = call.args.first().copied().unwrap_or(Value::NIL);
+            let line = call.args.get(1).copied().unwrap_or(Value::NIL);
+            scope.set_slot(handle, BINDING_FILE, file);
+            scope.set_slot(handle, BINDING_LINE, line);
             stack.push(binding);
             Ok(None)
         }

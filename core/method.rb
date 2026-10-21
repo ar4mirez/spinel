@@ -354,7 +354,8 @@ class Proc
     return __proc_binding__(self) if callable.nil?
     receiver = callable[4]
     raise ArgumentError, "Can't create Binding from C level Proc" if receiver.nil?
-    Proc.__empty_binding__.__binding_receiver_set__(receiver)
+    location = callable[2] || ["(binding)", 1]
+    Proc.__empty_binding__.__binding_receiver_set__(receiver).__binding_location_set__(*location)
   end
 
   # A binding with no locals, for a method's proc to lend its receiver to.
