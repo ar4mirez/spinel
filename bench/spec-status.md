@@ -34,7 +34,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/io` | 103 | 1631 | 1360 | 0 | 265 | 6 | 83% |
 | `core/kernel` | 118 | 2241 | 2036 | 0 | 155 | 50 | 91% |
 | `core/main` | 7 | 27 | 14 | 0 | 11 | 2 | 52% |
-| `core/marshal` | 6 | 475 | 458 | 0 | 12 | 5 | 96% |
+| `core/marshal` | 6 | 475 | 459 | 0 | 11 | 5 | 97% |
 | `core/matchdata` | 30 | 186 | 185 | 0 | 1 | 0 | 99% |
 | `core/math` | 29 | 243 | 243 | 0 | 0 | 0 | 100% |
 | `core/method` | 26 | 199 | 177 | 0 | 4 | 18 | 89% |
@@ -131,4 +131,4 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `optional/capi` | 47 | 0 | 0 | 0 | 0 | 0 | — |
 | `optional/thread_safety` | 1 | 5 | 0 | 0 | 5 | 0 | 0% |
 | `security` | 13 | 26 | 18 | 0 | 8 | 0 | 69% |
-| **total** | 3835 | 32571 | 27117 | 0 | 4975 | 479 | 83% |
+| **total** | 3835 | 32571 | 27118 | 0 | 4974 | 479 | 83% |
