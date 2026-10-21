@@ -570,6 +570,19 @@ impl Compiler {
 
     fn finish(mut self) -> Iseq {
         self.emit(Insn::Leave);
+        // A block's own `&b` is the block's, not its method's; its `yield` and
+        // `super` reach the method's block, so they count for the method.
+        let uses_block = (self.scope_barrier && self.params.block.is_some())
+            || self.insns.iter().any(|insn| {
+                matches!(
+                    insn,
+                    Insn::Yield(_) | Insn::DefinedYield | Insn::Super(_) | Insn::Refuse(_)
+                )
+            })
+            || self
+                .children
+                .iter()
+                .any(|child| !child.scope_barrier && child.uses_block);
         Iseq {
             name: self.name,
             insns: self.insns,
@@ -594,6 +607,7 @@ impl Compiler {
             outer: self.outer,
             from_eval: self.from_eval,
             refusals: self.refusals,
+            uses_block,
             linked: crate::shared::symbols::Linked::default(),
         }
     }

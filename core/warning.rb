@@ -96,7 +96,17 @@ module Kernel
     return nil if $VERBOSE.nil? || (verbose && !$VERBOSE)
     __warning_send__(text, nil)
   end
-  private :__warning__, :__warning_send__, :__regexp_flag_warning__, :__parse_warning__
+  # "the block passed to 'm' ... may be ignored" (#273), already a whole line,
+  # owed by a call that passed a block to a method that never uses one. It
+  # prints under `-w`, or whenever `Warning[:strict_unused_block]` is on —
+  # which also drops the relief of another `m` that does use its block.
+  def __unused_block_warning__(text, relieved)
+    return nil if $VERBOSE.nil?
+    return nil unless Warning[:strict_unused_block] || ($VERBOSE && !relieved)
+    __warning_send__(text, nil)
+  end
+  private :__warning__, :__warning_send__, :__regexp_flag_warning__, :__parse_warning__,
+          :__unused_block_warning__
 end
 
 # The globals whose assignment is more than a store (#268). The VM sends an

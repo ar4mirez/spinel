@@ -1009,6 +1009,15 @@ pub struct Definitions {
     /// it was made from share one `Iseq`, which is where CRuby keeps the flag
     /// too. Safe as a key for the reason `interned` is — marking interns.
     ruby2_keywords: std::collections::HashSet<usize>,
+    /// The bodies a call has already warned about passing an unused block to
+    /// (#273). Once per method definition, measured on ruby 4.0.7: a second
+    /// call site to the same `def` stays quiet, a redefinition warns again.
+    unused_block_warned: std::collections::HashSet<i64>,
+    /// The names of the program's methods whose bodies use a block — CRuby's
+    /// duck-typing relief outside `Warning[:strict_unused_block]`: a block
+    /// passed to one `m` that ignores it may be meant for another `m` that
+    /// does not. The core library's are left out, as CRuby's C methods are.
+    block_users: std::collections::HashSet<SymbolId>,
 }
 
 impl Definitions {
@@ -1018,7 +1027,27 @@ impl Definitions {
             entries: Vec::new(),
             interned: std::collections::HashMap::new(),
             ruby2_keywords: std::collections::HashSet::new(),
+            unused_block_warned: std::collections::HashSet::new(),
+            block_users: std::collections::HashSet::new(),
         }
+    }
+
+    /// Whether this is the first call to pass `body` a block it ignores —
+    /// see [`Definitions::unused_block_warned`].
+    pub fn first_unused_block(&mut self, body: Value) -> bool {
+        body.as_fixnum()
+            .is_some_and(|id| self.unused_block_warned.insert(id))
+    }
+
+    /// Record that a method named `name` uses its block.
+    pub fn note_block_user(&mut self, name: SymbolId) {
+        self.block_users.insert(name);
+    }
+
+    /// See [`Definitions::block_users`].
+    #[must_use]
+    pub fn is_block_user(&self, name: SymbolId) -> bool {
+        self.block_users.contains(&name)
     }
 
     /// Mark `iseq` as taking a caller's keywords into a flagged `Hash` (#200).
