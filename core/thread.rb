@@ -187,11 +187,7 @@ class Thread
       mode = __mode__(error)
       mode == :immediate || (blocking && mode == :on_blocking)
     end
-    return if index.nil?
-    interrupt = pending.delete_at(index)
-    # The rest are met at the next turn, as CRuby meets its queue's next.
-    __thread_interrupt__(@index, -> { __deliver__(false) }) unless pending.empty?
-    __meet__(interrupt)
+    __meet__(pending.delete_at(index)) unless index.nil?
   end
 
   # Another thread's kill or raise, run in this one when it next runs: held
@@ -401,7 +397,7 @@ class Thread
   end
 
   def kill
-    return self if @__s.dead
+    return self if @__s.dead || @__s.killing
     if @index == 0
       exit
     elsif equal?(Thread.current)
