@@ -113,9 +113,31 @@ pub fn parse_file(path: &str, source: &[u8]) -> Parsed {
 /// there is valid and answers the method's block, unless a `class` or
 /// `module` body in the string encloses it. Those diagnostics are dropped.
 /// The caller's locals are the compiler's business — see `compile::eval`.
+///
+/// `encoding` is the string's own encoding when it is not UTF-8: CRuby reads
+/// an `eval` string in it unless a magic comment names another.
 #[must_use]
-pub fn parse_eval(path: &str, source: &[u8], first_line: i64, in_method: bool) -> Parsed {
-    parse_at(path, source, first_line, in_method)
+pub fn parse_eval(
+    path: &str,
+    source: &[u8],
+    first_line: i64,
+    in_method: bool,
+    encoding: Option<&str>,
+) -> Parsed {
+    match encoding {
+        // ponytail: Prism is told the encoding by a magic comment put in
+        // front of the source, a line earlier, because `ruby-prism` exposes
+        // no `pm_options_encoding_set`; the upgrade is that option once the
+        // crate takes one. Only source past ASCII needs it: ASCII lexes the
+        // same in every ASCII-compatible encoding, and the caller gives its
+        // literals the encoding itself.
+        Some(name) if !source.is_ascii() && magic_encoding(source).is_none() => {
+            let mut framed = format!("# encoding: {name}\n").into_bytes();
+            framed.extend_from_slice(source);
+            parse_at(path, &framed, first_line - 1, in_method)
+        }
+        _ => parse_at(path, source, first_line, in_method),
+    }
 }
 
 /// The `yield`s outside any `class`, `module` or `class <<` body, by offset.

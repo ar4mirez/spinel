@@ -534,6 +534,10 @@ Object.new.respond_to?(:nope)  #=> false
 [:@ivar, :@@cvar, :$gvar, :$1, :Const, :_, :__, :a_1, :"9a", :"a-b", :"a.b", :":a", :"\n"].map { |k| {k => 1, 1.5 => 2}.inspect }  #=> ["{\"@ivar\": 1, 1.5 => 2}", "{\"@@cvar\": 1, 1.5 => 2}", "{\"$gvar\": 1, 1.5 => 2}", "{\"$1\": 1, 1.5 => 2}", "{Const: 1, 1.5 => 2}", "{_: 1, 1.5 => 2}", "{__: 1, 1.5 => 2}", "{a_1: 1, 1.5 => 2}", "{\"9a\": 1, 1.5 => 2}", "{\"a-b\": 1, 1.5 => 2}", "{\"a.b\": 1, 1.5 => 2}", "{\":a\": 1, 1.5 => 2}", "{\"\\n\": 1, 1.5 => 2}"]
 [:nil, :if, :self, :class, :end, :BEGIN, :__FILE__, :__method__].map { |k| {k => 1}.inspect }  #=> ["{nil: 1}", "{if: 1}", "{self: 1}", "{class: 1}", "{end: 1}", "{BEGIN: 1}", "{__FILE__: 1}", "{__method__: 1}"]
 [:é, :Été, :"é?", :"aあ", :"\u{1F600}", :"a b"].map { |k| {k => 1}.inspect }  #=> ["{é: 1}", "{Été: 1}", "{é?: 1}", "{aあ: 1}", "{😀: 1}", "{\"a b\": 1}"]
+begin; e = Encoding.default_external; Encoding.default_external = Encoding::US_ASCII; ["\u3042".inspect, :"\u3042".inspect, {"\u3042": 1}.inspect, "\u{1F600}".inspect, "\u3042".inspect.encoding.name]; ensure; Encoding.default_external = e; end  #=> ["\"\\u3042\"", ":\"\\u3042\"", "{\"\\u3042\": 1}", "\"\\u{1F600}\"", "US-ASCII"]
+begin; e = Encoding.default_external; Encoding.default_external = Encoding::ISO_8859_1; ["\x85".force_encoding("ISO-8859-1").inspect, "\u3042".inspect]; ensure; Encoding.default_external = e; end  #=> ["\"\\x85\"", "\"\\u3042\""]
+begin; Encoding.default_internal = Encoding::US_ASCII; ["\u3042".inspect, :"\u3042".inspect, {"\u3042": 1}.inspect]; ensure; Encoding.default_internal = nil; end  #=> ["\"\\u3042\"", ":\"\\u3042\"", "{\"\\u3042\": 1}"]
+[eval("'\xE9'".b).encoding.name, eval("'a'".force_encoding("US-ASCII")).encoding.name, eval("x = '\xE9'\n[x.bytes, __LINE__]".force_encoding("ISO-8859-1"), nil, "f", 10)]  #=> ["ASCII-8BIT", "US-ASCII", [[233], 11]]
 ({b: 1}.to_s)  #=> "{b: 1}"
 {1 => {b: 1}, [:c] => {"d" => :e}}.inspect  #=> "{1 => {b: 1}, [:c] => {\"d\" => :e}}"
 (h = {}; h[:x] = h; h.inspect)  #=> "{x: {...}}"
