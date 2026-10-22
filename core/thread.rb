@@ -32,7 +32,8 @@ class Thread
     attr_accessor :args, :block, :locals, :variables, :joiners, :mutexes, :report_on_exception,
                   :abort_on_exception, :priority, :name, :group, :exception, :value, :dead, :killing,
                   :location,
-                  :started, :deferred, :masks, :pending, :storage, :recursive
+                  :started, :deferred, :masks, :pending, :storage, :recursive,
+                  :uninterruptible
   end
   private_constant :State
 
@@ -158,14 +159,19 @@ class Thread
 
   def pending_interrupt?(error = nil)
     pending = __pending__
-    error.nil? ? !pending.empty? : pending.any? { |e| error === e }
+    error.nil? ? !pending.empty? : pending.any? { |e| !KILL.equal?(e) && error === e }
   end
+
+  # A kill held in `__pending__`, in its place among the raises.
+  KILL = Object.new.freeze
+  private_constant :KILL
 
   def __masks__ = (@__s.masks ||= [])
   def __pending__ = (@__s.pending ||= [])
 
-  # What the masks say for `error`, innermost first.
+  # What the masks say for `error`, innermost first. A kill is not masked.
   def __mode__(error)
+    return :immediate if KILL.equal?(error)
     __masks__.reverse_each do |mask|
       mask.each { |klass, mode| return mode if klass === error }
     end
@@ -176,12 +182,90 @@ class Thread
   # the thread about to wait.
   def __deliver__(blocking)
     pending = __pending__
-    return if pending.empty?
+    return if pending.empty? || __uninterruptible__?
     index = pending.index do |error|
       mode = __mode__(error)
       mode == :immediate || (blocking && mode == :on_blocking)
     end
-    Kernel.raise pending.delete_at(index) unless index.nil?
+    __meet__(pending.delete_at(index)) unless index.nil?
+  end
+
+  # Another thread's kill or raise, run in this one when it next runs: held
+  # in `__pending__`, in arrival order, while it is uninterruptible or the
+  # masks here, now, hold it back — a raise met on a wait it woke is met
+  # blocking.
+  def __interrupted__(interrupt)
+    mode = __mode__(interrupt)
+    if __uninterruptible__? || mode == :never || (mode == :on_blocking && !__thread_woken__)
+      __pending__ << interrupt
+    else
+      __meet__(interrupt)
+    end
+    nil
+  end
+
+  def __meet__(interrupt)
+    throw self if KILL.equal?(interrupt)
+    Thread.__raise_here__(interrupt)
+  end
+
+  # The block with no interrupt let in, as CRuby's
+  # `mutex_lock_uninterruptible`: a kill or raise that comes meanwhile waits
+  # for it to end, and then goes.
+  def __uninterruptibly__
+    @__s.uninterruptible = (@__s.uninterruptible || 0) + 1
+    begin
+      yield
+    ensure
+      @__s.uninterruptible -= 1
+    end
+    __deliver__(false)
+  end
+
+  def __uninterruptible__? = (@__s.uninterruptible || 0) > 0
+
+  # What `raise` with these arguments raises, built in the calling thread as
+  # CRuby's `rb_make_exception` builds it — `#exception` asked of the first,
+  # a backtrace only when one is given, and the cause decided here — but not
+  # raised: the target raises it, and takes its own backtrace (#328).
+  def self.__exception__(args, options)
+    given = options.key?(:cause)
+    cause = options[:cause]
+    Kernel.raise ArgumentError, "only cause is given with no arguments" if args.empty? && given
+    unless cause.nil? || Exception === cause
+      Kernel.raise TypeError, "exception object expected"
+    end
+    # Keywords but `cause:` are a Hash argument, as `raise` takes them.
+    rest = options.reject { |key, _| key == :cause }
+    args += [rest] unless rest.empty?
+    if args.size > 3
+      Kernel.raise ArgumentError, "wrong number of arguments (given #{args.size}, expected 0..3)"
+    end
+    first = args[0]
+    error = if args.empty?
+              RuntimeError.new("")
+            elsif args.size == 1 && String === first
+              RuntimeError.new(first)
+            else
+              unless first.respond_to?(:exception, true)
+                Kernel.raise TypeError, "exception class/object expected"
+              end
+              made = args.size == 1 ? first.__send__(:exception) : first.__send__(:exception, args[1])
+              Kernel.raise TypeError, "exception object expected" unless Exception === made
+              made
+            end
+    error.set_backtrace(args[2]) if args.size == 3
+    error.__take_cause__(given ? cause : $!, given)
+    error
+  end
+
+  # `Thread#raise`'s exception, raised in the thread it was meant for: asked
+  # for `#exception` again here, as CRuby asks, and given this thread's
+  # backtrace when it has none.
+  def self.__raise_here__(error)
+    raised = error.exception
+    Kernel.raise TypeError, "exception object expected" unless Exception === raised
+    Kernel.raise raised
   end
 
   # Called by every wait before it waits: `:on_blocking` interrupts go now.
@@ -246,7 +330,7 @@ class Thread
       Fiber.current.__set_storage__(@__s.storage)
       # What was asked of it before it ran, now that it can be.
       Kernel.throw self if @__s.killing
-      Kernel.raise @__s.deferred unless @__s.deferred.nil?
+      Thread.__raise_here__(@__s.deferred) unless @__s.deferred.nil?
       @__s.value = @__s.block.call(*@__s.args)
     rescue Exception => e
       @__s.exception = e
@@ -255,7 +339,7 @@ class Thread
         Thread.main.raise(e)
         next
       end
-      __report__(e) if @__s.report_on_exception
+      __uninterruptibly__ { __report__(e) } if @__s.report_on_exception
       if @__s.abort_on_exception || Thread.abort_on_exception
         Thread.main.raise(e)
       end
@@ -316,7 +400,7 @@ class Thread
   end
 
   def kill
-    return self if @__s.dead
+    return self if @__s.dead || @__s.killing
     if @index == 0
       exit
     elsif equal?(Thread.current)
@@ -324,7 +408,7 @@ class Thread
       throw self
     else
       @__s.killing = true
-      __thread_interrupt__(@index, nil) if @__s.started
+      __thread_interrupt__(@index, -> { __interrupted__(KILL) }) if @__s.started
     end
     self
   end
@@ -333,25 +417,9 @@ class Thread
 
   def raise(*args, **options)
     return nil if @__s.dead
-    if args.empty? && options.key?(:cause)
-      Kernel.raise ArgumentError, "only cause is given with no arguments"
-    end
-    cause = options[:cause]
-    unless cause.nil? || Exception === cause
-      Kernel.raise TypeError, "exception object expected"
-    end
-    error = if args.empty?
-              RuntimeError.new("unhandled exception")
-            else
-              # Built as `raise` builds it, without raising it here.
-              begin
-                Kernel.raise(*args, **options)
-              rescue Exception => e
-                e
-              end
-            end
+    error = Thread.__exception__(args, options)
     if equal?(Thread.current)
-      Kernel.raise(error)
+      Thread.__raise_here__(error)
     elsif !@__s.started
       @__s.deferred = error
     else
@@ -359,7 +427,7 @@ class Thread
       if mode == :never || (mode == :on_blocking && __thread_status__(@index) != :sleep)
         __pending__ << error
       else
-        __thread_interrupt__(@index, error)
+        __thread_interrupt__(@index, -> { __interrupted__(error) })
       end
     end
     nil
@@ -630,7 +698,9 @@ class Thread
         Thread.__before_wait__
         reason = __thread_block__(timeout, nil, 0, false)
       ensure
-        lock
+        # Taken back before anything else, a kill included: the caller's
+        # `ensure` runs holding it, as CRuby's does.
+        Thread.current.__uninterruptibly__ { lock }
       end
       (Process.clock_gettime(Process::CLOCK_MONOTONIC) - started).round
     end

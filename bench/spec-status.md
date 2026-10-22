@@ -15,7 +15,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/class` | 8 | 54 | 36 | 0 | 18 | 0 | 67% |
 | `core/comparable` | 7 | 54 | 54 | 0 | 0 | 0 | 100% |
 | `core/complex` | 43 | 169 | 169 | 0 | 0 | 0 | 100% |
-| `core/conditionvariable` | 4 | 11 | 10 | 0 | 0 | 1 | 91% |
+| `core/conditionvariable` | 4 | 11 | 11 | 0 | 0 | 0 | 100% |
 | `core/data` | 13 | 88 | 88 | 0 | 0 | 0 | 100% |
 | `core/dir` | 34 | 333 | 267 | 0 | 40 | 26 | 80% |
 | `core/encoding` | 45 | 636 | 504 | 0 | 132 | 0 | 79% |
@@ -39,7 +39,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/math` | 29 | 243 | 243 | 0 | 0 | 0 | 100% |
 | `core/method` | 26 | 199 | 196 | 0 | 1 | 2 | 98% |
 | `core/module` | 86 | 1051 | 828 | 0 | 205 | 18 | 79% |
-| `core/mutex` | 7 | 35 | 34 | 0 | 0 | 1 | 97% |
+| `core/mutex` | 7 | 35 | 35 | 0 | 0 | 0 | 100% |
 | `core/nil` | 18 | 27 | 25 | 0 | 2 | 0 | 93% |
 | `core/numeric` | 46 | 326 | 324 | 0 | 0 | 2 | 99% |
 | `core/objectspace` | 29 | 108 | 108 | 0 | 0 | 0 | 100% |
@@ -59,7 +59,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/struct` | 30 | 170 | 167 | 0 | 3 | 0 | 98% |
 | `core/symbol` | 29 | 270 | 258 | 0 | 9 | 3 | 96% |
 | `core/systemexit` | 2 | 6 | 6 | 0 | 0 | 0 | 100% |
-| `core/thread` | 54 | 398 | 365 | 0 | 25 | 8 | 92% |
+| `core/thread` | 54 | 398 | 382 | 0 | 12 | 4 | 96% |
 | `core/threadgroup` | 5 | 8 | 8 | 0 | 0 | 0 | 100% |
 | `core/time` | 66 | 652 | 633 | 0 | 6 | 13 | 97% |
 | `core/tracepoint` | 19 | 76 | 0 | 0 | 76 | 0 | 0% |
@@ -131,4 +131,4 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `optional/capi` | 47 | 0 | 0 | 0 | 0 | 0 | — |
 | `optional/thread_safety` | 1 | 5 | 0 | 0 | 5 | 0 | 0% |
 | `security` | 13 | 26 | 21 | 0 | 5 | 0 | 81% |
-| **total** | 3835 | 32671 | 28124 | 0 | 4196 | 351 | 86% |
+| **total** | 3835 | 32671 | 28143 | 0 | 4183 | 345 | 86% |

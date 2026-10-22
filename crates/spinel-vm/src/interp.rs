@@ -1585,6 +1585,7 @@ fn thread_native(
             threads::current(scope);
             bool_value(scope.fibers().threads.others())
         }
+        ThreadOp::Woken => bool_value(scope.fibers().threads.woken),
         ThreadOp::Backtrace => match threads::take_frames(scope, index(0).unwrap_or(usize::MAX)) {
             None => Value::NIL,
             Some(saved) => {
@@ -1654,23 +1655,10 @@ fn thread_native(
         }
         ThreadOp::Interrupt => {
             let target = index(0).unwrap_or(usize::MAX);
-            let exception = call.args.get(1).copied().unwrap_or(Value::NIL);
-            let unwind = if exception.is_nil() {
-                // A kill is a throw tagged with the thread, which runs every
-                // `ensure` on the way out and no `rescue`: `core/thread.rb`
-                // catches it at the bottom of the thread.
-                let object = threads::object(scope, target);
-                Unwind::Throw {
-                    tag: object,
-                    value: object,
-                }
-            } else {
-                Unwind::Exception(exception)
-            };
-            if target == threads::current(scope) {
-                return Ok(Some(unwind));
-            }
-            threads::interrupt(scope, target, unwind);
+            let block = call.args.get(1).copied().unwrap_or(Value::NIL);
+            // A raise or a kill is a block, run in the target.
+            let frame = threads::interrupt_frame(scope, call, block, ids)?;
+            threads::interrupt(scope, target, frame);
             Value::NIL
         }
     };
@@ -12810,6 +12798,11 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             Builtin::Kernel,
             &["__thread_others__"],
             Native::Thread(ThreadOp::Others),
+        ),
+        (
+            Builtin::Kernel,
+            &["__thread_woken__"],
+            Native::Thread(ThreadOp::Woken),
         ),
         (
             Builtin::Kernel,

@@ -1,1 +1,0 @@
-fails(#328: a thread killed after being signalled leaves without retaking the mutex):ConditionVariable#wait reacquires the lock even if the thread is killed after being signaled

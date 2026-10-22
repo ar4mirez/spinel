@@ -999,13 +999,16 @@ pub enum ThreadOp {
     Pass,
     /// `__thread_exit__`: the running thread is done; never answers.
     Exit,
-    /// `__thread_interrupt__(index, exception)`: raise it in that thread when
-    /// it next runs; nil kills it.
+    /// `__thread_interrupt__(index, block)`: call the block in that thread
+    /// when it next runs, where it stopped.
     Interrupt,
     /// `__thread_status__(index)`: `:run`, `:sleep` or `:dead`.
     Status,
     /// `__thread_others__`: whether another thread is alive.
     Others,
+    /// `__thread_woken__`: whether the running thread last ran on out of a
+    /// wait, woken.
+    Woken,
     /// `__thread_backtrace__(index)`: `[strings, [path, line, label]...]` for
     /// a thread that is not running, or nil.
     Backtrace,
