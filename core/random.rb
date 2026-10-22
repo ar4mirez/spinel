@@ -140,13 +140,21 @@ class Random
   # fits 64 bits, and `limited_big_rand` past that.
   def __limited__(limit)
     return 0 if limit == 0
-    mask = (1 << limit.bit_length) - 1
     if limit <= 0xffffffff
-      loop do
+      # CRuby's `make_mask`: every bit below the top one set, in five steps
+      # where `bit_length` takes one per bit.
+      mask = limit | (limit >> 1)
+      mask = mask | (mask >> 2)
+      mask = mask | (mask >> 4)
+      mask = mask | (mask >> 8)
+      mask = mask | (mask >> 16)
+      while true
         value = __mt_next__(@state, 1)[0] & mask
         return value if value <= limit
       end
-    elsif limit <= 0xffffffffffffffff
+    end
+    mask = (1 << limit.bit_length) - 1
+    if limit <= 0xffffffffffffffff
       loop do
         value = 0
         fits = true
