@@ -88,6 +88,9 @@ fix is a different slice. The reason says which slice, by number.
 ## What is here now
 
 Three hundred and forty-four tags across a hundred and fifty-seven files.
+Matching Ruby 4.0.8's `Set` (#365) moved six to #368 and changed nothing
+else: Spinel now keeps `compare_by_identity` there as 4.0.8 does, and the
+examples wait for a ruby/spec that asserts it. Before it,
 #365 added six, and five of their files: the `core/set` examples saying
 `&`, `map!`, `classify`, `divide`, `flatten` and `flatten!` drop
 `compare_by_identity`, which Ruby 4.0.8 now keeps while the pinned ruby/spec
