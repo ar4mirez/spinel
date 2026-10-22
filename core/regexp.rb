@@ -71,22 +71,52 @@ end
 class Regexp
   # Every metacharacter backslashed, the whitespace escapes spelled out, and
   # `/` left alone — CRuby's set, measured. US-ASCII when the result is ASCII.
+  ESCAPES = Array.new(128)
+  " .*?+^$|()[]{}\\-#".each_char { |c| ESCAPES[c.ord] = "\\" + c }
+  ESCAPES[0x0a] = "\\n"
+  ESCAPES[0x09] = "\\t"
+  ESCAPES[0x0d] = "\\r"
+  ESCAPES[0x0c] = "\\f"
+  ESCAPES[0x0b] = "\\v"
+  ESCAPES.freeze
+  private_constant :ESCAPES
+
+  # Where no byte of a wider character is below 0x80 — BINARY (index 0),
+  # UTF-8 (1), US-ASCII (2), or any ASCII-compatible String that is all ASCII
+  # — every byte below 0x80 is a character, so the bytes are walked and the
+  # runs between metacharacters copied whole: `gsub` with a String pattern
+  # escapes it on every call (#299). Shift_JIS and its kin have trail bytes
+  # like `\` and `[`, and are walked a character at a time.
   def self.escape(text)
     text = text.to_s if text.is_a?(Symbol)
     text = String.__coerce__(text)
+    unless text.__encoding_index__ <= 2 || (text.encoding.ascii_compatible? && text.ascii_only?)
+      return __escape_chars__(text)
+    end
+    out = String.new(encoding: text.encoding)
+    size = text.bytesize
+    copied = 0
+    i = 0
+    while i < size
+      byte = text.__getbyte__(i)
+      if byte < 0x80 && (escaped = ESCAPES[byte])
+        out << text.__byteslice__(copied, i - copied) if i > copied
+        out << escaped
+        copied = i + 1
+      end
+      i += 1
+    end
+    out << text.__byteslice__(copied, size - copied) if size > copied
+    out.force_encoding(Encoding::US_ASCII) if out.ascii_only?
+    out
+  end
+
+  def self.__escape_chars__(text)
     out = String.new(encoding: text.encoding)
     text.each_char do |c|
-      case c
-      when " " then out << "\\ "
-      when "\n" then out << "\\n"
-      when "\t" then out << "\\t"
-      when "\r" then out << "\\r"
-      when "\f" then out << "\\f"
-      when "\v" then out << "\\v"
-      when ".", "*", "?", "+", "^", "$", "|", "(", ")", "[", "]", "{", "}", "\\", "-", "#"
-        out << "\\" << c
-      else out << c
-      end
+      ord = c.ord
+      escaped = ord < 0x80 ? ESCAPES[ord] : nil
+      escaped.nil? ? out << c : out << escaped
     end
     out.force_encoding(Encoding::US_ASCII) if out.ascii_only?
     out

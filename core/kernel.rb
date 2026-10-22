@@ -26,8 +26,10 @@ module Kernel
   #
   # The ancestry is the object's real one, singleton class first (#202): a
   # module it was `extend`ed with counts, and an overridden `class` does not.
+  # The class table answers it in place; building `ancestors` to search it
+  # was most of what `gsub` and `split` cost per call (#299).
   def is_a?(mod)
-    return true if __reflect_class_of__(self).ancestors.include?(mod)
+    return true if __reflect_kind_of__(self, mod)
     raise TypeError, "class or module required" if __reflect_module_kind__(mod).nil?
     false
   end
