@@ -1280,7 +1280,7 @@ class Array
       # taken one at or below it, in order.
       sorted = []
       picked = []
-      draws.each do |draw|
+      draws.first(n).each do |draw|
         j = 0
         while j < sorted.size && draw >= sorted[j]
           draw = draw + 1
