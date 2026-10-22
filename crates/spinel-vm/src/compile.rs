@@ -75,9 +75,12 @@ type Emit = Result<(), Unsupported>;
 /// The slot name for the implicit block parameter.
 ///
 /// A real local called `it` shadows it, and Prism has already decided which is
-/// which — a shadowed one arrives as [`VarRef::Local`], not [`VarRef::It`], so
-/// sharing the name here cannot collide with a user's variable.
-const IT: &str = "it";
+/// which — a shadowed one arrives as [`VarRef::Local`], not [`VarRef::It`].
+/// The slot is still spelled with a leading `%`, as the temporaries are,
+/// because `it` is not a local to anything that reads names: a `Binding` must
+/// neither list it nor get or set it, and an `eval` must not resolve `it` to
+/// it (#38). `Binding#implicit_parameters` is what reads it, by this name.
+pub(crate) const IT: &str = "%it";
 
 /// The slot a `for` body's block is handed each element in.
 ///

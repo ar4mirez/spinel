@@ -10,7 +10,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/argf` | 35 | 139 | 0 | 0 | 120 | 19 | 0% |
 | `core/array` | 132 | 2898 | 2795 | 0 | 89 | 14 | 96% |
 | `core/basicobject` | 14 | 172 | 165 | 0 | 7 | 0 | 96% |
-| `core/binding` | 12 | 98 | 58 | 0 | 38 | 2 | 59% |
+| `core/binding` | 12 | 98 | 95 | 0 | 1 | 2 | 97% |
 | `core/builtin_constants` | 1 | 27 | 17 | 0 | 10 | 0 | 63% |
 | `core/class` | 8 | 54 | 46 | 0 | 8 | 0 | 85% |
 | `core/comparable` | 7 | 54 | 54 | 0 | 0 | 0 | 100% |
@@ -66,7 +66,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/true` | 9 | 13 | 11 | 0 | 2 | 0 | 85% |
 | `core/unboundmethod` | 20 | 109 | 107 | 0 | 0 | 2 | 98% |
 | `core/warning` | 5 | 31 | 31 | 0 | 0 | 0 | 100% |
-| `language` | 67 | 2668 | 2501 | 0 | 129 | 38 | 94% |
+| `language` | 67 | 2668 | 2504 | 0 | 129 | 35 | 94% |
 | `language/predefined` | 2 | 14 | 12 | 0 | 0 | 2 | 86% |
 | `language/regexp` | 11 | 257 | 225 | 0 | 29 | 3 | 88% |
 | `library/English` | 2 | 27 | 1 | 0 | 0 | 26 | 4% |
@@ -131,4 +131,4 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `optional/capi` | 47 | 0 | 0 | 0 | 0 | 0 | — |
 | `optional/thread_safety` | 1 | 5 | 0 | 0 | 5 | 0 | 0% |
 | `security` | 13 | 31 | 28 | 0 | 3 | 0 | 90% |
-| **total** | 3835 | 32682 | 28396 | 0 | 3944 | 342 | 87% |
+| **total** | 3835 | 32682 | 28436 | 0 | 3907 | 339 | 87% |

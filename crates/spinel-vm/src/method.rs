@@ -785,6 +785,10 @@ pub enum BindingOp {
     Set,
     /// `Binding#local_variables`, innermost first, without duplicates.
     Names,
+    /// `Binding#__binding_implicit__`: `[name, value]` for each implicit
+    /// parameter — `it`, or `_1` up to the highest used — of the binding's
+    /// innermost scope only.
+    Implicit,
     /// `Binding#receiver`.
     Receiver,
     /// `Binding#__binding_receiver_set__(self)`: `Kernel.eval` runs with
