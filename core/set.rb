@@ -59,6 +59,15 @@ class Set
     @__hash__.compare_by_identity?
   end
 
+  # An empty set of this one's class, compared the way this one is. Since
+  # ruby 4.0.8 the sets `&`, `^`, `map!`, `classify`, `divide` and `flatten`
+  # build keep `compare_by_identity` (#365).
+  def __empty_like__
+    out = self.class.new
+    out.compare_by_identity if compare_by_identity?
+    out
+  end
+
   def size
     @__hash__.size
   end
@@ -188,9 +197,10 @@ class Set
     return enum_for(:collect!) { size } unless block_given?
     Kernel.__check_frozen__(self)
     mapped = to_a.map { |element| yield(element) }
-    # A fresh table: what comes out of the block is compared the ordinary
-    # way, whatever the set did before. Measured.
+    # A fresh table, compared the way this set is (ruby 4.0.8).
+    identity = compare_by_identity?
     @__hash__ = {}
+    @__hash__.compare_by_identity if identity
     mapped.each { |element| @__hash__[element] = true }
     self
   end
@@ -207,20 +217,18 @@ class Set
   end
   alias difference -
 
-  # A new set, compared the ordinary way even when this one is not. Measured:
-  # `^` keeps the identity flag and `&` does not.
   def &(enum)
-    out = self.class.new
+    out = __empty_like__
     __each_of__(enum) { |element| out.add(element) if include?(element) }
     out
   end
   alias intersection &
 
-  # In one or the other, and not both.
+  # In one or the other, and not both. An Enumerable is gathered the way
+  # this set compares, so two equal strings stay two under identity.
   def ^(enum)
-    other = enum.is_a?(Set) ? enum : self.class.new(enum)
-    out = self.class.new
-    out.compare_by_identity if compare_by_identity?
+    other = enum.is_a?(Set) ? enum : __empty_like__.merge(enum)
+    out = __empty_like__
     each { |element| out.add(element) unless other.include?(element) }
     other.each { |element| out.add(element) unless include?(element) }
     out
@@ -307,7 +315,7 @@ class Set
     groups = {}
     each do |element|
       key = yield(element)
-      groups[key] = self.class.new unless groups.key?(key)
+      groups[key] = __empty_like__ unless groups.key?(key)
       groups[key].add(element)
     end
     groups
@@ -323,7 +331,7 @@ class Set
       out = self.class.new
       elements.each do |start|
         next if group_of.key?(start)
-        group = self.class.new
+        group = __empty_like__
         pending = [start]
         group_of[start] = group
         until pending.empty?
@@ -346,7 +354,7 @@ class Set
   end
 
   def flatten
-    self.class.new.__flatten_merge__(self, [])
+    __empty_like__.__flatten_merge__(self, [])
   end
 
   def flatten!

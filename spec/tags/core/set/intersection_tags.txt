@@ -1,1 +1,1 @@
-fails(#365: Ruby 4.0.8 keeps compare_by_identity here, the pinned ruby/spec and Spinel do not):Set#& does not retain compare_by_identity flag
+fails(#368: Ruby 4.0.8 keeps compare_by_identity here, and so does Spinel; the pinned ruby/spec still asserts 4.0.7):Set#& does not retain compare_by_identity flag
