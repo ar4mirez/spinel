@@ -209,6 +209,16 @@ fn a_chilled_string_changed_by_an_instruction_warns_once() {
 }
 
 #[test]
+fn a_chilled_string_warns_before_an_instruction_changes_it() {
+    let output = run(&["-W:deprecated", "chilled_vm_raise.rb"], "");
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "boom\n[]\nboom\nboom\nnil\n"
+    );
+}
+
+#[test]
 fn a_missing_script_is_a_load_error() {
     let output = run(&["missing.rb"], "");
     assert_eq!(output.status.code(), Some(1));

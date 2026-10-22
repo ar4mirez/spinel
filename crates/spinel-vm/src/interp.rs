@@ -2366,9 +2366,7 @@ fn run<'h>(
                     Insn::SetIvar(name) => {
                         let symbol = frames[top].symbols[name as usize];
                         let receiver = frames[top].receiver;
-                        let value = stack.pop().expect("setivar on an empty stack");
-                        ivar_set(scope, receiver, symbol, value)?;
-                        if let Some(unwind) = thaw_chilled(
+                        if let Some(thawing) = thaw_chilled(
                             scope,
                             &mut stack,
                             &mut frames,
@@ -2376,8 +2374,10 @@ fn run<'h>(
                             &mut ids,
                             receiver,
                         )? {
-                            return Ok(Step::Unwind(unwind));
+                            return Ok(thawing);
                         }
+                        let value = stack.pop().expect("setivar on an empty stack");
+                        ivar_set(scope, receiver, symbol, value)?;
                     }
 
                     Insn::DefinedIvar(name) => {
@@ -3186,7 +3186,18 @@ fn run<'h>(
                         let iseq = Arc::clone(&frames[top].iseq.children[child as usize]);
                         let symbol = frames[top].symbols[name as usize];
                         let cref = frames[top].cref;
-                        let receiver = stack.pop().expect("a receiver to define on");
+                        let receiver = *stack.last().expect("a receiver to define on");
+                        if let Some(thawing) = thaw_chilled(
+                            scope,
+                            &mut stack,
+                            &mut frames,
+                            proc_class,
+                            &mut ids,
+                            receiver,
+                        )? {
+                            return Ok(thawing);
+                        }
+                        stack.pop();
                         // `def frozen_obj.m` raises: a singleton method is stored on
                         // the object, and a frozen object does not take stores.
                         frozen_check(scope, receiver)?;
@@ -3206,18 +3217,6 @@ fn run<'h>(
                             receiver,
                             "singleton_method_added",
                             vec![Value::symbol(symbol)],
-                        )? {
-                            return Ok(Step::Unwind(unwind));
-                        }
-                        // Pushed last, so the warning comes before the hook,
-                        // as `rb_check_frozen` has it before the definition.
-                        if let Some(unwind) = thaw_chilled(
-                            scope,
-                            &mut stack,
-                            &mut frames,
-                            proc_class,
-                            &mut ids,
-                            receiver,
                         )? {
                             return Ok(Step::Unwind(unwind));
                         }
@@ -3425,6 +3424,21 @@ fn run<'h>(
                     Insn::OpenClass(index) => {
                         let iseq = Arc::clone(&frames[top].iseq);
                         let def = &iseq.class_defs[index as usize];
+                        // `class << s` on a chilled String warns before it opens.
+                        if def.kind == DefKind::Singleton {
+                            let object =
+                                *stack.last().expect("an object to open the singleton of");
+                            if let Some(thawing) = thaw_chilled(
+                                scope,
+                                &mut stack,
+                                &mut frames,
+                                proc_class,
+                                &mut ids,
+                                object,
+                            )? {
+                                return Ok(thawing);
+                            }
+                        }
                         if let Some(unwind) = open_class(
                             scope,
                             &mut stack,
@@ -6147,11 +6161,9 @@ fn open_class<'h>(
     let top = frames.len() - 1;
     let outer = frames[top].cref;
 
-    let mut opened = None;
     let (id, hooks) = match def.kind {
         DefKind::Singleton => {
             let object = stack.pop().expect("an object to open the singleton of");
-            opened = Some(object);
             (singleton_of(scope, object)?, Vec::new())
         }
         kind => {
@@ -6266,10 +6278,6 @@ fn open_class<'h>(
         {
             return Ok(Some(unwind));
         }
-    }
-    // `class << s` on a chilled String warns before its body runs.
-    if let Some(object) = opened {
-        return thaw_chilled(scope, stack, frames, proc_class, ids, object);
     }
     Ok(None)
 }
@@ -6975,13 +6983,22 @@ fn vm_warn<'h>(
     )
 }
 
-/// Thaw `object` if it is a chilled String (#263) that an instruction just
-/// changed: `def s.m`, `class << s`, `@x =` in one of its methods (#341).
+/// Thaw `object` if it is a chilled String (#263) that the instruction being
+/// run is about to change: `def s.m`, `class << s`, `@x =` in one of its
+/// methods (#341).
 ///
-/// CRuby reaches all three through `rb_check_frozen`. Here they are sent to
-/// `Kernel.__thaw__`, the same Ruby every mutator's thaw goes through, so the
-/// warning, its category and its once-only are decided in one place. A
-/// String that is not chilled costs one header read.
+/// CRuby reaches all three through `rb_check_frozen`, which warns before the
+/// change, so a `Warning.warn` that raises leaves the String as it was. Here
+/// the instruction is rewound, with its operands still on the stack, under a
+/// call to `Kernel.__thaw__`, the same Ruby every mutator's thaw goes through:
+/// the warning, its category and its once-only are decided in one place, and
+/// the instruction runs again on a String that is no longer chilled. `None`
+/// is "not chilled, carry on", and costs one header read.
+///
+/// ponytail: while the thaw runs, the rewound frame's line is that of the
+/// instruction before, the operand's. That is the same line unless the
+/// operand spans lines. Upgrade by letting a frame resume at an instruction
+/// rather than after one.
 fn thaw_chilled<'h>(
     scope: &mut HandleScope<'h>,
     stack: &mut Stack,
@@ -6989,7 +7006,7 @@ fn thaw_chilled<'h>(
     proc_class: Handle<'h>,
     ids: &mut u64,
     object: Value,
-) -> Result<Option<Unwind>, Error> {
+) -> Result<Option<Step>, Error> {
     if object.is_immediate() {
         return Ok(None);
     }
@@ -6997,8 +7014,10 @@ fn thaw_chilled<'h>(
     if scope.chilled(handle).is_none() {
         return Ok(None);
     }
+    let top = frames.len() - 1;
+    frames[top].pc -= 1;
     let kernel = scope.classes().object(Builtin::Kernel.id());
-    call_discarded(
+    let unwind = call_discarded(
         scope,
         stack,
         frames,
@@ -7007,7 +7026,8 @@ fn thaw_chilled<'h>(
         kernel,
         crate::shared::symbols::intern("__thaw__"),
         vec![object],
-    )
+    )?;
+    Ok(Some(unwind.map_or(Step::Next, Step::Unwind)))
 }
 
 /// Whether reading the unset global `name` is worth a `-w` warning.
