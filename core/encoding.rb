@@ -186,7 +186,7 @@ class Encoding
       when Encoding then object
       when String then object.encoding
       when Symbol then object.to_s.encoding
-      when Regexp then object.source.ascii_only? ? Encoding::US_ASCII : Encoding::UTF_8
+      when Regexp then object.encoding
       end
     end
   end

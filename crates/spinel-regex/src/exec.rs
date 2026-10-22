@@ -667,69 +667,91 @@ impl Subject<'_> {
     }
 
     fn is_char_boundary(&self, at: usize) -> bool {
-        match self.enc {
-            Encoding::Binary => true,
-            Encoding::Utf8 => self.bytes.get(at).is_none_or(|&b| b & 0xc0 != 0x80),
-        }
+        self.enc.is_char_boundary(self.bytes, at)
     }
 
     /// The character at `sp` and how many bytes it takes. A byte that does
-    /// not start a valid UTF-8 sequence is never handed over by the VM, which
+    /// not start a valid character is never handed over by the VM, which
     /// refuses a broken subject before matching; it reads as one character
     /// that matches nothing a pattern can spell.
     fn next_char(&self, sp: usize) -> Option<(char, usize)> {
-        let first = *self.bytes.get(sp)?;
-        match self.enc {
-            // One character per byte, and the character *is* the byte: a
-            // binary pattern's `\xff` is U+00FF to the parser, so the two meet.
-            Encoding::Binary => Some((char::from(first), 1)),
-            Encoding::Utf8 => {
-                let width = match first {
-                    0x00..=0x7f => 1,
-                    0xc0..=0xdf => 2,
-                    0xe0..=0xef => 3,
-                    _ => 4,
-                };
-                let end = (sp + width).min(self.bytes.len());
-                match std::str::from_utf8(&self.bytes[sp..end]) {
-                    Ok(text) => text.chars().next().map(|c| (c, c.len_utf8())),
-                    Err(_) => Some(('\u{fffd}', 1)),
-                }
-            }
-        }
+        self.enc.decode(self.bytes.get(sp..)?)
     }
 
+    /// The character that ends at `sp`. In EUC-JP and Shift_JIS that means
+    /// reading forward from somewhere known, because a trail byte can also be
+    /// a lead, or an `a`.
     fn prev_char(&self, sp: usize) -> Option<char> {
         if sp == 0 {
             return None;
         }
-        let mut from = sp - 1;
-        while from > 0 && !self.is_char_boundary(from) {
-            from -= 1;
-        }
+        let from = self.enc.char_start_before(self.bytes, sp);
         self.next_char(from).map(|(c, _)| c)
     }
 }
 
-/// Whether a character's classes are Unicode's or only ASCII's.
-///
-/// In a binary subject a byte past ASCII is no letter, no space and no case
-/// of anything — Onigmo's ASCII-8BIT answers false for every ctype above 0x7f
-/// — even though the `char` it is carried as here would say otherwise.
-fn ascii_only(c: char, enc: Encoding) -> bool {
-    enc == Encoding::Binary && !c.is_ascii()
+/// What a character past ASCII is to the classes and the case folds, which is
+/// a property of the encoding it was read in.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    /// ASCII, in any encoding, or anything in UTF-8: Unicode's classes.
+    Unicode,
+    /// A byte of BINARY: no class, no case — Onigmo's ASCII-8BIT answers
+    /// false for every ctype above `0x7f`, even though the `char` it is
+    /// carried as here would say otherwise.
+    Byte,
+    /// A byte of ISO-8859-1: Onigmo's Latin-1 table, Unicode's cases.
+    Latin1(u8),
+    /// A character of EUC-JP or Shift_JIS past ASCII: word, graph and print,
+    /// and nothing else; a case only by the encoding's own arithmetic.
+    Japanese,
+}
+
+fn kind(c: char, enc: Encoding) -> Kind {
+    if c.is_ascii() {
+        return Kind::Unicode;
+    }
+    match enc {
+        Encoding::Utf8 => Kind::Unicode,
+        Encoding::Binary => Kind::Byte,
+        Encoding::Latin1 => Kind::Latin1(u8::try_from(u32::from(c)).unwrap_or(0xff)),
+        Encoding::EucJp | Encoding::ShiftJis => Kind::Japanese,
+    }
+}
+
+/// Whether case folding goes through Unicode's tables for this character.
+fn unicode_case(c: char, enc: Encoding) -> bool {
+    matches!(kind(c, enc), Kind::Unicode | Kind::Latin1(_))
 }
 
 fn chars_equal(a: char, b: char, icase: bool, enc: Encoding) -> bool {
     if a == b {
         return true;
     }
-    if ascii_only(a, enc) || ascii_only(b, enc) {
+    if !icase {
+        return false;
+    }
+    if kind(a, enc) == Kind::Japanese || kind(b, enc) == Kind::Japanese {
+        return enc.other_case(a) == Some(b);
+    }
+    if !unicode_case(a, enc) || !unicode_case(b, enc) {
         return false;
     }
     // ponytail: simple case folding, one character to one character. Full
     // Unicode folding (ß to ss) needs a table; add it with the Encoding slice.
-    icase && a.to_lowercase().eq(b.to_lowercase())
+    a.to_lowercase().eq(b.to_lowercase())
+}
+
+/// Whether `test` holds for some other case of `c`.
+fn any_other_case(c: char, enc: Encoding, mut test: impl FnMut(char) -> bool) -> bool {
+    match kind(c, enc) {
+        Kind::Byte => false,
+        Kind::Japanese => enc.other_case(c).is_some_and(test),
+        Kind::Unicode | Kind::Latin1(_) => c
+            .to_lowercase()
+            .chain(c.to_uppercase())
+            .any(|folded| folded != c && test(folded)),
+    }
 }
 
 fn text_at(haystack: Subject<'_>, sp: usize, text: &[u8], icase: bool) -> bool {
@@ -752,9 +774,19 @@ fn text_at(haystack: Subject<'_>, sp: usize, text: &[u8], icase: bool) -> bool {
     true
 }
 
-/// Ruby's `\b` is defined in terms of `\w`, which is ASCII.
-fn is_word(c: char) -> bool {
-    c.is_ascii_alphanumeric() || c == '_'
+/// Ruby's `\b` is defined in terms of a word character: ASCII's in UTF-8
+/// and BINARY here, the encoding's own table in ISO-8859-1, and every
+/// multibyte character in EUC-JP and Shift_JIS, which `\w` is not.
+///
+/// ponytail: CRuby's UTF-8 `\b` is Unicode's word, not ASCII's —
+/// `/\b/ =~ "é"` is 0 there. Out of #339's scope; it moves with the rest of
+/// the Onigmo dialect.
+fn is_word(c: char, enc: Encoding) -> bool {
+    match kind(c, enc) {
+        Kind::Latin1(b) => crate::chars::latin1::posix(Posix::Word, b),
+        Kind::Japanese => true,
+        Kind::Unicode | Kind::Byte => c.is_ascii_alphanumeric() || c == '_',
+    }
 }
 
 fn anchor_holds(anchor: Anchor, haystack: Subject<'_>, sp: usize, start: usize) -> bool {
@@ -774,8 +806,9 @@ fn anchor_holds(anchor: Anchor, haystack: Subject<'_>, sp: usize, start: usize) 
         Anchor::LineStart => sp == 0 || (sp < haystack.len() && bytes[sp - 1] == b'\n'),
         Anchor::LineEnd => sp == haystack.len() || bytes[sp..].starts_with(b"\n"),
         Anchor::WordBoundary | Anchor::NotWordBoundary => {
-            let before = haystack.prev_char(sp).is_some_and(is_word);
-            let after = haystack.next_char(sp).is_some_and(|(c, _)| is_word(c));
+            let enc = haystack.enc;
+            let before = haystack.prev_char(sp).is_some_and(|c| is_word(c, enc));
+            let after = haystack.next_char(sp).is_some_and(|(c, _)| is_word(c, enc));
             (before != after) == matches!(anchor, Anchor::WordBoundary)
         }
     }
@@ -787,13 +820,12 @@ fn class_matches(class: &Class, c: char, enc: Encoding) -> bool {
         .iter()
         .any(|item| item_matches(item, c, class.icase, enc));
     // Case folding inside a class: `[a]` under `/i` also matches `A`.
-    if !held && class.icase && !ascii_only(c, enc) {
-        held = c.to_lowercase().chain(c.to_uppercase()).any(|folded| {
-            folded != c
-                && class
-                    .items
-                    .iter()
-                    .any(|item| item_matches(item, folded, false, enc))
+    if !held && class.icase {
+        held = any_other_case(c, enc, |folded| {
+            class
+                .items
+                .iter()
+                .any(|item| item_matches(item, folded, false, enc))
         });
     }
     // `[a-z&&[^b]]`: every intersected branch has to agree, and the `^`
@@ -817,15 +849,23 @@ fn item_matches(item: &ClassItem, c: char, icase: bool, enc: Encoding) -> bool {
         ClassItem::Char(want) => chars_equal(c, *want, icase, enc),
         ClassItem::Range(low, high) => {
             (*low..=*high).contains(&c)
-                || (icase
-                    && !ascii_only(c, enc)
-                    && c.to_lowercase()
-                        .chain(c.to_uppercase())
-                        .any(|f| (*low..=*high).contains(&f)))
+                || (icase && any_other_case(c, enc, |f| (*low..=*high).contains(&f)))
         }
-        ClassItem::Perl(kind, negated) => perl_matches(*kind, c) != *negated,
-        ClassItem::Posix(kind, negated) => {
-            (!ascii_only(c, enc) && posix_matches(*kind, c)) != *negated
+        ClassItem::Perl(perl, negated) => {
+            let held = match kind(c, enc) {
+                Kind::Latin1(b) => crate::chars::latin1::perl(*perl, b),
+                _ => perl_matches(*perl, c),
+            };
+            held != *negated
+        }
+        ClassItem::Posix(posix, negated) => {
+            let held = match kind(c, enc) {
+                Kind::Unicode => posix_matches(*posix, c),
+                Kind::Byte => false,
+                Kind::Latin1(b) => crate::chars::latin1::posix(*posix, b),
+                Kind::Japanese => matches!(posix, Posix::Word | Posix::Graph | Posix::Print),
+            };
+            held != *negated
         }
         ClassItem::Nested(inner) => class_matches(inner, c, enc),
     }
@@ -919,7 +959,7 @@ mod posix_oracle {
     /// Measured by `scripts/regexp-oracle.rb --generate`. CI re-checks it.
     const TABLE: &str = include_str!("../tests/posix.txt");
 
-    fn kind(name: &str) -> Posix {
+    pub(super) fn kind(name: &str) -> Posix {
         match name {
             "alpha" => Posix::Alpha,
             "digit" => Posix::Digit,
@@ -1038,6 +1078,179 @@ mod posix_oracle {
              wrote down. Fix the bracket, or fix the list — do not widen it to \
              make a run green.\n\n{}",
             reports.join("\n\n")
+        );
+    }
+}
+
+/// The classes, word boundary and case folds of the characters past ASCII in
+/// ISO-8859-1, EUC-JP and Shift_JIS, replayed against CRuby (#339).
+///
+/// A unit test for the reason [`posix_oracle`] is one: the predicates are what
+/// is checked, over every character each encoding has.
+#[cfg(test)]
+mod encoding_oracle {
+    use super::{chars_equal, is_word, item_matches};
+    use crate::Encoding;
+    use crate::parse::{ClassItem, Perl};
+
+    /// Measured by `scripts/regexp-oracle.rb --generate`. CI re-checks it.
+    const TABLE: &str = include_str!("../tests/encodings.txt");
+
+    fn encoding(name: &str) -> Encoding {
+        match name {
+            "ISO-8859-1" => Encoding::Latin1,
+            "EUC-JP" => Encoding::EucJp,
+            "Windows-31J" | "Shift_JIS" => Encoding::ShiftJis,
+            other => panic!("encodings.txt names an encoding the engine does not read: {other}"),
+        }
+    }
+
+    /// Every character past ASCII, by its code, read the way a subject is.
+    fn characters(enc: Encoding) -> Vec<(u32, char)> {
+        let mut sequences: Vec<Vec<u8>> = Vec::new();
+        let euc = 0xa1..=0xfe_u8;
+        match enc {
+            Encoding::Latin1 => sequences.extend((0x80..=0xff_u8).map(|b| vec![b])),
+            Encoding::EucJp => {
+                sequences.extend(euc.clone().map(|t| vec![0x8e, t]));
+                for lead in euc.clone() {
+                    sequences.extend(euc.clone().map(|t| vec![lead, t]));
+                }
+                for mid in euc.clone() {
+                    sequences.extend(euc.clone().map(|t| vec![0x8f, mid, t]));
+                }
+            }
+            _ => {
+                sequences.extend((0xa1..=0xdf_u8).map(|b| vec![b]));
+                for lead in (0x81..=0x9f_u8).chain(0xe0..=0xfc) {
+                    let trails = (0x40..=0x7e_u8).chain(0x80..=0xfc);
+                    sequences.extend(trails.map(|t| vec![lead, t]));
+                }
+            }
+        }
+        sequences
+            .into_iter()
+            .map(|bytes| {
+                let (c, len) = enc.decode(&bytes).expect("a character");
+                assert_eq!(len, bytes.len(), "{bytes:02X?} is one character");
+                let code = bytes.iter().fold(0u32, |code, &b| code << 8 | u32::from(b));
+                assert_eq!(enc.code(c), code, "{bytes:02X?} keeps its code");
+                assert_eq!(enc.char_bytes(c), bytes, "{bytes:02X?} writes back");
+                (code, c)
+            })
+            .collect()
+    }
+
+    fn holds(label: &str, c: char, enc: Encoding) -> bool {
+        let perl = |kind| item_matches(&ClassItem::Perl(kind, false), c, false, enc);
+        match label {
+            "\\b" => is_word(c, enc),
+            "\\w" => perl(Perl::Word),
+            "\\d" => perl(Perl::Digit),
+            "\\s" => perl(Perl::Space),
+            "\\h" => perl(Perl::Hex),
+            name => item_matches(
+                &ClassItem::Posix(super::posix_oracle::kind(name), false),
+                c,
+                false,
+                enc,
+            ),
+        }
+    }
+
+    fn hex(text: &str) -> u32 {
+        u32::from_str_radix(text, 16).expect("a hex code")
+    }
+
+    /// `LO-HI;LO;...`, or `all` or `none` of `codes`.
+    fn wanted(field: &str, codes: &[u32]) -> Vec<u32> {
+        match field {
+            "all" => codes.to_vec(),
+            "none" | "" => Vec::new(),
+            ranges => ranges
+                .split(';')
+                .flat_map(|range| {
+                    let (lo, hi) = range.split_once('-').unwrap_or((range, range));
+                    hex(lo)..=hex(hi)
+                })
+                .collect(),
+        }
+    }
+
+    /// `LO-HI+D;...` as each code's other case.
+    fn folds(field: &str) -> std::collections::HashMap<u32, u32> {
+        let mut pairs = std::collections::HashMap::new();
+        for block in field.split(';').filter(|b| !b.is_empty()) {
+            let at = block.rfind(['+', '-']).expect("a distance");
+            let (range, distance) = block.split_at(at);
+            let (lo, hi) = range.split_once('-').expect("a range");
+            let distance = hex(&distance[1..]);
+            for code in hex(lo)..=hex(hi) {
+                let other = if block.as_bytes()[at] == b'+' {
+                    code + distance
+                } else {
+                    code - distance
+                };
+                pairs.insert(code, other);
+            }
+        }
+        pairs
+    }
+
+    #[test]
+    fn every_class_and_fold_agrees_with_cruby() {
+        let mut wrong = Vec::new();
+        let mut lines = 0;
+        for line in TABLE.lines() {
+            if line.starts_with('#') || line.trim().is_empty() {
+                continue;
+            }
+            let fields: Vec<&str> = line.split('\t').collect();
+            let (name, label, field) = (fields[0], fields[1], fields.get(2).copied().unwrap_or(""));
+            let enc = encoding(name);
+            let chars = characters(enc);
+            lines += 1;
+            if label == "fold" {
+                let want = folds(field);
+                for &(code, c) in &chars {
+                    // Latin-1's cases are Unicode's, so its partner is found
+                    // by asking; the others' by their arithmetic.
+                    let got = match enc {
+                        Encoding::Latin1 => chars
+                            .iter()
+                            .find(|&&(_, other)| other != c && chars_equal(c, other, true, enc))
+                            .map(|&(other, _)| other),
+                        _ => enc.other_case(c).map(|other| enc.code(other)),
+                    };
+                    if got != want.get(&code).copied() {
+                        wrong.push(format!(
+                            "{name} fold {code:X}: ruby {:X?} engine {got:X?}",
+                            want.get(&code)
+                        ));
+                    }
+                }
+                continue;
+            }
+            let codes: Vec<u32> = chars.iter().map(|&(code, _)| code).collect();
+            let want = wanted(field, &codes);
+            let got: Vec<u32> = chars
+                .iter()
+                .filter(|&&(_, c)| holds(label, c, enc))
+                .map(|&(code, _)| code)
+                .collect();
+            if got != want {
+                wrong.push(format!(
+                    "{name} {label}: ruby {} codes, engine {}",
+                    want.len(),
+                    got.len()
+                ));
+            }
+        }
+        assert_eq!(lines, 80, "encodings.txt has a line per encoding and class");
+        assert!(
+            wrong.is_empty(),
+            "disagreements with CRuby:\n{}",
+            wrong.join("\n")
         );
     }
 }

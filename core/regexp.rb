@@ -230,11 +230,43 @@ class Regexp
         return converted unless converted.nil?
         return Regexp.new(escape(only))
       end
+      # Each part is fixed to an ASCII-compatible encoding, in one that is
+      # not ASCII-compatible, or neither; two of a kind must agree, and the
+      # second kind meets neither of the others. CRuby's `rb_reg_s_union`,
+      # check for check and message for message.
+      fixed = nil
+      wide = nil
+      free = false
       parts = patterns.map do |pattern|
         converted = Regexp.try_convert(pattern)
-        converted.nil? ? escape(String.__coerce__(pattern)) : converted.to_s
+        if converted.nil?
+          string = String.__coerce__(pattern)
+          encoding = string.encoding
+          bound = !string.ascii_only?
+          part = escape(string)
+        else
+          encoding = converted.encoding
+          bound = converted.fixed_encoding?
+          part = converted.to_s
+        end
+        if !encoding.ascii_compatible?
+          wide ||= encoding
+          raise ArgumentError, "incompatible encodings: " + wide.name + " and " + encoding.name unless wide == encoding
+        elsif bound
+          fixed ||= encoding
+          raise ArgumentError, "incompatible encodings: " + fixed.name + " and " + encoding.name unless fixed == encoding
+        else
+          free = true
+        end
+        unless wide.nil?
+          raise ArgumentError, "ASCII incompatible encoding: " + wide.name if free
+          raise ArgumentError, "incompatible encodings: " + wide.name + " and " + fixed.name unless fixed.nil?
+        end
+        part
       end
-      Regexp.new(parts.join("|"))
+      encoding = wide || fixed || Encoding::BINARY
+      separator = encoding.ascii_compatible? ? "|" : "|".encode(encoding)
+      Regexp.new(parts.map(&:b).join(separator.b).force_encoding(encoding))
     end
 
     def try_convert(object)

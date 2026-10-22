@@ -1073,7 +1073,68 @@ impl Parser {
             value = value * 8 + (self.next().expect("just peeked") as u32 - '0' as u32);
             seen += 1;
         }
+        if value > 0x7f && matches!(self.encoding, Encoding::EucJp | Encoding::ShiftJis) {
+            let lead = u8::try_from(value).map_err(|_| {
+                Error::Unsupported("an octal escape past a byte in a multibyte pattern")
+            })?;
+            return self.multibyte_escape(lead);
+        }
         char::from_u32(value).ok_or_else(|| Error::Syntax("invalid octal escape".into()))
+    }
+
+    /// The character an escaped byte past ASCII starts, in EUC-JP or
+    /// Shift_JIS: the escapes after it supply the rest of its bytes, as
+    /// Onigmo reads them — `\xa4\xa2` is `あ`, `\244\242` too, and
+    /// `\xa4` alone is too short. Measured on ruby 4.0.7, messages included.
+    fn multibyte_escape(&mut self, lead: u8) -> Result<char, Error> {
+        let invalid = || Error::Syntax("invalid multibyte escape".into());
+        let len = self.encoding.lead_len(lead).ok_or_else(invalid)?;
+        let mut bytes = vec![lead];
+        while bytes.len() < len {
+            let byte = self
+                .escaped_byte()
+                .ok_or_else(|| Error::Syntax("too short escaped multibyte character".into()))?;
+            bytes.push(byte);
+        }
+        self.encoding.spelled_by(&bytes).ok_or_else(invalid)
+    }
+
+    /// One byte spelled as an escape, `\xHH` or `\NNN`, consumed; or `None`,
+    /// with nothing consumed, when what follows is not one.
+    fn escaped_byte(&mut self) -> Option<u8> {
+        if self.peek() != Some('\\') {
+            return None;
+        }
+        let save = self.pos;
+        self.pos += 1;
+        let (radix, max) = match self.peek() {
+            Some('x') => {
+                self.pos += 1;
+                (16, 2)
+            }
+            Some('0'..='7') => (8, 3),
+            _ => {
+                self.pos = save;
+                return None;
+            }
+        };
+        let mut value: u32 = 0;
+        let mut seen = 0;
+        while seen < max {
+            let Some(digit) = self.peek().and_then(|c| c.to_digit(radix)) else {
+                break;
+            };
+            value = value * radix + digit;
+            self.pos += 1;
+            seen += 1;
+        }
+        match u8::try_from(value) {
+            Ok(byte) if seen > 0 => Some(byte),
+            _ => {
+                self.pos = save;
+                None
+            }
+        }
     }
 
     /// The character an escape stands for, for the escapes that stand for one.
@@ -1121,15 +1182,21 @@ impl Parser {
                     }
                     let n = u32::from_str_radix(&hex, 16)
                         .map_err(|_| Error::Syntax("invalid hex escape".into()))?;
-                    // A byte above ASCII is not a codepoint. In a binary
-                    // pattern it is the byte, which the matcher carries as the
-                    // `char` with the same number; in UTF-8 it would be part
-                    // of a multibyte sequence, which waits for the rest of the
-                    // Onigmo dialect.
-                    if n > 0x7f && self.encoding != Encoding::Binary {
-                        return Err(Error::Unsupported("a non-ASCII \\x byte escape"));
+                    // A byte above ASCII is not a codepoint. In a binary or
+                    // Latin-1 pattern it is the byte, which the matcher
+                    // carries as the `char` with the same number; in EUC-JP
+                    // and Shift_JIS it leads a character the escapes after it
+                    // finish; in UTF-8 it would too, which waits for the rest
+                    // of the Onigmo dialect.
+                    match self.encoding {
+                        _ if n <= 0x7f => char::from_u32(n)
+                            .ok_or_else(|| Error::Syntax("invalid hex escape".into()))?,
+                        Encoding::Utf8 => {
+                            return Err(Error::Unsupported("a non-ASCII \\x byte escape"));
+                        }
+                        Encoding::EucJp | Encoding::ShiftJis => self.multibyte_escape(n as u8)?,
+                        Encoding::Binary | Encoding::Latin1 => char::from(n as u8),
                     }
-                    char::from_u32(n).ok_or_else(|| Error::Syntax("invalid hex escape".into()))?
                 }
             }
             'u' => {
@@ -1185,11 +1252,12 @@ impl Parser {
             // meaning is the character itself.
             other => other,
         };
-        // A binary pattern's characters are bytes, so a character past ASCII
-        // named by its codepoint has no meaning in one.
-        if c == 'u' && !ch.is_ascii() && self.encoding == Encoding::Binary {
+        // A codepoint past ASCII names a Unicode character, which a pattern
+        // in any other encoding has no way to hold: CRuby's "UTF-8 character
+        // in non UTF-8 regexp", refused here rather than spelled.
+        if c == 'u' && !ch.is_ascii() && self.encoding != Encoding::Utf8 {
             return Err(Error::Unsupported(
-                "a non-ASCII \\u escape in a binary pattern",
+                "a non-ASCII \\u escape in a pattern that is not UTF-8",
             ));
         }
         Ok(ch)

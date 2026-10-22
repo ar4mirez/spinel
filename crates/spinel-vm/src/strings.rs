@@ -8,10 +8,11 @@
 //! bytes lived in its own cell could only grow by becoming a different object,
 //! and `s << "x"` must not change `s`'s identity.
 //!
-//! The VM knows an encoding only by index, and character boundaries only for
-//! the three launch encodings. Every other encoding is a name `core/` can
-//! answer about, and a character operation on it is refused by the caller
-//! rather than guessed at.
+//! The VM knows an encoding only by index, and character boundaries for the
+//! three launch encodings, the arithmetic ones `transcode` reads, and the two
+//! Japanese multibyte families, whose lead and trail bytes are ranges rather
+//! than a table. Every other encoding is a name `core/` can answer about, and
+//! a character operation on it is refused by the caller rather than guessed at.
 
 use crate::heap::{Handle, HandleScope, Payload};
 use crate::value::Value;
@@ -37,6 +38,8 @@ pub const US_ASCII: u8 = 2;
 pub const EUC_JP: u8 = 10;
 /// `Windows-31J`, which a regexp's `/s` fixes it to.
 pub const WINDOWS_31J: u8 = 11;
+/// `Shift_JIS`, whose characters are bounded as Windows-31J's are.
+pub const SHIFT_JIS: u8 = 39;
 
 /// Fill a freshly allocated `String` object (of `SLOTS` slots) with `bytes` in
 /// `encoding`.
@@ -132,8 +135,24 @@ pub fn char_len(encoding: u8, bytes: &[u8], at: usize) -> Option<usize> {
     match encoding {
         BINARY | US_ASCII => Some(1),
         UTF_8 => Some(utf8_char_len(&bytes[at..])),
+        EUC_JP | WINDOWS_31J | SHIFT_JIS => {
+            Some(japanese_char_len(encoding, &bytes[at..]).unwrap_or(1))
+        }
         _ => crate::transcode::char_len(encoding, bytes, at),
     }
+}
+
+/// The length of the character at the start of `bytes` in EUC-JP or in the
+/// Shift_JIS family, or `None` when it is not one: a broken one is a character
+/// per byte, as for UTF-8. The regex engine's reading, so that a match's
+/// character boundaries are `String#size`'s.
+fn japanese_char_len(encoding: u8, bytes: &[u8]) -> Option<usize> {
+    let engine = if encoding == EUC_JP {
+        spinel_regex::Encoding::EucJp
+    } else {
+        spinel_regex::Encoding::ShiftJis
+    };
+    engine.char_len(bytes)
 }
 
 /// The length of one UTF-8 character at the start of `bytes`: the whole
@@ -190,6 +209,16 @@ pub fn valid(encoding: u8, bytes: &[u8]) -> Option<bool> {
         BINARY => Some(true),
         US_ASCII => Some(bytes.is_ascii()),
         UTF_8 => Some(std::str::from_utf8(bytes).is_ok()),
+        EUC_JP | WINDOWS_31J | SHIFT_JIS => {
+            let mut at = 0;
+            while at < bytes.len() {
+                match japanese_char_len(encoding, &bytes[at..]) {
+                    Some(len) => at += len,
+                    None => return Some(false),
+                }
+            }
+            Some(true)
+        }
         _ => crate::transcode::valid(encoding, bytes),
     }
 }
@@ -724,6 +753,32 @@ mod tests {
         assert_eq!(char_offsets(BINARY, "é".as_bytes()), Some(vec![0, 1, 2]));
         assert_eq!(valid(US_ASCII, "é".as_bytes()), Some(false));
         assert_eq!(valid(BINARY, b"\xff"), Some(true));
+    }
+
+    #[test]
+    fn euc_jp_reads_two_and_three_byte_characters() {
+        // あ, half-width ｱ, a JIS X 0212 character, then ASCII.
+        let text = b"\xa4\xa2\x8e\xb1\x8f\xa1\xa1a";
+        assert_eq!(char_offsets(EUC_JP, text), Some(vec![0, 2, 4, 7, 8]));
+        assert_eq!(valid(EUC_JP, text), Some(true));
+        // A lead with no trail, and a byte that leads nothing: a character
+        // per byte, and broken. Measured.
+        assert_eq!(char_offsets(EUC_JP, b"\x8f\xa1a"), Some(vec![0, 1, 2, 3]));
+        assert_eq!(valid(EUC_JP, b"\xa1"), Some(false));
+        assert_eq!(valid(EUC_JP, b"\x80"), Some(false));
+    }
+
+    #[test]
+    fn a_shift_jis_trail_can_be_an_ascii_byte() {
+        // "\x82\x61" is one character, not a lead and an "a".
+        for encoding in [WINDOWS_31J, SHIFT_JIS] {
+            assert_eq!(char_offsets(encoding, b"\x82\x61a"), Some(vec![0, 2, 3]));
+            assert_eq!(char_offsets(encoding, b"\xb1\xc3"), Some(vec![0, 1, 2]));
+            assert_eq!(valid(encoding, b"\x82\xa0\xb1"), Some(true));
+            assert_eq!(valid(encoding, b"\x81\x20"), Some(false));
+            assert_eq!(valid(encoding, b"\xa0"), Some(false));
+            assert_eq!(valid(encoding, b"\xfd"), Some(false));
+        }
     }
 
     #[test]

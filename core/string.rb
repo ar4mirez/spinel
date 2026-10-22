@@ -607,7 +607,13 @@ class String
       end
       return "\\x" + Integer.__hex__(byte, 2)
     end
-    return char.__bytes__.map { |b| "\\x" + Integer.__hex__(b, 2) }.join unless unicode && char.valid_encoding?
+    unless unicode && char.valid_encoding?
+      return char.__bytes__.map { |b| "\\x" + Integer.__hex__(b, 2) }.join unless char.valid_encoding?
+      return char if raw
+      # A multibyte character of EUC-JP or Shift_JIS is its code, its bytes
+      # read as one number: `"\x{A4A2}"`. Measured.
+      return "\\x{" + char.__bytes__.map { |b| Integer.__hex__(b, 2) }.join + "}"
+    end
     code = char.ord
     if !raw || (code >= 0x80 && code <= 0x9f)
       return code > 0xffff ? "\\u{" + Integer.__hex__(code, 1) + "}" : "\\u" + Integer.__hex__(code, 4)
