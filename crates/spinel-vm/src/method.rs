@@ -905,6 +905,15 @@ pub enum ReflectOp {
     /// the module holding the deprecated constant that `mod.const_get(name)`
     /// finds, or nil.
     ConstDeprecated,
+    /// `(mod, name)` → `[value]` of the class variable removed from `mod`'s
+    /// own table, or nil when it holds none by that name.
+    CvarRemove,
+    /// `(mod)` → whether it is a class `Class.allocate` made that has no
+    /// superclass yet (#28).
+    Uninitialized,
+    /// `(class, superclass)` → nil; gives an uninitialised class its
+    /// superclass and metaclass. `Class#initialize`'s half Ruby cannot reach.
+    Inherit,
     /// `(from, to)` → nil; gives `to` a copy of `from`'s singleton class when
     /// it has one. `Kernel#clone`'s half that Ruby cannot reach.
     CopySingleton,

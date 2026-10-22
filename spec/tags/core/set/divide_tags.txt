@@ -1,0 +1,1 @@
+fails(#365: Ruby 4.0.8 keeps compare_by_identity here, the pinned ruby/spec and Spinel do not):Set#divide does not retain compare_by_identity flag

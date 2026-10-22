@@ -1305,10 +1305,31 @@ fn reflect_native(
                 }
             }
         }
+        ReflectOp::CvarRemove => {
+            let module = module_arg(scope, 0)?;
+            let name = symbol_arg(1)?;
+            match scope.classes_mut().cvar_remove(module, name) {
+                Some(value) => new_array(scope, &[value]),
+                None => Value::NIL,
+            }
+        }
+        ReflectOp::Uninitialized => {
+            let uninitialized =
+                class_id_of(scope, arg(0)).is_some_and(|id| scope.classes().is_uninitialized(id));
+            bool_value(uninitialized)
+        }
+        ReflectOp::Inherit => {
+            let class = module_arg(scope, 0)?;
+            let superclass = module_arg(scope, 1)?;
+            scope.classes_mut().inherit(class, superclass);
+            // The link `class C < A` owes its metaclass: see `anonymous_module`.
+            scope.singleton_class(class);
+            Value::NIL
+        }
         ReflectOp::CopySingleton => {
             let (from, to) = (arg(0), arg(1));
-            // A class's own singleton is its metaclass, which `Module#dup`
-            // would have to copy along with the method table; an immediate
+            // A class's own singleton is its metaclass, which `copy_module`
+            // has already copied with the rest of the class; an immediate
             // has none to copy.
             if !from.is_immediate()
                 && !to.is_immediate()
@@ -6481,6 +6502,15 @@ fn superclass_of(scope: &mut HandleScope<'_>, value: Value) -> Result<ClassId, E
     if id == Builtin::Class.id() {
         return Err(Error::raise("TypeError", "can't make subclass of Class"));
     }
+    // `Class.allocate` made it and `Class#initialize` has not run: it has no
+    // superclass, so a subclass would have no path to `Object`. The `class`
+    // keyword does not ask this in CRuby, and neither does `define_or_reopen`.
+    if scope.classes().is_uninitialized(id) {
+        return Err(Error::raise(
+            "TypeError",
+            "can't inherit uninitialized class",
+        ));
+    }
     Ok(id)
 }
 
@@ -8264,6 +8294,77 @@ fn dup_value(scope: &mut HandleScope<'_>, value: Value) -> Result<Value, Error> 
     Ok(scope.get(copy))
 }
 
+/// `Module#dup` and `#clone` (#28): a new, anonymous class or module of the
+/// same class as `from`, holding its methods, constants, class variables,
+/// mixins, instance variables and singleton class.
+///
+/// The whole copy, where `dup` on an ordinary object copies only the cell:
+/// CRuby 4.0 does it inside the allocation too, and `Module#initialize_copy`
+/// is `Kernel`'s, so `Module.new.send(:initialize_copy, Comparable)` copies
+/// nothing — measured. The singleton class is copied by `dup` as well as by
+/// `clone`, which is what makes a class method reachable on a duplicate.
+fn copy_module(scope: &mut HandleScope<'_>, from: ClassId) -> Result<Value, Error> {
+    if from == Builtin::BasicObject.id() {
+        return Err(Error::raise("TypeError", "can't copy the root class"));
+    }
+    if scope.classes().is_singleton(from) {
+        return Err(Error::raise("TypeError", "can't copy singleton class"));
+    }
+    let object = scope.classes().object(from);
+    let kind = scope.classes().kind(from);
+    let class = class_of(scope, object);
+    let to = new_module_of(scope, kind, class);
+    scope.classes_mut().copy_module(from, to);
+    if let Some(singleton) = scope.classes().singleton(from) {
+        let target = scope.singleton_class(to);
+        scope.classes_mut().copy_singleton(singleton, target);
+    }
+    let copy = scope.classes().object(to);
+    // Not its id, nor the memo `Module#name` keeps: the copy has a name of
+    // its own to acquire.
+    let skipped = [crate::shared::symbols::class_id_ivar(), symbol("@__name__")];
+    for name in ivar_names(scope, object) {
+        if !skipped.contains(&name) {
+            let value = ivar_get(scope, object, name)?;
+            ivar_set(scope, copy, name, value)?;
+        }
+    }
+    Ok(copy)
+}
+
+/// A class or module with nothing in it, an instance of `class` — `Class`,
+/// `Module`, or a subclass of `Module` — rather than of the one `kind` would
+/// give it. A class made this way is uninitialised until something gives it a
+/// superclass: [`Classes::inherit`] or [`Classes::copy_module`].
+fn new_module_of(scope: &mut HandleScope<'_>, kind: Kind, class: Option<ClassId>) -> ClassId {
+    let id = match kind {
+        Kind::Class => scope.define_class(None, None),
+        Kind::Module => scope.define_module(None),
+    };
+    // Past a singleton class to the class it stands in front of: `obj.dup`
+    // never carries a singleton across, and neither does a module's.
+    let mut class = class;
+    while let Some(c) = class
+        && scope.classes().is_singleton(c)
+    {
+        class = scope.classes().superclass(c);
+    }
+    let default = match kind {
+        Kind::Class => Builtin::Class.id(),
+        Kind::Module => Builtin::Module.id(),
+    };
+    if let Some(class) = class
+        && class != default
+    {
+        let object = scope.classes().object(id);
+        let meta = scope.classes().object(class);
+        let mut nested = scope.nested();
+        let handle = nested.root(object);
+        nested.set_class(handle, meta);
+    }
+    id
+}
+
 /// The class a copy of `value` should wear: its own, with any singleton
 /// class walked past.
 ///
@@ -8320,7 +8421,42 @@ fn allocate_instance(scope: &mut HandleScope<'_>, id: ClassId) -> Result<Value, 
     // string that answers `MyString` — which is what asking `Builtin::ALL` by
     // class id could not do, because a class the bootstrap did not create is
     // `None` for its own id however built-in its ancestry.
+    if scope.classes().is_uninitialized(id) {
+        return Err(Error::raise(
+            "TypeError",
+            "can't instantiate uninitialized class",
+        ));
+    }
+    // A subclass of one, through the `class` keyword: CRuby finds no allocator
+    // above it.
+    if scope.classes().reaches_uninitialized(id) {
+        let name = match scope.classes().name(id) {
+            Some(name) => name.to_owned(),
+            None => {
+                let class = scope.classes().object(id);
+                inspect(scope, class)
+            }
+        };
+        return Err(Error::raise(
+            "TypeError",
+            format!("allocator undefined for {name}"),
+        ));
+    }
     match scope.classes().repr(id) {
+        // `Class.allocate` is a class with no superclass yet, which
+        // `Class#initialize` gives it (#28); `superclass` and `new` refuse it
+        // until then. `Class.new` never comes here — see `anonymous_module`.
+        Some(Builtin::Class) => {
+            let class = new_module_of(scope, Kind::Class, Some(id));
+            Ok(scope.classes().object(class))
+        }
+        // An instance of a subclass of `Module` (#28): an anonymous module
+        // whose class is the subclass, which `initialize` then runs on.
+        // `Module.new` itself is `anonymous_module`.
+        Some(Builtin::Module) => {
+            let module = new_module_of(scope, Kind::Module, Some(id));
+            Ok(scope.classes().object(module))
+        }
         // A user-defined class, or `Object` itself: one slot, for the ivar
         // storage a shape transition will hang off it.
         // `Numeric` too: it has no representation of its own, and a class
@@ -8390,14 +8526,6 @@ fn allocate_instance(scope: &mut HandleScope<'_>, id: ClassId) -> Result<Value, 
             Err(Error::Unknowable {
                 what: allocate_refusal(other),
                 needs: match other {
-                    // #162 made `Class.new` and `Module.new` real. What is left
-                    // is `allocate` itself, which in Ruby answers a class that
-                    // is not initialised — `superclass` raises `TypeError:
-                    // uninitialized class` on it and `new` refuses to
-                    // instantiate it. That is the bare-object-wearing-a-class
-                    // hazard #13 shut the door on, so it stays shut.
-                    Builtin::Class => "a class can exist uninitialised (#28)",
-                    Builtin::Module => "`Module.allocate` is a `NoMethodError` in Ruby (#28)",
                     Builtin::Regexp => "a pattern can be compiled from a run-time value",
                     Builtin::Integer | Builtin::Symbol | Builtin::Float => {
                         "the rule by which Ruby refuses it too"
@@ -8496,7 +8624,7 @@ fn native_call<'h>(
     // `Module#__names_then__`, which converts and calls back here with names
     // these primitives can read. Measured: `attr_reader o` calls `o.to_str`.
     let names = match native {
-        Native::AttrDefine { .. } | Native::ModuleFunction => call.args.len(),
+        Native::AttrDefine { .. } | Native::ModuleFunction | Native::UndefMethod => call.args.len(),
         Native::ClassVariable(CvarOp::Get | CvarOp::Set | CvarOp::Defined)
         | Native::MethodDefined => call.args.len().min(1),
         _ => 0,
@@ -9331,13 +9459,11 @@ fn native_call<'h>(
         Native::Dup => {
             // A class's identity lives in the class table, not in its cell:
             // copying the cell would hand back an object that looks like the
-            // class and shares its method table. `Class#dup` is real in Ruby
-            // and is not this.
-            if class_id_of(scope, call.receiver).is_some() {
-                return Err(Error::Unknowable {
-                    what: "`dup` on a class or module",
-                    needs: "a copy of its method table, which is `Module#dup`",
-                });
+            // class and shares its method table, so a class is copied there.
+            if let Some(id) = class_id_of(scope, call.receiver) {
+                let copy = copy_module(scope, id)?;
+                stack.push(copy);
+                return Ok(None);
             }
             // A copy of a `Proc` is its slots, so it is `==` to the original:
             // `Proc#==` compares what they hold (#27).
@@ -9361,6 +9487,12 @@ fn native_call<'h>(
                     "TypeError",
                     "can't create instance of singleton class",
                 ));
+            }
+            // CRuby undefines `allocate` for `Module` and every subclass of
+            // it, though `new` still makes one — measured.
+            if scope.classes().repr(id) == Some(Builtin::Module) {
+                let exception = no_method_error(scope, call.receiver, call.name, &call.args);
+                return Ok(Some(Unwind::Exception(exception)));
             }
             // `Array.allocate(1)` raises in Ruby: `allocate` never takes
             // arguments, on any class.
@@ -11058,6 +11190,9 @@ fn native_call<'h>(
                     ),
                 ));
             }
+            if scope.classes().reaches_uninitialized(id) {
+                return Err(Error::raise("TypeError", "uninitialized class"));
+            }
             let value = match scope.classes().superclass(id) {
                 Some(parent) => scope.classes().object(parent),
                 None => Value::NIL,
@@ -11330,7 +11465,6 @@ fn native_call<'h>(
                     operands: "a receiver that is not a Module",
                 });
             };
-            module_frozen_check(scope, id)?;
             // `alias_method new, old` is one pair; `undef_method` takes any
             // number of names, each undefined in turn.
             let given = if aliasing {
@@ -11352,9 +11486,14 @@ fn native_call<'h>(
                         return Err(Error::raise("TypeError", "is not a symbol nor a string"));
                     };
                     let old = crate::shared::symbols::intern(&old);
+                    module_frozen_check(scope, id)?;
                     let core = frames.last().is_some_and(|frame| is_internal(&frame.iseq));
                     (scope.classes_mut().alias_method(id, name, old, core), old)
                 } else {
+                    // Each name is converted before the module is found
+                    // frozen, and no name at all modifies nothing — CRuby's
+                    // `rb_undef` order, measured.
+                    module_frozen_check(scope, id)?;
                     (scope.classes_mut().undef_method(id, name), name)
                 };
                 if !ok {
@@ -13000,6 +13139,21 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             Builtin::Kernel,
             &["__reflect_copy_singleton__"],
             Native::Reflect(ReflectOp::CopySingleton),
+        ),
+        (
+            Builtin::Kernel,
+            &["__reflect_cvar_remove__"],
+            Native::Reflect(ReflectOp::CvarRemove),
+        ),
+        (
+            Builtin::Kernel,
+            &["__reflect_uninitialized__"],
+            Native::Reflect(ReflectOp::Uninitialized),
+        ),
+        (
+            Builtin::Kernel,
+            &["__reflect_inherit__"],
+            Native::Reflect(ReflectOp::Inherit),
         ),
         (
             Builtin::Kernel,

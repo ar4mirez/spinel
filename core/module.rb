@@ -393,7 +393,9 @@ class Module
 
   def remove_method(*names)
     names.each do |name|
-      symbol = name.is_a?(Symbol) ? name : name.to_str.to_sym
+      symbol = Module.__name_arg__(name).to_sym
+      # After the name, before whether it is defined: CRuby's order, measured.
+      Kernel.__check_frozen__(self)
       unless __reflect_remove_method__(self, symbol)
         raise NameError.new("method '#{symbol}' not defined in #{inspect}", symbol, receiver: self)
       end
@@ -410,6 +412,25 @@ class Module
 
   def singleton_class?
     __reflect_is_singleton__(self)
+  end
+
+  # `class_variable_defined?` is what checks the name is a class variable's,
+  # in other words than this method's — measured. One held by an ancestor is
+  # found and still not this module's to remove.
+  def remove_class_variable(name)
+    symbol = Module.__name_arg__(name).to_sym
+    defined = begin
+      class_variable_defined?(symbol)
+    rescue NameError
+      raise NameError.new("wrong class variable name #{symbol}", symbol, receiver: self)
+    end
+    Kernel.__check_frozen__(self)
+    removed = __reflect_cvar_remove__(self, symbol)
+    return removed[0] unless removed.nil?
+    if defined
+      raise NameError.new("cannot remove #{symbol} for #{self}", symbol, receiver: self)
+    end
+    raise NameError.new("class variable #{symbol} not defined for #{self}", symbol, receiver: self)
   end
 end
 
@@ -439,6 +460,16 @@ class Module
 
   private :method_added, :method_removed, :method_undefined, :included,
           :extended, :prepended, :const_added
+end
+
+# What `new` on a subclass of `Module` runs (#28); `Module.new` itself is a
+# primitive. The block is the module body, as it is for `Module.new`.
+class Module
+  def initialize(&block)
+    module_exec(self, &block) if block
+  end
+
+  private :initialize
 end
 
 # `include`, `prepend` and `extend` are Ruby so that what they call is
