@@ -1006,6 +1006,9 @@ pub enum ThreadOp {
     Status,
     /// `__thread_others__`: whether another thread is alive.
     Others,
+    /// `__thread_woken__`: whether the running thread last ran on out of a
+    /// wait, woken.
+    Woken,
     /// `__thread_backtrace__(index)`: `[strings, [path, line, label]...]` for
     /// a thread that is not running, or nil.
     Backtrace,

@@ -1585,6 +1585,7 @@ fn thread_native(
             threads::current(scope);
             bool_value(scope.fibers().threads.others())
         }
+        ThreadOp::Woken => bool_value(scope.fibers().threads.woken),
         ThreadOp::Backtrace => match threads::take_frames(scope, index(0).unwrap_or(usize::MAX)) {
             None => Value::NIL,
             Some(saved) => {
@@ -12797,6 +12798,11 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             Builtin::Kernel,
             &["__thread_others__"],
             Native::Thread(ThreadOp::Others),
+        ),
+        (
+            Builtin::Kernel,
+            &["__thread_woken__"],
+            Native::Thread(ThreadOp::Woken),
         ),
         (
             Builtin::Kernel,

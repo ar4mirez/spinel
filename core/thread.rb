@@ -191,9 +191,12 @@ class Thread
   end
 
   # Another thread's kill or raise, run in this one when it next runs: held
-  # in `__pending__`, in arrival order, while it is uninterruptible.
+  # in `__pending__`, in arrival order, while it is uninterruptible or the
+  # masks here, now, hold it back — a raise met on a wait it woke is met
+  # blocking.
   def __interrupted__(interrupt)
-    if __uninterruptible__?
+    mode = __mode__(interrupt)
+    if __uninterruptible__? || mode == :never || (mode == :on_blocking && !__thread_woken__)
       __pending__ << interrupt
     else
       __meet__(interrupt)

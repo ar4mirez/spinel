@@ -95,6 +95,9 @@ pub(crate) struct ThreadTable {
     pub(super) entries: Vec<ThreadEntry>,
     pub(super) current: usize,
     pub(super) slice_started: Option<Instant>,
+    /// Whether the running thread was last entered out of a wait, woken:
+    /// an interrupt met there is met blocking.
+    pub(super) woken: bool,
 }
 
 impl ThreadTable {
@@ -542,6 +545,7 @@ fn enter(
     fibers.root_parked = world.root_parked;
     fibers.threads.current = to;
     fibers.threads.slice_started = Some(Instant::now());
+    fibers.threads.woken = push.is_some_and(|value| !value.is_nil());
     *stack = context.stack;
     *frames = context.frames;
     let [last_match, errinfo, last_line, status] = specials;
