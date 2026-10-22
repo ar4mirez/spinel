@@ -2368,6 +2368,16 @@ fn run<'h>(
                         let receiver = frames[top].receiver;
                         let value = stack.pop().expect("setivar on an empty stack");
                         ivar_set(scope, receiver, symbol, value)?;
+                        if let Some(unwind) = thaw_chilled(
+                            scope,
+                            &mut stack,
+                            &mut frames,
+                            proc_class,
+                            &mut ids,
+                            receiver,
+                        )? {
+                            return Ok(Step::Unwind(unwind));
+                        }
                     }
 
                     Insn::DefinedIvar(name) => {
@@ -3196,6 +3206,18 @@ fn run<'h>(
                             receiver,
                             "singleton_method_added",
                             vec![Value::symbol(symbol)],
+                        )? {
+                            return Ok(Step::Unwind(unwind));
+                        }
+                        // Pushed last, so the warning comes before the hook,
+                        // as `rb_check_frozen` has it before the definition.
+                        if let Some(unwind) = thaw_chilled(
+                            scope,
+                            &mut stack,
+                            &mut frames,
+                            proc_class,
+                            &mut ids,
+                            receiver,
                         )? {
                             return Ok(Step::Unwind(unwind));
                         }
@@ -6125,9 +6147,11 @@ fn open_class<'h>(
     let top = frames.len() - 1;
     let outer = frames[top].cref;
 
+    let mut opened = None;
     let (id, hooks) = match def.kind {
         DefKind::Singleton => {
             let object = stack.pop().expect("an object to open the singleton of");
+            opened = Some(object);
             (singleton_of(scope, object)?, Vec::new())
         }
         kind => {
@@ -6242,6 +6266,10 @@ fn open_class<'h>(
         {
             return Ok(Some(unwind));
         }
+    }
+    // `class << s` on a chilled String warns before its body runs.
+    if let Some(object) = opened {
+        return thaw_chilled(scope, stack, frames, proc_class, ids, object);
     }
     Ok(None)
 }
@@ -6944,6 +6972,41 @@ fn vm_warn<'h>(
         kernel,
         crate::shared::symbols::intern("__warning__"),
         vec![text, bool_value(verbose)],
+    )
+}
+
+/// Thaw `object` if it is a chilled String (#263) that an instruction just
+/// changed: `def s.m`, `class << s`, `@x =` in one of its methods (#341).
+///
+/// CRuby reaches all three through `rb_check_frozen`. Here they are sent to
+/// `Kernel.__thaw__`, the same Ruby every mutator's thaw goes through, so the
+/// warning, its category and its once-only are decided in one place. A
+/// String that is not chilled costs one header read.
+fn thaw_chilled<'h>(
+    scope: &mut HandleScope<'h>,
+    stack: &mut Stack,
+    frames: &mut Vec<Call>,
+    proc_class: Handle<'h>,
+    ids: &mut u64,
+    object: Value,
+) -> Result<Option<Unwind>, Error> {
+    if object.is_immediate() {
+        return Ok(None);
+    }
+    let handle = scope.root(object);
+    if scope.chilled(handle).is_none() {
+        return Ok(None);
+    }
+    let kernel = scope.classes().object(Builtin::Kernel.id());
+    call_discarded(
+        scope,
+        stack,
+        frames,
+        proc_class,
+        ids,
+        kernel,
+        crate::shared::symbols::intern("__thaw__"),
+        vec![object],
     )
 }
 

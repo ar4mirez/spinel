@@ -188,6 +188,27 @@ fn frozen_string_literal_flags_settle_what_literals_are() {
 }
 
 #[test]
+fn a_chilled_string_changed_by_an_instruction_warns_once() {
+    let warned = run(&["-W:deprecated", "chilled_vm.rb"], "");
+    assert!(warned.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&warned.stdout),
+        "[false, false, false]\n"
+    );
+    let warning = "warning: literal string will be frozen in the future \
+                   (run with --debug-frozen-string-literal for more information)\n";
+    assert_eq!(
+        String::from_utf8_lossy(&warned.stderr),
+        [3, 4, 5]
+            .map(|line| format!("chilled_vm.rb:{line}: {warning}"))
+            .concat()
+    );
+    let quiet = run(&["chilled_vm.rb"], "");
+    assert!(quiet.status.success());
+    assert_eq!(String::from_utf8_lossy(&quiet.stderr), "");
+}
+
+#[test]
 fn a_missing_script_is_a_load_error() {
     let output = run(&["missing.rb"], "");
     assert_eq!(output.status.code(), Some(1));
