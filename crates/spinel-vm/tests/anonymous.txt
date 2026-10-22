@@ -85,4 +85,5 @@ $oracle_pad = []; p1 = Class.new { def self.inherited(sub); $oracle_pad << :hook
 
 Class.allocate.superclass  #=> !TypeError: uninitialized class
 Class.allocate.new  #=> !TypeError: can't instantiate uninitialized class
+Class.new(Class.allocate)  #=> !TypeError: can't inherit uninitialized class
 Module.allocate  #=> !NoMethodError: undefined method 'allocate' for class Module

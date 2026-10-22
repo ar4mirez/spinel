@@ -6502,6 +6502,12 @@ fn superclass_of(scope: &mut HandleScope<'_>, value: Value) -> Result<ClassId, E
     if id == Builtin::Class.id() {
         return Err(Error::raise("TypeError", "can't make subclass of Class"));
     }
+    // `Class.allocate` made it and `Class#initialize` has not run: it has no
+    // superclass, so a subclass would have no path to `Object`. The `class`
+    // keyword does not ask this in CRuby, and neither does `define_or_reopen`.
+    if scope.classes().is_uninitialized(id) {
+        return Err(Error::raise("TypeError", "can't inherit uninitialized class"));
+    }
     Ok(id)
 }
 
