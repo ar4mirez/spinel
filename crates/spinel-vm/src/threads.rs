@@ -25,6 +25,7 @@
 //! handing the heap over under the lock, is the upgrade; the table and the
 //! switch here are what it would keep.
 
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use super::{
@@ -62,6 +63,17 @@ pub(super) enum ThreadState {
     Dead,
 }
 
+/// What another thread asked of one, met when it next runs.
+pub(super) enum Interrupt {
+    /// A kill: the throw tagged with the thread.
+    Unwind(Unwind),
+    /// `Thread#raise`: a frame, built in the thread that raised, that raises
+    /// the exception here — so it is asked for `#exception` again in this
+    /// thread and takes this thread's backtrace, where it was interrupted, as
+    /// CRuby's does (#328).
+    Call(Box<Call>),
+}
+
 /// A thread's own fiber bookkeeping, kept here while another thread runs.
 #[derive(Default)]
 pub(super) struct FiberWorld {
@@ -75,8 +87,10 @@ pub(super) struct ThreadEntry {
     pub(super) object: Value,
     pub(super) state: ThreadState,
     pub(super) fibers: FiberWorld,
-    /// An exception to raise in it, or a kill, when it next runs.
-    pub(super) pending: Option<Unwind>,
+    /// Raises and kills for it, the first met when it next runs and each of
+    /// the rest the time after: a kill that follows a raise waits for the
+    /// raise to be met, as CRuby's queue of interrupts does.
+    pub(super) pending: VecDeque<Interrupt>,
     /// Its `$~`, `$!`, `$_` and `$?` while another thread runs: one slot
     /// each per heap in the VM, one each per thread in Ruby.
     pub(super) specials: [Value; 4],
@@ -111,8 +125,11 @@ impl ThreadTable {
             if let Some(parked) = &entry.fibers.root_parked {
                 context_roots(parked, f);
             }
-            if let Some(unwind) = entry.pending {
-                super::unwind_roots(unwind, f);
+            for interrupt in &entry.pending {
+                match interrupt {
+                    Interrupt::Unwind(unwind) => super::unwind_roots(*unwind, f),
+                    Interrupt::Call(frame) => frame_roots(frame, f),
+                }
             }
             entry.specials.iter().copied().for_each(&mut *f);
         }
@@ -135,7 +152,7 @@ impl ThreadTable {
         for (index, entry) in self.entries.iter_mut().enumerate() {
             if index != 0 {
                 entry.state = ThreadState::Dead;
-                entry.pending = None;
+                entry.pending.clear();
             }
         }
         self.entries[0].state = ThreadState::Running;
@@ -157,7 +174,7 @@ fn ensure_main(scope: &mut HandleScope<'_>) {
             object: Value::NIL,
             state: ThreadState::Running,
             fibers: FiberWorld::default(),
-            pending: None,
+            pending: VecDeque::new(),
             specials: [Value::NIL; 4],
         });
         threads.current = 0;
@@ -179,7 +196,31 @@ pub(super) fn spawn(
     let mut frames: Vec<Call> = Vec::new();
     // The block is entered with no arguments: `core/thread.rb` hands it a
     // lambda that calls the thread's own block with the thread's.
-    let inner = Pending {
+    push_proc_frame(
+        scope,
+        &stack,
+        &mut frames,
+        &block_call(call, block),
+        block,
+        ids,
+    )?;
+    let threads = &mut scope.fibers_mut().threads;
+    threads.entries.push(ThreadEntry {
+        object,
+        state: ThreadState::Ready {
+            context: Context { stack, frames },
+            push: None,
+        },
+        fibers: FiberWorld::default(),
+        pending: VecDeque::new(),
+        specials: [Value::NIL; 4],
+    });
+    Ok(threads.entries.len() - 1)
+}
+
+/// A call of `block` with no arguments, as `call` would make it.
+fn block_call(call: &Pending, block: Value) -> Pending {
+    Pending {
         cache: None,
         name: call.name,
         receiver: block,
@@ -194,20 +235,30 @@ pub(super) fn spawn(
         target: Target::Block(block),
         owner: None,
         defined_as: None,
-    };
-    push_proc_frame(scope, &stack, &mut frames, &inner, block, ids)?;
-    let threads = &mut scope.fibers_mut().threads;
-    threads.entries.push(ThreadEntry {
-        object,
-        state: ThreadState::Ready {
-            context: Context { stack, frames },
-            push: None,
-        },
-        fibers: FiberWorld::default(),
-        pending: None,
-        specials: [Value::NIL; 4],
-    });
-    Ok(threads.entries.len() - 1)
+    }
+}
+
+/// The frame `Thread#raise` leaves for another thread: a call of `block`,
+/// with no arguments and its value dropped, pushed when that thread next runs.
+pub(super) fn raise_frame(
+    scope: &mut HandleScope<'_>,
+    call: &Pending,
+    block: Value,
+    ids: &mut u64,
+) -> Result<Call, Error> {
+    let stack = Stack::default();
+    let mut frames: Vec<Call> = Vec::new();
+    push_proc_frame(
+        scope,
+        &stack,
+        &mut frames,
+        &block_call(call, block),
+        block,
+        ids,
+    )?;
+    let mut frame = frames.pop().expect("push_proc_frame pushed a frame");
+    frame.discards_value = true;
+    Ok(frame)
 }
 
 pub(super) fn current(scope: &mut HandleScope<'_>) -> usize {
@@ -263,14 +314,14 @@ pub(super) fn wakeup(scope: &mut HandleScope<'_>, index: usize, reason: Value) -
     true
 }
 
-/// Leave `unwind` for a thread to meet when it next runs, and wake it.
-pub(super) fn interrupt(scope: &mut HandleScope<'_>, index: usize, unwind: Unwind) {
+/// Leave `interrupt` for a thread to meet when it next runs, and wake it.
+pub(super) fn interrupt(scope: &mut HandleScope<'_>, index: usize, interrupt: Interrupt) {
     let interrupted = Value::symbol(crate::shared::symbols::intern("interrupted"));
     if let Some(entry) = scope.fibers_mut().threads.entries.get_mut(index) {
         if matches!(entry.state, ThreadState::Dead) {
             return;
         }
-        entry.pending = Some(unwind);
+        entry.pending.push_back(interrupt);
     }
     wakeup(scope, index, interrupted);
 }
@@ -454,7 +505,7 @@ pub(super) fn switch(
         Leave::Exit => ThreadState::Dead,
     };
     // A thread with an interrupt waiting does not wait.
-    if entry.pending.is_some() {
+    if !entry.pending.is_empty() {
         wakeup(scope, from, reason("interrupted"));
     }
     // The next to run: one able to now, or the first to wake.
@@ -495,7 +546,7 @@ fn enter(
         unreachable!("only a ready thread is entered")
     };
     let world = std::mem::take(&mut entry.fibers);
-    let pending = entry.pending.take();
+    let pending = entry.pending.pop_front();
     let specials = std::mem::replace(&mut entry.specials, [Value::NIL; 4]);
     fibers.current = world.current;
     fibers.root = world.root;
@@ -509,13 +560,31 @@ fn enter(
     scope.set_errinfo(errinfo);
     scope.set_global(special("$_"), last_line);
     scope.set_global(special("$?"), status);
-    adopt_roots(scope, stack, frames);
-    if pending.is_none()
-        && let Some(value) = push
-    {
-        stack.push(value);
+    match pending {
+        Some(Interrupt::Unwind(unwind)) => {
+            adopt_roots(scope, stack, frames);
+            Some(unwind)
+        }
+        // The raise runs on top of whatever the thread was doing, as a call
+        // that call returns to: what it stopped in has its answer below it.
+        Some(Interrupt::Call(mut frame)) => {
+            if let Some(value) = push {
+                stack.push(value);
+            }
+            frame.base = stack.len();
+            frame.errinfo_on_entry = scope.errinfo();
+            frames.push(*frame);
+            adopt_roots(scope, stack, frames);
+            None
+        }
+        None => {
+            adopt_roots(scope, stack, frames);
+            if let Some(value) = push {
+                stack.push(value);
+            }
+            None
+        }
     }
-    pending
 }
 
 /// The loop's turn check: when the running thread's slice is used up and
@@ -548,7 +617,10 @@ pub(super) fn preempt(
     }
     wake_ready(scope, Some(Duration::ZERO));
     let current = scope.fibers().threads.current;
-    if next_ready(scope, current).is_none_or(|next| next == current) {
+    // An interrupt that waited behind another is met here, at the latest:
+    // leaving and coming straight back is what meets it.
+    let queued = !scope.fibers().threads.entries[current].pending.is_empty();
+    if !queued && next_ready(scope, current).is_none_or(|next| next == current) {
         scope.fibers_mut().threads.slice_started = Some(Instant::now());
         return Ok(None);
     }
@@ -629,7 +701,7 @@ pub(super) fn forked(scope: &mut HandleScope<'_>) {
     for (index, entry) in threads.entries.iter_mut().enumerate() {
         if index != current {
             entry.state = ThreadState::Dead;
-            entry.pending = None;
+            entry.pending.clear();
         }
     }
 }

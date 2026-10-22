@@ -1,1 +1,0 @@
-fails(#328: an interrupted lock attempt from a fiber is still counted as the fiber waiting):Mutex#lock does not raise deadlock if a fiber's attempt to lock was interrupted

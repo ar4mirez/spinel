@@ -516,6 +516,29 @@ class Exception
     @__cause__
   end
 
+  # The cause the first `raise` of this exception would give it, given
+  # without raising it: `Thread#raise` decides it in the calling thread and
+  # raises in another (#328). A `cause:` given is taken unless it is the
+  # exception itself, and refused when its own causes lead back here;
+  # otherwise `current` — the `$!` there — unless one was already set.
+  def __take_cause__(current, given)
+    if given
+      return if current.equal?(self)
+      seen = {}.compare_by_identity
+      link = current
+      until link.nil? || seen.key?(link)
+        raise ArgumentError, "circular causes" if link.equal?(self)
+        seen[link] = true
+        link = link.cause
+      end
+    elsif defined?(@__cause__)
+      return
+    elsif current.equal?(self)
+      current = nil
+    end
+    @__cause__ = current unless frozen?
+  end
+
   # The message with the class name after its first line, which is what
   # `full_message` prints: "boom (RuntimeError)". Three exceptions to that,
   # all measured — an empty message is the class name alone ("unhandled

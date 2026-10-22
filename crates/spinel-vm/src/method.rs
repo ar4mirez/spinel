@@ -999,8 +999,8 @@ pub enum ThreadOp {
     Pass,
     /// `__thread_exit__`: the running thread is done; never answers.
     Exit,
-    /// `__thread_interrupt__(index, exception)`: raise it in that thread when
-    /// it next runs; nil kills it.
+    /// `__thread_interrupt__(index, raiser)`: call the block `raiser` in that
+    /// thread when it next runs, where it stopped; nil kills it.
     Interrupt,
     /// `__thread_status__(index)`: `:run`, `:sleep` or `:dead`.
     Status,

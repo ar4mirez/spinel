@@ -1654,23 +1654,25 @@ fn thread_native(
         }
         ThreadOp::Interrupt => {
             let target = index(0).unwrap_or(usize::MAX);
-            let exception = call.args.get(1).copied().unwrap_or(Value::NIL);
-            let unwind = if exception.is_nil() {
+            let raiser = call.args.get(1).copied().unwrap_or(Value::NIL);
+            let interrupt = if raiser.is_nil() {
                 // A kill is a throw tagged with the thread, which runs every
                 // `ensure` on the way out and no `rescue`: `core/thread.rb`
                 // catches it at the bottom of the thread.
                 let object = threads::object(scope, target);
-                Unwind::Throw {
+                let unwind = Unwind::Throw {
                     tag: object,
                     value: object,
+                };
+                if target == threads::current(scope) {
+                    return Ok(Some(unwind));
                 }
+                threads::Interrupt::Unwind(unwind)
             } else {
-                Unwind::Exception(exception)
+                // A raise is a block that raises, run in the target.
+                threads::Interrupt::Call(Box::new(threads::raise_frame(scope, call, raiser, ids)?))
             };
-            if target == threads::current(scope) {
-                return Ok(Some(unwind));
-            }
-            threads::interrupt(scope, target, unwind);
+            threads::interrupt(scope, target, interrupt);
             Value::NIL
         }
     };
