@@ -1665,13 +1665,13 @@ impl<'h> HandleScope<'h> {
     /// Exchange the root stack for `roots`, answering the one there was. Each
     /// thread of the heap has a root stack of its own, parked with it while
     /// another runs, so the handles its loop and primitives hold stay its own
-    /// (`interp/threads.rs`).
+    /// (`threads.rs`).
     pub(crate) fn swap_roots(&mut self, roots: Vec<Value>) -> Vec<Value> {
         std::mem::replace(&mut self.heap.roots, roots)
     }
 
     /// This scope's heap, for the OS thread of another of its threads to run
-    /// on while this one waits to be handed it back (`interp/threads.rs`).
+    /// on while this one waits to be handed it back (`threads.rs`).
     pub(crate) fn heap_ptr(&mut self) -> *mut Heap {
         &mut *self.heap
     }
