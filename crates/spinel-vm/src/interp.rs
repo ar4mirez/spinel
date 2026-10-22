@@ -3426,8 +3426,7 @@ fn run<'h>(
                         let def = &iseq.class_defs[index as usize];
                         // `class << s` on a chilled String warns before it opens.
                         if def.kind == DefKind::Singleton {
-                            let object =
-                                *stack.last().expect("an object to open the singleton of");
+                            let object = *stack.last().expect("an object to open the singleton of");
                             if let Some(thawing) = thaw_chilled(
                                 scope,
                                 &mut stack,
