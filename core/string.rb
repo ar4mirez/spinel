@@ -605,9 +605,6 @@ class String
       if byte < 0x80 && unicode
         return "\\u" + Integer.__hex__(byte, 4)
       end
-      # ISO-8859-1 (index 22) is the one single-byte encoding past ASCII
-      # walked here, and its printable half starts at NBSP.
-      return char if raw && byte >= 0xa0 && __encoding_index__ == 22
       return "\\x" + Integer.__hex__(byte, 2)
     end
     return char.__bytes__.map { |b| "\\x" + Integer.__hex__(b, 2) }.join unless unicode && char.valid_encoding?
