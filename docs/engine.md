@@ -326,8 +326,18 @@ pass, never a wrong answer. Today that is `(?~)`, a recursive `\g<>` call, condi
 
 Matching is byte-oriented and reports byte offsets; `MatchData` converts to
 characters, because that is what `#begin` answers. A match reads its subject
-in one of two ways, `spinel_regex::Encoding`: as UTF-8, or a character per
-byte with only ASCII's classes and cases, which is BINARY and US-ASCII. A
+in one of five ways, `spinel_regex::Encoding`: as UTF-8; a character per byte
+with only ASCII's classes and cases, which is BINARY and US-ASCII; a character
+per byte with Onigmo's Latin-1 table, which is ISO-8859-1; or a multibyte
+character at a time, which is EUC-JP, and Shift_JIS with Windows-31J. The
+machine compares `char`s, so a multibyte character is carried at a private-use
+codepoint numbered by Onigmo's own code for it — its bytes read as one
+big-endian number — which keeps ranges in order without the Unicode mapping
+those encodings need a table for; it is word, graph and print and nothing
+else, and folds case only by the encoding's arithmetic. Shift_JIS's trail bytes
+overlap ASCII, so stepping back means reading forward from a byte that can
+only start a character. The classes and folds are measured into
+`crates/spinel-regex/tests/encodings.txt` and replayed by a unit test. A
 `Regexp` carries its own encoding as CRuby does, in its source String: `/u`,
 `/e` and `/s` fix it to UTF-8, EUC-JP and Windows-31J, `/n` makes it BINARY
 when the source names a byte past ASCII (a raw one only from a BINARY String;
@@ -335,10 +345,11 @@ any other is a `RegexpError`, as in CRuby), and an ASCII pattern is US-ASCII and
 free to match in the subject's encoding. Which encoding a match uses, and when
 the two cannot meet, is `rb_reg_prepare_enc`'s decision, ported. The program
 does not depend on the encoding, so one compiled pattern serves every subject;
-only a binary source is parsed differently, its `\xff` being a byte. A source or
-subject past ASCII in any other encoding — EUC-JP, Windows-31J, ISO-8859-1 —
-is refused until the engine reads its characters
-([#339](https://github.com/ar4mirez/spinel/issues/339)). `$~` is one slot
+only the source is parsed in its own: a `\xff` is a byte in BINARY and
+ISO-8859-1, and in EUC-JP and Shift_JIS it leads a character the escapes after
+it finish. A source or subject past ASCII in any other encoding is refused until
+the engine reads its characters
+([#372](https://github.com/ar4mirez/spinel/issues/372)). `$~` is one slot
 per heap — Ruby scopes it per frame and per thread, which arrives with the
 frame specials and with Ractors. The refs derived from it — `$1`, `$&`,
 `` $` ``, `$'`, `$+` — are read off that match rather than out of the global

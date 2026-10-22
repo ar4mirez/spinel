@@ -38,6 +38,7 @@
 //! assert_eq!(re.name_to_group("mid"), Some(1));
 //! ```
 
+mod chars;
 mod exec;
 mod parse;
 
@@ -154,6 +155,19 @@ pub enum Encoding {
     /// number, so a source written in this encoding spells byte `0xff` as
     /// `'\u{ff}'`, and so does the escape `\xff`.
     Binary,
+    /// ISO-8859-1: a character per byte, carried as the `char` with that
+    /// number, which is also its Unicode codepoint. The classes are Onigmo's
+    /// Latin-1 table rather than Unicode's, and the cases are Unicode's.
+    Latin1,
+    /// EUC-JP, which `/e` fixes a pattern to. A multibyte character is
+    /// carried at a private-use codepoint, and matches only the classes
+    /// Onigmo gives every one — word, graph and print — and only its own
+    /// other case.
+    EucJp,
+    /// Shift_JIS and Windows-31J, which `/s` fixes a pattern to: the same
+    /// characters, as far as a pattern can tell. Carried and classed as
+    /// EUC-JP's are; half-width katakana is a byte alone, and a word character.
+    ShiftJis,
 }
 
 /// One compiled pattern.
@@ -418,6 +432,147 @@ mod tests {
         let re = Regex::with_encoding("\\xc9", icase, Encoding::Binary).expect("compiles");
         let caps = re.find_in(b"\xe9", 0, Encoding::Binary).expect("runs");
         assert_eq!(caps, None);
+    }
+
+    fn find_in(
+        pattern: &str,
+        flags: Flags,
+        enc: Encoding,
+        haystack: &[u8],
+    ) -> Option<(usize, usize)> {
+        let source = enc.read_source(pattern.as_bytes()).expect("a valid source");
+        Regex::with_encoding(&source, flags, enc)
+            .expect("compiles")
+            .find_in(haystack, 0, enc)
+            .expect("runs")
+            .and_then(|c| c.group(0))
+    }
+
+    #[test]
+    fn euc_jp_and_shift_jis_read_a_multibyte_character_as_one() {
+        let plain = Flags::default();
+        // The issue's three, measured on ruby 4.0.7.
+        assert_eq!(
+            find_in(".", plain, Encoding::EucJp, b"\xc3\xa9"),
+            Some((0, 2))
+        );
+        assert_eq!(
+            find_in(".", plain, Encoding::ShiftJis, b"\xc3\xa9"),
+            Some((0, 1))
+        );
+        assert_eq!(find_in("a", plain, Encoding::ShiftJis, b"\x82\x61"), None);
+        assert_eq!(
+            find_in("a", plain, Encoding::ShiftJis, b"\x82\x61a"),
+            Some((2, 3))
+        );
+        // A lookbehind and `\b` step back over a trail that looks like an `a`.
+        assert_eq!(
+            find_in("(?<=a)b", plain, Encoding::ShiftJis, b"\x82ab"),
+            None
+        );
+        assert_eq!(
+            find_in("\\bb", plain, Encoding::ShiftJis, b"\x82\x61b"),
+            None
+        );
+        // Three bytes, and a range over codes.
+        assert_eq!(
+            find_in(".", plain, Encoding::EucJp, b"\x8f\xa1\xa1"),
+            Some((0, 3))
+        );
+        let kana = "[\\xa4\\xa1-\\xa4\\xf3]+";
+        assert_eq!(
+            find_in(kana, plain, Encoding::EucJp, b"ab\xa4\xab\xa4\xca\xa5\xa2"),
+            Some((2, 6))
+        );
+    }
+
+    #[test]
+    fn a_multibyte_character_is_a_word_but_no_letter() {
+        let plain = Flags::default();
+        let a = b"\xa4\xa2";
+        assert_eq!(find_in("[[:alpha:]]", plain, Encoding::EucJp, a), None);
+        assert_eq!(
+            find_in("[[:word:]]", plain, Encoding::EucJp, a),
+            Some((0, 2))
+        );
+        assert_eq!(find_in("\\w", plain, Encoding::EucJp, a), None);
+        assert_eq!(find_in("\\b", plain, Encoding::EucJp, a), Some((0, 0)));
+        let icase = Flags {
+            icase: true,
+            ..Flags::default()
+        };
+        // Full-width Ａ and ａ, and Shift_JIS's Cyrillic, whose lower half is
+        // one further away past the hole at 847F.
+        assert_eq!(
+            find_in("\\xa3\\xc1", icase, Encoding::EucJp, b"\xa3\xe1"),
+            Some((0, 2))
+        );
+        assert_eq!(
+            find_in("\\x84\\x60", icase, Encoding::ShiftJis, b"\x84\x91"),
+            Some((0, 2))
+        );
+    }
+
+    #[test]
+    fn a_multibyte_escape_takes_the_escapes_after_it() {
+        let plain = Flags::default();
+        assert_eq!(
+            find_in("\\244\\242", plain, Encoding::EucJp, b"\xa4\xa2"),
+            Some((0, 2))
+        );
+        assert_eq!(
+            find_in("\\xb1", plain, Encoding::ShiftJis, b"\xb1"),
+            Some((0, 1))
+        );
+        for (source, enc, message) in [
+            (
+                "\\xa4",
+                Encoding::EucJp,
+                "too short escaped multibyte character",
+            ),
+            (
+                "\\x82a",
+                Encoding::ShiftJis,
+                "too short escaped multibyte character",
+            ),
+            ("\\xff", Encoding::EucJp, "invalid multibyte escape"),
+            ("\\x82\\x20", Encoding::ShiftJis, "invalid multibyte escape"),
+        ] {
+            assert_eq!(
+                Regex::with_encoding(source, plain, enc).err(),
+                Some(Error::Syntax(message.into())),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn latin1_is_a_character_per_byte_with_its_own_classes() {
+        let plain = Flags::default();
+        assert_eq!(
+            find_in("\\s", plain, Encoding::Latin1, b"a\xa0"),
+            Some((1, 2))
+        );
+        assert_eq!(
+            find_in("[[:alpha:]]", plain, Encoding::Latin1, b"\xe9"),
+            Some((0, 1))
+        );
+        assert_eq!(
+            find_in("[[:punct:]]", plain, Encoding::Latin1, b"\xa7"),
+            None
+        );
+        assert_eq!(
+            find_in("\\xe9", plain, Encoding::Latin1, b"\xe9"),
+            Some((0, 1))
+        );
+        let icase = Flags {
+            icase: true,
+            ..Flags::default()
+        };
+        assert_eq!(
+            find_in("\\xc9", icase, Encoding::Latin1, b"\xe9"),
+            Some((0, 1))
+        );
     }
 
     #[test]
