@@ -84,8 +84,8 @@ module Kernel
     nil
   end
 
-  # `Regexp.new("a", Object.new)`: the VM builds the pattern and asks this to
-  # say what it made of the second argument.
+  # `Regexp.new("a", Object.new)`: `Regexp#initialize` asks this to say what
+  # it made of the second argument.
   def __regexp_flag_warning__(flag)
     __warning__("expected true or false as ignorecase: #{flag.inspect}", true)
   end
