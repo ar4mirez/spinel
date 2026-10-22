@@ -134,6 +134,18 @@ impl std::fmt::Display for Error {
 }
 
 impl Error {
+    /// Whether this says the VM cannot run the program, rather than anything
+    /// Ruby would raise: see `refuse`.
+    fn is_refusal(&self) -> bool {
+        matches!(
+            self,
+            Error::NoDispatch { .. }
+                | Error::Unknowable { .. }
+                | Error::Budget
+                | Error::NotCompiled(_)
+        )
+    }
+
     /// A raise with Ruby's own message text.
     fn raise(class: &'static str, message: impl Into<String>) -> Error {
         Error::Raise {
@@ -581,8 +593,10 @@ impl FiberTable {
     /// Leave the root running and every fiber that was mid-switch dead: the
     /// end of an evaluation that stopped inside a fiber, where nothing is left
     /// to return to.
+    ///
+    /// Threads live on: the program's end kills them (`Thread.__terminate_all__`),
+    /// once its `at_exit` blocks have run with them alive, as CRuby's does.
     fn abandon(&mut self) {
-        self.threads.abandon();
         if self.current.is_none() && self.root_parked.is_none() {
             return;
         }
@@ -634,15 +648,9 @@ fn leave_fiber(
     frames: &mut Vec<Call>,
     exit: FiberExit,
 ) -> Result<Option<Unwind>, ()> {
+    // The root fiber out of frames is the end of the loop: the evaluation's,
+    // or a thread's, whose OS thread then hands the heap on (`threads.rs`).
     let Some(id) = scope.fibers().current else {
-        // A thread's own root fiber is out of frames: the thread is over,
-        // and another runs. `core/thread.rb` ends every thread before this,
-        // so what reaches here — an exception its last `ensure` raised — is
-        // dropped with it, as CRuby's thread would end on it.
-        if !scope.fibers().threads.entries.is_empty() && scope.fibers().threads.current != 0 {
-            let _ = exit;
-            return Ok(threads::switch(scope, stack, frames, threads::Leave::Exit));
-        }
         return Err(());
     };
     let fibers = scope.fibers_mut();
@@ -701,6 +709,11 @@ fn leave_fiber(
             Ok(None)
         }
         FiberExit::Unwind(Unwind::Exception(exception)) => Ok(Some(Unwind::Exception(exception))),
+        // A kill of the thread goes on out of every fiber it is in, to the
+        // bottom of the thread, as CRuby's ends each on the way.
+        FiberExit::Unwind(Unwind::Throw { tag, value }) if threads::is_kill(scope, tag) => {
+            Ok(Some(Unwind::Throw { tag, value }))
+        }
         // Each becomes the exception it would have been without the fiber,
         // carrying the same values: `exception_new` collects the note.
         FiberExit::Unwind(
@@ -1647,18 +1660,23 @@ fn thread_native(
                 fds,
                 deadlockable,
             };
-            return Ok(threads::switch(scope, stack, frames, leave));
+            return threads::switch(scope, stack, frames, leave, ids);
         }
         ThreadOp::Pass => {
-            return Ok(threads::switch(
+            return threads::switch(
                 scope,
                 stack,
                 frames,
                 threads::Leave::Ready(Some(Value::NIL)),
-            ));
+                ids,
+            );
         }
-        ThreadOp::Exit => {
-            return Ok(threads::switch(scope, stack, frames, threads::Leave::Exit));
+        ThreadOp::Outside => bool_value(threads::is_outside(scope, index(0).unwrap_or(usize::MAX))),
+        ThreadOp::NativeId => {
+            match threads::native_thread_id(scope, index(0).unwrap_or(usize::MAX)) {
+                Some(id) => Value::fixnum(id).expect("a thread id is a fixnum"),
+                None => Value::NIL,
+            }
         }
         ThreadOp::Interrupt => {
             let target = index(0).unwrap_or(usize::MAX);
@@ -1972,13 +1990,7 @@ pub fn eval_in(
         frame.receiver = scope.main();
     }
 
-    // Rooted once rather than per allocation: `alloc` needs a handle to the
-    // class, and taking one inside the loop would grow the root stack by an
-    // entry per literal.
-    let string_class = class_handle(scope, Builtin::String);
-    let proc_class = class_handle(scope, Builtin::Proc);
-
-    let mut stack = Stack::with_capacity(iseq.max_stack);
+    let stack = Stack::with_capacity(iseq.max_stack);
     // Owned before the frame is built so the call caches can key off the same
     // `Arc` the frame holds.
     let script = Arc::new(iseq.clone());
@@ -2017,17 +2029,39 @@ pub fn eval_in(
         parked: Vec::new(),
         boundary_limit: 0,
     }];
-    // `u64::MAX` is no budget at all: what `spinel run` asks for, since a
-    // program is allowed to run for as long as it runs.
-    let mut budget = scope.budget().unwrap_or(u64::MAX);
     // Frame ids, handed out in order. Zero means "no such frame", which is what
     // a body with nowhere to `break` to carries.
     // Frame ids continue from the last evaluation: a fiber resumed here may
     // hold frames an earlier one made, and an id must name one frame.
     scope.fibers_mut().abandon();
-    let mut ids: u64 = scope.fibers().frame_ids.max(1);
+    let ids: u64 = scope.fibers().frame_ids.max(1);
     frames[0].id = ids;
     frames[0].home = ids;
+
+    let (result, ids) = run(scope, stack, frames, ids);
+    scope.fibers_mut().frame_ids = ids;
+    scope.fibers_mut().abandon();
+    result
+}
+
+/// The instruction loop, over `stack` and `frames` until the last frame
+/// returns: an evaluation's, from [`eval_in`], or a thread's, on the OS
+/// thread of its own it runs on (`threads.rs`). Answers what it ended with,
+/// and the next frame id to hand out.
+fn run<'h>(
+    scope: &mut HandleScope<'h>,
+    mut stack: Stack,
+    mut frames: Vec<Call>,
+    mut ids: u64,
+) -> (Result<Value, Error>, u64) {
+    // Rooted once rather than per allocation: `alloc` needs a handle to the
+    // class, and taking one inside the loop would grow the root stack by an
+    // entry per literal.
+    let string_class = class_handle(scope, Builtin::String);
+    let proc_class = class_handle(scope, Builtin::Proc);
+    // `u64::MAX` is no budget at all: what `spinel run` asks for, since a
+    // program is allowed to run for as long as it runs.
+    let mut budget = scope.budget().unwrap_or(u64::MAX);
 
     // The refusal boundaries on the stack, innermost last, as
     // `(frame index, frame id, budget deadline)`. Refreshed only when the frame
@@ -2098,7 +2132,18 @@ pub fn eval_in(
                     slice_end = budget.saturating_sub(threads::SLICE_INSNS);
                     limit = deadline.max(slice_end);
                     seen_frames = usize::MAX;
-                    if let Some(unwind) = threads::preempt(scope, &mut stack, &mut frames)?
+                    let unwind = match threads::preempt(scope, &mut stack, &mut frames, &mut ids) {
+                        Ok(unwind) => unwind,
+                        // A refusal another thread left for this one.
+                        Err(error) => Some(refuse(
+                            scope,
+                            &mut stack,
+                            &mut frames,
+                            &mut boundaries,
+                            error,
+                        )?),
+                    };
+                    if let Some(unwind) = unwind
                         && let Some(value) =
                             unwind_to_handler(scope, &mut stack, &mut frames, unwind)?
                     {
@@ -3608,10 +3653,7 @@ pub fn eval_in(
             }
         })
     })();
-
-    scope.fibers_mut().frame_ids = ids;
-    scope.fibers_mut().abandon();
-    result
+    (result, ids)
 }
 
 /// The loop's operand stack: a `Vec` that remembers how far down it has been
@@ -3837,25 +3879,11 @@ fn refuse(
         match catch_refusal(scope, frames, boundaries, error) {
             Ok(unwind) => return Ok(unwind),
             Err(unhandled) => {
-                let refusal = matches!(
-                    unhandled,
-                    Error::NoDispatch { .. }
-                        | Error::Unknowable { .. }
-                        | Error::Budget
-                        | Error::NotCompiled(_)
-                );
-                if refusal
-                    && scope.fibers().current.is_none()
-                    && !scope.fibers().threads.entries.is_empty()
-                    && scope.fibers().threads.current != 0
-                {
-                    // A thread cannot go on, and nothing in it can say so: it
-                    // ends, and the main thread meets the refusal where it is
-                    // waiting, which is the example that started it.
-                    threads::abort_to_main(scope, stack, frames);
-                    error = unhandled;
-                    continue;
-                }
+                // A thread that cannot go on, with nothing in it to say so,
+                // ends here too: its loop does, and the main thread meets the
+                // refusal where it waits, which is the example that started
+                // the thread (`threads::finish`).
+                let refusal = unhandled.is_refusal();
                 if !refusal || scope.fibers().current.is_none() {
                     return Err(unhandled);
                 }
@@ -10773,9 +10801,9 @@ fn native_call<'h>(
             stack.push(value);
             Ok(None)
         }
-        Native::Fs(op) => fs_native(scope, stack, &call, op),
+        Native::Fs(op) => fs_native(scope, stack, frames, &call, op, ids),
         Native::Sys(op) => sys_native(scope, stack, &call, op),
-        Native::Sock(op) => sock_native(scope, stack, &call, op),
+        Native::Sock(op) => sock_native(scope, stack, frames, &call, op, ids),
 
         Native::FrameNesting => {
             let cref = frames.last().map_or(CrefId::ROOT, |frame| frame.cref);
@@ -11771,7 +11799,9 @@ fn native_call<'h>(
             // Ruby raises where the `throw` is, not where the search gives up,
             // and `UncaughtThrowError` is an ordinary rescuable exception — so
             // it is decided here rather than at the top of the unwind.
-            if !frames.iter().any(|frame| frame.tag == Some(tag)) {
+            // A kill is a throw of the thread, caught at its bottom, which
+            // may be below the fiber it is in.
+            if !frames.iter().any(|frame| frame.tag == Some(tag)) && !threads::is_kill(scope, tag) {
                 return Err(uncaught_throw(scope, tag, value));
             }
             Ok(Some(Unwind::Throw { tag, value }))
@@ -12788,8 +12818,13 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         ),
         (
             Builtin::Kernel,
-            &["__thread_exit__"],
-            Native::Thread(ThreadOp::Exit),
+            &["__thread_outside__"],
+            Native::Thread(ThreadOp::Outside),
+        ),
+        (
+            Builtin::Kernel,
+            &["__thread_native_id__"],
+            Native::Thread(ThreadOp::NativeId),
         ),
         (
             Builtin::Kernel,
@@ -16879,8 +16914,10 @@ fn parameters_value(scope: &mut HandleScope<'_>, iseq: &Iseq) -> Value {
 fn fs_native(
     scope: &mut HandleScope<'_>,
     stack: &mut Stack,
+    frames: &mut Vec<Call>,
     call: &Pending,
     op: FsOp,
+    ids: &mut u64,
 ) -> Result<Option<Unwind>, Error> {
     let value = match op {
         FsOp::Kind => {
@@ -17135,24 +17172,27 @@ fn fs_native(
                 .get(2)
                 .and_then(|v| v.as_fixnum())
                 .unwrap_or(0o666);
-            let fd = match std::ffi::CString::new(path.into_os_string().into_vec()) {
+            let Ok(path) = std::ffi::CString::new(path.into_os_string().into_vec()) else {
+                // A NUL inside a path names nothing.
+                stack.push(Value::fixnum(i64::from(libc::EINVAL)).expect("an errno"));
+                return Ok(None);
+            };
+            // Outside the lock: opening a FIFO blocks until its other end
+            // is opened, which another thread may be about to do.
+            let (fd, error) = threads::outside(scope, stack, frames, ids, || {
                 // SAFETY: `path` is NUL-terminated and outlives the call;
                 // `open` reads it and answers a descriptor or -1.
-                Ok(path) => unsafe {
+                let fd = unsafe {
                     libc::open(
                         path.as_ptr(),
                         flags as libc::c_int | libc::O_CLOEXEC,
                         perm as libc::c_uint,
                     )
-                },
-                // A NUL inside a path names nothing.
-                Err(_) => {
-                    stack.push(Value::fixnum(i64::from(libc::EINVAL)).expect("an errno"));
-                    return Ok(None);
-                }
-            };
+                };
+                (fd, std::io::Error::last_os_error())
+            });
             if fd < 0 {
-                errno_value(&std::io::Error::last_os_error())
+                errno_value(&error)
             } else {
                 let fd = Value::fixnum(i64::from(fd)).expect("a descriptor is a fixnum");
                 new_array(scope, &[fd])
@@ -18095,8 +18135,10 @@ fn sockaddr_value(scope: &mut HandleScope<'_>, bytes: Option<Vec<u8>>) -> Value 
 fn sock_native(
     scope: &mut HandleScope<'_>,
     stack: &mut Stack,
+    frames: &mut Vec<Call>,
     call: &Pending,
     op: SockOp,
+    ids: &mut u64,
 ) -> Result<Option<Unwind>, Error> {
     use crate::socket as sock;
     let int = |n: i64| Value::fixnum(n).expect("a socket answer is a fixnum");
@@ -18237,14 +18279,19 @@ fn sock_native(
         SockOp::GetAddrInfo => {
             let host = bytes_or_nil(scope, call, 0, "__sock_getaddrinfo__")?;
             let service = bytes_or_nil(scope, call, 1, "__sock_getaddrinfo__")?;
-            match sock::getaddrinfo(
-                host.as_deref(),
-                service.as_deref(),
-                arg(2),
-                arg(3),
-                arg(4),
-                arg(5),
-            ) {
+            let (family, kind, protocol, flags) = (arg(2), arg(3), arg(4), arg(5));
+            // Outside the lock: the resolver can wait on the network.
+            let answer = threads::outside(scope, stack, frames, ids, || {
+                sock::getaddrinfo(
+                    host.as_deref(),
+                    service.as_deref(),
+                    family,
+                    kind,
+                    protocol,
+                    flags,
+                )
+            });
+            match answer {
                 Ok(list) => rooted_array(
                     scope,
                     list,
