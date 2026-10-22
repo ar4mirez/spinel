@@ -361,11 +361,9 @@ module Kernel
   # A chilled String (#263) — a literal in a file with no
   # `frozen_string_literal` comment, or what `Symbol#to_s` answers — is
   # mutable, and says so the first time it is changed: the deprecation
-  # warning, once, and it is an ordinary String after that.
-  #
-  # ponytail: only mutation that passes through Ruby thaws. `def s.m`,
-  # `class << s` and `@x =` in a String method go through the VM, whose
-  # warnings carry no category yet; #341 moves the thaw there.
+  # warning, once, and it is an ordinary String after that. `def s.m`,
+  # `class << s` and `@x =` in a String method are instructions rather than
+  # methods; the VM sends them here too (#341).
   def self.__thaw__(object)
     case __unchill__(object)
     when :literal

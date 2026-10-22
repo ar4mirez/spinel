@@ -2366,6 +2366,16 @@ fn run<'h>(
                     Insn::SetIvar(name) => {
                         let symbol = frames[top].symbols[name as usize];
                         let receiver = frames[top].receiver;
+                        if let Some(thawing) = thaw_chilled(
+                            scope,
+                            &mut stack,
+                            &mut frames,
+                            proc_class,
+                            &mut ids,
+                            receiver,
+                        )? {
+                            return Ok(thawing);
+                        }
                         let value = stack.pop().expect("setivar on an empty stack");
                         ivar_set(scope, receiver, symbol, value)?;
                     }
@@ -3176,7 +3186,18 @@ fn run<'h>(
                         let iseq = Arc::clone(&frames[top].iseq.children[child as usize]);
                         let symbol = frames[top].symbols[name as usize];
                         let cref = frames[top].cref;
-                        let receiver = stack.pop().expect("a receiver to define on");
+                        let receiver = *stack.last().expect("a receiver to define on");
+                        if let Some(thawing) = thaw_chilled(
+                            scope,
+                            &mut stack,
+                            &mut frames,
+                            proc_class,
+                            &mut ids,
+                            receiver,
+                        )? {
+                            return Ok(thawing);
+                        }
+                        stack.pop();
                         // `def frozen_obj.m` raises: a singleton method is stored on
                         // the object, and a frozen object does not take stores.
                         frozen_check(scope, receiver)?;
@@ -3403,6 +3424,20 @@ fn run<'h>(
                     Insn::OpenClass(index) => {
                         let iseq = Arc::clone(&frames[top].iseq);
                         let def = &iseq.class_defs[index as usize];
+                        // `class << s` on a chilled String warns before it opens.
+                        if def.kind == DefKind::Singleton {
+                            let object = *stack.last().expect("an object to open the singleton of");
+                            if let Some(thawing) = thaw_chilled(
+                                scope,
+                                &mut stack,
+                                &mut frames,
+                                proc_class,
+                                &mut ids,
+                                object,
+                            )? {
+                                return Ok(thawing);
+                            }
+                        }
                         if let Some(unwind) = open_class(
                             scope,
                             &mut stack,
@@ -6945,6 +6980,53 @@ fn vm_warn<'h>(
         crate::shared::symbols::intern("__warning__"),
         vec![text, bool_value(verbose)],
     )
+}
+
+/// Thaw `object` if it is a chilled String (#263) that the instruction being
+/// run is about to change: `def s.m`, `class << s`, `@x =` in one of its
+/// methods (#341).
+///
+/// CRuby reaches all three through `rb_check_frozen`, which warns before the
+/// change, so a `Warning.warn` that raises leaves the String as it was. Here
+/// the instruction is rewound, with its operands still on the stack, under a
+/// call to `Kernel.__thaw__`, the same Ruby every mutator's thaw goes through:
+/// the warning, its category and its once-only are decided in one place, and
+/// the instruction runs again on a String that is no longer chilled. `None`
+/// is "not chilled, carry on", and costs one header read.
+///
+/// ponytail: while the thaw runs, the rewound frame's line is that of the
+/// instruction before, the operand's. That is the same line unless the
+/// operand spans lines. Upgrade by letting a frame resume at an instruction
+/// rather than after one.
+fn thaw_chilled<'h>(
+    scope: &mut HandleScope<'h>,
+    stack: &mut Stack,
+    frames: &mut Vec<Call>,
+    proc_class: Handle<'h>,
+    ids: &mut u64,
+    object: Value,
+) -> Result<Option<Step>, Error> {
+    if object.is_immediate() {
+        return Ok(None);
+    }
+    let handle = scope.root(object);
+    if scope.chilled(handle).is_none() {
+        return Ok(None);
+    }
+    let top = frames.len() - 1;
+    frames[top].pc -= 1;
+    let kernel = scope.classes().object(Builtin::Kernel.id());
+    let unwind = call_discarded(
+        scope,
+        stack,
+        frames,
+        proc_class,
+        ids,
+        kernel,
+        crate::shared::symbols::intern("__thaw__"),
+        vec![object],
+    )?;
+    Ok(Some(unwind.map_or(Step::Next, Step::Unwind)))
 }
 
 /// Whether reading the unset global `name` is worth a `-w` warning.
