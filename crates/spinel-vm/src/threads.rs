@@ -1,35 +1,47 @@
-//! Threads (#45): the VM half, under `interp`.
+//! Threads (#45, #328): the VM half, under `interp`.
 //!
 //! A thread is what a fiber is — the interpreter's two vectors, its value
 //! stack and its frames — plus the fiber bookkeeping of its own: which fiber
 //! of the thread runs, its root fiber's object, and the root's vectors while a
-//! fiber was transferred to. Switching threads is swapping all of that, the
-//! way `resume` swaps a fiber's. Every heap has one table of them, beside its
+//! fiber was transferred to. Every heap has one table of them, beside its
 //! fibers, and the collector traces both.
+//!
+//! Each thread runs on an OS thread of its own, and they take turns with the
+//! heap under the per-Ractor lock `docs/engine.md` describes (#328): the OS
+//! thread holding it runs its thread's loop (`interp::run`), and every other
+//! waits for its turn. A switch parks the running thread here — its vectors,
+//! its root stack, its fiber bookkeeping and specials — picks the next, hands
+//! it the heap and waits to be handed it back; the next takes its own back
+//! from here and goes on in its own loop. So a switch is what it was when the
+//! threads took turns on one OS thread, and the scheduler is the same; what
+//! the OS threads add is a call that blocks in the kernel — `open(2)` of a
+//! FIFO, `getaddrinfo` — made [`outside`] the lock, its thread parked as if it
+//! waited while the others run.
 //!
 //! What a thread *does* — `join`, `Mutex`, `Queue`, `Thread#raise`'s
 //! exception, `report_on_exception` — is `core/thread.rb`. This file is the
 //! scheduler under it: who runs, who waits for what, and the switches. A
 //! thread that waits says what for, a deadline or a descriptor becoming
 //! ready, or nothing (another thread's `wakeup`); when no thread can run the
-//! scheduler waits in `poll(2)` for the first of them; and when every thread
-//! waits on another for ever, the main thread is woken to raise the deadlock.
-//! The interpreter loop preempts the running thread every time slice, so a
-//! thread that never waits does not starve the others.
+//! scheduler waits in `poll(2)` for the first of them, or for a thread back
+//! from outside the lock; and when every thread waits on another for ever,
+//! the main thread is woken to raise the deadlock. The interpreter loop
+//! preempts the running thread every time slice, so a thread that never
+//! waits does not starve the others.
 //!
-//! ponytail: the threads of a Ractor take turns on its one OS thread — the
-//! lock `docs/engine.md` describes, held by one OS thread for all of them — so
-//! a blocking call no thread scheduled around (a `getaddrinfo`, an FFI call)
-//! stops them all. Waits that go through `IO.select`, `IO#wait`, `sleep`,
-//! `Queue`, `Mutex` and `join` all overlap. One OS thread per Ruby thread,
-//! handing the heap over under the lock, is the upgrade; the table and the
-//! switch here are what it would keep.
+//! ponytail: only `open(2)` and `getaddrinfo` are made outside the lock so
+//! far, and a call made there cannot be interrupted — `Thread#raise` and
+//! `Thread#kill` are met when it returns, where CRuby's unblocking function
+//! ends it early. Each blocking primitive is one [`outside`] call away; the
+//! interruption is a signal to the waiting OS thread.
 
 use std::collections::VecDeque;
+use std::mem::ManuallyDrop;
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use super::{
-    Call, Context, Error, HandleScope, Pending, Stack, Target, Unwind, Value, adopt_roots,
+    Call, Context, Error, HandleScope, Heap, Pending, Stack, Target, Unwind, Value, adopt_roots,
     frame_roots, push_proc_frame,
 };
 
@@ -38,6 +50,10 @@ const SLICE: Duration = Duration::from_millis(10);
 
 /// Instructions between the loop's looks at the clock.
 pub(super) const SLICE_INSNS: u64 = 4096;
+
+/// The stack each thread's OS thread is made with: the main thread's usual
+/// size, since a primitive that recurses — `inspect`, `Marshal` — runs on it.
+const OS_STACK: usize = 8 << 20;
 
 pub(super) enum ThreadState {
     /// Running now: its vectors are the loop's.
@@ -59,6 +75,9 @@ pub(super) enum ThreadState {
         /// since a signal could end it.
         deadlockable: bool,
     },
+    /// In a call made [`outside`] the lock, its vectors here, until the call
+    /// returns and it gets back in line.
+    Outside { context: Context },
     /// Finished.
     Dead,
 }
@@ -86,6 +105,11 @@ pub(super) struct ThreadEntry {
     /// Its `$~`, `$!`, `$_` and `$?` while another thread runs: one slot
     /// each per heap in the VM, one each per thread in Ruby.
     pub(super) specials: [Value; 4],
+    /// Its root stack while another thread runs: what the handles its loop
+    /// and its primitives hold are indexes into.
+    pub(super) roots: Vec<Value>,
+    /// Its OS thread, as the kernel names it (`gettid(2)` on Linux).
+    pub(super) native_id: i64,
 }
 
 /// Every thread a heap has made. Empty until the first one is: the main
@@ -98,6 +122,12 @@ pub(crate) struct ThreadTable {
     /// Whether the running thread was last entered out of a wait, woken:
     /// an interrupt met there is met blocking.
     pub(super) woken: bool,
+    /// Which OS thread has the heap; made with the main thread's entry.
+    lock: Option<Arc<Lock>>,
+    /// A refusal a thread met with nothing in it to catch it: the thread
+    /// ended, and the main thread meets the refusal where it waits, which
+    /// is the example that started the thread.
+    refusal: Option<Error>,
 }
 
 impl ThreadTable {
@@ -111,7 +141,9 @@ impl ThreadTable {
                         f(*value);
                     }
                 }
-                ThreadState::Blocked { context: c, .. } => context_roots(c, f),
+                ThreadState::Blocked { context: c, .. } | ThreadState::Outside { context: c } => {
+                    context_roots(c, f);
+                }
                 ThreadState::Running | ThreadState::Dead => {}
             }
             if let Some(root) = entry.fibers.root {
@@ -124,6 +156,7 @@ impl ThreadTable {
                 frame_roots(frame, f);
             }
             entry.specials.iter().copied().for_each(&mut *f);
+            entry.roots.iter().copied().for_each(&mut *f);
         }
     }
 
@@ -134,22 +167,6 @@ impl ThreadTable {
             .enumerate()
             .any(|(i, e)| i != self.current && !matches!(e.state, ThreadState::Dead))
     }
-
-    /// The end of an evaluation: every thread but the main one is gone, as
-    /// CRuby kills them when the main thread ends.
-    pub(super) fn abandon(&mut self) {
-        if self.entries.is_empty() {
-            return;
-        }
-        for (index, entry) in self.entries.iter_mut().enumerate() {
-            if index != 0 {
-                entry.state = ThreadState::Dead;
-                entry.pending.clear();
-            }
-        }
-        self.entries[0].state = ThreadState::Running;
-        self.current = 0;
-    }
 }
 
 fn context_roots(context: &Context, f: &mut impl FnMut(Value)) {
@@ -159,23 +176,169 @@ fn context_roots(context: &Context, f: &mut impl FnMut(Value)) {
     }
 }
 
+/// The per-Ractor lock: which thread's OS thread may use the heap.
+struct Lock {
+    held: Mutex<Held>,
+    /// A pipe a thread back from [`outside`] writes a byte to, so that a
+    /// scheduler waiting in `poll(2)` for something else wakes to put it
+    /// back in line.
+    wake: [libc::c_int; 2],
+}
+
+struct Held {
+    /// The thread whose OS thread has the heap; none while every thread that
+    /// could have it is outside the lock.
+    holder: Option<usize>,
+    /// The heap, as its last holder handed it on.
+    heap: HeapPtr,
+    /// What each thread's OS thread waits on for its turn, by index.
+    turns: Vec<Arc<Condvar>>,
+    /// Threads back from outside the lock, to be put back in line.
+    back: Vec<usize>,
+}
+
+struct HeapPtr(*mut Heap);
+
+// SAFETY: the heap goes from one OS thread to another only through `Held`,
+// under its mutex, and only the OS thread `holder` names uses it.
+unsafe impl Send for HeapPtr {}
+
+impl Lock {
+    fn new(heap: *mut Heap, holder: usize, threads: usize) -> Lock {
+        let mut wake = [-1; 2];
+        // SAFETY: `wake` is the two descriptors `pipe` fills in; `fcntl` only
+        // sets flags on them.
+        unsafe {
+            if libc::pipe(wake.as_mut_ptr()) == 0 {
+                for fd in wake {
+                    libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+                    libc::fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK);
+                }
+            }
+        }
+        Lock {
+            held: Mutex::new(Held {
+                holder: Some(holder),
+                heap: HeapPtr(heap),
+                turns: (0..threads).map(|_| Arc::new(Condvar::new())).collect(),
+                back: Vec::new(),
+            }),
+            wake,
+        }
+    }
+
+    fn held(&self) -> MutexGuard<'_, Held> {
+        self.held.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Hand the heap to `to`, or to nobody.
+    fn give(&self, heap: *mut Heap, to: Option<usize>) {
+        let mut held = self.held();
+        held.heap = HeapPtr(heap);
+        held.holder = to;
+        if let Some(to) = to {
+            held.turns[to].notify_one();
+        }
+    }
+
+    /// Wait for `me`'s turn with the heap; the heap, once it is.
+    fn wait(&self, me: usize) -> *mut Heap {
+        Self::wait_in(self.held(), me)
+    }
+
+    fn wait_in(mut held: MutexGuard<'_, Held>, me: usize) -> *mut Heap {
+        let turn = Arc::clone(&held.turns[me]);
+        while held.holder != Some(me) {
+            held = turn.wait(held).unwrap_or_else(PoisonError::into_inner);
+        }
+        held.heap.0
+    }
+
+    /// Back from outside: take the heap if nobody has it, or get in line
+    /// and wait for a turn.
+    fn come_back(&self, me: usize) -> *mut Heap {
+        let mut held = self.held();
+        if held.holder.is_none() {
+            held.holder = Some(me);
+            return held.heap.0;
+        }
+        held.back.push(me);
+        // SAFETY: one byte, from a live local, to the pipe's write end. A
+        // full pipe answers EAGAIN, and is waking the scheduler already.
+        unsafe { libc::write(self.wake[1], [1u8].as_ptr().cast(), 1) };
+        Self::wait_in(held, me)
+    }
+
+    /// Empty the wake pipe.
+    fn drain(&self) {
+        let mut bytes = [0u8; 64];
+        // SAFETY: reads into a live local buffer of its own length; the read
+        // end is nonblocking, so an empty pipe answers -1.
+        while unsafe { libc::read(self.wake[0], bytes.as_mut_ptr().cast(), bytes.len()) } > 0 {}
+    }
+}
+
+impl Drop for Lock {
+    fn drop(&mut self) {
+        for fd in self.wake {
+            if fd >= 0 {
+                // SAFETY: the lock made both descriptors and nothing else
+                // closes them.
+                unsafe { libc::close(fd) };
+            }
+        }
+    }
+}
+
+/// The calling OS thread, as the kernel names it.
+fn native_id() -> i64 {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: `gettid` has no preconditions.
+        i64::from(unsafe { libc::gettid() })
+    }
+    #[cfg(target_vendor = "apple")]
+    {
+        let mut id: u64 = 0;
+        // SAFETY: a null thread is the calling one, and `id` is where the
+        // answer goes.
+        unsafe { libc::pthread_threadid_np(0 as libc::pthread_t, &mut id) };
+        id as i64
+    }
+    #[cfg(not(any(target_os = "linux", target_vendor = "apple")))]
+    {
+        // SAFETY: `pthread_self` has no preconditions.
+        unsafe { libc::pthread_self() as i64 }
+    }
+}
+
 fn ensure_main(scope: &mut HandleScope<'_>) {
-    let threads = &mut scope.fibers_mut().threads;
-    if threads.entries.is_empty() {
+    if scope.fibers().threads.entries.is_empty() {
+        let heap = scope.heap_ptr();
+        let threads = &mut scope.fibers_mut().threads;
         threads.entries.push(ThreadEntry {
             object: Value::NIL,
             state: ThreadState::Running,
             fibers: FiberWorld::default(),
             pending: VecDeque::new(),
             specials: [Value::NIL; 4],
+            roots: Vec::new(),
+            native_id: native_id(),
         });
         threads.current = 0;
         threads.slice_started = Some(Instant::now());
+        threads.lock = Some(Arc::new(Lock::new(heap, 0, 1)));
     }
 }
 
-/// A new thread running `block`, its first frame pushed now so any later
-/// switch can enter it. It runs when the scheduler gets to it.
+fn lock(scope: &HandleScope<'_>) -> Arc<Lock> {
+    let lock = scope.fibers().threads.lock.as_ref();
+    Arc::clone(lock.expect("the main thread's entry made the lock"))
+}
+
+/// A new thread running `block`, its first frame pushed now so its OS thread,
+/// started now and waiting for its turn, can enter it. It runs when the
+/// scheduler gets to it.
 pub(super) fn spawn(
     scope: &mut HandleScope<'_>,
     call: &Pending,
@@ -196,8 +359,29 @@ pub(super) fn spawn(
         block,
         ids,
     )?;
-    let threads = &mut scope.fibers_mut().threads;
-    threads.entries.push(ThreadEntry {
+    let index = scope.fibers().threads.entries.len();
+    let lock = lock(scope);
+    lock.held().turns.push(Arc::new(Condvar::new()));
+    let (told, started) = std::sync::mpsc::channel();
+    let its_lock = Arc::clone(&lock);
+    let spawned = std::thread::Builder::new()
+        .stack_size(OS_STACK)
+        .spawn(move || {
+            let _ = told.send(native_id());
+            os_thread(&its_lock, index);
+        });
+    if let Err(error) = spawned {
+        lock.held().turns.pop();
+        let reason = error
+            .raw_os_error()
+            .map_or_else(|| error.to_string(), crate::errno::message);
+        return Err(Error::raise(
+            "ThreadError",
+            format!("can't create Thread: {reason}"),
+        ));
+    }
+    let native_id = started.recv().unwrap_or_default();
+    scope.fibers_mut().threads.entries.push(ThreadEntry {
         object,
         state: ThreadState::Ready {
             context: Context { stack, frames },
@@ -206,8 +390,79 @@ pub(super) fn spawn(
         fibers: FiberWorld::default(),
         pending: VecDeque::new(),
         specials: [Value::NIL; 4],
+        roots: Vec::new(),
+        native_id,
     });
-    Ok(threads.entries.len() - 1)
+    Ok(index)
+}
+
+/// A thread's OS thread: wait for the first turn, run the thread's loop over
+/// its vectors, and hand the heap on when it is over.
+fn os_thread(lock: &Lock, me: usize) {
+    let heap = lock.wait(me);
+    // SAFETY: the heap is this OS thread's until it hands it on. Whoever had
+    // it parked what was theirs on it — vectors, root stack — before handing
+    // it here, and waits to be handed it back (`hand_to`), so nothing else
+    // uses it meanwhile; every later turn is handed the same way. It outlives
+    // the thread's turns: only a thread with a turn hands it on, so once the
+    // main thread's last evaluation is over nothing hands it on again, and a
+    // thread still alive then — one the program's end did not kill
+    // (`Thread.__terminate_all__`), or one an embedder never ended — waits
+    // for ever, its OS thread with it.
+    let heap = unsafe { &mut *heap };
+    // Never dropped: dropping truncates the root stack, which by the time
+    // this thread is over belongs to whoever it handed the heap to. `finish`
+    // lets go of this thread's roots by hand first.
+    let mut scope = ManuallyDrop::new(heap.scope());
+    hand_to(&mut scope, me, me);
+    let (mut stack, mut frames) = (Stack::default(), Vec::new());
+    enter(&mut scope, &mut stack, &mut frames, me, true);
+    let ids = scope.fibers().frame_ids;
+    let (result, ids) = super::run(&mut scope, stack, frames, ids);
+    finish(&mut scope, me, result, ids);
+}
+
+/// A thread's loop is over: it is dead, and the heap goes on.
+fn finish(scope: &mut HandleScope<'_>, me: usize, result: Result<Value, Error>, ids: u64) {
+    let _ = scope.swap_roots(Vec::new());
+    let fibers = scope.fibers_mut();
+    fibers.frame_ids = ids;
+    fibers.current = None;
+    fibers.root = None;
+    fibers.root_parked = None;
+    let threads = &mut fibers.threads;
+    threads.entries[me].state = ThreadState::Dead;
+    threads.entries[me].pending.clear();
+    // A refusal nothing in the thread could take is the main thread's to
+    // meet. Anything else that ends the loop — an exception its last `ensure`
+    // raised, since `core/thread.rb` rescues the rest — is dropped with it,
+    // as CRuby's thread would end on it.
+    let mut first = None;
+    if let Err(error) = result
+        && error.is_refusal()
+    {
+        threads.refusal = Some(error);
+        let main = &mut threads.entries[0];
+        main.state = match std::mem::replace(&mut main.state, ThreadState::Dead) {
+            ThreadState::Ready { context, .. } | ThreadState::Blocked { context, .. } => {
+                first = Some(0);
+                ThreadState::Ready {
+                    context,
+                    push: None,
+                }
+            }
+            // Outside the lock: it meets the refusal at its next turn check.
+            other => other,
+        };
+    }
+    if matches!(threads.entries[0].state, ThreadState::Dead) {
+        // ponytail: this thread forked, and in the child it was the only one
+        // left; CRuby makes it the child's main thread, whose end ends the
+        // process. Without that, its end ends the process here, `at_exit`
+        // unrun.
+        std::process::exit(0);
+    }
+    release(scope, me, first);
 }
 
 /// A call of `block` with no arguments, as `call` would make it.
@@ -274,14 +529,44 @@ pub(super) fn object(scope: &HandleScope<'_>, index: usize) -> Value {
         .map_or(Value::NIL, |e| e.object)
 }
 
-/// `:run`, `:sleep` or `:dead` for a thread.
+/// `:run`, `:sleep` or `:dead` for a thread. One outside the lock sleeps, as
+/// CRuby's in a blocking region does.
 pub(super) fn status(scope: &HandleScope<'_>, index: usize) -> &'static str {
     match scope.fibers().threads.entries.get(index).map(|e| &e.state) {
         None => "run",
         Some(ThreadState::Running | ThreadState::Ready { .. }) => "run",
-        Some(ThreadState::Blocked { .. }) => "sleep",
+        Some(ThreadState::Blocked { .. } | ThreadState::Outside { .. }) => "sleep",
         Some(ThreadState::Dead) => "dead",
     }
+}
+
+/// Whether a throw of `tag` is a kill of the running thread: `core/thread.rb`
+/// kills a thread by throwing its `Thread`, caught at the thread's bottom.
+pub(super) fn is_kill(scope: &HandleScope<'_>, tag: Value) -> bool {
+    let threads = &scope.fibers().threads;
+    threads.current != 0
+        && !tag.is_nil()
+        && threads
+            .entries
+            .get(threads.current)
+            .is_some_and(|e| e.object == tag)
+}
+
+/// Whether a thread is in a call made [`outside`] the lock.
+pub(super) fn is_outside(scope: &HandleScope<'_>, index: usize) -> bool {
+    scope
+        .fibers()
+        .threads
+        .entries
+        .get(index)
+        .is_some_and(|e| matches!(e.state, ThreadState::Outside { .. }))
+}
+
+/// The OS thread a thread runs on.
+pub(super) fn native_thread_id(scope: &mut HandleScope<'_>, index: usize) -> Option<i64> {
+    ensure_main(scope);
+    let entry = scope.fibers().threads.entries.get(index)?;
+    (!matches!(entry.state, ThreadState::Dead)).then_some(entry.native_id)
 }
 
 /// Make a waiting thread able to run, its wait answering `reason`. False
@@ -328,37 +613,64 @@ pub(super) enum Leave {
         fds: Vec<(libc::c_int, libc::c_short)>,
         deadlockable: bool,
     },
-    /// Its block has finished.
-    Exit,
 }
 
 fn reason(name: &str) -> Value {
     Value::symbol(crate::shared::symbols::intern(name))
 }
 
+/// Put the threads back from outside the lock back in line.
+fn take_back(scope: &mut HandleScope<'_>) -> usize {
+    let back = match &scope.fibers().threads.lock {
+        Some(lock) => std::mem::take(&mut lock.held().back),
+        None => return 0,
+    };
+    let mut woken = 0;
+    for index in back {
+        let entry = &mut scope.fibers_mut().threads.entries[index];
+        let ThreadState::Outside { context } =
+            std::mem::replace(&mut entry.state, ThreadState::Dead)
+        else {
+            unreachable!("only a thread outside the lock comes back")
+        };
+        entry.state = ThreadState::Ready {
+            context,
+            push: None,
+        };
+        woken += 1;
+    }
+    woken
+}
+
 /// Wake every waiting thread whose deadline has passed or whose descriptor
-/// is ready, waiting up to `timeout` for one to be; how many woke.
+/// is ready, and every thread back from outside the lock, waiting up to
+/// `timeout` for one to be; how many woke.
 fn wake_ready(scope: &mut HandleScope<'_>, timeout: Option<Duration>) -> usize {
     let now = Instant::now();
     let mut woken = 0;
     let mut polled: Vec<(usize, libc::pollfd)> = Vec::new();
     let mut expired = Vec::new();
+    let mut outside = false;
     for (index, entry) in scope.fibers().threads.entries.iter().enumerate() {
-        if let ThreadState::Blocked { deadline, fds, .. } = &entry.state {
-            if deadline.is_some_and(|d| d <= now) {
-                expired.push(index);
-            } else {
-                for &(fd, events) in fds {
-                    polled.push((
-                        index,
-                        libc::pollfd {
-                            fd,
-                            events,
-                            revents: 0,
-                        },
-                    ));
+        match &entry.state {
+            ThreadState::Blocked { deadline, fds, .. } => {
+                if deadline.is_some_and(|d| d <= now) {
+                    expired.push(index);
+                } else {
+                    for &(fd, events) in fds {
+                        polled.push((
+                            index,
+                            libc::pollfd {
+                                fd,
+                                events,
+                                revents: 0,
+                            },
+                        ));
+                    }
                 }
             }
+            ThreadState::Outside { .. } => outside = true,
+            _ => {}
         }
     }
     for index in expired {
@@ -366,6 +678,22 @@ fn wake_ready(scope: &mut HandleScope<'_>, timeout: Option<Duration>) -> usize {
             woken += 1;
         }
     }
+    // A thread outside the lock is waited for on the wake pipe.
+    let wake = if outside {
+        woken += take_back(scope);
+        let lock = lock(scope);
+        polled.push((
+            usize::MAX,
+            libc::pollfd {
+                fd: lock.wake[0],
+                events: libc::POLLIN,
+                revents: 0,
+            },
+        ));
+        Some(lock)
+    } else {
+        None
+    };
     if woken > 0 || (polled.is_empty() && timeout.is_some_and(|t| t.is_zero())) {
         return woken;
     }
@@ -381,7 +709,15 @@ fn wake_ready(scope: &mut HandleScope<'_>, timeout: Option<Duration>) -> usize {
     let ready = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, ms) };
     if ready > 0 {
         for ((index, _), pollfd) in polled.iter().zip(&fds) {
-            if pollfd.revents != 0 && wakeup(scope, *index, reason("ready")) {
+            if pollfd.revents == 0 {
+                continue;
+            }
+            if *index == usize::MAX {
+                if let Some(lock) = &wake {
+                    lock.drain();
+                }
+                woken += take_back(scope);
+            } else if wakeup(scope, *index, reason("ready")) {
                 woken += 1;
             }
         }
@@ -415,9 +751,16 @@ fn next_ready(scope: &HandleScope<'_>, after: usize) -> Option<usize> {
         .find(|&i| matches!(entries[i].state, ThreadState::Ready { .. }))
 }
 
+/// A waiting thread other than `me`, to keep the scheduler going while no
+/// thread can run.
+fn next_waiting(scope: &HandleScope<'_>, me: usize) -> Option<usize> {
+    let entries = &scope.fibers().threads.entries;
+    (0..entries.len()).find(|&i| i != me && matches!(entries[i].state, ThreadState::Blocked { .. }))
+}
+
 /// When to stop waiting for nothing to be ready: the earliest deadline, or
-/// whether anything waits on a descriptor; or that every thread waits for
-/// ever, and whether all of them count toward a deadlock.
+/// whether anything waits on a descriptor or outside the lock; or that every
+/// thread waits for ever, and whether all of them count toward a deadlock.
 enum Idle {
     Until(Option<Instant>),
     Forever { deadlock: bool },
@@ -428,20 +771,24 @@ fn idle(scope: &HandleScope<'_>) -> Idle {
     let mut waits_on_fds = false;
     let mut deadlock = true;
     for entry in &scope.fibers().threads.entries {
-        if let ThreadState::Blocked {
-            deadline,
-            fds: entry_fds,
-            deadlockable,
-            ..
-        } = &entry.state
-        {
-            if let Some(d) = deadline {
-                earliest = Some(earliest.map_or(*d, |e| e.min(*d)));
+        match &entry.state {
+            ThreadState::Blocked {
+                deadline,
+                fds: entry_fds,
+                deadlockable,
+                ..
+            } => {
+                if let Some(d) = deadline {
+                    earliest = Some(earliest.map_or(*d, |e| e.min(*d)));
+                }
+                waits_on_fds |= !entry_fds.is_empty();
+                if deadline.is_none() && entry_fds.is_empty() && !deadlockable {
+                    deadlock = false;
+                }
             }
-            waits_on_fds |= !entry_fds.is_empty();
-            if deadline.is_none() && entry_fds.is_empty() && !deadlockable {
-                deadlock = false;
-            }
+            // It is coming back.
+            ThreadState::Outside { .. } => waits_on_fds = true,
+            _ => {}
         }
     }
     if earliest.is_some() || waits_on_fds {
@@ -451,60 +798,13 @@ fn idle(scope: &HandleScope<'_>) -> Idle {
     }
 }
 
-/// Take the running thread off the processor as `leave` says and put the
-/// next one on; the answer is an unwind to start the new one with, when it
-/// has an interrupt waiting.
-pub(super) fn switch(
-    scope: &mut HandleScope<'_>,
-    stack: &mut Stack,
-    frames: &mut Vec<Call>,
-    leave: Leave,
-) -> Option<Unwind> {
-    ensure_main(scope);
-    let from = scope.fibers().threads.current;
-    // Park the running thread, and its fibers.
-    let context = Context {
-        stack: std::mem::take(stack),
-        frames: std::mem::take(frames),
-    };
-    let specials = [
-        scope.last_match(),
-        scope.errinfo(),
-        scope.global(special("$_")).unwrap_or(Value::NIL),
-        scope.global(special("$?")).unwrap_or(Value::NIL),
-    ];
-    let fibers = scope.fibers_mut();
-    let world = FiberWorld {
-        current: fibers.current.take(),
-        root: fibers.root.take(),
-        root_parked: fibers.root_parked.take(),
-    };
-    let entry = &mut fibers.threads.entries[from];
-    entry.fibers = world;
-    entry.specials = specials;
-    entry.state = match leave {
-        Leave::Ready(push) => ThreadState::Ready { context, push },
-        Leave::Block {
-            deadline,
-            fds,
-            deadlockable,
-        } => ThreadState::Blocked {
-            context,
-            deadline,
-            fds,
-            deadlockable,
-        },
-        Leave::Exit => ThreadState::Dead,
-    };
-    // A thread with an interrupt waiting does not wait.
-    if !entry.pending.is_empty() {
-        wakeup(scope, from, reason("interrupted"));
-    }
-    // The next to run: one able to now, or the first to wake.
-    let to = loop {
+/// The next thread to run, looking after `after` first; when none can, wait
+/// for the first that can.
+fn pick(scope: &mut HandleScope<'_>, after: usize) -> usize {
+    loop {
         wake_ready(scope, Some(Duration::ZERO));
-        if let Some(next) = next_ready(scope, from) {
-            break next;
+        if let Some(next) = next_ready(scope, after) {
+            return next;
         }
         match idle(scope) {
             Idle::Until(deadline) => {
@@ -520,16 +820,149 @@ pub(super) fn switch(
                 wake_ready(scope, None);
             }
         }
-    };
-    enter(scope, stack, frames, to)
+    }
 }
 
+/// Hand the heap to `to`, and wait to be handed it back able to run. It can
+/// come back first with `me` still waiting — while every thread that could
+/// run is outside the lock — for `me` to keep the scheduler going.
+fn hand_to(scope: &mut HandleScope<'_>, me: usize, to: usize) {
+    let lock = lock(scope);
+    let mut to = to;
+    loop {
+        if to != me {
+            // The heap goes to `to`'s OS thread, which uses it until it
+            // hands it back; this one touches nothing of it meanwhile. The
+            // pointer handed over is this scope's own, so the compiler sees
+            // the heap escape into the lock before the wait and come back
+            // out of it after.
+            lock.give(scope.heap_ptr(), Some(to));
+            lock.wait(me);
+        }
+        if matches!(
+            scope.fibers().threads.entries[me].state,
+            ThreadState::Ready { .. }
+        ) {
+            return;
+        }
+        to = pick(scope, me);
+    }
+}
+
+/// Hand the heap on from a thread that stops running without waiting for it
+/// back — it is over, or it is going outside the lock: to `first`, or to a
+/// thread able to run, or to a waiting one to keep the scheduler going, or
+/// to nobody, for the first thread back from outside to take.
+fn release(scope: &mut HandleScope<'_>, me: usize, first: Option<usize>) {
+    let lock = lock(scope);
+    loop {
+        wake_ready(scope, Some(Duration::ZERO));
+        let to = first
+            .or_else(|| next_ready(scope, me))
+            .or_else(|| next_waiting(scope, me));
+        let heap = scope.heap_ptr();
+        let mut held = lock.held();
+        if to.is_none() && !held.back.is_empty() {
+            // One came back meanwhile: it is next.
+            continue;
+        }
+        held.heap = HeapPtr(heap);
+        held.holder = to;
+        if let Some(to) = to {
+            held.turns[to].notify_one();
+        }
+        return;
+    }
+}
+
+/// Park the running thread, `from`, in the state `state` makes of its
+/// vectors: they, its root stack, its fibers and its specials go here.
+fn park(
+    scope: &mut HandleScope<'_>,
+    stack: &mut Stack,
+    frames: &mut Vec<Call>,
+    from: usize,
+    ids: u64,
+    state: impl FnOnce(Context) -> ThreadState,
+) {
+    let context = Context {
+        stack: std::mem::take(stack),
+        frames: std::mem::take(frames),
+    };
+    let specials = [
+        scope.last_match(),
+        scope.errinfo(),
+        scope.global(special("$_")).unwrap_or(Value::NIL),
+        scope.global(special("$?")).unwrap_or(Value::NIL),
+    ];
+    let roots = scope.swap_roots(Vec::new());
+    let fibers = scope.fibers_mut();
+    fibers.frame_ids = ids;
+    let world = FiberWorld {
+        current: fibers.current.take(),
+        root: fibers.root.take(),
+        root_parked: fibers.root_parked.take(),
+    };
+    let entry = &mut fibers.threads.entries[from];
+    entry.fibers = world;
+    entry.specials = specials;
+    entry.roots = roots;
+    entry.state = state(context);
+}
+
+/// Take the running thread off the processor as `leave` says, put the next
+/// one on, and wait for this one's next turn. A refusal another thread left
+/// for the main thread is its answer there.
+pub(super) fn switch(
+    scope: &mut HandleScope<'_>,
+    stack: &mut Stack,
+    frames: &mut Vec<Call>,
+    leave: Leave,
+    ids: &mut u64,
+) -> Result<Option<Unwind>, Error> {
+    ensure_main(scope);
+    let from = scope.fibers().threads.current;
+    park(scope, stack, frames, from, *ids, |context| match leave {
+        Leave::Ready(push) => ThreadState::Ready { context, push },
+        Leave::Block {
+            deadline,
+            fds,
+            deadlockable,
+        } => ThreadState::Blocked {
+            context,
+            deadline,
+            fds,
+            deadlockable,
+        },
+    });
+    // A thread with an interrupt waiting does not wait.
+    if !scope.fibers().threads.entries[from].pending.is_empty() {
+        wakeup(scope, from, reason("interrupted"));
+    }
+    let to = pick(scope, from);
+    hand_to(scope, from, to);
+    *ids = scope.fibers().frame_ids;
+    enter(scope, stack, frames, from, true);
+    if from == 0
+        && let Some(refusal) = scope.fibers_mut().threads.refusal.take()
+    {
+        return Err(refusal);
+    }
+    Ok(None)
+}
+
+/// Put the thread `to`, able to run, back in the loop's vectors, and its
+/// root stack, fibers and specials back on the heap. An interrupt waiting for
+/// it goes on top, as a call what it stopped in returns to — unless it
+/// stopped part-way through a primitive (`interruptible` false), which meets
+/// the interrupt at its next turn check.
 fn enter(
     scope: &mut HandleScope<'_>,
     stack: &mut Stack,
     frames: &mut Vec<Call>,
     to: usize,
-) -> Option<Unwind> {
+    interruptible: bool,
+) {
     let fibers = scope.fibers_mut();
     let entry = &mut fibers.threads.entries[to];
     let ThreadState::Ready { context, push } =
@@ -538,14 +971,20 @@ fn enter(
         unreachable!("only a ready thread is entered")
     };
     let world = std::mem::take(&mut entry.fibers);
-    let pending = entry.pending.pop_front();
+    let pending = if interruptible {
+        entry.pending.pop_front()
+    } else {
+        None
+    };
     let specials = std::mem::replace(&mut entry.specials, [Value::NIL; 4]);
+    let roots = std::mem::take(&mut entry.roots);
     fibers.current = world.current;
     fibers.root = world.root;
     fibers.root_parked = world.root_parked;
     fibers.threads.current = to;
     fibers.threads.slice_started = Some(Instant::now());
     fibers.threads.woken = push.is_some_and(|value| !value.is_nil());
+    let _ = scope.swap_roots(roots);
     *stack = context.stack;
     *frames = context.frames;
     let [last_match, errinfo, last_line, status] = specials;
@@ -564,7 +1003,6 @@ fn enter(
         frames.push(frame);
     }
     adopt_roots(scope, stack, frames);
-    None
 }
 
 /// The loop's turn check: when the running thread's slice is used up and
@@ -573,8 +1011,18 @@ pub(super) fn preempt(
     scope: &mut HandleScope<'_>,
     stack: &mut Stack,
     frames: &mut Vec<Call>,
+    ids: &mut u64,
 ) -> Result<Option<Unwind>, Error> {
     let threads = &scope.fibers().threads;
+    if threads.current == 0 && threads.refusal.is_some() {
+        // Left by a thread that ended while this one was outside the lock.
+        return Err(scope
+            .fibers_mut()
+            .threads
+            .refusal
+            .take()
+            .expect("checked above"));
+    }
     if threads.entries.len() < 2 || !threads.others() {
         return Ok(None);
     }
@@ -604,7 +1052,7 @@ pub(super) fn preempt(
         scope.fibers_mut().threads.slice_started = Some(Instant::now());
         return Ok(None);
     }
-    Ok(switch(scope, stack, frames, Leave::Ready(None)))
+    switch(scope, stack, frames, Leave::Ready(None), ids)
 }
 
 /// A deadline `seconds` from now; None for none, and for one too far off to
@@ -616,35 +1064,48 @@ pub(super) fn deadline(seconds: f64) -> Option<Instant> {
     Instant::now().checked_add(Duration::from_secs_f64(seconds.min(1e9)))
 }
 
-/// The running thread is over with a refusal nothing in it can catch: it
-/// ends, and the main thread is put back on the processor, wherever it was,
-/// for the refusal to unwind there.
-pub(super) fn abort_to_main(
+/// Make `call`, which blocks in the kernel, outside the lock: the running
+/// thread is parked as if it waited, another runs meanwhile, and the thread
+/// gets back in line when `call` returns. `call` must not touch the heap —
+/// it is not this OS thread's while `call` runs — so a primitive reads what
+/// it needs out of its arguments first and makes objects of the answer after.
+pub(super) fn outside<R>(
     scope: &mut HandleScope<'_>,
     stack: &mut Stack,
     frames: &mut Vec<Call>,
-) {
-    let from = scope.fibers().threads.current;
-    std::mem::take(stack);
-    std::mem::take(frames);
-    let fibers = scope.fibers_mut();
-    fibers.current = None;
-    fibers.root = None;
-    fibers.root_parked = None;
-    fibers.threads.entries[from].state = ThreadState::Dead;
-    let main = &mut fibers.threads.entries[0];
-    let context = match std::mem::replace(&mut main.state, ThreadState::Dead) {
-        ThreadState::Ready { context, .. } | ThreadState::Blocked { context, .. } => context,
-        other => {
-            main.state = other;
-            return;
-        }
+    ids: &mut u64,
+    call: impl FnOnce() -> R,
+) -> R {
+    let threads = &scope.fibers().threads;
+    if threads.entries.len() < 2 || !threads.others() {
+        return call();
+    }
+    let me = threads.current;
+    let lock = lock(scope);
+    park(scope, stack, frames, me, *ids, |context| {
+        ThreadState::Outside { context }
+    });
+    release(scope, me, None);
+    let answer = call();
+    lock.come_back(me);
+    let entry = &mut scope.fibers_mut().threads.entries[me];
+    // Put back in line by whoever had the heap, or the heap taken from nobody.
+    let (ThreadState::Ready { context, .. } | ThreadState::Outside { context }) =
+        std::mem::replace(&mut entry.state, ThreadState::Dead)
+    else {
+        unreachable!("a thread outside the lock waits for nothing else")
     };
-    main.state = ThreadState::Ready {
+    entry.state = ThreadState::Ready {
         context,
         push: None,
     };
-    let _ = enter(scope, stack, frames, 0);
+    *ids = scope.fibers().frame_ids;
+    enter(scope, stack, frames, me, false);
+    answer
+}
+
+fn special(name: &str) -> super::SymbolId {
+    crate::shared::symbols::intern(name)
 }
 
 /// A thread's saved frames, lent out for a backtrace: none for the running
@@ -652,9 +1113,9 @@ pub(super) fn abort_to_main(
 pub(super) fn take_frames(scope: &mut HandleScope<'_>, index: usize) -> Option<Vec<Call>> {
     let entry = scope.fibers_mut().threads.entries.get_mut(index)?;
     match &mut entry.state {
-        ThreadState::Ready { context, .. } | ThreadState::Blocked { context, .. } => {
-            Some(std::mem::take(&mut context.frames))
-        }
+        ThreadState::Ready { context, .. }
+        | ThreadState::Blocked { context, .. }
+        | ThreadState::Outside { context } => Some(std::mem::take(&mut context.frames)),
         ThreadState::Running | ThreadState::Dead => None,
     }
 }
@@ -662,20 +1123,19 @@ pub(super) fn take_frames(scope: &mut HandleScope<'_>, index: usize) -> Option<V
 /// Give back what [`take_frames`] lent.
 pub(super) fn give_frames(scope: &mut HandleScope<'_>, index: usize, frames: Vec<Call>) {
     if let Some(entry) = scope.fibers_mut().threads.entries.get_mut(index)
-        && let ThreadState::Ready { context, .. } | ThreadState::Blocked { context, .. } =
-            &mut entry.state
+        && let ThreadState::Ready { context, .. }
+        | ThreadState::Blocked { context, .. }
+        | ThreadState::Outside { context } = &mut entry.state
     {
         context.frames = frames;
     }
 }
 
-fn special(name: &str) -> super::SymbolId {
-    crate::shared::symbols::intern(name)
-}
-
 /// After `fork`, in the child: the thread that forked is the only one there
-/// is, as in CRuby, and every other is dead.
+/// is, as in CRuby, and every other is dead. Their OS threads stayed in the
+/// parent, so the lock starts again here, held by the one that is left.
 pub(super) fn forked(scope: &mut HandleScope<'_>) {
+    let heap = scope.heap_ptr();
     let threads = &mut scope.fibers_mut().threads;
     let current = threads.current;
     for (index, entry) in threads.entries.iter_mut().enumerate() {
@@ -683,5 +1143,9 @@ pub(super) fn forked(scope: &mut HandleScope<'_>) {
             entry.state = ThreadState::Dead;
             entry.pending.clear();
         }
+    }
+    if threads.lock.is_some() {
+        threads.lock = Some(Arc::new(Lock::new(heap, current, threads.entries.len())));
+        threads.entries[current].native_id = native_id();
     }
 }

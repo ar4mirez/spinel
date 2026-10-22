@@ -487,9 +487,9 @@ pub fn gethostname() -> io::Result<Vec<u8>> {
 /// `getservbyname(3)`: the port in host order.
 ///
 /// ponytail: the non-reentrant call, whose answer is libc's static buffer,
-/// read at once; one OS thread per Ractor never races it until Ractors run
-/// in parallel (#119), when `getservbyname_r` where there is one is the
-/// upgrade.
+/// read at once; a Ractor's threads call it holding its lock, so they never
+/// race it until Ractors run in parallel (#119), when `getservbyname_r`
+/// where there is one is the upgrade.
 pub fn service_port(name: &[u8], protocol: &[u8]) -> Option<u16> {
     let name = CString::new(name).ok()?;
     let protocol = CString::new(protocol).ok()?;

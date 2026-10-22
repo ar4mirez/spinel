@@ -87,7 +87,13 @@ fix is a different slice. The reason says which slice, by number.
 
 ## What is here now
 
-Three hundred and forty-nine tags across a hundred and sixty files.
+Three hundred and thirty-nine tags across a hundred and fifty-three files.
+#328 removed four, and their three files: `Thread#native_thread_id` telling
+threads apart and `File.open` on a FIFO, which pass now that each thread runs
+on an OS thread of its own and `open(2)` is made outside the lock, and the two
+`core/exception/top_level` examples that end a program with a thread asleep,
+which pass now that the program's end kills its threads, `ensure` clauses and
+all. Before it,
 #326 removed three, and both of `library/pathname`'s files: `Pathname#===`
 and `Kernel#Pathname`, which pass now that the builtin half of `Pathname`
 loads at boot. Giving `Dir` instances, `Dir.foreach` and `encoding:` then

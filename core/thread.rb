@@ -9,8 +9,7 @@
 # `:ready`, `:woken`, `:interrupted`, or `:deadlock` for the main thread when
 # every thread waits on another.
 #
-# ponytail: the threads of a Ractor take turns on one OS thread (see
-# `threads.rs`); `Thread#[]` is per thread rather than per fiber; and
+# ponytail: `Thread#[]` is per thread rather than per fiber, and
 # `handle_interrupt` defers nothing.
 class Thread
   # The `fatal` CRuby raises in the main thread on a deadlock: an Exception
@@ -112,6 +111,23 @@ class Thread
   def self.pass
     __thread_pass__
     nil
+  end
+
+  # The end of the program, once its `at_exit` blocks have run: every other
+  # thread is killed — the `ensure` clauses of the fiber it is in run, a
+  # suspended fiber's do not — and waited for, as CRuby's
+  # `rb_thread_terminate_all` does. One in a call outside the lock is left to
+  # the process's end, which CRuby would interrupt instead.
+  def self.__terminate_all__
+    return unless __thread_others__
+    me = current
+    others = list.reject { |t| t.equal?(me) }
+    others.each(&:kill)
+    others.each do |t|
+      t.join(0.01) while t.alive? && !__thread_outside__(t.__index__)
+    rescue Exception
+      nil
+    end
   end
 
   def self.stop
@@ -323,7 +339,8 @@ class Thread
   end
 
   # The bottom of every thread but the main one: the block, what it raised,
-  # and the end — which wakes whoever joins it and never returns.
+  # and the end — which wakes whoever joins it. Returning from here ends the
+  # thread, and its OS thread hands the heap on.
   def __run__
     catch(self) do
       @__s.started = true
@@ -349,7 +366,6 @@ class Thread
     @__s.mutexes.dup.each { |m| m.__abandon__ }
     @__s.joiners.each { |index| __thread_wakeup__(index) }
     @__s.joiners.clear
-    __thread_exit__
   end
 
   def __report__(error)
@@ -599,7 +615,7 @@ class Thread
     lines[start, length]
   end
 
-  def native_thread_id = @__s.dead ? nil : Process.pid
+  def native_thread_id = @__s.dead ? nil : __thread_native_id__(@index)
 
   def __thread_address__ = "0x" + __address__
 

@@ -22,10 +22,10 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/enumerable` | 61 | 536 | 523 | 0 | 10 | 3 | 98% |
 | `core/enumerator` | 73 | 431 | 431 | 0 | 0 | 0 | 100% |
 | `core/env` | 45 | 193 | 126 | 0 | 66 | 1 | 65% |
-| `core/exception` | 39 | 250 | 241 | 0 | 5 | 4 | 96% |
+| `core/exception` | 39 | 250 | 243 | 0 | 5 | 2 | 97% |
 | `core/false` | 9 | 13 | 11 | 0 | 2 | 0 | 85% |
 | `core/fiber` | 15 | 189 | 142 | 0 | 42 | 5 | 75% |
-| `core/file` | 111 | 922 | 876 | 0 | 42 | 4 | 95% |
+| `core/file` | 111 | 922 | 877 | 0 | 42 | 3 | 95% |
 | `core/filetest` | 25 | 95 | 94 | 0 | 1 | 0 | 99% |
 | `core/float` | 50 | 261 | 260 | 0 | 0 | 1 | 100% |
 | `core/gc` | 18 | 41 | 41 | 0 | 0 | 0 | 100% |
@@ -59,7 +59,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/struct` | 30 | 170 | 167 | 0 | 3 | 0 | 98% |
 | `core/symbol` | 29 | 270 | 258 | 0 | 9 | 3 | 96% |
 | `core/systemexit` | 2 | 6 | 6 | 0 | 0 | 0 | 100% |
-| `core/thread` | 54 | 398 | 382 | 0 | 12 | 4 | 96% |
+| `core/thread` | 54 | 398 | 384 | 0 | 11 | 3 | 96% |
 | `core/threadgroup` | 5 | 8 | 8 | 0 | 0 | 0 | 100% |
 | `core/time` | 66 | 652 | 633 | 0 | 6 | 13 | 97% |
 | `core/tracepoint` | 19 | 76 | 0 | 0 | 76 | 0 | 0% |
@@ -131,4 +131,4 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `optional/capi` | 47 | 0 | 0 | 0 | 0 | 0 | — |
 | `optional/thread_safety` | 1 | 5 | 0 | 0 | 5 | 0 | 0% |
 | `security` | 13 | 26 | 21 | 0 | 5 | 0 | 81% |
-| **total** | 3835 | 32671 | 28144 | 0 | 4182 | 345 | 86% |
+| **total** | 3835 | 32671 | 28149 | 0 | 4181 | 341 | 86% |

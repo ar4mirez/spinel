@@ -1001,8 +1001,12 @@ pub enum ThreadOp {
     Wakeup,
     /// `__thread_pass__`: let another thread run first.
     Pass,
-    /// `__thread_exit__`: the running thread is done; never answers.
-    Exit,
+    /// `__thread_outside__(index)`: whether it is in a call that blocks in
+    /// the kernel, made outside the lock.
+    Outside,
+    /// `__thread_native_id__(index)`: the id of the OS thread it runs on, or
+    /// nil once it is dead.
+    NativeId,
     /// `__thread_interrupt__(index, block)`: call the block in that thread
     /// when it next runs, where it stopped.
     Interrupt,
