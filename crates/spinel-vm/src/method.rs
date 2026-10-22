@@ -271,6 +271,8 @@ pub enum Native {
     /// operators: the method an explicit `2.send(:+, 1)` finds (#239). The same
     /// function [`Insn::BinOp`][crate::bytecode::Insn::BinOp] answers from, with
     /// `Numeric`'s coercing operator behind it as `super` when that declines.
+    /// `NumOp(BinOp::Eq)` is `==` and `===` both, as `int_equal` and `flo_eq`
+    /// are in CRuby (#345, #349), and asks a non-number `other == self`.
     NumOp(crate::bytecode::BinOp),
     /// `Integer#-@` and `Float#-@`.
     NumNeg,

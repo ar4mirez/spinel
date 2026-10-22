@@ -1,1 +1,0 @@
-fails(#349: Float has no == of its own, so an alias of it would alias Comparable#==; it wants == as a primitive with === the same method):Float#=== is an alias of Float#==

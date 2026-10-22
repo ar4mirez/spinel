@@ -18,8 +18,11 @@ class BasicObject
     __identical__(false) || __identical__(nil)
   end
 
+  # Through a send, not the `==` instruction: code here is exempt from the
+  # instruction's redefinition check, and `1 != 2` must hear a program's
+  # `Integer#==` the way CRuby's `rb_obj_not_equal` does.
   def !=(other)
-    !(self == other)
+    !__send__(:==, other)
   end
 end
 

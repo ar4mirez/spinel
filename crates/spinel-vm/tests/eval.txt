@@ -1492,6 +1492,14 @@ class Integer; alias_method :op_old_add, :+; def +(o); 42; end; end; r = [1 + 1,
 class Integer; alias_method :op_old_neg, :-@; def -@; :neg; end; end; y = 3; r = [-y, -3]; Integer.alias_method(:-@, :op_old_neg); r << -y  #=> [:neg, -3, -3]
 class Integer; alias_method :op_old_lt, :<; def <(o); :lt; end; end; r = [[1, 2].each_with_index.to_a, 1 < 2]; Integer.alias_method(:<, :op_old_lt); r  #=> [[[1, 0], [2, 1]], :lt]
 a = []; defined?(a << 1); a  #=> []
+# `==` is a method too, with `===` the same one (#345, #349). A number asks an
+# object that is not one, `obj == 1`, whichever way the comparison is reached.
+Integer.instance_method(:===) == Integer.instance_method(:==)  #=> true
+Float.instance_method(:===) == Float.instance_method(:==)  #=> true
+[Integer.instance_method(:==).owner, Float.instance_method(:===).owner]  #=> [Integer, Float]
+o = Object.new; def o.==(x); :asked; end; [1.send(:==, o), 1.0.send(:==, o), 1 == o, 1 === o, (2**70).send(:==, o), (case o when 1 then :hit else :miss end)]  #=> [true, true, true, true, true, :hit]
+[1.send(:==, 1.0), 1.0.send(:===, 1), (2**70).send(:==, 2**70), 1.send(:==, "1"), 1.send(:!=, 2), 3.method(:===).arity]  #=> [true, true, true, false, true, 1]
+class Integer; alias_method :op_old_eq, :==; def ==(o); :eq; end; end; r = [1 == 2, 1 != 2, 1.send(:==, 2), 1 === 2]; Integer.alias_method(:==, :op_old_eq); r << (1 == 2)  #=> [:eq, false, :eq, false, false]
 
 # ------------------------------------------------------------- warnings (#268)
 # Each row swaps `$stderr` for an object that keeps what it is written and
