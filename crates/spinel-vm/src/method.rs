@@ -889,6 +889,10 @@ pub enum ReflectOp {
     ModuleKind,
     /// `(singleton class)` → the object it belongs to.
     Attached,
+    /// `(object, mod)` → whether `mod` is among the ancestors of the object's
+    /// class, singleton included; false when `mod` is not a module.
+    /// `Kernel#is_a?` without building `ancestors` (#299).
+    KindOf,
     /// `(object, module, name, past)` → `[owner, arity, visibility, path,
     /// line]` for the method a lookup finds, or nil. What `Kernel#method` and
     /// `Module#instance_method` are made from.

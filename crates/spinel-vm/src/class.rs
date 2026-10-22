@@ -933,9 +933,24 @@ impl Classes {
         out
     }
 
+    /// Whether `module` is in [`Classes::ancestors`] of `id`, the class itself
+    /// included: `Kernel#is_a?` and [`Classes::includes`]. Walks the chain in place
+    /// rather than collecting it, since `is_a?` is asked constantly.
+    pub fn reaches(&self, id: ClassId, module: ClassId) -> bool {
+        let mut cursor = Some(id);
+        while let Some(c) = cursor {
+            let entry = self.entry(c);
+            if entry.own.contains(&module) {
+                return true;
+            }
+            cursor = entry.superclass;
+        }
+        false
+    }
+
     /// `Module#include?`: reachable through the chain, and not the class itself.
     pub fn includes(&self, id: ClassId, module: ClassId) -> bool {
-        id != module && self.ancestors(id).contains(&module)
+        id != module && self.reaches(id, module)
     }
 
     /// Define, redefine, or replace a method on this class or module, in the
@@ -3081,6 +3096,9 @@ mod tests {
         assert!(classes.includes(c, Builtin::Kernel.id()), "through Object");
         assert!(!classes.includes(c, c), "a class does not include itself");
         assert!(!classes.includes(m, c));
+        assert!(classes.reaches(c, c), "`is_a?` counts the class itself");
+        assert!(classes.reaches(c, Builtin::BasicObject.id()));
+        assert!(!classes.reaches(Builtin::Object.id(), c));
 
         // `method_defined_here` is the `false` argument to Ruby's
         // `Module#instance_methods`: what this one defines, ancestors aside.
