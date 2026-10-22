@@ -1188,6 +1188,145 @@ class Array
     found
   end
 
+  # --- random order ---------------------------------------------------------
+  # CRuby's `array.c`, draw for draw, so a seeded generator answers the order
+  # CRuby does: `%w[a b c].shuffle(random: Random.new(1))` is `%w[a c b]` in
+  # both. `random:` is the `Random` class — the default generator — a
+  # `Random`, or anything with a public `rand`.
+
+  # A uniform index in 0..limit: CRuby's `rb_random_ulong_limited`. A Random
+  # draws it itself; anything else is asked for `rand(limit + 1)`, and its
+  # answer converted with `to_int` and checked. Measured wording.
+  def __random_upto__(random, limit)
+    return Random.__default__.__limited__(limit) if Random.equal?(random)
+    return random.__limited__(limit) if Random === random
+    value = Integer.__index__(random.rand(limit + 1))
+    raise RangeError, "random number too small #{value}" if value < 0
+    raise RangeError, "random number too big #{value}" if value > limit
+    value
+  end
+
+  # Fisher-Yates from the end, as `rb_ary_shuffle_bang`.
+  def shuffle!(random: Random)
+    __check_frozen__
+    length = size
+    i = length
+    while i > 0
+      j = __random_upto__(random, i - 1)
+      raise RuntimeError, "modified during shuffle" unless size == length
+      i = i - 1
+      swap = self[i]
+      self[i] = self[j]
+      self[j] = swap
+    end
+    self
+  end
+
+  def shuffle(random: Random)
+    Array.new(self).shuffle!(random: random)
+  end
+
+  # `sample` answers one element, `sample(n)` an Array of up to n distinct
+  # positions. CRuby picks the positions three ways by n — up to ten drawn and
+  # placed among each other, a sparse swap for a small n of a big array, a
+  # partial shuffle otherwise — and each consumes the generator differently,
+  # so all three are here. The array may change under a `rand` that is not a
+  # Random's; what is read after the draws is re-measured, as CRuby does.
+  def sample(*count, random: Random)
+    if count.size > 1
+      raise ArgumentError, "wrong number of arguments (given #{count.size}, expected 0..1)"
+    end
+    length = size
+    if count.empty?
+      return self[0] if length < 2
+      return self[__random_upto__(random, length - 1)]
+    end
+    n = Integer.__index__(count[0])
+    raise ArgumentError, "negative sample number" if n < 0
+    n = length if n > length
+    draws = n <= 10 ? Array.new(n) { |i| __random_upto__(random, length - i - 1) } : nil
+    drawn_from = length
+    length = size
+    if length < drawn_from && !draws.nil?
+      draws.each { |draw| return [] if draw >= length }
+    end
+    n = length if n > length
+    case n
+    when 0
+      return []
+    when 1
+      return [self[draws[0]]]
+    when 2
+      first, second = draws
+      second = second + 1 if second >= first
+      return [self[first], self[second]]
+    when 3
+      first, second, third = draws
+      low = second
+      high = first
+      if second >= first
+        low = first
+        second = second + 1
+        high = second
+      end
+      if third >= low
+        third = third + 1
+        third = third + 1 if third >= high
+      end
+      return [self[first], self[second], self[third]]
+    end
+    unless draws.nil?
+      # Each draw counts among the positions not yet taken: step past every
+      # taken one at or below it, in order.
+      sorted = []
+      picked = []
+      draws.first(n).each do |draw|
+        j = 0
+        while j < sorted.size && draw >= sorted[j]
+          draw = draw + 1
+          j = j + 1
+        end
+        sorted.insert(j, draw)
+        picked.push(draw)
+      end
+      return picked.map { |at| self[at] }
+    end
+    threshold =
+      if length < 2560 then length / 128
+      elsif length < 5120 then length / 64
+      elsif length < 10240 then length / 32
+      else length / 16
+      end
+    if n <= threshold / 2
+      # The partial shuffle below, with the swaps kept in a Hash rather than
+      # a copy of the whole array.
+      picks = Array.new(n) { |i| __random_upto__(random, length - i - 1) + i }
+      length = size
+      if length <= picks.max
+        n = 0
+      elsif n > length
+        n = length
+      end
+      moved = {}
+      return Array.new(n) do |i|
+        j = picks[i]
+        from = moved.fetch(j, j)
+        moved[j] = moved.fetch(i, i)
+        self[from]
+      end
+    end
+    out = Array.new(self)
+    i = 0
+    while i < n
+      j = __random_upto__(random, length - i - 1) + i
+      swap = out[i]
+      out[i] = out[j]
+      out[j] = swap
+      i = i + 1
+    end
+    out.__take__(0, n)
+  end
+
   # --- combinatorics ----------------------------------------------------------
   # Each takes a block or answers an Enumerator with its size, and iterates a
   # snapshot: measured, changing the array inside the block does not change
