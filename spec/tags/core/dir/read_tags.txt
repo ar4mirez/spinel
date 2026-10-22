@@ -1,0 +1,1 @@
+fails(#42: directory entries are not transcoded to the default internal encoding):Dir#read returns all directory entries even when encoding conversion will fail

@@ -35,6 +35,8 @@ class Dir
     alias delete rmdir
     alias unlink rmdir
   end
+
+  alias path to_path
 end
 
 class Encoding

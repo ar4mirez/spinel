@@ -532,6 +532,9 @@ module Enumerable
       plain = list.__sort_plain__
       return plain unless plain.nil?
     end
+    # A new Array even with nothing to order: `to_a` is the receiver itself,
+    # and `sort!` refills the receiver from what this returns.
+    return list.dup if list.size <= 1
     __merge_sort__(list, block)
   end
 

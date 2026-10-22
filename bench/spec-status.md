@@ -17,7 +17,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/complex` | 43 | 169 | 169 | 0 | 0 | 0 | 100% |
 | `core/conditionvariable` | 4 | 11 | 10 | 0 | 0 | 1 | 91% |
 | `core/data` | 13 | 88 | 88 | 0 | 0 | 0 | 100% |
-| `core/dir` | 34 | 332 | 203 | 0 | 92 | 37 | 61% |
+| `core/dir` | 34 | 333 | 267 | 0 | 40 | 26 | 80% |
 | `core/encoding` | 45 | 636 | 504 | 0 | 132 | 0 | 79% |
 | `core/enumerable` | 61 | 536 | 523 | 0 | 10 | 3 | 98% |
 | `core/enumerator` | 73 | 431 | 431 | 0 | 0 | 0 | 100% |
@@ -34,7 +34,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/io` | 103 | 1631 | 1360 | 0 | 265 | 6 | 83% |
 | `core/kernel` | 118 | 2241 | 2047 | 0 | 150 | 44 | 91% |
 | `core/main` | 7 | 27 | 15 | 0 | 11 | 1 | 56% |
-| `core/marshal` | 6 | 475 | 461 | 0 | 9 | 5 | 97% |
+| `core/marshal` | 6 | 475 | 462 | 0 | 8 | 5 | 97% |
 | `core/matchdata` | 30 | 186 | 185 | 0 | 1 | 0 | 99% |
 | `core/math` | 29 | 243 | 243 | 0 | 0 | 0 | 100% |
 | `core/method` | 26 | 199 | 196 | 0 | 1 | 2 | 98% |
@@ -85,11 +85,11 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `library/etc` | 19 | 50 | 0 | 0 | 50 | 0 | 0% |
 | `library/expect` | 1 | 6 | 0 | 0 | 6 | 0 | 0% |
 | `library/fiddle` | 1 | 1 | 0 | 0 | 1 | 0 | 0% |
-| `library/find` | 2 | 3 | 1 | 0 | 2 | 0 | 33% |
+| `library/find` | 2 | 3 | 3 | 0 | 0 | 0 | 100% |
 | `library/getoptlong` | 10 | 27 | 0 | 0 | 27 | 0 | 0% |
 | `library/io-wait` | 3 | 28 | 23 | 0 | 5 | 0 | 82% |
 | `library/ipaddr` | 6 | 29 | 25 | 0 | 3 | 1 | 86% |
-| `library/irb` | 1 | 1 | 0 | 0 | 1 | 0 | 0% |
+| `library/irb` | 1 | 1 | 0 | 0 | 0 | 1 | 0% |
 | `library/logger` | 14 | 55 | 0 | 0 | 52 | 3 | 0% |
 | `library/matrix` | 97 | 361 | 11 | 0 | 350 | 0 | 3% |
 | `library/mkmf` | 1 | 1 | 0 | 0 | 0 | 1 | 0% |
@@ -130,5 +130,5 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `library/zlib` | 42 | 147 | 0 | 0 | 147 | 0 | 0% |
 | `optional/capi` | 47 | 0 | 0 | 0 | 0 | 0 | — |
 | `optional/thread_safety` | 1 | 5 | 0 | 0 | 5 | 0 | 0% |
-| `security` | 13 | 26 | 20 | 0 | 6 | 0 | 77% |
-| **total** | 3835 | 32670 | 28056 | 0 | 4253 | 361 | 86% |
+| `security` | 13 | 26 | 21 | 0 | 5 | 0 | 81% |
+| **total** | 3835 | 32671 | 28124 | 0 | 4196 | 351 | 86% |

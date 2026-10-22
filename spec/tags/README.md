@@ -87,10 +87,13 @@ fix is a different slice. The reason says which slice, by number.
 
 ## What is here now
 
-Three hundred and fifty-nine tags across a hundred and fifty-eight files.
+Three hundred and forty-nine tags across a hundred and sixty files.
 #326 removed three, and both of `library/pathname`'s files: `Pathname#===`
 and `Kernel#Pathname`, which pass now that the builtin half of `Pathname`
-loads at boot. Before it, #36 removed fifteen, and all three of `core/objectspace`'s files: the
+loads at boot. Giving `Dir` instances, `Dir.foreach` and `encoding:` then
+removed thirteen `Dir.glob` and `Dir.[]` tags whose examples pass, and added
+three: `Dir#children` and `Dir#read` on the default internal encoding (#42),
+and `Binding#irb` (#47), which `Dir.mktmpdir`'s cleanup no longer blocks. Before it, #36 removed fifteen, and all three of `core/objectspace`'s files: the
 finalizer examples that run a child `spinel` and the `garbage_collect` ones
 that found no `ObjectSpace`, which pass now that the collector is reachable
 from Ruby.

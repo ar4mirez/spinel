@@ -888,9 +888,18 @@ end
   def self.delete(path) = rmdir(path)
   def self.unlink(path) = rmdir(path)
 
-  def self.children(path)
+  # `encoding:` tags each name with that encoding, as `dir.c` does; the
+  # bytes are the file system's either way.
+  def self.children(path, encoding: nil)
     path = File.__path__(path)
-    File.__check__(__fs_children__(path), path, "dir_initialize")
+    names = File.__check__(__fs_children__(path), path, "dir_initialize")
+    __encode_names__(names, encoding)
+  end
+
+  def self.__encode_names__(names, encoding)
+    return names if encoding.nil?
+    encoding = Encoding.find(encoding) unless encoding.is_a?(Encoding)
+    names.each { |name| name.force_encoding(encoding) }
   end
 
   # A path that is not a directory is not an empty one; a missing one raises.
@@ -901,14 +910,82 @@ end
     File.__check__(children, path, "rb_dir_s_empty_p").empty?
   end
 
-  def self.entries(path)
-    [".", ".."] + children(path)
+  def self.entries(path, encoding: nil)
+    __encode_names__([+".", +".."], encoding) + children(path, encoding: encoding)
   end
 
-  def self.each_child(path, &block)
-    return enum_for(:each_child, path) unless block
-    children(path).each(&block)
+  def self.each_child(path, encoding: nil, &block)
+    return enum_for(:each_child, path, encoding: encoding) unless block
+    children(path, encoding: encoding).each(&block)
     nil
+  end
+
+  def self.foreach(path, encoding: nil, &block)
+    return enum_for(:foreach, path, encoding: encoding) unless block
+    entries(path, encoding: encoding).each(&block)
+    nil
+  end
+
+  # With a block, the directory is closed when it returns, and its value is
+  # the block's.
+  def self.open(path, encoding: nil)
+    dir = new(path, encoding: encoding)
+    return dir unless block_given?
+    begin
+      yield dir
+    ensure
+      dir.close
+    end
+  end
+
+  # ponytail: a Dir reads its entries once, when it is opened, rather than
+  # holding a `DIR *`; `fileno`, `seek` and `chdir` wait for #42.
+  def initialize(path, encoding: nil)
+    @path = File.__path__(path)
+    @entries = Dir.entries(@path, encoding: encoding)
+    @pos = 0
+    @closed = false
+  end
+
+  def to_path = @path
+  def inspect = "#<Dir:#{@path}>"
+
+  def read
+    __check_open__
+    name = @entries[@pos]
+    @pos += 1 unless name.nil?
+    name
+  end
+
+  def each
+    return enum_for(:each) unless block_given?
+    __check_open__
+    # From the start each time, as `dir_each_entry`'s `rewinddir`.
+    @pos = 0
+    while (name = read)
+      yield name
+    end
+    self
+  end
+
+  def children
+    __check_open__
+    @entries.reject { |name| name == "." || name == ".." }
+  end
+
+  def each_child(&block)
+    return enum_for(:each_child) unless block
+    children.each(&block)
+    self
+  end
+
+  def close
+    @closed = true
+    nil
+  end
+
+  def __check_open__
+    raise IOError, "closed directory" if @closed
   end
 
   def self.[](*patterns, base: nil, sort: true)
