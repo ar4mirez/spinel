@@ -2263,13 +2263,12 @@ fn run<'h>(
                     if depth >= 2
                         && let (Some(a), Some(b)) =
                             (stack[depth - 2].as_fixnum(), stack[depth - 1].as_fixnum())
-                        && (matches!(op, BinOp::Eq | BinOp::Neq)
-                            || operator_fast_path(
-                                scope,
-                                stack[depth - 2],
-                                op as usize,
-                                &frames[top],
-                            ))
+                        && operator_fast_path(
+                            scope,
+                            stack[depth - 2],
+                            operator_guard(op),
+                            &frames[top],
+                        )
                     {
                         let answer = match op {
                             BinOp::Add => a.checked_add(b).and_then(Value::fixnum),
@@ -2549,26 +2548,23 @@ fn run<'h>(
                     Insn::BinOp(op) => {
                         let right = stack.pop().expect("binop on an empty stack");
                         let left = stack.pop().expect("binop on an empty stack");
+                        let redefined =
+                            !operator_fast_path(scope, left, operator_guard(op), &frames[top]);
                         // `1 == obj` for an object that is not a number: CRuby's
                         // `num_equal` asks the object, `obj == 1`, so a class's
                         // own `==` decides. Measured.
-                        let swapped = op == BinOp::Eq
-                            && !right.is_immediate()
-                            && (num(scope, left).is_some() || crate::bignum::is_big(scope, left))
-                            && heap_kind(scope, right).is_none()
-                            && !crate::bignum::is_big(scope, right)
-                            && crate::float::read(scope, right).is_none();
-                        let result = if swapped {
-                            Err(Error::NoDispatch {
-                                op: "==",
-                                operands: "a number and an object that decides",
-                            })
-                        } else if !matches!(op, BinOp::Eq | BinOp::Neq)
-                            && !operator_fast_path(scope, left, op as usize, &frames[top])
-                        {
+                        let swapped = !redefined
+                            && matches!(op, BinOp::Eq | BinOp::Neq)
+                            && eq_asks_other(scope, left, right);
+                        let result = if redefined {
                             Err(Error::NoDispatch {
                                 op: op.name(),
                                 operands: "a number whose class redefined the operator",
+                            })
+                        } else if swapped {
+                            Err(Error::NoDispatch {
+                                op: op.name(),
+                                operands: "a number and an object that decides",
                             })
                         } else {
                             binop(scope, op, left, right)
@@ -2593,11 +2589,13 @@ fn run<'h>(
                                     cache: None,
                                     // The object decides, and its answer is
                                     // made a boolean: `Numeric#__eq_other__`.
-                                    name: crate::shared::symbols::intern(if swapped {
-                                        "__eq_other__"
-                                    } else {
-                                        op.name()
-                                    }),
+                                    name: crate::shared::symbols::intern(
+                                        if swapped && op == BinOp::Eq {
+                                            "__eq_other__"
+                                        } else {
+                                            op.name()
+                                        },
+                                    ),
                                     receiver: left,
                                     args: vec![right],
                                     keywords: Vec::new(),
@@ -9626,6 +9624,37 @@ fn native_call<'h>(
                     ),
                 ));
             }
+            // `Integer#==` and `Float#==` (#345, #349). An operand that is not
+            // a number answers for itself: `Numeric#__eq_other__` asks it
+            // `other == self`, CRuby's `num_equal`. Not `super`, which is
+            // `Comparable#==` and would go through `<=>`.
+            if op == BinOp::Eq {
+                let answer = if eq_asks_other(scope, call.receiver, call.args[0]) {
+                    None
+                } else {
+                    match binop(scope, op, call.receiver, call.args[0]) {
+                        Ok(value) => Some(value),
+                        Err(Error::NoDispatch { .. }) => None,
+                        Err(other) => return Err(other),
+                    }
+                };
+                if let Some(value) = answer {
+                    stack.push(value);
+                    return Ok(None);
+                }
+                let forwarded = Pending {
+                    cache: None,
+                    name: crate::shared::symbols::intern("__eq_other__"),
+                    implicit_self: true,
+                    variable_call: false,
+                    public_only: false,
+                    target: Target::Method,
+                    owner: None,
+                    defined_as: None,
+                    ..call
+                };
+                return dispatch(scope, stack, frames, forwarded, proc_class, ids);
+            }
             match binop(scope, op, call.receiver, call.args[0]) {
                 Ok(value) => {
                     stack.push(value);
@@ -13729,6 +13758,20 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
                 .classes_mut()
                 .seal_operator(which, class, op as usize, symbol, body);
         }
+        // `==`, with `===` the same method (#345, #349). Only `==` is sealed:
+        // it is what `Insn::BinOp` answers for `==` and `!=`, while `===` is
+        // always a send.
+        let body = scope
+            .definitions_mut()
+            .add(Definition::Native(Native::NumOp(BinOp::Eq)));
+        for name in ["==", "==="] {
+            let symbol = crate::shared::symbols::intern(name);
+            scope.classes_mut().define_method(class, symbol, body);
+        }
+        let symbol = crate::shared::symbols::intern("==");
+        scope
+            .classes_mut()
+            .seal_operator(which, class, BinOp::Eq as usize, symbol, body);
         let body = scope
             .definitions_mut()
             .add(Definition::Native(Native::NumNeg));
@@ -13866,6 +13909,26 @@ fn num(scope: &mut HandleScope<'_>, value: Value) -> Option<Num> {
 ///
 /// [`Classes::seal_operator`]: crate::class::Classes::seal_operator
 const NEG_GUARD: usize = BinOp::Ge as usize + 1;
+
+/// The operator whose seal decides `op`'s fast path. `!=` is answered from
+/// `==`, so it is the redefinition of `==` that `1 != 2` has to hear, as
+/// CRuby's `opt_neq` checks `==` too.
+fn operator_guard(op: BinOp) -> usize {
+    match op {
+        BinOp::Neq => BinOp::Eq as usize,
+        op => op as usize,
+    }
+}
+
+/// Whether `left == right` is the object's to answer: a number against an
+/// object that is not one, which CRuby's `num_equal` asks as `right == left`.
+fn eq_asks_other(scope: &mut HandleScope<'_>, left: Value, right: Value) -> bool {
+    !right.is_immediate()
+        && (num(scope, left).is_some() || crate::bignum::is_big(scope, left))
+        && heap_kind(scope, right).is_none()
+        && !crate::bignum::is_big(scope, right)
+        && crate::float::read(scope, right).is_none()
+}
 
 /// Whether an operator instruction may answer `left`'s operator itself.
 ///
@@ -14569,6 +14632,14 @@ fn case_eq(scope: &mut HandleScope<'_>, condition: Value, subject: Value) -> Res
         return Err(Error::NoDispatch {
             op: "===",
             operands: "a `when` condition that is not a value",
+        });
+    }
+    // `when 1` against an object that is not a number: `Integer#===` asks the
+    // object, `subject == 1`, so the send decides (#345).
+    if eq_asks_other(scope, condition, subject) {
+        return Err(Error::NoDispatch {
+            op: "===",
+            operands: "a number and an object that decides",
         });
     }
     ruby_eq(scope, condition, subject)

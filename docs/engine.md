@@ -47,7 +47,10 @@ with `2 + 1`, and `Numeric`'s coercing operator is their `super`. The
 instruction keeps its fast path only while the name still resolves to that
 primitive: the class table records the bodies it installed and re-reads them
 after any definition, so `class Integer; def +(o) = 42; end` is heard at the
-next `1 + 1` (#239, PRD 0056). Code in `core/*.rb` is exempt, as C is in CRuby.
+next `1 + 1` (#239, PRD 0056). `==` is one of them, with `===` the same method
+as CRuby's `int_equal` and `flo_eq` are, and a number compared with an object
+that is not one asks the object, `obj == 1` (#345, #349); `!=` follows a
+redefined `==`. Code in `core/*.rb` is exempt, as C is in CRuby.
 A program's change to one of the methods CRuby optimises — its measured list,
 wider than these operators — is what `Warning[:performance]` reports, once per
 body the core library installed (#320).
