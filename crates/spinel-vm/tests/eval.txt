@@ -1498,6 +1498,7 @@ Integer.instance_method(:===) == Integer.instance_method(:==)  #=> true
 Float.instance_method(:===) == Float.instance_method(:==)  #=> true
 [Integer.instance_method(:==).owner, Float.instance_method(:===).owner]  #=> [Integer, Float]
 o = Object.new; def o.==(x); :asked; end; [1.send(:==, o), 1.0.send(:==, o), 1 == o, 1 === o, (2**70).send(:==, o), (case o when 1 then :hit else :miss end)]  #=> [true, true, true, true, true, :hit]
+o = Object.new; def o.==(x); true; end; [1 != o, 1.0 != o]  #=> [false, false]
 [1.send(:==, 1.0), 1.0.send(:===, 1), (2**70).send(:==, 2**70), 1.send(:==, "1"), 1.send(:!=, 2), 3.method(:===).arity]  #=> [true, true, true, false, true, 1]
 class Integer; alias_method :op_old_eq, :==; def ==(o); :eq; end; end; r = [1 == 2, 1 != 2, 1.send(:==, 2), 1 === 2]; Integer.alias_method(:==, :op_old_eq); r << (1 == 2)  #=> [:eq, false, :eq, false, false]
 

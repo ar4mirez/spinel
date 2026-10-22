@@ -2553,8 +2553,9 @@ fn run<'h>(
                         // `1 == obj` for an object that is not a number: CRuby's
                         // `num_equal` asks the object, `obj == 1`, so a class's
                         // own `==` decides. Measured.
-                        let swapped =
-                            !redefined && op == BinOp::Eq && eq_asks_other(scope, left, right);
+                        let swapped = !redefined
+                            && matches!(op, BinOp::Eq | BinOp::Neq)
+                            && eq_asks_other(scope, left, right);
                         let result = if redefined {
                             Err(Error::NoDispatch {
                                 op: op.name(),
@@ -2562,7 +2563,7 @@ fn run<'h>(
                             })
                         } else if swapped {
                             Err(Error::NoDispatch {
-                                op: "==",
+                                op: op.name(),
                                 operands: "a number and an object that decides",
                             })
                         } else {
@@ -2588,11 +2589,13 @@ fn run<'h>(
                                     cache: None,
                                     // The object decides, and its answer is
                                     // made a boolean: `Numeric#__eq_other__`.
-                                    name: crate::shared::symbols::intern(if swapped {
-                                        "__eq_other__"
-                                    } else {
-                                        op.name()
-                                    }),
+                                    name: crate::shared::symbols::intern(
+                                        if swapped && op == BinOp::Eq {
+                                            "__eq_other__"
+                                        } else {
+                                            op.name()
+                                        },
+                                    ),
                                     receiver: left,
                                     args: vec![right],
                                     keywords: Vec::new(),
@@ -13907,15 +13910,6 @@ fn num(scope: &mut HandleScope<'_>, value: Value) -> Option<Num> {
 /// [`Classes::seal_operator`]: crate::class::Classes::seal_operator
 const NEG_GUARD: usize = BinOp::Ge as usize + 1;
 
-/// Whether an operator instruction may answer `left`'s operator itself.
-///
-/// It may unless `left` is a number whose class no longer has the VM's own
-/// method under that name — `class Integer; def +(o) = 42; end` makes `1 + 1`
-/// 42, measured, so the instruction has to send (#239).
-///
-/// Code in `core/*.rb` is exempt. It stands where CRuby has C, and C adds two
-/// integers without asking `Integer#+`: `[1, 2].each_with_index` still counts
-/// from zero after that redefinition.
 /// The operator whose seal decides `op`'s fast path. `!=` is answered from
 /// `==`, so it is the redefinition of `==` that `1 != 2` has to hear, as
 /// CRuby's `opt_neq` checks `==` too.
@@ -13936,6 +13930,15 @@ fn eq_asks_other(scope: &mut HandleScope<'_>, left: Value, right: Value) -> bool
         && crate::float::read(scope, right).is_none()
 }
 
+/// Whether an operator instruction may answer `left`'s operator itself.
+///
+/// It may unless `left` is a number whose class no longer has the VM's own
+/// method under that name — `class Integer; def +(o) = 42; end` makes `1 + 1`
+/// 42, measured, so the instruction has to send (#239).
+///
+/// Code in `core/*.rb` is exempt. It stands where CRuby has C, and C adds two
+/// integers without asking `Integer#+`: `[1, 2].each_with_index` still counts
+/// from zero after that redefinition.
 #[inline]
 fn operator_fast_path(scope: &mut HandleScope<'_>, left: Value, op: usize, frame: &Call) -> bool {
     let which = if left.as_fixnum().is_some() {
