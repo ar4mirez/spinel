@@ -44,7 +44,9 @@ class Symbol
            ["+", "-", "*", "/", "%", "**", "==", "!=", ">", ">=", "<", "<=",
             "<=>", "===", "=~", "!~", "!", "~", "[]", "[]=", "<<", ">>", "&",
             "|", "^", "+@", "-@", "`"].include?(name)
-    return ":" + name if bare
+    # And only a name the inspect encoding can show is bare: CRuby's
+    # `rb_str_symname_p`.
+    return ":" + name if bare && (name.ascii_only? || name.encoding == String.__inspect_encoding__)
     ":" + name.inspect
   end
 

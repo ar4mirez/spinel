@@ -16707,14 +16707,20 @@ fn binding_eval(
     let line = call.args.get(2).and_then(|v| v.as_fixnum()).unwrap_or(1);
     let handle = scope.root(binding);
     let in_method = scope.slot(handle, BINDING_OWNER) != Value::NIL;
-    let (program, warnings) = match parser(&path, &source, line, in_method) {
+    // With no magic comment, the string's own encoding is the source
+    // encoding: Prism lexes in it, and its literals take it.
+    let encoding = call.args.first().and_then(|&v| string_encoding(scope, v));
+    if encoding.is_some_and(|e| !crate::strings::ascii_compatible(e)) {
+        return Err(Error::raise("ArgumentError", "invalid source encoding"));
+    }
+    let named = encoding
+        .filter(|&e| e != crate::strings::UTF_8)
+        .map(crate::strings::name);
+    let (program, warnings) = match parser(&path, &source, line, in_method, named) {
         Ok(crate::heap::ParsedSource {
             mut program,
             warnings,
         }) => {
-            // With no magic comment, the string's own encoding is the source
-            // encoding its literals take.
-            let encoding = call.args.first().and_then(|&v| string_encoding(scope, v));
             if let Some(map) = Arc::get_mut(&mut program.source)
                 && map.encoding.is_none()
                 && let Some(encoding) = encoding.filter(|&e| e != crate::strings::UTF_8)
@@ -17881,7 +17887,7 @@ fn load_file(
         }
     };
     let name = path.to_string_lossy().into_owned();
-    let (program, warnings) = match parser(&name, &source, 1, false) {
+    let (program, warnings) = match parser(&name, &source, 1, false, None) {
         Ok(parsed) => (parsed.program, parsed.warnings),
         Err(crate::heap::ParseFailure::Syntax(message)) => {
             return Err(syntax_error(scope, message, &name));

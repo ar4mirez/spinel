@@ -526,19 +526,32 @@ class String
     out.force_encoding(encoding.ascii_compatible? ? encoding : Encoding::US_ASCII)
   end
 
+  # A character past ASCII is shown as itself only when the string is in the
+  # encoding the answer is in, `String.__inspect_encoding__`; anything else
+  # is escaped. The answer is in that encoding. CRuby's `rb_str_inspect`.
   def inspect
-    return __wide_inspect__ if [3, 4, 5, 6].include?(__encoding_index__)
+    shown = String.__inspect_encoding__
+    return __wide_inspect__.__force_encoding__(shown.__index__) if [3, 4, 5, 6].include?(__encoding_index__)
     unicode = __encoding_index__ == 1
+    raw = encoding == shown
     out = +"\""
     offsets = __char_offsets__
     i = 0
     while i < offsets.size - 1
       char = __byteslice__(offsets[i], offsets[i + 1] - offsets[i])
-      out << __inspect_char__(char, unicode, offsets, i)
+      out << __inspect_char__(char, unicode, raw, offsets, i)
       i += 1
     end
     out << "\""
-    out.__force_encoding__(1)
+    out.__force_encoding__(shown.__index__)
+  end
+
+  # The encoding `inspect` answers in and can show characters of: the default
+  # internal encoding, else the default external, and US-ASCII for one that
+  # is not ASCII-compatible. Measured on ruby 4.0.7.
+  def self.__inspect_encoding__
+    shown = Encoding.default_internal || Encoding.default_external
+    shown.ascii_compatible? ? shown : Encoding::US_ASCII
   end
 
   # Built on first use: this file loads before `Hash`'s Ruby half.
@@ -579,7 +592,7 @@ class String
     out
   end
 
-  def __inspect_char__(char, unicode, offsets, i)
+  def __inspect_char__(char, unicode, raw, offsets, i)
     if char.bytesize == 1
       byte = char.getbyte(0)
       named = String.__escapes__[char.b.__force_encoding__(1)] if byte < 0x80
@@ -592,12 +605,15 @@ class String
       if byte < 0x80 && unicode
         return "\\u" + Integer.__hex__(byte, 4)
       end
+      # ISO-8859-1 (index 22) is the one single-byte encoding past ASCII
+      # walked here, and its printable half starts at NBSP.
+      return char if raw && byte >= 0xa0 && __encoding_index__ == 22
       return "\\x" + Integer.__hex__(byte, 2)
     end
     return char.__bytes__.map { |b| "\\x" + Integer.__hex__(b, 2) }.join unless unicode && char.valid_encoding?
     code = char.ord
-    if code >= 0x80 && code <= 0x9f
-      return "\\u" + Integer.__hex__(code, 4)
+    if !raw || (code >= 0x80 && code <= 0x9f)
+      return code > 0xffff ? "\\u{" + Integer.__hex__(code, 1) + "}" : "\\u" + Integer.__hex__(code, 4)
     end
     char
   end

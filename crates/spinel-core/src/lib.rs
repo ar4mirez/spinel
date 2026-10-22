@@ -263,8 +263,9 @@ fn parse_eval(
     source: &[u8],
     line: i64,
     in_method: bool,
+    encoding: Option<&str>,
 ) -> Result<ParsedSource, ParseFailure> {
-    let parsed = spinel_parse::parse_eval(path, source, line, in_method);
+    let parsed = spinel_parse::parse_eval(path, source, line, in_method, encoding);
     if let Some(error) = parsed.syntax_errors().next() {
         let at = parsed.program.source.line(error.span.start);
         return Err(ParseFailure::Syntax(format!(
