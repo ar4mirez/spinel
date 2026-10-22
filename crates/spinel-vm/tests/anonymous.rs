@@ -95,8 +95,7 @@ fn spinel_agrees_with_the_ruby_that_measured_the_table() {
         };
         rows += 1;
         // Rows this slice deliberately does not answer. Each names why, and
-        // each is a refusal rather than a wrong value — the property that
-        // matters is that Spinel says so, which `refusals_are_refusals` checks.
+        // `skips_are_still_needed` fails once one of them answers rightly.
         if SKIPPED.iter().any(|(prefix, _)| source.starts_with(prefix)) {
             continue;
         }
@@ -122,85 +121,38 @@ fn spinel_agrees_with_the_ruby_that_measured_the_table() {
 
 /// The rows above that are skipped, and the reason each one is.
 ///
-/// A list rather than a comment, because `refusals_are_refusals` runs it: a row
-/// that starts answering — rightly or wrongly — fails here instead of sitting
-/// skipped for a slice that already fixed it.
-const SKIPPED: &[(&str, &str)] = &[
-    (
-        "Class.new(Object.new.singleton_class)",
-        "`Object#singleton_class` is #28's",
-    ),
-    (
-        "k = Class.new { OracleAssigned = 1 }; k.const_defined?",
-        "`Module#const_defined?` is #28's",
-    ),
-    (
-        "k = Class.new { def hi; end }; k.instance_methods(false)",
-        "`Module#instance_methods` is #28's",
-    ),
-    (
-        "k = Class.new { [1].each { def deep; end } }; k.instance_methods(false)",
-        "`Module#instance_methods` is #28's",
-    ),
-    (
-        "m = Module.new { def q; end }; m.instance_methods(false)",
-        "`Module#instance_methods` is #28's",
-    ),
-    (
-        "k = Class.new { @iv = 7 }; k.instance_variable_get",
-        "instance variables are not compiled yet (#151)",
-    ),
-    (
-        "x = 5; Class.new { $oracle_local",
-        "a global variable is not compiled yet",
-    ),
-    (
-        "k = Class.new { |c| $oracle_arg",
-        "a global variable is not compiled yet",
-    ),
-    (
-        "k = Class.new { $oracle_self",
-        "a global variable is not compiled yet",
-    ),
-    (
-        "m = Module.new { $oracle_ms",
-        "a global variable is not compiled yet",
-    ),
-    (
-        "Class.new { |a, b| $oracle_two",
-        "a global variable is not compiled yet",
-    ),
-    (
-        "class OracleQ; CV = \"from-Q\"; end; class OracleR",
-        "a global variable is not compiled yet",
-    ),
-    (
-        "Class.allocate",
-        "`Class.allocate` answers an uninitialised class, which #13 shut the door on",
-    ),
-    (
-        "Module.allocate",
-        "`Module.allocate` is a `NoMethodError` in Ruby; Spinel refuses instead",
-    ),
-    (
-        "OracleI = Class.new; OracleI.new.to_s",
-        "an instance's `to_s` has no address — #15's gap, unchanged",
-    ),
-];
+/// A list rather than a comment, because `skips_are_still_needed` runs it: a
+/// row that starts answering rightly fails there instead of sitting skipped
+/// for a slice that already fixed it.
+const SKIPPED: &[(&str, &str)] = &[(
+    "k = Class.new { [1].each { def deep; end } }; k.instance_methods(false)",
+    "a `def` in a block inside the `Class.new` block is private, the top level's default",
+)];
 
-/// What this slice will not answer, it refuses — it never guesses.
+/// Every skipped row still gets CRuby's answer wrong, or refuses it. One that
+/// agrees has been fixed by some slice, and comes off the list (#28 took the
+/// two `allocate` rows off this way).
 #[test]
-fn refusals_are_refusals() {
-    for (source, why) in [
-        ("Class.allocate", "an uninitialised class"),
-        ("Module.allocate", "an uninitialised module"),
-    ] {
-        let answer = eval(source);
-        assert!(
-            matches!(&answer, Err(why) if why.starts_with("refused:")),
-            "{why} should refuse, but {source:?} answered {answer:?}"
-        );
+fn skips_are_still_needed() {
+    let mut fixed = Vec::new();
+    for (index, line) in TABLE.lines().enumerate() {
+        let Some((source, want)) = line.split_once(SEPARATOR) else {
+            continue;
+        };
+        if line.trim_start().starts_with('#')
+            || !SKIPPED.iter().any(|(prefix, _)| source.starts_with(prefix))
+        {
+            continue;
+        }
+        if eval(source).as_deref() == Ok(want) {
+            fixed.push(format!("anonymous.txt:{}: {source}", index + 1));
+        }
     }
+    assert!(
+        fixed.is_empty(),
+        "skipped, but answering as CRuby does:\n{}",
+        fixed.join("\n")
+    );
 }
 
 /// Reopening a class does not fire `inherited` —

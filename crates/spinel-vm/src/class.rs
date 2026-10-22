@@ -901,6 +901,100 @@ impl Classes {
         self.entry(id).superclass
     }
 
+    /// Whether this is a class `Class.allocate` made and `Class#initialize`
+    /// has not yet given a superclass (#28). Only `BasicObject` is a class with
+    /// none on purpose; a singleton class always has one.
+    #[must_use]
+    pub fn is_uninitialized(&self, id: ClassId) -> bool {
+        let entry = self.entry(id);
+        entry.kind == Kind::Class
+            && entry.superclass.is_none()
+            && !entry.is_singleton
+            && id != Builtin::BasicObject.id()
+    }
+
+    /// `Class#initialize` on an uninitialised class: give it `superclass`, and
+    /// with it the representation its instances will have.
+    pub fn inherit(&mut self, id: ClassId, superclass: ClassId) {
+        let repr = self.entry(superclass).repr;
+        let entry = self.entry_mut(id);
+        entry.superclass = Some(superclass);
+        entry.repr = repr;
+        self.entry_mut(superclass).subclasses.push(id);
+        self.invalidate(id);
+    }
+
+    /// `Module#dup` and `#clone`'s table half (#28): make `to`, which nothing
+    /// has defined anything in yet, hold what `from` holds — its superclass,
+    /// its run of mixins with `to` standing where `from` stood, its methods,
+    /// constants and class variables. Its singleton class and instance
+    /// variables are the caller's, because both need the heap.
+    ///
+    /// A copied method belongs to `to`: an `alias` or a narrowed visibility
+    /// that stood in for one of `from`'s own methods now stands in for `to`'s,
+    /// so `super` in the copy resolves along the copy's ancestry — CRuby's
+    /// `rb_method_entry_clone` with the copy as the defined class.
+    pub fn copy_module(&mut self, from: ClassId, to: ClassId) {
+        let source = self.entry(from);
+        let superclass = source.superclass;
+        let repr = source.repr;
+        let own: Vec<ClassId> = source
+            .own
+            .iter()
+            .map(|&c| if c == from { to } else { c })
+            .collect();
+        let origin = source.origin;
+        let methods: HashMap<SymbolId, MethodEntry> = source
+            .methods
+            .iter()
+            .map(|(&name, &(body, cref, visibility, stands_for))| {
+                let stands_for = stands_for.map(|o| {
+                    if o.owner == from {
+                        Origin { owner: to, ..o }
+                    } else {
+                        o
+                    }
+                });
+                (name, (body, cref, visibility, stands_for))
+            })
+            .collect();
+        let constants = source.constants.clone();
+        let constant_order = source.constant_order.clone();
+        let private_constants = source.private_constants.clone();
+        let class_variables = source.class_variables.clone();
+        let cvar_order = source.cvar_order.clone();
+        let deprecated: Vec<(ClassId, SymbolId)> = self
+            .deprecated_constants
+            .iter()
+            .filter(|&&(id, _)| id == from)
+            .map(|&(_, name)| (to, name))
+            .collect();
+        self.deprecated_constants.extend(deprecated);
+        // Every module in the run now has `to` in its chain too, so a later
+        // `include` into one of them reaches the copy — the flat `includers`
+        // list's invariant.
+        for &module in &own {
+            if module != to && !self.entry(module).includers.contains(&to) {
+                self.entry_mut(module).includers.push(to);
+            }
+        }
+        if let Some(superclass) = superclass {
+            self.entry_mut(superclass).subclasses.push(to);
+        }
+        let target = self.entry_mut(to);
+        target.superclass = superclass;
+        target.repr = repr;
+        target.own = own;
+        target.origin = origin;
+        target.methods = methods;
+        target.constants = constants;
+        target.constant_order = constant_order;
+        target.private_constants = private_constants;
+        target.class_variables = class_variables;
+        target.cvar_order = cvar_order;
+        self.invalidate(to);
+    }
+
     /// The heap object Ruby sees, which is what an instance's header points at.
     pub fn object(&self, id: ClassId) -> Value {
         self.entry(id).object
@@ -1197,6 +1291,15 @@ impl Classes {
         if entry.class_variables.insert(name, value).is_none() {
             entry.cvar_order.push(name);
         }
+    }
+
+    /// `Module#remove_class_variable`: take `@@a` out of this module's own
+    /// table, answering what it held. An ancestor's is not this one's to take.
+    pub fn cvar_remove(&mut self, id: ClassId, name: SymbolId) -> Option<Value> {
+        let entry = self.entry_mut(id);
+        let value = entry.class_variables.remove(&name)?;
+        entry.cvar_order.retain(|&n| n != name);
+        Some(value)
     }
 
     /// Whether `id` or an ancestor holds `@@a`: `defined?(@@a)`.
@@ -2318,7 +2421,8 @@ impl<'h> HandleScope<'h> {
         }
     }
 
-    /// A new class. `superclass` is `None` only for `BasicObject`.
+    /// A new class. `superclass` is `None` only for `BasicObject`, and for
+    /// the uninitialised class `Class.allocate` answers (#28).
     pub fn define_class(&mut self, name: Option<&str>, superclass: Option<ClassId>) -> ClassId {
         self.define(name, Kind::Class, superclass, false)
     }
@@ -2384,7 +2488,14 @@ impl<'h> HandleScope<'h> {
                 Some(superclass) => self.singleton_class(superclass),
                 None => Builtin::Class.id(),
             }),
-            Kind::Module => Some(Builtin::Module.id()),
+            // `Module`, or the subclass of it the module is an instance of:
+            // `Class.new(Module).new.singleton_class.superclass` is that
+            // subclass, measured.
+            Kind::Module => {
+                let object = self.classes().object(id);
+                let handle = self.root(object);
+                Some(self.class_of(handle).unwrap_or(Builtin::Module.id()))
+            }
         };
         // Making the superclass's may have made this one already: it links the
         // subclasses that exist, and this class is one of them.
@@ -3043,6 +3154,46 @@ mod tests {
         classes.define_method(m, name, Value::fixnum(2).unwrap());
         assert!(classes.serial(host) > host_serial, "definition on M");
         assert_eq!(classes.lookup(host, name).unwrap().owner, m, "M now wins");
+    }
+
+    // `Module#dup` (#28): the copy has the original's chain with itself where
+    // the original stood, and from then on the two move apart — except that a
+    // module both of them include is still shared, so it reaches both.
+    #[test]
+    fn a_copy_has_the_chain_and_then_its_own_table() {
+        let mut heap = booted();
+        let mut scope = heap.scope();
+        let base = scope.define_class(Some("Base"), Some(Builtin::Object.id()));
+        let m = scope.define_module(Some("M"));
+        let n = scope.define_module(Some("N"));
+        let original = scope.define_class(Some("C"), Some(base));
+        let copy = scope.define_class(None, None);
+        let (here, later, in_m) = (SymbolId(4), SymbolId(5), SymbolId(6));
+        let classes = scope.classes_mut();
+        classes.include(original, m).unwrap();
+        classes.define_method(original, here, Value::fixnum(1).unwrap());
+        assert!(classes.is_uninitialized(copy));
+
+        classes.copy_module(original, copy);
+        assert!(!classes.is_uninitialized(copy));
+        assert_eq!(classes.superclass(copy), Some(base));
+        assert_eq!(&classes.ancestors(copy)[..3], &[copy, m, base]);
+        assert_eq!(classes.lookup(copy, here).unwrap().owner, copy);
+
+        classes.define_method(copy, later, Value::fixnum(2).unwrap());
+        assert_eq!(
+            classes.lookup(original, later),
+            None,
+            "the tables are apart"
+        );
+
+        // `M` counts the copy among its includers, so what it gains later —
+        // a method, or a module of its own — reaches the copy too.
+        assert_eq!(classes.lookup(copy, in_m), None, "a cached miss");
+        classes.define_method(m, in_m, Value::fixnum(3).unwrap());
+        assert_eq!(classes.lookup(copy, in_m).unwrap().owner, m);
+        classes.include(m, n).unwrap();
+        assert!(classes.ancestors(copy).contains(&n));
     }
 
     // T9: `def obj.foo` and `obj.extend M` both mutate a singleton class, and

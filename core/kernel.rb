@@ -298,10 +298,17 @@ module Kernel
   # mixed into one, and then the first ordinary class and no further:
   # `F.public_methods(false)` lists the singleton methods of F's superclass,
   # and `Class.private_methods(false)` lists `Class#initialize`. Measured.
+  # A name met nearer, in any visibility, hides it further up: a module's
+  # public `module_function :initialize` is not also `Module`'s private one.
   def __own_method_names__(which)
     names = []
+    hidden = []
     __reflect_class_of__(self).ancestors.each do |ancestor|
-      __reflect_method_names__(ancestor, false, which).each { |name| names.push(name) unless names.include?(name) }
+      __reflect_method_names__(ancestor, false, which).each do |name|
+        names.push(name) unless hidden.include?(name) || names.include?(name)
+      end
+      hidden.concat(__reflect_method_names__(ancestor, false, 0))
+      hidden.concat(__reflect_method_names__(ancestor, false, 3))
       break if ancestor.instance_of?(Class) && !__reflect_is_singleton__(ancestor)
     end
     names

@@ -87,7 +87,10 @@ fix is a different slice. The reason says which slice, by number.
 
 ## What is here now
 
-Three hundred and thirty-nine tags across a hundred and fifty-three files.
+Three hundred and thirty-eight tags across a hundred and fifty-two files.
+Copying a class or module (#28) removed one, and its file:
+`Singleton.allocate` being private, which passes now that `allocate` on a
+class is real. Before it,
 #328 removed four, and their three files: `Thread#native_thread_id` telling
 threads apart and `File.open` on a FIFO, which pass now that each thread runs
 on an OS thread of its own and `open(2)` is made outside the lock, and the two
