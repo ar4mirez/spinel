@@ -1,1 +1,0 @@
-fails(#33: Regexp subclassing, string flags, US-ASCII source encoding, to_s option groups, and out-of-range numbered references):Regexp.new works by default for subclasses with overridden #initialize

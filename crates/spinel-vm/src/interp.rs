@@ -8472,6 +8472,16 @@ fn allocate_instance(scope: &mut HandleScope<'_>, id: ClassId) -> Result<Value, 
             let handle = empty_array_of(scope, id);
             Ok(scope.get(handle))
         }
+        // A pattern with no table entry yet: every slot nil until
+        // `Regexp#initialize` compiles into it, and every reader but `inspect`
+        // a `TypeError` before then, as CRuby's `rb_reg_check` makes them.
+        Some(Builtin::Regexp) => {
+            let class = scope.classes().object(id);
+            let class = scope.root(class);
+            let (payload, slots) = crate::regexp::regexp_shape();
+            let handle = scope.alloc(Some(class), payload, slots);
+            Ok(scope.get(handle))
+        }
         // Empty and BINARY, which is what `String.new` with no arguments
         // answers; `initialize` sets contents and encoding from there (#19).
         Some(Builtin::String) => Ok(string_bytes_in(scope, id, b"", crate::strings::BINARY)),
@@ -8526,7 +8536,6 @@ fn allocate_instance(scope: &mut HandleScope<'_>, id: ClassId) -> Result<Value, 
             Err(Error::Unknowable {
                 what: allocate_refusal(other),
                 needs: match other {
-                    Builtin::Regexp => "a pattern can be compiled from a run-time value",
                     Builtin::Integer | Builtin::Symbol | Builtin::Float => {
                         "the rule by which Ruby refuses it too"
                     }
@@ -8913,65 +8922,6 @@ fn native_call<'h>(
                         scope.classes().name(id).unwrap_or("an anonymous module")
                     ),
                 ));
-            }
-            // `Regexp.new(source)` for the same reason: `allocate` refuses on
-            // `Regexp` because a pattern cannot exist uninitialised, so there
-            // is nothing for allocate-then-initialize to allocate. Answered
-            // here rather than as a singleton method on the class, because
-            // building `Regexp`'s metaclass at bootstrap would build `Object`'s
-            // and `BasicObject`'s with it — a singleton class is observable,
-            // and none of the three should exist until something asks.
-            if scope.classes().repr(id) == Some(Builtin::Regexp) {
-                let value = regexp_new_from(scope, &call)?;
-                // A subclass's `new` answers one of its own, which is what
-                // lets it override `match` and be asked (#203).
-                //
-                // ponytail: the subclass's `initialize` is not called. The
-                // pattern is compiled before there is an object to call it on.
-                if Builtin::Regexp.id() != id {
-                    let class = scope.classes().object(id);
-                    let mut nested = scope.nested();
-                    let handle = nested.root(value);
-                    nested.set_class(handle, class);
-                }
-                stack.push(value);
-                // The two things `Regexp.new` says about a second argument it
-                // is not going to use as given (#268): flags beside a Regexp
-                // are ignored, and anything but an Integer, a String, true,
-                // false or nil is read as "ignore case" — under `-w` only, and
-                // with the argument's `inspect`, which is why that one is Ruby.
-                let first = call.args.first().copied().unwrap_or(Value::NIL);
-                let second = call.args.get(1).copied();
-                if is_regexp(scope, first) {
-                    if second.is_some() {
-                        return vm_warn(
-                            scope,
-                            stack,
-                            frames,
-                            proc_class,
-                            ids,
-                            "flags ignored",
-                            false,
-                        );
-                    }
-                } else if let Some(flag) = second
-                    && !flag.is_immediate()
-                    && !crate::bignum::is_big(scope, flag)
-                    && string_text(scope, flag).is_none()
-                {
-                    let kernel = scope.classes().object(Builtin::Kernel.id());
-                    return call_discarded(
-                        scope,
-                        stack,
-                        frames,
-                        proc_class,
-                        ids,
-                        kernel,
-                        crate::shared::symbols::intern("__regexp_flag_warning__"),
-                        vec![flag],
-                    );
-                }
-                return Ok(None);
             }
             // Since #15 the shape per class lives in one place, and `new` is
             // what Ruby says it is: allocate, then `initialize`. A class with no
@@ -12064,13 +12014,18 @@ fn native_call<'h>(
             stack.push(value);
             Ok(None)
         }
+        Native::RegexpInitialize => {
+            regexp_initialize(
+                scope,
+                call.receiver,
+                first_arg(&call),
+                call.args.get(1).copied(),
+            )?;
+            stack.push(call.receiver);
+            Ok(None)
+        }
         Native::RegexpMatchAt => {
-            let Some(program) = regexp_program(scope, call.receiver) else {
-                return Err(Error::NoDispatch {
-                    op: "__match_at__",
-                    operands: "a receiver that is not a Regexp",
-                });
-            };
+            let program = regexp_program_checked(scope, call.receiver, "__match_at__")?;
             let subject = first_arg(&call);
             let engine = regexp_match_encoding(scope, call.receiver, subject)?;
             let text = string_bytes(scope, subject).unwrap_or_default();
@@ -12135,12 +12090,7 @@ fn native_call<'h>(
             Ok(None)
         }
         Native::RegexpNameTable => {
-            let Some(program) = regexp_program(scope, call.receiver) else {
-                return Err(Error::NoDispatch {
-                    op: "names",
-                    operands: "a receiver that is not a Regexp",
-                });
-            };
+            let program = regexp_program_checked(scope, call.receiver, "names")?;
             let pairs: Vec<(String, usize)> = program
                 .names()
                 .iter()
@@ -12164,12 +12114,7 @@ fn native_call<'h>(
             } else {
                 crate::regexp::REGEXP_OPTIONS
             };
-            if !is_regexp(scope, call.receiver) {
-                return Err(Error::NoDispatch {
-                    op: "source",
-                    operands: "a receiver that is not a Regexp",
-                });
-            }
+            regexp_program_checked(scope, call.receiver, "source")?;
             let mut nested = scope.nested();
             let handle = nested.root(call.receiver);
             let value = nested.slot(handle, slot);
@@ -12177,18 +12122,28 @@ fn native_call<'h>(
             Ok(None)
         }
         Native::RegexpToS { inspect } => {
-            let Some(program) = regexp_program(scope, call.receiver) else {
-                return Err(Error::NoDispatch {
-                    op: "to_s",
-                    operands: "a receiver that is not a Regexp",
-                });
+            // An uninitialised pattern has nothing to show: `__inspect__` is
+            // nil for one, and `Regexp#inspect` shows it as any object.
+            if inspect
+                && is_regexp(scope, call.receiver)
+                && regexp_program(scope, call.receiver).is_none()
+            {
+                stack.push(Value::NIL);
+                return Ok(None);
+            }
+            let program = regexp_program_checked(scope, call.receiver, "to_s")?;
+            // `to_s` folds a leading group of options into its own; `inspect`
+            // shows the source as written.
+            let (body, flags) = if inspect {
+                (program.source(), program.flags())
+            } else {
+                regexp_to_s_fold(&program)
             };
             // A binary pattern's source reaches the engine a byte to a
             // character; shown, a byte past ASCII is its escape, as CRuby
             // shows it: `/\xE9/n`.
             let source: String = match program.encoding() {
-                spinel_regex::Encoding::Binary => program
-                    .source()
+                spinel_regex::Encoding::Binary => body
                     .chars()
                     .map(|c| {
                         if c.is_ascii() {
@@ -12198,7 +12153,7 @@ fn native_call<'h>(
                         }
                     })
                     .collect(),
-                spinel_regex::Encoding::Utf8 => program.source().to_owned(),
+                spinel_regex::Encoding::Utf8 => body.to_owned(),
             };
             let text = if inspect {
                 // `%r{/foo/bar}.inspect` is `/\/foo\/bar/`: a slash that the
@@ -12221,10 +12176,12 @@ fn native_call<'h>(
             } else {
                 // `(?mix-mix:source)`: every flag named, on one side or the
                 // other, which is what makes two `to_s` strings comparable.
-                let on = program.flags().to_letters();
+                // A slash is escaped here too, as CRuby's `rb_reg_expr_str`
+                // does for both.
+                let on = flags.to_letters();
                 let off: String = "mix".chars().filter(|c| !on.contains(*c)).collect();
                 let dash = if off.is_empty() { "" } else { "-" };
-                format!("(?{on}{dash}{off}:{source})")
+                format!("(?{on}{dash}{off}:{})", escape_slashes(&source))
             };
             let value = string_new(scope, &text);
             stack.push(value);
@@ -12488,7 +12445,7 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         ),
         (
             Builtin::Regexp,
-            &["inspect"],
+            &["__inspect__"],
             Native::RegexpToS { inspect: true },
         ),
         (Builtin::String, &["=~"], Native::StringMatchOp),
@@ -12535,6 +12492,11 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         (Builtin::Regexp, &["__match__"], Native::RegexpQuietMatch),
         (Builtin::Regexp, &["__match_all__"], Native::RegexpMatchAll),
         (Builtin::Regexp, &["__match_at__"], Native::RegexpMatchAt),
+        (
+            Builtin::Regexp,
+            &["__initialize__"],
+            Native::RegexpInitialize,
+        ),
         (
             Builtin::Module,
             &["attr_reader"],
@@ -14895,19 +14857,28 @@ fn regexp_literal(scope: &mut HandleScope<'_>, source: &str, options: i64) -> Re
     Ok(value)
 }
 
-/// Compile `source` and wrap it in a `Regexp` object.
-/// `Regexp.new(source, options)`.
+/// `Regexp#__initialize__(pattern, flags)`: compile into `receiver`, which
+/// `Regexp.allocate` made.
 ///
 /// The literal path is [`Insn::NewRegexp`]; this is the same compile with its
-/// argument arriving as a value, which is the half `core/regexp.rb` said was
-/// missing. The object is **not** frozen, unlike a literal — measured.
-fn regexp_new_from(scope: &mut HandleScope<'_>, call: &Pending) -> Result<Value, Error> {
-    let Some(first) = call.args.first().copied() else {
-        return Err(Error::raise(
-            "ArgumentError",
-            "wrong number of arguments (given 0, expected 1..3)",
-        ));
-    };
+/// argument arriving as a value. `core/regexp.rb`'s `initialize` has already
+/// converted `pattern` to a String or a Regexp and said what it had to about
+/// `flags`. The object is **not** frozen, unlike a literal — measured.
+fn regexp_initialize(
+    scope: &mut HandleScope<'_>,
+    receiver: Value,
+    first: Value,
+    flags: Option<Value>,
+) -> Result<(), Error> {
+    if !is_regexp(scope, receiver) {
+        return Err(Error::NoDispatch {
+            op: "__initialize__",
+            operands: "a receiver that is not a Regexp",
+        });
+    }
+    if regexp_program(scope, receiver).is_some() {
+        return Err(Error::raise("TypeError", "already initialized regexp"));
+    }
     // `Regexp.new(/a/i)` takes the pattern's own source *and* its options, and
     // ignores a second argument. Measured.
     let from_regexp = is_regexp(scope, first);
@@ -14936,7 +14907,7 @@ fn regexp_new_from(scope: &mut HandleScope<'_>, call: &Pending) -> Result<Value,
     if !from_regexp {
         // Ruby takes an integer of flags, and treats any other truthy value as
         // `IGNORECASE` — `Regexp.new("a", true).options` is 1. Measured.
-        options = match call.args.get(1).copied() {
+        options = match flags {
             None | Some(Value::NIL) | Some(Value::FALSE) => 0,
             Some(v) => match v.unpack() {
                 crate::value::Unpacked::Fixnum(n) => n,
@@ -14968,7 +14939,7 @@ fn regexp_new_from(scope: &mut HandleScope<'_>, call: &Pending) -> Result<Value,
     // Only Ruby's own bits: anything above them is not an option at all, and
     // must not be read as an encoding a literal fixed.
     let options = options & ((1 << crate::regexp::LITERAL_ENCODING_SHIFT) - 1);
-    regexp_build(scope, &bytes, encoding, options, None, false)
+    regexp_build(scope, &bytes, encoding, options, None, Some(receiver)).map(|_| ())
 }
 
 /// A literal's pattern: its options may carry the encoding a modifier fixed.
@@ -14988,11 +14959,12 @@ fn regexp_new(
         encoding,
         options & ((1 << shift) - 1),
         fixed,
-        true,
+        None,
     )
 }
 
-/// The pattern behind both constructors.
+/// The pattern behind both constructors: a new frozen `Regexp` for a literal,
+/// or, given `into`, the uninitialised one `Regexp.new` allocated.
 ///
 /// A literal is frozen from birth, which is what makes `Regexp#initialize` on
 /// one a `FrozenError`; `Regexp.new("a").frozen?` is `false`. Measured, and the
@@ -15003,8 +14975,9 @@ fn regexp_build(
     encoding: u8,
     options: i64,
     fixed: Option<u8>,
-    frozen: bool,
+    into: Option<Value>,
 ) -> Result<Value, Error> {
+    let frozen = into.is_none();
     // `/n` reads a raw byte past ASCII only from a BINARY String: written in
     // any other encoding it is a character, which CRuby refuses. Measured.
     if options & crate::regexp::NOENCODING != 0
@@ -15050,11 +15023,16 @@ fn regexp_build(
     // what `Regexp#encoding` reads.
     let string = class_handle(scope, Builtin::String);
     let text = string_alloc(scope, string, source, encoding);
-    let class = class_handle(scope, Builtin::Regexp);
-    let (payload, slots) = crate::regexp::regexp_shape();
     let mut nested = scope.nested();
     let text = nested.root(text);
-    let handle = nested.alloc(Some(class), payload, slots);
+    let handle = match into {
+        Some(object) => nested.root(object),
+        None => {
+            let class = class_handle(&mut nested, Builtin::Regexp);
+            let (payload, slots) = crate::regexp::regexp_shape();
+            nested.alloc(Some(class), payload, slots)
+        }
+    };
     let index = Value::fixnum(i64::try_from(index).unwrap_or(i64::MAX))
         .expect("a regexp table index fits a fixnum");
     nested.set_slot(handle, crate::regexp::REGEXP_INDEX, index);
@@ -15101,6 +15079,26 @@ fn regexp_program(
         .as_fixnum()?;
     let index = usize::try_from(index).ok()?;
     nested.regexps().get(index).map(std::sync::Arc::clone)
+}
+
+/// The compiled pattern behind a receiver that must be a `Regexp`, or the
+/// `TypeError` CRuby's `rb_reg_check` raises for one `Regexp.allocate` made and
+/// nothing has initialised.
+fn regexp_program_checked(
+    scope: &mut HandleScope<'_>,
+    value: Value,
+    op: &'static str,
+) -> Result<std::sync::Arc<spinel_regex::Regex>, Error> {
+    if let Some(program) = regexp_program(scope, value) {
+        return Ok(program);
+    }
+    if is_regexp(scope, value) {
+        return Err(Error::raise("TypeError", "uninitialized Regexp"));
+    }
+    Err(Error::NoDispatch {
+        op,
+        operands: "a receiver that is not a Regexp",
+    })
 }
 
 /// A `String` object's text, when it is one and it is UTF-8.
@@ -15237,12 +15235,7 @@ fn regexp_match_from(
     subject: Value,
     pos: Value,
 ) -> Result<Value, Error> {
-    let Some(program) = regexp_program(scope, regexp) else {
-        return Err(Error::NoDispatch {
-            op: "=~",
-            operands: "a receiver that is not a Regexp",
-        });
-    };
+    let program = regexp_program_checked(scope, regexp, "=~")?;
     // `/re/ =~ nil` is nil in Ruby, not a TypeError.
     if subject == Value::NIL {
         scope.set_last_match(Value::NIL);
@@ -15873,7 +15866,60 @@ fn byte_offset(text: &str, chars: usize) -> usize {
         .map_or(text.len(), |(i, _)| i)
 }
 
-/// Escape any `/` the source left bare, for `Regexp#inspect`.
+/// What `Regexp#to_s` shows: the source and flags, with options the source
+/// opens with taken into the flags — CRuby's `rb_reg_str_with_term`, step for
+/// step.
+///
+/// Bare switches, `(?i)`, are folded and the rest looked at again. A source
+/// that is one group of options, `(?i:...)`, is shown as that group's body, but
+/// only when the body compiles alone: that is what tells `(?i:a)` from
+/// `(?i:a)(?m:b)`, whose "body" `a)(?m:b` does not. Anything else shows the
+/// whole source with the pattern's own flags. So `/(?i:a)/.to_s` is
+/// `(?i-mx:a)` and `/(?i)ab/.to_s` is `(?i-mx:ab)`, measured on ruby 4.0.7.
+fn regexp_to_s_fold(program: &spinel_regex::Regex) -> (&str, spinel_regex::Flags) {
+    fn switch(flags: &mut spinel_regex::Flags, letter: u8, on: bool) -> bool {
+        match letter {
+            b'i' => flags.icase = on,
+            b'm' => flags.dotall = on,
+            b'x' => flags.extended = on,
+            _ => return false,
+        }
+        true
+    }
+    let source = program.source();
+    let bytes = source.as_bytes();
+    let mut flags = program.flags();
+    let mut start = 0;
+    while bytes.len() - start >= 4 && bytes[start] == b'(' && bytes[start + 1] == b'?' {
+        let mut at = start + 2;
+        while at < bytes.len() && switch(&mut flags, bytes[at], true) {
+            at += 1;
+        }
+        if bytes.len() - at > 1 && bytes[at] == b'-' {
+            at += 1;
+            while at < bytes.len() && switch(&mut flags, bytes[at], false) {
+                at += 1;
+            }
+        }
+        match bytes.get(at) {
+            Some(b')') => {
+                start = at + 1;
+                continue;
+            }
+            Some(b':') if bytes.len() - at >= 2 && bytes[bytes.len() - 1] == b')' => {
+                let body = &source[at + 1..bytes.len() - 1];
+                if spinel_regex::Regex::with_encoding(body, flags, program.encoding()).is_ok() {
+                    return (body, flags);
+                }
+            }
+            _ => {}
+        }
+        return (source, program.flags());
+    }
+    (&source[start..], flags)
+}
+
+/// Escape any `/` the source left bare, for `Regexp#inspect` and `#to_s`.
 fn escape_slashes(source: &str) -> String {
     let mut out = String::with_capacity(source.len());
     let mut escaped = false;
