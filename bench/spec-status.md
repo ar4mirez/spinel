@@ -52,7 +52,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/refinement` | 8 | 25 | 0 | 0 | 25 | 0 | 0% |
 | `core/regexp` | 24 | 256 | 213 | 0 | 30 | 13 | 83% |
 | `core/ruby` | 1 | 0 | 0 | 0 | 0 | 0 | — |
-| `core/set` | 57 | 175 | 171 | 0 | 1 | 3 | 98% |
+| `core/set` | 57 | 175 | 165 | 0 | 1 | 9 | 94% |
 | `core/signal` | 3 | 53 | 40 | 0 | 10 | 3 | 75% |
 | `core/sizedqueue` | 16 | 61 | 54 | 0 | 7 | 0 | 89% |
 | `core/string` | 151 | 3906 | 3520 | 0 | 359 | 27 | 90% |
@@ -131,4 +131,4 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `optional/capi` | 47 | 0 | 0 | 0 | 0 | 0 | — |
 | `optional/thread_safety` | 1 | 5 | 0 | 0 | 5 | 0 | 0% |
 | `security` | 13 | 31 | 28 | 0 | 3 | 0 | 90% |
-| **total** | 3835 | 32682 | 28388 | 0 | 3954 | 340 | 87% |
+| **total** | 3835 | 32682 | 28382 | 0 | 3954 | 346 | 87% |
