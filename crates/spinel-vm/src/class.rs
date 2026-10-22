@@ -934,7 +934,7 @@ impl Classes {
     }
 
     /// Whether `module` is in [`Classes::ancestors`] of `id`, the class itself
-    /// included: `Kernel#is_a?` and `Module#<=`. Walks the chain in place
+    /// included: `Kernel#is_a?` and [`Classes::includes`]. Walks the chain in place
     /// rather than collecting it, since `is_a?` is asked constantly.
     pub fn reaches(&self, id: ClassId, module: ClassId) -> bool {
         let mut cursor = Some(id);

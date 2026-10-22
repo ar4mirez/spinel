@@ -24,16 +24,15 @@ matches but two costs paid once a call, before the first match:
 `__reflect_*__` primitives: whether `mod` is among the ancestors of the
 object's class, singleton included. `Classes::reaches` walks the chain in
 place rather than collecting it. `is_a?` asks it and keeps its Ruby
-`TypeError` for a `mod` that is not a module. `Module#<=` asks the same walk
-through **`__reflect_reaches__(mod, other)`**, in place of two `ancestors`
-Arrays, and so does `Module#include?`.
+`TypeError` for a `mod` that is not a module.
 
 **`Regexp.escape` walks bytes where every byte below 0x80 is a character**:
 BINARY, UTF-8, US-ASCII, or any ASCII-compatible String that is all ASCII.
 A 128-entry table gives each metacharacter's escape, and the runs between
 them are copied whole. Shift_JIS, Windows-31J, Big5 and GBK have trail bytes
 like `\` and `[` below 0x80, so any other String is walked a character at a
-time as before, against the same table.
+time as before, against the same table, and a character of more than one
+byte is never a metacharacter.
 
 ## Not done
 
@@ -41,6 +40,10 @@ What is left per match is the interpreter's own call cost: a `yield` from
 `Array#each` is about 0.7µs and a send to a Ruby method 0.3–0.5µs, and a
 global `gsub` makes about six per match. That is Phase 5 and 6's (an
 interpreter within 1.5× of CRuby's, then the JIT), not a String method's.
+
+`Module#<=` and `Module#include?` still build `ancestors` and search it.
+Giving them the same in-place walk was left out: neither is on the `gsub`,
+`split` or `sort` paths #299 is about.
 
 ## Check
 

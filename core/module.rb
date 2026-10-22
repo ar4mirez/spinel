@@ -46,7 +46,7 @@ class Module
     unless __reflect_module_kind__(mod) == :module
       raise TypeError, "wrong argument type #{mod.class} (expected Module)"
     end
-    !equal?(mod) && __reflect_reaches__(self, mod)
+    !equal?(mod) && ancestors.include?(mod)
   end
 
   # Ancestry as a partial order: true below, false above, nil when the two
@@ -58,8 +58,8 @@ class Module
 
   def <=(other)
     raise TypeError, "compared with non class/module" if __reflect_module_kind__(other).nil?
-    return true if __reflect_reaches__(self, other)
-    return false if __reflect_reaches__(other, self)
+    return true if equal?(other) || ancestors.include?(other)
+    return false if other.ancestors.include?(self)
     nil
   end
 

@@ -1260,10 +1260,6 @@ fn reflect_native(
                 None => Value::FALSE,
             }
         }
-        ReflectOp::Reaches => match (class_id_of(scope, arg(0)), class_id_of(scope, arg(1))) {
-            (Some(id), Some(module)) => bool_value(scope.classes().reaches(id, module)),
-            _ => Value::FALSE,
-        },
         ReflectOp::MethodArity => {
             let found = match (class_of(scope, arg(0)), arg(1).as_symbol()) {
                 (Some(class), Some(name)) => scope.classes_mut().lookup(class, name),
@@ -12947,11 +12943,6 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             Builtin::Kernel,
             &["__reflect_kind_of__"],
             Native::Reflect(ReflectOp::KindOf),
-        ),
-        (
-            Builtin::Kernel,
-            &["__reflect_reaches__"],
-            Native::Reflect(ReflectOp::Reaches),
         ),
         (
             Builtin::Kernel,

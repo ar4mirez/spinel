@@ -893,9 +893,6 @@ pub enum ReflectOp {
     /// class, singleton included; false when `mod` is not a module.
     /// `Kernel#is_a?` without building `ancestors` (#299).
     KindOf,
-    /// `(mod, other)` → whether `other` is among `mod`'s ancestors, `mod`
-    /// included; false when either is not a module. `Module#<=`'s half.
-    Reaches,
     /// `(object, module, name, past)` → `[owner, arity, visibility, path,
     /// line]` for the method a lookup finds, or nil. What `Kernel#method` and
     /// `Module#instance_method` are made from.

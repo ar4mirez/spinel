@@ -114,8 +114,7 @@ class Regexp
   def self.__escape_chars__(text)
     out = String.new(encoding: text.encoding)
     text.each_char do |c|
-      ord = c.ord
-      escaped = ord < 0x80 ? ESCAPES[ord] : nil
+      escaped = c.bytesize == 1 ? ESCAPES[c.getbyte(0)] : nil
       escaped.nil? ? out << c : out << escaped
     end
     out.force_encoding(Encoding::US_ASCII) if out.ascii_only?
