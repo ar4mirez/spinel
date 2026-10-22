@@ -93,7 +93,8 @@ and `Kernel#Pathname`, which pass now that the builtin half of `Pathname`
 loads at boot. Giving `Dir` instances, `Dir.foreach` and `encoding:` then
 removed thirteen `Dir.glob` and `Dir.[]` tags whose examples pass, and added
 three: `Dir#children` and `Dir#read` on the default internal encoding (#42),
-and `Binding#irb` (#47), which `Dir.mktmpdir`'s cleanup no longer blocks. Before it, #36 removed fifteen, and all three of `core/objectspace`'s files: the
+and `Binding#irb` (#47), which `Dir.mktmpdir`'s cleanup no longer blocks.
+Before it, #36 removed fifteen, and all three of `core/objectspace`'s files: the
 finalizer examples that run a child `spinel` and the `garbage_collect` ones
 that found no `ObjectSpace`, which pass now that the collector is reachable
 from Ruby.

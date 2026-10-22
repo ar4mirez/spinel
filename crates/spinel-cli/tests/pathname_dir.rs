@@ -35,8 +35,8 @@ fn pathname_lists_finds_and_removes_a_tree() {
     std::fs::write(tree.join("a.txt"), "a").expect("a.txt is written");
     std::fs::write(tree.join("sub/.b"), "b").expect("sub/.b is written");
 
-    let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/pathname/dir_listing.rb");
+    let script =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/pathname/dir_listing.rb");
     let output = Command::new(SPINEL)
         .arg("run")
         .arg(&script)
