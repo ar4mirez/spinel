@@ -122,8 +122,11 @@ impl Encoding {
     /// EUC-JP, one no trail can be in Shift_JIS, or the start.
     ///
     /// ponytail: a subject that is one long run of multibyte characters reads
-    /// from its start each time, which makes a lookbehind over it quadratic.
-    /// Keep a boundary table per subject if that is ever the hot path.
+    /// from its start each time, which makes a lookbehind over it quadratic,
+    /// and a search for `\b` or `\B` too, since `prev_char` steps back this
+    /// way at every place a match may start. Keep a boundary table per
+    /// subject, or the previous start in the search loop, if that is ever the
+    /// hot path.
     #[must_use]
     pub fn is_char_boundary(self, bytes: &[u8], at: usize) -> bool {
         match self {

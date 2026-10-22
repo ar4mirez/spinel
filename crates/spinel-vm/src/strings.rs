@@ -144,38 +144,15 @@ pub fn char_len(encoding: u8, bytes: &[u8], at: usize) -> Option<usize> {
 
 /// The length of the character at the start of `bytes` in EUC-JP or in the
 /// Shift_JIS family, or `None` when it is not one: a broken one is a character
-/// per byte, as for UTF-8. Measured on ruby 4.0.7, byte by byte.
-///
-/// EUC-JP is ASCII, `8E` and one trail for half-width katakana, `8F` and two
-/// for JIS X 0212, or a lead and a trail, every lead and trail `A1`-`FE`.
-/// Shift_JIS is ASCII, half-width katakana `A1`-`DF` alone, or a lead
-/// `81`-`9F` or `E0`-`FC` and a trail `40`-`7E` or `80`-`FC` — which overlaps
-/// ASCII, so a trail can look like an `a`.
+/// per byte, as for UTF-8. The regex engine's reading, so that a match's
+/// character boundaries are `String#size`'s.
 fn japanese_char_len(encoding: u8, bytes: &[u8]) -> Option<usize> {
-    let first = *bytes.first()?;
-    if first < 0x80 {
-        return Some(1);
-    }
-    let trail = |at: usize, ok: fn(u8) -> bool| bytes.get(at).copied().is_some_and(ok);
-    let euc = |b: u8| (0xa1..=0xfe).contains(&b);
-    let sjis = |b: u8| matches!(b, 0x40..=0x7e | 0x80..=0xfc);
-    let want = if encoding == EUC_JP {
-        match first {
-            0x8e => 2,
-            0x8f if trail(1, euc) => 3,
-            0xa1..=0xfe => 2,
-            _ => return None,
-        }
+    let engine = if encoding == EUC_JP {
+        spinel_regex::Encoding::EucJp
     } else {
-        match first {
-            0xa1..=0xdf => return Some(1),
-            0x81..=0x9f | 0xe0..=0xfc => {
-                return trail(1, sjis).then_some(2);
-            }
-            _ => return None,
-        }
+        spinel_regex::Encoding::ShiftJis
     };
-    (1..want).all(|at| trail(at, euc)).then_some(want)
+    engine.char_len(bytes)
 }
 
 /// The length of one UTF-8 character at the start of `bytes`: the whole

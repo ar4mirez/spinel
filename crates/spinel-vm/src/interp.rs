@@ -15121,7 +15121,13 @@ fn regexp_build(
     let index = scope
         .regexps_mut()
         .add(&pattern, options, engine)
-        .map_err(|e| regexp_source_error(&e, &pattern))?;
+        .map_err(|e| {
+            if engine == spinel_regex::Encoding::Utf8 {
+                regexp_source_error(&e, &pattern)
+            } else {
+                regexp_source_error(&e, &regexp_display(source, engine))
+            }
+        })?;
     // The source String is in the pattern's encoding, as CRuby's is: that is
     // what `Regexp#encoding` reads.
     let string = class_handle(scope, Builtin::String);
