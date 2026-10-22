@@ -40,6 +40,25 @@ class Binding
     __binding_names__
   end
 
+  # `it`, or `_1` up to the highest a block uses: its implicit parameters,
+  # which are not locals. Only the innermost scope's count.
+  def implicit_parameters
+    __binding_implicit__.map(&:first)
+  end
+
+  def implicit_parameter_get(name)
+    name = __implicit_name__(name)
+    found = __binding_implicit__.assoc(name)
+    unless found
+      raise NameError.new("implicit parameter '#{name}' is not defined for #{inspect}", name)
+    end
+    found[1]
+  end
+
+  def implicit_parameter_defined?(name)
+    !__binding_implicit__.assoc(__implicit_name__(name)).nil?
+  end
+
   def receiver
     __binding_receiver__
   end
@@ -50,13 +69,7 @@ class Binding
 
   # A Symbol, or a String naming one, that could be a local variable.
   def __local_name__(name)
-    unless Symbol === name
-      unless String === name
-        raise TypeError, "#{name.inspect} is not a symbol nor a string" unless name.respond_to?(:to_str)
-        name = name.to_str
-      end
-      name = name.to_sym
-    end
+    name = __symbol_name__(name)
     text = name.to_s
     if text.bytesize == 2 && text.getbyte(0) == 95 && text.getbyte(1) >= 49 && text.getbyte(1) <= 57
       raise NameError.new("numbered parameter '#{text}' is not a local variable", name)
@@ -74,6 +87,26 @@ class Binding
     name
   end
   private :__local_name__
+
+  # A Symbol, or a String naming one, that is `it` or `_1` to `_9`.
+  def __implicit_name__(name)
+    name = __symbol_name__(name)
+    text = name.to_s
+    numbered = text.bytesize == 2 && text.getbyte(0) == 95 && text.getbyte(1) >= 49 && text.getbyte(1) <= 57
+    raise NameError.new("'#{text}' is not an implicit parameter", name) unless numbered || text == "it"
+    name
+  end
+  private :__implicit_name__
+
+  def __symbol_name__(name)
+    return name if Symbol === name
+    unless String === name
+      raise TypeError, "#{name.inspect} is not a symbol nor a string" unless name.respond_to?(:to_str)
+      name = name.to_str
+    end
+    name.to_sym
+  end
+  private :__symbol_name__
 end
 
 module Kernel

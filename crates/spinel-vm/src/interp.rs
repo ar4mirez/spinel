@@ -13172,6 +13172,11 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         ),
         (
             Builtin::Kernel,
+            &["__binding_implicit__"],
+            Native::Binding(BindingOp::Implicit),
+        ),
+        (
+            Builtin::Kernel,
             &["__binding_receiver__"],
             Native::Binding(BindingOp::Receiver),
         ),
@@ -16462,6 +16467,39 @@ fn binding_op(
             stack.push(value);
             Ok(None)
         }
+        BindingOp::Implicit => {
+            // Only the innermost scope's: a block's implicit parameters are
+            // its own, and an environment an `eval` or `local_variable_set`
+            // pushed has none, which is CRuby's answer too.
+            let body = scope.slot(handle, BINDING_BODY);
+            let locals = match scope.definitions().get(body) {
+                Some(Definition::Iseq(iseq)) => iseq.locals.clone(),
+                _ => Vec::new(),
+            };
+            let mut found: Vec<(usize, &str)> = locals
+                .iter()
+                .enumerate()
+                .filter_map(|(slot, name)| match &**name {
+                    crate::compile::IT => Some((slot, "it")),
+                    name if numbered_param(name) => Some((slot, name)),
+                    _ => None,
+                })
+                .collect();
+            found.sort_by_key(|&(_, name)| name);
+            let env = scope.slot(handle, BINDING_ENV);
+            let env = scope.root(env);
+            let mut pairs = Vec::new();
+            for (slot, name) in found {
+                let env = scope.get(env);
+                let value = env_get(scope, env, slot);
+                let pair = new_array(scope, &[Value::symbol(symbol(name)), value]);
+                pairs.push(scope.root(pair));
+            }
+            let pairs: Vec<Value> = pairs.into_iter().map(|pair| scope.get(pair)).collect();
+            let value = new_array(scope, &pairs);
+            stack.push(value);
+            Ok(None)
+        }
         BindingOp::Get => {
             let Some(name) = symbol_arg(0) else {
                 return Err(Error::NoDispatch {
@@ -16525,10 +16563,16 @@ fn binding_op(
 }
 
 /// Whether a slot name is one Ruby can see: the compiler's own temporaries
-/// start with `%`, and a numbered or `it` parameter is not a local.
+/// and the implicit `it` start with `%`, and a numbered parameter is not a
+/// local.
 fn spellable_local(name: &str) -> bool {
-    let numbered = name.len() == 2 && name.starts_with('_') && name.as_bytes()[1].is_ascii_digit();
-    !(name.starts_with('%') || numbered || name == "it")
+    !(name.starts_with('%') || numbered_param(name))
+}
+
+/// `_1` to `_9`, which no local can be called.
+fn numbered_param(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    bytes.len() == 2 && bytes[0] == b'_' && (b'1'..=b'9').contains(&bytes[1])
 }
 
 fn binding_eval(

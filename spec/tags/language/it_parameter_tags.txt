@@ -1,3 +1,0 @@
-fails(#38: a Binding taken inside a block using it treats it as a local):The `it` parameter does not affect binding local variables setting
-fails(#38: a Binding taken inside a block using it treats it as a local):The `it` parameter does not affect binding local variables definition check
-fails(#38: Binding: an expectation about an error, newly reported since PRD 0077 let mspec's raise matcher run inside its BasicObject proxy):The `it` parameter does not affect binding local variables getting
