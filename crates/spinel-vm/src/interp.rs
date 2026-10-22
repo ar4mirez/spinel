@@ -6506,7 +6506,10 @@ fn superclass_of(scope: &mut HandleScope<'_>, value: Value) -> Result<ClassId, E
     // superclass, so a subclass would have no path to `Object`. The `class`
     // keyword does not ask this in CRuby, and neither does `define_or_reopen`.
     if scope.classes().is_uninitialized(id) {
-        return Err(Error::raise("TypeError", "can't inherit uninitialized class"));
+        return Err(Error::raise(
+            "TypeError",
+            "can't inherit uninitialized class",
+        ));
     }
     Ok(id)
 }
