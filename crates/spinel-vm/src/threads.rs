@@ -63,17 +63,6 @@ pub(super) enum ThreadState {
     Dead,
 }
 
-/// What another thread asked of one, met when it next runs.
-pub(super) enum Interrupt {
-    /// A kill: the throw tagged with the thread.
-    Unwind(Unwind),
-    /// `Thread#raise`: a frame, built in the thread that raised, that raises
-    /// the exception here — so it is asked for `#exception` again in this
-    /// thread and takes this thread's backtrace, where it was interrupted, as
-    /// CRuby's does (#328).
-    Call(Box<Call>),
-}
-
 /// A thread's own fiber bookkeeping, kept here while another thread runs.
 #[derive(Default)]
 pub(super) struct FiberWorld {
@@ -89,8 +78,11 @@ pub(super) struct ThreadEntry {
     pub(super) fibers: FiberWorld,
     /// Raises and kills for it, the first met when it next runs and each of
     /// the rest the time after: a kill that follows a raise waits for the
-    /// raise to be met, as CRuby's queue of interrupts does.
-    pub(super) pending: VecDeque<Interrupt>,
+    /// raise to be met, as CRuby's queue of interrupts does. Each is a frame,
+    /// built in the thread that asked, that `core/thread.rb` runs here — so a
+    /// raise is asked for `#exception` again in this thread and takes this
+    /// thread's backtrace, where it was interrupted, as CRuby's does (#328).
+    pub(super) pending: VecDeque<Call>,
     /// Its `$~`, `$!`, `$_` and `$?` while another thread runs: one slot
     /// each per heap in the VM, one each per thread in Ruby.
     pub(super) specials: [Value; 4],
@@ -125,11 +117,8 @@ impl ThreadTable {
             if let Some(parked) = &entry.fibers.root_parked {
                 context_roots(parked, f);
             }
-            for interrupt in &entry.pending {
-                match interrupt {
-                    Interrupt::Unwind(unwind) => super::unwind_roots(*unwind, f),
-                    Interrupt::Call(frame) => frame_roots(frame, f),
-                }
+            for frame in &entry.pending {
+                frame_roots(frame, f);
             }
             entry.specials.iter().copied().for_each(&mut *f);
         }
@@ -238,9 +227,9 @@ fn block_call(call: &Pending, block: Value) -> Pending {
     }
 }
 
-/// The frame `Thread#raise` leaves for another thread: a call of `block`,
+/// The frame `Thread#raise` and `Thread#kill` leave for another thread: a call of `block`,
 /// with no arguments and its value dropped, pushed when that thread next runs.
-pub(super) fn raise_frame(
+pub(super) fn interrupt_frame(
     scope: &mut HandleScope<'_>,
     call: &Pending,
     block: Value,
@@ -315,7 +304,7 @@ pub(super) fn wakeup(scope: &mut HandleScope<'_>, index: usize, reason: Value) -
 }
 
 /// Leave `interrupt` for a thread to meet when it next runs, and wake it.
-pub(super) fn interrupt(scope: &mut HandleScope<'_>, index: usize, interrupt: Interrupt) {
+pub(super) fn interrupt(scope: &mut HandleScope<'_>, index: usize, interrupt: Call) {
     let interrupted = Value::symbol(crate::shared::symbols::intern("interrupted"));
     if let Some(entry) = scope.fibers_mut().threads.entries.get_mut(index) {
         if matches!(entry.state, ThreadState::Dead) {
@@ -560,31 +549,18 @@ fn enter(
     scope.set_errinfo(errinfo);
     scope.set_global(special("$_"), last_line);
     scope.set_global(special("$?"), status);
-    match pending {
-        Some(Interrupt::Unwind(unwind)) => {
-            adopt_roots(scope, stack, frames);
-            Some(unwind)
-        }
-        // The raise runs on top of whatever the thread was doing, as a call
-        // that call returns to: what it stopped in has its answer below it.
-        Some(Interrupt::Call(mut frame)) => {
-            if let Some(value) = push {
-                stack.push(value);
-            }
-            frame.base = stack.len();
-            frame.errinfo_on_entry = scope.errinfo();
-            frames.push(*frame);
-            adopt_roots(scope, stack, frames);
-            None
-        }
-        None => {
-            adopt_roots(scope, stack, frames);
-            if let Some(value) = push {
-                stack.push(value);
-            }
-            None
-        }
+    if let Some(value) = push {
+        stack.push(value);
     }
+    // The interrupt runs on top of whatever the thread was doing, as a call
+    // that call returns to: what it stopped in has its answer below it.
+    if let Some(mut frame) = pending {
+        frame.base = stack.len();
+        frame.errinfo_on_entry = scope.errinfo();
+        frames.push(frame);
+    }
+    adopt_roots(scope, stack, frames);
+    None
 }
 
 /// The loop's turn check: when the running thread's slice is used up and

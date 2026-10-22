@@ -33,7 +33,7 @@ class Thread
                   :abort_on_exception, :priority, :name, :group, :exception, :value, :dead, :killing,
                   :location,
                   :started, :deferred, :masks, :pending, :storage, :recursive,
-                  :uninterruptible, :kill_waiting
+                  :uninterruptible
   end
   private_constant :State
 
@@ -159,14 +159,19 @@ class Thread
 
   def pending_interrupt?(error = nil)
     pending = __pending__
-    error.nil? ? !pending.empty? : pending.any? { |e| error === e }
+    error.nil? ? !pending.empty? : pending.any? { |e| !KILL.equal?(e) && error === e }
   end
+
+  # A kill held in `__pending__`, in its place among the raises.
+  KILL = Object.new.freeze
+  private_constant :KILL
 
   def __masks__ = (@__s.masks ||= [])
   def __pending__ = (@__s.pending ||= [])
 
-  # What the masks say for `error`, innermost first.
+  # What the masks say for `error`, innermost first. A kill is not masked.
   def __mode__(error)
+    return :immediate if KILL.equal?(error)
     __masks__.reverse_each do |mask|
       mask.each { |klass, mode| return mode if klass === error }
     end
@@ -182,7 +187,27 @@ class Thread
       mode = __mode__(error)
       mode == :immediate || (blocking && mode == :on_blocking)
     end
-    Thread.__raise_here__(pending.delete_at(index)) unless index.nil?
+    return if index.nil?
+    interrupt = pending.delete_at(index)
+    # The rest are met at the next turn, as CRuby meets its queue's next.
+    __thread_interrupt__(@index, -> { __deliver__(false) }) unless pending.empty?
+    __meet__(interrupt)
+  end
+
+  # Another thread's kill or raise, run in this one when it next runs: held
+  # in `__pending__`, in arrival order, while it is uninterruptible.
+  def __interrupted__(interrupt)
+    if __uninterruptible__?
+      __pending__ << interrupt
+    else
+      __meet__(interrupt)
+    end
+    nil
+  end
+
+  def __meet__(interrupt)
+    throw self if KILL.equal?(interrupt)
+    Thread.__raise_here__(interrupt)
   end
 
   # The block with no interrupt let in, as CRuby's
@@ -194,11 +219,6 @@ class Thread
       yield
     ensure
       @__s.uninterruptible -= 1
-    end
-    return if __uninterruptible__?
-    if @__s.kill_waiting
-      @__s.kill_waiting = false
-      throw self
     end
     __deliver__(false)
   end
@@ -320,7 +340,7 @@ class Thread
         Thread.main.raise(e)
         next
       end
-      __report__(e) if @__s.report_on_exception
+      __uninterruptibly__ { __report__(e) } if @__s.report_on_exception
       if @__s.abort_on_exception || Thread.abort_on_exception
         Thread.main.raise(e)
       end
@@ -389,11 +409,7 @@ class Thread
       throw self
     else
       @__s.killing = true
-      if __uninterruptible__?
-        @__s.kill_waiting = true
-      elsif @__s.started
-        __thread_interrupt__(@index, nil)
-      end
+      __thread_interrupt__(@index, -> { __interrupted__(KILL) }) if @__s.started
     end
     self
   end
@@ -409,11 +425,10 @@ class Thread
       @__s.deferred = error
     else
       mode = __mode__(error)
-      if mode == :never || (mode == :on_blocking && __thread_status__(@index) != :sleep) ||
-         __uninterruptible__?
+      if mode == :never || (mode == :on_blocking && __thread_status__(@index) != :sleep)
         __pending__ << error
       else
-        __thread_interrupt__(@index, -> { Thread.__raise_here__(error) })
+        __thread_interrupt__(@index, -> { __interrupted__(error) })
       end
     end
     nil
