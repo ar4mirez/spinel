@@ -796,6 +796,39 @@ class File < IO
   end
 end
 
+# The predicates `File` answers as singleton methods, as a module of their
+# own. CRuby defines each C function twice, once here and once on `File`;
+# here the second definition is a call to the first.
+module FileTest
+  def blockdev?(path) = File.blockdev?(path)
+  def chardev?(path) = File.chardev?(path)
+  def directory?(path) = File.directory?(path)
+  def empty?(path) = File.empty?(path)
+  def executable?(path) = File.executable?(path)
+  def executable_real?(path) = File.executable_real?(path)
+  def exist?(path) = File.exist?(path)
+  def file?(path) = File.file?(path)
+  def grpowned?(path) = File.grpowned?(path)
+  def identical?(first, second) = File.identical?(first, second)
+  def owned?(path) = File.owned?(path)
+  def pipe?(path) = File.pipe?(path)
+  def readable?(path) = File.readable?(path)
+  def readable_real?(path) = File.readable_real?(path)
+  def setgid?(path) = File.setgid?(path)
+  def setuid?(path) = File.setuid?(path)
+  def size(path) = File.size(path)
+  def size?(path) = File.size?(path)
+  def socket?(path) = File.socket?(path)
+  def sticky?(path) = File.sticky?(path)
+  def symlink?(path) = File.symlink?(path)
+  def world_readable?(path) = File.world_readable?(path)
+  def world_writable?(path) = File.world_writable?(path)
+  def writable?(path) = File.writable?(path)
+  def writable_real?(path) = File.writable_real?(path)
+  alias zero? empty?
+  module_function(*instance_methods(false))
+end
+
 class Dir
   include Enumerable
 
@@ -855,19 +888,104 @@ end
   def self.delete(path) = rmdir(path)
   def self.unlink(path) = rmdir(path)
 
-  def self.children(path)
+  # `encoding:` tags each name with that encoding, as `dir.c` does; the
+  # bytes are the file system's either way.
+  def self.children(path, encoding: nil)
     path = File.__path__(path)
-    File.__check__(__fs_children__(path), path, "dir_initialize")
+    names = File.__check__(__fs_children__(path), path, "dir_initialize")
+    __encode_names__(names, encoding)
   end
 
-  def self.entries(path)
-    [".", ".."] + children(path)
+  def self.__encode_names__(names, encoding)
+    return names if encoding.nil?
+    encoding = Encoding.find(encoding) unless encoding.is_a?(Encoding)
+    names.each { |name| name.force_encoding(encoding) }
   end
 
-  def self.each_child(path, &block)
-    return enum_for(:each_child, path) unless block
-    children(path).each(&block)
+  # A path that is not a directory is not an empty one; a missing one raises.
+  def self.empty?(path)
+    path = File.__path__(path)
+    children = __fs_children__(path)
+    return false if children == Errno::ENOTDIR::Errno
+    File.__check__(children, path, "rb_dir_s_empty_p").empty?
+  end
+
+  def self.entries(path, encoding: nil)
+    __encode_names__([+".", +".."], encoding) + children(path, encoding: encoding)
+  end
+
+  def self.each_child(path, encoding: nil, &block)
+    return enum_for(:each_child, path, encoding: encoding) unless block
+    children(path, encoding: encoding).each(&block)
     nil
+  end
+
+  def self.foreach(path, encoding: nil, &block)
+    return enum_for(:foreach, path, encoding: encoding) unless block
+    entries(path, encoding: encoding).each(&block)
+    nil
+  end
+
+  # With a block, the directory is closed when it returns, and its value is
+  # the block's.
+  def self.open(path, encoding: nil)
+    dir = new(path, encoding: encoding)
+    return dir unless block_given?
+    begin
+      yield dir
+    ensure
+      dir.close
+    end
+  end
+
+  # ponytail: a Dir reads its entries once, when it is opened, rather than
+  # holding a `DIR *`; `fileno`, `seek` and `chdir` wait for #42.
+  def initialize(path, encoding: nil)
+    @path = File.__path__(path)
+    @entries = Dir.entries(@path, encoding: encoding)
+    @pos = 0
+    @closed = false
+  end
+
+  def to_path = @path
+  def inspect = "#<Dir:#{@path}>"
+
+  def read
+    __check_open__
+    name = @entries[@pos]
+    @pos += 1 unless name.nil?
+    name
+  end
+
+  def each
+    return enum_for(:each) unless block_given?
+    __check_open__
+    # From the start each time, as `dir_each_entry`'s `rewinddir`.
+    @pos = 0
+    while (name = read)
+      yield name
+    end
+    self
+  end
+
+  def children
+    __check_open__
+    @entries.reject { |name| name == "." || name == ".." }
+  end
+
+  def each_child(&block)
+    return enum_for(:each_child) unless block
+    children.each(&block)
+    self
+  end
+
+  def close
+    @closed = true
+    nil
+  end
+
+  def __check_open__
+    raise IOError, "closed directory" if @closed
   end
 
   def self.[](*patterns, base: nil, sort: true)
@@ -877,13 +995,17 @@ end
   # `*`, `?`, `[...]`, `{a,b}` and `**/`, matched a segment at a time; a name
   # starting with `.` only by a pattern that does too. Results are sorted
   # within each directory, and a brace's alternatives keep their order,
-  # measured. Flags are not supported yet.
+  # measured. `File::FNM_DOTMATCH` lets a wildcard match those names too.
   def self.glob(patterns, flags = 0, base: nil, sort: true, &block)
-    raise NotImplementedError, "Dir.glob flags" unless flags == 0
+    flags = Integer.__index__(flags)
+    # ponytail: FNM_DOTMATCH is the one flag; the rest raise until #42
+    # takes them on.
+    raise NotImplementedError, "Dir.glob flags" unless flags & ~File::FNM_DOTMATCH == 0
+    dotmatch = flags & File::FNM_DOTMATCH != 0
     results = []
     Array(patterns).each do |pattern|
       __expand_braces__(File.__path__(pattern)).each do |expanded|
-        results.concat(__glob__(expanded, base.nil? ? nil : File.__path__(base)))
+        results.concat(__glob__(expanded, base.nil? ? nil : File.__path__(base), dotmatch))
       end
     end
     return results unless block
@@ -923,37 +1045,66 @@ end
     alternatives.flat_map { |alt| __expand_braces__(head + alt + tail) }
   end
 
-  def self.__glob__(pattern, base)
+  # `.` is offered to a pattern only in the first directory a glob lists,
+  # and there not where `**` is recursing unless FNM_DOTMATCH; `..` never.
+  # That is `glob_helper`'s FNM_GLOB_SKIPDOT in CRuby's dir.c, and why on
+  # ruby 4.0.7 `*` with FNM_DOTMATCH answers `.` and `a/*` answers `a/.`,
+  # yet `*/*` answers no `a/.`.
+  def self.__glob__(pattern, base, dotmatch = false)
     absolute = pattern.start_with?("/")
     segments = pattern.split("/", -1)
     segments.shift if absolute
     paths = [absolute ? "/" : ""]
     root = base || "."
+    listed = false
+    recursing = false
+    recursed = {}
     segments.each_with_index do |segment, index|
       last = index == segments.size - 1
       if segment.empty?
-        # A trailing `/`: directories only.
-        paths = paths.select { |path| File.directory?(__on_disk__(path, root)) }.map { |path| path + "/" } if last
+        # A trailing `/`: directories only, and the current directory only
+        # as a `base:`, which answers it as `/`.
+        if last
+          paths = paths.select { |path| (base || !path.empty?) && File.directory?(__on_disk__(path, root)) }.map { |path| path + "/" }
+        end
         next
       end
-      if segment == "**"
-        paths = paths.flat_map { |path| [path] + __descendants__(path, root) }
+      # `**` recurses only as a directory, `**/`; last, it is a `*`.
+      if segment == "**" && !last
+        recursing = true
+        paths = paths.flat_map do |path|
+          descendants = __descendants__(path, root, dotmatch)
+          descendants.each { |descendant| recursed[descendant] = true }
+          [path] + descendants
+        end
         next
       end
+      dot = ->(path) { !listed && !recursed[path] && (dotmatch || !recursing) }
       if segment.match?(/[*?\[]/)
         matcher = __segment_regexp__(segment)
+        dots = dotmatch || segment.start_with?(".")
         paths = paths.flat_map do |path|
           dir = __on_disk__(path, root)
           next [] unless File.directory?(dir)
           children = __fs_children__(dir)
           next [] if Integer === children
-          children.select { |name| matcher.match?(name) && (!name.start_with?(".") || segment.start_with?(".")) }
+          children = ["."] + children if dots && dot.(path)
+          children.select { |name| matcher.match?(name) && (dots || !name.start_with?(".")) }
                   .map { |name| __join__(path, name) }
         end
+        listed = true
       else
+        # Under `**` a plain name is matched against what the directory
+        # lists, so `.` and `..` follow the listing's rule.
+        if recursing && (segment == "." || segment == "..")
+          paths = paths.select { |path| segment == "." && dot.(path) }
+        end
         paths = paths.map { |path| __join__(path, segment) }
                      .select { |path| File.exist?(__on_disk__(path, root)) || File.symlink?(__on_disk__(path, root)) }
+        listed = true if recursing
       end
+      recursing = false
+      recursed = {}
     end
     paths
   end
@@ -968,16 +1119,16 @@ end
   end
 
   # Every directory below `path`, depth first in sorted order, skipping
-  # names that start with `.`, as `**/` does.
-  def self.__descendants__(path, root)
+  # names that start with `.` unless FNM_DOTMATCH, as `**/` does.
+  def self.__descendants__(path, root, dotmatch = false)
     dir = __on_disk__(path, root)
     children = __fs_children__(dir)
     return [] if Integer === children
     children.flat_map do |name|
-      next [] if name.start_with?(".")
+      next [] if name.start_with?(".") && !dotmatch
       child = __join__(path, name)
       next [] unless File.directory?(__on_disk__(child, root)) && !File.symlink?(__on_disk__(child, root))
-      [child] + __descendants__(child, root)
+      [child] + __descendants__(child, root, dotmatch)
     end
   end
 

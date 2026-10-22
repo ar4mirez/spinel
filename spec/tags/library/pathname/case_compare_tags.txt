@@ -1,1 +1,0 @@
-fails(#326: Pathname is the stdlib extras alone, without the builtin half that defines ===):Pathname#=== is an alias of Pathname#==

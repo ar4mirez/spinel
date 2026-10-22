@@ -1,0 +1,1 @@
+fails(#47: irb is not vendored, so Binding#irb is undefined):Binding#irb creates an IRB session with the binding in scope
