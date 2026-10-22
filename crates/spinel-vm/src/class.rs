@@ -913,6 +913,21 @@ impl Classes {
             && id != Builtin::BasicObject.id()
     }
 
+    /// Whether this class or one above it is uninitialised: `class X < c` with
+    /// `c` from `Class.allocate` builds `X`, but its chain stops short of
+    /// `Object`, so CRuby refuses `X.superclass` and `X.new`.
+    #[must_use]
+    pub fn reaches_uninitialized(&self, id: ClassId) -> bool {
+        let mut current = Some(id);
+        while let Some(class) = current {
+            if self.is_uninitialized(class) {
+                return true;
+            }
+            current = self.superclass(class);
+        }
+        false
+    }
+
     /// `Class#initialize` on an uninitialised class: give it `superclass`, and
     /// with it the representation its instances will have.
     pub fn inherit(&mut self, id: ClassId, superclass: ClassId) {

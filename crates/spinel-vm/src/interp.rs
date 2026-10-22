@@ -8424,6 +8424,21 @@ fn allocate_instance(scope: &mut HandleScope<'_>, id: ClassId) -> Result<Value, 
             "can't instantiate uninitialized class",
         ));
     }
+    // A subclass of one, through the `class` keyword: CRuby finds no allocator
+    // above it.
+    if scope.classes().reaches_uninitialized(id) {
+        let name = match scope.classes().name(id) {
+            Some(name) => name.to_owned(),
+            None => {
+                let class = scope.classes().object(id);
+                inspect(scope, class)
+            }
+        };
+        return Err(Error::raise(
+            "TypeError",
+            format!("allocator undefined for {name}"),
+        ));
+    }
     match scope.classes().repr(id) {
         // `Class.allocate` is a class with no superclass yet, which
         // `Class#initialize` gives it (#28); `superclass` and `new` refuse it
@@ -11172,7 +11187,7 @@ fn native_call<'h>(
                     ),
                 ));
             }
-            if scope.classes().is_uninitialized(id) {
+            if scope.classes().reaches_uninitialized(id) {
                 return Err(Error::raise("TypeError", "uninitialized class"));
             }
             let value = match scope.classes().superclass(id) {

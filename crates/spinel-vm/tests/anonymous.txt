@@ -86,4 +86,8 @@ $oracle_pad = []; p1 = Class.new { def self.inherited(sub); $oracle_pad << :hook
 Class.allocate.superclass  #=> !TypeError: uninitialized class
 Class.allocate.new  #=> !TypeError: can't instantiate uninitialized class
 Class.new(Class.allocate)  #=> !TypeError: can't inherit uninitialized class
+$oracle_ua = Class.allocate; class OracleZ1 < $oracle_ua; end; OracleZ1.superclass  #=> !TypeError: uninitialized class
+$oracle_ub = Class.allocate; class OracleZ2 < $oracle_ub; end; OracleZ2.new  #=> !TypeError: allocator undefined for OracleZ2
+$oracle_uc = Class.allocate; class OracleZ3 < $oracle_uc; end; OracleZ3.allocate  #=> !TypeError: allocator undefined for OracleZ3
+$oracle_ud = Class.allocate; class OracleZ4 < $oracle_ud; end; class OracleZ5 < OracleZ4; end; OracleZ5.superclass  #=> !TypeError: uninitialized class
 Module.allocate  #=> !NoMethodError: undefined method 'allocate' for class Module
