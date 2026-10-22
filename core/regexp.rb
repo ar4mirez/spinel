@@ -1,14 +1,15 @@
 # Regexp.
 #
-# `=~`, `match`, `match?`, `===`, `source`, `options`, `to_s` and `inspect` are
+# `=~`, `match`, `match?`, `===`, `source`, `options` and `to_s` are
 # primitives: they run the engine in `spinel-regex` and read the compiled
 # pattern's table entry.
 #
-# `Regexp.new` is a primitive too, and a singleton method rather than an
-# `initialize`: `Class#allocate` refuses on `Regexp` because a pattern cannot
-# exist uninitialised, so there is nothing for the usual allocate-then-initialize
-# to allocate. The object it builds is *not* frozen, which is the one way it
-# differs from a literal.
+# `Regexp.new` is Ruby's own allocate-then-initialize (#33). `allocate` makes a
+# pattern with no table entry, every reader of which but `inspect` raises
+# `TypeError`, and `initialize` compiles into it with the `__initialize__`
+# primitive — so a subclass's `initialize` runs, and `super` from it is what
+# compiles. The object is *not* frozen, which is the one way it differs from a
+# literal.
 class Regexp
   # The flag bits, as Ruby numbers them. `Regexp.new("a", IGNORECASE).options`
   # is 1 and `/a/ix.options` is 3, so these are a public part of the interface
@@ -17,14 +18,46 @@ class Regexp
   EXTENDED = 2
   MULTILINE = 4
 
-  # Reachable only through `send`: `Regexp.new` builds its object without going
-  # through `initialize`, so anything that gets here already holds a compiled
-  # pattern. A literal is frozen and Ruby raises `FrozenError`; an unfrozen one
-  # from `Regexp.new` raises `TypeError`. Measured on ruby 4.0.6 — 4.1 makes
-  # both `FrozenError`, and ruby/spec guards the two apart.
-  def initialize(*args)
+  # The pattern may be anything that converts with `to_str`. A Regexp keeps its
+  # own options, and flags beside one are ignored, with a warning unless they
+  # are nil. As flags, anything but an Integer, a String of `imx`, nil, true or
+  # false is read as "ignore case" and said so under `-w`. All measured on ruby
+  # 4.0.7, as is the order: the arguments are read before the receiver is
+  # checked. A literal is frozen and raises `FrozenError`; a pattern already
+  # compiled raises `TypeError` — 4.1 makes both `FrozenError`, and ruby/spec
+  # guards the two apart.
+  #
+  # ponytail: `timeout:` is accepted and not kept; `Regexp.timeout=` is not
+  # enforced either. Both wait on a deadline the engine can check a match
+  # against.
+  def initialize(pattern, flags = nil, timeout: nil)
+    if pattern.is_a?(Regexp)
+      __warning__("flags ignored") unless flags.nil?
+    else
+      unless pattern.is_a?(String)
+        text = String.__coerce__(pattern)
+        # CRuby 4.1's wording, `into` where 4.0 said `to`
+        # (bugs.ruby-lang.org/issues/21864), which ruby/spec checks on every
+        # engine but CRuby before 4.1.
+        unless text.is_a?(String)
+          raise TypeError, "can't convert #{pattern.class} into String (#{pattern.class}#to_str gives #{text.class})"
+        end
+        pattern = text
+      end
+      # A bignum is not taken as flags: CRuby reads only a fixnum.
+      unless flags.nil? || true.equal?(flags) || false.equal?(flags) ||
+             (flags.is_a?(Integer) && flags.bit_length < 63) || flags.is_a?(String)
+        __regexp_flag_warning__(flags)
+      end
+    end
     raise FrozenError.new("can't modify frozen Regexp: " + inspect, receiver: self) if frozen?
-    raise TypeError, "already initialized regexp"
+    __initialize__(pattern, flags)
+  end
+
+  # One `Regexp.allocate` made and nothing has initialised shows as any object
+  # does. Measured.
+  def inspect
+    __inspect__ || super
   end
 
   def ==(other)
@@ -179,53 +212,29 @@ class Regexp
   end
 
   class << self
-    # The pattern may be anything that converts with `to_str`, which is a
-    # send: it is converted here, and the primitive takes a String or a
-    # Regexp.
-    alias __new__ new
-    def new(*args, timeout: nil)
-      unless args.empty? || args[0].is_a?(String) || args[0].is_a?(Regexp)
-        pattern = args[0]
-        unless pattern.respond_to?(:to_str)
-          raise TypeError, "no implicit conversion of " + (pattern.nil? ? "nil" : pattern.class.to_s) + " into String"
-        end
-        text = pattern.to_str
-        unless text.is_a?(String)
-          raise TypeError, "can't convert " + pattern.class.to_s + " to String (" +
-                           pattern.class.to_s + "#to_str gives " + text.class.to_s + ")"
-        end
-        args = [text] + args[1, args.size - 1]
-      end
-      __new__(*args)
-    end
-
-    def compile(*args)
-      new(*args)
+    def compile(...)
+      new(...)
     end
 
     # One pattern that matches what any of these does. A String is matched
-    # literally; a Regexp keeps its own options, inside a group.
+    # literally; a Regexp, or what `to_regexp` makes, keeps its own options,
+    # inside a group. Alone, a pattern is answered as it is and a Symbol is
+    # quoted as its name; among others a Symbol is a `TypeError`. The answer
+    # is a `Regexp` whatever class `union` was sent to. Measured on ruby 4.0.7.
     def union(*patterns)
       patterns = patterns[0] if patterns.size == 1 && patterns[0].is_a?(Array)
       return /(?!)/ if patterns.empty?
       if patterns.size == 1
         only = patterns[0]
-        return only if only.is_a?(Regexp)
+        converted = Regexp.try_convert(only)
+        return converted unless converted.nil?
+        return Regexp.new(escape(only))
       end
       parts = patterns.map do |pattern|
-        if pattern.is_a?(Regexp)
-          pattern.to_s
-        else
-          unless pattern.is_a?(String)
-            unless pattern.respond_to?(:to_str)
-              raise TypeError, "no implicit conversion of " + pattern.class.to_s + " into String"
-            end
-            pattern = pattern.to_str
-          end
-          escape(pattern)
-        end
+        converted = Regexp.try_convert(pattern)
+        converted.nil? ? escape(String.__coerce__(pattern)) : converted.to_s
       end
-      new(parts.join("|"))
+      Regexp.new(parts.join("|"))
     end
 
     def try_convert(object)
@@ -233,7 +242,8 @@ class Regexp
       return nil unless object.respond_to?(:to_regexp)
       converted = object.to_regexp
       return converted if converted.nil? || converted.is_a?(Regexp)
-      raise TypeError, "can't convert " + object.class.to_s + " to Regexp (" +
+      # CRuby 4.1's wording, as `initialize`'s is.
+      raise TypeError, "can't convert " + object.class.to_s + " into Regexp (" +
                        object.class.to_s + "#to_regexp gives " + converted.class.to_s + ")"
     end
 

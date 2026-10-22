@@ -4,6 +4,12 @@
 # `length` and `names` are primitives: they read capture offsets and group
 # names the regexp engine recorded. The rest is Ruby.
 class MatchData
+  # A MatchData is only ever what a match made: CRuby undefines both
+  # (bugs.ruby-lang.org/issues/16294).
+  class << self
+    undef_method :new, :allocate
+  end
+
   # The whole match, which is group 0. Without this, `Kernel#to_s` would answer
   # `#<MatchData>` — a plausible string that is not the matched text.
   def to_s
