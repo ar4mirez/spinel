@@ -604,9 +604,7 @@ class Integer
       else
         [0xf0 | (code >> 18), 0x80 | ((code >> 12) & 0x3f), 0x80 | ((code >> 6) & 0x3f), 0x80 | (code & 0x3f)]
       end
-    string = "".b
-    bytes.each { |byte| string.__splice__(string.bytesize, 0, __byte_string__(byte)) }
-    string.__force_encoding__(1)
+    __bytes_string__(bytes).__force_encoding__(1)
   end
 
   # The codepoint of one valid UTF-8 character's bytes.
@@ -621,6 +619,15 @@ class Integer
       i += 1
     end
     code
+  end
+
+  # The codepoint of one valid CESU-8 character's bytes: a six-byte one is a
+  # UTF-16 surrogate pair, each half spelled as UTF-8.
+  def self.__cesu8_decode__(bytes)
+    return __utf8_decode__(bytes) if bytes.size < 6
+    high = __utf8_decode__(bytes[0, 3])
+    low = __utf8_decode__(bytes[3, 3])
+    0x10000 + ((high - 0xd800) << 10) + (low - 0xdc00)
   end
 
   HEX_DIGITS = "0123456789ABCDEF"
@@ -639,32 +646,102 @@ end
 
 class Integer
   # Below 128 a US-ASCII character, below 256 a BINARY byte, and with an
-  # encoding the codepoint in it. Measured.
+  # encoding the codepoint in it: CRuby's `rb_enc_uint_chr`, which writes the
+  # code in as many bytes as the encoding's layout gives it and answers them
+  # only when they are one valid character. Measured.
   def chr(encoding = nil)
     if encoding.nil? && self > 255 && !Encoding.default_internal.nil?
       encoding = Encoding.default_internal
     end
     if encoding.nil?
-      if self < 0 || self > 255
-        # A bignum is not named, measured.
-        shown = self < -4611686018427387904 || self > 4611686018427387903 ? "bignum" : to_s
-        raise RangeError, "#{shown} out of char range"
-      end
+      raise Integer.__out_of_char_range__(self) if self < 0 || self > 255
       return Integer.__byte_string__(self).__force_encoding__(self < 128 ? 2 : 0)
     end
     encoding = Encoding.find(encoding)
-    case encoding.__index__
-    when 1
-      out = String.new(encoding: encoding)
-      out << self
-      out
-    when 0, 2
-      limit = encoding.__index__ == 2 ? 127 : 255
-      raise RangeError, "#{self} out of char range" if self < 0 || self > limit
-      Integer.__byte_string__(self).__force_encoding__(encoding.__index__)
+    raise Integer.__out_of_char_range__(self) if self < 0 || self > 0xffff_ffff
+    index = encoding.__index__
+    if encoding.__single_byte__
+      raise RangeError, "#{self} out of char range" if self > 255
+      return Integer.__byte_string__(self).__force_encoding__(index) unless index == 2 && self > 127
     else
-      # Which codepoints EUC-JP or Shift_JIS has is their table's question.
+      bytes = Integer.__code_bytes__(self, index)
+      raise RangeError, "#{self} out of char range" if bytes.nil?
+      if bytes
+        out = Integer.__bytes_string__(bytes).__force_encoding__(index)
+        return out if out.valid_encoding? && out.length == 1
+      end
+    end
+    raise RangeError, "invalid codepoint 0x#{Integer.__hex__(self, 1)} in #{encoding.name}"
+  end
+
+  # The `RangeError` for a code no encoding can take. A bignum is not named,
+  # measured.
+  def self.__out_of_char_range__(code)
+    shown = code < -4611686018427387904 || code > 4611686018427387903 ? "bignum" : code.to_s
+    RangeError.new("#{shown} out of char range")
+  end
+
+  # The bytes Onigmo's `code_to_mbclen` and `mbcput` write `code` as in the
+  # multibyte encoding at `index`: nil when the code is past what the layout
+  # can hold (`out of char range`), false when the layout has no place for it
+  # (`invalid codepoint`). Whether the bytes are then a character is the
+  # encoding's own question.
+  def self.__code_bytes__(code, index)
+    case index
+    when 1, 15
+      # UTF-8, and CESU-8, which spells a code past U+FFFF as its UTF-16
+      # surrogate pair. 0xFFFFFFFE and 0xFFFFFFFF are Onigmo's invalid-byte
+      # codes, one byte that is never a character.
+      return [code & 0xff] if code >= 0xffff_fffe
+      return nil if code > 0x10ffff
+      if code > 0xffff && index == 15
+        code -= 0x10000
+        return __utf8__(0xd800 | (code >> 10)).bytes + __utf8__(0xdc00 | (code & 0x3ff)).bytes
+      end
+      __utf8__(code).bytes
+    when 3, 4
+      # UTF-16BE and UTF-16LE.
+      return false if code > 0x10ffff
+      units =
+        if code > 0xffff
+          code -= 0x10000
+          [0xd800 | (code >> 10), 0xdc00 | (code & 0x3ff)]
+        else
+          [code]
+        end
+      units.flat_map { |unit| index == 3 ? [unit >> 8, unit & 0xff] : [unit & 0xff, unit >> 8] }
+    when 5, 6
+      # UTF-32BE and UTF-32LE.
+      big = [code >> 24, (code >> 16) & 0xff, (code >> 8) & 0xff, code & 0xff]
+      index == 5 ? big : big.reverse
+    when 10
+      # EUC-JP: ASCII, a two-byte code, or a three-byte one, each byte of a
+      # multibyte code with its high bit set.
+      return [code] if code < 0x80
+      return nil if code > 0xffffff
+      if code & 0xff808080 == 0x808080
+        [code >> 16, (code >> 8) & 0xff, code & 0xff]
+      elsif code & 0xffff8080 == 0x8080
+        [code >> 8, code & 0xff]
+      else
+        false
+      end
+    when 11, 39
+      # Windows-31J and Shift_JIS: a byte, or a lead and a trail.
+      return [code] if code < 0x100
+      return nil if code > 0xffff
+      [code >> 8, code & 0xff]
+    else
+      # Big5, GBK, EUC-KR, GB18030 and the other multibyte encodings' layouts
+      # wait on their character boundaries (#372).
       __needs_char_table__
     end
+  end
+
+  # A BINARY String of `bytes`.
+  def self.__bytes_string__(bytes)
+    string = "".b
+    bytes.each { |byte| string.__splice__(string.bytesize, 0, __byte_string__(byte)) }
+    string
   end
 end

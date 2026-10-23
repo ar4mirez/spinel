@@ -3,9 +3,9 @@
 # The list is CRuby's, generated into `crates/spinel-vm/src/encoding_table.rs`
 # by `scripts/encoding-table.rb`: every name, alias, constant and flag is a
 # measurement. A String carries an index into it. The VM walks characters for
-# three encodings — UTF-8, US-ASCII and BINARY — and refuses a character
-# operation in any other rather than counting wrongly; the rest of this file is
-# names and rules, which every encoding has.
+# the encodings `crate::strings::char_len` knows (docs/engine.md lists them)
+# and refuses a character operation in any other rather than counting wrongly;
+# the rest of this file is names and rules, which every encoding has.
 class Encoding
   # The names CRuby resolves from the process at boot rather than from the
   # table. Spinel's process is UTF-8, as CRuby's is under a UTF-8 locale.
@@ -37,6 +37,11 @@ class Encoding
 
   def dummy?
     @__dummy__
+  end
+
+  # Whether every character is one byte, from CRuby's table.
+  def __single_byte__
+    @__single_byte__
   end
 
   def inspect
