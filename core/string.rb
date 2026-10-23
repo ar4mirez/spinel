@@ -36,6 +36,14 @@ class String
     @__interned__ ||= ObjectSpace::WeakKeyMap.new
   end
 
+  # What `to_sym` and `:"#{...}"` raise for bytes that are not characters of
+  # the String's ASCII-compatible encoding: `sym_check_asciionly`'s error,
+  # which shows the name as `inspect` does. The primitive decides; this only
+  # words it (#333).
+  def __invalid_symbol__
+    raise EncodingError, "invalid symbol in encoding #{encoding} :#{inspect}"
+  end
+
   def __expect_string__(other)
     return if other.is_a?(String)
     raise TypeError, "no implicit conversion of " + other.class.name + " into String"
@@ -533,6 +541,13 @@ class String
   def inspect
     shown = String.__inspect_encoding__
     return __wide_inspect__.__force_encoding__(shown.__index__) if [3, 4, 5, 6].include?(__encoding_index__)
+    # A dummy encoding has no characters to show: every byte is escaped, even
+    # an ASCII one and a UTF-16 byte order mark. Measured.
+    if encoding.dummy?
+      out = +"\""
+      __bytes__.each { |b| out << "\\x" << Integer.__hex__(b, 2) }
+      return (out << "\"").__force_encoding__(shown.__index__)
+    end
     unicode = __encoding_index__ == 1 || __encoding_index__ == 15
     raw = encoding == shown
     out = +"\""
@@ -781,6 +796,10 @@ class String
   def end_with?(*suffixes)
     suffixes.any? do |suffix|
       suffix = String.__coerce__(suffix)
+      # `rb_enc_check` first, as `rb_str_end_with` does: a suffix in an
+      # encoding this one cannot combine with raises, though it could never
+      # match. Measured.
+      __combined_encoding__(suffix)
       at = bytesize - suffix.bytesize
       at >= 0 && __byteslice__(at, suffix.bytesize) == suffix &&
         (suffix.empty? || __char_offsets__.include?(at))

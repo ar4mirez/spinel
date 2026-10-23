@@ -1141,21 +1141,43 @@ impl Compiler {
                 }
             }
 
-            // An interpolated symbol builds the string the same way `"a#{b}"`
-            // does and interns the result at run time. It cannot go through the
-            // iseq's symbol table, which is fixed when the iseq is compiled.
-            ExprKind::Sym(symbol) => match flat_bytes(&symbol.parts) {
-                Some(bytes) => {
-                    let name = String::from_utf8(bytes.into_vec())
-                        .map_err(|_| Unsupported::at("a symbol that is not UTF-8", span))?;
-                    let index = self.symbol(&name);
-                    self.emit(Insn::PushSym(index));
+            ExprKind::Sym(symbol) => {
+                let encoding = self.literal_encoding(symbol.encoding);
+                match flat_bytes(&symbol.parts) {
+                    // A name in UTF-8, or ASCII in any ASCII-compatible
+                    // encoding, is what the iseq's symbol table holds, which is
+                    // every name a UTF-8 file writes.
+                    Some(bytes)
+                        if (bytes.is_ascii() && crate::strings::ascii_compatible(encoding))
+                            || (encoding == crate::strings::UTF_8
+                                && std::str::from_utf8(&bytes).is_ok()) =>
+                    {
+                        let name = String::from_utf8(bytes.into_vec()).expect("checked above");
+                        let index = self.symbol(&name);
+                        self.emit(Insn::PushSym(index));
+                    }
+                    // Any other is a Symbol in the file's encoding (#333): `:é`
+                    // under `# encoding: binary` is a BINARY Symbol. Its name
+                    // goes in as a frozen String and is interned where it runs,
+                    // which is also where bytes the encoding does not have
+                    // raise. ponytail: interned on every evaluation, because
+                    // the iseq's symbol table holds names as `str`; give that
+                    // table an encoding if such a literal is ever hot.
+                    Some(bytes) => {
+                        let index = self.literal(Literal::FrozenStr(bytes, encoding));
+                        self.emit(Insn::PushLit(index));
+                        self.emit(Insn::Intern);
+                    }
+                    // An interpolated symbol builds the string the same way
+                    // `"a#{b}"` does and interns the result at run time. It
+                    // cannot go through the iseq's symbol table, which is fixed
+                    // when the iseq is compiled.
+                    None => {
+                        self.interpolated(&symbol.parts, self.source_encoding())?;
+                        self.emit(Insn::Intern);
+                    }
                 }
-                None => {
-                    self.interpolated(&symbol.parts, self.source_encoding())?;
-                    self.emit(Insn::Intern);
-                }
-            },
+            }
 
             ExprKind::Array(elements) => self.array_literal(elements, span)?,
 
