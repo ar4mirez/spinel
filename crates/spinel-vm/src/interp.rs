@@ -7856,17 +7856,17 @@ fn is_internal_ivar(name: SymbolId) -> bool {
 ///
 /// `:@0` and `:@@x` are `NameError`s in Ruby, not misses — `@0` is not a name
 /// and `@@x` is a class variable — so the check is the grammar rather than a
-/// leading `@`.
-fn is_ivar_name(name: &str) -> bool {
-    let mut chars = name.chars();
-    if chars.next() != Some('@') {
-        return false;
+/// leading `@`. Read on the name's bytes, where every byte past ASCII is an
+/// identifier character, as CRuby's `is_identchar` has it: `"@\xE9"` is an
+/// ivar name in ISO-8859-1 as `"@é"` is in UTF-8.
+fn is_ivar_name(name: &[u8]) -> bool {
+    let ident = |b: &u8| *b == b'_' || b.is_ascii_alphanumeric() || !b.is_ascii();
+    match name {
+        [b'@', first, rest @ ..] => {
+            ident(first) && !first.is_ascii_digit() && rest.iter().all(ident)
+        }
+        _ => false,
     }
-    match chars.next() {
-        Some(first) if first == '_' || first.is_alphabetic() => {}
-        _ => return false,
-    }
-    chars.all(|c| c == '_' || c.is_alphanumeric())
 }
 
 /// An interned name, for the handful of ivars the VM writes itself.
@@ -8815,16 +8815,16 @@ fn native_call<'h>(
             }
             let name = args.remove(0);
             // A String names the method as well as a Symbol does.
-            let interned = name
-                .as_symbol()
-                .or_else(|| intern_string(scope, name).ok().flatten());
-            let Some(name) = interned else {
+            if name.as_symbol().is_none() && string_bytes(scope, name).is_none() {
                 // Anything else is a TypeError naming it by `inspect`, which
                 // is a method call this primitive cannot make.
                 return Err(Error::NoDispatch {
                     op: "send",
                     operands: "a method name that is not a Symbol or a String",
                 });
+            }
+            let Some(name) = name_symbol(scope, name)? else {
+                return invalid_symbol(scope, stack, frames, call.cref, name, proc_class, ids);
             };
             let forwarded = Pending {
                 // `send` resolves a name the call site never mentioned, so the
@@ -11555,6 +11555,17 @@ fn native_call<'h>(
             let Some(name) = call.args.first().and_then(|&v| method_name_of(scope, v)) else {
                 return Err(Error::raise("TypeError", "is not a symbol nor a string"));
             };
+            let Some(symbol) = name_symbol(scope, call.args[0])? else {
+                return invalid_symbol(
+                    scope,
+                    stack,
+                    frames,
+                    call.cref,
+                    call.args[0],
+                    proc_class,
+                    ids,
+                );
+            };
             // `A.class_variable_get(:z)` is a `NameError` about the *name*,
             // which is a different message from the one about a missing
             // variable. Measured.
@@ -11567,17 +11578,6 @@ fn native_call<'h>(
                     call.receiver,
                 ));
             }
-            let Some(symbol) = name_symbol(scope, call.args[0])? else {
-                return invalid_symbol(
-                    scope,
-                    stack,
-                    frames,
-                    call.cref,
-                    call.args[0],
-                    proc_class,
-                    ids,
-                );
-            };
             match op {
                 CvarOp::Names => unreachable!("answered above"),
                 CvarOp::Defined => {
@@ -12038,10 +12038,16 @@ fn native_call<'h>(
                             format!("{} is not a symbol nor a string", inspect(scope, argument)),
                         ));
                     };
+                    let Some(ivar) = name_symbol(scope, argument)? else {
+                        return invalid_symbol(
+                            scope, stack, frames, call.cref, argument, proc_class, ids,
+                        );
+                    };
                     // Ruby checks the spelling before the object: an argument
                     // that is not an ivar name is a `NameError` whether or not
                     // the receiver holds anything.
-                    if !is_ivar_name(&name) {
+                    let (bytes, _) = crate::shared::symbols::bytes(ivar).unwrap_or_default();
+                    if !is_ivar_name(&bytes) {
                         // `e.name` is the argument as it was passed, String
                         // or Symbol. Measured.
                         return Err(name_error(
@@ -12051,11 +12057,6 @@ fn native_call<'h>(
                             call.receiver,
                         ));
                     }
-                    let Some(ivar) = name_symbol(scope, argument)? else {
-                        return invalid_symbol(
-                            scope, stack, frames, call.cref, argument, proc_class, ids,
-                        );
-                    };
                     match op {
                         IvarOp::Get => ivar_get(scope, call.receiver, ivar)?,
                         IvarOp::Defined => {
