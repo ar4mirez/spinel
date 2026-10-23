@@ -839,7 +839,7 @@ fn str_native(
         };
         let class = scope.root(call.receiver);
         let mut list = Vec::with_capacity(crate::encoding_table::ENCODINGS.len());
-        for (index, &(names, compatible, dummy)) in
+        for (index, &(names, compatible, dummy, single_byte)) in
             crate::encoding_table::ENCODINGS.iter().enumerate()
         {
             let mut name_values = Vec::with_capacity(names.len());
@@ -869,6 +869,12 @@ fn str_native(
                 bool_value(compatible),
             )?;
             ivar_set(scope, object, symbol("@__dummy__"), bool_value(dummy))?;
+            ivar_set(
+                scope,
+                object,
+                symbol("@__single_byte__"),
+                bool_value(single_byte),
+            )?;
             let handle = scope.root(object);
             scope.freeze(handle);
             list.push(object);

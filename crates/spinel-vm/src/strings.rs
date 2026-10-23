@@ -36,6 +36,9 @@ pub const UTF_8: u8 = 1;
 pub const US_ASCII: u8 = 2;
 /// `EUC-JP`, which a regexp's `/e` fixes it to.
 pub const EUC_JP: u8 = 10;
+/// CESU-8: UTF-8 that spells a codepoint past U+FFFF as its UTF-16
+/// surrogate pair, three bytes each.
+pub const CESU_8: u8 = 15;
 /// `Windows-31J`, which a regexp's `/s` fixes it to.
 pub const WINDOWS_31J: u8 = 11;
 /// `Shift_JIS`, whose characters are bounded as Windows-31J's are.
@@ -138,6 +141,7 @@ pub fn char_len(encoding: u8, bytes: &[u8], at: usize) -> Option<usize> {
         EUC_JP | WINDOWS_31J | SHIFT_JIS => {
             Some(japanese_char_len(encoding, &bytes[at..]).unwrap_or(1))
         }
+        CESU_8 => Some(cesu8_char_len(&bytes[at..]).unwrap_or(1)),
         _ => crate::transcode::char_len(encoding, bytes, at),
     }
 }
@@ -153,6 +157,36 @@ fn japanese_char_len(encoding: u8, bytes: &[u8]) -> Option<usize> {
         spinel_regex::Encoding::ShiftJis
     };
     engine.char_len(bytes)
+}
+
+/// The length of the CESU-8 character at the start of `bytes`, or `None` when
+/// it is not one: UTF-8's one to three bytes without its four, and a high
+/// surrogate followed by a low one as a single six-byte character. A lone
+/// surrogate is broken, a character per byte. Measured.
+fn cesu8_char_len(bytes: &[u8]) -> Option<usize> {
+    let three = |at: usize| -> Option<u32> {
+        let seq = bytes.get(at..at + 3)?;
+        let (low, high) = match seq[0] {
+            0xe0 => (0xa0, 0xbf),
+            0xe1..=0xef => (0x80, 0xbf),
+            _ => return None,
+        };
+        (seq[1] >= low && seq[1] <= high && seq[2] & 0xc0 == 0x80).then(|| {
+            u32::from(seq[0] & 0x0f) << 12
+                | u32::from(seq[1] & 0x3f) << 6
+                | u32::from(seq[2] & 0x3f)
+        })
+    };
+    match bytes[0] {
+        0x00..=0x7f => Some(1),
+        0xc2..=0xdf => bytes.get(1).filter(|&&b| b & 0xc0 == 0x80).map(|_| 2),
+        0xe0..=0xef => match three(0)? {
+            0xd800..=0xdbff => matches!(three(3), Some(0xdc00..=0xdfff)).then_some(6),
+            0xdc00..=0xdfff => None,
+            _ => Some(3),
+        },
+        _ => None,
+    }
 }
 
 /// The length of one UTF-8 character at the start of `bytes`: the whole
@@ -209,10 +243,15 @@ pub fn valid(encoding: u8, bytes: &[u8]) -> Option<bool> {
         BINARY => Some(true),
         US_ASCII => Some(bytes.is_ascii()),
         UTF_8 => Some(std::str::from_utf8(bytes).is_ok()),
-        EUC_JP | WINDOWS_31J | SHIFT_JIS => {
+        EUC_JP | WINDOWS_31J | SHIFT_JIS | CESU_8 => {
             let mut at = 0;
             while at < bytes.len() {
-                match japanese_char_len(encoding, &bytes[at..]) {
+                let len = if encoding == CESU_8 {
+                    cesu8_char_len(&bytes[at..])
+                } else {
+                    japanese_char_len(encoding, &bytes[at..])
+                };
+                match len {
                     Some(len) => at += len,
                     None => return Some(false),
                 }
@@ -228,7 +267,7 @@ pub fn valid(encoding: u8, bytes: &[u8]) -> Option<bool> {
 pub fn ascii_compatible(encoding: u8) -> bool {
     crate::encoding_table::ENCODINGS
         .get(usize::from(encoding))
-        .is_some_and(|&(_, compatible, _)| compatible)
+        .is_some_and(|&(_, compatible, _, _)| compatible)
 }
 
 /// CRuby's `rb_str_comparable`: whether two strings' bytes may be compared
@@ -292,7 +331,7 @@ pub fn compatible(left: (u8, &[u8]), right: (u8, &[u8])) -> Option<u8> {
 pub fn index_named(name: &str) -> Option<u8> {
     crate::encoding_table::ENCODINGS
         .iter()
-        .position(|&(names, _, _)| {
+        .position(|&(names, _, _, _)| {
             names
                 .iter()
                 .any(|candidate| candidate.eq_ignore_ascii_case(name))
@@ -724,7 +763,7 @@ fn strip_fraction_zeros(text: &str) -> String {
 pub fn name(encoding: u8) -> &'static str {
     crate::encoding_table::ENCODINGS
         .get(usize::from(encoding))
-        .map_or("?", |&(names, _, _)| names[0])
+        .map_or("?", |&(names, _, _, _)| names[0])
 }
 
 fn fixnum(n: usize) -> Value {
@@ -753,6 +792,21 @@ mod tests {
         assert_eq!(char_offsets(BINARY, "é".as_bytes()), Some(vec![0, 1, 2]));
         assert_eq!(valid(US_ASCII, "é".as_bytes()), Some(false));
         assert_eq!(valid(BINARY, b"\xff"), Some(true));
+    }
+
+    #[test]
+    fn cesu8_reads_a_surrogate_pair_as_one_character() {
+        // "a", U+10400 as its pair, U+D7FF, then "b".
+        let text = b"a\xed\xa0\x81\xed\xb0\x80\xed\x9f\xbfb";
+        assert_eq!(char_offsets(CESU_8, text), Some(vec![0, 1, 7, 10, 11]));
+        assert_eq!(valid(CESU_8, text), Some(true));
+        // A lone high surrogate, and UTF-8's four-byte form, are bytes.
+        assert_eq!(
+            char_offsets(CESU_8, b"\xed\xa0\x81\xed\x80\x80"),
+            Some(vec![0, 1, 2, 3, 6])
+        );
+        assert_eq!(valid(CESU_8, b"\xed\xb0\x80"), Some(false));
+        assert_eq!(valid(CESU_8, b"\xf0\x90\x90\x80"), Some(false));
     }
 
     #[test]

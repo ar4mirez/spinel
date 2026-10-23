@@ -287,7 +287,23 @@ pub fn char_len(encoding: u8, bytes: &[u8], at: usize) -> Option<usize> {
 pub fn valid(encoding: u8, bytes: &[u8]) -> Option<bool> {
     match encoding {
         ISO_8859_1 => Some(true),
-        UTF_16BE | UTF_16LE | UTF_32BE | UTF_32LE => {
+        UTF_32BE | UTF_32LE => Some(
+            bytes.len() % 4 == 0
+                && bytes.chunks(4).all(|quad| {
+                    let quad = [quad[0], quad[1], quad[2], quad[3]];
+                    // Onigmo reads the unit as a signed int, so a code with its top
+                    // bit set passes its range check: measured, `valid_encoding?`
+                    // holds for "\xFF\xFF\xFF\xFF" in UTF-32BE although
+                    // transcoding refuses it.
+                    let code = if encoding == UTF_32BE {
+                        i32::from_be_bytes(quad)
+                    } else {
+                        i32::from_le_bytes(quad)
+                    };
+                    code <= 0x10_ffff && !(code < 0x1_0000 && (code >> 8) & 0xf8 == 0xd8)
+                }),
+        ),
+        UTF_16BE | UTF_16LE => {
             let mut at = 0;
             while at < bytes.len() {
                 match decode(encoding, bytes, at) {
@@ -325,6 +341,16 @@ mod tests {
         assert_eq!(there.output, [0x61, 0, 0x3d, 0xd8, 0x00, 0xde]);
         let back = step(UTF_16LE, UTF_8, &there.output, 0);
         assert_eq!(back.output, "a😀".as_bytes());
+    }
+
+    #[test]
+    fn utf32_validity_reads_the_unit_as_signed() {
+        assert_eq!(valid(UTF_32BE, b"\xff\xff\xff\xff"), Some(true));
+        assert_eq!(valid(UTF_32BE, b"\x7f\xff\xff\xff"), Some(false));
+        assert_eq!(valid(UTF_32BE, b"\xff\xff\xd8\x00"), Some(false));
+        assert_eq!(valid(UTF_32LE, b"\x00\xd8\x00\x00"), Some(false));
+        assert_eq!(valid(UTF_32LE, b"\x00\x00\x00\x80"), Some(true));
+        assert_eq!(valid(UTF_32LE, b"\x00\x00\x00"), Some(false));
     }
 
     #[test]
