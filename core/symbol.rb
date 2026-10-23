@@ -36,18 +36,29 @@ class Symbol
   # it becomes one, the fix is a primitive, not a public constant.
   def inspect
     name = to_s
+    # Only a name the inspect encoding can show may be bare, which is the
+    # first thing CRuby's `rb_str_symname_p` asks: a BINARY name past ASCII,
+    # or one in UTF-16 or a dummy encoding, is quoted whatever it spells.
+    return ":" + name.inspect unless name.ascii_only? || name.encoding == String.__inspect_encoding__
+    probe = Symbol.__probe__(name)
     # A name is bare when it could be written as a symbol literal: an
     # identifier (any non-ASCII character counts as a letter), an instance or
     # class variable, a global — including the one-character specials and `$-w`
     # style flags — or an operator. Measured.
-    bare = /\A(?:[A-Za-z_\u0080-\u{10FFFF}][A-Za-z0-9_\u0080-\u{10FFFF}]*[?!=]?|@@?[A-Za-z_\u0080-\u{10FFFF}][A-Za-z0-9_\u0080-\u{10FFFF}]*|\$(?:[A-Za-z_\u0080-\u{10FFFF}][A-Za-z0-9_\u0080-\u{10FFFF}]*|[0-9]+|[~*$?!@\/\\;,.=:<>"&`'+0]|-[A-Za-z0-9_]))\z/.match?(name) ||
+    bare = /\A(?:[A-Za-z_\u0080-\u{10FFFF}][A-Za-z0-9_\u0080-\u{10FFFF}]*[?!=]?|@@?[A-Za-z_\u0080-\u{10FFFF}][A-Za-z0-9_\u0080-\u{10FFFF}]*|\$(?:[A-Za-z_\u0080-\u{10FFFF}][A-Za-z0-9_\u0080-\u{10FFFF}]*|[0-9]+|[~*$?!@\/\\;,.=:<>"&`'+0]|-[A-Za-z0-9_]))\z/.match?(probe) ||
            ["+", "-", "*", "/", "%", "**", "==", "!=", ">", ">=", "<", "<=",
             "<=>", "===", "=~", "!~", "!", "~", "[]", "[]=", "<<", ">>", "&",
-            "|", "^", "+@", "-@", "`"].include?(name)
-    # And only a name the inspect encoding can show is bare: CRuby's
-    # `rb_str_symname_p`.
-    return ":" + name if bare && (name.ascii_only? || name.encoding == String.__inspect_encoding__)
-    ":" + name.inspect
+            "|", "^", "+@", "-@", "`"].include?(probe)
+    bare ? ":" + name : ":" + name.inspect
+  end
+
+  # The shapes `inspect` and `Hash#inspect` test a name against are UTF-8's,
+  # and any character past ASCII is a letter in every encoding
+  # (`is_identchar`), so a name in another encoding is tested with an `a`
+  # standing in for each such character.
+  def self.__probe__(name)
+    return name if name.ascii_only? || name.encoding == Encoding::UTF_8
+    name.each_char.map { |char| char.ascii_only? ? char : "a" }.join
   end
 
   def empty?

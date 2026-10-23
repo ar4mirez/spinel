@@ -848,8 +848,8 @@ class Hash
   # `crates/spinel-vm/tests/eval.txt` is the table this answers to.
   def self.__symbol_key__(key)
     name = key.to_s
-    plain = name.match?(/\A[A-Za-z_\u0080-\u{10FFFF}][A-Za-z0-9_\u0080-\u{10FFFF}]*[?!]?\z/) &&
-            (name.ascii_only? || String.__inspect_encoding__ == name.encoding)
+    plain = (name.ascii_only? || String.__inspect_encoding__ == name.encoding) &&
+            Symbol.__probe__(name).match?(/\A[A-Za-z_\u0080-\u{10FFFF}][A-Za-z0-9_\u0080-\u{10FFFF}]*[?!]?\z/)
     plain ? "#{name}:" : "#{name.inspect}:"
   end
 

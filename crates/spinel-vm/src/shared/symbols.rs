@@ -6,6 +6,13 @@
 //! position-independent (see [`crate::bytecode`]), and linking one means turning
 //! those names into ids.
 //!
+//! A name is bytes in an encoding, as a CRuby Symbol's is a String (#333):
+//! equal bytes in two encodings are two Symbols unless both are ASCII, so
+//! `"é".b.to_sym` and `:é` differ and `"a".b.to_sym` is `:a`. A name that is
+//! ASCII in an ASCII-compatible encoding is kept as US-ASCII, which is what
+//! `rb_str_intern` re-tags it to, so that one key stands for every spelling
+//! CRuby's `rb_str_hash_cmp` would call equal.
+//!
 //! Symbols are never garbage collected in Ruby unless they were created
 //! dynamically, and Spinel does not create them dynamically yet, so the table is
 //! append-only in the strict sense: an id is an index that is never reused.
@@ -15,14 +22,26 @@
 use std::collections::HashMap;
 use std::sync::{OnceLock, RwLock};
 
+use crate::strings::{US_ASCII, UTF_8};
 use crate::value::SymbolId;
 
-/// The name table. `names[id]` is the name; `ids` is the reverse index that
-/// makes interning idempotent.
+/// The name table. `names[id]` is the name and its encoding; `ids` is the
+/// reverse index that makes interning idempotent, keyed by bytes and then by
+/// encoding, so that a lookup borrows the bytes rather than building a key.
 #[derive(Debug, Default)]
 struct Table {
-    names: Vec<Box<str>>,
-    ids: HashMap<Box<str>, SymbolId>,
+    names: Vec<(Box<[u8]>, u8)>,
+    ids: HashMap<Box<[u8]>, Vec<(u8, SymbolId)>>,
+}
+
+impl Table {
+    fn find(&self, bytes: &[u8], encoding: u8) -> Option<SymbolId> {
+        self.ids
+            .get(bytes)?
+            .iter()
+            .find(|&&(enc, _)| enc == encoding)
+            .map(|&(_, id)| id)
+    }
 }
 
 fn table() -> &'static RwLock<Table> {
@@ -50,18 +69,36 @@ macro_rules! lock {
 /// The id for `name`, interning it if this is the first time it is seen.
 ///
 /// Idempotent: the same name always gives the same id for the life of the
-/// process.
+/// process. A Rust `str` is UTF-8, so this is the UTF-8 Symbol of that
+/// name, US-ASCII when it is ASCII — what a literal in a UTF-8 file is.
 #[must_use]
 pub fn intern(name: &str) -> SymbolId {
+    intern_bytes(name.as_bytes(), UTF_8)
+}
+
+/// The id for the name `bytes` in `encoding`, interning it if this is the
+/// first time it is seen. Whether the bytes are characters of the encoding is
+/// the caller's question: `String#to_sym` raises before it gets here.
+#[must_use]
+pub fn intern_bytes(bytes: &[u8], encoding: u8) -> SymbolId {
+    // `rb_str_intern` re-tags an ASCII name as US-ASCII, and an empty name
+    // hashes and compares equal to every other empty one.
+    let encoding =
+        if bytes.is_empty() || (crate::strings::ascii_compatible(encoding) && bytes.is_ascii()) {
+            US_ASCII
+        } else {
+            encoding
+        };
+
     // The read path is the common one — a compiler links the same names over and
     // over — so it does not take the write lock to find out the name is known.
-    if let Some(&id) = lock!(read).ids.get(name) {
+    if let Some(id) = lock!(read).find(bytes, encoding) {
         return id;
     }
 
     let mut table = lock!(write);
     // Another thread may have interned it between the two locks.
-    if let Some(&id) = table.ids.get(name) {
+    if let Some(id) = table.find(bytes, encoding) {
         return id;
     }
 
@@ -69,9 +106,9 @@ pub fn intern(name: &str) -> SymbolId {
     // inside `Value`'s tag. A program that reaches it has a symbol leak, which is
     // a bug worth a panic rather than a silent wrap.
     let id = SymbolId(u32::try_from(table.names.len()).expect("symbol table overflow"));
-    let name: Box<str> = name.into();
-    table.names.push(name.clone());
-    table.ids.insert(name, id);
+    let name: Box<[u8]> = bytes.into();
+    table.names.push((name.clone(), encoding));
+    table.ids.entry(name).or_default().push((encoding, id));
     id
 }
 
@@ -96,11 +133,26 @@ pub const CLASS_ID_IVAR: &str = "@__id__";
 /// The name `id` was interned under, or `None` if it was never interned.
 ///
 /// Returns an owned `String` rather than a borrow: the table is behind a lock,
-/// and nothing on a hot path asks for a name. `Symbol#to_s` in phase 2 allocates
-/// a Ruby `String` here anyway.
+/// and nothing on a hot path asks for a name. This is the name as the VM
+/// spells a method or a variable in a message; a name whose bytes are not
+/// UTF-8 comes back with U+FFFD where they were. What a Ruby program sees is
+/// [`bytes`], which `Symbol#to_s` reads.
 #[must_use]
 pub fn name(id: SymbolId) -> Option<String> {
-    lock!(read).names.get(id.0 as usize).map(|n| n.to_string())
+    lock!(read)
+        .names
+        .get(id.0 as usize)
+        .map(|(bytes, _)| String::from_utf8_lossy(bytes).into_owned())
+}
+
+/// The bytes and encoding `id` was interned under, or `None` if it was never
+/// interned: US-ASCII for an ASCII name in any ASCII-compatible encoding.
+#[must_use]
+pub fn bytes(id: SymbolId) -> Option<(Vec<u8>, u8)> {
+    lock!(read)
+        .names
+        .get(id.0 as usize)
+        .map(|(bytes, encoding)| (bytes.to_vec(), *encoding))
 }
 
 /// How many symbols the process has interned.
@@ -165,6 +217,37 @@ mod tests {
         // Ids are indices into an append-only table, so one handed out earlier
         // stays valid however much the table has grown since.
         assert!(len() > first.0 as usize);
+    }
+
+    #[test]
+    fn equal_bytes_in_two_encodings_are_two_symbols() {
+        let utf8 = intern("caf\u{e9}_two");
+        let binary = intern_bytes("caf\u{e9}_two".as_bytes(), crate::strings::BINARY);
+        assert_ne!(utf8, binary);
+        assert_eq!(
+            bytes(binary),
+            Some(("caf\u{e9}_two".as_bytes().to_vec(), crate::strings::BINARY))
+        );
+        assert_eq!(bytes(utf8).map(|(_, enc)| enc), Some(UTF_8));
+    }
+
+    #[test]
+    fn an_ascii_name_is_one_us_ascii_symbol_in_every_compatible_encoding() {
+        let plain = intern("ascii_everywhere");
+        assert_eq!(
+            intern_bytes(b"ascii_everywhere", crate::strings::BINARY),
+            plain
+        );
+        assert_eq!(bytes(plain).map(|(_, enc)| enc), Some(US_ASCII));
+        // UTF-16LE is not ASCII-compatible, so its "a" is a Symbol of its own.
+        let utf16 = crate::strings::index_named("UTF-16LE").expect("UTF-16LE");
+        assert_ne!(intern_bytes(b"a\0s\0", utf16), intern("a\0s\0"));
+    }
+
+    #[test]
+    fn a_name_that_is_not_utf8_has_a_lossy_rust_name() {
+        let id = intern_bytes(b"\xff_lossy", crate::strings::BINARY);
+        assert_eq!(name(id).as_deref(), Some("\u{fffd}_lossy"));
     }
 
     #[test]
