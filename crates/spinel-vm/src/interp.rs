@@ -7869,16 +7869,6 @@ fn is_ivar_name(name: &str) -> bool {
     chars.all(|c| c == '_' || c.is_alphanumeric())
 }
 
-/// A method or ivar name given as a Symbol or a String, as every reflective
-/// method in Ruby accepts both.
-fn attribute_name(scope: &mut HandleScope<'_>, value: Value) -> Option<String> {
-    if let Some(id) = value.as_symbol() {
-        return crate::shared::symbols::name(id);
-    }
-    let bytes = string_bytes(scope, value)?;
-    String::from_utf8(bytes).ok()
-}
-
 /// An interned name, for the handful of ivars the VM writes itself.
 pub(crate) fn symbol(name: &str) -> SymbolId {
     crate::shared::symbols::intern(name)
@@ -8228,27 +8218,57 @@ fn hash_value(
     Ok(())
 }
 
-/// A method name given as a `Symbol` or a `String`, as Ruby's reflection takes
-/// either.
+/// A method or variable name given as a `Symbol` or a `String`, as Ruby's
+/// reflection takes either, spelled as a message shows it; [`name_symbol`] is
+/// the name itself.
 fn method_name_of(scope: &mut HandleScope<'_>, value: Value) -> Option<String> {
     if let Some(id) = value.as_symbol() {
         return crate::shared::symbols::name(id);
     }
-    string_bytes(scope, value).and_then(|bytes| String::from_utf8(bytes).ok())
+    let bytes = string_bytes(scope, value)?;
+    Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
-/// The Symbol a name argument stands for, once `method_name_of` has read its
-/// spelling: a Symbol is itself, and a String is its name in its own encoding
-/// (#333), so that `send("é".b)` asks for the BINARY `:é` and a name that is
-/// not UTF-8 is not re-interned as its lossy Rust spelling.
-fn name_symbol(scope: &mut HandleScope<'_>, value: Value, name: &str) -> SymbolId {
-    if let Some(id) = value.as_symbol() {
-        return id;
+/// The Symbol a name argument stands for: a Symbol is itself, and a String is
+/// its name in its own encoding (#333), so that `send("é".b)` asks for the
+/// BINARY `:é` and a name that is not UTF-8 is not re-interned as its lossy
+/// Rust spelling. `None` for a String whose bytes are not characters of its
+/// encoding, which [`invalid_symbol`] raises on as `to_sym` does.
+fn name_symbol(scope: &mut HandleScope<'_>, value: Value) -> Result<Option<SymbolId>, Error> {
+    match value.as_symbol() {
+        Some(id) => Ok(Some(id)),
+        None => intern_string(scope, value),
     }
-    match intern_string(scope, value) {
-        Ok(Some(id)) => id,
-        _ => crate::shared::symbols::intern(name),
-    }
+}
+
+/// `String#__invalid_symbol__` on a name argument [`name_symbol`] refused: the
+/// `EncodingError` `to_sym` raises, in its words.
+fn invalid_symbol<'h>(
+    scope: &mut HandleScope<'h>,
+    stack: &mut Stack,
+    frames: &mut Vec<Call>,
+    cref: CrefId,
+    name: Value,
+    proc_class: Handle<'h>,
+    ids: &mut u64,
+) -> Result<Option<Unwind>, Error> {
+    let forwarded = Pending {
+        cache: None,
+        name: crate::shared::symbols::intern("__invalid_symbol__"),
+        receiver: name,
+        args: Vec::new(),
+        keywords: Vec::new(),
+        block: Value::NIL,
+        block_is_literal: false,
+        cref,
+        implicit_self: true,
+        variable_call: false,
+        public_only: false,
+        target: Target::Method,
+        owner: None,
+        defined_as: None,
+    };
+    dispatch(scope, stack, frames, forwarded, proc_class, ids)
 }
 
 /// `Float#to_s`, in Ruby's shape.
@@ -10536,7 +10556,11 @@ fn native_call<'h>(
                     ));
                 }
             }
-            let symbol = name_symbol(scope, name_value, &name);
+            let Some(symbol) = name_symbol(scope, name_value)? else {
+                return invalid_symbol(
+                    scope, stack, frames, call.cref, name_value, proc_class, ids,
+                );
+            };
             // `initialize` and its siblings are private wherever they are
             // defined; otherwise a call from the class's own body follows that
             // body's default — `private; define_method(:b) {}` is private.
@@ -11344,7 +11368,11 @@ fn native_call<'h>(
                 let Some(name) = method_name_of(scope, argument) else {
                     return Err(Error::raise("TypeError", "is not a symbol nor a string"));
                 };
-                let symbol = name_symbol(scope, argument, &name);
+                let Some(symbol) = name_symbol(scope, argument)? else {
+                    return invalid_symbol(
+                        scope, stack, frames, call.cref, argument, proc_class, ids,
+                    );
+                };
                 // Narrowing an *inherited* method defines it here, and Ruby
                 // fires `method_added` for that definition — but not when the
                 // method was already this class's own. The condition is what
@@ -11414,7 +11442,11 @@ fn native_call<'h>(
                 let Some(name) = method_name_of(scope, argument) else {
                     return Err(Error::raise("TypeError", "is not a symbol nor a string"));
                 };
-                let symbol = name_symbol(scope, argument, &name);
+                let Some(symbol) = name_symbol(scope, argument)? else {
+                    return invalid_symbol(
+                        scope, stack, frames, call.cref, argument, proc_class, ids,
+                    );
+                };
                 let Some(method) = scope.classes_mut().lookup(id, symbol) else {
                     let owner = scope
                         .classes()
@@ -11450,10 +11482,14 @@ fn native_call<'h>(
             // `core/module/method_added_spec.rb`. Reversed so they run in
             // argument order.
             for &argument in call.args.iter().rev() {
-                let Some(name) = method_name_of(scope, argument) else {
+                let Some(_) = method_name_of(scope, argument) else {
                     continue;
                 };
-                let symbol = name_symbol(scope, argument, &name);
+                let Some(symbol) = name_symbol(scope, argument)? else {
+                    return invalid_symbol(
+                        scope, stack, frames, call.cref, argument, proc_class, ids,
+                    );
+                };
                 if let Some(unwind) = fire_method_hook(
                     scope, stack, frames, proc_class, ids, singleton, "added", symbol,
                 )? {
@@ -11470,10 +11506,20 @@ fn native_call<'h>(
                     operands: "a receiver that is not a Module",
                 });
             };
-            let Some(name) = call.args.first().and_then(|&v| method_name_of(scope, v)) else {
+            let Some(_) = call.args.first().and_then(|&v| method_name_of(scope, v)) else {
                 return Err(Error::raise("TypeError", "is not a symbol nor a string"));
             };
-            let symbol = name_symbol(scope, call.args[0], &name);
+            let Some(symbol) = name_symbol(scope, call.args[0])? else {
+                return invalid_symbol(
+                    scope,
+                    stack,
+                    frames,
+                    call.cref,
+                    call.args[0],
+                    proc_class,
+                    ids,
+                );
+            };
             let found = lookup_inherited(scope, id, symbol, call.args.get(1));
             let matched = found.is_some_and(|method| method.visibility == visibility);
             stack.push(bool_value(matched));
@@ -11521,7 +11567,17 @@ fn native_call<'h>(
                     call.receiver,
                 ));
             }
-            let symbol = name_symbol(scope, call.args[0], &name);
+            let Some(symbol) = name_symbol(scope, call.args[0])? else {
+                return invalid_symbol(
+                    scope,
+                    stack,
+                    frames,
+                    call.cref,
+                    call.args[0],
+                    proc_class,
+                    ids,
+                );
+            };
             match op {
                 CvarOp::Names => unreachable!("answered above"),
                 CvarOp::Defined => {
@@ -11585,15 +11641,29 @@ fn native_call<'h>(
             }
             let mut done = Vec::new();
             for &argument in given {
-                let Some(name) = method_name_of(scope, argument) else {
+                let Some(_) = method_name_of(scope, argument) else {
                     return Err(Error::raise("TypeError", "is not a symbol nor a string"));
                 };
-                let name = name_symbol(scope, argument, &name);
+                let Some(name) = name_symbol(scope, argument)? else {
+                    return invalid_symbol(
+                        scope, stack, frames, call.cref, argument, proc_class, ids,
+                    );
+                };
                 let (ok, missing) = if aliasing {
-                    let Some(old) = call.args.get(1).and_then(|&v| method_name_of(scope, v)) else {
+                    let Some(_) = call.args.get(1).and_then(|&v| method_name_of(scope, v)) else {
                         return Err(Error::raise("TypeError", "is not a symbol nor a string"));
                     };
-                    let old = name_symbol(scope, call.args[1], &old);
+                    let Some(old) = name_symbol(scope, call.args[1])? else {
+                        return invalid_symbol(
+                            scope,
+                            stack,
+                            frames,
+                            call.cref,
+                            call.args[1],
+                            proc_class,
+                            ids,
+                        );
+                    };
                     module_frozen_check(scope, id)?;
                     let core = frames.last().is_some_and(|frame| is_internal(&frame.iseq));
                     (scope.classes_mut().alias_method(id, name, old, core), old)
@@ -11642,12 +11712,22 @@ fn native_call<'h>(
                     operands: "a receiver that is not a Module",
                 });
             };
-            let Some(name) = call.args.first().and_then(|&v| method_name_of(scope, v)) else {
+            let Some(_) = call.args.first().and_then(|&v| method_name_of(scope, v)) else {
                 return Err(Error::raise("TypeError", "is not a symbol nor a string"));
             };
             // Public or protected, never private — measured on ruby 4.0.6.
             // The second argument is `inherit`, not mspec's `include_all`.
-            let symbol = name_symbol(scope, call.args[0], &name);
+            let Some(symbol) = name_symbol(scope, call.args[0])? else {
+                return invalid_symbol(
+                    scope,
+                    stack,
+                    frames,
+                    call.cref,
+                    call.args[0],
+                    proc_class,
+                    ids,
+                );
+            };
             let found = lookup_inherited(scope, id, symbol, call.args.get(1));
             let matched = found.is_some_and(|method| method.visibility != Visibility::Private);
             stack.push(bool_value(matched));
@@ -11655,7 +11735,7 @@ fn native_call<'h>(
         }
 
         Native::RespondTo => {
-            let Some(name) = call.args.first().and_then(|&v| method_name_of(scope, v)) else {
+            let Some(_) = call.args.first().and_then(|&v| method_name_of(scope, v)) else {
                 return Err(Error::raise("TypeError", "is not a symbol nor a string"));
             };
             // `class_of`, the same resolver `Target::Method` dispatch uses, so
@@ -11666,7 +11746,17 @@ fn native_call<'h>(
             // it really is mspec's `include_all`, selecting on visibility,
             // rather than `method_defined?`'s `inherit`, which selects on the
             // ancestor chain. ruby/spec asks both with the same shape.
-            let symbol = name_symbol(scope, call.args[0], &name);
+            let Some(symbol) = name_symbol(scope, call.args[0])? else {
+                return invalid_symbol(
+                    scope,
+                    stack,
+                    frames,
+                    call.cref,
+                    call.args[0],
+                    proc_class,
+                    ids,
+                );
+            };
             let include_all = call.args.get(1).is_some_and(|&v| v.is_truthy());
             let found = scope
                 .classes_mut()
@@ -11727,7 +11817,11 @@ fn native_call<'h>(
                 let Some(text) = method_name_of(scope, argument) else {
                     return Err(Error::raise("TypeError", "is not a symbol nor a string"));
                 };
-                let symbol = name_symbol(scope, argument, &text);
+                let Some(symbol) = name_symbol(scope, argument)? else {
+                    return invalid_symbol(
+                        scope, stack, frames, call.cref, argument, proc_class, ids,
+                    );
+                };
                 if scope.classes().const_get_here(id, symbol).is_none() {
                     return Err(Error::raise(
                         "NameError",
@@ -11867,18 +11961,27 @@ fn native_call<'h>(
                 .map_or(Visibility::Public, |frame| frame.scope_default.visibility());
             let mut defined: Vec<Value> = Vec::new();
             for &argument in &call.args {
-                let Some(name) = attribute_name(scope, argument) else {
+                if argument.as_symbol().is_none() && string_bytes(scope, argument).is_none() {
                     return Err(Error::raise(
                         "TypeError",
                         format!("{} is not a symbol nor a string", inspect(scope, argument)),
                     ));
+                }
+                // The reader, the ivar and the writer are one name in the
+                // argument's encoding: `attr_accessor "é".b` is BINARY all
+                // three ways (#333).
+                let Some(getter) = name_symbol(scope, argument)? else {
+                    return invalid_symbol(
+                        scope, stack, frames, call.cref, argument, proc_class, ids,
+                    );
                 };
-                let ivar = symbol(&format!("@{name}"));
+                let (bytes, encoding) = crate::shared::symbols::bytes(getter).unwrap_or_default();
+                let ivar =
+                    crate::shared::symbols::intern_bytes(&[b"@", &bytes[..]].concat(), encoding);
                 if reader {
                     let body = scope
                         .definitions_mut()
                         .add(Definition::Native(Native::IvarReader(ivar)));
-                    let getter = symbol(&name);
                     scope
                         .classes_mut()
                         .define_method_visibly(owner, getter, body, cref, visibility);
@@ -11888,7 +11991,10 @@ fn native_call<'h>(
                     let body = scope
                         .definitions_mut()
                         .add(Definition::Native(Native::IvarWriter(ivar)));
-                    let setter = symbol(&format!("{name}="));
+                    let setter = crate::shared::symbols::intern_bytes(
+                        &[&bytes[..], b"="].concat(),
+                        encoding,
+                    );
                     scope
                         .classes_mut()
                         .define_method_visibly(owner, setter, body, cref, visibility);
@@ -11926,7 +12032,7 @@ fn native_call<'h>(
                 }
                 _ => {
                     let argument = call.args.first().copied().unwrap_or(Value::NIL);
-                    let Some(name) = attribute_name(scope, argument) else {
+                    let Some(name) = method_name_of(scope, argument) else {
                         return Err(Error::raise(
                             "TypeError",
                             format!("{} is not a symbol nor a string", inspect(scope, argument)),
@@ -11945,7 +12051,11 @@ fn native_call<'h>(
                             call.receiver,
                         ));
                     }
-                    let ivar = symbol(&name);
+                    let Some(ivar) = name_symbol(scope, argument)? else {
+                        return invalid_symbol(
+                            scope, stack, frames, call.cref, argument, proc_class, ids,
+                        );
+                    };
                     match op {
                         IvarOp::Get => ivar_get(scope, call.receiver, ivar)?,
                         IvarOp::Defined => {
