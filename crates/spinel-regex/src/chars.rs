@@ -6,7 +6,7 @@
 //! also the character, its bytes being Unicode's first 256 codepoints.
 //!
 //! EUC-JP's and Shift_JIS's multibyte characters have no Unicode number this
-//! engine can compute: that mapping is a table, and it is #333's. They do not
+//! engine can compute: that mapping is a table, and it is #378's. They do not
 //! need one. Onigmo itself never maps them: a character's code is its bytes
 //! read as one big-endian number (`あ` is `0xA4A2` in EUC-JP), a range compares
 //! those codes, and the classes and case folds are rules over them. So a
