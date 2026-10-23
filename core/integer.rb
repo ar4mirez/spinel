@@ -621,6 +621,15 @@ class Integer
     code
   end
 
+  # The codepoint of one valid CESU-8 character's bytes: a six-byte one is a
+  # UTF-16 surrogate pair, each half spelled as UTF-8.
+  def self.__cesu8_decode__(bytes)
+    return __utf8_decode__(bytes) if bytes.size < 6
+    high = __utf8_decode__(bytes[0, 3])
+    low = __utf8_decode__(bytes[3, 3])
+    0x10000 + ((high - 0xd800) << 10) + (low - 0xdc00)
+  end
+
   HEX_DIGITS = "0123456789ABCDEF"
 
   # `n` in uppercase hex, zero-padded to `width` digits.

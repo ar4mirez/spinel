@@ -469,6 +469,7 @@ class String
     char = __byteslice__(0, offsets[1])
     raise ArgumentError, "invalid byte sequence in #{encoding.name}" unless char.valid_encoding?
     return Integer.__utf8_decode__(char.__bytes__) if __encoding_index__ == 1
+    return Integer.__cesu8_decode__(char.__bytes__) if __encoding_index__ == 15
     char.getbyte(0)
   end
 
@@ -532,7 +533,7 @@ class String
   def inspect
     shown = String.__inspect_encoding__
     return __wide_inspect__.__force_encoding__(shown.__index__) if [3, 4, 5, 6].include?(__encoding_index__)
-    unicode = __encoding_index__ == 1
+    unicode = __encoding_index__ == 1 || __encoding_index__ == 15
     raw = encoding == shown
     out = +"\""
     offsets = __char_offsets__
