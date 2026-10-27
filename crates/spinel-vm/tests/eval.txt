@@ -1510,6 +1510,10 @@ class Integer; alias_method :op_old_eq, :==; def ==(o); :eq; end; end; r = [1 ==
 # Each row swaps `$stderr` for an object that keeps what it is written and
 # strips the position, which is the oracle's own file here and `(eval)` there.
 e = Object.new; def e.write(*a); (@a ||= []).concat(a); 0; end; def e.got; (@a || []).map { |s| s.sub(/\A.*?: warning: /, "") }; end; o = $stderr; $stderr = e; begin; [1].all?(1) { }; ensure; $stderr = o; end; e.got  #=> ["given block not used\n"]
+# A `Warning.warn` with an optional `category:` gets the category from
+# `Kernel#warn`; one taking only the message gets one argument (#374).
+d = Warning[:deprecated]; Warning[:deprecated] = true; $wg = []; def Warning.warn(m, category: nil) = $wg << category; begin; warn("y", category: :deprecated); ensure; Warning.singleton_class.send(:remove_method, :warn); Warning[:deprecated] = d; end; $wg  #=> [:deprecated]
+d = Warning[:deprecated]; Warning[:deprecated] = true; $wg = []; def Warning.warn(m) = $wg << m.class; begin; warn("y", category: :deprecated); ensure; Warning.singleton_class.send(:remove_method, :warn); Warning[:deprecated] = d; end; $wg  #=> [String]
 e = Object.new; def e.write(*a); (@a ||= []).concat(a); 0; end; def e.got; (@a || []).map { |s| s.sub(/\A.*?: warning: /, "") }; end; o = $stderr; $stderr = e; begin; {}.fetch(1, 2) { 3 }; ensure; $stderr = o; end; e.got  #=> ["block supersedes default value argument\n"]
 e = Object.new; def e.write(*a); (@a ||= []).concat(a); 0; end; def e.got; (@a || []).map { |s| s.sub(/\A.*?: warning: /, "") }; end; o = $stderr; $stderr = e; begin; Object.const_set(:WarnQ1, 1); Object.const_set(:WarnQ1, 2); ensure; $stderr = o; end; e.got.first  #=> "already initialized constant WarnQ1\n"
 e = Object.new; def e.write(*a); (@a ||= []).concat(a); 0; end; def e.got; (@a || []).map { |s| s.sub(/\A.*?: warning: /, "") }; end; o = $stderr; $stderr = e; begin; eval("{a: 1, a: 2}"); ensure; $stderr = o; end; e.got  #=> ["key :a is duplicated and overwritten on line 1\n"]

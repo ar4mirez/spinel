@@ -1286,7 +1286,7 @@ fn reflect_native(
             };
             match found.and_then(|method| scope.definitions().get(method.body).cloned()) {
                 Some(Definition::Iseq(iseq)) => {
-                    Value::fixnum(iseq.params.positional_arity()).expect("an arity fits a fixnum")
+                    Value::fixnum(iseq.params.method_arity()).expect("an arity fits a fixnum")
                 }
                 // A primitive or a `define_method` body: not a fixed count the
                 // caller can rely on.
