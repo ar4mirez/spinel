@@ -15751,7 +15751,7 @@ fn regexp_build(
     }
     let (encoding, options) = regexp_encoding(source, encoding, options, fixed);
     // The engine reads each encoding it knows in its own way: a binary or
-    // Latin-1 pattern a byte to a character, EUC-JP and Shift_JIS a multibyte
+    // single-byte pattern a byte to a character, EUC-JP and Shift_JIS a multibyte
     // character to one (#339). An ASCII source in any other encoding is the
     // same characters in UTF-8, and so is a US-ASCII one, which is parsed as
     // UTF-8 though it matches as BINARY.
@@ -15782,8 +15782,8 @@ fn regexp_build(
         ),
         None => {
             return Err(Error::Unknowable {
-                what: "a regexp source with characters past ASCII in an encoding other than UTF-8, BINARY, ISO-8859-1, EUC-JP and Shift_JIS",
-                needs: "a regex engine that reads characters in the remaining encodings (#372)",
+                what: "a regexp source with characters past ASCII in a multibyte encoding other than UTF-8, EUC-JP and Shift_JIS",
+                needs: "a regex engine that reads characters in the remaining multibyte encodings (#388)",
             });
         }
     };
@@ -15945,7 +15945,7 @@ fn regexp_match_encoding(
         None if !ascii => {
             return Err(Error::Unknowable {
                 what: "matching a regexp against a string with characters past ASCII in an encoding whose characters this VM cannot bound",
-                needs: "character boundaries for the remaining encodings (#372)",
+                needs: "character boundaries for the remaining multibyte encodings (#388)",
             });
         }
         _ => {}
@@ -15986,24 +15986,25 @@ fn regexp_match_encoding(
         // ASCII text reads the same in every ASCII-compatible encoding.
         None if ascii => Ok(spinel_regex::Encoding::Utf8),
         None => Err(Error::Unknowable {
-            what: "matching a regexp against a string with characters past ASCII in an encoding other than UTF-8, US-ASCII, BINARY, ISO-8859-1, EUC-JP and Shift_JIS",
-            needs: "a regex engine that reads characters in the remaining encodings (#372)",
+            what: "matching a regexp against a string with characters past ASCII in a multibyte encoding other than UTF-8, EUC-JP and Shift_JIS",
+            needs: "a regex engine that reads characters in the remaining multibyte encodings (#388)",
         }),
     }
 }
 
 /// How the engine reads characters in `encoding`, for the encodings it can:
-/// US-ASCII as BINARY, since an ASCII subject is the same in both, and
-/// Windows-31J as Shift_JIS, whose characters it bounds and classes alike.
+/// US-ASCII as BINARY, since an ASCII subject is the same in both,
+/// Windows-31J as Shift_JIS, whose characters it bounds and classes alike,
+/// and every other single-byte encoding by its own table, or as BINARY when
+/// Onigmo classes nothing past ASCII in it (#372).
 fn regexp_engine(encoding: u8) -> Option<spinel_regex::Encoding> {
     use crate::strings::{BINARY, EUC_JP, SHIFT_JIS, US_ASCII, UTF_8, WINDOWS_31J};
     match encoding {
         BINARY | US_ASCII => Some(spinel_regex::Encoding::Binary),
         UTF_8 => Some(spinel_regex::Encoding::Utf8),
-        crate::transcode::ISO_8859_1 => Some(spinel_regex::Encoding::Latin1),
         EUC_JP => Some(spinel_regex::Encoding::EucJp),
         WINDOWS_31J | SHIFT_JIS => Some(spinel_regex::Encoding::ShiftJis),
-        _ => None,
+        _ => spinel_regex::Encoding::single_byte(crate::strings::name(encoding)),
     }
 }
 
@@ -16120,7 +16121,7 @@ fn regexp_match_from(
             // the end as the last; a byte each, when every character is one.
             let single = matches!(
                 engine,
-                spinel_regex::Encoding::Binary | spinel_regex::Encoding::Latin1
+                spinel_regex::Encoding::Binary | spinel_regex::Encoding::Single(_)
             ) || bytes.is_ascii();
             let mut starts = Vec::new();
             if !single {

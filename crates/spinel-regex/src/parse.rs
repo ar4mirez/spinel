@@ -1183,7 +1183,7 @@ impl Parser {
                     let n = u32::from_str_radix(&hex, 16)
                         .map_err(|_| Error::Syntax("invalid hex escape".into()))?;
                     // A byte above ASCII is not a codepoint. In a binary or
-                    // Latin-1 pattern it is the byte, which the matcher
+                    // single-byte pattern it is the byte, which the matcher
                     // carries as the `char` with the same number; in EUC-JP
                     // and Shift_JIS it leads a character the escapes after it
                     // finish; in UTF-8 it would too, which waits for the rest
@@ -1195,7 +1195,7 @@ impl Parser {
                             return Err(Error::Unsupported("a non-ASCII \\x byte escape"));
                         }
                         Encoding::EucJp | Encoding::ShiftJis => self.multibyte_escape(n as u8)?,
-                        Encoding::Binary | Encoding::Latin1 => char::from(n as u8),
+                        Encoding::Binary | Encoding::Single(_) => char::from(n as u8),
                     }
                 }
             }

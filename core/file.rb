@@ -134,16 +134,49 @@ class File < IO
     if path.start_with?("~")
       slash = path.index("/")
       user = slash.nil? ? path[1..] : path[1...slash]
-      home = user.empty? ? Dir.home : Dir.home(user)
+      home = __fs_string__(user.empty? ? Dir.home : Dir.home(user))
       raise ArgumentError, "non-absolute home" unless home.start_with?("/")
+      encoding = __fs_enc_check__(home, path)
       path = home + (slash.nil? ? "" : path[slash..])
     end
-    __normalize__(path.start_with?("/") ? path : join(dir.nil? ? Dir.pwd : expand_path(dir), path))
+    __expand__(path, encoding, dir) { |base| expand_path(base) }
   end
 
   def self.absolute_path(path, dir = nil)
-    path = __path__(path)
-    __normalize__(path.start_with?("/") ? path : join(dir.nil? ? Dir.pwd : absolute_path(dir), path))
+    __expand__(__path__(path), nil, dir) { |base| absolute_path(base) }
+  end
+
+  # `path` made absolute against `dir`, expanded by the block, or the working
+  # directory, in the encoding CRuby's `rb_file_expand_path_internal` gives
+  # it: an absolute path's own, else what `fs_enc_check` makes of it and the
+  # directory, which is in the filesystem encoding when it is the working one.
+  def self.__expand__(path, encoding, dir)
+    if path.start_with?("/")
+      expanded = path
+    elsif dir.nil?
+      cwd = __fs_string__(Dir.pwd)
+      encoding = __fs_enc_check__(path, cwd)
+      expanded = join(cwd, path)
+    else
+      base = yield(dir)
+      encoding = __fs_enc_check__(base, path)
+      expanded = join(base, path)
+    end
+    __normalize__(expanded).force_encoding(encoding || path.encoding)
+  end
+
+  # A path the system handed back, in the filesystem encoding as CRuby tags
+  # one.
+  def self.__fs_string__(path)
+    path.dup.force_encoding(Encoding.find("filesystem"))
+  end
+
+  # CRuby's `fs_enc_check`: the encoding two paths combine in, except that
+  # where that is US-ASCII it is the first's own, or failing that the second's.
+  def self.__fs_enc_check__(first, second)
+    encoding = first.__combined_encoding__(second)
+    return encoding unless encoding == Encoding::US_ASCII
+    first.encoding == Encoding::US_ASCII ? second.encoding : first.encoding
   end
 
   # `.` and `..` resolved lexically, separators collapsed.

@@ -9,9 +9,9 @@
 //! and `s << "x"` must not change `s`'s identity.
 //!
 //! The VM knows an encoding only by index, and character boundaries for the
-//! three launch encodings, the arithmetic ones `transcode` reads, and the two
-//! Japanese multibyte families, whose lead and trail bytes are ranges rather
-//! than a table. Every other encoding is a name `core/` can answer about, and
+//! three launch encodings, the arithmetic ones `transcode` reads, every
+//! single-byte encoding, and the two Japanese multibyte families, whose lead
+//! and trail bytes are ranges rather than a table. Every other encoding is a name `core/` can answer about, and
 //! a character operation on it is refused by the caller rather than guessed at.
 
 use crate::heap::{Handle, HandleScope, Payload};
@@ -142,8 +142,20 @@ pub fn char_len(encoding: u8, bytes: &[u8], at: usize) -> Option<usize> {
             Some(japanese_char_len(encoding, &bytes[at..]).unwrap_or(1))
         }
         CESU_8 => Some(cesu8_char_len(&bytes[at..]).unwrap_or(1)),
+        _ if bytewise(encoding) => Some(1),
         _ => crate::transcode::char_len(encoding, bytes, at),
     }
+}
+
+/// Whether every byte is a character of `encoding` on its own: an
+/// ASCII-compatible single-byte encoding that is not a dummy — ISO-8859-1 to
+/// -16, KOI8, the Windows and IBM code pages, macRoman and the rest. Measured
+/// on ruby 4.0.9: in each, every byte is valid alone (#372).
+fn bytewise(encoding: u8) -> bool {
+    crate::encoding_table::ENCODINGS
+        .get(usize::from(encoding))
+        .is_some_and(|&(_, compatible, dummy, single)| compatible && !dummy && single)
+        && encoding != US_ASCII
 }
 
 /// The length of the character at the start of `bytes` in EUC-JP or in the
@@ -232,7 +244,10 @@ pub fn char_offsets(encoding: u8, bytes: &[u8]) -> Option<Vec<usize>> {
 /// table of every character's position.
 #[must_use]
 pub fn single_byte(encoding: u8, bytes: &[u8]) -> bool {
-    encoding == BINARY || encoding == US_ASCII || (ascii_compatible(encoding) && bytes.is_ascii())
+    encoding == BINARY
+        || encoding == US_ASCII
+        || bytewise(encoding)
+        || (ascii_compatible(encoding) && bytes.is_ascii())
 }
 
 /// Whether every byte sequence is a character of `encoding`; `None` when this
@@ -258,6 +273,7 @@ pub fn valid(encoding: u8, bytes: &[u8]) -> Option<bool> {
             }
             Some(true)
         }
+        _ if bytewise(encoding) => Some(true),
         _ => crate::transcode::valid(encoding, bytes),
     }
 }
