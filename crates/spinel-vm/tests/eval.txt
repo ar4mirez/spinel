@@ -293,6 +293,10 @@ eval("# frozen_string_literal: true\ns = 'y'; begin; class << s; end; rescue => 
 s = "y".freeze; begin; s.singleton_class; rescue => e; [e.class, e.message]; end  #=> [TypeError, "can't define singleton"]
 s = "z".dup.freeze; begin; def s.m; end; rescue => e; e.class; end  #=> FrozenError
 s = "z".dup.freeze; class << s; self; end.singleton_class?  #=> true
+eval("# frozen_string_literal: true\ns = 'abc'; s.instance_eval { size }")  #=> 3
+eval("# frozen_string_literal: true\ns = 'abc'; s.instance_exec(2) { |n| size * n }")  #=> 6
+eval("# frozen_string_literal: true\ns = 'abc'; s.instance_eval('size')")  #=> 3
+eval("# frozen_string_literal: true\ns = 'abc'; begin; s.instance_eval { def q; end }; rescue => e; [e.class, e.message]; end")  #=> [TypeError, "can't define singleton"]
 
 # -- `defined?`: the answer is a table, not a rule ---------------------------
 # Only the cases where this heap is the authority. A `defined?` that *misses* is

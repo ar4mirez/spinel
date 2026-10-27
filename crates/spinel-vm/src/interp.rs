@@ -7268,19 +7268,25 @@ fn singleton_of(scope: &mut HandleScope<'_>, receiver: Value) -> Result<ClassId,
 /// `"z".dup.freeze`, is an ordinary frozen object and takes one. Measured on
 /// ruby 4.0.9.
 fn fstring_check(scope: &mut HandleScope<'_>, value: Value) -> Result<(), Error> {
-    if value.is_immediate() || !is_string(scope, value) {
-        return Ok(());
-    }
-    let handle = scope.root(value);
-    if !scope.is_frozen(handle) {
-        return Ok(());
-    }
-    let bytes = crate::strings::bytes(scope, handle);
-    let encoding = crate::strings::encoding(scope, handle);
-    if scope.regexps().fstring(&bytes, encoding) == Some(value) {
+    if is_fstring(scope, value) {
         return Err(Error::raise("TypeError", "can't define singleton"));
     }
     Ok(())
+}
+
+/// Whether `value` is a frozen literal: the fstring interned for its bytes and
+/// encoding.
+fn is_fstring(scope: &mut HandleScope<'_>, value: Value) -> bool {
+    if value.is_immediate() || !is_string(scope, value) {
+        return false;
+    }
+    let handle = scope.root(value);
+    if !scope.is_frozen(handle) {
+        return false;
+    }
+    let bytes = crate::strings::bytes(scope, handle);
+    let encoding = crate::strings::encoding(scope, handle);
+    scope.regexps().fstring(&bytes, encoding) == Some(value)
 }
 
 /// The class table entry a value *is*, as opposed to the one it is an instance
@@ -10923,7 +10929,7 @@ fn native_call<'h>(
                 ));
             }
             // A Symbol or a number — a bignum and a heap Float included — cannot
-            // have a singleton class.
+            // have a singleton class, nor can a frozen literal (#376).
             let numeric = class_of(scope, call.receiver).is_some_and(|class| {
                 matches!(
                     scope.classes().repr(class),
@@ -10932,6 +10938,7 @@ fn native_call<'h>(
             });
             let refuses_def = !module
                 && (numeric
+                    || is_fstring(scope, call.receiver)
                     || (call.receiver.is_immediate()
                         && !matches!(call.receiver, Value::NIL | Value::TRUE | Value::FALSE)));
             let definee = if module {
