@@ -219,6 +219,16 @@ fn a_chilled_string_warns_before_an_instruction_changes_it() {
 }
 
 #[test]
+fn a_warning_warn_with_an_optional_category_receives_it() {
+    let output = run(&["-W:deprecated", "warning_category.rb"], "");
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "W :deprecated\nW :deprecated\n1 String\n1 String\n"
+    );
+}
+
+#[test]
 fn a_missing_script_is_a_load_error() {
     let output = run(&["missing.rb"], "");
     assert_eq!(output.status.code(), Some(1));

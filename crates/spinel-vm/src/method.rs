@@ -937,9 +937,10 @@ pub enum ReflectOp {
     /// line]` for the method a lookup finds, or nil. What `Kernel#method` and
     /// `Module#instance_method` are made from.
     MethodLookup,
-    /// `(object, name)` → the arity of the method a send would find, -1 for
-    /// one with no fixed count, or nil when there is none. What `Kernel#warn`
-    /// asks of `Warning.warn` before passing it a keyword.
+    /// `(object, name)` → the `Method#arity` of the method a send would find,
+    /// -1 for a primitive, or nil when there is none. What `Kernel#warn` asks
+    /// of `Warning.warn` before passing it a keyword, as CRuby's
+    /// `rb_warning_warn_arity` does: `(m, category: nil)` is -2, not 1 (#374).
     MethodArity,
     /// `(mod, name, mark)` → with `mark`, deprecates the constant; without,
     /// the module holding the deprecated constant that `mod.const_get(name)`
