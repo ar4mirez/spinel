@@ -93,9 +93,11 @@ class Method
   # Every core method here is Ruby, and so has a location; CRuby's has one only
   # when CRuby writes it in Ruby too, in an `<internal:…>` file of its own, and
   # is nil for one it writes in C (#380). Which are which is `RUBY_WRITTEN`,
-  # measured. An alias is asked about under the name it aliases, in every
-  # module the owner inherits from, since `alias foo tap` in a class of the
-  # program's owns the alias there and the body in `Kernel`.
+  # measured. An alias is asked about under the name it aliases, in the first
+  # module from the owner up that defines that name itself, since `alias foo
+  # tap` in a class of the program's owns the alias there and the body in
+  # `Kernel`, while `Float#finite?` is Float's own, in C, whatever `Numeric`
+  # writes.
   def self.__source_location__(found, name)
     file = found[3]
     return nil if file.nil?
@@ -103,6 +105,7 @@ class Method
     return location unless file.start_with?("<internal:")
     original = found[7] || name
     found[0].ancestors.each do |mod|
+      next unless mod.method_defined?(original, false) || mod.private_method_defined?(original, false)
       if __reflect_is_singleton__(mod)
         attached = mod.attached_object
         owner = Module === attached ? attached.name : nil
@@ -111,7 +114,7 @@ class Method
         owner = mod.name
         separator = "#"
       end
-      return location if !owner.nil? && RUBY_WRITTEN["#{owner}#{separator}#{original}"]
+      return !owner.nil? && RUBY_WRITTEN["#{owner}#{separator}#{original}"] ? location : nil
     end
     nil
   end
