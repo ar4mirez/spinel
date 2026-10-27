@@ -66,7 +66,8 @@ enum Inst {
 /// A compiled pattern.
 pub struct Program {
     insts: Vec<Inst>,
-    classes: Vec<Class>,
+    /// Each class, with the one character it folds as under `/i`, if any.
+    classes: Vec<(Class, Option<char>)>,
     pub groups: usize,
     marks: usize,
 }
@@ -107,7 +108,8 @@ pub fn compile(ast: &Ast, groups: usize) -> Result<Program, Error> {
 
 struct Compiler {
     insts: Vec<Inst>,
-    classes: Vec<Class>,
+    /// Each class, with the one character it folds as under `/i`, if any.
+    classes: Vec<(Class, Option<char>)>,
     marks: usize,
 }
 
@@ -143,7 +145,7 @@ impl Compiler {
             Ast::Class(class) => {
                 let index = u32::try_from(self.classes.len())
                     .map_err(|_| Error::Syntax("too many character classes".into()))?;
-                self.classes.push(class.clone());
+                self.classes.push((class.clone(), folds_as_literal(class)));
                 self.emit(Inst::Class(index));
             }
             Ast::Any { nl } => {
@@ -432,9 +434,9 @@ impl Program {
                         _ => false,
                     },
                     Inst::Class(index) => {
-                        let class = &self.classes[*index as usize];
+                        let (class, only) = &self.classes[*index as usize];
                         match haystack.next_char(sp) {
-                            Some((c, width)) if class_holds(class, c, haystack.enc) => {
+                            Some((c, width)) if class_holds(class, *only, c, haystack.enc) => {
                                 sp += width;
                                 true
                             }
@@ -863,16 +865,27 @@ fn anchor_holds(anchor: Anchor, haystack: Subject<'_>, sp: usize, start: usize) 
     }
 }
 
-/// Whether a pattern's class matches `c`. Onigmo compiles a class whose set
+/// Whether a pattern's class matches `c`, given what `folds_as_literal`
+/// answered for it when the pattern was compiled.
+fn class_holds(class: &Class, only: Option<char>, c: char, enc: Encoding) -> bool {
+    match only {
+        Some(only) => chars_equal(c, only, true, enc, Fold::Literal),
+        None => class_matches(class, c, enc),
+    }
+}
+
+/// The character an `/i` class folds as. Onigmo compiles a class whose set
 /// is one character, `[\x80]`, `[i-i]`, `[[\x80]]`, `[\x80\x80]` or
-/// `[\x80-\x81&&\x80]`, as that character, so under `/i` it folds as a
-/// literal does; a nested class is merged into its parent first, so
-/// `[[\x80]\x81]` folds as a class.
-fn class_holds(class: &Class, c: char, enc: Encoding) -> bool {
-    let set = if class.icase { char_set(class) } else { None };
-    match set.as_deref() {
-        Some(&[(only, high)]) if only == high => chars_equal(c, only, true, enc, Fold::Literal),
-        _ => class_matches(class, c, enc),
+/// `[\x80-\x81&&\x80]`, as that character, so it folds as a literal does;
+/// a nested class is merged into its parent first, so `[[\x80]\x81]` folds
+/// as a class.
+fn folds_as_literal(class: &Class) -> Option<char> {
+    if !class.icase {
+        return None;
+    }
+    match char_set(class).as_deref() {
+        Some(&[(only, high)]) if only == high => Some(only),
+        _ => None,
     }
 }
 
@@ -1195,7 +1208,9 @@ mod posix_oracle {
 /// is checked, over every character each encoding has.
 #[cfg(test)]
 mod encoding_oracle {
-    use super::{Fold, chars_equal, class_holds, class_matches, is_word, item_matches};
+    use super::{
+        Fold, chars_equal, class_holds, class_matches, folds_as_literal, is_word, item_matches,
+    };
     use crate::Encoding;
     use crate::parse::{Class, ClassItem, Perl};
     use std::collections::{BTreeSet, HashMap};
@@ -1338,10 +1353,10 @@ mod encoding_oracle {
                 }
                 let (cx, cy) = (char::from(x), char::from(y));
                 let (held, other) = if label == "fold" {
-                    (
-                        chars_equal(cy, cx, true, enc, Fold::Literal),
-                        class_holds(&class(vec![ClassItem::Range(cx, cx)]), cy, enc),
-                    )
+                    (chars_equal(cy, cx, true, enc, Fold::Literal), {
+                        let one = class(vec![ClassItem::Range(cx, cx)]);
+                        class_holds(&one, folds_as_literal(&one), cy, enc)
+                    })
                 } else {
                     (
                         class_matches(&class(vec![ClassItem::Char(cx)]), cy, enc),
