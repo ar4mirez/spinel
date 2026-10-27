@@ -69,7 +69,8 @@ class Method
   end
 
   def self.__inspect__(kind, receiver_text, name, found)
-    where = found[3].nil? ? "" : " #{found[3]}:#{found[4]}"
+    location = Method.__source_location__(found, name)
+    where = location.nil? ? "" : " #{location[0]}:#{location[1]}"
     original = found[7]
     shown = original.nil? || original == name ? name.to_s : "#{name}(#{original})"
     "#<#{kind}: #{receiver_text}#{shown}(#{Method.__signature__(found[5], found[1])})#{where}>"
