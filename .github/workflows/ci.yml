@@ -261,6 +261,21 @@ jobs:
           ruby-version: '4.0'
       - run: ruby scripts/coerce-oracle.rb --check
 
+  # Every core method in Spinel is Ruby, but CRuby writes most of its own in C,
+  # and a C method's `source_location` is nil: `Array#<<` has none where
+  # `Kernel#tap` answers `<internal:kernel>`. `core/ruby_written.rb` is the list
+  # of the ones CRuby writes in Ruby, measured; this job checks it still is.
+  source-location:
+    name: source location oracle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ruby/setup-ruby@v1
+        with:
+          # The language version this build implements.
+          ruby-version: '4.0'
+      - run: ruby scripts/source-location-oracle.rb --check
+
   # Ruby's regex dialect is Onigmo's, and the parts of it that matter are the
   # parts nobody would guess: `\w` is ASCII while `[[:alpha:]]` is not, `^` is a
   # line anchor that still does not match after a trailing newline, and an empty
