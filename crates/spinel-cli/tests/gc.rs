@@ -31,3 +31,25 @@ fn weak_references_clear_and_finalizers_run_after_collection() {
         "before: 4 size=4\nafter: 1 size=1\ntrue\nObject\nObject\ntrue\nat_exit\nfinalizer at exit\n"
     );
 }
+
+/// A String `String#-@` interned is collected once nothing refers to it
+/// (#384): the fstring table holds it weakly, and holds one a frozen literal
+/// answered strongly, as CRuby's iseq does.
+#[test]
+fn deduplicated_strings_nothing_references_are_collected() {
+    let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/gc/dedup.rb");
+    let output = Command::new(SPINEL)
+        .arg("run")
+        .arg(&script)
+        .output()
+        .expect("spinel runs");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "true\nbefore: 3\nafter: 2\ntrue\n[\"kept\", \"lit\"]\n"
+    );
+}

@@ -10703,6 +10703,12 @@ fn native_call<'h>(
             Ok(Some(Unwind::Exception(scope.get(exception))))
         }
 
+        Native::StringFstring => {
+            let found = fstring_for(scope, call.receiver)?;
+            stack.push(found);
+            Ok(None)
+        }
+
         Native::StringIntern => match intern_string(scope, call.receiver)? {
             Some(symbol) => {
                 stack.push(Value::symbol(symbol));
@@ -12998,6 +13004,34 @@ fn intern_string(scope: &mut HandleScope<'_>, value: Value) -> Result<Option<Sym
     Ok(Some(crate::shared::symbols::intern_bytes(&bytes, encoding)))
 }
 
+/// What `String#__fstring__` answers: for a `value` of class `String` itself —
+/// not a subclass's instance, nor one with a singleton class — the fstring
+/// interned for its bytes and encoding, or `value` interned as it when it is
+/// frozen. nil when there is none it can answer.
+fn fstring_for(scope: &mut HandleScope<'_>, value: Value) -> Result<Value, Error> {
+    let (Some(encoding), Some(bytes)) = (string_encoding(scope, value), string_bytes(scope, value))
+    else {
+        return Err(Error::NoDispatch {
+            op: "String#-@",
+            operands: "a receiver that is not a String",
+        });
+    };
+    let handle = scope.root(value);
+    let string = class_handle(scope, Builtin::String);
+    if scope.class(handle) != Some(scope.get(string)) {
+        return Ok(Value::NIL);
+    }
+    if let Some(found) = scope.regexps().fstring(&bytes, encoding) {
+        return Ok(found);
+    }
+    if !scope.is_frozen(handle) {
+        return Ok(Value::NIL);
+    }
+    Ok(scope
+        .regexps_mut()
+        .intern_weak_fstring(&bytes, encoding, value))
+}
+
 /// A `String`'s bytes, or `None` when the value is not one.
 fn string_bytes(scope: &mut HandleScope<'_>, value: Value) -> Option<Vec<u8>> {
     if value.is_immediate() {
@@ -14239,6 +14273,7 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         ),
         (Builtin::Kernel, &["__sleep__"], Native::Sleep),
         (Builtin::String, &["to_sym", "intern"], Native::StringIntern),
+        (Builtin::String, &["__fstring__"], Native::StringFstring),
         // #19's byte and encoding primitives; `core/string.rb` and
         // `core/encoding.rb` are the methods.
         (
@@ -14504,7 +14539,7 @@ fn materialise<'h>(
             // A frozen literal is interned by content, CRuby's fstring: every
             // evaluation of every site with these bytes answers one object.
             if matches!(literal, Literal::FrozenStr(..))
-                && let Some(interned) = scope.regexps().fstring(bytes, encoding)
+                && let Some(interned) = scope.regexps_mut().literal_fstring(bytes, encoding)
             {
                 return Ok(interned);
             }

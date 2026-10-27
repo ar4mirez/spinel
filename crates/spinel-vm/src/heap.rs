@@ -1052,6 +1052,8 @@ impl Heap {
                 table.retain_live();
             }
         }
+        // The fstrings `String#-@` made are held the same way (#384).
+        self.regexps.retain_live_fstrings(survived);
     }
 
     /// Move the finalizers of every object that did not survive onto the

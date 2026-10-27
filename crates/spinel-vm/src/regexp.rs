@@ -74,7 +74,12 @@ pub struct Regexps {
     /// literal under `# frozen_string_literal: true` answer, one object per
     /// content — CRuby's fstring table. Here because this is the heap's traced
     /// literal cache, and a frozen literal is a literal.
-    strings: HashMap<(Vec<u8>, u8), Value>,
+    ///
+    /// The flag is whether the entry is a root. A literal's is: CRuby's iseq
+    /// holds its fstring, and nothing here holds a literal's value but this
+    /// table. One `String#-@` made is not (#384): the table is weak for it, as
+    /// CRuby's is, and lets it go once nothing else references it.
+    strings: HashMap<(Vec<u8>, u8), (Value, bool)>,
 }
 
 impl Regexps {
@@ -128,21 +133,51 @@ impl Regexps {
         for (_, value) in self.once.values() {
             f(*value);
         }
-        for value in self.strings.values() {
-            f(*value);
+        for &(value, rooted) in self.strings.values() {
+            if rooted {
+                f(value);
+            }
         }
     }
 
     /// The interned frozen String with these bytes, if one has been made.
     #[must_use]
     pub fn fstring(&self, bytes: &[u8], encoding: u8) -> Option<Value> {
-        self.strings.get(&(bytes.to_vec(), encoding)).copied()
+        self.strings
+            .get(&(bytes.to_vec(), encoding))
+            .map(|&(value, _)| value)
+    }
+
+    /// The fstring a frozen literal with these bytes answers, if one has been
+    /// made. One `String#-@` made becomes a root here: the literal refers to
+    /// it from now on, as CRuby's iseq would.
+    pub fn literal_fstring(&mut self, bytes: &[u8], encoding: u8) -> Option<Value> {
+        let (value, rooted) = self.strings.get_mut(&(bytes.to_vec(), encoding))?;
+        *rooted = true;
+        Some(*value)
     }
 
     /// Make `value` the interned frozen String for its bytes and encoding:
     /// `"a"` in UTF-8 and in US-ASCII are two literals, and two objects (#19).
     pub fn intern_fstring(&mut self, bytes: &[u8], encoding: u8, value: Value) {
-        self.strings.insert((bytes.to_vec(), encoding), value);
+        self.strings
+            .insert((bytes.to_vec(), encoding), (value, true));
+    }
+
+    /// The fstring for these bytes and encoding, making `value` it, held
+    /// weakly, when there is none: what `String#-@` interns (#384).
+    pub fn intern_weak_fstring(&mut self, bytes: &[u8], encoding: u8, value: Value) -> Value {
+        self.strings
+            .entry((bytes.to_vec(), encoding))
+            .or_insert((value, false))
+            .0
+    }
+
+    /// Let go of every weak fstring `live` says did not survive marking, so
+    /// nothing reads a cell `sweep` is about to free.
+    pub fn retain_live_fstrings(&mut self, live: impl Fn(Value) -> bool) {
+        self.strings
+            .retain(|_, &mut (value, rooted)| rooted || live(value));
     }
 
     /// What this `/o` site answered the first time it ran, if it has.

@@ -19,22 +19,24 @@ class String
   end
 
   # `-str`: a frozen String with the same content and encoding, and the same
-  # one each time it is asked for. The table holds each one weakly (#36), as
-  # CRuby's does: one that nothing else references is let go.
+  # one each time it is asked for — CRuby's fstring, the one a frozen literal
+  # with that content is (#384). The VM's table holds one `-@` made weakly
+  # (#36), as CRuby's does: one that nothing else references is let go.
+  #
+  # Only a bare String is interned: of class String, with no singleton class
+  # and no instance variables. Any other is its own answer when frozen, and
+  # otherwise copied as `rb_str_dup` copies, its class and its bytes only, and
+  # the copy is interned if that made it bare. Measured on ruby 4.0.9.
   def -@
-    # One with instance variables is its own: a frozen copy, kept nowhere.
-    return frozen? ? self : String.new(self).freeze unless instance_variables.empty?
-    table = String.__interned__
-    found = table[self]
-    return found if !found.nil? && found.encoding == encoding
-    kept = frozen? && instance_of?(String) ? self : String.new(self).freeze
-    table[kept] = kept
+    if instance_variables.empty?
+      fstring = __fstring__
+      return fstring unless fstring.nil?
+    end
+    return self if frozen?
+    copy = self.class.allocate.replace(self).freeze
+    copy.__fstring__ || copy
   end
   alias dedup -@
-
-  def self.__interned__
-    @__interned__ ||= ObjectSpace::WeakKeyMap.new
-  end
 
   # What `to_sym` and `:"#{...}"` raise for bytes that are not characters of
   # the String's ASCII-compatible encoding: `sym_check_asciionly`'s error,
