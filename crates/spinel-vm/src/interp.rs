@@ -1465,6 +1465,13 @@ fn reflect_native(
                     };
                     let path = scope.root(path);
                     let visibility = Value::symbol(symbol(method.visibility.name()));
+                    // The module whose entry holds the body, when this one
+                    // stands in for it: what `inspect` names beside the owner.
+                    let defined = match method.origin {
+                        Some(origin) => scope.classes().object(origin.owner),
+                        None => Value::NIL,
+                    };
+                    let defined = scope.root(defined);
                     let fields = [
                         scope.get(owner),
                         Value::fixnum(arity).expect("an arity fits a fixnum"),
@@ -1479,6 +1486,7 @@ fn reflect_native(
                         // Where its constants resolve, which running the
                         // definition later needs with it.
                         cref_value(method.cref),
+                        scope.get(defined),
                     ];
                     new_array(scope, &fields)
                 }
