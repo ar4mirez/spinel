@@ -16035,6 +16035,10 @@ fn regexp_match_encoding(
         theirs
     };
     match regexp_engine(chosen) {
+        Some(engine) if engine.uncarried(&bytes) => Err(Error::Unknowable {
+            what: "matching a regexp against a GB18030 string with a four-byte code no character is assigned",
+            needs: "a regex engine that compares codes rather than `char`s (#388)",
+        }),
         Some(engine) => Ok(engine),
         // ASCII text reads the same in every ASCII-compatible encoding.
         None if ascii => Ok(spinel_regex::Encoding::Utf8),

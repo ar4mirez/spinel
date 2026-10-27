@@ -420,6 +420,12 @@ fn ctype_of(encoding: u8, code: u32) -> Option<Ctype> {
     }
 }
 
+/// Whether `encoding` is UTF-8 or a variant of it, UTF8-MAC and the
+/// carriers', whose characters are UTF-8's.
+fn utf8_like(encoding: u8) -> bool {
+    encoding == UTF_8 || multibyte(encoding) == Some(spinel_regex::Encoding::Utf8)
+}
+
 fn utf8_len(code: u32) -> usize {
     match code {
         0..=0x7f => 1,
@@ -511,11 +517,13 @@ fn encode_char(encoding: u8, code: u32) -> Vec<u8> {
 /// a digit stops the carry (`"a.9"` → `"a.10"`), and a carry off the left
 /// inserts a new first character. With no alphanumerics the last character
 /// steps, wrapping bytewise. `None` for an encoding this VM cannot walk.
+/// The UTF-8 variants step as UTF-8 does.
 #[must_use]
 pub fn succ(encoding: u8, bytes: &[u8]) -> Option<Vec<u8>> {
     if bytes.is_empty() {
         return Some(Vec::new());
     }
+    let encoding = if utf8_like(encoding) { UTF_8 } else { encoding };
     let offsets = char_offsets(encoding, bytes)?;
     // Each character as (start, len, code), or None for an invalid byte,
     // which `succ` steps over.
@@ -933,6 +941,23 @@ mod tests {
             Some(vec![0, 2, 3])
         );
         assert_eq!(valid(named("EUC-JIS-2004"), b"\x8f\xa1\xa1"), Some(true));
+    }
+
+    #[test]
+    fn a_utf8_variant_steps_as_utf8() {
+        for variant in ["UTF8-MAC", "UTF8-DoCoMo", "UTF8-KDDI", "UTF8-SoftBank"] {
+            let encoding = named(variant);
+            assert_eq!(
+                succ(encoding, "aé".as_bytes()),
+                Some("aê".as_bytes().to_vec()),
+                "{variant}"
+            );
+            assert_eq!(
+                succ(encoding, "€".as_bytes()),
+                succ(UTF_8, "€".as_bytes()),
+                "{variant}"
+            );
+        }
     }
 
     #[test]

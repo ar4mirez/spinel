@@ -304,22 +304,20 @@ impl Regex {
     /// The leftmost match at or after byte offset `start`, reading `haystack`
     /// as `encoding`. A UTF-8 haystack must be valid UTF-8.
     ///
+    /// The caller checks a haystack once, before matching it, the way it
+    /// checks that it is not broken: one [`Encoding::uncarried`] refuses
+    /// reads a character that is not its own. Checking here would walk the
+    /// whole haystack on every call of a scan.
+    ///
     /// # Errors
     ///
-    /// [`Error::Budget`] if backtracking ran past its step budget, and
-    /// [`Error::Unsupported`] for a haystack with a character
-    /// [`Encoding::uncarried`] refuses.
+    /// [`Error::Budget`] if backtracking ran past its step budget.
     pub fn find_in(
         &self,
         haystack: &[u8],
         start: usize,
         encoding: Encoding,
     ) -> Result<Option<Captures>, Error> {
-        if encoding.uncarried(haystack) {
-            return Err(Error::Unsupported(
-                "a GB18030 subject with a four-byte code no character is assigned",
-            ));
-        }
         let subject = exec::Subject {
             bytes: haystack,
             enc: encoding,
@@ -350,11 +348,6 @@ impl Regex {
         start: usize,
         encoding: Encoding,
     ) -> Result<Option<Captures>, Error> {
-        if encoding.uncarried(haystack) {
-            return Err(Error::Unsupported(
-                "a GB18030 subject with a four-byte code no character is assigned",
-            ));
-        }
         let subject = exec::Subject {
             bytes: haystack,
             enc: encoding,
@@ -597,15 +590,10 @@ mod tests {
 
     #[test]
     fn a_gb18030_code_no_character_has_is_refused() {
-        let re = Regex::with_encoding(".", Flags::default(), Encoding::Gb18030).expect("compiles");
-        assert!(matches!(
-            re.find_in(b"\x84\x31\xa5\x30", 0, Encoding::Gb18030),
-            Err(Error::Unsupported(_))
-        ));
-        assert!(
-            re.find_in(b"\x84\x31\xa4\x39", 0, Encoding::Gb18030)
-                .is_ok()
-        );
+        assert!(Encoding::Gb18030.uncarried(b"a\x84\x31\xa5\x30"));
+        assert!(Encoding::Gb18030.uncarried(b"\xe3\x32\x9a\x36"));
+        assert!(!Encoding::Gb18030.uncarried(b"\x84\x31\xa4\x39\xe3\x32\x9a\x35"));
+        assert!(!Encoding::EucTw.uncarried(b"\x84\x31\xa5\x30"));
         let source = Encoding::Gb18030
             .read_source(b"\\xe3\\x32\\x9a\\x36")
             .expect("ASCII");

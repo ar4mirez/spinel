@@ -326,8 +326,9 @@ impl Encoding {
 
     /// Whether `bytes` holds a character this engine cannot carry: a GB18030
     /// four-byte code no character is assigned, `8431A530` to `8F39FE39` or
-    /// past `E3329A35`. A pattern with one is refused, and so is a match
-    /// against a subject with one, rather than read as some other character.
+    /// past `E3329A35`. A pattern with one is refused, and a caller refuses a
+    /// subject with one before matching it, rather than read it as some other
+    /// character.
     ///
     /// ponytail: refusing is the ceiling here. A `char` cannot hold the 1.6
     /// million codes GB18030's bytes can spell; carrying them all means the
