@@ -865,53 +865,58 @@ fn anchor_holds(anchor: Anchor, haystack: Subject<'_>, sp: usize, start: usize) 
 
 /// Whether a pattern's class matches `c`. Onigmo compiles a class whose set
 /// is one character, `[\x80]`, `[i-i]`, `[[\x80]]`, `[\x80\x80]` or
-/// `[\x80&&\x80]`, as that character, so under `/i` it folds as a literal
-/// does; a nested class is merged into its parent first, so `[[\x80]\x81]`
-/// folds as a class.
+/// `[\x80-\x81&&\x80]`, as that character, so under `/i` it folds as a
+/// literal does; a nested class is merged into its parent first, so
+/// `[[\x80]\x81]` folds as a class.
 fn class_holds(class: &Class, c: char, enc: Encoding) -> bool {
-    match single_char(class, enc) {
-        Some(only) if class.icase => chars_equal(c, only, true, enc, Fold::Literal),
+    let set = if class.icase { char_set(class) } else { None };
+    match set.as_deref() {
+        Some(&[(only, high)]) if only == high => chars_equal(c, only, true, enc, Fold::Literal),
         _ => class_matches(class, c, enc),
     }
 }
 
-/// The one character a non-negated class's set holds before case folding,
-/// if every item names it and every intersected branch holds it.
-fn single_char(class: &Class, enc: Encoding) -> Option<char> {
+/// A class's set before case folding, as sorted, merged inclusive intervals,
+/// when it is spelled with characters and ranges alone: `None` for a negated
+/// part or one holding a `\w` or `[:alpha:]`.
+fn char_set(class: &Class) -> Option<Vec<(char, char)>> {
     if class.negated {
         return None;
     }
-    let mut only = None;
+    let mut set = Vec::new();
     for item in &class.items {
-        let c = match item {
-            ClassItem::Char(c) => *c,
-            ClassItem::Range(low, high) if low == high => *low,
-            ClassItem::Nested(inner) => single_char(inner, enc)?,
-            _ => return None,
-        };
-        if only.is_some_and(|o| o != c) {
-            return None;
+        match item {
+            ClassItem::Char(c) => set.push((*c, *c)),
+            ClassItem::Range(low, high) => set.push((*low, *high)),
+            ClassItem::Nested(inner) => set.extend(char_set(inner)?),
+            ClassItem::Perl(..) | ClassItem::Posix(..) => return None,
         }
-        only = Some(c);
     }
-    let only = only?;
-    class
-        .intersect
-        .iter()
-        .all(|other| holds_unfolded(other, only, enc))
-        .then_some(only)
+    let mut set = merged(set);
+    for other in &class.intersect {
+        let other = char_set(other)?;
+        set = merged(
+            set.iter()
+                .flat_map(|&(low, high)| other.iter().map(move |&(l, h)| (low.max(l), high.min(h))))
+                .collect(),
+        );
+    }
+    Some(set)
 }
 
-/// Whether a class's set holds `c` as written, with no case folding.
-fn holds_unfolded(class: &Class, c: char, enc: Encoding) -> bool {
-    let held = class.items.iter().any(|item| match item {
-        ClassItem::Nested(inner) => holds_unfolded(inner, c, enc),
-        _ => item_matches(item, c, false, enc),
-    }) && class
-        .intersect
-        .iter()
-        .all(|other| holds_unfolded(other, c, enc));
-    held != class.negated
+fn merged(mut set: Vec<(char, char)>) -> Vec<(char, char)> {
+    set.retain(|(low, high)| low <= high);
+    set.sort_unstable();
+    let mut out: Vec<(char, char)> = Vec::with_capacity(set.len());
+    for (low, high) in set {
+        match out.last_mut() {
+            Some(last) if (low as u32) <= (last.1 as u32).saturating_add(1) => {
+                last.1 = last.1.max(high)
+            }
+            _ => out.push((low, high)),
+        }
+    }
+    out
 }
 
 fn class_matches(class: &Class, c: char, enc: Encoding) -> bool {
