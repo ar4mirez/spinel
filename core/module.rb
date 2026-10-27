@@ -515,8 +515,14 @@ class Module
     self
   end
 
+  # CRuby asks for the singleton class before it checks frozen (#383): an
+  # Integer, a Symbol or a frozen literal is refused with `TypeError`, and
+  # `nil`, `true` and `false`, frozen as they are, extend their own class.
   def extend_object(object)
-    Kernel.__check_frozen__(object)
+    __reflect_singleton_class__(object)
+    unless nil.equal?(object) || true.equal?(object) || false.equal?(object)
+      Kernel.__check_frozen__(object)
+    end
     object.__extend__(self)
     object
   end
