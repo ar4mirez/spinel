@@ -597,12 +597,27 @@ mod tests {
         assert_eq!(find_in("[i]", icase, turkish, b"\xdd"), Some((0, 1)));
         assert_eq!(find_in("[h-j]", icase, turkish, b"\xdd"), None);
         assert_eq!(find_in("[^i]", icase, turkish, b"\xdd"), Some((0, 1)));
+        assert_eq!(find_in("[[i]]", icase, turkish, b"\xdd"), Some((0, 1)));
         // Windows-1251's folds go one way, and a backreference takes both.
         let cyrillic = reading("Windows-1251");
         assert_eq!(find_in("\\x80", icase, cyrillic, b"\x90"), Some((0, 1)));
         assert_eq!(find_in("\\x90", icase, cyrillic, b"\x80"), None);
         assert_eq!(find_in("[\\x80]", icase, cyrillic, b"\x90"), Some((0, 1)));
         assert_eq!(find_in("[\\x80\\x81]", icase, cyrillic, b"\x90"), None);
+        for one in [
+            "[[\\x80]]",
+            "[\\x80\\x80]",
+            "[\\x80-\\x80\\x80]",
+            "[\\x80[\\x80]]",
+            "[\\x80&&\\x80]",
+        ] {
+            assert_eq!(
+                find_in(one, icase, cyrillic, b"\x90"),
+                Some((0, 1)),
+                "{one}"
+            );
+        }
+        assert_eq!(find_in("[[\\x80]\\x81]", icase, cyrillic, b"\x90"), None);
         assert_eq!(
             find_in("(.)\\1", icase, cyrillic, b"\x90\x80"),
             Some((0, 2))

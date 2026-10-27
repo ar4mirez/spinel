@@ -863,22 +863,55 @@ fn anchor_holds(anchor: Anchor, haystack: Subject<'_>, sp: usize, start: usize) 
     }
 }
 
-/// Whether a pattern's class matches `c`. Onigmo compiles a class of one
-/// character, `[\x80]` or `[i-i]`, as that character, so under `/i` it folds
-/// as a literal does; a nested class is merged into its parent first, so
-/// `[[\x80]\x81]` folds as a class.
+/// Whether a pattern's class matches `c`. Onigmo compiles a class whose set
+/// is one character, `[\x80]`, `[i-i]`, `[[\x80]]`, `[\x80\x80]` or
+/// `[\x80&&\x80]`, as that character, so under `/i` it folds as a literal
+/// does; a nested class is merged into its parent first, so `[[\x80]\x81]`
+/// folds as a class.
 fn class_holds(class: &Class, c: char, enc: Encoding) -> bool {
-    let only = match class.items.as_slice() {
-        [ClassItem::Char(only)] => Some(*only),
-        [ClassItem::Range(low, high)] if low == high => Some(*low),
-        _ => None,
-    };
-    match only {
-        Some(only) if class.icase && !class.negated && class.intersect.is_empty() => {
-            chars_equal(c, only, true, enc, Fold::Literal)
-        }
+    match single_char(class, enc) {
+        Some(only) if class.icase => chars_equal(c, only, true, enc, Fold::Literal),
         _ => class_matches(class, c, enc),
     }
+}
+
+/// The one character a non-negated class's set holds before case folding,
+/// if every item names it and every intersected branch holds it.
+fn single_char(class: &Class, enc: Encoding) -> Option<char> {
+    if class.negated {
+        return None;
+    }
+    let mut only = None;
+    for item in &class.items {
+        let c = match item {
+            ClassItem::Char(c) => *c,
+            ClassItem::Range(low, high) if low == high => *low,
+            ClassItem::Nested(inner) => single_char(inner, enc)?,
+            _ => return None,
+        };
+        if only.is_some_and(|o| o != c) {
+            return None;
+        }
+        only = Some(c);
+    }
+    let only = only?;
+    class
+        .intersect
+        .iter()
+        .all(|other| holds_unfolded(other, only, enc))
+        .then_some(only)
+}
+
+/// Whether a class's set holds `c` as written, with no case folding.
+fn holds_unfolded(class: &Class, c: char, enc: Encoding) -> bool {
+    let held = class.items.iter().any(|item| match item {
+        ClassItem::Nested(inner) => holds_unfolded(inner, c, enc),
+        _ => item_matches(item, c, false, enc),
+    }) && class
+        .intersect
+        .iter()
+        .all(|other| holds_unfolded(other, c, enc));
+    held != class.negated
 }
 
 fn class_matches(class: &Class, c: char, enc: Encoding) -> bool {
