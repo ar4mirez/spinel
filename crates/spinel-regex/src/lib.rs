@@ -305,9 +305,9 @@ impl Regex {
     /// as `encoding`. A UTF-8 haystack must be valid UTF-8.
     ///
     /// The caller checks a haystack once, before matching it, the way it
-    /// checks that it is not broken: one [`Encoding::uncarried`] refuses
-    /// reads a character that is not its own. Checking here would walk the
-    /// whole haystack on every call of a scan.
+    /// checks that it is not broken: a haystack [`Encoding::uncarried`]
+    /// refuses reads a character as one that is not its own. Checking here
+    /// would walk the whole haystack on every call of a scan.
     ///
     /// # Errors
     ///
