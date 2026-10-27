@@ -1,1 +1,0 @@
-fails(a frozen String literal is a new object each time it is evaluated, so it is not the deduplicated one):String#-@ deduplicates frozen strings

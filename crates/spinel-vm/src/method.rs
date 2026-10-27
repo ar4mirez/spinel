@@ -566,6 +566,12 @@ pub enum Native {
     Str(StrOp),
     /// `String#to_sym` and `#intern`: the symbol table is the VM's.
     StringIntern,
+    /// `String#__fstring__`: for a receiver of class `String` itself, the
+    /// fstring for its bytes and encoding (#384) — the one a frozen literal or
+    /// an earlier `-@` interned, or else the receiver, interned weakly, when it
+    /// is frozen. nil otherwise: `-@` decides the rest. The fstring table is
+    /// the VM's, and so is knowing whether a String has a singleton class.
+    StringFstring,
     /// `Kernel#__raise_no_method__(name, args)`: the NoMethodError the VM
     /// raises for a missing method, raised on purpose — what
     /// `BasicObject#method_missing` does when called directly (#28).
