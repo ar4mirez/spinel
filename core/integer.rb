@@ -733,7 +733,7 @@ class Integer
       [code >> 8, code & 0xff]
     else
       # Big5, GBK, EUC-KR, GB18030 and the other multibyte encodings' layouts
-      # wait on their character boundaries (#372).
+      # wait on their character boundaries (#388).
       __needs_char_table__
     end
   end

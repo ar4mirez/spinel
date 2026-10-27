@@ -1,9 +1,10 @@
 //! How a character is read out of bytes, encoding by encoding (#339).
 //!
 //! The machine compares `char`s, so every encoding's characters have to be
-//! carried as one. UTF-8's are themselves. BINARY's and ISO-8859-1's are a
-//! byte each, carried as the `char` with that number — which for ISO-8859-1 is
-//! also the character, its bytes being Unicode's first 256 codepoints.
+//! carried as one. UTF-8's are themselves. BINARY's and every other
+//! single-byte encoding's are a byte each, carried as the `char` with that
+//! number — the character itself only in ISO-8859-1, so what a byte is to the
+//! classes and case folds is the encoding's table, never Unicode's (#372).
 //!
 //! EUC-JP's and Shift_JIS's multibyte characters have no Unicode number this
 //! engine can compute: that mapping is a table, and it is #378's. They do not
@@ -18,6 +19,8 @@
 //! above everything Unicode assigns.
 
 use crate::Encoding;
+use crate::parse::{Perl, Posix};
+use crate::single_byte::Table;
 
 /// Where a two-byte code is carried: `U+F0000 + code`.
 const DOUBLE: u32 = 0xF_0000;
@@ -54,7 +57,7 @@ impl Encoding {
         let first = *bytes.first()?;
         let trail = |at: usize, ok: fn(u8) -> bool| bytes.get(at).copied().is_some_and(ok);
         match self {
-            Encoding::Binary | Encoding::Latin1 => Some(1),
+            Encoding::Binary | Encoding::Single(_) => Some(1),
             Encoding::Utf8 => {
                 let width = match first {
                     0x00..=0x7f => 1,
@@ -130,7 +133,7 @@ impl Encoding {
     #[must_use]
     pub fn is_char_boundary(self, bytes: &[u8], at: usize) -> bool {
         match self {
-            Encoding::Binary | Encoding::Latin1 => true,
+            Encoding::Binary | Encoding::Single(_) => true,
             Encoding::Utf8 => bytes.get(at).is_none_or(|&b| b & 0xc0 != 0x80),
             Encoding::EucJp | Encoding::ShiftJis => {
                 at >= bytes.len() || self.char_start_before(bytes, at + 1) == at
@@ -195,6 +198,15 @@ impl Encoding {
         } else {
             c - DOUBLE
         }
+    }
+
+    /// How the engine reads a single-byte encoding, by its CRuby name: as
+    /// BINARY when Onigmo classes and folds nothing past ASCII in it — IBM437,
+    /// macRoman and the other code pages — else by its table. `None` for an
+    /// encoding that is not single-byte.
+    #[must_use]
+    pub fn single_byte(name: &str) -> Option<Encoding> {
+        crate::single_byte::reading(name)
     }
 
     /// A character's bytes in this encoding: what `Regexp#to_s` writes back.
@@ -275,71 +287,66 @@ fn carried(n: u32) -> char {
     char::from_u32(n).unwrap_or('\u{fffd}')
 }
 
-/// Onigmo's ISO-8859-1 classes for the bytes past ASCII, which are not
-/// Unicode's for the same codepoints: `\s` takes `A0` though UTF-8's is ASCII,
-/// `[[:space:]]` does not take `85`, `§` and `¶` are no punctuation and the
-/// soft hyphen is, and the superscripts and fractions are word characters.
-/// Measured into `tests/encodings.txt`, which a unit test replays.
-pub(crate) mod latin1 {
-    use crate::parse::{Perl, Posix};
-
-    const LETTER: &[(u8, u8)] = &[
-        (0xaa, 0xaa),
-        (0xb5, 0xb5),
-        (0xba, 0xba),
-        (0xc0, 0xd6),
-        (0xd8, 0xf6),
-        (0xf8, 0xff),
-    ];
-    const UPPER: &[(u8, u8)] = &[(0xc0, 0xd6), (0xd8, 0xde)];
-    const LOWER: &[(u8, u8)] = &[
-        (0xaa, 0xaa),
-        (0xb5, 0xb5),
-        (0xba, 0xba),
-        (0xdf, 0xf6),
-        (0xf8, 0xff),
-    ];
-    const PUNCT: &[(u8, u8)] = &[
-        (0xa1, 0xa1),
-        (0xab, 0xab),
-        (0xad, 0xad),
-        (0xb7, 0xb7),
-        (0xbb, 0xbb),
-        (0xbf, 0xbf),
-    ];
-    const WORD: &[(u8, u8)] = &[
-        (0xaa, 0xaa),
-        (0xb2, 0xb3),
-        (0xb5, 0xb5),
-        (0xb9, 0xba),
-        (0xbc, 0xbe),
-        (0xc0, 0xd6),
-        (0xd8, 0xf6),
-        (0xf8, 0xff),
-    ];
-
-    fn within(ranges: &[(u8, u8)], b: u8) -> bool {
-        ranges.iter().any(|&(low, high)| (low..=high).contains(&b))
+/// What a single-byte encoding's table says about a byte past ASCII.
+impl Table {
+    fn holds(mask: u128, b: u8) -> bool {
+        b >= 0x80 && mask >> (b - 0x80) & 1 == 1
     }
 
-    /// A POSIX bracket, for a byte `80`-`FF`.
-    pub fn posix(kind: Posix, b: u8) -> bool {
-        match kind {
-            Posix::Alpha | Posix::Alnum => within(LETTER, b),
-            Posix::Upper => within(UPPER, b),
-            Posix::Lower => within(LOWER, b),
-            Posix::Space | Posix::Blank => b == 0xa0,
-            Posix::Print => b >= 0xa0,
-            Posix::Graph => b >= 0xa1,
-            Posix::Punct => within(PUNCT, b),
-            Posix::Cntrl => b <= 0x9f,
-            Posix::Word => within(WORD, b),
-            Posix::Digit | Posix::XDigit | Posix::Ascii => false,
-        }
+    /// A POSIX bracket.
+    pub(crate) fn posix(&self, kind: Posix, b: u8) -> bool {
+        let mask = match kind {
+            Posix::Alpha => self.alpha,
+            Posix::Digit => self.digit,
+            Posix::Alnum => self.alnum,
+            Posix::Upper => self.upper,
+            Posix::Lower => self.lower,
+            Posix::Space => self.space,
+            Posix::Blank => self.blank,
+            Posix::Punct => self.punct,
+            Posix::Print => self.print,
+            Posix::Graph => self.graph,
+            Posix::Cntrl => self.cntrl,
+            Posix::XDigit => self.xdigit,
+            Posix::Word => self.word,
+            Posix::Ascii => self.ascii,
+        };
+        Table::holds(mask, b)
     }
 
-    /// A shorthand, for a byte `80`-`FF`: only `\s`, and only for `A0`.
-    pub fn perl(kind: Perl, b: u8) -> bool {
-        kind == Perl::Space && b == 0xa0
+    /// A shorthand: ISO-8859-1's `\s` takes `A0`, though UTF-8's is ASCII.
+    pub(crate) fn perl(&self, kind: Perl, b: u8) -> bool {
+        let mask = match kind {
+            Perl::Word => self.perl_word,
+            Perl::Digit => self.perl_digit,
+            Perl::Space => self.perl_space,
+            Perl::Hex => self.perl_hex,
+        };
+        Table::holds(mask, b)
+    }
+
+    /// Whether `\b` takes the byte as a word character.
+    pub(crate) fn word(&self, b: u8) -> bool {
+        Table::holds(self.word_boundary, b)
+    }
+
+    /// Whether `/x/i` matches `y`, for a pair with a side past ASCII.
+    pub(crate) fn literal_folds(&self, x: u8, y: u8) -> bool {
+        self.folds.binary_search(&(x, y)).is_ok()
+    }
+
+    /// Whether a class holding `x` matches `y` under `/i`, for a pair with a
+    /// side past ASCII and a class of more than one character.
+    pub(crate) fn class_folds(&self, x: u8, y: u8) -> bool {
+        self.class_folds.binary_search(&(x, y)).is_ok()
+    }
+
+    /// Every `x` a class can hold to match `y` under `/i`, past ASCII's own
+    /// cases.
+    pub(crate) fn class_partners(&self, y: u8) -> impl Iterator<Item = u8> + '_ {
+        self.class_folds
+            .iter()
+            .filter(move |&&(_, to)| to == y)
+            .map(|&(from, _)| from)
     }
 }

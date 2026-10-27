@@ -41,8 +41,10 @@
 mod chars;
 mod exec;
 mod parse;
+mod single_byte;
 
 pub use exec::Match as RawMatch;
+pub use single_byte::Charset;
 
 use std::fmt;
 
@@ -150,15 +152,19 @@ pub enum Encoding {
     /// folding are Unicode's.
     #[default]
     Utf8,
-    /// One character per byte, with only ASCII's classes and cases: BINARY and
-    /// US-ASCII. A byte past ASCII is carried as the `char` with the same
-    /// number, so a source written in this encoding spells byte `0xff` as
-    /// `'\u{ff}'`, and so does the escape `\xff`.
+    /// One character per byte, with only ASCII's classes and cases: BINARY,
+    /// US-ASCII, and the code pages Onigmo classes nothing past ASCII in —
+    /// IBM437, macRoman, Windows-1258 and the rest. A byte past ASCII is
+    /// carried as the `char` with the same number, so a source written in
+    /// this encoding spells byte `0xff` as `'\u{ff}'`, and so does the escape
+    /// `\xff`.
     Binary,
-    /// ISO-8859-1: a character per byte, carried as the `char` with that
-    /// number, which is also its Unicode codepoint. The classes are Onigmo's
-    /// Latin-1 table rather than Unicode's, and the cases are Unicode's.
-    Latin1,
+    /// A single-byte encoding past ASCII-8BIT's: ISO-8859-1 to -16, KOI8-R
+    /// and -U, Windows-1250 to -1257 and the encodings Onigmo reads as one of
+    /// them. A character per byte, carried as the `char` with that number, as
+    /// in BINARY; its classes and case folds are the encoding's own table,
+    /// measured from CRuby (#372), never Unicode's for the `char`.
+    Single(Charset),
     /// EUC-JP, which `/e` fixes a pattern to. A multibyte character is
     /// carried at a private-use codepoint, and matches only the classes
     /// Onigmo gives every one — word, graph and print — and only its own
@@ -549,30 +555,82 @@ mod tests {
     #[test]
     fn latin1_is_a_character_per_byte_with_its_own_classes() {
         let plain = Flags::default();
-        assert_eq!(
-            find_in("\\s", plain, Encoding::Latin1, b"a\xa0"),
-            Some((1, 2))
-        );
-        assert_eq!(
-            find_in("[[:alpha:]]", plain, Encoding::Latin1, b"\xe9"),
-            Some((0, 1))
-        );
-        assert_eq!(
-            find_in("[[:punct:]]", plain, Encoding::Latin1, b"\xa7"),
-            None
-        );
-        assert_eq!(
-            find_in("\\xe9", plain, Encoding::Latin1, b"\xe9"),
-            Some((0, 1))
-        );
+        let latin1 = Encoding::Single(Charset::Iso8859_1);
+        assert_eq!(find_in("\\s", plain, latin1, b"a\xa0"), Some((1, 2)));
+        assert_eq!(find_in("[[:alpha:]]", plain, latin1, b"\xe9"), Some((0, 1)));
+        assert_eq!(find_in("[[:punct:]]", plain, latin1, b"\xa7"), None);
+        assert_eq!(find_in("\\xe9", plain, latin1, b"\xe9"), Some((0, 1)));
         let icase = Flags {
             icase: true,
             ..Flags::default()
         };
+        assert_eq!(find_in("\\xc9", icase, latin1, b"\xe9"), Some((0, 1)));
+    }
+
+    #[test]
+    fn a_single_byte_encoding_classes_and_folds_by_its_own_table() {
+        let plain = Flags::default();
+        let icase = Flags {
+            icase: true,
+            ..Flags::default()
+        };
+        let reading = |name| Encoding::single_byte(name).expect("single-byte");
+        // ISO-8859-2's `\xB1` is `ą`, a lower-case letter whose other case is
+        // `\xA1`, `Ą`: where Latin-1 has `±` and `¡`.
+        let latin2 = reading("ISO-8859-2");
+        assert_eq!(find_in(".", plain, latin2, b"\xb1"), Some((0, 1)));
+        assert_eq!(find_in("[[:lower:]]", plain, latin2, b"\xb1"), Some((0, 1)));
+        assert_eq!(find_in("\\xa1", icase, latin2, b"\xb1"), Some((0, 1)));
         assert_eq!(
-            find_in("\\xc9", icase, Encoding::Latin1, b"\xe9"),
+            find_in("[\\xa0-\\xa2]", icase, latin2, b"\xb1"),
             Some((0, 1))
         );
+        assert_eq!(
+            find_in("\\xa1", icase, reading("ISO-8859-1"), b"\xb1"),
+            None
+        );
+        // ISO-8859-9's `/i/i` and `/I/i` match `İ`, and `/İ/i` both of them;
+        // a class folds by another map, unless it is one character.
+        let turkish = reading("ISO-8859-9");
+        assert_eq!(find_in("i", icase, turkish, b"\xdd"), Some((0, 1)));
+        assert_eq!(find_in("\\xdd", icase, turkish, b"I"), Some((0, 1)));
+        assert_eq!(find_in("[i]", icase, turkish, b"\xdd"), Some((0, 1)));
+        assert_eq!(find_in("[h-j]", icase, turkish, b"\xdd"), None);
+        assert_eq!(find_in("[^i]", icase, turkish, b"\xdd"), Some((0, 1)));
+        assert_eq!(find_in("[[i]]", icase, turkish, b"\xdd"), Some((0, 1)));
+        // Windows-1251's folds go one way, and a backreference takes both.
+        let cyrillic = reading("Windows-1251");
+        assert_eq!(find_in("\\x80", icase, cyrillic, b"\x90"), Some((0, 1)));
+        assert_eq!(find_in("\\x90", icase, cyrillic, b"\x80"), None);
+        assert_eq!(find_in("[\\x80]", icase, cyrillic, b"\x90"), Some((0, 1)));
+        assert_eq!(find_in("[\\x80\\x81]", icase, cyrillic, b"\x90"), None);
+        for one in [
+            "[[\\x80]]",
+            "[\\x80\\x80]",
+            "[\\x80-\\x80\\x80]",
+            "[\\x80[\\x80]]",
+            "[\\x80&&\\x80]",
+            "[\\x80-\\x81&&\\x80]",
+            "[\\x80\\x81&&\\x80]",
+        ] {
+            assert_eq!(
+                find_in(one, icase, cyrillic, b"\x90"),
+                Some((0, 1)),
+                "{one}"
+            );
+        }
+        assert_eq!(find_in("[[\\x80]\\x81]", icase, cyrillic, b"\x90"), None);
+        assert_eq!(
+            find_in("(.)\\1", icase, cyrillic, b"\x90\x80"),
+            Some((0, 2))
+        );
+        // A code page Onigmo classes nothing past ASCII in reads as BINARY.
+        assert_eq!(Encoding::single_byte("IBM437"), Some(Encoding::Binary));
+        assert_eq!(
+            Encoding::single_byte("Windows-1257"),
+            Some(reading("ISO-8859-13"))
+        );
+        assert_eq!(Encoding::single_byte("EUC-KR"), None);
     }
 
     #[test]

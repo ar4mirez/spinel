@@ -32,6 +32,7 @@ CORPUS = File.join(ROOT, "spec", "ruby", "language", "regexp")
 TABLE = File.join(ROOT, "crates", "spinel-regex", "tests", "oracle.txt")
 POSIX_TABLE = File.join(ROOT, "crates", "spinel-regex", "tests", "posix.txt")
 ENCODING_TABLE = File.join(ROOT, "crates", "spinel-regex", "tests", "encodings.txt")
+SINGLE_BYTE_TABLE = File.join(ROOT, "crates", "spinel-regex", "src", "single_byte.rs")
 
 # Subjects chosen so that two engines which disagree about the dialect give
 # different answers on at least one of them.
@@ -235,14 +236,27 @@ POSIX_HEADER = <<~TEXT
 TEXT
 
 # The classes, shorthands, word boundary and case folds of the characters past
-# ASCII in the encodings `spinel-regex` reads besides UTF-8 and BINARY (#339).
+# ASCII in the encodings `spinel-regex` reads besides UTF-8: EUC-JP and the
+# Shift_JIS family (#339), and every single-byte encoding (#372).
 ENCODING_CLASSES = (POSIX.map { |name| ["[[:#{name}:]]", name] } +
                     [["\\w", "\\w"], ["\\d", "\\d"], ["\\s", "\\s"], ["\\h", "\\h"], ["\\b", "\\b"]]).freeze
+
+# The single-byte encodings, in CRuby's index order: ASCII-compatible, not a
+# dummy, and every byte past ASCII one character of its own. ASCII-8BIT is the
+# first, so an encoding Onigmo classes and folds as BINARY says so.
+SINGLE_BYTE = Encoding.list.select do |enc|
+  enc.ascii_compatible? && !enc.dummy? && (0x80..0xFF).all? do |b|
+    char = b.chr.force_encoding(enc)
+    char.valid_encoding? && (char * 2).length == 2
+  end
+end.map(&:name).freeze
+
+MULTIBYTE = %w[EUC-JP Windows-31J Shift_JIS].freeze
 
 # Every character past ASCII, by its code: Onigmo's number for it, the bytes
 # read as one big-endian integer.
 def encoding_chars(name)
-  if name == "ISO-8859-1"
+  if SINGLE_BYTE.include?(name)
     return (0x80..0xFF).map { |b| [b, b.chr.force_encoding(name)] }
   end
   bytes = []
@@ -265,23 +279,18 @@ def code_ranges(codes)
   end.join(";")
 end
 
-# A class over every character: its codes as ranges, or `all` and `none` for
-# the multibyte encodings, whose code space has holes no range list reads well.
+# The codes of `chars` a class holds.
 def encoding_class(name, pattern, chars)
   regexp = Regexp.new(pattern.encode(name))
-  held = chars.select { |_, char| regexp.match?(char) }.map(&:first)
-  return code_ranges(held) if name == "ISO-8859-1"
-  return "all" if held.size == chars.size
-  return "none" if held.empty?
-  code_ranges(held)
+  chars.select { |_, char| regexp.match?(char) }.map(&:first)
 end
 
-# The pairs `/x/i` matches, as `LO-HI+D` blocks: every code from LO to HI folds
-# to itself plus D. The candidates are each character's Unicode other cases,
-# transcoded back — Onigmo folds nothing else in these encodings, and trying
-# every pair is 10^8 matches.
-def encoding_folds(name, chars)
-  pairs = chars.flat_map do |code, char|
+# The pairs `/x/i` matches in a multibyte encoding, as `[x, y]` codes. The
+# candidates are each character's Unicode other cases, transcoded back —
+# Onigmo folds nothing else in these encodings, and trying every pair is 10^8
+# matches.
+def multibyte_folds(name, chars)
+  chars.flat_map do |code, char|
     # A code no Unicode character maps to has no other case to try.
     unicode = begin
       char.encode(Encoding::UTF_8)
@@ -299,23 +308,95 @@ def encoding_folds(name, chars)
       [code, back.bytes.inject(0) { |c, b| (c << 8) | b }] if folded && back.bytesize == char.bytesize
     end
   end
-  pairs.sort.chunk_while { |(a, x), (b, y)| b == a + 1 && y - b == x - a }.map do |run|
+end
+
+# The pairs `/x/i` matches in a single-byte encoding, as `[x, y]` bytes, past
+# ASCII's own cases: every pair is tried. The relation is not symmetric —
+# Windows-1251's `/\x80/i` matches `"\x90"` but `/\x90/i` does not match
+# `"\x80"` — and it reaches into ASCII: ISO-8859-9's `/i/i` matches `İ`.
+def byte_folds(name)
+  regexps = (0..0xFF).map { |x| Regexp.new(Regexp.escape(x.chr.force_encoding(name)), Regexp::IGNORECASE) }
+  byte_domain.select { |x, y| regexps[x].match?(y.chr.force_encoding(name)) }
+end
+
+# The pairs a character class folds, which Onigmo takes from another map than
+# a literal's: Windows-1251's `/[\x80\x81]/i` does not match `"\x90"`, and
+# ISO-8859-9's `/[h-j]/i` does not match `İ`. A class of one character is
+# compiled as that character, so it is `/[^x]/i`, every byte outside x's
+# class folds, that measures them.
+def byte_class_folds(name)
+  outside = (0..0xFF).map { |x| Regexp.new(format("[^\\x%02X]", x).force_encoding(name), Regexp::IGNORECASE) }
+  byte_domain.reject { |x, y| outside[x].match?(y.chr.force_encoding(name)) }
+end
+
+# Every `[x, y]` of two bytes with at least one past ASCII.
+def byte_domain
+  @byte_domain ||= (0..0xFF).to_a.product((0..0xFF).to_a).reject { |x, y| x == y || (x < 0x80 && y < 0x80) }
+end
+
+# One encoding, measured: each class's codes, and its case pairs.
+def encoding_measure(name)
+  @measured ||= {}
+  @measured[name] ||= begin
+    chars = encoding_chars(name)
+    classes = ENCODING_CLASSES.to_h { |pattern, label| [label, encoding_class(name, pattern, chars)] }
+    single = SINGLE_BYTE.include?(name)
+    folds = single ? byte_folds(name) : multibyte_folds(name, chars)
+    class_folds = single ? byte_class_folds(name).sort : nil
+    {classes: classes, folds: folds.sort, class_folds: class_folds, size: chars.size}
+  end
+end
+
+# A class's field: its codes as ranges, or `all` and `none` for the multibyte
+# encodings, whose code space has holes no range list reads well.
+def class_field(name, codes, size)
+  return code_ranges(codes) if SINGLE_BYTE.include?(name)
+  return "all" if codes.size == size
+  return "none" if codes.empty?
+  code_ranges(codes)
+end
+
+# Case pairs as `LO-HI+D` blocks: every code from LO to HI folds to itself
+# plus D. A code that folds to two others is in two blocks.
+def fold_field(pairs)
+  pairs.chunk_while { |(a, x), (b, y)| b == a + 1 && y - b == x - a }.map do |run|
     format("%X-%X%+X", run[0][0], run[-1][0], run[0][1] - run[0][0]).sub("+-", "-")
   end.join(";")
 end
 
-def encoding_render
-  lines = %w[ISO-8859-1 EUC-JP Windows-31J Shift_JIS].flat_map do |name|
-    chars = encoding_chars(name)
-    ENCODING_CLASSES.map { |pattern, label| "#{name}\t#{label}\t#{encoding_class(name, pattern, chars)}" } +
-      ["#{name}\tfold\t#{encoding_folds(name, chars)}"]
+def encoding_lines(name)
+  measured = encoding_measure(name)
+  ENCODING_CLASSES.map do |_, label|
+    "#{name}\t#{label}\t#{class_field(name, measured[:classes][label], measured[:size])}"
+  end + ["#{name}\tfold\t#{fold_field(measured[:folds])}"] +
+    (measured[:class_folds] ? ["#{name}\tclass-fold\t#{fold_field(measured[:class_folds])}"] : [])
+end
+
+# Each single-byte encoding's table: its own name when it is the first with
+# what it measures, else the earlier encoding's it is the same as.
+def single_byte_owners
+  @owners ||= begin
+    seen = {}
+    SINGLE_BYTE.to_h do |name|
+      table = encoding_lines(name).map { |line| line.split("\t", 2)[1] }
+      [name, seen[table] ||= name]
+    end
   end
+end
+
+def encoding_render
+  lines = SINGLE_BYTE.flat_map do |name|
+    owner = single_byte_owners[name]
+    owner == name ? encoding_lines(name) : ["#{name}\tsame\t#{owner}"]
+  end
+  lines += MULTIBYTE.flat_map { |name| encoding_lines(name) }
   [ENCODING_HEADER.chomp, "", *lines, ""].join("\n")
 end
 
 ENCODING_HEADER = <<~TEXT
-  # The characters past ASCII in ISO-8859-1, EUC-JP, Windows-31J and
-  # Shift_JIS, as Ruby's regexps class and fold them. Do not edit by hand.
+  # The characters past ASCII in every single-byte encoding, EUC-JP,
+  # Windows-31J and Shift_JIS, as Ruby's regexps class and fold them. Do not
+  # edit by hand.
   #
   # Generated by `scripts/regexp-oracle.rb --generate`; CI re-runs it with
   # `--check`, and a unit test in `crates/spinel-regex/src/exec.rs` replays
@@ -324,8 +405,118 @@ ENCODING_HEADER = <<~TEXT
   # One line per encoding and class: the encoding, a tab, the class, a tab,
   # then the codes it holds — a character's code is its bytes read as one
   # big-endian number — as `;`-separated hex ranges, or `all` or `none` of
-  # the multibyte encodings' characters. A `fold` line lists the case pairs
-  # as `LO-HI+D`: every code from LO to HI folds to itself plus D.
+  # the multibyte encodings' characters. A `fold` line lists the pairs `/x/i`
+  # matches as `LO-HI+D`: every x from LO to HI matches x plus D. In a
+  # single-byte encoding that is every such pair but ASCII's own, and a
+  # `class-fold` line lists the pairs a class of more than one character
+  # folds, which Onigmo takes from another map. A single-byte encoding that
+  # measures the same as an earlier one is a `same` line naming it.
+TEXT
+
+# The same measurement as Rust, for the single-byte encodings: what
+# `crates/spinel-regex/src/single_byte.rs` is.
+FIELDS = [*POSIX, "perl_word", "perl_digit", "perl_space", "perl_hex", "word_boundary"].freeze
+FIELD_OF = ENCODING_CLASSES.map(&:last).zip(FIELDS).to_h.freeze
+
+# `ISO-8859-1` as `Iso8859_1`, `KOI8-R` as `Koi8R`, `Windows-1250` as
+# `Windows1250`.
+def variant(name)
+  name.split("-").map(&:capitalize).inject do |joined, part|
+    joined.match?(/\d\z/) && part.match?(/\A\d/) ? "#{joined}_#{part}" : joined + part
+  end
+end
+
+def mask(codes)
+  bits = codes.sum { |code| 1 << (code - 0x80) }
+  hex = format("%032x", bits).scan(/.{4}/).join("_")
+  "0x#{hex}"
+end
+
+def rust_pairs(field, pairs)
+  lines = pairs.map { |x, y| format("(0x%02X, 0x%02X)", x, y) }.each_slice(6).map do |slice|
+    "        #{slice.join(', ')},"
+  end
+  ["    #{field}: &[", *lines, "    ],"]
+end
+
+def rust_table(name)
+  measured = encoding_measure(name)
+  fields = ENCODING_CLASSES.map do |_, label|
+    "    #{FIELD_OF[label]}: #{mask(measured[:classes][label])},"
+  end
+  [
+    "#[rustfmt::skip]",
+    "static #{name.upcase.tr('-', '_')}: Table = Table {",
+    *fields,
+    *rust_pairs("folds", measured[:folds]),
+    *rust_pairs("class_folds", measured[:class_folds]),
+    "};"
+  ]
+end
+
+def single_byte_render
+  owners = single_byte_owners
+  charsets = owners.values.uniq - ["ASCII-8BIT"]
+  readings = owners.group_by { |_, owner| owner }.map do |owner, names|
+    reading = owner == "ASCII-8BIT" ? "Encoding::Binary" : "Encoding::Single(Charset::#{variant(owner)})"
+    "        #{names.map { |name, _| name.inspect }.join(' | ')} => #{reading},"
+  end
+  [
+    SINGLE_BYTE_HEADER.chomp,
+    "",
+    "use crate::Encoding;",
+    "",
+    "/// A single-byte encoding with classes or case folds past ASCII, named for",
+    "/// the first encoding in CRuby's index order to measure as it does.",
+    "#[derive(Debug, Clone, Copy, PartialEq, Eq)]",
+    "pub enum Charset {",
+    *charsets.map { |name| "    #{variant(name)}," },
+    "}",
+    "",
+    "/// One encoding's bytes past ASCII. A class has bit `b - 0x80` set for each",
+    "/// byte `b` it holds.",
+    "pub(crate) struct Table {",
+    *FIELDS.map { |field| "    pub(crate) #{field}: u128," },
+    "    /// `(x, y)` for each pair `/x/i` matches, past ASCII's own cases, in",
+    "    /// ascending order. Not symmetric, and a pair can have one ASCII side.",
+    "    pub(crate) folds: &'static [(u8, u8)],",
+    "    /// The same for a class of more than one character, whose folds Onigmo",
+    "    /// takes from another map: `/[xz]/i` matches `y` when `(x, y)` or",
+    "    /// `(z, y)` is here.",
+    "    pub(crate) class_folds: &'static [(u8, u8)],",
+    "}",
+    "",
+    "impl Charset {",
+    "    pub(crate) fn table(self) -> &'static Table {",
+    "        match self {",
+    *charsets.map { |name| "            Charset::#{variant(name)} => &#{name.upcase.tr('-', '_')}," },
+    "        }",
+    "    }",
+    "}",
+    "",
+    "/// How the engine reads a single-byte encoding, by its name: as BINARY when",
+    "/// Onigmo classes and folds nothing past ASCII in it, else by its table.",
+    "#[rustfmt::skip]",
+    "pub(crate) fn reading(name: &str) -> Option<Encoding> {",
+    "    Some(match name {",
+    *readings,
+    "        _ => return None,",
+    "    })",
+    "}",
+    *charsets.flat_map { |name| ["", *rust_table(name)] },
+    ""
+  ].join("\n")
+end
+
+SINGLE_BYTE_HEADER = <<~TEXT
+  //! The classes and case folds of the bytes past ASCII in every single-byte
+  //! encoding Ruby has, as its regexps answer them (#372). Do not edit by hand.
+  //!
+  //! Generated by `scripts/regexp-oracle.rb --generate`, from the same
+  //! measurement as `tests/encodings.txt`; CI re-runs it with `--check`, and
+  //! the unit test that replays that file checks these tables against it.
+  //! Measured rather than derived from Unicode: Onigmo's tables are its own,
+  //! and differ from Unicode's even for ISO-8859-1.
 TEXT
 
 case ARGV[0]
@@ -336,10 +527,13 @@ when "--generate"
   puts "wrote #{POSIX_TABLE}"
   File.write(ENCODING_TABLE, encoding_render)
   puts "wrote #{ENCODING_TABLE}"
+  File.write(SINGLE_BYTE_TABLE, single_byte_render)
+  puts "wrote #{SINGLE_BYTE_TABLE}"
 when "--check"
   stale = []
   {TABLE => method(:render), POSIX_TABLE => method(:posix_render),
-   ENCODING_TABLE => method(:encoding_render)}.each do |path, build|
+   ENCODING_TABLE => method(:encoding_render),
+   SINGLE_BYTE_TABLE => method(:single_byte_render)}.each do |path, build|
     current = File.exist?(path) ? File.read(path) : ""
     stale << path unless current == build.call
   end
