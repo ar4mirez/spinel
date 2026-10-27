@@ -101,7 +101,8 @@ impl CrefId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct CrefNode {
     class: ClassId,
-    /// `None` only for [`CrefId::ROOT`].
+    /// `None` only for [`CrefId::ROOT`] and the copies `using` makes of it,
+    /// which is how [`Classes::cref_is_root`] tells the top level.
     parent: Option<CrefId>,
     /// Whether this node was pushed by an eval-shaped construct — `Class.new`'s
     /// block, and `module_eval`/`class_eval`/`instance_eval` when #28 adds them.
@@ -651,6 +652,9 @@ pub struct Classes {
     /// Lexical scopes, as an arena of linked-list nodes. See [`CrefId`].
     /// `bootstrap` seeds node 0 with `Object`, which is [`CrefId::ROOT`].
     crefs: Vec<CrefNode>,
+    /// [`Classes::replace_refinements`]'s copies, by the node and table each
+    /// was made from, so a hot `&:sym` in a refined file allocates once.
+    refined_copies: HashMap<(CrefId, Option<u32>), CrefId>,
     /// The refinement tables scopes point at, by [`CrefNode::refinements`].
     /// An arena beside the crefs and for their reason: a table is never
     /// freed, and one is made per `using` executed, not per scope.
@@ -2014,6 +2018,13 @@ impl Classes {
         id
     }
 
+    /// Whether `cref` is a file's top level: [`CrefId::ROOT`], or a copy of it
+    /// a top-level `using` made.
+    #[must_use]
+    pub fn cref_is_root(&self, cref: CrefId) -> bool {
+        self.cref(cref).parent.is_none()
+    }
+
     /// Whether `main.using` may run in this scope: a file's top level, a
     /// wrapped `load`'s included. Measured: a `module` body is not, even when
     /// `send` reaches `main`'s method from it.
@@ -2177,10 +2188,14 @@ impl Classes {
     }
 
     fn replace_refinements(&mut self, cref: CrefId, refinements: Option<u32>) -> CrefId {
+        if let Some(&id) = self.refined_copies.get(&(cref, refinements)) {
+            return id;
+        }
         let mut node = *self.cref(cref);
         node.refinements = refinements;
         let id = CrefId(self.crefs.len() as u32);
         self.crefs.push(node);
+        self.refined_copies.insert((cref, refinements), id);
         id
     }
 
@@ -3635,6 +3650,33 @@ mod tests {
         assert!(classes.method_defined_here(m, name));
         assert!(!classes.method_defined_here(c, name), "C inherits it");
         assert!(classes.lookup(c, name).is_some(), "but still finds it");
+    }
+
+    #[test]
+    fn a_refined_copy_of_a_scope_is_made_once_and_keeps_the_top_level() {
+        let mut heap = booted();
+        let mut scope = heap.scope();
+        let owner = scope.define_module(Some("M"));
+        let refinement = scope.define_module(None);
+        let c = scope.define_class(Some("C"), Some(Builtin::Object.id()));
+        let classes = scope.classes_mut();
+        classes.add_refinement(owner, Builtin::String.id(), refinement);
+
+        let top = classes.using(CrefId::ROOT, owner);
+        assert_ne!(top, CrefId::ROOT);
+        assert!(classes.cref_is_root(top), "`using` at the top level");
+        assert!(classes.cref_is_top_level(top));
+
+        let body = classes.push_cref(CrefId::ROOT, c);
+        assert!(!classes.cref_is_root(body));
+        let first = classes.with_refinements_of(body, top);
+        let len = classes.crefs.len();
+        for _ in 0..3 {
+            assert_eq!(classes.with_refinements_of(body, top), first);
+        }
+        assert_eq!(classes.crefs.len(), len, "a hot `&:sym` allocates once");
+        assert!(classes.cref_refined(first));
+        assert_eq!(classes.with_refinements_of(CrefId::ROOT, top), top);
     }
 
     #[test]

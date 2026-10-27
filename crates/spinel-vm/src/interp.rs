@@ -6642,7 +6642,7 @@ fn class_or_anonymous(scope: &mut HandleScope<'_>, id: ClassId) -> String {
 /// `class variable access from toplevel`, measured.
 fn cvar_owner(scope: &mut HandleScope<'_>, cref: CrefId) -> Result<ClassId, Error> {
     let cref = scope.classes().lexical_cref(cref);
-    if cref == CrefId::ROOT {
+    if scope.classes().cref_is_root(cref) {
         return Err(Error::raise(
             "RuntimeError",
             "class variable access from toplevel",
