@@ -435,7 +435,7 @@ end
 # not `Object`, so a `BasicObject` subclass that includes `Kernel` gets it.
 module Kernel
   def extend(*modules)
-    Module.__check_mixins__(modules)
+    Module.__check_mixins__(modules, "extend")
     i = modules.size
     while i > 0
       i -= 1

@@ -1,0 +1,1 @@
+fails(#380: source_location of a core method CRuby writes in C is nil, and every Spinel core method is Ruby):Proc#source_location returns nil for a core method that has been proc-ified

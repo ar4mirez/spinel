@@ -12,7 +12,7 @@ end
 
 # `main`, the top level's `self`: an Object whose singleton answers `to_s` as
 # "main" and forwards `include`, `define_method`, `ruby2_keywords`, `public`
-# and `private` to `Object`, privately — CRuby's set, measured. `public` and `private` are the
+# and `private` to `Object`, and has `using`, privately — CRuby's set, measured. `public` and `private` are the
 # primitives themselves, so a bare one sets the top-level frame's default.
 class << self
   def to_s
@@ -34,6 +34,8 @@ class << self
 
   alias public __main_public__
   alias private __main_private__
+  # The primitive, so it activates refinements in the file that called it.
+  alias using __main_using__
 
-  private :include, :define_method, :ruby2_keywords, :public, :private
+  private :include, :define_method, :ruby2_keywords, :public, :private, :using
 end

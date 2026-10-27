@@ -127,6 +127,12 @@ module Marshal
     end.compact
   end
 
+  # A library class whose instances CRuby makes in C adds itself here when it
+  # loads, after the table above may already be made: `StringIO`.
+  def self.__opaque_class__(klass)
+    __opaque__ << klass
+  end
+
   def self.__valued__
     @__valued__ ||= [::String, ::Array, ::Hash, ::Regexp, ::Integer, ::Float, ::Symbol, ::Module,
                      ::Struct, ::Data, ::Time, ::NilClass, ::TrueClass, ::FalseClass]

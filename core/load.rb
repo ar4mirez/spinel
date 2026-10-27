@@ -168,6 +168,8 @@ module Kernel
     main.define_singleton_method(:to_s) { "main" }
     main.define_singleton_method(:inspect) { "main" }
     main.define_singleton_method(:include) { |*modules| wrapper.include(*modules) }
+    main.singleton_class.__send__(:alias_method, :using, :__main_using__)
+    main.singleton_class.__send__(:private, :using)
     main
   end
 
