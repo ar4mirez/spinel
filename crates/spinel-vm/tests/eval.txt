@@ -286,6 +286,13 @@ o = Object.new; class << o; def m; self; end; end; o.m.equal?(o)  #=> true
 class GC5; end; class << GC5; def m; 6; end; end; GC5.m  #=> 6
 class GC6; def self.a; 1; end; def self.b; a + 1; end; end; GC6.b  #=> 2
 class GC7; def self.m; 1; end; end; class GC8 < GC7; end; GC8.m  #=> 1
+# A frozen literal is CRuby's fstring and takes no singleton class: the
+# immediates' `TypeError`, not the `FrozenError` a `dup.freeze` String gets (#376).
+eval("# frozen_string_literal: true\ns = 'y'; begin; def s.m; end; rescue => e; [e.class, e.message]; end")  #=> [TypeError, "can't define singleton"]
+eval("# frozen_string_literal: true\ns = 'y'; begin; class << s; end; rescue => e; [e.class, e.message]; end")  #=> [TypeError, "can't define singleton"]
+s = "y".freeze; begin; s.singleton_class; rescue => e; [e.class, e.message]; end  #=> [TypeError, "can't define singleton"]
+s = "z".dup.freeze; begin; def s.m; end; rescue => e; e.class; end  #=> FrozenError
+s = "z".dup.freeze; class << s; self; end.singleton_class?  #=> true
 
 # -- `defined?`: the answer is a table, not a rule ---------------------------
 # Only the cases where this heap is the authority. A `defined?` that *misses* is

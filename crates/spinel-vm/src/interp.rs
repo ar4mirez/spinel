@@ -3233,6 +3233,9 @@ fn run<'h>(
                             return Ok(thawing);
                         }
                         stack.pop();
+                        // A frozen literal takes no singleton at all, which CRuby
+                        // says before it says frozen (#376).
+                        fstring_check(scope, receiver)?;
                         // `def frozen_obj.m` raises: a singleton method is stored on
                         // the object, and a frozen object does not take stores.
                         frozen_check(scope, receiver)?;
@@ -7254,8 +7257,30 @@ fn singleton_of(scope: &mut HandleScope<'_>, receiver: Value) -> Result<ClassId,
         // Ruby's text exactly: no receiver in it, and no article.
         return Err(Error::raise("TypeError", "can't define singleton"));
     }
+    fstring_check(scope, receiver)?;
     let handle = scope.root(receiver);
     Ok(scope.singleton_class_of(handle))
+}
+
+/// Refuse a frozen literal a singleton class (#376). One is CRuby's fstring,
+/// shared by every site with its bytes and encoding, so `rb_singleton_class`
+/// refuses it with the immediates' `TypeError`. A String frozen any other way,
+/// `"z".dup.freeze`, is an ordinary frozen object and takes one. Measured on
+/// ruby 4.0.9.
+fn fstring_check(scope: &mut HandleScope<'_>, value: Value) -> Result<(), Error> {
+    if value.is_immediate() || !is_string(scope, value) {
+        return Ok(());
+    }
+    let handle = scope.root(value);
+    if !scope.is_frozen(handle) {
+        return Ok(());
+    }
+    let bytes = crate::strings::bytes(scope, handle);
+    let encoding = crate::strings::encoding(scope, handle);
+    if scope.regexps().fstring(&bytes, encoding) == Some(value) {
+        return Err(Error::raise("TypeError", "can't define singleton"));
+    }
+    Ok(())
 }
 
 /// The class table entry a value *is*, as opposed to the one it is an instance

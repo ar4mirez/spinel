@@ -1,2 +1,2 @@
-fails(#41: reopen keeps the receiver and its singleton class, where CRuby gives it a fresh one):Kernel#singleton_class raises TypeError for a frozen deduplicated String
+fails(#384: String#-@ keeps its own table, so the String it answers is not the fstring a frozen literal is and takes a singleton class):Kernel#singleton_class raises TypeError for a frozen deduplicated String
 fails(#41: reopen keeps the receiver and its singleton class, where CRuby gives it a fresh one):Kernel#singleton_class for an IO object with a replaced singleton class looks up singleton methods from the fresh singleton class after an object instance got a new one
