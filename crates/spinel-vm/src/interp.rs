@@ -979,10 +979,37 @@ fn str_native(
                 });
             };
             let start = usize::try_from(index_arg(1)?).unwrap_or(0);
-            let found = if op == StrOp::ByteIndex {
-                crate::strings::find(&bytes, &needle, start)
-            } else {
-                crate::strings::rfind(&bytes, &needle, start)
+            // CRuby's `rb_strseq_index` and `str_rindex`: a broken needle is
+            // found nowhere, and a match starts a character — `"a"` is not
+            // in Shift_JIS's `"\x82\x61"`, whose trail it is — unless a
+            // third argument of false says otherwise, as `byterindex`'s byte
+            // by byte search does. UTF-8's trails are no character's first
+            // byte, so only the other multibyte encodings can put one inside
+            // another.
+            let needle_encoding = string_encoding(scope, arg(0)).unwrap_or(encoding);
+            if crate::strings::valid(needle_encoding, &needle) == Some(false) {
+                stack.push(Value::NIL);
+                return Ok(None);
+            }
+            let reading = crate::strings::multibyte(encoding)
+                .filter(|&engine| engine != spinel_regex::Encoding::Utf8 && arg(2) != Value::FALSE);
+            let starts =
+                |at: usize| reading.is_none_or(|engine| engine.is_char_boundary(&bytes, at));
+            let mut from = start;
+            let found = loop {
+                let at = if op == StrOp::ByteIndex {
+                    crate::strings::find(&bytes, &needle, from)
+                } else {
+                    crate::strings::rfind(&bytes, &needle, from)
+                };
+                match at {
+                    Some(at) if !starts(at) => match op {
+                        StrOp::ByteIndex => from = at + 1,
+                        _ if at == 0 => break None,
+                        _ => from = at - 1,
+                    },
+                    at => break at,
+                }
             };
             found.map_or(Value::NIL, |at| fixnum(at as i64))
         }
@@ -12761,7 +12788,27 @@ fn native_call<'h>(
             // `/\x{82A0}/` for a Shift_JIS `あ`. `to_s` writes its bytes back,
             // in the pattern's own encoding. Measured.
             let engine = program.encoding();
-            let source: String = if inspect && engine != spinel_regex::Encoding::Utf8 {
+            // A UTF-8 variant — UTF8-MAC and the carriers' — reads as UTF-8
+            // but is not the encoding `inspect` shows characters in, so one
+            // past ASCII is its codepoint, `\u3042`, as CRuby's
+            // `rb_reg_expr_str` escapes a Unicode one. Measured.
+            let variant = engine == spinel_regex::Encoding::Utf8 && {
+                let mut nested = scope.nested();
+                let handle = nested.root(call.receiver);
+                let source = nested.slot(handle, crate::regexp::REGEXP_SOURCE);
+                string_encoding(&mut nested, source).is_some_and(|e| e != crate::strings::UTF_8)
+            };
+            let source: String = if inspect && variant {
+                let mut shown = String::with_capacity(body.len());
+                for c in body.chars() {
+                    match u32::from(c) {
+                        code @ 0x80..=0xffff => shown.push_str(&format!("\\u{code:04X}")),
+                        code @ 0x1_0000.. => shown.push_str(&format!("\\u{{{code:X}}}")),
+                        _ => shown.push(c),
+                    }
+                }
+                shown
+            } else if inspect && engine != spinel_regex::Encoding::Utf8 {
                 let mut shown = String::with_capacity(body.len());
                 body.chars()
                     .for_each(|c| push_regexp_char(&mut shown, c, engine));
@@ -15751,8 +15798,8 @@ fn regexp_build(
     }
     let (encoding, options) = regexp_encoding(source, encoding, options, fixed);
     // The engine reads each encoding it knows in its own way: a binary or
-    // single-byte pattern a byte to a character, EUC-JP and Shift_JIS a multibyte
-    // character to one (#339). An ASCII source in any other encoding is the
+    // single-byte pattern a byte to a character, a multibyte one a multibyte
+    // character to one (#339, #388). An ASCII source in any other encoding is the
     // same characters in UTF-8, and so is a US-ASCII one, which is parsed as
     // UTF-8 though it matches as BINARY.
     let reading = if encoding == crate::strings::US_ASCII {
@@ -15761,6 +15808,12 @@ fn regexp_build(
         regexp_engine(encoding)
     };
     let (pattern, engine) = match reading {
+        Some(engine) if engine.uncarried(source) => {
+            return Err(Error::Unknowable {
+                what: "a GB18030 regexp source with a four-byte code no character is assigned",
+                needs: "a regex engine that compares codes rather than `char`s (#388)",
+            });
+        }
         Some(engine) => match engine.read_source(source) {
             Some(text) => (text, engine),
             None => {
@@ -15782,8 +15835,8 @@ fn regexp_build(
         ),
         None => {
             return Err(Error::Unknowable {
-                what: "a regexp source with characters past ASCII in a multibyte encoding other than UTF-8, EUC-JP and Shift_JIS",
-                needs: "a regex engine that reads characters in the remaining multibyte encodings (#388)",
+                what: "a regexp source with characters past ASCII in CESU-8",
+                needs: "a regex engine that reads CESU-8's characters (#388)",
             });
         }
     };
@@ -15945,7 +15998,7 @@ fn regexp_match_encoding(
         None if !ascii => {
             return Err(Error::Unknowable {
                 what: "matching a regexp against a string with characters past ASCII in an encoding whose characters this VM cannot bound",
-                needs: "character boundaries for the remaining multibyte encodings (#388)",
+                needs: "character boundaries for that encoding",
             });
         }
         _ => {}
@@ -15986,25 +16039,26 @@ fn regexp_match_encoding(
         // ASCII text reads the same in every ASCII-compatible encoding.
         None if ascii => Ok(spinel_regex::Encoding::Utf8),
         None => Err(Error::Unknowable {
-            what: "matching a regexp against a string with characters past ASCII in a multibyte encoding other than UTF-8, EUC-JP and Shift_JIS",
-            needs: "a regex engine that reads characters in the remaining multibyte encodings (#388)",
+            what: "matching a regexp against a string with characters past ASCII in CESU-8",
+            needs: "a regex engine that reads CESU-8's characters (#388)",
         }),
     }
 }
 
 /// How the engine reads characters in `encoding`, for the encodings it can:
-/// US-ASCII as BINARY, since an ASCII subject is the same in both,
-/// Windows-31J as Shift_JIS, whose characters it bounds and classes alike,
-/// and every other single-byte encoding by its own table, or as BINARY when
-/// Onigmo classes nothing past ASCII in it (#372).
+/// US-ASCII as BINARY, since an ASCII subject is the same in both, every
+/// multibyte encoding but CESU-8 as `crate::strings` bounds it — Windows-31J
+/// and the carriers' Shift_JIS as Shift_JIS, whose characters it bounds and
+/// classes alike, and the rest the same way (#388) — and every other
+/// single-byte encoding by its own table, or as BINARY when Onigmo classes
+/// nothing past ASCII in it (#372).
 fn regexp_engine(encoding: u8) -> Option<spinel_regex::Encoding> {
-    use crate::strings::{BINARY, EUC_JP, SHIFT_JIS, US_ASCII, UTF_8, WINDOWS_31J};
+    use crate::strings::{BINARY, US_ASCII, UTF_8};
     match encoding {
         BINARY | US_ASCII => Some(spinel_regex::Encoding::Binary),
         UTF_8 => Some(spinel_regex::Encoding::Utf8),
-        EUC_JP => Some(spinel_regex::Encoding::EucJp),
-        WINDOWS_31J | SHIFT_JIS => Some(spinel_regex::Encoding::ShiftJis),
-        _ => spinel_regex::Encoding::single_byte(crate::strings::name(encoding)),
+        _ => crate::strings::multibyte(encoding)
+            .or_else(|| spinel_regex::Encoding::single_byte(crate::strings::name(encoding))),
     }
 }
 

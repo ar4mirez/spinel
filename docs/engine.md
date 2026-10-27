@@ -225,7 +225,7 @@ As of [#15](https://github.com/ar4mirez/spinel/issues/15) step 3 compiles `core/
 
 **`Array` is two slots: storage and length.** A heap cell cannot grow, so an array whose elements live in its own slots could only grow by becoming a different object and Ruby would see the identity change. The elements live in a separate `Payload::Slots` object instead, and growing replaces *that*; the `Array`'s own address never moves. This is `RARRAY`'s pointer and length, for the same reason. `String` has no such indirection yet, which is why `String#<<`, `#concat` and `#replace` are absent rather than approximated — a mutable string is the same change applied to a byte payload.
 
-Strings (default): a byte buffer, a byte count and an encoding index (`strings.rs`, #19) — the buffer is a separate object so a String grows in place. Characters are walked in UTF-8, US-ASCII, ASCII-8BIT, ISO-8859-1, UTF-16 and UTF-32, the encodings `encode` converts between arithmetically (`transcode.rs`, PRD 0050), in EUC-JP, Shift_JIS and Windows-31J, whose lead and trail bytes are ranges (#339), in CESU-8, UTF-8 with a codepoint past U+FFFF spelled as its surrogate pair (#344), and in every other single-byte encoding that is not a dummy — every byte a valid character of its own, measured (#372); characters in any other encoding are refused until their boundaries arrive (#388). No cached character count yet: `length` walks the bytes, which is the first thing to add when a benchmark asks. No ropes.
+Strings (default): a byte buffer, a byte count and an encoding index (`strings.rs`, #19) — the buffer is a separate object so a String grows in place. Characters are walked in UTF-8, US-ASCII, ASCII-8BIT, ISO-8859-1, UTF-16 and UTF-32, the encodings `encode` converts between arithmetically (`transcode.rs`, PRD 0050), in EUC-JP, Shift_JIS and Windows-31J, whose lead and trail bytes are ranges (#339), in CESU-8, UTF-8 with a codepoint past U+FFFF spelled as its surrogate pair (#344), in every other single-byte encoding that is not a dummy — every byte a valid character of its own, measured (#372) — and in every other ASCII-compatible multibyte encoding that is not a dummy, Big5, CP949, EUC-KR, GBK, GB18030, EUC-TW, Emacs-Mule and the variants, bounded as the regex engine reads them (#388); characters in a dummy encoding are refused. No cached character count yet: `length` walks the bytes, which is the first thing to add when a benchmark asks. No ropes.
 
 Hash (default): insertion-ordered open addressing, keyed on `#hash`/`#eql?` with fast paths for Symbol, String, and fixnum keys.
 
@@ -332,8 +332,11 @@ code pages Onigmo classes nothing past ASCII in (IBM437, macRoman,
 Windows-1258 and the rest); a character per byte with the encoding's own
 table, which is ISO-8859-1 to -16, KOI8-R and -U and Windows-1250 to -1257 —
 `Single(Charset)`, a `Charset` per distinct table, so Windows-1256 reads as
-ISO-8859-6; or a multibyte character at a time, which is EUC-JP, and
-Shift_JIS with Windows-31J. A single-byte table has Onigmo's classes and two
+ISO-8859-6; or a multibyte character at a time, which is EUC-JP,
+Shift_JIS with Windows-31J, Big5, CP949, EUC-KR, GBK, GB18030, EUC-TW and
+Emacs-Mule, and the variants that measure the same as one of them (UTF8-MAC
+reads as UTF-8, eucJP-ms as EUC-JP, CP950 as Big5, GB2312 as EUC-KR, …).
+A single-byte table has Onigmo's classes and two
 case maps, neither Unicode's: a literal's, which is not symmetric (Windows-1251's
 `/\x80/i` matches `"\x90"`, not the other way) and reaches into ASCII
 (ISO-8859-9's `/i/i` matches `İ`), and a class's, which is smaller. A class of
@@ -345,10 +348,20 @@ machine compares `char`s, so a multibyte character is carried at a private-use
 codepoint numbered by Onigmo's own code for it — its bytes read as one
 big-endian number — which keeps ranges in order without the Unicode mapping
 those encodings need a table for; it is word, graph and print and nothing
-else, and folds case only by the encoding's arithmetic. Shift_JIS's trail bytes
-overlap ASCII, so stepping back means reading forward from a byte that can
-only start a character. The classes and folds are measured into
-`crates/spinel-regex/tests/encodings.txt` and replayed by a unit test. A
+else, and folds case only by the encoding's arithmetic, which only EUC-JP and
+Shift_JIS have. GB18030, EUC-TW and Emacs-Mule have codes of three and four
+bytes too many for those planes, so theirs are carried by rank: every
+character past ASCII in code order, from `U+0080` up past the surrogates.
+GB18030's four bytes spell 1.6 million codes, more than there are scalar
+values, but the ones a character is assigned and its two-byte codes are
+exactly as many as the scalar values past ASCII; a pattern or subject with
+any other four-byte code is refused. Shift_JIS's, Big5's, CP949's, GBK's
+and GB18030's trail bytes overlap ASCII, so stepping back means reading
+forward from a byte that can only start a character, and a substring search
+skips a match that starts inside one, as CRuby's does. The characters'
+boundaries, as an automaton per encoding, and their classes and both folds
+are measured into `crates/spinel-regex/tests/encodings.txt` and replayed by a
+unit test. A
 `Regexp` carries its own encoding as CRuby does, in its source String: `/u`,
 `/e` and `/s` fix it to UTF-8, EUC-JP and Windows-31J, `/n` makes it BINARY
 when the source names a byte past ASCII (a raw one only from a BINARY String;
@@ -357,9 +370,9 @@ free to match in the subject's encoding. Which encoding a match uses, and when
 the two cannot meet, is `rb_reg_prepare_enc`'s decision, ported. The program
 does not depend on the encoding, so one compiled pattern serves every subject;
 only the source is parsed in its own: a `\xff` is a byte in BINARY and the
-other single-byte encodings, and in EUC-JP and Shift_JIS it leads a character
-the escapes after it finish. A source or subject past ASCII in any other
-multibyte encoding is refused until the engine reads its characters
+other single-byte encodings, and in the multibyte ones it leads a character
+the escapes after it finish. A source or subject past ASCII in CESU-8 is
+refused until the engine reads its characters
 ([#388](https://github.com/ar4mirez/spinel/issues/388)). `$~` is one slot
 per heap — Ruby scopes it per frame and per thread, which arrives with the
 frame specials and with Ractors. The refs derived from it — `$1`, `$&`,

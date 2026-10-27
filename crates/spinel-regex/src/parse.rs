@@ -1073,7 +1073,7 @@ impl Parser {
             value = value * 8 + (self.next().expect("just peeked") as u32 - '0' as u32);
             seen += 1;
         }
-        if value > 0x7f && matches!(self.encoding, Encoding::EucJp | Encoding::ShiftJis) {
+        if value > 0x7f && self.encoding.multibyte_coded() {
             let lead = u8::try_from(value).map_err(|_| {
                 Error::Unsupported("an octal escape past a byte in a multibyte pattern")
             })?;
@@ -1082,19 +1082,24 @@ impl Parser {
         char::from_u32(value).ok_or_else(|| Error::Syntax("invalid octal escape".into()))
     }
 
-    /// The character an escaped byte past ASCII starts, in EUC-JP or
-    /// Shift_JIS: the escapes after it supply the rest of its bytes, as
-    /// Onigmo reads them — `\xa4\xa2` is `あ`, `\244\242` too, and
-    /// `\xa4` alone is too short. Measured on ruby 4.0.7, messages included.
+    /// The character an escaped byte past ASCII starts, in a multibyte
+    /// encoding past UTF-8: the escapes after it supply the rest of its
+    /// bytes, as Onigmo reads them — `\xa4\xa2` is `あ` in EUC-JP,
+    /// `\244\242` too, and `\xa4` alone is too short. Measured on ruby
+    /// 4.0.7, messages included.
     fn multibyte_escape(&mut self, lead: u8) -> Result<char, Error> {
         let invalid = || Error::Syntax("invalid multibyte escape".into());
-        let len = self.encoding.lead_len(lead).ok_or_else(invalid)?;
         let mut bytes = vec![lead];
-        while bytes.len() < len {
+        while bytes.len() < self.encoding.lead_len(&bytes).ok_or_else(invalid)? {
             let byte = self
                 .escaped_byte()
                 .ok_or_else(|| Error::Syntax("too short escaped multibyte character".into()))?;
             bytes.push(byte);
+        }
+        if self.encoding.uncarried(&bytes) {
+            return Err(Error::Unsupported(
+                "a GB18030 four-byte code no character is assigned",
+            ));
         }
         self.encoding.spelled_by(&bytes).ok_or_else(invalid)
     }
@@ -1185,7 +1190,8 @@ impl Parser {
                     // A byte above ASCII is not a codepoint. In a binary or
                     // single-byte pattern it is the byte, which the matcher
                     // carries as the `char` with the same number; in EUC-JP
-                    // and Shift_JIS it leads a character the escapes after it
+                    // and the other multibyte encodings it leads a character
+                    // the escapes after it
                     // finish; in UTF-8 it would too, which waits for the rest
                     // of the Onigmo dialect.
                     match self.encoding {
@@ -1194,8 +1200,8 @@ impl Parser {
                         Encoding::Utf8 => {
                             return Err(Error::Unsupported("a non-ASCII \\x byte escape"));
                         }
-                        Encoding::EucJp | Encoding::ShiftJis => self.multibyte_escape(n as u8)?,
                         Encoding::Binary | Encoding::Single(_) => char::from(n as u8),
+                        _ => self.multibyte_escape(n as u8)?,
                     }
                 }
             }

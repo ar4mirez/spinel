@@ -688,8 +688,9 @@ class Integer
   # encoding's own question.
   def self.__code_bytes__(code, index)
     case index
-    when 1, 15
-      # UTF-8, and CESU-8, which spells a code past U+FFFF as its UTF-16
+    when 1, 9, 15, 95, 97, 101
+      # UTF-8, its variants UTF8-MAC and the carriers' UTF8-DoCoMo, -KDDI and
+      # -SoftBank, and CESU-8, which spells a code past U+FFFF as its UTF-16
       # surrogate pair. 0xFFFFFFFE and 0xFFFFFFFF are Onigmo's invalid-byte
       # codes, one byte that is never a character.
       return [code & 0xff] if code >= 0xffff_fffe
@@ -714,9 +715,10 @@ class Integer
       # UTF-32BE and UTF-32LE.
       big = [code >> 24, (code >> 16) & 0xff, (code >> 8) & 0xff, code & 0xff]
       index == 5 ? big : big.reverse
-    when 10
-      # EUC-JP: ASCII, a two-byte code, or a three-byte one, each byte of a
-      # multibyte code with its high bit set.
+    when 10, 80, 81, 82
+      # EUC-JP, and eucJP-ms, CP51932 and EUC-JIS-2004: ASCII, a two-byte
+      # code, or a three-byte one, each byte of a multibyte code with its high
+      # bit set.
       return [code] if code < 0x80
       return nil if code > 0xffffff
       if code & 0xff808080 == 0x808080
@@ -726,14 +728,32 @@ class Integer
       else
         false
       end
-    when 11, 39
-      # Windows-31J and Shift_JIS: a byte, or a lead and a trail.
+    when 11, 39, 93, 96, 98, 102, 12, 13, 14, 76, 77, 16, 18, 83, 84, 21
+      # A byte, or a lead and a trail: Windows-31J, Shift_JIS, MacJapanese
+      # and the carriers' SJIS-DoCoMo, -KDDI and -SoftBank; Big5, Big5-HKSCS,
+      # Big5-UAO, CP950 and CP951; CP949; EUC-KR, GB2312 and GB12345; GBK.
       return [code] if code < 0x100
       return nil if code > 0xffff
       [code >> 8, code & 0xff]
+    when 19, 20
+      # EUC-TW and GB18030: a byte, two, or four, and nothing of three.
+      return [code] if code < 0x100
+      return [code >> 8, code & 0xff] if code < 0x10000
+      return false if code < 0x1000000
+      [code >> 24, (code >> 16) & 0xff, (code >> 8) & 0xff, code & 0xff]
+    when 17, 79, 100
+      # Emacs-Mule and the stateless ISO-2022-JPs: as many bytes as the code
+      # has.
+      bytes = []
+      loop do
+        bytes.unshift(code & 0xff)
+        code >>= 8
+        break if code == 0
+      end
+      bytes
     else
-      # Big5, GBK, EUC-KR, GB18030 and the other multibyte encodings' layouts
-      # wait on their character boundaries (#388).
+      # Every multibyte encoding CRuby 4.0 has is above; one it adds waits on
+      # its layout.
       __needs_char_table__
     end
   end

@@ -174,6 +174,27 @@ pub enum Encoding {
     /// characters, as far as a pattern can tell. Carried and classed as
     /// EUC-JP's are; half-width katakana is a byte alone, and a word character.
     ShiftJis,
+    /// Big5, and Big5-HKSCS, Big5-UAO, CP950 and CP951, which measure the
+    /// same: a lead `A1`-`FE` and a trail `40`-`7E` or `A1`-`FE`. This and
+    /// the multibyte encodings below are carried and classed as EUC-JP's are,
+    /// and fold no case past ASCII (#388).
+    Big5,
+    /// CP949: a lead `81`-`FE` and a trail `41`-`5A`, `61`-`7A` or `81`-`FE`,
+    /// and `80` a character alone, in no class.
+    Cp949,
+    /// EUC-KR, GB2312 and GB12345: a lead and a trail, each `A1`-`FE`.
+    EucKr,
+    /// GBK: a lead `81`-`FE` and a trail `40`-`7E` or `80`-`FE`, and `80` a
+    /// character alone, in no class.
+    Gbk,
+    /// GB18030: GBK's two bytes without its `80`, and four, `81`-`FE`,
+    /// `30`-`39`, `81`-`FE`, `30`-`39`.
+    Gb18030,
+    /// EUC-TW: two bytes `A1`-`FE`, or `8E`, a plane `A1`-`B0` and two more.
+    EucTw,
+    /// Emacs-Mule and the stateless ISO-2022-JPs: a leading byte `81`-`9D`
+    /// that says how many bytes `A0`-`FF` follow, from one to three.
+    EmacsMule,
 }
 
 /// One compiled pattern.
@@ -285,13 +306,20 @@ impl Regex {
     ///
     /// # Errors
     ///
-    /// [`Error::Budget`] if backtracking ran past its step budget.
+    /// [`Error::Budget`] if backtracking ran past its step budget, and
+    /// [`Error::Unsupported`] for a haystack with a character
+    /// [`Encoding::uncarried`] refuses.
     pub fn find_in(
         &self,
         haystack: &[u8],
         start: usize,
         encoding: Encoding,
     ) -> Result<Option<Captures>, Error> {
+        if encoding.uncarried(haystack) {
+            return Err(Error::Unsupported(
+                "a GB18030 subject with a four-byte code no character is assigned",
+            ));
+        }
         let subject = exec::Subject {
             bytes: haystack,
             enc: encoding,
@@ -315,13 +343,18 @@ impl Regex {
     ///
     /// # Errors
     ///
-    /// [`Error::Budget`] if backtracking ran past its step budget.
+    /// As [`Regex::find_in`].
     pub fn match_in(
         &self,
         haystack: &[u8],
         start: usize,
         encoding: Encoding,
     ) -> Result<Option<Captures>, Error> {
+        if encoding.uncarried(haystack) {
+            return Err(Error::Unsupported(
+                "a GB18030 subject with a four-byte code no character is assigned",
+            ));
+        }
         let subject = exec::Subject {
             bytes: haystack,
             enc: encoding,
@@ -493,6 +526,96 @@ mod tests {
     }
 
     #[test]
+    fn the_other_multibyte_encodings_read_a_character_as_one() {
+        let plain = Flags::default();
+        // A trail that is an ASCII letter is no letter, a step back over it
+        // included; measured on ruby 4.0.9.
+        assert_eq!(find_in("a", plain, Encoding::Big5, b"\xa4\x61"), None);
+        assert_eq!(
+            find_in("a", plain, Encoding::Big5, b"\xa4\x61a"),
+            Some((2, 3))
+        );
+        assert_eq!(find_in("\\bb", plain, Encoding::Big5, b"\xa4\x61b"), None);
+        let icase = Flags {
+            icase: true,
+            ..Flags::default()
+        };
+        assert_eq!(find_in("A", icase, Encoding::Cp949, b"\x81\x41"), None);
+        // GBK's `80` is a character alone, and in no class.
+        assert_eq!(find_in(".", plain, Encoding::Gbk, b"\x80"), Some((0, 1)));
+        assert_eq!(find_in("[[:word:]]", plain, Encoding::Gbk, b"\x80"), None);
+        // GB18030's four bytes, whose trails are ASCII digits.
+        assert_eq!(
+            find_in(".(.).", plain, Encoding::Gb18030, b"a\x81\x30\x81\x30b"),
+            Some((0, 6))
+        );
+        assert_eq!(
+            find_in("(?<=0)1", plain, Encoding::Gb18030, b"\x81\x30\x81\x301"),
+            None
+        );
+        assert_eq!(
+            find_in("\\xa1\\xa1", plain, Encoding::EucKr, b"\xb0\xa1\xa1\xa1"),
+            Some((2, 4))
+        );
+        assert_eq!(
+            find_in(
+                "\\x8e\\xa2\\xa1\\xa1",
+                plain,
+                Encoding::EucTw,
+                b"x\x8e\xa2\xa1\xa1"
+            ),
+            Some((1, 5))
+        );
+        assert_eq!(
+            find_in(
+                "\\x90\\xa0\\xa0",
+                plain,
+                Encoding::EmacsMule,
+                b"\x90\xa0\xa0"
+            ),
+            Some((0, 3))
+        );
+    }
+
+    #[test]
+    fn a_range_compares_codes_across_their_lengths() {
+        let plain = Flags::default();
+        // Two bytes, then four: `FEFE` is below `8431A439`, which is below
+        // `90308130`, in GB18030 as in Onigmo.
+        let range = "[\\xfe\\xfe-\\x90\\x30\\x81\\x30]";
+        assert_eq!(
+            find_in(range, plain, Encoding::Gb18030, b"\x84\x31\xa4\x39"),
+            Some((0, 4))
+        );
+        assert_eq!(find_in(range, plain, Encoding::Gb18030, b"\xfe\xfd"), None);
+        let range = "[\\xa1\\xa1-\\x8e\\xa1\\xa1\\xa1]";
+        assert_eq!(
+            find_in(range, plain, Encoding::EucTw, b"\xfe\xfe"),
+            Some((0, 2))
+        );
+    }
+
+    #[test]
+    fn a_gb18030_code_no_character_has_is_refused() {
+        let re = Regex::with_encoding(".", Flags::default(), Encoding::Gb18030).expect("compiles");
+        assert!(matches!(
+            re.find_in(b"\x84\x31\xa5\x30", 0, Encoding::Gb18030),
+            Err(Error::Unsupported(_))
+        ));
+        assert!(
+            re.find_in(b"\x84\x31\xa4\x39", 0, Encoding::Gb18030)
+                .is_ok()
+        );
+        let source = Encoding::Gb18030
+            .read_source(b"\\xe3\\x32\\x9a\\x36")
+            .expect("ASCII");
+        assert!(matches!(
+            Regex::with_encoding(&source, Flags::default(), Encoding::Gb18030),
+            Err(Error::Unsupported(_))
+        ));
+    }
+
+    #[test]
     fn a_multibyte_character_is_a_word_but_no_letter() {
         let plain = Flags::default();
         let a = b"\xa4\xa2";
@@ -540,6 +663,16 @@ mod tests {
                 "\\x82a",
                 Encoding::ShiftJis,
                 "too short escaped multibyte character",
+            ),
+            (
+                "\\x81\\x30\\x81",
+                Encoding::Gb18030,
+                "too short escaped multibyte character",
+            ),
+            (
+                "\\x81\\x30\\x20\\x30",
+                Encoding::Gb18030,
+                "invalid multibyte escape",
             ),
             ("\\xff", Encoding::EucJp, "invalid multibyte escape"),
             ("\\x82\\x20", Encoding::ShiftJis, "invalid multibyte escape"),

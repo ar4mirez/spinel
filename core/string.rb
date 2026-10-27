@@ -478,9 +478,18 @@ class String
     offsets = __char_offsets__
     char = __byteslice__(0, offsets[1])
     raise ArgumentError, "invalid byte sequence in #{encoding.name}" unless char.valid_encoding?
-    return Integer.__utf8_decode__(char.__bytes__) if __encoding_index__ == 1
-    return Integer.__cesu8_decode__(char.__bytes__) if __encoding_index__ == 15
-    char.getbyte(0)
+    case __encoding_index__
+    when 1, 9, 95, 97, 101
+      # UTF-8, and UTF8-MAC and the carriers' UTF8-DoCoMo, -KDDI and -SoftBank.
+      Integer.__utf8_decode__(char.__bytes__)
+    when 15
+      Integer.__cesu8_decode__(char.__bytes__)
+    else
+      # Any other ASCII-compatible encoding's is Onigmo's code: the bytes as
+      # one big-endian number, `0xA4A2` for EUC-JP's `あ`. Measured.
+      return char.getbyte(0) unless encoding.ascii_compatible?
+      char.__bytes__.inject(0) { |code, byte| (code << 8) | byte }
+    end
   end
 
   # --- inspect -------------------------------------------------------------
@@ -550,7 +559,9 @@ class String
       __bytes__.each { |b| out << "\\x" << Integer.__hex__(b, 2) }
       return (out << "\"").__force_encoding__(shown.__index__)
     end
-    unicode = __encoding_index__ == 1 || __encoding_index__ == 15
+    # UTF-8, UTF8-MAC and the carriers' UTF8-DoCoMo, -KDDI and -SoftBank, and
+    # CESU-8: Unicode's characters, shown as `\u`.
+    unicode = [1, 9, 15, 95, 97, 101].include?(__encoding_index__)
     raw = encoding == shown
     out = +"\""
     offsets = __char_offsets__
@@ -628,8 +639,8 @@ class String
     unless unicode && char.valid_encoding?
       return char.__bytes__.map { |b| "\\x" + Integer.__hex__(b, 2) }.join unless char.valid_encoding?
       return char if raw
-      # A multibyte character of EUC-JP or Shift_JIS is its code, its bytes
-      # read as one number: `"\x{A4A2}"`. Measured.
+      # A multibyte character of any other encoding is its code, its bytes
+      # read as one number: `"\x{A4A2}"` in EUC-JP. Measured.
       return "\\x{" + char.__bytes__.map { |b| Integer.__hex__(b, 2) }.join + "}"
     end
     code = char.ord
@@ -770,7 +781,9 @@ class String
     __check_char_boundary__(start)
     pattern = String.__coerce__(pattern)
     __combined_encoding__(pattern)
-    __byte_rindex__(pattern, start)
+    # Byte by byte, a match inside a character included: CRuby's
+    # `rb_str_byterindex`. Measured.
+    __byte_rindex__(pattern, start, false)
   end
 
   def __check_char_boundary__(byte)
@@ -1218,6 +1231,15 @@ class String
       beg = found + separator.bytesize
       count += 1
       break if lim > 0 && lim <= count
+    end
+    # CRuby's `rb_str_split_m` searches on past a match inside a character,
+    # from the next one, without moving where the last piece begins — until
+    # nothing is left to find, when the last piece begins where the search
+    # stopped: `"\x82\x61".split("a")` in Shift_JIS is `[]`. Measured.
+    unless lim > 0 && lim <= count
+      while (inside = __byte_index__(separator, beg, false))
+        beg = __char_offsets__.bsearch { |offset| offset > inside }
+      end
     end
     __split_rest__(pieces, beg, lim)
   end
