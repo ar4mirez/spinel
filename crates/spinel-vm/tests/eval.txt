@@ -403,6 +403,12 @@ module Ex1; def w; "A"; end; end; o = Object.new; o.extend(Ex1); o.w  #=> "A"
 module Ex2; def w; "A"; end; end; module Ex3; def w; "B"; end; end; o = Object.new; o.extend(Ex2, Ex3); o.w  #=> "A"
 module Ex4; def w; 1; end; end; o = Object.new; before = o.respond_to?(:w); o.extend(Ex4); [before, o.respond_to?(:w)]  #=> [false, true]
 module Ex5; extend self; def h; 1; end; end; Ex5.h  #=> 1
+# A receiver with no singleton class is refused before frozen is asked: the
+# `TypeError`, not `FrozenError`. `nil` extends `NilClass` (#383).
+module Ex6; def w; 6; end; end; [1, :a, 1.5, 2**70].map { |o| begin; o.extend(Ex6); rescue => e; [e.class, e.message]; end }.uniq  #=> [[TypeError, "can't define singleton"]]
+eval("# frozen_string_literal: true\nmodule Ex9; end; begin; 'y'.extend(Ex9); rescue => e; [e.class, e.message]; end")  #=> [TypeError, "can't define singleton"]
+module Ex7; def w7; 7; end; end; [nil.extend(Ex7).w7, true.extend(Ex7).w7, nil.singleton_class.include?(Ex7)]  #=> [7, 7, true]
+module Ex8; end; [Object.new.freeze, "z".dup.freeze].map { |o| begin; o.extend(Ex8); rescue => e; e.class; end }  #=> [FrozenError, FrozenError]
 class Iv1; end; c = Iv1.new; before = c.respond_to?(:t); class Iv1; def t; 1; end; end; [before, c.respond_to?(:t)]  #=> [false, true]
 class Iv2; end; d = Iv2.new; before = d.respond_to?(:t); def d.t; 1; end; [before, d.respond_to?(:t)]  #=> [false, true]
 class Iv3; end; e = Iv3.new; before = e.respond_to?(:t); module Iv3M; def t; 1; end; end; class Iv3; include Iv3M; end; [before, e.respond_to?(:t)]  #=> [false, true]
