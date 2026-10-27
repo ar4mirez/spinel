@@ -101,7 +101,8 @@ impl CrefId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct CrefNode {
     class: ClassId,
-    /// `None` only for [`CrefId::ROOT`].
+    /// `None` only for [`CrefId::ROOT`] and the copies `using` makes of it,
+    /// which is how [`Classes::cref_is_root`] tells the top level.
     parent: Option<CrefId>,
     /// Whether this node was pushed by an eval-shaped construct — `Class.new`'s
     /// block, and `module_eval`/`class_eval`/`instance_eval` when #28 adds them.
@@ -134,6 +135,37 @@ struct CrefNode {
     /// does not: a *string* `instance_eval`'s (#38). See
     /// [`Classes::push_constant_scope`].
     consts_only: bool,
+    /// The scope `load(file, true)` runs a file in: its wrapper module, where
+    /// `main.using` is still at the top level.
+    wraps_load: bool,
+    /// The refinements active here (#352), as an index into
+    /// [`Classes::active`]: what `using` activated in this scope or one
+    /// around it, or a `refine` block's own. CRuby's `CREF_REFINEMENTS`.
+    refinements: Option<u32>,
+}
+
+/// Which refinements a scope has active (#352).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Active {
+    /// What `using` activated: for each refined class or module, its
+    /// refinements, the most recently activated first. A snapshot of which
+    /// refinements, taken when `using` ran, though not of what they define —
+    /// a refinement reopened later shows its new methods, measured, and a
+    /// refinement its module makes later does not.
+    Used(Vec<(ClassId, Vec<ClassId>)>),
+    /// A `refine` block's: every refinement its module has made, including
+    /// the ones made after the block ran, and none `using` activated around
+    /// it. CRuby hands the block the module's own `__activated_refinements__`
+    /// table, live.
+    Refining(ClassId),
+}
+
+/// What `Module#refine` made: the class or module it refines, and the module
+/// whose `refine` it came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Refinement {
+    target: ClassId,
+    owner: ClassId,
 }
 
 /// The names Ruby makes private on definition, whatever the scope's default.
@@ -620,6 +652,18 @@ pub struct Classes {
     /// Lexical scopes, as an arena of linked-list nodes. See [`CrefId`].
     /// `bootstrap` seeds node 0 with `Object`, which is [`CrefId::ROOT`].
     crefs: Vec<CrefNode>,
+    /// [`Classes::replace_refinements`]'s copies, by the node and table each
+    /// was made from, so a hot `&:sym` in a refined file allocates once.
+    refined_copies: HashMap<(CrefId, Option<u32>), CrefId>,
+    /// The refinement tables scopes point at, by [`CrefNode::refinements`].
+    /// An arena beside the crefs and for their reason: a table is never
+    /// freed, and one is made per `using` executed, not per scope.
+    active: Vec<Active>,
+    /// Every refinement `Module#refine` has made, by its own id (#352).
+    refinements: HashMap<ClassId, Refinement>,
+    /// Each module's refinements, `(target, refinement)` in the order its
+    /// `refine` calls made them: what `using` activates, and in what order.
+    refinements_by_owner: HashMap<ClassId, Vec<(ClassId, ClassId)>>,
     /// [`Classes::invalidate`]'s frontier, kept rather than allocated per call.
     /// Loading `core/*.rb` runs one walk per definition, several hundred of
     /// them, and a `Vec` and a `HashSet` per walk was measurably the whole cost
@@ -1141,9 +1185,15 @@ impl Classes {
     /// A lookup from `id`, falling back to `Object` for a module, which has
     /// none in its chain: `alias`/`alias_method` and `public :m` in a module
     /// find `Object#m` — `rb_alias`'s and `rb_export_method`'s fallback.
+    ///
+    /// A refinement finds the refined class's methods next, as CRuby's does
+    /// through the superclass it gives one (#352): `refine(Array) { alias
+    /// orig_count count }` copies `Array#count`.
     fn lookup_for_module(&mut self, id: ClassId, name: SymbolId) -> Option<Method> {
         self.lookup_uncached(id, name).or_else(|| {
-            if self.kind(id) == Kind::Module {
+            if let Some(target) = self.refined_target(id) {
+                self.lookup_uncached(target, name)
+            } else if self.kind(id) == Kind::Module {
                 self.lookup_uncached(Builtin::Object.id(), name)
             } else {
                 None
@@ -1463,10 +1513,18 @@ impl Classes {
         // to an object whose class never included it is the exception: CRuby
         // runs it from an iclass in front of that class, so `super` searches
         // the whole chain (#27).
-        let at = match chain.iter().position(|&c| c == owner) {
-            Some(at) => at + 1,
-            None if self.kind(owner) == Kind::Module => 0,
-            None => return None,
+        let refined = self.refined_target(owner);
+        let at = match (chain.iter().position(|&c| c == owner), refined) {
+            (Some(at), _) => at + 1,
+            // A refinement's method goes on to the class it refines, and only
+            // there: not to another refinement active where it was called
+            // (#352). The class's own run, its prepended modules included.
+            (None, Some(target)) => {
+                let first = self.entry(target).own.first().copied().unwrap_or(target);
+                chain.iter().position(|&c| c == first).unwrap_or(0)
+            }
+            (None, None) if self.kind(owner) == Kind::Module => 0,
+            (None, None) => return None,
         };
         for &next in &chain[at..] {
             if let Some(&(body, cref, visibility, origin)) = self.entry(next).methods.get(&name) {
@@ -1936,14 +1994,47 @@ impl Classes {
 
     fn push_cref_node(&mut self, outer: CrefId, class: ClassId, pushed_by_eval: bool) -> CrefId {
         let id = CrefId(self.crefs.len() as u32);
+        // A scope opened inside one with refinements active has them active
+        // too: a `class` body, a block's `class_eval`, an `eval`. CRuby's
+        // `vm_cref_new0` copies them from the previous cref the same way.
+        let refinements = self.cref(outer).refinements;
         self.crefs.push(CrefNode {
             class,
             parent: Some(outer),
             pushed_by_eval,
             refuses_def: false,
             consts_only: false,
+            wraps_load: false,
+            refinements,
         });
         id
+    }
+
+    /// The scope `load(file, true)` runs the file in: its wrapper module,
+    /// nested in nothing but the top level.
+    pub fn push_load_wrapper(&mut self, module: ClassId) -> CrefId {
+        let id = self.push_cref_node(CrefId::ROOT, module, false);
+        self.crefs[id.index()].wraps_load = true;
+        id
+    }
+
+    /// Whether `cref` is a file's top level: [`CrefId::ROOT`], or a copy of it
+    /// a top-level `using` made.
+    #[must_use]
+    pub fn cref_is_root(&self, cref: CrefId) -> bool {
+        self.cref(cref).parent.is_none()
+    }
+
+    /// Whether `main.using` may run in this scope: a file's top level, a
+    /// wrapped `load`'s included. Measured: a `module` body is not, even when
+    /// `send` reaches `main`'s method from it.
+    #[must_use]
+    pub fn cref_is_top_level(&self, cref: CrefId) -> bool {
+        let node = self.cref(cref);
+        match node.parent {
+            None => true,
+            Some(parent) => node.wraps_load && self.cref(parent).parent.is_none(),
+        }
     }
 
     /// Install [`CrefId::ROOT`]. Called once, by `bootstrap`, before any Ruby
@@ -1957,11 +2048,297 @@ impl Classes {
             pushed_by_eval: false,
             refuses_def: false,
             consts_only: false,
+            wraps_load: false,
+            refinements: None,
         });
     }
 
     fn cref(&self, id: CrefId) -> &CrefNode {
         &self.crefs[id.index()]
+    }
+
+    // -- refinements (#352) ------------------------------------------------
+
+    /// The refinement `owner`'s `refine` made of `target`, if it made one:
+    /// a second `refine` of the same class reopens it, measured.
+    #[must_use]
+    pub fn refinement_of(&self, owner: ClassId, target: ClassId) -> Option<ClassId> {
+        self.refinements_by_owner
+            .get(&owner)?
+            .iter()
+            .find(|&&(t, _)| t == target)
+            .map(|&(_, refinement)| refinement)
+    }
+
+    /// Record `refinement` as `owner`'s refinement of `target`.
+    pub fn add_refinement(&mut self, owner: ClassId, target: ClassId, refinement: ClassId) {
+        self.refinements
+            .insert(refinement, Refinement { target, owner });
+        self.refinements_by_owner
+            .entry(owner)
+            .or_default()
+            .push((target, refinement));
+    }
+
+    /// What `refinement` refines, when it is one.
+    #[must_use]
+    pub fn refined_target(&self, refinement: ClassId) -> Option<ClassId> {
+        self.refinements.get(&refinement).map(|r| r.target)
+    }
+
+    /// The module whose `refine` made `refinement`, when it is one.
+    #[must_use]
+    pub fn refinement_owner(&self, refinement: ClassId) -> Option<ClassId> {
+        self.refinements.get(&refinement).map(|r| r.owner)
+    }
+
+    /// `Module#refinements`: the ones `owner` made, in the order it made them.
+    #[must_use]
+    pub fn refinements_made_by(&self, owner: ClassId) -> Vec<ClassId> {
+        self.refinements_by_owner
+            .get(&owner)
+            .map(|made| made.iter().map(|&(_, refinement)| refinement).collect())
+            .unwrap_or_default()
+    }
+
+    /// Whether any refinement is active in `cref`. The question a send asks
+    /// before it may use its inline cache, so it is one index and a compare.
+    #[must_use]
+    pub fn cref_refined(&self, cref: CrefId) -> bool {
+        self.cref(cref).refinements.is_some()
+    }
+
+    /// The scope a `refine` block runs in: an eval node defining into
+    /// `refinement`, with every refinement `owner` makes active and nothing
+    /// `using` activated outside it — CRuby's `rb_yield_refine_block`.
+    pub fn push_refine_cref(
+        &mut self,
+        outer: CrefId,
+        refinement: ClassId,
+        owner: ClassId,
+    ) -> CrefId {
+        let id = self.push_cref_node(outer, refinement, true);
+        let table = self.add_active(Active::Refining(owner));
+        self.crefs[id.index()].refinements = Some(table);
+        id
+    }
+
+    /// `using module` in the scope `cref`: a copy of that scope's node with
+    /// `module`'s refinements, and its ancestors', added to what it already
+    /// had. The caller puts the copy where `cref` was, so what runs after the
+    /// `using` sees them and a method defined before it keeps the scope it was
+    /// defined in — CRuby's `rb_vm_cref_replace_with_duplicated_cref`.
+    ///
+    /// The deepest ancestor goes first, so a module's own refinement of a
+    /// class wins over one it includes; one already active is not added again.
+    pub fn using(&mut self, cref: CrefId, module: ClassId) -> CrefId {
+        let mut table = match self.cref(cref).refinements {
+            Some(index) => self.used_table(index),
+            None => Vec::new(),
+        };
+        for ancestor in self.ancestors(module).into_iter().rev() {
+            let Some(made) = self.refinements_by_owner.get(&ancestor) else {
+                continue;
+            };
+            for &(target, refinement) in made {
+                match table.iter_mut().find(|(t, _)| *t == target) {
+                    Some((_, refinements)) => {
+                        if !refinements.contains(&refinement) {
+                            refinements.insert(0, refinement);
+                        }
+                    }
+                    None => table.push((target, vec![refinement])),
+                }
+            }
+        }
+        let index = self.add_active(Active::Used(table));
+        self.replace_refinements(cref, Some(index))
+    }
+
+    /// A copy of `cref`'s node with `from`'s refinements in place of its own:
+    /// the scope a `Proc` the core library makes on a program's behalf runs in,
+    /// so `Symbol#to_proc` sends as the code that asked for it would, and the
+    /// one a method `Refinement#import_methods` copies runs in (#352).
+    pub fn with_refinements_of(&mut self, cref: CrefId, from: CrefId) -> CrefId {
+        let refinements = self.cref(from).refinements;
+        if self.cref(cref).refinements == refinements {
+            return cref;
+        }
+        self.replace_refinements(cref, refinements)
+    }
+
+    /// `Module.used_modules`: the modules whose refinements are active in
+    /// `cref`, most recently activated first.
+    #[must_use]
+    pub fn used_modules(&self, cref: CrefId) -> Vec<ClassId> {
+        let Some(index) = self.cref(cref).refinements else {
+            return Vec::new();
+        };
+        let mut modules = Vec::new();
+        for (_, refinements) in self.used_table(index) {
+            for refinement in refinements {
+                if let Some(owner) = self.refinement_owner(refinement)
+                    && !modules.contains(&owner)
+                {
+                    modules.push(owner);
+                }
+            }
+        }
+        modules
+    }
+
+    fn replace_refinements(&mut self, cref: CrefId, refinements: Option<u32>) -> CrefId {
+        if let Some(&id) = self.refined_copies.get(&(cref, refinements)) {
+            return id;
+        }
+        let mut node = *self.cref(cref);
+        node.refinements = refinements;
+        let id = CrefId(self.crefs.len() as u32);
+        self.crefs.push(node);
+        self.refined_copies.insert((cref, refinements), id);
+        id
+    }
+
+    fn add_active(&mut self, active: Active) -> u32 {
+        self.active.push(active);
+        (self.active.len() - 1) as u32
+    }
+
+    /// An active table as `using` would have built it.
+    fn used_table(&self, index: u32) -> Vec<(ClassId, Vec<ClassId>)> {
+        match &self.active[index as usize] {
+            Active::Used(table) => table.clone(),
+            Active::Refining(owner) => self
+                .refinements_by_owner
+                .get(owner)
+                .map(|made| made.iter().map(|&(t, r)| (t, vec![r])).collect())
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Calls `f` with each refinement of `target` active in table `index`,
+    /// the one that wins first, until `f` answers.
+    fn each_refinement_of<T>(
+        &self,
+        index: u32,
+        target: ClassId,
+        mut f: impl FnMut(ClassId) -> Option<T>,
+    ) -> Option<T> {
+        match &self.active[index as usize] {
+            Active::Used(table) => table
+                .iter()
+                .filter(|(t, _)| *t == target)
+                .flat_map(|(_, refinements)| refinements.iter())
+                .find_map(|&refinement| f(refinement)),
+            Active::Refining(owner) => self
+                .refinements_by_owner
+                .get(owner)?
+                .iter()
+                .filter(|&&(t, _)| t == target)
+                .find_map(|&(_, refinement)| f(refinement)),
+        }
+    }
+
+    /// Whether a refinement active in table `index` defines `name` at all.
+    fn active_defines(&self, index: u32, name: SymbolId) -> bool {
+        let defines = |refinement: ClassId| self.entry(refinement).methods.contains_key(&name);
+        match &self.active[index as usize] {
+            Active::Used(table) => table
+                .iter()
+                .flat_map(|(_, refinements)| refinements.iter())
+                .any(|&refinement| defines(refinement)),
+            Active::Refining(owner) => self
+                .refinements_by_owner
+                .get(owner)
+                .is_some_and(|made| made.iter().any(|&(_, refinement)| defines(refinement))),
+        }
+    }
+
+    /// `name` as an active refinement of `target` defines it.
+    fn refined_method(
+        &self,
+        index: u32,
+        target: ClassId,
+        name: SymbolId,
+    ) -> Option<Option<Method>> {
+        self.each_refinement_of(index, target, |refinement| {
+            let &(body, cref, visibility, origin) = self.entry(refinement).methods.get(&name)?;
+            // `undef` in a refinement hides the method where it is active.
+            if body == Value::UNDEF {
+                return Some(None);
+            }
+            Some(Some(Method {
+                owner: refinement,
+                body,
+                cref,
+                visibility,
+                origin,
+            }))
+        })
+    }
+
+    /// What `name` resolves to on `id` from code in `cref`, when a refinement
+    /// active there could change the answer; `None` when none could, and
+    /// [`Classes::lookup`] — with its caches — is the answer.
+    ///
+    /// The walk is the ancestor chain's, asking at each class or module
+    /// whether a refinement of it is active before its own table: so a
+    /// subclass's method or a singleton method still wins over a refinement of
+    /// the class above it, and a refinement of `Enumerable` answers for an
+    /// `Array`. A class's refinement is asked before the modules prepended to
+    /// it, as CRuby's `REFINED` entry in the class's own table is.
+    ///
+    /// ponytail: uncached, and so is every send naming a refined method from a
+    /// refined scope. Memoise per `(table, class, name)` beside the per-class
+    /// cache if a benchmark shows refined code mattering.
+    #[must_use]
+    pub fn refined_lookup(
+        &self,
+        id: ClassId,
+        name: SymbolId,
+        cref: CrefId,
+    ) -> Option<Option<Method>> {
+        let index = self.cref(cref).refinements?;
+        if !self.active_defines(index, name) {
+            return None;
+        }
+        let mut cursor = Some(id);
+        while let Some(c) = cursor {
+            if let Some(found) = self.refined_method(index, c, name) {
+                return Some(found);
+            }
+            for &owner in &self.entry(c).own {
+                if owner != c
+                    && let Some(found) = self.refined_method(index, owner, name)
+                {
+                    return Some(found);
+                }
+                if let Some(&(body, cref, visibility, origin)) =
+                    self.entry(owner).methods.get(&name)
+                {
+                    if body == Value::UNDEF {
+                        return Some(None);
+                    }
+                    return Some(Some(Method {
+                        owner,
+                        body,
+                        cref,
+                        visibility,
+                        origin,
+                    }));
+                }
+            }
+            cursor = self.entry(c).superclass;
+        }
+        Some(None)
+    }
+
+    /// [`Classes::lookup`], honouring the refinements active in `cref`.
+    pub fn lookup_in(&mut self, id: ClassId, name: SymbolId, cref: CrefId) -> Option<Method> {
+        match self.refined_lookup(id, name, cref) {
+            Some(found) => found,
+            None => self.lookup(id, name),
+        }
     }
 
     /// How many lookups the cache is currently answering. For tests and, in
@@ -3273,6 +3650,33 @@ mod tests {
         assert!(classes.method_defined_here(m, name));
         assert!(!classes.method_defined_here(c, name), "C inherits it");
         assert!(classes.lookup(c, name).is_some(), "but still finds it");
+    }
+
+    #[test]
+    fn a_refined_copy_of_a_scope_is_made_once_and_keeps_the_top_level() {
+        let mut heap = booted();
+        let mut scope = heap.scope();
+        let owner = scope.define_module(Some("M"));
+        let refinement = scope.define_module(None);
+        let c = scope.define_class(Some("C"), Some(Builtin::Object.id()));
+        let classes = scope.classes_mut();
+        classes.add_refinement(owner, Builtin::String.id(), refinement);
+
+        let top = classes.using(CrefId::ROOT, owner);
+        assert_ne!(top, CrefId::ROOT);
+        assert!(classes.cref_is_root(top), "`using` at the top level");
+        assert!(classes.cref_is_top_level(top));
+
+        let body = classes.push_cref(CrefId::ROOT, c);
+        assert!(!classes.cref_is_root(body));
+        let first = classes.with_refinements_of(body, top);
+        let len = classes.crefs.len();
+        for _ in 0..3 {
+            assert_eq!(classes.with_refinements_of(body, top), first);
+        }
+        assert_eq!(classes.crefs.len(), len, "a hot `&:sym` allocates once");
+        assert!(classes.cref_refined(first));
+        assert_eq!(classes.with_refinements_of(CrefId::ROOT, top), top);
     }
 
     #[test]

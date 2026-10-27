@@ -433,6 +433,32 @@ pub enum Native {
     /// `Module.nesting`: the caller's lexical scopes, which only its frame
     /// knows.
     FrameNesting,
+    /// `Module#refine` (#352): this module's refinement of the argument,
+    /// made on the first ask, with the block run as its body in a scope where
+    /// all of this module's refinements are active.
+    Refine,
+    /// `Module#using` and, with `main`, `main.using` (#352): activate a
+    /// module's refinements in the caller's lexical scope, which only the
+    /// caller's frame holds.
+    Using {
+        main: bool,
+    },
+    /// `Module#refinements` (#352): the refinements this module has made.
+    Refinements,
+    /// `Refinement#__import_methods__(module)` (#352): copy `module`'s own
+    /// methods into this refinement, each in its own scope with the
+    /// refinements active where the program called it, as CRuby's
+    /// `refinement_import_methods_i` does. Answers the name of the first one
+    /// not written in Ruby, importing nothing, or nil.
+    ImportMethods,
+    /// `Module.used_modules` (#352): the modules whose refinements are active
+    /// where the program called it.
+    UsedModules,
+    /// `Proc.__refined_by_caller__(proc)` (#352): give a `Proc` the core
+    /// library made on a program's behalf the refinements active where the
+    /// program asked for it — `Symbol#to_proc`'s, which sends as the code that
+    /// wrote `&:name` would.
+    RefinedByCaller,
     /// `binding`, string `eval` and a `Binding`'s locals (#38).
     Binding(BindingOp),
     /// `Kernel#__load_file__(path, wrap)`: parse, compile and run a file at
@@ -898,6 +924,9 @@ pub enum ReflectOp {
     /// `include` checks its arguments with while the core library is still
     /// loading and `is_a?` cannot yet run.
     ModuleKind,
+    /// `(object)` → the class or module a refinement refines, or nil for
+    /// anything that is not a refinement (#352).
+    RefinedClass,
     /// `(singleton class)` → the object it belongs to.
     Attached,
     /// `(object, mod)` → whether `mod` is among the ancestors of the object's

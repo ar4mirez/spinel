@@ -1370,10 +1370,11 @@ fn reflect_native(
                         .lookup_super(class, origin.owner, origin.name)
                 })
             } else if arg(1) == Value::NIL {
-                class_of(scope, object).and_then(|class| scope.classes_mut().lookup(class, name))
+                class_of(scope, object)
+                    .and_then(|class| scope.classes_mut().lookup_in(class, name, call.cref))
             } else {
                 let module = module_arg(scope, 1)?;
-                scope.classes_mut().lookup(module, name)
+                scope.classes_mut().lookup_in(module, name, call.cref)
             };
             match found {
                 None => Value::NIL,
@@ -1487,6 +1488,12 @@ fn reflect_native(
             match class_id_of(scope, arg(0)).map(|id| scope.classes().kind(id)) {
                 Some(Kind::Class) => Value::symbol(symbol("class")),
                 Some(Kind::Module) => Value::symbol(symbol("module")),
+                None => Value::NIL,
+            }
+        }
+        ReflectOp::RefinedClass => {
+            match class_id_of(scope, arg(0)).and_then(|id| scope.classes().refined_target(id)) {
+                Some(target) => scope.classes().object(target),
                 None => Value::NIL,
             }
         }
@@ -2760,8 +2767,9 @@ fn run<'h>(
                         if value != Value::NIL && proc_body(scope, value).is_none() {
                             stack.pop();
                             let name = crate::shared::symbols::intern("to_proc");
+                            let cref = frames[top].cref;
                             let converts = class_of(scope, value)
-                                .and_then(|class| scope.classes_mut().lookup(class, name))
+                                .and_then(|class| scope.classes_mut().lookup_in(class, name, cref))
                                 .is_some();
                             if !converts {
                                 return Err(Error::raise(
@@ -4566,21 +4574,27 @@ fn dispatch<'h>(
                 // whose own memo answers it, and then goes on to build an
                 // exception or to find `method_missing` — not a path worth
                 // widening an entry for.
-                _ => match call.cache {
-                    Some(slot) => {
-                        let serial = scope.classes().serial(class);
-                        match scope.call_caches().get(slot, class, serial) {
-                            hit @ Some(_) => hit,
-                            None => {
-                                let found = scope.classes_mut().lookup(class, call.name);
-                                if let Some(method) = found {
-                                    scope.call_caches_mut().fill(slot, class, serial, method);
+                // A refinement active where the call was written may answer
+                // instead (#352). Neither cache can say which scope it answered
+                // for, so such a call asks the walk, and fills neither.
+                _ => match scope.classes().refined_lookup(class, call.name, call.cref) {
+                    Some(found) => found,
+                    None => match call.cache {
+                        Some(slot) => {
+                            let serial = scope.classes().serial(class);
+                            match scope.call_caches().get(slot, class, serial) {
+                                hit @ Some(_) => hit,
+                                None => {
+                                    let found = scope.classes_mut().lookup(class, call.name);
+                                    if let Some(method) = found {
+                                        scope.call_caches_mut().fill(slot, class, serial, method);
+                                    }
+                                    found
                                 }
-                                found
                             }
                         }
-                    }
-                    None => scope.classes_mut().lookup(class, call.name),
+                        None => scope.classes_mut().lookup(class, call.name),
+                    },
                 },
             };
             // R8: an unknown method raises rather than answering `nil`. A
@@ -6628,7 +6642,7 @@ fn class_or_anonymous(scope: &mut HandleScope<'_>, id: ClassId) -> String {
 /// `class variable access from toplevel`, measured.
 fn cvar_owner(scope: &mut HandleScope<'_>, cref: CrefId) -> Result<ClassId, Error> {
     let cref = scope.classes().lexical_cref(cref);
-    if cref == CrefId::ROOT {
+    if scope.classes().cref_is_root(cref) {
         return Err(Error::raise(
             "RuntimeError",
             "class variable access from toplevel",
@@ -8473,6 +8487,198 @@ fn copy_module(scope: &mut HandleScope<'_>, from: ClassId) -> Result<Value, Erro
     Ok(copy)
 }
 
+/// The lexical scope of the nearest frame that is the program's rather than
+/// the core library's: where a method written in `core/*.rb` on a program's
+/// behalf — `Kernel#method`, `Symbol#to_proc` — finds the refinements the
+/// program has active, as the C method it stands for would (#352).
+fn program_cref(frames: &[Call]) -> Option<CrefId> {
+    frames
+        .iter()
+        .rev()
+        .find(|frame| !is_internal(&frame.iseq))
+        .map(|frame| frame.cref)
+}
+
+/// `Module#refine(target) { ... }` (#352): this module's refinement of
+/// `target` — made on the first ask, reopened after — with the block run as
+/// its body, and answered rather than the block's value.
+///
+/// The body is an eval node defining into the refinement, where every
+/// refinement this module makes is active and nothing `using` activated
+/// outside it is: CRuby's `rb_yield_refine_block`. So a refined method can
+/// call another this module refines, made before or after it.
+fn refine(
+    scope: &mut HandleScope<'_>,
+    stack: &mut Stack,
+    frames: &mut Vec<Call>,
+    call: &Pending,
+    ids: &mut u64,
+) -> Result<Option<Unwind>, Error> {
+    // CRuby's checks, in its order, and its wordings.
+    if call.args.len() != 1 {
+        return Err(Error::raise(
+            "ArgumentError",
+            format!(
+                "wrong number of arguments (given {}, expected 1)",
+                call.args.len()
+            ),
+        ));
+    }
+    let block = call.block;
+    if block == Value::NIL {
+        return Err(Error::raise("ArgumentError", "no block given"));
+    }
+    if !call.block_is_literal {
+        return Err(Error::raise(
+            "ArgumentError",
+            "can't pass a Proc as a block to Module#refine",
+        ));
+    }
+    let owner = class_id_of(scope, call.receiver).ok_or(Error::NoDispatch {
+        op: "refine",
+        operands: "a receiver that is not a Module",
+    })?;
+    let target_object = call.args[0];
+    let Some(target) = class_id_of(scope, target_object) else {
+        return Err(Error::raise(
+            "TypeError",
+            format!(
+                "wrong argument type {} (expected Class or Module)",
+                class_name_of(scope, target_object)
+            ),
+        ));
+    };
+    let refinement = match scope.classes().refinement_of(owner, target) {
+        Some(refinement) => refinement,
+        None => {
+            let class = scope
+                .classes()
+                .const_get_here(Builtin::Object.id(), symbol("Refinement"))
+                .and_then(|class| class_id_of(scope, class))
+                .ok_or(Error::NoDispatch {
+                    op: "refine",
+                    operands: "a heap whose core library defines no `Refinement`",
+                })?;
+            let id = new_module_of(scope, Kind::Module, Some(class));
+            scope.classes_mut().add_refinement(owner, target, id);
+            // What `Refinement#target` and `#inspect` read, as CRuby keeps
+            // `__refined_class__` and `__defined_at__`.
+            let object = scope.classes().object(id);
+            ivar_set(scope, object, symbol("@__target__"), target_object)?;
+            ivar_set(scope, object, symbol("@__defined_at__"), call.receiver)?;
+            id
+        }
+    };
+    let object = scope.classes().object(refinement);
+    // Below the block's frame base, which leaves it as the answer: see
+    // `anonymous_module`.
+    stack.push(object);
+    let inner = Pending {
+        cache: None,
+        name: call.name,
+        receiver: block,
+        args: Vec::new(),
+        keywords: Vec::new(),
+        block: Value::NIL,
+        block_is_literal: false,
+        cref: call.cref,
+        implicit_self: false,
+        variable_call: false,
+        public_only: false,
+        target: Target::Block(block),
+        owner: None,
+        defined_as: None,
+    };
+    set_break_target(scope, block, *ids + 1);
+    push_proc_frame(scope, stack, frames, &inner, block, ids)?;
+    let last = frames.len() - 1;
+    let cref = scope
+        .classes_mut()
+        .push_refine_cref(frames[last].cref, refinement, owner);
+    frames[last].receiver = object;
+    frames[last].cref = cref;
+    frames[last].keeps_receiver = true;
+    frames[last].scope_default = ScopeDefault::Public;
+    Ok(None)
+}
+
+/// `Module#using(module)` and `main.using(module)` (#352): `module`'s
+/// refinements, and its ancestors', active in the caller's scope from here
+/// to its end. The caller's frame moves to a copy of its scope that has them,
+/// so a method or block defined after this sees them and one defined before
+/// does not — CRuby's `rb_vm_cref_replace_with_duplicated_cref`.
+///
+/// Both are refused inside a method, a block in one included; `main.using`
+/// also anywhere but a file's top level, which a wrapped `load`'s is.
+/// Measured, with CRuby's wordings.
+fn using(
+    scope: &mut HandleScope<'_>,
+    stack: &mut Stack,
+    frames: &mut [Call],
+    call: &Pending,
+    main: bool,
+) -> Result<Option<Unwind>, Error> {
+    if call.args.len() != 1 {
+        return Err(Error::raise(
+            "ArgumentError",
+            format!(
+                "wrong number of arguments (given {}, expected 1)",
+                call.args.len()
+            ),
+        ));
+    }
+    let Some(frame) = frames.last_mut() else {
+        return Err(Error::NoDispatch {
+            op: "using",
+            operands: "no caller to activate refinements in",
+        });
+    };
+    if main {
+        if frame.owner.is_some() || !scope.classes().cref_is_top_level(frame.cref) {
+            return Err(Error::raise(
+                "RuntimeError",
+                "main.using is permitted only at toplevel",
+            ));
+        }
+    } else {
+        if frame.owner.is_some() {
+            return Err(Error::raise(
+                "RuntimeError",
+                "Module#using is not permitted in methods",
+            ));
+        }
+        if frame.receiver != call.receiver {
+            return Err(Error::raise(
+                "RuntimeError",
+                "Module#using is not called on self",
+            ));
+        }
+    }
+    let argument = call.args[0];
+    let module =
+        class_id_of(scope, argument).filter(|&id| scope.classes().kind(id) == Kind::Module);
+    let Some(module) = module else {
+        return Err(Error::raise(
+            "TypeError",
+            format!(
+                "wrong argument type {} (expected Module)",
+                class_name_of(scope, argument)
+            ),
+        ));
+    };
+    // A refinement's ancestry runs into the class it refines, which CRuby's
+    // walk refuses by that class's type. Measured, for a module's too.
+    if scope.classes().refined_target(module).is_some() {
+        return Err(Error::raise(
+            "TypeError",
+            "wrong argument type Class (expected Module)",
+        ));
+    }
+    frame.cref = scope.classes_mut().using(frame.cref, module);
+    stack.push(call.receiver);
+    Ok(None)
+}
+
 /// A class or module with nothing in it, an instance of `class` — `Class`,
 /// `Module`, or a subclass of `Module` — rather than of the one `kind` would
 /// give it. A class made this way is uninitialised until something gives it a
@@ -10279,7 +10485,18 @@ fn native_call<'h>(
             stack.push(value);
             Ok(None)
         }
-        Native::Reflect(op) => reflect_native(scope, stack, &call, op),
+        Native::Reflect(op) => {
+            // `Kernel#method` and its kin are Ruby, and find what the program
+            // that called them would: through its refinements (#352).
+            let call = match op {
+                ReflectOp::MethodLookup => Pending {
+                    cref: program_cref(frames).unwrap_or(call.cref),
+                    ..call
+                },
+                _ => call,
+            };
+            reflect_native(scope, stack, &call, op)
+        }
         Native::Str(op) => str_native(scope, stack, &call, op),
         Native::NumCompare => {
             let other = first_arg(&call);
@@ -11082,6 +11299,99 @@ fn native_call<'h>(
             Ok(None)
         }
 
+        Native::Refine => refine(scope, stack, frames, &call, ids),
+        Native::Using { main } => using(scope, stack, frames, &call, main),
+        Native::Refinements => {
+            let owner = class_id_of(scope, call.receiver).ok_or(Error::NoDispatch {
+                op: "refinements",
+                operands: "a receiver that is not a Module",
+            })?;
+            let made: Vec<Value> = scope
+                .classes()
+                .refinements_made_by(owner)
+                .into_iter()
+                .map(|id| scope.classes().object(id))
+                .collect();
+            let value = new_array(scope, &made);
+            stack.push(value);
+            Ok(None)
+        }
+        Native::ImportMethods => {
+            let refinement = class_id_of(scope, call.receiver)
+                .filter(|&id| scope.classes().refined_target(id).is_some())
+                .ok_or(Error::NoDispatch {
+                    op: "import_methods",
+                    operands: "a receiver that is not a refinement",
+                })?;
+            let module = call
+                .args
+                .first()
+                .and_then(|&module| class_id_of(scope, module))
+                .ok_or(Error::NoDispatch {
+                    op: "import_methods",
+                    operands: "an argument that is not a Module",
+                })?;
+            let mut methods = Vec::new();
+            for (name, body, _) in scope.classes().own_method_entries(module) {
+                // Only a body compiled from the program's Ruby: a core
+                // method stands for a C one, and a `define_method` block or
+                // an `undef` is not an iseq method in CRuby either.
+                let ruby = matches!(
+                    scope.definitions().get(body),
+                    Some(Definition::Iseq(iseq)) if !is_internal(iseq)
+                );
+                if !ruby {
+                    stack.push(Value::symbol(name));
+                    return Ok(None);
+                }
+                if let Some(method) = scope.classes().own_method(module, name) {
+                    methods.push((name, method));
+                }
+            }
+            let program = program_cref(frames).unwrap_or(call.cref);
+            for (name, method) in methods {
+                let cref = scope
+                    .classes_mut()
+                    .with_refinements_of(method.cref, program);
+                scope.classes_mut().define_method_from(
+                    refinement,
+                    name,
+                    method.body,
+                    cref,
+                    method.visibility,
+                    method.origin,
+                );
+            }
+            stack.push(Value::NIL);
+            Ok(None)
+        }
+        Native::UsedModules => {
+            let cref = program_cref(frames).unwrap_or(call.cref);
+            let used: Vec<Value> = scope
+                .classes()
+                .used_modules(cref)
+                .into_iter()
+                .map(|id| scope.classes().object(id))
+                .collect();
+            let value = new_array(scope, &used);
+            stack.push(value);
+            Ok(None)
+        }
+        Native::RefinedByCaller => {
+            let made = call.args.first().copied().unwrap_or(Value::NIL);
+            if let Some(program) = program_cref(frames)
+                && scope.classes().cref_refined(program)
+                && proc_body(scope, made).is_some()
+            {
+                let handle = scope.root(made);
+                let cref = cref_from(scope.slot(handle, PROC_CREF));
+                let cref = scope.classes_mut().with_refinements_of(cref, program);
+                scope.set_slot(handle, PROC_CREF, cref_value(cref));
+            }
+            stack.push(made);
+            Ok(None)
+        }
+
         Native::FrameDir => {
             let path = frames.last().and_then(|frame| frame.iseq.path.clone());
             let from_eval = frames.last().is_some_and(|frame| frame.iseq.from_eval);
@@ -11760,7 +12070,7 @@ fn native_call<'h>(
             let include_all = call.args.get(1).is_some_and(|&v| v.is_truthy());
             let found = scope
                 .classes_mut()
-                .lookup(class, symbol)
+                .lookup_in(class, symbol, call.cref)
                 .is_some_and(|method| include_all || method.visibility == Visibility::Public);
             // Not in the table: a program's `respond_to_missing?` decides
             // (#28), as a frame whose answer comes back as a boolean.
@@ -13372,6 +13682,11 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         ),
         (
             Builtin::Kernel,
+            &["__reflect_refined_class__"],
+            Native::Reflect(ReflectOp::RefinedClass),
+        ),
+        (
+            Builtin::Kernel,
             &["__reflect_attached__"],
             Native::Reflect(ReflectOp::Attached),
         ),
@@ -13855,6 +14170,29 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             &["__module_nesting__"],
             Native::FrameNesting,
         ),
+        // Refinements (#352): both halves work on the caller's lexical
+        // scope, which only its frame holds. `core/module.rb` makes them
+        // private and takes `refine` off `Class`; `core/object.rb` gives
+        // `main` its `using`.
+        (Builtin::Module, &["refine"], Native::Refine),
+        (Builtin::Module, &["using"], Native::Using { main: false }),
+        (Builtin::Module, &["refinements"], Native::Refinements),
+        (Builtin::Module, &["__used_modules__"], Native::UsedModules),
+        (
+            Builtin::Module,
+            &["__import_methods__"],
+            Native::ImportMethods,
+        ),
+        (
+            Builtin::Kernel,
+            &["__main_using__"],
+            Native::Using { main: true },
+        ),
+        (
+            Builtin::Kernel,
+            &["__refined_by_caller__"],
+            Native::RefinedByCaller,
+        ),
         // `main`'s `public` and `private`, aliased onto its singleton by
         // `core/object.rb` so a bare one reaches the top-level frame.
         (
@@ -14223,7 +14561,9 @@ fn operator_fast_path(scope: &mut HandleScope<'_>, left: Value, op: usize, frame
     } else {
         return true;
     };
-    scope.classes_mut().operator_is_native(which, op)
+    // A refinement can redefine the operator where it is active (#352), so
+    // code with any active sends.
+    (scope.classes_mut().operator_is_native(which, op) && !scope.classes().cref_refined(frame.cref))
         || frame
             .iseq
             .path
@@ -18271,7 +18611,7 @@ fn load_file(
         .copied()
         .and_then(|module| class_id_of(scope, module));
     let cref = match wrap {
-        Some(module) => scope.classes_mut().push_cref(CrefId::ROOT, module),
+        Some(module) => scope.classes_mut().push_load_wrapper(module),
         None => CrefId::ROOT,
     };
     let receiver = match call.args.get(2) {

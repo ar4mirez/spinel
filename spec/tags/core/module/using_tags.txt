@@ -1,1 +1,0 @@
-fails(#28: Module and Class reflection: an expectation about an error, newly reported since PRD 0077 let mspec's raise matcher run inside its BasicObject proxy):Module#using accepts module without refinements

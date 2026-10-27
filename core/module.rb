@@ -480,7 +480,7 @@ end
 # modules before `Array`'s Ruby half is loaded.
 class Module
   def include(*modules)
-    Module.__check_mixins__(modules)
+    Module.__check_mixins__(modules, "include", self)
     i = modules.size
     while i > 0
       i -= 1
@@ -491,7 +491,7 @@ class Module
   end
 
   def prepend(*modules)
-    Module.__check_mixins__(modules)
+    Module.__check_mixins__(modules, "prepend", self)
     i = modules.size
     while i > 0
       i -= 1
@@ -531,13 +531,21 @@ class Module
     Object.constants
   end
 
-  def self.__check_mixins__(modules)
+  # `verb` names the caller, for the refinements' errors (#352): a refinement
+  # can be neither mixed in nor have anything mixed into it. CRuby's order.
+  def self.__check_mixins__(modules, verb, receiver = nil)
+    if verb != "extend" && !__reflect_refined_class__(receiver).nil?
+      Kernel.raise TypeError, "Refinement##{verb} has been removed"
+    end
     Kernel.raise ArgumentError, "wrong number of arguments (given 0, expected 1+)" if modules.size == 0
     i = 0
     while i < modules.size
       mod = modules[i]
       unless __reflect_module_kind__(mod) == :module
         Kernel.raise TypeError, "wrong argument type #{mod.class} (expected Module)"
+      end
+      unless __reflect_refined_class__(mod).nil?
+        Kernel.raise TypeError, verb == "extend" ? "Cannot extend object with refinement" : "Cannot #{verb} refinement"
       end
       i += 1
     end
@@ -586,4 +594,63 @@ class Module
     return -1 if self < other
     other < self ? 1 : nil
   end
+end
+
+# Refinements (#352). `refine` and `using` are primitives: both work on the
+# caller's lexical scope, which only its frame holds. CRuby makes both
+# private, and takes `refine` off `Class`.
+class Module
+  private :refine, :using
+
+  def self.used_modules
+    __used_modules__
+  end
+end
+
+class Class
+  undef_method :refine
+end
+
+# What `refine` makes: a module of its own class, which knows what it refines
+# and which module's `refine` made it.
+class Refinement < Module
+  # A refinement is mixed into nothing: `include`, `prepend` and `extend`
+  # refuse one before these could run, and CRuby removes them.
+  undef_method :append_features, :prepend_features, :extend_object
+
+  def target
+    @__target__
+  end
+
+  # Copies the modules' own methods, written in Ruby, into this refinement,
+  # where they see the refinements active here. Not their ancestors'.
+  def import_methods(*modules)
+    modules.each do |mod|
+      unless __reflect_module_kind__(mod) == :module
+        raise TypeError, "wrong argument type #{mod.class} (expected Module)"
+      end
+    end
+    modules.each do |mod|
+      if mod.ancestors.size > 1
+        warn "#{mod} has ancestors, but Refinement#import_methods doesn't import their methods", uplevel: 0
+      end
+      name = __import_methods__(mod)
+      raise ArgumentError, "Can't import method which is not defined with Ruby code: #{mod}##{name}" if name
+    end
+    self
+  end
+  private :import_methods
+
+  # A refinement's methods continue into the class it refines, through the
+  # superclass CRuby gives it, so its `instance_methods` lists that class's
+  # too. Its `ancestors` do not: measured, `[refinement]`.
+  def instance_methods(inherit = true)
+    own = super(false)
+    inherit ? own | @__target__.instance_methods : own
+  end
+
+  def inspect
+    "#<refinement:#{@__target__.inspect}@#{@__defined_at__.inspect}>"
+  end
+  alias to_s inspect
 end

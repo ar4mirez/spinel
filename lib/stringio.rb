@@ -14,6 +14,9 @@ class StringIO
   include IO::Readable if defined?(IO::Readable)
   include IO::Writable if defined?(IO::Writable)
 
+  # CRuby's is a data object, so `Marshal.dump` refuses one.
+  Marshal.__opaque_class__(self)
+
   VERSION = "3.2.0"
   MAX_LENGTH = 2**63 - 1
 

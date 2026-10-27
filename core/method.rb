@@ -337,6 +337,8 @@ class Symbol
       rest = args.__take__(1, args.size - 1)
       receiver.public_send(name, *rest, **keywords, &block)
     end
+    # It sends through the refinements active where it was asked for (#352).
+    __refined_by_caller__(made)
     Proc.__stands_for__(made, -2, [[:req], [:rest]], nil, "(&#{inspect})")
   end
 end
