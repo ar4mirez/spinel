@@ -10,8 +10,9 @@
 //!
 //! The VM knows an encoding only by index, and character boundaries for the
 //! three launch encodings, the arithmetic ones `transcode` reads, every
-//! single-byte encoding, and the two Japanese multibyte families, whose lead
-//! and trail bytes are ranges rather than a table. Every other encoding is a name `core/` can answer about, and
+//! single-byte encoding, CESU-8, and every other ASCII-compatible multibyte
+//! encoding that is not a dummy, whose lead and trail bytes are ranges rather
+//! than a table. Every other encoding is a name `core/` can answer about, and
 //! a character operation on it is refused by the caller rather than guessed at.
 
 use crate::heap::{Handle, HandleScope, Payload};
@@ -138,12 +139,12 @@ pub fn char_len(encoding: u8, bytes: &[u8], at: usize) -> Option<usize> {
     match encoding {
         BINARY | US_ASCII => Some(1),
         UTF_8 => Some(utf8_char_len(&bytes[at..])),
-        EUC_JP | WINDOWS_31J | SHIFT_JIS => {
-            Some(japanese_char_len(encoding, &bytes[at..]).unwrap_or(1))
-        }
         CESU_8 => Some(cesu8_char_len(&bytes[at..]).unwrap_or(1)),
         _ if bytewise(encoding) => Some(1),
-        _ => crate::transcode::char_len(encoding, bytes, at),
+        _ => match multibyte(encoding) {
+            Some(engine) => Some(engine.char_width(bytes, at)),
+            None => crate::transcode::char_len(encoding, bytes, at),
+        },
     }
 }
 
@@ -158,17 +159,24 @@ fn bytewise(encoding: u8) -> bool {
         && encoding != US_ASCII
 }
 
-/// The length of the character at the start of `bytes` in EUC-JP or in the
-/// Shift_JIS family, or `None` when it is not one: a broken one is a character
-/// per byte, as for UTF-8. The regex engine's reading, so that a match's
-/// character boundaries are `String#size`'s.
-fn japanese_char_len(encoding: u8, bytes: &[u8]) -> Option<usize> {
-    let engine = if encoding == EUC_JP {
-        spinel_regex::Encoding::EucJp
-    } else {
-        spinel_regex::Encoding::ShiftJis
-    };
-    engine.char_len(bytes)
+/// How the regex engine reads a multibyte encoding other than UTF-8 and
+/// CESU-8, whose characters this layer then bounds as the engine does, so
+/// that a match's character boundaries are `String#size`'s: EUC-JP, the
+/// Shift_JIS family, Big5, CP949, EUC-KR, GBK, GB18030, EUC-TW, Emacs-Mule and
+/// the variants that measure the same as one of them, UTF-8's included
+/// (#339, #388). A broken one is a character per byte, as for UTF-8.
+#[must_use]
+pub fn multibyte(encoding: u8) -> Option<spinel_regex::Encoding> {
+    match encoding {
+        EUC_JP => Some(spinel_regex::Encoding::EucJp),
+        WINDOWS_31J | SHIFT_JIS => Some(spinel_regex::Encoding::ShiftJis),
+        BINARY | UTF_8 | US_ASCII | CESU_8 => None,
+        _ if bytewise(encoding) => None,
+        _ => crate::encoding_table::ENCODINGS
+            .get(usize::from(encoding))
+            .filter(|&&(_, compatible, dummy, _)| compatible && !dummy)
+            .and_then(|_| spinel_regex::Encoding::multibyte(name(encoding))),
+    }
 }
 
 /// The length of the CESU-8 character at the start of `bytes`, or `None` when
@@ -230,9 +238,14 @@ fn utf8_char_len(bytes: &[u8]) -> usize {
 pub fn char_offsets(encoding: u8, bytes: &[u8]) -> Option<Vec<usize>> {
     let mut offsets = Vec::with_capacity(bytes.len() + 1);
     let mut at = 0;
+    // Found once, rather than by name at every character.
+    let engine = multibyte(encoding);
     while at < bytes.len() {
         offsets.push(at);
-        at += char_len(encoding, bytes, at)?;
+        at += match engine {
+            Some(engine) => engine.char_width(bytes, at),
+            None => char_len(encoding, bytes, at)?,
+        };
     }
     offsets.push(bytes.len());
     Some(offsets)
@@ -258,15 +271,10 @@ pub fn valid(encoding: u8, bytes: &[u8]) -> Option<bool> {
         BINARY => Some(true),
         US_ASCII => Some(bytes.is_ascii()),
         UTF_8 => Some(std::str::from_utf8(bytes).is_ok()),
-        EUC_JP | WINDOWS_31J | SHIFT_JIS | CESU_8 => {
+        CESU_8 => {
             let mut at = 0;
             while at < bytes.len() {
-                let len = if encoding == CESU_8 {
-                    cesu8_char_len(&bytes[at..])
-                } else {
-                    japanese_char_len(encoding, &bytes[at..])
-                };
-                match len {
+                match cesu8_char_len(&bytes[at..]) {
                     Some(len) => at += len,
                     None => return Some(false),
                 }
@@ -274,7 +282,19 @@ pub fn valid(encoding: u8, bytes: &[u8]) -> Option<bool> {
             Some(true)
         }
         _ if bytewise(encoding) => Some(true),
-        _ => crate::transcode::valid(encoding, bytes),
+        _ => match multibyte(encoding) {
+            Some(engine) => {
+                let mut at = 0;
+                while at < bytes.len() {
+                    match engine.char_len(&bytes[at..]) {
+                        Some(len) => at += len,
+                        None => return Some(false),
+                    }
+                }
+                Some(true)
+            }
+            None => crate::transcode::valid(encoding, bytes),
+        },
     }
 }
 
@@ -400,6 +420,12 @@ fn ctype_of(encoding: u8, code: u32) -> Option<Ctype> {
     }
 }
 
+/// Whether `encoding` is UTF-8 or a variant of it, UTF8-MAC and the
+/// carriers', whose characters are UTF-8's.
+fn utf8_like(encoding: u8) -> bool {
+    encoding == UTF_8 || multibyte(encoding) == Some(spinel_regex::Encoding::Utf8)
+}
+
 fn utf8_len(code: u32) -> usize {
     match code {
         0..=0x7f => 1,
@@ -491,11 +517,13 @@ fn encode_char(encoding: u8, code: u32) -> Vec<u8> {
 /// a digit stops the carry (`"a.9"` → `"a.10"`), and a carry off the left
 /// inserts a new first character. With no alphanumerics the last character
 /// steps, wrapping bytewise. `None` for an encoding this VM cannot walk.
+/// The UTF-8 variants step as UTF-8 does.
 #[must_use]
 pub fn succ(encoding: u8, bytes: &[u8]) -> Option<Vec<u8>> {
     if bytes.is_empty() {
         return Some(Vec::new());
     }
+    let encoding = if utf8_like(encoding) { UTF_8 } else { encoding };
     let offsets = char_offsets(encoding, bytes)?;
     // Each character as (start, len, code), or None for an invalid byte,
     // which `succ` steps over.
@@ -509,7 +537,10 @@ pub fn succ(encoding: u8, bytes: &[u8]) -> Option<Vec<u8>> {
                     .and_then(|text| text.chars().next())
                     .map(|c| (w[0], piece.len(), u32::from(c)))
             } else {
-                Some((w[0], 1, u32::from(piece[0])))
+                // A multibyte character's code is its bytes as one number,
+                // which no class makes a letter or a digit.
+                let code = piece.iter().fold(0, |code, &b| code << 8 | u32::from(b));
+                Some((w[0], piece.len(), code))
             }
         })
         .collect();
@@ -557,6 +588,13 @@ pub fn succ(encoding: u8, bytes: &[u8]) -> Option<Vec<u8>> {
             let Some((start, len, code)) = entry else {
                 continue;
             };
+            // ponytail: stepping a multibyte character other than UTF-8's
+            // is `enc_succ_char` bumping its last byte until the bytes are a
+            // character again, which needs the encoding's "too short" from
+            // its "invalid"; refused until that is ported.
+            if encoding != UTF_8 && len > 1 {
+                return None;
+            }
             let (result, next) = succ_char(encoding, code, len);
             out.splice(start..start + len, encode_char(encoding, next));
             if result == Neighbor::Found {
@@ -851,9 +889,81 @@ mod tests {
         }
     }
 
+    /// An encoding's index, by its name.
+    fn named(name: &str) -> u8 {
+        index_named(name).expect("an encoding CRuby has")
+    }
+
+    #[test]
+    fn the_other_multibyte_encodings_are_bounded_as_measured() {
+        // 가 in EUC-KR, the issue's; a broken lead, a byte each.
+        assert_eq!(
+            char_offsets(named("EUC-KR"), b"\xb0\xa1a"),
+            Some(vec![0, 2, 3])
+        );
+        assert_eq!(valid(named("GB2312"), b"\xb0"), Some(false));
+        // Big5's leads start at A1, and its trail can be an ASCII letter.
+        assert_eq!(
+            char_offsets(named("CP950"), b"\xa4\x61a"),
+            Some(vec![0, 2, 3])
+        );
+        assert_eq!(valid(named("Big5-HKSCS"), b"\x87\x40"), Some(false));
+        // GBK's and CP949's 80 is a character alone; GB18030's is not.
+        assert_eq!(
+            char_offsets(named("GBK"), b"\x80\x81\x40"),
+            Some(vec![0, 1, 3])
+        );
+        assert_eq!(valid(named("CP949"), b"\x80\x81\x41"), Some(true));
+        assert_eq!(valid(named("GB18030"), b"\x80"), Some(false));
+        // GB18030's four bytes, EUC-TW's, and Emacs-Mule's three and four.
+        let gb = b"\x81\x30\x81\x30\x81\x40";
+        assert_eq!(char_offsets(named("GB18030"), gb), Some(vec![0, 4, 6]));
+        assert_eq!(
+            char_offsets(named("GB18030"), b"\x81\x30\x81"),
+            Some(vec![0, 1, 2, 3])
+        );
+        assert_eq!(
+            char_offsets(named("EUC-TW"), b"\x8e\xa2\xa1\xa1\xc4\xa1"),
+            Some(vec![0, 4, 6])
+        );
+        let mule = b"\x90\xa0\xa0\x9c\xf0\xa0\xa0";
+        assert_eq!(
+            char_offsets(named("stateless-ISO-2022-JP"), mule),
+            Some(vec![0, 3, 7])
+        );
+        // The variants read as what they measure the same as.
+        assert_eq!(
+            char_offsets(named("UTF8-MAC"), "aé".as_bytes()),
+            Some(vec![0, 1, 3])
+        );
+        assert_eq!(
+            char_offsets(named("SJIS-DoCoMo"), b"\x82\x61a"),
+            Some(vec![0, 2, 3])
+        );
+        assert_eq!(valid(named("EUC-JIS-2004"), b"\x8f\xa1\xa1"), Some(true));
+    }
+
+    #[test]
+    fn a_utf8_variant_steps_as_utf8() {
+        for variant in ["UTF8-MAC", "UTF8-DoCoMo", "UTF8-KDDI", "UTF8-SoftBank"] {
+            let encoding = named(variant);
+            assert_eq!(
+                succ(encoding, "aé".as_bytes()),
+                Some("aê".as_bytes().to_vec()),
+                "{variant}"
+            );
+            assert_eq!(
+                succ(encoding, "€".as_bytes()),
+                succ(UTF_8, "€".as_bytes()),
+                "{variant}"
+            );
+        }
+    }
+
     #[test]
     fn an_unknown_encoding_is_unknown() {
-        assert_eq!(char_offsets(9, b"abc"), None);
-        assert_eq!(valid(9, b"abc"), None);
+        let dummy = named("ISO-2022-JP");
+        assert_eq!(char_offsets(dummy, b"abc"), None);
+        assert_eq!(valid(dummy, b"abc"), None);
     }
 }

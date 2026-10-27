@@ -236,8 +236,8 @@ POSIX_HEADER = <<~TEXT
 TEXT
 
 # The classes, shorthands, word boundary and case folds of the characters past
-# ASCII in the encodings `spinel-regex` reads besides UTF-8: EUC-JP and the
-# Shift_JIS family (#339), and every single-byte encoding (#372).
+# ASCII in the encodings `spinel-regex` reads besides UTF-8: every multibyte
+# one but CESU-8 (#339, #388), and every single-byte encoding (#372).
 ENCODING_CLASSES = (POSIX.map { |name| ["[[:#{name}:]]", name] } +
                     [["\\w", "\\w"], ["\\d", "\\d"], ["\\s", "\\s"], ["\\h", "\\h"], ["\\b", "\\b"]]).freeze
 
@@ -251,7 +251,62 @@ SINGLE_BYTE = Encoding.list.select do |enc|
   end
 end.map(&:name).freeze
 
-MULTIBYTE = %w[EUC-JP Windows-31J Shift_JIS].freeze
+# The multibyte encodings past UTF-8, in CRuby's index order: ASCII-compatible,
+# not a dummy, and not a byte per character. CESU-8 is UTF-8's characters
+# spelled another way and is not read yet; the UTF-8 variants are measured
+# against UTF-8, whose classes `posix.txt` holds (#388).
+MULTIBYTE = (Encoding.list.select { |enc| enc.ascii_compatible? && !enc.dummy? }.map(&:name) -
+             SINGLE_BYTE - %w[UTF-8 US-ASCII CESU-8]).freeze
+
+# Where a character's bytes go, as CRuby reads them: from a state, each byte
+# either ends a character, leads on to another state, or starts none. The
+# states are found by trying every byte after every prefix that is not yet a
+# character but may still become one, and two states are one when every byte
+# does the same from both. State 0 is the start. Measured, not read off a
+# reference page: Big5's leads start at `A1`, not `81`, and GBK's `80` is a
+# character alone.
+def byte_states(name)
+  @byte_states ||= {}
+  @byte_states[name] ||= begin
+    states = {}
+    rows = []
+    walk = lambda do |prefix|
+      row = (0..0xFF).map do |b|
+        bytes = prefix + [b]
+        string = bytes.pack("C*").force_encoding(name)
+        if string.valid_encoding?
+          string.length == 1 ? :end : :none
+        elsif string.scrub("?") == "?"
+          walk.(bytes)
+        else
+          :none
+        end
+      end
+      # A prefix scrub reads as one replacement, but that no byte continues,
+      # is a byte that starts nothing.
+      next :none if row.all?(:none)
+      states[row] ||= (rows << row).size - 1
+    end
+    start = walk.([])
+    # Number the states from the start, breadth first.
+    order = [start]
+    order.each { |id| rows[id].each { |to| order << to if to.is_a?(Integer) && !order.include?(to) } }
+    order.map { |id| rows[id].map { |to| to.is_a?(Integer) ? order.index(to) : to } }
+  end
+end
+
+def byte_field(name)
+  byte_states(name).each_with_index.map do |row, id|
+    targets = (0..0xFF).reject { |b| row[b] == :none }.group_by { |b| row[b] }
+    moves = targets.map do |to, bytes|
+      spans = bytes.chunk_while { |a, b| b == a + 1 }.map do |run|
+        run.size == 1 ? format("%02X", run[0]) : format("%02X-%02X", run[0], run[-1])
+      end.join(",")
+      to == :end ? spans : "#{spans}>#{to}"
+    end
+    "#{id}: #{moves.join(' ')}"
+  end.join("; ")
+end
 
 # Every character past ASCII, by its code: Onigmo's number for it, the bytes
 # read as one big-endian integer.
@@ -259,18 +314,20 @@ def encoding_chars(name)
   if SINGLE_BYTE.include?(name)
     return (0x80..0xFF).map { |b| [b, b.chr.force_encoding(name)] }
   end
-  bytes = []
-  euc = (0xA1..0xFE).to_a
-  if name == "EUC-JP"
-    euc.each { |t| bytes << [0x8E, t] }
-    euc.each { |l| euc.each { |t| bytes << [l, t] } }
-    euc.each { |m| euc.each { |t| bytes << [0x8F, m, t] } }
-  else
-    (0xA1..0xDF).each { |b| bytes << [b] }
-    trails = (0x40..0x7E).to_a + (0x80..0xFC).to_a
-    ((0x81..0x9F).to_a + (0xE0..0xFC).to_a).each { |l| trails.each { |t| bytes << [l, t] } }
+  states = byte_states(name)
+  sequences = []
+  grow = lambda do |prefix, state|
+    states[state].each_with_index do |to, b|
+      next if prefix.empty? && b < 0x80
+      if to == :end
+        sequences << prefix + [b]
+      elsif to.is_a?(Integer)
+        grow.(prefix + [b], to)
+      end
+    end
   end
-  bytes.map { |list| [list.inject(0) { |code, b| (code << 8) | b }, list.pack("C*").force_encoding(name)] }
+  grow.([], 0)
+  sequences.map { |list| [list.inject(0) { |code, b| (code << 8) | b }, list.pack("C*").force_encoding(name)] }
 end
 
 def code_ranges(codes)
@@ -285,11 +342,49 @@ def encoding_class(name, pattern, chars)
   chars.select { |_, char| regexp.match?(char) }.map(&:first)
 end
 
-# The pairs `/x/i` matches in a multibyte encoding, as `[x, y]` codes. The
-# candidates are each character's Unicode other cases, transcoded back —
-# Onigmo folds nothing else in these encodings, and trying every pair is 10^8
-# matches.
-def multibyte_folds(name, chars)
+def code_of(char)
+  char.bytes.inject(0) { |code, b| (code << 8) | b }
+end
+
+# A pattern of `chars` that matches what any of them matches under `/i`: an
+# alternation of literals, or one class of them all.
+def fold_pattern(name, chars, klass)
+  quoted = chars.map { |char| Regexp.escape(char) }
+  source = klass ? "[#{quoted.join}\\x01]" : quoted.join("|")
+  Regexp.new(source.force_encoding(name), Regexp::IGNORECASE)
+end
+
+# Every `[x, y]` among `chars`, x and y apart, that a pattern of x matches y
+# by: halve the characters, look for each half's patterns in the other half,
+# and halve again. A hit names a pattern only up to its half, so each pattern
+# of the half is then tried against it alone.
+def fold_pairs(name, chars, klass, found)
+  return if chars.size < 2
+  halves = chars.each_slice((chars.size + 1) / 2).to_a
+  [halves, halves.reverse].each do |patterns, subjects|
+    hits = subjects.join.force_encoding(name).scan(fold_pattern(name, patterns, klass)).uniq
+    patterns.product(hits).each do |char, hit|
+      found << [code_of(char), code_of(hit)] if fold_pattern(name, [char], klass).match?(hit)
+    end
+  end
+  halves.each { |half| fold_pairs(name, half, klass, found) }
+end
+
+# The pairs `[x, y]` a multibyte encoding folds, `/x/i` matching `y`, or a
+# class of more than one character holding `x` matching `y` when `klass` is
+# set, past ASCII's own cases. Where there are few enough characters every
+# one is tried, as a pattern, against every other and every ASCII letter;
+# for the rest the candidates are each character's Unicode other cases,
+# transcoded back, which is all Onigmo folds in EUC-JP — trying every pair of
+# EUC-TW's is 10^10 matches, and an alternation or class of that many
+# characters is more than Onigmo compiles.
+def multibyte_folds(name, chars, klass)
+  if chars.size <= EXHAUSTIVE
+    letters = [*"A".."Z", *"a".."z"].map { |c| c.encode(name) }
+    found = []
+    fold_pairs(name, chars.map(&:last) + letters, klass, found)
+    return found.reject { |x, y| x < 0x80 && y < 0x80 }.uniq
+  end
   chars.flat_map do |code, char|
     # A code no Unicode character maps to has no other case to try.
     unicode = begin
@@ -304,11 +399,14 @@ def multibyte_folds(name, chars)
       rescue EncodingError
         next
       end
-      folded = Regexp.new(Regexp.escape(char), Regexp::IGNORECASE).match?(back)
-      [code, back.bytes.inject(0) { |c, b| (c << 8) | b }] if folded && back.bytesize == char.bytesize
+      [code, code_of(back)] if fold_pattern(name, [char], klass).match?(back) && back.bytesize == char.bytesize
     end
   end
 end
+
+# The most characters an encoding can have for its folds to be measured pair
+# by pair: EUC-KR, Big5, CP949, GBK and the GB2312 family.
+EXHAUSTIVE = 30_000
 
 # The pairs `/x/i` matches in a single-byte encoding, as `[x, y]` bytes, past
 # ASCII's own cases: every pair is tried. The relation is not symmetric —
@@ -341,9 +439,9 @@ def encoding_measure(name)
     chars = encoding_chars(name)
     classes = ENCODING_CLASSES.to_h { |pattern, label| [label, encoding_class(name, pattern, chars)] }
     single = SINGLE_BYTE.include?(name)
-    folds = single ? byte_folds(name) : multibyte_folds(name, chars)
-    class_folds = single ? byte_class_folds(name).sort : nil
-    {classes: classes, folds: folds.sort, class_folds: class_folds, size: chars.size}
+    folds = single ? byte_folds(name) : multibyte_folds(name, chars, false)
+    class_folds = single ? byte_class_folds(name) : multibyte_folds(name, chars, true)
+    {classes: classes, folds: folds.sort, class_folds: class_folds.sort, size: chars.size}
   end
 end
 
@@ -366,20 +464,46 @@ end
 
 def encoding_lines(name)
   measured = encoding_measure(name)
-  ENCODING_CLASSES.map do |_, label|
+  bytes = SINGLE_BYTE.include?(name) ? [] : ["#{name}\tbytes\t#{byte_field(name)}"]
+  bytes + ENCODING_CLASSES.map do |_, label|
     "#{name}\t#{label}\t#{class_field(name, measured[:classes][label], measured[:size])}"
-  end + ["#{name}\tfold\t#{fold_field(measured[:folds])}"] +
-    (measured[:class_folds] ? ["#{name}\tclass-fold\t#{fold_field(measured[:class_folds])}"] : [])
+  end + ["#{name}\tfold\t#{fold_field(measured[:folds])}",
+         "#{name}\tclass-fold\t#{fold_field(measured[:class_folds])}"]
 end
 
-# Each single-byte encoding's table: its own name when it is the first with
-# what it measures, else the earlier encoding's it is the same as.
+# Each encoding's table: its own name when it is the first with what it
+# measures, else the earlier encoding's it is the same as. A multibyte
+# encoding's lines start with its bytes, so only encodings with the same
+# characters can be the same.
+def encoding_owners(names)
+  seen = {}
+  names.to_h do |name|
+    table = encoding_lines(name).map { |line| line.split("\t", 2)[1] }
+    [name, seen[table] ||= name]
+  end
+end
+
 def single_byte_owners
-  @owners ||= begin
-    seen = {}
-    SINGLE_BYTE.to_h do |name|
-      table = encoding_lines(name).map { |line| line.split("\t", 2)[1] }
-      [name, seen[table] ||= name]
+  @owners ||= encoding_owners(SINGLE_BYTE)
+end
+
+# Whether a UTF-8 variant — UTF8-MAC and the three carriers' — reads as UTF-8
+# does: the same bytes, every class the same over every codepoint, and every
+# character's Unicode other cases folded the same.
+def utf8_variant?(name)
+  return false unless byte_field(name) == byte_field("UTF-8")
+  points = (0..0x10FFFF).reject { |cp| SURROGATES.cover?(cp) }
+  text = points.map { |cp| cp.chr(Encoding::UTF_8) }.join
+  ours = text.dup.force_encoding(name)
+  same_classes = ENCODING_CLASSES.all? do |pattern, _|
+    text.gsub(Regexp.new(pattern), "|").b == ours.gsub(Regexp.new(pattern.encode(name)), "|").b
+  end
+  same_classes && points.all? do |cp|
+    char = cp.chr(Encoding::UTF_8)
+    others = [char.upcase, char.downcase].uniq - [char]
+    others.all? do |other|
+      Regexp.new(Regexp.escape(char), Regexp::IGNORECASE).match?(other) ==
+        Regexp.new(Regexp.escape(char).force_encoding(name), Regexp::IGNORECASE).match?(other.dup.force_encoding(name))
     end
   end
 end
@@ -389,14 +513,22 @@ def encoding_render
     owner = single_byte_owners[name]
     owner == name ? encoding_lines(name) : ["#{name}\tsame\t#{owner}"]
   end
-  lines += MULTIBYTE.flat_map { |name| encoding_lines(name) }
+  utf8, others = MULTIBYTE.partition { |name| byte_field(name) == byte_field("UTF-8") }
+  owners = encoding_owners(others)
+  lines += MULTIBYTE.flat_map do |name|
+    if utf8.include?(name)
+      abort "#{name} no longer reads as UTF-8" unless utf8_variant?(name)
+      next ["#{name}\tsame\tUTF-8"]
+    end
+    owners[name] == name ? encoding_lines(name) : ["#{name}\tsame\t#{owners[name]}"]
+  end
   [ENCODING_HEADER.chomp, "", *lines, ""].join("\n")
 end
 
 ENCODING_HEADER = <<~TEXT
-  # The characters past ASCII in every single-byte encoding, EUC-JP,
-  # Windows-31J and Shift_JIS, as Ruby's regexps class and fold them. Do not
-  # edit by hand.
+  # The characters past ASCII in every single-byte encoding and every
+  # multibyte one but UTF-8 and CESU-8, as Ruby's regexps class and fold
+  # them. Do not edit by hand.
   #
   # Generated by `scripts/regexp-oracle.rb --generate`; CI re-runs it with
   # `--check`, and a unit test in `crates/spinel-regex/src/exec.rs` replays
@@ -406,11 +538,19 @@ ENCODING_HEADER = <<~TEXT
   # then the codes it holds — a character's code is its bytes read as one
   # big-endian number — as `;`-separated hex ranges, or `all` or `none` of
   # the multibyte encodings' characters. A `fold` line lists the pairs `/x/i`
-  # matches as `LO-HI+D`: every x from LO to HI matches x plus D. In a
-  # single-byte encoding that is every such pair but ASCII's own, and a
-  # `class-fold` line lists the pairs a class of more than one character
-  # folds, which Onigmo takes from another map. A single-byte encoding that
-  # measures the same as an earlier one is a `same` line naming it.
+  # matches as `LO-HI+D`: every x from LO to HI matches x plus D, past
+  # ASCII's own cases. A `class-fold` line lists the pairs a class of more
+  # than one character folds, which Onigmo takes from another map. Both are
+  # every pair tried in a single-byte encoding and in a multibyte one of at
+  # most 30000 characters, and each character's Unicode other cases in the
+  # larger ones.
+  #
+  # A multibyte encoding's first line is its `bytes`: from each numbered
+  # state, `;`-separated, the bytes that end a character, and the bytes that
+  # lead on to another state as `BYTES>STATE`; any other byte starts no
+  # character there. State 0 is the start. An encoding that measures the
+  # same as an earlier one is a `same` line naming it; the UTF-8 variants
+  # name UTF-8, whose classes `posix.txt` holds.
 TEXT
 
 # The same measurement as Rust, for the single-byte encodings: what

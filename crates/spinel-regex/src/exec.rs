@@ -706,9 +706,10 @@ enum Kind {
     Byte,
     /// A byte of a single-byte encoding with a table: the table's classes.
     Single(Charset, u8),
-    /// A character of EUC-JP or Shift_JIS past ASCII: word, graph and print,
-    /// and nothing else; a case only by the encoding's own arithmetic.
-    Japanese,
+    /// A character past ASCII of a multibyte encoding other than UTF-8: word,
+    /// graph and print, and nothing else; a case only by the encoding's own
+    /// arithmetic, in EUC-JP and Shift_JIS.
+    Multibyte,
 }
 
 fn kind(c: char, enc: Encoding) -> Kind {
@@ -719,7 +720,9 @@ fn kind(c: char, enc: Encoding) -> Kind {
         Encoding::Utf8 => Kind::Unicode,
         Encoding::Binary => Kind::Byte,
         Encoding::Single(set) => Kind::Single(set, u8::try_from(u32::from(c)).unwrap_or(0xff)),
-        Encoding::EucJp | Encoding::ShiftJis => Kind::Japanese,
+        // GBK's and CP949's `80` is a character alone, in no class.
+        _ if enc.lone_byte(c) => Kind::Byte,
+        _ => Kind::Multibyte,
     }
 }
 
@@ -760,7 +763,7 @@ fn chars_equal(a: char, b: char, icase: bool, enc: Encoding, fold: Fold) -> bool
             Fold::Class => table.class_folds(b, a),
         });
     }
-    if kind(a, enc) == Kind::Japanese || kind(b, enc) == Kind::Japanese {
+    if kind(a, enc) == Kind::Multibyte || kind(b, enc) == Kind::Multibyte {
         return enc.other_case(a) == Some(b);
     }
     if kind(a, enc) != Kind::Unicode || kind(b, enc) != Kind::Unicode {
@@ -789,7 +792,7 @@ fn any_other_case(c: char, enc: Encoding, mut test: impl FnMut(char) -> bool) ->
     }
     match kind(c, enc) {
         Kind::Byte | Kind::Single(..) => false,
-        Kind::Japanese => enc.other_case(c).is_some_and(test),
+        Kind::Multibyte => enc.other_case(c).is_some_and(test),
         Kind::Unicode => c
             .to_lowercase()
             .chain(c.to_uppercase())
@@ -826,8 +829,8 @@ fn text_at(haystack: Subject<'_>, sp: usize, text: &[u8], icase: bool) -> bool {
 
 /// Ruby's `\b` is defined in terms of a word character: ASCII's in UTF-8
 /// and BINARY here, the encoding's own table in the other single-byte
-/// encodings, and every multibyte character in EUC-JP and Shift_JIS, which
-/// `\w` is not.
+/// encodings, and every multibyte character in the multibyte encodings past
+/// UTF-8, which `\w` is not.
 ///
 /// ponytail: CRuby's UTF-8 `\b` is Unicode's word, not ASCII's —
 /// `/\b/ =~ "é"` is 0 there. Out of #339's scope; it moves with the rest of
@@ -835,7 +838,7 @@ fn text_at(haystack: Subject<'_>, sp: usize, text: &[u8], icase: bool) -> bool {
 fn is_word(c: char, enc: Encoding) -> bool {
     match kind(c, enc) {
         Kind::Single(set, b) => set.table().word(b),
-        Kind::Japanese => true,
+        Kind::Multibyte => true,
         Kind::Unicode | Kind::Byte => c.is_ascii_alphanumeric() || c == '_',
     }
 }
@@ -981,7 +984,7 @@ fn item_matches(item: &ClassItem, c: char, icase: bool, enc: Encoding) -> bool {
                 Kind::Unicode => posix_matches(*posix, c),
                 Kind::Byte => false,
                 Kind::Single(set, b) => set.table().posix(*posix, b),
-                Kind::Japanese => matches!(posix, Posix::Word | Posix::Graph | Posix::Print),
+                Kind::Multibyte => matches!(posix, Posix::Word | Posix::Graph | Posix::Print),
             };
             held != *negated
         }
@@ -1219,42 +1222,98 @@ mod encoding_oracle {
     const TABLE: &str = include_str!("../tests/encodings.txt");
 
     fn encoding(name: &str) -> Encoding {
-        Encoding::single_byte(name).unwrap_or_else(|| match name {
-            "EUC-JP" => Encoding::EucJp,
-            "Windows-31J" | "Shift_JIS" => Encoding::ShiftJis,
-            other => panic!("encodings.txt names an encoding the engine does not read: {other}"),
-        })
+        Encoding::single_byte(name)
+            .or_else(|| Encoding::multibyte(name))
+            .unwrap_or_else(|| {
+                panic!("encodings.txt names an encoding the engine does not read: {name}")
+            })
     }
 
     fn single(enc: Encoding) -> bool {
         matches!(enc, Encoding::Binary | Encoding::Single(_))
     }
 
-    /// Every character past ASCII, by its code, read the way a subject is.
-    fn characters(enc: Encoding) -> Vec<(u32, char)> {
-        let mut sequences: Vec<Vec<u8>> = Vec::new();
-        let euc = 0xa1..=0xfe_u8;
-        match enc {
-            _ if single(enc) => sequences.extend((0x80..=0xff_u8).map(|b| vec![b])),
-            Encoding::EucJp => {
-                sequences.extend(euc.clone().map(|t| vec![0x8e, t]));
-                for lead in euc.clone() {
-                    sequences.extend(euc.clone().map(|t| vec![lead, t]));
+    /// What a byte does from a state of a `bytes` line.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    enum Move {
+        End,
+        To(usize),
+        Nothing,
+    }
+
+    /// A `bytes` line's states: `0: 00-7F A1-FE>1; 1: 40-7E,A1-FE`.
+    fn states(field: &str) -> Vec<[Move; 256]> {
+        field
+            .split("; ")
+            .map(|state| {
+                let mut row = [Move::Nothing; 256];
+                let (_, moves) = state.split_once(": ").expect("a numbered state");
+                for group in moves.split(' ') {
+                    let (spans, to) = match group.split_once('>') {
+                        Some((spans, to)) => (spans, Move::To(to.parse().expect("a state"))),
+                        None => (group, Move::End),
+                    };
+                    for span in spans.split(',') {
+                        let (lo, hi) = span.split_once('-').unwrap_or((span, span));
+                        for b in hex(lo)..=hex(hi) {
+                            row[b as usize] = to;
+                        }
+                    }
                 }
-                for mid in euc.clone() {
-                    sequences.extend(euc.clone().map(|t| vec![0x8f, mid, t]));
+                row
+            })
+            .collect()
+    }
+
+    /// Every byte after every prefix the states reach, checked against the
+    /// engine's `char_len`; and every character past ASCII, by its bytes.
+    fn walk(
+        enc: Encoding,
+        states: &[[Move; 256]],
+        name: &str,
+        wrong: &mut Vec<String>,
+    ) -> Vec<Vec<u8>> {
+        let mut found = Vec::new();
+        let mut prefixes = vec![(Vec::new(), 0)];
+        while let Some((mut bytes, state)) = prefixes.pop() {
+            for b in 0..=0xff_u8 {
+                bytes.push(b);
+                let want = match states[state][b as usize] {
+                    Move::End => Some(bytes.len()),
+                    Move::To(next) => {
+                        prefixes.push((bytes.clone(), next));
+                        None
+                    }
+                    Move::Nothing => None,
+                };
+                let got = enc.char_len(&bytes);
+                if got != want {
+                    wrong.push(format!(
+                        "{name} {bytes:02X?}: ruby {want:?}, engine {got:?}"
+                    ));
                 }
-            }
-            _ => {
-                sequences.extend((0xa1..=0xdf_u8).map(|b| vec![b]));
-                for lead in (0x81..=0x9f_u8).chain(0xe0..=0xfc) {
-                    let trails = (0x40..=0x7e_u8).chain(0x80..=0xfc);
-                    sequences.extend(trails.map(|t| vec![lead, t]));
+                if want.is_some() && (bytes.len() > 1 || b >= 0x80) {
+                    found.push(bytes.clone());
                 }
+                bytes.pop();
             }
         }
+        found.sort();
+        found
+    }
+
+    /// Every character past ASCII, by its code, read the way a subject is.
+    /// GB18030's four-byte codes that no character is assigned are refused
+    /// rather than read, so they are not replayed.
+    fn characters(enc: Encoding, sequences: Vec<Vec<u8>>) -> Vec<(u32, char)> {
+        let sequences = if single(enc) {
+            (0x80..=0xff_u8).map(|b| vec![b]).collect()
+        } else {
+            sequences
+        };
         sequences
             .into_iter()
+            .filter(|bytes| !enc.uncarried(bytes))
             .map(|bytes| {
                 let (c, len) = enc.decode(&bytes).expect("a character");
                 assert_eq!(len, bytes.len(), "{bytes:02X?} is one character");
@@ -1334,9 +1393,25 @@ mod encoding_oracle {
         wrong: &mut Vec<String>,
     ) -> BTreeSet<(u32, u32)> {
         if !single(enc) {
+            // Each character's other case, by the encoding's arithmetic, is
+            // all the engine folds, as a literal and in a class.
             return chars
                 .iter()
-                .filter_map(|&(code, c)| enc.other_case(c).map(|other| (code, enc.code(other))))
+                .filter_map(|&(code, c)| {
+                    let other = enc.other_case(c)?;
+                    let holds = if label == "fold" {
+                        chars_equal(other, c, true, enc, Fold::Literal)
+                    } else {
+                        let two = Class {
+                            negated: false,
+                            icase: true,
+                            items: vec![ClassItem::Char(c), ClassItem::Char('\x01')],
+                            intersect: Vec::new(),
+                        };
+                        class_matches(&two, other, enc)
+                    };
+                    holds.then(|| (code, enc.code(other)))
+                })
                 .collect();
         }
         let class = |items: Vec<ClassItem>| Class {
@@ -1380,6 +1455,8 @@ mod encoding_oracle {
     fn every_class_and_fold_agrees_with_cruby() {
         let mut wrong = Vec::new();
         let mut lines: HashMap<&str, usize> = HashMap::new();
+        // Each encoding's characters, read once.
+        let mut read: HashMap<&str, Vec<(u32, char)>> = HashMap::new();
         for line in TABLE.lines() {
             if line.starts_with('#') || line.trim().is_empty() {
                 continue;
@@ -1395,10 +1472,17 @@ mod encoding_oracle {
                 continue;
             }
             *lines.entry(name).or_default() += 1;
-            let chars = characters(enc);
+            if label == "bytes" {
+                let found = walk(enc, &states(field), name, &mut wrong);
+                read.insert(name, characters(enc, found));
+                continue;
+            }
+            let chars = read
+                .entry(name)
+                .or_insert_with(|| characters(enc, Vec::new()));
             if label == "fold" || label == "class-fold" {
                 let want = folds(field);
-                let got = engine_folds(enc, label, &chars, &mut wrong);
+                let got = engine_folds(enc, label, chars, &mut wrong);
                 for pair in want.symmetric_difference(&got) {
                     wrong.push(format!(
                         "{name} fold {:X}->{:X}: ruby {}, engine {}",
@@ -1431,13 +1515,20 @@ mod encoding_oracle {
             "ISO-8859-2",
             "KOI8-R",
             "EUC-JP",
-            "Shift_JIS",
+            "Windows-31J",
+            "Big5",
+            "CP949",
+            "EUC-KR",
+            "GBK",
+            "GB18030",
+            "EUC-TW",
+            "Emacs-Mule",
         ] {
             assert!(lines.contains_key(name), "encodings.txt measures {name}");
         }
         for (name, count) in &lines {
-            // A single-byte encoding's class folds have a line of their own.
-            let want = if single(encoding(name)) { 21 } else { 20 };
+            // A multibyte encoding's bytes have a line of their own.
+            let want = if single(encoding(name)) { 21 } else { 22 };
             assert_eq!(*count, want, "{name} has a line per class and its folds");
         }
         assert!(
