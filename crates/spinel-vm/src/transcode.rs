@@ -1,7 +1,8 @@
 //! Transcoding (#19): `String#encode` and `Encoding::Converter`, for the
 //! encodings whose mapping to Unicode is arithmetic — UTF-8, US-ASCII,
-//! BINARY, ISO-8859-1, and UTF-16 and UTF-32 in both byte orders. Any other
-//! pair is refused by the caller; a table-driven encoding is a later slice's.
+//! BINARY, ISO-8859-1, and UTF-16 and UTF-32 in both byte orders — and the
+//! JIS encodings whose mapping is CRuby's table, EUC-JP, Shift_JIS and
+//! Windows-31J (#378, in `jis.rs`). Any other pair is refused by the caller.
 //!
 //! The unit of work is [`step`]: convert from a byte offset until the input
 //! ends or a character cannot be converted, and report which and why. The
@@ -22,7 +23,7 @@ pub fn supported(encoding: u8) -> bool {
     matches!(
         encoding,
         BINARY | UTF_8 | US_ASCII | UTF_16BE | UTF_16LE | UTF_32BE | UTF_32LE | ISO_8859_1
-    )
+    ) || crate::jis::supported(encoding)
 }
 
 /// One source character, or why there is none.
@@ -34,7 +35,8 @@ enum Decoded {
     Invalid { error: usize, readagain: usize },
     /// A sequence the input ended in the middle of.
     Incomplete(usize),
-    /// A BINARY byte past ASCII: a byte, but no character anywhere else.
+    /// A BINARY byte past ASCII, or a JIS character Unicode has none for: a
+    /// character here, but no character anywhere else.
     Undefined(usize),
 }
 
@@ -153,6 +155,14 @@ fn decode(encoding: u8, bytes: &[u8], at: usize) -> Decoded {
                 Decoded::Char(code, 4)
             }
         }
+        _ if crate::jis::supported(encoding) => match crate::jis::read(encoding, bytes, at) {
+            crate::jis::Read::Char(jis, len) => match crate::jis::to_unicode(encoding, jis) {
+                Some(code) => Decoded::Char(code, len),
+                None => Decoded::Undefined(len),
+            },
+            crate::jis::Read::Invalid { error, readagain } => Decoded::Invalid { error, readagain },
+            crate::jis::Read::Incomplete(len) => Decoded::Incomplete(len),
+        },
         _ => Decoded::Invalid {
             error: 1,
             readagain: 0,
@@ -190,6 +200,9 @@ pub fn encode(encoding: u8, code: u32) -> Option<Vec<u8>> {
         }
         UTF_32BE => Some(code.to_be_bytes().to_vec()),
         UTF_32LE => Some(code.to_le_bytes().to_vec()),
+        _ if crate::jis::supported(encoding) => {
+            crate::jis::write(encoding, crate::jis::from_unicode(encoding, code)?)
+        }
         _ => None,
     }
 }
@@ -220,6 +233,39 @@ pub struct Step {
     pub next: usize,
 }
 
+/// What [`convert`] makes of one character.
+type Converted = Result<(Option<Vec<u8>>, usize), (Stop, usize, usize)>;
+
+/// One character at `at`: its bytes in `destination` (`None` for the source's
+/// own, unchanged) and how many it took, or why it stops — with how many bytes
+/// are the error and how many are read again.
+///
+/// A conversion to the same encoding is `scrub`'s: a character is kept as it
+/// is, even one Unicode has no character for, and even one a round trip would
+/// spell differently.
+fn convert(source: u8, destination: u8, bytes: &[u8], at: usize) -> Converted {
+    if crate::jis::direct(source, destination) {
+        return match crate::jis::read(source, bytes, at) {
+            crate::jis::Read::Char(jis, len) => crate::jis::write(destination, jis)
+                .map(|encoded| (Some(encoded), len))
+                .ok_or((Stop::Undefined(None), len, 0)),
+            crate::jis::Read::Invalid { error, readagain } => {
+                Err((Stop::Invalid, error, readagain))
+            }
+            crate::jis::Read::Incomplete(len) => Err((Stop::Incomplete, len, 0)),
+        };
+    }
+    match decode(source, bytes, at) {
+        Decoded::Char(_, len) | Decoded::Undefined(len) if source == destination => Ok((None, len)),
+        Decoded::Char(code, len) => encode(destination, code)
+            .map(|encoded| (Some(encoded), len))
+            .ok_or((Stop::Undefined(Some(code)), len, 0)),
+        Decoded::Invalid { error, readagain } => Err((Stop::Invalid, error, readagain)),
+        Decoded::Incomplete(len) => Err((Stop::Incomplete, len, 0)),
+        Decoded::Undefined(len) => Err((Stop::Undefined(None), len, 0)),
+    }
+}
+
 /// Convert `bytes` from `start` until the end or the first character that
 /// cannot be converted.
 #[must_use]
@@ -227,18 +273,13 @@ pub fn step(source: u8, destination: u8, bytes: &[u8], start: usize) -> Step {
     let mut output = Vec::with_capacity(bytes.len().saturating_sub(start));
     let mut at = start;
     while at < bytes.len() {
-        let (stop, error_len, readagain) = match decode(source, bytes, at) {
-            Decoded::Char(code, len) => match encode(destination, code) {
-                Some(encoded) => {
-                    output.extend_from_slice(&encoded);
-                    at += len;
-                    continue;
-                }
-                None => (Stop::Undefined(Some(code)), len, 0),
-            },
-            Decoded::Invalid { error, readagain } => (Stop::Invalid, error, readagain),
-            Decoded::Incomplete(len) => (Stop::Incomplete, len, 0),
-            Decoded::Undefined(len) => (Stop::Undefined(None), len, 0),
+        let (stop, error_len, readagain) = match convert(source, destination, bytes, at) {
+            Ok((encoded, len)) => {
+                output.extend_from_slice(encoded.as_deref().unwrap_or(&bytes[at..at + len]));
+                at += len;
+                continue;
+            }
+            Err(stopped) => stopped,
         };
         let error = bytes[at..at + error_len].to_vec();
         let readagain_bytes =
