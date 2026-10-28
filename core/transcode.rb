@@ -100,7 +100,7 @@ class String
       # cannot, its bytes are read as UTF-8 as they are. Measured.
       text =
         begin
-          String.__convert__(self, source, Encoding::UTF_8, {})
+          String.__convert__(self, source, Encoding::UTF_8, {}, nil)
         rescue EncodingError
           b.force_encoding(Encoding::UTF_8)
         end
@@ -116,7 +116,7 @@ class String
       result = xml ? String.__escape_xml__(text, xml) : text.dup
       return String.__newlines__(result, newlines.first).force_encoding(target)
     end
-    String.__convert__(text, source, target, options)
+    String.__convert__(text, source, target, options, newlines.first)
   end
 
   def __converter_encoding__(value, from)
@@ -185,9 +185,8 @@ class String
   # state between steps — ISO-2022-JP's G0, the attribute's quote, a CR
   # `universal_newline` holds — so what is inserted for an error goes
   # through it too.
-  def self.__convert__(text, source, target, options)
+  def self.__convert__(text, source, target, options, newline)
     xml = options[:xml]
-    newline = __newline_decorators__(options).first
     replacement = __replacement__(target, options)
     bom = nil
     step_target = target
