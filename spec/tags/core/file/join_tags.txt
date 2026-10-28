@@ -1,1 +1,0 @@
-fails(#402: File.join returns UTF-8 whatever its paths' encoding):File.join preserves the encoding of the path
