@@ -129,7 +129,8 @@ class String
 
   # The newline decorators `options` ask for, by CRuby's names: `newline:`'s,
   # which overrides the others, or each of `universal_newline:`,
-  # `crlf_newline:` and `cr_newline:` that is truthy. Measured.
+  # `crlf_newline:`, `cr_newline:` and `lf_newline:` that is truthy, in that
+  # order. Measured.
   def self.__newline_decorators__(options)
     newline = options[:newline]
     unless newline.nil?
@@ -142,6 +143,7 @@ class String
     names << "universal_newline" if options[:universal_newline]
     names << "crlf_newline" if options[:crlf_newline]
     names << "cr_newline" if options[:cr_newline]
+    names << "lf_newline" if options[:lf_newline]
     names
   end
 

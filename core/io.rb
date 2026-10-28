@@ -853,7 +853,7 @@ end
   # The options a read transcodes with: CRuby's `make_readconv` leaves out
   # the decorators for writing. Universal newline is done on the way in.
   def __read_ecopts__
-    @ecopts.reject { |key, _| %i[newline crlf_newline cr_newline].include?(key) }
+    @ecopts.reject { |key, _| %i[newline crlf_newline cr_newline lf_newline].include?(key) }
   end
 
   # A String about to be written, in the encoding the IO writes: `@enc2`, or
