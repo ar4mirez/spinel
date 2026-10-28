@@ -120,14 +120,22 @@ class Method
     nil
   end
 
+  # The name `super_method` asks the owner under. An alias of a module's body
+  # is held under the alias's own name, and that entry knows the module it
+  # stands in for, so `super` goes on past the module (#397): asked under the
+  # original name, the owner's walk finds the aliased body itself. Any other
+  # goes on past the owner under the original name, as CRuby's does.
+  def self.__super_name__(found, name)
+    found[10] ? name : found[7] || name
+  end
+
   def unbind
     UnboundMethod.__make__(@__name__, @__found__, __reflect_class_of__(@__receiver__))
   end
 
   def super_method
-    name = original_name
-    found = __reflect_method_lookup__(@__receiver__, @__found__[0], name, true)
-    found.nil? ? nil : Method.__make__(@__receiver__, name, found, found[0])
+    found = __reflect_method_lookup__(@__receiver__, @__found__[0], Method.__super_name__(@__found__, @__name__), true)
+    found.nil? ? nil : Method.__make__(@__receiver__, original_name, found, found[0])
   end
 
   # A lambda, as CRuby's is, that calls through to this and reports this
@@ -233,9 +241,8 @@ class UnboundMethod
   end
 
   def super_method
-    name = original_name
-    found = __reflect_method_lookup__(nil, @__found__[0], name, true, @__from__)
-    found.nil? ? nil : UnboundMethod.__make__(name, found, @__from__)
+    found = __reflect_method_lookup__(nil, @__found__[0], Method.__super_name__(@__found__, @__name__), true, @__from__)
+    found.nil? ? nil : UnboundMethod.__make__(original_name, found, @__from__)
   end
 
   def ==(other)
