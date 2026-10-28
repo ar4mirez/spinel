@@ -10845,7 +10845,11 @@ fn native_call<'h>(
                     }
                     // A class's method goes only where that class reaches; a
                     // module's goes anywhere. CRuby's two messages (#398).
-                    let checked = if field(11) == Value::NIL { owner } else { field(11) };
+                    let checked = if field(11) == Value::NIL {
+                        owner
+                    } else {
+                        field(11)
+                    };
                     let refined = scope.classes().refined_target(target);
                     if let Some(from) = class_id_of(scope, checked)
                         && scope.classes().kind(from) == Kind::Class
