@@ -1232,12 +1232,46 @@ end
     nil while @rbuf.bytesize < length && __fill__(length - @rbuf.bytesize)
     length = @rbuf.bytesize if length > @rbuf.bytesize
     char = __take__(length).force_encoding(__encoding__)
-    # Bytes that do not make a character are given back one at a time.
-    if !char.valid_encoding? && char.bytesize > 1
-      @rbuf = char.byteslice(1, char.bytesize - 1).b + @rbuf
-      char = char.byteslice(0, 1)
-    end
+    return __broken_char__(char) unless char.valid_encoding?
     @enc2.nil? ? char : char.encode(__read_encoding__, **@ecopts)
+  end
+
+  # Bytes that do not make a character are given back one at a time. Where
+  # they are transcoded, the converter sees them with the bytes after, as
+  # CRuby's does on the stream: `"\xA4A"` in EUC-JP is `"\xA4" followed by
+  # "A"`, not an incomplete `"\xA4"`, and `"\xE3\x81A"` in UTF-8 is one broken
+  # sequence of two bytes. The bytes its error names are read; the rest are
+  # read again.
+  def __broken_char__(char)
+    @rbuf = char.b + @rbuf
+    length = 1
+    error = nil
+    if @enc2
+      size = char.bytesize
+      loop do
+        nil while @rbuf.bytesize <= size && __fill__(1)
+        break if error && @rbuf.bytesize <= size
+        window = @rbuf.byteslice(0, size + 1).force_encoding(__encoding__)
+        begin
+          window.encode(__read_encoding__)
+          break
+        rescue Encoding::InvalidByteSequenceError => e
+          error = e
+          length = e.error_bytes.bytesize
+          # Cut short at the end of what has been read: the converter waits
+          # for the bytes that say what it is.
+          break unless e.readagain_bytes.to_s.empty? && length == window.bytesize
+          size = length
+        end
+      end
+    end
+    char = __take__(length).force_encoding(__encoding__)
+    return char if @enc2.nil?
+    begin
+      char.encode(__read_encoding__, **@ecopts)
+    rescue Encoding::InvalidByteSequenceError
+      raise error || $!
+    end
   end
 
   def readchar
