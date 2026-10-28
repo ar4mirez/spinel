@@ -218,8 +218,9 @@ class String
     out << bom if bom
     step_source = source
     start = 0
+    unread = 0
     if source.__index__ == 7 || source.__index__ == 8
-      out, state, step_source, start = __bom_order__(text, source, target, options, replacement, step_target, out)
+      step_source, start, unread = __bom_order__(text, source, target, options)
     end
     stages = __path__(step_source, step_target)
     path = stages.map(&:__index__)
@@ -232,6 +233,15 @@ class String
       text = __newlines__(xml ? __escape_xml__(text, xml) : text, newline)
       mode = 0
       on_source = true
+    end
+    if unread > 0
+      opened = "".__transcode__(path, 0, state, mode, false)
+      __needs_char_table__ if opened.nil?
+      out << opened[0].b
+      state = opened[9]
+      unread.times do
+        out, state = __insert__(out, replacement, step_target, state) || __not_inserted__(replacement, target)
+      end
     end
     loop do
       step = text.__transcode__(path, start, state, mode, false)
@@ -377,29 +387,29 @@ class String
   # its byte order: CRuby's decoder reads every unit before it as invalid
   # and a short one at the end as incomplete, and the BOM is not output.
   # Without a BOM the whole source is read so, and is read in big-endian
-  # after it, which then has nothing left to read. The output so far, the
-  # conversion's state, the order and where it starts. Measured.
-  def self.__bom_order__(text, source, target, options, replacement, step_target, out)
+  # after it, which then has nothing left to read. The order, where it
+  # starts, and how many units before it are replaced. Measured.
+  def self.__bom_order__(text, source, target, options)
     unit = source.__index__ == 7 ? 2 : 4
     order = Encoding::LIST[source.__index__ == 7 ? 3 : 5]
-    state = 0
+    unread = 0
     at = 0
     while at < text.bytesize
       bytes = text.byteslice(at, unit).b
       at += bytes.bytesize
       if source.__index__ == 7
-        return [out, state, Encoding::UTF_16LE, at] if bytes == "\xFF\xFE".b
-        return [out, state, Encoding::UTF_16BE, at] if bytes == "\xFE\xFF".b
+        return [Encoding::UTF_16LE, at, unread] if bytes == "\xFF\xFE".b
+        return [Encoding::UTF_16BE, at, unread] if bytes == "\xFE\xFF".b
       else
-        return [out, state, Encoding::UTF_32LE, at] if bytes == "\xFF\xFE\x00\x00".b
-        return [out, state, Encoding::UTF_32BE, at] if bytes == "\x00\x00\xFE\xFF".b
+        return [Encoding::UTF_32LE, at, unread] if bytes == "\xFF\xFE\x00\x00".b
+        return [Encoding::UTF_32BE, at, unread] if bytes == "\x00\x00\xFE\xFF".b
       end
       stop = bytes.bytesize < unit ? :incomplete : :invalid
       # CRuby's only converter from either goes to UTF-8.
       raise __invalid_error__(stop, bytes, "".b, source, target, Encoding::UTF_8) unless options[:invalid] == :replace
-      out, state = __insert__(out, replacement, step_target, state) || __not_inserted__(replacement, target)
+      unread += 1
     end
-    [out, state, order, at]
+    [order, at, unread]
   end
 
   def self.__escape_xml__(text, mode)
