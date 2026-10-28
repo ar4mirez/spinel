@@ -38,7 +38,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/matchdata` | 30 | 186 | 186 | 0 | 0 | 0 | 100% |
 | `core/math` | 29 | 243 | 243 | 0 | 0 | 0 | 100% |
 | `core/method` | 26 | 199 | 197 | 0 | 0 | 2 | 99% |
-| `core/module` | 86 | 1051 | 916 | 0 | 118 | 17 | 87% |
+| `core/module` | 86 | 1051 | 921 | 0 | 118 | 12 | 88% |
 | `core/mutex` | 7 | 35 | 35 | 0 | 0 | 0 | 100% |
 | `core/nil` | 18 | 27 | 25 | 0 | 2 | 0 | 93% |
 | `core/numeric` | 46 | 326 | 324 | 0 | 0 | 2 | 99% |
@@ -131,4 +131,4 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `optional/capi` | 47 | 0 | 0 | 0 | 0 | 0 | — |
 | `optional/thread_safety` | 1 | 5 | 0 | 0 | 5 | 0 | 0% |
 | `security` | 13 | 31 | 28 | 0 | 3 | 0 | 90% |
-| **total** | 3835 | 32691 | 28640 | 0 | 3727 | 324 | 88% |
+| **total** | 3835 | 32691 | 28645 | 0 | 3727 | 319 | 88% |

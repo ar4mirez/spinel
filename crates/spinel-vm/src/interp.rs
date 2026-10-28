@@ -1473,6 +1473,11 @@ fn reflect_native(
                     };
                     let defined = scope.root(defined);
                     let aliased = method.origin.is_some_and(|origin| origin.aliased);
+                    let narrowed = match method.origin.and_then(|origin| origin.narrowed) {
+                        Some(holder) => scope.classes().object(holder),
+                        None => Value::NIL,
+                    };
+                    let narrowed = scope.root(narrowed);
                     let fields = [
                         scope.get(owner),
                         Value::fixnum(arity).expect("an arity fits a fixnum"),
@@ -1491,6 +1496,8 @@ fn reflect_native(
                         // An alias of a module's body, which `define_method`
                         // copies as that alias.
                         bool_value(aliased),
+                        // For a visibility copy, the entry it narrows.
+                        scope.get(narrowed),
                     ];
                     new_array(scope, &fields)
                 }
@@ -10836,6 +10843,27 @@ fn native_call<'h>(
                     if field(10).is_truthy() {
                         alias_of = class_id_of(scope, field(9));
                     }
+                    // A class's method goes only where that class reaches; a
+                    // module's goes anywhere. CRuby's two messages (#398).
+                    let checked = if field(11) == Value::NIL {
+                        owner
+                    } else {
+                        field(11)
+                    };
+                    let refined = scope.classes().refined_target(target);
+                    if let Some(from) = class_id_of(scope, checked)
+                        && scope.classes().kind(from) == Kind::Class
+                        && !scope.classes().reaches(target, from)
+                        && !refined.is_some_and(|refined| scope.classes().reaches(refined, from))
+                    {
+                        let message = if scope.classes().is_singleton(from) {
+                            "can't bind singleton method to a different class".to_owned()
+                        } else {
+                            let shown = inspect(scope, checked);
+                            format!("bind argument must be a subclass of {shown}")
+                        };
+                        return Err(Error::raise("TypeError", message));
+                    }
                     if scope.definitions().get(body).is_some() {
                         captured = class_id_of(scope, owner).map(|owner| Method {
                             owner,
@@ -10915,6 +10943,7 @@ fn native_call<'h>(
                         owner: alias_of.unwrap_or(target),
                         name: source_name.unwrap_or(symbol),
                         aliased: alias_of.is_some(),
+                        narrowed: None,
                     };
                     (method.body, method.cref, Some(origin))
                 }
