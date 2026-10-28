@@ -1025,13 +1025,6 @@ impl Classes {
                     } else {
                         o
                     }
-                })
-                .map(|o| {
-                    if o.narrowed == Some(from) {
-                        Origin { narrowed: Some(to), ..o }
-                    } else {
-                        o
-                    }
                 });
                 (name, (body, cref, visibility, stands_for))
             })
