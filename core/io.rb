@@ -1234,7 +1234,20 @@ end
     length = @rbuf.bytesize if length > @rbuf.bytesize
     char = __take__(length).force_encoding(__encoding__)
     return __broken_char__(char) unless char.valid_encoding?
+    char = __newline_char_in__(char)
     @enc2.nil? ? char : char.encode(__read_encoding__, **@ecopts)
+  end
+
+  # Universal newline on a character read alone: a CR is an LF, and takes
+  # the LF after it with it. CRuby waits for the character that says which,
+  # on a pipe as well. Measured.
+  def __newline_char_in__(char)
+    return char unless @ecopts[:universal_newline] || @ecopts[:newline] == :universal
+    return char unless char == "\r".encode(char.encoding)
+    lf = "\n".encode(char.encoding)
+    nil while @rbuf.bytesize < lf.bytesize && __fill__(lf.bytesize - @rbuf.bytesize)
+    __take__(lf.bytesize) if @rbuf.byteslice(0, lf.bytesize) == lf.b
+    lf
   end
 
   # Bytes that do not make a character are given back one at a time. Where
