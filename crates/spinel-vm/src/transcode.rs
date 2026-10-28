@@ -217,8 +217,14 @@ pub enum Stop {
     /// The input ends inside a character.
     Incomplete,
     /// A character the destination encoding does not have — its codepoint,
-    /// or `None` for a BINARY byte, which has none.
-    Undefined(Option<u32>),
+    /// or `None` for a BINARY byte, which has none, and for a character the
+    /// direct JIS converter met, which CRuby reports by its bytes. `reference`
+    /// is the codepoint `xml:` writes it as, which that character does have
+    /// when Unicode does.
+    Undefined {
+        code: Option<u32>,
+        reference: Option<u32>,
+    },
 }
 
 /// What one [`step`] produced.
@@ -248,7 +254,17 @@ fn convert(source: u8, destination: u8, bytes: &[u8], at: usize) -> Converted {
         return match crate::jis::read(source, bytes, at) {
             crate::jis::Read::Char(jis, len) => crate::jis::write(destination, jis)
                 .map(|encoded| (Some(encoded), len))
-                .ok_or((Stop::Undefined(None), len, 0)),
+                .ok_or_else(|| {
+                    let reference = crate::jis::to_unicode(source, jis);
+                    (
+                        Stop::Undefined {
+                            code: None,
+                            reference,
+                        },
+                        len,
+                        0,
+                    )
+                }),
             crate::jis::Read::Invalid { error, readagain } => {
                 Err((Stop::Invalid, error, readagain))
             }
@@ -259,10 +275,24 @@ fn convert(source: u8, destination: u8, bytes: &[u8], at: usize) -> Converted {
         Decoded::Char(_, len) | Decoded::Undefined(len) if source == destination => Ok((None, len)),
         Decoded::Char(code, len) => encode(destination, code)
             .map(|encoded| (Some(encoded), len))
-            .ok_or((Stop::Undefined(Some(code)), len, 0)),
+            .ok_or((
+                Stop::Undefined {
+                    code: Some(code),
+                    reference: Some(code),
+                },
+                len,
+                0,
+            )),
         Decoded::Invalid { error, readagain } => Err((Stop::Invalid, error, readagain)),
         Decoded::Incomplete(len) => Err((Stop::Incomplete, len, 0)),
-        Decoded::Undefined(len) => Err((Stop::Undefined(None), len, 0)),
+        Decoded::Undefined(len) => Err((
+            Stop::Undefined {
+                code: None,
+                reference: None,
+            },
+            len,
+            0,
+        )),
     }
 }
 
@@ -397,7 +427,49 @@ mod tests {
     #[test]
     fn undefined_carries_the_codepoint() {
         let s = step(UTF_8, US_ASCII, "aé".as_bytes(), 0);
-        assert_eq!(s.stop, Stop::Undefined(Some(0xe9)));
+        assert_eq!(
+            s.stop,
+            Stop::Undefined {
+                code: Some(0xe9),
+                reference: Some(0xe9)
+            }
+        );
         assert_eq!(s.output, b"a");
+    }
+
+    #[test]
+    fn direct_jis_undefined_is_referenced_by_its_source_codepoint() {
+        use crate::strings::{EUC_JP, SHIFT_JIS};
+        for (bytes, reference) in [
+            (&b"\x8f\xab\xb1a"[..], 0xe9),
+            (b"\x8f\xa2\xaf", 0x2d8),
+            (b"\x8f\xa9\xa1", 0xc6),
+        ] {
+            let s = step(EUC_JP, SHIFT_JIS, bytes, 0);
+            assert_eq!(
+                s.stop,
+                Stop::Undefined {
+                    code: None,
+                    reference: Some(reference)
+                }
+            );
+            assert_eq!(s.error, &bytes[..3]);
+        }
+        let s = step(EUC_JP, SHIFT_JIS, b"\x8e\xe0", 0);
+        assert_eq!(
+            s.stop,
+            Stop::Undefined {
+                code: None,
+                reference: None
+            }
+        );
+        let s = step(SHIFT_JIS, EUC_JP, b"\xf0\x40", 0);
+        assert_eq!(
+            s.stop,
+            Stop::Undefined {
+                code: None,
+                reference: None
+            }
+        );
     }
 }

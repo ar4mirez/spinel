@@ -136,7 +136,7 @@ class String
     loop do
       step = text.__transcode__(step_source.__index__, step_target.__index__, start)
       __needs_char_table__ if step.nil?
-      output, stop, error, readagain, following, code = step
+      output, stop, error, readagain, following, code, reference = step
       out << output.b
       break if stop == :done
       piece =
@@ -150,8 +150,8 @@ class String
           # A character with a codepoint is UTF-8's, whatever the source:
           # it is what the step that failed was given. Measured.
           char = code ? Integer.__utf8__(code) : error.dup.force_encoding(source)
-          if xml && code
-            "&#x#{Integer.__hex__(code, 1)};"
+          if xml && reference
+            "&#x#{Integer.__hex__(reference, 1)};"
           elsif options[:undef] == :replace
             replacement
           elsif options[:fallback]
@@ -527,7 +527,7 @@ class Encoding
       start = 0
       loop do
         step = input.__transcode__(@source_encoding.__index__, @destination_encoding.__index__, start)
-        converted, stop, error, readagain, following, code = step
+        converted, stop, error, readagain, following, code, reference = step
         output << converted.b
         if stop == :done
           @errinfo = [flags & PARTIAL_INPUT != 0 ? :source_buffer_empty : :finished, nil, nil, nil, nil]
@@ -541,8 +541,8 @@ class Encoding
         end
         replace =
           if stop == :undefined
-            if flags & UNDEF_MASK == UNDEF_HEX_CHARREF && code
-              "&#x#{Integer.__hex__(code, 1)};"
+            if flags & UNDEF_MASK == UNDEF_HEX_CHARREF && reference
+              "&#x#{Integer.__hex__(reference, 1)};"
             elsif flags & UNDEF_MASK == UNDEF_REPLACE
               @replacement
             end
