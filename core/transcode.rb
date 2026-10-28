@@ -175,6 +175,23 @@ class String
     end
   end
 
+  # What follows the byte at `at` of what a decorator wrote for one source
+  # byte, in `text` as the decorators wrote it: the rest of an entity `xml:`
+  # wrote, or the LF of a CRLF `crlf_newline` did. Every `&` there is an
+  # entity's and every CRLF a decorated LF.
+  def self.__decorator_rest__(text, at, xml, newline)
+    bytes = text.b
+    rest =
+      if xml && bytes.getbyte(at) == 38
+        bytes.byteslice(at + 1, bytes.index(";", at) - at)
+      elsif newline == "crlf_newline" && bytes.getbyte(at) == 13 && bytes.getbyte(at + 1) == 10
+        "\n".b
+      else
+        "".b
+      end
+    rest.force_encoding(text.encoding)
+  end
+
   def self.__unicode__(encoding)
     UNICODE_INDEXES.include?(encoding.__index__)
   end
@@ -204,12 +221,14 @@ class String
     stages = __path__(step_source, step_target)
     path = stages.map(&:__index__)
     mode = (xml == :attr ? 2 : (xml ? 1 : 0)) | NEWLINE_MODES.fetch(newline, 0) << 2
+    on_source = false
     if (xml || newline) && stages.drop(1).none?(&:ascii_compatible?)
       # The decorators read the source itself — UTF-8 into UTF-16 or UTF-32
       # — and work on its bytes before they are read, so an error reports
       # the bytes they wrote. Measured.
       text = __newlines__(xml ? __escape_xml__(text, xml) : text, newline)
       mode = 0
+      on_source = true
     end
     state = 0
     out = String.new(encoding: Encoding::BINARY)
@@ -226,6 +245,17 @@ class String
         case stop
         when :invalid, :incomplete
           raise __invalid_error__(stop, error, readagain, source, target, to) unless options[:invalid] == :replace
+          if on_source && !readagain.empty?
+            # The byte read again began what a decorator wrote for one
+            # source byte — CRLF for LF, an entity for `<` — and CRuby
+            # writes the rest of it before the replacement, and that byte
+            # after. Measured.
+            rest = __decorator_rest__(text, following, xml, newline)
+            unless rest.empty?
+              out, state = __insert__(out, rest, step_target, state)
+              text = text.byteslice(0, following + 1) + text.byteslice(following + 1 + rest.bytesize, text.bytesize)
+            end
+          end
           __insert__(out, replacement, step_target, state)
         when :undefined
           if xml && reference
