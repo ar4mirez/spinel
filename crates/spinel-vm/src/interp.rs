@@ -10836,6 +10836,20 @@ fn native_call<'h>(
                     if field(10).is_truthy() {
                         alias_of = class_id_of(scope, field(9));
                     }
+                    // A class's method goes only where that class reaches; a
+                    // module's goes anywhere. CRuby's two messages (#398).
+                    if let Some(from) = class_id_of(scope, owner)
+                        && scope.classes().kind(from) == Kind::Class
+                        && !scope.classes().reaches(target, from)
+                    {
+                        let message = if scope.classes().is_singleton(from) {
+                            "can't bind singleton method to a different class".to_owned()
+                        } else {
+                            let shown = inspect(scope, owner);
+                            format!("bind argument must be a subclass of {shown}")
+                        };
+                        return Err(Error::raise("TypeError", message));
+                    }
                     if scope.definitions().get(body).is_some() {
                         captured = class_id_of(scope, owner).map(|owner| Method {
                             owner,
