@@ -861,6 +861,9 @@ pub enum StrOp {
     AsciiOnly,
     /// `()` → each character's starting byte offset, then the bytesize.
     CharOffsets,
+    /// `()` → whether the receiver is a character cut short, the start of
+    /// one that more bytes would finish.
+    CutShort,
     /// `(string)` → the encoding index the two would combine in, or nil.
     Compatible,
     /// `(needle, byte_start)` → the byte offset of the first `needle` at or

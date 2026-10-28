@@ -148,6 +148,15 @@ pub fn char_len(encoding: u8, bytes: &[u8], at: usize) -> Option<usize> {
     }
 }
 
+/// Whether `bytes` starts with a character of `encoding` cut short, which more
+/// bytes would finish: what an IO reading a character asks before it waits
+/// for the rest. Only the multibyte encodings the regex engine reads answer;
+/// a reader knows the others' lengths from their first bytes.
+#[must_use]
+pub fn cut_short(encoding: u8, bytes: &[u8]) -> bool {
+    multibyte(encoding).is_some_and(|engine| engine.is_cut_short(bytes))
+}
+
 /// Whether every byte is a character of `encoding` on its own: an
 /// ASCII-compatible single-byte encoding that is not a dummy — ISO-8859-1 to
 /// -16, KOI8, the Windows and IBM code pages, macRoman and the rest. Measured

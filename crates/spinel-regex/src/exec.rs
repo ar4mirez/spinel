@@ -1266,7 +1266,7 @@ mod encoding_oracle {
     }
 
     /// Every byte after every prefix the states reach, checked against the
-    /// engine's `char_len`; and every character past ASCII, by its bytes.
+    /// engine's `char_len` and `is_cut_short`; and every character past ASCII, by its bytes.
     fn walk(
         enc: Encoding,
         states: &[[Move; 256]],
@@ -1291,6 +1291,10 @@ mod encoding_oracle {
                     wrong.push(format!(
                         "{name} {bytes:02X?}: ruby {want:?}, engine {got:?}"
                     ));
+                }
+                let cut = matches!(states[state][b as usize], Move::To(_));
+                if enc.is_cut_short(&bytes) != cut {
+                    wrong.push(format!("{name} {bytes:02X?}: cut short is {cut}"));
                 }
                 if want.is_some() && (bytes.len() > 1 || b >= 0x80) {
                     found.push(bytes.clone());
