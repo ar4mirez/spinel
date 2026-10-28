@@ -12,8 +12,9 @@
 //! three launch encodings, the arithmetic ones `transcode` reads, every
 //! single-byte encoding, CESU-8, every other ASCII-compatible multibyte
 //! encoding that is not a dummy, whose lead and trail bytes are ranges rather
-//! than a table, and the dummies, a byte each. Every other encoding is a name `core/` can answer about, and
-//! a character operation on it is refused by the caller rather than guessed at.
+//! than a table, and the dummies, a byte each. Every other encoding is a name
+//! `core/` can answer about, and a character operation on it is refused by
+//! the caller rather than guessed at.
 
 use crate::heap::{Handle, HandleScope, Payload};
 use crate::value::Value;
