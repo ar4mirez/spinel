@@ -1243,11 +1243,12 @@ end
   # on a pipe as well. Measured.
   def __newline_char_in__(char)
     return char unless @ecopts[:universal_newline] || @ecopts[:newline] == :universal
-    return char unless char == "\r".encode(char.encoding)
-    lf = "\n".encode(char.encoding)
+    enc = char.encoding
+    cr, lf = enc.ascii_compatible? ? ["\r".b, "\n".b] : ["\r".encode(enc).b, "\n".encode(enc).b]
+    return char unless char.b == cr
     nil while @rbuf.bytesize < lf.bytesize && __fill__(lf.bytesize - @rbuf.bytesize)
-    __take__(lf.bytesize) if @rbuf.byteslice(0, lf.bytesize) == lf.b
-    lf
+    __take__(lf.bytesize) if @rbuf.byteslice(0, lf.bytesize) == lf
+    lf.force_encoding(enc)
   end
 
   # Bytes that do not make a character are given back one at a time. Where
