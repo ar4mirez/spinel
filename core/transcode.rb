@@ -241,17 +241,24 @@ class String
   end
 
   # `out` with `piece` appended in `target`, and the conversion's state after
-  # it: a piece CRuby inserts goes through the target's encoder, so it
-  # switches ISO-2022-JP's G0 as the text around it does. nil when `piece`
-  # has no spelling in `target`.
+  # it. CRuby converts a piece on its own to the target's insert encoding —
+  # stateless-ISO-2022-JP for ISO-2022-JP — and then through the target's
+  # encoder, so it switches ISO-2022-JP's G0 as the text around it does and
+  # leaves the source's decoder as it was. nil when `piece` has no spelling
+  # in `target`.
   def self.__insert__(out, piece, target, state)
     return [out, state] if piece.empty?
-    if piece.encoding.equal?(target)
-      bytes = piece.b
-    else
-      path = __path__(piece.encoding, target).map(&:__index__)
-      step = piece.__transcode__(path, 0, state, 0, false)
+    via = target.__index__ == 85 ? Encoding::LIST[79] : target
+    bytes = piece.b
+    unless piece.encoding.equal?(via)
+      path = __path__(piece.encoding, via).map(&:__index__)
+      step = piece.__transcode__(path, 0, 0, 0, false)
       __needs_char_table__ if step.nil?
+      return nil unless step[1] == :done
+      bytes = step[0].b
+    end
+    unless via.equal?(target)
+      step = bytes.__transcode__([79, 85], 0, state, 0, false)
       return nil unless step[1] == :done
       bytes = step[0].b
       state = step[9]
