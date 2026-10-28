@@ -259,8 +259,8 @@ pub struct Step {
 
 /// What a conversion keeps between steps, which Ruby holds as one Integer:
 /// ISO-2022-JP's decoder G0 in the low two bits and its encoder's in the
-/// next two, and whether `xml: :attr` has opened its quote. A fresh
-/// conversion is 0.
+/// next two, whether `xml: :attr` has opened its quote, and whether
+/// `universal_newline` holds a CR. A fresh conversion is 0.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct State(pub u8);
 
@@ -288,14 +288,49 @@ impl State {
     fn set_quoted(&mut self, quoted: bool) {
         self.0 = self.0 & !16 | u8::from(quoted) << 4;
     }
+
+    fn held(self) -> bool {
+        self.0 & 32 != 0
+    }
+
+    fn set_held(&mut self, held: bool) {
+        self.0 = self.0 & !32 | u8::from(held) << 5;
+    }
 }
 
 /// How `xml:` escapes: not at all, as text, or as an attribute's content.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Xml {
+    #[default]
     None,
     Text,
     Attr,
+}
+
+/// Which newline decorator works: none; `universal_newline`, which `lf_newline`
+/// is too, CRLF and CR to LF; `crlf_newline`, LF to CRLF; or `cr_newline`, LF
+/// to CR.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Newline {
+    #[default]
+    None,
+    Universal,
+    Crlf,
+    Cr,
+}
+
+/// The decorators a conversion runs, which work together at one stage of its
+/// path, the xml ones before the newline one. Measured.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Decorators {
+    pub xml: Xml,
+    pub newline: Newline,
+}
+
+impl Decorators {
+    fn any(self) -> bool {
+        self != Self::default()
+    }
 }
 
 /// The entity `xml:` writes for an ASCII byte, if it writes one.
@@ -311,7 +346,7 @@ fn escape(xml: Xml, byte: u8) -> Option<&'static [u8]> {
 }
 
 /// Whether ASCII is ASCII in `encoding`, which is where CRuby's decorators
-/// work: `xml:` escapes at the last such stage of a path.
+/// work: at the last such stage of a path.
 fn ascii_compatible(encoding: u8) -> bool {
     !matches!(
         encoding,
@@ -473,30 +508,19 @@ struct Stages {
 }
 
 /// Carries one character, `stages.current` in `path[k]`, through the rest of
-/// `path` into `out`, escaping it for `xml:` at stage `decorate`.
+/// `path` into `out`, decorated at stage `at`.
 fn carry(
     path: &[u8],
     mut k: usize,
     stages: &mut Stages,
     state: &mut State,
-    (xml, decorate): (Xml, Option<usize>),
+    (decorators, at): (Decorators, Option<usize>),
     out: &mut Vec<u8>,
 ) -> Result<(), Refused> {
     let last = path.len() - 1;
     loop {
-        if decorate == Some(k) && xml == Xml::Attr && !state.quoted() {
-            // The quote opens with the first character that reaches it, so
-            // an entity written for an undefined one before is outside it.
-            // Measured.
-            state.set_quoted(true);
-            unescaped(path, k, b"\"", state, out)?;
-        }
-        let entity = match stages.current.as_slice() {
-            &[byte] if decorate == Some(k) => escape(xml, byte),
-            _ => None,
-        };
-        if let Some(entity) = entity {
-            return unescaped(path, k, entity, state, out);
+        if at == Some(k) {
+            return decorate(path, k, stages, state, decorators, out);
         }
         if k == last {
             out.extend_from_slice(&stages.current);
@@ -525,7 +549,92 @@ fn carry(
     }
 }
 
-/// Carries ASCII `text` from stage `k` the rest of the way, unescaped.
+/// The decorators on one character at stage `k`, in CRuby's order: `xml:`'s
+/// escape, its quote, which opens with the first character that reaches it
+/// — so an entity written for an undefined one before is outside it — and
+/// the newline decorator, which every piece of either goes through.
+/// Measured.
+fn decorate(
+    path: &[u8],
+    k: usize,
+    stages: &mut Stages,
+    state: &mut State,
+    decorators: Decorators,
+    out: &mut Vec<u8>,
+) -> Result<(), Refused> {
+    let Decorators { xml, newline } = decorators;
+    if xml == Xml::Attr && !state.quoted() {
+        state.set_quoted(true);
+        newlines(path, k, b"\"", state, newline, out)?;
+    }
+    let entity = match stages.current.as_slice() {
+        &[byte] => escape(xml, byte),
+        _ => None,
+    };
+    match entity {
+        Some(entity) => newlines(path, k, entity, state, newline, out),
+        None => newlined(path, k, stages, state, newline, out),
+    }
+}
+
+/// ASCII `text` at stage `k` through the newline decorator, byte by byte.
+fn newlines(
+    path: &[u8],
+    k: usize,
+    text: &[u8],
+    state: &mut State,
+    newline: Newline,
+    out: &mut Vec<u8>,
+) -> Result<(), Refused> {
+    for &byte in text {
+        let mut inner = Stages {
+            current: vec![byte],
+            ..Stages::default()
+        };
+        newlined(path, k, &mut inner, state, newline, out)?;
+    }
+    Ok(())
+}
+
+/// One character at stage `k` through the newline decorator, then the rest
+/// of the way. `universal_newline` holds a CR until it sees what follows: an
+/// LF with it is one LF, and anything else follows an LF. What is inserted
+/// for an error goes past it, so it comes before a CR held. Measured.
+fn newlined(
+    path: &[u8],
+    k: usize,
+    stages: &mut Stages,
+    state: &mut State,
+    newline: Newline,
+    out: &mut Vec<u8>,
+) -> Result<(), Refused> {
+    let byte = match stages.current.as_slice() {
+        &[byte] => Some(byte),
+        _ => None,
+    };
+    match (newline, byte) {
+        (Newline::Universal, Some(b'\r')) => {
+            let held = state.held();
+            state.set_held(true);
+            return if held {
+                unescaped(path, k, b"\n", state, out)
+            } else {
+                Ok(())
+            };
+        }
+        (Newline::Universal, Some(b'\n')) => state.set_held(false),
+        (Newline::Universal, _) if state.held() => {
+            state.set_held(false);
+            unescaped(path, k, b"\n", state, out)?;
+        }
+        (Newline::Crlf, Some(b'\n')) => return unescaped(path, k, b"\r\n", state, out),
+        (Newline::Cr, Some(b'\n')) => stages.current[0] = b'\r',
+        _ => {}
+    }
+    carry(path, k, stages, state, (Decorators::default(), None), out)
+}
+
+/// Carries ASCII `text` from stage `k` the rest of the way, undecorated.
 fn unescaped(
     path: &[u8],
     k: usize,
@@ -538,7 +647,14 @@ fn unescaped(
             current: vec![byte],
             ..Stages::default()
         };
-        carry(path, k, &mut inner, state, (Xml::None, None), out)?;
+        carry(
+            path,
+            k,
+            &mut inner,
+            state,
+            (Decorators::default(), None),
+            out,
+        )?;
     }
     Ok(())
 }
@@ -549,14 +665,16 @@ fn unescaped(
 /// them, or one encoding alone, whose characters are read and kept as they
 /// are. `state` is the conversion's at `start`, and is left as it is at
 /// `next`; `finish` ends the output once the input is all converted: closes
-/// `xml: :attr`'s quote, and goes back to ASCII in ISO-2022-JP. `None` for a path with a step this VM has no converter for.
+/// `xml: :attr`'s quote, writes the CR `universal_newline` holds, and goes
+/// back to ASCII in ISO-2022-JP. `None` for a path with a step this VM has
+/// no converter for.
 #[must_use]
 pub fn step(
     path: &[u8],
     bytes: &[u8],
     start: usize,
     state: &mut State,
-    xml: Xml,
+    decorators: Decorators,
     finish: bool,
 ) -> Option<Step> {
     let (&first, &end) = (path.first()?, path.last()?);
@@ -566,18 +684,20 @@ pub fn step(
         return None;
     }
     // Where the source itself is the last such stage — UTF-8 into UTF-16 or
-    // UTF-32 — CRuby's decorator escapes bytes before they are read, which
+    // UTF-32 — CRuby's decorators work on bytes before they are read, which
     // is the caller's to do.
-    let decorate = match xml {
-        Xml::None => None,
-        _ => (1..=last).rev().find(|&i| ascii_compatible(path[i])),
+    let xml = decorators.xml;
+    let decorate = if decorators.any() {
+        (1..=last).rev().find(|&i| ascii_compatible(path[i]))
+    } else {
+        None
     };
     let mut output = Vec::with_capacity(bytes.len().saturating_sub(start));
     if xml == Xml::Attr && decorate == Some(last) && !state.quoted() {
         // At the end of the path the quote opens before anything, even what
         // is inserted for an error before the first character; before an
         // encoder it opens with the first character that reaches it, in
-        // `carry`. Measured.
+        // `decorate`. Measured.
         output.push(b'"');
         state.set_quoted(true);
     }
@@ -608,7 +728,7 @@ pub fn step(
                 last.min(1),
                 &mut stages,
                 state,
-                (xml, decorate),
+                (decorators, decorate),
                 &mut output,
             ) {
                 return Some(Step {
@@ -625,11 +745,17 @@ pub fn step(
         at += len;
     }
     if finish {
-        if let (Xml::Attr, Some(stage)) = (xml, decorate) {
-            let quotes: &[u8] = if state.quoted() { b"\"" } else { b"\"\"" };
+        if let Some(stage) = decorate {
             // ASCII, which every converter has a spelling for.
-            let _ = unescaped(path, stage, quotes, state, &mut output);
-            state.set_quoted(false);
+            if xml == Xml::Attr {
+                let quotes: &[u8] = if state.quoted() { b"\"" } else { b"\"\"" };
+                let _ = newlines(path, stage, quotes, state, decorators.newline, &mut output);
+                state.set_quoted(false);
+            }
+            if state.held() {
+                state.set_held(false);
+                let _ = unescaped(path, stage, b"\n", state, &mut output);
+            }
         }
         if end == ISO_2022_JP {
             crate::iso2022jp::finish(state, &mut output);
@@ -707,9 +833,24 @@ pub fn valid(encoding: u8, bytes: &[u8]) -> Option<bool> {
 mod tests {
     use super::*;
 
-    /// A conversion from the start, from a fresh state, without `xml:`.
+    fn xml(xml: Xml) -> Decorators {
+        Decorators {
+            xml,
+            ..Decorators::default()
+        }
+    }
+
+    /// A conversion from the start, from a fresh state, undecorated.
     fn run(path: &[u8], bytes: &[u8]) -> Step {
-        step(path, bytes, 0, &mut State::default(), Xml::None, true).expect("a path this VM runs")
+        step(
+            path,
+            bytes,
+            0,
+            &mut State::default(),
+            Decorators::default(),
+            true,
+        )
+        .expect("a path this VM runs")
     }
 
     #[test]
@@ -815,11 +956,18 @@ mod tests {
             "あ".as_bytes(),
             0,
             &mut state,
-            Xml::None,
+            Decorators::default(),
             false,
         );
         assert_eq!(s.map(|s| s.output), Some(b"\x1b$B$\"".to_vec()));
-        let s = step(&TO_ISO_2022_JP, b"", 0, &mut state, Xml::None, true);
+        let s = step(
+            &TO_ISO_2022_JP,
+            b"",
+            0,
+            &mut state,
+            Decorators::default(),
+            true,
+        );
         assert_eq!(s.map(|s| s.output), Some(b"\x1b(B".to_vec()));
     }
 
@@ -881,7 +1029,7 @@ mod tests {
             b"<\x1b$B<!\x1b(B",
             0,
             &mut State::default(),
-            Xml::Text,
+            xml(Xml::Text),
             true,
         );
         assert_eq!(s.map(|s| s.output), Some("&lt;次".as_bytes().to_vec()));
@@ -891,7 +1039,7 @@ mod tests {
             b"<",
             0,
             &mut State::default(),
-            Xml::Text,
+            xml(Xml::Text),
             true,
         );
         assert_eq!(s.map(|s| s.output), Some(b"&\0l\0t\0;\0".to_vec()));
@@ -905,7 +1053,7 @@ mod tests {
                 bytes,
                 0,
                 &mut State::default(),
-                Xml::Attr,
+                xml(Xml::Attr),
                 true,
             )
             .unwrap()
@@ -921,10 +1069,95 @@ mod tests {
             "ü".as_bytes(),
             0,
             &mut State::default(),
-            Xml::Attr,
+            xml(Xml::Attr),
             true,
         );
         assert_eq!(s.map(|s| s.output), Some(b"\"".to_vec()));
+    }
+
+    #[test]
+    fn newlines_are_decorated_where_ascii_is_ascii() {
+        let newline = |path: &[u8], bytes: &[u8], newline| {
+            let decorators = Decorators {
+                newline,
+                ..Decorators::default()
+            };
+            step(path, bytes, 0, &mut State::default(), decorators, true)
+                .unwrap()
+                .output
+        };
+        // Before the encoder into UTF-16, so the CR is a character there.
+        assert_eq!(
+            newline(&[EUC_JP, UTF_8, UTF_16LE], b"a\nb", Newline::Crlf),
+            b"a\0\r\0\n\0b\0"
+        );
+        // After the decoder from ISO-2022-JP, so its JIS X 0208 bytes are not
+        // newlines and its CR and LF are its own.
+        assert_eq!(
+            newline(
+                &FROM_ISO_2022_JP,
+                b"a\r\n\x1b$B$\"\x1b(B\r",
+                Newline::Universal
+            ),
+            "a\nあ\n".as_bytes()
+        );
+        assert_eq!(
+            newline(&TO_ISO_2022_JP, "\nあ\n".as_bytes(), Newline::Cr),
+            b"\r\x1b$B$\"\x1b(B\r"
+        );
+    }
+
+    #[test]
+    fn universal_newline_holds_a_cr_across_steps() {
+        let decorators = Decorators {
+            newline: Newline::Universal,
+            ..Decorators::default()
+        };
+        let mut state = State::default();
+        let path = [UTF_8, US_ASCII];
+        let s = step(&path, "a\ré".as_bytes(), 0, &mut state, decorators, false).unwrap();
+        // The CR waits while the error is reported, and what is inserted for
+        // it comes first.
+        assert_eq!((s.output.as_slice(), s.next), (&b"a"[..], 4));
+        let s = step(
+            &path,
+            "a\ré\nb".as_bytes(),
+            4,
+            &mut state,
+            decorators,
+            false,
+        )
+        .unwrap();
+        assert_eq!(s.output, b"\nb");
+        let s = step(&path, b"\r", 0, &mut state, decorators, true).unwrap();
+        assert_eq!(s.output, b"\n");
+        assert_eq!(state, State::default());
+    }
+
+    #[test]
+    fn an_attribute_quote_goes_through_the_newline_decorator() {
+        let decorators = Decorators {
+            xml: Xml::Attr,
+            newline: Newline::Universal,
+        };
+        let s = step(
+            &[UTF_8, EUC_JP],
+            b"\r<",
+            0,
+            &mut State::default(),
+            decorators,
+            true,
+        );
+        assert_eq!(s.map(|s| s.output), Some(b"\"\n&lt;\"".to_vec()));
+        let s = step(
+            &TO_ISO_2022_JP,
+            b"a\r",
+            0,
+            &mut State::default(),
+            decorators,
+            true,
+        );
+        assert_eq!(s.map(|s| s.output), Some(b"\"a\n\"".to_vec()));
     }
 
     #[test]
@@ -935,7 +1168,7 @@ mod tests {
                 b"",
                 0,
                 &mut State::default(),
-                Xml::None,
+                Decorators::default(),
                 true
             )
             .is_none()
@@ -946,11 +1179,21 @@ mod tests {
                 b"",
                 0,
                 &mut State::default(),
-                Xml::None,
+                Decorators::default(),
                 true
             )
             .is_none()
         );
-        assert!(step(&[], b"", 0, &mut State::default(), Xml::None, true).is_none());
+        assert!(
+            step(
+                &[],
+                b"",
+                0,
+                &mut State::default(),
+                Decorators::default(),
+                true
+            )
+            .is_none()
+        );
     }
 }

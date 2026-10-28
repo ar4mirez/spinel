@@ -1015,8 +1015,10 @@ fn str_native(
             found.map_or(Value::NIL, |at| fixnum(at as i64))
         }
         StrOp::Transcode => {
-            // `__transcode__(path, start, state, xml, finish)`: see
-            // `transcode::step`. `xml` is 0, 1 for `:text` or 2 for `:attr`.
+            // `__transcode__(path, start, state, decorators, finish)`: see
+            // `transcode::step`. `decorators` is `xml:` in its low two bits,
+            // 0, 1 for `:text` or 2 for `:attr`, and the newline decorator in
+            // the next two, 0, 1 for universal, 2 for CRLF or 3 for CR.
             let path = array_elements(scope, arg(0))
                 .unwrap_or_default()
                 .iter()
@@ -1026,13 +1028,23 @@ fn str_native(
             let start = usize::try_from(index_arg(1)?).unwrap_or(0).min(bytes.len());
             let mut state =
                 crate::transcode::State(u8::try_from(arg(2).as_fixnum().unwrap_or(0)).unwrap_or(0));
-            let xml = match arg(3).as_fixnum() {
-                Some(1) => crate::transcode::Xml::Text,
-                Some(2) => crate::transcode::Xml::Attr,
-                _ => crate::transcode::Xml::None,
+            let mode = arg(3).as_fixnum().unwrap_or(0);
+            let decorators = crate::transcode::Decorators {
+                xml: match mode & 3 {
+                    1 => crate::transcode::Xml::Text,
+                    2 => crate::transcode::Xml::Attr,
+                    _ => crate::transcode::Xml::None,
+                },
+                newline: match mode >> 2 & 3 {
+                    1 => crate::transcode::Newline::Universal,
+                    2 => crate::transcode::Newline::Crlf,
+                    3 => crate::transcode::Newline::Cr,
+                    _ => crate::transcode::Newline::None,
+                },
             };
             let finish = arg(4).is_truthy();
-            let Some(step) = crate::transcode::step(&path, &bytes, start, &mut state, xml, finish)
+            let Some(step) =
+                crate::transcode::step(&path, &bytes, start, &mut state, decorators, finish)
             else {
                 stack.push(Value::NIL);
                 return Ok(None);

@@ -847,14 +847,20 @@ end
   # Bytes read, in the IO's encoding and then in the one reads answer in.
   def __decode__(bytes)
     bytes.force_encoding(__encoding__)
-    @enc2.nil? ? bytes : bytes.encode(__read_encoding__, **@ecopts)
+    @enc2.nil? ? bytes : bytes.encode(__read_encoding__, **__read_ecopts__)
+  end
+
+  # The options a read transcodes with: CRuby's `make_readconv` leaves out
+  # the decorators for writing. Universal newline is done on the way in.
+  def __read_ecopts__
+    @ecopts.reject { |key, _| %i[newline crlf_newline cr_newline lf_newline].include?(key) }
   end
 
   # A String about to be written, in the encoding the IO writes: `@enc2`, or
   # `@enc` unless that is BINARY. CRuby's `do_writeconv`.
   def __encode_out__(text)
     target = @enc2 || (@enc == Encoding::BINARY ? nil : @enc)
-    text = text.encode(target, **@ecopts.reject { |key, _| key == :newline || key == :universal_newline }) unless target.nil? || text.encoding == target
+    text = text.encode(target, **@ecopts.reject { |key, _| %i[newline universal_newline crlf_newline cr_newline].include?(key) }) unless target.nil? || text.encoding == target
     if @ecopts[:crlf_newline] || @ecopts[:newline] == :crlf
       text = text.gsub("\n", "\r\n")
     elsif @ecopts[:cr_newline] || @ecopts[:newline] == :cr
@@ -1235,7 +1241,7 @@ end
     char = __take__(length).force_encoding(__encoding__)
     return __broken_char__(char) unless char.valid_encoding?
     char = __newline_char_in__(char)
-    @enc2.nil? ? char : char.encode(__read_encoding__, **@ecopts)
+    @enc2.nil? ? char : char.encode(__read_encoding__, **__read_ecopts__)
   end
 
   # Universal newline on a character read alone: a CR is an LF, and takes
@@ -1282,7 +1288,7 @@ end
     char = __take__(length).force_encoding(__encoding__)
     return char if @enc2.nil?
     begin
-      char.encode(__read_encoding__, **@ecopts)
+      char.encode(__read_encoding__, **__read_ecopts__)
     rescue Encoding::InvalidByteSequenceError
       raise error || $!
     end
