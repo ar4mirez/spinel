@@ -1590,6 +1590,8 @@ require "io/nonblock"; r, w = IO.pipe; r.nonblock = true; r.timeout = 1; r.set_e
 # refusing it as a String operation (#412): the error is the converter's, a
 # same-encoding copy keeps the byte, and IO reads it the same way.
 [("\xA4".force_encoding("euc-jp").encode("utf-8", universal_newline: true) rescue [$!.class, $!.message]), "\xA4\r".force_encoding("euc-jp").encode("euc-jp", universal_newline: true).bytes, "\xA4\r\n".force_encoding("euc-jp").encode("utf-8", universal_newline: true, invalid: :replace, replace: "\r")]  #=> [[Encoding::InvalidByteSequenceError, "incomplete \"\\xA4\" on EUC-JP"], [164, 10], "\r\n"]
+# The byte an error reads again is the source's, so a CR stays "\r" (#415).
+["\x82\r".force_encoding("shift_jis"), "a\r\n\x82\r\nb".force_encoding("shift_jis"), "<\x82\r".force_encoding("shift_jis")].each_with_index.map { |s, i| begin; s.encode("utf-8", universal_newline: true, xml: i == 2 ? :text : nil); rescue => e; [e.message, e.readagain_bytes]; end }  #=> [["\"\\x82\" followed by \"\\r\" on Shift_JIS", "\r"], ["\"\\x82\" followed by \"\\r\" on Shift_JIS", "\r"], ["\"\\x82\" followed by \"\\r\" on Shift_JIS", "\r"]]
 n = "/tmp/spinel-eval-#{Process.pid}-unl"; File.binwrite(n, "\xA4"); r = [File.open(n, "r:euc-jp:utf-8", universal_newline: true) { |f| f.getc rescue [$!.class, $!.message] }]; File.binwrite(n, "a\xA4\r\nb"); r << File.open(n, "r:euc-jp", universal_newline: true) { |f| [f.gets.bytes, f.read] } << File.open(n, "r:euc-jp:utf-8", universal_newline: true, invalid: :replace) { |f| f.read }; File.delete(n); r  #=> [[Encoding::InvalidByteSequenceError, "incomplete \"\\xA4\" on EUC-JP"], [[97, 164, 10], "b"], "a�\nb"]
 
 # ------------------------------------------- Method, UnboundMethod and `&` (#27)

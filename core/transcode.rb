@@ -81,7 +81,7 @@ class String
       result = __decorate_output__(result, options)
       return result.force_encoding(target)
     end
-    String.__convert__(text, source, target, options)
+    String.__convert__(text, source, target, options, self)
   end
 
   def __converter_encoding__(value, from)
@@ -101,10 +101,8 @@ class String
   # CRLF and CR become LF, byte by byte: an invalid byte is left for the
   # transcoder to report, not refused as a String operation would (#412).
   # No ASCII-compatible encoding has CR or LF as a trailing byte.
-  # ponytail: the source is rewritten before the transcoder reads it, so an
-  # invalid byte followed by CR reports "\n" as its readagain bytes where
-  # CRuby, decorating after the transcoder, reports "\r"; decorating each
-  # step's output instead lifts that (#415).
+  # The byte an error reads again is taken from the undecorated source, so a
+  # CR after an invalid byte is reported as "\r", as CRuby does (#415).
   def self.__universal_newline__(text)
     text.b.gsub("\r\n", "\n").gsub("\r", "\n").force_encoding(text.encoding)
   end
@@ -124,12 +122,14 @@ class String
 
   # The step loop. A BOM'd UTF-16 or UTF-32 target converts big-endian and
   # gains its BOM; a source of either reads its BOM to learn its order.
-  def self.__convert__(text, source, target, options)
+  def self.__convert__(text, source, target, options, raw = text)
     xml = options[:xml]
     if xml && !(xml == :text || xml == :attr)
       raise ArgumentError, "unexpected value for xml option: #{xml.inspect}"
     end
     replacement = __replacement__(target, options)
+    # A universal-newline copy keeps the source's offsets but for CRLF.
+    raw = nil if raw.equal?(text)
     bom = nil
     step_target = target
     if target.__index__ == 7 || target.__index__ == 8
@@ -141,7 +141,10 @@ class String
     if source.__index__ == 7 || source.__index__ == 8
       step_source, start = __bom_order__(text, source)
     end
-    text = __escape_xml__(text, xml) if xml
+    if xml
+      text = __escape_xml__(text, xml)
+      raw = __escape_xml__(raw, xml) if raw
+    end
     out = String.new(encoding: Encoding::BINARY)
     out << bom if bom
     loop do
@@ -154,6 +157,7 @@ class String
         case stop
         when :invalid, :incomplete
           unless options[:invalid] == :replace
+            readagain = __raw_byte__(raw, following) if raw && readagain == "\n"
             raise __invalid_error__(stop, error, readagain, source, target)
           end
           replacement
@@ -176,6 +180,14 @@ class String
     end
     out = out.__decorate_output__(out.force_encoding(target), options) if options[:crlf_newline] || options[:cr_newline]
     out.force_encoding(target)
+  end
+
+  # The source byte behind `at` in its universal-newline copy, where each
+  # CRLF became one LF.
+  def self.__raw_byte__(raw, at)
+    i = 0
+    at.times { i += raw.getbyte(i) == 13 && raw.getbyte(i + 1) == 10 ? 2 : 1 }
+    raw.byteslice(i, 1)
   end
 
   def self.__supported_target__(encoding)
