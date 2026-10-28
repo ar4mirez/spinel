@@ -304,6 +304,7 @@ impl Method {
             owner: self.owner,
             name,
             aliased: false,
+            narrowed: None,
         })
     }
 }
@@ -322,6 +323,11 @@ pub struct Origin {
     /// again, `X(Kernel)#w(tap)`; a copy of anything else, a class's body
     /// aliased included, is the target's own (#395).
     pub aliased: bool,
+    /// For a `private :m` copy of an inherited `m`, the class or module whose
+    /// entry it narrows, as CRuby resolves a `ZSUPER` entry: the alias's
+    /// class for an alias, the definer for a `def`. What `define_method`
+    /// checks a target against (#398).
+    pub narrowed: Option<ClassId>,
 }
 
 /// One method table entry: the body, the scope its `def` was written in, its
@@ -1019,6 +1025,13 @@ impl Classes {
                     } else {
                         o
                     }
+                })
+                .map(|o| {
+                    if o.narrowed == Some(from) {
+                        Origin { narrowed: Some(to), ..o }
+                    } else {
+                        o
+                    }
                 });
                 (name, (body, cref, visibility, stands_for))
             })
@@ -1232,7 +1245,10 @@ impl Classes {
             return true;
         }
         self.note_redefinition(id, name, None, false);
-        let origin = found.origin_or(name);
+        let origin = Origin {
+            narrowed: Some(found.origin.and_then(|o| o.narrowed).unwrap_or(found.owner)),
+            ..found.origin_or(name)
+        };
         self.entry_mut(id)
             .methods
             .insert(name, (found.body, found.cref, visibility, Some(origin)));
@@ -1281,6 +1297,7 @@ impl Classes {
             let origin = found.origin_or(old);
             Origin {
                 aliased: self.kind(origin.owner) == Kind::Module,
+                narrowed: None,
                 ..origin
             }
         });
@@ -1569,6 +1586,7 @@ impl Classes {
                 owner,
                 name,
                 aliased: false,
+                narrowed: None,
             },
             |method| method.origin_or(name),
         );
