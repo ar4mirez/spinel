@@ -1559,16 +1559,24 @@ impl Classes {
 
     /// Where `super` from the method `owner` holds under `name` continues:
     /// the definition that entry stands in for, if it stands in for one (#27).
+    /// An alias of a module's body copied into a class that does not include
+    /// that module continues past the class instead, as CRuby's
+    /// `rb_find_defined_class_by_owner` falls back to the alias's class (#395).
     #[must_use]
     pub fn super_origin(&self, owner: ClassId, name: SymbolId) -> Origin {
-        self.method_at(owner, name).map_or(
+        let origin = self.method_at(owner, name).map_or(
             Origin {
                 owner,
                 name,
                 aliased: false,
             },
             |method| method.origin_or(name),
-        )
+        );
+        if origin.aliased && !self.reaches(owner, origin.owner) {
+            Origin { owner, ..origin }
+        } else {
+            origin
+        }
     }
 
     /// The method `owner` itself defines under `name`, with no walk: what a
