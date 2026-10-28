@@ -1015,14 +1015,29 @@ fn str_native(
             found.map_or(Value::NIL, |at| fixnum(at as i64))
         }
         StrOp::Transcode => {
-            let source = u8::try_from(index_arg(0)?).unwrap_or(0);
-            let destination = u8::try_from(index_arg(1)?).unwrap_or(0);
-            let start = usize::try_from(index_arg(2)?).unwrap_or(0).min(bytes.len());
-            if !crate::transcode::supported(source) || !crate::transcode::supported(destination) {
+            // `__transcode__(path, start, state, xml, finish)`: see
+            // `transcode::step`. `xml` is 0, 1 for `:text` or 2 for `:attr`.
+            let path = array_elements(scope, arg(0))
+                .unwrap_or_default()
+                .iter()
+                .map(|v| v.as_fixnum().and_then(|n| u8::try_from(n).ok()))
+                .collect::<Option<Vec<u8>>>()
+                .unwrap_or_default();
+            let start = usize::try_from(index_arg(1)?).unwrap_or(0).min(bytes.len());
+            let mut state =
+                crate::transcode::State(u8::try_from(arg(2).as_fixnum().unwrap_or(0)).unwrap_or(0));
+            let xml = match arg(3).as_fixnum() {
+                Some(1) => crate::transcode::Xml::Text,
+                Some(2) => crate::transcode::Xml::Attr,
+                _ => crate::transcode::Xml::None,
+            };
+            let finish = arg(4).is_truthy();
+            let Some(step) = crate::transcode::step(&path, &bytes, start, &mut state, xml, finish)
+            else {
                 stack.push(Value::NIL);
                 return Ok(None);
-            }
-            let step = crate::transcode::step(source, destination, &bytes, start);
+            };
+            let destination = path.last().copied().unwrap_or(crate::strings::BINARY);
             let (stop, code, reference) = match step.stop {
                 crate::transcode::Stop::Done => ("done", None, None),
                 crate::transcode::Stop::Invalid => ("invalid", None, None),
@@ -1056,6 +1071,9 @@ fn str_native(
                     fixnum(step.next as i64),
                     code,
                     reference,
+                    fixnum(i64::from(step.from)),
+                    fixnum(i64::from(step.to)),
+                    fixnum(i64::from(state.0)),
                 ],
             )
         }

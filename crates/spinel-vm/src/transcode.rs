@@ -1,15 +1,20 @@
 //! Transcoding (#19): `String#encode` and `Encoding::Converter`, for the
 //! encodings whose mapping to Unicode is arithmetic — UTF-8, US-ASCII,
-//! BINARY, ISO-8859-1, and UTF-16 and UTF-32 in both byte orders — and the
-//! JIS encodings whose mapping is CRuby's table, EUC-JP, Shift_JIS and
-//! Windows-31J (#378, in `jis.rs`). Any other pair is refused by the caller.
+//! BINARY, ISO-8859-1, and UTF-16 and UTF-32 in both byte orders — the JIS
+//! encodings whose mapping is CRuby's table, EUC-JP, Shift_JIS and
+//! Windows-31J (#378, in `jis.rs`), and ISO-2022-JP and stateless-ISO-2022-JP
+//! (#404, in `iso2022jp.rs`). Any other pair is refused by the caller.
 //!
 //! The unit of work is [`step`]: convert from a byte offset until the input
-//! ends or a character cannot be converted, and report which and why. The
-//! Ruby side decides what an error means — replace it, ask a fallback, or
-//! raise with CRuby's attributes — and calls again past it.
+//! ends or a character cannot be converted, and report which and why. A
+//! conversion runs along a path of CRuby's converters, which `core/` finds as
+//! `search_convpath` does, a character at a time through each of them, so an
+//! error names the converter that refused it, as CRuby's does. The Ruby side
+//! decides what an error means — replace it, ask a fallback, or raise with
+//! CRuby's attributes — and calls again past it.
 
-use crate::strings::{BINARY, US_ASCII, UTF_8};
+use crate::iso2022jp::{ISO_2022_JP, STATELESS_ISO_2022_JP};
+use crate::strings::{BINARY, EUC_JP, US_ASCII, UTF_8};
 
 pub const UTF_16BE: u8 = 3;
 pub const UTF_16LE: u8 = 4;
@@ -22,7 +27,16 @@ pub const ISO_8859_1: u8 = 22;
 pub fn supported(encoding: u8) -> bool {
     matches!(
         encoding,
-        BINARY | UTF_8 | US_ASCII | UTF_16BE | UTF_16LE | UTF_32BE | UTF_32LE | ISO_8859_1
+        BINARY
+            | UTF_8
+            | US_ASCII
+            | UTF_16BE
+            | UTF_16LE
+            | UTF_32BE
+            | UTF_32LE
+            | ISO_8859_1
+            | STATELESS_ISO_2022_JP
+            | ISO_2022_JP
     ) || crate::jis::supported(encoding)
 }
 
@@ -237,98 +251,399 @@ pub struct Step {
     pub readagain: Vec<u8>,
     /// Where to continue: past the error, but before `readagain`.
     pub next: usize,
+    /// The converter that stopped it, from and to: the first for an invalid
+    /// sequence, and for an undefined character whichever had no spelling.
+    pub from: u8,
+    pub to: u8,
 }
 
-/// What [`convert`] makes of one character.
-type Converted = Result<(Option<Vec<u8>>, usize), (Stop, usize, usize)>;
+/// What a conversion keeps between steps, which Ruby holds as one Integer:
+/// ISO-2022-JP's decoder G0 in the low two bits and its encoder's in the
+/// next two, and whether `xml: :attr` has opened its quote. A fresh
+/// conversion is 0.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct State(pub u8);
 
-/// One character at `at`: its bytes in `destination` (`None` for the source's
-/// own, unchanged) and how many it took, or why it stops — with how many bytes
-/// are the error and how many are read again.
+impl State {
+    pub(crate) fn decoder(self) -> u8 {
+        self.0 & 3
+    }
+
+    pub(crate) fn encoder(self) -> u8 {
+        self.0 >> 2 & 3
+    }
+
+    pub(crate) fn set_decoder(&mut self, g0: u8) {
+        self.0 = self.0 & !3 | g0;
+    }
+
+    pub(crate) fn set_encoder(&mut self, g0: u8) {
+        self.0 = self.0 & !12 | g0 << 2;
+    }
+
+    fn quoted(self) -> bool {
+        self.0 & 16 != 0
+    }
+
+    fn set_quoted(&mut self, quoted: bool) {
+        self.0 = self.0 & !16 | u8::from(quoted) << 4;
+    }
+}
+
+/// How `xml:` escapes: not at all, as text, or as an attribute's content.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Xml {
+    None,
+    Text,
+    Attr,
+}
+
+/// The entity `xml:` writes for an ASCII byte, if it writes one.
+fn escape(xml: Xml, byte: u8) -> Option<&'static [u8]> {
+    match (xml, byte) {
+        (Xml::None, _) => None,
+        (_, b'&') => Some(b"&amp;"),
+        (_, b'<') => Some(b"&lt;"),
+        (_, b'>') => Some(b"&gt;"),
+        (Xml::Attr, b'"') => Some(b"&quot;"),
+        _ => None,
+    }
+}
+
+/// Whether ASCII is ASCII in `encoding`, which is where CRuby's decorators
+/// work: `xml:` escapes at the last such stage of a path.
+fn ascii_compatible(encoding: u8) -> bool {
+    !matches!(
+        encoding,
+        UTF_16BE | UTF_16LE | UTF_32BE | UTF_32LE | ISO_2022_JP
+    )
+}
+
+/// Whether `encoding` is read to and written from a Unicode codepoint.
+fn by_codepoint(encoding: u8) -> bool {
+    matches!(
+        encoding,
+        BINARY | UTF_8 | US_ASCII | UTF_16BE | UTF_16LE | UTF_32BE | UTF_32LE | ISO_8859_1
+    ) || crate::jis::supported(encoding)
+}
+
+/// Whether CRuby has a converter from `from` to `to` that this VM runs:
+/// every encoding to and from UTF-8, EUC-JP to and from Shift_JIS, and
+/// stateless-ISO-2022-JP to and from EUC-JP and ISO-2022-JP.
+fn converts(from: u8, to: u8) -> bool {
+    match (from, to) {
+        (ISO_2022_JP, STATELESS_ISO_2022_JP)
+        | (STATELESS_ISO_2022_JP, ISO_2022_JP | EUC_JP)
+        | (EUC_JP, STATELESS_ISO_2022_JP) => true,
+        _ if crate::jis::direct(from, to) => true,
+        _ => from != to && (from == UTF_8 || to == UTF_8) && by_codepoint(from) && by_codepoint(to),
+    }
+}
+
+/// What a [`hop`] makes of one character: how many bytes it took, or why it
+/// stops, with how many bytes are the error and how many are read again.
+type Hopped = Result<usize, (Stop, usize, usize)>;
+
+fn failed(fail: crate::iso2022jp::Fail) -> (Stop, usize, usize) {
+    match fail {
+        crate::iso2022jp::Fail::Invalid { error, readagain } => (Stop::Invalid, error, readagain),
+        crate::iso2022jp::Fail::Incomplete(len) => (Stop::Incomplete, len, 0),
+    }
+}
+
+/// One of CRuby's converters: the character at `at`, from `from` to `to`,
+/// appended to `out`. Nothing is appended when it stops.
 ///
 /// A conversion to the same encoding is `scrub`'s: a character is kept as it
 /// is, even one Unicode has no character for, and even one a round trip would
 /// spell differently.
-fn convert(source: u8, destination: u8, bytes: &[u8], at: usize) -> Converted {
-    if crate::jis::direct(source, destination) {
-        return match crate::jis::read(source, bytes, at) {
-            crate::jis::Read::Char(jis, len) => crate::jis::write(destination, jis)
-                .map(|encoded| (Some(encoded), len))
-                .ok_or_else(|| {
-                    let reference = crate::jis::to_unicode(source, jis);
-                    (
-                        Stop::Undefined {
-                            code: None,
-                            reference,
-                        },
-                        len,
-                        0,
-                    )
-                }),
-            crate::jis::Read::Invalid { error, readagain } => {
-                Err((Stop::Invalid, error, readagain))
+fn hop(from: u8, to: u8, bytes: &[u8], at: usize, state: &mut State, out: &mut Vec<u8>) -> Hopped {
+    use crate::iso2022jp::{self, Char};
+    use crate::jis::{self, Jis, Read};
+    match (from, to) {
+        (ISO_2022_JP, _) => iso2022jp::decode(bytes, at, state, out).map_err(failed),
+        (STATELESS_ISO_2022_JP, _) => {
+            let (c, len) = iso2022jp::read(bytes, at).map_err(failed)?;
+            if to == ISO_2022_JP {
+                iso2022jp::encode(c, state, out).map_err(failed)?;
+            } else {
+                match c {
+                    Char::Ascii(b) => out.push(b),
+                    Char::Kanji(_, first, second) => out.extend_from_slice(&[first, second]),
+                }
             }
-            crate::jis::Read::Incomplete(len) => Err((Stop::Incomplete, len, 0)),
-        };
-    }
-    match decode(source, bytes, at) {
-        Decoded::Char(_, len) | Decoded::Undefined(len) if source == destination => Ok((None, len)),
-        Decoded::Char(code, len) => encode(destination, code)
-            .map(|encoded| (Some(encoded), len))
-            .ok_or((
+            Ok(len)
+        }
+        (EUC_JP, STATELESS_ISO_2022_JP) => match jis::read(EUC_JP, bytes, at) {
+            // SO, SI and ESC, which ISO-2022-JP cannot carry as text, have no
+            // spelling either. Measured.
+            Read::Char(Jis::Ascii(b @ (0x0e | 0x0f | 0x1b)), len) => Err((
                 Stop::Undefined {
-                    code: Some(code),
-                    reference: Some(code),
+                    code: None,
+                    reference: Some(u32::from(b)),
                 },
                 len,
                 0,
             )),
-        Decoded::Invalid { error, readagain } => Err((Stop::Invalid, error, readagain)),
-        Decoded::Incomplete(len) => Err((Stop::Incomplete, len, 0)),
-        Decoded::Undefined(len) => Err((
-            Stop::Undefined {
-                code: None,
-                reference: None,
+            Read::Char(Jis::Ascii(b), len) => {
+                out.push(b);
+                Ok(len)
+            }
+            Read::Char(Jis::Cell(cell), len) => {
+                out.push(0x92);
+                out.extend(jis::write(EUC_JP, Jis::Cell(cell)).unwrap_or_default());
+                Ok(len)
+            }
+            // The katakana and JIS X 0212 have no spelling there. Measured.
+            Read::Char(jis, len) => Err((
+                Stop::Undefined {
+                    code: None,
+                    reference: jis::to_unicode(EUC_JP, jis),
+                },
+                len,
+                0,
+            )),
+            Read::Invalid { error, readagain } => Err((Stop::Invalid, error, readagain)),
+            Read::Incomplete(len) => Err((Stop::Incomplete, len, 0)),
+        },
+        _ if jis::direct(from, to) => match jis::read(from, bytes, at) {
+            Read::Char(jis, len) => match jis::write(to, jis) {
+                Some(encoded) => {
+                    out.extend(encoded);
+                    Ok(len)
+                }
+                None => Err((
+                    Stop::Undefined {
+                        code: None,
+                        reference: jis::to_unicode(from, jis),
+                    },
+                    len,
+                    0,
+                )),
             },
-            len,
-            0,
-        )),
+            Read::Invalid { error, readagain } => Err((Stop::Invalid, error, readagain)),
+            Read::Incomplete(len) => Err((Stop::Incomplete, len, 0)),
+        },
+        _ => match decode(from, bytes, at) {
+            Decoded::Char(_, len) | Decoded::Undefined(len) if from == to => {
+                out.extend_from_slice(&bytes[at..at + len]);
+                Ok(len)
+            }
+            Decoded::Char(code, len) => match encode(to, code) {
+                Some(encoded) => {
+                    out.extend(encoded);
+                    Ok(len)
+                }
+                None => Err((
+                    Stop::Undefined {
+                        code: Some(code),
+                        reference: Some(code),
+                    },
+                    len,
+                    0,
+                )),
+            },
+            Decoded::Invalid { error, readagain } => Err((Stop::Invalid, error, readagain)),
+            Decoded::Incomplete(len) => Err((Stop::Incomplete, len, 0)),
+            Decoded::Undefined(len) => Err((
+                Stop::Undefined {
+                    code: None,
+                    reference: None,
+                },
+                len,
+                0,
+            )),
+        },
     }
 }
 
-/// Convert `bytes` from `start` until the end or the first character that
-/// cannot be converted.
+/// A character a converter after the first refused, as the stage it was
+/// refused at, why, and its bytes there.
+struct Refused {
+    stage: usize,
+    stop: Stop,
+    error: Vec<u8>,
+}
+
+/// Scratch for [`carry`], kept across characters so a step allocates once.
+#[derive(Default)]
+struct Stages {
+    current: Vec<u8>,
+    next: Vec<u8>,
+}
+
+/// Carries one character, `stages.current` in `path[k]`, through the rest of
+/// `path` into `out`, escaping it for `xml:` at stage `decorate`.
+fn carry(
+    path: &[u8],
+    mut k: usize,
+    stages: &mut Stages,
+    state: &mut State,
+    (xml, decorate): (Xml, Option<usize>),
+    out: &mut Vec<u8>,
+) -> Result<(), Refused> {
+    let last = path.len() - 1;
+    loop {
+        if decorate == Some(k) && xml == Xml::Attr && !state.quoted() {
+            // The quote opens with the first character that reaches it, so
+            // an entity written for an undefined one before is outside it.
+            // Measured.
+            state.set_quoted(true);
+            unescaped(path, k, b"\"", state, out)?;
+        }
+        let entity = match stages.current.as_slice() {
+            &[byte] if decorate == Some(k) => escape(xml, byte),
+            _ => None,
+        };
+        if let Some(entity) = entity {
+            return unescaped(path, k, entity, state, out);
+        }
+        if k == last {
+            out.extend_from_slice(&stages.current);
+            return Ok(());
+        }
+        stages.next.clear();
+        match hop(
+            path[k],
+            path[k + 1],
+            &stages.current,
+            0,
+            state,
+            &mut stages.next,
+        ) {
+            Ok(_) => {}
+            Err((stop, ..)) => {
+                return Err(Refused {
+                    stage: k,
+                    stop,
+                    error: std::mem::take(&mut stages.current),
+                });
+            }
+        }
+        std::mem::swap(&mut stages.current, &mut stages.next);
+        k += 1;
+    }
+}
+
+/// Carries ASCII `text` from stage `k` the rest of the way, unescaped.
+fn unescaped(
+    path: &[u8],
+    k: usize,
+    text: &[u8],
+    state: &mut State,
+    out: &mut Vec<u8>,
+) -> Result<(), Refused> {
+    for &byte in text {
+        let mut inner = Stages {
+            current: vec![byte],
+            ..Stages::default()
+        };
+        carry(path, k, &mut inner, state, (Xml::None, None), out)?;
+    }
+    Ok(())
+}
+
+/// Convert `bytes` from `start` along `path` until the end or the first
+/// character that cannot be converted. `path` is every encoding the
+/// conversion passes through, as `Encoding::Converter.search_convpath` has
+/// them, or one encoding alone, whose characters are read and kept as they
+/// are. `state` is the conversion's at `start`, and is left as it is at
+/// `next`; `finish` ends the output once the input is all converted: closes
+/// `xml: :attr`'s quote, and goes back to ASCII in ISO-2022-JP. `None` for a path with a step this VM has no converter for.
 #[must_use]
-pub fn step(source: u8, destination: u8, bytes: &[u8], start: usize) -> Step {
+pub fn step(
+    path: &[u8],
+    bytes: &[u8],
+    start: usize,
+    state: &mut State,
+    xml: Xml,
+    finish: bool,
+) -> Option<Step> {
+    let (&first, &end) = (path.first()?, path.last()?);
+    let last = path.len() - 1;
+    let readable = path.len() > 1 || by_codepoint(first);
+    if !readable || !path.windows(2).all(|pair| converts(pair[0], pair[1])) {
+        return None;
+    }
+    // Where the source itself is the last such stage — UTF-8 into UTF-16 or
+    // UTF-32 — CRuby's decorator escapes bytes before they are read, which
+    // is the caller's to do.
+    let decorate = match xml {
+        Xml::None => None,
+        _ => (1..=last).rev().find(|&i| ascii_compatible(path[i])),
+    };
     let mut output = Vec::with_capacity(bytes.len().saturating_sub(start));
+    if xml == Xml::Attr && decorate == Some(last) && !state.quoted() {
+        // At the end of the path the quote opens before anything, even what
+        // is inserted for an error before the first character; before an
+        // encoder it opens with the first character that reaches it, in
+        // `carry`. Measured.
+        output.push(b'"');
+        state.set_quoted(true);
+    }
+    let mut stages = Stages::default();
     let mut at = start;
     while at < bytes.len() {
-        let (stop, error_len, readagain) = match convert(source, destination, bytes, at) {
-            Ok((encoded, len)) => {
-                output.extend_from_slice(encoded.as_deref().unwrap_or(&bytes[at..at + len]));
-                at += len;
-                continue;
+        let to = path.get(1).copied().unwrap_or(first);
+        stages.current.clear();
+        let len = match hop(first, to, bytes, at, state, &mut stages.current) {
+            Ok(len) => len,
+            Err((stop, error_len, readagain)) => {
+                let readagain_end = (at + error_len + readagain).min(bytes.len());
+                return Some(Step {
+                    output,
+                    stop,
+                    error: bytes[at..at + error_len].to_vec(),
+                    readagain: bytes[at + error_len..readagain_end].to_vec(),
+                    next: at + error_len,
+                    from: first,
+                    to,
+                });
             }
-            Err(stopped) => stopped,
         };
-        let error = bytes[at..at + error_len].to_vec();
-        let readagain_bytes =
-            bytes[at + error_len..(at + error_len + readagain).min(bytes.len())].to_vec();
-        return Step {
-            output,
-            stop,
-            error,
-            readagain: readagain_bytes,
-            next: at + error_len,
-        };
+        // An escape sequence is no character, and goes no further.
+        if !stages.current.is_empty() {
+            if let Err(refused) = carry(
+                path,
+                last.min(1),
+                &mut stages,
+                state,
+                (xml, decorate),
+                &mut output,
+            ) {
+                return Some(Step {
+                    output,
+                    stop: refused.stop,
+                    error: refused.error,
+                    readagain: Vec::new(),
+                    next: at + len,
+                    from: path[refused.stage],
+                    to: path[(refused.stage + 1).min(last)],
+                });
+            }
+        }
+        at += len;
     }
-    Step {
+    if finish {
+        if let (Xml::Attr, Some(stage)) = (xml, decorate) {
+            let quotes: &[u8] = if state.quoted() { b"\"" } else { b"\"\"" };
+            // ASCII, which every converter has a spelling for.
+            let _ = unescaped(path, stage, quotes, state, &mut output);
+            state.set_quoted(false);
+        }
+        if end == ISO_2022_JP {
+            crate::iso2022jp::finish(state, &mut output);
+        }
+    }
+    Some(Step {
         output,
         stop: Stop::Done,
         error: Vec::new(),
         readagain: Vec::new(),
         next: bytes.len(),
-    }
+        from: first,
+        to: end,
+    })
 }
 
 /// Character boundaries for the non-ASCII-compatible encodings and Latin-1,
@@ -392,25 +707,30 @@ pub fn valid(encoding: u8, bytes: &[u8]) -> Option<bool> {
 mod tests {
     use super::*;
 
+    /// A conversion from the start, from a fresh state, without `xml:`.
+    fn run(path: &[u8], bytes: &[u8]) -> Step {
+        step(path, bytes, 0, &mut State::default(), Xml::None, true).expect("a path this VM runs")
+    }
+
     #[test]
     fn invalid_utf8_reports_like_cruby() {
-        let s = step(UTF_8, UTF_16LE, b"a\xe3b", 0);
+        let s = run(&[UTF_8, UTF_16LE], b"a\xe3b");
         assert_eq!(s.stop, Stop::Invalid);
         assert_eq!(
             (s.error.as_slice(), s.readagain.as_slice()),
             (&b"\xe3"[..], &b"b"[..])
         );
         assert_eq!(s.next, 2);
-        let s = step(UTF_8, UTF_16LE, b"a\xe3\x81", 0);
+        let s = run(&[UTF_8, UTF_16LE], b"a\xe3\x81");
         assert_eq!(s.stop, Stop::Incomplete);
         assert_eq!(s.error, b"\xe3\x81");
     }
 
     #[test]
     fn utf16_round_trips_a_surrogate_pair() {
-        let there = step(UTF_8, UTF_16LE, "a😀".as_bytes(), 0);
+        let there = run(&[UTF_8, UTF_16LE], "a😀".as_bytes());
         assert_eq!(there.output, [0x61, 0, 0x3d, 0xd8, 0x00, 0xde]);
-        let back = step(UTF_16LE, UTF_8, &there.output, 0);
+        let back = run(&[UTF_16LE, UTF_8], &there.output);
         assert_eq!(back.output, "a😀".as_bytes());
     }
 
@@ -426,7 +746,7 @@ mod tests {
 
     #[test]
     fn undefined_carries_the_codepoint() {
-        let s = step(UTF_8, US_ASCII, "aé".as_bytes(), 0);
+        let s = run(&[UTF_8, US_ASCII], "aé".as_bytes());
         assert_eq!(
             s.stop,
             Stop::Undefined {
@@ -439,13 +759,13 @@ mod tests {
 
     #[test]
     fn direct_jis_undefined_is_referenced_by_its_source_codepoint() {
-        use crate::strings::{EUC_JP, SHIFT_JIS};
+        use crate::strings::SHIFT_JIS;
         for (bytes, reference) in [
             (&b"\x8f\xab\xb1a"[..], 0xe9),
             (b"\x8f\xa2\xaf", 0x2d8),
             (b"\x8f\xa9\xa1", 0xc6),
         ] {
-            let s = step(EUC_JP, SHIFT_JIS, bytes, 0);
+            let s = run(&[EUC_JP, SHIFT_JIS], bytes);
             assert_eq!(
                 s.stop,
                 Stop::Undefined {
@@ -455,7 +775,7 @@ mod tests {
             );
             assert_eq!(s.error, &bytes[..3]);
         }
-        let s = step(EUC_JP, SHIFT_JIS, b"\x8e\xe0", 0);
+        let s = run(&[EUC_JP, SHIFT_JIS], b"\x8e\xe0");
         assert_eq!(
             s.stop,
             Stop::Undefined {
@@ -463,7 +783,7 @@ mod tests {
                 reference: None
             }
         );
-        let s = step(SHIFT_JIS, EUC_JP, b"\xf0\x40", 0);
+        let s = run(&[SHIFT_JIS, EUC_JP], b"\xf0\x40");
         assert_eq!(
             s.stop,
             Stop::Undefined {
@@ -471,5 +791,166 @@ mod tests {
                 reference: None
             }
         );
+    }
+
+    const TO_ISO_2022_JP: [u8; 4] = [UTF_8, EUC_JP, STATELESS_ISO_2022_JP, ISO_2022_JP];
+    const FROM_ISO_2022_JP: [u8; 4] = [ISO_2022_JP, STATELESS_ISO_2022_JP, EUC_JP, UTF_8];
+
+    // The issue's example, and the rest measured on ruby 4.0.9.
+    #[test]
+    fn iso_2022_jp_goes_through_stateless_and_euc_jp() {
+        assert_eq!(
+            run(&TO_ISO_2022_JP, "あ".as_bytes()).output,
+            b"\x1b$B$\"\x1b(B"
+        );
+        let s = run(&FROM_ISO_2022_JP, b"a\x1b$B$\"$$\x1b(Bb");
+        assert_eq!(
+            (s.stop, s.output),
+            (Stop::Done, "aあいb".as_bytes().to_vec())
+        );
+        // Back to ASCII only when the output is finished.
+        let mut state = State::default();
+        let s = step(
+            &TO_ISO_2022_JP,
+            "あ".as_bytes(),
+            0,
+            &mut state,
+            Xml::None,
+            false,
+        );
+        assert_eq!(s.map(|s| s.output), Some(b"\x1b$B$\"".to_vec()));
+        let s = step(&TO_ISO_2022_JP, b"", 0, &mut state, Xml::None, true);
+        assert_eq!(s.map(|s| s.output), Some(b"\x1b(B".to_vec()));
+    }
+
+    #[test]
+    fn an_error_names_the_converter_that_refused() {
+        let s = run(&FROM_ISO_2022_JP, b"\x1b$B)!");
+        assert_eq!(
+            (s.from, s.to, s.error.as_slice()),
+            (EUC_JP, UTF_8, &b"\xa9\xa1"[..])
+        );
+        assert_eq!(s.next, 5);
+        let s = run(&FROM_ISO_2022_JP, b"a\x1b$C");
+        assert_eq!(s.stop, Stop::Invalid);
+        assert_eq!((s.from, s.to), (ISO_2022_JP, STATELESS_ISO_2022_JP));
+        let s = run(&TO_ISO_2022_JP, "aｱ".as_bytes());
+        assert_eq!(
+            (s.from, s.to, s.error.as_slice()),
+            (EUC_JP, STATELESS_ISO_2022_JP, &b"\x8e\xb1"[..])
+        );
+        assert_eq!(
+            s.stop,
+            Stop::Undefined {
+                code: None,
+                reference: Some(0xff71)
+            }
+        );
+        // ESC has no spelling in stateless-ISO-2022-JP; the encoder after it
+        // refuses one it is given as invalid.
+        let s = run(&TO_ISO_2022_JP, b"\x1b");
+        assert_eq!(
+            (s.from, s.to, s.error.as_slice()),
+            (EUC_JP, STATELESS_ISO_2022_JP, &b"\x1b"[..])
+        );
+        assert_eq!(
+            s.stop,
+            Stop::Undefined {
+                code: None,
+                reference: Some(0x1b)
+            }
+        );
+        let s = run(&[STATELESS_ISO_2022_JP, ISO_2022_JP], b"\x1b");
+        assert_eq!(s.stop, Stop::Invalid);
+        let s = run(&TO_ISO_2022_JP, "😀".as_bytes());
+        assert_eq!((s.from, s.to), (UTF_8, EUC_JP));
+        assert_eq!(
+            s.stop,
+            Stop::Undefined {
+                code: Some(0x1f600),
+                reference: Some(0x1f600)
+            }
+        );
+    }
+
+    #[test]
+    fn xml_escapes_after_a_stateful_source_is_decoded() {
+        // `<` in JIS X 0208 is half a character, not markup.
+        let s = step(
+            &FROM_ISO_2022_JP,
+            b"<\x1b$B<!\x1b(B",
+            0,
+            &mut State::default(),
+            Xml::Text,
+            true,
+        );
+        assert_eq!(s.map(|s| s.output), Some("&lt;次".as_bytes().to_vec()));
+        // Through UTF-8 into UTF-16, after the first converter.
+        let s = step(
+            &[EUC_JP, UTF_8, UTF_16LE],
+            b"<",
+            0,
+            &mut State::default(),
+            Xml::Text,
+            true,
+        );
+        assert_eq!(s.map(|s| s.output), Some(b"&\0l\0t\0;\0".to_vec()));
+    }
+
+    #[test]
+    fn an_attribute_opens_its_quote_with_the_first_character_through() {
+        let attr = |bytes: &[u8]| {
+            step(
+                &TO_ISO_2022_JP,
+                bytes,
+                0,
+                &mut State::default(),
+                Xml::Attr,
+                true,
+            )
+            .unwrap()
+        };
+        assert_eq!(attr("あ".as_bytes()).output, b"\"\x1b$B$\"\x1b(B\"");
+        assert_eq!(attr(b"").output, b"\"\"");
+        // ESC is refused before it reaches the quote.
+        let s = attr(b"\x1b");
+        assert_eq!((s.output.as_slice(), s.from), (&b""[..], EUC_JP));
+        // Into an ASCII-compatible destination, the quote comes first.
+        let s = step(
+            &[UTF_8, US_ASCII],
+            "ü".as_bytes(),
+            0,
+            &mut State::default(),
+            Xml::Attr,
+            true,
+        );
+        assert_eq!(s.map(|s| s.output), Some(b"\"".to_vec()));
+    }
+
+    #[test]
+    fn a_path_without_a_converter_is_refused() {
+        assert!(
+            step(
+                &[UTF_16LE, UTF_16BE],
+                b"",
+                0,
+                &mut State::default(),
+                Xml::None,
+                true
+            )
+            .is_none()
+        );
+        assert!(
+            step(
+                &[ISO_2022_JP],
+                b"",
+                0,
+                &mut State::default(),
+                Xml::None,
+                true
+            )
+            .is_none()
+        );
+        assert!(step(&[], b"", 0, &mut State::default(), Xml::None, true).is_none());
     }
 }
