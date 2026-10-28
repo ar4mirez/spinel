@@ -47,6 +47,14 @@ end
 
 class String
   UNICODE_INDEXES = [1, 3, 4, 5, 6, 7, 8].freeze
+  # `newline:`'s values, and the decorators they name.
+  NEWLINE_DECORATORS = {
+    universal: "universal_newline", crlf: "crlf_newline", cr: "cr_newline", lf: "lf_newline"
+  }.freeze
+
+  # How the VM names a newline decorator: see `transcode::step`. CRuby's
+  # `lf_newline` is `universal_newline` again. Measured.
+  NEWLINE_MODES = { "universal_newline" => 1, "lf_newline" => 1, "crlf_newline" => 2, "cr_newline" => 3 }.freeze
 
   def encode(*args, **options)
     __transcoded__(args, options)
@@ -73,7 +81,13 @@ class String
         __converter_encoding__(args[0], source)
       end
     text = self
-    decorated = options[:xml] || options[:universal_newline] || options[:crlf_newline] || options[:cr_newline]
+    xml = options[:xml]
+    if xml && !(xml == :text || xml == :attr)
+      raise ArgumentError, "unexpected value for xml option: #{xml}" if xml.is_a?(Symbol)
+      raise ArgumentError, "unexpected value for xml option"
+    end
+    newlines = String.__newline_decorators__(options)
+    decorated = xml || !newlines.empty?
     # CRuby's `str_transcode0` again: with no decorator, ASCII between two
     # ASCII-compatible encodings is relabelled, not converted, so no
     # converter is needed and none refuses a character. Measured.
@@ -92,20 +106,17 @@ class String
         end
       source = Encoding::UTF_8
     end
-    text = __decorate_source__(text, source, options)
+    # One newline decorator at a time: CRuby has no converter for two.
+    # Measured.
+    raise String.__decorators_not_found__(source, target, newlines, xml) if newlines.size > 1
     # A dummy has no characters to replace, and with a decorator nothing is
-    # converted to find one: it is kept as it is. Measured.
+    # converted to find one: it is kept as it is, and the decorators work on
+    # its bytes. `xml:` escapes even when nothing is transcoded. Measured.
     if target.equal?(source) && (decorated || options[:invalid] != :replace || source.dummy?)
-      xml = options[:xml]
-      if xml && !(xml == :text || xml == :attr)
-        raise ArgumentError, "unexpected value for xml option: #{xml.inspect}"
-      end
-      # `xml:` escapes even when nothing is transcoded. Measured.
       result = xml ? String.__escape_xml__(text, xml) : text.dup
-      result = __decorate_output__(result, options)
-      return result.force_encoding(target)
+      return String.__newlines__(result, newlines.first).force_encoding(target)
     end
-    String.__convert__(text, source, target, options, self)
+    String.__convert__(text, source, target, options)
   end
 
   def __converter_encoding__(value, from)
@@ -116,35 +127,50 @@ class String
     raise Encoding::ConverterNotFoundError, "code converter not found (#{from.name} to #{name})"
   end
 
-  # The newline options that read the source: CRLF and CR become LF.
-  def __decorate_source__(text, source, options)
-    return text unless options[:universal_newline] && String.__newlines_bytewise__(source)
-    String.__universal_newline__(text)
+  # The newline decorators `options` ask for, by CRuby's names: `newline:`'s,
+  # which overrides the others, or each of `universal_newline:`,
+  # `crlf_newline:` and `cr_newline:` that is truthy. Measured.
+  def self.__newline_decorators__(options)
+    newline = options[:newline]
+    unless newline.nil?
+      name = NEWLINE_DECORATORS[newline] if newline.is_a?(Symbol)
+      return [name] if name
+      raise ArgumentError, "unexpected value for newline option: #{newline}" if newline.is_a?(Symbol)
+      raise ArgumentError, "unexpected value for newline option"
+    end
+    names = []
+    names << "universal_newline" if options[:universal_newline]
+    names << "crlf_newline" if options[:crlf_newline]
+    names << "cr_newline" if options[:cr_newline]
+    names
   end
 
-  # Whether a newline is its byte wherever it is: in an ASCII-compatible
-  # encoding, and in ISO-2022-JP, whose JIS X 0208 bytes are 21 to 7E.
-  def self.__newlines_bytewise__(encoding)
-    encoding.ascii_compatible? || encoding.__index__ == 85
+  # The error for decorators no converter path has: the encodings, unless
+  # they are the same, and every decorator, the newline ones first. Measured.
+  def self.__decorators_not_found__(source, target, newlines, xml)
+    names = newlines + (xml == :attr ? ["xml_attr_content", "xml_attr_quote"] : xml ? ["xml_text"] : [])
+    names = names.join(",")
+    names = "#{source.name} to #{target.name} with #{names}" unless source.equal?(target)
+    Encoding::ConverterNotFoundError.new("code converter not found (#{names})")
   end
 
   # CRLF and CR become LF, byte by byte: an invalid byte is left for the
   # transcoder to report, not refused as a String operation would (#412).
   # No ASCII-compatible encoding has CR or LF as a trailing byte.
-  # The byte an error reads again is taken from the undecorated source, so a
-  # CR after an invalid byte is reported as "\r", as CRuby does (#415).
   def self.__universal_newline__(text)
     text.b.gsub("\r\n", "\n").gsub("\r", "\n").force_encoding(text.encoding)
   end
 
-  def __decorate_output__(text, options)
-    return text unless String.__newlines_bytewise__(text.encoding)
-    if options[:crlf_newline]
-      text = text.b.gsub("\n", "\r\n").force_encoding(text.encoding)
-    elsif options[:cr_newline]
-      text = text.b.gsub("\n", "\r").force_encoding(text.encoding)
+  # The newline decorator `name` on the bytes of `text`, which are ASCII
+  # where they are ASCII: before a source is read, or with nothing to
+  # transcode.
+  def self.__newlines__(text, name)
+    case name
+    when "universal_newline", "lf_newline" then __universal_newline__(text)
+    when "crlf_newline" then text.b.gsub("\n", "\r\n").force_encoding(text.encoding)
+    when "cr_newline" then text.b.gsub("\n", "\r").force_encoding(text.encoding)
+    else text
     end
-    text
   end
 
   def self.__unicode__(encoding)
@@ -153,18 +179,16 @@ class String
 
   # The step loop. A BOM'd UTF-16 or UTF-32 target converts big-endian and
   # gains its BOM; a source of either reads its BOM to learn its order. The
-  # VM escapes for `xml:` where CRuby's decorator works, after a stateful
-  # source is decoded and before a stateful target is encoded, and keeps the
-  # conversion's state between steps — ISO-2022-JP's G0, the attribute's
-  # quote — so what is inserted for an error goes through it too.
-  def self.__convert__(text, source, target, options, raw = text)
+  # VM runs the decorators — `xml:` and the newline options — where CRuby's
+  # work, after a stateful source is decoded and before a stateful target or
+  # one that is not ASCII-compatible is encoded, and keeps the conversion's
+  # state between steps — ISO-2022-JP's G0, the attribute's quote, a CR
+  # `universal_newline` holds — so what is inserted for an error goes
+  # through it too.
+  def self.__convert__(text, source, target, options)
     xml = options[:xml]
-    if xml && !(xml == :text || xml == :attr)
-      raise ArgumentError, "unexpected value for xml option: #{xml.inspect}"
-    end
+    newline = __newline_decorators__(options).first
     replacement = __replacement__(target, options)
-    # A universal-newline copy keeps the source's offsets but for CRLF.
-    raw = nil if raw.equal?(text)
     bom = nil
     step_target = target
     if target.__index__ == 7 || target.__index__ == 8
@@ -178,19 +202,19 @@ class String
     end
     stages = __path__(step_source, step_target)
     path = stages.map(&:__index__)
-    xml_mode = xml == :attr ? 2 : (xml ? 1 : 0)
-    if xml && stages.drop(1).none?(&:ascii_compatible?)
-      # The decorator reads the source itself — UTF-8 into UTF-16 or UTF-32 —
-      # and escapes its bytes before they are read. Measured.
-      text = __escape_xml__(text, xml)
-      raw = __escape_xml__(raw, xml) if raw
-      xml_mode = 0
+    mode = (xml == :attr ? 2 : (xml ? 1 : 0)) | NEWLINE_MODES.fetch(newline, 0) << 2
+    if (xml || newline) && stages.drop(1).none?(&:ascii_compatible?)
+      # The decorators read the source itself — UTF-8 into UTF-16 or UTF-32
+      # — and work on its bytes before they are read, so an error reports
+      # the bytes they wrote. Measured.
+      text = __newlines__(xml ? __escape_xml__(text, xml) : text, newline)
+      mode = 0
     end
     state = 0
     out = String.new(encoding: Encoding::BINARY)
     out << bom if bom
     loop do
-      step = text.__transcode__(path, start, state, xml_mode, false)
+      step = text.__transcode__(path, start, state, mode, false)
       __needs_char_table__ if step.nil?
       output, stop, error, readagain, following, code, reference, from, to, state = step
       out << output.b
@@ -200,16 +224,7 @@ class String
       inserted =
         case stop
         when :invalid, :incomplete
-          unless options[:invalid] == :replace
-            readagain = __raw_byte__(raw, following) if raw && readagain == "\n"
-            # ponytail: ISO-2022-JP's CR or LF in JIS X 0208 mode, where it is
-            # invalid, is the error itself, shown as it was; a CRLF there is
-            # one error where CRuby, decorating after the decoder, reads two.
-            # The upgrade is universal_newline as a decorator in
-            # `transcode::step`, where `xml:` escapes (#421).
-            error = __raw_byte__(raw, following - 1) if raw && error == "\n"
-            raise __invalid_error__(stop, error, readagain, source, target, to)
-          end
+          raise __invalid_error__(stop, error, readagain, source, target, to) unless options[:invalid] == :replace
           __insert__(out, replacement, step_target, state)
         when :undefined
           if xml && reference
@@ -229,8 +244,7 @@ class String
       out, state = inserted || __not_inserted__(replacement, target)
       start = following
     end
-    out << "".__transcode__(path, 0, state, xml_mode, true)[0].b
-    out = out.__decorate_output__(out.force_encoding(target), options) if options[:crlf_newline] || options[:cr_newline]
+    out << "".__transcode__(path, 0, state, mode, true)[0].b
     out.force_encoding(target)
   end
 
@@ -270,14 +284,6 @@ class String
   # oddly but measured.
   def self.__not_inserted__(piece, target)
     raise Encoding::ConverterNotFoundError, "code converter not found (#{piece.encoding.name} to #{target.name})"
-  end
-
-  # The source byte behind `at` in its universal-newline copy, where each
-  # CRLF became one LF.
-  def self.__raw_byte__(raw, at)
-    i = 0
-    at.times { i += raw.getbyte(i) == 13 && raw.getbyte(i + 1) == 10 ? 2 : 1 }
-    raw.byteslice(i, 1)
   end
 
   def self.__supported_target__(encoding)
