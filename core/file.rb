@@ -229,7 +229,9 @@ class File < IO
   def self.realdirpath(path, dir = nil)
     path = __path__(path)
     dir = __path__(dir) unless dir.nil?
-    expanded = expand_path(path.b, dir&.b).b
+    cwd = Dir.pwd.b
+    base = dir.nil? ? cwd : expand_path(dir.b, cwd).b
+    expanded = expand_path(path.b, base).b
     resolved = if exist?(expanded) || symlink?(expanded)
       realpath(expanded)
     else
