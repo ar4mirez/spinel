@@ -256,8 +256,26 @@ impl Encoding {
     /// - The others are as their [`Encoding`] variants say.
     #[must_use]
     pub fn char_len(self, bytes: &[u8]) -> Option<usize> {
+        self.measure(bytes, false)
+    }
+
+    /// Whether `bytes` is the start of a character that is cut short: what
+    /// there is fits one, and more bytes would finish it. What a reader asks
+    /// before it waits for the rest, as CRuby's `rb_enc_precise_mbclen`
+    /// answers `NEEDMORE`; `"\xa4"` is one in EUC-JP, `"\xa4A"` is not.
+    #[must_use]
+    pub fn is_cut_short(self, bytes: &[u8]) -> bool {
+        self.char_len(bytes).is_none()
+            && self
+                .measure(bytes, true)
+                .is_some_and(|len| len > bytes.len())
+    }
+
+    /// [`Encoding::char_len`], with a missing trail byte taken as a fitting
+    /// one when `open` is set.
+    fn measure(self, bytes: &[u8], open: bool) -> Option<usize> {
         let first = *bytes.first()?;
-        let trail = |at: usize, ok: fn(u8) -> bool| bytes.get(at).copied().is_some_and(ok);
+        let trail = |at: usize, ok: fn(u8) -> bool| bytes.get(at).copied().map_or(open, ok);
         let trails =
             |ok: &[fn(u8) -> bool]| ok.iter().enumerate().all(|(at, &ok)| trail(at + 1, ok));
         match self {
@@ -270,10 +288,12 @@ impl Encoding {
                     _ => 4,
                 };
                 let end = width.min(bytes.len());
-                std::str::from_utf8(&bytes[..end])
-                    .ok()
-                    .and_then(|text| text.chars().next())
-                    .map(char::len_utf8)
+                match std::str::from_utf8(&bytes[..end]) {
+                    Ok(text) => text.chars().next().map(char::len_utf8),
+                    // Valid as far as it goes.
+                    Err(cut) if open && cut.error_len().is_none() => Some(width),
+                    Err(_) => None,
+                }
             }
             _ if first < 0x80 => Some(1),
             Encoding::EucJp => match first {

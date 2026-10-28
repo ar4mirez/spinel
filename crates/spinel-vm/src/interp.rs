@@ -971,6 +971,7 @@ fn str_native(
             }
             None => return Err(unknown_encoding("a character operation")),
         },
+        StrOp::CutShort => bool_value(strings::cut_short(encoding, &bytes)),
         StrOp::ByteIndex | StrOp::ByteRindex => {
             let Some(needle) = string_bytes(scope, arg(0)) else {
                 return Err(Error::NoDispatch {
@@ -14461,6 +14462,11 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             Builtin::String,
             &["__char_offsets__"],
             Native::Str(StrOp::CharOffsets),
+        ),
+        (
+            Builtin::String,
+            &["__cut_short__"],
+            Native::Str(StrOp::CutShort),
         ),
         (
             Builtin::String,

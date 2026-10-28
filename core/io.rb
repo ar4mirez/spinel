@@ -1205,8 +1205,20 @@ end
       high = encoding == Encoding::UTF_16LE ? @rbuf.getbyte(1).to_i : first
       high & 0xFC == 0xD8 ? 4 : 2
     when Encoding::UTF_32LE, Encoding::UTF_32BE then 4
-    else 1
+    else
+      return 1 if first < 0x80 || !encoding.ascii_compatible?
+      # EUC-JP, Shift_JIS and the other multibyte encodings: the String's
+      # own boundaries, over the longest any of their characters is.
+      @rbuf.byteslice(0, 4).force_encoding(encoding).__char_len_at__(0)
     end
+  end
+
+  # Whether the buffer starts with a character of a multibyte encoding that
+  # the bytes still to come would finish: `"\xA4"` in EUC-JP, where
+  # `"\xA4A"` is a broken byte and then an `A`.
+  def __char_cut_short__
+    @rbuf.bytesize < 4 && @rbuf.getbyte(0) >= 0x80 &&
+      @rbuf.byteslice(0, 4).force_encoding(__encoding__).__cut_short__
   end
 
   def getc
@@ -1215,6 +1227,7 @@ end
     # The lead byte says how many more there are: reading further ahead
     # would wait on a pipe for bytes nobody has written.
     nil while @rbuf.bytesize < 2 && __encoding__.name.start_with?("UTF-16") && __fill__(1)
+    nil while __char_cut_short__ && __fill__(1)
     length = __char_length__
     nil while @rbuf.bytesize < length && __fill__(length - @rbuf.bytesize)
     length = @rbuf.bytesize if length > @rbuf.bytesize
