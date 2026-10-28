@@ -469,6 +469,11 @@ class Encoding
     PARTIAL_INPUT = 0x20000
     AFTER_OUTPUT = 0x40000
     XML_ATTR_QUOTE_DECORATOR = 0x100000
+    # The newline decorators by CRuby's names, in the order it names them.
+    NEWLINE_FLAGS = {
+      "universal_newline" => UNIVERSAL_NEWLINE_DECORATOR, "crlf_newline" => CRLF_NEWLINE_DECORATOR,
+      "cr_newline" => CR_NEWLINE_DECORATOR, "lf_newline" => LF_NEWLINE_DECORATOR
+    }.freeze
 
     attr_reader :source_encoding, :destination_encoding, :last_error
 
@@ -498,14 +503,24 @@ class Encoding
       unless String.__supported_target__(source) && String.__supported_target__(destination)
         __needs_char_table__
       end
-      decorators = []
-      decorators.push("universal_newline") if options[:universal_newline]
-      decorators.push("crlf_newline") if options[:crlf_newline]
+      decorators = String.__newline_decorators__(options)
+      __check_decorators__(source, destination, decorators)
+      __decorated__(__path__(source, destination), decorators, destination)
+    end
+
+    # The newline decorators `flags` name.
+    def self.__newline_decorators__(flags)
+      NEWLINE_FLAGS.select { |_, flag| flags & flag != 0 }.keys
+    end
+
+    # CRuby has no converter from an encoding to itself, decorated or not, nor
+    # one for two newline decorators. Measured.
+    def self.__check_decorators__(source, destination, decorators)
       if source.equal?(destination)
         with = decorators.empty? ? "" : " with #{decorators.join(",")}"
         raise Encoding::ConverterNotFoundError, "code converter not found (#{source.name} to #{destination.name}#{with})"
       end
-      __decorated__(__path__(source, destination), decorators, destination)
+      raise String.__decorators_not_found__(source, destination, decorators, nil) if decorators.size > 1
     end
 
     # The ASCII-compatible encoding a non-ASCII-compatible one converts
@@ -524,15 +539,7 @@ class Encoding
     def initialize(source, destination, options = 0)
       @source_encoding = Converter.__encoding__(source)
       @destination_encoding = Converter.__encoding__(destination)
-      if @source_encoding.equal?(@destination_encoding)
-        raise Encoding::ConverterNotFoundError,
-              "code converter not found (#{@source_encoding.name} to #{@destination_encoding.name})"
-      end
-      unless String.__supported_target__(@source_encoding) && String.__supported_target__(@destination_encoding)
-        __needs_char_table__
-      end
       @flags = 0
-      @decorators = []
       replacement = nil
       if options.is_a?(Integer)
         @flags = options
@@ -541,23 +548,33 @@ class Encoding
         @flags = @flags | INVALID_REPLACE if options[:invalid] == :replace
         @flags = @flags | UNDEF_REPLACE if options[:undef] == :replace
         @flags = @flags | UNDEF_HEX_CHARREF if options[:xml]
-        @flags = @flags | UNIVERSAL_NEWLINE_DECORATOR if options[:universal_newline]
-        @flags = @flags | CRLF_NEWLINE_DECORATOR if options[:crlf_newline]
-        @flags = @flags | CR_NEWLINE_DECORATOR if options[:cr_newline]
+        String.__newline_decorators__(options).each { |name| @flags = @flags | NEWLINE_FLAGS[name] }
         replacement = options[:replace]
       end
-      @decorators.push("universal_newline") if @flags & UNIVERSAL_NEWLINE_DECORATOR != 0
-      @decorators.push("crlf_newline") if @flags & CRLF_NEWLINE_DECORATOR != 0
-      @decorators.push("cr_newline") if @flags & CR_NEWLINE_DECORATOR != 0
+      @decorators = Converter.__newline_decorators__(@flags)
+      Converter.__check_decorators__(@source_encoding, @destination_encoding, @decorators)
+      unless String.__supported_target__(@source_encoding) && String.__supported_target__(@destination_encoding)
+        __needs_char_table__
+      end
       # The default is not converted: "?" stays US-ASCII. Measured.
       if replacement.nil?
         @replacement = __default_replacement__
       else
         self.replacement = replacement
       end
-      @path = String.__path__(@source_encoding, @destination_encoding).map(&:__index__)
-      # ISO-2022-JP's, between calls.
+      stages = String.__path__(@source_encoding, @destination_encoding)
+      @path = stages.map(&:__index__)
+      # The newline decorator works in `transcode::step`, as `String#encode`'s
+      # does, unless it reads the source itself — UTF-8 into UTF-16 or UTF-32
+      # — where it works on the bytes of each chunk before they are read.
+      newline = @decorators.first
+      @source_newline = newline if newline && stages.drop(1).none?(&:ascii_compatible?)
+      @mode = @source_newline ? 0 : String::NEWLINE_MODES.fetch(newline, 0) << 2
+      # ISO-2022-JP's, and a CR `universal_newline` holds, between calls.
       @state = 0
+      @held = false
+      # Decorated source bytes after an error, read before the next chunk.
+      @decorated = "".b
       @readagain = "".b
       @pending_output = "".b
       @errinfo = [:source_buffer_empty, nil, nil, nil, nil]
@@ -604,7 +621,8 @@ class Encoding
     end
 
     def inspect
-      "#<Encoding::Converter: #{@source_encoding.name} to #{@destination_encoding.name}>"
+      with = @decorators.empty? ? "" : " with #{@decorators.join(",")}"
+      "#<Encoding::Converter: #{@source_encoding.name} to #{@destination_encoding.name}#{with}>"
     end
 
     def primitive_errinfo
@@ -642,8 +660,9 @@ class Encoding
       offset = Integer.__index__(offset) unless offset.nil?
       bytesize = Integer.__index__(bytesize) unless bytesize.nil?
       raise ArgumentError, "output_byteoffset too big" if !offset.nil? && offset > destination.bytesize
-      input = @readagain + (source.nil? ? "".b : source.b)
+      input = @readagain + @decorated + __decorate_source__(source.nil? ? "".b : source.b, flags)
       @readagain = "".b
+      @decorated = "".b
       source&.__splice__(0, source.bytesize, "")
       output = @pending_output
       @pending_output = "".b
@@ -662,6 +681,19 @@ class Encoding
       result
     end
 
+    # A chunk through the newline decorator that reads the source itself.
+    # `universal_newline` holds a trailing CR of partial input until it sees
+    # what follows, as CRuby's does. Measured.
+    def __decorate_source__(input, flags)
+      return input unless @source_newline
+      if @source_newline == "universal_newline" || @source_newline == "lf_newline"
+        input = "\r".b + input if @held
+        @held = flags & PARTIAL_INPUT != 0 && input.getbyte(input.bytesize - 1) == 13
+        input = input.byteslice(0, input.bytesize - 1) if @held
+      end
+      String.__newlines__(input, @source_newline).b
+    end
+
     # One run over `input`, appending to `output`. Errors the flags replace
     # are replaced; the first one they do not is reported, its bytes and any
     # read-again bytes taken from the input, and what follows put back in
@@ -670,7 +702,7 @@ class Encoding
     def __run__(input, output, flags, source)
       start = 0
       loop do
-        step = input.__transcode__(@path, start, @state, 0, flags & PARTIAL_INPUT == 0)
+        step = input.__transcode__(@path, start, @state, @mode, flags & PARTIAL_INPUT == 0)
         converted, stop, error, readagain, following, code, reference, from, to, @state = step
         output << converted.b
         if stop == :done
@@ -702,7 +734,15 @@ class Encoding
         end
         rest = input.byteslice(following + readagain.bytesize, input.bytesize)
         @readagain = readagain.b
-        source&.__splice__(0, 0, rest)
+        # ponytail: decorated bytes are kept to be read next, not put back in
+        # `source`, where they would be decorated again; CRuby puts back as
+        # much as its decorator has not buffered, which differs by chunk. The
+        # upgrade is a map from decorated offsets to the source's.
+        if @source_newline
+          @decorated = rest.b
+        else
+          source&.__splice__(0, 0, rest)
+        end
         result = { invalid: :invalid_byte_sequence, incomplete: :incomplete_input, undefined: :undefined_conversion }[stop]
         from = Encoding::LIST[from]
         to = Encoding::LIST[to]
