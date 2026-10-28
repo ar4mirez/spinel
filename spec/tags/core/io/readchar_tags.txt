@@ -1,0 +1,1 @@
+fails(#403: IO reads a byte per character in a multibyte external encoding):IO#readchar with internal encoding not specified does not transcode the String

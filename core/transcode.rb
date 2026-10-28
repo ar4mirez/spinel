@@ -1,10 +1,11 @@
 # `String#encode`, `#encode!` and `#scrub` (#19), driving the transcoder in
 # `crates/spinel-vm/src/transcode.rs` one step at a time. The VM converts
 # between the encodings whose mapping is arithmetic — UTF-8, US-ASCII,
-# BINARY, ISO-8859-1, UTF-16 and UTF-32 — and refuses any other; this file
-# is CRuby's rules about what an error means: `invalid:`/`undef:` with
-# `replace:`, `fallback:`, `xml:`, the newline options, and the exceptions,
-# with their attributes and messages, measured on ruby 4.0.7.
+# BINARY, ISO-8859-1, UTF-16 and UTF-32 — and EUC-JP, Shift_JIS and
+# Windows-31J, whose mapping is CRuby's table (#378), and refuses any other;
+# this file is CRuby's rules about what an error means: `invalid:`/`undef:`
+# with `replace:`, `fallback:`, `xml:`, the newline options, and the
+# exceptions, with their attributes and messages, measured on ruby 4.0.7.
 class Encoding
   class InvalidByteSequenceError
     def error_bytes = @__error_bytes__
@@ -135,7 +136,7 @@ class String
     loop do
       step = text.__transcode__(step_source.__index__, step_target.__index__, start)
       __needs_char_table__ if step.nil?
-      output, stop, error, readagain, following, code = step
+      output, stop, error, readagain, following, code, reference = step
       out << output.b
       break if stop == :done
       piece =
@@ -146,10 +147,11 @@ class String
           end
           replacement
         when :undefined
+          # A character with a codepoint is UTF-8's, whatever the source:
+          # it is what the step that failed was given. Measured.
           char = code ? Integer.__utf8__(code) : error.dup.force_encoding(source)
-          char = char.encode(source) if code && !source.equal?(Encoding::UTF_8) && __supported_target__(source)
-          if xml && code
-            "&#x#{Integer.__hex__(code, 1)};"
+          if xml && reference
+            "&#x#{Integer.__hex__(reference, 1)};"
           elsif options[:undef] == :replace
             replacement
           elsif options[:fallback]
@@ -161,12 +163,23 @@ class String
       out << __in_target__(piece, step_target).b
       start = following
     end
-    out = __decorate_output__(out.force_encoding(target), options) if options[:crlf_newline] || options[:cr_newline]
+    out = out.__decorate_output__(out.force_encoding(target), options) if options[:crlf_newline] || options[:cr_newline]
     out.force_encoding(target)
   end
 
   def self.__supported_target__(encoding)
-    [0, 1, 2, 3, 4, 5, 6, 22].include?(encoding.__index__)
+    [0, 1, 2, 3, 4, 5, 6, 10, 11, 22, 39].include?(encoding.__index__)
+  end
+
+  # EUC-JP and Shift_JIS convert to each other directly; every other pair
+  # without UTF-8 on one side goes through it, in two steps. Measured.
+  def self.__direct__(source, target)
+    pair = [source.__index__, target.__index__]
+    pair == [10, 39] || pair == [39, 10]
+  end
+
+  def self.__through_utf8__(source, target)
+    !source.equal?(Encoding::UTF_8) && !target.equal?(Encoding::UTF_8) && !__direct__(source, target)
   end
 
   # What `invalid: :replace` and `undef: :replace` substitute: `replace:`, or
@@ -245,26 +258,30 @@ class String
       end
     # No bytes to read again is nil, not "". Measured.
     readagain = nil if readagain.empty?
+    # Through UTF-8, the step that failed is the one into it. Measured.
+    target = Encoding::UTF_8 if __through_utf8__(source, target)
     Encoding::InvalidByteSequenceError.new(message).__set__(error, readagain, source, target, stop == :incomplete)
   end
 
-  # A codepoint names itself as `U+00E9`; a BINARY byte as its escape. A
-  # conversion that goes through UTF-8 says so. Measured.
+  # A codepoint names itself as `U+00E9`; a character with none — a BINARY
+  # byte, a JIS character Unicode lacks — as its bytes. A conversion that goes
+  # through UTF-8 says so, and names the step that failed. Measured.
   def self.__undefined_error__(char, code, error, source, target)
+    through = __through_utf8__(source, target)
+    shown = code.nil? ? error.inspect : "U+#{Integer.__hex__(code, 4)}"
+    step_target = code.nil? && through ? Encoding::UTF_8 : target
     message =
-      if code.nil?
-        "#{error.inspect} from #{source.name} to #{target.name}"
-      elsif !source.equal?(Encoding::UTF_8) && !target.equal?(Encoding::UTF_8)
-        "U+#{Integer.__hex__(code, 4)} to #{target.name} in conversion from #{source.name} to UTF-8 to #{target.name}"
+      if through
+        "#{shown} to #{step_target.name} in conversion from #{source.name} to UTF-8 to #{target.name}"
       else
-        "U+#{Integer.__hex__(code, 4)} from #{source.name} to #{target.name}"
+        "#{shown} from #{source.name} to #{target.name}"
       end
-    # Through UTF-8, the step that failed is UTF-8's: its character and its
-    # source encoding are what the error reports.
-    if code && !source.equal?(Encoding::UTF_8) && !target.equal?(Encoding::UTF_8)
+    # Through UTF-8, a character with a codepoint failed the second step:
+    # UTF-8's character and encoding are what the error reports.
+    if code && through
       return Encoding::UndefinedConversionError.new(message).__set__(Integer.__utf8__(code), Encoding::UTF_8, target)
     end
-    Encoding::UndefinedConversionError.new(message).__set__(char, source, target)
+    Encoding::UndefinedConversionError.new(message).__set__(char, source, step_target)
   end
 
   # `scrub`: each invalid sequence replaced — by the argument, by the block's
@@ -333,12 +350,13 @@ class Encoding
       Encoding.find(String.__coerce__(value))
     end
 
-    # The converters run through UTF-8 unless one side is UTF-8.
+    # The converters run through UTF-8 unless one side is UTF-8, or the pair
+    # is EUC-JP and Shift_JIS.
     def self.__path__(source, destination)
-      if source.equal?(Encoding::UTF_8) || destination.equal?(Encoding::UTF_8)
-        [[source, destination]]
-      else
+      if String.__through_utf8__(source, destination)
         [[source, Encoding::UTF_8], [Encoding::UTF_8, destination]]
+      else
+        [[source, destination]]
       end
     end
 
@@ -396,7 +414,12 @@ class Encoding
       @decorators.push("universal_newline") if @flags & UNIVERSAL_NEWLINE_DECORATOR != 0
       @decorators.push("crlf_newline") if @flags & CRLF_NEWLINE_DECORATOR != 0
       @decorators.push("cr_newline") if @flags & CR_NEWLINE_DECORATOR != 0
-      self.replacement = replacement.nil? ? __default_replacement__ : replacement
+      # The default is not converted: "?" stays US-ASCII. Measured.
+      if replacement.nil?
+        @replacement = __default_replacement__
+      else
+        self.replacement = replacement
+      end
       @readagain = "".b
       @pending_output = "".b
       @errinfo = [:source_buffer_empty, nil, nil, nil, nil]
@@ -420,6 +443,20 @@ class Encoding
         converted = value.to_str
         raise TypeError, "can't convert #{value.class} to String (#{value.class}#to_str gives #{converted.class})" unless converted.is_a?(String)
         value = converted
+      end
+      # Kept in the encoding output is inserted in: the destination, or the
+      # ASCII-compatible one a UTF-16 or UTF-32 destination converts through.
+      # A replacement that cannot be converted is refused, the old one kept.
+      # Measured.
+      target = Converter.asciicompat_encoding(@destination_encoding) || @destination_encoding
+      unless value.encoding.equal?(target)
+        # Raised outside the rescue, so it has no cause: CRuby's has none.
+        value = begin
+          value.encode(target)
+        rescue EncodingError
+          nil
+        end
+        raise Encoding::UndefinedConversionError, "replacement character setup failed" if value.nil?
       end
       @replacement = value
     end
@@ -490,7 +527,7 @@ class Encoding
       start = 0
       loop do
         step = input.__transcode__(@source_encoding.__index__, @destination_encoding.__index__, start)
-        converted, stop, error, readagain, following, code = step
+        converted, stop, error, readagain, following, code, reference = step
         output << converted.b
         if stop == :done
           @errinfo = [flags & PARTIAL_INPUT != 0 ? :source_buffer_empty : :finished, nil, nil, nil, nil]
@@ -504,8 +541,8 @@ class Encoding
         end
         replace =
           if stop == :undefined
-            if flags & UNDEF_MASK == UNDEF_HEX_CHARREF && code
-              "&#x#{Integer.__hex__(code, 1)};"
+            if flags & UNDEF_MASK == UNDEF_HEX_CHARREF && reference
+              "&#x#{Integer.__hex__(reference, 1)};"
             elsif flags & UNDEF_MASK == UNDEF_REPLACE
               @replacement
             end
@@ -524,10 +561,10 @@ class Encoding
         if stop == :undefined
           char = code ? Integer.__utf8__(code) : error.dup.force_encoding(@source_encoding)
           @last_error = String.__undefined_error__(char, code, error, @source_encoding, @destination_encoding)
-          @errinfo = [result, @source_encoding.name, @destination_encoding.name, error.b, "".b]
+          @errinfo = [result, @last_error.source_encoding_name, @last_error.destination_encoding_name, @last_error.error_char.b, "".b]
         else
           @last_error = String.__invalid_error__(stop, error.b, readagain.b, @source_encoding, @destination_encoding)
-          @errinfo = [result, @source_encoding.name, @destination_encoding.name, error.b, readagain.b]
+          @errinfo = [result, @source_encoding.name, @last_error.destination_encoding_name, error.b, readagain.b]
         end
         return result
       end

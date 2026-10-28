@@ -76,6 +76,8 @@ pub mod errno;
 pub mod float;
 pub mod heap;
 pub mod interp;
+pub mod jis;
+pub mod jis_table;
 pub mod method;
 pub mod mt;
 pub mod regexp;

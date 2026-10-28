@@ -1022,11 +1022,13 @@ fn str_native(
                 return Ok(None);
             }
             let step = crate::transcode::step(source, destination, &bytes, start);
-            let (stop, code) = match step.stop {
-                crate::transcode::Stop::Done => ("done", None),
-                crate::transcode::Stop::Invalid => ("invalid", None),
-                crate::transcode::Stop::Incomplete => ("incomplete", None),
-                crate::transcode::Stop::Undefined(code) => ("undefined", code),
+            let (stop, code, reference) = match step.stop {
+                crate::transcode::Stop::Done => ("done", None, None),
+                crate::transcode::Stop::Invalid => ("invalid", None, None),
+                crate::transcode::Stop::Incomplete => ("incomplete", None, None),
+                crate::transcode::Stop::Undefined { code, reference } => {
+                    ("undefined", code, reference)
+                }
             };
             let output = string_bytes_in(scope, Builtin::String.id(), &step.output, destination);
             let error = string_bytes_in(
@@ -1042,6 +1044,7 @@ fn str_native(
                 crate::strings::BINARY,
             );
             let code = code.map_or(Value::NIL, |c| fixnum(i64::from(c)));
+            let reference = reference.map_or(Value::NIL, |c| fixnum(i64::from(c)));
             new_array(
                 scope,
                 &[
@@ -1051,6 +1054,7 @@ fn str_native(
                     readagain,
                     fixnum(step.next as i64),
                     code,
+                    reference,
                 ],
             )
         }
