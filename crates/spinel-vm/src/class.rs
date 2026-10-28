@@ -303,6 +303,7 @@ impl Method {
         self.origin.unwrap_or(Origin {
             owner: self.owner,
             name,
+            aliased: false,
         })
     }
 }
@@ -316,6 +317,11 @@ impl Method {
 pub struct Origin {
     pub owner: ClassId,
     pub name: SymbolId,
+    /// An alias of a body a module holds, which CRuby keeps as an `ALIAS`
+    /// entry naming that body. A `define_method` copy of one is that alias
+    /// again, `X(Kernel)#w(tap)`; a copy of anything else, a class's body
+    /// aliased included, is the target's own (#395).
+    pub aliased: bool,
 }
 
 /// One method table entry: the body, the scope its `def` was written in, its
@@ -1271,7 +1277,13 @@ impl Classes {
             found.visibility
         };
         self.note_redefinition(id, new, Some(found.body), true);
-        let origin = (!as_own).then(|| found.origin_or(old));
+        let origin = (!as_own).then(|| {
+            let origin = found.origin_or(old);
+            Origin {
+                aliased: self.kind(origin.owner) == Kind::Module,
+                ..origin
+            }
+        });
         self.entry_mut(id)
             .methods
             .insert(new, (found.body, found.cref, visibility, origin));
@@ -1549,8 +1561,14 @@ impl Classes {
     /// the definition that entry stands in for, if it stands in for one (#27).
     #[must_use]
     pub fn super_origin(&self, owner: ClassId, name: SymbolId) -> Origin {
-        self.method_at(owner, name)
-            .map_or(Origin { owner, name }, |method| method.origin_or(name))
+        self.method_at(owner, name).map_or(
+            Origin {
+                owner,
+                name,
+                aliased: false,
+            },
+            |method| method.origin_or(name),
+        )
     }
 
     /// The method `owner` itself defines under `name`, with no walk: what a

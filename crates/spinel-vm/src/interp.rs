@@ -1472,6 +1472,7 @@ fn reflect_native(
                         None => Value::NIL,
                     };
                     let defined = scope.root(defined);
+                    let aliased = method.origin.is_some_and(|origin| origin.aliased);
                     let fields = [
                         scope.get(owner),
                         Value::fixnum(arity).expect("an arity fits a fixnum"),
@@ -1487,6 +1488,9 @@ fn reflect_native(
                         // definition later needs with it.
                         cref_value(method.cref),
                         scope.get(defined),
+                        // An alias of a module's body, which `define_method`
+                        // copies as that alias.
+                        bool_value(aliased),
                     ];
                     new_array(scope, &fields)
                 }
@@ -10816,6 +10820,7 @@ fn native_call<'h>(
             // the method its owner defines under its name.
             let mut captured = None;
             let mut source_name = None;
+            let mut alias_of = None;
             if proc_body(scope, body_value).is_none() {
                 let class = class_name(scope, body_value);
                 if class == "Method" || class == "UnboundMethod" {
@@ -10828,6 +10833,9 @@ fn native_call<'h>(
                     let field = |index: usize| found.get(index).copied().unwrap_or(Value::NIL);
                     source_name = field(7).as_symbol().or(held.as_symbol());
                     let (owner, body, cref) = (field(0), field(6), field(8));
+                    if field(10).is_truthy() {
+                        alias_of = class_id_of(scope, field(9));
+                    }
                     if scope.definitions().get(body).is_some() {
                         captured = class_id_of(scope, owner).map(|owner| Method {
                             owner,
@@ -10897,13 +10905,16 @@ fn native_call<'h>(
                         && scope.classes().cref_class(frame.cref) == target
                 });
             // A method's body keeps the name it was defined under, which
-            // `original_name` reports and `super` in it looks for.
+            // `original_name` reports and `super` in it looks for. An alias of
+            // a module's body stays one, as CRuby's `ALIAS` entry does: the
+            // copy names that module and `super` in it continues from there,
+            // `X(Kernel)#w(tap)` (#395). Any other body is the target's own.
             let (body, cref, origin) = match captured {
                 Some(method) => {
-                    let defined = method.origin_or(source_name.unwrap_or(symbol)).name;
                     let origin = crate::class::Origin {
-                        owner: target,
-                        name: defined,
+                        owner: alias_of.unwrap_or(target),
+                        name: source_name.unwrap_or(symbol),
+                        aliased: alias_of.is_some(),
                     };
                     (method.body, method.cref, Some(origin))
                 }
