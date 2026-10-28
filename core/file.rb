@@ -46,8 +46,12 @@ class File < IO
     raise SystemCallError.new(path, result, where)
   end
 
+  # In the encoding CRuby's `rb_file_join` gives the result: it starts as an
+  # empty US-ASCII string and each part goes in by `fs_enc_check`, so the
+  # paths' own encoding is kept. Nothing to join is an empty binary string.
   def self.join(*parts)
-    out = "".dup
+    return "".b if parts.empty?
+    out = "".dup.force_encoding(Encoding::US_ASCII)
     __join_into__(out, parts, [], true)
     out
   end
@@ -56,8 +60,9 @@ class File < IO
   # has at its own ends: `File.join("q//", "b")` is "q//b". Measured.
   def self.__join_into__(out, parts, seen, first)
     parts.each do |part|
-      # An empty Array is an empty part: `File.join([], "a")` is "/a".
-      part = "" if Array === part && part.empty?
+      # An empty Array is an empty part, joined as nothing to join is:
+      # `File.join([], "a")` is a binary "/a".
+      part = "".b if Array === part && part.empty?
       if Array === part
         raise ArgumentError, "recursive array" if seen.any? { |s| s.equal?(part) }
         seen.push(part)
@@ -68,16 +73,15 @@ class File < IO
       part = __path_of__(part) unless String === part
       raise ArgumentError, "string contains null byte" if part.include?("\0")
       if first
-        out << part
       elsif out.end_with?("/") && part.start_with?("/")
         # Both sides have separators: the right part's win. Measured.
         out.sub!(%r{/+\z}, "")
-        out << part
-      elsif out.end_with?("/") || part.start_with?("/")
-        out << part
-      else
-        out << "/" << part
+      elsif !out.end_with?("/") && !part.start_with?("/")
+        out << "/"
       end
+      encoding = __fs_enc_check__(out, part)
+      out << part
+      out.force_encoding(encoding)
       first = false
     end
     first
@@ -199,8 +203,25 @@ class File < IO
 
   def self.realpath(path, dir = nil)
     path = __path__(path)
+    # The result is in the encoding of `path` as given, not of its join with
+    # `dir`. Measured.
+    encoding = path.encoding
     path = join(__path__(dir), path) unless dir.nil? || path.start_with?("/")
-    __check__(__fs_realpath__(path), path, "rb_check_realpath_internal")
+    resolved = __check__(__fs_realpath__(path), path, "rb_check_realpath_internal")
+    __in_path_encoding__(__fs_string__(resolved), encoding)
+  end
+
+  # A path the system resolved, in the encoding of the one it was asked
+  # about, as CRuby's `rb_check_realpath_internal` gives it: transcoded where
+  # it can be, else tagged with that encoding as it is. Measured.
+  def self.__in_path_encoding__(resolved, encoding)
+    return resolved if resolved.encoding == encoding
+    return resolved.force_encoding(encoding) if resolved.ascii_only?
+    begin
+      resolved.encode(encoding)
+    rescue EncodingError
+      resolved.force_encoding(encoding)
+    end
   end
 
   # `realpath`, but the last component need not exist.
