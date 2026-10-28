@@ -10838,14 +10838,19 @@ fn native_call<'h>(
                     }
                     // A class's method goes only where that class reaches; a
                     // module's goes anywhere. CRuby's two messages (#398).
-                    if let Some(from) = class_id_of(scope, owner)
+                    let narrowed = field(9) != Value::NIL
+                        && !field(10).is_truthy()
+                        && field(7).as_symbol().is_some()
+                        && field(7).as_symbol() == held.as_symbol();
+                    let checked = if narrowed { field(9) } else { owner };
+                    if let Some(from) = class_id_of(scope, checked)
                         && scope.classes().kind(from) == Kind::Class
                         && !scope.classes().reaches(target, from)
                     {
                         let message = if scope.classes().is_singleton(from) {
                             "can't bind singleton method to a different class".to_owned()
                         } else {
-                            let shown = inspect(scope, owner);
+                            let shown = inspect(scope, checked);
                             format!("bind argument must be a subclass of {shown}")
                         };
                         return Err(Error::raise("TypeError", message));
