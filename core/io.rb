@@ -857,16 +857,40 @@ end
   end
 
   # A String about to be written, in the encoding the IO writes: `@enc2`, or
-  # `@enc` unless that is BINARY. CRuby's `do_writeconv`.
+  # `@enc` unless that is BINARY. CRuby's `do_writeconv`, with the newline
+  # decorators run by `String#encode`. Measured.
   def __encode_out__(text)
+    options = __write_ecopts__
+    newline = String.__newline_decorators__(options).first
     target = @enc2 || (@enc == Encoding::BINARY ? nil : @enc)
-    text = text.encode(target, **@ecopts.reject { |key, _| %i[newline universal_newline crlf_newline cr_newline].include?(key) }) unless target.nil? || text.encoding == target
-    if @ecopts[:crlf_newline] || @ecopts[:newline] == :crlf
-      text = text.gsub("\n", "\r\n")
-    elsif @ecopts[:cr_newline] || @ecopts[:newline] == :cr
-      text = text.gsub("\n", "\r")
+    if target.nil?
+      # No conversion: the decorators work on the bytes, which a text mode
+      # IO — any newline option makes one — wants ASCII-compatible.
+      if !text.encoding.ascii_compatible? && %i[newline universal_newline crlf_newline cr_newline lf_newline].any? { |key| @ecopts[key] }
+        raise ArgumentError, "ASCII incompatible string written for text mode IO without encoding conversion: #{text.encoding}"
+      end
+      return text if newline.nil?
+      decorators = options.select { |key, _| %i[newline crlf_newline cr_newline lf_newline].include?(key) }
+      return text.b.encode(Encoding::BINARY, **decorators).force_encoding(text.encoding)
     end
-    text
+    ascii = Encoding::Converter.asciicompat_encoding(target)
+    if newline && ascii
+      # Into an encoding that is not ASCII-compatible, CRuby converts twice:
+      # with the decorators to the ASCII-compatible encoding it pairs with,
+      # then on to the IO's with only the error handling.
+      handling = options.reject { |key, _| %i[newline crlf_newline cr_newline lf_newline xml].include?(key) }
+      return text.encode(ascii, **options).encode(target, **handling)
+    end
+    return text if newline.nil? && text.encoding == target
+    text.encode(target, **options)
+  end
+
+  # The options a write transcodes with: CRuby's `make_writeconv` leaves out
+  # the decorator for reading, universal newline, and `newline:` overrides
+  # the other newline options.
+  def __write_ecopts__
+    return @ecopts.reject { |key, _| %i[newline universal_newline crlf_newline cr_newline lf_newline].include?(key) } if @ecopts[:newline] == :universal
+    @ecopts.reject { |key, _| key == :universal_newline }
   end
 
   # --- the read buffer -----------------------------------------------------
