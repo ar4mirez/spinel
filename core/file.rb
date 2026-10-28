@@ -224,11 +224,46 @@ class File < IO
     end
   end
 
-  # `realpath`, but the last component need not exist.
+  # `realpath`, but the last component need not exist. The path is worked
+  # out in raw bytes, as CRuby's `rb_check_realpath_emulate` does it.
   def self.realdirpath(path, dir = nil)
-    path = expand_path(path, dir)
-    return realpath(path) if exist?(path) || symlink?(path)
-    join(realpath(dirname(path)), basename(path))
+    path = __path__(path)
+    dir = __path__(dir) unless dir.nil?
+    cwd = Dir.pwd.b
+    base = dir.nil? ? cwd : expand_path(dir.b, cwd).b
+    expanded = expand_path(path.b, base).b
+    resolved = if exist?(expanded) || symlink?(expanded)
+      realpath(expanded)
+    else
+      join(realpath(dirname(expanded)), basename(expanded))
+    end
+    __realpath_rec_encoding__(resolved.b, path, dir)
+  end
+
+  # The encoding `rb_check_realpath_emulate` gives the path it resolved.
+  # It starts from the root of `path` when that is absolute, else of `dir`
+  # when that is, else of the working directory, which it reads as binary;
+  # a binary or US-ASCII `path` starts it in the filesystem encoding
+  # instead. Whatever that is, the bytes go on in it, and are then tagged
+  # with `path`'s encoding where they are ASCII or that is binary, else
+  # transcoded to it where they can be, and kept as they are where they
+  # cannot. Measured.
+  def self.__realpath_rec_encoding__(resolved, path, dir)
+    encoding = path.encoding
+    root = if path.b.start_with?("/")
+      encoding
+    elsif !dir.nil? && dir.b.start_with?("/")
+      dir.encoding
+    else
+      Encoding::BINARY
+    end
+    root = Encoding.find("filesystem") if encoding == Encoding::BINARY || encoding == Encoding::US_ASCII
+    resolved = resolved.force_encoding(root)
+    return resolved if root == encoding
+    return resolved.force_encoding(encoding) if resolved.ascii_only? || encoding == Encoding::BINARY
+    resolved.encode(encoding)
+  rescue EncodingError
+    resolved
   end
 
   def self.exist?(path)

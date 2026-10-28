@@ -1573,6 +1573,11 @@ n = "/tmp/spinel-eval-#{Process.pid}-a"; File.open(n, "w") { |f| f.write("one\n"
 n = "/tmp/spinel-eval-#{Process.pid}-b"; r = File.open(n, "w+") { |f| f.write("abcdef"); f.rewind; a = f.read(2); f.seek(-2, IO::SEEK_END); [a, f.read, f.pos, f.eof?, f.read, f.read(1)] }; File.delete(n); r  #=> ["ab", "ef", 6, true, "", nil]
 n = "/tmp/spinel-eval-#{Process.pid}-c"; File.write(n, "x\ny\n"); r = File.open(n) { |f| [f.gets, f.lineno, f.gets(chomp: true), f.gets, (f.write("z") rescue $!.message)] }; s = File.stat(n); r += [s.file?, s.directory?, s.size, s.ftype]; File.delete(n); r  #=> ["x\n", 1, "y", nil, "not opened for writing", true, false, 4, "file"]
 d = "/tmp/spinel-eval-#{Process.pid}-d"; r = [Dir.mkdir(d), File.directory?(d), (Dir.mkdir(d) rescue $!.class), Dir.rmdir(d), File.exist?(d), (File.open("#{d}/x") rescue $!.class)]; r  #=> [0, true, Errno::EEXIST, 0, false, Errno::ENOENT]
+# `File.realdirpath` builds its path from the root of `path`, `dir` or the
+# working directory, read as binary (#406): a `dir` with non-ASCII in it ends
+# in `path`'s encoding where it is absolute, and binary where it is relative.
+d = "/tmp/spinel-eval-#{Process.pid}-dir_あ"; Dir.mkdir(d); x = "x".encode("EUC-JP"); up = "../" * Dir.pwd.count("/") + d[1..]; r = [File.realdirpath(x, d).encoding.name, File.realdirpath(x, up).encoding.name, File.realdirpath("x", up).encoding.name, File.realdirpath("x".encode("US-ASCII"), up).encoding.name, File.realdirpath(x, d.b).encoding.name]; Dir.rmdir(d); r  #=> ["EUC-JP", "ASCII-8BIT", "ASCII-8BIT", "UTF-8", "ASCII-8BIT"]
+d = "#{File.realpath("/tmp")}/spinel-eval-#{Process.pid}-cwd_あ"; Dir.mkdir(d); Dir.mkdir("#{d}/dir_あ"); r = Dir.chdir(d) { [File.realdirpath("x", "dir_あ"), File.realdirpath("dir_あ/x"), File.realdirpath("x", "../#{File.basename(d)}")].map { |s| [s.b == "#{d}/dir_あ/x".b || s.b == "#{d}/x".b, s.encoding.name] } }; Dir.rmdir("#{d}/dir_あ"); Dir.rmdir(d); r  #=> [[true, "ASCII-8BIT"], [true, "ASCII-8BIT"], [true, "ASCII-8BIT"]]
 
 # ------------------------------------------- Method, UnboundMethod and `&` (#27)
 # A method taken out of its class is the body it held: equal to its alias,
