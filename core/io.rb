@@ -930,6 +930,7 @@ end
   # Universal newline on the way in, when it was asked for.
   def __newlines_in__(text)
     return text unless @ecopts[:universal_newline] || @ecopts[:newline] == :universal
+    return String.__universal_newline__(text) if text.encoding.ascii_compatible?
     text.gsub(/\r\n?/, "\n")
   end
 

@@ -95,7 +95,18 @@ class String
   # The newline options that read the source: CRLF and CR become LF.
   def __decorate_source__(text, source, options)
     return text unless options[:universal_newline] && source.ascii_compatible?
-    text.gsub("\r\n", "\n").gsub("\r", "\n")
+    String.__universal_newline__(text)
+  end
+
+  # CRLF and CR become LF, byte by byte: an invalid byte is left for the
+  # transcoder to report, not refused as a String operation would (#412).
+  # No ASCII-compatible encoding has CR or LF as a trailing byte.
+  # ponytail: the source is rewritten before the transcoder reads it, so an
+  # invalid byte followed by CR reports "\n" as its readagain bytes where
+  # CRuby, decorating after the transcoder, reports "\r"; decorating each
+  # step's output instead lifts that (#415).
+  def self.__universal_newline__(text)
+    text.b.gsub("\r\n", "\n").gsub("\r", "\n").force_encoding(text.encoding)
   end
 
   def __decorate_output__(text, options)
