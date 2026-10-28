@@ -10,9 +10,9 @@
 //!
 //! The VM knows an encoding only by index, and character boundaries for the
 //! three launch encodings, the arithmetic ones `transcode` reads, every
-//! single-byte encoding, CESU-8, and every other ASCII-compatible multibyte
+//! single-byte encoding, CESU-8, every other ASCII-compatible multibyte
 //! encoding that is not a dummy, whose lead and trail bytes are ranges rather
-//! than a table. Every other encoding is a name `core/` can answer about, and
+//! than a table, and the dummies, a byte each. Every other encoding is a name `core/` can answer about, and
 //! a character operation on it is refused by the caller rather than guessed at.
 
 use crate::heap::{Handle, HandleScope, Payload};
@@ -140,7 +140,7 @@ pub fn char_len(encoding: u8, bytes: &[u8], at: usize) -> Option<usize> {
         BINARY | US_ASCII => Some(1),
         UTF_8 => Some(utf8_char_len(&bytes[at..])),
         CESU_8 => Some(cesu8_char_len(&bytes[at..]).unwrap_or(1)),
-        _ if bytewise(encoding) => Some(1),
+        _ if bytewise(encoding) || dummy(encoding) => Some(1),
         _ => match multibyte(encoding) {
             Some(engine) => Some(engine.char_width(bytes, at)),
             None => crate::transcode::char_len(encoding, bytes, at),
@@ -166,6 +166,15 @@ fn bytewise(encoding: u8) -> bool {
         .get(usize::from(encoding))
         .is_some_and(|&(_, compatible, dummy, single)| compatible && !dummy && single)
         && encoding != US_ASCII
+}
+
+/// Whether `encoding` is a dummy — ISO-2022-JP and its variants, UTF-7, the
+/// UTF-16 and UTF-32 that carry a BOM, IBM037 — which CRuby reads a byte per
+/// character, every byte valid. Measured on ruby 4.0.9 for every one (#404).
+fn dummy(encoding: u8) -> bool {
+    crate::encoding_table::ENCODINGS
+        .get(usize::from(encoding))
+        .is_some_and(|&(_, _, dummy, _)| dummy)
 }
 
 /// How the regex engine reads a multibyte encoding other than UTF-8 and
@@ -269,6 +278,7 @@ pub fn single_byte(encoding: u8, bytes: &[u8]) -> bool {
     encoding == BINARY
         || encoding == US_ASCII
         || bytewise(encoding)
+        || dummy(encoding)
         || (ascii_compatible(encoding) && bytes.is_ascii())
 }
 
@@ -290,7 +300,7 @@ pub fn valid(encoding: u8, bytes: &[u8]) -> Option<bool> {
             }
             Some(true)
         }
-        _ if bytewise(encoding) => Some(true),
+        _ if bytewise(encoding) || dummy(encoding) => Some(true),
         _ => match multibyte(encoding) {
             Some(engine) => {
                 let mut at = 0;
@@ -970,9 +980,11 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_encoding_is_unknown() {
-        let dummy = named("ISO-2022-JP");
-        assert_eq!(char_offsets(dummy, b"abc"), None);
-        assert_eq!(valid(dummy, b"abc"), None);
+    fn a_dummy_is_a_byte_per_character_and_always_valid() {
+        for name in ["ISO-2022-JP", "UTF-16", "UTF-7", "IBM037"] {
+            let dummy = named(name);
+            assert_eq!(char_offsets(dummy, b"a\x80\xff"), Some(vec![0, 1, 2, 3]));
+            assert_eq!(valid(dummy, b"\xd8\x00\x80"), Some(true));
+        }
     }
 }

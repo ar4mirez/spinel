@@ -1,11 +1,13 @@
 # `String#encode`, `#encode!` and `#scrub` (#19), driving the transcoder in
 # `crates/spinel-vm/src/transcode.rs` one step at a time. The VM converts
 # between the encodings whose mapping is arithmetic — UTF-8, US-ASCII,
-# BINARY, ISO-8859-1, UTF-16 and UTF-32 — and EUC-JP, Shift_JIS and
-# Windows-31J, whose mapping is CRuby's table (#378), and refuses any other;
-# this file is CRuby's rules about what an error means: `invalid:`/`undef:`
-# with `replace:`, `fallback:`, `xml:`, the newline options, and the
-# exceptions, with their attributes and messages, measured on ruby 4.0.7.
+# BINARY, ISO-8859-1, UTF-16 and UTF-32 — EUC-JP, Shift_JIS and
+# Windows-31J, whose mapping is CRuby's table (#378), and ISO-2022-JP and
+# stateless-ISO-2022-JP (#404), and refuses any other. This file finds the
+# path of CRuby's converters a conversion takes, and is CRuby's rules about
+# what an error means: `invalid:`/`undef:` with `replace:`, `fallback:`,
+# `xml:`, the newline options, and the exceptions, with their attributes and
+# messages, measured on ruby 4.0.7 and 4.0.9.
 class Encoding
   class InvalidByteSequenceError
     def error_bytes = @__error_bytes__
@@ -70,8 +72,30 @@ class String
       else
         __converter_encoding__(args[0], source)
       end
-    text = __decorate_source__(self, source, options)
-    if target.equal?(source) && options[:invalid] != :replace
+    text = self
+    decorated = options[:xml] || options[:universal_newline] || options[:crlf_newline] || options[:cr_newline]
+    # CRuby's `str_transcode0` again: with no decorator, ASCII between two
+    # ASCII-compatible encodings is relabelled, not converted, so no
+    # converter is needed and none refuses a character. Measured.
+    if !decorated && !target.equal?(source) && source.ascii_compatible? && target.ascii_compatible? && ascii_only?
+      return dup.force_encoding(target)
+    end
+    if decorated && !source.ascii_compatible? && !target.ascii_compatible?
+      # CRuby's `str_transcode0`: with a decorator between two encodings that
+      # are not ASCII-compatible, the string goes to UTF-8 first — and if it
+      # cannot, its bytes are read as UTF-8 as they are. Measured.
+      text =
+        begin
+          String.__convert__(self, source, Encoding::UTF_8, {})
+        rescue EncodingError
+          b.force_encoding(Encoding::UTF_8)
+        end
+      source = Encoding::UTF_8
+    end
+    text = __decorate_source__(text, source, options)
+    # A dummy has no characters to replace, and with a decorator nothing is
+    # converted to find one: it is kept as it is. Measured.
+    if target.equal?(source) && (decorated || options[:invalid] != :replace || source.dummy?)
       xml = options[:xml]
       if xml && !(xml == :text || xml == :attr)
         raise ArgumentError, "unexpected value for xml option: #{xml.inspect}"
@@ -94,8 +118,14 @@ class String
 
   # The newline options that read the source: CRLF and CR become LF.
   def __decorate_source__(text, source, options)
-    return text unless options[:universal_newline] && source.ascii_compatible?
+    return text unless options[:universal_newline] && String.__newlines_bytewise__(source)
     String.__universal_newline__(text)
+  end
+
+  # Whether a newline is its byte wherever it is: in an ASCII-compatible
+  # encoding, and in ISO-2022-JP, whose JIS X 0208 bytes are 21 to 7E.
+  def self.__newlines_bytewise__(encoding)
+    encoding.ascii_compatible? || encoding.__index__ == 85
   end
 
   # CRLF and CR become LF, byte by byte: an invalid byte is left for the
@@ -108,10 +138,11 @@ class String
   end
 
   def __decorate_output__(text, options)
-    if options[:crlf_newline] && text.encoding.ascii_compatible?
-      text = text.gsub("\n", "\r\n")
-    elsif options[:cr_newline] && text.encoding.ascii_compatible?
-      text = text.gsub("\n", "\r")
+    return text unless String.__newlines_bytewise__(text.encoding)
+    if options[:crlf_newline]
+      text = text.b.gsub("\n", "\r\n").force_encoding(text.encoding)
+    elsif options[:cr_newline]
+      text = text.b.gsub("\n", "\r").force_encoding(text.encoding)
     end
     text
   end
@@ -121,7 +152,11 @@ class String
   end
 
   # The step loop. A BOM'd UTF-16 or UTF-32 target converts big-endian and
-  # gains its BOM; a source of either reads its BOM to learn its order.
+  # gains its BOM; a source of either reads its BOM to learn its order. The
+  # VM escapes for `xml:` where CRuby's decorator works, after a stateful
+  # source is decoded and before a stateful target is encoded, and keeps the
+  # conversion's state between steps — ISO-2022-JP's G0, the attribute's
+  # quote — so what is inserted for an error goes through it too.
   def self.__convert__(text, source, target, options, raw = text)
     xml = options[:xml]
     if xml && !(xml == :text || xml == :attr)
@@ -141,45 +176,93 @@ class String
     if source.__index__ == 7 || source.__index__ == 8
       step_source, start = __bom_order__(text, source)
     end
-    if xml
+    stages = __path__(step_source, step_target)
+    path = stages.map(&:__index__)
+    xml_mode = xml == :attr ? 2 : (xml ? 1 : 0)
+    if xml && stages.drop(1).none?(&:ascii_compatible?)
+      # The decorator reads the source itself — UTF-8 into UTF-16 or UTF-32 —
+      # and escapes its bytes before they are read. Measured.
       text = __escape_xml__(text, xml)
       raw = __escape_xml__(raw, xml) if raw
+      xml_mode = 0
     end
+    state = 0
     out = String.new(encoding: Encoding::BINARY)
     out << bom if bom
     loop do
-      step = text.__transcode__(step_source.__index__, step_target.__index__, start)
+      step = text.__transcode__(path, start, state, xml_mode, false)
       __needs_char_table__ if step.nil?
-      output, stop, error, readagain, following, code, reference = step
+      output, stop, error, readagain, following, code, reference, from, to, state = step
       out << output.b
       break if stop == :done
-      piece =
+      from = __step_encoding__(from, step_source, source)
+      to = __step_encoding__(to, step_target, target)
+      inserted =
         case stop
         when :invalid, :incomplete
           unless options[:invalid] == :replace
             readagain = __raw_byte__(raw, following) if raw && readagain == "\n"
-            raise __invalid_error__(stop, error, readagain, source, target)
+            # ponytail: ISO-2022-JP's CR or LF in JIS X 0208 mode, where it is
+            # invalid, is the error itself, shown as it was; a CRLF there is
+            # one error where CRuby, decorating after the decoder, reads two.
+            # The upgrade is universal_newline as a decorator in
+            # `transcode::step`, where `xml:` escapes (#421).
+            error = __raw_byte__(raw, following - 1) if raw && error == "\n"
+            raise __invalid_error__(stop, error, readagain, source, target, to)
           end
-          replacement
+          __insert__(out, replacement, step_target, state)
         when :undefined
-          # A character with a codepoint is UTF-8's, whatever the source:
-          # it is what the step that failed was given. Measured.
-          char = code ? Integer.__utf8__(code) : error.dup.force_encoding(source)
           if xml && reference
-            "&#x#{Integer.__hex__(reference, 1)};"
-          elsif options[:undef] == :replace
-            replacement
+            __insert__(out, "&#x#{Integer.__hex__(reference, 1)};", step_target, state)
+          # With `xml:` an undefined character is a reference or nothing:
+          # `undef: :replace` does not apply. Measured.
+          elsif options[:undef] == :replace && !xml
+            __insert__(out, replacement, step_target, state)
           elsif options[:fallback]
-            __fallback__(options[:fallback], char, code, error, source, target)
+            char = __error_char__(code, error, from)
+            result = __fallback__(options[:fallback], char, code, error, from, to, source, target)
+            __insert__(out, result, step_target, state) || raise(ArgumentError, "too big fallback string")
           else
-            raise __undefined_error__(char, code, error, source, target)
+            raise __undefined_error__(code, error, from, to, source, target)
           end
         end
-      out << __in_target__(piece, step_target).b
+      out, state = inserted || __not_inserted__(replacement, target)
       start = following
     end
+    out << "".__transcode__(path, 0, state, xml_mode, true)[0].b
     out = out.__decorate_output__(out.force_encoding(target), options) if options[:crlf_newline] || options[:cr_newline]
     out.force_encoding(target)
+  end
+
+  # A converter's encoding as the conversion names it: a BOM'd UTF-16's or
+  # UTF-32's ends are the byte order they convert in.
+  def self.__step_encoding__(index, step_encoding, encoding)
+    index == step_encoding.__index__ ? encoding : Encoding::LIST[index]
+  end
+
+  # `out` with `piece` appended in `target`, and the conversion's state after
+  # it: a piece CRuby inserts goes through the target's encoder, so it
+  # switches ISO-2022-JP's G0 as the text around it does. nil when `piece`
+  # has no spelling in `target`.
+  def self.__insert__(out, piece, target, state)
+    return [out, state] if piece.empty?
+    if piece.encoding.equal?(target)
+      bytes = piece.b
+    else
+      path = __path__(piece.encoding, target).map(&:__index__)
+      step = piece.__transcode__(path, 0, state, 0, false)
+      __needs_char_table__ if step.nil?
+      return nil unless step[1] == :done
+      bytes = step[0].b
+      state = step[9]
+    end
+    [out << bytes, state]
+  end
+
+  # A replacement that cannot be converted is CRuby's ConverterNotFoundError,
+  # oddly but measured.
+  def self.__not_inserted__(piece, target)
+    raise Encoding::ConverterNotFoundError, "code converter not found (#{piece.encoding.name} to #{target.name})"
   end
 
   # The source byte behind `at` in its universal-newline copy, where each
@@ -191,18 +274,37 @@ class String
   end
 
   def self.__supported_target__(encoding)
-    [0, 1, 2, 3, 4, 5, 6, 10, 11, 22, 39].include?(encoding.__index__)
+    [0, 1, 2, 3, 4, 5, 6, 10, 11, 22, 39, 79, 85].include?(encoding.__index__)
   end
 
-  # EUC-JP and Shift_JIS convert to each other directly; every other pair
-  # without UTF-8 on one side goes through it, in two steps. Measured.
-  def self.__direct__(source, target)
+  # Every encoding a conversion passes through, `source` to `target`, along
+  # CRuby's converters as `search_convpath` finds them: every encoding to and
+  # from UTF-8, EUC-JP to and from Shift_JIS, and ISO-2022-JP through
+  # stateless-ISO-2022-JP to and from EUC-JP. Between these the shortest
+  # path is the only one. A conversion to the same encoding is the encoding
+  # alone. Measured.
+  def self.__path__(source, target)
+    return [source] if source.equal?(target)
     pair = [source.__index__, target.__index__]
-    pair == [10, 39] || pair == [39, 10]
+    return [source, target] if pair == [85, 79] || pair == [79, 85]
+    if pair.include?(79) || pair.include?(85)
+      # Up to EUC-JP and down from it, which is there once.
+      return [source, *__to_euc_jp__(source), *[*__to_euc_jp__(target).reverse, target].drop(1)]
+    end
+    return [source, target] if pair == [10, 39] || pair == [39, 10]
+    return [source, target] if source.equal?(Encoding::UTF_8) || target.equal?(Encoding::UTF_8)
+    [source, Encoding::UTF_8, target]
   end
 
-  def self.__through_utf8__(source, target)
-    !source.equal?(Encoding::UTF_8) && !target.equal?(Encoding::UTF_8) && !__direct__(source, target)
+  # The encodings from `encoding` to EUC-JP, without `encoding`.
+  def self.__to_euc_jp__(encoding)
+    euc_jp = Encoding::LIST[10]
+    case encoding.__index__
+    when 10 then []
+    when 85 then [Encoding::LIST[79], euc_jp]
+    when 79, 39, 1 then [euc_jp]
+    else [Encoding::UTF_8, euc_jp]
+    end
   end
 
   # What `invalid: :replace` and `undef: :replace` substitute: `replace:`, or
@@ -213,16 +315,8 @@ class String
     __unicode__(target) ? "�" : "?"
   end
 
-  # A piece of output in the target encoding; a replacement that cannot be
-  # converted is CRuby's ConverterNotFoundError, oddly but measured.
-  def self.__in_target__(piece, target)
-    return piece if piece.encoding.equal?(target) || piece.empty?
-    piece.encode(target)
-  rescue Encoding::UndefinedConversionError
-    raise Encoding::ConverterNotFoundError, "code converter not found (#{piece.encoding.name} to #{target.name})"
-  end
-
-  def self.__fallback__(fallback, char, code, error, source, target)
+  # What `fallback:` answers for an undefined character, as a String.
+  def self.__fallback__(fallback, char, code, error, from, to, source, target)
     result =
       if fallback.is_a?(Hash)
         fallback[char]
@@ -231,13 +325,8 @@ class String
       else
         fallback[char]
       end
-    raise __undefined_error__(char, code, error, source, target) if result.nil?
-    result = String.__coerce__(result)
-    begin
-      result.encode(target)
-    rescue Encoding::UndefinedConversionError
-      raise ArgumentError, "too big fallback string"
-    end
+    raise __undefined_error__(code, error, from, to, source, target) if result.nil?
+    String.__coerce__(result)
   end
 
   def self.__bom_order__(text, source)
@@ -253,9 +342,11 @@ class String
   end
 
   def self.__escape_xml__(text, mode)
-    escaped = String.new(encoding: text.encoding)
+    # Built in bytes, so a dummy's ASCII is escaped too. Measured.
+    escaped = String.new(encoding: Encoding::BINARY)
     escaped << "\"" if mode == :attr
     text.each_char do |c|
+      c = c.b
       escaped <<
         case c
         when "&" then "&amp;"
@@ -266,10 +357,11 @@ class String
         end
     end
     escaped << "\"" if mode == :attr
-    escaped
+    escaped.force_encoding(text.encoding)
   end
 
-  def self.__invalid_error__(stop, error, readagain, source, target)
+  # `to` is where the first converter goes, which is the step that failed.
+  def self.__invalid_error__(stop, error, readagain, source, target, to)
     shown = error.inspect
     message =
       if stop == :incomplete
@@ -281,30 +373,28 @@ class String
       end
     # No bytes to read again is nil, not "". Measured.
     readagain = nil if readagain.empty?
-    # Through UTF-8, the step that failed is the one into it. Measured.
-    target = Encoding::UTF_8 if __through_utf8__(source, target)
-    Encoding::InvalidByteSequenceError.new(message).__set__(error, readagain, source, target, stop == :incomplete)
+    Encoding::InvalidByteSequenceError.new(message).__set__(error, readagain, source, to, stop == :incomplete)
+  end
+
+  # The character a converter had no spelling for, in the encoding it came
+  # from: UTF-8's, by its codepoint, or the bytes it was given.
+  def self.__error_char__(code, error, from)
+    code ? Integer.__utf8__(code) : error.dup.force_encoding(from)
   end
 
   # A codepoint names itself as `U+00E9`; a character with none — a BINARY
-  # byte, a JIS character Unicode lacks — as its bytes. A conversion that goes
-  # through UTF-8 says so, and names the step that failed. Measured.
-  def self.__undefined_error__(char, code, error, source, target)
-    through = __through_utf8__(source, target)
+  # byte, a JIS character Unicode lacks — as its bytes, in the encoding the
+  # converter that failed came from. A conversion of more than one step says
+  # so, and names the step that failed. Measured.
+  def self.__undefined_error__(code, error, from, to, source, target)
     shown = code.nil? ? error.inspect : "U+#{Integer.__hex__(code, 4)}"
-    step_target = code.nil? && through ? Encoding::UTF_8 : target
     message =
-      if through
-        "#{shown} to #{step_target.name} in conversion from #{source.name} to UTF-8 to #{target.name}"
-      else
+      if from.equal?(source) && to.equal?(target)
         "#{shown} from #{source.name} to #{target.name}"
+      else
+        "#{shown} to #{to.name} in conversion from #{__path__(source, target).map(&:name).join(" to ")}"
       end
-    # Through UTF-8, a character with a codepoint failed the second step:
-    # UTF-8's character and encoding are what the error reports.
-    if code && through
-      return Encoding::UndefinedConversionError.new(message).__set__(Integer.__utf8__(code), Encoding::UTF_8, target)
-    end
-    Encoding::UndefinedConversionError.new(message).__set__(char, source, step_target)
+    Encoding::UndefinedConversionError.new(message).__set__(__error_char__(code, error, from), from, to)
   end
 
   # `scrub`: each invalid sequence replaced — by the argument, by the block's
@@ -324,7 +414,7 @@ class String
     out = String.new(encoding: encoding)
     start = 0
     loop do
-      step = __transcode__(__encoding_index__, __encoding_index__, start)
+      step = __transcode__([__encoding_index__], start, 0, 0, false)
       __needs_char_table__ if step.nil?
       output, stop, error, _readagain, following = step
       out << output
@@ -373,14 +463,18 @@ class Encoding
       Encoding.find(String.__coerce__(value))
     end
 
-    # The converters run through UTF-8 unless one side is UTF-8, or the pair
-    # is EUC-JP and Shift_JIS.
+    # The converters a conversion runs through, as pairs of encodings: see
+    # `String.__path__`.
     def self.__path__(source, destination)
-      if String.__through_utf8__(source, destination)
-        [[source, Encoding::UTF_8], [Encoding::UTF_8, destination]]
-      else
-        [[source, destination]]
-      end
+      String.__path__(source, destination).each_cons(2).to_a
+    end
+
+    # The path with its decorators, which work where ASCII is ASCII: last,
+    # or before the converter into a destination that is not ASCII-compatible.
+    # Measured.
+    def self.__decorated__(path, decorators, destination)
+      return path + decorators if destination.ascii_compatible?
+      path[0...-1] + decorators + path[-1..]
     end
 
     def self.search_convpath(source, destination, **options)
@@ -390,10 +484,14 @@ class Encoding
       unless String.__supported_target__(source) && String.__supported_target__(destination)
         __needs_char_table__
       end
-      path = __path__(source, destination)
-      path.push("universal_newline") if options[:universal_newline]
-      path.push("crlf_newline") if options[:crlf_newline]
-      path
+      decorators = []
+      decorators.push("universal_newline") if options[:universal_newline]
+      decorators.push("crlf_newline") if options[:crlf_newline]
+      if source.equal?(destination)
+        with = decorators.empty? ? "" : " with #{decorators.join(",")}"
+        raise Encoding::ConverterNotFoundError, "code converter not found (#{source.name} to #{destination.name}#{with})"
+      end
+      __decorated__(__path__(source, destination), decorators, destination)
     end
 
     # The ASCII-compatible encoding a non-ASCII-compatible one converts
@@ -443,6 +541,9 @@ class Encoding
       else
         self.replacement = replacement
       end
+      @path = String.__path__(@source_encoding, @destination_encoding).map(&:__index__)
+      # ISO-2022-JP's, between calls.
+      @state = 0
       @readagain = "".b
       @pending_output = "".b
       @errinfo = [:source_buffer_empty, nil, nil, nil, nil]
@@ -485,7 +586,7 @@ class Encoding
     end
 
     def convpath
-      Converter.__path__(@source_encoding, @destination_encoding) + @decorators
+      Converter.__decorated__(Converter.__path__(@source_encoding, @destination_encoding), @decorators, @destination_encoding)
     end
 
     def inspect
@@ -502,8 +603,13 @@ class Encoding
       taken.force_encoding(@source_encoding)
     end
 
+    # Inserted before the destination's encoder, so it switches ISO-2022-JP's
+    # G0 as converted text does. Measured.
     def insert_output(text)
-      @pending_output << String.__in_target__(String.__coerce__(text), @destination_encoding).b
+      text = String.__coerce__(text)
+      @pending_output, @state =
+        String.__insert__(@pending_output, text, @destination_encoding, @state) ||
+        String.__not_inserted__(text, @destination_encoding)
       nil
     end
 
@@ -545,12 +651,13 @@ class Encoding
     # One run over `input`, appending to `output`. Errors the flags replace
     # are replaced; the first one they do not is reported, its bytes and any
     # read-again bytes taken from the input, and what follows put back in
-    # `source` for the caller.
+    # `source` for the caller. Input that is not partial ends the output, as
+    # ISO-2022-JP's return to ASCII.
     def __run__(input, output, flags, source)
       start = 0
       loop do
-        step = input.__transcode__(@source_encoding.__index__, @destination_encoding.__index__, start)
-        converted, stop, error, readagain, following, code, reference = step
+        step = input.__transcode__(@path, start, @state, 0, flags & PARTIAL_INPUT == 0)
+        converted, stop, error, readagain, following, code, reference, from, to, @state = step
         output << converted.b
         if stop == :done
           @errinfo = [flags & PARTIAL_INPUT != 0 ? :source_buffer_empty : :finished, nil, nil, nil, nil]
@@ -573,7 +680,9 @@ class Encoding
             @replacement
           end
         if replace
-          output << String.__in_target__(replace, @destination_encoding).b
+          output, @state =
+            String.__insert__(output, replace, @destination_encoding, @state) ||
+            String.__not_inserted__(replace, @destination_encoding)
           start = following
           next
         end
@@ -581,12 +690,13 @@ class Encoding
         @readagain = readagain.b
         source&.__splice__(0, 0, rest)
         result = { invalid: :invalid_byte_sequence, incomplete: :incomplete_input, undefined: :undefined_conversion }[stop]
+        from = Encoding::LIST[from]
+        to = Encoding::LIST[to]
         if stop == :undefined
-          char = code ? Integer.__utf8__(code) : error.dup.force_encoding(@source_encoding)
-          @last_error = String.__undefined_error__(char, code, error, @source_encoding, @destination_encoding)
+          @last_error = String.__undefined_error__(code, error, from, to, @source_encoding, @destination_encoding)
           @errinfo = [result, @last_error.source_encoding_name, @last_error.destination_encoding_name, @last_error.error_char.b, "".b]
         else
-          @last_error = String.__invalid_error__(stop, error.b, readagain.b, @source_encoding, @destination_encoding)
+          @last_error = String.__invalid_error__(stop, error.b, readagain.b, @source_encoding, @destination_encoding, to)
           @errinfo = [result, @source_encoding.name, @last_error.destination_encoding_name, error.b, readagain.b]
         end
         return result

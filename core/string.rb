@@ -553,10 +553,24 @@ class String
     shown = String.__inspect_encoding__
     return __wide_inspect__.__force_encoding__(shown.__index__) if [3, 4, 5, 6].include?(__encoding_index__)
     # A dummy encoding has no characters to show: every byte is escaped, even
-    # an ASCII one and a UTF-16 byte order mark. Measured.
+    # an ASCII one and a UTF-16 byte order mark, and the controls with a name
+    # by their name. Measured.
     if encoding.dummy?
       out = +"\""
-      __bytes__.each { |b| out << "\\x" << Integer.__hex__(b, 2) }
+      __bytes__.each do |b|
+        out <<
+          case b
+          when 7 then "\\a"
+          when 8 then "\\b"
+          when 9 then "\\t"
+          when 10 then "\\n"
+          when 11 then "\\v"
+          when 12 then "\\f"
+          when 13 then "\\r"
+          when 27 then "\\e"
+          else "\\x" + Integer.__hex__(b, 2)
+          end
+      end
       return (out << "\"").__force_encoding__(shown.__index__)
     end
     # UTF-8, UTF8-MAC and the carriers' UTF8-DoCoMo, -KDDI and -SoftBank, and
@@ -1713,6 +1727,8 @@ class String
   def upto(max, exclusive = false, &block)
     max = String.__coerce__(max)
     return to_enum(:upto, max, exclusive) if block.nil?
+    # `rb_str_upto_each` checks the two encodings first. Measured.
+    __combined_encoding__(max)
     if length == 1 && max.length == 1 && ascii_only? && max.ascii_only?
       first = ord
       last = max.ord
