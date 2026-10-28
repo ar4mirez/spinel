@@ -1249,8 +1249,6 @@ end
     if @enc2
       size = char.bytesize
       loop do
-        nil while @rbuf.bytesize <= size && __fill__(1)
-        break if error && @rbuf.bytesize <= size
         window = @rbuf.byteslice(0, size + 1).force_encoding(__encoding__)
         begin
           window.encode(__read_encoding__)
@@ -1259,9 +1257,10 @@ end
           error = e
           length = e.error_bytes.bytesize
           # Cut short at the end of what has been read: the converter waits
-          # for the bytes that say what it is.
-          break unless e.readagain_bytes.to_s.empty? && length == window.bytesize
-          size = length
+          # for the bytes that say what it is, and only then.
+          break unless e.incomplete_input?
+          size = window.bytesize
+          break unless @rbuf.bytesize > size || __fill__(1)
         end
       end
     end
