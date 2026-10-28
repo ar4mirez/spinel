@@ -1578,6 +1578,8 @@ d = "/tmp/spinel-eval-#{Process.pid}-d"; r = [Dir.mkdir(d), File.directory?(d), 
 # in `path`'s encoding where it is absolute, and binary where it is relative.
 d = "/tmp/spinel-eval-#{Process.pid}-dir_あ"; Dir.mkdir(d); x = "x".encode("EUC-JP"); up = "../" * Dir.pwd.count("/") + d[1..]; r = [File.realdirpath(x, d).encoding.name, File.realdirpath(x, up).encoding.name, File.realdirpath("x", up).encoding.name, File.realdirpath("x".encode("US-ASCII"), up).encoding.name, File.realdirpath(x, d.b).encoding.name]; Dir.rmdir(d); r  #=> ["EUC-JP", "ASCII-8BIT", "ASCII-8BIT", "UTF-8", "ASCII-8BIT"]
 d = "#{File.realpath("/tmp")}/spinel-eval-#{Process.pid}-cwd_あ"; Dir.mkdir(d); Dir.mkdir("#{d}/dir_あ"); r = Dir.chdir(d) { [File.realdirpath("x", "dir_あ"), File.realdirpath("dir_あ/x"), File.realdirpath("x", "../#{File.basename(d)}")].map { |s| [s.b == "#{d}/dir_あ/x".b || s.b == "#{d}/x".b, s.encoding.name] } }; Dir.rmdir("#{d}/dir_あ"); Dir.rmdir(d); r  #=> [[true, "ASCII-8BIT"], [true, "ASCII-8BIT"], [true, "ASCII-8BIT"]]
+# A leading "~" in `path` or `dir` is a file name, not the home directory (#410).
+d = File.realpath("/tmp"); r = Dir.chdir(d) { [File.realdirpath("~"), File.realdirpath("~", d), File.realdirpath("~", "../#{File.basename(d)}")] }; r == ["#{d}/~"] * 3  #=> true
 # `IO#getc` transcodes a broken sequence with the bytes after it, as CRuby's
 # converter does on the stream (#408): the error names what follows, and the
 # bytes it names are read while the rest are read again.

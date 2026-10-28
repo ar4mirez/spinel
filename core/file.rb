@@ -230,8 +230,10 @@ class File < IO
     path = __path__(path)
     dir = __path__(dir) unless dir.nil?
     cwd = Dir.pwd.b
-    base = dir.nil? ? cwd : expand_path(dir.b, cwd).b
-    expanded = expand_path(path.b, base).b
+    # `absolute_path`, not `expand_path`: a leading "~" in `path` or `dir` is
+    # a file name here, as it is to `rb_check_realpath_emulate` (#410).
+    base = dir.nil? ? cwd : absolute_path(dir.b, cwd).b
+    expanded = absolute_path(path.b, base).b
     resolved = if exist?(expanded) || symlink?(expanded)
       realpath(expanded)
     else
