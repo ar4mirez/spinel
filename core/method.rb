@@ -163,9 +163,12 @@ class Method
 
   def inspect
     # A method on the receiver's own singleton class is written `recv.name`.
-    # Otherwise the class it was looked up from, and the owner beside it when
-    # that is another module: a singleton class only when it is a class's or
-    # a module's, since an object's is not where its methods were found.
+    # Otherwise the class it was looked up from, and beside it the module that
+    # holds the body when that is another: a singleton class only when it is a
+    # class's or a module's, since an object's is not where its methods were
+    # found. An alias, or `public :m` on an inherited `m`, holds another
+    # module's body under its own owner: `alias foo tap` in `Foo` is
+    # `Foo(Kernel)#foo(tap)`.
     owner = @__found__[0]
     if __reflect_is_singleton__(owner)
       text = "#{@__receiver__.inspect}."
@@ -175,7 +178,8 @@ class Method
         klass = __reflect_class_of__(@__receiver__)
         klass = Kernel.__class_of__(@__receiver__) unless Module === @__receiver__
       end
-      text = klass.equal?(owner) ? "#{owner}#" : "#{klass}(#{owner})#"
+      defined = @__found__[9] || owner
+      text = klass.equal?(defined) ? "#{klass}#" : "#{klass}(#{defined})#"
     end
     Method.__inspect__("Method", text, @__name__, @__found__)
   end
@@ -244,7 +248,8 @@ class UnboundMethod
   end
 
   def inspect
-    Method.__inspect__("UnboundMethod", "#{owner}#", @__name__, @__found__)
+    # The module that holds the body, which for an alias is not its owner.
+    Method.__inspect__("UnboundMethod", "#{@__found__[9] || owner}#", @__name__, @__found__)
   end
   alias to_s inspect
 end
