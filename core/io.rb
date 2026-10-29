@@ -1470,8 +1470,9 @@ end
     # With a read converter CRuby reads a record from what the converter
     # makes: the blank lines before it are skipped there, characters held
     # among them, and the limit counts what it made, so a limit of 2 is
-    # one character in UTF-16 (#477).
-    converted = paragraph ? __read_converter__? : __chars_held__? || __xml_in__
+    # one character in UTF-16 (#477). So does a limit on any line where the
+    # converter makes other bytes than it reads (#479).
+    converted = paragraph ? __read_converter__? : __chars_held__? || __xml_in__ || !limit.nil? && __converts_bytes__?
     # Blank lines before a record are not part of it.
     __swallow__(unit) if paragraph
     wanted = nil
@@ -1492,12 +1493,33 @@ end
       line = __newlines_in__(__decode__(line)) unless line.nil?
     end
     return nil if line.nil?
+    # CRuby's `nolimit`: a line the limit cut short is not counted (#480).
+    counted = !__cut_by_limit__?(line, paragraph ? "\n\n" : separator, limit)
     # The blank lines between records belong to neither.
     __swallow__(unit) if paragraph
     line = __chomp_line__(line, paragraph ? "\n\n" : separator) if chomp && !separator.nil?
-    @lineno += 1
-    $. = @lineno
+    if counted
+      @lineno += 1
+      $. = @lineno
+    end
     line
+  end
+
+  # Whether the read converter makes other bytes than it reads: an internal
+  # encoding, or an external one that is not ASCII-compatible.
+  def __converts_bytes__?
+    __read_converter__? && (!@enc2.nil? || !__encoding__.ascii_compatible?)
+  end
+
+  # Whether the limit, rather than the separator or the end, ended a line
+  # as read: it is as long as the limit, counted in what the read converter
+  # made, and does not end with the separator.
+  def __cut_by_limit__?(line, separator, limit)
+    return false if limit.nil? || limit <= 0 || line.bytesize < limit
+    return true if separator.nil?
+    enc = line.encoding
+    sep = separator.encoding == enc || separator.ascii_only? && enc.ascii_compatible? ? separator.b : separator.encode(enc).b
+    !line.b.end_with?(sep)
   end
 
   # The next line as the read converter makes it, or nil at the end, where
