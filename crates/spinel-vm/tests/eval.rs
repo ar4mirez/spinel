@@ -468,3 +468,28 @@ fn an_operator_instruction_hears_a_prepend_and_an_undef() {
         assert_eq!(eval(source).as_deref(), Ok(want), "{source}");
     }
 }
+
+/// CRuby 4.0.9 never ends where `universal_newline:` into UTF-16 or UTF-32
+/// would buffer a replacement after a character begun behind a held CR: each
+/// error breaks the next replacement's first character. Spinel puts the
+/// replacement before that character instead, so the table, which CRuby
+/// re-measures, cannot hold these.
+#[test]
+fn a_replacement_that_would_break_a_begun_character_goes_before_it() {
+    for (source, want) in [
+        (
+            r#""a\xC2\r\xC3\xA9".encode("UTF-16LE", universal_newline: true, invalid: :replace).encode("UTF-8")"#,
+            "\"a\u{FFFD}\\né\"",
+        ),
+        (
+            r#""a\xE3\r\xE3\x81\x82b".encode("UTF-32BE", universal_newline: true, invalid: :replace).encode("UTF-8")"#,
+            "\"a\u{FFFD}\\nあb\"",
+        ),
+        (
+            r#"c = Encoding::Converter.new("UTF-8", "UTF-16LE", universal_newline: true, invalid: :replace); (c.convert("a\xC2\r") + c.convert("\xC3") + c.convert("\xA9") + c.finish).encode("UTF-8")"#,
+            "\"a\u{FFFD}\\né\"",
+        ),
+    ] {
+        assert_eq!(eval(source).unwrap(), want, "{source}");
+    }
+}

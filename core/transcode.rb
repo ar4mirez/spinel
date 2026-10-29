@@ -242,12 +242,9 @@ class String
   # is still buffered, and the step that stopped, if one did.
   def self.__read_turns__(turns, buffered, path, state, final, out, via, target, named)
     index = 0
-    fed = buffered.bytesize
-    inserted = 0
     loop do
       if index < turns.size
         buffered << turns[index]
-        fed += turns[index].bytesize
         index += 1
       end
       last = final && index == turns.size
@@ -272,26 +269,36 @@ class String
         if piece.nil?
           return [out, state, rest + turns.drop(index).join.b, step]
         end
-        inserted += 1
-        if inserted > 2 * fed + 64
-          # ponytail: CRuby never ends where a replacement it buffered
-          # breaks a character begun before it (U+FFFD after "\xE3"), each
-          # error buffering more than it reads; past this many the
-          # replacement goes straight to the output instead. The upgrade is
-          # whatever CRuby settles on.
-          out, state = __insert__(out, piece, target, state) || __not_inserted__(piece, named)
-          start = following
-          next
-        end
         bytes = __in_encoding__(piece, via)
         __not_inserted__(piece, named) if bytes.nil?
         # Nothing to insert leaves the bytes read again in the encoder, which
         # reads them first. Measured.
-        buffered = bytes.empty? ? readagain.b + rest : rest + bytes + readagain.b
+        buffered = if bytes.empty?
+          readagain.b + rest
+        elsif bytes.getbyte(0) >= 0x80 && __begun__(rest, path)
+          # ponytail: CRuby never ends where the replacement would follow a
+          # character the turn has only begun (U+FFFD after "\xC3"): each
+          # error breaks the next replacement's first character and buffers
+          # another. It goes before the rest of the turn instead, as without
+          # decorators. The upgrade is whatever CRuby settles on.
+          bytes + readagain.b + rest
+        else
+          rest + bytes + readagain.b
+        end
         again = true
         break
       end
       return [out, state, buffered, nil] if index == turns.size && !again
+    end
+  end
+
+  # Whether `bytes` ends in a character begun but not finished, read along
+  # `path`.
+  def self.__begun__(bytes, path)
+    [3, 2, 1].any? do |size|
+      next false if bytes.bytesize < size
+      tail = bytes.byteslice(bytes.bytesize - size, size)
+      tail.getbyte(0) >= 0xC0 && tail.__transcode__(path, 0, 0, 0, false)[1] == :incomplete
     end
   end
 
