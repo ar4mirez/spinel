@@ -479,6 +479,8 @@ end
     @closed = false
     @autoclose = true
     @ecopts = @ecopts.dup
+    # A converter of its own, so an attribute's quote of its own.
+    @xml_quote = nil
     self
   end
 
@@ -530,11 +532,15 @@ end
   # `$?` is how it went.
   def close
     return nil if @closed
-    @closed = true
-    @rbuf = "".b
-    __fd_close__(@wfileno) unless @wfileno.nil? || @wclosed
-    IO.__check__(__fd_close__(@fileno), @path) if @autoclose && !@rclosed
-    __reap__
+    begin
+      __close_quote__
+    ensure
+      @closed = true
+      @rbuf = "".b
+      __fd_close__(@wfileno) unless @wfileno.nil? || @wclosed
+      IO.__check__(__fd_close__(@fileno), @path) if @autoclose && !@rclosed
+      __reap__
+    end
     nil
   end
 
@@ -564,6 +570,7 @@ end
   def close_write
     return nil if @closed
     unless @wfileno.nil?
+      __close_quote__ unless @wclosed
       __fd_close__(@wfileno) unless @wclosed
       @wclosed = true
       @access = 0
@@ -667,6 +674,8 @@ end
     @binmode = true
     @enc = Encoding::BINARY
     @enc2 = nil
+    # CRuby drops the converter unfinished, an attribute's quote and all.
+    @xml_quote = nil
     # And no newline conversion: binmode is bytes as they are.
     @ecopts = @ecopts.reject { |key, _| %i[newline universal_newline crlf_newline cr_newline lf_newline].include?(key) }
     self
@@ -808,6 +817,9 @@ end
       ecopts = {}
     end
     @ecopts = ecopts
+    # CRuby drops the converter unfinished: an attribute's quote open is
+    # never closed, and the next write opens another.
+    @xml_quote = nil
     __validate_enc_binmode__
     self
   end
@@ -859,11 +871,20 @@ end
   # A String about to be written, in the encoding the IO writes: `@enc2`, or
   # `@enc` unless that is BINARY. CRuby's `do_writeconv`, with the newline
   # decorators run by `String#encode`. Measured.
+  #
+  # `xml: :attr`'s quote is the stream's, not each write's: CRuby's
+  # `make_writeconv` keeps that stateful decorator in the IO's own converter,
+  # made by the first write that is not empty, which opens the quote with the
+  # first character it is given and closes it when the IO closes. So a write
+  # is escaped without its quotes, and the first with anything in it opens
+  # one. `@xml_quote` is nil before there is a converter, then whether the
+  # quote is open.
   def __encode_out__(text)
     options = __write_ecopts__
     newline = String.__newline_decorators__(options).first
     target = @enc2 || (@enc == Encoding::BINARY ? nil : @enc)
     xml = options[:xml]
+    @xml_quote = false if xml == :attr && @xml_quote.nil?
     if target.nil?
       # No conversion: the decorators work on the bytes, which a text mode
       # IO — any newline option makes one, `xml:` does not — wants
@@ -873,7 +894,7 @@ end
       end
       return text if newline.nil? && xml.nil?
       decorators = options.select { |key, _| %i[newline crlf_newline cr_newline lf_newline xml].include?(key) }
-      return text.b.encode(Encoding::BINARY, **decorators).force_encoding(text.encoding)
+      return __open_quote__(text.b.encode(Encoding::BINARY, **decorators), xml).force_encoding(text.encoding)
     end
     ascii = Encoding::Converter.asciicompat_encoding(target)
     if ascii
@@ -882,12 +903,42 @@ end
       # raises: with the decorators to the ASCII-compatible encoding it pairs
       # with, then on to the IO's with only the error handling.
       handling = options.reject { |key, _| %i[newline crlf_newline cr_newline lf_newline xml].include?(key) }
-      return text.encode(ascii, **options).encode(target, **handling)
+      # The quote goes in before the second, so one that raises leaves it
+      # open but unwritten, as CRuby's converter does. Measured.
+      return __open_quote__(text.encode(ascii, **options), xml).encode(target, **handling)
     end
     # In its own encoding a String is still decorated: CRuby's `encode`
     # runs the decorators over its bytes, invalid ones and all.
     return text if newline.nil? && xml.nil? && text.encoding == target
-    text.encode(target, **options)
+    __open_quote__(text.encode(target, **options), xml)
+  end
+
+  # What `encode` with `xml: :attr` made, in an ASCII-compatible encoding,
+  # as the stream's quote has it: without the quotes, and with the opening
+  # one if this is the first character.
+  def __open_quote__(quoted, xml)
+    return quoted unless xml == :attr
+    content = quoted.byteslice(1, quoted.bytesize - 2)
+    return content if content.empty? || @xml_quote
+    @xml_quote = true
+    "\"".b.force_encoding(content.encoding) << content
+  end
+
+  # The closing quote CRuby's `finish_writeconv` writes when the IO closes,
+  # or `""` if no character opened it.
+  def __close_quote__
+    open = @xml_quote
+    return if open.nil?
+    @xml_quote = nil
+    quote = open ? "\"" : "\"\""
+    target = @enc2 || (@enc == Encoding::BINARY ? nil : @enc)
+    unless target.nil? || target.ascii_compatible?
+      # The first character took UTF-16's or UTF-32's mark: the quote after
+      # it is in the big-endian order they write.
+      target = Encoding.find("#{target.name}BE") if open && (target == Encoding::UTF_16 || target == Encoding::UTF_32)
+      quote = quote.encode(target)
+    end
+    __write_all__(quote)
   end
 
   # The options a write transcodes with: CRuby's `make_writeconv` leaves out
