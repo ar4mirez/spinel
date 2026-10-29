@@ -1820,3 +1820,6 @@ k = Encoding::Converter; c = k.new("UTF-8", "UTF-16LE", crlf_newline: true, inva
 
 # ------------------------------- a broken replacement is refused before decorating (#430)
 ["a\xFF<b", "a\xFF\nb"].flat_map { |s| [{ xml: :text }, { crlf_newline: true }, {}].map { |o| (s.encode("UTF-16LE", **o, invalid: :replace, replace: "\xFF"); :none) rescue [$!.class, $!.message] } } + [("a\xFF".encode("UTF-16LE", universal_newline: true, invalid: :replace, replace: "\xFF".b) rescue $!.class)]  #=> [[ArgumentError, "replacement string is broken: \"\\xFF\" as UTF-8"], [ArgumentError, "replacement string is broken: \"\\xFF\" as UTF-8"], [ArgumentError, "replacement string is broken: \"\\xFF\" as UTF-8"], [ArgumentError, "replacement string is broken: \"\\xFF\" as UTF-8"], [ArgumentError, "replacement string is broken: \"\\xFF\" as UTF-8"], [ArgumentError, "replacement string is broken: \"\\xFF\" as UTF-8"], Encoding::ConverterNotFoundError]
+
+# ------------------------------- inspect escapes a character that is not printable (#434)
+["\uFFFE", "\uFFFF", "\u0378", "a\u2028b\u2029", "\u{2FFFE}", "\u{10FFFF}", "\uD7FF", "\u0085", "\u00A0\u3000\u{E000}\u{E0001}\u00AD\u00E9\u{1F600}\u{30000}"].map(&:inspect)  #=> ["\"\\uFFFE\"", "\"\\uFFFF\"", "\"\\u0378\"", "\"a\\u2028b\\u2029\"", "\"\\u{2FFFE}\"", "\"\\u{10FFFF}\"", "\"\\uD7FF\"", "\"\\u0085\"", "\" 　󠀁­é😀𰀀\""]
