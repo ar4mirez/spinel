@@ -456,6 +456,12 @@ end
       __ext_int_to_encs__(nil, nil)
     end
     @ecopts = __ecopts__(options)
+    # A text mode IO reads with universal newline, on every platform, unless
+    # a newline option says otherwise: CRuby's `rb_io_extract_modeenc` gives
+    # its flags the decorator before the options are looked at (#465).
+    if textmode && @access != 1 && %i[newline universal_newline crlf_newline cr_newline lf_newline].all? { |key| @ecopts[key].nil? }
+      @ecopts[:universal_newline] = true
+    end
     __validate_enc_binmode__
     @rbuf = "".b
     @lineno = 0
@@ -903,10 +909,7 @@ end
   # anything, at the end as well: an IO has a read converter when it has an
   # internal encoding or a newline option. With both `xml:` decorators, the
   # quote's too, it asks for all of them in one converter, and none has them
-  # (#458, #461). Measured.
-  # ponytail: text mode (`rt`, `textmode:`) gives CRuby's IO one too, with
-  # universal newline, but is not kept once the IO is open; upgrade by
-  # keeping it (#465).
+  # (#458, #461). Text mode gives it universal newline (#465). Measured.
   def __readconv__
     return unless @ecopts[:xml].equal?(XML_BOTH) && (@enc2 || __newline_decorator__?)
     newlines = __universal_newline__? ? ["universal_newline"] : []
@@ -1083,12 +1086,12 @@ end
     taken
   end
 
-  # Whether the first `cut` buffered bytes end part way through a UTF-8
+  # Whether the first `cut` bytes of `buffer` end part way through a UTF-8
   # character: a lead byte with fewer bytes after it than it announces.
-  def __partial_character__(cut)
+  def __partial_character__(cut, buffer)
     back = 1
     while back <= 4 && back <= cut
-      byte = @rbuf.getbyte(cut - back)
+      byte = buffer.getbyte(cut - back)
       if byte & 0xC0 != 0x80
         return false if byte < 0xC0
         needed = byte >= 0xF0 ? 4 : (byte >= 0xE0 ? 3 : 2)
@@ -1282,14 +1285,38 @@ end
     end
     # An empty separator is paragraph mode: a blank line ends the record.
     paragraph = !separator.nil? && separator.empty?
+    # With universal newline a CR is a newline too, alone or before a LF.
+    unit = __universal_newline__? ? __newline_unit__ : nil
     # Blank lines before a record are not part of it.
-    __take__(1) while paragraph && (@rbuf.empty? ? __fill__ : true) && @rbuf.getbyte(0) == 10
+    __skip_blank__(unit) if paragraph
     wanted = nil
     unless separator.nil?
       wanted = paragraph ? "\n\n" : separator
       wanted = wanted.encode(__encoding__) unless wanted.encoding == __encoding__ || wanted.ascii_only? && __encoding__.ascii_compatible?
       wanted = wanted.b
     end
+    if unit
+      bytes = __universal_line__(wanted, limit, unit)
+      return nil if bytes.nil?
+      line = __decode__(bytes)
+    else
+      line = __line_bytes__(wanted, limit)
+      return nil if line.nil?
+      line = __newlines_in__(__decode__(line))
+    end
+    if paragraph
+      # The blank lines between records belong to neither.
+      __skip_blank__(unit)
+    end
+    line = __chomp_line__(line, paragraph ? "\n\n" : separator) if chomp && !separator.nil?
+    @lineno += 1
+    $. = @lineno
+    line
+  end
+
+  # The bytes of the next line as read, or nil at the end: up to the
+  # separator, or `limit` bytes, or the end.
+  def __line_bytes__(wanted, limit)
     from = 0
     cut = nil
     while cut.nil?
@@ -1311,24 +1338,143 @@ end
       # that continue one are recognisable.
       if __encoding__ == Encoding::UTF_8
         extra = 0
-        while extra < 16 && __partial_character__(cut) && (cut < @rbuf.bytesize || __fill__)
+        while extra < 16 && __partial_character__(cut, @rbuf) && (cut < @rbuf.bytesize || __fill__)
+          cut += 1
+          extra += 1
+        end
+      end
+    end
+    cut == 0 ? nil : __take__(cut)
+  end
+
+  # The bytes of the next line with universal newline, converted, or nil at
+  # the end. CRuby converts what it reads before it looks for the separator
+  # or counts the limit, so a lone CR ends a line too (#464). The buffer
+  # keeps the bytes as they were read, as `pos`, `read(n)` and `getbyte`
+  # after a line see them in CRuby: the line is converted only as far as it
+  # goes, and each LF that stood for a CRLF is a byte more it takes.
+  def __universal_line__(wanted, limit, unit)
+    enc, cr, lf, newline = __newline_bytes__(unit)
+    line = { view: "".b, crlfs: [], scanned: 0, ended: false, cr: cr, lf: lf, unit: unit, newline: newline }
+    view = line[:view]
+    from = 0
+    cut = nil
+    while cut.nil?
+      at = wanted.nil? ? nil : view.index(wanted, from)
+      # In UTF-16 or UTF-32 only at a character's start.
+      at = view.index(wanted, at + 1) while at && at % unit != 0
+      if at
+        cut = at + wanted.bytesize
+      elsif !limit.nil? && limit > 0 && view.bytesize >= limit
+        cut = limit
+      else
+        from = view.bytesize - (wanted.nil? ? 0 : wanted.bytesize) + 1
+        from = 0 if from < 0
+        cut = view.bytesize unless __convert_more__(line)
+      end
+    end
+    if !limit.nil? && limit > 0 && limit <= cut
+      cut = limit
+      if enc == Encoding::UTF_8
+        extra = 0
+        while extra < 16 && __partial_character__(cut, view) && (cut < view.bytesize || __convert_more__(line))
           cut += 1
           extra += 1
         end
       end
     end
     return nil if cut == 0
-    line = __newlines_in__(__decode__(__take__(cut)))
-    if paragraph
-      # The blank lines between records belong to neither.
-      __take__(1) while (@rbuf.empty? ? __fill__ : true) && @rbuf.getbyte(0) == 10
+    __take__(cut + line[:crlfs].count { |at| at < cut } * unit)
+    view.byteslice(0, cut)
+  end
+
+  # Converts the buffered bytes of a line up to the next newline, reading
+  # more when there are none; false at the end. A CR the buffer ends in
+  # waits for what comes after it, which says whether a LF goes with it, as
+  # CRuby's converter does, on a pipe as well.
+  def __convert_more__(line)
+    view = line[:view]
+    unit = line[:unit]
+    loop do
+      scanned = line[:scanned]
+      at = @rbuf.index(line[:newline], scanned)
+      at = @rbuf.index(line[:newline], at + 1) while at && at % unit != 0
+      upto = nil
+      if at.nil?
+        # Whole characters only, until the end.
+        upto = line[:ended] ? @rbuf.bytesize : @rbuf.bytesize / unit * unit
+      elsif @rbuf.byteslice(at, unit) == line[:lf]
+        upto = at + unit
+      elsif line[:ended] || @rbuf.bytesize >= at + 2 * unit
+        crlf = @rbuf.byteslice(at + unit, unit) == line[:lf]
+        view << @rbuf.byteslice(scanned, at - scanned)
+        line[:crlfs] << view.bytesize if crlf
+        view << line[:lf]
+        line[:scanned] = at + (crlf ? 2 : 1) * unit
+        return true
+      else
+        upto = at
+      end
+      if upto > scanned
+        view << @rbuf.byteslice(scanned, upto - scanned)
+        line[:scanned] = upto
+        return true
+      end
+      return false if line[:ended]
+      line[:ended] = !__fill__
     end
-    # In paragraph mode `chomp` takes the blank line that ended the record and
-    # nothing else: the last record keeps its own newline. Measured.
-    line = line.chomp(paragraph ? "\n\n" : separator) if chomp && !separator.nil?
-    @lineno += 1
-    $. = @lineno
-    line
+  end
+
+  # The bytes a CR or LF is in the encoding read, for universal newline on
+  # lines; nil for a dummy encoding, whose lines are converted afterwards.
+  def __newline_unit__
+    enc = __encoding__
+    return 1 if enc.ascii_compatible?
+    case enc
+    when Encoding::UTF_16LE, Encoding::UTF_16BE then 2
+    when Encoding::UTF_32LE, Encoding::UTF_32BE then 4
+    end
+  end
+
+  # The encoding read, a CR and a LF in it, and a Regexp for either, kept
+  # until the encoding changes.
+  def __newline_bytes__(unit)
+    enc = __encoding__
+    return @newline_bytes if @newline_bytes && @newline_bytes[0] == enc
+    cr, lf = unit == 1 ? ["\r".b, "\n".b] : ["\r".encode(enc).b, "\n".encode(enc).b]
+    @newline_bytes = [enc, cr, lf, Regexp.union(cr, lf)]
+  end
+
+  # Takes the blank lines before or between records in paragraph mode. With
+  # universal newline a CR is one too, and each is a whole character, so
+  # the buffer stays at a character's start in UTF-16 or UTF-32.
+  def __skip_blank__(unit)
+    unless unit
+      __take__(1) while (@rbuf.empty? ? __fill__ : true) && @rbuf.getbyte(0) == 10
+      return
+    end
+    cr, lf = __newline_bytes__(unit)[1, 2]
+    loop do
+      next if @rbuf.bytesize < unit && __fill__
+      head = @rbuf.byteslice(0, unit)
+      break unless head == lf || head == cr
+      __take__(unit)
+    end
+  end
+
+  # `chomp:` takes off the separator and nothing else, as CRuby's
+  # `rb_io_getline` does, with the CR before a separator that is a single
+  # "\n" byte: a lone CR stays, which `String#chomp("\n")` would take
+  # (#467). In paragraph mode that is the blank line that ended the record,
+  # so the last record keeps its own newline. Measured.
+  def __chomp_line__(line, separator)
+    enc = line.encoding
+    tail = separator.encoding == enc || separator.ascii_only? && enc.ascii_compatible? ? separator.b : separator.encode(enc).b
+    bytes = line.b
+    return line unless bytes.end_with?(tail)
+    size = bytes.bytesize - tail.bytesize
+    size -= 1 if tail.bytesize == 1 && tail.getbyte(0) == 10 && size > 0 && bytes.getbyte(size - 1) == 13
+    line.byteslice(0, size)
   end
 
   def readline(*args, chomp: false, **)
