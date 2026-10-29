@@ -77,10 +77,12 @@ module Kernel
         $stderr.write(e.full_message)
       end
     end
-    # Then every other thread is killed, and the finalizers of every object
-    # still alive run (#36), as CRuby does once the `at_exit` blocks are done.
+    # Then every other thread is killed, the finalizers of every object still
+    # alive run (#36), and every IO's converter is finished (#456), as CRuby
+    # does once the `at_exit` blocks are done.
     Thread.__terminate_all__
     ObjectSpace.__finalize_all__
+    IO.__finish_all__
     status
   end
 

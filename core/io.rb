@@ -833,17 +833,26 @@ end
   # newline decorator kept. The replacement String and `fallback:` are not
   # flags, so only given ones count, and a `replace:` that stood for
   # `undef: :replace` leaves that behind with the default replacement.
-  # ponytail: a second `xml:` replaces the first, where CRuby keeps both
-  # decorators and then finds no converter (#458); upgrade by keeping a set of them.
+  # `xml:` is flags too, so a second one that differs keeps both decorators,
+  # `XML_BOTH`, for which a conversion then finds no converter (#458).
   def __kept_ecopts__(options)
     given = __ecopts__(options)
     newlines = %i[newline universal_newline crlf_newline cr_newline lf_newline]
     kept = @ecopts.reject { |key, _| %i[replace fallback].include?(key) }
     kept[:undef] = :replace if !@ecopts[:replace].nil? && @ecopts[:invalid] != :replace
     kept = kept.reject { |key, _| newlines.include?(key) } if newlines.any? { |key| !given[key].nil? }
+    xml = kept[:xml]
     given.each { |key, value| kept[key] = value unless value.nil? }
+    if %i[text attr].include?(given[:xml]) && (xml.equal?(XML_BOTH) || (%i[text attr].include?(xml) && xml != given[:xml]))
+      kept[:xml] = XML_BOTH
+    end
     kept
   end
+
+  # Both `xml:` decorators at once, as an IO's flags can hold them: no
+  # converter has the pair. Not a value `xml:` can be given.
+  XML_BOTH = Object.new.freeze
+  private_constant :XML_BOTH
 
   def set_encoding_by_bom
     __check_open__
@@ -886,7 +895,14 @@ end
   # The options a read transcodes with: CRuby's `make_readconv` leaves out
   # the decorators for writing. Universal newline is done on the way in.
   def __read_ecopts__
-    @ecopts.reject { |key, _| %i[newline crlf_newline cr_newline lf_newline].include?(key) }
+    options = @ecopts.reject { |key, _| %i[newline crlf_newline cr_newline lf_newline].include?(key) }
+    if options[:xml].equal?(XML_BOTH)
+      # Both `xml:` decorators, the quote's too, as CRuby's `make_readconv`
+      # asks for all of them in one converter. Measured.
+      newlines = options[:universal_newline] ? ["universal_newline"] : []
+      raise String.__decorators_not_found__(@enc2, __read_encoding__, newlines + %w[xml_text xml_attr_content xml_attr_quote], nil)
+    end
+    options
   end
 
   # A String about to be written, in the encoding the IO writes: `@enc2`, or
@@ -905,7 +921,20 @@ end
     newline = String.__newline_decorators__(options).first
     target = @enc2 || (@enc == Encoding::BINARY ? nil : @enc)
     xml = options[:xml]
-    @xml_quote = false if xml == :attr && @xml_quote.nil?
+    if (xml == :attr || xml.equal?(XML_BOTH)) && @xml_quote.nil?
+      @xml_quote = false
+      IO.__open_quotes__[self] = true
+    end
+    if xml.equal?(XML_BOTH)
+      # CRuby's `make_writeconv` gives the IO's own converter only the
+      # stateful decorator, the quote, and that one it makes. A write first
+      # converts with the other two, into the ASCII-compatible encoding the
+      # IO's pairs with, and no converter has both: the quote is left to
+      # close with nothing in it. Measured.
+      source = text.encoding
+      common = target.nil? ? source : Encoding::Converter.asciicompat_encoding(target) || target
+      raise String.__decorators_not_found__(source, common, String.__newline_decorators__(options) + %w[xml_text xml_attr_content], nil)
+    end
     if target.nil?
       # No conversion: the decorators work on the bytes, which a text mode
       # IO — any newline option makes one, `xml:` does not — wants
@@ -960,6 +989,30 @@ end
       quote = quote.encode(target)
     end
     __write_all__(quote)
+  end
+
+  # The IOs whose converter has `xml: :attr`'s quote, held weakly. CRuby
+  # finishes an IO's converter when it finalizes the IO, so the program's end
+  # closes the quote of each still open (#456).
+  # ponytail: only at the end. An IO collected before it keeps its quote
+  # open, as it keeps its descriptor, where CRuby closes both; upgrade by
+  # finalizing an IO when it is collected (#460).
+  def self.__open_quotes__
+    @__open_quotes__ ||= ObjectSpace::WeakMap.new
+  end
+
+  # After the finalizers, as CRuby's IOs are finished after every other
+  # object's. A failure is dropped, as a finalizer's is.
+  def self.__finish_all__
+    __open_quotes__.keys.each do |io|
+      io.__finish__
+    rescue Exception
+    end
+    nil
+  end
+
+  def __finish__
+    __close_quote__ unless @closed || @wclosed
   end
 
   # The options a write transcodes with: CRuby's `make_writeconv` leaves out
