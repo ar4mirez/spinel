@@ -874,10 +874,11 @@ end
       return text.b.encode(Encoding::BINARY, **decorators).force_encoding(text.encoding)
     end
     ascii = Encoding::Converter.asciicompat_encoding(target)
-    if newline && ascii
-      # Into an encoding that is not ASCII-compatible, CRuby converts twice:
-      # with the decorators to the ASCII-compatible encoding it pairs with,
-      # then on to the IO's with only the error handling.
+    if ascii
+      # Into an encoding that is not ASCII-compatible, CRuby converts twice,
+      # even from that same encoding with no decorator, so an invalid String
+      # raises: with the decorators to the ASCII-compatible encoding it pairs
+      # with, then on to the IO's with only the error handling.
       handling = options.reject { |key, _| %i[newline crlf_newline cr_newline lf_newline xml].include?(key) }
       return text.encode(ascii, **options).encode(target, **handling)
     end
