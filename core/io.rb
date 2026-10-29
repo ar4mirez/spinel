@@ -1466,7 +1466,7 @@ end
     enc = __read_encoding__
     return if separator.encoding == enc
     return if separator.ascii_only? && (separator.empty? || enc.ascii_compatible?)
-    return if separator.equal?($/) && separator == "\n"
+    return if separator.equal?(IO.__default_rs__)
     raise ArgumentError, "encoding mismatch: #{enc} IO with #{separator.encoding} RS"
   end
 
@@ -2547,8 +2547,18 @@ alias $> $stdout
 $VERBOSE = false
 alias $-v $VERBOSE
 alias $-w $VERBOSE
-# The input record separator: what `gets` and `each_line` split on.
-$/ = "\n"
+# The input record separator: what `gets` and `each_line` split on. It
+# starts as CRuby's `rb_default_rs`, a frozen US-ASCII newline, and
+# assigning one equal to it puts that very object back (#484).
+class IO
+  DEFAULT_RS = "\n".dup.force_encoding(Encoding::US_ASCII).freeze
+  private_constant :DEFAULT_RS
+
+  def self.__default_rs__
+    DEFAULT_RS
+  end
+end
+$/ = IO.__default_rs__
 alias $-0 $/
 
 module Kernel
