@@ -1472,10 +1472,8 @@ end
     end
     return nil if line.nil?
     line = (held << line.b).force_encoding(line.encoding) if held && !held.equal?(line)
-    if paragraph
-      # The blank lines between records belong to neither.
-      __skip_blank__(unit)
-    end
+    # The blank lines between records belong to neither.
+    __skip_blank__(unit) if paragraph && !__chars_held__?
     line = __chomp_line__(line, paragraph ? "\n\n" : separator) if chomp && !separator.nil?
     @lineno += 1
     $. = @lineno
@@ -1509,10 +1507,8 @@ end
       if at && (limit.nil? || limit <= 0 || at + sep.bytesize <= limit)
         cut = at + sep.bytesize
       elsif !limit.nil? && limit > 0 && out.bytesize >= limit
-        cut = limit
-        if enc == Encoding::UTF_8
-          cut += 1 while cut < out.bytesize && cut - limit < 16 && __partial_character__(cut, out)
-        end
+        cut = 0
+        out.dup.force_encoding(enc).each_char { |char| break if cut >= limit; cut += char.bytesize }
       elsif __chars_held__?
         from = sep.nil? ? 0 : [out.bytesize - sep.bytesize + 1, 0].max
         out << __take_chars__
@@ -1977,7 +1973,7 @@ end
 
   def sysseek(offset, whence = IO::SEEK_SET)
     __check_open__
-    raise IOError, "sysseek for buffered IO" unless @rbuf.empty?
+    raise IOError, "sysseek for buffered IO" unless @rbuf.empty? && !__chars_held__?
     IO.__check__(__fd_seek__(@fileno, IO.__c_long__(offset), __whence__(whence)), @path)[0]
   end
 
