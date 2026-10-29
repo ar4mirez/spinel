@@ -240,11 +240,30 @@ class String
   # turn before the encoder reads on. Measured. A nil from the block stops,
   # handing back the step and what was not read. The output, the state, what
   # is still buffered, and the step that stopped, if one did.
-  def self.__read_turns__(turns, buffered, path, state, final, out, via, target, named)
+  def self.__read_turns__(turns, buffered, path, state, final, out, via, target, named, &block)
+    size = out.bytesize
+    read = __read_turns_in__(turns, buffered.dup, path, state, final, out, via, named, false, &block)
+    return read if read
+    # ponytail: CRuby never ends where a replacement it buffers breaks a
+    # character the turn has only begun (U+FFFD after "\xC3"), each error
+    # buffering more than it reads; past a bound the turns are read again
+    # from the start with such a replacement before that character, as
+    # without decorators. The upgrade is whatever CRuby settles on.
+    out.replace(out.byteslice(0, size))
+    __read_turns_in__(turns, buffered, path, state, final, out, via, named, true, &block)
+  end
+
+  # `__read_turns__` once, a replacement that would follow a character the
+  # turn has only begun going before it when `begun`; nil where, without
+  # that, the errors buffer more than they read.
+  def self.__read_turns_in__(turns, buffered, path, state, final, out, via, named, begun)
     index = 0
+    fed = buffered.bytesize
+    inserted = 0
     loop do
       if index < turns.size
         buffered << turns[index]
+        fed += turns[index].bytesize
         index += 1
       end
       last = final && index == turns.size
@@ -269,18 +288,15 @@ class String
         if piece.nil?
           return [out, state, rest + turns.drop(index).join.b, step]
         end
+        inserted += 1
+        return nil if !begun && inserted > 2 * fed + 64
         bytes = __in_encoding__(piece, via)
         __not_inserted__(piece, named) if bytes.nil?
         # Nothing to insert leaves the bytes read again in the encoder, which
         # reads them first. Measured.
         buffered = if bytes.empty?
           readagain.b + rest
-        elsif bytes.getbyte(0) >= 0x80 && __begun__(rest, path)
-          # ponytail: CRuby never ends where the replacement would follow a
-          # character the turn has only begun (U+FFFD after "\xC3"): each
-          # error breaks the next replacement's first character and buffers
-          # another. It goes before the rest of the turn instead, as without
-          # decorators. The upgrade is whatever CRuby settles on.
+        elsif begun && bytes.getbyte(0) >= 0x80 && __begun__(rest, path)
           bytes + readagain.b + rest
         else
           rest + bytes + readagain.b

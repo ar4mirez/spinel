@@ -493,3 +493,25 @@ fn a_replacement_that_would_break_a_begun_character_goes_before_it() {
         assert_eq!(eval(source).unwrap(), want, "{source}");
     }
 }
+
+/// Where CRuby 4.0.9 does finish, a replacement after a character begun
+/// behind it stays where CRuby's decorator buffer puts it.
+#[test]
+fn a_replacement_after_a_begun_character_stays_where_cruby_ends() {
+    for (source, want) in [
+        (
+            r#""\xF0\x80\xE3a".encode("UTF-16LE", xml: :attr, invalid: :replace).encode("UTF-8")"#,
+            "\"\\\"\u{FFFD}a\u{FFFD}\u{FFFD}\u{FFFD}\u{FFFD}\\\"\"",
+        ),
+        (
+            r#""\xF0\x80\xF0\x80a\xE3\x81\x82\xFF\r".encode("UTF-16LE", universal_newline: true, invalid: :replace).encode("UTF-8")"#,
+            "\"\u{FFFD}\u{FFFD}\u{FFFD}\u{FFFD}\u{FFFD}a\u{FFFD}\u{FFFD}\u{FFFD}\u{FFFD}\u{FFFD}\u{FFFD}\u{FFFD}\\n\"",
+        ),
+        (
+            r#""\xE0\x80\xF4\x90\xFF\r\n\"".encode("UTF-32LE", cr_newline: true, invalid: :replace).encode("UTF-8")"#,
+            "\"\u{FFFD}\u{FFFD}\u{FFFD}\\r\u{FFFD}\\r\u{FFFD}\\\"\u{FFFD}\u{FFFD}\"",
+        ),
+    ] {
+        assert_eq!(eval(source).unwrap(), want, "{source}");
+    }
+}
