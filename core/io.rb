@@ -1523,8 +1523,9 @@ end
   end
 
   # The next line as the read converter makes it, or nil at the end, where
-  # it holds characters or decorates, and every record in paragraph mode
-  # through one (#477): CRuby looks for the separator, and
+  # it holds characters or decorates, every record in paragraph mode
+  # through one (#477), and a line with a limit where it makes other bytes
+  # than it reads (#479): CRuby looks for the separator, and
   # counts the limit, in what its converter made, so `xml:`'s entities and
   # quote count and a separator can be in them, and the characters made
   # past the line are held for the next read (#466, #468, #470). `wanted`
