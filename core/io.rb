@@ -1467,20 +1467,22 @@ end
     paragraph = !separator.nil? && separator.empty?
     # With universal newline a CR is a newline too, alone or before a LF.
     unit = __universal_newline__? ? __newline_unit__ : nil
-    # ponytail: in paragraph mode the characters the read converter holds
-    # start the record as they are, and blank lines among them stay; upgrade
-    # by looking for the record's end among them as well.
-    held = paragraph && __chars_held__? ? __take_chars__ : nil
+    # With a read converter CRuby reads a record from what the converter
+    # makes: the blank lines before it are skipped there, characters held
+    # among them, and the limit counts what it made, so a limit of 2 is
+    # one character in UTF-16 (#477).
+    converted = paragraph ? __read_converter__? : __chars_held__? || __xml_in__
+    held = paragraph && !converted && __chars_held__? ? __take_chars__ : nil
     # Blank lines before a record are not part of it.
-    __skip_blank__(unit) if paragraph && held.nil?
+    __swallow__(unit) if paragraph && held.nil?
     wanted = nil
     unless separator.nil?
       wanted = paragraph ? "\n\n" : separator
       wanted = wanted.encode(__encoding__) unless wanted.encoding == __encoding__ || wanted.ascii_only? && __encoding__.ascii_compatible?
       wanted = wanted.b
     end
-    if !paragraph && (__chars_held__? || __xml_in__)
-      line = __converted_line__(separator, wanted, limit, unit)
+    if converted
+      line = __converted_line__(paragraph ? "\n\n" : separator, wanted, limit, unit)
       return nil if line.nil?
     elsif unit
       bytes, cr = __universal_line__(wanted, limit, unit)
@@ -1495,21 +1497,10 @@ end
       line = held.empty? ? nil : held.force_encoding(__read_encoding__)
       held = nil
     end
-    if paragraph && __xml_in__ == :attr && (line.nil? || !line.b.end_with?(__in_read__("\n\n").b))
-      # A record the end cut short ends with the converter's last characters.
-      finish = __finish_in__
-      unless finish.nil?
-        __finish_in__
-        line = line.nil? ? finish : (line.b << finish.b).force_encoding(line.encoding)
-      end
-    end
     return nil if line.nil?
     line = (held << line.b).force_encoding(line.encoding) if held
     # The blank lines between records belong to neither.
-    if paragraph && !__chars_held__?
-      __skip_blank__(unit)
-      __hold_next__ if __read_converter__?
-    end
+    __swallow__(unit) if paragraph
     line = __chomp_line__(line, paragraph ? "\n\n" : separator) if chomp && !separator.nil?
     @lineno += 1
     $. = @lineno
@@ -1517,7 +1508,8 @@ end
   end
 
   # The next line as the read converter makes it, or nil at the end, where
-  # it holds characters or decorates: CRuby looks for the separator, and
+  # it holds characters or decorates, and every record in paragraph mode
+  # through one (#477): CRuby looks for the separator, and
   # counts the limit, in what its converter made, so `xml:`'s entities and
   # quote count and a separator can be in them, and the characters made
   # past the line are held for the next read (#466, #468, #470). `wanted`
@@ -1557,7 +1549,7 @@ end
           __read_ahead__(cr, unit) if cr
         else
           bytes = __line_bytes__(wanted, room)
-          piece = bytes.nil? ? nil : __newlines_in__(__decode__(bytes))
+          piece = bytes.nil? ? nil : __newlines_in__(__decode__(__rest_of_char__(bytes)))
         end
         if piece.nil?
           # At the end, until the converter has nothing more.
@@ -1575,6 +1567,26 @@ end
     return nil if cut == 0
     __hold_chars__(out.byteslice(cut, out.bytesize - cut)) if cut < out.bytesize
     out.byteslice(0, cut).force_encoding(enc)
+  end
+
+  # The rest of the character a line of bytes read from UTF-16 or UTF-32
+  # stops inside, where the limit counted what the converter makes rather
+  # than the bytes read (#477): a whole unit, and the low surrogate after a
+  # high one.
+  def __rest_of_char__(bytes)
+    unit = __newline_unit__
+    return bytes if unit.nil? || unit == 1
+    want = -bytes.bytesize % unit
+    if want == 0 && unit == 2 && bytes.bytesize >= 2
+      high = __encoding__ == Encoding::UTF_16BE ? bytes.getbyte(-2) : bytes.getbyte(-1)
+      want = 2 if high & 0xFC == 0xD8
+    end
+    while want > 0 && (!@rbuf.empty? || __fill__)
+      more = __take__(want)
+      bytes << more
+      want -= more.bytesize
+    end
+    bytes
   end
 
   # The bytes of the next line as read, or nil at the end: up to the
@@ -1645,6 +1657,16 @@ end
           cut += 1
           extra += 1
         end
+      elsif unit > 1
+        # In UTF-16 or UTF-32 to the end of the character, and of a
+        # surrogate pair (#477).
+        cut += -cut % unit
+        nil while view.bytesize < cut + 2 && __convert_more__(line)
+        if unit == 2 && cut >= 2 && cut < view.bytesize
+          high = enc == Encoding::UTF_16BE ? view.getbyte(cut - 2) : view.getbyte(cut - 1)
+          cut += 2 if high & 0xFC == 0xD8
+        end
+        cut = view.bytesize if cut > view.bytesize
       end
     end
     return nil if cut == 0
@@ -1732,6 +1754,23 @@ end
       break unless head == lf || (universal && head == cr)
       __take__(unit)
     end
+  end
+
+  # CRuby's `swallow`: the blank lines before or after a record in
+  # paragraph mode. The newlines the read converter holds go first; when
+  # that leaves nothing held, the blank lines read, and the character after
+  # them is held.
+  def __swallow__(unit)
+    if __chars_held__?
+      lf = __in_read__("\n").b
+      held = @cbuf.b
+      at = 0
+      at += lf.bytesize while held.byteslice(at, lf.bytesize) == lf
+      @cbuf = held.byteslice(at, held.bytesize - at)
+      return if __chars_held__?
+    end
+    __skip_blank__(unit)
+    __hold_next__ if __read_converter__?
   end
 
   # CRuby's `swallow` skips the blank lines in what the read converter
