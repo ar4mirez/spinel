@@ -995,6 +995,7 @@ end
   # and an attribute's quote with it.
   def __clear_readconv__
     @cbuf = "".b
+    @rpend = nil
     @rquote = nil
     @rfinished = false
     @readconv_dropped = false
@@ -1005,6 +1006,7 @@ end
   # `eof?` is false, until a read of characters makes a converter again,
   # which starts without them. Measured.
   def __drop_readconv__
+    @rpend = nil
     @rquote = nil
     @rfinished = false
     @readconv_dropped = __chars_held__?
@@ -1016,23 +1018,49 @@ end
     raise IOError, "byte oriented read for character buffered IO" if __chars_held__?
   end
 
-  # A character read past a lone CR, which CRuby's converter reads to tell
-  # it from a CRLF, so `pos` counts it: it is held, converted (#470).
-  # ponytail: only a whole character by itself, a byte below 0x80 or one
-  # UTF-16 or UTF-32 unit; CRuby's reads the first byte of a longer one, and
-  # holds a CR to tell it in turn. Those stay in the buffer, `pos` one
-  # short; upgrade by keeping the converter's own state (#472).
+  # What CRuby's converter reads past a lone CR to tell it from a CRLF, so
+  # `pos` counts it (#470, #472). A whole character is held, converted. A
+  # CR the converter keeps itself, to tell in turn: it is the bytes' and
+  # not a character held, so a read of bytes goes past it, and the next
+  # read of characters starts with it, one "\n" with a LF after it and
+  # "\n" before anything else. The first byte of a longer character is
+  # held as it is without an internal encoding, the converter there being
+  # the newline decorator alone, and kept by the converter with one, as its
+  # transcoder does. `pos` or `seek` over bytes buffered drops what the
+  # converter kept. Measured.
+  # ponytail: in UTF-16 or UTF-32 the first unit of a surrogate pair stays
+  # in the buffer, `pos` a unit short; upgrade by keeping it as the first
+  # byte of a longer character is.
   def __read_ahead__(cr, unit)
     return if @rbuf.bytesize < unit
     head = @rbuf.byteslice(0, unit)
-    return if head == cr
+    if head == cr
+      @rpend = __take__(unit)
+      return
+    end
     case unit
-    when 1 then return if head.getbyte(0) >= 0x80
+    when 1
+      unless head.dup.force_encoding(__encoding__).valid_encoding?
+        if @enc2.nil?
+          @cbuf = (@cbuf || "".b) << __take__(1)
+        else
+          @rpend = __take__(1)
+        end
+        return
+      end
     when 2
       high = __encoding__ == Encoding::UTF_16LE ? head.getbyte(1) : head.getbyte(0)
       return if high & 0xF8 == 0xD8
     end
     @cbuf = (@cbuf || "".b) << __decode__(__take__(unit)).b
+  end
+
+  # The bytes the converter kept past a lone CR go back before the buffer,
+  # for a read of characters to convert them first (#472).
+  def __unpend__
+    return if @rpend.nil?
+    @rbuf = @rpend + @rbuf
+    @rpend = nil
   end
 
   # The options a read transcodes with: CRuby's `make_readconv` leaves out
@@ -1275,6 +1303,7 @@ end
     if length.nil?
       nil while __fill__
       held = __take_chars__
+      __unpend__
       out = __newlines_in__(__decode__(__take__(@rbuf.bytesize)))
       finish = __finish_in__
       __finish_in__ unless finish.nil?
@@ -1581,6 +1610,7 @@ end
   # after a line see them in CRuby: the line is converted only as far as it
   # goes, and each LF that stood for a CRLF is a byte more it takes.
   def __universal_line__(wanted, limit, unit)
+    __unpend__
     enc, cr, lf, newline = __newline_bytes__(unit)
     line = { view: "".b, crlfs: [], lone: [], scanned: 0, ended: false, cr: cr, lf: lf, unit: unit, newline: newline }
     view = line[:view]
@@ -1683,6 +1713,7 @@ end
       __take__(1) while (@rbuf.empty? ? __fill__ : true) && @rbuf.getbyte(0) == 10
       return
     end
+    __unpend__
     cr, lf = __newline_bytes__(unit)[1, 2]
     loop do
       next if @rbuf.bytesize < unit && __fill__
@@ -1797,7 +1828,14 @@ end
   def getc
     __readable__
     __readconv__
-    return __take_char__ if __chars_held__?
+    if __chars_held__?
+      held = @cbuf.dup.force_encoding(__read_encoding__)
+      return __take_char__ unless @enc2.nil? && !held.valid_encoding? && held[0].bytesize == held.bytesize
+      # The first byte of a longer character, read past a lone CR, is all
+      # that is held: it is read again with the bytes after it (#472).
+      @rbuf = __take_chars__ << @rbuf
+    end
+    __unpend__
     if @rbuf.empty? && !__fill__
       finish = __finish_in__
       return nil if finish.nil?
@@ -1904,22 +1942,17 @@ end
   # With a read converter the character goes back among the ones it made,
   # as it is, not to be converted again: CRuby's `rb_io_ungetc` puts it in
   # the `cbuf`, so a CR stays a CR with universal newline (#470). Measured.
+  # Without one a String goes back as its bytes, as CRuby's
+  # `io_ungetbyte`, in whatever encoding it is (#473). Measured.
   def ungetc(char)
     __readable__
-    if __read_converter__?
-      bytes = Integer === char ? (char.chr(__read_encoding__) rescue (char & 0xff).chr) : IO.__str__(char)
-      __readconv__
-      __hold_chars__(bytes.b)
-      return nil
-    end
-    bytes = if Integer === char
-              (char.chr(__encoding__) rescue (char & 0xff).chr)
-            else
-              char = IO.__str__(char)
-              char.encoding == __encoding__ || char.ascii_only? ? char : char.encode(__encoding__)
-            end
+    bytes = Integer === char ? (char.chr(__read_encoding__) rescue (char & 0xff).chr) : IO.__str__(char)
     __readconv__
-    @rbuf = bytes.b + @rbuf
+    if __read_converter__?
+      __hold_chars__(bytes.b)
+    else
+      @rbuf = bytes.b + @rbuf
+    end
     nil
   end
 
