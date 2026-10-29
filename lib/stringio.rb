@@ -666,8 +666,11 @@ class StringIO
     if !target.nil? && target != Encoding::BINARY && text.encoding != Encoding::BINARY && text.encoding != target
       text = text.encode(target)
     end
+    # An ASCII-only String is written as it is only into an ASCII-compatible
+    # String; into UTF-16 or UTF-32 it is converted, as CRuby's `strio_write`
+    # does, so `puts` writes its newline in that encoding.
     unless text.encoding == string.encoding || string.encoding == Encoding::BINARY ||
-           text.ascii_only? || text.encoding == Encoding::BINARY
+           (text.ascii_only? && string.encoding.ascii_compatible?) || text.encoding == Encoding::BINARY
       text = text.encode(string.encoding)
     end
     bytes = text.b
@@ -736,7 +739,7 @@ class StringIO
       text = object.nil? ? "" : (String === object ? object : object.to_s)
       text = Kernel.instance_method(:to_s).bind(object).call unless text.is_a?(String)
       write(text)
-      write("\n") unless text.end_with?("\n")
+      write("\n") unless text.__end_with_newline__
     end
   end
   private :__puts__
