@@ -66,7 +66,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/true` | 9 | 13 | 11 | 0 | 2 | 0 | 85% |
 | `core/unboundmethod` | 20 | 109 | 107 | 0 | 0 | 2 | 98% |
 | `core/warning` | 5 | 31 | 31 | 0 | 0 | 0 | 100% |
-| `language` | 67 | 2668 | 2506 | 0 | 128 | 34 | 94% |
+| `language` | 67 | 2668 | 2510 | 0 | 128 | 30 | 94% |
 | `language/predefined` | 2 | 14 | 12 | 0 | 0 | 2 | 86% |
 | `language/regexp` | 11 | 257 | 231 | 0 | 23 | 3 | 90% |
 | `library/English` | 2 | 27 | 1 | 0 | 0 | 26 | 4% |
@@ -131,4 +131,4 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `optional/capi` | 47 | 0 | 0 | 0 | 0 | 0 | — |
 | `optional/thread_safety` | 1 | 5 | 0 | 0 | 5 | 0 | 0% |
 | `security` | 13 | 31 | 28 | 0 | 3 | 0 | 90% |
-| **total** | 3835 | 32691 | 28879 | 0 | 3494 | 318 | 88% |
+| **total** | 3835 | 32691 | 28883 | 0 | 3494 | 314 | 88% |
