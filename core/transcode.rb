@@ -255,7 +255,8 @@ class String
 
   # `__read_turns__` once, a replacement that would follow a character the
   # turn has only begun going before it when `begun`; nil where, without
-  # that, the errors buffer more than they read.
+  # that, the errors buffer more than they read, and with it the step that
+  # keeps doing so, unreplaced.
   def self.__read_turns_in__(turns, buffered, path, state, final, out, via, named, begun)
     index = 0
     fed = buffered.bytesize
@@ -289,7 +290,10 @@ class String
           return [out, state, rest + turns.drop(index).join.b, step]
         end
         inserted += 1
-        return nil if !begun && inserted > 2 * fed + 64
+        if inserted > 2 * fed + 64
+          return nil unless begun
+          return [out, state, rest + turns.drop(index).join.b, step]
+        end
         bytes = __in_encoding__(piece, via)
         __not_inserted__(piece, named) if bytes.nil?
         # Nothing to insert leaves the bytes read again in the encoder, which
