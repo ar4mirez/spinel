@@ -240,7 +240,7 @@ class String
   # turn before the encoder reads on. Measured. A nil from the block stops,
   # handing back the step and what was not read. The output, the state, what
   # is still buffered, and the step that stopped, if one did.
-  def self.__read_turns__(turns, buffered, path, state, final, out, via, target, named, &block)
+  def self.__read_turns__(turns, buffered, path, state, final, out, via, named, &block)
     size = out.bytesize
     read = __read_turns_in__(turns, buffered.dup, path, state, final, out, via, named, false, &block)
     return read if read
@@ -397,7 +397,7 @@ class String
         return out.force_encoding(target)
       end
       turns, = __decorator_turns__(text, xml, newline, false, true)
-      out, state = __read_turns__(turns, "".b, path, state, true, out, step_source, step_target, target) { |step| piece_for.call(step)[0] }
+      out, state = __read_turns__(turns, "".b, path, state, true, out, step_source, target) { |step| piece_for.call(step)[0] }
       out << "".__transcode__(path, 0, state, 0, true)[0].b
       return out.force_encoding(target)
     end
@@ -503,7 +503,11 @@ class String
   # U+FFFD for a Unicode target and "?" for any other.
   def self.__replacement__(target, options)
     replacement = options[:replace]
-    return String.__coerce__(replacement) unless replacement.nil?
+    unless replacement.nil?
+      replacement = String.__coerce__(replacement)
+      raise ArgumentError, "replacement string is broken: #{replacement.dump} as #{replacement.encoding}" unless replacement.valid_encoding?
+      return replacement
+    end
     __unicode__(target) ? "�" : "?"
   end
 
@@ -887,7 +891,7 @@ class Encoding
       final = flags & PARTIAL_INPUT == 0
       turns, @held = String.__decorator_turns__(chunk, nil, @source_newline, @held, final)
       via = Encoding::LIST[@path.first]
-      _, @state, buffered, step = String.__read_turns__(turns, buffered, @path, @state, final, output, via, @destination_encoding, @destination_encoding) do |stopped|
+      _, @state, buffered, step = String.__read_turns__(turns, buffered, @path, @state, final, output, via, @destination_encoding) do |stopped|
         __replacement_for__(stopped, flags)
       end
       if step.nil?
