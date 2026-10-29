@@ -863,14 +863,16 @@ end
     options = __write_ecopts__
     newline = String.__newline_decorators__(options).first
     target = @enc2 || (@enc == Encoding::BINARY ? nil : @enc)
+    xml = options[:xml]
     if target.nil?
       # No conversion: the decorators work on the bytes, which a text mode
-      # IO — any newline option makes one — wants ASCII-compatible.
+      # IO — any newline option makes one, `xml:` does not — wants
+      # ASCII-compatible.
       if !text.encoding.ascii_compatible? && %i[newline universal_newline crlf_newline cr_newline lf_newline].any? { |key| @ecopts[key] }
         raise ArgumentError, "ASCII incompatible string written for text mode IO without encoding conversion: #{text.encoding}"
       end
-      return text if newline.nil?
-      decorators = options.select { |key, _| %i[newline crlf_newline cr_newline lf_newline].include?(key) }
+      return text if newline.nil? && xml.nil?
+      decorators = options.select { |key, _| %i[newline crlf_newline cr_newline lf_newline xml].include?(key) }
       return text.b.encode(Encoding::BINARY, **decorators).force_encoding(text.encoding)
     end
     ascii = Encoding::Converter.asciicompat_encoding(target)
@@ -882,7 +884,9 @@ end
       handling = options.reject { |key, _| %i[newline crlf_newline cr_newline lf_newline xml].include?(key) }
       return text.encode(ascii, **options).encode(target, **handling)
     end
-    return text if newline.nil? && text.encoding == target
+    # In its own encoding a String is still decorated: CRuby's `encode`
+    # runs the decorators over its bytes, invalid ones and all.
+    return text if newline.nil? && xml.nil? && text.encoding == target
     text.encode(target, **options)
   end
 
