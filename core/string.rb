@@ -604,6 +604,16 @@ class String
                    "\f" => "\\f", "\v" => "\\v", "\b" => "\\b", "\a" => "\\a", "\e" => "\\e" }.freeze
   end
 
+  # Whether a Unicode character is one `inspect` shows as itself: Onigmo's
+  # `[[:print:]]`, which leaves out the controls, the line and paragraph
+  # separators, and every unassigned code point, the noncharacters among them.
+  # Asked of the UTF-8 character so that CESU-8 and the carriers' UTF-8s
+  # answer the same. CRuby's `rb_enc_isprint`. Measured on ruby 4.0.9.
+  def self.__printable__(code)
+    @__print__ = /\A[[:print:]]\z/ if @__print__.nil?
+    code.chr(Encoding::UTF_8).match?(@__print__)
+  end
+
   # A UTF-16 or UTF-32 string, through its codepoints: ASCII as itself or its
   # named escape, everything else `\uXXXX` or `\u{XXXXX}`, and an invalid
   # character as its bytes. Measured.
@@ -658,7 +668,7 @@ class String
       return "\\x{" + char.__bytes__.map { |b| Integer.__hex__(b, 2) }.join + "}"
     end
     code = char.ord
-    if !raw || (code >= 0x80 && code <= 0x9f)
+    if !raw || !String.__printable__(code)
       return code > 0xffff ? "\\u{" + Integer.__hex__(code, 1) + "}" : "\\u" + Integer.__hex__(code, 4)
     end
     char
