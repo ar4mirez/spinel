@@ -335,7 +335,8 @@ class String
   end
 
   # The step loop. A BOM'd UTF-16 or UTF-32 target converts big-endian and
-  # gains its BOM; a source of either reads its BOM to learn its order. The
+  # gains its BOM with the first character written, so a conversion that
+  # writes nothing has none. Measured. A source of either reads its BOM to learn its order. The
   # VM runs the decorators — `xml:` and the newline options — where CRuby's
   # work, after a stateful source is decoded and before a stateful target or
   # one that is not ASCII-compatible is encoded, and keeps the conversion's
@@ -353,7 +354,6 @@ class String
     end
     state = 0
     out = String.new(encoding: Encoding::BINARY)
-    out << bom if bom
     step_source = source
     start = 0
     unread = 0
@@ -398,12 +398,12 @@ class String
       if whole[1] == :done
         out << whole[0].b
         out << "".__transcode__(path, 0, whole[9], 0, true)[0].b
-        return out.force_encoding(target)
+        return __with_bom__(out, bom, target)
       end
       turns, = __decorator_turns__(text, xml, newline, false, true)
       out, state = __read_turns__(turns, "".b, path, state, true, out, step_source, target) { |step| piece_for.call(step)[0] }
       out << "".__transcode__(path, 0, state, 0, true)[0].b
-      return out.force_encoding(target)
+      return __with_bom__(out, bom, target)
     end
     if unread > 0
       opened = "".__transcode__(path, 0, state, mode, false)
@@ -428,6 +428,12 @@ class String
       start = following
     end
     out << "".__transcode__(path, 0, state, mode, true)[0].b
+    __with_bom__(out, bom, target)
+  end
+
+  # `out` in `target`, after `bom` when anything was written.
+  def self.__with_bom__(out, bom, target)
+    out.prepend(bom) if bom && !out.empty?
     out.force_encoding(target)
   end
 
