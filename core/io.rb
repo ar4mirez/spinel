@@ -895,14 +895,26 @@ end
   # The options a read transcodes with: CRuby's `make_readconv` leaves out
   # the decorators for writing. Universal newline is done on the way in.
   def __read_ecopts__
-    options = @ecopts.reject { |key, _| %i[newline crlf_newline cr_newline lf_newline].include?(key) }
-    if options[:xml].equal?(XML_BOTH)
-      # Both `xml:` decorators, the quote's too, as CRuby's `make_readconv`
-      # asks for all of them in one converter. Measured.
-      newlines = options[:universal_newline] ? ["universal_newline"] : []
-      raise String.__decorators_not_found__(@enc2, __read_encoding__, newlines + %w[xml_text xml_attr_content xml_attr_quote], nil)
-    end
-    options
+    __readconv__
+    @ecopts.reject { |key, _| %i[newline crlf_newline cr_newline lf_newline].include?(key) }
+  end
+
+  # CRuby's `make_readconv`, which a read that converts makes before it reads
+  # anything, at the end as well: an IO has a read converter when it has an
+  # internal encoding or a newline option. With both `xml:` decorators, the
+  # quote's too, it asks for all of them in one converter, and none has them
+  # (#458, #461). Measured.
+  # ponytail: text mode (`rt`, `textmode:`) gives CRuby's IO one too, with
+  # universal newline, but is not kept once the IO is open; upgrade by
+  # keeping it (#465).
+  def __readconv__
+    return unless @ecopts[:xml].equal?(XML_BOTH) && (@enc2 || __newline_decorator__?)
+    newlines = __universal_newline__? ? ["universal_newline"] : []
+    raise String.__decorators_not_found__(@enc2 || __encoding__, __read_encoding__, newlines + %w[xml_text xml_attr_content xml_attr_quote], nil)
+  end
+
+  def __universal_newline__?
+    @ecopts[:universal_newline] || @ecopts[:newline] == :universal
   end
 
   # A String about to be written, in the encoding the IO writes: `@enc2`, or
@@ -1087,17 +1099,32 @@ end
     false
   end
 
-  # Universal newline on the way in, when it was asked for.
+  # Universal newline on the way in, when it was asked for. A String that is
+  # not ASCII-compatible, read into UTF-16 or UTF-32, is gone through a
+  # character at a time, as its CR and LF are more than a byte (#462).
   def __newlines_in__(text)
-    return text unless @ecopts[:universal_newline] || @ecopts[:newline] == :universal
+    return text unless __universal_newline__?
     return String.__universal_newline__(text) if text.encoding.ascii_compatible?
-    text.gsub(/\r\n?/, "\n")
+    cr = "\r".encode(text.encoding)
+    lf = "\n".encode(text.encoding)
+    out = String.new(encoding: text.encoding)
+    after_cr = false
+    text.each_char do |char|
+      if char == cr
+        out << lf
+      elsif !(after_cr && char == lf)
+        out << char
+      end
+      after_cr = char == cr
+    end
+    out
   end
 
   # --- reading -------------------------------------------------------------
 
   def read(length = nil, buffer = nil)
     __readable__
+    __readconv__ if length.nil?
     unless buffer.nil?
       buffer = buffer.to_str unless String === buffer
       raise FrozenError, "can't modify frozen String: #{buffer.inspect}" if buffer.frozen?
@@ -1245,6 +1272,7 @@ end
   def __gets__(separator, limit, chomp)
     __readable__
     return "" if limit == 0
+    __readconv__
     if separator.nil? && limit.nil?
       line = read
       return nil if line.empty?
@@ -1384,6 +1412,7 @@ end
 
   def getc
     __readable__
+    __readconv__
     return nil if @rbuf.empty? && !__fill__
     # The lead byte says how many more there are: reading further ahead
     # would wait on a pipe for bytes nobody has written.
@@ -1402,7 +1431,7 @@ end
   # the LF after it with it. CRuby waits for the character that says which,
   # on a pipe as well. Measured.
   def __newline_char_in__(char)
-    return char unless @ecopts[:universal_newline] || @ecopts[:newline] == :universal
+    return char unless __universal_newline__?
     enc = char.encoding
     cr, lf = enc.ascii_compatible? ? ["\r".b, "\n".b] : ["\r".encode(enc).b, "\n".encode(enc).b]
     return char unless char.b == cr
@@ -1478,6 +1507,7 @@ end
               char = IO.__str__(char)
               char.encoding == __encoding__ || char.ascii_only? ? char : char.encode(__encoding__)
             end
+    __readconv__
     @rbuf = bytes.b + @rbuf
     nil
   end
