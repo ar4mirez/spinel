@@ -1831,3 +1831,9 @@ s = "\u00A0\u3000\u{E000}\u{E0001}\u00AD\u00E9\u{1F600}\u{30000}"; s.inspect == 
 
 # ------------------------------- no BOM into UTF-16 or UTF-32 when nothing is written (#438)
 ["".encode("UTF-16").bytes, "".encode("UTF-32").bytes, "\xFF".encode("UTF-16", invalid: :replace, replace: "").bytes, "\xFF".encode("UTF-32", invalid: :replace, replace: "").bytes, "".encode("UTF-16", crlf_newline: true).bytes, "\xFF".encode("UTF-32", xml: :text, invalid: :replace, replace: "").bytes, "\xFF".encode("UTF-16", universal_newline: true, invalid: :replace, replace: "").bytes, "".encode("UTF-16", xml: :attr).bytes, "\xFFa".encode("UTF-16", invalid: :replace, replace: "").bytes, "".encode("UTF-16").encoding.name]  #=> [[], [], [], [], [], [], [], [254, 255, 0, 34, 0, 34], [254, 255, 0, 97], "UTF-16"]
+
+# ------------------------------- Symbol#inspect quotes a name with a character that is not printable (#439)
+[:"\uFFFE", :"a\u0378", :"\u2028", :"\u{2FFFE}", :"@\uFFFE", :"$\u0378", :"\u0378?"].map(&:inspect)  #=> [":\"\\uFFFE\"", ":\"a\\u0378\"", ":\"\\u2028\"", ":\"\\u{2FFFE}\"", ":\"@\\uFFFE\"", ":\"$\\u0378\"", ":\"\\u0378?\""]
+[:"\uFFFE", :"a\u2029"].map { |k| {k => 1}.inspect }  #=> ["{\"\\uFFFE\": 1}", "{\"a\\u2029\": 1}"]
+# A printable name past ASCII stays bare; compared in Ruby, since this table renders a String with Rust's escapes.
+[:"\u00E9", :"a\u3000b", :"\u{1F600}"].map(&:inspect) == [":\u00E9", ":a\u3000b", ":\u{1F600}"]  #=> true

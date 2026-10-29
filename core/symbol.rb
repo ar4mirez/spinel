@@ -40,6 +40,7 @@ class Symbol
     # first thing CRuby's `rb_str_symname_p` asks: a BINARY name past ASCII,
     # or one in UTF-16 or a dummy encoding, is quoted whatever it spells.
     return ":" + name.inspect unless name.ascii_only? || name.encoding == String.__inspect_encoding__
+    return ":" + name.inspect unless Symbol.__printable__(name)
     probe = Symbol.__probe__(name)
     # A name is bare when it could be written as a symbol literal: an
     # identifier (any non-ASCII character counts as a letter), an instance or
@@ -59,6 +60,19 @@ class Symbol
   def self.__probe__(name)
     return name if name.ascii_only? || name.encoding == Encoding::UTF_8
     name.each_char.map { |char| char.ascii_only? ? char : "a" }.join
+  end
+
+  # Whether every character of a name is one `inspect` shows as itself, the
+  # last thing `rb_str_symname_p` asks (`sym_printable`): a name holding an
+  # unassigned code point, a noncharacter, or U+2028 or U+2029 is quoted.
+  # Measured on ruby 4.0.9.
+  # ponytail: only Unicode names are asked, since `String.__printable__` knows
+  # Unicode's print class alone; a name in another multibyte inspect encoding
+  # stays bare until that encoding's class is measured.
+  def self.__printable__(name)
+    return true if name.ascii_only? || !name.valid_encoding?
+    return true unless [1, 9, 15, 95, 97, 101].include?(name.__encoding_index__)
+    name.each_char.all? { |char| char.ascii_only? || String.__printable__(char.ord) }
   end
 
   def empty?
