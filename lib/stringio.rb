@@ -20,6 +20,11 @@ class StringIO
   VERSION = "3.2.0"
   MAX_LENGTH = 2**63 - 1
 
+  # The newline `puts` writes: US-ASCII, as CRuby's `rb_default_rs`, so a
+  # US-ASCII StringIO does not convert it.
+  NEWLINE = "\n".encode(Encoding::US_ASCII).freeze
+  private_constant :NEWLINE
+
   def self.new(*args, **options, &block)
     warn("StringIO::new() does not take block; use StringIO::open() instead", uplevel: 1) unless block.nil?
     super(*args, **options)
@@ -36,7 +41,8 @@ class StringIO
     end
   end
 
-  def initialize(string = nil, mode = nil, **options)
+  def initialize(string = nil, mode = (alone = true; nil), **options)
+    alone &&= !string.nil?
     if string.nil?
       string = String.new(encoding: Encoding.default_external)
       mode ||= "r+"
@@ -44,6 +50,10 @@ class StringIO
       string = String.__coerce__(string) unless string.is_a?(String)
     end
     __set_mode__(string, mode, options)
+    # A String given alone fixes the encoding to its own, over any keyword,
+    # as CRuby's `strio_init` does: a later `force_encoding` of the String
+    # does not change what is read or what a write converts into.
+    @__encoding__ = string.encoding if alone
     @__string__ = string
     @__pos__ = 0
     @__lineno__ = 0
@@ -662,20 +672,33 @@ class StringIO
     return 0 if text.empty?
     raise IOError, "not modifiable string" if @__string__.frozen?
     string = @__string__
-    target = @__encoding__
-    if !target.nil? && target != Encoding::BINARY && text.encoding != Encoding::BINARY && text.encoding != target
-      text = text.encode(target)
+    target = external_encoding
+    source = text.encoding
+    # As CRuby's `strio_write`: BINARY and US-ASCII are never converted into,
+    # and a String that cannot be converted is kept as it is, which raises
+    # `Encoding::CompatibilityError` unless it is BINARY or US-ASCII.
+    unless target == source || target == Encoding::BINARY || target == Encoding::US_ASCII
+      converted = __convert__(text, target)
+      if converted.nil?
+        unless source == Encoding::BINARY || source == Encoding::US_ASCII
+          raise Encoding::CompatibilityError, "incompatible character encodings: #{target} and #{source}"
+        end
+      else
+        text = converted
+      end
     end
-    # An ASCII-only String is written as it is only into an ASCII-compatible
-    # String; into UTF-16 or UTF-32 it is converted, as CRuby's `strio_write`
-    # does, so `puts` writes its newline in that encoding.
-    unless text.encoding == string.encoding || string.encoding == Encoding::BINARY ||
-           (text.ascii_only? && string.encoding.ascii_compatible?) || text.encoding == Encoding::BINARY
-      text = text.encode(string.encoding)
-    end
-    bytes = text.b
     length = string.bytesize
     @__pos__ = length if @__append__
+    if @__pos__ == length && target != Encoding::BINARY && source != Encoding::BINARY
+      # Appended as `String#<<` does, which can give the String the written
+      # one's encoding or raise `Encoding::CompatibilityError`, as
+      # `rb_str_buf_append` does.
+      string << text
+      written = string.bytesize - length
+      @__pos__ += written
+      return written
+    end
+    bytes = text.b
     if @__pos__ > length
       __splice__(length, 0, "\0".b * (@__pos__ - length))
       length = @__pos__
@@ -686,6 +709,19 @@ class StringIO
     bytes.bytesize
   end
   private :__write__
+
+  # `text` in `encoding`, or nil when it cannot be converted, as CRuby's
+  # `rb_str_conv_enc`: an ASCII-only String into an ASCII-compatible encoding
+  # is relabelled rather than transcoded.
+  def __convert__(text, encoding)
+    if (encoding.ascii_compatible? && text.ascii_only?) || encoding == Encoding::BINARY
+      return text.dup.force_encoding(encoding)
+    end
+    text.encode(encoding)
+  rescue EncodingError
+    nil
+  end
+  private :__convert__
 
   def syswrite(object)
     write(object)
@@ -718,7 +754,7 @@ class StringIO
   def puts(*objects)
     __writable!
     if objects.empty?
-      write("\n")
+      write(NEWLINE)
       return nil
     end
     __puts__(objects, [])
@@ -730,7 +766,8 @@ class StringIO
       if Array === object || (!(String === object) && object.respond_to?(:to_ary) && (array = object.to_ary).is_a?(Array))
         array ||= object
         if seen.any? { |s| s.equal?(array) }
-          write("[...]\n")
+          write("[...]".encode(Encoding::US_ASCII))
+          write(NEWLINE)
           next
         end
         __puts__(array, seen + [array])
@@ -739,7 +776,7 @@ class StringIO
       text = object.nil? ? "" : (String === object ? object : object.to_s)
       text = Kernel.instance_method(:to_s).bind(object).call unless text.is_a?(String)
       write(text)
-      write("\n") unless text.__end_with_newline__
+      write(NEWLINE) unless text.__end_with_newline__
     end
   end
   private :__puts__

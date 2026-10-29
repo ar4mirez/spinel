@@ -1490,7 +1490,11 @@ end
       line = __line_bytes__(wanted, limit)
       line = __newlines_in__(__decode__(line)) unless line.nil?
     end
-    line = held.empty? ? nil : held.force_encoding(__read_encoding__) if line.nil? && held
+    if line.nil? && held
+      # The characters held are the whole record.
+      line = held.empty? ? nil : held.force_encoding(__read_encoding__)
+      held = nil
+    end
     if paragraph && __xml_in__ == :attr && (line.nil? || !line.b.end_with?(__in_read__("\n\n").b))
       # A record the end cut short ends with the converter's last characters.
       finish = __finish_in__
@@ -1500,9 +1504,12 @@ end
       end
     end
     return nil if line.nil?
-    line = (held << line.b).force_encoding(line.encoding) if held && !held.equal?(line)
+    line = (held << line.b).force_encoding(line.encoding) if held
     # The blank lines between records belong to neither.
-    __skip_blank__(unit) if paragraph && !__chars_held__?
+    if paragraph && !__chars_held__?
+      __skip_blank__(unit)
+      __hold_next__ if __read_converter__?
+    end
     line = __chomp_line__(line, paragraph ? "\n\n" : separator) if chomp && !separator.nil?
     @lineno += 1
     $. = @lineno
@@ -1707,8 +1714,12 @@ end
 
   # Takes the blank lines before or between records in paragraph mode. With
   # universal newline a CR is one too, and each is a whole character, so
-  # the buffer stays at a character's start in UTF-16 or UTF-32.
+  # the buffer stays at a character's start in UTF-16 or UTF-32. A read
+  # converter looks for them in what it makes, so a character at a time
+  # there without universal newline too (#475); with none they are bytes.
   def __skip_blank__(unit)
+    universal = !unit.nil?
+    unit ||= __newline_unit__ if __read_converter__? && !__encoding__.ascii_compatible?
     unless unit
       __take__(1) while (@rbuf.empty? ? __fill__ : true) && @rbuf.getbyte(0) == 10
       return
@@ -1718,9 +1729,38 @@ end
     loop do
       next if @rbuf.bytesize < unit && __fill__
       head = @rbuf.byteslice(0, unit)
-      break unless head == lf || head == cr
+      break unless head == lf || (universal && head == cr)
       __take__(unit)
     end
+  end
+
+  # CRuby's `swallow` skips the blank lines in what the read converter
+  # makes, so it converts the character after them and holds it, and `pos`
+  # counts it (#475). Without an internal encoding the converter is the
+  # newline decorator alone, which makes a character of each byte; with one,
+  # a whole character is read, and an invalid one raises. Measured.
+  # ponytail: the character is sized by `valid_encoding?`, so with a dummy
+  # (stateful) external encoding, or an invalid sequence the converter
+  # replaces, nothing is held and `pos` stays short of CRuby's; upgrade by
+  # asking the transcoder how many bytes its first character takes.
+  def __hold_next__
+    return if @rbuf.empty? && !__fill__
+    size = 1
+    unless @enc2.nil?
+      enc = __encoding__
+      return if enc.dummy?
+      while @rbuf.bytesize < 4
+        break unless __fill__
+      end
+      head = @rbuf.byteslice(0, 4).force_encoding(enc)
+      size = (1..head.bytesize).find { |n| head.byteslice(0, n).valid_encoding? }
+      if size.nil?
+        # None is valid: converting them raises the transcoder's error.
+        head.encode(__read_encoding__, **__read_ecopts__)
+        return
+      end
+    end
+    __hold_chars__(__decode__(__take__(size)).b)
   end
 
   # `chomp:` takes off the separator and nothing else, as CRuby's
