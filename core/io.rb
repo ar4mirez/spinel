@@ -1288,7 +1288,7 @@ end
     # With universal newline a CR is a newline too, alone or before a LF.
     unit = __universal_newline__? ? __newline_unit__ : nil
     # Blank lines before a record are not part of it.
-    __take__(1) while paragraph && (@rbuf.empty? ? __fill__ : true) && __blank_byte__(@rbuf.getbyte(0), unit)
+    __skip_blank__(unit) if paragraph
     wanted = nil
     unless separator.nil?
       wanted = paragraph ? "\n\n" : separator
@@ -1306,7 +1306,7 @@ end
     end
     if paragraph
       # The blank lines between records belong to neither.
-      __take__(1) while (@rbuf.empty? ? __fill__ : true) && __blank_byte__(@rbuf.getbyte(0), unit)
+      __skip_blank__(unit)
     end
     line = __chomp_line__(line, paragraph ? "\n\n" : separator) if chomp && !separator.nil?
     @lineno += 1
@@ -1354,9 +1354,8 @@ end
   # after a line see them in CRuby: the line is converted only as far as it
   # goes, and each LF that stood for a CRLF is a byte more it takes.
   def __universal_line__(wanted, limit, unit)
-    enc = __encoding__
-    cr, lf = unit == 1 ? ["\r".b, "\n".b] : ["\r".encode(enc).b, "\n".encode(enc).b]
-    line = { view: "".b, crlfs: [], scanned: 0, ended: false, cr: cr, lf: lf, unit: unit, newline: Regexp.union(cr, lf) }
+    enc, cr, lf, newline = __newline_bytes__(unit)
+    line = { view: "".b, crlfs: [], scanned: 0, ended: false, cr: cr, lf: lf, unit: unit, newline: newline }
     view = line[:view]
     from = 0
     cut = nil
@@ -1437,9 +1436,30 @@ end
     end
   end
 
-  # A blank line's byte in paragraph mode: a CR too with universal newline.
-  def __blank_byte__(byte, unit)
-    byte == 10 || (unit == 1 && byte == 13)
+  # The encoding read, a CR and a LF in it, and a Regexp for either, kept
+  # until the encoding changes.
+  def __newline_bytes__(unit)
+    enc = __encoding__
+    return @newline_bytes if @newline_bytes && @newline_bytes[0] == enc
+    cr, lf = unit == 1 ? ["\r".b, "\n".b] : ["\r".encode(enc).b, "\n".encode(enc).b]
+    @newline_bytes = [enc, cr, lf, Regexp.union(cr, lf)]
+  end
+
+  # Takes the blank lines before or between records in paragraph mode. With
+  # universal newline a CR is one too, and each is a whole character, so
+  # the buffer stays at a character's start in UTF-16 or UTF-32.
+  def __skip_blank__(unit)
+    unless unit
+      __take__(1) while (@rbuf.empty? ? __fill__ : true) && @rbuf.getbyte(0) == 10
+      return
+    end
+    cr, lf = __newline_bytes__(unit)[1, 2]
+    loop do
+      next if @rbuf.bytesize < unit && __fill__
+      head = @rbuf.byteslice(0, unit)
+      break unless head == lf || head == cr
+      __take__(unit)
+    end
   end
 
   # `chomp:` takes off the separator and nothing else, as CRuby's
