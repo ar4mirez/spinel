@@ -261,6 +261,17 @@ pub fn report_uncaught(scope: &mut HandleScope<'_>) -> bool {
     interp::eval_in(scope, &mut frame, &iseq).is_ok_and(|value| value.is_truthy())
 }
 
+/// Finish the program once its error is reported: kill the other threads,
+/// run the finalizers left, and finish every IO's converter, in that order.
+pub fn cleanup(scope: &mut HandleScope<'_>) {
+    let parsed = spinel_parse::parse_file("<exit>", b"Kernel.__cleanup__");
+    let Ok(iseq) = compile::program(&parsed.program) else {
+        return;
+    };
+    let mut frame = interp::Frame::new(0);
+    let _ = interp::eval_in(scope, &mut frame, &iseq);
+}
+
 /// What string `eval` parses with (#38): the VM has no parser of its own.
 fn parse_eval(
     path: &str,
