@@ -364,7 +364,15 @@ class String
       # The decorators read the source itself — UTF-8 into UTF-16 or UTF-32
       # — and work on its bytes before they are read, so an error reports
       # the bytes they wrote, and what goes in for it is read after what
-      # they had written. Measured.
+      # they had written. Measured. Only an error's place depends on the
+      # turns, so a conversion without one decorates the text whole.
+      whole = __newlines__(xml ? __escape_xml__(text, xml) : text, newline).__transcode__(path, 0, state, 0, true)
+      __needs_char_table__ if whole.nil?
+      if whole[1] == :done
+        out << whole[0].b
+        out << "".__transcode__(path, 0, whole[9], 0, true)[0].b
+        return out.force_encoding(target)
+      end
       turns, = __decorator_turns__(text, xml, newline, false, true)
       out, state = __read_turns__(turns, "".b, path, state, true, out, step_source, step_target, target) { |step| piece_for.call(step)[0] }
       out << "".__transcode__(path, 0, state, 0, true)[0].b
