@@ -810,6 +810,20 @@ class String
     __byte_rindex__(pattern, start, false)
   end
 
+  # Whether `self` ends in a newline in its own encoding, as CRuby's
+  # `rb_str_end_with_asciichar`: a String that is not ASCII-compatible, such
+  # as UTF-16LE, is not compared with a UTF-8 "\n", which would raise. The
+  # newline must start on a character boundary; a dummy encoding has none to
+  # find, so its last byte is compared, as CRuby does. `IO#puts` and
+  # `StringIO#puts` ask it.
+  def __end_with_newline__
+    enc = encoding
+    return end_with?("\n") if enc.ascii_compatible?
+    return b.end_with?("\n".b) if enc.dummy?
+    newline = "\n".encode(enc).b
+    bytesize % newline.bytesize == 0 && b.end_with?(newline)
+  end
+
   def __check_char_boundary__(byte)
     return if byte == bytesize || __char_offsets__.include?(byte)
     raise IndexError, "offset #{byte} does not land on character boundary"
