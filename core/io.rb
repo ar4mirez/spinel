@@ -1472,9 +1472,8 @@ end
     # among them, and the limit counts what it made, so a limit of 2 is
     # one character in UTF-16 (#477).
     converted = paragraph ? __read_converter__? : __chars_held__? || __xml_in__
-    held = paragraph && !converted && __chars_held__? ? __take_chars__ : nil
     # Blank lines before a record are not part of it.
-    __swallow__(unit) if paragraph && held.nil?
+    __swallow__(unit) if paragraph
     wanted = nil
     unless separator.nil?
       wanted = paragraph ? "\n\n" : separator
@@ -1492,13 +1491,7 @@ end
       line = __line_bytes__(wanted, limit)
       line = __newlines_in__(__decode__(line)) unless line.nil?
     end
-    if line.nil? && held
-      # The characters held are the whole record.
-      line = held.empty? ? nil : held.force_encoding(__read_encoding__)
-      held = nil
-    end
     return nil if line.nil?
-    line = (held << line.b).force_encoding(line.encoding) if held
     # The blank lines between records belong to neither.
     __swallow__(unit) if paragraph
     line = __chomp_line__(line, paragraph ? "\n\n" : separator) if chomp && !separator.nil?
@@ -1661,10 +1654,13 @@ end
         # In UTF-16 or UTF-32 to the end of the character, and of a
         # surrogate pair (#477).
         cut += -cut % unit
-        nil while view.bytesize < cut + 2 && __convert_more__(line)
-        if unit == 2 && cut >= 2 && cut < view.bytesize
+        nil while view.bytesize < cut && __convert_more__(line)
+        if unit == 2 && cut >= 2 && cut <= view.bytesize
           high = enc == Encoding::UTF_16BE ? view.getbyte(cut - 2) : view.getbyte(cut - 1)
-          cut += 2 if high & 0xFC == 0xD8
+          if high & 0xFC == 0xD8
+            nil while view.bytesize < cut + 2 && __convert_more__(line)
+            cut += 2
+          end
         end
         cut = view.bytesize if cut > view.bytesize
       end
