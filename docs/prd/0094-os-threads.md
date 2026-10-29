@@ -56,8 +56,9 @@ lock. This is the same place `abort_to_main` put it.
 longer dropped at the end of each evaluation. `Kernel.__exit__` runs the
 `at_exit` blocks with every thread alive, as CRuby does; once an uncaught
 error is reported, `Kernel.__cleanup__` has `Thread.__terminate_all__` kill
-the rest and wait for them, and then the finalizers run. A kill is a `throw` of the `Thread`, and it now goes out of
-every fiber the thread is in, down to the `catch` at the thread's bottom.
+the rest and wait for them, and then the finalizers run. A kill is a
+`throw` of the `Thread`, and it now goes out of every fiber the thread is
+in, down to the `catch` at the thread's bottom.
 So the `ensure` clauses of the fiber a thread is in run, and a suspended
 fiber's do not.
 
