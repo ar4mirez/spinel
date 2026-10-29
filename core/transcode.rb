@@ -336,13 +336,13 @@ class String
 
   # The step loop. A BOM'd UTF-16 or UTF-32 target converts big-endian and
   # gains its BOM with the first character written, so a conversion that
-  # writes nothing has none. Measured. A source of either reads its BOM to learn its order. The
-  # VM runs the decorators — `xml:` and the newline options — where CRuby's
-  # work, after a stateful source is decoded and before a stateful target or
-  # one that is not ASCII-compatible is encoded, and keeps the conversion's
-  # state between steps — ISO-2022-JP's G0, the attribute's quote, a CR
-  # `universal_newline` holds — so what is inserted for an error goes
-  # through it too.
+  # writes nothing has none. Measured. A source of either reads its BOM to
+  # learn its order. The VM runs the decorators — `xml:` and the newline
+  # options — where CRuby's work, after a stateful source is decoded and
+  # before a stateful target or one that is not ASCII-compatible is encoded,
+  # and keeps the conversion's state between steps — ISO-2022-JP's G0, the
+  # attribute's quote, a CR `universal_newline` holds — so what is inserted
+  # for an error goes through it too.
   def self.__convert__(text, source, target, options, newline)
     xml = options[:xml]
     replacement = __replacement__(target, options)
