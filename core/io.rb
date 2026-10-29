@@ -1449,7 +1449,25 @@ end
     separator = separator.to_str unless separator.nil? || String === separator
     limit = IO.__c_long__(limit) unless limit.nil?
     limit = nil if !limit.nil? && limit < 0
+    __check_open__
+    __check_separator__(separator)
     [separator, limit]
+  end
+
+  # CRuby's `check_getline_args`: a separator is looked for in what the
+  # read converter makes, so one in another encoding raises, unless it is
+  # ASCII on an ASCII-compatible read, or empty (#482). Measured: before
+  # the IO is checked for reading and before a limit of 0. `$/` as it
+  # starts is let through and stands for a newline in the read encoding.
+  # ponytail: CRuby's `$/ = "\n"` puts that one back, so a `$/` of "\n"
+  # stands in for it; drop the stand-in when the setter does that (#484).
+  def __check_separator__(separator)
+    return if separator.nil?
+    enc = __read_encoding__
+    return if separator.encoding == enc
+    return if separator.ascii_only? && (separator.empty? || enc.ascii_compatible?)
+    return if separator.equal?($/) && separator == "\n"
+    raise ArgumentError, "encoding mismatch: #{enc} IO with #{separator.encoding} RS"
   end
 
   def __gets__(separator, limit, chomp)
