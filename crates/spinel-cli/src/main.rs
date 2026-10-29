@@ -598,6 +598,9 @@ fn run_program(
             eprintln!("{}: {}", path.display(), describe_error(err));
         }
     }
+    // Threads, finalizers and IOs are finished after the report, so an IO's
+    // `xml: :attr` quote closes around it.
+    spinel_core::cleanup(&mut scope);
     // A `SignalException` that reached the top ends the process by its
     // signal, so whoever waits for it sees that, not an exit status.
     if let Err(spinel_vm::Error::Uncaught { class, message }) = &outcome {

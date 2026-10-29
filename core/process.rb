@@ -77,13 +77,18 @@ module Kernel
         $stderr.write(e.full_message)
       end
     end
-    # Then every other thread is killed, the finalizers of every object still
-    # alive run (#36), and every IO's converter is finished (#456), as CRuby
-    # does once the `at_exit` blocks are done.
+    status
+  end
+
+  # Once the `at_exit` blocks have run and the error is reported, every other
+  # thread is killed, the finalizers of every object still alive run (#36),
+  # and every IO's converter is finished (#456), as CRuby's `rb_ec_cleanup`
+  # does.
+  def self.__cleanup__
     Thread.__terminate_all__
     ObjectSpace.__finalize_all__
     IO.__finish_all__
-    status
+    nil
   end
 
   # The top level's report of the exception that ended the program: nothing

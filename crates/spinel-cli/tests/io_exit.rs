@@ -69,3 +69,20 @@ fn exit_bang_leaves_an_xml_attr_quote_open() {
     assert!(output.status.success());
     assert_eq!(written, b"\"a");
 }
+
+/// The uncaught error is reported before the IOs are finished, as CRuby's
+/// `rb_ec_cleanup` does, so `$stderr`'s quote closes after the report.
+#[test]
+fn an_xml_attr_quote_on_stderr_closes_after_the_report() {
+    let output = Command::new(SPINEL)
+        .arg("-e")
+        .arg("$stderr.set_encoding('UTF-8', xml: :attr); $stderr.write('a'); raise 'x'")
+        .output()
+        .expect("spinel runs");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success());
+    assert!(stderr.starts_with("\"a"), "stderr: {stderr}");
+    assert!(stderr.ends_with("\""), "stderr: {stderr}");
+    assert!(stderr.contains("x (RuntimeError)"), "stderr: {stderr}");
+    assert_eq!(stderr.matches('"').count(), 2, "stderr: {stderr}");
+}
