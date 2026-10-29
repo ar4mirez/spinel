@@ -1739,19 +1739,26 @@ end
   # counts it (#475). Without an internal encoding the converter is the
   # newline decorator alone, which makes a character of each byte; with one,
   # a whole character is read, and an invalid one raises. Measured.
+  # ponytail: the character is sized by `valid_encoding?`, so with a dummy
+  # (stateful) external encoding, or an invalid sequence the converter
+  # replaces, nothing is held and `pos` stays short of CRuby's; upgrade by
+  # asking the transcoder how many bytes its first character takes.
   def __hold_next__
     return if @rbuf.empty? && !__fill__
     size = 1
     unless @enc2.nil?
       enc = __encoding__
+      return if enc.dummy?
       while @rbuf.bytesize < 4
         break unless __fill__
       end
       head = @rbuf.byteslice(0, 4).force_encoding(enc)
       size = (1..head.bytesize).find { |n| head.byteslice(0, n).valid_encoding? }
-      # None is valid: converting them raises the transcoder's error.
-      head.encode(__read_encoding__, **__read_ecopts__) if size.nil?
-      size ||= 1
+      if size.nil?
+        # None is valid: converting them raises the transcoder's error.
+        head.encode(__read_encoding__, **__read_ecopts__)
+        return
+      end
     end
     __hold_chars__(__decode__(__take__(size)).b)
   end
