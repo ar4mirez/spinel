@@ -468,3 +468,69 @@ fn an_operator_instruction_hears_a_prepend_and_an_undef() {
         assert_eq!(eval(source).as_deref(), Ok(want), "{source}");
     }
 }
+
+/// CRuby 4.0.9 never ends where `universal_newline:` into UTF-16 or UTF-32
+/// would buffer a replacement after a character begun behind a held CR: each
+/// error breaks the next replacement's first character. Spinel puts the
+/// replacement before that character instead, so the table, which CRuby
+/// re-measures, cannot hold these.
+#[test]
+fn a_replacement_that_would_break_a_begun_character_goes_before_it() {
+    for (source, want) in [
+        (
+            r#""a\xC2\r\xC3\xA9".encode("UTF-16LE", universal_newline: true, invalid: :replace).encode("UTF-8")"#,
+            "\"a\u{FFFD}\\né\"",
+        ),
+        (
+            r#""a\xE3\r\xE3\x81\x82b".encode("UTF-32BE", universal_newline: true, invalid: :replace).encode("UTF-8")"#,
+            "\"a\u{FFFD}\\nあb\"",
+        ),
+        (
+            r#"c = Encoding::Converter.new("UTF-8", "UTF-16LE", universal_newline: true, invalid: :replace); (c.convert("a\xC2\r") + c.convert("\xC3") + c.convert("\xA9") + c.finish).encode("UTF-8")"#,
+            "\"a\u{FFFD}\\né\"",
+        ),
+    ] {
+        assert_eq!(eval(source).unwrap(), want, "{source}");
+    }
+}
+
+/// Where CRuby 4.0.9 does finish, a replacement after a character begun
+/// behind it stays where CRuby's decorator buffer puts it.
+#[test]
+fn a_replacement_after_a_begun_character_stays_where_cruby_ends() {
+    for (source, want) in [
+        (
+            r#""\xF0\x80\xE3a".encode("UTF-16LE", xml: :attr, invalid: :replace).encode("UTF-8")"#,
+            "\"\\\"\u{FFFD}a\u{FFFD}\u{FFFD}\u{FFFD}\u{FFFD}\\\"\"",
+        ),
+        (
+            r#""\xF0\x80\xF0\x80a\xE3\x81\x82\xFF\r".encode("UTF-16LE", universal_newline: true, invalid: :replace).encode("UTF-8")"#,
+            "\"\u{FFFD}\u{FFFD}\u{FFFD}\u{FFFD}\u{FFFD}a\u{FFFD}\u{FFFD}\u{FFFD}\u{FFFD}\u{FFFD}\u{FFFD}\u{FFFD}\\n\"",
+        ),
+        (
+            r#""\xE0\x80\xF4\x90\xFF\r\n\"".encode("UTF-32LE", cr_newline: true, invalid: :replace).encode("UTF-8")"#,
+            "\"\u{FFFD}\u{FFFD}\u{FFFD}\\r\u{FFFD}\\r\u{FFFD}\\\"\u{FFFD}\u{FFFD}\"",
+        ),
+    ] {
+        assert_eq!(eval(source).unwrap(), want, "{source}");
+    }
+}
+
+/// CRuby 4.0.9 never ends where a Converter's broken replacement goes back
+/// through a newline decorator that reads the UTF-8 source: each `"\xFF"` it
+/// inserts is another invalid byte. Spinel stops at the error instead.
+#[test]
+fn a_broken_replacement_behind_a_newline_decorator_stops_at_the_error() {
+    for (source, want) in [
+        (
+            r#"c = Encoding::Converter.new("UTF-8", "UTF-16LE", crlf_newline: true, invalid: :replace); c.replacement = "\xFF"; begin; c.convert("a\xFF"); rescue => e; [e.class, e.error_bytes.bytes]; end"#,
+            "[Encoding::InvalidByteSequenceError, [255]]",
+        ),
+        (
+            r#"c = Encoding::Converter.new("UTF-8", "UTF-32BE", universal_newline: true, invalid: :replace); c.replacement = "\xFF"; d = "".b; c.primitive_convert("a\xFFb".b, d)"#,
+            ":invalid_byte_sequence",
+        ),
+    ] {
+        assert_eq!(eval(source).unwrap(), want, "{source}");
+    }
+}

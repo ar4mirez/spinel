@@ -175,21 +175,159 @@ class String
     end
   end
 
-  # What follows the byte at `at` of what a decorator wrote for one source
-  # byte, in `text` as the decorators wrote it: the rest of an entity `xml:`
-  # wrote, or the LF of a CRLF `crlf_newline` did. Every `&` there is an
-  # entity's and every CRLF a decorated LF.
-  def self.__decorator_rest__(text, at, xml, newline)
-    bytes = text.b
-    rest =
-      if xml && bytes.getbyte(at) == 38
-        bytes.byteslice(at + 1, bytes.index(";", at) - at)
-      elsif newline == "crlf_newline" && bytes.getbyte(at) == 13 && bytes.getbyte(at + 1) == 10
-        "\n".b
-      else
-        "".b
+  # What the first decorator hands on at each of its turns, where the
+  # decorators read the source itself (UTF-8 into UTF-16 or UTF-32), and
+  # whether `universal_newline` holds a CR after them. CRuby's first
+  # decorator writes one source byte's worth and stops, and the encoder reads
+  # all of it before the next turn. A CR `universal_newline` holds writes
+  # nothing: as the first decorator it goes on to the next byte, but behind
+  # `xml:` that turn hands on nothing. A `final` last turn is what finishing
+  # writes: the attribute's closing quote, a held CR's LF. Measured.
+  def self.__decorator_turns__(text, xml, newline, held, final)
+    quoted = false
+    turns = text.b.bytes.map do |byte|
+      piece = byte.chr
+      next piece unless xml
+      piece = byte == 34 && xml == :attr ? "&quot;".b : __escape_xml__(piece, :text).b
+      next piece if xml == :text || quoted
+      quoted = true
+      "\"".b + piece
+    end
+    turns << (xml == :attr ? (quoted ? "\"".b : "\"\"".b) : "".b) if final
+    decorated = []
+    turns.each_with_index do |piece, at|
+      piece, held = __newline_turn__(piece, newline, held)
+      if final && at == turns.size - 1 && held
+        piece << "\n"
+        held = false
       end
-    rest.force_encoding(text.encoding)
+      # The first decorator goes on past a turn that writes nothing.
+      next if piece.empty? && !xml && at < turns.size - 1
+      decorated << piece
+    end
+    [decorated, held]
+  end
+
+  # One turn's bytes through the newline decorator `name`, and whether
+  # `universal_newline` holds a CR after them.
+  def self.__newline_turn__(piece, name, held)
+    case name
+    when "universal_newline", "lf_newline"
+      out = "".b
+      piece.each_byte do |byte|
+        if held
+          out << "\n"
+          held = false
+          next if byte == 10
+        end
+        if byte == 13
+          held = true
+        else
+          out << byte.chr
+        end
+      end
+      [out, held]
+    else [__newlines__(piece, name).b, held]
+    end
+  end
+
+  # The decorators' `turns` read by the encoder along `path` as CRuby's reads
+  # its decorator's buffer: all that is buffered at each turn, keeping a
+  # character it has only begun when more may come. What the block gives
+  # for an error — a replacement, its bytes in `via` — goes to the end of
+  # what is buffered, after the rest of the turn it stopped in, with the
+  # bytes the error reads again after it, and the decorator takes its next
+  # turn before the encoder reads on. Measured. A nil from the block stops,
+  # handing back the step and what was not read. The output, the state, what
+  # is still buffered, and the step that stopped, if one did.
+  def self.__read_turns__(turns, buffered, path, state, final, out, via, named, &block)
+    size = out.bytesize
+    read = __read_turns_in__(turns, buffered.dup, path, state, final, out, via, named, false, &block)
+    return read if read
+    # ponytail: CRuby never ends where a replacement it buffers breaks a
+    # character the turn has only begun (U+FFFD after "\xC3"), each error
+    # buffering more than it reads; past a bound the turns are read again
+    # from the start with such a replacement before that character, as
+    # without decorators. The upgrade is whatever CRuby settles on.
+    out.replace(out.byteslice(0, size))
+    __read_turns_in__(turns, buffered, path, state, final, out, via, named, true, &block)
+  end
+
+  # `__read_turns__` once, a replacement that would follow a character the
+  # turn has only begun going before it when `begun`; nil where, without
+  # that, the errors buffer more than they read, and with it the step that
+  # keeps doing so, unreplaced.
+  def self.__read_turns_in__(turns, buffered, path, state, final, out, via, named, begun)
+    index = 0
+    fed = buffered.bytesize
+    inserted = 0
+    loop do
+      if index < turns.size
+        buffered << turns[index]
+        fed += turns[index].bytesize
+        index += 1
+      end
+      last = final && index == turns.size
+      again = false
+      start = 0
+      loop do
+        step = buffered.__transcode__(path, start, state, 0, last)
+        __needs_char_table__ if step.nil?
+        output, stop, error, readagain, following = step
+        state = step[9]
+        out << output.b
+        if stop == :done
+          buffered = "".b
+          break
+        end
+        if stop == :incomplete && !last
+          buffered = error.b
+          break
+        end
+        piece = yield step
+        rest = buffered.byteslice(following + readagain.bytesize, buffered.bytesize)
+        if piece.nil?
+          return [out, state, rest + turns.drop(index).join.b, step]
+        end
+        inserted += 1
+        if inserted > 2 * fed + 64
+          return nil unless begun
+          return [out, state, rest + turns.drop(index).join.b, step]
+        end
+        bytes = __in_encoding__(piece, via)
+        __not_inserted__(piece, named) if bytes.nil?
+        # Nothing to insert leaves the bytes read again in the encoder, which
+        # reads them first. Measured.
+        buffered = if bytes.empty?
+          readagain.b + rest
+        elsif begun && bytes.getbyte(0) >= 0x80 && __begun__(rest, path)
+          bytes + readagain.b + rest
+        else
+          rest + bytes + readagain.b
+        end
+        again = true
+        break
+      end
+      return [out, state, buffered, nil] if index == turns.size && !again
+    end
+  end
+
+  # Whether `bytes` ends in a character begun but not finished, read along
+  # `path`.
+  def self.__begun__(bytes, path)
+    [3, 2, 1].any? do |size|
+      next false if bytes.bytesize < size
+      tail = bytes.byteslice(bytes.bytesize - size, size)
+      tail.getbyte(0) >= 0xC0 && tail.__transcode__(path, 0, 0, 0, false)[1] == :incomplete
+    end
+  end
+
+  # The bytes of `piece` in `encoding`, or nil when it has no spelling there.
+  def self.__in_encoding__(piece, encoding)
+    return piece.b if piece.encoding.equal?(encoding) || piece.empty?
+    step = piece.__transcode__(__path__(piece.encoding, encoding).map(&:__index__), 0, 0, 0, true)
+    __needs_char_table__ if step.nil?
+    step[1] == :done ? step[0].b : nil
   end
 
   def self.__unicode__(encoding)
@@ -225,14 +363,47 @@ class String
     stages = __path__(step_source, step_target)
     path = stages.map(&:__index__)
     mode = (xml == :attr ? 2 : (xml ? 1 : 0)) | NEWLINE_MODES.fetch(newline, 0) << 2
-    on_source = false
+    # What goes in for an error, and whether it is a fallback's answer.
+    piece_for = lambda do |step|
+      _, stop, error, readagain, _, code, reference, from, to = step
+      from = __step_encoding__(from, step_source, source)
+      to = __step_encoding__(to, step_target, target)
+      case stop
+      when :invalid, :incomplete
+        raise __invalid_error__(stop, error, readagain, source, target, to) unless options[:invalid] == :replace
+        [replacement, false]
+      when :undefined
+        if xml && reference
+          ["&#x#{Integer.__hex__(reference, 1)};", false]
+        # With `xml:` an undefined character is a reference or nothing:
+        # `undef: :replace` does not apply. Measured.
+        elsif options[:undef] == :replace && !xml
+          [replacement, false]
+        elsif options[:fallback]
+          char = __error_char__(code, error, from)
+          [__fallback__(options[:fallback], char, code, error, from, to, source, target), true]
+        else
+          raise __undefined_error__(code, error, from, to, source, target)
+        end
+      end
+    end
     if (xml || newline) && stages.drop(1).none?(&:ascii_compatible?)
       # The decorators read the source itself — UTF-8 into UTF-16 or UTF-32
       # — and work on its bytes before they are read, so an error reports
-      # the bytes they wrote. Measured.
-      text = __newlines__(xml ? __escape_xml__(text, xml) : text, newline)
-      mode = 0
-      on_source = true
+      # the bytes they wrote, and what goes in for it is read after what
+      # they had written. Measured. Only an error's place depends on the
+      # turns, so a conversion without one decorates the text whole.
+      whole = __newlines__(xml ? __escape_xml__(text, xml) : text, newline).__transcode__(path, 0, state, 0, true)
+      __needs_char_table__ if whole.nil?
+      if whole[1] == :done
+        out << whole[0].b
+        out << "".__transcode__(path, 0, whole[9], 0, true)[0].b
+        return out.force_encoding(target)
+      end
+      turns, = __decorator_turns__(text, xml, newline, false, true)
+      out, state = __read_turns__(turns, "".b, path, state, true, out, step_source, target) { |step| piece_for.call(step)[0] }
+      out << "".__transcode__(path, 0, state, 0, true)[0].b
+      return out.force_encoding(target)
     end
     if unread > 0
       opened = "".__transcode__(path, 0, state, mode, false)
@@ -246,43 +417,14 @@ class String
     loop do
       step = text.__transcode__(path, start, state, mode, false)
       __needs_char_table__ if step.nil?
-      output, stop, error, readagain, following, code, reference, from, to, state = step
+      output, stop, _, _, following = step
+      state = step[9]
       out << output.b
       break if stop == :done
-      from = __step_encoding__(from, step_source, source)
-      to = __step_encoding__(to, step_target, target)
-      inserted =
-        case stop
-        when :invalid, :incomplete
-          raise __invalid_error__(stop, error, readagain, source, target, to) unless options[:invalid] == :replace
-          if on_source && !readagain.empty?
-            # The byte read again began what a decorator wrote for one
-            # source byte — CRLF for LF, an entity for `<` — and CRuby
-            # writes the rest of it before the replacement, and that byte
-            # after. Measured.
-            rest = __decorator_rest__(text, following, xml, newline)
-            unless rest.empty?
-              out, state = __insert__(out, rest, step_target, state)
-              text = text.byteslice(0, following + 1) + text.byteslice(following + 1 + rest.bytesize, text.bytesize)
-            end
-          end
-          __insert__(out, replacement, step_target, state)
-        when :undefined
-          if xml && reference
-            __insert__(out, "&#x#{Integer.__hex__(reference, 1)};", step_target, state)
-          # With `xml:` an undefined character is a reference or nothing:
-          # `undef: :replace` does not apply. Measured.
-          elsif options[:undef] == :replace && !xml
-            __insert__(out, replacement, step_target, state)
-          elsif options[:fallback]
-            char = __error_char__(code, error, from)
-            result = __fallback__(options[:fallback], char, code, error, from, to, source, target)
-            __insert__(out, result, step_target, state) || raise(ArgumentError, "too big fallback string")
-          else
-            raise __undefined_error__(code, error, from, to, source, target)
-          end
-        end
-      out, state = inserted || __not_inserted__(replacement, target)
+      piece, fallback = piece_for.call(step)
+      inserted = __insert__(out, piece, step_target, state)
+      raise ArgumentError, "too big fallback string" if inserted.nil? && fallback
+      out, state = inserted || __not_inserted__(piece, target)
       start = following
     end
     out << "".__transcode__(path, 0, state, mode, true)[0].b
@@ -365,7 +507,11 @@ class String
   # U+FFFD for a Unicode target and "?" for any other.
   def self.__replacement__(target, options)
     replacement = options[:replace]
-    return String.__coerce__(replacement) unless replacement.nil?
+    unless replacement.nil?
+      replacement = String.__coerce__(replacement)
+      raise ArgumentError, "replacement string is broken: #{replacement.dump} as #{replacement.encoding}" unless replacement.valid_encoding?
+      return replacement
+    end
     __unicode__(target) ? "�" : "?"
   end
 
@@ -717,13 +863,14 @@ class Encoding
       offset = Integer.__index__(offset) unless offset.nil?
       bytesize = Integer.__index__(bytesize) unless bytesize.nil?
       raise ArgumentError, "output_byteoffset too big" if !offset.nil? && offset > destination.bytesize
-      input = @readagain + @decorated + __decorate_source__(source.nil? ? "".b : source.b, flags)
+      chunk = source.nil? ? "".b : source.b
+      buffered = @readagain + @decorated
       @readagain = "".b
       @decorated = "".b
       source&.__splice__(0, source.bytesize, "")
       output = @pending_output
       @pending_output = "".b
-      result = __run__(input, output, flags, source)
+      result = @source_newline ? __run_turns__(chunk, buffered, output, flags) : __run__(buffered + chunk, output, flags, source)
       unless offset.nil?
         destination.__splice__(offset, destination.bytesize - offset, "")
       end
@@ -738,17 +885,33 @@ class Encoding
       result
     end
 
-    # A chunk through the newline decorator that reads the source itself.
-    # `universal_newline` holds a trailing CR of partial input until it sees
-    # what follows, as CRuby's does. Measured.
-    def __decorate_source__(input, flags)
-      return input unless @source_newline
-      if @source_newline == "universal_newline" || @source_newline == "lf_newline"
-        input = "\r".b + input if @held
-        @held = flags & PARTIAL_INPUT != 0 && input.getbyte(input.bytesize - 1) == 13
-        input = input.byteslice(0, input.bytesize - 1) if @held
+    # One run over `chunk` where the newline decorator reads the source
+    # itself, its turns read as `String#encode` reads them, so a replacement
+    # comes after what the decorator had written. `buffered` is what an
+    # earlier run left decorated or begun. `universal_newline` holds a
+    # trailing CR of partial input until it sees what follows, as CRuby's
+    # does. Measured.
+    def __run_turns__(chunk, buffered, output, flags)
+      final = flags & PARTIAL_INPUT == 0
+      turns, @held = String.__decorator_turns__(chunk, nil, @source_newline, @held, final)
+      via = Encoding::LIST[@path.first]
+      _, @state, buffered, step = String.__read_turns__(turns, buffered, @path, @state, final, output, via, @destination_encoding) do |stopped|
+        __replacement_for__(stopped, flags)
       end
-      String.__newlines__(input, @source_newline).b
+      if step.nil?
+        # A character begun at the end of partial input waits for the rest.
+        @readagain = buffered
+        @errinfo = [final ? :finished : :source_buffer_empty, nil, nil, nil, nil]
+        @last_error = nil
+        return @errinfo[0]
+      end
+      @readagain = step[3].b
+      # ponytail: decorated bytes are kept to be read next, not put back in
+      # `source`, where they would be decorated again; CRuby puts back as
+      # much as its decorator has not buffered, which differs by chunk. The
+      # upgrade is a map from decorated offsets to the source's.
+      @decorated = buffered
+      __stopped__(step)
     end
 
     # One run over `input`, appending to `output`. Errors the flags replace
@@ -760,7 +923,8 @@ class Encoding
       start = 0
       loop do
         step = input.__transcode__(@path, start, @state, @mode, flags & PARTIAL_INPUT == 0)
-        converted, stop, error, readagain, following, code, reference, from, to, @state = step
+        converted, stop, error, readagain, following = step
+        @state = step[9]
         output << converted.b
         if stop == :done
           @errinfo = [flags & PARTIAL_INPUT != 0 ? :source_buffer_empty : :finished, nil, nil, nil, nil]
@@ -772,16 +936,7 @@ class Encoding
           @errinfo = [:source_buffer_empty, nil, nil, nil, nil]
           return :source_buffer_empty
         end
-        replace =
-          if stop == :undefined
-            if flags & UNDEF_MASK == UNDEF_HEX_CHARREF && reference
-              "&#x#{Integer.__hex__(reference, 1)};"
-            elsif flags & UNDEF_MASK == UNDEF_REPLACE
-              @replacement
-            end
-          elsif flags & INVALID_MASK == INVALID_REPLACE
-            @replacement
-          end
+        replace = __replacement_for__(step, flags)
         if replace
           output, @state =
             String.__insert__(output, replace, @destination_encoding, @state) ||
@@ -789,29 +944,40 @@ class Encoding
           start = following
           next
         end
-        rest = input.byteslice(following + readagain.bytesize, input.bytesize)
         @readagain = readagain.b
-        # ponytail: decorated bytes are kept to be read next, not put back in
-        # `source`, where they would be decorated again; CRuby puts back as
-        # much as its decorator has not buffered, which differs by chunk. The
-        # upgrade is a map from decorated offsets to the source's.
-        if @source_newline
-          @decorated = rest.b
-        else
-          source&.__splice__(0, 0, rest)
-        end
-        result = { invalid: :invalid_byte_sequence, incomplete: :incomplete_input, undefined: :undefined_conversion }[stop]
-        from = Encoding::LIST[from]
-        to = Encoding::LIST[to]
-        if stop == :undefined
-          @last_error = String.__undefined_error__(code, error, from, to, @source_encoding, @destination_encoding)
-          @errinfo = [result, @last_error.source_encoding_name, @last_error.destination_encoding_name, @last_error.error_char.b, "".b]
-        else
-          @last_error = String.__invalid_error__(stop, error.b, readagain.b, @source_encoding, @destination_encoding, to)
-          @errinfo = [result, @source_encoding.name, @last_error.destination_encoding_name, error.b, readagain.b]
-        end
-        return result
+        source&.__splice__(0, 0, input.byteslice(following + readagain.bytesize, input.bytesize))
+        return __stopped__(step)
       end
+    end
+
+    # What the flags put in for the error `step` stopped at, or nil.
+    def __replacement_for__(step, flags)
+      if step[1] == :undefined
+        if flags & UNDEF_MASK == UNDEF_HEX_CHARREF && step[6]
+          "&#x#{Integer.__hex__(step[6], 1)};"
+        elsif flags & UNDEF_MASK == UNDEF_REPLACE
+          @replacement
+        end
+      elsif flags & INVALID_MASK == INVALID_REPLACE
+        @replacement
+      end
+    end
+
+    # The error `step` stopped at, kept for `primitive_errinfo` and
+    # `last_error`, and its result.
+    def __stopped__(step)
+      _, stop, error, readagain, _, code, _, from, to = step
+      result = { invalid: :invalid_byte_sequence, incomplete: :incomplete_input, undefined: :undefined_conversion }[stop]
+      from = Encoding::LIST[from]
+      to = Encoding::LIST[to]
+      if stop == :undefined
+        @last_error = String.__undefined_error__(code, error, from, to, @source_encoding, @destination_encoding)
+        @errinfo = [result, @last_error.source_encoding_name, @last_error.destination_encoding_name, @last_error.error_char.b, "".b]
+      else
+        @last_error = String.__invalid_error__(stop, error.b, readagain.b, @source_encoding, @destination_encoding, to)
+        @errinfo = [result, @source_encoding.name, @last_error.destination_encoding_name, error.b, readagain.b]
+      end
+      result
     end
 
     # Converts a chunk, raising the error a stop names; input that ends
