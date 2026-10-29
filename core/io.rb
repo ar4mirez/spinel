@@ -676,8 +676,10 @@ end
     @enc2 = nil
     # CRuby drops the converter unfinished, an attribute's quote and all.
     @xml_quote = nil
-    # And no newline conversion: binmode is bytes as they are.
-    @ecopts = @ecopts.reject { |key, _| %i[newline universal_newline crlf_newline cr_newline lf_newline].include?(key) }
+    # And no conversion options at all: CRuby's `io_ascii8bit_binmode` zeroes
+    # the flags and drops the rest, so `xml:` and the error handling go with
+    # the newline decorators.
+    @ecopts = {}
     self
   end
 
@@ -746,7 +748,7 @@ end
   end
 
   def __newline_decorator__?
-    @ecopts[:universal_newline] || @ecopts[:crlf_newline] || @ecopts[:cr_newline] || !@ecopts[:newline].nil?
+    @ecopts[:universal_newline] || @ecopts[:crlf_newline] || @ecopts[:cr_newline] || @ecopts[:lf_newline] || !@ecopts[:newline].nil?
   end
 
   # What reads answer in.
@@ -786,7 +788,7 @@ end
       raise ArgumentError, "wrong number of arguments (given #{encodings.size}, expected 1..2)"
     end
     first, second = encodings
-    ecopts = __ecopts__(options)
+    ecopts = __kept_ecopts__(options)
     if !second.nil?
       external = __encoding_arg__(first)
       if !(Encoding === second) && second.to_str == "-"
@@ -804,7 +806,7 @@ end
       end
     elsif first.nil?
       __ext_int_to_encs__(nil, nil)
-      ecopts = {}
+      ecopts = __kept_ecopts__({})
     elsif !(Encoding === first) && (String === first || first.respond_to?(:to_str))
       text = first.to_str
       raise ArgumentError, "invalid name encoding (non ASCII)" unless text.encoding.ascii_compatible?
@@ -814,7 +816,7 @@ end
       __ext_int_to_encs__(external, internal, bom)
     else
       __ext_int_to_encs__(__encoding_arg__(first), nil)
-      ecopts = {}
+      ecopts = __kept_ecopts__({})
     end
     @ecopts = ecopts
     # CRuby drops the converter unfinished: an attribute's quote open is
@@ -822,6 +824,25 @@ end
     @xml_quote = nil
     __validate_enc_binmode__
     self
+  end
+
+  # The options `set_encoding` leaves, as CRuby's `io_encoding_set` starts
+  # from the IO's own flags and `econv_opts` adds the given ones to them. The
+  # flags (the error handling, `xml:`, the newline decorators) are kept; a
+  # given one sets its own, and any newline option given replaces every
+  # newline decorator kept. The replacement String and `fallback:` are not
+  # flags, so only given ones count, and a `replace:` that stood for
+  # `undef: :replace` leaves that behind with the default replacement.
+  # ponytail: a second `xml:` replaces the first, where CRuby keeps both
+  # decorators and then finds no converter (#458); upgrade by keeping a set of them.
+  def __kept_ecopts__(options)
+    given = __ecopts__(options)
+    newlines = %i[newline universal_newline crlf_newline cr_newline lf_newline]
+    kept = @ecopts.reject { |key, _| %i[replace fallback].include?(key) }
+    kept[:undef] = :replace if !@ecopts[:replace].nil? && @ecopts[:invalid] != :replace
+    kept = kept.reject { |key, _| newlines.include?(key) } if newlines.any? { |key| !given[key].nil? }
+    given.each { |key, value| kept[key] = value unless value.nil? }
+    kept
   end
 
   def set_encoding_by_bom
