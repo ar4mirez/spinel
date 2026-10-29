@@ -1362,6 +1362,8 @@ end
     cut = nil
     while cut.nil?
       at = wanted.nil? ? nil : view.index(wanted, from)
+      # In UTF-16 or UTF-32 only at a character's start.
+      at = view.index(wanted, at + 1) while at && at % unit != 0
       if at
         cut = at + wanted.bytesize
       elsif !limit.nil? && limit > 0 && view.bytesize >= limit
