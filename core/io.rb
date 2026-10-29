@@ -1533,7 +1533,7 @@ end
     lines.each do |line|
       if String === line
         out << line
-        out << "\n" unless line.end_with?("\n")
+        out << "\n" unless __end_with_newline__(line)
         next
       end
       array = Array === line ? line : (line.respond_to?(:to_ary, true) ? line.to_ary : nil)
@@ -1547,9 +1547,22 @@ end
         text = line.nil? ? "" : line.to_s
         text = Kernel.instance_method(:to_s).bind_call(line) unless String === text
         out << text
-        out << "\n" unless text.end_with?("\n")
+        out << "\n" unless __end_with_newline__(text)
       end
     end
+  end
+
+  # Whether `line` ends in a newline in its own encoding, as CRuby's
+  # `rb_str_end_with_asciichar`: a String that is not ASCII-compatible, such
+  # as UTF-16LE, is not compared with a UTF-8 "\n", which would raise. The
+  # newline must start on a character boundary; a dummy encoding has none to
+  # find, so its last byte is compared, as CRuby does.
+  def __end_with_newline__(line)
+    enc = line.encoding
+    return line.end_with?("\n") if enc.ascii_compatible?
+    return line.b.end_with?("\n".b) if enc.dummy?
+    newline = "\n".encode(enc).b
+    line.bytesize % newline.bytesize == 0 && line.b.end_with?(newline)
   end
 
   # --- another descriptor ----------------------------------------------------
