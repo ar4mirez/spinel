@@ -984,12 +984,20 @@ class Encoding
     # next conversion to report it, before it reads anything; or, where
     # invalid bytes are replaced, each replacement comes after all of the
     # rest. Measured.
+    # A sequence cut short at the end, before a lone encoder, waits begun for
+    # the source to be read on into it. Measured.
     # ponytail: an invalid byte reported where the encoder would have read
-    # it; CRuby reads the source on into the same buffer where the sequence
-    # is cut short at the end or the path has a converter before the
-    # encoder. Upgrade by buffering inserted text ahead of the encoder (#494).
+    # it; CRuby reads the source on into the same buffer where the path has
+    # a converter before the encoder, and `putback` reaches what it reads
+    # again after a character the source began. Upgrade by buffering
+    # inserted text ahead of the encoder (#494).
     def __insert_valid__(piece, text)
       replaced = 0
+      if __reads_on__(text) && !@begun.empty?
+        # After a character begun, it goes on in the same buffer. Measured.
+        text = (@begun + text.b).force_encoding(text.encoding)
+        @begun = "".b
+      end
       loop do
         inserted = String.__insert__(piece, text, @step_destination, @state)
         if inserted
@@ -1003,7 +1011,12 @@ class Encoding
         error, readagain, following = step[2].b, step[3].b, step[4]
         piece, @state = String.__insert__(piece, text.byteslice(0, following - error.bytesize), @step_destination, @state)
         rest = text.byteslice(following, text.bytesize - following)
-        if @flags & INVALID_MASK == INVALID_REPLACE
+        if step[1] == :incomplete && __reads_on__(text)
+          # Cut short at the end, it is read on into from the source, as
+          # though begun there. Measured.
+          @begun = error
+          break
+        elsif @flags & INVALID_MASK == INVALID_REPLACE
           replaced += 1
           text = rest
         else
@@ -1017,6 +1030,13 @@ class Encoding
           String.__not_inserted__(@replacement, @destination_encoding)
       end
       piece
+    end
+
+    # Whether `text` inserted goes into the buffer the source is read into:
+    # one converter, reading the source as it is, with nothing waiting to
+    # be read again.
+    def __reads_on__(text)
+      text.encoding == @source_encoding && @path.size == 2 && !@source_decorated && @readagain.empty?
     end
 
     # The invalid byte `insert_output` was given, reported where the
