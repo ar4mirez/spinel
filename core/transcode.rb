@@ -1365,7 +1365,7 @@ class Encoding
     # destination, `universal_newline` or the attribute's quote.
     def __finisher__
       if @destination_encoding.__index__ == 85 then true
-      elsif @source_decorated then false
+      elsif @source_decorated || !@step_destination.ascii_compatible? then false
       elsif @newline then String::NEWLINE_MODES[@newline] == 1
       else @quote
       end
