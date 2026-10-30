@@ -7,8 +7,11 @@
 # returns nothing refers to it.
 dir = ARGV[0]
 
+# The files under `dir` some descriptor is open on, found by matching each
+# descriptor's device and inode, since not every platform has /proc/self/fd.
 def open_fds(dir)
-  Dir.children("/proc/self/fd").map { |fd| File.readlink("/proc/self/fd/#{fd}") rescue fd }.grep(/\A#{Regexp.escape(dir)}/).sort
+  files = Dir.children(dir).to_h { |name| s = File.stat(File.join(dir, name)); [[s.dev, s.ino], name] }
+  (3...256).filter_map { |fd| s = (IO.for_fd(fd, autoclose: false).stat rescue nil) and files[[s.dev, s.ino]] }.sort
 end
 
 def quoted(path) = (io = File.open(path, "w:UTF-8", xml: :attr); io.write("<a"); nil)
@@ -35,7 +38,7 @@ GC.start
 p File.binread(File.join(dir, "quoted"))
 p File.binread(File.join(dir, "utf16"))
 p File.binread(File.join(dir, "unquoted"))
-p open_fds(dir).map { |path| File.basename(path) }
+p open_fds(dir)
 reused.write("ok")
 reused.close
 p File.read(File.join(dir, "reused"))
