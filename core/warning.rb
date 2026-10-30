@@ -123,6 +123,15 @@ module Kernel
         raise TypeError, "value of #{name} must be String"
       end
       __warning__("non-nil '#{name}' is deprecated", false, :deprecated) unless value.nil?
+      # CRuby's `$/` setter keeps a frozen copy with no class or instance
+      # variables of its own, or the default separator itself (#484).
+      if (name == :$/ || name == :$-0) && !value.nil?
+        if value == IO.__default_rs__
+          value = IO.__default_rs__
+        elsif !(value.frozen? && value.instance_of?(String) && value.instance_variables.empty?)
+          value = String.new(value).freeze
+        end
+      end
     when :$;
       unless value.nil? || value.is_a?(String) || value.is_a?(Regexp)
         raise TypeError, "value of $; must be String or Regexp"

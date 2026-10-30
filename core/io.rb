@@ -1457,16 +1457,16 @@ end
   # CRuby's `check_getline_args`: a separator is looked for in what the
   # read converter makes, so one in another encoding raises, unless it is
   # ASCII on an ASCII-compatible read, or empty (#482). Measured: before
-  # the IO is checked for reading and before a limit of 0. `$/` as it
-  # starts is let through and stands for a newline in the read encoding.
-  # ponytail: CRuby's `$/ = "\n"` puts that one back, so a `$/` of "\n"
-  # stands in for it; drop the stand-in when the setter does that (#484).
+  # the IO is checked for reading and before a limit of 0. The default
+  # separator, CRuby's `rb_default_rs`, is let through by identity and
+  # stands for a newline in the read encoding; the `$/` setter puts it
+  # back for any `"\n"` (#484).
   def __check_separator__(separator)
     return if separator.nil?
     enc = __read_encoding__
     return if separator.encoding == enc
     return if separator.ascii_only? && (separator.empty? || enc.ascii_compatible?)
-    return if separator.equal?($/) && separator == "\n"
+    return if separator.equal?(IO.__default_rs__)
     raise ArgumentError, "encoding mismatch: #{enc} IO with #{separator.encoding} RS"
   end
 
@@ -2547,8 +2547,18 @@ alias $> $stdout
 $VERBOSE = false
 alias $-v $VERBOSE
 alias $-w $VERBOSE
-# The input record separator: what `gets` and `each_line` split on.
-$/ = "\n"
+# The input record separator: what `gets` and `each_line` split on. It
+# starts as CRuby's `rb_default_rs`, a frozen US-ASCII newline, and
+# assigning one equal to it puts that very object back (#484).
+class IO
+  DEFAULT_RS = "\n".dup.force_encoding(Encoding::US_ASCII).freeze
+  private_constant :DEFAULT_RS
+
+  def self.__default_rs__
+    DEFAULT_RS
+  end
+end
+$/ = IO.__default_rs__
 alias $-0 $/
 
 module Kernel
