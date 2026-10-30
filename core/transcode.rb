@@ -938,16 +938,17 @@ class Encoding
       text = String.__coerce__(text)
       # Finished, an encoder or an attribute's quote working last converts
       # nothing more, even what is inserted before it. Measured.
-      return nil if (@finished || @finishing) && (!@step_destination.ascii_compatible? || (@quote && !@source_decorated))
+      done = @finished || @finishing
+      return nil if done && (!@step_destination.ascii_compatible? || (@quote && !@newline && !@source_decorated))
       piece = "".b
-      __open_quote__(piece) unless text.empty?
+      __open_quote__(piece) unless text.empty? || done
       piece, @state =
         String.__insert__(piece, text, @step_destination, @state) ||
         String.__not_inserted__(text, @destination_encoding)
       # Into an ASCII-compatible destination it goes before what a character
       # in flight has still to write; before an encoder or a decorator, after
       # it. Measured.
-      front = @step_destination.ascii_compatible? && !(@escape || @quote || @newline)
+      front = @step_destination.ascii_compatible? && (done || !(@escape || @quote || @newline))
       at = front ? @inserted : @pending_output.bytesize
       @pending_output.__splice__(at, 0, piece)
       @inserted = at + piece.bytesize
