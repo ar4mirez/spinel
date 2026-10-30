@@ -1016,9 +1016,10 @@ fn str_native(
         }
         StrOp::Transcode => {
             // `__transcode__(path, start, state, decorators, finish)`: see
-            // `transcode::step`. `decorators` is `xml:` in its low two bits,
-            // 0, 1 for `:text` or 2 for `:attr`, and the newline decorator in
-            // the next two, 0, 1 for universal, 2 for CRLF or 3 for CR.
+            // `transcode::step`. `decorators` is the xml escape in its low two
+            // bits, 0, 1 for text or 2 for an attribute's content, the newline
+            // decorator in the next two, 0, 1 for universal, 2 for CRLF or 3
+            // for CR, and the attribute's quote in the next.
             let path = array_elements(scope, arg(0))
                 .unwrap_or_default()
                 .iter()
@@ -1035,6 +1036,7 @@ fn str_native(
                     2 => crate::transcode::Xml::Attr,
                     _ => crate::transcode::Xml::None,
                 },
+                quote: mode & 16 != 0,
                 newline: match mode >> 2 & 3 {
                     1 => crate::transcode::Newline::Universal,
                     2 => crate::transcode::Newline::Crlf,
