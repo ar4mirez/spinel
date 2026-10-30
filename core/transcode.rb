@@ -253,12 +253,10 @@ class String
   # bytes the error reads again after it, and the decorator takes its next
   # turn before the encoder reads on. Measured. A nil from the block stops,
   # handing back the step and what was not read. The output, the state, what
-  # is still buffered, and the step that stopped, if one did. With `wait`,
-  # the decorator's next turn comes with the next call, so after a
-  # replacement the encoder waits for it rather than reading on.
-  def self.__read_turns__(turns, buffered, path, state, final, out, via, named, wait = false, &block)
+  # is still buffered, and the step that stopped, if one did.
+  def self.__read_turns__(turns, buffered, path, state, final, out, via, named, &block)
     size = out.bytesize
-    read = __read_turns_in__(turns, buffered.dup, path, state, final, out, via, named, false, wait, &block)
+    read = __read_turns_in__(turns, buffered.dup, path, state, final, out, via, named, false, &block)
     return read if read
     # ponytail: CRuby never ends where a replacement it buffers breaks a
     # character the turn has only begun (U+FFFD after "\xC3"), each error
@@ -266,14 +264,14 @@ class String
     # from the start with such a replacement before that character, as
     # without decorators. The upgrade is whatever CRuby settles on.
     out.replace(out.byteslice(0, size))
-    __read_turns_in__(turns, buffered, path, state, final, out, via, named, true, wait, &block)
+    __read_turns_in__(turns, buffered, path, state, final, out, via, named, true, &block)
   end
 
   # `__read_turns__` once, a replacement that would follow a character the
   # turn has only begun going before it when `begun`; nil where, without
   # that, the errors buffer more than they read, and with it the step that
   # keeps doing so, unreplaced.
-  def self.__read_turns_in__(turns, buffered, path, state, final, out, via, named, begun, wait)
+  def self.__read_turns_in__(turns, buffered, path, state, final, out, via, named, begun)
     index = 0
     fed = buffered.bytesize
     inserted = 0
@@ -283,8 +281,6 @@ class String
         buffered << turns[index]
         fed += turns[index].bytesize
         index += 1
-      elsif again && wait
-        return [out, state, buffered, nil]
       end
       last = final && index == turns.size
       again = false
@@ -715,6 +711,56 @@ class Encoding
       "xml_text" => "xml_text_escape", "xml_attr_content" => "xml_attr_content_escape",
       "xml_attr_quote" => "xml_attr_quote"
     }.freeze
+    # Bytes read from the front.
+    class Buffer
+      attr_accessor :bytes, :at
+
+      def initialize(bytes = "".b)
+        @bytes = bytes
+        @at = 0
+      end
+
+      def copy
+        copied = Buffer.new(@bytes.dup)
+        copied.at = @at
+        copied
+      end
+    end
+    private_constant :Buffer
+
+    # One transcoder: what it has read of the character it is in, the bytes
+    # an error left it to read again, the output of a character, or of its
+    # finishing, still to be written, and its buffer.
+    class Element
+      attr_accessor :path, :src, :dst, :decorator, :encoder, :fun, :finisher, :state, :unit, :bom,
+                    :out, :readbuf, :readagain, :writebuf, :need_room, :phase, :finishing, :last, :error
+
+      def initialize(path: nil, src: nil, dst: nil, decorator: nil, encoder: false, fun: false, finisher: false, state: 0)
+        @path = path
+        @src = src
+        @dst = dst
+        @decorator = decorator
+        @encoder = encoder
+        @fun = fun
+        @finisher = finisher
+        @state = state
+        @unit = nil
+        @bom = nil
+        @out = Buffer.new
+        @readbuf = "".b
+        @readagain = "".b
+        @writebuf = "".b
+        @need_room = false
+        @phase = :read
+        @finishing = false
+        @last = :source_buffer_empty
+        @error = nil
+      end
+    end
+    private_constant :Element
+
+    # The most `__windowed__` reads at once.
+    WINDOW = 4096
     # A BOM'd UTF-16's and UTF-32's BOMs, by the order they name.
     BOM_ORDERS = {
       "\xFF\xFE".b => Encoding::UTF_16LE, "\xFE\xFF".b => Encoding::UTF_16BE,
@@ -834,7 +880,9 @@ class Encoding
       @elements = __elements__
       # What `insert_output` puts before an encoder that reads the source
       # itself, read before the source, as CRuby's `in_buf`.
-      @in_buf = __buffer__
+      @in_buf = Buffer.new
+      # How many bytes `__windowed__` reads at once.
+      @window = WINDOW
       # How many transcoders, from the first, have finished.
       @num_finished = 0
       @errinfo = [:source_buffer_empty, nil, nil, nil, nil]
@@ -897,12 +945,12 @@ class Encoding
     # its order, and a BOM'd destination is written big-endian after a BOM
     # its first character writes. Measured.
     def __elements__
-      stages = String.__path__(Converter.__big_endian__(@source_encoding), Converter.__big_endian__(@destination_encoding))
+      stages = String.__path__(@source_encoding, @destination_encoding)
       elements = stages.each_cons(2).map do |from, to|
-        __element__(
-          path: [from.__index__, to.__index__],
-          src: stages.first.equal?(from) ? @source_encoding : from,
-          dst: stages.last.equal?(to) ? @destination_encoding : to,
+        Element.new(
+          path: [Converter.__big_endian__(from).__index__, Converter.__big_endian__(to).__index__],
+          src: from,
+          dst: to,
           # An encoder takes what is inserted into the buffer it reads, as
           # CRuby's `asciicompat_encoder`.
           encoder: from.ascii_compatible? && !to.ascii_compatible?,
@@ -913,55 +961,42 @@ class Encoding
           finisher: to.__index__ == 85
         )
       end
-      elements.first[:unit] = { 7 => 2, 8 => 4 }[@source_encoding.__index__]
-      elements.last[:bom] = { 7 => "\xFE\xFF".b, 8 => "\x00\x00\xFE\xFF".b }[@destination_encoding.__index__]
+      elements.first.unit = { 7 => 2, 8 => 4 }[@source_encoding.__index__]
+      elements.last.bom = { 7 => "\xFE\xFF".b, 8 => "\x00\x00\xFE\xFF".b }[@destination_encoding.__index__]
       decorators = Converter.__path_names__(@flags).map do |name|
         newline = name == "universal_newline" || name == "lf_newline"
         # The attribute's quote takes what is inserted before it, as an
         # encoder does, so it opens before it. Measured.
         quote = name == "xml_attr_quote"
-        __element__(decorator: name, encoder: quote, fun: newline || quote, finisher: newline || quote, state: false)
+        Element.new(decorator: name, encoder: quote, fun: newline || quote, finisher: newline || quote, state: false)
       end
       return elements + decorators if @destination_encoding.ascii_compatible?
       elements[0...-1] + decorators + elements[-1..]
     end
 
-    # One transcoder: what it has read of the character it is in, the bytes
-    # an error left it to read again, the output of a character, or of its
-    # finishing, still to be written, and its buffer.
-    def __element__(**fields)
-      {
-        path: nil, src: nil, dst: nil, decorator: nil, encoder: false, fun: false, finisher: false,
-        state: 0, unit: nil, bom: nil, out: __buffer__, readbuf: "".b, readagain: "".b,
-        writebuf: "".b, need_room: false, phase: :read, finishing: false,
-        last: :source_buffer_empty, error: nil
-      }.merge(fields)
-    end
-
-    # Bytes read from the front.
-    def __buffer__(bytes = "".b)
-      { bytes: bytes, at: 0 }
-    end
-
     def __unread__(buffer)
-      buffer[:bytes].bytesize - buffer[:at]
+      buffer.bytes.bytesize - buffer.at
     end
 
     # The next `count` bytes of `buffer`, read.
     def __read__(buffer, count)
-      bytes = buffer[:bytes]
-      at = buffer[:at]
-      taken = bytes.byteslice(at, count)
-      at += taken.bytesize
+      taken = buffer.bytes.__byteslice__(buffer.at, count)
+      __skip__(buffer, taken.bytesize)
+      taken
+    end
+
+    # Past the next `count` bytes of `buffer`.
+    def __skip__(buffer, count)
+      bytes = buffer.bytes
+      at = buffer.at + count
       if at == bytes.bytesize
-        buffer[:bytes] = "".b
+        buffer.bytes = "".b
         at = 0
       elsif at >= 4096
-        buffer[:bytes] = bytes.byteslice(at, bytes.bytesize - at)
+        buffer.bytes = bytes.byteslice(at, bytes.bytesize - at)
         at = 0
       end
-      buffer[:at] = at
-      taken
+      buffer.at = at
     end
 
     def __room__(output, limit)
@@ -978,9 +1013,9 @@ class Encoding
     # Measured.
     def putback(max = nil)
       element = @elements.first
-      again = element[:readagain]
+      again = element.readagain
       count = max.nil? ? again.bytesize : [max, again.bytesize].min
-      element[:readagain] = again.byteslice(0, again.bytesize - count)
+      element.readagain = again.byteslice(0, again.bytesize - count)
       again.byteslice(again.bytesize - count, count).force_encoding(@source_encoding)
     end
 
@@ -1009,19 +1044,19 @@ class Encoding
     def __insert__(bytes, begun = false)
       return if bytes.empty?
       last = @elements.last
-      unless last[:encoder]
-        last[:out][:bytes] << bytes
+      unless last.encoder
+        last.out.bytes << bytes
         return
       end
-      buffer = @elements.size == 1 ? @in_buf : @elements[-2][:out]
-      rest = buffer[:bytes].byteslice(buffer[:at], __unread__(buffer))
-      if begun && last[:path] && bytes.getbyte(0) >= 0x80 && String.__begun__(rest, last[:path])
-        buffer[:bytes] = bytes + last[:readagain] + rest
-        buffer[:at] = 0
+      buffer = @elements.size == 1 ? @in_buf : @elements[-2].out
+      rest = buffer.bytes.byteslice(buffer.at, __unread__(buffer))
+      if begun && last.path && bytes.getbyte(0) >= 0x80 && String.__begun__(rest, last.path)
+        buffer.bytes = bytes + last.readagain + rest
+        buffer.at = 0
       else
-        buffer[:bytes] << bytes << last[:readagain]
+        buffer.bytes << bytes << last.readagain
       end
-      last[:readagain] = "".b
+      last.readagain = "".b
     end
 
     # Converts as much of `source` as it can into `destination` and says why
@@ -1040,11 +1075,11 @@ class Encoding
       offset = Integer.__index__(offset) unless offset.nil?
       bytesize = Integer.__index__(bytesize) unless bytesize.nil?
       raise ArgumentError, "output_byteoffset too big" if !offset.nil? && offset > destination.bytesize
-      input = __buffer__(source.nil? ? "".b : source.b)
+      input = Buffer.new(source.nil? ? "".b : source.b)
       source&.__splice__(0, source.bytesize, "")
       output = "".b
       result = __econv_convert__(input, output, bytesize, flags)
-      source&.__splice__(0, 0, input[:bytes].byteslice(input[:at], __unread__(input)))
+      source&.__splice__(0, 0, input.bytes.byteslice(input.at, __unread__(input)))
       destination.__splice__(offset, destination.bytesize - offset, "") unless offset.nil?
       destination.__splice__(destination.bytesize, 0, output)
       destination.force_encoding(@destination_encoding)
@@ -1075,7 +1110,7 @@ class Encoding
             case @flags & UNDEF_MASK
             when UNDEF_REPLACE then @replacement
             when UNDEF_HEX_CHARREF
-              reference = @error_element[:error][6]
+              reference = @error_element.error[6]
               "&#x#{Integer.__hex__(reference, 1)};" if reference
             end
           end
@@ -1096,26 +1131,26 @@ class Encoding
     # How many bytes wait inside, in every transcoder.
     def __buffered__
       @elements.sum do |element|
-        __unread__(element[:out]) + element[:readbuf].bytesize + element[:readagain].bytesize + element[:writebuf].bytesize
+        __unread__(element.out) + element.readbuf.bytesize + element.readagain.bytesize + element.writebuf.bytesize
       end + __unread__(@in_buf)
     end
 
     # Everything a conversion changes, to run it again from where it began.
     def __saved__(input, output)
       elements = @elements.map do |element|
-        element.merge(
-          out: __buffer__(element[:out][:bytes].dup).merge(at: element[:out][:at]),
-          readbuf: element[:readbuf].dup, readagain: element[:readagain].dup, writebuf: element[:writebuf].dup
-        )
+        copy = element.dup
+        copy.out = element.out.copy
+        copy.readbuf = element.readbuf.dup
+        copy.readagain = element.readagain.dup
+        copy.writebuf = element.writebuf.dup
+        copy
       end
-      [elements, __buffer__(@in_buf[:bytes].dup).merge(at: @in_buf[:at]), @num_finished, input[:bytes], input[:at], output.bytesize]
+      [elements, @in_buf.copy, @num_finished, input.bytes, input.at, output.bytesize]
     end
 
     def __restore__(saved, input, output)
-      elements, in_buf, @num_finished, input[:bytes], input[:at], size = saved
-      @elements = elements.map { |element| element.merge(out: element[:out].dup) }
-      @in_buf = in_buf.dup
-      output.replace(output.byteslice(0, size))
+      @elements, @in_buf, @num_finished, input.bytes, input.at, size = saved
+      output.__splice__(size, output.bytesize - size, "")
     end
 
     # CRuby's `rb_econv_convert0`: what was inserted after the last
@@ -1134,7 +1169,7 @@ class Encoding
     end
 
     def __convert0_run__(input, output, limit, flags)
-      waiting = @elements.last[:out]
+      waiting = @elements.last.out
       written = false
       unless __unread__(waiting) == 0
         room = __room__(output, limit)
@@ -1154,7 +1189,7 @@ class Encoding
       # finishes, leaving the source; partial, it answers that it wrote.
       # Measured.
       if written && flags & AFTER_OUTPUT != 0 && __unread__(input) != 0
-        result = __trans_conv__(__buffer__, output, limit, flags)
+        result = __trans_conv__(Buffer.new, output, limit, flags)
         return result[0] == :source_buffer_empty ? [:after_output, nil] : result
       end
       return __trans_conv__(input, output, limit, flags) if flags & AFTER_OUTPUT != 0 || @elements.size == 1
@@ -1172,20 +1207,24 @@ class Encoding
     # conversion, the first transcoder reading a window of the source at
     # once makes what reading it a character at a time makes. A window that
     # stops anywhere is put back as it was, and nil leaves it to be read a
-    # character at a time, so it stops where it should.
+    # character at a time, so it stops where it should. The window narrows
+    # after one that stops and widens after one that does not, so what is
+    # put back stays near the distance to the next stop.
     def __windowed__(input, output, flags)
       loop do
         saved = __saved__(input, output)
         size = __unread__(input)
-        size = 4096 if size > 4096
-        window = __buffer__(input[:bytes].byteslice(input[:at], size))
+        size = @window if size > @window
+        window = Buffer.new(input.bytes.__byteslice__(input.at, size))
         more = __unread__(input) > size
         result = __trans_conv__(window, output, nil, more ? flags | PARTIAL_INPUT : flags)
         unless result[0] == :source_buffer_empty || result[0] == :finished
           __restore__(saved, input, output)
+          @window = [size / 16, 16].max
           return nil
         end
-        __read__(input, size - __unread__(window))
+        @window = [@window * 2, WINDOW].min
+        __skip__(input, size - __unread__(window))
         return result unless more && result[0] == :source_buffer_empty
       end
     end
@@ -1195,12 +1234,12 @@ class Encoding
     # want more input, and where it is.
     def __trans_conv__(input, output, limit, flags)
       last = @elements.size - 1
-      @elements[0][:last] = :source_buffer_empty if @elements[0][:last] == :after_output
+      @elements[0].last = :source_buffer_empty if @elements[0].last == :after_output
       start = last
-      start -= 1 while start >= 0 && !__reports__(@elements[start][:last]) && @elements[start][:last] != :finished
+      start -= 1 while start >= 0 && !__reports__(@elements[start].last) && @elements[start].last != :finished
       if start < 0
-        if @elements[last][:last] == :destination_buffer_full && flags & AFTER_OUTPUT != 0
-          result = __trans_conv__(__buffer__, output, limit, (flags & ~AFTER_OUTPUT) | PARTIAL_INPUT)
+        if @elements[last].last == :destination_buffer_full && flags & AFTER_OUTPUT != 0
+          result = __trans_conv__(Buffer.new, output, limit, (flags & ~AFTER_OUTPUT) | PARTIAL_INPUT)
           return result[0] == :source_buffer_empty ? [:after_output, nil] : result
         end
       end
@@ -1211,9 +1250,9 @@ class Encoding
         start = reported + 1
       end
       last.downto(0) do |at|
-        result = @elements[at][:last]
+        result = @elements[at].last
         next if result == :source_buffer_empty
-        @elements[at][:last] = :source_buffer_empty if __reports__(result) && result != :after_output
+        @elements[at].last = :source_buffer_empty if __reports__(result) && result != :after_output
         return [result, at]
       end
       [:source_buffer_empty, nil]
@@ -1235,8 +1274,8 @@ class Encoding
         at = start
         while at <= last
           element = @elements[at]
-          source = at == 0 ? input : @elements[at - 1][:out]
-          sink = at == last ? output : element[:out][:bytes]
+          source = at == 0 ? input : @elements[at - 1].out
+          sink = at == last ? output : element.out.bytes
           f = flags
           f = f | PARTIAL_INPUT unless @num_finished == at
           if at == 0 && flags & AFTER_OUTPUT != 0
@@ -1246,7 +1285,7 @@ class Encoding
           f = f & ~AFTER_OUTPUT unless at == 0
           unread = __unread__(source)
           size = sink.bytesize
-          result = element[:last] = __transcoding__(element, source, sink, at == last ? limit : nil, f)
+          result = element.last = __transcoding__(element, source, sink, at == last ? limit : nil, f)
           moved = true if __unread__(source) != unread || sink.bytesize != size
           return at if __reports__(result)
           @num_finished = at + 1 if result == :finished
@@ -1260,13 +1299,13 @@ class Encoding
     # `transcode_restartable`: what an error left it to read again is read
     # first, as partial input.
     def __transcoding__(element, input, output, limit, flags)
-      again = element[:readagain]
+      again = element.readagain
       unless again.empty?
-        element[:readagain] = "".b
-        again = __buffer__(again)
+        element.readagain = "".b
+        again = Buffer.new(again)
         result = __transcoding_run__(element, again, output, limit, flags | PARTIAL_INPUT)
         unless result == :source_buffer_empty
-          element[:readagain] = element[:readagain] + again[:bytes].byteslice(again[:at], __unread__(again))
+          element.readagain = element.readagain + again.bytes.byteslice(again.at, __unread__(again))
           return result
         end
       end
@@ -1285,25 +1324,25 @@ class Encoding
       partial = flags & PARTIAL_INPUT != 0
       start = output.bytesize
       loop do
-        return :finished if element[:phase] == :finished
-        if element[:phase] == :write
-          if element[:need_room]
+        return :finished if element.phase == :finished
+        if element.phase == :write
+          if element.need_room
             return :destination_buffer_full if __room__(output, limit) < 1
-            element[:need_room] = false
+            element.need_room = false
           end
-          pending = element[:writebuf]
+          pending = element.writebuf
           until pending.empty?
             room = __room__(output, limit)
             return :destination_buffer_full if room < 1
             room = pending.bytesize if room > pending.bytesize
             output << pending.byteslice(0, room)
-            pending = element[:writebuf] = pending.byteslice(room, pending.bytesize - room)
+            pending = element.writebuf = pending.byteslice(room, pending.bytesize - room)
           end
-          element[:phase] = element[:finishing] ? :finished : :read
+          element.phase = element.finishing ? :finished : :read
           next
         end
-        read = element[:readbuf]
-        if read.empty? && limit.nil? && flags & AFTER_OUTPUT == 0 && element[:unit].nil? && __unread__(input) != 0
+        read = element.readbuf
+        if read.empty? && limit.nil? && flags & AFTER_OUTPUT == 0 && element.unit.nil? && __unread__(input) != 0
           # With nowhere to stop between characters, they are read all at
           # once.
           result = __run_whole__(element, input, output)
@@ -1336,31 +1375,30 @@ class Encoding
     # without bound: a character the input ends in the middle of waits begun,
     # and an error is the result, or nil.
     def __run_whole__(element, input, output)
-      bytes = input[:bytes].byteslice(input[:at], __unread__(input))
-      if element[:decorator]
-        __read__(input, bytes.bytesize)
-        output << __decorated_all__(element, bytes)
+      if element.decorator
+        output << __decorated_all__(element, __read__(input, __unread__(input)))
         return nil
       end
-      step = bytes.__transcode__(element[:path], 0, element[:state], 0, false)
+      at = input.at
+      step = input.bytes.__transcode__(element.path, at, element.state, 0, false)
       __needs_char_table__ if step.nil?
-      element[:state] = step[9]
+      element.state = step[9]
       out = step[0].b
-      if element[:bom] && !out.empty?
-        out = element[:bom] + out
-        element[:bom] = nil
+      if element.bom && !out.empty?
+        out = element.bom + out
+        element.bom = nil
       end
       output << out
       case step[1]
       when :done
-        __read__(input, bytes.bytesize)
+        __skip__(input, __unread__(input))
         nil
       when :incomplete
-        __read__(input, bytes.bytesize)
-        element[:readbuf] = step[2].b
+        __skip__(input, __unread__(input))
+        element.readbuf = step[2].b
         nil
       else
-        __read__(input, step[4] + step[3].bytesize)
+        __skip__(input, step[4] - at + step[3].bytesize)
         __element_error__(element, step)
       end
     end
@@ -1368,19 +1406,18 @@ class Encoding
     # What the decorator `element` writes for all of `bytes`, as
     # `__decorated__` does a byte at a time.
     def __decorated_all__(element, bytes)
-      name = element[:decorator]
+      name = element.decorator
       case name
       when "xml_text_escape", "xml_attr_content_escape"
-        out = bytes.b.gsub("&", "&amp;").gsub("<", "&lt;").gsub(">", "&gt;")
-        out = out.gsub("\"", "&quot;").gsub("'", "&apos;") if name == "xml_attr_content_escape"
-        out.b
+        escape = name == "xml_attr_content_escape" ? :attr : :text
+        bytes.b.gsub(/[&<>"']/n) { |c| String.__xml_entity__(c, escape) }.b
       when "xml_attr_quote"
-        return bytes.b if element[:state] || bytes.empty?
-        element[:state] = true
+        return bytes.b if element.state || bytes.empty?
+        element.state = true
         "\"".b + bytes
       when "crlf_newline", "cr_newline" then String.__newlines__(bytes, name).b
       else
-        out, element[:state] = String.__newline_turn__(bytes, name, element[:state])
+        out, element.state = String.__newline_turn__(bytes, name, element.state)
         out
       end
     end
@@ -1388,42 +1425,42 @@ class Encoding
     # The step the transcoder `element` takes over the character it has read
     # so far, or nil while it needs more; with `finish`, no more comes.
     def __recognized__(element, finish)
-      read = element[:readbuf]
-      return [__decorated__(element, read), :done] if element[:decorator]
-      unit = element[:unit]
+      read = element.readbuf
+      return [__decorated__(element, read), :done] if element.decorator
+      unit = element.unit
       if unit
         # Before its BOM, a BOM'd UTF-16 or UTF-32 reads a unit at a time:
         # any other is invalid, and one cut short incomplete. Measured.
         return nil if read.bytesize < unit && !finish
         order = read.bytesize == unit ? BOM_ORDERS[read] : nil
         if order
-          element[:unit] = nil
-          element[:path] = [order.__index__, element[:path][1]]
+          element.unit = nil
+          element.path = [order.__index__, element.path[1]]
           return ["".b, :done]
         end
         return ["".b, read.bytesize < unit ? :incomplete : :invalid, read.dup, "".b]
       end
-      step = read.__transcode__(element[:path], 0, element[:state], 0, finish)
+      step = read.__transcode__(element.path, 0, element.state, 0, finish)
       __needs_char_table__ if step.nil?
       return nil if step[1] == :incomplete && !finish
-      element[:state] = step[9]
+      element.state = step[9]
       step
     end
 
     # What the decorator `element` writes for the byte `byte`, as CRuby's
     # decorators read a byte at a time.
     def __decorated__(element, byte)
-      name = element[:decorator]
+      name = element.decorator
       case name
       when "xml_text_escape" then String.__xml_entity__(byte, :text).b
       when "xml_attr_content_escape" then String.__xml_entity__(byte, :attr).b
       when "xml_attr_quote"
-        return byte.b if element[:state]
-        element[:state] = true
+        return byte.b if element.state
+        element.state = true
         "\"".b + byte
       when "crlf_newline", "cr_newline" then String.__newlines__(byte, name).b
       else
-        out, element[:state] = String.__newline_turn__(byte, name, element[:state])
+        out, element.state = String.__newline_turn__(byte, name, element.state)
         out
       end
     end
@@ -1431,43 +1468,43 @@ class Encoding
     # The character `element` has read makes `out`, written next. A BOM'd
     # destination's BOM goes before its first.
     def __written__(element, out)
-      element[:readbuf] = "".b
-      if element[:bom] && !out.empty?
-        out = element[:bom] + out
-        element[:bom] = nil
+      element.readbuf = "".b
+      if element.bom && !out.empty?
+        out = element.bom + out
+        element.bom = nil
       end
-      element[:writebuf] = out
-      element[:need_room] = !out.empty? || element[:fun]
-      element[:phase] = :write
+      element.writebuf = out
+      element.need_room = !out.empty? || element.fun
+      element.phase = :write
     end
 
     # What `element` writes as it finishes: the attribute's closing quote,
     # the LF of a CR `universal_newline` holds, ISO-2022-JP's return to
     # ASCII. Even nothing waits for a byte of room. Measured.
     def __finish_element__(element)
-      element[:finishing] = true
-      unless element[:finisher]
-        element[:phase] = :finished
+      element.finishing = true
+      unless element.finisher
+        element.phase = :finished
         return
       end
       out =
-        case element[:decorator]
-        when "xml_attr_quote" then element[:state] ? "\"".b : "\"\"".b
-        when nil then "".__transcode__(element[:path], 0, element[:state], 0, true)[0].b
-        else element[:state] ? "\n".b : "".b
+        case element.decorator
+        when "xml_attr_quote" then element.state ? "\"".b : "\"\"".b
+        when nil then "".__transcode__(element.path, 0, element.state, 0, true)[0].b
+        else element.state ? "\n".b : "".b
         end
-      element[:state] = false if element[:decorator]
-      element[:writebuf] = out
-      element[:need_room] = true
-      element[:phase] = :write
+      element.state = false if element.decorator
+      element.writebuf = out
+      element.need_room = true
+      element.phase = :write
     end
 
     # The error `step` stopped `element` at: the bytes after it are read
     # again, and its result.
     def __element_error__(element, step)
-      element[:readbuf] = "".b
-      element[:readagain] = step[3].b
-      element[:error] = step
+      element.readbuf = "".b
+      element.readagain = step[3].b
+      element.error = step
       { invalid: :invalid_byte_sequence, incomplete: :incomplete_input, undefined: :undefined_conversion }[step[1]]
     end
 
@@ -1476,14 +1513,14 @@ class Encoding
     # transcoder's encodings, as CRuby's. Measured.
     def __stopped__(element, result)
       @error_element = element
-      _, stop, error, _, _, code = element[:error]
-      from = element[:src]
-      to = element[:dst]
+      _, stop, error, _, _, code = element.error
+      from = element.src
+      to = element.dst
       if stop == :undefined
         @last_error = String.__undefined_error__(code, error, from, to, @source_encoding, @destination_encoding)
         @errinfo = [result, from.name, to.name, @last_error.error_char.b, "".b]
       else
-        readagain = element[:readagain]
+        readagain = element.readagain
         @last_error = String.__invalid_error__(stop, error.b, readagain.b, from, to, to)
         @errinfo = [result, from.name, to.name, error.b, readagain.b]
       end

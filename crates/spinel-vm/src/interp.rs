@@ -900,8 +900,30 @@ fn str_native(
         });
     }
     let receiver = scope.root(call.receiver);
-    let bytes = strings::bytes(scope, receiver);
     let encoding = strings::encoding(scope, receiver);
+    // These two touch only part of a long buffer, so they do not copy it.
+    if op == StrOp::Splice {
+        let start = usize::try_from(index_arg(0)?).unwrap_or(0);
+        let len = usize::try_from(index_arg(1)?).unwrap_or(0);
+        let Some(with) = string_bytes(scope, arg(2)) else {
+            return Err(Error::NoDispatch {
+                op: "String splice",
+                operands: "a replacement that is not a String",
+            });
+        };
+        strings::splice(scope, receiver, start, len, &with);
+        stack.push(call.receiver);
+        return Ok(None);
+    }
+    if op == StrOp::ByteSlice {
+        let start = usize::try_from(index_arg(0)?).unwrap_or(0);
+        let len = usize::try_from(index_arg(1)?).unwrap_or(0);
+        let taken = strings::byte_range(scope, receiver, start, len);
+        let value = string_bytes_in(scope, Builtin::String.id(), &taken, encoding);
+        stack.push(value);
+        return Ok(None);
+    }
+    let bytes = strings::bytes(scope, receiver);
     let fixnum = |n: i64| Value::fixnum(n).expect("a string offset fits a fixnum");
     let value = match op {
         StrOp::EncodingIndex => fixnum(i64::from(encoding)),
@@ -911,18 +933,6 @@ fn str_native(
                 operands: "an encoding index out of range",
             })?;
             strings::set_encoding(scope, receiver, index);
-            call.receiver
-        }
-        StrOp::Splice => {
-            let start = usize::try_from(index_arg(0)?).unwrap_or(0);
-            let len = usize::try_from(index_arg(1)?).unwrap_or(0);
-            let Some(with) = string_bytes(scope, arg(2)) else {
-                return Err(Error::NoDispatch {
-                    op: "String splice",
-                    operands: "a replacement that is not a String",
-                });
-            };
-            strings::splice(scope, receiver, start, len, &with);
             call.receiver
         }
         StrOp::GetByte => {
@@ -948,12 +958,6 @@ fn str_native(
             }
             strings::splice(scope, receiver, index, 1, &[(byte & 0xff) as u8]);
             arg(1)
-        }
-        StrOp::ByteSlice => {
-            let start = usize::try_from(index_arg(0)?).unwrap_or(0).min(bytes.len());
-            let len = usize::try_from(index_arg(1)?).unwrap_or(0);
-            let end = (start + len).min(bytes.len());
-            string_bytes_in(scope, Builtin::String.id(), &bytes[start..end], encoding)
         }
         StrOp::Bytes => {
             let items: Vec<Value> = bytes.iter().map(|&b| fixnum(i64::from(b))).collect();
@@ -1119,7 +1123,9 @@ fn str_native(
             strings::compatible((encoding, &bytes), (other_enc, &other_bytes))
                 .map_or(Value::NIL, |index| fixnum(i64::from(index)))
         }
-        StrOp::EncodingInstall
+        StrOp::Splice
+        | StrOp::ByteSlice
+        | StrOp::EncodingInstall
         | StrOp::FloatFormat
         | StrOp::NeedsCharTable
         | StrOp::NeedsPointers
@@ -10681,7 +10687,7 @@ fn native_call<'h>(
                     && crate::strings::ascii_compatible(theirs);
                 if mine == theirs || ascii {
                     let receiver = scope.root(call.receiver);
-                    let at = crate::strings::bytes(scope, receiver).len();
+                    let at = crate::strings::bytesize(scope, receiver);
                     crate::strings::splice(scope, receiver, at, 0, &bytes);
                     stack.push(call.receiver);
                     return Ok(None);
