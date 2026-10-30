@@ -2376,17 +2376,24 @@ end
     else
       # One system call for all of them, as `writev` would be.
       text = "".b
+      converted = false
       begin
         objects.each do |object|
           object = object.to_s unless String === object
           text << __encode_out__(object).b
         end
+        converted = true
       ensure
-        written = __write_all__(text)
+        __write_partial__(text) unless converted
       end
-      return written
     end
     __write_all__(text)
+  end
+
+  def __write_partial__(text)
+    __write_all__(text) unless @sync || tty?
+  rescue StandardError
+    nil
   end
 
   def syswrite(object)
