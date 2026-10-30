@@ -2036,7 +2036,10 @@ end
   # CRuby's `swallow`: the blank lines before or after a record in
   # paragraph mode. The newlines the read converter holds go first; when
   # that leaves nothing held, the blank lines read, and the character after
-  # them is held.
+  # them is held. At the end of the bytes that goes for what the converter
+  # makes as it finishes too, a CR it held among them; a line that read to
+  # the end has finished it, and CRuby's has no blank lines to swallow.
+  # Measured.
   def __swallow__(unit)
     stream = __stream_in__?
     while __chars_held__? || stream
@@ -2049,7 +2052,7 @@ end
         return if __chars_held__?
       end
       next unless stream
-      made = __next_chars__
+      made = __next_chars__ || (__finish_in__ if @readconv)
       return if made.nil?
       __hold_chars__(made.b)
     end
