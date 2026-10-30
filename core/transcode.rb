@@ -1002,6 +1002,7 @@ class Encoding
       @pending_output = "".b
       inserted = @inserted
       @inserted = 0
+      finished = @finished
       result =
         if @finished || @finishing
           :finished
@@ -1028,7 +1029,7 @@ class Encoding
       # Where a decorator or encoder finishes after what filled it, the
       # destination is full until its own finishing bytes are what fill it.
       # Measured.
-      if result == :finished && output.bytesize == bytesize && @reset == 0 && __finisher__ && !__quote_last__
+      if result == :finished && !finished && output.bytesize == bytesize && @reset == 0 && __finisher__ && !__quote_last__
         @finishing = true
         result = :destination_buffer_full
       end
