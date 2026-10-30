@@ -479,7 +479,8 @@ end
   end
 
   # The descriptor this IO owns from now on, for its finalizer (#460). An IO
-  # `reopen` sets up again keeps the one it has.
+  # `reopen` sets up again keeps the one it has, and the attribute's quote
+  # still open, which `close` would write to the new file (#488).
   def __arm__
     if @finalizer.nil?
       @finalizer = Finalizer.new
@@ -488,7 +489,7 @@ end
     @finalizer.fd = @fileno
     @finalizer.wfd = nil
     @finalizer.autoclose = @autoclose
-    @finalizer.quote = nil
+    @finalizer.quote = __closing_quote__(@xml_quote)
   end
 
   # A copy has a descriptor of its own, `dup(2)` of the original's, at the

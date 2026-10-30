@@ -17,6 +17,9 @@ end
 def quoted(path) = (io = File.open(path, "w:UTF-8", xml: :attr); io.write("<a"); nil)
 def utf16(path) = (io = File.open(path, "w:UTF-16LE", xml: :attr); io.write("a"); nil)
 def unquoted(path) = (io = File.open(path, "w:UTF-8", xml: :attr); io.write("a"); io.binmode; nil)
+# Reopened by path with its quote open: the new file is the one it closes
+# in (#488).
+def reopened(path) = (io = File.open("#{path}-a", "w:UTF-8", xml: :attr); io.write("x"); io.reopen("#{path}-b", "w"); io.write("y"); nil)
 def left(path) = (File.open(path, "w"); nil)
 def kept(path) = (IO.new(IO.sysopen(path, "w"), autoclose: false); nil)
 def copied(path) = (io = File.open(path, "w"); io.dup; io.close; nil)
@@ -28,6 +31,7 @@ def closed(path) = (File.open(path, "w").close; nil)
 quoted(File.join(dir, "quoted"))
 utf16(File.join(dir, "utf16"))
 unquoted(File.join(dir, "unquoted"))
+reopened(File.join(dir, "reopened"))
 left(File.join(dir, "left"))
 kept(File.join(dir, "kept"))
 copied(File.join(dir, "copied"))
@@ -38,6 +42,7 @@ GC.start
 p File.binread(File.join(dir, "quoted"))
 p File.binread(File.join(dir, "utf16"))
 p File.binread(File.join(dir, "unquoted"))
+p File.binread(File.join(dir, "reopened-a")), File.binread(File.join(dir, "reopened-b"))
 p open_fds(dir)
 reused.write("ok")
 reused.close
