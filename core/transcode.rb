@@ -707,6 +707,9 @@ class Encoding
       "xml_text" => "xml_text_escape", "xml_attr_content" => "xml_attr_content_escape",
       "xml_attr_quote" => "xml_attr_quote"
     }.freeze
+    # The bit of `transcode::State` that `universal_newline` holds a CR in.
+    HELD_CR = 32
+    private_constant :HELD_CR
     # Bytes read from the front.
     class Buffer
       attr_accessor :bytes, :at
@@ -1423,22 +1426,23 @@ class Encoding
     end
 
     # What the decorator `element` writes for all of `bytes`, as
-    # `__decorated__` does a byte at a time.
+    # `__decorated__` does a byte at a time: along BINARY alone, where every
+    # byte is a character kept as it is, `transcode::step` decorates them
+    # with what the state holds of a CR.
     def __decorated_all__(element, bytes)
-      name = element.decorator
-      case name
-      when "xml_text_escape", "xml_attr_content_escape"
-        escape = name == "xml_attr_content_escape" ? :attr : :text
-        bytes.b.gsub(/[&<>"']/n) { |c| String.__xml_entity__(c, escape) }.b
-      when "xml_attr_quote"
-        return bytes.b if element.state || bytes.empty?
-        element.state = true
-        "\"".b + bytes
-      when "crlf_newline", "cr_newline" then String.__newlines__(bytes, name).b
-      else
-        out, element.state = String.__newline_turn__(bytes, name, element.state)
-        out
-      end
+      mode =
+        case element.decorator
+        when "xml_text_escape" then String.__xml_mode__(:text, false)
+        when "xml_attr_content_escape" then String.__xml_mode__(:attr, false)
+        when "xml_attr_quote"
+          return bytes.b if element.state || bytes.empty?
+          element.state = true
+          return "\"".b + bytes
+        else String::NEWLINE_MODES.fetch(element.decorator) << 2
+        end
+      step = bytes.__transcode__([0], 0, element.state ? HELD_CR : 0, mode, false)
+      element.state = step[9] & HELD_CR != 0
+      step[0].b
     end
 
     # The step the transcoder `element` takes over the character it has read

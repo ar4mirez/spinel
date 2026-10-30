@@ -681,8 +681,8 @@ fn unescaped(
 /// Convert `bytes` from `start` along `path` until the end or the first
 /// character that cannot be converted. `path` is every encoding the
 /// conversion passes through, as `Encoding::Converter.search_convpath` has
-/// them, or one encoding alone, whose characters are read and kept as they
-/// are. `state` is the conversion's at `start`, and is left as it is at
+/// them, or one encoding alone, whose characters are read, decorated and kept
+/// as they are. `state` is the conversion's at `start`, and is left as it is at
 /// `next`; `finish` ends the output once the input is all converted: closes
 /// `xml: :attr`'s quote, writes the CR `universal_newline` holds, and goes
 /// back to ASCII in ISO-2022-JP. `None` for a path with a step this VM has
@@ -706,7 +706,9 @@ pub fn step(
     // UTF-32 — CRuby's decorators work on bytes before they are read, which
     // is the caller's to do.
     let decorate = if decorators.any() {
-        (1..=last).rev().find(|&i| ascii_compatible(path[i]))
+        (last.min(1)..=last)
+            .rev()
+            .find(|&i| ascii_compatible(path[i]))
     } else {
         None
     };
@@ -1185,6 +1187,38 @@ mod tests {
         let s = step(&path, b"\r", 0, &mut state, decorators, true).unwrap();
         assert_eq!(s.output, b"\n");
         assert_eq!(state, State::default());
+    }
+
+    #[test]
+    fn one_encoding_is_decorated_keeping_every_byte() {
+        let run = |decorators, state: &mut State, bytes: &[u8]| {
+            step(&[BINARY], bytes, 0, state, decorators, false)
+                .unwrap()
+                .output
+        };
+        let universal = Decorators {
+            newline: Newline::Universal,
+            ..Decorators::default()
+        };
+        let mut state = State::default();
+        assert_eq!(run(universal, &mut state, b"a\r\n\xFF\r\r"), b"a\n\xFF\n");
+        assert!(state.held());
+        assert_eq!(run(universal, &mut state, b"\nb"), b"\nb");
+        assert!(!state.held());
+        let crlf = Decorators {
+            newline: Newline::Crlf,
+            ..Decorators::default()
+        };
+        assert_eq!(run(crlf, &mut state, b"\n\xFF"), b"\r\n\xFF");
+        let attr = Decorators {
+            xml: Xml::Attr,
+            ..Decorators::default()
+        };
+        assert_eq!(run(attr, &mut state, b"\"\xFF"), b"&quot;\xFF");
+        // A path with nothing but its source ASCII-compatible stays the
+        // caller's to decorate.
+        let s = step(&[UTF_8, UTF_16BE], b"\r\n", 0, &mut state, universal, false).unwrap();
+        assert_eq!(s.output, b"\0\r\0\n");
     }
 
     #[test]
