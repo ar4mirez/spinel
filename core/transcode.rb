@@ -871,6 +871,10 @@ class Encoding
       # output left that did not fit.
       @finished = false
       @finishing = false
+      # How many bytes at the end of what waits are the last converter's own
+      # finishing: ISO-2022-JP's encoder resetting, or the LF of a CR
+      # `universal_newline` held.
+      @reset = 0
       @errinfo = [:source_buffer_empty, nil, nil, nil, nil]
       @last_error = nil
     end
@@ -937,9 +941,10 @@ class Encoding
     def insert_output(text)
       text = String.__coerce__(text)
       # Finished, an encoder or an attribute's quote working last converts
-      # nothing more, even what is inserted before it. Measured.
+      # nothing more, even what is inserted before it, once what a decorator
+      # had waiting ahead of the encoder has been through it. Measured.
       done = @finished || @finishing
-      return nil if done && (!@step_destination.ascii_compatible? || (@quote && !@newline && !@source_decorated))
+      return nil if done && (@step_destination.ascii_compatible? ? __quote_last__ : @pending_output.bytesize <= @reset)
       piece = "".b
       __open_quote__(piece) unless text.empty? || done
       piece, @state =
@@ -949,10 +954,11 @@ class Encoding
       # an escape or a newline in flight has still to write, but after it
       # where the attribute's quote works last; before an encoder, after it.
       # Measured.
-      front = @step_destination.ascii_compatible? && (done || !(@quote && !@newline))
+      front = @step_destination.ascii_compatible? && (done || !__quote_last__)
       at = front ? @inserted : @pending_output.bytesize
       @pending_output.__splice__(at, 0, piece)
       @inserted = at + piece.bytesize
+      @reset = 0 unless front
       __bommed__(@pending_output)
       @deferred = true if !text.empty? && __deferring__
       nil
@@ -1017,6 +1023,13 @@ class Encoding
         output = output.byteslice(0, bytesize)
         # What finishing wrote waits, and the converter is not finished until it is written.
         @finishing = true if result == :finished
+        result = :destination_buffer_full
+      end
+      # Where a decorator or encoder finishes after what filled it, the
+      # destination is full until its own finishing bytes are what fill it.
+      # Measured.
+      if result == :finished && output.bytesize == bytesize && @reset == 0 && __finisher__ && !__quote_last__
+        @finishing = true
         result = :destination_buffer_full
       end
       if result == :finished
@@ -1274,11 +1287,17 @@ class Encoding
             result = :destination_buffer_full
             break
           end
+          # A CR the source ends with, `universal_newline` holds until it
+          # finishes, so where it works last its LF is its own finishing.
+          # Measured.
+          last = __finisher__ && !@quote && @destination_encoding.__index__ != 85
+          @reset = final && last && input.end_with?("\r".encode(@step_source).b) ? 1 : 0
           result = final ? __finishing__(output, bytesize) : :source_buffer_empty
           if final
             finished = "".__transcode__(@path, 0, @state, @mode, true)
             @state = finished[9]
             pending << finished[0].b
+            @reset = 3 if @destination_encoding.__index__ == 85 && finished[0].b.end_with?("\e(B".b)
           end
           break
         end
@@ -1334,15 +1353,26 @@ class Encoding
     # `universal_newline` or the attribute's quote — is full, even if
     # finishing writes nothing, and finishing's output waits. Measured.
     def __finishing__(output, bytesize)
-      finisher =
-        if @destination_encoding.__index__ == 85 then true
-        elsif @source_decorated then false
-        elsif @newline then String::NEWLINE_MODES[@newline] == 1
-        else @quote
-        end
-      return :finished unless finisher && output.bytesize == bytesize
+      return :finished unless __finisher__ && output.bytesize == bytesize && @reset == 0
       @finishing = true
       :destination_buffer_full
+    end
+
+    # Whether the last converter finishes after what is written before it:
+    # ISO-2022-JP's encoder, or the last decorator into an ASCII-compatible
+    # destination, `universal_newline` or the attribute's quote.
+    def __finisher__
+      if @destination_encoding.__index__ == 85 then true
+      elsif @source_decorated then false
+      elsif @newline then String::NEWLINE_MODES[@newline] == 1
+      else @quote
+      end
+    end
+
+    # Whether the attribute's quote is the last decorator, into an
+    # ASCII-compatible destination.
+    def __quote_last__
+      @step_destination.ascii_compatible? && @quote && !@newline
     end
 
     # What waits to be written as a sized run starts, taken from `output`,
