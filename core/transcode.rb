@@ -877,6 +877,8 @@ class Encoding
       @reset = 0
       @errinfo = [:source_buffer_empty, nil, nil, nil, nil]
       @last_error = nil
+      # An invalid byte inserted, still to be reported, and what follows it.
+      @insert_stop = nil
     end
 
     def __default_replacement__
@@ -939,7 +941,15 @@ class Encoding
     # G0 as converted text does. Measured. Where the decorators work last,
     # the attribute's quote opens before it. Measured.
     def insert_output(text)
-      text = String.__coerce__(text)
+      # Encoded to the encoding it is inserted in first, as `String#encode`
+      # does, so what that cannot spell raises its error even once finished;
+      # text already in it is taken as it is, however invalid. Measured.
+      text = String.__coerce__(text).encode(__insert_encoding__)
+      if @insert_stop
+        # After an invalid byte still to be reported, behind what follows it.
+        @insert_stop[2] << text.b
+        return nil
+      end
       # Finished, an encoder or an attribute's quote working last converts
       # nothing more, even what is inserted before it, once what a decorator
       # had waiting ahead of the encoder has been through it. Measured.
@@ -947,9 +957,7 @@ class Encoding
       return nil if done && (@step_destination.ascii_compatible? ? __quote_last__ : @pending_output.bytesize <= @reset)
       piece = "".b
       __open_quote__(piece) unless text.empty? || done
-      piece, @state =
-        String.__insert__(piece, text, @step_destination, @state) ||
-        String.__not_inserted__(text, @destination_encoding)
+      piece = __insert_valid__(piece, text)
       # Into an ASCII-compatible destination it goes before what a character,
       # an escape or a newline in flight has still to write, but after it
       # where the attribute's quote works last; before an encoder, after it.
@@ -962,6 +970,85 @@ class Encoding
       __bommed__(@pending_output)
       @deferred = true if !text.empty? && __deferring__
       nil
+    end
+
+    # The encoding `insert_output` inserts in: the destination's, or the
+    # ASCII-compatible one its encoder reads, as CRuby's
+    # `rb_econv_encoding_to_insert_output`.
+    def __insert_encoding__
+      Converter.asciicompat_encoding(@destination_encoding) || @destination_encoding
+    end
+
+    # `piece` with `text` inserted up to the first sequence the destination's
+    # encoder finds invalid. Past it, the rest waits in `@insert_stop` for the
+    # next conversion to report it, before it reads anything; or, where
+    # invalid bytes are replaced, each replacement comes after all of the
+    # rest. Measured.
+    # A sequence cut short at the end, before a lone encoder, waits begun for
+    # the source to be read on into it. Measured.
+    # ponytail: an invalid byte reported where the encoder would have read
+    # it; CRuby reads the source on into the same buffer where the path has
+    # a converter before the encoder, and `putback` reaches what it reads
+    # again after a character the source began. Upgrade by buffering
+    # inserted text ahead of the encoder (#494).
+    def __insert_valid__(piece, text)
+      replaced = 0
+      if __reads_on__(text) && !@begun.empty?
+        # After a character begun, it goes on in the same buffer. Measured.
+        text = (@begun + text.b).force_encoding(text.encoding)
+        @begun = "".b
+      end
+      loop do
+        inserted = String.__insert__(piece, text, @step_destination, @state)
+        if inserted
+          piece, @state = inserted
+          break
+        end
+        path = String.__path__(text.encoding, @step_destination).map(&:__index__)
+        step = text.__transcode__(path, 0, 0, 0, false)
+        __needs_char_table__ if step.nil?
+        String.__not_inserted__(text, @destination_encoding) if step[1] == :done
+        error, readagain, following = step[2].b, step[3].b, step[4]
+        piece, @state = String.__insert__(piece, text.byteslice(0, following - error.bytesize), @step_destination, @state)
+        rest = text.byteslice(following, text.bytesize - following)
+        if step[1] == :incomplete && __reads_on__(text)
+          # Cut short at the end, it is read on into from the source, as
+          # though begun there. Measured.
+          @begun = error
+          break
+        elsif @flags & INVALID_MASK == INVALID_REPLACE
+          replaced += 1
+          text = rest
+        else
+          @insert_stop = [error, readagain, rest.b]
+          break
+        end
+      end
+      replaced.times do
+        piece, @state =
+          String.__insert__(piece, @replacement, @step_destination, @state) ||
+          String.__not_inserted__(@replacement, @destination_encoding)
+      end
+      piece
+    end
+
+    # Whether `text` inserted goes into the buffer the source is read into:
+    # one converter, reading the source as it is, with nothing waiting to
+    # be read again.
+    def __reads_on__(text)
+      text.encoding == @source_encoding && @path.size == 2 && !@source_decorated && @readagain.empty?
+    end
+
+    # The invalid byte `insert_output` was given, reported where the
+    # encoder reaches it, and what was inserted after it waiting again.
+    def __stop_inserted__
+      error, readagain, rest = @insert_stop
+      @insert_stop = nil
+      from = __insert_encoding__
+      @last_error = String.__invalid_error__(:invalid, error, readagain, from, @destination_encoding, @destination_encoding)
+      @errinfo = [:invalid_byte_sequence, from.name, @destination_encoding.name, error, readagain]
+      insert_output(rest.force_encoding(from))
+      :invalid_byte_sequence
     end
 
     # Whether what is inserted waits in a buffer before the destination's
@@ -1009,6 +1096,8 @@ class Encoding
         elsif !bytesize.nil? && output.bytesize > bytesize && !@deferred
           # What waits does not all fit, so nothing is read. Measured.
           :destination_buffer_full
+        elsif @insert_stop
+          __stop_inserted__
         else
           chunk = source.nil? ? "".b : source.b
           source&.__splice__(0, source.bytesize, "")

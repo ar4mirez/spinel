@@ -134,6 +134,17 @@ fn decode(encoding: u8, bytes: &[u8], at: usize) -> Decoded {
                 return Decoded::Incomplete(rest.len());
             };
             match first {
+                // Big-endian, the next unit's first byte already says it is
+                // no low surrogate, so only it is read again. Measured.
+                0xd800..=0xdbff
+                    if encoding == UTF_16BE
+                        && rest.get(2).is_some_and(|b| !(0xdc..=0xdf).contains(b)) =>
+                {
+                    Decoded::Invalid {
+                        error: 2,
+                        readagain: 1,
+                    }
+                }
                 0xd800..=0xdbff => match unit(2) {
                     None if rest.len() < 4 => Decoded::Incomplete(rest.len()),
                     Some(second @ 0xdc00..=0xdfff) => {
