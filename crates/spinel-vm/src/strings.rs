@@ -57,6 +57,21 @@ pub fn init<'h>(scope: &mut HandleScope<'h>, string: Handle<'h>, bytes: &[u8], e
     scope.set_slot(string, ENCODING, fixnum(usize::from(encoding)));
 }
 
+/// `len` of the live bytes from `start`, copied out.
+pub fn byte_range<'h>(
+    scope: &mut HandleScope<'h>,
+    string: Handle<'h>,
+    start: usize,
+    len: usize,
+) -> Vec<u8> {
+    let live = bytesize(scope, string);
+    let start = start.min(live);
+    let end = start.saturating_add(len).min(live);
+    let buffer = scope.slot(string, BUFFER);
+    let buffer = scope.root(buffer);
+    scope.bytes(buffer)[start..end].to_vec()
+}
+
 /// The live bytes, copied out.
 pub fn bytes<'h>(scope: &mut HandleScope<'h>, string: Handle<'h>) -> Vec<u8> {
     let len = bytesize(scope, string);
@@ -96,20 +111,23 @@ pub fn splice<'h>(
     len: usize,
     with: &[u8],
 ) {
-    let old = bytes(scope, string);
-    let start = start.min(old.len());
-    let end = (start + len).min(old.len());
-    let new_len = old.len() - (end - start) + with.len();
+    let old_len = bytesize(scope, string);
+    let start = start.min(old_len);
+    let end = (start + len).min(old_len);
+    let new_len = old_len - (end - start) + with.len();
     let buffer = scope.slot(string, BUFFER);
     let buffer = scope.root(buffer);
     let capacity = scope.len(buffer) as usize;
-    let mut joined = Vec::with_capacity(new_len);
-    joined.extend_from_slice(&old[..start]);
-    joined.extend_from_slice(with);
-    joined.extend_from_slice(&old[end..]);
     if new_len <= capacity {
-        scope.bytes_mut(buffer)[..new_len].copy_from_slice(&joined);
+        let live = scope.bytes_mut(buffer);
+        live.copy_within(end..old_len, start + with.len());
+        live[start..start + with.len()].copy_from_slice(with);
     } else {
+        let old = bytes(scope, string);
+        let mut joined = Vec::with_capacity(new_len);
+        joined.extend_from_slice(&old[..start]);
+        joined.extend_from_slice(with);
+        joined.extend_from_slice(&old[end..]);
         let mut grown = capacity.max(MIN_CAPACITY);
         while grown < new_len {
             grown *= 2;

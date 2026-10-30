@@ -42,10 +42,12 @@ goes through UTF-8 says so in the message and reports the UTF-8 step's
 character and encodings, `readagain_bytes` is nil when there are none, and a
 replacement that cannot be converted is — measured — `ConverterNotFoundError`.
 
-**`Encoding::Converter`** is the same loop as a stream: `primitive_convert`
+**`Encoding::Converter`** is the same converters as a stream, each converter
+and decorator a transcoder with a buffer of its own, as CRuby's
+`rb_econv_convert` runs them (#492, #494): `primitive_convert`
 with partial input, destination offsets and size limits (output past the limit
 waits for the next call), bytes read past an error kept for the next call
-(`putback` returns them), `insert_output`, `convert`/`finish`,
+(`putback` returns the first converter's), `insert_output`, `convert`/`finish`,
 `primitive_errinfo`, `last_error`, `convpath`, `search_convpath`,
 `asciicompat_encoding`, and the flag constants.
 

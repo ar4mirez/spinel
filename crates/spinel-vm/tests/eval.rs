@@ -473,7 +473,10 @@ fn an_operator_instruction_hears_a_prepend_and_an_undef() {
 /// would buffer a replacement after a character begun behind a held CR: each
 /// error breaks the next replacement's first character. Spinel puts the
 /// replacement before that character instead, so the table, which CRuby
-/// re-measures, cannot hold these.
+/// re-measures, cannot hold these. Under CRuby these grow memory without
+/// bound: never run them there without a memory cap and a SIGKILL timeout,
+/// `systemd-run --user --scope -p MemoryMax=1500M -p MemorySwapMax=0 timeout
+/// -k 5 120 ruby ...`.
 #[test]
 fn a_replacement_that_would_break_a_begun_character_goes_before_it() {
     for (source, want) in [
@@ -518,7 +521,10 @@ fn a_replacement_after_a_begun_character_stays_where_cruby_ends() {
 
 /// CRuby 4.0.9 never ends where a Converter's broken replacement goes back
 /// through a newline decorator that reads the UTF-8 source: each `"\xFF"` it
-/// inserts is another invalid byte. Spinel stops at the error instead.
+/// inserts is another invalid byte. Spinel stops at the error instead. Under
+/// CRuby these spin inside the transcoder and ignore SIGTERM: never run them
+/// there without a memory cap and a SIGKILL timeout, `systemd-run --user
+/// --scope -p MemoryMax=1500M -p MemorySwapMax=0 timeout -k 5 120 ruby ...`.
 #[test]
 fn a_broken_replacement_behind_a_newline_decorator_stops_at_the_error() {
     for (source, want) in [
