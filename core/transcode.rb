@@ -936,9 +936,9 @@ class Encoding
     # the attribute's quote opens before it. Measured.
     def insert_output(text)
       text = String.__coerce__(text)
-      # Finished, an encoder converts nothing more, even what is inserted
-      # before it. Measured.
-      return nil if (@finished || @finishing) && !@step_destination.ascii_compatible?
+      # Finished, an encoder or an attribute's quote working last converts
+      # nothing more, even what is inserted before it. Measured.
+      return nil if (@finished || @finishing) && (!@step_destination.ascii_compatible? || (@quote && !@source_decorated))
       piece = "".b
       __open_quote__(piece) unless text.empty?
       piece, @state =
