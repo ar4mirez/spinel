@@ -761,6 +761,8 @@ class Encoding
 
     # The most `__windowed__` reads at once.
     WINDOW = 4096
+    # The least room in the destination that is worth a window.
+    WINDOW_ROOM = 8
     # A BOM'd UTF-16's and UTF-32's BOMs, by the order they name.
     BOM_ORDERS = {
       "\xFF\xFE".b => Encoding::UTF_16LE, "\xFE\xFF".b => Encoding::UTF_16BE,
@@ -924,6 +926,7 @@ class Encoding
         raise Encoding::UndefinedConversionError, "replacement character setup failed" if value.nil?
       end
       @replacement = value
+      @replacement_bytes = nil
     end
 
     def convpath
@@ -1049,8 +1052,8 @@ class Encoding
         return
       end
       buffer = @elements.size == 1 ? @in_buf : @elements[-2].out
-      rest = buffer.bytes.byteslice(buffer.at, __unread__(buffer))
-      if begun && last.path && bytes.getbyte(0) >= 0x80 && String.__begun__(rest, last.path)
+      rest = buffer.bytes.byteslice(buffer.at, __unread__(buffer)) if begun && last.path && bytes.getbyte(0) >= 0x80
+      if rest && String.__begun__(rest, last.path)
         buffer.bytes = bytes + last.readagain + rest
         buffer.at = 0
       else
@@ -1079,6 +1082,7 @@ class Encoding
       source&.__splice__(0, source.bytesize, "")
       output = "".b
       result = __econv_convert__(input, output, bytesize, flags)
+      __stopped__(result)
       source&.__splice__(0, 0, input.bytes.byteslice(input.at, __unread__(input)))
       destination.__splice__(offset, destination.bytesize - offset, "") unless offset.nil?
       destination.__splice__(destination.bytesize, 0, output)
@@ -1096,36 +1100,46 @@ class Encoding
     # stops at the error, unreplaced. The upgrade is whatever CRuby settles
     # on.
     def __econv_convert__(input, output, limit, flags)
-      saved = __saved__(input, output)
-      fed = __unread__(input) + __buffered__
+      saved = first = fed = nil
       begun = false
       inserted = 0
       loop do
         result = __convert0__(input, output, limit, flags)
-        piece =
+        bytes =
           case result
           when :invalid_byte_sequence, :incomplete_input
-            @replacement if @flags & INVALID_MASK == INVALID_REPLACE
+            __replacement_bytes__ if @flags & INVALID_MASK == INVALID_REPLACE
           when :undefined_conversion
             case @flags & UNDEF_MASK
-            when UNDEF_REPLACE then @replacement
+            when UNDEF_REPLACE then __replacement_bytes__
             when UNDEF_HEX_CHARREF
               reference = @error_element.error[6]
-              "&#x#{Integer.__hex__(reference, 1)};" if reference
+              "&#x#{Integer.__hex__(reference, 1)};".b if reference
             end
           end
-        bytes = piece && String.__in_encoding__(piece, __insert_encoding__)
         return result if bytes.nil?
         inserted += 1
-        if inserted > 2 * fed + 64
+        if saved.nil?
+          # Nothing goes differently before the first error replaced, so a
+          # run again starts from it.
+          saved = __saved__(input, output)
+          first = bytes
+          fed = __unread__(input) + __buffered__
+        elsif inserted > 2 * fed + 64
           return result if begun
           __restore__(saved, input, output)
           begun = true
-          inserted = 0
-          next
+          inserted = 1
+          bytes = first
         end
         __insert__(bytes, begun)
       end
+    end
+
+    # The replacement in the encoding it is inserted in, or nil when it has
+    # no spelling there.
+    def __replacement_bytes__
+      @replacement_bytes ||= String.__in_encoding__(@replacement, __insert_encoding__)
     end
 
     # How many bytes wait inside, in every transcoder.
@@ -1159,13 +1173,12 @@ class Encoding
     # the first goes a character at a time, the rest reading on after it.
     def __convert0__(input, output, limit, flags)
       result, position = __convert0_run__(input, output, limit, flags)
-      @error_element = nil
-      @last_error = nil
-      @errinfo = [result, nil, nil, nil, nil]
-      if result == :invalid_byte_sequence || result == :incomplete_input || result == :undefined_conversion
-        __stopped__(@elements[position], result)
-      end
+      @error_element = position && __error__(result) ? @elements[position] : nil
       result
+    end
+
+    def __error__(result)
+      result == :invalid_byte_sequence || result == :incomplete_input || result == :undefined_conversion
     end
 
     def __convert0_run__(input, output, limit, flags)
@@ -1192,40 +1205,50 @@ class Encoding
         result = __trans_conv__(Buffer.new, output, limit, flags)
         return result[0] == :source_buffer_empty ? [:after_output, nil] : result
       end
-      return __trans_conv__(input, output, limit, flags) if flags & AFTER_OUTPUT != 0 || @elements.size == 1
-      if limit.nil?
-        result = __windowed__(input, output, flags)
-        return result if result
-      end
+      return __trans_conv__(input, output, limit, flags) if flags & AFTER_OUTPUT != 0 || (@elements.size == 1 && limit.nil?)
+      result = __windowed__(input, output, limit, flags)
+      return result if result
+      return __trans_conv__(input, output, limit, flags) if @elements.size == 1
       loop do
         result = __trans_conv__(input, output, limit, flags | AFTER_OUTPUT)
         return result unless result[0] == :after_output
       end
     end
 
-    # Into a destination with no `bytesize`, where nothing stops the
-    # conversion, the first transcoder reading a window of the source at
-    # once makes what reading it a character at a time makes. A window that
-    # stops anywhere is put back as it was, and nil leaves it to be read a
-    # character at a time, so it stops where it should. The window narrows
-    # after one that stops and widens after one that does not, so what is
-    # put back stays near the distance to the next stop.
-    def __windowed__(input, output, flags)
+    # Where nothing stops the conversion, and a byte of the destination is
+    # left over, the first transcoder reading a window of the source at once
+    # makes what reading it a character at a time makes; so it does if an
+    # error stops the first transcoder itself, the rest having read all it
+    # wrote before it. Any other stop puts the window back as it was, and nil
+    # leaves it to be read a character at a time, so it stops where it should.
+    # The window narrows after one put back and widens after one that is not,
+    # so what is put back stays near the distance to the next stop. Once the
+    # first transcoder has finished the source is not read, and the rest go
+    # on finishing however much of it is left.
+    def __windowed__(input, output, limit, flags)
+      return nil if @num_finished > 0
       loop do
-        saved = __saved__(input, output)
         size = __unread__(input)
         size = @window if size > @window
+        unless limit.nil?
+          room = limit - output.bytesize - 1
+          return nil if room < WINDOW_ROOM
+          size = room if size > room
+        end
+        saved = __saved__(input, output)
         window = Buffer.new(input.bytes.__byteslice__(input.at, size))
         more = __unread__(input) > size
         result = __trans_conv__(window, output, nil, more ? flags | PARTIAL_INPUT : flags)
-        unless result[0] == :source_buffer_empty || result[0] == :finished
+        stopped = result[0]
+        unless (stopped == :source_buffer_empty || stopped == :finished || (__error__(stopped) && result[1] == 0)) &&
+               (limit.nil? || output.bytesize < limit)
           __restore__(saved, input, output)
           @window = [size / 16, 16].max
           return nil
         end
         @window = [@window * 2, WINDOW].min
         __skip__(input, size - __unread__(window))
-        return result unless more && result[0] == :source_buffer_empty
+        return result unless more && stopped == :source_buffer_empty
       end
     end
 
@@ -1508,19 +1531,21 @@ class Encoding
       { invalid: :invalid_byte_sequence, incomplete: :incomplete_input, undefined: :undefined_conversion }[step[1]]
     end
 
-    # The error the transcoder `element` reported, kept for
-    # `primitive_errinfo`, `last_error` and `putback`, named by that
-    # transcoder's encodings, as CRuby's. Measured.
-    def __stopped__(element, result)
-      @error_element = element
-      _, stop, error, _, _, code = element.error
-      from = element.src
-      to = element.dst
+    # What `result` leaves for `primitive_errinfo` and `last_error`: with an
+    # error, the transcoder's that reported it, named by its encodings, as
+    # CRuby's. Measured.
+    def __stopped__(result)
+      @last_error = nil
+      @errinfo = [result, nil, nil, nil, nil]
+      return unless @error_element
+      _, stop, error, _, _, code = @error_element.error
+      from = @error_element.src
+      to = @error_element.dst
       if stop == :undefined
         @last_error = String.__undefined_error__(code, error, from, to, @source_encoding, @destination_encoding)
         @errinfo = [result, from.name, to.name, @last_error.error_char.b, "".b]
       else
-        readagain = element.readagain
+        readagain = @error_element.readagain
         @last_error = String.__invalid_error__(stop, error.b, readagain.b, from, to, to)
         @errinfo = [result, from.name, to.name, error.b, readagain.b]
       end
