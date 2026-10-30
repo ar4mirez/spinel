@@ -2460,12 +2460,12 @@ end
 
   # An Array argument is flattened into its elements, measured: `puts [1, [2]]`
   # is two lines, `puts []` is none, and an Array that contains itself prints
-  # `[...]` where it recurs rather than looping. One write for the lot.
+  # `[...]` where it recurs rather than looping. One write for each line, as
+  # CRuby's `rb_io_puts`, so the lines before one that raises are written, on
+  # a sync IO as well, where one `write` of them all would drop them (#420).
   def puts(*lines)
     return write("\n") && nil if lines.empty?
-    out = []
-    __puts_lines__(lines, [], out)
-    __writev__(out) unless out.empty?
+    __puts_lines__(lines, [])
     nil
   end
 
@@ -2479,27 +2479,29 @@ end
     end
   end
 
-  def __puts_lines__(lines, seen, out)
+  def __puts_lines__(lines, seen)
     lines.each do |line|
       if String === line
-        out << line
-        out << "\n" unless line.__end_with_newline__
+        __puts_line__(line)
         next
       end
       array = Array === line ? line : (line.respond_to?(:to_ary, true) ? line.to_ary : nil)
       if Array === array
         if seen.any? { |outer| outer.equal?(array) }
-          out << "[...]\n"
+          __puts_line__("[...]\n")
         else
-          __puts_lines__(array, seen + [array], out)
+          __puts_lines__(array, seen + [array])
         end
       else
         text = line.nil? ? "" : line.to_s
         text = Kernel.instance_method(:to_s).bind_call(line) unless String === text
-        out << text
-        out << "\n" unless text.__end_with_newline__
+        __puts_line__(text)
       end
     end
+  end
+
+  def __puts_line__(text)
+    __writev__(text.__end_with_newline__ ? [text] : [text, "\n"])
   end
 
   # --- another descriptor ----------------------------------------------------
