@@ -227,16 +227,20 @@ class String
   def self.__newline_turn__(piece, name, held)
     case name
     when "universal_newline", "lf_newline"
-      return ["".b, held] if piece.empty?
       out = "".b
-      if held
-        out << "\n"
-        piece = piece.byteslice(1, piece.bytesize - 1) if piece.getbyte(0) == 10
+      piece.each_byte do |byte|
+        if held
+          out << "\n"
+          held = false
+          next if byte == 10
+        end
+        if byte == 13
+          held = true
+        else
+          out << byte.chr
+        end
       end
-      held = piece.getbyte(-1) == 13
-      piece = piece.byteslice(0, piece.bytesize - 1) if held
-      piece = __universal_newline__(piece) if piece.include?("\r")
-      [out << piece, held]
+      [out, held]
     else [__newlines__(piece, name).b, held]
     end
   end
