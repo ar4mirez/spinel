@@ -1287,17 +1287,18 @@ class Encoding
             result = :destination_buffer_full
             break
           end
-          # A CR the source ends with, `universal_newline` holds until it
-          # finishes, so where it works last its LF is its own finishing.
-          # Measured.
-          last = __finisher__ && !@quote && @destination_encoding.__index__ != 85
-          @reset = final && last && input.end_with?("\r".encode(@step_source).b) ? 1 : 0
           result = final ? __finishing__(output, bytesize) : :source_buffer_empty
           if final
             finished = "".__transcode__(@path, 0, @state, @mode, true)
             @state = finished[9]
             pending << finished[0].b
-            @reset = 3 if @destination_encoding.__index__ == 85 && finished[0].b.end_with?("\e(B".b)
+            # A CR `universal_newline` holds it writes as it finishes, so
+            # where it works last that LF is its own finishing. Measured.
+            @reset =
+              if @destination_encoding.__index__ == 85 then finished[0].b.end_with?("\e(B".b) ? 3 : 0
+              elsif __finisher__ && !@quote then finished[0].bytesize
+              else 0
+              end
           end
           break
         end
@@ -1353,7 +1354,7 @@ class Encoding
     # `universal_newline` or the attribute's quote — is full, even if
     # finishing writes nothing, and finishing's output waits. Measured.
     def __finishing__(output, bytesize)
-      return :finished unless __finisher__ && output.bytesize == bytesize && @reset == 0
+      return :finished unless __finisher__ && output.bytesize == bytesize
       @finishing = true
       :destination_buffer_full
     end
