@@ -299,6 +299,8 @@ impl State {
 }
 
 /// How `xml:` escapes: not at all, as text, or as an attribute's content.
+/// The attribute's quote is a decorator of its own, which `xml: :attr` runs
+/// with this one and `Encoding::Converter`'s flags can run alone.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Xml {
     #[default]
@@ -324,6 +326,7 @@ pub enum Newline {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Decorators {
     pub xml: Xml,
+    pub quote: bool,
     pub newline: Newline,
 }
 
@@ -341,6 +344,7 @@ fn escape(xml: Xml, byte: u8) -> Option<&'static [u8]> {
         (_, b'<') => Some(b"&lt;"),
         (_, b'>') => Some(b"&gt;"),
         (Xml::Attr, b'"') => Some(b"&quot;"),
+        (Xml::Attr, b'\'') => Some(b"&apos;"),
         _ => None,
     }
 }
@@ -562,8 +566,12 @@ fn decorate(
     decorators: Decorators,
     out: &mut Vec<u8>,
 ) -> Result<(), Refused> {
-    let Decorators { xml, newline } = decorators;
-    if xml == Xml::Attr && !state.quoted() {
+    let Decorators {
+        xml,
+        quote,
+        newline,
+    } = decorators;
+    if quote && !state.quoted() {
         state.set_quoted(true);
         newlines(path, k, b"\"", state, newline, out)?;
     }
@@ -686,14 +694,13 @@ pub fn step(
     // Where the source itself is the last such stage — UTF-8 into UTF-16 or
     // UTF-32 — CRuby's decorators work on bytes before they are read, which
     // is the caller's to do.
-    let xml = decorators.xml;
     let decorate = if decorators.any() {
         (1..=last).rev().find(|&i| ascii_compatible(path[i]))
     } else {
         None
     };
     let mut output = Vec::with_capacity(bytes.len().saturating_sub(start));
-    if xml == Xml::Attr && decorate == Some(last) && !state.quoted() {
+    if decorators.quote && decorate == Some(last) && !state.quoted() {
         // At the end of the path the quote opens before anything, even what
         // is inserted for an error before the first character; before an
         // encoder it opens with the first character that reaches it, in
@@ -747,7 +754,7 @@ pub fn step(
     if finish {
         if let Some(stage) = decorate {
             // ASCII, which every converter has a spelling for.
-            if xml == Xml::Attr {
+            if decorators.quote {
                 let quotes: &[u8] = if state.quoted() { b"\"" } else { b"\"\"" };
                 let _ = newlines(path, stage, quotes, state, decorators.newline, &mut output);
                 state.set_quoted(false);
@@ -836,6 +843,7 @@ mod tests {
     fn xml(xml: Xml) -> Decorators {
         Decorators {
             xml,
+            quote: xml == Xml::Attr,
             ..Decorators::default()
         }
     }
@@ -1076,6 +1084,40 @@ mod tests {
     }
 
     #[test]
+    fn the_attribute_quote_is_a_decorator_of_its_own() {
+        let attr = |decorators| {
+            step(
+                &[UTF_8, EUC_JP],
+                b"<'\"",
+                0,
+                &mut State::default(),
+                decorators,
+                true,
+            )
+            .map(|s| s.output)
+        };
+        let quote = Decorators {
+            quote: true,
+            ..Decorators::default()
+        };
+        assert_eq!(attr(quote), Some(b"\"<'\"\"".to_vec()));
+        assert_eq!(
+            attr(Decorators {
+                xml: Xml::Attr,
+                ..Decorators::default()
+            }),
+            Some(b"&lt;&apos;&quot;".to_vec())
+        );
+        assert_eq!(
+            attr(Decorators {
+                xml: Xml::Text,
+                ..quote
+            }),
+            Some(b"\"&lt;'\"\"".to_vec())
+        );
+    }
+
+    #[test]
     fn newlines_are_decorated_where_ascii_is_ascii() {
         let newline = |path: &[u8], bytes: &[u8], newline| {
             let decorators = Decorators {
@@ -1138,6 +1180,7 @@ mod tests {
     fn an_attribute_quote_goes_through_the_newline_decorator() {
         let decorators = Decorators {
             xml: Xml::Attr,
+            quote: true,
             newline: Newline::Universal,
         };
         let s = step(
