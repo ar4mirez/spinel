@@ -245,7 +245,9 @@ module ObjectSpace
 
   def self.undefine_finalizer(obj)
     raise FrozenError.new("can't modify frozen #{Kernel.__class_of__(obj)}: #{obj.inspect}", receiver: obj) if obj.frozen?
+    kept = __finalizer_list__(obj).select { |callable| IO.__finalizer__?(callable) }
     __finalizer_remove__(obj)
+    kept.each { |callable| __finalizer_add__(obj, callable) }
     obj
   end
 
