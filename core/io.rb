@@ -1018,7 +1018,9 @@ end
   def __next_chars__
     while !@rbuf.empty? || __fill__
       out = __convert_in__(__take__(1))
-      return out unless out.empty?
+      next if out.empty?
+      @rnewline = out.getbyte(-1) == 0x0A
+      return out
     end
     nil
   end
@@ -1040,11 +1042,14 @@ end
   # That byte goes with them in ISO-2022-JP, where it is the whole character;
   # in UTF-16 or UTF-32 it is a byte at a time from there, as the bytes after
   # it can be what makes the character, and likewise from a CR universal
-  # newline holds. With `room` left of a limit, no more bytes go than cannot
-  # fill it: four a byte, more than a character's bytes can make, the partial
-  # one the converter holds among them. Answers "" where the bytes made
-  # nothing yet.
+  # newline holds. A newline can leave the next CR held, and a held CR comes
+  # out with the next character, a line of its own that an error later in a
+  # run would lose, so after one it is a byte at a time to that character.
+  # With `room` left of a limit, no more bytes go than cannot fill it: four a
+  # byte, more than a character's bytes can make, the partial one the
+  # converter holds among them. Answers "" where the bytes made nothing yet.
   def __chars_to_line_end__(sep, room)
+    return __next_chars__ if @rnewline
     return nil if @rbuf.empty? && !__fill__
     at = sep && @rbuf.index(sep[-1])
     at += 1 if at && __encoding__ == Encoding::ISO_2022_JP
