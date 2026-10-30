@@ -86,6 +86,7 @@ module Kernel
   # does.
   def self.__cleanup__
     Thread.__terminate_all__
+    IO.__end__
     ObjectSpace.__finalize_all__
     IO.__finish_all__
     nil

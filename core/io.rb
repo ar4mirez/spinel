@@ -394,6 +394,8 @@ end
     wanted = @access
     have = current & 3
     if (wanted != 0 && have == 0) || (wanted != 1 && have == 1)
+      # Not this IO's to close: CRuby checks before the IO takes it.
+      @finalizer&.fd = nil
       raise Errno::EINVAL
     end
   end
@@ -472,7 +474,21 @@ end
     path = options[:path]
     @path = (String === path ? path : File.__path__(path)).dup unless path.nil?
     __bom__ if bom && @access != 1
+    __arm__
     self
+  end
+
+  # The descriptor this IO owns from now on, for its finalizer (#460). An IO
+  # `reopen` sets up again keeps the one it has.
+  def __arm__
+    if @finalizer.nil?
+      @finalizer = Finalizer.new
+      __finalizer_add__(self, @finalizer)
+    end
+    @finalizer.fd = @fileno
+    @finalizer.wfd = nil
+    @finalizer.autoclose = @autoclose
+    @finalizer.quote = nil
   end
 
   # A copy has a descriptor of its own, `dup(2)` of the original's, at the
@@ -489,6 +505,9 @@ end
     @ecopts = @ecopts.dup
     # A converter of its own, so an attribute's quote of its own.
     @xml_quote = nil
+    # And a finalizer of its own, for the descriptor of its own.
+    @finalizer = nil
+    __arm__
     self
   end
 
@@ -535,6 +554,7 @@ end
   def autoclose=(value)
     __check_open__
     @autoclose = value ? true : false
+    @finalizer&.autoclose = @autoclose
     value
   end
 
@@ -546,6 +566,7 @@ end
       __close_quote__
     ensure
       @closed = true
+      @finalizer&.disarm
       @rbuf = "".b
       @cbuf = "".b
       __fd_close__(@wfileno) unless @wfileno.nil? || @wclosed
@@ -571,6 +592,7 @@ end
     unless @wfileno.nil?
       __fd_close__(@fileno) unless @rclosed
       @rclosed = true
+      @finalizer&.fd = nil
       @access = 1
       return @wclosed ? close : nil
     end
@@ -584,6 +606,7 @@ end
       __close_quote__ unless @wclosed
       __fd_close__(@wfileno) unless @wclosed
       @wclosed = true
+      @finalizer&.wfd = nil
       @access = 0
       return @rclosed ? close : nil
     end
@@ -633,6 +656,7 @@ end
   def __pid__(pid, writer = nil)
     @pid = pid
     @wfileno = writer
+    @finalizer&.wfd = writer
     self
   end
 
@@ -686,7 +710,7 @@ end
     @enc = Encoding::BINARY
     @enc2 = nil
     # CRuby drops the converter unfinished, an attribute's quote and all.
-    @xml_quote = nil
+    __xml_quote__(nil)
     __clear_readconv__
     # And no conversion options at all: CRuby's `io_ascii8bit_binmode` zeroes
     # the flags and drops the rest, so `xml:` and the error handling go with
@@ -834,7 +858,7 @@ end
     # CRuby drops the converter unfinished: an attribute's quote open is
     # never closed, and the next write opens another. The read converter
     # goes too, with the characters it held.
-    @xml_quote = nil
+    __xml_quote__(nil)
     __clear_readconv__
     __validate_enc_binmode__
     self
@@ -1104,7 +1128,7 @@ end
     target = @enc2 || (@enc == Encoding::BINARY ? nil : @enc)
     xml = options[:xml]
     if (xml == :attr || xml.equal?(XML_BOTH)) && @xml_quote.nil?
-      @xml_quote = false
+      __xml_quote__(false)
       IO.__open_quotes__[self] = true
     end
     if xml.equal?(XML_BOTH)
@@ -1152,16 +1176,29 @@ end
     return quoted unless xml == :attr
     content = quoted.byteslice(1, quoted.bytesize - 2)
     return content if content.empty? || @xml_quote
-    @xml_quote = true
+    __xml_quote__(true)
     "\"".b.force_encoding(content.encoding) << content
   end
 
   # The closing quote CRuby's `finish_writeconv` writes when the IO closes,
   # or `""` if no character opened it.
   def __close_quote__
-    open = @xml_quote
-    return if open.nil?
-    @xml_quote = nil
+    quote = __closing_quote__(@xml_quote)
+    return if quote.nil?
+    __xml_quote__(nil)
+    __write_all__(quote)
+  end
+
+  # Where the attribute's quote is, and what closing it writes, which the
+  # finalizer is told: the encoding it is written in cannot change while it
+  # is open, as `set_encoding` and `binmode` drop it.
+  def __xml_quote__(state)
+    @xml_quote = state
+    @finalizer&.quote = __closing_quote__(state)
+  end
+
+  def __closing_quote__(open)
+    return nil if open.nil?
     quote = open ? "\"" : "\"\""
     target = @enc2 || (@enc == Encoding::BINARY ? nil : @enc)
     unless target.nil? || target.ascii_compatible?
@@ -1170,18 +1207,59 @@ end
       target = Encoding.find("#{target.name}BE") if open && (target == Encoding::UTF_16 || target == Encoding::UTF_32)
       quote = quote.encode(target)
     end
-    __write_all__(quote)
+    quote.b
   end
 
   # The IOs whose converter has `xml: :attr`'s quote, held weakly. CRuby
   # finishes an IO's converter when it finalizes the IO, so the program's end
-  # closes the quote of each still open (#456).
-  # ponytail: only at the end. An IO collected before it keeps its quote
-  # open, as it keeps its descriptor, where CRuby closes both; upgrade by
-  # finalizing an IO when it is collected (#460).
+  # closes the quote of each still open (#456); one collected before then
+  # has had its `Finalizer` do it (#460).
   def self.__open_quotes__
     @__open_quotes__ ||= ObjectSpace::WeakMap.new
   end
+
+  # What finalizing an IO the collector freed does, CRuby's
+  # `rb_io_fptr_finalize`: it finishes the write converter, which closes an
+  # `xml: :attr` quote, and closes the descriptor, unless it is 0, 1 or 2 or
+  # the IO is not to `autoclose` it. It is told what that needs as the IO
+  # changes, and never holds the IO, which would keep it alive.
+  #
+  # At the program's end it does nothing: the IOs still alive then are
+  # finished by `IO.__finish_all__`, after every other finalizer, and their
+  # descriptors close with the process.
+  class Finalizer
+    attr_writer :fd, :wfd, :autoclose, :quote
+
+    def disarm
+      @fd = @wfd = @quote = nil
+    end
+
+    def call(_id)
+      return if IO.__ending__
+      fd, wfd, quote = @fd, @wfd, @quote
+      disarm
+      unless quote.nil? || (wfd || fd).nil?
+        until quote.empty?
+          written = __fd_write__(wfd || fd, quote)
+          break unless Array === written && written[0] > 0
+          quote = quote.byteslice(written[0], quote.bytesize - written[0])
+        end
+      end
+      __fd_close__(wfd) unless wfd.nil?
+      __fd_close__(fd) if @autoclose && !fd.nil? && fd > 2
+      nil
+    rescue Exception
+      nil
+    end
+  end
+  private_constant :Finalizer
+
+  # Whether `callable` is an IO's own finalizer, which
+  # `ObjectSpace.undefine_finalizer` leaves: CRuby's is no finalizer at all.
+  def self.__finalizer__?(callable) = Finalizer === callable
+
+  def self.__ending__ = @__ending__
+  def self.__end__ = (@__ending__ = true; nil)
 
   # After the finalizers, as CRuby's IOs are finished after every other
   # object's. A failure is dropped, as a finalizer's is.
