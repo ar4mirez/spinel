@@ -2376,10 +2376,15 @@ end
     else
       # One system call for all of them, as `writev` would be.
       text = "".b
-      objects.each do |object|
-        object = object.to_s unless String === object
-        text << __encode_out__(object).b
+      begin
+        objects.each do |object|
+          object = object.to_s unless String === object
+          text << __encode_out__(object).b
+        end
+      ensure
+        written = __write_all__(text)
       end
+      return written
     end
     __write_all__(text)
   end
