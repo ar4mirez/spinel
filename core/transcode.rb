@@ -227,20 +227,16 @@ class String
   def self.__newline_turn__(piece, name, held)
     case name
     when "universal_newline", "lf_newline"
+      return ["".b, held] if piece.empty?
       out = "".b
-      piece.each_byte do |byte|
-        if held
-          out << "\n"
-          held = false
-          next if byte == 10
-        end
-        if byte == 13
-          held = true
-        else
-          out << byte.chr
-        end
+      if held
+        out << "\n"
+        piece = piece.byteslice(1, piece.bytesize - 1) if piece.getbyte(0) == 10
       end
-      [out, held]
+      held = piece.getbyte(-1) == 13
+      piece = piece.byteslice(0, piece.bytesize - 1) if held
+      piece = __universal_newline__(piece) if piece.include?("\r")
+      [out << piece, held]
     else [__newlines__(piece, name).b, held]
     end
   end
@@ -995,7 +991,7 @@ class Encoding
       if at == bytes.bytesize
         buffer.bytes = "".b
         at = 0
-      elsif at >= 4096
+      elsif at >= 4096 && at * 2 >= bytes.bytesize
         buffer.bytes = bytes.byteslice(at, bytes.bytesize - at)
         at = 0
       end
@@ -1231,7 +1227,7 @@ class Encoding
         size = __unread__(input)
         size = @window if size > @window
         unless limit.nil?
-          room = limit - output.bytesize - 1
+          room = limit - output.bytesize - __buffered__ - 1
           return nil if room < WINDOW_ROOM
           size = room if size > room
         end

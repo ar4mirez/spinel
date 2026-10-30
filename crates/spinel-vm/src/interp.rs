@@ -9735,30 +9735,32 @@ fn native_call<'h>(
         }
 
         Native::StringSize { bytes } => {
+            // The size is kept, so a long string is not copied to answer.
+            if bytes && !call.receiver.is_immediate() && is_string(scope, call.receiver) {
+                let receiver = scope.root(call.receiver);
+                let length = crate::strings::bytesize(scope, receiver);
+                stack.push(Value::fixnum(length as i64).expect("a length fits a fixnum"));
+                return Ok(None);
+            }
             let Some(payload) = string_bytes(scope, call.receiver) else {
                 return Err(Error::NoDispatch {
                     op: "String#length",
                     operands: "a receiver that is not a String",
                 });
             };
-            let length = if bytes {
+            // Characters, by the receiver's encoding: an invalid UTF-8 byte
+            // is a character of its own, and an encoding whose boundaries
+            // this VM does not know refuses rather than counting bytes and
+            // calling them characters.
+            let encoding = string_encoding(scope, call.receiver).unwrap_or(crate::strings::UTF_8);
+            // Counted without a table of where each one starts, when one
+            // byte is one character.
+            let length = if crate::strings::single_byte(encoding, &payload) {
                 payload.len()
             } else {
-                // Characters, by the receiver's encoding: an invalid UTF-8
-                // byte is a character of its own, and an encoding whose
-                // boundaries this VM does not know refuses rather than
-                // counting bytes and calling them characters.
-                let encoding =
-                    string_encoding(scope, call.receiver).unwrap_or(crate::strings::UTF_8);
-                // Counted without a table of where each one starts, when one
-                // byte is one character.
-                if crate::strings::single_byte(encoding, &payload) {
-                    payload.len()
-                } else {
-                    match crate::strings::char_offsets(encoding, &payload) {
-                        Some(offsets) => offsets.len() - 1,
-                        None => return Err(unknown_encoding("`length`")),
-                    }
+                match crate::strings::char_offsets(encoding, &payload) {
+                    Some(offsets) => offsets.len() - 1,
+                    None => return Err(unknown_encoding("`length`")),
                 }
             };
             stack.push(Value::fixnum(length as i64).expect("a length fits a fixnum"));
