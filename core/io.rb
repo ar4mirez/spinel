@@ -1010,9 +1010,11 @@ end
   # is read with the character after it, and `pos` is past that and no
   # further. Measured.
   # ponytail: a call of the converter for each byte, the cost of a read that
-  # stops where CRuby's does, and nearly all of it is the call's, not the
-  # byte's, so `primitive_convert` stopping for `after_output:` (#502) only
-  # halves double-byte text; the upgrade is a cheaper call as well.
+  # stops where CRuby's does. Measured on a release build: `primitive_convert`
+  # takes about 556us for 1 byte and 843us for 2040 bytes at once, so nearly
+  # all of it is the call's, and `getc` is about 1.3ms a character. Stopping
+  # for `after_output:` (#502) would only halve double-byte text; the upgrade
+  # is that and a cheaper call together.
   def __next_chars__
     while !@rbuf.empty? || __fill__
       out = __convert_in__(__take__(1))
@@ -1021,27 +1023,38 @@ end
     nil
   end
 
-  # Whether a line ends only at a "\n" the bytes read have a 0x0A for, so
-  # `__chars_to_newline__` cannot read past its end: no limit to stop at,
-  # a separator ending in "\n", and nothing that makes one of something else,
-  # a decorator or a replacement, or has it inside a character's bytes.
-  # ponytail: any other line, a limit's among them, stays a byte at a time at
-  # `__next_chars__`'s cost; upgrade with the cheaper call that names.
-  def __newline_runs__?(sep, limit, enc)
-    (limit.nil? || limit <= 0) && (sep.nil? || sep.getbyte(-1) == 10) && enc.ascii_compatible? && @ecopts.empty?
+  # Whether `__chars_to_line_end__` can go by the bytes read: a separator
+  # ending in an ASCII character has that character's byte in them, and
+  # nothing but universal newline makes one from something else, or a
+  # replacement or decorator more than it read.
+  # ponytail: any other line stays a byte at a time at `__next_chars__`'s
+  # cost; upgrade with the cheaper call that names.
+  def __line_runs__?(sep, enc)
+    return false unless enc.ascii_compatible? && (sep.nil? || sep.dup.force_encoding(enc)[-1].ascii_only?)
+    @ecopts.empty? || (@ecopts.size == 1 && __universal_newline__?)
   end
 
-  # `__next_chars__` for a line, which `__newline_runs__?` lets go faster:
-  # what comes before the next 0x0A cannot end it, so those bytes go to the
-  # converter in one call, and `pos` stops where `__next_chars__` would. The
-  # 0x0A goes with them where it is the whole newline; in UTF-16 or UTF-32 it
-  # is a byte at a time from there, as the bytes after it can be what makes
-  # the "\n". Answers "" where the bytes made nothing yet.
-  def __chars_to_newline__
+  # `__next_chars__` for a line, which `__line_runs__?` lets go faster: what
+  # comes before the next byte that can end it cannot, so those bytes go to
+  # the converter in one call, and `pos` stops where `__next_chars__` would.
+  # That byte goes with them in ISO-2022-JP, where it is the whole character;
+  # in UTF-16 or UTF-32 it is a byte at a time from there, as the bytes after
+  # it can be what makes the character, and likewise from a CR universal
+  # newline holds. With `room` left of a limit, no more bytes go than cannot
+  # fill it: four a byte, more than a character's bytes can make, the partial
+  # one the converter holds among them. Answers "" where the bytes made
+  # nothing yet.
+  def __chars_to_line_end__(sep, room)
     return nil if @rbuf.empty? && !__fill__
-    at = @rbuf.index("\n")
+    at = sep && @rbuf.index(sep[-1])
     at += 1 if at && __encoding__ == Encoding::ISO_2022_JP
-    at == 0 ? __next_chars__ : __convert_in__(__take__(at || @rbuf.bytesize))
+    if sep&.end_with?("\n") && __universal_newline__?
+      cr = @rbuf.index("\r")
+      at = cr if cr && (at.nil? || cr < at)
+    end
+    count = at || @rbuf.bytesize
+    count = [count, room / 4].min if room && room > 0
+    count == 0 ? __next_chars__ : __convert_in__(__take__(count))
   end
 
   # An ASCII String in the encoding reads answer in.
@@ -1782,7 +1795,7 @@ end
     from = 0
     cut = nil
     stream = __stream_in__?
-    runs = stream && __newline_runs__?(sep, limit, enc)
+    runs = stream && __line_runs__?(sep, enc)
     while cut.nil?
       at = sep.nil? ? nil : out.index(sep, from)
       at = out.index(sep, at + 1) while at && at % step != 0
@@ -1798,7 +1811,7 @@ end
         from = sep.nil? ? 0 : [out.bytesize - sep.bytesize + 1, 0].max
         room = limit.nil? || limit <= 0 ? limit : limit - out.bytesize
         if stream
-          piece = runs ? __chars_to_newline__ : __next_chars__
+          piece = runs ? __chars_to_line_end__(sep, room) : __next_chars__
         elsif unit
           bytes, cr = __universal_line__(wanted, room, unit)
           piece = bytes.nil? ? nil : __decode__(bytes)
