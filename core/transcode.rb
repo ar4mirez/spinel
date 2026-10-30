@@ -945,10 +945,11 @@ class Encoding
       piece, @state =
         String.__insert__(piece, text, @step_destination, @state) ||
         String.__not_inserted__(text, @destination_encoding)
-      # Into an ASCII-compatible destination it goes before what a character
-      # in flight has still to write; before an encoder or a decorator, after
-      # it. Measured.
-      front = @step_destination.ascii_compatible? && (done || !(@escape || @quote || @newline))
+      # Into an ASCII-compatible destination it goes before what a character,
+      # an escape or a newline in flight has still to write, but after it
+      # where the attribute's quote works last; before an encoder, after it.
+      # Measured.
+      front = @step_destination.ascii_compatible? && (done || !(@quote && !@newline))
       at = front ? @inserted : @pending_output.bytesize
       @pending_output.__splice__(at, 0, piece)
       @inserted = at + piece.bytesize
