@@ -1,7 +1,7 @@
 //! What an IO left open does when the program ends, on the `spinel` binary:
 //! CRuby finishes each IO's converter when it finalizes the IO, after the
 //! `at_exit` blocks and the other finalizers, so an `xml: :attr` quote still
-//! open is closed (#456).
+//! open is closed (#456), and ISO-2022-JP goes back to ASCII (#420).
 //!
 //! ruby/spec cannot say this — it is what another process finds afterwards.
 
@@ -30,6 +30,9 @@ fn an_xml_attr_quote_left_open_is_closed_at_exit() {
         read("closed"),
         read("binmode"),
         read("both"),
+        read("stateful"),
+        read("utf16_mark"),
+        read("begun"),
     ];
     std::fs::remove_dir_all(&dir).ok();
     assert!(
@@ -49,6 +52,9 @@ fn an_xml_attr_quote_left_open_is_closed_at_exit() {
             b"\"a\"".to_vec(),
             b"\"a".to_vec(),
             b"\"\"".to_vec(),
+            b"\x1b$B$\"$$\x1b(B".to_vec(),
+            b"\xFE\xFF\0a\0b".to_vec(),
+            b"a\0".to_vec(),
         ]
     );
 }
