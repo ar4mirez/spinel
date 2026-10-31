@@ -772,6 +772,10 @@ class Encoding
     WINDOW = 4096
     # The least room in the destination that is worth a window.
     WINDOW_ROOM = 8
+    # How many bytes `__run_whole__` reads at once with `AFTER_OUTPUT`, enough
+    # for an escape sequence and the character after it. One longer goes round
+    # again.
+    AFTER_OUTPUT_BYTES = 16
     # A BOM'd UTF-16's and UTF-32's BOMs, by the order they name.
     BOM_ORDERS = {
       "\xFF\xFE".b => Encoding::UTF_16LE, "\xFE\xFF".b => Encoding::UTF_16BE,
@@ -1406,15 +1410,21 @@ class Encoding
 
     # `__transcoding_run__` over all of `input` at once, into an `output`
     # without bound, or up to the first character that writes anything with
-    # `after_output`: a character the input ends in the middle of waits begun,
-    # and an error is the result, or nil.
+    # `after_output`, which reads a few bytes at a time so that stopping costs
+    # the same however much input is left: a character the bytes end in the
+    # middle of waits begun, and an error is the result, or nil.
     def __run_whole__(element, input, output, after_output)
       if element.decorator
         output << __decorated_all__(element, __read__(input, __unread__(input)))
         return nil
       end
+      bytes = input.bytes
       at = input.at
-      step = input.bytes.__transcode__(element.path, at, element.state, after_output ? STOP_AFTER_OUTPUT : 0, false)
+      if after_output
+        bytes = bytes.__byteslice__(at, AFTER_OUTPUT_BYTES)
+        at = 0
+      end
+      step = bytes.__transcode__(element.path, at, element.state, after_output ? STOP_AFTER_OUTPUT : 0, false)
       __needs_char_table__ if step.nil?
       element.state = step[9]
       out = step[0].b
@@ -1428,7 +1438,7 @@ class Encoding
         __skip__(input, step[4] - at)
         nil
       when :incomplete
-        __skip__(input, __unread__(input))
+        __skip__(input, bytes.bytesize - at)
         element.readbuf = step[2].b
         nil
       else
