@@ -56,6 +56,9 @@ class String
   # `lf_newline` is `universal_newline` again. Measured.
   NEWLINE_MODES = { "universal_newline" => 1, "lf_newline" => 1, "crlf_newline" => 2, "cr_newline" => 3 }.freeze
 
+  # The bit of `transcode::State` that says the source's BOM told its order.
+  BOM_READ = 64
+
   def encode(*args, **options)
     __transcoded__(args, options)
   end
@@ -374,6 +377,7 @@ class String
     unread = 0
     if source.__index__ == 7 || source.__index__ == 8
       step_source, start, unread = __bom_order__(text, source, target, options)
+      state = BOM_READ
     end
     stages = __path__(step_source, step_target)
     path = stages.map(&:__index__)
@@ -430,7 +434,7 @@ class String
       end
     end
     loop do
-      step = text.__transcode__(path, start, state, mode, false)
+      step = text.__transcode__(path, start, state, mode, true)
       __needs_char_table__ if step.nil?
       output, stop, _, _, following = step
       state = step[9]
@@ -442,7 +446,6 @@ class String
       out, state = inserted || __not_inserted__(piece, target)
       start = following
     end
-    out << "".__transcode__(path, 0, state, mode, true)[0].b
     __with_bom__(out, bom, target)
   end
 
@@ -1475,12 +1478,14 @@ class Encoding
       unit = element.unit
       if unit
         # Before its BOM, a BOM'd UTF-16 or UTF-32 reads a unit at a time:
-        # any other is invalid, and one cut short incomplete. Measured.
+        # any other is invalid, and one cut short incomplete, as one is after
+        # it too. Measured.
         return nil if read.bytesize < unit && !finish
         order = read.bytesize == unit ? BOM_ORDERS[read] : nil
         if order
           element.unit = nil
           element.path = [order.__index__, element.path[1]]
+          element.state |= String::BOM_READ
           return ["".b, :done]
         end
         return ["".b, read.bytesize < unit ? :incomplete : :invalid, read.dup, "".b]
