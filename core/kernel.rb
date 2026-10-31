@@ -126,6 +126,42 @@ module Kernel
     klass
   end
 
+  # What `name` answers, private or not, or what the block gives if there is
+  # nothing to call: CRuby's `rb_check_funcall`, which is how an implicit
+  # conversion looks. Nothing here is sent to an object that may not have it,
+  # so it may be a `BasicObject`. A `respond_to?` or `respond_to_missing?` of its
+  # own is asked and can say no, and a `method_missing` of its own is tried. A
+  # `NoMethodError` from that means nothing is there unless one of them said
+  # yes; a yes from `respond_to_missing?` alone no longer counts once `name` has
+  # been defined publicly along the way.
+  def self.__check_funcall__(object, name)
+    klass = __reflect_class_of__(object)
+    asked = missing = false
+    if __overrides__?(klass, :respond_to?, Kernel)
+      one = klass.instance_method(:respond_to?).arity == 1
+      asked = one ? object.__send__(:respond_to?, name) : object.__send__(:respond_to?, name, true)
+      return yield unless asked
+    end
+    return object.__send__(name) if klass.method_defined?(name) || klass.private_method_defined?(name)
+    if __overrides__?(klass, :respond_to_missing?, Kernel)
+      return yield unless object.__send__(:respond_to_missing?, name, true)
+      missing = true
+    end
+    return yield unless __overrides__?(klass, :method_missing, BasicObject)
+    begin
+      object.__send__(:method_missing, name)
+    rescue NoMethodError
+      raise if asked || (missing && !klass.public_method_defined?(name))
+      yield
+    end
+  end
+
+  # Whether `klass` has a `name`, whatever its visibility, other than `basic`'s.
+  def self.__overrides__?(klass, name, basic)
+    return false unless klass.method_defined?(name) || klass.private_method_defined?(name)
+    !klass.instance_method(name).owner.equal?(basic)
+  end
+
   # The objects `inspect` is part-way through, innermost last: what stops an
   # object that holds itself from inspecting forever. Per heap, on `Kernel`.
   def self.__inspecting__

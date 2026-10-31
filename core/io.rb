@@ -330,10 +330,10 @@ end
 
   def self.try_convert(object)
     return object if IO === object
-    return nil unless object.respond_to?(:to_io)
-    io = object.to_io
-    unless io.nil? || IO === io
-      raise TypeError, "can't convert #{object.class} to IO (#{object.class}#to_io gives #{io.class})"
+    io = Kernel.__check_funcall__(object, :to_io) { nil }
+    unless nil.equal?(io) || IO === io
+      klass = Kernel.__class_of__(object)
+      raise TypeError, "can't convert #{klass} to IO (#{klass}#to_io gives #{Kernel.__class_of__(io)})"
     end
     io
   end
@@ -1663,6 +1663,8 @@ end
     end
   end
 
+  def __held_bytes__ = @rbuf.bytesize
+
   def __take__(count)
     count = @rbuf.bytesize if count > @rbuf.bytesize
     taken = @rbuf.byteslice(0, count)
@@ -1831,12 +1833,16 @@ end
     raise ArgumentError, "negative string size (or size too big)" if length < 0
     # Measured: a zero length hands the buffer back as it was.
     return buffer || "" if length == 0
-    chunk = IO.__check__(__fd_pread__(@fileno, length, offset), @path)
+    chunk = __pread_bytes__(length, offset)
     raise EOFError, "end of file reached" if chunk.empty?
     return chunk if buffer.nil?
     # The caller's buffer keeps its encoding.
     encoding = buffer.encoding
     buffer.replace(chunk).force_encoding(encoding)
+  end
+
+  def __pread_bytes__(length, offset)
+    IO.__check__(__fd_pread__(@fileno, length, offset), @path)
   end
 
   # Only `gets` and `readline` set `$_`: `readlines` and `each_line` leave it.
@@ -2984,58 +2990,132 @@ end
     $_ = nil
   end
 
-  # From one IO or file to another, a block at a time. A source offset reads
-  # with `pread` and leaves the source where it was, as CRuby does.
+  # From one IO or file to another, a block at a time, as CRuby's
+  # `copy_stream_body`. Each end is an IO, one a String or a `to_path` names,
+  # or else a stream, with its own `read` and `write`. Between two IOs the bytes
+  # go by the descriptors, and those methods are not called. A source offset
+  # reads with `pread` and leaves the source where it was.
   def self.copy_stream(source, destination, length = nil, offset = nil)
     length = Integer.__index__(length) unless length.nil?
     position = offset.nil? ? nil : Integer.__index__(offset)
+    # Measured: a negative one is as good as none.
+    length = nil if length&.negative?
+    position = nil if position&.negative?
     close_source = close_destination = false
     copied = 0
     begin
-      # Anything with `to_path` is a file to `copy_stream_body`: the IO its
-      # `to_io` gives, or the one it names, and never its own `read` or `write`.
-      source = IO.try_convert(source) || source if source.respond_to?(:to_path)
-      unless IO === source || (!source.respond_to?(:to_path) && (source.respond_to?(:read) || source.respond_to?(:readpartial)))
-        source = File.open(File.__path__(source), "rb")
-        close_source = true
+      from_file = __copy_stream_file__?(source)
+      if from_file
+        # What `to_io` gives, or the file named, and never its own `read`.
+        source = IO.try_convert(source) || source
+        unless IO === source
+          source = File.open(File.__path__(source), "rb")
+          close_source = true
+        end
+        source.__readable__
+        source.__byte_readable__
       end
-      source.__readable__ if IO === source
-      destination = IO.try_convert(destination) || destination if destination.respond_to?(:to_path)
-      unless IO === destination || (!destination.respond_to?(:to_path) && destination.respond_to?(:write))
-        destination = File.open(File.__path__(destination), "wb")
-        close_destination = true
-      end
-      # An IO stays binary after the copy, whatever it was, as CRuby's
-      # `copy_stream_body` makes it, even for no bytes at all. It drops the
-      # converters unfinished, and the bytes go out as they are.
-      if IO === destination
+      to_file = __copy_stream_file__?(destination)
+      if to_file
+        destination = IO.try_convert(destination) || destination
+        unless IO === destination
+          destination = File.open(File.__path__(destination), "wb")
+          close_destination = true
+        end
+        # An IO stays binary after the copy, whatever it was, even for no
+        # bytes at all. It drops the converters unfinished, and the bytes go
+        # out as they are.
         destination.__writable__
         destination.__write_binmode__
       end
-      while length.nil? || copied < length
-        want = length.nil? ? 65536 : [65536, length - copied].min
-        chunk = if !position.nil? && IO === source
-                  begin
-                    source.pread(want, position + copied)
-                  rescue EOFError
-                    nil
+      # What the source has read ahead goes first, and counts whatever a
+      # stream's `write` answers.
+      if from_file && position.nil?
+        held = source.__take__(length || source.__held_bytes__)
+        unless held.empty?
+          to_file ? destination.__write_all__(held) : destination.__send__(:write, held)
+          copied = held.bytesize
+        end
+      end
+      rest = length.nil? ? nil : length - copied
+      unless rest == 0
+        copied += if from_file && to_file
+                    __copy_stream_bytes__(source, destination, rest, position)
+                  else
+                    __copy_stream_fallback__(source, destination, from_file, rest, position)
                   end
-                elsif IO === source || source.respond_to?(:readpartial)
-                  begin
-                    source.readpartial(want)
-                  rescue EOFError
-                    nil
-                  end
-                else
-                  source.read(want)
-                end
-        break if chunk.nil? || chunk.empty?
-        destination.write(chunk)
-        copied += chunk.bytesize
       end
     ensure
       source.close if close_source
       destination.close if close_destination
+    end
+    copied
+  end
+
+  # Whether `copy_stream` takes this end as an IO or a file.
+  def self.__copy_stream_file__?(stream)
+    IO === stream || String === stream || __copy_stream_answers__?(stream, :to_path)
+  end
+
+  # Whether a public `name` is there, as CRuby's `rb_respond_to`. A
+  # `respond_to?` of its own is asked, whatever its visibility; otherwise, and
+  # for a `BasicObject`, which has none, the object is looked at.
+  def self.__copy_stream_answers__?(stream, name)
+    if Kernel.__overrides__?(__reflect_class_of__(stream), :respond_to?, Kernel)
+      stream.__send__(:respond_to?, name)
+    else
+      Kernel.instance_method(:respond_to?).bind(stream).call(name)
+    end
+  end
+
+  # CRuby's `nogvl_copy_stream_func`: descriptor to descriptor.
+  def self.__copy_stream_bytes__(source, destination, length, position)
+    copied = 0
+    until copied == length
+      want = length.nil? || length - copied > 65536 ? 65536 : length - copied
+      chunk = if position.nil?
+                source.__partial__(want, nil, "readpartial")
+              else
+                source.__pread_bytes__(want, position + copied)
+              end
+      break if chunk.nil? || chunk.empty?
+      destination.__writable__
+      destination.__write_all__(chunk)
+      copied += chunk.bytesize
+    end
+    copied
+  end
+
+  # CRuby's `copy_stream_fallback`, when one end is a stream: one buffer, handed
+  # to `readpartial` or else `read` and then to `write`, and what `write`
+  # answers is what counts. Those are called whatever their visibility, and an
+  # `EOFError` from either ends the copy.
+  def self.__copy_stream_fallback__(source, destination, from_file, length, position)
+    raise ArgumentError, "cannot specify src_offset for non-IO" unless from_file || position.nil?
+    reader = __copy_stream_answers__?(source, :readpartial) ? :readpartial : :read unless from_file
+    buffer = "".b
+    rest = length
+    copied = 0
+    begin
+      until rest == 0
+        want = rest.nil? || rest > 16384 ? 16384 : rest
+        if !from_file
+          break if source.__send__(reader, want, buffer).nil? && reader == :read
+        elsif position.nil?
+          break if source.__partial__(want, buffer, "readpartial").nil?
+        else
+          chunk = source.__pread_bytes__(want, position)
+          break if chunk.empty?
+          buffer.replace(chunk)
+          position += chunk.bytesize
+        end
+        written = Integer.__index__(destination.__send__(:write, buffer))
+        copied += written
+        rest -= written unless rest.nil?
+        break if reader == :read && buffer.empty?
+      end
+    rescue EOFError
+      nil
     end
     copied
   end
