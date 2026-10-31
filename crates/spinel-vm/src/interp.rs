@@ -1023,7 +1023,8 @@ fn str_native(
             // `transcode::step`. `decorators` is the xml escape in its low two
             // bits, 0, 1 for text or 2 for an attribute's content, the newline
             // decorator in the next two, 0, 1 for universal, 2 for CRLF or 3
-            // for CR, and the attribute's quote in the next.
+            // for CR, the attribute's quote in the next, and in the next
+            // whether it stops after output.
             let path = array_elements(scope, arg(0))
                 .unwrap_or_default()
                 .iter()
@@ -1049,9 +1050,16 @@ fn str_native(
                 },
             };
             let finish = arg(4).is_truthy();
-            let Some(step) =
-                crate::transcode::step(&path, &bytes, start, &mut state, decorators, finish)
-            else {
+            let after_output = mode & 32 != 0;
+            let Some(step) = crate::transcode::step(
+                &path,
+                &bytes,
+                start,
+                &mut state,
+                decorators,
+                finish,
+                after_output,
+            ) else {
                 stack.push(Value::NIL);
                 return Ok(None);
             };

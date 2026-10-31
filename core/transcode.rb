@@ -717,6 +717,9 @@ class Encoding
     # The bit of `transcode::State` that `universal_newline` holds a CR in.
     HELD_CR = 32
     private_constant :HELD_CR
+    # The bit of `__transcode__`'s decorators that stops it after output.
+    STOP_AFTER_OUTPUT = 32
+    private_constant :STOP_AFTER_OUTPUT
     # Bytes read from the front.
     class Buffer
       attr_accessor :bytes, :at
@@ -1371,15 +1374,16 @@ class Encoding
           next
         end
         read = element.readbuf
-        if read.empty? && limit.nil? && flags & AFTER_OUTPUT == 0 && element.unit.nil? && __unread__(input) != 0
-          # With nowhere to stop between characters, they are read all at
-          # once.
-          result = __run_whole__(element, input, output)
-          return result if result
-          next
-        end
+        after_output = flags & AFTER_OUTPUT != 0
         if read.empty?
-          return :after_output if flags & AFTER_OUTPUT != 0 && output.bytesize != start
+          return :after_output if after_output && output.bytesize != start
+          if limit.nil? && element.unit.nil? && __unread__(input) != 0 && !(after_output && element.decorator)
+            # With nowhere to stop between characters, they are read all at
+            # once, up to the first that writes anything with `AFTER_OUTPUT`.
+            result = __run_whole__(element, input, output, after_output)
+            return result if result
+            next
+          end
           if __unread__(input) == 0
             return :source_buffer_empty if partial
             __finish_element__(element)
@@ -1401,15 +1405,16 @@ class Encoding
     end
 
     # `__transcoding_run__` over all of `input` at once, into an `output`
-    # without bound: a character the input ends in the middle of waits begun,
+    # without bound, or up to the first character that writes anything with
+    # `after_output`: a character the input ends in the middle of waits begun,
     # and an error is the result, or nil.
-    def __run_whole__(element, input, output)
+    def __run_whole__(element, input, output, after_output)
       if element.decorator
         output << __decorated_all__(element, __read__(input, __unread__(input)))
         return nil
       end
       at = input.at
-      step = input.bytes.__transcode__(element.path, at, element.state, 0, false)
+      step = input.bytes.__transcode__(element.path, at, element.state, after_output ? STOP_AFTER_OUTPUT : 0, false)
       __needs_char_table__ if step.nil?
       element.state = step[9]
       out = step[0].b
@@ -1420,7 +1425,7 @@ class Encoding
       output << out
       case step[1]
       when :done
-        __skip__(input, __unread__(input))
+        __skip__(input, step[4] - at)
         nil
       when :incomplete
         __skip__(input, __unread__(input))

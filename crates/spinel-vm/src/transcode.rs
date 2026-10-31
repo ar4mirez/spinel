@@ -685,8 +685,9 @@ fn unescaped(
 /// as they are. `state` is the conversion's at `start`, and is left as it is at
 /// `next`; `finish` ends the output once the input is all converted: closes
 /// `xml: :attr`'s quote, writes the CR `universal_newline` holds, and goes
-/// back to ASCII in ISO-2022-JP. `None` for a path with a step this VM has
-/// no converter for.
+/// back to ASCII in ISO-2022-JP. `after_output` stops after the first
+/// character that writes anything, `next` past it, as CRuby's `AFTER_OUTPUT`
+/// does. `None` for a path with a step this VM has no converter for.
 #[must_use]
 pub fn step(
     path: &[u8],
@@ -695,6 +696,7 @@ pub fn step(
     state: &mut State,
     decorators: Decorators,
     finish: bool,
+    after_output: bool,
 ) -> Option<Step> {
     let (&first, &end) = (path.first()?, path.last()?);
     let last = path.len() - 1;
@@ -763,6 +765,17 @@ pub fn step(
             }
         }
         at += len;
+        if after_output && !output.is_empty() {
+            return Some(Step {
+                output,
+                stop: Stop::Done,
+                error: Vec::new(),
+                readagain: Vec::new(),
+                next: at,
+                from: first,
+                to: end,
+            });
+        }
     }
     if finish {
         if let Some(stage) = decorate {
@@ -852,6 +865,18 @@ pub fn valid(encoding: u8, bytes: &[u8]) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `super::step` to the end of the input.
+    fn step(
+        path: &[u8],
+        bytes: &[u8],
+        start: usize,
+        state: &mut State,
+        decorators: Decorators,
+        finish: bool,
+    ) -> Option<Step> {
+        super::step(path, bytes, start, state, decorators, finish, false)
+    }
 
     fn xml(xml: Xml) -> Decorators {
         Decorators {
@@ -1160,6 +1185,26 @@ mod tests {
             newline(&TO_ISO_2022_JP, "\nあ\n".as_bytes(), Newline::Cr),
             b"\r\x1b$B$\"\x1b(B\r"
         );
+    }
+
+    #[test]
+    fn after_output_stops_past_the_first_character_that_writes() {
+        let mut state = State::default();
+        let path = [ISO_2022_JP, STATELESS_ISO_2022_JP, EUC_JP, UTF_8];
+        let bytes = b"\x1b$B\x1b(B\x1b$B$\"$$";
+        let s = super::step(
+            &path,
+            bytes,
+            0,
+            &mut state,
+            Decorators::default(),
+            false,
+            true,
+        )
+        .unwrap();
+        assert_eq!(s.output, "あ".as_bytes());
+        assert_eq!(s.stop, Stop::Done);
+        assert_eq!(s.next, 11);
     }
 
     #[test]
