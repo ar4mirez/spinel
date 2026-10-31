@@ -195,6 +195,22 @@ fn decode(encoding: u8, bytes: &[u8], at: usize) -> Decoded {
     }
 }
 
+/// Whether `short`, the end of a UTF-32 input and less than a unit, already
+/// says it is no character. CRuby's UTF-32BE and UTF-32LE decoders read byte
+/// by byte and take the rest of the unit with a byte that fails, so these are
+/// the bytes each fails at; UTF-32LE's first two can still become anything.
+/// The BOM'd UTF-32 reads whole units, whichever order, and has none. Measured.
+fn no_character(encoding: u8, short: &[u8]) -> bool {
+    let surrogate = |byte: &u8| (0xd8..=0xdf).contains(byte);
+    match (encoding, short) {
+        (UTF_32BE, [first, ..]) if *first != 0 => true,
+        (UTF_32BE, [_, second, ..]) if *second > 0x10 => true,
+        (UTF_32BE, [_, 0, third]) => surrogate(third),
+        (UTF_32LE, [_, second, third]) => *third > 0x10 || (*third == 0 && surrogate(second)),
+        _ => false,
+    }
+}
+
 /// `code` in `encoding`, or `None` when the encoding has no such character.
 #[must_use]
 pub fn encode(encoding: u8, code: u32) -> Option<Vec<u8>> {
@@ -270,8 +286,9 @@ pub struct Step {
 
 /// What a conversion keeps between steps, which Ruby holds as one Integer:
 /// ISO-2022-JP's decoder G0 in the low two bits and its encoder's in the
-/// next two, whether `xml: :attr` has opened its quote, and whether
-/// `universal_newline` holds a CR. A fresh conversion is 0.
+/// next two, whether `xml: :attr` has opened its quote, whether
+/// `universal_newline` holds a CR, and whether the source's BOM told its byte
+/// order. A fresh conversion is 0.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct State(pub u8);
 
@@ -306,6 +323,10 @@ impl State {
 
     fn set_held(&mut self, held: bool) {
         self.0 = self.0 & !32 | u8::from(held) << 5;
+    }
+
+    fn bom_read(self) -> bool {
+        self.0 & 64 != 0
     }
 }
 
@@ -683,9 +704,11 @@ fn unescaped(
 /// conversion passes through, as `Encoding::Converter.search_convpath` has
 /// them, or one encoding alone, whose characters are read, decorated and kept
 /// as they are. `state` is the conversion's at `start`, and is left as it is at
-/// `next`; `finish` ends the output once the input is all converted: closes
-/// `xml: :attr`'s quote, writes the CR `universal_newline` holds, and goes
-/// back to ASCII in ISO-2022-JP. `after_output` stops after the first
+/// `next`; `finish` says no byte follows `bytes`, so a UTF-32 unit they cut
+/// short that is already no character is invalid, not incomplete, and ends the
+/// output once the input is all converted: closes `xml: :attr`'s quote, writes
+/// the CR `universal_newline` holds, and goes back to ASCII in ISO-2022-JP.
+/// `after_output` stops after the first
 /// character that writes anything, `next` past it, as CRuby's `AFTER_OUTPUT`
 /// does. `None` for a path with a step this VM has no converter for.
 #[must_use]
@@ -731,6 +754,15 @@ pub fn step(
         let len = match hop(first, to, bytes, at, state, &mut stages.current) {
             Ok(len) => len,
             Err((stop, error_len, readagain)) => {
+                let stop = if stop == Stop::Incomplete
+                    && finish
+                    && !state.bom_read()
+                    && no_character(first, &bytes[at..])
+                {
+                    Stop::Invalid
+                } else {
+                    stop
+                };
                 let readagain_end = (at + error_len + readagain).min(bytes.len());
                 return Some(Step {
                     output,
@@ -911,6 +943,56 @@ mod tests {
         let s = run(&[UTF_8, UTF_16LE], b"a\xe3\x81");
         assert_eq!(s.stop, Stop::Incomplete);
         assert_eq!(s.error, b"\xe3\x81");
+    }
+
+    #[test]
+    fn a_utf32_unit_cut_short_is_invalid_where_it_is_already_no_character() {
+        let stop = |path: &[u8], bytes: &[u8]| run(path, bytes).stop;
+        for bytes in [
+            &b"\xff"[..],
+            b"\xff\x00",
+            b"\x00\x11",
+            b"\x00\x11\x00",
+            b"\x00\x00\xd8",
+        ] {
+            assert_eq!(stop(&[UTF_32BE, UTF_8], bytes), Stop::Invalid);
+        }
+        for bytes in [&b"\x00"[..], b"\x00\x00", b"\x00\x10\xff", b"\x00\x00\xe0"] {
+            assert_eq!(stop(&[UTF_32BE, UTF_8], bytes), Stop::Incomplete);
+        }
+        for bytes in [&b"\x00\x00\x11"[..], b"\x00\xd8\x00"] {
+            assert_eq!(stop(&[UTF_32LE, UTF_8], bytes), Stop::Invalid);
+        }
+        for bytes in [&b"\xff"[..], b"\xff\x00", b"\x00\xd8", b"\x00\xd8\x01"] {
+            assert_eq!(stop(&[UTF_32LE, UTF_8], bytes), Stop::Incomplete);
+        }
+        // More may follow: it waits for the rest of the unit.
+        let more = |state: &mut State| {
+            step(
+                &[UTF_32BE, UTF_8],
+                b"\xff\x00",
+                0,
+                state,
+                Decorators::default(),
+                false,
+            )
+        };
+        assert_eq!(
+            more(&mut State::default()).expect("a path").stop,
+            Stop::Incomplete
+        );
+        // After a BOM it is incomplete whatever the bytes.
+        let read = |state: &mut State| {
+            step(
+                &[UTF_32BE, UTF_8],
+                b"\xff\x00",
+                0,
+                state,
+                Decorators::default(),
+                true,
+            )
+        };
+        assert_eq!(read(&mut State(64)).expect("a path").stop, Stop::Incomplete);
     }
 
     #[test]
