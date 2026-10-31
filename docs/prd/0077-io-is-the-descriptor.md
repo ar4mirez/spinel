@@ -23,8 +23,9 @@ Corpus: the `bench/spec-status.md` on `main`.
 
 **`IO` is the descriptor; `File` opens one.** The read buffer, `gets` with
 its limits and paragraph mode, `read`, `seek`, `pos`, `write` and the rest
-move from `File` to `IO` unchanged. `File#initialize` opens a path and hands
-the descriptor to `IO#__setup__`, which every way of making an IO shares:
+move from `File` to `IO` unchanged. `File#initialize` reads the mode with
+`IO#__modeenc__`, opens a path and hands the descriptor to `IO#__open_fd__`,
+the two halves of `IO#__setup__`, which every way of making an IO shares:
 `IO.new` checks its descriptor with `fcntl(F_GETFL)` and refuses a mode the
 descriptor does not allow (`EINVAL`, measured), `IO.pipe` makes two without
 calling `new` (measured: a class that redefines `new` is not asked), and the

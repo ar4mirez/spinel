@@ -304,11 +304,18 @@ end
     fds = IO.__check__(__fd_pipe__)
     # Measured: made without `new`, so a class that redefines it is not asked.
     reader = allocate
-    reader.__send__(:initialize, fds[0], "r", **options)
+    # `replace:` is read with the encodings, by `set_encoding`, or not at all.
+    reader.__send__(:initialize, fds[0], "r", **options.reject { |key, _| key == :replace })
     writer = allocate
     writer.__send__(:initialize, fds[1], "w")
     writer.sync = true
-    reader.set_encoding(*encodings, **options) unless encodings.empty?
+    begin
+      reader.set_encoding(*encodings, **options) unless encodings.empty?
+    rescue Exception
+      reader.close
+      writer.close
+      raise
+    end
     pair = [reader, writer]
     return pair unless block_given?
     begin
@@ -323,7 +330,7 @@ end
     return object if IO === object
     return nil unless object.respond_to?(:to_io)
     io = object.to_io
-    unless IO === io
+    unless io.nil? || IO === io
       raise TypeError, "can't convert #{object.class} to IO (#{object.class}#to_io gives #{io.class})"
     end
     io
@@ -404,6 +411,13 @@ end
   # What every way of making an IO shares: a descriptor and a mode, with the
   # options that refine it.
   def __setup__(fd, mode, options)
+    __open_fd__(fd, options, __modeenc__(mode, options))
+  end
+
+  # CRuby's `rb_io_extract_modeenc`, which reads the mode and the options
+  # before anything is opened or started, so one it refuses creates no file,
+  # truncates none and runs no child. Answers whether the mode asks for a BOM.
+  def __modeenc__(mode, options)
     # Measured: `mode: nil` beside a mode is no second mode.
     unless options[:mode].nil?
       raise ArgumentError, "mode specified twice" unless mode.nil?
@@ -446,7 +460,6 @@ end
       end
       named = true
     end
-    @fileno = fd
     # 0 reads, 1 writes, 2 does both: `O_ACCMODE`, the same on every target.
     @access = flags & 3
     @append = flags & File::APPEND != 0
@@ -465,7 +478,17 @@ end
     if textmode && @access != 1 && %i[newline universal_newline crlf_newline cr_newline lf_newline].all? { |key| @ecopts[key].nil? }
       @ecopts[:universal_newline] = true
     end
+    # What makes a write want an ASCII-compatible String, on a duplex child's
+    # write side too, which has no decorator of its own: a newline decorator
+    # here, so `"r+t"` but not `"wt"`, which has none. Measured.
+    @textmode = __newline_decorator__? ? true : false
     __validate_enc_binmode__
+    bom
+  end
+
+  # The descriptor of an IO `__modeenc__` has read the mode of.
+  def __open_fd__(fd, options, bom)
+    @fileno = fd
     @rbuf = "".b
     @cbuf = "".b
     @lineno = 0
@@ -535,6 +558,12 @@ end
     %i[invalid undef replace xml newline universal_newline crlf_newline cr_newline lf_newline fallback].each do |key|
       kept[key] = options[key] if options.key?(key)
     end
+    # CRuby's `rb_econv_prepare_options` refuses a broken one here, and keeps a
+    # frozen copy, rather than leaving that to a conversion that uses it.
+    unless kept[:replace].nil?
+      replacement = String.__replacement_option__(kept[:replace])
+      kept[:replace] = replacement.frozen? ? replacement : replacement.dup.freeze
+    end
     kept
   end
 
@@ -591,10 +620,24 @@ end
   # The descriptor writes go to: a duplex child's own write end, or the one.
   def __wfd__ = @wfileno || @fileno
 
+  # Whether this is a duplex child still read from. CRuby makes that two IOs,
+  # and the one `tied_io_for_writing` holds has no encoding and no options:
+  # what `IO.popen` was given, and `set_encoding`, are the read side's, so a
+  # write goes out as it is. `@textmode` is both sides', and `@wbinary` says
+  # the write side has been made binary, for when `close_read` leaves only it.
+  def __tied__? = !@wfileno.nil? && !@rclosed
+
   def close_read
     return nil if @closed
     unless @wfileno.nil?
-      __fd_close__(@fileno) unless @rclosed
+      unless @rclosed
+        __fd_close__(@fileno)
+        # What is left is CRuby's write side, whose encodings are its own.
+        @enc = @wbinary ? Encoding::BINARY : nil
+        @enc2 = nil
+        @binmode = true if @wbinary
+        @ecopts = {}
+      end
       @rclosed = true
       @finalizer&.fd = nil
       @access = 1
@@ -710,7 +753,23 @@ end
 
   def binmode
     __check_open__
+    @wbinary = true
+    __ascii8bit_binmode__
+    self
+  end
+
+  # What `IO.copy_stream` does to the IO it writes to: of a duplex child, only
+  # the write side, as `rb_io_get_write_io` gives it.
+  def __write_binmode__
+    return __ascii8bit_binmode__ unless __tied__?
+    @wbinary = true
+    @textmode = false
+  end
+
+  # CRuby's `rb_io_ascii8bit_binmode`.
+  def __ascii8bit_binmode__
     @binmode = true
+    @textmode = false
     @enc = Encoding::BINARY
     @enc2 = nil
     # CRuby drops the converter unfinished, an attribute's quote and all.
@@ -720,7 +779,6 @@ end
     # the flags and drops the rest, so `xml:` and the error handling go with
     # the newline decorators.
     @ecopts = {}
-    self
   end
 
   def binmode?
@@ -804,7 +862,7 @@ end
   def external_encoding
     return @enc2 unless @enc2.nil?
     # One that writes has an encoding only when it was given one.
-    return @enc if @access != 0
+    return @enc if @access != 0 && !__tied__?
     __read_encoding__
   end
 
@@ -828,14 +886,17 @@ end
       raise ArgumentError, "wrong number of arguments (given #{encodings.size}, expected 1..2)"
     end
     first, second = encodings
-    ecopts = __kept_ecopts__(options)
+    # The options are read after the encodings and only where CRuby's
+    # `io_encoding_set` reads them, and a `replace:` refused changes nothing.
     if !second.nil?
       external = __encoding_arg__(first)
-      if !(Encoding === second) && second.to_str == "-"
+      none = !(Encoding === second) && second.to_str == "-"
+      internal = __encoding_arg__(second) unless none
+      ecopts = __kept_ecopts__(options)
+      if none
         @enc = external
         @enc2 = nil
       else
-        internal = __encoding_arg__(second)
         @enc = internal
         @enc2 = internal == external ? nil : external
       end
@@ -853,12 +914,15 @@ end
       # A `bom|` here names the encoding and reads nothing: CRuby reads past a
       # mark only when it opens.
       _, _, _, external, internal, bom = IO.__parse_mode__("r:#{text}")
+      ecopts = __kept_ecopts__(options)
       __ext_int_to_encs__(external, internal, bom)
     else
       __ext_int_to_encs__(__encoding_arg__(first), nil)
       ecopts = __kept_ecopts__({})
     end
     @ecopts = ecopts
+    # From here `@ecopts` says, but a duplex child's write side is not this.
+    @textmode = false unless __tied__?
     # CRuby drops the converter unfinished: an attribute's quote open is
     # never closed, and the next write opens another. The read converter
     # goes too, with the characters it held.
@@ -1246,6 +1310,10 @@ end
   # one. `@xml_quote` is nil before there is a converter, then whether the
   # quote is open.
   def __encode_out__(text)
+    if __tied__?
+      __refuse_for_text_mode__(text) if @textmode && !text.encoding.ascii_compatible?
+      return text
+    end
     options = __write_ecopts__
     newline = String.__newline_decorators__(options).first
     target = @enc2 || (@enc == Encoding::BINARY ? nil : @enc)
@@ -1269,8 +1337,8 @@ end
       # No conversion: the decorators work on the bytes, which a text mode
       # IO — any newline option makes one, `xml:` does not — wants
       # ASCII-compatible.
-      if !text.encoding.ascii_compatible? && %i[newline universal_newline crlf_newline cr_newline lf_newline].any? { |key| @ecopts[key] }
-        raise ArgumentError, "ASCII incompatible string written for text mode IO without encoding conversion: #{text.encoding}"
+      if !text.encoding.ascii_compatible? && (@textmode || %i[newline universal_newline crlf_newline cr_newline lf_newline].any? { |key| @ecopts[key] })
+        __refuse_for_text_mode__(text)
       end
       return text if newline.nil? && xml.nil?
       decorators = options.select { |key, _| %i[newline crlf_newline cr_newline lf_newline xml].include?(key) }
@@ -1291,6 +1359,10 @@ end
     # runs the decorators over its bytes, invalid ones and all.
     return text if newline.nil? && xml.nil? && text.encoding == target
     __open_quote__(text.encode(target, **options), xml)
+  end
+
+  def __refuse_for_text_mode__(text)
+    raise ArgumentError, "ASCII incompatible string written for text mode IO without encoding conversion: #{text.encoding}"
   end
 
   # CRuby's `make_writeconv`, for an encoding that is not ASCII-compatible:
@@ -2579,6 +2651,8 @@ end
     mode = options[:mode] if mode.nil? && options.key?(:mode)
     mode = __mode_letters__ if mode.nil?
     flags = IO.__parse_mode__(mode)[0]
+    # Read once, and refused before the file is opened, or truncated.
+    options = options.merge(__ecopts__(options).slice(:replace))
     fd = IO.__check__(__fd_open__(path, flags, 0666), path, "rb_sysopen")[0]
     if @closed
       @fileno = fd
@@ -2641,6 +2715,10 @@ end
     io_keys = %i[external_encoding internal_encoding encoding textmode binmode autoclose invalid undef replace newline universal_newline crlf_newline cr_newline lf_newline xml]
     io_options = options.select { |key, _| io_keys.include?(key) }
     spawn_options = command_options.merge(options.reject { |key, _| io_keys.include?(key) })
+    # Read before the child starts, as `rb_io_popen` does, in the mode as it
+    # was given. A pipe has no BOM read past, however the mode names one.
+    io = allocate
+    io.__modeenc__(mode, io_options)
     child_in = child_out = parent_r = parent_w = nil
     if access != 1
       parent_r, child_out = IO.__check__(__fd_pipe__)
@@ -2657,17 +2735,8 @@ end
       __fd_close__(child_in) unless child_in.nil?
       __fd_close__(child_out) unless child_out.nil?
     end
-    io = allocate
-    if access == 2
-      io.__setup__(parent_r, "r+", io_options)
-      io.__pid__(pid, parent_w)
-    elsif access == 1
-      io.__setup__(parent_w, mode, io_options)
-      io.__pid__(pid)
-    else
-      io.__setup__(parent_r, mode, io_options)
-      io.__pid__(pid)
-    end
+    io.__open_fd__(access == 1 ? parent_w : parent_r, io_options, false)
+    io.__pid__(pid, access == 2 ? parent_w : nil)
     io.sync = true if access != 0
     return io unless block
     begin
@@ -2759,19 +2828,31 @@ end
   # From one IO or file to another, a block at a time. A source offset reads
   # with `pread` and leaves the source where it was, as CRuby does.
   def self.copy_stream(source, destination, length = nil, offset = nil)
-    close_source = close_destination = false
-    unless IO === source || source.respond_to?(:read) || source.respond_to?(:readpartial)
-      source = File.open(File.__path__(source), "rb")
-      close_source = true
-    end
-    unless IO === destination || destination.respond_to?(:write)
-      destination = File.open(File.__path__(destination), "wb")
-      close_destination = true
-    end
     length = Integer.__index__(length) unless length.nil?
+    position = offset.nil? ? nil : Integer.__index__(offset)
+    close_source = close_destination = false
     copied = 0
     begin
-      position = offset.nil? ? nil : Integer.__index__(offset)
+      # Anything with `to_path` is a file to `copy_stream_body`: the IO its
+      # `to_io` gives, or the one it names, and never its own `read` or `write`.
+      source = IO.try_convert(source) || source if source.respond_to?(:to_path)
+      unless IO === source || (!source.respond_to?(:to_path) && (source.respond_to?(:read) || source.respond_to?(:readpartial)))
+        source = File.open(File.__path__(source), "rb")
+        close_source = true
+      end
+      source.__readable__ if IO === source
+      destination = IO.try_convert(destination) || destination if destination.respond_to?(:to_path)
+      unless IO === destination || (!destination.respond_to?(:to_path) && destination.respond_to?(:write))
+        destination = File.open(File.__path__(destination), "wb")
+        close_destination = true
+      end
+      # An IO stays binary after the copy, whatever it was, as CRuby's
+      # `copy_stream_body` makes it, even for no bytes at all. It drops the
+      # converters unfinished, and the bytes go out as they are.
+      if IO === destination
+        destination.__writable__
+        destination.__write_binmode__
+      end
       while length.nil? || copied < length
         want = length.nil? ? 65536 : [65536, length - copied].min
         chunk = if !position.nil? && IO === source

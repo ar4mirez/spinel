@@ -678,9 +678,12 @@ class String
   def self.__coerce__(value)
     return value if value.is_a?(String)
     unless value.respond_to?(:to_str)
-      raise TypeError, "no implicit conversion of #{value.nil? ? 'nil' : value.class} into String"
+      shown = case value when nil, true, false then value.inspect else value.class end
+      raise TypeError, "no implicit conversion of #{shown} into String"
     end
-    value.to_str
+    string = value.to_str
+    return string if string.is_a?(String)
+    raise TypeError, "can't convert #{value.class} to String (#{value.class}#to_str gives #{string.class})"
   end
 end
 

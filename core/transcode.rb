@@ -528,12 +528,15 @@ class String
   # U+FFFD for a Unicode target and "?" for any other.
   def self.__replacement__(target, options)
     replacement = options[:replace]
-    unless replacement.nil?
-      replacement = String.__coerce__(replacement)
-      raise ArgumentError, "replacement string is broken: #{replacement.dump} as #{replacement.encoding}" unless replacement.valid_encoding?
-      return replacement
-    end
+    return __replacement_option__(replacement) unless replacement.nil?
     __unicode__(target) ? "�" : "?"
+  end
+
+  # A `replace:` as a String, refused when it is broken in its own encoding.
+  def self.__replacement_option__(replacement)
+    replacement = String.__coerce__(replacement)
+    raise ArgumentError, "replacement string is broken: #{replacement.dump} as #{replacement.encoding}" unless replacement.valid_encoding?
+    replacement
   end
 
   # What `fallback:` answers for an undefined character, as a String.
