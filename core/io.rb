@@ -4,11 +4,11 @@
 # answers an errno on failure. The rest, which is most of it, is Ruby.
 #
 # The read buffer is `@rbuf`, bytes the descriptor has moved past and the
-# reader has not: `pos` subtracts it, a relative seek adjusts for it, and a
-# write after a read seeks back over it first.
+# reader has not: `pos` gives it back and counts what stays, a relative seek
+# adjusts for it, and a write after a read seeks back over it first.
 #
-# ponytail: no write buffer, so `sync` is only recorded and `flush` has
-# nothing to do; and conversion between an external and an internal encoding
+# ponytail: no write buffer, so `flush` has nothing to do and `sync` only says
+# what a `write` of several does with what it has gathered; and conversion between an external and an internal encoding
 # is done a whole read or a whole line at a time, by `String#encode`, unless
 # one of them is stateful, where the IO keeps a converter (`__stream_in__?`).
 # That stream decoder for every read is the upgrade, when a spec needs a line
@@ -548,6 +548,8 @@ end
     @writeconv = nil
     @wpre = nil
     @xml_quote = nil
+    # The writes in progress are the original's.
+    @wgathered = nil
     # And a finalizer of its own, for the descriptor of its own.
     @finalizer = nil
     __arm__
@@ -1203,15 +1205,17 @@ end
 
   # `__finish_in__` where the IO keeps a converter, which writes what it has
   # left, an attribute's closing quote or the escape back to ASCII among it,
-  # and goes: the next read that gets this far makes another.
+  # and goes: the next read that gets this far makes another. One that raises
+  # stays, as CRuby's `fill_cbuf` keeps it, for the next read to have what it
+  # has left, a CR it held as a newline among it. Measured.
   def __finish_readconv__
     if @rfinished
       @rfinished = false
       return nil
     end
-    converter = @readconv || __make_readconv__
+    @readconv ||= __make_readconv__
+    out = @readconv.finish
     @readconv = nil
-    out = converter.finish
     return nil if out.empty?
     @rfinished = true
     out
@@ -1357,11 +1361,11 @@ end
   #
   # `xml: :attr`'s quote is the stream's, not each write's: CRuby's
   # `make_writeconv` keeps that stateful decorator in the IO's own converter,
-  # made by the first write that is not empty, which opens the quote with the
-  # first character it is given and closes it when the IO closes. So a write
-  # is escaped without its quotes, and the first with anything in it opens
-  # one. `@xml_quote` is nil before there is a converter, then whether the
-  # quote is open.
+  # made by the first write of a String that is not empty or of any number
+  # other than one, which opens the quote with the first character it is given
+  # and closes it when the IO closes. So a write is escaped without its quotes,
+  # and the first with anything in it opens one. `@xml_quote` is nil before
+  # there is a converter, then whether the quote is open.
   #
   # What the first write that needs a conversion finds stays: the options in
   # `@wpre`, and in `@wtarget` the encoding, unless that is `:current`, which
@@ -1440,10 +1444,11 @@ end
 
   # CRuby's `make_writeconv`. For an encoding that is not ASCII-compatible it
   # makes the converter into it from the ASCII-compatible encoding it pairs
-  # with, with only the error handling. Done once, by the first write that is
-  # not empty: `reopen` keeps it all, and writes go on through it, as CRuby's
-  # do, whatever it opened. Without an encoding, or with a converter to go on
-  # through, the encoding stays as well. Measured.
+  # with, with only the error handling. Done once, by the first write of a
+  # String that is not empty or of any number other than one: `reopen` keeps it
+  # all, and writes go on through it, as CRuby's do, whatever it opened. Without
+  # an encoding, or with a converter to go on through, the encoding stays as
+  # well. Measured.
   def __make_writeconv__
     return if @wpre
     options = __write_ecopts__
@@ -1473,14 +1478,29 @@ end
   # What CRuby's `finish_writeconv` writes when the IO closes: the closing
   # quote, or `""` if no character opened it, and the converter's end, the
   # escape back to ASCII. An error raises having written nothing more: a
-  # character a write began and none finished. Measured.
+  # character a write began and none finished. What writes in progress have
+  # gathered goes first, as CRuby flushes its write buffer. Measured.
   def __finish_writeconv__
+    __flush_gathered__
     quote = __closing_quote__(@xml_quote)
     converter = @writeconv
     __clear_writeconv__
     return if quote.nil? && converter.nil?
     closing = IO.__closing__(quote, converter)
     __write_all__(closing) unless closing.empty?
+  end
+
+  # Each write in progress, oldest first, and emptied, as it may yet write the
+  # rest. A tty has no write buffer: the list goes, which tells each of them
+  # to look at the IO itself. A write that succeeds never asks `tty?`. With the
+  # write side closed, a `close_write` has flushed them and the rest go nowhere.
+  def __flush_gathered__
+    return if @wclosed || @wgathered.nil? || @wgathered.empty?
+    return @wgathered = nil if tty?
+    @wgathered.dup.each do |text|
+      __write_all__(text)
+      text.clear
+    end
   end
 
   # The converter gone unfinished, with the quote.
@@ -2545,12 +2565,13 @@ end
   end
 
   # CRuby gives the bytes buffered back to find where the reader is, and
-  # drops the converters with them, as `seek` does. Measured.
+  # drops the converters with them, as `seek` does: what `ungetc` put there
+  # goes too, unless that would seek before the start, and then they all
+  # stay and count. Measured.
   def pos
     __check_open__
-    position = IO.__check__(__fd_seek__(@fileno, 0, IO::SEEK_CUR), @path)[0] - @rbuf.bytesize
-    __clear_codeconv__ unless @rbuf.empty?
-    position
+    __unread__
+    IO.__check__(__fd_seek__(@fileno, 0, IO::SEEK_CUR), @path)[0] - @rbuf.bytesize
   end
   alias tell pos
 
@@ -2561,35 +2582,59 @@ end
 
   # --- writing ---------------------------------------------------------------
 
+  # CRuby's `io_write_m`. One object is `io_write`, which makes it a String
+  # before it looks at the IO, and for an empty one looks no further. Any other
+  # number is `io_writev`, which checks the IO first, and an empty String goes
+  # through the converter like another, so that makes one, an attribute's quote
+  # and all. Measured.
   def write(*objects)
-    __check_open__
-    # Measured: nothing to write is not checked against the mode.
-    return 0 if objects.all? { |object| String === object && object.empty? }
-    __writable__
-    return 0 if objects.empty?
     if objects.size == 1
       text = objects[0]
       text = text.to_s unless String === text
-      text = __encode_out__(text)
-    else
-      # One system call for all of them, as `writev` would be.
-      text = "".b
-      converted = false
-      begin
-        objects.each do |object|
-          object = object.to_s unless String === object
-          text << __encode_out__(object).b
-        end
-        converted = true
-      ensure
-        __write_partial__(text) unless converted
-      end
+      return 0 if text.empty?
+      __writable__
+      return __write_all__(__encode_out__(text))
     end
-    __write_all__(text)
+    __writable__
+    __write_gathered__(objects)
+  end
+
+  # One system call for all of them, as `writev` would be, and only `writev` is
+  # the one for a sync IO or a tty: the rest are CRuby's write buffer, listed in
+  # `@wgathered` while a `to_s` can run, one for each write in progress, so a
+  # `close` there writes what came before. What comes after goes in with no
+  # descriptor to reach, and counts. Measured.
+  # ponytail: only `close` sees `@wgathered`, so a write from a `to_s` goes
+  # ahead of it where CRuby's goes after; upgrade with a real write buffer.
+  # ponytail: `sync` is read once, where `io_writev` tests it for each object,
+  # and a `to_s` that closes a sync IO raises even with nothing to write, where
+  # CRuby's returns; upgrade by walking the objects as `io_writev` does (#529).
+  def __write_gathered__(objects)
+    text = "".b
+    total = 0
+    gathering = !@sync
+    (@wgathered ||= []) << text if gathering
+    converted = false
+    begin
+      objects.each do |object|
+        object = object.to_s unless String === object
+        piece = __encode_out__(object).b
+        total += piece.bytesize
+        text << piece
+      end
+      converted = true
+    ensure
+      @wgathered&.delete_if { |listed| listed.equal?(text) }
+      __write_partial__(text) unless converted
+    end
+    closed = @closed || @wclosed
+    raise IOError, "closed stream" if closed && !(gathering && @wgathered)
+    __write_all__(text) unless closed || text.empty?
+    total
   end
 
   def __write_partial__(text)
-    __write_all__(text) unless @sync || tty?
+    __write_all__(text) unless @wclosed || @sync || tty?
   rescue StandardError
     nil
   end
@@ -2686,7 +2731,7 @@ end
       array = Array === line ? line : (line.respond_to?(:to_ary, true) ? line.to_ary : nil)
       if Array === array
         if seen.any? { |outer| outer.equal?(array) }
-          __puts_line__("[...]\n")
+          __puts_line__("[...]".b)
         else
           __puts_lines__(array, seen + [array])
         end
