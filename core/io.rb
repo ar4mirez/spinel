@@ -536,6 +536,7 @@ end
     @ecopts = @ecopts.dup
     # A converter of its own, so an attribute's quote of its own.
     @writeconv = nil
+    @wpre = nil
     @xml_quote = nil
     # And a finalizer of its own, for the descriptor of its own.
     @finalizer = nil
@@ -1327,15 +1328,26 @@ end
   # is escaped without its quotes, and the first with anything in it opens
   # one. `@xml_quote` is nil before there is a converter, then whether the
   # quote is open.
+  #
+  # What the first write that needs a conversion finds stays: the options in
+  # `@wpre`, and in `@wtarget` the encoding, unless that is `:current`, which
+  # goes on following the IO's. `reopen` changes neither, whatever it takes.
+  # Measured.
   def __encode_out__(text)
     if __tied__?
       __refuse_for_text_mode__(text) if @textmode && !text.encoding.ascii_compatible?
       return text
     end
-    options = __write_ecopts__
+    return text unless __need_writeconv__?
+    __make_writeconv__
+    options = @wpre
+    target = @wtarget
+    if target.equal?(:current)
+      target = __write_target__
+      return text if target.nil?
+    end
     newline = String.__newline_decorators__(options).first
-    target = @enc2 || (@enc == Encoding::BINARY ? nil : @enc)
-    ascii = __make_writeconv__(target, options)
+    ascii = @writeconv&.source_encoding
     xml = options[:xml]
     if (xml == :attr || xml.equal?(XML_BOTH)) && @xml_quote.nil?
       __xml_quote__(false)
@@ -1375,7 +1387,7 @@ end
     end
     # In its own encoding a String is still decorated: CRuby's `encode`
     # runs the decorators over its bytes, invalid ones and all.
-    return text if newline.nil? && xml.nil? && text.encoding == target
+    return text if newline.nil? && xml.nil? && text.encoding == target && options[:invalid] != :replace
     __open_quote__(text.encode(target, **options), xml)
   end
 
@@ -1383,19 +1395,33 @@ end
     raise ArgumentError, "ASCII incompatible string written for text mode IO without encoding conversion: #{text.encoding}"
   end
 
-  # CRuby's `make_writeconv`, for an encoding that is not ASCII-compatible:
-  # the converter into it from the ASCII-compatible encoding it pairs with,
-  # with only the error handling. That encoding, or nil with no converter.
-  # Made once, by the first write that is not empty: `reopen` keeps it, and
-  # writes go on through it, as CRuby's do, whatever it opened. Measured.
-  def __make_writeconv__(target, options)
-    return @writeconv.source_encoding if @writeconv
+  # The encoding the IO writes: `@enc2`, or `@enc` unless that is BINARY.
+  def __write_target__ = @enc2 || (@enc == Encoding::BINARY ? nil : @enc)
+
+  # CRuby's `NEED_WRITECONV`.
+  def __need_writeconv__?
+    !__write_target__.nil? || @textmode || __newline_decorator__? || !@ecopts[:xml].nil?
+  end
+
+  # CRuby's `make_writeconv`. For an encoding that is not ASCII-compatible it
+  # makes the converter into it from the ASCII-compatible encoding it pairs
+  # with, with only the error handling. Done once, by the first write that is
+  # not empty: `reopen` keeps it all, and writes go on through it, as CRuby's
+  # do, whatever it opened. Without an encoding, or with a converter to go on
+  # through, the encoding stays as well. Measured.
+  def __make_writeconv__
+    return if @wpre
+    options = __write_ecopts__
+    target = __write_target__
     ascii = target && Encoding::Converter.asciicompat_encoding(target)
-    return nil if ascii.nil?
-    @writeconv = __converter__(ascii, target, options.slice(:invalid, :undef, :replace))
-    @finalizer&.writeconv = @writeconv
-    IO.__unfinished__[self] = true
-    ascii
+    unless ascii.nil?
+      @writeconv = __converter__(ascii, target, options.slice(:invalid, :undef, :replace))
+      @finalizer&.writeconv = @writeconv
+      IO.__unfinished__[self] = true
+    end
+    stateful = options[:xml] == :attr || options[:xml].equal?(XML_BOTH)
+    @wtarget = target.nil? || ascii || stateful ? target : :current
+    @wpre = options
   end
 
   # What `encode` with `xml: :attr` made, in an ASCII-compatible encoding,
@@ -1416,8 +1442,8 @@ end
   def __finish_writeconv__
     quote = __closing_quote__(@xml_quote)
     converter = @writeconv
-    return if quote.nil? && converter.nil?
     __clear_writeconv__
+    return if quote.nil? && converter.nil?
     closing = IO.__closing__(quote, converter)
     __write_all__(closing) unless closing.empty?
   end
@@ -1425,6 +1451,7 @@ end
   # The converter gone unfinished, with the quote.
   def __clear_writeconv__
     @writeconv = nil
+    @wpre = nil
     __xml_quote__(nil)
   end
 
@@ -2689,20 +2716,15 @@ end
   # CRuby's `io_reopen`. A reader's bytes buffered go, and the read converter
   # with them; what the descriptor is at then decides what else does. The
   # other IO gives back its own, and this one takes all it is but `autoclose`,
-  # which either can turn off, and the options that are not newlines, which
-  # stay. Measured.
-  # ponytail: those stay as CRuby's do once a write has fixed them. Before a
-  # write, and for reads always, CRuby takes the other's; that needs them
-  # apart from `@ecopts`, a snapshot at the first write.
+  # which either can turn off, and what its first write fixed, which stays for
+  # its writes while reads go by what it took. Measured.
   def __reopen_io__(other)
     other.__check_open__
     __check_open__
     return self if other.equal?(self)
     __unread__(true) if @access == 0
     position = other.__seekable_pos__ unless other.__access__ == 1
-    kept = @ecopts.slice(:invalid, :undef, :replace, :fallback, :xml)
     @access, @append, @oflags, @binmode, @textmode, @sync, @enc, @enc2, @ecopts, @lineno, @pid = other.__modes__
-    @ecopts.update(kept)
     @autoclose &&= other.autoclose?
     @finalizer&.autoclose = @autoclose
     @path = other.path
@@ -2720,8 +2742,7 @@ end
 
   # What `reopen` takes from this IO.
   def __modes__
-    newlines = @ecopts.slice(:newline, :universal_newline, :crlf_newline, :cr_newline, :lf_newline)
-    [@access, @append, @oflags, @binmode, @textmode, @sync, @enc, @enc2, newlines, @lineno, @pid]
+    [@access, @append, @oflags, @binmode, @textmode, @sync, @enc, @enc2, @ecopts.dup, @lineno, @pid]
   end
 
   # Where the descriptor is, once it has given back what is buffered.
