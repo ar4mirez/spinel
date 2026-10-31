@@ -35,7 +35,7 @@ class Regexp
       __warning__("flags ignored") unless flags.nil?
     else
       unless pattern.is_a?(String)
-        text = String.__coerce__(pattern)
+        text = pattern.respond_to?(:to_str) ? pattern.to_str : String.__coerce__(pattern)
         # CRuby 4.1's wording, `into` where 4.0 said `to`
         # (bugs.ruby-lang.org/issues/21864), which ruby/spec checks on every
         # engine but CRuby before 4.1.
