@@ -465,8 +465,6 @@ end
     ecopts = __ecopts__(options)
     # 0 reads, 1 writes, 2 does both: `O_ACCMODE`, the same on every target.
     @access = flags & 3
-    @append = flags & File::APPEND != 0
-    @oflags = flags
     @binmode = binmode
     if named
       __ext_int_to_encs__(external, internal, bom)
@@ -487,6 +485,7 @@ end
     # here, so `"r+t"` but not `"wt"`, which has none. Measured.
     @textmode = __newline_decorator__? ? true : false
     __validate_enc_binmode__
+    @oflags = flags
     bom
   end
 
@@ -2729,7 +2728,7 @@ end
     return self if other.equal?(self)
     __unread__(true) if @access == 0
     position = other.__seekable_pos__ unless other.__access__ == 1
-    @access, @append, @oflags, @binmode, @textmode, @sync, @enc, @enc2, @ecopts, @lineno, @pid = other.__modes__
+    @access, @oflags, @binmode, @textmode, @sync, @enc, @enc2, @ecopts, @lineno, @pid = other.__modes__
     @wpre = @wpre.reject { |key, _| %i[newline universal_newline crlf_newline cr_newline lf_newline].include?(key) } if @wpre && @binmode
     @autoclose &&= other.autoclose?
     @finalizer&.autoclose = @autoclose
@@ -2748,7 +2747,7 @@ end
 
   # What `reopen` takes from this IO.
   def __modes__
-    [@access, @append, @oflags, @binmode, @textmode, @sync, @enc, @enc2, @ecopts.dup, @lineno, @pid]
+    [@access, @oflags, @binmode, @textmode, @sync, @enc, @enc2, @ecopts.dup, @lineno, @pid]
   end
 
   # Where the descriptor is, once it has given back what is buffered.
