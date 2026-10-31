@@ -342,7 +342,7 @@ class File < IO
   end
 
   def truncate(length)
-    __writable__
+    __writable__(false)
     IO.__check__(__fs_truncate__(@fileno, Integer.__index__(length)), @path)
     0
   end

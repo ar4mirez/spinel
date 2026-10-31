@@ -307,7 +307,9 @@ end
     # `replace:` is read with the encodings, by `set_encoding`, or not at all.
     reader.__send__(:initialize, fds[0], "r", **options.reject { |key, _| key == :replace })
     writer = allocate
-    writer.__send__(:initialize, fds[1], "w")
+    # By number: a pipe's mode says nothing of creating or truncating, which
+    # `reopen` with a path and no mode goes by.
+    writer.__send__(:initialize, fds[1], File::WRONLY)
     writer.sync = true
     begin
       reader.set_encoding(*encodings, **options) unless encodings.empty?
@@ -395,7 +397,7 @@ end
     fd = Integer.__index__(fd)
     current = IO.__check__(__fd_fcntl__(fd, IO.__fcntl__("F_GETFL"), 0))[0]
     if mode.nil? && !options.key?(:mode) && !options.key?(:flags)
-      mode = current & 3
+      mode = current & (3 | File::APPEND)
     end
     __setup__(fd, mode, options)
     # The descriptor has to allow what the mode asks for.
@@ -460,9 +462,9 @@ end
       end
       named = true
     end
+    ecopts = __ecopts__(options)
     # 0 reads, 1 writes, 2 does both: `O_ACCMODE`, the same on every target.
     @access = flags & 3
-    @append = flags & File::APPEND != 0
     @binmode = binmode
     if named
       __ext_int_to_encs__(external, internal, bom)
@@ -471,7 +473,7 @@ end
     else
       __ext_int_to_encs__(nil, nil)
     end
-    @ecopts = __ecopts__(options)
+    @ecopts = ecopts
     # A text mode IO reads with universal newline, on every platform, unless
     # a newline option says otherwise: CRuby's `rb_io_extract_modeenc` gives
     # its flags the decorator before the options are looked at (#465).
@@ -483,6 +485,7 @@ end
     # here, so `"r+t"` but not `"wt"`, which has none. Measured.
     @textmode = __newline_decorator__? ? true : false
     __validate_enc_binmode__
+    @oflags = flags
     bom
   end
 
@@ -525,12 +528,14 @@ end
     original.__unread__
     @fileno = IO.__check__(__fd_dup__(original.fileno), @path)[0]
     @rbuf = "".b
-    __clear_readconv__
+    @cbuf = "".b
+    __drop_readconv__
     @closed = false
     @autoclose = true
     @ecopts = @ecopts.dup
     # A converter of its own, so an attribute's quote of its own.
     @writeconv = nil
+    @wpre = nil
     @xml_quote = nil
     # And a finalizer of its own, for the descriptor of its own.
     @finalizer = nil
@@ -538,14 +543,16 @@ end
     self
   end
 
-  # Seek the descriptor back over what is buffered and forget it, and the
-  # read converter with it. A pipe cannot seek, and keeps its buffer.
-  def __unread__
+  # CRuby's `io_unread`: seek the descriptor back over what is buffered and
+  # forget it, and both converters with it. What cannot seek keeps its buffer
+  # unless it is to be discarded all the same, which a socket, a tty or a
+  # duplex child, CRuby's `FMODE_DUPLEX`, never does.
+  def __unread__(discard = false)
     return if @rbuf.empty?
     result = __fd_seek__(@fileno, -@rbuf.bytesize, IO::SEEK_CUR)
-    return if Integer === result
+    return if Integer === result && (!discard || (result == Errno::ESPIPE::Errno && (!@wfileno.nil? || tty? || stat.socket?)))
     @rbuf = "".b
-    __drop_readconv__
+    __clear_codeconv__
   end
 
   # The options that say how to convert, kept for `String#encode`.
@@ -773,8 +780,7 @@ end
     @enc = Encoding::BINARY
     @enc2 = nil
     # CRuby drops the converter unfinished, an attribute's quote and all.
-    __clear_writeconv__
-    __clear_readconv__
+    __clear_codeconv__
     # And no conversion options at all: CRuby's `io_ascii8bit_binmode` zeroes
     # the flags and drops the rest, so `xml:` and the error handling go with
     # the newline decorators.
@@ -801,9 +807,12 @@ end
     raise IOError, "not opened for reading" if @access == 1
   end
 
-  def __writable__
+  # CRuby's `rb_io_check_writable`. Bytes read ahead are bytes the descriptor
+  # has moved past; a write belongs where the reader is.
+  def __writable__(unread = true)
     __check_open__
     raise IOError, "not opened for writing" if @access == 0
+    __unread__(true) if unread && @wfileno.nil?
   end
 
   # --- encodings ---------------------------------------------------------------
@@ -925,9 +934,9 @@ end
     @textmode = false unless __tied__?
     # CRuby drops the converter unfinished: an attribute's quote open is
     # never closed, and the next write opens another. The read converter
-    # goes too, with the characters it held.
-    __clear_writeconv__
-    __clear_readconv__
+    # goes too, and the characters it held count until a read of characters
+    # makes another.
+    __clear_codeconv__
     __validate_enc_binmode__
     self
   end
@@ -967,6 +976,7 @@ end
     unless @enc.nil? || @enc == Encoding::BINARY
       raise ArgumentError, "encoding is set to #{@enc} already"
     end
+    __byte_readable__
     __bom__
   end
 
@@ -1188,6 +1198,15 @@ end
     !@cbuf.nil? && !@cbuf.empty?
   end
 
+  # Whether a read of characters takes what is held. `reopen` can leave
+  # characters held on an IO with no read converter: those read past them,
+  # and a read of bytes still refuses, until a mode with a converter hands
+  # them out, or makes a converter that starts without them where
+  # `__drop_readconv__` dropped the last. Measured.
+  def __chars_read__?
+    __chars_held__? && __read_converter__?
+  end
+
   # The characters held, taken, as bytes.
   def __take_chars__
     held = @cbuf || "".b
@@ -1209,21 +1228,16 @@ end
     char
   end
 
-  # CRuby's `clear_readconv`: the converter goes, the characters it held
-  # and an attribute's quote with it.
-  def __clear_readconv__
-    @readconv = nil
-    @cbuf = "".b
-    @rpend = nil
-    @rquote = nil
-    @rfinished = false
-    @readconv_dropped = false
+  # CRuby's `clear_codeconv`, both converters.
+  def __clear_codeconv__
+    __clear_writeconv__
+    __drop_readconv__
   end
 
-  # The read converter `io_unread` drops, giving back the bytes buffered:
-  # the characters it held still count, so a read of bytes refuses and
-  # `eof?` is false, until a read of characters makes a converter again,
-  # which starts without them. Measured.
+  # CRuby's `clear_readconv`: the converter goes, and an attribute's quote
+  # with it, but the characters it held still count, so a read of bytes
+  # refuses and `eof?` is false, until a read of characters makes a converter
+  # again, which starts without them. Measured.
   def __drop_readconv__
     @readconv = nil
     @rpend = nil
@@ -1296,8 +1310,10 @@ end
   # quote's too, it asks for all of them in one converter, and none has them
   # (#458, #461). Text mode gives it universal newline (#465). Measured.
   def __readconv__
-    @cbuf = "".b if @readconv_dropped
-    @readconv_dropped = false
+    if @readconv_dropped && __read_converter__?
+      @cbuf = "".b
+      @readconv_dropped = false
+    end
     return unless @ecopts[:xml].equal?(XML_BOTH) && (@enc2 || __newline_decorator__?)
     newlines = __universal_newline__? ? ["universal_newline"] : []
     raise String.__decorators_not_found__(@enc2 || __encoding__, __read_encoding__, newlines + %w[xml_text xml_attr_content xml_attr_quote], nil)
@@ -1318,15 +1334,27 @@ end
   # is escaped without its quotes, and the first with anything in it opens
   # one. `@xml_quote` is nil before there is a converter, then whether the
   # quote is open.
+  #
+  # What the first write that needs a conversion finds stays: the options in
+  # `@wpre`, and in `@wtarget` the encoding, unless that is `:current`, which
+  # goes on following the IO's. `reopen` leaves them, whatever it takes, but
+  # for the newlines, which a binary IO it took with an IO drops. They go with
+  # the converter, as bytes buffered given back take it too. Measured.
   def __encode_out__(text)
     if __tied__?
       __refuse_for_text_mode__(text) if @textmode && !text.encoding.ascii_compatible?
       return text
     end
-    options = __write_ecopts__
+    return text unless __need_writeconv__?
+    __make_writeconv__
+    options = @wpre
+    target = @wtarget
+    if target.equal?(:current)
+      target = __write_target__
+      return text if target.nil?
+    end
     newline = String.__newline_decorators__(options).first
-    target = @enc2 || (@enc == Encoding::BINARY ? nil : @enc)
-    ascii = __make_writeconv__(target, options)
+    ascii = @writeconv&.source_encoding
     xml = options[:xml]
     if (xml == :attr || xml.equal?(XML_BOTH)) && @xml_quote.nil?
       __xml_quote__(false)
@@ -1366,7 +1394,7 @@ end
     end
     # In its own encoding a String is still decorated: CRuby's `encode`
     # runs the decorators over its bytes, invalid ones and all.
-    return text if newline.nil? && xml.nil? && text.encoding == target
+    return text if newline.nil? && xml.nil? && text.encoding == target && options[:invalid] != :replace
     __open_quote__(text.encode(target, **options), xml)
   end
 
@@ -1374,19 +1402,33 @@ end
     raise ArgumentError, "ASCII incompatible string written for text mode IO without encoding conversion: #{text.encoding}"
   end
 
-  # CRuby's `make_writeconv`, for an encoding that is not ASCII-compatible:
-  # the converter into it from the ASCII-compatible encoding it pairs with,
-  # with only the error handling. That encoding, or nil with no converter.
-  # Made once, by the first write that is not empty: `reopen` keeps it, and
-  # writes go on through it, as CRuby's do, whatever it opened. Measured.
-  def __make_writeconv__(target, options)
-    return @writeconv.source_encoding if @writeconv
+  # The encoding the IO writes: `@enc2`, or `@enc` unless that is BINARY.
+  def __write_target__ = @enc2 || (@enc == Encoding::BINARY ? nil : @enc)
+
+  # CRuby's `NEED_WRITECONV`.
+  def __need_writeconv__?
+    !(@enc.nil? || @enc == Encoding::BINARY) || @textmode || __newline_decorator__? || !@ecopts[:xml].nil?
+  end
+
+  # CRuby's `make_writeconv`. For an encoding that is not ASCII-compatible it
+  # makes the converter into it from the ASCII-compatible encoding it pairs
+  # with, with only the error handling. Done once, by the first write that is
+  # not empty: `reopen` keeps it all, and writes go on through it, as CRuby's
+  # do, whatever it opened. Without an encoding, or with a converter to go on
+  # through, the encoding stays as well. Measured.
+  def __make_writeconv__
+    return if @wpre
+    options = __write_ecopts__
+    target = __write_target__
     ascii = target && Encoding::Converter.asciicompat_encoding(target)
-    return nil if ascii.nil?
-    @writeconv = __converter__(ascii, target, options.slice(:invalid, :undef, :replace))
-    @finalizer&.writeconv = @writeconv
-    IO.__unfinished__[self] = true
-    ascii
+    unless ascii.nil?
+      @writeconv = __converter__(ascii, target, options.slice(:invalid, :undef, :replace))
+      @finalizer&.writeconv = @writeconv
+      IO.__unfinished__[self] = true
+    end
+    stateful = options[:xml] == :attr || options[:xml].equal?(XML_BOTH)
+    @wtarget = target.nil? || ascii || stateful ? target : :current
+    @wpre = options
   end
 
   # What `encode` with `xml: :attr` made, in an ASCII-compatible encoding,
@@ -1407,8 +1449,8 @@ end
   def __finish_writeconv__
     quote = __closing_quote__(@xml_quote)
     converter = @writeconv
-    return if quote.nil? && converter.nil?
     __clear_writeconv__
+    return if quote.nil? && converter.nil?
     closing = IO.__closing__(quote, converter)
     __write_all__(closing) unless closing.empty?
   end
@@ -1416,6 +1458,7 @@ end
   # The converter gone unfinished, with the quote.
   def __clear_writeconv__
     @writeconv = nil
+    @wpre = nil
     __xml_quote__(nil)
   end
 
@@ -1615,7 +1658,7 @@ end
     end
     if length.nil?
       nil while __fill__
-      held = __take_chars__
+      held = __chars_read__? ? __take_chars__ : "".b
       __unpend__
       out = __newlines_in__(__decode__(__take__(@rbuf.bytesize)))
       finish = __finish_in__
@@ -1804,7 +1847,7 @@ end
     # one character in UTF-16 (#477). So does a limit on any line where the
     # converter makes other bytes than it reads (#479).
     stream = __stream_in__?
-    converted = paragraph ? __read_converter__? : stream || __chars_held__? || __xml_in__ || !limit.nil? && __converts_bytes__?
+    converted = paragraph ? __read_converter__? : stream || __chars_read__? || __xml_in__ || !limit.nil? && __converts_bytes__?
     # Blank lines before a record are not part of it.
     __swallow__(unit) if paragraph
     wanted = nil
@@ -1890,7 +1933,7 @@ end
       elsif !limit.nil? && limit > 0 && out.bytesize >= limit
         cut = 0
         out.dup.force_encoding(enc).each_char { |char| break if cut >= limit; cut += char.bytesize }
-      elsif __chars_held__?
+      elsif __chars_read__?
         from = sep.nil? ? 0 : [out.bytesize - sep.bytesize + 1, 0].max
         out << __take_chars__
       else
@@ -2123,8 +2166,8 @@ end
   # Measured.
   def __swallow__(unit)
     stream = __stream_in__?
-    while __chars_held__? || stream
-      if __chars_held__?
+    while __chars_read__? || stream
+      if __chars_read__?
         lf = __separator_in__("\n", __read_encoding__)
         held = @cbuf.b
         at = 0
@@ -2239,6 +2282,7 @@ end
     __readable__
     while (byte = __next_byte__)
       yield byte
+      __byte_readable__
     end
     self
   end
@@ -2274,7 +2318,7 @@ end
   def getc
     __readable__
     __readconv__
-    if __chars_held__?
+    if __chars_read__?
       held = @cbuf.dup.force_encoding(__read_encoding__)
       return __take_char__ unless @enc2.nil? && !held.valid_encoding? && held[0].bytesize == held.bytesize
       # The first byte of a longer character, read past a lone CR, is all
@@ -2313,7 +2357,7 @@ end
   # makes an entity of `<`, and CRuby's `getc` hands it out a character at
   # a time, the rest held (#468). Measured.
   def __hand_out__(out)
-    return out unless __xml_in__ || __chars_held__?
+    return out unless __xml_in__ || __chars_read__?
     __hold_chars__(out.b)
     __chars_held__? ? __take_char__ : getc
   end
@@ -2387,6 +2431,7 @@ end
     return enum_for(:each_codepoint) unless block_given?
     while (char = getc)
       yield char.ord
+      __byte_readable__ unless __read_converter__?
     end
     self
   end
@@ -2439,12 +2484,11 @@ end
     __check_open__
     whence = __whence__(whence)
     offset = IO.__c_long__(offset)
-    # Bytes buffered are given back first, and the read converter with them;
-    # with none, it stays. Measured.
-    __drop_readconv__ unless @rbuf.empty?
-    # The descriptor is ahead of the reader by what is buffered.
-    offset -= @rbuf.bytesize if whence == IO::SEEK_CUR
+    # Bytes buffered are given back first, and the converters with them; with
+    # none, they stay. Measured.
+    __unread__
     IO.__check__(__fd_seek__(@fileno, offset, whence), @path)
+    __clear_codeconv__ unless @rbuf.empty?
     @rbuf = "".b
     0
   end
@@ -2462,21 +2506,22 @@ end
     IO.__check__(__fd_seek__(@fileno, IO.__c_long__(offset), __whence__(whence)), @path)[0]
   end
 
-  # `rewind` drops the read converter and the characters it held, as
-  # CRuby's does, where `seek` drops it only with bytes buffered. Measured.
+  # `rewind` drops the read converter as CRuby's does, where `seek` drops it
+  # only with bytes buffered. The characters it held count until a read of
+  # characters makes another. Measured.
   def rewind
     seek(0)
-    __clear_readconv__
+    __drop_readconv__
     @lineno = 0
     0
   end
 
   # CRuby gives the bytes buffered back to find where the reader is, and
-  # drops the read converter with them, as `seek` does. Measured.
+  # drops the converters with them, as `seek` does. Measured.
   def pos
     __check_open__
     position = IO.__check__(__fd_seek__(@fileno, 0, IO::SEEK_CUR), @path)[0] - @rbuf.bytesize
-    __drop_readconv__ unless @rbuf.empty?
+    __clear_codeconv__ unless @rbuf.empty?
     position
   end
   alias tell pos
@@ -2493,9 +2538,6 @@ end
     # Measured: nothing to write is not checked against the mode.
     return 0 if objects.all? { |object| String === object && object.empty? }
     __writable__
-    # Bytes read ahead are bytes the descriptor has moved past; a write
-    # belongs where the reader is. A pipe cannot seek, and has no such place.
-    __unread__ unless @rbuf.empty? || !@wfileno.nil?
     return 0 if objects.empty?
     if objects.size == 1
       text = objects[0]
@@ -2634,34 +2676,30 @@ end
 
   # --- another descriptor ----------------------------------------------------
 
-  def reopen(other = nil, mode = nil, **options)
-    if !(IO === other) && other.respond_to?(:to_io)
-      converted = other.to_io
-      unless IO === converted
-        raise TypeError, "can't convert #{other.class} to IO (#{other.class}#to_io gives #{converted.class})"
+  # CRuby's `rb_io_reopen`, which looks for an IO only in a lone argument.
+  def reopen(other = nil, mode = (lone = true; nil), **options)
+    if lone
+      if !(IO === other) && other.respond_to?(:to_io)
+        converted = other.to_io
+        unless IO === converted
+          raise TypeError, "can't convert #{other.class} to IO (#{other.class}#to_io gives #{converted.class})"
+        end
+        other = converted
       end
-      other = converted
-    end
-    if IO === other
-      other.__check_open__
-      __check_open__
-      position = other.__seekable_pos__
-      unless other.fileno == @fileno
-        IO.__check__(__fd_dup2__(other.fileno, @fileno), @path)
-      end
-      @access = other.__access__
-      @path = other.path
-      @rbuf = "".b
-      __clear_readconv__
-      IO.__check__(__fd_seek__(@fileno, position, IO::SEEK_SET)) unless position.nil?
-      return self
+      return __reopen_io__(other) if IO === other
     end
     path = File.__path__(other)
-    mode = options[:mode] if mode.nil? && options.key?(:mode)
-    mode = __mode_letters__ if mode.nil?
-    flags = IO.__parse_mode__(mode)[0]
-    # Read once, and refused before the file is opened, or truncated.
-    options = options.merge(__ecopts__(options).slice(:replace))
+    if mode.nil? && options.empty?
+      # Everything stays, the mode's creating and truncating among it.
+      flags = @access | (@oflags & (File::CREAT | File::TRUNC | File::APPEND | File::EXCL))
+    else
+      # The mode starts again, and with it `sync` and `autoclose`, but no BOM
+      # is read past: only opening a file does that. `lineno` stays.
+      __modeenc__(mode, options)
+      flags = @oflags
+      @sync = false
+      @autoclose = true
+    end
     fd = IO.__check__(__fd_open__(path, flags, 0666), path, "rb_sysopen")[0]
     if @closed
       @fileno = fd
@@ -2670,27 +2708,53 @@ end
       IO.__check__(__fd_dup2__(fd, @fileno), path)
       __fd_close__(fd)
     end
-    __setup__(@fileno, mode, options.reject { |key, _| key == :mode })
+    # The bytes buffered go; the read converter and the characters it holds
+    # stay, whatever was opened.
+    @rbuf = "".b
     @path = path.dup
+    __arm__
+    self
+  end
+
+  # CRuby's `io_reopen`. A reader's bytes buffered go, and the read converter
+  # with them; what the descriptor is at then decides what else does. The
+  # other IO gives back its own, and this one takes all it is but `autoclose`,
+  # which either can turn off, and what its first write fixed, which stays for
+  # its writes while reads go by what it took. A binary IO takes the newlines
+  # out of that too, as `io_reopen` ends in `rb_io_binmode`. Measured.
+  def __reopen_io__(other)
+    other.__check_open__
+    __check_open__
+    return self if other.equal?(self)
+    __unread__(true) if @access == 0
+    position = other.__seekable_pos__ unless other.__access__ == 1
+    @access, @oflags, @binmode, @textmode, @sync, @enc, @enc2, @ecopts, @lineno, @pid = other.__modes__
+    @wpre = @wpre.reject { |key, _| %i[newline universal_newline crlf_newline cr_newline lf_newline].include?(key) } if @wpre && @binmode
+    @autoclose &&= other.autoclose?
+    @finalizer&.autoclose = @autoclose
+    @path = other.path
+    unless other.fileno == @fileno
+      IO.__check__(__fd_dup2__(other.fileno, @fileno), @path)
+      unless position.nil?
+        __unread__(true)
+        IO.__check__(__fd_seek__(@fileno, position, IO::SEEK_SET))
+      end
+    end
     self
   end
 
   def __access__ = @access
 
-  # What `reopen` with a path opens when it was given no mode: the one this
-  # IO has, without truncating what it opens.
-  def __mode_letters__
-    case @access
-    when 0 then "r"
-    when 1 then @append ? "a" : "w"
-    else "r+"
-    end
+  # What `reopen` takes from this IO.
+  def __modes__
+    [@access, @oflags, @binmode, @textmode, @sync, @enc, @enc2, @ecopts.dup, @lineno, @pid]
   end
 
+  # Where the descriptor is, once it has given back what is buffered.
   def __seekable_pos__
-    pos
-  rescue Errno::ESPIPE
-    nil
+    __unread__
+    position = __fd_seek__(@fileno, 0, IO::SEEK_CUR)
+    Integer === position ? nil : position[0]
   end
 
   # --- a child on the other end ----------------------------------------------
