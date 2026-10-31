@@ -526,7 +526,7 @@ end
   # is given back first, as CRuby's `rb_io_init_copy` flushes it.
   def initialize_copy(original)
     original.__check_open__
-    original.__unread__
+    original.__unread_reader__
     @fileno = IO.__check__(__fd_dup__(original.fileno), @path)[0]
     @rbuf = "".b
     @cbuf = "".b
@@ -546,14 +546,21 @@ end
 
   # CRuby's `io_unread`: seek the descriptor back over what is buffered and
   # forget it, and both converters with it. What cannot seek keeps its buffer
-  # unless it is to be discarded all the same, or, with `:seekable`, unless
-  # it is a pipe or a socket, whose read-ahead a write leaves.
+  # unless it is to be discarded all the same, which a socket or a duplex
+  # child, CRuby's `FMODE_DUPLEX`, never does.
   def __unread__(discard = false)
     return if @rbuf.empty?
     result = __fd_seek__(@fileno, -@rbuf.bytesize, IO::SEEK_CUR)
-    return if Integer === result && (!discard || (discard == :seekable && result == Errno::ESPIPE::Errno))
+    return if Integer === result && (!discard || (result == Errno::ESPIPE::Errno && (!@wfileno.nil? || stat.socket?)))
     @rbuf = "".b
     __clear_codeconv__
+  end
+
+  # What CRuby's `rb_io_flush_raw` does to bytes buffered, which `dup` and
+  # `truncate` go through: an IO that reads gives them back, one that only
+  # writes leaves them. Measured.
+  def __unread_reader__
+    __unread__(true) unless @access == 1
   end
 
   # The options that say how to convert, kept for `String#encode`.
@@ -810,10 +817,10 @@ end
 
   # CRuby's `rb_io_check_writable`. Bytes read ahead are bytes the descriptor
   # has moved past; a write belongs where the reader is.
-  def __writable__(discard = :seekable)
+  def __writable__(unread = true)
     __check_open__
     raise IOError, "not opened for writing" if @access == 0
-    __unread__(discard) if @wfileno.nil?
+    __unread__(true) if unread && @wfileno.nil?
   end
 
   # --- encodings ---------------------------------------------------------------
@@ -2487,11 +2494,8 @@ end
     offset = IO.__c_long__(offset)
     # Bytes buffered are given back first, and the converters with them; with
     # none, they stay. Measured.
-    __clear_codeconv__ unless @rbuf.empty?
-    # The descriptor is ahead of the reader by what is buffered.
-    offset -= @rbuf.bytesize if whence == IO::SEEK_CUR
+    __unread__(true)
     IO.__check__(__fd_seek__(@fileno, offset, whence), @path)
-    @rbuf = "".b
     0
   end
 
