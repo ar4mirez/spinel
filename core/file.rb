@@ -303,7 +303,7 @@ class File < IO
     raise ArgumentError, "mode specified twice" if !mode.nil? && options.key?(:mode)
     path = File.__path__(path)
     given = mode.nil? ? options.fetch(:mode, "r") : mode
-    flags = IO.__parse_mode__(given)[0]
+    flags = IO.__mode_flags__(given)[0]
     flags |= Integer.__index__(options[:flags]) if options[:flags]
     perm = options[:perm] if perm.nil?
     options = options.reject { |key, _| key == :perm }

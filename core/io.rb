@@ -295,7 +295,7 @@ end
 
   def self.sysopen(path, mode = nil, perm = nil)
     path = File.__path__(path)
-    flags = mode.nil? ? File::RDONLY : IO.__parse_mode__(mode)[0]
+    flags = mode.nil? ? File::RDONLY : IO.__mode_flags__(mode)[0]
     perm = perm.nil? ? 0666 : Integer.__index__(perm)
     IO.__check__(__fd_open__(path, flags, perm), path, "rb_sysopen")[0]
   end
@@ -341,10 +341,33 @@ end
   # `open(2)`'s flags for a mode and what the mode says about encodings:
   # `[flags, binmode, textmode, external, internal, bom]`. A String mode is
   # `r`, `w` or `a`, then any of `+`, `b`, `t` and (after `w`) `x`, then
-  # `:external:internal`. CRuby's `rb_io_modestr_fmode` and
-  # `rb_io_ext_int_to_encs`, measured.
+  # `:external:internal`. CRuby's `rb_io_modestr_fmode` and `parse_mode_enc`,
+  # measured.
   def self.__parse_mode__(mode)
-    return [Integer.__index__(mode), false, false, nil, nil, false] unless String === mode || mode.respond_to?(:to_str)
+    flags, binmode, textmode, encodings = __mode_flags__(mode)
+    external = internal = nil
+    bom = false
+    unless encodings.nil?
+      ext_name, int_name = encodings.split(":", 2)
+      # A prefix naming nothing is no prefix, and only a name that starts
+      # `UTF-` has a mark looked for, however else it might be spelled.
+      if ext_name.match?(/\Abom\|./im)
+        ext_name = ext_name[4..]
+        bom = ext_name.match?(/\Autf-/i)
+        __warning__("BOM with non-UTF encoding #{encodings[4..]} is nonsense") unless bom
+      end
+      external = __find_encoding__(ext_name)
+      # "-" is no conversion, which is not the same as no internal
+      # encoding: that one is the default.
+      internal = int_name.nil? ? nil : (int_name == "-" ? :none : __find_encoding__(int_name))
+    end
+    [flags, binmode, textmode, external, internal, bom]
+  end
+
+  # The part of a mode that needs no encoding found, so what only opens warns
+  # about none: `[flags, binmode, textmode, encodings]`.
+  def self.__mode_flags__(mode)
+    return [Integer.__index__(mode), false, false, nil] unless String === mode || mode.respond_to?(:to_str)
     mode = mode.to_str unless String === mode
     letters, encodings = mode.split(":", 2)
     letters = letters.to_s
@@ -368,20 +391,7 @@ end
       end
     end
     invalid.call if binmode && textmode
-    external = internal = nil
-    bom = false
-    unless encodings.nil?
-      ext_name, int_name = encodings.split(":", 2)
-      if ext_name.match?(/\Abom\|/i)
-        bom = true
-        ext_name = ext_name[4..]
-      end
-      external = __find_encoding__(ext_name)
-      # "-" is no conversion, which is not the same as no internal
-      # encoding: that one is the default.
-      internal = int_name.nil? ? nil : (int_name == "-" ? :none : __find_encoding__(int_name))
-    end
-    [flags, binmode, textmode, external, internal, bom]
+    [flags, binmode, textmode, encodings]
   end
 
   # An encoding named in a mode: an unknown one is warned about and ignored.
@@ -389,7 +399,7 @@ end
     return name if Encoding === name
     Encoding.find(name)
   rescue ArgumentError
-    __warning__("Unsupported encoding: #{name} ignored")
+    __warning__("Unsupported encoding #{name} ignored")
     nil
   end
 
@@ -500,7 +510,7 @@ end
     @autoclose = options.key?(:autoclose) ? (options[:autoclose] ? true : false) : true
     path = options[:path]
     @path = (String === path ? path : File.__path__(path)).dup unless path.nil?
-    __bom__ if bom && @access != 1
+    __bom__ if bom
     __arm__
     self
   end
@@ -929,6 +939,12 @@ end
       __ext_int_to_encs__(__encoding_arg__(first), nil)
       ecopts = __kept_ecopts__({})
     end
+    __encoding_set__(ecopts)
+    self
+  end
+
+  # The end of CRuby's `io_encoding_set`, the slots being set.
+  def __encoding_set__(ecopts)
     @ecopts = ecopts
     # From here `@ecopts` says, but a duplex child's write side is not this.
     @textmode = false unless __tied__?
@@ -938,7 +954,6 @@ end
     # makes another.
     __clear_codeconv__
     __validate_enc_binmode__
-    self
   end
 
   # The options `set_encoding` leaves, as CRuby's `io_encoding_set` starts
@@ -989,16 +1004,28 @@ end
   ].freeze
   private_constant :BOMS
 
-  # Read past a byte order mark and take the encoding it names. Answers the
-  # encoding, or nil when there is no mark.
+  # Read past a byte order mark and take the encoding it names, as the
+  # external, keeping the internal: CRuby's `io_set_encoding_by_bom`. Answers
+  # the encoding, or nil when there is no mark, which leaves the internal
+  # encoding as what the IO reads in, without conversion. An IO that does not
+  # read has no mark.
   def __bom__
-    nil while @rbuf.bytesize < 4 && __fill__(4 - @rbuf.bytesize)
-    BOMS.each do |mark, name|
-      next unless @rbuf.byteslice(0, mark.bytesize) == mark
-      __take__(mark.bytesize)
-      __ext_int_to_encs__(Encoding.find(name), nil, true)
-      return Encoding.find(name)
+    if @access != 1
+      nil while @rbuf.bytesize < 4 && __fill__(4 - @rbuf.bytesize)
+      BOMS.each do |mark, name|
+        next unless @rbuf.byteslice(0, mark.bytesize) == mark
+        __take__(mark.bytesize)
+        external = Encoding.find(name)
+        if @enc2.nil?
+          __ext_int_to_encs__(external, nil)
+        else
+          @enc2 = @enc == external ? nil : external
+        end
+        __encoding_set__(__kept_ecopts__({}))
+        return external
+      end
     end
+    @enc2 = nil
     nil
   end
 
@@ -2783,7 +2810,7 @@ end
     if Hash === spawn_args.first
       env = env.merge(spawn_args.shift)
     end
-    flags, = IO.__parse_mode__(mode)
+    flags, = IO.__mode_flags__(mode)
     access = flags & 3
     io_keys = %i[external_encoding internal_encoding encoding textmode binmode autoclose invalid undef replace newline universal_newline crlf_newline cr_newline lf_newline xml]
     io_options = options.select { |key, _| io_keys.include?(key) }
