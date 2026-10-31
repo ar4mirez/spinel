@@ -63,7 +63,7 @@ Help states plainly that subcommands are not implemented yet rather than pretend
 
 ### R4 — CI on macOS arm64 and Linux x64
 
-One workflow, matrix over `macos-14` (arm64) and `ubuntu-latest` (x64):
+One workflow, matrix over `macos-26` (arm64; was `macos-14` until that image was retired, #505) and `ubuntu-latest` (x64):
 build release, run tests, and separately check `fmt` and `clippy -D warnings`.
 
 ### R5 — Integration test that drives the built binary
