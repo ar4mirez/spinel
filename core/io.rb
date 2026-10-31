@@ -397,7 +397,7 @@ end
     fd = Integer.__index__(fd)
     current = IO.__check__(__fd_fcntl__(fd, IO.__fcntl__("F_GETFL"), 0))[0]
     if mode.nil? && !options.key?(:mode) && !options.key?(:flags)
-      mode = current & 3
+      mode = current & (3 | File::APPEND)
     end
     __setup__(fd, mode, options)
     # The descriptor has to allow what the mode asks for.
