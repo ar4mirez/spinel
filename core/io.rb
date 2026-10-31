@@ -544,15 +544,16 @@ end
     self
   end
 
-  # Seek the descriptor back over what is buffered and forget it, and the
-  # read converter with it. A pipe cannot seek, and keeps its buffer unless
-  # it is to be discarded all the same.
+  # CRuby's `io_unread`: seek the descriptor back over what is buffered and
+  # forget it, and both converters with it. What cannot seek keeps its buffer
+  # unless it is to be discarded all the same, or, with `:seekable`, unless
+  # it is a pipe or a socket, whose read-ahead a write leaves.
   def __unread__(discard = false)
     return if @rbuf.empty?
     result = __fd_seek__(@fileno, -@rbuf.bytesize, IO::SEEK_CUR)
-    return if Integer === result && !discard
+    return if Integer === result && (!discard || (discard == :seekable && result == Errno::ESPIPE::Errno))
     @rbuf = "".b
-    __drop_readconv__
+    __clear_codeconv__
   end
 
   # The options that say how to convert, kept for `String#encode`.
@@ -780,8 +781,7 @@ end
     @enc = Encoding::BINARY
     @enc2 = nil
     # CRuby drops the converter unfinished, an attribute's quote and all.
-    __clear_writeconv__
-    __drop_readconv__
+    __clear_codeconv__
     # And no conversion options at all: CRuby's `io_ascii8bit_binmode` zeroes
     # the flags and drops the rest, so `xml:` and the error handling go with
     # the newline decorators.
@@ -808,9 +808,12 @@ end
     raise IOError, "not opened for reading" if @access == 1
   end
 
-  def __writable__
+  # CRuby's `rb_io_check_writable`. Bytes read ahead are bytes the descriptor
+  # has moved past; a write belongs where the reader is.
+  def __writable__(discard = :seekable)
     __check_open__
     raise IOError, "not opened for writing" if @access == 0
+    __unread__(discard) if @wfileno.nil?
   end
 
   # --- encodings ---------------------------------------------------------------
@@ -934,8 +937,7 @@ end
     # never closed, and the next write opens another. The read converter
     # goes too, and the characters it held count until a read of characters
     # makes another.
-    __clear_writeconv__
-    __drop_readconv__
+    __clear_codeconv__
     __validate_enc_binmode__
     self
   end
@@ -1227,11 +1229,16 @@ end
     char
   end
 
-  # CRuby's `clear_readconv`, which `io_unread` calls giving back the bytes
-  # buffered: the converter goes, and an attribute's quote with it, but the
-  # characters it held still count, so a read of bytes refuses and `eof?` is
-  # false, until a read of characters makes a converter again, which starts
-  # without them. Measured.
+  # CRuby's `clear_codeconv`, both converters.
+  def __clear_codeconv__
+    __clear_writeconv__
+    __drop_readconv__
+  end
+
+  # CRuby's `clear_readconv`: the converter goes, and an attribute's quote
+  # with it, but the characters it held still count, so a read of bytes
+  # refuses and `eof?` is false, until a read of characters makes a converter
+  # again, which starts without them. Measured.
   def __drop_readconv__
     @readconv = nil
     @rpend = nil
@@ -1332,7 +1339,8 @@ end
   # What the first write that needs a conversion finds stays: the options in
   # `@wpre`, and in `@wtarget` the encoding, unless that is `:current`, which
   # goes on following the IO's. `reopen` leaves them, whatever it takes, but
-  # for the newlines, which a binary IO it took with an IO drops. Measured.
+  # for the newlines, which a binary IO it took with an IO drops. They go with
+  # the converter, as bytes buffered given back take it too. Measured.
   def __encode_out__(text)
     if __tied__?
       __refuse_for_text_mode__(text) if @textmode && !text.encoding.ascii_compatible?
@@ -2477,9 +2485,9 @@ end
     __check_open__
     whence = __whence__(whence)
     offset = IO.__c_long__(offset)
-    # Bytes buffered are given back first, and the read converter with them;
-    # with none, it stays. Measured.
-    __drop_readconv__ unless @rbuf.empty?
+    # Bytes buffered are given back first, and the converters with them; with
+    # none, they stay. Measured.
+    __clear_codeconv__ unless @rbuf.empty?
     # The descriptor is ahead of the reader by what is buffered.
     offset -= @rbuf.bytesize if whence == IO::SEEK_CUR
     IO.__check__(__fd_seek__(@fileno, offset, whence), @path)
@@ -2511,11 +2519,11 @@ end
   end
 
   # CRuby gives the bytes buffered back to find where the reader is, and
-  # drops the read converter with them, as `seek` does. Measured.
+  # drops the converters with them, as `seek` does. Measured.
   def pos
     __check_open__
     position = IO.__check__(__fd_seek__(@fileno, 0, IO::SEEK_CUR), @path)[0] - @rbuf.bytesize
-    __drop_readconv__ unless @rbuf.empty?
+    __clear_codeconv__ unless @rbuf.empty?
     position
   end
   alias tell pos
@@ -2532,9 +2540,6 @@ end
     # Measured: nothing to write is not checked against the mode.
     return 0 if objects.all? { |object| String === object && object.empty? }
     __writable__
-    # Bytes read ahead are bytes the descriptor has moved past; a write
-    # belongs where the reader is. A pipe cannot seek, and has no such place.
-    __unread__ unless @rbuf.empty? || !@wfileno.nil?
     return 0 if objects.empty?
     if objects.size == 1
       text = objects[0]
