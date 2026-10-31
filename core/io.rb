@@ -462,6 +462,7 @@ end
       end
       named = true
     end
+    ecopts = __ecopts__(options)
     # 0 reads, 1 writes, 2 does both: `O_ACCMODE`, the same on every target.
     @access = flags & 3
     @append = flags & File::APPEND != 0
@@ -474,7 +475,7 @@ end
     else
       __ext_int_to_encs__(nil, nil)
     end
-    @ecopts = __ecopts__(options)
+    @ecopts = ecopts
     # A text mode IO reads with universal newline, on every platform, unless
     # a newline option says otherwise: CRuby's `rb_io_extract_modeenc` gives
     # its flags the decorator before the options are looked at (#465).
@@ -973,6 +974,7 @@ end
     unless @enc.nil? || @enc == Encoding::BINARY
       raise ArgumentError, "encoding is set to #{@enc} already"
     end
+    __byte_readable__
     __bom__
   end
 
@@ -2246,6 +2248,7 @@ end
     __readable__
     while (byte = __next_byte__)
       yield byte
+      __byte_readable__
     end
     self
   end
@@ -2394,6 +2397,7 @@ end
     return enum_for(:each_codepoint) unless block_given?
     while (char = getc)
       yield char.ord
+      __byte_readable__ unless __read_converter__?
     end
     self
   end
