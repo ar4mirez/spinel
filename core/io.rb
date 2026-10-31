@@ -1059,29 +1059,38 @@ end
   # What the read converter makes of `bytes`, going on from the last it read:
   # partial input, so what they end part way through waits inside. On an
   # error the bytes it did not read, those it read past the error's among
-  # them, go back to be read next, as CRuby's `fill_cbuf` gives them back.
-  def __convert_in__(bytes)
+  # them, go back to be read next, as CRuby's `fill_cbuf` gives them back, and
+  # so do those it did not get to where it stopped `after_output`.
+  def __convert_in__(bytes, flags = Encoding::Converter::PARTIAL_INPUT)
     @readconv ||= __make_readconv__
     out = String.new(encoding: __read_encoding__)
-    result = @readconv.primitive_convert(bytes, out, nil, nil, partial_input: true)
+    result = @readconv.primitive_convert(bytes, out, nil, nil, flags)
     return out if result == :source_buffer_empty
+    if result == :after_output
+      @rbuf = bytes.b + @rbuf
+      return out
+    end
     @rbuf = @readconv.putback.b + bytes.b + @rbuf
     raise @readconv.last_error
   end
 
-  # What the read converter makes next, or nil at the end of the bytes: a
-  # byte at a time, as CRuby's stops after each output, so an escape sequence
-  # is read with the character after it, and `pos` is past that and no
-  # further. Measured.
-  # ponytail: a call of the converter for each byte, the cost of a read that
-  # stops where CRuby's does. Measured on a release build: `primitive_convert`
-  # takes about 556us for 1 byte and 843us for 2040 bytes at once, so nearly
-  # all of it is the call's, and `getc` is about 1.3ms a character. Stopping
-  # for `after_output:` (#502) would only halve double-byte text; the upgrade
-  # is that and a cheaper call together.
+  # How many bytes `__next_chars__` offers the converter at a time, enough
+  # for an escape sequence and the character after it, or a BOM and a UTF-32
+  # character. One longer goes round again; what is not read comes back.
+  NEXT_CHARS_BYTES = 8
+  private_constant :NEXT_CHARS_BYTES
+
+  # What the read converter makes next, or nil at the end of the bytes: it
+  # stops after output, as CRuby's `fill_cbuf` does, so an escape sequence is
+  # read with the character after it, and `pos` is past that and no further.
+  # A converter of more than one transcoder can stop with nothing out yet, as
+  # a CR universal newline holds. Measured.
+  # ponytail: a call of the converter for each character, which is most of
+  # what a `getc` costs here. The upgrade is a cheaper call.
   def __next_chars__
+    flags = Encoding::Converter::PARTIAL_INPUT | Encoding::Converter::AFTER_OUTPUT
     while !@rbuf.empty? || __fill__
-      out = __convert_in__(__take__(1))
+      out = __convert_in__(__take__(NEXT_CHARS_BYTES), flags)
       next if out.empty?
       @rnewline = out.getbyte(-1) == 0x0A
       return out
@@ -1093,7 +1102,7 @@ end
   # ending in an ASCII character has that character's byte in them, and
   # nothing but universal newline makes one from something else, or a
   # replacement or decorator more than it read.
-  # ponytail: any other line stays a byte at a time at `__next_chars__`'s
+  # ponytail: any other line stays a character at a time at `__next_chars__`'s
   # cost; upgrade with the cheaper call that names.
   def __line_runs__?(sep, enc)
     return false unless enc.ascii_compatible? && (sep.nil? || sep.dup.force_encoding(enc)[-1].ascii_only?)
@@ -1104,11 +1113,11 @@ end
   # comes before the next byte that can end it cannot, so those bytes go to
   # the converter in one call, and `pos` stops where `__next_chars__` would.
   # That byte goes with them in ISO-2022-JP, where it is the whole character;
-  # in UTF-16 or UTF-32 it is a byte at a time from there, as the bytes after
-  # it can be what makes the character, and likewise from a CR universal
+  # in UTF-16 or UTF-32 it is a character at a time from there, as the bytes
+  # after it can be what makes the character, and likewise from a CR universal
   # newline holds. A newline can leave the next CR held, and a held CR comes
   # out with the next character, a line of its own that an error later in a
-  # run would lose, so after one it is a byte at a time to that character.
+  # run would lose, so after one it is a character at a time to the next.
   # With `room` left of a limit, no more bytes go than cannot fill it: four a
   # byte, more than a character's bytes can make, the partial one the
   # converter holds among them. Answers "" where the bytes made nothing yet.
