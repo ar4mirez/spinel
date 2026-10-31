@@ -1331,8 +1331,8 @@ end
   #
   # What the first write that needs a conversion finds stays: the options in
   # `@wpre`, and in `@wtarget` the encoding, unless that is `:current`, which
-  # goes on following the IO's. `reopen` changes neither, whatever it takes.
-  # Measured.
+  # goes on following the IO's. `reopen` leaves them, whatever it takes, but
+  # for the newlines, which a binary IO it took with an IO drops. Measured.
   def __encode_out__(text)
     if __tied__?
       __refuse_for_text_mode__(text) if @textmode && !text.encoding.ascii_compatible?
@@ -1400,7 +1400,7 @@ end
 
   # CRuby's `NEED_WRITECONV`.
   def __need_writeconv__?
-    !__write_target__.nil? || @textmode || __newline_decorator__? || !@ecopts[:xml].nil?
+    !(@enc.nil? || @enc == Encoding::BINARY) || @textmode || __newline_decorator__? || !@ecopts[:xml].nil?
   end
 
   # CRuby's `make_writeconv`. For an encoding that is not ASCII-compatible it
@@ -2717,7 +2717,8 @@ end
   # with them; what the descriptor is at then decides what else does. The
   # other IO gives back its own, and this one takes all it is but `autoclose`,
   # which either can turn off, and what its first write fixed, which stays for
-  # its writes while reads go by what it took. Measured.
+  # its writes while reads go by what it took. A binary IO takes the newlines
+  # out of that too, as `io_reopen` ends in `rb_io_binmode`. Measured.
   def __reopen_io__(other)
     other.__check_open__
     __check_open__
@@ -2725,6 +2726,7 @@ end
     __unread__(true) if @access == 0
     position = other.__seekable_pos__ unless other.__access__ == 1
     @access, @append, @oflags, @binmode, @textmode, @sync, @enc, @enc2, @ecopts, @lineno, @pid = other.__modes__
+    @wpre = @wpre.reject { |key, _| %i[newline universal_newline crlf_newline cr_newline lf_newline].include?(key) } if @wpre && @binmode
     @autoclose &&= other.autoclose?
     @finalizer&.autoclose = @autoclose
     @path = other.path
