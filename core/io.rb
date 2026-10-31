@@ -4,11 +4,11 @@
 # answers an errno on failure. The rest, which is most of it, is Ruby.
 #
 # The read buffer is `@rbuf`, bytes the descriptor has moved past and the
-# reader has not: `pos` subtracts it, a relative seek adjusts for it, and a
-# write after a read seeks back over it first.
+# reader has not: `pos` gives it back and counts what stays, a relative seek
+# adjusts for it, and a write after a read seeks back over it first.
 #
-# ponytail: no write buffer, so `sync` is only recorded and `flush` has
-# nothing to do; and conversion between an external and an internal encoding
+# ponytail: no write buffer, so `flush` has nothing to do and `sync` only says
+# what a `write` of several does with what it has gathered; and conversion between an external and an internal encoding
 # is done a whole read or a whole line at a time, by `String#encode`, unless
 # one of them is stateful, where the IO keeps a converter (`__stream_in__?`).
 # That stream decoder for every read is the upgrade, when a spec needs a line

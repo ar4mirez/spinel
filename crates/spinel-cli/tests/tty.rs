@@ -51,8 +51,8 @@ fn on_a_terminal(fixture: &str, input: &[u8]) -> (String, String) {
         std::thread::sleep(Duration::from_millis(20));
     }
     let answer = std::fs::read_to_string(&out).expect("the program wrote its answer");
-    let terminal = String::from_utf8_lossy(&std::fs::read(&typescript).expect("the typescript"))
-        .into_owned();
+    let terminal =
+        String::from_utf8_lossy(&std::fs::read(&typescript).expect("the typescript")).into_owned();
     std::fs::remove_file(&out).ok();
     std::fs::remove_file(&typescript).ok();
     (answer, terminal)
