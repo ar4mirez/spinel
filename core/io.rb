@@ -304,8 +304,8 @@ end
     fds = IO.__check__(__fd_pipe__)
     # Measured: made without `new`, so a class that redefines it is not asked.
     reader = allocate
-    # `replace:` is read with the encodings, by `set_encoding`, or not at all.
-    reader.__send__(:initialize, fds[0], "r", **options.reject { |key, _| key == :replace })
+    # These are read with the encodings, by `set_encoding`, or not at all.
+    reader.__send__(:initialize, fds[0], "r", **options.reject { |key, _| %i[invalid undef replace xml].include?(key) })
     writer = allocate
     # By number: a pipe's mode says nothing of creating or truncating, which
     # `reopen` with a path and no mode goes by.
@@ -570,6 +570,11 @@ end
 
   # The options that say how to convert, kept for `String#encode`.
   def __ecopts__(options)
+    # CRuby's `econv_opts`, whose order says which of several bad ones raises:
+    # anything but nil or `:replace` is refused, `false` too. Measured.
+    raise ArgumentError, "unknown value for invalid character option" unless [nil, :replace].include?(options[:invalid])
+    raise ArgumentError, "unknown value for undefined character option" unless [nil, :replace].include?(options[:undef])
+    String.__xml_option__(options) if options.key?(:xml)
     newline = options[:newline]
     unless newline.nil? || %i[universal crlf cr lf].include?(newline)
       raise ArgumentError, "unexpected value for newline option: #{newline}"

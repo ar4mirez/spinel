@@ -129,8 +129,8 @@ class String
   # `xml:`, which is nil, `:text` or `:attr`: `false` is refused. Measured.
   def self.__xml_option__(options)
     xml = options[:xml]
-    return xml if xml.nil? || xml == :text || xml == :attr
-    raise ArgumentError, "unexpected value for xml option: #{xml}" if xml.is_a?(Symbol)
+    return xml if [nil, :text, :attr].include?(xml)
+    raise ArgumentError, "unexpected value for xml option: #{xml}" if Symbol === xml
     raise ArgumentError, "unexpected value for xml option"
   end
 
