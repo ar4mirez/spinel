@@ -1203,15 +1203,17 @@ end
 
   # `__finish_in__` where the IO keeps a converter, which writes what it has
   # left, an attribute's closing quote or the escape back to ASCII among it,
-  # and goes: the next read that gets this far makes another.
+  # and goes: the next read that gets this far makes another. One that raises
+  # stays, as CRuby's `fill_cbuf` keeps it, for the next read to have what it
+  # has left, a CR it held as a newline among it. Measured.
   def __finish_readconv__
     if @rfinished
       @rfinished = false
       return nil
     end
-    converter = @readconv || __make_readconv__
+    @readconv ||= __make_readconv__
+    out = @readconv.finish
     @readconv = nil
-    out = converter.finish
     return nil if out.empty?
     @rfinished = true
     out
@@ -1473,8 +1475,13 @@ end
   # What CRuby's `finish_writeconv` writes when the IO closes: the closing
   # quote, or `""` if no character opened it, and the converter's end, the
   # escape back to ASCII. An error raises having written nothing more: a
-  # character a write began and none finished. Measured.
+  # character a write began and none finished. What a write has gathered goes
+  # first, as CRuby flushes its write buffer. Measured.
   def __finish_writeconv__
+    unless @wgathered.nil?
+      __write_all__(@wgathered)
+      @wgathered.clear
+    end
     quote = __closing_quote__(@xml_quote)
     converter = @writeconv
     __clear_writeconv__
@@ -2545,12 +2552,13 @@ end
   end
 
   # CRuby gives the bytes buffered back to find where the reader is, and
-  # drops the converters with them, as `seek` does. Measured.
+  # drops the converters with them, as `seek` does: what `ungetc` put there
+  # goes too, unless that would seek before the start, and then they all
+  # stay and count. Measured.
   def pos
     __check_open__
-    position = IO.__check__(__fd_seek__(@fileno, 0, IO::SEEK_CUR), @path)[0] - @rbuf.bytesize
-    __clear_codeconv__ unless @rbuf.empty?
-    position
+    __unread__
+    IO.__check__(__fd_seek__(@fileno, 0, IO::SEEK_CUR), @path)[0] - @rbuf.bytesize
   end
   alias tell pos
 
@@ -2561,31 +2569,52 @@ end
 
   # --- writing ---------------------------------------------------------------
 
+  # CRuby's `io_write_m`. One object is `io_write`, which makes it a String
+  # before it looks at the IO, and for an empty one looks no further. Any other
+  # number is `io_writev`, which checks the IO first, and an empty String goes
+  # through the converter like another, so that makes one, an attribute's quote
+  # and all. Measured.
   def write(*objects)
-    __check_open__
-    # Measured: nothing to write is not checked against the mode.
-    return 0 if objects.all? { |object| String === object && object.empty? }
-    __writable__
-    return 0 if objects.empty?
     if objects.size == 1
       text = objects[0]
       text = text.to_s unless String === text
-      text = __encode_out__(text)
-    else
-      # One system call for all of them, as `writev` would be.
-      text = "".b
-      converted = false
-      begin
-        objects.each do |object|
-          object = object.to_s unless String === object
-          text << __encode_out__(object).b
-        end
-        converted = true
-      ensure
-        __write_partial__(text) unless converted
-      end
+      return 0 if text.empty?
+      __writable__
+      return __write_all__(__encode_out__(text))
     end
-    __write_all__(text)
+    __writable__
+    __write_gathered__(objects)
+  end
+
+  # One system call for all of them, as `writev` would be, and only `writev` is
+  # the one for a sync IO or a tty: the rest are CRuby's write buffer, kept in
+  # `@wgathered` while a `to_s` can run, so a `close` there writes what came
+  # before. What comes after goes in with no descriptor to reach, and counts.
+  # Measured.
+  # ponytail: only `close` sees `@wgathered`, so a write from a `to_s` goes
+  # ahead of it where CRuby's goes after; upgrade with a real write buffer.
+  def __write_gathered__(objects)
+    text = "".b
+    total = 0
+    outer = @wgathered
+    gathering = !(@sync || tty?)
+    @wgathered = text if gathering
+    converted = false
+    begin
+      objects.each do |object|
+        object = object.to_s unless String === object
+        piece = __encode_out__(object).b
+        total += piece.bytesize
+        text << piece
+      end
+      converted = true
+    ensure
+      @wgathered = outer
+      __write_partial__(text) unless converted
+    end
+    __check_open__ unless gathering
+    __write_all__(text) unless @closed || text.empty?
+    total
   end
 
   def __write_partial__(text)
@@ -2686,7 +2715,7 @@ end
       array = Array === line ? line : (line.respond_to?(:to_ary, true) ? line.to_ary : nil)
       if Array === array
         if seen.any? { |outer| outer.equal?(array) }
-          __puts_line__("[...]\n")
+          __puts_line__("[...]".b)
         else
           __puts_lines__(array, seen + [array])
         end
