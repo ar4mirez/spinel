@@ -526,7 +526,7 @@ end
   # is given back first, as CRuby's `rb_io_init_copy` flushes it.
   def initialize_copy(original)
     original.__check_open__
-    original.__unread_reader__
+    original.__unread__
     @fileno = IO.__check__(__fd_dup__(original.fileno), @path)[0]
     @rbuf = "".b
     @cbuf = "".b
@@ -546,21 +546,14 @@ end
 
   # CRuby's `io_unread`: seek the descriptor back over what is buffered and
   # forget it, and both converters with it. What cannot seek keeps its buffer
-  # unless it is to be discarded all the same, which a socket or a duplex
-  # child, CRuby's `FMODE_DUPLEX`, never does.
+  # unless it is to be discarded all the same, which a socket, a tty or a
+  # duplex child, CRuby's `FMODE_DUPLEX`, never does.
   def __unread__(discard = false)
     return if @rbuf.empty?
     result = __fd_seek__(@fileno, -@rbuf.bytesize, IO::SEEK_CUR)
-    return if Integer === result && (!discard || (result == Errno::ESPIPE::Errno && (!@wfileno.nil? || stat.socket?)))
+    return if Integer === result && (!discard || (result == Errno::ESPIPE::Errno && (!@wfileno.nil? || tty? || stat.socket?)))
     @rbuf = "".b
     __clear_codeconv__
-  end
-
-  # What CRuby's `rb_io_flush_raw` does to bytes buffered, which `dup` and
-  # `truncate` go through: an IO that reads gives them back, one that only
-  # writes leaves them. Measured.
-  def __unread_reader__
-    __unread__(true) unless @access == 1
   end
 
   # The options that say how to convert, kept for `String#encode`.
@@ -2494,8 +2487,10 @@ end
     offset = IO.__c_long__(offset)
     # Bytes buffered are given back first, and the converters with them; with
     # none, they stay. Measured.
-    __unread__(true)
+    __unread__
     IO.__check__(__fd_seek__(@fileno, offset, whence), @path)
+    __clear_codeconv__ unless @rbuf.empty?
+    @rbuf = "".b
     0
   end
 

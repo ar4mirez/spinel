@@ -343,7 +343,6 @@ class File < IO
 
   def truncate(length)
     __writable__(false)
-    __unread_reader__
     IO.__check__(__fs_truncate__(@fileno, Integer.__index__(length)), @path)
     0
   end
