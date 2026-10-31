@@ -76,6 +76,6 @@ fn an_io_the_collector_frees_is_finalized() {
     );
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "\"\\\"&lt;a\\\"\"\n\"\\\"\\x00a\\x00\\\"\\x00\"\n\"\\\"a\"\n\"\\\"x\"\n\"y\\\"\"\n[\"kept\", \"reused\"]\n\"ok\"\n"
+        "\"\\\"&lt;a\\\"\"\n\"\\\"\\x00a\\x00\\\"\\x00\"\n\"\\\"a\"\n\"\\\"x\"\n\"y\\\"\"\n\"\\e$B$\\\"$$\\e(B\"\n\"\\\"\\e$B$\\\"\\e(B\\\"\"\n\"a\\x00\"\n[\"kept\", \"reused\"]\n\"ok\"\n"
     );
 }

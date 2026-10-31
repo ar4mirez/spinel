@@ -1,7 +1,8 @@
 # An IO the collector frees is finalized, as CRuby's `rb_io_fptr_finalize`
 # does (#460): its write converter is finished, which closes an
-# `xml: :attr` quote, and its descriptor is closed, unless it is not to
-# `autoclose` it. Measured on ruby 4.0.9, which prints the same.
+# `xml: :attr` quote and writes ISO-2022-JP's escape back to ASCII (#420),
+# and its descriptor is closed, unless it is not to `autoclose` it. Measured
+# on ruby 4.0.9, which prints the same.
 #
 # Every IO meant to die is made inside a method, so that once the method
 # returns nothing refers to it.
@@ -20,6 +21,10 @@ def unquoted(path) = (io = File.open(path, "w:UTF-8", xml: :attr); io.write("a")
 # Reopened by path with its quote open: the new file is the one it closes
 # in (#488).
 def reopened(path) = (io = File.open("#{path}-a", "w:UTF-8", xml: :attr); io.write("x"); io.reopen("#{path}-b", "w"); io.write("y"); nil)
+def stateful(path) = (io = File.open(path, "w:ISO-2022-JP"); io.write("あ"); io.write("い"); nil)
+def quoted_stateful(path) = (io = File.open(path, "w:ISO-2022-JP", xml: :attr); io.write("あ"); nil)
+# Part of a character, which no error can be raised for: it is dropped.
+def begun(path) = (io = File.open(path, "w:UTF-16LE"); io.write("a\xE3"); nil)
 def left(path) = (File.open(path, "w"); nil)
 def kept(path) = (IO.new(IO.sysopen(path, "w"), autoclose: false); nil)
 def copied(path) = (io = File.open(path, "w"); io.dup; io.close; nil)
@@ -32,6 +37,9 @@ quoted(File.join(dir, "quoted"))
 utf16(File.join(dir, "utf16"))
 unquoted(File.join(dir, "unquoted"))
 reopened(File.join(dir, "reopened"))
+stateful(File.join(dir, "stateful"))
+quoted_stateful(File.join(dir, "quoted_stateful"))
+begun(File.join(dir, "begun"))
 left(File.join(dir, "left"))
 kept(File.join(dir, "kept"))
 copied(File.join(dir, "copied"))
@@ -43,6 +51,7 @@ p File.binread(File.join(dir, "quoted"))
 p File.binread(File.join(dir, "utf16"))
 p File.binread(File.join(dir, "unquoted"))
 p File.binread(File.join(dir, "reopened-a")), File.binread(File.join(dir, "reopened-b"))
+p File.binread(File.join(dir, "stateful")), File.binread(File.join(dir, "quoted_stateful")), File.binread(File.join(dir, "begun"))
 p open_fds(dir)
 reused.write("ok")
 reused.close

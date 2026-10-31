@@ -9,9 +9,10 @@
 #
 # ponytail: no write buffer, so `sync` is only recorded and `flush` has
 # nothing to do; and conversion between an external and an internal encoding
-# is done a whole read or a whole line at a time, by `String#encode`. A
-# stream decoder is the upgrade, when a spec needs a line split across a
-# conversion.
+# is done a whole read or a whole line at a time, by `String#encode`, unless
+# one of them is stateful, where the IO keeps a converter (`__stream_in__?`).
+# That stream decoder for every read is the upgrade, when a spec needs a line
+# split across a conversion.
 
 class IO
 end
@@ -490,6 +491,7 @@ end
     @finalizer.wfd = nil
     @finalizer.autoclose = @autoclose
     @finalizer.quote = __closing_quote__(@xml_quote)
+    @finalizer.writeconv = @writeconv
   end
 
   # A copy has a descriptor of its own, `dup(2)` of the original's, at the
@@ -505,6 +507,7 @@ end
     @autoclose = true
     @ecopts = @ecopts.dup
     # A converter of its own, so an attribute's quote of its own.
+    @writeconv = nil
     @xml_quote = nil
     # And a finalizer of its own, for the descriptor of its own.
     @finalizer = nil
@@ -564,7 +567,7 @@ end
   def close
     return nil if @closed
     begin
-      __close_quote__
+      __finish_writeconv__
     ensure
       @closed = true
       @finalizer&.disarm
@@ -604,7 +607,7 @@ end
   def close_write
     return nil if @closed
     unless @wfileno.nil?
-      __close_quote__ unless @wclosed
+      __finish_writeconv__ unless @wclosed
       __fd_close__(@wfileno) unless @wclosed
       @wclosed = true
       @finalizer&.wfd = nil
@@ -711,7 +714,7 @@ end
     @enc = Encoding::BINARY
     @enc2 = nil
     # CRuby drops the converter unfinished, an attribute's quote and all.
-    __xml_quote__(nil)
+    __clear_writeconv__
     __clear_readconv__
     # And no conversion options at all: CRuby's `io_ascii8bit_binmode` zeroes
     # the flags and drops the rest, so `xml:` and the error handling go with
@@ -859,7 +862,7 @@ end
     # CRuby drops the converter unfinished: an attribute's quote open is
     # never closed, and the next write opens another. The read converter
     # goes too, with the characters it held.
-    __xml_quote__(nil)
+    __clear_writeconv__
     __clear_readconv__
     __validate_enc_binmode__
     self
@@ -931,6 +934,7 @@ end
   # attribute's quote opens with the first character it makes and closes
   # at the end (#466, #468): each piece is escaped without its quotes.
   def __decode__(bytes)
+    return __convert_in__(bytes) if __stream_in__?
     bytes.force_encoding(__encoding__)
     xml = __xml_in__
     if @enc2.nil?
@@ -959,6 +963,105 @@ end
     (xml == :text || xml == :attr) && __read_converter__? ? xml : nil
   end
 
+  # Whether reads go through the IO's own `Encoding::Converter`, `@readconv`,
+  # because what a conversion knows carries from one read to the next:
+  # ISO-2022-JP's G0, the byte order a BOM'd UTF-16 or UTF-32 read, the mark
+  # one writes first (#420). `String#encode` starts and finishes each time.
+  def __stream_in__?
+    !@enc2.nil? && (__stateful__?(@enc2) || __stateful__?(__read_encoding__))
+  end
+
+  def __stateful__?(encoding)
+    encoding.dummy? && String.__supported_target__(encoding)
+  end
+
+  # CRuby's `make_readconv`, with its `xml:` decorators and universal newline
+  # in the one converter, where a read that starts and finishes a conversion
+  # has them done around it.
+  def __make_readconv__
+    options = __read_ecopts__
+    options[:universal_newline] = true if __universal_newline__?
+    __converter__(__encoding__, __read_encoding__, options)
+  end
+
+  # A converter the IO keeps. One whose `replace:` has no spelling in what it
+  # writes is not found, as CRuby's `rb_econv_open_opts` gives up. Measured.
+  def __converter__(source, target, options)
+    Encoding::Converter.new(source, target, **options)
+  rescue Encoding::UndefinedConversionError
+    raise Encoding::ConverterNotFoundError, "code converter not found (#{source.name} to #{target.name})"
+  end
+
+  # What the read converter makes of `bytes`, going on from the last it read:
+  # partial input, so what they end part way through waits inside. On an
+  # error the bytes it did not read, those it read past the error's among
+  # them, go back to be read next, as CRuby's `fill_cbuf` gives them back.
+  def __convert_in__(bytes)
+    @readconv ||= __make_readconv__
+    out = String.new(encoding: __read_encoding__)
+    result = @readconv.primitive_convert(bytes, out, nil, nil, partial_input: true)
+    return out if result == :source_buffer_empty
+    @rbuf = @readconv.putback.b + bytes.b + @rbuf
+    raise @readconv.last_error
+  end
+
+  # What the read converter makes next, or nil at the end of the bytes: a
+  # byte at a time, as CRuby's stops after each output, so an escape sequence
+  # is read with the character after it, and `pos` is past that and no
+  # further. Measured.
+  # ponytail: a call of the converter for each byte, the cost of a read that
+  # stops where CRuby's does. Measured on a release build: `primitive_convert`
+  # takes about 556us for 1 byte and 843us for 2040 bytes at once, so nearly
+  # all of it is the call's, and `getc` is about 1.3ms a character. Stopping
+  # for `after_output:` (#502) would only halve double-byte text; the upgrade
+  # is that and a cheaper call together.
+  def __next_chars__
+    while !@rbuf.empty? || __fill__
+      out = __convert_in__(__take__(1))
+      next if out.empty?
+      @rnewline = out.getbyte(-1) == 0x0A
+      return out
+    end
+    nil
+  end
+
+  # Whether `__chars_to_line_end__` can go by the bytes read: a separator
+  # ending in an ASCII character has that character's byte in them, and
+  # nothing but universal newline makes one from something else, or a
+  # replacement or decorator more than it read.
+  # ponytail: any other line stays a byte at a time at `__next_chars__`'s
+  # cost; upgrade with the cheaper call that names.
+  def __line_runs__?(sep, enc)
+    return false unless enc.ascii_compatible? && (sep.nil? || sep.dup.force_encoding(enc)[-1].ascii_only?)
+    @ecopts.empty? || (@ecopts.size == 1 && __universal_newline__?)
+  end
+
+  # `__next_chars__` for a line, which `__line_runs__?` lets go faster: what
+  # comes before the next byte that can end it cannot, so those bytes go to
+  # the converter in one call, and `pos` stops where `__next_chars__` would.
+  # That byte goes with them in ISO-2022-JP, where it is the whole character;
+  # in UTF-16 or UTF-32 it is a byte at a time from there, as the bytes after
+  # it can be what makes the character, and likewise from a CR universal
+  # newline holds. A newline can leave the next CR held, and a held CR comes
+  # out with the next character, a line of its own that an error later in a
+  # run would lose, so after one it is a byte at a time to that character.
+  # With `room` left of a limit, no more bytes go than cannot fill it: four a
+  # byte, more than a character's bytes can make, the partial one the
+  # converter holds among them. Answers "" where the bytes made nothing yet.
+  def __chars_to_line_end__(sep, room)
+    return __next_chars__ if @rnewline
+    return nil if @rbuf.empty? && !__fill__
+    at = sep && @rbuf.index(sep[-1])
+    at += 1 if at && __encoding__ == Encoding::ISO_2022_JP
+    if sep&.end_with?("\n") && __universal_newline__?
+      cr = @rbuf.index("\r")
+      at = cr if cr && (at.nil? || cr < at)
+    end
+    count = at || @rbuf.bytesize
+    count = [count, room / 4].min if room && room > 0
+    count == 0 ? __next_chars__ : __convert_in__(__take__(count))
+  end
+
   # An ASCII String in the encoding reads answer in.
   def __in_read__(text)
     enc = __read_encoding__
@@ -974,6 +1077,7 @@ end
   # while one a limit stops first leaves it finished for the next to find
   # nothing. Measured.
   def __finish_in__
+    return __finish_readconv__ if __stream_in__?
     return nil unless __xml_in__ == :attr
     if @rfinished
       @rfinished = false
@@ -984,6 +1088,22 @@ end
     @rquote = false
     @rfinished = true
     __in_read__(quote)
+  end
+
+  # `__finish_in__` where the IO keeps a converter, which writes what it has
+  # left, an attribute's closing quote or the escape back to ASCII among it,
+  # and goes: the next read that gets this far makes another.
+  def __finish_readconv__
+    if @rfinished
+      @rfinished = false
+      return nil
+    end
+    converter = @readconv || __make_readconv__
+    @readconv = nil
+    out = converter.finish
+    return nil if out.empty?
+    @rfinished = true
+    out
   end
 
   # Characters the read converter has made and not handed out, in the
@@ -1019,6 +1139,7 @@ end
   # CRuby's `clear_readconv`: the converter goes, the characters it held
   # and an attribute's quote with it.
   def __clear_readconv__
+    @readconv = nil
     @cbuf = "".b
     @rpend = nil
     @rquote = nil
@@ -1031,6 +1152,7 @@ end
   # `eof?` is false, until a read of characters makes a converter again,
   # which starts without them. Measured.
   def __drop_readconv__
+    @readconv = nil
     @rpend = nil
     @rquote = nil
     @rfinished = false
@@ -1127,10 +1249,11 @@ end
     options = __write_ecopts__
     newline = String.__newline_decorators__(options).first
     target = @enc2 || (@enc == Encoding::BINARY ? nil : @enc)
+    ascii = __make_writeconv__(target, options)
     xml = options[:xml]
     if (xml == :attr || xml.equal?(XML_BOTH)) && @xml_quote.nil?
       __xml_quote__(false)
-      IO.__open_quotes__[self] = true
+      IO.__unfinished__[self] = true
     end
     if xml.equal?(XML_BOTH)
       # CRuby's `make_writeconv` gives the IO's own converter only the
@@ -1153,21 +1276,36 @@ end
       decorators = options.select { |key, _| %i[newline crlf_newline cr_newline lf_newline xml].include?(key) }
       return __open_quote__(text.b.encode(Encoding::BINARY, **decorators), xml).force_encoding(text.encoding)
     end
-    ascii = Encoding::Converter.asciicompat_encoding(target)
     if ascii
       # Into an encoding that is not ASCII-compatible, CRuby converts twice,
       # even from that same encoding with no decorator, so an invalid String
       # raises: with the decorators to the ASCII-compatible encoding it pairs
-      # with, then on to the IO's with only the error handling.
-      handling = options.reject { |key, _| %i[newline crlf_newline cr_newline lf_newline xml].include?(key) }
+      # with, then on through the IO's own converter, which keeps ISO-2022-JP's
+      # G0 from one write to the next, and a character a write ends part way
+      # through (#420).
       # The quote goes in before the second, so one that raises leaves it
       # open but unwritten, as CRuby's converter does. Measured.
-      return __open_quote__(text.encode(ascii, **options), xml).encode(target, **handling)
+      return @writeconv.convert(__open_quote__(text.encode(ascii, **options), xml))
     end
     # In its own encoding a String is still decorated: CRuby's `encode`
     # runs the decorators over its bytes, invalid ones and all.
     return text if newline.nil? && xml.nil? && text.encoding == target
     __open_quote__(text.encode(target, **options), xml)
+  end
+
+  # CRuby's `make_writeconv`, for an encoding that is not ASCII-compatible:
+  # the converter into it from the ASCII-compatible encoding it pairs with,
+  # with only the error handling. That encoding, or nil with no converter.
+  # Made once, by the first write that is not empty: `reopen` keeps it, and
+  # writes go on through it, as CRuby's do, whatever it opened. Measured.
+  def __make_writeconv__(target, options)
+    return @writeconv.source_encoding if @writeconv
+    ascii = target && Encoding::Converter.asciicompat_encoding(target)
+    return nil if ascii.nil?
+    @writeconv = __converter__(ascii, target, options.slice(:invalid, :undef, :replace))
+    @finalizer&.writeconv = @writeconv
+    IO.__unfinished__[self] = true
+    ascii
   end
 
   # What `encode` with `xml: :attr` made, in an ASCII-compatible encoding,
@@ -1181,47 +1319,60 @@ end
     "\"".b.force_encoding(content.encoding) << content
   end
 
-  # The closing quote CRuby's `finish_writeconv` writes when the IO closes,
-  # or `""` if no character opened it.
-  def __close_quote__
+  # What CRuby's `finish_writeconv` writes when the IO closes: the closing
+  # quote, or `""` if no character opened it, and the converter's end, the
+  # escape back to ASCII. An error raises having written nothing more: a
+  # character a write began and none finished. Measured.
+  def __finish_writeconv__
     quote = __closing_quote__(@xml_quote)
-    return if quote.nil?
-    __xml_quote__(nil)
-    __write_all__(quote)
+    converter = @writeconv
+    return if quote.nil? && converter.nil?
+    __clear_writeconv__
+    closing = IO.__closing__(quote, converter)
+    __write_all__(closing) unless closing.empty?
   end
 
-  # Where the attribute's quote is, and what closing it writes, which the
-  # finalizer is told: the encoding it is written in cannot change while it
-  # is open, as `set_encoding` and `binmode` drop it.
+  # The converter gone unfinished, with the quote.
+  def __clear_writeconv__
+    @writeconv = nil
+    __xml_quote__(nil)
+  end
+
+  # Where the attribute's quote is, and what the converter is, which the
+  # finalizer is told.
   def __xml_quote__(state)
     @xml_quote = state
     @finalizer&.quote = __closing_quote__(state)
+    @finalizer&.writeconv = @writeconv
   end
 
   def __closing_quote__(open)
     return nil if open.nil?
-    quote = open ? "\"" : "\"\""
-    target = @enc2 || (@enc == Encoding::BINARY ? nil : @enc)
-    unless target.nil? || target.ascii_compatible?
-      # The first character took UTF-16's or UTF-32's mark: the quote after
-      # it is in the big-endian order they write.
-      target = Encoding.find("#{target.name}BE") if open && (target == Encoding::UTF_16 || target == Encoding::UTF_32)
-      quote = quote.encode(target)
-    end
-    quote.b
+    (open ? "\"" : "\"\"").b
   end
 
-  # The IOs whose converter has `xml: :attr`'s quote, held weakly. CRuby
-  # finishes an IO's converter when it finalizes the IO, so the program's end
-  # closes the quote of each still open (#456); one collected before then
-  # has had its `Finalizer` do it (#460).
-  def self.__open_quotes__
-    @__open_quotes__ ||= ObjectSpace::WeakMap.new
+  # The bytes closing writes: the quote goes through the converter, if there
+  # is one, for it to write its mark or switch to ASCII for it, and then it
+  # finishes.
+  def self.__closing__(quote, converter)
+    return quote if converter.nil?
+    source = converter.source_encoding
+    closing = converter.convert((quote || "").dup.force_encoding(source)).b
+    closing << converter.finish.b
+  end
+
+  # The IOs with a converter to finish, `xml: :attr`'s quote or one a write
+  # goes on through, held weakly. CRuby finishes an IO's converter when it
+  # finalizes the IO, so the program's end closes the quote of each still open
+  # (#456); one collected before then has had its `Finalizer` do it (#460).
+  def self.__unfinished__
+    @__unfinished__ ||= ObjectSpace::WeakMap.new
   end
 
   # What finalizing an IO the collector freed does, CRuby's
   # `rb_io_fptr_finalize`: it finishes the write converter, which closes an
-  # `xml: :attr` quote, and closes the descriptor, unless it is 0, 1 or 2 or
+  # `xml: :attr` quote and goes back to ASCII, and closes the descriptor,
+  # unless it is 0, 1 or 2 or
   # the IO is not to `autoclose` it. It is told what that needs as the IO
   # changes, and never holds the IO, which would keep it alive.
   #
@@ -1229,17 +1380,19 @@ end
   # finished by `IO.__finish_all__`, after every other finalizer, and their
   # descriptors close with the process.
   class Finalizer
-    attr_writer :fd, :wfd, :autoclose, :quote
+    attr_writer :fd, :wfd, :autoclose, :quote, :writeconv
 
     def disarm
-      @fd = @wfd = @quote = nil
+      @fd = @wfd = @quote = @writeconv = nil
     end
 
     def call(_id)
       return if IO.__ending__
-      fd, wfd, quote = @fd, @wfd, @quote
+      fd, wfd, quote, writeconv = @fd, @wfd, @quote, @writeconv
       disarm
-      unless quote.nil? || (wfd || fd).nil?
+      unless (quote.nil? && writeconv.nil?) || (wfd || fd).nil?
+        # An error finishing is dropped, and the descriptor still closes.
+        quote = IO.__closing__(quote, writeconv) rescue "".b
         until quote.empty?
           written = __fd_write__(wfd || fd, quote)
           break unless Array === written && written[0] > 0
@@ -1265,7 +1418,7 @@ end
   # After the finalizers, as CRuby's IOs are finished after every other
   # object's. A failure is dropped, as a finalizer's is.
   def self.__finish_all__
-    __open_quotes__.keys.each do |io|
+    __unfinished__.keys.each do |io|
       io.__finish__
     rescue Exception
     end
@@ -1273,7 +1426,7 @@ end
   end
 
   def __finish__
-    __close_quote__ unless @closed || @wclosed
+    __finish_writeconv__ unless @closed || @wclosed
   end
 
   # The options a write transcodes with: CRuby's `make_writeconv` leaves out
@@ -1352,7 +1505,7 @@ end
   # not ASCII-compatible, read into UTF-16 or UTF-32, is gone through a
   # character at a time, as its CR and LF are more than a byte (#462).
   def __newlines_in__(text)
-    return text unless __universal_newline__?
+    return text unless __universal_newline__? && !__stream_in__?
     return String.__universal_newline__(text) if text.encoding.ascii_compatible?
     cr = "\r".encode(text.encoding)
     lf = "\n".encode(text.encoding)
@@ -1569,11 +1722,12 @@ end
     # among them, and the limit counts what it made, so a limit of 2 is
     # one character in UTF-16 (#477). So does a limit on any line where the
     # converter makes other bytes than it reads (#479).
-    converted = paragraph ? __read_converter__? : __chars_held__? || __xml_in__ || !limit.nil? && __converts_bytes__?
+    stream = __stream_in__?
+    converted = paragraph ? __read_converter__? : stream || __chars_held__? || __xml_in__ || !limit.nil? && __converts_bytes__?
     # Blank lines before a record are not part of it.
     __swallow__(unit) if paragraph
     wanted = nil
-    unless separator.nil?
+    unless separator.nil? || stream
       wanted = paragraph ? "\n\n" : separator
       wanted = wanted.encode(__encoding__) unless wanted.encoding == __encoding__ || wanted.ascii_only? && __encoding__.ascii_compatible?
       wanted = wanted.b
@@ -1614,9 +1768,15 @@ end
   def __cut_by_limit__?(line, separator, limit)
     return false if limit.nil? || limit <= 0 || line.bytesize < limit
     return true if separator.nil?
-    enc = line.encoding
-    sep = separator.encoding == enc || separator.ascii_only? && enc.ascii_compatible? ? separator.b : separator.encode(enc).b
-    !line.b.end_with?(sep)
+    !line.b.end_with?(__separator_in__(separator, line.encoding))
+  end
+
+  # The bytes of a separator in what the read converter makes. A dummy
+  # encoding is read a byte at a time, so its newline is the byte, even in a
+  # BOM'd UTF-16 or UTF-32. Measured.
+  def __separator_in__(separator, enc)
+    return separator.b if separator.encoding == enc || separator.ascii_only? && (enc.ascii_compatible? || enc.dummy?)
+    separator.encode(enc).b
   end
 
   # The next line as the read converter makes it, or nil at the end, where
@@ -1633,15 +1793,14 @@ end
   # ahead of CRuby's there; upgrade by converting a character at a time.
   def __converted_line__(separator, wanted, limit, unit)
     enc = __read_encoding__
-    sep = nil
-    unless separator.nil?
-      sep = separator.encoding == enc || separator.ascii_only? && enc.ascii_compatible? ? separator.b : separator.encode(enc).b
-    end
+    sep = separator.nil? ? nil : __separator_in__(separator, enc)
     # In UTF-16 or UTF-32 a separator counts only at a character's start.
-    step = enc.ascii_compatible? ? 1 : (enc.name.start_with?("UTF-32") ? 4 : 2)
+    step = enc.ascii_compatible? || enc.dummy? ? 1 : (enc.name.start_with?("UTF-32") ? 4 : 2)
     out = "".b
     from = 0
     cut = nil
+    stream = __stream_in__?
+    runs = stream && __line_runs__?(sep, enc)
     while cut.nil?
       at = sep.nil? ? nil : out.index(sep, from)
       at = out.index(sep, at + 1) while at && at % step != 0
@@ -1656,7 +1815,9 @@ end
       else
         from = sep.nil? ? 0 : [out.bytesize - sep.bytesize + 1, 0].max
         room = limit.nil? || limit <= 0 ? limit : limit - out.bytesize
-        if unit
+        if stream
+          piece = runs ? __chars_to_line_end__(sep, room) : __next_chars__
+        elsif unit
           bytes, cr = __universal_line__(wanted, room, unit)
           piece = bytes.nil? ? nil : __decode__(bytes)
           __read_ahead__(cr, unit) if cr
@@ -1875,15 +2036,25 @@ end
   # CRuby's `swallow`: the blank lines before or after a record in
   # paragraph mode. The newlines the read converter holds go first; when
   # that leaves nothing held, the blank lines read, and the character after
-  # them is held.
+  # them is held. At the end of the bytes that goes for what the converter
+  # makes as it finishes too, a CR it held among them; a line that read to
+  # the end has finished it, and CRuby's has no blank lines to swallow.
+  # Measured.
   def __swallow__(unit)
-    if __chars_held__?
-      lf = __in_read__("\n").b
-      held = @cbuf.b
-      at = 0
-      at += lf.bytesize while held.byteslice(at, lf.bytesize) == lf
-      @cbuf = held.byteslice(at, held.bytesize - at)
-      return if __chars_held__?
+    stream = __stream_in__?
+    while __chars_held__? || stream
+      if __chars_held__?
+        lf = __separator_in__("\n", __read_encoding__)
+        held = @cbuf.b
+        at = 0
+        at += lf.bytesize while held.byteslice(at, lf.bytesize) == lf
+        @cbuf = held.byteslice(at, held.bytesize - at)
+        return if __chars_held__?
+      end
+      next unless stream
+      made = __next_chars__ || (__finish_in__ if @readconv)
+      return if made.nil?
+      __hold_chars__(made.b)
     end
     __skip_blank__(unit)
     __hold_next__ if __read_converter__?
@@ -1894,10 +2065,10 @@ end
   # counts it (#475). Without an internal encoding the converter is the
   # newline decorator alone, which makes a character of each byte; with one,
   # a whole character is read, and an invalid one raises. Measured.
-  # ponytail: the character is sized by `valid_encoding?`, so with a dummy
-  # (stateful) external encoding, or an invalid sequence the converter
-  # replaces, nothing is held and `pos` stays short of CRuby's; upgrade by
-  # asking the transcoder how many bytes its first character takes.
+  # ponytail: the character is sized by `valid_encoding?`, so with an invalid
+  # sequence the converter replaces nothing is held and `pos` stays short of
+  # CRuby's; upgrade by asking the transcoder how many bytes its first
+  # character takes.
   def __hold_next__
     return if @rbuf.empty? && !__fill__
     size = 1
@@ -1924,8 +2095,7 @@ end
   # (#467). In paragraph mode that is the blank line that ended the record,
   # so the last record keeps its own newline. Measured.
   def __chomp_line__(line, separator)
-    enc = line.encoding
-    tail = separator.encoding == enc || separator.ascii_only? && enc.ascii_compatible? ? separator.b : separator.encode(enc).b
+    tail = __separator_in__(separator, line.encoding)
     bytes = line.b
     return line unless bytes.end_with?(tail)
     size = bytes.bytesize - tail.bytesize
@@ -2031,6 +2201,12 @@ end
       @rbuf = __take_chars__ << @rbuf
     end
     __unpend__
+    if __stream_in__?
+      made = __next_chars__ || __finish_in__
+      return nil if made.nil?
+      __hold_chars__(made.b)
+      return __take_char__
+    end
     if @rbuf.empty? && !__fill__
       finish = __finish_in__
       return nil if finish.nil?
@@ -2247,12 +2423,24 @@ end
     else
       # One system call for all of them, as `writev` would be.
       text = "".b
-      objects.each do |object|
-        object = object.to_s unless String === object
-        text << __encode_out__(object).b
+      converted = false
+      begin
+        objects.each do |object|
+          object = object.to_s unless String === object
+          text << __encode_out__(object).b
+        end
+        converted = true
+      ensure
+        __write_partial__(text) unless converted
       end
     end
     __write_all__(text)
+  end
+
+  def __write_partial__(text)
+    __write_all__(text) unless @sync || tty?
+  rescue StandardError
+    nil
   end
 
   def syswrite(object)
@@ -2319,12 +2507,12 @@ end
 
   # An Array argument is flattened into its elements, measured: `puts [1, [2]]`
   # is two lines, `puts []` is none, and an Array that contains itself prints
-  # `[...]` where it recurs rather than looping. One write for the lot.
+  # `[...]` where it recurs rather than looping. One write for each line, as
+  # CRuby's `rb_io_puts`, so the lines before one that raises are written, on
+  # a sync IO as well, where one `write` of them all would drop them (#420).
   def puts(*lines)
     return write("\n") && nil if lines.empty?
-    out = []
-    __puts_lines__(lines, [], out)
-    __writev__(out) unless out.empty?
+    __puts_lines__(lines, [])
     nil
   end
 
@@ -2338,27 +2526,29 @@ end
     end
   end
 
-  def __puts_lines__(lines, seen, out)
+  def __puts_lines__(lines, seen)
     lines.each do |line|
       if String === line
-        out << line
-        out << "\n" unless line.__end_with_newline__
+        __puts_line__(line)
         next
       end
       array = Array === line ? line : (line.respond_to?(:to_ary, true) ? line.to_ary : nil)
       if Array === array
         if seen.any? { |outer| outer.equal?(array) }
-          out << "[...]\n"
+          __puts_line__("[...]\n")
         else
-          __puts_lines__(array, seen + [array], out)
+          __puts_lines__(array, seen + [array])
         end
       else
         text = line.nil? ? "" : line.to_s
         text = Kernel.instance_method(:to_s).bind_call(line) unless String === text
-        out << text
-        out << "\n" unless text.__end_with_newline__
+        __puts_line__(text)
       end
     end
+  end
+
+  def __puts_line__(text)
+    __writev__(text.__end_with_newline__ ? [text] : [text, "\n"])
   end
 
   # --- another descriptor ----------------------------------------------------
