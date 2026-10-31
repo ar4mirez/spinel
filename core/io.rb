@@ -330,7 +330,7 @@ end
     return object if IO === object
     return nil unless object.respond_to?(:to_io)
     io = object.to_io
-    unless IO === io
+    unless io.nil? || IO === io
       raise TypeError, "can't convert #{object.class} to IO (#{object.class}#to_io gives #{io.class})"
     end
     io
@@ -2651,8 +2651,8 @@ end
     mode = options[:mode] if mode.nil? && options.key?(:mode)
     mode = __mode_letters__ if mode.nil?
     flags = IO.__parse_mode__(mode)[0]
-    # Refused before the file is opened, or truncated.
-    __ecopts__(options)
+    # Read once, and refused before the file is opened, or truncated.
+    options = options.merge(__ecopts__(options).slice(:replace))
     fd = IO.__check__(__fd_open__(path, flags, 0666), path, "rb_sysopen")[0]
     if @closed
       @fileno = fd
@@ -2833,12 +2833,16 @@ end
     close_source = close_destination = false
     copied = 0
     begin
-      unless IO === source || source.respond_to?(:read) || source.respond_to?(:readpartial)
+      # Anything with `to_path` is a file to `copy_stream_body`: the IO its
+      # `to_io` gives, or the one it names, and never its own `read` or `write`.
+      source = IO.try_convert(source) || source if source.respond_to?(:to_path)
+      unless IO === source || (!source.respond_to?(:to_path) && (source.respond_to?(:read) || source.respond_to?(:readpartial)))
         source = File.open(File.__path__(source), "rb")
         close_source = true
       end
       source.__readable__ if IO === source
-      unless IO === destination || destination.respond_to?(:write)
+      destination = IO.try_convert(destination) || destination if destination.respond_to?(:to_path)
+      unless IO === destination || (!destination.respond_to?(:to_path) && destination.respond_to?(:write))
         destination = File.open(File.__path__(destination), "wb")
         close_destination = true
       end
