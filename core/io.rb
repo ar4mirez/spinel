@@ -330,10 +330,10 @@ end
 
   def self.try_convert(object)
     return object if IO === object
-    return nil unless object.respond_to?(:to_io)
-    io = object.to_io
-    unless io.nil? || IO === io
-      raise TypeError, "can't convert #{object.class} to IO (#{object.class}#to_io gives #{io.class})"
+    io = Kernel.__check_funcall__(object, :to_io) { nil }
+    unless nil.equal?(io) || IO === io
+      klass = Kernel.__class_of__(object)
+      raise TypeError, "can't convert #{klass} to IO (#{klass}#to_io gives #{Kernel.__class_of__(io)})"
     end
     io
   end
@@ -3057,12 +3057,15 @@ end
     IO === stream || String === stream || __copy_stream_answers__?(stream, :to_path)
   end
 
-  # Whether a public `name` is there. A stream may be a `BasicObject`, which
-  # cannot be asked and is looked at.
+  # Whether a public `name` is there, as CRuby's `rb_respond_to`. A
+  # `respond_to?` of its own is asked, whatever its visibility; otherwise, and
+  # for a `BasicObject`, which has none, the object is looked at.
   def self.__copy_stream_answers__?(stream, name)
-    respond = Kernel.instance_method(:respond_to?)
-    return respond.bind(stream).call(name) unless respond.bind(stream).call(:respond_to?, true)
-    stream.respond_to?(name)
+    if Kernel.__overrides__?(__reflect_class_of__(stream), :respond_to?, Kernel)
+      stream.__send__(:respond_to?, name)
+    else
+      Kernel.instance_method(:respond_to?).bind(stream).call(name)
+    end
   end
 
   # CRuby's `nogvl_copy_stream_func`: descriptor to descriptor.

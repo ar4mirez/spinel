@@ -24,18 +24,16 @@ class File < IO
   end
 
   def self.__path_of__(path)
-    if path.respond_to?(:to_path)
-      # Measured: what `to_path` answers is held to being a String, so a
-      # `to_path` of 1 cannot open descriptor 1.
-      path = path.to_path
-      return path if String === path
+    # Measured: what `to_path` answers is held to being a String, so a
+    # `to_path` of 1 cannot open descriptor 1.
+    path = Kernel.__check_funcall__(path, :to_path) { path }
+    return path if String === path
+    converted = Kernel.__check_funcall__(path, :to_str) do
+      raise TypeError, "no implicit conversion of #{nil.equal?(path) ? "nil" : Kernel.__class_of__(path)} into String"
     end
-    if path.respond_to?(:to_str)
-      converted = path.to_str
-      return converted if String === converted
-      raise TypeError, "can't convert #{path.class} to String (#{path.class}#to_str gives #{converted.class})"
-    end
-    raise TypeError, "no implicit conversion of #{path.nil? ? "nil" : path.class} into String"
+    return converted if String === converted
+    klass = Kernel.__class_of__(path)
+    raise TypeError, "can't convert #{klass} to String (#{klass}#to_str gives #{Kernel.__class_of__(converted)})"
   end
 
   # Raise the `SystemCallError` a primitive answered with an errno.
@@ -491,9 +489,9 @@ class File < IO
 
   # A path, or an IO, which is asked about its descriptor.
   def self.__stat_of__(path)
-    return path.stat if IO === path
-    return path.to_io.stat if !(String === path) && path.respond_to?(:to_io)
-    stat(path)
+    return stat(path) if String === path
+    io = IO.try_convert(path)
+    io.nil? ? stat(path) : io.stat
   end
 
   def self.__stat_or_nil__(path)

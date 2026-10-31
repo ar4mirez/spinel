@@ -34,12 +34,10 @@ class Module
     to_s
   end
 
-  # A BasicObject has no `is_a?` to ask, and is still an instance of what it
-  # is an instance of: its class is read directly.
+  # Read from the class table and never asked: nothing is sent to the object,
+  # which may be a BasicObject, and an `is_a?` of its own has no say.
   def ===(object)
-    object.is_a?(self)
-  rescue NoMethodError
-    (__reflect_class_of__(object) <= self) ? true : false
+    __reflect_kind_of__(object, self)
   end
 
   def include?(mod)
