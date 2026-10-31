@@ -2606,6 +2606,9 @@ end
   # descriptor to reach, and counts. Measured.
   # ponytail: only `close` sees `@wgathered`, so a write from a `to_s` goes
   # ahead of it where CRuby's goes after; upgrade with a real write buffer.
+  # ponytail: `sync` is read once, where `io_writev` tests it for each object,
+  # and a `to_s` that closes a sync IO raises even with nothing to write, where
+  # CRuby's returns; upgrade by walking the objects as `io_writev` does (#529).
   def __write_gathered__(objects)
     text = "".b
     total = 0
