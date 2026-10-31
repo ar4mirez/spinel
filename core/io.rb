@@ -528,7 +528,8 @@ end
     original.__unread__
     @fileno = IO.__check__(__fd_dup__(original.fileno), @path)[0]
     @rbuf = "".b
-    __clear_readconv__
+    @cbuf = "".b
+    __drop_readconv__
     @closed = false
     @autoclose = true
     @ecopts = @ecopts.dup
@@ -778,7 +779,7 @@ end
     @enc2 = nil
     # CRuby drops the converter unfinished, an attribute's quote and all.
     __clear_writeconv__
-    __clear_readconv__
+    __drop_readconv__
     # And no conversion options at all: CRuby's `io_ascii8bit_binmode` zeroes
     # the flags and drops the rest, so `xml:` and the error handling go with
     # the newline decorators.
@@ -929,9 +930,10 @@ end
     @textmode = false unless __tied__?
     # CRuby drops the converter unfinished: an attribute's quote open is
     # never closed, and the next write opens another. The read converter
-    # goes too, with the characters it held.
+    # goes too, and the characters it held count until a read of characters
+    # makes another.
     __clear_writeconv__
-    __clear_readconv__
+    __drop_readconv__
     __validate_enc_binmode__
     self
   end
@@ -1195,7 +1197,8 @@ end
   # Whether a read of characters takes what is held. `reopen` can leave
   # characters held on an IO with no read converter: those read past them,
   # and a read of bytes still refuses, until a mode with a converter hands
-  # them out or `set_encoding` drops them. Measured.
+  # them out, or makes a converter that starts without them where
+  # `__drop_readconv__` dropped the last. Measured.
   def __chars_read__?
     __chars_held__? && __read_converter__?
   end
@@ -1221,21 +1224,11 @@ end
     char
   end
 
-  # CRuby's `clear_readconv`: the converter goes, the characters it held
-  # and an attribute's quote with it.
-  def __clear_readconv__
-    @readconv = nil
-    @cbuf = "".b
-    @rpend = nil
-    @rquote = nil
-    @rfinished = false
-    @readconv_dropped = false
-  end
-
-  # The read converter `io_unread` drops, giving back the bytes buffered:
-  # the characters it held still count, so a read of bytes refuses and
-  # `eof?` is false, until a read of characters makes a converter again,
-  # which starts without them. Measured.
+  # CRuby's `clear_readconv`, which `io_unread` calls giving back the bytes
+  # buffered: the converter goes, and an attribute's quote with it, but the
+  # characters it held still count, so a read of bytes refuses and `eof?` is
+  # false, until a read of characters makes a converter again, which starts
+  # without them. Measured.
   def __drop_readconv__
     @readconv = nil
     @rpend = nil
