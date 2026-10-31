@@ -2689,14 +2689,20 @@ end
   # CRuby's `io_reopen`. A reader's bytes buffered go, and the read converter
   # with them; what the descriptor is at then decides what else does. The
   # other IO gives back its own, and this one takes all it is but `autoclose`,
-  # which either can turn off. Measured.
+  # which either can turn off, and the options that are not newlines, which
+  # stay. Measured.
+  # ponytail: those stay as CRuby's do once a write has fixed them. Before a
+  # write, and for reads always, CRuby takes the other's; that needs them
+  # apart from `@ecopts`, a snapshot at the first write.
   def __reopen_io__(other)
     other.__check_open__
     __check_open__
     return self if other.equal?(self)
     __unread__(true) if @access == 0
     position = other.__seekable_pos__ unless other.__access__ == 1
+    kept = @ecopts.slice(:invalid, :undef, :replace, :fallback, :xml)
     @access, @append, @oflags, @binmode, @textmode, @sync, @enc, @enc2, @ecopts, @lineno, @pid = other.__modes__
+    @ecopts.update(kept)
     @autoclose &&= other.autoclose?
     @finalizer&.autoclose = @autoclose
     @path = other.path
@@ -2714,7 +2720,8 @@ end
 
   # What `reopen` takes from this IO.
   def __modes__
-    [@access, @append, @oflags, @binmode, @textmode, @sync, @enc, @enc2, @ecopts.dup, @lineno, @pid]
+    newlines = @ecopts.slice(:newline, :universal_newline, :crlf_newline, :cr_newline, :lf_newline)
+    [@access, @append, @oflags, @binmode, @textmode, @sync, @enc, @enc2, newlines, @lineno, @pid]
   end
 
   # Where the descriptor is, once it has given back what is buffered.
