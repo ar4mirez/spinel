@@ -475,27 +475,31 @@ end
     end
     ecopts = __ecopts__(options)
     # 0 reads, 1 writes, 2 does both: `O_ACCMODE`, the same on every target.
-    @access = flags & 3
-    @binmode = binmode
+    access = flags & 3
     if named
-      __ext_int_to_encs__(external, internal, bom)
+      enc, enc2 = __ext_int_to_encs__(external, internal, bom)
     elsif binmode
-      __ext_int_to_encs__(Encoding::BINARY, nil)
+      enc, enc2 = __ext_int_to_encs__(Encoding::BINARY, nil)
     else
-      __ext_int_to_encs__(nil, nil)
+      enc, enc2 = __ext_int_to_encs__(nil, nil)
     end
-    @ecopts = ecopts
     # A text mode IO reads with universal newline, on every platform, unless
     # a newline option says otherwise: CRuby's `rb_io_extract_modeenc` gives
     # its flags the decorator before the options are looked at (#465).
-    if textmode && @access != 1 && %i[newline universal_newline crlf_newline cr_newline lf_newline].all? { |key| @ecopts[key].nil? }
-      @ecopts[:universal_newline] = true
+    if textmode && access != 1 && %i[newline universal_newline crlf_newline cr_newline lf_newline].all? { |key| ecopts[key].nil? }
+      ecopts[:universal_newline] = true
     end
+    # Checked before any of it is assigned: `reopen` keeps what it refuses.
+    __validate_enc_binmode__(access, binmode, enc, enc2, ecopts)
+    @access = access
+    @binmode = binmode
+    @enc = enc
+    @enc2 = enc2
+    @ecopts = ecopts
     # What makes a write want an ASCII-compatible String, on a duplex child's
     # write side too, which has no decorator of its own: a newline decorator
     # here, so `"r+t"` but not `"wt"`, which has none. Measured.
     @textmode = __newline_decorator__? ? true : false
-    __validate_enc_binmode__
     @oflags = flags
     bom
   end
@@ -841,8 +845,9 @@ end
   # back. Without `@enc2` nothing is converted on the way in.
 
   # `rb_io_ext_int_to_encs`: the slots for an external and an internal
-  # encoding asked for. A nil external is the default, a nil internal the
-  # default internal, and `:none` (an internal of "-") no conversion.
+  # encoding asked for, as `[enc, enc2]`. A nil external is the default, a nil
+  # internal the default internal, and `:none` (an internal of "-") no
+  # conversion.
   def __ext_int_to_encs__(external, internal, bom = false)
     default_external = external.nil?
     external = Encoding.default_external if default_external
@@ -853,27 +858,26 @@ end
     end
     internal = nil if internal == :none
     if internal.nil? || (!bom && internal == external)
-      @enc = default_external && internal != external ? nil : external
-      @enc2 = nil
+      [default_external && internal != external ? nil : external, nil]
     else
-      @enc = internal
-      @enc2 = external
+      [internal, external]
     end
   end
 
   # An IO that reads text in an encoding that is not ASCII-compatible has to
-  # be in binmode: CRuby's `validate_enc_binmode`.
-  def __validate_enc_binmode__
-    if @access != 1 && @enc2.nil? && !@binmode && !(@enc || Encoding.default_external).ascii_compatible?
+  # be in binmode: CRuby's `validate_enc_binmode`, which is given what is to
+  # be assigned, so what it refuses leaves the IO as it was.
+  def __validate_enc_binmode__(access, binmode, enc, enc2, ecopts)
+    if access != 1 && enc2.nil? && !binmode && !(enc || Encoding.default_external).ascii_compatible?
       raise ArgumentError, "ASCII incompatible encoding needs binmode"
     end
-    if @binmode && __newline_decorator__?
+    if binmode && __newline_decorator__?(ecopts)
       raise ArgumentError, "newline decorator with binary mode"
     end
   end
 
-  def __newline_decorator__?
-    @ecopts[:universal_newline] || @ecopts[:crlf_newline] || @ecopts[:cr_newline] || @ecopts[:lf_newline] || !@ecopts[:newline].nil?
+  def __newline_decorator__?(ecopts = @ecopts)
+    ecopts[:universal_newline] || ecopts[:crlf_newline] || ecopts[:cr_newline] || ecopts[:lf_newline] || !ecopts[:newline].nil?
   end
 
   # What reads answer in.
@@ -921,19 +925,19 @@ end
       internal = __encoding_arg__(second) unless none
       ecopts = __kept_ecopts__(options)
       if none
-        @enc = external
-        @enc2 = nil
+        enc = external
+        enc2 = nil
       else
-        @enc = internal
-        @enc2 = internal == external ? nil : external
+        enc = internal
+        enc2 = internal == external ? nil : external
       end
       # From BINARY there is nothing to convert.
-      if @enc2 == Encoding::BINARY
-        @enc = @enc2
-        @enc2 = nil
+      if enc2 == Encoding::BINARY
+        enc = enc2
+        enc2 = nil
       end
     elsif first.nil?
-      __ext_int_to_encs__(nil, nil)
+      enc, enc2 = __ext_int_to_encs__(nil, nil)
       ecopts = __kept_ecopts__({})
     elsif !(Encoding === first) && (String === first || first.respond_to?(:to_str))
       text = first.to_str
@@ -942,17 +946,21 @@ end
       # mark only when it opens.
       _, _, _, external, internal, bom = IO.__parse_mode__("r:#{text}")
       ecopts = __kept_ecopts__(options)
-      __ext_int_to_encs__(external, internal, bom)
+      enc, enc2 = __ext_int_to_encs__(external, internal, bom)
     else
-      __ext_int_to_encs__(__encoding_arg__(first), nil)
+      enc, enc2 = __ext_int_to_encs__(__encoding_arg__(first), nil)
       ecopts = __kept_ecopts__({})
     end
-    __encoding_set__(ecopts)
+    __encoding_set__(enc, enc2, ecopts)
     self
   end
 
-  # The end of CRuby's `io_encoding_set`, the slots being set.
-  def __encoding_set__(ecopts)
+  # The end of CRuby's `io_encoding_set`: nothing is assigned until the check
+  # has passed.
+  def __encoding_set__(enc, enc2, ecopts)
+    __validate_enc_binmode__(@access, @binmode, enc, enc2, ecopts)
+    @enc = enc
+    @enc2 = enc2
     @ecopts = ecopts
     # From here `@ecopts` says, but a duplex child's write side is not this.
     @textmode = false unless __tied__?
@@ -961,7 +969,6 @@ end
     # goes too, and the characters it held count until a read of characters
     # makes another.
     __clear_codeconv__
-    __validate_enc_binmode__
   end
 
   # The options `set_encoding` leaves, as CRuby's `io_encoding_set` starts
@@ -1025,11 +1032,12 @@ end
         __take__(mark.bytesize)
         external = Encoding.find(name)
         if @enc2.nil?
-          __ext_int_to_encs__(external, nil)
+          enc, enc2 = __ext_int_to_encs__(external, nil)
         else
-          @enc2 = @enc == external ? nil : external
+          enc = @enc
+          enc2 = enc == external ? nil : external
         end
-        __encoding_set__(__kept_ecopts__({}))
+        __encoding_set__(enc, enc2, __kept_ecopts__({}))
         return external
       end
     end
