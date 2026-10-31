@@ -2909,9 +2909,8 @@ end
     ensure
       io.close unless io.closed?
     end
-  rescue SystemCallError
+  ensure
     [parent_r, parent_w].each { |fd| __fd_close__(fd) unless fd.nil? } if pid.nil?
-    raise
   end
 
   # --- reading and writing whole files -------------------------------------
