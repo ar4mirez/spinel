@@ -306,12 +306,13 @@ class File < IO
     flags = IO.__parse_mode__(given)[0]
     flags |= Integer.__index__(options[:flags]) if options[:flags]
     perm = options[:perm] if perm.nil?
+    options = options.reject { |key, _| key == :perm }
+    bom = __modeenc__(mode, options)
     perm = perm.nil? ? 0666 : Integer.__index__(perm)
     fd = IO.__check__(__fd_open__(path, flags, perm), path, "rb_sysopen")[0]
     @path = path.dup
-    options = options.reject { |key, _| key == :perm }
     begin
-      __setup__(fd, mode, options)
+      __open_fd__(fd, options, bom)
     rescue Exception
       __fd_close__(fd)
       raise

@@ -128,6 +128,8 @@ class StringIO
         raise ArgumentError, flagged_binary ? "binmode specified twice" : "textmode specified twice"
       end
     end
+    # `strio_init` reads these with `rb_io_extract_modeenc`, as an IO's are.
+    String.__replacement_option__(options[:replace]) unless options[:replace].nil?
     if writable && string.frozen?
       raise FrozenError.new("can't modify frozen String", receiver: string) if truncate && !readable && mode.is_a?(Integer)
       raise Errno::EACCES
