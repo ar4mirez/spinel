@@ -1361,11 +1361,11 @@ end
   #
   # `xml: :attr`'s quote is the stream's, not each write's: CRuby's
   # `make_writeconv` keeps that stateful decorator in the IO's own converter,
-  # made by the first write that is not empty, which opens the quote with the
-  # first character it is given and closes it when the IO closes. So a write
-  # is escaped without its quotes, and the first with anything in it opens
-  # one. `@xml_quote` is nil before there is a converter, then whether the
-  # quote is open.
+  # made by the first write of a String that is not empty or of any number
+  # other than one, which opens the quote with the first character it is given
+  # and closes it when the IO closes. So a write is escaped without its quotes,
+  # and the first with anything in it opens one. `@xml_quote` is nil before
+  # there is a converter, then whether the quote is open.
   #
   # What the first write that needs a conversion finds stays: the options in
   # `@wpre`, and in `@wtarget` the encoding, unless that is `:current`, which
@@ -1492,10 +1492,10 @@ end
 
   # Each write in progress, oldest first, and emptied, as it may yet write the
   # rest. A tty has no write buffer: the list goes, which tells each of them
-  # to look at the IO itself. Only here, off the path of a write that succeeds,
-  # is `tty?` asked.
+  # to look at the IO itself. A write that succeeds never asks `tty?`. With the
+  # write side closed, a `close_write` has flushed them and the rest go nowhere.
   def __flush_gathered__
-    return if @wgathered.nil? || @wgathered.empty?
+    return if @wclosed || @wgathered.nil? || @wgathered.empty?
     return @wgathered = nil if tty?
     @wgathered.dup.each do |text|
       __write_all__(text)
@@ -2624,13 +2624,14 @@ end
       @wgathered&.delete_if { |listed| listed.equal?(text) }
       __write_partial__(text) unless converted
     end
-    __check_open__ unless gathering && @wgathered
-    __write_all__(text) unless @closed || text.empty?
+    closed = @closed || @wclosed
+    raise IOError, "closed stream" if closed && !(gathering && @wgathered)
+    __write_all__(text) unless closed || text.empty?
     total
   end
 
   def __write_partial__(text)
-    __write_all__(text) unless @sync || tty?
+    __write_all__(text) unless @wclosed || @sync || tty?
   rescue StandardError
     nil
   end
