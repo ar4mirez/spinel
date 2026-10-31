@@ -684,22 +684,18 @@ module Process
     end
 
     # The options as `[child, parent]` pairs, the files opened for them to be
-    # closed after the fork, the rest of the options, and which of the
-    # descriptors in `extra` an option redirects as well, if one does.
+    # closed after the fork, and which of the descriptors in `extra` an option
+    # redirects as well, if one does.
     def redirections(options, extra = [])
       pairs = extra.dup
       opened = []
       children = []
-      rest = {}
       # What a redirection is, in the order `piped` reads them.
       claims = { given: [], file: [], close: [], child: [] }
       options.each do |key, value|
         keys = Array === key ? key : [key]
         fds = keys.map { |one| target(one) }
-        if fds.include?(nil)
-          rest[key] = value
-          next
-        end
+        next if fds.include?(nil)
         claims[claim(value)].concat(fds)
         # `[:out, :err] => name` opens the file once, for both.
         shared = nil
@@ -741,7 +737,7 @@ module Process
         made = pairs.find { |child, _| child == other }
         pairs << [fd, made.nil? ? other : made[1]]
       end
-      [pairs, opened, rest, piped(extra, claims)]
+      [pairs, opened, piped(extra, claims)]
     end
 
     def claim(value)
@@ -773,22 +769,25 @@ module Process
         path, argv, shown = command(command_args)
       rescue SystemCallError => unfound
       end
-      pairs, opened, rest, twice = redirections(options, extra)
+      # CRuby reads these with the arguments, before it opens a file or
+      # refuses a descriptor.
+      chdir = options[:chdir].nil? ? nil : File.__path__(options[:chdir])
+      pgroup = case options[:pgroup]
+               when nil, false then nil
+               when true then 0
+               else Integer.__index__(options[:pgroup])
+               end
+      raise ArgumentError, "negative process group ID : #{pgroup}" if !pgroup.nil? && pgroup < 0
+      umask = options[:umask].nil? ? nil : Integer.__index__(options[:umask])
+      table = environment(env, options)
+      pairs, opened, twice = redirections(options, extra)
       raise ArgumentError, "fd #{twice} specified twice" unless twice.nil?
       unless unfound.nil?
         # CRuby finds out in the child it forked, which then exits 127.
         __global_store__(:$?, Process::Status.__make__(0, 127 << 8)) unless replace
         raise unfound
       end
-      chdir = rest[:chdir].nil? ? nil : File.__path__(rest[:chdir])
-      pgroup = case rest[:pgroup]
-               when nil, false then nil
-               when true then 0
-               else Integer.__index__(rest[:pgroup])
-               end
-      raise ArgumentError, "negative process group ID : #{pgroup}" if !pgroup.nil? && pgroup < 0
-      umask = rest[:umask].nil? ? nil : Integer.__index__(rest[:umask])
-      result = __sys_spawn__(path, argv, environment(env, rest), pairs.flatten, chdir, pgroup, umask, replace, rest[:close_others])
+      result = __sys_spawn__(path, argv, table, pairs.flatten, chdir, pgroup, umask, replace, options[:close_others])
       raise SystemCallError.new(shown, result) if Integer === result
       if result.size == 2
         # The child ran and could not become the program: CRuby's `$?` is
