@@ -548,6 +548,8 @@ end
     @writeconv = nil
     @wpre = nil
     @xml_quote = nil
+    # The writes in progress are the original's.
+    @wgathered = nil
     # And a finalizer of its own, for the descriptor of its own.
     @finalizer = nil
     __arm__
@@ -1442,10 +1444,11 @@ end
 
   # CRuby's `make_writeconv`. For an encoding that is not ASCII-compatible it
   # makes the converter into it from the ASCII-compatible encoding it pairs
-  # with, with only the error handling. Done once, by the first write that is
-  # not empty: `reopen` keeps it all, and writes go on through it, as CRuby's
-  # do, whatever it opened. Without an encoding, or with a converter to go on
-  # through, the encoding stays as well. Measured.
+  # with, with only the error handling. Done once, by the first write of a
+  # String that is not empty or of any number other than one: `reopen` keeps it
+  # all, and writes go on through it, as CRuby's do, whatever it opened. Without
+  # an encoding, or with a converter to go on through, the encoding stays as
+  # well. Measured.
   def __make_writeconv__
     return if @wpre
     options = __write_ecopts__
@@ -1475,19 +1478,29 @@ end
   # What CRuby's `finish_writeconv` writes when the IO closes: the closing
   # quote, or `""` if no character opened it, and the converter's end, the
   # escape back to ASCII. An error raises having written nothing more: a
-  # character a write began and none finished. What a write has gathered goes
-  # first, as CRuby flushes its write buffer. Measured.
+  # character a write began and none finished. What writes in progress have
+  # gathered goes first, as CRuby flushes its write buffer. Measured.
   def __finish_writeconv__
-    unless @wgathered.nil?
-      __write_all__(@wgathered)
-      @wgathered.clear
-    end
+    __flush_gathered__
     quote = __closing_quote__(@xml_quote)
     converter = @writeconv
     __clear_writeconv__
     return if quote.nil? && converter.nil?
     closing = IO.__closing__(quote, converter)
     __write_all__(closing) unless closing.empty?
+  end
+
+  # Each write in progress, oldest first, and emptied, as it may yet write the
+  # rest. A tty has no write buffer: the list goes, which tells each of them
+  # to look at the IO itself. Only here, off the path of a write that succeeds,
+  # is `tty?` asked.
+  def __flush_gathered__
+    return if @wgathered.nil? || @wgathered.empty?
+    return @wgathered = nil if tty?
+    @wgathered.dup.each do |text|
+      __write_all__(text)
+      text.clear
+    end
   end
 
   # The converter gone unfinished, with the quote.
@@ -2587,18 +2600,17 @@ end
   end
 
   # One system call for all of them, as `writev` would be, and only `writev` is
-  # the one for a sync IO or a tty: the rest are CRuby's write buffer, kept in
-  # `@wgathered` while a `to_s` can run, so a `close` there writes what came
-  # before. What comes after goes in with no descriptor to reach, and counts.
-  # Measured.
+  # the one for a sync IO or a tty: the rest are CRuby's write buffer, listed in
+  # `@wgathered` while a `to_s` can run, one for each write in progress, so a
+  # `close` there writes what came before. What comes after goes in with no
+  # descriptor to reach, and counts. Measured.
   # ponytail: only `close` sees `@wgathered`, so a write from a `to_s` goes
   # ahead of it where CRuby's goes after; upgrade with a real write buffer.
   def __write_gathered__(objects)
     text = "".b
     total = 0
-    outer = @wgathered
-    gathering = !(@sync || tty?)
-    @wgathered = text if gathering
+    gathering = !@sync
+    (@wgathered ||= []) << text if gathering
     converted = false
     begin
       objects.each do |object|
@@ -2609,10 +2621,10 @@ end
       end
       converted = true
     ensure
-      @wgathered = outer
+      @wgathered&.delete_if { |listed| listed.equal?(text) }
       __write_partial__(text) unless converted
     end
-    __check_open__ unless gathering
+    __check_open__ unless gathering && @wgathered
     __write_all__(text) unless @closed || text.empty?
     total
   end
