@@ -339,7 +339,8 @@ end
   end
 
   # `open(2)`'s flags for a mode and what the mode says about encodings:
-  # `[flags, binmode, textmode, external, internal, bom]`. A String mode is
+  # `[flags, binmode, textmode, external, internal, bom, named]`, `named` being
+  # whether it has an encodings part at all, found or not. A String mode is
   # `r`, `w` or `a`, then any of `+`, `b`, `t` and (after `w`) `x`, then
   # `:external:internal`. CRuby's `rb_io_modestr_fmode` and `parse_mode_enc`,
   # measured.
@@ -349,6 +350,7 @@ end
     bom = false
     unless encodings.nil?
       ext_name, int_name = encodings.split(":", 2)
+      ext_name = ext_name.to_s
       # A prefix naming nothing is no prefix, and only a name that starts
       # `UTF-` has a mark looked for, however else it might be spelled.
       if ext_name.match?(/\Abom\|./im)
@@ -361,7 +363,7 @@ end
       # encoding: that one is the default.
       internal = int_name.nil? ? nil : (int_name == "-" ? :none : __find_encoding__(int_name))
     end
-    [flags, binmode, textmode, external, internal, bom]
+    [flags, binmode, textmode, external, internal, bom, !encodings.nil?]
   end
 
   # The part of a mode that needs no encoding found, so what only opens warns
@@ -436,7 +438,7 @@ end
       mode = options[:mode]
     end
     mode = "r" if mode.nil?
-    flags, binmode, textmode, external, internal, bom = IO.__parse_mode__(mode)
+    flags, binmode, textmode, external, internal, bom, named = IO.__parse_mode__(mode)
     flags |= Integer.__index__(options[:flags]) if options[:flags]
     # `textmode:` and then `binmode:`, each against what is set so far,
     # whatever its value: CRuby's `rb_io_extract_modeenc`, measured.
@@ -452,7 +454,6 @@ end
     end
     # The mode's encodings, then the options', then binmode's, then the
     # defaults: CRuby's `rb_io_extract_modeenc`.
-    named = !external.nil? || !internal.nil? || bom
     if !options[:external_encoding].nil? || !options[:internal_encoding].nil?
       unless options[:encoding].nil?
         __warning__("Ignoring encoding parameter '#{options[:encoding]}': #{options[:external_encoding] ? "external" : "internal"}_encoding is used")
