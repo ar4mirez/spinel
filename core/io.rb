@@ -517,6 +517,8 @@ end
     @autoclose = options.key?(:autoclose) ? (options[:autoclose] ? true : false) : true
     path = options[:path]
     @path = (String === path ? path : File.__path__(path)).dup unless path.nil?
+    # CRuby's `io_check_tty`: only here, so a `reopen` onto a terminal is not.
+    @duplex = true if __fs_isatty__(fd)
     __bom__ if bom
     __arm__
     self
@@ -539,10 +541,12 @@ end
 
   # A copy has a descriptor of its own, `dup(2)` of the original's, at the
   # original's position. The two share an offset, so the original's read-ahead
-  # is given back first, as CRuby's `rb_io_init_copy` flushes it.
+  # is given back first, as CRuby's `rb_io_init_copy` flushes it, and what that
+  # finds out about the descriptor the copy is told too.
   def initialize_copy(original)
     original.__check_open__
-    original.__unread__
+    original.__unread__(true)
+    @duplex = original.__duplex__
     @fileno = IO.__check__(__fd_dup__(original.fileno), @path)[0]
     @rbuf = "".b
     @cbuf = "".b
@@ -566,15 +570,21 @@ end
 
   # CRuby's `io_unread`: seek the descriptor back over what is buffered and
   # forget it, and both converters with it. What cannot seek keeps its buffer
-  # unless it is to be discarded all the same, which a socket, a tty or a
-  # duplex child, CRuby's `FMODE_DUPLEX`, never does.
+  # unless it is to be discarded all the same. `@duplex` is `FMODE_DUPLEX`, of
+  # a socket, a tty or a child, or of what this finds cannot seek, and such an
+  # IO keeps its buffer from then on, whatever its descriptor comes to be.
   def __unread__(discard = false)
-    return if @rbuf.empty?
+    return if @rbuf.empty? || @duplex
     result = __fd_seek__(@fileno, -@rbuf.bytesize, IO::SEEK_CUR)
-    return if Integer === result && (!discard || (result == Errno::ESPIPE::Errno && (!@wfileno.nil? || tty? || stat.socket?)))
+    if Integer === result
+      @duplex = true if result == Errno::ESPIPE::Errno
+      return unless discard
+    end
     @rbuf = "".b
     __clear_codeconv__
   end
+
+  def __duplex__ = @duplex
 
   # The options that say how to convert, kept for `String#encode`.
   def __ecopts__(options)
@@ -741,6 +751,7 @@ end
     @pid = pid
     @wfileno = writer
     @finalizer&.wfd = writer
+    @duplex = true
     self
   end
 
@@ -839,10 +850,10 @@ end
 
   # CRuby's `rb_io_check_writable`. Bytes read ahead are bytes the descriptor
   # has moved past; a write belongs where the reader is.
-  def __writable__(unread = true)
+  def __writable__
     __check_open__
     raise IOError, "not opened for writing" unless __writes__?
-    __unread__(true) if unread && @wfileno.nil?
+    __unread__(true)
   end
 
   # --- encodings ---------------------------------------------------------------
@@ -2800,12 +2811,10 @@ end
     __check_open__
     whence = __whence__(whence)
     offset = IO.__c_long__(offset)
-    # Bytes buffered are given back first, and the converters with them; with
-    # none, they stay. Measured.
-    __unread__
+    # Bytes buffered are given back first, and the converters with them, even
+    # if the seek then fails; with none, they stay. Measured.
+    __unread__(true)
     IO.__check__(__fd_seek__(@fileno, offset, whence), @path)
-    __clear_codeconv__ unless @rbuf.empty?
-    @rbuf = "".b
     0
   end
 
@@ -3041,6 +3050,7 @@ end
       flags = @oflags
       @sync = false
       @autoclose = true
+      @duplex = nil
     end
     # The bytes buffered go, even if what is named does not open; the read
     # converter and the characters it holds stay, whatever was opened.
@@ -3078,7 +3088,7 @@ end
     end
     __unread__(true) if @access == 0
     position = other.__seekable_pos__ if other.__reads__?
-    @access, @oflags, @binmode, @textmode, @sync, @enc, @enc2, @ecopts, @lineno, @pid = other.__modes__
+    @access, @oflags, @binmode, @textmode, @sync, @enc, @enc2, @ecopts, @lineno, @pid, @duplex = other.__modes__
     @wpre = @wpre.reject { |key, _| %i[newline universal_newline crlf_newline cr_newline lf_newline].include?(key) } if @wpre && @binmode
     @autoclose &&= other.autoclose?
     @finalizer&.autoclose = @autoclose
@@ -3148,7 +3158,7 @@ end
 
   # What `reopen` takes from this IO.
   def __modes__
-    [@access, @oflags, @binmode, @textmode, @sync, @enc, @enc2, @ecopts.dup, @lineno, @pid]
+    [@access, @oflags, @binmode, @textmode, @sync, @enc, @enc2, @ecopts.dup, @lineno, @pid, @duplex]
   end
 
   # Where the descriptor is, once it has given back what is buffered.

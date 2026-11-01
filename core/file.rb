@@ -339,9 +339,12 @@ class File < IO
     0
   end
 
+  # CRuby's `rb_file_truncate`: the length first, then the IO, whose bytes
+  # buffered are given back as `flush` gives them.
   def truncate(length)
-    __writable__(false)
-    IO.__check__(__fs_truncate__(@fileno, Integer.__index__(length)), @path)
+    length = Integer.__index__(length)
+    __writable__
+    IO.__check__(__fs_truncate__(@fileno, length), @path)
     0
   end
 
