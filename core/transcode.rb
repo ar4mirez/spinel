@@ -897,6 +897,9 @@ class Encoding
       @last_error = nil
       # The transcoder whose error the last conversion reported.
       @error_element = nil
+      # Whether a call has stopped at `__econv_convert__`'s bound, short of
+      # its limit.
+      @stopped_short = false
     end
 
     def __default_replacement__
@@ -1103,10 +1106,14 @@ class Encoding
     # (U+FFFD after "\xC3"), or one that is itself invalid — inserting more
     # than it reads. Past a bound the call is run again from where it began
     # with such a replacement before that character, and past it again it
-    # stops at the error, unreplaced. The upgrade is whatever CRuby settles
-    # on.
+    # stops at the error, unreplaced. The first call with a limit to pass the
+    # bound still writing stops there instead, answering as though the limit
+    # had come, so what it wrote is what CRuby's writes, and a line that ends
+    # in it is CRuby's; CRuby's would go on to the limit, a call of this loop
+    # a character. The calls after it run again as above, so a read of an IO
+    # ends where CRuby's never does. The upgrade is whatever CRuby settles on.
     def __econv_convert__(input, output, limit, flags)
-      saved = first = fed = nil
+      saved = first = fed = grown = nil
       begun = false
       inserted = 0
       loop do
@@ -1131,8 +1138,15 @@ class Encoding
           saved = __saved__(input, output)
           first = bytes
           fed = __unread__(input) + __buffered__
+          grown = output.bytesize
         elsif inserted > 2 * fed + 64
           return result if begun
+          if limit && !@stopped_short && output.bytesize > grown
+            @stopped_short = true
+            @error_element = nil
+            __insert__(bytes)
+            return :destination_buffer_full
+          end
           __restore__(saved, input, output)
           begun = true
           inserted = 1
