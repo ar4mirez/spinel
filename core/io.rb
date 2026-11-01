@@ -213,17 +213,17 @@ class IO
   end
 
   def wait_readable(timeout = nil)
-    __check_open__
+    __readable__
     IO.__wait__([[self, IO::READABLE]], timeout).nil? ? nil : self
   end
 
   def wait_writable(timeout = nil)
-    __check_open__
+    __writable__
     IO.__wait__([[self, IO::WRITABLE]], timeout).nil? ? nil : self
   end
 
   def wait_priority(timeout = nil)
-    __check_open__
+    __readable__
     IO.__wait__([[self, IO::PRIORITY]], timeout).nil? ? nil : self
   end
 
@@ -491,6 +491,7 @@ end
     end
     # Checked before any of it is assigned: `reopen` keeps what it refuses.
     __validate_enc_binmode__(access, binmode, enc, enc2, ecopts)
+    yield flags, binmode, ecopts if block_given?
     @access = access
     @binmode = binmode
     @enc = enc
@@ -556,6 +557,8 @@ end
     @wgathered = nil
     # And a finalizer of its own, for the descriptor of its own.
     @finalizer = nil
+    # A copy is no standard stream, whatever it copies.
+    @stdio = nil
     __arm__
     self
   end
@@ -628,11 +631,14 @@ end
       __finish_writeconv__
     ensure
       @closed = true
+      # The access goes and the rest of the mode stays, for `reopen`.
+      @access = 3
+      @stdio = nil
       @finalizer&.disarm
       @rbuf = "".b
       @cbuf = "".b
       __fd_close__(@wfileno) unless @wfileno.nil? || @wclosed
-      IO.__check__(__fd_close__(@fileno), @path) if @autoclose && !@rclosed
+      IO.__check__(__fd_close__(@fileno), @path) if @autoclose && !@rclosed && @fileno > 2
       __reap__
     end
     nil
@@ -672,7 +678,7 @@ end
       @access = 1
       return @wclosed ? close : nil
     end
-    raise IOError, "closing non-duplex IO for reading" unless @access == 0
+    raise IOError, "closing non-duplex IO for reading" if __writes__?
     close
   end
 
@@ -686,7 +692,7 @@ end
       @access = 0
       return @rclosed ? close : nil
     end
-    raise IOError, "closing non-duplex IO for writing" unless @access == 1
+    raise IOError, "closing non-duplex IO for writing" if __reads__?
     close
   end
 
@@ -826,14 +832,14 @@ end
 
   def __readable__
     __check_open__
-    raise IOError, "not opened for reading" if @access == 1
+    raise IOError, "not opened for reading" unless __reads__?
   end
 
   # CRuby's `rb_io_check_writable`. Bytes read ahead are bytes the descriptor
   # has moved past; a write belongs where the reader is.
   def __writable__(unread = true)
     __check_open__
-    raise IOError, "not opened for writing" if @access == 0
+    raise IOError, "not opened for writing" unless __writes__?
     __unread__(true) if unread && @wfileno.nil?
   end
 
@@ -868,7 +874,7 @@ end
   # be in binmode: CRuby's `validate_enc_binmode`, which is given what is to
   # be assigned, so what it refuses leaves the IO as it was.
   def __validate_enc_binmode__(access, binmode, enc, enc2, ecopts)
-    if access != 1 && enc2.nil? && !binmode && !(enc || Encoding.default_external).ascii_compatible?
+    if (access == 0 || access == 2) && enc2.nil? && !binmode && !(enc || Encoding.default_external).ascii_compatible?
       raise ArgumentError, "ASCII incompatible encoding needs binmode"
     end
     if binmode && __newline_decorator__?(ecopts)
@@ -893,7 +899,7 @@ end
   def external_encoding
     return @enc2 unless @enc2.nil?
     # One that writes has an encoding only when it was given one.
-    return @enc if @access != 0 && !__tied__?
+    return @enc if __writes__? && !__tied__?
     __read_encoding__
   end
 
@@ -1025,7 +1031,7 @@ end
   # encoding as what the IO reads in, without conversion. An IO that does not
   # read has no mark.
   def __bom__
-    if @access != 1
+    if __reads__?
       nil while @rbuf.bytesize < 4 && __fill__
       BOMS.each do |mark, name|
         next unless @rbuf.byteslice(0, mark.bytesize) == mark
@@ -2813,11 +2819,12 @@ end
     path = File.__path__(other)
     if mode.nil? && options.empty?
       # Everything stays, the mode's creating and truncating among it.
-      flags = @access | (@oflags & (File::CREAT | File::TRUNC | File::APPEND | File::EXCL))
+      # Neither reading nor writing opens as a reader does.
+      flags = (@access == 3 ? File::RDONLY : @access) | (@oflags & (File::CREAT | File::TRUNC | File::APPEND | File::EXCL))
     else
       # The mode starts again, and with it `sync` and `autoclose`, but no BOM
       # is read past: only opening a file does that. `lineno` stays.
-      __modeenc__(mode, options)
+      __modeenc__(mode, options) { |flags, binmode, ecopts| __check_access__(flags, binmode, ecopts) }
       flags = @oflags
       @sync = false
       @autoclose = true
@@ -2848,13 +2855,18 @@ end
     other.__check_open__
     __check_open__
     return self if other.equal?(self)
+    # Only here is it `stdio_file` that counts: an `autoclose = false` IO can
+    # take any access from an IO, and a standard stream only one it has.
+    if @stdio && !@autoclose && other.__side__ != 2 && other.__side__ != (@fileno == 0 ? 0 : 1)
+      __refuse_access__(other.__modestr__)
+    end
     __unread__(true) if @access == 0
-    position = other.__seekable_pos__ unless other.__access__ == 1
+    position = other.__seekable_pos__ if other.__reads__?
     @access, @oflags, @binmode, @textmode, @sync, @enc, @enc2, @ecopts, @lineno, @pid = other.__modes__
     @wpre = @wpre.reject { |key, _| %i[newline universal_newline crlf_newline cr_newline lf_newline].include?(key) } if @wpre && @binmode
     @autoclose &&= other.autoclose?
     @finalizer&.autoclose = @autoclose
-    @path = other.path
+    @path = other.path || (@path unless @autoclose)
     unless other.fileno == @fileno
       IO.__check__(__fd_dup2__(other.fileno, @fileno), @path)
       unless position.nil?
@@ -2865,7 +2877,57 @@ end
     self
   end
 
-  def __access__ = @access
+  # 0 reads, 1 writes, 2 does both and 3 does neither, which a closed IO is
+  # and stays when `reopen` gives it a path and no mode.
+  def __reads__? = @access == 0 || @access == 2
+
+  def __writes__? = @access == 1 || @access == 2
+
+  # CRuby's `rb_io_reopen`: an IO that is `RUBY_IO_EXTERNAL_P`, a standard
+  # stream or one with `autoclose = false`, keeps the access it has. What it
+  # does not have it may take. Asked with a mode that is about to be assigned.
+  def __check_access__(flags, binmode, ecopts)
+    access = flags & 3
+    return if @autoclose || access == 2 || __side__ == 3 || __side__ == access
+    __refuse_access__(IO.__modestr__(access, flags, binmode, __newline_decorator__?(ecopts)))
+  end
+
+  # ponytail: CRuby takes the path for the name and crashes on an IO without
+  # one, a pipe or `IO.for_fd`, which here says its descriptor instead.
+  def __refuse_access__(mode)
+    raise ArgumentError, "#{@path || "fd #{@fileno}"} can't change access mode from #{__modestr__.inspect} to #{mode.inspect}"
+  end
+
+  # A duplex child's access as a mode counts it: CRuby makes that two IOs, and
+  # this one is the side that reads.
+  def __side__ = @access != 3 && __tied__? ? 0 : @access
+
+  def __modestr__ = IO.__modestr__(__side__, @oflags, @binmode, __newline_decorator__?)
+
+  # What a mode is called, CRuby's `rb_io_fmode_modestr`.
+  # The `t` is a newline decorator's: what was asked for without one is lost.
+  def self.__modestr__(access, flags, binmode, text)
+    kind = binmode ? "b" : (text ? "t" : "")
+    both = access == 2 ? "+" : ""
+    excl = flags & File::EXCL == 0 ? "" : "x"
+    return "a#{kind}#{both}" unless flags & File::APPEND == 0
+    if access == 3
+      # ponytail: the bits a mode names, without those of what the IO became.
+      bits = { File::CREAT => 0x80, File::EXCL => 0x400, File::TRUNC => 0x800 }
+      fmode = bits.sum { |flag, bit| flags & flag == 0 ? 0 : bit }
+      fmode |= binmode ? 0x4 : (text ? 0x1000 : 0)
+      raise ArgumentError, "invalid access fmode 0x#{fmode.to_s(16)}"
+    end
+    return "r#{kind}" if access == 0
+    return "r#{kind}+" if access == 2 && flags & File::CREAT == 0
+    "w#{kind}#{both}#{excl}"
+  end
+
+  # What only `STDIN`, `STDOUT` and `STDERR` are, until they are closed.
+  def __stdio__
+    @stdio = true
+    self
+  end
 
   # What `reopen` takes from this IO.
   def __modes__
@@ -3152,9 +3214,10 @@ end
 
 # The standard streams. Made without `new`, which checks the descriptor: a
 # process may start with one of them closed.
-STDIN = IO.allocate.__setup__(0, "r", { path: "<STDIN>" })
-STDOUT = IO.allocate.__setup__(1, "w", { path: "<STDOUT>" })
-STDERR = IO.allocate.__setup__(2, "w", { path: "<STDERR>" })
+# Measured: `autoclose?` is false, and `close` leaves the descriptor open.
+STDIN = IO.allocate.__setup__(0, "r", { path: "<STDIN>", autoclose: false }).__stdio__
+STDOUT = IO.allocate.__setup__(1, "w", { path: "<STDOUT>", autoclose: false }).__stdio__
+STDERR = IO.allocate.__setup__(2, "w", { path: "<STDERR>", autoclose: false }).__stdio__
 # Measured: only STDERR starts unbuffered.
 STDERR.sync = true
 $stdin = STDIN

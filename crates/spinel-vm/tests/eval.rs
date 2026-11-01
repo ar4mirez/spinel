@@ -469,6 +469,26 @@ fn an_operator_instruction_hears_a_prepend_and_an_undef() {
     }
 }
 
+/// CRuby 4.0.9 takes the path of the IO that refuses a change of access mode
+/// for its message and segfaults on an IO without one, so the table, which
+/// CRuby re-measures, cannot hold these: never run them there. Spinel refuses
+/// the same and names the descriptor.
+#[test]
+fn an_io_without_a_path_refuses_a_change_of_access_mode_by_its_descriptor() {
+    for (source, want) in [
+        (
+            r#"n = "/tmp/spinel-eval-#{Process.pid}-520c"; r, w = IO.pipe; r.autoclose = false; m = begin; r.reopen(n, "w"); rescue ArgumentError => x; x.message.sub(r.fileno.to_s, "N"); end; r.autoclose = true; r.close; w.close; [m, File.exist?(n)]"#,
+            r#"["fd N can't change access mode from \"r\" to \"w\"", false]"#,
+        ),
+        (
+            r#"n = "/tmp/spinel-eval-#{Process.pid}-520d"; f = IO.popen("cat", "r+"); f.close_write; f.autoclose = false; m = begin; f.reopen(n, "w"); rescue ArgumentError => x; x.message.sub(f.fileno.to_s, "N"); end; f.close; [m, File.exist?(n)]"#,
+            r#"["fd N can't change access mode from \"r\" to \"w\"", false]"#,
+        ),
+    ] {
+        assert_eq!(eval(source).unwrap(), want, "{source}");
+    }
+}
+
 /// CRuby 4.0.9 never ends where `universal_newline:` into UTF-16 or UTF-32
 /// would buffer a replacement after a character begun behind a held CR: each
 /// error breaks the next replacement's first character. Spinel puts the
