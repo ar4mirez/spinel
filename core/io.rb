@@ -638,7 +638,7 @@ end
       @rbuf = "".b
       @cbuf = "".b
       __fd_close__(@wfileno) unless @wfileno.nil? || @wclosed
-      IO.__check__(__fd_close__(@fileno), @path) if @autoclose && !@rclosed
+      IO.__check__(__fd_close__(@fileno), @path) if @autoclose && !@rclosed && @fileno > 2
       __reap__
     end
     nil
@@ -1031,7 +1031,7 @@ end
   # encoding as what the IO reads in, without conversion. An IO that does not
   # read has no mark.
   def __bom__
-    if @access != 1
+    if __reads__?
       nil while @rbuf.bytesize < 4 && __fill__
       BOMS.each do |mark, name|
         next unless @rbuf.byteslice(0, mark.bytesize) == mark
@@ -2866,7 +2866,7 @@ end
     @wpre = @wpre.reject { |key, _| %i[newline universal_newline crlf_newline cr_newline lf_newline].include?(key) } if @wpre && @binmode
     @autoclose &&= other.autoclose?
     @finalizer&.autoclose = @autoclose
-    @path = other.path
+    @path = other.path || (@path unless @autoclose)
     unless other.fileno == @fileno
       IO.__check__(__fd_dup2__(other.fileno, @fileno), @path)
       unless position.nil?
@@ -2907,17 +2907,17 @@ end
   # What a mode is called, CRuby's `rb_io_fmode_modestr`.
   # The `t` is a newline decorator's: what was asked for without one is lost.
   def self.__modestr__(access, flags, binmode, text)
-    if access == 3
-      # ponytail: the bits a mode names, without those of what the IO became.
-      bits = { File::APPEND => 0x40, File::CREAT => 0x80, File::EXCL => 0x400, File::TRUNC => 0x800 }
-      fmode = bits.sum { |flag, bit| flags & flag == 0 ? 0 : bit }
-      fmode |= binmode ? 0x4 : (text ? 0x1000 : 0)
-      raise ArgumentError, "invalid access fmode 0x#{fmode.to_s(16)}"
-    end
     kind = binmode ? "b" : (text ? "t" : "")
     both = access == 2 ? "+" : ""
     excl = flags & File::EXCL == 0 ? "" : "x"
     return "a#{kind}#{both}" unless flags & File::APPEND == 0
+    if access == 3
+      # ponytail: the bits a mode names, without those of what the IO became.
+      bits = { File::CREAT => 0x80, File::EXCL => 0x400, File::TRUNC => 0x800 }
+      fmode = bits.sum { |flag, bit| flags & flag == 0 ? 0 : bit }
+      fmode |= binmode ? 0x4 : (text ? 0x1000 : 0)
+      raise ArgumentError, "invalid access fmode 0x#{fmode.to_s(16)}"
+    end
     return "r#{kind}" if access == 0
     return "r#{kind}+" if access == 2 && flags & File::CREAT == 0
     "w#{kind}#{both}#{excl}"
