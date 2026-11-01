@@ -280,8 +280,8 @@ def self.new(*args, **options, &block)
   super(*args, **options, &nil)
 end
 
-def self.for_fd(*args, **options, &block)
-  new(*args, **options, &block)
+def self.for_fd(*args, **options)
+  new(*args, **options)
 end
 
   def self.open(*args, **options)
