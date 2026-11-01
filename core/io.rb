@@ -1110,26 +1110,37 @@ end
   end
 
   # What the read converter makes of `bytes`, going on from the last it read:
-  # partial input, so what they end part way through waits inside. On an
-  # error the bytes it did not read, those it read past the error's among
-  # them, go back to be read next, as CRuby's `fill_cbuf` gives them back, and
-  # so do those it did not get to where it stopped `after_output`.
+  # partial input, so what they end part way through waits inside.
   def __convert_in__(bytes, flags = Encoding::Converter::PARTIAL_INPUT)
-    @readconv ||= __make_readconv__
     out = String.new(encoding: __read_encoding__)
+    __convert_onto__(bytes, out, flags)
+    out
+  end
+
+  # `__convert_in__` onto `out`, answering whether it stopped `after_output`.
+  # The bytes it did not get to go back to be read next, and on an error so do
+  # those it read past the error's, as CRuby's `fill_cbuf` gives them back.
+  # What a call stopping after output made as well as the error, a BOM or an
+  # attribute's quote, stays held, in the buffer `fill_cbuf` was filling: only
+  # a read that had taken what it made before loses that. Measured.
+  def __convert_onto__(bytes, out, flags)
+    @readconv ||= __make_readconv__
     result = @readconv.primitive_convert(bytes, out, nil, nil, flags)
-    return out if result == :source_buffer_empty
+    return false if result == :source_buffer_empty || result == :finished
     if result == :after_output
       @rbuf = bytes.b + @rbuf
-      return out
+      return true
     end
     @rbuf = @readconv.putback.b + bytes.b + @rbuf
+    __hold_chars__(out.b) if flags & Encoding::Converter::AFTER_OUTPUT != 0
     raise @readconv.last_error
   end
 
   # How many bytes `__next_chars__` offers the converter at a time, enough
   # for an escape sequence and the character after it, or a BOM and a UTF-32
   # character. One longer goes round again; what is not read comes back.
+  # ponytail: where an offer ends can change what a broken sequence takes with
+  # it (#543); offering all that is buffered copies it per character.
   NEXT_CHARS_BYTES = 8
   private_constant :NEXT_CHARS_BYTES
 
@@ -1137,18 +1148,21 @@ end
   # stops after output, as CRuby's `fill_cbuf` does, so an escape sequence is
   # read with the character after it, and `pos` is past that and no further.
   # A converter of more than one transcoder can stop with nothing out yet, as
-  # a CR universal newline holds. Measured.
+  # a CR universal newline holds. One that makes output without stopping,
+  # references for the characters it cannot write, reads on to the end of
+  # the bytes buffered, as CRuby's call is given them all, and no further.
+  # Measured.
   # ponytail: a call of the converter for each character, which is most of
   # what a `getc` costs here. The upgrade is a cheaper call.
   def __next_chars__
     flags = Encoding::Converter::PARTIAL_INPUT | Encoding::Converter::AFTER_OUTPUT
-    while !@rbuf.empty? || __fill__
-      out = __convert_in__(__take__(NEXT_CHARS_BYTES), flags)
-      next if out.empty?
-      @rnewline = out.getbyte(-1) == 0x0A
-      return out
+    out = String.new(encoding: __read_encoding__)
+    while !@rbuf.empty? || (out.empty? && __fill__)
+      break if __convert_onto__(__take__(NEXT_CHARS_BYTES), out, flags) && !out.empty?
     end
-    nil
+    return nil if out.empty?
+    @rnewline = out.getbyte(-1) == 0x0A
+    out
   end
 
   # Whether `__chars_to_line_end__` can go by the bytes read: a separator
