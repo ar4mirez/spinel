@@ -684,19 +684,19 @@ module Process
     end
 
     # The options as `[child, parent]` pairs, the files opened for them to be
-    # closed after the fork, and the rest of the options.
+    # closed after the fork, and which of the descriptors in `extra` an option
+    # redirects as well, if one does.
     def redirections(options, extra = [])
       pairs = extra.dup
       opened = []
       children = []
-      rest = {}
+      # What a redirection is, in the order `piped` reads them.
+      claims = { given: [], file: [], close: [], child: [] }
       options.each do |key, value|
         keys = Array === key ? key : [key]
         fds = keys.map { |one| target(one) }
-        if fds.include?(nil)
-          rest[key] = value
-          next
-        end
+        next if fds.include?(nil)
+        claims[claim(value)].concat(fds)
         # `[:out, :err] => name` opens the file once, for both.
         shared = nil
         fds.each do |fd|
@@ -737,7 +737,28 @@ module Process
         made = pairs.find { |child, _| child == other }
         pairs << [fd, made.nil? ? other : made[1]]
       end
-      [pairs, opened, rest]
+      [pairs, opened, piped(extra, claims)]
+    end
+
+    def claim(value)
+      case value
+      when :close then :close
+      when :in, :out, :err, Integer, IO then :given
+      when Array then value[0] == :child ? :child : :file
+      else :file
+      end
+    end
+
+    # CRuby's `check_exec_fds` over a list it builds from `IO.popen`'s pipes
+    # and the options, so which descriptor it names is the first to repeat in
+    # that list: the ones given, then the pipes, then the files, what is
+    # closed and what is the child's.
+    # ponytail: only a descriptor in `extra` is looked for, so `spawn` still
+    # lets `out: a, 1 => b` through (#538).
+    def piped(extra, claims)
+      fds = extra.map(&:first)
+      fds.find { |fd| claims[:given].include?(fd) } ||
+        (claims[:file] + claims[:close] + claims[:child]).find { |fd| fds.include?(fd) }
     end
 
     # Start a child, or with `replace` become it. Answers the pid.
@@ -746,21 +767,27 @@ module Process
       check(options)
       begin
         path, argv, shown = command(command_args)
-      rescue SystemCallError
-        # CRuby finds out in the child it forked, which then exits 127.
-        __global_store__(:$?, Process::Status.__make__(0, 127 << 8)) unless replace
-        raise
+      rescue SystemCallError => unfound
       end
-      pairs, opened, rest = redirections(options, extra)
-      chdir = rest[:chdir].nil? ? nil : File.__path__(rest[:chdir])
-      pgroup = case rest[:pgroup]
+      # CRuby reads these with the arguments, before it opens a file or
+      # refuses a descriptor.
+      chdir = options[:chdir].nil? ? nil : File.__path__(options[:chdir])
+      pgroup = case options[:pgroup]
                when nil, false then nil
                when true then 0
-               else Integer.__index__(rest[:pgroup])
+               else Integer.__index__(options[:pgroup])
                end
       raise ArgumentError, "negative process group ID : #{pgroup}" if !pgroup.nil? && pgroup < 0
-      umask = rest[:umask].nil? ? nil : Integer.__index__(rest[:umask])
-      result = __sys_spawn__(path, argv, environment(env, rest), pairs.flatten, chdir, pgroup, umask, replace, rest[:close_others])
+      umask = options[:umask].nil? ? nil : Integer.__index__(options[:umask])
+      table = environment(env, options)
+      pairs, opened, twice = redirections(options, extra)
+      raise ArgumentError, "fd #{twice} specified twice" unless twice.nil?
+      unless unfound.nil?
+        # CRuby finds out in the child it forked, which then exits 127.
+        __global_store__(:$?, Process::Status.__make__(0, 127 << 8)) unless replace
+        raise unfound
+      end
+      result = __sys_spawn__(path, argv, table, pairs.flatten, chdir, pgroup, umask, replace, options[:close_others])
       raise SystemCallError.new(shown, result) if Integer === result
       if result.size == 2
         # The child ran and could not become the program: CRuby's `$?` is
