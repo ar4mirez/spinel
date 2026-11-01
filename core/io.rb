@@ -419,6 +419,20 @@ end
     Encoding.find(name)
   end
 
+  # `internal_encoding:`, which CRuby reads as a C string before it looks for
+  # the encoding, so "-" is no conversion however the String is encoded: a
+  # wide one ends at its first NUL byte.
+  def self.__internal_option__(value)
+    return value if Encoding === value
+    name = String.__coerce__(value)
+    if name.encoding.ascii_compatible? || name.encoding.dummy?
+      raise ArgumentError, "string contains null byte" if name.b.include?("\0")
+    elsif name.each_char.any? { |char| char.b.delete("\0").empty? }
+      raise ArgumentError, "string contains null char"
+    end
+    name.b.partition("\0")[0] == "-" ? :none : __to_encoding__(value)
+  end
+
   def initialize(fd, mode = nil, **options)
     fd = Integer.__index__(fd)
     current = IO.__check__(__fd_fcntl__(fd, IO.__fcntl__("F_GETFL"), 0))[0]
@@ -474,7 +488,7 @@ end
       end
       given = IO.__to_encoding__(options[:external_encoding]) unless options[:external_encoding].nil?
       wanted = options[:internal_encoding]
-      wanted = wanted == "-" ? :none : IO.__to_encoding__(wanted) unless wanted.nil?
+      wanted = IO.__internal_option__(wanted) unless wanted.nil?
       raise ArgumentError, "encoding specified twice" if named
       external = given
       internal = wanted
