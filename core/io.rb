@@ -10,7 +10,8 @@
 # ponytail: no write buffer, so `flush` has nothing to do and `sync` only says
 # what a `write` of several does with what it has gathered; and conversion between an external and an internal encoding
 # is done a whole read or a whole line at a time, by `String#encode`, unless
-# one of them is stateful, where the IO keeps a converter (`__stream_in__?`).
+# one of them is stateful or `reopen` left one, where the IO keeps a converter
+# (`__stream_in__?`).
 # That stream decoder for every read is the upgrade, when a spec needs a line
 # split across a conversion.
 
@@ -3060,11 +3061,13 @@ end
   end
 
   # CRuby's `io_reopen`. A reader's bytes buffered go, and the read converter
-  # with them; what the descriptor is at then decides what else does. The
-  # other IO gives back its own, and this one takes all it is but `autoclose`,
-  # which either can turn off, and what its first write fixed, which stays for
-  # its writes while reads go by what it took. A binary IO takes the newlines
-  # out of that too, as `io_reopen` ends in `rb_io_binmode`. Measured.
+  # with them, where there were any; with none it stays, for reads to go on
+  # through (`__keep_readconv__`). What the descriptor is at then decides what
+  # else goes. The other IO gives back its own, and this one takes all it is
+  # but `autoclose`, which either can turn off, and what its first write fixed,
+  # which stays for its writes while other reads go by what it took. A binary
+  # IO takes the newlines out of that too, as `io_reopen` ends in
+  # `rb_io_binmode`. Measured.
   def __reopen_io__(other)
     other.__check_open__
     __check_open__
