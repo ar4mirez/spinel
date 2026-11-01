@@ -637,6 +637,8 @@ end
       @finalizer&.disarm
       @rbuf = "".b
       @cbuf = "".b
+      # CRuby's `close` leaves `readconv` freed, and a `reopen` crashes on it.
+      __drop_readconv__
       __fd_close__(@wfileno) unless @wfileno.nil? || @wclosed
       IO.__check__(__fd_close__(@fileno), @path) if @autoclose && !@rclosed && @fileno > 2
       __reap__
@@ -1065,7 +1067,7 @@ end
       out = String.__escape_xml__(bytes, xml)
       out = out.byteslice(1, out.bytesize - 2).force_encoding(bytes.encoding) if xml == :attr
     else
-      out = bytes.encode(__read_encoding__, **__read_ecopts__)
+      out = bytes.encode(__read_encoding__, **__read_options__(@ecopts))
       out = out[1...-1] if xml == :attr
     end
     return out unless xml == :attr && !@rquote && !out.empty?
@@ -1090,7 +1092,10 @@ end
   # because what a conversion knows carries from one read to the next:
   # ISO-2022-JP's G0, the byte order a BOM'd UTF-16 or UTF-32 read, the mark
   # one writes first (#420). `String#encode` starts and finishes each time.
+  # So do they when `reopen` left a converter of other encodings than the IO
+  # has now, which `String#encode` could not stand in for (#517).
   def __stream_in__?
+    return __read_converter__? if @rkept
     !@enc2.nil? && (__stateful__?(@enc2) || __stateful__?(__read_encoding__))
   end
 
@@ -1102,9 +1107,46 @@ end
   # in the one converter, where a read that starts and finishes a conversion
   # has them done around it.
   def __make_readconv__
-    options = __read_ecopts__
-    options[:universal_newline] = true if __universal_newline__?
-    __converter__(__encoding__, __read_encoding__, options)
+    __readconv__
+    source, target, ecopts = @rmade
+    options = __read_options__(ecopts)
+    options[:universal_newline] = true if __universal_newline__?(ecopts)
+    __converter__(source, target, options)
+  end
+
+  # CRuby's `rb_io_reopen` and `io_reopen` replace the encodings and leave
+  # `readconv`, and `make_readconv` makes none while there is one, so reads
+  # with a converter go on through the one a read already made, its options
+  # and all, and what it writes is called what the IO reads in now. Reads
+  # that have no converter leave it there for a later `reopen` to come back
+  # to. It carries on where the old one was: an attribute's quote is open, a
+  # CR or the first byte of a character is inside, and one that has finished
+  # reads nothing. Whatever drops the converter ends this. Measured.
+  # ponytail: a converter of decorators alone is not kept, as `Converter.new`
+  # has no `""`, so reads follow the new encodings (#550). A CR at the end of
+  # the bytes finishes CRuby's as it looks past it, and not this (#551).
+  def __keep_readconv__
+    made = @rmade
+    return if made.nil? || @rkept || made == __read_made__
+    if made[0].nil?
+      @rmade = nil
+      return
+    end
+    @rkept = true
+    return unless @readconv.nil?
+    begin
+      @readconv = __make_readconv__
+    rescue Encoding::ConverterNotFoundError
+      # The read that asked for it raised this too, and so made none.
+      @rmade = nil
+      @rkept = false
+      return
+    end
+    @readconv.primitive_convert("a".encode(made[0]), "".b, nil, nil, Encoding::Converter::PARTIAL_INPUT) if @rquote
+    @readconv.finish if @rfinished
+    return if @rpend.nil?
+    __hold_chars__(__convert_in__(@rpend).b)
+    @rpend = nil
   end
 
   # A converter the IO keeps. One whose `replace:` has no spelling in what it
@@ -1133,6 +1175,7 @@ end
   def __convert_onto__(bytes, out, room, flags)
     @readconv ||= __make_readconv__
     result = @readconv.primitive_convert(bytes, out, nil, room, flags)
+    out.force_encoding(__read_encoding__) if @rkept
     return out if result == :source_buffer_empty
     if result == :after_output || result == :destination_buffer_full || result == :finished
       @rbuf = bytes.b + @rbuf
@@ -1172,7 +1215,7 @@ end
     flags = Encoding::Converter::PARTIAL_INPUT | Encoding::Converter::AFTER_OUTPUT
     out = String.new(encoding: __read_encoding__)
     while !@rbuf.empty? || __fill__
-      plain = @ecopts.empty?
+      plain = __plain_readconv__?
       return nil unless __convert_onto__(__take__(plain ? NEXT_CHARS_BYTES : @rbuf.bytesize), out, plain ? nil : READ_CONVERTER_BYTES, flags)
       next if out.empty?
       @rnewline = out.getbyte(-1) == 0x0A
@@ -1184,10 +1227,12 @@ end
   # Whether `__chars_to_line_end__` can go by the bytes read: a separator
   # ending in an ASCII character has that character's byte in them, and
   # nothing but universal newline makes one from something else, or a
-  # replacement or decorator more than it read.
+  # replacement or decorator more than it read. Not through a converter
+  # `reopen` left, whose bytes are not those of the encodings the IO has.
   # ponytail: any other line stays a character at a time at `__next_chars__`'s
   # cost; upgrade with the cheaper call that names.
   def __line_runs__?(sep, enc)
+    return false if @rkept
     return false unless enc.ascii_compatible? && (sep.nil? || sep.dup.force_encoding(enc)[-1].ascii_only?)
     @ecopts.empty? || (@ecopts.size == 1 && __universal_newline__?)
   end
@@ -1235,16 +1280,27 @@ end
   # nothing. Measured.
   def __finish_in__
     return __finish_readconv__ if __stream_in__?
-    return nil unless __xml_in__ == :attr
+    unless __xml_in__ == :attr
+      __read_ended__
+      return nil
+    end
     if @rfinished
       @rfinished = false
       @rquote = nil
+      @rmade = nil
       return nil
     end
     quote = @rquote ? "\"" : "\"\""
     @rquote = false
     @rfinished = true
     __in_read__(quote)
+  end
+
+  # A read with a converter that reached the end, where CRuby's drops it. A
+  # line through `__converted_line__` goes on to `__finish_in__` for that, and
+  # one read `whole` by bytes says so itself: a limit can stop the other first.
+  def __read_ended__
+    @rmade = nil if __read_converter__?
   end
 
   # `__finish_in__` where the IO keeps a converter, which writes what it has
@@ -1255,12 +1311,17 @@ end
   def __finish_readconv__
     if @rfinished
       @rfinished = false
+      @readconv = nil
+      __forget_readconv__
       return nil
     end
     @readconv ||= __make_readconv__
     out = @readconv.finish
     @readconv = nil
-    return nil if out.empty?
+    if out.empty?
+      __forget_readconv__
+      return nil
+    end
     @rfinished = true
     out
   end
@@ -1317,9 +1378,16 @@ end
   def __drop_readconv__
     @readconv = nil
     @rpend = nil
-    @rquote = nil
     @rfinished = false
     @readconv_dropped = __chars_held__?
+    __forget_readconv__
+  end
+
+  # No read has made a converter, so the next makes one of the IO's encodings.
+  def __forget_readconv__
+    @rmade = nil
+    @rkept = false
+    @rquote = nil
   end
 
   # A read of bytes, where the read converter holds characters: CRuby's
@@ -1377,26 +1445,47 @@ end
   # the decorators for writing. Universal newline is done on the way in.
   def __read_ecopts__
     __readconv__
-    @ecopts.reject { |key, _| %i[newline crlf_newline cr_newline lf_newline].include?(key) }
+    __read_options__(@ecopts)
+  end
+
+  def __read_options__(ecopts)
+    ecopts.reject { |key, _| %i[newline crlf_newline cr_newline lf_newline].include?(key) }
+  end
+
+  # Whether the converter reads go through has no options.
+  def __plain_readconv__? = (@rkept ? @rmade[2] : @ecopts).empty?
+
+  # What a converter made now would convert: without an internal encoding,
+  # CRuby's is the decorators alone.
+  def __read_made__
+    @enc2.nil? ? [nil, nil, @ecopts] : [__encoding__, __read_encoding__, @ecopts]
   end
 
   # CRuby's `make_readconv`, which a read that converts makes before it reads
   # anything, at the end as well: an IO has a read converter when it has an
   # internal encoding or a newline option. With both `xml:` decorators, the
   # quote's too, it asks for all of them in one converter, and none has them
-  # (#458, #461). Text mode gives it universal newline (#465). Measured.
+  # (#458, #461). Text mode gives it universal newline (#465). What it would
+  # convert is noted, for `reopen`, which leaves it, to make it from: reads
+  # that need nothing kept from one to the next have no converter to leave
+  # (#517). Measured.
   def __readconv__
     if @readconv_dropped && __read_converter__?
       @cbuf = "".b
       @readconv_dropped = false
     end
-    return unless @ecopts[:xml].equal?(XML_BOTH) && (@enc2 || __newline_decorator__?)
+    # An IO with neither has no converter, and is most of what reads here.
+    return unless @rmade.nil? && (@enc2 || !@ecopts.empty?) && __read_converter__?
+    unless @ecopts[:xml].equal?(XML_BOTH)
+      @rmade = __read_made__
+      return
+    end
     newlines = __universal_newline__? ? ["universal_newline"] : []
     raise String.__decorators_not_found__(@enc2 || __encoding__, __read_encoding__, newlines + %w[xml_text xml_attr_content xml_attr_quote], nil)
   end
 
-  def __universal_newline__?
-    @ecopts[:universal_newline] || @ecopts[:newline] == :universal
+  def __universal_newline__?(ecopts = @ecopts)
+    ecopts[:universal_newline] || ecopts[:newline] == :universal
   end
 
   # A String about to be written, in the encoding the IO writes: `@enc2`, or
@@ -1661,7 +1750,7 @@ end
   # buffered before `set_encoding` makes that a stream with options stay short
   # of CRuby's 128KB. The upgrade is a line read that does not cost with the
   # buffer, and 128KB for any read converter.
-  def __fill__(want = __stream_in__? && !@ecopts.empty? ? READ_CONVERTER_BYTES : 65536)
+  def __fill__(want = __stream_in__? && !__plain_readconv__? ? READ_CONVERTER_BYTES : 65536)
     chunk = IO.__check__(__read_wait__(want), @path)
     return false if chunk.empty?
     @rbuf << chunk
@@ -1963,11 +2052,11 @@ end
       line = __converted_line__(paragraph ? "\n\n" : separator, wanted, limit, unit)
       return nil if line.nil?
     elsif unit
-      bytes, cr = __universal_line__(wanted, limit, unit)
+      bytes, cr = __universal_line__(wanted, limit, unit, true)
       line = bytes.nil? ? nil : __decode__(bytes)
       __read_ahead__(cr, unit) if cr
     else
-      line = __line_bytes__(wanted, limit)
+      line = __line_bytes__(wanted, limit, true)
       line = __newlines_in__(__decode__(line)) unless line.nil?
     end
     return nil if line.nil?
@@ -2092,7 +2181,7 @@ end
 
   # The bytes of the next line as read, or nil at the end: up to the
   # separator, or `limit` bytes, or the end.
-  def __line_bytes__(wanted, limit)
+  def __line_bytes__(wanted, limit, whole = false)
     from = 0
     cut = nil
     while cut.nil?
@@ -2104,7 +2193,10 @@ end
       else
         from = @rbuf.bytesize - (wanted.nil? ? 0 : wanted.bytesize) + 1
         from = 0 if from < 0
-        cut = @rbuf.bytesize unless __fill__
+        unless __fill__
+          cut = @rbuf.bytesize
+          __read_ended__ if whole
+        end
       end
     end
     if !limit.nil? && limit > 0 && limit <= cut
@@ -2129,7 +2221,7 @@ end
   # keeps the bytes as they were read, as `pos`, `read(n)` and `getbyte`
   # after a line see them in CRuby: the line is converted only as far as it
   # goes, and each LF that stood for a CRLF is a byte more it takes.
-  def __universal_line__(wanted, limit, unit)
+  def __universal_line__(wanted, limit, unit, whole = false)
     __unpend__
     enc, cr, lf, newline = __newline_bytes__(unit)
     line = { view: "".b, crlfs: [], lone: [], scanned: 0, ended: false, cr: cr, lf: lf, unit: unit, newline: newline }
@@ -2147,7 +2239,10 @@ end
       else
         from = view.bytesize - (wanted.nil? ? 0 : wanted.bytesize) + 1
         from = 0 if from < 0
-        cut = view.bytesize unless __convert_more__(line)
+        unless __convert_more__(line)
+          cut = view.bytesize
+          __read_ended__ if whole
+        end
       end
     end
     if !limit.nil? && limit > 0 && limit <= cut
@@ -2842,6 +2937,7 @@ end
     @rbuf = "".b
     @path = path.dup
     __arm__
+    __keep_readconv__
     self
   end
 
@@ -2874,6 +2970,7 @@ end
         IO.__check__(__fd_seek__(@fileno, position, IO::SEEK_SET))
       end
     end
+    __keep_readconv__
     self
   end
 
