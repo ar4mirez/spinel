@@ -1090,7 +1090,6 @@ end
       end
     end
     @enc2 = nil
-    @bom_unmarked = true
     nil
   end
 
@@ -1176,7 +1175,7 @@ end
   # so a CR in the bytes is a CR, and the characters are cut from what it
   # makes (#525).
   def __newline_on_bytes__?
-    @bom_unmarked && @ecopts[:xml].nil? && __universal_newline__? && !__read_encoding__.ascii_compatible?
+    @enc2.nil? && !@enc.nil? && !@enc.ascii_compatible? && __universal_newline__?
   end
 
   def __stateful__?(encoding)
@@ -1189,7 +1188,7 @@ end
   def __make_readconv__
     __readconv__
     source, target, ecopts = @rmade
-    return NewlineBytes.new(__read_encoding__) if source.nil?
+    return NewlineBytes.new(__read_encoding__, @ecopts[:xml]) if source.nil?
     options = __read_options__(ecopts)
     options[:universal_newline] = true if __universal_newline__?(ecopts)
     __converter__(source, target, options)
@@ -1242,12 +1241,15 @@ end
   # ponytail: only that read; `Encoding::Converter.new("", "", ...)` would
   # replace this, and is #550.
   class NewlineBytes
-    def initialize(encoding)
+    def initialize(encoding, xml)
       @encoding = encoding
+      @xml = xml
       @cr = false
+      @finished = false
     end
 
     def primitive_convert(source, out, _offset, _room, flags)
+      return :finished if @finished
       made = "".b
       if flags & Encoding::Converter::AFTER_OUTPUT == 0
         made, @cr = String.__newline_turn__(source, "universal_newline", @cr)
@@ -1260,6 +1262,14 @@ end
         end
         source.replace(source.byteslice(used, source.bytesize - used))
       end
+      made = String.__escape_xml__(made, @xml).b if @xml
+      if @xml == :attr
+        made = made.byteslice(1, made.bytesize - 2)
+        unless made.empty? || @quoted
+          made = "\"".b + made
+          @quoted = true
+        end
+      end
       out.force_encoding(Encoding::BINARY) << made
       out.force_encoding(@encoding)
       return :after_output unless source.empty?
@@ -1268,7 +1278,10 @@ end
 
     def finish
       held = @cr ? "\n" : ""
+      held = String.__escape_xml__(held, @xml)[1...-1] if @xml == :attr
+      held = (@quoted ? "" : "\"") + held + "\"" if @xml == :attr
       @cr = false
+      @finished = true
       held.b.force_encoding(@encoding)
     end
   end
@@ -2210,7 +2223,7 @@ end
     # one character in UTF-16 (#477). So does a limit on any line where the
     # converter makes other bytes than it reads (#479).
     stream = __stream_in__?
-    kept = @rkept
+    kept = @rkept || __newline_on_bytes__?
     converted = paragraph ? __read_converter__? : stream || __chars_read__? || __xml_in__ || !limit.nil? && __converts_bytes__?
     # Blank lines before a record are not part of it.
     __swallow__(unit) if paragraph
