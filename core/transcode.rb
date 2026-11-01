@@ -174,7 +174,7 @@ class String
   # transcoder to report, not refused as a String operation would (#412).
   # No ASCII-compatible encoding has CR or LF as a trailing byte.
   def self.__universal_newline__(text)
-    text.b.gsub("\r\n", "\n").gsub("\r", "\n").force_encoding(text.encoding)
+    text.b.split("\r\n", -1).join("\n").gsub("\r", "\n").force_encoding(text.encoding)
   end
 
   # The newline decorator `name` on the bytes of `text`, which are ASCII

@@ -1333,11 +1333,6 @@ end
   NEXT_CHARS_BYTES = 8
   private_constant :NEXT_CHARS_BYTES
 
-  # How many bytes a fill asks for through a `NewlineBytes`, which reads a byte
-  # at a time, where each read pays for what is left in the buffer.
-  NEWLINE_BYTES_FILL = 4096
-  private_constant :NEWLINE_BYTES_FILL
-
   # What the read converter makes next, or nil at the end of the bytes. It
   # stops after output, as CRuby's `fill_cbuf` does, so an escape sequence is
   # read with the character after it, and `pos` is past that and no further.
@@ -1951,7 +1946,7 @@ end
   # buffered before `set_encoding` makes that a stream with options stay short
   # of CRuby's 128KB. The upgrade is a line read that does not cost with the
   # buffer, and 128KB for any read converter.
-  def __fill__(want = NewlineBytes === @readconv ? NEWLINE_BYTES_FILL : (__stream_in__? && !__plain_readconv__? ? READ_CONVERTER_BYTES : 65536))
+  def __fill__(want = __stream_in__? && !__plain_readconv__? ? READ_CONVERTER_BYTES : 65536)
     chunk = IO.__check__(__read_wait__(want), @path)
     return false if chunk.empty?
     @rbuf << chunk
