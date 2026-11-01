@@ -1085,14 +1085,22 @@ end
   # took all of `bytes` before `String#encode` raised: a converter finds the
   # error again, and what it did not get to goes back to be read next, as do
   # those it read past the error's. That read has not ended, whatever it saw
-  # of the bytes, so it still made a converter, and anything made before the
-  # error opened an attribute's quote. Measured.
+  # of the bytes, so it still made a converter. It goes as `more_char` does, a
+  # call at a time: what the calls before the error made went with the read,
+  # an attribute's quote among it, and what the one that raised made stays
+  # held, as in `cbuf`, which only a `read` takes with it. Measured.
   def __give_back_past_error__(bytes)
     converter = __converter__(__encoding__, __read_encoding__, __read_ecopts__)
-    made = "".b
-    converter.primitive_convert(bytes, made)
+    converter.primitive_convert("a".encode(__encoding__), "".b, nil, nil, Encoding::Converter::PARTIAL_INPUT) if @rquote
+    made = nil
+    loop do
+      made = "".b
+      result = converter.primitive_convert(bytes, made, nil, nil, Encoding::Converter::AFTER_OUTPUT)
+      @rquote = true if __xml_in__ == :attr && !made.empty?
+      break unless result == :after_output
+    end
     @rbuf = converter.putback.b + bytes.b + @rbuf
-    @rquote = true if __xml_in__ == :attr && !made.empty?
+    __hold_chars__(made)
   end
 
   # Whether the IO has a read converter, as CRuby's `NEED_READCONV`: an
@@ -1915,7 +1923,12 @@ end
       nil while __fill__
       held = __chars_read__? ? __take_chars__ : "".b
       __unpend__
-      out = __newlines_in__(__decode__(__take__(@rbuf.bytesize)))
+      begin
+        out = __newlines_in__(__decode__(__take__(@rbuf.bytesize)))
+      rescue Encoding::InvalidByteSequenceError, Encoding::UndefinedConversionError
+        __take_chars__
+        raise
+      end
       finish = __finish_in__
       __finish_in__ unless finish.nil?
       unless held.empty? && finish.nil?
