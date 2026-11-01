@@ -1333,6 +1333,11 @@ end
   NEXT_CHARS_BYTES = 8
   private_constant :NEXT_CHARS_BYTES
 
+  # How many bytes a fill asks for through a `NewlineBytes`, which reads a byte
+  # at a time, where each read pays for what is left in the buffer.
+  NEWLINE_BYTES_FILL = 4096
+  private_constant :NEWLINE_BYTES_FILL
+
   # What the read converter makes next, or nil at the end of the bytes. It
   # stops after output, as CRuby's `fill_cbuf` does, so an escape sequence is
   # read with the character after it, and `pos` is past that and no further.
@@ -1348,11 +1353,13 @@ end
   # what a `getc` costs here. The upgrade is a cheaper call.
   def __next_chars__
     __unpend__ if @rkept
+    return nil if @rfinished && @readconv
     flags = Encoding::Converter::PARTIAL_INPUT | Encoding::Converter::AFTER_OUTPUT
     out = String.new(encoding: __read_encoding__)
     while !@rbuf.empty? || __fill__
       plain = __plain_readconv__?
-      return nil unless __convert_onto__(__take__(plain ? NEXT_CHARS_BYTES : @rbuf.bytesize), out, plain ? nil : READ_CONVERTER_BYTES, flags)
+      count = NewlineBytes === @readconv ? 1 : (plain ? NEXT_CHARS_BYTES : @rbuf.bytesize)
+      return nil unless __convert_onto__(__take__(count), out, plain ? nil : READ_CONVERTER_BYTES, flags)
       next if out.empty?
       @rnewline = out.getbyte(-1) == 0x0A
       return out
@@ -1363,13 +1370,15 @@ end
   # Whether `__chars_to_line_end__` can go by the bytes read: a separator
   # ending in an ASCII character has that character's byte in them, and
   # nothing but universal newline makes one from something else, or a
-  # replacement or decorator more than it read. Not through a converter
-  # `reopen` left, whose bytes are not those of the encodings the IO has.
+  # replacement or decorator more than it read, and by the bytes where
+  # `__newline_on_bytes__?` makes them whatever they are called. Not through a
+  # converter `reopen` left, whose bytes are not those of the encodings the IO
+  # has.
   # ponytail: any other line stays a character at a time at `__next_chars__`'s
   # cost; upgrade with the cheaper call that names.
   def __line_runs__?(sep, enc)
     return false if @rkept
-    return false unless enc.ascii_compatible? && (sep.nil? || sep.dup.force_encoding(enc)[-1].ascii_only?)
+    return false unless enc.ascii_compatible? ? sep.nil? || sep.dup.force_encoding(enc)[-1].ascii_only? : __newline_on_bytes__?
     @ecopts.empty? || (@ecopts.size == 1 && __universal_newline__?)
   end
 
@@ -1379,7 +1388,9 @@ end
   # That byte goes with them in ISO-2022-JP, where it is the whole character;
   # in UTF-16 or UTF-32 it is a character at a time from there, as the bytes
   # after it can be what makes the character, and likewise from a CR universal
-  # newline holds. A newline can leave the next CR held, and a held CR comes
+  # newline holds. `__newline_on_bytes__?` makes a character of each byte, so
+  # that byte goes with them there too, a CRLF's LF with its CR, and only a CR
+  # that could be held waits. A newline can leave the next CR held, and a held CR comes
   # out with the next character, a line of its own that an error later in a
   # run would lose, so after one it is a character at a time to the next.
   # With `room` left of a limit, no more bytes go than cannot fill it: four a
@@ -1388,15 +1399,20 @@ end
   # and nil where the converter has finished.
   def __chars_to_line_end__(sep, room)
     return __next_chars__ if @rnewline
-    return nil if @rbuf.empty? && !__fill__
+    return nil if @rfinished && @readconv || @rbuf.empty? && !__fill__
+    bytes = __newline_on_bytes__?
     at = sep && @rbuf.index(sep[-1])
-    at += 1 if at && __encoding__ == Encoding::ISO_2022_JP
+    at += 1 if at && (bytes || __encoding__ == Encoding::ISO_2022_JP)
     if sep&.end_with?("\n") && __universal_newline__?
       cr = @rbuf.index("\r")
-      at = cr if cr && (at.nil? || cr < at)
+      if cr && (at.nil? || cr < at)
+        at = cr
+        at += 2 if bytes && @rbuf.getbyte(cr + 1) == 10
+      end
     end
     count = at || @rbuf.bytesize
     count = [count, room / 4].min if room && room > 0
+    count -= 1 if bytes && count > 0 && @rbuf.getbyte(count - 1) == 13
     count == 0 ? __next_chars__ : __convert_in__(__take__(count))
   end
 
@@ -1441,7 +1457,8 @@ end
 
   # `__finish_in__` where the IO keeps a converter, which writes what it has
   # left, an attribute's closing quote or the escape back to ASCII among it,
-  # and goes: the next read that gets this far makes another. One that raises
+  # and goes: the next read that gets this far makes another. A `NewlineBytes`
+  # that wrote something stays until then, finished. One that raises
   # stays, as CRuby's `fill_cbuf` keeps it, for the next read to have what it
   # has left, a CR it held as a newline among it. Measured.
   def __finish_readconv__
@@ -1453,7 +1470,7 @@ end
     end
     @readconv ||= __make_readconv__
     out = @readconv.finish
-    @readconv = nil
+    @readconv = nil if out.empty? || !(NewlineBytes === @readconv)
     if out.empty?
       __forget_readconv__
       return nil
@@ -1509,7 +1526,7 @@ end
     enc = __read_encoding__
     while !__chars_held__? || __held_cut_short__?(@cbuf, enc)
       made = __next_chars__
-      readconv = @readconv || readconv
+      readconv = @readconv
       kept = @rmade
       made ||= __finish_in__
       unless made.nil?
@@ -1934,7 +1951,7 @@ end
   # buffered before `set_encoding` makes that a stream with options stay short
   # of CRuby's 128KB. The upgrade is a line read that does not cost with the
   # buffer, and 128KB for any read converter.
-  def __fill__(want = __stream_in__? && !__plain_readconv__? ? READ_CONVERTER_BYTES : 65536)
+  def __fill__(want = NewlineBytes === @readconv ? NEWLINE_BYTES_FILL : (__stream_in__? && !__plain_readconv__? ? READ_CONVERTER_BYTES : 65536))
     chunk = IO.__check__(__read_wait__(want), @path)
     return false if chunk.empty?
     @rbuf << chunk
@@ -2319,7 +2336,7 @@ end
         out << __take_chars__
       else
         from = sep.nil? ? 0 : [out.bytesize - sep.bytesize + 1, 0].max
-        room = limit.nil? || limit <= 0 ? limit : limit - out.bytesize
+        room = limit.nil? || limit <= 0 ? limit : [limit - out.bytesize, 1].max
         if stream
           piece = runs ? __chars_to_line_end__(sep, room) : __next_chars__
         elsif unit
