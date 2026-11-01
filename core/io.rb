@@ -306,7 +306,7 @@ end
     # Measured: made without `new`, so a class that redefines it is not asked.
     reader = allocate
     # These are read with the encodings, by `set_encoding`, or not at all.
-    reader.__send__(:initialize, fds[0], "r", **options.reject { |key, _| %i[invalid undef replace xml].include?(key) })
+    reader.__send__(:initialize, fds[0], "r", **options.reject { |key, _| %i[invalid undef replace xml external_encoding internal_encoding].include?(key) })
     writer = allocate
     # By number: a pipe's mode says nothing of creating or truncating, which
     # `reopen` with a path and no mode goes by.
@@ -350,8 +350,10 @@ end
     external = internal = nil
     bom = false
     unless encodings.nil?
-      ext_name, int_name = encodings.split(":", 2)
-      ext_name = ext_name.to_s
+      # The last colon splits them, so a name before it may hold another.
+      colon = encodings.rindex(":")
+      ext_name = colon ? encodings[0...colon] : encodings
+      int_name = colon && encodings[(colon + 1)..]
       # A prefix naming nothing is no prefix, and only a name that starts
       # `UTF-` has a mark looked for, however else it might be spelled.
       if ext_name.match?(/\Abom\|./im)
@@ -359,7 +361,8 @@ end
         bom = ext_name.match?(/\Autf-/i)
         __warning__("BOM with non-UTF encoding #{encodings[4..]} is nonsense") unless bom
       end
-      external = __find_encoding__(ext_name)
+      # An empty name is warned about as all of what it was split from.
+      external = __find_encoding__(ext_name, ext_name.empty? ? encodings : ext_name)
       # "-" is no conversion, which is not the same as no internal
       # encoding: that one is the default.
       internal = int_name.nil? ? nil : (int_name == "-" ? :none : __find_encoding__(int_name))
@@ -398,12 +401,22 @@ end
   end
 
   # An encoding named in a mode: an unknown one is warned about and ignored.
-  def self.__find_encoding__(name)
+  def self.__find_encoding__(name, shown = name)
     return name if Encoding === name
     Encoding.find(name)
   rescue ArgumentError
-    __warning__("Unsupported encoding #{name} ignored")
+    __warning__("Unsupported encoding #{shown} ignored")
     nil
+  end
+
+  # An encoding named by an option: an unknown one is refused, which only a
+  # mode's is not. CRuby's `rb_to_encoding`.
+  def self.__to_encoding__(value)
+    return value if Encoding === value
+    name = __str__(value)
+    raise ArgumentError, "invalid encoding name (non ASCII)" unless name.encoding.ascii_compatible?
+    raise ArgumentError, "invalid encoding name (NUL byte)" if name.include?("\0")
+    Encoding.find(name)
   end
 
   def initialize(fd, mode = nil, **options)
@@ -459,10 +472,12 @@ end
       unless options[:encoding].nil?
         __warning__("Ignoring encoding parameter '#{options[:encoding]}': #{options[:external_encoding] ? "external" : "internal"}_encoding is used")
       end
-      raise ArgumentError, "encoding specified twice" if named
-      external = IO.__find_encoding__(options[:external_encoding]) unless options[:external_encoding].nil?
+      given = IO.__to_encoding__(options[:external_encoding]) unless options[:external_encoding].nil?
       wanted = options[:internal_encoding]
-      internal = wanted.nil? ? nil : (wanted == "-" ? :none : IO.__find_encoding__(wanted))
+      wanted = wanted == "-" ? :none : IO.__to_encoding__(wanted) unless wanted.nil?
+      raise ArgumentError, "encoding specified twice" if named
+      external = given
+      internal = wanted
       named = true
     elsif !options[:encoding].nil?
       raise ArgumentError, "encoding specified twice" if named
