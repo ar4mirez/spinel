@@ -29,5 +29,8 @@ fn one_read_goes_as_far_as_cruby_buffers() {
         String::from_utf8_lossy(&output.stderr)
     );
     // Measured on ruby 4.0.9.
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "66000\n43694\n66000\n");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "66000\n43694\n66000\n"
+    );
 }
