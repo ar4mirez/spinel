@@ -625,7 +625,7 @@ end
   end
 
   # A child's IO (`IO.popen`) waits for the child once it is closed, and
-  # `$?` is how it went.
+  # `$?` is how it went: nil when another IO for the child reaped it first.
   def close
     return nil if @closed
     begin
@@ -651,8 +651,7 @@ end
     return if @pid.nil?
     pid = @pid
     @pid = nil
-    status = Process::Status.wait(pid)
-    __global_store__(:$?, status) unless status.nil?
+    __global_store__(:$?, Process::Status.wait(pid))
   end
 
   # The descriptor writes go to: a duplex child's own write end, or the one.
