@@ -1026,7 +1026,7 @@ end
   # read has no mark.
   def __bom__
     if @access != 1
-      nil while @rbuf.bytesize < 4 && __fill__(4 - @rbuf.bytesize)
+      nil while @rbuf.bytesize < 4 && __fill__
       BOMS.each do |mark, name|
         next unless @rbuf.byteslice(0, mark.bytesize) == mark
         __take__(mark.bytesize)
@@ -1051,7 +1051,7 @@ end
   # attribute's quote opens with the first character it makes and closes
   # at the end (#466, #468): each piece is escaped without its quotes.
   def __decode__(bytes)
-    return __convert_in__(bytes) if __stream_in__?
+    return __convert_in__(bytes) || __in_read__("") if __stream_in__?
     bytes.force_encoding(__encoding__)
     xml = __xml_in__
     if @enc2.nil?
@@ -1110,11 +1110,10 @@ end
   end
 
   # What the read converter makes of `bytes`, going on from the last it read:
-  # partial input, so what they end part way through waits inside.
+  # partial input, so what they end part way through waits inside. Nil from a
+  # converter that has finished, which leaves them for the one after it.
   def __convert_in__(bytes)
-    out = String.new(encoding: __read_encoding__)
-    __convert_onto__(bytes, out, nil, Encoding::Converter::PARTIAL_INPUT)
-    out
+    __convert_onto__(bytes, String.new(encoding: __read_encoding__), nil, Encoding::Converter::PARTIAL_INPUT)
   end
 
   # `__convert_in__` onto `out`, up to `room` bytes of it. The bytes it did not
@@ -1122,22 +1121,25 @@ end
   # the error's, as CRuby's `fill_cbuf` gives them back. What a call stopping
   # after output made as well as the error, a BOM or an attribute's quote,
   # stays held, in the buffer `fill_cbuf` was filling: only a read that had
-  # taken what it made before loses that. Measured.
+  # taken what it made before loses that. A converter that has finished reads
+  # nothing and answers nil, as `fill_cbuf`'s MORE_CHAR_FINISHED: the bytes
+  # wait in the buffer for the converter made after it. Measured.
   def __convert_onto__(bytes, out, room, flags)
     @readconv ||= __make_readconv__
     result = @readconv.primitive_convert(bytes, out, nil, room, flags)
-    return if result == :source_buffer_empty || result == :finished
-    if result == :after_output || result == :destination_buffer_full
+    return out if result == :source_buffer_empty
+    if result == :after_output || result == :destination_buffer_full || result == :finished
       @rbuf = bytes.b + @rbuf
-      return
+      return result == :finished && out.empty? ? nil : out
     end
     @rbuf = @readconv.putback.b + bytes.b + @rbuf
     __hold_chars__(out.b) if flags & Encoding::Converter::AFTER_OUTPUT != 0
     raise @readconv.last_error
   end
 
-  # CRuby's `rbuf` and `cbuf` for an IO with a read converter: what one call
-  # of it is given, and what it can make. Measured.
+  # CRuby's `rbuf` and `cbuf` for an IO with a read converter: what a fill of
+  # the buffer asks for, so what one call of it is given, and what it can make.
+  # Measured.
   READ_CONVERTER_BYTES = 131072
   private_constant :READ_CONVERTER_BYTES
 
@@ -1163,9 +1165,9 @@ end
   def __next_chars__
     flags = Encoding::Converter::PARTIAL_INPUT | Encoding::Converter::AFTER_OUTPUT
     out = String.new(encoding: __read_encoding__)
-    while !@rbuf.empty? || __fill__(READ_CONVERTER_BYTES)
+    while !@rbuf.empty? || __fill__
       plain = @ecopts.empty?
-      __convert_onto__(__take__(plain ? NEXT_CHARS_BYTES : @rbuf.bytesize), out, plain ? nil : READ_CONVERTER_BYTES, flags)
+      return nil unless __convert_onto__(__take__(plain ? NEXT_CHARS_BYTES : @rbuf.bytesize), out, plain ? nil : READ_CONVERTER_BYTES, flags)
       next if out.empty?
       @rnewline = out.getbyte(-1) == 0x0A
       return out
@@ -1195,7 +1197,8 @@ end
   # run would lose, so after one it is a character at a time to the next.
   # With `room` left of a limit, no more bytes go than cannot fill it: four a
   # byte, more than a character's bytes can make, the partial one the
-  # converter holds among them. Answers "" where the bytes made nothing yet.
+  # converter holds among them. Answers "" where the bytes made nothing yet,
+  # and nil where the converter has finished.
   def __chars_to_line_end__(sep, room)
     return __next_chars__ if @rnewline
     return nil if @rbuf.empty? && !__fill__
@@ -1647,7 +1650,10 @@ end
   # --- the read buffer -----------------------------------------------------
 
   # Pull up to `want` more bytes into the buffer; false at the end of the file.
-  def __fill__(want = 65536)
+  # ponytail: a `gets` costs with what is buffered, so CRuby's 128KB doubles it
+  # through a converter that keeps no state, which only `__stream_in__?` needs.
+  # The upgrade is a line read that does not cost with the buffer.
+  def __fill__(want = __read_converter__? ? READ_CONVERTER_BYTES : 65536)
     chunk = IO.__check__(__read_wait__(want), @path)
     return false if chunk.empty?
     @rbuf << chunk
