@@ -413,7 +413,7 @@ end
   # mode's is not. CRuby's `rb_to_encoding`.
   def self.__to_encoding__(value)
     return value if Encoding === value
-    name = __str__(value)
+    name = String.__coerce__(value)
     raise ArgumentError, "invalid encoding name (non ASCII)" unless name.encoding.ascii_compatible?
     raise ArgumentError, "invalid encoding name (NUL byte)" if name.include?("\0")
     Encoding.find(name)
