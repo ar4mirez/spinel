@@ -1138,8 +1138,8 @@ end
   end
 
   # CRuby's `rbuf` and `cbuf` for an IO with a read converter: what a fill of
-  # the buffer asks for, so what one call of it is given, and what it can make.
-  # Measured.
+  # the buffer asks for where reads go through it, so what one call of it is
+  # given, and what it can make. Measured.
   READ_CONVERTER_BYTES = 131072
   private_constant :READ_CONVERTER_BYTES
 
@@ -1650,10 +1650,10 @@ end
   # --- the read buffer -----------------------------------------------------
 
   # Pull up to `want` more bytes into the buffer; false at the end of the file.
-  # ponytail: a `gets` costs with what is buffered, so CRuby's 128KB doubles it
-  # through a converter that keeps no state, which only `__stream_in__?` needs.
-  # The upgrade is a line read that does not cost with the buffer.
-  def __fill__(want = __read_converter__? ? READ_CONVERTER_BYTES : 65536)
+  # ponytail: bytes buffered before `set_encoding` makes this a stream stay at
+  # 64KB where CRuby's are 128KB. The upgrade is a line read that does not cost
+  # with the buffer, and 128KB for any read converter.
+  def __fill__(want = __stream_in__? ? READ_CONVERTER_BYTES : 65536)
     chunk = IO.__check__(__read_wait__(want), @path)
     return false if chunk.empty?
     @rbuf << chunk
