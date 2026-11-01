@@ -494,6 +494,7 @@ class BasicSocket < IO
   def __setup_socket__(fd)
     __setup__(fd, "r+", { binmode: true })
     @sync = true
+    @duplex = true
     # Nonblocking, as every socket CRuby 3 makes; the blocking calls wait.
     __nonblock__
     @do_not_reverse_lookup = BasicSocket.do_not_reverse_lookup

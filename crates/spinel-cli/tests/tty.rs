@@ -65,6 +65,30 @@ fn a_write_to_a_tty_leaves_what_was_read_ahead() {
 }
 
 #[test]
+fn a_dup_of_a_tty_leaves_what_was_read_ahead() {
+    let (answer, _) = on_a_terminal("tty_dup_read_ahead.rb", b"hello\nworld\n");
+    assert_eq!(answer, r#"["h", "ello\n"]"#);
+}
+
+#[test]
+fn a_failed_seek_on_a_tty_leaves_what_was_read_ahead() {
+    let (answer, _) = on_a_terminal("tty_seek_read_ahead.rb", b"hello\nworld\n");
+    assert_eq!(answer, r#"["h", Errno::ESPIPE, "ello\n"]"#);
+}
+
+#[test]
+fn an_io_made_on_a_tty_descriptor_is_duplex_too() {
+    let (answer, _) = on_a_terminal("tty_new_read_ahead.rb", b"hello\nworld\n");
+    assert_eq!(answer, r#"["h", Errno::ESPIPE, "ello\n"]"#);
+}
+
+#[test]
+fn a_reopen_onto_a_tty_is_not_duplex() {
+    let (answer, _) = on_a_terminal("tty_reopened_read_ahead.rb", b"hello\nworld\n");
+    assert_eq!(answer, r#"["h", Errno::ESPIPE, "world\n"]"#);
+}
+
+#[test]
 fn a_to_s_that_closes_a_tty_leaves_the_write_nothing_to_flush() {
     let (answer, terminal) = on_a_terminal("tty_closed_by_to_s.rb", b"");
     assert_eq!(answer, r#"[IOError, "closed stream"]"#);
