@@ -1161,7 +1161,8 @@ end
   # ISO-2022-JP's G0, the byte order a BOM'd UTF-16 or UTF-32 read, the mark
   # one writes first (#420). `String#encode` starts and finishes each time.
   # So do they when `reopen` left a converter of other encodings than the IO
-  # has now, which `String#encode` could not stand in for (#517).
+  # has now, which `String#encode` could not stand in for (#517), and where
+  # `__newline_on_bytes__?`, which it could not either.
   def __stream_in__?
     return __read_converter__? if @rkept
     return __newline_on_bytes__? if @enc2.nil?
@@ -1341,7 +1342,8 @@ end
   # buffered, as CRuby's is, since how far a call goes hangs on it: only with
   # input left does output stop the call, and references for characters it
   # cannot write do not stop it at all. With none, a character's output stops
-  # it wherever the input ends. Measured.
+  # it wherever the input ends. Measured. `NewlineBytes` stops after output
+  # whatever it is given, so it is given a byte.
   # ponytail: all that is buffered is copied per character, 40% to 80% of a
   # `getc` with options on a long file. The upgrade is the cheaper call below.
   # ponytail: a call of the converter for each character, which is most of
@@ -1385,9 +1387,10 @@ end
   # after it can be what makes the character, and likewise from a CR universal
   # newline holds. `__newline_on_bytes__?` makes a character of each byte, so
   # that byte goes with them there too, a CRLF's LF with its CR, and only a CR
-  # that could be held waits. A newline can leave the next CR held, and a held CR comes
-  # out with the next character, a line of its own that an error later in a
-  # run would lose, so after one it is a character at a time to the next.
+  # that could be held waits. A newline can leave the next CR held, and a held
+  # CR comes out with the next character, a line of its own that an error
+  # later in a run would lose, so after one it is a character at a time to the
+  # next.
   # With `room` left of a limit, no more bytes go than cannot fill it: four a
   # byte, more than a character's bytes can make, the partial one the
   # converter holds among them. Answers "" where the bytes made nothing yet,
@@ -1513,9 +1516,9 @@ end
     char
   end
 
-  # CRuby's `io_getc` through a converter `reopen` left, whose bytes need not
-  # end where a character of what they are called does: it makes more until
-  # the first is whole. At the end what is cut short goes a byte at a time,
+  # CRuby's `io_getc` through a converter `reopen` left or a `NewlineBytes`,
+  # whose bytes need not end where a character of what they are called does:
+  # it makes more until the first is whole. At the end what is cut short goes a byte at a time,
   # and the converter stays finished until the last has. Measured.
   def __kept_char__
     enc = __read_encoding__
@@ -2369,8 +2372,8 @@ end
     cut
   end
 
-  # What a converter `reopen` left makes need not end where a character of
-  # what it is called does, so CRuby's `extra_limit` goes a byte past the limit
+  # What a converter `reopen` left or a `NewlineBytes` makes need not end where
+  # a character of what it is called does, so CRuby's `extra_limit` goes a byte past the limit
   # while the bytes up to it end in NEEDMORE. Nil where it needs more made; at
   # the end of the bytes the line is what there is, and the limit did not end
   # it. Measured.
