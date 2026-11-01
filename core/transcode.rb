@@ -174,7 +174,7 @@ class String
   # transcoder to report, not refused as a String operation would (#412).
   # No ASCII-compatible encoding has CR or LF as a trailing byte.
   def self.__universal_newline__(text)
-    text.b.gsub("\r\n", "\n").gsub("\r", "\n").force_encoding(text.encoding)
+    text.b.split("\r\n", -1).join("\n").gsub("\r", "\n").force_encoding(text.encoding)
   end
 
   # The newline decorator `name` on the bytes of `text`, which are ASCII
@@ -230,20 +230,10 @@ class String
   def self.__newline_turn__(piece, name, held)
     case name
     when "universal_newline", "lf_newline"
-      out = "".b
-      piece.each_byte do |byte|
-        if held
-          out << "\n"
-          held = false
-          next if byte == 10
-        end
-        if byte == 13
-          held = true
-        else
-          out << byte.chr
-        end
-      end
-      [out, held]
+      out = held ? "\r".b << piece.b : piece.b
+      held = out.getbyte(-1) == 13
+      out = out.byteslice(0, out.bytesize - 1) if held
+      [out.include?("\r") ? __universal_newline__(out) : out, held]
     else [__newlines__(piece, name).b, held]
     end
   end
