@@ -1120,8 +1120,9 @@ end
   # and all, and what it writes is called what the IO reads in now. Reads
   # that have no converter leave it there for a later `reopen` to come back
   # to. It carries on where the old one was: an attribute's quote is open, a
-  # CR or the first byte of a character is inside, and one that has finished
-  # reads nothing. Whatever drops the converter ends this. Measured.
+  # CR or the first byte of a character is inside, which `@rpend` holds for
+  # the next read that reaches it, and one that has finished reads nothing.
+  # Whatever drops the converter ends this. Measured.
   # ponytail: a converter of decorators alone is not kept, as `Converter.new`
   # has no `""`, so reads follow the new encodings (#550). A CR at the end of
   # the bytes finishes CRuby's as it looks past it, and not this (#551).
@@ -1144,9 +1145,6 @@ end
     end
     @readconv.primitive_convert("a".encode(made[0]), "".b, nil, nil, Encoding::Converter::PARTIAL_INPUT) if @rquote
     @readconv.finish if @rfinished
-    return if @rpend.nil?
-    __hold_chars__(__convert_in__(@rpend).b)
-    @rpend = nil
   end
 
   # A converter the IO keeps. One whose `replace:` has no spelling in what it
@@ -1212,6 +1210,7 @@ end
   # ponytail: a call of the converter for each character, which is most of
   # what a `getc` costs here. The upgrade is a cheaper call.
   def __next_chars__
+    __unpend__ if @rkept
     flags = Encoding::Converter::PARTIAL_INPUT | Encoding::Converter::AFTER_OUTPUT
     out = String.new(encoding: __read_encoding__)
     while !@rbuf.empty? || __fill__
@@ -1365,6 +1364,53 @@ end
     char
   end
 
+  # CRuby's `io_getc` through a converter `reopen` left, whose bytes need not
+  # end where a character of what they are called does: it makes more until
+  # the first is whole. At the end what is cut short goes a byte at a time,
+  # and the converter stays finished until the last has. Measured.
+  def __kept_char__
+    enc = __read_encoding__
+    while !__chars_held__? || __held_cut_short__?(enc)
+      made = __next_chars__
+      readconv = @readconv
+      kept = @rmade
+      made ||= __finish_in__
+      unless made.nil?
+        @cbuf = (@cbuf || "".b) << made.b
+        next
+      end
+      return nil unless __chars_held__?
+      unit = @cbuf.byteslice(0, 1).force_encoding(enc)
+      @cbuf = @cbuf.byteslice(1, @cbuf.bytesize - 1).b
+      @readconv, @rmade, @rkept, @rfinished = readconv, kept, true, true if __chars_held__?
+      return unit
+    end
+    __take_char__
+  end
+
+  # CRuby's NEEDMORE: whether the characters held start with one of `enc` that
+  # more bytes would finish.
+  # ponytail: CESU-8 answers no, so its tail goes as broken characters; upgrade
+  # by asking as UTF-8 is asked.
+  def __held_cut_short__?(enc)
+    head = @cbuf.byteslice(0, 4).force_encoding(enc)
+    size = head.bytesize
+    case enc
+    when Encoding::UTF_8
+      first = head.getbyte(0)
+      return false if first < 0xC2 || first > 0xF4
+      room = (first >= 0xF0 ? 4 : (first >= 0xE0 ? 3 : 2)) - size
+      room > 0 && [0x80, 0x90, 0xA0].any? { |byte| (head.b + byte.chr * room).force_encoding(enc).valid_encoding? }
+    when Encoding::UTF_16LE, Encoding::UTF_16BE
+      return true if size < 2
+      little = enc == Encoding::UTF_16LE
+      return false unless head.getbyte(little ? 1 : 0) & 0xFC == 0xD8
+      size == 2 || size == 3 && (little || head.getbyte(2) & 0xFC == 0xDC)
+    when Encoding::UTF_32LE, Encoding::UTF_32BE then size < 4
+    else head.__cut_short__
+    end
+  end
+
   # CRuby's `clear_codeconv`, both converters.
   def __clear_codeconv__
     __clear_writeconv__
@@ -1434,9 +1480,10 @@ end
   end
 
   # The bytes the converter kept past a lone CR go back before the buffer,
-  # for a read of characters to convert them first (#472).
+  # for a read of characters to convert them first (#472). A read that does
+  # not go through the converter `reopen` left passes them by, as it does it.
   def __unpend__
-    return if @rpend.nil?
+    return if @rpend.nil? || @rkept && !__read_converter__?
     @rbuf = @rpend + @rbuf
     @rpend = nil
   end
@@ -2516,6 +2563,7 @@ end
   def getc
     __readable__
     __readconv__
+    return __kept_char__ if @rkept && __read_converter__?
     if __chars_read__?
       held = @cbuf.dup.force_encoding(__read_encoding__)
       return __take_char__ unless @enc2.nil? && !held.valid_encoding? && held[0].bytesize == held.bytesize
@@ -2924,6 +2972,10 @@ end
       @sync = false
       @autoclose = true
     end
+    # The bytes buffered go, even if what is named does not open; the read
+    # converter and the characters it holds stay, whatever was opened.
+    @rbuf = "".b
+    __keep_readconv__
     fd = IO.__check__(__fd_open__(path, flags, 0666), path, "rb_sysopen")[0]
     if @closed
       @fileno = fd
@@ -2932,12 +2984,8 @@ end
       IO.__check__(__fd_dup2__(fd, @fileno), path)
       __fd_close__(fd)
     end
-    # The bytes buffered go; the read converter and the characters it holds
-    # stay, whatever was opened.
-    @rbuf = "".b
     @path = path.dup
     __arm__
-    __keep_readconv__
     self
   end
 
