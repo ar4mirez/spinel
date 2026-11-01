@@ -223,7 +223,7 @@ class IO
   end
 
   def wait_priority(timeout = nil)
-    __check_open__
+    __readable__
     IO.__wait__([[self, IO::PRIORITY]], timeout).nil? ? nil : self
   end
 
