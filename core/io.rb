@@ -1188,7 +1188,7 @@ end
   def __make_readconv__
     __readconv__
     source, target, ecopts = @rmade
-    return NewlineBytes.new(__read_encoding__, @ecopts[:xml]) if source.nil?
+    return NewlineBytes.new(__read_encoding__, ecopts[:xml]) if source.nil?
     options = __read_options__(ecopts)
     options[:universal_newline] = true if __universal_newline__?(ecopts)
     __converter__(source, target, options)
@@ -1203,13 +1203,14 @@ end
   # CR or the first byte of a character is inside, which `@rpend` holds for
   # the next read that reaches it, and one that has finished reads nothing.
   # Whatever drops the converter ends this. Measured.
-  # ponytail: a converter of decorators alone is not kept, as `Converter.new`
-  # has no `""`, so reads follow the new encodings (#550). A CR at the end of
-  # the bytes finishes CRuby's as it looks past it, and not this (#551).
+  # ponytail: of the converters of decorators alone only `NewlineBytes` is
+  # kept, as `Converter.new` has no `""`, so reads with any other follow the
+  # new encodings (#550). A CR at the end of the bytes finishes CRuby's as it
+  # looks past it, and not this (#551).
   def __keep_readconv__
     made = @rmade
     return if made.nil? || @rkept || made == __read_made__
-    if made[0].nil?
+    if made[0].nil? && !(NewlineBytes === @readconv)
       @rmade = nil
       return
     end
@@ -1236,8 +1237,10 @@ end
   end
 
   # CRuby's converter of the universal newline decorator alone, as much of it
-  # as `__newline_on_bytes__?` reads through: it makes bytes, whatever they
-  # are called, and holds a CR for the byte after it.
+  # as `__newline_on_bytes__?` reads through and `reopen` keeps: it makes
+  # bytes, whatever they are called, and holds a CR for the byte after it. An
+  # attribute's quote comes first and opens on the first byte, whatever that
+  # makes.
   # ponytail: only that read; `Encoding::Converter.new("", "", ...)` would
   # replace this, and is #550.
   class NewlineBytes
@@ -1250,6 +1253,7 @@ end
 
     def primitive_convert(source, out, _offset, _room, flags)
       return :finished if @finished
+      seen = !source.empty?
       made = "".b
       if flags & Encoding::Converter::AFTER_OUTPUT == 0
         made, @cr = String.__newline_turn__(source, "universal_newline", @cr)
@@ -1259,13 +1263,14 @@ end
         while made.empty? && used < source.bytesize
           made, @cr = String.__newline_turn__(source.byteslice(used, 1), "universal_newline", @cr)
           used += 1
+          break if @xml == :attr && !@quoted
         end
         source.replace(source.byteslice(used, source.bytesize - used))
       end
       made = String.__escape_xml__(made, @xml).b if @xml
       if @xml == :attr
         made = made.byteslice(1, made.bytesize - 2)
-        unless made.empty? || @quoted
+        if seen && !@quoted
           made = "\"".b + made
           @quoted = true
         end
@@ -1504,7 +1509,7 @@ end
     enc = __read_encoding__
     while !__chars_held__? || __held_cut_short__?(@cbuf, enc)
       made = __next_chars__
-      readconv = @readconv
+      readconv = @readconv || readconv
       kept = @rmade
       made ||= __finish_in__
       unless made.nil?
