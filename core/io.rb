@@ -1090,6 +1090,7 @@ end
       end
     end
     @enc2 = nil
+    @bom_unmarked = true
     nil
   end
 
@@ -1164,7 +1165,18 @@ end
   # has now, which `String#encode` could not stand in for (#517).
   def __stream_in__?
     return __read_converter__? if @rkept
-    !@enc2.nil? && (__stateful__?(@enc2) || __stateful__?(__read_encoding__))
+    return __newline_on_bytes__? if @enc2.nil?
+    __stateful__?(@enc2) || __stateful__?(__read_encoding__)
+  end
+
+  # Whether universal newline has only bytes to go on: `BOM|` that finds no
+  # mark clears the internal encoding and leaves an encoding that is not
+  # ASCII-compatible with no conversion, which CRuby's `validate_enc_binmode`
+  # is not run again to refuse. CRuby's converter is then the decorator alone,
+  # so a CR in the bytes is a CR, and the characters are cut from what it
+  # makes (#525).
+  def __newline_on_bytes__?
+    @bom_unmarked && @ecopts[:xml].nil? && __universal_newline__? && !__read_encoding__.ascii_compatible?
   end
 
   def __stateful__?(encoding)
@@ -1177,6 +1189,7 @@ end
   def __make_readconv__
     __readconv__
     source, target, ecopts = @rmade
+    return NewlineBytes.new(__read_encoding__) if source.nil?
     options = __read_options__(ecopts)
     options[:universal_newline] = true if __universal_newline__?(ecopts)
     __converter__(source, target, options)
@@ -1222,6 +1235,44 @@ end
   rescue Encoding::UndefinedConversionError
     raise Encoding::ConverterNotFoundError, "code converter not found (#{source.name} to #{target.name})"
   end
+
+  # CRuby's converter of the universal newline decorator alone, as much of it
+  # as `__newline_on_bytes__?` reads through: it makes bytes, whatever they
+  # are called, and holds a CR for the byte after it.
+  # ponytail: only that read; `Encoding::Converter.new("", "", ...)` would
+  # replace this, and is #550.
+  class NewlineBytes
+    def initialize(encoding)
+      @encoding = encoding
+      @cr = false
+    end
+
+    def primitive_convert(source, out, _offset, _room, flags)
+      made = "".b
+      if flags & Encoding::Converter::AFTER_OUTPUT == 0
+        made, @cr = String.__newline_turn__(source, "universal_newline", @cr)
+        source.clear
+      else
+        used = 0
+        while made.empty? && used < source.bytesize
+          made, @cr = String.__newline_turn__(source.byteslice(used, 1), "universal_newline", @cr)
+          used += 1
+        end
+        source.replace(source.byteslice(used, source.bytesize - used))
+      end
+      out.force_encoding(Encoding::BINARY) << made
+      out.force_encoding(@encoding)
+      return :after_output unless source.empty?
+      :source_buffer_empty
+    end
+
+    def finish
+      held = @cr ? "\n" : ""
+      @cr = false
+      held.b.force_encoding(@encoding)
+    end
+  end
+  private_constant :NewlineBytes
 
   # What the read converter makes of `bytes`, going on from the last it read:
   # partial input, so what they end part way through waits inside. Nil from a
@@ -2282,7 +2333,7 @@ end
   # Where a limit ends a line of what the read converter made: after the
   # character it lands in.
   def __limit_cut__(out, limit, enc)
-    return __kept_limit_cut__(out, limit, enc) if @rkept
+    return __kept_limit_cut__(out, limit, enc) if @rkept || __newline_on_bytes__?
     cut = 0
     out.dup.force_encoding(enc).each_char { |char| break if cut >= limit; cut += char.bytesize }
     cut
@@ -2673,7 +2724,7 @@ end
   def getc
     __readable__
     __readconv__
-    return __kept_char__ if @rkept && __read_converter__?
+    return __kept_char__ if @rkept && __read_converter__? || __newline_on_bytes__?
     if __chars_read__?
       held = @cbuf.dup.force_encoding(__read_encoding__)
       return __take_char__ unless @enc2.nil? && !held.valid_encoding? && held[0].bytesize == held.bytesize
