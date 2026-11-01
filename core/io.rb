@@ -1057,8 +1057,9 @@ end
   # with the read converter's `xml:` decorator. That converter is the
   # stream's, as CRuby's `make_readconv` keeps one for the IO, so an
   # attribute's quote opens with the first character it makes and closes
-  # at the end (#466, #468): each piece is escaped without its quotes.
-  def __decode__(bytes)
+  # at the end (#466, #468): each piece is escaped without its quotes. `taken`
+  # is what came off the buffer, where that is not `bytes` themselves.
+  def __decode__(bytes, taken = bytes)
     return __convert_in__(bytes) || __in_read__("") if __stream_in__?
     bytes.force_encoding(__encoding__)
     xml = __xml_in__
@@ -1067,12 +1068,31 @@ end
       out = String.__escape_xml__(bytes, xml)
       out = out.byteslice(1, out.bytesize - 2).force_encoding(bytes.encoding) if xml == :attr
     else
-      out = bytes.encode(__read_encoding__, **__read_options__(@ecopts))
+      begin
+        out = bytes.encode(__read_encoding__, **__read_options__(@ecopts))
+      rescue Encoding::InvalidByteSequenceError, Encoding::UndefinedConversionError => error
+        __give_back_past_error__(taken)
+        raise error
+      end
       out = out[1...-1] if xml == :attr
     end
     return out unless xml == :attr && !@rquote && !out.empty?
     @rquote = true
     (__in_read__("\"").b << out.b).force_encoding(out.encoding)
+  end
+
+  # What CRuby's `fill_cbuf` leaves when a conversion raises, for a read that
+  # took all of `bytes` before `String#encode` raised: a converter finds the
+  # error again, and what it did not get to goes back to be read next, as do
+  # those it read past the error's. That read has not ended, whatever it saw
+  # of the bytes, so it still made a converter, and anything made before the
+  # error opened an attribute's quote. Measured.
+  def __give_back_past_error__(bytes)
+    converter = __converter__(__encoding__, __read_encoding__, __read_ecopts__)
+    made = "".b
+    converter.primitive_convert(bytes, made)
+    @rbuf = converter.putback.b + bytes.b + @rbuf
+    @rquote = true if __xml_in__ == :attr && !made.empty?
   end
 
   # Whether the IO has a read converter, as CRuby's `NEED_READCONV`: an
@@ -1370,7 +1390,7 @@ end
   # and the converter stays finished until the last has. Measured.
   def __kept_char__
     enc = __read_encoding__
-    while !__chars_held__? || __held_cut_short__?(enc)
+    while !__chars_held__? || __held_cut_short__?(@cbuf, enc)
       made = __next_chars__
       readconv = @readconv
       kept = @rmade
@@ -1388,12 +1408,12 @@ end
     __take_char__
   end
 
-  # CRuby's NEEDMORE: whether the characters held start with one of `enc` that
-  # more bytes would finish.
+  # CRuby's NEEDMORE: whether `bytes` start with a character of `enc` that more
+  # bytes would finish.
   # ponytail: CESU-8 answers no, so its tail goes as broken characters; upgrade
   # by asking as UTF-8 is asked.
-  def __held_cut_short__?(enc)
-    head = @cbuf.byteslice(0, 4).force_encoding(enc)
+  def __held_cut_short__?(bytes, enc)
+    head = bytes.byteslice(0, 4).force_encoding(enc)
     size = head.bytesize
     case enc
     when Encoding::UTF_8
@@ -2086,6 +2106,7 @@ end
     # one character in UTF-16 (#477). So does a limit on any line where the
     # converter makes other bytes than it reads (#479).
     stream = __stream_in__?
+    kept = @rkept
     converted = paragraph ? __read_converter__? : stream || __chars_read__? || __xml_in__ || !limit.nil? && __converts_bytes__?
     # Blank lines before a record are not part of it.
     __swallow__(unit) if paragraph
@@ -2099,8 +2120,8 @@ end
       line = __converted_line__(paragraph ? "\n\n" : separator, wanted, limit, unit)
       return nil if line.nil?
     elsif unit
-      bytes, cr = __universal_line__(wanted, limit, unit, true)
-      line = bytes.nil? ? nil : __decode__(bytes)
+      bytes, cr, taken = __universal_line__(wanted, limit, unit, true)
+      line = bytes.nil? ? nil : __decode__(bytes, taken)
       __read_ahead__(cr, unit) if cr
     else
       line = __line_bytes__(wanted, limit, true)
@@ -2108,7 +2129,7 @@ end
     end
     return nil if line.nil?
     # CRuby's `nolimit`: a line the limit cut short is not counted (#480).
-    counted = !__cut_by_limit__?(line, paragraph ? "\n\n" : separator, limit)
+    counted = !__cut_by_limit__?(line, paragraph ? "\n\n" : separator, limit) || kept && __ends_cut_short__?(line, line.encoding)
     # The blank lines between records belong to neither.
     __swallow__(unit) if paragraph
     line = __chomp_line__(line, paragraph ? "\n\n" : separator) if chomp && !separator.nil?
@@ -2169,9 +2190,8 @@ end
       at = out.index(sep, at + 1) while at && at % step != 0
       if at && (limit.nil? || limit <= 0 || at + sep.bytesize <= limit)
         cut = at + sep.bytesize
-      elsif !limit.nil? && limit > 0 && out.bytesize >= limit
-        cut = 0
-        out.dup.force_encoding(enc).each_char { |char| break if cut >= limit; cut += char.bytesize }
+      elsif !limit.nil? && limit > 0 && out.bytesize >= limit && (cut = __limit_cut__(out, limit, enc))
+        next
       elsif __chars_read__?
         from = sep.nil? ? 0 : [out.bytesize - sep.bytesize + 1, 0].max
         out << __take_chars__
@@ -2181,8 +2201,8 @@ end
         if stream
           piece = runs ? __chars_to_line_end__(sep, room) : __next_chars__
         elsif unit
-          bytes, cr = __universal_line__(wanted, room, unit)
-          piece = bytes.nil? ? nil : __decode__(bytes)
+          bytes, cr, taken = __universal_line__(wanted, room, unit)
+          piece = bytes.nil? ? nil : __decode__(bytes, taken)
           __read_ahead__(cr, unit) if cr
         else
           bytes = __line_bytes__(wanted, room)
@@ -2204,6 +2224,40 @@ end
     return nil if cut == 0
     __hold_chars__(out.byteslice(cut, out.bytesize - cut)) if cut < out.bytesize
     out.byteslice(0, cut).force_encoding(enc)
+  end
+
+  # Where a limit ends a line of what the read converter made: after the
+  # character it lands in.
+  def __limit_cut__(out, limit, enc)
+    return __kept_limit_cut__(out, limit, enc) if @rkept
+    cut = 0
+    out.dup.force_encoding(enc).each_char { |char| break if cut >= limit; cut += char.bytesize }
+    cut
+  end
+
+  # What a converter `reopen` left makes need not end where a character of
+  # what it is called does, so CRuby's `extra_limit` goes a byte past the limit
+  # while the bytes up to it end in NEEDMORE. Nil where it needs more made; at
+  # the end of the bytes the line is what there is, and the limit did not end
+  # it. Measured.
+  def __kept_limit_cut__(out, limit, enc)
+    cut = limit
+    while __ends_cut_short__?(out.byteslice(0, cut), enc)
+      return nil if cut == out.bytesize
+      cut += 1
+    end
+    cut
+  end
+
+  # Whether `line` ends in a character of `enc` cut short. One reads as a byte
+  # at a time, so each start is asked.
+  def __ends_cut_short__?(line, enc)
+    at = 0
+    line.dup.force_encoding(enc).each_char do |char|
+      return true if __held_cut_short__?(line.byteslice(at, 4), enc)
+      at += char.bytesize
+    end
+    false
   end
 
   # The rest of the character a line of bytes read from UTF-16 or UTF-32
@@ -2267,7 +2321,8 @@ end
   # or counts the limit, so a lone CR ends a line too (#464). The buffer
   # keeps the bytes as they were read, as `pos`, `read(n)` and `getbyte`
   # after a line see them in CRuby: the line is converted only as far as it
-  # goes, and each LF that stood for a CRLF is a byte more it takes.
+  # goes, and each LF that stood for a CRLF is a byte more it takes. It answers
+  # those bytes as well, for what goes back if converting the line raises.
   def __universal_line__(wanted, limit, unit, whole = false)
     __unpend__
     enc, cr, lf, newline = __newline_bytes__(unit)
@@ -2316,10 +2371,10 @@ end
       end
     end
     return nil if cut == 0
-    __take__(cut + line[:crlfs].count { |at| at < cut } * unit)
+    taken = __take__(cut + line[:crlfs].count { |at| at < cut } * unit)
     # A line that ends in a lone CR had the character after it read: the
     # CR, for the caller to hold that character once the line is made.
-    [view.byteslice(0, cut), line[:lone].include?(cut) ? cr : nil]
+    [view.byteslice(0, cut), line[:lone].include?(cut) ? cr : nil, taken]
   end
 
   # Converts the buffered bytes of a line up to the next newline, reading
@@ -2451,7 +2506,9 @@ end
       size = (1..head.bytesize).find { |n| head.byteslice(0, n).valid_encoding? }
       if size.nil?
         # None is valid: converting them raises the transcoder's error.
-        head.encode(__read_encoding__, **__read_ecopts__)
+        __take__(head.bytesize)
+        __decode__(head)
+        @rbuf = head.b + @rbuf
         return
       end
     end
