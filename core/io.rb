@@ -1209,13 +1209,16 @@ end
 
   # CRuby's `make_readconv`, with its `xml:` decorators and universal newline
   # in the one converter, where a read that starts and finishes a conversion
-  # has them done around it.
+  # has them done around it. Without an internal encoding it is of the
+  # decorators alone, `""` to `""`, which `NewlineBytes` stands in for where
+  # the IO reads through it itself (#550).
   def __make_readconv__
     __readconv__
     source, target, ecopts = @rmade
-    return NewlineBytes.new(__read_encoding__, ecopts[:xml]) if source.nil?
+    return NewlineBytes.new(__read_encoding__, ecopts[:xml]) if source.nil? && !@rkept
     options = __read_options__(ecopts)
     options[:universal_newline] = true if __universal_newline__?(ecopts)
+    return Encoding::Converter.new("", "", **options) if source.nil?
     __converter__(source, target, options)
   end
 
@@ -1228,17 +1231,13 @@ end
   # CR or the first byte of a character is inside, which `@rpend` holds for
   # the next read that reaches it, and one that has finished reads nothing.
   # Whatever drops the converter ends this. Measured.
-  # ponytail: of the converters of decorators alone only `NewlineBytes` is
-  # kept, as `Converter.new` has no `""`, so reads with any other follow the
-  # new encodings (#550). A CR at the end of the bytes finishes CRuby's as it
-  # looks past it, and not this (#551).
+  # One of decorators alone is kept too, a `NewlineBytes` as it is, so what
+  # it writes is the bytes, called what the IO reads in now (#550).
+  # ponytail: a CR at the end of the bytes finishes CRuby's as it looks past
+  # it, and not this (#551).
   def __keep_readconv__
     made = @rmade
     return if made.nil? || @rkept || made == __read_made__
-    if made[0].nil? && !(NewlineBytes === @readconv)
-      @rmade = nil
-      return
-    end
     @rkept = true
     return unless @readconv.nil?
     begin
@@ -1249,7 +1248,7 @@ end
       @rkept = false
       return
     end
-    @readconv.primitive_convert("a".encode(made[0]), "".b, nil, nil, Encoding::Converter::PARTIAL_INPUT) if @rquote
+    @readconv.primitive_convert(made[0] ? "a".encode(made[0]) : "a".b, "".b, nil, nil, Encoding::Converter::PARTIAL_INPUT) if @rquote
     @readconv.finish if @rfinished
   end
 
@@ -1266,8 +1265,10 @@ end
   # bytes, whatever they are called, and holds a CR for the byte after it. An
   # attribute's quote comes first and opens on the first byte, whatever that
   # makes.
-  # ponytail: only that read; `Encoding::Converter.new("", "", ...)` would
-  # replace this, and is #550.
+  # ponytail: only that read, which it does for less than
+  # `Encoding::Converter.new("", "", ...)`, as each call of that costs as much
+  # as one of any other converter, twice what a `getc` costs here. The upgrade
+  # is a cheaper call, which `__next_chars__` names too.
   class NewlineBytes
     def initialize(encoding, xml)
       @encoding = encoding
