@@ -839,12 +839,27 @@ class Encoding
     # CRuby has no converter from an encoding to itself, decorated or not, nor
     # one for two newline decorators, or for both xml escapes. Measured.
     def self.__check_decorators__(source, destination, flags)
-      names = __decorator_names__(flags)
       newlines = NEWLINE_FLAGS.count { |_, flag| flags & flag != 0 }
       escapes = flags & XML_TEXT_DECORATOR != 0 && flags & XML_ATTR_CONTENT_DECORATOR != 0
-      return unless source.equal?(destination) || newlines > 1 || escapes
-      with = names.empty? ? "" : " with #{names.join(",")}"
-      raise Encoding::ConverterNotFoundError, "code converter not found (#{source.name} to #{destination.name}#{with})"
+      return unless (!source.nil? && source.equal?(destination)) || newlines > 1 || escapes
+      raise Encoding::ConverterNotFoundError, "code converter not found (#{__description__(source, destination, flags)})"
+    end
+
+    # CRuby's `econv_description`: the encodings, then the decorators after
+    # " with ", or the decorators alone for a converter of nothing else, and
+    # "no-conversion" for one of neither. Measured.
+    def self.__description__(source, destination, flags)
+      names = __decorator_names__(flags).join(",")
+      return names.empty? ? "no-conversion" : names if source.nil?
+      names.empty? ? "#{source.name} to #{destination.name}" : "#{source.name} to #{destination.name} with #{names}"
+    end
+
+    # Whether `source` and `destination` are both `""`, which CRuby takes for
+    # a converter of decorators alone: it has no encodings and converts
+    # nothing, what `make_readconv` makes for an IO with a newline option and
+    # no internal encoding (#550). Measured.
+    def self.__decorators_alone__?(source, destination)
+      source.is_a?(String) && source.empty? && destination.is_a?(String) && destination.empty?
     end
 
     # The ASCII-compatible encoding a non-ASCII-compatible one converts
@@ -875,10 +890,16 @@ class Encoding
         @flags = Converter.__option_flags__(options)
         replacement = options[:replace]
       end
-      @source_encoding = Converter.__encoding__(source)
-      @destination_encoding = Converter.__encoding__(destination)
+      source = String.__coerce__(source) unless source.is_a?(Encoding)
+      destination = String.__coerce__(destination) unless destination.is_a?(Encoding)
+      if Converter.__decorators_alone__?(source, destination)
+        @source_encoding = @destination_encoding = nil
+      else
+        @source_encoding = Converter.__encoding__(source)
+        @destination_encoding = Converter.__encoding__(destination)
+      end
       Converter.__check_decorators__(@source_encoding, @destination_encoding, @flags)
-      unless String.__supported_target__(@source_encoding) && String.__supported_target__(@destination_encoding)
+      unless @source_encoding.nil? || (String.__supported_target__(@source_encoding) && String.__supported_target__(@destination_encoding))
         __needs_char_table__
       end
       # The default is not converted: "?" stays US-ASCII. Measured.
@@ -904,7 +925,9 @@ class Encoding
       @stopped_short = false
     end
 
+    # With no destination, "?" in BINARY. Measured.
     def __default_replacement__
+      return "?".b if @destination_encoding.nil?
       String.__unicode__(@destination_encoding) ? "�" : "?".encode(Encoding::US_ASCII)
     end
 
@@ -923,11 +946,11 @@ class Encoding
         value = converted
       end
       # Kept in the encoding output is inserted in: the destination, or the
-      # ASCII-compatible one a UTF-16 or UTF-32 destination converts through.
-      # A replacement that cannot be converted is refused, the old one kept.
-      # Measured.
-      target = Converter.asciicompat_encoding(@destination_encoding) || @destination_encoding
-      unless value.encoding.equal?(target)
+      # ASCII-compatible one a UTF-16 or UTF-32 destination converts through,
+      # and with no destination as it is. A replacement that cannot be
+      # converted is refused, the old one kept. Measured.
+      target = __insert_encoding__
+      unless target.nil? || value.encoding.equal?(target)
         # Raised outside the rescue, so it has no cause: CRuby's has none.
         value = begin
           value.encode(target)
@@ -941,14 +964,13 @@ class Encoding
     end
 
     def convpath
+      return Converter.__path_names__(@flags) if @source_encoding.nil?
       Converter.__decorated__(Converter.__path__(@source_encoding, @destination_encoding), Converter.__path_names__(@flags), @destination_encoding)
     end
 
     # In BINARY, as CRuby's. Measured.
     def inspect
-      names = Converter.__decorator_names__(@flags)
-      with = names.empty? ? "" : " with #{names.join(",")}"
-      "#<Encoding::Converter: #{@source_encoding.name} to #{@destination_encoding.name}#{with}>".b
+      "#<Encoding::Converter: #{Converter.__description__(@source_encoding, @destination_encoding, @flags)}>".b
     end
 
     # The transcoders a conversion runs, in order, as CRuby's
@@ -957,9 +979,10 @@ class Encoding
     # ASCII-compatible, each with a buffer of its own that the next reads.
     # A BOM'd UTF-16 or UTF-32 source is read in units until its BOM tells
     # its order, and a BOM'd destination is written big-endian after a BOM
-    # its first character writes. Measured.
+    # its first character writes. A converter of decorators alone has only
+    # them, and one of nothing has none. Measured.
     def __elements__
-      stages = String.__path__(@source_encoding, @destination_encoding)
+      stages = @source_encoding.nil? ? [] : String.__path__(@source_encoding, @destination_encoding)
       elements = stages.each_cons(2).map do |from, to|
         Element.new(
           path: [Converter.__big_endian__(from).__index__, Converter.__big_endian__(to).__index__],
@@ -975,8 +998,10 @@ class Encoding
           finisher: to.__index__ == 85
         )
       end
-      elements.first.unit = { 7 => 2, 8 => 4 }[@source_encoding.__index__]
-      elements.last.bom = { 7 => "\xFE\xFF".b, 8 => "\x00\x00\xFE\xFF".b }[@destination_encoding.__index__]
+      unless elements.empty?
+        elements.first.unit = { 7 => 2, 8 => 4 }[@source_encoding.__index__]
+        elements.last.bom = { 7 => "\xFE\xFF".b, 8 => "\x00\x00\xFE\xFF".b }[@destination_encoding.__index__]
+      end
       decorators = Converter.__path_names__(@flags).map do |name|
         newline = name == "universal_newline" || name == "lf_newline"
         # The attribute's quote takes what is inserted before it, as an
@@ -984,7 +1009,7 @@ class Encoding
         quote = name == "xml_attr_quote"
         Element.new(decorator: name, encoder: quote, fun: newline || quote, finisher: newline || quote, state: false)
       end
-      return elements + decorators if @destination_encoding.ascii_compatible?
+      return elements + decorators if elements.empty? || @destination_encoding.ascii_compatible?
       elements[0...-1] + decorators + elements[-1..]
     end
 
@@ -1027,25 +1052,29 @@ class Encoding
     # Measured.
     def putback(max = nil)
       element = @elements.first
+      return "".b if element.nil?
       again = element.readagain
       count = max.nil? ? again.bytesize : [max, again.bytesize].min
       element.readagain = again.byteslice(0, again.bytesize - count)
-      again.byteslice(again.bytesize - count, count).force_encoding(@source_encoding)
+      again = again.byteslice(again.bytesize - count, count)
+      @source_encoding.nil? ? again.b : again.force_encoding(@source_encoding)
     end
 
     # Encoded to the encoding it is inserted in first, as `String#encode`
     # does, so what that cannot spell raises its error even once finished;
-    # text already in it is taken as it is, however invalid. Measured.
+    # text already in it is taken as it is, however invalid. With no
+    # destination that is BINARY. Measured.
     def insert_output(text)
-      text = String.__coerce__(text).encode(__insert_encoding__)
+      text = String.__coerce__(text).encode(__insert_encoding__ || Encoding::BINARY)
       __insert__(text.b)
       nil
     end
 
     # The encoding `insert_output` inserts in: the destination's, or the
     # ASCII-compatible one its encoder reads, as CRuby's
-    # `rb_econv_encoding_to_insert_output`.
+    # `rb_econv_encoding_to_insert_output`, or nil with no destination.
     def __insert_encoding__
+      return nil if @destination_encoding.nil?
       Converter.asciicompat_encoding(@destination_encoding) || @destination_encoding
     end
 
@@ -1058,6 +1087,10 @@ class Encoding
     def __insert__(bytes, begun = false)
       return if bytes.empty?
       last = @elements.last
+      if last.nil?
+        @in_buf.bytes << bytes
+        return
+      end
       unless last.encoder
         last.out.bytes << bytes
         return
@@ -1092,13 +1125,32 @@ class Encoding
       input = Buffer.new(source.nil? ? "".b : source.b)
       source&.__splice__(0, source.bytesize, "")
       output = "".b
-      result = __econv_convert__(input, output, bytesize, flags)
+      result = @elements.empty? ? __copy__(input, output, bytesize, flags) : __econv_convert__(input, output, bytesize, flags)
       __stopped__(result)
       source&.__splice__(0, 0, input.bytes.byteslice(input.at, __unread__(input)))
       destination.__splice__(offset, destination.bytesize - offset, "") unless offset.nil?
       destination.__splice__(destination.bytesize, 0, output)
-      destination.force_encoding(@destination_encoding)
+      destination.force_encoding(@destination_encoding) unless @destination_encoding.nil?
       result
+    end
+
+    # CRuby's converter of nothing: what was inserted, then the source, as it
+    # is, no further than `limit`. With `AFTER_OUTPUT` it stops after what was
+    # inserted, or else a byte. It never finishes for good. Measured.
+    def __copy__(input, output, limit, flags)
+      after = flags & AFTER_OUTPUT != 0
+      [@in_buf, input].each do |buffer|
+        count = __unread__(buffer)
+        count = 1 if after && count > 1 && buffer.equal?(input)
+        room = __room__(output, limit)
+        if room < count
+          output << __read__(buffer, room)
+          return :destination_buffer_full
+        end
+        output << __read__(buffer, count)
+        return :after_output if after && count > 0
+      end
+      flags & PARTIAL_INPUT != 0 ? :source_buffer_empty : :finished
     end
 
     # CRuby's `rb_econv_convert`: an error the flags replace has what goes
@@ -1590,7 +1642,7 @@ class Encoding
     def convert(text)
       text = String.__coerce__(text)
       source = text.dup
-      out = String.new(encoding: @destination_encoding)
+      out = __new_out__
       loop do
         result = primitive_convert(source, out, nil, nil, partial_input: true)
         case result
@@ -1602,8 +1654,14 @@ class Encoding
       end
     end
 
+    # What `convert` and `finish` write into: BINARY with no destination.
+    # Measured.
+    def __new_out__
+      @destination_encoding.nil? ? String.new : String.new(encoding: @destination_encoding)
+    end
+
     def finish
-      out = String.new(encoding: @destination_encoding)
+      out = __new_out__
       result = primitive_convert("".b, out)
       raise @last_error if result == :invalid_byte_sequence || result == :incomplete_input || result == :undefined_conversion
       out
