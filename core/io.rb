@@ -682,9 +682,10 @@ end
         __fd_close__(@wfileno)
         # The write end is gone for good, so a `reopen` does not take it back.
         # CRuby's `close` leaves the tied write IO closed, not untied, and a
-        # write after `reopen` finds it so; `close_write` unties it.
+        # write after `reopen` finds it so; `close_write` and `close_read`
+        # untie it.
         @wclosed = true
-        @wgone = true
+        @wgone = true unless @rclosed
         @finalizer&.wfd = nil
       end
       IO.__check__(__fd_close__(@fileno), @path) if @autoclose && !@rclosed && @fileno > 2
