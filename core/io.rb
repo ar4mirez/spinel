@@ -2276,7 +2276,7 @@ end
       wanted = wanted.b
     end
     if converted
-      line = __converted_line__(paragraph ? "\n\n" : separator, wanted, limit, unit)
+      line = __converted_line__(separator, wanted, limit, unit)
       return nil if line.nil?
     elsif unit
       bytes, cr, taken = __universal_line__(wanted, limit, unit, true)
@@ -2288,10 +2288,10 @@ end
     end
     return nil if line.nil?
     # CRuby's `nolimit`: a line the limit cut short is not counted (#480).
-    counted = !__cut_by_limit__?(line, paragraph ? "\n\n" : separator, limit) || kept && __ends_cut_short__?(line, line.encoding)
+    counted = !__cut_by_limit__?(line, separator, limit) || kept && __ends_cut_short__?(line, line.encoding)
     # The blank lines between records belong to neither.
     __swallow__(unit) if paragraph
-    line = __chomp_line__(line, paragraph ? "\n\n" : separator) if chomp && !separator.nil?
+    line = __chomp_line__(line, separator) if chomp && !separator.nil?
     if counted
       @lineno += 1
       $. = @lineno
@@ -2316,9 +2316,14 @@ end
 
   # The bytes of a separator in what the read converter makes. A dummy
   # encoding is read a byte at a time, so its newline is the byte, even in a
-  # BOM'd UTF-16 or UTF-32. Measured.
+  # BOM'd UTF-16 or UTF-32. Paragraph mode's empty separator is CRuby's
+  # "\n\n" converted to the read encoding, so in a BOM'd one it is the BOM
+  # and two newlines in its units, and a record ends only where those bytes
+  # are (#542). Measured.
   def __separator_in__(separator, enc)
-    return separator.b if separator.encoding == enc || separator.ascii_only? && (enc.ascii_compatible? || enc.dummy?)
+    paragraph = separator.empty?
+    separator = "\n\n" if paragraph
+    return separator.b if separator.encoding == enc || separator.ascii_only? && (enc.ascii_compatible? || enc.dummy? && !paragraph)
     separator.encode(enc).b
   end
 
