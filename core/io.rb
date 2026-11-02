@@ -1834,8 +1834,9 @@ end
   # to look at the IO itself. A write with none nested in it never asks `tty?`.
   # With the write side closed, a `close_write` has flushed them and the rest go
   # nowhere. All are taken before they are written, as a thread may flush too.
-  # `@wsynced` is `sync` as it reached the write side: a `sync=` after a
-  # `close_write` reaches only the read side, and no later flush comes here.
+  # `@wsynced` is `sync` as it reached the write side, for `__write_gathered__`:
+  # a `sync=` after a `close_write` reaches only the read side, and no later
+  # flush comes here.
   def __flush_gathered__
     return if @wclosed || @wgathered.nil? || @wgathered.empty?
     return @wgathered = nil if tty?
