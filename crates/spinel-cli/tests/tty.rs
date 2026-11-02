@@ -111,3 +111,10 @@ fn a_write_from_a_to_s_goes_ahead_of_what_a_tty_gathered() {
     assert!(terminal.contains("[first][second][third]"), "{terminal:?}");
     assert!(!terminal.contains("dropped"), "{terminal:?}");
 }
+
+#[test]
+fn a_to_s_that_closes_a_tty_with_nothing_to_write_leaves_nothing_to_raise() {
+    let (answer, terminal) = on_a_terminal("tty_closed_by_to_s_nothing_to_write.rb", b"");
+    assert_eq!(answer, "[0, 0]");
+    assert!(terminal.contains("[nested]"), "{terminal:?}");
+}
