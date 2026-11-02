@@ -593,6 +593,7 @@ end
     @xml_quote = nil
     # The writes in progress are the original's.
     @wgathered = nil
+    @wsynced = false
     # And a finalizer of its own, for the descriptor of its own.
     @finalizer = nil
     # A copy is no standard stream, whatever it copies.
@@ -1833,9 +1834,12 @@ end
   # to look at the IO itself. A write with none nested in it never asks `tty?`.
   # With the write side closed, a `close_write` has flushed them and the rest go
   # nowhere. All are taken before they are written, as a thread may flush too.
+  # `@wsynced` is `sync` as it reached the write side: a `sync=` after a
+  # `close_write` reaches only the read side, and no later flush comes here.
   def __flush_gathered__
     return if @wclosed || @wgathered.nil? || @wgathered.empty?
     return @wgathered = nil if tty?
+    @wsynced = @sync
     bytes = "".b
     @wgathered.each do |text|
       bytes << text
@@ -3008,8 +3012,10 @@ end
   # writes what came before, and `rest` is for `writev`. What comes after a close
   # goes in the buffer with no descriptor to reach, and counts. So does `rest`
   # if the buffer holds any, or if there are no bytes for `writev` to send; any
-  # other `rest` finds the stream closed. A tty is found only when a `to_s`
-  # flushes, where the list goes, so its text is `rest`. Measured.
+  # other `rest` finds the stream closed. So does the last object if it brought
+  # the close with sync on, as `io_fwrite` tests sync after its `to_s`, and has
+  # bytes. A tty is found only when a `to_s` flushes, where the list goes, so its
+  # text is `rest`. Measured.
   # ponytail: only a `close` or a write sees `@wgathered`, so what else flushes
   # CRuby's buffer leaves it gathered (#571); upgrade with a real write buffer.
   def __write_gathered__(objects)
@@ -3021,6 +3027,7 @@ end
     end
     text = "".b
     rest = nil
+    piece = nil
     total = 0
     index = 0
     (@wgathered ||= []) << text
@@ -3045,7 +3052,8 @@ end
       __write_partial__(text) unless converted
     end
     if @closed || @wclosed
-      raise IOError, "closed stream" if flushed ? text.empty? && rest && !rest.empty? : total > 0
+      unsent = flushed ? (rest ? text.empty? && !rest.empty? : @wsynced && !piece.empty?) : total > 0
+      raise IOError, "closed stream" if unsent
       return total
     end
     if rest
