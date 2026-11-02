@@ -683,7 +683,8 @@ end
         # The write end is gone for good, so a `reopen` does not take it back.
         # CRuby's `close` leaves the tied write IO closed, not untied, and a
         # write after `reopen` finds it so; `close_write` unties it.
-        @wclosed = :close
+        @wclosed = true
+        @wgone = true
         @finalizer&.wfd = nil
       end
       IO.__check__(__fd_close__(@fileno), @path) if @autoclose && !@rclosed && @fileno > 2
@@ -732,7 +733,7 @@ end
   end
 
   def close_write
-    return nil if @closed || @wclosed == :close
+    return nil if @closed || @wgone
     unless @wfileno.nil?
       __finish_writeconv__ unless @wclosed
       __fd_close__(@wfileno) unless @wclosed
@@ -904,7 +905,7 @@ end
 
   def __check_write_open__
     __check_open__
-    raise IOError, "closed stream" if @wclosed == :close
+    raise IOError, "closed stream" if @wgone
   end
 
   # --- encodings ---------------------------------------------------------------
@@ -3284,6 +3285,7 @@ end
     @rbuf = "".b
     __keep_readconv__
     fd = IO.__check__(__fd_open__(path, flags, 0666), path, "rb_sysopen")[0]
+    __untie__
     if @closed
       @fileno = fd
       @closed = false
@@ -3294,6 +3296,16 @@ end
     @path = path.dup
     __arm__
     self
+  end
+
+  # A duplex child whose write end is closed is one IO from here on, as CRuby's
+  # is once `close_write` unties it; what `close` left tied stays in `@wgone`.
+  def __untie__
+    return if @wfileno.nil? || !@wclosed
+    @wfileno = nil
+    @wclosed = false
+    @rclosed = false
+    @finalizer&.wfd = nil
   end
 
   # CRuby's `io_reopen`. A reader's bytes buffered go, and the read converter
@@ -3314,6 +3326,7 @@ end
       __refuse_access__(other.__modestr__)
     end
     __unread__(true) if @access == 0
+    __untie__
     position = other.__seekable_pos__ if other.__reads__?
     @access, @oflags, @binmode, @textmode, @sync, @enc, @enc2, @ecopts, @lineno, @pid, @duplex = other.__modes__
     @rmoded = !other.__tied__? || other.__rmoded__
