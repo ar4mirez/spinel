@@ -840,6 +840,7 @@ module Kernel
 
   # True when the command succeeded, false when it ran and failed, and nil
   # when it could not be started — unless `exception: true` asks for errors.
+  # A redirection's file that will not open raises either way.
   def system(*args, exception: false, **options)
     unless exception.nil? || true.equal?(exception) || false.equal?(exception)
       raise ArgumentError, "expected true or false as exception: #{exception.inspect}"
