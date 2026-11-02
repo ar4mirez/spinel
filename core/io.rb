@@ -1830,15 +1830,18 @@ end
 
   # Each write in progress, oldest first, and emptied, as it may yet write the
   # rest. A tty has no write buffer: the list goes, which tells each of them
-  # to look at the IO itself. A write that succeeds never asks `tty?`. With the
-  # write side closed, a `close_write` has flushed them and the rest go nowhere.
+  # to look at the IO itself. A write with none nested in it never asks `tty?`.
+  # With the write side closed, a `close_write` has flushed them and the rest go
+  # nowhere. All are taken before they are written, as a thread may flush too.
   def __flush_gathered__
     return if @wclosed || @wgathered.nil? || @wgathered.empty?
     return @wgathered = nil if tty?
-    @wgathered.dup.each do |text|
-      __write_all__(text)
+    bytes = "".b
+    @wgathered.each do |text|
+      bytes << text
       text.clear
     end
+    __write_all__(bytes) unless bytes.empty?
   end
 
   # The converter gone unfinished, with the quote.
@@ -1978,7 +1981,10 @@ end
   end
 
   # Every byte of `text`, waiting whenever a nonblocking descriptor is full.
+  # What writes in progress have gathered goes first, as it is in CRuby's write
+  # buffer ahead of these bytes.
   def __write_all__(text)
+    __flush_gathered__ if @wgathered && !@wgathered.empty?
     total = text.bytesize
     loop do
       IO.__wait__([[self, IO::WRITABLE]], @timeout, true) || raise(IO::TimeoutError, "Blocking operation timed out!") if __thread_others__
@@ -2998,10 +3004,10 @@ end
   # One system call for all of them, as `writev` would be, and only `writev` is
   # the one for a sync IO or a tty: the rest are CRuby's write buffer, listed in
   # `@wgathered` while a `to_s` can run, one for each write in progress, so a
-  # `close` there writes what came before. What comes after goes in with no
-  # descriptor to reach, and counts. Measured.
-  # ponytail: only `close` sees `@wgathered`, so a write from a `to_s` goes
-  # ahead of it where CRuby's goes after; upgrade with a real write buffer.
+  # `close` or a write there writes what came before. What comes after a close
+  # goes in with no descriptor to reach, and counts. Measured.
+  # ponytail: only a `close` or a write sees `@wgathered`, so what else flushes
+  # CRuby's buffer leaves it gathered (#571); upgrade with a real write buffer.
   # ponytail: `sync` is read once, where `io_writev` tests it for each object,
   # and a `to_s` that closes a sync IO raises even with nothing to write, where
   # CRuby's returns; upgrade by walking the objects as `io_writev` does (#529).
@@ -3044,6 +3050,7 @@ end
   def write_nonblock(object, exception: true)
     __writable__
     IO.__exception_flag__(exception)
+    __flush_gathered__
     __nonblock__
     text = String === object ? object : object.to_s
     result = __fd_write__(__wfd__, text)
