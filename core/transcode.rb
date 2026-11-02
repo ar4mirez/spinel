@@ -84,6 +84,7 @@ class String
         __converter_encoding__(args[0], source)
       end
     text = self
+    String.__econv_opts__(options) unless options.empty?
     xml = String.__xml_option__(options)
     newlines = String.__newline_decorators__(options)
     decorated = xml || !newlines.empty?
@@ -811,6 +812,7 @@ class Encoding
     # The flags `options` ask for, as `new` reads them. `xml:` also writes an
     # undefined character as a reference. Measured.
     def self.__option_flags__(options)
+      String.__econv_opts__(options)
       flags = 0
       flags = flags | INVALID_REPLACE if options[:invalid] == :replace
       flags = flags | UNDEF_REPLACE if options[:undef] == :replace

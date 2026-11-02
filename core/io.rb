@@ -622,15 +622,7 @@ end
 
   # The options that say how to convert, kept for `String#encode`.
   def __ecopts__(options)
-    # CRuby's `econv_opts`, whose order says which of several bad ones raises:
-    # anything but nil or `:replace` is refused, `false` too. Measured.
-    raise ArgumentError, "unknown value for invalid character option" unless [nil, :replace].include?(options[:invalid])
-    raise ArgumentError, "unknown value for undefined character option" unless [nil, :replace].include?(options[:undef])
-    String.__xml_option__(options) if options.key?(:xml)
-    newline = options[:newline]
-    unless newline.nil? || %i[universal crlf cr lf].include?(newline)
-      raise ArgumentError, "unexpected value for newline option: #{newline}"
-    end
+    String.__econv_opts__(options)
     kept = {}
     %i[invalid undef replace xml newline universal_newline crlf_newline cr_newline lf_newline fallback].each do |key|
       kept[key] = options[key] if options.key?(key)
