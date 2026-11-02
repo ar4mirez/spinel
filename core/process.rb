@@ -753,12 +753,13 @@ module Process
     # and the options, so which descriptor it names is the first to repeat in
     # that list: the ones given, then the pipes, then the files, what is
     # closed and what is the child's.
-    # ponytail: only a descriptor in `extra` is looked for, so `spawn` still
-    # lets `out: a, 1 => b` through (#538).
     def piped(extra, claims)
-      fds = extra.map(&:first)
-      fds.find { |fd| claims[:given].include?(fd) } ||
-        (claims[:file] + claims[:close] + claims[:child]).find { |fd| fds.include?(fd) }
+      seen = {}
+      (claims[:given] + extra.map(&:first) + claims[:file] + claims[:close] + claims[:child]).find do |fd|
+        next true if seen[fd]
+        seen[fd] = true
+        false
+      end
     end
 
     # Start a child, or with `replace` become it. Answers the pid.
