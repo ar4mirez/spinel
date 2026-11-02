@@ -3001,41 +3001,74 @@ end
     __write_gathered__(objects)
   end
 
-  # One system call for all of them, as `writev` would be, and only `writev` is
-  # the one for a sync IO or a tty: the rest are CRuby's write buffer, listed in
-  # `@wgathered` while a `to_s` can run, one for each write in progress, so a
-  # `close` or a write there writes what came before. What comes after a close
-  # goes in with no descriptor to reach, and counts. Measured.
+  # CRuby's `io_writev` walks the objects, and each one meeting a sync IO or a
+  # tty takes all the rest to `writev`, one system call; before that they go to
+  # the write buffer. So `text` is that buffer, listed in `@wgathered` while a
+  # `to_s` can run, one for each write in progress, so a `close` or a write there
+  # writes what came before, and `rest` is for `writev`. What comes after a close
+  # goes in the buffer with no descriptor to reach, and counts. So does `rest`
+  # if the buffer holds any, or if there are no bytes for `writev` to send; any
+  # other `rest` finds the stream closed. A tty is found only when a `to_s`
+  # flushes, where the list goes, so its text is `rest`. Measured.
   # ponytail: only a `close` or a write sees `@wgathered`, so what else flushes
   # CRuby's buffer leaves it gathered (#571); upgrade with a real write buffer.
-  # ponytail: `sync` is read once, where `io_writev` tests it for each object,
-  # and a `to_s` that closes a sync IO raises even with nothing to write, where
-  # CRuby's returns; upgrade by walking the objects as `io_writev` does (#529).
   def __write_gathered__(objects)
+    if @sync
+      rest = __gather__(objects, 0)
+      return 0 if rest.empty?
+      raise IOError, "closed stream" if @closed || @wclosed
+      return __write_all__(rest)
+    end
     text = "".b
+    rest = nil
     total = 0
-    (@wgathered ||= []) << text unless @sync
+    index = 0
+    (@wgathered ||= []) << text
     converted = false
     begin
-      objects.each do |object|
+      while index < objects.size
+        if @sync
+          rest = __gather__(objects, index)
+          total += rest.bytesize
+          break
+        end
+        object = objects[index]
         object = object.to_s unless String === object
         piece = __encode_out__(object).b
         total += piece.bytesize
         text << piece
+        index += 1
       end
       converted = true
     ensure
       flushed = @wgathered&.reject! { |listed| listed.equal?(text) }
       __write_partial__(text) unless converted
     end
-    closed = @closed || @wclosed
-    raise IOError, "closed stream" if closed && !flushed
-    __write_all__(text) unless closed || text.empty?
+    if @closed || @wclosed
+      raise IOError, "closed stream" if flushed ? text.empty? && rest && !rest.empty? : total > 0
+      return total
+    end
+    if rest
+      text.empty? ? text = rest : text << rest
+    end
+    __write_all__(text) unless text.empty?
     total
   end
 
+  # The objects from `index` on, as bytes for one `writev`.
+  def __gather__(objects, index)
+    text = "".b
+    while index < objects.size
+      object = objects[index]
+      object = object.to_s unless String === object
+      text << __encode_out__(object).b
+      index += 1
+    end
+    text
+  end
+
   def __write_partial__(text)
-    __write_all__(text) unless @wclosed || @sync || tty?
+    __write_all__(text) unless @wclosed || text.empty? || tty?
   rescue StandardError
     nil
   end
