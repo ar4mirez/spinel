@@ -219,10 +219,11 @@ class IO
   end
 
   # CRuby's duplex child is two IOs, and this looks at the side that reads,
-  # however much a write goes through to the other.
+  # however much a write goes through to the other, until `reopen` gives that
+  # side a mode of its own (`@rmoded`).
   def wait_writable(timeout = nil)
     __writable__
-    raise IOError, "not opened for writing" if __tied__?
+    raise IOError, "not opened for writing" if __tied__? && !@rmoded
     IO.__wait__([[self, IO::WRITABLE]], timeout).nil? ? nil : self
   end
 
@@ -3167,6 +3168,7 @@ end
       @sync = false
       @autoclose = true
       @duplex = nil
+      @rmoded = true
     end
     # The bytes buffered go, even if what is named does not open; the read
     # converter and the characters it holds stay, whatever was opened.
@@ -3205,6 +3207,7 @@ end
     __unread__(true) if @access == 0
     position = other.__seekable_pos__ if other.__reads__?
     @access, @oflags, @binmode, @textmode, @sync, @enc, @enc2, @ecopts, @lineno, @pid, @duplex = other.__modes__
+    @rmoded = true
     @wpre = @wpre.reject { |key, _| %i[newline universal_newline crlf_newline cr_newline lf_newline].include?(key) } if @wpre && @binmode
     @autoclose &&= other.autoclose?
     @finalizer&.autoclose = @autoclose
