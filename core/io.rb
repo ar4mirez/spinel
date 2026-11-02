@@ -310,7 +310,8 @@ end
     # Measured: made without `new`, so a class that redefines it is not asked.
     reader = allocate
     # These are read with the encodings, by `set_encoding`, or not at all.
-    reader.__send__(:initialize, fds[0], "r", **options.reject { |key, _| %i[invalid undef replace xml external_encoding internal_encoding].include?(key) })
+    ignored = %i[invalid undef replace xml newline universal_newline crlf_newline cr_newline lf_newline external_encoding internal_encoding]
+    reader.__send__(:initialize, fds[0], "r", **options.reject { |key, _| ignored.include?(key) })
     writer = allocate
     # By number: a pipe's mode says nothing of creating or truncating, which
     # `reopen` with a path and no mode goes by.
