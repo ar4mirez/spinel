@@ -218,8 +218,11 @@ class IO
     IO.__wait__([[self, IO::READABLE]], timeout).nil? ? nil : self
   end
 
+  # CRuby's duplex child is two IOs, and this looks at the side that reads,
+  # however much a write goes through to the other.
   def wait_writable(timeout = nil)
     __writable__
+    raise IOError, "not opened for writing" if __tied__?
     IO.__wait__([[self, IO::WRITABLE]], timeout).nil? ? nil : self
   end
 
