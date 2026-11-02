@@ -3109,7 +3109,7 @@ end
   # CRuby's `rb_io_puts`, so the lines before one that raises are written, on
   # a sync IO as well, where one `write` of them all would drop them (#420).
   def puts(*lines)
-    return write("\n") && nil if lines.empty?
+    return write(DEFAULT_RS) && nil if lines.empty?
     __puts_lines__(lines, [])
     nil
   end
@@ -3146,7 +3146,7 @@ end
   end
 
   def __puts_line__(text)
-    __writev__(text.__end_with_newline__ ? [text] : [text, "\n"])
+    __writev__(text.__end_with_newline__ ? [text] : [text, DEFAULT_RS])
   end
 
   # --- another descriptor ----------------------------------------------------
