@@ -731,7 +731,7 @@ end
   end
 
   def close_write
-    return nil if @closed
+    return nil if @closed || @wclosed == :close
     unless @wfileno.nil?
       __finish_writeconv__ unless @wclosed
       __fd_close__(@wfileno) unless @wclosed
