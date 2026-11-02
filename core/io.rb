@@ -700,7 +700,7 @@ end
   end
 
   # The descriptor writes go to: a duplex child's own write end, or the one.
-  def __wfd__ = @wclosed == :close ? @fileno : (@wfileno || @fileno)
+  def __wfd__ = @wclosed ? @fileno : (@wfileno || @fileno)
 
   # Whether this is a duplex child still read from. CRuby makes that two IOs,
   # and the one `tied_io_for_writing` holds has no encoding and no options:
