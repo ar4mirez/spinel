@@ -707,6 +707,8 @@ end
   # the write side has been made binary, for when `close_read` leaves only it.
   def __tied__? = !@wfileno.nil? && !@rclosed
 
+  def __rmoded__ = @rmoded
+
   def close_read
     return nil if @closed
     unless @wfileno.nil?
@@ -3207,7 +3209,7 @@ end
     __unread__(true) if @access == 0
     position = other.__seekable_pos__ if other.__reads__?
     @access, @oflags, @binmode, @textmode, @sync, @enc, @enc2, @ecopts, @lineno, @pid, @duplex = other.__modes__
-    @rmoded = true
+    @rmoded = !other.__tied__? || other.__rmoded__
     @wpre = @wpre.reject { |key, _| %i[newline universal_newline crlf_newline cr_newline lf_newline].include?(key) } if @wpre && @binmode
     @autoclose &&= other.autoclose?
     @finalizer&.autoclose = @autoclose
