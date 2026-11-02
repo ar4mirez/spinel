@@ -825,8 +825,10 @@ end
 
   def stat
     __check_open__
-    File::Stat.__from__(IO.__check__(__fs_stat__(@fileno, true), @path))
+    __stat__
   end
+
+  def __stat__ = File::Stat.__from__(IO.__check__(__fs_stat__(@fileno, true), @path))
 
   def binmode
     __check_open__
@@ -2180,8 +2182,18 @@ end
     buffer.replace(chunk).force_encoding(encoding)
   end
 
-  def __pread_bytes__(length, offset)
-    IO.__check__(__fd_pread__(@fileno, length, offset), @path)
+  # `IO.copy_stream` names the call where `pread` names the path.
+  def __pread_bytes__(length, offset, path = @path)
+    IO.__check__(__fd_pread__(@fileno, length, offset), path)
+  end
+
+  # Where the descriptor is, whatever is buffered.
+  def __fd_pos__
+    IO.__check__(__fd_seek__(@fileno, 0, IO::SEEK_CUR), @path)[0]
+  end
+
+  def __fd_pos__=(offset)
+    IO.__check__(__fd_seek__(@fileno, offset, IO::SEEK_SET), @path)
   end
 
   # Only `gets` and `readline` set `$_`: `readlines` and `each_line` leave it.
@@ -3548,15 +3560,40 @@ end
     end
   end
 
-  # CRuby's `nogvl_copy_stream_func`: descriptor to descriptor.
+  # CRuby's `nogvl_copy_stream_func`: descriptor to descriptor. From a file
+  # with no offset that is `copy_file_range` or else `sendfile`, which copy what
+  # the file holds past where the source is, reading from the source's place
+  # and writing at the destination's, both as they were before. So one IO at
+  # both ends, or two that share a place, writes the bytes back where they were
+  # read (#536). Here those are `pread`s from the source's place, and then the
+  # source is moved past them, unless the writes have already moved it.
   def self.__copy_stream_bytes__(source, destination, length, position)
+    if position.nil?
+      stat = source.__stat__
+      return __copy_stream_chunks__(source, destination, length, nil) unless stat.file?
+      start = source.__fd_pos__
+      length = stat.size > start ? stat.size - start : 0 if length.nil?
+      copied = 0
+      begin
+        copied = __copy_stream_chunks__(source, destination, length, start)
+      ensure
+        source.__fd_pos__ = start + copied if copied > 0 && source.__fd_pos__ == start
+      end
+      copied
+    else
+      __copy_stream_chunks__(source, destination, length, position)
+    end
+  end
+
+  def self.__copy_stream_chunks__(source, destination, length, position)
     copied = 0
     until copied == length
       want = length.nil? || length - copied > 65536 ? 65536 : length - copied
       chunk = if position.nil?
                 source.__partial__(want, nil, "readpartial")
               else
-                source.__pread_bytes__(want, position + copied)
+                # Measured: an `Errno::ESPIPE` names the call.
+                source.__pread_bytes__(want, position + copied, "pread")
               end
       break if chunk.nil? || chunk.empty?
       destination.__writable__
@@ -3584,7 +3621,7 @@ end
         elsif position.nil?
           break if source.__partial__(want, buffer, "readpartial").nil?
         else
-          chunk = source.__pread_bytes__(want, position)
+          chunk = source.__pread_bytes__(want, position, "pread")
           break if chunk.empty?
           buffer.replace(chunk)
           position += chunk.bytesize
