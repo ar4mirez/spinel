@@ -140,6 +140,7 @@ class IO
     end
     ios = sets.map { |set| set.map { |item| IO.__to_io__(item) } }
     ios.each { |set| set.each(&:__check_open__) }
+    ios[1].each(&:__check_write_open__)
     pairs = []
     [IO::READABLE, IO::WRITABLE, IO::PRIORITY].each_with_index do |bit, i|
       ios[i].each { |io| pairs << [io, bit] }
@@ -699,7 +700,7 @@ end
   end
 
   # The descriptor writes go to: a duplex child's own write end, or the one.
-  def __wfd__ = @wfileno || @fileno
+  def __wfd__ = @wclosed == :close ? @fileno : (@wfileno || @fileno)
 
   # Whether this is a duplex child still read from. CRuby makes that two IOs,
   # and the one `tied_io_for_writing` holds has no encoding and no options:
@@ -890,9 +891,20 @@ end
   # has moved past; a write belongs where the reader is.
   def __writable__
     __check_open__
-    raise IOError, "closed stream" if @wclosed == :close
     raise IOError, "not opened for writing" unless __writes__?
     __unread__(true)
+  end
+
+  # CRuby's `GetWriteIO` before `rb_io_check_writable`: a write goes to a
+  # duplex child's write end, which stays closed once `close` let it go.
+  def __write_side__
+    __check_write_open__
+    __writable__
+  end
+
+  def __check_write_open__
+    __check_open__
+    raise IOError, "closed stream" if @wclosed == :close
   end
 
   # --- encodings ---------------------------------------------------------------
@@ -3046,10 +3058,10 @@ end
       text = objects[0]
       text = text.to_s unless String === text
       return 0 if text.empty?
-      __writable__
+      __write_side__
       return __write_all__(__encode_out__(text))
     end
-    __writable__
+    __write_side__
     __write_gathered__(objects)
   end
 
@@ -3130,13 +3142,13 @@ end
   end
 
   def syswrite(object)
-    __writable__
+    __write_side__
     text = String === object ? object : object.to_s
     IO.__check__(__fd_write__(__wfd__, text), @path)[0]
   end
 
   def write_nonblock(object, exception: true)
-    __writable__
+    __write_side__
     IO.__exception_flag__(exception)
     __flush_gathered__
     __nonblock__
@@ -3155,7 +3167,7 @@ end
   end
 
   def pwrite(object, offset)
-    __writable__
+    __write_side__
     text = String === object ? object : object.to_s
     IO.__check__(__fd_pwrite__(__wfd__, text, Integer.__index__(offset)), @path)[0]
   end
@@ -3561,7 +3573,7 @@ end
         # An IO stays binary after the copy, whatever it was, even for no
         # bytes at all. It drops the converters unfinished, and the bytes go
         # out as they are.
-        destination.__writable__
+        destination.__write_side__
         destination.__write_binmode__
       end
       # What the source has read ahead goes first, and counts whatever a
@@ -3640,7 +3652,7 @@ end
                 source.__pread_bytes__(want, position + copied, "pread")
               end
       break if chunk.nil? || chunk.empty?
-      destination.__writable__
+      destination.__write_side__
       destination.__write_all__(chunk)
       copied += chunk.bytesize
     end
