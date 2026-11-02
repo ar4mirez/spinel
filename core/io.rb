@@ -677,7 +677,14 @@ end
       @cbuf = "".b
       # CRuby's `close` leaves `readconv` freed, and a `reopen` crashes on it.
       __drop_readconv__
-      __fd_close__(@wfileno) unless @wfileno.nil? || @wclosed
+      unless @wfileno.nil? || @wclosed
+        __fd_close__(@wfileno)
+        # The write end is gone for good, so a `reopen` does not take it back.
+        # CRuby's `close` leaves the tied write IO closed, not untied, and a
+        # write after `reopen` finds it so; `close_write` unties it.
+        @wclosed = :close
+        @finalizer&.wfd = nil
+      end
       IO.__check__(__fd_close__(@fileno), @path) if @autoclose && !@rclosed && @fileno > 2
       __reap__
     end
@@ -883,6 +890,7 @@ end
   # has moved past; a write belongs where the reader is.
   def __writable__
     __check_open__
+    raise IOError, "closed stream" if @wclosed == :close
     raise IOError, "not opened for writing" unless __writes__?
     __unread__(true)
   end
