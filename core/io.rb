@@ -3034,7 +3034,7 @@ end
     converted = false
     begin
       while index < objects.size
-        if @sync
+        if @wclosed ? @wsynced : @sync
           rest = __gather__(objects, index)
           total += rest.bytesize
           break
