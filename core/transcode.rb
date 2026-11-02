@@ -76,6 +76,7 @@ class String
     if args.size > 2
       raise ArgumentError, "wrong number of arguments (given #{args.size}, expected 0..2)"
     end
+    String.__econv_opts__(options) unless options.empty?
     source = args.size == 2 ? __converter_encoding__(args[1], encoding) : encoding
     target =
       if args.empty?
@@ -797,13 +798,13 @@ class Encoding
     end
 
     def self.search_convpath(source, destination, **options)
+      flags = __option_flags__(options)
       source = __encoding__(source)
       destination = __encoding__(destination)
       # Which pairs CRuby has a path for is its converter table's question.
       unless String.__supported_target__(source) && String.__supported_target__(destination)
         __needs_char_table__
       end
-      flags = __option_flags__(options)
       __check_decorators__(source, destination, flags)
       __decorated__(__path__(source, destination), __path_names__(flags), destination)
     end
@@ -811,6 +812,7 @@ class Encoding
     # The flags `options` ask for, as `new` reads them. `xml:` also writes an
     # undefined character as a reference. Measured.
     def self.__option_flags__(options)
+      String.__econv_opts__(options)
       flags = 0
       flags = flags | INVALID_REPLACE if options[:invalid] == :replace
       flags = flags | UNDEF_REPLACE if options[:undef] == :replace
@@ -865,8 +867,6 @@ class Encoding
     end
 
     def initialize(source, destination, options = 0)
-      @source_encoding = Converter.__encoding__(source)
-      @destination_encoding = Converter.__encoding__(destination)
       replacement = nil
       if options.is_a?(Integer)
         @flags = options
@@ -875,6 +875,8 @@ class Encoding
         @flags = Converter.__option_flags__(options)
         replacement = options[:replace]
       end
+      @source_encoding = Converter.__encoding__(source)
+      @destination_encoding = Converter.__encoding__(destination)
       Converter.__check_decorators__(@source_encoding, @destination_encoding, @flags)
       unless String.__supported_target__(@source_encoding) && String.__supported_target__(@destination_encoding)
         __needs_char_table__

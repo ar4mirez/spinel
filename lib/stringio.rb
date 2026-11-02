@@ -129,6 +129,7 @@ class StringIO
       end
     end
     # `strio_init` reads these with `rb_io_extract_modeenc`, as an IO's are.
+    String.__econv_opts__(options)
     String.__replacement_option__(options[:replace]) unless options[:replace].nil?
     if writable && string.frozen?
       raise FrozenError.new("can't modify frozen String", receiver: string) if truncate && !readable && mode.is_a?(Integer)

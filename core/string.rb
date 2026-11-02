@@ -685,6 +685,21 @@ class String
     return string if string.is_a?(String)
     raise TypeError, "can't convert #{value.class} to String (#{value.class}#to_str gives #{string.class})"
   end
+
+  # CRuby's `econv_opts`, whose order says which of several bad ones raises:
+  # `invalid:` and `undef:` take nil or `:replace` only, `false` too, then
+  # `xml:` and `newline:` are checked. Measured.
+  def self.__econv_opts__(options)
+    raise ArgumentError, "unknown value for invalid character option" unless [nil, :replace].include?(options[:invalid])
+    raise ArgumentError, "unknown value for undefined character option" unless [nil, :replace].include?(options[:undef])
+    # `xml:` is checked by `transcode.rb`'s `__xml_option__`, loaded later
+    # than `io.rb` reads its standard streams' options, which have none.
+    __xml_option__(options) if options.key?(:xml)
+    newline = options[:newline]
+    return if newline.nil? || %i[universal crlf cr lf].include?(newline)
+    raise ArgumentError, "unexpected value for newline option: #{newline}" if Symbol === newline
+    raise ArgumentError, "unexpected value for newline option"
+  end
 end
 
 class Encoding
