@@ -1352,7 +1352,7 @@ end
   # what a `getc` costs here. The upgrade is a cheaper call.
   def __next_chars__
     __unpend__ if @rkept
-    return nil if @rfinished && @readconv
+    return nil if @rfinished
     flags = Encoding::Converter::PARTIAL_INPUT | Encoding::Converter::AFTER_OUTPUT
     out = String.new(encoding: __read_encoding__)
     while !@rbuf.empty? || __fill__
@@ -1399,7 +1399,7 @@ end
   # and nil where the converter has finished.
   def __chars_to_line_end__(sep, room)
     return __next_chars__ if @rnewline
-    return nil if @rfinished && @readconv || @rbuf.empty? && !__fill__
+    return nil if @rfinished || @rbuf.empty? && !__fill__
     bytes = __newline_on_bytes__?
     at = sep && @rbuf.index(sep[-1])
     at += 1 if at && (bytes || __encoding__ == Encoding::ISO_2022_JP)
@@ -1424,8 +1424,9 @@ end
 
   # What the read converter makes when a read of characters reaches the
   # end: an attribute's closing quote, or `""` when no character opened it.
-  # A converter that has finished makes nothing more, and CRuby's read then
-  # drops it and stops; the next read makes one again, with another `""`.
+  # A converter that has finished makes nothing more, and CRuby's next read of
+  # characters then finds nothing, drops it and stops, whatever bytes came in
+  # between; the read after makes one again, with another `""` (#544).
   # So a read that goes on until the converter stops, as `read` and `gets`
   # without a limit do, has `""` every time and `each_line` never ends,
   # while one a limit stops first leaves it finished for the next to find
@@ -1457,10 +1458,12 @@ end
 
   # `__finish_in__` where the IO keeps a converter, which writes what it has
   # left, an attribute's closing quote or the escape back to ASCII among it,
-  # and goes: the next read that gets this far makes another. A `NewlineBytes`
-  # that wrote something stays until then, finished. One that raises
-  # stays, as CRuby's `fill_cbuf` keeps it, for the next read to have what it
-  # has left, a CR it held as a newline among it. Measured.
+  # and stays, finished, until the next read of characters finds nothing,
+  # answers nil and drops it, as CRuby's `fill_cbuf` answers
+  # MORE_CHAR_FINISHED; bytes that arrive in between wait for the read after,
+  # which makes another (#544). One that wrote nothing goes at once. One that
+  # raises stays, as CRuby's `fill_cbuf` keeps it, for the next read to have
+  # what it has left, a CR it held as a newline among it. Measured.
   def __finish_readconv__
     if @rfinished
       @rfinished = false
@@ -1470,8 +1473,8 @@ end
     end
     @readconv ||= __make_readconv__
     out = @readconv.finish
-    @readconv = nil if out.empty? || !(NewlineBytes === @readconv)
     if out.empty?
+      @readconv = nil
       __forget_readconv__
       return nil
     end
@@ -2059,6 +2062,13 @@ end
       nil while __fill__
       held = __chars_read__? ? __take_chars__ : "".b
       __unpend__
+      if @rfinished
+        # A converter that has finished reads nothing, and goes.
+        __finish_in__
+        out = held.force_encoding(__read_encoding__)
+        return out if buffer.nil?
+        return buffer.replace(out)
+      end
       begin
         out = __newlines_in__(__decode__(__take__(@rbuf.bytesize)))
       rescue Encoding::InvalidByteSequenceError, Encoding::UndefinedConversionError
@@ -2364,6 +2374,8 @@ end
         room = limit.nil? || limit <= 0 ? limit : [limit - out.bytesize, 1].max
         if stream
           piece = runs ? __chars_to_line_end__(sep, room) : __next_chars__
+        elsif @rfinished
+          piece = nil
         elsif unit
           bytes, cr, taken = __universal_line__(wanted, room, unit)
           piece = bytes.nil? ? nil : __decode__(bytes, taken)
@@ -2640,10 +2652,12 @@ end
         return if __chars_held__?
       end
       next unless stream
+      return if @rfinished
       made = __next_chars__ || (__finish_in__ if @readconv)
       return if made.nil?
       __hold_chars__(made.b)
     end
+    return if @rfinished
     __skip_blank__(unit)
     __hold_next__ if __read_converter__?
   end
@@ -2799,6 +2813,7 @@ end
       __hold_chars__(made.b)
       return __take_char__
     end
+    return __finish_in__ if @rfinished
     if @rbuf.empty? && !__fill__
       finish = __finish_in__
       return nil if finish.nil?
