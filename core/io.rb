@@ -2756,15 +2756,29 @@ end
   end
 
   # The bytes buffered and to come, past the characters the read converter
-  # holds, which CRuby's `rb_io_each_byte` does not look at. Measured.
+  # holds, which CRuby's `rb_io_each_byte` does not look at. Measured. As
+  # there, whether the IO reads is asked only after a yield: one that does
+  # not hands over what its descriptor gives, or fails as the read does.
   def each_byte
     return enum_for(:each_byte) unless block_given?
-    __readable__
-    while (byte = __next_byte__)
+    __check_open__
+    until @rbuf.empty? && !__fillbuf__
+      byte = @rbuf.getbyte(0)
+      @rbuf = @rbuf.__byteslice__(1, @rbuf.bytesize - 1)
       yield byte
+      __readable__
       __byte_readable__
     end
     self
+  end
+
+  # CRuby's `io_fillbuf`, whose failure names the descriptor and the path.
+  def __fillbuf__
+    chunk = __read_wait__(65536)
+    raise SystemCallError.new("fd:#{@fileno} #{@path}", chunk, "io_fillbuf") if Integer === chunk
+    return false if chunk.empty?
+    @rbuf << chunk
+    true
   end
 
   # The bytes of the next character in the IO's encoding.
