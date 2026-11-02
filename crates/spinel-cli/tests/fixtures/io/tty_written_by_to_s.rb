@@ -13,10 +13,24 @@ closer.define_singleton_method(:to_s) do
   "[after]"
 end
 tty.write("[gathered]", writer)
-answer =
-  begin
-    tty.write("[unwritten]", closer)
-  rescue IOError => e
-    [e.class, e.message]
-  end
-File.write(ARGV[0], answer.inspect)
+answers = []
+begin
+  tty.write("[unwritten]", closer)
+rescue IOError => e
+  answers << [e.class, e.message]
+end
+# A finished write of several between them leaves the close the same.
+later = File.open("/dev/tty", "w")
+finisher = Object.new
+finisher.define_singleton_method(:to_s) do
+  later.write("[first]")
+  later.write("[second]", "[third]")
+  later.close
+  "[after]"
+end
+begin
+  later.write("[dropped]", finisher)
+rescue IOError => e
+  answers << [e.class, e.message]
+end
+File.write(ARGV[0], answers.inspect)

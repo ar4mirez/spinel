@@ -99,10 +99,15 @@ fn a_to_s_that_closes_a_tty_leaves_the_write_nothing_to_flush() {
 #[test]
 fn a_write_from_a_to_s_goes_ahead_of_what_a_tty_gathered() {
     let (answer, terminal) = on_a_terminal("tty_written_by_to_s.rb", b"");
-    assert_eq!(answer, r#"[IOError, "closed stream"]"#);
+    assert_eq!(
+        answer,
+        r#"[[IOError, "closed stream"], [IOError, "closed stream"]]"#
+    );
     assert!(
         terminal.contains("[nested][gathered][after][again]"),
         "{terminal:?}"
     );
     assert!(!terminal.contains("unwritten"), "{terminal:?}");
+    assert!(terminal.contains("[first][second][third]"), "{terminal:?}");
+    assert!(!terminal.contains("dropped"), "{terminal:?}");
 }

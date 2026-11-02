@@ -3014,8 +3014,7 @@ end
   def __write_gathered__(objects)
     text = "".b
     total = 0
-    gathering = !@sync
-    (@wgathered ||= []) << text if gathering
+    (@wgathered ||= []) << text unless @sync
     converted = false
     begin
       objects.each do |object|
@@ -3026,11 +3025,11 @@ end
       end
       converted = true
     ensure
-      @wgathered&.delete_if { |listed| listed.equal?(text) }
+      flushed = @wgathered&.reject! { |listed| listed.equal?(text) }
       __write_partial__(text) unless converted
     end
     closed = @closed || @wclosed
-    raise IOError, "closed stream" if closed && !(gathering && @wgathered)
+    raise IOError, "closed stream" if closed && !flushed
     __write_all__(text) unless closed || text.empty?
     total
   end
