@@ -489,6 +489,19 @@ fn an_io_without_a_path_refuses_a_change_of_access_mode_by_its_descriptor() {
     }
 }
 
+/// CRuby 4.0.9 holds a write in its buffer, and `reopen` with a path assigns
+/// the new mode before anything flushes it, so the flush goes to a read-only
+/// descriptor and the bytes reach neither file: `Errno::EBADF`, and `""` in
+/// the file written. Spinel keeps the bytes, deliberately unlike CRuby: they are
+/// in the first file when `reopen` reads the second, and a write buffer added
+/// later must flush before `reopen` changes the mode, so they are still kept.
+/// The table, which CRuby re-measures, cannot hold this (#534).
+#[test]
+fn reopen_with_a_path_keeps_what_was_written_before_it() {
+    let source = r#"n = "/tmp/spinel-eval-#{Process.pid}-534"; o = n + "o"; File.write(o, "XYZ"); r = (File.open(n, "w") { |f| f.write("q"); f.reopen(o, "r"); f.read } rescue $!.class); x = [r, File.read(n), File.read(o)]; File.delete(n, o); x"#;
+    assert_eq!(eval(source).unwrap(), r#"["XYZ", "q", "XYZ"]"#);
+}
+
 /// CRuby 4.0.9 never ends where `universal_newline:` into UTF-16 or UTF-32
 /// would buffer a replacement after a character begun behind a held CR: each
 /// error breaks the next replacement's first character. Spinel puts the
