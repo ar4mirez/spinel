@@ -711,7 +711,7 @@ module Process
                    when :close then -1
                    when :in, :out, :err, Integer, IO then target(value)
                    when String
-                     file = File.open(value, fd == 0 ? "r" : "w")
+                     file = open_file(value, fd == 0 ? "r" : "w")
                      opened << file
                      file.fileno
                    when Array
@@ -721,12 +721,12 @@ module Process
                      end
                      path, mode, perm = value
                      mode ||= "r"
-                     file = File.open(File.__path__(path), mode, perm || 0644)
+                     file = open_file(File.__path__(path), mode, perm || 0644)
                      opened << file
                      file.fileno
                    else
                      path = File.__path__(value)
-                     file = File.open(path, fd == 0 ? "r" : "w")
+                     file = open_file(path, fd == 0 ? "r" : "w")
                      opened << file
                      file.fileno
                    end
@@ -741,6 +741,25 @@ module Process
         pairs << [fd, made.nil? ? other : made[1]]
       end
       [pairs, opened, piped(extra, claims)]
+    end
+
+    # CRuby's `rb_execarg_parent_start1` calls `open` itself, so a file that
+    # will not open names the path alone, without `File.open`'s `rb_sysopen`.
+    def open_file(path, mode, perm = 0644)
+      File.open(path, mode, perm)
+    rescue SystemCallError => failed
+      raise SystemCallError.new(path, failed.errno)
+    end
+
+    # Carries a redirection's error past `system`'s rescue: CRuby opens the
+    # file in the parent, so `system` raises it rather than answering nil.
+    class Opening < Exception
+      attr_reader :error
+
+      def initialize(error)
+        @error = error
+        super()
+      end
     end
 
     def claim(value)
@@ -784,7 +803,11 @@ module Process
       raise ArgumentError, "negative process group ID : #{pgroup}" if !pgroup.nil? && pgroup < 0
       umask = options[:umask].nil? ? nil : Integer.__index__(options[:umask])
       table = environment(env, options)
-      pairs, opened, twice = redirections(options, extra)
+      begin
+        pairs, opened, twice = redirections(options, extra)
+      rescue SystemCallError => failed
+        raise name == "system" ? Opening.new(failed) : failed
+      end
       raise ArgumentError, "fd #{twice} specified twice" unless twice.nil?
       unless unfound.nil?
         # CRuby finds out in the child it forked, which then exits 127.
@@ -824,6 +847,8 @@ module Kernel
     args = args + [options] unless options.empty?
     begin
       pid = Process::Spawn.start(args, name: "system")
+    rescue Process::Spawn::Opening => opening
+      raise opening.error
     rescue SystemCallError
       raise if exception
       __global_store__(:$?, Process::Status.__make__(0, 127 << 8))
