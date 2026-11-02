@@ -671,17 +671,20 @@ module Process
     # be true or false.
     def check(options)
       options.each do |key, value|
-        next if Integer === key || IO === key || Array === key || %i[in out err].include?(key)
+        next if redirection?(key)
         raise ArgumentError, "wrong exec option" unless Symbol === key
-        # ponytail: `rlimit_*`, `:uid` and `:gid` are accepted and not applied;
-        # each is one more call in the child before `execve`.
-        next if key.to_s.start_with?("rlimit_")
-        raise ArgumentError, "wrong exec option symbol: #{key}" unless OPTIONS.include?(key)
+        raise ArgumentError, "wrong exec option symbol: #{key}" unless option?(key)
         if (key == :unsetenv_others || key == :close_others) && !(value.nil? || true.equal?(value) || false.equal?(value))
           raise ArgumentError, "expected true or false as #{key}: #{value.inspect}"
         end
       end
     end
+
+    def redirection?(key) = Integer === key || IO === key || Array === key || %i[in out err].include?(key)
+
+    # ponytail: `rlimit_*`, `:uid` and `:gid` are accepted and not applied;
+    # each is one more call in the child before `execve`.
+    def option?(key) = redirection?(key) || OPTIONS.include?(key) || (Symbol === key && key.to_s.start_with?("rlimit_"))
 
     # The options as `[child, parent]` pairs, the files opened for them to be
     # closed after the fork, and which of the descriptors in `extra` an option

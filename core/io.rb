@@ -3372,7 +3372,9 @@ end
     access = flags & 3
     io_keys = %i[external_encoding internal_encoding encoding textmode binmode autoclose invalid undef replace newline universal_newline crlf_newline cr_newline lf_newline xml]
     io_options = options.select { |key, _| io_keys.include?(key) }
-    spawn_options = command_options.merge(options.reject { |key, _| io_keys.include?(key) })
+    # A key `spawn` does not know is left for the IO, as `rb_execarg_extract_options`
+    # leaves it, where it is ignored; in the command it is still refused.
+    spawn_options = command_options.merge(options.select { |key, _| Process::Spawn.option?(key) })
     # Read before the child starts, as `rb_io_popen` does, in the mode as it
     # was given. A pipe has no BOM read past, however the mode names one.
     io = allocate
