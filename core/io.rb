@@ -743,8 +743,11 @@ end
   def close_write
     return nil if @closed || @wgone
     unless @wfileno.nil?
-      __finish_writeconv__ unless @wclosed
-      __fd_close__(@wfileno) unless @wclosed
+      # A second `close_write` finds the write side untied and closes the IO
+      # itself, as CRuby's does once `GetWriteIO` gives back the reader.
+      return close if @wclosed
+      __finish_writeconv__
+      __fd_close__(@wfileno)
       @wclosed = true
       @finalizer&.wfd = nil
       @access = 0
