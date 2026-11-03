@@ -1202,9 +1202,10 @@ end
   # one writes first (#420). `String#encode` starts and finishes each time.
   # So do they when `reopen` left a converter of other encodings than the IO
   # has now, which `String#encode` could not stand in for (#517), and where
-  # `__newline_on_bytes__?`, which it could not either.
+  # `__newline_on_bytes__?`, which it could not either, and once a decorator
+  # moved what came before a separator past it (#566).
   def __stream_in__?
-    return __read_converter__? if @rkept
+    return __read_converter__? if @rkept || @rstream
     return __newline_on_bytes__? if @enc2.nil?
     __stateful__?(@enc2) || __stateful__?(__read_encoding__)
   end
@@ -1645,6 +1646,7 @@ end
   def __forget_readconv__
     @rmade = nil
     @rkept = false
+    @rstream = false
     @rquote = nil
   end
 
@@ -2497,8 +2499,15 @@ end
           __read_ahead__(cr, unit) if cr
         else
           bytes = __line_bytes__(wanted, room)
+          quote = @rquote
           piece = bytes.nil? ? nil : __newlines_in__(__decode__(__rest_of_char__(bytes, wanted)))
-          piece = __within_limit__(out, piece, bytes, bytes, limit, enc) || piece if piece && room && room > 0 && piece.bytesize > limit - out.bytesize
+          if piece && @ecopts[:xml] && __moved_past__?(piece, bytes, sep, wanted, enc)
+            __stream_from__(bytes, quote)
+            stream = true
+            piece = __next_chars__
+          elsif piece && room && room > 0 && piece.bytesize > limit - out.bytesize
+            piece = __within_limit__(out, piece, bytes, bytes, limit, enc) || piece
+          end
         end
         if piece.nil?
           # At the end, until the converter has nothing more.
@@ -2516,6 +2525,50 @@ end
     return nil if cut == 0
     __hold_chars__(out.byteslice(cut, out.bytesize - cut)) if cut < out.bytesize
     out.byteslice(0, cut).force_encoding(enc)
+  end
+
+  # Whether the decorator moved what came before the separator in a line of
+  # bytes past it in what they made: `xml:`'s buffer puts a replacement after
+  # what it has still to read, and the bytes an error left to read again after
+  # that (#543), and one from past the separator can come before it. CRuby's
+  # converter is given all that is buffered and does not stop for a
+  # replacement, so the line ends where the separator is found in what it
+  # makes of them, and `pos` is past them all (#566). So any line with a byte
+  # to replace goes that way; without `xml:` nothing moves. Measured.
+  def __moved_past__?(piece, bytes, sep, wanted, enc)
+    return false if sep.nil? || wanted.nil? || __xml_in__.nil?
+    return true unless bytes.valid_encoding?
+    # Valid bytes are replaced only where they have no character there.
+    return false if @ecopts[:undef] != :replace || __ends_in__?(piece, sep) || !__ends_in__?(bytes, wanted)
+    made = piece.b
+    at = made.index(sep)
+    at = made.index(sep, at + 1) until at.nil? || __char_edge__(made, 0, at, enc) == at
+    !at.nil?
+  end
+
+  # Whether `text` ends in the bytes of `tail`, a byte at a time: a copy of
+  # either costs more than the line's read (#588).
+  def __ends_in__?(text, tail)
+    size = text.bytesize - tail.bytesize
+    return false if size < 0
+    at = 0
+    while at < tail.bytesize
+      return false unless text.getbyte(size + at) == tail.getbyte(at)
+      at += 1
+    end
+    true
+  end
+
+  # The bytes of a line go back, and the IO reads through its own converter
+  # from there, as a stream does, until it drops it: a line of bytes at a time
+  # finishes a conversion that CRuby's goes on with. One that opened an
+  # attribute's quote before has it open.
+  def __stream_from__(bytes, quote)
+    @rbuf = bytes.b + @rbuf
+    @rquote = quote
+    @rstream = true
+    @readconv = __make_readconv__
+    @readconv.primitive_convert("a".encode(__encoding__), "".b, nil, nil, Encoding::Converter::PARTIAL_INPUT) if @rquote
   end
 
   # The start of the character of `out` that `at` is in, or `at` itself
