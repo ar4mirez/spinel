@@ -2482,12 +2482,15 @@ end
         elsif @rfinished
           piece = nil
         elsif unit
-          bytes, cr, taken = __universal_line__(wanted, room, unit)
+          bytes, cr, taken = __universal_line__(wanted, @rrate ? __limit_read__(room) : room, unit)
           piece = bytes.nil? ? nil : __decode__(bytes, taken)
+          made = __within_limit__(out, piece, bytes, taken, limit, enc) if piece && room && room > 0 && piece.bytesize > limit - out.bytesize
+          piece, cr = made, nil if made
           __read_ahead__(cr, unit) if cr
         else
-          bytes = __line_bytes__(wanted, room)
+          bytes = __line_bytes__(wanted, @rrate ? __limit_read__(room) : room)
           piece = bytes.nil? ? nil : __newlines_in__(__decode__(__rest_of_char__(bytes, wanted)))
+          piece = __within_limit__(out, piece, bytes, bytes, limit, enc) || piece if piece && room && room > 0 && piece.bytesize > limit - out.bytesize
         end
         if piece.nil?
           # At the end, until the converter has nothing more.
@@ -2535,6 +2538,47 @@ end
     cut = 0
     out.dup.force_encoding(enc).each_char { |char| break if cut >= limit; cut += char.bytesize }
     cut
+  end
+
+  # How many bytes to read for `room` left of a limit, by what the last
+  # piece a limit went past made of what was read, so a line that goes on
+  # past the limit is read about as far as it takes, and not read and then
+  # given back (#556). Only a guess: `__within_limit__` gives back what it
+  # went past. Never more than `room`, as bytes read past what a character
+  # at a time would reach could raise where CRuby's has not converted them.
+  def __limit_read__(room)
+    return room if room.nil? || room <= 0 || @rrate[0] >= @rrate[1]
+    [room * @rrate[0] / @rrate[1], 1].max
+  end
+
+  # CRuby's `more_char` converts a character at a time, so a limit leaves
+  # what the line did not take as read, not converted and held in `cbuf`,
+  # where `reopen` would keep it and a read of bytes would refuse (#556).
+  # `piece` was made of `bytes`, the line as read, or of `taken` where
+  # universal newline made `bytes` of it, and goes past the limit. Where
+  # each character read made one, those the limit does not take go back to
+  # be read, and the piece is what it took; nil where it is held. Measured.
+  # ponytail: where characters read do not make one each (an `xml:` entity,
+  # a replacement, a CRLF before the limit's cut), the rest is held as
+  # before; upgrade by mapping what each character read made.
+  def __within_limit__(out, piece, bytes, taken, limit, enc)
+    need = limit - out.bytesize
+    @rrate = [bytes.bytesize, piece.bytesize]
+    made = piece.dup.force_encoding(enc)
+    # The characters up to the one the limit lands in. Each byte of one it
+    # cuts short counts as one.
+    count = made.byteslice(0, need).length
+    count -= 1 while count > 1 && made[0, count - 1].bytesize >= need
+    size = made.length
+    return nil if count >= size
+    read = bytes.dup.force_encoding(__encoding__)
+    return nil unless read.length == size
+    read = read[0, count]
+    # A CRLF universal newline made one character of lies past what is
+    # taken unless a newline is before it.
+    return nil unless taken.bytesize == bytes.bytesize || !read.include?("\n".encode(__encoding__))
+    @rbuf = taken.byteslice(read.bytesize, taken.bytesize - read.bytesize).b << @rbuf
+    made[0, count]
   end
 
   # What a converter `reopen` left or a `NewlineBytes` makes need not end where
