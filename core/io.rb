@@ -611,7 +611,7 @@ end
   # IO keeps its buffer from then on, whatever its descriptor comes to be.
   def __unread__(discard = false)
     return if @rbuf.empty? || @duplex
-    result = __fd_seek__(@fileno, -@rbuf.bytesize, IO::SEEK_CUR)
+    result = __fd_seek__(@fileno, -__rbuf_read__, IO::SEEK_CUR)
     if Integer === result
       @duplex = true if result == Errno::ESPIPE::Errno
       return unless discard
@@ -1169,9 +1169,21 @@ end
       break unless result == :after_output
     end
     back = converter.putback.b + bytes.b
-    back = "\r".encode(__encoding__).b + back if options[:universal_newline] && converter.finish.b.start_with?("\n".encode(__read_encoding__).b)
+    if options[:universal_newline] && converter.finish.b.start_with?("\n".encode(__read_encoding__).b)
+      cr = "\r".encode(__encoding__).b
+      back = cr + back
+      @rcr = cr.bytesize
+    end
     @rbuf = back + @rbuf
     __hold_chars__(made)
+  end
+
+  # The bytes buffered that came from the descriptor: a CR given back past an
+  # error is the converter's, not the file's, so `pos` and `__unread__` do not
+  # count it, and what drops the converter drops it, as CRuby's goes with its
+  # `readconv` (#555). It is first in the buffer until a read takes it.
+  def __rbuf_read__
+    @rbuf.bytesize - (@rcr || 0)
   end
 
   # Whether the IO has a read converter, as CRuby's `NEED_READCONV`: an
@@ -1625,6 +1637,8 @@ end
   # refuses and `eof?` is false, until a read of characters makes a converter
   # again, which starts without them. Measured.
   def __drop_readconv__
+    @rbuf = @rbuf.byteslice(@rcr, @rbuf.bytesize - @rcr) if @rcr && @rbuf.bytesize >= @rcr
+    @rcr = nil
     @readconv = nil
     @rpend = nil
     @rfinished = false
@@ -2069,6 +2083,7 @@ end
 
   def __take__(count)
     count = @rbuf.bytesize if count > @rbuf.bytesize
+    @rcr = nil if count > 0
     taken = @rbuf.byteslice(0, count)
     @rbuf = @rbuf.byteslice(count, @rbuf.bytesize - count)
     taken
@@ -2931,6 +2946,7 @@ end
     until @rbuf.empty? && !__fillbuf__
       byte = @rbuf.getbyte(0)
       @rbuf = @rbuf.__byteslice__(1, @rbuf.bytesize - 1)
+      @rcr = nil
       yield byte
       __readable__
       __byte_readable__
@@ -3183,7 +3199,7 @@ end
   def pos
     __check_open__
     __unread__
-    IO.__check__(__fd_seek__(@fileno, 0, IO::SEEK_CUR), @path)[0] - @rbuf.bytesize
+    IO.__check__(__fd_seek__(@fileno, 0, IO::SEEK_CUR), @path)[0] - __rbuf_read__
   end
   alias tell pos
 
