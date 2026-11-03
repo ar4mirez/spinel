@@ -624,7 +624,17 @@ class String
         char.__bytes__.each { |b| out << "\\x" << Integer.__hex__(b, 2) }
         next
       end
-      code = char.encode(Encoding::UTF_8).ord
+      # A UTF-32 unit is its code, read straight from the bytes: one past
+      # U+10FFFF or in the surrogates is still a character, shown as `\u{...}`
+      # though no UTF-8 holds it. Measured on ruby 4.0.9.
+      code =
+        if char.bytesize == 4 && __encoding_index__ >= 5
+          b = char.__bytes__
+          b = b.reverse if __encoding_index__ == 6
+          (b[0] << 24) | (b[1] << 16) | (b[2] << 8) | b[3]
+        else
+          char.encode(Encoding::UTF_8).ord
+        end
       if code < 0x80
         ascii = Integer.__byte_string__(code).__force_encoding__(1)
         named = String.__escapes__[ascii]
