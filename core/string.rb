@@ -210,7 +210,10 @@ class String
     __setbyte__(at, byte)
   end
 
-  def byteslice(*args)
+  # `byteslice` with Integers is the primitive's, and never arrives here
+  # (#588). A Range, an index that needs converting, a bignum or the wrong
+  # number of arguments is sent on to this.
+  def __byteslice_args__(*args)
     start, len = __bytes_range__(args, "byteslice")
     return nil if start.nil?
     __byteslice__(start, len)

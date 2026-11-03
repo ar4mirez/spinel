@@ -388,6 +388,8 @@ pub enum Native {
     FloatToS,
     /// `String#[]` — allocates a substring out of a byte payload.
     StringIndex,
+    /// `String#byteslice` with Integers — copies a byte range (#588).
+    StringByteSlice,
     /// `String#<=>` — compares two byte payloads.
     StringCompare,
     /// `strerror(3)` for an error number, as a String (#29).
