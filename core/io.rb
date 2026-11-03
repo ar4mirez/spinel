@@ -2580,7 +2580,7 @@ end
     from = 0
     cut = nil
     # In UTF-16 or UTF-32 a separator counts only at a character's start.
-    step = @enc2.nil? || __encoding__.ascii_compatible? || __encoding__.dummy? ? 1 : (__encoding__.name.start_with?("UTF-32") ? 4 : 2)
+    step = @enc2.nil? ? 1 : (__newline_unit__ || 1)
     while cut.nil?
       at = wanted.nil? ? nil : @rbuf.index(wanted, from)
       at = @rbuf.index(wanted, at + 1) while at && at % step != 0
