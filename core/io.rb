@@ -2674,13 +2674,21 @@ end
     if !limit.nil? && limit > 0 && limit <= cut
       cut = limit
       # A limit that lands inside a character takes the rest of it: Ruby
-      # does not hand back half a character. UTF-8 only, where the bytes
-      # that continue one are recognisable.
-      if __encoding__ == Encoding::UTF_8
+      # does not hand back half a character. In UTF-8, where the bytes
+      # that continue one are recognisable, and UTF-16 or UTF-32, where the
+      # character the limit lands in starts on a unit, as `BOM|` that finds
+      # no mark reads (#564).
+      enc = __encoding__
+      if enc == Encoding::UTF_8
         extra = 0
         while extra < 16 && __partial_character__(cut, @rbuf) && (cut < @rbuf.bytesize || __fill__)
           cut += 1
           extra += 1
+        end
+      elsif !enc.ascii_compatible? && (unit = __newline_unit__)
+        at = cut - (cut % unit == 0 ? unit : cut % unit)
+        while __held_cut_short__?(@rbuf.byteslice(at, cut - at), enc) && (cut < @rbuf.bytesize || __fill__)
+          cut += 1
         end
       end
     end
