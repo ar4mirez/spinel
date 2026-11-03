@@ -1681,7 +1681,10 @@ end
   # as it keeps the first of bytes that make no character. Nothing after the
   # CR is the end, which CRuby's converter looked for, and so finished
   # (#551). `pos` or `seek` over bytes buffered drops what the converter
-  # kept. Measured.
+  # kept. Bytes that make no character raise on the read the CR answers,
+  # the transcoder having read them with it, and the CR goes back as from
+  # any read that raises (#555): before a decorator that comes first, only
+  # a byte no UTF-8 character starts with does. Measured (#595).
   # ponytail: in UTF-16 or UTF-32 the first unit of a surrogate pair stays
   # in the buffer, `pos` a unit short; upgrade by keeping it as the first
   # byte of a longer character is.
@@ -1703,11 +1706,18 @@ end
           @cbuf = (@cbuf || "".b) << __take__(1)
           return
         end
-        unless enc == Encoding::UTF_8 && !__read_encoding__.ascii_compatible?
+        if enc == Encoding::UTF_8 && !__read_encoding__.ascii_compatible?
+          lead = head.getbyte(0)
+          return __decode__(cr + __take__(1)) if (lead < 0xC2 || lead > 0xF4) && __raises_past_cr__?
+        else
           nil while __char_cut_short__ && __fill__(1)
           unit = __char_length__
           unit = @rbuf.bytesize if unit > @rbuf.bytesize
-          unit = 1 unless @rbuf.byteslice(0, unit).force_encoding(enc).valid_encoding?
+          unless @rbuf.byteslice(0, unit).force_encoding(enc).valid_encoding?
+            # What the error names reads past the character, as on the stream.
+            return __decode__(cr + __take__([@rbuf.bytesize, 4].min)) if __raises_past_cr__?
+            unit = 1
+          end
         end
         if unit == 1
           @rpend = __take__(1)
@@ -1720,6 +1730,11 @@ end
     end
     @cbuf = (@cbuf || "".b) << __decode__(__take__(unit)).b
   end
+
+  # Whether bytes past a lone CR that make no character raise on that read:
+  # a replacement waits for the next, and a read through `@readconv` has the
+  # converter read past the CR itself.
+  def __raises_past_cr__? = @ecopts[:invalid] != :replace && !__stream_in__?
 
   # The bytes the converter kept past a lone CR go back before the buffer,
   # for a read of characters to convert them first (#472). A read that does
