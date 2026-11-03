@@ -2407,7 +2407,15 @@ end
   def __cut_by_limit__?(line, separator, limit)
     return false if limit.nil? || limit <= 0 || line.bytesize < limit
     return true if separator.nil?
-    !line.b.end_with?(__separator_in__(separator, line.encoding))
+    !__ends_with_separator__?(line, __separator_in__(separator, line.encoding))
+  end
+
+  # Whether a line ends with the bytes of its separator where a character
+  # of it starts, CRuby's `at_char_boundary` (#552).
+  def __ends_with_separator__?(line, tail)
+    bytes = line.b
+    size = bytes.bytesize - tail.bytesize
+    bytes.end_with?(tail) && __char_edge__(bytes, 0, size, line.encoding) == size
   end
 
   # The bytes of a separator in what the read converter makes. A dummy
@@ -2571,8 +2579,11 @@ end
   def __line_bytes__(wanted, limit, whole = false)
     from = 0
     cut = nil
+    # In UTF-16 or UTF-32 a separator counts only at a character's start.
+    step = @enc2.nil? || __encoding__.ascii_compatible? || __encoding__.dummy? ? 1 : (__encoding__.name.start_with?("UTF-32") ? 4 : 2)
     while cut.nil?
       at = wanted.nil? ? nil : @rbuf.index(wanted, from)
+      at = @rbuf.index(wanted, at + 1) while at && at % step != 0
       if at
         cut = at + wanted.bytesize
       elsif !limit.nil? && limit > 0 && @rbuf.bytesize >= limit
@@ -2818,8 +2829,8 @@ end
   # so the last record keeps its own newline. Measured.
   def __chomp_line__(line, separator)
     tail = __separator_in__(separator, line.encoding)
+    return line unless __ends_with_separator__?(line, tail)
     bytes = line.b
-    return line unless bytes.end_with?(tail)
     size = bytes.bytesize - tail.bytesize
     size -= 1 if tail.bytesize == 1 && tail.getbyte(0) == 10 && size > 0 && bytes.getbyte(size - 1) == 13
     line.byteslice(0, size)
