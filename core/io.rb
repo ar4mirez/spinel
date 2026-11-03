@@ -2482,13 +2482,13 @@ end
         elsif @rfinished
           piece = nil
         elsif unit
-          bytes, cr, taken = __universal_line__(wanted, @rrate ? __limit_read__(room) : room, unit)
+          bytes, cr, taken = __universal_line__(wanted, room, unit)
           piece = bytes.nil? ? nil : __decode__(bytes, taken)
           made = __within_limit__(out, piece, bytes, taken, limit, enc) if piece && room && room > 0 && piece.bytesize > limit - out.bytesize
           piece, cr = made, nil if made
           __read_ahead__(cr, unit) if cr
         else
-          bytes = __line_bytes__(wanted, @rrate ? __limit_read__(room) : room)
+          bytes = __line_bytes__(wanted, room)
           piece = bytes.nil? ? nil : __newlines_in__(__decode__(__rest_of_char__(bytes, wanted)))
           piece = __within_limit__(out, piece, bytes, bytes, limit, enc) || piece if piece && room && room > 0 && piece.bytesize > limit - out.bytesize
         end
@@ -2540,17 +2540,6 @@ end
     cut
   end
 
-  # How many bytes to read for `room` left of a limit, by what the last
-  # piece a limit went past made of what was read, so a line that goes on
-  # past the limit is read about as far as it takes, and not read and then
-  # given back (#556). Only a guess: `__within_limit__` gives back what it
-  # went past. Never more than `room`, as bytes read past what a character
-  # at a time would reach could raise where CRuby's has not converted them.
-  def __limit_read__(room)
-    return room if room.nil? || room <= 0 || @rrate[0] >= @rrate[1]
-    [room * @rrate[0] / @rrate[1], 1].max
-  end
-
   # CRuby's `more_char` converts a character at a time, so a limit leaves
   # what the line did not take as read, not converted and held in `cbuf`,
   # where `reopen` would keep it and a read of bytes would refuse (#556).
@@ -2563,7 +2552,6 @@ end
   # before; upgrade by mapping what each character read made.
   def __within_limit__(out, piece, bytes, taken, limit, enc)
     need = limit - out.bytesize
-    @rrate = [bytes.bytesize, piece.bytesize]
     made = piece.dup.force_encoding(enc)
     # The characters up to the one the limit lands in. Each byte of one it
     # cuts short counts as one.
