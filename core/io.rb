@@ -3342,8 +3342,9 @@ end
   # bytes. A tty is found only when a `to_s` flushes, where the list goes, so its
   # text is `rest`. A `flush`, `fsync`, `seek`, `pos` or `dup` there writes it
   # too, as each flushes CRuby's buffer. Measured.
-  # ponytail: a `truncate`, `reopen` or read there still leaves it gathered
-  # (#612); upgrade with a `__flush_gathered__` at each.
+  # ponytail: a `truncate`, `reopen`, read, `File#size` or `File#flock` there
+  # still leaves it gathered, and `sysseek` does not warn (#612); upgrade with a
+  # `__flush_gathered__` at each.
   def __write_gathered__(objects)
     if @sync
       rest = __gather__(objects, 0)
