@@ -2689,6 +2689,13 @@ end
           end
         end
         cut = view.bytesize if cut > view.bytesize
+      elsif !enc.dummy? && !enc.__single_byte__
+        # In another multibyte encoding to the end of the character (#553).
+        extra = 0
+        while extra < 4 && __last_cut_short__?(view.byteslice(0, cut), enc) && (cut < view.bytesize || __convert_more__(line))
+          cut += 1
+          extra += 1
+        end
       end
     end
     return nil if cut == 0
