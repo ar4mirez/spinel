@@ -3477,45 +3477,12 @@ end
   # CRuby's `rb_io_puts`, so the lines before one that raises are written, on
   # a sync IO as well, where one `write` of them all would drop them (#420).
   def puts(*lines)
-    return write(DEFAULT_RS) && nil if lines.empty?
+    if lines.empty?
+      write(DEFAULT_RS)
+      return nil
+    end
     __puts_lines__(lines, [])
     nil
-  end
-
-  # Several pieces in one `write`, as CRuby's `rb_io_writev`; a `write` that
-  # takes one argument, the interface before Ruby 2.5, gets them one at a time.
-  def __writev__(pieces)
-    if pieces.size > 1 && method(:write).arity == 1
-      pieces.each { |piece| write(piece) }
-    else
-      write(*pieces)
-    end
-  end
-
-  def __puts_lines__(lines, seen)
-    lines.each do |line|
-      if String === line
-        __puts_line__(line)
-        next
-      end
-      array = Array === line ? line : (line.respond_to?(:to_ary, true) ? line.to_ary : nil)
-      if Array === array
-        if seen.any? { |outer| outer.equal?(array) }
-          __puts_line__("[...]".b)
-        else
-          __puts_lines__(array, seen + [array])
-        end
-      else
-        text = line.nil? ? "" : line.to_s
-        text = Kernel.instance_method(:to_s).bind_call(line) unless String === text
-        __puts_line__(text)
-      end
-    end
-  end
-
-  def __puts_line__(text)
-    # An empty line writes only the newline, as CRuby's `io_puts_ary` does.
-    __writev__(text.__end_with_newline__ ? [text] : (text.empty? ? [DEFAULT_RS] : [text, DEFAULT_RS]))
   end
 
   # --- another descriptor ----------------------------------------------------
@@ -4005,8 +3972,54 @@ $/ = IO.__default_rs__
 alias $-0 $/
 
 module Kernel
+  # CRuby's `rb_f_puts`: on `$stdout` itself, a plain object whose only
+  # method is `write`, the lines go out as `IO#puts` writes them (#574);
+  # anything else is asked for its own `puts`, private or not.
   def puts(*lines)
-    $stdout.puts(*lines)
+    out = $stdout
+    return out.__send__(:puts, *lines) unless equal?(out)
+    if lines.empty?
+      write(IO.__default_rs__)
+      return nil
+    end
+    __puts_lines__(lines, [])
+    nil
+  end
+
+  # Several pieces in one `write`, as CRuby's `rb_io_writev`; a `write` that
+  # takes one argument, the interface before Ruby 2.5, gets them one at a time.
+  def __writev__(pieces)
+    if pieces.size > 1 && respond_to?(:write, true) && method(:write).arity == 1
+      pieces.each { |piece| write(piece) }
+    else
+      write(*pieces)
+    end
+  end
+
+  def __puts_lines__(lines, seen)
+    lines.each do |line|
+      if String === line
+        __puts_line__(line)
+        next
+      end
+      array = Array === line ? line : (line.respond_to?(:to_ary, true) ? line.to_ary : nil)
+      if Array === array
+        if seen.any? { |outer| outer.equal?(array) }
+          __puts_line__("[...]".b)
+        else
+          __puts_lines__(array, seen + [array])
+        end
+      else
+        text = line.nil? ? "" : line.to_s
+        text = Kernel.instance_method(:to_s).bind_call(line) unless String === text
+        __puts_line__(text)
+      end
+    end
+  end
+
+  def __puts_line__(text)
+    # An empty line writes only the newline, as CRuby's `io_puts_ary` does.
+    __writev__(text.__end_with_newline__ ? [text] : (text.empty? ? [IO.__default_rs__] : [text, IO.__default_rs__]))
   end
 
   def print(*parts)
