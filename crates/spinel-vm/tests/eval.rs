@@ -573,3 +573,19 @@ fn a_broken_replacement_behind_a_newline_decorator_stops_at_the_error() {
         assert_eq!(eval(source).unwrap(), want, "{source}");
     }
 }
+
+/// Where `xml:`'s buffer moves a replacement in a line past its newline, CRuby
+/// 4.0.9's converter, given all that is buffered, goes on past it, so the
+/// line ends at the newline in what it made and `pos` is past every byte
+/// (#566). Its conversion of this input never ends but at its 128KB of room:
+/// never run it under CRuby without a memory cap and a SIGKILL timeout,
+/// `systemd-run --user --scope -p MemoryMax=1500M -p MemorySwapMax=0 timeout
+/// -k 5 120 ruby ...`, and read it with a bound.
+#[test]
+fn a_line_whose_replacement_moves_past_the_newline_reads_all_that_is_buffered() {
+    let source = r#"n = "/tmp/spinel-eval-#{Process.pid}-566"; File.binwrite(n, "\xF0\x9F\x98\x80\xE3\x81\xFF\xFE\xE3\x81\x00\n\xE3\n\r".b); r = File.open(n, "r:UTF-8:UTF-16LE", invalid: :replace, undef: :replace, xml: :attr) { |f| [f.readline.bytes, f.pos, f.gets(60).bytes, f.pos] }; File.delete(n); r"#;
+    assert_eq!(
+        eval(source).unwrap(),
+        "[[34, 0, 61, 216, 0, 222, 253, 255, 253, 255, 253, 255, 253, 255, 10, 0], 15, [253, 255, 10, 0], 15]"
+    );
+}
