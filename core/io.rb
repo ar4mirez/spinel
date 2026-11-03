@@ -2686,8 +2686,10 @@ end
           extra += 1
         end
       elsif !enc.ascii_compatible? && (unit = __newline_unit__)
-        at = cut - (cut % unit == 0 ? unit : cut % unit)
-        while __held_cut_short__?(@rbuf.byteslice(at, cut - at), enc) && (cut < @rbuf.bytesize || __fill__)
+        loop do
+          at = cut - 1 - (cut - 1) % unit
+          at -= unit if unit == 2 && at >= unit && (@rbuf.getbyte(enc == Encoding::UTF_16LE ? at + 1 : at) || 0) & 0xFC == 0xDC
+          break unless __held_cut_short__?(@rbuf.byteslice(at, cut - at), enc) && (cut < @rbuf.bytesize || __fill__)
           cut += 1
         end
       end
