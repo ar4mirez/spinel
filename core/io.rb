@@ -2484,9 +2484,11 @@ end
     stream = __stream_in__?
     runs = stream && __line_runs__?(sep, enc)
     while cut.nil?
-      at = sep.nil? ? nil : out.index(sep, from)
+      # `out` is bytes: `String#index` would tabulate every character of it
+      # on each search, which grows with the record (#585).
+      at = sep.nil? ? nil : out.__byte_index__(sep, from)
       until at.nil? || (edge = __char_edge__(out, edge, at, enc)) == at
-        at = out.index(sep, at + 1)
+        at = out.__byte_index__(sep, at + 1)
       end
       if at && (limit.nil? || limit <= 0 || at + sep.bytesize <= limit)
         cut = at + sep.bytesize
@@ -2720,8 +2722,10 @@ end
     # In UTF-16 or UTF-32 a separator counts only at a character's start.
     step = @enc2.nil? ? 1 : (__newline_unit__ || 1)
     while cut.nil?
-      at = wanted.nil? ? nil : @rbuf.index(wanted, from)
-      at = @rbuf.index(wanted, at + 1) while at && at % step != 0
+      # The buffer is bytes: `String#index` would tabulate every character
+      # of it on each line, so a file a line at a time was quadratic (#585).
+      at = wanted.nil? ? nil : @rbuf.__byte_index__(wanted, from)
+      at = @rbuf.__byte_index__(wanted, at + 1) while at && at % step != 0
       if at
         cut = at + wanted.bytesize
       elsif !limit.nil? && limit > 0 && @rbuf.bytesize >= limit

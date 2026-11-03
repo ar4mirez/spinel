@@ -4,6 +4,7 @@
 #
 #   scripts/bench.sh                 every benchmark
 #   scripts/bench.sh regex_captures  one of them
+#   scripts/bench.sh io_gets         a Ruby one, `bench/io_gets.rb`, on Spinel
 #   scripts/bench.sh --ruby          the same regex patterns on system ruby
 #
 # Numbers go in the PR, not into the repo — `docs/roadmap.md`, rule 7. The one
@@ -43,9 +44,25 @@ if [[ "${1:-}" == "--ruby" ]]; then
   exit 0
 fi
 
+# A `bench/*.rb` runs on the release `spinel`, and on `ruby --yjit` by hand:
+# its header says how.
+run_ruby_bench() {
+  echo "== $1"
+  "$repo_root/target/release/spinel" run "$1"
+}
+
 # `cargo bench` with `harness = false` just runs each `main`, so a name selects
 # one the way `--bench` does.
 if [[ $# -gt 0 ]]; then
+  if [[ -f "$repo_root/bench/$1.rb" ]]; then
+    cargo build --release -p spinel-cli
+    run_ruby_bench "$repo_root/bench/$1.rb"
+    exit 0
+  fi
   exec cargo bench --bench "$1"
 fi
-exec cargo bench --benches
+cargo bench --benches
+cargo build --release -p spinel-cli
+for bench in "$repo_root"/bench/*.rb; do
+  run_ruby_bench "$bench"
+done
