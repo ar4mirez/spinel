@@ -3131,6 +3131,14 @@ end
     length = @rbuf.bytesize if length > @rbuf.bytesize
     char = __take__(length).force_encoding(__encoding__)
     return __hand_out__(__broken_char__(char)) unless char.valid_encoding?
+    # Without an internal encoding CRuby's converter is the decorators alone,
+    # which go a byte at a time, and the first output it stops after is an
+    # attribute's quote with the first byte: the rest is still to be read,
+    # for `pos` and for a `reopen` that keeps the converter (#593). Measured.
+    if char.bytesize > 1 && !@rquote && @enc2.nil? && __xml_in__ == :attr
+      @rbuf = char.byteslice(1, char.bytesize - 1).b << @rbuf
+      char = char.byteslice(0, 1)
+    end
     char, cr = __newline_char_in__(char)
     out = __decode__(char)
     __read_ahead__(cr, cr.bytesize) if cr
