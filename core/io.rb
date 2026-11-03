@@ -2343,6 +2343,7 @@ end
         wanted = wanted.encode(__encoding__) unless wanted.encoding == __encoding__ || wanted.ascii_only? && __encoding__.ascii_compatible?
         wanted = wanted.b
       rescue EncodingError
+        raise if @enc2.nil?
         wanted = nil
       end
       # CRuby's `at_char_boundary`: with an internal encoding the separator
