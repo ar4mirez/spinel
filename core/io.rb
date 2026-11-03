@@ -1152,9 +1152,14 @@ end
   # of the bytes, so it still made a converter. It goes as `more_char` does, a
   # call at a time: what the calls before the error made went with the read,
   # an attribute's quote among it, and what the one that raised made stays
-  # held, as in `cbuf`, which only a `read` takes with it. Measured.
+  # held, as in `cbuf`, which only a `read` takes with it. With universal
+  # newline the converter has its decorator, as `__make_readconv__` gives it,
+  # and a CR it holds before the error, to tell from a CRLF, goes back too:
+  # CRuby's keeps it, and the next read makes it the `"\n"` (#555). Measured.
   def __give_back_past_error__(bytes)
-    converter = __converter__(__encoding__, __read_encoding__, __read_ecopts__)
+    options = __read_ecopts__
+    options[:universal_newline] = true if __universal_newline__?
+    converter = __converter__(__encoding__, __read_encoding__, options)
     converter.primitive_convert("a".encode(__encoding__), "".b, nil, nil, Encoding::Converter::PARTIAL_INPUT) if @rquote
     made = nil
     loop do
@@ -1163,7 +1168,9 @@ end
       @rquote = true if __xml_in__ == :attr && !made.empty?
       break unless result == :after_output
     end
-    @rbuf = converter.putback.b + bytes.b + @rbuf
+    back = converter.putback.b + bytes.b
+    back = "\r".encode(__encoding__).b + back if options[:universal_newline] && converter.finish.b.start_with?("\n".encode(__read_encoding__).b)
+    @rbuf = back + @rbuf
     __hold_chars__(made)
   end
 
