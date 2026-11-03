@@ -3514,7 +3514,8 @@ end
   end
 
   def __puts_line__(text)
-    __writev__(text.__end_with_newline__ ? [text] : [text, DEFAULT_RS])
+    # An empty line writes only the newline, as CRuby's `io_puts_ary` does.
+    __writev__(text.__end_with_newline__ ? [text] : (text.empty? ? [DEFAULT_RS] : [text, DEFAULT_RS]))
   end
 
   # --- another descriptor ----------------------------------------------------
