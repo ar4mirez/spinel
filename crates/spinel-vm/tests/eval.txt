@@ -2435,3 +2435,5 @@ k = ->(&d) { c = Class.new(IO) { attr_reader :log }; c.define_method(:write, &d)
 o = Object.new; def o.write(*a) (@l ||= []) << a; 0 end; def o.l = @l; s = $stdout; $stdout = o; r = begin; [puts("k"), puts, puts([1, ["x"]]), puts("a\n")]; ensure; $stdout = s; end; [r, o.l]  #=> [[nil, nil, nil, nil], [["k", "\n"], ["\n"], ["1", "\n"], ["x", "\n"], ["a\n"]]]
 # A `write` with no method of its own, reached through `method_missing`, takes the pieces together, as CRuby's `rb_obj_method_arity` counts it 0; `puts` answers nil whatever `write` returns.
 o = Object.new; def o.write(*) end; def o.method_missing(n, *a) n == :write ? ((@l ||= []) << a; false) : super end; def o.l = @l; s = $stdout; $stdout = o; o.singleton_class.remove_method(:write); r = begin; [puts("k"), puts]; ensure; $stdout = s; end; [r, o.l]  #=> [[nil, nil], [["k", "\n"], ["\n"]]]
+
+f = IO.popen("cat", "r+"); r = [f.close_write, f.closed?, f.close_write, f.closed?, $?.class, f.close_write]; r  #=> [nil, false, nil, true, Process::Status, nil]
