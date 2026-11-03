@@ -822,8 +822,11 @@ end
     0
   end
 
+  # CRuby's `rb_io_flush_raw`: writes go at once here, so what is left is
+  # `io_unread` of a reader, discarding what a pipe cannot give back.
   def flush
     __check_open__
+    __unread__(true)
     self
   end
 
