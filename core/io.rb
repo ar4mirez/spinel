@@ -3477,7 +3477,10 @@ end
   # CRuby's `rb_io_puts`, so the lines before one that raises are written, on
   # a sync IO as well, where one `write` of them all would drop them (#420).
   def puts(*lines)
-    return write(DEFAULT_RS) && nil if lines.empty?
+    if lines.empty?
+      write(DEFAULT_RS)
+      return nil
+    end
     __puts_lines__(lines, [])
     nil
   end
@@ -3975,7 +3978,10 @@ module Kernel
   def puts(*lines)
     out = $stdout
     return out.__send__(:puts, *lines) unless equal?(out)
-    return write(IO.__default_rs__) && nil if lines.empty?
+    if lines.empty?
+      write(IO.__default_rs__)
+      return nil
+    end
     __puts_lines__(lines, [])
     nil
   end
@@ -3983,7 +3989,7 @@ module Kernel
   # Several pieces in one `write`, as CRuby's `rb_io_writev`; a `write` that
   # takes one argument, the interface before Ruby 2.5, gets them one at a time.
   def __writev__(pieces)
-    if pieces.size > 1 && method(:write).arity == 1
+    if pieces.size > 1 && respond_to?(:write, true) && method(:write).arity == 1
       pieces.each { |piece| write(piece) }
     else
       write(*pieces)
@@ -4015,7 +4021,6 @@ module Kernel
     # An empty line writes only the newline, as CRuby's `io_puts_ary` does.
     __writev__(text.__end_with_newline__ ? [text] : (text.empty? ? [IO.__default_rs__] : [text, IO.__default_rs__]))
   end
-
 
   def print(*parts)
     $stdout.print(*parts)
