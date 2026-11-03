@@ -783,6 +783,23 @@ class Encoding
       Encoding.find(String.__coerce__(value))
     end
 
+    # The encoding `value` names, or the name as it is when it names none,
+    # "internal" with no default internal among them, as CRuby's `econv_args`
+    # keeps one, for `__converter_check__` (#592).
+    def self.__encoding_or_name__(value)
+      return value if value.is_a?(Encoding)
+      Encoding.find(value) || value
+    rescue ArgumentError
+      value
+    end
+
+    # CRuby's `rb_econv_open` finds no converter for a name that is no
+    # encoding, `""` among them. Measured.
+    def self.__converter_check__(source, destination, flags)
+      return if source.is_a?(Encoding) && destination.is_a?(Encoding)
+      raise Encoding::ConverterNotFoundError, "code converter not found (#{__description__(source, destination, flags)})"
+    end
+
     # The converters a conversion runs through, as pairs of encodings: see
     # `String.__path__`.
     def self.__path__(source, destination)
@@ -799,8 +816,11 @@ class Encoding
 
     def self.search_convpath(source, destination, **options)
       flags = __option_flags__(options)
-      source = __encoding__(source)
-      destination = __encoding__(destination)
+      source = String.__coerce__(source) unless source.is_a?(Encoding)
+      destination = String.__coerce__(destination) unless destination.is_a?(Encoding)
+      source = __encoding_or_name__(source)
+      destination = __encoding_or_name__(destination)
+      __converter_check__(source, destination, flags)
       # Which pairs CRuby has a path for is its converter table's question.
       unless String.__supported_target__(source) && String.__supported_target__(destination)
         __needs_char_table__
@@ -845,13 +865,15 @@ class Encoding
       raise Encoding::ConverterNotFoundError, "code converter not found (#{__description__(source, destination, flags)})"
     end
 
-    # CRuby's `econv_description`: the encodings, then the decorators after
-    # " with ", or the decorators alone for a converter of nothing else, and
-    # "no-conversion" for one of neither. Measured.
+    # CRuby's `econv_description`: the names, joined by " to " when both are
+    # given, then the decorators after " with ", or the decorators alone for a
+    # converter of no names, and "no-conversion" for one of neither. A side is
+    # an Encoding, a name that is none, or nil for none. Measured.
     def self.__description__(source, destination, flags)
-      names = __decorator_names__(flags).join(",")
-      return names.empty? ? "no-conversion" : names if source.nil?
-      names.empty? ? "#{source.name} to #{destination.name}" : "#{source.name} to #{destination.name} with #{names}"
+      names = [source, destination].map { |side| side.is_a?(Encoding) ? side.name : side.to_s }.reject(&:empty?).join(" to ")
+      decorators = __decorator_names__(flags).join(",")
+      return decorators.empty? ? "no-conversion" : decorators if names.empty?
+      decorators.empty? ? names : "#{names} with #{decorators}"
     end
 
     # Whether `source` and `destination` are both `""`, which CRuby takes for
@@ -895,8 +917,11 @@ class Encoding
       if Converter.__decorators_alone__?(source, destination)
         @source_encoding = @destination_encoding = nil
       else
-        @source_encoding = Converter.__encoding__(source)
-        @destination_encoding = Converter.__encoding__(destination)
+        source = Converter.__encoding_or_name__(source)
+        destination = Converter.__encoding_or_name__(destination)
+        Converter.__converter_check__(source, destination, @flags)
+        @source_encoding = source
+        @destination_encoding = destination
       end
       Converter.__check_decorators__(@source_encoding, @destination_encoding, @flags)
       unless @source_encoding.nil? || (String.__supported_target__(@source_encoding) && String.__supported_target__(@destination_encoding))
