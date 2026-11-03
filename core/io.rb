@@ -2339,8 +2339,22 @@ end
     wanted = nil
     unless separator.nil? || stream
       wanted = paragraph ? "\n\n" : separator
-      wanted = wanted.encode(__encoding__) unless wanted.encoding == __encoding__ || wanted.ascii_only? && __encoding__.ascii_compatible?
-      wanted = wanted.b
+      begin
+        wanted = wanted.encode(__encoding__) unless wanted.encoding == __encoding__ || wanted.ascii_only? && __encoding__.ascii_compatible?
+        wanted = wanted.b
+      rescue EncodingError
+        raise if @enc2.nil?
+        wanted = nil
+      end
+      # CRuby's `at_char_boundary`: with an internal encoding the separator
+      # is looked for in what the converter makes, and only where a
+      # character starts. Where its bytes as read could be found inside a
+      # character, or it has none, the line is read from what the
+      # converter makes, a line of bytes at a time (#552).
+      if !@enc2.nil? && (wanted.nil? || !__starts_char__?(wanted))
+        converted = true
+        wanted = __newline_read__
+      end
     end
     if converted
       line = __converted_line__(separator, wanted, limit, unit)
@@ -2366,6 +2380,21 @@ end
     line
   end
 
+  # Whether the bytes of a separator as read are found only where a
+  # character starts. In UTF-8 and single-byte encodings they are; in the
+  # others a byte below "0" is no part of a character of more, so it starts
+  # one, while a letter or "\\" can end one in Shift_JIS, Big5 or GBK.
+  def __starts_char__?(wanted)
+    enc = __encoding__
+    return true unless enc.ascii_compatible?
+    enc == Encoding::UTF_8 || enc.__single_byte__ || wanted.getbyte(0) < 0x30
+  end
+
+  # A newline in the bytes as read, to read a line of them at a time.
+  def __newline_read__
+    __encoding__.ascii_compatible? ? "\n".b : "\n".encode(__encoding__).b
+  end
+
   # Whether the read converter makes other bytes than it reads: an internal
   # encoding, or an external one that is not ASCII-compatible.
   def __converts_bytes__?
@@ -2378,7 +2407,15 @@ end
   def __cut_by_limit__?(line, separator, limit)
     return false if limit.nil? || limit <= 0 || line.bytesize < limit
     return true if separator.nil?
-    !line.b.end_with?(__separator_in__(separator, line.encoding))
+    !__ends_with_separator__?(line, __separator_in__(separator, line.encoding))
+  end
+
+  # Whether a line ends with the bytes of its separator where a character
+  # of it starts, CRuby's `at_char_boundary` (#552).
+  def __ends_with_separator__?(line, tail)
+    bytes = line.b
+    size = bytes.bytesize - tail.bytesize
+    bytes.end_with?(tail) && __char_edge__(bytes, 0, size, line.encoding) == size
   end
 
   # The bytes of a separator in what the read converter makes. A dummy
@@ -2409,16 +2446,19 @@ end
   def __converted_line__(separator, wanted, limit, unit)
     enc = __read_encoding__
     sep = separator.nil? ? nil : __separator_in__(separator, enc)
-    # In UTF-16 or UTF-32 a separator counts only at a character's start.
-    step = enc.ascii_compatible? || enc.dummy? ? 1 : (enc.name.start_with?("UTF-32") ? 4 : 2)
     out = "".b
     from = 0
+    # Where a character of `out` is known to start, for CRuby's
+    # `at_char_boundary`: a separator counts only at a character's start (#552).
+    edge = 0
     cut = nil
     stream = __stream_in__?
     runs = stream && __line_runs__?(sep, enc)
     while cut.nil?
       at = sep.nil? ? nil : out.index(sep, from)
-      at = out.index(sep, at + 1) while at && at % step != 0
+      until at.nil? || (edge = __char_edge__(out, edge, at, enc)) == at
+        at = out.index(sep, at + 1)
+      end
       if at && (limit.nil? || limit <= 0 || at + sep.bytesize <= limit)
         cut = at + sep.bytesize
       elsif !limit.nil? && limit > 0 && out.bytesize >= limit && (cut = __limit_cut__(out, limit, enc))
@@ -2457,6 +2497,27 @@ end
     return nil if cut == 0
     __hold_chars__(out.byteslice(cut, out.bytesize - cut)) if cut < out.bytesize
     out.byteslice(0, cut).force_encoding(enc)
+  end
+
+  # The start of the character of `out` that `at` is in, or `at` itself
+  # where one starts there, walking from `edge`, where one does. In UTF-16
+  # or UTF-32 that is a unit's start; in UTF-8 any byte that does not go
+  # on with one starts one.
+  def __char_edge__(out, edge, at, enc)
+    return at if enc.dummy? || enc.__single_byte__
+    if !enc.ascii_compatible?
+      step = enc.name.start_with?("UTF-32") ? 4 : 2
+      return at - at % step
+    end
+    if enc == Encoding::UTF_8
+      at -= 1 while at > edge && out.getbyte(at) & 0xC0 == 0x80
+      return at
+    end
+    out.byteslice(edge, at - edge + 4).force_encoding(enc).each_char do |char|
+      break if edge + char.bytesize > at
+      edge += char.bytesize
+    end
+    edge
   end
 
   # Where a limit ends a line of what the read converter made: after the
@@ -2518,8 +2579,11 @@ end
   def __line_bytes__(wanted, limit, whole = false)
     from = 0
     cut = nil
+    # In UTF-16 or UTF-32 a separator counts only at a character's start.
+    step = @enc2.nil? ? 1 : (__newline_unit__ || 1)
     while cut.nil?
       at = wanted.nil? ? nil : @rbuf.index(wanted, from)
+      at = @rbuf.index(wanted, at + 1) while at && at % step != 0
       if at
         cut = at + wanted.bytesize
       elsif !limit.nil? && limit > 0 && @rbuf.bytesize >= limit
@@ -2765,8 +2829,8 @@ end
   # so the last record keeps its own newline. Measured.
   def __chomp_line__(line, separator)
     tail = __separator_in__(separator, line.encoding)
+    return line unless __ends_with_separator__?(line, tail)
     bytes = line.b
-    return line unless bytes.end_with?(tail)
     size = bytes.bytesize - tail.bytesize
     size -= 1 if tail.bytesize == 1 && tail.getbyte(0) == 10 && size > 0 && bytes.getbyte(size - 1) == 13
     line.byteslice(0, size)
