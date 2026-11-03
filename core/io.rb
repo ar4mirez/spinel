@@ -2633,32 +2633,99 @@ end
   # what the line did not take as read, not converted and held in `cbuf`,
   # where `reopen` would keep it and a read of bytes would refuse (#556).
   # `piece` was made of `bytes`, the line as read, or of `taken` where
-  # universal newline made `bytes` of it, and goes past the limit. Where
-  # each character read made one, those the limit does not take go back to
-  # be read, and the piece is what it took; nil where it is held. Measured.
-  # ponytail: where characters read do not make one each (an `xml:` entity,
-  # a replacement of more than one, a CRLF before the limit's cut), the rest
-  # is held as before; upgrade by mapping what each character read made.
+  # universal newline made `bytes` of it, and goes past the limit. The
+  # characters read up to the one whose making reaches the limit are taken,
+  # and the rest go back to be read; what that last one made past the limit
+  # is held, as in `cbuf`. The piece is what they made; nil where it is held
+  # as a whole. Where a character read makes other than one, an `xml:`
+  # entity or a replacement of more, what each made is found by converting
+  # it alone (#602). Measured.
   def __within_limit__(out, piece, bytes, taken, limit, enc)
     need = limit - out.bytesize
     made = piece.dup.force_encoding(enc)
-    # The characters up to the one the limit lands in. Each byte of one it
-    # cuts short counts as one.
-    count = made.byteslice(0, need).length
-    count -= 1 while count > 1 && made[0, count - 1].bytesize >= need
-    size = made.length
-    return nil if count >= size
     read = bytes.dup.force_encoding(__encoding__)
-    return nil unless read.length == size
+    size = made.length
+    length = read.length
+    if length == size
+      # The characters up to the one the limit lands in. Each byte of one it
+      # cuts short counts as one.
+      count = made.byteslice(0, need).length
+      count -= 1 while count > 1 && made[0, count - 1].bytesize >= need
+      return nil if count >= size
+      upto = made[0, count].bytesize
+    else
+      count, upto, sizes = __made_within__(read, made, need)
+      return nil if count.nil?
+    end
+    # A replacement for an invalid byte goes in before the converter's last
+    # step where that writes what is not ASCII-compatible, so the step goes
+    # on to make the next character with it. Measured.
+    unless __read_encoding__.ascii_compatible?
+      until read[count - 1].valid_encoding?
+        return nil if count >= length
+        upto += sizes ? sizes[count] : made[count].bytesize
+        count += 1
+      end
+    end
     read = read[0, count]
-    # An invalid byte replaced in a converter of more than one step has
-    # the next step convert past it.
-    return nil if !read[-1].valid_encoding? && Encoding::Converter.search_convpath(__encoding__, __read_encoding__).size > 1
-    # A CRLF universal newline made one character of lies past what is
-    # taken unless a newline is before it.
-    return nil unless taken.bytesize == bytes.bytesize || !read.include?("\n".encode(__encoding__))
-    @rbuf = taken.byteslice(read.bytesize, taken.bytesize - read.bytesize).b << @rbuf
-    made[0, count]
+    back = taken.bytesize == bytes.bytesize ? read.bytesize : __taken_of__(read, taken)
+    @rbuf = taken.byteslice(back, taken.bytesize - back).b << @rbuf
+    made.byteslice(0, upto)
+  end
+
+  # How many characters of `read` make what reaches `need` bytes of `made`,
+  # how many bytes of it they make, and what each makes: each is converted
+  # alone, as `__decode__` converts them together, and an attribute's quote
+  # that opens comes with the first. Nil where all of them are needed, or
+  # where what they make alone does not add up to what they made.
+  def __made_within__(read, made, need)
+    xml = __xml_in__
+    lead = made.bytesize
+    sizes = []
+    read.each_char do |char|
+      one = __made_alone__(char, xml)
+      return nil if one.nil?
+      sizes << one.bytesize
+      lead -= one.bytesize
+    end
+    return nil unless lead == 0 || xml == :attr && lead == "\"".encode(made.encoding).bytesize
+    count = 0
+    upto = lead
+    loop do
+      upto += sizes[count]
+      count += 1
+      break if upto >= need
+    end
+    return nil if count >= sizes.size
+    [count, upto, sizes]
+  end
+
+  # What a character read makes on its own through the read converter, as
+  # `__decode__` makes it, without an attribute's quotes; nil where it raises.
+  def __made_alone__(char, xml)
+    if @enc2.nil?
+      return char if xml.nil?
+      one = String.__escape_xml__(char, xml)
+    else
+      one = char.encode(__read_encoding__, **__read_options__(@ecopts))
+    end
+    xml == :attr ? one[1...-1] : one
+  rescue EncodingError
+    nil
+  end
+
+  # How many bytes of `taken` the characters of `read` were made of: with
+  # universal newline each LF that stood for a CRLF is a unit more.
+  def __taken_of__(read, taken)
+    lf = "\n".encode(__encoding__)
+    cr = "\r".encode(__encoding__).b
+    unit = lf.bytesize
+    at = 0
+    read.each_char do |char|
+      at += unit if char == lf && taken.byteslice(at, unit) == cr && taken.byteslice(at + unit, unit) == lf.b
+      at += char.bytesize
+    end
+    at
   end
 
   # What a converter `reopen` left or a `NewlineBytes` makes need not end where
