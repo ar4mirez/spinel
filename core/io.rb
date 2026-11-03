@@ -580,11 +580,13 @@ end
   end
 
   # A copy has a descriptor of its own, `dup(2)` of the original's, at the
-  # original's position. The two share an offset, so the original's read-ahead
-  # is given back first, as CRuby's `rb_io_init_copy` flushes it, and what that
-  # finds out about the descriptor the copy is told too.
+  # original's position. The two share an offset, so what the original's writes
+  # in progress have gathered is written and its read-ahead given back first, as
+  # CRuby's `rb_io_init_copy` flushes both, and what that finds out about the
+  # descriptor the copy is told too.
   def initialize_copy(original)
     original.__check_open__
+    original.__flush_gathered__
     original.__unread__(true)
     @duplex = original.__duplex__
     @fileno = IO.__check__(__fd_dup__(original.fileno), @path)[0]
@@ -815,22 +817,28 @@ end
     value
   end
 
+  # What writes in progress have gathered goes first, as CRuby's `rb_io_fsync`
+  # flushes its write buffer. So for `fdatasync`.
   def fsync
     __check_open__
+    __flush_gathered__
     IO.__check__(__fd_fsync__(@fileno, false), @path)
     0
   end
 
   def fdatasync
     __check_open__
+    __flush_gathered__
     IO.__check__(__fd_fsync__(@fileno, true), @path)
     0
   end
 
-  # CRuby's `rb_io_flush_raw`: writes go at once here, so what is left is
-  # `io_unread` of a reader, discarding what a pipe cannot give back.
+  # CRuby's `rb_io_flush_raw`: writes go at once here, so what is left is what
+  # writes in progress have gathered, then `io_unread` of a reader, discarding
+  # what a pipe cannot give back.
   def flush
     __check_open__
+    __flush_gathered__
     __unread__(true)
     self
   end
@@ -3253,8 +3261,10 @@ end
     __check_open__
     whence = __whence__(whence)
     offset = IO.__c_long__(offset)
-    # Bytes buffered are given back first, and the converters with them, even
-    # if the seek then fails; with none, they stay. Measured.
+    # What writes in progress have gathered is written, and bytes buffered are
+    # given back, first, as CRuby's `flush_before_seek`, and the converters
+    # with them, even if the seek then fails; with none, they stay. Measured.
+    __flush_gathered__
     __unread__(true)
     IO.__check__(__fd_seek__(@fileno, offset, whence), @path)
     0
@@ -3286,9 +3296,11 @@ end
   # CRuby gives the bytes buffered back to find where the reader is, and
   # drops the converters with them, as `seek` does: what `ungetc` put there
   # goes too, unless that would seek before the start, and then they all
-  # stay and count. Measured.
+  # stay and count. What writes in progress have gathered is written first, as
+  # `flush_before_seek` flushes the write buffer. Measured.
   def pos
     __check_open__
+    __flush_gathered__
     __unread__
     IO.__check__(__fd_seek__(@fileno, 0, IO::SEEK_CUR), @path)[0] - @rbuf.bytesize
   end
@@ -3328,9 +3340,10 @@ end
   # other `rest` finds the stream closed. So does the last object if it brought
   # the close with sync on, as `io_fwrite` tests sync after its `to_s`, and has
   # bytes. A tty is found only when a `to_s` flushes, where the list goes, so its
-  # text is `rest`. Measured.
-  # ponytail: only a `close` or a write sees `@wgathered`, so what else flushes
-  # CRuby's buffer leaves it gathered (#571); upgrade with a real write buffer.
+  # text is `rest`. A `flush`, `fsync`, `seek`, `pos` or `dup` there writes it
+  # too, as each flushes CRuby's buffer. Measured.
+  # ponytail: a `truncate`, `reopen` or read there still leaves it gathered
+  # (#612); upgrade with a `__flush_gathered__` at each.
   def __write_gathered__(objects)
     if @sync
       rest = __gather__(objects, 0)
