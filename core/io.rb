@@ -285,9 +285,14 @@ def self.new(*args, **options, &block)
   super(*args, **options, &nil)
 end
 
-def self.for_fd(*args, **options)
-  new(*args, **options)
-end
+  # Measured: made without `new`, and initialized by IO's own `initialize`,
+  # as CRuby's `rb_io_s_for_fd` calls `rb_io_initialize`, so neither a
+  # redefined `new` nor a subclass's `initialize` is asked.
+  def self.for_fd(*args, **options)
+    io = allocate
+    IO.instance_method(:initialize).bind_call(io, *args, **options)
+    io
+  end
 
   def self.open(*args, **options)
     io = new(*args, **options)
