@@ -2548,8 +2548,8 @@ end
   # each character read made one, those the limit does not take go back to
   # be read, and the piece is what it took; nil where it is held. Measured.
   # ponytail: where characters read do not make one each (an `xml:` entity,
-  # a replacement, a CRLF before the limit's cut), the rest is held as
-  # before; upgrade by mapping what each character read made.
+  # a replacement of more than one, a CRLF before the limit's cut), the rest
+  # is held as before; upgrade by mapping what each character read made.
   def __within_limit__(out, piece, bytes, taken, limit, enc)
     need = limit - out.bytesize
     made = piece.dup.force_encoding(enc)
@@ -2562,6 +2562,9 @@ end
     read = bytes.dup.force_encoding(__encoding__)
     return nil unless read.length == size
     read = read[0, count]
+    # An invalid byte replaced in a converter of more than one step has
+    # the next step convert past it.
+    return nil if !read[-1].valid_encoding? && Encoding::Converter.search_convpath(__encoding__, __read_encoding__).size > 1
     # A CRLF universal newline made one character of lies past what is
     # taken unless a newline is before it.
     return nil unless taken.bytesize == bytes.bytesize || !read.include?("\n".encode(__encoding__))
