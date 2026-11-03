@@ -10482,6 +10482,58 @@ fn native_call<'h>(
             Ok(None)
         }
 
+        Native::StringByteSlice => {
+            // `byteslice(i)` and `byteslice(i, n)` with fixnums are what every
+            // byte loop asks, and cost what `getbyte` does here. A Range, an
+            // object to convert, a bignum or the wrong count is the Ruby
+            // half's: `String#__byteslice_args__` (#588).
+            let request = match call.args.as_slice() {
+                [start] => start.as_fixnum().map(|start| (start, None)),
+                [start, len] => match (start.as_fixnum(), len.as_fixnum()) {
+                    (Some(start), Some(len)) => Some((start, Some(len))),
+                    _ => None,
+                },
+                _ => None,
+            };
+            let Some((start, len)) = request else {
+                let forwarded = Pending {
+                    cache: None,
+                    name: crate::shared::symbols::intern("__byteslice_args__"),
+                    target: Target::Method,
+                    owner: None,
+                    defined_as: None,
+                    ..call
+                };
+                return dispatch(scope, stack, frames, forwarded, proc_class, ids);
+            };
+            if !is_string(scope, call.receiver) {
+                return Err(Error::NoDispatch {
+                    op: "String#byteslice",
+                    operands: "a receiver that is not a String",
+                });
+            }
+            let receiver = scope.root(call.receiver);
+            let size = crate::strings::bytesize(scope, receiver) as i64;
+            let start = if start < 0 { start + size } else { start };
+            // The one-argument form is one byte, and nil at the end; the
+            // two-argument form is "" there, and nil for a negative length.
+            let len = match len {
+                None if start < 0 || start >= size => None,
+                None => Some(1),
+                Some(len) if start < 0 || start > size || len < 0 => None,
+                Some(len) => Some(len.min(size - start)),
+            };
+            let Some(len) = len else {
+                stack.push(Value::NIL);
+                return Ok(None);
+            };
+            let encoding = crate::strings::encoding(scope, receiver);
+            let taken = crate::strings::byte_range(scope, receiver, start as usize, len as usize);
+            let value = string_bytes_in(scope, Builtin::String.id(), &taken, encoding);
+            stack.push(value);
+            Ok(None)
+        }
+
         Native::StringCompare => {
             let Some(left) = string_bytes(scope, call.receiver) else {
                 return Err(Error::NoDispatch {
@@ -14547,6 +14599,7 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         ),
         (Builtin::Float, &["to_s"], Native::FloatToS),
         (Builtin::String, &["__index__", "[]"], Native::StringIndex),
+        (Builtin::String, &["byteslice"], Native::StringByteSlice),
         (Builtin::String, &["<=>"], Native::StringCompare),
     ];
     for (builtin, names, native) in table {
