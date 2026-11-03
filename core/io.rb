@@ -2479,7 +2479,7 @@ end
           __read_ahead__(cr, unit) if cr
         else
           bytes = __line_bytes__(wanted, room)
-          piece = bytes.nil? ? nil : __newlines_in__(__decode__(__rest_of_char__(bytes)))
+          piece = bytes.nil? ? nil : __newlines_in__(__decode__(__rest_of_char__(bytes, wanted)))
         end
         if piece.nil?
           # At the end, until the converter has nothing more.
@@ -2554,13 +2554,13 @@ end
     false
   end
 
-  # The rest of the character a line of bytes read from UTF-16 or UTF-32
-  # stops inside, where the limit counted what the converter makes rather
-  # than the bytes read (#477): a whole unit, and the low surrogate after a
-  # high one.
-  def __rest_of_char__(bytes)
+  # The rest of the character a line of bytes read stops inside, where the
+  # limit counted what the converter makes rather than the bytes read: in
+  # UTF-16 or UTF-32 a whole unit, and the low surrogate after a high one
+  # (#477); in another multibyte encoding, the bytes it is cut short of (#553).
+  def __rest_of_char__(bytes, wanted)
     unit = __newline_unit__
-    return bytes if unit.nil? || unit == 1
+    return __rest_of_multibyte__(bytes, wanted) if unit.nil? || unit == 1
     want = -bytes.bytesize % unit
     if want == 0 && unit == 2 && bytes.bytesize >= 2
       high = __encoding__ == Encoding::UTF_16BE ? bytes.getbyte(-2) : bytes.getbyte(-1)
@@ -2572,6 +2572,29 @@ end
       want -= more.bytesize
     end
     bytes
+  end
+
+  # `bytes` with the rest of a character of an ASCII-compatible multibyte
+  # encoding other than UTF-8 its end is cut short of. `__line_bytes__`
+  # already does it for UTF-8, and a line that ends in its separator ends
+  # where a character does.
+  def __rest_of_multibyte__(bytes, wanted)
+    enc = __encoding__
+    return bytes if enc == Encoding::UTF_8 || enc.dummy? || enc.__single_byte__
+    return bytes if wanted && bytes.end_with?(wanted)
+    extra = 0
+    while extra < 4 && __last_cut_short__?(bytes, enc) && (!@rbuf.empty? || __fill__)
+      bytes << __take__(1)
+      extra += 1
+    end
+    bytes
+  end
+
+  # Whether the last character of `bytes`, read as `enc`, is cut short.
+  def __last_cut_short__?(bytes, enc)
+    last = nil
+    bytes.dup.force_encoding(enc).each_char { |char| last = char }
+    !last.nil? && __held_cut_short__?(last.b, enc)
   end
 
   # The bytes of the next line as read, or nil at the end: up to the
@@ -2666,6 +2689,13 @@ end
           end
         end
         cut = view.bytesize if cut > view.bytesize
+      elsif !enc.dummy? && !enc.__single_byte__
+        # In another multibyte encoding to the end of the character (#553).
+        extra = 0
+        while extra < 4 && __last_cut_short__?(view.byteslice(0, cut), enc) && (cut < view.bytesize || __convert_more__(line))
+          cut += 1
+          extra += 1
+        end
       end
     end
     return nil if cut == 0
