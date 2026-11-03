@@ -810,12 +810,12 @@ end
   alias to_path path
 
   def sync
-    __check_open__
+    __check_write_open__
     @sync
   end
 
   def sync=(value)
-    __check_open__
+    __check_write_open__
     @sync = value ? true : false
     value
   end
@@ -823,14 +823,14 @@ end
   # What writes in progress have gathered goes first, as CRuby's `rb_io_fsync`
   # flushes its write buffer. So for `fdatasync`.
   def fsync
-    __check_open__
+    __check_write_open__
     __flush_gathered__
     IO.__check__(__fd_fsync__(@fileno, false), @path)
     0
   end
 
   def fdatasync
-    __check_open__
+    __check_write_open__
     __flush_gathered__
     IO.__check__(__fd_fsync__(@fileno, true), @path)
     0
@@ -840,7 +840,7 @@ end
   # writes in progress have gathered, then `io_unread` of a reader, discarding
   # what a pipe cannot give back.
   def flush
-    __check_open__
+    __check_write_open__
     __flush_gathered__
     __unread__(true)
     self
