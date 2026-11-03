@@ -2736,11 +2736,20 @@ end
     cut = nil
     # In UTF-16 or UTF-32 a separator counts only at a character's start.
     step = @enc2.nil? ? 1 : (__newline_unit__ || 1)
+    # With no read converter too, CRuby's `at_char_boundary` takes it only
+    # where a character of the external encoding starts, so a "\\" that
+    # ends one in Shift_JIS, Big5 or GBK is no separator (#597). `edge` is
+    # where one is known to start, walked from the buffer's start.
+    chars = __encoding__ unless wanted.nil? || __starts_char__?(wanted)
+    edge = 0
     while cut.nil?
       # The buffer is bytes: `String#index` would tabulate every character
       # of it on each line, so a file a line at a time was quadratic (#585).
       at = wanted.nil? ? nil : @rbuf.__byte_index__(wanted, from)
       at = @rbuf.__byte_index__(wanted, at + 1) while at && at % step != 0
+      until chars.nil? || at.nil? || (edge = __char_edge__(@rbuf, edge, at, chars)) == at
+        at = @rbuf.__byte_index__(wanted, at + 1)
+      end
       if at
         cut = at + wanted.bytesize
       elsif !limit.nil? && limit > 0 && @rbuf.bytesize >= limit
