@@ -3405,6 +3405,14 @@ end
       end
       return __hand_out__(__broken_char__(char))
     end
+    # So with `undef: :replace` is a character the internal encoding has no
+    # character for, through a converter of more than one transcoder: it goes
+    # on past the replacement too, where one transcoder stops (#634). Telling
+    # an undefined character costs a conversion, so only where it is set.
+    if @ecopts[:undef] == :replace && !@enc2.nil? && __xml_in__.nil? && __undefined_in_read__?(char)
+      __stream_from__(char, @rquote)
+      return getc
+    end
     # Without an internal encoding CRuby's converter is the decorators alone,
     # which go a byte at a time, and the first output it stops after is an
     # attribute's quote with the first byte: the rest is still to be read,
