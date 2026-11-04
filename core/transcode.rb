@@ -948,7 +948,25 @@ class Encoding
       # Whether a call has stopped at `__econv_convert__`'s bound, short of
       # its limit.
       @stopped_short = false
+      # Whether the last call stopped there, with more to write.
+      @suspended = false
+      # Whether a call stops there however many have before (#611).
+      @goes_on = false
     end
+
+    # A call past `__econv_convert__`'s bound stops there however many have
+    # before, so the next goes on with what CRuby's goes on to: `IO#gets`
+    # with a limit takes that much of a conversion that never ends (#611).
+    # ponytail: going on is that loop's call a character, about 110us a byte
+    # made on a release build, so `gets(140000)` takes 15s where CRuby's takes
+    # 16ms. The upgrade is writing what the errors repeat without a call of
+    # the transcoders for each.
+    def __goes_on__=(goes_on)
+      @goes_on = goes_on
+    end
+
+    # Whether the last call stopped at the bound, with more to write.
+    def __suspended__? = @suspended
 
     # With no destination, "?" in BINARY. Measured.
     def __default_replacement__
@@ -1203,8 +1221,11 @@ class Encoding
     # had come, so what it wrote is what CRuby's writes, and a line that ends
     # in it is CRuby's; CRuby's would go on to the limit, a call of this loop
     # a character. The calls after it run again as above, so a read of an IO
-    # ends where CRuby's never does. The upgrade is whatever CRuby settles on.
+    # ends where CRuby's never does, but where `__goes_on__` has each stop
+    # there too, for `IO#gets` with a limit (#611). The upgrade is whatever
+    # CRuby settles on.
     def __econv_convert__(input, output, limit, flags)
+      @suspended = false
       saved = first = fed = grown = nil
       begun = false
       inserted = 0
@@ -1233,8 +1254,8 @@ class Encoding
           grown = output.bytesize
         elsif inserted > 2 * fed + 64
           return result if begun
-          if limit && !@stopped_short && output.bytesize > grown
-            @stopped_short = true
+          if limit && (!@stopped_short || @goes_on) && output.bytesize > grown
+            @stopped_short = @suspended = true
             @error_element = nil
             __insert__(bytes)
             return :destination_buffer_full

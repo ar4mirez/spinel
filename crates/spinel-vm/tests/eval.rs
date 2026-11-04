@@ -605,3 +605,16 @@ fn a_getc_after_a_clean_line_reads_all_that_is_buffered() {
         "[[34, 0, 61, 216, 1, 222, 10, 0], [253, 255], 16, [253, 255, 253, 255, 253, 255, 10, 0], 16]"
     );
 }
+
+/// Where `xml:` after a broken sequence makes a conversion that never ends
+/// (#543), CRuby 4.0.9's `gets` with a limit hands out that much of what it
+/// made, and the next goes on with it (#611). Its conversion of this input
+/// never ends but at its 128KB of room: never run it under CRuby without a
+/// memory cap and a SIGKILL timeout, `systemd-run --user --scope -p
+/// MemoryMax=1500M -p MemorySwapMax=0 timeout -k 5 120 ruby ...`, and read it
+/// with a bound.
+#[test]
+fn a_gets_limit_through_a_conversion_that_never_ends_takes_what_it_makes() {
+    let source = r#"n = "/tmp/spinel-eval-#{Process.pid}-611"; File.binwrite(n, "\xF0\x9F\x98\x80\xE3\x81\xFF\xFE\xE3\x81\x00\xFF\xE3\r".b); r = File.open(n, "r:UTF-8:UTF-16LE", invalid: :replace, xml: :text) { |f| [f.gets(200).size, f.pos, f.gets(60)&.size, f.pos] }; File.delete(n); r"#;
+    assert_eq!(eval(source).unwrap(), "[99, 14, 30, 14]");
+}
