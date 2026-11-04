@@ -868,6 +868,12 @@ pub enum StrOp {
     CutShort,
     /// `(string)` → the encoding index the two would combine in, or nil.
     Compatible,
+    /// `(char)` → the byte offset that character starts at, the bytesize
+    /// for the length, or nil past it.
+    CharByte,
+    /// `(byte_from, byte_to)` → how many characters start from `byte_from`,
+    /// a character's start, up to `byte_to`.
+    CharCount,
     /// `(needle, byte_start)` → the byte offset of the first `needle` at or
     /// after `byte_start`, or nil.
     ByteIndex,

@@ -923,8 +923,93 @@ fn str_native(
         stack.push(value);
         return Ok(None);
     }
-    let bytes = strings::bytes(scope, receiver);
     let fixnum = |n: i64| Value::fixnum(n).expect("a string offset fits a fixnum");
+    // These only read the receiver, so they read a long buffer where it lies
+    // rather than copying it: a search near the start of a long String costs
+    // what the search does, not the String's length (#617).
+    match op {
+        StrOp::ByteIndex | StrOp::ByteRindex => {
+            let Some(needle) = string_bytes(scope, arg(0)) else {
+                return Err(Error::NoDispatch {
+                    op: "String search",
+                    operands: "a needle that is not a String",
+                });
+            };
+            let start = usize::try_from(index_arg(1)?).unwrap_or(0);
+            // CRuby's `rb_strseq_index` and `str_rindex`: a broken needle is
+            // found nowhere, and a match starts a character — `"a"` is not
+            // in Shift_JIS's `"\x82\x61"`, whose trail it is — unless a
+            // third argument of false says otherwise, as `byterindex`'s byte
+            // by byte search does. UTF-8's trails are no character's first
+            // byte, so only the other multibyte encodings can put one inside
+            // another.
+            let needle_encoding = string_encoding(scope, arg(0)).unwrap_or(encoding);
+            if crate::strings::valid(needle_encoding, &needle) == Some(false) {
+                stack.push(Value::NIL);
+                return Ok(None);
+            }
+            let reading = crate::strings::multibyte(encoding)
+                .filter(|&engine| engine != spinel_regex::Encoding::Utf8 && arg(2) != Value::FALSE);
+            let bytes = strings::live(scope, receiver);
+            let starts =
+                |at: usize| reading.is_none_or(|engine| engine.is_char_boundary(bytes, at));
+            let mut from = start;
+            let found = loop {
+                let at = if op == StrOp::ByteIndex {
+                    crate::strings::find(bytes, &needle, from)
+                } else {
+                    crate::strings::rfind(bytes, &needle, from)
+                };
+                match at {
+                    Some(at) if !starts(at) => match op {
+                        StrOp::ByteIndex => from = at + 1,
+                        _ if at == 0 => break None,
+                        _ => from = at - 1,
+                    },
+                    at => break at,
+                }
+            };
+            stack.push(found.map_or(Value::NIL, |at| fixnum(at as i64)));
+            return Ok(None);
+        }
+        StrOp::CharByte => {
+            let char = usize::try_from(index_arg(0)?).unwrap_or(0);
+            let bytes = strings::live(scope, receiver);
+            let Some(at) = strings::char_byte(encoding, bytes, char) else {
+                return Err(unknown_encoding("`length`"));
+            };
+            stack.push(at.map_or(Value::NIL, |at| fixnum(at as i64)));
+            return Ok(None);
+        }
+        StrOp::CharCount => {
+            let from = usize::try_from(index_arg(0)?).unwrap_or(0);
+            let to = usize::try_from(index_arg(1)?).unwrap_or(0);
+            let bytes = strings::live(scope, receiver);
+            let Some(count) = strings::char_count(encoding, bytes, from, to) else {
+                return Err(unknown_encoding("a character operation"));
+            };
+            stack.push(fixnum(count as i64));
+            return Ok(None);
+        }
+        StrOp::Compatible => {
+            let other = arg(0);
+            let (Some(other_bytes), Some(other_enc)) =
+                (string_bytes(scope, other), string_encoding(scope, other))
+            else {
+                return Err(Error::NoDispatch {
+                    op: "Encoding.compatible?",
+                    operands: "an argument that is not a String",
+                });
+            };
+            let bytes = strings::live(scope, receiver);
+            let value = strings::compatible((encoding, bytes), (other_enc, &other_bytes))
+                .map_or(Value::NIL, |index| fixnum(i64::from(index)));
+            stack.push(value);
+            return Ok(None);
+        }
+        _ => {}
+    }
+    let bytes = strings::bytes(scope, receiver);
     let value = match op {
         StrOp::EncodingIndex => fixnum(i64::from(encoding)),
         StrOp::ForceEncoding => {
@@ -976,48 +1061,6 @@ fn str_native(
             None => return Err(unknown_encoding("a character operation")),
         },
         StrOp::CutShort => bool_value(strings::cut_short(encoding, &bytes)),
-        StrOp::ByteIndex | StrOp::ByteRindex => {
-            let Some(needle) = string_bytes(scope, arg(0)) else {
-                return Err(Error::NoDispatch {
-                    op: "String search",
-                    operands: "a needle that is not a String",
-                });
-            };
-            let start = usize::try_from(index_arg(1)?).unwrap_or(0);
-            // CRuby's `rb_strseq_index` and `str_rindex`: a broken needle is
-            // found nowhere, and a match starts a character — `"a"` is not
-            // in Shift_JIS's `"\x82\x61"`, whose trail it is — unless a
-            // third argument of false says otherwise, as `byterindex`'s byte
-            // by byte search does. UTF-8's trails are no character's first
-            // byte, so only the other multibyte encodings can put one inside
-            // another.
-            let needle_encoding = string_encoding(scope, arg(0)).unwrap_or(encoding);
-            if crate::strings::valid(needle_encoding, &needle) == Some(false) {
-                stack.push(Value::NIL);
-                return Ok(None);
-            }
-            let reading = crate::strings::multibyte(encoding)
-                .filter(|&engine| engine != spinel_regex::Encoding::Utf8 && arg(2) != Value::FALSE);
-            let starts =
-                |at: usize| reading.is_none_or(|engine| engine.is_char_boundary(&bytes, at));
-            let mut from = start;
-            let found = loop {
-                let at = if op == StrOp::ByteIndex {
-                    crate::strings::find(&bytes, &needle, from)
-                } else {
-                    crate::strings::rfind(&bytes, &needle, from)
-                };
-                match at {
-                    Some(at) if !starts(at) => match op {
-                        StrOp::ByteIndex => from = at + 1,
-                        _ if at == 0 => break None,
-                        _ => from = at - 1,
-                    },
-                    at => break at,
-                }
-            };
-            found.map_or(Value::NIL, |at| fixnum(at as i64))
-        }
         StrOp::Transcode => {
             // `__transcode__(path, start, state, decorators, finish)`: see
             // `transcode::step`. `decorators` is the xml escape in its low two
@@ -1118,21 +1161,13 @@ fn str_native(
             };
             string_bytes_in(scope, Builtin::String.id(), &mapped, encoding)
         }
-        StrOp::Compatible => {
-            let other = arg(0);
-            let (Some(other_bytes), Some(other_enc)) =
-                (string_bytes(scope, other), string_encoding(scope, other))
-            else {
-                return Err(Error::NoDispatch {
-                    op: "Encoding.compatible?",
-                    operands: "an argument that is not a String",
-                });
-            };
-            strings::compatible((encoding, &bytes), (other_enc, &other_bytes))
-                .map_or(Value::NIL, |index| fixnum(i64::from(index)))
-        }
         StrOp::Splice
         | StrOp::ByteSlice
+        | StrOp::ByteIndex
+        | StrOp::ByteRindex
+        | StrOp::CharByte
+        | StrOp::CharCount
+        | StrOp::Compatible
         | StrOp::EncodingInstall
         | StrOp::FloatFormat
         | StrOp::NeedsCharTable
@@ -14494,6 +14529,16 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             Builtin::String,
             &["__byte_index__"],
             Native::Str(StrOp::ByteIndex),
+        ),
+        (
+            Builtin::String,
+            &["__char_byte__"],
+            Native::Str(StrOp::CharByte),
+        ),
+        (
+            Builtin::String,
+            &["__char_count__"],
+            Native::Str(StrOp::CharCount),
         ),
         (
             Builtin::String,
