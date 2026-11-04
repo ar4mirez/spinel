@@ -738,8 +738,9 @@ class String
 end
 
 # The long tail (#19, second half). Ruby over the byte primitives: search is
-# `__byte_index__`, case is `__case_map__`, and every position a method
-# answers is converted to characters through `__char_offsets__`.
+# `__byte_index__`, case is `__case_map__`, and a position a method answers is
+# converted to characters through `__char_offsets__`, or, in `index`, by
+# walking only as far as it needs with `__char_byte__` and `__char_count__`.
 class String
   # --- positions -------------------------------------------------------------
 
@@ -765,11 +766,16 @@ class String
 
   # --- searching -------------------------------------------------------------
 
+  # Only a negative start counts the characters: otherwise the walk goes as
+  # far as the start, and back from the match only as far as it, so a match
+  # near the start of a long String costs what the search does (#617). A
+  # character is at least a byte, so a start past the bytesize is past the end
+  # however big it is.
   def index(pattern, start = 0)
     start = Integer.__index__(start)
-    size = length
-    start += size if start < 0
-    if start < 0 || start > size
+    start += length if start < 0
+    byte = start < 0 || start > bytesize ? nil : __char_byte__(start)
+    if byte.nil?
       $~ = nil if pattern.is_a?(Regexp)
       return nil
     end
@@ -779,8 +785,8 @@ class String
     end
     pattern = String.__coerce__(pattern)
     __combined_encoding__(pattern)
-    at = __byte_index__(pattern, __char_to_byte__(start))
-    at.nil? ? nil : __byte_to_char__(at)
+    at = __byte_index__(pattern, byte)
+    at.nil? ? nil : start + __char_count__(byte, at)
   end
 
   def rindex(pattern, *rest)
@@ -855,8 +861,10 @@ class String
     bytesize % newline.bytesize == 0 && b.end_with?(newline)
   end
 
+  # A boundary is where the walk to the character that starts at or after it
+  # lands, which goes no further than `byte` (#617).
   def __check_char_boundary__(byte)
-    return if byte == bytesize || __char_offsets__.include?(byte)
+    return if byte == bytesize || __char_byte__(__char_count__(0, byte)) == byte
     raise IndexError, "offset #{byte} does not land on character boundary"
   end
 

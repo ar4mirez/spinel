@@ -72,6 +72,15 @@ pub fn byte_range<'h>(
     scope.bytes(buffer)[start..end].to_vec()
 }
 
+/// The live bytes, borrowed where they lie: what a primitive that only reads
+/// part of a long String takes instead of `bytes`'s copy (#617).
+pub fn live<'s, 'h>(scope: &'s mut HandleScope<'h>, string: Handle<'h>) -> &'s [u8] {
+    let len = bytesize(scope, string);
+    let buffer = scope.slot(string, BUFFER);
+    let buffer = scope.root(buffer);
+    &scope.bytes(buffer)[..len]
+}
+
 /// The live bytes, copied out.
 pub fn bytes<'h>(scope: &mut HandleScope<'h>, string: Handle<'h>) -> Vec<u8> {
     let len = bytesize(scope, string);
@@ -294,11 +303,66 @@ pub fn char_offsets(encoding: u8, bytes: &[u8]) -> Option<Vec<usize>> {
 /// table of every character's position.
 #[must_use]
 pub fn single_byte(encoding: u8, bytes: &[u8]) -> bool {
-    encoding == BINARY
-        || encoding == US_ASCII
-        || bytewise(encoding)
-        || dummy(encoding)
-        || (ascii_compatible(encoding) && bytes.is_ascii())
+    every_byte_a_char(encoding) || (ascii_compatible(encoding) && bytes.is_ascii())
+}
+
+/// Whether `encoding` reads a character per byte whatever the bytes are, so
+/// that answering it needs no look at them.
+fn every_byte_a_char(encoding: u8) -> bool {
+    encoding == BINARY || encoding == US_ASCII || bytewise(encoding) || dummy(encoding)
+}
+
+/// The byte offset of character `char`, what `char_offsets(..)[char]` is,
+/// walking from the start only as far as it rather than building the table:
+/// a search near the start of a long String then costs what the search does
+/// (#617). `Some(None)` when `char` is past the length; `None` for an
+/// encoding this VM cannot walk, as `char_offsets` refuses it.
+#[must_use]
+pub fn char_byte(encoding: u8, bytes: &[u8], char: usize) -> Option<Option<usize>> {
+    if every_byte_a_char(encoding) {
+        return Some((char <= bytes.len()).then_some(char));
+    }
+    // Refused at once, as the table refuses it, rather than only when the
+    // walk reaches a character.
+    if !bytes.is_empty() {
+        char_len(encoding, bytes, 0)?;
+    }
+    let engine = multibyte(encoding);
+    let mut at = 0;
+    for _ in 0..char {
+        if at >= bytes.len() {
+            return Some(None);
+        }
+        at += match engine {
+            Some(engine) => engine.char_width(bytes, at),
+            None => char_len(encoding, bytes, at)?,
+        };
+    }
+    Some(Some(at.min(bytes.len())))
+}
+
+/// How many characters start in `from..to`, walking from `from`, itself a
+/// character's start: the character index of byte `to` less that of `from`,
+/// as a search of `char_offsets` for the first offset at or past `to` answers
+/// it, without building the table (#617). `None` for an encoding this VM
+/// cannot walk.
+#[must_use]
+pub fn char_count(encoding: u8, bytes: &[u8], from: usize, to: usize) -> Option<usize> {
+    let to = to.min(bytes.len());
+    if every_byte_a_char(encoding) {
+        return Some(to.saturating_sub(from));
+    }
+    let engine = multibyte(encoding);
+    let mut at = from;
+    let mut count = 0;
+    while at < to {
+        count += 1;
+        at += match engine {
+            Some(engine) => engine.char_width(bytes, at),
+            None => char_len(encoding, bytes, at)?,
+        };
+    }
+    Some(count)
 }
 
 /// Whether every byte sequence is a character of `encoding`; `None` when this
@@ -877,6 +941,40 @@ mod tests {
         assert_eq!(char_offsets(UTF_8, b"\xc0\xaf"), Some(vec![0, 1, 2]));
         // A truncated sequence: the lead byte alone, then the rest.
         assert_eq!(char_offsets(UTF_8, b"\xe2\x82"), Some(vec![0, 1, 2]));
+    }
+
+    #[test]
+    fn a_walk_answers_what_the_table_does() {
+        let samples: [(u8, &[u8]); 6] = [
+            (UTF_8, "aé€😀b".as_bytes()),
+            (UTF_8, b"\xff\xe2\x82a\xc0\xaf"),
+            (BINARY, "é".as_bytes()),
+            (US_ASCII, b"\xffab"),
+            (CESU_8, b"a\xed\xa0\x81\xed\xb0\x80\xed\x9f\xbfb"),
+            (SHIFT_JIS, b"a\x82\x61b\x82"),
+        ];
+        for (encoding, bytes) in samples {
+            let offsets = char_offsets(encoding, bytes).expect("a walkable encoding");
+            let length = offsets.len() - 1;
+            for char in 0..=length + 1 {
+                let expected = offsets.get(char).copied();
+                assert_eq!(
+                    char_byte(encoding, bytes, char),
+                    Some(expected),
+                    "{bytes:?} {char}"
+                );
+            }
+            for (char, &from) in offsets.iter().enumerate() {
+                for to in from..=bytes.len() {
+                    let at = offsets.partition_point(|&offset| offset < to);
+                    assert_eq!(
+                        char_count(encoding, bytes, from, to),
+                        Some(at - char),
+                        "{bytes:?} {from}..{to}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
