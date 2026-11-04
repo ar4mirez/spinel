@@ -1145,7 +1145,7 @@ end
   # attribute's quote opens with the first character it makes and closes
   # at the end (#466, #468): each piece is escaped without its quotes. `taken`
   # is what came off the buffer, where that is not `bytes` themselves.
-  def __decode__(bytes, taken = bytes)
+  def __decode__(bytes, taken = bytes, universal = false)
     return __convert_in__(bytes) || __in_read__("") if __stream_in__?
     bytes.force_encoding(__encoding__)
     xml = __xml_in__
@@ -1155,7 +1155,9 @@ end
       out = out.byteslice(1, out.bytesize - 2).force_encoding(bytes.encoding) if xml == :attr
     else
       begin
-        out = bytes.encode(__read_encoding__, **__read_options__(@ecopts))
+        options = __read_options__(@ecopts)
+        options[:universal_newline] = true if universal
+        out = bytes.encode(__read_encoding__, **options)
       rescue Encoding::InvalidByteSequenceError, Encoding::UndefinedConversionError => error
         __give_back_past_error__(taken)
         raise error
@@ -1744,20 +1746,90 @@ end
           end
         end
         if unit == 1
+          return __replaced_past_cr__(cr) if __replaces_past_cr__?
           @rpend = __take__(1)
           return
         end
+      end
+      if __replaces_past_cr__? && __undefined_in__?(@rbuf.byteslice(0, unit))
+        out = __decode__(__take__(unit))
+        @rpend = cr
+        return out
       end
     when 2
       high = __encoding__ == Encoding::UTF_16LE ? head.getbyte(1) : head.getbyte(0)
       return if high & 0xF8 == 0xD8
     end
     @cbuf = (@cbuf || "".b) << __decode__(__take__(unit)).b
+    nil
+  end
+
+  # Whether the character past a lone CR is replaced on the read the CR
+  # answers: CRuby's transcoder, which comes before the decorator, reads it
+  # there, and its replacement comes out ahead of the decorator, which still
+  # holds the CR, so the `"\n"` comes after it, `pos` past it, and a LF
+  # after it makes a CRLF of the CR (#626). Measured. From UTF-8 into UTF-16
+  # or UTF-32 the decorator comes first, and so does the `"\n"`.
+  def __replaces_past_cr__?
+    !@enc2.nil? && !__stream_in__? && (__encoding__ != Encoding::UTF_8 || __read_encoding__.ascii_compatible?)
+  end
+
+  # The replacement for bytes past a lone CR that make no character. The
+  # CR is held again, `@rpend`, and so is what the transcoder read past
+  # them to tell, which is its own, so `pos` is past both and the next read
+  # starts with them (#626). Measured.
+  def __replaced_past_cr__(cr)
+    window = @rbuf.byteslice(0, [@rbuf.bytesize, 4].min).force_encoding(__encoding__)
+    broken = 1
+    again = 0
+    begin
+      window.encode(__read_encoding__)
+    rescue Encoding::InvalidByteSequenceError => error
+      broken = error.error_bytes.bytesize
+      again = error.readagain_bytes.to_s.bytesize
+    end
+    out = __decode__(__take__(broken))
+    @rpend = cr + __take__(again)
+    out
+  end
+
+  # Whether a whole character has no spelling in the encoding reads answer
+  # in, and `undef: :replace` replaces it.
+  def __undefined_in__?(bytes)
+    return false unless @ecopts[:undef] == :replace
+    bytes.dup.force_encoding(__encoding__).encode(__read_encoding__)
+    false
+  rescue Encoding::UndefinedConversionError
+    true
+  end
+
+  # A line that a lone CR ends, where `__read_ahead__` replaced what came
+  # past it: the replacement comes before the `"\n"`, and the CR it held
+  # again is told from a CRLF as before, which a line reads on to (#626).
+  def __before_newline__(text, before, cr, unit)
+    return text if before.nil?
+    nl = "\n".encode(text.encoding).b
+    text = text.b
+    text = text.byteslice(0, text.bytesize - nl.bytesize) if text.end_with?(nl)
+    lf = "\n".encode(__encoding__).b
+    loop do
+      text << before.b
+      __unpend__
+      __take__(cr.bytesize)
+      nil while @rbuf.bytesize < lf.bytesize && __fill__(lf.bytesize - @rbuf.bytesize)
+      if @rbuf.byteslice(0, lf.bytesize) == lf
+        __take__(lf.bytesize)
+        break
+      end
+      before = __read_ahead__(cr, unit)
+      break if before.nil?
+    end
+    (text << nl).force_encoding(__read_encoding__)
   end
 
   # Whether bytes past a lone CR that make no character raise on that read:
-  # a replacement waits for the next, and a read through `@readconv` has the
-  # converter read past the CR itself.
+  # a replacement is made there, `__replaced_past_cr__` (#626), and a read
+  # through `@readconv` has the converter read past the CR itself.
   def __raises_past_cr__? = @ecopts[:invalid] != :replace && !__stream_in__?
 
   # The bytes the converter kept past a lone CR go back before the buffer,
@@ -2194,7 +2266,14 @@ end
         return buffer.replace(out)
       end
       begin
-        out = __newlines_in__(__decode__(__take__(@rbuf.bytesize)))
+        # A replacement past a lone CR comes before its `"\n"`, as the
+        # transcoder that comes first makes it (#626).
+        bytes = __take__(@rbuf.bytesize)
+        out = if __replaces_past_cr__? && __universal_newline__? && (__replaces_invalid__? || @ecopts[:undef] == :replace)
+          __decode__(bytes, bytes, true)
+        else
+          __newlines_in__(__decode__(bytes))
+        end
       rescue Encoding::InvalidByteSequenceError, Encoding::UndefinedConversionError
         __take_chars__
         raise
@@ -2438,7 +2517,7 @@ end
         @rbuf = taken.b + @rbuf
         line = __converted_line__(separator, wanted, limit, unit)
       elsif cr
-        __read_ahead__(cr, unit)
+        line = __before_newline__(line, __read_ahead__(cr, unit), cr, unit)
       end
     else
       bytes = __line_bytes__(wanted, limit, true)
@@ -2572,7 +2651,7 @@ end
           else
             made = __within_limit__(out, piece, bytes, taken, limit, enc) if piece && room && room > 0 && piece.bytesize > limit - out.bytesize
             piece, cr = made, nil if made
-            __read_ahead__(cr, unit) if cr
+            piece = __before_newline__(piece, __read_ahead__(cr, unit), cr, unit) if cr
           end
         else
           bytes = __line_bytes__(wanted, room)
@@ -3323,7 +3402,12 @@ end
     end
     char, cr = __newline_char_in__(char)
     out = __decode__(char)
-    __read_ahead__(cr, cr.bytesize) if cr
+    # A replacement past a lone CR is all this read makes: the CR is held
+    # again, for the next to tell (#626).
+    if cr && (before = __read_ahead__(cr, cr.bytesize))
+      __hold_chars__(before.b)
+      return __take_char__
+    end
     __hand_out__(out)
   end
 
