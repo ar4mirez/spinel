@@ -317,8 +317,11 @@ class File < IO
     end
   end
 
+  # What writes in progress have gathered goes first, as `rb_file_size`'s
+  # `flush_before_seek` on an IO that writes.
   def size
     __check_open__
+    __flush_gathered__ if __writes__?
     stat.size
   end
 
@@ -340,17 +343,22 @@ class File < IO
   end
 
   # CRuby's `rb_file_truncate`: the length first, then the IO, whose bytes
-  # buffered are given back as `flush` gives them.
+  # buffered are given back as `flush` gives them, and what writes in progress
+  # have gathered written.
   def truncate(length)
     length = Integer.__index__(length)
     __writable__
+    __flush_gathered__
     IO.__check__(__fs_truncate__(@fileno, length), @path)
     0
   end
 
-  # `flock(2)`. With `LOCK_NB`, a lock someone else holds is `false`.
+  # `flock(2)`. With `LOCK_NB`, a lock someone else holds is `false`. What
+  # writes in progress have gathered goes first, as `rb_file_flock` flushes an
+  # IO that writes.
   def flock(operation)
     __check_open__
+    __flush_gathered__ if __writes__?
     result = __fd_flock__(@fileno, Integer.__index__(operation))
     return false if result == Errno::EWOULDBLOCK::Errno && Integer.__index__(operation) & LOCK_NB != 0
     IO.__check__(result, @path)

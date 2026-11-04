@@ -903,9 +903,12 @@ end
     raise IOError, "closed stream" if @closed
   end
 
+  # CRuby's `rb_io_check_char_readable`, which flushes the write buffer first:
+  # here what writes in progress have gathered.
   def __readable__
     __check_open__
     raise IOError, "not opened for reading" unless __reads__?
+    __flush_gathered__ if @wgathered && !@wgathered.empty?
   end
 
   # CRuby's `rb_io_check_writable`. Bytes read ahead are bytes the descriptor
@@ -3463,9 +3466,12 @@ end
     end
   end
 
+  # CRuby's `rb_io_sysseek` refuses bytes read ahead, and only warns of a write
+  # buffer holding bytes, here what writes in progress have gathered.
   def sysseek(offset, whence = IO::SEEK_SET)
     __check_open__
     raise IOError, "sysseek for buffered IO" unless @rbuf.empty? && !__chars_held__?
+    warn("sysseek for buffered IO", uplevel: 1) if @wgathered&.any? { |text| !text.empty? }
     IO.__check__(__fd_seek__(@fileno, IO.__c_long__(offset), __whence__(whence)), @path)[0]
   end
 
@@ -3526,11 +3532,9 @@ end
   # other `rest` finds the stream closed. So does the last object if it brought
   # the close with sync on, as `io_fwrite` tests sync after its `to_s`, and has
   # bytes. A tty is found only when a `to_s` flushes, where the list goes, so its
-  # text is `rest`. A `flush`, `fsync`, `seek`, `pos` or `dup` there writes it
-  # too, as each flushes CRuby's buffer. Measured.
-  # ponytail: a `truncate`, `reopen`, read, `File#size` or `File#flock` there
-  # still leaves it gathered, and `sysseek` does not warn (#612); upgrade with a
-  # `__flush_gathered__` at each.
+  # text is `rest`. A `flush`, `fsync`, `seek`, `pos`, `dup`, `truncate`,
+  # `reopen` with a path, a read, `File#size` or `File#flock` there writes it
+  # too, as each flushes CRuby's buffer, and `sysseek` warns of it. Measured.
   def __write_gathered__(objects)
     if @sync
       rest = __gather__(objects, 0)
@@ -3700,8 +3704,11 @@ end
       @duplex = nil
       @rmoded = true
     end
-    # The bytes buffered go, even if what is named does not open; the read
-    # converter and the characters it holds stay, whatever was opened.
+    # What writes in progress have gathered is written if the IO now writes,
+    # as `rb_io_reopen` flushes by the new mode. The bytes buffered go, even if
+    # what is named does not open; the read converter and the characters it
+    # holds stay, whatever was opened.
+    __flush_gathered__ if !@closed && __writes__?
     @rbuf = "".b
     __keep_readconv__
     fd = IO.__check__(__fd_open__(path, flags, 0666), path, "rb_sysopen")[0]
