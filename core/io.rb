@@ -3272,6 +3272,7 @@ end
       # that is held: it is read again with the bytes after it (#472).
       @rbuf = __take_chars__ << @rbuf
     end
+    pended = !@rpend.nil?
     __unpend__
     if __stream_in__?
       made = __next_chars__ || __finish_in__
@@ -3312,6 +3313,13 @@ end
     if char.bytesize > 1 && !@rquote && @enc2.nil? && __xml_in__ == :attr
       @rbuf = char.byteslice(1, char.bytesize - 1).b << @rbuf
       char = char.byteslice(0, 1)
+    end
+    # The decorators alone hold a CR they reach until a later read sees the
+    # byte after it: this read takes the CR and makes only the quote, and
+    # `pos` is past the CR alone (#624). Measured.
+    if !pended && @enc2.nil? && __xml_in__ == :attr && __universal_newline__? && char.b == "\r".b
+      @rpend = char.b
+      return __hand_out__(@rquote ? "" : (@rquote = true; __in_read__("\"")))
     end
     char, cr = __newline_char_in__(char)
     out = __decode__(char)
