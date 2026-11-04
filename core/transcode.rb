@@ -886,10 +886,11 @@ class Encoding
 
     # The ASCII-compatible encoding a non-ASCII-compatible one converts
     # through: UTF-8 for UTF-16 and UTF-32. nil for one that is already
-    # ASCII-compatible. Measured.
+    # ASCII-compatible, and for a name that resolves to none, "internal" with
+    # no default internal among them (#622). Measured.
     def self.asciicompat_encoding(encoding)
       encoding = __encoding__(encoding)
-      return nil if encoding.ascii_compatible?
+      return nil if encoding.nil? || encoding.ascii_compatible?
       return Encoding.find("stateless-ISO-2022-JP") if encoding.name == "ISO-2022-JP"
       return Encoding::UTF_8 if [3, 4, 5, 6, 7, 8].include?(encoding.__index__)
       nil
