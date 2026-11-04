@@ -3022,10 +3022,17 @@ end
     view = line[:view]
     from = 0
     cut = nil
+    # In Shift_JIS, Big5 or GBK only where a character starts, as in
+    # `__line_bytes__` (#629).
+    chars = enc unless wanted.nil? || __starts_char__?(wanted)
+    edge = 0
     while cut.nil?
       at = wanted.nil? ? nil : view.index(wanted, from)
       # In UTF-16 or UTF-32 only at a character's start.
       at = view.index(wanted, at + 1) while at && at % unit != 0
+      until chars.nil? || at.nil? || (edge = __char_edge__(view, edge, at, chars)) == at
+        at = view.index(wanted, at + 1)
+      end
       if at
         cut = at + wanted.bytesize
       elsif !limit.nil? && limit > 0 && view.bytesize >= limit
