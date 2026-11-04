@@ -738,8 +738,9 @@ class String
 end
 
 # The long tail (#19, second half). Ruby over the byte primitives: search is
-# `__byte_index__`, case is `__case_map__`, and every position a method
-# answers is converted to characters through `__char_offsets__`.
+# `__byte_index__`, case is `__case_map__`, and a position a method answers is
+# converted to characters through `__char_offsets__`, or, in `index`, by
+# walking only as far as it needs with `__char_byte__` and `__char_count__`.
 class String
   # --- positions -------------------------------------------------------------
 
