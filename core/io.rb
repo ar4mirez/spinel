@@ -2941,11 +2941,16 @@ end
     bytes
   end
 
-  # Whether the last character of `bytes`, read as `enc`, is cut short.
+  # Whether the last character of `bytes`, read as `enc`, is cut short. A
+  # broken one reads as a character per byte, GB18030's "\x81\x30" as "\x81"
+  # and "0", so the tail from each of the last three starts is asked.
   def __last_cut_short__?(bytes, enc)
-    last = nil
-    bytes.dup.force_encoding(enc).each_char { |char| last = char }
-    !last.nil? && __held_cut_short__?(last.b, enc)
+    tail = []
+    bytes.dup.force_encoding(enc).each_char do |char|
+      tail << char.b
+      tail.shift if tail.size > 3
+    end
+    (0...tail.size).any? { |at| __held_cut_short__?(tail.drop(at).join.b, enc) }
   end
 
   # The bytes of the next line as read, or nil at the end: up to the
@@ -3002,6 +3007,14 @@ end
           at -= unit if unit == 2 && at >= unit && (@rbuf.getbyte(enc == Encoding::UTF_16LE ? at + 1 : at) || 0) & 0xFC == 0xDC
           break unless __held_cut_short__?(@rbuf.byteslice(at, cut - at), enc) && (cut < @rbuf.bytesize || __fill__)
           cut += 1
+        end
+      elsif !enc.dummy? && !enc.__single_byte__
+        # In Shift_JIS, EUC-JP, Big5, GBK and the like to the end of the
+        # character, as the universal newline path does (#553, #628).
+        extra = 0
+        while extra < 4 && __last_cut_short__?(@rbuf.byteslice(0, cut), enc) && (cut < @rbuf.bytesize || __fill__)
+          cut += 1
+          extra += 1
         end
       end
     end
