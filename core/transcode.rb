@@ -1042,6 +1042,19 @@ class Encoding
       buffer.bytes.bytesize - buffer.at
     end
 
+    # Whether the converter holds nothing a new one would not: no part of a
+    # character read, nothing to read again or still to write, nothing
+    # finished or inserted, and no transcoder's state moved. `IO` reads a line
+    # at a time again from such a one (#609).
+    def __idle__?
+      return false unless @num_finished == 0 && __unread__(@in_buf) == 0
+      @elements.all? do |element|
+        element.readbuf.empty? && element.readagain.empty? && element.writebuf.empty? &&
+          __unread__(element.out) == 0 && element.phase == :read && !element.finishing &&
+          (element.state == 0 || element.state == false)
+      end
+    end
+
     # The next `count` bytes of `buffer`, read.
     def __read__(buffer, count)
       taken = buffer.bytes.__byteslice__(buffer.at, count)

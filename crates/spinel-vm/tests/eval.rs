@@ -589,3 +589,19 @@ fn a_line_whose_replacement_moves_past_the_newline_reads_all_that_is_buffered() 
         "[[34, 0, 61, 216, 0, 222, 253, 255, 253, 255, 253, 255, 253, 255, 10, 0], 15, [253, 255, 10, 0], 15]"
     );
 }
+
+/// After a clean line under `xml:`, a `getc` on a byte to replace gives CRuby
+/// 4.0.9's converter all that is buffered, and it does not stop for a
+/// replacement, so `pos` is past every byte, and the next line is what it made
+/// (#609). Its conversion of this input never ends but at its 128KB of room:
+/// never run it under CRuby without a memory cap and a SIGKILL timeout,
+/// `systemd-run --user --scope -p MemoryMax=1500M -p MemorySwapMax=0 timeout
+/// -k 5 120 ruby ...`, and read it with a bound.
+#[test]
+fn a_getc_after_a_clean_line_reads_all_that_is_buffered() {
+    let source = r#"n = "/tmp/spinel-eval-#{Process.pid}-609c"; File.binwrite(n, "\xF0\x9F\x98\x81\n\xE3\x81\xFF\xFE\xE3\x81\x00\n\xE3\n\r".b); r = File.open(n, "r:UTF-8:UTF-16LE", invalid: :replace, xml: :attr) { |f| [f.readline(100).bytes, f.getc.bytes, f.pos, f.gets(9).bytes, f.pos] }; File.delete(n); r"#;
+    assert_eq!(
+        eval(source).unwrap(),
+        "[[34, 0, 61, 216, 1, 222, 10, 0], [253, 255], 16, [253, 255, 253, 255, 253, 255, 10, 0], 16]"
+    );
+}

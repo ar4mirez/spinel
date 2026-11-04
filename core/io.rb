@@ -2377,7 +2377,9 @@ end
     stream = __stream_in__?
     kept = @rkept || __newline_on_bytes__?
     # So does one with a converter that has finished, which it finds (#551).
-    converted = paragraph ? __read_converter__? : stream || __chars_read__? || __xml_in__ || @rfinished && __read_converter__? || !limit.nil? && __converts_bytes__?
+    # A read without options has no decorator, and looks no further.
+    options = !@ecopts.empty?
+    converted = paragraph ? __read_converter__? : stream || __chars_read__? || options && __xml_in__ || @rfinished && __read_converter__? || !limit.nil? && __converts_bytes__?
     # Blank lines before a record are not part of it.
     __swallow__(unit) if paragraph
     wanted = nil
@@ -2408,8 +2410,14 @@ end
       line = bytes.nil? ? nil : __decode__(bytes, taken)
       __read_ahead__(cr, unit) if cr
     else
-      line = __line_bytes__(wanted, limit, true)
-      line = __newlines_in__(__decode__(line)) unless line.nil?
+      bytes = __line_bytes__(wanted, limit, true)
+      line = bytes.nil? ? nil : __newlines_in__(__decode__(bytes))
+      # A line with a byte to replace goes back, to be read as the converter
+      # makes it, which `__moved_past__?` sends on past it (#609).
+      if line && options && __replaces_invalid__? && !bytes.valid_encoding?
+        @rbuf = bytes.b + @rbuf
+        line = __converted_line__(separator, wanted, limit, unit)
+      end
     end
     return nil if line.nil?
     # CRuby's `nolimit`: a line the limit cut short is not counted (#480).
@@ -2529,7 +2537,7 @@ end
           bytes = __line_bytes__(wanted, room)
           quote = @rquote
           piece = bytes.nil? ? nil : __newlines_in__(__decode__(__rest_of_char__(bytes, wanted)))
-          if piece && @ecopts[:xml] && __moved_past__?(piece, bytes, sep, wanted, enc)
+          if piece && !@ecopts.empty? && __moved_past__?(piece, bytes, sep, wanted, enc)
             __stream_from__(bytes, quote)
             stream = true
             piece = __next_chars__
@@ -2552,7 +2560,20 @@ end
     end
     return nil if cut == 0
     __hold_chars__(out.byteslice(cut, out.bytesize - cut)) if cut < out.bytesize
+    __leave_stream__ if stream
     out.byteslice(0, cut).force_encoding(enc)
+  end
+
+  # Reads go a line of bytes at a time again once the converter they went
+  # through after a replacement without `xml:` (#609) holds nothing: a new
+  # one, as `String#encode` makes, goes as it would, and the next line with
+  # a byte to replace comes back to it. Otherwise every line after one bad
+  # byte would go a character at a time, ten times slower. With `xml:` the
+  # converter keeps an attribute's quote, so it stays (#566).
+  def __leave_stream__
+    return unless @rstream && __xml_in__.nil? && @readconv&.__idle__?
+    @rstream = false
+    @readconv = nil
   end
 
   # Whether the decorator moved what came before the separator in a line of
@@ -2562,16 +2583,27 @@ end
   # converter is given all that is buffered and does not stop for a
   # replacement, so the line ends where the separator is found in what it
   # makes of them, and `pos` is past them all (#566). So any line with a byte
-  # to replace goes that way; without `xml:` nothing moves. Measured.
+  # to replace goes that way. Without `xml:` nothing moves, but the converter
+  # still goes on past the separator after a replacement, so `pos` is past
+  # what it went on to (#609). Measured.
   def __moved_past__?(piece, bytes, sep, wanted, enc)
-    return false if sep.nil? || wanted.nil? || __xml_in__.nil?
-    return true unless bytes.valid_encoding?
+    return false if sep.nil? || wanted.nil?
+    xml = __xml_in__
+    # Without an internal encoding only a decorator converts.
+    return !xml.nil? || !@enc2.nil? unless bytes.valid_encoding?
+    return false if xml.nil?
     # Valid bytes are replaced only where they have no character there.
     return false if @ecopts[:undef] != :replace || __ends_in__?(piece, sep) || !__ends_in__?(bytes, wanted)
     made = piece.b
     at = made.index(sep)
     at = made.index(sep, at + 1) until at.nil? || __char_edge__(made, 0, at, enc) == at
     !at.nil?
+  end
+
+  # Whether the read converter replaces bytes that make no character: an
+  # internal encoding and `invalid: :replace`. Without one nothing converts.
+  def __replaces_invalid__?
+    !@enc2.nil? && @ecopts[:invalid] == :replace
   end
 
   # Whether `text` ends in the bytes of `tail`, a byte at a time: a copy of
@@ -3204,6 +3236,7 @@ end
       made = __next_chars__ || __finish_in__
       return nil if made.nil?
       __hold_chars__(made.b)
+      __leave_stream__
       return __take_char__
     end
     return __finish_in__ if @rfinished && __read_converter__?
@@ -3221,7 +3254,16 @@ end
     nil while @rbuf.bytesize < length && __fill__(length - @rbuf.bytesize)
     length = @rbuf.bytesize if length > @rbuf.bytesize
     char = __take__(length).force_encoding(__encoding__)
-    return __hand_out__(__broken_char__(char)) unless char.valid_encoding?
+    unless char.valid_encoding?
+      # A byte to replace: CRuby's converter is given all that is buffered
+      # and does not stop for a replacement, so `pos` is past what it went on
+      # to (#609). From here the IO reads through it, as after such a line.
+      if __replaces_invalid__?
+        __stream_from__(char, @rquote)
+        return getc
+      end
+      return __hand_out__(__broken_char__(char))
+    end
     # Without an internal encoding CRuby's converter is the decorators alone,
     # which go a byte at a time, and the first output it stops after is an
     # attribute's quote with the first byte: the rest is still to be read,
