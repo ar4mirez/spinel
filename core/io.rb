@@ -3003,6 +3003,14 @@ end
           break unless __held_cut_short__?(@rbuf.byteslice(at, cut - at), enc) && (cut < @rbuf.bytesize || __fill__)
           cut += 1
         end
+      elsif !enc.dummy? && !enc.__single_byte__
+        # In Shift_JIS, EUC-JP, Big5, GBK and the like to the end of the
+        # character, as the universal newline path does (#553, #628).
+        extra = 0
+        while extra < 4 && __last_cut_short__?(@rbuf.byteslice(0, cut), enc) && (cut < @rbuf.bytesize || __fill__)
+          cut += 1
+          extra += 1
+        end
       end
     end
     cut == 0 ? nil : __take__(cut)
