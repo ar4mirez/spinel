@@ -2408,7 +2408,14 @@ end
     elsif unit
       bytes, cr, taken = __universal_line__(wanted, limit, unit, true)
       line = bytes.nil? ? nil : __decode__(bytes, taken)
-      __read_ahead__(cr, unit) if cr
+      # A line with a byte to replace goes back, CRs and all, to be read as
+      # the converter makes it, its universal newline in it (#610).
+      if line && options && __replaces_invalid__? && !bytes.valid_encoding?
+        @rbuf = taken.b + @rbuf
+        line = __converted_line__(separator, wanted, limit, unit)
+      elsif cr
+        __read_ahead__(cr, unit)
+      end
     else
       bytes = __line_bytes__(wanted, limit, true)
       line = bytes.nil? ? nil : __newlines_in__(__decode__(bytes))
@@ -2529,10 +2536,19 @@ end
           piece = nil
         elsif unit
           bytes, cr, taken = __universal_line__(wanted, room, unit)
+          quote = @rquote
           piece = bytes.nil? ? nil : __decode__(bytes, taken)
-          made = __within_limit__(out, piece, bytes, taken, limit, enc) if piece && room && room > 0 && piece.bytesize > limit - out.bytesize
-          piece, cr = made, nil if made
-          __read_ahead__(cr, unit) if cr
+          if piece && !@ecopts.empty? && __moved_past__?(piece, bytes, sep, wanted, enc)
+            # The bytes as read go back, CRs and all, for the converter's
+            # universal newline to make them as CRuby's does (#610).
+            __stream_from__(taken, quote)
+            stream = true
+            piece = __next_chars__
+          else
+            made = __within_limit__(out, piece, bytes, taken, limit, enc) if piece && room && room > 0 && piece.bytesize > limit - out.bytesize
+            piece, cr = made, nil if made
+            __read_ahead__(cr, unit) if cr
+          end
         else
           bytes = __line_bytes__(wanted, room)
           quote = @rquote
