@@ -1341,6 +1341,10 @@ end
       @finished = true
       held.b.force_encoding(@encoding)
     end
+
+    # It makes as much as it reads, so it never stops short (#611).
+    def __goes_on__=(_goes_on); end
+    def __suspended__? = false
   end
   private_constant :NewlineBytes
 
@@ -1358,10 +1362,21 @@ end
   # stays held, in the buffer `fill_cbuf` was filling: only a read that had
   # taken what it made before loses that. A converter that has finished reads
   # nothing and answers nil, as `fill_cbuf`'s MORE_CHAR_FINISHED: the bytes
-  # wait in the buffer for the converter made after it. Measured.
-  def __convert_onto__(bytes, out, room, flags)
+  # wait in the buffer for the converter made after it. Measured. With
+  # `goes_on`, a conversion that never ends stops short each call and the
+  # next goes on with it (#611).
+  def __convert_onto__(bytes, out, room, flags, goes_on = false)
     @readconv ||= __make_readconv__
-    result = @readconv.primitive_convert(bytes, out, nil, room, flags)
+    if goes_on
+      @readconv.__goes_on__ = true
+      begin
+        result = @readconv.primitive_convert(bytes, out, nil, room, flags)
+      ensure
+        @readconv.__goes_on__ = false
+      end
+    else
+      result = @readconv.primitive_convert(bytes, out, nil, room, flags)
+    end
     out.force_encoding(__read_encoding__) if @rkept
     return out if result == :source_buffer_empty
     if result == :after_output || result == :destination_buffer_full || result == :finished
@@ -1399,15 +1414,21 @@ end
   # `getc` with options on a long file. The upgrade is the cheaper call below.
   # ponytail: a call of the converter for each character, which is most of
   # what a `getc` costs here. The upgrade is a cheaper call.
-  def __next_chars__
+  # With `goes_on`, for `gets` with a limit, a conversion that never ends but
+  # at its room, as `xml:` after a broken sequence (#543), goes on from where
+  # its last call stopped short of that, with nothing left to read, as
+  # CRuby's `fill_cbuf` does after MORE_CHAR_SUSPENDED; so the limit takes
+  # that much of what it makes, and the next read goes on with it (#611).
+  # Without it the read ends there, where CRuby's never does.
+  def __next_chars__(goes_on = false)
     __unpend__ if @rkept
     return nil if @rfinished
     flags = Encoding::Converter::PARTIAL_INPUT | Encoding::Converter::AFTER_OUTPUT
     out = String.new(encoding: __read_encoding__)
-    while !@rbuf.empty? || __fill__
+    while !@rbuf.empty? || goes_on && @readconv&.__suspended__? || __fill__
       plain = __plain_readconv__?
       count = NewlineBytes === @readconv ? 1 : (plain ? NEXT_CHARS_BYTES : @rbuf.bytesize)
-      return nil unless __convert_onto__(__take__(count), out, plain ? nil : READ_CONVERTER_BYTES, flags)
+      return nil unless __convert_onto__(__take__(count), out, plain ? nil : READ_CONVERTER_BYTES, flags, goes_on)
       next if out.empty?
       @rnewline = out.getbyte(-1) == 0x0A
       return out
@@ -2513,6 +2534,7 @@ end
     cut = nil
     stream = __stream_in__?
     runs = stream && __line_runs__?(sep, enc)
+    goes_on = !limit.nil? && limit > 0
     while cut.nil?
       # `out` is bytes: `String#index` would tabulate every character of it
       # on each search, which grows with the record (#585).
@@ -2531,7 +2553,7 @@ end
         from = sep.nil? ? 0 : [out.bytesize - sep.bytesize + 1, 0].max
         room = limit.nil? || limit <= 0 ? limit : [limit - out.bytesize, 1].max
         if stream
-          piece = runs ? __chars_to_line_end__(sep, room) : __next_chars__
+          piece = runs ? __chars_to_line_end__(sep, room) : __next_chars__(goes_on)
         elsif @rfinished
           piece = nil
         elsif unit
@@ -2543,7 +2565,7 @@ end
             # universal newline to make them as CRuby's does (#610).
             __stream_from__(taken, quote)
             stream = true
-            piece = __next_chars__
+            piece = __next_chars__(goes_on)
           else
             made = __within_limit__(out, piece, bytes, taken, limit, enc) if piece && room && room > 0 && piece.bytesize > limit - out.bytesize
             piece, cr = made, nil if made
@@ -2556,7 +2578,7 @@ end
           if piece && !@ecopts.empty? && __moved_past__?(piece, bytes, sep, wanted, enc)
             __stream_from__(bytes, quote)
             stream = true
-            piece = __next_chars__
+            piece = __next_chars__(goes_on)
           elsif piece && room && room > 0 && piece.bytesize > limit - out.bytesize
             piece = __within_limit__(out, piece, bytes, bytes, limit, enc) || piece
           end
