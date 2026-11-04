@@ -1811,11 +1811,11 @@ end
     nl = "\n".encode(text.encoding).b
     text = text.b
     text = text.byteslice(0, text.bytesize - nl.bytesize) if text.end_with?(nl)
+    lf = "\n".encode(__encoding__).b
     loop do
       text << before.b
       __unpend__
       __take__(cr.bytesize)
-      lf = "\n".encode(__encoding__).b
       nil while @rbuf.bytesize < lf.bytesize && __fill__(lf.bytesize - @rbuf.bytesize)
       if @rbuf.byteslice(0, lf.bytesize) == lf
         __take__(lf.bytesize)
@@ -2269,7 +2269,11 @@ end
         # A replacement past a lone CR comes before its `"\n"`, as the
         # transcoder that comes first makes it (#626).
         bytes = __take__(@rbuf.bytesize)
-        out = __replaces_past_cr__? && __universal_newline__? && (__replaces_invalid__? || @ecopts[:undef] == :replace) ? __decode__(bytes, bytes, true) : __newlines_in__(__decode__(bytes))
+        out = if __replaces_past_cr__? && __universal_newline__? && (__replaces_invalid__? || @ecopts[:undef] == :replace)
+          __decode__(bytes, bytes, true)
+        else
+          __newlines_in__(__decode__(bytes))
+        end
       rescue Encoding::InvalidByteSequenceError, Encoding::UndefinedConversionError
         __take_chars__
         raise
