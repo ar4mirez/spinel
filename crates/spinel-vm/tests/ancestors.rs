@@ -55,8 +55,15 @@ fn parse(text: &str) -> Vec<Case<'_>> {
     cases
 }
 
-#[test]
-fn spinel_agrees_with_the_ruby_ancestors_table() {
+/// How many tests the table is dealt across. Under miri each case builds and
+/// bootstraps its own heap, which is minutes interpreted, so one test holding
+/// every case was the longest test in the job by far; dealt across six, each
+/// part is one miri-selected case and the parts run side by side.
+const PARTS: usize = 6;
+
+/// The cases at positions `part`, `part + PARTS`, … of the ones this run
+/// checks. The six parts together are every one of them, each exactly once.
+fn spinel_agrees_with_the_ruby_ancestors_table(part: usize) {
     let cases = parse(TABLE);
     assert!(
         cases.len() > 20,
@@ -66,15 +73,21 @@ fn spinel_agrees_with_the_ruby_ancestors_table() {
     let mut checked = 0;
 
     // Under miri, every eighth case — six, spread across the table. Each case
-    // builds and bootstraps a fresh heap, which is ~20s interpreted, and
-    // every case drives the same unsafe paths (allocation, bootstrap, class
-    // definition); what differs between them is ordering logic in safe Rust,
-    // which the ordinary `cargo test` jobs check in full.
+    // builds and bootstraps a fresh heap, which is a minute or more
+    // interpreted, and every case drives the same unsafe paths (allocation,
+    // bootstrap, class definition); what differs between them is ordering
+    // logic in safe Rust, which the ordinary `cargo test` jobs check in full.
     #[cfg(not(miri))]
     const STRIDE: usize = 1;
     #[cfg(miri)]
     const STRIDE: usize = 8;
-    let cases: Vec<_> = cases.into_iter().step_by(STRIDE).collect();
+    let cases: Vec<_> = cases
+        .into_iter()
+        .step_by(STRIDE)
+        .skip(part)
+        .step_by(PARTS)
+        .collect();
+    assert!(!cases.is_empty(), "part {part} of {PARTS} has no cases");
 
     for case in &cases {
         let mut heap = Heap::new();
@@ -158,4 +171,34 @@ fn spinel_agrees_with_the_ruby_ancestors_table() {
         "{checked} expectations for {} cases",
         cases.len()
     );
+}
+
+#[test]
+fn spinel_agrees_with_the_ruby_ancestors_table_first_part() {
+    spinel_agrees_with_the_ruby_ancestors_table(0);
+}
+
+#[test]
+fn spinel_agrees_with_the_ruby_ancestors_table_second_part() {
+    spinel_agrees_with_the_ruby_ancestors_table(1);
+}
+
+#[test]
+fn spinel_agrees_with_the_ruby_ancestors_table_third_part() {
+    spinel_agrees_with_the_ruby_ancestors_table(2);
+}
+
+#[test]
+fn spinel_agrees_with_the_ruby_ancestors_table_fourth_part() {
+    spinel_agrees_with_the_ruby_ancestors_table(3);
+}
+
+#[test]
+fn spinel_agrees_with_the_ruby_ancestors_table_fifth_part() {
+    spinel_agrees_with_the_ruby_ancestors_table(4);
+}
+
+#[test]
+fn spinel_agrees_with_the_ruby_ancestors_table_sixth_part() {
+    spinel_agrees_with_the_ruby_ancestors_table(5);
 }

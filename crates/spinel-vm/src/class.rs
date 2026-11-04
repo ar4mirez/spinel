@@ -705,6 +705,10 @@ pub struct Classes {
     optimised: Vec<(ClassId, SymbolId, Option<Value>)>,
     /// The ones changed since [`Classes::take_redefined`] last asked.
     redefined: Vec<(ClassId, SymbolId)>,
+    /// The classes [`Classes::invalidate`] was asked about since
+    /// [`Classes::defer_invalidation`], each once, waiting for
+    /// [`Classes::flush_invalidation`]. `None` the rest of the time.
+    deferred: Option<Vec<ClassId>>,
 }
 
 /// One numeric class's operators: the bodies the VM installed, and which of
@@ -1466,6 +1470,12 @@ impl Classes {
     /// are cached as `None`, so a name nothing defines costs one chain walk
     /// rather than one per call.
     pub fn lookup(&mut self, id: ClassId, name: SymbolId) -> Option<Method> {
+        // A lookup cached now could be one a held invalidation was going to
+        // clear, and nothing would clear it.
+        debug_assert!(
+            self.deferred.is_none(),
+            "a cached lookup while invalidation is deferred"
+        );
         if let Some(&hit) = self.entry(id).cache.get(&name) {
             return hit;
         }
@@ -2573,6 +2583,12 @@ impl Classes {
     // trades the walk for a check on every hit.
     fn invalidate(&mut self, id: ClassId) {
         self.operators_fresh = false;
+        if let Some(deferred) = &mut self.deferred {
+            if !deferred.contains(&id) {
+                deferred.push(id);
+            }
+            return;
+        }
         self.walks += 1;
         let mark = self.walks;
         // Out of `self` for the walk, so the frontier and the entries can be
@@ -2596,6 +2612,30 @@ impl Classes {
             stack.extend_from_slice(&entry.includers);
         }
         self.walk = stack;
+    }
+
+    /// Hold every [`Classes::invalidate`] until [`Classes::flush_invalidation`],
+    /// which then walks from each class it was asked about once.
+    ///
+    /// For a run of definitions nothing looks up in between — the primitives
+    /// `bootstrap` installs, ~400 of them, most on `Kernel`, `Object` or
+    /// `Comparable`, whose walk reaches every class. One walk per class at the
+    /// end leaves the same caches cleared and every serial moved, without the
+    /// 47,000 entry visits that made it most of a bootstrap under miri.
+    pub(crate) fn defer_invalidation(&mut self) {
+        assert!(self.deferred.is_none(), "invalidation is already deferred");
+        self.deferred = Some(Vec::new());
+    }
+
+    /// The walks [`Classes::defer_invalidation`] held, one per class.
+    pub(crate) fn flush_invalidation(&mut self) {
+        let deferred = self
+            .deferred
+            .take()
+            .expect("flush_invalidation without defer_invalidation");
+        for id in deferred {
+            self.invalidate(id);
+        }
     }
 
     fn entry(&self, id: ClassId) -> &Entry {

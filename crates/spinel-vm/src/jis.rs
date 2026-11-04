@@ -329,29 +329,105 @@ mod tests {
         );
     }
 
-    #[test]
-    fn every_written_cell_reads_back_but_the_one_way_ones() {
-        for (encoding, table, one_way) in [
-            (EUC_JP, &EUC_JP_WRITE[..], jis_table::EUC_JP_ONE_WAY),
-            (
-                SHIFT_JIS,
-                &SHIFT_JIS_WRITE[..],
-                jis_table::SHIFT_JIS_ONE_WAY,
-            ),
-            (
-                WINDOWS_31J,
-                &WINDOWS_31J_WRITE[..],
-                jis_table::WINDOWS_31J_ONE_WAY,
-            ),
-        ] {
-            for &(code, _) in table {
-                let bytes = through(encoding, u32::from(code)).unwrap();
-                let read = back(encoding, &bytes);
-                if !one_way.iter().any(|&(c, _)| c == code) {
-                    assert_eq!(read, Some(u32::from(code)), "{encoding} U+{code:04X}");
-                }
+    /// Every cell `encoding` writes reads back to the code it was written
+    /// from, but the one-way ones. One quarter of the table at a time, so that
+    /// under miri, where a cell costs ~12ms, no one test holds the job's wall
+    /// time: the twelve tests below are the four quarters of each table.
+    fn every_written_cell_reads_back(
+        encoding: u8,
+        table: &[(u16, u16)],
+        one_way: &[(u16, u16)],
+        quarter: usize,
+    ) {
+        let start = table.len() * quarter / 4;
+        let end = table.len() * (quarter + 1) / 4;
+        for &(code, _) in &table[start..end] {
+            let bytes = through(encoding, u32::from(code)).unwrap();
+            let read = back(encoding, &bytes);
+            if !one_way.iter().any(|&(c, _)| c == code) {
+                assert_eq!(read, Some(u32::from(code)), "{encoding} U+{code:04X}");
             }
         }
+    }
+
+    #[test]
+    fn every_written_euc_jp_cell_reads_back_but_the_one_way_ones_first_quarter() {
+        every_written_cell_reads_back(EUC_JP, &EUC_JP_WRITE, jis_table::EUC_JP_ONE_WAY, 0);
+    }
+
+    #[test]
+    fn every_written_euc_jp_cell_reads_back_but_the_one_way_ones_second_quarter() {
+        every_written_cell_reads_back(EUC_JP, &EUC_JP_WRITE, jis_table::EUC_JP_ONE_WAY, 1);
+    }
+
+    #[test]
+    fn every_written_euc_jp_cell_reads_back_but_the_one_way_ones_third_quarter() {
+        every_written_cell_reads_back(EUC_JP, &EUC_JP_WRITE, jis_table::EUC_JP_ONE_WAY, 2);
+    }
+
+    #[test]
+    fn every_written_euc_jp_cell_reads_back_but_the_one_way_ones_fourth_quarter() {
+        every_written_cell_reads_back(EUC_JP, &EUC_JP_WRITE, jis_table::EUC_JP_ONE_WAY, 3);
+    }
+
+    #[test]
+    fn every_written_shift_jis_cell_reads_back_but_the_one_way_ones_first_quarter() {
+        every_written_cell_reads_back(SHIFT_JIS, &SHIFT_JIS_WRITE, jis_table::SHIFT_JIS_ONE_WAY, 0);
+    }
+
+    #[test]
+    fn every_written_shift_jis_cell_reads_back_but_the_one_way_ones_second_quarter() {
+        every_written_cell_reads_back(SHIFT_JIS, &SHIFT_JIS_WRITE, jis_table::SHIFT_JIS_ONE_WAY, 1);
+    }
+
+    #[test]
+    fn every_written_shift_jis_cell_reads_back_but_the_one_way_ones_third_quarter() {
+        every_written_cell_reads_back(SHIFT_JIS, &SHIFT_JIS_WRITE, jis_table::SHIFT_JIS_ONE_WAY, 2);
+    }
+
+    #[test]
+    fn every_written_shift_jis_cell_reads_back_but_the_one_way_ones_fourth_quarter() {
+        every_written_cell_reads_back(SHIFT_JIS, &SHIFT_JIS_WRITE, jis_table::SHIFT_JIS_ONE_WAY, 3);
+    }
+
+    #[test]
+    fn every_written_windows_31j_cell_reads_back_but_the_one_way_ones_first_quarter() {
+        every_written_cell_reads_back(
+            WINDOWS_31J,
+            &WINDOWS_31J_WRITE,
+            jis_table::WINDOWS_31J_ONE_WAY,
+            0,
+        );
+    }
+
+    #[test]
+    fn every_written_windows_31j_cell_reads_back_but_the_one_way_ones_second_quarter() {
+        every_written_cell_reads_back(
+            WINDOWS_31J,
+            &WINDOWS_31J_WRITE,
+            jis_table::WINDOWS_31J_ONE_WAY,
+            1,
+        );
+    }
+
+    #[test]
+    fn every_written_windows_31j_cell_reads_back_but_the_one_way_ones_third_quarter() {
+        every_written_cell_reads_back(
+            WINDOWS_31J,
+            &WINDOWS_31J_WRITE,
+            jis_table::WINDOWS_31J_ONE_WAY,
+            2,
+        );
+    }
+
+    #[test]
+    fn every_written_windows_31j_cell_reads_back_but_the_one_way_ones_fourth_quarter() {
+        every_written_cell_reads_back(
+            WINDOWS_31J,
+            &WINDOWS_31J_WRITE,
+            jis_table::WINDOWS_31J_ONE_WAY,
+            3,
+        );
     }
 
     #[test]

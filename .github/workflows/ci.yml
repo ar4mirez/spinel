@@ -76,9 +76,17 @@ jobs:
   # Not `-Zmiri-strict-provenance`, which PRD 0006 guessed at: that mode bans the
   # integer-to-pointer round trip, and a tagged `Value` *is* that round trip. The
   # default model tracks exposed provenance, which is the one `Value` is written in.
-  miri:
-    name: miri
+  #
+  # Split four ways by `cargo nextest --partition`, because one runner's four
+  # cores took 30-41 minutes over the whole suite. Every test still runs under
+  # miri exactly once: the partitions are disjoint and together are the suite.
+  miri-shard:
+    name: miri (${{ matrix.partition }}/4)
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        partition: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v5
 
@@ -98,12 +106,30 @@ jobs:
       # here is the pointer arithmetic, not ten million iterations of it.
       #
       # Through nextest, which runs each test in its own miri process, so the
-      # runner's cores share the work: interpreted, one heap bootstrap is ~20s
-      # and most tests do one, and `cargo miri test` runs them one at a time.
+      # runner's cores share the work: interpreted, one heap bootstrap took
+      # ~185s on ubuntu-latest (November 2026) until the primitives stopped
+      # walking every class per definition, which cut it to under half, and
+      # most tests do one; `cargo miri test` runs them one at a time. `count:` deals the tests out
+      # round-robin, which spreads the bootstrapping ones across the shards.
+      - run: cargo miri nextest run -p spinel-vm --partition count:${{ matrix.partition }}/4
       # nextest does not run doctests, so they keep a `cargo miri test` of
-      # their own.
-      - run: cargo miri nextest run -p spinel-vm
-      - run: cargo miri test -p spinel-vm --doc
+      # their own, in one shard so they run once.
+      - if: matrix.partition == 1
+        run: cargo miri test -p spinel-vm --doc
+
+  # The one name to watch or require: green only when every shard is.
+  miri:
+    name: miri
+    needs: miri-shard
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every miri shard passed
+        run: |
+          if [ "${{ needs.miri-shard.result }}" != "success" ]; then
+            echo "::error::a miri shard did not pass: ${{ needs.miri-shard.result }}"
+            exit 1
+          fi
 
   # Catches a dependency edge that architecture.md forbids, e.g. Prism escaping
   # spinel-parse, before it becomes load-bearing and expensive to unwind.
