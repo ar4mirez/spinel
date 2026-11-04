@@ -3413,6 +3413,30 @@ end
       @rbuf = char.byteslice(1, char.bytesize - 1).b << @rbuf
       char = char.byteslice(0, 1)
     end
+    # With an internal encoding CRuby's first read stops after the
+    # converter's first output, the attribute's quote. Into an encoding that
+    # is not ASCII-compatible the decorators come before the transcoder, on
+    # the UTF-8 it is read from, so that output is the quote and the first
+    # byte: the converter holds the rest of what it took, which `pos` drops
+    # with it, and the bytes after are read again without it (#633). Measured.
+    if char.bytesize > 1 && !@rquote && !@enc2.nil? && __xml_in__ == :attr && __encoding__ == Encoding::UTF_8 && !__read_encoding__.ascii_compatible?
+      @rbuf = char.byteslice(1, char.bytesize - 1).b << @rbuf
+      @rpend = char.byteslice(0, 1).b
+      @rquote = true
+      return __hand_out__(__in_read__("\""))
+    end
+    # Into one that is, they come after it, and a character it cannot convert
+    # is inserted as a reference, which is no output to stop after: the read
+    # goes on to the next it can, or to the end of what is buffered, or to a
+    # CR the universal newline decorator would hold (#633).
+    if !@rquote && !@enc2.nil? && __xml_in__ == :attr && __read_encoding__.ascii_compatible? && __undefined_in_read__?(char)
+      while !@rbuf.empty? && !(__universal_newline__? && @rbuf.getbyte(0) == 13)
+        more = @rbuf.byteslice(0, __char_length__).force_encoding(__encoding__)
+        break unless more.valid_encoding?
+        char = (char.b << __take__(more.bytesize)).force_encoding(__encoding__)
+        break unless __undefined_in_read__?(more)
+      end
+    end
     # The decorators alone hold a CR they reach until a later read sees the
     # byte after it: this read takes the CR and makes only the quote, and
     # `pos` is past the CR alone (#624). Measured.
@@ -3429,6 +3453,17 @@ end
       return __take_char__
     end
     __hand_out__(out)
+  end
+
+  # Whether the read converter cannot convert `char` into the encoding reads
+  # answer in, and so inserts what stands for it instead.
+  def __undefined_in_read__?(char)
+    char.encode(__read_encoding__)
+    false
+  rescue Encoding::UndefinedConversionError
+    true
+  rescue EncodingError
+    false
   end
 
   # One character of what the read converter made for one read: `xml:`
