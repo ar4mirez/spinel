@@ -3427,7 +3427,8 @@ end
     end
     # Into one that is, they come after it, and a character it cannot convert
     # is inserted as a reference, which is no output to stop after: the read
-    # goes on to the next it can, or to the end of what is buffered (#633).
+    # goes on to the next it can, or to the end of what is buffered, or to a
+    # CR the universal newline decorator would hold (#633).
     if !@rquote && !@enc2.nil? && __xml_in__ == :attr && __read_encoding__.ascii_compatible? && __undefined_in_read__?(char)
       while !@rbuf.empty? && !(__universal_newline__? && @rbuf.getbyte(0) == 13)
         more = @rbuf.byteslice(0, __char_length__).force_encoding(__encoding__)
