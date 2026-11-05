@@ -2510,10 +2510,12 @@ end
       return nil if line.nil?
     elsif unit
       bytes, cr, taken = __universal_line__(wanted, limit, unit, true)
+      quote = @rquote
       line = bytes.nil? ? nil : __decode__(bytes, taken)
       # A line with a byte to replace goes back, CRs and all, to be read as
-      # the converter makes it, its universal newline in it (#610).
-      if line && options && __replaces_invalid__? && !bytes.valid_encoding?
+      # the converter makes it, its universal newline in it (#610), as does
+      # one that opens an attribute on a replacement (#636).
+      if line && options && (__replaces_invalid__? && !bytes.valid_encoding? || __opens_on_replacement__?(bytes, quote))
         @rbuf = taken.b + @rbuf
         line = __converted_line__(separator, wanted, limit, unit)
       elsif cr
@@ -2642,9 +2644,9 @@ end
           bytes, cr, taken = __universal_line__(wanted, room, unit)
           quote = @rquote
           piece = bytes.nil? ? nil : __decode__(bytes, taken)
-          if piece && !@ecopts.empty? && __moved_past__?(piece, bytes, sep, wanted, enc)
+          if piece && !@ecopts.empty? && (__moved_past__?(piece, bytes, sep, wanted, enc) || __opens_on_replacement__?(bytes, quote))
             # The bytes as read go back, CRs and all, for the converter's
-            # universal newline to make them as CRuby's does (#610).
+            # universal newline to make them as CRuby's does (#610, #636).
             __stream_from__(taken, quote)
             stream = true
             piece = __next_chars__(goes_on)
@@ -2718,6 +2720,21 @@ end
     at = made.index(sep)
     at = made.index(sep, at + 1) until at.nil? || __char_edge__(made, 0, at, enc) == at
     !at.nil?
+  end
+
+  # Whether a line of bytes opens an attribute's quote on a character the
+  # internal encoding has no spelling for, under universal newline: CRuby's
+  # converter has its newline decorator before the `xml:` one, so the
+  # replacement comes out before the quote opens, where `String#encode`
+  # puts the quote first (#636). Measured.
+  def __opens_on_replacement__?(bytes, quote)
+    return false if quote || @enc2.nil? || __xml_in__ != :attr || !__universal_newline__?
+    char = bytes.byteslice(0, 4).force_encoding(__encoding__)[0]
+    return false if char.nil? || !char.valid_encoding?
+    char.encode(__read_encoding__)
+    false
+  rescue Encoding::UndefinedConversionError
+    true
   end
 
   # Whether the read converter replaces bytes that make no character: an
