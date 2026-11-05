@@ -13759,6 +13759,11 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         ),
         (
             Builtin::Kernel,
+            &["__finalizer_copy__"],
+            Native::Gc(GcOp::FinalizerCopy),
+        ),
+        (
+            Builtin::Kernel,
             &["__finalizer_take__"],
             Native::Gc(GcOp::FinalizerTake),
         ),
@@ -16848,6 +16853,31 @@ fn gc_native(scope: &mut HandleScope<'_>, call: &Pending, op: GcOp) -> Value {
                     Value::NIL
                 }
             }
+        }
+        GcOp::FinalizerCopy => {
+            let (object, copy) = (arg(0), arg(1));
+            if object.is_immediate() || copy.is_immediate() {
+                return Value::NIL;
+            }
+            let handle = scope.root(object);
+            let callables = scope.finalizers(handle).to_vec();
+            if callables.is_empty() {
+                return Value::NIL;
+            }
+            // CRuby's `String#dup` copies a bare String — of `String` itself,
+            // with no singleton class and no instance variables — without
+            // `init_copy`, so without its finalizers; `clone` and any other
+            // String still go through it. Measured.
+            let bare = class_of(scope, object) == Some(Builtin::String.id())
+                && scope.shape(handle) == ShapeId::NONE;
+            if arg(2).is_truthy() && bare {
+                return Value::NIL;
+            }
+            let copy = scope.root(copy);
+            for callable in callables {
+                scope.add_finalizer(copy, callable);
+            }
+            Value::NIL
         }
         GcOp::FinalizerTake => take_finalizers(scope, arg(0).is_truthy()),
         GcOp::EachObject => each_object(scope, arg(0)),

@@ -10,7 +10,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/argf` | 35 | 139 | 0 | 0 | 120 | 19 | 0% |
 | `core/array` | 132 | 2898 | 2801 | 0 | 83 | 14 | 97% |
 | `core/basicobject` | 14 | 172 | 165 | 0 | 7 | 0 | 96% |
-| `core/binding` | 12 | 98 | 96 | 0 | 0 | 2 | 98% |
+| `core/binding` | 12 | 98 | 98 | 0 | 0 | 0 | 100% |
 | `core/builtin_constants` | 1 | 27 | 17 | 0 | 10 | 0 | 63% |
 | `core/class` | 8 | 54 | 54 | 0 | 0 | 0 | 100% |
 | `core/comparable` | 7 | 54 | 54 | 0 | 0 | 0 | 100% |
@@ -37,13 +37,13 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/marshal` | 6 | 475 | 473 | 0 | 0 | 2 | 100% |
 | `core/matchdata` | 30 | 186 | 186 | 0 | 0 | 0 | 100% |
 | `core/math` | 29 | 243 | 243 | 0 | 0 | 0 | 100% |
-| `core/method` | 26 | 199 | 197 | 0 | 0 | 2 | 99% |
+| `core/method` | 26 | 199 | 199 | 0 | 0 | 0 | 100% |
 | `core/module` | 86 | 1051 | 958 | 0 | 81 | 12 | 91% |
 | `core/mutex` | 7 | 35 | 35 | 0 | 0 | 0 | 100% |
 | `core/nil` | 18 | 27 | 25 | 0 | 2 | 0 | 93% |
 | `core/numeric` | 46 | 326 | 324 | 0 | 0 | 2 | 99% |
 | `core/objectspace` | 29 | 108 | 108 | 0 | 0 | 0 | 100% |
-| `core/proc` | 25 | 247 | 244 | 0 | 1 | 2 | 99% |
+| `core/proc` | 25 | 247 | 246 | 0 | 1 | 0 | 100% |
 | `core/process` | 92 | 439 | 401 | 0 | 25 | 13 | 91% |
 | `core/queue` | 15 | 46 | 40 | 0 | 6 | 0 | 87% |
 | `core/random` | 10 | 87 | 87 | 0 | 0 | 0 | 100% |
@@ -64,7 +64,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/time` | 66 | 652 | 634 | 0 | 5 | 13 | 97% |
 | `core/tracepoint` | 19 | 76 | 0 | 0 | 76 | 0 | 0% |
 | `core/true` | 9 | 13 | 11 | 0 | 2 | 0 | 85% |
-| `core/unboundmethod` | 20 | 109 | 107 | 0 | 0 | 2 | 98% |
+| `core/unboundmethod` | 20 | 109 | 109 | 0 | 0 | 0 | 100% |
 | `core/warning` | 5 | 31 | 31 | 0 | 0 | 0 | 100% |
 | `language` | 67 | 2668 | 2510 | 0 | 128 | 30 | 94% |
 | `language/predefined` | 2 | 14 | 12 | 0 | 0 | 2 | 86% |
@@ -131,4 +131,4 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `optional/capi` | 47 | 0 | 0 | 0 | 0 | 0 | — |
 | `optional/thread_safety` | 1 | 5 | 0 | 0 | 5 | 0 | 0% |
 | `security` | 13 | 31 | 28 | 0 | 3 | 0 | 90% |
-| **total** | 3835 | 32691 | 28951 | 0 | 3425 | 315 | 89% |
+| **total** | 3835 | 32691 | 28959 | 0 | 3425 | 307 | 89% |

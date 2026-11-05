@@ -1,1 +1,0 @@
-fails(#36: ObjectSpace and finalizers: newly run since #43 let ruby_exe start Spinel, and it disagrees):Proc#clone copies the finalizer
