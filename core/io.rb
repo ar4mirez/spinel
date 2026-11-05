@@ -1743,10 +1743,10 @@ end
           # A decorator that comes first hands a byte no UTF-8 character
           # starts with on with the one past it, which the transcoder reads,
           # so where that is replaced `pos` is past both and drops them
-          # (#644). Measured.
+          # (#644), and past any more it hands on after them (#661). Measured.
           lead = head.getbyte(0)
           past = enc == Encoding::UTF_8 && !__read_encoding__.ascii_compatible? && @ecopts[:invalid] == :replace && (lead < 0xC2 || lead > 0xF4)
-          @rpend = __take__(past ? 2 : 1)
+          @rpend = past ? __handed_on__ : __take__(1)
           return
         end
       end
@@ -1761,6 +1761,24 @@ end
     end
     @cbuf = (@cbuf || "".b) << __decode__(__take__(unit)).b
     nil
+  end
+
+  # What the converter hands on with a broken byte past a lone CR from
+  # UTF-8 into UTF-16 or UTF-32: the byte past it, and on past each byte
+  # that is broken too, or a CR that does not follow a CR, which the
+  # decorator holds for the byte after it, up to the end (#661). Measured.
+  def __handed_on__
+    taken = __take__(1)
+    prev = nil
+    loop do
+      nil while @rbuf.empty? && __fill__(1)
+      byte = @rbuf.getbyte(0)
+      return taken if byte.nil?
+      taken << __take__(1)
+      broken = byte >= 0x80 && (byte < 0xC2 || byte > 0xF4)
+      return taken unless broken || byte == 0x0D && prev != 0x0D
+      prev = byte
+    end
   end
 
   # Whether the character past a lone CR is replaced on the read the CR
