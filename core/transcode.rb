@@ -1,9 +1,10 @@
 # `String#encode`, `#encode!` and `#scrub` (#19), driving the transcoder in
 # `crates/spinel-vm/src/transcode.rs` one step at a time. The VM converts
 # between the encodings whose mapping is arithmetic — UTF-8, US-ASCII,
-# BINARY, ISO-8859-1, UTF-16 and UTF-32 — EUC-JP, Shift_JIS and
-# Windows-31J, whose mapping is CRuby's table (#378), and ISO-2022-JP and
-# stateless-ISO-2022-JP (#404), and refuses any other. This file finds the
+# BINARY, ISO-8859-1, UTF-16 and UTF-32 — EUC-JP, Shift_JIS,
+# Windows-31J and CP51932, whose mapping is CRuby's table (#378, #419),
+# ISO-2022-JP and stateless-ISO-2022-JP (#404), and CP50220 and CP50221
+# (#419), and refuses any other. This file finds the
 # path of CRuby's converters a conversion takes, and is CRuby's rules about
 # what an error means: `invalid:`/`undef:` with `replace:`, `fallback:`,
 # `xml:`, the newline options, and the exceptions, with their attributes and
@@ -15,7 +16,7 @@ class Encoding
     def source_encoding = @__source_encoding__
     def destination_encoding = @__destination_encoding__
     def source_encoding_name = @__source_encoding__&.name
-    def destination_encoding_name = @__destination_encoding__&.name
+    def destination_encoding_name = @__destination_encoding_name__ || @__destination_encoding__&.name
     # nil until a conversion sets it, then true or false. Measured.
     def incomplete_input? = @__incomplete__
 
@@ -24,6 +25,7 @@ class Encoding
       @__readagain_bytes__ = readagain
       @__source_encoding__ = source
       @__destination_encoding__ = destination
+      @__destination_encoding_name__ = String.__converter_name__(source, destination)
       @__incomplete__ = incomplete
       self
     end
@@ -58,6 +60,15 @@ class String
 
   # The bit of `transcode::State` that says the source's BOM told its order.
   BOM_READ = 64
+
+  # The encoding each converts to and from on the way to UTF-8, by index,
+  # where it is not UTF-8 itself: ISO-2022-JP through stateless-ISO-2022-JP
+  # and EUC-JP, CP50220 and CP50221 through CP51932. Measured.
+  CONVERTS_THROUGH = { 85 => 79, 79 => 10, 87 => 81, 88 => 81 }.freeze
+
+  # The encoding a stateful encoder reads what is inserted in, by index: see
+  # `__insert__`.
+  INSERTS_THROUGH = { 85 => 79, 87 => 81, 88 => 81 }.freeze
 
   def encode(*args, **options)
     __transcoded__(args, options)
@@ -380,7 +391,7 @@ class String
       to = __step_encoding__(to, step_target, target)
       case stop
       when :invalid, :incomplete
-        raise __invalid_error__(stop, error, readagain, source, target, to) unless options[:invalid] == :replace
+        raise __invalid_error__(stop, error, readagain, from, target, to) unless options[:invalid] == :replace
         [replacement, false]
       when :undefined
         if xml && reference
@@ -454,13 +465,14 @@ class String
 
   # `out` with `piece` appended in `target`, and the conversion's state after
   # it. CRuby converts a piece on its own to the target's insert encoding —
-  # stateless-ISO-2022-JP for ISO-2022-JP — and then through the target's
-  # encoder, so it switches ISO-2022-JP's G0 as the text around it does and
-  # leaves the source's decoder as it was. nil when `piece` has no spelling
+  # stateless-ISO-2022-JP for ISO-2022-JP, CP51932 for CP50220 and CP50221 —
+  # and then through the target's encoder, so it switches G0 as the text
+  # around it does, joins the katakana CP50220 holds, and leaves the source's
+  # decoder as it was. nil when `piece` has no spelling
   # in `target`.
   def self.__insert__(out, piece, target, state)
     return [out, state] if piece.empty?
-    via = target.__index__ == 85 ? Encoding::LIST[79] : target
+    via = Encoding::LIST[INSERTS_THROUGH.fetch(target.__index__, target.__index__)]
     bytes = piece.b
     unless piece.encoding.equal?(via)
       path = __path__(piece.encoding, via).map(&:__index__)
@@ -470,7 +482,7 @@ class String
       bytes = step[0].b
     end
     unless via.equal?(target)
-      step = bytes.__transcode__([79, 85], 0, state, 0, false)
+      step = bytes.__transcode__([via.__index__, target.__index__], 0, state, 0, false)
       return nil unless step[1] == :done
       bytes = step[0].b
       state = step[9]
@@ -485,37 +497,33 @@ class String
   end
 
   def self.__supported_target__(encoding)
-    [0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 22, 39, 79, 85].include?(encoding.__index__)
+    [0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 22, 39, 79, 81, 85, 87, 88].include?(encoding.__index__)
   end
 
   # Every encoding a conversion passes through, `source` to `target`, along
-  # CRuby's converters as `search_convpath` finds them: every encoding to and
-  # from UTF-8, EUC-JP to and from Shift_JIS, and ISO-2022-JP through
-  # stateless-ISO-2022-JP to and from EUC-JP. Between these the shortest
-  # path is the only one. A conversion to the same encoding is the encoding
+  # CRuby's converters as `search_convpath` finds them. They make a tree
+  # under UTF-8, which every other encoding converts to and from but those
+  # in `CONVERTS_THROUGH`, and Shift_JIS also converts to and from EUC-JP,
+  # which is shorter to EUC-JP and what is under it. Between these the
+  # shortest path is the only one: up from `source` to where the two meet
+  # and down to `target`. A conversion to the same encoding is the encoding
   # alone. Measured.
   def self.__path__(source, target)
     return [source] if source.equal?(target)
-    pair = [source.__index__, target.__index__]
-    return [source, target] if pair == [85, 79] || pair == [79, 85]
-    if pair.include?(79) || pair.include?(85)
-      # Up to EUC-JP and down from it, which is there once.
-      return [source, *__to_euc_jp__(source), *[*__to_euc_jp__(target).reverse, target].drop(1)]
-    end
-    return [source, target] if pair == [10, 39] || pair == [39, 10]
-    return [source, target] if source.equal?(Encoding::UTF_8) || target.equal?(Encoding::UTF_8)
-    [source, Encoding::UTF_8, target]
+    up = __up__(source)
+    down = __up__(target)
+    euc_jp = Encoding::LIST[10]
+    up = [source, *__up__(euc_jp)] if source.__index__ == 39 && down.include?(euc_jp)
+    down = [target, *__up__(euc_jp)] if target.__index__ == 39 && up.include?(euc_jp)
+    meet = up.find { |encoding| down.include?(encoding) }
+    up[0..up.index(meet)] + down[0...down.index(meet)].reverse
   end
 
-  # The encodings from `encoding` to EUC-JP, without `encoding`.
-  def self.__to_euc_jp__(encoding)
-    euc_jp = Encoding::LIST[10]
-    case encoding.__index__
-    when 10 then []
-    when 85 then [Encoding::LIST[79], euc_jp]
-    when 79, 39, 1 then [euc_jp]
-    else [Encoding::UTF_8, euc_jp]
-    end
+  # `encoding` and the encodings above it, up to UTF-8.
+  def self.__up__(encoding)
+    chain = [encoding]
+    chain << Encoding::LIST[CONVERTS_THROUGH.fetch(chain.last.__index__, 1)] until chain.last.equal?(Encoding::UTF_8)
+    chain
   end
 
   # What `invalid: :replace` and `undef: :replace` substitute: `replace:`, or
@@ -620,17 +628,27 @@ class String
     code ? Integer.__utf8__(code) : error.dup.force_encoding(from)
   end
 
+  # The name CRuby's converter from `from` gives `to`, its encoding's but
+  # for CP50220's and CP50221's decoders, which write `cp51932`. Measured.
+  def self.__converter_name__(from, to)
+    return nil if to.nil?
+    !from.nil? && [87, 88].include?(from.__index__) && to.__index__ == 81 ? "cp51932" : to.name
+  end
+
   # A codepoint names itself as `U+00E9`; a character with none — a BINARY
   # byte, a JIS character Unicode lacks — as its bytes, in the encoding the
   # converter that failed came from. A conversion of more than one step says
-  # so, and names the step that failed. Measured.
+  # so, and names the step that failed, each encoding as the converter into
+  # it names it. Measured.
   def self.__undefined_error__(code, error, from, to, source, target)
     shown = code.nil? ? error.inspect : "U+#{Integer.__hex__(code, 4)}"
     message =
       if from.equal?(source) && to.equal?(target)
         "#{shown} from #{source.name} to #{target.name}"
       else
-        "#{shown} to #{to.name} in conversion from #{__path__(source, target).map(&:name).join(" to ")}"
+        path = __path__(source, target)
+        names = [path.first.name] + path.each_cons(2).map { |a, b| __converter_name__(a, b) }
+        "#{shown} to #{to.name} in conversion from #{names.join(" to ")}"
       end
     Encoding::UndefinedConversionError.new(message).__set__(__error_char__(code, error, from), from, to)
   end
@@ -711,6 +729,10 @@ class Encoding
     # The bit of `transcode::State` that `universal_newline` holds a CR in.
     HELD_CR = 32
     private_constant :HELD_CR
+
+    # `asciicompat_encoding`'s answers, by index.
+    ASCIICOMPAT = { 3 => 1, 4 => 1, 5 => 1, 6 => 1, 7 => 1, 8 => 1, 78 => 22, 85 => 79, 87 => 81, 88 => 81, 99 => 100 }.freeze
+    private_constant :ASCIICOMPAT
     # The bit of `__transcode__`'s decorators that stops it after output.
     STOP_AFTER_OUTPUT = 32
     private_constant :STOP_AFTER_OUTPUT
@@ -885,15 +907,18 @@ class Encoding
     end
 
     # The ASCII-compatible encoding a non-ASCII-compatible one converts
-    # through: UTF-8 for UTF-16 and UTF-32. nil for one that is already
-    # ASCII-compatible, and for a name that resolves to none, "internal" with
-    # no default internal among them (#622). Measured.
+    # through, as CRuby's converter table has it: UTF-8 for UTF-16 and
+    # UTF-32, stateless-ISO-2022-JP for ISO-2022-JP and its KDDI variant for
+    # ISO-2022-JP-KDDI, CP51932 for CP50220 and CP50221, and ISO-8859-1 for
+    # IBM037. nil for ISO-2022-JP-2 and UTF-7, which CRuby converts to
+    # nothing, for one that is already ASCII-compatible, and for a name that
+    # resolves to none, "internal" with no default internal among them
+    # (#622). Measured, for every dummy (#419).
     def self.asciicompat_encoding(encoding)
       encoding = __encoding__(encoding)
-      return nil if encoding.nil? || encoding.ascii_compatible?
-      return Encoding.find("stateless-ISO-2022-JP") if encoding.name == "ISO-2022-JP"
-      return Encoding::UTF_8 if [3, 4, 5, 6, 7, 8].include?(encoding.__index__)
-      nil
+      return nil if encoding.nil?
+      through = ASCIICOMPAT[encoding.__index__]
+      through && Encoding::LIST[through]
     rescue ArgumentError
       nil
     end
@@ -1035,11 +1060,12 @@ class Encoding
           # An encoder takes what is inserted into the buffer it reads, as
           # CRuby's `asciicompat_encoder`.
           encoder: from.ascii_compatible? && !to.ascii_compatible?,
-          # ISO-2022-JP's decoder reads an escape sequence with a function,
+          # A stateful decoder reads an escape sequence with a function,
           # which waits for room although it writes nothing. Measured.
-          fun: from.__index__ == 85,
-          # ISO-2022-JP's encoder goes back to ASCII as it finishes.
-          finisher: to.__index__ == 85
+          fun: [85, 87, 88].include?(from.__index__),
+          # A stateful encoder goes back to ASCII as it finishes, CP50220
+          # after the katakana it holds.
+          finisher: [85, 87, 88].include?(to.__index__)
         )
       end
       unless elements.empty?
@@ -1688,11 +1714,11 @@ class Encoding
       to = @error_element.dst
       if stop == :undefined
         @last_error = String.__undefined_error__(code, error, from, to, @source_encoding, @destination_encoding)
-        @errinfo = [result, from.name, to.name, @last_error.error_char.b, "".b]
+        @errinfo = [result, from.name, String.__converter_name__(from, to), @last_error.error_char.b, "".b]
       else
         readagain = @error_element.readagain
         @last_error = String.__invalid_error__(stop, error.b, readagain.b, from, to, to)
-        @errinfo = [result, from.name, to.name, error.b, readagain.b]
+        @errinfo = [result, from.name, String.__converter_name__(from, to), error.b, readagain.b]
       end
     end
 

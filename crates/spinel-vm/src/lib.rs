@@ -71,6 +71,7 @@ pub mod bytecode;
 pub mod callcache;
 pub mod class;
 pub mod compile;
+pub mod cp5022x;
 pub mod encoding_table;
 pub mod errno;
 pub mod float;

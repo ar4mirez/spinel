@@ -2,8 +2,10 @@
 //! encodings whose mapping to Unicode is arithmetic — UTF-8, US-ASCII,
 //! BINARY, ISO-8859-1, and UTF-16 and UTF-32 in both byte orders — the JIS
 //! encodings whose mapping is CRuby's table, EUC-JP, Shift_JIS and
-//! Windows-31J (#378, in `jis.rs`), and ISO-2022-JP and stateless-ISO-2022-JP
-//! (#404, in `iso2022jp.rs`). Any other pair is refused by the caller.
+//! Windows-31J (#378, in `jis.rs`), ISO-2022-JP and stateless-ISO-2022-JP
+//! (#404, in `iso2022jp.rs`), and CP51932, by CRuby's table too, with CP50220
+//! and CP50221 through it (#419, in `cp5022x.rs`). Any other pair is refused
+//! by the caller.
 //!
 //! The unit of work is [`step`]: convert from a byte offset until the input
 //! ends or a character cannot be converted, and report which and why. A
@@ -13,7 +15,9 @@
 //! decides what an error means — replace it, ask a fallback, or raise with
 //! CRuby's attributes — and calls again past it.
 
+use crate::cp5022x::{CP50220, CP50221};
 use crate::iso2022jp::{ISO_2022_JP, STATELESS_ISO_2022_JP};
+use crate::jis::CP51932;
 use crate::strings::{BINARY, EUC_JP, US_ASCII, UTF_8};
 
 pub const UTF_16BE: u8 = 3;
@@ -37,6 +41,8 @@ pub fn supported(encoding: u8) -> bool {
             | ISO_8859_1
             | STATELESS_ISO_2022_JP
             | ISO_2022_JP
+            | CP50220
+            | CP50221
     ) || crate::jis::supported(encoding)
 }
 
@@ -285,28 +291,37 @@ pub struct Step {
 }
 
 /// What a conversion keeps between steps, which Ruby holds as one Integer:
-/// ISO-2022-JP's decoder G0 in the low two bits and its encoder's in the
-/// next two, whether `xml: :attr` has opened its quote, whether
-/// `universal_newline` holds a CR, and whether the source's BOM told its byte
-/// order. A fresh conversion is 0.
+/// a stateful decoder's G0 — ISO-2022-JP's, CP50220's or CP50221's — in the
+/// low two bits and an encoder's in the next two, whether `xml: :attr` has
+/// opened its quote, whether `universal_newline` holds a CR, whether the
+/// source's BOM told its byte order, and in the next byte the katakana
+/// CP50220's encoder holds, if any. A fresh conversion is 0.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct State(pub u8);
+pub struct State(pub u32);
 
 impl State {
     pub(crate) fn decoder(self) -> u8 {
-        self.0 & 3
+        (self.0 & 3) as u8
     }
 
     pub(crate) fn encoder(self) -> u8 {
-        self.0 >> 2 & 3
+        (self.0 >> 2 & 3) as u8
     }
 
     pub(crate) fn set_decoder(&mut self, g0: u8) {
-        self.0 = self.0 & !3 | g0;
+        self.0 = self.0 & !3 | u32::from(g0);
     }
 
     pub(crate) fn set_encoder(&mut self, g0: u8) {
-        self.0 = self.0 & !12 | g0 << 2;
+        self.0 = self.0 & !12 | u32::from(g0) << 2;
+    }
+
+    pub(crate) fn held_kana(self) -> Option<u8> {
+        Some((self.0 >> 8 & 0xff) as u8).filter(|&kana| kana != 0)
+    }
+
+    pub(crate) fn set_held_kana(&mut self, kana: Option<u8>) {
+        self.0 = self.0 & !0xff00 | u32::from(kana.unwrap_or(0)) << 8;
     }
 
     fn quoted(self) -> bool {
@@ -314,7 +329,7 @@ impl State {
     }
 
     fn set_quoted(&mut self, quoted: bool) {
-        self.0 = self.0 & !16 | u8::from(quoted) << 4;
+        self.0 = self.0 & !16 | u32::from(quoted) << 4;
     }
 
     fn held(self) -> bool {
@@ -322,7 +337,7 @@ impl State {
     }
 
     fn set_held(&mut self, held: bool) {
-        self.0 = self.0 & !32 | u8::from(held) << 5;
+        self.0 = self.0 & !32 | u32::from(held) << 5;
     }
 
     fn bom_read(self) -> bool {
@@ -386,7 +401,7 @@ fn escape(xml: Xml, byte: u8) -> Option<&'static [u8]> {
 fn ascii_compatible(encoding: u8) -> bool {
     !matches!(
         encoding,
-        UTF_16BE | UTF_16LE | UTF_32BE | UTF_32LE | ISO_2022_JP
+        UTF_16BE | UTF_16LE | UTF_32BE | UTF_32LE | ISO_2022_JP | CP50220 | CP50221
     )
 }
 
@@ -399,13 +414,16 @@ fn by_codepoint(encoding: u8) -> bool {
 }
 
 /// Whether CRuby has a converter from `from` to `to` that this VM runs:
-/// every encoding to and from UTF-8, EUC-JP to and from Shift_JIS, and
-/// stateless-ISO-2022-JP to and from EUC-JP and ISO-2022-JP.
+/// every encoding to and from UTF-8, EUC-JP to and from Shift_JIS,
+/// stateless-ISO-2022-JP to and from EUC-JP and ISO-2022-JP, and CP51932 to
+/// and from CP50220 and CP50221.
 fn converts(from: u8, to: u8) -> bool {
     match (from, to) {
         (ISO_2022_JP, STATELESS_ISO_2022_JP)
         | (STATELESS_ISO_2022_JP, ISO_2022_JP | EUC_JP)
-        | (EUC_JP, STATELESS_ISO_2022_JP) => true,
+        | (EUC_JP, STATELESS_ISO_2022_JP)
+        | (CP50220 | CP50221, CP51932)
+        | (CP51932, CP50220 | CP50221) => true,
         _ if crate::jis::direct(from, to) => true,
         _ => from != to && (from == UTF_8 || to == UTF_8) && by_codepoint(from) && by_codepoint(to),
     }
@@ -433,6 +451,25 @@ fn hop(from: u8, to: u8, bytes: &[u8], at: usize, state: &mut State, out: &mut V
     use crate::jis::{self, Jis, Read};
     match (from, to) {
         (ISO_2022_JP, _) => iso2022jp::decode(bytes, at, state, out).map_err(failed),
+        (CP50220 | CP50221, _) => crate::cp5022x::decode(bytes, at, state, out).map_err(failed),
+        (CP51932, CP50220 | CP50221) => match jis::read(CP51932, bytes, at) {
+            // SO, SI and ESC, which these cannot carry as text, have no
+            // spelling there. Measured.
+            Read::Char(Jis::Ascii(b @ (0x0e | 0x0f | 0x1b)), len) => Err((
+                Stop::Undefined {
+                    code: None,
+                    reference: Some(u32::from(b)),
+                },
+                len,
+                0,
+            )),
+            Read::Char(jis, len) => {
+                crate::cp5022x::encode(to, jis, state, out);
+                Ok(len)
+            }
+            Read::Invalid { error, readagain } => Err((Stop::Invalid, error, readagain)),
+            Read::Incomplete(len) => Err((Stop::Incomplete, len, 0)),
+        },
         (STATELESS_ISO_2022_JP, _) => {
             let (c, len) = iso2022jp::read(bytes, at).map_err(failed)?;
             if to == ISO_2022_JP {
@@ -707,7 +744,8 @@ fn unescaped(
 /// `next`; `finish` says no byte follows `bytes`, so a UTF-32 unit they cut
 /// short that is already no character is invalid, not incomplete, and ends the
 /// output once the input is all converted: closes `xml: :attr`'s quote, writes
-/// the CR `universal_newline` holds, and goes back to ASCII in ISO-2022-JP.
+/// the CR `universal_newline` holds, and goes back to ASCII in ISO-2022-JP,
+/// CP50220 and CP50221, after the katakana CP50220 holds.
 /// `after_output` stops after the first
 /// character that writes anything, `next` past it, as CRuby's `AFTER_OUTPUT`
 /// does. `None` for a path with a step this VM has no converter for.
@@ -824,6 +862,9 @@ pub fn step(
         }
         if end == ISO_2022_JP {
             crate::iso2022jp::finish(state, &mut output);
+        }
+        if crate::cp5022x::supported(end) {
+            crate::cp5022x::finish(state, &mut output);
         }
     }
     Some(Step {
