@@ -1074,6 +1074,10 @@ pub enum GcOp {
     /// cell, or with `true` of the class its header names, an Integer; nil
     /// for an immediate.
     Address,
+    /// `__objspace_contents__(object)`: `[frozen, detail, ...]`, what
+    /// `ObjectSpace.dump` shows of it beyond its type, read without sending
+    /// it anything. See `interp.rs`, `dump_contents`.
+    Contents,
 }
 
 /// Which thread primitive. See `threads.rs` for the scheduler and

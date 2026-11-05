@@ -95,7 +95,7 @@ module ObjectSpace
   end
 
   def self._dump(obj, out)
-    out << _dump_object(obj, _dump_readers)
+    out << _dump_object(obj)
     out
   end
 
@@ -104,60 +104,46 @@ module ObjectSpace
   # does not describe itself.
   def self._dump_all(out, full, since, shapes)
     objects = __each_object__(nil)
-    readers = _dump_readers
     json = +''
     objects.each do |obj|
       if Integer === since && since >= 0
         site = __objspace_allocation__(obj)
         next unless site && site[4] >= since
       end
-      json << _dump_object(obj, readers) << "\n"
+      json << _dump_object(obj) << "\n"
     end
     out << json
     out
   end
 
-  # The core methods `_dump_object` reads an object through, bound to it
-  # rather than sent: it may be a BasicObject, or define its own.
-  def self._dump_readers
-    {
-      frozen: Kernel.instance_method(:frozen?),
-      bytes: String.instance_method(:b),
-      encoding: String.instance_method(:encoding),
-      length: Array.instance_method(:length),
-      name: Module.instance_method(:__name__),
-      float: Float.instance_method(:to_s),
-    }
-  end
-
   # `obj`'s line of `dump`: CRuby's keys, for what this heap can say about
   # it. No `shape_id`, `slot_size` or `flags`: those describe CRuby's own
   # heap, and a program reading them reads CRuby.
-  def self._dump_object(obj, readers)
+  def self._dump_object(obj)
+    contents = __objspace_contents__(obj)
     address = __objspace_address__(obj, false)
     if address.nil?
-      return "null" if obj.nil?
-      return %({"type":"SYMBOL", "value":#{_json_string(obj.name)}}) if Symbol === obj
-      return obj.to_s
+      return "null" if nil.equal?(obj)
+      return "true" if true.equal?(obj)
+      return "false" if false.equal?(obj)
+      return %({"type":"SYMBOL", "value":#{_json_string(contents[1])}}) if Symbol === obj
+      return contents[1]
     end
     type = __objspace_type__(obj).name[2..]
     line = +%({"address":"0x#{address.to_s(16)}", "type":"#{type}")
     klass = __objspace_address__(obj, true)
     line << %(, "class":"0x#{klass.to_s(16)}") if klass
-    line << ', "frozen":true' if readers[:frozen].bind_call(obj)
+    line << ', "frozen":true' if contents[0]
     case type
     when "STRING"
-      bytes = readers[:bytes].bind_call(obj)
-      encoding = readers[:encoding].bind_call(obj).name
-      line << %(, "bytesize":#{bytes.bytesize}, "value":#{_json_string(bytes)})
-      line << %(, "encoding":#{_json_string(encoding)})
+      line << %(, "bytesize":#{contents[1].bytesize}, "value":#{_json_string(contents[1])})
+      line << %(, "encoding":#{_json_string(contents[2])})
     when "ARRAY"
-      line << %(, "length":#{readers[:length].bind_call(obj)})
+      line << %(, "length":#{contents[1]})
     when "CLASS", "MODULE"
-      name = readers[:name].bind_call(obj)
-      line << %(, "name":#{_json_string(name)}) if name
+      line << %(, "name":#{_json_string(contents[1])}) if contents[1]
     when "FLOAT"
-      line << %(, "value":"#{readers[:float].bind_call(obj)}")
+      line << %(, "value":"#{contents[1]}")
     end
     references = __objspace_reachable__(obj)
     unless references.empty?
@@ -207,7 +193,6 @@ module ObjectSpace
   class << self
     private :_dump
     private :_dump_all
-    private :_dump_readers
     private :_dump_object
     private :_json_string
     private :_dump_shapes

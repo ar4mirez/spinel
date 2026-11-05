@@ -13839,6 +13839,11 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         ),
         (
             Builtin::Kernel,
+            &["__objspace_contents__"],
+            Native::Gc(GcOp::Contents),
+        ),
+        (
+            Builtin::Kernel,
             &["__backtrace_here__"],
             Native::BacktraceHere,
         ),
@@ -16987,6 +16992,7 @@ fn gc_native(scope: &mut HandleScope<'_>, call: &Pending, op: GcOp) -> Value {
             };
             Value::fixnum(i64::try_from(address).unwrap_or(i64::MAX)).unwrap_or(Value::NIL)
         }
+        GcOp::Contents => dump_contents(scope, arg(0)),
         GcOp::Id2Ref => {
             let found = arg(0).as_fixnum().and_then(|id| {
                 scope.objects().into_iter().find(|&object| {
@@ -17150,6 +17156,70 @@ fn allocation_site(scope: &mut HandleScope<'_>, object: Value) -> Value {
             generation,
         ],
     )
+}
+
+/// `[frozen, detail, ...]` for `ObjectSpace.dump` (#690), read off the cell
+/// so the object is sent nothing: a String's bytes, as a binary String, and
+/// its encoding's name; an Array's length; a module's name, or nil; a
+/// Float's, Integer's or Symbol's text.
+fn dump_contents(scope: &mut HandleScope<'_>, object: Value) -> Value {
+    use crate::value::Unpacked;
+    let text = match object.unpack() {
+        Unpacked::Fixnum(n) => Some(n.to_string()),
+        Unpacked::Flonum(f) => Some(float_to_s(f)),
+        Unpacked::Symbol(id) => Some(
+            crate::shared::symbols::name(id)
+                .unwrap_or_default()
+                .to_owned(),
+        ),
+        Unpacked::Heap(_) => None,
+        _ => return new_array(scope, &[Value::TRUE]),
+    };
+    if let Some(text) = text {
+        let text = string_new(scope, &text);
+        scope.root(text);
+        return new_array(scope, &[Value::TRUE, text]);
+    }
+    let handle = scope.root(object);
+    let frozen = bool_value(scope.is_frozen(handle));
+    let details = match dump_type(scope, object) {
+        "STRING" => {
+            let bytes = crate::strings::bytes(scope, handle);
+            let encoding = crate::strings::encoding(scope, handle);
+            let bytes =
+                string_bytes_in(scope, Builtin::String.id(), &bytes, crate::strings::BINARY);
+            scope.root(bytes);
+            let name = string_new(scope, crate::strings::name(encoding));
+            scope.root(name);
+            vec![bytes, name]
+        }
+        "ARRAY" => {
+            let length = i64::try_from(array_len(scope, handle)).unwrap_or(i64::MAX);
+            vec![Value::fixnum(length).unwrap_or(Value::NIL)]
+        }
+        "CLASS" | "MODULE" => {
+            let name = class_id_of(scope, object)
+                .and_then(|id| scope.classes().name(id).map(str::to_owned));
+            match name {
+                Some(name) => {
+                    let name = string_new(scope, &name);
+                    scope.root(name);
+                    vec![name]
+                }
+                None => vec![Value::NIL],
+            }
+        }
+        "FLOAT" => {
+            let value = crate::float::read(scope, object).unwrap_or(f64::NAN);
+            let text = string_new(scope, &float_to_s(value));
+            scope.root(text);
+            vec![text]
+        }
+        _ => Vec::new(),
+    };
+    let mut out = vec![frozen];
+    out.extend(details);
+    new_array(scope, &out)
 }
 
 /// CRuby's `T_*` name for what `object`, a heap object, is.
