@@ -1806,7 +1806,18 @@ end
       again = error.readagain_bytes.to_s.bytesize
     end
     out = __decode__(__take__(broken))
-    again = __read_on__ unless __read_encoding__.ascii_compatible?
+    begin
+      again = __read_on__ unless __read_encoding__.ascii_compatible?
+    rescue Encoding::UndefinedConversionError
+      # Where the character with no spelling ended what was buffered, CRuby's
+      # converter finished and so kept the replacement and the CR (#645,
+      # #663). Measured.
+      if @rbuf.empty? && !__fill__(1)
+        @cbuf = (@cbuf || "".b) << out.b
+        @rpend = cr
+      end
+      raise
+    end
     @rpend = cr + __take__(again)
     out
   end
@@ -1817,7 +1828,8 @@ end
   # past any bytes that make none, whose replacements go in past it too.
   # `pos` is past them all, and drops them with the CR, unless they ended
   # what was buffered, where CRuby's converter finished and so kept them
-  # (#645). Measured.
+  # (#645). A whole character with no spelling raises there (#663).
+  # Measured.
   def __read_on__
     enc = __encoding__
     past = 0
@@ -1832,9 +1844,13 @@ end
       rescue Encoding::InvalidByteSequenceError => error
         past += error.error_bytes.bytesize
       rescue Encoding::UndefinedConversionError
-        # ponytail: one with no spelling raises on the next read, not this
-        # one as CRuby's does; upgrade by raising here (#663).
-        return past
+        # One with no spelling raises on this read, the CR and the
+        # replacement dropped, and `pos` past it (#663). Measured.
+        # ponytail: `undef: :replace` stops before it, so its replacement
+        # comes a read late; upgrade by replacing it here (#671).
+        return past if @ecopts[:undef] == :replace
+        __take__(past + char.bytesize)
+        char.encode(__read_encoding__)
       end
     end
   end
