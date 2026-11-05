@@ -2279,7 +2279,19 @@ fn run<'h>(
     // Where the running thread's turn is next checked (#45): every
     // `SLICE_INSNS` instructions, on the same compare as the budget.
     let mut slice_end: u64 = budget.saturating_sub(threads::SLICE_INSNS);
-    let mut limit = deadline.max(slice_end);
+    // `ObjectSpace.trace_object_allocations` (#690). While it is on,
+    // `trace_floor` pins the limit at its maximum, so the budget compare
+    // every instruction already makes sends each one through `trace_step`,
+    // which files what the last instruction allocated under the frame that
+    // ran it, `traced_top`. With tracing off the floor is zero and the loop
+    // pays nothing for it.
+    let mut traced_top = frames.len().saturating_sub(1);
+    let mut trace_floor: u64 = if scope.tracing_allocations() || scope.has_fresh_allocations() {
+        u64::MAX
+    } else {
+        0
+    };
+    let mut limit = deadline.max(slice_end).max(trace_floor);
 
     // Everything the loop roots from here on is released between
     // instructions, a batch at a time: see `release_roots`.
@@ -2305,10 +2317,19 @@ fn run<'h>(
                 // finished instructions are let go, so an object only they
                 // named is freed. Finalizers a collection queued run here
                 // too, as a call pushed on top of whatever was running.
-                if scope.take_collection_request() {
-                    release_roots(scope, &mut stack, &frames, floor);
-                    root_limit = floor + ROOT_SLACK.max(2 * (scope.rooted() - floor));
-                    scope.collect();
+                let requests = scope.take_loop_requests();
+                if requests != 0 {
+                    if requests & crate::heap::LOOP_COLLECT != 0 {
+                        release_roots(scope, &mut stack, &frames, floor);
+                        root_limit = floor + ROOT_SLACK.max(2 * (scope.rooted() - floor));
+                        scope.collect();
+                    }
+                    // Tracing is started by a method, so it is first seen
+                    // here, at the call or the return around the primitive.
+                    if requests & crate::heap::LOOP_TRACE != 0 && trace_floor == 0 {
+                        trace_floor = u64::MAX;
+                        traced_top = frames.len().saturating_sub(1);
+                    }
                 }
                 if scope.has_pending_finalizers() {
                     let list = take_finalizers(scope, false);
@@ -2330,47 +2351,56 @@ fn run<'h>(
                 }
                 seen_frames = frames.len();
                 deadline = refresh_boundaries(scope, &frames, &mut boundaries, budget);
-                limit = deadline.max(slice_end);
+                limit = deadline.max(slice_end).max(trace_floor);
             }
             budget = budget.saturating_sub(1);
             if budget <= limit {
-                if budget <= slice_end && budget > deadline {
-                    // A turn check, not the budget: another thread may run.
-                    slice_end = budget.saturating_sub(threads::SLICE_INSNS);
+                if trace_floor != 0 && !trace_step(scope, &frames, &mut traced_top) {
+                    trace_floor = 0;
                     limit = deadline.max(slice_end);
+                }
+                // Past the floor, only tracing sent this instruction here.
+                if budget <= deadline.max(slice_end) {
+                    if budget <= slice_end && budget > deadline {
+                        // A turn check, not the budget: another thread may run.
+                        slice_end = budget.saturating_sub(threads::SLICE_INSNS);
+                        limit = deadline.max(slice_end).max(trace_floor);
+                        seen_frames = usize::MAX;
+                        let unwind =
+                            match threads::preempt(scope, &mut stack, &mut frames, &mut ids) {
+                                Ok(unwind) => unwind,
+                                // A refusal another thread left for this one.
+                                Err(error) => Some(refuse(
+                                    scope,
+                                    &mut stack,
+                                    &mut frames,
+                                    &mut boundaries,
+                                    error,
+                                )?),
+                            };
+                        if let Some(unwind) = unwind
+                            && let Some(value) =
+                                unwind_to_handler(scope, &mut stack, &mut frames, unwind)?
+                        {
+                            break value;
+                        }
+                        continue;
+                    }
+                    // Out of budget: the whole evaluation's, or a boundary's.
+                    let unwind = refuse(
+                        scope,
+                        &mut stack,
+                        &mut frames,
+                        &mut boundaries,
+                        Error::Budget,
+                    )?;
                     seen_frames = usize::MAX;
-                    let unwind = match threads::preempt(scope, &mut stack, &mut frames, &mut ids) {
-                        Ok(unwind) => unwind,
-                        // A refusal another thread left for this one.
-                        Err(error) => Some(refuse(
-                            scope,
-                            &mut stack,
-                            &mut frames,
-                            &mut boundaries,
-                            error,
-                        )?),
-                    };
-                    if let Some(unwind) = unwind
-                        && let Some(value) =
-                            unwind_to_handler(scope, &mut stack, &mut frames, unwind)?
+                    if let Some(value) = unwind_to_handler(scope, &mut stack, &mut frames, unwind)?
                     {
                         break value;
                     }
                     continue;
                 }
-                // Out of budget: the whole evaluation's, or a boundary's.
-                let unwind = refuse(
-                    scope,
-                    &mut stack,
-                    &mut frames,
-                    &mut boundaries,
-                    Error::Budget,
-                )?;
-                seen_frames = usize::MAX;
-                if let Some(value) = unwind_to_handler(scope, &mut stack, &mut frames, unwind)? {
-                    break value;
-                }
-                continue;
             }
             let top = frames.len() - 1;
             let insn = frames[top].iseq.insns[frames[top].pc];
@@ -3887,13 +3917,6 @@ fn run<'h>(
                 }
                 Ok(Step::Next)
             })();
-            // `ObjectSpace.trace_object_allocations` (#690): what this
-            // instruction allocated was allocated where it ran. Asked here,
-            // after the instructions answered inline above, none of which
-            // allocates; with tracing off the list stays empty.
-            if scope.has_fresh_allocations() {
-                stamp_allocations(scope, &frames, top);
-            }
 
             let unwind = match stepped {
                 Ok(Step::Next) => continue,
@@ -3928,6 +3951,11 @@ fn run<'h>(
             }
         })
     })();
+    // A loop below this one, entered for a callback, may still be waiting
+    // to notice tracing that started here.
+    if scope.tracing_allocations() {
+        scope.request_trace_notice();
+    }
     (result, ids)
 }
 
@@ -17287,6 +17315,20 @@ fn json_string(out: &mut String, bytes: &[u8]) {
     out.push('"');
 }
 
+/// One instruction's worth of allocation tracing (#690), run before each
+/// instruction while it is on: file what the last one allocated under the
+/// frame that ran it, and note the frame about to run the next. Answers
+/// whether tracing is still on, which the loop needs to know to stop.
+#[cold]
+#[inline(never)]
+fn trace_step(scope: &mut HandleScope<'_>, frames: &[Call], traced_top: &mut usize) -> bool {
+    if scope.has_fresh_allocations() {
+        stamp_allocations(scope, frames, *traced_top);
+    }
+    *traced_top = frames.len().saturating_sub(1);
+    scope.tracing_allocations()
+}
+
 /// Where the instruction frame `at` was running allocated what it did
 /// (#690), as CRuby's `objspace` reports it: the program's file and line,
 /// and the method running there with the class it was found on. A method
@@ -17294,6 +17336,8 @@ fn json_string(out: &mut String, bytes: &[u8]) {
 /// in C — `Array#map` itself, at the line of the program that called it —
 /// so a frame inside the core library is reported as the core method the
 /// program called, at the program's position, as `backtrace_of` does.
+#[cold]
+#[inline(never)]
 fn stamp_allocations(scope: &mut HandleScope<'_>, frames: &[Call], at: usize) {
     let generation = scope.stats().collections;
     let Some(last) = frames.len().checked_sub(1) else {
