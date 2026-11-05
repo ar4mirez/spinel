@@ -1,16 +1,20 @@
-//! The JIS encodings — EUC-JP, Shift_JIS and Windows-31J — for transcoding
-//! (#378). Reading a character is arithmetic: which bytes lead and which
-//! follow. What it means in Unicode is a table, generated from CRuby into
+//! The JIS encodings — EUC-JP, Shift_JIS and Windows-31J (#378), and CP51932
+//! (#419) — for transcoding. Reading a character is arithmetic: which bytes
+//! lead and which follow. What it means in Unicode is a table, generated from CRuby into
 //! `jis_table.rs` by `scripts/jis-table.rb`, which also checks everything this
 //! file assumes about the bytes against CRuby.
 //!
 //! A character is a *cell*, its row and column from 0 in a plane of 94
 //! columns: JIS X 0208 for EUC-JP's two bytes and Shift_JIS's, JIS X 0212 for
 //! EUC-JP's three, and Windows-31J's 120 rows of two-byte Shift_JIS codes.
-//! ASCII and the half-width katakana are arithmetic and have no cell.
+//! CP51932 is EUC-JP's shape without the three, over Windows-31J's first 94
+//! rows, Microsoft's choices and the NEC rows. ASCII and the half-width
+//! katakana are arithmetic and have no cell.
 
 use crate::jis_table;
 use crate::strings::{EUC_JP, SHIFT_JIS, WINDOWS_31J};
+
+pub const CP51932: u8 = 81;
 
 const CELLS: usize = 94 * 94;
 const WINDOWS_CELLS: usize = 120 * 94;
@@ -112,11 +116,22 @@ static WINDOWS_31J_WRITE: [(u16, u16); jis_table::WINDOWS_31J_WRITTEN] = writer(
     jis_table::WINDOWS_31J_UNCHOSEN,
     jis_table::WINDOWS_31J_ONE_WAY,
 );
+static CP51932_WRITE: [(u16, u16); jis_table::CP51932_WRITTEN] = writer(
+    WINDOWS_31J_READ.split_at(CELLS).0,
+    &[],
+    jis_table::CP51932_UNCHOSEN,
+    jis_table::CP51932_ONE_WAY,
+);
 
 /// Whether `encoding` is one of these.
 #[must_use]
 pub fn supported(encoding: u8) -> bool {
-    matches!(encoding, EUC_JP | SHIFT_JIS | WINDOWS_31J)
+    matches!(encoding, EUC_JP | SHIFT_JIS | WINDOWS_31J | CP51932)
+}
+
+/// Whether `encoding` is spelled as EUC-JP is: CP51932 too, without 0x8F.
+fn euc(encoding: u8) -> bool {
+    encoding == EUC_JP || encoding == CP51932
 }
 
 /// Whether CRuby converts between the two without going through UTF-8: EUC-JP
@@ -134,8 +149,8 @@ pub fn direct(source: u8, destination: u8) -> bool {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Jis {
     Ascii(u8),
-    /// The half-width katakana byte, 0xA1 to 0xDF; EUC-JP also reads 0xE0 to
-    /// 0xFE after 0x8E, which is no character.
+    /// The half-width katakana byte, 0xA1 to 0xDF; EUC-JP and CP51932 also
+    /// read 0xE0 to 0xFE after 0x8E, which is no character.
     Kana(u8),
     /// A cell of JIS X 0208, or of Windows-31J's 120 rows.
     Cell(u16),
@@ -162,9 +177,9 @@ pub fn read(encoding: u8, bytes: &[u8], at: usize) -> Read {
     if lead < 0x80 {
         return Read::Char(Jis::Ascii(lead), 1);
     }
-    if encoding == EUC_JP {
+    if euc(encoding) {
         let follows = |b: u8| (0xa1..=0xfe).contains(&b);
-        if !(lead == 0x8e || lead == 0x8f || follows(lead)) {
+        if !(lead == 0x8e || (lead == 0x8f && encoding == EUC_JP) || follows(lead)) {
             return invalid(1, 0);
         }
         let Some(&second) = rest.get(1) else {
@@ -208,7 +223,9 @@ pub fn to_unicode(encoding: u8, jis: Jis) -> Option<u32> {
         Jis::Ascii(b) => return Some(u32::from(b)),
         Jis::Kana(b @ 0xa1..=0xdf) => return Some(0xff61 + u32::from(b - 0xa1)),
         Jis::Kana(_) => return None,
-        Jis::Cell(cell) if encoding == WINDOWS_31J => WINDOWS_31J_READ[usize::from(cell)],
+        Jis::Cell(cell) if encoding == WINDOWS_31J || encoding == CP51932 => {
+            WINDOWS_31J_READ[usize::from(cell)]
+        }
         Jis::Cell(cell) => *JIS0208.get(usize::from(cell))?,
         Jis::Supplementary(cell) => JIS0212[usize::from(cell)],
     };
@@ -227,6 +244,7 @@ pub fn from_unicode(encoding: u8, code: u32) -> Option<Jis> {
     let table: &[(u16, u16)] = match encoding {
         EUC_JP => &EUC_JP_WRITE,
         SHIFT_JIS => &SHIFT_JIS_WRITE,
+        CP51932 => &CP51932_WRITE,
         _ => &WINDOWS_31J_WRITE,
     };
     let at = table.binary_search_by_key(&code, |&(c, _)| c).ok()?;
@@ -242,15 +260,15 @@ pub fn from_unicode(encoding: u8, code: u32) -> Option<Jis> {
 /// encodings, and EUC-JP's katakana bytes that are no katakana.
 #[must_use]
 pub fn write(encoding: u8, jis: Jis) -> Option<Vec<u8>> {
-    let euc = |cell: u16| [0xa1 + (cell / 94) as u8, 0xa1 + (cell % 94) as u8];
-    Some(match (encoding == EUC_JP, jis) {
+    let cell_bytes = |cell: u16| [0xa1 + (cell / 94) as u8, 0xa1 + (cell % 94) as u8];
+    Some(match (euc(encoding), jis) {
         (_, Jis::Ascii(b)) => vec![b],
         (_, Jis::Kana(b)) if !(0xa1..=0xdf).contains(&b) => return None,
         (true, Jis::Kana(b)) => vec![0x8e, b],
         (false, Jis::Kana(b)) => vec![b],
-        (true, Jis::Cell(cell)) if usize::from(cell) < CELLS => euc(cell).to_vec(),
-        (true, Jis::Supplementary(cell)) => {
-            let [a, b] = euc(cell);
+        (true, Jis::Cell(cell)) if usize::from(cell) < CELLS => cell_bytes(cell).to_vec(),
+        (true, Jis::Supplementary(cell)) if encoding == EUC_JP => {
+            let [a, b] = cell_bytes(cell);
             vec![0x8f, a, b]
         }
         (false, Jis::Cell(cell)) if usize::from(cell) < WINDOWS_CELLS => {
@@ -296,6 +314,29 @@ mod tests {
         assert_eq!(through(EUC_JP, 0xa5), None);
     }
 
+    // Measured on ruby 4.0.9 (#419).
+    #[test]
+    fn writes_and_reads_cp51932_as_cruby_does() {
+        assert_eq!(through(CP51932, 0x2460), Some(vec![0xad, 0xa1]));
+        assert_eq!(through(CP51932, 0x2252), Some(vec![0xa2, 0xe2]));
+        assert_eq!(through(CP51932, 0xffe2), Some(vec![0xa2, 0xcc]));
+        assert_eq!(through(CP51932, 0x9ad9), Some(vec![0xfc, 0xe2]));
+        assert_eq!(through(CP51932, 0x2015), Some(vec![0xa1, 0xbd]));
+        assert_eq!(through(CP51932, 0xe9), None);
+        assert_eq!(through(CP51932, 0xff71), Some(vec![0x8e, 0xb1]));
+        assert_eq!(back(CP51932, &[0xad, 0xf0]), Some(0x2252));
+        assert_eq!(back(CP51932, &[0xf9, 0xa1]), Some(0x7e8a));
+        assert_eq!(back(CP51932, &[0xa1, 0xc1]), Some(0xff5e));
+        assert_eq!(back(CP51932, &[0xf5, 0xa1]), None);
+        assert_eq!(
+            read(CP51932, &[0x8f, 0xa1, 0xa1], 0),
+            Read::Invalid {
+                error: 1,
+                readagain: 0
+            }
+        );
+    }
+
     #[test]
     fn reads_as_cruby_does() {
         assert_eq!(back(EUC_JP, &[0xa2, 0xaa]), Some(0x2192));
@@ -332,7 +373,7 @@ mod tests {
     /// Every cell `encoding` writes reads back to the code it was written
     /// from, but the one-way ones. One quarter of the table at a time, so that
     /// under miri, where a cell costs ~12ms, no one test holds the job's wall
-    /// time: the twelve tests below are the four quarters of each table.
+    /// time: the sixteen tests below are the four quarters of each table.
     fn every_written_cell_reads_back(
         encoding: u8,
         table: &[(u16, u16)],
@@ -428,6 +469,26 @@ mod tests {
             jis_table::WINDOWS_31J_ONE_WAY,
             3,
         );
+    }
+
+    #[test]
+    fn every_written_cp51932_cell_reads_back_but_the_one_way_ones_first_quarter() {
+        every_written_cell_reads_back(CP51932, &CP51932_WRITE, jis_table::CP51932_ONE_WAY, 0);
+    }
+
+    #[test]
+    fn every_written_cp51932_cell_reads_back_but_the_one_way_ones_second_quarter() {
+        every_written_cell_reads_back(CP51932, &CP51932_WRITE, jis_table::CP51932_ONE_WAY, 1);
+    }
+
+    #[test]
+    fn every_written_cp51932_cell_reads_back_but_the_one_way_ones_third_quarter() {
+        every_written_cell_reads_back(CP51932, &CP51932_WRITE, jis_table::CP51932_ONE_WAY, 2);
+    }
+
+    #[test]
+    fn every_written_cp51932_cell_reads_back_but_the_one_way_ones_fourth_quarter() {
+        every_written_cell_reads_back(CP51932, &CP51932_WRITE, jis_table::CP51932_ONE_WAY, 3);
     }
 
     #[test]

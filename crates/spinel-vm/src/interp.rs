@@ -1075,8 +1075,9 @@ fn str_native(
                 .collect::<Option<Vec<u8>>>()
                 .unwrap_or_default();
             let start = usize::try_from(index_arg(1)?).unwrap_or(0).min(bytes.len());
-            let mut state =
-                crate::transcode::State(u8::try_from(arg(2).as_fixnum().unwrap_or(0)).unwrap_or(0));
+            let mut state = crate::transcode::State(
+                u32::try_from(arg(2).as_fixnum().unwrap_or(0)).unwrap_or(0),
+            );
             let mode = arg(3).as_fixnum().unwrap_or(0);
             let decorators = crate::transcode::Decorators {
                 xml: match mode & 3 {
