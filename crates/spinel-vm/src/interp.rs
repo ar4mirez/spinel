@@ -1076,7 +1076,7 @@ fn str_native(
                 .unwrap_or_default();
             let start = usize::try_from(index_arg(1)?).unwrap_or(0).min(bytes.len());
             let mut state = crate::transcode::State(
-                u32::try_from(arg(2).as_fixnum().unwrap_or(0)).unwrap_or(0),
+                u64::try_from(arg(2).as_fixnum().unwrap_or(0)).unwrap_or(0),
             );
             let mode = arg(3).as_fixnum().unwrap_or(0);
             let decorators = crate::transcode::Decorators {
@@ -1143,7 +1143,7 @@ fn str_native(
                     reference,
                     fixnum(i64::from(step.from)),
                     fixnum(i64::from(step.to)),
-                    fixnum(i64::from(state.0)),
+                    fixnum(i64::try_from(state.0).unwrap_or(0)),
                 ],
             )
         }
