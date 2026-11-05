@@ -1696,9 +1696,10 @@ end
   # transcoder, which reads the whole character, so that is held, converted
   # (#551). From UTF-8 into UTF-16 or UTF-32 `rb_econv_decorate_at_last`
   # puts the decorator first, so the converter keeps the one byte it reads,
-  # as it keeps the first of bytes that make no character. Nothing after the
-  # CR is the end, which CRuby's converter looked for, and so finished
-  # (#551). `pos` or `seek` over bytes buffered drops what the converter
+  # as it keeps the first of bytes that make no character, and with a byte
+  # that makes none the one past it too, which a `pos` drops (#644).
+  # Nothing after the CR is the end, which CRuby's converter looked for,
+  # and so finished (#551). `pos` or `seek` over bytes buffered drops what the converter
   # kept. Bytes that make no character raise on the read the CR answers,
   # the transcoder having read them with it, and the CR goes back as from
   # any read that raises (#555): before a decorator that comes first, only
@@ -1739,7 +1740,13 @@ end
         end
         if unit == 1
           return __replaced_past_cr__(cr) if __replaces_past_cr__?
-          @rpend = __take__(1)
+          # A decorator that comes first hands a byte no UTF-8 character
+          # starts with on with the one past it, which the transcoder reads,
+          # so where that is replaced `pos` is past both and drops them
+          # (#644). Measured.
+          lead = head.getbyte(0)
+          past = enc == Encoding::UTF_8 && !__read_encoding__.ascii_compatible? && @ecopts[:invalid] == :replace && (lead < 0xC2 || lead > 0xF4)
+          @rpend = __take__(past ? 2 : 1)
           return
         end
       end
