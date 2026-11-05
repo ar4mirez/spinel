@@ -1743,7 +1743,7 @@ end
           # A decorator that comes first hands a byte no UTF-8 character
           # starts with on with the one past it, which the transcoder reads,
           # so where that is replaced `pos` is past both and drops them
-          # (#644). Measured.
+          # (#644), and past any more it hands on after them (#661). Measured.
           lead = head.getbyte(0)
           past = enc == Encoding::UTF_8 && !__read_encoding__.ascii_compatible? && @ecopts[:invalid] == :replace && (lead < 0xC2 || lead > 0xF4)
           @rpend = past ? __handed_on__ : __take__(1)
