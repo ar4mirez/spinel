@@ -1846,9 +1846,16 @@ end
       rescue Encoding::UndefinedConversionError
         # One with no spelling raises on this read, the CR and the
         # replacement dropped, and `pos` past it (#663). Measured.
-        # ponytail: `undef: :replace` stops before it, so its replacement
-        # comes a read late; upgrade by replacing it here (#671).
-        return past if @ecopts[:undef] == :replace
+        # With `undef: :replace` it is replaced on this read instead, after
+        # the one this read answers and ahead of the CR, the bytes before it
+        # dropping, and the transcoder reads on past it as past a broken
+        # byte (#671). Measured.
+        if @ecopts[:undef] == :replace
+          __take__(past)
+          @cbuf = (@cbuf || "".b) << __decode__(__take__(char.bytesize)).b
+          past = 0
+          next
+        end
         __take__(past + char.bytesize)
         char.encode(__read_encoding__)
       end
