@@ -873,9 +873,13 @@ class String
   end
 
   # A boundary is where the walk to the character that starts at or after it
-  # lands, which goes no further than `byte` (#617).
+  # lands, which goes no further than `byte` (#617). In UTF-8 a trail byte is
+  # never one, even where a truncated character leaves it standing alone:
+  # CRuby's `rb_enc_left_char_head` steps back over it (#641).
   def __check_char_boundary__(byte)
-    return if byte == bytesize || __char_byte__(__char_count__(0, byte)) == byte
+    return if byte == bytesize
+    trail = byte > 0 && encoding == Encoding::UTF_8 && (getbyte(byte) & 0xc0) == 0x80
+    return if !trail && __char_byte__(__char_count__(0, byte)) == byte
     raise IndexError, "offset #{byte} does not land on character boundary"
   end
 
