@@ -2581,3 +2581,10 @@ n = "/tmp/spinel-eval-#{Process.pid}-675c"; File.binwrite(n, "a\r\xF0\x9F\x98\x8
 "\u{1F600}".b.force_encoding("UTF-32LE").ord  #=> 2157486064
 "\u{1F600}".encode("UTF-32BE").ord  #=> 128512
 "\x00\x00\x00\xE9a".b.force_encoding("UTF-32BE").ord  #=> 233
+
+# ------------------------------- read on an attribute opened on a character with no spelling before a lone CR under universal newline (#679)
+# As for `gets` (#636) and `getc` (#657), a plain `read` gets the charref before the quote, into EUC-JP, Shift_JIS and ISO-8859-1. Measured on ruby 4.0.9 (#679).
+n = "/tmp/spinel-eval-#{Process.pid}-679a"; File.binwrite(n, "\xF0\x9F\x98\x81\rab".b); r = File.open(n, "r:UTF-8:EUC-JP", xml: :attr, newline: :universal) { |f| f.read }; File.delete(n); r  #=> "&#x1F601;\"\nab\""
+n = "/tmp/spinel-eval-#{Process.pid}-679b"; File.binwrite(n, "\xF0\x9F\x98\x81\rab".b); r = File.open(n, "r:UTF-8:Shift_JIS", xml: :attr, newline: :universal) { |f| f.read }; File.delete(n); r  #=> "&#x1F601;\"\nab\""
+n = "/tmp/spinel-eval-#{Process.pid}-679c"; File.binwrite(n, "\xF0\x9F\x98\x81\rab".b); r = File.open(n, "r:UTF-8:ISO-8859-1", xml: :attr, newline: :universal) { |f| f.read }; File.delete(n); r  #=> "&#x1F601;\"\nab\""
+n = "/tmp/spinel-eval-#{Process.pid}-679d"; File.binwrite(n, "\xF0\x9F\x98\x81\rab".b); r = File.open(n, "r:UTF-8:EUC-JP", xml: :attr, newline: :universal) { |f| f.gets(nil) }; File.delete(n); r  #=> "&#x1F601;\"\nab\""
