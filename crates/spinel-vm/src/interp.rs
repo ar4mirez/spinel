@@ -2317,19 +2317,18 @@ fn run<'h>(
                 // finished instructions are let go, so an object only they
                 // named is freed. Finalizers a collection queued run here
                 // too, as a call pushed on top of whatever was running.
-                let requests = scope.take_loop_requests();
-                if requests != 0 {
-                    if requests & crate::heap::LOOP_COLLECT != 0 {
-                        release_roots(scope, &mut stack, &frames, floor);
-                        root_limit = floor + ROOT_SLACK.max(2 * (scope.rooted() - floor));
-                        scope.collect();
-                    }
-                    // Tracing is started by a method, so it is first seen
-                    // here, at the call or the return around the primitive.
-                    if requests & crate::heap::LOOP_TRACE != 0 && trace_floor == 0 {
-                        trace_floor = u64::MAX;
-                        traced_top = frames.len().saturating_sub(1);
-                    }
+                if scope.take_collection_request() {
+                    release_roots(scope, &mut stack, &frames, floor);
+                    root_limit = floor + ROOT_SLACK.max(2 * (scope.rooted() - floor));
+                    scope.collect();
+                }
+                // Tracing is started by a method, so this loop first sees it
+                // here, at the call or the return around the primitive — or,
+                // when another thread or a loop below started it, at this
+                // loop's next call, return or turn check.
+                if trace_floor == 0 && scope.tracing_allocations() {
+                    trace_floor = u64::MAX;
+                    traced_top = frames.len().saturating_sub(1);
                 }
                 if scope.has_pending_finalizers() {
                     let list = take_finalizers(scope, false);
@@ -3951,11 +3950,6 @@ fn run<'h>(
             }
         })
     })();
-    // A loop below this one, entered for a callback, may still be waiting
-    // to notice tracing that started here.
-    if scope.tracing_allocations() {
-        scope.request_trace_notice();
-    }
     (result, ids)
 }
 
@@ -13840,13 +13834,8 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         ),
         (
             Builtin::Kernel,
-            &["__objspace_dump__"],
-            Native::Gc(GcOp::Dump),
-        ),
-        (
-            Builtin::Kernel,
-            &["__objspace_dump_all__"],
-            Native::Gc(GcOp::DumpAll),
+            &["__objspace_address__"],
+            Native::Gc(GcOp::Address),
         ),
         (
             Builtin::Kernel,
@@ -16982,14 +16971,21 @@ fn gc_native(scope: &mut HandleScope<'_>, call: &Pending, op: GcOp) -> Value {
             };
             Value::symbol(crate::shared::symbols::intern(&format!("T_{kind}")))
         }
-        GcOp::Dump => {
-            let json = dump_object(scope, arg(0));
-            string_new(scope, &json)
-        }
-        GcOp::DumpAll => {
-            let since = arg(0).as_fixnum().and_then(|n| u64::try_from(n).ok());
-            let json = dump_all(scope, since);
-            string_new(scope, &json)
+        GcOp::Address => {
+            let object = arg(0);
+            if object.is_immediate() {
+                return Value::NIL;
+            }
+            let handle = scope.root(object);
+            let address = if arg(1).is_truthy() {
+                match scope.class(handle).and_then(Value::as_heap) {
+                    Some(pointer) => pointer.as_ptr() as usize,
+                    None => return Value::NIL,
+                }
+            } else {
+                scope.address(handle)
+            };
+            Value::fixnum(i64::try_from(address).unwrap_or(i64::MAX)).unwrap_or(Value::NIL)
         }
         GcOp::Id2Ref => {
             let found = arg(0).as_fixnum().and_then(|id| {
@@ -17156,111 +17152,6 @@ fn allocation_site(scope: &mut HandleScope<'_>, object: Value) -> Value {
     )
 }
 
-/// `object`'s line of `ObjectSpace.dump` (#690): CRuby's keys, for what
-/// this heap can say about it. No `shape_id`, `slot_size` or `flags`: those
-/// describe CRuby's own heap, and a program reading them reads CRuby.
-fn dump_object(scope: &mut HandleScope<'_>, object: Value) -> String {
-    use crate::value::Unpacked;
-    let mut out = String::from("{");
-    match object.unpack() {
-        Unpacked::Nil => return "null".to_owned(),
-        Unpacked::True => return "true".to_owned(),
-        Unpacked::False => return "false".to_owned(),
-        Unpacked::Fixnum(n) => return n.to_string(),
-        Unpacked::Flonum(f) => return float_to_s(f),
-        Unpacked::Symbol(id) => {
-            let name = crate::shared::symbols::name(id).unwrap_or_default();
-            out.push_str("\"type\":\"SYMBOL\", \"value\":");
-            json_string(&mut out, name.as_bytes());
-            out.push('}');
-            return out;
-        }
-        Unpacked::Undef | Unpacked::Heap(_) => {}
-    }
-    let handle = scope.root(object);
-    let address = scope.address(handle);
-    let kind = dump_type(scope, object);
-    out.push_str(&format!(
-        "\"address\":\"0x{address:x}\", \"type\":\"{kind}\""
-    ));
-    if let Some(class) = scope.class(handle)
-        && let Some(pointer) = class.as_heap()
-    {
-        out.push_str(&format!(
-            ", \"class\":\"0x{:x}\"",
-            pointer.as_ptr() as usize
-        ));
-    }
-    if scope.is_frozen(handle) {
-        out.push_str(", \"frozen\":true");
-    }
-    match kind {
-        "STRING" => {
-            let bytes = crate::strings::bytes(scope, handle);
-            let encoding = crate::strings::encoding(scope, handle);
-            out.push_str(&format!(", \"bytesize\":{}, \"value\":", bytes.len()));
-            json_string(&mut out, &bytes);
-            out.push_str(", \"encoding\":");
-            json_string(&mut out, crate::strings::name(encoding).as_bytes());
-        }
-        "ARRAY" => out.push_str(&format!(", \"length\":{}", array_len(scope, handle))),
-        "CLASS" | "MODULE" => {
-            if let Some(name) = class_id_of(scope, object)
-                .and_then(|id| scope.classes().name(id).map(str::to_owned))
-            {
-                out.push_str(", \"name\":");
-                json_string(&mut out, name.as_bytes());
-            }
-        }
-        "FLOAT" => {
-            let value = crate::float::read(scope, object).unwrap_or(f64::NAN);
-            out.push_str(&format!(", \"value\":\"{}\"", float_to_s(value)));
-        }
-        _ => {}
-    }
-    let references: Vec<String> = references_of(scope, object)
-        .into_iter()
-        .filter_map(Value::as_heap)
-        .map(|pointer| format!("\"0x{:x}\"", pointer.as_ptr() as usize))
-        .collect();
-    if !references.is_empty() {
-        out.push_str(&format!(", \"references\":[{}]", references.join(", ")));
-    }
-    if let Some(site) = scope.allocation_site(handle).cloned() {
-        out.push_str(", \"file\":");
-        json_string(&mut out, site.path.as_bytes());
-        out.push_str(&format!(", \"line\":{}", site.line));
-        if let Some(method) = site.method.and_then(crate::shared::symbols::name) {
-            out.push_str(", \"method\":");
-            json_string(&mut out, method.as_bytes());
-        }
-        out.push_str(&format!(", \"generation\":{}", site.generation));
-    }
-    out.push_str(&format!(", \"memsize\":{}}}", scope.memsize(handle)));
-    out
-}
-
-/// `ObjectSpace.dump_all` (#690): a line of `dump_object` for every object
-/// Ruby can see, or, given `since`, for every one allocation tracing saw
-/// made at that generation or later.
-fn dump_all(scope: &mut HandleScope<'_>, since: Option<u64>) -> String {
-    let mut out = String::new();
-    for object in scope.objects() {
-        let handle = scope.root(object);
-        if let Some(since) = since {
-            let recent = scope
-                .allocation_site(handle)
-                .is_some_and(|site| site.generation >= since);
-            if !recent {
-                continue;
-            }
-        }
-        out.push_str(&dump_object(scope, object));
-        out.push('\n');
-    }
-    out
-}
-
 /// CRuby's `T_*` name for what `object`, a heap object, is.
 fn dump_type(scope: &mut HandleScope<'_>, object: Value) -> &'static str {
     if let Some(id) = class_id_of(scope, object) {
@@ -17292,27 +17183,6 @@ fn heap_repr(scope: &mut HandleScope<'_>, object: Value) -> Option<Builtin> {
     scope
         .class_of(handle)
         .and_then(|id| scope.classes().repr(id))
-}
-
-/// `bytes` as a JSON string, escaped as CRuby's `objspace` escapes one.
-fn json_string(out: &mut String, bytes: &[u8]) {
-    out.push('"');
-    for ch in String::from_utf8_lossy(bytes).chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\u{8}' => out.push_str("\\b"),
-            '\u{c}' => out.push_str("\\f"),
-            ch if (ch as u32) < 0x20 || ch == '\u{7f}' => {
-                out.push_str(&format!("\\u{:04x}", ch as u32));
-            }
-            ch => out.push(ch),
-        }
-    }
-    out.push('"');
 }
 
 /// One instruction's worth of allocation tracing (#690), run before each
@@ -17436,12 +17306,16 @@ fn gc_stat(scope: &mut HandleScope<'_>) -> Value {
 /// A singleton class of a singleton class is left out. CRuby makes those
 /// only when it must, and hides them from this walk; here one is made the
 /// first time a singleton class is dispatched on, so it is the walk that
-/// has to skip it.
+/// has to skip it. Given nil, every object Ruby can see, those included,
+/// for `ObjectSpace.dump_all`.
 fn each_object(scope: &mut HandleScope<'_>, module: Value) -> Value {
+    let objects = scope.objects();
+    if module.is_nil() {
+        return new_array(scope, &objects);
+    }
     let Some(module) = class_id_of(scope, module) else {
         return new_array(scope, &[]);
     };
-    let objects = scope.objects();
     let mut kinds: std::collections::HashMap<u64, bool> = std::collections::HashMap::new();
     let mut found = Vec::new();
     for object in objects {

@@ -1048,7 +1048,8 @@ pub enum GcOp {
     FinalizerCopy,
     /// `__finalizer_take__(everything)`: `[id, [callable, ...], ...]`, flat.
     FinalizerTake,
-    /// `__each_object__(module)`: every object that is a kind of `module`.
+    /// `__each_object__(module)`: every object that is a kind of `module`,
+    /// or with nil every object Ruby can see.
     EachObject,
     /// `__id2ref__(id, missing)`: the heap object with that `object_id`.
     Id2Ref,
@@ -1069,11 +1070,10 @@ pub enum GcOp {
     AllocationSite,
     /// `__objspace_type__(object)`: CRuby's `T_*` type for it, a Symbol.
     ObjectType,
-    /// `__objspace_dump__(object)`: its line of `ObjectSpace.dump` JSON.
-    Dump,
-    /// `__objspace_dump_all__(since)`: a line for every object, or for every
-    /// one traced at generation `since` or later.
-    DumpAll,
+    /// `__objspace_address__(object, header_class)`: the address of its
+    /// cell, or with `true` of the class its header names, an Integer; nil
+    /// for an immediate.
+    Address,
 }
 
 /// Which thread primitive. See `threads.rs` for the scheduler and

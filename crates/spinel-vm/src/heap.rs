@@ -368,15 +368,11 @@ pub struct Heap {
     gc_disabled: bool,
     /// `GC.stress`: every allocation collects first.
     gc_stress: bool,
-    /// What the interpreter loop is asked to do at its next call or return,
-    /// as [`LOOP_COLLECT`] and [`LOOP_TRACE`] bits. One byte so the loop
-    /// reads every request in the one load it already made for the first.
-    ///
-    /// `GC.start` asks for a collection, which runs there because the loop
-    /// can first let go of the handles it took for instructions that have
-    /// finished — collecting inside the native would keep alive everything
-    /// those stale handles still name.
-    loop_requests: u8,
+    /// `GC.start` asked for a collection. The interpreter loop runs it at
+    /// the next call or return, where it can let go of the handles it took
+    /// for instructions that have finished — collecting inside the native
+    /// would keep alive everything those stale handles still name.
+    gc_requested: bool,
     /// Time spent collecting, for `GC.total_time` and `GC.stat(:time)`.
     gc_time: std::time::Duration,
     /// Objects allocated as of the last collection, so `GC.stat` can count
@@ -548,11 +544,6 @@ impl WeakTable {
     }
 }
 
-/// [`Heap`]'s `loop_requests` bit for a collection `GC.start` asked for.
-pub(crate) const LOOP_COLLECT: u8 = 0b1;
-/// [`Heap`]'s `loop_requests` bit saying allocation tracing started (#690).
-pub(crate) const LOOP_TRACE: u8 = 0b10;
-
 /// Whether `value` came through the mark phase alive: an immediate always
 /// does, and a heap object does when it is marked.
 fn survived(value: Value) -> bool {
@@ -656,7 +647,7 @@ impl Heap {
             hooked_globals: std::collections::HashMap::new(),
             gc_disabled: false,
             gc_stress: false,
-            loop_requests: 0,
+            gc_requested: false,
             gc_time: std::time::Duration::ZERO,
             allocated_at_gc: 0,
             weak: HashMap::new(),
@@ -1611,18 +1602,12 @@ impl<'h> HandleScope<'h> {
     /// `GC.start`: collect at the interpreter's next call or return, where
     /// the loop can first let go of handles it no longer needs.
     pub(crate) fn request_collection(&mut self) {
-        self.heap.loop_requests |= LOOP_COLLECT;
+        self.heap.gc_requested = true;
     }
 
-    /// Ask the interpreter loop to notice, at its next call or return, that
-    /// allocations are being traced (#690).
-    pub(crate) fn request_trace_notice(&mut self) {
-        self.heap.loop_requests |= LOOP_TRACE;
-    }
-
-    /// What the loop was asked to do, as `LOOP_*` bits, forgetting it.
-    pub(crate) fn take_loop_requests(&mut self) -> u8 {
-        std::mem::take(&mut self.heap.loop_requests)
+    /// Whether a collection was asked for, forgetting that it was.
+    pub(crate) fn take_collection_request(&mut self) -> bool {
+        std::mem::take(&mut self.heap.gc_requested)
     }
 
     /// `GC.disable` with `true`, `GC.enable` with `false`; answers whether
@@ -1733,9 +1718,6 @@ impl<'h> HandleScope<'h> {
         } else {
             depth.saturating_sub(1)
         };
-        if start {
-            self.request_trace_notice();
-        }
     }
 
     /// Whether allocation tracing is on.

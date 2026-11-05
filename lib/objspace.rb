@@ -1,6 +1,7 @@
 # `objspace` (#690): CRuby's `ext/objspace`, which asks the collector what
 # `ObjectSpace` itself does not. Its C half is the `__objspace_*__`
-# primitives over `heap.rs`; its Ruby half, `dump` and `dump_all` below, is
+# primitives over `heap.rs` and, where Ruby can say it, the JSON writer
+# `_dump` and `_dump_all` below; its Ruby half, `dump` and `dump_all`, is
 # upstream's `objspace.rb`.
 
 module ObjectSpace
@@ -94,14 +95,109 @@ module ObjectSpace
   end
 
   def self._dump(obj, out)
-    out << __objspace_dump__(obj)
+    out << _dump_object(obj, _dump_readers)
     out
   end
 
   # `full` asks for the empty slots too, which this heap does not walk.
+  # What the walk allocates is made after the heap is listed, so the dump
+  # does not describe itself.
   def self._dump_all(out, full, since, shapes)
-    out << __objspace_dump_all__(since)
+    objects = __each_object__(nil)
+    readers = _dump_readers
+    json = +''
+    objects.each do |obj|
+      if Integer === since && since >= 0
+        site = __objspace_allocation__(obj)
+        next unless site && site[4] >= since
+      end
+      json << _dump_object(obj, readers) << "\n"
+    end
+    out << json
     out
+  end
+
+  # The core methods `_dump_object` reads an object through, bound to it
+  # rather than sent: it may be a BasicObject, or define its own.
+  def self._dump_readers
+    {
+      frozen: Kernel.instance_method(:frozen?),
+      bytes: String.instance_method(:b),
+      encoding: String.instance_method(:encoding),
+      length: Array.instance_method(:length),
+      name: Module.instance_method(:__name__),
+      float: Float.instance_method(:to_s),
+    }
+  end
+
+  # `obj`'s line of `dump`: CRuby's keys, for what this heap can say about
+  # it. No `shape_id`, `slot_size` or `flags`: those describe CRuby's own
+  # heap, and a program reading them reads CRuby.
+  def self._dump_object(obj, readers)
+    address = __objspace_address__(obj, false)
+    if address.nil?
+      return "null" if obj.nil?
+      return %({"type":"SYMBOL", "value":#{_json_string(obj.name)}}) if Symbol === obj
+      return obj.to_s
+    end
+    type = __objspace_type__(obj).name[2..]
+    line = +%({"address":"0x#{address.to_s(16)}", "type":"#{type}")
+    klass = __objspace_address__(obj, true)
+    line << %(, "class":"0x#{klass.to_s(16)}") if klass
+    line << ', "frozen":true' if readers[:frozen].bind_call(obj)
+    case type
+    when "STRING"
+      bytes = readers[:bytes].bind_call(obj)
+      encoding = readers[:encoding].bind_call(obj).name
+      line << %(, "bytesize":#{bytes.bytesize}, "value":#{_json_string(bytes)})
+      line << %(, "encoding":#{_json_string(encoding)})
+    when "ARRAY"
+      line << %(, "length":#{readers[:length].bind_call(obj)})
+    when "CLASS", "MODULE"
+      name = readers[:name].bind_call(obj)
+      line << %(, "name":#{_json_string(name)}) if name
+    when "FLOAT"
+      line << %(, "value":"#{readers[:float].bind_call(obj)}")
+    end
+    references = __objspace_reachable__(obj)
+    unless references.empty?
+      addresses = references.map { |ref| %("0x#{__objspace_address__(ref, false).to_s(16)}") }
+      line << %(, "references":[#{addresses.join(", ")}])
+    end
+    site = __objspace_allocation__(obj)
+    if site
+      line << %(, "file":#{_json_string(site[0])}, "line":#{site[1]})
+      line << %(, "method":#{_json_string(site[3].name)}) if site[3]
+      line << %(, "generation":#{site[4]})
+    end
+    line << %(, "memsize":#{__objspace_memsize__(obj)}})
+  end
+
+  # `bytes` as a JSON string, escaped as CRuby's `objspace` escapes one,
+  # with what is not UTF-8 replaced. Each character to escape is split on
+  # and joined back escaped, the backslash first, since the escapes are
+  # written with one.
+  def self._json_string(bytes)
+    text = bytes.b.force_encoding(Encoding::UTF_8).scrub("�")
+    return %("#{text}") unless text.match?(/["\\\x00-\x1f\x7f]/)
+    text = text.split("\\", -1).join("\\\\") if text.include?("\\")
+    text = text.split('"', -1).join('\\"') if text.include?('"')
+    if text.match?(/[\x00-\x1f\x7f]/)
+      [*0..0x1f, 0x7f].each do |code|
+        ch = code.chr
+        next unless text.include?(ch)
+        escape = case ch
+                 when "\n" then "\\n"
+                 when "\r" then "\\r"
+                 when "\t" then "\\t"
+                 when "\b" then "\\b"
+                 when "\f" then "\\f"
+                 else "\\u00" + (code < 0x10 ? "0" : "") + code.to_s(16)
+                 end
+        text = text.split(ch, -1).join(escape)
+      end
+    end
+    %("#{text}")
   end
 
   def self._dump_shapes(out, since)
@@ -111,6 +207,9 @@ module ObjectSpace
   class << self
     private :_dump
     private :_dump_all
+    private :_dump_readers
+    private :_dump_object
+    private :_json_string
     private :_dump_shapes
   end
 
