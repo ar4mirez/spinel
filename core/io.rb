@@ -1815,13 +1815,11 @@ end
     begin
       again = __read_on__(out) unless __read_encoding__.ascii_compatible?
     rescue Encoding::UndefinedConversionError
-      # Where the character with no spelling ended what was buffered, CRuby's
-      # converter finished and so kept the replacement and the CR (#645,
-      # #663). Measured.
-      if @rbuf.empty? && !__fill__(1)
-        @cbuf = (@cbuf || "".b) << out.b
-        @rpend = cr
-      end
+      # CRuby's converter still holds the replacement and the CR, for the
+      # next read to give them, unless a `pos` drops them (#663, #673).
+      # Measured.
+      @cbuf = (@cbuf || "".b) << out.b
+      @rpend = cr
       raise
     end
     @rpend = cr + __take__(again)
@@ -1850,8 +1848,9 @@ end
       rescue Encoding::InvalidByteSequenceError => error
         past += error.error_bytes.bytesize
       rescue Encoding::UndefinedConversionError
-        # One with no spelling raises on this read, the CR and the
-        # replacement dropped, and `pos` past it (#663). Measured.
+        # One with no spelling raises on this read, and `pos` past it
+        # drops the CR and the replacement, which the caller holds for the
+        # next read otherwise (#663, #673). Measured.
         # With `undef: :replace` it is replaced on this read instead, after
         # the one this read answers and ahead of the CR, after the
         # replacements of the bytes before it that make none, and the
