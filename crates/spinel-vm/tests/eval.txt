@@ -2542,3 +2542,7 @@ n = "/tmp/spinel-eval-#{Process.pid}-636c"; File.binwrite(n, "\xF0\x9F\x98\x81\n
 "\xD8\x3D\xDE\x00".b.force_encoding("UTF-16BE").ord  #=> 128512
 "é".encode("UTF-16BE").ord  #=> 233
 n = "/tmp/spinel-eval-#{Process.pid}-650"; File.binwrite(n, "\u{1F600}a"); r = File.open(n, "r:UTF-8:UTF-16LE") { |f| f.getc.ord }; File.delete(n); r  #=> 128512
+
+# ------------------------------- getc on an attribute opened on a character with no spelling under universal newline (#657)
+# As for `gets` (#636), `getc` gets the charref before the quote, the converter taking that character alone. Measured on ruby 4.0.9 (#657).
+n = "/tmp/spinel-eval-#{Process.pid}-657"; File.binwrite(n, "\xF0\x9F\x98\x81\nab\n".b); r = File.open(n, "r:UTF-8:EUC-JP", xml: :attr, newline: :universal) { |f| [f.getc, f.pos, f.gets, f.pos] }; File.delete(n); r  #=> ["&", 4, "\"\n", 5]

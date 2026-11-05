@@ -3487,6 +3487,13 @@ end
       @rquote = true
       return __hand_out__(__in_read__("\""))
     end
+    # Under universal newline the decorators come before `xml:`, so one with
+    # no spelling that opens a quote is the converter's to make, the
+    # replacement before the quote, as `gets` does (#636, #657). Measured.
+    if __opens_on_replacement__?(char.b, @rquote)
+      __stream_from__(char, @rquote)
+      return getc
+    end
     # Into one that is, they come after it, and a character it cannot convert
     # is inserted as a reference, which is no output to stop after: the read
     # goes on to the next it can, or to the end of what is buffered, or to a
