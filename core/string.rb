@@ -862,6 +862,16 @@ class String
       start = bytesize if start > bytesize
     end
     __check_char_boundary__(start)
+    if pattern.is_a?(Regexp)
+      # Backward a character at a time, as `#rindex`, answering the byte offset.
+      at = __byte_to_char__(start)
+      while at >= 0
+        match = pattern.match(self, at)
+        return match.byteoffset(0)[0] if !match.nil? && match.begin(0) == at
+        at -= 1
+      end
+      return nil
+    end
     pattern = String.__coerce__(pattern)
     __combined_encoding__(pattern)
     # Byte by byte, a match inside a character included: CRuby's
