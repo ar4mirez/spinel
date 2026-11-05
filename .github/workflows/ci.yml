@@ -109,8 +109,9 @@ jobs:
       # runner's cores share the work: interpreted, one heap bootstrap took
       # ~185s on ubuntu-latest (November 2026) until the primitives stopped
       # walking every class per definition, which cut it to under half, and
-      # most tests do one; `cargo miri test` runs them one at a time. `count:` deals the tests out
-      # round-robin, which spreads the bootstrapping ones across the shards.
+      # most tests do one; `cargo miri test` runs them one at a time. `count:`
+      # deals the tests out round-robin, which spreads the bootstrapping ones
+      # across the shards.
       - run: cargo miri nextest run -p spinel-vm --partition count:${{ matrix.partition }}/4
       # nextest does not run doctests, so they keep a `cargo miri test` of
       # their own, in one shard so they run once.
