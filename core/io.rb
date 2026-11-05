@@ -2510,12 +2510,10 @@ end
       return nil if line.nil?
     elsif unit
       bytes, cr, taken = __universal_line__(wanted, limit, unit, true)
-      quote = @rquote
       line = bytes.nil? ? nil : __decode__(bytes, taken)
       # A line with a byte to replace goes back, CRs and all, to be read as
-      # the converter makes it, its universal newline in it (#610), as does
-      # one that opens an attribute on a replacement (#636).
-      if line && options && (__replaces_invalid__? && !bytes.valid_encoding? || __opens_on_replacement__?(bytes, quote))
+      # the converter makes it, its universal newline in it (#610).
+      if line && options && __replaces_invalid__? && !bytes.valid_encoding?
         @rbuf = taken.b + @rbuf
         line = __converted_line__(separator, wanted, limit, unit)
       elsif cr
