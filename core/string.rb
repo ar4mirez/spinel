@@ -490,7 +490,18 @@ class String
     else
       # Any other ASCII-compatible encoding's is Onigmo's code: the bytes as
       # one big-endian number, `0xA4A2` for EUC-JP's `あ`. Measured.
-      return char.getbyte(0) unless encoding.ascii_compatible?
+      unless encoding.ascii_compatible?
+        name = encoding.name
+        if name == "UTF-16LE" || name == "UTF-16BE"
+          # One code unit, or a surrogate pair folded into its code point.
+          b = char.__bytes__
+          b = b.each_slice(2).flat_map(&:reverse) if name == "UTF-16LE"
+          hi = (b[0] << 8) | b[1]
+          return hi if b.size == 2
+          return 0x10000 + ((hi - 0xD800) << 10) + (((b[2] << 8) | b[3]) - 0xDC00)
+        end
+        return char.getbyte(0)
+      end
       char.__bytes__.inject(0) { |code, byte| (code << 8) | byte }
     end
   end
