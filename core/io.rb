@@ -3255,6 +3255,14 @@ end
         @rbuf = head.b + @rbuf
         return
       end
+      # One with no spelling that opens a quote is the converter's to make,
+      # the replacement before the quote (#636).
+      if __opens_on_replacement__?(head.b, @rquote)
+        __stream_from__("".b, @rquote)
+        made = __next_chars__
+        __hold_chars__(made.b) if made
+        return
+      end
     end
     __hold_chars__(__decode__(__take__(size)).b)
   end

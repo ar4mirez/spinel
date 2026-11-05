@@ -2521,3 +2521,5 @@ n = "/tmp/spinel-eval-#{Process.pid}-634b"; File.binwrite(n, "\xF0\x9F\x98\x80\n
 n = "/tmp/spinel-eval-#{Process.pid}-636"; File.binwrite(n, "\xF0\x9F\x98\x81\nab\n".b); r = File.open(n, "r:UTF-8:EUC-JP", xml: :attr, newline: :universal) { |f| [f.gets(40), f.pos, f.gets(40), f.pos] }; File.delete(n); r  #=> ["&#x1F601;\"\n", 5, "\"ab\n", 8]
 # So does such a line after another. Measured on ruby 4.0.9 (#636).
 n = "/tmp/spinel-eval-#{Process.pid}-636b"; File.binwrite(n, "ab\n\xF0\x9F\x98\x81\ncd\n".b); r = File.open(n, "r:UTF-8:EUC-JP", xml: :attr, newline: :universal) { |f| [f.gets(40), f.pos, f.gets(40), f.pos] }; File.delete(n); r  #=> ["\"ab\n", 3, "&#x1F601;\"\n", 8]
+# So does a paragraph in `gets("")` that opens on one. Measured on ruby 4.0.9 (#636).
+n = "/tmp/spinel-eval-#{Process.pid}-636c"; File.binwrite(n, "\xF0\x9F\x98\x81\n\nab\n".b); r = File.open(n, "r:UTF-8:EUC-JP", xml: :attr, newline: :universal) { |f| [f.gets(""), f.pos] }; File.delete(n); r  #=> ["&#x1F601;\"\n\n", 7]
