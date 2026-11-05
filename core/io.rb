@@ -577,6 +577,13 @@ end
   # CRuby's `rb_io_init_copy` flushes both, and what that finds out about the
   # descriptor the copy is told too.
   def initialize_copy(original)
+    # A finalizer of its own, for the descriptor of its own: `dup` gave
+    # the copy the original's, which would close the original's descriptor.
+    # A program's own finalizers stay, as CRuby's `init_copy` copies them.
+    kept = __finalizer_list__(self).reject { |callable| IO.__finalizer__?(callable) }
+    __finalizer_remove__(self)
+    kept.each { |callable| __finalizer_add__(self, callable) }
+    @finalizer = nil
     original.__check_open__
     original.__flush_gathered__
     original.__unread__(true)
@@ -595,13 +602,6 @@ end
     # The writes in progress are the original's.
     @wgathered = nil
     @wsynced = false
-    # And a finalizer of its own, for the descriptor of its own: `dup` gave
-    # the copy the original's, which would close the original's descriptor.
-    # A program's own finalizers stay, as CRuby's `init_copy` copies them.
-    kept = __finalizer_list__(self).reject { |callable| IO.__finalizer__?(callable) }
-    __finalizer_remove__(self)
-    kept.each { |callable| __finalizer_add__(self, callable) }
-    @finalizer = nil
     # A copy is no standard stream, whatever it copies.
     @stdio = nil
     __arm__
