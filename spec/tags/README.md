@@ -87,9 +87,11 @@ fix is a different slice. The reason says which slice, by number.
 
 ## What is here now
 
-Three hundred and five tags across a hundred and thirty-seven files; the
-count below it went stale over the slices since, which removed tags without
-saying so here. Copying an object's finalizers to its `dup` and `clone`
+Two hundred and ninety-seven tags across a hundred and thirty-four files.
+`require 'objspace'` (#690) removed `library/objectspace`'s eight, and their
+three files. Before it, three hundred and five across a hundred and
+thirty-seven; the count below it went stale over the slices since, which
+removed tags without saying so here. Copying an object's finalizers to its `dup` and `clone`
 (#36) removed eight, and their eight files: `Proc`, `Method`,
 `UnboundMethod` and `Binding` each asserting a finalizer runs once more for
 the copy. The same slice moved `library/objectspace`'s eight to #690, which
