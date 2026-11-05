@@ -1807,7 +1807,7 @@ end
     end
     out = __decode__(__take__(broken))
     begin
-      again = __read_on__ unless __read_encoding__.ascii_compatible?
+      again = __read_on__(out) unless __read_encoding__.ascii_compatible?
     rescue Encoding::UndefinedConversionError
       # Where the character with no spelling ended what was buffered, CRuby's
       # converter finished and so kept the replacement and the CR (#645,
@@ -1830,7 +1830,7 @@ end
   # what was buffered, where CRuby's converter finished and so kept them
   # (#645). A whole character with no spelling raises there (#663).
   # Measured.
-  def __read_on__
+  def __read_on__(out)
     enc = __encoding__
     past = 0
     loop do
@@ -1851,7 +1851,7 @@ end
         # replacements of the bytes before it that make none, and the
         # transcoder reads on past it as past a broken byte (#671). Measured.
         if @ecopts[:undef] == :replace
-          @cbuf = (@cbuf || "".b) << __decode__(__take__(past + char.bytesize)).b
+          out << __decode__(__take__(past + char.bytesize))
           past = 0
           next
         end
