@@ -2535,3 +2535,10 @@ n = "/tmp/spinel-eval-#{Process.pid}-636b"; File.binwrite(n, "ab\n\xF0\x9F\x98\x
 # So does a paragraph in `gets("")` that opens on one. Measured on ruby 4.0.9 (#636).
 n = "/tmp/spinel-eval-#{Process.pid}-636c"; File.binwrite(n, "\xF0\x9F\x98\x81\n\nab\n".b); r = File.open(n, "r:UTF-8:EUC-JP", xml: :attr, newline: :universal) { |f| [f.gets(""), f.pos] }; File.delete(n); r  #=> ["&#x1F601;\"\n\n", 7]
 [("\xe2\x82a".byteindex("a", 1) rescue [$!.class, $!.message]), ("\xe2\x82a".byterindex("a", 1) rescue [$!.class, $!.message]), "\xe2\x82a".byteindex("a", 2), "\x82a".byteindex("a", 0), "\xe2\x82a".b.byteindex("a", 1)]  #=> [[IndexError, "offset 1 does not land on character boundary"], [IndexError, "offset 1 does not land on character boundary"], 2, 1, 2]
+
+# `String#ord` on UTF-16 decodes the first character: a surrogate pair folds into its code point, whether the String's encoding came from `force_encoding`, `encode` or an IO read. Measured on ruby 4.0.9 (#650).
+"=\xD8\x00\xDE".b.force_encoding("UTF-16LE").ord  #=> 128512
+"\u{1F600}".encode("UTF-16LE").ord  #=> 128512
+"\xD8\x3D\xDE\x00".b.force_encoding("UTF-16BE").ord  #=> 128512
+"é".encode("UTF-16BE").ord  #=> 233
+n = "/tmp/spinel-eval-#{Process.pid}-650"; File.binwrite(n, "\u{1F600}a"); r = File.open(n, "r:UTF-8:UTF-16LE") { |f| f.getc.ord }; File.delete(n); r  #=> 128512
