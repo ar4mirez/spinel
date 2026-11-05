@@ -90,6 +90,10 @@ class Array
   def self.__to_ary__(value)
     converted = __check_array__(value)
     return converted unless converted.nil?
+    if value.respond_to?(:to_ary, true)
+      raise TypeError, "can't convert " + value.class.to_s + " to Array (" +
+                       value.class.to_s + "#to_ary gives NilClass)"
+    end
     shown = value.nil? || true.equal?(value) || false.equal?(value) ? value.inspect : value.class.to_s
     raise TypeError, "no implicit conversion of " + shown + " into Array"
   end

@@ -9227,7 +9227,6 @@ fn new_array(scope: &mut HandleScope<'_>, elements: &[Value]) -> Value {
 // Primitives
 // ---------------------------------------------------------------------------
 
-/// The operations Ruby cannot define in Ruby. See [`Native`].
 /// Hand a call its primitive cannot finish to the Ruby method `name` on the
 /// same receiver, with the same arguments and block. What the primitive could
 /// not do is a send — `to_int`, `to_ary` — and a native cannot sequence one.
@@ -9254,6 +9253,7 @@ fn forward_to_ruby<'h>(
     dispatch(scope, stack, frames, forwarded, proc_class, ids)
 }
 
+/// The operations Ruby cannot define in Ruby. See [`Native`].
 fn native_call<'h>(
     scope: &mut HandleScope<'h>,
     stack: &mut Stack,
