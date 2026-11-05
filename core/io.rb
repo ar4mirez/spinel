@@ -1828,8 +1828,8 @@ end
   # past any bytes that make none, whose replacements go in past it too.
   # `pos` is past them all, and drops them with the CR, unless they ended
   # what was buffered, where CRuby's converter finished and so kept them
-  # (#645). A whole character with no spelling raises there (#663).
-  # Measured.
+  # (#645). A whole character with no spelling raises there (#663), unless
+  # `undef: :replace` joins its replacement to `out` (#671). Measured.
   def __read_on__(out)
     enc = __encoding__
     past = 0
