@@ -1751,6 +1751,9 @@ end
         end
       end
       if __replaces_past_cr__? && __undefined_in__?(@rbuf.byteslice(0, unit))
+        # Into UTF-16 or UTF-32 the transcoder reads on past it as past
+        # bytes that make none (#677). Measured.
+        return __replaced_past_cr__(cr, unit) if @ecopts[:undef] == :replace && !__read_encoding__.ascii_compatible?
         out = __decode__(__take__(unit))
         @rpend = cr
         return out
@@ -1794,16 +1797,19 @@ end
   # The replacement for bytes past a lone CR that make no character. The
   # CR is held again, `@rpend`, and so is what the transcoder read past
   # them to tell, which is its own, so `pos` is past both and the next read
-  # starts with them (#626). Measured.
-  def __replaced_past_cr__(cr)
-    window = @rbuf.byteslice(0, [@rbuf.bytesize, 4].min).force_encoding(__encoding__)
-    broken = 1
+  # starts with them (#626). Measured. `undefined` is the length of a whole
+  # character with no spelling there instead (#677).
+  def __replaced_past_cr__(cr, undefined = nil)
+    broken = undefined || 1
     again = 0
-    begin
-      window.encode(__read_encoding__)
-    rescue Encoding::InvalidByteSequenceError => error
-      broken = error.error_bytes.bytesize
-      again = error.readagain_bytes.to_s.bytesize
+    unless undefined
+      window = @rbuf.byteslice(0, [@rbuf.bytesize, 4].min).force_encoding(__encoding__)
+      begin
+        window.encode(__read_encoding__)
+      rescue Encoding::InvalidByteSequenceError => error
+        broken = error.error_bytes.bytesize
+        again = error.readagain_bytes.to_s.bytesize
+      end
     end
     out = __decode__(__take__(broken))
     begin
