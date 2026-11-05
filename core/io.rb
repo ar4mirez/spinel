@@ -1796,9 +1796,10 @@ end
   # Into UTF-16 or UTF-32 the decorator comes after a transcoder into UTF-8,
   # and the replacement goes in past it, so that transcoder reads on to hand
   # the decorator the next whole character, what it reads again among it,
-  # past any bytes that make none, whose replacements go in past it too. `pos` is past them all, and drops
-  # them with the CR, unless they ended what was buffered, where CRuby's
-  # converter finished and so kept them (#645). Measured.
+  # past any bytes that make none, whose replacements go in past it too.
+  # `pos` is past them all, and drops them with the CR, unless they ended
+  # what was buffered, where CRuby's converter finished and so kept them
+  # (#645). Measured.
   def __read_on__
     enc = __encoding__
     past = 0
