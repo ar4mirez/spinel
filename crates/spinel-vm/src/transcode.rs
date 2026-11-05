@@ -294,10 +294,12 @@ pub struct Step {
 /// a stateful decoder's G0 — ISO-2022-JP's, CP50220's or CP50221's — in the
 /// low two bits and an encoder's in the next two, whether `xml: :attr` has
 /// opened its quote, whether `universal_newline` holds a CR, whether the
-/// source's BOM told its byte order, and in the next byte the katakana
-/// CP50220's encoder holds, if any. A fresh conversion is 0.
+/// source's BOM told its byte order, in the next byte the katakana
+/// CP50220's encoder holds, if any, and above it the bytes CP50220's or
+/// CP50221's decoder wrote that the converter after it has still to read:
+/// how many in two bits, and from bit 24 the bytes. A fresh conversion is 0.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct State(pub u32);
+pub struct State(pub u64);
 
 impl State {
     pub(crate) fn decoder(self) -> u8 {
@@ -309,11 +311,11 @@ impl State {
     }
 
     pub(crate) fn set_decoder(&mut self, g0: u8) {
-        self.0 = self.0 & !3 | u32::from(g0);
+        self.0 = self.0 & !3 | u64::from(g0);
     }
 
     pub(crate) fn set_encoder(&mut self, g0: u8) {
-        self.0 = self.0 & !12 | u32::from(g0) << 2;
+        self.0 = self.0 & !12 | u64::from(g0) << 2;
     }
 
     pub(crate) fn held_kana(self) -> Option<u8> {
@@ -321,7 +323,7 @@ impl State {
     }
 
     pub(crate) fn set_held_kana(&mut self, kana: Option<u8>) {
-        self.0 = self.0 & !0xff00 | u32::from(kana.unwrap_or(0)) << 8;
+        self.0 = self.0 & !0xff00 | u64::from(kana.unwrap_or(0)) << 8;
     }
 
     fn quoted(self) -> bool {
@@ -329,7 +331,7 @@ impl State {
     }
 
     fn set_quoted(&mut self, quoted: bool) {
-        self.0 = self.0 & !16 | u32::from(quoted) << 4;
+        self.0 = self.0 & !16 | u64::from(quoted) << 4;
     }
 
     fn held(self) -> bool {
@@ -337,13 +339,43 @@ impl State {
     }
 
     fn set_held(&mut self, held: bool) {
-        self.0 = self.0 & !32 | u32::from(held) << 5;
+        self.0 = self.0 & !32 | u64::from(held) << 5;
+    }
+
+    /// The bytes waiting for the converter after CP50220's or CP50221's
+    /// decoder, taken out of the state.
+    fn take_pending(&mut self) -> Vec<u8> {
+        let len = (self.0 >> 16 & 3) as usize;
+        let pending = (0..len).map(|i| (self.0 >> (24 + 8 * i)) as u8).collect();
+        self.0 &= !(PENDING_LEN | PENDING_BYTES);
+        pending
+    }
+
+    /// Leaves `bytes`, at most [`PENDING_MAX`] of them, waiting.
+    fn set_pending(&mut self, bytes: &[u8]) {
+        debug_assert!(bytes.len() <= PENDING_MAX, "{bytes:?} waiting");
+        self.0 &= !(PENDING_LEN | PENDING_BYTES);
+        self.0 |= (bytes.len() as u64) << 16;
+        for (i, &byte) in bytes.iter().enumerate() {
+            self.0 |= u64::from(byte) << (24 + 8 * i);
+        }
+    }
+
+    fn pending(self) -> bool {
+        self.0 & PENDING_LEN != 0
     }
 
     fn bom_read(self) -> bool {
         self.0 & 64 != 0
     }
 }
+
+/// Where [`State`] keeps how many bytes wait for the converter after
+/// CP50220's or CP50221's decoder, and the bytes.
+const PENDING_LEN: u64 = 3 << 16;
+const PENDING_BYTES: u64 = 0xffff << 24;
+/// How many can wait: see [`stream`].
+const PENDING_MAX: usize = 2;
 
 /// How `xml:` escapes: not at all, as text, or as an attribute's content.
 /// The attribute's quote is a decorator of its own, which `xml: :attr` runs
@@ -566,11 +598,13 @@ fn hop(from: u8, to: u8, bytes: &[u8], at: usize, state: &mut State, out: &mut V
 }
 
 /// A character a converter after the first refused, as the stage it was
-/// refused at, why, and its bytes there.
+/// refused at, why, its bytes there, and those it read past them and gives
+/// back.
 struct Refused {
     stage: usize,
     stop: Stop,
     error: Vec<u8>,
+    readagain: Vec<u8>,
 }
 
 /// Scratch for [`carry`], kept across characters so a step allocates once.
@@ -599,6 +633,9 @@ fn carry(
             out.extend_from_slice(&stages.current);
             return Ok(());
         }
+        if k == 1 && crate::cp5022x::supported(path[0]) {
+            return stream(path, stages, state, (decorators, at), out, false);
+        }
         stages.next.clear();
         match hop(
             path[k],
@@ -614,12 +651,65 @@ fn carry(
                     stage: k,
                     stop,
                     error: std::mem::take(&mut stages.current),
+                    readagain: Vec::new(),
                 });
             }
         }
         std::mem::swap(&mut stages.current, &mut stages.next);
         k += 1;
     }
+}
+
+/// What CP50220's or CP50221's decoder wrote, `stages.current`, read on by
+/// the converter after it, CP51932's, and carried the rest of the way. In
+/// ASCII the decoder writes a byte from 0x80 to 0x92 as it is, so CP51932's
+/// reader takes a byte stream, as CRuby's does: 0x8E reads the bytes the
+/// next character writes. The bytes a character has only begun, and those an
+/// error leaves to read again, wait in `state` for the next, and at `finish`
+/// one begun is incomplete. Measured.
+///
+/// What waits is at most [`PENDING_MAX`]: a character begun is one byte, the
+/// decoder writes two at most, an error, which reads one, stops at once, and
+/// what it leaves is read before the decoder reads on.
+fn stream(
+    path: &[u8],
+    stages: &Stages,
+    state: &mut State,
+    decorated: (Decorators, Option<usize>),
+    out: &mut Vec<u8>,
+    finish: bool,
+) -> Result<(), Refused> {
+    let mut buffer = state.take_pending();
+    buffer.extend_from_slice(&stages.current);
+    let mut next = Stages::default();
+    let mut at = 0;
+    while at < buffer.len() {
+        next.current.clear();
+        match hop(path[1], path[2], &buffer, at, state, &mut next.current) {
+            Ok(len) => {
+                at += len;
+                if let Err(refused) = carry(path, 2, &mut next, state, decorated, out) {
+                    state.set_pending(&buffer[at..]);
+                    return Err(refused);
+                }
+            }
+            Err((Stop::Incomplete, ..)) if !finish => {
+                state.set_pending(&buffer[at..]);
+                return Ok(());
+            }
+            Err((stop, error, readagain)) => {
+                let end = at + error;
+                state.set_pending(&buffer[end..]);
+                return Err(Refused {
+                    stage: 1,
+                    stop,
+                    error: buffer[at..end].to_vec(),
+                    readagain: buffer[end..(end + readagain).min(buffer.len())].to_vec(),
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The decorators on one character at stage `k`, in CRuby's order: `xml:`'s
@@ -776,15 +866,43 @@ pub fn step(
         None
     };
     let mut output = Vec::with_capacity(bytes.len().saturating_sub(start));
-    if decorators.quote && decorate == Some(last) && !state.quoted() {
-        // At the end of the path the quote opens before anything, even what
-        // is inserted for an error before the first character; before an
-        // encoder it opens with the first character that reaches it, in
+    if decorators.quote
+        && decorators.newline == Newline::None
+        && decorate == Some(last)
+        && !state.quoted()
+    {
+        // As the last decorator at the end of the path the quote opens
+        // before anything, even what is inserted for an error before the
+        // first character; before an encoder, or the newline decorator that
+        // follows it, it opens with the first character that reaches it, in
         // `decorate`. Measured.
         output.push(b'"');
         state.set_quoted(true);
     }
     let mut stages = Stages::default();
+    // What an error left the converter after CP50220's or CP50221's decoder
+    // to read again is read before the decoder reads on; a character begun
+    // goes on waiting. Measured.
+    if state.pending() && last > 1 {
+        if let Err(refused) = stream(
+            path,
+            &stages,
+            state,
+            (decorators, decorate),
+            &mut output,
+            false,
+        ) {
+            return Some(Step {
+                output,
+                stop: refused.stop,
+                error: refused.error,
+                readagain: refused.readagain,
+                next: start,
+                from: path[refused.stage],
+                to: path[(refused.stage + 1).min(last)],
+            });
+        }
+    }
     let mut at = start;
     while at < bytes.len() {
         let to = path.get(1).copied().unwrap_or(first);
@@ -827,7 +945,7 @@ pub fn step(
                     output,
                     stop: refused.stop,
                     error: refused.error,
-                    readagain: Vec::new(),
+                    readagain: refused.readagain,
                     next: at + len,
                     from: path[refused.stage],
                     to: path[(refused.stage + 1).min(last)],
@@ -844,6 +962,26 @@ pub fn step(
                 next: at,
                 from: first,
                 to: end,
+            });
+        }
+    }
+    if finish && state.pending() && last > 1 {
+        if let Err(refused) = stream(
+            path,
+            &Stages::default(),
+            state,
+            (decorators, decorate),
+            &mut output,
+            true,
+        ) {
+            return Some(Step {
+                output,
+                stop: refused.stop,
+                error: refused.error,
+                readagain: refused.readagain,
+                next: bytes.len(),
+                from: path[refused.stage],
+                to: path[(refused.stage + 1).min(last)],
             });
         }
     }
@@ -1242,6 +1380,52 @@ mod tests {
             true,
         );
         assert_eq!(s.map(|s| s.output), Some(b"\"".to_vec()));
+        // Unless the newline decorator follows it: then it opens with the
+        // first character, after what an error before it inserts. (#684)
+        let s = step(
+            &[UTF_8, US_ASCII],
+            "üa".as_bytes(),
+            0,
+            &mut State::default(),
+            Decorators {
+                newline: Newline::Universal,
+                ..xml(Xml::Attr)
+            },
+            true,
+        );
+        assert_eq!(s.map(|s| s.output), Some(Vec::new()));
+    }
+
+    #[test]
+    fn cp5022x_hands_cp51932_a_byte_stream() {
+        let path = [CP50221, CP51932, UTF_8];
+        // 0x8E, passed on as it is in ASCII, reads the bytes of the next
+        // character, and gives back what it read past. (#684)
+        let mut state = State::default();
+        let s = step(&path, b"\x8Ea", 0, &mut state, Decorators::default(), true).unwrap();
+        assert_eq!(
+            (s.stop, s.error, s.readagain, s.next, s.from, s.to),
+            (Stop::Invalid, vec![0x8e], b"a".to_vec(), 2, CP51932, UTF_8)
+        );
+        // What it gave back is read before the decoder reads on.
+        let s = step(&path, b"\x8Ea", 2, &mut state, Decorators::default(), true).unwrap();
+        assert_eq!((s.stop, s.output), (Stop::Done, b"a".to_vec()));
+        assert_eq!(state, State::default());
+        // With a katakana: 0x8E and its 0xA4 are one, its 0xA2 left begun.
+        let s = run(&path, b"\x8E\x1b$B$\"");
+        assert_eq!(
+            (s.stop, s.output, s.error),
+            (Stop::Incomplete, "､".as_bytes().to_vec(), vec![0xa2])
+        );
+        // A character begun waits across steps.
+        let mut state = State::default();
+        let s = step(&path, b"\x8E", 0, &mut state, Decorators::default(), false).unwrap();
+        assert_eq!((s.stop, s.output.len()), (Stop::Done, 0));
+        let s = step(&path, b"\x0e1", 0, &mut state, Decorators::default(), true).unwrap();
+        assert_eq!(
+            (s.stop, s.error, s.readagain),
+            (Stop::Invalid, vec![0x8e], vec![0x8e])
+        );
     }
 
     #[test]

@@ -70,6 +70,9 @@ class String
   # `__insert__`.
   INSERTS_THROUGH = { 85 => 79, 87 => 81, 88 => 81 }.freeze
 
+  # CP50220 and CP50221, by index.
+  CP5022X = [87, 88].freeze
+
   def encode(*args, **options)
     __transcoded__(args, options)
   end
@@ -120,6 +123,9 @@ class String
     # One newline decorator at a time: CRuby has no converter for two.
     # Measured.
     raise String.__decorators_not_found__(source, target, newlines, xml) if newlines.size > 1
+    if target.equal?(source) && !decorated && options[:invalid] == :replace && !options[:replace].nil?
+      String.__scrub_compatible__(self, String.__replacement_option__(options[:replace]))
+    end
     # A dummy has no characters to replace, and with a decorator nothing is
     # converted to find one: it is kept as it is, and the decorators work on
     # its bytes. `xml:` escapes even when nothing is transcoded. Measured.
@@ -128,6 +134,28 @@ class String
       return String.__newlines__(result, newlines.first).force_encoding(target)
     end
     String.__convert__(text, source, target, options, newlines.first)
+  end
+
+  # CRuby's `str_transcode0` to the same encoding, undecorated, with
+  # `invalid: :replace`: `scrub`, whose `replace:` must suit the string —
+  # ASCII where a character can be a byte, as in every encoding, the UTF-16
+  # and UTF-32 dummies too, but UTF-16BE/LE and UTF-32BE/LE, or else in the
+  # string's own encoding — even a dummy's, which is then kept as it is. Measured.
+  # ponytail: CRuby asks only of a string whose coderange it has not found
+  # clean, which this VM does not keep: a dummy's is taken as never found,
+  # and another's as found where it is valid. The upgrade is keeping it.
+  def self.__scrub_compatible__(text, replacement)
+    return unless text.encoding.dummy? || !text.valid_encoding?
+    encoding = text.encoding
+    compatible =
+      if replacement.encoding.ascii_compatible? && replacement.ascii_only?
+        !UNICODE_INDEXES[1, 4].include?(encoding.__index__)
+      else
+        replacement.encoding.equal?(encoding)
+      end
+    return if compatible
+    raise Encoding::CompatibilityError,
+          "incompatible character encodings: #{encoding.__shown__} and #{replacement.encoding.__shown__}"
   end
 
   def __converter_encoding__(value, from)
@@ -178,7 +206,10 @@ class String
   def self.__decorators_not_found__(source, target, newlines, xml)
     names = newlines + (xml == :attr ? ["xml_attr_content", "xml_attr_quote"] : xml ? ["xml_text"] : [])
     names = names.join(",")
-    names = "#{source.name} to #{target.name} with #{names}" unless source.equal?(target)
+    unless source.equal?(target)
+      conversion = "#{source.name} to #{target.name}"
+      names = names.empty? ? conversion : "#{conversion} with #{names}"
+    end
     Encoding::ConverterNotFoundError.new("code converter not found (#{names})")
   end
 
@@ -366,6 +397,9 @@ class String
   def self.__convert__(text, source, target, options, newline)
     xml = options[:xml]
     replacement = __replacement__(target, options)
+    # To itself it is `scrub`, which opens no converter.
+    __replacement_spelled__(replacement, source, target, [newline].compact, xml) unless options[:replace].nil? || source.equal?(target)
+    return __converted__(text, source, target, options) if CP5022X.include?(source.__index__) && CP5022X.include?(target.__index__)
     bom = nil
     step_target = target
     if target.__index__ == 7 || target.__index__ == 8
@@ -449,6 +483,34 @@ class String
       start = following
     end
     __with_bom__(out, bom, target)
+  end
+
+  # CRuby's `rb_econv_set_replacement` as the converter opens: a `replace:`
+  # with no spelling where what is inserted goes in — the target, or the
+  # ASCII-compatible encoding its encoder reads — fails the open, as
+  # ConverterNotFoundError naming the conversion, before any character
+  # needs it. Measured.
+  def self.__replacement_spelled__(replacement, source, target, newlines, xml)
+    via = Encoding::Converter.asciicompat_encoding(target) || target
+    return if replacement.encoding.equal?(via)
+    step = replacement.__transcode__(__path__(replacement.encoding, via).map(&:__index__), 0, 0, 0, true)
+    # A replacement this VM cannot convert is left to be found out when one
+    # is needed.
+    return if step.nil? || step[1] == :done
+    raise __decorators_not_found__(source, target, newlines, xml)
+  end
+
+  # CP50220 to CP50221 and back, as CRuby's `transcode_loop` converts every
+  # pair: through `Encoding::Converter`. The encoder reads what the decoder
+  # wrote as a byte stream, and what goes in for an error it reads after all
+  # it has still to read, which only the converter's buffers keep. No
+  # character is undefined on the way, so no fallback is asked. Measured.
+  def self.__converted__(text, source, target, options)
+    converter = Encoding::Converter.new(source, target, options)
+    out = String.new(encoding: target)
+    result = converter.primitive_convert(text.b, out)
+    raise converter.last_error unless result == :finished
+    out
   end
 
   # `out` in `target`, after `bom` when anything was written.
@@ -731,7 +793,7 @@ class Encoding
     private_constant :HELD_CR
 
     # `asciicompat_encoding`'s answers, by index.
-    ASCIICOMPAT = { 3 => 1, 4 => 1, 5 => 1, 6 => 1, 7 => 1, 8 => 1, 78 => 22, 85 => 79, 87 => 81, 88 => 81, 99 => 100 }.freeze
+    ASCIICOMPAT = { 3 => 1, 4 => 1, 5 => 1, 6 => 1, 7 => 1, 8 => 1, 15 => 1, 78 => 22, 85 => 79, 87 => 81, 88 => 81, 99 => 100 }.freeze
     private_constant :ASCIICOMPAT
     # The bit of `__transcode__`'s decorators that stops it after output.
     STOP_AFTER_OUTPUT = 32
@@ -906,14 +968,14 @@ class Encoding
       source.is_a?(String) && source.empty? && destination.is_a?(String) && destination.empty?
     end
 
-    # The ASCII-compatible encoding a non-ASCII-compatible one converts
-    # through, as CRuby's converter table has it: UTF-8 for UTF-16 and
-    # UTF-32, stateless-ISO-2022-JP for ISO-2022-JP and its KDDI variant for
-    # ISO-2022-JP-KDDI, CP51932 for CP50220 and CP50221, and ISO-8859-1 for
-    # IBM037. nil for ISO-2022-JP-2 and UTF-7, which CRuby converts to
-    # nothing, for one that is already ASCII-compatible, and for a name that
-    # resolves to none, "internal" with no default internal among them
-    # (#622). Measured, for every dummy (#419).
+    # The ASCII-compatible encoding an encoding's encoder reads, as CRuby's
+    # converter table has it: UTF-8 for UTF-16 and UTF-32, stateless-ISO-
+    # 2022-JP for ISO-2022-JP and its KDDI variant for ISO-2022-JP-KDDI,
+    # CP51932 for CP50220 and CP50221, ISO-8859-1 for IBM037, and UTF-8 for
+    # CESU-8, though CESU-8 is ASCII-compatible itself. nil for ISO-2022-JP-2
+    # and UTF-7, which CRuby converts to nothing, for any other, and for a
+    # name that resolves to none, "internal" with no default internal among
+    # them (#622). Measured, for every dummy (#419) and CESU-8 (#684).
     def self.asciicompat_encoding(encoding)
       encoding = __encoding__(encoding)
       return nil if encoding.nil?
@@ -953,11 +1015,19 @@ class Encoding
       unless @source_encoding.nil? || (String.__supported_target__(@source_encoding) && String.__supported_target__(@destination_encoding))
         __needs_char_table__
       end
-      # The default is not converted: "?" stays US-ASCII. Measured.
+      # The default is not converted: "?" stays US-ASCII. Measured. A
+      # replacement with no spelling where it goes in fails the open, as
+      # CRuby's `rb_econv_open_opts` does, naming the conversion. Measured.
       if replacement.nil?
         @replacement = __default_replacement__
       else
-        self.replacement = replacement
+        spelled = begin
+          self.replacement = replacement
+          true
+        rescue Encoding::UndefinedConversionError
+          false
+        end
+        raise Encoding::ConverterNotFoundError, "code converter not found (#{Converter.__description__(@source_encoding, @destination_encoding, @flags)})" unless spelled
       end
       @elements = __elements__
       # What `insert_output` puts before an encoder that reads the source
