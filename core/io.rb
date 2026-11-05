@@ -3542,8 +3542,10 @@ end
     end
     # The decorators alone hold a CR they reach until a later read sees the
     # byte after it: this read takes the CR and makes only the quote, and
-    # `pos` is past the CR alone (#624). Measured.
-    if !pended && @enc2.nil? && __xml_in__ == :attr && __universal_newline__? && char.b == "\r".b
+    # `pos` is past the CR alone (#624). With an internal encoding that is
+    # ASCII-compatible the decorators come after the transcoder and hold it
+    # the same way (#667). Measured.
+    if !pended && (@enc2.nil? || __read_encoding__.ascii_compatible?) && __xml_in__ == :attr && __universal_newline__? && char.b == "\r".b
       @rpend = char.b
       return __hand_out__(@rquote ? "" : (@rquote = true; __in_read__("\"")))
     end
