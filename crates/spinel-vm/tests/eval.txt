@@ -2616,3 +2616,12 @@ ec = Encoding::Converter.new("UTF-8", "CP50221"); a = ec.convert("あ"); ec.inse
 "😀a".encode("ISO-8859-1", xml: :attr, universal_newline: true)  #=> "&#x1F600;\"a\""
 ["😀".encode("ISO-8859-1", xml: :attr, universal_newline: true), "😀\r".encode("ISO-8859-1", xml: :attr, universal_newline: true), "😀a".encode("US-ASCII", xml: :attr, newline: :crlf), "\xFFa".encode("ISO-8859-1", xml: :attr, universal_newline: true, invalid: :replace), "😀a".encode("ISO-8859-1", xml: :attr), "\r😀a".encode("ISO-8859-1", xml: :attr, universal_newline: true)]  #=> ["&#x1F600;\"\"", "&#x1F600;\"\n\"", "&#x1F600;\"a\"", "?\"a\"", "\"&#x1F600;a\"", "\"&#x1F600;\na\""]
 Encoding::Converter.asciicompat_encoding("CESU-8").name  #=> "UTF-8"
+# #686: a `replace:` alone replaces an undefined character, as CRuby's `econv_opts` sets UNDEF_REPLACE; invalid bytes still raise.
+"\u2603".encode("ISO-8859-1", replace: "x")  #=> "x"
+("\xFF".encode("ISO-8859-1", replace: "x") rescue [$!.class, $!.message])  #=> [Encoding::InvalidByteSequenceError, "\"\\xFF\" on UTF-8"]
+Encoding::Converter.new("UTF-8", "ISO-8859-1", replace: "x").convert("\u2603")  #=> "x"
+n = "/tmp/spinel-eval-#{Process.pid}-686"; File.binwrite(n, "a\u2603b"); r = File.open(n, "r:UTF-8:ISO-8859-1", replace: "x") { |f| f.read }; File.delete(n); r  #=> "axb"
+"\u2603".encode("ISO-8859-1", replace: "x", fallback: { "\u2603" => "F" })  #=> "x"
+"\u2603".encode("ISO-8859-1", replace: "x", xml: :text)  #=> "&#x2603;"
+n = "/tmp/spinel-eval-#{Process.pid}-686s"; File.binwrite(n, "a\u2603b\xFF"); e = ->(f) { f.read rescue [$!.class, $!.message] }; r = [File.open(n, "r:UTF-8:ISO-8859-1", invalid: :replace) { |f| f.set_encoding("UTF-8", "ISO-8859-1", replace: "x"); e.(f) }, File.open(n, "r:UTF-8:ISO-8859-1") { |f| f.set_encoding("UTF-8", "ISO-8859-1", replace: "x"); e.(f) }, File.open(n, "r:UTF-8:ISO-8859-1", invalid: :replace) { |f| f.set_encoding("UTF-8:ISO-8859-1", replace: "x"); e.(f) }, File.open(n, "r:UTF-8:ISO-8859-1", invalid: :replace) { |f| f.set_encoding("UTF-8", "ISO-8859-1", undef: :replace, replace: "x"); e.(f) }]; File.delete(n); r  #=> [[Encoding::UndefinedConversionError, "U+2603 from UTF-8 to ISO-8859-1"], [Encoding::InvalidByteSequenceError, "\"\\xFF\" on UTF-8"], [Encoding::UndefinedConversionError, "U+2603 from UTF-8 to ISO-8859-1"], "axbx"]
+"é".encode("CP50221", replace: "a").bytes  #=> [97]

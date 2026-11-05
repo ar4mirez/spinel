@@ -431,8 +431,9 @@ class String
         if xml && reference
           ["&#x#{Integer.__hex__(reference, 1)};", false]
         # With `xml:` an undefined character is a reference or nothing:
-        # `undef: :replace` does not apply. Measured.
-        elsif options[:undef] == :replace && !xml
+        # `undef: :replace` does not apply. Measured. A replacement wins over
+        # `fallback:`, as CRuby's flag replaces before the fallback is asked.
+        elsif String.__undef_replace__?(options) && !xml
           [replacement, false]
         elsif options[:fallback]
           char = __error_char__(code, error, from)
@@ -919,7 +920,7 @@ class Encoding
       String.__econv_opts__(options)
       flags = 0
       flags = flags | INVALID_REPLACE if options[:invalid] == :replace
-      flags = flags | UNDEF_REPLACE if options[:undef] == :replace
+      flags = flags | UNDEF_REPLACE if String.__undef_replace__?(options)
       xml = String.__xml_option__(options)
       flags = flags | UNDEF_HEX_CHARREF | XML_TEXT_DECORATOR if xml == :text
       flags = flags | UNDEF_HEX_CHARREF | XML_ATTR_CONTENT_DECORATOR | XML_ATTR_QUOTE_DECORATOR if xml == :attr

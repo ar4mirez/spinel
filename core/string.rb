@@ -730,6 +730,12 @@ class String
     raise ArgumentError, "unexpected value for newline option: #{newline}" if Symbol === newline
     raise ArgumentError, "unexpected value for newline option"
   end
+
+  # Whether `options` replace an undefined character: `undef: :replace`, or,
+  # as CRuby's `econv_opts` sets it, a `replace:` without `invalid: :replace`.
+  def self.__undef_replace__?(options)
+    options[:undef] == :replace || (!options[:replace].nil? && options[:invalid] != :replace)
+  end
 end
 
 class Encoding

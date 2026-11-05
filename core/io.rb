@@ -634,6 +634,8 @@ end
       replacement = String.__replacement_option__(kept[:replace])
       kept[:replace] = replacement.frozen? ? replacement : replacement.dup.freeze
     end
+    # The flag CRuby's `econv_opts` sets for a `replace:` alone.
+    kept[:undef] = :replace if String.__undef_replace__?(kept)
     kept
   end
 
@@ -1063,14 +1065,16 @@ end
   # given one sets its own, and any newline option given replaces every
   # newline decorator kept. The replacement String and `fallback:` are not
   # flags, so only given ones count, and a `replace:` that stood for
-  # `undef: :replace` leaves that behind with the default replacement.
+  # `undef: :replace` leaves that behind with the default replacement. A
+  # given `replace:` stands for it only where neither the given nor the kept
+  # options have `invalid: :replace`, as `econv_opts` checks the IO's flags.
   # `xml:` is flags too, so a second one that differs keeps both decorators,
   # `XML_BOTH`, for which a conversion then finds no converter (#458).
   def __kept_ecopts__(options)
     given = __ecopts__(options)
+    given.delete(:undef) if options[:undef] != :replace && @ecopts[:invalid] == :replace
     newlines = %i[newline universal_newline crlf_newline cr_newline lf_newline]
     kept = @ecopts.reject { |key, _| %i[replace fallback].include?(key) }
-    kept[:undef] = :replace if !@ecopts[:replace].nil? && @ecopts[:invalid] != :replace
     kept = kept.reject { |key, _| newlines.include?(key) } if newlines.any? { |key| !given[key].nil? }
     xml = kept[:xml]
     given.each { |key, value| kept[key] = value unless value.nil? }
