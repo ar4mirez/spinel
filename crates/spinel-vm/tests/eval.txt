@@ -2567,6 +2567,10 @@ n = "/tmp/spinel-eval-#{Process.pid}-657"; File.binwrite(n, "\xF0\x9F\x98\x81\na
 # Into an ASCII-compatible internal encoding the decorators come after the transcoder and hold a CR alone as without one (#624): `getc` takes the CR and answers the quote, so `pos` is past the CR and not the LF. Measured on ruby 4.0.9 (#667).
 n = "/tmp/spinel-eval-#{Process.pid}-667"; File.binwrite(n, "ab\r\ncd\n"); r = File.open(n, "r:UTF-8:EUC-JP", xml: :attr, newline: :universal) { |f| r = []; 5.times { r << f.getc << f.pos }; r }; File.delete(n); r  #=> ["\"", 1, "\"", 2, "\"", 3, "\"", 4, "\"", 5]
 n = "/tmp/spinel-eval-#{Process.pid}-667b"; File.binwrite(n, "\xF0\x9F\x98\x81\rab"); r = File.open(n, "r:UTF-8:EUC-JP", xml: :attr, newline: :universal) { |f| r = []; 4.times { r << f.getc << f.pos }; r }; File.delete(n); r  #=> ["&", 4, "\"", 5, "\"", 6, "\"", 7]
+# Past a lone CR a character with no spelling in it is the transcoder's to make a charref of, ahead of the decorator that holds the CR, so the `"\n"` comes after the charref, for `each_char`, `getc` then `read`, and `read`. Measured on ruby 4.0.9 (#675).
+n = "/tmp/spinel-eval-#{Process.pid}-675"; File.binwrite(n, "\r\xF0\x9F\x98\x81"); r = File.open(n, "r:UTF-8:EUC-JP", xml: :attr, newline: :universal) { |f| f.each_char.to_a }; File.delete(n); r  #=> ["\"", "&", "#", "x", "1", "F", "6", "0", "1", ";", "\n", "\""]
+n = "/tmp/spinel-eval-#{Process.pid}-675b"; File.binwrite(n, "\r\xF0\x9F\x98\x81"); r = File.open(n, "r:UTF-8:Shift_JIS", xml: :attr, newline: :universal) { |f| [f.getc, f.read] }; File.delete(n); r  #=> ["\"", "&#x1F601;\n\""]
+n = "/tmp/spinel-eval-#{Process.pid}-675c"; File.binwrite(n, "a\r\xF0\x9F\x98\x81b\r\n"); r = File.open(n, "r:UTF-8:ISO-8859-1", xml: :attr, newline: :universal) { |f| f.read }; File.delete(n); r  #=> "\"a&#x1F601;\nb\n\""
 
 # `String#ord` on UTF-32 answers the first code unit, whether the String's encoding came from `encode` or `force_encoding`, even one that is no code point. Measured on ruby 4.0.9 (#665).
 "\u{1F600}".encode("UTF-32LE").ord  #=> 128512

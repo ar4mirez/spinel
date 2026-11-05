@@ -1862,9 +1862,10 @@ end
   end
 
   # Whether a whole character has no spelling in the encoding reads answer
-  # in, and `undef: :replace` replaces it.
+  # in, and `undef: :replace` replaces it, or `xml:` makes it a charref
+  # (#675).
   def __undefined_in__?(bytes)
-    return false unless @ecopts[:undef] == :replace
+    return false unless @ecopts[:undef] == :replace || __xml_in__
     bytes.dup.force_encoding(__encoding__).encode(__read_encoding__)
     false
   rescue Encoding::UndefinedConversionError
@@ -2338,9 +2339,10 @@ end
       end
       begin
         # A replacement past a lone CR comes before its `"\n"`, as the
-        # transcoder that comes first makes it (#626).
+        # transcoder that comes first makes it (#626), and so does an `xml:`
+        # charref (#675).
         bytes = __take__(@rbuf.bytesize)
-        out = if __replaces_past_cr__? && __universal_newline__? && (__replaces_invalid__? || @ecopts[:undef] == :replace)
+        out = if __replaces_past_cr__? && __universal_newline__? && (__replaces_invalid__? || @ecopts[:undef] == :replace || __xml_in__)
           __decode__(bytes, bytes, true)
         else
           __newlines_in__(__decode__(bytes))
