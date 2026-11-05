@@ -222,6 +222,34 @@ class Module
     owners.any? { |owner| !owner.__autoload_entry__(symbol).nil? }
   end
 
+  # Where the constant `const_get` would find was assigned (#128): `[path,
+  # line]`, `[]` for one the core library defined, or nil for none. An
+  # autoload not yet resolved answers where `autoload` was called; the
+  # constant's own place once the file has assigned it, even mid-require.
+  def const_source_location(name, inherit = true)
+    name = name.to_str if !name.is_a?(Symbol) && !name.is_a?(String) && name.respond_to?(:to_str)
+    path = __const_path?(name)
+    unless path.nil?
+      top, parts = __const_path__(path)
+      raise NameError.new("wrong constant name #{path}", path.to_sym) if parts.empty?
+      base = top ? Object : self
+      last = parts.pop
+      parts.each { |part| base = base.const_get(part, inherit) }
+      raise TypeError, "#{base.inspect} does not refer to class/module" unless base.is_a?(Module)
+      return base.const_source_location(last, inherit)
+    end
+    symbol = __const_name__(name)
+    found = __reflect_const_source__(self, symbol, inherit)
+    return found unless found.nil?
+    owners = inherit ? ancestors : [self]
+    owners += [Object] if inherit && instance_of?(Module)
+    owners.each do |owner|
+      next if owner.__autoload_entry__(symbol).nil?
+      return owner.instance_variable_get(:@__autoload_locations__)[symbol]
+    end
+    nil
+  end
+
   def const_set(name, value)
     symbol = __const_name__(name)
     raise FrozenError.new("can't modify frozen #{self.class}: #{inspect}", receiver: self) if frozen?
@@ -268,6 +296,11 @@ class Module
     return nil if feature && $LOADED_FEATURES.include?(feature)
     entries = instance_variable_get(:@__autoloads__) || instance_variable_set(:@__autoloads__, {})
     entries[symbol] = path.dup.freeze
+    # The program's position, which is where CRuby says the constant is until
+    # the file defines it.
+    locations = instance_variable_get(:@__autoload_locations__) || instance_variable_set(:@__autoload_locations__, {})
+    here = __backtrace_here__.first
+    locations[symbol] = here.nil? ? [] : [here[0], here[1]]
     __send__(:const_added, symbol)
     nil
   end

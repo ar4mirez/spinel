@@ -26,6 +26,11 @@ class Class
   def inherited(subclass)
   end
 
+  # The classes that name this one their superclass, newest first (#128).
+  def subclasses
+    __reflect_subclasses__(self)
+  end
+
   private :inherited, :initialize
 end
 

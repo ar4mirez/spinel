@@ -35,6 +35,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::Arc;
 
 use crate::heap::{Handle, HandleScope, Payload};
 use crate::shared::symbols::class_id_ivar;
@@ -649,6 +650,10 @@ struct Entry {
     /// A `Vec` rather than a set: a module with a private constant usually has
     /// one or two of them, and this is read only on a qualified reference.
     private_constants: Vec<SymbolId>,
+    /// Where each of `constants` was last assigned, as file and line:
+    /// `Module#const_source_location` (#128). A constant the VM or the core
+    /// library defined has none, which Ruby spells `[]`.
+    constant_locations: HashMap<SymbolId, (Arc<str>, i32)>,
 }
 
 /// One heap's classes and modules.
@@ -1036,6 +1041,7 @@ impl Classes {
         let constants = source.constants.clone();
         let constant_order = source.constant_order.clone();
         let private_constants = source.private_constants.clone();
+        let constant_locations = source.constant_locations.clone();
         let class_variables = source.class_variables.clone();
         let cvar_order = source.cvar_order.clone();
         let deprecated: Vec<(ClassId, SymbolId)> = self
@@ -1065,6 +1071,7 @@ impl Classes {
         target.constants = constants;
         target.constant_order = constant_order;
         target.private_constants = private_constants;
+        target.constant_locations = constant_locations;
         target.class_variables = class_variables;
         target.cvar_order = cvar_order;
         self.invalidate(to);
@@ -1633,9 +1640,46 @@ impl Classes {
     /// `Module#const_set` both ask [`Classes::const_get_here`] first (#268).
     pub fn const_set(&mut self, id: ClassId, name: SymbolId, value: Value) {
         let entry = self.entry_mut(id);
+        entry.constant_locations.remove(&name);
         if entry.constants.insert(name, value).is_none() {
             entry.constant_order.push(name);
         }
+    }
+
+    /// [`Classes::const_set`], remembering where the program assigned it.
+    /// `None` is an assignment with no place in the program, as one made by
+    /// the core library is.
+    pub fn const_set_at(
+        &mut self,
+        id: ClassId,
+        name: SymbolId,
+        value: Value,
+        location: Option<(Arc<str>, i32)>,
+    ) {
+        self.const_set(id, name, value);
+        if let Some(location) = location {
+            self.entry_mut(id).constant_locations.insert(name, location);
+        }
+    }
+
+    /// Where this module's own `name` was last assigned, when the program
+    /// assigned it: what [`Classes::const_set_at`] recorded.
+    #[must_use]
+    pub fn const_location(&self, id: ClassId, name: SymbolId) -> Option<(Arc<str>, i32)> {
+        self.entry(id).constant_locations.get(&name).cloned()
+    }
+
+    /// `Class#subclasses`: the classes whose superclass this is, newest
+    /// first as CRuby lists them, leaving out singleton classes.
+    #[must_use]
+    pub fn subclasses(&self, id: ClassId) -> Vec<ClassId> {
+        self.entry(id)
+            .subclasses
+            .iter()
+            .rev()
+            .copied()
+            .filter(|&class| !self.entry(class).is_singleton)
+            .collect()
     }
 
     /// This module's own constant names, in definition order, with whether
@@ -1741,6 +1785,7 @@ impl Classes {
         let constants = source.constants.clone();
         let constant_order = source.constant_order.clone();
         let private_constants = source.private_constants.clone();
+        let constant_locations = source.constant_locations.clone();
         // `own` is the class itself and then what was mixed in, nearest first;
         // including them farthest first rebuilds the same order.
         let mixins: Vec<ClassId> = source.own.iter().copied().filter(|&c| c != from).collect();
@@ -1753,6 +1798,7 @@ impl Classes {
         target.constants = constants;
         target.constant_order = constant_order;
         target.private_constants = private_constants;
+        target.constant_locations = constant_locations;
         self.invalidate(to);
     }
 
@@ -1765,6 +1811,7 @@ impl Classes {
         let value = entry.constants.remove(&name)?;
         entry.constant_order.retain(|&n| n != name);
         entry.private_constants.retain(|&n| n != name);
+        entry.constant_locations.remove(&name);
         Some(value)
     }
 
@@ -2685,6 +2732,7 @@ impl Classes {
             constants: HashMap::new(),
             constant_order: Vec::new(),
             private_constants: Vec::new(),
+            constant_locations: HashMap::new(),
             class_variables: HashMap::new(),
             cvar_order: Vec::new(),
         });
