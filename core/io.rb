@@ -1847,12 +1847,11 @@ end
         # One with no spelling raises on this read, the CR and the
         # replacement dropped, and `pos` past it (#663). Measured.
         # With `undef: :replace` it is replaced on this read instead, after
-        # the one this read answers and ahead of the CR, the bytes before it
-        # dropping, and the transcoder reads on past it as past a broken
-        # byte (#671). Measured.
+        # the one this read answers and ahead of the CR, after the
+        # replacements of the bytes before it that make none, and the
+        # transcoder reads on past it as past a broken byte (#671). Measured.
         if @ecopts[:undef] == :replace
-          __take__(past)
-          @cbuf = (@cbuf || "".b) << __decode__(__take__(char.bytesize)).b
+          @cbuf = (@cbuf || "".b) << __decode__(__take__(past + char.bytesize)).b
           past = 0
           next
         end
