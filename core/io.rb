@@ -1697,9 +1697,9 @@ end
   # (#551). From UTF-8 into UTF-16 or UTF-32 `rb_econv_decorate_at_last`
   # puts the decorator first, so the converter keeps the one byte it reads,
   # as it keeps the first of bytes that make no character, and with a byte
-  # that makes none the one past it too, which a `pos` drops (#644). Nothing after the
-  # CR is the end, which CRuby's converter looked for, and so finished
-  # (#551). `pos` or `seek` over bytes buffered drops what the converter
+  # that makes none the one past it too, which a `pos` drops (#644).
+  # Nothing after the CR is the end, which CRuby's converter looked for,
+  # and so finished (#551). `pos` or `seek` over bytes buffered drops what the converter
   # kept. Bytes that make no character raise on the read the CR answers,
   # the transcoder having read them with it, and the CR goes back as from
   # any read that raises (#555): before a decorator that comes first, only
