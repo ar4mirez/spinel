@@ -634,6 +634,8 @@ end
       replacement = String.__replacement_option__(kept[:replace])
       kept[:replace] = replacement.frozen? ? replacement : replacement.dup.freeze
     end
+    # The flag CRuby's `econv_opts` sets for a `replace:` alone.
+    kept[:undef] = :replace if String.__undef_replace__?(kept)
     kept
   end
 
