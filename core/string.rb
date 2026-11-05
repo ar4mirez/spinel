@@ -500,6 +500,12 @@ class String
           return hi if b.size == 2
           return 0x10000 + ((hi - 0xD800) << 10) + (((b[2] << 8) | b[3]) - 0xDC00)
         end
+        if name == "UTF-32LE" || name == "UTF-32BE"
+          # One code unit, which Onigmo answers whatever it holds (#665).
+          b = char.__bytes__
+          b = b.reverse if name == "UTF-32LE"
+          return b.inject(0) { |code, byte| (code << 8) | byte }
+        end
         return char.getbyte(0)
       end
       char.__bytes__.inject(0) { |code, byte| (code << 8) | byte }
