@@ -2279,7 +2279,19 @@ fn run<'h>(
     // Where the running thread's turn is next checked (#45): every
     // `SLICE_INSNS` instructions, on the same compare as the budget.
     let mut slice_end: u64 = budget.saturating_sub(threads::SLICE_INSNS);
-    let mut limit = deadline.max(slice_end);
+    // `ObjectSpace.trace_object_allocations` (#690). While it is on,
+    // `trace_floor` pins the limit at its maximum, so the budget compare
+    // every instruction already makes sends each one through `trace_step`,
+    // which files what the last instruction allocated under the frame that
+    // ran it, `traced_top`. With tracing off the floor is zero and the loop
+    // pays nothing for it.
+    let mut traced_top = frames.len().saturating_sub(1);
+    let mut trace_floor: u64 = if scope.tracing_allocations() || scope.has_fresh_allocations() {
+        u64::MAX
+    } else {
+        0
+    };
+    let mut limit = deadline.max(slice_end).max(trace_floor);
 
     // Everything the loop roots from here on is released between
     // instructions, a batch at a time: see `release_roots`.
@@ -2310,6 +2322,14 @@ fn run<'h>(
                     root_limit = floor + ROOT_SLACK.max(2 * (scope.rooted() - floor));
                     scope.collect();
                 }
+                // Tracing is started by a method, so this loop first sees it
+                // here, at the call or the return around the primitive — or,
+                // when another thread or a loop below started it, at this
+                // loop's next call, return or turn check.
+                if trace_floor == 0 && scope.tracing_allocations() {
+                    trace_floor = u64::MAX;
+                    traced_top = frames.len().saturating_sub(1);
+                }
                 if scope.has_pending_finalizers() {
                     let list = take_finalizers(scope, false);
                     let kernel = scope.classes().object(Builtin::Kernel.id());
@@ -2330,47 +2350,56 @@ fn run<'h>(
                 }
                 seen_frames = frames.len();
                 deadline = refresh_boundaries(scope, &frames, &mut boundaries, budget);
-                limit = deadline.max(slice_end);
+                limit = deadline.max(slice_end).max(trace_floor);
             }
             budget = budget.saturating_sub(1);
             if budget <= limit {
-                if budget <= slice_end && budget > deadline {
-                    // A turn check, not the budget: another thread may run.
-                    slice_end = budget.saturating_sub(threads::SLICE_INSNS);
+                if trace_floor != 0 && !trace_step(scope, &frames, &mut traced_top) {
+                    trace_floor = 0;
                     limit = deadline.max(slice_end);
+                }
+                // Past the floor, only tracing sent this instruction here.
+                if budget <= deadline.max(slice_end) {
+                    if budget <= slice_end && budget > deadline {
+                        // A turn check, not the budget: another thread may run.
+                        slice_end = budget.saturating_sub(threads::SLICE_INSNS);
+                        limit = deadline.max(slice_end).max(trace_floor);
+                        seen_frames = usize::MAX;
+                        let unwind =
+                            match threads::preempt(scope, &mut stack, &mut frames, &mut ids) {
+                                Ok(unwind) => unwind,
+                                // A refusal another thread left for this one.
+                                Err(error) => Some(refuse(
+                                    scope,
+                                    &mut stack,
+                                    &mut frames,
+                                    &mut boundaries,
+                                    error,
+                                )?),
+                            };
+                        if let Some(unwind) = unwind
+                            && let Some(value) =
+                                unwind_to_handler(scope, &mut stack, &mut frames, unwind)?
+                        {
+                            break value;
+                        }
+                        continue;
+                    }
+                    // Out of budget: the whole evaluation's, or a boundary's.
+                    let unwind = refuse(
+                        scope,
+                        &mut stack,
+                        &mut frames,
+                        &mut boundaries,
+                        Error::Budget,
+                    )?;
                     seen_frames = usize::MAX;
-                    let unwind = match threads::preempt(scope, &mut stack, &mut frames, &mut ids) {
-                        Ok(unwind) => unwind,
-                        // A refusal another thread left for this one.
-                        Err(error) => Some(refuse(
-                            scope,
-                            &mut stack,
-                            &mut frames,
-                            &mut boundaries,
-                            error,
-                        )?),
-                    };
-                    if let Some(unwind) = unwind
-                        && let Some(value) =
-                            unwind_to_handler(scope, &mut stack, &mut frames, unwind)?
+                    if let Some(value) = unwind_to_handler(scope, &mut stack, &mut frames, unwind)?
                     {
                         break value;
                     }
                     continue;
                 }
-                // Out of budget: the whole evaluation's, or a boundary's.
-                let unwind = refuse(
-                    scope,
-                    &mut stack,
-                    &mut frames,
-                    &mut boundaries,
-                    Error::Budget,
-                )?;
-                seen_frames = usize::MAX;
-                if let Some(value) = unwind_to_handler(scope, &mut stack, &mut frames, unwind)? {
-                    break value;
-                }
-                continue;
             }
             let top = frames.len() - 1;
             let insn = frames[top].iseq.insns[frames[top].pc];
@@ -13780,6 +13809,41 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         ),
         (
             Builtin::Kernel,
+            &["__objspace_memsize__"],
+            Native::Gc(GcOp::Memsize),
+        ),
+        (
+            Builtin::Kernel,
+            &["__objspace_reachable__"],
+            Native::Gc(GcOp::Reachable),
+        ),
+        (
+            Builtin::Kernel,
+            &["__objspace_trace__"],
+            Native::Gc(GcOp::TraceAllocations),
+        ),
+        (
+            Builtin::Kernel,
+            &["__objspace_allocation__"],
+            Native::Gc(GcOp::AllocationSite),
+        ),
+        (
+            Builtin::Kernel,
+            &["__objspace_type__"],
+            Native::Gc(GcOp::ObjectType),
+        ),
+        (
+            Builtin::Kernel,
+            &["__objspace_address__"],
+            Native::Gc(GcOp::Address),
+        ),
+        (
+            Builtin::Kernel,
+            &["__objspace_contents__"],
+            Native::Gc(GcOp::Contents),
+        ),
+        (
+            Builtin::Kernel,
             &["__backtrace_here__"],
             Native::BacktraceHere,
         ),
@@ -16882,6 +16946,53 @@ fn gc_native(scope: &mut HandleScope<'_>, call: &Pending, op: GcOp) -> Value {
         GcOp::FinalizerTake => take_finalizers(scope, arg(0).is_truthy()),
         GcOp::EachObject => each_object(scope, arg(0)),
         GcOp::Immediate => bool_value(arg(0).is_immediate()),
+        GcOp::Memsize => {
+            let object = arg(0);
+            if object.is_immediate() {
+                return count(0);
+            }
+            let handle = scope.root(object);
+            count(scope.memsize(handle))
+        }
+        GcOp::Reachable => reachable_objects(scope, arg(0)),
+        GcOp::TraceAllocations => {
+            match arg(0) {
+                Value::NIL => scope.clear_allocation_sites(),
+                flag => scope.trace_allocations(flag.is_truthy()),
+            }
+            Value::NIL
+        }
+        GcOp::AllocationSite => allocation_site(scope, arg(0)),
+        GcOp::ObjectType => {
+            let object = arg(0);
+            let kind = match object.unpack() {
+                crate::value::Unpacked::Nil => "NIL",
+                crate::value::Unpacked::True => "TRUE",
+                crate::value::Unpacked::False => "FALSE",
+                crate::value::Unpacked::Fixnum(_) => "FIXNUM",
+                crate::value::Unpacked::Flonum(_) => "FLOAT",
+                crate::value::Unpacked::Symbol(_) => "SYMBOL",
+                _ => dump_type(scope, object),
+            };
+            Value::symbol(crate::shared::symbols::intern(&format!("T_{kind}")))
+        }
+        GcOp::Address => {
+            let object = arg(0);
+            if object.is_immediate() {
+                return Value::NIL;
+            }
+            let handle = scope.root(object);
+            let address = if arg(1).is_truthy() {
+                match scope.class(handle).and_then(Value::as_heap) {
+                    Some(pointer) => pointer.as_ptr() as usize,
+                    None => return Value::NIL,
+                }
+            } else {
+                scope.address(handle)
+            };
+            Value::fixnum(i64::try_from(address).unwrap_or(i64::MAX)).unwrap_or(Value::NIL)
+        }
+        GcOp::Contents => dump_contents(scope, arg(0)),
         GcOp::Id2Ref => {
             let found = arg(0).as_fixnum().and_then(|id| {
                 scope.objects().into_iter().find(|&object| {
@@ -16978,6 +17089,234 @@ fn take_finalizers(scope: &mut HandleScope<'_>, everything: bool) -> Value {
     new_array(scope, &flat)
 }
 
+/// `ObjectSpace.reachable_objects_from` (#690): what `object` references,
+/// or nil for an immediate.
+fn reachable_objects(scope: &mut HandleScope<'_>, object: Value) -> Value {
+    if object.is_immediate() {
+        return Value::NIL;
+    }
+    let found = references_of(scope, object);
+    new_array(scope, &found)
+}
+
+/// The heap objects `object`, a heap object, references, each once, in the
+/// order `mark` would reach them. An `Array` answers only its live
+/// elements, not what its storage still holds past its length.
+fn references_of(scope: &mut HandleScope<'_>, object: Value) -> Vec<Value> {
+    let handle = scope.root(object);
+    let found = if heap_repr(scope, object) == Some(Builtin::Array) {
+        let mut found = scope.references(handle, Some(ARRAY_STORAGE));
+        for index in 0..array_len(scope, handle) {
+            found.push(array_get(scope, handle, index));
+        }
+        found
+    } else {
+        scope.references(handle, None)
+    };
+    let mut seen = std::collections::HashSet::new();
+    found
+        .into_iter()
+        .filter(|value| !value.is_immediate() && seen.insert(*value))
+        .collect()
+}
+
+/// `[path, line, class_path, method_id, generation]` for an object
+/// allocation tracing saw made, or nil (#690).
+fn allocation_site(scope: &mut HandleScope<'_>, object: Value) -> Value {
+    if object.is_immediate() {
+        return Value::NIL;
+    }
+    let handle = scope.root(object);
+    let Some(site) = scope.allocation_site(handle).cloned() else {
+        return Value::NIL;
+    };
+    let path = string_new(scope, &site.path);
+    scope.root(path);
+    let class = match site
+        .class
+        .and_then(|id| scope.classes().name(id).map(str::to_owned))
+    {
+        Some(name) => {
+            let name = string_new(scope, &name);
+            scope.root(name);
+            name
+        }
+        None => Value::NIL,
+    };
+    let fixnum = |n: i64| Value::fixnum(n).unwrap_or(Value::NIL);
+    let method = site.method.map_or(Value::NIL, Value::symbol);
+    let generation = fixnum(i64::try_from(site.generation).unwrap_or(i64::MAX));
+    new_array(
+        scope,
+        &[
+            path,
+            fixnum(i64::from(site.line)),
+            class,
+            method,
+            generation,
+        ],
+    )
+}
+
+/// `[frozen, detail, ...]` for `ObjectSpace.dump` (#690), read off the cell
+/// so the object is sent nothing: a String's bytes, as a binary String, and
+/// its encoding's name; an Array's length; a module's name, or nil; a
+/// Float's, Integer's or Symbol's text.
+fn dump_contents(scope: &mut HandleScope<'_>, object: Value) -> Value {
+    use crate::value::Unpacked;
+    let text = match object.unpack() {
+        Unpacked::Fixnum(n) => Some(n.to_string()),
+        Unpacked::Flonum(f) => Some(float_to_s(f)),
+        Unpacked::Symbol(id) => Some(
+            crate::shared::symbols::name(id)
+                .unwrap_or_default()
+                .to_owned(),
+        ),
+        Unpacked::Heap(_) => None,
+        _ => return new_array(scope, &[Value::TRUE]),
+    };
+    if let Some(text) = text {
+        let text = string_new(scope, &text);
+        scope.root(text);
+        return new_array(scope, &[Value::TRUE, text]);
+    }
+    let handle = scope.root(object);
+    let frozen = bool_value(scope.is_frozen(handle));
+    let details = match dump_type(scope, object) {
+        "STRING" => {
+            let bytes = crate::strings::bytes(scope, handle);
+            let encoding = crate::strings::encoding(scope, handle);
+            let bytes =
+                string_bytes_in(scope, Builtin::String.id(), &bytes, crate::strings::BINARY);
+            scope.root(bytes);
+            let name = string_new(scope, crate::strings::name(encoding));
+            scope.root(name);
+            vec![bytes, name]
+        }
+        "ARRAY" => {
+            let length = i64::try_from(array_len(scope, handle)).unwrap_or(i64::MAX);
+            vec![Value::fixnum(length).unwrap_or(Value::NIL)]
+        }
+        "CLASS" | "MODULE" => {
+            let name = class_id_of(scope, object)
+                .and_then(|id| scope.classes().name(id).map(str::to_owned));
+            match name {
+                Some(name) => {
+                    let name = string_new(scope, &name);
+                    scope.root(name);
+                    vec![name]
+                }
+                None => vec![Value::NIL],
+            }
+        }
+        "FLOAT" => {
+            let value = crate::float::read(scope, object).unwrap_or(f64::NAN);
+            let text = string_new(scope, &float_to_s(value));
+            scope.root(text);
+            vec![text]
+        }
+        _ => Vec::new(),
+    };
+    let mut out = vec![frozen];
+    out.extend(details);
+    new_array(scope, &out)
+}
+
+/// CRuby's `T_*` name for what `object`, a heap object, is.
+fn dump_type(scope: &mut HandleScope<'_>, object: Value) -> &'static str {
+    if let Some(id) = class_id_of(scope, object) {
+        return match scope.classes().kind(id) {
+            Kind::Module => "MODULE",
+            Kind::Class => "CLASS",
+        };
+    }
+    if crate::bignum::is_big(scope, object) {
+        return "BIGNUM";
+    }
+    match heap_repr(scope, object) {
+        Some(Builtin::String) => "STRING",
+        Some(Builtin::Array) => "ARRAY",
+        Some(Builtin::Hash) => "HASH",
+        Some(Builtin::Float) => "FLOAT",
+        Some(Builtin::Regexp) => "REGEXP",
+        Some(Builtin::MatchData) => "MATCH",
+        Some(Builtin::Proc) => "DATA",
+        _ => "OBJECT",
+    }
+}
+
+/// The representation of the class in `object`'s header, read without
+/// `class_of`, which gives a singleton class a singleton of its own — an
+/// allocation in the middle of `dump_all`'s walk.
+fn heap_repr(scope: &mut HandleScope<'_>, object: Value) -> Option<Builtin> {
+    let handle = scope.root(object);
+    scope
+        .class_of(handle)
+        .and_then(|id| scope.classes().repr(id))
+}
+
+/// One instruction's worth of allocation tracing (#690), run before each
+/// instruction while it is on: file what the last one allocated under the
+/// frame that ran it, and note the frame about to run the next. Answers
+/// whether tracing is still on, which the loop needs to know to stop.
+#[cold]
+#[inline(never)]
+fn trace_step(scope: &mut HandleScope<'_>, frames: &[Call], traced_top: &mut usize) -> bool {
+    if scope.has_fresh_allocations() {
+        stamp_allocations(scope, frames, *traced_top);
+    }
+    *traced_top = frames.len().saturating_sub(1);
+    scope.tracing_allocations()
+}
+
+/// Where the instruction frame `at` was running allocated what it did
+/// (#690), as CRuby's `objspace` reports it: the program's file and line,
+/// and the method running there with the class it was found on. A method
+/// `core/*.rb` writes in Ruby is reported the way CRuby reports one written
+/// in C — `Array#map` itself, at the line of the program that called it —
+/// so a frame inside the core library is reported as the core method the
+/// program called, at the program's position, as `backtrace_of` does.
+#[cold]
+#[inline(never)]
+fn stamp_allocations(scope: &mut HandleScope<'_>, frames: &[Call], at: usize) {
+    let generation = scope.stats().collections;
+    let Some(last) = frames.len().checked_sub(1) else {
+        let path = Arc::from("");
+        let site = crate::heap::AllocationSite {
+            path,
+            line: 0,
+            class: None,
+            method: None,
+            generation,
+        };
+        scope.stamp_allocations(&site);
+        return;
+    };
+    let at = at.min(last);
+    let internal = |frame: &Call| {
+        frame
+            .iseq
+            .path
+            .as_deref()
+            .is_some_and(|path| path.starts_with("<internal:"))
+    };
+    let program = (0..=at).rev().find(|&index| !internal(&frames[index]));
+    let (position, method) = match program {
+        Some(index) if index < at => (index, index + 1),
+        Some(index) => (index, index),
+        None => (at, at),
+    };
+    let frame = &frames[position];
+    let site = crate::heap::AllocationSite {
+        path: frame.iseq.path.clone().unwrap_or_else(|| Arc::from("")),
+        line: frame.iseq.line_at(frame.pc.saturating_sub(1)).unwrap_or(0),
+        class: frames[method].owner,
+        method: frames[method].defined_as,
+        generation,
+    };
+    scope.stamp_allocations(&site);
+}
+
 /// `GC.stat`'s keys, CRuby 4.0's in its order, with what this collector can
 /// say for each. It has one generation and never compacts, so the
 /// generational and compaction counters are zero and every collection is a
@@ -17037,12 +17376,16 @@ fn gc_stat(scope: &mut HandleScope<'_>) -> Value {
 /// A singleton class of a singleton class is left out. CRuby makes those
 /// only when it must, and hides them from this walk; here one is made the
 /// first time a singleton class is dispatched on, so it is the walk that
-/// has to skip it.
+/// has to skip it. Given nil, every object Ruby can see, those included,
+/// for `ObjectSpace.dump_all`.
 fn each_object(scope: &mut HandleScope<'_>, module: Value) -> Value {
+    let objects = scope.objects();
+    if module.is_nil() {
+        return new_array(scope, &objects);
+    }
     let Some(module) = class_id_of(scope, module) else {
         return new_array(scope, &[]);
     };
-    let objects = scope.objects();
     let mut kinds: std::collections::HashMap<u64, bool> = std::collections::HashMap::new();
     let mut found = Vec::new();
     for object in objects {

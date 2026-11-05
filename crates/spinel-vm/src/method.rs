@@ -1048,13 +1048,36 @@ pub enum GcOp {
     FinalizerCopy,
     /// `__finalizer_take__(everything)`: `[id, [callable, ...], ...]`, flat.
     FinalizerTake,
-    /// `__each_object__(module)`: every object that is a kind of `module`.
+    /// `__each_object__(module)`: every object that is a kind of `module`,
+    /// or with nil every object Ruby can see.
     EachObject,
     /// `__id2ref__(id, missing)`: the heap object with that `object_id`.
     Id2Ref,
     /// `__immediate__(object)`: whether it is a value rather than an object
     /// on the heap — one the collector can never collect.
     Immediate,
+    /// `__objspace_memsize__(object)`: the bytes it occupies with the
+    /// storage it owns, 0 for an immediate (#690).
+    Memsize,
+    /// `__objspace_reachable__(object)`: the objects it references, each
+    /// once, or nil for an immediate.
+    Reachable,
+    /// `__objspace_trace__(flag)`: start tracing allocations with `true`,
+    /// stop with `false`, forget what was traced with nil.
+    TraceAllocations,
+    /// `__objspace_allocation__(object)`: `[path, line, class_path,
+    /// method_id, generation]` where tracing saw it allocated, or nil.
+    AllocationSite,
+    /// `__objspace_type__(object)`: CRuby's `T_*` type for it, a Symbol.
+    ObjectType,
+    /// `__objspace_address__(object, header_class)`: the address of its
+    /// cell, or with `true` of the class its header names, an Integer; nil
+    /// for an immediate.
+    Address,
+    /// `__objspace_contents__(object)`: `[frozen, detail, ...]`, what
+    /// `ObjectSpace.dump` shows of it beyond its type, read without sending
+    /// it anything. See `interp.rs`, `dump_contents`.
+    Contents,
 }
 
 /// Which thread primitive. See `threads.rs` for the scheduler and

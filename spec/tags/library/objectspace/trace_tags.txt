@@ -1,1 +1,0 @@
-fails(#690: objspace is not loadable yet, so the child spinel ruby_exe starts fails to require it):require "objspace/trace" shows object allocation sites

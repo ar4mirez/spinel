@@ -77,3 +77,23 @@ fn threads_run_on_os_threads_of_their_own() {
         "own\nopened opened\nran meanwhile\nalive at exit\nkilled at the end\n"
     );
 }
+
+#[test]
+fn a_thread_running_before_tracing_starts_traces_its_allocations() {
+    let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/threads/trace_allocations.rb");
+    let output = Command::new(SPINEL)
+        .arg("run")
+        .arg(&script)
+        .output()
+        .expect("spinel runs");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "[\"trace_allocations.rb\", 8]\n"
+    );
+}

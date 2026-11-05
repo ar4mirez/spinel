@@ -1,1 +1,0 @@
-fails(#690: objspace is not loadable yet, so the child spinel ruby_exe starts fails to require it):ObjectSpace.dump dumps to stdout when passed output: :stdout

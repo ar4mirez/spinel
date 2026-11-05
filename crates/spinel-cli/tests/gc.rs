@@ -102,3 +102,22 @@ fn copies_take_the_finalizers_of_the_original() {
         "[:object, :object]\n[:string]\n[]\n\"still open\"\n[:writer]\n"
     );
 }
+
+/// `ObjectSpace.dump_all` and `dump` read a singleton class without
+/// dispatching on it, so they give it no singleton class of its own (#690).
+#[test]
+fn dumping_the_heap_makes_no_singleton_classes() {
+    let script =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/gc/dump_singletons.rb");
+    let output = Command::new(SPINEL)
+        .arg("run")
+        .arg(&script)
+        .output()
+        .expect("spinel runs");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "1\n");
+}

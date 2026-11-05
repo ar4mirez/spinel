@@ -1,6 +1,0 @@
-fails(#690: objspace is not loadable yet, so the child spinel ruby_exe starts fails to require it):ObjectSpace.dump_all dumps Ruby heap to string when passed output: :string
-fails(#690: objspace is not loadable yet, so the child spinel ruby_exe starts fails to require it):ObjectSpace.dump_all dumps Ruby heap to a temporary file when passed output: :file
-fails(#690: objspace is not loadable yet, so the child spinel ruby_exe starts fails to require it):ObjectSpace.dump_all dumps Ruby heap to a temporary file when :output not specified
-fails(#690: objspace is not loadable yet, so the child spinel ruby_exe starts fails to require it):ObjectSpace.dump_all dumps Ruby heap to a temporary file when passed output: :nil
-fails(#690: objspace is not loadable yet, so the child spinel ruby_exe starts fails to require it):ObjectSpace.dump_all dumps Ruby heap to stdout when passed output: :stdout
-fails(#690: objspace is not loadable yet, so the child spinel ruby_exe starts fails to require it):ObjectSpace.dump_all dumps Ruby heap to provided IO when passed output: IO
