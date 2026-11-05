@@ -1806,7 +1806,18 @@ end
       again = error.readagain_bytes.to_s.bytesize
     end
     out = __decode__(__take__(broken))
-    again = __read_on__ unless __read_encoding__.ascii_compatible?
+    begin
+      again = __read_on__ unless __read_encoding__.ascii_compatible?
+    rescue Encoding::UndefinedConversionError
+      # Where the character with no spelling ended what was buffered, CRuby's
+      # converter finished and so kept the replacement and the CR (#645,
+      # #663). Measured.
+      if @rbuf.empty? && !__fill__(1)
+        @cbuf = (@cbuf || "".b) << out.b
+        @rpend = cr
+      end
+      raise
+    end
     @rpend = cr + __take__(again)
     out
   end
