@@ -1055,6 +1055,25 @@ pub enum GcOp {
     /// `__immediate__(object)`: whether it is a value rather than an object
     /// on the heap — one the collector can never collect.
     Immediate,
+    /// `__objspace_memsize__(object)`: the bytes it occupies with the
+    /// storage it owns, 0 for an immediate (#690).
+    Memsize,
+    /// `__objspace_reachable__(object)`: the objects it references, each
+    /// once, or nil for an immediate.
+    Reachable,
+    /// `__objspace_trace__(flag)`: start tracing allocations with `true`,
+    /// stop with `false`, forget what was traced with nil.
+    TraceAllocations,
+    /// `__objspace_allocation__(object)`: `[path, line, class_path,
+    /// method_id, generation]` where tracing saw it allocated, or nil.
+    AllocationSite,
+    /// `__objspace_type__(object)`: CRuby's `T_*` type for it, a Symbol.
+    ObjectType,
+    /// `__objspace_dump__(object)`: its line of `ObjectSpace.dump` JSON.
+    Dump,
+    /// `__objspace_dump_all__(since)`: a line for every object, or for every
+    /// one traced at generation `since` or later.
+    DumpAll,
 }
 
 /// Which thread primitive. See `threads.rs` for the scheduler and

@@ -3887,6 +3887,13 @@ fn run<'h>(
                 }
                 Ok(Step::Next)
             })();
+            // `ObjectSpace.trace_object_allocations` (#690): what this
+            // instruction allocated was allocated where it ran. Asked here,
+            // after the instructions answered inline above, none of which
+            // allocates; with tracing off the list stays empty.
+            if scope.has_fresh_allocations() {
+                stamp_allocations(scope, &frames, top);
+            }
 
             let unwind = match stepped {
                 Ok(Step::Next) => continue,
@@ -13780,6 +13787,41 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         ),
         (
             Builtin::Kernel,
+            &["__objspace_memsize__"],
+            Native::Gc(GcOp::Memsize),
+        ),
+        (
+            Builtin::Kernel,
+            &["__objspace_reachable__"],
+            Native::Gc(GcOp::Reachable),
+        ),
+        (
+            Builtin::Kernel,
+            &["__objspace_trace__"],
+            Native::Gc(GcOp::TraceAllocations),
+        ),
+        (
+            Builtin::Kernel,
+            &["__objspace_allocation__"],
+            Native::Gc(GcOp::AllocationSite),
+        ),
+        (
+            Builtin::Kernel,
+            &["__objspace_type__"],
+            Native::Gc(GcOp::ObjectType),
+        ),
+        (
+            Builtin::Kernel,
+            &["__objspace_dump__"],
+            Native::Gc(GcOp::Dump),
+        ),
+        (
+            Builtin::Kernel,
+            &["__objspace_dump_all__"],
+            Native::Gc(GcOp::DumpAll),
+        ),
+        (
+            Builtin::Kernel,
             &["__backtrace_here__"],
             Native::BacktraceHere,
         ),
@@ -16882,6 +16924,45 @@ fn gc_native(scope: &mut HandleScope<'_>, call: &Pending, op: GcOp) -> Value {
         GcOp::FinalizerTake => take_finalizers(scope, arg(0).is_truthy()),
         GcOp::EachObject => each_object(scope, arg(0)),
         GcOp::Immediate => bool_value(arg(0).is_immediate()),
+        GcOp::Memsize => {
+            let object = arg(0);
+            if object.is_immediate() {
+                return count(0);
+            }
+            let handle = scope.root(object);
+            count(scope.memsize(handle))
+        }
+        GcOp::Reachable => reachable_objects(scope, arg(0)),
+        GcOp::TraceAllocations => {
+            match arg(0) {
+                Value::NIL => scope.clear_allocation_sites(),
+                flag => scope.trace_allocations(flag.is_truthy()),
+            }
+            Value::NIL
+        }
+        GcOp::AllocationSite => allocation_site(scope, arg(0)),
+        GcOp::ObjectType => {
+            let object = arg(0);
+            let kind = match object.unpack() {
+                crate::value::Unpacked::Nil => "NIL",
+                crate::value::Unpacked::True => "TRUE",
+                crate::value::Unpacked::False => "FALSE",
+                crate::value::Unpacked::Fixnum(_) => "FIXNUM",
+                crate::value::Unpacked::Flonum(_) => "FLOAT",
+                crate::value::Unpacked::Symbol(_) => "SYMBOL",
+                _ => dump_type(scope, object),
+            };
+            Value::symbol(crate::shared::symbols::intern(&format!("T_{kind}")))
+        }
+        GcOp::Dump => {
+            let json = dump_object(scope, arg(0));
+            string_new(scope, &json)
+        }
+        GcOp::DumpAll => {
+            let since = arg(0).as_fixnum().and_then(|n| u64::try_from(n).ok());
+            let json = dump_all(scope, since);
+            string_new(scope, &json)
+        }
         GcOp::Id2Ref => {
             let found = arg(0).as_fixnum().and_then(|id| {
                 scope.objects().into_iter().find(|&object| {
@@ -16976,6 +17057,280 @@ fn take_finalizers(scope: &mut HandleScope<'_>, everything: bool) -> Value {
         flat.push(list);
     }
     new_array(scope, &flat)
+}
+
+/// `ObjectSpace.reachable_objects_from` (#690): what `object` references,
+/// or nil for an immediate.
+fn reachable_objects(scope: &mut HandleScope<'_>, object: Value) -> Value {
+    if object.is_immediate() {
+        return Value::NIL;
+    }
+    let found = references_of(scope, object);
+    new_array(scope, &found)
+}
+
+/// The heap objects `object`, a heap object, references, each once, in the
+/// order `mark` would reach them. An `Array` answers only its live
+/// elements, not what its storage still holds past its length.
+fn references_of(scope: &mut HandleScope<'_>, object: Value) -> Vec<Value> {
+    let handle = scope.root(object);
+    let found = if heap_repr(scope, object) == Some(Builtin::Array) {
+        let mut found = scope.references(handle, Some(ARRAY_STORAGE));
+        for index in 0..array_len(scope, handle) {
+            found.push(array_get(scope, handle, index));
+        }
+        found
+    } else {
+        scope.references(handle, None)
+    };
+    let mut seen = std::collections::HashSet::new();
+    found
+        .into_iter()
+        .filter(|value| !value.is_immediate() && seen.insert(*value))
+        .collect()
+}
+
+/// `[path, line, class_path, method_id, generation]` for an object
+/// allocation tracing saw made, or nil (#690).
+fn allocation_site(scope: &mut HandleScope<'_>, object: Value) -> Value {
+    if object.is_immediate() {
+        return Value::NIL;
+    }
+    let handle = scope.root(object);
+    let Some(site) = scope.allocation_site(handle).cloned() else {
+        return Value::NIL;
+    };
+    let path = string_new(scope, &site.path);
+    scope.root(path);
+    let class = match site
+        .class
+        .and_then(|id| scope.classes().name(id).map(str::to_owned))
+    {
+        Some(name) => {
+            let name = string_new(scope, &name);
+            scope.root(name);
+            name
+        }
+        None => Value::NIL,
+    };
+    let fixnum = |n: i64| Value::fixnum(n).unwrap_or(Value::NIL);
+    let method = site.method.map_or(Value::NIL, Value::symbol);
+    let generation = fixnum(i64::try_from(site.generation).unwrap_or(i64::MAX));
+    new_array(
+        scope,
+        &[
+            path,
+            fixnum(i64::from(site.line)),
+            class,
+            method,
+            generation,
+        ],
+    )
+}
+
+/// `object`'s line of `ObjectSpace.dump` (#690): CRuby's keys, for what
+/// this heap can say about it. No `shape_id`, `slot_size` or `flags`: those
+/// describe CRuby's own heap, and a program reading them reads CRuby.
+fn dump_object(scope: &mut HandleScope<'_>, object: Value) -> String {
+    use crate::value::Unpacked;
+    let mut out = String::from("{");
+    match object.unpack() {
+        Unpacked::Nil => return "null".to_owned(),
+        Unpacked::True => return "true".to_owned(),
+        Unpacked::False => return "false".to_owned(),
+        Unpacked::Fixnum(n) => return n.to_string(),
+        Unpacked::Flonum(f) => return float_to_s(f),
+        Unpacked::Symbol(id) => {
+            let name = crate::shared::symbols::name(id).unwrap_or_default();
+            out.push_str("\"type\":\"SYMBOL\", \"value\":");
+            json_string(&mut out, name.as_bytes());
+            out.push('}');
+            return out;
+        }
+        Unpacked::Undef | Unpacked::Heap(_) => {}
+    }
+    let handle = scope.root(object);
+    let address = scope.address(handle);
+    let kind = dump_type(scope, object);
+    out.push_str(&format!(
+        "\"address\":\"0x{address:x}\", \"type\":\"{kind}\""
+    ));
+    if let Some(class) = scope.class(handle)
+        && let Some(pointer) = class.as_heap()
+    {
+        out.push_str(&format!(
+            ", \"class\":\"0x{:x}\"",
+            pointer.as_ptr() as usize
+        ));
+    }
+    if scope.is_frozen(handle) {
+        out.push_str(", \"frozen\":true");
+    }
+    match kind {
+        "STRING" => {
+            let bytes = crate::strings::bytes(scope, handle);
+            let encoding = crate::strings::encoding(scope, handle);
+            out.push_str(&format!(", \"bytesize\":{}, \"value\":", bytes.len()));
+            json_string(&mut out, &bytes);
+            out.push_str(", \"encoding\":");
+            json_string(&mut out, crate::strings::name(encoding).as_bytes());
+        }
+        "ARRAY" => out.push_str(&format!(", \"length\":{}", array_len(scope, handle))),
+        "CLASS" | "MODULE" => {
+            if let Some(name) = class_id_of(scope, object)
+                .and_then(|id| scope.classes().name(id).map(str::to_owned))
+            {
+                out.push_str(", \"name\":");
+                json_string(&mut out, name.as_bytes());
+            }
+        }
+        "FLOAT" => {
+            let value = crate::float::read(scope, object).unwrap_or(f64::NAN);
+            out.push_str(&format!(", \"value\":\"{}\"", float_to_s(value)));
+        }
+        _ => {}
+    }
+    let references: Vec<String> = references_of(scope, object)
+        .into_iter()
+        .filter_map(Value::as_heap)
+        .map(|pointer| format!("\"0x{:x}\"", pointer.as_ptr() as usize))
+        .collect();
+    if !references.is_empty() {
+        out.push_str(&format!(", \"references\":[{}]", references.join(", ")));
+    }
+    if let Some(site) = scope.allocation_site(handle).cloned() {
+        out.push_str(", \"file\":");
+        json_string(&mut out, site.path.as_bytes());
+        out.push_str(&format!(", \"line\":{}", site.line));
+        if let Some(method) = site.method.and_then(crate::shared::symbols::name) {
+            out.push_str(", \"method\":");
+            json_string(&mut out, method.as_bytes());
+        }
+        out.push_str(&format!(", \"generation\":{}", site.generation));
+    }
+    out.push_str(&format!(", \"memsize\":{}}}", scope.memsize(handle)));
+    out
+}
+
+/// `ObjectSpace.dump_all` (#690): a line of `dump_object` for every object
+/// Ruby can see, or, given `since`, for every one allocation tracing saw
+/// made at that generation or later.
+fn dump_all(scope: &mut HandleScope<'_>, since: Option<u64>) -> String {
+    let mut out = String::new();
+    for object in scope.objects() {
+        let handle = scope.root(object);
+        if let Some(since) = since {
+            let recent = scope
+                .allocation_site(handle)
+                .is_some_and(|site| site.generation >= since);
+            if !recent {
+                continue;
+            }
+        }
+        out.push_str(&dump_object(scope, object));
+        out.push('\n');
+    }
+    out
+}
+
+/// CRuby's `T_*` name for what `object`, a heap object, is.
+fn dump_type(scope: &mut HandleScope<'_>, object: Value) -> &'static str {
+    if let Some(id) = class_id_of(scope, object) {
+        return match scope.classes().kind(id) {
+            Kind::Module => "MODULE",
+            Kind::Class => "CLASS",
+        };
+    }
+    if crate::bignum::is_big(scope, object) {
+        return "BIGNUM";
+    }
+    match heap_repr(scope, object) {
+        Some(Builtin::String) => "STRING",
+        Some(Builtin::Array) => "ARRAY",
+        Some(Builtin::Hash) => "HASH",
+        Some(Builtin::Float) => "FLOAT",
+        Some(Builtin::Regexp) => "REGEXP",
+        Some(Builtin::MatchData) => "MATCH",
+        Some(Builtin::Proc) => "DATA",
+        _ => "OBJECT",
+    }
+}
+
+/// The representation of the class in `object`'s header, read without
+/// `class_of`, which gives a singleton class a singleton of its own — an
+/// allocation in the middle of `dump_all`'s walk.
+fn heap_repr(scope: &mut HandleScope<'_>, object: Value) -> Option<Builtin> {
+    let handle = scope.root(object);
+    scope
+        .class_of(handle)
+        .and_then(|id| scope.classes().repr(id))
+}
+
+/// `bytes` as a JSON string, escaped as CRuby's `objspace` escapes one.
+fn json_string(out: &mut String, bytes: &[u8]) {
+    out.push('"');
+    for ch in String::from_utf8_lossy(bytes).chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{8}' => out.push_str("\\b"),
+            '\u{c}' => out.push_str("\\f"),
+            ch if (ch as u32) < 0x20 || ch == '\u{7f}' => {
+                out.push_str(&format!("\\u{:04x}", ch as u32));
+            }
+            ch => out.push(ch),
+        }
+    }
+    out.push('"');
+}
+
+/// Where the instruction frame `at` was running allocated what it did
+/// (#690), as CRuby's `objspace` reports it: the program's file and line,
+/// and the method running there with the class it was found on. A method
+/// `core/*.rb` writes in Ruby is reported the way CRuby reports one written
+/// in C — `Array#map` itself, at the line of the program that called it —
+/// so a frame inside the core library is reported as the core method the
+/// program called, at the program's position, as `backtrace_of` does.
+fn stamp_allocations(scope: &mut HandleScope<'_>, frames: &[Call], at: usize) {
+    let generation = scope.stats().collections;
+    let Some(last) = frames.len().checked_sub(1) else {
+        let path = Arc::from("");
+        let site = crate::heap::AllocationSite {
+            path,
+            line: 0,
+            class: None,
+            method: None,
+            generation,
+        };
+        scope.stamp_allocations(&site);
+        return;
+    };
+    let at = at.min(last);
+    let internal = |frame: &Call| {
+        frame
+            .iseq
+            .path
+            .as_deref()
+            .is_some_and(|path| path.starts_with("<internal:"))
+    };
+    let program = (0..=at).rev().find(|&index| !internal(&frames[index]));
+    let (position, method) = match program {
+        Some(index) if index < at => (index, index + 1),
+        Some(index) => (index, index),
+        None => (at, at),
+    };
+    let frame = &frames[position];
+    let site = crate::heap::AllocationSite {
+        path: frame.iseq.path.clone().unwrap_or_else(|| Arc::from("")),
+        line: frame.iseq.line_at(frame.pc.saturating_sub(1)).unwrap_or(0),
+        class: frames[method].owner,
+        method: frames[method].defined_as,
+        generation,
+    };
+    scope.stamp_allocations(&site);
 }
 
 /// `GC.stat`'s keys, CRuby 4.0's in its order, with what this collector can

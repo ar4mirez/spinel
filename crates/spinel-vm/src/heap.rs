@@ -393,6 +393,31 @@ pub struct Heap {
     /// already swept: a finalizer is handed the id and never the object, so
     /// running one cannot resurrect it.
     pending_finalizers: Vec<(i64, Vec<Value>)>,
+    /// `ObjectSpace.trace_object_allocations_start` calls not yet matched by
+    /// a `_stop` (#690). While it is nonzero, every object Ruby can see is
+    /// noted in `fresh_allocations` as it is allocated.
+    allocation_tracing: u32,
+    /// Objects allocated since the interpreter last stamped them with where
+    /// it was. The allocator cannot see the frame stack, so it leaves the
+    /// address here and the loop, which can, files it under the instruction
+    /// that allocated it — see `interp.rs`, `stamp_allocations`.
+    fresh_allocations: Vec<usize>,
+    /// Where each traced object was allocated, by address. Weak, like
+    /// `side_ivars`: an entry goes with its object before `sweep`, so a later
+    /// object in the same cell does not inherit it.
+    allocation_sites: HashMap<usize, AllocationSite>,
+}
+
+/// Where `ObjectSpace.trace_object_allocations` saw an object allocated
+/// (#690): the program's file and line, the method running there and the
+/// class it was found on, and how many collections had run.
+#[derive(Debug, Clone)]
+pub(crate) struct AllocationSite {
+    pub(crate) path: std::sync::Arc<str>,
+    pub(crate) line: i32,
+    pub(crate) class: Option<crate::class::ClassId>,
+    pub(crate) method: Option<SymbolId>,
+    pub(crate) generation: u64,
 }
 
 /// One weak map's entries (#36): the identity of each key, its value, and
@@ -557,6 +582,15 @@ fn address_marked(address: usize) -> bool {
     unsafe { (*(address as *const Header)).flags & MARKED != 0 }
 }
 
+/// The bytes `obj` occupies: its whole cell, or its own allocation when it is
+/// too large for one.
+fn cell_size(obj: Obj) -> usize {
+    // SAFETY: called only on live objects of this heap.
+    let header = unsafe { &*obj.header() };
+    let size = Heap::object_size(header.payload, header.len);
+    size_class(size).map_or(size, |index| SIZE_CLASSES[index])
+}
+
 /// The class index for an object needing `bytes` in total, or `None` for large objects.
 fn size_class(bytes: usize) -> Option<usize> {
     if bytes > MAX_CELL {
@@ -619,6 +653,9 @@ impl Heap {
             weak: HashMap::new(),
             finalizers: HashMap::new(),
             pending_finalizers: Vec::new(),
+            allocation_tracing: 0,
+            fresh_allocations: Vec::new(),
+            allocation_sites: HashMap::new(),
         }
     }
 
@@ -842,6 +879,11 @@ impl Heap {
         };
 
         let obj = Obj(cell.cast());
+        // One flag test when nothing is tracing (#690). A classless object is
+        // the storage of one that has a class, and Ruby never asks about it.
+        if self.allocation_tracing != 0 && class.is_some() {
+            self.fresh_allocations.push(cell.as_ptr() as usize);
+        }
         // SAFETY: `cell` is at least `size` bytes, eight-byte aligned, and owned by
         // this heap. Writing the whole header initialises it, including over a free
         // cell's link in the first word.
@@ -1101,8 +1143,13 @@ impl Heap {
             // heap, and nothing has been freed yet in this cycle.
             unsafe { (*(address as *const Header)).flags & MARKED != 0 }
         });
-        // A weak map's table goes with the map, for the same reason.
+        // A weak map's table goes with the map, for the same reason, and so
+        // does what allocation tracing noted about an object (#690).
         self.weak.retain(|&address, _| address_marked(address));
+        self.allocation_sites
+            .retain(|&address, _| address_marked(address));
+        self.fresh_allocations
+            .retain(|&address| address_marked(address));
         self.free = [ptr::null_mut(); CLASS_COUNT];
         let mut live_bytes = 0;
         let mut live_objects = 0;
@@ -1652,6 +1699,136 @@ impl<'h> HandleScope<'h> {
         out
     }
 
+    /// `ObjectSpace.trace_object_allocations_start` and `_stop` (#690): they
+    /// nest, and a `_stop` with none left to match does nothing.
+    pub(crate) fn trace_allocations(&mut self, start: bool) {
+        let depth = &mut self.heap.allocation_tracing;
+        *depth = if start {
+            depth.saturating_add(1)
+        } else {
+            depth.saturating_sub(1)
+        };
+    }
+
+    /// Whether objects allocated since the loop last looked are waiting to
+    /// be told where they were made. Asked once per instruction the loop
+    /// does not answer inline, so it is one load.
+    pub(crate) fn has_fresh_allocations(&self) -> bool {
+        !self.heap.fresh_allocations.is_empty()
+    }
+
+    /// File every object allocated since the last call under `site`.
+    pub(crate) fn stamp_allocations(&mut self, site: &AllocationSite) {
+        let heap = &mut *self.heap;
+        for address in heap.fresh_allocations.drain(..) {
+            heap.allocation_sites.insert(address, site.clone());
+        }
+    }
+
+    /// Where `object` was allocated, if tracing saw it.
+    pub(crate) fn allocation_site(&self, object: Handle<'h>) -> Option<&AllocationSite> {
+        self.heap.allocation_sites.get(&self.address(object))
+    }
+
+    /// `ObjectSpace.trace_object_allocations_clear`.
+    pub(crate) fn clear_allocation_sites(&mut self) {
+        self.heap.allocation_sites.clear();
+        self.heap.fresh_allocations.clear();
+    }
+
+    /// `ObjectSpace.memsize_of` (#690): the cell, and the storage it owns —
+    /// the classless objects in its slots, an Array's elements and an
+    /// object's instance variables, and its side-table ivars. What a class
+    /// keeps in Rust, its method table, is not counted.
+    pub(crate) fn memsize(&self, handle: Handle<'h>) -> usize {
+        let obj = self.object(handle);
+        let mut total = cell_size(obj);
+        self.each_storage(obj, |storage| total += cell_size(storage));
+        total
+    }
+
+    /// The objects `handle` holds a strong reference to (#690), as `mark`
+    /// traces them: its class, then what its slots name, looking through the
+    /// classless storage objects Ruby never sees — an environment, an
+    /// Array's elements, an object's instance variables — to the objects in
+    /// them. Immediates are left out; an object named twice appears twice.
+    ///
+    /// `skip` names one of the object's own slots not to follow: an
+    /// `Array`'s storage, whose slots past its length still hold what was
+    /// shifted out, so the caller reads its live elements instead.
+    pub(crate) fn references(&self, handle: Handle<'h>, skip: Option<usize>) -> Vec<Value> {
+        let obj = self.object(handle);
+        let mut out = Vec::new();
+        // SAFETY: `object` checked that the handle names a live heap object.
+        if let Some(class) = unsafe { (*obj.header()).class } {
+            out.push(class);
+        }
+        let mut pending = vec![obj];
+        let mut seen = std::collections::HashSet::new();
+        if let Some(storage) = self.side_storage(obj) {
+            pending.push(storage);
+        }
+        while let Some(next) = pending.pop() {
+            // SAFETY: every object queued is live: `obj`, or one a live
+            // object's slot names.
+            let header = unsafe { &*next.header() };
+            if header.payload != Payload::Slots {
+                continue;
+            }
+            for i in 0..header.len as usize {
+                if next == obj && skip == Some(i) {
+                    continue;
+                }
+                // SAFETY: a slots payload holds `len` initialised values.
+                let value = unsafe { ptr::read(next.slots().add(i)) };
+                let Some(pointer) = value.as_heap() else {
+                    continue;
+                };
+                let held = Obj(pointer.cast());
+                // SAFETY: a heap value in a live slot is a live object.
+                if unsafe { (*held.header()).class }.is_some() {
+                    out.push(value);
+                } else if seen.insert(pointer.as_ptr() as usize) {
+                    pending.push(held);
+                }
+            }
+        }
+        out
+    }
+
+    /// Call `visit` with each classless object `obj` owns: those in its
+    /// slots, and its side-table ivar storage.
+    fn each_storage(&self, obj: Obj, mut visit: impl FnMut(Obj)) {
+        // SAFETY: `obj` is a live object of this heap.
+        let header = unsafe { &*obj.header() };
+        if header.payload == Payload::Slots {
+            for i in 0..header.len as usize {
+                // SAFETY: a slots payload holds `len` initialised values.
+                let value = unsafe { ptr::read(obj.slots().add(i)) };
+                if let Some(pointer) = value.as_heap() {
+                    let held = Obj(pointer.cast());
+                    // SAFETY: a heap value in a live slot is a live object.
+                    if unsafe { (*held.header()).class }.is_none() {
+                        visit(held);
+                    }
+                }
+            }
+        }
+        if let Some(storage) = self.side_storage(obj) {
+            visit(storage);
+        }
+    }
+
+    /// The side-table ivar storage of `obj`, if it has one.
+    fn side_storage(&self, obj: Obj) -> Option<Obj> {
+        // SAFETY: `obj` is a live object of this heap.
+        if unsafe { (*obj.header()).flags } & SIDE_IVARS == 0 {
+            return None;
+        }
+        let storage = self.heap.side_ivars.get(&(obj.0.as_ptr() as usize))?;
+        storage.as_heap().map(|pointer| Obj(pointer.cast()))
+    }
+
     /// Forget every handle past the first `len`, as dropping a nested scope
     /// would. The interpreter loop uses it between instructions, where no
     /// handle it took is still in use, and roots what its stack and frames
@@ -1990,6 +2167,69 @@ mod tests {
         let storage = scope.side_ivars(kept);
         let storage = scope.root(storage);
         assert_eq!(scope.slot(storage, 0), Value::TRUE);
+    }
+
+    /// What allocation tracing noted about an object goes with it, so a
+    /// later object in its cell is not reported as made where the dead one
+    /// was; and nothing is noted while tracing is off (#690).
+    #[test]
+    fn allocation_sites_go_with_their_object() {
+        let mut heap = Heap::new();
+        let mut scope = heap.scope();
+        let class = scope.alloc(None, Payload::Slots, 1);
+        let untraced = scope.alloc(Some(class), Payload::Slots, 1);
+        assert!(!scope.has_fresh_allocations());
+        scope.trace_allocations(true);
+        let kept = scope.alloc(Some(class), Payload::Slots, 1);
+        {
+            let mut inner = scope.nested();
+            inner.alloc(Some(class), Payload::Slots, 1);
+            // Classless: storage, which Ruby never asks about.
+            inner.alloc(None, Payload::Slots, 1);
+        }
+        let site = AllocationSite {
+            path: std::sync::Arc::from("a.rb"),
+            line: 3,
+            class: None,
+            method: None,
+            generation: 0,
+        };
+        scope.stamp_allocations(&site);
+        assert!(!scope.has_fresh_allocations());
+        assert_eq!(scope.heap.allocation_sites.len(), 2);
+        scope.trace_allocations(false);
+        scope.trace_allocations(false);
+        scope.collect();
+        assert_eq!(scope.heap.allocation_sites.len(), 1);
+        assert_eq!(scope.allocation_site(kept).map(|site| site.line), Some(3));
+        assert!(scope.allocation_site(untraced).is_none());
+        let reused = scope.alloc(Some(class), Payload::Slots, 1);
+        assert!(!scope.has_fresh_allocations());
+        assert!(scope.allocation_site(reused).is_none());
+    }
+
+    /// An object's size counts the classless storage it owns and not the
+    /// objects with a class it points at, and its references look through
+    /// that storage to what it holds (#690).
+    #[test]
+    fn memsize_and_references_look_through_storage() {
+        let mut heap = Heap::new();
+        let mut scope = heap.scope();
+        let class = scope.alloc(None, Payload::Slots, 1);
+        let held = scope.alloc(Some(class), Payload::Slots, 1);
+        let storage = scope.alloc(None, Payload::Slots, 20);
+        let value = scope.get(held);
+        scope.set_slot(storage, 3, value);
+        let owner = scope.alloc(Some(class), Payload::Slots, 2);
+        let storage = scope.get(storage);
+        scope.set_slot(owner, 0, storage);
+        scope.set_slot(owner, 1, value);
+        // 16 + 2 slots is a 32-byte cell, and 16 + 20 slots a 256-byte one.
+        assert_eq!(scope.memsize(owner), 32 + 256);
+        assert_eq!(scope.memsize(held), 32);
+        let class = scope.get(class);
+        assert_eq!(scope.references(owner, None), vec![class, value, value]);
+        assert_eq!(scope.references(owner, Some(0)), vec![class, value]);
     }
 
     /// A weak map lets go of an entry once either half is unreachable, keeps

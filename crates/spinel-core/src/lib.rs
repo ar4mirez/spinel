@@ -205,6 +205,11 @@ const LIBRARIES: &[(&str, &str)] = &[
     ("socket", include_str!("../../../lib/socket.rb")),
     ("date", include_str!("../../../lib/date.rb")),
     ("date_core", include_str!("../../../lib/date_core.rb")),
+    ("objspace", include_str!("../../../lib/objspace.rb")),
+    (
+        "objspace/trace",
+        include_str!("../../../lib/objspace/trace.rb"),
+    ),
 ];
 
 fn library(name: &str) -> Option<&'static str> {
