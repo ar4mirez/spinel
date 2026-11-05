@@ -770,9 +770,15 @@ class String
   # far as the start, and back from the match only as far as it, so a match
   # near the start of a long String costs what the search does (#617). A
   # character is at least a byte, so a start past the bytesize is past the end
-  # however big it is.
+  # however big it is. A start past a C long is a RangeError, as CRuby's
+  # `NUM2LONG` makes it (#640).
   def index(pattern, start = 0)
-    start = Integer.__index__(start)
+    start = Integer.__index__(start) unless start.is_a?(Integer)
+    # Within a fixnum it is a long; checked here rather than through
+    # `Integer.__c_long__`, which `bench/string_index.rb` measures.
+    unless start <= 4611686018427387903 && start >= -4611686018427387904
+      start = Integer.__c_long__(start)
+    end
     start += length if start < 0
     byte = start < 0 || start > bytesize ? nil : __char_byte__(start)
     if byte.nil?
@@ -795,7 +801,7 @@ class String
     if rest.empty?
       start = size
     else
-      start = Integer.__index__(rest[0])
+      start = Integer.__c_long__(rest[0])
       start += size if start < 0
       return nil if start < 0
       start = size if start > size
@@ -816,7 +822,12 @@ class String
   end
 
   def byteindex(pattern, start = 0)
-    start = Integer.__index__(start)
+    start = Integer.__index__(start) unless start.is_a?(Integer)
+    # Within a fixnum it is a long; checked here rather than through
+    # `Integer.__c_long__`, which `bench/string_index.rb` measures.
+    unless start <= 4611686018427387903 && start >= -4611686018427387904
+      start = Integer.__c_long__(start)
+    end
     start += bytesize if start < 0
     return nil if start < 0 || start > bytesize
     __check_char_boundary__(start)
@@ -834,7 +845,7 @@ class String
     if rest.empty?
       start = bytesize
     else
-      start = Integer.__index__(rest[0])
+      start = Integer.__c_long__(rest[0])
       start += bytesize if start < 0
       return nil if start < 0
       start = bytesize if start > bytesize

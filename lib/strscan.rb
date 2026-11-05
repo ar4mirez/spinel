@@ -249,7 +249,7 @@ class StringScanner
 
   def peek(length)
     __check__
-    length = IO.__c_long__(length)
+    length = Integer.__c_long__(length)
     raise ArgumentError, "negative string size (or size too big)" if length < 0
     return "".dup if eos?
     @string.byteslice(@curr, length)

@@ -555,6 +555,16 @@ class Integer
     converted
   end
 
+  # `NUM2LONG`: an index argument that fits in a C long, as CRuby converts one
+  # before it looks at it.
+  def self.__c_long__(value)
+    value = Integer.__index__(value)
+    if value > 9223372036854775807 || value < -9223372036854775808
+      raise RangeError, "bignum too big to convert into 'long'"
+    end
+    value
+  end
+
   # `rb_to_int`: an Integer, or what the object's `to_int` answers when that is
   # one. The message for a `to_int` that answers something else is CRuby 4.1's,
   # `into` where 4.0 said `to` (bugs.ruby-lang.org/issues/21864), which

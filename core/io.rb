@@ -255,14 +255,6 @@ class IO
     value
   end
 
-  def self.__c_long__(value)
-    value = Integer.__index__(value)
-    if value > 9223372036854775807 || value < -9223372036854775808
-      raise RangeError, "bignum too big to convert into 'long'"
-    end
-    value
-  end
-
   # A String argument: one, or what `to_str` makes of one.
   def self.__str__(value)
     return value if String === value
@@ -2434,7 +2426,7 @@ end
       separator, limit = args
     end
     separator = separator.to_str unless separator.nil? || String === separator
-    limit = IO.__c_long__(limit) unless limit.nil?
+    limit = Integer.__c_long__(limit) unless limit.nil?
     limit = nil if !limit.nil? && limit < 0
     __check_open__
     __check_separator__(separator)
@@ -3627,7 +3619,7 @@ end
   def seek(offset, whence = IO::SEEK_SET)
     __check_open__
     whence = __whence__(whence)
-    offset = IO.__c_long__(offset)
+    offset = Integer.__c_long__(offset)
     # What writes in progress have gathered is written, and bytes buffered are
     # given back, first, as CRuby's `flush_before_seek`, and the converters
     # with them, even if the seek then fails; with none, they stay. Measured.
@@ -3650,7 +3642,7 @@ end
     __check_open__
     raise IOError, "sysseek for buffered IO" unless @rbuf.empty? && !__chars_held__?
     warn("sysseek for buffered IO", uplevel: 1) if @wgathered&.any? { |text| !text.empty? }
-    IO.__check__(__fd_seek__(@fileno, IO.__c_long__(offset), __whence__(whence)), @path)[0]
+    IO.__check__(__fd_seek__(@fileno, Integer.__c_long__(offset), __whence__(whence)), @path)[0]
   end
 
   # `rewind` drops the read converter as CRuby's does, where `seek` drops it
