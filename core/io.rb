@@ -2348,7 +2348,16 @@ end
         # transcoder that comes first makes it (#626), and so does an `xml:`
         # charref (#675).
         bytes = __take__(@rbuf.bytesize)
-        out = if __replaces_past_cr__? && __universal_newline__? && (__replaces_invalid__? || @ecopts[:undef] == :replace || __xml_in__)
+        # One that opens the quote on a character with no spelling is the
+        # converter's to make, the replacement before the quote, as `gets`
+        # and `getc` do (#636, #657, #679). Measured.
+        if __opens_on_replacement__?(bytes, @rquote)
+          __stream_from__(bytes, @rquote)
+          bytes = __take__(@rbuf.bytesize)
+        end
+        out = if __stream_in__?
+          __decode__(bytes)
+        elsif __replaces_past_cr__? && __universal_newline__? && (__replaces_invalid__? || @ecopts[:undef] == :replace || __xml_in__)
           __decode__(bytes, bytes, true)
         else
           __newlines_in__(__decode__(bytes))
