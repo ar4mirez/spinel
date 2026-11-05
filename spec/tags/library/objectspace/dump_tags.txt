@@ -1,1 +1,1 @@
-fails(#36: ObjectSpace and finalizers: newly run since #43 let ruby_exe start Spinel, and it disagrees):ObjectSpace.dump dumps to stdout when passed output: :stdout
+fails(#690: objspace is not loadable yet, so the child spinel ruby_exe starts fails to require it):ObjectSpace.dump dumps to stdout when passed output: :stdout

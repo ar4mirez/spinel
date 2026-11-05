@@ -79,3 +79,26 @@ fn an_io_the_collector_frees_is_finalized() {
         "\"\\\"&lt;a\\\"\"\n\"\\\"\\x00a\\x00\\\"\\x00\"\n\"\\\"a\"\n\"\\\"x\"\n\"y\\\"\"\n\"\\e$B$\\\"$$\\e(B\"\n\"\\\"\\e$B$\\\"\\e(B\\\"\"\n\"a\\x00\"\n[\"kept\", \"reused\"]\n\"ok\"\n"
     );
 }
+
+/// `dup` and `clone` copy an object's finalizers (#36), but for `dup` of a
+/// bare String, as CRuby's `String#dup` skips `init_copy`; an IO's copy does
+/// not take the finalizer that closes the original's descriptor.
+#[test]
+fn copies_take_the_finalizers_of_the_original() {
+    let script =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/gc/copy_finalizers.rb");
+    let output = Command::new(SPINEL)
+        .arg("run")
+        .arg(&script)
+        .output()
+        .expect("spinel runs");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "[:object, :object]\n[:string]\n[]\n\"still open\"\n[:writer]\n"
+    );
+}

@@ -414,10 +414,14 @@ module Kernel
   # The copy is the primitive's; what it means for the class is
   # `initialize_copy`'s, which a program overrides — mspec's `ContextState`
   # drops its cached hook lists there, and a copy that skipped it ran one
-  # shared group's hooks for the next.
+  # shared group's hooks for the next. The finalizers come along before the
+  # hook runs, as CRuby's `init_copy` copies them (#36).
   def dup
     copy = __dup__
-    copy.__send__(:initialize_dup, self) unless copy.equal?(self)
+    unless copy.equal?(self)
+      __finalizer_copy__(self, copy, true)
+      copy.__send__(:initialize_dup, self)
+    end
     copy
   end
 
@@ -437,6 +441,7 @@ module Kernel
       return self
     end
     __reflect_copy_singleton__(self, copy)
+    __finalizer_copy__(self, copy, false)
     if freeze.nil?
       copy.__send__(:initialize_clone, self)
       copy.freeze if frozen?

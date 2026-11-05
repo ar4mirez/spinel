@@ -1043,6 +1043,9 @@ pub enum GcOp {
     FinalizerAdd,
     /// `__finalizer_remove__(object)`.
     FinalizerRemove,
+    /// `__finalizer_copy__(object, copy, dup)`: give `copy` the finalizers of
+    /// `object`, as `dup` and `clone` do.
+    FinalizerCopy,
     /// `__finalizer_take__(everything)`: `[id, [callable, ...], ...]`, flat.
     FinalizerTake,
     /// `__each_object__(module)`: every object that is a kind of `module`.

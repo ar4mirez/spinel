@@ -87,7 +87,14 @@ fix is a different slice. The reason says which slice, by number.
 
 ## What is here now
 
-Three hundred and forty-four tags across a hundred and fifty-seven files.
+Three hundred and five tags across a hundred and thirty-seven files; the
+count below it went stale over the slices since, which removed tags without
+saying so here. Copying an object's finalizers to its `dup` and `clone`
+(#36) removed eight, and their eight files: `Proc`, `Method`,
+`UnboundMethod` and `Binding` each asserting a finalizer runs once more for
+the copy. The same slice moved `library/objectspace`'s eight to #690, which
+is `require 'objspace'`, the extension the rest of #36 did not need. Before it,
+three hundred and forty-four across a hundred and fifty-seven files.
 Matching Ruby 4.0.8's `Set` (#365) moved six to #368 and changed nothing
 else: Spinel now keeps `compare_by_identity` there as 4.0.8 does, and the
 examples wait for a ruby/spec that asserts it. Before it,

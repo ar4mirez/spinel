@@ -1,1 +1,1 @@
-fails(#36: ObjectSpace and finalizers: newly run since #43 let ruby_exe start Spinel, and it disagrees):require "objspace/trace" shows object allocation sites
+fails(#690: objspace is not loadable yet, so the child spinel ruby_exe starts fails to require it):require "objspace/trace" shows object allocation sites
