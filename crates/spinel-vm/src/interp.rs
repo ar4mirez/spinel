@@ -1205,11 +1205,41 @@ fn incompatible_encodings(left: u8, right: u8) -> Error {
 
 /// The class-table reads and writes reflection is built on (#28). Every
 /// argument check and message is `core/module.rb`'s; these trust their input.
+/// The module `Module#const_get(name, inherit)` would read `name` from: the
+/// receiver's own table, then — when `inherit` — its ancestors', and then,
+/// for a module, which has no `Object` in its chain, `Object`'s:
+/// `Comparable.const_get(:String)` is String. Measured.
+fn const_get_owner(
+    classes: &crate::class::Classes,
+    module: ClassId,
+    name: SymbolId,
+    inherit: bool,
+) -> Option<ClassId> {
+    if classes.const_get_here(module, name).is_some() {
+        return Some(module);
+    }
+    if !inherit {
+        return None;
+    }
+    let found = classes
+        .ancestors(module)
+        .into_iter()
+        .find(|&ancestor| classes.const_get_here(ancestor, name).is_some());
+    if found.is_some() || classes.kind(module) != Kind::Module {
+        return found;
+    }
+    classes
+        .ancestors(Builtin::Object.id())
+        .into_iter()
+        .find(|&ancestor| classes.const_get_here(ancestor, name).is_some())
+}
+
 fn reflect_native(
     scope: &mut HandleScope<'_>,
     stack: &mut Stack,
     call: &Pending,
     op: ReflectOp,
+    position: Option<(Arc<str>, i32)>,
 ) -> Result<Option<Unwind>, Error> {
     let arg = |index: usize| call.args.get(index).copied().unwrap_or(Value::NIL);
     let module_arg = |scope: &mut HandleScope<'_>, index: usize| {
@@ -1240,36 +1270,46 @@ fn reflect_native(
                 return Ok(None);
             }
             let inherit = arg(2).is_truthy();
-            let mut found = scope.classes().const_get_here(module, name);
-            if found.is_none() && inherit {
-                // The ancestors, and then — for a module, which has no
-                // `Object` in its chain — `Object`'s: `Comparable.const_get
-                // (:String)` is String. Measured.
-                for ancestor in scope.classes().ancestors(module) {
-                    if let Some(value) = scope.classes().const_get_here(ancestor, name) {
-                        found = Some(value);
-                        break;
-                    }
-                }
-                if found.is_none() && scope.classes().kind(module) == Kind::Module {
-                    for ancestor in scope.classes().ancestors(Builtin::Object.id()) {
-                        if let Some(value) = scope.classes().const_get_here(ancestor, name) {
-                            found = Some(value);
-                            break;
-                        }
-                    }
-                }
-            }
+            let found = const_get_owner(scope.classes(), module, name, inherit)
+                .and_then(|owner| scope.classes().const_get_here(owner, name));
             match found {
                 Some(value) => new_array(scope, &[value]),
                 None => Value::NIL,
             }
         }
+        ReflectOp::ConstSource => {
+            let module = module_arg(scope, 0)?;
+            let name = symbol_arg(1)?;
+            let inherit = arg(2).is_truthy();
+            match const_get_owner(scope.classes(), module, name, inherit) {
+                None => Value::NIL,
+                Some(owner) => match scope.classes().const_location(owner, name) {
+                    None => new_array(scope, &[]),
+                    Some((path, line)) => {
+                        let path = string_new(scope, &path);
+                        let line = Value::fixnum(i64::from(line)).expect("a line is a fixnum");
+                        new_array(scope, &[path, line])
+                    }
+                },
+            }
+        }
+        ReflectOp::Subclasses => {
+            let class = module_arg(scope, 0)?;
+            let subclasses: Vec<Value> = scope
+                .classes()
+                .subclasses(class)
+                .into_iter()
+                .map(|id| scope.classes().object(id))
+                .collect();
+            new_array(scope, &subclasses)
+        }
         ReflectOp::ConstSet => {
             let module = module_arg(scope, 0)?;
             let name = symbol_arg(1)?;
             let value = arg(2);
-            scope.classes_mut().const_set(module, name, value);
+            scope
+                .classes_mut()
+                .const_set_at(module, name, value, position);
             // `m.const_set(:X, Module.new)` names the module, as `X = ...` would.
             name_if_anonymous(scope, module, name, value);
             value
@@ -3484,7 +3524,10 @@ fn run<'h>(
                         let value = stack.pop().expect("a value to assign");
                         let target = const_base(scope, &mut stack, cref, how)?;
                         let redefined = scope.classes().const_get_here(target, symbol).is_some();
-                        scope.classes_mut().const_set(target, symbol, value);
+                        let location = frame_position(&frames[top]);
+                        scope
+                            .classes_mut()
+                            .const_set_at(target, symbol, value, location);
                         // `Foo = Class.new` is how an anonymous class gets a name,
                         // and the only way one ever does. Only the first assignment
                         // names it: `A = Class.new; B = A` leaves both `"A"`.
@@ -3510,9 +3553,9 @@ fn run<'h>(
                         // frame is pushed last, so it runs first.
                         //
                         // ponytail: CRuby follows with "previous definition
-                        // of X was here", at the first assignment's line. A
-                        // constant does not record where it was assigned;
-                        // that is `const_source_location`'s table (#128).
+                        // of X was here", at the first assignment's line.
+                        // `Classes::const_location` now has that line; the
+                        // second warning is still to write.
                         if redefined {
                             let message = format!(
                                 "already initialized constant {}",
@@ -6372,7 +6415,8 @@ fn open_class<'h>(
             if def.scoped && scope.classes().const_is_private(cbase, name) {
                 return Err(uninitialized(scope, cbase, name, ConstScope::Qualified));
             }
-            define_or_reopen(scope, cbase, name, kind, superclass)?
+            let location = frame_position(&frames[top]);
+            define_or_reopen(scope, cbase, name, kind, superclass, location)?
         }
     };
 
@@ -6478,6 +6522,7 @@ fn define_or_reopen(
     name: SymbolId,
     kind: DefKind,
     superclass: Option<Value>,
+    location: Option<(Arc<str>, i32)>,
 ) -> Result<(ClassId, Hooks), Error> {
     let wanted = match superclass {
         None => None,
@@ -6544,7 +6589,9 @@ fn define_or_reopen(
         scope.singleton_class(id);
     }
     let object = scope.classes().object(id);
-    scope.classes_mut().const_set(cbase, name, object);
+    scope
+        .classes_mut()
+        .const_set_at(cbase, name, object, location);
     // The hooks a new definition owes (#28), in CRuby's order, measured:
     // `const_added` on the module it is named in — `class A::C` is a constant
     // assignment like any other — then, for a class, `inherited` on its
@@ -8655,6 +8702,28 @@ fn copy_module(scope: &mut HandleScope<'_>, from: ClassId) -> Result<Value, Erro
 /// the core library's: where a method written in `core/*.rb` on a program's
 /// behalf — `Kernel#method`, `Symbol#to_proc` — finds the refinements the
 /// program has active, as the C method it stands for would (#352).
+/// Where `frame` is running, as file and line, unless it is the core
+/// library's: what a constant it assigns remembers (#128). CRuby has no
+/// location for a constant its C defines, and the core library is that here.
+fn frame_position(frame: &Call) -> Option<(Arc<str>, i32)> {
+    if is_internal(&frame.iseq) {
+        return None;
+    }
+    let path = frame.iseq.path.clone()?;
+    let line = frame.iseq.line_at(frame.pc.saturating_sub(1))?;
+    Some((path, line))
+}
+
+/// [`frame_position`] for the innermost frame that is the program's: where
+/// it called the core method now running, as `Module#const_set`.
+fn program_position(frames: &[Call]) -> Option<(Arc<str>, i32)> {
+    frames
+        .iter()
+        .rev()
+        .find(|frame| !is_internal(&frame.iseq))
+        .and_then(frame_position)
+}
+
 fn program_cref(frames: &[Call]) -> Option<CrefId> {
     frames
         .iter()
@@ -10713,7 +10782,11 @@ fn native_call<'h>(
                 },
                 _ => call,
             };
-            reflect_native(scope, stack, &call, op)
+            let position = match op {
+                ReflectOp::ConstSet => program_position(frames),
+                _ => None,
+            };
+            reflect_native(scope, stack, &call, op, position)
         }
         Native::Str(op) => str_native(scope, stack, &call, op),
         Native::NumCompare => {
@@ -13936,6 +14009,16 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             Builtin::Kernel,
             &["__reflect_const_set__"],
             Native::Reflect(ReflectOp::ConstSet),
+        ),
+        (
+            Builtin::Kernel,
+            &["__reflect_const_source__"],
+            Native::Reflect(ReflectOp::ConstSource),
+        ),
+        (
+            Builtin::Kernel,
+            &["__reflect_subclasses__"],
+            Native::Reflect(ReflectOp::Subclasses),
         ),
         (
             Builtin::Kernel,

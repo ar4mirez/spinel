@@ -260,6 +260,7 @@ The package-manager.md, cli.md, test-runner.md and build.md designs. Slices as l
 ## Phase 7: Rails and reach
 
 - Rails prerequisites: `TracePoint` (`:class`, `:call`, `:return`, `:line`, `:raise`), `Module#const_source_location`, `Class#subclasses`, Ractor-safe class-level state from the main Ractor. *Check:* `zeitwerk` and `activesupport` test suites.
+- **Done for `Module#const_source_location` and `Class#subclasses` (#128):** each module's constant table now keeps where each constant was last assigned — `X = ...`, the `class` and `module` keywords on first definition, and `const_set` at the program's call — and `remove_const` drops it. The core library's constants have none, which Ruby answers as `[]`, as for a constant CRuby's C defines. An unresolved autoload answers where `autoload` was called until the file assigns the constant. `Class#subclasses` reads the `subclasses` edges the method cache already keeps, newest first, without singleton classes. Spec delta: `core/module/const_source_location_spec.rb` 6 → 42 of 42, `core/class/subclasses_spec.rb` 0 → 8 of 8.
 - `rails new` app boots on Spinel, `spinel test` runs its suite green with SQLite, then Postgres via the native `pg`. *Check:* fixture app in CI.
 - `nokogiri` Spinel-native gem on a Rust XML/HTML parser, because Rails' test helpers depend on it. *Check:* `rails-html-sanitizer` suite.
 - `spinel fmt` and `spinel lint` on `spinel_ast`. `spinel ruby install` for pinned Spinel versions. Windows.

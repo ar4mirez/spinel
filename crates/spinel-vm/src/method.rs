@@ -920,6 +920,12 @@ pub enum ReflectOp {
     ConstLookup,
     /// `(mod, name, value)` → value, naming an anonymous module it holds.
     ConstSet,
+    /// `(mod, name, inherit)` → `[path, line]` where the constant `ConstLookup`
+    /// would find was assigned, `[]` for one the program did not assign, or
+    /// nil when there is none (#128).
+    ConstSource,
+    /// `(class)` → its direct subclasses, newest first, singletons left out.
+    Subclasses,
     /// `(mod, inherit)` → the public constant names, definition order.
     ConstNames,
     /// `(mod, name)` → `[value]` removed, or nil.
