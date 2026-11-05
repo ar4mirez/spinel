@@ -14647,6 +14647,9 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         (Builtin::String, &["byteslice"], Native::StringByteSlice),
         (Builtin::String, &["<=>"], Native::StringCompare),
     ];
+    // Nothing is looked up until the module functions below, so the walks
+    // every definition here would start are held and done once per class.
+    scope.classes_mut().defer_invalidation();
     for (builtin, names, native) in table {
         let body = scope.definitions_mut().add(Definition::Native(*native));
         for name in *names {
@@ -14708,6 +14711,8 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             .classes_mut()
             .seal_operator(which, class, NEG_GUARD, symbol, body);
     }
+
+    scope.classes_mut().flush_invalidation();
 
     // The module functions (#161). `Kernel.private_instance_methods(false)` on
     // ruby 4.0.6 is where this list comes from, not from taste: each is a
