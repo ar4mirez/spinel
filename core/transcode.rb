@@ -138,8 +138,9 @@ class String
 
   # CRuby's `str_transcode0` to the same encoding, undecorated, with
   # `invalid: :replace`: `scrub`, whose `replace:` must suit the string —
-  # ASCII where a character can be a byte, or else in the string's own
-  # encoding — even a dummy's, which is then kept as it is. Measured.
+  # ASCII where a character can be a byte, as in every encoding but
+  # UTF-16BE/LE and UTF-32BE/LE (their dummies too), or else in the string's
+  # own encoding — even a dummy's, which is then kept as it is. Measured.
   # ponytail: CRuby asks only of a string whose coderange it has not found
   # clean, which this VM does not keep: a dummy's is taken as never found,
   # and another's as found where it is valid. The upgrade is keeping it.
@@ -148,7 +149,7 @@ class String
     encoding = text.encoding
     compatible =
       if replacement.encoding.ascii_compatible? && replacement.ascii_only?
-        !UNICODE_INDEXES.drop(1).include?(encoding.__index__)
+        !UNICODE_INDEXES[1, 4].include?(encoding.__index__)
       else
         replacement.encoding.equal?(encoding)
       end
