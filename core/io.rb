@@ -1848,8 +1848,9 @@ end
       rescue Encoding::InvalidByteSequenceError => error
         past += error.error_bytes.bytesize
       rescue Encoding::UndefinedConversionError
-        # One with no spelling raises on this read, the CR and the
-        # replacement dropped, and `pos` past it (#663). Measured.
+        # One with no spelling raises on this read, and `pos` past it
+        # drops the CR and the replacement, which the caller holds for the
+        # next read otherwise (#663, #673). Measured.
         # With `undef: :replace` it is replaced on this read instead, after
         # the one this read answers and ahead of the CR, after the
         # replacements of the bytes before it that make none, and the
