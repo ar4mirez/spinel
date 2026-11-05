@@ -1075,7 +1075,7 @@ end
     given.delete(:undef) if options[:undef] != :replace && @ecopts[:invalid] == :replace
     newlines = %i[newline universal_newline crlf_newline cr_newline lf_newline]
     kept = @ecopts.reject { |key, _| %i[replace fallback].include?(key) }
-    kept =kept.reject { |key, _| newlines.include?(key) } if newlines.any? { |key| !given[key].nil? }
+    kept = kept.reject { |key, _| newlines.include?(key) } if newlines.any? { |key| !given[key].nil? }
     xml = kept[:xml]
     given.each { |key, value| kept[key] = value unless value.nil? }
     if %i[text attr].include?(given[:xml]) && (xml.equal?(XML_BOTH) || (%i[text attr].include?(xml) && xml != given[:xml]))
