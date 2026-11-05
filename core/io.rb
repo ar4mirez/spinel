@@ -1788,8 +1788,37 @@ end
       again = error.readagain_bytes.to_s.bytesize
     end
     out = __decode__(__take__(broken))
+    again = __read_on__ unless __read_encoding__.ascii_compatible?
     @rpend = cr + __take__(again)
     out
+  end
+
+  # Into UTF-16 or UTF-32 the decorator comes after a transcoder into UTF-8,
+  # and the replacement goes in past it, so that transcoder reads on to hand
+  # the decorator the next whole character, what it reads again among it,
+  # past any bytes that make none, whose replacements go in past it too.
+  # `pos` is past them all, and drops them with the CR, unless they ended
+  # what was buffered, where CRuby's converter finished and so kept them
+  # (#645). Measured.
+  def __read_on__
+    enc = __encoding__
+    past = 0
+    loop do
+      nil while @rbuf.bytesize < past + 4 && __fill__(past + 4 - @rbuf.bytesize)
+      return past if @rbuf.bytesize <= past
+      window = @rbuf.byteslice(past, 4).force_encoding(enc)
+      char = window[0]
+      begin
+        (char.valid_encoding? ? char : window).encode(Encoding::UTF_8)
+        return past + char.bytesize
+      rescue Encoding::InvalidByteSequenceError => error
+        past += error.error_bytes.bytesize
+      rescue Encoding::UndefinedConversionError
+        # ponytail: one with no spelling raises on the next read, not this
+        # one as CRuby's does; upgrade by raising here (#663).
+        return past
+      end
+    end
   end
 
   # Whether a whole character has no spelling in the encoding reads answer
@@ -1805,7 +1834,9 @@ end
   # A line that a lone CR ends, where `__read_ahead__` replaced what came
   # past it: the replacement comes before the `"\n"`, and the CR it held
   # again is told from a CRLF as before, which a line reads on to (#626).
-  def __before_newline__(text, before, cr, unit)
+  # One whose replacement fills the limit, `room`, ends there, the CR still
+  # held, so a `pos` drops it and the byte after it is read next (#645).
+  def __before_newline__(text, before, cr, unit, room = nil)
     return text if before.nil?
     nl = "\n".encode(text.encoding).b
     text = text.b
@@ -1813,6 +1844,7 @@ end
     lf = "\n".encode(__encoding__).b
     loop do
       text << before.b
+      return text.force_encoding(__read_encoding__) if room && text.bytesize >= room && __read_encoding__.ascii_compatible?
       __unpend__
       __take__(cr.bytesize)
       nil while @rbuf.bytesize < lf.bytesize && __fill__(lf.bytesize - @rbuf.bytesize)
@@ -2516,7 +2548,7 @@ end
         @rbuf = taken.b + @rbuf
         line = __converted_line__(separator, wanted, limit, unit)
       elsif cr
-        line = __before_newline__(line, __read_ahead__(cr, unit), cr, unit)
+        line = __before_newline__(line, __read_ahead__(cr, unit), cr, unit, limit && limit > 0 ? limit : nil)
       end
     else
       bytes = __line_bytes__(wanted, limit, true)
@@ -2650,7 +2682,7 @@ end
           else
             made = __within_limit__(out, piece, bytes, taken, limit, enc) if piece && room && room > 0 && piece.bytesize > limit - out.bytesize
             piece, cr = made, nil if made
-            piece = __before_newline__(piece, __read_ahead__(cr, unit), cr, unit) if cr
+            piece = __before_newline__(piece, __read_ahead__(cr, unit), cr, unit, limit && limit > 0 ? limit - out.bytesize : nil) if cr
           end
         else
           bytes = __line_bytes__(wanted, room)
