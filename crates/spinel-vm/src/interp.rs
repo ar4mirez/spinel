@@ -9227,6 +9227,32 @@ fn new_array(scope: &mut HandleScope<'_>, elements: &[Value]) -> Value {
 // Primitives
 // ---------------------------------------------------------------------------
 
+/// Hand a call its primitive cannot finish to the Ruby method `name` on the
+/// same receiver, with the same arguments and block. What the primitive could
+/// not do is a send — `to_int`, `to_ary` — and a native cannot sequence one.
+fn forward_to_ruby<'h>(
+    scope: &mut HandleScope<'h>,
+    stack: &mut Stack,
+    frames: &mut Vec<Call>,
+    call: Pending,
+    name: &str,
+    proc_class: Handle<'h>,
+    ids: &mut u64,
+) -> Result<Option<Unwind>, Error> {
+    let forwarded = Pending {
+        cache: None,
+        name: crate::shared::symbols::intern(name),
+        implicit_self: true,
+        variable_call: false,
+        public_only: false,
+        target: Target::Method,
+        owner: None,
+        defined_as: None,
+        ..call
+    };
+    dispatch(scope, stack, frames, forwarded, proc_class, ids)
+}
+
 /// The operations Ruby cannot define in Ruby. See [`Native`].
 fn native_call<'h>(
     scope: &mut HandleScope<'h>,
@@ -9651,8 +9677,10 @@ fn native_call<'h>(
             // Slices are answered here since #21: `a[start, length]` and
             // `a[range]` with Integer (or nil) ends, CRuby's `rb_ary_subseq`
             // and `rb_range_component_beg_len` rule for rule. A Float index is
-            // truncated, as `Float#to_int` would. An index that needs a Ruby
-            // `to_int` still refuses: the native cannot send it.
+            // truncated, as `Float#to_int` would. Anything else — an object
+            // with `to_int`, a Range whose ends need one, an
+            // `Enumerator::ArithmeticSequence` — is Ruby's, in
+            // `Array#__aref_other__`.
             let slice = match call.args.as_slice() {
                 [start, count] => match (index_arg(*start), index_arg(*count)) {
                     (Some(start), Some(count)) => Some(subseq_bounds(start, count, length)),
@@ -9681,10 +9709,15 @@ fn native_call<'h>(
                 }
             };
             let Some(bounds) = slice else {
-                return Err(Error::NoDispatch {
-                    op: "Array#[]",
-                    operands: "an index that is not an Integer, Float or Range",
-                });
+                return forward_to_ruby(
+                    scope,
+                    stack,
+                    frames,
+                    call,
+                    "__aref_other__",
+                    proc_class,
+                    ids,
+                );
             };
             let value = match bounds {
                 Some((start, count)) => {
@@ -9712,10 +9745,15 @@ fn native_call<'h>(
                 ));
             }
             let Some(index) = call.args.first().and_then(|&v| index_arg(v)) else {
-                return Err(Error::NoDispatch {
-                    op: "Array#[]",
-                    operands: "an index that is not an Integer",
-                });
+                return forward_to_ruby(
+                    scope,
+                    stack,
+                    frames,
+                    call,
+                    "__at_other__",
+                    proc_class,
+                    ids,
+                );
             };
             let resolved = resolve_index(index, length);
             let value = match resolved {
@@ -9771,15 +9809,20 @@ fn native_call<'h>(
             };
             if let Some((start, count, value)) = splice {
                 // The replacement: an Array's elements, or the value itself as
-                // one element. Something with its own `to_ary` would need it
-                // called, which a native cannot.
+                // one element. Something with its own `to_ary` needs it called,
+                // which `Array#__aset_other__` does.
                 let replacement = match array_elements(scope, value) {
                     Some(elements) => elements,
                     None if defines_to_ary(scope, value) => {
-                        return Err(Error::NoDispatch {
-                            op: "Array#[]=",
-                            operands: "a replacement with its own `to_ary`",
-                        });
+                        return forward_to_ruby(
+                            scope,
+                            stack,
+                            frames,
+                            call,
+                            "__aset_other__",
+                            proc_class,
+                            ids,
+                        );
                     }
                     None => vec![value],
                 };
@@ -9793,10 +9836,15 @@ fn native_call<'h>(
                 _ => None,
             };
             let Some((index, value)) = assignment else {
-                return Err(Error::NoDispatch {
-                    op: "Array#[]=",
-                    operands: "an index that is not an Integer, Float or Range",
-                });
+                return forward_to_ruby(
+                    scope,
+                    stack,
+                    frames,
+                    call,
+                    "__aset_other__",
+                    proc_class,
+                    ids,
+                );
             };
             // A negative index past the front is an IndexError in Ruby, not a
             // silent write at zero. One past the end is not an error at all:
@@ -9849,10 +9897,15 @@ fn native_call<'h>(
                     ));
                 }
                 let Some(count) = index_arg(count) else {
-                    return Err(Error::NoDispatch {
-                        op: "Array#pop",
-                        operands: "a count that is not an Integer",
-                    });
+                    return forward_to_ruby(
+                        scope,
+                        stack,
+                        frames,
+                        call,
+                        "__pop_other__",
+                        proc_class,
+                        ids,
+                    );
                 };
                 if count < 0 {
                     return Err(Error::raise("ArgumentError", "negative array size"));
@@ -12561,11 +12614,18 @@ fn native_call<'h>(
                     operands: "a receiver that is not an Array",
                 });
             };
+            // Anything but an Array is converted with `to_ary`, a send, in
+            // `Array#__plus_other__`.
             let Some(right) = call.args.first().and_then(|&v| array_elements(scope, v)) else {
-                return Err(Error::raise(
-                    "TypeError",
-                    "no implicit conversion into Array",
-                ));
+                return forward_to_ruby(
+                    scope,
+                    stack,
+                    frames,
+                    call,
+                    "__plus_other__",
+                    proc_class,
+                    ids,
+                );
             };
             left.extend(right);
             let value = new_array(scope, &left);

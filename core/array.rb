@@ -23,20 +23,20 @@ class Array
     end
     size = given.size > 0 ? given[0] : 0
     default = given.size > 1 ? given[1] : nil
-    if size.is_a?(Array)
-      # `Array.new([1, 2], :x)` is a TypeError, not an arity error: the first
-      # argument was taken as a size and an Array is not one.
-      unless given.size < 2
-        raise TypeError, "no implicit conversion of Array into Integer"
+    # CRuby's `rb_ary_initialize`: a lone argument that converts with
+    # `to_ary` is copied. Otherwise it is a size, through `to_int`, which is
+    # why `Array.new([1, 2], :x)` is a TypeError rather than an arity error.
+    if given.size == 1 && !size.is_a?(Integer)
+      contents = Array.__check_array__(size)
+      unless contents.nil?
+        clear
+        contents.each { |element| push(element) }
+        return self
       end
-      clear
-      size.each { |element| push(element) }
-      return self
     end
-    unless size.is_a?(Integer)
-      raise TypeError, "no implicit conversion into Integer"
-    end
+    size = Array.__long__(size)
     raise ArgumentError, "negative array size" if size < 0
+    raise ArgumentError, "array size too big" if size > ARY_MAX_SIZE
     clear
     i = 0
     while i < size
@@ -48,6 +48,234 @@ class Array
 
   def <<(element)
     push(element)
+  end
+
+  # `ARY_MAX_SIZE`: the most elements CRuby's storage can address, one VALUE
+  # each in a `long` of bytes.
+  ARY_MAX_SIZE = 9223372036854775807 / 8
+  private_constant :ARY_MAX_SIZE
+
+  # `NUM2LONG`, which is how `array.c` reads every index and count: an
+  # Integer, a Float truncated, or anything with `to_int`, and in every case
+  # one that fits in a C long.
+  def self.__long__(value)
+    if value.is_a?(Float)
+      if value.nan? || value >= 9223372036854775808.0 || value < -9223372036854775808.0
+        raise RangeError, "float #{format("%-.10g", value)} out of range of integer"
+      end
+      return value.to_i
+    end
+    raise TypeError, "no implicit conversion from nil to integer" if value.nil?
+    value = Integer.__to_int__(value)
+    if value > 9223372036854775807 || value < -9223372036854775808
+      raise RangeError, "bignum too big to convert into 'long'"
+    end
+    value
+  end
+
+  # `rb_check_array_type`: an Array, what a `to_ary` answers (a private one
+  # counts), or nil when there is none or it declines. A `to_ary` that answers
+  # anything else is a TypeError naming both classes.
+  def self.__check_array__(value)
+    return value if value.is_a?(Array)
+    return nil unless value.respond_to?(:to_ary, true)
+    converted = value.__send__(:to_ary)
+    return converted if converted.nil? || converted.is_a?(Array)
+    raise TypeError, "can't convert " + value.class.to_s + " to Array (" +
+                     value.class.to_s + "#to_ary gives " + converted.class.to_s + ")"
+  end
+
+  # `rb_convert_type` to Array: like `__check_array__`, but there has to be
+  # an answer.
+  def self.__to_ary__(value)
+    converted = __check_array__(value)
+    return converted unless converted.nil?
+    if value.respond_to?(:to_ary, true)
+      raise TypeError, "can't convert " + value.class.to_s + " to Array (" +
+                       value.class.to_s + "#to_ary gives NilClass)"
+    end
+    shown = value.nil? || true.equal?(value) || false.equal?(value) ? value.inspect : value.class.to_s
+    raise TypeError, "no implicit conversion of " + shown + " into Array"
+  end
+
+  # The primitives `[]`, `at`, `[]=`, `pop` and `+` read Integers, Floats and
+  # Ranges of them, and Arrays. Any other argument is converted with a send,
+  # which a native cannot make, so they hand the call to these — which
+  # convert, then call the primitive again with what it reads. They reach it
+  # under its own name, so a subclass that overrides `[]` is not re-entered.
+  alias __aref__ []
+  alias __aset__ []=
+  alias __pop__ pop
+  alias __plus__ +
+
+  # `rb_ary_aref1` and `rb_ary_aref2`.
+  def __aref_other__(*given)
+    if given.size == 2
+      start = Array.__long__(given[0])
+      return __subseq__(start, Array.__long__(given[1]))
+    end
+    unless given.size == 1
+      raise ArgumentError, "wrong number of arguments (given #{given.size}, expected 1..2)"
+    end
+    span = __sequence_span__(given[0])
+    return nil if span.nil?
+    return __subseq_step__(span[0], span[1], span[2]) unless span == false
+    __entry__(Array.__long__(given[0]))
+  end
+
+  # `rb_ary_at`.
+  def __at_other__(index)
+    __entry__(Array.__long__(index))
+  end
+
+  # `rb_ary_entry`: one element by an index that fits a long, which may still
+  # be too far out to be an immediate the primitive reads.
+  def __entry__(index)
+    index += size if index < 0
+    index >= 0 && index < size ? __aref__(index) : nil
+  end
+
+  # `rb_ary_subseq`, after `rb_ary_aref2` has counted a negative start from
+  # the end.
+  def __subseq__(start, count)
+    start += size if start < 0
+    return nil if start < 0 || start > size || count < 0
+    count = size - start if count > size - start
+    __aref__(start, count)
+  end
+
+  # `rb_arithmetic_sequence_beg_len_step` for a read: `[start, count, step]`
+  # for a Range or an `Enumerator::ArithmeticSequence`, nil when it starts
+  # outside, false when the index is neither. A step other than 1 or -1 may
+  # not reach past the end, which is a RangeError naming the sequence.
+  def __sequence_span__(index)
+    if index.is_a?(Enumerator::ArithmeticSequence)
+      first = index.begin
+      last = index.end
+      exclusive = index.exclude_end?
+      step = index.step.nil? ? 1 : Array.__long__(index.step)
+    elsif index.is_a?(Range)
+      first = index.begin
+      last = index.end
+      exclusive = index.exclude_end?
+      step = 1
+    else
+      return false
+    end
+    if step < 0
+      # The excluded end is excluded before the ends swap, so it is the
+      # start, not the finish, that moves.
+      if exclusive && !last.nil?
+        last = Array.__long__(last) + 1
+        exclusive = false
+      end
+      first, last = last, first
+    end
+    unless step < -1 || step > 1
+      span = __range_span__(first, last, exclusive, false)
+      return span && [span[0], span[1], step]
+    end
+    span = __range_span__(first, last, exclusive, true)
+    if span.nil? || span[0] > size || span[1] > size
+      raise RangeError, "#{index.inspect} out of range"
+    end
+    [span[0], span[1], step]
+  end
+
+  # `rb_range_component_beg_len`: the start and count a range's ends select,
+  # nil when it starts before the front. A read (`strict` false) is also nil
+  # past the end and is clamped to it; a write or a stepped read is neither.
+  def __range_span__(first, last, exclusive, strict)
+    start = first.nil? ? 0 : Array.__long__(first)
+    stop = last.nil? ? -1 : Array.__long__(last)
+    exclusive = false if last.nil?
+    if start < 0
+      start += size
+      return nil if start < 0
+    end
+    stop += size if stop < 0
+    stop += 1 unless exclusive
+    unless strict
+      return nil if start > size
+      stop = size if stop > size
+    end
+    count = stop - start
+    [start, count < 0 ? 0 : count]
+  end
+
+  # `rb_ary_subseq_step`: every `step`th element of the window, from its
+  # front for a positive step and from its back for a negative one.
+  def __subseq_step__(start, count, step)
+    return nil if start > size || start < 0 || count < 0
+    count = size - start if size < count || size < start + count
+    return [] if count == 0
+    raise ArgumentError, "slice step cannot be zero" if step == 0
+    return __aref__(start, count) if step == 1
+    return [__aref__(start)] if step > 0 && step >= count
+    step = -count if step < -count
+    stride = step < 0 ? -step : step
+    taken = (count + stride - 1) / stride
+    at = step > 0 ? start : start + count - 1
+    out = []
+    while out.size < taken
+      out.push(__aref__(at))
+      at += step
+    end
+    out
+  end
+
+  # `rb_ary_aset`: the indexes converted first, then the replacement of a
+  # splice with `to_ary`.
+  def __aset_other__(*given)
+    unless given.size == 2 || given.size == 3
+      raise ArgumentError, "wrong number of arguments (given #{given.size}, expected 2..3)"
+    end
+    __check_frozen__
+    value = given[-1]
+    if given.size == 3
+      start = Array.__long__(given[0])
+      count = Array.__long__(given[1])
+    elsif given[0].is_a?(Range)
+      range = given[0]
+      span = __range_span__(range.begin, range.end, range.exclude_end?, true)
+      raise RangeError, "#{range.inspect} out of range" if span.nil?
+      start, count = span
+    else
+      __aset__(__store_index__(Array.__long__(given[0])), value)
+      return value
+    end
+    replacement = Array.__check_array__(value) || [value]
+    raise IndexError, "negative length (#{count})" if count < 0
+    start = __store_index__(start)
+    # Past the end a splice keeps nothing of what it covers, so a count
+    # larger than the array is the array's size.
+    __aset__(start, count > size ? size : count, replacement)
+    value
+  end
+
+  # `rb_ary_store`'s bounds: a negative index counts from the end, and may not
+  # pass the front; one past `ARY_MAX_SIZE` is too big to grow to.
+  def __store_index__(index)
+    if index < 0
+      at = index + size
+      raise IndexError, "index #{index} too small for array; minimum: -#{size}" if at < 0
+      return at
+    end
+    raise IndexError, "index #{index} too big" if index >= ARY_MAX_SIZE
+    index
+  end
+
+  # `rb_ary_pop_m`.
+  def __pop_other__(count)
+    __check_frozen__
+    count = Array.__long__(count)
+    raise ArgumentError, "negative array size" if count < 0
+    __pop__(count > size ? size : count)
+  end
+
+  # `rb_ary_plus`.
+  def __plus_other__(other)
+    __plus__(Array.__to_ary__(other))
   end
 
   def empty?
@@ -92,17 +320,8 @@ class Array
   # is *not* spread, it becomes the single value. Anything without `to_ary` is
   # wrapped, which is why `a, b = nil` leaves both nil rather than raising.
   def self.__masgn_array__(value)
-    return value if value.is_a?(Array)
     # A private `to_ary` counts, and one that answers nil declines.
-    if value.respond_to?(:to_ary, true)
-      spread = value.__send__(:to_ary)
-      return spread if spread.is_a?(Array)
-      unless spread.nil?
-        raise TypeError, "can't convert " + value.class.to_s + " to Array (" +
-                         value.class.to_s + "#to_ary gives " + spread.class.to_s + ")"
-      end
-    end
-    [value]
+    __check_array__(value) || [value]
   end
 
   # Cut this array into one value per assignment target (#154).
