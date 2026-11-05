@@ -1753,7 +1753,7 @@ end
       if __replaces_past_cr__? && __undefined_in__?(@rbuf.byteslice(0, unit))
         # Into UTF-16 or UTF-32 the transcoder reads on past it as past
         # bytes that make none (#677). Measured.
-        return __replaced_past_cr__(cr, unit) unless __read_encoding__.ascii_compatible?
+        return __replaced_past_cr__(cr, unit) if @ecopts[:undef] == :replace && !__read_encoding__.ascii_compatible?
         out = __decode__(__take__(unit))
         @rpend = cr
         return out
