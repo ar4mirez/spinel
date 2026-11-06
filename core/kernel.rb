@@ -156,6 +156,16 @@ module Kernel
     end
   end
 
+  # Whether `__check_funcall__` on an instance of `klass` would find nothing to
+  # call and ask nothing on the way: no `name`, and no `respond_to?`,
+  # `respond_to_missing?` or `method_missing` of its own.
+  def self.__funcall_plain__?(klass, name)
+    !klass.method_defined?(name) && !klass.private_method_defined?(name) &&
+      !__overrides__?(klass, :respond_to?, Kernel) &&
+      !__overrides__?(klass, :respond_to_missing?, Kernel) &&
+      !__overrides__?(klass, :method_missing, BasicObject)
+  end
+
   # Whether `klass` has a `name`, whatever its visibility, other than `basic`'s.
   def self.__overrides__?(klass, name, basic)
     return false unless klass.method_defined?(name) || klass.private_method_defined?(name)
@@ -392,6 +402,33 @@ module Kernel
       raise FrozenError.new("can't modify frozen #{object.class}: #{object.inspect}", receiver: object)
     end
     __thaw__(object)
+  end
+
+  # `send`, `__send__` and `public_send` (`method`) with a name that is
+  # neither a Symbol nor a String: the VM hands the call here, and the name is
+  # converted as `rb_check_id` converts it — `to_str`, or a TypeError naming it
+  # by `inspect` — before the send is made again. CRuby raises that TypeError
+  # from the C method, so its backtrace starts at `Kernel#public_send`, not
+  # here. Measured.
+  def self.__send_name__(receiver, method, name, *args, **keywords, &block)
+    unless name.is_a?(Symbol) || name.is_a?(String)
+      converted = name.respond_to?(:to_str) ? name.to_str : nil
+      unless converted.is_a?(String)
+        error = TypeError.new("#{name.inspect} is not a symbol nor a string")
+        begin
+          raise error
+        rescue TypeError
+          error.__relabel_top__(method == :__send__ ? "BasicObject#__send__" : "Kernel##{method}")
+          raise
+        end
+      end
+      name = converted
+    end
+    if method == :public_send
+      receiver.public_send(name, *args, **keywords, &block)
+    else
+      receiver.__send__(name, *args, **keywords, &block)
+    end
   end
 
   # A chilled String (#263) — a literal in a file with no

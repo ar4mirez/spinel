@@ -195,6 +195,7 @@ n = 1; l = -> { n }; n = 2; l.call  #=> 2
 def s1(a); a * 2; end; send(:s1, 4)  #=> 8
 def s1(a); a * 2; end; __send__(:s1, 5)  #=> 10
 def sb; yield 2; end; send(:sb) { |a| a + 1 }  #=> 3
+o = Object.new; def o.hi(*a, k: 0); [a, k, block_given?]; end; n = Object.new; def n.to_str; "hi"; end; [o.send(n, 1, k: 2) { }, o.public_send(n), (o.send(nil) rescue [$!.class, $!.message]), (o.public_send(1.5) rescue $!.message), (o.__send__(:hi.to_proc) rescue $!.class)]  #=> [[[1], 2, true], [[], 0, false], [TypeError, "nil is not a symbol nor a string"], "1.5 is not a symbol nor a string", TypeError]
 def y2; yield 1, 2; end; y2 { [_1, _2] }  #=> [1, 2]
 def y1; yield 7; end; y1 { it }  #=> 7
 def y1; yield 7; end; y1 { |it| it }  #=> 7
