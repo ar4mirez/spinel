@@ -736,8 +736,6 @@ class Array
     raise FrozenError.new("can't modify frozen Array: " + inspect, receiver: self) if frozen?
   end
 
-  # `rb_ary_concat_multi`: every argument through `to_ary`, and with more than
-  # one they are joined first, so `a.concat(a, a)` appends `a` as it was.
   # `rb_ary_to_h`, which is not Enumerable's: each pair through `to_ary`, and
   # the errors name the index.
   def to_h
@@ -760,6 +758,8 @@ class Array
     out
   end
 
+  # `rb_ary_concat_multi`: every argument through `to_ary`, and with more than
+  # one they are joined first, so `a.concat(a, a)` appends `a` as it was.
   def concat(*others)
     __check_frozen__
     if others.size == 1

@@ -9314,8 +9314,9 @@ fn native_call<'h>(
                 // TypeError naming it by `inspect`: sends this primitive
                 // cannot make, so `Kernel.__send_name__` makes them and
                 // sends again with the name it answers.
-                let mut forwarded_args = Vec::with_capacity(args.len() + 3);
+                let mut forwarded_args = Vec::with_capacity(args.len() + 4);
                 forwarded_args.push(call.receiver);
+                forwarded_args.push(if public_only { Value::TRUE } else { Value::FALSE });
                 forwarded_args.push(Value::symbol(call.name));
                 forwarded_args.push(name);
                 forwarded_args.extend_from_slice(&args);

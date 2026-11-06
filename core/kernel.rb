@@ -404,27 +404,36 @@ module Kernel
     __thaw__(object)
   end
 
-  # `send`, `__send__` and `public_send` (`method`) with a name that is
-  # neither a Symbol nor a String: the VM hands the call here, and the name is
-  # converted as `rb_check_id` converts it — `to_str`, or a TypeError naming it
-  # by `inspect` — before the send is made again. CRuby raises that TypeError
-  # from the C method, so its backtrace starts at `Kernel#public_send`, not
-  # here. Measured.
-  def self.__send_name__(receiver, method, name, *args, **keywords, &block)
-    unless name.is_a?(Symbol) || name.is_a?(String)
-      converted = name.respond_to?(:to_str) ? name.to_str : nil
-      unless converted.is_a?(String)
-        error = TypeError.new("#{name.inspect} is not a symbol nor a string")
+  # `send`, `__send__` and `public_send` with a name that is neither a Symbol
+  # nor a String: the VM hands the call here, with whether it was
+  # `public_send` and the name it was called by, and the name is converted as
+  # `rb_check_id` converts it — `to_str` as `rb_check_funcall` reads it, or a
+  # TypeError naming it by `inspect` — before the send is made again. CRuby
+  # raises that TypeError from the C method, so its backtrace starts at
+  # `Kernel#public_send`, not here. Measured.
+  def self.__send_name__(receiver, public_only, method, name, *args, **keywords, &block)
+    unless Symbol === name || String === name
+      converted = Kernel.__check_funcall__(name, :to_str) { nil }
+      unless String === converted
+        shown = Kernel === name ? name.inspect : "#<" + Kernel.__class_of__(name).to_s + ">"
+        error = TypeError.new(shown + " is not a symbol nor a string")
         begin
           raise error
         rescue TypeError
-          error.__relabel_top__(method == :__send__ ? "BasicObject#__send__" : "Kernel##{method}")
+          label = if public_only
+                    "Kernel#public_send"
+                  elsif method == :__send__
+                    "BasicObject#__send__"
+                  else
+                    "Kernel#send"
+                  end
+          error.__relabel_top__(label)
           raise
         end
       end
       name = converted
     end
-    if method == :public_send
+    if public_only
       receiver.public_send(name, *args, **keywords, &block)
     else
       receiver.__send__(name, *args, **keywords, &block)
