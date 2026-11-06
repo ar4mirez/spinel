@@ -409,7 +409,7 @@ impl Program {
         };
         let caps = (0..=self.groups)
             .map(|g| match (saves[g * 2], saves[g * 2 + 1]) {
-                (Some(s), Some(e)) => Some((s, e)),
+                (Some(s), Some(e)) => Some((s.min(e), e)),
                 _ => None,
             })
             .collect();

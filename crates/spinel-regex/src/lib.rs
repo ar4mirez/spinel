@@ -930,6 +930,23 @@ mod tests {
         }
         // Level 0 is the only level there is without recursion.
         assert_eq!(find("(?<a>a)\\k<a+0>", "aa"), Some((0, 2)));
+        assert_eq!(find("(a)\\k<1+0>", "aa"), Some((0, 2)));
+        assert_eq!(find("(a)\\k<-1+0>", "aa"), Some((0, 2)));
+        assert_eq!(find("(a)(?(<1+0>)a|b)", "aa"), Some((0, 2)));
+        assert_eq!(find("(a)(?(<-1+0>)a|b)", "aa"), Some((0, 2)));
+        for level in ["(a)\\k<1+1>", "(a)\\k<-1+1>", "(a)(?(<1+1>)a|b)"] {
+            assert!(
+                matches!(
+                    Regex::new(level, Flags::default()),
+                    Err(Error::Unsupported(_))
+                ),
+                "{level}"
+            );
+        }
+        assert!(matches!(
+            Regex::new("(a)(?(<3+0>)a|b)", Flags::default()),
+            Err(Error::Syntax(_))
+        ));
     }
 
     #[test]
@@ -960,6 +977,9 @@ mod tests {
     fn keep_moves_the_start_of_the_match() {
         assert_eq!(find("a\\Kb", "xab"), Some((2, 3)));
         assert_eq!(find("a\\K", "ab"), Some((1, 1)));
+        // A `\\K` inside a lookahead lands past the end; the start stops there.
+        assert_eq!(find("a(?=b\\K)", "ab"), Some((1, 1)));
+        assert_eq!(find("(?=a\\K)", "a"), Some((0, 0)));
     }
 
     #[test]

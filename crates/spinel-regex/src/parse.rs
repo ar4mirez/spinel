@@ -730,9 +730,7 @@ impl Parser {
                 let close = if open == '<' { '>' } else { '\'' };
                 let name = self.delimited_name(close).ok_or_else(invalid)?;
                 let group = self.reference(&name)?;
-                if name.parse::<usize>().is_ok() {
-                    self.conditioned = self.conditioned.max(group);
-                }
+                self.conditioned = self.conditioned.max(group);
                 group
             }
             Some(c) if c.is_ascii_digit() => {
@@ -779,13 +777,29 @@ impl Parser {
 
     /// The group a `\k<...>` or a `(?(<...>)...)` names: a number, a number
     /// relative to the groups opened so far (`-1` is the last one), or a name,
-    /// optionally with a recursion level (`name+0`). Messages are Onigmo's.
+    /// any of them optionally with a recursion level (`name+0`, `1+0`). Messages are Onigmo's.
     fn reference(&mut self, name: &str) -> Result<usize, Error> {
         let invalid_name = || Error::Syntax(format!("invalid group name <{name}>"));
         let undefined = |base: &str| Error::Syntax(format!("undefined name <{base}> reference"));
         // Before the number, which Rust would read `+1` as.
         if name.starts_with('+') {
             return Err(undefined(name));
+        }
+        // `name+1` or `name-1`: a capture at a recursion level. A `+` or `-`
+        // not followed by a level is no name at all, even when a group is
+        // called exactly that — `(?<a+>a)` is legal and `\k<a+>` is not.
+        if let Some(at) = name.rfind(['+', '-']).filter(|&at| at > 0) {
+            let (base, level) = (&name[..at], &name[at + 1..]);
+            let Ok(level) = level.parse::<usize>() else {
+                return Err(invalid_name());
+            };
+            let group = self.reference(base)?;
+            // Level 0 is the current level, which without recursion is every
+            // capture there is.
+            if level != 0 {
+                return Err(Error::Unsupported("a \\k<> level specifier"));
+            }
+            return Ok(group);
         }
         if let Ok(n) = name.parse::<usize>() {
             // `\k<0>` names the whole match rather than a group, and Ruby
@@ -806,22 +820,6 @@ impl Parser {
             }
             self.numeric_backref = true;
             return Ok(self.groups + 1 - n);
-        }
-        // `name+1` or `name-1`: a capture at a recursion level. A `+` or `-`
-        // not followed by a level is no name at all, even when a group is
-        // called exactly that — `(?<a+>a)` is legal and `\k<a+>` is not.
-        if let Some(at) = name.rfind(['+', '-']) {
-            let (base, level) = (&name[..at], &name[at + 1..]);
-            let Ok(level) = level.parse::<usize>() else {
-                return Err(invalid_name());
-            };
-            let group = *self.name_index.get(base).ok_or_else(|| undefined(base))?;
-            // Level 0 is the current level, which without recursion is every
-            // capture there is.
-            if level != 0 {
-                return Err(Error::Unsupported("a \\k<> level specifier"));
-            }
-            return Ok(group);
         }
         self.name_index
             .get(name)
