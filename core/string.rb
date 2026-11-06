@@ -412,6 +412,14 @@ class String
     __force_encoding__(combined.__index__)
   end
 
+  # `rb_obj_as_string` and then `<<`: what `Array#inspect` appends an
+  # element's `inspect` with. A String whose bytes go on as they are is the
+  # native's; this is the rest.
+  def __append_as_string_rest__(other)
+    other = Array.__as_string__(other.to_s, other) unless String === other
+    __append__(other)
+  end
+
   def concat(*others)
     __modify__
     # Each argument as it was before any was appended: `s.concat(s, s)`

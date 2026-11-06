@@ -317,7 +317,13 @@ class Array
         raise TypeError, "can't convert to Integer"
       end
     end
-    raise ArgumentError, "negative array size" if count < 0
+    # `NUM2LONG` comes before the sign check, so a negative Bignum is a
+    # RangeError too. Only a count past the end can be one that is too big.
+    if count < 0
+      raise RangeError, "bignum too big to convert into 'long'" if count < -9223372036854775808
+      raise ArgumentError, "negative array size"
+    end
+    raise RangeError, "bignum too big to convert into 'long'" if count > size && count > 9223372036854775807
     count
   end
 
@@ -570,9 +576,13 @@ class Array
   # and two arrays that agree as far as the shorter one goes are ordered by size.
   # `nil` when the operand is not an array, or when any pair is not comparable —
   # `[1] <=> [:a]` is nil, not an error, because `<=>` reports "no opinion"
-  # rather than raising. Measured on ruby 4.0.6.
+  # rather than raising. Measured on ruby 4.0.6. An operand that is not an
+  # Array is converted as `rb_check_array_type` converts it.
   def <=>(other)
-    return nil unless other.is_a?(Array)
+    unless other.is_a?(Array)
+      other = Array.__check_array__(other)
+      return nil if other.nil?
+    end
     return 0 if equal?(other)
     shorter = size < other.size ? size : other.size
     i = 0
@@ -782,6 +792,9 @@ class Array
       __warning__("$, is set to non-nil value", false, :deprecated)
       separator = $,
     end
+    # An empty Array answers before the separator is converted, as
+    # `rb_ary_join` does.
+    return "".b.__force_encoding__(2) if empty?
     separator = String.__coerce__(separator) unless separator.nil?
     out = "".b.__force_encoding__(2)
     __join_into__(out, separator, [], [true])
@@ -796,15 +809,31 @@ class Array
     seen.push(self)
     i = 0
     while i < size
-      out << separator if i > 0 && !separator.nil?
-      item = self[i]
-      if item.is_a?(Array)
-        item.__join_into__(out, separator, seen, first)
-      elsif !item.is_a?(String) && !item.respond_to?(:to_str) && item.respond_to?(:to_ary) &&
-            (converted = item.to_ary).is_a?(Array)
-        converted.__join_into__(out, separator, seen, first)
-      else
-        part = item.is_a?(String) ? item : (item.respond_to?(:to_str) ? item.to_str : item.to_s)
+      out << separator if separator && i > 0
+      # `ary_join_1`'s order: a String, an Array, then `to_str`, `to_ary`
+      # and `to_s`, where a conversion that answers nil declines and the
+      # next one is tried. Each test is a send, so an Integer takes no more
+      # of them than it must.
+      part = self[i]
+      unless part.is_a?(String)
+        item = part
+        part = nil
+        if item.is_a?(Array)
+          item.__join_into__(out, separator, seen, first)
+        else
+          part = Array.__join_str__(item) if item.respond_to?(:to_str)
+          unless part
+            nested = item.respond_to?(:to_ary) ? Array.__join_ary__(item) : nil
+            if nested
+              nested.__join_into__(out, separator, seen, first)
+            else
+              part = item.to_s
+              part = Array.__as_string__(part, item) unless part.is_a?(String)
+            end
+          end
+        end
+      end
+      if part
         if first[0]
           out.__force_encoding__(part.__encoding_index__)
           first[0] = false
@@ -816,22 +845,45 @@ class Array
     seen.pop
   end
 
+  # `join`'s `rb_check_string_type` and `rb_check_array_type` on an element
+  # that has the method: the String or Array it answers, or nil to decline.
+  def self.__join_str__(item)
+    part = item.to_str
+    return part if nil.equal?(part) || part.is_a?(String)
+    raise TypeError, "can't convert #{item.class} to String (#{item.class}#to_str gives #{part.class})"
+  end
+
+  def self.__join_ary__(item)
+    nested = item.to_ary
+    return nested if nil.equal?(nested) || nested.is_a?(Array)
+    __to_ary_failed__(item, nested)
+  end
+
+  # `rb_obj_as_string_result`: what a `to_s` answered if it is a String, and
+  # `Kernel#to_s` if it is not.
+  def self.__as_string__(answer, object)
+    return answer if String === answer
+    Kernel.instance_method(:to_s).bind_call(object)
+  end
+
   # In the first element's `inspect` encoding, negotiating as it appends; an
   # empty Array is US-ASCII, and one that holds itself shows `[...]` there.
   # Measured.
   def inspect
     return "[]".b.__force_encoding__(2) if empty?
     Kernel.__inspect_guard__(self, "[...]") do
-      out = "[".b.__force_encoding__(2)
-      i = 0
+      # `rb_inspect`'s `rb_obj_as_string`: an `inspect` that answers
+      # something else is sent `to_s`. The first element is taken out of the
+      # loop, so the others pay for no test of which one they are, and
+      # `__append_as_string__` tests theirs in the native.
+      part = self[0].inspect
+      part = Array.__as_string__(part.to_s, part) unless String === part
+      out = "[".b.__force_encoding__(part.__encoding_index__)
+      out << part
+      i = 1
       while i < size
-        part = self[i].inspect
-        if i == 0
-          out.__force_encoding__(part.__encoding_index__)
-        else
-          out << ", "
-        end
-        out << part
+        out << ", "
+        out.__append_as_string__(self[i].inspect)
         i += 1
       end
       out << "]"
@@ -1164,14 +1216,16 @@ class Array
       end
     else
       unless bounds.empty? || bounds[0].nil?
-        start = __count_like__(bounds[0])
+        start = Array.__long__(bounds[0])
         start = start + size if start < 0
         start = 0 if start < 0
       end
-      count = __count_like__(bounds[1]) if bounds.size > 1 && !bounds[1].nil?
+      count = Array.__long__(bounds[1]) if bounds.size > 1 && !bounds[1].nil?
       count = size - start if count.nil?
     end
-    return self if count <= 0
+    return self if count < 0
+    # `rb_ary_fill`'s guard: the end has to be addressable.
+    raise ArgumentError, "argument too big" if start >= ARY_MAX_SIZE || count > ARY_MAX_SIZE - start
     i = start
     stop = start + count
     while i < stop
@@ -1226,7 +1280,8 @@ class Array
     index = __count_like__(given[0])
     at = index < 0 ? index + size : index
     return self[at] if at >= 0 && at < size
-    return yield(index) if block_given?
+    # The block gets the argument as given, not its `to_int`.
+    return yield(given[0]) if block_given?
     return given[1] if given.size == 2
     raise IndexError, "index #{index} outside of array bounds: #{-size}...#{size}"
   end
@@ -1730,6 +1785,17 @@ class Array
   # without one, all of them as an Array.
   def product(*others, &block)
     lists = [dup] + others.map { |other| Array.__to_ary__(other).dup }
+    # `rb_ary_product`'s guard on the result it would build: its length has
+    # to fit in a C long, unless a list met on the way there is empty. With
+    # a block there is no result, and CRuby yields however many there are.
+    if block.nil?
+      length = 1
+      lists.each do |list|
+        break if list.empty?
+        raise RangeError, "too big to product" if length * list.size > 9223372036854775807
+        length *= list.size
+      end
+    end
     out = block.nil? ? [] : nil
     __product_into__(lists, 0, [], out, block)
     block.nil? ? out : self
