@@ -8,8 +8,8 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 |---|---:|---:|---:|---:|---:|---:|---:|
 | `command_line` | 32 | 175 | 168 | 0 | 0 | 7 | 96% |
 | `core/argf` | 35 | 139 | 0 | 0 | 120 | 19 | 0% |
-| `core/array` | 132 | 2898 | 2838 | 0 | 46 | 14 | 98% |
-| `core/basicobject` | 14 | 172 | 165 | 0 | 7 | 0 | 96% |
+| `core/array` | 132 | 2898 | 2866 | 0 | 21 | 11 | 99% |
+| `core/basicobject` | 14 | 172 | 166 | 0 | 6 | 0 | 97% |
 | `core/binding` | 12 | 98 | 98 | 0 | 0 | 0 | 100% |
 | `core/builtin_constants` | 1 | 27 | 17 | 0 | 10 | 0 | 63% |
 | `core/class` | 8 | 54 | 54 | 0 | 0 | 0 | 100% |
@@ -19,7 +19,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/data` | 13 | 88 | 88 | 0 | 0 | 0 | 100% |
 | `core/dir` | 34 | 333 | 270 | 0 | 37 | 26 | 81% |
 | `core/encoding` | 45 | 636 | 625 | 0 | 11 | 0 | 98% |
-| `core/enumerable` | 61 | 536 | 523 | 0 | 10 | 3 | 98% |
+| `core/enumerable` | 61 | 536 | 527 | 0 | 6 | 3 | 98% |
 | `core/enumerator` | 73 | 431 | 431 | 0 | 0 | 0 | 100% |
 | `core/env` | 45 | 193 | 127 | 0 | 65 | 1 | 66% |
 | `core/exception` | 39 | 250 | 243 | 0 | 5 | 2 | 97% |
@@ -32,7 +32,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/hash` | 69 | 562 | 530 | 0 | 29 | 3 | 94% |
 | `core/integer` | 70 | 598 | 598 | 0 | 0 | 0 | 100% |
 | `core/io` | 103 | 1631 | 1420 | 0 | 205 | 6 | 87% |
-| `core/kernel` | 118 | 2241 | 2053 | 0 | 145 | 43 | 92% |
+| `core/kernel` | 118 | 2241 | 2056 | 0 | 142 | 43 | 92% |
 | `core/main` | 7 | 27 | 25 | 0 | 2 | 0 | 93% |
 | `core/marshal` | 6 | 475 | 473 | 0 | 0 | 2 | 100% |
 | `core/matchdata` | 30 | 186 | 186 | 0 | 0 | 0 | 100% |
@@ -131,4 +131,4 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `optional/capi` | 47 | 0 | 0 | 0 | 0 | 0 | — |
 | `optional/thread_safety` | 1 | 5 | 0 | 0 | 5 | 0 | 0% |
 | `security` | 13 | 31 | 28 | 0 | 3 | 0 | 90% |
-| **total** | 3835 | 32691 | 29041 | 0 | 3351 | 299 | 89% |
+| **total** | 3835 | 32691 | 29077 | 0 | 3318 | 296 | 89% |

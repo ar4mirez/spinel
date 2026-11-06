@@ -74,28 +74,35 @@ class Array
   end
 
   # `rb_check_array_type`: an Array, what a `to_ary` answers (a private one
-  # counts), or nil when there is none or it declines. A `to_ary` that answers
-  # anything else is a TypeError naming both classes.
+  # counts), or nil when there is none or it declines. The call is
+  # `rb_check_funcall`'s, so a `respond_to?` that says no is believed, a
+  # `method_missing` is tried, and the value may be a `BasicObject`. A
+  # `to_ary` that answers anything else is a TypeError naming both classes,
+  # in CRuby 4.1's words (`into`, where 4.0 said `to`), which ruby/spec
+  # checks; see `Integer.__to_int__`.
   def self.__check_array__(value)
-    return value if value.is_a?(Array)
-    return nil unless value.respond_to?(:to_ary, true)
-    converted = value.__send__(:to_ary)
-    return converted if converted.nil? || converted.is_a?(Array)
-    raise TypeError, "can't convert " + value.class.to_s + " to Array (" +
-                     value.class.to_s + "#to_ary gives " + converted.class.to_s + ")"
+    return value if Array === value
+    converted = Kernel.__check_funcall__(value, :to_ary) { return nil }
+    return converted if nil.equal?(converted) || Array === converted
+    __to_ary_failed__(value, converted)
   end
 
   # `rb_convert_type` to Array: like `__check_array__`, but there has to be
   # an answer.
   def self.__to_ary__(value)
-    converted = __check_array__(value)
-    return converted unless converted.nil?
-    if value.respond_to?(:to_ary, true)
-      raise TypeError, "can't convert " + value.class.to_s + " to Array (" +
-                       value.class.to_s + "#to_ary gives NilClass)"
+    return value if Array === value
+    converted = Kernel.__check_funcall__(value, :to_ary) do
+      shown = nil.equal?(value) || true.equal?(value) || false.equal?(value) ? value.inspect : Kernel.__class_of__(value).to_s
+      raise TypeError, "no implicit conversion of " + shown + " into Array"
     end
-    shown = value.nil? || true.equal?(value) || false.equal?(value) ? value.inspect : value.class.to_s
-    raise TypeError, "no implicit conversion of " + shown + " into Array"
+    return converted if Array === converted
+    __to_ary_failed__(value, converted)
+  end
+
+  def self.__to_ary_failed__(value, converted)
+    klass = Kernel.__class_of__(value).to_s
+    raise TypeError, "can't convert " + klass + " into Array (" + klass + "#to_ary gives " +
+                     Kernel.__class_of__(converted).to_s + ")"
   end
 
   # The primitives `[]`, `at`, `[]=`, `pop` and `+` read Integers, Floats and
@@ -439,14 +446,17 @@ class Array
 
   # `find(ifnone)` calls `ifnone` when nothing matched. Ruby does not check that
   # it is callable up front, so a non-callable raises NoMethodError at the point
-  # it would have been called — which is what `find_spec.rb` asserts.
+  # it would have been called — which is what `find_spec.rb` asserts. Without a
+  # block it is an Enumerator of unknown size that keeps `ifnone`.
   def find(ifnone = nil)
+    return to_enum(:find, ifnone) unless block_given?
     each { |element| return element if yield(element) }
     return nil if ifnone.nil?
     ifnone.call
   end
 
   def detect(ifnone = nil)
+    return to_enum(:detect, ifnone) unless block_given?
     each { |element| return element if yield(element) }
     return nil if ifnone.nil?
     ifnone.call
@@ -726,9 +736,39 @@ class Array
     raise FrozenError.new("can't modify frozen Array: " + inspect, receiver: self) if frozen?
   end
 
-  def concat(other)
+  # `rb_ary_to_h`, which is not Enumerable's: each pair through `to_ary`, and
+  # the errors name the index.
+  def to_h
+    out = {}
+    i = 0
+    while i < size
+      element = self[i]
+      element = yield(element) if block_given?
+      pair = Array.__check_array__(element)
+      if pair.nil?
+        raise TypeError, "wrong element type " + Kernel.__class_of__(element).to_s + " at " + i.to_s +
+                         " (expected array)"
+      end
+      unless pair.size == 2
+        raise ArgumentError, "wrong array length at " + i.to_s + " (expected 2, was " + pair.size.to_s + ")"
+      end
+      out[pair[0]] = pair[1]
+      i += 1
+    end
+    out
+  end
+
+  # `rb_ary_concat_multi`: every argument through `to_ary`, and with more than
+  # one they are joined first, so `a.concat(a, a)` appends `a` as it was.
+  def concat(*others)
     __check_frozen__
-    other.each { |element| push(element) }
+    if others.size == 1
+      added = Array.__to_ary__(others[0])
+    else
+      added = []
+      others.each { |other| added.__aset__(added.size, 0, Array.__to_ary__(other)) }
+    end
+    __aset__(size, 0, added)
     self
   end
 
@@ -815,15 +855,9 @@ class Array
     made
   end
 
-  # An Array as is, anything with `to_ary` through it, nil otherwise. A
-  # `to_ary` that answers something else is a TypeError naming both classes.
+  # `rb_check_array_type`, which is all CRuby's `try_convert` is.
   def self.try_convert(value)
-    return value if value.is_a?(Array)
-    return nil unless value.respond_to?(:to_ary)
-    converted = value.to_ary
-    return converted if converted.nil? || converted.is_a?(Array)
-    raise TypeError,
-          "can't convert #{value.class} to Array (#{value.class}#to_ary gives #{converted.class})"
+    __check_array__(value)
   end
 
   # An operand that has to be an Array: itself, or its `to_ary`.
@@ -1327,7 +1361,7 @@ class Array
     level = __count_like__(level) unless level.nil?
     level = -1 if level.nil?
     out = []
-    __flatten_into__(out, self, level, [])
+    __flatten_into__(out, self, level, [], [])
     out
   end
 
@@ -1338,17 +1372,36 @@ class Array
     __refill__(flatten(level))
   end
 
-  def __flatten_into__(out, array, level, open)
+  # Each element is `rb_check_array_type`'s, and only above `level`: one at
+  # the bottom is kept without being asked for `to_ary`. `plain` holds the
+  # classes this call has found nothing to ask in, so a leaf of a class seen
+  # before costs a scan of a short list rather than `rb_check_funcall`'s
+  # reflection.
+  def __flatten_into__(out, array, level, open, plain)
     if open.any? { |seen| seen.equal?(array) }
       raise ArgumentError, "tried to flatten recursive array"
     end
     open.push(array)
     array.each do |element|
-      nested = element.is_a?(Array) ? element : (element.respond_to?(:to_ary) ? element.to_ary : nil)
-      if !nested.nil? && level != 0
-        __flatten_into__(out, nested, level - 1, open)
-      else
+      nested = nil
+      if Array === element
+        nested = element
+      elsif level != 0
+        klass = __reflect_class_of__(element)
+        j = 0
+        j += 1 while j < plain.size && !plain[j].equal?(klass)
+        if j == plain.size
+          if Kernel.__funcall_plain__?(klass, :to_ary)
+            plain.push(klass)
+          else
+            nested = Array.__check_array__(element)
+          end
+        end
+      end
+      if nested.nil? || level == 0
         out.push(element)
+      else
+        __flatten_into__(out, nested, level - 1, open, plain)
       end
     end
     open.pop
@@ -1678,7 +1731,7 @@ class Array
   # With a block, each combination is yielded and the receiver answered;
   # without one, all of them as an Array.
   def product(*others, &block)
-    lists = [dup] + others.map { |other| Array.__coerce__(other).dup }
+    lists = [dup] + others.map { |other| Array.__to_ary__(other).dup }
     out = block.nil? ? [] : nil
     __product_into__(lists, 0, [], out, block)
     block.nil? ? out : self

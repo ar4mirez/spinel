@@ -9310,12 +9310,34 @@ fn native_call<'h>(
             let name = args.remove(0);
             // A String names the method as well as a Symbol does.
             if name.as_symbol().is_none() && string_bytes(scope, name).is_none() {
-                // Anything else is a TypeError naming it by `inspect`, which
-                // is a method call this primitive cannot make.
-                return Err(Error::NoDispatch {
-                    op: "send",
-                    operands: "a method name that is not a Symbol or a String",
+                // Anything else is converted through `to_str`, or is a
+                // TypeError naming it by `inspect`: sends this primitive
+                // cannot make, so `Kernel.__send_name__` makes them and
+                // sends again with the name it answers.
+                let mut forwarded_args = Vec::with_capacity(args.len() + 4);
+                forwarded_args.push(call.receiver);
+                forwarded_args.push(if public_only {
+                    Value::TRUE
+                } else {
+                    Value::FALSE
                 });
+                forwarded_args.push(Value::symbol(call.name));
+                forwarded_args.push(name);
+                forwarded_args.extend_from_slice(&args);
+                let forwarded = Pending {
+                    cache: None,
+                    name: crate::shared::symbols::intern("__send_name__"),
+                    receiver: scope.classes().object(Builtin::Kernel.id()),
+                    args: forwarded_args,
+                    implicit_self: true,
+                    variable_call: false,
+                    public_only: false,
+                    target: Target::Method,
+                    owner: None,
+                    defined_as: None,
+                    ..call
+                };
+                return dispatch(scope, stack, frames, forwarded, proc_class, ids);
             }
             let Some(name) = name_symbol(scope, name)? else {
                 return invalid_symbol(scope, stack, frames, call.cref, name, proc_class, ids);

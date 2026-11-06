@@ -110,11 +110,8 @@ module Pack
     when Integer then value
     when Float then Kernel.__float_to_i__(value)
     when nil then raise TypeError, "no implicit conversion of nil into Integer"
-    else
-      unless value.respond_to?(:to_int)
-        raise TypeError, "no implicit conversion of #{value.class} into Integer"
-      end
-      value.to_int
+    # `rb_to_int`, so a `to_int` that answers something else is a TypeError.
+    else Integer.__to_int__(value)
     end
   end
 
@@ -272,7 +269,9 @@ class Array
         field << pad.b * (width - field.bytesize) if field.bytesize < width
         out << field
       when "B", "b"
-        bits = String.__coerce__(take.call)
+        # nil packs as an empty string, as for `a`. Measured.
+        bits = take.call
+        bits = bits.nil? ? "" : String.__coerce__(bits)
         width = count == :star ? bits.length : (count || 1)
         # A count past the string pads with NUL bytes — CRuby's formula,
         # which for bits counts half a byte per missing bit.
@@ -290,7 +289,8 @@ class Array
         bytes.concat([0] * extra)
         out << Pack.bytes_to_string(bytes)
       when "H", "h"
-        hex = String.__coerce__(take.call)
+        hex = take.call
+        hex = hex.nil? ? "" : String.__coerce__(hex)
         width = count == :star ? hex.length : (count || 1)
         extra = width > hex.length ? (width + 1) / 2 - (hex.length + 1) / 2 : 0
         width = hex.length if width > hex.length
@@ -312,7 +312,10 @@ class Array
         out << (count == 0 ? Pack.base64(text.bytes, 0) : Pack.base64(text.bytes, line.nil? ? nil : [line, 3].max)).b
       when "M"
         value = take.call
+        # `rb_obj_as_string`: a `to_s` that answers something else is
+        # replaced by `Kernel#to_s`'s `#<Class:0x...>`.
         text = value.is_a?(String) ? value : value.to_s
+        text = Kernel.instance_method(:to_s).bind_call(value) unless text.is_a?(String)
         out << Pack.qprint(text.bytes, count == :star ? nil : count).b
       when "u"
         text = String.__coerce__(take.call)

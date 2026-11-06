@@ -480,6 +480,18 @@ class Exception
     __stderr_tty__
   end
 
+  # The top frame named `label`: a core helper raising on behalf of a
+  # primitive, which CRuby raises from the C method's own frame.
+  def __relabel_top__(label)
+    lines = @__backtrace__
+    return if lines.nil? || lines.empty?
+    at = lines[0].rindex(":in '")
+    lines[0] = lines[0][0, at] + ":in '" + label + "'" unless at.nil?
+    raw = @__backtrace_locations__
+    raw[0] = [raw[0][0], raw[0][1], label] unless raw.nil? || raw.empty?
+    @__locations__ = nil
+  end
+
   def backtrace_locations
     raw = @__backtrace_locations__
     return nil if raw.nil?

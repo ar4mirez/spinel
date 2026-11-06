@@ -335,11 +335,12 @@ class Hash
   # A String key that is not frozen is stored as a frozen copy, so mutating
   # the caller's String cannot move it in the table — measured, and
   # `compare_by_identity` is the one table that keeps the caller's own object.
+  # `String === key`, not `key.is_a?`: a key may be a `BasicObject`.
   def []=(key, value)
     __check_frozen__
     at = __index__(key)
     if at.nil?
-      if !@__identity__ && key.is_a?(String) && !key.frozen?
+      if !@__identity__ && String === key && !key.frozen?
         key = key.dup.freeze
       end
       @__pairs__.push([key, value])
