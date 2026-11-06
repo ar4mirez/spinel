@@ -572,6 +572,9 @@ struct Entry {
     /// see [`Classes::each_root`].
     object: Value,
     name: Option<Box<str>>,
+    /// Whether `name` is one `Module#set_temporary_name` gave, which a
+    /// constant path replaces as it replaces `#<Module:0x...>::N`.
+    temporary: bool,
     kind: Kind,
     superclass: Option<ClassId>,
     /// This class's run of the ancestor chain: prepended modules, then the class
@@ -959,7 +962,26 @@ impl Classes {
     /// Replace a temporary name — the `#<Module:0x...>::N` a module gets
     /// under an anonymous one — with the path it is reachable by now.
     pub fn rename(&mut self, id: ClassId, name: &str) {
-        self.entry_mut(id).name = Some(Box::from(name));
+        let entry = self.entry_mut(id);
+        entry.name = Some(Box::from(name));
+        entry.temporary = false;
+    }
+
+    /// Whether the name is one a constant path will replace: none yet, the
+    /// `#<Module:0x...>::N` a module gets under an anonymous one, or one
+    /// `Module#set_temporary_name` gave.
+    #[must_use]
+    pub fn has_temporary_name(&self, id: ClassId) -> bool {
+        let entry = self.entry(id);
+        entry.temporary || entry.name.as_deref().is_none_or(|name| name.starts_with("#<"))
+    }
+
+    /// `Module#set_temporary_name`'s write: a name a constant path still
+    /// replaces, or none.
+    pub fn set_temporary_name(&mut self, id: ClassId, name: Option<&str>) {
+        let entry = self.entry_mut(id);
+        entry.name = name.map(Box::from);
+        entry.temporary = name.is_some();
     }
 
     pub fn superclass(&self, id: ClassId) -> Option<ClassId> {
@@ -2716,6 +2738,7 @@ impl Classes {
             repr,
             object,
             name: name.map(Box::from),
+            temporary: false,
             kind,
             superclass,
             own: vec![id],

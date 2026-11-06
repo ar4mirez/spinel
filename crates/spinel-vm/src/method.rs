@@ -943,6 +943,11 @@ pub enum ReflectOp {
     ConstSource,
     /// `(class)` → its direct subclasses, newest first, singletons left out.
     Subclasses,
+    /// `(mod, name)` → nil; gives `mod` the temporary name `name`, a String
+    /// or nil, and the modules it holds under that name follow.
+    TemporaryName,
+    /// `(mod)` → whether its name is one a constant path would still replace.
+    Temporary,
     /// `(mod, inherit)` → the public constant names, definition order.
     ConstNames,
     /// `(mod, name)` → `[value]` removed, or nil.
@@ -950,7 +955,7 @@ pub enum ReflectOp {
     /// `(mod, name)` → whether the module holds it; makes it public.
     ConstPublic,
     /// `(class, inherit, which)` → method names: `which` 0 is public and
-    /// protected, 1 public, 2 protected, 3 private.
+    /// protected, 1 public, 2 protected, 3 private, 4 undefined.
     MethodNames,
     /// `(object)` → its class, singleton included if it has one.
     ClassOf,

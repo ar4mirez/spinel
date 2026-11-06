@@ -302,7 +302,7 @@ module Kernel
   def self.__method_name__(name)
     return name if Symbol === name
     return name.to_sym if String === name
-    return name.to_str.to_sym if name.respond_to?(:to_str)
+    return String.__coerce__(name).to_sym if name.respond_to?(:to_str)
     raise TypeError, "#{name.inspect} is not a symbol nor a string"
   end
 

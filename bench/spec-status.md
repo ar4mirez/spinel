@@ -33,12 +33,12 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/integer` | 70 | 598 | 598 | 0 | 0 | 0 | 100% |
 | `core/io` | 103 | 1631 | 1420 | 0 | 205 | 6 | 87% |
 | `core/kernel` | 118 | 2241 | 2056 | 0 | 142 | 43 | 92% |
-| `core/main` | 7 | 27 | 25 | 0 | 2 | 0 | 93% |
+| `core/main` | 7 | 27 | 27 | 0 | 0 | 0 | 100% |
 | `core/marshal` | 6 | 475 | 473 | 0 | 0 | 2 | 100% |
 | `core/matchdata` | 30 | 186 | 186 | 0 | 0 | 0 | 100% |
 | `core/math` | 29 | 243 | 243 | 0 | 0 | 0 | 100% |
 | `core/method` | 26 | 199 | 199 | 0 | 0 | 0 | 100% |
-| `core/module` | 86 | 1051 | 958 | 0 | 81 | 12 | 91% |
+| `core/module` | 86 | 1051 | 996 | 0 | 41 | 14 | 95% |
 | `core/mutex` | 7 | 35 | 35 | 0 | 0 | 0 | 100% |
 | `core/nil` | 18 | 27 | 25 | 0 | 2 | 0 | 93% |
 | `core/numeric` | 46 | 326 | 324 | 0 | 0 | 2 | 99% |
@@ -131,4 +131,4 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `optional/capi` | 47 | 0 | 0 | 0 | 0 | 0 | — |
 | `optional/thread_safety` | 1 | 5 | 0 | 0 | 5 | 0 | 0% |
 | `security` | 13 | 31 | 28 | 0 | 3 | 0 | 90% |
-| **total** | 3835 | 32691 | 29102 | 0 | 3305 | 284 | 89% |
+| **total** | 3835 | 32691 | 29142 | 0 | 3263 | 286 | 89% |
