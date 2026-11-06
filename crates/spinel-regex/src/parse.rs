@@ -16,7 +16,7 @@
 
 use crate::property::Property;
 use crate::{CharRange, Encoding, Error, Flags};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// One parsed node.
 #[derive(Debug, Clone, PartialEq)]
@@ -264,18 +264,12 @@ fn resolve_calls(ast: &mut Ast, names: &HashMap<String, usize>) -> Result<(), Er
     }
     let mut groups: HashMap<usize, Ast> = HashMap::new();
     collect_groups(ast, &mut groups);
-    let mut called = Vec::new();
-    resolve(ast, names, &groups, &mut called)?;
+    resolve(ast, names, &groups)?;
     let mut groups: HashMap<usize, Ast> = HashMap::new();
     collect_groups(ast, &mut groups);
     groups.insert(0, ast.clone());
-    called.sort_unstable();
-    called.dedup();
-    for group in called {
-        let body = &groups[&group];
-        if reaches_first(body, group, &groups, &mut vec![group]) {
-            return Err(Error::Syntax("never ending recursion".into()));
-        }
+    if never_ends(&groups) {
+        return Err(Error::Syntax("never ending recursion".into()));
     }
     Ok(())
 }
@@ -317,13 +311,11 @@ fn collect_groups(ast: &Ast, groups: &mut HashMap<usize, Ast>) {
     }
 }
 
-/// Every `Ast::Call` to the `Ast::CallGroup` it names, noting each group
-/// called.
+/// Every `Ast::Call` to the `Ast::CallGroup` it names.
 fn resolve(
     ast: &mut Ast,
     names: &HashMap<String, usize>,
     groups: &HashMap<usize, Ast>,
-    called: &mut Vec<usize>,
 ) -> Result<(), Error> {
     match ast {
         Ast::Call(name) => {
@@ -336,103 +328,121 @@ fn resolve(
             if index != 0 && !groups.contains_key(&index) {
                 return Err(Error::Syntax(format!("undefined group <{name}> reference")));
             }
-            called.push(index);
             *ast = Ast::CallGroup(index);
             Ok(())
         }
         Ast::Concat(parts) | Ast::Alt(parts) => {
             for part in parts {
-                resolve(part, names, groups, called)?;
+                resolve(part, names, groups)?;
             }
             Ok(())
         }
         Ast::Cond { yes, no, .. } => {
-            resolve(yes, names, groups, called)?;
-            resolve(no, names, groups, called)
+            resolve(yes, names, groups)?;
+            resolve(no, names, groups)
         }
         Ast::Group { body, .. }
         | Ast::Atomic(body)
         | Ast::Repeat { body, .. }
         | Ast::Look { body, .. }
-        | Ast::Absent(body) => resolve(body, names, groups, called),
+        | Ast::Absent(body) => resolve(body, names, groups),
         _ => Ok(()),
     }
 }
 
-/// Whether `ast` can call `target` before it has matched a character,
-/// following the calls it makes on the way. `visiting` holds the groups
-/// already being followed, so a cycle that does not pass `target` ends.
-fn reaches_first(
-    ast: &Ast,
-    target: usize,
-    groups: &HashMap<usize, Ast>,
-    visiting: &mut Vec<usize>,
+/// Whether some group can call itself again before matching a character,
+/// through the groups it calls first. Each group's body is walked once for
+/// whether it may match empty and once for the calls it makes first, so the
+/// check is a cycle search over that graph rather than a walk of every path.
+fn never_ends(groups: &HashMap<usize, Ast>) -> bool {
+    let empty = empty_groups(groups);
+    let firsts: HashMap<usize, Vec<usize>> = groups
+        .iter()
+        .map(|(&group, body)| {
+            let mut calls = Vec::new();
+            first_calls(body, &empty, &mut calls);
+            (group, calls)
+        })
+        .collect();
+    let mut done = HashMap::new();
+    groups
+        .keys()
+        .any(|&group| on_cycle(group, &firsts, &mut done))
+}
+
+/// Depth-first from `group`: whether it reaches a group still being followed.
+/// `done` holds each group already settled, `false` while it is open.
+fn on_cycle(
+    group: usize,
+    firsts: &HashMap<usize, Vec<usize>>,
+    done: &mut HashMap<usize, bool>,
 ) -> bool {
-    match ast {
-        Ast::CallGroup(group) if *group == target => true,
-        Ast::CallGroup(group) => {
-            if visiting.contains(group) {
-                return false;
+    if let Some(&settled) = done.get(&group) {
+        return !settled;
+    }
+    done.insert(group, false);
+    let cycle = firsts
+        .get(&group)
+        .is_some_and(|calls| calls.iter().any(|&next| on_cycle(next, firsts, done)));
+    done.insert(group, true);
+    cycle
+}
+
+/// The groups whose bodies can match without consuming a character, as a
+/// least fixpoint: a group counts as consuming until its body is shown not to.
+fn empty_groups(groups: &HashMap<usize, Ast>) -> HashSet<usize> {
+    let mut empty = HashSet::new();
+    loop {
+        let before = empty.len();
+        for (&group, body) in groups {
+            if !empty.contains(&group) && may_be_empty(body, &empty) {
+                empty.insert(group);
             }
-            visiting.push(*group);
-            let found = groups
-                .get(group)
-                .is_some_and(|body| reaches_first(body, target, groups, visiting));
-            visiting.pop();
-            found
         }
+        if empty.len() == before {
+            return empty;
+        }
+    }
+}
+
+/// The groups `ast` can call before it has matched a character.
+fn first_calls(ast: &Ast, empty: &HashSet<usize>, calls: &mut Vec<usize>) {
+    match ast {
+        Ast::CallGroup(group) => calls.push(*group),
         Ast::Concat(parts) => {
             for part in parts {
-                if reaches_first(part, target, groups, visiting) {
-                    return true;
-                }
-                if !may_be_empty(part, groups, visiting) {
-                    return false;
+                first_calls(part, empty, calls);
+                if !may_be_empty(part, empty) {
+                    break;
                 }
             }
-            false
         }
         Ast::Alt(parts) => parts
             .iter()
-            .any(|part| reaches_first(part, target, groups, visiting)),
+            .for_each(|part| first_calls(part, empty, calls)),
         Ast::Cond { yes, no, .. } => {
-            reaches_first(yes, target, groups, visiting)
-                || reaches_first(no, target, groups, visiting)
+            first_calls(yes, empty, calls);
+            first_calls(no, empty, calls);
         }
         Ast::Group { body, .. }
         | Ast::Atomic(body)
         | Ast::Repeat { body, .. }
         | Ast::Look { body, .. }
-        | Ast::Absent(body) => reaches_first(body, target, groups, visiting),
-        _ => false,
+        | Ast::Absent(body) => first_calls(body, empty, calls),
+        _ => {}
     }
 }
 
-/// Whether `ast` can match without consuming a character. A call into a
-/// group already being followed is taken as consuming one, which can only
-/// make [`reaches_first`] refuse less.
-fn may_be_empty(ast: &Ast, groups: &HashMap<usize, Ast>, visiting: &mut Vec<usize>) -> bool {
+/// Whether `ast` can match without consuming a character, given the groups
+/// known to.
+fn may_be_empty(ast: &Ast, empty: &HashSet<usize>) -> bool {
     match ast {
         Ast::Literal { .. } | Ast::Class(_) | Ast::Any { .. } | Ast::Grapheme => false,
-        Ast::Concat(parts) => parts
-            .iter()
-            .all(|part| may_be_empty(part, groups, visiting)),
-        Ast::Alt(parts) => parts
-            .iter()
-            .any(|part| may_be_empty(part, groups, visiting)),
-        Ast::Group { body, .. } | Ast::Atomic(body) => may_be_empty(body, groups, visiting),
-        Ast::Repeat { body, min, .. } => *min == 0 || may_be_empty(body, groups, visiting),
-        Ast::CallGroup(group) => {
-            if visiting.contains(group) {
-                return false;
-            }
-            visiting.push(*group);
-            let empty = groups
-                .get(group)
-                .is_none_or(|body| may_be_empty(body, groups, visiting));
-            visiting.pop();
-            empty
-        }
+        Ast::Concat(parts) => parts.iter().all(|part| may_be_empty(part, empty)),
+        Ast::Alt(parts) => parts.iter().any(|part| may_be_empty(part, empty)),
+        Ast::Group { body, .. } | Ast::Atomic(body) => may_be_empty(body, empty),
+        Ast::Repeat { body, min, .. } => *min == 0 || may_be_empty(body, empty),
+        Ast::CallGroup(group) => empty.contains(group),
         _ => true,
     }
 }

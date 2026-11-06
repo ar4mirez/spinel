@@ -884,6 +884,18 @@ mod tests {
                 "{source}"
             );
         }
+        // A chain of groups each calling the next twice is checked once per
+        // group, not once per path through it.
+        let chain: String = (0..30)
+            .map(|i| format!("(?<g{i}>\\g<g{n}>|\\g<g{n}>)", n = i + 1))
+            .chain(["(?<g30>x)".to_owned()])
+            .collect();
+        assert!(Regex::new(&chain, Flags::default()).is_ok());
+        let looped = chain.replace("(?<g30>x)", "(?<g30>\\g<g0>)");
+        assert_eq!(
+            Regex::new(&looped, Flags::default()).err(),
+            Some(Error::Syntax("never ending recursion".into()))
+        );
         assert!(Regex::new("(?<a>a\\g<a>|b)", Flags::default()).is_ok());
         assert!(matches!(
             Regex::new("\\g<b>", Flags::default()),
@@ -1260,6 +1272,21 @@ mod tests {
     fn a_pathological_pattern_refuses_rather_than_hangs() {
         let re = Regex::new("(a+)+b", Flags::default()).expect("compiles");
         assert_eq!(re.is_match(&"a".repeat(60)), Err(Error::Budget));
+    }
+
+    #[test]
+    fn deep_recursion_refuses_rather_than_overflows_the_stack() {
+        // Each level re-enters the matcher through the atomic group.
+        let re = Regex::new("(?<p>\\((?>[^()]|\\g<p>)*\\))", Flags::default()).expect("compiles");
+        let deep = format!("{}{}", "(".repeat(20_000), ")".repeat(20_000));
+        assert_eq!(re.find_at(&deep, 0), Err(Error::Budget));
+        let nested = format!("{}{}", "(".repeat(200), ")".repeat(200));
+        let found = re.find_at(&nested, 0).expect("runs").expect("matches");
+        assert_eq!(found.group(0), Some((0, 400)));
+        // No atomic group, but a call chain as long as the subject, dropped
+        // when the attempt fails.
+        let long = "a".repeat(300_000);
+        assert_eq!(find("\\A(?<a>a\\g<a>)", &long), None);
     }
 
     #[test]

@@ -3,8 +3,11 @@
 //! Backtracking rather than a Thompson NFA because Ruby's dialect has
 //! backreferences and lookaround, neither of which a finite automaton can
 //! express. The machine is iterative over an explicit stack for the main flow,
-//! and recursive only for lookaround and atomic groups, whose nesting depth is
-//! a property of the pattern rather than of the subject.
+//! and recursive only for lookaround, atomic and absent groups. Their nesting
+//! is a property of the pattern until a recursive call runs back into one, and
+//! then it follows the subject: `/(?<p>\((?>[^()]|\g<p>)*\))/` nests once per
+//! parenthesis. Past [`MAX_NESTING`] the search refuses with [`Error::Budget`]
+//! rather than overflow the native stack.
 
 use crate::grapheme::grapheme_end;
 use crate::parse::{Anchor, Ast, Class, ClassItem, Perl, Posix};
@@ -132,6 +135,13 @@ const MAX_PROGRAM: usize = 100_000;
 /// those slowly; this engine refuses, because a spec run that hangs reports
 /// nothing at all. Tuned well above anything ruby/spec needs.
 const MAX_STEPS: u64 = 5_000_000;
+
+/// How deep sub-programs may nest, each one a native frame of [`Program::run`].
+///
+/// ponytail: Onigmo keeps this nesting on a heap stack and has no such limit.
+/// Lift it by running atomic, lookaround and absent bodies on the explicit
+/// backtrack stack instead of recursing.
+const MAX_NESTING: usize = 256;
 
 /// How many steps run between two looks at the clock, when a match has a
 /// deadline. A step is a few nanoseconds; a clock read is tens of them.
@@ -542,6 +552,20 @@ struct Frame {
     next: Frames,
 }
 
+/// Unlinks the chain a frame at a time: a deep recursion's chain dropped the
+/// default way takes one native frame per call.
+impl Drop for Frame {
+    fn drop(&mut self) {
+        let mut next = self.next.take();
+        while let Some(frame) = next {
+            match Rc::try_unwrap(frame) {
+                Ok(mut frame) => next = frame.next.take(),
+                Err(_) => break,
+            }
+        }
+    }
+}
+
 /// What happened along the current path, for the questions only the order of
 /// it answers: which start a recursive group's end pairs with, and which
 /// capture a level backreference names. Onigmo answers both from its
@@ -562,6 +586,8 @@ struct Ctx {
     deadline: Option<Instant>,
     steps: u64,
     history: Vec<Event>,
+    /// How many [`Program::run`]s are open, for [`MAX_NESTING`].
+    nesting: usize,
 }
 
 impl Ctx {
@@ -571,6 +597,7 @@ impl Ctx {
             deadline,
             steps: 0,
             history: Vec::new(),
+            nesting: 0,
         }
     }
 
@@ -662,6 +689,26 @@ impl Program {
     /// and the captures it set, or `None` if every path fails.
     #[allow(clippy::too_many_arguments)]
     fn run(
+        &self,
+        haystack: Subject<'_>,
+        pc: usize,
+        sp: usize,
+        anchor: usize,
+        saves: Vec<Option<usize>>,
+        marks: Vec<Option<Mark>>,
+        ctx: &mut Ctx,
+    ) -> Result<Option<SubMatch>, Error> {
+        if ctx.nesting >= MAX_NESTING {
+            return Err(Error::Budget);
+        }
+        ctx.nesting += 1;
+        let found = self.run_nested(haystack, pc, sp, anchor, saves, marks, ctx);
+        ctx.nesting -= 1;
+        found
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_nested(
         &self,
         haystack: Subject<'_>,
         mut pc: usize,
