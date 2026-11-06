@@ -116,15 +116,15 @@ module Kernel
     autoloads = __autoload_feature__(path, me)
     begin
       __load_file__(path, nil)
+      __autoload_feature_done__(autoloads, path)
     rescue Exception
       features.delete(path)
-      __autoload_feature_done__(autoloads, false)
       raise
     ensure
       loading.delete(path)
       loaders.delete(path)
+      autoloads&.each { |owner, name| owner.instance_variable_get(:@__autoloading__)&.delete(name) }
     end
-    __autoload_feature_done__(autoloads, path)
     true
   end
 
@@ -154,8 +154,6 @@ module Kernel
   def self.__autoload_feature_done__(autoloads, path)
     return if autoloads.nil?
     autoloads.each do |owner, name|
-      owner.instance_variable_get(:@__autoloading__)&.delete(name)
-      next unless path
       entries = owner.instance_variable_get(:@__autoloads__)
       next if entries.nil? || !entries.key?(name)
       if __reflect_const_lookup__(owner, name, false).nil?

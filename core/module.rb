@@ -199,7 +199,7 @@ class Module
       __const_deprecation__(symbol)
       return found[0]
     end
-    __const_missing__(symbol, :qualified, [])
+    __const_missing__(symbol, :inherit, [])
   end
 
   # Whether a constant found here was assigned by a file another thread is
@@ -314,7 +314,7 @@ class Module
     return nil if feature && $LOADED_FEATURES.include?(feature)
     entries = instance_variable_get(:@__autoloads__) || instance_variable_set(:@__autoloads__, {})
     entries[symbol] = path.dup.freeze
-    __mark_autoloads__
+    __mark_autoloads__(symbol)
     instance_variable_get(:@__autoload_spent__)&.delete(symbol)
     # By feature too, so a plain `require` of the same file is this autoload
     # running (`Kernel.__autoload_feature__`).
@@ -407,13 +407,15 @@ class Module
   # A constant the VM did not find (#39): an autoload for the name, where the
   # reference would have looked — the lexical scopes, the ancestors, `Object`
   # — then the program's `const_missing`, then the `NameError` the VM would
-  # have raised itself.
+  # have raised itself. `A::B` does not look in `Object` unless `A` is it;
+  # `const_get(:B)` does, as `const_defined?` has it.
   def __const_missing__(name, how, nesting)
     search = lambda do
       owners = case how
                when :lexical then nesting + (nesting.first || self).ancestors + [Object]
                when :top then Object.ancestors
-               else ancestors
+               when :inherit then instance_of?(Module) ? ancestors + [Object] : ancestors
+               else equal?(Object) ? ancestors : ancestors - [Object]
                end
       owners.uniq
     end

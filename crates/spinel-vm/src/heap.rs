@@ -320,10 +320,10 @@ pub struct Heap {
     /// Whether code this heap was meant to run did not all run — see
     /// [`HandleScope::mark_partial`].
     partial: bool,
-    /// Whether `Module#autoload` has ever registered a name on this heap, so
-    /// a constant read only looks for an autoload shadowing what it found
-    /// once there may be one (#709).
-    autoloads: bool,
+    /// The names `Module#autoload` has ever registered on this heap, so a
+    /// constant read only looks for an autoload shadowing what it found when
+    /// there may be one for its name (#709).
+    autoloads: std::collections::HashSet<SymbolId>,
     /// The program's name and arguments, as the embedder was given them:
     /// `$0` and `ARGV`.
     argv: Vec<String>,
@@ -640,7 +640,7 @@ impl Heap {
             parser: None,
             libraries: None,
             partial: false,
-            autoloads: false,
+            autoloads: std::collections::HashSet::new(),
             argv: Vec::new(),
             program_name: String::new(),
             budget: Some(crate::interp::BUDGET),
@@ -1475,13 +1475,13 @@ impl<'h> HandleScope<'h> {
         self.heap.partial
     }
 
-    /// `Module#autoload` registered a name. See `Heap::autoloads`.
-    pub(crate) fn mark_autoloads(&mut self) {
-        self.heap.autoloads = true;
+    /// `Module#autoload` registered `name`. See `Heap::autoloads`.
+    pub(crate) fn mark_autoloads(&mut self, name: SymbolId) {
+        self.heap.autoloads.insert(name);
     }
 
-    pub(crate) fn autoloads(&self) -> bool {
-        self.heap.autoloads
+    pub(crate) fn autoloads(&self, name: SymbolId) -> bool {
+        self.heap.autoloads.contains(&name)
     }
 
     /// The program name and arguments `$0` and `ARGV` start as. Set before

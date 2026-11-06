@@ -3531,7 +3531,7 @@ fn run<'h>(
                         // to load (#709).
                         let found = match found {
                             Some(_)
-                                if scope.autoloads()
+                                if scope.autoloads(symbol)
                                     && autoload_shadows(scope, cref, from, how, symbol)? =>
                             {
                                 None
@@ -12102,7 +12102,9 @@ fn native_call<'h>(
             Ok(None)
         }
         Native::MarkAutoloads => {
-            scope.mark_autoloads();
+            for name in call.args.iter().filter_map(|v| v.as_symbol()) {
+                scope.mark_autoloads(name);
+            }
             stack.push(Value::NIL);
             Ok(None)
         }
