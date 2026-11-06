@@ -408,15 +408,14 @@ module Kernel
   # nor a String: the VM hands the call here, with whether it was
   # `public_send` and the name it was called by, and the name is converted as
   # `rb_check_id` converts it — `to_str` as `rb_check_funcall` reads it, or a
-  # TypeError naming it by `inspect` — before the send is made again. CRuby
-  # raises that TypeError from the C method, so its backtrace starts at
-  # `Kernel#public_send`, not here. Measured.
+  # TypeError naming it by `inspect`, so a `BasicObject` raises NoMethodError —
+  # before the send is made again. CRuby raises that TypeError from the C
+  # method, so its backtrace starts at `Kernel#public_send`, not here. Measured.
   def self.__send_name__(receiver, public_only, method, name, *args, **keywords, &block)
     unless Symbol === name || String === name
       converted = Kernel.__check_funcall__(name, :to_str) { nil }
       unless String === converted
-        shown = Kernel === name ? name.inspect : "#<" + Kernel.__class_of__(name).to_s + ">"
-        error = TypeError.new(shown + " is not a symbol nor a string")
+        error = TypeError.new(name.inspect + " is not a symbol nor a string")
         begin
           raise error
         rescue TypeError
