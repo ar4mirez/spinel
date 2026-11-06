@@ -11002,19 +11002,18 @@ fn native_call<'h>(
                 .map(|w| w as u32)
                 .collect();
             let single = call.args.get(1).is_some_and(|v| v.is_truthy());
-            let state = crate::mt::Mt::new(&words, single);
+            let state = crate::mt::Mt::seed(&words, single);
             let class = class_handle(scope, Builtin::String);
-            let value = string_alloc(scope, class, &state.to_bytes(), crate::strings::BINARY);
+            let value = string_alloc(scope, class, &state, crate::strings::BINARY);
             stack.push(value);
             Ok(None)
         }
         Native::MtNext => {
-            let (handle, mut mt) = mt_state(scope, &call, "__mt_next__")?;
             let count = int_arg(&call, 1).unwrap_or(1).max(0) as usize;
+            let mut mt = mt_state(scope, &call, "__mt_next__")?;
             let outputs: Vec<Value> = (0..count)
                 .map(|_| Value::fixnum(i64::from(mt.next_u32())).expect("a u32 is a fixnum"))
                 .collect();
-            mt_store(scope, handle, &mt);
             let value = new_array(scope, &outputs);
             stack.push(value);
             Ok(None)
@@ -11026,9 +11025,7 @@ fn native_call<'h>(
                     operands: "a limit that is not in 0..2**32-1",
                 });
             };
-            let (handle, mut mt) = mt_state(scope, &call, "__mt_limited__")?;
-            let value = mt.limited(limit);
-            mt_store(scope, handle, &mt);
+            let value = mt_state(scope, &call, "__mt_limited__")?.limited(limit);
             stack.push(Value::fixnum(i64::from(value)).expect("a u32 is a fixnum"));
             Ok(None)
         }
@@ -11047,11 +11044,10 @@ fn native_call<'h>(
                     operands: "more draws than limits down to zero",
                 });
             }
-            let (handle, mut mt) = mt_state(scope, &call, "__mt_limited_down__")?;
+            let mut mt = mt_state(scope, &call, "__mt_limited_down__")?;
             let draws: Vec<Value> = (0..count)
                 .map(|k| Value::fixnum(i64::from(mt.limited(top - k))).expect("a u32 is a fixnum"))
                 .collect();
-            mt_store(scope, handle, &mt);
             let value = new_array(scope, &draws);
             stack.push(value);
             Ok(None)
@@ -18687,13 +18683,13 @@ unsafe fn set_errno(value: libc::c_int) {
     }
 }
 
-/// The generator a `__mt_*__` primitive was handed: its state String's
-/// handle, and the state read out of it.
-fn mt_state<'h>(
-    scope: &mut HandleScope<'h>,
+/// The generator a `__mt_*__` primitive was handed, run on its state
+/// String's bytes in place (#703).
+fn mt_state<'s, 'h>(
+    scope: &'s mut HandleScope<'h>,
     call: &Pending,
     op: &'static str,
-) -> Result<(Handle<'h>, crate::mt::Mt), Error> {
+) -> Result<crate::mt::Mt<'s>, Error> {
     let Some(&state) = call.args.first() else {
         return Err(Error::NoDispatch {
             op,
@@ -18701,20 +18697,10 @@ fn mt_state<'h>(
         });
     };
     let handle = scope.root(state);
-    let bytes = crate::strings::bytes(scope, handle);
-    let Some(mt) = crate::mt::Mt::from_bytes(&bytes) else {
-        return Err(Error::NoDispatch {
-            op,
-            operands: "a String that is not a generator's state",
-        });
-    };
-    Ok((handle, mt))
-}
-
-/// Write a generator's state back into its String, in place.
-fn mt_store<'h>(scope: &mut HandleScope<'h>, handle: Handle<'h>, mt: &crate::mt::Mt) {
-    let len = crate::strings::bytesize(scope, handle);
-    crate::strings::splice(scope, handle, 0, len, &mt.to_bytes());
+    crate::mt::Mt::from_bytes(crate::strings::live_mut(scope, handle)).ok_or(Error::NoDispatch {
+        op,
+        operands: "a String that is not a generator's state",
+    })
 }
 
 /// An Integer argument, if that is what was passed.
