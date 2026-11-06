@@ -1542,13 +1542,34 @@ class Array
     value
   end
 
+  # The Random that draws for `random:`, or nil for anything else.
+  def __generator_for__(random)
+    return Random.__default__ if Random.equal?(random)
+    return random if Random === random
+    nil
+  end
+
+  # `count` draws of `__random_upto__`, under `top`, `top - 1`, ... in turn.
+  # A Random answers them in one call: a draw from one runs no Ruby, so
+  # nothing can change between them, and a send per draw was most of the
+  # cost of a long `sample` (#697). Anything else is asked once per draw.
+  def __random_draws__(random, top, count)
+    return [] if count == 0
+    generator = __generator_for__(random)
+    return generator.__limited_down__(top, count) unless generator.nil?
+    Array.new(count) { |k| __random_upto__(random, top - k) }
+  end
+
   # Fisher-Yates from the end, as `rb_ary_shuffle_bang`.
   def shuffle!(random: Random)
     __check_frozen__
     length = size
+    # A Random's draws are taken at once; anything else's one at a time, so
+    # a `rand` that changes the array is caught at the next draw.
+    draws = __generator_for__(random).nil? ? nil : __random_draws__(random, length - 1, length)
     i = length
     while i > 0
-      j = __random_upto__(random, i - 1)
+      j = draws.nil? ? __random_upto__(random, i - 1) : draws[length - i]
       raise RuntimeError, "modified during shuffle" unless size == length
       i = i - 1
       swap = self[i]
@@ -1580,7 +1601,7 @@ class Array
     n = Integer.__index__(count[0])
     raise ArgumentError, "negative sample number" if n < 0
     n = length if n > length
-    draws = n <= 10 ? Array.new(n) { |i| __random_upto__(random, length - i - 1) } : nil
+    draws = n <= 10 ? __random_draws__(random, length - 1, n) : nil
     drawn_from = length
     length = size
     if length < drawn_from && !draws.nil?
@@ -1636,7 +1657,8 @@ class Array
     if n <= threshold / 2
       # The partial shuffle below, with the swaps kept in a Hash rather than
       # a copy of the whole array.
-      picks = Array.new(n) { |i| __random_upto__(random, length - i - 1) + i }
+      draws = __random_draws__(random, length - 1, n)
+      picks = Array.new(n) { |i| draws[i] + i }
       length = size
       if length <= picks.max
         n = 0
@@ -1651,16 +1673,19 @@ class Array
         self[from]
       end
     end
-    out = Array.new(self)
+    # `+` and `[start, length]` copy natively; `Array.new(self)` and
+    # `__take__` would push one element at a time (#697).
+    out = [] + self
+    draws = __random_draws__(random, length - 1, n)
     i = 0
     while i < n
-      j = __random_upto__(random, length - i - 1) + i
+      j = draws[i] + i
       swap = out[i]
       out[i] = out[j]
       out[j] = swap
       i = i + 1
     end
-    out.__take__(0, n)
+    out[0, n]
   end
 
   # --- combinatorics ----------------------------------------------------------
