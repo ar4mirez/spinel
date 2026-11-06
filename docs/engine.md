@@ -321,8 +321,8 @@ the toolchain.
 
 What the engine does not implement yet returns `Error::Unsupported`, which the
 VM turns into `Error::Unknowable` and the spec runner reports as *blocked*: never a
-pass, never a wrong answer. Today that is `(?~)`, a recursive `\g<>` call, conditional groups,
-`\K`, `\R`, `\X`, `\p{}` and `\k<name+1>` level specifiers.
+pass, never a wrong answer. Today that is `(?~)`, a recursive `\g<>` call,
+`\X`, `\p{}` and a `\k<name+1>` level specifier past level 0.
 
 Matching is byte-oriented and reports byte offsets; `MatchData` converts to
 characters, because that is what `#begin` answers. A match reads its subject
