@@ -14,6 +14,7 @@
 //! the parser writes into the nodes that follow it, so the matcher never has to
 //! carry a flag register. That is also what makes `(?i:a)b` mean what it says.
 
+use crate::property::Property;
 use crate::{CharRange, Encoding, Error, Flags};
 use std::collections::HashMap;
 
@@ -112,6 +113,9 @@ pub enum ClassItem {
     Perl(Perl, bool),
     /// `[[:alpha:]]` and friends. Unicode-aware.
     Posix(Posix, bool),
+    /// `\p{L}` and its negations, in a UTF-8 pattern: a measured Unicode
+    /// property, which `(?a)` leaves alone.
+    Property(Property, bool),
     /// A nested `[...]`, which Onigmo allows inside a class.
     Nested(Box<Class>),
 }
@@ -941,7 +945,15 @@ impl Parser {
             'K' => Ast::Keep,
             'R' => self.line_break(),
             'X' => return Err(Error::Unsupported("the \\X grapheme cluster escape")),
-            'p' | 'P' => return Err(Error::Unsupported("a \\p{} unicode property")),
+            'p' | 'P' => match self.property(c == 'P')? {
+                Some((item, negated)) => Ast::Class(Class {
+                    negated,
+                    icase: self.flags.icase,
+                    items: vec![item],
+                    intersect: Vec::new(),
+                }),
+                None => self.literal(c),
+            },
             '1'..='9' => {
                 // A backreference, reading as many digits as name a group that
                 // already exists. A single digit may still be a *forward*
@@ -1148,6 +1160,7 @@ impl Parser {
 
             if c == '[' && self.peek_at(1) == Some(':') {
                 items.push(self.posix_class()?);
+                self.no_range_from_a_class()?;
                 continue;
             }
             if c == '[' {
@@ -1163,6 +1176,7 @@ impl Parser {
                     unreachable!("class_atom answers one of the two")
                 };
                 items.push(item);
+                self.no_range_from_a_class()?;
                 continue;
             };
 
@@ -1172,20 +1186,18 @@ impl Parser {
                 && self.peek_at(1).is_some()
             {
                 self.pos += 1;
-                match self.class_atom()? {
-                    ClassAtom::Char(high) => {
-                        if low_ch > high {
-                            return Err(Error::Syntax("empty range in char class".into()));
-                        }
-                        items.push(ClassItem::Range(low_ch, high));
-                    }
-                    // `[\w-z]` is `\w`, `-`, `z` in Ruby, not a range.
-                    ClassAtom::Item(item) => {
-                        items.push(ClassItem::Char(low_ch));
-                        items.push(ClassItem::Char('-'));
-                        items.push(item);
-                    }
+                // A range cannot end at a class: `[a-\w]`, `[a-[:digit:]]`.
+                let end_of_range = || Error::Syntax("char-class value at end of range".into());
+                if self.peek() == Some('[') && self.peek_at(1) == Some(':') {
+                    return Err(end_of_range());
                 }
+                let ClassAtom::Char(high) = self.class_atom()? else {
+                    return Err(end_of_range());
+                };
+                if low_ch > high {
+                    return Err(Error::Syntax("empty range in char class".into()));
+                }
+                items.push(ClassItem::Range(low_ch, high));
                 continue;
             }
             items.push(ClassItem::Char(low_ch));
@@ -1199,11 +1211,79 @@ impl Parser {
         })
     }
 
+    /// Nor can a range start at one: after `\w`, `[:alpha:]` or `\p{L}`, a
+    /// `-` is literal only before the `]` or a `&&`. `[\w-z]` is an error,
+    /// `[\w-]` the two. Measured on CRuby 4.0.9.
+    fn no_range_from_a_class(&self) -> Result<(), Error> {
+        let ranged = self.peek() == Some('-')
+            && !matches!(self.peek_at(1), None | Some(']'))
+            && !(self.peek_at(1) == Some('&') && self.peek_at(2) == Some('&'));
+        if ranged {
+            return Err(Error::Syntax(
+                "unmatched range specifier in char-class".into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// The half of `[a&&b]` after the `&&`, which runs to the same `]`.
     fn bracket_class_rest(&mut self) -> Result<Class, Error> {
         // Reuse the class parser by pretending the `&&` opened a new class:
         // it consumes up to the shared `]`, which is exactly right.
         self.bracket_class()
+    }
+
+    /// `\p{name}`, `\p{^name}` or `\P{name}`, after its `p` or `P`: the
+    /// property, unnegated, and whether the escape negates it. `None` when no
+    /// brace follows, and Onigmo reads the letter itself (with a warning).
+    ///
+    /// The name ends at `}`, and `(`, `)`, `{` or `|` before one end it as
+    /// invalid. The message names what was read, and an unterminated name
+    /// minus its last character, as Onigmo's does: `\p{Alpha` reports
+    /// `{Alph}`. A UTF-8 pattern reads every property CRuby measured; any
+    /// other only the POSIX names, in any case. Measured on CRuby 4.0.9.
+    fn property(&mut self, upper: bool) -> Result<Option<(ClassItem, bool)>, Error> {
+        if !self.eat('{') {
+            return Ok(None);
+        }
+        let negated = upper != self.eat('^');
+        let mut name = String::new();
+        let invalid =
+            |name: &str| Error::Syntax(format!("invalid character property name {{{name}}}"));
+        loop {
+            match self.next() {
+                Some('}') => break,
+                Some('(' | ')' | '{' | '|') => return Err(invalid(&name)),
+                Some(c) => name.push(c),
+                None => {
+                    name.pop();
+                    return Err(invalid(&name));
+                }
+            }
+        }
+        if self.encoding == Encoding::Utf8 {
+            return match crate::property::lookup(&name) {
+                Some(property) => Ok(Some((ClassItem::Property(property, false), negated))),
+                None => Err(invalid(&name)),
+            };
+        }
+        let lower = name.to_ascii_lowercase();
+        if let Some(kind) = posix_kind(&lower) {
+            return Ok(Some((ClassItem::Posix(kind, false), negated)));
+        }
+        // EUC-JP and Shift_JIS have six scripts of their own, as ranges of
+        // their own codes, that no table here holds yet.
+        if matches!(self.encoding, Encoding::EucJp | Encoding::ShiftJis)
+            && matches!(
+                lower.as_str(),
+                "hiragana" | "katakana" | "han" | "latin" | "greek" | "cyrillic"
+            )
+        {
+            return Err(Error::Unsupported(
+                "a \\p{} script property in an EUC-JP or Shift_JIS pattern",
+            ));
+        }
+        Err(invalid(&name))
     }
 
     fn posix_class(&mut self) -> Result<ClassItem, Error> {
@@ -1222,23 +1302,8 @@ impl Parser {
             self.pos = start;
             return Err(Error::Syntax("invalid POSIX bracket type".into()));
         }
-        let kind = match name.as_str() {
-            "alpha" => Posix::Alpha,
-            "digit" => Posix::Digit,
-            "alnum" => Posix::Alnum,
-            "upper" => Posix::Upper,
-            "lower" => Posix::Lower,
-            "space" => Posix::Space,
-            "blank" => Posix::Blank,
-            "punct" => Posix::Punct,
-            "print" => Posix::Print,
-            "graph" => Posix::Graph,
-            "cntrl" => Posix::Cntrl,
-            "xdigit" => Posix::XDigit,
-            "word" => Posix::Word,
-            "ascii" => Posix::Ascii,
-            _ => return Err(Error::Syntax("invalid POSIX bracket type".into())),
-        };
+        let kind =
+            posix_kind(&name).ok_or_else(|| Error::Syntax("invalid POSIX bracket type".into()))?;
         Ok(self.ranged(ClassItem::Posix(kind, negated)))
     }
 
@@ -1268,7 +1333,16 @@ impl Parser {
                 };
                 ClassAtom::Item(self.ranged(ClassItem::Perl(kind, negated)))
             }
-            'p' | 'P' => return Err(Error::Unsupported("a \\p{} unicode property")),
+            'p' | 'P' => match self.property(e == 'P')? {
+                Some((ClassItem::Property(property, _), negated)) => {
+                    ClassAtom::Item(ClassItem::Property(property, negated))
+                }
+                Some((ClassItem::Posix(kind, _), negated)) => {
+                    ClassAtom::Item(ClassItem::Posix(kind, negated))
+                }
+                Some(_) => unreachable!("a property is one of the two"),
+                None => ClassAtom::Char(e),
+            },
             _ => ClassAtom::Char(self.escaped_char(e)?),
         })
     }
@@ -1483,6 +1557,27 @@ enum ClassAtom {
     Item(ClassItem),
 }
 
+/// A POSIX bracket by name, as `[[:name:]]` spells it.
+fn posix_kind(name: &str) -> Option<Posix> {
+    Some(match name {
+        "alpha" => Posix::Alpha,
+        "digit" => Posix::Digit,
+        "alnum" => Posix::Alnum,
+        "upper" => Posix::Upper,
+        "lower" => Posix::Lower,
+        "space" => Posix::Space,
+        "blank" => Posix::Blank,
+        "punct" => Posix::Punct,
+        "print" => Posix::Print,
+        "graph" => Posix::Graph,
+        "cntrl" => Posix::Cntrl,
+        "xdigit" => Posix::XDigit,
+        "word" => Posix::Word,
+        "ascii" => Posix::Ascii,
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1589,13 +1684,7 @@ mod tests {
 
     #[test]
     fn onigmo_only_constructs_refuse_rather_than_guess() {
-        for source in [
-            "(?~foo)",
-            "(?<a>a\\g<a>?)",
-            "\\X",
-            "\\p{Alpha}",
-            "(?<a>a)\\k<a+1>",
-        ] {
+        for source in ["(?~foo)", "(?<a>a\\g<a>?)", "\\X", "(?<a>a)\\k<a+1>"] {
             assert!(
                 matches!(
                     parse(source, Flags::default(), Encoding::Utf8),
@@ -1604,6 +1693,42 @@ mod tests {
                 "{source} should refuse"
             );
         }
+    }
+
+    /// What `\p{}` refuses, and the name each message carries, as CRuby
+    /// 4.0.9 reports it.
+    #[test]
+    fn a_property_name_is_checked_as_onigmo_does() {
+        let message = |source: &str, encoding| match parse(source, Flags::default(), encoding) {
+            Err(Error::Syntax(message)) => message,
+            Err(other) => panic!("{source}: {other}"),
+            Ok(_) => panic!("{source} should not parse"),
+        };
+        let invalid = |name: &str| format!("invalid character property name {{{name}}}");
+        assert_eq!(message("\\p{Foo}", Encoding::Utf8), invalid("Foo"));
+        assert_eq!(message("\\p{", Encoding::Utf8), invalid(""));
+        assert_eq!(message("\\p{^}", Encoding::Utf8), invalid(""));
+        assert_eq!(message("\\p{Alpha", Encoding::Utf8), invalid("Alph"));
+        assert_eq!(message("\\p{L(}", Encoding::Utf8), invalid("L"));
+        assert_eq!(message("\\p{ ^L}", Encoding::Utf8), invalid(" ^L"));
+        assert_eq!(message("[\\p{é}]", Encoding::Utf8), invalid("é"));
+        assert_eq!(message("\\p{L}", Encoding::Binary), invalid("L"));
+        assert_eq!(message("\\p{al_pha}", Encoding::Binary), invalid("al_pha"));
+        assert!(parse("\\p{Alpha}", Flags::default(), Encoding::Binary).is_ok());
+        assert!(parse("\\p{^ASCII}", Flags::default(), Encoding::Binary).is_ok());
+        assert!(matches!(
+            parse("\\p{Hiragana}", Flags::default(), Encoding::EucJp),
+            Err(Error::Unsupported(_))
+        ));
+        // With no brace, `\p` is the letter.
+        assert_eq!(
+            parse("\\pL", Flags::default(), Encoding::Utf8)
+                .map(|p| p.ast)
+                .ok(),
+            parse("pL", Flags::default(), Encoding::Utf8)
+                .map(|p| p.ast)
+                .ok()
+        );
     }
 
     #[test]

@@ -322,7 +322,16 @@ the toolchain.
 What the engine does not implement yet returns `Error::Unsupported`, which the
 VM turns into `Error::Unknowable` and the spec runner reports as *blocked*: never a
 pass, never a wrong answer. Today that is `(?~)`, a recursive `\g<>` call,
-`\X`, `\p{}` and a `\k<name+1>` level specifier past level 0.
+`\X`, a `\k<name+1>` level specifier past level 0, and the six scripts
+(`\p{Hiragana}` and the rest) an EUC-JP or Shift_JIS pattern names in its own
+codes.
+
+`\p{}` in a UTF-8 pattern reads `tests/properties.txt`: every name CRuby's
+Onigmo takes there (general categories, scripts, binary properties, blocks
+and ages), measured over every codepoint by `scripts/regexp-oracle.rb` as the
+POSIX brackets are, and baked into range tables by `build.rs`. An age is
+stored as what its version added, and `\p{Age=V}` is the union up to `V`. In
+any other encoding `\p{}` takes only the POSIX bracket names.
 
 Matching is byte-oriented and reports byte offsets; `MatchData` converts to
 characters, because that is what `#begin` answers. A match reads its subject
