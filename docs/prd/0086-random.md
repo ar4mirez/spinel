@@ -15,7 +15,11 @@ spec comparing against a fixed draw, sees CRuby's numbers.
 is the reference generator — `init_genrand`, `init_by_array`,
 `genrand_int32` — behind two primitives: `__mt_new__(words, single)` answers
 a state String, and `__mt_next__(state, count)` draws 32-bit outputs and
-writes the advanced state back. The state is a BINARY String each `Random`
+writes the advanced state back. Two more came with #697, because a draw's
+cost is what bounds a long `sample`: `__mt_limited__(state, limit)` runs
+`limited_rand`'s mask-and-redraw loop for a limit below 2**32, and
+`__mt_limited_down__(state, top, count)` runs it under `top`, `top - 1`, ...
+for a shuffle's draws at once. The state is a BINARY String each `Random`
 holds (624 words and the index), so the default generator belongs to the
 heap, and there is no process-global one.
 

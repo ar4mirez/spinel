@@ -11009,27 +11009,50 @@ fn native_call<'h>(
             Ok(None)
         }
         Native::MtNext => {
-            let Some(&state) = call.args.first() else {
-                return Err(Error::NoDispatch {
-                    op: "__mt_next__",
-                    operands: "no generator state",
-                });
-            };
-            let handle = scope.root(state);
-            let bytes = crate::strings::bytes(scope, handle);
-            let Some(mut mt) = crate::mt::Mt::from_bytes(&bytes) else {
-                return Err(Error::NoDispatch {
-                    op: "__mt_next__",
-                    operands: "a String that is not a generator's state",
-                });
-            };
+            let (handle, mut mt) = mt_state(scope, &call, "__mt_next__")?;
             let count = int_arg(&call, 1).unwrap_or(1).max(0) as usize;
             let outputs: Vec<Value> = (0..count)
                 .map(|_| Value::fixnum(i64::from(mt.next_u32())).expect("a u32 is a fixnum"))
                 .collect();
-            let len = crate::strings::bytesize(scope, handle);
-            crate::strings::splice(scope, handle, 0, len, &mt.to_bytes());
+            mt_store(scope, handle, &mt);
             let value = new_array(scope, &outputs);
+            stack.push(value);
+            Ok(None)
+        }
+        Native::MtLimited => {
+            let Some(limit) = int_arg(&call, 1).and_then(|l| u32::try_from(l).ok()) else {
+                return Err(Error::NoDispatch {
+                    op: "__mt_limited__",
+                    operands: "a limit that is not in 0..2**32-1",
+                });
+            };
+            let (handle, mut mt) = mt_state(scope, &call, "__mt_limited__")?;
+            let value = mt.limited(limit);
+            mt_store(scope, handle, &mt);
+            stack.push(Value::fixnum(i64::from(value)).expect("a u32 is a fixnum"));
+            Ok(None)
+        }
+        Native::MtLimitedDown => {
+            let top = int_arg(&call, 1).and_then(|l| u32::try_from(l).ok());
+            let count = int_arg(&call, 2).and_then(|c| u32::try_from(c).ok());
+            let (Some(top), Some(count)) = (top, count) else {
+                return Err(Error::NoDispatch {
+                    op: "__mt_limited_down__",
+                    operands: "a limit or a count that is not in 0..2**32-1",
+                });
+            };
+            if u64::from(count) > u64::from(top) + 1 {
+                return Err(Error::NoDispatch {
+                    op: "__mt_limited_down__",
+                    operands: "more draws than limits down to zero",
+                });
+            }
+            let (handle, mut mt) = mt_state(scope, &call, "__mt_limited_down__")?;
+            let draws: Vec<Value> = (0..count)
+                .map(|k| Value::fixnum(i64::from(mt.limited(top - k))).expect("a u32 is a fixnum"))
+                .collect();
+            mt_store(scope, handle, &mt);
+            let value = new_array(scope, &draws);
             stack.push(value);
             Ok(None)
         }
@@ -14883,6 +14906,12 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         (Builtin::Kernel, &["__digest__"], Native::Digest),
         (Builtin::Kernel, &["__mt_new__"], Native::MtNew),
         (Builtin::Kernel, &["__mt_next__"], Native::MtNext),
+        (Builtin::Kernel, &["__mt_limited__"], Native::MtLimited),
+        (
+            Builtin::Kernel,
+            &["__mt_limited_down__"],
+            Native::MtLimitedDown,
+        ),
         (
             Builtin::BasicObject,
             &["__raise_no_method__"],
@@ -18656,6 +18685,36 @@ unsafe fn set_errno(value: libc::c_int) {
         let at = libc::__error();
         *at = value;
     }
+}
+
+/// The generator a `__mt_*__` primitive was handed: its state String's
+/// handle, and the state read out of it.
+fn mt_state<'h>(
+    scope: &mut HandleScope<'h>,
+    call: &Pending,
+    op: &'static str,
+) -> Result<(Handle<'h>, crate::mt::Mt), Error> {
+    let Some(&state) = call.args.first() else {
+        return Err(Error::NoDispatch {
+            op,
+            operands: "no generator state",
+        });
+    };
+    let handle = scope.root(state);
+    let bytes = crate::strings::bytes(scope, handle);
+    let Some(mt) = crate::mt::Mt::from_bytes(&bytes) else {
+        return Err(Error::NoDispatch {
+            op,
+            operands: "a String that is not a generator's state",
+        });
+    };
+    Ok((handle, mt))
+}
+
+/// Write a generator's state back into its String, in place.
+fn mt_store<'h>(scope: &mut HandleScope<'h>, handle: Handle<'h>, mt: &crate::mt::Mt) {
+    let len = crate::strings::bytesize(scope, handle);
+    crate::strings::splice(scope, handle, 0, len, &mt.to_bytes());
 }
 
 /// An Integer argument, if that is what was passed.

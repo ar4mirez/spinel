@@ -139,20 +139,9 @@ class Random
   # A uniform Integer in 0..limit: CRuby's `limited_rand` for a limit that
   # fits 64 bits, and `limited_big_rand` past that.
   def __limited__(limit)
-    return 0 if limit == 0
-    if limit <= 0xffffffff
-      # CRuby's `make_mask`: every bit below the top one set, in five steps
-      # where `bit_length` takes one per bit.
-      mask = limit | (limit >> 1)
-      mask = mask | (mask >> 2)
-      mask = mask | (mask >> 4)
-      mask = mask | (mask >> 8)
-      mask = mask | (mask >> 16)
-      while true
-        value = __mt_next__(@state, 1)[0] & mask
-        return value if value <= limit
-      end
-    end
+    # The 32-bit loop is `__mt_limited__`'s: it is the per-draw cost of
+    # `sample` and `shuffle` (#697).
+    return __mt_limited__(@state, limit) if limit <= 0xffffffff
     mask = (1 << limit.bit_length) - 1
     if limit <= 0xffffffffffffffff
       loop do
@@ -199,6 +188,14 @@ class Random
         return out.each_with_index.sum { |word, i| word << (32 * i) }
       end
     end
+  end
+
+  # `count` draws of `__limited__`, under `top`, `top - 1`, ... in turn: the
+  # limits a Fisher-Yates shuffle draws under, asked for at once so a long
+  # `sample` or `shuffle` is not a send per draw (#697).
+  def __limited_down__(top, count)
+    return __mt_limited_down__(@state, top, count) if top <= 0xffffffff
+    Array.new(count) { |k| __limited__(top - k) }
   end
 
   # CRuby's `rand_int`: below `max`, nil for zero, and for a negative one nil

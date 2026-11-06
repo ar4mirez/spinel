@@ -587,6 +587,16 @@ pub enum Native {
     /// `Kernel#__mt_next__(state, count)`: the next `count` 32-bit outputs as
     /// an Array of Integers, the state String updated in place.
     MtNext,
+    /// `Kernel#__mt_limited__(state, limit)`: a uniform Integer in 0..limit
+    /// for a limit below 2**32, drawn as CRuby's `limited_rand` draws it —
+    /// one output at a time under a mask, until one is not past the limit
+    /// (#697). The loop is the per-draw cost of `sample` and `shuffle`.
+    MtLimited,
+    /// `Kernel#__mt_limited_down__(state, top, count)`: `count` draws as
+    /// `__mt_limited__`'s, under the limits `top`, `top - 1`, ... — the order
+    /// a Fisher-Yates shuffle or a `sample` asks for them — as an Array
+    /// (#697). `top` is below 2**32 and `count` at most `top + 1`.
+    MtLimitedDown,
     /// `Kernel#__digest__(algorithm, string)`: the digest of the bytes, as a
     /// BINARY String — MD5, SHA1, SHA256, SHA384, SHA512 or RMD160 (#58).
     Digest,

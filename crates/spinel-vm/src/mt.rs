@@ -84,6 +84,22 @@ impl Mt {
         y ^ (y >> 18)
     }
 
+    /// A uniform value in 0..=limit: CRuby's `limited_rand` for a limit that
+    /// fits 32 bits. Every bit below the top one of `limit` is the mask, and
+    /// an output past `limit` under it is drawn again.
+    pub fn limited(&mut self, limit: u32) -> u32 {
+        if limit == 0 {
+            return 0;
+        }
+        let mask = u32::MAX >> limit.leading_zeros();
+        loop {
+            let value = self.next_u32() & mask;
+            if value <= limit {
+                return value;
+            }
+        }
+    }
+
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity((N + 1) * 4);
         for word in self.state {
@@ -125,5 +141,13 @@ mod tests {
         let mut mt = Mt::new(&[0x123, 0x234, 0x345, 0x456], false);
         assert_eq!(mt.next_u32(), 1_067_595_299);
         assert_eq!(mt.next_u32(), 955_945_823);
+    }
+
+    /// Ruby 4.0.6: `r = Random.new(42); 5.times.map { r.rand(6) }`.
+    #[test]
+    fn limited_draws_as_limited_rand() {
+        let mut mt = Mt::new(&[42], true);
+        let draws: Vec<u32> = (0..5).map(|_| mt.limited(5)).collect();
+        assert_eq!(draws, [3, 4, 2, 4, 4]);
     }
 }
