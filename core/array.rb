@@ -876,14 +876,23 @@ class Array
       # something else is sent `to_s`. The first element is taken out of the
       # loop, so the others pay for no test of which one they are, and
       # `__append_as_string__` tests theirs in the native.
+      # Then `rb_inspect` escapes one that is in neither the default
+      # encoding nor ASCII (`String.__inspect_target__`); the test is inline, so
+      # the common element pays for no send.
+      target = String.__inspect_target__
       part = self[0].inspect
       part = Array.__as_string__(part.to_s, part) unless String === part
+      part = String.__escape__(part) unless part.__encoding_index__ == target || part.ascii_only?
       out = "[".b.__force_encoding__(part.__encoding_index__)
       out << part
       i = 1
       while i < size
         out << ", "
-        out.__append_as_string__(self[i].inspect)
+        part = self[i].inspect
+        if String === part && part.__encoding_index__ != target && !part.ascii_only?
+          part = String.__escape__(part)
+        end
+        out.__append_as_string__(part)
         i += 1
       end
       out << "]"

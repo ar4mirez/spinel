@@ -625,6 +625,71 @@ class String
     shown.ascii_compatible? ? shown : Encoding::US_ASCII
   end
 
+  # `rb_inspect` takes an `inspect` answer as it is when it is in the
+  # default internal or external encoding, or ASCII only, and through
+  # `__escape__` otherwise, so that it joins anything; `Array#inspect` and
+  # `Hash#inspect` test that inline. This is the encoding index they let
+  # through, and -1 when the default encoding is not ASCII-compatible, which
+  # lets nothing but ASCII through.
+  def self.__inspect_target__
+    shown = Encoding.default_internal || Encoding.default_external
+    shown.ascii_compatible? ? shown.__index__ : -1
+  end
+
+  # CRuby's `rb_str_escape`: per character in the string's own encoding, the
+  # controls by their name, printable ASCII as itself, and everything else
+  # `\uXXXX` in a Unicode encoding or `\xXX` in another. Quotes and
+  # backslashes are not escaped. The answer is US-ASCII.
+  def self.__escape__(str)
+    index = str.__encoding_index__
+    wide = index >= 3 && index <= 6
+    unicode = wide || [1, 9, 15, 95, 97, 101].include?(index)
+    ascii = str.encoding.ascii_compatible?
+    out = +""
+    # ponytail: an invalid sequence is escaped as `each_char` groups it,
+    # where CRuby steps one minimum-length unit at a time and looks again.
+    # The bytes shown are the same unless a character starts inside one.
+    str.each_char do |char|
+      unless char.valid_encoding?
+        char.__bytes__.each { |b| out << "\\x" << Integer.__hex__(b, 2) }
+        next
+      end
+      code =
+        if unicode
+          char.bytesize == 1 ? char.getbyte(0) : char.encode(Encoding::UTF_8).ord
+        else
+          char.__bytes__.inject(0) { |n, b| (n << 8) | b }
+        end
+      named = __escaped_char__(code)
+      if named
+        out << named
+      elsif code >= 0x20 && code < 0x7f && (ascii || unicode)
+        out << Integer.__byte_string__(code).__force_encoding__(1)
+      elsif unicode
+        out << (code > 0xffff ? "\\u{" + Integer.__hex__(code, 1) + "}" : "\\u" + Integer.__hex__(code, 4))
+      else
+        out << (code > 0xff ? "\\x{" + Integer.__hex__(code, 1) + "}" : "\\x" + Integer.__hex__(code, 2))
+      end
+    end
+    out.__force_encoding__(2)
+  end
+
+  # `ruby_escaped_char`.
+  def self.__escaped_char__(code)
+    case code
+    when 0x00 then "\\0"
+    when 0x0a then "\\n"
+    when 0x0d then "\\r"
+    when 0x09 then "\\t"
+    when 0x0c then "\\f"
+    when 0x0b then "\\v"
+    when 0x08 then "\\b"
+    when 0x07 then "\\a"
+    when 0x1b then "\\e"
+    when 0x7f then "\\c?"
+    end
+  end
+
   # Built on first use: this file loads before `Hash`'s Ruby half.
   def self.__escapes__
     return @__escapes__ unless @__escapes__.nil?
