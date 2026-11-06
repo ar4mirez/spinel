@@ -410,6 +410,29 @@ struct Call {
     /// unwinds to here and becomes the call's value, rather than ending the
     /// evaluation. See `Native::RefusalBoundary`.
     boundary_limit: u64,
+    /// What a backtrace calls this frame, when a native pushed it (#711).
+    shown: Shown,
+}
+
+/// What a backtrace calls a frame a native pushed on its own behalf (#711).
+///
+/// A native hands what it cannot do itself to a core-library helper, whose
+/// frame CRuby does not have: CRuby has the C method's frame there, or none
+/// at all. `Module.new.module_eval(o)` with an `o` that converts through
+/// `to_str` is "in 'Module#module_eval'", not "in 'Kernel.__eval_string_args__'",
+/// and `send(o)` has no line of its own. Measured on 4.0.9.
+#[derive(Clone, Copy)]
+enum Shown {
+    /// Under its own name, as every frame is unless a native says otherwise.
+    Own,
+    /// Not at all: `send` and `__send__`, which CRuby makes without a frame.
+    Hidden,
+    /// Under the native's name: `Module#module_eval`, `Kernel#public_send`.
+    As(&'static str, SymbolId),
+    /// Under its own name, and then a line for the native that ran it at its
+    /// caller's position: a String `module_eval`'s body, which runs in a frame
+    /// of its own above a C method's.
+    Under(&'static str, SymbolId),
 }
 
 /// How a callee takes the arguments it was handed.
@@ -2265,6 +2288,7 @@ pub fn eval_in(
         defined_as: None,
         parked: Vec::new(),
         boundary_limit: 0,
+        shown: Shown::Own,
     }];
     // Frame ids, handed out in order. Zero means "no such frame", which is what
     // a body with nowhere to `break` to carries.
@@ -5292,6 +5316,7 @@ fn push_frame(
         defined_as: call.defined_as,
         parked: Vec::new(),
         boundary_limit: 0,
+        shown: Shown::Own,
     });
     Ok(())
 }
@@ -5674,6 +5699,27 @@ fn string_encoding(scope: &mut HandleScope<'_>, value: Value) -> Option<u8> {
     Some(crate::strings::encoding(scope, handle))
 }
 
+/// `dispatch`, with the frame it pushes shown in a backtrace as `shown`
+/// says: a core-library helper a native hands its work to (#711).
+fn dispatch_shown<'h>(
+    scope: &mut HandleScope<'h>,
+    stack: &mut Stack,
+    frames: &mut Vec<Call>,
+    call: Pending,
+    proc_class: Handle<'h>,
+    ids: &mut u64,
+    shown: Shown,
+) -> Result<Option<Unwind>, Error> {
+    let depth = frames.len();
+    let unwind = dispatch(scope, stack, frames, call, proc_class, ids)?;
+    if frames.len() > depth
+        && let Some(frame) = frames.get_mut(depth)
+    {
+        frame.shown = shown;
+    }
+    Ok(unwind)
+}
+
 /// One line of a backtrace: the file, the line, and what was running there.
 struct BacktraceLine {
     path: Arc<str>,
@@ -5693,31 +5739,46 @@ struct BacktraceLine {
 /// called it. `[2].map { raise }` is "in 'block in <main>'", "in 'Array#map'",
 /// "in '<main>'" — not the `each` and the block `core/array.rb` runs `map` on.
 fn backtrace_of(scope: &mut HandleScope<'_>, frames: &[Call]) -> Vec<BacktraceLine> {
-    let raw: Vec<(bool, BacktraceLine)> = frames
+    let raw: Vec<(bool, Shown, BacktraceLine)> = frames
         .iter()
         .rev()
         .map(|frame| {
             let path = frame.iseq.path.clone().unwrap_or_else(|| Arc::from(""));
             let line = frame.iseq.line_at(frame.pc.saturating_sub(1)).unwrap_or(0);
             let internal = path.starts_with("<internal:");
-            let label = frame_label(scope, frame);
-            (internal, BacktraceLine { path, line, label })
+            let label = match frame.shown {
+                Shown::As(owner, method) => native_label(owner, method),
+                _ => frame_label(scope, frame),
+            };
+            (internal, frame.shown, BacktraceLine { path, line, label })
         })
         .collect();
     let mut out = Vec::with_capacity(raw.len());
-    for (index, (internal, entry)) in raw.iter().enumerate() {
+    for (index, (internal, shown, entry)) in raw.iter().enumerate() {
         if !internal {
             out.push(BacktraceLine {
                 path: Arc::clone(&entry.path),
                 line: entry.line,
                 label: entry.label.clone(),
             });
+            if let (Shown::Under(owner, method), Some((false, _, caller))) =
+                (shown, raw.get(index + 1))
+            {
+                out.push(BacktraceLine {
+                    path: Arc::clone(&caller.path),
+                    line: caller.line,
+                    label: native_label(owner, *method),
+                });
+            }
+            continue;
+        }
+        if matches!(shown, Shown::Hidden) {
             continue;
         }
         // Only the core method the program itself called, at the program's
         // position: the next frame out is where that call was written.
         match raw.get(index + 1) {
-            Some((false, caller)) if !entry.label.starts_with("block ") => {
+            Some((false, _, caller)) if !entry.label.starts_with("block ") => {
                 out.push(BacktraceLine {
                     path: Arc::clone(&caller.path),
                     line: caller.line,
@@ -5728,6 +5789,14 @@ fn backtrace_of(scope: &mut HandleScope<'_>, frames: &[Call]) -> Vec<BacktraceLi
         }
     }
     out
+}
+
+/// `Module#module_eval`: a native's label, which is its owner's and its own.
+fn native_label(owner: &str, method: SymbolId) -> String {
+    format!(
+        "{owner}#{}",
+        crate::shared::symbols::name(method).unwrap_or_default()
+    )
 }
 
 /// What CRuby 3.4 calls a frame: `Foo#bar`, `Foo.bar`, `block (2 levels) in
@@ -6548,6 +6617,7 @@ fn open_class<'h>(
         errinfo_on_entry: scope.errinfo(),
         parked: Vec::new(),
         boundary_limit: 0,
+        shown: Shown::Own,
     });
     // A new definition's hooks run before its body: each is a frame above the
     // body's, pushed last-first so they run in order.
@@ -9417,14 +9487,13 @@ fn native_call<'h>(
                 // TypeError naming it by `inspect`: sends this primitive
                 // cannot make, so `Kernel.__send_name__` makes them and
                 // sends again with the name it answers.
-                let mut forwarded_args = Vec::with_capacity(args.len() + 4);
+                let mut forwarded_args = Vec::with_capacity(args.len() + 3);
                 forwarded_args.push(call.receiver);
                 forwarded_args.push(if public_only {
                     Value::TRUE
                 } else {
                     Value::FALSE
                 });
-                forwarded_args.push(Value::symbol(call.name));
                 forwarded_args.push(name);
                 forwarded_args.extend_from_slice(&args);
                 let forwarded = Pending {
@@ -9440,7 +9509,14 @@ fn native_call<'h>(
                     defined_as: None,
                     ..call
                 };
-                return dispatch(scope, stack, frames, forwarded, proc_class, ids);
+                // CRuby makes `send` without a frame, and `public_send` with
+                // one of its own.
+                let shown = if public_only {
+                    Shown::As("Kernel", call.name)
+                } else {
+                    Shown::Hidden
+                };
+                return dispatch_shown(scope, stack, frames, forwarded, proc_class, ids, shown);
             }
             let Some(name) = name_symbol(scope, name)? else {
                 return invalid_symbol(scope, stack, frames, call.cref, name, proc_class, ids);
@@ -11452,8 +11528,9 @@ fn native_call<'h>(
                 // sends this primitive cannot make, so `Kernel.__eval_string_args__`
                 // makes them and comes back through `__eval_string__`, which
                 // evaluates in the frame below its own — this call's caller.
-                // ponytail: that method's frame shows in a backtrace under its
-                // own name, where CRuby's says `Module#module_eval` (#711).
+                // Either way a backtrace has a line for this method, as
+                // CRuby's has one for the C method (#711).
+                let owner = if module { "Module" } else { "BasicObject" };
                 let plain = |scope: &mut HandleScope<'_>, index: usize| match call.args.get(index) {
                     None => true,
                     Some(&v) if index == 2 => {
@@ -11481,10 +11558,18 @@ fn native_call<'h>(
                         defined_as: None,
                         ..call
                     };
-                    return dispatch(scope, stack, frames, forwarded, proc_class, ids);
+                    let shown = Shown::As(owner, call.name);
+                    return dispatch_shown(scope, stack, frames, forwarded, proc_class, ids, shown);
                 }
                 let at = frames.len().checked_sub(1);
-                return eval_string(scope, stack, frames, &call, module, at, ids);
+                let depth = frames.len();
+                let unwind = eval_string(scope, stack, frames, &call, module, at, ids)?;
+                if frames.len() > depth
+                    && let Some(frame) = frames.last_mut()
+                {
+                    frame.shown = Shown::Under(owner, call.name);
+                }
+                return Ok(unwind);
             }
             if !exec && !call.args.is_empty() {
                 return Err(Error::raise(
