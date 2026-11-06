@@ -351,9 +351,9 @@ fn resolve(
 }
 
 /// Whether some group can call itself again before matching a character,
-/// through the groups it calls first. Each group's body is walked once for
-/// whether it may match empty and once for the calls it makes first, so the
-/// check is a cycle search over that graph rather than a walk of every path.
+/// through the groups it calls first. Which groups may match empty is settled
+/// first, by [`empty_groups`]; then each body is walked once for the calls it
+/// makes first, and the answer is a cycle search over those calls.
 fn never_ends(groups: &HashMap<usize, Ast>) -> bool {
     let empty = empty_groups(groups);
     let firsts: HashMap<usize, Vec<usize>> = groups
@@ -390,18 +390,50 @@ fn on_cycle(
 
 /// The groups whose bodies can match without consuming a character, as a
 /// least fixpoint: a group counts as consuming until its body is shown not to.
+/// Each body is walked once, and again only when a group it calls turns out
+/// to be empty.
 fn empty_groups(groups: &HashMap<usize, Ast>) -> HashSet<usize> {
+    let mut callers: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (&group, body) in groups {
+        let mut calls = Vec::new();
+        all_calls(body, &mut calls);
+        calls.sort_unstable();
+        calls.dedup();
+        for callee in calls {
+            callers.entry(callee).or_default().push(group);
+        }
+    }
     let mut empty = HashSet::new();
-    loop {
-        let before = empty.len();
-        for (&group, body) in groups {
-            if !empty.contains(&group) && may_be_empty(body, &empty) {
-                empty.insert(group);
-            }
+    let mut pending: Vec<usize> = groups.keys().copied().collect();
+    while let Some(group) = pending.pop() {
+        if empty.contains(&group) || !may_be_empty(&groups[&group], &empty) {
+            continue;
         }
-        if empty.len() == before {
-            return empty;
+        empty.insert(group);
+        if let Some(callers) = callers.get(&group) {
+            pending.extend(callers.iter().filter(|caller| !empty.contains(caller)));
         }
+    }
+    empty
+}
+
+/// Every group `ast` calls, wherever the call sits.
+fn all_calls(ast: &Ast, calls: &mut Vec<usize>) {
+    match ast {
+        Ast::CallGroup(group) => calls.push(*group),
+        Ast::Concat(parts) | Ast::Alt(parts) => {
+            parts.iter().for_each(|part| all_calls(part, calls))
+        }
+        Ast::Cond { yes, no, .. } => {
+            all_calls(yes, calls);
+            all_calls(no, calls);
+        }
+        Ast::Group { body, .. }
+        | Ast::Atomic(body)
+        | Ast::Repeat { body, .. }
+        | Ast::Look { body, .. }
+        | Ast::Absent(body) => all_calls(body, calls),
+        _ => {}
     }
 }
 
