@@ -94,7 +94,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `library/matrix` | 97 | 361 | 11 | 0 | 350 | 0 | 3% |
 | `library/mkmf` | 1 | 1 | 0 | 0 | 0 | 1 | 0% |
 | `library/monitor` | 6 | 12 | 0 | 0 | 12 | 0 | 0% |
-| `library/net-ftp` | 56 | 427 | 1 | 0 | 424 | 2 | 0% |
+| `library/net-ftp` | 56 | 419 | 1 | 0 | 416 | 2 | 0% |
 | `library/net-http` | 131 | 379 | 379 | 0 | 0 | 0 | 100% |
 | `library/objectspace` | 7 | 46 | 45 | 0 | 1 | 0 | 98% |
 | `library/observer` | 5 | 8 | 0 | 0 | 8 | 0 | 0% |
@@ -131,4 +131,4 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `optional/capi` | 47 | 0 | 0 | 0 | 0 | 0 | — |
 | `optional/thread_safety` | 1 | 5 | 0 | 0 | 5 | 0 | 0% |
 | `security` | 13 | 31 | 28 | 0 | 3 | 0 | 90% |
-| **total** | 3835 | 32691 | 29194 | 0 | 3214 | 283 | 89% |
+| **total** | 3835 | 32683 | 29194 | 0 | 3206 | 283 | 89% |

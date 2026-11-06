@@ -114,13 +114,15 @@ module Kernel
     loading.push(path)
     loaders[path] = me
     autoloads = __autoload_feature__(path, me)
+    loaded = false
     begin
       __load_file__(path, nil)
       __autoload_feature_done__(autoloads, path)
-    rescue Exception
-      features.delete(path)
-      raise
+      loaded = true
     ensure
+      # A load that did not finish — an exception, or a `throw` out of the
+      # file — is not recorded, so the next `require` runs it again.
+      features.delete(path) unless loaded
       loading.delete(path)
       loaders.delete(path)
       autoloads&.each { |owner, name| owner.instance_variable_get(:@__autoloading__)&.delete(name) }
@@ -161,7 +163,7 @@ module Kernel
                 owner.instance_variable_set(:@__autoload_spent__, {})
         spent[name] = path
       else
-        entries.delete(name)
+        owner.__autoload_forget__(name)
       end
     end
   end

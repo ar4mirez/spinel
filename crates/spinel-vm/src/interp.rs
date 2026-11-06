@@ -3529,14 +3529,14 @@ fn run<'h>(
                         // An autoload in a scope searched before the one that
                         // holds the constant comes first: it is the miss path's
                         // to load (#709).
-                        let found = match found {
-                            Some(_)
-                                if scope.autoloads(symbol)
-                                    && autoload_shadows(scope, cref, from, how, symbol)? =>
-                            {
-                                None
-                            }
-                            found => found,
+                        let found = if found.is_some()
+                            && scope.any_autoloads()
+                            && scope.autoloads(symbol)
+                            && autoload_shadows(scope, cref, from, how, symbol)
+                        {
+                            None
+                        } else {
+                            found
                         };
                         let Some(value) = found else {
                             // An autoload, or a `const_missing` of the
@@ -3754,14 +3754,16 @@ fn run<'h>(
                                 return Ok(thawing);
                             }
                         }
-                        if let Some(step) = autoload_definee(
-                            scope,
-                            &mut stack,
-                            &mut frames,
-                            def,
-                            proc_class,
-                            &mut ids,
-                        )? {
+                        if scope.any_autoloads()
+                            && let Some(step) = autoload_definee(
+                                scope,
+                                &mut stack,
+                                &mut frames,
+                                def,
+                                proc_class,
+                                &mut ids,
+                            )?
+                        {
                             return Ok(step);
                         }
                         if let Some(unwind) = open_class(
@@ -7414,6 +7416,8 @@ fn thaw_chilled<'h>(
 /// Whether `owner` holds an autoload for `name` that this thread has not
 /// started loading — `Module#autoload`'s entries, kept in `core/module.rb`.
 /// The thread loading it sees the name as not yet defined, as in CRuby.
+#[cold]
+#[inline(never)]
 fn autoload_pending(
     scope: &mut HandleScope<'_>,
     owner: ClassId,
@@ -7425,9 +7429,7 @@ fn autoload_pending(
         return Ok(false);
     }
     let key = Value::symbol(name);
-    let has = |scope: &mut HandleScope<'_>, hash: Value| {
-        hash_pairs(scope, hash).and_then(|pairs| pairs.into_iter().find(|&(k, _)| k == key))
-    };
+    let has = |scope: &mut HandleScope<'_>, hash: Value| symbol_key_get(scope, hash, key);
     if has(scope, entries).is_none() {
         return Ok(false);
     }
@@ -7444,29 +7446,61 @@ fn autoload_pending(
         return Ok(true);
     }
     let me = Value::fixnum(threads::current(scope) as i64).unwrap_or(Value::NIL);
-    Ok(has(scope, loading).is_none_or(|(_, thread)| thread != me))
+    Ok(has(scope, loading).is_none_or(|thread| thread != me))
+}
+
+/// The value a Hash keeps under the Symbol `key`, read in place: the
+/// autoload tables are small and keyed by Symbol, so this walks the pairs
+/// without copying them out the way [`hash_pairs`] does.
+#[cold]
+#[inline(never)]
+fn symbol_key_get(scope: &mut HandleScope<'_>, hash: Value, key: Value) -> Option<Value> {
+    let pairs = ivar_get(scope, hash, symbol("@__pairs__")).ok()?;
+    if heap_kind(scope, pairs) != Some(HeapKind::Array) {
+        return None;
+    }
+    let pairs = scope.root(pairs);
+    for index in 0..array_len(scope, pairs) {
+        let pair = array_get(scope, pairs, index);
+        if heap_kind(scope, pair) != Some(HeapKind::Array) {
+            continue;
+        }
+        let pair = scope.root(pair);
+        if array_len(scope, pair) == 2 && array_get(scope, pair, 0) == key {
+            return Some(array_get(scope, pair, 1));
+        }
+    }
+    None
 }
 
 /// Whether an autoload on a module the reference searches comes before the
 /// first module whose own table holds `name`.
+///
+/// Infallible on purpose: the owners are modules, whose instance variables
+/// always read, and a constant read's hot arm carries no extra error path.
+#[cold]
+#[inline(never)]
 fn autoload_shadows(
     scope: &mut HandleScope<'_>,
     cref: CrefId,
     from: ClassId,
     how: ConstScope,
     name: SymbolId,
-) -> Result<bool, Error> {
+) -> bool {
+    if !scope.autoloads(name) {
+        return false;
+    }
     for owner in const_owners(scope, cref, from, how) {
         if scope.classes().const_get_here(owner, name).is_some() {
             // Assigned by a file another thread is still autoloading: to this
             // thread it is that autoload yet, and reading it waits (#709).
-            return autoloading_elsewhere(scope, owner, name);
+            return autoloading_elsewhere(scope, owner, name).unwrap_or(false);
         }
-        if autoload_pending(scope, owner, name)? {
-            return Ok(true);
+        if autoload_pending(scope, owner, name).unwrap_or(false) {
+            return true;
         }
     }
-    Ok(false)
+    false
 }
 
 /// The modules a constant reference searches, in order: CRuby's lexical
@@ -7500,6 +7534,8 @@ fn const_owners(
 
 /// Whether another thread is part-way through the autoload of `name` on
 /// `owner` (`@__autoloading__`, kept by `Module#__autoload__`).
+#[cold]
+#[inline(never)]
 fn autoloading_elsewhere(
     scope: &mut HandleScope<'_>,
     owner: ClassId,
@@ -7512,13 +7548,13 @@ fn autoloading_elsewhere(
     }
     let key = Value::symbol(name);
     let me = Value::fixnum(threads::current(scope) as i64).unwrap_or(Value::NIL);
-    Ok(hash_pairs(scope, loading)
-        .and_then(|pairs| pairs.into_iter().find(|&(k, _)| k == key))
-        .is_some_and(|(_, thread)| thread != me))
+    Ok(symbol_key_get(scope, loading, key).is_some_and(|thread| thread != me))
 }
 
 /// Whether a constant reference that found nothing would autoload: an entry
 /// on a module the reference searches, in the order it searches them.
+#[cold]
+#[inline(never)]
 fn autoload_reachable(
     scope: &mut HandleScope<'_>,
     cref: CrefId,
@@ -7542,6 +7578,8 @@ fn autoload_reachable(
 /// The `OpenClass` operands stay on the stack, and the frame is rewound onto
 /// the instruction, the way [`thaw_chilled`] does it. `__autoload_definee__`
 /// removes the entry whatever the file did, so the second pass finds none.
+#[cold]
+#[inline(never)]
 fn autoload_definee<'h>(
     scope: &mut HandleScope<'h>,
     stack: &mut Stack,
@@ -12102,8 +12140,9 @@ fn native_call<'h>(
             Ok(None)
         }
         Native::MarkAutoloads => {
-            for name in call.args.iter().filter_map(|v| v.as_symbol()) {
-                scope.mark_autoloads(name);
+            let added = call.args.get(1).is_none_or(|v| v.is_truthy());
+            if let Some(name) = call.args.first().and_then(|v| v.as_symbol()) {
+                scope.mark_autoloads(name, added);
             }
             stack.push(Value::NIL);
             Ok(None)

@@ -315,8 +315,8 @@ class Module
     end
     return nil if feature && $LOADED_FEATURES.include?(feature)
     entries = instance_variable_get(:@__autoloads__) || instance_variable_set(:@__autoloads__, {})
+    __mark_autoloads__(symbol, true) unless entries.key?(symbol)
     entries[symbol] = path.dup.freeze
-    __mark_autoloads__(symbol)
     instance_variable_get(:@__autoload_spent__)&.delete(symbol)
     # By feature too, so a plain `require` of the same file is this autoload
     # running (`Kernel.__autoload_feature__`).
@@ -389,7 +389,7 @@ class Module
         loading.delete(symbol)
       end
     end
-    @__autoloads__&.delete(symbol)
+    __autoload_forget__(symbol)
     found = __reflect_const_lookup__(self, symbol, false)
     return found[0] unless found.nil?
     nil
@@ -402,8 +402,17 @@ class Module
     path = __autoload_entry__(symbol)
     return nil if path.nil?
     __autoload__(symbol, path)
-    @__autoloads__&.delete(symbol)
+    __autoload_forget__(symbol)
     nil
+  end
+
+  # Drop the entry for `symbol`, and tell the VM one fewer module holds an
+  # autoload by that name: once none does, its constant reads stop checking.
+  def __autoload_forget__(symbol)
+    entries = instance_variable_get(:@__autoloads__)
+    return if entries.nil? || !entries.key?(symbol)
+    entries.delete(symbol)
+    __mark_autoloads__(symbol, false)
   end
 
   # A constant the VM did not find (#39): an autoload for the name, where the
@@ -463,7 +472,7 @@ class Module
     # An autoload not yet loaded goes without loading its file, and answers
     # nil, as CRuby's does.
     if removed.nil? && @__autoloads__&.key?(symbol)
-      @__autoloads__.delete(symbol)
+      __autoload_forget__(symbol)
       @__autoload_spent__&.delete(symbol)
       @__autoload_locations__&.delete(symbol)
       return nil
