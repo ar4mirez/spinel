@@ -19,7 +19,10 @@ writes the advanced state back. Two more came with #697, because a draw's
 cost is what bounds a long `sample`: `__mt_limited__(state, limit)` runs
 `limited_rand`'s mask-and-redraw loop for a limit below 2**32, and
 `__mt_limited_down__(state, top, count)` runs it under `top`, `top - 1`, ...
-for a shuffle's draws at once. The state is a BINARY String each `Random`
+for a shuffle's draws at once. With #705, `__mt_real__(state, inclusive)`
+answers `genrand_res53`'s Float (or the inclusive one) directly, and
+`__mt_new__` takes a Fixnum seed and splits it itself: those were most of a
+`rand` and a `Random.new`. The state is a BINARY String each `Random`
 holds (624 words and the index), so the default generator belongs to the
 heap, and there is no process-global one.
 
