@@ -32,6 +32,9 @@ class Regexp
   # against.
   def initialize(pattern, flags = nil, timeout: nil)
     if pattern.is_a?(Regexp)
+      # One `Regexp.allocate` made is refused before anything else, with the
+      # `TypeError` its `source` raises.
+      pattern.source
       __warning__("flags ignored") unless flags.nil?
     else
       unless pattern.is_a?(String)
@@ -196,8 +199,11 @@ class Regexp
   # The source String is in the pattern's encoding, as CRuby keeps it: US-ASCII
   # for an ASCII pattern free to match in any ASCII-compatible encoding, and
   # the one a modifier, `/n` past ASCII, or the source itself fixed it to.
+  # One `Regexp.allocate` made has no source, and is BINARY. Measured.
   def encoding
     source.encoding
+  rescue TypeError
+    Encoding::BINARY
   end
 
   def fixed_encoding?

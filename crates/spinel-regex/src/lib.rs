@@ -26,8 +26,8 @@
 //! Constructs this engine does not implement yet return [`Error::Unsupported`]
 //! rather than a guess. The VM turns that into `Error::Unknowable`, and the
 //! spec run reports the example *blocked* — never passed, never failed.
-//! Today that is `(?~)`, `\g<>`, conditional groups, `\K`, `\R`, `\X`, `\p{}`
-//! and `\k<name+1>` level specifiers.
+//! Today that is `(?~)`, a recursive `\g<>` call, `\X`, `\p{}` and a
+//! `\k<name+1>` level specifier past level 0.
 //!
 //! ```
 //! use spinel_regex::{Flags, Regex};
@@ -86,6 +86,22 @@ pub struct Flags {
     pub extended: bool,
     /// `/m` — `.` also matches a newline.
     pub dotall: bool,
+    /// `(?a)`, `(?u)` and `(?d)`: which characters the shorthands and the
+    /// POSIX brackets reach. Only an inline option sets it; a literal's own
+    /// flags and `Regexp#options` never carry it.
+    pub range: CharRange,
+}
+
+/// What `\w`, `\d`, `\s` and the POSIX brackets reach past ASCII.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CharRange {
+    /// `(?d)`, Ruby's default: the shorthands are ASCII, the brackets Unicode.
+    #[default]
+    Default,
+    /// `(?a)`: both are ASCII.
+    Ascii,
+    /// `(?u)`: both are Unicode.
+    Unicode,
 }
 
 impl Flags {
@@ -119,6 +135,7 @@ impl Flags {
             icase: options & Self::IGNORECASE != 0,
             extended: options & Self::EXTENDED != 0,
             dotall: options & Self::MULTILINE != 0,
+            range: CharRange::Default,
         }
     }
 
@@ -900,6 +917,82 @@ mod tests {
     }
 
     #[test]
+    fn a_relative_call_or_backreference_counts_back_from_here() {
+        assert_eq!(find("(a)\\g<-1>", "aa"), Some((0, 2)));
+        assert_eq!(find("(a)\\k<-1>", "ab"), None);
+        assert_eq!(find("(a)\\k<-1>", "aa"), Some((0, 2)));
+        assert_eq!(find("(a)\\g<+1>(b)", "abb"), Some((0, 3)));
+        for refused in ["(a)\\k<-2>", "(a)\\k<+1>", "(a)\\g<-0>", "(?<a+>a)\\k<a+>"] {
+            assert!(
+                matches!(Regex::new(refused, Flags::default()), Err(Error::Syntax(_))),
+                "{refused}"
+            );
+        }
+        // Level 0 is the only level there is without recursion.
+        assert_eq!(find("(?<a>a)\\k<a+0>", "aa"), Some((0, 2)));
+    }
+
+    #[test]
+    fn a_conditional_takes_the_branch_its_group_decides() {
+        assert_eq!(find("(a)?(?(1)b|c)", "ab"), Some((0, 2)));
+        assert_eq!(find("(a)?(?(1)b|c)", "c"), Some((0, 1)));
+        assert_eq!(find("(a)?(?(1)b|c)", "ac"), Some((1, 2)));
+        assert_eq!(find("(a)(?(<-1>)a|b)", "aa"), Some((0, 2)));
+        assert_eq!(find("(?<n>a)(?('n')b|c)", "ab"), Some((0, 2)));
+        // With no `no` branch an unmatched group matches the empty string.
+        assert_eq!(find("(?(1)a)(a)", "a"), Some((0, 1)));
+        for refused in [
+            "(a)(?(1)a|b|c)",
+            "(a)(?(2)a|b)",
+            "(a)(?(?=a)a|b)",
+            "(?<a>a)(?(a)a|b)",
+            "(?<a>a)(?(1)a|b)",
+            "(?(<n>)a|b)(?<n>b)",
+        ] {
+            assert!(
+                matches!(Regex::new(refused, Flags::default()), Err(Error::Syntax(_))),
+                "{refused}"
+            );
+        }
+    }
+
+    #[test]
+    fn keep_moves_the_start_of_the_match() {
+        assert_eq!(find("a\\Kb", "xab"), Some((2, 3)));
+        assert_eq!(find("a\\K", "ab"), Some((1, 1)));
+    }
+
+    #[test]
+    fn a_line_break_takes_crlf_whole() {
+        assert_eq!(find("\\R", "x\r\ny"), Some((1, 3)));
+        assert_eq!(find("\\R\\n", "\r\n"), None);
+        assert_eq!(find("\\R", "\u{2028}"), Some((0, 3)));
+        assert_eq!(find("\\R", "\u{0b}"), Some((0, 1)));
+    }
+
+    #[test]
+    fn ascii_and_unicode_options_move_both_kinds_of_class() {
+        assert_eq!(find("(?a)[[:alpha:]]+", "a\u{3042}"), Some((0, 1)));
+        assert_eq!(find("(?a)[[:^alpha:]]", "a\u{3042}"), Some((1, 4)));
+        assert_eq!(find("(?u)\\w+", "a\u{3042}"), Some((0, 4)));
+        assert_eq!(find("(?d)\\w+", "a\u{3042}"), Some((0, 1)));
+        assert_eq!(find("(?u)\\h", "\u{3042}"), None);
+        assert_eq!(find("(?a:\\w)\\w", "aa"), Some((0, 2)));
+        assert!(matches!(
+            Regex::new("(?-a)a", Flags::default()),
+            Err(Error::Syntax(_))
+        ));
+    }
+
+    #[test]
+    fn a_backreference_past_the_groups_starting_8_or_9_is_digits() {
+        assert_eq!(find("\\99999", "99999"), Some((0, 5)));
+        assert_eq!(find("(a)\\999", "a999"), Some((0, 4)));
+        // Starting 1 to 7 it is an octal escape, as before.
+        assert_eq!(find("\\1000", "@0"), Some((0, 2)));
+    }
+
+    #[test]
     fn class_intersection_needs_both_halves() {
         assert_eq!(find("[a-z&&[^b]]", "b"), None);
         assert_eq!(find("[a-z&&[^b]]", "c"), Some((0, 1)));
@@ -911,6 +1004,7 @@ mod tests {
             icase: true,
             dotall: true,
             extended: false,
+            range: CharRange::Default,
         };
         assert_eq!(flags.to_options(), 1 | 4);
         assert_eq!(Flags::from_options(flags.to_options()), flags);

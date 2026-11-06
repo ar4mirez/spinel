@@ -14,7 +14,7 @@
 //! the parser writes into the nodes that follow it, so the matcher never has to
 //! carry a flag register. That is also what makes `(?i:a)b` mean what it says.
 
-use crate::{Encoding, Error, Flags};
+use crate::{CharRange, Encoding, Error, Flags};
 use std::collections::HashMap;
 
 /// One parsed node.
@@ -63,6 +63,14 @@ pub enum Ast {
     /// `\g<name>` or `\g<1>` as written; [`parse`] replaces every one with a
     /// copy of the group it calls before the matcher sees the tree.
     Call(String),
+    /// `(?(1)yes|no)`: `yes` if group `group` has matched, `no` otherwise.
+    Cond {
+        group: usize,
+        yes: Box<Ast>,
+        no: Box<Ast>,
+    },
+    /// `\K`: the match is reported as starting here.
+    Keep,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -155,6 +163,7 @@ pub fn parse(source: &str, flags: Flags, encoding: Encoding) -> Result<Parsed, E
         names: Vec::new(),
         name_index: HashMap::new(),
         numeric_backref: false,
+        conditioned: 0,
     };
     let ast = parser.alternation()?;
     if parser.pos < parser.chars.len() {
@@ -177,6 +186,11 @@ pub fn parse(source: &str, flags: Flags, encoding: Encoding) -> Result<Parsed, E
         return Err(Error::Syntax(
             "numbered backref/call is not allowed. (use name)".into(),
         ));
+    }
+    // `(?(1)...)` may test a group written after it, but not one that is never
+    // written at all.
+    if parser.conditioned > parser.groups {
+        return Err(Error::Syntax("invalid backref number/name".into()));
     }
     let mut ast = ast;
     resolve_calls(&mut ast, &parser.name_index)?;
@@ -243,6 +257,7 @@ fn contains_call(ast: &Ast) -> bool {
     match ast {
         Ast::Call(_) => true,
         Ast::Concat(parts) | Ast::Alt(parts) => parts.iter().any(contains_call),
+        Ast::Cond { yes, no, .. } => contains_call(yes) || contains_call(no),
         Ast::Group { body, .. }
         | Ast::Atomic(body)
         | Ast::Repeat { body, .. }
@@ -262,6 +277,10 @@ fn collect_groups(ast: &Ast, groups: &mut HashMap<usize, Ast>) {
         Ast::Concat(parts) | Ast::Alt(parts) => {
             parts.iter().for_each(|part| collect_groups(part, groups))
         }
+        Ast::Cond { yes, no, .. } => {
+            collect_groups(yes, groups);
+            collect_groups(no, groups);
+        }
         Ast::Atomic(body) | Ast::Repeat { body, .. } | Ast::Look { body, .. } => {
             collect_groups(body, groups)
         }
@@ -280,9 +299,6 @@ fn inline_calls(
             let index = match name.parse::<usize>() {
                 Ok(0) => return Err(Error::Unsupported("a \\g<0> call of the whole pattern")),
                 Ok(n) => n,
-                Err(_) if name.starts_with('-') || name.starts_with('+') => {
-                    return Err(Error::Unsupported("a relative \\g<> subexpression call"));
-                }
                 Err(_) => *names
                     .get(name.as_str())
                     .ok_or_else(|| Error::Syntax(format!("undefined name <{name}> reference")))?,
@@ -320,6 +336,10 @@ fn inline_calls(
             }
             Ok(())
         }
+        Ast::Cond { yes, no, .. } => {
+            inline_calls(yes, names, groups, calling)?;
+            inline_calls(no, names, groups, calling)
+        }
         Ast::Atomic(body) | Ast::Repeat { body, .. } | Ast::Look { body, .. } => {
             inline_calls(body, names, groups, calling)
         }
@@ -344,6 +364,14 @@ fn renumber_groups(ast: &mut Ast, renumber: &impl Fn(usize) -> Option<usize>) {
                 *group = new;
             }
         }
+        Ast::Cond { group, yes, no } => {
+            // The same holds for a condition: only a name survives to here.
+            if let Some(new) = renumber(*group) {
+                *group = new;
+            }
+            renumber_groups(yes, renumber);
+            renumber_groups(no, renumber);
+        }
         Ast::Concat(parts) | Ast::Alt(parts) => {
             for part in parts {
                 renumber_groups(part, renumber);
@@ -357,7 +385,8 @@ fn renumber_groups(ast: &mut Ast, renumber: &impl Fn(usize) -> Option<usize>) {
         | Ast::Class(_)
         | Ast::Any { .. }
         | Ast::Anchor(_)
-        | Ast::Call(_) => {}
+        | Ast::Call(_)
+        | Ast::Keep => {}
     }
 }
 
@@ -378,6 +407,9 @@ struct Parser {
     /// numeric backreference an error, including one written *before* the named
     /// group appears. Measured — `/\1(?<a>a)/` is refused too (#205).
     numeric_backref: bool,
+    /// The highest group a `(?(n)...)` condition names by number, checked
+    /// against the group count once the whole pattern is read.
+    conditioned: usize,
 }
 
 impl Parser {
@@ -678,10 +710,123 @@ impl Parser {
             // `(?~...)`, `(?(1)...)`, `(?{...})` and the other Onigmo corners.
             // Refused rather than approximated: see the crate docs.
             Some('~') => Err(Error::Unsupported("the (?~) absent operator")),
-            Some('(') => Err(Error::Unsupported("a conditional group (?(...)...)")),
+            Some('(') => {
+                self.pos += 1;
+                self.conditional()
+            }
             Some('{') => Err(Error::Unsupported("an embedded code block (?{...})")),
             _ => self.inline_flags(),
         }
+    }
+
+    /// `(?(cond)yes|no)`, from just after the `(?(`. The condition names a
+    /// group: `1`, `<1>`, `'1'`, `<-1>`, `<name>` or `'name'`. A bare name is
+    /// refused, as is a lookaround, and so is a third branch.
+    fn conditional(&mut self) -> Result<Ast, Error> {
+        let invalid = || Error::Syntax("invalid conditional pattern".into());
+        let group = match self.peek() {
+            Some(open @ ('<' | '\'')) => {
+                self.pos += 1;
+                let close = if open == '<' { '>' } else { '\'' };
+                let name = self.delimited_name(close).ok_or_else(invalid)?;
+                let group = self.reference(&name)?;
+                if name.parse::<usize>().is_ok() {
+                    self.conditioned = self.conditioned.max(group);
+                }
+                group
+            }
+            Some(c) if c.is_ascii_digit() => {
+                let mut digits = String::new();
+                while self.peek().is_some_and(|c| c.is_ascii_digit()) {
+                    digits.push(self.next().expect("just peeked"));
+                }
+                let group = self.reference(&digits)?;
+                self.conditioned = self.conditioned.max(group);
+                group
+            }
+            _ => return Err(invalid()),
+        };
+        if !self.eat(')') {
+            return Err(invalid());
+        }
+        let (yes, no) = match self.grouped_alternation()? {
+            Ast::Alt(mut branches) if branches.len() == 2 => {
+                let no = branches.pop().expect("two branches");
+                let yes = branches.pop().expect("two branches");
+                (yes, no)
+            }
+            Ast::Alt(_) => return Err(invalid()),
+            yes => (yes, Ast::Empty),
+        };
+        Ok(Ast::Cond {
+            group,
+            yes: Box::new(yes),
+            no: Box::new(no),
+        })
+    }
+
+    /// The name between `<` and `>`, or between quotes, consumed with its
+    /// closing delimiter. `None` if the pattern ends first.
+    fn delimited_name(&mut self, close: char) -> Option<String> {
+        let mut name = String::new();
+        loop {
+            match self.next()? {
+                c if c == close => return Some(name),
+                c => name.push(c),
+            }
+        }
+    }
+
+    /// The group a `\k<...>` or a `(?(<...>)...)` names: a number, a number
+    /// relative to the groups opened so far (`-1` is the last one), or a name,
+    /// optionally with a recursion level (`name+0`). Messages are Onigmo's.
+    fn reference(&mut self, name: &str) -> Result<usize, Error> {
+        let invalid_name = || Error::Syntax(format!("invalid group name <{name}>"));
+        let undefined = |base: &str| Error::Syntax(format!("undefined name <{base}> reference"));
+        // Before the number, which Rust would read `+1` as.
+        if name.starts_with('+') {
+            return Err(undefined(name));
+        }
+        if let Ok(n) = name.parse::<usize>() {
+            // `\k<0>` names the whole match rather than a group, and Ruby
+            // refuses the pattern rather than matching nothing with it.
+            if n == 0 {
+                return Err(invalid_name());
+            }
+            self.numeric_backref = true;
+            return Ok(n);
+        }
+        if let Some(back) = name.strip_prefix('-') {
+            let n = back.parse::<usize>().map_err(|_| invalid_name())?;
+            if n == 0 {
+                return Err(invalid_name());
+            }
+            if n > self.groups {
+                return Err(Error::Syntax("invalid backref number/name".into()));
+            }
+            self.numeric_backref = true;
+            return Ok(self.groups + 1 - n);
+        }
+        // `name+1` or `name-1`: a capture at a recursion level. A `+` or `-`
+        // not followed by a level is no name at all, even when a group is
+        // called exactly that — `(?<a+>a)` is legal and `\k<a+>` is not.
+        if let Some(at) = name.rfind(['+', '-']) {
+            let (base, level) = (&name[..at], &name[at + 1..]);
+            let Ok(level) = level.parse::<usize>() else {
+                return Err(invalid_name());
+            };
+            let group = *self.name_index.get(base).ok_or_else(|| undefined(base))?;
+            // Level 0 is the current level, which without recursion is every
+            // capture there is.
+            if level != 0 {
+                return Err(Error::Unsupported("a \\k<> level specifier"));
+            }
+            return Ok(group);
+        }
+        self.name_index
+            .get(name)
+            .copied()
+            .ok_or_else(|| undefined(name))
     }
 
     fn lookaround(&mut self, behind: bool, negate: bool) -> Result<Ast, Error> {
@@ -737,6 +882,11 @@ impl Parser {
                 Some('i') => flags.icase = !negating,
                 Some('m') => flags.dotall = !negating,
                 Some('x') => flags.extended = !negating,
+                // `(?a)`, `(?u)` and `(?d)` cannot be turned off, only
+                // replaced: `(?-a)` is an undefined option in Ruby.
+                Some('a') if !negating => flags.range = CharRange::Ascii,
+                Some('u') if !negating => flags.range = CharRange::Unicode,
+                Some('d') if !negating => flags.range = CharRange::Default,
                 Some('-') if !negating => negating = true,
                 Some(':') => {
                     self.pos += 1;
@@ -790,8 +940,8 @@ impl Parser {
             'w' | 'W' | 'd' | 'D' | 's' | 'S' | 'h' | 'H' => Ast::Class(self.shorthand_class(c)),
             'k' => return self.named_backref(),
             'g' => return self.subexpression_call(),
-            'K' => return Err(Error::Unsupported("the \\K keep operator")),
-            'R' => return Err(Error::Unsupported("the \\R line break escape")),
+            'K' => Ast::Keep,
+            'R' => self.line_break(),
             'X' => return Err(Error::Unsupported("the \\X grapheme cluster escape")),
             'p' | 'P' => return Err(Error::Unsupported("a \\p{} unicode property")),
             '1'..='9' => {
@@ -813,6 +963,12 @@ impl Parser {
                     digits.push(self.next().expect("just peeked"));
                 }
                 let value = digits.parse::<usize>().unwrap_or(usize::MAX);
+                // `\8` and `\9` start no octal escape, so past the groups
+                // they are the digit itself: `/\99999/` matches `"99999"`.
+                if value > self.groups && digits.len() > 1 && matches!(c, '8' | '9') {
+                    self.pos = start + 1;
+                    return Ok(self.literal(c));
+                }
                 if value > self.groups && digits.len() > 1 {
                     self.pos = start;
                     let ch = self.octal_escape()?;
@@ -847,8 +1003,27 @@ impl Parser {
                 None => return Err(Error::Syntax("invalid group name <>".into())),
             }
         }
-        if name.parse::<usize>().is_ok() || name.starts_with('-') || name.starts_with('+') {
+        if name.parse::<usize>().is_ok() {
             self.numeric_backref = true;
+        }
+        // `\g<-1>` calls the group opened last, `\g<+1>` the next one to
+        // open; both are kept as the absolute number they come to.
+        if let Some(sign @ ('-' | '+')) = name.chars().next() {
+            let n = name[1..]
+                .parse::<usize>()
+                .ok()
+                .filter(|&n| n > 0)
+                .ok_or_else(|| Error::Syntax(format!("invalid group name <{name}>")))?;
+            let group = if sign == '-' {
+                if n > self.groups {
+                    return Err(Error::Syntax("invalid backref number/name".into()));
+                }
+                self.groups + 1 - n
+            } else {
+                self.groups + n
+            };
+            self.numeric_backref = true;
+            return Ok(Ast::Call(group.to_string()));
         }
         Ok(Ast::Call(name))
     }
@@ -859,37 +1034,72 @@ impl Parser {
             Some('\'') => '\'',
             _ => return Err(Error::Syntax("invalid backref name".into())),
         };
-        let mut name = String::new();
-        loop {
-            match self.next() {
-                Some(c) if c == close => break,
-                Some(c) => name.push(c),
-                None => return Err(Error::Syntax("invalid backref name".into())),
-            }
-        }
-        // `\k<name+1>` asks for a capture at a recursion level, which needs the
-        // subexpression-call machinery this engine does not have.
-        if name.contains('+') || name.contains('-') {
-            return Err(Error::Unsupported("a \\k<> level specifier"));
-        }
-        let group = if let Ok(n) = name.parse::<usize>() {
-            // `\k<0>` names the whole match rather than a group, and Ruby
-            // refuses the pattern rather than matching nothing with it.
-            if n == 0 {
-                return Err(Error::Syntax(format!("invalid group name <{name}>")));
-            }
-            self.numeric_backref = true;
-            n
-        } else {
-            *self
-                .name_index
-                .get(&name)
-                .ok_or_else(|| Error::Syntax(format!("unknown group name: {name}")))?
-        };
+        let name = self
+            .delimited_name(close)
+            .ok_or_else(|| Error::Syntax("invalid backref name".into()))?;
+        let group = self.reference(&name)?;
         Ok(Ast::Backref {
             group,
             icase: self.flags.icase,
         })
+    }
+
+    /// `\R`: a CRLF pair, or any one line break, taken atomically —
+    /// `/\R\n/` does not match `"\r\n"`. Past ASCII the breaks are
+    /// Unicode's, which only a Unicode pattern can name.
+    fn line_break(&self) -> Ast {
+        let mut items = vec![ClassItem::Range('\n', '\r')];
+        if self.encoding == Encoding::Utf8 {
+            items.push(ClassItem::Char('\u{85}'));
+            items.push(ClassItem::Range('\u{2028}', '\u{2029}'));
+        }
+        let pair = Ast::Concat(vec![
+            Ast::Literal {
+                ch: '\r',
+                icase: false,
+            },
+            Ast::Literal {
+                ch: '\n',
+                icase: false,
+            },
+        ]);
+        let single = Ast::Class(Class {
+            negated: false,
+            icase: false,
+            items,
+            intersect: Vec::new(),
+        });
+        Ast::Atomic(Box::new(Ast::Alt(vec![pair, single])))
+    }
+
+    /// A shorthand or POSIX bracket as `(?a)` or `(?u)` reads it. Under `(?a)`
+    /// a bracket is cut down to ASCII before it is negated, so `[[:^alpha:]]`
+    /// still matches `あ`; under `(?u)` the shorthands read as the brackets
+    /// of the same name. `\h` is ASCII under every option.
+    fn ranged(&self, item: ClassItem) -> ClassItem {
+        match (self.flags.range, item) {
+            (CharRange::Ascii, ClassItem::Posix(kind, negated)) => {
+                let ascii = Class {
+                    negated: false,
+                    icase: self.flags.icase,
+                    items: vec![ClassItem::Posix(Posix::Ascii, false)],
+                    intersect: Vec::new(),
+                };
+                ClassItem::Nested(Box::new(Class {
+                    negated,
+                    icase: self.flags.icase,
+                    items: vec![ClassItem::Posix(kind, false)],
+                    intersect: vec![ascii],
+                }))
+            }
+            (CharRange::Unicode, ClassItem::Perl(kind, negated)) => match kind {
+                Perl::Word => ClassItem::Posix(Posix::Word, negated),
+                Perl::Digit => ClassItem::Posix(Posix::Digit, negated),
+                Perl::Space => ClassItem::Posix(Posix::Space, negated),
+                Perl::Hex => ClassItem::Perl(kind, negated),
+            },
+            (_, item) => item,
+        }
     }
 
     fn shorthand_class(&self, c: char) -> Class {
@@ -906,7 +1116,7 @@ impl Parser {
         Class {
             negated: false,
             icase: self.flags.icase,
-            items: vec![ClassItem::Perl(kind, negated)],
+            items: vec![self.ranged(ClassItem::Perl(kind, negated))],
             intersect: Vec::new(),
         }
     }
@@ -1031,7 +1241,7 @@ impl Parser {
             "ascii" => Posix::Ascii,
             _ => return Err(Error::Syntax("invalid POSIX bracket type".into())),
         };
-        Ok(ClassItem::Posix(kind, negated))
+        Ok(self.ranged(ClassItem::Posix(kind, negated)))
     }
 
     /// One element inside a bracket class: either a plain character, which may
@@ -1058,7 +1268,7 @@ impl Parser {
                     'h' => (Perl::Hex, false),
                     _ => (Perl::Hex, true),
                 };
-                ClassAtom::Item(ClassItem::Perl(kind, negated))
+                ClassAtom::Item(self.ranged(ClassItem::Perl(kind, negated)))
             }
             'p' | 'P' => return Err(Error::Unsupported("a \\p{} unicode property")),
             _ => ClassAtom::Char(self.escaped_char(e)?),
@@ -1381,7 +1591,13 @@ mod tests {
 
     #[test]
     fn onigmo_only_constructs_refuse_rather_than_guess() {
-        for source in ["(?~foo)", "(?<a>a\\g<a>?)", "a\\Kb", "\\R", "\\p{Alpha}"] {
+        for source in [
+            "(?~foo)",
+            "(?<a>a\\g<a>?)",
+            "\\X",
+            "\\p{Alpha}",
+            "(?<a>a)\\k<a+1>",
+        ] {
             assert!(
                 matches!(
                     parse(source, Flags::default(), Encoding::Utf8),

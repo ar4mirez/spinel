@@ -31,6 +31,13 @@ enum Inst {
         group: usize,
         icase: bool,
     },
+    /// `(?(n)...)`: carry on if group `group` has matched, else go to `no`.
+    IfMatched {
+        group: usize,
+        no: usize,
+    },
+    /// `\K`: the match now starts here.
+    Keep,
     /// Run the sub-program at `start` without consuming input.
     Look {
         behind: bool,
@@ -164,6 +171,22 @@ impl Compiler {
                 for item in items {
                     self.node(item)?;
                 }
+            }
+            Ast::Cond { group, yes, no } => {
+                let test = self.emit(Inst::Jump(0));
+                self.node(yes)?;
+                let skip = self.emit(Inst::Jump(0));
+                let otherwise = self.here();
+                self.node(no)?;
+                let end = self.here();
+                self.insts[test] = Inst::IfMatched {
+                    group: *group,
+                    no: otherwise,
+                };
+                self.insts[skip] = Inst::Jump(end);
+            }
+            Ast::Keep => {
+                self.emit(Inst::Keep);
             }
             Ast::Group { index, body } => match index {
                 Some(n) => {
@@ -504,6 +527,17 @@ impl Program {
                     }
                     Inst::Jump(target) => {
                         pc = *target;
+                        continue;
+                    }
+                    Inst::IfMatched { group, no } => {
+                        let matched = saves.get(group * 2).copied().flatten().is_some()
+                            && saves.get(group * 2 + 1).copied().flatten().is_some();
+                        pc = if matched { pc + 1 } else { *no };
+                        continue;
+                    }
+                    Inst::Keep => {
+                        saves[0] = Some(sp);
+                        pc += 1;
                         continue;
                     }
                     Inst::Split { prefer, alt } => {
