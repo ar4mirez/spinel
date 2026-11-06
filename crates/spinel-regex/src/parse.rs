@@ -16,7 +16,7 @@
 
 use crate::property::Property;
 use crate::{CharRange, Encoding, Error, Flags};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// One parsed node.
 #[derive(Debug, Clone, PartialEq)]
@@ -61,9 +61,22 @@ pub enum Ast {
         negate: bool,
         body: Box<Ast>,
     },
-    /// `\g<name>` or `\g<1>` as written; [`parse`] replaces every one with a
-    /// copy of the group it calls before the matcher sees the tree.
+    /// `\g<name>` or `\g<1>` as written; [`parse`] resolves every one to a
+    /// [`Ast::CallGroup`] before the matcher sees the tree.
     Call(String),
+    /// A call of group `n`, `0` being the whole pattern.
+    CallGroup(usize),
+    /// `\k<name+n>` and `\k<name-n>`: group `group` as captured `level`
+    /// calls away, `-1` out to the caller.
+    LevelBackref {
+        group: usize,
+        icase: bool,
+        level: isize,
+    },
+    /// `(?~absent)`.
+    Absent(Box<Ast>),
+    /// `\X`, one extended grapheme cluster.
+    Grapheme,
     /// `(?(1)yes|no)`: `yes` if group `group` has matched, `no` otherwise.
     Cond {
         group: usize,
@@ -239,22 +252,26 @@ fn drop_unnamed_groups(
     (named.len(), names)
 }
 
-/// Replace every subexpression call with a copy of the group it calls —
-/// capturing, so that the group's capture is the call's when the call matched
-/// last, as Onigmo has it.
+/// Resolve every subexpression call to the group it calls, which the matcher
+/// runs as a subroutine, as Onigmo does: so a call may recurse, and a level
+/// backreference can tell one call's capture from another's.
 ///
-/// A call into a group that, through calls, reaches itself is recursion, which
-/// a copy cannot express; that is refused. Every call the standard library
-/// makes — URI's RFC 3986 grammar is built of them — calls a group that does
-/// not.
+/// A call that can reach itself again before matching a character never
+/// ends, and Onigmo refuses the pattern: `/(?<a>a|\g<a>)/`. Measured.
 fn resolve_calls(ast: &mut Ast, names: &HashMap<String, usize>) -> Result<(), Error> {
     if !contains_call(ast) {
         return Ok(());
     }
     let mut groups: HashMap<usize, Ast> = HashMap::new();
     collect_groups(ast, &mut groups);
-    let mut calling = Vec::new();
-    inline_calls(ast, names, &groups, &mut calling)
+    resolve(ast, names, &groups)?;
+    let mut groups: HashMap<usize, Ast> = HashMap::new();
+    collect_groups(ast, &mut groups);
+    groups.insert(0, ast.clone());
+    if never_ends(&groups) {
+        return Err(Error::Syntax("never ending recursion".into()));
+    }
+    Ok(())
 }
 
 fn contains_call(ast: &Ast) -> bool {
@@ -265,7 +282,8 @@ fn contains_call(ast: &Ast) -> bool {
         Ast::Group { body, .. }
         | Ast::Atomic(body)
         | Ast::Repeat { body, .. }
-        | Ast::Look { body, .. } => contains_call(body),
+        | Ast::Look { body, .. }
+        | Ast::Absent(body) => contains_call(body),
         _ => false,
     }
 }
@@ -274,7 +292,7 @@ fn collect_groups(ast: &Ast, groups: &mut HashMap<usize, Ast>) {
     match ast {
         Ast::Group { index, body } => {
             if let Some(index) = index {
-                groups.insert(*index, ast.clone());
+                groups.insert(*index, (**body).clone());
             }
             collect_groups(body, groups);
         }
@@ -285,69 +303,179 @@ fn collect_groups(ast: &Ast, groups: &mut HashMap<usize, Ast>) {
             collect_groups(yes, groups);
             collect_groups(no, groups);
         }
-        Ast::Atomic(body) | Ast::Repeat { body, .. } | Ast::Look { body, .. } => {
-            collect_groups(body, groups)
-        }
+        Ast::Atomic(body)
+        | Ast::Repeat { body, .. }
+        | Ast::Look { body, .. }
+        | Ast::Absent(body) => collect_groups(body, groups),
         _ => {}
     }
 }
 
-fn inline_calls(
+/// Every `Ast::Call` to the `Ast::CallGroup` it names.
+fn resolve(
     ast: &mut Ast,
     names: &HashMap<String, usize>,
     groups: &HashMap<usize, Ast>,
-    calling: &mut Vec<usize>,
 ) -> Result<(), Error> {
     match ast {
         Ast::Call(name) => {
             let index = match name.parse::<usize>() {
-                Ok(0) => return Err(Error::Unsupported("a \\g<0> call of the whole pattern")),
                 Ok(n) => n,
                 Err(_) => *names
                     .get(name.as_str())
                     .ok_or_else(|| Error::Syntax(format!("undefined name <{name}> reference")))?,
             };
-            let Some(group) = groups.get(&index) else {
+            if index != 0 && !groups.contains_key(&index) {
                 return Err(Error::Syntax(format!("undefined group <{name}> reference")));
-            };
-            if calling.contains(&index) {
-                return Err(Error::Unsupported("a recursive \\g<> subexpression call"));
             }
-            let mut copy = group.clone();
-            calling.push(index);
-            let result = inline_calls(&mut copy, names, groups, calling);
-            calling.pop();
-            result?;
-            *ast = copy;
+            *ast = Ast::CallGroup(index);
             Ok(())
-        }
-        Ast::Group { index, body } => {
-            // A group's own body runs as part of a call into it, so a call it
-            // makes back to itself is recursion here too.
-            let pushed = index.is_some_and(|i| {
-                calling.push(i);
-                true
-            });
-            let result = inline_calls(body, names, groups, calling);
-            if pushed {
-                calling.pop();
-            }
-            result
         }
         Ast::Concat(parts) | Ast::Alt(parts) => {
             for part in parts {
-                inline_calls(part, names, groups, calling)?;
+                resolve(part, names, groups)?;
             }
             Ok(())
         }
         Ast::Cond { yes, no, .. } => {
-            inline_calls(yes, names, groups, calling)?;
-            inline_calls(no, names, groups, calling)
+            resolve(yes, names, groups)?;
+            resolve(no, names, groups)
         }
-        Ast::Atomic(body) | Ast::Repeat { body, .. } | Ast::Look { body, .. } => {
-            inline_calls(body, names, groups, calling)
-        }
+        Ast::Group { body, .. }
+        | Ast::Atomic(body)
+        | Ast::Repeat { body, .. }
+        | Ast::Look { body, .. }
+        | Ast::Absent(body) => resolve(body, names, groups),
         _ => Ok(()),
+    }
+}
+
+/// Whether some group can call itself again before matching a character,
+/// through the groups it calls first. Which groups may match empty is settled
+/// first, by [`empty_groups`]; then each body is walked once for the calls it
+/// makes first, and the answer is a cycle search over those calls.
+fn never_ends(groups: &HashMap<usize, Ast>) -> bool {
+    let empty = empty_groups(groups);
+    let firsts: HashMap<usize, Vec<usize>> = groups
+        .iter()
+        .map(|(&group, body)| {
+            let mut calls = Vec::new();
+            first_calls(body, &empty, &mut calls);
+            (group, calls)
+        })
+        .collect();
+    let mut done = HashMap::new();
+    groups
+        .keys()
+        .any(|&group| on_cycle(group, &firsts, &mut done))
+}
+
+/// Depth-first from `group`: whether it reaches a group still being followed.
+/// `done` holds each group already settled, `false` while it is open.
+fn on_cycle(
+    group: usize,
+    firsts: &HashMap<usize, Vec<usize>>,
+    done: &mut HashMap<usize, bool>,
+) -> bool {
+    if let Some(&settled) = done.get(&group) {
+        return !settled;
+    }
+    done.insert(group, false);
+    let cycle = firsts
+        .get(&group)
+        .is_some_and(|calls| calls.iter().any(|&next| on_cycle(next, firsts, done)));
+    done.insert(group, true);
+    cycle
+}
+
+/// The groups whose bodies can match without consuming a character, as a
+/// least fixpoint: a group counts as consuming until its body is shown not to.
+/// Each body is walked once, and again only when a group it calls turns out
+/// to be empty.
+fn empty_groups(groups: &HashMap<usize, Ast>) -> HashSet<usize> {
+    let mut callers: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (&group, body) in groups {
+        let mut calls = Vec::new();
+        all_calls(body, &mut calls);
+        calls.sort_unstable();
+        calls.dedup();
+        for callee in calls {
+            callers.entry(callee).or_default().push(group);
+        }
+    }
+    let mut empty = HashSet::new();
+    let mut pending: Vec<usize> = groups.keys().copied().collect();
+    while let Some(group) = pending.pop() {
+        if empty.contains(&group) || !may_be_empty(&groups[&group], &empty) {
+            continue;
+        }
+        empty.insert(group);
+        if let Some(callers) = callers.get(&group) {
+            pending.extend(callers.iter().filter(|caller| !empty.contains(caller)));
+        }
+    }
+    empty
+}
+
+/// Every group `ast` calls, wherever the call sits.
+fn all_calls(ast: &Ast, calls: &mut Vec<usize>) {
+    match ast {
+        Ast::CallGroup(group) => calls.push(*group),
+        Ast::Concat(parts) | Ast::Alt(parts) => {
+            parts.iter().for_each(|part| all_calls(part, calls))
+        }
+        Ast::Cond { yes, no, .. } => {
+            all_calls(yes, calls);
+            all_calls(no, calls);
+        }
+        Ast::Group { body, .. }
+        | Ast::Atomic(body)
+        | Ast::Repeat { body, .. }
+        | Ast::Look { body, .. }
+        | Ast::Absent(body) => all_calls(body, calls),
+        _ => {}
+    }
+}
+
+/// The groups `ast` can call before it has matched a character.
+fn first_calls(ast: &Ast, empty: &HashSet<usize>, calls: &mut Vec<usize>) {
+    match ast {
+        Ast::CallGroup(group) => calls.push(*group),
+        Ast::Concat(parts) => {
+            for part in parts {
+                first_calls(part, empty, calls);
+                if !may_be_empty(part, empty) {
+                    break;
+                }
+            }
+        }
+        Ast::Alt(parts) => parts
+            .iter()
+            .for_each(|part| first_calls(part, empty, calls)),
+        Ast::Cond { yes, no, .. } => {
+            first_calls(yes, empty, calls);
+            first_calls(no, empty, calls);
+        }
+        Ast::Group { body, .. }
+        | Ast::Atomic(body)
+        | Ast::Repeat { body, .. }
+        | Ast::Look { body, .. }
+        | Ast::Absent(body) => first_calls(body, empty, calls),
+        _ => {}
+    }
+}
+
+/// Whether `ast` can match without consuming a character, given the groups
+/// known to.
+fn may_be_empty(ast: &Ast, empty: &HashSet<usize>) -> bool {
+    match ast {
+        Ast::Literal { .. } | Ast::Class(_) | Ast::Any { .. } | Ast::Grapheme => false,
+        Ast::Concat(parts) => parts.iter().all(|part| may_be_empty(part, empty)),
+        Ast::Alt(parts) => parts.iter().any(|part| may_be_empty(part, empty)),
+        Ast::Group { body, .. } | Ast::Atomic(body) => may_be_empty(body, empty),
+        Ast::Repeat { body, min, .. } => *min == 0 || may_be_empty(body, empty),
+        Ast::CallGroup(group) => empty.contains(group),
+        _ => true,
     }
 }
 
@@ -360,11 +488,19 @@ fn renumber_groups(ast: &mut Ast, renumber: &impl Fn(usize) -> Option<usize>) {
             }
             renumber_groups(body, renumber);
         }
-        Ast::Backref { group, .. } => {
-            // A numeric backreference is already an error in a pattern with
-            // names, so this only ever resolves a `\k<name>` — which points at
-            // a named group and therefore always renumbers.
+        // A numeric backreference or call is already an error in a pattern
+        // with names, so this only ever resolves a name — which points at a
+        // named group and therefore always renumbers. `\g<0>` is the whole
+        // pattern under any numbering.
+        Ast::Backref { group, .. } | Ast::LevelBackref { group, .. } => {
             if let Some(new) = renumber(*group) {
+                *group = new;
+            }
+        }
+        Ast::CallGroup(group) => {
+            if *group != 0
+                && let Some(new) = renumber(*group)
+            {
                 *group = new;
             }
         }
@@ -381,7 +517,10 @@ fn renumber_groups(ast: &mut Ast, renumber: &impl Fn(usize) -> Option<usize>) {
                 renumber_groups(part, renumber);
             }
         }
-        Ast::Atomic(body) | Ast::Repeat { body, .. } | Ast::Look { body, .. } => {
+        Ast::Atomic(body)
+        | Ast::Repeat { body, .. }
+        | Ast::Look { body, .. }
+        | Ast::Absent(body) => {
             renumber_groups(body, renumber);
         }
         Ast::Empty
@@ -390,7 +529,8 @@ fn renumber_groups(ast: &mut Ast, renumber: &impl Fn(usize) -> Option<usize>) {
         | Ast::Any { .. }
         | Ast::Anchor(_)
         | Ast::Call(_)
-        | Ast::Keep => {}
+        | Ast::Keep
+        | Ast::Grapheme => {}
     }
 }
 
@@ -713,7 +853,11 @@ impl Parser {
             }
             // `(?~...)`, `(?(1)...)`, `(?{...})` and the other Onigmo corners.
             // Refused rather than approximated: see the crate docs.
-            Some('~') => Err(Error::Unsupported("the (?~) absent operator")),
+            Some('~') => {
+                self.pos += 1;
+                let body = self.grouped_alternation()?;
+                Ok(Ast::Absent(Box::new(body)))
+            }
             Some('(') => {
                 self.pos += 1;
                 self.conditional()
@@ -783,6 +927,14 @@ impl Parser {
     /// relative to the groups opened so far (`-1` is the last one), or a name,
     /// any of them optionally with a recursion level (`name+0`, `1+0`). Messages are Onigmo's.
     fn reference(&mut self, name: &str) -> Result<usize, Error> {
+        match self.leveled_reference(name)? {
+            (group, None | Some(0)) => Ok(group),
+            (_, Some(_)) => Err(Error::Unsupported("a level in a conditional's group")),
+        }
+    }
+
+    /// [`Parser::reference`], with the level a `name+n` or `name-n` gives.
+    fn leveled_reference(&mut self, name: &str) -> Result<(usize, Option<isize>), Error> {
         let invalid_name = || Error::Syntax(format!("invalid group name <{name}>"));
         let undefined = |base: &str| Error::Syntax(format!("undefined name <{base}> reference"));
         // Before the number, which Rust would read `+1` as.
@@ -794,16 +946,16 @@ impl Parser {
         // called exactly that — `(?<a+>a)` is legal and `\k<a+>` is not.
         if let Some(at) = name.rfind(['+', '-']).filter(|&at| at > 0) {
             let (base, level) = (&name[..at], &name[at + 1..]);
-            let Ok(level) = level.parse::<usize>() else {
+            let Ok(level) = level.parse::<isize>() else {
                 return Err(invalid_name());
             };
+            let level = if name.as_bytes()[at] == b'-' {
+                -level
+            } else {
+                level
+            };
             let group = self.reference(base)?;
-            // Level 0 is the current level, which without recursion is every
-            // capture there is.
-            if level != 0 {
-                return Err(Error::Unsupported("a \\k<> level specifier"));
-            }
-            return Ok(group);
+            return Ok((group, Some(level)));
         }
         if let Ok(n) = name.parse::<usize>() {
             // `\k<0>` names the whole match rather than a group, and Ruby
@@ -812,7 +964,7 @@ impl Parser {
                 return Err(invalid_name());
             }
             self.numeric_backref = true;
-            return Ok(n);
+            return Ok((n, None));
         }
         if let Some(back) = name.strip_prefix('-') {
             let n = back.parse::<usize>().map_err(|_| invalid_name())?;
@@ -823,11 +975,12 @@ impl Parser {
                 return Err(Error::Syntax("invalid backref number/name".into()));
             }
             self.numeric_backref = true;
-            return Ok(self.groups + 1 - n);
+            return Ok((self.groups + 1 - n, None));
         }
         self.name_index
             .get(name)
             .copied()
+            .map(|group| (group, None))
             .ok_or_else(|| undefined(name))
     }
 
@@ -944,7 +1097,7 @@ impl Parser {
             'g' => return self.subexpression_call(),
             'K' => Ast::Keep,
             'R' => self.line_break(),
-            'X' => return Err(Error::Unsupported("the \\X grapheme cluster escape")),
+            'X' => Ast::Grapheme,
             'p' | 'P' => match self.property(c == 'P')? {
                 Some((item, negated)) => Ast::Class(Class {
                     negated,
@@ -1013,7 +1166,9 @@ impl Parser {
                 None => return Err(Error::Syntax("invalid group name <>".into())),
             }
         }
-        if name.parse::<usize>().is_ok() {
+        // `\g<0>` is the whole pattern, which a name does not renumber, so a
+        // pattern with names may call it: `/(?<a>x)\g<0>?/`. Measured.
+        if name.parse::<usize>().is_ok_and(|n| n != 0) {
             self.numeric_backref = true;
         }
         // `\g<-1>` calls the group opened last, `\g<+1>` the next one to
@@ -1047,10 +1202,16 @@ impl Parser {
         let name = self
             .delimited_name(close)
             .ok_or_else(|| Error::Syntax("invalid backref name".into()))?;
-        let group = self.reference(&name)?;
-        Ok(Ast::Backref {
-            group,
-            icase: self.flags.icase,
+        Ok(match self.leveled_reference(&name)? {
+            (group, None) => Ast::Backref {
+                group,
+                icase: self.flags.icase,
+            },
+            (group, Some(level)) => Ast::LevelBackref {
+                group,
+                icase: self.flags.icase,
+                level,
+            },
         })
     }
 
@@ -1684,7 +1845,7 @@ mod tests {
 
     #[test]
     fn onigmo_only_constructs_refuse_rather_than_guess() {
-        for source in ["(?~foo)", "(?<a>a\\g<a>?)", "\\X", "(?<a>a)\\k<a+1>"] {
+        for source in ["(?{a})", "(a)(?(<1+1>)a|b)"] {
             assert!(
                 matches!(
                     parse(source, Flags::default(), Encoding::Utf8),

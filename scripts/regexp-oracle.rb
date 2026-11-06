@@ -69,7 +69,14 @@ EXTRA = [
   # and one in the arm of an alternation that did not run.
   '(a)(?<b>b)', '(?<b>b)(a)', '(a)(?<b>b)(c)(?<d>d)', '(?<b>b)(?<a>a)',
   '(?<x>a)(y)?', '(?:a)(?<b>b)', '(?<a>x)|(y)', '((?<b>b))',
-  '(?<b>(a))', '(a)(b)'
+  '(?<b>(a))', '(a)(b)',
+
+  # #33: Onigmo's absent operator, which the corpus builds with `Regexp.new`
+  # rather than as a literal; recursive calls and the call levels a level
+  # backreference reads; a call of the whole pattern; and `\X`.
+  '(?~foo)', '(?~)', '(?~$)', '(?~(b))', '(?~a|b)', 'a(?~b)?c',
+  '(?<a>.)\g<a>\k<a+0>', '(?<a>.)(?<b>\g<a>)\k<a+1>', '(?<a>a|\(\g<a>\))',
+  '\A(?<a>.\g<a>?)\z', '\(\g<0>?\)', '(?<a>\g<a>)', '\X', '\X\X'
 ].freeze
 
 # Patterns whose *meaning* is fine but whose timing is not: Ruby answers a

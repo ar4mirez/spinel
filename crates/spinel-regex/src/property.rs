@@ -34,8 +34,15 @@ pub(crate) fn lookup(name: &str) -> Option<Property> {
     if let Some(at) = AGES.iter().position(|(age, _)| *age == key) {
         return u8::try_from(at).ok().map(Property::Age);
     }
+    named(&key)
+}
+
+/// A measured set by the name `tests/properties.txt` spells it with, already
+/// lowercase and with nothing dropped: what `\X` reads its sets by, without
+/// [`lookup`]'s allocation per character.
+pub(crate) fn named(key: &str) -> Option<Property> {
     NAMES
-        .binary_search_by(|(name, _)| (*name).cmp(key.as_str()))
+        .binary_search_by(|(name, _)| (*name).cmp(key))
         .ok()
         .map(|at| Property::Set(NAMES[at].1))
 }

@@ -18,6 +18,7 @@ use crate::{Payload, Value};
 use spinel_regex::{Flags, Regex};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// Slot layout of a `Regexp` object.
 mod regexp_slot {
@@ -60,8 +61,13 @@ pub const LITERAL_ENCODING_SHIFT: u32 = 8;
 #[derive(Default)]
 pub struct Regexps {
     compiled: Vec<Arc<Regex>>,
-    /// `(source, options)` to the one `Regexp` object a literal answers with.
-    cache: HashMap<(String, i64), Value>,
+    /// `(source, options, source encoding)` to the one `Regexp` object a
+    /// literal answers with.
+    cache: HashMap<(String, i64, u8), Value>,
+    /// `Regexp.timeout`: how long any match may run, unless its pattern says.
+    timeout: Option<Duration>,
+    /// The `timeout:` a `Regexp.new` gave, by the compiled pattern's index.
+    timeouts: HashMap<usize, Duration>,
     /// `/o` sites, keyed by the body they are in and their index within it.
     ///
     /// Not keyed by source: `/o` answers the *first* interpolation for ever, so
@@ -88,6 +94,8 @@ impl Regexps {
         Regexps {
             compiled: Vec::new(),
             cache: HashMap::new(),
+            timeout: None,
+            timeouts: HashMap::new(),
             once: HashMap::new(),
             strings: HashMap::new(),
         }
@@ -117,12 +125,38 @@ impl Regexps {
     }
 
     #[must_use]
-    pub fn cached(&self, source: &str, options: i64) -> Option<Value> {
-        self.cache.get(&(source.to_owned(), options)).copied()
+    pub fn cached(&self, source: &str, options: i64, encoding: u8) -> Option<Value> {
+        self.cache
+            .get(&(source.to_owned(), options, encoding))
+            .copied()
     }
 
-    pub fn cache(&mut self, source: &str, options: i64, value: Value) {
-        self.cache.insert((source.to_owned(), options), value);
+    pub fn cache(&mut self, source: &str, options: i64, encoding: u8, value: Value) {
+        self.cache
+            .insert((source.to_owned(), options, encoding), value);
+    }
+
+    /// `Regexp.timeout=`, which `core/regexp.rb` has already checked.
+    ///
+    /// ponytail: one per heap, where CRuby's is one per process. A Ractor
+    /// that sets it sets its own; share it under the class lock in
+    /// `shared/` if a program ever needs one Ractor to time another's.
+    pub fn set_timeout(&mut self, timeout: Option<Duration>) {
+        self.timeout = timeout;
+    }
+
+    /// The `timeout:` the pattern at `index` was made with.
+    pub fn set_pattern_timeout(&mut self, index: usize, timeout: Duration) {
+        self.timeouts.insert(index, timeout);
+    }
+
+    /// When a match of the pattern at `index` that starts now is due to give
+    /// up: its own `timeout:`, or else `Regexp.timeout`. A deadline too far
+    /// off to name is none.
+    #[must_use]
+    pub fn deadline(&self, index: usize) -> Option<Instant> {
+        let timeout = self.timeouts.get(&index).copied().or(self.timeout)?;
+        Instant::now().checked_add(timeout)
     }
 
     /// The cached literals, which are reachable from nothing else.

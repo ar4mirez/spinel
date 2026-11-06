@@ -241,7 +241,7 @@ fn agrees_with_cruby_on_every_pattern_it_accepts() {
 /// is closing. Lower this number as constructs land; never raise it.
 #[test]
 fn refusals_stay_within_their_budget() {
-    const BUDGET: usize = 40;
+    const BUDGET: usize = 2;
     let tally = replay();
     let mut kinds: Vec<&str> = tally.refused.iter().map(|(_, what)| *what).collect();
     kinds.sort_unstable();

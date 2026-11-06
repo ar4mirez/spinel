@@ -152,11 +152,15 @@ pub enum Native {
     /// take part), or nil. Leaves `$~` alone: what `StringScanner` (#57) is
     /// built on.
     RegexpMatchAt,
-    /// `Regexp#__initialize__(pattern, flags)`: compile into an uninitialised
-    /// receiver, which is what `Regexp.allocate` makes and `Regexp#initialize`
-    /// fills. `pattern` is a String or a Regexp, already converted; `flags` is
-    /// what `Regexp.new` took, read as it reads it.
+    /// `Regexp#__initialize__(pattern, flags, timeout)`: compile into an
+    /// uninitialised receiver, which is what `Regexp.allocate` makes and
+    /// `Regexp#initialize` fills. `pattern` is a String or a Regexp, already
+    /// converted; `flags` is what `Regexp.new` took, read as it reads it;
+    /// `timeout` is the seconds `timeout:` gave, as a Float, or nil.
     RegexpInitialize,
+    /// `Kernel#__regexp_timeout__(seconds)`: `Regexp.timeout=`, a Float or
+    /// nil already checked, which every match without its own reads.
+    RegexpTimeout,
     /// `Integer#<=>` between two numbers the VM holds unboxed, which is what
     /// a sort asks a hundred thousand times. Anything else — a bignum, a
     /// Rational, an object that coerces — is `Numeric#<=>`'s, in Ruby.

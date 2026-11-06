@@ -1113,6 +1113,7 @@ impl Compiler {
                         let index = self.literal(Literal::Regexp {
                             source: source.into_boxed_str(),
                             options,
+                            encoding: self.source_encoding(),
                         });
                         self.emit(Insn::PushLit(index));
                     }

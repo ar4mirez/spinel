@@ -39,6 +39,7 @@
 
 mod chars;
 mod exec;
+mod grapheme;
 mod parse;
 mod property;
 mod single_byte;
@@ -47,6 +48,7 @@ pub use exec::Match as RawMatch;
 pub use single_byte::Charset;
 
 use std::fmt;
+use std::time::Instant;
 
 /// What can go wrong, either when compiling a pattern or when running one.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,6 +61,9 @@ pub enum Error {
     /// Backtracking ran past its step budget. The VM reports this the way it
     /// reports any other budget exhaustion, rather than hanging.
     Budget,
+    /// The match ran past the deadline its caller gave it: `Regexp.timeout`,
+    /// which the VM raises as `Regexp::TimeoutError`.
+    Timeout,
 }
 
 impl fmt::Display for Error {
@@ -67,6 +72,7 @@ impl fmt::Display for Error {
             Error::Syntax(message) => write!(f, "{message}"),
             Error::Unsupported(what) => write!(f, "{what} is not supported yet"),
             Error::Budget => write!(f, "regexp match took too many steps"),
+            Error::Timeout => write!(f, "regexp match timeout"),
         }
     }
 }
@@ -335,13 +341,30 @@ impl Regex {
         start: usize,
         encoding: Encoding,
     ) -> Result<Option<Captures>, Error> {
+        self.find_until(haystack, start, encoding, None)
+    }
+
+    /// [`Regex::find_in`], giving up at `deadline` rather than after a step
+    /// budget when there is one.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Timeout`] once `deadline` passes, or, with none,
+    /// [`Error::Budget`] if backtracking ran past its step budget.
+    pub fn find_until(
+        &self,
+        haystack: &[u8],
+        start: usize,
+        encoding: Encoding,
+        deadline: Option<Instant>,
+    ) -> Result<Option<Captures>, Error> {
         let subject = exec::Subject {
             bytes: haystack,
             enc: encoding,
         };
         Ok(self
             .program
-            .find_at(subject, start)?
+            .find_at(subject, start, deadline)?
             .map(|m| Captures { caps: m.caps }))
     }
 
@@ -365,13 +388,28 @@ impl Regex {
         start: usize,
         encoding: Encoding,
     ) -> Result<Option<Captures>, Error> {
+        self.match_until(haystack, start, encoding, None)
+    }
+
+    /// [`Regex::match_in`], with a deadline as [`Regex::find_until`] has.
+    ///
+    /// # Errors
+    ///
+    /// As [`Regex::find_until`].
+    pub fn match_until(
+        &self,
+        haystack: &[u8],
+        start: usize,
+        encoding: Encoding,
+        deadline: Option<Instant>,
+    ) -> Result<Option<Captures>, Error> {
         let subject = exec::Subject {
             bytes: haystack,
             enc: encoding,
         };
         Ok(self
             .program
-            .match_at(subject, start)?
+            .match_at(subject, start, deadline)?
             .map(|m| Captures { caps: m.caps }))
     }
 
@@ -827,15 +865,173 @@ mod tests {
     }
 
     #[test]
-    fn a_recursive_or_unknown_call_is_refused() {
-        assert!(matches!(
-            Regex::new("(?<a>a\\g<a>?)", Flags::default()),
-            Err(Error::Unsupported(_))
-        ));
+    fn a_call_that_never_ends_or_names_nothing_is_refused() {
+        // A call that reaches itself before matching a character, directly,
+        // through an alternative, an optional, a loop, a lookahead or another
+        // group. Measured: Onigmo's "never ending recursion".
+        for source in [
+            "(?<a>\\g<a>)",
+            "(?<a>a|\\g<a>)",
+            "(?<a>a?\\g<a>)",
+            "(?<a>\\g<a>*)",
+            "(?<a>(?=\\g<a>)a)",
+            "(?<a>\\g<b>)(?<b>\\g<a>)",
+            "\\g<0>a",
+        ] {
+            assert_eq!(
+                Regex::new(source, Flags::default()).err(),
+                Some(Error::Syntax("never ending recursion".into())),
+                "{source}"
+            );
+        }
+        // A chain of groups each calling the next twice is checked once per
+        // group, not once per path through it.
+        let chain: String = (0..30)
+            .map(|i| format!("(?<g{i}>\\g<g{n}>|\\g<g{n}>)", n = i + 1))
+            .chain(["(?<g30>x)".to_owned()])
+            .collect();
+        assert!(Regex::new(&chain, Flags::default()).is_ok());
+        let looped = chain.replace("(?<g30>x)", "(?<g30>\\g<g0>)");
+        assert_eq!(
+            Regex::new(&looped, Flags::default()).err(),
+            Some(Error::Syntax("never ending recursion".into()))
+        );
+        assert!(Regex::new("(?<a>a\\g<a>|b)", Flags::default()).is_ok());
         assert!(matches!(
             Regex::new("\\g<b>", Flags::default()),
             Err(Error::Syntax(_))
         ));
+    }
+
+    /// Each answer measured on CRuby 4.0.9.
+    #[test]
+    fn a_recursive_call_matches_nested_text() {
+        let parens = "^ (?<parens>  (?: \\( \\g<parens> \\) | [^()] )*  ) $";
+        let flags = Flags::from_options(Flags::EXTENDED);
+        let re = Regex::new(parens, flags).expect("compiles");
+        let caps = re
+            .find_at("((a)(b))c(d)", 0)
+            .expect("runs")
+            .expect("matches");
+        // The group's start pairs with its own end, not the innermost call's.
+        assert_eq!(caps.group(1), Some((0, 12)));
+        assert_eq!(re.find_at("((a)(b)c(d)", 0).expect("runs"), None);
+
+        let re = Regex::new("\\A(?<a>x\\g<a>?y)\\z", Flags::default()).expect("compiles");
+        let caps = re.find_at("xxxyyy", 0).expect("runs").expect("matches");
+        assert_eq!(caps.group(1), Some((0, 6)));
+        assert_eq!(
+            find("\\A(?<a>a\\g<a>?)\\z", &"a".repeat(500)),
+            Some((0, 500))
+        );
+        // Mutual recursion, and a group a call left captures what came last.
+        let re = Regex::new("(?<a>x\\g<b>?)(?<b>y\\g<a>?)", Flags::default()).expect("compiles");
+        let caps = re.find_at("xyxy", 0).expect("runs").expect("matches");
+        assert_eq!((caps.group(1), caps.group(2)), (Some((0, 3)), Some((3, 4))));
+        // The whole pattern, called.
+        assert_eq!(find("\\(\\g<0>?\\)", "x((()))"), Some((1, 7)));
+        assert_eq!(find("a\\g<0>?b", "caabbd"), Some((1, 5)));
+        assert_eq!(find("(?<a>x)\\g<0>?", "xxx"), Some((0, 3)));
+        // Recursion inside an atomic group and a lookahead.
+        assert_eq!(
+            find("(?<p>\\((?>[^()]|\\g<p>)*\\))", "((a)b)"),
+            Some((0, 6))
+        );
+        assert_eq!(
+            find("(?=(?<p>\\((?:[^()]|\\g<p>)*\\)))\\(", "x((a)b)"),
+            Some((1, 2))
+        );
+    }
+
+    /// `\k<name+n>` reads the capture `n` calls away. Measured.
+    #[test]
+    fn a_level_backreference_reads_its_own_call_level() {
+        let flags = Flags::from_options(Flags::EXTENDED);
+        let mirror = "^ (?<mirror> (?: (?<first_char>.) \\g<mirror> \\k<first_char-0> )? ) $";
+        let re = Regex::new(mirror, flags).expect("compiles");
+        assert!(re.find_at("abccba", 0).expect("runs").is_some());
+        assert!(re.find_at("abccbd", 0).expect("runs").is_none());
+        let broken = "^ (?<mirror> (?: (?<first_char>.) \\g<mirror> \\k<first_char> )? ) $";
+        let re = Regex::new(broken, flags).expect("compiles");
+        assert!(re.find_at("abccba", 0).expect("runs").is_none());
+        assert!(re.find_at("abcccc", 0).expect("runs").is_some());
+        // A called group's own capture is a call level down from where it is
+        // written, so level 0 there has none and level 1 has the last.
+        assert_eq!(find("(?<a>.)\\g<a>\\k<a+0>", "xyx"), None);
+        assert_eq!(find("(?<a>.)(?<b>\\g<a>)\\k<a+1>", "xyy"), Some((0, 3)));
+        assert_eq!(find("(?<a>.)(?<b>\\g<a>)\\k<a+1>", "xyx"), None);
+    }
+
+    /// `(?~absent)`, against what CRuby 4.0.9 answers.
+    #[test]
+    fn the_absent_operator_matches_what_does_not_hold_its_pattern() {
+        let scan = |pattern: &str, subject: &str| -> Vec<(usize, usize)> {
+            let re = Regex::new(pattern, Flags::default()).expect("compiles");
+            let mut found = Vec::new();
+            let mut at = 0;
+            while at <= subject.len() {
+                let Some(caps) = re.find_at(subject, at).expect("runs") else {
+                    break;
+                };
+                let (start, end) = caps.group(0).expect("a match");
+                found.push((start, end));
+                at = if end > start { end } else { end + 1 };
+            }
+            found
+        };
+        assert_eq!(find("(?~foo)", "hello"), Some((0, 5)));
+        assert_eq!(scan("(?~foo)", "foo"), [(0, 2), (2, 3), (3, 3)]);
+        assert_eq!(scan("(?~bc)", "abcabc"), [(0, 2), (2, 5), (5, 6), (6, 6)]);
+        assert_eq!(scan("(?~)", "ab"), [(2, 2)]);
+        assert_eq!(scan("(?~$)", "ab\ncd"), [(0, 2), (3, 5), (5, 5)]);
+        assert_eq!(scan("(?~\\b)", "ab cd"), [(1, 2), (4, 5), (5, 5)]);
+        assert_eq!(scan("(?~b\\z)", "abab"), [(0, 3), (3, 3), (4, 4)]);
+        assert_eq!(scan("(?~a)", "aab"), [(0, 0), (1, 1), (2, 3), (3, 3)]);
+        assert_eq!(find("x(?~)y", "xy"), None);
+        assert_eq!(find("\\A/\\*(?~\\*/)\\*/", "/* a */ b */"), Some((0, 7)));
+        assert_eq!(find("(?~ab)c", "aabbc"), Some((2, 5)));
+        assert_eq!(find("(?~(?<=a)b)", "cbab"), Some((0, 3)));
+        assert_eq!(find("a(?~b)?c", "axxc"), Some((0, 4)));
+        // The absent pattern's capture is not undone.
+        let re = Regex::new("(?~(b))", Flags::default()).expect("compiles");
+        let caps = re.find_at("abc", 0).expect("runs").expect("matches");
+        assert_eq!((caps.group(0), caps.group(1)), (Some((0, 1)), Some((1, 2))));
+    }
+
+    /// `\X` keeps an emoji sequence, a CRLF and a combining mark together.
+    #[test]
+    fn a_grapheme_cluster_is_one_match() {
+        let clusters = |subject: &str| -> Vec<String> {
+            let re = Regex::new("\\X", Flags::default()).expect("compiles");
+            let mut found = Vec::new();
+            let mut at = 0;
+            while let Some(caps) = re.find_at(subject, at).expect("runs") {
+                let (start, end) = caps.group(0).expect("a match");
+                found.push(subject[start..end].to_owned());
+                at = end;
+            }
+            found
+        };
+        assert_eq!(clusters("\u{1F918}\u{1F3FD}"), ["\u{1F918}\u{1F3FD}"]);
+        let family = "\u{1F469}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}";
+        assert_eq!(clusters(family), [family]);
+        assert_eq!(
+            clusters("\u{1F3F3}\u{FE0F}\u{1F308}"),
+            ["\u{1F3F3}\u{FE0F}", "\u{1F308}"]
+        );
+        assert_eq!(clusters("a\r\nb\u{301}"), ["a", "\r\n", "b\u{301}"]);
+        assert_eq!(
+            clusters("\u{1F1EF}\u{1F1F5}\u{1F1FA}"),
+            ["\u{1F1EF}\u{1F1F5}", "\u{1F1FA}"]
+        );
+        assert_eq!(
+            clusters("\u{1100}\u{1161}\u{11A8}"),
+            ["\u{1100}\u{1161}\u{11A8}"]
+        );
+        // GB9c: a consonant, a virama, a consonant.
+        assert_eq!(clusters("\u{915}\u{94D}\u{937}"), ["\u{915}\u{94D}\u{937}"]);
+        assert_eq!(find("\\X", ""), None);
+        assert_eq!(find_binary("\\X", b"\r\n"), Some((0, 2)));
     }
 
     #[test]
@@ -963,15 +1159,14 @@ mod tests {
         assert_eq!(find("(a)\\k<-1+0>", "aa"), Some((0, 2)));
         assert_eq!(find("(a)(?(<1+0>)a|b)", "aa"), Some((0, 2)));
         assert_eq!(find("(a)(?(<-1+0>)a|b)", "aa"), Some((0, 2)));
-        for level in ["(a)\\k<1+1>", "(a)\\k<-1+1>", "(a)(?(<1+1>)a|b)"] {
-            assert!(
-                matches!(
-                    Regex::new(level, Flags::default()),
-                    Err(Error::Unsupported(_))
-                ),
-                "{level}"
-            );
+        // Any other level has nothing in it without a call.
+        for level in ["(a)\\k<1+1>", "(a)\\k<-1+1>", "(?<a>.)\\k<a-1>"] {
+            assert_eq!(find(level, "aa"), None, "{level}");
         }
+        assert!(matches!(
+            Regex::new("(a)(?(<1+1>)a|b)", Flags::default()),
+            Err(Error::Unsupported(_))
+        ));
         assert!(matches!(
             Regex::new("(a)(?(<3+0>)a|b)", Flags::default()),
             Err(Error::Syntax(_))
@@ -1080,10 +1275,42 @@ mod tests {
     }
 
     #[test]
+    fn deep_recursion_refuses_rather_than_overflows_the_stack() {
+        // Each level re-enters the matcher through the atomic group.
+        let re = Regex::new("(?<p>\\((?>[^()]|\\g<p>)*\\))", Flags::default()).expect("compiles");
+        let deep = format!("{}{}", "(".repeat(20_000), ")".repeat(20_000));
+        assert_eq!(re.find_at(&deep, 0), Err(Error::Budget));
+        let nested = format!("{}{}", "(".repeat(200), ")".repeat(200));
+        let found = re.find_at(&nested, 0).expect("runs").expect("matches");
+        assert_eq!(found.group(0), Some((0, 400)));
+        // No atomic group, but a call chain as long as the subject, dropped
+        // when the attempt fails.
+        let long = "a".repeat(300_000);
+        assert_eq!(find("\\A(?<a>a\\g<a>)", &long), None);
+    }
+
+    #[test]
     fn unsupported_constructs_refuse_at_compile_time() {
         assert!(matches!(
-            Regex::new("(?~foo)", Flags::default()),
+            Regex::new("(?{a})", Flags::default()),
             Err(Error::Unsupported(_))
         ));
+    }
+
+    /// With a deadline the step budget is gone, and the deadline is what
+    /// stops a pattern that backtracks without end.
+    #[test]
+    fn a_deadline_stops_a_match_the_budget_would_not() {
+        let re = Regex::new("^(a*)*$", Flags::default()).expect("compiles");
+        let subject = format!("{}x", "a".repeat(100_000));
+        let deadline = Instant::now() + std::time::Duration::from_millis(1);
+        assert_eq!(
+            re.find_until(subject.as_bytes(), 0, Encoding::Utf8, Some(deadline)),
+            Err(Error::Timeout)
+        );
+        // A match that finishes in time is answered as without one.
+        let deadline = Instant::now() + std::time::Duration::from_secs(60);
+        let found = re.find_until(b"aaa", 0, Encoding::Utf8, Some(deadline));
+        assert_eq!(found.map(|c| c.and_then(|c| c.group(0))), Ok(Some((0, 3))));
     }
 }
