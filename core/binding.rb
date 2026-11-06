@@ -152,32 +152,19 @@ module Kernel
 
   # A String `instance_eval` or `class_eval` whose source or file is not a
   # String, or whose line is not an Integer: the native sends it here to be
-  # converted, source first, and `__eval_string__` evaluates it through the
-  # binding of this method's caller, which is the native's. A nil line is a
-  # TypeError, as CRuby's `NUM2INT` makes it. Measured.
+  # converted, source, then line, then file, as CRuby's `specific_eval` does,
+  # and `__eval_string__` evaluates it through the binding of this method's
+  # caller, which is the native's. A nil line is a TypeError, as CRuby's
+  # `NUM2INT` makes it. Measured on 4.0.9.
   def self.__eval_string_args__(receiver, mod, name, source, *rest)
-    source = __eval_string_arg__(source)
-    file = rest.empty? || rest[0].nil? ? nil : __eval_string_arg__(rest[0])
+    source = String.__coerce__(source)
     line = rest.size < 2 ? 1 : __eval_string_line__(rest[1])
+    file = rest.empty? || rest[0].nil? ? nil : String.__coerce__(rest[0])
     __eval_string__(receiver, mod, name, source, file, line)
   end
 
   def self.__eval_string_line__(line)
     raise TypeError, "no implicit conversion from nil to integer" if line.nil?
-    Integer.__to_int__(line)
-  end
-
-  # CRuby 4.1's wording, `into` where 4.0 said `to`
-  # (bugs.ruby-lang.org/issues/21864), which ruby/spec checks on every engine
-  # but CRuby before 4.1.
-  def self.__eval_string_arg__(value)
-    return value if String === value
-    unless value.respond_to?(:to_str)
-      shown = case value when nil, true, false then value.inspect else value.class end
-      raise TypeError, "no implicit conversion of #{shown} into String"
-    end
-    text = value.to_str
-    return text if String === text
-    raise TypeError, "can't convert #{value.class} into String (#{value.class}#to_str gives #{text.class})"
+    Integer.__to_int__(line, "to")
   end
 end
