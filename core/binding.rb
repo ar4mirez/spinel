@@ -147,7 +147,7 @@ module Kernel
 
   def self.__eval_line__(line)
     return 1 if line.nil?
-    Integer === line ? line : line.to_int
+    __eval_int__(Integer === line ? line : line.to_int)
   end
 
   # A String `instance_eval` or `class_eval` whose source or file is not a
@@ -165,7 +165,12 @@ module Kernel
 
   def self.__eval_string_line__(line)
     raise TypeError, "no implicit conversion from nil to integer" if line.nil?
-    line = Integer.__to_int__(line, "to")
+    __eval_int__(Integer.__to_int__(line, "to"))
+  end
+
+  # CRuby's `NUM2INT`: a line in range for a C `int`, or a RangeError
+  # naming it. Measured on 4.0.9.
+  def self.__eval_int__(line)
     if line > 9223372036854775807 || line < -9223372036854775808
       raise RangeError, "bignum too big to convert into 'long'"
     elsif line > 2147483647
