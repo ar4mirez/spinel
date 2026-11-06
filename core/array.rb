@@ -1375,7 +1375,7 @@ class Array
   # Each element is `rb_check_array_type`'s, and only above `level`: one at
   # the bottom is kept without being asked for `to_ary`. `plain` holds the
   # classes this call has found nothing to ask in, so a leaf of a class seen
-  # before costs a scan of a short list rather than `rb_check_funcall`'s
+  # before costs one native identity scan rather than `rb_check_funcall`'s
   # reflection.
   def __flatten_into__(out, array, level, open, plain)
     if open.any? { |seen| seen.equal?(array) }
@@ -1387,10 +1387,8 @@ class Array
       if Array === element
         nested = element
       elsif level != 0
-        klass = __reflect_class_of__(element)
-        j = 0
-        j += 1 while j < plain.size && !plain[j].equal?(klass)
-        if j == plain.size
+        unless __reflect_class_in__(element, plain)
+          klass = __reflect_class_of__(element)
           if Kernel.__funcall_plain__?(klass, :to_ary)
             plain.push(klass)
           else
