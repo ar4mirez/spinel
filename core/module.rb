@@ -207,7 +207,9 @@ class Module
   # some autoload has run.
   def __autoload_awaited__(symbol, inherit)
     return false unless Module.instance_variable_get(:@__autoloaded__)
-    (inherit ? ancestors : [self]).any? { |owner| owner.__autoloading_elsewhere__(symbol) }
+    owners = inherit ? ancestors : [self]
+    owners += [Object] if inherit && instance_of?(Module)
+    owners.any? { |owner| owner.__autoloading_elsewhere__(symbol) }
   end
 
   def const_missing(name)
