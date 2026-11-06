@@ -1993,15 +1993,14 @@ mod tests {
 
     #[test]
     fn onigmo_only_constructs_refuse_rather_than_guess() {
-        for source in ["(a)(?(<1+1>)a|b)"] {
-            assert!(
-                matches!(
-                    parse(source, Flags::default(), Encoding::Utf8),
-                    Err(Error::Unsupported(_))
-                ),
-                "{source} should refuse"
-            );
-        }
+        let source = "(a)(?(<1+1>)a|b)";
+        assert!(
+            matches!(
+                parse(source, Flags::default(), Encoding::Utf8),
+                Err(Error::Unsupported(_))
+            ),
+            "{source} should refuse"
+        );
     }
 
     /// What `\p{}` refuses, and the name each message carries, as CRuby

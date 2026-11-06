@@ -344,10 +344,10 @@ literal as it parses it, so `spinel-parse` checks each literal with
 `spinel_regex::check`: one that is not a pattern is a `SyntaxError` before
 anything runs, and its warnings are said once, with the parser's. A literal
 the parser leaves to the run time — in a file whose magic comment is not
-UTF-8, or with an encoding of its own — says them on its first compile
-instead, and the parser records on each literal which it was. A constructor
-says them at its call, except `Regexp.new(regexp)`, whose pattern already
-did.
+UTF-8, with an encoding of its own, or whose bytes are not UTF-8 — says them
+on its first compile instead, and the parser records on each literal which it
+was. A constructor says them at its call, except `Regexp.new(regexp)`, whose
+pattern already did.
 
 A match runs under a step budget, and refuses with `Error::Budget` past it,
 unless its caller gives it a deadline: `Regexp.timeout` or a pattern's own
