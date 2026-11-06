@@ -1,0 +1,2 @@
+fails(#28: the message is CRuby 4.0's - can't convert Object to String - and the spec asks a non-CRuby engine for the Ruby 4.1 wording, can't convert Object into String):BasicObject#instance_eval raises ArgumentError if returned value is not String
+fails(#28: the message is CRuby 4.0's - can't convert Object to Integer - and the spec asks a non-CRuby engine for the Ruby 4.1 wording, can't convert Object into Integer):BasicObject#instance_eval raises ArgumentError if returned value is not Integer

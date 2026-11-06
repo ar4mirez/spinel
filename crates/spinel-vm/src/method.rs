@@ -560,6 +560,11 @@ pub enum Native {
         module: bool,
         exec: bool,
     },
+    /// `Kernel#__eval_string__(receiver, module, name, source, file, line)`:
+    /// a String `instance_eval` (`module` false) or `class_eval` whose
+    /// arguments `Kernel.__eval_string_args__` converted, through the binding
+    /// of the frame that called that method.
+    EvalString,
     /// Reads and writes of the class table that `core/module.rb` and
     /// `core/kernel.rb` build reflection on (#28). Installed as
     /// `Kernel#__reflect_*__`.

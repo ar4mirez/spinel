@@ -147,6 +147,37 @@ module Kernel
 
   def self.__eval_line__(line)
     return 1 if line.nil?
-    Integer === line ? line : line.to_int
+    __eval_int__(Integer === line ? line : line.to_int)
+  end
+
+  # A String `instance_eval` or `class_eval` whose source or file is not a
+  # String, or whose line is not an Integer: the native sends it here to be
+  # converted, source, then line, then file, as CRuby's `specific_eval` does,
+  # and `__eval_string__` evaluates it through the binding of this method's
+  # caller, which is the native's. A nil line is a TypeError, as CRuby's
+  # `NUM2INT` makes it. Measured on 4.0.9.
+  def self.__eval_string_args__(receiver, mod, name, source, *rest)
+    source = String.__coerce__(source)
+    line = rest.size < 2 ? 1 : __eval_string_line__(rest[1])
+    file = rest.empty? || rest[0].nil? ? nil : String.__coerce__(rest[0])
+    __eval_string__(receiver, mod, name, source, file, line)
+  end
+
+  def self.__eval_string_line__(line)
+    raise TypeError, "no implicit conversion from nil to integer" if line.nil?
+    __eval_int__(Integer.__to_int__(line, "to"))
+  end
+
+  # CRuby's `NUM2INT`: a line in range for a C `int`, or a RangeError
+  # naming it. Measured on 4.0.9.
+  def self.__eval_int__(line)
+    if line > 9223372036854775807 || line < -9223372036854775808
+      raise RangeError, "bignum too big to convert into 'long'"
+    elsif line > 2147483647
+      raise RangeError, "integer #{line} too big to convert to 'int'"
+    elsif line < -2147483648
+      raise RangeError, "integer #{line} too small to convert to 'int'"
+    end
+    line
   end
 end

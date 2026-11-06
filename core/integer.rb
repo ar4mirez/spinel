@@ -569,7 +569,7 @@ class Integer
   # one. The message for a `to_int` that answers something else is CRuby 4.1's,
   # `into` where 4.0 said `to` (bugs.ruby-lang.org/issues/21864), which
   # ruby/spec checks on every engine but CRuby before 4.1.
-  def self.__to_int__(value)
+  def self.__to_int__(value, to = "into")
     return value if value.is_a?(Integer)
     unless value.respond_to?(:to_int, true)
       shown = value.nil? || true.equal?(value) || false.equal?(value) ? value.inspect : value.class.to_s
@@ -577,12 +577,12 @@ class Integer
     end
     converted = value.__send__(:to_int)
     return converted if converted.is_a?(Integer)
-    __to_int_failed__(value, converted)
+    __to_int_failed__(value, converted, to)
   end
 
-  def self.__to_int_failed__(value, converted)
+  def self.__to_int_failed__(value, converted, to = "into")
     raise TypeError,
-          "can't convert #{value.class} into Integer (#{value.class}#to_int gives #{converted.class})"
+          "can't convert #{value.class} #{to} Integer (#{value.class}#to_int gives #{converted.class})"
   end
 
   # Like `__to_int__`, but an object with no `to_int`, or one answering nil, is
