@@ -1303,6 +1303,23 @@ fn reflect_native(
                 .collect();
             new_array(scope, &subclasses)
         }
+        ReflectOp::Temporary => {
+            let module = module_arg(scope, 0)?;
+            bool_value(scope.classes().has_temporary_name(module))
+        }
+        ReflectOp::TemporaryName => {
+            let module = module_arg(scope, 0)?;
+            let name = match arg(1) {
+                Value::NIL => None,
+                name => Some(
+                    string_bytes(scope, name)
+                        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                        .ok_or_else(|| Error::raise("TypeError", "expected a String"))?,
+                ),
+            };
+            set_temporary_name(scope, module, name);
+            Value::NIL
+        }
         ReflectOp::ConstSet => {
             let module = module_arg(scope, 0)?;
             let name = symbol_arg(1)?;
@@ -1380,10 +1397,11 @@ fn reflect_native(
                         continue;
                     }
                     seen.push(name);
-                    if body == Value::UNDEF || is_core_helper(name) {
+                    if is_core_helper(name) || (body == Value::UNDEF) != (which == 4) {
                         continue;
                     }
                     let wanted = match which {
+                        4 => true,
                         1 => visibility == Visibility::Public,
                         2 => visibility == Visibility::Protected,
                         3 => visibility == Visibility::Private,
@@ -7336,13 +7354,13 @@ fn name_if_anonymous(scope: &mut HandleScope<'_>, cbase: ClassId, name: SymbolId
     let Some(id) = class_id_of(scope, value) else {
         return;
     };
-    let held = scope.classes().name(id).map(str::to_owned);
-    if held.as_deref().is_some_and(|held| !is_temporary_name(held)) {
+    if !scope.classes().has_temporary_name(id) {
         return;
     }
     let path = qualified_name(scope, cbase, name);
-    if is_temporary_name(&path) {
-        scope.classes_mut().name_if_anonymous(id, &path);
+    // Under a module whose own name is temporary, so is the path.
+    if scope.classes().has_temporary_name(cbase) {
+        scope.classes_mut().name_if_anonymous_temporary(id, &path);
         return;
     }
     if scope.classes().is_singleton(id) {
@@ -7361,7 +7379,8 @@ fn name_if_anonymous(scope: &mut HandleScope<'_>, cbase: ClassId, name: SymbolId
                 continue;
             };
             if scope.classes().is_singleton(inner)
-                || !scope.classes().name(inner).is_some_and(is_temporary_name)
+                || scope.classes().name(inner).is_none()
+                || !scope.classes().has_temporary_name(inner)
             {
                 continue;
             }
@@ -7372,9 +7391,40 @@ fn name_if_anonymous(scope: &mut HandleScope<'_>, cbase: ClassId, name: SymbolId
     }
 }
 
-/// Whether a module's name is one it has only until a constant path reaches it.
-fn is_temporary_name(name: &str) -> bool {
-    name.starts_with("#<")
+/// `Module#set_temporary_name`'s write: the module takes `name`, or none, and
+/// every module it holds whose name is still the path through it follows —
+/// `m::N` becomes `"name::N"`, or nameless with it. Measured on ruby 4.0.7.
+fn set_temporary_name(scope: &mut HandleScope<'_>, id: ClassId, name: Option<String>) {
+    let mut pending = vec![(id, name)];
+    while let Some((outer, name)) = pending.pop() {
+        // Matched against the old path, so before `outer` is renamed.
+        let mut held = Vec::new();
+        for (constant, _) in scope.classes().const_names(outer) {
+            let Some(inner) = scope.classes().const_get_here(outer, constant) else {
+                continue;
+            };
+            let Some(inner) = class_id_of(scope, inner) else {
+                continue;
+            };
+            if inner == outer
+                || scope.classes().is_singleton(inner)
+                || !scope.classes().has_temporary_name(inner)
+            {
+                continue;
+            }
+            let path = qualified_name(scope, outer, constant);
+            if scope.classes().name(inner) == Some(path.as_str()) {
+                let renamed = name
+                    .as_ref()
+                    .map(|name| format!("{name}::{}", symbol_name(constant)));
+                held.push((inner, renamed));
+            }
+        }
+        scope
+            .classes_mut()
+            .set_temporary_name(outer, name.as_deref());
+        pending.extend(held);
+    }
 }
 
 fn qualified_name(scope: &mut HandleScope<'_>, cbase: ClassId, name: SymbolId) -> String {
@@ -9265,6 +9315,40 @@ fn forward_to_ruby<'h>(
     dispatch(scope, stack, frames, forwarded, proc_class, ids)
 }
 
+/// The `NameError` for a method `id` does not have, which a primitive that
+/// takes names raises: `Module#__undefined_method__` raises it, because CRuby
+/// names the module by its `to_s`, and that is a send. `undef` is whether
+/// `undef_method` is the caller: only it names a singleton class's module.
+#[allow(clippy::too_many_arguments)]
+fn undefined_method_in<'h>(
+    scope: &mut HandleScope<'h>,
+    stack: &mut Stack,
+    frames: &mut Vec<Call>,
+    call: Pending,
+    id: ClassId,
+    name: SymbolId,
+    undef: bool,
+    proc_class: Handle<'h>,
+    ids: &mut u64,
+) -> Result<Option<Unwind>, Error> {
+    let forwarded = Pending {
+        cache: None,
+        name: crate::shared::symbols::intern("__undefined_method__"),
+        receiver: scope.classes().object(id),
+        args: vec![
+            Value::symbol(name),
+            if undef { Value::TRUE } else { Value::FALSE },
+        ],
+        keywords: Vec::new(),
+        block: Value::NIL,
+        target: Target::Method,
+        owner: None,
+        defined_as: None,
+        ..call
+    };
+    dispatch(scope, stack, frames, forwarded, proc_class, ids)
+}
+
 /// The operations Ruby cannot define in Ruby. See [`Native`].
 fn native_call<'h>(
     scope: &mut HandleScope<'h>,
@@ -9281,8 +9365,15 @@ fn native_call<'h>(
     // these primitives can read. Measured: `attr_reader o` calls `o.to_str`.
     let names = match native {
         Native::AttrDefine { .. } | Native::ModuleFunction | Native::UndefMethod => call.args.len(),
+        // One Array is a list of names, which the primitive reads itself.
+        Native::SetVisibility(_) if !matches!(call.args.as_slice(), [only] if heap_kind(scope, *only) == Some(HeapKind::Array)) => {
+            call.args.len()
+        }
+        Native::AliasMethod => call.args.len().min(2),
         Native::ClassVariable(CvarOp::Get | CvarOp::Set | CvarOp::Defined)
-        | Native::MethodDefined => call.args.len().min(1),
+        | Native::MethodDefined
+        | Native::VisibilityDefined(_)
+        | Native::DefineMethod { .. } => call.args.len().min(1),
         _ => 0,
     };
     if call.args[..names]
@@ -12146,10 +12237,25 @@ fn native_call<'h>(
                 stack.push(Value::NIL);
                 return Ok(None);
             }
+            // One Array argument is the list of names: `private([:a, :b])`.
+            // ponytail: its elements are not sent `to_str`, which CRuby's
+            // are; the upgrade is converting them in `__names_then__` too.
+            let given = match call.args.as_slice() {
+                [only] if heap_kind(scope, *only) == Some(HeapKind::Array) => {
+                    let list = scope.root(*only);
+                    (0..array_len(scope, list))
+                        .map(|index| array_get(scope, list, index))
+                        .collect()
+                }
+                many => many.to_vec(),
+            };
             let mut narrowed = Vec::new();
-            for &argument in &call.args {
-                let Some(name) = method_name_of(scope, argument) else {
-                    return Err(Error::raise("TypeError", "is not a symbol nor a string"));
+            for &argument in &given {
+                let Some(_) = method_name_of(scope, argument) else {
+                    return Err(Error::raise(
+                        "TypeError",
+                        format!("{} is not a symbol nor a string", inspect(scope, argument)),
+                    ));
                 };
                 let Some(symbol) = name_symbol(scope, argument)? else {
                     return invalid_symbol(
@@ -12164,22 +12270,9 @@ fn native_call<'h>(
                     narrowed.push(symbol);
                 }
                 if !scope.classes_mut().set_visibility(id, symbol, visibility) {
-                    // Not `describe_receiver`: this wording quotes the name and
-                    // that one does not — "for class 'E'" here against "for
-                    // class E" in a `NoMethodError`. Both are measured on ruby
-                    // 4.0.6 and ruby/spec asserts on each.
-                    let kind = match scope.classes().kind(id) {
-                        Kind::Module => "module",
-                        Kind::Class => "class",
-                    };
-                    let owner = scope
-                        .classes()
-                        .name(id)
-                        .map_or_else(|| "?".to_owned(), ToOwned::to_owned);
-                    return Err(Error::raise(
-                        "NameError",
-                        format!("undefined method '{name}' for {kind} '{owner}'"),
-                    ));
+                    return undefined_method_in(
+                        scope, stack, frames, call, id, symbol, false, proc_class, ids,
+                    );
                 }
             }
             // Ruby answers the arguments: one bare, several as an array. That
@@ -12222,7 +12315,7 @@ fn native_call<'h>(
             }
             let singleton = singleton_of(scope, call.receiver)?;
             for &argument in &call.args {
-                let Some(name) = method_name_of(scope, argument) else {
+                let Some(_) = method_name_of(scope, argument) else {
                     return Err(Error::raise("TypeError", "is not a symbol nor a string"));
                 };
                 let Some(symbol) = name_symbol(scope, argument)? else {
@@ -12230,15 +12323,17 @@ fn native_call<'h>(
                         scope, stack, frames, call.cref, argument, proc_class, ids,
                     );
                 };
-                let Some(method) = scope.classes_mut().lookup(id, symbol) else {
-                    let owner = scope
-                        .classes()
-                        .name(id)
-                        .map_or_else(|| "?".to_owned(), ToOwned::to_owned);
-                    return Err(Error::raise(
-                        "NameError",
-                        format!("undefined method '{name}' for module '{owner}'"),
-                    ));
+                // A module's lookup falls back to `Object`'s, as CRuby's
+                // does: `module_function :require` copies `Kernel#require`.
+                let found = scope.classes_mut().lookup(id, symbol).or_else(|| {
+                    (scope.classes().kind(id) == Kind::Module)
+                        .then(|| scope.classes_mut().lookup(Builtin::Object.id(), symbol))
+                        .flatten()
+                });
+                let Some(method) = found else {
+                    return undefined_method_in(
+                        scope, stack, frames, call, id, symbol, false, proc_class, ids,
+                    );
                 };
                 // Public on the singleton, private as an instance method.
                 scope.classes_mut().define_method_visibly(
@@ -12415,15 +12510,15 @@ fn native_call<'h>(
             // `alias_method new, old` is one pair; `undef_method` takes any
             // number of names, each undefined in turn.
             let given = if aliasing {
-                &call.args[..call.args.len().min(1)]
+                call.args[..call.args.len().min(1)].to_vec()
             } else {
-                &call.args[..]
+                call.args.clone()
             };
             if aliasing && given.is_empty() {
                 return Err(Error::raise("TypeError", "is not a symbol nor a string"));
             }
             let mut done = Vec::new();
-            for &argument in given {
+            for argument in given {
                 let Some(_) = method_name_of(scope, argument) else {
                     return Err(Error::raise("TypeError", "is not a symbol nor a string"));
                 };
@@ -12458,14 +12553,9 @@ fn native_call<'h>(
                     (scope.classes_mut().undef_method(id, name), name)
                 };
                 if !ok {
-                    return Err(Error::raise(
-                        "NameError",
-                        format!(
-                            "undefined method '{}' for {}",
-                            symbol_name(missing),
-                            class_display_name(scope, id),
-                        ),
-                    ));
+                    return undefined_method_in(
+                        scope, stack, frames, call, id, missing, !aliasing, proc_class, ids,
+                    );
                 }
                 done.push(name);
             }
@@ -14212,6 +14302,16 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             Builtin::Kernel,
             &["__reflect_subclasses__"],
             Native::Reflect(ReflectOp::Subclasses),
+        ),
+        (
+            Builtin::Kernel,
+            &["__reflect_temporary__"],
+            Native::Reflect(ReflectOp::Temporary),
+        ),
+        (
+            Builtin::Kernel,
+            &["__reflect_temporary_name__"],
+            Native::Reflect(ReflectOp::TemporaryName),
         ),
         (
             Builtin::Kernel,

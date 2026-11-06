@@ -47,6 +47,11 @@ class Module
     !equal?(mod) && ancestors.include?(mod)
   end
 
+  # Every module in the ancestors, prepended ones too, but not this one.
+  def included_modules
+    ancestors.select { |mod| !equal?(mod) && __reflect_module_kind__(mod) == :module }
+  end
+
   # Ancestry as a partial order: true below, false above, nil when the two
   # are unrelated. Measured.
   def <(other)
@@ -95,8 +100,7 @@ class Module
 
   def self.__name_arg__(name)
     return name if name.is_a?(Symbol) || name.is_a?(String)
-    converted = name.respond_to?(:to_str) ? name.to_str : nil
-    return converted if converted.is_a?(String)
+    return String.__coerce__(name) if name.respond_to?(:to_str)
     raise TypeError, "#{name.inspect} is not a symbol nor a string"
   end
 
@@ -131,7 +135,7 @@ class Module
     elsif name.is_a?(String)
       name.to_sym
     elsif name.respond_to?(:to_str)
-      name.to_str.to_sym
+      String.__coerce__(name).to_sym
     else
       raise TypeError, "no implicit conversion of #{name.nil? ? "nil" : name.class} into String"
     end
@@ -420,6 +424,49 @@ class Module
 
   def private_instance_methods(inherit = true)
     __reflect_method_names__(self, inherit, 3)
+  end
+
+  # The names `undef_method` hid here, this module's own and no ancestor's.
+  def undefined_instance_methods
+    __reflect_method_names__(self, false, 4)
+  end
+
+  # A name that holds until a constant path names the module: `nil` takes it
+  # away again. Measured on ruby 4.0.7, messages included.
+  def set_temporary_name(name)
+    raise RuntimeError, "can't change permanent name" unless __reflect_temporary__(self)
+    unless name.nil?
+      name = String.__coerce__(name) unless String === name
+      raise ArgumentError, "empty class/module name" if name.empty?
+      if Module.__constant_path__(name)
+        raise ArgumentError, "the temporary name must not be a constant path to avoid confusion"
+      end
+    end
+    __reflect_temporary_name__(self, name)
+    self
+  end
+
+  # `A`, `A::B`, `::A::B`: segments that are each a constant name.
+  def self.__constant_path__(text)
+    text = text[2, text.length - 2] if text.start_with?("::")
+    parts = text.split("::", -1)
+    parts.all? { |part| part.match?(/\A[A-Z](?:[A-Za-z0-9_]|[^\x00-\x7F])*\z/) }
+  end
+
+  # The `NameError` a primitive that takes method names raises for one this
+  # module does not have. CRuby names the module by `to_s`, quoted, and
+  # `undef_method` alone names a module's singleton class by the module:
+  # `String.singleton_class` says "class 'String'" there, and
+  # "class '#<Class:String>'" for `alias_method` and the visibility methods.
+  # Measured on ruby 4.0.9.
+  def __undefined_method__(name, undefining)
+    owner = self
+    if undefining && singleton_class?
+      attached = __reflect_attached__(self)
+      owner = attached unless __reflect_module_kind__(attached).nil?
+    end
+    kind = Class === owner ? "class" : "module"
+    raise NameError.new("undefined method '#{name}' for #{kind} '#{owner}'", name, receiver: self)
   end
 
   def remove_method(*names)

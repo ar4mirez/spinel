@@ -572,6 +572,9 @@ struct Entry {
     /// see [`Classes::each_root`].
     object: Value,
     name: Option<Box<str>>,
+    /// Whether `name` is one `Module#set_temporary_name` gave, which a
+    /// constant path replaces as it replaces `#<Module:0x...>::N`.
+    temporary: bool,
     kind: Kind,
     superclass: Option<ClassId>,
     /// This class's run of the ancestor chain: prepended modules, then the class
@@ -940,26 +943,47 @@ impl Classes {
         self.entry(id).name.as_deref()
     }
 
-    /// Give an anonymous class or module the name a constant just gave it, and
-    /// answer whether it took one.
+    /// Give a nameless class or module the path a constant under a module
+    /// with a temporary name just gave it, as a temporary name of its own:
+    /// `m.set_temporary_name("fake"); m::N = Module.new` makes `N` `"fake::N"`
+    /// until `m` is named, and then `N` follows it.
     ///
-    /// `Foo = Class.new` makes `Foo.name` `"Foo"`, but only the first
-    /// assignment does: `A = Class.new; B = A` leaves both answering `"A"`.
-    /// That is why this is `_if_anonymous` and not a setter — the second
-    /// assignment has to be a no-op, not a rename.
-    pub fn name_if_anonymous(&mut self, id: ClassId, name: &str) -> bool {
+    /// Only the first assignment does: a module that already has a name keeps it.
+    pub fn name_if_anonymous_temporary(&mut self, id: ClassId, name: &str) {
         let entry = self.entry_mut(id);
-        if entry.name.is_some() {
-            return false;
+        if entry.name.is_none() {
+            entry.name = Some(Box::from(name));
+            entry.temporary = true;
         }
-        entry.name = Some(Box::from(name));
-        true
     }
 
     /// Replace a temporary name — the `#<Module:0x...>::N` a module gets
     /// under an anonymous one — with the path it is reachable by now.
     pub fn rename(&mut self, id: ClassId, name: &str) {
-        self.entry_mut(id).name = Some(Box::from(name));
+        let entry = self.entry_mut(id);
+        entry.name = Some(Box::from(name));
+        entry.temporary = false;
+    }
+
+    /// Whether the name is one a constant path will replace: none yet, the
+    /// `#<Module:0x...>::N` a module gets under an anonymous one, or one
+    /// `Module#set_temporary_name` gave.
+    #[must_use]
+    pub fn has_temporary_name(&self, id: ClassId) -> bool {
+        let entry = self.entry(id);
+        entry.temporary
+            || entry
+                .name
+                .as_deref()
+                .is_none_or(|name| name.starts_with("#<"))
+    }
+
+    /// `Module#set_temporary_name`'s write: a name a constant path still
+    /// replaces, or none.
+    pub fn set_temporary_name(&mut self, id: ClassId, name: Option<&str>) {
+        let entry = self.entry_mut(id);
+        entry.name = name.map(Box::from);
+        entry.temporary = name.is_some();
     }
 
     pub fn superclass(&self, id: ClassId) -> Option<ClassId> {
@@ -2716,6 +2740,7 @@ impl Classes {
             repr,
             object,
             name: name.map(Box::from),
+            temporary: false,
             kind,
             superclass,
             own: vec![id],
