@@ -92,6 +92,11 @@ module Kernel
         end
       end
       return __spinel_require__(path) unless path.match?(%r{spec/ruby/.*/(fixtures|shared)/})
+      # A fixture an example itself loads — an `autoload` firing, a
+      # `require` the example makes — raises as Ruby's does: the example is
+      # what asserts on that error, and keeping the autoload or the
+      # `LoadError` is the behaviour under test.
+      return __spinel_require__(path) if MSpec.current&.state
       result = nil
       reason = __refusal_boundary__(SpinelRunner::UNLIMITED) do
         result = begin

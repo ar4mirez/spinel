@@ -231,6 +231,9 @@ pub enum ParseFailure {
 }
 
 pub struct Heap {
+    /// Whether any module holds an autoload entry (#709): the one test a
+    /// constant read pays, kept first beside the fields the loop reads most.
+    any_autoloads: bool,
     /// The root set. A [`HandleScope`] owns a contiguous run of it and truncates back
     /// to its base on drop, so this is `docs/engine.md`'s linked list of scopes with
     /// the links implied by the index.
@@ -406,6 +409,13 @@ pub struct Heap {
     /// `side_ivars`: an entry goes with its object before `sweep`, so a later
     /// object in the same cell does not inherit it.
     allocation_sites: HashMap<usize, AllocationSite>,
+    /// How many modules hold an autoload entry for each name, indexed by
+    /// symbol, so a constant read only looks for an autoload shadowing what
+    /// it found while there may be one for its name (#709). A Vec rather than
+    /// a map: the read is one bounds-checked load, with no hashing.
+    autoloads: Vec<u32>,
+    /// The sum of `autoloads`.
+    autoload_total: u32,
 }
 
 /// Where `ObjectSpace.trace_object_allocations` saw an object allocated
@@ -636,6 +646,9 @@ impl Heap {
             parser: None,
             libraries: None,
             partial: false,
+            autoloads: Vec::new(),
+            autoload_total: 0,
+            any_autoloads: false,
             argv: Vec::new(),
             program_name: String::new(),
             budget: Some(crate::interp::BUDGET),
@@ -1468,6 +1481,42 @@ impl<'h> HandleScope<'h> {
 
     pub(crate) fn partial(&self) -> bool {
         self.heap.partial
+    }
+
+    /// One more module (`added`) or one fewer holds an autoload for `name`.
+    /// See `Heap::autoloads`.
+    pub(crate) fn mark_autoloads(&mut self, name: SymbolId, added: bool) {
+        let index = name.0 as usize;
+        let heap = &mut *self.heap;
+        if heap.autoloads.len() <= index {
+            if !added {
+                return;
+            }
+            heap.autoloads.resize(index + 1, 0);
+        }
+        let count = &mut heap.autoloads[index];
+        if added {
+            *count += 1;
+            heap.autoload_total += 1;
+        } else if *count > 0 {
+            *count -= 1;
+            heap.autoload_total -= 1;
+        }
+        heap.any_autoloads = heap.autoload_total > 0;
+    }
+
+    /// Whether any name has an autoload: the one test a constant read pays.
+    #[inline(always)]
+    pub(crate) fn any_autoloads(&self) -> bool {
+        self.heap.any_autoloads
+    }
+
+    #[inline(always)]
+    pub(crate) fn autoloads(&self, name: SymbolId) -> bool {
+        self.heap
+            .autoloads
+            .get(name.0 as usize)
+            .is_some_and(|&count| count > 0)
     }
 
     /// The program name and arguments `$0` and `ARGV` start as. Set before

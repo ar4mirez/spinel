@@ -493,6 +493,10 @@ pub enum Native {
     /// `Kernel#__mark_partial__`: a file this heap was meant to load did not
     /// finish. See `HandleScope::mark_partial`.
     MarkPartial,
+    /// `Kernel#__mark_autoloads__(name, added)`: one more module holds an
+    /// autoload for `name`, or with `added` false one fewer, so reads of it
+    /// check for one that shadows what they found only while one exists.
+    MarkAutoloads,
     /// `Kernel#__ruby_constants__`: `RUBY_VERSION` and its neighbours, as a
     /// flat `[name, value, ...]` Array, from the constants `--version` prints.
     RubyConstants,
