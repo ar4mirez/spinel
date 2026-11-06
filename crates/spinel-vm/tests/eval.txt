@@ -463,6 +463,12 @@ class VH; private; def outer; def nested; :n; end; :o; end; end; h = VH.new; h.s
 class VI; private; def self.s; :s; end; end; VI.s  #=> :s
 class VJ; def a; end; def b; end; end; [(class VJ; private :a; end), (class VJ; private :a, :b; end)]  #=> [:a, [:a, :b]]
 begin; class VK; private :nope; end; rescue NameError => e; e.message; end  #=> "undefined method 'nope' for class 'VK'"
+# A singleton class is named by its module for `undef_method` alone.
+begin; String.singleton_class.send(:undef_method, :nope); rescue NameError => e; e.message; end  #=> "undefined method 'nope' for class 'String'"
+begin; String.singleton_class.send(:alias_method, :a, :nope); rescue NameError => e; e.message; end  #=> "undefined method 'nope' for class '#<Class:String>'"
+begin; String.singleton_class.send(:private, :nope); rescue NameError => e; e.message; end  #=> "undefined method 'nope' for class '#<Class:String>'"
+begin; String.singleton_class.send(:protected, :nope); rescue NameError => e; e.message; end  #=> "undefined method 'nope' for class '#<Class:String>'"
+begin; String.singleton_class.send(:public, :nope); rescue NameError => e; e.message; end  #=> "undefined method 'nope' for class '#<Class:String>'"
 class VL; def m; :base; end; end; class VM < VL; private :m; end; VL.new.m  #=> :base
 # `module_function`: private instance method, public singleton copy. This is
 # what makes the two `defined?` answers differ.

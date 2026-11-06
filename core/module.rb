@@ -454,12 +454,14 @@ class Module
   end
 
   # The `NameError` a primitive that takes method names raises for one this
-  # module does not have. CRuby names the module by `to_s`, quoted, and a
-  # module's singleton class by the module: `String.singleton_class` says
-  # "class 'String'". Measured on ruby 4.0.7.
-  def __undefined_method__(name)
+  # module does not have. CRuby names the module by `to_s`, quoted, and
+  # `undef_method` alone names a module's singleton class by the module:
+  # `String.singleton_class` says "class 'String'" there, and
+  # "class '#<Class:String>'" for `alias_method` and the visibility methods.
+  # Measured on ruby 4.0.9.
+  def __undefined_method__(name, undefining)
     owner = self
-    if singleton_class?
+    if undefining && singleton_class?
       attached = __reflect_attached__(self)
       owner = attached unless __reflect_module_kind__(attached).nil?
     end

@@ -9315,7 +9315,8 @@ fn forward_to_ruby<'h>(
 
 /// The `NameError` for a method `id` does not have, which a primitive that
 /// takes names raises: `Module#__undefined_method__` raises it, because CRuby
-/// names the module by its `to_s`, and that is a send.
+/// names the module by its `to_s`, and that is a send. `undef` is whether
+/// `undef_method` is the caller: only it names a singleton class's module.
 #[allow(clippy::too_many_arguments)]
 fn undefined_method_in<'h>(
     scope: &mut HandleScope<'h>,
@@ -9324,6 +9325,7 @@ fn undefined_method_in<'h>(
     call: Pending,
     id: ClassId,
     name: SymbolId,
+    undef: bool,
     proc_class: Handle<'h>,
     ids: &mut u64,
 ) -> Result<Option<Unwind>, Error> {
@@ -9331,7 +9333,7 @@ fn undefined_method_in<'h>(
         cache: None,
         name: crate::shared::symbols::intern("__undefined_method__"),
         receiver: scope.classes().object(id),
-        args: vec![Value::symbol(name)],
+        args: vec![Value::symbol(name), if undef { Value::TRUE } else { Value::FALSE }],
         keywords: Vec::new(),
         block: Value::NIL,
         target: Target::Method,
@@ -12265,7 +12267,7 @@ fn native_call<'h>(
                     narrowed.push(symbol);
                 }
                 if !scope.classes_mut().set_visibility(id, symbol, visibility) {
-                    return undefined_method_in(scope, stack, frames, call, id, symbol, proc_class, ids);
+                    return undefined_method_in(scope, stack, frames, call, id, symbol, false, proc_class, ids);
                 }
             }
             // Ruby answers the arguments: one bare, several as an array. That
@@ -12324,7 +12326,7 @@ fn native_call<'h>(
                         .flatten()
                 });
                 let Some(method) = found else {
-                    return undefined_method_in(scope, stack, frames, call, id, symbol, proc_class, ids);
+                    return undefined_method_in(scope, stack, frames, call, id, symbol, false, proc_class, ids);
                 };
                 // Public on the singleton, private as an instance method.
                 scope.classes_mut().define_method_visibly(
@@ -12545,7 +12547,7 @@ fn native_call<'h>(
                 };
                 if !ok {
                     return undefined_method_in(
-                        scope, stack, frames, call, id, missing, proc_class, ids,
+                        scope, stack, frames, call, id, missing, !aliasing, proc_class, ids,
                     );
                 }
                 done.push(name);
