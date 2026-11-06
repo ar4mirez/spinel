@@ -1483,8 +1483,8 @@ impl<'h> HandleScope<'h> {
         self.heap.partial
     }
 
-    /// `Module#autoload` registered `name`. See `Heap::autoloads`.
     /// One more module (`added`) or one fewer holds an autoload for `name`.
+    /// See `Heap::autoloads`.
     pub(crate) fn mark_autoloads(&mut self, name: SymbolId, added: bool) {
         let index = name.0 as usize;
         let heap = &mut *self.heap;
