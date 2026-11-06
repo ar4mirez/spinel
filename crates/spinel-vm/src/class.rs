@@ -2305,6 +2305,22 @@ impl Classes {
         modules
     }
 
+    /// Each refinement active in `cref`, once: `Module.used_refinements`.
+    pub fn used_refinements(&self, cref: CrefId) -> Vec<ClassId> {
+        let Some(index) = self.cref(cref).refinements else {
+            return Vec::new();
+        };
+        let mut used = Vec::new();
+        for (_, refinements) in self.used_table(index) {
+            for refinement in refinements {
+                if !used.contains(&refinement) {
+                    used.push(refinement);
+                }
+            }
+        }
+        used
+    }
+
     fn replace_refinements(&mut self, cref: CrefId, refinements: Option<u32>) -> CrefId {
         if let Some(&id) = self.refined_copies.get(&(cref, refinements)) {
             return id;

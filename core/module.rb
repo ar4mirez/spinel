@@ -689,6 +689,10 @@ class Module
   def self.used_modules
     __used_modules__
   end
+
+  def self.used_refinements
+    __used_refinements__
+  end
 end
 
 class Class

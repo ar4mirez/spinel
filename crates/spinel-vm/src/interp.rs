@@ -11940,6 +11940,18 @@ fn native_call<'h>(
             stack.push(value);
             Ok(None)
         }
+        Native::UsedRefinements => {
+            let cref = program_cref(frames).unwrap_or(call.cref);
+            let used: Vec<Value> = scope
+                .classes()
+                .used_refinements(cref)
+                .into_iter()
+                .map(|id| scope.classes().object(id))
+                .collect();
+            let value = new_array(scope, &used);
+            stack.push(value);
+            Ok(None)
+        }
         Native::RefinedByCaller => {
             let made = call.args.first().copied().unwrap_or(Value::NIL);
             if let Some(program) = program_cref(frames)
@@ -14861,6 +14873,11 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         (Builtin::Module, &["using"], Native::Using { main: false }),
         (Builtin::Module, &["refinements"], Native::Refinements),
         (Builtin::Module, &["__used_modules__"], Native::UsedModules),
+        (
+            Builtin::Module,
+            &["__used_refinements__"],
+            Native::UsedRefinements,
+        ),
         (
             Builtin::Module,
             &["__import_methods__"],

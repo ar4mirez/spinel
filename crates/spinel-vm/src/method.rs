@@ -458,6 +458,9 @@ pub enum Native {
     /// `Module.used_modules` (#352): the modules whose refinements are active
     /// where the program called it.
     UsedModules,
+    /// `Module.used_refinements` (#710): the refinements active where the
+    /// program called it, each once.
+    UsedRefinements,
     /// `Proc.__refined_by_caller__(proc)` (#352): give a `Proc` the core
     /// library made on a program's behalf the refinements active where the
     /// program asked for it — `Symbol#to_proc`'s, which sends as the code that
