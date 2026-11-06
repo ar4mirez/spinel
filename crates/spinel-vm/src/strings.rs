@@ -81,6 +81,16 @@ pub fn live<'s, 'h>(scope: &'s mut HandleScope<'h>, string: Handle<'h>) -> &'s [
     &scope.bytes(buffer)[..len]
 }
 
+/// The live bytes, borrowed mutably where they lie: what a primitive that
+/// rewrites a fixed-length String in place takes instead of a copy and a
+/// `splice` back (#703).
+pub fn live_mut<'s, 'h>(scope: &'s mut HandleScope<'h>, string: Handle<'h>) -> &'s mut [u8] {
+    let len = bytesize(scope, string);
+    let buffer = scope.slot(string, BUFFER);
+    let buffer = scope.root(buffer);
+    &mut scope.bytes_mut(buffer)[..len]
+}
+
 /// The live bytes, copied out.
 pub fn bytes<'h>(scope: &mut HandleScope<'h>, string: Handle<'h>) -> Vec<u8> {
     let len = bytesize(scope, string);
