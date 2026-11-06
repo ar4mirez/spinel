@@ -971,7 +971,11 @@ impl Classes {
     #[must_use]
     pub fn has_temporary_name(&self, id: ClassId) -> bool {
         let entry = self.entry(id);
-        entry.temporary || entry.name.as_deref().is_none_or(|name| name.starts_with("#<"))
+        entry.temporary
+            || entry
+                .name
+                .as_deref()
+                .is_none_or(|name| name.starts_with("#<"))
     }
 
     /// `Module#set_temporary_name`'s write: a name a constant path still

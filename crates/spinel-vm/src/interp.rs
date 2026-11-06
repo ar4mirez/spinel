@@ -7420,7 +7420,9 @@ fn set_temporary_name(scope: &mut HandleScope<'_>, id: ClassId, name: Option<Str
                 held.push((inner, renamed));
             }
         }
-        scope.classes_mut().set_temporary_name(outer, name.as_deref());
+        scope
+            .classes_mut()
+            .set_temporary_name(outer, name.as_deref());
         pending.extend(held);
     }
 }
@@ -9333,7 +9335,10 @@ fn undefined_method_in<'h>(
         cache: None,
         name: crate::shared::symbols::intern("__undefined_method__"),
         receiver: scope.classes().object(id),
-        args: vec![Value::symbol(name), if undef { Value::TRUE } else { Value::FALSE }],
+        args: vec![
+            Value::symbol(name),
+            if undef { Value::TRUE } else { Value::FALSE },
+        ],
         keywords: Vec::new(),
         block: Value::NIL,
         target: Target::Method,
@@ -9361,9 +9366,7 @@ fn native_call<'h>(
     let names = match native {
         Native::AttrDefine { .. } | Native::ModuleFunction | Native::UndefMethod => call.args.len(),
         // One Array is a list of names, which the primitive reads itself.
-        Native::SetVisibility(_)
-            if !matches!(call.args.as_slice(), [only] if heap_kind(scope, *only) == Some(HeapKind::Array)) =>
-        {
+        Native::SetVisibility(_) if !matches!(call.args.as_slice(), [only] if heap_kind(scope, *only) == Some(HeapKind::Array)) => {
             call.args.len()
         }
         Native::AliasMethod => call.args.len().min(2),
@@ -12267,7 +12270,9 @@ fn native_call<'h>(
                     narrowed.push(symbol);
                 }
                 if !scope.classes_mut().set_visibility(id, symbol, visibility) {
-                    return undefined_method_in(scope, stack, frames, call, id, symbol, false, proc_class, ids);
+                    return undefined_method_in(
+                        scope, stack, frames, call, id, symbol, false, proc_class, ids,
+                    );
                 }
             }
             // Ruby answers the arguments: one bare, several as an array. That
@@ -12326,7 +12331,9 @@ fn native_call<'h>(
                         .flatten()
                 });
                 let Some(method) = found else {
-                    return undefined_method_in(scope, stack, frames, call, id, symbol, false, proc_class, ids);
+                    return undefined_method_in(
+                        scope, stack, frames, call, id, symbol, false, proc_class, ids,
+                    );
                 };
                 // Public on the singleton, private as an instance method.
                 scope.classes_mut().define_method_visibly(
