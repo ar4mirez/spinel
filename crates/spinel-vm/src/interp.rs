@@ -11434,9 +11434,6 @@ fn native_call<'h>(
         Native::EvalBlock { module, exec } => {
             // No block: the body is a String, and this is string `eval`.
             let string_body = call.block == Value::NIL;
-            // The class a string body's constants resolve in, read before
-            // anything below makes a singleton class.
-            let constant_class = class_of(scope, call.receiver);
             if string_body {
                 if exec {
                     return Err(Error::raise("LocalJumpError", "no block given"));
@@ -11450,8 +11447,44 @@ fn native_call<'h>(
                         ),
                     ));
                 }
+                // A source and file that are not Strings, or a line that is
+                // not an Integer, are converted through `to_str` and `to_int`:
+                // sends this primitive cannot make, so `Kernel.__eval_string_args__`
+                // makes them and comes back through `__eval_string__`, which
+                // evaluates in the frame below its own — this call's caller.
+                // ponytail: that method's frame shows in a backtrace under its
+                // own name, where CRuby's says `Module#module_eval` (#711).
+                let plain = |scope: &mut HandleScope<'_>, index: usize| match call.args.get(index) {
+                    None => true,
+                    Some(&v) if index == 2 => v.as_fixnum().is_some(),
+                    Some(&v) => (index == 1 && v == Value::NIL) || is_string(scope, v),
+                };
+                if !(plain(scope, 0) && plain(scope, 1) && plain(scope, 2)) {
+                    let mut args = Vec::with_capacity(call.args.len() + 3);
+                    args.push(call.receiver);
+                    args.push(if module { Value::TRUE } else { Value::FALSE });
+                    args.push(Value::symbol(call.name));
+                    args.extend_from_slice(&call.args);
+                    let forwarded = Pending {
+                        cache: None,
+                        name: crate::shared::symbols::intern("__eval_string_args__"),
+                        receiver: scope.classes().object(Builtin::Kernel.id()),
+                        args,
+                        keywords: Vec::new(),
+                        implicit_self: true,
+                        variable_call: false,
+                        public_only: false,
+                        target: Target::Method,
+                        owner: None,
+                        defined_as: None,
+                        ..call
+                    };
+                    return dispatch(scope, stack, frames, forwarded, proc_class, ids);
+                }
+                let at = frames.len().checked_sub(1);
+                return eval_string(scope, stack, frames, &call, module, at, ids);
             }
-            if !string_body && !exec && !call.args.is_empty() {
+            if !exec && !call.args.is_empty() {
                 return Err(Error::raise(
                     "ArgumentError",
                     format!(
@@ -11460,57 +11493,7 @@ fn native_call<'h>(
                     ),
                 ));
             }
-            // A Symbol or a number — a bignum and a heap Float included — cannot
-            // have a singleton class, nor can a frozen literal (#376).
-            let numeric = class_of(scope, call.receiver).is_some_and(|class| {
-                matches!(
-                    scope.classes().repr(class),
-                    Some(Builtin::Integer | Builtin::Float)
-                )
-            });
-            let refuses_def = !module
-                && (numeric
-                    || is_fstring(scope, call.receiver)
-                    || (call.receiver.is_immediate()
-                        && !matches!(call.receiver, Value::NIL | Value::TRUE | Value::FALSE)));
-            let definee = if module {
-                class_id_of(scope, call.receiver).ok_or(Error::NoDispatch {
-                    op: "class_eval",
-                    operands: "a receiver that is not a Module",
-                })?
-            } else if refuses_def {
-                // An Integer cannot have a singleton class, so the eval node
-                // refuses `def` (`refuses_def`); everything else in the body
-                // runs against the class.
-                class_of(scope, call.receiver).ok_or_else(|| no_class(call.receiver))?
-            } else {
-                singleton_of(scope, call.receiver)?
-            };
-            if string_body {
-                let cref = frames.last().map_or(CrefId::ROOT, |frame| frame.cref);
-                let cref = if module {
-                    // A string `class_eval` is the class body reopened.
-                    scope.classes_mut().push_cref(cref, definee)
-                } else {
-                    let constants = constant_class.unwrap_or(definee);
-                    let cref = scope.classes_mut().push_constant_scope(cref, constants);
-                    if refuses_def {
-                        scope
-                            .classes_mut()
-                            .push_eval_cref_refusing_def(cref, definee)
-                    } else {
-                        scope.classes_mut().push_eval_cref(cref, definee)
-                    }
-                };
-                let binding = capture_binding(scope, frames, frames.len().checked_sub(1))?;
-                let handle = scope.root(binding);
-                scope.set_slot(handle, BINDING_SELF, call.receiver);
-                scope.set_slot(handle, BINDING_CREF, cref_value(cref));
-                // A body of its own, so `def` starts public.
-                scope.set_slot(handle, BINDING_VISIBILITY, Value::fixnum(0).expect("small"));
-                let binding = scope.get(handle);
-                return binding_eval(scope, stack, frames, &call, binding, ids);
-            }
+            let (definee, refuses_def, _) = eval_definee(scope, call.receiver, module)?;
             let (receiver, block) = (call.receiver, call.block);
             let args = if exec {
                 call.args.clone()
@@ -11540,6 +11523,20 @@ fn native_call<'h>(
             set_break_target(scope, block, *ids + 1);
             push_proc_frame_as(scope, stack, frames, &inner, block, ids, role)?;
             Ok(None)
+        }
+
+        Native::EvalString => {
+            let module = call.args.get(1) == Some(&Value::TRUE);
+            let name = call.args.get(2).and_then(|v| v.as_symbol());
+            let inner = Pending {
+                receiver: call.args.first().copied().unwrap_or(Value::NIL),
+                name: name.unwrap_or(call.name),
+                args: call.args.get(3..).unwrap_or_default().to_vec(),
+                ..call
+            };
+            // The frame below `__eval_string_args__`'s own.
+            let at = frames.len().checked_sub(2);
+            eval_string(scope, stack, frames, &inner, module, at, ids)
         }
 
         Native::ProcLocation => {
@@ -14275,6 +14272,7 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
                 exec: false,
             },
         ),
+        (Builtin::Kernel, &["__eval_string__"], Native::EvalString),
         (
             Builtin::Module,
             &["class_exec", "module_exec"],
@@ -18372,6 +18370,84 @@ fn numbered_param(name: &str) -> bool {
     bytes.len() == 2 && bytes[0] == b'_' && (b'1'..=b'9').contains(&bytes[1])
 }
 
+/// The class `instance_eval` or `class_eval` defines into, whether its body
+/// refuses `def`, and the class a String body's constants resolve in.
+fn eval_definee(
+    scope: &mut HandleScope<'_>,
+    receiver: Value,
+    module: bool,
+) -> Result<(ClassId, bool, Option<ClassId>), Error> {
+    // Read before anything below makes a singleton class.
+    let constant_class = class_of(scope, receiver);
+    // A Symbol or a number — a bignum and a heap Float included — cannot
+    // have a singleton class, nor can a frozen literal (#376).
+    let numeric = class_of(scope, receiver).is_some_and(|class| {
+        matches!(
+            scope.classes().repr(class),
+            Some(Builtin::Integer | Builtin::Float)
+        )
+    });
+    let refuses_def = !module
+        && (numeric
+            || is_fstring(scope, receiver)
+            || (receiver.is_immediate()
+                && !matches!(receiver, Value::NIL | Value::TRUE | Value::FALSE)));
+    let definee = if module {
+        class_id_of(scope, receiver).ok_or(Error::NoDispatch {
+            op: "class_eval",
+            operands: "a receiver that is not a Module",
+        })?
+    } else if refuses_def {
+        // An Integer cannot have a singleton class, so the eval node
+        // refuses `def` (`refuses_def`); everything else in the body
+        // runs against the class.
+        class_of(scope, receiver).ok_or_else(|| no_class(receiver))?
+    } else {
+        singleton_of(scope, receiver)?
+    };
+    Ok((definee, refuses_def, constant_class))
+}
+
+/// A String `instance_eval` or `class_eval` of `call.args` — a String source,
+/// and a String or nil file and an Integer line when given — through the
+/// binding of the frame at `at`.
+fn eval_string(
+    scope: &mut HandleScope<'_>,
+    stack: &mut Stack,
+    frames: &mut Vec<Call>,
+    call: &Pending,
+    module: bool,
+    at: Option<usize>,
+    ids: &mut u64,
+) -> Result<Option<Unwind>, Error> {
+    let (definee, refuses_def, constant_class) = eval_definee(scope, call.receiver, module)?;
+    let cref = at
+        .and_then(|at| frames.get(at))
+        .map_or(CrefId::ROOT, |frame| frame.cref);
+    let cref = if module {
+        // A string `class_eval` is the class body reopened.
+        scope.classes_mut().push_cref(cref, definee)
+    } else {
+        let constants = constant_class.unwrap_or(definee);
+        let cref = scope.classes_mut().push_constant_scope(cref, constants);
+        if refuses_def {
+            scope
+                .classes_mut()
+                .push_eval_cref_refusing_def(cref, definee)
+        } else {
+            scope.classes_mut().push_eval_cref(cref, definee)
+        }
+    };
+    let binding = capture_binding(scope, frames, at)?;
+    let handle = scope.root(binding);
+    scope.set_slot(handle, BINDING_SELF, call.receiver);
+    scope.set_slot(handle, BINDING_CREF, cref_value(cref));
+    // A body of its own, so `def` starts public.
+    scope.set_slot(handle, BINDING_VISIBILITY, Value::fixnum(0).expect("small"));
+    let binding = scope.get(handle);
+    binding_eval(scope, stack, frames, call, binding, ids)
+}
+
 fn binding_eval(
     scope: &mut HandleScope<'_>,
     stack: &mut Stack,
@@ -18386,30 +18462,6 @@ fn binding_eval(
             needs: "a parser, which `spinel_core::boot` installs",
         });
     };
-    // `Kernel#eval` and `Binding#eval` convert their arguments in Ruby first;
-    // `instance_eval` and `class_eval` are natives, and calling `to_str` or
-    // `to_int` from one is a frame it cannot sequence.
-    // ponytail: a String or Integer only, here; the upgrade is a Ruby
-    // `instance_eval` around a native that captures its caller's frame.
-    let convertible = |scope: &mut HandleScope<'_>, index: usize, integer: bool| {
-        call.args.get(index).is_none_or(|&v| {
-            v == Value::NIL
-                || if integer {
-                    v.as_fixnum().is_some()
-                } else {
-                    is_string(scope, v)
-                }
-        })
-    };
-    if !convertible(scope, 0, false)
-        || !convertible(scope, 1, false)
-        || !convertible(scope, 2, true)
-    {
-        return Err(Error::Unknowable {
-            what: "`instance_eval` or `class_eval` with an argument to convert",
-            needs: "a Ruby `instance_eval` around the native",
-        });
-    }
     let source = call.args.first().and_then(|&v| string_bytes(scope, v));
     let Some(source) = source else {
         return Err(Error::NoDispatch {
