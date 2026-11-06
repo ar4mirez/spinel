@@ -188,7 +188,7 @@ class Module
           symbol = __const_name__(part)
           found = __reflect_const_lookup__(base, symbol, inherit ? :qualified : false)
           # A miss is an autoload's turn first, then `const_missing`.
-          base = found.nil? ? base.__send__(:__const_missing__, symbol, :qualified, []) : found[0]
+          base = found.nil? ? base.__send__(:__const_missing__, symbol, inherit ? :qualified : :own, []) : found[0]
         end
       end
       return base
@@ -199,7 +199,7 @@ class Module
       __const_deprecation__(symbol)
       return found[0]
     end
-    __const_missing__(symbol, :inherit, [])
+    __const_missing__(symbol, inherit ? :inherit : :own, [])
   end
 
   # Whether a constant found here was assigned by a file another thread is
@@ -408,13 +408,15 @@ class Module
   # reference would have looked — the lexical scopes, the ancestors, `Object`
   # — then the program's `const_missing`, then the `NameError` the VM would
   # have raised itself. `A::B` does not look in `Object` unless `A` is it;
-  # `const_get(:B)` does, as `const_defined?` has it.
+  # `const_get(:B)` does, as `const_defined?` has it; `const_get(:B, false)`
+  # looks only here.
   def __const_missing__(name, how, nesting)
     search = lambda do
       owners = case how
                when :lexical then nesting + (nesting.first || self).ancestors + [Object]
                when :top then Object.ancestors
                when :inherit then instance_of?(Module) ? ancestors + [Object] : ancestors
+               when :own then [self]
                else equal?(Object) ? ancestors : ancestors - [Object]
                end
       owners.uniq
