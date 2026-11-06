@@ -9,8 +9,8 @@
 # ponytail: O(n) lookup. A real Hash is an open-addressed table keyed by
 # `#hash`, and `@__hashes__` is already the half of it that decides which slot. The
 # upgrade is this file and a primitive over it; outside it, only
-# `hash_pairs`, `hash_of_pairs` and `expand_splats` in `interp.rs` know the
-# representation, and each says so.
+# `hash_pairs`, `hash_of_pairs`, `expand_splats` and `symbol_key_get` in
+# `interp.rs` know the representation, and each says so.
 class Hash
   include Enumerable
 
