@@ -165,6 +165,14 @@ module Kernel
 
   def self.__eval_string_line__(line)
     raise TypeError, "no implicit conversion from nil to integer" if line.nil?
-    Integer.__to_int__(line, "to")
+    line = Integer.__to_int__(line, "to")
+    if line > 9223372036854775807 || line < -9223372036854775808
+      raise RangeError, "bignum too big to convert into 'long'"
+    elsif line > 2147483647
+      raise RangeError, "integer #{line} too big to convert to 'int'"
+    elsif line < -2147483648
+      raise RangeError, "integer #{line} too small to convert to 'int'"
+    end
+    line
   end
 end

@@ -11456,7 +11456,7 @@ fn native_call<'h>(
                 // own name, where CRuby's says `Module#module_eval` (#711).
                 let plain = |scope: &mut HandleScope<'_>, index: usize| match call.args.get(index) {
                     None => true,
-                    Some(&v) if index == 2 => v.as_fixnum().is_some(),
+                    Some(&v) if index == 2 => v.as_fixnum().is_some_and(|n| i32::try_from(n).is_ok()),
                     Some(&v) => (index == 1 && v == Value::NIL) || is_string(scope, v),
                 };
                 if !(plain(scope, 0) && plain(scope, 1) && plain(scope, 2)) {
