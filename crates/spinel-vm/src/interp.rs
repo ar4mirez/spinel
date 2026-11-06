@@ -11565,7 +11565,7 @@ fn native_call<'h>(
                 let depth = frames.len();
                 let unwind = eval_string(scope, stack, frames, &call, module, at, ids)?;
                 if frames.len() > depth
-                    && let Some(frame) = frames.last_mut()
+                    && let Some(frame) = frames.get_mut(depth)
                 {
                     frame.shown = Shown::Under(owner, call.name);
                 }
