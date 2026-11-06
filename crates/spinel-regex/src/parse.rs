@@ -1079,7 +1079,7 @@ impl Parser {
             (CharRange::Ascii, ClassItem::Posix(kind, negated)) => {
                 let ascii = Class {
                     negated: false,
-                    icase: self.flags.icase,
+                    icase: false,
                     items: vec![ClassItem::Posix(Posix::Ascii, false)],
                     intersect: Vec::new(),
                 };

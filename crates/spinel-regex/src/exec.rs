@@ -980,6 +980,7 @@ fn class_matches(class: &Class, c: char, enc: Encoding) -> bool {
             class
                 .items
                 .iter()
+                .filter(|item| !matches!(item, ClassItem::Nested(_)))
                 .any(|item| item_matches(item, folded, false, enc))
         });
     }

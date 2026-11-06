@@ -998,6 +998,12 @@ mod tests {
         assert_eq!(find("(?d)\\w+", "a\u{3042}"), Some((0, 1)));
         assert_eq!(find("(?u)\\h", "\u{3042}"), None);
         assert_eq!(find("(?a:\\w)\\w", "aa"), Some((0, 2)));
+        // The ASCII cut tests the character itself, never its case fold.
+        assert_eq!(find("(?ai)[[:alpha:]]", "\u{212a}"), None);
+        assert_eq!(find("(?ai)[[:lower:]]", "\u{17f}"), None);
+        assert_eq!(find("(?ai)[[:^alpha:]]", "\u{212a}"), Some((0, 3)));
+        assert_eq!(find("(?ai)[[:lower:]]", "A"), Some((0, 1)));
+        assert_eq!(find("(?ai)k", "\u{212a}"), Some((0, 3)));
         assert!(matches!(
             Regex::new("(?-a)a", Flags::default()),
             Err(Error::Syntax(_))
