@@ -1400,6 +1400,18 @@ fn reflect_native(
             let class = class_of(scope, arg(0)).ok_or_else(|| no_class(arg(0)))?;
             scope.classes().object(class)
         }
+        ReflectOp::ClassIn => {
+            let class = class_of(scope, arg(0)).ok_or_else(|| no_class(arg(0)))?;
+            let class = scope.classes().object(class);
+            let list = arg(1);
+            if heap_kind(scope, list) != Some(HeapKind::Array) {
+                return Err(Error::raise("TypeError", "expected an Array"));
+            }
+            let list = scope.root(list);
+            let found =
+                (0..array_len(scope, list)).any(|index| array_get(scope, list, index) == class);
+            bool_value(found)
+        }
         ReflectOp::SingletonClass => {
             let target = arg(0);
             if let Some(n) = target.as_fixnum() {
@@ -14195,6 +14207,11 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             Builtin::Kernel,
             &["__reflect_class_of__"],
             Native::Reflect(ReflectOp::ClassOf),
+        ),
+        (
+            Builtin::Kernel,
+            &["__reflect_class_in__"],
+            Native::Reflect(ReflectOp::ClassIn),
         ),
         (
             Builtin::Kernel,

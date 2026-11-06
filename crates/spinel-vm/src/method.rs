@@ -937,6 +937,9 @@ pub enum ReflectOp {
     MethodNames,
     /// `(object)` → its class, singleton included if it has one.
     ClassOf,
+    /// `(object, list)` → whether `ClassOf` of `object` is identically one of
+    /// the Array `list`'s elements: `Array#flatten`'s per-call class cache.
+    ClassIn,
     /// `(object)` → its singleton class, made if need be.
     SingletonClass,
     /// `(mod, name)` → whether `mod` defined it and it is now gone.
