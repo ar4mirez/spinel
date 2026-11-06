@@ -26,8 +26,7 @@
 //! Constructs this engine does not implement yet return [`Error::Unsupported`]
 //! rather than a guess. The VM turns that into `Error::Unknowable`, and the
 //! spec run reports the example *blocked* — never passed, never failed.
-//! Today that is `(?~)`, a recursive `\g<>` call, `\X`, `\p{}` and a
-//! `\k<name+1>` level specifier past level 0.
+//! `docs/engine.md` lists which constructs those are today.
 //!
 //! ```
 //! use spinel_regex::{Flags, Regex};
