@@ -1110,10 +1110,23 @@ impl Compiler {
                         let source = String::from_utf8(bytes.into_vec()).map_err(|_| {
                             Unsupported::at("a regexp source that is not UTF-8", span)
                         })?;
+                        // `spinel-parse` checks a literal only in a UTF-8
+                        // file and with no encoding of its own.
+                        let parser_warned = self
+                            .source
+                            .as_ref()
+                            .and_then(|map| map.encoding.as_deref())
+                            .is_none_or(|name| name.eq_ignore_ascii_case("utf-8"))
+                            && matches!(
+                                regexp.flags.encoding,
+                                spinel_ast::RegexpEncoding::None | spinel_ast::RegexpEncoding::Utf8
+                            )
+                            && regexp.flags.forced != spinel_ast::ForcedEncoding::Binary;
                         let index = self.literal(Literal::Regexp {
                             source: source.into_boxed_str(),
                             options,
                             encoding: self.source_encoding(),
+                            parser_warned,
                         });
                         self.emit(Insn::PushLit(index));
                     }

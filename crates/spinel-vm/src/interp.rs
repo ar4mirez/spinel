@@ -2581,6 +2581,19 @@ fn run<'h>(
                         let literal = frames[top].iseq.literals[index as usize].clone();
                         let value = materialise(scope, &literal, string_class)?;
                         stack.push(value);
+                        if let Some(message) = scope.take_pending_warning()
+                            && let Some(unwind) = vm_warn(
+                                scope,
+                                &mut stack,
+                                &mut frames,
+                                proc_class,
+                                &mut ids,
+                                &message,
+                                false,
+                            )?
+                        {
+                            return Ok(Step::Unwind(unwind));
+                        }
                     }
                     Insn::PushSym(index) => {
                         let symbol = frames[top].symbols[index as usize];
@@ -15621,7 +15634,8 @@ fn materialise<'h>(
             source,
             options,
             encoding,
-        } => regexp_literal(scope, source, *options, *encoding),
+            parser_warned,
+        } => regexp_literal(scope, source, *options, *encoding, *parser_warned),
         Literal::Str(bytes, encoding)
         | Literal::FrozenStr(bytes, encoding)
         | Literal::ChilledStr(bytes, encoding) => {
@@ -16721,18 +16735,23 @@ fn regexp_source_error(error: &spinel_regex::Error, source: &str) -> Error {
 ///
 /// The pattern is read in the file's source encoding, so in a `# encoding:
 /// binary` file `/\xAA/` is the byte, and BINARY. Measured.
+///
+/// What Onigmo warns about the pattern is said once: by the parser when it
+/// checked the literal, otherwise left pending on this first compile.
 fn regexp_literal(
     scope: &mut HandleScope<'_>,
     source: &str,
     options: i64,
     encoding: u8,
+    parser_warned: bool,
 ) -> Result<Value, Error> {
     if let Some(cached) = scope.regexps().cached(source, options, encoding) {
         return Ok(cached);
     }
     let value = regexp_new(scope, source.as_bytes(), encoding, options)?;
-    // The parser has already said what Onigmo warns about a literal.
-    scope.take_pending_warning();
+    if parser_warned {
+        scope.take_pending_warning();
+    }
     scope.regexps_mut().cache(source, options, encoding, value);
     Ok(value)
 }
@@ -16819,7 +16838,12 @@ fn regexp_initialize(
     // Only Ruby's own bits: anything above them is not an option at all, and
     // must not be read as an encoding a literal fixed.
     let options = options & ((1 << crate::regexp::LITERAL_ENCODING_SHIFT) - 1);
-    regexp_build(scope, &bytes, encoding, options, None, Some(receiver)).map(|_| ())
+    let built = regexp_build(scope, &bytes, encoding, options, None, Some(receiver));
+    // A Regexp's pattern was warned about when it was made. Measured.
+    if from_regexp {
+        scope.take_pending_warning();
+    }
+    built.map(|_| ())
 }
 
 /// A literal's pattern: its options may carry the encoding a modifier fixed.
@@ -16940,8 +16964,8 @@ fn regexp_build(
             }
         })?;
     // What Onigmo warns about the pattern, for the caller to say: a
-    // constructor at the line that called it, a literal not at all, because
-    // the parser did. ponytail: one warning per pattern, where Onigmo gives
+    // constructor at the line that called it, a literal only where the parser
+    // did not. ponytail: one warning per pattern, where Onigmo gives
     // each nested quantifier its own; the upgrade is a pending list.
     if let Some(warning) = scope
         .regexps()

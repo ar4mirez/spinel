@@ -342,8 +342,11 @@ Onigmo's `ReduceTypeTable`, as measured for all 36 pairs, and its warning is
 kept on the compiled pattern for the caller to say. CRuby compiles a regexp
 literal as it parses it, so `spinel-parse` checks each literal with
 `spinel_regex::check`: one that is not a pattern is a `SyntaxError` before
-anything runs, and its warnings are said once, with the parser's. A
-constructor says them at its call.
+anything runs, and its warnings are said once, with the parser's. A literal
+the parser leaves to the run time — in a file that is not UTF-8, or with an
+encoding of its own — says them on its first compile instead. A constructor
+says them at its call, except `Regexp.new(regexp)`, whose pattern already
+did.
 
 A match runs under a step budget, and refuses with `Error::Budget` past it,
 unless its caller gives it a deadline: `Regexp.timeout` or a pattern's own
