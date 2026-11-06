@@ -187,18 +187,27 @@ class Module
           # it does not fall back to `Object`. Measured.
           symbol = __const_name__(part)
           found = __reflect_const_lookup__(base, symbol, inherit ? :qualified : false)
-          base = found.nil? ? base.__send__(:const_missing, symbol) : found[0]
+          # A miss is an autoload's turn first, then `const_missing`.
+          base = found.nil? ? base.__send__(:__const_missing__, symbol, :qualified, []) : found[0]
         end
       end
       return base
     end
     symbol = __const_name__(name)
     found = __reflect_const_lookup__(self, symbol, inherit)
-    unless found.nil?
+    unless found.nil? || __autoload_awaited__(symbol, inherit)
       __const_deprecation__(symbol)
       return found[0]
     end
     __const_missing__(symbol, :qualified, [])
+  end
+
+  # Whether a constant found here was assigned by a file another thread is
+  # still autoloading, which this thread waits for (#709). Only asked once
+  # some autoload has run.
+  def __autoload_awaited__(symbol, inherit)
+    return false unless Module.instance_variable_get(:@__autoloaded__)
+    (inherit ? ancestors : [self]).any? { |owner| owner.__autoloading_elsewhere__(symbol) }
   end
 
   def const_missing(name)
@@ -223,7 +232,7 @@ class Module
     # A constant an autoload will define is defined, as CRuby has it.
     owners = inherit ? ancestors : [self]
     owners += [Object] if inherit && instance_of?(Module)
-    owners.any? { |owner| !owner.__autoload_entry__(symbol).nil? }
+    owners.any? { |owner| !owner.__autoload_pending__(symbol).nil? }
   end
 
   # Where the constant `const_get` would find was assigned (#128): `[path,
@@ -243,10 +252,15 @@ class Module
       return base.const_source_location(last, inherit)
     end
     symbol = __const_name__(name)
-    found = __reflect_const_source__(self, symbol, inherit)
-    return found unless found.nil?
     owners = inherit ? ancestors : [self]
     owners += [Object] if inherit && instance_of?(Module)
+    # Another thread still loading it: to this one, it is the autoload yet.
+    owners.each do |owner|
+      next unless owner.__autoloading_elsewhere__(symbol)
+      return owner.instance_variable_get(:@__autoload_locations__)[symbol]
+    end
+    found = __reflect_const_source__(self, symbol, inherit)
+    return found unless found.nil?
     owners.each do |owner|
       next if owner.__autoload_entry__(symbol).nil?
       return owner.instance_variable_get(:@__autoload_locations__)[symbol]
@@ -300,6 +314,15 @@ class Module
     return nil if feature && $LOADED_FEATURES.include?(feature)
     entries = instance_variable_get(:@__autoloads__) || instance_variable_set(:@__autoloads__, {})
     entries[symbol] = path.dup.freeze
+    __mark_autoloads__
+    instance_variable_get(:@__autoload_spent__)&.delete(symbol)
+    # By feature too, so a plain `require` of the same file is this autoload
+    # running (`Kernel.__autoload_feature__`).
+    unless feature.nil?
+      features = Kernel.instance_variable_get(:@__autoload_features__) ||
+                 Kernel.instance_variable_set(:@__autoload_features__, {})
+      (features[feature] ||= []) << [self, symbol]
+    end
     # The program's position, which is where CRuby says the constant is until
     # the file defines it.
     locations = instance_variable_get(:@__autoload_locations__) || instance_variable_set(:@__autoload_locations__, {})
@@ -313,7 +336,7 @@ class Module
     symbol = Symbol === name ? name : IO.__str__(name).to_sym
     owners = inherit ? ancestors : [self]
     owners.each do |owner|
-      path = owner.__autoload_entry__(symbol)
+      path = owner.__autoload_pending__(symbol)
       return path unless path.nil?
     end
     nil
@@ -324,12 +347,60 @@ class Module
     entries && entries[symbol]
   end
 
+  # The path of an autoload for `symbol` that this thread is not the one
+  # loading, or nil: the loading thread sees the name as not yet defined.
+  def __autoload_pending__(symbol)
+    path = __autoload_entry__(symbol)
+    return nil if path.nil?
+    spent = instance_variable_get(:@__autoload_spent__)
+    return nil if spent&.key?(symbol) && $LOADED_FEATURES.include?(spent[symbol])
+    loading = instance_variable_get(:@__autoloading__)
+    return path if loading.nil? || !loading.key?(symbol)
+    loading[symbol] == __thread_current__ ? nil : path
+  end
+
+  def __autoloading_elsewhere__(symbol)
+    loading = instance_variable_get(:@__autoloading__)
+    !loading.nil? && loading.key?(symbol) && loading[symbol] != __thread_current__
+  end
+
   # Require what an autoload names, and answer the constant it defined.
+  # CRuby sends `require` to `main`, so a program's own `require` is the one
+  # that runs; a file this thread is part-way through loading is not required
+  # again, and so draws no circular-require warning.
   def __autoload__(symbol, path)
-    require path
+    feature = begin
+      Kernel.__find_feature__(path)
+    rescue LoadError
+      nil
+    end
+    loaders = Kernel.instance_variable_get(:@__loaders__)
+    me = __thread_current__
+    unless feature && loaders && loaders[feature] == me
+      # While it loads, this thread sees the name as not yet defined.
+      loading = (@__autoloading__ ||= {})
+      loading[symbol] = me
+      Module.instance_variable_set(:@__autoloaded__, true)
+      begin
+        TOPLEVEL_BINDING.receiver.__send__(:require, path)
+      ensure
+        loading.delete(symbol)
+      end
+    end
     @__autoloads__&.delete(symbol)
     found = __reflect_const_lookup__(self, symbol, false)
     return found[0] unless found.nil?
+    nil
+  end
+
+  # `class C`/`module C` naming a registered autoload (#709): the VM calls
+  # this, then runs the definition again. The entry goes whether or not the
+  # file defined the name, so that second run opens a class of its own.
+  def __autoload_definee__(symbol)
+    path = __autoload_entry__(symbol)
+    return nil if path.nil?
+    __autoload__(symbol, path)
+    @__autoloads__&.delete(symbol)
     nil
   end
 
@@ -338,22 +409,35 @@ class Module
   # — then the program's `const_missing`, then the `NameError` the VM would
   # have raised itself.
   def __const_missing__(name, how, nesting)
-    owners = case how
-             when :lexical then nesting + (nesting.first || self).ancestors + [Object]
-             when :top then Object.ancestors
-             else ancestors + (instance_of?(Module) ? [] : [])
-             end
-    owners = owners.uniq
+    search = lambda do
+      owners = case how
+               when :lexical then nesting + (nesting.first || self).ancestors + [Object]
+               when :top then Object.ancestors
+               else ancestors
+               end
+      owners.uniq
+    end
+    owners = search.call
     owners.each do |owner|
-      path = owner.__autoload_entry__(name)
+      # Another thread is loading it: wait for that load, then look again.
+      if owner.__autoloading_elsewhere__(name)
+        sleep(0.001) while owner.__autoloading_elsewhere__(name)
+        search.call.each do |scope|
+          found = __reflect_const_lookup__(scope, name, false)
+          return found[0] unless found.nil?
+        end
+      end
+      path = owner.__autoload_pending__(name)
       next if path.nil?
       if owner.__autoload__(name, path).nil? && __reflect_const_lookup__(owner, name, false).nil?
         full = owner.equal?(Object) ? name.to_s : "#{owner.inspect}::#{name}"
         __warning__("Expected #{path} to define #{full} but it didn't", true)
       end
       # The original lookup again: what the file defined may be anywhere it
-      # would have looked, an outer scope as well as the one it was declared in.
-      owners.each do |scope|
+      # would have looked, an outer scope as well as the one it was declared
+      # in — and in a module the file included or prepended, so the
+      # ancestors are read afresh.
+      search.call.each do |scope|
         found = __reflect_const_lookup__(scope, name, false)
         return found[0] unless found.nil?
       end
@@ -370,6 +454,14 @@ class Module
     symbol = __const_name__(name)
     __const_deprecation__(symbol)
     removed = __reflect_const_remove__(self, symbol)
+    # An autoload not yet loaded goes without loading its file, and answers
+    # nil, as CRuby's does.
+    if removed.nil? && @__autoloads__&.key?(symbol)
+      @__autoloads__.delete(symbol)
+      @__autoload_spent__&.delete(symbol)
+      @__autoload_locations__&.delete(symbol)
+      return nil
+    end
     if removed.nil?
       raise NameError.new("constant #{inspect}::#{symbol} not defined", symbol)
     end

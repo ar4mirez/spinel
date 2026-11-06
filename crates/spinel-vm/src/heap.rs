@@ -320,6 +320,10 @@ pub struct Heap {
     /// Whether code this heap was meant to run did not all run — see
     /// [`HandleScope::mark_partial`].
     partial: bool,
+    /// Whether `Module#autoload` has ever registered a name on this heap, so
+    /// a constant read only looks for an autoload shadowing what it found
+    /// once there may be one (#709).
+    autoloads: bool,
     /// The program's name and arguments, as the embedder was given them:
     /// `$0` and `ARGV`.
     argv: Vec<String>,
@@ -636,6 +640,7 @@ impl Heap {
             parser: None,
             libraries: None,
             partial: false,
+            autoloads: false,
             argv: Vec::new(),
             program_name: String::new(),
             budget: Some(crate::interp::BUDGET),
@@ -1468,6 +1473,15 @@ impl<'h> HandleScope<'h> {
 
     pub(crate) fn partial(&self) -> bool {
         self.heap.partial
+    }
+
+    /// `Module#autoload` registered a name. See `Heap::autoloads`.
+    pub(crate) fn mark_autoloads(&mut self) {
+        self.heap.autoloads = true;
+    }
+
+    pub(crate) fn autoloads(&self) -> bool {
+        self.heap.autoloads
     }
 
     /// The program name and arguments `$0` and `ARGV` start as. Set before

@@ -113,16 +113,59 @@ module Kernel
     features.push(path)
     loading.push(path)
     loaders[path] = me
+    autoloads = __autoload_feature__(path, me)
     begin
       __load_file__(path, nil)
     rescue Exception
       features.delete(path)
+      __autoload_feature_done__(autoloads, false)
       raise
     ensure
       loading.delete(path)
       loaders.delete(path)
     end
+    __autoload_feature_done__(autoloads, path)
     true
+  end
+
+  # A file an autoload names is that autoload running, however it came to be
+  # required: while it loads, the loading thread sees the names it registered
+  # as not yet defined. Answers the `[module, name]` pairs still waiting on it.
+  def self.__autoload_feature__(path, me)
+    registry = @__autoload_features__
+    return nil if registry.nil?
+    autoloads = registry[path]
+    return nil if autoloads.nil?
+    autoloads = autoloads.select { |owner, name| owner.__autoload_entry__(name) }
+    autoloads.each { |owner, name| owner.instance_variable_get(:@__autoload_spent__)&.delete(name) }
+    autoloads.each do |owner, name|
+      loading = owner.instance_variable_get(:@__autoloading__) ||
+                owner.instance_variable_set(:@__autoloading__, {})
+      loading[name] = me
+    end
+    Module.instance_variable_set(:@__autoloaded__, true) unless autoloads.empty?
+    autoloads
+  end
+
+  # Once the file has loaded, its autoloads are spent: a name it defined is a
+  # constant, and one it did not stays listed in `constants` but does not
+  # autoload while the file stays in `$LOADED_FEATURES` — CRuby's
+  # `check_autoload_required`. A file that raised leaves them registered.
+  def self.__autoload_feature_done__(autoloads, path)
+    return if autoloads.nil?
+    autoloads.each do |owner, name|
+      owner.instance_variable_get(:@__autoloading__)&.delete(name)
+      next unless path
+      entries = owner.instance_variable_get(:@__autoloads__)
+      next if entries.nil? || !entries.key?(name)
+      if __reflect_const_lookup__(owner, name, false).nil?
+        spent = owner.instance_variable_get(:@__autoload_spent__) ||
+                owner.instance_variable_set(:@__autoload_spent__, {})
+        spent[name] = path
+      else
+        entries.delete(name)
+      end
+    end
   end
 
   # The file `require` would load for `name`, or a `LoadError`.
