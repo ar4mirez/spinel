@@ -179,8 +179,10 @@ pub enum Native {
     Chill,
     /// `String#<<` for the case every loop that builds a String is in: an
     /// unfrozen, unchilled receiver and a String argument whose bytes can be appended
-    /// as they are. Anything else is the Ruby half's, `String#__append__`.
-    StringAppend,
+    /// as they are. Anything else is the Ruby half's, the method named here:
+    /// `String#__append__` for `<<`, and for `__append_as_string__`, which
+    /// `Array#inspect` appends with, `String#__append_as_string_rest__`.
+    StringAppend(&'static str),
     /// `Regexp#__match__`: `match`, leaving `$~` as it was. What the core
     /// library matches with, so that reading a number out of a String does
     /// not change the caller's last match.

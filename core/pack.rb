@@ -196,6 +196,27 @@ module Pack
     out
   end
 
+  # CRuby's `rb_uv_to_utf8`: the original UTF-8, which runs to six bytes and
+  # 0x7fffffff, so `U` packs codepoints Unicode does not have.
+  def self.uv_to_utf8(code)
+    return [code] if code < 0x80
+    count =
+      if code < 0x800 then 2
+      elsif code < 0x10000 then 3
+      elsif code < 0x200000 then 4
+      elsif code < 0x4000000 then 5
+      elsif code < 0x80000000 then 6
+      else raise RangeError, "pack(U): value out of range"
+      end
+    bytes = []
+    (count - 1).times do
+      bytes.unshift(0x80 | (code & 0x3f))
+      code = code >> 6
+    end
+    bytes.unshift(((0xff00 >> count) & 0xff) | code)
+    bytes
+  end
+
   def self.ber(value)
     raise ArgumentError, "can't compress negative numbers" if value < 0
     groups = [value & 0x7f]
@@ -244,7 +265,7 @@ class Array
         times.times do
           code = Pack.integer_arg(take.call)
           raise RangeError, "pack(U): value out of range" if code < 0
-          out << Integer.__utf8__(code).b
+          out << Pack.bytes_to_string(Pack.uv_to_utf8(code))
         end
       when "w"
         times = count == :star ? size - item : (count || 1)
@@ -299,7 +320,10 @@ class Array
           byte = 0
           slice.each_with_index do |at, k|
             c = hex.getbyte(at)
-            nibble = c >= 0x61 ? (c - 0x61 + 10) & 15 : (c >= 0x41 ? (c - 0x41 + 10) & 15 : c & 15)
+            # `ISALPHA`, so any letter counts from 10 and anything else is
+            # its own low nibble.
+            alpha = (c >= 0x61 && c <= 0x7a) || (c >= 0x41 && c <= 0x5a)
+            nibble = alpha ? ((c & 15) + 9) & 15 : c & 15
             byte = byte | (letter == "H" ? (k == 0 ? nibble << 4 : nibble) : (k == 0 ? nibble : nibble << 4))
           end
           bytes.push(byte)
@@ -308,8 +332,9 @@ class Array
         out << Pack.bytes_to_string(bytes)
       when "m"
         text = String.__coerce__(take.call)
-        line = count == :star || count.nil? ? nil : count
-        out << (count == 0 ? Pack.base64(text.bytes, 0) : Pack.base64(text.bytes, line.nil? ? nil : [line, 3].max)).b
+        # A count of 2 or less, `*` included, is 45 bytes a line.
+        line = count == :star || count.nil? || count <= 2 ? nil : count
+        out << (count == 0 ? Pack.base64(text.bytes, 0) : Pack.base64(text.bytes, line)).b
       when "M"
         value = take.call
         # `rb_obj_as_string`: a `to_s` that answers something else is

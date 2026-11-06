@@ -8,7 +8,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 |---|---:|---:|---:|---:|---:|---:|---:|
 | `command_line` | 32 | 175 | 168 | 0 | 0 | 7 | 96% |
 | `core/argf` | 35 | 139 | 0 | 0 | 120 | 19 | 0% |
-| `core/array` | 132 | 2898 | 2866 | 0 | 21 | 11 | 99% |
+| `core/array` | 132 | 2898 | 2884 | 0 | 14 | 0 | 100% |
 | `core/basicobject` | 14 | 172 | 166 | 0 | 6 | 0 | 97% |
 | `core/binding` | 12 | 98 | 98 | 0 | 0 | 0 | 100% |
 | `core/builtin_constants` | 1 | 27 | 17 | 0 | 10 | 0 | 63% |
@@ -131,4 +131,4 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `optional/capi` | 47 | 0 | 0 | 0 | 0 | 0 | — |
 | `optional/thread_safety` | 1 | 5 | 0 | 0 | 5 | 0 | 0% |
 | `security` | 13 | 31 | 28 | 0 | 3 | 0 | 90% |
-| **total** | 3835 | 32691 | 29077 | 0 | 3318 | 296 | 89% |
+| **total** | 3835 | 32691 | 29095 | 0 | 3311 | 285 | 89% |

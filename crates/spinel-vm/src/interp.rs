@@ -10951,7 +10951,7 @@ fn native_call<'h>(
             stack.push(sorted);
             Ok(None)
         }
-        Native::StringAppend => {
+        Native::StringAppend(rest) => {
             let other = first_arg(&call);
             let plain = call.args.len() == 1
                 && !call.receiver.is_immediate()
@@ -10982,7 +10982,7 @@ fn native_call<'h>(
             }
             let forwarded = Pending {
                 cache: None,
-                name: crate::shared::symbols::intern("__append__"),
+                name: crate::shared::symbols::intern(rest),
                 target: Target::Method,
                 owner: None,
                 defined_as: None,
@@ -14774,7 +14774,12 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             Native::Str(StrOp::ForceEncoding),
         ),
         (Builtin::String, &["__splice__"], Native::Str(StrOp::Splice)),
-        (Builtin::String, &["<<"], Native::StringAppend),
+        (Builtin::String, &["<<"], Native::StringAppend("__append__")),
+        (
+            Builtin::String,
+            &["__append_as_string__"],
+            Native::StringAppend("__append_as_string_rest__"),
+        ),
         (Builtin::Integer, &["<=>"], Native::NumCompare),
         (Builtin::Array, &["__sort_plain__"], Native::SortPlain),
         (
