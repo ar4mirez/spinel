@@ -146,6 +146,8 @@ pub fn parse_eval(
 struct RegexpLiterals {
     errors: Vec<Diagnostic>,
     warnings: Vec<Diagnostic>,
+    /// Where each literal it compiled starts.
+    checked: std::collections::HashSet<u32>,
 }
 
 /// The two literal-regexp nodes carry the same flags on unrelated types.
@@ -178,6 +180,7 @@ impl RegexpLiterals {
             return;
         };
         let span = lower::span_of(location);
+        self.checked.insert(span.start);
         match spinel_regex::check(source, flags, spinel_regex::Encoding::Utf8) {
             Ok(found) => self
                 .warnings
@@ -289,11 +292,11 @@ fn parse_at(path: &str, source: &[u8], first_line: i64, yield_allowed: bool) -> 
     // valid Ruby is a `SyntaxError` before anything runs, and what Onigmo
     // warns about one is said once, here, however often it is evaluated.
     let utf8_source = magic_encoding(source).is_none_or(|name| name.eq_ignore_ascii_case("utf-8"));
+    let mut literals = RegexpLiterals::default();
     if errors.is_empty() && utf8_source {
-        let mut literals = RegexpLiterals::default();
         ruby_prism::Visit::visit_program_node(&mut literals, &root);
-        errors.extend(literals.errors);
-        warnings.extend(literals.warnings);
+        errors.append(&mut literals.errors);
+        warnings.append(&mut literals.warnings);
     }
 
     let (program, lowering_errors) = lower::program(
@@ -302,6 +305,7 @@ fn parse_at(path: &str, source: &[u8], first_line: i64, yield_allowed: bool) -> 
             path,
             line_starts: &line_starts(source),
             first_line,
+            checked_regexps: &literals.checked,
         },
     );
     errors.extend(lowering_errors);
