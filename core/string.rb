@@ -903,13 +903,10 @@ class String
       start = size if start > size
     end
     if pattern.is_a?(Regexp)
-      at = start
-      while at >= 0
-        match = pattern.match(self, at)
-        return at if !match.nil? && match.begin(0) == at
-        at -= 1
-      end
-      return nil
+      # Backward from `start`, with `\G` anchored there: CRuby's
+      # `rb_reg_search` in reverse.
+      match = pattern.__rmatch__(self, start)
+      return match.nil? ? nil : match.begin(0)
     end
     pattern = String.__coerce__(pattern)
     __combined_encoding__(pattern)
@@ -948,14 +945,9 @@ class String
     end
     __check_char_boundary__(start)
     if pattern.is_a?(Regexp)
-      # Backward a character at a time, as `#rindex`, answering the byte offset.
-      at = __byte_to_char__(start)
-      while at >= 0
-        match = pattern.match(self, at)
-        return match.byteoffset(0)[0] if !match.nil? && match.begin(0) == at
-        at -= 1
-      end
-      return nil
+      # Backward, as `#rindex`, answering the byte offset.
+      match = pattern.__rmatch__(self, __byte_to_char__(start))
+      return match.nil? ? nil : match.byteoffset(0)[0]
     end
     pattern = String.__coerce__(pattern)
     __combined_encoding__(pattern)

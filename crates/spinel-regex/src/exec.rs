@@ -660,6 +660,19 @@ impl Program {
         self.run_from(haystack, start, start, &mut Ctx::new(deadline))
     }
 
+    /// One attempt at `at` with `\G` anchored at `anchor`: a step of a
+    /// backward search, which starts at `anchor` and tries each character
+    /// before it in turn.
+    pub fn match_anchored(
+        &self,
+        haystack: Subject<'_>,
+        at: usize,
+        anchor: usize,
+        deadline: Option<Instant>,
+    ) -> Result<Option<Match>, Error> {
+        self.run_from(haystack, at, anchor, &mut Ctx::new(deadline))
+    }
+
     /// One attempt at `at`. `start` is where the whole search began, which is
     /// what `\G` anchors to — not `at`: measured, `'hello'.match(/\Go/)` is
     /// nil, and anchoring to the attempt matched the `o`.

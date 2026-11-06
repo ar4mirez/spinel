@@ -168,6 +168,8 @@ pub struct Parsed {
     /// be used more than once in Ruby, so this is a name to *last* group map,
     /// matching what `MatchData#[]` answers.
     pub names: Vec<(String, usize)>,
+    /// What Onigmo warns about the pattern as it compiles it.
+    pub warnings: Vec<String>,
 }
 
 pub fn parse(source: &str, flags: Flags, encoding: Encoding) -> Result<Parsed, Error> {
@@ -181,6 +183,7 @@ pub fn parse(source: &str, flags: Flags, encoding: Encoding) -> Result<Parsed, E
         name_index: HashMap::new(),
         numeric_backref: false,
         conditioned: 0,
+        warnings: Vec::new(),
     };
     let ast = parser.alternation()?;
     if parser.pos < parser.chars.len() {
@@ -212,7 +215,12 @@ pub fn parse(source: &str, flags: Flags, encoding: Encoding) -> Result<Parsed, E
     let mut ast = ast;
     resolve_calls(&mut ast, &parser.name_index)?;
     let (groups, names) = drop_unnamed_groups(&mut ast, parser.groups, parser.names);
-    Ok(Parsed { ast, groups, names })
+    Ok(Parsed {
+        ast,
+        groups,
+        names,
+        warnings: parser.warnings,
+    })
 }
 
 /// Ruby's rule: one named group anywhere makes every *unnamed* `(...)` a
@@ -534,6 +542,44 @@ fn renumber_groups(ast: &mut Ast, renumber: &impl Fn(usize) -> Option<usize>) {
     }
 }
 
+/// What Onigmo makes of one quantifier applied to another: see
+/// [`Parser::nest`].
+#[derive(Clone, Copy)]
+enum Reduce {
+    /// Left as written.
+    Asis,
+    /// The outer one is redundant.
+    Del,
+    /// `*`
+    Star,
+    /// `*?`
+    LazyStar,
+    /// `??`
+    LazyOptional,
+    /// `(?:x+)??`
+    LazyOptionalPlus,
+}
+
+/// Which of `?`, `*`, `+`, `??`, `*?` and `+?` a quantifier is, by its index in
+/// Onigmo's table, or `None` for any other bounds.
+fn popular(min: u32, max: Option<u32>, greedy: bool) -> Option<usize> {
+    let base = match (min, max) {
+        (0, Some(1)) => 0,
+        (0, None) => 1,
+        (1, None) => 2,
+        _ => return None,
+    };
+    Some(if greedy { base } else { base + 3 })
+}
+
+/// `atom` without the plain groups around its quantifier.
+fn peel(atom: Ast) -> Ast {
+    match atom {
+        Ast::Group { index: None, body } => peel(*body),
+        other => other,
+    }
+}
+
 struct Parser {
     chars: Vec<char>,
     pos: usize,
@@ -554,6 +600,9 @@ struct Parser {
     /// The highest group a `(?(n)...)` condition names by number, checked
     /// against the group count once the whole pattern is read.
     conditioned: usize,
+    /// What Onigmo would warn about this pattern, without the `: /source/`
+    /// Ruby ends each with.
+    warnings: Vec<String>,
 }
 
 impl Parser {
@@ -628,13 +677,18 @@ impl Parser {
                 None | Some('|') | Some(')') => break,
                 _ => {}
             }
+            // A plain `(?:...)` is transparent to Onigmo's nested-quantifier
+            // rule, where `(?i:...)` and a capture are not.
+            let plain = self.peek() == Some('(')
+                && self.peek_at(1) == Some('?')
+                && self.peek_at(2) == Some(':');
             let atom = self.atom()?;
             // A `(?i)` mid-pattern parses as `Empty` after mutating flags; it
             // must not then pick up a quantifier of its own.
             let quantified = if matches!(atom, Ast::Empty) {
                 atom
             } else {
-                self.quantifier(atom)?
+                self.quantifier(atom, plain)?
             };
             items.push(quantified);
         }
@@ -652,29 +706,38 @@ impl Parser {
     /// is `(a{2})?` and `a{2}+` is one-or-more of `a{2}`. Measured, not
     /// guessed — the comma is what makes the difference, and only `{n}` has
     /// none. `repetition_spec.rb` checks the `?` case.
-    fn quantifier(&mut self, mut atom: Ast) -> Result<Ast, Error> {
+    ///
+    /// Only `?+`, `*+` and `++` are possessive: after any `{n,m}` a `+` is a
+    /// second quantifier, so `a{0,1}+` is `(?:a?)+`, which [`Parser::nest`]
+    /// then reduces to `a*`.
+    fn quantifier(&mut self, mut atom: Ast, mut plain: bool) -> Result<Ast, Error> {
         loop {
             self.skip_extended();
-            let (min, max, exact) = match self.peek() {
+            let (min, max, exact, interval) = match self.peek() {
                 Some('*') => {
                     self.pos += 1;
-                    (0, None, false)
+                    (0, None, false, false)
                 }
                 Some('+') => {
                     self.pos += 1;
-                    (1, None, false)
+                    (1, None, false, false)
                 }
                 Some('?') => {
                     self.pos += 1;
-                    (0, Some(1), false)
+                    (0, Some(1), false, false)
                 }
                 Some('{') => match self.bounded_repeat()? {
-                    Some(bounds) => bounds,
+                    Some((min, max, exact)) => (min, max, exact, true),
                     // `a{` with no closing brace is a literal `{` in Ruby.
                     None => return Ok(atom),
                 },
                 _ => return Ok(atom),
             };
+            // `{1}` is the atom itself, which Onigmo drops before anything
+            // else sees it: `(?:a+){1}?` is `(?:a+)?`, and warns as that.
+            if exact && min == 1 {
+                continue;
+            }
 
             // `??` and `*?` are lazy; `?+` and `*+` are possessive. After an
             // exact `{n}` neither applies: the next character starts a new
@@ -687,7 +750,7 @@ impl Parser {
                         self.pos += 1;
                         greedy = false;
                     }
-                    Some('+') => {
+                    Some('+') if !interval => {
                         self.pos += 1;
                         possessive = true;
                     }
@@ -695,15 +758,98 @@ impl Parser {
                 }
             }
 
-            atom = Ast::Repeat {
+            atom = self.nest(atom, plain, min, max, greedy);
+            plain = false;
+            if possessive {
+                atom = Ast::Atomic(Box::new(atom));
+            }
+        }
+    }
+
+    /// One quantifier applied to `atom`, under Onigmo's rule for a quantifier
+    /// whose target is itself one of `?`, `*`, `+`, `??`, `*?` or `+?`,
+    /// directly or through plain `(?:...)`: the pair is reduced to the one
+    /// quantifier it means, with a warning naming both.
+    ///
+    /// `ReduceTypeTable` and the two messages are Onigmo's
+    /// `onig_reduce_nested_quantifier` and `set_quantifier`, all 36 pairs
+    /// measured against CRuby 4.0.9: `(?:a?)+` is `a*` and warns, `(?:a+)??`
+    /// is left as written and does not. Since Ruby bug #17341 a `+?` under
+    /// `?`, `*` or `+` is left alone too, where older Onigmo reduced it.
+    fn nest(&mut self, atom: Ast, plain: bool, min: u32, max: Option<u32>, greedy: bool) -> Ast {
+        use Reduce::{Asis, Del, LazyOptional, LazyOptionalPlus, LazyStar, Star};
+        // Inner quantifier by row, outer by column, in `POPULAR` order.
+        const TABLE: [[Reduce; 6]; 6] = [
+            [Del, Star, Star, LazyOptional, LazyStar, Asis],
+            [Del, Del, Del, LazyOptionalPlus, LazyOptionalPlus, Del],
+            [Star, Star, Del, Asis, LazyOptionalPlus, Del],
+            [Del, LazyStar, LazyStar, Del, LazyStar, LazyStar],
+            [Del, Del, Del, Del, Del, Del],
+            [Asis, Asis, Asis, LazyStar, LazyStar, Del],
+        ];
+        const POPULAR: [&str; 6] = ["?", "*", "+", "??", "*?", "+?"];
+        let outer = popular(min, max, greedy);
+        let mut target = &atom;
+        if plain {
+            while let Ast::Group { index: None, body } = target {
+                target = body;
+            }
+        }
+        let inner = match target {
+            Ast::Repeat {
+                min, max, greedy, ..
+            } => popular(*min, *max, *greedy),
+            _ => None,
+        };
+        let (Some(inner), Some(outer)) = (inner, outer) else {
+            return Ast::Repeat {
                 body: Box::new(atom),
                 min,
                 max,
                 greedy,
             };
-            if possessive {
-                atom = Ast::Atomic(Box::new(atom));
+        };
+        let reduce = TABLE[inner][outer];
+        let replaced = match reduce {
+            Asis => {
+                return Ast::Repeat {
+                    body: Box::new(atom),
+                    min,
+                    max,
+                    greedy,
+                };
             }
+            Del => {
+                self.warnings.push(format!(
+                    "regular expression has redundant nested repeat operator '{}'",
+                    POPULAR[inner]
+                ));
+                return peel(atom);
+            }
+            Star => "*",
+            LazyStar => "*?",
+            LazyOptional => "??",
+            LazyOptionalPlus => "+ and ??",
+        };
+        self.warnings.push(format!(
+            "nested repeat operator '{}' and '{}' was replaced with '{replaced}' in regular expression",
+            POPULAR[inner], POPULAR[outer]
+        ));
+        let Ast::Repeat { body, .. } = peel(atom) else {
+            unreachable!("the target was just seen to be a quantifier")
+        };
+        let repeat = |body: Box<Ast>, min, max, greedy| Ast::Repeat {
+            body,
+            min,
+            max,
+            greedy,
+        };
+        match reduce {
+            Star => repeat(body, 0, None, true),
+            LazyStar => repeat(body, 0, None, false),
+            LazyOptional => repeat(body, 0, Some(1), false),
+            LazyOptionalPlus => repeat(Box::new(repeat(body, 1, None, true)), 0, Some(1), false),
+            Asis | Del => unreachable!("answered above"),
         }
     }
 
@@ -756,7 +902,9 @@ impl Parser {
         }
         if let Some(max) = max {
             if max < min {
-                return Err(Error::Syntax("min repeat greater than max repeat".into()));
+                return Err(Error::Syntax(
+                    "upper is smaller than lower in repeat range".into(),
+                ));
             }
         }
         Ok(Some((min, max, exact)))
@@ -851,8 +999,9 @@ impl Parser {
                 self.pos += 1;
                 self.named_group('\'')
             }
-            // `(?~...)`, `(?(1)...)`, `(?{...})` and the other Onigmo corners.
-            // Refused rather than approximated: see the crate docs.
+            // `(?~...)` and `(?(1)...)`, the Onigmo corners. `(?{...})` is not
+            // Ruby's at all: it falls to the options below and is an
+            // `undefined group option`, as in CRuby. Measured.
             Some('~') => {
                 self.pos += 1;
                 let body = self.grouped_alternation()?;
@@ -862,7 +1011,6 @@ impl Parser {
                 self.pos += 1;
                 self.conditional()
             }
-            Some('{') => Err(Error::Unsupported("an embedded code block (?{...})")),
             _ => self.inline_flags(),
         }
     }
@@ -1845,7 +1993,7 @@ mod tests {
 
     #[test]
     fn onigmo_only_constructs_refuse_rather_than_guess() {
-        for source in ["(?{a})", "(a)(?(<1+1>)a|b)"] {
+        for source in ["(a)(?(<1+1>)a|b)"] {
             assert!(
                 matches!(
                     parse(source, Flags::default(), Encoding::Utf8),

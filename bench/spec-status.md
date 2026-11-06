@@ -34,7 +34,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/io` | 103 | 1631 | 1420 | 0 | 205 | 6 | 87% |
 | `core/kernel` | 118 | 2241 | 2059 | 0 | 141 | 41 | 92% |
 | `core/main` | 7 | 27 | 27 | 0 | 0 | 0 | 100% |
-| `core/marshal` | 6 | 475 | 473 | 0 | 0 | 2 | 100% |
+| `core/marshal` | 6 | 475 | 475 | 0 | 0 | 0 | 100% |
 | `core/matchdata` | 30 | 186 | 186 | 0 | 0 | 0 | 100% |
 | `core/math` | 29 | 243 | 243 | 0 | 0 | 0 | 100% |
 | `core/method` | 26 | 199 | 199 | 0 | 0 | 0 | 100% |
@@ -50,12 +50,12 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/range` | 35 | 606 | 606 | 0 | 0 | 0 | 100% |
 | `core/rational` | 32 | 160 | 159 | 0 | 0 | 1 | 99% |
 | `core/refinement` | 8 | 25 | 24 | 0 | 1 | 0 | 96% |
-| `core/regexp` | 24 | 256 | 247 | 0 | 0 | 9 | 96% |
+| `core/regexp` | 24 | 256 | 255 | 0 | 0 | 1 | 100% |
 | `core/ruby` | 1 | 0 | 0 | 0 | 0 | 0 | — |
 | `core/set` | 57 | 175 | 165 | 0 | 1 | 9 | 94% |
 | `core/signal` | 3 | 53 | 40 | 0 | 10 | 3 | 75% |
 | `core/sizedqueue` | 16 | 61 | 54 | 0 | 7 | 0 | 89% |
-| `core/string` | 151 | 3906 | 3607 | 0 | 274 | 25 | 92% |
+| `core/string` | 151 | 3906 | 3609 | 0 | 274 | 23 | 92% |
 | `core/struct` | 30 | 170 | 169 | 0 | 1 | 0 | 99% |
 | `core/symbol` | 29 | 270 | 269 | 0 | 0 | 1 | 100% |
 | `core/systemexit` | 2 | 6 | 6 | 0 | 0 | 0 | 100% |
@@ -68,7 +68,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/warning` | 5 | 31 | 31 | 0 | 0 | 0 | 100% |
 | `language` | 67 | 2668 | 2512 | 0 | 126 | 30 | 94% |
 | `language/predefined` | 2 | 14 | 12 | 0 | 0 | 2 | 86% |
-| `language/regexp` | 11 | 257 | 254 | 0 | 0 | 3 | 99% |
+| `language/regexp` | 11 | 257 | 257 | 0 | 0 | 0 | 100% |
 | `library/English` | 2 | 27 | 1 | 0 | 0 | 26 | 4% |
 | `library/abbrev` | 1 | 4 | 0 | 0 | 4 | 0 | 0% |
 | `library/base64` | 6 | 26 | 0 | 0 | 26 | 0 | 0% |
@@ -131,4 +131,4 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `optional/capi` | 47 | 0 | 0 | 0 | 0 | 0 | — |
 | `optional/thread_safety` | 1 | 5 | 0 | 0 | 5 | 0 | 0% |
 | `security` | 13 | 31 | 28 | 0 | 3 | 0 | 90% |
-| **total** | 3835 | 32683 | 29221 | 0 | 3179 | 283 | 89% |
+| **total** | 3835 | 32683 | 29236 | 0 | 3179 | 268 | 89% |

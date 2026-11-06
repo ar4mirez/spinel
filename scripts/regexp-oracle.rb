@@ -76,7 +76,11 @@ EXTRA = [
   # backreference reads; a call of the whole pattern; and `\X`.
   '(?~foo)', '(?~)', '(?~$)', '(?~(b))', '(?~a|b)', 'a(?~b)?c',
   '(?<a>.)\g<a>\k<a+0>', '(?<a>.)(?<b>\g<a>)\k<a+1>', '(?<a>a|\(\g<a>\))',
-  '\A(?<a>.\g<a>?)\z', '\(\g<0>?\)', '(?<a>\g<a>)', '\X', '\X\X'
+  '\A(?<a>.\g<a>?)\z', '\(\g<0>?\)', '(?<a>\g<a>)', '\X', '\X\X',
+  # #33: a quantifier on a quantifier, which Onigmo reduces to one, and `+`
+  # after an interval, which is a second quantifier rather than possessive.
+  '(?:a?)+', '(?:a+)?', '(?:a*?)+', '(?:a??)+', '(?:a+)??', '(?:a*)??',
+  'a+?*', 'a+?+', '(?:a?)?+', 'a{0,1}+', 'a{1,2}+', '(?:a+){1}?', 'a{0,1}{0,1}?'
 ].freeze
 
 # Patterns whose *meaning* is fine but whose timing is not: Ruby answers a

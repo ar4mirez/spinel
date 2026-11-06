@@ -322,7 +322,7 @@ the toolchain.
 What the engine does not implement yet returns `Error::Unsupported`, which the
 VM turns into `Error::Unknowable` and the spec runner reports as *blocked*: never a
 pass, never a wrong answer. Today that is a level in a conditional's group,
-`(?(<1+1>)...)`, an embedded code block `(?{...})`, and the six scripts
+`(?(<1+1>)...)`, and the six scripts
 (`\p{Hiragana}` and the rest) an EUC-JP or Shift_JIS pattern names in its own
 codes.
 
@@ -335,6 +335,15 @@ itself before matching a character is Onigmo's `never ending recursion`.
 `(?~absent)` is `OP_ABSENT` step for step, and `\X` is UAX #29's rules over
 the `Grapheme_Cluster_Break`, `InCB` and `Extended_Pictographic` sets in
 `tests/properties.txt`.
+
+A quantifier on a quantifier — `(?:a?)+`, `a**`, and `a{0,1}+`, since only
+`?+`, `*+` and `++` are possessive — is reduced to the one it means by
+Onigmo's `ReduceTypeTable`, as measured for all 36 pairs, and its warning is
+kept on the compiled pattern for the caller to say. CRuby compiles a regexp
+literal as it parses it, so `spinel-parse` checks each literal with
+`spinel_regex::check`: one that is not a pattern is a `SyntaxError` before
+anything runs, and its warnings are said once, with the parser's. A
+constructor says them at its call.
 
 A match runs under a step budget, and refuses with `Error::Budget` past it,
 unless its caller gives it a deadline: `Regexp.timeout` or a pattern's own
@@ -397,7 +406,11 @@ only the source is parsed in its own: a `\xff` is a byte in BINARY and the
 other single-byte encodings, and in the multibyte ones it leads a character
 the escapes after it finish. A source or subject past ASCII in CESU-8 is
 refused until the engine reads its characters
-([#388](https://github.com/ar4mirez/spinel/issues/388)). `$~` is one slot
+([#388](https://github.com/ar4mirez/spinel/issues/388)). A pattern written in
+UTF-16 or UTF-32 is in that encoding, fixed, and compiled from the characters
+it spells; matching one against a subject in its encoding is refused until the
+engine reads those subjects, and against any other is CRuby's
+`Encoding::CompatibilityError`. `$~` is one slot
 per heap — Ruby scopes it per frame and per thread, which arrives with the
 frame specials and with Ractors. The refs derived from it — `$1`, `$&`,
 `` $` ``, `$'`, `$+` — are read off that match rather than out of the global

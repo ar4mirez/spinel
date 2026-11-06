@@ -548,3 +548,31 @@ fn invalid_utf8_source_does_not_panic() {
     let parsed = parse(b"# encoding: binary\nx = \"\xFF\xFE\"\n");
     assert_eq!(parsed.lowering_bugs().count(), 0);
 }
+
+#[test]
+fn a_regexp_literal_is_compiled_as_it_is_parsed() {
+    // CRuby compiles a literal pattern at parse time: one that is not a
+    // pattern is a syntax error, and what Onigmo warns about is said here.
+    let parsed = parse(b"p 1\n/[[:etc:]]/\n");
+    let messages: Vec<&str> = parsed.syntax_errors().map(|d| d.message.as_str()).collect();
+    assert_eq!(messages, ["invalid POSIX bracket type: /[[:etc:]]/"]);
+
+    let parsed = parse(b"/(?:a?)+/\n/a\\/**/\n");
+    assert!(parsed.is_ok());
+    let warnings: Vec<&str> = parsed
+        .warnings
+        .iter()
+        .map(|d| d.message.as_str())
+        .filter(|m| m.contains("repeat operator"))
+        .collect();
+    assert_eq!(
+        warnings,
+        [
+            "nested repeat operator '?' and '+' was replaced with '*' in regular expression: /(?:a?)+/",
+            "regular expression has redundant nested repeat operator '*': /a\\/**/",
+        ]
+    );
+
+    // An interpolated pattern is only known when it runs.
+    assert!(parse(b"x = 1; /#{x}[[:etc:]]/").is_ok());
+}

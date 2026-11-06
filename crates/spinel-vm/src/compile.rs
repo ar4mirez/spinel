@@ -1634,12 +1634,19 @@ impl Compiler {
                 }
                 None => Err(Unsupported::at("this regexp back-reference", span)),
             },
-            VarRef::NumberedRef(n) => {
-                let n = u16::try_from(*n)
-                    .map_err(|_| Unsupported::at("a capture group number this wide", span))?;
-                self.emit(Insn::LastMatch(MatchRef::Group(n)));
-                Ok(())
-            }
+            // A number too big for a variable — Prism hands it over as 0,
+            // having warned that it is "always nil" — or past any group a
+            // pattern can have (Onigmo's limit is 32767) is nil. Measured.
+            VarRef::NumberedRef(n) => match u16::try_from(*n) {
+                Ok(n) if n > 0 => {
+                    self.emit(Insn::LastMatch(MatchRef::Group(n)));
+                    Ok(())
+                }
+                _ => {
+                    self.emit(Insn::PushNil);
+                    Ok(())
+                }
+            },
         }
     }
 

@@ -152,6 +152,11 @@ pub enum Native {
     /// take part), or nil. Leaves `$~` alone: what `StringScanner` (#57) is
     /// built on.
     RegexpMatchAt,
+    /// `Regexp#__rmatch__(string, pos)`: the match that starts nearest
+    /// before character `pos`, searching backward with `\G` anchored at
+    /// `pos`, as a MatchData that `$~` is set to, or nil. CRuby's
+    /// `rb_reg_search` with `reverse`, which `String#rindex` makes.
+    RegexpRmatch,
     /// `Regexp#__initialize__(pattern, flags, timeout)`: compile into an
     /// uninitialised receiver, which is what `Regexp.allocate` makes and
     /// `Regexp#initialize` fills. `pattern` is a String or a Regexp, already

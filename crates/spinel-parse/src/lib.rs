@@ -140,6 +140,84 @@ pub fn parse_eval(
     }
 }
 
+/// What compiling each regexp literal in a UTF-8 file says: the first that is
+/// not a pattern, and every warning.
+#[derive(Default)]
+struct RegexpLiterals {
+    errors: Vec<Diagnostic>,
+    warnings: Vec<Diagnostic>,
+}
+
+/// The two literal-regexp nodes carry the same flags on unrelated types.
+macro_rules! regexp_literal_flags {
+    ($n:expr) => {{
+        let n = $n;
+        // A pattern in another encoding, or BINARY, reads its source
+        // differently, and the run-time compile is left to judge it.
+        let checked = !(n.is_euc_jp()
+            || n.is_windows_31j()
+            || n.is_ascii_8bit()
+            || n.is_forced_binary_encoding());
+        checked.then(|| spinel_regex::Flags {
+            icase: n.is_ignore_case(),
+            extended: n.is_extended(),
+            dotall: n.is_multi_line(),
+            range: spinel_regex::CharRange::default(),
+        })
+    }};
+}
+
+impl RegexpLiterals {
+    fn check(
+        &mut self,
+        location: &ruby_prism::Location<'_>,
+        source: &[u8],
+        flags: Option<spinel_regex::Flags>,
+    ) {
+        let (Some(flags), Ok(source)) = (flags, std::str::from_utf8(source)) else {
+            return;
+        };
+        let span = lower::span_of(location);
+        match spinel_regex::check(source, flags, spinel_regex::Encoding::Utf8) {
+            Ok(found) => self
+                .warnings
+                .extend(found.into_iter().map(|message| Diagnostic {
+                    span,
+                    message: format!("{message}: {}", spinel_regex::describe(source)),
+                    origin: Origin::Syntax,
+                })),
+            Err(spinel_regex::Error::Syntax(message)) if self.errors.is_empty() => {
+                self.errors.push(Diagnostic {
+                    span,
+                    message: format!("{message}: {}", spinel_regex::describe(source)),
+                    origin: Origin::Syntax,
+                });
+            }
+            // A construct the engine refuses is the run-time compile's to
+            // report, as a blocked example rather than a SyntaxError.
+            Err(_) => {}
+        }
+    }
+}
+
+impl<'pr> ruby_prism::Visit<'pr> for RegexpLiterals {
+    fn visit_regular_expression_node(&mut self, node: &ruby_prism::RegularExpressionNode<'pr>) {
+        self.check(
+            &node.location(),
+            node.unescaped(),
+            regexp_literal_flags!(node),
+        );
+    }
+
+    fn visit_match_last_line_node(&mut self, node: &ruby_prism::MatchLastLineNode<'pr>) {
+        self.check(
+            &node.location(),
+            node.unescaped(),
+            regexp_literal_flags!(node),
+        );
+    }
+}
+
 /// The `yield`s outside any `class`, `module` or `class <<` body, by offset.
 #[derive(Default)]
 struct OpenYields {
@@ -205,6 +283,17 @@ fn parse_at(path: &str, source: &[u8], first_line: i64, yield_allowed: bool) -> 
         let mut open = OpenYields::default();
         ruby_prism::Visit::visit_program_node(&mut open, &root);
         errors.retain(|d| d.message != "Invalid yield" || !open.starts.contains(&d.span.start));
+    }
+
+    // CRuby compiles a regexp literal as it parses it: a pattern that is not
+    // valid Ruby is a `SyntaxError` before anything runs, and what Onigmo
+    // warns about one is said once, here, however often it is evaluated.
+    let utf8_source = magic_encoding(source).is_none_or(|name| name.eq_ignore_ascii_case("utf-8"));
+    if errors.is_empty() && utf8_source {
+        let mut literals = RegexpLiterals::default();
+        ruby_prism::Visit::visit_program_node(&mut literals, &root);
+        errors.extend(literals.errors);
+        warnings.extend(literals.warnings);
     }
 
     let (program, lowering_errors) = lower::program(
@@ -309,6 +398,8 @@ pub fn is_verbose_warning(message: &str) -> bool {
         || message.starts_with("invalid character syntax; use ")
         || message.ends_with(" is too big for a number variable, always nil")
         || message.starts_with("string literal in ")
+        || message.starts_with("regular expression has redundant nested repeat operator ")
+        || message.starts_with("nested repeat operator ")
         || message.starts_with("regex literal in ");
     !default
 }
