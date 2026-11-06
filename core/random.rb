@@ -63,6 +63,9 @@ class Random
   # `init_by_array`'s, with a top word of 1 dropped first — CRuby's guard
   # for a leading zero, measured with 2**32 and 2**32 + 5.
   def self.__state_for__(seed)
+    # A Fixnum's words are `__mt_new__`'s to split: this loop was most of
+    # `Random.new` (#705).
+    return __mt_new__(seed, true) if Integer === seed && seed.abs < 0x4000000000000000
     n = seed.abs
     words = []
     while n > 0
@@ -124,17 +127,11 @@ class Random
   end
 
   # `genrand_res53`: [0, 1).
-  def __real__
-    a, b = __mt_next__(@state, 2)
-    ((a >> 5) * 67108864.0 + (b >> 6)) / 9007199254740992.0
-  end
+  def __real__ = __mt_real__(@state, false)
 
   # [0, 1], for an inclusive Float range: the 64 bits of two outputs scaled
   # by 2**53 + 1, as CRuby's `int_pair_to_real_inclusive` does. Measured.
-  def __real_inclusive__
-    a, b = __mt_next__(@state, 2)
-    (((a << 32) | b) * 9007199254740993 >> 64) / 9007199254740992.0
-  end
+  def __real_inclusive__ = __mt_real__(@state, true)
 
   # A uniform Integer in 0..limit: CRuby's `limited_rand` for a limit that
   # fits 64 bits, and `limited_big_rand` past that.
@@ -271,6 +268,8 @@ class Random
   end
 
   def rand(*args)
+    # No argument is the common draw: straight to the primitive (#705).
+    return __mt_real__(@state, false) if args.empty?
     value = __rand__(args)
     raise ArgumentError, "invalid argument - #{args[0]}" if value.nil?
     # Neither a number nor a range: CRuby converts it, and says why not.

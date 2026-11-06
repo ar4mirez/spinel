@@ -582,11 +582,16 @@ pub enum Native {
     RaiseNoMethod,
     /// `Kernel#__mt_new__(key, single)`: a Mersenne Twister's state, as a
     /// BINARY String, from a key of 32-bit words — `init_genrand` of the one
-    /// word when `single`, `init_by_array` otherwise (#249).
+    /// word when `single`, `init_by_array` otherwise (#249). A Fixnum key is
+    /// a seed, split into words as `Random.__state_for__` splits one (#705).
     MtNew,
     /// `Kernel#__mt_next__(state, count)`: the next `count` 32-bit outputs as
     /// an Array of Integers, the state String updated in place.
     MtNext,
+    /// `Kernel#__mt_real__(state, inclusive)`: a Float in [0, 1) from the
+    /// next two outputs, or in [0, 1] when `inclusive` — `Random#rand`'s
+    /// draw, without an Array of the outputs in between (#705).
+    MtReal,
     /// `Kernel#__mt_limited__(state, limit)`: a uniform Integer in 0..limit
     /// for a limit below 2**32, drawn as CRuby's `limited_rand` draws it —
     /// one output at a time under a mask, until one is not past the limit

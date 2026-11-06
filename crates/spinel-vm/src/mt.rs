@@ -39,6 +39,20 @@ impl<'a> Mt<'a> {
         out
     }
 
+    /// A Fixnum seed's key: its absolute value as 32-bit words, least
+    /// significant first, and whether `init_genrand` takes it — one word —
+    /// or `init_by_array`, with a top word of 1 dropped first, as
+    /// `Random.__state_for__` does for any seed (#705).
+    pub fn seed_words(seed: i64) -> (Vec<u32>, bool) {
+        let n = seed.unsigned_abs();
+        let (low, high) = (n as u32, (n >> 32) as u32);
+        match high {
+            0 => (vec![low], true),
+            1 => (vec![low], false),
+            _ => (vec![low, high], false),
+        }
+    }
+
     /// The generator whose state is `bytes`, or `None` when they are not one.
     pub fn from_bytes(bytes: &'a mut [u8]) -> Option<Mt<'a>> {
         (bytes.len() == STATE_LEN).then_some(Mt { bytes })
@@ -69,6 +83,20 @@ impl<'a> Mt<'a> {
         y ^= (y << 7) & 0x9d2c_5680;
         y ^= (y << 15) & 0xefc6_0000;
         y ^ (y >> 18)
+    }
+
+    /// `genrand_res53`: a Float in [0, 1) from two outputs, or in [0, 1]
+    /// when `inclusive` — their 64 bits scaled by 2**53 + 1, as CRuby's
+    /// `int_pair_to_real_inclusive` does (#705).
+    pub fn real(&mut self, inclusive: bool) -> f64 {
+        let a = self.next_u32();
+        let b = self.next_u32();
+        if inclusive {
+            let bits = (u128::from(a) << 32) | u128::from(b);
+            ((bits * ((1u128 << 53) + 1)) >> 64) as f64 / 9_007_199_254_740_992.0
+        } else {
+            (f64::from(a >> 5) * 67_108_864.0 + f64::from(b >> 6)) / 9_007_199_254_740_992.0
+        }
     }
 
     /// A uniform value in 0..=limit: CRuby's `limited_rand` for a limit that
@@ -162,6 +190,25 @@ mod tests {
         let mut mt = Mt::from_bytes(&mut state).unwrap();
         let draws: Vec<u32> = (0..5).map(|_| mt.limited(5)).collect();
         assert_eq!(draws, [3, 4, 2, 4, 4]);
+    }
+
+    /// Ruby 4.0.9: `r = Random.new(42); [r.rand, r.rand(1.0..2.0) - 1]`,
+    /// the second through the inclusive scaling.
+    #[test]
+    fn real_draws_as_genrand_res53() {
+        let mut state = Mt::seed(&[42], true);
+        let mut mt = Mt::from_bytes(&mut state).unwrap();
+        assert_eq!(mt.real(false), 0.3745401188473625);
+        assert_eq!(mt.real(true) + 1.0, 1.950714311605188);
+    }
+
+    /// A seed splits as `Random.__state_for__` splits it: one word, a top
+    /// word of 1 dropped (2**32 + 5), and two words.
+    #[test]
+    fn a_seed_splits_into_its_key() {
+        assert_eq!(Mt::seed_words(-7), (vec![7], true));
+        assert_eq!(Mt::seed_words((1 << 32) + 5), (vec![5], false));
+        assert_eq!(Mt::seed_words(1 << 40), (vec![0, 256], false));
     }
 
     /// A draw leaves the state where it was taken: a second view of the same

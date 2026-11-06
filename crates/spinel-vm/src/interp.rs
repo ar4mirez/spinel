@@ -10992,16 +10992,20 @@ fn native_call<'h>(
         }
 
         Native::MtNew => {
-            let words: Vec<u32> = call
-                .args
-                .first()
-                .and_then(|&v| array_elements(scope, v))
-                .unwrap_or_default()
-                .into_iter()
-                .filter_map(|v| v.as_fixnum())
-                .map(|w| w as u32)
-                .collect();
-            let single = call.args.get(1).is_some_and(|v| v.is_truthy());
+            let (words, single) = if let Some(seed) = int_arg(&call, 0) {
+                crate::mt::Mt::seed_words(seed)
+            } else {
+                let words: Vec<u32> = call
+                    .args
+                    .first()
+                    .and_then(|&v| array_elements(scope, v))
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|v| v.as_fixnum())
+                    .map(|w| w as u32)
+                    .collect();
+                (words, call.args.get(1).is_some_and(|v| v.is_truthy()))
+            };
             let state = crate::mt::Mt::seed(&words, single);
             let class = class_handle(scope, Builtin::String);
             let value = string_alloc(scope, class, &state, crate::strings::BINARY);
@@ -11015,6 +11019,13 @@ fn native_call<'h>(
                 .map(|_| Value::fixnum(i64::from(mt.next_u32())).expect("a u32 is a fixnum"))
                 .collect();
             let value = new_array(scope, &outputs);
+            stack.push(value);
+            Ok(None)
+        }
+        Native::MtReal => {
+            let inclusive = call.args.get(1).is_some_and(|v| v.is_truthy());
+            let r = mt_state(scope, &call, "__mt_real__")?.real(inclusive);
+            let value = crate::float::value(scope, r);
             stack.push(value);
             Ok(None)
         }
@@ -14902,6 +14913,7 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         (Builtin::Kernel, &["__digest__"], Native::Digest),
         (Builtin::Kernel, &["__mt_new__"], Native::MtNew),
         (Builtin::Kernel, &["__mt_next__"], Native::MtNext),
+        (Builtin::Kernel, &["__mt_real__"], Native::MtReal),
         (Builtin::Kernel, &["__mt_limited__"], Native::MtLimited),
         (
             Builtin::Kernel,
