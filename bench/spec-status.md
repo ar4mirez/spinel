@@ -29,7 +29,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/filetest` | 25 | 95 | 94 | 0 | 1 | 0 | 99% |
 | `core/float` | 50 | 261 | 261 | 0 | 0 | 0 | 100% |
 | `core/gc` | 18 | 41 | 41 | 0 | 0 | 0 | 100% |
-| `core/hash` | 69 | 562 | 531 | 0 | 28 | 3 | 94% |
+| `core/hash` | 69 | 562 | 535 | 0 | 25 | 2 | 95% |
 | `core/integer` | 70 | 598 | 598 | 0 | 0 | 0 | 100% |
 | `core/io` | 103 | 1631 | 1420 | 0 | 205 | 6 | 87% |
 | `core/kernel` | 118 | 2241 | 2056 | 0 | 142 | 43 | 92% |
@@ -131,4 +131,4 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `optional/capi` | 47 | 0 | 0 | 0 | 0 | 0 | — |
 | `optional/thread_safety` | 1 | 5 | 0 | 0 | 5 | 0 | 0% |
 | `security` | 13 | 31 | 28 | 0 | 3 | 0 | 90% |
-| **total** | 3835 | 32691 | 29097 | 0 | 3309 | 285 | 89% |
+| **total** | 3835 | 32691 | 29101 | 0 | 3306 | 284 | 89% |
