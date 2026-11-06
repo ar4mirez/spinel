@@ -7360,7 +7360,7 @@ fn name_if_anonymous(scope: &mut HandleScope<'_>, cbase: ClassId, name: SymbolId
     let path = qualified_name(scope, cbase, name);
     // Under a module whose own name is temporary, so is the path.
     if scope.classes().has_temporary_name(cbase) {
-        scope.classes_mut().name_if_anonymous(id, &path);
+        scope.classes_mut().name_if_anonymous_temporary(id, &path);
         return;
     }
     if scope.classes().is_singleton(id) {

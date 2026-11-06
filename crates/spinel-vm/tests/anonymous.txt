@@ -48,6 +48,10 @@ OracleF = Class.new; OracleG = OracleF; OracleG.name  #=> "OracleF"
 module OracleNS; end; OracleNS::Inner = Class.new; OracleNS::Inner.name  #=> "OracleNS::Inner"
 class OracleH; K = Class.new; end; OracleH::K.name  #=> "OracleH::K"
 OracleI = Class.new; OracleI.new.to_s  #=> "#<OracleI:0xXX>"
+m = Module.new; m.set_temporary_name("fake"); m::N = Module.new; m::N.name  #=> "fake::N"
+m = Module.new; m.set_temporary_name("fake"); m::N = Module.new; OracleTmpA = m; m::N.name  #=> "OracleTmpA::N"
+m = Module.new; m.set_temporary_name("fake"); m::N = Module.new; m.set_temporary_name("other"); m::N.name  #=> "other::N"
+m = Module.new; m.set_temporary_name("fake"); m::N = Module.new; m.set_temporary_name(nil); m::N.name  #=> nil
 
 # -- the block ----------------------------------------------------------
 

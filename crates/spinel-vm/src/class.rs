@@ -943,20 +943,18 @@ impl Classes {
         self.entry(id).name.as_deref()
     }
 
-    /// Give an anonymous class or module the name a constant just gave it, and
-    /// answer whether it took one.
+    /// Give a nameless class or module the path a constant under a module
+    /// with a temporary name just gave it, as a temporary name of its own:
+    /// `m.set_temporary_name("fake"); m::N = Module.new` makes `N` `"fake::N"`
+    /// until `m` is named, and then `N` follows it.
     ///
-    /// `Foo = Class.new` makes `Foo.name` `"Foo"`, but only the first
-    /// assignment does: `A = Class.new; B = A` leaves both answering `"A"`.
-    /// That is why this is `_if_anonymous` and not a setter — the second
-    /// assignment has to be a no-op, not a rename.
-    pub fn name_if_anonymous(&mut self, id: ClassId, name: &str) -> bool {
+    /// Only the first assignment does: a module that already has a name keeps it.
+    pub fn name_if_anonymous_temporary(&mut self, id: ClassId, name: &str) {
         let entry = self.entry_mut(id);
-        if entry.name.is_some() {
-            return false;
+        if entry.name.is_none() {
+            entry.name = Some(Box::from(name));
+            entry.temporary = true;
         }
-        entry.name = Some(Box::from(name));
-        true
     }
 
     /// Replace a temporary name — the `#<Module:0x...>::N` a module gets
