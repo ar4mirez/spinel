@@ -827,16 +827,29 @@ class Hash
     return "{}".b.__force_encoding__(2) if empty?
     Kernel.__inspect_guard__(self, "{...}") do
       out = "{".b.__force_encoding__(2)
+      # `rb_inspect`'s escape of a key's or value's `inspect`
+      # (`String.__inspect_target__`), tested inline so the common one pays for no
+      # send.
+      target = String.__inspect_target__
       pairs = @__pairs__
       i = 0
       while i < pairs.size
         out << ", " if i > 0
         key = pairs[i][0]
         if key.is_a?(Symbol)
-          out << Hash.__symbol_key__(key) << " " << pairs[i][1].inspect
+          out << Hash.__symbol_key__(key) << " "
         else
-          out << key.inspect << " => " << pairs[i][1].inspect
+          part = key.inspect
+          if String === part && part.__encoding_index__ != target && !part.ascii_only?
+            part = String.__escape__(part)
+          end
+          out << part << " => "
         end
+        part = pairs[i][1].inspect
+        if String === part && part.__encoding_index__ != target && !part.ascii_only?
+          part = String.__escape__(part)
+        end
+        out << part
         i += 1
       end
       out << "}"
