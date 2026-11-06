@@ -13523,7 +13523,24 @@ fn native_call<'h>(
                 first_arg(&call),
                 call.args.get(1).copied(),
             )?;
+            let timeout = call.args.get(2).copied().unwrap_or(Value::NIL);
+            if let Some(timeout) = regexp_timeout_duration(scope, timeout) {
+                let index = {
+                    let mut nested = scope.nested();
+                    let handle = nested.root(call.receiver);
+                    nested.slot(handle, crate::regexp::REGEXP_INDEX).as_fixnum()
+                };
+                if let Some(index) = index.and_then(|i| usize::try_from(i).ok()) {
+                    scope.regexps_mut().set_pattern_timeout(index, timeout);
+                }
+            }
             stack.push(call.receiver);
+            Ok(None)
+        }
+        Native::RegexpTimeout => {
+            let timeout = regexp_timeout_duration(scope, first_arg(&call));
+            scope.regexps_mut().set_timeout(timeout);
+            stack.push(Value::NIL);
             Ok(None)
         }
         Native::RegexpMatchAt => {
@@ -13538,10 +13555,11 @@ fn native_call<'h>(
                 stack.push(Value::NIL);
                 return Ok(None);
             }
+            let deadline = regexp_deadline(scope, call.receiver);
             let found = if anchored {
-                program.match_in(&text, at, engine)
+                program.match_until(&text, at, engine, deadline)
             } else {
-                program.find_in(&text, at, engine)
+                program.find_until(&text, at, engine, deadline)
             }
             .map_err(|e| regexp_error(&e))?;
             let value = match found {
@@ -14283,6 +14301,11 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         (Builtin::Module, &["undef_method"], Native::UndefMethod),
         (Builtin::Class, &["superclass"], Native::Superclass),
         (Builtin::Kernel, &["__strerror__"], Native::Strerror),
+        (
+            Builtin::Kernel,
+            &["__regexp_timeout__"],
+            Native::RegexpTimeout,
+        ),
         (Builtin::Kernel, &["__errno_class__"], Native::ErrnoClass),
         (Builtin::Kernel, &["__signal_list__"], Native::SignalList),
         (Builtin::Kernel, &["__gc_start__"], Native::Gc(GcOp::Start)),
@@ -15545,7 +15568,11 @@ fn materialise<'h>(
                 .expect("the compiler normalised the literal to base 10");
             Ok(crate::bignum::value(scope, &n))
         }
-        Literal::Regexp { source, options } => regexp_literal(scope, source, *options),
+        Literal::Regexp {
+            source,
+            options,
+            encoding,
+        } => regexp_literal(scope, source, *options, *encoding),
         Literal::Str(bytes, encoding)
         | Literal::FrozenStr(bytes, encoding)
         | Literal::ChilledStr(bytes, encoding) => {
@@ -16453,6 +16480,9 @@ fn regexp_error(error: &spinel_regex::Error) -> Error {
             needs: "the rest of the Onigmo dialect",
         },
         spinel_regex::Error::Budget => Error::Budget,
+        spinel_regex::Error::Timeout => {
+            Error::raise("Regexp::TimeoutError", "regexp match timeout")
+        }
     }
 }
 
@@ -16635,12 +16665,20 @@ fn regexp_source_error(error: &spinel_regex::Error, source: &str) -> Error {
 /// Ruby answers the *same* object every time a literal without interpolation is
 /// evaluated — `rs[0].should.equal?(rs[1])` in `regexp_spec.rb` — so the cache
 /// is a correctness requirement rather than an optimisation.
-fn regexp_literal(scope: &mut HandleScope<'_>, source: &str, options: i64) -> Result<Value, Error> {
-    if let Some(cached) = scope.regexps().cached(source, options) {
+///
+/// The pattern is read in the file's source encoding, so in a `# encoding:
+/// binary` file `/\xAA/` is the byte, and BINARY. Measured.
+fn regexp_literal(
+    scope: &mut HandleScope<'_>,
+    source: &str,
+    options: i64,
+    encoding: u8,
+) -> Result<Value, Error> {
+    if let Some(cached) = scope.regexps().cached(source, options, encoding) {
         return Ok(cached);
     }
-    let value = regexp_new(scope, source.as_bytes(), crate::strings::UTF_8, options)?;
-    scope.regexps_mut().cache(source, options, value);
+    let value = regexp_new(scope, source.as_bytes(), encoding, options)?;
+    scope.regexps_mut().cache(source, options, encoding, value);
     Ok(value)
 }
 
@@ -16896,6 +16934,26 @@ fn regexp_program(
         .as_fixnum()?;
     let index = usize::try_from(index).ok()?;
     nested.regexps().get(index).map(std::sync::Arc::clone)
+}
+
+/// A timeout `core/regexp.rb` has checked, as a Float of seconds, or nil.
+fn regexp_timeout_duration(
+    scope: &mut HandleScope<'_>,
+    seconds: Value,
+) -> Option<std::time::Duration> {
+    let seconds = crate::float::read(scope, seconds)?;
+    std::time::Duration::try_from_secs_f64(seconds).ok()
+}
+
+/// When a match of `regexp` that starts now gives up with
+/// `Regexp::TimeoutError`: its own `timeout:`, or `Regexp.timeout`.
+fn regexp_deadline(scope: &mut HandleScope<'_>, regexp: Value) -> Option<std::time::Instant> {
+    let mut nested = scope.nested();
+    let handle = nested.root(regexp);
+    let index = nested
+        .slot(handle, crate::regexp::REGEXP_INDEX)
+        .as_fixnum()?;
+    nested.regexps().deadline(usize::try_from(index).ok()?)
 }
 
 /// The compiled pattern behind a receiver that must be a `Regexp`, or the
@@ -17192,8 +17250,9 @@ fn regexp_match_from(
         }
     };
 
+    let deadline = regexp_deadline(scope, regexp);
     let found = program
-        .find_in(&bytes, start, engine)
+        .find_until(&bytes, start, engine, deadline)
         .map_err(|e| regexp_error(&e))?;
     let Some(caps) = found else {
         scope.set_last_match(Value::NIL);
@@ -17268,8 +17327,9 @@ fn regexp_match_all(
     let mut found = Vec::new();
     let mut start = 0;
     while start <= text.len() {
+        let deadline = regexp_deadline(scope, regexp);
         let Some(caps) = program
-            .find_in(&text, start, engine)
+            .find_until(&text, start, engine, deadline)
             .map_err(|e| regexp_error(&e))?
         else {
             break;

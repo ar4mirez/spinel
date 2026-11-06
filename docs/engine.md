@@ -321,10 +321,25 @@ the toolchain.
 
 What the engine does not implement yet returns `Error::Unsupported`, which the
 VM turns into `Error::Unknowable` and the spec runner reports as *blocked*: never a
-pass, never a wrong answer. Today that is `(?~)`, a recursive `\g<>` call,
-`\X`, a `\k<name+1>` level specifier past level 0, and the six scripts
+pass, never a wrong answer. Today that is a level in a conditional's group,
+`(?(<1+1>)...)`, an embedded code block `(?{...})`, and the six scripts
 (`\p{Hiragana}` and the rest) an EUC-JP or Shift_JIS pattern names in its own
 codes.
+
+A group any `\g<>` calls is a subroutine, run by a call where it is written
+and at every call, as Onigmo compiles it: so a call may recurse, and
+`\k<name+n>` can read the capture `n` call levels away from an `Event`
+history of the path's calls, returns and captures — which is also how a
+recursive group's end finds the start it pairs with. A call that can reach
+itself before matching a character is Onigmo's `never ending recursion`.
+`(?~absent)` is `OP_ABSENT` step for step, and `\X` is UAX #29's rules over
+the `Grapheme_Cluster_Break`, `InCB` and `Extended_Pictographic` sets in
+`tests/properties.txt`.
+
+A match runs under a step budget, and refuses with `Error::Budget` past it,
+unless its caller gives it a deadline: `Regexp.timeout` or a pattern's own
+`timeout:`. Then the deadline replaces the budget, as CRuby gives up only when
+its timeout runs out, and a match past it is `Regexp::TimeoutError`.
 
 `\p{}` in a UTF-8 pattern reads `tests/properties.txt`: every name CRuby's
 Onigmo takes there (general categories, scripts, binary properties, blocks

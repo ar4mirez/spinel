@@ -27,10 +27,11 @@ class Regexp
   # compiled raises `TypeError` — 4.1 makes both `FrozenError`, and ruby/spec
   # guards the two apart.
   #
-  # ponytail: `timeout:` is accepted and not kept; `Regexp.timeout=` is not
-  # enforced either. Both wait on a deadline the engine can check a match
-  # against.
+  # `timeout:` is this pattern's own, which `Regexp.timeout` does not
+  # override; a match that runs past it raises `Regexp::TimeoutError`. One
+  # made from a Regexp does not take that one's. Measured.
   def initialize(pattern, flags = nil, timeout: nil)
+    timeout = Regexp.__timeout_seconds__(timeout)
     if pattern.is_a?(Regexp)
       # One `Regexp.allocate` made is refused before anything else, with the
       # `TypeError` its `source` raises.
@@ -54,7 +55,17 @@ class Regexp
       end
     end
     raise FrozenError.new("can't modify frozen Regexp: " + inspect, receiver: self) if frozen?
-    __initialize__(pattern, flags)
+    __initialize__(pattern, flags, timeout)
+    @__timeout__ = timeout
+  end
+
+  # What a match that runs past it raises.
+  class TimeoutError < RegexpError
+  end
+
+  # The `timeout:` this pattern was made with, in seconds, or nil.
+  def timeout
+    @__timeout__
   end
 
   # One `Regexp.allocate` made and nothing has initialised shows as any object
@@ -300,17 +311,28 @@ class Regexp
       @__timeout__
     end
 
-    # ponytail: kept and answered, and not enforced. This engine has no
-    # deadline to check a match against.
+    # How long any match may run before it raises `Regexp::TimeoutError`,
+    # unless its pattern has a `timeout:` of its own.
     def timeout=(seconds)
-      unless seconds.nil?
-        unless seconds.is_a?(Numeric)
-          raise TypeError, "can't convert " + seconds.class.to_s + " into Float"
-        end
-        raise ArgumentError, "invalid timeout: " + seconds.to_s if seconds <= 0
-        seconds = seconds.to_f
-      end
+      seconds = __timeout_seconds__(seconds)
+      __regexp_timeout__(seconds)
       @__timeout__ = seconds
+    end
+
+    # A timeout as a Float of seconds, as CRuby reads one for either: positive,
+    # and no more than the nanoseconds a 64-bit count holds, which is what
+    # `Float::INFINITY` comes to. Measured on ruby 4.0.9.
+    def __timeout_seconds__(seconds)
+      return nil if seconds.nil?
+      case seconds
+      when String then raise TypeError, "no implicit conversion to float from string"
+      when true, false then raise TypeError, "no implicit conversion to float from " + seconds.to_s
+      when Numeric
+      else
+        raise TypeError, "can't convert " + seconds.class.to_s + " into Float"
+      end
+      raise ArgumentError, "invalid timeout: " + seconds.to_s if seconds <= 0
+      seconds.to_f > 18446744073.709553 ? 18446744073.709553 : seconds.to_f
     end
 
     # `$~`, or one group of it.

@@ -658,7 +658,14 @@ pub enum Literal {
     /// table. Compiled on first evaluation, then cached: Ruby answers the same
     /// object every time a literal is evaluated, which `regexp_spec.rb` checks
     /// with `equal?`.
-    Regexp { source: Box<str>, options: i64 },
+    ///
+    /// `encoding` is the file's source encoding, which is what a `\xAA`
+    /// written in it means: a byte, in a `# encoding: binary` file.
+    Regexp {
+        source: Box<str>,
+        options: i64,
+        encoding: u8,
+    },
 }
 
 /// What a [`CatchEntry`] does when control leaves its range abnormally.

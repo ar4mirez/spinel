@@ -6,8 +6,12 @@
 //! and recursive only for lookaround and atomic groups, whose nesting depth is
 //! a property of the pattern rather than of the subject.
 
+use crate::grapheme::grapheme_end;
 use crate::parse::{Anchor, Ast, Class, ClassItem, Perl, Posix};
 use crate::{Charset, Encoding, Error};
+use std::collections::HashMap;
+use std::rc::Rc;
+use std::time::Instant;
 
 #[derive(Debug, Clone)]
 enum Inst {
@@ -68,6 +72,37 @@ enum Inst {
     /// End of a sub-program.
     Accept,
     Match,
+    /// `\g<n>`, and the place a called group is written: run the group's
+    /// subroutine at `target` and come back. Onigmo compiles a group any call
+    /// names this way at its definition too, which is what puts its capture a
+    /// call level down — `/(?<a>.)\g<a>\k<a+0>/` matches nothing, measured.
+    Call {
+        target: usize,
+    },
+    /// The end of a called group's subroutine.
+    Return,
+    /// The close of a called group. Its start is the one opened at the same
+    /// depth of this group's own recursion, not the last one written, so
+    /// `/\A(?<a>x\g<a>?y)\z/` captures all of `"xxxyyy"`: Onigmo's
+    /// `MEMORY_END_PUSH_REC`.
+    SaveRec(usize),
+    /// `\k<name+n>`: the capture group `group` last took `level` calls away
+    /// from here, `-1` being the caller's and `+1` a call that returned.
+    LevelBackref {
+        group: usize,
+        icase: bool,
+        level: isize,
+    },
+    /// Never matches: a level backreference in a pattern with no calls, which
+    /// has no level but its own.
+    Fail,
+    /// `(?~absent)`, with the absent pattern at `start`: as long a stretch
+    /// as does not hold a match of it, and shorter ones on backtracking.
+    Absent {
+        start: usize,
+    },
+    /// `\X`: one extended grapheme cluster, taken atomically.
+    Grapheme,
 }
 
 /// A compiled pattern.
@@ -77,6 +112,9 @@ pub struct Program {
     classes: Vec<(Class, Option<char>)>,
     pub groups: usize,
     marks: usize,
+    /// Whether the run keeps a [`Event`] history: a pattern with a call does,
+    /// for [`Inst::SaveRec`] and [`Inst::LevelBackref`] to read.
+    history: bool,
 }
 
 /// Where each capture landed, as byte offsets into the subject.
@@ -95,22 +133,102 @@ const MAX_PROGRAM: usize = 100_000;
 /// nothing at all. Tuned well above anything ruby/spec needs.
 const MAX_STEPS: u64 = 5_000_000;
 
+/// How many steps run between two looks at the clock, when a match has a
+/// deadline. A step is a few nanoseconds; a clock read is tens of them.
+const CLOCK_EVERY: u64 = 1024;
+
 pub fn compile(ast: &Ast, groups: usize) -> Result<Program, Error> {
+    let mut bodies = HashMap::new();
+    collect_called(ast, &mut bodies);
+    let mut called: Vec<usize> = Vec::new();
+    collect_calls(ast, &mut called);
+    called.sort_unstable();
+    called.dedup();
     let mut c = Compiler {
         insts: Vec::new(),
         classes: Vec::new(),
         marks: 0,
+        called: called.clone(),
+        calls: Vec::new(),
+        history: !called.is_empty(),
     };
-    c.emit(Inst::Save(0));
-    c.node(ast)?;
-    c.emit(Inst::Save(1));
+    if called.contains(&0) {
+        // `\g<0>` calls the whole pattern, so the whole pattern is a
+        // subroutine too, and the program calls it once to begin.
+        c.call(0);
+    } else {
+        c.emit(Inst::Save(0));
+        c.node(ast)?;
+        c.emit(Inst::Save(1));
+    }
     c.emit(Inst::Match);
+    let mut starts = HashMap::new();
+    for &group in &called {
+        starts.insert(group, c.here());
+        c.emit(Inst::Save(group * 2));
+        match group {
+            0 => c.node(ast)?,
+            _ => c.node(bodies.get(&group).copied().unwrap_or(&Ast::Empty))?,
+        }
+        c.emit(Inst::SaveRec(group));
+        c.emit(Inst::Return);
+    }
+    for (at, group) in std::mem::take(&mut c.calls) {
+        c.insts[at] = Inst::Call {
+            target: starts[&group],
+        };
+    }
     Ok(Program {
         insts: c.insts,
         classes: c.classes,
         groups,
         marks: c.marks,
+        history: c.history,
     })
+}
+
+/// The body of every capturing group, by index, for the ones a call needs.
+fn collect_called<'a>(ast: &'a Ast, bodies: &mut HashMap<usize, &'a Ast>) {
+    match ast {
+        Ast::Group { index, body } => {
+            if let Some(index) = index {
+                bodies.insert(*index, body);
+            }
+            collect_called(body, bodies);
+        }
+        Ast::Concat(parts) | Ast::Alt(parts) => {
+            parts.iter().for_each(|part| collect_called(part, bodies));
+        }
+        Ast::Cond { yes, no, .. } => {
+            collect_called(yes, bodies);
+            collect_called(no, bodies);
+        }
+        Ast::Atomic(body)
+        | Ast::Repeat { body, .. }
+        | Ast::Look { body, .. }
+        | Ast::Absent(body) => collect_called(body, bodies),
+        _ => {}
+    }
+}
+
+/// Every group a call names.
+fn collect_calls(ast: &Ast, called: &mut Vec<usize>) {
+    match ast {
+        Ast::CallGroup(group) => called.push(*group),
+        Ast::Concat(parts) | Ast::Alt(parts) => {
+            parts.iter().for_each(|part| collect_calls(part, called));
+        }
+        Ast::Cond { yes, no, .. } => {
+            collect_calls(yes, called);
+            collect_calls(no, called);
+        }
+        Ast::Group { body, .. }
+        | Ast::Atomic(body)
+        | Ast::Repeat { body, .. }
+        | Ast::Look { body, .. }
+        | Ast::Absent(body) => collect_calls(body, called),
+        _ => {}
+    }
 }
 
 struct Compiler {
@@ -118,6 +236,13 @@ struct Compiler {
     /// Each class, with the one character it folds as under `/i`, if any.
     classes: Vec<(Class, Option<char>)>,
     marks: usize,
+    /// The groups a call names, which compile as subroutines.
+    called: Vec<usize>,
+    /// Each [`Inst::Call`] written, and the group it calls, to point at the
+    /// subroutine once that is laid out.
+    calls: Vec<(usize, usize)>,
+    /// Whether the program keeps an [`Event`] history.
+    history: bool,
 }
 
 impl Compiler {
@@ -128,6 +253,12 @@ impl Compiler {
 
     fn here(&self) -> usize {
         self.insts.len()
+    }
+
+    /// A call into `group`'s subroutine, pointed at it once it is laid out.
+    fn call(&mut self, group: usize) {
+        let at = self.emit(Inst::Fail);
+        self.calls.push((at, group));
     }
 
     fn too_large(&self) -> Result<(), Error> {
@@ -141,8 +272,37 @@ impl Compiler {
         self.too_large()?;
         match ast {
             Ast::Empty => {}
-            // The parser has replaced every call with the group it calls.
+            // The parser has resolved every call to the group it calls.
             Ast::Call(_) => unreachable!("a subexpression call left unresolved"),
+            Ast::CallGroup(group) => self.call(*group),
+            Ast::LevelBackref {
+                group,
+                icase,
+                level,
+            } => {
+                // With no call there is no level but this one, which holds
+                // every capture: `/(?<a>.)\k<a+0>/` is `/(?<a>.)\k<a>/` and
+                // `\k<a-1>` matches nothing. Measured.
+                let inst = match (self.history, *level) {
+                    (true, level) => Inst::LevelBackref {
+                        group: *group,
+                        icase: *icase,
+                        level,
+                    },
+                    (false, 0) => Inst::Backref {
+                        group: *group,
+                        icase: *icase,
+                    },
+                    (false, _) => Inst::Fail,
+                };
+                self.emit(inst);
+            }
+            Ast::Absent(body) => {
+                self.sub_program(body, |start| Inst::Absent { start })?;
+            }
+            Ast::Grapheme => {
+                self.emit(Inst::Grapheme);
+            }
             Ast::Literal { ch, icase } => {
                 self.emit(Inst::Char {
                     ch: *ch,
@@ -189,6 +349,8 @@ impl Compiler {
                 self.emit(Inst::Keep);
             }
             Ast::Group { index, body } => match index {
+                // A called group is its subroutine, called where it is written.
+                Some(n) if self.called.contains(n) => self.call(*n),
                 Some(n) => {
                     self.emit(Inst::Save(n * 2));
                     self.node(body)?;
@@ -362,18 +524,93 @@ struct Backtrack {
     sp: usize,
     saves: Vec<Option<usize>>,
     marks: Vec<Option<Mark>>,
+    frames: Frames,
+    /// How long the [`Event`] history was, which is as long as it is again.
+    history: usize,
 }
 
+/// The calls a path is inside, innermost first. Shared rather than copied,
+/// because every backtrack point holds the whole chain.
+type Frames = Option<Rc<Frame>>;
+
+/// One call: where it returns to, and the loop marks it found there. A
+/// recursive call runs the same loops again, and their marks must be the
+/// caller's once it returns.
+struct Frame {
+    ret: usize,
+    marks: Vec<Option<Mark>>,
+    next: Frames,
+}
+
+/// What happened along the current path, for the questions only the order of
+/// it answers: which start a recursive group's end pairs with, and which
+/// capture a level backreference names. Onigmo answers both from its
+/// backtrack stack, which holds the same records.
+#[derive(Clone, Copy)]
+enum Event {
+    Call,
+    Return,
+    Save { slot: usize, at: usize },
+}
+
+/// What one search carries through every attempt and sub-program.
+struct Ctx {
+    /// Steps left before [`Error::Budget`], with no deadline.
+    budget: u64,
+    /// When [`Error::Timeout`] is due, if the caller set one. A deadline
+    /// takes the budget's place: CRuby gives up only when it runs out.
+    deadline: Option<Instant>,
+    steps: u64,
+    history: Vec<Event>,
+}
+
+impl Ctx {
+    fn new(deadline: Option<Instant>) -> Ctx {
+        Ctx {
+            budget: MAX_STEPS,
+            deadline,
+            steps: 0,
+            history: Vec::new(),
+        }
+    }
+
+    fn step(&mut self) -> Result<(), Error> {
+        match self.deadline {
+            None => {
+                self.budget = self.budget.saturating_sub(1);
+                if self.budget == 0 {
+                    return Err(Error::Budget);
+                }
+            }
+            Some(deadline) => {
+                self.steps += 1;
+                if self.steps % CLOCK_EVERY == 0 && Instant::now() >= deadline {
+                    return Err(Error::Timeout);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Each capture slot's byte offset, two per group.
+type Saves = Vec<Option<usize>>;
+
 /// What a sub-program hands back: where it finished, and the captures it set.
-type SubMatch = (usize, Vec<Option<usize>>);
+type SubMatch = (usize, Saves);
 
 impl Program {
     /// The leftmost match at or after `start`, which is what Ruby's `=~` wants.
-    pub fn find_at(&self, haystack: Subject<'_>, start: usize) -> Result<Option<Match>, Error> {
-        let mut budget = MAX_STEPS;
+    pub fn find_at(
+        &self,
+        haystack: Subject<'_>,
+        start: usize,
+        deadline: Option<Instant>,
+    ) -> Result<Option<Match>, Error> {
+        let mut ctx = Ctx::new(deadline);
         let mut at = start;
         loop {
-            if let Some(m) = self.run_from(haystack, at, start, &mut budget)? {
+            if let Some(m) = self.run_from(haystack, at, start, &mut ctx)? {
                 return Ok(Some(m));
             }
             if at >= haystack.len() {
@@ -387,9 +624,13 @@ impl Program {
 
     /// One attempt at `start` and nowhere else, with `\G` anchored there:
     /// what `StringScanner#scan` asks.
-    pub fn match_at(&self, haystack: Subject<'_>, start: usize) -> Result<Option<Match>, Error> {
-        let mut budget = MAX_STEPS;
-        self.run_from(haystack, start, start, &mut budget)
+    pub fn match_at(
+        &self,
+        haystack: Subject<'_>,
+        start: usize,
+        deadline: Option<Instant>,
+    ) -> Result<Option<Match>, Error> {
+        self.run_from(haystack, start, start, &mut Ctx::new(deadline))
     }
 
     /// One attempt at `at`. `start` is where the whole search began, which is
@@ -400,11 +641,12 @@ impl Program {
         haystack: Subject<'_>,
         at: usize,
         start: usize,
-        budget: &mut u64,
+        ctx: &mut Ctx,
     ) -> Result<Option<Match>, Error> {
         let saves = vec![None; (self.groups + 1) * 2];
         let marks = vec![None; self.marks];
-        let Some((_, saves)) = self.run(haystack, 0, at, start, saves, marks, budget)? else {
+        ctx.history.clear();
+        let Some((_, saves)) = self.run(haystack, 0, at, start, saves, marks, ctx)? else {
             return Ok(None);
         };
         let caps = (0..=self.groups)
@@ -427,16 +669,15 @@ impl Program {
         anchor: usize,
         mut saves: Vec<Option<usize>>,
         mut marks: Vec<Option<Mark>>,
-        budget: &mut u64,
+        ctx: &mut Ctx,
     ) -> Result<Option<SubMatch>, Error> {
         let mut stack: Vec<Backtrack> = Vec::new();
+        let mut frames: Frames = None;
+        let begun = ctx.history.len();
 
         loop {
             let failed = loop {
-                *budget = budget.saturating_sub(1);
-                if *budget == 0 {
-                    return Err(Error::Budget);
-                }
+                ctx.step()?;
 
                 let advanced = match &self.insts[pc] {
                     Inst::Match | Inst::Accept => return Ok(Some((sp, saves))),
@@ -469,8 +710,93 @@ impl Program {
                     Inst::Anchor(a) => anchor_holds(*a, haystack, sp, anchor),
                     Inst::Save(slot) => {
                         saves[*slot] = Some(sp);
+                        if self.history {
+                            ctx.history.push(Event::Save {
+                                slot: *slot,
+                                at: sp,
+                            });
+                        }
                         pc += 1;
                         continue;
+                    }
+                    Inst::SaveRec(group) => {
+                        saves[group * 2] = rec_start(&ctx.history, *group);
+                        saves[group * 2 + 1] = Some(sp);
+                        ctx.history.push(Event::Save {
+                            slot: group * 2 + 1,
+                            at: sp,
+                        });
+                        pc += 1;
+                        continue;
+                    }
+                    Inst::Call { target } => {
+                        frames = Some(Rc::new(Frame {
+                            ret: pc + 1,
+                            marks: marks.clone(),
+                            next: frames.take(),
+                        }));
+                        ctx.history.push(Event::Call);
+                        pc = *target;
+                        continue;
+                    }
+                    Inst::Return => {
+                        let frame = frames.take().expect("a return with no call to return from");
+                        pc = frame.ret;
+                        marks.clone_from(&frame.marks);
+                        frames.clone_from(&frame.next);
+                        ctx.history.push(Event::Return);
+                        continue;
+                    }
+                    Inst::Fail => false,
+                    Inst::LevelBackref {
+                        group,
+                        icase,
+                        level,
+                    } => match level_capture(&ctx.history, *group, *level) {
+                        Some((s, e)) if s <= e => {
+                            let text = haystack.bytes[s..e].to_owned();
+                            if text_at(haystack, sp, &text, *icase) {
+                                sp += text.len();
+                                true
+                            } else {
+                                false
+                            }
+                        }
+                        _ => false,
+                    },
+                    Inst::Grapheme => match grapheme_end(haystack, sp) {
+                        Some(end) => {
+                            sp = end;
+                            true
+                        }
+                        None => false,
+                    },
+                    Inst::Absent { start } => {
+                        let (points, leaked) =
+                            self.absent(haystack, *start, sp, anchor, &saves, &marks, ctx)?;
+                        if let Some(leaked) = leaked {
+                            saves = leaked;
+                        }
+                        let mut points = points.into_iter();
+                        // The longest stretch first; each shorter one is a
+                        // point to come back to.
+                        match points.next_back() {
+                            Some(longest) => {
+                                for point in points {
+                                    stack.push(Backtrack {
+                                        pc: pc + 1,
+                                        sp: point,
+                                        saves: saves.clone(),
+                                        marks: marks.clone(),
+                                        frames: frames.clone(),
+                                        history: ctx.history.len(),
+                                    });
+                                }
+                                sp = longest;
+                                true
+                            }
+                            None => false,
+                        }
                     }
                     Inst::Mark(slot) => {
                         marks[*slot] = Some(Mark {
@@ -537,6 +863,9 @@ impl Program {
                     }
                     Inst::Keep => {
                         saves[0] = Some(sp);
+                        if self.history {
+                            ctx.history.push(Event::Save { slot: 0, at: sp });
+                        }
                         pc += 1;
                         continue;
                     }
@@ -546,6 +875,8 @@ impl Program {
                             sp,
                             saves: saves.clone(),
                             marks: marks.clone(),
+                            frames: frames.clone(),
+                            history: ctx.history.len(),
                         });
                         pc = *prefer;
                         continue;
@@ -555,7 +886,9 @@ impl Program {
                             saves.get(group * 2).copied().flatten(),
                             saves.get(group * 2 + 1).copied().flatten(),
                         ) {
-                            (Some(s), Some(e)) => {
+                            // A recursive group's start can be newer than its
+                            // end, mid-recursion; that pair holds no text.
+                            (Some(s), Some(e)) if s <= e => {
                                 let text = haystack.bytes[s..e].to_owned();
                                 if text_at(haystack, sp, &text, *icase) {
                                     sp += text.len();
@@ -577,7 +910,7 @@ impl Program {
                             anchor,
                             saves.clone(),
                             marks.clone(),
-                            budget,
+                            ctx,
                         )?;
                         match inner {
                             // Committed: the sub-match's position and captures
@@ -596,8 +929,9 @@ impl Program {
                         negate,
                         start,
                     } => {
+                        let before = ctx.history.len();
                         let found = if *behind {
-                            self.look_behind(haystack, *start, sp, anchor, &saves, &marks, budget)?
+                            self.look_behind(haystack, *start, sp, anchor, &saves, &marks, ctx)?
                         } else {
                             self.run(
                                 haystack,
@@ -606,9 +940,14 @@ impl Program {
                                 anchor,
                                 saves.clone(),
                                 marks.clone(),
-                                budget,
+                                ctx,
                             )?
                         };
+                        // A negative lookaround that held matched nothing, so
+                        // nothing it did happened.
+                        if *negate {
+                            ctx.history.truncate(before);
+                        }
                         match (found, *negate) {
                             // A lookahead that held keeps its captures:
                             // `/(?=(a))/ =~ "a"` sets `$1`. A negative one
@@ -638,8 +977,13 @@ impl Program {
                         sp = entry.sp;
                         saves = entry.saves;
                         marks = entry.marks;
+                        frames = entry.frames;
+                        ctx.history.truncate(entry.history);
                     }
-                    None => return Ok(None),
+                    None => {
+                        ctx.history.truncate(begun);
+                        return Ok(None);
+                    }
                 }
             }
         }
@@ -663,10 +1007,11 @@ impl Program {
         anchor: usize,
         saves: &[Option<usize>],
         marks: &[Option<Mark>],
-        budget: &mut u64,
+        ctx: &mut Ctx,
     ) -> Result<Option<SubMatch>, Error> {
         let mut from = sp;
         loop {
+            let before = ctx.history.len();
             if let Some((end, inner)) = self.run(
                 haystack,
                 start,
@@ -674,12 +1019,13 @@ impl Program {
                 anchor,
                 saves.to_vec(),
                 marks.to_vec(),
-                budget,
+                ctx,
             )? {
                 // Only a body that finishes exactly where the lookbehind sits.
                 if end == sp {
                     return Ok(Some((end, inner)));
                 }
+                ctx.history.truncate(before);
             }
             if from == 0 {
                 return Ok(None);
@@ -690,6 +1036,132 @@ impl Program {
             }
         }
     }
+}
+
+impl Program {
+    /// `(?~absent)` at `origin`: every place the stretch from `origin` may end,
+    /// shortest first, and the captures the absent pattern leaked.
+    ///
+    /// Onigmo's `OP_ABSENT`, step for step. It walks forward a character at a
+    /// time, and at each place `s` it has not ruled out it notes `s` as an end,
+    /// then tries the absent pattern from `s` over the whole subject. A match
+    /// of it that ends at `e` rules out every end from the character before
+    /// `e` on, so no stretch holds all of it. That is why `"foo".scan(/(?~foo)/)`
+    /// is `["fo", "o", ""]`. An empty match of it right at `origin` rules out
+    /// everything, `origin` too, so `(?~)` matches nowhere — except at the end
+    /// of the subject, where Onigmo matches `""` without trying it:
+    /// `"ab".scan(/(?~)/)` is `[""]`, found at 2. Measured.
+    ///
+    /// The absent pattern's captures are not undone: `/(?~(b))/ =~ "abc"`
+    /// leaves `$1` as `"b"`, because Onigmo keeps a capture outside the stack
+    /// it pops. Here the last match of it stands.
+    ///
+    /// ponytail: tries the absent pattern once per character after `origin`,
+    /// so a long stretch costs its length times the pattern. Onigmo does the
+    /// same work; a pattern that makes it the hot path wants a literal scan.
+    #[allow(clippy::too_many_arguments)]
+    fn absent(
+        &self,
+        haystack: Subject<'_>,
+        start: usize,
+        origin: usize,
+        anchor: usize,
+        saves: &[Option<usize>],
+        marks: &[Option<Mark>],
+        ctx: &mut Ctx,
+    ) -> Result<(Vec<usize>, Option<Saves>), Error> {
+        // The last place a stretch may end, as a signed offset: a match right
+        // at `origin` puts it before the subject's first byte.
+        if origin >= haystack.len() {
+            return Ok((vec![origin], None));
+        }
+        let mut last = haystack.len() as isize;
+        let mut points = Vec::new();
+        let mut leaked = None;
+        let mut s = origin;
+        loop {
+            let here = s as isize;
+            if (origin as isize) > last && s > origin {
+                return Ok((Vec::new(), leaked));
+            }
+            if here >= last && s > origin {
+                if here == last {
+                    points.push(s);
+                }
+                break;
+            }
+            points.push(s);
+            let before = ctx.history.len();
+            if let Some((end, inner)) = self.run(
+                haystack,
+                start,
+                s,
+                anchor,
+                saves.to_vec(),
+                marks.to_vec(),
+                ctx,
+            )? {
+                let previous = if end == 0 {
+                    -1
+                } else {
+                    haystack.enc.char_start_before(haystack.bytes, end) as isize
+                };
+                last = last.min(previous);
+                leaked = Some(inner);
+            }
+            ctx.history.truncate(before);
+            s = match haystack.next_char(s) {
+                Some((_, width)) => s + width,
+                None => s + 1,
+            };
+        }
+        Ok((points, leaked))
+    }
+}
+
+/// Where a called group opened, for the close at `group`'s current depth:
+/// the latest start not already paired with a later end. Onigmo's
+/// `STACK_GET_MEM_START`.
+fn rec_start(history: &[Event], group: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for event in history.iter().rev() {
+        match *event {
+            Event::Save { slot, .. } if slot == group * 2 + 1 => depth += 1,
+            Event::Save { slot, at } if slot == group * 2 => {
+                if depth == 0 {
+                    return Some(at);
+                }
+                depth -= 1;
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The capture `group` last took `level` calls from here: Onigmo's
+/// `backref_match_at_nested_level`, which walks back counting a call it
+/// leaves as one level out and a return it crosses as one level in.
+fn level_capture(history: &[Event], group: usize, level: isize) -> Option<(usize, usize)> {
+    let mut here = 0isize;
+    let mut end = None;
+    for event in history.iter().rev() {
+        match *event {
+            Event::Call => here -= 1,
+            Event::Return => here += 1,
+            Event::Save { slot, at } if here == level => {
+                if slot == group * 2 + 1 {
+                    end = Some(at);
+                } else if slot == group * 2
+                    && let Some(end) = end
+                {
+                    return Some((at, end));
+                }
+            }
+            Event::Save { .. } => {}
+        }
+    }
+    None
 }
 
 /// The bytes a pattern runs over, and how to read characters out of them.
@@ -712,7 +1184,7 @@ impl Subject<'_> {
     /// not start a valid character is never handed over by the VM, which
     /// refuses a broken subject before matching; it reads as one character
     /// that matches nothing a pattern can spell.
-    fn next_char(&self, sp: usize) -> Option<(char, usize)> {
+    pub(crate) fn next_char(&self, sp: usize) -> Option<(char, usize)> {
         self.enc.decode(self.bytes.get(sp..)?)
     }
 
