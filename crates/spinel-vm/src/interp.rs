@@ -16492,6 +16492,24 @@ fn names_non_ascii(source: &str) -> bool {
     false
 }
 
+/// Whether a regexp source names a `\p{}` property, which fixes an ASCII
+/// pattern to its encoding as a character past ASCII would: `/\p{L}/` is
+/// UTF-8 and `/\p{Alpha}/n` BINARY, both fixed. Measured on CRuby 4.0.9.
+fn names_a_property(source: &[u8]) -> bool {
+    let mut at = 0;
+    while at + 2 < source.len() {
+        if source[at] != b'\\' {
+            at += 1;
+            continue;
+        }
+        if matches!(source[at + 1], b'p' | b'P') && source[at + 2] == b'{' {
+            return true;
+        }
+        at += 2;
+    }
+    false
+}
+
 /// Whether an ASCII regexp source has a `\xHH` or octal escape for a byte past
 /// ASCII, which under `/n` makes the pattern BINARY: `/\xff/n.encoding`.
 fn escapes_a_byte(source: &[u8]) -> bool {
@@ -16544,7 +16562,8 @@ fn regexp_encoding(source: &[u8], encoding: u8, options: i64, fixed: Option<u8>)
     use crate::regexp::{FIXEDENCODING, NOENCODING};
     let text = std::str::from_utf8(source).unwrap_or("");
     let names_unicode = source.is_ascii() && names_non_ascii(text);
-    let ascii = source.is_ascii() && !names_unicode && !escapes_a_byte(source);
+    let ascii =
+        source.is_ascii() && !names_unicode && !escapes_a_byte(source) && !names_a_property(source);
     if let Some(encoding) = fixed {
         (encoding, options | FIXEDENCODING)
     } else if options & NOENCODING != 0 {

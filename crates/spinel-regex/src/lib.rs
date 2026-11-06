@@ -26,8 +26,7 @@
 //! Constructs this engine does not implement yet return [`Error::Unsupported`]
 //! rather than a guess. The VM turns that into `Error::Unknowable`, and the
 //! spec run reports the example *blocked* — never passed, never failed.
-//! Today that is `(?~)`, a recursive `\g<>` call, `\X`, `\p{}` and a
-//! `\k<name+1>` level specifier past level 0.
+//! `docs/engine.md` lists which constructs those are today.
 //!
 //! ```
 //! use spinel_regex::{Flags, Regex};
@@ -41,6 +40,7 @@
 mod chars;
 mod exec;
 mod parse;
+mod property;
 mod single_byte;
 
 pub use exec::Match as RawMatch;
@@ -467,6 +467,35 @@ mod tests {
         let re = Regex::new("b$", Flags::default()).expect("compiles");
         let caps = re.find_in(b"\xffab", 0, Encoding::Binary).expect("runs");
         assert_eq!(caps.and_then(|c| c.group(0)), Some((2, 3)));
+    }
+
+    /// `\p{}` in and out of a class, negated three ways, and under `/i`,
+    /// where Onigmo folds the property's set before an outer negation takes
+    /// it away: `/\P{Lu}/i` matches neither case of a letter, `[\P{Lu}]/i`
+    /// both. `(?a)` narrows no property. Measured on CRuby 4.0.9.
+    #[test]
+    fn a_property_matches_folds_and_negates_as_onigmo_does() {
+        let icase = Flags {
+            icase: true,
+            ..Flags::default()
+        };
+        let find_i =
+            |pattern, haystack: &str| find_in(pattern, icase, Encoding::Utf8, haystack.as_bytes());
+        assert_eq!(find("\\p{L}+", "a\u{6E9}b"), Some((0, 1)));
+        assert_eq!(find("\\p{Arabic}", "a\u{6E9}b"), Some((1, 3)));
+        assert_eq!(find("[\\p{L}\\d]+", "ab12!"), Some((0, 4)));
+        assert_eq!(find("[^\\p{L}]+", "ab12!"), Some((2, 5)));
+        assert_eq!(find("\\p{^L}", "a1"), Some((1, 2)));
+        assert_eq!(find("\\P{^L}", "1a"), Some((1, 2)));
+        assert_eq!(find("\\P{L}", "a"), None);
+        assert_eq!(find("(?a)\\p{Word}", "é"), Some((0, 2)));
+        assert_eq!(find("\\pL", "pL"), Some((0, 2)));
+        assert_eq!(find_i("\\p{Lu}", "a"), Some((0, 1)));
+        assert_eq!(find_i("\\P{Lu}", "a"), None);
+        assert_eq!(find_i("\\P{Lu}", "A"), None);
+        assert_eq!(find_i("[\\P{Lu}]", "A"), Some((0, 1)));
+        assert_eq!(find_i("[^\\P{Lu}]", "a"), None);
+        assert_eq!(find_binary("\\p{Alpha}", b"\xe9a"), Some((1, 2)));
     }
 
     #[test]

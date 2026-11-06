@@ -31,6 +31,7 @@ ROOT = File.expand_path("..", __dir__)
 CORPUS = File.join(ROOT, "spec", "ruby", "language", "regexp")
 TABLE = File.join(ROOT, "crates", "spinel-regex", "tests", "oracle.txt")
 POSIX_TABLE = File.join(ROOT, "crates", "spinel-regex", "tests", "posix.txt")
+PROPERTY_TABLE = File.join(ROOT, "crates", "spinel-regex", "tests", "properties.txt")
 ENCODING_TABLE = File.join(ROOT, "crates", "spinel-regex", "tests", "encodings.txt")
 SINGLE_BYTE_TABLE = File.join(ROOT, "crates", "spinel-regex", "src", "single_byte.rs")
 
@@ -233,6 +234,239 @@ POSIX_HEADER = <<~TEXT
   # `;`-separated hex ranges, `LO-HI` or a bare `LO` for a single codepoint.
   # Surrogates are excluded — Ruby cannot build a String from one and Rust's
   # `char` cannot hold one, so neither engine has an answer to compare.
+TEXT
+
+# Every name `\p{}` takes in a UTF-8 pattern, as Onigmo spells it once it has
+# dropped spaces, hyphens and underscores and lowercased the rest: the general
+# categories, scripts, binary properties, blocks (`in…`) and ages. Copied from
+# the name table of CRuby's `enc/unicode/17.0.0/name2ctype.h`; Ruby has no way
+# to list them, so this list is the one input the measurement cannot produce.
+# Each name is still compiled by the Ruby that runs `--generate`, so one it
+# does not know fails the run rather than writing a wrong table.
+PROPERTIES = %w[
+  adlam adlm age=10.0 age=1.1 age=11.0 age=12.0 age=12.1 age=13.0 age=14.0
+  age=15.0 age=15.1 age=16.0 age=17.0 age=2.0 age=2.1 age=3.0 age=3.1 age=3.2
+  age=4.0 age=4.1 age=5.0 age=5.1 age=5.2 age=6.0 age=6.1 age=6.2 age=6.3
+  age=7.0 age=8.0 age=9.0 aghb ahex ahom alnum alpha alphabetic
+  anatolianhieroglyphs any arab arabic armenian armi armn ascii asciihexdigit
+  assigned avestan avst bali balinese bamu bamum bass bassavah batak batk beng
+  bengali berf beriaerfe bhaiksuki bhks bidic bidicontrol blank bopo bopomofo
+  brah brahmi brai braille bugi buginese buhd buhid c cakm canadianaboriginal
+  cans cari carian cased casedletter caseignorable caucasianalbanian cc cf
+  chakma cham changeswhencasefolded changeswhencasemapped
+  changeswhenlowercased changeswhentitlecased changeswhenuppercased cher
+  cherokee chorasmian chrs ci closepunctuation cn cntrl co combiningmark
+  common connectorpunctuation control copt coptic cpmn cprt cs cuneiform
+  currencysymbol cwcf cwcm cwl cwt cwu cypriot cyprominoan cyrillic cyrl dash
+  dashpunctuation decimalnumber defaultignorablecodepoint dep deprecated
+  deseret deva devanagari di dia diacritic diak digit divesakuru dogr dogra
+  dsrt dupl duployan ebase ecomp egyp egyptianhieroglyphs elba elbasan elym
+  elymaic emod emoji emojicomponent emojimodifier emojimodifierbase
+  emojipresentation enclosingmark epres ethi ethiopic ext extendedpictographic
+  extender extpict finalpunctuation format gara garay geor georgian glag
+  glagolitic gong gonm goth gothic gran grantha graph graphemebase
+  graphemeclusterbreak=control graphemeclusterbreak=cr
+  graphemeclusterbreak=extend graphemeclusterbreak=l graphemeclusterbreak=lf
+  graphemeclusterbreak=lv graphemeclusterbreak=lvt
+  graphemeclusterbreak=prepend graphemeclusterbreak=regionalindicator
+  graphemeclusterbreak=spacingmark graphemeclusterbreak=t
+  graphemeclusterbreak=v graphemeclusterbreak=zwj graphemeextend graphemelink
+  grbase greek grek grext grlink gujarati gujr gukh gunjalagondi gurmukhi guru
+  gurungkhema han hang hangul hani hanifirohingya hano hanunoo hatr hatran
+  hebr hebrew hex hexdigit hira hiragana hluw hmng hmnp hung hyphen idc
+  idcompatmathcontinue idcompatmathstart idcontinue ideo ideographic ids idsb
+  idsbinaryoperator idst idstart idstrinaryoperator idsu idsunaryoperator
+  imperialaramaic inadlam inaegeannumbers inahom inalchemicalsymbols
+  inalphabeticpresentationforms inanatolianhieroglyphs
+  inancientgreekmusicalnotation inancientgreeknumbers inancientsymbols
+  inarabic inarabicextendeda inarabicextendedb inarabicextendedc
+  inarabicmathematicalalphabeticsymbols inarabicpresentationformsa
+  inarabicpresentationformsb inarabicsupplement inarmenian inarrows inavestan
+  inbalinese inbamum inbamumsupplement inbasiclatin inbassavah inbatak
+  inbengali inberiaerfe inbhaiksuki inblockelements inbopomofo
+  inbopomofoextended inboxdrawing inbrahmi inbraillepatterns inbuginese
+  inbuhid inbyzantinemusicalsymbols incarian incaucasianalbanian
+  incb=consonant incb=extend incb=linker inchakma incham incherokee
+  incherokeesupplement inchesssymbols inchorasmian incjkcompatibility
+  incjkcompatibilityforms incjkcompatibilityideographs
+  incjkcompatibilityideographssupplement incjkradicalssupplement incjkstrokes
+  incjksymbolsandpunctuation incjkunifiedideographs
+  incjkunifiedideographsextensiona incjkunifiedideographsextensionb
+  incjkunifiedideographsextensionc incjkunifiedideographsextensiond
+  incjkunifiedideographsextensione incjkunifiedideographsextensionf
+  incjkunifiedideographsextensiong incjkunifiedideographsextensionh
+  incjkunifiedideographsextensioni incjkunifiedideographsextensionj
+  incombiningdiacriticalmarks incombiningdiacriticalmarksextended
+  incombiningdiacriticalmarksforsymbols incombiningdiacriticalmarkssupplement
+  incombininghalfmarks incommonindicnumberforms incontrolpictures incoptic
+  incopticepactnumbers incountingrodnumerals incuneiform
+  incuneiformnumbersandpunctuation incurrencysymbols incypriotsyllabary
+  incyprominoan incyrillic incyrillicextendeda incyrillicextendedb
+  incyrillicextendedc incyrillicextendedd incyrillicsupplement indeseret
+  indevanagari indevanagariextended indevanagariextendeda indingbats
+  indivesakuru indogra indominotiles induployan inearlydynasticcuneiform
+  inegyptianhieroglyphformatcontrols inegyptianhieroglyphs
+  inegyptianhieroglyphsextendeda inelbasan inelymaic inemoticons
+  inenclosedalphanumerics inenclosedalphanumericsupplement
+  inenclosedcjklettersandmonths inenclosedideographicsupplement inethiopic
+  inethiopicextended inethiopicextendeda inethiopicextendedb
+  inethiopicsupplement ingaray ingeneralpunctuation ingeometricshapes
+  ingeometricshapesextended ingeorgian ingeorgianextended ingeorgiansupplement
+  inglagolitic inglagoliticsupplement ingothic ingrantha ingreekandcoptic
+  ingreekextended ingujarati ingunjalagondi ingurmukhi ingurungkhema
+  inhalfwidthandfullwidthforms inhangulcompatibilityjamo inhanguljamo
+  inhanguljamoextendeda inhanguljamoextendedb inhangulsyllables
+  inhanifirohingya inhanunoo inhatran inhebrew inherited
+  inhighprivateusesurrogates inhighsurrogates inhiragana
+  inideographicdescriptioncharacters inideographicsymbolsandpunctuation
+  inimperialaramaic inindicsiyaqnumbers ininscriptionalpahlavi
+  ininscriptionalparthian inipaextensions initialpunctuation injavanese
+  inkaithi inkaktoviknumerals inkanaextendeda inkanaextendedb inkanasupplement
+  inkanbun inkangxiradicals inkannada inkatakana inkatakanaphoneticextensions
+  inkawi inkayahli inkharoshthi inkhitansmallscript inkhmer inkhmersymbols
+  inkhojki inkhudawadi inkiratrai inlao inlatin1supplement inlatinextendeda
+  inlatinextendedadditional inlatinextendedb inlatinextendedc inlatinextendedd
+  inlatinextendede inlatinextendedf inlatinextendedg inlepcha
+  inletterlikesymbols inlimbu inlineara inlinearbideograms inlinearbsyllabary
+  inlisu inlisusupplement inlowsurrogates inlycian inlydian inmahajani
+  inmahjongtiles inmakasar inmalayalam inmandaic inmanichaean inmarchen
+  inmasaramgondi inmathematicalalphanumericsymbols inmathematicaloperators
+  inmayannumerals inmedefaidrin inmeeteimayek inmeeteimayekextensions
+  inmendekikakui inmeroiticcursive inmeroitichieroglyphs inmiao
+  inmiscellaneousmathematicalsymbolsa inmiscellaneousmathematicalsymbolsb
+  inmiscellaneoussymbols inmiscellaneoussymbolsandarrows
+  inmiscellaneoussymbolsandpictographs inmiscellaneoussymbolssupplement
+  inmiscellaneoustechnical inmodi inmodifiertoneletters inmongolian
+  inmongoliansupplement inmro inmultani inmusicalsymbols inmyanmar
+  inmyanmarextendeda inmyanmarextendedb inmyanmarextendedc innabataean
+  innagmundari innandinagari innewa innewtailue innko innoblock innumberforms
+  innushu innyiakengpuachuehmong inogham inolchiki inoldhungarian inolditalic
+  inoldnortharabian inoldpermic inoldpersian inoldsogdian inoldsoutharabian
+  inoldturkic inolduyghur inolonal inopticalcharacterrecognition inoriya
+  inornamentaldingbats inosage inosmanya inottomansiyaqnumbers inpahawhhmong
+  inpalmyrene inpaucinhau inphagspa inphaistosdisc inphoenician
+  inphoneticextensions inphoneticextensionssupplement inplayingcards
+  inprivateusearea inpsalterpahlavi inrejang inruminumeralsymbols inrunic
+  insamaritan insaurashtra inscriptionalpahlavi inscriptionalparthian
+  insharada insharadasupplement inshavian inshorthandformatcontrols insiddham
+  insidetic insinhala insinhalaarchaicnumbers insmallformvariants
+  insmallkanaextension insogdian insorasompeng insoyombo
+  inspacingmodifierletters inspecials insundanese insundanesesupplement
+  insunuwar insuperscriptsandsubscripts insupplementalarrowsa
+  insupplementalarrowsb insupplementalarrowsc
+  insupplementalmathematicaloperators insupplementalpunctuation
+  insupplementalsymbolsandpictographs insupplementaryprivateuseareaa
+  insupplementaryprivateuseareab insuttonsignwriting insylotinagri
+  insymbolsandpictographsextendeda insymbolsforlegacycomputing
+  insymbolsforlegacycomputingsupplement insyriac insyriacsupplement intagalog
+  intagbanwa intags intaile intaitham intaiviet intaixuanjingsymbols intaiyo
+  intakri intamil intamilsupplement intangsa intangut intangutcomponents
+  intangutcomponentssupplement intangutsupplement intelugu inthaana inthai
+  intibetan intifinagh intirhuta intodhri intolongsiki intoto
+  intransportandmapsymbols intulutigalari inugaritic
+  inunifiedcanadianaboriginalsyllabics
+  inunifiedcanadianaboriginalsyllabicsextended
+  inunifiedcanadianaboriginalsyllabicsextendeda invai invariationselectors
+  invariationselectorssupplement invedicextensions inverticalforms invithkuqi
+  inwancho inwarangciti inyezidi inyijinghexagramsymbols inyiradicals
+  inyisyllables inzanabazarsquare inznamennymusicalnotation ital java javanese
+  joinc joincontrol kaithi kali kana kannada katakana kawi kayahli khar
+  kharoshthi khitansmallscript khmer khmr khoj khojki khudawadi kiratrai kits
+  knda krai kthi l lana lao laoo latin latn lc lepc lepcha letter letternumber
+  limb limbu lina linb lineara linearb lineseparator lisu ll lm lo loe
+  logicalorderexception lower lowercase lowercaseletter lt lu lyci lycian lydi
+  lydian m mahajani mahj maka makasar malayalam mand mandaic mani manichaean
+  marc marchen mark masaramgondi math mathsymbol mc mcm me medefaidrin medf
+  meeteimayek mend mendekikakui merc mero meroiticcursive meroitichieroglyphs
+  miao mlym mn modi modifiercombiningmark modifierletter modifiersymbol mong
+  mongolian mro mroo mtei mult multani myanmar mymr n nabataean nagm
+  nagmundari nand nandinagari narb nbat nchar nd newa newtailue nko nkoo nl no
+  noncharactercodepoint nonspacingmark nshu number nushu nyiakengpuachuehmong
+  oalpha odi ogam ogham ogrext oidc oids olchiki olck oldhungarian olditalic
+  oldnortharabian oldpermic oldpersian oldsogdian oldsoutharabian oldturkic
+  olduyghur olonal olower omath onao openpunctuation oriya orkh orya osage
+  osge osma osmanya other otheralphabetic otherdefaultignorablecodepoint
+  othergraphemeextend otheridcontinue otheridstart otherletter otherlowercase
+  othermath othernumber otherpunctuation othersymbol otheruppercase ougr
+  oupper p pahawhhmong palm palmyrene paragraphseparator patsyn patternsyntax
+  patternwhitespace patws pauc paucinhau pc pcm pd pe perm pf phag phagspa
+  phli phlp phnx phoenician pi plrd po prependedconcatenationmark print
+  privateuse prti ps psalterpahlavi punct punctuation qaac qaai qmark
+  quotationmark radical regionalindicator rejang ri rjng rohg runic runr s
+  samaritan samr sarb saur saurashtra sc sd sentenceterminal separator sgnw
+  sharada shavian shaw shrd sidd siddham sidetic sidt signwriting sind sinh
+  sinhala sk sm so softdotted sogd sogdian sogo sora sorasompeng soyo soyombo
+  space spaceseparator spacingmark sterm sund sundanese sunu sunuwar surrogate
+  sylo sylotinagri symbol syrc syriac tagalog tagb tagbanwa taile taitham
+  taiviet taiyo takr takri tale talu tamil taml tang tangsa tangut tavt tayo
+  telu telugu term terminalpunctuation tfng tglg thaa thaana thai tibetan tibt
+  tifinagh tirh tirhuta titlecaseletter tnsa todhri todr tolongsiki tols toto
+  tulutigalari tutg ugar ugaritic uideo unassigned unifiedideograph unknown
+  upper uppercase uppercaseletter vai vaii variationselector vith vithkuqi vs
+  wancho wara warangciti wcho whitespace word wspace xdigit xidc xidcontinue
+  xids xidstart xpeo xposixpunct xsux yezi yezidi yi yiii z zanabazarsquare
+  zanb zinh zl zp zs zyyy zzzz
+].freeze
+
+# Every scalar value, in order, as one UTF-8 String: a property's matches are
+# then its runs, read with one `scan` per property instead of a million
+# `match?` calls. Surrogates are left out, so a run that crosses their gap is
+# split back into the two ranges it stands for.
+def property_runs(regexp)
+  @all_scalars ||= ((0..0xD7FF).to_a + (0xE000..0x10FFFF).to_a).pack("U*")
+  ranges = []
+  @all_scalars.scan(regexp) do |run|
+    low = run[0].ord
+    high = run[-1].ord
+    if low < SURROGATES.first && high > SURROGATES.last
+      ranges << [low, SURROGATES.first - 1] << [SURROGATES.last + 1, high]
+    else
+      ranges << [low, high]
+    end
+  end
+  ranges
+end
+
+def property_render
+  sets = {}
+  ages = []
+  PROPERTIES.each do |name|
+    if name.start_with?("age=")
+      ages << name
+      next
+    end
+    (sets[property_runs(Regexp.new("\\p{#{name}}+"))] ||= []) << name
+  end
+  lines = sets.map { |ranges, names| property_line(names.join(","), ranges) }
+  # An age is every character assigned by that version, so each holds the one
+  # before it. A line holds only what its version added, measured as such.
+  ages.sort_by! { |name| Gem::Version.new(name.delete_prefix("age=")) }
+  ages.each_with_index do |name, i|
+    added = i.zero? ? "\\p{#{name}}" : "[\\p{#{name}}&&\\P{#{ages[i - 1]}}]"
+    lines << property_line(name, property_runs(Regexp.new("#{added}+")))
+  end
+  [PROPERTY_HEADER.chomp, "", *lines, ""].join("\n")
+end
+
+def property_line(names, ranges)
+  fields = ranges.map { |lo, hi| lo == hi ? format("%X", lo) : format("%X-%X", lo, hi) }
+  "#{names}\t#{fields.join(';')}"
+end
+
+PROPERTY_HEADER = <<~TEXT
+  # Ruby's `\\p{}` properties in UTF-8, measured over every codepoint. Do not
+  # edit by hand.
+  #
+  # Generated by `scripts/regexp-oracle.rb --generate`; CI re-runs it with
+  # `--check`, and `crates/spinel-regex/build.rs` turns it into the tables the
+  # engine matches `\\p{}` against.
+  #
+  # One set per line: the names that match it, `,`-separated and spelled as
+  # Onigmo looks them up (lowercase, no space, `-` or `_`), a tab, then its
+  # codepoints as `;`-separated hex ranges, `LO-HI` or a bare `LO`. Names that
+  # measure the same share a line. An `age=` line holds only the codepoints
+  # that version assigned: `\\p{Age=V}` is every `age=` line up to V's.
+  # Surrogates are excluded, as in `posix.txt`.
 TEXT
 
 # The classes, shorthands, word boundary and case folds of the characters past
@@ -665,6 +899,8 @@ when "--generate"
   puts "wrote #{TABLE}"
   File.write(POSIX_TABLE, posix_render)
   puts "wrote #{POSIX_TABLE}"
+  File.write(PROPERTY_TABLE, property_render)
+  puts "wrote #{PROPERTY_TABLE}"
   File.write(ENCODING_TABLE, encoding_render)
   puts "wrote #{ENCODING_TABLE}"
   File.write(SINGLE_BYTE_TABLE, single_byte_render)
@@ -672,6 +908,7 @@ when "--generate"
 when "--check"
   stale = []
   {TABLE => method(:render), POSIX_TABLE => method(:posix_render),
+   PROPERTY_TABLE => method(:property_render),
    ENCODING_TABLE => method(:encoding_render),
    SINGLE_BYTE_TABLE => method(:single_byte_render)}.each do |path, build|
     current = File.exist?(path) ? File.read(path) : ""

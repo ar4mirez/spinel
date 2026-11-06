@@ -68,7 +68,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/warning` | 5 | 31 | 31 | 0 | 0 | 0 | 100% |
 | `language` | 67 | 2668 | 2512 | 0 | 126 | 30 | 94% |
 | `language/predefined` | 2 | 14 | 12 | 0 | 0 | 2 | 86% |
-| `language/regexp` | 11 | 257 | 241 | 0 | 13 | 3 | 94% |
+| `language/regexp` | 11 | 257 | 249 | 0 | 5 | 3 | 97% |
 | `library/English` | 2 | 27 | 1 | 0 | 0 | 26 | 4% |
 | `library/abbrev` | 1 | 4 | 0 | 0 | 4 | 0 | 0% |
 | `library/base64` | 6 | 26 | 0 | 0 | 26 | 0 | 0% |
@@ -131,4 +131,4 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `optional/capi` | 47 | 0 | 0 | 0 | 0 | 0 | — |
 | `optional/thread_safety` | 1 | 5 | 0 | 0 | 5 | 0 | 0% |
 | `security` | 13 | 31 | 28 | 0 | 3 | 0 | 90% |
-| **total** | 3835 | 32683 | 29206 | 0 | 3194 | 283 | 89% |
+| **total** | 3835 | 32683 | 29214 | 0 | 3186 | 283 | 89% |

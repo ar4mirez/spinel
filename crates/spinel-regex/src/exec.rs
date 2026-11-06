@@ -939,7 +939,7 @@ fn char_set(class: &Class) -> Option<Vec<(char, char)>> {
             ClassItem::Char(c) => set.push((*c, *c)),
             ClassItem::Range(low, high) => set.push((*low, *high)),
             ClassItem::Nested(inner) => set.extend(char_set(inner)?),
-            ClassItem::Perl(..) | ClassItem::Posix(..) => return None,
+            ClassItem::Perl(..) | ClassItem::Posix(..) | ClassItem::Property(..) => return None,
         }
     }
     let mut set = merged(set);
@@ -1023,6 +1023,12 @@ fn item_matches(item: &ClassItem, c: char, icase: bool, enc: Encoding) -> bool {
             };
             held != *negated
         }
+        // Only a UTF-8 pattern holds a property, and a character of another
+        // encoding has none of them.
+        ClassItem::Property(property, negated) => {
+            let held = kind(c, enc) == Kind::Unicode && crate::property::contains(*property, c);
+            held != *negated
+        }
         ClassItem::Nested(inner) => class_matches(inner, c, enc),
     }
 }
@@ -1050,7 +1056,7 @@ fn perl_matches(kind: Perl, c: char) -> bool {
 include!(concat!(env!("OUT_DIR"), "/posix_tables.rs"));
 
 /// Whether a sorted, disjoint range table contains `c`.
-fn in_ranges(ranges: &[(u32, u32)], c: char) -> bool {
+pub(crate) fn in_ranges(ranges: &[(u32, u32)], c: char) -> bool {
     let c = c as u32;
     ranges
         .binary_search_by(|&(low, high)| {
