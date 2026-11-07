@@ -200,7 +200,7 @@ pub fn compile(ast: &Ast, groups: usize) -> Result<Program, Error> {
 /// The body of every capturing group, by index, for the ones a call needs.
 fn collect_called<'a>(ast: &'a Ast, bodies: &mut HashMap<usize, &'a Ast>) {
     match ast {
-        Ast::Group { index, body } => {
+        Ast::Group { index, body, .. } => {
             if let Some(index) = index {
                 bodies.insert(*index, body);
             }
@@ -358,7 +358,7 @@ impl Compiler {
             Ast::Keep => {
                 self.emit(Inst::Keep);
             }
-            Ast::Group { index, body } => match index {
+            Ast::Group { index, body, .. } => match index {
                 // A called group is its subroutine, called where it is written.
                 Some(n) if self.called.contains(n) => self.call(*n),
                 Some(n) => {

@@ -36,9 +36,12 @@ pub enum Ast {
     },
     Concat(Vec<Ast>),
     Alt(Vec<Ast>),
-    /// `index` is `None` for `(?:...)`, `Some(n)` for a capture.
+    /// `index` is `None` for `(?:...)` and `(?i:...)`, `Some(n)` for a
+    /// capture. `plain` is set only for `(?:...)`, which alone is transparent
+    /// to Onigmo's nested-quantifier rule.
     Group {
         index: Option<usize>,
+        plain: bool,
         body: Box<Ast>,
     },
     /// `(?>...)` and the body of a possessive quantifier: matched once, and
@@ -298,7 +301,7 @@ fn contains_call(ast: &Ast) -> bool {
 
 fn collect_groups(ast: &Ast, groups: &mut HashMap<usize, Ast>) {
     match ast {
-        Ast::Group { index, body } => {
+        Ast::Group { index, body, .. } => {
             if let Some(index) = index {
                 groups.insert(*index, (**body).clone());
             }
@@ -490,7 +493,7 @@ fn may_be_empty(ast: &Ast, empty: &HashSet<usize>) -> bool {
 /// Rewrite every group index and backreference through `renumber`.
 fn renumber_groups(ast: &mut Ast, renumber: &impl Fn(usize) -> Option<usize>) {
     match ast {
-        Ast::Group { index, body } => {
+        Ast::Group { index, body, .. } => {
             if let Some(old) = *index {
                 *index = renumber(old);
             }
@@ -575,7 +578,11 @@ fn popular(min: u32, max: Option<u32>, greedy: bool) -> Option<usize> {
 /// `atom` without the plain groups around its quantifier.
 fn peel(atom: Ast) -> Ast {
     match atom {
-        Ast::Group { index: None, body } => peel(*body),
+        Ast::Group {
+            index: None,
+            plain: true,
+            body,
+        } => peel(*body),
         other => other,
     }
 }
@@ -677,18 +684,13 @@ impl Parser {
                 None | Some('|') | Some(')') => break,
                 _ => {}
             }
-            // A plain `(?:...)` is transparent to Onigmo's nested-quantifier
-            // rule, where `(?i:...)` and a capture are not.
-            let plain = self.peek() == Some('(')
-                && self.peek_at(1) == Some('?')
-                && self.peek_at(2) == Some(':');
             let atom = self.atom()?;
             // A `(?i)` mid-pattern parses as `Empty` after mutating flags; it
             // must not then pick up a quantifier of its own.
             let quantified = if matches!(atom, Ast::Empty) {
                 atom
             } else {
-                self.quantifier(atom, plain)?
+                self.quantifier(atom)?
             };
             items.push(quantified);
         }
@@ -710,7 +712,7 @@ impl Parser {
     /// Only `?+`, `*+` and `++` are possessive: after any `{n,m}` a `+` is a
     /// second quantifier, so `a{0,1}+` is `(?:a?)+`, which [`Parser::nest`]
     /// then reduces to `a*`.
-    fn quantifier(&mut self, mut atom: Ast, mut plain: bool) -> Result<Ast, Error> {
+    fn quantifier(&mut self, mut atom: Ast) -> Result<Ast, Error> {
         loop {
             self.skip_extended();
             let (min, max, exact, interval) = match self.peek() {
@@ -758,8 +760,7 @@ impl Parser {
                 }
             }
 
-            atom = self.nest(atom, plain, min, max, greedy);
-            plain = false;
+            atom = self.nest(atom, min, max, greedy);
             if possessive {
                 atom = Ast::Atomic(Box::new(atom));
             }
@@ -776,7 +777,7 @@ impl Parser {
     /// measured against CRuby 4.0.9: `(?:a?)+` is `a*` and warns, `(?:a+)??`
     /// is left as written and does not. Since Ruby bug #17341 a `+?` under
     /// `?`, `*` or `+` is left alone too, where older Onigmo reduced it.
-    fn nest(&mut self, atom: Ast, plain: bool, min: u32, max: Option<u32>, greedy: bool) -> Ast {
+    fn nest(&mut self, atom: Ast, min: u32, max: Option<u32>, greedy: bool) -> Ast {
         use Reduce::{Asis, Del, LazyOptional, LazyOptionalPlus, LazyStar, Star};
         // Inner quantifier by row, outer by column, in `POPULAR` order.
         const TABLE: [[Reduce; 6]; 6] = [
@@ -790,10 +791,13 @@ impl Parser {
         const POPULAR: [&str; 6] = ["?", "*", "+", "??", "*?", "+?"];
         let outer = popular(min, max, greedy);
         let mut target = &atom;
-        if plain {
-            while let Ast::Group { index: None, body } = target {
-                target = body;
-            }
+        while let Ast::Group {
+            index: None,
+            plain: true,
+            body,
+        } = target
+        {
+            target = body;
         }
         let inner = match target {
             Ast::Repeat {
@@ -946,6 +950,7 @@ impl Parser {
             let body = self.grouped_alternation()?;
             return Ok(Ast::Group {
                 index: Some(index),
+                plain: false,
                 body: Box::new(body),
             });
         }
@@ -956,6 +961,7 @@ impl Parser {
                 let body = self.grouped_alternation()?;
                 Ok(Ast::Group {
                     index: None,
+                    plain: true,
                     body: Box::new(body),
                 })
             }
@@ -1169,6 +1175,7 @@ impl Parser {
         let body = self.grouped_alternation()?;
         Ok(Ast::Group {
             index: Some(index),
+            plain: false,
             body: Box::new(body),
         })
     }
@@ -1198,6 +1205,7 @@ impl Parser {
                     self.flags = saved;
                     return Ok(Ast::Group {
                         index: None,
+                        plain: false,
                         body: Box::new(body),
                     });
                 }

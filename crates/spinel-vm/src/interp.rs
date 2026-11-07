@@ -18249,16 +18249,6 @@ fn nth_arg(call: &Pending, n: usize) -> Value {
     call.args.get(n).copied().unwrap_or(Value::NIL)
 }
 
-/// What `Regexp#to_s` shows: the source and flags, with options the source
-/// opens with taken into the flags — CRuby's `rb_reg_str_with_term`, step for
-/// step.
-///
-/// Bare switches, `(?i)`, are folded and the rest looked at again. A source
-/// that is one group of options, `(?i:...)`, is shown as that group's body, but
-/// only when the body compiles alone: that is what tells `(?i:a)` from
-/// `(?i:a)(?m:b)`, whose "body" `a)(?m:b` does not. Anything else shows the
-/// whole source with the pattern's own flags. So `/(?i:a)/.to_s` is
-/// `(?i-mx:a)` and `/(?i)ab/.to_s` is `(?i-mx:ab)`, measured on ruby 4.0.7.
 /// `Regexp#to_s` and `#inspect` for a pattern in UTF-16 or UTF-32.
 ///
 /// `to_s` is in the pattern's own encoding, `(?-mix:` and all. `inspect` is
@@ -18299,6 +18289,16 @@ fn regexp_wide_to_s(
     string_alloc(scope, string, &bytes, encoding)
 }
 
+/// What `Regexp#to_s` shows: the source and flags, with options the source
+/// opens with taken into the flags — CRuby's `rb_reg_str_with_term`, step for
+/// step.
+///
+/// Bare switches, `(?i)`, are folded and the rest looked at again. A source
+/// that is one group of options, `(?i:...)`, is shown as that group's body, but
+/// only when the body compiles alone: that is what tells `(?i:a)` from
+/// `(?i:a)(?m:b)`, whose "body" `a)(?m:b` does not. Anything else shows the
+/// whole source with the pattern's own flags. So `/(?i:a)/.to_s` is
+/// `(?i-mx:a)` and `/(?i)ab/.to_s` is `(?i-mx:ab)`, measured on ruby 4.0.7.
 fn regexp_to_s_fold(program: &spinel_regex::Regex) -> (&str, spinel_regex::Flags) {
     fn switch(flags: &mut spinel_regex::Flags, letter: u8, on: bool) -> bool {
         match letter {

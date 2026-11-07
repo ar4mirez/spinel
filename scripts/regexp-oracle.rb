@@ -80,7 +80,9 @@ EXTRA = [
   # #33: a quantifier on a quantifier, which Onigmo reduces to one, and `+`
   # after an interval, which is a second quantifier rather than possessive.
   '(?:a?)+', '(?:a+)?', '(?:a*?)+', '(?:a??)+', '(?:a+)??', '(?:a*)??',
-  'a+?*', 'a+?+', '(?:a?)?+', 'a{0,1}+', 'a{1,2}+', '(?:a+){1}?', 'a{0,1}{0,1}?'
+  'a+?*', 'a+?+', '(?:a?)?+', 'a{0,1}+', 'a{1,2}+', '(?:a+){1}?', 'a{0,1}{0,1}?',
+  # An option group is not transparent to that rule the way `(?:...)` is.
+  '(?:(?i:a?))+', '(?:(?i:a*))+', '(?:(?:a?))+'
 ].freeze
 
 # Patterns whose *meaning* is fine but whose timing is not: Ruby answers a
