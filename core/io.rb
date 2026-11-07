@@ -2268,7 +2268,7 @@ end
       if __thread_others__
         IO.__wait__([[self, IO::READABLE]], @timeout, true) || raise(IO::TimeoutError, "Blocking operation timed out!")
         raise IOError, "stream closed in another thread" if @closed
-      elsif __thread_current__ == 0 && __waits_in_read__?
+      elsif @__read_kind_fd__ == @fileno ? @__read_waits__ : __waits_in_read__?
         IO.__wait__([[self, IO::READABLE]], @timeout, true) || raise(IO::TimeoutError, "Blocking operation timed out!")
       end
       chunk = __fd_read__(@fileno, want)
@@ -2278,13 +2278,15 @@ end
   end
 
   # Whether a `read(2)` of this descriptor can block for ever: a pipe, a FIFO
-  # or a character device. Asked once per descriptor.
+  # or a character device. Asked once per descriptor; the answer is kept in
+  # `@__read_waits__` for the `@fileno` in `@__read_kind_fd__`, which is all
+  # a fill reads afterwards. Alone, the running thread is the main thread,
+  # so a fill needs no look at which thread it is.
   def __waits_in_read__?
-    return @__waits_in_read__[1] if @__waits_in_read__ && @__waits_in_read__[0] == @fileno
     stat = __fs_stat__(@fileno, true)
-    kind = Integer === stat ? false : %w[pipe? chardev?].any? { |m| File::Stat.__from__(stat).__send__(m) }
-    @__waits_in_read__ = [@fileno, kind]
-    kind
+    kind = !(Integer === stat) && (File::Stat.__from__(stat).pipe? || File::Stat.__from__(stat).chardev?)
+    @__read_kind_fd__ = @fileno
+    @__read_waits__ = kind
   end
 
   # Every byte of `text`, waiting whenever a nonblocking descriptor is full.
