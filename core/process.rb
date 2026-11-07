@@ -621,7 +621,6 @@ module Process
   # and a signal ends the nap and runs its handler (or, untrapped, ends the
   # program) at once, as CRuby's interrupted `waitpid` does.
   #
-  #
   # Alone, a wait for one child that ends it waits in `poll(2)` on a `pidfd`
   # for it and on the signals' wake pipe, which sees the child's exit at once.
   # ponytail: a wait for any child, for a stop (`WUNTRACED`), with another
