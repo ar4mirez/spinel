@@ -120,7 +120,7 @@ class IO
         # A signal cut the wait short: its handler runs here, and the wait
         # goes on (#44).
         if revents == Errno::EINTR::Errno
-          Signal.__run_pending__ if __thread_current__ == 0
+          Signal.__run_pending__ if __thread_current__ == __thread_main__
           next
         end
         __check__(revents, nil, "poll(2)")

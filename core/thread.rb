@@ -93,16 +93,17 @@ class Thread
 
   def self.current
     index = __thread_current__
-    __thread_object__(index) || (index == 0 ? main : nil)
+    __thread_object__(index) || (index == __thread_main__ ? main : nil)
   end
 
   def self.main
-    __thread_object__(0) || begin
+    index = __thread_main__
+    __thread_object__(index) || begin
       thread = __allocate__
       thread.__setup__(nil, nil)
-      thread.__index__ = 0
+      thread.__index__ = index
       thread.__started__!
-      __thread_set_object__(0, thread)
+      __thread_set_object__(index, thread)
       thread
     end
   end
@@ -378,6 +379,12 @@ class Thread
         Thread.main.raise(e)
         next
       end
+      # The main thread of a child forked from this thread ends, as the top
+      # level does, by the signal that reached it.
+      if SignalException === e && @index == __thread_main__
+        __signal_handle__(e.signo, 0)
+        __sys_kill__(e.signo, Process.pid)
+      end
       __uninterruptibly__ { __report__(e) } if @__s.report_on_exception
       if @__s.abort_on_exception || Thread.abort_on_exception
         Thread.main.raise(e)
@@ -402,7 +409,7 @@ class Thread
       limit = Float === limit || Integer === limit ? limit : Float(limit)
     end
     Kernel.raise ThreadError, "Target thread must not be current thread" if equal?(Thread.current)
-    Kernel.raise ThreadError, "Target thread must not be main thread" if @index == 0
+    Kernel.raise ThreadError, "Target thread must not be main thread" if @index == __thread_main__
     deadline = limit && Process.clock_gettime(Process::CLOCK_MONOTONIC) + limit
     until @__s.dead
       me = __thread_current__
@@ -439,7 +446,7 @@ class Thread
 
   def kill
     return self if @__s.dead || @__s.killing
-    if @index == 0
+    if @index == __thread_main__
       exit
     elsif equal?(Thread.current)
       @__s.killing = true

@@ -1161,6 +1161,8 @@ pub enum ThreadOp {
     New,
     /// `__thread_current__`: the running thread's index.
     Current,
+    /// `__thread_main__`: the main thread's index.
+    Main,
     /// `__thread_object__(index)`: its `Thread`, nil for an unnamed main.
     Object,
     /// `__thread_set_object__(index, thread)`: name the main thread's.

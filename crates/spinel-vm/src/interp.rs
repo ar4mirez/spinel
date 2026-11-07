@@ -1851,6 +1851,7 @@ fn thread_native(
             int(threads::spawn(scope, call, object, block, ids)?)
         }
         ThreadOp::Current => int(threads::current(scope)),
+        ThreadOp::Main => int(threads::main(scope)),
         ThreadOp::Object => threads::object(scope, index(0).unwrap_or(0)),
         ThreadOp::SetObject => {
             let object = call.args.get(1).copied().unwrap_or(Value::NIL);
@@ -14813,6 +14814,11 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             Builtin::Kernel,
             &["__thread_current__"],
             Native::Thread(ThreadOp::Current),
+        ),
+        (
+            Builtin::Kernel,
+            &["__thread_main__"],
+            Native::Thread(ThreadOp::Main),
         ),
         (
             Builtin::Kernel,

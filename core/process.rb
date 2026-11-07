@@ -682,7 +682,7 @@ module Process
     # returns, so its handler runs before `Process.kill` does, as CRuby's
     # `rb_f_kill` runs it. Sent from another thread, it waits for the main
     # thread's next safe point.
-    Signal.__run_pending__ if __thread_current__ == 0
+    Signal.__run_pending__ if __thread_current__ == __thread_main__
     pids.size
   end
 

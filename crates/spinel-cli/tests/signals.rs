@@ -5,7 +5,8 @@
 //! still ends it; a handler that raises leaves the other signals waiting,
 //! and none runs inside another; a
 //! forked child wakes for its own signals, even one sent the moment it is
-//! forked; SIGINT cuts a blocked read short; and `ENV` is the environment a
+//! forked, and one forked from another thread handles them as its main
+//! thread; SIGINT cuts a blocked read short; and `ENV` is the environment a
 //! child inherits. Each fixture's output was measured against ruby 4.0.9, but
 //! for the one difference `last_call.rb` names.
 
@@ -110,6 +111,13 @@ fn a_signal_sent_right_after_fork_reaches_the_child() {
         assert!(status.success(), "stderr: {stderr}");
         assert_eq!(stdout, "child\n0\n");
     }
+}
+
+#[test]
+fn a_child_forked_from_another_thread_handles_its_signals() {
+    let (status, stdout, stderr) = run("fork_from_thread.rb");
+    assert!(status.success(), "stderr: {stderr}");
+    assert_eq!(stdout, "true\ntrapped\n15\n");
 }
 
 #[test]
