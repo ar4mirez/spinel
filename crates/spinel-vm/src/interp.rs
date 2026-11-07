@@ -2227,6 +2227,96 @@ enum Parked {
     Unwind(Unwind),
 }
 
+/// `main`. A plain `Object`, as Ruby has it: `def` at the top level lands on
+/// its class, a receiverless call finds it there, and `@a` at the top level
+/// is an ivar on this object like any other. One per heap, kept by it.
+fn main_object(scope: &mut HandleScope<'_>) -> Value {
+    if scope.main() == Value::NIL {
+        let object = class_handle(scope, Builtin::Object);
+        let handle = alloc_ivar_object(scope, Some(object));
+        let main = scope.get(handle);
+        scope.set_main(main);
+    }
+    scope.main()
+}
+
+/// Define `TOPLEVEL_BINDING` (#38), before anything the program runs: a
+/// file `-r` requires already sees it, and a local it sets there with
+/// `local_variable_set` is the main script's to see. [`eval_main`] runs the
+/// script inside it. Like CRuby's, it was taken nowhere in the program, so
+/// its `source_location` is `["<main>", 0]`.
+///
+/// Does nothing when the constant is already defined.
+pub fn define_toplevel_binding(scope: &mut HandleScope<'_>) -> Result<(), Error> {
+    let object = Builtin::Object.id();
+    let name = crate::shared::symbols::intern("TOPLEVEL_BINDING");
+    if scope.classes().const_get_here(object, name).is_some() {
+        return Ok(());
+    }
+    let receiver = main_object(scope);
+    let receiver = scope.root(receiver);
+    let env = env_alloc(scope, Value::NIL, 0);
+    let receiver = scope.get(receiver);
+    let iseq = Arc::new(Iseq {
+        name: "<main>".into(),
+        path: Some("<main>".into()),
+        scope_barrier: true,
+        ..Iseq::default()
+    });
+    let binding = make_binding(
+        scope,
+        BindingParts {
+            iseq,
+            env,
+            receiver,
+            cref: CrefId::ROOT,
+            block: Value::NIL,
+            home: 1,
+            owner: Value::NIL,
+            method: Value::NIL,
+            // The top level's `def` is private (#161).
+            visibility: 1,
+            line: 0,
+        },
+    )?;
+    scope.classes_mut().const_set(object, name, binding);
+    Ok(())
+}
+
+/// Run the main script inside `TOPLEVEL_BINDING` (#38), as [`eval_in`]
+/// otherwise would: its environment sits inside the binding's, so the
+/// binding answers the script's locals and the ones `local_variable_set`
+/// gave it before the script ran, merged. The script's code still cannot
+/// name the latter, as in CRuby, which compiles it as a file.
+///
+/// ponytail: only the script's own body is given the binding's names as
+/// [`Iseq::outer`]; a block in it was compiled without them, so a `binding`
+/// taken in a block does not list them, though its environments reach them.
+/// The upgrade is compiling the script with the names as an outer scope its
+/// code cannot see, which the compiler has no notion of yet.
+pub fn eval_main(
+    scope: &mut HandleScope<'_>,
+    frame: &mut Frame,
+    iseq: &Iseq,
+) -> Result<Value, Error> {
+    let object = Builtin::Object.id();
+    let name = crate::shared::symbols::intern("TOPLEVEL_BINDING");
+    let binding = scope.classes().const_get_here(object, name);
+    let Some(binding) = binding.filter(|&b| is_binding(scope, b)) else {
+        return eval_in(scope, frame, iseq);
+    };
+    let handle = scope.root(binding);
+    let mut iseq = iseq.clone();
+    iseq.outer = binding_chain(scope, binding);
+    let outer = scope.slot(handle, BINDING_ENV);
+    frame.reserve(iseq.locals.len());
+    frame.env = env_alloc(scope, outer, frame.slots);
+    let env = frame.env;
+    let binding = scope.get(handle);
+    binding_push(scope, binding, &Arc::new(iseq.clone()), env);
+    eval_in(scope, frame, &iseq)
+}
+
 /// Run `iseq` in `frame`, which may already hold locals from an earlier run.
 pub fn eval_in(
     scope: &mut HandleScope<'_>,
@@ -2237,17 +2327,7 @@ pub fn eval_in(
     frame.reserve(iseq.locals.len());
     let env = frame.env(scope);
     if frame.receiver == Value::NIL {
-        // `main`. A plain `Object`, as Ruby has it: `def` at the top level
-        // lands on its class, a receiverless call finds it there, and `@a` at
-        // the top level is an ivar on this object like any other. One per
-        // heap, kept by it.
-        if scope.main() == Value::NIL {
-            let object = class_handle(scope, Builtin::Object);
-            let handle = alloc_ivar_object(scope, Some(object));
-            let main = scope.get(handle);
-            scope.set_main(main);
-        }
-        frame.receiver = scope.main();
+        frame.receiver = main_object(scope);
     }
 
     let stack = Stack::with_capacity(iseq.max_stack);
@@ -3964,6 +4044,19 @@ fn run<'h>(
                         // to the method it was written in, and if that method has
                         // already returned there is nothing to return *from*.
                         if !frames.iter().any(|call| call.id == frame) {
+                            return Err(local_jump_error(scope, "return", value));
+                        }
+                        // An `eval` string run in a block can return from
+                        // the method or lambda around the block, and from
+                        // nothing else: a script's or a class body's
+                        // `return` is not the string's to take.
+                        if frames[top].iseq.eval_in_block
+                            && frames.iter().rev().any(|call| {
+                                call.id == frame
+                                    && call.defined_as.is_none()
+                                    && call.iseq.scope_barrier
+                            })
+                        {
                             return Err(local_jump_error(scope, "return", value));
                         }
                         return Ok(Step::Unwind(Unwind::Return { frame, value }));
@@ -18623,6 +18716,46 @@ fn binding_chain(scope: &mut HandleScope<'_>, binding: Value) -> Vec<Vec<Box<str
     }
 }
 
+/// The parameters of the method an `eval` string's binding was taken in, for
+/// a bare `super` in the string to forward: the binding's home frame, when
+/// that is a method body still running and the outermost scope of `chain`.
+///
+/// ponytail: found among the running frames, so a `Binding` that outlived
+/// its method has none and its `super` stays a refusal. The upgrade is the
+/// binding keeping its method's body, as it keeps its innermost one.
+fn eval_method(
+    frames: &[Call],
+    home: Option<i64>,
+    chain: &[Vec<Box<str>>],
+) -> Option<crate::compile::MethodParams> {
+    let home = u64::try_from(home?).ok()?;
+    let frame = frames
+        .iter()
+        .rev()
+        .find(|f| f.id == home && f.home == home)?;
+    let iseq = &frame.iseq;
+    (iseq.scope_barrier && frame.defined_as.is_some() && chain.last() == Some(&iseq.locals))
+        .then(|| crate::compile::MethodParams::of(iseq))
+}
+
+/// What a scope of `names` declares of the anonymous parameters, as an
+/// `eval` string inside it may pass them on.
+///
+/// `...` declares the anonymous `*`, `**` and `&` slots it forwards through,
+/// and its own hidden `%...` besides; only the latter counts for it, because
+/// CRuby measures `def m(...) = eval("f(*)")` a `SyntaxError`.
+fn forwarding_of(names: &[Box<str>]) -> u8 {
+    use spinel_ast::forwarding::{ALL, BLOCK, KEYWORDS, POSITIONALS};
+    let has = |name: &str| names.iter().any(|n| &**n == name);
+    if has("%...") {
+        return ALL;
+    }
+    [("*", POSITIONALS), ("**", KEYWORDS), ("&", BLOCK)]
+        .into_iter()
+        .filter(|&(name, _)| has(name))
+        .fold(0, |flags, (_, flag)| flags | flag)
+}
+
 /// `(slot, depth)` of `name` in a binding, innermost wins.
 fn binding_find(chain: &[Vec<Box<str>>], name: &str) -> Option<(usize, u16)> {
     chain.iter().enumerate().find_map(|(depth, names)| {
@@ -19117,7 +19250,9 @@ fn binding_eval(
     let named = encoding
         .filter(|&e| e != crate::strings::UTF_8)
         .map(crate::strings::name);
-    let (program, warnings) = match parser(&path, &source, line, in_method, named) {
+    let chain = binding_chain(scope, binding);
+    let forwarding: Vec<u8> = chain.iter().map(|names| forwarding_of(names)).collect();
+    let (program, warnings) = match parser(&path, &source, line, in_method, named, &forwarding) {
         Ok(crate::heap::ParsedSource {
             mut program,
             warnings,
@@ -19140,7 +19275,6 @@ fn binding_eval(
             });
         }
     };
-    let chain = binding_chain(scope, binding);
     // A backtrace names an `eval`'s frame after the body it runs in.
     let (name, level) = {
         let handle = scope.root(binding);
@@ -19151,7 +19285,12 @@ fn binding_eval(
         }
     };
     let frozen = scope.frozen_string_literal();
-    let iseq = match crate::compile::eval(&program, chain, &name, level, frozen) {
+    let method = {
+        let handle = scope.root(binding);
+        let home = scope.slot(handle, BINDING_HOME).as_fixnum();
+        eval_method(frames, home, &chain)
+    };
+    let iseq = match crate::compile::eval(&program, chain, &name, level, frozen, method.as_ref()) {
         Ok(iseq) => Arc::new(iseq),
         Err(unsupported) => {
             return Err(Error::Unknowable {
@@ -20308,7 +20447,7 @@ fn load_file(
         }
     };
     let name = path.to_string_lossy().into_owned();
-    let (program, warnings) = match parser(&name, &source, 1, false, None) {
+    let (program, warnings) = match parser(&name, &source, 1, false, None, &[]) {
         Ok(parsed) => (parsed.program, parsed.warnings),
         Err(crate::heap::ParseFailure::Syntax(message)) => {
             return Err(syntax_error(scope, message, &name));

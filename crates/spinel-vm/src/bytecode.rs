@@ -782,6 +782,11 @@ pub struct Iseq {
     /// Compiled from a string `eval`, whose `path` is the name it was given
     /// rather than a file on disk: `__dir__` does not resolve it.
     pub from_eval: bool,
+    /// Compiled from a string `eval` taken in a block, or from a block in
+    /// one: a `return` here whose home is not a method or a lambda is a
+    /// `LocalJumpError`, where the same `return` written in the block itself
+    /// ends the script. Measured on CRuby 4.0.9.
+    pub eval_in_block: bool,
     /// The constructs [`Insn::Refuse`] names: what the compiler could not
     /// lower in this body, which it compiled to a refusal instead.
     pub refusals: Vec<&'static str>,
@@ -793,6 +798,11 @@ pub struct Iseq {
     /// block may be ignored. A refused body counts, since what it would have
     /// done with one is not known.
     pub uses_block: bool,
+    /// The encoding [`Self::symbols`] are names in: the source's, when that
+    /// is not UTF-8 (#38). `Vπ` in a BINARY `eval` string names the BINARY
+    /// Symbol `:"V\xCF\x80"`, not the UTF-8 `:Vπ`. An ASCII name is the same
+    /// Symbol in either.
+    pub symbol_encoding: Option<u8>,
     /// [`Iseq::linked`]'s answer, kept: see [`Linked`].
     pub linked: symbols::Linked,
 }
@@ -1033,9 +1043,10 @@ impl Iseq {
     /// indexes a `Vec` instead of taking the table's lock.
     #[must_use]
     pub fn link(&self) -> Vec<SymbolId> {
+        let encoding = self.symbol_encoding.unwrap_or(crate::strings::UTF_8);
         self.symbols
             .iter()
-            .map(|name| symbols::intern(name))
+            .map(|name| symbols::intern_bytes(name.as_bytes(), encoding))
             .collect()
     }
 

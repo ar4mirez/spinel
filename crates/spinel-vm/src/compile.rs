@@ -169,14 +169,25 @@ fn hoist_begin(body: &[Expr]) -> std::borrow::Cow<'_, [Expr]> {
 ///
 /// `name` and `block_level` are the caller's body's, so a backtrace labels the
 /// string's frame the way it labels the frame `eval` was called from.
+///
+/// `method` is the parameters of the method the caller runs in, when its
+/// environment is the outermost of `chain`: a bare `super` in the string
+/// forwards them, as it would written there.
 pub fn eval(
     program: &Program,
     chain: Vec<Vec<Box<str>>>,
     name: &str,
     block_level: u32,
     frozen_string_literal: Option<bool>,
+    method: Option<&MethodParams>,
 ) -> Result<Iseq, Unsupported> {
     let mut compiler = Compiler::new(name, &program.locals);
+    if let Some(MethodParams(method)) = method {
+        compiler.zsuper = Some(Zsuper {
+            depth: u16::try_from(chain.len()).unwrap_or(u16::MAX),
+            ..method.clone()
+        });
+    }
     compiler.frozen_default = frozen_string_literal == Some(true);
     compiler.chill = frozen_string_literal.is_none();
     compiler.block_level = block_level;
@@ -186,6 +197,7 @@ pub fn eval(
     compiler.outer = chain;
     compiler.eval_visible = 1;
     compiler.from_eval = true;
+    compiler.eval_in_block = block_level > 0;
     compiler.eval_phantoms = vec![Vec::new()];
     compiler.find_eval_phantoms();
     // An `eval` string is a code unit of its own: its `BEGIN`s run first in it.
@@ -375,6 +387,8 @@ struct Compiler {
     refusals: Vec<&'static str>,
     /// See [`Iseq::from_eval`].
     from_eval: bool,
+    /// See [`Iseq::eval_in_block`].
+    eval_in_block: bool,
     /// `--enable=frozen-string-literal`: a literal in a file that says
     /// nothing about it is frozen, as one under the magic comment is.
     frozen_default: bool,
@@ -385,6 +399,19 @@ struct Compiler {
     chill: bool,
 }
 
+/// A method's parameters as a bare `super` inside an `eval` string forwards
+/// them (#38).
+#[derive(Debug, Clone)]
+pub struct MethodParams(Zsuper);
+
+impl MethodParams {
+    /// The parameters of `method`, a method body.
+    #[must_use]
+    pub fn of(method: &Iseq) -> MethodParams {
+        MethodParams(Zsuper::from_spec(&method.params, &method.symbols))
+    }
+}
+
 impl Zsuper {
     /// The parameters in the order a call takes them: required, optional,
     /// rest, post, then keywords.
@@ -393,7 +420,7 @@ impl Zsuper {
     /// and because an anonymous `*` still has a slot to forward. The block
     /// parameter is deliberately absent: `super` forwards the frame's block
     /// whether or not the method named it, which the interpreter does.
-    fn from_spec(spec: &ParamSpec) -> Zsuper {
+    fn from_spec(spec: &ParamSpec, symbols: &[Box<str>]) -> Zsuper {
         let mut positional = Vec::new();
         positional.extend(spec.required.iter().map(|&slot| (slot, false)));
         positional.extend(spec.optional.iter().map(|o| (o.slot, false)));
@@ -407,7 +434,11 @@ impl Zsuper {
         positional.extend(spec.post.iter().map(|&slot| (slot, false)));
         Zsuper {
             positional,
-            keywords: spec.keywords.iter().map(|k| (k.name, k.slot)).collect(),
+            keywords: spec
+                .keywords
+                .iter()
+                .map(|k| (symbols[k.name as usize].clone(), k.slot))
+                .collect(),
             kwrest: spec.kwrest,
             depth: 0,
         }
@@ -420,8 +451,10 @@ struct Zsuper {
     /// `(slot, is_rest)` in the order the call takes them: required, optional,
     /// rest, post. A rest parameter is one pushed value the site splats.
     positional: Vec<(u16, bool)>,
-    /// `(symbol index, slot)` per declared keyword.
-    keywords: Vec<(u32, u16)>,
+    /// `(name, slot)` per declared keyword. By name, because a block inside
+    /// the method has a symbol table of its own: an index into the method's
+    /// forwarded `k:` under whatever the block had interned there.
+    keywords: Vec<(Box<str>, u16)>,
     /// The `**rest` parameter's slot, forwarded with the keywords.
     kwrest: Option<u16>,
     /// How many scopes up [`Self::positional`]'s slots live: zero in the method
@@ -467,6 +500,7 @@ impl Compiler {
             eval_phantoms: Vec::new(),
             refusals: Vec::new(),
             from_eval: false,
+            eval_in_block: false,
             frozen_default: false,
             chill: false,
         }
@@ -504,6 +538,9 @@ impl Compiler {
         compiler.line = parent.line;
         compiler.block_level = if barrier { 0 } else { parent.block_level + 1 };
         compiler.from_eval = parent.from_eval;
+        // A `def` in the string is a method of its own; its `return` homes to
+        // it.
+        compiler.eval_in_block = parent.eval_in_block && !barrier;
         compiler.frozen_default = parent.frozen_default;
         compiler.chill = parent.chill;
         if !barrier {
@@ -586,6 +623,8 @@ impl Compiler {
                 .children
                 .iter()
                 .any(|child| !child.scope_barrier && child.uses_block);
+        let symbol_encoding =
+            Some(self.source_encoding()).filter(|&encoding| encoding != crate::strings::UTF_8);
         Iseq {
             name: self.name,
             insns: self.insns,
@@ -609,8 +648,10 @@ impl Compiler {
             first_line: self.first_line,
             outer: self.outer,
             from_eval: self.from_eval,
+            eval_in_block: self.eval_in_block,
             refusals: self.refusals,
             uses_block,
+            symbol_encoding,
             linked: crate::shared::symbols::Linked::default(),
         }
     }
@@ -3495,7 +3536,7 @@ impl Compiler {
         // block keeps the one it inherited in `nested`, because `super` inside
         // one forwards the enclosing method's arguments, not the block's.
         if barrier {
-            child.zsuper = Some(Zsuper::from_spec(&child.params));
+            child.zsuper = Some(Zsuper::from_spec(&child.params, &child.symbols));
         }
         // Optional defaults are emitted first, each at a known instruction, so
         // the binder can enter the body at the first default it has to compute
@@ -3667,6 +3708,10 @@ impl Compiler {
                     spec.kwrest = Some(self.param_slot("**", at + 1));
                     spec.block = Some(self.param_slot("&", at + 2));
                     at += 3;
+                    // Not a parameter: a mark that this scope was declared
+                    // with `...` rather than `*, **, &`, which an `eval`
+                    // string inside it has to tell apart (#38).
+                    self.slot("%...");
                 }
             }
         }
@@ -4178,7 +4223,8 @@ impl Compiler {
             // gets, so an empty rest passes no keywords at all.
             self.push_const_name("Hash");
             self.emit_send("__literal__", 0);
-            for &(name, slot) in &forward.keywords {
+            for (name, slot) in &forward.keywords {
+                let (name, slot) = (self.symbol(name), *slot);
                 self.emit(Insn::Dup);
                 self.emit(Insn::PushSym(name));
                 self.emit(Insn::GetLocal(slot, forward.depth));
@@ -4191,7 +4237,8 @@ impl Compiler {
             self.emit(Insn::Pop);
             site.kwsplat = true;
         } else {
-            for &(name, slot) in &forward.keywords {
+            for (name, slot) in &forward.keywords {
+                let (name, slot) = (self.symbol(name), *slot);
                 self.emit(Insn::GetLocal(slot, forward.depth));
                 site.keywords.push(name);
             }

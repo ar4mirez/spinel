@@ -204,8 +204,11 @@ pub struct Stats {
 ///
 /// The flag says whether the string runs inside a method, where a `yield`
 /// at its top level is valid. The encoding is the source's when it is not
-/// UTF-8, by name.
-pub type Parser = fn(&str, &[u8], i64, bool, Option<&str>) -> Result<ParsedSource, ParseFailure>;
+/// UTF-8, by name. The flags are what each scope around the string declares
+/// of the anonymous `*`, `**`, `&` and `...`, innermost first, as
+/// `spinel_ast::forwarding` has them.
+pub type Parser =
+    fn(&str, &[u8], i64, bool, Option<&str>, &[u8]) -> Result<ParsedSource, ParseFailure>;
 
 /// The libraries shipped inside the binary, by the name `require` is given:
 /// the Ruby source, or `None` for a name that is not one of them.

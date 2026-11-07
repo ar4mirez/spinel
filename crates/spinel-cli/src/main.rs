@@ -456,6 +456,11 @@ fn run_program(
     spinel_core::boot(&mut scope);
     scope.set_frozen_string_literal(frozen_string_literal);
     library_path(&mut scope);
+    // Before the flags' `-r` files, which can already see it.
+    if let Err(err) = spinel_vm::interp::define_toplevel_binding(&mut scope) {
+        eprintln!("{}: {}", path.display(), describe_error(&err));
+        return ExitCode::FAILURE;
+    }
 
     // The flags' meaning runs first, as `ruby` runs `-r` before it reads the
     // program: an `at_exit` a required file registers runs even when the
@@ -486,27 +491,6 @@ fn run_program(
         {
             loop_around(&mut parsed.program, template);
         }
-        // `TOPLEVEL_BINDING` is the main script's own frame, so the call that
-        // records it is the first thing the script does.
-        let here = spinel_ast::Span { start: 0, end: 0 };
-        let capture = |name: &str, args: Vec<spinel_ast::Expr>| {
-            spinel_ast::Expr::new(
-                here,
-                spinel_ast::ExprKind::Call(Box::new(spinel_ast::Call {
-                    receiver: None,
-                    name: name.into(),
-                    name_span: here,
-                    args,
-                    block: None,
-                    flags: spinel_ast::CallFlags::default(),
-                })),
-            )
-        };
-        let binding = capture("binding", Vec::new());
-        parsed
-            .program
-            .body
-            .insert(0, capture("__toplevel_binding__", vec![binding]));
         if !report_syntax_errors(path, &source, &parsed) {
             syntax_error = true;
         } else {
@@ -562,8 +546,10 @@ fn run_program(
                     .map(|_| spinel_vm::Value::NIL);
             }
             if outcome.is_ok() {
+                // Inside `TOPLEVEL_BINDING`, which is what makes its locals
+                // the script's.
                 let mut frame = spinel_vm::interp::Frame::new(0);
-                outcome = spinel_vm::interp::eval_in(&mut scope, &mut frame, &iseq)
+                outcome = spinel_vm::interp::eval_main(&mut scope, &mut frame, &iseq)
                     .map(|_| spinel_vm::Value::NIL);
             }
         }
