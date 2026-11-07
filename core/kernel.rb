@@ -628,7 +628,7 @@ module Kernel
     # `Thread#wakeup` ends it early, as CRuby's does.
     started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
     Thread.__before_wait__
-    __thread_block__(seconds, nil, 0, false)
+    __thread_wait__(seconds, nil, 0, false)
     (Process.clock_gettime(Process::CLOCK_MONOTONIC) - started).round
   end
 

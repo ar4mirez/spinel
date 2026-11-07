@@ -421,6 +421,16 @@ pub enum Native {
     /// Installed as `Kernel#__signal_list__`. `Signal.list` and
     /// `SignalException#initialize` are Ruby on top of it.
     SignalList,
+    /// `Kernel#__signal_handle__(number, mode)`: what the operating system
+    /// does with a signal — 0 its default, 1 nothing, 2 count it for Ruby's
+    /// handler (#44). Nil, or the errno.
+    SignalHandle,
+    /// `Kernel#__signal_take__`: one arrival of the lowest-numbered signal
+    /// waiting, its number, the rest left waiting; nil when none waits.
+    SignalTake,
+    /// `Kernel#__signal_mask__(on)`: set whether a trap handler runs, so
+    /// signals waiting are left to wait; whether one ran before.
+    SignalMask,
     /// The backtrace of the frames below the calling one, as
     /// `[[path, line, label], ...]` innermost first (#29).
     ///
@@ -514,6 +524,9 @@ pub enum Native {
     Environ,
     /// `Kernel#__getenv__(name)`: one variable, or nil.
     Getenv,
+    /// `Kernel#__setenv__(name, value)`: set one variable of the process
+    /// environment, or with `value` nil remove it. Nil, or the errno.
+    Setenv,
     /// The file system calls `File` and `Dir` are Ruby over (#39).
     Fs(FsOp),
     /// The process's identity and clocks, for `Process` (#145).
@@ -823,12 +836,19 @@ pub enum SysOp {
     /// `__sys_waitpid__(pid, flags)`: `[pid, raw status]`, `[0, nil]` when
     /// `WNOHANG` found nothing, or an errno.
     Waitpid,
+    /// `__sys_wait_child__(pid)`: wait, in `poll(2)`, for the child `pid`
+    /// to have a status or for a signal to arrive: `:exited`, `:signal`, or
+    /// nil where the platform has no `pidfd` (#44).
+    WaitChild,
     /// `__sys_kill__(signal, pid)`: true, or an errno.
     Kill,
     /// `__sys_fork__`: `[pid]`, 0 in the child, or an errno.
     Fork,
     /// `__sys_exit__(status)`: `_exit(2)`, with nothing run on the way out.
     Exit,
+    /// `__sys_proctitle__(title)`: what `ps` shows for this process, set as
+    /// CRuby's `setproctitle` sets it when `$0` is assigned. Nil.
+    Proctitle,
     /// `__sys_pgid__(op, a, b)`: `getpgid`, `setpgid`, `getsid`, `setsid`
     /// and `getpgrp` (ops 0 to 4): `[answer]` or an errno.
     Pgid,
@@ -1145,6 +1165,8 @@ pub enum ThreadOp {
     New,
     /// `__thread_current__`: the running thread's index.
     Current,
+    /// `__thread_main__`: the main thread's index.
+    Main,
     /// `__thread_object__(index)`: its `Thread`, nil for an unnamed main.
     Object,
     /// `__thread_set_object__(index, thread)`: name the main thread's.

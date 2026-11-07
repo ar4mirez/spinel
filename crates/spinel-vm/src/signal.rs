@@ -129,6 +129,29 @@ pub fn die_by(name: &str) -> bool {
     true
 }
 
+/// Give the signals Ruby reserves its own handler, as CRuby's `Init_signal`
+/// does when a program starts: HUP, INT, QUIT, ALRM, TERM, USR1 and USR2
+/// raise a `SignalException` in the main thread — an `Interrupt` for INT —
+/// which ends the program by that signal unless something rescues it. One a
+/// parent left ignored (`nohup`'s HUP) stays ignored. For `spinel` to call
+/// before a program, not for every heap: a test's heaps share a process.
+pub fn install_ruby_defaults() {
+    use crate::shared::signals::{Disposition, inherited_ignored, install};
+    for signo in [
+        libc::SIGHUP,
+        libc::SIGINT,
+        libc::SIGQUIT,
+        libc::SIGALRM,
+        libc::SIGTERM,
+        libc::SIGUSR1,
+        libc::SIGUSR2,
+    ] {
+        if !inherited_ignored(signo) {
+            let _ = install(signo, Disposition::Ruby);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

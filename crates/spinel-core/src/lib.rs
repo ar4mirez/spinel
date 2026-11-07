@@ -236,6 +236,21 @@ pub fn boot(scope: &mut HandleScope<'_>) {
     interp::watch_optimised(scope);
 }
 
+/// Handle the signals that arrived and wait, as the main program's last safe
+/// point (#44): one that came during the last call — a `system` the program
+/// ended on — is not lost. Its handler's exception is the program's.
+pub fn handle_signals(scope: &mut HandleScope<'_>) -> Result<spinel_vm::Value, spinel_vm::Error> {
+    if !shared::signals::any() {
+        return Ok(spinel_vm::Value::NIL);
+    }
+    let parsed = spinel_parse::parse_file("<main>", b"Signal.__run_pending__");
+    let Ok(iseq) = compile::program(&parsed.program) else {
+        return Ok(spinel_vm::Value::NIL);
+    };
+    let mut frame = interp::Frame::new(0);
+    interp::eval_in(scope, &mut frame, &iseq)
+}
+
 /// End the program: run its `at_exit` blocks and answer its exit status —
 /// `SystemExit#status` when `exit` ended it, 1 for another uncaught
 /// exception (left in `$!` by the VM), 0 otherwise. `None` when the status

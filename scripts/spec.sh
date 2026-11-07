@@ -124,7 +124,10 @@ for ((at = 0; at < ${#files[@]}; at += chunk)); do
   printf '%s\n' "${files[@]:at:chunk}" > "$scratch/${#units[@]}.files"
   units+=("${files[$at]}")
 done
-export RUBY_EXE="$spinel" SPINEL_SPEC_LIST=1
+# What `mspec`'s own `MSpecScript#setup_env` exports for the processes a spec
+# starts: the interpreter, and its flags, none (`config[:flags]` is `[]`).
+# `core/process/fixtures/kill.rb` splits `RUBY_FLAGS` to start another one.
+export RUBY_EXE="$spinel" RUBY_FLAGS="${RUBY_FLAGS-}" SPINEL_SPEC_LIST=1
 if [[ -n "$tagged" ]]; then export SPINEL_SPEC_TAGGED=1; fi
 for index in "${!units[@]}"; do
   printf '%s\0' "$index"

@@ -454,6 +454,7 @@ fn run_program(
     scope.set_argv(&path.to_string_lossy(), args);
     scope.set_budget(None);
     spinel_core::boot(&mut scope);
+    spinel_vm::signal::install_ruby_defaults();
     scope.set_frozen_string_literal(frozen_string_literal);
     library_path(&mut scope);
     // Before the flags' `-r` files, which can already see it.
@@ -553,6 +554,9 @@ fn run_program(
                     .map(|_| spinel_vm::Value::NIL);
             }
         }
+    }
+    if outcome.is_ok() && !syntax_error {
+        outcome = spinel_core::handle_signals(&mut scope).map(|_| spinel_vm::Value::NIL);
     }
     // The `at_exit` blocks run before the error is reported, as CRuby runs
     // them: one may `exit!`, and then nothing is printed.

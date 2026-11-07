@@ -1851,6 +1851,7 @@ fn thread_native(
             int(threads::spawn(scope, call, object, block, ids)?)
         }
         ThreadOp::Current => int(threads::current(scope)),
+        ThreadOp::Main => int(threads::main(scope)),
         ThreadOp::Object => threads::object(scope, index(0).unwrap_or(0)),
         ThreadOp::SetObject => {
             let object = call.args.get(1).copied().unwrap_or(Value::NIL);
@@ -2499,6 +2500,47 @@ fn run<'h>(
                         slice_end = budget.saturating_sub(threads::SLICE_INSNS);
                         limit = deadline.max(slice_end).max(trace_floor);
                         seen_frames = usize::MAX;
+                        // A signal that arrived is handled here, a safe point
+                        // between two instructions of the main thread (#44):
+                        // its handler is a call pushed on top of what runs,
+                        // as a finalizer is. Not part-way through the core
+                        // library, which `preempt` does not interleave
+                        // either; the next turn check looks again.
+                        if threads::signal_waits(scope) && threads::signal_is_mine(scope) {
+                            if frames
+                                .last()
+                                .and_then(|frame| frame.iseq.path.as_deref())
+                                .is_some_and(|path| path.starts_with("<internal:"))
+                            {
+                                // Look again soon rather than a slice from
+                                // now: a loop that is mostly core library
+                                // could otherwise be in it at every check.
+                                // The look itself runs no instruction, so
+                                // at least one runs before the next.
+                                slice_end = budget.saturating_sub(SIGNAL_RECHECK + 1);
+                                limit = deadline.max(slice_end).max(trace_floor);
+                            } else {
+                                let object = Builtin::Object.id();
+                                let name = crate::shared::symbols::intern("Signal");
+                                if let Some(signal) = scope.classes().const_get_here(object, name) {
+                                    if let Some(unwind) = call_discarded(
+                                        scope,
+                                        &mut stack,
+                                        &mut frames,
+                                        proc_class,
+                                        &mut ids,
+                                        signal,
+                                        crate::shared::symbols::intern("__run_pending__"),
+                                        Vec::new(),
+                                    )? && let Some(value) =
+                                        unwind_to_handler(scope, &mut stack, &mut frames, unwind)?
+                                    {
+                                        break value;
+                                    }
+                                    continue;
+                                }
+                            }
+                        }
                         let unwind =
                             match threads::preempt(scope, &mut stack, &mut frames, &mut ids) {
                                 Ok(unwind) => unwind,
@@ -4237,6 +4279,12 @@ impl std::ops::Deref for Stack {
 
 /// How many handles the loop lets pile up before it releases them.
 const ROOT_SLACK: usize = 4096;
+
+/// Instructions between the turn checks that look for a program frame to
+/// run a waiting signal's handler on top of, while the core library runs:
+/// every one, since a loop's period can be a multiple of any longer stride
+/// and meet the core library at every look. Only while a signal waits.
+const SIGNAL_RECHECK: u64 = 1;
 
 /// Let go of every handle the loop has taken, and root again what it still
 /// holds: the operand stack and each frame's values.
@@ -11417,6 +11465,35 @@ fn native_call<'h>(
             Ok(None)
         }
 
+        Native::SignalHandle => {
+            use crate::shared::signals::{Disposition, install};
+            let number = call.args.first().and_then(|v| v.as_fixnum()).unwrap_or(0);
+            let disposition = match call.args.get(1).and_then(|v| v.as_fixnum()) {
+                Some(0) => Disposition::Default,
+                Some(1) => Disposition::Ignore,
+                _ => Disposition::Ruby,
+            };
+            let value = match install(number as i32, disposition) {
+                Ok(()) => Value::NIL,
+                Err(error) => errno_value(&error),
+            };
+            stack.push(value);
+            Ok(None)
+        }
+        Native::SignalMask => {
+            let on = call.args.first().is_some_and(|v| v.is_truthy());
+            let value = bool_value(threads::set_trapping(scope, on));
+            stack.push(value);
+            Ok(None)
+        }
+        Native::SignalTake => {
+            let value = crate::shared::signals::take().map_or(Value::NIL, |n| {
+                Value::fixnum(i64::from(n)).expect("a signal number is a fixnum")
+            });
+            stack.push(value);
+            Ok(None)
+        }
+
         Native::BacktraceHere => {
             let below = &frames[..frames.len().saturating_sub(1)];
             let lines = backtrace_of(scope, below);
@@ -12215,6 +12292,46 @@ fn native_call<'h>(
                 _ => Value::NIL,
             };
             stack.push(value);
+            Ok(None)
+        }
+        Native::Setenv => {
+            // `core/process.rb` has refused a null byte in either and an
+            // empty name or one holding `=` for a value, so what is left is a
+            // removal of a name no variable can have, which removes nothing.
+            let name = call.args.first().and_then(|&v| string_bytes(scope, v));
+            let value = call.args.get(1).and_then(|&v| string_bytes(scope, v));
+            let answer = match name {
+                Some(name) if !name.is_empty() && !name.contains(&b'=') && !name.contains(&0) => {
+                    let name = std::ffi::OsString::from_vec(name);
+                    match value {
+                        // SAFETY: `set_var` and `remove_var` race only with a
+                        // read of the environment that does not take std's
+                        // lock, made on another OS thread. Every Ruby thread
+                        // of this Ractor calls into the VM holding its lock,
+                        // and what runs outside it (`getaddrinfo`, `open`)
+                        // reads at most through glibc's `getenv`, which
+                        // tolerates a concurrent `setenv`.
+                        // ponytail: with Ractors in parallel (#119) every
+                        // Ractor's writes need one lock, as CRuby's `env_lock`.
+                        Some(value) if !value.contains(&0) => unsafe {
+                            std::env::set_var(name, std::ffi::OsString::from_vec(value));
+                            Value::NIL
+                        },
+                        Some(_) => {
+                            Value::fixnum(i64::from(libc::EINVAL)).expect("an errno is a fixnum")
+                        }
+                        None => unsafe {
+                            std::env::remove_var(name);
+                            Value::NIL
+                        },
+                    }
+                }
+                Some(_) if value.is_some() => {
+                    Value::fixnum(i64::from(libc::EINVAL)).expect("an errno is a fixnum")
+                }
+                _ => Value::NIL,
+            };
+            stack.push(answer);
             Ok(None)
         }
         Native::Environ => {
@@ -14463,6 +14580,13 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         ),
         (Builtin::Kernel, &["__errno_class__"], Native::ErrnoClass),
         (Builtin::Kernel, &["__signal_list__"], Native::SignalList),
+        (
+            Builtin::Kernel,
+            &["__signal_handle__"],
+            Native::SignalHandle,
+        ),
+        (Builtin::Kernel, &["__signal_take__"], Native::SignalTake),
+        (Builtin::Kernel, &["__signal_mask__"], Native::SignalMask),
         (Builtin::Kernel, &["__gc_start__"], Native::Gc(GcOp::Start)),
         (Builtin::Kernel, &["__gc_stat__"], Native::Gc(GcOp::Stat)),
         (
@@ -14690,6 +14814,11 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             Builtin::Kernel,
             &["__thread_current__"],
             Native::Thread(ThreadOp::Current),
+        ),
+        (
+            Builtin::Kernel,
+            &["__thread_main__"],
+            Native::Thread(ThreadOp::Main),
         ),
         (
             Builtin::Kernel,
@@ -15053,6 +15182,7 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         ),
         (Builtin::Kernel, &["__environ__"], Native::Environ),
         (Builtin::Kernel, &["__getenv__"], Native::Getenv),
+        (Builtin::Kernel, &["__setenv__"], Native::Setenv),
         (Builtin::Kernel, &["__fs_kind__"], Native::Fs(FsOp::Kind)),
         (
             Builtin::Kernel,
@@ -15361,9 +15491,19 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             &["__sys_waitpid__"],
             Native::Sys(SysOp::Waitpid),
         ),
+        (
+            Builtin::Kernel,
+            &["__sys_wait_child__"],
+            Native::Sys(SysOp::WaitChild),
+        ),
         (Builtin::Kernel, &["__sys_kill__"], Native::Sys(SysOp::Kill)),
         (Builtin::Kernel, &["__sys_fork__"], Native::Sys(SysOp::Fork)),
         (Builtin::Kernel, &["__sys_exit__"], Native::Sys(SysOp::Exit)),
+        (
+            Builtin::Kernel,
+            &["__sys_proctitle__"],
+            Native::Sys(SysOp::Proctitle),
+        ),
         (Builtin::Kernel, &["__sys_pgid__"], Native::Sys(SysOp::Pgid)),
         (
             Builtin::Kernel,
@@ -19397,6 +19537,110 @@ fn path_arg(scope: &mut HandleScope<'_>, call: &Pending, index: usize) -> Result
     Ok(PathBuf::from(std::ffi::OsString::from_vec(bytes)))
 }
 
+/// Write `title` over the process's argument area, which is what
+/// `/proc/<pid>/cmdline`, and so `ps`, reads: the bytes from `arg_start` to
+/// `arg_end` that `/proc/self/stat` names, the rest of the area zeroed.
+///
+/// ponytail: a title is cut to the area the arguments had, where CRuby's
+/// `setproctitle` moves the environment out of the way for a longer one;
+/// and only on Linux, where the area's bounds can be read.
+#[cfg(target_os = "linux")]
+fn set_proctitle(title: &[u8]) {
+    let Ok(stat) = std::fs::read("/proc/self/stat") else {
+        return;
+    };
+    // The command name is in parentheses and may hold anything: the fields
+    // count from the last `)`, which ends it. `arg_start` and `arg_end` are
+    // fields 48 and 49 (proc(5)); the one after the `)` is field 3.
+    let Some(close) = stat.iter().rposition(|&b| b == b')') else {
+        return;
+    };
+    let fields: Vec<&[u8]> = stat[close + 1..]
+        .split(|b| b.is_ascii_whitespace())
+        .filter(|f| !f.is_empty())
+        .collect();
+    let field =
+        |n: usize| -> Option<usize> { std::str::from_utf8(fields.get(n - 3)?).ok()?.parse().ok() };
+    let (Some(start), Some(end)) = (field(48), field(49)) else {
+        return;
+    };
+    if end <= start || end - start > 1 << 20 {
+        return;
+    }
+    let area = end - start;
+    let keep = title.len().min(area - 1);
+    // SAFETY: `start..end` is this process's own argument area, mapped and
+    // writable for as long as the process lives: the kernel put `argv`'s
+    // strings there at `execve`. Nothing in the VM reads them again; the
+    // command line was read into Rust's own strings at start-up.
+    unsafe {
+        let base = start as *mut u8;
+        std::ptr::copy_nonoverlapping(title.as_ptr(), base, keep);
+        std::ptr::write_bytes(base.add(keep), 0, area - keep);
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn set_proctitle(_title: &[u8]) {}
+
+/// Wait for the child `pid` to have a status to collect, or for a signal to
+/// arrive: `poll(2)` on a `pidfd` for it and on the signals' wake pipe, so
+/// `Process.wait` returns the moment the child ends, and a signal is handled
+/// at once rather than when it does (#44). Some(true) when the child is
+/// ready, Some(false) for a signal, None when there is no `pidfd` for it.
+/// Without `signals`, as while a trap handler runs, it waits for the child
+/// alone.
+#[cfg(target_os = "linux")]
+fn wait_child(pid: libc::pid_t, signals: bool) -> Option<bool> {
+    if pid <= 0 {
+        return None;
+    }
+    // SAFETY: `pidfd_open` takes a pid and flags and answers a descriptor.
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) } as libc::c_int;
+    if fd < 0 {
+        return None;
+    }
+    let answer = loop {
+        if signals && crate::shared::signals::any() {
+            break Some(false);
+        }
+        let mut fds = vec![libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        }];
+        if signals && let Some(wake) = crate::shared::signals::wake_fd() {
+            fds.push(libc::pollfd {
+                fd: wake,
+                events: libc::POLLIN,
+                revents: 0,
+            });
+        }
+        // SAFETY: `fds` is `fds.len()` `pollfd`s, read and written by `poll`.
+        let ready = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, -1) };
+        if ready < 0 {
+            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            break None;
+        }
+        if fds[0].revents != 0 {
+            break Some(true);
+        }
+        if fds.get(1).is_some_and(|w| w.revents != 0) {
+            crate::shared::signals::drain();
+        }
+    };
+    // SAFETY: the descriptor `pidfd_open` made above.
+    unsafe { libc::close(fd) };
+    answer
+}
+
+#[cfg(not(target_os = "linux"))]
+fn wait_child(_pid: libc::pid_t, _signals: bool) -> Option<bool> {
+    None
+}
+
 /// An `io::Error` as the errno the Ruby side raises `SystemCallError` with.
 fn errno_value(error: &std::io::Error) -> Value {
     let errno = error.raw_os_error().unwrap_or(libc::EIO);
@@ -19540,6 +19784,9 @@ fn spawn_process(
             // signal stays ignored across `execve`: `yes | head` would never
             // end. The child gets the default back.
             libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+            // A mask survives `execve` too, and this may be a thread that
+            // blocked every signal for the main thread to take them (#44).
+            crate::shared::signals::unblock_on_this_thread();
             libc::execve(path.as_ptr(), argv_ptrs.as_ptr(), envp_ptrs.as_ptr());
             if child_errno() == libc::ENOEXEC {
                 libc::execve(shell.as_ptr(), shell_ptrs.as_ptr(), envp_ptrs.as_ptr());
@@ -20825,6 +21072,15 @@ fn sys_native(
                 Err((None, errno)) => int(i64::from(errno)),
             }
         }
+        SysOp::WaitChild => {
+            let pid = int_arg(call, 0).unwrap_or(-1) as libc::pid_t;
+            let signals = !scope.fibers().threads.trapping;
+            match wait_child(pid, signals) {
+                Some(true) => Value::symbol(crate::shared::symbols::intern("exited")),
+                Some(false) => Value::symbol(crate::shared::symbols::intern("signal")),
+                None => Value::NIL,
+            }
+        }
         SysOp::Waitpid => {
             let pid = int_arg(call, 0).unwrap_or(-1) as libc::pid_t;
             let flags = int_arg(call, 1).unwrap_or(0) as libc::c_int;
@@ -20862,14 +21118,20 @@ fn sys_native(
             // the VM for the child to lose. When Ractors run in parallel
             // (#119) this refuses unless the main Ractor is the only one, as
             // CRuby does.
-            // SAFETY: the VM holds no lock another thread could own, and the
-            // child goes on running this same single thread.
-            let pid = unsafe { libc::fork() };
+            // The VM holds no lock another thread could own, and the child
+            // goes on running this same single thread.
+            let pid = crate::shared::signals::fork();
             if pid < 0 {
                 errno_value(&std::io::Error::last_os_error())
             } else {
                 new_array(scope, &[int(i64::from(pid))])
             }
+        }
+        SysOp::Proctitle => {
+            if let Some(title) = call.args.first().and_then(|&v| string_bytes(scope, v)) {
+                set_proctitle(&title);
+            }
+            Value::NIL
         }
         SysOp::Exit => {
             let status = int_arg(call, 0).unwrap_or(0) as libc::c_int;

@@ -118,10 +118,16 @@ pub(super) struct ThreadEntry {
 pub(crate) struct ThreadTable {
     pub(super) entries: Vec<ThreadEntry>,
     pub(super) current: usize,
+    /// The main thread's entry: 0, but in a child forked from another
+    /// thread, the one that forked, as CRuby's `rb_thread_atfork` makes it.
+    pub(super) main: usize,
     pub(super) slice_started: Option<Instant>,
     /// Whether the running thread was last entered out of a wait, woken:
     /// an interrupt met there is met blocking.
     pub(super) woken: bool,
+    /// Whether a trap handler runs: signals that wait go on waiting until it
+    /// returns, as CRuby's `TRAP_INTERRUPT_MASK` keeps them (#44).
+    pub(super) trapping: bool,
     /// Which OS thread has the heap; made with the main thread's entry.
     lock: Option<Arc<Lock>>,
     /// A refusal a thread met with nothing in it to catch it: the thread
@@ -367,6 +373,9 @@ pub(super) fn spawn(
     let spawned = std::thread::Builder::new()
         .stack_size(OS_STACK)
         .spawn(move || {
+            // Signals go to the main thread's OS thread, which runs their
+            // handlers and whose waits they cut short (#44).
+            crate::shared::signals::block_on_this_thread();
             let _ = told.send(native_id());
             os_thread(&its_lock, index);
         });
@@ -442,10 +451,11 @@ fn finish(scope: &mut HandleScope<'_>, me: usize, result: Result<Value, Error>, 
         && error.is_refusal()
     {
         threads.refusal = Some(error);
-        let main = &mut threads.entries[0];
-        main.state = match std::mem::replace(&mut main.state, ThreadState::Dead) {
+        let main = threads.main;
+        let entry = &mut threads.entries[main];
+        entry.state = match std::mem::replace(&mut entry.state, ThreadState::Dead) {
             ThreadState::Ready { context, .. } | ThreadState::Blocked { context, .. } => {
-                first = Some(0);
+                first = Some(main);
                 ThreadState::Ready {
                     context,
                     push: None,
@@ -455,11 +465,10 @@ fn finish(scope: &mut HandleScope<'_>, me: usize, result: Result<Value, Error>, 
             other => other,
         };
     }
-    if matches!(threads.entries[0].state, ThreadState::Dead) {
-        // ponytail: this thread forked, and in the child it was the only one
-        // left; CRuby makes it the child's main thread, whose end ends the
-        // process. Without that, its end ends the process here, `at_exit`
-        // unrun.
+    if me == threads.main {
+        // ponytail: this thread forked, and in the child it is the main
+        // thread, whose end ends the process. Its end ends the process here,
+        // `at_exit` unrun.
         std::process::exit(0);
     }
     release(scope, me, first);
@@ -513,6 +522,11 @@ pub(super) fn current(scope: &mut HandleScope<'_>) -> usize {
     scope.fibers().threads.current
 }
 
+pub(super) fn main(scope: &mut HandleScope<'_>) -> usize {
+    ensure_main(scope);
+    scope.fibers().threads.main
+}
+
 pub(super) fn set_object(scope: &mut HandleScope<'_>, index: usize, object: Value) {
     ensure_main(scope);
     if let Some(entry) = scope.fibers_mut().threads.entries.get_mut(index) {
@@ -544,7 +558,7 @@ pub(super) fn status(scope: &HandleScope<'_>, index: usize) -> &'static str {
 /// kills a thread by throwing its `Thread`, caught at the thread's bottom.
 pub(super) fn is_kill(scope: &HandleScope<'_>, tag: Value) -> bool {
     let threads = &scope.fibers().threads;
-    threads.current != 0
+    threads.current != threads.main
         && !tag.is_nil()
         && threads
             .entries
@@ -678,6 +692,23 @@ fn wake_ready(scope: &mut HandleScope<'_>, timeout: Option<Duration>) -> usize {
             woken += 1;
         }
     }
+    woken += wake_for_signal(scope);
+    // A signal ends the main thread's wait, on the signals' own wake pipe;
+    // a look that waits for nothing has already seen whether one came.
+    if timeout.is_none_or(|t| !t.is_zero())
+        && main_blocked(scope)
+        && !scope.fibers().threads.trapping
+        && let Some(fd) = crate::shared::signals::wake_fd()
+    {
+        polled.push((
+            SIGNALED,
+            libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            },
+        ));
+    }
     // A thread outside the lock is waited for on the wake pipe.
     let wake = if outside {
         woken += take_back(scope);
@@ -717,11 +748,15 @@ fn wake_ready(scope: &mut HandleScope<'_>, timeout: Option<Duration>) -> usize {
                     lock.drain();
                 }
                 woken += take_back(scope);
+            } else if *index == SIGNALED {
+                crate::shared::signals::drain();
             } else if wakeup(scope, *index, reason("ready")) {
                 woken += 1;
             }
         }
     }
+    // A signal may have cut the `poll` short (EINTR) as well as written.
+    woken += wake_for_signal(scope);
     let now = Instant::now();
     let late: Vec<usize> = scope
         .fibers()
@@ -740,6 +775,51 @@ fn wake_ready(scope: &mut HandleScope<'_>, timeout: Option<Duration>) -> usize {
         }
     }
     woken
+}
+
+/// The `polled` index of the signals' wake pipe.
+const SIGNALED: usize = usize::MAX - 1;
+
+/// Whether the main thread waits.
+fn main_blocked(scope: &HandleScope<'_>) -> bool {
+    scope
+        .fibers()
+        .threads
+        .entries
+        .get(scope.fibers().threads.main)
+        .is_some_and(|e| matches!(e.state, ThreadState::Blocked { .. }))
+}
+
+/// A signal waiting wakes the main thread from its wait, answering
+/// `:signal`, for the wait to run the handlers and go on waiting
+/// (`Kernel#__thread_wait__`). How many woke: one or none.
+fn wake_for_signal(scope: &mut HandleScope<'_>) -> usize {
+    let main = scope.fibers().threads.main;
+    usize::from(signal_waits(scope) && wakeup(scope, main, reason("signal")))
+}
+
+/// Whether a signal waits to be handled now: none does while a trap
+/// handler runs.
+pub(super) fn signal_waits(scope: &HandleScope<'_>) -> bool {
+    crate::shared::signals::any() && !scope.fibers().threads.trapping
+}
+
+/// Set whether a trap handler runs, answering whether one did.
+pub(super) fn set_trapping(scope: &mut HandleScope<'_>, trapping: bool) -> bool {
+    std::mem::replace(&mut scope.fibers_mut().threads.trapping, trapping)
+}
+
+/// For the loop's turn check when a signal waits: whether the running
+/// thread is the main thread, which then handles it; another wakes the main
+/// thread if it waits, and otherwise leaves it for its next turn check.
+pub(super) fn signal_is_mine(scope: &mut HandleScope<'_>) -> bool {
+    ensure_main(scope);
+    let threads = &scope.fibers().threads;
+    if threads.current == threads.main {
+        return true;
+    }
+    wake_for_signal(scope);
+    false
 }
 
 /// The next thread able to run, looking after `after` first, round robin.
@@ -813,7 +893,8 @@ fn pick(scope: &mut HandleScope<'_>, after: usize) -> usize {
             }
             Idle::Forever { deadlock: true } => {
                 // Every thread waits on another: the main thread raises.
-                wakeup(scope, 0, reason("deadlock"));
+                let main = scope.fibers().threads.main;
+                wakeup(scope, main, reason("deadlock"));
             }
             Idle::Forever { deadlock: false } => {
                 // A `sleep` with nothing to end it but a signal.
@@ -943,7 +1024,7 @@ pub(super) fn switch(
     hand_to(scope, from, to);
     *ids = scope.fibers().frame_ids;
     enter(scope, stack, frames, from, true);
-    if from == 0
+    if from == scope.fibers().threads.main
         && let Some(refusal) = scope.fibers_mut().threads.refusal.take()
     {
         return Err(refusal);
@@ -1014,7 +1095,7 @@ pub(super) fn preempt(
     ids: &mut u64,
 ) -> Result<Option<Unwind>, Error> {
     let threads = &scope.fibers().threads;
-    if threads.current == 0 && threads.refusal.is_some() {
+    if threads.current == threads.main && threads.refusal.is_some() {
         // Left by a thread that ended while this one was outside the lock.
         return Err(scope
             .fibers_mut()
@@ -1138,6 +1219,7 @@ pub(super) fn forked(scope: &mut HandleScope<'_>) {
     let heap = scope.heap_ptr();
     let threads = &mut scope.fibers_mut().threads;
     let current = threads.current;
+    threads.main = current;
     for (index, entry) in threads.entries.iter_mut().enumerate() {
         if index != current {
             entry.state = ThreadState::Dead;

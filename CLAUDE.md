@@ -9,7 +9,7 @@ Read `README.md`, then `docs/engine.md` if touching the VM, or the subsystem doc
 - Prism is the parser, but nothing outside `crates/spinel-parse` may see a Prism node. Everything consumes `spinel_ast`.
 - Native extensions use the `spinel-ext` Rust API or FFI. There is no CRuby C API, and no `extconf.rb`.
 - Core classes live in `core/*.rb`. Rust primitives exist only where Ruby cannot express the operation (raw bytes, allocation, syscalls, dispatch). If a method can be written in Ruby, it is.
-- One `Heap` per Ractor. There is no process-global mutable VM state. `static mut`, `lazy_static` with interior mutability, and thread-locals holding VM objects are forbidden. The only exceptions live in `crates/spinel-vm/src/shared/`: immutable append-only tables (symbols, frozen literals) and shared class objects whose tables are writable only by the main Ractor under the class lock.
+- One `Heap` per Ractor. There is no process-global mutable VM state. `static mut`, `lazy_static` with interior mutability, and thread-locals holding VM objects are forbidden. The only exceptions live in `crates/spinel-vm/src/shared/`: immutable append-only tables (symbols, frozen literals), shared class objects whose tables are writable only by the main Ractor under the class lock, and the per-signal counts of signals waiting to be handled, which the OS handler writes and only the main Ractor takes.
 - Compat contract for tooling: Gemfile, Gemfile.lock, and the `GEM_HOME` on-disk layout stay interoperable with Bundler and RubyGems.
 
 ## Conventions
