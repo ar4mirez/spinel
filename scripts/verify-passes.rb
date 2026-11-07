@@ -63,7 +63,10 @@ bugs = {}
 Dir.mktmpdir("verify-passes") do |dir|
   list = File.join(dir, "passes.tsv")
   File.write(list, passes.map { |pass| pass.join("\t") + "\n" }.join)
-  env = { "SPINEL_VERIFY_PASSES" => list, "RUBY_EXE" => RbConfig.ruby }
+  # What `scripts/spec.sh` exports for Spinel, and mspec's own `setup_env`:
+  # `core/process/fixtures/kill.rb` splits `RUBY_FLAGS` to start a Ruby.
+  env = { "SPINEL_VERIFY_PASSES" => list, "RUBY_EXE" => RbConfig.ruby,
+          "RUBY_FLAGS" => ENV.fetch("RUBY_FLAGS", "") }
   wanted = passes.map(&:first).uniq.map { |file| File.join(ROOT, file) }
   queue = Queue.new
   chunks.each_value { |files| queue << files if files.intersect?(wanted) }
