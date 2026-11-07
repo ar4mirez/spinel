@@ -216,7 +216,7 @@ module ObjectSpace
     missing = Object.new
     found = __id2ref__(id, missing)
     return found unless found.equal?(missing)
-    return (id - 1) / 2 if id.odd? && id.abs < (1 << 62)
+    return (id - 1) / 2 if id.odd? && id.abs < (1 << 63)
     raise RangeError, "#{id} is not an id value"
   end
 

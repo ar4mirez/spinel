@@ -10683,10 +10683,12 @@ fn native_call<'h>(
             // The immediates are Ruby's own documented values where Ruby has
             // one, and the tagged word otherwise — which is unique per value
             // and equal for the same value, the two properties `object_id` is
-            // asked for. A Flonum's word, and a large Fixnum's 2n+1, is past a
-            // fixnum, so it is an Integer of whatever size it needs, as CRuby's
-            // is (`1.5.object_id` is never nil); `compare_by_identity` files a
-            // key under it (#729).
+            // asked for. Each kind keeps its own residue, as CRuby's do: a
+            // Fixnum is odd, a Flonum 2 mod 4, a Symbol 12 mod 16, a heap cell
+            // 0 mod 16, so equal ids are the same object across kinds, which
+            // `compare_by_identity` relies on (#729). A Flonum's word, and a
+            // large Fixnum's 2n+1, is past a fixnum, so it is an Integer of
+            // whatever size it needs (`1.5.object_id` is never nil).
             use crate::value::Unpacked;
             let id = match call.receiver.unpack() {
                 Unpacked::Fixnum(n) => {
@@ -10702,7 +10704,7 @@ fn native_call<'h>(
                 Unpacked::True => Some(20),
                 Unpacked::False => Some(0),
                 Unpacked::Symbol(_) | Unpacked::Flonum(_) | Unpacked::Undef => {
-                    let word = num_bigint::BigInt::from(call.receiver.to_bits() >> 1);
+                    let word = num_bigint::BigInt::from(call.receiver.to_bits() as i64);
                     let id = crate::bignum::value(scope, &word);
                     stack.push(id);
                     return Ok(None);
