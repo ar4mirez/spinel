@@ -421,6 +421,16 @@ pub enum Native {
     /// Installed as `Kernel#__signal_list__`. `Signal.list` and
     /// `SignalException#initialize` are Ruby on top of it.
     SignalList,
+    /// `Kernel#__signal_handle__(number, mode)`: what the operating system
+    /// does with a signal — 0 its default, 1 nothing, 2 count it for Ruby's
+    /// handler (#44). Nil, or the errno.
+    SignalHandle,
+    /// `Kernel#__signal_take__`: the signals that arrived since the last
+    /// call, once per arrival, as an Array of numbers.
+    SignalTake,
+    /// `Kernel#__signal_forked__`: in a child after `fork`, forget what the
+    /// parent had waiting and unblock every signal.
+    SignalForked,
     /// The backtrace of the frames below the calling one, as
     /// `[[path, line, label], ...]` innermost first (#29).
     ///
@@ -514,6 +524,9 @@ pub enum Native {
     Environ,
     /// `Kernel#__getenv__(name)`: one variable, or nil.
     Getenv,
+    /// `Kernel#__setenv__(name, value)`: set one variable of the process
+    /// environment, or with `value` nil remove it. Nil, or the errno.
+    Setenv,
     /// The file system calls `File` and `Dir` are Ruby over (#39).
     Fs(FsOp),
     /// The process's identity and clocks, for `Process` (#145).
@@ -829,6 +842,9 @@ pub enum SysOp {
     Fork,
     /// `__sys_exit__(status)`: `_exit(2)`, with nothing run on the way out.
     Exit,
+    /// `__sys_proctitle__(title)`: what `ps` shows for this process, set as
+    /// CRuby's `setproctitle` sets it when `$0` is assigned. Nil.
+    Proctitle,
     /// `__sys_pgid__(op, a, b)`: `getpgid`, `setpgid`, `getsid`, `setsid`
     /// and `getpgrp` (ops 0 to 4): `[answer]` or an errno.
     Pgid,

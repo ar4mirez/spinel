@@ -12,6 +12,9 @@ RUBY_COPYRIGHT = "ruby - Copyright (C) 1993-2025 Yukihiro Matsumoto".freeze
 ARGV = __argv__
 $0 = ARGV.shift
 alias $PROGRAM_NAME $0
+# Assigned from now on through `Kernel#__global_assign__`, which renames the
+# process (#44).
+__hook_global__(false, :$0, :$PROGRAM_NAME)
 # The process's id, kept current by `fork`; read-only to a program.
 __global_store__(:$$, __sys_ids__[0])
 __freeze_global__(:$$)
@@ -56,7 +59,9 @@ module Kernel
     # `$!` has gone back to nil.
     @__uncaught__ = error
     status = error.nil? ? 0 : __status_of__(error)
+    # `trap(:EXIT)` first, then the `at_exit` blocks, last registered first.
     handlers = __at_exit__
+    handlers.push(-> { Signal.__run_exit__ })
     until handlers.empty?
       handler = handlers.pop
       begin
@@ -100,74 +105,101 @@ module Kernel
 end
 
 
-# The environment, as `ENV`. Read from the process on first use and kept per
-# heap: a write is seen by this program and not by the process, which is the
-# same thing until `Process` (#43) can start a child that would inherit it.
+# The environment, as `ENV`: a live view of the process's own, as CRuby's
+# is. Every read goes to the process and every write is `setenv(3)` or
+# `unsetenv(3)`, so a child, a C library and `ENV` all see one environment.
 ENV = Object.new
 
 class << ENV
   include Enumerable
 
-  # The whole environment as a Hash, built the first time something
-  # enumerates it. Until then one variable is read straight from the process
-  # and a write is kept in `@written` — building the table costs milliseconds,
-  # and a spec runner touches `ENV` in every example's heap.
-  def __table__
-    @table ||= begin
-      table = {}
-      pairs = __environ__
-      i = 0
-      while i < pairs.size
+  # The whole environment as a new Hash, its names and values frozen.
+  def __table__ = __cached__.dup
+
+  # The same, not to be changed: built from the process the first time it is
+  # asked for and kept until a write through `ENV` or a change of encoding,
+  # since building one costs a Hash insert per variable (#729).
+  # ponytail: a variable a native library sets with `setenv(3)` itself is
+  # seen by `[]` and `fetch` at once, which ask the process, and by the
+  # enumerating methods after the next write through `ENV`.
+  def __cached__
+    locale = Encoding.find("locale")
+    internal = Encoding.default_internal
+    return @cached if @cached && @cached_for == [locale, internal]
+    table = {}
+    pairs = __environ__
+    # What `__environ__` answers is UTF-8; under a UTF-8 locale with no
+    # internal encoding each String is already what a program reads.
+    plain = locale == Encoding::UTF_8 && internal.nil?
+    i = 0
+    while i < pairs.size
+      if plain
         table[pairs[i].freeze] = pairs[i + 1].freeze
-        i += 2
+      else
+        table[__external__(pairs[i], locale, internal)] = __external__(pairs[i + 1], locale, internal)
       end
-      (@written || {}).each { |name, value| value.nil? ? table.delete(name) : table[name] = value }
-      @written = nil
-      table
+      i += 2
     end
+    @cached_for = [locale, internal]
+    @cached = table
   end
 
   def __lookup__(name)
-    return @table[name] if @table
-    return @written[name] if @written&.key?(name)
     __getenv__(name)&.freeze
   end
 
-  def __store__(name, value)
-    if @table
-      value.nil? ? @table.delete(name) : @table[name] = value
-    else
-      (@written ||= {})[name] = value
-    end
-  end
-
+  # A name or a value as `rb_env` reads one: a String, or through `to_str`.
   def __name__(name)
     return name if String === name
     raise TypeError, "no implicit conversion of #{name.nil? ? "nil" : name.class} into String" unless name.respond_to?(:to_str)
-    name.to_str
+    converted = name.to_str
+    unless String === converted
+      raise TypeError, "can't convert #{name.class} to String (#{name.class}#to_str gives #{converted.class})"
+    end
+    converted
   end
 
-  def [](name)
-    __external__(__lookup__(__name__(name)))
-  end
-
-  # A value as a program reads it: transcoded to `Encoding.default_internal`
-  # when one is set.
-  def __external__(value)
-    internal = Encoding.default_internal
-    value.nil? || internal.nil? ? value : value.encode(internal).freeze
-  end
-
-  # `setenv(3)`'s rule for a name, measured: empty, or holding `=`, is EINVAL.
-  def __check_name__(name)
-    raise Errno::EINVAL, "setenv(#{name})" if name.empty? || name.include?("=")
+  # A name to look up: a String with no null byte, which CRuby refuses
+  # before it asks the process.
+  def __key__(name)
+    name = __name__(name)
+    raise ArgumentError, "bad environment variable name: contains null byte" if name.include?("\0")
     name
   end
 
+  def [](name)
+    __external__(__lookup__(__key__(name)))
+  end
+
+  # A name or a value as a program reads it, as `rb_external_str_new_with_enc`
+  # makes one: frozen, in the locale's encoding — BINARY instead when that is
+  # US-ASCII and the bytes are not — and transcoded to
+  # `Encoding.default_internal` when one is set. Measured on 4.0.9.
+  def __external__(value, locale = Encoding.find("locale"), internal = Encoding.default_internal)
+    return nil if value.nil?
+    value = value.dup.force_encoding(locale) unless value.encoding == locale
+    if locale == Encoding::US_ASCII && !value.ascii_only?
+      value.force_encoding(Encoding::BINARY)
+    else
+      value = (value.encode(internal) rescue value) unless internal.nil? || internal == locale
+    end
+    value.frozen? ? value : value.freeze
+  end
+
+  def __set__(name, value)
+    @cached = nil
+    result = __setenv__(name, value)
+    raise SystemCallError.new("setenv(#{name})", result) if Integer === result
+    value
+  end
+
   def fetch(name, *default)
+    if default.size > 1
+      raise ArgumentError, "wrong number of arguments (given #{default.size + 1}, expected 1..2)"
+    end
     __warning__("block supersedes default value argument") if !default.empty? && block_given?
-    name = __name__(name)
-    value = __lookup__(name)
+    name = __key__(name)
+    value = self[name]
     return value unless value.nil?
     return yield(name) if block_given?
     return default[0] unless default.empty?
@@ -175,27 +207,28 @@ class << ENV
   end
 
   def []=(name, value)
-    name = __name__(name)
+    name = __key__(name)
     if value.nil?
-      __store__(name, nil)
-    else
-      value = __name__(value)
-      __store__(__check_name__(name).dup.freeze, value.dup.freeze)
+      __set__(name, nil)
+      return nil
     end
+    value = __name__(value)
+    raise ArgumentError, "bad environment variable value: contains null byte" if value.include?("\0")
+    __set__(name, value)
     value
   end
 
   alias store []=
 
   def delete(name)
-    name = __name__(name)
-    value = __lookup__(name)
-    __store__(name, nil)
+    name = __key__(name)
+    value = self[name]
+    __set__(name, nil) unless value.nil?
     value.nil? && block_given? ? yield(name) : value
   end
 
   def key?(name)
-    !__lookup__(__name__(name)).nil?
+    !__lookup__(__key__(name)).nil?
   end
 
   alias has_key? key?
@@ -205,23 +238,88 @@ class << ENV
   def value?(value)
     return nil unless String === value || value.respond_to?(:to_str)
     value = value.to_str unless String === value
-    __table__.value?(value)
+    __cached__.value?(value)
   end
 
   alias has_value? value?
 
-  def keys = __table__.keys
-  def values = __table__.values
-  def size = __table__.size
+  def key(value)
+    value = __name__(value)
+    __cached__.each { |name, known| return name if known == value }
+    nil
+  end
+
+  def assoc(name)
+    name = __key__(name)
+    value = self[name]
+    value.nil? ? nil : [__external__(name.dup), value]
+  end
+
+  def rassoc(value)
+    return nil unless String === value || value.respond_to?(:to_str)
+    value = value.to_str unless String === value
+    __cached__.each { |name, known| return [name, known] if known == value }
+    nil
+  end
+
+  def values_at(*names)
+    names.map { |name| self[name] }
+  end
+
+  def fetch_values(*names, &block)
+    names.map { |name| fetch(name, &block) }
+  end
+
+  # The names as given, not as converted: `ENV.slice(obj)` answers `obj`.
+  def slice(*names)
+    table = {}
+    names.each do |name|
+      value = self[name]
+      table[name] = value unless value.nil?
+    end
+    table
+  end
+
+  def except(*names)
+    table = __table__
+    names.each { |name| table.delete(name) }
+    table
+  end
+
+  def invert = __cached__.invert
+  def keys = __cached__.keys
+  def values = __cached__.values
+  def size = __environ__.size / 2
   alias length size
-  def empty? = __table__.empty?
-  def to_h(&block) = block ? __table__.to_h(&block) : __table__.dup
-  def to_hash = __table__.dup
-  def to_a = __table__.to_a
+  def empty? = __environ__.empty?
+  def to_hash = __table__
+  def to_a = __cached__.to_a
+  def rehash = nil
+
+  def to_h
+    return __table__ unless block_given?
+    table = {}
+    __cached__.each do |name, value|
+      pair = yield(name, value)
+      unless Array === pair
+        unless pair.respond_to?(:to_ary)
+          raise TypeError, "wrong element type #{pair.class} (expected array)"
+        end
+        pair = pair.to_ary
+      end
+      raise ArgumentError, "element has wrong array length (expected 2, was #{pair.size})" unless pair.size == 2
+      table[pair[0]] = pair[1]
+    end
+    table
+  end
+
+  def freeze
+    raise TypeError, "cannot freeze ENV"
+  end
 
   def each(&block)
     return enum_for(:each) { size } unless block
-    __table__.each(&block)
+    __cached__.each_pair { |name, value| yield name, value }
     self
   end
 
@@ -229,22 +327,74 @@ class << ENV
 
   def each_key(&block)
     return enum_for(:each_key) { size } unless block
-    __table__.each_key(&block)
+    keys.each(&block)
     self
   end
 
   def each_value(&block)
     return enum_for(:each_value) { size } unless block
-    __table__.each_value(&block)
+    values.each(&block)
     self
   end
 
+  # Each pair the block answers true for is removed, one at a time, from the
+  # table as it was before the first.
+  def delete_if
+    return enum_for(:delete_if) { size } unless block_given?
+    __cached__.each { |name, value| delete(name) if yield(name, value) }
+    self
+  end
+
+  def reject!
+    return enum_for(:reject!) { size } unless block_given?
+    deleted = false
+    __cached__.each do |name, value|
+      if yield(name, value)
+        delete(name)
+        deleted = true
+      end
+    end
+    deleted ? self : nil
+  end
+
+  def keep_if
+    return enum_for(:keep_if) { size } unless block_given?
+    __cached__.each { |name, value| delete(name) unless yield(name, value) }
+    self
+  end
+
+  def select!
+    return enum_for(:select!) { size } unless block_given?
+    deleted = false
+    __cached__.each do |name, value|
+      unless yield(name, value)
+        delete(name)
+        deleted = true
+      end
+    end
+    deleted ? self : nil
+  end
+
+  alias filter! select!
+
+  def shift
+    pairs = __environ__
+    return nil if pairs.empty?
+    name = pairs[0]
+    value = pairs[1]
+    __set__(name, nil)
+    [__external__(name), __external__(value)]
+  end
+
+  # Each pair goes into the environment as it is reached, as CRuby's
+  # `env_update` stores them, so a pair the process refuses stops the update
+  # with the ones before it stored. A value of nil removes the variable.
   def update(*others)
     others.each do |other|
-      other.to_hash.each do |name, value|
-        name = __name__(name)
-        if block_given? && __table__.key?(name)
-          value = yield(name, __table__[name], value)
+      __hash__(other).each_pair do |name, value|
+        name = __key__(name)
+        if block_given? && !(old = self[name]).nil?
+          value = yield(name, old, value)
         end
         self[name] = value
       end
@@ -252,16 +402,26 @@ class << ENV
     self
   end
 
+  alias merge! update
+
+  def __hash__(other)
+    return other if Hash === other
+    unless other.respond_to?(:to_hash)
+      raise TypeError, "no implicit conversion of #{other.nil? ? "nil" : other.class} into Hash"
+    end
+    other.to_hash
+  end
+
   def select(&block)
     return enum_for(:select) { size } unless block
-    to_h.select(&block)
+    __cached__.select(&block)
   end
 
   alias filter select
 
   def reject(&block)
     return enum_for(:reject) { size } unless block
-    to_h.reject(&block)
+    __cached__.reject(&block)
   end
 
   def dup
@@ -275,24 +435,28 @@ class << ENV
     raise TypeError, "Cannot clone ENV, use ENV.to_h to get a copy of ENV as a hash"
   end
 
-  alias merge! update
-
-  # All or nothing: every pair is checked before any is stored. Measured.
+  # All or nothing: every pair is checked before any is stored, and only
+  # then is every variable the new table does not name removed. Measured.
   def replace(other)
-    pairs = other.to_hash.map do |name, value|
-      [__check_name__(__name__(name)), __name__(value)]
+    pairs = __hash__(other).map do |name, value|
+      name = __key__(name)
+      value = __name__(value)
+      raise Errno::EINVAL, "setenv(#{name})" if name.empty? || name.include?("=")
+      raise ArgumentError, "bad environment variable value: contains null byte" if value.include?("\0")
+      [name, value]
     end
-    __table__.clear
     pairs.each { |name, value| self[name] = value }
+    named = pairs.to_h
+    keys.each { |name| __set__(name, nil) unless named.key?(name) }
     self
   end
 
   def clear
-    __table__.clear
+    keys.each { |name| __set__(name, nil) }
     self
   end
 
-  def inspect = __table__.inspect
+  def inspect = __cached__.inspect
   def to_s = "ENV"
 end
 
@@ -484,7 +648,15 @@ module Process
   # A signal by number, by name with or without `SIG`, or as a Symbol; a
   # leading `-` signals the process group.
   def self.__signal_number__(signal)
-    return [Integer.__index__(signal), false] if Integer === signal || !(String === signal || Symbol === signal || signal.respond_to?(:to_str))
+    # CRuby's `rb_f_kill`: a Fixnum, a Symbol, or a String or what converts
+    # to one, and nothing else — no `to_int`, no Bignum, no Float. Measured.
+    if Integer === signal
+      raise ArgumentError, "bad signal type Integer" unless signal.bit_length < 63
+      return [signal, false]
+    end
+    unless String === signal || Symbol === signal || signal.respond_to?(:to_str)
+      raise ArgumentError, "bad signal type #{signal.class}"
+    end
     name = Symbol === signal ? signal.to_s : (String === signal ? signal : signal.to_str)
     group = name.start_with?("-")
     name = name[1..] if group
@@ -503,19 +675,14 @@ module Process
     end
     pids.each do |pid|
       pid = Integer.__index__(pid)
-      # ponytail: `Signal.trap` records a handler and nothing runs it, and the
-      # signals CRuby turns into exceptions (INT, TERM and the other reserved
-      # ones) have no exception to become. A signal this process sends itself
-      # that Ruby would act on is refused until handlers run (#44).
-      # One the operating system acts on alone — KILL, STOP, or any left
-      # at its default — is sent.
-      if number != 0 && Signal.__handler_for__(number) != "SYSTEM_DEFAULT" &&
-         (pid == Process.pid || pid == 0 || (group && pid == Process.getpgrp) || pid == -Process.getpgrp)
-        __needs_signals__
-      end
       result = __sys_kill__(number, group ? -pid : pid)
       raise SystemCallError.new(nil, result) if Integer === result
     end
+    # A signal the main thread sends its own process arrives before `kill(2)`
+    # returns, so its handler runs before `Process.kill` does, as CRuby's
+    # `rb_f_kill` runs it. Sent from another thread, it waits for the main
+    # thread's next safe point.
+    Signal.__run_pending__ if __thread_current__ == 0
     pids.size
   end
 
@@ -529,6 +696,7 @@ module Process
     if result[0] == 0
       __global_store__(:$$, Process.pid)
       Thread.__forked__
+      __signal_forked__
     end
     result[0]
   end
@@ -633,7 +801,24 @@ module Process
     end
 
     def environment(env, options)
-      table = options[:unsetenv_others] ? {} : ENV.to_h
+      # The process's own pairs, as bytes: a child inherits them as they are,
+      # with none of `ENV`'s encoding for a program to read them in.
+      pairs = options[:unsetenv_others] ? [] : __environ__
+      if env.empty?
+        joined = []
+        i = 0
+        while i < pairs.size
+          joined << "#{pairs[i]}=#{pairs[i + 1]}"
+          i += 2
+        end
+        return joined
+      end
+      table = {}
+      i = 0
+      while i < pairs.size
+        table[pairs[i]] = pairs[i + 1]
+        i += 2
+      end
       env.each do |key, value|
         key = IO.__str__(key)
         raise ArgumentError, "environment name contains a equal : #{key}" if key.include?("=")

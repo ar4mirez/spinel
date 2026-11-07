@@ -10,7 +10,14 @@
 //! never removed, so an index handed out at any moment stays valid forever and
 //! no Ractor can observe another's write as a *change*. The lock protects the
 //! append, not the reads that follow it.
+//!
+//! One more is here because the operating system puts it here: the signals
+//! that arrived and wait to be handled (`signals`). A signal is delivered to
+//! the process, on any OS thread, so its count cannot live on a heap; it is a
+//! number per signal and holds no VM object, and only the main Ractor takes
+//! from it.
 
 pub mod core_image;
 pub mod hash_seed;
+pub mod signals;
 pub mod symbols;

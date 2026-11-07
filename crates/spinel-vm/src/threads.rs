@@ -367,6 +367,9 @@ pub(super) fn spawn(
     let spawned = std::thread::Builder::new()
         .stack_size(OS_STACK)
         .spawn(move || {
+            // Signals go to the main thread's OS thread, which runs their
+            // handlers and whose waits they cut short (#44).
+            crate::shared::signals::block_on_this_thread();
             let _ = told.send(native_id());
             os_thread(&its_lock, index);
         });
@@ -678,6 +681,22 @@ fn wake_ready(scope: &mut HandleScope<'_>, timeout: Option<Duration>) -> usize {
             woken += 1;
         }
     }
+    woken += wake_for_signal(scope);
+    // A signal ends the main thread's wait, on the signals' own wake pipe;
+    // a look that waits for nothing has already seen whether one came.
+    if timeout.is_none_or(|t| !t.is_zero())
+        && main_blocked(scope)
+        && let Some(fd) = crate::shared::signals::wake_fd()
+    {
+        polled.push((
+            SIGNALED,
+            libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            },
+        ));
+    }
     // A thread outside the lock is waited for on the wake pipe.
     let wake = if outside {
         woken += take_back(scope);
@@ -717,11 +736,15 @@ fn wake_ready(scope: &mut HandleScope<'_>, timeout: Option<Duration>) -> usize {
                     lock.drain();
                 }
                 woken += take_back(scope);
+            } else if *index == SIGNALED {
+                crate::shared::signals::drain();
             } else if wakeup(scope, *index, reason("ready")) {
                 woken += 1;
             }
         }
     }
+    // A signal may have cut the `poll` short (EINTR) as well as written.
+    woken += wake_for_signal(scope);
     let now = Instant::now();
     let late: Vec<usize> = scope
         .fibers()
@@ -740,6 +763,38 @@ fn wake_ready(scope: &mut HandleScope<'_>, timeout: Option<Duration>) -> usize {
         }
     }
     woken
+}
+
+/// The `polled` index of the signals' wake pipe.
+const SIGNALED: usize = usize::MAX - 1;
+
+/// Whether the main thread waits.
+fn main_blocked(scope: &HandleScope<'_>) -> bool {
+    scope
+        .fibers()
+        .threads
+        .entries
+        .first()
+        .is_some_and(|e| matches!(e.state, ThreadState::Blocked { .. }))
+}
+
+/// A signal waiting wakes the main thread from its wait, answering
+/// `:signal`, for the wait to run the handlers and go on waiting
+/// (`Kernel#__thread_wait__`). How many woke: one or none.
+fn wake_for_signal(scope: &mut HandleScope<'_>) -> usize {
+    usize::from(crate::shared::signals::any() && wakeup(scope, 0, reason("signal")))
+}
+
+/// For the loop's turn check when a signal waits: whether the running
+/// thread is the main thread, which then handles it; another wakes the main
+/// thread if it waits, and otherwise leaves it for its next turn check.
+pub(super) fn signal_is_mine(scope: &mut HandleScope<'_>) -> bool {
+    ensure_main(scope);
+    if scope.fibers().threads.current == 0 {
+        return true;
+    }
+    wake_for_signal(scope);
+    false
 }
 
 /// The next thread able to run, looking after `after` first, round robin.

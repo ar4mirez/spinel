@@ -7,10 +7,32 @@
 # who holds a `Mutex`, what a `Queue` hands out, how a thread reports the
 # exception it died of. `__thread_block__` answers why it woke: `:timeout`,
 # `:ready`, `:woken`, `:interrupted`, or `:deadlock` for the main thread when
-# every thread waits on another.
+# every thread waits on another — and `:signal` for the main thread when a
+# signal arrived, which `__thread_wait__` answers by running its handler and
+# waiting on for what is left (#44).
 #
 # ponytail: `Thread#[]` is per thread rather than per fiber, and
 # `handle_interrupt` defers nothing.
+module Kernel
+  # `__thread_block__`, but a signal that ends the wait is handled and the
+  # wait goes on, until its deadline: a trap does not cut a `sleep` or a
+  # `join` short in CRuby. Measured on 4.0.9.
+  def __thread_wait__(seconds, fds, events, deadlockable)
+    deadline = seconds && Process.clock_gettime(Process::CLOCK_MONOTONIC) + seconds
+    loop do
+      reason = __thread_block__(seconds, fds, events, deadlockable)
+      return reason unless reason == :signal
+      Signal.__run_pending__
+      if deadline
+        seconds = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        return :timeout if seconds <= 0
+      end
+    end
+  end
+
+  private :__thread_wait__
+end
+
 class Thread
   # The `fatal` CRuby raises in the main thread on a deadlock: an Exception
   # no `rescue => e` catches, and no constant names.
@@ -388,7 +410,7 @@ class Thread
       remaining = deadline && [deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC), 0].max
       begin
         Thread.__before_wait__
-        reason = __thread_block__(remaining, nil, 0, true)
+        reason = __thread_wait__(remaining, nil, 0, true)
       ensure
         @__s.joiners.delete(me)
       end
@@ -463,7 +485,7 @@ class Thread
 
   # `sleep` in this thread: until woken, or for `seconds`.
   def __sleep__(seconds, deadlockable)
-    __thread_block__(seconds, nil, 0, deadlockable)
+    __thread_wait__(seconds, nil, 0, deadlockable)
   end
 
   # --- locals ----------------------------------------------------------------
@@ -568,7 +590,8 @@ class Thread
     @__s.priority = Integer.__index__(value).clamp(-3, 3)
   end
 
-  def group = @__s.dead ? nil : @__s.group
+  # Kept once the thread is dead, as CRuby 4.0 keeps it: measured on 4.0.9.
+  def group = @__s.group
 
   def __group__=(group)
     @__s.group = group
@@ -649,7 +672,7 @@ class Thread
         @waiters << index
         begin
           Thread.__before_wait__
-          reason = __thread_block__(nil, nil, 0, true)
+          reason = __thread_wait__(nil, nil, 0, true)
         ensure
           @waiters.delete(index)
         end
@@ -712,7 +735,7 @@ class Thread
       unlock
       begin
         Thread.__before_wait__
-        reason = __thread_block__(timeout, nil, 0, false)
+        reason = __thread_wait__(timeout, nil, 0, false)
       ensure
         # Taken back before anything else, a kill included: the caller's
         # `ensure` runs holding it, as CRuby's does.
@@ -792,7 +815,7 @@ class Thread
       remaining = deadline && [deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC), 0].max
       begin
         Thread.__before_wait__
-        reason = __thread_block__(remaining, nil, 0, true)
+        reason = __thread_wait__(remaining, nil, 0, true)
       ensure
         waiters.delete(index)
       end

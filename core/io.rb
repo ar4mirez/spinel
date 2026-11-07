@@ -110,14 +110,19 @@ class IO
         if Array === revents && revents.all?(0)
           return nil if ms == 0
           Thread.__before_wait__
-          __thread_block__(deadline && ms / 1000.0, polls, 0, false)
+          __thread_wait__(deadline && ms / 1000.0, polls, 0, false)
           next
         end
       else
         revents = __fd_poll__(polls, ms)
       end
       if Integer === revents
-        next if revents == Errno::EINTR::Errno
+        # A signal cut the wait short: its handler runs here, and the wait
+        # goes on (#44).
+        if revents == Errno::EINTR::Errno
+          Signal.__run_pending__ if __thread_current__ == 0
+          next
+        end
         __check__(revents, nil, "poll(2)")
       end
       return nil if revents.all?(0)
@@ -2255,14 +2260,31 @@ end
   def __read_wait__(want)
     loop do
       # A blocking descriptor would stop every thread: wait for it first.
+      # Alone, the main thread waits first too on a pipe or a terminal, in a
+      # `poll(2)` a signal cuts short, where a `read(2)` would be restarted:
+      # Ctrl-C ends a `gets` (#44). Not on a socket — nonblocking, so its
+      # read answers EAGAIN and waits below, and a listening one is never
+      # readable but answers ENOTCONN — nor on a file, which never waits.
       if __thread_others__
         IO.__wait__([[self, IO::READABLE]], @timeout, true) || raise(IO::TimeoutError, "Blocking operation timed out!")
         raise IOError, "stream closed in another thread" if @closed
+      elsif __thread_current__ == 0 && __waits_in_read__?
+        IO.__wait__([[self, IO::READABLE]], @timeout, true) || raise(IO::TimeoutError, "Blocking operation timed out!")
       end
       chunk = __fd_read__(@fileno, want)
       return chunk unless chunk == IO.__eagain__
       IO.__wait__([[self, IO::READABLE]], @timeout) || raise(IO::TimeoutError, "Blocking operation timed out!")
     end
+  end
+
+  # Whether a `read(2)` of this descriptor can block for ever: a pipe, a FIFO
+  # or a character device. Asked once per descriptor.
+  def __waits_in_read__?
+    return @__waits_in_read__[1] if @__waits_in_read__ && @__waits_in_read__[0] == @fileno
+    stat = __fs_stat__(@fileno, true)
+    kind = Integer === stat ? false : %w[pipe? chardev?].any? { |m| File::Stat.__from__(stat).__send__(m) }
+    @__waits_in_read__ = [@fileno, kind]
+    kind
   end
 
   # Every byte of `text`, waiting whenever a nonblocking descriptor is full.

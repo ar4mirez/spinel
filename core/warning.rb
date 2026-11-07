@@ -140,6 +140,19 @@ module Kernel
     when :$=
       __warning__("variable $= is no longer effective; ignored", false, :deprecated)
       return nil
+    when :$0, :$PROGRAM_NAME
+      # A frozen copy, which is also what `ps` shows from now on: CRuby's
+      # `set_arg0`. Measured on 4.0.9.
+      unless String === value
+        unless value.respond_to?(:to_str)
+          raise TypeError, "no implicit conversion of #{value.nil? ? "nil" : value.class} into String"
+        end
+        value = value.to_str
+      end
+      value = value.dup.freeze
+      __sys_proctitle__(value)
+      __global_store__(:$0, value)
+      return value
     end
     __global_store__(name, value)
   end
