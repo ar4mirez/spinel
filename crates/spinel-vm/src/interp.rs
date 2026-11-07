@@ -11486,11 +11486,6 @@ fn native_call<'h>(
             stack.push(value);
             Ok(None)
         }
-        Native::SignalForked => {
-            crate::shared::signals::forked();
-            stack.push(Value::NIL);
-            Ok(None)
-        }
 
         Native::BacktraceHere => {
             let below = &frames[..frames.len().saturating_sub(1)];
@@ -14584,11 +14579,6 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             Native::SignalHandle,
         ),
         (Builtin::Kernel, &["__signal_take__"], Native::SignalTake),
-        (
-            Builtin::Kernel,
-            &["__signal_forked__"],
-            Native::SignalForked,
-        ),
         (Builtin::Kernel, &["__gc_start__"], Native::Gc(GcOp::Start)),
         (Builtin::Kernel, &["__gc_stat__"], Native::Gc(GcOp::Stat)),
         (
@@ -21043,9 +21033,9 @@ fn sys_native(
             // the VM for the child to lose. When Ractors run in parallel
             // (#119) this refuses unless the main Ractor is the only one, as
             // CRuby does.
-            // SAFETY: the VM holds no lock another thread could own, and the
-            // child goes on running this same single thread.
-            let pid = unsafe { libc::fork() };
+            // The VM holds no lock another thread could own, and the child
+            // goes on running this same single thread.
+            let pid = crate::shared::signals::fork();
             if pid < 0 {
                 errno_value(&std::io::Error::last_os_error())
             } else {

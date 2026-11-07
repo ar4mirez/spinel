@@ -696,7 +696,6 @@ module Process
     if result[0] == 0
       __global_store__(:$$, Process.pid)
       Thread.__forked__
-      __signal_forked__
     end
     result[0]
   end

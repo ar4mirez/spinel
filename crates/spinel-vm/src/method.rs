@@ -428,9 +428,6 @@ pub enum Native {
     /// `Kernel#__signal_take__`: one arrival of the lowest-numbered signal
     /// waiting, its number, the rest left waiting; nil when none waits.
     SignalTake,
-    /// `Kernel#__signal_forked__`: in a child after `fork`, forget what the
-    /// parent had waiting and unblock every signal.
-    SignalForked,
     /// The backtrace of the frames below the calling one, as
     /// `[[path, line, label], ...]` innermost first (#29).
     ///

@@ -262,10 +262,32 @@ pub fn unblock_on_this_thread() {
     }
 }
 
+/// `fork(2)` with every signal blocked across it, as CRuby's
+/// `disable_child_handler_before_fork` does: a signal sent to the child
+/// before it has forgotten the parent's counts and pipe waits in the kernel,
+/// and is counted once `forked` unblocks it. The parent gets its mask back.
+pub fn fork() -> libc::pid_t {
+    // SAFETY: `all` and `saved` are local `sigset_t`s; `pthread_sigmask`
+    // reads the one and fills the other.
+    unsafe {
+        let mut all: libc::sigset_t = std::mem::zeroed();
+        let mut saved: libc::sigset_t = std::mem::zeroed();
+        libc::sigfillset(&raw mut all);
+        libc::pthread_sigmask(libc::SIG_SETMASK, &raw const all, &raw mut saved);
+        let pid = libc::fork();
+        if pid == 0 {
+            forked();
+        } else {
+            libc::pthread_sigmask(libc::SIG_SETMASK, &raw const saved, std::ptr::null_mut());
+        }
+        pid
+    }
+}
+
 /// In a child after `fork`: what the parent had waiting is the parent's, and
 /// so is its wake pipe; the child's handlers, inherited, wake a pipe of its
 /// own.
-pub fn forked() {
+fn forked() {
     ANY.store(false, Ordering::SeqCst);
     for slot in &PENDING {
         slot.store(0, Ordering::SeqCst);
