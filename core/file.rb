@@ -1015,18 +1015,18 @@ end
     __external_names__(names)
   end
 
-  # Then converted to `Encoding.default_internal` when one is set, as
+  # A US-ASCII name with non-ASCII bytes is binary. Otherwise it is
+  # converted to `Encoding.default_internal` when one is set, as
   # `rb_str_conv_enc` converts: an ASCII-only name is only retagged, and one
   # that will not convert is kept as it was.
   def self.__external_names__(names)
     internal = Encoding.default_internal
-    return names if internal.nil?
     names.map! do |name|
       from = name.encoding
-      if from == internal
-        name
-      elsif from == Encoding::US_ASCII && !name.ascii_only?
+      if from == Encoding::US_ASCII && !name.ascii_only?
         name.force_encoding(Encoding::BINARY)
+      elsif internal.nil? || from == internal
+        name
       elsif internal == Encoding::BINARY || (internal.ascii_compatible? && from.ascii_compatible? && name.ascii_only?)
         name.force_encoding(internal)
       else
@@ -1283,6 +1283,7 @@ end
   def self.__glob0__(pattern, flags, base, results)
     encoding = pattern.encoding
     encoding = Encoding.find("filesystem") if encoding == Encoding::US_ASCII
+    encoding = Encoding::BINARY if encoding == Encoding::US_ASCII
     chars = pattern.dup.force_encoding(encoding).chars
     root = chars[0] == "/" ? 1 : 0
     if root == 0 && !base.nil?
