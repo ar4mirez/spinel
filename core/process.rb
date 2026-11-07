@@ -621,11 +621,24 @@ module Process
   # and a signal ends the nap and runs its handler (or, untrapped, ends the
   # program) at once, as CRuby's interrupted `waitpid` does.
   #
-  # ponytail: a child's exit is seen up to one nap late. A wait on the
-  # signal wake fd and a `pidfd` (or SIGCHLD) would see it at once.
+  #
+  # Alone, a wait for one child that ends it waits in `poll(2)` on a `pidfd`
+  # for it and on the signals' wake pipe, which sees the child's exit at once.
+  # ponytail: a wait for any child, for a stop (`WUNTRACED`), with another
+  # thread alive or off Linux naps between looks, so sees the exit up to one
+  # nap late; a SIGCHLD wake would see it at once.
   def self.__waitpid__(pid, flags)
     nohang = Process::WNOHANG
     return __sys_waitpid__(pid, flags) if flags & nohang != 0
+    if pid > 0 && flags & Process::WUNTRACED == 0 && !__thread_others__
+      loop do
+        case __sys_wait_child__(pid)
+        when :exited then return __sys_waitpid__(pid, flags)
+        when :signal then Signal.__run_pending__
+        else break
+        end
+      end
+    end
     loop do
       result = __sys_waitpid__(pid, flags | nohang)
       return result unless Array === result && result[0] == 0

@@ -836,6 +836,10 @@ pub enum SysOp {
     /// `__sys_waitpid__(pid, flags)`: `[pid, raw status]`, `[0, nil]` when
     /// `WNOHANG` found nothing, or an errno.
     Waitpid,
+    /// `__sys_wait_child__(pid)`: wait, in `poll(2)`, for the child `pid`
+    /// to have a status or for a signal to arrive: `:exited`, `:signal`, or
+    /// nil where the platform has no `pidfd` (#44).
+    WaitChild,
     /// `__sys_kill__(signal, pid)`: true, or an errno.
     Kill,
     /// `__sys_fork__`: `[pid]`, 0 in the child, or an errno.

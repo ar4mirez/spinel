@@ -15491,6 +15491,11 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             &["__sys_waitpid__"],
             Native::Sys(SysOp::Waitpid),
         ),
+        (
+            Builtin::Kernel,
+            &["__sys_wait_child__"],
+            Native::Sys(SysOp::WaitChild),
+        ),
         (Builtin::Kernel, &["__sys_kill__"], Native::Sys(SysOp::Kill)),
         (Builtin::Kernel, &["__sys_fork__"], Native::Sys(SysOp::Fork)),
         (Builtin::Kernel, &["__sys_exit__"], Native::Sys(SysOp::Exit)),
@@ -19578,6 +19583,62 @@ fn set_proctitle(title: &[u8]) {
 #[cfg(not(target_os = "linux"))]
 fn set_proctitle(_title: &[u8]) {}
 
+/// Wait for the child `pid` to have a status to collect, or for a signal to
+/// arrive: `poll(2)` on a `pidfd` for it and on the signals' wake pipe, so
+/// `Process.wait` returns the moment the child ends, and a signal is handled
+/// at once rather than when it does (#44). Some(true) when the child is
+/// ready, Some(false) for a signal, None when there is no `pidfd` for it.
+#[cfg(target_os = "linux")]
+fn wait_child(pid: libc::pid_t) -> Option<bool> {
+    if pid <= 0 {
+        return None;
+    }
+    // SAFETY: `pidfd_open` takes a pid and flags and answers a descriptor.
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) } as libc::c_int;
+    if fd < 0 {
+        return None;
+    }
+    let answer = loop {
+        if crate::shared::signals::any() {
+            break Some(false);
+        }
+        let mut fds = vec![libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        }];
+        if let Some(wake) = crate::shared::signals::wake_fd() {
+            fds.push(libc::pollfd {
+                fd: wake,
+                events: libc::POLLIN,
+                revents: 0,
+            });
+        }
+        // SAFETY: `fds` is `fds.len()` `pollfd`s, read and written by `poll`.
+        let ready = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, -1) };
+        if ready < 0 {
+            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            break None;
+        }
+        if fds[0].revents != 0 {
+            break Some(true);
+        }
+        if fds.get(1).is_some_and(|w| w.revents != 0) {
+            crate::shared::signals::drain();
+        }
+    };
+    // SAFETY: the descriptor `pidfd_open` made above.
+    unsafe { libc::close(fd) };
+    answer
+}
+
+#[cfg(not(target_os = "linux"))]
+fn wait_child(_pid: libc::pid_t) -> Option<bool> {
+    None
+}
+
 /// An `io::Error` as the errno the Ruby side raises `SystemCallError` with.
 fn errno_value(error: &std::io::Error) -> Value {
     let errno = error.raw_os_error().unwrap_or(libc::EIO);
@@ -21007,6 +21068,14 @@ fn sys_native(
                     new_array(scope, &[int(i64::from(pid)), int(i64::from(errno))])
                 }
                 Err((None, errno)) => int(i64::from(errno)),
+            }
+        }
+        SysOp::WaitChild => {
+            let pid = int_arg(call, 0).unwrap_or(-1) as libc::pid_t;
+            match wait_child(pid) {
+                Some(true) => Value::symbol(crate::shared::symbols::intern("exited")),
+                Some(false) => Value::symbol(crate::shared::symbols::intern("signal")),
+                None => Value::NIL,
             }
         }
         SysOp::Waitpid => {
