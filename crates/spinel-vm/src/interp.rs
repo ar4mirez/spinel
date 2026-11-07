@@ -5762,8 +5762,10 @@ fn bind_keywords(
 /// Hash is only these ivars, so it writes them.
 ///
 // ponytail: the second place outside `core/hash.rb` that knows the
-// representation, beside `hash_pairs`; both move behind a primitive when the
-// open-addressed table arrives.
+// representation, beside `hash_pairs`. It writes `@__pairs__` alone, which
+// is the truth there: the codes and the index over them (#729) are built
+// from it on first use. Both move behind a primitive if the pairs ever stop
+// being the whole of a Hash.
 fn hash_of_pairs(scope: &mut HandleScope<'_>, pairs: &[(Value, Value)]) -> Result<Value, Error> {
     let rooted: Vec<_> = pairs
         .iter()
@@ -9729,10 +9731,10 @@ fn allocate_instance(scope: &mut HandleScope<'_>, id: ClassId) -> Result<Value, 
 /// re-entering the interpreter there is what `expand_splats` already refuses to
 /// do. An ivar read is a shape lookup, not a call.
 ///
-// ponytail: the one place outside `core/hash.rb` that knows the
-// representation, and that file's own note says nothing else should. Give
-// `Hash` a primitive that hands out its pairs when the open-addressed table
-// that note promises arrives, and this reads that instead.
+// ponytail: one of the places outside `core/hash.rb` that know the
+// representation, which that file's own note lists. The open-addressed index
+// (#729) left `@__pairs__` the ordered truth, so reading it here is still
+// whole; give `Hash` a primitive that hands out its pairs if that changes.
 fn hash_pairs(scope: &mut HandleScope<'_>, value: Value) -> Option<Vec<(Value, Value)>> {
     let pairs = ivar_get(scope, value, symbol("@__pairs__")).ok()?;
     let mut out = Vec::new();
@@ -10681,7 +10683,9 @@ fn native_call<'h>(
             // The immediates are Ruby's own documented values where Ruby has
             // one, and the tagged word otherwise — which is unique per value
             // and equal for the same value, the two properties `object_id` is
-            // asked for.
+            // asked for. A Flonum's word is past a fixnum, so it is an Integer
+            // of whatever size it needs, as CRuby's is (`1.5.object_id` is
+            // never nil); `compare_by_identity` files a key under it (#729).
             use crate::value::Unpacked;
             let id = match call.receiver.unpack() {
                 Unpacked::Fixnum(n) => n.checked_mul(2).and_then(|n| n.checked_add(1)),
@@ -10689,7 +10693,10 @@ fn native_call<'h>(
                 Unpacked::True => Some(20),
                 Unpacked::False => Some(0),
                 Unpacked::Symbol(_) | Unpacked::Flonum(_) | Unpacked::Undef => {
-                    i64::try_from(call.receiver.to_bits() >> 1).ok()
+                    let word = num_bigint::BigInt::from(call.receiver.to_bits() >> 1);
+                    let id = crate::bignum::value(scope, &word);
+                    stack.push(id);
+                    return Ok(None);
                 }
                 Unpacked::Heap(_) => {
                     let handle = scope.root(call.receiver);

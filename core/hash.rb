@@ -1,16 +1,26 @@
 # Hash.
 #
 # `Class#allocate` gives a Hash three instance variables: `@__pairs__`, an
-# association list of `[key, value]` Arrays, plus the default and whether it is
-# a block. Two more arrive on use: `@__hashes__`, each key's hash code as it was
-# when stored (#22), and `@__identity__`. Every method here is a linear
-# walk over `@__pairs__`.
+# association list of `[key, value]` Arrays in insertion order, plus the
+# default and whether it is a block. Three more arrive on use: `@__hashes__`,
+# each key's code as it was when stored (#22) — its hash code, or its
+# `__id__` under `@__identity__` — and `@__table__`, an open-addressed index
+# from code to position in `@__pairs__` (#729).
 #
-# ponytail: O(n) lookup. A real Hash is an open-addressed table keyed by
-# `#hash`, and `@__hashes__` is already the half of it that decides which slot. The
-# upgrade is this file and a primitive over it; outside it, only
-# `hash_pairs`, `hash_of_pairs`, `expand_splats` and `symbol_key_get` in
-# `interp.rs` know the representation, and each says so.
+# `@__pairs__` is the truth and the other two are derived from it: anything
+# that rebuilds the pairs drops what it cannot keep (nil), and `__hashes__`
+# and `__build_table__` recompute on demand. A table only exists past
+# sixteen pairs; a smaller hash is scanned, which is cheaper than probing at
+# that size. Outside this file, only `hash_pairs`, `hash_of_pairs`,
+# `expand_splats` and `symbol_key_get` in `interp.rs` know the
+# representation, and each says so: they read or build `@__pairs__` alone,
+# which a missing `@__hashes__` and `@__table__` make whole again.
+#
+# ponytail: `delete` (and so `shift`) rebuilds the pair list and drops the
+# table, O(n) a call, as before #729: positions shift, and deleting in place
+# would change what an `each` already under way sees. The upgrade is pairs
+# with holes left by a delete and compacted on growth, as CRuby's `st_table`
+# does, which every iterating method here would have to skip.
 class Hash
   include Enumerable
 
@@ -124,7 +134,9 @@ class Hash
     pairs = []
     other.each_pair { |key, value| pairs.push([key, value]) }
     @__pairs__ = pairs
+    # `Kernel#dup` copied the slots, so these still point at `other`'s.
     @__hashes__ = nil
+    @__table__ = nil
     # Measured: `compare_by_identity` survives `dup` and `clone`.
     @__identity__ = other.compare_by_identity?
     __copy_default_from__(other)
@@ -241,38 +253,114 @@ class Hash
   # through this one method, so `[]`, `[]=`, `key?`, `fetch` and `delete` all
   # agree by construction.
   #
-  # A key's hash code is taken when it is stored, in `@__hashes__` beside
+  # A key's code is taken when it is stored, in `@__hashes__` beside
   # `@__pairs__`, so a key mutated afterwards is not found until `rehash` — which
-  # is Ruby's behaviour and what `rehash_spec.rb` checks. `@__hashes__` is dropped
-  # (nil) by anything that rebuilds `@__pairs__`, and recomputed on demand.
+  # is Ruby's behaviour and what `rehash_spec.rb` checks.
   #
-  # Under `compare_by_identity` the only question is identity, and `hash` is
-  # never called: measured.
+  # Under `compare_by_identity` the only question is identity, and neither
+  # `hash` nor `equal?` is called: measured. The code there is the key's
+  # `__id__`, so codes that match are the same object.
+  #
+  # Through `@__table__` when there is one, probing linearly from the slot
+  # the code picks; a scan of the codes when the hash is small. The arrays
+  # are read once, so a key's `eql?` that rebuilds this hash leaves the walk
+  # on the arrays it started with, which are never shortened in place.
+  #
+  # The code is taken here rather than sent to `__code__`, and the walk is
+  # `__find__` so that `[]=` can hand it the code it keeps: every lookup pays
+  # for each send on this path, and an optional parameter costs one too.
+  # `[]`, `fetch`, `key?` and `[]=` write this line out themselves and send
+  # `__find__` directly, for the same reason.
   def __index__(key)
-    pairs = @__pairs__
-    i = 0
-    if @__identity__
-      id = key.__id__
-      while i < pairs.size
-        return i if pairs[i][0].__id__ == id
-        i = i + 1
-      end
-      return nil
-    end
-    code = __key_hash__(key)
-    hashes = __hashes__
-    while i < pairs.size
-      if hashes[i] == code
-        stored = pairs[i][0]
-        return i if stored.equal?(key) || key.eql?(stored)
-      end
-      i = i + 1
-    end
-    nil
+    __find__(key, @__identity__ ? key.__id__ : (__any_hash__(key) || __element_hash__(key)))
   end
 
+  def __find__(key, code)
+    identity = @__identity__
+    pairs = @__pairs__
+    hashes = @__hashes__ || __hashes__
+    table = @__table__
+    if table.nil?
+      count = pairs.size
+      # At sixteen pairs or fewer there is no table: a scan of a few codes
+      # costs less than building and probing one, and most hashes — keyword
+      # arguments, small literals, `Array#sample`'s swaps — never grow past
+      # it. Measured: at twelve pairs a table was a fifth slower.
+      #
+      # A frozen hash cannot keep a table it builds, so one frozen without
+      # `freeze` building it first — by the VM, not the method — is scanned.
+      if count <= 16 || frozen?
+        i = 0
+        while i < count
+          if hashes[i] == code
+            stored = pairs[i][0]
+            return i if identity || stored.equal?(key) || key.eql?(stored)
+          end
+          i = i + 1
+        end
+        return nil
+      end
+      table = __build_table__
+    end
+    mask = table.size - 1
+    slot = (code ^ (code >> 2)) & mask
+    while true
+      at = table[slot]
+      return nil if at.nil?
+      if hashes[at] == code
+        stored = pairs[at][0]
+        return at if identity || stored.equal?(key) || key.eql?(stored)
+      end
+      slot = (slot + 1) & mask
+    end
+  end
+
+  # What a key is filed under: its hash code, or under `compare_by_identity`
+  # its `__id__`, so that `hash` is never called there.
+  def __code__(key)
+    @__identity__ ? key.__id__ : __key_hash__(key)
+  end
+
+  # Kept when they can be: a frozen hash's codes are taken afresh each time,
+  # which `freeze` makes rare by taking them first.
   def __hashes__
-    @__hashes__ ||= @__pairs__.map { |pair| __key_hash__(pair[0]) }
+    hashes = @__hashes__
+    return hashes unless hashes.nil?
+    hashes = @__pairs__.map { |pair| __code__(pair[0]) }
+    frozen? ? hashes : (@__hashes__ = hashes)
+  end
+
+  # The codes and the table are built before the hash is frozen, since a
+  # frozen one cannot store them, and its lookups would otherwise go back to
+  # a scan.
+  def freeze
+    unless frozen?
+      __hashes__
+      __build_table__ if @__table__.nil? && size > 16
+    end
+    super
+  end
+
+  # A table at most half full, so a probe ends soon at an empty slot; its
+  # size is a power of two, so the slot is a mask of the code. The code is
+  # folded with itself shifted first: an `__id__` steps by a power of two,
+  # and its low bits alone would fill one slot in four.
+  def __build_table__
+    hashes = __hashes__
+    count = hashes.size
+    size = 16
+    size = size * 2 while size < count * 2 + 2
+    table = Array.new(size)
+    mask = size - 1
+    i = 0
+    while i < count
+      code = hashes[i]
+      slot = (code ^ (code >> 2)) & mask
+      slot = (slot + 1) & mask until table[slot].nil?
+      table[slot] = i
+      i = i + 1
+    end
+    @__table__ = table
   end
 
   # A key's hash code. CRuby's `any_hash` hashes nil, true, false, an Integer,
@@ -288,6 +376,7 @@ class Hash
     raise FrozenError.new("can't modify frozen Hash: " + inspect, receiver: self) if frozen?
     @__identity__ = true
     @__hashes__ = nil
+    @__table__ = nil
     self
   end
 
@@ -303,6 +392,7 @@ class Hash
     pairs = @__pairs__
     @__pairs__ = []
     @__hashes__ = []
+    @__table__ = nil
     pairs.each { |pair| self[pair[0]] = pair[1] }
     self
   end
@@ -311,7 +401,7 @@ class Hash
   # `Hash` subclass overriding `default(key)` is how ruby/spec's `DefaultHash`
   # answers 100 for every key, and reading `@__default__` here would never see it.
   def [](key)
-    at = __index__(key)
+    at = __find__(key, @__identity__ ? key.__id__ : (__any_hash__(key) || __element_hash__(key)))
     return @__pairs__[at][1] unless at.nil?
     default(key)
   end
@@ -325,7 +415,7 @@ class Hash
     end
     __warning__("block supersedes default value argument") if fallback.size > 1 && block_given?
     key = fallback[0]
-    at = __index__(key)
+    at = __find__(key, @__identity__ ? key.__id__ : (__any_hash__(key) || __element_hash__(key)))
     return @__pairs__[at][1] unless at.nil?
     return yield(key) if block_given?
     return fallback[1] if fallback.size > 1
@@ -336,15 +426,37 @@ class Hash
   # the caller's String cannot move it in the table — measured, and
   # `compare_by_identity` is the one table that keeps the caller's own object.
   # `String === key`, not `key.is_a?`: a key may be a `BasicObject`.
+  #
+  # The key's code is taken once and filed with it, so a key's `hash` runs
+  # once per store, as CRuby's does. A new key goes into the table in place
+  # while the table stays half empty, and past that the table is dropped and
+  # built twice the size by the next lookup, which keeps a store amortised
+  # O(1) (#729).
   def []=(key, value)
     __check_frozen__
-    at = __index__(key)
+    code = @__identity__ ? key.__id__ : (__any_hash__(key) || __element_hash__(key))
+    at = __find__(key, code)
     if at.nil?
       if !@__identity__ && String === key && !key.frozen?
         key = key.dup.freeze
       end
-      @__pairs__.push([key, value])
-      @__hashes__.push(__key_hash__(key)) unless @__hashes__.nil? || @__identity__
+      pairs = @__pairs__
+      pairs.push([key, value])
+      hashes = @__hashes__
+      unless hashes.nil?
+        hashes.push(code)
+        table = @__table__
+        unless table.nil?
+          if pairs.size * 2 > table.size
+            @__table__ = nil
+          else
+            mask = table.size - 1
+            slot = (code ^ (code >> 2)) & mask
+            slot = (slot + 1) & mask until table[slot].nil?
+            table[slot] = pairs.size - 1
+          end
+        end
+      end
     else
       @__pairs__[at][1] = value
     end
@@ -356,7 +468,7 @@ class Hash
   end
 
   def key?(key)
-    !__index__(key).nil?
+    !__find__(key, @__identity__ ? key.__id__ : (__any_hash__(key) || __element_hash__(key))).nil?
   end
 
   def has_key?(key)
@@ -475,15 +587,23 @@ class Hash
       return nil
     end
     pairs = @__pairs__
+    hashes = @__hashes__
     gone = pairs[at][1]
     kept = []
+    codes = hashes.nil? ? nil : []
     i = 0
     while i < pairs.size
-      kept.push(pairs[i]) unless i == at
+      unless i == at
+        kept.push(pairs[i])
+        codes.push(hashes[i]) unless codes.nil?
+      end
       i = i + 1
     end
+    # The codes the remaining keys were stored under go with them: a key
+    # mutated since it was stored stays where it was until `rehash`.
     @__pairs__ = kept
-    @__hashes__ = nil
+    @__hashes__ = codes
+    @__table__ = nil
     gone
   end
 
@@ -558,6 +678,7 @@ class Hash
     # own is dropped: measured both ways.
     @__identity__ = other.compare_by_identity?
     @__hashes__ = nil
+    @__table__ = nil
     other.each_pair { |key, value| self[key] = value }
     __copy_default_from__(other)
     self
@@ -565,7 +686,9 @@ class Hash
 
   def clear
     __check_frozen__
-    keys.each { |key| delete(key) }
+    @__pairs__ = []
+    @__hashes__ = []
+    @__table__ = nil
     self
   end
 
