@@ -661,10 +661,15 @@ pub enum Literal {
     ///
     /// `encoding` is the file's source encoding, which is what a `\xAA`
     /// written in it means: a byte, in a `# encoding: binary` file.
+    ///
+    /// `parser_warned` is whether `spinel-parse` compiled the pattern and
+    /// said what Onigmo warns about it; one it left to the run time warns on
+    /// its first compile here instead.
     Regexp {
         source: Box<str>,
         options: i64,
         encoding: u8,
+        parser_warned: bool,
     },
 }
 

@@ -1016,6 +1016,29 @@ pub fn step(
     })
 }
 
+/// Whether `encoding` is UTF-16 or UTF-32 in one byte order: the encodings
+/// that are not ASCII-compatible and that a `Regexp` can be written in.
+#[must_use]
+pub fn wide(encoding: u8) -> bool {
+    matches!(encoding, UTF_16BE | UTF_16LE | UTF_32BE | UTF_32LE)
+}
+
+/// Text in a [`wide`] encoding as the characters it spells, or `None` when
+/// any of it is not a character.
+#[must_use]
+pub fn decode_wide(encoding: u8, bytes: &[u8]) -> Option<String> {
+    let mut text = String::with_capacity(bytes.len() / 2);
+    let mut at = 0;
+    while at < bytes.len() {
+        let Decoded::Char(code, len) = decode(encoding, bytes, at) else {
+            return None;
+        };
+        text.push(char::from_u32(code)?);
+        at += len;
+    }
+    Some(text)
+}
+
 /// Character boundaries for the non-ASCII-compatible encodings and Latin-1,
 /// so `length` and `[]` work on a transcoded string: UTF-16 in units with
 /// surrogate pairs, UTF-32 in fours, a broken tail as one character.

@@ -220,6 +220,46 @@ pub enum Encoding {
     EmacsMule,
 }
 
+/// Read `source` as a pattern without compiling it: its warnings, as
+/// [`Regex::warnings`] would answer them, or why it is not one.
+///
+/// The parser's check of a regexp literal, which CRuby compiles as it parses,
+/// so a pattern that is not valid Ruby is a `SyntaxError` before anything
+/// runs.
+///
+/// # Errors
+///
+/// As [`Regex::new`], for what is found before compiling.
+pub fn check(source: &str, flags: Flags, encoding: Encoding) -> Result<Vec<String>, Error> {
+    parse::parse(source, flags, encoding).map(|parsed| parsed.warnings)
+}
+
+/// `source` as Ruby quotes a pattern in a message: between slashes, with a
+/// bare `/` escaped and a control character as `\xHH`. Onigmo's
+/// `onig_snprintf_with_pattern`, measured: `Regexp.new("a\n**")` warns about
+/// `/a\x0a**/`.
+#[must_use]
+pub fn describe(source: &str) -> String {
+    let mut out = String::with_capacity(source.len() + 2);
+    out.push('/');
+    let mut chars = source.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                out.push(c);
+                if let Some(next) = chars.next() {
+                    out.push(next);
+                }
+            }
+            '/' => out.push_str("\\/"),
+            c if c.is_ascii_control() => out.push_str(&format!("\\x{:02x}", u32::from(c))),
+            c => out.push(c),
+        }
+    }
+    out.push('/');
+    out
+}
+
 /// One compiled pattern.
 pub struct Regex {
     source: String,
@@ -227,6 +267,7 @@ pub struct Regex {
     encoding: Encoding,
     program: exec::Program,
     names: Vec<(String, usize)>,
+    warnings: Vec<String>,
 }
 
 impl fmt::Debug for Regex {
@@ -263,7 +304,15 @@ impl Regex {
             encoding,
             program,
             names: parsed.names,
+            warnings: parsed.warnings,
         })
+    }
+
+    /// What Onigmo warns about the pattern as it compiles it — a nested
+    /// quantifier it reduced — each without the `: /source/` Ruby ends it with.
+    #[must_use]
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
     }
 
     /// The pattern as written, which is what `Regexp#source` answers.
@@ -365,6 +414,33 @@ impl Regex {
         Ok(self
             .program
             .find_at(subject, start, deadline)?
+            .map(|m| Captures { caps: m.caps }))
+    }
+
+    /// A match that starts exactly at byte offset `at`, with `\G` anchored at
+    /// `anchor` rather than there: one step of the backward search
+    /// `String#rindex` makes from `anchor`, as CRuby's `onig_search` does
+    /// with its range behind its start. `"helloYOU.".rindex(/YOU\G/, 8)` is
+    /// 5. Measured.
+    ///
+    /// # Errors
+    ///
+    /// As [`Regex::find_until`].
+    pub fn match_anchored(
+        &self,
+        haystack: &[u8],
+        at: usize,
+        anchor: usize,
+        encoding: Encoding,
+        deadline: Option<Instant>,
+    ) -> Result<Option<Captures>, Error> {
+        let subject = exec::Subject {
+            bytes: haystack,
+            enc: encoding,
+        };
+        Ok(self
+            .program
+            .match_anchored(subject, at, anchor, deadline)?
             .map(|m| Captures { caps: m.caps }))
     }
 
@@ -1292,9 +1368,14 @@ mod tests {
     #[test]
     fn unsupported_constructs_refuse_at_compile_time() {
         assert!(matches!(
-            Regex::new("(?{a})", Flags::default()),
+            Regex::new("(a)(?(<1+1>)a|b)", Flags::default()),
             Err(Error::Unsupported(_))
         ));
+        // Not Ruby's at all, rather than unsupported.
+        assert_eq!(
+            Regex::new("(?{a})", Flags::default()).err(),
+            Some(Error::Syntax("undefined group option".into()))
+        );
     }
 
     /// With a deadline the step budget is gone, and the deadline is what

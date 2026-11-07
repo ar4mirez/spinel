@@ -87,8 +87,15 @@ fix is a different slice. The reason says which slice, by number.
 
 ## What is here now
 
-Two hundred and ninety-seven tags across a hundred and thirty-four files.
-`require 'objspace'` (#690) removed `library/objectspace`'s eight, and their
+Two hundred and sixty-six tags across a hundred and thirteen files. The
+rest of #33 removed fourteen, and eight files: `Regexp.union`'s seven UTF-16
+rows, which pass now that a pattern written in UTF-16 is in that encoding;
+three `language/regexp` rows, a numbered variable too big to be one, a literal
+that is a `SyntaxError` and a nested repeat's warning; the two `Marshal` rows
+on a Regexp's encoding; and `rindex` and
+`byterindex` with `\G`, which anchors at the search's start. Before it, two
+hundred and eighty across a hundred and twenty-one; the count below went stale
+again over the slices between. `require 'objspace'` (#690) removed `library/objectspace`'s eight, and their
 three files. Before it, three hundred and five across a hundred and
 thirty-seven; the count below it went stale over the slices since, which
 removed tags without saying so here. Copying an object's finalizers to its `dup` and `clone`

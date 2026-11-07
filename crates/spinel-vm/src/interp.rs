@@ -2581,6 +2581,19 @@ fn run<'h>(
                         let literal = frames[top].iseq.literals[index as usize].clone();
                         let value = materialise(scope, &literal, string_class)?;
                         stack.push(value);
+                        if let Some(message) = scope.take_pending_warning()
+                            && let Some(unwind) = vm_warn(
+                                scope,
+                                &mut stack,
+                                &mut frames,
+                                proc_class,
+                                &mut ids,
+                                &message,
+                                false,
+                            )?
+                        {
+                            return Ok(Step::Unwind(unwind));
+                        }
                     }
                     Insn::PushSym(index) => {
                         let symbol = frames[top].symbols[index as usize];
@@ -3296,6 +3309,19 @@ fn run<'h>(
                         };
                         let value = regexp_new(scope, &bytes, encoding, options)?;
                         stack.push(value);
+                        if let Some(message) = scope.take_pending_warning()
+                            && let Some(unwind) = vm_warn(
+                                scope,
+                                &mut stack,
+                                &mut frames,
+                                proc_class,
+                                &mut ids,
+                                &message,
+                                false,
+                            )?
+                        {
+                            return Ok(Step::Unwind(unwind));
+                        }
                     }
 
                     Insn::OnceGet(displacement, site) => {
@@ -3331,6 +3357,19 @@ fn run<'h>(
                             let value = regexp_new(scope, &bytes, encoding, options)?;
                             scope.regexps_mut().cache_once(&iseq, site, value);
                             stack.push(value);
+                            if let Some(message) = scope.take_pending_warning()
+                                && let Some(unwind) = vm_warn(
+                                    scope,
+                                    &mut stack,
+                                    &mut frames,
+                                    proc_class,
+                                    &mut ids,
+                                    &message,
+                                    false,
+                                )?
+                            {
+                                return Ok(Step::Unwind(unwind));
+                            }
                         }
                     }
 
@@ -13588,6 +13627,17 @@ fn native_call<'h>(
             stack.push(value);
             Ok(None)
         }
+        Native::RegexpRmatch => {
+            let data = regexp_search(
+                scope,
+                call.receiver,
+                first_arg(&call),
+                nth_arg(&call, 1),
+                true,
+            )?;
+            stack.push(data);
+            Ok(None)
+        }
         Native::RegexpQuietMatch => {
             let saved = scope.last_match();
             let data = regexp_match_from(scope, call.receiver, first_arg(&call), Value::NIL)?;
@@ -13651,6 +13701,17 @@ fn native_call<'h>(
                 return Ok(None);
             }
             let program = regexp_program_checked(scope, call.receiver, "to_s")?;
+            let source_encoding = {
+                let mut nested = scope.nested();
+                let handle = nested.root(call.receiver);
+                let source = nested.slot(handle, crate::regexp::REGEXP_SOURCE);
+                string_encoding(&mut nested, source)
+            };
+            if let Some(encoding) = source_encoding.filter(|&e| crate::transcode::wide(e)) {
+                let value = regexp_wide_to_s(scope, call.receiver, &program, encoding, inspect);
+                stack.push(value);
+                return Ok(None);
+            }
             // `to_s` folds a leading group of options into its own; `inspect`
             // shows the source as written.
             let (body, flags) = if inspect {
@@ -14091,6 +14152,7 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         (Builtin::Regexp, &["__match__"], Native::RegexpQuietMatch),
         (Builtin::Regexp, &["__match_all__"], Native::RegexpMatchAll),
         (Builtin::Regexp, &["__match_at__"], Native::RegexpMatchAt),
+        (Builtin::Regexp, &["__rmatch__"], Native::RegexpRmatch),
         (
             Builtin::Regexp,
             &["__initialize__"],
@@ -15572,7 +15634,8 @@ fn materialise<'h>(
             source,
             options,
             encoding,
-        } => regexp_literal(scope, source, *options, *encoding),
+            parser_warned,
+        } => regexp_literal(scope, source, *options, *encoding, *parser_warned),
         Literal::Str(bytes, encoding)
         | Literal::FrozenStr(bytes, encoding)
         | Literal::ChilledStr(bytes, encoding) => {
@@ -16596,6 +16659,10 @@ fn regexp_encoding(source: &[u8], encoding: u8, options: i64, fixed: Option<u8>)
         source.is_ascii() && !names_unicode && !escapes_a_byte(source) && !names_a_property(source);
     if let Some(encoding) = fixed {
         (encoding, options | FIXEDENCODING)
+    } else if crate::transcode::wide(encoding) {
+        // UTF-16 and UTF-32 meet no other encoding, so a pattern in one is
+        // fixed to it whatever it spells. Measured.
+        (encoding, options | FIXEDENCODING)
     } else if options & NOENCODING != 0 {
         if ascii {
             (crate::strings::US_ASCII, options)
@@ -16668,16 +16735,23 @@ fn regexp_source_error(error: &spinel_regex::Error, source: &str) -> Error {
 ///
 /// The pattern is read in the file's source encoding, so in a `# encoding:
 /// binary` file `/\xAA/` is the byte, and BINARY. Measured.
+///
+/// What Onigmo warns about the pattern is said once: by the parser when it
+/// checked the literal, otherwise left pending on this first compile.
 fn regexp_literal(
     scope: &mut HandleScope<'_>,
     source: &str,
     options: i64,
     encoding: u8,
+    parser_warned: bool,
 ) -> Result<Value, Error> {
     if let Some(cached) = scope.regexps().cached(source, options, encoding) {
         return Ok(cached);
     }
     let value = regexp_new(scope, source.as_bytes(), encoding, options)?;
+    if parser_warned {
+        scope.take_pending_warning();
+    }
     scope.regexps_mut().cache(source, options, encoding, value);
     Ok(value)
 }
@@ -16764,7 +16838,12 @@ fn regexp_initialize(
     // Only Ruby's own bits: anything above them is not an option at all, and
     // must not be read as an encoding a literal fixed.
     let options = options & ((1 << crate::regexp::LITERAL_ENCODING_SHIFT) - 1);
-    regexp_build(scope, &bytes, encoding, options, None, Some(receiver)).map(|_| ())
+    let built = regexp_build(scope, &bytes, encoding, options, None, Some(receiver));
+    // A Regexp's pattern was warned about when it was made. Measured.
+    if from_regexp {
+        scope.take_pending_warning();
+    }
+    built.map(|_| ())
 }
 
 /// A literal's pattern: its options may carry the encoding a modifier fixed.
@@ -16832,6 +16911,16 @@ fn regexp_build(
         regexp_engine(encoding)
     };
     let (pattern, engine) = match reading {
+        // The engine reads UTF-16 and UTF-32 as the characters they spell,
+        // which is all a pattern's syntax is made of.
+        _ if crate::transcode::wide(encoding) => {
+            match crate::transcode::decode_wide(encoding, source) {
+                Some(text) => (text, spinel_regex::Encoding::Utf8),
+                None => {
+                    return Err(Error::raise("RegexpError", "invalid multibyte character"));
+                }
+            }
+        }
         Some(engine) if engine.uncarried(source) => {
             return Err(Error::Unknowable {
                 what: "a GB18030 regexp source with a four-byte code no character is assigned",
@@ -16874,6 +16963,18 @@ fn regexp_build(
                 regexp_source_error(&e, &regexp_display(source, engine))
             }
         })?;
+    // What Onigmo warns about the pattern, for the caller to say: a
+    // constructor at the line that called it, a literal only where the parser
+    // did not. ponytail: one warning per pattern, where Onigmo gives
+    // each nested quantifier its own; the upgrade is a pending list.
+    if let Some(warning) = scope
+        .regexps()
+        .get(index)
+        .and_then(|regex| regex.warnings().first())
+    {
+        let warning = format!("{warning}: {}", spinel_regex::describe(&pattern));
+        scope.set_pending_warning(warning);
+    }
     // The source String is in the pattern's encoding, as CRuby's is: that is
     // what `Regexp#encoding` reads.
     let string = class_handle(scope, Builtin::String);
@@ -17078,6 +17179,12 @@ fn regexp_match_encoding(
         }
         theirs
     };
+    if crate::transcode::wide(chosen) {
+        return Err(Error::Unknowable {
+            what: "matching a regexp against a UTF-16 or UTF-32 string",
+            needs: "a regex engine that reads UTF-16 and UTF-32 subjects",
+        });
+    }
     match regexp_engine(chosen) {
         Some(engine) if engine.uncarried(&bytes) => Err(Error::Unknowable {
             what: "matching a regexp against a GB18030 string with a four-byte code no character is assigned",
@@ -17180,6 +17287,19 @@ fn regexp_match_from(
     subject: Value,
     pos: Value,
 ) -> Result<Value, Error> {
+    regexp_search(scope, regexp, subject, pos, false)
+}
+
+/// [`regexp_match_from`], or with `reverse` the backward search from `pos`
+/// that `String#rindex` makes: each character start from `pos` down to 0 is
+/// tried in turn, `\G` anchored at `pos` for every one.
+fn regexp_search(
+    scope: &mut HandleScope<'_>,
+    regexp: Value,
+    subject: Value,
+    pos: Value,
+    reverse: bool,
+) -> Result<Value, Error> {
     let program = regexp_program_checked(scope, regexp, "=~")?;
     // `/re/ =~ nil` is nil in Ruby, not a TypeError.
     if subject == Value::NIL {
@@ -17207,6 +17327,7 @@ fn regexp_match_from(
 
     // A position past either end of the subject is no match at all, rather
     // than an error.
+    let mut starts = Vec::new();
     let start = match pos {
         Value::NIL => 0,
         _ => {
@@ -17225,7 +17346,6 @@ fn regexp_match_from(
                 engine,
                 spinel_regex::Encoding::Binary | spinel_regex::Encoding::Single(_)
             ) || bytes.is_ascii();
-            let mut starts = Vec::new();
             if !single {
                 starts.push(0);
                 while let Some(&at) = starts.last().filter(|&&at| at < bytes.len()) {
@@ -17251,9 +17371,27 @@ fn regexp_match_from(
     };
 
     let deadline = regexp_deadline(scope, regexp);
-    let found = program
-        .find_until(&bytes, start, engine, deadline)
-        .map_err(|e| regexp_error(&e))?;
+    let found = if reverse {
+        let mut at = start;
+        loop {
+            let found = program
+                .match_anchored(&bytes, at, start, engine, deadline)
+                .map_err(|e| regexp_error(&e))?;
+            if found.is_some() || at == 0 {
+                break found;
+            }
+            // The character start before `at`: a byte back when every
+            // character is one, else the one `starts` holds.
+            at = match starts.binary_search(&at) {
+                Ok(index) | Err(index) if !starts.is_empty() => starts[index.saturating_sub(1)],
+                _ => at - 1,
+            };
+        }
+    } else {
+        program
+            .find_until(&bytes, start, engine, deadline)
+            .map_err(|e| regexp_error(&e))?
+    };
     let Some(caps) = found else {
         scope.set_last_match(Value::NIL);
         return Ok(Value::NIL);
@@ -18109,6 +18247,46 @@ fn first_arg(call: &Pending) -> Value {
 
 fn nth_arg(call: &Pending, n: usize) -> Value {
     call.args.get(n).copied().unwrap_or(Value::NIL)
+}
+
+/// `Regexp#to_s` and `#inspect` for a pattern in UTF-16 or UTF-32.
+///
+/// `to_s` is in the pattern's own encoding, `(?-mix:` and all. `inspect` is
+/// the source's bytes as they stand between the slashes, a US-ASCII String
+/// with a NUL in it for `"a".encode("UTF-16LE")`, because CRuby's
+/// `rb_reg_desc` copies a source it cannot read as ASCII. Measured.
+fn regexp_wide_to_s(
+    scope: &mut HandleScope<'_>,
+    regexp: Value,
+    program: &spinel_regex::Regex,
+    encoding: u8,
+    inspect: bool,
+) -> Value {
+    let (bytes, encoding) = if inspect {
+        let source = {
+            let mut nested = scope.nested();
+            let handle = nested.root(regexp);
+            nested.slot(handle, crate::regexp::REGEXP_SOURCE)
+        };
+        let mut shown = b"/".to_vec();
+        shown.extend(string_bytes(scope, source).unwrap_or_default());
+        shown.push(b'/');
+        shown.extend(program.flags().to_letters().bytes());
+        (shown, crate::strings::US_ASCII)
+    } else {
+        let (body, flags) = regexp_to_s_fold(program);
+        let on = flags.to_letters();
+        let off: String = "mix".chars().filter(|c| !on.contains(*c)).collect();
+        let dash = if off.is_empty() { "" } else { "-" };
+        let text = format!("(?{on}{dash}{off}:{})", escape_slashes(body));
+        let bytes = text
+            .chars()
+            .flat_map(|c| crate::transcode::encode(encoding, u32::from(c)).unwrap_or_default())
+            .collect();
+        (bytes, encoding)
+    };
+    let string = class_handle(scope, Builtin::String);
+    string_alloc(scope, string, &bytes, encoding)
 }
 
 /// What `Regexp#to_s` shows: the source and flags, with options the source

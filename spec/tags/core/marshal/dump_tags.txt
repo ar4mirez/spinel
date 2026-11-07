@@ -1,1 +1,0 @@
-fails(a Regexp does not keep the encoding of a fixed-encoding source - #33):Marshal.dump with a Regexp dumps an ascii-compatible Regexp

@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 ruby-prism = "1.9.0"
 spinel-ast.workspace = true
+spinel-regex.workspace = true
 
 [lints]
 workspace = true

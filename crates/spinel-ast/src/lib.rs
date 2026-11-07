@@ -370,6 +370,9 @@ pub enum StrPart {
 pub struct RegexpLit {
     pub parts: Vec<StrPart>,
     pub flags: RegexpFlags,
+    /// Whether the parser compiled this literal as it parsed it, and so has
+    /// already said what Onigmo warns about it.
+    pub checked: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

@@ -62,6 +62,8 @@ pub(crate) struct SourceOrigin<'a> {
     pub(crate) line_starts: &'a [u32],
     /// What line 1 is numbered: `eval`'s `lineno` (#38).
     pub(crate) first_line: i64,
+    /// Where each regexp literal the parser compiled starts.
+    pub(crate) checked_regexps: &'a std::collections::HashSet<u32>,
 }
 
 impl SourceOrigin<'_> {
@@ -421,6 +423,10 @@ impl Lower<'_> {
                 ExprKind::Regexp(Box::new(RegexpLit {
                     parts: vec![StrPart::Bytes(bytes(n.unescaped()))],
                     flags: regexp_flags_literal(&n),
+                    checked: self
+                        .origin
+                        .checked_regexps
+                        .contains(&span_of(&n.location()).start),
                 }))
             }
             pm::Node::InterpolatedRegularExpressionNode { .. } => {
@@ -429,6 +435,7 @@ impl Lower<'_> {
                 ExprKind::Regexp(Box::new(RegexpLit {
                     parts,
                     flags: regexp_flags_interpolated(&n),
+                    checked: false,
                 }))
             }
             pm::Node::MatchLastLineNode { .. } => {
@@ -436,6 +443,10 @@ impl Lower<'_> {
                 ExprKind::MatchLastLine(Box::new(RegexpLit {
                     parts: vec![StrPart::Bytes(bytes(n.unescaped()))],
                     flags: regexp_flags_last_line(&n),
+                    checked: self
+                        .origin
+                        .checked_regexps
+                        .contains(&span_of(&n.location()).start),
                 }))
             }
             pm::Node::InterpolatedMatchLastLineNode { .. } => {
@@ -444,6 +455,7 @@ impl Lower<'_> {
                 ExprKind::MatchLastLine(Box::new(RegexpLit {
                     parts,
                     flags: regexp_flags_interpolated_last_line(&n),
+                    checked: false,
                 }))
             }
 
