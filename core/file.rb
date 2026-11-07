@@ -185,6 +185,12 @@ class File < IO
   # Measured: the run of separators a path starts with is kept as written,
   # `//a` and `////a` included, until a `..` climbs back past it.
   def self.__normalize__(path)
+    # Already normal, with no repeated separator, no `.` or `..` and no
+    # trailing separator, a copy of it is the result: one regexp search, not
+    # a step per component, which made `expand_path` of a long path cost its
+    # length many times over (#49). Searched as bytes, so a broken path is
+    # looked at as the split below looks at it.
+    return path.dup if path.start_with?("/") && !path.b.match?(%r{//|/\.\.?(?:/|\z)|./\z})
     root = path[/\A\/+/] || "/"
     parts = []
     path.split("/").each do |part|

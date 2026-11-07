@@ -970,6 +970,14 @@ class String
     bytesize % newline.bytesize == 0 && b.end_with?(newline)
   end
 
+  # Whether a character starts at `byte`, as `__char_offsets__.include?(byte)`
+  # answers it, but walking only as far as `byte` rather than building the
+  # table of every character's position: `File.join` asks it of a path at
+  # every part, so a long path made each call cost its length (#49).
+  def __char_start__?(byte)
+    __char_byte__(__char_count__(0, byte)) == byte
+  end
+
   # A boundary is where the walk to the character that starts at or after it
   # lands, which goes no further than `byte` (#617). In UTF-8 a trail byte is
   # never one, even where a truncated character leaves it standing alone:
@@ -993,7 +1001,7 @@ class String
       else
         prefix = String.__coerce__(prefix)
         bytesize >= prefix.bytesize && __byteslice__(0, prefix.bytesize) == prefix &&
-          (prefix.empty? || __char_offsets__.include?(prefix.bytesize))
+          (prefix.empty? || __char_start__?(prefix.bytesize))
       end
     end
   end
@@ -1007,7 +1015,7 @@ class String
       __combined_encoding__(suffix)
       at = bytesize - suffix.bytesize
       at >= 0 && __byteslice__(at, suffix.bytesize) == suffix &&
-        (suffix.empty? || __char_offsets__.include?(at))
+        (suffix.empty? || __char_start__?(at))
     end
   end
 
