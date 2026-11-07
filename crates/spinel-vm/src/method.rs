@@ -715,6 +715,17 @@ pub enum FsOp {
     Utime,
     /// `__fs_chown__(path, uid, gid, follow)`: true. -1 leaves one alone.
     Chown,
+    /// `__fd_opendir__(path)`: `[fd]`, a close-on-exec descriptor opened
+    /// with `O_DIRECTORY`, so a path that is not a directory is `ENOTDIR`.
+    OpenDir,
+    /// `__fd_dirents__(fd)`: the directory's entry names, sorted, without
+    /// `.` and `..`, read as `fdopendir(3)` reads them from a duplicate of
+    /// `fd`, so its errors are `fdopendir`'s and `fd` stays open.
+    DirEntries,
+    /// `__fs_fchdir__(fd)`: true.
+    Fchdir,
+    /// `__fs_chroot__(path)`: true.
+    Chroot,
 }
 
 /// Which socket call. See `socket.rs` for the calls and `interp.rs`,

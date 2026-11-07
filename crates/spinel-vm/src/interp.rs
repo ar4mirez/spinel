@@ -15307,6 +15307,26 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         ),
         (
             Builtin::Kernel,
+            &["__fd_opendir__"],
+            Native::Fs(FsOp::OpenDir),
+        ),
+        (
+            Builtin::Kernel,
+            &["__fd_dirents__"],
+            Native::Fs(FsOp::DirEntries),
+        ),
+        (
+            Builtin::Kernel,
+            &["__fs_fchdir__"],
+            Native::Fs(FsOp::Fchdir),
+        ),
+        (
+            Builtin::Kernel,
+            &["__fs_chroot__"],
+            Native::Fs(FsOp::Chroot),
+        ),
+        (
+            Builtin::Kernel,
             &["__fs_isatty__"],
             Native::Fs(FsOp::Isatty),
         ),
@@ -19920,6 +19940,66 @@ fn fs_native(
                 Err(error) => errno_value(&error),
             }
         }
+        FsOp::OpenDir => {
+            let path = path_arg(scope, call, 0)?;
+            let Ok(path) = std::ffi::CString::new(path.into_os_string().into_vec()) else {
+                stack.push(Value::fixnum(i64::from(libc::EINVAL)).expect("an errno"));
+                return Ok(None);
+            };
+            // SAFETY: `path` is NUL-terminated and outlives the call; `open`
+            // reads it and answers a descriptor or -1.
+            let fd = unsafe {
+                libc::open(
+                    path.as_ptr(),
+                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+                )
+            };
+            if fd < 0 {
+                errno_value(&std::io::Error::last_os_error())
+            } else {
+                let fd = Value::fixnum(i64::from(fd)).expect("a descriptor");
+                new_array(scope, &[fd])
+            }
+        }
+        FsOp::DirEntries => {
+            let fd = fd_arg(call)?;
+            match dir_entries(fd) {
+                Ok(mut names) => {
+                    names.sort();
+                    let mut values = Vec::with_capacity(names.len());
+                    for name in names {
+                        let value = os_string(scope, name);
+                        values.push(scope.root(value));
+                    }
+                    let values: Vec<Value> = values.into_iter().map(|h| scope.get(h)).collect();
+                    new_array(scope, &values)
+                }
+                Err(error) => errno_value(&error),
+            }
+        }
+        FsOp::Fchdir => {
+            let fd = fd_arg(call)?;
+            // SAFETY: `fchdir` takes a descriptor and touches no memory.
+            // Process-wide, as `__fs_chdir__` is.
+            if unsafe { libc::fchdir(fd) } < 0 {
+                errno_value(&std::io::Error::last_os_error())
+            } else {
+                Value::TRUE
+            }
+        }
+        FsOp::Chroot => {
+            let path = path_arg(scope, call, 0)?;
+            let Ok(path) = std::ffi::CString::new(path.into_os_string().into_vec()) else {
+                stack.push(Value::fixnum(i64::from(libc::EINVAL)).expect("an errno"));
+                return Ok(None);
+            };
+            // SAFETY: `path` is NUL-terminated and outlives the call.
+            if unsafe { libc::chroot(path.as_ptr()) } < 0 {
+                errno_value(&std::io::Error::last_os_error())
+            } else {
+                Value::TRUE
+            }
+        }
         FsOp::Umask => {
             // `umask(2)` only answers by being set, so reading it is setting
             // it twice. Process-wide, as the working directory is.
@@ -20411,6 +20491,45 @@ fn fs_native(
 }
 
 /// A path the OS handed back, as a UTF-8 String.
+/// A directory's entry names but `.` and `..`, read through `fdopendir(3)`
+/// on a duplicate of `fd` so that `fd` stays open when the stream is closed.
+/// The duplicate shares `fd`'s offset, so the stream is rewound first.
+fn dir_entries(fd: libc::c_int) -> std::io::Result<Vec<std::ffi::OsString>> {
+    // SAFETY: `fcntl` takes a descriptor and touches no memory.
+    let copy = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
+    if copy < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: `copy` is a descriptor this function owns; on success the
+    // stream owns it and `closedir` below closes it.
+    let stream = unsafe { libc::fdopendir(copy) };
+    if stream.is_null() {
+        let error = std::io::Error::last_os_error();
+        // SAFETY: `fdopendir` failed, so `copy` is still ours to close.
+        unsafe { libc::close(copy) };
+        return Err(error);
+    }
+    let mut names = Vec::new();
+    // SAFETY: `stream` is open until `closedir`; each `dirent` that
+    // `readdir` answers is valid until the next call, and its name is
+    // copied out before then.
+    unsafe {
+        libc::rewinddir(stream);
+        loop {
+            let entry = libc::readdir(stream);
+            if entry.is_null() {
+                break;
+            }
+            let name = std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()).to_bytes();
+            if name != b"." && name != b".." {
+                names.push(std::ffi::OsString::from_vec(name.to_vec()));
+            }
+        }
+        libc::closedir(stream);
+    }
+    Ok(names)
+}
+
 fn os_string(scope: &mut HandleScope<'_>, text: std::ffi::OsString) -> Value {
     let class = class_handle(scope, Builtin::String);
     string_alloc(scope, class, &text.into_vec(), crate::strings::UTF_8)
