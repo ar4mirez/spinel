@@ -43,6 +43,8 @@ pub const EUC_JP: u8 = 10;
 pub const CESU_8: u8 = 15;
 /// `Windows-31J`, which a regexp's `/s` fixes it to.
 pub const WINDOWS_31J: u8 = 11;
+/// `EUC-KR`, transcoded by CRuby's table (#725).
+pub const EUC_KR: u8 = 18;
 /// `Shift_JIS`, whose characters are bounded as Windows-31J's are.
 pub const SHIFT_JIS: u8 = 39;
 

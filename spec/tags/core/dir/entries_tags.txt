@@ -1,1 +1,0 @@
-fails(#725: transcoding to EUC-KR is not implemented):Dir.entries returns entries transcoded to the default internal encoding

@@ -1,0 +1,166 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# The oracle behind `crates/spinel-vm/src/euckr_table.rs` (#725): how CRuby
+# maps EUC-KR to Unicode and back. As with the JIS encodings
+# (`scripts/jis-table.rb`, #378), the mapping is a table, not arithmetic, so
+# it is measured through `String#encode` on a real Ruby rather than copied
+# from a standard: what CRuby's `enc/trans/korean` tables say is the answer.
+#
+#   ruby scripts/euckr-table.rb --check      # CI: agree, or fail
+#   ruby scripts/euckr-table.rb --generate   # rewrite the table
+#
+# A character past ASCII is a *cell* of KS X 1001: its row and column, from
+# 0, in a plane of 94 columns, spelled as two bytes 0xA1 to 0xFE. ASCII is
+# arithmetic and is checked here, not tabled. Besides the plane, the table
+# records what decoding does not determine: which cell CRuby writes for a
+# character more than one cell decodes to, and the characters it writes as a
+# cell that reads back as another. What the Rust side does by hand — which
+# bytes lead, which follow, and what an invalid sequence reports — is checked
+# against CRuby here too, so a Ruby that changes any of it fails CI.
+
+TABLE = File.expand_path("../crates/spinel-vm/src/euckr_table.rs", __dir__)
+ENCODING = "EUC-KR"
+CELLS = 94 * 94
+
+def decode(bytes)
+  [:char, bytes.pack("C*").force_encoding(ENCODING).encode("UTF-8").ord]
+rescue Encoding::UndefinedConversionError
+  [:undefined]
+rescue Encoding::InvalidByteSequenceError => e
+  [e.incomplete_input? ? :incomplete : :invalid, e.error_bytes.bytesize, e.readagain_bytes&.bytesize || 0]
+end
+
+def code(bytes)
+  outcome = decode(bytes)
+  outcome[0] == :char ? outcome[1] : nil
+end
+
+def euc(cell) = [0xA1 + cell / 94, 0xA1 + cell % 94]
+
+def fail!(message)
+  warn "euckr-table: #{message}"
+  exit 1
+end
+
+def expect(what, actual, expected)
+  fail!("#{what}: CRuby says #{actual.inspect}, the Rust side assumes #{expected.inspect}") unless actual == expected
+end
+
+# What `euckr.rs`'s reader assumes about the bytes alone: ASCII is itself, a
+# lead is 0xA1 to 0xFE and so is the byte after it, a bad lead is the error
+# alone, and a bad byte after a lead is given back to be read again.
+def model(bytes)
+  follows = ->(b) { (0xA1..0xFE).cover?(b) }
+  first, second = bytes
+  return :char if first < 0x80
+  return [:invalid, 1, 0] unless follows.(first)
+  return [:incomplete, 1, 0] if second.nil?
+  follows.(second) ? :char : [:invalid, 1, 1]
+end
+
+def check_reader
+  prefixes = (0..0xFF).map { [_1] }
+  until prefixes.empty?
+    bytes = prefixes.shift
+    outcome = decode(bytes)
+    outcome = :char if outcome[0] == :char || outcome[0] == :undefined
+    expect("reading #{bytes.map { format("%02X", _1) }.join}", outcome, model(bytes))
+    prefixes.concat((0..0xFF).map { bytes + [_1] }) if outcome[0] == :incomplete
+  end
+  expect("path to UTF-8", Encoding::Converter.search_convpath(ENCODING, "UTF-8"), [[Encoding::EUC_KR, Encoding::UTF_8]])
+  expect("path from UTF-8", Encoding::Converter.search_convpath("UTF-8", ENCODING), [[Encoding::UTF_8, Encoding::EUC_KR]])
+end
+
+def check_ascii
+  (0..0x7F).each do |b|
+    expect("ASCII #{b}", code([b]), b)
+    expect("writing ASCII #{b}", b.chr.encode(ENCODING).bytes, [b])
+  end
+end
+
+# How CRuby writes each character, against what reading every cell back
+# implies: the cells it does not choose when several read as one character,
+# and the characters it writes as a cell that reads as another.
+def writing(cells)
+  written = {}
+  (0x80..0x10FFFF).each do |point|
+    next if point.between?(0xD800, 0xDFFF)
+    bytes = begin
+      point.chr("UTF-8").encode(ENCODING).bytes
+    rescue Encoding::UndefinedConversionError
+      next
+    end
+    fail!("writes U+#{point.to_s(16)} past the BMP") if point > 0xFFFF
+    fail!("writes U+#{point.to_s(16)} as #{bytes}, not a cell") unless bytes.size == 2 && bytes.all? { (0xA1..0xFE).cover?(_1) }
+    written[point] = (bytes[0] - 0xA1) * 94 + bytes[1] - 0xA1
+  end
+  one_way = written.select { |point, cell| cells[cell] != point }.sort
+  unchosen = cells.each_index.select { |cell| cells[cell] && written[cells[cell]] != cell }
+  built = {}
+  cells.each_with_index { |point, cell| built[point] = cell if point && !unchosen.include?(cell) }
+  one_way.each { |point, cell| built[point] = cell }
+  expect("writing", built.sort, written.sort)
+  [built.size, unchosen, one_way]
+end
+
+def row_text(points)
+  points.map do |point|
+    next "\\0" if point.nil?
+    char = point.chr("UTF-8")
+    char.match?(/[^\p{L}\p{N}\p{P}\p{S}]|["\\]/) ? format("\\u{%X}", point) : char
+  end.join
+end
+
+def list(values, per_line)
+  return "&[]" if values.empty?
+  "&[\n#{values.each_slice(per_line).map { |line| "    #{line.join(", ")}," }.join("\n")}\n]"
+end
+
+def render
+  check_reader
+  check_ascii
+  cells = Array.new(CELLS) { |cell| code(euc(cell)) }
+  count, unchosen, one_way = writing(cells)
+  rows = cells.each_slice(94).map { |row| row_text(row) }
+  <<~RUST
+    //! How CRuby maps EUC-KR to Unicode (#725).
+    //! Generated by `scripts/euckr-table.rb --generate` from ruby #{RUBY_VERSION}; do not edit.
+    //!
+    //! The plane is its characters in cell order, as text: `euckr.rs` reads it
+    //! into an array of codepoints at compile time, and inverts it there for
+    //! writing.
+
+    /// KS X 1001 as EUC-KR reads it: a row per line, `\\0` for a cell with no
+    /// character.
+    pub const KSX1001: &str = "\\
+    #{rows.join("\\\n")}";
+
+    /// How many characters EUC-KR writes as a cell.
+    pub const EUC_KR_WRITTEN: usize = #{count};
+
+    /// EUC-KR's cells that read as a character CRuby writes as another cell.
+    #[rustfmt::skip]
+    pub const EUC_KR_UNCHOSEN: &[u16] = #{list(unchosen, 12)};
+
+    /// Characters EUC-KR writes as a cell that reads as another, and that cell.
+    #[rustfmt::skip]
+    pub const EUC_KR_ONE_WAY: &[(u16, u16)] = #{list(one_way.map { |point, cell| format("(0x%04X, %d)", point, cell) }, 6)};
+  RUST
+end
+
+case ARGV.first
+when "--generate"
+  File.write(TABLE, render)
+  puts "wrote #{TABLE}"
+when "--check"
+  if File.read(TABLE).sub(/from ruby [\d.]+/, "") == render.sub(/from ruby [\d.]+/, "")
+    puts "#{TABLE} matches ruby #{RUBY_VERSION}"
+  else
+    warn "#{TABLE} disagrees with ruby #{RUBY_VERSION}: run --generate and review the diff"
+    exit 1
+  end
+else
+  warn "usage: #{$PROGRAM_NAME} --check | --generate"
+  exit 2
+end

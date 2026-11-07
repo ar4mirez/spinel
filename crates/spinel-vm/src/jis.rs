@@ -21,7 +21,7 @@ const WINDOWS_CELLS: usize = 120 * 94;
 
 /// A plane's text, one character per cell and NUL for none, as codepoints.
 /// Evaluated at compile time; a plane of the wrong size does not compile.
-const fn plane<const N: usize>(text: &str) -> [u16; N] {
+pub(crate) const fn plane<const N: usize>(text: &str) -> [u16; N] {
     let bytes = text.as_bytes();
     let mut out = [0u16; N];
     let (mut at, mut cell) = (0, 0);
@@ -50,7 +50,7 @@ const fn plane<const N: usize>(text: &str) -> [u16; N] {
 /// cell of `first` then `second` that reads as a character, but those CRuby
 /// writes another cell for, and the characters it writes as a cell that reads
 /// as something else. Evaluated at compile time, from the planes.
-const fn writer<const N: usize>(
+pub(crate) const fn writer<const N: usize>(
     first: &[u16],
     second: &[u16],
     unchosen: &[u16],
