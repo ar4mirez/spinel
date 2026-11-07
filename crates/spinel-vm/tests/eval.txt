@@ -2686,3 +2686,7 @@ n = "/tmp/spinel-eval-#{Process.pid}-686s"; File.binwrite(n, "a\u2603b\xFF"); e 
 "é".encode("CP50221", replace: "a").bytes  #=> [97]
 # #695: the per-call class cache of `flatten` is keyed by the class with its singleton, so a leaf with its own `to_ary` among plain ones of the same class is still asked.
 c = Class.new; a = c.new; b = c.new; def b.to_ary = [:b]; m = c.new; def m.method_missing(n, *) = n == :to_ary ? [:m] : super; [[a, b, a, m, 1, 1.5, "s", :y].flatten.map { |x| c === x ? :a : x }, [b, [a, b]].flatten(1).size, [BasicObject.new, b].flatten.size]  #=> [[:a, :b, :a, :m, 1, 1.5, "s", :y], 3, 2]
+# EUC-KR to and from UTF-8, by CRuby's KS X 1001 table (#725).
+"가".encode("EUC-KR").bytes  #=> [176, 161]
+"\xB0\xA1".force_encoding("EUC-KR").encode("UTF-8")  #=> "가"
+[("\xA2\xE8".force_encoding("EUC-KR").encode("UTF-8") rescue [$!.class, $!.message]), ("é".encode("EUC-KR") rescue [$!.class, $!.message]), "\xB0\xA1\xFF".force_encoding("EUC-KR").encode("UTF-8", invalid: :replace), "\xB0\xA1".force_encoding("EUC-KR").encode("UTF-16LE").bytes]  #=> [[Encoding::UndefinedConversionError, "\"\\xA2\\xE8\" from EUC-KR to UTF-8"], [Encoding::UndefinedConversionError, "U+00E9 from UTF-8 to EUC-KR"], "가�", [0, 172]]
