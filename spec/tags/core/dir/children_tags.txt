@@ -1,2 +1,2 @@
-fails(#42: directory entries are not transcoded to the default internal encoding):Dir.children returns children transcoded to the default internal encoding
-fails(#42: directory entries are not transcoded to the default internal encoding):Dir#children returns children transcoded to the default internal encoding
+fails(#725: transcoding to EUC-KR is not implemented):Dir.children returns children transcoded to the default internal encoding
+fails(#725: transcoding to EUC-KR is not implemented):Dir#children returns children transcoded to the default internal encoding

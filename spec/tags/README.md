@@ -87,8 +87,14 @@ fix is a different slice. The reason says which slice, by number.
 
 ## What is here now
 
-Two hundred and sixty-six tags across a hundred and thirteen files. The
-rest of #33 removed fourteen, and eight files: `Regexp.union`'s seven UTF-16
+Two hundred and forty tags across a hundred and eight files. `Dir` (#42)
+removed twenty-three, and three files: `Dir.glob`'s twelve and `Dir.[]`'s ten,
+which pass now that the glob is `dir.c`'s, and `Dir#read` on a name that
+cannot be converted; it moved the three on the default internal encoding to
+#725, as the encoding they convert to is EUC-KR. Before it, two hundred and
+sixty-three across a hundred and eleven, where this count had said two
+hundred and sixty-six across a hundred and thirteen, gone stale over the
+slices between. The rest of #33 removed fourteen, and eight files: `Regexp.union`'s seven UTF-16
 rows, which pass now that a pattern written in UTF-16 is in that encoding;
 three `language/regexp` rows, a numbered variable too big to be one, a literal
 that is a `SyntaxError` and a nested repeat's warning; the two `Marshal` rows

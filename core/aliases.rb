@@ -37,6 +37,7 @@ class Dir
   end
 
   alias path to_path
+  alias tell pos
 end
 
 class Encoding
