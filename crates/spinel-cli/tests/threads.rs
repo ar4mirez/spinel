@@ -2,7 +2,8 @@
 //! the same time, and a thread that never waits is preempted rather than
 //! starving the rest. Each runs on an OS thread of its own (#328), so one
 //! blocked in the kernel leaves the rest running, and the program's end
-//! kills those still alive.
+//! kills those still alive. A thread whose sleep is over gets its turn even
+//! while the one running is mostly in the core library (#728).
 
 use std::io::Read;
 use std::path::PathBuf;
@@ -96,4 +97,21 @@ fn a_thread_running_before_tracing_starts_traces_its_allocations() {
         String::from_utf8_lossy(&output.stdout),
         "[\"trace_allocations.rb\", 8]\n"
     );
+}
+
+#[test]
+fn a_sleeper_wakes_while_the_main_thread_loops_in_the_core_library() {
+    let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/threads/core_library_loop.rb");
+    let output = Command::new(SPINEL)
+        .arg("run")
+        .arg(&script)
+        .output()
+        .expect("spinel runs");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "woken\n");
 }
