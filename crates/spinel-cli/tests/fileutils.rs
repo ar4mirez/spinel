@@ -90,10 +90,8 @@ fn fileutils_works_on_a_scratch_tree() {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
-    let root = std::env::temp_dir().join(format!(
-        "spinel-fileutils-{}-{nanos}",
-        std::process::id()
-    ));
+    let root =
+        std::env::temp_dir().join(format!("spinel-fileutils-{}-{nanos}", std::process::id()));
     std::fs::create_dir_all(&root).expect("the scratch directory is made");
 
     let script =
