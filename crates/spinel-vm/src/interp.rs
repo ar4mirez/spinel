@@ -7943,12 +7943,12 @@ fn qualified_name(scope: &mut HandleScope<'_>, cbase: ClassId, name: SymbolId) -
         None if cbase != Builtin::Object.id() => {
             let object = scope.classes().object(cbase);
             let handle = scope.root(object);
-            let id = scope.address(handle) >> 4;
+            let id = crate::heap::object_id(scope.address(handle));
             let noun = match scope.classes().kind(cbase) {
                 Kind::Module => "Module",
                 Kind::Class => "Class",
             };
-            format!("#<{noun}:0x{id:x}>::{leaf}")
+            format!("#<{noun}:0x{id:016x}>::{leaf}")
         }
         _ => leaf,
     }
