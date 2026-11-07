@@ -428,6 +428,9 @@ pub enum Native {
     /// `Kernel#__signal_take__`: one arrival of the lowest-numbered signal
     /// waiting, its number, the rest left waiting; nil when none waits.
     SignalTake,
+    /// `Kernel#__signal_mask__(on)`: set whether a trap handler runs, so
+    /// signals waiting are left to wait; whether one ran before.
+    SignalMask,
     /// The backtrace of the frames below the calling one, as
     /// `[[path, line, label], ...]` innermost first (#29).
     ///

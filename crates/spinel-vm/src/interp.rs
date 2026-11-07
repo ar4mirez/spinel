@@ -2505,7 +2505,7 @@ fn run<'h>(
                         // as a finalizer is. Not part-way through the core
                         // library, which `preempt` does not interleave
                         // either; the next turn check looks again.
-                        if crate::shared::signals::any() && threads::signal_is_mine(scope) {
+                        if threads::signal_waits(scope) && threads::signal_is_mine(scope) {
                             if frames
                                 .last()
                                 .and_then(|frame| frame.iseq.path.as_deref())
@@ -11479,6 +11479,12 @@ fn native_call<'h>(
             stack.push(value);
             Ok(None)
         }
+        Native::SignalMask => {
+            let on = call.args.first().is_some_and(|v| v.is_truthy());
+            let value = bool_value(threads::set_trapping(scope, on));
+            stack.push(value);
+            Ok(None)
+        }
         Native::SignalTake => {
             let value = crate::shared::signals::take().map_or(Value::NIL, |n| {
                 Value::fixnum(i64::from(n)).expect("a signal number is a fixnum")
@@ -14579,6 +14585,7 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             Native::SignalHandle,
         ),
         (Builtin::Kernel, &["__signal_take__"], Native::SignalTake),
+        (Builtin::Kernel, &["__signal_mask__"], Native::SignalMask),
         (Builtin::Kernel, &["__gc_start__"], Native::Gc(GcOp::Start)),
         (Builtin::Kernel, &["__gc_stat__"], Native::Gc(GcOp::Stat)),
         (

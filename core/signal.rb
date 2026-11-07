@@ -91,11 +91,18 @@ module Signal
   # Every signal that arrived since the last look, handled in the order of
   # their numbers, once per arrival, taken one at a time: a handler that
   # raises leaves the rest waiting for the next safe point, as CRuby does.
-  # Called by the main thread only, at a safe point: the interpreter's turn
-  # check, or a wait a signal ended.
+  # No handler runs inside another: while one runs, signals wait, as
+  # CRuby's `TRAP_INTERRUPT_MASK` keeps them. Called by the main thread
+  # only, at a safe point: the interpreter's turn check, or a wait a signal
+  # ended.
   def self.__run_pending__
-    while (number = __signal_take__)
-      __deliver__(number)
+    return nil if __signal_mask__(true)
+    begin
+      while (number = __signal_take__)
+        __deliver__(number)
+      end
+    ensure
+      __signal_mask__(false)
     end
     nil
   end

@@ -2,7 +2,8 @@
 //! example covers: a handler runs on the main thread at a safe point and the
 //! wait it interrupted goes on; it runs even when the main thread is almost
 //! always in the core library; a signal met during the program's last call
-//! still ends it; a handler that raises leaves the other signals waiting; a
+//! still ends it; a handler that raises leaves the other signals waiting,
+//! and none runs inside another; a
 //! forked child wakes for its own signals, even one sent the moment it is
 //! forked; SIGINT cuts a blocked read short; and `ENV` is the environment a
 //! child inherits. Each fixture's output was measured against ruby 4.0.9, but
@@ -109,6 +110,13 @@ fn a_signal_sent_right_after_fork_reaches_the_child() {
         assert!(status.success(), "stderr: {stderr}");
         assert_eq!(stdout, "child\n0\n");
     }
+}
+
+#[test]
+fn a_handler_does_not_run_inside_another() {
+    let (status, stdout, stderr) = run("one_at_a_time.rb");
+    assert!(status.success(), "stderr: {stderr}");
+    assert_eq!(stdout, "[\"a1\", \"a2\", \"b\"]\n");
 }
 
 #[test]

@@ -122,6 +122,9 @@ pub(crate) struct ThreadTable {
     /// Whether the running thread was last entered out of a wait, woken:
     /// an interrupt met there is met blocking.
     pub(super) woken: bool,
+    /// Whether a trap handler runs: signals that wait go on waiting until it
+    /// returns, as CRuby's `TRAP_INTERRUPT_MASK` keeps them (#44).
+    pub(super) trapping: bool,
     /// Which OS thread has the heap; made with the main thread's entry.
     lock: Option<Arc<Lock>>,
     /// A refusal a thread met with nothing in it to catch it: the thread
@@ -686,6 +689,7 @@ fn wake_ready(scope: &mut HandleScope<'_>, timeout: Option<Duration>) -> usize {
     // a look that waits for nothing has already seen whether one came.
     if timeout.is_none_or(|t| !t.is_zero())
         && main_blocked(scope)
+        && !scope.fibers().threads.trapping
         && let Some(fd) = crate::shared::signals::wake_fd()
     {
         polled.push((
@@ -782,7 +786,18 @@ fn main_blocked(scope: &HandleScope<'_>) -> bool {
 /// `:signal`, for the wait to run the handlers and go on waiting
 /// (`Kernel#__thread_wait__`). How many woke: one or none.
 fn wake_for_signal(scope: &mut HandleScope<'_>) -> usize {
-    usize::from(crate::shared::signals::any() && wakeup(scope, 0, reason("signal")))
+    usize::from(signal_waits(scope) && wakeup(scope, 0, reason("signal")))
+}
+
+/// Whether a signal waits to be handled now: none does while a trap
+/// handler runs.
+pub(super) fn signal_waits(scope: &HandleScope<'_>) -> bool {
+    crate::shared::signals::any() && !scope.fibers().threads.trapping
+}
+
+/// Set whether a trap handler runs, answering whether one did.
+pub(super) fn set_trapping(scope: &mut HandleScope<'_>, trapping: bool) -> bool {
+    std::mem::replace(&mut scope.fibers_mut().threads.trapping, trapping)
 }
 
 /// For the loop's turn check when a signal waits: whether the running
