@@ -32,7 +32,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/hash` | 69 | 562 | 535 | 0 | 25 | 2 | 95% |
 | `core/integer` | 70 | 598 | 598 | 0 | 0 | 0 | 100% |
 | `core/io` | 103 | 1631 | 1420 | 0 | 205 | 6 | 87% |
-| `core/kernel` | 118 | 2241 | 2059 | 0 | 141 | 41 | 92% |
+| `core/kernel` | 118 | 2241 | 2066 | 0 | 135 | 40 | 92% |
 | `core/main` | 7 | 27 | 27 | 0 | 0 | 0 | 100% |
 | `core/marshal` | 6 | 475 | 475 | 0 | 0 | 0 | 100% |
 | `core/matchdata` | 30 | 186 | 186 | 0 | 0 | 0 | 100% |
@@ -66,8 +66,8 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/true` | 9 | 13 | 11 | 0 | 2 | 0 | 85% |
 | `core/unboundmethod` | 20 | 109 | 109 | 0 | 0 | 0 | 100% |
 | `core/warning` | 5 | 31 | 31 | 0 | 0 | 0 | 100% |
-| `language` | 67 | 2668 | 2512 | 0 | 126 | 30 | 94% |
-| `language/predefined` | 2 | 14 | 12 | 0 | 0 | 2 | 86% |
+| `language` | 67 | 2668 | 2513 | 0 | 125 | 30 | 94% |
+| `language/predefined` | 2 | 14 | 14 | 0 | 0 | 0 | 100% |
 | `language/regexp` | 11 | 257 | 257 | 0 | 0 | 0 | 100% |
 | `library/English` | 2 | 27 | 1 | 0 | 0 | 26 | 4% |
 | `library/abbrev` | 1 | 4 | 0 | 0 | 4 | 0 | 0% |
@@ -131,4 +131,4 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `optional/capi` | 47 | 0 | 0 | 0 | 0 | 0 | — |
 | `optional/thread_safety` | 1 | 5 | 0 | 0 | 5 | 0 | 0% |
 | `security` | 13 | 31 | 28 | 0 | 3 | 0 | 90% |
-| **total** | 3835 | 32683 | 29235 | 0 | 3179 | 269 | 89% |
+| **total** | 3835 | 32683 | 29245 | 0 | 3172 | 266 | 89% |

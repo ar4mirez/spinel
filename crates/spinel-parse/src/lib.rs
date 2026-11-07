@@ -102,7 +102,7 @@ const EVAL: &str = "(eval)";
 /// `SourceFileNode::filepath()` is always empty — so lowering carries it.
 #[must_use]
 pub fn parse_file(path: &str, source: &[u8]) -> Parsed {
-    parse_at(path, source, 1, false)
+    parse_at(path, source, 1, &EvalScopes::FILE)
 }
 
 /// Parse a string handed to `eval` (#38): `path` and `first_line` are its
@@ -116,6 +116,12 @@ pub fn parse_file(path: &str, source: &[u8]) -> Parsed {
 ///
 /// `encoding` is the string's own encoding when it is not UTF-8: CRuby reads
 /// an `eval` string in it unless a magic comment names another.
+///
+/// `forwarding` is what each scope around the string declares of the
+/// anonymous `*`, `**`, `&` and `...`, innermost first, as
+/// [`spinel_ast::forwarding`] flags: the string may pass on what they
+/// declare. Prism, told none of it, rejects every such use; see
+/// [`EvalScopes`] for how that is put right.
 #[must_use]
 pub fn parse_eval(
     path: &str,
@@ -123,7 +129,12 @@ pub fn parse_eval(
     first_line: i64,
     in_method: bool,
     encoding: Option<&str>,
+    forwarding: &[u8],
 ) -> Parsed {
+    let scopes = EvalScopes {
+        yield_allowed: in_method,
+        forwarding,
+    };
     match encoding {
         // ponytail: Prism is told the encoding by a magic comment put in
         // front of the source, a line earlier, because `ruby-prism` exposes
@@ -134,9 +145,9 @@ pub fn parse_eval(
         Some(name) if !source.is_ascii() && magic_encoding(source).is_none() => {
             let mut framed = format!("# encoding: {name}\n").into_bytes();
             framed.extend_from_slice(source);
-            parse_at(path, &framed, first_line - 1, in_method)
+            parse_at(path, &framed, first_line - 1, &scopes)
         }
-        _ => parse_at(path, source, first_line, in_method),
+        _ => parse_at(path, source, first_line, &scopes),
     }
 }
 
@@ -221,6 +232,190 @@ impl<'pr> ruby_prism::Visit<'pr> for RegexpLiterals {
     }
 }
 
+/// What an `eval` string is parsed inside of, which Prism is not told.
+struct EvalScopes<'a> {
+    /// The string runs inside a method, so a `yield` at its top level is
+    /// valid.
+    yield_allowed: bool,
+    /// See [`parse_eval`]. Empty for a file, which has nothing around it.
+    forwarding: &'a [u8],
+}
+
+impl EvalScopes<'_> {
+    const FILE: EvalScopes<'static> = EvalScopes {
+        yield_allowed: false,
+        forwarding: &[],
+    };
+
+    /// Prism's verdict on one use of an anonymous parameter, given the
+    /// scopes it was not told about. Answers whether the diagnostic stays,
+    /// rewriting it when the use conflicts rather than has nothing to pass.
+    ///
+    /// ponytail: Prism takes these scopes as `pm_options_t::scopes`, which
+    /// `ruby-prism` 1.9 does not expose; it parses the string as a file,
+    /// whose top scope declares nothing. So each "no anonymous parameter"
+    /// error is checked again here, the way Prism's own
+    /// `pm_parser_scope_forwarding_param_check` would have with the scopes:
+    /// walking outward, a scope that declares the parameter and is closed
+    /// passes it, unless an open one nearer did too, which is the "also used
+    /// within block" conflict. The string's own top scope is open, as is every
+    /// scope given except the outermost. The upgrade is passing the scopes to
+    /// Prism once the crate takes options, and deleting this.
+    fn recheck_forwarding(&self, nesting: &ForwardingNesting, diagnostic: &mut Diagnostic) -> bool {
+        let Some(anonymous) = ANONYMOUS.iter().find(|a| diagnostic.message == a.missing) else {
+            return true;
+        };
+        let at = diagnostic.span.start;
+        // A `def` or class body in the string is a closed scope of its own,
+        // and Prism already checked the use against it.
+        if nesting
+            .closed
+            .iter()
+            .any(|&(start, end)| start <= at && at < end)
+        {
+            return true;
+        }
+        let mut conflict = nesting.blocks.iter().any(|&(start, end, declares)| {
+            start <= at && at < end && declares & anonymous.flag != 0
+        });
+        let last = self.forwarding.len().saturating_sub(1);
+        for (index, &declares) in self.forwarding.iter().enumerate() {
+            if declares & anonymous.flag != 0 {
+                if index == last {
+                    if !conflict {
+                        return false;
+                    }
+                    let Some(message) = anonymous.conflict else {
+                        // `...` cannot be a block's parameter, so Prism has
+                        // no conflict to report for it.
+                        return false;
+                    };
+                    message.clone_into(&mut diagnostic.message);
+                    return true;
+                }
+                conflict = true;
+            }
+        }
+        true
+    }
+}
+
+/// One anonymous parameter, by Prism's two messages about using it.
+struct Anonymous {
+    flag: u8,
+    /// No scope around the use declares the parameter.
+    missing: &'static str,
+    /// A block nearer the use declares it too.
+    conflict: Option<&'static str>,
+}
+
+/// Prism's `PM_ERR_ARGUMENT_NO_FORWARDING_*` and `PM_ERR_ARGUMENT_CONFLICT_*`.
+const ANONYMOUS: [Anonymous; 4] = [
+    Anonymous {
+        flag: spinel_ast::forwarding::POSITIONALS,
+        missing: "unexpected `*`; no anonymous rest parameter",
+        conflict: Some("unexpected `*`; anonymous rest parameter is also used within block"),
+    },
+    Anonymous {
+        flag: spinel_ast::forwarding::KEYWORDS,
+        missing: "unexpected `**`; no anonymous keyword rest parameter",
+        conflict: Some(
+            "unexpected `**`; anonymous keyword rest parameter is also used within block",
+        ),
+    },
+    Anonymous {
+        flag: spinel_ast::forwarding::BLOCK,
+        missing: "unexpected `&`; no anonymous block parameter",
+        conflict: Some("unexpected `&`; anonymous block parameter is also used within block"),
+    },
+    Anonymous {
+        flag: spinel_ast::forwarding::ALL,
+        missing: "unexpected ... when the parent method is not forwarding",
+        conflict: None,
+    },
+];
+
+/// The scopes inside an `eval` string an anonymous parameter's use is
+/// checked through, as byte ranges.
+#[derive(Default)]
+struct ForwardingNesting {
+    /// `def` and class bodies: closed scopes.
+    closed: Vec<(u32, u32)>,
+    /// Blocks and lambdas: open scopes, with the anonymous parameters each
+    /// declares.
+    blocks: Vec<(u32, u32, u8)>,
+}
+
+impl ForwardingNesting {
+    fn close(&mut self, location: &ruby_prism::Location<'_>) {
+        let span = lower::span_of(location);
+        self.closed.push((span.start, span.end));
+    }
+
+    fn open(
+        &mut self,
+        location: &ruby_prism::Location<'_>,
+        parameters: Option<ruby_prism::Node<'_>>,
+    ) {
+        let span = lower::span_of(location);
+        let declares = parameters
+            .and_then(|p| p.as_block_parameters_node())
+            .and_then(|p| p.parameters())
+            .map_or(0, |p| {
+                let mut declares = 0;
+                if p.rest()
+                    .and_then(|r| r.as_rest_parameter_node())
+                    .is_some_and(|r| r.name().is_none())
+                {
+                    declares |= spinel_ast::forwarding::POSITIONALS;
+                }
+                if p.keyword_rest()
+                    .and_then(|r| r.as_keyword_rest_parameter_node())
+                    .is_some_and(|r| r.name().is_none())
+                {
+                    declares |= spinel_ast::forwarding::KEYWORDS;
+                }
+                if p.block().is_some_and(|b| b.name().is_none()) {
+                    declares |= spinel_ast::forwarding::BLOCK;
+                }
+                declares
+            });
+        self.blocks.push((span.start, span.end, declares));
+    }
+}
+
+impl<'pr> ruby_prism::Visit<'pr> for ForwardingNesting {
+    fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'pr>) {
+        self.close(&node.location());
+        ruby_prism::visit_def_node(self, node);
+    }
+
+    fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'pr>) {
+        self.close(&node.location());
+        ruby_prism::visit_class_node(self, node);
+    }
+
+    fn visit_module_node(&mut self, node: &ruby_prism::ModuleNode<'pr>) {
+        self.close(&node.location());
+        ruby_prism::visit_module_node(self, node);
+    }
+
+    fn visit_singleton_class_node(&mut self, node: &ruby_prism::SingletonClassNode<'pr>) {
+        self.close(&node.location());
+        ruby_prism::visit_singleton_class_node(self, node);
+    }
+
+    fn visit_block_node(&mut self, node: &ruby_prism::BlockNode<'pr>) {
+        self.open(&node.location(), node.parameters());
+        ruby_prism::visit_block_node(self, node);
+    }
+
+    fn visit_lambda_node(&mut self, node: &ruby_prism::LambdaNode<'pr>) {
+        self.open(&node.location(), node.parameters());
+        ruby_prism::visit_lambda_node(self, node);
+    }
+}
+
 /// The `yield`s outside any `class`, `module` or `class <<` body, by offset.
 #[derive(Default)]
 struct OpenYields {
@@ -255,7 +450,7 @@ impl<'pr> ruby_prism::Visit<'pr> for OpenYields {
     }
 }
 
-fn parse_at(path: &str, source: &[u8], first_line: i64, yield_allowed: bool) -> Parsed {
+fn parse_at(path: &str, source: &[u8], first_line: i64, scopes: &EvalScopes<'_>) -> Parsed {
     let result = ruby_prism::parse(source);
 
     let to_diagnostic = |d: ruby_prism::Diagnostic<'_>| Diagnostic {
@@ -282,10 +477,19 @@ fn parse_at(path: &str, source: &[u8], first_line: i64, yield_allowed: bool) -> 
             .retain(|d| d.span.start < start || !d.message.starts_with("possibly useless use of "));
     }
 
-    if yield_allowed && errors.iter().any(|d| d.message == "Invalid yield") {
+    if scopes.yield_allowed && errors.iter().any(|d| d.message == "Invalid yield") {
         let mut open = OpenYields::default();
         ruby_prism::Visit::visit_program_node(&mut open, &root);
         errors.retain(|d| d.message != "Invalid yield" || !open.starts.contains(&d.span.start));
+    }
+    if !scopes.forwarding.is_empty()
+        && errors
+            .iter()
+            .any(|d| ANONYMOUS.iter().any(|a| d.message == a.missing))
+    {
+        let mut nesting = ForwardingNesting::default();
+        ruby_prism::Visit::visit_program_node(&mut nesting, &root);
+        errors.retain_mut(|d| scopes.recheck_forwarding(&nesting, d));
     }
 
     // CRuby compiles a regexp literal as it parses it: a pattern that is not

@@ -41,6 +41,23 @@
 
 pub mod prism_map;
 
+/// Which anonymous parameters a scope around an `eval` string declares, so
+/// the string may pass them on (#38): `def m(*) = eval("f(*)")`.
+///
+/// One flag set per scope, as the parser takes them. The values are Prism's
+/// `PM_OPTIONS_SCOPE_FORWARDING_*`, which is what CRuby hands its parser for
+/// the same question.
+pub mod forwarding {
+    /// The anonymous `*`.
+    pub const POSITIONALS: u8 = 0x1;
+    /// The anonymous `**`.
+    pub const KEYWORDS: u8 = 0x2;
+    /// The anonymous `&`.
+    pub const BLOCK: u8 = 0x4;
+    /// `...`, which on its own forwards none of the other three.
+    pub const ALL: u8 = 0x8;
+}
+
 // ---------------------------------------------------------------------------
 // Spans and names
 // ---------------------------------------------------------------------------

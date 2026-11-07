@@ -299,6 +299,20 @@ eval("# frozen_string_literal: true\ns = 'abc'; s.instance_eval { size }")  #=> 
 eval("# frozen_string_literal: true\ns = 'abc'; s.instance_exec(2) { |n| size * n }")  #=> 6
 eval("# frozen_string_literal: true\ns = 'abc'; s.instance_eval('size')")  #=> 3
 eval("# frozen_string_literal: true\ns = 'abc'; begin; s.instance_eval { def q; end }; rescue => e; [e.class, e.message]; end")  #=> [TypeError, "can't define singleton"]
+# An `eval` string may pass on the anonymous parameters of the scopes around
+# it, and only those: `...` is not `*, **, &`, and a block that declares one
+# too is Prism's "also used within block" conflict (#38).
+def evf_t; yield; rescue SyntaxError => e; e.message[/unexpected[^\n]*/]; end; def evf_g(*a, **k, &b) = [a, k.to_a, b&.call]; def evf_1(*, **, &) = eval("evf_g(*, **, &)"); def evf_2(...) = eval("evf_g(...)"); def evf_3(*) = eval("[1].map { evf_g(*) }"); [evf_1(1, x: 2) { 3 }, evf_2(4, y: 5) { 6 }, evf_3(7)]  #=> [[[1], [[:x, 2]], 3], [[4], [[:y, 5]], 6], [[[7], [], nil]]]
+def evf_t; yield; rescue SyntaxError => e; e.message[/unexpected[^\n]*/]; end; def evf_g(*a, **k, &b) = [a, k, b&.call]; def evf_4(...) = eval("evf_g(*)"); def evf_5(*, **, &) = eval("evf_g(...)"); def evf_6(*) = eval("->(*) { evf_g(*) }"); def evf_7(*) = [1].map { |*| eval("evf_g(*)") }; def evf_8(*) = eval("def evf_z = evf_g(*)"); def evf_9(&) = eval("[1].map { |&| evf_g(&) }"); [evf_t { evf_4(1) }, evf_t { evf_5(1) }, evf_t { evf_6(1) }, evf_t { evf_7(1) }, evf_t { evf_8(1) }, evf_t { evf_9 { } }, evf_t { eval("evf_g(**)") }]  #=> ["unexpected `*`; no anonymous rest parameter", "unexpected ... when the parent method is not forwarding", "unexpected `*`; anonymous rest parameter is also used within block", "unexpected `*`; anonymous rest parameter is also used within block", "unexpected `*`; no anonymous rest parameter", "unexpected `&`; anonymous block parameter is also used within block", "unexpected `**`; no anonymous keyword rest parameter"]
+# A bare `super` in an `eval` string forwards the method's parameters as they
+# are now, from a block in it too; a block's `super` forwards a keyword under
+# its own name, not whatever the block's symbol table holds there (#38).
+module EvSM; def m(a, b:, **k) = [a, b, k]; def n(*a, **k) = k; end; class EvSC; include EvSM; def m(a, b:, **k); a = 5; [1].map { eval("super") }; end; def n(k: 1, **o); [[1].map { super }, eval("super")]; end; end; [EvSC.new.m(1, b: 2, c: 3), EvSC.new.n(k: 6)].flatten.map { |x| Hash === x ? x.to_a : x }  #=> [5, 2, [[:c, 3]], [[:k, 6]], [[:k, 6]]]
+# `return` in an `eval` string taken in a block returns from the method or
+# lambda around the block (#38).
+def evr_m = [1].each { eval("[2].each { return 5 }") }; [evr_m, -> { [1].each { eval("return 3") }; 4 }.call]  #=> [5, 3]
+# A name in a BINARY `eval` string is a BINARY Symbol (#38).
+s = eval(":Vπ".b); [s.encoding.name, s == :"Vπ", s == "Vπ".b.to_sym]  #=> ["ASCII-8BIT", false, true]
 # A String `instance_eval`/`class_eval` whose arguments go through `to_str`
 # and `to_int` still runs in its caller's binding (#28).
 module EvTS; X = :evts; end; lv = 42; s = Object.new; def s.to_str; "[self, X, lv, __FILE__, __LINE__]"; end; f = Object.new; def f.to_str; "f.rb"; end; EvTS.module_eval(s, f, 3)  #=> [EvTS, :evts, 42, "f.rb", 3]

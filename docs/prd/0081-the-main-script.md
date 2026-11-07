@@ -35,6 +35,10 @@ not by Prism's token, so one inside a heredoc counts.
 **`TOPLEVEL_BINDING`** is the `binding` of the main script's own frame,
 recorded by a call the CLI puts first in the program.
 
+> Superseded by #38 (see `docs/roadmap.md`): `TOPLEVEL_BINDING` is now made
+> before `-r`'s files run (`interp::define_toplevel_binding`), and the main
+> script runs inside it (`interp::eval_main`); the inserted call is gone.
+
 **How a program ends.** The exception that ended it is printed by Ruby,
 `full_message` with its cause and backtrace, after the `at_exit` handlers,
 as CRuby's top level prints it; a `SystemExit` of any class and a signal

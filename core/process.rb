@@ -40,15 +40,6 @@ module Kernel
 
   private :__end_block__
 
-  # The CLI makes this the main script's first call: its frame is the
-  # top level every file shares.
-  def __toplevel_binding__(binding)
-    Object.const_set(:TOPLEVEL_BINDING, binding) unless Object.const_defined?(:TOPLEVEL_BINDING, false)
-    nil
-  end
-
-  private :__toplevel_binding__
-
   class << self
     attr_accessor :__end_sites__
   end

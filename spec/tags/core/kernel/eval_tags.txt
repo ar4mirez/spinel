@@ -1,1 +1,0 @@
-fails(#38: eval: newly run since #43 let ruby_exe start Spinel, and it disagrees):Kernel#eval raises a LocalJumpError if there is no lambda-style closure in the chain
