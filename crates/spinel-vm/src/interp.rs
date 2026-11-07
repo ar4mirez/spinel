@@ -2483,6 +2483,12 @@ fn run<'h>(
                         break value;
                     }
                 }
+                // A turn the core library kept this thread from giving is
+                // given at the call or return that leaves it (#728): the
+                // turn check comes at this instruction.
+                if threads::turn_owed(scope) && !threads::in_core_library(&frames) {
+                    slice_end = budget.saturating_sub(1);
+                }
                 seen_frames = frames.len();
                 deadline = refresh_boundaries(scope, &frames, &mut boundaries, budget);
                 limit = deadline.max(slice_end).max(trace_floor);

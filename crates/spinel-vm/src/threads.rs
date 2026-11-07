@@ -122,6 +122,10 @@ pub(crate) struct ThreadTable {
     /// thread, the one that forked, as CRuby's `rb_thread_atfork` makes it.
     pub(super) main: usize,
     pub(super) slice_started: Option<Instant>,
+    /// Whether the running thread owes another a turn it could not give
+    /// because it was in the core library at the turn check (#728): the loop
+    /// checks again at the call or return that leaves the core library.
+    pub(super) owed: bool,
     /// Whether the running thread was last entered out of a wait, woken:
     /// an interrupt met there is met blocking.
     pub(super) woken: bool,
@@ -804,6 +808,21 @@ pub(super) fn signal_waits(scope: &HandleScope<'_>) -> bool {
     crate::shared::signals::any() && !scope.fibers().threads.trapping
 }
 
+/// Whether the running thread owes another a turn the core library kept it
+/// from giving at the last turn check (#728).
+pub(super) fn turn_owed(scope: &HandleScope<'_>) -> bool {
+    scope.fibers().threads.owed
+}
+
+/// Whether the top frame is the core library's, which `preempt` does not
+/// interleave with another thread.
+pub(super) fn in_core_library(frames: &[Call]) -> bool {
+    frames
+        .last()
+        .and_then(|frame| frame.iseq.path.as_deref())
+        .is_some_and(|path| path.starts_with("<internal:"))
+}
+
 /// Set whether a trap handler runs, answering whether one did.
 pub(super) fn set_trapping(scope: &mut HandleScope<'_>, trapping: bool) -> bool {
     std::mem::replace(&mut scope.fibers_mut().threads.trapping, trapping)
@@ -1064,6 +1083,7 @@ fn enter(
     fibers.root_parked = world.root_parked;
     fibers.threads.current = to;
     fibers.threads.slice_started = Some(Instant::now());
+    fibers.threads.owed = false;
     fibers.threads.woken = push.is_some_and(|value| !value.is_nil());
     let _ = scope.swap_roots(roots);
     *stack = context.stack;
@@ -1105,22 +1125,25 @@ pub(super) fn preempt(
             .expect("checked above"));
     }
     if threads.entries.len() < 2 || !threads.others() {
+        if threads.owed {
+            // The thread it was owed to is gone.
+            scope.fibers_mut().threads.owed = false;
+        }
         return Ok(None);
     }
     // Not part-way through the core library: its methods are Ruby here where
     // CRuby's are C, and run whole under the lock there, so they do here —
     // `Array#reject!` is not interleaved with another thread's `<<`. A block
     // the core library calls is the program's again, and can be preempted.
-    if frames
-        .last()
-        .and_then(|frame| frame.iseq.path.as_deref())
-        .is_some_and(|path| path.starts_with("<internal:"))
-    {
+    let internal = in_core_library(frames);
+    if internal && threads.owed {
+        // Still in the core library: the turn is given once it returns.
         return Ok(None);
     }
-    if threads
-        .slice_started
-        .is_some_and(|started| started.elapsed() < SLICE)
+    if !threads.owed
+        && threads
+            .slice_started
+            .is_some_and(|started| started.elapsed() < SLICE)
     {
         return Ok(None);
     }
@@ -1130,7 +1153,17 @@ pub(super) fn preempt(
     // leaving and coming straight back is what meets it.
     let queued = !scope.fibers().threads.entries[current].pending.is_empty();
     if !queued && next_ready(scope, current).is_none_or(|next| next == current) {
-        scope.fibers_mut().threads.slice_started = Some(Instant::now());
+        let threads = &mut scope.fibers_mut().threads;
+        threads.slice_started = Some(Instant::now());
+        threads.owed = false;
+        return Ok(None);
+    }
+    // Owed rather than given up: a loop that is mostly core library could be
+    // in it at every turn check a slice apart, its period a multiple of the
+    // check's, and keep the turn for as long as it runs (#728). The loop
+    // checks again at the call or return that leaves the core library.
+    if internal {
+        scope.fibers_mut().threads.owed = true;
         return Ok(None);
     }
     switch(scope, stack, frames, Leave::Ready(None), ids)
