@@ -2,13 +2,13 @@
 //! example covers: a handler runs on the main thread at a safe point and the
 //! wait it interrupted goes on; it runs even when the main thread is almost
 //! always in the core library; a signal met during the program's last call
-//! still ends it; a handler that raises leaves the other signals waiting,
+//! still ends it; one met while the main thread waits for a child is handled
+//! during the wait; a handler that raises leaves the other signals waiting,
 //! and none runs inside another; a
 //! forked child wakes for its own signals, even one sent the moment it is
 //! forked, and one forked from another thread handles them as its main
 //! thread; SIGINT cuts a blocked read short; and `ENV` is the environment a
-//! child inherits. Each fixture's output was measured against ruby 4.0.9, but
-//! for the one difference `last_call.rb` names.
+//! child inherits. Each fixture's output was measured against ruby 4.0.9.
 
 use std::io::Read;
 use std::os::unix::process::ExitStatusExt;
@@ -81,13 +81,19 @@ fn a_signal_reaches_a_main_thread_in_the_core_library() {
 
 #[test]
 fn a_signal_met_in_the_last_call_still_ends_the_program() {
-    // CRuby's `waitpid` is interrupted and the program ends inside `system`;
-    // Spinel's is restarted and the signal is handled when it returns, so
-    // "after" is printed first (the `ponytail:` in `shared/signals.rs`).
-    // Either way the process ends by SIGTERM, which is what a parent sees.
-    let (status, _, stderr) = run("last_call.rb");
+    // The program ends inside `system`, as CRuby's does: "after" is never
+    // printed, and the process ends by SIGTERM, which is what a parent sees.
+    let (status, stdout, stderr) = run("last_call.rb");
     // SIGTERM is 15 on every platform Spinel builds for.
     assert_eq!(status.signal(), Some(15), "stderr: {stderr}");
+    assert_eq!(stdout, "");
+}
+
+#[test]
+fn a_signal_is_handled_while_the_main_thread_waits_for_a_child() {
+    let (status, stdout, stderr) = run("wait_interrupted.rb");
+    assert_eq!(status.signal(), Some(15), "stderr: {stderr}");
+    assert_eq!(stdout, "true\n[:handler, :system]\n");
 }
 
 #[test]

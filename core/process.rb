@@ -615,12 +615,17 @@ module Process
 
   # `waitpid(2)`, raising `ECHILD` as `Process.wait` does and
   # `Process::Status.wait` does not. Nil when `WNOHANG` found nothing.
-  # `waitpid(2)` that lets other threads run while it waits (#45): with
-  # another thread alive, `WNOHANG` and a nap between looks, so the child
-  # it waits for can be fed by one of them.
+  # `waitpid(2)` that lets other threads run while it waits (#45), and
+  # signals reach the main thread while it waits (#44): `WNOHANG` and a nap
+  # between looks, so the child it waits for can be fed by another thread,
+  # and a signal ends the nap and runs its handler (or, untrapped, ends the
+  # program) at once, as CRuby's interrupted `waitpid` does.
+  #
+  # ponytail: a child's exit is seen up to one nap late. A wait on the
+  # signal wake fd and a `pidfd` (or SIGCHLD) would see it at once.
   def self.__waitpid__(pid, flags)
     nohang = Process::WNOHANG
-    return __sys_waitpid__(pid, flags) if flags & nohang != 0 || !__thread_others__
+    return __sys_waitpid__(pid, flags) if flags & nohang != 0
     loop do
       result = __sys_waitpid__(pid, flags | nohang)
       return result unless Array === result && result[0] == 0

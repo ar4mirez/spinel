@@ -133,12 +133,12 @@ fn close_pipe(fds: [libc::c_int; 2]) {
 }
 
 /// Set what `signo` does. `SA_RESTART`, so a call the VM makes under its
-/// lock — `waitpid`, `read` of a ready descriptor — is never cut short by a
+/// lock — a `WNOHANG` `waitpid`, `read` of a ready descriptor — is never cut short by a
 /// signal it has no way to answer; the waits a program spends its time in
 /// (`poll(2)`, which is never restarted) wake for one.
 ///
 /// ponytail: a call that blocks in the kernel under the lock and is not a
-/// `poll(2)` — `waitpid`, `accept`, `flock`, a write to a full pipe — meets a
+/// `poll(2)` — `accept`, `flock`, a write to a full pipe — meets a
 /// signal only when it returns, where CRuby's blocking region is interrupted
 /// and the call retried after the handler. Each is one wait-for-readiness or
 /// one EINTR loop away.
