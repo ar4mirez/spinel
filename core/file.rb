@@ -1015,15 +1015,15 @@ end
     __external_names__(names)
   end
 
-  # A US-ASCII name with non-ASCII bytes is binary. Otherwise it is
-  # converted to `Encoding.default_internal` when one is set, as
-  # `rb_str_conv_enc` converts: an ASCII-only name is only retagged, and one
-  # that will not convert is kept as it was.
+  # A binary name, or a US-ASCII one with non-ASCII bytes, is binary.
+  # Otherwise it is converted to `Encoding.default_internal` when one is
+  # set, as `rb_str_conv_enc` converts: an ASCII-only name is only retagged,
+  # and one that will not convert is kept as it was.
   def self.__external_names__(names)
     internal = Encoding.default_internal
     names.map! do |name|
       from = name.encoding
-      if from == Encoding::US_ASCII && !name.ascii_only?
+      if from == Encoding::BINARY || (from == Encoding::US_ASCII && !name.ascii_only?)
         name.force_encoding(Encoding::BINARY)
       elsif internal.nil? || from == internal
         name

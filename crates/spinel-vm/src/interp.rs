@@ -20490,7 +20490,6 @@ fn fs_native(
     Ok(None)
 }
 
-/// A path the OS handed back, as a UTF-8 String.
 /// A directory's entry names but `.` and `..`, read through `fdopendir(3)`
 /// on a duplicate of `fd` so that `fd` stays open when the stream is closed.
 /// The duplicate shares `fd`'s offset, so the stream is rewound first.
@@ -20530,6 +20529,7 @@ fn dir_entries(fd: libc::c_int) -> std::io::Result<Vec<std::ffi::OsString>> {
     Ok(names)
 }
 
+/// A path the OS handed back, as a UTF-8 String.
 fn os_string(scope: &mut HandleScope<'_>, text: std::ffi::OsString) -> Value {
     let class = class_handle(scope, Builtin::String);
     string_alloc(scope, class, &text.into_vec(), crate::strings::UTF_8)
