@@ -1598,6 +1598,7 @@ h = {a: 1}; def h.hi; 1; end; c = h.clone; c[:b] = 2; [h.inspect, c.inspect, c.h
 h = {a: 1}; h.default = 5; d = h.dup; d[:b] = 2; [h.inspect, d.inspect, d[:zz]]  #=> ["{a: 1}", "{a: 1, b: 2}", 5]
 h = {}.compare_by_identity; [h.dup.compare_by_identity?, h.clone.compare_by_identity?]  #=> [true, true]
 h = {}.compare_by_identity; 12.times { |i| h[i + 0.5] = i }; s = "k"; h[s] = :a; h[s.dup] = :b; [h[1.5], h[11.5], h[2.25], h.size, h[s], 1.5.object_id.is_a?(Integer), 1.5.object_id == 1.5.object_id, 1.5.object_id == 2.5.object_id]  #=> [1, 11, nil, 14, :a, true, true, false]
+h = {}.compare_by_identity; 20.times { |i| h[i] = i }; a = 2**61 + 5; b = -(2**61) - 5; h[a] = :a; h[b] = :b; [h[2**61 + 5], h[-(2**61) - 5], h[2**61 + 6], h[19], h.size, (2**61 + 5).object_id.is_a?(Integer), (2**61 + 5).object_id == (2**61 + 5).object_id]  #=> [:a, :b, nil, 19, 22, true, true]
 class DcH < Hash; attr_accessor :x; def initialize_copy(o); super; @x = :copied; end; end; a = DcH.new; a[:k] = 1; d = a.clone; [d.inspect, d.class, d.x]  #=> ["{k: 1}", DcH, :copied]
 s = "a".freeze; d = s.clone; [d, d.frozen?, d.equal?(s)]  #=> ["a", true, false]
 [1.clone, 1.dup, :a.clone, nil.clone, true.dup]  #=> [1, 1, :a, nil, true]
