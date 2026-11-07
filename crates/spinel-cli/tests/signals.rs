@@ -113,6 +113,13 @@ fn system_in_a_handler_with_a_signal_waiting_does_not_spin() {
 }
 
 #[test]
+fn a_thread_a_handler_starts_runs_while_the_main_thread_waits() {
+    let (status, stdout, stderr) = run("thread_in_wait_handler.rb");
+    assert!(status.success(), "stderr: {stderr}");
+    assert_eq!(stdout, "15\n");
+}
+
+#[test]
 fn a_handler_that_raises_leaves_the_other_signals_waiting() {
     let (status, stdout, stderr) = run("raise_keeps_rest.rb");
     assert!(status.success(), "stderr: {stderr}");

@@ -630,15 +630,15 @@ module Process
   def self.__waitpid__(pid, flags)
     nohang = Process::WNOHANG
     return __sys_waitpid__(pid, flags) if flags & nohang != 0
-    alone = pid > 0 && flags & Process::WUNTRACED == 0 && !__thread_others__
+    pidfd = pid > 0 && flags & Process::WUNTRACED == 0
     loop do
       result = __sys_waitpid__(pid, flags | nohang)
       return result unless Array === result && result[0] == 0
-      case alone && __sys_wait_child__(pid)
+      case pidfd && !__thread_others__ && __sys_wait_child__(pid)
       when :exited then nil
       when :signal then Signal.__run_pending__
       else
-        alone = false
+        pidfd = false
         sleep(0.002)
       end
     end
