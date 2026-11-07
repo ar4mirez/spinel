@@ -89,10 +89,14 @@ module Signal
   end
 
   # Every signal that arrived since the last look, handled in the order of
-  # their numbers, once per arrival. Called by the main thread only, at a
-  # safe point: the interpreter's turn check, or a wait a signal ended.
+  # their numbers, once per arrival, taken one at a time: a handler that
+  # raises leaves the rest waiting for the next safe point, as CRuby does.
+  # Called by the main thread only, at a safe point: the interpreter's turn
+  # check, or a wait a signal ended.
   def self.__run_pending__
-    __signal_take__.each { |number| __deliver__(number) }
+    while (number = __signal_take__)
+      __deliver__(number)
+    end
     nil
   end
 

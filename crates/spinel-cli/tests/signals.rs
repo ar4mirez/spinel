@@ -2,9 +2,10 @@
 //! example covers: a handler runs on the main thread at a safe point and the
 //! wait it interrupted goes on; it runs even when the main thread is almost
 //! always in the core library; a signal met during the program's last call
-//! still ends it; SIGINT cuts a blocked read short; and `ENV` is the
-//! environment a child inherits. Each fixture's output was measured against
-//! ruby 4.0.9, but for the one difference `last_call.rb` names.
+//! still ends it; a handler that raises leaves the other signals waiting; a
+//! forked child wakes for its own signals; SIGINT cuts a blocked read short;
+//! and `ENV` is the environment a child inherits. Each fixture's output was
+//! measured against ruby 4.0.9, but for the one difference `last_call.rb` names.
 
 use std::io::Read;
 use std::os::unix::process::ExitStatusExt;
@@ -84,6 +85,20 @@ fn a_signal_met_in_the_last_call_still_ends_the_program() {
     let (status, _, stderr) = run("last_call.rb");
     // SIGTERM is 15 on every platform Spinel builds for.
     assert_eq!(status.signal(), Some(15), "stderr: {stderr}");
+}
+
+#[test]
+fn a_handler_that_raises_leaves_the_other_signals_waiting() {
+    let (status, stdout, stderr) = run("raise_keeps_rest.rb");
+    assert!(status.success(), "stderr: {stderr}");
+    assert_eq!(stdout, "[\"interrupt\", \"usr1\"]\n");
+}
+
+#[test]
+fn a_forked_child_handles_its_own_signals() {
+    let (status, stdout, stderr) = run("forked_child.rb");
+    assert!(status.success(), "stderr: {stderr}");
+    assert_eq!(stdout, "child\n0\n");
 }
 
 #[test]

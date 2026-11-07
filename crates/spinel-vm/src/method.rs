@@ -425,8 +425,8 @@ pub enum Native {
     /// does with a signal — 0 its default, 1 nothing, 2 count it for Ruby's
     /// handler (#44). Nil, or the errno.
     SignalHandle,
-    /// `Kernel#__signal_take__`: the signals that arrived since the last
-    /// call, once per arrival, as an Array of numbers.
+    /// `Kernel#__signal_take__`: one arrival of the lowest-numbered signal
+    /// waiting, its number, the rest left waiting; nil when none waits.
     SignalTake,
     /// `Kernel#__signal_forked__`: in a child after `fork`, forget what the
     /// parent had waiting and unblock every signal.

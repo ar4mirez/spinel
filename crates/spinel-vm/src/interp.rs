@@ -11480,11 +11480,9 @@ fn native_call<'h>(
             Ok(None)
         }
         Native::SignalTake => {
-            let taken: Vec<Value> = crate::shared::signals::take()
-                .into_iter()
-                .map(|n| Value::fixnum(i64::from(n)).expect("a signal number is a fixnum"))
-                .collect();
-            let value = new_array(scope, &taken);
+            let value = crate::shared::signals::take().map_or(Value::NIL, |n| {
+                Value::fixnum(i64::from(n)).expect("a signal number is a fixnum")
+            });
             stack.push(value);
             Ok(None)
         }

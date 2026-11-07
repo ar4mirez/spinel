@@ -14,8 +14,7 @@
 //! It is a count per signal number and a pipe, the process state POSIX
 //! signals are, and only the main Ractor takes from it.
 
-use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
 
 /// One more than the highest signal number on any platform Spinel builds
 /// for: Linux's 64 real-time signals included.
@@ -28,9 +27,22 @@ static PENDING: [AtomicU32; SLOTS] = [const { AtomicU32::new(0) }; SLOTS];
 static ANY: AtomicBool = AtomicBool::new(false);
 
 /// The pipe the handler writes a byte to, so a `poll(2)` on its read end
-/// wakes whichever OS thread waits in it. Made, nonblocking and
-/// close-on-exec, the first time a handler is installed.
-static WAKE: OnceLock<[libc::c_int; 2]> = OnceLock::new();
+/// wakes whichever OS thread waits in it: its read end in the high half and
+/// its write end in the low, or `NO_PIPE`. Made, nonblocking and
+/// close-on-exec, the first time a handler is installed, and made again in a
+/// child after `fork`, so parent and child never drain each other's.
+static WAKE: AtomicI64 = AtomicI64::new(NO_PIPE);
+
+const NO_PIPE: i64 = -1;
+
+fn wake() -> Option<[libc::c_int; 2]> {
+    let packed = WAKE.load(Ordering::SeqCst);
+    (packed != NO_PIPE).then_some([(packed >> 32) as libc::c_int, packed as libc::c_int])
+}
+
+fn pack([read, write]: [libc::c_int; 2]) -> i64 {
+    (i64::from(read) << 32) | i64::from(write as u32)
+}
 
 /// What a signal is set to do.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -52,7 +64,7 @@ extern "C" fn on_signal(signo: libc::c_int) {
         slot.fetch_add(1, Ordering::SeqCst);
         ANY.store(true, Ordering::SeqCst);
     }
-    if let Some(&[_, write]) = WAKE.get() {
+    if let Some([_, write]) = wake() {
         let byte = 1u8;
         // SAFETY: one byte from a local; a full pipe already wakes its reader,
         // so a write that fails loses nothing.
@@ -81,9 +93,21 @@ fn set_errno(errno: libc::c_int) {
 fn set_errno(_errno: libc::c_int) {}
 
 fn wake_pipe() -> Option<[libc::c_int; 2]> {
-    if let Some(&pipe) = WAKE.get() {
+    if let Some(pipe) = wake() {
         return Some(pipe);
     }
+    let fds = new_pipe()?;
+    if WAKE
+        .compare_exchange(NO_PIPE, pack(fds), Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        // Another thread made one first: this pair is not needed.
+        close_pipe(fds);
+    }
+    wake()
+}
+
+fn new_pipe() -> Option<[libc::c_int; 2]> {
     let mut fds = [0 as libc::c_int; 2];
     // SAFETY: `fds` is two writable ints for `pipe` to fill.
     if unsafe { libc::pipe(fds.as_mut_ptr()) } < 0 {
@@ -97,15 +121,15 @@ fn wake_pipe() -> Option<[libc::c_int; 2]> {
             libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
         }
     }
-    if WAKE.set(fds).is_err() {
-        // Another thread made one first: this pair is not needed.
-        // SAFETY: descriptors this call made and nothing else has.
-        unsafe {
-            libc::close(fds[0]);
-            libc::close(fds[1]);
-        }
+    Some(fds)
+}
+
+fn close_pipe(fds: [libc::c_int; 2]) {
+    // SAFETY: a pair `new_pipe` made, which nothing else closes.
+    unsafe {
+        libc::close(fds[0]);
+        libc::close(fds[1]);
     }
-    WAKE.get().copied()
 }
 
 /// Set what `signo` does. `SA_RESTART`, so a call the VM makes under its
@@ -159,17 +183,27 @@ pub fn any() -> bool {
     ANY.load(Ordering::SeqCst)
 }
 
-/// Every signal waiting, once per time it arrived, lowest number first; and
-/// none waiting after.
-pub fn take() -> Vec<i32> {
-    let mut taken = Vec::new();
+/// One arrival of the lowest-numbered signal waiting, as CRuby's
+/// `rb_get_next_signal` takes it; the rest stay waiting, so a handler that
+/// raises leaves them for the next safe point.
+pub fn take() -> Option<i32> {
     if !ANY.swap(false, Ordering::SeqCst) {
-        return taken;
+        return None;
     }
+    let mut taken = None;
     for (signo, slot) in PENDING.iter().enumerate() {
-        let count = slot.swap(0, Ordering::SeqCst);
-        for _ in 0..count {
-            taken.push(signo as i32);
+        if slot.load(Ordering::SeqCst) == 0 {
+            continue;
+        }
+        if taken.is_some() {
+            ANY.store(true, Ordering::SeqCst);
+            break;
+        }
+        slot.fetch_sub(1, Ordering::SeqCst);
+        taken = Some(signo as i32);
+        if slot.load(Ordering::SeqCst) > 0 {
+            ANY.store(true, Ordering::SeqCst);
+            break;
         }
     }
     taken
@@ -178,12 +212,12 @@ pub fn take() -> Vec<i32> {
 /// The wake pipe's read end, for a `poll(2)` to wait on; none before any
 /// handler is installed.
 pub fn wake_fd() -> Option<libc::c_int> {
-    WAKE.get().map(|&[read, _]| read)
+    wake().map(|[read, _]| read)
 }
 
 /// Empty the wake pipe after a `poll(2)` saw it ready.
 pub fn drain() {
-    if let Some(&[read, _]) = WAKE.get() {
+    if let Some([read, _]) = wake() {
         let mut bytes = [0u8; 64];
         // SAFETY: `bytes` is writable for its length; the descriptor is
         // nonblocking, so this ends when the pipe is empty.
@@ -228,11 +262,18 @@ pub fn unblock_on_this_thread() {
     }
 }
 
-/// In a child after `fork`: what the parent had waiting is the parent's.
+/// In a child after `fork`: what the parent had waiting is the parent's, and
+/// so is its wake pipe; the child's handlers, inherited, wake a pipe of its
+/// own.
 pub fn forked() {
     ANY.store(false, Ordering::SeqCst);
     for slot in &PENDING {
         slot.store(0, Ordering::SeqCst);
+    }
+    if let Some(inherited) = wake() {
+        let fresh = new_pipe().map_or(NO_PIPE, pack);
+        WAKE.store(fresh, Ordering::SeqCst);
+        close_pipe(inherited);
     }
     unblock_on_this_thread();
 }
