@@ -3,12 +3,14 @@
 //! wait it interrupted goes on; it runs even when the main thread is almost
 //! always in the core library; a signal met during the program's last call
 //! still ends it; one met while the main thread waits for a child is handled
-//! during the wait; a handler that raises leaves the other signals waiting,
-//! and none runs inside another; a
-//! forked child wakes for its own signals, even one sent the moment it is
-//! forked, and one forked from another thread handles them as its main
-//! thread; SIGINT cuts a blocked read short; and `ENV` is the environment a
-//! child inherits. Each fixture's output was measured against ruby 4.0.9.
+//! during the wait, which still answers ECHILD at once for a process that is
+//! not a child and, inside a handler, waits for the child alone; a handler
+//! that raises leaves the other signals waiting, and none runs inside
+//! another; a forked child wakes for its own signals, even one sent the
+//! moment it is forked, and one forked from another thread handles them as
+//! its main thread; SIGINT cuts a blocked read short; and `ENV` is the
+//! environment a child inherits. Each fixture's output was measured against
+//! ruby 4.0.9.
 
 use std::io::Read;
 use std::os::unix::process::ExitStatusExt;
@@ -94,6 +96,20 @@ fn a_signal_is_handled_while_the_main_thread_waits_for_a_child() {
     let (status, stdout, stderr) = run("wait_interrupted.rb");
     assert_eq!(status.signal(), Some(15), "stderr: {stderr}");
     assert_eq!(stdout, "true\n[:handler, :system]\n");
+}
+
+#[test]
+fn waiting_for_a_process_that_is_not_a_child_raises_echild_at_once() {
+    let (status, stdout, stderr) = run("wait_not_a_child.rb");
+    assert!(status.success(), "stderr: {stderr}");
+    assert_eq!(stdout, "ECHILD\ntrue\n");
+}
+
+#[test]
+fn system_in_a_handler_with_a_signal_waiting_does_not_spin() {
+    let (status, stdout, stderr) = run("system_in_handler.rb");
+    assert!(status.success(), "stderr: {stderr}");
+    assert_eq!(stdout, "true\nusr2\nend\n");
 }
 
 #[test]

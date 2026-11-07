@@ -19588,8 +19588,10 @@ fn set_proctitle(_title: &[u8]) {}
 /// `Process.wait` returns the moment the child ends, and a signal is handled
 /// at once rather than when it does (#44). Some(true) when the child is
 /// ready, Some(false) for a signal, None when there is no `pidfd` for it.
+/// Without `signals`, as while a trap handler runs, it waits for the child
+/// alone.
 #[cfg(target_os = "linux")]
-fn wait_child(pid: libc::pid_t) -> Option<bool> {
+fn wait_child(pid: libc::pid_t, signals: bool) -> Option<bool> {
     if pid <= 0 {
         return None;
     }
@@ -19599,7 +19601,7 @@ fn wait_child(pid: libc::pid_t) -> Option<bool> {
         return None;
     }
     let answer = loop {
-        if crate::shared::signals::any() {
+        if signals && crate::shared::signals::any() {
             break Some(false);
         }
         let mut fds = vec![libc::pollfd {
@@ -19607,7 +19609,7 @@ fn wait_child(pid: libc::pid_t) -> Option<bool> {
             events: libc::POLLIN,
             revents: 0,
         }];
-        if let Some(wake) = crate::shared::signals::wake_fd() {
+        if signals && let Some(wake) = crate::shared::signals::wake_fd() {
             fds.push(libc::pollfd {
                 fd: wake,
                 events: libc::POLLIN,
@@ -19635,7 +19637,7 @@ fn wait_child(pid: libc::pid_t) -> Option<bool> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn wait_child(_pid: libc::pid_t) -> Option<bool> {
+fn wait_child(_pid: libc::pid_t, _signals: bool) -> Option<bool> {
     None
 }
 
@@ -21072,7 +21074,8 @@ fn sys_native(
         }
         SysOp::WaitChild => {
             let pid = int_arg(call, 0).unwrap_or(-1) as libc::pid_t;
-            match wait_child(pid) {
+            let signals = !scope.fibers().threads.trapping;
+            match wait_child(pid, signals) {
                 Some(true) => Value::symbol(crate::shared::symbols::intern("exited")),
                 Some(false) => Value::symbol(crate::shared::symbols::intern("signal")),
                 None => Value::NIL,
