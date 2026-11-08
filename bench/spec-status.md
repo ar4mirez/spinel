@@ -49,7 +49,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/random` | 10 | 87 | 87 | 0 | 0 | 0 | 100% |
 | `core/range` | 35 | 606 | 606 | 0 | 0 | 0 | 100% |
 | `core/rational` | 32 | 160 | 159 | 0 | 0 | 1 | 99% |
-| `core/refinement` | 8 | 25 | 24 | 0 | 1 | 0 | 96% |
+| `core/refinement` | 8 | 25 | 25 | 0 | 0 | 0 | 100% |
 | `core/regexp` | 24 | 256 | 254 | 0 | 0 | 2 | 99% |
 | `core/ruby` | 1 | 0 | 0 | 0 | 0 | 0 | — |
 | `core/set` | 57 | 175 | 165 | 0 | 1 | 9 | 94% |
@@ -127,8 +127,8 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `library/weakref` | 5 | 9 | 9 | 0 | 0 | 0 | 100% |
 | `library/win32ole` | 74 | 0 | 0 | 0 | 0 | 0 | — |
 | `library/yaml` | 9 | 46 | 1 | 0 | 45 | 0 | 2% |
-| `library/zlib` | 42 | 148 | 0 | 0 | 148 | 0 | 0% |
+| `library/zlib` | 42 | 148 | 148 | 0 | 0 | 0 | 100% |
 | `optional/capi` | 47 | 0 | 0 | 0 | 0 | 0 | — |
 | `optional/thread_safety` | 1 | 5 | 0 | 0 | 5 | 0 | 0% |
 | `security` | 13 | 31 | 29 | 0 | 2 | 0 | 94% |
-| **total** | 3835 | 32783 | 29513 | 0 | 3053 | 217 | 90% |
+| **total** | 3835 | 32783 | 29662 | 0 | 2904 | 217 | 90% |
