@@ -868,7 +868,7 @@ class Thread
     end
 
     def pop(non_block = false, timeout: nil)
-      deadline = __deadline__(non_block, timeout)
+      deadline = timeout.nil? ? nil : __deadline__(non_block, timeout)
       timed_out = false
       while true
         unless @__items__.empty?
@@ -937,7 +937,7 @@ class Thread
     end
 
     def push(object, non_block = false, timeout: nil)
-      deadline = __deadline__(non_block, timeout)
+      deadline = timeout.nil? ? nil : __deadline__(non_block, timeout)
       timed_out = false
       while true
         Kernel.raise ClosedQueueError, "queue closed" if @__closed__
