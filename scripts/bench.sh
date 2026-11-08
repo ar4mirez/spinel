@@ -159,6 +159,7 @@ yb_run() {
   local warmup="${WARMUP_ITRS:-1}" timed="${BENCH_ITRS:-5}"
   export WARMUP_ITRS="$warmup" BENCH_ITRS="$timed"
   local tmp="$yb_results.tmp"
+  trap "rm -f $(printf %q "$tmp")" EXIT
   yb_probe
   {
     echo "# Written by scripts/bench.sh --yjit-bench. Medians in milliseconds; do not edit."
