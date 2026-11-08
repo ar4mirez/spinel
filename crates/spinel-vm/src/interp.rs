@@ -3896,6 +3896,26 @@ fn run<'h>(
                         stack.push(value);
                     }
 
+                    Insn::DefinedSuper => {
+                        // The lookup `Insn::Super` dispatches through, asked
+                        // without calling: `rb_method_boundp` on the next
+                        // definition, private ones included.
+                        let found = match (frames[top].owner, frames[top].defined_as) {
+                            (Some(owner), Some(name)) => {
+                                let origin = scope.classes().super_origin(owner, name);
+                                class_of(scope, frames[top].receiver).is_some_and(|class| {
+                                    scope
+                                        .classes()
+                                        .lookup_super(class, origin.owner, origin.name)
+                                        .is_some()
+                                })
+                            }
+                            _ => false,
+                        };
+                        let value = defined_word(scope, string_class, found.then_some("super"));
+                        stack.push(value);
+                    }
+
                     Insn::DefinedYield => {
                         // A frame either has a block or does not, and this heap is the
                         // authority on which. So `nil` here is an answer, not a gap.
@@ -12005,6 +12025,75 @@ fn native_call<'h>(
             stack.push(value);
             Ok(None)
         }
+        Native::JsonParse => {
+            let value = json_parse(scope, &call)?;
+            stack.push(value);
+            Ok(None)
+        }
+        Native::JsonFloat => {
+            let Some(f) = call
+                .args
+                .first()
+                .and_then(|&v| crate::float::read(scope, v))
+            else {
+                return Err(Error::NoDispatch {
+                    op: "__json_float__",
+                    operands: "an argument that is not a Float",
+                });
+            };
+            let text = crate::json::dtoa(f);
+            let class = class_handle(scope, Builtin::String);
+            let value = string_alloc(scope, class, text.as_bytes(), crate::strings::UTF_8);
+            stack.push(value);
+            Ok(None)
+        }
+        Native::JsonEscape => {
+            let text = call.args.first().copied().unwrap_or(Value::NIL);
+            let (Some(bytes), Some(encoding), Some(flags)) = (
+                string_bytes(scope, text),
+                string_encoding(scope, text),
+                int_arg(&call, 1),
+            ) else {
+                return Err(Error::NoDispatch {
+                    op: "__json_escape__",
+                    operands: "a receiver that is not a String or flags that are not a Fixnum",
+                });
+            };
+            let ascii = bytes.is_ascii() && crate::strings::ascii_compatible(encoding);
+            if !ascii
+                && !(encoding == crate::strings::UTF_8
+                    && crate::strings::valid(crate::strings::UTF_8, &bytes) == Some(true))
+            {
+                stack.push(Value::NIL);
+                return Ok(None);
+            }
+            let mut out = Vec::with_capacity(bytes.len() + 2);
+            out.push(b'"');
+            crate::json::escape(&bytes, flags & 1 != 0, flags & 2 != 0, &mut out);
+            out.push(b'"');
+            let class = class_handle(scope, Builtin::String);
+            let value = string_alloc(scope, class, &out, crate::strings::UTF_8);
+            stack.push(value);
+            Ok(None)
+        }
+        Native::JsonWhere => {
+            let source = call.args.first().and_then(|&v| string_bytes(scope, v));
+            let offset = int_arg(&call, 1).and_then(|n| usize::try_from(n).ok());
+            let (Some(source), Some(offset)) = (source, offset) else {
+                return Err(Error::NoDispatch {
+                    op: "__json_where__",
+                    operands: "a source that is not a String or an offset that is not one",
+                });
+            };
+            let (line, column) = crate::json::position(&source, offset);
+            let fragment = crate::json::fragment(&source, offset);
+            let class = class_handle(scope, Builtin::String);
+            let fragment = string_alloc(scope, class, &fragment, crate::strings::UTF_8);
+            let fixnum = |n: i64| Value::fixnum(n).unwrap_or(Value::NIL);
+            let value = new_array(scope, &[fixnum(line), fixnum(column), fragment]);
+            stack.push(value);
+            Ok(None)
+        }
         Native::RaiseNoMethod => {
             let name = call
                 .args
@@ -16022,6 +16111,10 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             Native::Str(StrOp::EncodingInstall),
         ),
         (Builtin::Kernel, &["__digest__"], Native::Digest),
+        (Builtin::Kernel, &["__json_parse__"], Native::JsonParse),
+        (Builtin::Kernel, &["__json_where__"], Native::JsonWhere),
+        (Builtin::Kernel, &["__json_float__"], Native::JsonFloat),
+        (Builtin::Kernel, &["__json_escape__"], Native::JsonEscape),
         (Builtin::Kernel, &["__mt_new__"], Native::MtNew),
         (Builtin::Kernel, &["__mt_next__"], Native::MtNext),
         (Builtin::Kernel, &["__mt_real__"], Native::MtReal),
@@ -20203,6 +20296,308 @@ fn mt_state<'s, 'h>(
         op,
         operands: "a String that is not a generator's state",
     })
+}
+
+/// The flags `lib/json/ext/parser.rb` passes `__json_parse__`, one bit per
+/// option of `JSON::Ext::ParserConfig` the parser reads.
+mod json_flag {
+    pub const ALLOW_NAN: i64 = 1;
+    pub const ALLOW_TRAILING_COMMA: i64 = 2;
+    pub const ALLOW_CONTROL_CHARACTERS: i64 = 4;
+    pub const SYMBOLIZE_NAMES: i64 = 8;
+    pub const FREEZE: i64 = 16;
+    /// `allow_duplicate_key: true`.
+    pub const DUPLICATES_IGNORED: i64 = 32;
+    /// `allow_duplicate_key: false`.
+    pub const DUPLICATES_RAISE: i64 = 64;
+    /// Objects as `[object_mark, offset, key, value, ...]` Arrays, for the
+    /// Ruby half to build, so an `on_load` proc sees every pair.
+    pub const RAW_OBJECTS: i64 = 128;
+    /// Numbers with a fraction or exponent as `[float_mark, text]` Arrays,
+    /// for a `decimal_class`.
+    pub const RAW_FLOATS: i64 = 256;
+}
+
+/// `Kernel#__json_parse__(source, max_nesting, flags, marks)` (#55).
+///
+/// `source` is the document as a String already in UTF-8 (the Ruby half
+/// converts it, as `convert_encoding` does); `marks` is `[object_mark,
+/// float_mark]`, two objects no document can contain, used only under the
+/// raw flags. The answer is `[value, failure, warnings]`: `failure` nil, or
+/// `[0, message, line, column]` for a `ParserError`, `[1, depth]` for a
+/// `NestingError`, `[2, key, fragment, line, column]` for a duplicate key
+/// under `allow_duplicate_key: false`, `[3, name]` for a key
+/// `symbolize_names` cannot make a Symbol of; `warnings` nil or
+/// `[[key, line, column], ...]` for the default duplicate-key warning.
+fn json_parse(scope: &mut HandleScope<'_>, call: &Pending) -> Result<Value, Error> {
+    use crate::json;
+    let refuse = |operands| Error::NoDispatch {
+        op: "__json_parse__",
+        operands,
+    };
+    let source = call
+        .args
+        .first()
+        .and_then(|&v| string_bytes(scope, v))
+        .ok_or(refuse("a source that is not a String"))?;
+    let max_nesting = int_arg(call, 1).ok_or(refuse("a max_nesting that is not a Fixnum"))?;
+    let flags = int_arg(call, 2).ok_or(refuse("flags that are not a Fixnum"))?;
+    let marks = call
+        .args
+        .get(3)
+        .and_then(|&v| array_elements(scope, v))
+        .unwrap_or_default();
+    let flag = |bit| flags & bit != 0;
+    let raw_objects = flag(json_flag::RAW_OBJECTS);
+    let raw_floats = flag(json_flag::RAW_FLOATS);
+    if (raw_objects || raw_floats) && marks.len() != 2 {
+        return Err(refuse("raw flags without the two marks"));
+    }
+    let config = json::Config {
+        max_nesting,
+        allow_nan: flag(json_flag::ALLOW_NAN),
+        allow_trailing_comma: flag(json_flag::ALLOW_TRAILING_COMMA),
+        allow_control_characters: flag(json_flag::ALLOW_CONTROL_CHARACTERS),
+        duplicates: if flag(json_flag::DUPLICATES_IGNORED) {
+            json::Duplicates::Ignore
+        } else if flag(json_flag::DUPLICATES_RAISE) {
+            json::Duplicates::Raise
+        } else {
+            json::Duplicates::Warn
+        },
+        raw_objects,
+    };
+    let mut inner = scope.nested();
+    let mut sink = JsonSink {
+        scope: &mut inner,
+        symbolize: flag(json_flag::SYMBOLIZE_NAMES),
+        freeze: flag(json_flag::FREEZE) && !raw_objects,
+        freeze_strings: flag(json_flag::FREEZE),
+        raw_objects,
+        raw_floats,
+        marks,
+        bad_symbol: None,
+        error: None,
+    };
+    let outcome = json::parse(&source, &config, &mut sink);
+    if let Some(error) = sink.error.take() {
+        return Err(error);
+    }
+    let bad_symbol = sink.bad_symbol.take();
+    let scope = &mut inner;
+    let fixnum = |n: i64| Value::fixnum(n).unwrap_or(Value::NIL);
+    let utf8 = |scope: &mut HandleScope<'_>, bytes: &[u8]| {
+        let class = class_handle(scope, Builtin::String);
+        let value = string_alloc(scope, class, bytes, crate::strings::UTF_8);
+        scope.root(value);
+        value
+    };
+    let (value, failure) = match (bad_symbol, outcome.result) {
+        (Some(name), _) => {
+            let name = utf8(scope, &name);
+            let failure = new_array(scope, &[fixnum(3), name]);
+            (Value::NIL, failure)
+        }
+        (None, Ok(value)) => (value, Value::NIL),
+        (
+            None,
+            Err(json::Failure::Syntax {
+                message,
+                line,
+                column,
+            }),
+        ) => {
+            let message = utf8(scope, &message);
+            let failure = new_array(scope, &[fixnum(0), message, fixnum(line), fixnum(column)]);
+            (Value::NIL, failure)
+        }
+        (None, Err(json::Failure::Nesting { depth })) => {
+            (Value::NIL, new_array(scope, &[fixnum(1), fixnum(depth)]))
+        }
+        (
+            None,
+            Err(json::Failure::Duplicate {
+                key,
+                fragment,
+                line,
+                column,
+            }),
+        ) => {
+            let fragment = utf8(scope, &fragment);
+            let failure = new_array(
+                scope,
+                &[fixnum(2), key, fragment, fixnum(line), fixnum(column)],
+            );
+            (Value::NIL, failure)
+        }
+    };
+    let failure = scope.root(failure);
+    let warnings = if outcome.warnings.is_empty() {
+        Value::NIL
+    } else {
+        let mut each = Vec::with_capacity(outcome.warnings.len());
+        for warning in &outcome.warnings {
+            let entry = new_array(
+                scope,
+                &[warning.key, fixnum(warning.line), fixnum(warning.column)],
+            );
+            each.push(entry);
+            scope.root(entry);
+        }
+        new_array(scope, &each)
+    };
+    let warnings = scope.root(warnings);
+    let parts = [value, scope.get(failure), scope.get(warnings)];
+    Ok(new_array(scope, &parts))
+}
+
+/// Builds `json.rs`'s values as Ruby objects, each rooted as it is made, so
+/// none is collected before the container it belongs to holds it.
+struct JsonSink<'a, 'h> {
+    scope: &'a mut HandleScope<'h>,
+    symbolize: bool,
+    /// Freeze Arrays and Hashes: `freeze: true`, unless the Ruby half is
+    /// building the containers itself.
+    freeze: bool,
+    /// Make every String frozen and deduplicated, as `freeze: true` does.
+    freeze_strings: bool,
+    raw_objects: bool,
+    raw_floats: bool,
+    marks: Vec<Value>,
+    /// A key `symbolize_names` could not intern: its bytes are not UTF-8,
+    /// which `rb_str_intern` refuses with an EncodingError.
+    bad_symbol: Option<Vec<u8>>,
+    error: Option<Error>,
+}
+
+impl JsonSink<'_, '_> {
+    fn keep(&mut self, value: Value) -> Value {
+        self.scope.root(value);
+        value
+    }
+
+    fn frozen(&mut self, value: Value) -> Value {
+        let handle = self.scope.root(value);
+        self.scope.freeze(handle);
+        value
+    }
+
+    /// The deduplicated frozen String for `bytes`, as `rb_enc_interned_str`
+    /// answers one.
+    fn interned(&mut self, bytes: &[u8]) -> Value {
+        let encoding = crate::strings::UTF_8;
+        if let Some(found) = self.scope.regexps().fstring(bytes, encoding) {
+            return self.keep(found);
+        }
+        let class = class_handle(self.scope, Builtin::String);
+        let value = string_alloc(self.scope, class, bytes, encoding);
+        let value = self.frozen(value);
+        let value = self
+            .scope
+            .regexps_mut()
+            .intern_weak_fstring(bytes, encoding, value);
+        self.keep(value)
+    }
+}
+
+impl crate::json::Sink for JsonSink<'_, '_> {
+    type Value = Value;
+
+    fn literal(&mut self, which: crate::json::Literal) -> Value {
+        use crate::json::Literal;
+        match which {
+            Literal::Null => Value::NIL,
+            Literal::True => Value::TRUE,
+            Literal::False => Value::FALSE,
+            Literal::NaN => {
+                let value = crate::float::value(self.scope, f64::NAN);
+                self.keep(value)
+            }
+            Literal::Infinity => {
+                let value = crate::float::value(self.scope, f64::INFINITY);
+                self.keep(value)
+            }
+            Literal::MinusInfinity => {
+                let value = crate::float::value(self.scope, f64::NEG_INFINITY);
+                self.keep(value)
+            }
+        }
+    }
+
+    fn integer(&mut self, small: Option<i64>, text: &[u8]) -> Value {
+        if let Some(n) = small.and_then(Value::fixnum) {
+            return n;
+        }
+        let n = num_bigint::BigInt::parse_bytes(text, 10).unwrap_or_default();
+        let value = crate::bignum::value(self.scope, &n);
+        self.keep(value)
+    }
+
+    fn float(&mut self, value: f64, text: &[u8]) -> Value {
+        if self.raw_floats {
+            // `rb_str_new`: the text a `decimal_class` is given is BINARY.
+            let class = class_handle(self.scope, Builtin::String);
+            let text = string_alloc(self.scope, class, text, crate::strings::BINARY);
+            self.keep(text);
+            let node = new_array(self.scope, &[self.marks[1], text]);
+            return self.keep(node);
+        }
+        let value = crate::float::value(self.scope, value);
+        self.keep(value)
+    }
+
+    fn string(&mut self, bytes: &[u8], key: bool) -> Value {
+        if key && self.symbolize {
+            if !bytes.is_ascii()
+                && crate::strings::valid(crate::strings::UTF_8, bytes) != Some(true)
+            {
+                if self.bad_symbol.is_none() {
+                    self.bad_symbol = Some(bytes.to_vec());
+                }
+                return Value::NIL;
+            }
+            let id = crate::shared::symbols::intern_bytes(bytes, crate::strings::UTF_8);
+            return Value::symbol(id);
+        }
+        if key || self.freeze_strings {
+            return self.interned(bytes);
+        }
+        let class = class_handle(self.scope, Builtin::String);
+        let value = string_alloc(self.scope, class, bytes, crate::strings::UTF_8);
+        self.keep(value)
+    }
+
+    fn array(&mut self, items: &[Value]) -> Value {
+        let value = new_array(self.scope, items);
+        if self.freeze {
+            return self.frozen(value);
+        }
+        self.keep(value)
+    }
+
+    fn object(&mut self, pairs: &[Value], offset: usize) -> Value {
+        if self.raw_objects {
+            let mut node = Vec::with_capacity(pairs.len() + 2);
+            node.push(self.marks[0]);
+            node.push(Value::fixnum(offset as i64).unwrap_or(Value::NIL));
+            node.extend_from_slice(pairs);
+            let value = new_array(self.scope, &node);
+            return self.keep(value);
+        }
+        let pairs: Vec<(Value, Value)> = pairs.chunks(2).map(|kv| (kv[0], kv[1])).collect();
+        match hash_of_pairs(self.scope, &pairs) {
+            Ok(value) => {
+                if self.freeze {
+                    return self.frozen(value);
+                }
+                self.keep(value)
+            }
+            Err(error) => {
+                self.error.get_or_insert(error);
+                Value::NIL
+            }
+        }
+    }
 }
 
 /// An Integer argument, if that is what was passed.

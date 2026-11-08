@@ -776,7 +776,8 @@ impl Compiler {
             | Insn::GetConst(_, ConstScope::Lexical | ConstScope::Top)
             | Insn::DefinedConst(_, ConstScope::Lexical | ConstScope::Top)
             | Insn::DefinedSelfMethod(_)
-            | Insn::DefinedYield => 1,
+            | Insn::DefinedYield
+            | Insn::DefinedSuper => 1,
             // Leaves the assigned value, having consumed the module under it.
             Insn::SetConst(_, ConstScope::Qualified) => -1,
             Insn::SetConst(_, ConstScope::Lexical | ConstScope::Top) => 0,
@@ -3200,7 +3201,12 @@ impl Compiler {
                 self.emit(Insn::DefinedMatch(MatchRef::Group(n)));
                 Ok(())
             }
-            ExprKind::Super(_) => Err(Unsupported::at("`defined?` on `super`", span)),
+            // CRuby's `DEFINED_ZSUPER` either way: the arguments are not
+            // evaluated or checked, only whether there is a method to reach.
+            ExprKind::Super(_) => {
+                self.emit(Insn::DefinedSuper);
+                Ok(())
+            }
 
             // Everything else is `"expression"` without being evaluated, so it
             // is answerable even for a node this compiler could not run.

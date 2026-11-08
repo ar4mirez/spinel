@@ -82,6 +82,7 @@ pub mod interp;
 pub mod iso2022jp;
 pub mod jis;
 pub mod jis_table;
+pub mod json;
 pub mod method;
 pub mod mt;
 pub mod regexp;
