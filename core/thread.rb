@@ -791,10 +791,7 @@ class Thread
 
   class Queue
     def initialize(items = nil)
-      # The items are `@__items__` from `@__head__` on: a pop moves the head
-      # rather than shifting the Array, which moves everything after it.
       @__items__ = []
-      @__head__ = 0
       unless items.nil?
         unless items.respond_to?(:to_a)
           Kernel.raise TypeError, "can't convert #{items.class} into Array"
@@ -854,8 +851,15 @@ class Thread
       when String, true, false
         name = String === timeout ? "String" : timeout.to_s
         Kernel.raise TypeError, "no implicit conversion of #{name} into Float"
-      when Numeric then timeout = timeout.to_f
-      else Kernel.raise TypeError, "can't convert #{timeout.class} into Float"
+      else
+        unless timeout.respond_to?(:to_f)
+          Kernel.raise TypeError, "can't convert #{timeout.class} into Float"
+        end
+        float = timeout.to_f
+        unless Float === float
+          Kernel.raise TypeError, "can't convert #{timeout.class} to Float (#{timeout.class}#to_f gives #{float.class})"
+        end
+        timeout = float
       end
       Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
     end
@@ -863,8 +867,8 @@ class Thread
     def pop(non_block = false, timeout: nil)
       deadline = __deadline__(non_block, timeout)
       while true
-        unless @__items__.size == @__head__
-          item = __take_head__
+        unless @__items__.empty?
+          item = @__items__.shift
           __popped__
           return item
         end
@@ -876,24 +880,6 @@ class Thread
     end
     alias shift pop
     alias deq pop
-
-    # The first item. What it leaves before the head is let go of at once,
-    # and cut off once it is half the Array, so a pop is amortized constant.
-    def __take_head__
-      head = @__head__
-      item = @__items__[head]
-      @__items__[head] = nil
-      head += 1
-      if head == @__items__.size
-        @__items__ = []
-        head = 0
-      elsif head >= 32 && head * 2 >= @__items__.size
-        @__items__[0, head] = []
-        head = 0
-      end
-      @__head__ = head
-      item
-    end
 
     # A pop made room: `SizedQueue`'s pushers care.
     def __popped__; end
@@ -907,13 +893,12 @@ class Thread
     end
 
     def closed? = @__closed__
-    def empty? = @__items__.size == @__head__
-    def size = @__items__.size - @__head__
+    def empty? = @__items__.empty?
+    def size = @__items__.size
     alias length size
 
     def clear
-      @__items__ = []
-      @__head__ = 0
+      @__items__.clear
       __popped__
       self
     end
@@ -951,7 +936,7 @@ class Thread
       deadline = __deadline__(non_block, timeout)
       while true
         Kernel.raise ClosedQueueError, "queue closed" if @__closed__
-        if @__items__.size - @__head__ < @__max__
+        if @__items__.size < @__max__
           return super(object)
         end
         Kernel.raise ThreadError, "queue full" if non_block

@@ -19,21 +19,23 @@ def time(label)
 end
 
 N = 20_000
+# The threaded cases stay small while `Array#shift` is linear (#733).
+THREADED_N = 1_000
 
 time("push, pop         ") { q = Queue.new; i = 0; while i < N; q << i; q.pop; i += 1; end }
 time("push, pop timeout:") { q = Queue.new; i = 0; while i < N; q << i; q.pop(timeout: 1); i += 1; end }
 time("producer, consumer") do
   q = Queue.new
-  t = Thread.new { i = 0; while i < N; q.pop; i += 1; end }
+  t = Thread.new { i = 0; while i < THREADED_N; q.pop; i += 1; end }
   i = 0
-  while i < N; q << i; i += 1; end
+  while i < THREADED_N; q << i; i += 1; end
   t.join
 end
 time("SizedQueue(16)    ") do
   q = SizedQueue.new(16)
-  t = Thread.new { i = 0; while i < N; q.pop; i += 1; end }
+  t = Thread.new { i = 0; while i < THREADED_N; q.pop; i += 1; end }
   i = 0
-  while i < N; q << i; i += 1; end
+  while i < THREADED_N; q << i; i += 1; end
   t.join
 end
 time("Monitor enter/exit") { m = Monitor.new; i = 0; while i < N; m.synchronize { m.synchronize {} }; i += 1; end }
