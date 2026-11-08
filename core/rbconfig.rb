@@ -4,8 +4,12 @@
 module RbConfig
   cpu, os = RUBY_PLATFORM.split("-", 2)
   major, minor, teeny = RUBY_VERSION.split(".")
+  # CRuby's `bindir` is where `make install` put `ruby`; Spinel is one binary,
+  # so it is wherever that binary runs from.
+  exe = __exe_path__
   CONFIG = {
     "arch" => RUBY_PLATFORM,
+    "bindir" => exe && exe[0, exe.rindex("/") || 0],
     "host_cpu" => cpu,
     "host_os" => os,
     "target_cpu" => cpu,
@@ -25,6 +29,12 @@ module RbConfig
     "UNICODE_VERSION" => "17.0.0",
     "UNICODE_EMOJI_VERSION" => "17.0",
   }.freeze
+
+  # The interpreter's own path, as CRuby's `rbconfig.rb` builds it: what a
+  # program runs to start another Ruby (WEBrick's CGI handler, #54).
+  def self.ruby
+    File.join(CONFIG["bindir"], CONFIG["ruby_install_name"] + CONFIG["EXEEXT"])
+  end
 
   # `rbconfig/sizeof`'s table, for the 64-bit targets Spinel builds for:
   # `SIZEOF`, defined when that feature is required, as in CRuby.

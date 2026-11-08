@@ -188,6 +188,7 @@ fn image() -> &'static [Arc<Iseq>] {
 const LIBRARIES: &[(&str, &str)] = &[
     ("stringio", include_str!("../../../lib/stringio.rb")),
     ("fcntl", include_str!("../../../lib/fcntl.rb")),
+    ("etc", include_str!("../../../lib/etc.rb")),
     ("strscan", include_str!("../../../lib/strscan.rb")),
     ("digest", include_str!("../../../lib/digest.rb")),
     ("digest/md5", include_str!("../../../lib/digest/md5.rb")),

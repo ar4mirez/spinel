@@ -12670,6 +12670,14 @@ fn native_call<'h>(
             stack.push(value);
             Ok(None)
         }
+        Native::ExePath => {
+            let value = match std::env::current_exe() {
+                Ok(path) => os_string(scope, path.into_os_string()),
+                Err(_) => Value::NIL,
+            };
+            stack.push(value);
+            Ok(None)
+        }
         Native::MarkPartial => {
             scope.mark_partial();
             stack.push(Value::NIL);
@@ -15475,6 +15483,7 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             &["__ruby_constants__"],
             Native::RubyConstants,
         ),
+        (Builtin::Kernel, &["__exe_path__"], Native::ExePath),
         (Builtin::Kernel, &["__environ__"], Native::Environ),
         (Builtin::Kernel, &["__getenv__"], Native::Getenv),
         (Builtin::Kernel, &["__setenv__"], Native::Setenv),
