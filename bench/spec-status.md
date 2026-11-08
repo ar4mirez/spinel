@@ -66,7 +66,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/true` | 9 | 13 | 11 | 0 | 2 | 0 | 85% |
 | `core/unboundmethod` | 20 | 109 | 109 | 0 | 0 | 0 | 100% |
 | `core/warning` | 5 | 31 | 31 | 0 | 0 | 0 | 100% |
-| `language` | 67 | 2668 | 2515 | 0 | 125 | 28 | 94% |
+| `language` | 67 | 2668 | 2534 | 0 | 106 | 28 | 95% |
 | `language/predefined` | 2 | 14 | 14 | 0 | 0 | 0 | 100% |
 | `language/regexp` | 11 | 257 | 257 | 0 | 0 | 0 | 100% |
 | `library/English` | 2 | 27 | 1 | 0 | 0 | 26 | 4% |
@@ -96,7 +96,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `library/monitor` | 6 | 12 | 12 | 0 | 0 | 0 | 100% |
 | `library/net-ftp` | 56 | 419 | 1 | 0 | 416 | 2 | 0% |
 | `library/net-http` | 131 | 379 | 379 | 0 | 0 | 0 | 100% |
-| `library/objectspace` | 7 | 46 | 45 | 0 | 1 | 0 | 98% |
+| `library/objectspace` | 7 | 46 | 46 | 0 | 0 | 0 | 100% |
 | `library/observer` | 5 | 8 | 0 | 0 | 8 | 0 | 0% |
 | `library/open3` | 11 | 14 | 14 | 0 | 0 | 0 | 100% |
 | `library/openssl` | 19 | 132 | 0 | 0 | 132 | 0 | 0% |
@@ -130,5 +130,5 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `library/zlib` | 42 | 148 | 0 | 0 | 148 | 0 | 0% |
 | `optional/capi` | 47 | 0 | 0 | 0 | 0 | 0 | — |
 | `optional/thread_safety` | 1 | 5 | 0 | 0 | 5 | 0 | 0% |
-| `security` | 13 | 31 | 28 | 0 | 3 | 0 | 90% |
-| **total** | 3835 | 32783 | 29492 | 0 | 3074 | 217 | 90% |
+| `security` | 13 | 31 | 29 | 0 | 2 | 0 | 94% |
+| **total** | 3835 | 32783 | 29513 | 0 | 3053 | 217 | 90% |
