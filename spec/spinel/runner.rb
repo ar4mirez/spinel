@@ -83,12 +83,18 @@ module Kernel
       # harness ignored these, and the examples that use the library block
       # on the missing constant instead. Inside an example, `require` raises
       # as Ruby's does, which is what the `require` specs check.
-      if MSpec.current.nil? && !path.start_with?("/", ".")
+      # Only the spec file's own `require`: one a library makes while it
+      # loads (`erb/util` trying `erb/escape`) raises, so the library's own
+      # `rescue LoadError` fallback runs as it does on Ruby.
+      if MSpec.current.nil? && !path.start_with?("/", ".") && !@__in_library_require__
         begin
+          @__in_library_require__ = true
           return __spinel_require__(path)
         rescue LoadError => e
           SpinelRunner.formatter&.fixture_stopped(path, "#{e.class}: #{e.message}")
           return false
+        ensure
+          @__in_library_require__ = false
         end
       end
       return __spinel_require__(path) unless path.match?(%r{spec/ruby/.*/(fixtures|shared)/})
