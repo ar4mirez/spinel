@@ -666,6 +666,21 @@ pub enum Native {
     /// nor a valid UTF-8 String (US-ASCII with high bytes is not), which
     /// `valid_json_string_p` refuses.
     JsonEscape,
+    /// `Kernel#__zlib_init__(level, method, wbits, memlevel, strategy)` for a
+    /// deflate stream, `__zlib_init__(wbits)` for an inflate one (#59): the
+    /// new stream's state as a BINARY String, or zlib's error as an Integer.
+    ZlibInit,
+    /// `Kernel#__zlib_run__(state, input, offset, flush, filled, capa,
+    /// avail_out, stream)`: `zstream_run_func`, deflate or inflate called
+    /// until the output buffer CRuby's zlib.c would grow stops growing.
+    /// Answers `[err, consumed, output, msg, capa, avail_out, flags]`.
+    ZlibRun,
+    /// `Kernel#__zlib_ctl__(op, state, ...)`: the stream's other calls —
+    /// reset, end, set_dictionary, params, sync, sync_point and its counters.
+    ZlibCtl,
+    /// `Kernel#__zlib_checksum__(kind, sum, string)`: `adler32` (kind 0) or
+    /// `crc32` (kind 1) of the bytes, from a 32-bit `sum`.
+    ZlibChecksum,
 }
 
 /// Which file system call. Each answers an Integer errno on failure, for the

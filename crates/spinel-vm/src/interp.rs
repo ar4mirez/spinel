@@ -12076,6 +12076,11 @@ fn native_call<'h>(
             stack.push(value);
             Ok(None)
         }
+        Native::ZlibInit | Native::ZlibRun | Native::ZlibCtl | Native::ZlibChecksum => {
+            let value = zlib_native(scope, &call, native)?;
+            stack.push(value);
+            Ok(None)
+        }
         Native::JsonWhere => {
             let source = call.args.first().and_then(|&v| string_bytes(scope, v));
             let offset = int_arg(&call, 1).and_then(|n| usize::try_from(n).ok());
@@ -16115,6 +16120,14 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         (Builtin::Kernel, &["__json_where__"], Native::JsonWhere),
         (Builtin::Kernel, &["__json_float__"], Native::JsonFloat),
         (Builtin::Kernel, &["__json_escape__"], Native::JsonEscape),
+        (Builtin::Kernel, &["__zlib_init__"], Native::ZlibInit),
+        (Builtin::Kernel, &["__zlib_run__"], Native::ZlibRun),
+        (Builtin::Kernel, &["__zlib_ctl__"], Native::ZlibCtl),
+        (
+            Builtin::Kernel,
+            &["__zlib_checksum__"],
+            Native::ZlibChecksum,
+        ),
         (Builtin::Kernel, &["__mt_new__"], Native::MtNew),
         (Builtin::Kernel, &["__mt_next__"], Native::MtNext),
         (Builtin::Kernel, &["__mt_real__"], Native::MtReal),
@@ -20296,6 +20309,247 @@ fn mt_state<'s, 'h>(
         op,
         operands: "a String that is not a generator's state",
     })
+}
+
+/// The zlib primitives (#59), over `zlib.rs`. A state String that is not one
+/// `__zlib_init__` made is refused, as an argument of the wrong type is.
+fn zlib_native(
+    scope: &mut HandleScope<'_>,
+    call: &Pending,
+    native: Native,
+) -> Result<Value, Error> {
+    use crate::zlib;
+    let refuse = |op: &'static str| Error::NoDispatch {
+        op,
+        operands: "arguments that are not a zlib stream's",
+    };
+    let int = |index: usize| int_arg(call, index);
+    let int32 = |index: usize| int_arg(call, index).and_then(|n| i32::try_from(n).ok());
+    let fixnum = |n: i64| Value::fixnum(n).unwrap_or(Value::NIL);
+    match native {
+        Native::ZlibInit => {
+            let made = if call.args.len() == 5 {
+                let (Some(level), Some(method), Some(wbits), Some(mem), Some(strategy)) =
+                    (int32(0), int32(1), int32(2), int32(3), int32(4))
+                else {
+                    return Err(refuse("__zlib_init__"));
+                };
+                zlib::deflate_init(level, method, wbits, mem, strategy)
+            } else {
+                let Some(wbits) = int32(0) else {
+                    return Err(refuse("__zlib_init__"));
+                };
+                zlib::inflate_init(wbits)
+            };
+            Ok(match made {
+                Ok(state) => {
+                    let class = class_handle(scope, Builtin::String);
+                    string_alloc(scope, class, &state, crate::strings::BINARY)
+                }
+                Err(err) => fixnum(i64::from(err)),
+            })
+        }
+        Native::ZlibChecksum => {
+            let (Some(kind), Some(sum)) = (int(0), int(1)) else {
+                return Err(refuse("__zlib_checksum__"));
+            };
+            let data = call.args.get(2).and_then(|&v| string_bytes(scope, v));
+            let Some(data) = data else {
+                return Err(refuse("__zlib_checksum__"));
+            };
+            let sum = (sum as u64) & 0xffff_ffff;
+            let answer = if kind == 0 {
+                zlib::adler32(sum, Some(&data))
+            } else {
+                zlib::crc32(sum, Some(&data))
+            };
+            Ok(fixnum(answer as i64))
+        }
+        Native::ZlibRun => {
+            let state = call.args.first().copied().unwrap_or(Value::NIL);
+            let input = call.args.get(1).and_then(|&v| string_bytes(scope, v));
+            let (
+                Some(input),
+                Some(offset),
+                Some(flush),
+                Some(filled),
+                Some(capa),
+                Some(avail_out),
+                Some(stream),
+            ) = (input, int(2), int32(3), int(4), int(5), int(6), int(7))
+            else {
+                return Err(refuse("__zlib_run__"));
+            };
+            if string_encoding(scope, state).is_none() {
+                return Err(refuse("__zlib_run__"));
+            }
+            let input = input
+                .get(usize::try_from(offset).unwrap_or(usize::MAX)..)
+                .unwrap_or(&[]);
+            let (mut filled, mut capa) = (filled.max(0) as u64, capa.max(0) as u64);
+            let mut avail_out = u32::try_from(avail_out).unwrap_or(0);
+            let handle = scope.root(state);
+            let bytes = crate::strings::live_mut(scope, handle);
+            let deflating = zlib::is_deflate(bytes);
+            let mut output = Vec::new();
+            let mut at = 0usize;
+            let mut flags = 0i64;
+            let (mut err, mut msg);
+            // `zstream_run_func`, with CRuby's buffer growth: the output
+            // lands in a String of `capa` bytes whose room is `avail_out`.
+            const STEP_MAX: u64 = 16384;
+            const STEP_MIN: u64 = 2048;
+            loop {
+                let n = avail_out;
+                let Some(outcome) = zlib::run(bytes, &input[at..], Some(n), flush) else {
+                    return Err(refuse("__zlib_run__"));
+                };
+                at += outcome.consumed;
+                let wrote = outcome.output.len() as u32;
+                output.extend_from_slice(&outcome.output);
+                avail_out = n - wrote.min(n);
+                filled += u64::from(wrote);
+                err = outcome.err;
+                msg = outcome.msg;
+                if err == zlib::Z_STREAM_END {
+                    flags = (flags & !2) | 1;
+                    break;
+                }
+                if err != zlib::Z_OK && err != zlib::Z_BUF_ERROR {
+                    break;
+                }
+                if avail_out > 0 {
+                    flags |= 2;
+                    break;
+                }
+                if at == input.len() && !deflating {
+                    flags |= 2;
+                    break;
+                }
+                if stream != 0 {
+                    if filled >= STEP_MAX {
+                        flags |= 4;
+                        break;
+                    }
+                    let size = STEP_MAX - filled;
+                    if u64::from(avail_out) != size {
+                        capa = filled + size;
+                    }
+                    avail_out = size as u32;
+                } else if capa.saturating_sub(filled) >= STEP_MAX {
+                    avail_out = STEP_MAX as u32;
+                } else {
+                    let inc = (filled / 2).max(STEP_MIN);
+                    capa = filled + inc;
+                    avail_out = inc.min(STEP_MAX) as u32;
+                }
+            }
+            let class = class_handle(scope, Builtin::String);
+            let output = string_alloc(scope, class, &output, crate::strings::BINARY);
+            let msg = match zlib::message(msg) {
+                Some(text) => {
+                    let class = class_handle(scope, Builtin::String);
+                    string_alloc(scope, class, text.as_bytes(), crate::strings::UTF_8)
+                }
+                None => Value::NIL,
+            };
+            let parts = [
+                fixnum(i64::from(err)),
+                fixnum(at as i64),
+                output,
+                msg,
+                fixnum(capa as i64),
+                fixnum(i64::from(avail_out)),
+                fixnum(flags),
+            ];
+            Ok(new_array(scope, &parts))
+        }
+        Native::ZlibCtl => {
+            let Some(op) = int(0) else {
+                return Err(refuse("__zlib_ctl__"));
+            };
+            let state = call.args.get(1).copied().unwrap_or(Value::NIL);
+            if string_encoding(scope, state).is_none() {
+                return Err(refuse("__zlib_ctl__"));
+            }
+            // An argument String, copied before the state is borrowed.
+            let data = call.args.get(2).and_then(|&v| string_bytes(scope, v));
+            let level = int32(2);
+            let strategy = int32(3);
+            let room = call.args.get(4).and_then(|v| v.as_fixnum());
+            let handle = scope.root(state);
+            let bytes = crate::strings::live_mut(scope, handle);
+            let answer: Vec<i64>;
+            let mut output: Option<Vec<u8>> = None;
+            let mut msg = 0u8;
+            match op {
+                // reset, end
+                0 => {
+                    answer = vec![i64::from(
+                        zlib::reset(bytes).ok_or_else(|| refuse("__zlib_ctl__"))?,
+                    )]
+                }
+                1 => {
+                    answer = vec![i64::from(
+                        zlib::end(bytes).ok_or_else(|| refuse("__zlib_ctl__"))?,
+                    )]
+                }
+                // set_dictionary(dict)
+                2 => {
+                    let dict = data.ok_or_else(|| refuse("__zlib_ctl__"))?;
+                    let (err, m) =
+                        zlib::set_dictionary(bytes, &dict).ok_or_else(|| refuse("__zlib_ctl__"))?;
+                    msg = m;
+                    answer = vec![i64::from(err)];
+                }
+                // params(level, strategy, avail_out or nil)
+                3 => {
+                    let (Some(level), Some(strategy)) = (level, strategy) else {
+                        return Err(refuse("__zlib_ctl__"));
+                    };
+                    let room = room.map(|n| u32::try_from(n).unwrap_or(0));
+                    let o = zlib::params(bytes, level, strategy, room)
+                        .ok_or_else(|| refuse("__zlib_ctl__"))?;
+                    msg = o.msg;
+                    output = Some(o.output);
+                    answer = vec![i64::from(o.err)];
+                }
+                // sync(input)
+                4 => {
+                    let input = data.ok_or_else(|| refuse("__zlib_ctl__"))?;
+                    let o = zlib::sync(bytes, &input).ok_or_else(|| refuse("__zlib_ctl__"))?;
+                    msg = o.msg;
+                    answer = vec![i64::from(o.err), o.consumed as i64];
+                }
+                // sync_point
+                5 => {
+                    answer = vec![i64::from(
+                        zlib::sync_point(bytes).ok_or_else(|| refuse("__zlib_ctl__"))?,
+                    )]
+                }
+                // [total_in, total_out, adler, data_type]
+                6 => {
+                    let info = zlib::info(bytes).ok_or_else(|| refuse("__zlib_ctl__"))?;
+                    answer = info.iter().map(|&n| n as i64).collect();
+                }
+                _ => return Err(refuse("__zlib_ctl__")),
+            }
+            let mut parts: Vec<Value> = answer.into_iter().map(fixnum).collect();
+            if let Some(output) = output {
+                let class = class_handle(scope, Builtin::String);
+                parts.push(string_alloc(scope, class, &output, crate::strings::BINARY));
+            }
+            parts.push(match zlib::message(msg) {
+                Some(text) => {
+                    let class = class_handle(scope, Builtin::String);
+                    string_alloc(scope, class, text.as_bytes(), crate::strings::UTF_8)
+                }
+                None => Value::NIL,
+            });
+            Ok(new_array(scope, &parts))
+        }
+        _ => Err(refuse("__zlib__")),
+    }
 }
 
 /// The flags `lib/json/ext/parser.rb` passes `__json_parse__`, one bit per
