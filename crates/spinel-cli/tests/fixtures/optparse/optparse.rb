@@ -83,6 +83,7 @@ show("bad int") { run(%w[-c abc]) }
 show("bad float") { run(%w[-r x]) }
 show("bad enum") { run(%w[-t zip]) }
 show("ambiguous") { run(%w[--n x]) }
+show("ambiguous arg") { OptionParser.new { |o| o.on("--mode M", [:binary, :bits]) }.parse(%w[--mode bi]) }
 show("needless") { run(%w[--verbose=yes]) }
 show("bad regexp") { run(%w[--re 12]) }
 show("require_exact") do
@@ -127,5 +128,5 @@ def kw(alpha: 1, beta_gamma: nil); end
 k = OptionParser.new
 kh = {}
 k.define_by_keywords(kh, method(:kw), alpha: Integer, beta_gamma: String)
-k.parse(%w[--alpha 3 --beta-gamma x])
+p k.parse(%w[--alpha=3 --beta-gamma=x rest])
 p kh

@@ -44,6 +44,7 @@ bad int: OptionParser::InvalidArgument: invalid argument: -c abc
 bad float: OptionParser::InvalidArgument: invalid argument: -r x
 bad enum: OptionParser::InvalidArgument: invalid argument: -t zip
 ambiguous: OptionParser::AmbiguousOption: ambiguous option: --n
+ambiguous arg: OptionParser::AmbiguousArgument: ambiguous argument: --mode bi
 needless: OptionParser::NeedlessArgument: needless argument: --verbose=yes
 bad regexp: OptionParser::InvalidArgument: invalid argument: --re 12
 require_exact: OptionParser::InvalidOption: invalid option: --verb
@@ -77,7 +78,8 @@ tool 1.2.3
 22
 ["invalid option", ["--zap"], "invalid option: --zap"]
 2..5
-{alpha: nil, beta_gamma: nil}
+["rest"]
+{alpha: 3, beta_gamma: "x"}
 "#;
 
 #[test]
