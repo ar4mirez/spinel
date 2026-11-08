@@ -87,7 +87,7 @@ spec/
   tags/                    skipped specs with reasons
 scripts/                   spec.sh, spec-report.sh, spec-status.sh, verify-passes.rb, bench.sh, release.sh, vendor-stdlib.sh
 crates/spinel-cli/tests/   tooling integration tests + fixtures/
-bench/                     engine benchmarks (method_cache, regex_captures) and spec-status.md, the CI-generated progress bar; the yjit-bench subset joins them in phase 3
+bench/                     engine benchmarks, spec-status.md (the CI-generated progress bar), yjit-bench/ (the vendored ruby-bench subset and its results.tsv) and README.md, which explains them
 docs/
 ```
 
