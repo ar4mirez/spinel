@@ -8,9 +8,11 @@
 //! that raises leaves the other signals waiting, and none runs inside
 //! another; a forked child wakes for its own signals, even one sent the
 //! moment it is forked, and one forked from another thread handles them as
-//! its main thread; SIGINT cuts a blocked read short; and `ENV` is the
-//! environment a child inherits. Each fixture's output was measured against
-//! ruby 4.0.9.
+//! its main thread; SIGINT cuts a blocked read short; a `join`, a lock or a
+//! queue a signal interrupts sees the thread it waits on end, unlock or push
+//! while the handler runs, and a handled signal ends a `Mutex#sleep`; and
+//! `ENV` is the environment a child inherits. Each fixture's output was
+//! measured against ruby 4.0.9.
 
 use std::io::Read;
 use std::os::unix::process::ExitStatusExt;
@@ -161,6 +163,13 @@ fn sigint_cuts_a_blocked_read_short() {
     let (status, stdout, stderr) = run("interrupted_read.rb");
     assert!(status.success(), "stderr: {stderr}");
     assert_eq!(stdout, "Interrupt\n");
+}
+
+#[test]
+fn a_wait_looks_again_after_its_handler() {
+    let (status, stdout, stderr) = run("wakeup_during_handler.rb");
+    assert!(status.success(), "stderr: {stderr}");
+    assert_eq!(stdout, "join\nlock\n:pushed\ntrue\n");
 }
 
 #[test]

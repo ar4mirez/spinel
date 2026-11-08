@@ -6,7 +6,8 @@
 # A handler runs as CRuby's does: the OS handler only counts the signal
 # (`spinel_vm::shared::signals`), and the main thread runs the Ruby handler
 # at its next safe point — the interpreter's turn check, or the wait it is in,
-# which goes on waiting afterwards. `__run_pending__` is what both call.
+# which goes on waiting afterwards or looks again at what it waits for
+# (`Kernel#__thread_wait__`). `__run_pending__` is what both call.
 module Signal
   # A new Hash every call, as in CRuby, so a caller that mutates it cannot
   # change what the next caller sees.
