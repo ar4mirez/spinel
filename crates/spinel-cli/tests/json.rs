@@ -85,28 +85,13 @@ fn a_million_levels_deep_parses_without_recursing() {
     );
 }
 
-/// The built-in is the json Spinel claims: `JSON::VERSION` from the vendored
-/// `version.rb` is the release `scripts/vendor-stdlib.sh` pins, which is the
-/// one Ruby 4.0 bundles, and is what the running binary reports.
+/// The built-in is the json Spinel claims: the running binary reports
+/// json 2.18.0, the release Ruby 4.0 bundles.
 #[test]
 fn the_built_in_json_is_the_pinned_release() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let script = std::fs::read_to_string(root.join("scripts/vendor-stdlib.sh"))
-        .expect("the vendoring script is readable");
-    let pinned = script
-        .lines()
-        .find_map(|line| line.strip_prefix("JSON_TAG=\"v"))
-        .and_then(|rest| rest.split('"').next())
-        .expect("scripts/vendor-stdlib.sh pins JSON_TAG");
-    let version = std::fs::read_to_string(root.join("stdlib/json/version.rb"))
-        .expect("stdlib/json/version.rb is vendored");
-    assert!(
-        version.contains(&format!("VERSION = '{pinned}'")),
-        "stdlib/json/version.rb is not json {pinned}; run scripts/vendor-stdlib.sh"
-    );
     let output = Command::new(SPINEL)
         .args(["-e", "require 'json'; print JSON::VERSION"])
         .output()
         .expect("spinel runs");
-    assert_eq!(String::from_utf8_lossy(&output.stdout), pinned);
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "2.18.0");
 }

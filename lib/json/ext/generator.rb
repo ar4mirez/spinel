@@ -594,8 +594,7 @@ module JSON
         # `valid_json_string_p`.
         def valid?(text)
           return true if text.ascii_only?
-          encoding = text.encoding
-          (encoding == ::Encoding::UTF_8 || encoding == ::Encoding::US_ASCII) && text.valid_encoding?
+          text.encoding == ::Encoding::UTF_8 && text.valid_encoding?
         end
 
         # `ensure_valid_encoding`.

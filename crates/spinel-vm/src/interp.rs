@@ -12059,10 +12059,10 @@ fn native_call<'h>(
                     operands: "a receiver that is not a String or flags that are not a Fixnum",
                 });
             };
-            let utf8 = encoding == crate::strings::UTF_8 || encoding == crate::strings::US_ASCII;
             let ascii = bytes.is_ascii() && crate::strings::ascii_compatible(encoding);
             if !ascii
-                && !(utf8 && crate::strings::valid(crate::strings::UTF_8, &bytes) == Some(true))
+                && !(encoding == crate::strings::UTF_8
+                    && crate::strings::valid(crate::strings::UTF_8, &bytes) == Some(true))
             {
                 stack.push(Value::NIL);
                 return Ok(None);
@@ -20298,7 +20298,6 @@ fn mt_state<'s, 'h>(
     })
 }
 
-/// An Integer argument, if that is what was passed.
 /// The flags `lib/json/ext/parser.rb` passes `__json_parse__`, one bit per
 /// option of `JSON::Ext::ParserConfig` the parser reads.
 mod json_flag {
@@ -20601,6 +20600,7 @@ impl crate::json::Sink for JsonSink<'_, '_> {
     }
 }
 
+/// An Integer argument, if that is what was passed.
 fn int_arg(call: &Pending, index: usize) -> Option<i64> {
     call.args.get(index).and_then(|v| v.as_fixnum())
 }

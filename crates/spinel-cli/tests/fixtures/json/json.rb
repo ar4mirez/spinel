@@ -231,6 +231,8 @@ $VERBOSE = false
 show("binary ascii") { JSON.generate("abc".b) }
 show("binary invalid") { JSON.generate("\xff".b) }
 show("latin-1") { JSON.generate("\xe9".force_encoding("ISO-8859-1")) }
+show("us-ascii high bytes") { JSON.generate("caf\xC3\xA9".force_encoding("US-ASCII")) }
+show("us-ascii key") { JSON.generate({"k\xC3\xA9".force_encoding("US-ASCII") => 1}) }
 show("utf-16") { JSON.generate("é".encode("UTF-16LE")) }
 show("circular") { a = []; a << a; JSON.generate(a) }
 show("max_nesting") { JSON.generate([[[1]]], max_nesting: 2) }
