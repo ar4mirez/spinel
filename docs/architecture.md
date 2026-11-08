@@ -78,7 +78,7 @@ Target size: under 30 MB. No libruby, no OpenSSL unless we link it for the `open
 Cargo.toml                 workspace
 crates/                    one dir per crate above
 core/                      Ruby source for core classes, compiled into core.image
-stdlib/                    vendored pure-Ruby stdlib: ruby/ruby `lib/` at a pinned tag, flattened so stdlib/ is a $LOAD_PATH root, with UPSTREAM and its LICENSE/ files
+stdlib/                    vendored pure-Ruby stdlib: ruby/ruby `lib/` at a pinned tag, flattened so stdlib/ is a $LOAD_PATH root, with ruby/webrick's `lib/` at a pinned release laid over it, UPSTREAM and the LICENSE/ files
 shims/                     setup.rb, test_worker.rb, gemfile_eval.rb
 spec/
   ruby/                    git submodule: ruby/spec

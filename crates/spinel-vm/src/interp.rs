@@ -4535,10 +4535,15 @@ fn unwind_to_handler(
                     // ...everything except a jump that is not leaving this
                     // `begin` at all. `begin; while c; next; end; ensure; E;
                     // end` lands back inside the protected range, and E must
-                    // run when the `begin` ends, not once per iteration.
+                    // run when the `begin` ends, not once per iteration. A
+                    // target at the range's end is the `EnterEnsure` the body
+                    // falls into, which runs E itself: `begin; while true;
+                    // break; end; ensure; E; end` arrives there, and entering
+                    // E from here as well would run it twice.
                     CatchKind::Ensure => match unwind {
                         Unwind::Goto { target, .. } => {
-                            !entry.covers(u32::try_from(target).unwrap_or(u32::MAX))
+                            let target = u32::try_from(target).unwrap_or(u32::MAX);
+                            !(entry.covers(target) || target == entry.end)
                         }
                         _ => true,
                     },
@@ -12670,6 +12675,14 @@ fn native_call<'h>(
             stack.push(value);
             Ok(None)
         }
+        Native::ExePath => {
+            let value = match std::env::current_exe() {
+                Ok(path) => os_string(scope, path.into_os_string()),
+                Err(_) => Value::NIL,
+            };
+            stack.push(value);
+            Ok(None)
+        }
         Native::MarkPartial => {
             scope.mark_partial();
             stack.push(Value::NIL);
@@ -15475,6 +15488,7 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             &["__ruby_constants__"],
             Native::RubyConstants,
         ),
+        (Builtin::Kernel, &["__exe_path__"], Native::ExePath),
         (Builtin::Kernel, &["__environ__"], Native::Environ),
         (Builtin::Kernel, &["__getenv__"], Native::Getenv),
         (Builtin::Kernel, &["__setenv__"], Native::Setenv),

@@ -524,6 +524,9 @@ pub enum Native {
     /// `Kernel#__ruby_constants__`: `RUBY_VERSION` and its neighbours, as a
     /// flat `[name, value, ...]` Array, from the constants `--version` prints.
     RubyConstants,
+    /// `Kernel#__exe_path__`: the path of the running binary, or nil when
+    /// the platform cannot say. What `RbConfig.ruby` answers (#54).
+    ExePath,
     /// `Kernel#__environ__`: the process environment, as a flat
     /// `[name, value, ...]` Array.
     Environ,
