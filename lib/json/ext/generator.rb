@@ -13,6 +13,15 @@
 # configuration `instance_variables` does not show. This file follows the C
 # code instead, function by function.
 #
+# Plain data is written by `__json_generate__` (#742), in
+# `crates/spinel-vm/src/interp.rs`: an Array or a Hash of nil, booleans,
+# Integers, finite Floats, valid Strings and Arrays and Hashes of the same,
+# which `object` and `array` hand it first. Those are the values the C
+# generator writes without calling into Ruby, and walking them here cost an
+# interpreted step a value, some 200 times CRuby's time. The primitive gives
+# up on anything else, appending nothing, and the methods below write that
+# value: they hold every warning, error and `to_json` call there is.
+#
 # Two primitives do byte work (`crates/spinel-vm/src/json.rs`):
 # `__json_float__` is the gem's vendored `fpconv_dtoa`, whose Grisu2 digits
 # are not always the shortest ones `Float#to_s` prints and whose arithmetic is
@@ -319,6 +328,7 @@ module JSON
           @indent, @space, @space_before, @object_nl, @array_nl, @as_json, @max_nesting,
             @depth, @duplicate, @allow_nan, @ascii_only, @script_safe, @strict = state.__config__
           @escape = (@script_safe ? 1 : 0) | (@ascii_only ? 2 : 0)
+          @native = [@escape, @max_nesting, @indent, @space, @space_before, @object_nl, @array_nl].freeze
           @buffer = buffer || +""
           @vstate = nil
         end
@@ -447,6 +457,7 @@ module JSON
 
         # `generate_json_object` and `json_object_i`.
         def object(hash, depth)
+          return if __json_generate__(hash, @buffer, depth, @native)
           depth = increase(depth)
           buffer = @buffer
           if hash.empty?
@@ -539,6 +550,7 @@ module JSON
 
         # `generate_json_array`.
         def array(array, depth)
+          return if __json_generate__(array, @buffer, depth, @native)
           depth = increase(depth)
           buffer = @buffer
           if array.empty?

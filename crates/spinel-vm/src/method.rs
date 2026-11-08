@@ -666,6 +666,11 @@ pub enum Native {
     /// nor a valid UTF-8 String (US-ASCII with high bytes is not), which
     /// `valid_json_string_p` refuses.
     JsonEscape,
+    /// `Kernel#__json_generate__(obj, buffer, depth, config)`: json's C
+    /// generator over plain data (#742), appended to `buffer`, answering
+    /// true; or false, with `buffer` untouched, at the first value it does
+    /// not take, for the Ruby generator to write instead.
+    JsonGenerate,
     /// `Kernel#__zlib_init__(level, method, wbits, memlevel, strategy)` for a
     /// deflate stream, `__zlib_init__(wbits)` for an inflate one (#59): the
     /// new stream's state as a BINARY String, or zlib's error as an Integer.
