@@ -3,7 +3,9 @@
 //! starving the rest. Each runs on an OS thread of its own (#328), so one
 //! blocked in the kernel leaves the rest running, and the program's end
 //! kills those still alive. A thread whose sleep is over gets its turn even
-//! while the one running is mostly in the core library (#728).
+//! while the one running is mostly in the core library (#728). A thread
+//! waiting on a `Queue`, a `SizedQueue` or a `Monitor` sleeps rather than
+//! spins (#46).
 
 use std::io::Read;
 use std::path::PathBuf;
@@ -114,4 +116,24 @@ fn a_sleeper_wakes_while_the_main_thread_loops_in_the_core_library() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(String::from_utf8_lossy(&output.stdout), "woken\n");
+}
+
+#[test]
+fn queue_sized_queue_and_monitor_waits_do_not_spin() {
+    let script =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/threads/queue_blocks.rb");
+    let output = Command::new(SPINEL)
+        .arg("run")
+        .arg(&script)
+        .output()
+        .expect("spinel runs");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "pop slept\npush slept\nenter slept\n"
+    );
 }

@@ -663,45 +663,45 @@ class Thread
 
   class Mutex
     def initialize
-      @owner = nil
-      @waiters = []
+      @__owner__ = nil
+      @__waiters__ = []
     end
 
     def lock
       me = Thread.current
       fiber = Fiber.current
-      Kernel.raise ThreadError, "deadlock; recursive locking" if @fiber.equal?(fiber)
-      if @owner.equal?(me)
+      Kernel.raise ThreadError, "deadlock; recursive locking" if @__fiber__.equal?(fiber)
+      if @__owner__.equal?(me)
         Kernel.raise ThreadError, "deadlock; lock already owned by another fiber belonging to the same thread"
       end
-      until @owner.nil?
+      until @__owner__.nil?
         index = __thread_current__
-        @waiters << index
+        @__waiters__ << index
         begin
           Thread.__before_wait__
           reason = __thread_wait__(nil, nil, 0, true)
         ensure
-          @waiters.delete(index)
+          @__waiters__.delete(index)
         end
         Thread.__deadlock__ if reason == :deadlock
       end
-      @owner = me
-      @fiber = fiber
+      @__owner__ = me
+      @__fiber__ = fiber
       me.__mutexes__ << self
       self
     end
 
     def try_lock
-      return false unless @owner.nil?
-      @owner = Thread.current
-      @fiber = Fiber.current
-      @owner.__mutexes__ << self
+      return false unless @__owner__.nil?
+      @__owner__ = Thread.current
+      @__fiber__ = Fiber.current
+      @__owner__.__mutexes__ << self
       true
     end
 
     def unlock
-      Kernel.raise ThreadError, "Attempt to unlock a mutex which is not locked" if @owner.nil?
-      unless @fiber.equal?(Fiber.current)
+      Kernel.raise ThreadError, "Attempt to unlock a mutex which is not locked" if @__owner__.nil?
+      unless @__fiber__.equal?(Fiber.current)
         Kernel.raise ThreadError, "Attempt to unlock a mutex which is locked by another thread/fiber"
       end
       __release__
@@ -709,17 +709,17 @@ class Thread
     end
 
     def __release__
-      @owner.__mutexes__.delete(self)
-      @owner = nil
-      @fiber = nil
-      __thread_wakeup__(@waiters.first) unless @waiters.empty?
+      @__owner__.__mutexes__.delete(self)
+      @__owner__ = nil
+      @__fiber__ = nil
+      __thread_wakeup__(@__waiters__.first) unless @__waiters__.empty?
     end
 
     # The owner died holding it: CRuby hands it on.
     def __abandon__ = __release__
 
-    def locked? = !@owner.nil?
-    def owned? = !@fiber.nil? && @fiber.equal?(Fiber.current)
+    def locked? = !@__owner__.nil?
+    def owned? = !@__fiber__.nil? && @__fiber__.equal?(Fiber.current)
 
     def synchronize
       Kernel.raise ThreadError, "must be called with a block" unless block_given?
@@ -758,28 +758,28 @@ class Thread
 
   class ConditionVariable
     def initialize
-      @waiters = []
+      @__waiters__ = []
     end
 
     def wait(mutex, timeout = nil)
       index = __thread_current__
-      @waiters << index
+      @__waiters__ << index
       begin
         mutex.sleep(timeout)
       ensure
-        @waiters.delete(index)
+        @__waiters__.delete(index)
       end
       self
     end
 
     def signal
-      __thread_wakeup__(@waiters.shift) unless @waiters.empty?
+      __thread_wakeup__(@__waiters__.shift) unless @__waiters__.empty?
       self
     end
 
     def broadcast
-      waiters = @waiters.dup
-      @waiters.clear
+      waiters = @__waiters__.dup
+      @__waiters__.clear
       waiters.each { |index| __thread_wakeup__(index) }
       self
     end
@@ -791,25 +791,28 @@ class Thread
 
   class Queue
     def initialize(items = nil)
-      @items = []
+      # The items are `@__items__` from `@__head__` on: a pop moves the head
+      # rather than shifting the Array, which moves everything after it.
+      @__items__ = []
+      @__head__ = 0
       unless items.nil?
         unless items.respond_to?(:to_a)
           Kernel.raise TypeError, "can't convert #{items.class} into Array"
         end
         array = items.to_a
         unless Array === array
-          Kernel.raise TypeError, "can't convert #{items.class} to Array (#{items.class}#to_a gives #{array.class})"
+          Kernel.raise TypeError, "can't convert #{items.class} into Array (#{items.class}#to_a gives #{array.class})"
         end
-        @items.concat(array)
+        @__items__.concat(array)
       end
-      @waiters = []
-      @closed = false
+      @__waiters__ = []
+      @__closed__ = false
     end
 
     def push(object)
-      Kernel.raise ClosedQueueError, "queue closed" if @closed
-      @items.push(object)
-      __thread_wakeup__(@waiters.first) unless @waiters.empty?
+      Kernel.raise ClosedQueueError, "queue closed" if @__closed__
+      @__items__.push(object)
+      __thread_wakeup__(@__waiters__.shift) unless @__waiters__.empty?
       self
     end
     alias << push
@@ -830,53 +833,92 @@ class Thread
       !(deadline && Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline)
     end
 
+    # Woken threads leave the list, as CRuby's `sync_wakeup` takes them off
+    # it: a second push before the first woken thread runs wakes the next
+    # one, not the same one again.
+    def __wake_all__(waiters)
+      woken = waiters.dup
+      waiters.clear
+      woken.each { |index| __thread_wakeup__(index) }
+    end
+
+    # The timeout as CRuby's `queue_timeout2hrtime` reads it, `rb_num2dbl`
+    # for anything but an Integer, before the queue is looked at.
     def __deadline__(non_block, timeout)
       if non_block && !timeout.nil?
         Kernel.raise ArgumentError, "can't set a timeout if non_block is enabled"
       end
-      timeout && Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
+      return nil if timeout.nil?
+      case timeout
+      when Integer, Float
+      when String, true, false
+        name = String === timeout ? "String" : timeout.to_s
+        Kernel.raise TypeError, "no implicit conversion of #{name} into Float"
+      when Numeric then timeout = timeout.to_f
+      else Kernel.raise TypeError, "can't convert #{timeout.class} into Float"
+      end
+      Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
     end
 
     def pop(non_block = false, timeout: nil)
       deadline = __deadline__(non_block, timeout)
       while true
-        unless @items.empty?
-          item = @items.shift
+        unless @__items__.size == @__head__
+          item = __take_head__
           __popped__
           return item
         end
         Kernel.raise ThreadError, "queue empty" if non_block
-        return nil if @closed
+        return nil if @__closed__
         return nil if timeout == 0
-        return nil unless __wait__(@waiters, deadline)
+        return nil unless __wait__(@__waiters__, deadline)
       end
     end
     alias shift pop
     alias deq pop
 
+    # The first item. What it leaves before the head is let go of at once,
+    # and cut off once it is half the Array, so a pop is amortized constant.
+    def __take_head__
+      head = @__head__
+      item = @__items__[head]
+      @__items__[head] = nil
+      head += 1
+      if head == @__items__.size
+        @__items__ = []
+        head = 0
+      elsif head >= 32 && head * 2 >= @__items__.size
+        @__items__[0, head] = []
+        head = 0
+      end
+      @__head__ = head
+      item
+    end
+
     # A pop made room: `SizedQueue`'s pushers care.
     def __popped__; end
 
     def close
-      unless @closed
-        @closed = true
-        @waiters.dup.each { |index| __thread_wakeup__(index) }
+      unless @__closed__
+        @__closed__ = true
+        __wake_all__(@__waiters__)
       end
       self
     end
 
-    def closed? = @closed
-    def empty? = @items.empty?
-    def size = @items.size
+    def closed? = @__closed__
+    def empty? = @__items__.size == @__head__
+    def size = @__items__.size - @__head__
     alias length size
 
     def clear
-      @items.clear
+      @__items__ = []
+      @__head__ = 0
       __popped__
       self
     end
 
-    def num_waiting = @waiters.size
+    def num_waiting = @__waiters__.size
 
     def freeze
       Kernel.raise TypeError, "cannot freeze #{inspect}"
@@ -892,45 +934,45 @@ class Thread
       max = Integer.__index__(max)
       Kernel.raise ArgumentError, "queue size must be positive" unless max > 0
       super()
-      @max = max
-      @pushers = []
+      @__max__ = max
+      @__pushers__ = []
     end
 
-    attr_reader :max
+    def max = @__max__
 
     def max=(max)
       max = Integer.__index__(max)
       Kernel.raise ArgumentError, "queue size must be positive" unless max > 0
-      @max = max
-      @pushers.dup.each { |index| __thread_wakeup__(index) }
+      @__max__ = max
+      __wake_all__(@__pushers__)
     end
 
     def push(object, non_block = false, timeout: nil)
       deadline = __deadline__(non_block, timeout)
       while true
-        Kernel.raise ClosedQueueError, "queue closed" if @closed
-        if @items.size < @max
+        Kernel.raise ClosedQueueError, "queue closed" if @__closed__
+        if @__items__.size - @__head__ < @__max__
           return super(object)
         end
         Kernel.raise ThreadError, "queue full" if non_block
         return nil if timeout == 0
-        return nil unless __wait__(@pushers, deadline)
+        return nil unless __wait__(@__pushers__, deadline)
       end
     end
     alias << push
     alias enq push
 
     def __popped__
-      __thread_wakeup__(@pushers.first) unless @pushers.empty?
+      __thread_wakeup__(@__pushers__.shift) unless @__pushers__.empty?
     end
 
     def close
       super
-      @pushers.dup.each { |index| __thread_wakeup__(index) }
+      __wake_all__(@__pushers__)
       self
     end
 
-    def num_waiting = @waiters.size + @pushers.size
+    def num_waiting = @__waiters__.size + @__pushers__.size
   end
 
 end
