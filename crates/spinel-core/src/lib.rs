@@ -206,6 +206,7 @@ const LIBRARIES: &[(&str, &str)] = &[
     ("date", include_str!("../../../lib/date.rb")),
     ("date_core", include_str!("../../../lib/date_core.rb")),
     ("objspace", include_str!("../../../lib/objspace.rb")),
+    ("monitor", include_str!("../../../lib/monitor.rb")),
     (
         "objspace/trace",
         include_str!("../../../lib/objspace/trace.rb"),

@@ -45,7 +45,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/objectspace` | 29 | 108 | 108 | 0 | 0 | 0 | 100% |
 | `core/proc` | 25 | 247 | 246 | 0 | 1 | 0 | 100% |
 | `core/process` | 92 | 439 | 416 | 0 | 22 | 1 | 95% |
-| `core/queue` | 15 | 46 | 40 | 0 | 6 | 0 | 87% |
+| `core/queue` | 15 | 46 | 46 | 0 | 0 | 0 | 100% |
 | `core/random` | 10 | 87 | 87 | 0 | 0 | 0 | 100% |
 | `core/range` | 35 | 606 | 606 | 0 | 0 | 0 | 100% |
 | `core/rational` | 32 | 160 | 159 | 0 | 0 | 1 | 99% |
@@ -54,7 +54,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/ruby` | 1 | 0 | 0 | 0 | 0 | 0 | — |
 | `core/set` | 57 | 175 | 165 | 0 | 1 | 9 | 94% |
 | `core/signal` | 3 | 53 | 53 | 0 | 0 | 0 | 100% |
-| `core/sizedqueue` | 16 | 61 | 54 | 0 | 7 | 0 | 89% |
+| `core/sizedqueue` | 16 | 61 | 61 | 0 | 0 | 0 | 100% |
 | `core/string` | 151 | 3906 | 3609 | 0 | 274 | 23 | 92% |
 | `core/struct` | 30 | 170 | 169 | 0 | 1 | 0 | 99% |
 | `core/symbol` | 29 | 270 | 269 | 0 | 0 | 1 | 100% |
@@ -93,7 +93,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `library/logger` | 14 | 55 | 0 | 0 | 52 | 3 | 0% |
 | `library/matrix` | 97 | 361 | 11 | 0 | 350 | 0 | 3% |
 | `library/mkmf` | 1 | 1 | 0 | 0 | 0 | 1 | 0% |
-| `library/monitor` | 6 | 12 | 0 | 0 | 12 | 0 | 0% |
+| `library/monitor` | 6 | 12 | 12 | 0 | 0 | 0 | 100% |
 | `library/net-ftp` | 56 | 419 | 1 | 0 | 416 | 2 | 0% |
 | `library/net-http` | 131 | 379 | 379 | 0 | 0 | 0 | 100% |
 | `library/objectspace` | 7 | 46 | 45 | 0 | 1 | 0 | 98% |
@@ -119,7 +119,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `library/stringscanner` | 44 | 240 | 240 | 0 | 0 | 0 | 100% |
 | `library/syslog` | 20 | 75 | 0 | 0 | 75 | 0 | 0% |
 | `library/tempfile` | 10 | 45 | 45 | 0 | 0 | 0 | 100% |
-| `library/thread` | 2 | 2 | 0 | 0 | 0 | 2 | 0% |
+| `library/thread` | 2 | 2 | 2 | 0 | 0 | 0 | 100% |
 | `library/time` | 6 | 7 | 7 | 0 | 0 | 0 | 100% |
 | `library/timeout` | 2 | 7 | 7 | 0 | 0 | 0 | 100% |
 | `library/tmpdir` | 2 | 10 | 10 | 0 | 0 | 0 | 100% |
@@ -131,4 +131,4 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `optional/capi` | 47 | 0 | 0 | 0 | 0 | 0 | — |
 | `optional/thread_safety` | 1 | 5 | 0 | 0 | 5 | 0 | 0% |
 | `security` | 13 | 31 | 28 | 0 | 3 | 0 | 90% |
-| **total** | 3835 | 32683 | 29410 | 0 | 3053 | 220 | 90% |
+| **total** | 3835 | 32683 | 29437 | 0 | 3028 | 218 | 90% |
