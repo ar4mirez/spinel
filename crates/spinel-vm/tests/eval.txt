@@ -2693,3 +2693,14 @@ c = Class.new; a = c.new; b = c.new; def b.to_ary = [:b]; m = c.new; def m.metho
 "가".encode("EUC-KR").bytes  #=> [176, 161]
 "\xB0\xA1".force_encoding("EUC-KR").encode("UTF-8")  #=> "가"
 [("\xA2\xE8".force_encoding("EUC-KR").encode("UTF-8") rescue [$!.class, $!.message]), ("é".encode("EUC-KR") rescue [$!.class, $!.message]), "\xB0\xA1\xFF".force_encoding("EUC-KR").encode("UTF-8", invalid: :replace), "\xB0\xA1".force_encoding("EUC-KR").encode("UTF-16LE").bytes]  #=> [[Encoding::UndefinedConversionError, "\"\\xA2\\xE8\" from EUC-KR to UTF-8"], [Encoding::UndefinedConversionError, "U+00E9 from UTF-8 to EUC-KR"], "가�", [0, 172]]
+
+# shift and unshift move where an Array starts in its storage (#733): the
+# window is what every reader sees, through a grow, a splice and a dup.
+a = (1..6).to_a; [a.shift, a.shift(2), a, a.size, a[0], a[-1], a.first, a.last(2)]  #=> [1, [2, 3], [4, 5, 6], 3, 4, 6, 4, [5, 6]]
+a = (1..6).to_a; a.shift(3); a.unshift(:x, :y); a.push(:z); [a, a.size]  #=> [[:x, :y, 4, 5, 6, :z], 6]
+a = []; 50.times { |i| a.unshift(i); a << -i; a.shift if i % 3 == 0 }; [a.size, a.first(3), a.last(3), a.sum]  #=> [83, [49, 47, 46], [-47, -48, -49], -408]
+a = (1..20).to_a; 15.times { a.shift }; 30.times { |i| a << i }; a  #=> [16, 17, 18, 19, 20, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29]
+a = (1..8).to_a; a.shift(3); a[1, 2] = [:a, :b, :c]; a.insert(0, :z); [a, a.dup << 1, a]  #=> [[:z, 4, :a, :b, :c, 7, 8], [:z, 4, :a, :b, :c, 7, 8, 1], [:z, 4, :a, :b, :c, 7, 8]]
+a = (1..8).to_a; a.shift(8); a << 1; [a, a.shift, a.shift, a.shift(5), a.unshift, a]  #=> [[], 1, nil, [], [], []]
+a = (1..4).to_a; a.shift; [a == [2, 3, 4], a.hash == [2, 3, 4].hash, a.reverse, a.sort, a.map { |x| x * 2 }, a.inspect]  #=> [true, true, [4, 3, 2], [2, 3, 4], [4, 6, 8], "[2, 3, 4]"]
+[begin; [1].freeze.shift; rescue => e; e.class; end, begin; [].freeze.unshift; rescue => e; e.class; end, begin; [].freeze.shift(0); rescue => e; e.class; end]  #=> [FrozenError, FrozenError, FrozenError]

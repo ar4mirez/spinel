@@ -8384,53 +8384,143 @@ const ARRAY_SLOTS: u32 = 2;
 const ARRAY_MIN_CAPACITY: u32 = 4;
 
 /// The live element count of an `Array`, given a handle to one.
+#[inline]
 fn array_len<'h>(scope: &mut HandleScope<'h>, array: Handle<'h>) -> usize {
-    scope
-        .slot(array, ARRAY_LENGTH)
-        .as_fixnum()
-        .and_then(|n| usize::try_from(n).ok())
-        .unwrap_or(0)
+    array_window(scope, array).1
+}
+
+/// Bits of the length slot that hold the live element count; the bits above
+/// them hold the head offset.
+const ARRAY_LENGTH_BITS: u32 = 32;
+const ARRAY_LENGTH_MASK: i64 = (1 << ARRAY_LENGTH_BITS) - 1;
+
+/// Where the live elements start in the storage, and how many there are.
+///
+/// The live elements are storage slots `head..head + length`. A `shift` moves
+/// `head` up instead of copying the rest down, and an `unshift` moves it back
+/// down into room left at the front, which is what makes draining an Array
+/// from the front amortised O(1), as CRuby's shared arrays make
+/// `rb_ary_shift` (#733). Slots before `head` hold `nil`, so a shifted element
+/// is not kept alive by the storage it left.
+///
+/// Both live in the one length slot, so an `Array` stays a two-slot cell.
+/// ponytail: the packing caps an Array at 2^32 - 1 elements and its head at
+/// 2^30; past that, the head offset gets a slot of its own.
+#[inline]
+fn array_window<'h>(scope: &mut HandleScope<'h>, array: Handle<'h>) -> (usize, usize) {
+    let packed = scope.slot(array, ARRAY_LENGTH).as_fixnum().unwrap_or(0);
+    let head = usize::try_from(packed >> ARRAY_LENGTH_BITS).unwrap_or(0);
+    let length = usize::try_from(packed & ARRAY_LENGTH_MASK).unwrap_or(0);
+    (head, length)
+}
+
+/// Write the head offset and the live element count back.
+fn array_set_window<'h>(
+    scope: &mut HandleScope<'h>,
+    array: Handle<'h>,
+    head: usize,
+    length: usize,
+) {
+    if length as i64 > ARRAY_LENGTH_MASK || head >= 1 << 30 {
+        array_window_overflow(head, length);
+    }
+    let packed = ((head as i64) << ARRAY_LENGTH_BITS) | length as i64;
+    let packed = Value::fixnum(packed).expect("an array window fits a fixnum");
+    scope.set_slot(array, ARRAY_LENGTH, packed);
+}
+
+#[cold]
+#[inline(never)]
+fn array_window_overflow(head: usize, length: usize) -> ! {
+    panic!("an Array of {length} elements from {head} is past what its length slot holds")
+}
+
+/// The storage's capacity, 0 for an Array that never held anything.
+fn array_capacity<'h>(scope: &mut HandleScope<'h>, array: Handle<'h>) -> usize {
+    let storage = scope.slot(array, ARRAY_STORAGE);
+    if storage == Value::NIL {
+        return 0;
+    }
+    let storage = scope.root(storage);
+    scope.len(storage) as usize
 }
 
 /// Element `index`, or `nil` past the end — which is `Array#[]`'s answer for a
 /// slot inside capacity but past `length`, and must not read stale storage.
+#[inline]
 fn array_get<'h>(scope: &mut HandleScope<'h>, array: Handle<'h>, index: usize) -> Value {
-    if index >= array_len(scope, array) {
+    let (head, length) = array_window(scope, array);
+    if index >= length {
         return Value::NIL;
     }
     let storage = scope.slot(array, ARRAY_STORAGE);
     let storage = scope.root(storage);
-    scope.slot(storage, index)
+    scope.slot(storage, head + index)
 }
 
-/// Storage with room for at least `wanted` elements, copying the live ones
-/// across when a bigger object is needed. Stored back into the `Array`.
+/// Storage with room for at least `wanted` elements from the head, copying
+/// the live ones across when a bigger object is needed. Stored back into the
+/// `Array`.
+///
+/// Room left at the front by `shift` is reused before the storage grows, but
+/// only when it is at least half the storage: moving the live elements down is
+/// O(length), and that bound is what keeps a queue that pushes at the back
+/// and shifts at the front amortised O(1) rather than moving them on every
+/// push.
 fn array_reserve<'h>(scope: &mut HandleScope<'h>, array: Handle<'h>, wanted: usize) {
-    let current = scope.slot(array, ARRAY_STORAGE);
-    let capacity = if current == Value::NIL {
-        0
-    } else {
-        let handle = scope.root(current);
-        scope.len(handle) as usize
-    };
-    if capacity >= wanted {
+    let capacity = array_capacity(scope, array);
+    let (head, _) = array_window(scope, array);
+    if head + wanted <= capacity {
+        return;
+    }
+    array_make_room(scope, array, wanted, capacity);
+}
+
+/// The rest of `array_reserve`, out of line: a push that fits is the common
+/// case, and the moves and copies here would otherwise be inlined into every
+/// writer.
+#[inline(never)]
+fn array_make_room<'h>(
+    scope: &mut HandleScope<'h>,
+    array: Handle<'h>,
+    wanted: usize,
+    capacity: usize,
+) {
+    let (head, live) = array_window(scope, array);
+    if head > 0 && wanted <= capacity / 2 {
+        let storage = scope.slot(array, ARRAY_STORAGE);
+        let storage = scope.root(storage);
+        for index in 0..live {
+            let value = scope.slot(storage, head + index);
+            scope.set_slot(storage, index, value);
+        }
+        for index in live..(head + live).min(capacity) {
+            scope.set_slot(storage, index, Value::NIL);
+        }
+        array_set_window(scope, array, 0, live);
         return;
     }
     let mut grown = ARRAY_MIN_CAPACITY as usize;
     while grown < wanted {
         grown *= 2;
     }
-    let live = array_len(scope, array);
+    // Growing to a storage no bigger than this one, which a head offset can
+    // ask for, would leave no room and copy again on the next write.
+    if grown <= capacity {
+        grown = capacity * 2;
+    }
     let fresh = scope.alloc(None, Payload::Slots, grown as u32);
+    let current = scope.slot(array, ARRAY_STORAGE);
     if current != Value::NIL {
         let old = scope.root(current);
-        for index in 0..live.min(capacity) {
-            let value = scope.slot(old, index);
+        for index in 0..live.min(capacity.saturating_sub(head)) {
+            let value = scope.slot(old, head + index);
             scope.set_slot(fresh, index, value);
         }
     }
     let fresh = scope.get(fresh);
     scope.set_slot(array, ARRAY_STORAGE, fresh);
+    array_set_window(scope, array, 0, live);
 }
 
 /// Write element `index`, growing storage and extending `length` with `nil`s if
@@ -8440,25 +8530,173 @@ fn array_set<'h>(scope: &mut HandleScope<'h>, array: Handle<'h>, index: usize, v
     array_reserve(scope, array, index + 1);
     let storage = scope.slot(array, ARRAY_STORAGE);
     let storage = scope.root(storage);
-    let live = array_len(scope, array);
+    let (head, live) = array_window(scope, array);
     for gap in live..index {
-        scope.set_slot(storage, gap, Value::NIL);
+        scope.set_slot(storage, head + gap, Value::NIL);
     }
-    scope.set_slot(storage, index, value);
+    scope.set_slot(storage, head + index, value);
     if index >= live {
-        array_set_len(scope, array, index + 1);
+        array_set_window(scope, array, head, index + 1);
     }
 }
 
+/// Set the live element count, keeping the head where it is.
 fn array_set_len<'h>(scope: &mut HandleScope<'h>, array: Handle<'h>, length: usize) {
-    let length = Value::fixnum(length as i64).expect("an array length fits a fixnum");
-    scope.set_slot(array, ARRAY_LENGTH, length);
+    let (head, _) = array_window(scope, array);
+    array_set_window(scope, array, head, length);
 }
 
 /// Append, growing storage when it is full. The `Array` object is unchanged.
 fn array_push<'h>(scope: &mut HandleScope<'h>, array: Handle<'h>, value: Value) {
     let live = array_len(scope, array);
     array_set(scope, array, live, value);
+}
+
+/// Take the first `count` elements off, moving the head rather than the rest
+/// (#733): `rb_ary_shift`'s O(1). The slots it leaves let go of their values.
+#[inline(never)]
+fn array_shift<'h>(scope: &mut HandleScope<'h>, array: Handle<'h>, count: usize) -> Vec<Value> {
+    let (head, length) = array_window(scope, array);
+    let count = count.min(length);
+    if count == 0 {
+        return Vec::new();
+    }
+    let storage = scope.slot(array, ARRAY_STORAGE);
+    let storage = scope.root(storage);
+    let mut taken = Vec::with_capacity(count);
+    for index in head..head + count {
+        taken.push(scope.slot(storage, index));
+        scope.set_slot(storage, index, Value::NIL);
+    }
+    // An Array emptied from the front starts over at the front, so the room
+    // is all usable by the next push without a move.
+    let head = if count == length { 0 } else { head + count };
+    array_set_window(scope, array, head, length - count);
+    taken
+}
+
+/// Put `elements` in front, into room at the front when there is some, and
+/// otherwise leaving room there for the unshifts that follow: the live
+/// elements move to the back of a storage at least twice their new count, so
+/// the next O(length) move is length / 2 unshifts away — CRuby's
+/// `ary_ensure_room_for_unshift` makes the same trade.
+///
+/// Every value is reachable from the array or from the caller's arguments, so
+/// growing the storage cannot lose one.
+#[inline(never)]
+fn array_unshift<'h>(scope: &mut HandleScope<'h>, array: Handle<'h>, elements: &[Value]) {
+    let count = elements.len();
+    if count == 0 {
+        return;
+    }
+    let (head, length) = array_window(scope, array);
+    let total = length + count;
+    if head < count {
+        let capacity = array_capacity(scope, array);
+        let mut wanted = ARRAY_MIN_CAPACITY as usize;
+        while wanted < total * 2 {
+            wanted *= 2;
+        }
+        let room = wanted - total;
+        // Half the spare room in front and half behind, so pushes after the
+        // unshifts do not have to move them all again at once.
+        let front = room - room / 2;
+        if capacity >= wanted {
+            // Moved within this storage, back to front so a slot is read
+            // before it is overwritten.
+            let storage = scope.slot(array, ARRAY_STORAGE);
+            let storage = scope.root(storage);
+            let to = front + count;
+            for index in (0..length).rev() {
+                let value = scope.slot(storage, head + index);
+                scope.set_slot(storage, to + index, value);
+            }
+            for index in head..to.min(head + length) {
+                scope.set_slot(storage, index, Value::NIL);
+            }
+        } else {
+            let fresh = scope.alloc(None, Payload::Slots, wanted as u32);
+            let current = scope.slot(array, ARRAY_STORAGE);
+            if current != Value::NIL {
+                let old = scope.root(current);
+                for index in 0..length {
+                    let value = scope.slot(old, head + index);
+                    scope.set_slot(fresh, front + count + index, value);
+                }
+            }
+            let fresh = scope.get(fresh);
+            scope.set_slot(array, ARRAY_STORAGE, fresh);
+        }
+        array_set_window(scope, array, front + count, length);
+    }
+    let (head, length) = array_window(scope, array);
+    let storage = scope.slot(array, ARRAY_STORAGE);
+    let storage = scope.root(storage);
+    let new_head = head - count;
+    for (index, &value) in elements.iter().enumerate() {
+        scope.set_slot(storage, new_head + index, value);
+    }
+    array_set_window(scope, array, new_head, length + count);
+}
+
+/// `shift` answers the first element, or nil; `shift(n)` a new Array of the
+/// first n, however many there are. False for a count that is not an Integer,
+/// which `__shift_other__` converts with `to_int`.
+#[inline(never)]
+fn array_shift_native(
+    scope: &mut HandleScope<'_>,
+    stack: &mut Stack,
+    call: &Pending,
+) -> Result<bool, Error> {
+    let handle = expect_array(scope, call.receiver, "shift")?;
+    frozen_check(scope, call.receiver)?;
+    match call.args.as_slice() {
+        [] => {
+            let taken = array_shift(scope, handle, 1);
+            stack.push(taken.first().copied().unwrap_or(Value::NIL));
+        }
+        &[count] => {
+            let Some(count) = count.as_fixnum() else {
+                return Ok(false);
+            };
+            let Ok(count) = usize::try_from(count) else {
+                return Err(Error::raise("ArgumentError", "negative array size"));
+            };
+            // Copied out before they leave: `new_array` allocates, and until
+            // it holds them the receiver's storage is what keeps them alive.
+            let length = array_len(scope, handle);
+            let elements: Vec<Value> = (0..count.min(length))
+                .map(|index| array_get(scope, handle, index))
+                .collect();
+            let taken = new_array(scope, &elements);
+            array_shift(scope, handle, count);
+            stack.push(taken);
+        }
+        _ => {
+            return Err(Error::raise(
+                "ArgumentError",
+                format!(
+                    "wrong number of arguments (given {}, expected 0..1)",
+                    call.args.len()
+                ),
+            ));
+        }
+    }
+    Ok(true)
+}
+
+/// `unshift` and `prepend`, which answer the receiver.
+#[inline(never)]
+fn array_unshift_native(
+    scope: &mut HandleScope<'_>,
+    stack: &mut Stack,
+    call: &Pending,
+) -> Result<(), Error> {
+    let handle = expect_array(scope, call.receiver, "unshift")?;
+    frozen_check(scope, call.receiver)?;
+    array_unshift(scope, handle, &call.args);
+    stack.push(call.receiver);
+    Ok(())
 }
 
 /// A handle to the receiver, or a refusal naming the method that wanted one.
@@ -8634,13 +8872,15 @@ fn array_splice<'h>(
         return;
     }
     let storage = scope.root(storage);
+    // Reserving may have moved the live elements to the front.
+    let (head, _) = array_window(scope, array);
     for (index, &value) in elements.iter().enumerate() {
-        scope.set_slot(storage, index, value);
+        scope.set_slot(storage, head + index, value);
     }
     // Slots past the new end let go of what they held, so a shrinking splice
     // does not keep its removed elements alive.
     let capacity = scope.len(storage) as usize;
-    for index in elements.len()..capacity.min(length) {
+    for index in head + elements.len()..capacity.min(head + length) {
         scope.set_slot(storage, index, Value::NIL);
     }
     array_set_len(scope, array, elements.len());
@@ -9224,7 +9464,7 @@ fn dup_value(scope: &mut HandleScope<'_>, value: Value) -> Result<Value, Error> 
             // it, and `Array#initialize_copy` fills it (#201).
             if is_builtin(scope, value, Builtin::Array) {
                 scope.set_slot(copy, ARRAY_STORAGE, Value::NIL);
-                array_set_len(scope, copy, 0);
+                array_set_window(scope, copy, 0, 0);
             }
         }
     }
@@ -9770,7 +10010,7 @@ fn empty_array_of<'h>(scope: &mut HandleScope<'h>, id: ClassId) -> Handle<'h> {
     let class = scope.root(class);
     let handle = scope.alloc(Some(class), Payload::Slots, ARRAY_SLOTS);
     scope.set_slot(handle, ARRAY_STORAGE, Value::NIL);
-    array_set_len(scope, handle, 0);
+    array_set_window(scope, handle, 0, 0);
     handle
 }
 
@@ -10560,6 +10800,29 @@ fn native_call<'h>(
             let value = array_get(scope, handle, length - 1);
             array_set_len(scope, handle, length - 1);
             stack.push(value);
+            Ok(None)
+        }
+
+        // Out of line, as the other families of primitives are: the dispatch
+        // match is the interpreter's hottest code, and bodies inlined into it
+        // cost every other primitive (#733).
+        Native::ArrayShift => {
+            if array_shift_native(scope, stack, &call)? {
+                return Ok(None);
+            }
+            forward_to_ruby(
+                scope,
+                stack,
+                frames,
+                call,
+                "__shift_other__",
+                proc_class,
+                ids,
+            )
+        }
+
+        Native::ArrayUnshift => {
+            array_unshift_native(scope, stack, &call)?;
             Ok(None)
         }
 
@@ -14476,6 +14739,14 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             Native::ArrayPush,
         ),
         (Builtin::Array, &["pop"], Native::ArrayPop),
+        (Builtin::Array, &["shift", "__shift__"], Native::ArrayShift),
+        // Frozen is checked even when there is nothing to add, as CRuby's
+        // `rb_ary_modify_check` does for `unshift()`.
+        (
+            Builtin::Array,
+            &["unshift", "prepend"],
+            Native::ArrayUnshift,
+        ),
         (
             Builtin::String,
             &["length", "size"],
@@ -21835,6 +22106,101 @@ mod tests {
                 Value::fixnum(n).expect("small"),
                 "element {n} survived the copies"
             );
+        }
+    }
+
+    /// The head offset `shift` and `unshift` move (#733), against a
+    /// `VecDeque` doing the same operations: every reader sees the window, a
+    /// grow or a move keeps the elements in order, and a collection between
+    /// two operations frees none of the live ones. The elements are heap
+    /// objects reachable only through the array, so a slot the window lost
+    /// track of would be read after it was freed — which miri reports.
+    #[test]
+    fn shift_and_unshift_move_the_window_and_keep_the_elements() {
+        use std::collections::VecDeque;
+        let rounds = if cfg!(miri) { 150 } else { 3000 };
+        let mut heap = Heap::new();
+        let mut scope = heap.scope();
+        scope.bootstrap();
+        let array = new_array(&mut scope, &[]);
+        let _keep = scope.root(array);
+        let mut model: VecDeque<i64> = VecDeque::new();
+        let mut seed: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut next = |bound: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % bound
+        };
+        let mut serial = 0;
+        for round in 0..rounds {
+            let mut inner = scope.nested();
+            let handle = inner.root(array);
+            // An element is a one-element Array holding its serial number.
+            let mut fresh = |inner: &mut HandleScope<'_>| {
+                serial += 1;
+                (
+                    serial,
+                    new_array(inner, &[Value::fixnum(serial).expect("small")]),
+                )
+            };
+            match next(6) {
+                0 | 1 => {
+                    let (n, value) = fresh(&mut inner);
+                    array_push(&mut inner, handle, value);
+                    model.push_back(n);
+                }
+                2 => {
+                    let taken = array_shift(&mut inner, handle, 1);
+                    assert_eq!(taken.len(), usize::from(model.pop_front().is_some()));
+                }
+                3 => {
+                    let count = next(4) as usize;
+                    let taken = array_shift(&mut inner, handle, count);
+                    let expected = count.min(model.len());
+                    assert_eq!(taken.len(), expected);
+                    model.drain(..expected);
+                }
+                4 => {
+                    let mut values = Vec::new();
+                    let mut numbers = Vec::new();
+                    for _ in 0..=next(3) {
+                        let (n, value) = fresh(&mut inner);
+                        let _rooted = inner.root(value);
+                        values.push(value);
+                        numbers.push(n);
+                    }
+                    array_unshift(&mut inner, handle, &values);
+                    for &n in numbers.iter().rev() {
+                        model.push_front(n);
+                    }
+                }
+                _ => {
+                    // A splice in the middle, which reads and rewrites the
+                    // window wherever it starts.
+                    let start = next(model.len() as u64 + 1) as usize;
+                    let (n, value) = fresh(&mut inner);
+                    let _rooted = inner.root(value);
+                    let removed = 1.min(model.len() - start);
+                    array_splice(&mut inner, handle, start, removed, &[value]);
+                    model.drain(start..start + removed);
+                    model.insert(start, n);
+                }
+            }
+            if round % 25 == 0 {
+                inner.collect();
+            }
+            assert_eq!(array_len(&mut inner, handle), model.len(), "round {round}");
+            for (index, &n) in model.iter().enumerate() {
+                let element = array_get(&mut inner, handle, index);
+                let element = inner.root(element);
+                assert_eq!(
+                    array_get(&mut inner, element, 0),
+                    Value::fixnum(n).expect("small"),
+                    "round {round}, element {index}"
+                );
+            }
+            assert_eq!(array_get(&mut inner, handle, model.len()), Value::NIL);
         }
     }
 

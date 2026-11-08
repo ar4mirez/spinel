@@ -254,6 +254,11 @@ pub enum Native {
     ArrayPush,
     /// `Array#pop` — writes the length back.
     ArrayPop,
+    /// `Array#shift` — moves the head offset up (#733).
+    ArrayShift,
+    /// `Array#unshift` and `#prepend` — move the head offset down, making room
+    /// at the front when there is none (#733).
+    ArrayUnshift,
     /// `String#length` and `#size` (characters), and `#bytesize` (bytes).
     /// One primitive, because both read the same byte payload's length; they
     /// differ only in whether the bytes are decoded first.
