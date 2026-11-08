@@ -32,7 +32,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/hash` | 69 | 562 | 535 | 0 | 25 | 2 | 95% |
 | `core/integer` | 70 | 598 | 598 | 0 | 0 | 0 | 100% |
 | `core/io` | 103 | 1631 | 1420 | 0 | 205 | 6 | 87% |
-| `core/kernel` | 118 | 2241 | 2066 | 0 | 135 | 40 | 92% |
+| `core/kernel` | 118 | 2241 | 2067 | 0 | 135 | 39 | 92% |
 | `core/main` | 7 | 27 | 27 | 0 | 0 | 0 | 100% |
 | `core/marshal` | 6 | 475 | 475 | 0 | 0 | 0 | 100% |
 | `core/matchdata` | 30 | 186 | 186 | 0 | 0 | 0 | 100% |
@@ -81,7 +81,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `library/delegate` | 24 | 74 | 74 | 0 | 0 | 0 | 100% |
 | `library/digest` | 68 | 129 | 129 | 0 | 0 | 0 | 100% |
 | `library/drb` | 1 | 2 | 0 | 0 | 2 | 0 | 0% |
-| `library/erb` | 13 | 0 | 0 | 0 | 0 | 0 | — |
+| `library/erb` | 13 | 53 | 53 | 0 | 0 | 0 | 100% |
 | `library/etc` | 19 | 50 | 0 | 0 | 50 | 0 | 0% |
 | `library/expect` | 1 | 6 | 0 | 0 | 6 | 0 | 0% |
 | `library/fiddle` | 1 | 1 | 0 | 0 | 1 | 0 | 0% |
@@ -126,9 +126,9 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `library/uri` | 105 | 204 | 204 | 0 | 0 | 0 | 100% |
 | `library/weakref` | 5 | 9 | 9 | 0 | 0 | 0 | 100% |
 | `library/win32ole` | 74 | 0 | 0 | 0 | 0 | 0 | — |
-| `library/yaml` | 9 | 0 | 0 | 0 | 0 | 0 | — |
-| `library/zlib` | 42 | 147 | 0 | 0 | 147 | 0 | 0% |
+| `library/yaml` | 9 | 46 | 1 | 0 | 45 | 0 | 2% |
+| `library/zlib` | 42 | 148 | 0 | 0 | 148 | 0 | 0% |
 | `optional/capi` | 47 | 0 | 0 | 0 | 0 | 0 | — |
 | `optional/thread_safety` | 1 | 5 | 0 | 0 | 5 | 0 | 0% |
 | `security` | 13 | 31 | 28 | 0 | 3 | 0 | 90% |
-| **total** | 3835 | 32683 | 29437 | 0 | 3028 | 218 | 90% |
+| **total** | 3835 | 32783 | 29492 | 0 | 3074 | 217 | 90% |

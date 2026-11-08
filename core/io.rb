@@ -4522,8 +4522,19 @@ module Kernel
     __writev__(text.__end_with_newline__ ? [text] : (text.empty? ? [IO.__default_rs__] : [text, IO.__default_rs__]))
   end
 
+  # CRuby's `rb_f_print`: the pieces go to `$stdout.write`, so a plain
+  # object whose only method is `write` (ERB#run's spec) can stand in.
   def print(*parts)
-    $stdout.print(*parts)
+    out = $stdout
+    return out.print(*parts) if IO === out
+    parts = [$_] if parts.empty?
+    separator = $,
+    parts.each_with_index do |part, index|
+      out.__send__(:write, separator) if index > 0 && !separator.nil?
+      out.__send__(:write, part.nil? ? "" : part)
+    end
+    out.__send__(:write, $\) unless $\.nil?
+    nil
   end
 
   def p(*values)
