@@ -140,6 +140,23 @@ fn queue_sized_queue_and_monitor_waits_do_not_spin() {
 }
 
 #[test]
+fn clearing_a_sized_queue_wakes_every_blocked_pusher() {
+    let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/threads/sized_queue_clear.rb");
+    let output = Command::new(SPINEL)
+        .arg("run")
+        .arg(&script)
+        .output()
+        .expect("spinel runs");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "2\n");
+}
+
+#[test]
 fn a_timed_wait_answers_nil_or_false_when_it_times_out() {
     let script =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/threads/wait_results.rb");

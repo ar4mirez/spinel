@@ -903,7 +903,6 @@ class Thread
 
     def clear
       @__items__.clear
-      __popped__
       self
     end
 
@@ -954,6 +953,14 @@ class Thread
 
     def __popped__
       __thread_wakeup__(@__pushers__.shift) unless @__pushers__.empty?
+    end
+
+    # Clearing frees every slot, so every pusher wakes, as CRuby's
+    # `rb_szqueue_clear`.
+    def clear
+      super
+      __wake_all__(@__pushers__)
+      self
     end
 
     def close
