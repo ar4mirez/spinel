@@ -866,6 +866,7 @@ class Thread
 
     def pop(non_block = false, timeout: nil)
       deadline = __deadline__(non_block, timeout)
+      timed_out = false
       while true
         unless @__items__.empty?
           item = @__items__.shift
@@ -874,8 +875,8 @@ class Thread
         end
         Kernel.raise ThreadError, "queue empty" if non_block
         return nil if @__closed__
-        return nil if timeout == 0
-        return nil unless __wait__(@__waiters__, deadline)
+        return nil if timeout == 0 || timed_out
+        timed_out = !__wait__(@__waiters__, deadline)
       end
     end
     alias shift pop
@@ -934,14 +935,15 @@ class Thread
 
     def push(object, non_block = false, timeout: nil)
       deadline = __deadline__(non_block, timeout)
+      timed_out = false
       while true
         Kernel.raise ClosedQueueError, "queue closed" if @__closed__
         if @__items__.size < @__max__
           return super(object)
         end
         Kernel.raise ThreadError, "queue full" if non_block
-        return nil if timeout == 0
-        return nil unless __wait__(@__pushers__, deadline)
+        return nil if timeout == 0 || timed_out
+        timed_out = !__wait__(@__pushers__, deadline)
       end
     end
     alias << push
