@@ -647,6 +647,24 @@ pub enum Native {
     /// `Kernel#__digest__(algorithm, string)`: the digest of the bytes, as a
     /// BINARY String — MD5, SHA1, SHA256, SHA384, SHA512 or RMD160 (#58).
     Digest,
+    /// `Kernel#__json_parse__(source, max_nesting, flags, marks)`: json's
+    /// parser (#55), `json.rs`, building the document's objects. Answers
+    /// `[value, failure, warnings]` for `lib/json/ext/parser.rb` to raise and
+    /// warn from; `flags` and `marks` are described there.
+    JsonParse,
+    /// `Kernel#__json_where__(source, offset)`: `[line, column, fragment]`
+    /// for byte `offset` of `source`, as json's parser reports a position,
+    /// for an error the Ruby half raises over an object it built itself.
+    JsonWhere,
+    /// `Kernel#__json_float__(float)`: a finite Float as json's C generator
+    /// writes it, `fpconv_dtoa` (#55). Grisu2 is 64-bit arithmetic that
+    /// wraps, where every step in Ruby would be a Bignum.
+    JsonFloat,
+    /// `Kernel#__json_escape__(string, flags)`: the String as a quoted JSON
+    /// string, escaped as json's C generator escapes it (#55) — `flags` 1 for
+    /// `script_safe`, 2 for `ascii_only` — or nil when it is not ASCII,
+    /// UTF-8 or US-ASCII and valid, which `valid_json_string_p` refuses.
+    JsonEscape,
 }
 
 /// Which file system call. Each answers an Integer errno on failure, for the

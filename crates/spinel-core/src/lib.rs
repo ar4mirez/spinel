@@ -209,6 +209,14 @@ const LIBRARIES: &[(&str, &str)] = &[
     ("objspace", include_str!("../../../lib/objspace.rb")),
     ("monitor", include_str!("../../../lib/monitor.rb")),
     (
+        "json/ext/parser",
+        include_str!("../../../lib/json/ext/parser.rb"),
+    ),
+    (
+        "json/ext/generator",
+        include_str!("../../../lib/json/ext/generator.rb"),
+    ),
+    (
         "objspace/trace",
         include_str!("../../../lib/objspace/trace.rb"),
     ),

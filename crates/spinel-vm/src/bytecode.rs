@@ -272,6 +272,9 @@ pub enum Insn {
     DefinedSelfMethod(u32),
     /// `defined?(yield)`. Pushes `"yield"` when the frame has a block.
     DefinedYield,
+    /// `defined?(super)`, with or without arguments, which are not looked
+    /// at. Pushes `"super"` when the running method has one to go on to.
+    DefinedSuper,
 
     // -- exit -------------------------------------------------------------
     /// Return the top of the stack from this frame.
