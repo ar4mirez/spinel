@@ -689,29 +689,13 @@ class Array
     self
   end
 
-  # `shift` answers the first element; `shift(n)` answers a new array of the
-  # first n. Both leave the rest behind, in this same array.
-  def shift(*count)
-    __check_frozen__
-    if count.size > 1
-      raise ArgumentError, "wrong number of arguments (given " + count.size.to_s + ", expected 0..1)"
-    end
-    given = count.size > 0
-    wanted = given ? __count__(count[0]) : 1
-    taken = __take__(0, wanted)
-    rest = __take__(wanted, size)
-    clear
-    rest.each { |element| push(element) }
-    return taken if given
-    taken.empty? ? nil : taken[0]
-  end
-
-  def unshift(*elements)
-    rest = dup
-    clear
-    elements.each { |element| push(element) }
-    rest.each { |element| push(element) }
-    self
+  # `shift` and `shift(n)` are a primitive, which moves where the array
+  # starts in its storage rather than copying the rest down, so draining an
+  # array from the front is linear overall (#733). It hands a count that is
+  # not an Integer here, to be converted with `to_int`.
+  def __shift_other__(count)
+    wanted = __count__(count)
+    __shift__(wanted > size ? size : wanted)
   end
 
   def clear
@@ -1256,10 +1240,6 @@ class Array
   end
 
   # --- reading --------------------------------------------------------------
-
-  def prepend(*items)
-    unshift(*items)
-  end
 
   def values_at(*selectors)
     out = []
