@@ -795,8 +795,9 @@ fn main_blocked(scope: &HandleScope<'_>) -> bool {
 }
 
 /// A signal waiting wakes the main thread from its wait, answering
-/// `:signal`, for the wait to run the handlers and go on waiting
-/// (`Kernel#__thread_wait__`). How many woke: one or none.
+/// `:signal`, for the wait to run the handlers and go on waiting, or hand
+/// back to its caller to look again (`Kernel#__thread_wait__`). How many
+/// woke: one or none.
 fn wake_for_signal(scope: &mut HandleScope<'_>) -> usize {
     let main = scope.fibers().threads.main;
     usize::from(signal_waits(scope) && wakeup(scope, main, reason("signal")))
