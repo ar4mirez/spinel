@@ -8360,8 +8360,8 @@ fn symbol_name(id: SymbolId) -> String {
 // ---------------------------------------------------------------------------
 //
 // An `Array` is two slots, `[storage, length]`. `storage` is a separate
-// `Payload::Slots` object of `capacity` elements and `length` is a fixnum of how
-// many of them are live.
+// `Payload::Slots` object of `capacity` elements and `length` is a fixnum
+// packing how many of them are live with where they start (`array_window`).
 //
 // The indirection is what makes `a << 1` mutate the array the caller is
 // holding. A heap cell cannot grow — mark-sweep with size classes hands out a
@@ -8375,7 +8375,7 @@ fn symbol_name(id: SymbolId) -> String {
 
 /// Slot of the storage object inside an `Array`.
 const ARRAY_STORAGE: usize = 0;
-/// Slot of the live element count inside an `Array`.
+/// Slot of the live element count and head offset inside an `Array`.
 const ARRAY_LENGTH: usize = 1;
 /// Slots in the `Array` object itself. Not the element count.
 const ARRAY_SLOTS: u32 = 2;
