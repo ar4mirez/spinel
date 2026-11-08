@@ -569,10 +569,10 @@ fn survived(value: Value) -> bool {
     }
 }
 
-/// `Object#object_id` for the object at `address`: the address, shifted past
-/// the alignment bits that are zero on every cell.
+/// `Object#object_id` for the object at `address`: the address with the four
+/// alignment bits zero, so 0 mod 16, apart from every immediate's id.
 pub(crate) fn object_id(address: usize) -> i64 {
-    i64::try_from(address >> 4).expect("a cell address shifted by four fits in an i64")
+    i64::try_from(address & !0xf).expect("a cell address fits in an i64")
 }
 
 /// What `GC.stat` reports (#36), beside [`Stats`]: the counts it derives.
