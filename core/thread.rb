@@ -748,6 +748,10 @@ class Thread
         # `ensure` runs holding it, as CRuby's does.
         Thread.current.__uninterruptibly__ { lock }
       end
+      # nil when the timeout ran out, as CRuby's `rb_mutex_sleep`: what
+      # `ConditionVariable#wait` hands back, and Monitor reads, to tell a
+      # timeout from a signal.
+      return nil if reason == :timeout
       (Process.clock_gettime(Process::CLOCK_MONOTONIC) - started).round
     end
 
@@ -769,7 +773,6 @@ class Thread
       ensure
         @__waiters__.delete(index)
       end
-      self
     end
 
     def signal
