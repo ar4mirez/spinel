@@ -220,6 +220,7 @@ const LIBRARIES: &[(&str, &str)] = &[
         "objspace/trace",
         include_str!("../../../lib/objspace/trace.rb"),
     ),
+    ("zlib", include_str!("../../../lib/zlib.rb")),
 ];
 
 fn library(name: &str) -> Option<&'static str> {
