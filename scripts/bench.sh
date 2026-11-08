@@ -58,25 +58,41 @@ yb_list() {
   done | LC_ALL=C sort
 }
 
-# Run a command on one CPU with address randomisation off, under a memory cap
-# and a time limit, as far as this machine has the tools for each.
+# Pin runs to one CPU with address randomisation off, as far as this machine
+# has working tools for each, and cap their memory. `yb_pinning` names the
+# pinning that applied, for the `iterations` line.
+yb_pin=() yb_cap=() yb_pinning=""
+yb_probe() {
+  local cpu="${BENCH_CPU:-2}" arch
+  arch="$(uname -m)"
+  if command -v taskset >/dev/null && taskset -c "$cpu" true 2>/dev/null; then
+    yb_pin+=(taskset -c "$cpu"); yb_pinning+=", one CPU"
+  fi
+  if command -v setarch >/dev/null && setarch "$arch" -R true 2>/dev/null; then
+    yb_pin+=(setarch "$arch" -R); yb_pinning+=", ASLR off"
+  fi
+  if command -v systemd-run >/dev/null && systemd-run --user --scope -q true 2>/dev/null; then
+    yb_cap=(systemd-run --user --scope -q -p MemoryMax=1500M -p MemorySwapMax=0)
+  fi
+}
+
+# Run a command as `yb_probe` set up, under a time limit.
 yb_pinned() {
   local limit="$1"; shift
-  local cmd=("$@")
-  if command -v setarch >/dev/null; then cmd=(setarch "$(uname -m)" -R "${cmd[@]}"); fi
-  if command -v taskset >/dev/null; then cmd=(taskset -c "${BENCH_CPU:-2}" "${cmd[@]}"); fi
+  local cmd=(${yb_pin[@]+"${yb_pin[@]}"} "$@")
   if command -v timeout >/dev/null; then cmd=(timeout -k 5 "$limit" "${cmd[@]}"); fi
-  if command -v systemd-run >/dev/null && systemd-run --user --scope -q true 2>/dev/null; then
-    cmd=(systemd-run --user --scope -q -p MemoryMax=1500M -p MemorySwapMax=0 "${cmd[@]}")
-  fi
-  "${cmd[@]}"
+  ${yb_cap[@]+"${yb_cap[@]}"} "${cmd[@]}"
 }
 
 # The median a run printed, from the harness's last line.
 yb_median() {
-  local out
+  local out median
   out="$(yb_pinned "$@")" || { echo "bench.sh: failed: $*" >&2; echo "$out" >&2; return 1; }
-  echo "$out" | sed -n 's/^median_ms: //p' | tail -1
+  median="$(echo "$out" | sed -n 's/^median_ms: //p' | tail -1)"
+  if [[ ! "$median" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+    echo "bench.sh: no median_ms from: $*" >&2; echo "$out" >&2; return 1
+  fi
+  echo "$median"
 }
 
 # results.tsv -> the Markdown table, on standard output.
@@ -93,8 +109,8 @@ yb_render() {
       print "| benchmark | Spinel | `ruby --disable-yjit` | Spinel ÷ interpreter | within 1.5× | `ruby --yjit` |"
       print "|---|---:|---:|---:|:---:|---:|"
       for (i = 1; i <= n; i++) {
-        r = sp[i] / interp[i]
-        printf "| %s | %.1f ms | %.1f ms | %.2f× | %s | %.1f ms |\n", name[i], sp[i], interp[i], r, (r <= 1.5 ? "yes" : "no"), yjit[i]
+        r = sprintf("%.2f", sp[i] / interp[i])
+        printf "| %s | %.1f ms | %.1f ms | %s× | %s | %.1f ms |\n", name[i], sp[i], interp[i], r, (r + 0 <= 1.5 ? "yes" : "no"), yjit[i]
       }
     }
   ' "$yb_results"
@@ -143,11 +159,12 @@ yb_run() {
   local warmup="${WARMUP_ITRS:-1}" timed="${BENCH_ITRS:-5}"
   export WARMUP_ITRS="$warmup" BENCH_ITRS="$timed"
   local tmp="$yb_results.tmp"
+  yb_probe
   {
     echo "# Written by scripts/bench.sh --yjit-bench. Medians in milliseconds; do not edit."
     printf 'spinel\t%s\n' "$rev"
     printf 'ruby\t%s\n' "$(ruby --disable-yjit -e 'print RUBY_DESCRIPTION')"
-    printf 'iterations\t%s warmup and the median of %s timed iterations each, one CPU, ASLR off\n' "$warmup" "$timed"
+    printf 'iterations\t%s warmup and the median of %s timed iterations each%s\n' "$warmup" "$timed" "$yb_pinning"
     printf '#\tbenchmark\tspinel\truby --disable-yjit\truby --yjit\n'
   } > "$tmp"
   local name path s i y

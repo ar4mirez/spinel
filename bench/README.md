@@ -29,7 +29,9 @@ scripts/bench.sh --yjit-bench-check   # fail if the table is not what results.ts
 
 Every program runs through the same harness on both sides
 (`yjit-bench/lib/harness/loader.rb`), pinned to one CPU with address
-randomisation off and CRuby under a 1.5 GB memory cap. The medians are written
+randomisation off where this machine has working `taskset` and `setarch` (the
+line above the table says which applied), and under a 1.5 GB memory cap where
+`systemd-run --user` works. The medians are written
 to `yjit-bench/results.tsv`, and the table is rendered from that file; never
 edit either by hand. `cargo test` runs the check.
 
