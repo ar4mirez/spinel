@@ -1,9 +1,10 @@
 //! The vendored `webrick` (#54): a server on 127.0.0.1, on a port the system
 //! picks, serving Net::HTTP requests over one kept-alive connection — a proc
 //! servlet, a form POST with a cookie in the answer, a static file by GET and
-//! HEAD, a 404 and a raised status — then shutting down. ruby/spec has no
-//! `library/webrick`: it is a gem, not the standard library. Expected output
-//! is what ruby 4.0.9 prints for the same fixture with `-I stdlib`.
+//! HEAD, a 404 and a raised status — then shutting down, which it logs once.
+//! ruby/spec has no `library/webrick`: it is a gem, not the standard library.
+//! Expected output is what ruby 4.0.9 prints for the same fixture with
+//! `-I stdlib`.
 
 use std::io::Read;
 use std::path::PathBuf;
@@ -31,6 +32,8 @@ status: Stop
 listeners: 0
 ERROR '/missing' not found.
 ERROR no
+INFO  going to shutdown ...
+INFO  WEBrick::HTTPServer#start done.
 "#;
 
 #[test]

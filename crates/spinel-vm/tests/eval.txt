@@ -419,6 +419,20 @@ r = 0; n = 0; while n < 2; n = n + 1; begin; next; ensure; r = r + 1; end; end; 
 r = 0; n = 0; while n < 5; n = n + 1; begin; break; ensure; r = r + 1; end; end; r  #=> 1
 r = 0; n = 0; while n < 5; n = n + 1; begin; break 7; ensure; r = r + 1; end; end  #=> 7
 r = 0; begin; n = 0; while n < 2; n = n + 1; next; end; ensure; r = 1; end; r  #=> 1
+# A `while` that is the last thing in a `begin` lands, on `break`, exactly where
+# the body falls into its `ensure`: that is arriving, not leaving, so the ensure
+# runs once. WEBrick's `GenericServer#start` leaves its accept loop this way.
+r = 0; begin; while true; break; end; ensure; r += 1; end; r  #=> 1
+r = 0; begin; until false; break; end; ensure; r += 1; end; r  #=> 1
+r = 0; x = begin; while true; break 5; end; ensure; r += 1; end; [x, r]  #=> [5, 1]
+def ewb_m(a); begin; while true; break; end; ensure; a << 1; end; end; a = []; ewb_m(a); a  #=> [1]
+r = []; begin; while true; while true; break; end; r << :in; break; end; ensure; r << :e; end; r  #=> [:in, :e]
+r = []; begin; begin; while true; break; end; ensure; r << :inner; end; ensure; r << :outer; end; r  #=> [:inner, :outer]
+r = 0; begin; i = 0; while i < 3; i += 1; next; end; ensure; r += 1; end; [i, r]  #=> [3, 1]
+r = 0; begin; i = 0; j = 0; while i < 2; i += 1; j += 1; redo if j == 1; end; ensure; r += 1; end; [i, j, r]  #=> [2, 2, 1]
+def ewb_r(a); begin; while true; return :out; end; ensure; a << 1; end; end; a = []; [ewb_r(a), a]  #=> [:out, [1]]
+r = 0; begin; loop { break }; ensure; r += 1; end; r  #=> 1
+r = 0; begin; [1].each { break }; ensure; r += 1; end; r  #=> 1
 def ar1(a, b); [a, b]; end; begin; ar1(1); rescue ArgumentError => e; e.message; end  #=> "wrong number of arguments (given 1, expected 2)"
 def ar2(a); a; end; begin; ar2(1, 2); rescue ArgumentError => e; e.message; end  #=> "wrong number of arguments (given 2, expected 1)"
 def ar3(a, b); [a, b]; end; def ar3c; ar3(1, 2); end; ar3c  #=> [1, 2]

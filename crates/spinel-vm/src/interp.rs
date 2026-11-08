@@ -4538,7 +4538,8 @@ fn unwind_to_handler(
                     // run when the `begin` ends, not once per iteration.
                     CatchKind::Ensure => match unwind {
                         Unwind::Goto { target, .. } => {
-                            !entry.covers(u32::try_from(target).unwrap_or(u32::MAX))
+                            let target = u32::try_from(target).unwrap_or(u32::MAX);
+                            !(entry.covers(target) || target == entry.end)
                         }
                         _ => true,
                     },

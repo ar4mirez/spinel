@@ -12,7 +12,7 @@ access = StringIO.new
 server = WEBrick::HTTPServer.new(
   BindAddress: "127.0.0.1",
   Port: 0,
-  Logger: WEBrick::Log.new(log, WEBrick::BasicLog::WARN),
+  Logger: WEBrick::Log.new(log, WEBrick::BasicLog::INFO),
   AccessLog: [[access, "%m %U %s %b"]],
   DocumentRoot: File.join(__dir__, "root"),
 )
@@ -56,4 +56,7 @@ end
 puts access.string
 puts "status: #{server.status}"
 puts "listeners: #{server.listeners.size}"
+# Startup's INFO lines name the engine, the pid and the port; the rest, down
+# to the shutdown pair that must appear once, are the same run to run.
 puts log.string.lines.map { |line| line.sub(/\A\[[^\]]*\] /, "") }
+  .grep_v(/\AINFO  (WEBrick \d|ruby |\S+#start: pid=)/)
