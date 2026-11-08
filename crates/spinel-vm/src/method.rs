@@ -663,7 +663,8 @@ pub enum Native {
     /// `Kernel#__json_escape__(string, flags)`: the String as a quoted JSON
     /// string, escaped as json's C generator escapes it (#55) — `flags` 1 for
     /// `script_safe`, 2 for `ascii_only` — or nil when it is neither ASCII
-    /// nor valid UTF-8, which `valid_json_string_p` refuses.
+    /// nor a valid UTF-8 String (US-ASCII with high bytes is not), which
+    /// `valid_json_string_p` refuses.
     JsonEscape,
 }
 
