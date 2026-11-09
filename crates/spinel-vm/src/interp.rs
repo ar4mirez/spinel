@@ -20864,14 +20864,15 @@ impl crate::json::Sink for JsonSink<'_, '_> {
     }
 }
 
-/// An Integer argument, if that is what was passed.
 /// `Kernel#__json_generate__(obj, buffer, depth, config)` (#742): what
 /// `generate_json` writes for `obj`, at nesting `depth`, appended to `buffer`.
 ///
 /// `config` is `[flags, max_nesting, indent, space, space_before, object_nl,
 /// array_nl]`, the Run's configuration: `flags` as `__json_escape__` takes
-/// them, each layout String false when unset. The walk takes plain data
-/// alone: nil, true, false, an Integer, a finite Float, a String that is
+/// them, each layout String false when unset. `obj` is the Hash or the
+/// Array `object` or `array` was handed, written whatever its class, as
+/// `generate_json_object` and `generate_json_array` do. What it holds must be
+/// plain data: nil, true, false, an Integer, a finite Float, a String that is
 /// valid JSON text, and an Array or a Hash of exactly those classes whose
 /// keys are all Strings or all Symbols. Those are the values the C generator
 /// writes without calling into Ruby, so there is nothing for this walk to
@@ -20922,7 +20923,12 @@ fn json_generate(scope: &mut HandleScope<'_>, call: &Pending) -> Result<Value, E
         array_nl: layout(6),
     };
     let mut out = Vec::new();
-    if generator.value(scope, obj, depth, 0, &mut out).is_none() {
+    let written = if heap_kind(scope, obj) == Some(HeapKind::Array) {
+        generator.array(scope, obj, depth, 0, &mut out)
+    } else {
+        generator.object(scope, obj, depth, 0, &mut out)
+    };
+    if written.is_none() {
         return Ok(Value::FALSE);
     }
     let buffer = scope.root(buffer);
@@ -21018,15 +21024,12 @@ impl JsonGenerator {
         Some(())
     }
 
-    /// `obj.class`, which the C generator's class tests are: a singleton
-    /// class is looked through, so a Hash with methods of its own is still
-    /// written as a Hash, without calling them.
+    /// `RBASIC_CLASS(obj)`, which the C generator's class tests compare:
+    /// `None` for an object with a singleton class, which goes to `to_json`
+    /// in the Ruby generator.
     fn class(scope: &mut HandleScope<'_>, obj: Value) -> Option<ClassId> {
         let class = class_of(scope, obj)?;
-        if scope.classes().is_singleton(class) {
-            return scope.classes().superclass(class);
-        }
-        Some(class)
+        (!scope.classes().is_singleton(class)).then_some(class)
     }
 
     /// `string` for a String object, read where its bytes lie.
@@ -21178,6 +21181,7 @@ impl JsonGenerator {
     }
 }
 
+/// An Integer argument, if that is what was passed.
 fn int_arg(call: &Pending, index: usize) -> Option<i64> {
     call.args.get(index).and_then(|v| v.as_fixnum())
 }

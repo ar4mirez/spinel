@@ -304,6 +304,18 @@ show("give up non-finite") { JSON.generate([[1.5, Float::INFINITY]], allow_nan: 
 show("give up encoding") { JSON.generate([["ok", "caf\xE9".force_encoding("ISO-8859-1")]]) }
 show("give up non-ascii symbol key") { JSON.generate({"é".to_sym => 1}) }
 show("singleton hash") { h = {"a" => 1}; def h.each_pair = raise("each_pair"); JSON.generate([h, {"b" => h}]) }
+# json compares `RBASIC_CLASS`, so a value with a singleton class is not
+# plain data and its `to_json` is called; a key's class is `rb_obj_class`'s,
+# which looks through it. A Float takes no singleton method: ruby 4.0.9
+# raises TypeError, "can't define singleton", even for a boxed 1.0e300.
+singleton = ->(value) { def value.to_json(*) = %("singleton #{self.class}"); value }
+show("singleton to_json hash") { JSON.generate([1, singleton[{"a" => 1}], {"b" => singleton[{"c" => 2}]}]) }
+show("singleton to_json array") { JSON.generate([1, singleton[[2, 3]], {"b" => singleton[[]]}]) }
+show("singleton to_json string") { JSON.generate([1, singleton[+"s"], {"b" => singleton[+"t"]}]) }
+show("singleton to_json string pretty") { JSON.pretty_generate([singleton[+"s"]]) }
+show("singleton string key") { k = +"k"; def k.to_s = "key"; def k.to_json(*) = "!"; JSON.generate([{k => 1, "j" => 2}]) }
+show("singleton other method") { a = [1, "x"]; def a.shout = "!"; s = +"y"; def s.shout = "!"; JSON.generate([a, {"s" => s}, [s]]) }
+show("singleton strict") { a = [1]; def a.shout = "!"; JSON.generate([a], strict: true) }
 # The C generator walks plain data without sending a message, so none of
 # these is called; the issue's measured shapes, one each.
 redefined = [[Hash, :each_pair], [Integer, :to_s]]

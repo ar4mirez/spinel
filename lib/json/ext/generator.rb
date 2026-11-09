@@ -368,7 +368,9 @@ module JSON
         def value(obj, depth, as_json_called = false)
           buffer = @buffer
           # The commonest classes first: each test is an interpreted step.
-          klass = obj.class
+          # `RBASIC_CLASS`: an object with a singleton class is none of these
+          # and goes to `to_json`.
+          klass = __reflect_class_of__(obj)
           if klass.equal?(::String)
             if (quoted = __json_escape__(obj, @escape))
               buffer << quoted
