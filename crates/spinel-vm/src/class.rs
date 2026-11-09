@@ -54,6 +54,12 @@ impl ClassId {
     pub const fn index(self) -> usize {
         self.0 as usize
     }
+
+    /// The id at `index` of a heap's class list, for a memo that kept
+    /// [`ClassId::index`] and has checked it against that list.
+    pub(crate) const fn from_index(index: u32) -> ClassId {
+        ClassId(index)
+    }
 }
 
 /// One lexical scope, as an index into its heap's cref arena.
@@ -3150,6 +3156,22 @@ impl<'h> HandleScope<'h> {
 
     pub fn class_of(&mut self, handle: Handle<'h>) -> Option<ClassId> {
         let class = self.class(handle)?;
+        // Remembered from an earlier ask, and still the table's: the
+        // address of a class object that a collection freed and reused is
+        // forgotten by that collection.
+        let address = class.as_heap().map_or(0, |p| p.as_ptr() as usize);
+        if let Some(id) = self.remembered_class_id(address).map(ClassId)
+            && id.index() < self.classes().len()
+            && self.classes().object(id) == class
+        {
+            return Some(id);
+        }
+        let id = self.class_id_from_ivar(class);
+        self.remember_class_id(address, id.0);
+        Some(id)
+    }
+
+    fn class_id_from_ivar(&mut self, class: Value) -> ClassId {
         let mut inner = self.nested();
         let class = inner.root(class);
         // `expect` rather than `?`: `None` here would mean "this object has no
@@ -3160,9 +3182,7 @@ impl<'h> HandleScope<'h> {
             .expect("a class object holds instance variables")
             .as_fixnum()
             .expect("a class object carries its id in `@__id__`");
-        Some(ClassId(
-            u32::try_from(id).expect("a class id was written from a `ClassId`"),
-        ))
+        ClassId(u32::try_from(id).expect("a class id was written from a `ClassId`"))
     }
 }
 

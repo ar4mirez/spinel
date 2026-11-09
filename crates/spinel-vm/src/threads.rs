@@ -1100,6 +1100,7 @@ fn enter(
     // The interrupt runs on top of whatever the thread was doing, as a call
     // that call returns to: what it stopped in has its answer below it.
     if let Some(mut frame) = pending {
+        frame.floor = stack.len();
         frame.base = stack.len();
         frame.errinfo_on_entry = scope.errinfo();
         frames.push(frame);

@@ -243,13 +243,9 @@ const ENV_HEADER: usize = 1;
 /// Allocate an environment for `slots` locals, linked to `outer`.
 ///
 /// A plain `Slots` object, so the collector traces the locals and the parent
-/// link with no code that knows what an environment is.
-///
-// ponytail: one of these per call that has a frame, rather than only per call a
-// block actually captures. engine.md wants a `captured` bit from the resolve
-// pass deciding it, which is a compiler pass this slice does not need to be
-// correct — only to be fast. The uniform version keeps one code path for
-// `GetLocal`; upgrade it when `bench/` has a call-heavy number to move.
+/// link with no code that knows what an environment is. A method body's
+/// frame makes one only when something captures its locals: see
+/// [`Call::env`] and [`frame_env`].
 fn env_alloc(scope: &mut HandleScope<'_>, outer: Value, slots: usize) -> Value {
     let len = u32::try_from(ENV_HEADER + slots).expect("a scope has fewer than 4 billion locals");
     let handle = scope.alloc(None, Payload::Slots, len);
@@ -301,17 +297,27 @@ pub fn eval(heap: &mut Heap, iseq: &Iseq) -> Result<Value, Error> {
 /// the loop continues, which is what keeps the interpreter non-recursive and is
 /// what fibers will need when they own a VM stack of these.
 struct Call {
+    /// The body running. Its symbol pool is read through it
+    /// ([`Iseq::symbol_ids`]), resolved the first time any frame runs it.
     iseq: Arc<Iseq>,
-    /// This `Iseq`'s symbol pool, interned once per frame rather than per
-    /// instruction.
-    symbols: Arc<[SymbolId]>,
     /// Where this `Iseq`'s run of inline caches starts, resolved once per frame
-    /// for the same reason `symbols` is: the lookup is a hash probe, and it
+    /// rather than per instruction: the lookup is a hash probe, and it
     /// belongs on frame entry rather than on every `Send`. A call-site id is
     /// this plus the instruction's operand.
     cache_base: u32,
-    /// This frame's own locals.
+    /// This frame's own locals, once they live in a heap environment.
+    ///
+    /// `NIL` while they live on the operand stack instead, in
+    /// `stack[floor..base]`: a method body's locals start there, as CRuby's
+    /// do, and move to the heap only when something captures them — a block,
+    /// `binding`, an `eval` string — through [`frame_env`]. A body written
+    /// inside another scope (a block, an `eval` string) starts with a heap
+    /// environment linked to that scope's, so `NIL` means exactly the stack.
     env: Value,
+    /// Where this frame's slice of the operand stack starts: its locals,
+    /// while they are on the stack, then its operands from `base`. What a
+    /// return truncates the stack to.
+    floor: usize,
     receiver: Value,
     /// The block this frame was called with, as a `Proc` or `nil`. Reached by
     /// `yield` and by `block_given?`, and never by a slot, so an anonymous
@@ -2338,13 +2344,13 @@ pub fn eval_in(
     let cache_base = scope.call_caches_mut().base(&script);
     let mut frames: Vec<Call> = vec![Call {
         iseq: script,
-        symbols: iseq.linked(),
         cache_base,
         env,
         receiver: frame.receiver,
         cref: frame.cref,
         block: Value::NIL,
         pc: 0,
+        floor: 0,
         base: 0,
         keeps_receiver: false,
         raises_receiver: false,
@@ -2434,6 +2440,40 @@ fn run<'h>(
     let mut root_limit = floor + ROOT_SLACK;
 
     let result = (|| -> Result<Value, Error> {
+        // The running frame's instructions and its `pc`, held here rather
+        // than read through `frames` for every instruction: that read is a
+        // chain of five dependent loads — the vector, the frame, its `Iseq`,
+        // the instruction vector, the instruction — and the loop waited on
+        // it more than on anything an instruction does.
+        //
+        // Between instructions these always describe `frames.last()`, and
+        // `cur_pc` is the frame's `pc` rather than its own field. So
+        // `sync_out` writes it back before anything that may read or move
+        // frames, and `reload` reads both again after anything that may
+        // have changed which frame is last.
+        //
+        // SAFETY of `code`: it points into the `Iseq` the last frame holds
+        // an `Arc` of, which outlives every read through it, since each
+        // change to the frames is followed by a `reload`. An `Iseq` behind an
+        // `Arc` is never written.
+        let mut code: *const [Insn] = &[];
+        let mut cur_pc: usize = 0;
+        macro_rules! sync_out {
+            () => {
+                if let Some(frame) = frames.last_mut() {
+                    frame.pc = cur_pc;
+                }
+            };
+        }
+        macro_rules! reload {
+            () => {
+                if let Some(frame) = frames.last() {
+                    code = &raw const *frame.iseq.insns;
+                    cur_pc = frame.pc;
+                }
+            };
+        }
+        reload!();
         Ok(loop {
             // What the last instruction left on the stack is rooted before the
             // next one runs: see `Stack`.
@@ -2447,6 +2487,7 @@ fn run<'h>(
                 root_limit = floor + ROOT_SLACK.max(2 * (scope.rooted() - floor));
             }
             if frames.len() != seen_frames {
+                sync_out!();
                 // A call or a return (#36). `GC.start` collects here rather
                 // than inside its native, once the handles taken for
                 // finished instructions are let go, so an object only they
@@ -2490,11 +2531,21 @@ fn run<'h>(
                     slice_end = budget.saturating_sub(1);
                 }
                 seen_frames = frames.len();
-                deadline = refresh_boundaries(scope, &frames, &mut boundaries, budget);
+                // With no boundary anywhere and none to start, there is
+                // nothing for the refresh to find: its answer is zero.
+                deadline = if boundaries.is_empty()
+                    && frames.last().is_none_or(|frame| frame.boundary_limit == 0)
+                {
+                    0
+                } else {
+                    refresh_boundaries(scope, &frames, &mut boundaries, budget)
+                };
                 limit = deadline.max(slice_end).max(trace_floor);
+                reload!();
             }
             budget = budget.saturating_sub(1);
             if budget <= limit {
+                sync_out!();
                 if trace_floor != 0 && !trace_step(scope, &frames, &mut traced_top) {
                     trace_floor = 0;
                     limit = deadline.max(slice_end);
@@ -2543,6 +2594,7 @@ fn run<'h>(
                                     {
                                         break value;
                                     }
+                                    reload!();
                                     continue;
                                 }
                             }
@@ -2565,6 +2617,7 @@ fn run<'h>(
                         {
                             break value;
                         }
+                        reload!();
                         continue;
                     }
                     // Out of budget: the whole evaluation's, or a boundary's.
@@ -2580,12 +2633,15 @@ fn run<'h>(
                     {
                         break value;
                     }
+                    reload!();
                     continue;
                 }
+                reload!();
             }
             let top = frames.len() - 1;
-            let insn = frames[top].iseq.insns[frames[top].pc];
-            frames[top].pc += 1;
+            // SAFETY: see `code`.
+            let insn = unsafe { (*code)[cur_pc] };
+            cur_pc += 1;
 
             // The instructions a loop is mostly made of, answered here rather
             // than in the closure below. That closure holds every instruction
@@ -2626,30 +2682,87 @@ fn run<'h>(
                     continue;
                 }
                 Insn::GetLocal(slot, depth) => {
-                    let env = env_outer(scope, frames[top].env, depth);
-                    stack.push(env_get(scope, env, slot as usize));
+                    let frame = &frames[top];
+                    let value = if frame.env == Value::NIL {
+                        debug_assert_eq!(depth, 0, "a scope on the stack has no outer");
+                        stack[frame.floor + slot as usize]
+                    } else {
+                        let env = env_outer(scope, frame.env, depth);
+                        env_get(scope, env, slot as usize)
+                    };
+                    stack.push(value);
                     continue;
                 }
                 Insn::SetLocal(slot, depth) => {
                     let value = stack.pop().expect("setlocal on an empty stack");
-                    let env = env_outer(scope, frames[top].env, depth);
-                    env_set(scope, env, slot as usize, value);
+                    let frame = &frames[top];
+                    if frame.env == Value::NIL {
+                        debug_assert_eq!(depth, 0, "a scope on the stack has no outer");
+                        // Rooted already: it was on the stack a moment ago.
+                        stack.values[frame.floor + slot as usize] = value;
+                    } else {
+                        let env = env_outer(scope, frame.env, depth);
+                        env_set(scope, env, slot as usize, value);
+                    }
                     continue;
                 }
                 Insn::Jump(displacement) => {
-                    frames[top].pc = jump(frames[top].pc, displacement);
+                    cur_pc = jump(cur_pc, displacement);
                     continue;
                 }
                 Insn::JumpUnless(displacement) => {
                     if !stack.pop().expect("jump on an empty stack").is_truthy() {
-                        frames[top].pc = jump(frames[top].pc, displacement);
+                        cur_pc = jump(cur_pc, displacement);
                     }
                     continue;
                 }
                 Insn::JumpIf(displacement) => {
                     if stack.pop().expect("jump on an empty stack").is_truthy() {
-                        frames[top].pc = jump(frames[top].pc, displacement);
+                        cur_pc = jump(cur_pc, displacement);
                     }
+                    continue;
+                }
+                // The call most sends are — see `send_simple`. Anything it
+                // does not take is the closure's, untouched.
+                Insn::Send(index) => {
+                    sync_out!();
+                    if send_simple(scope, &mut stack, &mut frames, index, &mut ids) {
+                        reload!();
+                        continue;
+                    }
+                }
+                // A frame leaving the ordinary way, with a frame below it to
+                // answer: the closure's own arm, less the fiber and `raise`
+                // cases it hands back.
+                Insn::Leave if top > 0 && !frames[top].raises_receiver => {
+                    let value = stack.pop().unwrap_or(Value::NIL);
+                    let done = frames.pop().expect("a frame to leave");
+                    scope.set_errinfo(done.errinfo_on_entry);
+                    stack.truncate(done.floor);
+                    let value = if done.booleanizes_value {
+                        bool_value(value.is_truthy())
+                    } else {
+                        value
+                    };
+                    if !done.keeps_receiver && !done.discards_value {
+                        stack.push(value);
+                    }
+                    reload!();
+                    continue;
+                }
+                // `return` from a method or lambda body that no `ensure`
+                // around it has to see: the unwind the closure would start
+                // lands on this very frame, so it is answered here the way
+                // `unwind_to_handler` would answer it.
+                Insn::Return if top > 0 && returns_in_place(&frames[top], cur_pc) => {
+                    let value = stack.pop().unwrap_or(Value::NIL);
+                    let done = frames.pop().expect("a frame to return from");
+                    scope.set_errinfo(done.errinfo_on_entry);
+                    stack.truncate(done.floor);
+                    if !done.keeps_receiver && !done.discards_value {
+                        stack.push(value);
+                    }
+                    reload!();
                     continue;
                 }
                 // Two fixnums whose answer is a fixnum or a boolean, under an
@@ -2693,6 +2806,7 @@ fn run<'h>(
             // as an ordinary `Err`, and exactly one place below decides where it
             // lands — which is what makes `1 / 0` inside a `begin` a catchable
             // `ZeroDivisionError` rather than the end of the evaluation.
+            sync_out!();
             let stepped = (|| -> Result<Step, Error> {
                 match insn {
                     Insn::PushNil => stack.push(Value::NIL),
@@ -2724,7 +2838,7 @@ fn run<'h>(
                         }
                     }
                     Insn::PushSym(index) => {
-                        let symbol = frames[top].symbols[index as usize];
+                        let symbol = frames[top].iseq.symbol_ids()[index as usize];
                         stack.push(Value::symbol(symbol));
                     }
                     Insn::Intern => {
@@ -2789,13 +2903,13 @@ fn run<'h>(
                     }
 
                     Insn::GetIvar(name) => {
-                        let symbol = frames[top].symbols[name as usize];
+                        let symbol = frames[top].iseq.symbol_ids()[name as usize];
                         let receiver = frames[top].receiver;
                         stack.push(ivar_get(scope, receiver, symbol)?);
                     }
 
                     Insn::SetIvar(name) => {
-                        let symbol = frames[top].symbols[name as usize];
+                        let symbol = frames[top].iseq.symbol_ids()[name as usize];
                         let receiver = frames[top].receiver;
                         if let Some(thawing) = thaw_chilled(
                             scope,
@@ -2812,7 +2926,7 @@ fn run<'h>(
                     }
 
                     Insn::DefinedIvar(name) => {
-                        let symbol = frames[top].symbols[name as usize];
+                        let symbol = frames[top].iseq.symbol_ids()[name as usize];
                         let receiver = frames[top].receiver;
                         // `defined_word`, not `defined_answer`: an object this
                         // heap holds is the authority on which ivars it has, so a
@@ -2828,7 +2942,7 @@ fn run<'h>(
                     // `Insn::LastMatch`, so a name in this table is always one an
                     // assignment put there.
                     Insn::GetGlobal(name) => {
-                        let symbol = frames[top].symbols[name as usize];
+                        let symbol = frames[top].iseq.symbol_ids()[name as usize];
                         // A name aliased to a regexp special runs the derivation
                         // rather than reading a cell, so it tracks the *current*
                         // match: measured, a second `=~` moves it.
@@ -2899,7 +3013,7 @@ fn run<'h>(
                         stack.push(value);
                     }
                     Insn::SetGlobal(name) => {
-                        let symbol = frames[top].symbols[name as usize];
+                        let symbol = frames[top].iseq.symbol_ids()[name as usize];
                         // `alias $x $&` makes `$x` read-only, and Ruby names the
                         // alias rather than the special in the message. Measured.
                         if scope.global_special(symbol).is_some()
@@ -2936,7 +3050,7 @@ fn run<'h>(
                         scope.set_global(symbol, value);
                     }
                     Insn::DefinedGlobal(name) => {
-                        let symbol = frames[top].symbols[name as usize];
+                        let symbol = frames[top].iseq.symbol_ids()[name as usize];
                         // Presence, not truthiness: `$a = nil` is defined.
                         let held = scope.global(symbol).is_some();
                         let value =
@@ -2944,14 +3058,10 @@ fn run<'h>(
                         stack.push(value);
                     }
 
-                    Insn::GetLocal(slot, depth) => {
-                        let env = env_outer(scope, frames[top].env, depth);
-                        stack.push(env_get(scope, env, slot as usize));
-                    }
-                    Insn::SetLocal(slot, depth) => {
-                        let value = stack.pop().expect("setlocal on an empty stack");
-                        let env = env_outer(scope, frames[top].env, depth);
-                        env_set(scope, env, slot as usize, value);
+                    // Answered by the loop above, which never falls through
+                    // for either.
+                    Insn::GetLocal(..) | Insn::SetLocal(..) => {
+                        unreachable!("the loop answers local access itself")
                     }
 
                     Insn::Jump(displacement) => frames[top].pc = jump(frames[top].pc, displacement),
@@ -3320,11 +3430,12 @@ fn run<'h>(
 
                     Insn::MakeProc(child, lambda) => {
                         let iseq = Arc::clone(&frames[top].iseq.children[child as usize]);
+                        let env = frame_env(scope, &stack, &mut frames[top]);
                         let value = make_proc(
                             scope,
                             proc_class,
                             &iseq,
-                            frames[top].env,
+                            env,
                             frames[top].receiver,
                             frames[top].block,
                             lambda,
@@ -3337,7 +3448,7 @@ fn run<'h>(
                     Insn::DefineMethod(index) => {
                         let (name, child) = frames[top].iseq.definitions[index as usize];
                         let iseq = Arc::clone(&frames[top].iseq.children[child as usize]);
-                        let symbol = frames[top].symbols[name as usize];
+                        let symbol = frames[top].iseq.symbol_ids()[name as usize];
                         let cref = frames[top].cref;
                         let default = frames[top].scope_default;
                         if scope.classes().cref_refuses_def(cref) {
@@ -3508,7 +3619,7 @@ fn run<'h>(
                     // the name, so a subclass assigning `@@a` changes the
                     // superclass's; measured.
                     Insn::GetCvar(name) => {
-                        let symbol = frames[top].symbols[name as usize];
+                        let symbol = frames[top].iseq.symbol_ids()[name as usize];
                         let owner = cvar_owner(scope, frames[top].cref)?;
                         match cvar_read(scope, owner, symbol)? {
                             Some(value) => stack.push(value),
@@ -3531,13 +3642,13 @@ fn run<'h>(
                         }
                     }
                     Insn::SetCvar(name) => {
-                        let symbol = frames[top].symbols[name as usize];
+                        let symbol = frames[top].iseq.symbol_ids()[name as usize];
                         let owner = cvar_owner(scope, frames[top].cref)?;
                         let value = stack.pop().expect("setcvar on an empty stack");
                         scope.classes_mut().cvar_set(owner, symbol, value);
                     }
                     Insn::DefinedCvar(name) => {
-                        let symbol = frames[top].symbols[name as usize];
+                        let symbol = frames[top].iseq.symbol_ids()[name as usize];
                         // `defined?` never raises, so a top-level `@@a` is `nil`
                         // here rather than the `RuntimeError` reading one is.
                         let held = match cvar_owner(scope, frames[top].cref) {
@@ -3556,8 +3667,8 @@ fn run<'h>(
                         if scope.classes().cref_refuses_def(frames[top].cref) {
                             return Err(Error::raise("TypeError", "can't define singleton"));
                         }
-                        let new = frames[top].symbols[new as usize];
-                        let old = frames[top].symbols[old as usize];
+                        let new = frames[top].iseq.symbol_ids()[new as usize];
+                        let old = frames[top].iseq.symbol_ids()[old as usize];
                         let owner = scope.classes().cref_class(frames[top].cref);
                         let core = is_internal(&frames[top].iseq);
                         alias_into(scope, owner, new, old, core)?;
@@ -3597,7 +3708,7 @@ fn run<'h>(
                         }
                     }
                     Insn::Undef(name) => {
-                        let symbol = frames[top].symbols[name as usize];
+                        let symbol = frames[top].iseq.symbol_ids()[name as usize];
                         let owner = scope.classes().cref_class(frames[top].cref);
                         undef_from(scope, owner, symbol)?;
                         if let Some(unwind) = fire_method_hook(
@@ -3631,18 +3742,18 @@ fn run<'h>(
                         }
                     }
                     Insn::AliasGlobal(new, old) => {
-                        let new = frames[top].symbols[new as usize];
-                        let old = frames[top].symbols[old as usize];
+                        let new = frames[top].iseq.symbol_ids()[new as usize];
+                        let old = frames[top].iseq.symbol_ids()[old as usize];
                         scope.alias_global(new, old);
                     }
                     Insn::AliasGlobalSpecial(new, which) => {
-                        let new = frames[top].symbols[new as usize];
+                        let new = frames[top].iseq.symbol_ids()[new as usize];
                         scope.alias_global_special(new, which);
                     }
                     Insn::DefineSingleton(index) => {
                         let (name, child) = frames[top].iseq.definitions[index as usize];
                         let iseq = Arc::clone(&frames[top].iseq.children[child as usize]);
-                        let symbol = frames[top].symbols[name as usize];
+                        let symbol = frames[top].iseq.symbol_ids()[name as usize];
                         let cref = frames[top].cref;
                         let receiver = *stack.last().expect("a receiver to define on");
                         if let Some(thawing) = thaw_chilled(
@@ -3684,7 +3795,7 @@ fn run<'h>(
                     }
 
                     Insn::GetConst(name, how) => {
-                        let symbol = frames[top].symbols[name as usize];
+                        let symbol = frames[top].iseq.symbol_ids()[name as usize];
                         let cref = frames[top].cref;
                         let from = const_base(scope, &mut stack, cref, how)?;
                         let found = match how {
@@ -3781,7 +3892,7 @@ fn run<'h>(
                     }
 
                     Insn::SetConst(name, how) => {
-                        let symbol = frames[top].symbols[name as usize];
+                        let symbol = frames[top].iseq.symbol_ids()[name as usize];
                         let cref = frames[top].cref;
                         let value = stack.pop().expect("a value to assign");
                         let target = const_base(scope, &mut stack, cref, how)?;
@@ -3838,7 +3949,7 @@ fn run<'h>(
                     }
 
                     Insn::DefinedConst(name, how) => {
-                        let symbol = frames[top].symbols[name as usize];
+                        let symbol = frames[top].iseq.symbol_ids()[name as usize];
                         let cref = frames[top].cref;
                         let from = const_base(scope, &mut stack, cref, how)?;
                         let found = match how {
@@ -3859,7 +3970,7 @@ fn run<'h>(
                     }
 
                     Insn::DefinedMethod(name) | Insn::DefinedSelfMethod(name) => {
-                        let symbol = frames[top].symbols[name as usize];
+                        let symbol = frames[top].iseq.symbol_ids()[name as usize];
                         let receiver = match insn {
                             Insn::DefinedMethod(_) => stack.pop().expect("a receiver to ask about"),
                             _ => frames[top].receiver,
@@ -3970,7 +4081,7 @@ fn run<'h>(
                         let iseq = Arc::clone(&frames[top].iseq);
                         let site = &iseq.call_sites[index as usize];
                         let mut call =
-                            pop_call(scope, &mut stack, site, &frames[top], proc_class, true)?;
+                            pop_call(scope, &mut stack, site, &mut frames[top], proc_class, true)?;
                         // The call-site id: this `Iseq`'s run, plus the operand.
                         call.cache = Some(frames[top].cache_base + index);
                         if let Some(unwind) =
@@ -3987,7 +4098,7 @@ fn run<'h>(
                         // anonymous block costs nothing and `yield` needs no name.
                         let block = frames[top].block;
                         let mut call =
-                            pop_call(scope, &mut stack, site, &frames[top], proc_class, false)?;
+                            pop_call(scope, &mut stack, site, &mut frames[top], proc_class, false)?;
                         if block == Value::NIL {
                             return Err(Error::raise("LocalJumpError", "no block given (yield)"));
                         }
@@ -4016,7 +4127,7 @@ fn run<'h>(
                             _ => Value::NIL,
                         };
                         let mut call =
-                            pop_call(scope, &mut stack, site, &frames[top], proc_class, false)?;
+                            pop_call(scope, &mut stack, site, &mut frames[top], proc_class, false)?;
                         let (Some(owner), Some(name)) = (owner, name) else {
                             // A body that is not a method's and was not written in
                             // one. Ruby raises here rather than at parse time.
@@ -4059,7 +4170,7 @@ fn run<'h>(
                         let value = stack.pop().unwrap_or(Value::NIL);
                         let done = frames.pop().expect("a frame to leave");
                         scope.set_errinfo(done.errinfo_on_entry);
-                        stack.truncate(done.base);
+                        stack.truncate(done.floor);
                         if frames.is_empty() {
                             // A fiber's block returning is `resume` returning in
                             // its resumer; only the root's last frame ends the run.
@@ -4202,6 +4313,7 @@ fn run<'h>(
                 Ok(Step::Next)
             })();
 
+            reload!();
             let unwind = match stepped {
                 Ok(Step::Next) => continue,
                 Ok(Step::Done(value)) => break value,
@@ -4233,6 +4345,7 @@ fn run<'h>(
             if let Some(value) = unwind_to_handler(scope, &mut stack, &mut frames, unwind)? {
                 break value;
             }
+            reload!();
         })
     })();
     (result, ids)
@@ -4275,6 +4388,13 @@ impl Stack {
     fn truncate(&mut self, len: usize) {
         self.values.truncate(len);
         self.low = self.low.min(self.values.len());
+    }
+
+    /// Take out the value at `at`, closing the gap.
+    fn remove(&mut self, at: usize) -> Value {
+        let value = self.values.remove(at);
+        self.low = self.low.min(at);
+        value
     }
 
     fn drain(&mut self, range: std::ops::RangeFrom<usize>) -> std::vec::Drain<'_, Value> {
@@ -4627,7 +4747,7 @@ fn unwind_to_handler(
         // Nothing here wanted it, so this frame is done and gives `$!` back as
         // it found it. Whichever frame does catch it sets the cell above.
         scope.set_errinfo(done.errinfo_on_entry);
-        stack.truncate(done.base);
+        stack.truncate(done.floor);
         let landed = match unwind {
             Unwind::Break { frame, value } | Unwind::Return { frame, value } => {
                 (frame == done.id).then_some(value)
@@ -4838,6 +4958,144 @@ struct Pending {
     defined_as: Option<SymbolId>,
 }
 
+/// Whether a `return` in `frame` ends `frame` and nothing else: a method or
+/// lambda body, its own `return` target, with no `ensure` around the
+/// instruction to run on the way out — a `rescue` never takes a `return` —
+/// and not an `eval` string, whose `return` has rules of its own. What
+/// `Insn::Return` and `unwind_to_handler` would then do between them is pop
+/// it and leave the value, and the loop does that directly.
+fn returns_in_place(frame: &Call, pc: usize) -> bool {
+    if frame.home != frame.id || frame.raises_receiver || frame.iseq.eval_in_block {
+        return false;
+    }
+    let at = u32::try_from(pc.saturating_sub(1)).unwrap_or(u32::MAX);
+    !frame
+        .iseq
+        .catch_table
+        .iter()
+        .any(|entry| entry.kind == CatchKind::Ensure && entry.covers(at))
+}
+
+/// `Insn::Send` without a `Pending`, for the call most sends are: no block,
+/// no splat, no keywords, a receiver whose class the site's inline cache
+/// already resolved to a Ruby method this caller may call, and a body that
+/// takes exactly that many required arguments and nothing else. The
+/// arguments are already on the stack where the callee's first locals go,
+/// so the frame is pushed around them.
+///
+/// Answers whether it pushed the frame. When it did not, nothing has
+/// changed and `dispatch` takes the call, which is where every rule this
+/// skips — a refinement, a cache miss, `method_missing`, a visibility
+/// refusal, a native, a block's warning — is decided.
+fn send_simple(
+    scope: &mut HandleScope<'_>,
+    stack: &mut Stack,
+    frames: &mut Vec<Call>,
+    index: u32,
+    ids: &mut u64,
+) -> bool {
+    let top = frames.len() - 1;
+    let frame = &frames[top];
+    let site = &frame.iseq.call_sites[index as usize];
+    if site.block != BlockRef::None
+        || !site.splats.is_empty()
+        || !site.keywords.is_empty()
+        || site.kwsplat
+    {
+        return false;
+    }
+    let argc = site.argc as usize;
+    let Some(at) = stack.len().checked_sub(argc + 1) else {
+        return false;
+    };
+    let receiver = stack[at];
+    let Some(class) = class_of(scope, receiver) else {
+        return false;
+    };
+    let name = frame.iseq.symbol_ids()[site.name as usize];
+    if scope
+        .classes()
+        .refined_lookup(class, name, frame.cref)
+        .is_some()
+    {
+        return false;
+    }
+    let serial = scope.classes().serial(class);
+    let Some(method) = scope
+        .call_caches()
+        .get(frame.cache_base + index, class, serial)
+    else {
+        return false;
+    };
+    // `visibility_refusal`'s answer for the two cases that need no class
+    // lookup; `protected` is `dispatch`'s.
+    let visible = match method.visibility {
+        Visibility::Public => true,
+        Visibility::Private => site.implicit_self || frame.receiver == receiver,
+        Visibility::Protected => false,
+    };
+    if !visible {
+        return false;
+    }
+    let Some(Definition::Iseq(iseq)) = scope.definitions().get(method.body) else {
+        return false;
+    };
+    let params = &iseq.params;
+    if !(params.optional.is_empty()
+        && params.rest.is_none()
+        && params.post.is_empty()
+        && params.keywords.is_empty()
+        && params.kwrest.is_none()
+        && params.block.is_none()
+        && params.required.len() == argc
+        && params
+            .required
+            .iter()
+            .enumerate()
+            .all(|(position, &slot)| usize::from(slot) == position))
+    {
+        return false;
+    }
+    let iseq = Arc::clone(iseq);
+    *ids += 1;
+    let id = *ids;
+    // The receiver goes, and the arguments are the first locals.
+    stack.remove(at);
+    let base = at + iseq.locals.len();
+    stack.values.resize(base, Value::NIL);
+    let cache_base = scope.call_caches_mut().base(&iseq);
+    frames.push(Call {
+        iseq,
+        cache_base,
+        env: Value::NIL,
+        floor: at,
+        receiver,
+        cref: method.cref,
+        block: Value::NIL,
+        pc: 0,
+        base,
+        keeps_receiver: false,
+        raises_receiver: false,
+        discards_value: false,
+        booleanizes_value: false,
+        // A method body starts public, whatever the class body around it
+        // said.
+        scope_default: ScopeDefault::Public,
+        id,
+        home: id,
+        breaks: 0,
+        tag: None,
+        rescued: None,
+        errinfo_on_entry: scope.errinfo(),
+        owner: Some(method.owner),
+        defined_as: Some(name),
+        parked: Vec::new(),
+        boundary_limit: 0,
+        shown: Shown::Own,
+    });
+    true
+}
+
 /// Take a call site's operands off the stack.
 ///
 /// Reverse of the order the compiler pushed them: a passed block, then keyword
@@ -4846,7 +5104,7 @@ fn pop_call<'h>(
     scope: &mut HandleScope<'h>,
     stack: &mut Stack,
     site: &CallSite,
-    frame: &Call,
+    frame: &mut Call,
     proc_class: Handle<'h>,
     has_receiver: bool,
 ) -> Result<Pending, Error> {
@@ -4871,11 +5129,12 @@ fn pop_call<'h>(
         }
         BlockRef::Literal(child) => {
             let iseq = Arc::clone(&frame.iseq.children[child as usize]);
+            let env = frame_env(scope, stack, frame);
             make_proc(
                 scope,
                 proc_class,
                 &iseq,
-                frame.env,
+                env,
                 frame.receiver,
                 frame.block,
                 false,
@@ -4906,7 +5165,7 @@ fn pop_call<'h>(
         let mut named = Vec::with_capacity(site.keywords.len());
         for &name in site.keywords.iter().rev() {
             let value = stack.pop().expect("keyword on an empty stack");
-            named.push((Value::symbol(frame.symbols[name as usize]), value));
+            named.push((Value::symbol(frame.iseq.symbol_ids()[name as usize]), value));
         }
         named.reverse();
         named
@@ -4941,7 +5200,7 @@ fn pop_call<'h>(
         // `Insn::Send` fills this in; `Insn::Yield` leaves it, having no name
         // to resolve.
         cache: None,
-        name: frame.symbols[site.name as usize],
+        name: frame.iseq.symbol_ids()[site.name as usize],
         receiver,
         args,
         keywords,
@@ -5175,16 +5434,7 @@ fn dispatch<'h>(
                         // around it said.
                         scope_default: ScopeDefault::Public,
                     };
-                    push_frame(
-                        scope,
-                        stack,
-                        frames,
-                        &call,
-                        &iseq,
-                        Value::NIL,
-                        Binding::Strict,
-                        links,
-                    )?;
+                    push_method_frame(scope, stack, frames, &call, &iseq, Binding::Strict, links)?;
                     // Said on top of the frame, so it prints before the body
                     // runs, as CRuby's does.
                     if let Some((text, relieved)) = unused {
@@ -5496,7 +5746,8 @@ fn push_proc_frame_as(
     Ok(())
 }
 
-/// Bind the arguments and push the frame.
+/// Bind the arguments and push a frame whose locals live in a heap
+/// environment linked to `outer`: a block's, or an `eval` string's.
 // Eight, and each one is a different question the callee has to be told the
 // answer to. The three that travel together — which frames a non-local exit
 // looks for — are already one `Links`; grouping any of the rest would be a
@@ -5513,7 +5764,90 @@ fn push_frame(
     links: Links,
 ) -> Result<(), Error> {
     let env = env_alloc(scope, outer, iseq.locals.len());
-    let symbols = iseq.linked();
+    let at = stack.len();
+    bind_and_push(
+        scope,
+        frames,
+        call,
+        iseq,
+        &mut Locals::Env(env),
+        (at, at),
+        binding,
+        links,
+    )
+}
+
+/// Bind the arguments and push a frame for a body with no enclosing scope —
+/// a method's, or a file's top level — whose locals start on the operand
+/// stack, as CRuby's do, and move to the heap only if something captures
+/// them (see [`Call::env`]).
+fn push_method_frame(
+    scope: &mut HandleScope<'_>,
+    stack: &mut Stack,
+    frames: &mut Vec<Call>,
+    call: &Pending,
+    iseq: &Arc<Iseq>,
+    binding: Binding,
+    links: Links,
+) -> Result<(), Error> {
+    let floor = stack.len();
+    let base = floor + iseq.locals.len();
+    // `nil`, which needs no rooting: whatever `bind` writes over it is an
+    // argument the caller's stack already rooted, or an object it allocated
+    // through a handle.
+    stack.values.resize(base, Value::NIL);
+    let pushed = bind_and_push(
+        scope,
+        frames,
+        call,
+        iseq,
+        &mut Locals::Stack(&mut stack.values[floor..base]),
+        (floor, base),
+        binding,
+        links,
+    );
+    if pushed.is_err() {
+        stack.truncate(floor);
+    }
+    pushed
+}
+
+/// Where [`bind`] writes a frame's parameters.
+enum Locals<'a> {
+    /// A heap environment.
+    Env(Value),
+    /// The frame's slots on the operand stack.
+    Stack(&'a mut [Value]),
+}
+
+impl Locals<'_> {
+    fn set(&mut self, scope: &mut HandleScope<'_>, slot: usize, value: Value) {
+        match self {
+            Locals::Env(env) => env_set(scope, *env, slot, value),
+            Locals::Stack(slots) => slots[slot] = value,
+        }
+    }
+
+    fn env(&self) -> Value {
+        match self {
+            Locals::Env(env) => *env,
+            Locals::Stack(_) => Value::NIL,
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn bind_and_push(
+    scope: &mut HandleScope<'_>,
+    frames: &mut Vec<Call>,
+    call: &Pending,
+    iseq: &Arc<Iseq>,
+    locals: &mut Locals<'_>,
+    (floor, base): (usize, usize),
+    binding: Binding,
+    links: Links,
+) -> Result<(), Error> {
+    let symbols = iseq.symbol_ids();
     // Beside `link`, and for the same reason: one hash probe on frame entry
     // instead of one per `Send`.
     let cache_base = scope.call_caches_mut().base(iseq);
@@ -5523,23 +5857,23 @@ fn push_frame(
         && scope.definitions().is_ruby2_keywords(iseq);
     bind(
         scope,
-        env,
+        locals,
         &iseq.params,
-        &symbols,
+        symbols,
         call,
         binding,
         ruby2_keywords,
     )?;
     frames.push(Call {
         iseq: Arc::clone(iseq),
-        symbols,
         cache_base,
-        env,
+        env: locals.env(),
+        floor,
         receiver: call.receiver,
         cref: call.cref,
         block: call.block,
         pc: 0,
-        base: stack.len(),
+        base,
         keeps_receiver: false,
         raises_receiver: false,
         discards_value: false,
@@ -5563,6 +5897,23 @@ fn push_frame(
     Ok(())
 }
 
+/// The heap environment holding `frame`'s locals, moving them there from the
+/// operand stack first if that is where they still are: what a block, a
+/// `binding` or an `eval` string captures has to outlive the frame, and to
+/// see the frame's own later writes, so from here on both use this one.
+fn frame_env(scope: &mut HandleScope<'_>, stack: &Stack, frame: &mut Call) -> Value {
+    if frame.env == Value::NIL {
+        // The slots are rooted: everything on the operand stack is.
+        let env = env_alloc(scope, Value::NIL, frame.base - frame.floor);
+        let handle = scope.root(env);
+        for (slot, &value) in stack[frame.floor..frame.base].iter().enumerate() {
+            scope.set_slot(handle, ENV_HEADER + slot, value);
+        }
+        frame.env = env;
+    }
+    frame.env
+}
+
 // ---------------------------------------------------------------------------
 // Argument binding
 // ---------------------------------------------------------------------------
@@ -5578,7 +5929,7 @@ fn push_frame(
 /// it out again passes them as keywords (#200).
 fn bind(
     scope: &mut HandleScope<'_>,
-    env: Value,
+    env: &mut Locals<'_>,
     spec: &ParamSpec,
     symbols: &[SymbolId],
     call: &Pending,
@@ -5644,12 +5995,12 @@ fn bind(
     // parameter binds several names out of one argument, so `{ |(a, b), c| }`
     // writes the second argument to slot 2 and leaves slot 1 to `b` (#209).
     for (index, value) in args.iter().take(leading).enumerate() {
-        env_set(scope, env, spec.required[index] as usize, *value);
+        env.set(scope, spec.required[index] as usize, *value);
     }
     // Ruby pads a block's missing required parameters with `nil`; a lambda
     // never gets here, because `check_arity` refused first.
     for index in leading..required {
-        env_set(scope, env, spec.required[index] as usize, Value::NIL);
+        env.set(scope, spec.required[index] as usize, Value::NIL);
     }
 
     let after_required = available.saturating_sub(leading);
@@ -5666,7 +6017,7 @@ fn bind(
             // Not supplied: the body's guarded default fills it in.
             Value::UNDEF
         };
-        env_set(scope, env, entry.slot as usize, value);
+        env.set(scope, entry.slot as usize, value);
     }
 
     // With a splat the post-required parameters are taken from the right, and
@@ -5682,7 +6033,7 @@ fn bind(
             Vec::new()
         };
         let array = new_array(scope, &elements);
-        env_set(scope, env, slot as usize, array);
+        env.set(scope, slot as usize, array);
         available - trailing
     } else {
         cursor
@@ -5694,13 +6045,13 @@ fn bind(
         } else {
             Value::NIL
         };
-        env_set(scope, env, slot as usize, value);
+        env.set(scope, slot as usize, value);
     }
 
     bind_keywords(scope, env, spec, symbols, call)?;
 
     if let Some(slot) = spec.block {
-        env_set(scope, env, slot as usize, call.block);
+        env.set(scope, slot as usize, call.block);
     }
     Ok(())
 }
@@ -5716,7 +6067,7 @@ fn spreads(spec: &ParamSpec) -> bool {
 
 fn bind_keywords(
     scope: &mut HandleScope<'_>,
-    env: Value,
+    env: &mut Locals<'_>,
     spec: &ParamSpec,
     symbols: &[SymbolId],
     call: &Pending,
@@ -5736,14 +6087,14 @@ fn bind_keywords(
         let name = Value::symbol(symbols[keyword.name as usize]);
         let supplied = call.keywords.iter().find(|(k, _)| *k == name);
         match (supplied, keyword.required) {
-            (Some((_, value)), _) => env_set(scope, env, keyword.slot as usize, *value),
+            (Some((_, value)), _) => env.set(scope, keyword.slot as usize, *value),
             (None, true) => {
                 return Err(Error::raise(
                     "ArgumentError",
                     format!("missing keyword: :{}", keyword_label(name)),
                 ));
             }
-            (None, false) => env_set(scope, env, keyword.slot as usize, Value::UNDEF),
+            (None, false) => env.set(scope, keyword.slot as usize, Value::UNDEF),
         }
     }
 
@@ -5778,7 +6129,7 @@ fn bind_keywords(
         }
     }
     let collected = new_array(scope, &rest);
-    env_set(scope, env, slot as usize, collected);
+    env.set(scope, slot as usize, collected);
     Ok(())
 }
 
@@ -6778,7 +7129,7 @@ fn open_class<'h>(
                 // anonymous class. Measured — `anonymous.txt`.
                 false => scope.classes().cref_base(outer),
             };
-            let name = frames[top].symbols[def.name as usize];
+            let name = frames[top].iseq.symbol_ids()[def.name as usize];
             // `class A::B` is a qualified reference, so a private `B` is a
             // `NameError` — while a plain `class B` written inside `A`'s own
             // body reopens it, because that is the scope it is private to.
@@ -6796,7 +7147,6 @@ fn open_class<'h>(
     let receiver = scope.classes().object(id);
     let body = Arc::clone(&iseq.children[def.body as usize]);
     let env = env_alloc(scope, Value::NIL, body.locals.len());
-    let symbols = body.linked();
     let cache_base = scope.call_caches_mut().base(&body);
     *ids += 1;
     // Which frame a `return` written in this body leaves.
@@ -6831,7 +7181,6 @@ fn open_class<'h>(
     };
     frames.push(Call {
         iseq: body,
-        symbols,
         cache_base,
         env,
         receiver,
@@ -6845,6 +7194,7 @@ fn open_class<'h>(
         // `LocalJumpError` — which is Ruby.
         block: Value::NIL,
         pc: 0,
+        floor: stack.len(),
         base: stack.len(),
         keeps_receiver: false,
         raises_receiver: false,
@@ -7817,7 +8167,7 @@ fn autoload_definee<'h>(
     } else {
         scope.classes().cref_base(frames[top].cref)
     };
-    let name = frames[top].symbols[def.name as usize];
+    let name = frames[top].iseq.symbol_ids()[def.name as usize];
     if scope.classes().const_get_here(cbase, name).is_some() {
         return Ok(None);
     }
@@ -8359,6 +8709,14 @@ fn class_of(scope: &mut HandleScope<'_>, value: Value) -> Option<ClassId> {
         // through `class_of` means the binder let it escape.
         Unpacked::Undef => None,
         Unpacked::Heap(_) => {
+            // The common case, answered without a handle: a class remembered
+            // from an earlier ask. `Class` itself is the one that may need a
+            // singleton made first, below.
+            if let Some(id) = scope.remembered_class_of(value)
+                && id != Builtin::Class.id()
+            {
+                return Some(id);
+            }
             let handle = scope.root(value);
             let class = scope.class_of(handle)?;
             // A singleton class gets its own singleton on first dispatch,
@@ -10509,13 +10867,12 @@ fn native_call<'h>(
                                 breaks: 0,
                                 scope_default: ScopeDefault::Public,
                             };
-                            push_frame(
+                            push_method_frame(
                                 scope,
                                 stack,
                                 frames,
                                 &call,
                                 &iseq,
-                                Value::NIL,
                                 Binding::Strict,
                                 links,
                             )?;
@@ -19383,7 +19740,7 @@ fn binding_native(
         } else {
             frames.len().checked_sub(1)
         };
-        let binding = capture_binding(scope, frames, index)?;
+        let binding = capture_binding(scope, stack, frames, index)?;
         stack.push(binding);
         return Ok(None);
     }
@@ -19394,9 +19751,13 @@ fn binding_native(
 /// and where it is.
 fn capture_binding(
     scope: &mut HandleScope<'_>,
-    frames: &[Call],
+    stack: &Stack,
+    frames: &mut [Call],
     index: Option<usize>,
 ) -> Result<Value, Error> {
+    if let Some(frame) = index.and_then(|index| frames.get_mut(index)) {
+        frame_env(scope, stack, frame);
+    }
     let Some(frame) = index.and_then(|index| frames.get(index)) else {
         return Err(Error::NoDispatch {
             op: "binding",
@@ -19779,7 +20140,7 @@ fn eval_string(
             scope.classes_mut().push_eval_cref(cref, definee)
         }
     };
-    let binding = capture_binding(scope, frames, at)?;
+    let binding = capture_binding(scope, stack, frames, at)?;
     let handle = scope.root(binding);
     scope.set_slot(handle, BINDING_SELF, call.receiver);
     scope.set_slot(handle, BINDING_CREF, cref_value(cref));
@@ -22168,13 +22529,12 @@ fn load_file(
         // A `def` at a file's top level is private, as in the main script.
         scope_default: ScopeDefault::Private,
     };
-    push_frame(
+    push_method_frame(
         scope,
         stack,
         frames,
         &pending,
         &iseq,
-        Value::NIL,
         Binding::Strict,
         links,
     )?;
