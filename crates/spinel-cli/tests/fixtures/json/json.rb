@@ -317,6 +317,7 @@ show("singleton to_json string pretty") { JSON.pretty_generate([singleton[+"s"]]
 show("singleton string key") { k = +"k"; def k.to_s = "key"; def k.to_json(*) = "!"; k.freeze; JSON.generate([{k => 1, "j" => 2}]) }
 show("singleton other method") { a = [1, "x"]; def a.shout = "!"; s = +"y"; def s.shout = "!"; JSON.generate([a, {"s" => s}, [s]]) }
 show("singleton strict") { a = [1]; def a.shout = "!"; JSON.generate([a], strict: true) }
+show("singleton undef to_json") { h = {"a" => 1}; class << h; undef_method :to_json; end; [JSON.generate([h]), (JSON.generate([h], strict: true) rescue $!.class)] }
 show("extended to_json") { m = Module.new { def to_json(*) = %("extended") }; JSON.generate([{"a" => 1}.extend(m), {"b" => [2].extend(m)}]) }
 show("extended other method") { m = Module.new { def shout = "!" }; JSON.generate([{"a" => 1}.extend(m), [2].extend(m)], strict: true) }
 # A block `instance_eval` or `instance_exec` that defines nothing leaves the

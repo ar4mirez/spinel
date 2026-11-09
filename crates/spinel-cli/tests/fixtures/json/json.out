@@ -354,6 +354,7 @@ singleton to_json string pretty: "[\n  \"singleton String\"\n]"
 singleton string key: "[{\"key\":1,\"j\":2}]"
 singleton other method: "[[1,\"x\"],{\"s\":\"y\"},[\"y\"]]"
 singleton strict: JSON::GeneratorError: "#<Class:#<Array:0x...>> not allowed in JSON"
+singleton undef to_json: ["[\"{\\\"a\\\" => 1}\"]", JSON::GeneratorError]
 extended to_json: "[\"extended\",{\"b\":\"extended\"}]"
 extended other method: JSON::GeneratorError: "#<Class:#<Hash:0x...>> not allowed in JSON"
 instance_eval default: "[{\"a\":1},[1,\"x\"],\"s\",{\"k\":{\"a\":1},\"b\":[[1,\"x\"],\"s\"]}]"
@@ -386,7 +387,7 @@ exception: [RuntimeError, "boom"]
 create_additions false: {"json_class" => "Range", "a" => [1, 2, false]}
 unsafe_load: 1..2
 load deprecation: 1..2
-  warning: "json.rb:401: warning: JSON.load implicit support for `create_additions: true` is deprecated and will be removed in 3.0, use JSON.unsafe_load or explicitly pass `create_additions: true`\n"
+  warning: "json.rb:402: warning: JSON.load implicit support for `create_additions: true` is deprecated and will be removed in 3.0, use JSON.unsafe_load or explicitly pass `create_additions: true`\n"
 load nil: nil
 load proc: [1, 2, [[...]], [[...], [...]]]
 Coder: ["[\"Object\",1]", [1, 2.5]]

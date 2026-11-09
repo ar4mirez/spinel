@@ -683,6 +683,7 @@ module JSON
           klass.singleton_class? &&
             klass.instance_methods(false).empty? &&
             klass.private_instance_methods(false).empty? &&
+            klass.undefined_instance_methods.empty? &&
             klass.ancestors.size == klass.superclass.ancestors.size + 1
         end
       end
