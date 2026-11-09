@@ -21024,12 +21024,20 @@ impl JsonGenerator {
         Some(())
     }
 
-    /// `RBASIC_CLASS(obj)`, which the C generator's class tests compare:
-    /// `None` for an object with a singleton class, which goes to `to_json`
-    /// in the Ruby generator.
+    /// `RBASIC_CLASS(obj)`, which the C generator's class tests compare,
+    /// by `Run.bare_singleton?`'s rule: a singleton class holding no methods
+    /// and no extended module counts as none, and `None` for any other
+    /// singleton, whose object the Ruby generator writes.
     fn class(scope: &mut HandleScope<'_>, obj: Value) -> Option<ClassId> {
         let class = class_of(scope, obj)?;
-        (!scope.classes().is_singleton(class)).then_some(class)
+        let classes = scope.classes();
+        if !classes.is_singleton(class) {
+            return Some(class);
+        }
+        let superclass = classes.superclass(class)?;
+        (classes.own_method_entries(class).is_empty()
+            && classes.ancestors(class).len() == classes.ancestors(superclass).len() + 1)
+            .then_some(superclass)
     }
 
     /// `string` for a String object, read where its bytes lie.

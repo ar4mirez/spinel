@@ -365,12 +365,11 @@ module JSON
         end
 
         # `generate_json`.
-        def value(obj, depth, as_json_called = false)
+        def value(obj, depth, as_json_called = false, klass = __reflect_class_of__(obj))
           buffer = @buffer
           # The commonest classes first: each test is an interpreted step.
           # `RBASIC_CLASS`: an object with a singleton class is none of these
-          # and goes to `to_json`.
-          klass = __reflect_class_of__(obj)
+          # and goes to `to_json`, unless `Run.bare_singleton?` says it is none.
           if klass.equal?(::String)
             if (quoted = __json_escape__(obj, @escape))
               buffer << quoted
@@ -406,6 +405,8 @@ module JSON
                 raise TypeError, "wrong argument type #{State.type_name(fragment)} (expected String)"
               end
               append(fragment)
+            elsif Run.bare_singleton?(klass)
+              value(obj, depth, as_json_called, klass.superclass)
             elsif @strict
               if @as_json && !as_json_called
                 value(@as_json.call(obj, false), depth, true)
@@ -490,7 +491,7 @@ module JSON
                   mixed = true
                   mixed_keys(hash)
                 end
-                key_s = key.class.equal?(::String) ? key : string_subclass(key)
+                key_s = Run.string?(key) ? key : string_subclass(key)
                 break
               when :symbol
                 if first_type != :symbol && !mixed
@@ -517,7 +518,7 @@ module JSON
               end
             end
             key_s = valid_encoding(key_s, as_json_called, true)
-            if key_s.class.equal?(::String)
+            if Run.string?(key_s)
               raw_string(key_s)
             else
               value(key_s, depth)
@@ -653,14 +654,36 @@ module JSON
         end
 
         # `CLASS_OF`, which a message names: the singleton class when there
-        # is one, as every Class and Module has. One that holds no methods
-        # cannot be told from none here, so only those that do are named.
+        # is one, as every Class and Module has.
         def self.class_of(obj)
-          if Module === obj || !obj.singleton_methods.empty?
-            obj.singleton_class
-          else
-            obj.class
-          end
+          Module === obj ? obj.singleton_class : json_class(obj)
+        end
+
+        # `RBASIC_CLASS`, the class json's tests compare, made by nothing.
+        def self.json_class(obj)
+          klass = __reflect_class_of__(obj)
+          bare_singleton?(klass) ? klass.superclass : klass
+        end
+
+        # Whether `json_class(obj)` is String, asking nothing more of a
+        # String with no singleton class.
+        def self.string?(obj)
+          __reflect_class_of__(obj).equal?(::String) || json_class(obj).equal?(::String)
+        end
+
+        # Whether `klass` is a singleton class holding no methods and no
+        # extended module, which counts as none.
+        #
+        # ponytail: CRuby asks only whether the object has a singleton class,
+        # and Spinel's block `instance_eval` makes one where CRuby's does not
+        # (#716), so an empty one counts as none — wrong only after a bare
+        # `obj.singleton_class`. The upgrade is an `instance_eval` that
+        # allocates the singleton on its first `def`, as CRuby's does.
+        def self.bare_singleton?(klass)
+          klass.singleton_class? &&
+            klass.instance_methods(false).empty? &&
+            klass.private_instance_methods(false).empty? &&
+            klass.ancestors.size == klass.superclass.ancestors.size + 1
         end
       end
       private_constant :Run
