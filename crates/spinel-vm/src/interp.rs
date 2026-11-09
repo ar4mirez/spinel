@@ -9,10 +9,12 @@
 //!
 //! # Scopes
 //!
-//! A frame's locals live in a heap environment whose first slot links to the
-//! enclosing one, so a block reads an outer local by walking `depth` links.
-//! Making it an ordinary slots object is what lets the collector trace a
-//! captured variable without knowing what a closure is.
+//! A captured scope's locals live in a heap environment whose first slot links
+//! to the enclosing one, so a block reads an outer local by walking `depth`
+//! links. Making it an ordinary slots object is what lets the collector trace
+//! a captured variable without knowing what a closure is. A method body's
+//! locals start on the operand stack and move there only when something
+//! captures them (`frame_env`).
 //!
 //! A method body sets a *scope barrier* and a block body does not, which is the
 //! one place the two differ: `def` cannot see the locals it was written among,
@@ -167,7 +169,7 @@ pub const BUDGET: u64 = 50_000_000;
 ///
 /// A caller may keep one across several evaluations, and a local the first
 /// assigned is then visible to the next. Its locals live in a heap environment
-/// like every other scope's, so a block written at the top level captures them
+/// from the start, so a block written at the top level captures them
 /// for real rather than seeing a copy.
 #[derive(Debug, Clone)]
 pub struct Frame {
