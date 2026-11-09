@@ -12081,6 +12081,11 @@ fn native_call<'h>(
             stack.push(value);
             Ok(None)
         }
+        Native::JsonGenerate => {
+            let value = json_generate(scope, &call)?;
+            stack.push(value);
+            Ok(None)
+        }
         Native::JsonWhere => {
             let source = call.args.first().and_then(|&v| string_bytes(scope, v));
             let offset = int_arg(&call, 1).and_then(|n| usize::try_from(n).ok());
@@ -16120,6 +16125,11 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         (Builtin::Kernel, &["__json_where__"], Native::JsonWhere),
         (Builtin::Kernel, &["__json_float__"], Native::JsonFloat),
         (Builtin::Kernel, &["__json_escape__"], Native::JsonEscape),
+        (
+            Builtin::Kernel,
+            &["__json_generate__"],
+            Native::JsonGenerate,
+        ),
         (Builtin::Kernel, &["__zlib_init__"], Native::ZlibInit),
         (Builtin::Kernel, &["__zlib_run__"], Native::ZlibRun),
         (Builtin::Kernel, &["__zlib_ctl__"], Native::ZlibCtl),
@@ -20851,6 +20861,331 @@ impl crate::json::Sink for JsonSink<'_, '_> {
                 Value::NIL
             }
         }
+    }
+}
+
+/// `Kernel#__json_generate__(obj, buffer, depth, config)` (#742): what
+/// `generate_json` writes for `obj`, at nesting `depth`, appended to `buffer`.
+///
+/// `config` is `[flags, max_nesting, indent, space, space_before, object_nl,
+/// array_nl]`, the Run's configuration: `flags` as `__json_escape__` takes
+/// them, each layout String false when unset. `obj` is the Hash or the
+/// Array `object` or `array` was handed, written whatever its class, as
+/// `generate_json_object` and `generate_json_array` do. What it holds must be
+/// plain data: nil, true, false, an Integer, a finite Float, a String that is
+/// valid JSON text, and an Array or a Hash of exactly those classes whose
+/// keys are all Strings or all Symbols. Those are the values the C generator
+/// writes without calling into Ruby, so there is nothing for this walk to
+/// call. Anything else — a subclass, a singleton, a Symbol value, a
+/// non-finite Float, a String to re-encode, mixed keys, a nesting past
+/// `max_nesting` — answers false and appends nothing, and the Ruby
+/// generator writes that value itself, which has the warnings, errors and
+/// `to_json` calls to make.
+///
+/// ponytail: giving up starts that value over in Ruby, whose children try
+/// this again, so a value it does not take, deep inside, is walked once per
+/// level above it; the ceiling is depth times size for such a document. The
+/// upgrade is a walk that hands Ruby the one value and resumes.
+///
+/// Never inlined: in the native dispatch it would grow that one frame, which
+/// every native call pays for.
+#[inline(never)]
+fn json_generate(scope: &mut HandleScope<'_>, call: &Pending) -> Result<Value, Error> {
+    let refuse = |operands| Error::NoDispatch {
+        op: "__json_generate__",
+        operands,
+    };
+    let obj = call.args.first().copied().unwrap_or(Value::NIL);
+    let buffer = call.args.get(1).copied().unwrap_or(Value::NIL);
+    if !is_string(scope, buffer) {
+        return Err(refuse("a buffer that is not a String"));
+    }
+    let config = call
+        .args
+        .get(3)
+        .and_then(|&v| array_elements(scope, v))
+        .filter(|config| config.len() == 7)
+        .ok_or(refuse("a config that is not a seven-element Array"))?;
+    // A depth or a max_nesting past a Fixnum is Ruby's to answer.
+    let (Some(depth), Some(max_nesting)) = (int_arg(call, 2), config[1].as_fixnum()) else {
+        return Ok(Value::FALSE);
+    };
+    let mut layout = |at: usize| string_bytes(scope, config[at]).filter(|s| !s.is_empty());
+    let generator = JsonGenerator {
+        pairs: symbol("@__pairs__"),
+        script_safe: config[0].as_fixnum().is_some_and(|f| f & 1 != 0),
+        ascii_only: config[0].as_fixnum().is_some_and(|f| f & 2 != 0),
+        max_nesting,
+        indent: layout(2),
+        space: layout(3),
+        space_before: layout(4),
+        object_nl: layout(5),
+        array_nl: layout(6),
+    };
+    let mut out = Vec::new();
+    let written = if heap_kind(scope, obj) == Some(HeapKind::Array) {
+        generator.array(scope, obj, depth, 0, &mut out)
+    } else {
+        generator.object(scope, obj, depth, 0, &mut out)
+    };
+    if written.is_none() {
+        return Ok(Value::FALSE);
+    }
+    let buffer = scope.root(buffer);
+    let end = crate::strings::bytesize(scope, buffer);
+    crate::strings::splice(scope, buffer, end, 0, &out);
+    Ok(Value::TRUE)
+}
+
+/// The configuration `json_generate` walks with.
+struct JsonGenerator {
+    /// `@__pairs__`, the ivar a Hash keeps its pairs in.
+    pairs: SymbolId,
+    script_safe: bool,
+    ascii_only: bool,
+    max_nesting: i64,
+    indent: Option<Vec<u8>>,
+    space: Option<Vec<u8>>,
+    space_before: Option<Vec<u8>>,
+    object_nl: Option<Vec<u8>>,
+    array_nl: Option<Vec<u8>>,
+}
+
+impl JsonGenerator {
+    /// How deep this walk recurses in Rust before it leaves the rest to
+    /// Ruby, whose own stack check answers for a document nested without
+    /// limit (`max_nesting: 0`).
+    const RECURSION: usize = 256;
+
+    /// `generate_json` for one value: `Some` once written to `out`, `None`
+    /// for a value the Ruby generator writes instead.
+    fn value(
+        &self,
+        scope: &mut HandleScope<'_>,
+        obj: Value,
+        depth: i64,
+        recursion: usize,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        use crate::value::Unpacked;
+        use std::io::Write as _;
+        match obj.unpack() {
+            Unpacked::Nil => out.extend_from_slice(b"null"),
+            Unpacked::True => out.extend_from_slice(b"true"),
+            Unpacked::False => out.extend_from_slice(b"false"),
+            Unpacked::Fixnum(n) => write!(out, "{n}").ok()?,
+            Unpacked::Flonum(f) => self.float(f, out)?,
+            Unpacked::Symbol(_) | Unpacked::Undef => return None,
+            Unpacked::Heap(_) => {
+                let mut scope = scope.nested();
+                let scope = &mut scope;
+                let class = Self::class(scope, obj)?;
+                if class == Builtin::String.id() {
+                    self.string_value(scope, obj, out)?;
+                } else if class == Builtin::Hash.id() {
+                    self.object(scope, obj, depth, recursion, out)?;
+                } else if class == Builtin::Array.id() {
+                    self.array(scope, obj, depth, recursion, out)?;
+                } else if class == Builtin::Integer.id() {
+                    let n = crate::bignum::read(scope, obj)?;
+                    write!(out, "{n}").ok()?;
+                } else if class == Builtin::Float.id() {
+                    self.float(crate::float::read(scope, obj)?, out)?;
+                } else {
+                    return None;
+                }
+            }
+        }
+        Some(())
+    }
+
+    /// `generate_json_float`, finite: a non-finite one is an error or
+    /// `allow_nan`'s text, which the Ruby half decides.
+    fn float(&self, f: f64, out: &mut Vec<u8>) -> Option<()> {
+        if !f.is_finite() {
+            return None;
+        }
+        out.extend_from_slice(crate::json::dtoa(f).as_bytes());
+        Some(())
+    }
+
+    /// `raw_generate_json_string` for a String `valid_json_string_p` takes.
+    fn string(&self, bytes: &[u8], encoding: u8, out: &mut Vec<u8>) -> Option<()> {
+        let ascii = bytes.is_ascii() && crate::strings::ascii_compatible(encoding);
+        if !ascii
+            && !(encoding == crate::strings::UTF_8
+                && crate::strings::valid(crate::strings::UTF_8, bytes) == Some(true))
+        {
+            return None;
+        }
+        out.push(b'"');
+        crate::json::escape(bytes, self.script_safe, self.ascii_only, out);
+        out.push(b'"');
+        Some(())
+    }
+
+    /// `RBASIC_CLASS(obj)`, which the C generator's class tests compare,
+    /// by `Run.bare_singleton?`'s rule: a singleton class holding no methods
+    /// and no extended module counts as none, and `None` for any other
+    /// singleton, whose object the Ruby generator writes.
+    fn class(scope: &mut HandleScope<'_>, obj: Value) -> Option<ClassId> {
+        let class = class_of(scope, obj)?;
+        let classes = scope.classes();
+        if !classes.is_singleton(class) {
+            return Some(class);
+        }
+        let superclass = classes.superclass(class)?;
+        (classes.own_method_entries(class).is_empty()
+            && classes.ancestors(class).len() == classes.ancestors(superclass).len() + 1)
+            .then_some(superclass)
+    }
+
+    /// `string` for a String object, read where its bytes lie.
+    fn string_value(
+        &self,
+        scope: &mut HandleScope<'_>,
+        obj: Value,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        let handle = scope.root(obj);
+        let encoding = crate::strings::encoding(scope, handle);
+        let bytes = crate::strings::live(scope, handle);
+        self.string(bytes, encoding, out)
+    }
+
+    /// An Array's live elements: its storage, where they start, how many.
+    fn elements<'h>(
+        scope: &mut HandleScope<'h>,
+        array: Value,
+    ) -> Option<(Handle<'h>, usize, usize)> {
+        if heap_kind(scope, array) != Some(HeapKind::Array) {
+            return None;
+        }
+        let array = scope.root(array);
+        let (head, length) = array_window(scope, array);
+        let storage = scope.slot(array, ARRAY_STORAGE);
+        Some((scope.root(storage), head, length))
+    }
+
+    /// `increase_depth`, giving up where the Ruby half raises NestingError.
+    fn increase(&self, depth: i64, recursion: usize) -> Option<i64> {
+        let depth = depth + 1;
+        if (self.max_nesting != 0 && depth > self.max_nesting) || recursion >= Self::RECURSION {
+            return None;
+        }
+        Some(depth)
+    }
+
+    fn indent(&self, depth: i64, out: &mut Vec<u8>) {
+        if let Some(indent) = &self.indent {
+            for _ in 0..depth {
+                out.extend_from_slice(indent);
+            }
+        }
+    }
+
+    /// `generate_json_object`, for a Hash whose keys are all Strings (of
+    /// that class exactly) or all Symbols.
+    fn object(
+        &self,
+        scope: &mut HandleScope<'_>,
+        hash: Value,
+        depth: i64,
+        recursion: usize,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        let depth = self.increase(depth, recursion)?;
+        // `hash_pairs`'s reading of the representation, without its copies.
+        let pairs = ivar_get(scope, hash, self.pairs).ok()?;
+        let (pairs, head, length) = Self::elements(scope, pairs)?;
+        if length == 0 {
+            out.extend_from_slice(b"{}");
+            return Some(());
+        }
+        out.push(b'{');
+        let mut symbols = false;
+        for index in 0..length {
+            let pair = scope.slot(pairs, head + index);
+            let (pair, pair_head, pair_length) = Self::elements(scope, pair)?;
+            if pair_length != 2 {
+                return None;
+            }
+            let key = scope.slot(pair, pair_head);
+            let value = scope.slot(pair, pair_head + 1);
+            if index == 0 {
+                symbols = key.as_symbol().is_some();
+            }
+            if index > 0 {
+                out.push(b',');
+            }
+            if let Some(nl) = &self.object_nl {
+                out.extend_from_slice(nl);
+            }
+            self.indent(depth, out);
+            if symbols {
+                // `Symbol#name`; one that is not ASCII is left to Ruby,
+                // which knows the encoding it was made in.
+                let name = symbol_name(key.as_symbol()?);
+                self.string(name.as_bytes(), crate::strings::US_ASCII, out)?;
+            } else {
+                if key.is_immediate() || Self::class(scope, key)? != Builtin::String.id() {
+                    return None;
+                }
+                self.string_value(scope, key, out)?;
+            }
+            if let Some(space_before) = &self.space_before {
+                out.extend_from_slice(space_before);
+            }
+            out.push(b':');
+            if let Some(space) = &self.space {
+                out.extend_from_slice(space);
+            }
+            self.value(scope, value, depth, recursion + 1, out)?;
+        }
+        if let Some(nl) = &self.object_nl {
+            out.extend_from_slice(nl);
+            self.indent(depth - 1, out);
+        }
+        out.push(b'}');
+        Some(())
+    }
+
+    /// `generate_json_array`.
+    fn array(
+        &self,
+        scope: &mut HandleScope<'_>,
+        array: Value,
+        depth: i64,
+        recursion: usize,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        let depth = self.increase(depth, recursion)?;
+        let (storage, head, length) = Self::elements(scope, array)?;
+        if length == 0 {
+            out.extend_from_slice(b"[]");
+            return Some(());
+        }
+        out.push(b'[');
+        if let Some(nl) = &self.array_nl {
+            out.extend_from_slice(nl);
+        }
+        for index in 0..length {
+            let element = scope.slot(storage, head + index);
+            if index > 0 {
+                out.push(b',');
+                if let Some(nl) = &self.array_nl {
+                    out.extend_from_slice(nl);
+                }
+            }
+            self.indent(depth, out);
+            self.value(scope, element, depth, recursion + 1, out)?;
+        }
+        if let Some(nl) = &self.array_nl {
+            out.extend_from_slice(nl);
+            self.indent(depth - 1, out);
+        }
+        out.push(b']');
+        Some(())
     }
 }
 

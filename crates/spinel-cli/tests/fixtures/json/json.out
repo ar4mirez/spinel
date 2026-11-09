@@ -295,6 +295,78 @@ to_json unfrozen: [false, false, false]
 to_json arity: ArgumentError: "wrong number of arguments (given 2, expected 0..1)"
 hash to_json state: "{\n  \"a\":[\n    1\n  ]\n}"
 generate encoding: #<Encoding:UTF-8>
+== generate, plain data
+integers default: "[-3,-2,-1,0,1,2,3,4611686018427387904,1180591620717411303424,-18446744073709551616]"
+integers ascii_only: "[-3,-2,-1,0,1,2,3,4611686018427387904,1180591620717411303424,-18446744073709551616]"
+integers script_safe: "[-3,-2,-1,0,1,2,3,4611686018427387904,1180591620717411303424,-18446744073709551616]"
+integers layout: "[\n\t-3,\n\t-2,\n\t-1,\n\t0,\n\t1,\n\t2,\n\t3,\n\t4611686018427387904,\n\t1180591620717411303424,\n\t-18446744073709551616\n]"
+integers depth: "[\n    -3,\n    -2,\n    -1,\n    0,\n    1,\n    2,\n    3,\n    4611686018427387904,\n    1180591620717411303424,\n    -18446744073709551616\n  ]"
+integers strict: "[-3,-2,-1,0,1,2,3,4611686018427387904,1180591620717411303424,-18446744073709551616]"
+integers pretty: "[\n  -3,\n  -2,\n  -1,\n  0,\n  1,\n  2,\n  3,\n  4611686018427387904,\n  1180591620717411303424,\n  -18446744073709551616\n]"
+integers to_json: "[-3,-2,-1,0,1,2,3,4611686018427387904,1180591620717411303424,-18446744073709551616]"
+strings default: "[\"\",\"s\",\"é日本😀\",\"a\\\"b\\\\c\\n\\u0001\",\"</script>\u2028\u2029\"]"
+strings ascii_only: "[\"\",\"s\",\"\\u00e9\\u65e5\\u672c\\ud83d\\ude00\",\"a\\\"b\\\\c\\n\\u0001\",\"</script>\\u2028\\u2029\"]"
+strings script_safe: "[\"\",\"s\",\"é日本😀\",\"a\\\"b\\\\c\\n\\u0001\",\"<\\/script>\\u2028\\u2029\"]"
+strings layout: "[\n\t\"\",\n\t\"s\",\n\t\"é日本😀\",\n\t\"a\\\"b\\\\c\\n\\u0001\",\n\t\"</script>\u2028\u2029\"\n]"
+strings depth: "[\n    \"\",\n    \"s\",\n    \"é日本😀\",\n    \"a\\\"b\\\\c\\n\\u0001\",\n    \"</script>\u2028\u2029\"\n  ]"
+strings strict: "[\"\",\"s\",\"é日本😀\",\"a\\\"b\\\\c\\n\\u0001\",\"</script>\u2028\u2029\"]"
+strings pretty: "[\n  \"\",\n  \"s\",\n  \"é日本😀\",\n  \"a\\\"b\\\\c\\n\\u0001\",\n  \"</script>\u2028\u2029\"\n]"
+strings to_json: "[\"\",\"s\",\"é日本😀\",\"a\\\"b\\\\c\\n\\u0001\",\"</script>\u2028\u2029\"]"
+floats default: "[0.0,-0.0,1.5,8.85,1e+20,0.00000015,1e+300,5e-324]"
+floats ascii_only: "[0.0,-0.0,1.5,8.85,1e+20,0.00000015,1e+300,5e-324]"
+floats script_safe: "[0.0,-0.0,1.5,8.85,1e+20,0.00000015,1e+300,5e-324]"
+floats layout: "[\n\t0.0,\n\t-0.0,\n\t1.5,\n\t8.85,\n\t1e+20,\n\t0.00000015,\n\t1e+300,\n\t5e-324\n]"
+floats depth: "[\n    0.0,\n    -0.0,\n    1.5,\n    8.85,\n    1e+20,\n    0.00000015,\n    1e+300,\n    5e-324\n  ]"
+floats strict: "[0.0,-0.0,1.5,8.85,1e+20,0.00000015,1e+300,5e-324]"
+floats pretty: "[\n  0.0,\n  -0.0,\n  1.5,\n  8.85,\n  1e+20,\n  0.00000015,\n  1e+300,\n  5e-324\n]"
+floats to_json: "[0.0,-0.0,1.5,8.85,1e+20,0.00000015,1e+300,5e-324]"
+hashes default: "[{\"a\":1,\"b\":2,\"c\":3},{\"a\":[],\"b\":{},\"c\":null},{}]"
+hashes ascii_only: "[{\"a\":1,\"b\":2,\"c\":3},{\"a\":[],\"b\":{},\"c\":null},{}]"
+hashes script_safe: "[{\"a\":1,\"b\":2,\"c\":3},{\"a\":[],\"b\":{},\"c\":null},{}]"
+hashes layout: "[\n\t{\n\t\t\"a\" : 1,\n\t\t\"b\" : 2,\n\t\t\"c\" : 3\n\t},\n\t{\n\t\t\"a\" : [],\n\t\t\"b\" : {},\n\t\t\"c\" : null\n\t},\n\t{}\n]"
+hashes depth: "[\n    {\n      \"a\":1,\n      \"b\":2,\n      \"c\":3\n    },\n    {\n      \"a\":[],\n      \"b\":{},\n      \"c\":null\n    },\n    {}\n  ]"
+hashes strict: "[{\"a\":1,\"b\":2,\"c\":3},{\"a\":[],\"b\":{},\"c\":null},{}]"
+hashes pretty: "[\n  {\n    \"a\": 1,\n    \"b\": 2,\n    \"c\": 3\n  },\n  {\n    \"a\": [],\n    \"b\": {},\n    \"c\": null\n  },\n  {}\n]"
+hashes to_json: "[{\"a\":1,\"b\":2,\"c\":3},{\"a\":[],\"b\":{},\"c\":null},{}]"
+records default: "[{\"id\":0,\"name\":\"user 0\",\"email\":\"user0@example.com\",\"active\":true,\"score\":0.1,\"manager\":null,\"tags\":[\"alpha\",\"beta\",\"gamma 0\"],\"address\":{\"street\":\"0 Main St\",\"city\":\"Springfield\",\"zip\":\"00000\"},\"bio\":\"Line one\\nLine \\\"two\\\" with é and a tab\\t.\"},{\"id\":1,\"name\":\"user 1\",\"email\":\"user1@example.com\",\"active\":false,\"score\":1.35,\"manager\":null,\"tags\":[\"alpha\",\"beta\",\"gamma 1\"],\"address\":{\"street\":\"1 Main St\",\"city\":\"Springfield\",\"zip\":\"00001\"},\"bio\":\"Line one\\nLine \\\"two\\\" with é and a tab\\t.\"},{\"id\":2,\"name\":\"user 2\",\"email\":\"user2@example.com\",\"active\":true,\"score\":2.6,\"manager\":null,\"tags\":[\"alpha\",\"beta\",\"gamma 2\"],\"address\":{\"street\":\"2 Main St\",\"city\":\"Springfield\",\"zip\":\"00002\"},\"bio\":\"Line one\\nLine \\\"two\\\" with é and a tab\\t.\"}]"
+records ascii_only: "[{\"id\":0,\"name\":\"user 0\",\"email\":\"user0@example.com\",\"active\":true,\"score\":0.1,\"manager\":null,\"tags\":[\"alpha\",\"beta\",\"gamma 0\"],\"address\":{\"street\":\"0 Main St\",\"city\":\"Springfield\",\"zip\":\"00000\"},\"bio\":\"Line one\\nLine \\\"two\\\" with \\u00e9 and a tab\\t.\"},{\"id\":1,\"name\":\"user 1\",\"email\":\"user1@example.com\",\"active\":false,\"score\":1.35,\"manager\":null,\"tags\":[\"alpha\",\"beta\",\"gamma 1\"],\"address\":{\"street\":\"1 Main St\",\"city\":\"Springfield\",\"zip\":\"00001\"},\"bio\":\"Line one\\nLine \\\"two\\\" with \\u00e9 and a tab\\t.\"},{\"id\":2,\"name\":\"user 2\",\"email\":\"user2@example.com\",\"active\":true,\"score\":2.6,\"manager\":null,\"tags\":[\"alpha\",\"beta\",\"gamma 2\"],\"address\":{\"street\":\"2 Main St\",\"city\":\"Springfield\",\"zip\":\"00002\"},\"bio\":\"Line one\\nLine \\\"two\\\" with \\u00e9 and a tab\\t.\"}]"
+records script_safe: "[{\"id\":0,\"name\":\"user 0\",\"email\":\"user0@example.com\",\"active\":true,\"score\":0.1,\"manager\":null,\"tags\":[\"alpha\",\"beta\",\"gamma 0\"],\"address\":{\"street\":\"0 Main St\",\"city\":\"Springfield\",\"zip\":\"00000\"},\"bio\":\"Line one\\nLine \\\"two\\\" with é and a tab\\t.\"},{\"id\":1,\"name\":\"user 1\",\"email\":\"user1@example.com\",\"active\":false,\"score\":1.35,\"manager\":null,\"tags\":[\"alpha\",\"beta\",\"gamma 1\"],\"address\":{\"street\":\"1 Main St\",\"city\":\"Springfield\",\"zip\":\"00001\"},\"bio\":\"Line one\\nLine \\\"two\\\" with é and a tab\\t.\"},{\"id\":2,\"name\":\"user 2\",\"email\":\"user2@example.com\",\"active\":true,\"score\":2.6,\"manager\":null,\"tags\":[\"alpha\",\"beta\",\"gamma 2\"],\"address\":{\"street\":\"2 Main St\",\"city\":\"Springfield\",\"zip\":\"00002\"},\"bio\":\"Line one\\nLine \\\"two\\\" with é and a tab\\t.\"}]"
+records layout: "[\n\t{\n\t\t\"id\" : 0,\n\t\t\"name\" : \"user 0\",\n\t\t\"email\" : \"user0@example.com\",\n\t\t\"active\" : true,\n\t\t\"score\" : 0.1,\n\t\t\"manager\" : null,\n\t\t\"tags\" : [\n\t\t\t\"alpha\",\n\t\t\t\"beta\",\n\t\t\t\"gamma 0\"\n\t\t],\n\t\t\"address\" : {\n\t\t\t\"street\" : \"0 Main St\",\n\t\t\t\"city\" : \"Springfield\",\n\t\t\t\"zip\" : \"00000\"\n\t\t},\n\t\t\"bio\" : \"Line one\\nLine \\\"two\\\" with é and a tab\\t.\"\n\t},\n\t{\n\t\t\"id\" : 1,\n\t\t\"name\" : \"user 1\",\n\t\t\"email\" : \"user1@example.com\",\n\t\t\"active\" : false,\n\t\t\"score\" : 1.35,\n\t\t\"manager\" : null,\n\t\t\"tags\" : [\n\t\t\t\"alpha\",\n\t\t\t\"beta\",\n\t\t\t\"gamma 1\"\n\t\t],\n\t\t\"address\" : {\n\t\t\t\"street\" : \"1 Main St\",\n\t\t\t\"city\" : \"Springfield\",\n\t\t\t\"zip\" : \"00001\"\n\t\t},\n\t\t\"bio\" : \"Line one\\nLine \\\"two\\\" with é and a tab\\t.\"\n\t},\n\t{\n\t\t\"id\" : 2,\n\t\t\"name\" : \"user 2\",\n\t\t\"email\" : \"user2@example.com\",\n\t\t\"active\" : true,\n\t\t\"score\" : 2.6,\n\t\t\"manager\" : null,\n\t\t\"tags\" : [\n\t\t\t\"alpha\",\n\t\t\t\"beta\",\n\t\t\t\"gamma 2\"\n\t\t],\n\t\t\"address\" : {\n\t\t\t\"street\" : \"2 Main St\",\n\t\t\t\"city\" : \"Springfield\",\n\t\t\t\"zip\" : \"00002\"\n\t\t},\n\t\t\"bio\" : \"Line one\\nLine \\\"two\\\" with é and a tab\\t.\"\n\t}\n]"
+records depth: "[\n    {\n      \"id\":0,\n      \"name\":\"user 0\",\n      \"email\":\"user0@example.com\",\n      \"active\":true,\n      \"score\":0.1,\n      \"manager\":null,\n      \"tags\":[\n        \"alpha\",\n        \"beta\",\n        \"gamma 0\"\n      ],\n      \"address\":{\n        \"street\":\"0 Main St\",\n        \"city\":\"Springfield\",\n        \"zip\":\"00000\"\n      },\n      \"bio\":\"Line one\\nLine \\\"two\\\" with é and a tab\\t.\"\n    },\n    {\n      \"id\":1,\n      \"name\":\"user 1\",\n      \"email\":\"user1@example.com\",\n      \"active\":false,\n      \"score\":1.35,\n      \"manager\":null,\n      \"tags\":[\n        \"alpha\",\n        \"beta\",\n        \"gamma 1\"\n      ],\n      \"address\":{\n        \"street\":\"1 Main St\",\n        \"city\":\"Springfield\",\n        \"zip\":\"00001\"\n      },\n      \"bio\":\"Line one\\nLine \\\"two\\\" with é and a tab\\t.\"\n    },\n    {\n      \"id\":2,\n      \"name\":\"user 2\",\n      \"email\":\"user2@example.com\",\n      \"active\":true,\n      \"score\":2.6,\n      \"manager\":null,\n      \"tags\":[\n        \"alpha\",\n        \"beta\",\n        \"gamma 2\"\n      ],\n      \"address\":{\n        \"street\":\"2 Main St\",\n        \"city\":\"Springfield\",\n        \"zip\":\"00002\"\n      },\n      \"bio\":\"Line one\\nLine \\\"two\\\" with é and a tab\\t.\"\n    }\n  ]"
+records strict: "[{\"id\":0,\"name\":\"user 0\",\"email\":\"user0@example.com\",\"active\":true,\"score\":0.1,\"manager\":null,\"tags\":[\"alpha\",\"beta\",\"gamma 0\"],\"address\":{\"street\":\"0 Main St\",\"city\":\"Springfield\",\"zip\":\"00000\"},\"bio\":\"Line one\\nLine \\\"two\\\" with é and a tab\\t.\"},{\"id\":1,\"name\":\"user 1\",\"email\":\"user1@example.com\",\"active\":false,\"score\":1.35,\"manager\":null,\"tags\":[\"alpha\",\"beta\",\"gamma 1\"],\"address\":{\"street\":\"1 Main St\",\"city\":\"Springfield\",\"zip\":\"00001\"},\"bio\":\"Line one\\nLine \\\"two\\\" with é and a tab\\t.\"},{\"id\":2,\"name\":\"user 2\",\"email\":\"user2@example.com\",\"active\":true,\"score\":2.6,\"manager\":null,\"tags\":[\"alpha\",\"beta\",\"gamma 2\"],\"address\":{\"street\":\"2 Main St\",\"city\":\"Springfield\",\"zip\":\"00002\"},\"bio\":\"Line one\\nLine \\\"two\\\" with é and a tab\\t.\"}]"
+records pretty: "[\n  {\n    \"id\": 0,\n    \"name\": \"user 0\",\n    \"email\": \"user0@example.com\",\n    \"active\": true,\n    \"score\": 0.1,\n    \"manager\": null,\n    \"tags\": [\n      \"alpha\",\n      \"beta\",\n      \"gamma 0\"\n    ],\n    \"address\": {\n      \"street\": \"0 Main St\",\n      \"city\": \"Springfield\",\n      \"zip\": \"00000\"\n    },\n    \"bio\": \"Line one\\nLine \\\"two\\\" with é and a tab\\t.\"\n  },\n  {\n    \"id\": 1,\n    \"name\": \"user 1\",\n    \"email\": \"user1@example.com\",\n    \"active\": false,\n    \"score\": 1.35,\n    \"manager\": null,\n    \"tags\": [\n      \"alpha\",\n      \"beta\",\n      \"gamma 1\"\n    ],\n    \"address\": {\n      \"street\": \"1 Main St\",\n      \"city\": \"Springfield\",\n      \"zip\": \"00001\"\n    },\n    \"bio\": \"Line one\\nLine \\\"two\\\" with é and a tab\\t.\"\n  },\n  {\n    \"id\": 2,\n    \"name\": \"user 2\",\n    \"email\": \"user2@example.com\",\n    \"active\": true,\n    \"score\": 2.6,\n    \"manager\": null,\n    \"tags\": [\n      \"alpha\",\n      \"beta\",\n      \"gamma 2\"\n    ],\n    \"address\": {\n      \"street\": \"2 Main St\",\n      \"city\": \"Springfield\",\n      \"zip\": \"00002\"\n    },\n    \"bio\": \"Line one\\nLine \\\"two\\\" with é and a tab\\t.\"\n  }\n]"
+records to_json: "[{\"id\":0,\"name\":\"user 0\",\"email\":\"user0@example.com\",\"active\":true,\"score\":0.1,\"manager\":null,\"tags\":[\"alpha\",\"beta\",\"gamma 0\"],\"address\":{\"street\":\"0 Main St\",\"city\":\"Springfield\",\"zip\":\"00000\"},\"bio\":\"Line one\\nLine \\\"two\\\" with é and a tab\\t.\"},{\"id\":1,\"name\":\"user 1\",\"email\":\"user1@example.com\",\"active\":false,\"score\":1.35,\"manager\":null,\"tags\":[\"alpha\",\"beta\",\"gamma 1\"],\"address\":{\"street\":\"1 Main St\",\"city\":\"Springfield\",\"zip\":\"00001\"},\"bio\":\"Line one\\nLine \\\"two\\\" with é and a tab\\t.\"},{\"id\":2,\"name\":\"user 2\",\"email\":\"user2@example.com\",\"active\":true,\"score\":2.6,\"manager\":null,\"tags\":[\"alpha\",\"beta\",\"gamma 2\"],\"address\":{\"street\":\"2 Main St\",\"city\":\"Springfield\",\"zip\":\"00002\"},\"bio\":\"Line one\\nLine \\\"two\\\" with é and a tab\\t.\"}]"
+max_nesting edge: JSON::NestingError: "nesting of 3 is too deep. Did you try to serialize objects with circular references?" nil/nil
+deep nesting off: 603
+give up deep: "[\n {  \"a\":[\n   1,\n   {    \"b\":[\n     !,\n     2.5\n    ]}\n  ]},\n [\n  3\n ]\n]"
+give up symbol: "[{\"a\":[1,\"sym\"]},{\"b\":2}]"
+give up mixed keys: "[{\"x\":{\"a\":1,\"b\":2}},{\"y\":3}]"
+give up subclass: "[{\"a\":{\"1\":2}},[3],\"s\"]"
+give up string key subclass: "{\"k\":1,\"j\":2}"
+give up non-finite: "[[1.5,Infinity]]"
+give up encoding: "[[\"ok\",\"café\"]]"
+give up non-ascii symbol key: "{\"é\":1}"
+singleton hash: "[{\"a\":1},{\"b\":{\"a\":1}}]"
+singleton to_json hash: "[1,\"singleton Hash\",{\"b\":\"singleton Hash\"}]"
+singleton to_json array: "[1,\"singleton Array\",{\"b\":\"singleton Array\"}]"
+singleton to_json string: "[1,\"singleton String\",{\"b\":\"singleton String\"}]"
+singleton to_json string pretty: "[\n  \"singleton String\"\n]"
+singleton string key: "[{\"key\":1,\"j\":2}]"
+singleton other method: "[[1,\"x\"],{\"s\":\"y\"},[\"y\"]]"
+singleton strict: JSON::GeneratorError: "#<Class:#<Array:0x...>> not allowed in JSON"
+singleton undef to_json: ["[\"{\\\"a\\\" => 1}\"]", JSON::GeneratorError]
+extended to_json: "[\"extended\",{\"b\":\"extended\"}]"
+extended other method: JSON::GeneratorError: "#<Class:#<Hash:0x...>> not allowed in JSON"
+instance_eval default: "[{\"a\":1},[1,\"x\"],\"s\",{\"k\":{\"a\":1},\"b\":[[1,\"x\"],\"s\"]}]"
+instance_eval top level: ["{\"a\":1}", "[1,\"x\"]", "\"s\""]
+instance_eval strict: "[{\"a\":1},[1,\"x\"],\"s\",{\"k\":{\"a\":1},\"b\":[[1,\"x\"],\"s\"]}]"
+instance_eval strict as_json: "[{\"a\":1},[1,\"x\"],\"s\",{\"k\":{\"a\":1},\"b\":[[1,\"x\"],\"s\"]}]"
+instance_eval pretty: "[\n  {\n    \"a\": 1\n  },\n  [\n    1,\n    \"x\"\n  ],\n  \"s\",\n  {\n    \"k\": {\n      \"a\": 1\n    },\n    \"b\": [\n      [\n        1,\n        \"x\"\n      ],\n      \"s\"\n    ]\n  }\n]"
+5,000 Integers, nothing called: [[23891, true, "[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,", "90,4991,4992,4993,4994,4995,4996,4997,4998,4999]"], [38892, true, "[\n  0,\n  1,\n  2,\n  3,\n  4,\n  5,\n  6,\n  7,\n  8,\n ", "  4994,\n  4995,\n  4996,\n  4997,\n  4998,\n  4999\n]"]]
+5,000 Strings, nothing called: [[38891, true, "[\"s0\",\"s1\",\"s2\",\"s3\",\"s4\",\"s5\",\"s6\",\"s7\",\"s8\",\"s", "\"s4994\",\"s4995\",\"s4996\",\"s4997\",\"s4998\",\"s4999\"]"], [53892, true, "[\n  \"s0\",\n  \"s1\",\n  \"s2\",\n  \"s3\",\n  \"s4\",\n  \"s5\"", "5\",\n  \"s4996\",\n  \"s4997\",\n  \"s4998\",\n  \"s4999\"\n]"]]
+5,000 Floats, nothing called: [[34260, true, "[0.1,1.6,3.1,4.6,6.1,7.6,9.1,10.6,12.1,13.6,15.1", "489.6,7491.1,7492.6,7494.1,7495.6,7497.1,7498.6]"], [49261, true, "[\n  0.1,\n  1.6,\n  3.1,\n  4.6,\n  6.1,\n  7.6,\n  9.", "7492.6,\n  7494.1,\n  7495.6,\n  7497.1,\n  7498.6\n]"]]
+500 three-key Hashes, nothing called: [[14170, true, "[{\"a\":0,\"b\":0,\"c\":[0]},{\"a\":1,\"b\":-1,\"c\":[1]},{\"", "b\":-498,\"c\":[498]},{\"a\":499,\"b\":-499,\"c\":[499]}]"], [32171, true, "[\n  {\n    \"a\": 0,\n    \"b\": 0,\n    \"c\": [\n      0", "\n    \"b\": -499,\n    \"c\": [\n      499\n    ]\n  }\n]"]]
+500 records, nothing called: [[128973, true, "[{\"id\":0,\"name\":\"user 0\",\"email\":\"user0@example.", "\":\"Line one\\nLine \\\"two\\\" with é and a tab\\t.\"}]"], [186474, true, "[\n  {\n    \"id\": 0,\n    \"name\": \"user 0\",\n    \"em", "ine one\\nLine \\\"two\\\" with é and a tab\\t.\"\n  }\n]"]]
 == state
 defaults: {indent: "", space: "", space_before: "", object_nl: "", array_nl: "", as_json: false, allow_nan: false, ascii_only: false, max_nesting: 100, script_safe: false, strict: false, depth: 0, buffer_initial_length: 1024}
 configured: {indent: "  ", space: "", space_before: "", object_nl: "", array_nl: "", as_json: false, allow_nan: true, ascii_only: false, max_nesting: 5, script_safe: true, strict: true, depth: 1, buffer_initial_length: 1024}
@@ -315,7 +387,7 @@ exception: [RuntimeError, "boom"]
 create_additions false: {"json_class" => "Range", "a" => [1, 2, false]}
 unsafe_load: 1..2
 load deprecation: 1..2
-  warning: "json.rb:302: warning: JSON.load implicit support for `create_additions: true` is deprecated and will be removed in 3.0, use JSON.unsafe_load or explicitly pass `create_additions: true`\n"
+  warning: "json.rb:402: warning: JSON.load implicit support for `create_additions: true` is deprecated and will be removed in 3.0, use JSON.unsafe_load or explicitly pass `create_additions: true`\n"
 load nil: nil
 load proc: [1, 2, [[...]], [[...], [...]]]
 Coder: ["[\"Object\",1]", [1, 2.5]]

@@ -266,6 +266,106 @@ show("to_json arity") { nil.to_json(1, 2) }
 show("hash to_json state") { {"a" => [1]}.to_json(JSON::State.new(indent: "  ", object_nl: "\n", array_nl: "\n")) }
 show("generate encoding") { JSON.generate(["é"]).encoding }
 
+puts "== generate, plain data"
+# What `__json_generate__` writes (#742): the shapes the issue measured, one
+# example each, under every layout and escaping option, and documents where
+# it gives up partway and the Ruby generator writes the rest.
+record = ->(i) do
+  {"id" => i, "name" => "user #{i}", "email" => "user#{i}@example.com", "active" => i.even?,
+   "score" => i * 1.25 + 0.1, "manager" => nil, "tags" => ["alpha", "beta", "gamma #{i % 7}"],
+   "address" => {"street" => "#{i} Main St", "city" => "Springfield", "zip" => format("%05d", i)},
+   "bio" => "Line one\nLine \"two\" with é and a tab\t."}
+end
+plain = {
+  "integers" => (-3..3).to_a + [2**62, 2**70, -(2**64)],
+  "strings" => ["", "s", "é日本😀", "a\"b\\c\n\u0001", "</script>\u2028\u2029"],
+  "floats" => [0.0, -0.0, 1.5, 1.25 * 7 + 0.1, 1e20, 1.5e-7, 1.0e300, 5e-324],
+  "hashes" => [{"a" => 1, "b" => 2, "c" => 3}, {a: [], b: {}, c: nil}, {}],
+  "records" => (0...3).map(&record),
+}
+layouts = {
+  "default" => {}, "ascii_only" => {ascii_only: true}, "script_safe" => {script_safe: true},
+  "layout" => {indent: "\t", space: " ", space_before: " ", object_nl: "\n", array_nl: "\n"},
+  "depth" => {depth: 1, indent: "  ", object_nl: "\n", array_nl: "\n"}, "strict" => {strict: true},
+}
+plain.each do |name, value|
+  layouts.each { |layout, opts| show("#{name} #{layout}") { JSON.generate(value, opts) } }
+  show("#{name} pretty") { JSON.pretty_generate(value) }
+  show("#{name} to_json") { value.to_json }
+end
+show("max_nesting edge") { [JSON.generate([[{"a" => [1]}]], max_nesting: 4), JSON.generate([[{"a" => [1]}]], max_nesting: 3)] }
+show("deep nesting off") { JSON.generate((1..300).reduce([1]) { |acc, _| [acc] }, max_nesting: 0).bytesize }
+show("give up deep") { o = Object.new; def o.to_json(*) = "!"; JSON.generate([{"a" => [1, {"b" => [o, 2.5]}]}, [3]], indent: " ", array_nl: "\n") }
+show("give up symbol") { JSON.generate([{"a" => [1, :sym]}, {"b" => 2}]) }
+show("give up mixed keys") { JSON.generate([{"x" => {:a => 1, "b" => 2}}, {"y" => 3}], allow_duplicate_key: true) }
+show("give up subclass") { JSON.generate([{"a" => Class.new(Hash)[1, 2]}, Class.new(Array)[3], Class.new(String).new("s")]) }
+show("give up string key subclass") { JSON.generate({Class.new(String).new("k") => 1, "j" => 2}) }
+show("give up non-finite") { JSON.generate([[1.5, Float::INFINITY]], allow_nan: true) }
+show("give up encoding") { JSON.generate([["ok", "caf\xE9".force_encoding("ISO-8859-1")]]) }
+show("give up non-ascii symbol key") { JSON.generate({"é".to_sym => 1}) }
+show("singleton hash") { h = {"a" => 1}; def h.each_pair = raise("each_pair"); JSON.generate([h, {"b" => h}]) }
+# json compares `RBASIC_CLASS`, so a value with a singleton class is not
+# plain data and its `to_json` is called, and `json_object_i` calls `to_s`
+# on a String key whose `RBASIC_CLASS` is not String. A Float takes no
+# singleton method: ruby 4.0.9 raises TypeError, "can't define singleton",
+# even for a boxed 1.0e300.
+singleton = ->(value) { def value.to_json(*) = %("singleton #{self.class}"); value }
+show("singleton to_json hash") { JSON.generate([1, singleton[{"a" => 1}], {"b" => singleton[{"c" => 2}]}]) }
+show("singleton to_json array") { JSON.generate([1, singleton[[2, 3]], {"b" => singleton[[]]}]) }
+show("singleton to_json string") { JSON.generate([1, singleton[+"s"], {"b" => singleton[+"t"]}]) }
+show("singleton to_json string pretty") { JSON.pretty_generate([singleton[+"s"]]) }
+show("singleton string key") { k = +"k"; def k.to_s = "key"; def k.to_json(*) = "!"; k.freeze; JSON.generate([{k => 1, "j" => 2}]) }
+show("singleton other method") { a = [1, "x"]; def a.shout = "!"; s = +"y"; def s.shout = "!"; JSON.generate([a, {"s" => s}, [s]]) }
+show("singleton strict") { a = [1]; def a.shout = "!"; JSON.generate([a], strict: true) }
+show("singleton undef to_json") { h = {"a" => 1}; class << h; undef_method :to_json; end; [JSON.generate([h]), (JSON.generate([h], strict: true) rescue $!.class)] }
+show("extended to_json") { m = Module.new { def to_json(*) = %("extended") }; JSON.generate([{"a" => 1}.extend(m), {"b" => [2].extend(m)}]) }
+show("extended other method") { m = Module.new { def shout = "!" }; JSON.generate([{"a" => 1}.extend(m), [2].extend(m)], strict: true) }
+# A block `instance_eval` or `instance_exec` that defines nothing leaves the
+# object plain data.
+evaluated = -> do
+  h = {"a" => 1}
+  h.instance_exec {}
+  a = [1, "x"]
+  a.instance_eval {}
+  s = +"s"
+  s.instance_exec {}
+  k = +"k"
+  k.instance_eval {}
+  k.freeze
+  [h, a, s, {k => h, "b" => [a, s]}]
+end
+show("instance_eval default") { JSON.generate(evaluated.call) }
+show("instance_eval top level") { v = evaluated.call; [JSON.generate(v[0], strict: true), JSON.generate(v[1], strict: true), JSON.generate(v[2], strict: true)] }
+show("instance_eval strict") { JSON.generate(evaluated.call, strict: true) }
+show("instance_eval strict as_json") { JSON.generate(evaluated.call, strict: true, as_json: ->(o, key) { raise "as_json #{o.inspect}" }) }
+show("instance_eval pretty") { JSON.pretty_generate(evaluated.call) }
+# The C generator walks plain data without sending a message, so none of
+# these is called; the issue's measured shapes, one each.
+redefined = [[Hash, :each_pair], [Integer, :to_s]]
+{
+  "5,000 Integers" => (0...5000).to_a,
+  "5,000 Strings" => (0...5000).map { |i| "s#{i}" },
+  "5,000 Floats" => (0...5000).map { |i| i * 1.5 + 0.1 },
+  "500 three-key Hashes" => (0...500).map { |i| {"a" => i, "b" => -i, "c" => [i]} },
+  "500 records" => (0...500).map(&record),
+}.each do |name, value|
+  show("#{name}, nothing called") do
+    redefined.each do |klass, method|
+      klass.alias_method(:"__fixture_#{method}__", method)
+      klass.define_method(method) { |*| raise "#{klass}##{method} called" }
+    end
+    begin
+      generated = [JSON.generate(value), JSON.pretty_generate(value)]
+    ensure
+      redefined.each do |klass, method|
+        klass.alias_method(method, :"__fixture_#{method}__")
+        klass.remove_method(:"__fixture_#{method}__")
+      end
+    end
+    generated.map { |json| [json.bytesize, JSON.parse(json) == value, json[0, 48], json[-48..]] }
+  end
+end
+
 puts "== state"
 show("defaults") { JSON::State.new.to_h }
 show("configured") { JSON::State.new(indent: "  ", max_nesting: 5, allow_nan: true, script_safe: true, strict: true, depth: 1).to_h }
