@@ -55,7 +55,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/set` | 57 | 170 | 166 | 0 | 1 | 3 | 98% |
 | `core/signal` | 3 | 53 | 53 | 0 | 0 | 0 | 100% |
 | `core/sizedqueue` | 16 | 61 | 61 | 0 | 0 | 0 | 100% |
-| `core/string` | 151 | 3964 | 3667 | 0 | 274 | 23 | 93% |
+| `core/string` | 151 | 3964 | 3670 | 0 | 271 | 23 | 93% |
 | `core/struct` | 30 | 170 | 169 | 0 | 1 | 0 | 99% |
 | `core/symbol` | 29 | 270 | 269 | 0 | 0 | 1 | 100% |
 | `core/systemexit` | 2 | 6 | 6 | 0 | 0 | 0 | 100% |
@@ -131,4 +131,4 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `optional/capi` | 47 | 0 | 0 | 0 | 0 | 0 | — |
 | `optional/thread_safety` | 1 | 5 | 0 | 0 | 5 | 0 | 0% |
 | `security` | 13 | 31 | 29 | 0 | 2 | 0 | 94% |
-| **total** | 3841 | 32914 | 29772 | 0 | 2931 | 211 | 90% |
+| **total** | 3841 | 32914 | 29775 | 0 | 2928 | 211 | 90% |
