@@ -1121,12 +1121,21 @@ class String
   # of them, as `delete` would — `"llo".strip("lo", "l")` is "o" — in place of
   # whitespace and NUL.
   def __strip_sets__(selectors, left, right)
-    sets = __sets__(selectors)
+    sets = selectors.map { |spec| __set_for__(spec) }
     chars = self.chars
     first = 0
     last = chars.size
-    first += 1 while left && first < last && String.__in_sets__(chars[first], sets)
-    last -= 1 while right && last > first && String.__in_sets__(chars[last - 1], sets)
+    if left
+      while first < last
+        raise ArgumentError, "invalid byte sequence in #{encoding.name}" unless chars[first].valid_encoding?
+        break unless String.__in_sets__(chars[first], sets)
+        first += 1
+      end
+    end
+    if right
+      raise Encoding::CompatibilityError, "invalid byte sequence in #{encoding.name}" unless valid_encoding?
+      last -= 1 while last > first && String.__in_sets__(chars[last - 1], sets)
+    end
     out = String.new(encoding: encoding)
     chars[first...last].each { |c| out << c }
     out
