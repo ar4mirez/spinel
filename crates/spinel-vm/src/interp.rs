@@ -4223,7 +4223,7 @@ fn run<'h>(
                         // case and the search below finds it immediately. A block homes
                         // to the method it was written in, and if that method has
                         // already returned there is nothing to return *from*.
-                        if !frames.iter().any(|call| call.id == frame) {
+                        if !frames.iter().rev().any(|call| call.id == frame) {
                             return Err(local_jump_error(scope, "return", value));
                         }
                         // An `eval` string run in a block can return from
@@ -4245,7 +4245,7 @@ fn run<'h>(
                     Insn::Break => {
                         let value = stack.pop().unwrap_or(Value::NIL);
                         let frame = frames[top].breaks;
-                        if frame == 0 || !frames.iter().any(|call| call.id == frame) {
+                        if frame == 0 || !frames.iter().rev().any(|call| call.id == frame) {
                             return Err(local_jump_error(scope, "break", value));
                         }
                         return Ok(Step::Unwind(Unwind::Break { frame, value }));
@@ -5699,7 +5699,12 @@ fn push_proc_frame_as(
     // in, which is the frame `home` already names. A lambda is a method body as
     // far as `return` and `break` go, but not for this: under a bare `private`,
     // `-> { def m; end }` still defines a private `m`.
-    let home_frame = frames.iter().find(|frame| frame.id == home);
+    //
+    // Searched from the top, where the home of a block being yielded to sits
+    // a frame or two down: from the bottom, every `yield` cost the depth of
+    // the whole stack, and a recursion that yields at each level was cubic
+    // (#741). The `return` and `break` checks search the same way.
+    let home_frame = frames.iter().rev().find(|frame| frame.id == home);
     let scope_default = match role {
         ProcRole::Block => home_frame.map_or(ScopeDefault::Public, |frame| frame.scope_default),
         // A method body and a class body start public.
