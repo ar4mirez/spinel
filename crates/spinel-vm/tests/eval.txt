@@ -2746,3 +2746,7 @@ def m(x); y = x * 2; [binding.local_variable_defined?(:y), binding.local_variabl
 def m(x); 1.then { x += 1 }; x; end; m(1)  #=> 2
 def m(x); b = binding; b.local_variable_set(:x, 9); x; end; m(1)  #=> 9
 def r(n) = n.zero? ? 0 : 1 + r(n - 1); r(5000)  #=> 5000
+
+# ------------------------------- tr's family through a byte table, and Random#bytes in one call (#744)
+s = "hello\\abc-^".b; [s.tr("a-y", "b-z"), s.tr_s("el", "ip"), s.tr("^l", "*"), "abc".tr("aa", "xy"), s.tr("\\a-c", "X"), "a".tr("a", "^b"), "x".tr("a", "bz-x"), "\x80\x90\xFF".b.tr("\x80-\xFF".b, "a"), s.count("a-z", "^l"), s.delete("l", "lo"), "aaabbbccc".squeeze("a-b"), ("abc".tr("c-a", "X") rescue $!.message), "".tr("c-a", "x"), "".delete("c-a")]  #=> ["ifmmp\\bcd-^", "hipo\\abc-^", "**ll*******", "ybc", "hello\\XXX-^", "^", "x", "aaa", 6, "heo\\abc-^", "abccc", "invalid range \"c-a\" in string transliteration", "", ""]
+r = Random.new(42); [r.bytes(7).bytes, r.rand(100), Random.new(3).bytes(9).encoding.name, Random.new(3).bytes(0)]  #=> [[102, 220, 225, 95, 179, 61, 234], 92, "ASCII-8BIT", ""]

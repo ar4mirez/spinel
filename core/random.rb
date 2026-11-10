@@ -123,7 +123,7 @@ class Random
     size = Integer.__index__(size)
     raise ArgumentError, "negative string size (or size too big)" if size < 0
     return "".b if size == 0
-    __mt_next__(@state, (size + 3) / 4).pack("V*").byteslice(0, size)
+    __mt_bytes__(@state, size)
   end
 
   # `genrand_res53`: [0, 1).

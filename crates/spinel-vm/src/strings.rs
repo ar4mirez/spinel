@@ -841,6 +841,173 @@ pub fn rfind(haystack: &[u8], needle: &[u8], start: usize) -> Option<usize> {
         .find(|&at| &haystack[at..at + needle.len()] == needle)
 }
 
+/// Which of `tr`'s family [`byte_tr`] runs.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TrOp {
+    Count,
+    Delete,
+    Squeeze,
+    Tr,
+    TrSqueeze,
+}
+
+/// What [`byte_tr`] answers: `count`'s number, or the other four's bytes.
+#[derive(PartialEq, Eq, Debug)]
+pub enum TrOut {
+    Count(usize),
+    Bytes(Vec<u8>),
+}
+
+/// A `tr` set over single bytes, walked as CRuby's `trnext` walks one: a
+/// leading `^` negates it when something follows (only where `negatable`;
+/// `tr`'s replacement is never negated), a `\` makes the byte after it
+/// literal, and `a-z` is the bytes from `a` to `z`, unless the `-` is the
+/// last byte. The bytes in order, ranges spelled out, and whether it is
+/// negated; `None` for a descending range, which the Ruby side raises. The
+/// walk stops once it has `limit` bytes, as CRuby reads `tr`'s replacement
+/// only as far as the source needs it.
+fn tr_set(spec: &[u8], negatable: bool, limit: usize) -> Option<(Vec<u8>, bool)> {
+    let negated = negatable && spec.len() > 1 && spec[0] == b'^';
+    let mut at = usize::from(negated);
+    let mut out = Vec::with_capacity(spec.len());
+    while at < spec.len() && out.len() < limit {
+        if spec[at] == b'\\' && at + 1 < spec.len() {
+            at += 1;
+        }
+        let first = spec[at];
+        at += 1;
+        if at + 1 < spec.len() && spec[at] == b'-' {
+            let last = spec[at + 1];
+            at += 2;
+            if first > last {
+                return None;
+            }
+            out.extend(first..=last);
+        } else {
+            out.push(first);
+        }
+    }
+    Some((out, negated))
+}
+
+/// Which bytes every one of `specs` holds, the intersection that
+/// `count("a-z", "^l")` asks for; every byte when there are none, as
+/// `squeeze` with no argument has it.
+fn tr_members(specs: &[&[u8]]) -> Option<[bool; 256]> {
+    let mut members = [true; 256];
+    for spec in specs {
+        let (bytes, negated) = tr_set(spec, true, usize::MAX)?;
+        let mut held = [false; 256];
+        for byte in bytes {
+            held[usize::from(byte)] = true;
+        }
+        for (member, held) in members.iter_mut().zip(held) {
+            *member &= held != negated;
+        }
+    }
+    Some(members)
+}
+
+/// `count`, `delete`, `squeeze`, `tr` and `tr_s` in one pass over the bytes
+/// through a 256-entry table, CRuby's `tr_setup_table` and `tr_trans` for a
+/// string whose every character is a byte (#744). `specs` are each argument's
+/// encoding and bytes, `tr`'s two being the source set and the replacement.
+///
+/// `None` when that does not hold, and the Ruby side's character walk
+/// answers instead: the receiver is not one byte a character, valid, in an
+/// ASCII-compatible encoding; a set is neither ASCII nor in the receiver's
+/// encoding, so that the answer could be in another encoding, or has a
+/// character wider than a byte; or a set has a descending range, which that
+/// side raises.
+#[must_use]
+pub fn byte_tr(op: TrOp, encoding: u8, bytes: &[u8], specs: &[(u8, &[u8])]) -> Option<TrOut> {
+    let byte_wide = |encoding, bytes: &[u8]| {
+        ascii_compatible(encoding)
+            && single_byte(encoding, bytes)
+            && valid(encoding, bytes) == Some(true)
+    };
+    if !byte_wide(encoding, bytes) {
+        return None;
+    }
+    let fits = |&(spec_encoding, spec): &(u8, &[u8])| {
+        (ascii_compatible(spec_encoding) && spec.is_ascii())
+            || (spec_encoding == encoding && byte_wide(spec_encoding, spec))
+    };
+    if !specs.iter().all(fits) {
+        return None;
+    }
+    let sets: Vec<&[u8]> = specs.iter().map(|&(_, spec)| spec).collect();
+    let mut out = Vec::with_capacity(bytes.len());
+    match op {
+        TrOp::Count => {
+            let members = tr_members(&sets)?;
+            let n = bytes.iter().filter(|&&b| members[usize::from(b)]).count();
+            return Some(TrOut::Count(n));
+        }
+        TrOp::Delete => {
+            let members = tr_members(&sets)?;
+            out.extend(bytes.iter().filter(|&&b| !members[usize::from(b)]));
+        }
+        TrOp::Squeeze => {
+            let members = tr_members(&sets)?;
+            let mut previous = None;
+            for &b in bytes {
+                if previous == Some(b) && members[usize::from(b)] {
+                    continue;
+                }
+                out.push(b);
+                previous = Some(b);
+            }
+        }
+        TrOp::Tr | TrOp::TrSqueeze => {
+            let [from, to] = sets[..] else {
+                return None;
+            };
+            // An empty replacement deletes, as CRuby's `tr_trans` hands an
+            // empty one to `delete!`.
+            if to.is_empty() {
+                return byte_tr(TrOp::Delete, encoding, bytes, &specs[..1]);
+            }
+            let (from, negated) = tr_set(from, true, usize::MAX)?;
+            let (to, _) = tr_set(to, false, if negated { usize::MAX } else { from.len() })?;
+            // Nothing to replace with is a source that is empty.
+            let Some(&last) = to.last() else {
+                return Some(TrOut::Bytes(bytes.to_vec()));
+            };
+            let mut map: [Option<u8>; 256] = [None; 256];
+            if negated {
+                map = [Some(last); 256];
+                for byte in from {
+                    map[usize::from(byte)] = None;
+                }
+            } else {
+                // A byte listed twice maps as its last listing says.
+                for (k, byte) in from.into_iter().enumerate() {
+                    map[usize::from(byte)] = Some(to.get(k).copied().unwrap_or(last));
+                }
+            }
+            let squeeze = op == TrOp::TrSqueeze;
+            let mut previous = None;
+            for &b in bytes {
+                match map[usize::from(b)] {
+                    None => {
+                        out.push(b);
+                        previous = None;
+                    }
+                    Some(mapped) => {
+                        if squeeze && previous == Some(mapped) {
+                            continue;
+                        }
+                        out.push(mapped);
+                        previous = Some(mapped);
+                    }
+                }
+            }
+        }
+    }
+    Some(TrOut::Bytes(out))
+}
+
 /// Case mapping (#19): kind 0 upcase, 1 downcase, 2 swapcase, 3 capitalize,
 /// 4 fold. Full Unicode mapping for UTF-8 — Rust's, which is Unicode's,
 /// `"ß".upcase` is `"SS"` — and ASCII letters only for `ascii_only`, for
@@ -1340,5 +1507,76 @@ mod tests {
             assert_eq!(char_offsets(dummy, b"a\x80\xff"), Some(vec![0, 1, 2, 3]));
             assert_eq!(valid(dummy, b"\xd8\x00\x80"), Some(true));
         }
+    }
+
+    fn tr(op: TrOp, bytes: &[u8], specs: &[&[u8]]) -> Option<TrOut> {
+        let specs: Vec<(u8, &[u8])> = specs.iter().map(|&spec| (BINARY, spec)).collect();
+        byte_tr(op, BINARY, bytes, &specs)
+    }
+
+    fn tr_bytes(op: TrOp, bytes: &[u8], specs: &[&[u8]]) -> Vec<u8> {
+        match tr(op, bytes, specs) {
+            Some(TrOut::Bytes(out)) => out,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// Ruby 4.0.9's answers: ranges, `^`, `\`, a trailing `-`, a byte
+    /// listed twice, and a replacement read only as far as it is needed.
+    #[test]
+    fn byte_tr_walks_sets_as_trnext_does() {
+        assert_eq!(tr_bytes(TrOp::Tr, b"hello", &[b"a-y", b"b-z"]), b"ifmmp");
+        assert_eq!(
+            tr_bytes(TrOp::TrSqueeze, b"hello", &[b"el", b"ip"]),
+            b"hipo"
+        );
+        assert_eq!(tr_bytes(TrOp::Tr, b"hello", &[b"^l", b"*"]), b"**ll*");
+        assert_eq!(tr_bytes(TrOp::Tr, b"abc", &[b"aa", b"xy"]), b"ybc");
+        assert_eq!(tr_bytes(TrOp::Tr, b"abc\\", &[b"\\a-c", b"X"]), b"XXX\\");
+        assert_eq!(tr_bytes(TrOp::Tr, b"a-b\\", &[b"a\\-c", b"XYZ"]), b"XYb\\");
+        assert_eq!(tr_bytes(TrOp::Tr, b"abc-", &[b"a-", b"X"]), b"XbcX");
+        assert_eq!(tr_bytes(TrOp::Tr, b"abc^", &[b"^^", b"X"]), b"XXX^");
+        assert_eq!(tr_bytes(TrOp::Tr, b"a", &[b"a", b"^b"]), b"^");
+        assert_eq!(tr_bytes(TrOp::Tr, b"x", &[b"a", b"bz-x"]), b"x");
+        assert_eq!(tr_bytes(TrOp::Tr, b"hello", &[b"el", b""]), b"ho");
+        assert_eq!(
+            tr_bytes(TrOp::Tr, b"\x80\x90\xff", &[b"\x80-\xff", b"a"]),
+            b"aaa"
+        );
+        assert_eq!(
+            tr(TrOp::Count, b"aaabbb", &[b"a-z", b"^b"]),
+            Some(TrOut::Count(3))
+        );
+        assert_eq!(tr_bytes(TrOp::Delete, b"hello", &[b"l", b"lo"]), b"heo");
+        assert_eq!(tr_bytes(TrOp::Squeeze, b"aaabbbccc", &[b"a-b"]), b"abccc");
+        assert_eq!(tr_bytes(TrOp::Squeeze, b"aaabbbccc", &[]), b"abc");
+        // A descending range is the Ruby side's to raise.
+        assert_eq!(tr(TrOp::Tr, b"abc", &[b"c-a", b"X"]), None);
+        assert_eq!(tr(TrOp::Count, b"abc", &[b"a", b"z-x"]), None);
+    }
+
+    /// Only a receiver and sets of one-byte characters, whose answer is in
+    /// the receiver's encoding, take the byte table.
+    #[test]
+    fn byte_tr_refuses_wider_characters() {
+        let a: &[u8] = b"a";
+        let e_acute: &[u8] = "\u{e9}".as_bytes();
+        assert_eq!(byte_tr(TrOp::Count, UTF_8, e_acute, &[(UTF_8, a)]), None);
+        assert_eq!(
+            byte_tr(TrOp::Count, UTF_8, b"abc", &[(UTF_8, e_acute)]),
+            None
+        );
+        assert_eq!(
+            byte_tr(TrOp::Count, UTF_8, b"abc", &[(BINARY, b"\xe9")]),
+            None
+        );
+        assert_eq!(
+            byte_tr(TrOp::Count, US_ASCII, b"\xe9", &[(US_ASCII, a)]),
+            None
+        );
+        assert_eq!(
+            byte_tr(TrOp::Count, BINARY, b"\xe9a", &[(UTF_8, a)]),
+            Some(TrOut::Count(1))
+        );
     }
 }

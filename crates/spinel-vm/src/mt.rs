@@ -85,6 +85,18 @@ impl<'a> Mt<'a> {
         y ^ (y >> 18)
     }
 
+    /// `size` bytes from `ceil(size / 4)` outputs, each least significant
+    /// byte first and the last cut short: CRuby's `rand_mt_get_bytes`, what
+    /// `Random#bytes` answers (#744).
+    pub fn bytes(&mut self, size: usize) -> Vec<u8> {
+        let mut out = Vec::with_capacity(size.next_multiple_of(4));
+        while out.len() < size {
+            out.extend_from_slice(&self.next_u32().to_le_bytes());
+        }
+        out.truncate(size);
+        out
+    }
+
     /// `genrand_res53`: a Float in [0, 1) from two outputs, or in [0, 1]
     /// when `inclusive` — their 64 bits scaled by 2**53 + 1, as CRuby's
     /// `int_pair_to_real_inclusive` does (#705).
@@ -200,6 +212,20 @@ mod tests {
         let mut mt = Mt::from_bytes(&mut state).unwrap();
         assert_eq!(mt.real(false), 0.3745401188473625);
         assert_eq!(mt.real(true) + 1.0, 1.950714311605188);
+    }
+
+    /// Ruby 4.0.9: `r = Random.new(42); [r.bytes(7).bytes, r.rand(100)]` —
+    /// a word a four bytes, the last cut short and its rest not drawn again.
+    #[test]
+    fn bytes_are_the_words_least_significant_first() {
+        let mut state = Mt::seed(&[42], true);
+        let mut mt = Mt::from_bytes(&mut state).unwrap();
+        assert_eq!(mt.bytes(7), [102, 220, 225, 95, 179, 61, 234]);
+        assert_eq!(mt.bytes(0), []);
+        let mut state = Mt::seed(&[42], true);
+        let mut mt = Mt::from_bytes(&mut state).unwrap();
+        mt.bytes(3);
+        assert_eq!(mt.limited(99), 51);
     }
 
     /// A seed splits as `Random.__state_for__` splits it: one word, a top

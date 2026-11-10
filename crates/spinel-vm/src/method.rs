@@ -630,6 +630,11 @@ pub enum Native {
     /// `Kernel#__mt_next__(state, count)`: the next `count` 32-bit outputs as
     /// an Array of Integers, the state String updated in place.
     MtNext,
+    /// `Kernel#__mt_bytes__(state, size)`: `size` random bytes as a BINARY
+    /// String, each 32-bit output written least significant byte first and
+    /// the last one cut short, as CRuby's `rb_random_bytes` writes them
+    /// (#744).
+    MtBytes,
     /// `Kernel#__mt_real__(state, inclusive)`: a Float in [0, 1) from the
     /// next two outputs, or in [0, 1] when `inclusive` — `Random#rand`'s
     /// draw, without an Array of the outputs in between (#705).
@@ -984,6 +989,12 @@ pub enum StrOp {
     CutShort,
     /// `(string)` → the encoding index the two would combine in, or nil.
     Compatible,
+    /// `(op, specs)` → `count` (op 0), `delete` (1), `squeeze` (2), `tr` (3)
+    /// or `tr_s` (4) over the Strings `specs`, in one pass through a byte
+    /// table — an Integer for `count`, a new String for the rest — or nil
+    /// when a character is wider than a byte, and the Ruby side walks the
+    /// characters instead (#744). `strings::byte_tr` says when.
+    ByteTr,
     /// `(char)` → the byte offset that character starts at, the bytesize
     /// for the length, or nil past it.
     CharByte,

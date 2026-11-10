@@ -1798,36 +1798,39 @@ end
 class String
   # --- character sets: tr, delete, squeeze, count ---------------------------
 
-  # A `tr`-style set as a list of characters and whether it is negated:
-  # ranges `a-z`, a leading `^` (when there is more after it), and `\` escaping
-  # the next character. A descending range is CRuby's ArgumentError.
-  def self.__char_set__(spec)
+  # A `tr`-style set as a list of characters, whether it is negated, and the
+  # message of a descending range in it, CRuby's ArgumentError, or nil. It is
+  # walked as CRuby's `trnext` walks one: a leading `^` negates it when more
+  # follows (only where `negatable`; `tr`'s replacement is never negated), `\`
+  # makes the character after it literal, and `a-z` is a range unless the `-`
+  # is last. The walk stops at a descending range, and once it has `limit`
+  # characters, as CRuby reads `tr`'s replacement only as far as it needs.
+  def self.__char_set__(spec, negatable = true, limit = nil)
     spec = String.__coerce__(spec)
     raise ArgumentError, "invalid byte sequence in #{spec.encoding}" unless spec.valid_encoding?
     chars = spec.chars
-    negated = chars.size > 1 && chars[0] == "^"
-    chars = chars.drop(1) if negated
+    negated = negatable && chars.size > 1 && chars[0] == "^"
     out = []
-    i = 0
-    while i < chars.size
+    i = negated ? 1 : 0
+    while i < chars.size && (limit.nil? || out.size < limit)
+      i += 1 if chars[i] == "\\" && i + 1 < chars.size
       c = chars[i]
-      if c == "\\" && i + 1 < chars.size
-        out.push(chars[i + 1])
+      i += 1
+      if i + 1 < chars.size && chars[i] == "-"
+        last = chars[i + 1]
         i += 2
-      elsif i + 2 < chars.size && chars[i + 1] == "-"
         first = c.ord
-        last = chars[i + 2].ord
-        if first > last
-          raise ArgumentError, "invalid range \"#{c}-#{chars[i + 2]}\" in string transliteration"
+        final = last.ord
+        if first > final
+          return [out, negated, "invalid range \"#{c}-#{last}\" in string transliteration"] if first < 0x80 && final < 0x80
+          return [out, negated, "invalid range in string transliteration"]
         end
-        (first..last).each { |code| out.push(code < 0x80 ? Integer.__byte_string__(code).__force_encoding__(1) : Integer.__utf8__(code)) }
-        i += 3
+        (first..final).each { |code| out.push(code < 0x80 ? Integer.__byte_string__(code).__force_encoding__(1) : Integer.__utf8__(code)) }
       else
         out.push(c)
-        i += 1
       end
     end
-    [out, negated]
+    [out, negated, nil]
   end
 
   # Whether `char` is in every one of `sets` — `delete("a-z", "^l")` is the
@@ -1846,9 +1849,16 @@ class String
   # `tr_setup_table`'s `rb_enc_check`: every set must be in an encoding the
   # receiver's is compatible with.
   def __set_for__(spec)
+    chars, negated, bad = __unchecked_set_for__(spec)
+    raise ArgumentError, bad if bad
+    [chars, negated]
+  end
+
+  # `__set_for__`, leaving a descending range for the caller to raise.
+  def __unchecked_set_for__(spec, negatable = true, limit = nil)
     spec = String.__coerce__(spec)
     __combined_encoding__(spec)
-    String.__char_set__(spec)
+    String.__char_set__(spec, negatable, limit)
   end
 
   # Each of these walks the receiver by character, which CRuby refuses to do
@@ -1857,7 +1867,13 @@ class String
     raise ArgumentError, "invalid byte sequence in #{encoding}" unless valid_encoding?
   end
 
+  # `count`, `delete`, `squeeze`, `tr` and `tr_s` first ask `__byte_tr__`,
+  # which answers in one pass through a byte table when the receiver and the
+  # sets, all Strings, have only one-byte characters; it answers nil
+  # otherwise, and the character walks below run (#744).
   def count(*specs)
+    fast = specs.empty? ? nil : __byte_tr__(0, specs)
+    return fast if fast
     sets = __sets__(specs)
     n = 0
     each_char { |c| n += 1 if String.__in_sets__(c, sets) }
@@ -1865,6 +1881,11 @@ class String
   end
 
   def delete(*specs)
+    # CRuby's `rb_str_delete_bang` answers an empty receiver before it looks
+    # at the arguments, even at how many there are.
+    return String.new(encoding: encoding) if empty?
+    fast = specs.empty? ? nil : __byte_tr__(1, specs)
+    return fast if fast
     sets = __sets__(specs)
     out = String.new(encoding: encoding)
     each_char { |c| out << c unless String.__in_sets__(c, sets) }
@@ -1876,6 +1897,8 @@ class String
   end
 
   def squeeze(*specs)
+    fast = __byte_tr__(2, specs)
+    return fast if fast
     sets = specs.empty? ? nil : __sets__(specs)
     __check_set_receiver__ if sets.nil?
     out = String.new(encoding: encoding)
@@ -1909,11 +1932,25 @@ class String
   end
 
   # The `to` list is padded with its last character; a negated `from` maps
-  # every character outside it to that last character. `squeeze` collapses a
-  # run that came from the same translation.
+  # every character outside it to that last character, and a character `from`
+  # lists twice maps as its last listing says. `squeeze` collapses a run that
+  # came from the same translation.
   def __translate__(from, to, squeeze)
-    from_chars, negated = __set_for__(from)
-    to_chars, = __set_for__(to)
+    fast = __byte_tr__(squeeze ? 4 : 3, [from, to])
+    return fast if fast
+    # CRuby's `tr_trans` converts both, then answers an empty receiver before
+    # it reads either set.
+    from = String.__coerce__(from)
+    to = String.__coerce__(to)
+    return String.new(encoding: encoding) if empty?
+    from_chars, negated, from_bad = __unchecked_set_for__(from)
+    # CRuby reads the replacement a character for each of the source's, or
+    # all of it after a negated source, so a range past that is never read,
+    # and a bad one before a bad source's is the one raised.
+    to_chars, _, to_bad = __unchecked_set_for__(to, false, negated ? nil : from_chars.size)
+    raise ArgumentError, from_bad if from_bad && negated
+    raise ArgumentError, to_bad if to_bad
+    raise ArgumentError, from_bad if from_bad
     __check_set_receiver__
     return dup if from_chars.empty?
     out = String.new(encoding: encoding)
@@ -1926,7 +1963,7 @@ class String
         next
       end
       next if to_chars.empty?
-      mapped = negated ? to_chars.last : (to_chars[from_chars.index(c)] || to_chars.last)
+      mapped = negated ? to_chars.last : (to_chars[from_chars.rindex(c)] || to_chars.last)
       next if squeeze && mapped == last_out
       out << mapped
       last_out = mapped
