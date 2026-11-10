@@ -1080,7 +1080,8 @@ class String
 
   # An invalid character where stripping stops is an error — ArgumentError on
   # the left and, measured, Encoding::CompatibilityError on the right.
-  def lstrip
+  def lstrip(*selectors)
+    return __strip_sets__(selectors, true, false) unless selectors.empty?
     start = 0
     start += 1 while start < bytesize && __strippable__(__getbyte__(start))
     if start < bytesize && !__byteslice__(start, __char_len_at__(start)).valid_encoding?
@@ -1095,7 +1096,8 @@ class String
     at.nil? ? 1 : offsets[at + 1] - byte
   end
 
-  def rstrip
+  def rstrip(*selectors)
+    return __strip_sets__(selectors, false, true) unless selectors.empty?
     stop = bytesize
     stop -= 1 while stop > 0 && __strippable__(__getbyte__(stop - 1))
     if stop > 0
@@ -1110,20 +1112,36 @@ class String
     __byteslice__(0, stop)
   end
 
-  def strip
+  def strip(*selectors)
+    return __strip_sets__(selectors, true, true) unless selectors.empty?
     rstrip.lstrip
   end
 
-  def lstrip!
-    __bang__(lstrip)
+  # Given selectors, the strip methods take off the characters in every one
+  # of them, as `delete` would — `"llo".strip("lo", "l")` is "o" — in place of
+  # whitespace and NUL.
+  def __strip_sets__(selectors, left, right)
+    sets = __sets__(selectors)
+    chars = self.chars
+    first = 0
+    last = chars.size
+    first += 1 while left && first < last && String.__in_sets__(chars[first], sets)
+    last -= 1 while right && last > first && String.__in_sets__(chars[last - 1], sets)
+    out = String.new(encoding: encoding)
+    chars[first...last].each { |c| out << c }
+    out
   end
 
-  def rstrip!
-    __bang__(rstrip)
+  def lstrip!(*selectors)
+    __bang__(lstrip(*selectors))
   end
 
-  def strip!
-    __bang__(strip)
+  def rstrip!(*selectors)
+    __bang__(rstrip(*selectors))
+  end
+
+  def strip!(*selectors)
+    __bang__(strip(*selectors))
   end
 
   # A bang method's ending: replace self and answer it, or nil when nothing
@@ -1811,7 +1829,23 @@ class String
 
   def __sets__(specs)
     raise ArgumentError, "wrong number of arguments (given 0, expected 1+)" if specs.empty?
-    specs.map { |spec| String.__char_set__(spec) }
+    sets = specs.map { |spec| __set_for__(spec) }
+    __check_set_receiver__
+    sets
+  end
+
+  # `tr_setup_table`'s `rb_enc_check`: every set must be in an encoding the
+  # receiver's is compatible with.
+  def __set_for__(spec)
+    spec = String.__coerce__(spec)
+    __combined_encoding__(spec)
+    String.__char_set__(spec)
+  end
+
+  # Each of these walks the receiver by character, which CRuby refuses to do
+  # over a broken byte sequence.
+  def __check_set_receiver__
+    raise ArgumentError, "invalid byte sequence in #{encoding}" unless valid_encoding?
   end
 
   def count(*specs)
@@ -1834,6 +1868,7 @@ class String
 
   def squeeze(*specs)
     sets = specs.empty? ? nil : __sets__(specs)
+    __check_set_receiver__ if sets.nil?
     out = String.new(encoding: encoding)
     previous = nil
     each_char do |c|
@@ -1868,8 +1903,9 @@ class String
   # every character outside it to that last character. `squeeze` collapses a
   # run that came from the same translation.
   def __translate__(from, to, squeeze)
-    from_chars, negated = String.__char_set__(from)
-    to_chars, = String.__char_set__(to)
+    from_chars, negated = __set_for__(from)
+    to_chars, = __set_for__(to)
+    __check_set_receiver__
     return dup if from_chars.empty?
     out = String.new(encoding: encoding)
     last_out = nil

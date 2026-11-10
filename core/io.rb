@@ -2508,7 +2508,12 @@ end
     # Measured: a zero length hands the buffer back as it was.
     return buffer || "" if length == 0
     chunk = __pread_bytes__(length, offset)
-    raise EOFError, "end of file reached" if chunk.empty?
+    if chunk.empty?
+      # `rb_io_pread` empties the caller's buffer before raising, though any
+      # other read error leaves it as it was.
+      buffer&.clear
+      raise EOFError, "end of file reached"
+    end
     return chunk if buffer.nil?
     # The caller's buffer keeps its encoding.
     encoding = buffer.encoding
