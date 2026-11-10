@@ -1,12 +1,20 @@
-//! A `String`'s representation (#19): three slots, `[buffer, bytesize,
-//! encoding]`.
+//! A `String`'s representation (#19): four slots, `[buffer, bytesize,
+//! encoding, offset]`.
 //!
 //! `buffer` is a separate, classless `Payload::Bytes` object whose length is
-//! the capacity; `bytesize` is how many of its bytes are live; `encoding` is
-//! an index into the table `core/encoding.rb` builds. The indirection is
-//! `Array`'s, for `Array`'s reason: a heap cell cannot grow, so a String whose
-//! bytes lived in its own cell could only grow by becoming a different object,
-//! and `s << "x"` must not change `s`'s identity.
+//! the capacity; the live bytes are the `bytesize` of them from `offset`;
+//! `encoding` is an index into the table `core/encoding.rb` builds. The
+//! indirection is `Array`'s, for `Array`'s reason: a heap cell cannot grow, so
+//! a String whose bytes lived in its own cell could only grow by becoming a
+//! different object, and `s << "x"` must not change `s`'s identity.
+//!
+//! A long slice shares its source's buffer rather than copying it (#619), as
+//! CRuby's `rb_str_subseq` does: [`init_slice`] points the new String at the
+//! same buffer, at an offset, and freezes the *buffer* — a cell Ruby never
+//! sees, so its frozen bit is free to mean that its bytes never change again.
+//! From then on every String on it, the source included, copies its own bytes
+//! out before its first write ([`splice`], [`live_mut`]). A buffer that is not
+//! frozen has one String, at offset 0.
 //!
 //! The VM knows an encoding only by index, and character boundaries for the
 //! three launch encodings, the arithmetic ones `transcode` reads, every
@@ -25,10 +33,17 @@ const BUFFER: usize = 0;
 const BYTESIZE: usize = 1;
 /// Slot of the encoding index.
 const ENCODING: usize = 2;
-/// Slots in the `String` object itself.
-pub const SLOTS: u32 = 3;
+/// Slot of where in the buffer the live bytes start: 0 but for a String
+/// sharing another's buffer.
+const OFFSET: usize = 3;
+/// Slots in the `String` object itself. Four take the same 64-byte cell three
+/// did: 16 bytes of header and 32 of slots, against 40.
+pub const SLOTS: u32 = 4;
 /// The smallest buffer a growing string allocates.
 const MIN_CAPACITY: usize = 16;
+/// The shortest slice that shares its source's buffer; a shorter one is a
+/// cell's worth of bytes to copy, cheaper than what sharing can cost later.
+const SHARE_MIN: usize = 64;
 
 /// `ASCII-8BIT`, also `BINARY`: every byte is a character.
 pub const BINARY: u8 = 0;
@@ -57,48 +72,113 @@ pub fn init<'h>(scope: &mut HandleScope<'h>, string: Handle<'h>, bytes: &[u8], e
     scope.set_slot(string, BUFFER, buffer);
     scope.set_slot(string, BYTESIZE, fixnum(bytes.len()));
     scope.set_slot(string, ENCODING, fixnum(usize::from(encoding)));
+    scope.set_slot(string, OFFSET, fixnum(0));
 }
 
-/// `len` of the live bytes from `start`, copied out.
-pub fn byte_range<'h>(
+/// Fill a freshly allocated `String` object (of `SLOTS` slots) with `len` of
+/// `source`'s live bytes from `start`, in `encoding`: `byteslice`, and every
+/// slice made from byte offsets (#619).
+///
+/// A long slice shares `source`'s buffer, so it costs one cell whatever its
+/// length; a short one is copied, once. Long is at least [`SHARE_MIN`] bytes
+/// *and* at least half the buffer, which bounds what sharing can cost by the
+/// copy it saved: the slice keeps alive at most twice its own bytes, and the
+/// copy a later write to the source makes, now that its buffer is shared, is
+/// at most that many too. A short slice of a long String — a line out of
+/// IO's buffer — is copied, so writes to the long one stay in place.
+///
+/// ponytail: the rule is by size; CRuby shares only a slice that ends where
+/// its source does (it keeps a NUL after the bytes), so a long slice from the
+/// middle of a much longer String copies here as there. A buffer stays shared
+/// once shared, with no count of its Strings to undo that when only one is
+/// left, which is CRuby's ceiling too; the upgrade is a count the collector
+/// keeps, or a sweep that unfreezes a buffer it finds one String on.
+pub fn init_slice<'h>(
     scope: &mut HandleScope<'h>,
     string: Handle<'h>,
+    source: Handle<'h>,
     start: usize,
     len: usize,
-) -> Vec<u8> {
-    let live = bytesize(scope, string);
+    encoding: u8,
+) {
+    let live = bytesize(scope, source);
     let start = start.min(live);
-    let end = start.saturating_add(len).min(live);
-    let buffer = scope.slot(string, BUFFER);
+    let len = len.min(live - start);
+    let from = offset(scope, source) + start;
+    let buffer = scope.slot(source, BUFFER);
     let buffer = scope.root(buffer);
-    scope.bytes(buffer)[start..end].to_vec()
+    let capacity = scope.len(buffer) as usize;
+    if len >= SHARE_MIN && len.saturating_mul(2) >= capacity {
+        scope.freeze(buffer);
+        let shared = scope.get(buffer);
+        scope.set_slot(string, BUFFER, shared);
+        scope.set_slot(string, OFFSET, fixnum(from));
+    } else {
+        let copy = scope.alloc(None, Payload::Bytes, len as u32);
+        scope.copy_bytes(buffer, from, copy, 0, len);
+        let copy = scope.get(copy);
+        scope.set_slot(string, BUFFER, copy);
+        scope.set_slot(string, OFFSET, fixnum(0));
+    }
+    scope.set_slot(string, BYTESIZE, fixnum(len));
+    scope.set_slot(string, ENCODING, fixnum(usize::from(encoding)));
 }
 
 /// The live bytes, borrowed where they lie: what a primitive that only reads
 /// part of a long String takes instead of `bytes`'s copy (#617).
 pub fn live<'s, 'h>(scope: &'s mut HandleScope<'h>, string: Handle<'h>) -> &'s [u8] {
     let len = bytesize(scope, string);
+    let at = offset(scope, string);
     let buffer = scope.slot(string, BUFFER);
     let buffer = scope.root(buffer);
-    &scope.bytes(buffer)[..len]
+    &scope.bytes(buffer)[at..at + len]
 }
 
 /// The live bytes, borrowed mutably where they lie: what a primitive that
 /// rewrites a fixed-length String in place takes instead of a copy and a
-/// `splice` back (#703).
+/// `splice` back (#703). A String on a shared buffer gets its own first.
 pub fn live_mut<'s, 'h>(scope: &'s mut HandleScope<'h>, string: Handle<'h>) -> &'s mut [u8] {
     let len = bytesize(scope, string);
-    let buffer = scope.slot(string, BUFFER);
-    let buffer = scope.root(buffer);
+    let buffer = own(scope, string);
     &mut scope.bytes_mut(buffer)[..len]
 }
 
 /// The live bytes, copied out.
 pub fn bytes<'h>(scope: &mut HandleScope<'h>, string: Handle<'h>) -> Vec<u8> {
     let len = bytesize(scope, string);
+    let at = offset(scope, string);
     let buffer = scope.slot(string, BUFFER);
     let buffer = scope.root(buffer);
-    scope.bytes(buffer)[..len].to_vec()
+    scope.bytes(buffer)[at..at + len].to_vec()
+}
+
+/// Where in its buffer `string`'s live bytes start.
+fn offset<'h>(scope: &mut HandleScope<'h>, string: Handle<'h>) -> usize {
+    scope
+        .slot(string, OFFSET)
+        .as_fixnum()
+        .and_then(|n| usize::try_from(n).ok())
+        .unwrap_or(0)
+}
+
+/// `string`'s buffer, made its own to write into: when it is shared, a copy
+/// of just `string`'s live bytes, at offset 0 (#619). `splice` asks the same
+/// question itself, since it copies and edits in one pass.
+fn own<'h>(scope: &mut HandleScope<'h>, string: Handle<'h>) -> Handle<'h> {
+    let buffer = scope.slot(string, BUFFER);
+    let buffer = scope.root(buffer);
+    if !scope.is_frozen(buffer) {
+        debug_assert_eq!(offset(scope, string), 0, "an unshared buffer is at 0");
+        return buffer;
+    }
+    let len = bytesize(scope, string);
+    let at = offset(scope, string);
+    let fresh = scope.alloc(None, Payload::Bytes, len as u32);
+    scope.copy_bytes(buffer, at, fresh, 0, len);
+    let value = scope.get(fresh);
+    scope.set_slot(string, BUFFER, value);
+    scope.set_slot(string, OFFSET, fixnum(0));
+    fresh
 }
 
 pub fn bytesize<'h>(scope: &mut HandleScope<'h>, string: Handle<'h>) -> usize {
@@ -122,9 +202,10 @@ pub fn set_encoding<'h>(scope: &mut HandleScope<'h>, string: Handle<'h>, encodin
 }
 
 /// Replace bytes `start..start + len` with `with`: every in-place change —
-/// `<<`, `replace`, `[]=`, `insert`, `slice!` — is a splice. The buffer is
-/// reused when it has room and replaced, doubling, when it does not; the
-/// `String` object itself never moves.
+/// `<<`, `replace`, `[]=`, `insert`, `slice!`, `setbyte` — is a splice. The
+/// buffer is reused when it has room and is the String's own, and replaced
+/// when it does not or is shared (#619): doubling to grow, the String's own
+/// length otherwise. The `String` object itself never moves.
 pub fn splice<'h>(
     scope: &mut HandleScope<'h>,
     string: Handle<'h>,
@@ -134,35 +215,46 @@ pub fn splice<'h>(
 ) {
     let old_len = bytesize(scope, string);
     let start = start.min(old_len);
-    let end = (start + len).min(old_len);
+    let end = start.saturating_add(len).min(old_len);
     let new_len = old_len - (end - start) + with.len();
     let buffer = scope.slot(string, BUFFER);
     let buffer = scope.root(buffer);
+    let shared = scope.is_frozen(buffer);
     let capacity = scope.len(buffer) as usize;
-    if new_len <= capacity {
+    if !shared && new_len <= capacity {
+        debug_assert_eq!(offset(scope, string), 0, "an unshared buffer is at 0");
         let live = scope.bytes_mut(buffer);
         live.copy_within(end..old_len, start + with.len());
         live[start..start + with.len()].copy_from_slice(with);
     } else {
-        let old = bytes(scope, string);
-        let mut joined = Vec::with_capacity(new_len);
-        joined.extend_from_slice(&old[..start]);
-        joined.extend_from_slice(with);
-        joined.extend_from_slice(&old[end..]);
-        let mut grown = capacity.max(MIN_CAPACITY);
+        // A shared buffer was sized for the String that first had it, so a
+        // copy for this one is sized from this one's length.
+        let mut grown = if shared {
+            old_len.min(new_len)
+        } else {
+            capacity
+        }
+        .max(MIN_CAPACITY);
         while grown < new_len {
             grown *= 2;
         }
+        let at = offset(scope, string);
         let fresh = scope.alloc(None, Payload::Bytes, grown as u32);
-        scope.bytes_mut(fresh)[..new_len].copy_from_slice(&joined);
+        scope.copy_bytes(buffer, at, fresh, 0, start);
+        scope.bytes_mut(fresh)[start..start + with.len()].copy_from_slice(with);
+        scope.copy_bytes(buffer, at + end, fresh, start + with.len(), old_len - end);
         let fresh = scope.get(fresh);
         scope.set_slot(string, BUFFER, fresh);
+        scope.set_slot(string, OFFSET, fixnum(0));
     }
     scope.set_slot(string, BYTESIZE, fixnum(new_len));
 }
 
 /// A deep copy's buffer: `dup` must not share bytes, or `s.dup << "x"` would
 /// change `s`. Called on the copy after its slots were copied from the source.
+///
+/// ponytail: `dup` copies its bytes, where CRuby's shares a long String's
+/// buffer as [`init_slice`] does; the upgrade is the same freeze here.
 pub fn unshare<'h>(scope: &mut HandleScope<'h>, copy: Handle<'h>) {
     let live = bytes(scope, copy);
     let encoding = encoding(scope, copy);
@@ -941,6 +1033,139 @@ fn fixnum(n: usize) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::heap::Heap;
+
+    /// A String of `bytes`, classless: `strings.rs` never asks the class.
+    fn string<'h>(scope: &mut HandleScope<'h>, bytes: &[u8]) -> Handle<'h> {
+        let handle = scope.alloc(None, Payload::Slots, SLOTS);
+        init(scope, handle, bytes, BINARY);
+        handle
+    }
+
+    /// `len` of `source`'s bytes from `start`, as `byteslice` makes it.
+    fn slice<'h>(
+        scope: &mut HandleScope<'h>,
+        source: Handle<'h>,
+        start: usize,
+        len: usize,
+    ) -> Handle<'h> {
+        let handle = scope.alloc(None, Payload::Slots, SLOTS);
+        init_slice(scope, handle, source, start, len, BINARY);
+        handle
+    }
+
+    fn shares<'h>(scope: &mut HandleScope<'h>, a: Handle<'h>, b: Handle<'h>) -> bool {
+        scope.slot(a, BUFFER) == scope.slot(b, BUFFER)
+    }
+
+    /// The length of `string`'s buffer, which is its capacity.
+    fn capacity<'h>(scope: &mut HandleScope<'h>, string: Handle<'h>) -> u32 {
+        let buffer = scope.slot(string, BUFFER);
+        let buffer = scope.root(buffer);
+        scope.len(buffer)
+    }
+
+    fn text(n: usize) -> Vec<u8> {
+        (0..n).map(|i| b'a' + (i % 26) as u8).collect()
+    }
+
+    /// A long slice is the source's buffer at an offset, frozen; a short one,
+    /// or one well short of the buffer, is a copy (#619).
+    #[test]
+    fn a_long_slice_shares_the_buffer_and_a_short_one_copies_it() {
+        let mut heap = Heap::new();
+        let mut scope = heap.scope();
+        let all = text(200);
+        let source = string(&mut scope, &all);
+
+        let long = slice(&mut scope, source, 7, 150);
+        assert!(shares(&mut scope, source, long));
+        assert_eq!(live(&mut scope, long), &all[7..157]);
+        assert_eq!(bytes(&mut scope, long), &all[7..157]);
+        assert_eq!(bytesize(&mut scope, long), 150);
+        let buffer = scope.slot(source, BUFFER);
+        let buffer = scope.root(buffer);
+        assert!(scope.is_frozen(buffer));
+
+        let short = slice(&mut scope, source, 3, SHARE_MIN - 1);
+        assert!(!shares(&mut scope, source, short));
+        assert_eq!(live(&mut scope, short), &all[3..3 + SHARE_MIN - 1]);
+        let narrow = slice(&mut scope, source, 0, 99);
+        assert!(!shares(&mut scope, source, narrow));
+        assert_eq!(live(&mut scope, narrow), &all[..99]);
+
+        // A slice of a slice is the same buffer, at the two offsets added.
+        let inner = slice(&mut scope, long, 5, 120);
+        assert!(shares(&mut scope, source, inner));
+        assert_eq!(live(&mut scope, inner), &all[12..132]);
+        // Clamped to what is there, as the range was before.
+        let tail = slice(&mut scope, long, 100, 1000);
+        assert_eq!(live(&mut scope, tail), &all[107..157]);
+        let past = slice(&mut scope, long, 1000, 5);
+        assert_eq!(live(&mut scope, past), b"");
+    }
+
+    /// Once shared, a write to any String on the buffer copies that String's
+    /// bytes out first, and the others keep what they had.
+    #[test]
+    fn a_write_to_either_side_of_a_shared_buffer_copies_first() {
+        let mut heap = Heap::new();
+        let mut scope = heap.scope();
+        let all = text(128);
+        let source = string(&mut scope, &all);
+        let long = slice(&mut scope, source, 1, 127);
+        let other = slice(&mut scope, source, 0, 100);
+        assert!(shares(&mut scope, source, other));
+
+        splice(&mut scope, source, 128, 0, b"!");
+        assert!(!shares(&mut scope, source, long));
+        assert_eq!(live(&mut scope, source), [&all[..], b"!"].concat());
+        assert_eq!(live(&mut scope, long), &all[1..]);
+
+        splice(&mut scope, long, 0, 1, b"XY");
+        assert_eq!(live(&mut scope, long), [b"XY", &all[2..]].concat());
+        assert_eq!(live(&mut scope, other), &all[..100]);
+        assert_eq!(offset(&mut scope, long), 0);
+
+        live_mut(&mut scope, other)[0] = b'#';
+        assert_eq!(live(&mut scope, other), [b"#", &all[1..100]].concat());
+        assert_eq!(live(&mut scope, source), [&all[..], b"!"].concat());
+        assert_eq!(capacity(&mut scope, other), 100);
+
+        // Writes to a String's own buffer stay in place.
+        let own = scope.slot(long, BUFFER);
+        splice(&mut scope, long, 0, 2, b"");
+        assert_eq!(scope.slot(long, BUFFER), own);
+        assert_eq!(live(&mut scope, long), &all[2..]);
+
+        // A shrinking write to a shared String takes only what it keeps.
+        let wide = slice(&mut scope, other, 0, 100);
+        splice(&mut scope, wide, 0, 100, b"");
+        assert_eq!(live(&mut scope, wide), b"");
+        assert_eq!(capacity(&mut scope, wide), MIN_CAPACITY as u32);
+        assert_eq!(live(&mut scope, other), [b"#", &all[1..100]].concat());
+    }
+
+    /// The buffer is reached through the slice's slot like any other storage,
+    /// so it outlives the String it was made for.
+    #[test]
+    fn a_shared_buffer_outlives_its_source() {
+        let mut heap = Heap::new();
+        let mut scope = heap.scope();
+        let all = text(300);
+        let kept = scope.alloc(None, Payload::Slots, SLOTS);
+        {
+            let mut inner = scope.nested();
+            let source = string(&mut inner, &all);
+            init_slice(&mut inner, kept, source, 30, 270, UTF_8);
+        }
+        scope.collect();
+        assert_eq!(live(&mut scope, kept), &all[30..]);
+        assert_eq!(encoding(&mut scope, kept), UTF_8);
+        splice(&mut scope, kept, 0, 0, b">");
+        scope.collect();
+        assert_eq!(live(&mut scope, kept), [b">", &all[30..]].concat());
+    }
 
     #[test]
     fn invalid_utf8_is_one_character_per_byte() {

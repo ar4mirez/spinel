@@ -949,8 +949,7 @@ fn str_native(
     if op == StrOp::ByteSlice {
         let start = usize::try_from(index_arg(0)?).unwrap_or(0);
         let len = usize::try_from(index_arg(1)?).unwrap_or(0);
-        let taken = strings::byte_range(scope, receiver, start, len);
-        let value = string_bytes_in(scope, Builtin::String.id(), &taken, encoding);
+        let value = string_slice(scope, receiver, start, len);
         stack.push(value);
         return Ok(None);
     }
@@ -6270,7 +6269,7 @@ fn string_new(scope: &mut HandleScope<'_>, text: &str) -> Value {
 }
 
 /// A `String` of class `class` holding `bytes` in `encoding` — the one place a
-/// string is made. See `strings.rs` for the three slots.
+/// string is made. See `strings.rs` for the four slots.
 fn string_alloc<'h>(
     scope: &mut HandleScope<'h>,
     class: Handle<'h>,
@@ -9809,6 +9808,22 @@ fn string_bytes_in(scope: &mut HandleScope<'_>, id: ClassId, bytes: &[u8], encod
     string_alloc(scope, class, bytes, encoding)
 }
 
+/// A new `String` of `len` of `source`'s bytes from byte `start`, in its
+/// encoding: what `byteslice` and `[]` answer. A long one shares `source`'s
+/// buffer, so it costs what a short one does (#619) — `strings::init_slice`.
+fn string_slice<'h>(
+    scope: &mut HandleScope<'h>,
+    source: Handle<'h>,
+    start: usize,
+    len: usize,
+) -> Value {
+    let class = class_handle(scope, Builtin::String);
+    let encoding = crate::strings::encoding(scope, source);
+    let handle = scope.alloc(Some(class), Payload::Slots, crate::strings::SLOTS);
+    crate::strings::init_slice(scope, handle, source, start, len, encoding);
+    scope.get(handle)
+}
+
 /// `Object#dup`: a shallow copy of the cell, unfrozen.
 ///
 /// `Array` overrides this in `core/array.rb`, because copying an `Array`'s two
@@ -11894,19 +11909,23 @@ fn native_call<'h>(
         }
 
         Native::StringIndex => {
-            let Some(payload) = string_bytes(scope, call.receiver) else {
+            if !is_string(scope, call.receiver) {
                 return Err(Error::NoDispatch {
                     op: "String#[]",
                     operands: "a receiver that is not a String",
                 });
-            };
-            let encoding = string_encoding(scope, call.receiver).unwrap_or(crate::strings::UTF_8);
+            }
+            let receiver = scope.root(call.receiver);
+            let encoding = crate::strings::encoding(scope, receiver);
+            // Read where they lie, and the answer made by `string_slice`
+            // from byte offsets, so a long one shares the buffer (#619).
+            let payload = crate::strings::live(scope, receiver);
             // One byte per character needs no table: the index is the offset.
-            let single = crate::strings::single_byte(encoding, &payload);
+            let single = crate::strings::single_byte(encoding, payload);
             let offsets = if single {
                 Vec::new()
             } else {
-                let Some(offsets) = crate::strings::char_offsets(encoding, &payload) else {
+                let Some(offsets) = crate::strings::char_offsets(encoding, payload) else {
                     return Err(unknown_encoding("`[]`"));
                 };
                 offsets
@@ -11956,12 +11975,12 @@ fn native_call<'h>(
             }
             let start = start as usize;
             let end = (start + count as usize).min(length);
-            let slice = if single {
-                &payload[start..end]
+            let (from, to) = if single {
+                (start, end)
             } else {
-                &payload[offsets[start]..offsets[end]]
+                (offsets[start], offsets[end])
             };
-            let value = string_bytes_in(scope, Builtin::String.id(), slice, encoding);
+            let value = string_slice(scope, receiver, from, to - from);
             stack.push(value);
             Ok(None)
         }
@@ -12011,9 +12030,7 @@ fn native_call<'h>(
                 stack.push(Value::NIL);
                 return Ok(None);
             };
-            let encoding = crate::strings::encoding(scope, receiver);
-            let taken = crate::strings::byte_range(scope, receiver, start as usize, len as usize);
-            let value = string_bytes_in(scope, Builtin::String.id(), &taken, encoding);
+            let value = string_slice(scope, receiver, start as usize, len as usize);
             stack.push(value);
             Ok(None)
         }

@@ -73,6 +73,10 @@ const MARKED: u8 = 0b1;
 /// One of the two bits `docs/engine.md` reserves in the header. It lives on the
 /// object rather than in a side table because `frozen?` is asked on the hot
 /// path of every mutating method, and a side table would be a lookup there.
+///
+/// On a String's byte buffer, a classless cell Ruby never sees, it says the
+/// buffer is shared by more than one String and is never written again
+/// (`strings.rs`, #619).
 const FROZEN: u8 = 0b10;
 
 /// Set on an object whose instance variables live in the heap's side table
@@ -2173,6 +2177,54 @@ impl<'h> HandleScope<'h> {
         // SAFETY: as above, and `&mut self` makes this the only reference.
         unsafe { std::slice::from_raw_parts_mut(object.bytes(), header.len as usize) }
     }
+
+    /// Copy `len` bytes from `from` at `from_start` into `to` at `to_start`:
+    /// two byte objects, or one, the ranges overlapping or not. Cannot
+    /// collect. What `bytes` and `bytes_mut` cannot say together, since each
+    /// borrows the whole scope: a String's slice copied once, buffer to
+    /// buffer, rather than out into a `Vec` and back (#619).
+    ///
+    /// # Panics
+    ///
+    /// If either object holds slots, or either range is past its length.
+    pub fn copy_bytes(
+        &mut self,
+        from: Handle<'h>,
+        from_start: usize,
+        to: Handle<'h>,
+        to_start: usize,
+        len: usize,
+    ) {
+        let source = self.object(from);
+        let target = self.object(to);
+        for (object, start) in [(source, from_start), (target, to_start)] {
+            // SAFETY: the handle roots a live object of this heap.
+            let header = unsafe { &*object.header() };
+            assert_eq!(
+                header.payload,
+                Payload::Bytes,
+                "object holds slots, not bytes"
+            );
+            assert!(
+                start
+                    .checked_add(len)
+                    .is_some_and(|end| end <= header.len as usize),
+                "{start}..+{len} is past the object's {} bytes",
+                header.len
+            );
+        }
+        // SAFETY: both ranges were checked to lie within the `len` bytes
+        // allocated after their objects' headers, and `ptr::copy` allows them
+        // to overlap. No reference to either object's bytes is live: `&mut
+        // self` excludes one from `bytes`, and none is made here.
+        unsafe {
+            ptr::copy(
+                source.bytes().add(from_start),
+                target.bytes().add(to_start),
+                len,
+            )
+        }
+    }
 }
 
 impl Drop for HandleScope<'_> {
@@ -2503,6 +2555,36 @@ mod tests {
         assert_eq!(scope.bytes(bytes), &[0; 5]);
         scope.bytes_mut(bytes).copy_from_slice(b"hello");
         assert_eq!(scope.bytes(bytes), b"hello");
+    }
+
+    /// `copy_bytes` between two objects, and within one whichever way the
+    /// ranges overlap, as `copy_within` would (#619).
+    #[test]
+    fn copy_bytes_copies_between_objects_and_within_one() {
+        let mut heap = Heap::new();
+        let mut scope = heap.scope();
+        let from = scope.alloc(None, Payload::Bytes, 8);
+        scope.bytes_mut(from).copy_from_slice(b"abcdefgh");
+        let to = scope.alloc(None, Payload::Bytes, 6);
+        scope.copy_bytes(from, 2, to, 1, 4);
+        assert_eq!(scope.bytes(to), b"\0cdef\0");
+        scope.copy_bytes(from, 0, to, 0, 0);
+        assert_eq!(scope.bytes(to), b"\0cdef\0");
+
+        scope.copy_bytes(from, 0, from, 2, 5);
+        assert_eq!(scope.bytes(from), b"ababcdeh");
+        scope.copy_bytes(from, 3, from, 1, 5);
+        assert_eq!(scope.bytes(from), b"abcdeheh");
+    }
+
+    #[test]
+    #[should_panic(expected = "past the object's")]
+    fn copy_bytes_refuses_a_range_past_the_end() {
+        let mut heap = Heap::new();
+        let mut scope = heap.scope();
+        let from = scope.alloc(None, Payload::Bytes, 4);
+        let to = scope.alloc(None, Payload::Bytes, 4);
+        scope.copy_bytes(from, 1, to, 0, 4);
     }
 
     #[test]
