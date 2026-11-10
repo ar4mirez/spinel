@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use crate::bytecode::Iseq;
 use crate::class::{ClassId, Method};
+use crate::shape::ShapeId;
 
 /// What one call site last resolved, and what has to still be true to reuse it.
 ///
@@ -36,6 +37,28 @@ struct Entry {
     method: Method,
 }
 
+/// What one [`Insn::GetIvar`] site last read: the receiver's shape and where
+/// that shape keeps the site's name.
+///
+/// Needs no serial. A shape is a fixed path of names, so the index a shape
+/// gives a name never changes; and a site reads one name, fixed by the
+/// instruction. `shape` is [`ShapeId::NONE`] while the site has read nothing,
+/// which no object holding an instance variable wears.
+///
+/// [`Insn::GetIvar`]: crate::bytecode::Insn::GetIvar
+#[derive(Debug, Clone, Copy)]
+pub struct IvarEntry {
+    pub shape: ShapeId,
+    pub index: u16,
+}
+
+impl IvarEntry {
+    const EMPTY: IvarEntry = IvarEntry {
+        shape: ShapeId::NONE,
+        index: 0,
+    };
+}
+
 /// One heap's inline caches.
 ///
 /// Per heap because a [`Method`] names per-heap tables and a `ClassId` indexes
@@ -43,6 +66,11 @@ struct Entry {
 pub struct CallCaches {
     /// One slot per call site of every `Iseq` this heap has entered, in runs.
     entries: Vec<Option<Entry>>,
+    /// The instance-variable sites' caches, indexed as `entries` is: an
+    /// `Iseq`'s run there is its call sites and then its
+    /// [`Iseq::ivar_sites`], so each table has a slot the other never reads.
+    /// Four bytes a call site is cheaper than a second base per frame.
+    ivars: Vec<IvarEntry>,
     /// Where each `Iseq`'s run starts, by `Arc` address.
     ///
     /// An address is only a safe key because `iseqs` below holds a clone of the
@@ -73,6 +101,7 @@ impl Default for CallCaches {
     fn default() -> CallCaches {
         CallCaches {
             entries: Vec::new(),
+            ivars: Vec::new(),
             bases: HashMap::new(),
             iseqs: Vec::new(),
             recent: [(0, 0); RECENT],
@@ -109,8 +138,9 @@ impl CallCaches {
             return base;
         }
         let base = u32::try_from(self.entries.len()).expect("a heap under 2^32 call sites");
-        self.entries
-            .resize(self.entries.len() + iseq.call_sites.len(), None);
+        let run = iseq.call_sites.len() + iseq.ivar_sites as usize;
+        self.entries.resize(self.entries.len() + run, None);
+        self.ivars.resize(self.entries.len(), IvarEntry::EMPTY);
         self.bases.insert(key, base);
         self.iseqs.push(Arc::clone(iseq));
         self.recent[recent] = (key, base);
@@ -147,6 +177,34 @@ impl CallCaches {
             serial,
             method,
         });
+    }
+
+    /// What the instance-variable site at `slot` last read.
+    ///
+    /// # Panics
+    ///
+    /// As [`CallCaches::get`].
+    #[must_use]
+    pub fn ivar(&self, slot: u32) -> IvarEntry {
+        self.ivars[slot as usize]
+    }
+
+    /// Every instance-variable cache, for a reader that will index it with
+    /// slots from [`CallCaches::base`] while nothing fills one.
+    #[must_use]
+    pub fn ivars(&self) -> &[IvarEntry] {
+        &self.ivars
+    }
+
+    /// Remember that the site at `slot` found its name at `index` of an
+    /// object wearing `shape`. Monomorphic, as [`CallCaches::fill`] is.
+    ///
+    /// # Panics
+    ///
+    /// As [`CallCaches::get`].
+    pub fn fill_ivar(&mut self, slot: u32, shape: ShapeId, index: u16) {
+        debug_assert!(shape != ShapeId::NONE, "a cached read of nothing");
+        self.ivars[slot as usize] = IvarEntry { shape, index };
     }
 
     /// How many call sites are currently memoised. For tests, the way
@@ -217,6 +275,28 @@ mod tests {
         assert_eq!(caches.base(&second), 3);
         assert_eq!(caches.base(&first), 0, "the same `Iseq` keeps its run");
         assert_eq!(caches.len(), 5);
+    }
+
+    /// A body's run holds its instance-variable sites after its call sites,
+    /// so the next body's run starts past both, and an ivar slot reads back
+    /// what was filled into it and nothing before.
+    #[test]
+    fn an_iseqs_run_holds_its_ivar_sites_after_its_call_sites() {
+        let mut caches = CallCaches::new();
+        let first = Arc::new(Iseq {
+            ivar_sites: 3,
+            ..(*iseq_with(2)).clone()
+        });
+        let base = caches.base(&first);
+        assert_eq!(caches.base(&iseq_with(1)), base + 5);
+
+        let slot = base + 2 + 1;
+        assert_eq!(caches.ivar(slot).shape, ShapeId::NONE, "nothing read yet");
+        caches.fill_ivar(slot, ShapeId(7), 4);
+        let entry = caches.ivar(slot);
+        assert_eq!((entry.shape, entry.index), (ShapeId(7), 4));
+        assert_eq!(caches.ivar(slot - 1).shape, ShapeId::NONE);
+        assert_eq!(caches.filled(), 0, "an ivar slot is not a call site");
     }
 
     /// The invariant that makes an address a legal key: the table holds a clone,

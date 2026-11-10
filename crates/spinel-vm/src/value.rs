@@ -264,6 +264,49 @@ impl Value {
         self.bits()
     }
 
+    /// `self + other` when both are fixnums and so is the sum, computed on
+    /// the tagged words: `2a+1 + 2b+1 - 1` is `2(a+b)+1`, and it overflows an
+    /// `i64` exactly when `a+b` is past the fixnum range. `None` otherwise.
+    #[inline]
+    pub const fn fixnum_add(self, other: Value) -> Option<Value> {
+        let (a, b) = (self.bits() as i64, other.bits() as i64);
+        if (a & b) as u64 & FIXNUM_MASK != FIXNUM_TAG {
+            return None;
+        }
+        // `b` is odd, so `b - 1` cannot overflow, and the sum is odd.
+        match a.checked_add(b - 1) {
+            // The tag is already set; or-ing it in says so to the compiler,
+            // which then knows the word is not zero.
+            Some(sum) => Some(Value::from_bits(sum as u64 | FIXNUM_TAG)),
+            None => None,
+        }
+    }
+
+    /// `self - other`, as [`Value::fixnum_add`] is `+`: `2a+1 - 2b` is
+    /// `2(a-b)+1`.
+    #[inline]
+    pub const fn fixnum_sub(self, other: Value) -> Option<Value> {
+        let (a, b) = (self.bits() as i64, other.bits() as i64);
+        if (a & b) as u64 & FIXNUM_MASK != FIXNUM_TAG {
+            return None;
+        }
+        match a.checked_sub(b - 1) {
+            Some(difference) => Some(Value::from_bits(difference as u64 | FIXNUM_TAG)),
+            None => None,
+        }
+    }
+
+    /// Two fixnums' tagged words, which order as the numbers do, since
+    /// `2a+1 < 2b+1` exactly when `a < b`; `None` unless both are fixnums.
+    #[inline]
+    pub const fn fixnum_order(self, other: Value) -> Option<(i64, i64)> {
+        let (a, b) = (self.bits() as i64, other.bits() as i64);
+        if (a & b) as u64 & FIXNUM_MASK != FIXNUM_TAG {
+            return None;
+        }
+        Some((a, b))
+    }
+
     #[inline]
     const fn from_bits(bits: u64) -> Value {
         match NonZeroU64::new(bits) {
@@ -327,6 +370,36 @@ mod tests {
         for n in [0, 1, -1, 2, -2, 42, -42, i32::MAX as i64, i32::MIN as i64] {
             assert_eq!(Value::fixnum(n).unwrap().as_fixnum(), Some(n), "{n}");
         }
+    }
+
+    #[test]
+    fn tagged_fixnum_arithmetic_agrees_with_the_numbers() {
+        let edges = [
+            0,
+            1,
+            -1,
+            7,
+            -7,
+            Value::FIXNUM_MAX,
+            Value::FIXNUM_MAX - 1,
+            Value::FIXNUM_MIN,
+            Value::FIXNUM_MIN + 1,
+        ];
+        for a in edges {
+            for b in edges {
+                let (x, y) = (Value::fixnum(a).unwrap(), Value::fixnum(b).unwrap());
+                let sum = a.checked_add(b).and_then(Value::fixnum);
+                let difference = a.checked_sub(b).and_then(Value::fixnum);
+                assert_eq!(x.fixnum_add(y), sum, "{a} + {b}");
+                assert_eq!(x.fixnum_sub(y), difference, "{a} - {b}");
+                let (p, q) = x.fixnum_order(y).unwrap();
+                assert_eq!(p.cmp(&q), a.cmp(&b), "{a} <=> {b}");
+            }
+        }
+        let one = Value::fixnum(1).unwrap();
+        assert_eq!(one.fixnum_add(Value::NIL), None);
+        assert_eq!(Value::NIL.fixnum_sub(one), None);
+        assert_eq!(one.fixnum_order(Value::TRUE), None);
     }
 
     #[test]

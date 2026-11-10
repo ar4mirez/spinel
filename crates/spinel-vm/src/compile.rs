@@ -306,6 +306,9 @@ struct Compiler {
     class_defs: Vec<ClassDef>,
     /// How many `/o` sites this body has; each gets its own cache slot.
     once_regexps: u32,
+    /// How many `GetIvar` sites this body has, numbered from 0 until
+    /// [`Compiler::finish`] moves them past the call sites.
+    ivar_sites: u32,
     /// Protected ranges, appended as each `begin` finishes, so an inner one is
     /// already in the list when its outer one arrives. The unwinder takes the
     /// first entry covering the program counter, so that order *is* "innermost
@@ -483,6 +486,7 @@ impl Compiler {
             definitions: Vec::new(),
             class_defs: Vec::new(),
             once_regexps: 0,
+            ivar_sites: 0,
             catch_table: Vec::new(),
             retries: Vec::new(),
             open_ensures: 0,
@@ -625,6 +629,14 @@ impl Compiler {
                 .any(|child| !child.scope_barrier && child.uses_block);
         let symbol_encoding =
             Some(self.source_encoding()).filter(|&encoding| encoding != crate::strings::UTF_8);
+        // An ivar site's cache sits after the call sites in the heap's run for
+        // this body, whose length is only known now.
+        let calls = u32::try_from(self.call_sites.len()).expect("a body under 2^32 call sites");
+        for insn in &mut self.insns {
+            if let Insn::GetIvar(_, site) = insn {
+                *site += calls;
+            }
+        }
         Iseq {
             name: self.name,
             insns: self.insns,
@@ -640,6 +652,7 @@ impl Compiler {
             definitions: self.definitions,
             class_defs: self.class_defs,
             once_regexps: self.once_regexps,
+            ivar_sites: self.ivar_sites,
             catch_table: self.catch_table,
             scope_barrier: self.scope_barrier,
             path: self.source.as_ref().map(|source| Arc::from(&*source.path)),
@@ -682,7 +695,7 @@ impl Compiler {
             | Insn::PushSym(_)
             | Insn::LastMatch(_)
             | Insn::DefinedMatch(_)
-            | Insn::GetIvar(_)
+            | Insn::GetIvar(..)
             | Insn::DefinedIvar(_)
             | Insn::GetGlobal(_)
             | Insn::DefinedGlobal(_)
@@ -972,16 +985,29 @@ impl Compiler {
             if matches!(statement.kind, ExprKind::Defined(_)) {
                 continue;
             }
-            self.expr(statement)?;
-            self.emit(Insn::Pop);
+            self.discarded(statement)?;
         }
         if !keep && matches!(last.kind, ExprKind::Defined(_)) {
             return Ok(());
         }
-        self.expr(last)?;
-        if !keep {
-            self.emit(Insn::Pop);
+        if keep {
+            self.expr(last)
+        } else {
+            self.discarded(last)
         }
+    }
+
+    /// An expression whose value nothing reads: [`Compiler::expr`], then
+    /// `Pop`. An assignment is the exception, because its target already pops
+    /// the value: `a = v` as a statement is `v; SetLocal` rather than
+    /// `v; Dup; SetLocal; Pop`, which is how YARV compiles it too.
+    fn discarded(&mut self, expr: &Expr) -> Emit {
+        if let ExprKind::Assign(assign) = &expr.kind {
+            self.at(expr.span.start);
+            return self.assign(assign, expr.span, false);
+        }
+        self.expr(expr)?;
+        self.emit(Insn::Pop);
         Ok(())
     }
 
@@ -1248,7 +1274,7 @@ impl Compiler {
                 self.emit(Insn::PushNil);
             }
             ExprKind::ShareableConstant(node) => self.expr(&shareable_write(node))?,
-            ExprKind::Assign(assign) => self.assign(assign, span)?,
+            ExprKind::Assign(assign) => self.assign(assign, span, true)?,
             ExprKind::If(node) => self.if_expr(node)?,
             ExprKind::While(node) => self.while_expr(node)?,
             ExprKind::For(node) => self.for_expr(node, span)?,
@@ -1614,7 +1640,7 @@ impl Compiler {
             }
             VarRef::Instance(name) => {
                 let symbol = self.symbol(name);
-                self.emit(Insn::GetIvar(symbol));
+                self.emit_get_ivar(symbol);
                 Ok(())
             }
             VarRef::Class(name) => {
@@ -2028,7 +2054,27 @@ impl Compiler {
         Ok(())
     }
 
-    fn assign(&mut self, assign: &Assign, span: Span) -> Emit {
+    /// `keep` is whether the assignment's value is left on the stack. Where it
+    /// is not, a plain or compound write to a local or an instance variable
+    /// pops straight into its target, and anything else pops afterwards.
+    fn assign(&mut self, assign: &Assign, span: Span, keep: bool) -> Emit {
+        let into_target = !keep
+            && matches!(assign.op, AssignOp::Assign | AssignOp::Binary(_))
+            && matches!(
+                assign.target.kind,
+                TargetKind::Var(VarRef::Local { .. } | VarRef::Instance(_))
+            );
+        self.assign_value(assign, span, !into_target)?;
+        if !keep && !into_target {
+            self.emit(Insn::Pop);
+        }
+        Ok(())
+    }
+
+    /// [`Compiler::assign`], leaving the value behind unless `dup` is false,
+    /// which only a plain or compound write to a local or an instance variable
+    /// is ever given.
+    fn assign_value(&mut self, assign: &Assign, span: Span, dup: bool) -> Emit {
         if let Some((name, how)) = self.const_target(&assign.target)? {
             if assign.op == AssignOp::Assign {
                 self.expr(&assign.value)?;
@@ -2050,7 +2096,9 @@ impl Compiler {
         match &assign.op {
             AssignOp::Assign => {
                 self.expr(&assign.value)?;
-                self.emit(Insn::Dup);
+                if dup {
+                    self.emit(Insn::Dup);
+                }
                 self.emit_set(&slot);
             }
             // `a |= v`, `a <<= v` and the rest are `a = a.op(v)`: a send like
@@ -2062,7 +2110,9 @@ impl Compiler {
                     Some(op) => self.emit(Insn::BinOp(op)),
                     None => self.emit_send(op, 1),
                 };
-                self.emit(Insn::Dup);
+                if dup {
+                    self.emit(Insn::Dup);
+                }
                 self.emit_set(&slot);
             }
             // `a ||= v` reads `a`, and assigns only when it is falsy. The read
@@ -2502,7 +2552,7 @@ impl Compiler {
     fn emit_get(&mut self, slot: &Slot) {
         match slot {
             Slot::Local(slot, depth) => self.emit(Insn::GetLocal(*slot, *depth)),
-            Slot::Ivar(symbol) => self.emit(Insn::GetIvar(*symbol)),
+            Slot::Ivar(symbol) => self.emit_get_ivar(*symbol),
             Slot::Global(symbol) => self.emit(Insn::GetGlobal(*symbol)),
             Slot::Cvar(symbol) => self.emit(Insn::GetCvar(*symbol)),
             Slot::LastMatch => self.emit(Insn::LastMatch(MatchRef::Data)),
@@ -2525,6 +2575,14 @@ impl Compiler {
                 self.emit_send_splatting(&get, argc, splats);
             }
         }
+    }
+
+    /// Read an instance variable of `self` through a site of its own, which
+    /// is what gives each read an inline cache.
+    fn emit_get_ivar(&mut self, symbol: u32) {
+        let site = self.ivar_sites;
+        self.ivar_sites += 1;
+        self.emit(Insn::GetIvar(symbol, site));
     }
 
     /// Pop into the target. Callers emit `Dup` first where the value is wanted,

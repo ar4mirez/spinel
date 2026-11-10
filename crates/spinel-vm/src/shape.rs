@@ -116,11 +116,14 @@ impl Shapes {
     /// holds one by that name.
     ///
     /// A walk rather than a per-shape map: the chain is as long as the object
-    /// has instance variables, which is a handful.
+    /// has instance variables, which is a handful, and a `GetIvar` site's
+    /// inline cache answers a read without it once the site has seen the
+    /// receiver's shape (#747).
     //
-    // ponytail: linear in the ivar count, on every read. `docs/engine.md`'s
-    // call-site cache keyed by shape id is the upgrade, and the benchmark that
-    // would justify writing it arrives with the JIT.
+    // ponytail: linear in the ivar count, on a cache miss and on every other
+    // reader — `instance_variable_get`, `defined?(@a)`, a write. A per-shape
+    // map is the upgrade if an object with many ivars read through those
+    // shows up in a profile.
     pub fn index_of(&self, shape: ShapeId, name: SymbolId) -> Option<u16> {
         let mut at = shape;
         while at != ShapeId::ROOT && at != ShapeId::NONE {
