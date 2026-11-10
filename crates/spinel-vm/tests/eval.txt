@@ -2776,3 +2776,4 @@ def m; r = 0; 1.times { i = 0; while i < 10; r += i; i += 1; end }; r; end; m  #
 def m; a = "x"; b = nil; i = 0; while i < 3; b = a; i += 1; end; b; end; m  #=> "x"
 def m; i = 0; until i >= 7; i += 2; end; j = 10; j -= 3 while j > 0; [i, j, i == 8, i != 8, i <= 8, i > 8]; end; m  #=> [8, -2, true, false, true, false]
 def m; i = (1 << 62) - 3; n = 0; while i > 0 && n < 5; i += 1; n += 1; end; [i, n]; end; m  #=> [4611686018427387906, 5]
+def m; x = "x"; a = eval("[" + (0...20000).map { |i| "[#{i}, \"s#{i}\", x]" }.join(", ") + "]"); GC.start; [a.size, a[0], a[19999], a.all? { |r| r[2].equal?(x) }, a.sum { |r| r[0] }]; end; m  #=> [20000, [0, "s0", "x"], [19999, "s19999", "x"], true, 199990000]

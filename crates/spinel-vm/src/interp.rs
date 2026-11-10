@@ -2714,7 +2714,7 @@ fn run<'h>(
             // stack, which only an instruction that can collect has to see
             // done, nor the look at the frames. `run_light` runs them, and
             // stops at anything else, which comes back here unrun.
-            let mut operands = LightStack::<false>::new(&mut stack, 0, 0);
+            let mut operands = LightStack::<false>::new(&mut stack, 0);
             let ran = light_step(
                 scope,
                 &mut operands,
@@ -16945,7 +16945,7 @@ fn run_light(
     // How many may run before the budget reaches `limit`.
     let room = *budget - limit;
     let code = &frame.iseq.insns[..];
-    let mut stack = LightStack::<true>::new(stack, frame.iseq.max_stack, frame.base);
+    let mut stack = LightStack::<true>::new(stack, frame.iseq.max_stack);
     let mut at = *pc;
     let mut ran: u64 = 0;
     // Made and dropped within this run, which is what `IvarView::read` asks
@@ -16981,31 +16981,28 @@ fn run_light(
 /// every push and pop. Written back to the [`Stack`] by
 /// [`LightStack::finish`].
 ///
-/// So is the mark [`Stack::fresh`] reads, which is where `LIGHT` comes in.
-/// For one instruction run with the loop's rooting done (`LIGHT` false) it is
-/// kept exactly, as `Stack` keeps it. A run of light ones only needs it at
-/// the end, and a frame's operands are never popped below the frame's
-/// `base`; so it goes down to that when this is finished — everything a run
-/// pushed is above it — and nothing is kept along the way.
+/// So is the lowest length it reaches, which is what lowers the mark
+/// [`Stack::fresh`] reads: kept exactly, as `Stack` keeps it, so that what
+/// the loop roots next is what this pushed, and not the frame's operands
+/// below it again.
 struct LightStack<'s, const LIGHT: bool> {
     stack: &'s mut Stack,
     /// The `Vec`'s buffer, valid for `capacity` values: taken from it once,
     /// and again only after it grows.
     values: *mut Value,
     len: usize,
-    /// The mark, exactly when not `LIGHT`, and the frame's `base` when.
+    /// The lowest `len` has been since this was made.
     low: usize,
     capacity: usize,
 }
 
 impl<'s, const LIGHT: bool> LightStack<'s, LIGHT> {
     /// Room for `room` more values is made at once, so that a run of pushes
-    /// as deep as a body's operands go does not reach the slow path. `base`
-    /// is the frame's, which only a `LIGHT` one reads.
-    fn new(stack: &'s mut Stack, room: usize, base: usize) -> LightStack<'s, LIGHT> {
+    /// as deep as a body's operands go does not reach the slow path.
+    fn new(stack: &'s mut Stack, room: usize) -> LightStack<'s, LIGHT> {
         stack.values.reserve(room);
         let len = stack.values.len();
-        let low = if LIGHT { base } else { stack.low };
+        let low = len;
         let capacity = stack.values.capacity();
         let values = stack.values.as_mut_ptr();
         LightStack {
@@ -17038,9 +17035,7 @@ impl<'s, const LIGHT: bool> LightStack<'s, LIGHT> {
             return None;
         }
         self.len -= 1;
-        if !LIGHT {
-            self.low = self.low.min(self.len);
-        }
+        self.low = self.low.min(self.len);
         // SAFETY: below the old `len`, so written.
         Some(unsafe { self.values.add(self.len).read() })
     }
@@ -17076,9 +17071,7 @@ impl<'s, const LIGHT: bool> LightStack<'s, LIGHT> {
     fn truncate(&mut self, len: usize) {
         if len < self.len {
             self.len = len;
-            if !LIGHT {
-                self.low = self.low.min(len);
-            }
+            self.low = self.low.min(len);
         }
     }
 }
@@ -17109,11 +17102,7 @@ impl<const LIGHT: bool> LightStack<'_, LIGHT> {
         // SAFETY: every value below `len` was written, by the `Vec` or by a
         // push here, and `len` is within the capacity the buffer has.
         unsafe { self.stack.values.set_len(self.len) }
-        self.stack.low = if LIGHT {
-            self.stack.low.min(self.low)
-        } else {
-            self.low
-        };
+        self.stack.low = self.stack.low.min(self.low);
     }
 }
 
