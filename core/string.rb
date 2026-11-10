@@ -197,6 +197,25 @@ class String
     self
   end
 
+  # The bytes summed, modulo 2**bits; no modulo when bits is not
+  # positive. `bits` goes through CRuby's `NUM2INT` (Floats truncate).
+  def sum(bits = 16)
+    bits = Array.__long__(bits)
+    if bits > 2147483647
+      raise RangeError, "integer #{bits} too big to convert to 'int'"
+    elsif bits < -2147483648
+      raise RangeError, "integer #{bits} too small to convert to 'int'"
+    end
+    total = 0
+    i = 0
+    n = bytesize
+    while i < n
+      total += __getbyte__(i)
+      i += 1
+    end
+    bits > 0 ? total & ((1 << bits) - 1) : total
+  end
+
   def getbyte(index)
     __getbyte__(Integer.__index__(index))
   end
