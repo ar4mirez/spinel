@@ -1475,6 +1475,27 @@ impl<'h> HandleScope<'h> {
         (id.index() < classes.len() && classes.object(id) == class).then_some(id)
     }
 
+    /// A heap object's payload kind and slot count, without a handle; `None`
+    /// for an immediate. Under [`HandleScope::remembered_class_of`]'s rule.
+    #[inline]
+    pub(crate) fn layout_of(&self, value: Value) -> Option<(Payload, u32)> {
+        let object = Obj(value.as_heap()?.cast());
+        // SAFETY: a live object of this heap, per the contract above.
+        let header = unsafe { &*object.header() };
+        Some((header.payload, header.len))
+    }
+
+    /// The class object a heap object's header names; `None` for an
+    /// immediate, or an object built before classes were. Under
+    /// [`HandleScope::remembered_class_of`]'s rule: `value` is a live object
+    /// of this heap, and the read cannot collect.
+    #[inline]
+    pub(crate) fn class_object_of(&self, value: Value) -> Option<Value> {
+        let object = Obj(value.as_heap()?.cast());
+        // SAFETY: a live object of this heap, per the contract above.
+        unsafe { (*object.header()).class }
+    }
+
     /// The class id remembered for the class object at `address`, if any.
     pub(crate) fn remembered_class_id(&self, address: usize) -> Option<u32> {
         let (at, id) = self.heap.class_ids[(address >> 4) % CLASS_IDS];
@@ -1487,6 +1508,20 @@ impl<'h> HandleScope<'h> {
 
     pub fn call_caches_mut(&mut self) -> &mut crate::callcache::CallCaches {
         self.heap.call_caches_mut()
+    }
+
+    /// The definition `body` names, when it is Ruby code, entered in the
+    /// call caches: its run's base and the [`Entered`] a frame holds it by.
+    /// One step, so that neither table's borrow needs an `Arc` clone to
+    /// outlast the other's.
+    ///
+    /// [`Entered`]: crate::callcache::Entered
+    pub(crate) fn enter_body(&mut self, body: Value) -> Option<(u32, crate::callcache::Entered)> {
+        let heap = &mut *self.heap;
+        match heap.definitions.get(body)? {
+            crate::method::Definition::Iseq(iseq) => Some(heap.call_caches.enter(iseq)),
+            _ => None,
+        }
     }
 
     pub fn definitions_mut(&mut self) -> &mut crate::method::Definitions {
@@ -1753,6 +1788,11 @@ impl<'h> HandleScope<'h> {
     /// Whether a collection was asked for, forgetting that it was.
     pub(crate) fn take_collection_request(&mut self) -> bool {
         std::mem::take(&mut self.heap.gc_requested)
+    }
+
+    /// Whether a collection has been asked for, without taking the request.
+    pub(crate) fn collection_requested(&self) -> bool {
+        self.heap.gc_requested
     }
 
     /// `GC.disable` with `true`, `GC.enable` with `false`; answers whether
@@ -2058,6 +2098,7 @@ impl<'h> HandleScope<'h> {
     /// # Panics
     ///
     /// As [`HandleScope::slot`], and if `object` is not a heap object.
+    #[inline]
     pub(crate) fn slot_of(&self, object: Value, index: usize) -> Value {
         let object = Obj(object.as_heap().expect("a heap object").cast());
         self.check_slot(object, index);
@@ -2230,6 +2271,7 @@ impl<'h> HandleScope<'h> {
         unsafe { ptr::write(object.slots().add(index), value) }
     }
 
+    #[inline]
     fn check_slot(&self, object: Obj, index: usize) {
         // SAFETY: the handle roots a live object of this heap.
         let header = unsafe { &*object.header() };

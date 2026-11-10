@@ -14,11 +14,13 @@
 //! [`Classes::lookup`]: crate::class::Classes::lookup
 
 use std::collections::HashMap;
+use std::ptr::NonNull;
 use std::sync::Arc;
 
 use crate::bytecode::Iseq;
 use crate::class::{ClassId, Method};
 use crate::shape::ShapeId;
+use crate::value::{SymbolId, Value};
 
 /// What one call site last resolved, and what has to still be true to reuse it.
 ///
@@ -59,6 +61,131 @@ impl IvarEntry {
     };
 }
 
+/// How a call from one site binds the method its entry holds, worked out the
+/// first time the entry answers a call and kept until the entry is refilled
+/// — CRuby's `vm_callee_setup_arg` deciding once per call site that a call
+/// can take its fast path, and its keyword half matching the site's keyword
+/// names to the callee's once rather than per call.
+///
+/// It needs no guard of its own. The entry's class and serial already
+/// pin which method answers, so the method's body is fixed while the entry
+/// is valid, and the site is fixed by its slot; [`CallCaches::fill`]
+/// forgets the plan along with the entry it replaces.
+#[derive(Debug, Clone, Default)]
+pub enum Plan {
+    /// Not worked out yet: the entry has not answered a call since it was
+    /// filled.
+    #[default]
+    Unknown,
+    /// The call takes the general path, every time this entry answers it.
+    General,
+    /// The call binds on the operand stack: see [`Direct`].
+    Direct(Arc<Direct>),
+    /// A `yield` site's: the block body it last yielded to, and whether a
+    /// yield from it binds on the stack. See [`Yielded`].
+    Yielded(Arc<Yielded>),
+}
+
+/// An `Iseq` this heap has entered, held by a frame without a count of its
+/// own: a pointer, where an `Arc` clone would cost every call and every
+/// return an atomic increment and decrement of a count shared across
+/// Ractors.
+///
+/// Only [`CallCaches::enter`] makes one, and that is what makes it sound:
+/// the heap's caches keep a clone of the `Arc` for as long as the heap lives
+/// (see `CallCaches::iseqs`), never letting one go, and an `Iseq` behind an
+/// `Arc` is never written. So the `Iseq` outlives every frame of the heap,
+/// all of which live in the heap's own loop and fibers, and a shared
+/// reference to it is valid whenever one is read. It is a frame's to hold,
+/// not to keep past its heap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Entered(NonNull<Iseq>);
+
+// SAFETY: it is a shared reference to an `Iseq`, which is `Sync` — `Arc<Iseq>`
+// already crosses threads — and nothing is written through it.
+unsafe impl Send for Entered {}
+// SAFETY: as for `Send`.
+unsafe impl Sync for Entered {}
+
+impl std::ops::Deref for Entered {
+    type Target = Iseq;
+
+    fn deref(&self) -> &Iseq {
+        // SAFETY: made by `CallCaches::enter` from an `Arc` the caches keep
+        // for the life of the heap, as the type's documentation says, and
+        // never written through.
+        unsafe { self.0.as_ref() }
+    }
+}
+
+impl Entered {
+    /// An owning clone, for something that may outlive the frame — a
+    /// `Binding`, a `Proc` — or holds one while frames change.
+    #[must_use]
+    pub fn to_arc(self) -> Arc<Iseq> {
+        let pointer = self.0.as_ptr().cast_const();
+        // SAFETY: the pointer came from `Arc::as_ptr` on an `Arc` the caches
+        // still hold, so the allocation is live and one strong count is
+        // already the caches'; adding one and taking it as an `Arc` is the
+        // clone that `Arc` would make.
+        unsafe {
+            Arc::increment_strong_count(pointer);
+            Arc::from_raw(pointer)
+        }
+    }
+}
+
+/// What a `yield` site worked out for the block body it last yielded to.
+///
+/// A yield site resolves no method, so its entry is never filled and nothing
+/// forgets this; what it knows follows from the body alone — a definition
+/// id, which names one `Iseq` for the life of the heap — and the site, so
+/// the body is its whole guard. A site that yields to another body works it
+/// out again.
+#[derive(Debug)]
+pub struct Yielded {
+    /// The `Proc`'s body, as its `PROC_BODY` slot holds it.
+    pub body: Value,
+    /// Whether a yield from this site to this body binds on the stack:
+    /// what `yield_simple` checks of the body's parameters.
+    pub fits: bool,
+    /// The body.
+    pub iseq: Entered,
+    /// [`CallCaches::base`] for it.
+    pub cache_base: u32,
+}
+
+/// A call whose arguments are bound where they already are, on the operand
+/// stack: positional arguments into the callee's first locals, each keyword
+/// into its parameter's slot, and the parameters the site leaves out to the
+/// undef marker the body's guarded defaults look for.
+#[derive(Debug)]
+pub struct Direct {
+    /// The callee's body.
+    pub iseq: Entered,
+    /// Where the callee's own run of entries starts: [`CallCaches::base`]
+    /// for `iseq`, asked once here rather than at every frame push.
+    pub cache_base: u32,
+    /// The name the site calls, which the frame is entered under.
+    pub name: SymbolId,
+    /// The receiver class the entry holds the method for.
+    pub class: ClassId,
+    /// `class`'s object, which a receiver whose header names it is an
+    /// instance of: the site's guard, short of the class id. `nil` when
+    /// that does not follow from the header, for `Class` (see `send_simple`).
+    pub class_object: Value,
+    /// For each keyword the site writes, in the site's order, the callee
+    /// local it binds.
+    pub keywords: Box<[u16]>,
+    /// Whether those locals are the ones right after the positionals, in
+    /// the site's order: every argument is then already where its local
+    /// goes, once the receiver below them is gone.
+    pub in_order: bool,
+    /// The optional parameters, positional or keyword, that a call from this
+    /// site does not supply.
+    pub undef: Box<[u16]>,
+}
+
 /// One heap's inline caches.
 ///
 /// Per heap because a [`Method`] names per-heap tables and a `ClassId` indexes
@@ -66,6 +193,8 @@ impl IvarEntry {
 pub struct CallCaches {
     /// One slot per call site of every `Iseq` this heap has entered, in runs.
     entries: Vec<Option<Entry>>,
+    /// How the call each entry answers binds, indexed as `entries` is.
+    plans: Vec<Plan>,
     /// The instance-variable sites' caches, indexed as `entries` is: an
     /// `Iseq`'s run there is its call sites and then its
     /// [`Iseq::ivar_sites`], so each table has a slot the other never reads.
@@ -101,6 +230,7 @@ impl Default for CallCaches {
     fn default() -> CallCaches {
         CallCaches {
             entries: Vec::new(),
+            plans: Vec::new(),
             ivars: Vec::new(),
             bases: HashMap::new(),
             iseqs: Vec::new(),
@@ -126,25 +256,41 @@ impl CallCaches {
     ///
     /// If one heap ever holds more call sites than a `u32` can index.
     pub fn base(&mut self, iseq: &Arc<Iseq>) -> u32 {
-        let key = Arc::as_ptr(iseq) as usize;
+        self.enter(iseq).0
+    }
+
+    /// [`CallCaches::base`], and the [`Entered`] a frame running `iseq`
+    /// holds it by.
+    ///
+    /// # Panics
+    ///
+    /// As [`CallCaches::base`].
+    pub fn enter(&mut self, iseq: &Arc<Iseq>) -> (u32, Entered) {
+        // From `Arc::as_ptr` rather than a reference to the `Iseq`: its
+        // provenance is the whole allocation, counts included, which
+        // `Entered::to_arc` steps back into.
+        let pointer = Arc::as_ptr(iseq);
+        let entered = Entered(NonNull::new(pointer.cast_mut()).expect("an `Arc` is never null"));
+        let key = pointer as usize;
         // An `Iseq` is far bigger than 64 bytes, so the bits above them tell
         // two apart.
         let recent = (key >> 6) % RECENT;
         if self.recent[recent].0 == key {
-            return self.recent[recent].1;
+            return (self.recent[recent].1, entered);
         }
         if let Some(&base) = self.bases.get(&key) {
             self.recent[recent] = (key, base);
-            return base;
+            return (base, entered);
         }
         let base = u32::try_from(self.entries.len()).expect("a heap under 2^32 call sites");
         let run = iseq.call_sites.len() + iseq.ivar_sites as usize;
         self.entries.resize(self.entries.len() + run, None);
+        self.plans.resize(self.entries.len(), Plan::Unknown);
         self.ivars.resize(self.entries.len(), IvarEntry::EMPTY);
         self.bases.insert(key, base);
         self.iseqs.push(Arc::clone(iseq));
         self.recent[recent] = (key, base);
-        base
+        (base, entered)
     }
 
     /// What `slot` resolved to, if it resolved to something for this exact
@@ -155,6 +301,7 @@ impl CallCaches {
     /// If `slot` is outside the run [`CallCaches::base`] allocated, which means
     /// a caller added an operand to a base from a different `Iseq`.
     #[must_use]
+    #[inline]
     pub fn get(&self, slot: u32, class: ClassId, serial: u64) -> Option<Method> {
         match self.entries[slot as usize] {
             Some(entry) if entry.class == class && entry.serial == serial => Some(entry.method),
@@ -177,6 +324,28 @@ impl CallCaches {
             serial,
             method,
         });
+        self.plans[slot as usize] = Plan::Unknown;
+    }
+
+    /// How a call from `slot` binds the method its entry holds, if that has
+    /// been worked out since the entry was filled.
+    ///
+    /// # Panics
+    ///
+    /// As [`CallCaches::get`].
+    #[must_use]
+    #[inline]
+    pub fn plan(&self, slot: u32) -> &Plan {
+        &self.plans[slot as usize]
+    }
+
+    /// Remember how a call from `slot` binds, until the entry is refilled.
+    ///
+    /// # Panics
+    ///
+    /// As [`CallCaches::get`].
+    pub fn set_plan(&mut self, slot: u32, plan: Plan) {
+        self.plans[slot as usize] = plan;
     }
 
     /// What the instance-variable site at `slot` last read.
@@ -317,6 +486,53 @@ mod tests {
         // The run is still addressable, and the address is still spoken for.
         assert_eq!(caches.len(), 2);
         assert_eq!(base, 0);
+    }
+
+    /// An `Entered` reads the `Iseq` it was made from after the caller's own
+    /// `Arc` is gone, since the table keeps one; and `to_arc` is a clone of
+    /// that `Arc`, counted as one.
+    #[test]
+    fn an_entered_iseq_outlives_the_arc_it_was_made_from() {
+        let mut caches = CallCaches::new();
+        let iseq = Arc::new(Iseq {
+            name: "entered".into(),
+            ..(*iseq_with(3)).clone()
+        });
+        let (base, entered) = caches.enter(&iseq);
+        assert_eq!(base, caches.base(&iseq), "enter answers base's run");
+        drop(iseq);
+        assert_eq!(&*entered.name, "entered");
+        assert_eq!(entered.call_sites.len(), 3);
+
+        let owned = entered.to_arc();
+        assert_eq!(Arc::strong_count(&owned), 2, "the table's and this one");
+        assert!(std::ptr::eq(&*owned, &*entered));
+        drop(owned);
+        assert_eq!(&*entered.name, "entered");
+    }
+
+    /// Refilling a site forgets the plan worked out for what it held: the
+    /// plan is for that method, and another may answer now.
+    #[test]
+    fn a_refill_forgets_the_plan() {
+        let mut heap = booted();
+        let mut scope = heap.scope();
+        let name = crate::shared::symbols::intern("inline_cache_plan");
+        let c = scope.define_class(Some("C"), Some(Builtin::Object.id()));
+        scope
+            .classes_mut()
+            .define_method(c, name, Value::fixnum(1).unwrap());
+        let method = scope.classes_mut().lookup(c, name).unwrap();
+        let serial = scope.classes().serial(c);
+
+        let mut caches = CallCaches::new();
+        let base = caches.base(&iseq_with(1));
+        assert!(matches!(caches.plan(base), Plan::Unknown));
+        caches.fill(base, c, serial, method);
+        caches.set_plan(base, Plan::General);
+        assert!(matches!(caches.plan(base), Plan::General));
+        caches.fill(base, c, serial + 1, method);
+        assert!(matches!(caches.plan(base), Plan::Unknown), "forgotten");
     }
 
     /// A hit: fill a slot, and read it back through a guard that agrees.

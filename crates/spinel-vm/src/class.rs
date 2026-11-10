@@ -2238,6 +2238,7 @@ impl Classes {
     /// Whether any refinement is active in `cref`. The question a send asks
     /// before it may use its inline cache, so it is one index and a compare.
     #[must_use]
+    #[inline]
     pub fn cref_refined(&self, cref: CrefId) -> bool {
         self.cref(cref).refinements.is_some()
     }
