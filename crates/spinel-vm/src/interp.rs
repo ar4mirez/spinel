@@ -1021,6 +1021,38 @@ fn str_native(
             stack.push(fixnum(count as i64));
             return Ok(None);
         }
+        StrOp::ByteTr => {
+            let op = match index_arg(0)? {
+                0 => strings::TrOp::Count,
+                1 => strings::TrOp::Delete,
+                2 => strings::TrOp::Squeeze,
+                3 => strings::TrOp::Tr,
+                _ => strings::TrOp::TrSqueeze,
+            };
+            let mut specs = Vec::new();
+            for spec in array_elements(scope, arg(1)).unwrap_or_default() {
+                // A set that is not yet a String is converted on the Ruby
+                // side, in CRuby's order, so the walk there takes it.
+                let (Some(bytes), Some(spec_encoding)) =
+                    (string_bytes(scope, spec), string_encoding(scope, spec))
+                else {
+                    stack.push(Value::NIL);
+                    return Ok(None);
+                };
+                specs.push((spec_encoding, bytes));
+            }
+            let specs: Vec<(u8, &[u8])> = specs.iter().map(|(e, b)| (*e, b.as_slice())).collect();
+            let bytes = strings::live(scope, receiver);
+            let value = match strings::byte_tr(op, encoding, bytes, &specs) {
+                None => Value::NIL,
+                Some(strings::TrOut::Count(n)) => fixnum(n as i64),
+                Some(strings::TrOut::Bytes(out)) => {
+                    string_bytes_in(scope, Builtin::String.id(), &out, encoding)
+                }
+            };
+            stack.push(value);
+            return Ok(None);
+        }
         StrOp::Compatible => {
             let other = arg(0);
             let (Some(other_bytes), Some(other_enc)) =
@@ -1198,6 +1230,7 @@ fn str_native(
         | StrOp::ByteRindex
         | StrOp::CharByte
         | StrOp::CharCount
+        | StrOp::ByteTr
         | StrOp::Compatible
         | StrOp::EncodingInstall
         | StrOp::FloatFormat
@@ -12336,6 +12369,20 @@ fn native_call<'h>(
             stack.push(value);
             Ok(None)
         }
+        Native::MtBytes => {
+            let size = int_arg(&call, 1).and_then(|n| usize::try_from(n).ok());
+            let Some(size) = size else {
+                return Err(Error::NoDispatch {
+                    op: "__mt_bytes__",
+                    operands: "a size that is not a non-negative Integer",
+                });
+            };
+            let bytes = mt_state(scope, &call, "__mt_bytes__")?.bytes(size);
+            let value =
+                string_bytes_in(scope, Builtin::String.id(), &bytes, crate::strings::BINARY);
+            stack.push(value);
+            Ok(None)
+        }
         Native::MtReal => {
             let inclusive = call.args.get(1).is_some_and(|v| v.is_truthy());
             let r = mt_state(scope, &call, "__mt_real__")?.real(inclusive);
@@ -16497,6 +16544,11 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             Native::Str(StrOp::Compatible),
         ),
         (
+            Builtin::String,
+            &["__byte_tr__"],
+            Native::Str(StrOp::ByteTr),
+        ),
+        (
             Builtin::Kernel,
             &["__encoding_install__"],
             Native::Str(StrOp::EncodingInstall),
@@ -16521,6 +16573,7 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         ),
         (Builtin::Kernel, &["__mt_new__"], Native::MtNew),
         (Builtin::Kernel, &["__mt_next__"], Native::MtNext),
+        (Builtin::Kernel, &["__mt_bytes__"], Native::MtBytes),
         (Builtin::Kernel, &["__mt_real__"], Native::MtReal),
         (Builtin::Kernel, &["__mt_limited__"], Native::MtLimited),
         (

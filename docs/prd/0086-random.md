@@ -22,9 +22,11 @@ cost is what bounds a long `sample`: `__mt_limited__(state, limit)` runs
 for a shuffle's draws at once. With #705, `__mt_real__(state, inclusive)`
 answers `genrand_res53`'s Float (or the inclusive one) directly, and
 `__mt_new__` takes a Fixnum seed and splits it itself: those were most of a
-`rand` and a `Random.new`. The state is a BINARY String each `Random`
-holds (624 words and the index), so the default generator belongs to the
-heap, and there is no process-global one.
+`rand` and a `Random.new`. With #744, `__mt_bytes__(state, size)` answers
+`bytes`' BINARY String in one call, rather than an Array of outputs that
+`pack("V*")` then spent tens of microseconds a byte writing. The state is a
+BINARY String each `Random` holds (624 words and the index), so the default
+generator belongs to the heap, and there is no process-global one.
 
 **`core/random.rb`, after `random.c`:** which initialiser a seed's words get,
 `genrand_res53` and the inclusive-range real, `limited_rand` and
