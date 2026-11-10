@@ -1403,11 +1403,13 @@ class Array
 
   # `level` deep, or all the way with a negative or no level. An Array that
   # contains itself cannot be flattened all the way: ArgumentError, measured.
+  # With a level it can, as deep as the level says: `a = [1]; a << a;
+  # a.flatten(2)` is `[1, 1, 1, [1, [...]]]`, measured.
   def flatten(level = -1)
     level = __count_like__(level) unless level.nil?
     level = -1 if level.nil?
     out = []
-    __flatten_into__(out, self, level, [], [])
+    __flatten_into__(out, self, level)
     out
   end
 
@@ -1418,37 +1420,80 @@ class Array
     __refill__(flatten(level))
   end
 
+  # CRuby's `flatten()`, a loop over an explicit stack rather than a call per
+  # level, so 10,000 levels cost what 10,000 elements do (#741).
+  #
   # Each element is `rb_check_array_type`'s, and only above `level`: one at
   # the bottom is kept without being asked for `to_ary`. `plain` holds the
   # classes this call has found nothing to ask in, so a leaf of a class seen
   # before costs one native identity scan rather than `rb_check_funcall`'s
   # reflection.
-  def __flatten_into__(out, array, level, open, plain)
-    if open.any? { |seen| seen.equal?(array) }
-      raise ArgumentError, "tried to flatten recursive array"
-    end
-    open.push(array)
-    array.each do |element|
-      nested = nil
-      if Array === element
-        nested = element
-      elsif level != 0
-        unless __reflect_class_in__(element, plain)
-          klass = __reflect_class_of__(element)
-          if Kernel.__funcall_plain__?(klass, :to_ary)
-            plain.push(klass)
-          else
-            nested = Array.__check_array__(element)
+  #
+  # Only an unlimited flatten looks for recursion, as CRuby's does. `path` is
+  # the arrays open from the top down. The first `scan` of them are compared
+  # one by one, which is all most walks ever open; past those, `open` files
+  # each under where it sits in `path`. An entry left by
+  # an array since closed points at a slot that is gone or holds another
+  # array, so nothing is ever deleted, and the check costs one lookup however
+  # deep the walk is.
+  def __flatten_into__(out, array, level)
+    plain = []
+    path = [array]
+    check = level < 0
+    scan = 16
+    open = nil
+    indices = []
+    index = 0
+    while true
+      while index < array.size
+        element = array[index]
+        index += 1
+        nested = nil
+        if level < 0 || indices.size < level
+          if Array === element
+            nested = element
+          elsif !__reflect_class_in__(element, plain)
+            klass = __reflect_class_of__(element)
+            if Kernel.__funcall_plain__?(klass, :to_ary)
+              plain.push(klass)
+            else
+              nested = Array.__check_array__(element)
+            end
           end
         end
+        if nested.nil?
+          out.push(element)
+          next
+        end
+        if check
+          depth = path.size
+          scanned = depth < scan ? depth : scan
+          at = 0
+          while at < scanned
+            raise ArgumentError, "tried to flatten recursive array" if path[at].equal?(nested)
+            at += 1
+          end
+          if depth > scan
+            at = open[nested]
+            if !at.nil? && at < depth && path[at].equal?(nested)
+              raise ArgumentError, "tried to flatten recursive array"
+            end
+          end
+          if depth >= scan
+            open ||= {}.compare_by_identity
+            open[nested] = depth
+          end
+        end
+        path.push(nested)
+        indices.push(index)
+        array = nested
+        index = 0
       end
-      if nested.nil? || level == 0
-        out.push(element)
-      else
-        __flatten_into__(out, nested, level - 1, open, plain)
-      end
+      break if indices.empty?
+      path.pop
+      array = path[-1]
+      index = indices.pop
     end
-    open.pop
   end
 
   # `slice!` is `slice`, and the part it answers is removed.
