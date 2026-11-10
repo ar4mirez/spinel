@@ -91,7 +91,13 @@ Two hundred and eight tags across ninety-four files. Moving ruby/spec to
 upstream's `484c424b08` (#368) removed six, and their five files: the
 `core/set` examples #365 moved to #368, which now assert that `&`, `map!`,
 `classify`, `divide`, `flatten` and `flatten!` keep `compare_by_identity`, as
-Ruby 4.0.8 and Spinel do. The bump added no tag. Before it, two hundred and
+Ruby 4.0.8 and Spinel do. Upstream guards those "retains compare_by_identity
+flag" examples, and `^`'s, with `ruby_version_is "4.1"`, and the old "does not
+retain" ones with `""..."4.0"`, so on Spinel's `RUBY_VERSION` 4.0.0 both are
+skipped, not run: `scripts/spec.sh core/set` does not yet show them passing.
+With the guard relaxed locally, all eight pass on Spinel and match CRuby 4.0.9.
+#368 stays open until ruby/spec lowers the guard or Spinel reports 4.1. The
+bump added no tag. Before it, two hundred and
 fourteen across ninety-nine; the count below went stale over the slices
 between. Two hundred and forty tags across a hundred and eight files. `Dir` (#42)
 removed twenty-three, and three files: `Dir.glob`'s twelve and `Dir.[]`'s ten,
