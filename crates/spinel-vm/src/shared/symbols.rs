@@ -278,6 +278,11 @@ impl Linked {
     ) -> std::sync::Arc<[SymbolId]> {
         std::sync::Arc::clone(self.0.get_or_init(|| resolve().into()))
     }
+
+    /// [`Linked::get_or_resolve`], borrowed.
+    pub fn get_or_resolve_ref(&self, resolve: impl FnOnce() -> Vec<SymbolId>) -> &[SymbolId] {
+        self.0.get_or_init(|| resolve().into())
+    }
 }
 
 impl Clone for Linked {

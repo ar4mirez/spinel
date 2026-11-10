@@ -2718,3 +2718,31 @@ a = (1..8).to_a; a.shift(3); a[1, 2] = [:a, :b, :c]; a.insert(0, :z); [a, a.dup 
 a = (1..8).to_a; a.shift(8); a << 1; [a, a.shift, a.shift, a.shift(5), a.unshift, a]  #=> [[], 1, nil, [], [], []]
 a = (1..4).to_a; a.shift; [a == [2, 3, 4], a.hash == [2, 3, 4].hash, a.reverse, a.sort, a.map { |x| x * 2 }, a.inspect]  #=> [true, true, [4, 3, 2], [2, 3, 4], [4, 6, 8], "[2, 3, 4]"]
 [begin; [1].freeze.shift; rescue => e; e.class; end, begin; [].freeze.unshift; rescue => e; e.class; end, begin; [].freeze.shift(0); rescue => e; e.class; end]  #=> [FrozenError, FrozenError, FrozenError]
+
+# A method body's locals start on the operand stack and move to the heap when
+# something captures them (#746): a capture after a write, a write after a
+# capture, and the calls and returns that skip the general path.
+def m(n); x = n; b = binding; x = 7; b.local_variable_get(:x); end; m(1)  #=> 7
+def m; x = 1; pr = -> { x += 1 }; pr.call; x += 10; pr.call; x; end; m  #=> 13
+def m(a, b); eval("a * b"); end; m(6, 7)  #=> 42
+def m(a); eval("c = a + 1; c * 2"); end; m(2)  #=> 6
+def m(n); r = []; n.times { |i| r << i * n }; r; end; m(3)  #=> [0, 3, 6]
+def mk; c = 0; -> { c += 1 }; end; pr = mk; pr.call; pr.call  #=> 2
+def lv(a); b = 2; local_variables; end; lv(1)  #=> [:a, :b]
+def f(n) = n < 2 ? n : f(n - 1) + f(n - 2); f(15)  #=> 610
+def g(a, b) = [a, b]; def m(x) = g(x, x + 1); m(1)  #=> [1, 2]
+def k2(v) = v * 2; def k(x); y = x + 1; z = k2(y); [x, y, z]; end; k(1)  #=> [1, 2, 4]
+def m; x = 1; begin; return x; ensure; x = 2; end; end; m  #=> 1
+def m; [1].each { return 5 }; 6; end; m  #=> 5
+def m(a); return a if a > 1; :small; end; [m(1), m(2)]  #=> [:small, 2]
+def g(a) = a; begin; g; rescue ArgumentError => e; e.message; end  #=> "wrong number of arguments (given 0, expected 1)"
+def g(a) = a; begin; g(1, 2); rescue ArgumentError => e; e.message; end  #=> "wrong number of arguments (given 2, expected 1)"
+class C; def a = b; private def b = 3; end; C.new.a  #=> 3
+class C; def a = self.b; private def b = 4; end; C.new.a  #=> 4
+class D; private def b = 3; end; begin; D.new.b; rescue NoMethodError => e; e.message; end  #=> "private method 'b' called for an instance of D"
+def h = 1; a = h; def h = 2; [a, h]  #=> [1, 2]
+class E; def method_missing(n, *a) = [n, a]; end; E.new.zz(1)  #=> [:zz, [1]]
+def m(x); y = x * 2; [binding.local_variable_defined?(:y), binding.local_variables]; end; m(1)  #=> [true, [:x, :y]]
+def m(x); 1.then { x += 1 }; x; end; m(1)  #=> 2
+def m(x); b = binding; b.local_variable_set(:x, 9); x; end; m(1)  #=> 9
+def r(n) = n.zero? ? 0 : 1 + r(n - 1); r(5000)  #=> 5000

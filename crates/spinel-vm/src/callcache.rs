@@ -40,7 +40,6 @@ struct Entry {
 ///
 /// Per heap because a [`Method`] names per-heap tables and a `ClassId` indexes
 /// one heap's class list, while the `Iseq` they were resolved from is shared.
-#[derive(Default)]
 pub struct CallCaches {
     /// One slot per call site of every `Iseq` this heap has entered, in runs.
     entries: Vec<Option<Entry>>,
@@ -61,6 +60,24 @@ pub struct CallCaches {
     /// the one it adds is the top-level script's. Give the runs back when
     /// something can actually drop an `Iseq` mid-run.
     iseqs: Vec<Arc<Iseq>>,
+    /// The bases `base` answered last, direct-mapped by `Arc` address, in
+    /// front of the `bases` probe: a recursive or loop-called method enters
+    /// the same `Iseq` over and over. Sound for the reason `bases` is.
+    recent: [(usize, u32); RECENT],
+}
+
+/// How many bases [`CallCaches::base`] remembers without a probe.
+const RECENT: usize = 64;
+
+impl Default for CallCaches {
+    fn default() -> CallCaches {
+        CallCaches {
+            entries: Vec::new(),
+            bases: HashMap::new(),
+            iseqs: Vec::new(),
+            recent: [(0, 0); RECENT],
+        }
+    }
 }
 
 impl CallCaches {
@@ -81,7 +98,14 @@ impl CallCaches {
     /// If one heap ever holds more call sites than a `u32` can index.
     pub fn base(&mut self, iseq: &Arc<Iseq>) -> u32 {
         let key = Arc::as_ptr(iseq) as usize;
+        // An `Iseq` is far bigger than 64 bytes, so the bits above them tell
+        // two apart.
+        let recent = (key >> 6) % RECENT;
+        if self.recent[recent].0 == key {
+            return self.recent[recent].1;
+        }
         if let Some(&base) = self.bases.get(&key) {
+            self.recent[recent] = (key, base);
             return base;
         }
         let base = u32::try_from(self.entries.len()).expect("a heap under 2^32 call sites");
@@ -89,6 +113,7 @@ impl CallCaches {
             .resize(self.entries.len() + iseq.call_sites.len(), None);
         self.bases.insert(key, base);
         self.iseqs.push(Arc::clone(iseq));
+        self.recent[recent] = (key, base);
         base
     }
 

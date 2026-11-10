@@ -233,6 +233,9 @@ pub enum ParseFailure {
     Unsupported,
 }
 
+/// How many class objects [`Heap`] remembers the ids of.
+const CLASS_IDS: usize = 64;
+
 pub struct Heap {
     /// Whether any module holds an autoload entry (#709): the one test a
     /// constant read pays, kept first beside the fields the loop reads most.
@@ -265,6 +268,12 @@ pub struct Heap {
     /// source: an entry is two integers and a `Method`, whose body is a
     /// fixnum definition id the collector never traces.
     call_caches: crate::callcache::CallCaches,
+    /// Which class each recently asked-about class object is, direct-mapped
+    /// by address: `class_of` otherwise reads the class's `@__id__` through
+    /// its shape on every dispatch. Emptied by every collection, since a
+    /// freed class's address can be another's afterwards, and checked
+    /// against the class table on every hit.
+    class_ids: [(usize, u32); CLASS_IDS],
     regexps: crate::regexp::Regexps,
     /// Every fiber this heap has made, and the vectors of those not running
     /// (#16). Traced: a suspended fiber's frames hold values nothing else does.
@@ -638,6 +647,7 @@ impl Heap {
             shapes: Shapes::new(),
             definitions: crate::method::Definitions::new(),
             call_caches: crate::callcache::CallCaches::new(),
+            class_ids: [(0, 0); CLASS_IDS],
             regexps: crate::regexp::Regexps::new(),
             fibers: crate::interp::FiberTable::default(),
             last_match: Value::NIL,
@@ -990,6 +1000,7 @@ impl Heap {
     /// Mark every object reachable from the roots, then reclaim the rest.
     pub fn collect(&mut self) {
         let started = std::time::Instant::now();
+        self.class_ids = [(0, 0); CLASS_IDS];
         self.mark();
         self.trace_weak();
         self.queue_finalizers();
@@ -1390,6 +1401,32 @@ impl<'h> HandleScope<'h> {
     /// What each call site last resolved to. See [`crate::callcache`].
     pub fn call_caches(&self) -> &crate::callcache::CallCaches {
         self.heap.call_caches()
+    }
+
+    /// The class of a heap object, when the class object is one whose id
+    /// is remembered (see [`Heap`]'s `class_ids`): what `class_of` answers,
+    /// without rooting `value` or reading the class's `@__id__`.
+    ///
+    /// `value` must be a live object of this heap. Reading its header cannot
+    /// collect, so it needs no handle.
+    pub(crate) fn remembered_class_of(&self, value: Value) -> Option<crate::class::ClassId> {
+        let object = Obj(value.as_heap()?.cast());
+        // SAFETY: a live object of this heap, per the contract above.
+        let class = unsafe { (*object.header()).class }?;
+        let address = class.as_heap().map_or(0, |p| p.as_ptr() as usize);
+        let id = crate::class::ClassId::from_index(self.remembered_class_id(address)?);
+        let classes = self.classes();
+        (id.index() < classes.len() && classes.object(id) == class).then_some(id)
+    }
+
+    /// The class id remembered for the class object at `address`, if any.
+    pub(crate) fn remembered_class_id(&self, address: usize) -> Option<u32> {
+        let (at, id) = self.heap.class_ids[(address >> 4) % CLASS_IDS];
+        (at == address).then_some(id)
+    }
+
+    pub(crate) fn remember_class_id(&mut self, address: usize, id: u32) {
+        self.heap.class_ids[(address >> 4) % CLASS_IDS] = (address, id);
     }
 
     pub fn call_caches_mut(&mut self) -> &mut crate::callcache::CallCaches {

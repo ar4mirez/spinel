@@ -819,6 +819,13 @@ impl Iseq {
         self.linked.get_or_resolve(|| self.link())
     }
 
+    /// [`Iseq::linked`], borrowed: what a running frame reads its symbols
+    /// through, so pushing one copies no `Arc`.
+    #[must_use]
+    pub fn symbol_ids(&self) -> &[SymbolId] {
+        self.linked.get_or_resolve_ref(|| self.link())
+    }
+
     /// The source line the instruction at `pc` came from.
     #[must_use]
     pub fn line_at(&self, pc: usize) -> Option<i32> {
