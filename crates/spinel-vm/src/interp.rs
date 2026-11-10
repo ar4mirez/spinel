@@ -6269,7 +6269,7 @@ fn string_new(scope: &mut HandleScope<'_>, text: &str) -> Value {
 }
 
 /// A `String` of class `class` holding `bytes` in `encoding` — the one place a
-/// string is made. See `strings.rs` for the three slots.
+/// string is made. See `strings.rs` for the four slots.
 fn string_alloc<'h>(
     scope: &mut HandleScope<'h>,
     class: Handle<'h>,
