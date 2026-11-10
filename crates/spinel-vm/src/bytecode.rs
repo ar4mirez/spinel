@@ -233,7 +233,12 @@ pub enum Insn {
     /// Index into [`Iseq::symbols`]; pushes the frame's `self`'s ivar of that
     /// name, or `nil`. Ruby's answer for one never assigned is `nil`, so a
     /// miss is not an error.
-    GetIvar(u32),
+    ///
+    /// The second operand is the site's inline cache, an index into this
+    /// `Iseq`'s run of the heap's call caches past its [`Iseq::call_sites`]:
+    /// the shape the receiver last had there and where that shape keeps the
+    /// name. See [`Iseq::ivar_sites`].
+    GetIvar(u32, u32),
     /// Pops. Like [`Insn::SetLocal`], the compiler emits `Dup` first where the
     /// value is wanted, because assignment is an expression.
     SetIvar(u32),
@@ -751,6 +756,10 @@ pub struct Iseq {
     /// How many `/o` regexp sites this body has, so a heap can size their
     /// cache. One per [`Insn::NewRegexpOnce`].
     pub once_regexps: u32,
+    /// How many [`Insn::GetIvar`] sites this body has. Each has an inline
+    /// cache in the heap's call caches, in the same run as the call sites and
+    /// after them, so a site's operand is already its offset in that run.
+    pub ivar_sites: u32,
     /// One entry per [`Insn::OpenClass`].
     pub class_defs: Vec<ClassDef>,
     /// Protected instruction ranges, innermost first.

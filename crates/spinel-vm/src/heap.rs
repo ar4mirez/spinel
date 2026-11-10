@@ -143,6 +143,58 @@ const _: () = {
     assert!(align_of::<Header>() == 8);
 };
 
+/// One object's instance variables, as [`HandleScope::ivar_view`] found
+/// them, beside every `GetIvar` site's cache: a frame's `self`, looked at
+/// once for a run of instructions that read it rather than at every read.
+///
+/// Raw pointers, because what makes them good is not something a borrow can
+/// say: the object keeps its shape and its storage, and no cache is filled,
+/// for as long as nothing allocates, collects, assigns an instance variable
+/// or runs the closure that fills caches. A run of the interpreter's light
+/// instructions does none of those.
+pub(crate) struct IvarView {
+    /// The object's shape, or [`IvarView::NOTHING`] when its instance
+    /// variables are not in storage of its own: then nothing is answered.
+    shape: ShapeId,
+    values: *const Value,
+    len: usize,
+    caches: *const crate::callcache::IvarEntry,
+    caches_len: usize,
+}
+
+impl IvarView {
+    /// A shape no cache entry holds: entries are empty, `NONE`, or a shape
+    /// that holds the name they found, which `ROOT` holds none of.
+    const NOTHING: ShapeId = ShapeId::ROOT;
+
+    /// What the site whose cache is `slot` reads: the value at the index its
+    /// cache names, when the cache was filled for the shape this view saw.
+    ///
+    /// # Safety
+    ///
+    /// Nothing may have allocated, collected, assigned an instance variable
+    /// or filled a cache since [`HandleScope::ivar_view`] made this view, on
+    /// the heap it was made from.
+    #[inline(always)]
+    pub(crate) unsafe fn read(&self, slot: u32) -> Option<Value> {
+        let slot = slot as usize;
+        if slot >= self.caches_len {
+            return None;
+        }
+        // SAFETY: within the cache table, which the caller's promise keeps
+        // where it was and as long as it was.
+        let entry = unsafe { self.caches.add(slot).read() };
+        let index = entry.index as usize;
+        if (entry.shape != self.shape) | (index >= self.len) {
+            return None;
+        }
+        // SAFETY: a shape other than `NOTHING` means `values` is the
+        // object's storage of `len` slots, which the promise keeps live and
+        // in place.
+        Some(unsafe { self.values.add(index).read() })
+    }
+}
+
 /// A pointer to a live object, with the header arithmetic in one place.
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Obj(NonNull<Header>);
@@ -1997,6 +2049,125 @@ impl<'h> HandleScope<'h> {
     pub fn shape(&self, handle: Handle<'h>) -> ShapeId {
         // SAFETY: as above.
         unsafe { (*self.object(handle).header()).shape }
+    }
+
+    /// Slot `index` of `object`, read without a handle: for an object the
+    /// caller already holds reachable, as a frame holds its environment and
+    /// the ones it links to, and a read that cannot collect.
+    ///
+    /// # Panics
+    ///
+    /// As [`HandleScope::slot`], and if `object` is not a heap object.
+    pub(crate) fn slot_of(&self, object: Value, index: usize) -> Value {
+        let object = Obj(object.as_heap().expect("a heap object").cast());
+        self.check_slot(object, index);
+        // SAFETY: a heap `Value` the caller holds reachable is a live cell of
+        // this heap; bounds and payload kind checked.
+        unsafe { ptr::read(object.slots().add(index)) }
+    }
+
+    /// Store into slot `index` of `object` without a handle, under
+    /// [`HandleScope::slot_of`]'s rule. Cannot collect, so a bare `Value` is
+    /// safe to pass, and once stored it is as reachable as `object` is.
+    ///
+    /// # Panics
+    ///
+    /// As [`HandleScope::slot_of`].
+    pub(crate) fn set_slot_of(&mut self, object: Value, index: usize, value: Value) {
+        let object = Obj(object.as_heap().expect("a heap object").cast());
+        self.check_slot(object, index);
+        self.storable(value);
+        // SAFETY: as above. No write barrier, as for `set_slot`.
+        unsafe { ptr::write(object.slots().add(index), value) }
+    }
+
+    /// A look at `object`'s instance variables and at the sites' caches, for
+    /// [`IvarView::read`] to answer [`Insn::GetIvar`] from without going back
+    /// to either: see there for how long it stays true. `storage` is as for
+    /// [`HandleScope::cached_ivar`].
+    ///
+    /// [`Insn::GetIvar`]: crate::bytecode::Insn::GetIvar
+    pub(crate) fn ivar_view(&self, object: Value, storage: usize) -> IvarView {
+        let caches = self.heap.call_caches.ivars();
+        let mut view = IvarView {
+            shape: IvarView::NOTHING,
+            values: ptr::null(),
+            len: 0,
+            caches: caches.as_ptr(),
+            caches_len: caches.len(),
+        };
+        let Some(pointer) = object.as_heap() else {
+            return view;
+        };
+        let object = Obj(pointer.cast());
+        // SAFETY: as in `cached_ivar`.
+        let header = unsafe { &*object.header() };
+        if (header.shape == ShapeId::NONE)
+            | (header.flags & SIDE_IVARS != 0)
+            | (header.payload != Payload::Slots)
+            | (storage >= header.len as usize)
+        {
+            return view;
+        }
+        // SAFETY: as in `cached_ivar`.
+        let values = unsafe { ptr::read(object.slots().add(storage)) };
+        let Some(values) = values.as_heap() else {
+            return view;
+        };
+        let values = Obj(values.cast());
+        // SAFETY: as in `cached_ivar`.
+        let storage = unsafe { &*values.header() };
+        if storage.payload != Payload::Slots {
+            return view;
+        }
+        view.shape = header.shape;
+        view.values = values.slots();
+        view.len = storage.len as usize;
+        view
+    }
+
+    /// What the [`Insn::GetIvar`] site whose cache is `slot` reads from
+    /// `object`, when `object` wears the shape that cache holds: two headers
+    /// and two slots read, and no handle taken, since nothing here allocates.
+    /// `None` for everything else — an immediate, another shape, storage in
+    /// the side table — which the full read answers and then caches.
+    ///
+    /// `storage` is the slot an object with instance variables keeps their
+    /// storage in, which `interp.rs` owns.
+    ///
+    /// `object` must be reachable for the length of the call, as the frame's
+    /// `self` is.
+    ///
+    /// [`Insn::GetIvar`]: crate::bytecode::Insn::GetIvar
+    #[inline]
+    pub(crate) fn cached_ivar(&self, object: Value, slot: u32, storage: usize) -> Option<Value> {
+        let entry = self.heap.call_caches.ivar(slot);
+        let object = Obj(object.as_heap()?.cast());
+        // SAFETY: a heap `Value` is a cell of this heap, live because the
+        // caller holds it reachable, and every cell starts with a header.
+        let header = unsafe { &*object.header() };
+        // `|` rather than `||`: one branch for the lot, since a site's
+        // answer is the same nearly every time and each `||` would be a
+        // branch of its own.
+        if (entry.shape == ShapeId::NONE)
+            | (header.shape != entry.shape)
+            | (header.flags & SIDE_IVARS != 0)
+            | (header.payload != Payload::Slots)
+            | (storage >= header.len as usize)
+        {
+            return None;
+        }
+        // SAFETY: a slot within the object's length, read as `slot` reads one.
+        let values = unsafe { ptr::read(object.slots().add(storage)) };
+        let values = Obj(values.as_heap()?.cast());
+        // SAFETY: the storage is reachable from the object, so live.
+        let header = unsafe { &*values.header() };
+        let index = entry.index as usize;
+        if (header.payload != Payload::Slots) | (index >= header.len as usize) {
+            return None;
+        }
+        // SAFETY: as above, within the storage's length.
+        Some(unsafe { ptr::read(values.slots().add(index)) })
     }
 
     /// Whether the object's instance variables are kept in the side table.

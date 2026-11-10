@@ -2750,3 +2750,29 @@ def r(n) = n.zero? ? 0 : 1 + r(n - 1); r(5000)  #=> 5000
 # ------------------------------- tr's family through a byte table, and Random#bytes in one call (#744)
 s = "hello\\abc-^".b; [s.tr("a-y", "b-z"), s.tr_s("el", "ip"), s.tr("^l", "*"), "abc".tr("aa", "xy"), s.tr("\\a-c", "X"), "a".tr("a", "^b"), "x".tr("a", "bz-x"), "\x80\x90\xFF".b.tr("\x80-\xFF".b, "a"), s.count("a-z", "^l"), s.delete("l", "lo"), "aaabbbccc".squeeze("a-b"), ("abc".tr("c-a", "X") rescue $!.message), "".tr("c-a", "x"), "".delete("c-a")]  #=> ["ifmmp\\bcd-^", "hipo\\abc-^", "**ll*******", "ybc", "hello\\XXX-^", "^", "x", "aaa", 6, "heo\\abc-^", "abccc", "invalid range \"c-a\" in string transliteration", "", ""]
 r = Random.new(42); [r.bytes(7).bytes, r.rand(100), Random.new(3).bytes(9).encoding.name, Random.new(3).bytes(0)]  #=> [[102, 220, 225, 95, 179, 61, 234], 92, "ASCII-8BIT", ""]
+
+# ------------------------------- instance-variable reads through a shape-keyed inline cache (#747)
+# An assignment whose value nothing reads pops into its target; a site's cache is
+# keyed by shape, so a second shape, a shape that changes, storage in the side
+# table and a removed ivar each still answer; and a loop that runs without the
+# per-instruction rooting still sees a redefined `+`, block locals and a value
+# kept only by a local across a collection.
+def m; a = 1; @b = 2; a += 3; @b += 4; c = a; [a, @b, c]; end; m  #=> [4, 6, 4]
+x = 5; y = (x += 1); [x, y]  #=> [6, 6]
+def m; a = 1; a ||= 2; b = nil; b ||= 3; c = 1; c &&= 4; d = e = 5; [a, b, c, d, e]; end; m  #=> [1, 3, 4, 5, 5]
+class P747; def initialize(a, b) = (@a = a; @b = b); def b = @b; end; class Q747 < P747; def initialize(a, b) = (@b = b; @a = a); end; [P747.new(1, 2), Q747.new(3, 4), P747.new(5, 6)].map(&:b)  #=> [2, 4, 6]
+class R747; def initialize = (@a = 1); def a = @a; def grow = (@z = 2); end; r = R747.new; x = r.a; r.grow; [x, r.a, r.instance_variable_get(:@z)]  #=> [1, 1, 2]
+class S747; def initialize = (@a = 1; @b = 2); def b = @b; end; s = S747.new; x = s.b; s.remove_instance_variable(:@a); [x, s.b]  #=> [2, 2]
+class T747 < Array; def initialize = (@t = 9); def t = @t; end; [T747.new.t, T747.new.t]  #=> [9, 9]
+class U747; def initialize = (@n = 3); def sum; s = 0; i = 0; while i < 5; s += @n; i += 1; end; s; end; end; [U747.new.sum, U747.new.freeze.sum]  #=> [15, 15]
+class V747; def initialize = (@n = 1); def bump = (@n += 1); def run; s = 0; i = 0; while i < 3; s += @n; bump; i += 1; end; s; end; end; V747.new.run  #=> 6
+class W747; def initialize = (@n = 1); def run; s = 0; i = 0; while i < 3; s += @n; instance_variable_set(:"@x#{i}", i); i += 1; end; [s, instance_variables]; end; end; W747.new.run  #=> [3, [:@n, :@x0, :@x1, :@x2]]
+class X747; def a = @a; end; [X747.new.a, X747.new.a]  #=> [nil, nil]
+class G747; def initialize = (@s = "keep" + "me"); def m; i = 0; x = nil; while i < 2; x = @s; i += 1; end; @s = nil; GC.start; [x, "a" * 4]; end; end; G747.new.m  #=> ["keepme", "aaaa"]
+class Integer; alias_method :op_old_add747, :+; end; def m; s = 0; i = 0; while i < 4; s += 10; Integer.define_method(:+) { |o| 1000 } if i == 1; i = i.op_old_add747(1); end; s; ensure; Integer.alias_method(:+, :op_old_add747); end; m  #=> 1000
+def m; s = 0; [1, 2, 3].each { |x| s += x; t = s }; s; end; m  #=> 6
+def m; s = 0; [1, 2].each { |x| [10, 20].each { |y| s += x * y } }; s; end; m  #=> 90
+def m; r = 0; 1.times { i = 0; while i < 10; r += i; i += 1; end }; r; end; m  #=> 45
+def m; a = "x"; b = nil; i = 0; while i < 3; b = a; i += 1; end; b; end; m  #=> "x"
+def m; i = 0; until i >= 7; i += 2; end; j = 10; j -= 3 while j > 0; [i, j, i == 8, i != 8, i <= 8, i > 8]; end; m  #=> [8, -2, true, false, true, false]
+def m; i = (1 << 62) - 3; n = 0; while i > 0 && n < 5; i += 1; n += 1; end; [i, n]; end; m  #=> [4611686018427387906, 5]

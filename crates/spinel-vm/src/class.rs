@@ -888,6 +888,16 @@ impl Classes {
         self.operator_guards[which].native & (1 << op) != 0
     }
 
+    /// [`Classes::operator_is_native`] for every operator of `which` at once,
+    /// as a mask over the operator indices.
+    #[inline]
+    pub fn native_operators(&mut self, which: usize) -> u32 {
+        if !self.operators_fresh {
+            self.refresh_operators();
+        }
+        self.operator_guards[which].native
+    }
+
     /// Re-resolve the sealed names of each numeric class whose serial moved.
     #[cold]
     fn refresh_operators(&mut self) {

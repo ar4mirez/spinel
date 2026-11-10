@@ -277,6 +277,30 @@ fn env_set(scope: &mut HandleScope<'_>, env: Value, slot: usize, value: Value) {
     scope.set_slot(handle, ENV_HEADER + slot, value);
 }
 
+/// Slot `slot` of the environment `depth` scopes out from `env`, which the
+/// running frame holds: what `GetLocal` reads. No handle is taken, so the
+/// read neither grows the root stack nor costs a push, and it cannot collect.
+fn frame_local(scope: &HandleScope<'_>, mut env: Value, depth: u16, slot: usize) -> Value {
+    for _ in 0..depth {
+        env = scope.slot_of(env, 0);
+    }
+    scope.slot_of(env, ENV_HEADER + slot)
+}
+
+/// [`frame_local`]'s write: what `SetLocal` does to a heap environment.
+fn set_frame_local(
+    scope: &mut HandleScope<'_>,
+    mut env: Value,
+    depth: u16,
+    slot: usize,
+    value: Value,
+) {
+    for _ in 0..depth {
+        env = scope.slot_of(env, 0);
+    }
+    scope.set_slot_of(env, ENV_HEADER + slot, value);
+}
+
 /// The environment `depth` scopes out from `env`.
 fn env_outer(scope: &mut HandleScope<'_>, mut env: Value, depth: u16) -> Value {
     for _ in 0..depth {
@@ -2683,79 +2707,45 @@ fn run<'h>(
             // frame the size of all its arms' locals together, set up for
             // each `Pop`. Each arm is the closure's own arm, word for word,
             // for the cases that can neither fail nor leave the frame.
+            //
+            // None of them allocates, roots, or changes the frames, so once
+            // one has run, the ones after it need only the budget the top of
+            // this loop counts — not the rooting of what is fresh on the
+            // stack, which only an instruction that can collect has to see
+            // done, nor the look at the frames. `run_light` runs them, and
+            // stops at anything else, which comes back here unrun.
+            let mut operands = LightStack::<false>::new(&mut stack, 0, 0);
+            let ran = light_step(
+                scope,
+                &mut operands,
+                &frames[top],
+                // SAFETY: see `code`.
+                unsafe { &*code },
+                insn,
+                &mut cur_pc,
+                &mut Lazy::default(),
+                budget.saturating_sub(1) > limit,
+                // Exact here: the top of the loop has just compared.
+                false,
+            );
+            operands.finish();
+            if ran > 0 {
+                // The top of the loop counted the first.
+                budget = budget.saturating_sub(ran - 1);
+                run_light(
+                    scope,
+                    &mut stack,
+                    &frames[top],
+                    &mut cur_pc,
+                    &mut budget,
+                    limit,
+                );
+                continue;
+            }
+
+            // The rest of the instructions answered before the closure: the
+            // ones that change the frames, so cannot run light.
             match insn {
-                Insn::PushNil => {
-                    stack.push(Value::NIL);
-                    continue;
-                }
-                Insn::PushTrue => {
-                    stack.push(Value::TRUE);
-                    continue;
-                }
-                Insn::PushFalse => {
-                    stack.push(Value::FALSE);
-                    continue;
-                }
-                Insn::PushSelf => {
-                    stack.push(frames[top].receiver);
-                    continue;
-                }
-                Insn::PushInt(n) => {
-                    if let Some(value) = Value::fixnum(n) {
-                        stack.push(value);
-                        continue;
-                    }
-                }
-                Insn::Pop => {
-                    stack.pop();
-                    continue;
-                }
-                Insn::Dup => {
-                    let value = *stack.last().expect("dup on an empty stack");
-                    stack.push(value);
-                    continue;
-                }
-                Insn::GetLocal(slot, depth) => {
-                    let frame = &frames[top];
-                    let value = if frame.env == Value::NIL {
-                        debug_assert_eq!(depth, 0, "a scope on the stack has no outer");
-                        stack[frame.floor + slot as usize]
-                    } else {
-                        let env = env_outer(scope, frame.env, depth);
-                        env_get(scope, env, slot as usize)
-                    };
-                    stack.push(value);
-                    continue;
-                }
-                Insn::SetLocal(slot, depth) => {
-                    let value = stack.pop().expect("setlocal on an empty stack");
-                    let frame = &frames[top];
-                    if frame.env == Value::NIL {
-                        debug_assert_eq!(depth, 0, "a scope on the stack has no outer");
-                        // Rooted already: it was on the stack a moment ago.
-                        stack.values[frame.floor + slot as usize] = value;
-                    } else {
-                        let env = env_outer(scope, frame.env, depth);
-                        env_set(scope, env, slot as usize, value);
-                    }
-                    continue;
-                }
-                Insn::Jump(displacement) => {
-                    cur_pc = jump(cur_pc, displacement);
-                    continue;
-                }
-                Insn::JumpUnless(displacement) => {
-                    if !stack.pop().expect("jump on an empty stack").is_truthy() {
-                        cur_pc = jump(cur_pc, displacement);
-                    }
-                    continue;
-                }
-                Insn::JumpIf(displacement) => {
-                    if stack.pop().expect("jump on an empty stack").is_truthy() {
-                        cur_pc = jump(cur_pc, displacement);
-                    }
-                    continue;
-                }
                 // The call most sends are — see `send_simple`. Anything it
                 // does not take is the closure's, untouched.
                 Insn::Send(index) => {
@@ -2798,39 +2788,6 @@ fn run<'h>(
                     }
                     reload!();
                     continue;
-                }
-                // Two fixnums whose answer is a fixnum or a boolean, under an
-                // operator the program has not redefined. Anything else —
-                // overflow, a Float, a division — is the closure's.
-                Insn::BinOp(op) => {
-                    let depth = stack.len();
-                    if depth >= 2
-                        && let (Some(a), Some(b)) =
-                            (stack[depth - 2].as_fixnum(), stack[depth - 1].as_fixnum())
-                        && operator_fast_path(
-                            scope,
-                            stack[depth - 2],
-                            operator_guard(op),
-                            &frames[top],
-                        )
-                    {
-                        let answer = match op {
-                            BinOp::Add => a.checked_add(b).and_then(Value::fixnum),
-                            BinOp::Sub => a.checked_sub(b).and_then(Value::fixnum),
-                            BinOp::Lt => Some(bool_value(a < b)),
-                            BinOp::Le => Some(bool_value(a <= b)),
-                            BinOp::Gt => Some(bool_value(a > b)),
-                            BinOp::Ge => Some(bool_value(a >= b)),
-                            BinOp::Eq => Some(bool_value(a == b)),
-                            BinOp::Neq => Some(bool_value(a != b)),
-                            BinOp::Mul | BinOp::Div | BinOp::Mod => None,
-                        };
-                        if let Some(value) = answer {
-                            stack.truncate(depth - 2);
-                            stack.push(value);
-                            continue;
-                        }
-                    }
                 }
                 _ => {}
             }
@@ -2936,10 +2893,15 @@ fn run<'h>(
                         stack.push(captured);
                     }
 
-                    Insn::GetIvar(name) => {
+                    Insn::GetIvar(name, site) => {
                         let symbol = frames[top].iseq.symbol_ids()[name as usize];
                         let receiver = frames[top].receiver;
-                        stack.push(ivar_get(scope, receiver, symbol)?);
+                        let (value, found) = ivar_read(scope, receiver, symbol);
+                        if let Some((shape, index)) = found {
+                            let slot = frames[top].cache_base + site;
+                            scope.call_caches_mut().fill_ivar(slot, shape, index);
+                        }
+                        stack.push(value);
                     }
 
                     Insn::SetIvar(name) => {
@@ -9388,24 +9350,38 @@ pub(crate) fn ivar_get(
     object: Value,
     name: SymbolId,
 ) -> Result<Value, Error> {
+    Ok(ivar_read(scope, object, name).0)
+}
+
+/// [`ivar_get`], and where the value was found: the object's shape and the
+/// index that shape gives `name`, when it holds one, in storage of the
+/// object's own rather than the side table's — which is what a `GetIvar`
+/// site's inline cache can remember.
+fn ivar_read(
+    scope: &mut HandleScope<'_>,
+    object: Value,
+    name: SymbolId,
+) -> (Value, Option<(ShapeId, u16)>) {
     // Ruby answers `nil` for `@a` on an immediate, and warns about nothing.
     // There is no storage to consult and no question about what it holds.
     if object.is_immediate() {
-        return Ok(Value::NIL);
+        return (Value::NIL, None);
     }
     let mut nested = scope.nested();
     let handle = nested.root(object);
     let shape = nested.shape(handle);
     if shape == ShapeId::NONE {
-        return Ok(Value::NIL);
+        return (Value::NIL, None);
     }
     let Some(index) = nested.shapes().index_of(shape, name) else {
-        return Ok(Value::NIL);
+        return (Value::NIL, None);
     };
     let storage = ivar_storage(&nested, handle);
     debug_assert!(storage != Value::NIL, "a shape with no storage behind it");
+    let side = nested.has_side_ivars(handle);
     let storage = nested.root(storage);
-    Ok(nested.slot(storage, index as usize))
+    let value = nested.slot(storage, index as usize);
+    (value, (!side).then_some((shape, index)))
 }
 
 /// Whether `object` holds an instance variable called `name`.
@@ -16705,6 +16681,439 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         scope
             .classes_mut()
             .set_visibility(kernel, symbol, Visibility::Private);
+    }
+}
+
+/// Which [`BinOp`]s a fixnum on the left may answer itself in `frame`, as a
+/// mask over `op as usize`: [`operator_fast_path`]'s answer for every
+/// operator at once, for a run of instructions that cannot change it. `!=`
+/// is answered as `==` is, which is [`operator_guard`]'s rule.
+fn native_fixnum_ops(scope: &mut HandleScope<'_>, frame: &Call) -> u32 {
+    let native = if scope.classes().cref_refined(frame.cref) {
+        0
+    } else {
+        let native = scope.classes_mut().native_operators(0);
+        let eq = (native >> operator_guard(BinOp::Neq)) & 1;
+        (native & !(1 << BinOp::Neq as usize)) | (eq << BinOp::Neq as usize)
+    };
+    if native != u32::MAX
+        && frame
+            .iseq
+            .path
+            .as_deref()
+            .is_some_and(|path| path.starts_with("<internal:"))
+    {
+        return u32::MAX;
+    }
+    native
+}
+
+/// Run the instruction `code[*pc - 1]`, `insn`, if it is one of those [`run`]
+/// answers before its closure: those that neither allocate, nor root, nor
+/// change the frames. Answers how many instructions ran — a fixnum `BinOp`
+/// also runs a `SetLocal` or a conditional jump right after it, which is what
+/// its answer is for most often — and 0, with nothing changed, for anything
+/// else: another instruction, or one of these on operands it does not take,
+/// such as a `+` that overflows.
+///
+/// `LIGHT` is whether the loop skipped its rooting of what is fresh on the
+/// stack for this one, as [`run_light`] does. A value is stored into a local
+/// on the stack only once it is rooted, which a light instruction cannot know
+/// of a heap value, so a light `SetLocal` of one is not taken. `lazy` holds
+/// what a run works out about `frame` once, at the first instruction that
+/// needs it. `pair` is whether the budget has room for a second instruction,
+/// and `spent` whether it has reached [`run_light`]'s limit.
+#[inline(always)]
+#[expect(clippy::too_many_arguments, reason = "the loop's own registers")]
+fn light_step<const LIGHT: bool>(
+    scope: &mut HandleScope<'_>,
+    stack: &mut LightStack<'_, LIGHT>,
+    frame: &Call,
+    code: &[Insn],
+    insn: Insn,
+    pc: &mut usize,
+    lazy: &mut Lazy,
+    pair: bool,
+    spent: bool,
+) -> u64 {
+    // A jump backwards is where a run of these stops for the budget, once
+    // `spent` says it has reached the loop's limit: not taken here, so that
+    // `run` takes it with everything it does between instructions.
+    let declined = |displacement: i32| spent && displacement < 0;
+    match insn {
+        Insn::PushNil => stack.push(Value::NIL),
+        Insn::PushTrue => stack.push(Value::TRUE),
+        Insn::PushFalse => stack.push(Value::FALSE),
+        Insn::PushSelf => stack.push(frame.receiver),
+        Insn::PushInt(n) => match Value::fixnum(n) {
+            Some(value) => stack.push(value),
+            None => return 0,
+        },
+        Insn::Pop => {
+            stack.pop();
+        }
+        Insn::Dup => {
+            let value = stack.last().expect("dup on an empty stack");
+            stack.push(value);
+        }
+        Insn::GetLocal(slot, depth) => {
+            let value = if frame.env == Value::NIL {
+                debug_assert_eq!(depth, 0, "a scope on the stack has no outer");
+                stack.get(frame.floor + slot as usize)
+            } else {
+                frame_local(scope, frame.env, depth, slot as usize)
+            };
+            stack.push(value);
+        }
+        Insn::SetLocal(slot, depth) => {
+            let value = stack.last().expect("setlocal on an empty stack");
+            if LIGHT && !value.is_immediate() {
+                return 0;
+            }
+            stack.pop();
+            if frame.env == Value::NIL {
+                debug_assert_eq!(depth, 0, "a scope on the stack has no outer");
+                // Rooted already: it was on the stack a moment ago.
+                stack.set(frame.floor + slot as usize, value);
+            } else {
+                set_frame_local(scope, frame.env, depth, slot as usize, value);
+            }
+        }
+        Insn::Jump(displacement) => {
+            if declined(displacement) {
+                return 0;
+            }
+            *pc = jump(*pc, displacement);
+        }
+        Insn::JumpUnless(displacement) => {
+            let taken = !stack.last().expect("jump on an empty stack").is_truthy();
+            if taken && declined(displacement) {
+                return 0;
+            }
+            stack.pop();
+            if taken {
+                *pc = jump(*pc, displacement);
+            }
+        }
+        Insn::JumpIf(displacement) => {
+            let taken = stack.last().expect("jump on an empty stack").is_truthy();
+            if taken && declined(displacement) {
+                return 0;
+            }
+            stack.pop();
+            if taken {
+                *pc = jump(*pc, displacement);
+            }
+        }
+        // A read the site's inline cache answers: the receiver wears the
+        // shape it held last time. Anything else is the closure's, which
+        // fills the cache.
+        //
+        // A light run reads through a view of `self` it takes at its first
+        // such read, since nothing it does can change what that view saw.
+        Insn::GetIvar(_, site) => {
+            let slot = frame.cache_base + site;
+            let value = if LIGHT {
+                let view = lazy
+                    .view
+                    .get_or_insert_with(|| scope.ivar_view(frame.receiver, SLOT_IVARS));
+                // SAFETY: the view is `run_light`'s, made during this run,
+                // and a light run neither allocates, collects, assigns an
+                // instance variable nor fills a cache: a miss stops it.
+                unsafe { view.read(slot) }
+            } else {
+                scope.cached_ivar(frame.receiver, slot, SLOT_IVARS)
+            };
+            match value {
+                Some(value) => stack.push(value),
+                None => return 0,
+            }
+        }
+        // Two fixnums whose answer is a fixnum or a boolean, under an
+        // operator the program has not redefined. Anything else — overflow,
+        // a Float, a division — is the closure's.
+        Insn::BinOp(op) => {
+            let depth = stack.len();
+            let ops = *lazy
+                .ops
+                .get_or_insert_with(|| native_fixnum_ops(scope, frame));
+            if depth < 2 || ops & (1 << op as usize) == 0 {
+                return 0;
+            }
+            let Some(value) = fixnum_binop(op, stack.get(depth - 2), stack.get(depth - 1)) else {
+                return 0;
+            };
+            stack.truncate(depth - 2);
+            // The answer is a fixnum or a boolean, so immediate: nothing
+            // about it needs rooting, and the next instruction can take it
+            // straight from here.
+            match code.get(*pc).filter(|_| pair) {
+                Some(&Insn::SetLocal(slot, depth)) => {
+                    *pc += 1;
+                    if frame.env == Value::NIL {
+                        debug_assert_eq!(depth, 0, "a scope on the stack has no outer");
+                        stack.set(frame.floor + slot as usize, value);
+                    } else {
+                        set_frame_local(scope, frame.env, depth, slot as usize, value);
+                    }
+                    return 2;
+                }
+                Some(&Insn::JumpUnless(displacement))
+                    if value.is_truthy() || !declined(displacement) =>
+                {
+                    *pc += 1;
+                    if !value.is_truthy() {
+                        *pc = jump(*pc, displacement);
+                    }
+                    return 2;
+                }
+                Some(&Insn::JumpIf(displacement))
+                    if !value.is_truthy() || !declined(displacement) =>
+                {
+                    *pc += 1;
+                    if value.is_truthy() {
+                        *pc = jump(*pc, displacement);
+                    }
+                    return 2;
+                }
+                _ => stack.push(value),
+            }
+        }
+        _ => return 0,
+    }
+    1
+}
+
+/// What a run of [`light_step`]s works out about its frame the first time an
+/// instruction needs it, rather than on entry, since most runs need neither.
+#[derive(Default)]
+struct Lazy {
+    /// [`native_fixnum_ops`], for a `BinOp`.
+    ops: Option<u32>,
+    /// `self`'s instance variables, for a `GetIvar` in a light run.
+    view: Option<crate::heap::IvarView>,
+}
+
+/// `left op right` for two fixnums whose answer is a fixnum or a boolean;
+/// `None` for anything else — overflow, a Float, a division — which the
+/// closure answers. Whether the program redefined the operator is the
+/// caller's to have asked.
+#[inline(always)]
+fn fixnum_binop(op: BinOp, left: Value, right: Value) -> Option<Value> {
+    match op {
+        BinOp::Add => left.fixnum_add(right),
+        BinOp::Sub => left.fixnum_sub(right),
+        BinOp::Lt => left.fixnum_order(right).map(|(a, b)| bool_value(a < b)),
+        BinOp::Le => left.fixnum_order(right).map(|(a, b)| bool_value(a <= b)),
+        BinOp::Gt => left.fixnum_order(right).map(|(a, b)| bool_value(a > b)),
+        BinOp::Ge => left.fixnum_order(right).map(|(a, b)| bool_value(a >= b)),
+        BinOp::Eq => left.fixnum_order(right).map(|(a, b)| bool_value(a == b)),
+        BinOp::Neq => left.fixnum_order(right).map(|(a, b)| bool_value(a != b)),
+        BinOp::Mul | BinOp::Div | BinOp::Mod => None,
+    }
+}
+
+/// [`light_step`] for as long as it takes the instruction at `pc`, counting
+/// each against the budget as [`run`]'s loop does. Stops with `pc` at the
+/// first it does not run, which [`run`] then runs with everything it does
+/// between instructions.
+///
+/// The budget is counted for every instruction but compared with `limit`
+/// only on entry and at a jump backwards, as CRuby checks for interrupts at
+/// a backward branch: a run of these cannot go on for longer than a loop
+/// without one. Once it reaches `limit`, the next backward jump is left for
+/// [`run`], which does there what it does at `limit` — a turn check, a
+/// deadline — the length of one stretch of the body without a backward
+/// jump late, which nothing measures; and the comparison costs the
+/// instructions between nothing.
+///
+/// Its own function so that what the loop keeps between these instructions
+/// fits in registers, which `run`, holding every instruction there is, does
+/// not leave room for.
+#[inline(never)]
+fn run_light(
+    scope: &mut HandleScope<'_>,
+    stack: &mut Stack,
+    frame: &Call,
+    pc: &mut usize,
+    budget: &mut u64,
+    limit: u64,
+) {
+    if *budget <= limit {
+        return;
+    }
+    // How many may run before the budget reaches `limit`.
+    let room = *budget - limit;
+    let code = &frame.iseq.insns[..];
+    let mut stack = LightStack::<true>::new(stack, frame.iseq.max_stack, frame.base);
+    let mut at = *pc;
+    let mut ran: u64 = 0;
+    // Made and dropped within this run, which is what `IvarView::read` asks
+    // of the view it holds.
+    let mut lazy = Lazy::default();
+    loop {
+        let mut after = at + 1;
+        let step = light_step(
+            scope,
+            &mut stack,
+            frame,
+            code,
+            code[at],
+            &mut after,
+            &mut lazy,
+            true,
+            ran >= room,
+        );
+        if step == 0 {
+            break;
+        }
+        ran += step;
+        at = after;
+    }
+    stack.finish();
+    *pc = at;
+    *budget = budget.saturating_sub(ran);
+}
+
+/// The operand stack for [`light_step`]: its length and capacity held here
+/// rather than in the `Vec`, which is what lets a run of instructions keep
+/// them in registers instead of storing and loading the `Vec`'s fields at
+/// every push and pop. Written back to the [`Stack`] by
+/// [`LightStack::finish`].
+///
+/// So is the mark [`Stack::fresh`] reads, which is where `LIGHT` comes in.
+/// For one instruction run with the loop's rooting done (`LIGHT` false) it is
+/// kept exactly, as `Stack` keeps it. A run of light ones only needs it at
+/// the end, and a frame's operands are never popped below the frame's
+/// `base`; so it goes down to that when this is finished — everything a run
+/// pushed is above it — and nothing is kept along the way.
+struct LightStack<'s, const LIGHT: bool> {
+    stack: &'s mut Stack,
+    /// The `Vec`'s buffer, valid for `capacity` values: taken from it once,
+    /// and again only after it grows.
+    values: *mut Value,
+    len: usize,
+    /// The mark, exactly when not `LIGHT`, and the frame's `base` when.
+    low: usize,
+    capacity: usize,
+}
+
+impl<'s, const LIGHT: bool> LightStack<'s, LIGHT> {
+    /// Room for `room` more values is made at once, so that a run of pushes
+    /// as deep as a body's operands go does not reach the slow path. `base`
+    /// is the frame's, which only a `LIGHT` one reads.
+    fn new(stack: &'s mut Stack, room: usize, base: usize) -> LightStack<'s, LIGHT> {
+        stack.values.reserve(room);
+        let len = stack.values.len();
+        let low = if LIGHT { base } else { stack.low };
+        let capacity = stack.values.capacity();
+        let values = stack.values.as_mut_ptr();
+        LightStack {
+            stack,
+            values,
+            len,
+            low,
+            capacity,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    #[inline(always)]
+    fn push(&mut self, value: Value) {
+        if self.len == self.capacity {
+            (self.values, self.capacity) = light_grow(&mut self.stack.values, self.len);
+        }
+        // SAFETY: `len < capacity`, and `values` is the buffer of that
+        // capacity: the `Vec` has not moved it since it was taken.
+        unsafe { self.values.add(self.len).write(value) }
+        self.len += 1;
+    }
+
+    #[inline(always)]
+    fn pop(&mut self) -> Option<Value> {
+        if self.len == 0 {
+            return None;
+        }
+        self.len -= 1;
+        if !LIGHT {
+            self.low = self.low.min(self.len);
+        }
+        // SAFETY: below the old `len`, so written.
+        Some(unsafe { self.values.add(self.len).read() })
+    }
+
+    #[inline(always)]
+    fn last(&self) -> Option<Value> {
+        if self.len == 0 {
+            return None;
+        }
+        // SAFETY: below `len`, so written.
+        Some(unsafe { self.values.add(self.len - 1).read() })
+    }
+
+    #[inline(always)]
+    fn get(&self, at: usize) -> Value {
+        // A copy, so that the message's reference is not to the field: one
+        // to the field would keep the whole of this in memory.
+        let len = self.len;
+        assert!(at < len, "operand {at} past a stack of {len}");
+        // SAFETY: below `len`, so written.
+        unsafe { self.values.add(at).read() }
+    }
+
+    #[inline(always)]
+    fn set(&mut self, at: usize, value: Value) {
+        let len = self.len;
+        assert!(at < len, "operand {at} past a stack of {len}");
+        // SAFETY: below `len`, so within the buffer.
+        unsafe { self.values.add(at).write(value) }
+    }
+
+    #[inline(always)]
+    fn truncate(&mut self, len: usize) {
+        if len < self.len {
+            self.len = len;
+            if !LIGHT {
+                self.low = self.low.min(len);
+            }
+        }
+    }
+}
+
+/// A [`LightStack`] push past the room made: give the `Vec` the `len` values
+/// it holds so far, let it grow, and answer its buffer and capacity again.
+/// Out of line and by value, so the `LightStack` it serves is never needed
+/// in memory.
+#[cold]
+#[inline(never)]
+fn light_grow(values: &mut Vec<Value>, len: usize) -> (*mut Value, usize) {
+    // SAFETY: every value below `len` was written, by the `Vec` or by a push.
+    unsafe { values.set_len(len) }
+    values.reserve(1);
+    (values.as_mut_ptr(), values.capacity())
+}
+
+impl<const LIGHT: bool> LightStack<'_, LIGHT> {
+    /// Give the [`Stack`] its length and mark back.
+    ///
+    /// A method rather than `Drop`, because a `Drop` would have every panic
+    /// on the way keep these fields in memory for the unwind to read, which
+    /// is the very thing this type is for avoiding. A panic before it leaves
+    /// the `Vec` the length it had when this was made or last grew, every
+    /// value below which was written, so still sound; nothing runs on that
+    /// stack after one.
+    fn finish(self) {
+        // SAFETY: every value below `len` was written, by the `Vec` or by a
+        // push here, and `len` is within the capacity the buffer has.
+        unsafe { self.stack.values.set_len(self.len) }
+        self.stack.low = if LIGHT {
+            self.stack.low.min(self.low)
+        } else {
+            self.low
+        };
     }
 }
 
