@@ -955,9 +955,10 @@ impl Heap {
         self.bytes_since_gc += size;
         self.total_allocated += 1;
 
-        let cell = match size_class(size) {
-            Some(class_index) => self.cell_from_free_list(class_index),
-            None => self.large_object(size),
+        // A large object's memory comes zeroed; only a reused cell needs it.
+        let (cell, zeroed) = match size_class(size) {
+            Some(class_index) => (self.cell_from_free_list(class_index), false),
+            None => (self.large_object(size), true),
         };
 
         let obj = Obj(cell.cast());
@@ -988,8 +989,12 @@ impl Heap {
                         ptr::write(slots.add(i), Value::NIL);
                     }
                 }
-                // A reused cell still holds the dead object's bytes.
-                Payload::Bytes => ptr::write_bytes(obj.bytes(), 0, len as usize),
+                // A reused cell still holds the dead object's bytes; a large
+                // object's are the zeroes `large_object` asked for, and
+                // writing them again would touch every page of a buffer that
+                // may never be read past its first bytes.
+                Payload::Bytes if !zeroed => ptr::write_bytes(obj.bytes(), 0, len as usize),
+                Payload::Bytes => {}
             }
         }
         Value::heap(obj.0.cast())
@@ -1496,6 +1501,64 @@ impl<'h> HandleScope<'h> {
         unsafe { (*object.header()).class }
     }
 
+    /// The first `N` slots of `value`, under the rule above — a live object
+    /// of this heap, and a read that cannot collect — so without a handle,
+    /// and under one check rather than one each: what a primitive reading
+    /// its operands' fixed fields where they stand on the stack takes.
+    /// `None` for an immediate, or an object that holds bytes or fewer than
+    /// `N` slots.
+    #[inline]
+    pub(crate) fn slots_of<const N: usize>(&self, value: Value) -> Option<[Value; N]> {
+        let object = Obj(value.as_heap()?.cast());
+        // SAFETY: a live object of this heap, per the contract above.
+        let header = unsafe { &*object.header() };
+        if header.payload != Payload::Slots || (header.len as usize) < N {
+            return None;
+        }
+        // SAFETY: `N` slots, every one initialised by `allocate`.
+        Some(unsafe { ptr::read(object.slots().cast::<[Value; N]>()) })
+    }
+
+    /// A byte object's length and whether it is frozen, for `value` under
+    /// the rule above; `None` for an immediate or an object of slots.
+    #[inline]
+    pub(crate) fn bytes_layout_of(&self, value: Value) -> Option<(usize, bool)> {
+        let object = Obj(value.as_heap()?.cast());
+        // SAFETY: a live object of this heap, per the contract above.
+        let header = unsafe { &*object.header() };
+        (header.payload == Payload::Bytes)
+            .then_some((header.len as usize, header.flags & FROZEN != 0))
+    }
+
+    /// [`HandleScope::bytes`] for `value` under the rule above; `None` for an
+    /// immediate or an object of slots.
+    #[inline]
+    pub(crate) fn bytes_of(&self, value: Value) -> Option<&[u8]> {
+        let object = Obj(value.as_heap()?.cast());
+        // SAFETY: a live object of this heap, per the contract above.
+        let header = unsafe { &*object.header() };
+        if header.payload != Payload::Bytes {
+            return None;
+        }
+        // SAFETY: `len` bytes were allocated and zeroed after the header,
+        // and `&self` keeps a write from happening while they are borrowed.
+        Some(unsafe { std::slice::from_raw_parts(object.bytes(), header.len as usize) })
+    }
+
+    /// Whether `value` is frozen or chilled, under the rule above: what a
+    /// write to a String asks first, in one read of its flags. `false` for
+    /// an immediate, whose flags this does not keep.
+    #[inline]
+    pub(crate) fn is_frozen_or_chilled_of(&self, value: Value) -> bool {
+        let Some(pointer) = value.as_heap() else {
+            return false;
+        };
+        let object = Obj(pointer.cast());
+        // SAFETY: a live object of this heap, per the contract above.
+        let flags = unsafe { (*object.header()).flags };
+        flags & (FROZEN | CHILLED | CHILLED_SYMBOL) != 0
+    }
+
     /// The class id remembered for the class object at `address`, if any.
     pub(crate) fn remembered_class_id(&self, address: usize) -> Option<u32> {
         let (at, id) = self.heap.class_ids[(address >> 4) % CLASS_IDS];
@@ -1563,6 +1626,12 @@ impl<'h> HandleScope<'h> {
 
     pub fn set_pending_warning(&mut self, message: String) {
         self.heap.set_pending_warning(message);
+    }
+
+    /// Whether a primitive has left a warning for its caller to say.
+    #[must_use]
+    pub fn has_pending_warning(&self) -> bool {
+        self.heap.pending_warning.is_some()
     }
 
     pub fn take_pending_warning(&mut self) -> Option<String> {
@@ -2257,6 +2326,29 @@ impl<'h> HandleScope<'h> {
         unsafe { ptr::read(object.slots().add(index)) }
     }
 
+    /// [`HandleScope::set_slot`] of an immediate — a count, a flag — which
+    /// is never a pointer to check, into `object` under
+    /// [`HandleScope::remembered_class_of`]'s rule: a live object of this
+    /// heap, which the write, unable to collect, needs no handle for.
+    /// Inlined, for a primitive whose every call writes one.
+    ///
+    /// # Panics
+    ///
+    /// As `set_slot`, and if `object` is immediate or `value` is not.
+    #[inline(always)]
+    pub(crate) fn set_immediate_slot_of(&mut self, object: Value, index: usize, value: Value) {
+        assert!(value.is_immediate(), "{value:?} is not an immediate");
+        let object = Obj(object
+            .as_heap()
+            .expect("an object to write a slot of")
+            .cast());
+        self.check_slot(object, index);
+        // SAFETY: a live object of this heap, per the contract above, and
+        // `check_slot` checked the payload kind and the bound; an immediate
+        // needs no liveness check.
+        unsafe { ptr::write(object.slots().add(index), value) }
+    }
+
     /// Store into a slot. Cannot collect, so a bare `Value` is safe to pass.
     ///
     /// # Panics
@@ -2400,6 +2492,7 @@ impl<'h> HandleScope<'h> {
     /// # Panics
     ///
     /// If either object holds slots, or either range is past its length.
+    #[inline]
     pub fn copy_bytes(
         &mut self,
         from: Handle<'h>,
@@ -2408,10 +2501,31 @@ impl<'h> HandleScope<'h> {
         to_start: usize,
         len: usize,
     ) {
-        let source = self.object(from);
-        let target = self.object(to);
+        let (from, to) = (self.get(from), self.get(to));
+        self.copy_bytes_of(from, from_start, to, to_start, len);
+    }
+
+    /// [`HandleScope::copy_bytes`] between objects named by value, under
+    /// [`HandleScope::remembered_class_of`]'s rule: each a live object of
+    /// this heap, which the copy, unable to collect, needs no handle for.
+    ///
+    /// # Panics
+    ///
+    /// As `copy_bytes`, and if either is immediate.
+    #[inline]
+    pub(crate) fn copy_bytes_of(
+        &mut self,
+        from: Value,
+        from_start: usize,
+        to: Value,
+        to_start: usize,
+        len: usize,
+    ) {
+        let object = |value: Value| Obj(value.as_heap().expect("a byte object").cast());
+        let source = object(from);
+        let target = object(to);
         for (object, start) in [(source, from_start), (target, to_start)] {
-            // SAFETY: the handle roots a live object of this heap.
+            // SAFETY: a live object of this heap, per the contract above.
             let header = unsafe { &*object.header() };
             assert_eq!(
                 header.payload,
@@ -2768,6 +2882,25 @@ mod tests {
         assert_eq!(scope.bytes(bytes), &[0; 5]);
         scope.bytes_mut(bytes).copy_from_slice(b"hello");
         assert_eq!(scope.bytes(bytes), b"hello");
+    }
+
+    /// A large object's bytes are the zeroes its allocation asked for, which
+    /// `allocate` does not write again: fresh, and in memory a freed large
+    /// object had written all over.
+    #[test]
+    fn a_large_byte_object_reads_as_zero_bytes() {
+        let mut heap = Heap::new();
+        let len = MAX_CELL as u32 * 4;
+        {
+            let mut scope = heap.scope();
+            let big = scope.alloc(None, Payload::Bytes, len);
+            assert!(scope.bytes(big).iter().all(|&b| b == 0));
+            scope.bytes_mut(big).fill(0xa5);
+        }
+        heap.collect();
+        let mut scope = heap.scope();
+        let again = scope.alloc(None, Payload::Bytes, len);
+        assert!(scope.bytes(again).iter().all(|&b| b == 0));
     }
 
     /// `copy_bytes` between two objects, and within one whichever way the

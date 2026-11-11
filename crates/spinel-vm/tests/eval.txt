@@ -2815,3 +2815,26 @@ class Box748; def initialize(v) = (@v = v); def swap(h) = (h.clear; s = "tmp" * 
 # made on first dispatch, which the general path does once the loop has rooted
 # the stack, here the only reference to the argument the block just overwrote.
 class Sing748; def self.keep(a, b) = a; end; r = []; 3.times { h = "v" + "1"; 1.times { sc = Sing748.new.singleton_class; GC.stress = true; r << sc.keep(h, h = 0); GC.stress = false } }; r  #=> ["v1", "v1", "v1"]
+
+
+# ------------------------------- String appends answered on the operand stack (#749)
+# A warm `s << x` site answers from its plan where the call stands, without
+# allocating while the receiver's buffer has room and growing it otherwise, and
+# the receiver is the answer; anything the plan does not cover goes the general
+# way, warm or not: a frozen or chilled receiver, encodings that do not allow the
+# bytes as they are, an Integer, a redefinition, a singleton method, a
+# refinement, and a collection while the buffer grows.
+def a749(e) = (s = String.new(encoding: e); i = 0; while i < 40; s << "ab"; i += 1; end; s); [a749(Encoding::UTF_8) == "ab" * 40, a749(Encoding::BINARY).encoding.name, a749(Encoding::UTF_8).encoding.name]  #=> [true, "ASCII-8BIT", "UTF-8"]
+def b749; s = +"ab"; t = s; r = []; i = 0; while i < 5; r << (s << s).equal?(t); i += 1; end; [s.size, s[0, 6], r.uniq]; end; b749  #=> [64, "ababab", [true]]
+def c749; t = "x" * 100; s = t.byteslice(0, 80); u = t.byteslice(10, 90); i = 0; while i < 3; s << "y"; t << "z"; i += 1; end; [t.size, s.size, u.size, s[-4..], t[-4..], u.count("yz")]; end; c749  #=> [103, 83, 90, "xyyy", "xzzz", 0]
+def f749; s = +""; r = nil; i = 0; while i < 4; begin; s << "a"; rescue => e; r = [e.class, e.message]; end; s.freeze if i == 1; i += 1; end; [s, r]; end; f749  #=> ["aa", [FrozenError, "can't modify frozen String: \"aa\""]]
+def e749; s = +"é"; r = []; a = ["a", "b".b, "\xff".b, "c", "あ"]; i = 0; while i < 5; begin; s << a[i]; rescue => e; r << [e.class, e.message]; end; i += 1; end; [s, s.encoding.name, r]; end; e749  #=> ["éabcあ", "UTF-8", [[Encoding::CompatibilityError, "incompatible character encodings: UTF-8 and BINARY (ASCII-8BIT)"]]]
+def g749; a = ["é", "é", "x"]; r = []; [+"".b, +"a".b, +"\xff".b].each { |s| i = 0; while i < 3; begin; s << a[i]; rescue => e; r << e.class; end; i += 1; end; r << [s.encoding.name, s.bytesize] }; r; end; g749  #=> [["UTF-8", 5], ["UTF-8", 6], Encoding::CompatibilityError, Encoding::CompatibilityError, ["ASCII-8BIT", 2]]
+def h749 = (s = "lit"; i = 0; while i < 3; s << "x"; i += 1; end; [s, s.frozen?]); [h749, h749]  #=> [["litxxx", false], ["litxxx", false]]
+def i749(s) = (a = ["a", 66, "c", 0x3042]; i = 0; while i < 4; s << a[i]; i += 1; end; s); [i749(+""), i749(+"").encoding.name]  #=> ["aBcあ", "UTF-8"]
+class String; alias_method :app_old749, :<<; end; def r749(s, n) = (i = 0; while i < n; s << "x"; i += 1; end; s); a = r749(+"", 3); class String; def <<(o) = app_old749("[#{o}]"); end; b = r749(+"", 2); class String; alias_method :<<, :app_old749; remove_method :app_old749; end; [a, b, r749(+"", 2)]  #=> ["xxx", "[x][x]", "xx"]
+def s749(s) = (s << "y"); t = +"a"; s749(t); s749(t); def t.<<(o) = "single"; [s749(t), t, s749(+"b")]  #=> ["single", "ayy", "by"]
+class Sub749 < String; end; def u749(s, x) = (i = 0; while i < 3; s << x; i += 1; end; s); r = u749(Sub749.new("q"), Sub749.new("z")); [r, r.class, u749(+"p", Sub749.new("w")), u749(Sub749.new("m"), "n")]  #=> ["qzzz", Sub749, "pwww", "mnnn"]
+module R749; refine(String) { def <<(o) = "refined" }; end; class C749; def plain(s) = (s << "p"; s << "p"); using R749; def ref(s) = (s << "r"; s << "r"); end; c = C749.new; [c.plain(+"x"), c.ref(+"x"), c.plain(+"y"), c.ref(+"y")]  #=> ["xpp", "refined", "ypp", "refined"]
+def v749; s = +""; a = []; i = 0; while i < 3; a << (s << "q"); i += 1; end; [a.map(&:object_id).uniq.size, a[0].equal?(s), s]; end; v749  #=> [1, true, "qqq"]
+def gs749; s = +""; GC.stress = true; i = 0; while i < 40; s << "ab" + i.to_s; i += 1; end; GC.stress = false; [s.size, s[0, 6], s[-4..]]; end; gs749  #=> [150, "ab0ab1", "ab39"]
