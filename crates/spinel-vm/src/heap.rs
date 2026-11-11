@@ -1565,6 +1565,16 @@ impl<'h> HandleScope<'h> {
         (at == address).then_some(id)
     }
 
+    /// The id of the class or module `value` is the object of, when it is
+    /// remembered: [`HandleScope::remembered_class_of`]'s lookup, for the
+    /// class object itself rather than for an instance of it.
+    pub(crate) fn remembered_class_id_of(&self, value: Value) -> Option<crate::class::ClassId> {
+        let address = value.as_heap()?.as_ptr() as usize;
+        let id = crate::class::ClassId::from_index(self.remembered_class_id(address)?);
+        let classes = self.classes();
+        (id.index() < classes.len() && classes.object(id) == value).then_some(id)
+    }
+
     pub(crate) fn remember_class_id(&mut self, address: usize, id: u32) {
         self.heap.class_ids[(address >> 4) % CLASS_IDS] = (address, id);
     }
@@ -2278,6 +2288,62 @@ impl<'h> HandleScope<'h> {
         }
         // SAFETY: as above, within the storage's length.
         Some(unsafe { ptr::read(values.slots().add(index)) })
+    }
+
+    /// [`HandleScope::cached_ivar`]'s write, for an [`Insn::SetIvar`] site:
+    /// `value` stored where `object` already keeps the name, when it wears
+    /// the shape the site's cache holds and is neither frozen nor chilled.
+    /// False, with nothing written, for everything else — a name the object
+    /// does not hold yet, which is a transition, a frozen object's
+    /// `FrozenError`, storage in the side table — which the full write
+    /// answers. Overwriting a slot changes no shape and grows no storage, so
+    /// it cannot collect.
+    ///
+    /// `object` must be reachable for the length of the call, as the frame's
+    /// `self` is, and `value` must be one the caller holds rooted or that is
+    /// immediate.
+    ///
+    /// [`Insn::SetIvar`]: crate::bytecode::Insn::SetIvar
+    #[inline]
+    pub(crate) fn cached_set_ivar(
+        &mut self,
+        object: Value,
+        slot: u32,
+        storage: usize,
+        value: Value,
+    ) -> bool {
+        let entry = self.heap.call_caches.ivar(slot);
+        let Some(object) = object.as_heap() else {
+            return false;
+        };
+        let object = Obj(object.cast());
+        // SAFETY: as in `cached_ivar`.
+        let header = unsafe { &*object.header() };
+        if (entry.shape == ShapeId::NONE)
+            | (header.shape != entry.shape)
+            | (header.flags & (SIDE_IVARS | FROZEN | CHILLED | CHILLED_SYMBOL) != 0)
+            | (header.payload != Payload::Slots)
+            | (storage >= header.len as usize)
+        {
+            return false;
+        }
+        // SAFETY: as in `cached_ivar`.
+        let values = unsafe { ptr::read(object.slots().add(storage)) };
+        let Some(values) = values.as_heap() else {
+            return false;
+        };
+        let values = Obj(values.cast());
+        // SAFETY: as in `cached_ivar`.
+        let header = unsafe { &*values.header() };
+        let index = entry.index as usize;
+        if (header.payload != Payload::Slots) | (index >= header.len as usize) {
+            return false;
+        }
+        self.storable(value);
+        // SAFETY: within the storage's length, as `set_slot` writes one. No
+        // write barrier, as for `set_slot`.
+        unsafe { ptr::write(values.slots().add(index), value) };
+        true
     }
 
     /// Whether the object's instance variables are kept in the side table.

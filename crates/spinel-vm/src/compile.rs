@@ -309,6 +309,9 @@ struct Compiler {
     /// How many `GetIvar` sites this body has, numbered from 0 until
     /// [`Compiler::finish`] moves them past the call sites.
     ivar_sites: u32,
+    /// How many `GetConst` sites this body has, numbered from 0 until
+    /// [`Compiler::finish`] moves them past the call and ivar sites.
+    const_sites: u32,
     /// Protected ranges, appended as each `begin` finishes, so an inner one is
     /// already in the list when its outer one arrives. The unwinder takes the
     /// first entry covering the program counter, so that order *is* "innermost
@@ -487,6 +490,7 @@ impl Compiler {
             class_defs: Vec::new(),
             once_regexps: 0,
             ivar_sites: 0,
+            const_sites: 0,
             catch_table: Vec::new(),
             retries: Vec::new(),
             open_ensures: 0,
@@ -631,10 +635,14 @@ impl Compiler {
             Some(self.source_encoding()).filter(|&encoding| encoding != crate::strings::UTF_8);
         // An ivar site's cache sits after the call sites in the heap's run for
         // this body, whose length is only known now.
+        // A constant site's sits after those.
         let calls = u32::try_from(self.call_sites.len()).expect("a body under 2^32 call sites");
+        let ivars = calls + self.ivar_sites;
         for insn in &mut self.insns {
-            if let Insn::GetIvar(_, site) = insn {
-                *site += calls;
+            match insn {
+                Insn::GetIvar(_, site) | Insn::SetIvar(_, site) => *site += calls,
+                Insn::GetConst(_, _, site) => *site += ivars,
+                _ => {}
             }
         }
         Iseq {
@@ -653,6 +661,7 @@ impl Compiler {
             class_defs: self.class_defs,
             once_regexps: self.once_regexps,
             ivar_sites: self.ivar_sites,
+            const_sites: self.const_sites,
             catch_table: self.catch_table,
             scope_barrier: self.scope_barrier,
             path: self.source.as_ref().map(|source| Arc::from(&*source.path)),
@@ -726,7 +735,7 @@ impl Compiler {
             Insn::AliasGlobal(_, _) | Insn::AliasGlobalSpecial(_, _) => 0,
             Insn::Pop
             | Insn::SetLocal(_, _)
-            | Insn::SetIvar(_)
+            | Insn::SetIvar(_, _)
             | Insn::SetGlobal(_)
             | Insn::SetCvar(_)
             | Insn::SetLastMatch
@@ -779,14 +788,14 @@ impl Compiler {
             // Pops the receiver, pushes the name it defined.
             | Insn::DefineSingleton(_)
             // Pops the module, pushes the constant.
-            | Insn::GetConst(_, ConstScope::Qualified)
+            | Insn::GetConst(_, ConstScope::Qualified, _)
             | Insn::DefinedConst(_, ConstScope::Qualified)
             // Pops the receiver, pushes the answer.
             | Insn::DefinedMethod(_) => 0,
             // Defines on the lexical scope, so it takes no receiver; pushes the
             // name it defined.
             Insn::DefineMethod(_)
-            | Insn::GetConst(_, ConstScope::Lexical | ConstScope::Top)
+            | Insn::GetConst(_, ConstScope::Lexical | ConstScope::Top, _)
             | Insn::DefinedConst(_, ConstScope::Lexical | ConstScope::Top)
             | Insn::DefinedSelfMethod(_)
             | Insn::DefinedYield
@@ -1062,7 +1071,7 @@ impl Compiler {
             // not exist, and `Kernel#Rational` can be redefined (#227).
             ExprKind::Rational(rational) => {
                 let name = self.symbol("Rational");
-                self.emit(Insn::GetConst(name, ConstScope::Top));
+                self.emit_get_const(name, ConstScope::Top);
                 self.int_literal(&rational.numerator, rational.base, span)?;
                 self.int_literal(&rational.denominator, rational.base, span)?;
                 self.emit_send("__literal__", 2);
@@ -1072,7 +1081,7 @@ impl Compiler {
             // handed to `Complex` as the imaginary part (#227).
             ExprKind::Imaginary(inner) => {
                 let name = self.symbol("Complex");
-                self.emit(Insn::GetConst(name, ConstScope::Top));
+                self.emit_get_const(name, ConstScope::Top);
                 self.expr(inner)?;
                 self.emit_send("__literal__", 1);
             }
@@ -1314,7 +1323,7 @@ impl Compiler {
 
             ExprKind::ConstPath(path) => {
                 let (symbol, how) = self.const_path(path, span)?;
-                self.emit(Insn::GetConst(symbol, how));
+                self.emit_get_const(symbol, how);
             }
             ExprKind::Class(class) => self.class_expr(class, span)?,
             ExprKind::Module(module) => self.module_expr(module, span)?,
@@ -1404,7 +1413,7 @@ impl Compiler {
     /// instead. CRuby's equivalents are C calls that look up nothing.
     fn push_const_name(&mut self, name: &str) {
         let symbol = self.symbol(name);
-        self.emit(Insn::GetConst(symbol, ConstScope::Top));
+        self.emit_get_const(symbol, ConstScope::Top);
     }
 
     /// Send `name` with `argc` positional arguments, no block and no keywords.
@@ -1684,7 +1693,7 @@ impl Compiler {
             },
             VarRef::Const(name) => {
                 let symbol = self.symbol(name);
-                self.emit(Insn::GetConst(symbol, ConstScope::Lexical));
+                self.emit_get_const(symbol, ConstScope::Lexical);
                 Ok(())
             }
             VarRef::It => {
@@ -2012,7 +2021,7 @@ impl Compiler {
             AssignOp::Binary(op) => {
                 push_module!();
                 push_module!();
-                self.emit(Insn::GetConst(name, how));
+                self.emit_get_const(name, how);
                 self.expr(&assign.value)?;
                 match BinOp::from_name(op) {
                     Some(op) => self.emit(Insn::BinOp(op)),
@@ -2029,7 +2038,7 @@ impl Compiler {
                 self.emit(Insn::DefinedConst(name, how));
                 let undefined = self.emit_jump(Insn::JumpUnless);
                 push_module!();
-                self.emit(Insn::GetConst(name, how));
+                self.emit_get_const(name, how);
                 let keep = self.emit_jump(Insn::JumpIfKeep);
                 self.emit(Insn::Pop);
                 self.patch_here(undefined);
@@ -2042,7 +2051,7 @@ impl Compiler {
                 // `W &&= 7` on an undefined constant raises `NameError`, so
                 // this one reads outright.
                 push_module!();
-                self.emit(Insn::GetConst(name, how));
+                self.emit_get_const(name, how);
                 let keep = self.emit_jump(Insn::JumpUnlessKeep);
                 self.emit(Insn::Pop);
                 push_module!();
@@ -2058,6 +2067,9 @@ impl Compiler {
     /// is not, a plain or compound write to a local or an instance variable
     /// pops straight into its target, and anything else pops afterwards.
     fn assign(&mut self, assign: &Assign, span: Span, keep: bool) -> Emit {
+        if !keep && self.multi_assign_direct(assign)? {
+            return Ok(());
+        }
         let into_target = !keep
             && matches!(assign.op, AssignOp::Assign | AssignOp::Binary(_))
             && matches!(
@@ -2255,6 +2267,64 @@ impl Compiler {
         self.spread_into(multi, &mut prepared, span)?;
         self.emit(Insn::Pop);
         Ok(())
+    }
+
+    /// `a, b = x, y` as a statement, when nothing about it needs the spread:
+    /// the right-hand side is an array literal with no splat, and every target
+    /// is a different local or instance variable of `self`, with no `*` and
+    /// nothing after one. Then the values are pushed in order and popped into
+    /// the targets last to first, with a missing value `nil` and an extra one
+    /// evaluated and dropped, which is how YARV compiles the same statement
+    /// (#750). Answers whether it compiled it; `false` leaves the general
+    /// path to.
+    ///
+    /// Nothing can tell the order apart. Every value is evaluated before any
+    /// target is written, so `a, b = b, a` swaps; neither write can run Ruby
+    /// code; and a frozen `self` refuses the first instance variable the same
+    /// way whichever it is, since none was written before it. Two targets
+    /// naming one variable would let the order show — the last write wins —
+    /// so such a statement takes the general path.
+    fn multi_assign_direct(&mut self, assign: &Assign) -> Result<bool, Unsupported> {
+        let TargetKind::Multi(multi) = &assign.target.kind else {
+            return Ok(false);
+        };
+        let ExprKind::Array(values) = &assign.value.kind else {
+            return Ok(false);
+        };
+        if assign.op != AssignOp::Assign
+            || multi.rest.is_some()
+            || !multi.rights.is_empty()
+            || values
+                .iter()
+                .any(|value| matches!(value.kind, ExprKind::Splat(_)))
+        {
+            return Ok(false);
+        }
+        let mut seen: Vec<&VarRef> = Vec::with_capacity(multi.lefts.len());
+        for target in &multi.lefts {
+            match &target.kind {
+                TargetKind::Var(var @ (VarRef::Local { .. } | VarRef::Instance(_)))
+                    if !seen.contains(&var) =>
+                {
+                    seen.push(var);
+                }
+                _ => return Ok(false),
+            }
+        }
+        for value in values {
+            self.expr(value)?;
+        }
+        for _ in multi.lefts.len()..values.len() {
+            self.emit(Insn::Pop);
+        }
+        for _ in values.len()..multi.lefts.len() {
+            self.emit(Insn::PushNil);
+        }
+        for target in multi.lefts.iter().rev() {
+            let slot = self.target_slot(target)?;
+            self.emit_set(&slot);
+        }
+        Ok(true)
     }
 
     /// Prepare every target in `multi`, in the order [`Self::spread_into`] will
@@ -2577,6 +2647,14 @@ impl Compiler {
         }
     }
 
+    /// Read a constant through a site of its own, which is what gives each
+    /// read an inline cache.
+    fn emit_get_const(&mut self, symbol: u32, how: ConstScope) {
+        let site = self.const_sites;
+        self.const_sites += 1;
+        self.emit(Insn::GetConst(symbol, how, site));
+    }
+
     /// Read an instance variable of `self` through a site of its own, which
     /// is what gives each read an inline cache.
     fn emit_get_ivar(&mut self, symbol: u32) {
@@ -2590,7 +2668,11 @@ impl Compiler {
     fn emit_set(&mut self, slot: &Slot) {
         match slot {
             Slot::Local(slot, depth) => self.emit(Insn::SetLocal(*slot, *depth)),
-            Slot::Ivar(symbol) => self.emit(Insn::SetIvar(*symbol)),
+            Slot::Ivar(symbol) => {
+                let site = self.ivar_sites;
+                self.ivar_sites += 1;
+                self.emit(Insn::SetIvar(*symbol, site));
+            }
             Slot::Global(symbol) => self.emit(Insn::SetGlobal(*symbol)),
             Slot::Cvar(symbol) => self.emit(Insn::SetCvar(*symbol)),
             Slot::LastMatch => self.emit(Insn::SetLastMatch),
@@ -3418,7 +3500,7 @@ impl Compiler {
             Some((symbol, ConstScope::Qualified)) => Ok((symbol, true)),
             Some((symbol, ConstScope::Top)) => {
                 let object = self.symbol("Object");
-                self.emit(Insn::GetConst(object, ConstScope::Top));
+                self.emit_get_const(object, ConstScope::Top);
                 Ok((symbol, true))
             }
             None => Err(Unsupported::at("a dynamic class name", path.span)),
@@ -5128,7 +5210,7 @@ impl Compiler {
                 // which is the entire reason `NoMemoryError` and `SystemExit`
                 // are not `StandardError` descendants in the oracle table.
                 let name = self.symbol("StandardError");
-                self.emit(Insn::GetConst(name, ConstScope::Top));
+                self.emit_get_const(name, ConstScope::Top);
                 self.emit(Insn::CheckMatch);
                 hits.push(self.emit_jump(Insn::JumpIf));
             } else {

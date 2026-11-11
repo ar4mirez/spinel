@@ -18,7 +18,7 @@ use std::ptr::NonNull;
 use std::sync::Arc;
 
 use crate::bytecode::Iseq;
-use crate::class::{ClassId, Method};
+use crate::class::{ClassId, CrefId, Method};
 use crate::method::Native;
 use crate::shape::ShapeId;
 use crate::value::{SymbolId, Value};
@@ -60,6 +60,29 @@ impl IvarEntry {
         shape: ShapeId::NONE,
         index: 0,
     };
+}
+
+/// What an [`Insn::GetConst`] site found last time: the value, for a read
+/// from that lexical scope against that module, at that constant epoch (see
+/// `Classes::const_epoch`).
+///
+/// The epoch is the whole guard: everything that can change what a read
+/// answers moves it, so an entry from an older epoch is never believed. Nor
+/// is one's value ever read then, which is why a stale entry may go on
+/// holding a value the collector has since freed — it is a word compared
+/// with nothing, as a stale call-cache entry's body is — while a current
+/// entry's value is still in the constant table it came from, which roots
+/// it. The scope and the module are in the key because one site can run
+/// under more than one: a body `class_eval`'d into two classes reads
+/// lexically from both, and `A::X` reads from whatever `A` is.
+///
+/// [`Insn::GetConst`]: crate::bytecode::Insn::GetConst
+#[derive(Debug, Clone, Copy)]
+pub struct ConstEntry {
+    pub epoch: u64,
+    pub cref: CrefId,
+    pub from: ClassId,
+    pub value: Value,
 }
 
 /// How a call from one site binds the method its entry holds, worked out the
@@ -227,6 +250,10 @@ pub struct CallCaches {
     /// [`Iseq::ivar_sites`], so each table has a slot the other never reads.
     /// Four bytes a call site is cheaper than a second base per frame.
     ivars: Vec<IvarEntry>,
+    /// The constant sites' caches, indexed as `entries` is, for the same
+    /// reason: an `Iseq`'s run there is its call sites, its ivar sites and
+    /// then its [`Iseq::const_sites`].
+    consts: Vec<Option<ConstEntry>>,
     /// Where each `Iseq`'s run starts, by `Arc` address.
     ///
     /// An address is only a safe key because `iseqs` below holds a clone of the
@@ -259,6 +286,7 @@ impl Default for CallCaches {
             entries: Vec::new(),
             plans: Vec::new(),
             ivars: Vec::new(),
+            consts: Vec::new(),
             bases: HashMap::new(),
             iseqs: Vec::new(),
             recent: [(0, 0); RECENT],
@@ -310,10 +338,11 @@ impl CallCaches {
             return (base, entered);
         }
         let base = u32::try_from(self.entries.len()).expect("a heap under 2^32 call sites");
-        let run = iseq.call_sites.len() + iseq.ivar_sites as usize;
+        let run = iseq.call_sites.len() + iseq.ivar_sites as usize + iseq.const_sites as usize;
         self.entries.resize(self.entries.len() + run, None);
         self.plans.resize(self.entries.len(), Plan::Unknown);
         self.ivars.resize(self.entries.len(), IvarEntry::EMPTY);
+        self.consts.resize(self.entries.len(), None);
         self.bases.insert(key, base);
         self.iseqs.push(Arc::clone(iseq));
         self.recent[recent] = (key, base);
@@ -401,6 +430,44 @@ impl CallCaches {
     pub fn fill_ivar(&mut self, slot: u32, shape: ShapeId, index: u16) {
         debug_assert!(shape != ShapeId::NONE, "a cached read of nothing");
         self.ivars[slot as usize] = IvarEntry { shape, index };
+    }
+
+    /// What the [`Insn::GetConst`] site at `slot` found last, if it found
+    /// something at epoch `epoch`, reading from `cref` against `from`.
+    ///
+    /// # Panics
+    ///
+    /// As [`CallCaches::get`].
+    ///
+    /// [`Insn::GetConst`]: crate::bytecode::Insn::GetConst
+    #[inline]
+    #[must_use]
+    pub fn constant(&self, slot: u32, epoch: u64, cref: CrefId, from: ClassId) -> Option<Value> {
+        let entry = self.consts[slot as usize]?;
+        (entry.epoch == epoch && entry.cref == cref && entry.from == from).then_some(entry.value)
+    }
+
+    /// [`CallCaches::constant`] for a site that reads lexically or from the
+    /// top level, whose module follows from `cref` alone, so is not asked.
+    ///
+    /// # Panics
+    ///
+    /// As [`CallCaches::get`].
+    #[inline]
+    #[must_use]
+    pub fn scoped_constant(&self, slot: u32, epoch: u64, cref: CrefId) -> Option<Value> {
+        let entry = self.consts[slot as usize]?;
+        (entry.epoch == epoch && entry.cref == cref).then_some(entry.value)
+    }
+
+    /// Remember what the constant site at `slot` found. Monomorphic, as
+    /// [`CallCaches::fill`] is.
+    ///
+    /// # Panics
+    ///
+    /// As [`CallCaches::get`].
+    pub fn fill_constant(&mut self, slot: u32, entry: ConstEntry) {
+        self.consts[slot as usize] = Some(entry);
     }
 
     /// How many call sites are currently memoised. For tests, the way
@@ -493,6 +560,51 @@ mod tests {
         assert_eq!((entry.shape, entry.index), (ShapeId(7), 4));
         assert_eq!(caches.ivar(slot - 1).shape, ShapeId::NONE);
         assert_eq!(caches.filled(), 0, "an ivar slot is not a call site");
+    }
+
+    /// A body's constant sites come after its ivar sites in its run, and an
+    /// entry answers only for the epoch, scope and module it was filled for.
+    #[test]
+    fn a_constant_entry_answers_only_for_its_epoch_scope_and_module() {
+        let mut caches = CallCaches::new();
+        let body = Arc::new(Iseq {
+            ivar_sites: 2,
+            const_sites: 3,
+            ..(*iseq_with(1)).clone()
+        });
+        let base = caches.base(&body);
+        assert_eq!(caches.base(&iseq_with(1)), base + 6);
+
+        let slot = base + 1 + 2 + 1;
+        let (scope, other_scope) = (CrefId::from_index(0), CrefId::from_index(1));
+        let (module, other_module) = (ClassId::from_index(3), ClassId::from_index(4));
+        let value = Value::fixnum(7).expect("a fixnum");
+        assert_eq!(
+            caches.constant(slot, 0, scope, module),
+            None,
+            "nothing read yet"
+        );
+        caches.fill_constant(
+            slot,
+            ConstEntry {
+                epoch: 5,
+                cref: scope,
+                from: module,
+                value,
+            },
+        );
+        assert_eq!(caches.constant(slot, 5, scope, module), Some(value));
+        assert_eq!(caches.scoped_constant(slot, 5, scope), Some(value));
+        assert_eq!(
+            caches.constant(slot, 6, scope, module),
+            None,
+            "a later epoch"
+        );
+        assert_eq!(caches.constant(slot, 5, other_scope, module), None);
+        assert_eq!(caches.constant(slot, 5, scope, other_module), None);
+        assert_eq!(caches.scoped_constant(slot, 5, other_scope), None);
+        assert_eq!(caches.constant(slot - 1, 5, scope, module), None);
+        assert_eq!(caches.filled(), 0, "a constant slot is not a call site");
     }
 
     /// The invariant that makes an address a legal key: the table holds a clone,
