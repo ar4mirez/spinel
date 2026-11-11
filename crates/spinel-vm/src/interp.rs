@@ -2947,6 +2947,12 @@ fn run<'h>(
                             operands: "a value wider than a fixnum",
                         })?);
                     }
+                    // The light loop runs it; here for a run of the closure
+                    // that reaches one anyway. The compiler only emits one
+                    // for a double that fits.
+                    Insn::PushFloat(bits) => {
+                        stack.push(crate::float::value(scope, f64::from_bits(bits)));
+                    }
                     Insn::PushLit(index) => {
                         let literal = frames[top].iseq.literals[index as usize].clone();
                         let value = materialise(scope, &literal, string_class)?;
@@ -5469,79 +5475,10 @@ fn native_light(
     let is_string =
         |scope: &HandleScope<'_>, class| scope.classes().repr(class) == Some(Builtin::String);
     match plan.native {
-        // `attr_reader`'s method: the read `GetIvar` makes, with the site's
-        // own slot of the ivar caches as its cache — a call site's slot
-        // there is one no `GetIvar` uses (see `CallCaches::ivars`). A miss
-        // is the full read, which takes no handle that outlives it and
-        // allocates nothing, and fills the slot as `GetIvar`'s miss does.
-        Native::IvarReader(name) => {
-            if let Some(value) = scope.cached_ivar(receiver, slot, SLOT_IVARS) {
-                return Some(value);
-            }
-            let (value, found) = ivar_read(scope, receiver, name);
-            if let Some((shape, index)) = found {
-                scope.call_caches_mut().fill_ivar(slot, shape, index);
-            }
-            Some(value)
-        }
-        // `__math__(:name, x)` and `(:name, x, y)` for operands that are
-        // fixnums or flonums and an answer that is a flonum, as the
-        // primitive's own arm answers them. A heap Float or a bignum operand,
-        // an answer that needs a heap Float, and the operations that answer
-        // something else are the primitive's.
-        Native::Math => {
-            let operand = |value: Value| match value.as_fixnum() {
-                Some(n) => Some(n as f64),
-                None => value.as_flonum(),
-            };
-            let (name, x, second) = match *args {
-                [name, x] => (name.as_symbol()?, operand(x)?, 0.0),
-                [name, x, y] => (name.as_symbol()?, operand(x)?, operand(y)?),
-                _ => return None,
-            };
-            let value =
-                crate::shared::symbols::with_bytes(name, |name| math_float(name, x, second))??;
-            Value::flonum(value)
-        }
-        // `__reflect_kind_of__(object, module)`, `Module#===`'s question,
-        // when the object's class is known without a handle.
-        Native::Reflect(ReflectOp::KindOf) => {
-            let &[object, module] = args else { return None };
-            let class = known_class_of(scope, object)?;
-            let module = match scope.remembered_class_id_of(module) {
-                Some(module) => Some(module),
-                None => {
-                    // Remembered from here on, as `class_of` remembers the
-                    // class of an instance, which cannot collect.
-                    let found = class_id_of(&mut scope.nested(), module);
-                    if let (Some(id), Some(at)) = (found, module.as_heap()) {
-                        scope.remember_class_id(at.as_ptr() as usize, id.index() as u32);
-                    }
-                    found
-                }
-            };
-            Some(match module {
-                Some(module) => bool_value(scope.classes().reaches(class, module)),
-                None => Value::FALSE,
-            })
-        }
-        // `a[i]` for an index `index_arg` reads, as the primitive's own arm
-        // answers it: the element, or nil past either end. A Range, a pair,
-        // and anything that needs `to_int` are the primitive's.
-        Native::ArrayIndex => {
-            let &[index] = args else { return None };
-            let index = index_arg(index)?;
-            if heap_kind(scope, receiver) != Some(HeapKind::Array) {
-                return None;
-            }
-            let mut nested = scope.nested();
-            let array = nested.root(receiver);
-            let length = array_len(&mut nested, array);
-            Some(match resolve_index(index, length) {
-                Some(index) => array_get(&mut nested, array, index),
-                None => Value::NIL,
-            })
-        }
+        Native::IvarReader(name) => light_ivar_reader(scope, slot, receiver, name),
+        Native::Math => light_math(args),
+        Native::Reflect(ReflectOp::KindOf) => light_kind_of(scope, args),
+        Native::ArrayIndex => light_array_index(scope, receiver, args),
         Native::StringAppend(_) => {
             let &[other] = args else { return None };
             if !is_string(scope, plan.class) {
@@ -5556,6 +5493,98 @@ fn native_light(
         }
         _ => None,
     }
+}
+
+/// `attr_reader`'s method: the read `GetIvar` makes, with the site's own
+/// slot of the ivar caches as its cache — a call site's slot there is one no
+/// `GetIvar` uses (see `CallCaches::ivars`). A miss is the full read, which
+/// takes no handle that outlives it and allocates nothing, and fills the
+/// slot as `GetIvar`'s miss does.
+///
+/// This and the light forms after it are out of line, so that the one a
+/// loop of appends runs in [`native_light`] keeps the shape it had.
+#[inline(never)]
+fn light_ivar_reader(
+    scope: &mut HandleScope<'_>,
+    slot: u32,
+    receiver: Value,
+    name: SymbolId,
+) -> Option<Value> {
+    if let Some(value) = scope.cached_ivar(receiver, slot, SLOT_IVARS) {
+        return Some(value);
+    }
+    let (value, found) = ivar_read(scope, receiver, name);
+    if let Some((shape, index)) = found {
+        scope.call_caches_mut().fill_ivar(slot, shape, index);
+    }
+    Some(value)
+}
+
+/// `__math__(:name, x)` and `(:name, x, y)` for operands that are
+/// fixnums or flonums and an answer that is a flonum, as the
+/// primitive's own arm answers them. A heap Float or a bignum operand,
+/// an answer that needs a heap Float, and the operations that answer
+/// something else are the primitive's.
+#[inline(never)]
+fn light_math(args: &[Value]) -> Option<Value> {
+    let operand = |value: Value| match value.as_fixnum() {
+        Some(n) => Some(n as f64),
+        None => value.as_flonum(),
+    };
+    let (name, x, second) = match *args {
+        [name, x] => (name.as_symbol()?, operand(x)?, 0.0),
+        [name, x, y] => (name.as_symbol()?, operand(x)?, operand(y)?),
+        _ => return None,
+    };
+    let value = crate::shared::symbols::with_bytes(name, |name| math_float(name, x, second))??;
+    Value::flonum(value)
+}
+
+/// `__reflect_kind_of__(object, module)`, `Module#===`'s question,
+/// when the object's class is known without a handle.
+#[inline(never)]
+fn light_kind_of(scope: &mut HandleScope<'_>, args: &[Value]) -> Option<Value> {
+    let &[object, module] = args else { return None };
+    let class = known_class_of(scope, object)?;
+    let module = match scope.remembered_class_id_of(module) {
+        Some(module) => Some(module),
+        None => {
+            // Remembered from here on, as `class_of` remembers the class of
+            // an instance, which cannot collect.
+            let found = class_id_of(&mut scope.nested(), module);
+            if let (Some(id), Some(at)) = (found, module.as_heap()) {
+                scope.remember_class_id(at.as_ptr() as usize, id.index() as u32);
+            }
+            found
+        }
+    };
+    Some(match module {
+        Some(module) => bool_value(scope.classes().reaches(class, module)),
+        None => Value::FALSE,
+    })
+}
+
+/// `a[i]` for an index `index_arg` reads, as the primitive's own arm
+/// answers it: the element, or nil past either end. A Range, a pair,
+/// and anything that needs `to_int` are the primitive's.
+#[inline(never)]
+fn light_array_index(
+    scope: &mut HandleScope<'_>,
+    receiver: Value,
+    args: &[Value],
+) -> Option<Value> {
+    let &[index] = args else { return None };
+    let index = index_arg(index)?;
+    if heap_kind(scope, receiver) != Some(HeapKind::Array) {
+        return None;
+    }
+    let mut nested = scope.nested();
+    let array = nested.root(receiver);
+    let length = array_len(&mut nested, array);
+    Some(match resolve_index(index, length) {
+        Some(index) => array_get(&mut nested, array, index),
+        None => Value::NIL,
+    })
 }
 
 /// `Insn::Send` to a primitive's light form, when the site's plan is one:
@@ -17597,13 +17626,6 @@ fn light_step<const LIGHT: bool>(
             Some(value) => stack.push(value),
             None => return 0,
         },
-        // A Float literal that fits an immediate is that immediate, which
-        // `materialise` would answer without the heap. Every other literal
-        // allocates, so is the closure's.
-        Insn::PushLit(index) => match light_literal(frame, index) {
-            Some(value) => stack.push(value),
-            None => return 0,
-        },
         Insn::Pop => {
             stack.pop();
         }
@@ -17663,38 +17685,33 @@ fn light_step<const LIGHT: bool>(
                 *pc = jump(*pc, displacement);
             }
         }
+        // A Float literal that fits a flonum; a constant read from a scope
+        // that its site's cache answers; and an instance-variable write its
+        // site's cache answers, of an immediate in a light run, as its
+        // `SetLocal` takes one (#750). One arm and one call out of line:
+        // every instruction added here costs the loops of the others a little,
+        // whether or not they run it, and of the arrangements measured this
+        // one cost them least — see `light_more`.
+        Insn::PushFloat(_) | Insn::GetConst(..) | Insn::SetIvar(..) => {
+            let top = stack.last();
+            if LIGHT && matches!(insn, Insn::SetIvar(..)) && top.is_some_and(|v| !v.is_immediate())
+            {
+                return 0;
+            }
+            match light_more(scope, frame, insn, top) {
+                More::Push(value) => stack.push(value),
+                More::Pop => {
+                    stack.pop();
+                }
+                More::Decline => return 0,
+            }
+        }
         // A read the site's inline cache answers: the receiver wears the
         // shape it held last time. Anything else is the closure's, which
         // fills the cache.
         //
         // A light run reads through a view of `self` it takes at its first
         // such read, since nothing it does can change what that view saw.
-        // A constant read the site's inline cache answers, from a scope
-        // rather than from a module on the stack: the `GetConst` arm's hit,
-        // less `const_base`, whose answer for a lexical or top-level read
-        // follows from the frame's scope, which the entry is keyed by. The
-        // value is a constant's, which the constant table roots.
-        Insn::GetConst(name, how, site) if how != ConstScope::Qualified => {
-            match light_constant(scope, frame, name, site) {
-                Some(value) => stack.push(value),
-                None => return 0,
-            }
-        }
-        // A write the site's inline cache answers: an overwrite of a name
-        // `self` already holds, in the shape it held last time. A light run
-        // takes only an immediate, as its `SetLocal` does, and lets the view
-        // of `self` its reads took go, so the next read makes another.
-        Insn::SetIvar(_, site) => {
-            let value = stack.last().expect("setivar on an empty stack");
-            if LIGHT && !value.is_immediate() {
-                return 0;
-            }
-            lazy.view = None;
-            if !light_set_ivar(scope, frame, site, value) {
-                return 0;
-            }
-            stack.pop();
-        }
         Insn::GetIvar(_, site) => {
             let slot = frame.cache_base + site;
             let value = if LIGHT {
@@ -17703,7 +17720,8 @@ fn light_step<const LIGHT: bool>(
                     .get_or_insert_with(|| scope.ivar_view(frame.receiver, SLOT_IVARS));
                 // SAFETY: the view is `light_stretch`'s, made during this run,
                 // and a light run neither allocates, collects, assigns an
-                // instance variable nor fills a cache: a miss stops it.
+                // instance variable other than in place, nor fills a cache: a
+                // miss stops it.
                 unsafe { view.read(slot) }
             } else {
                 scope.cached_ivar(frame.receiver, slot, SLOT_IVARS)
@@ -17730,10 +17748,18 @@ fn light_step<const LIGHT: bool>(
             let (left, right) = (stack.get(depth - 2), stack.get(depth - 1));
             let value = match fixnum_binop(op, left, right) {
                 Some(value) => value,
-                None => match light_flonum_binop(scope, frame, lazy, op, left, right) {
-                    Some(value) => value,
-                    None => return 0,
-                },
+                None => {
+                    let Some(value) = light_flonum_binop(op, left, right) else {
+                        return 0;
+                    };
+                    let ops = *lazy
+                        .float_ops
+                        .get_or_insert_with(|| native_ops(scope, frame, 1));
+                    if ops & (1 << op as usize) == 0 {
+                        return 0;
+                    }
+                    value
+                }
             };
             stack.truncate(depth - 2);
             // The answer is a fixnum, a flonum or a boolean, so immediate: nothing
@@ -17824,55 +17850,70 @@ fn fixnum_binop(op: BinOp, left: Value, right: Value) -> Option<Value> {
     }
 }
 
-/// [`light_step`]'s `PushLit`: a Float literal that fits a flonum. Out of
-/// line, as the rest of these, so that the instructions `light_step` has
-/// always run keep the registers they had.
+/// What [`light_more`] answers [`light_step`].
+enum More {
+    Push(Value),
+    Pop,
+    Decline,
+}
+
+/// [`light_step`]'s rarer instructions, out of line: a Float literal that
+/// fits a flonum; a `GetConst` from a scope whose site's cache holds the
+/// read for that scope at the current epoch, with no autoload waiting on
+/// the name; and a `SetIvar` of `top` that [`HandleScope::cached_set_ivar`]
+/// answers on `self`. `Decline` leaves everything as it was.
+///
+/// Each instruction `light_step` runs is code in every loop of light
+/// instructions, and costs the others a few instructions each, run or not.
+/// Measured in instructions retired against main (#750), these three as one
+/// arm and one call, taking values rather than the run's operand stack or
+/// [`Lazy`], cost those loops least: inline, or as an arm each, or called
+/// from outside `light_step`'s loop, they cost more.
 #[inline(never)]
-fn light_literal(frame: &Call, index: u32) -> Option<Value> {
-    match frame.iseq.literals.get(index as usize) {
-        Some(&Literal::Float(f)) => Value::flonum(f),
-        _ => None,
+fn light_more(scope: &mut HandleScope<'_>, frame: &Call, insn: Insn, top: Option<Value>) -> More {
+    match insn {
+        Insn::PushFloat(bits) => match Value::flonum(f64::from_bits(bits)) {
+            Some(value) => More::Push(value),
+            None => More::Decline,
+        },
+        Insn::GetConst(name, how, site) if how != ConstScope::Qualified => {
+            let symbol = frame.iseq.symbol_ids()[name as usize];
+            if scope.any_autoloads() && scope.autoloads(symbol) {
+                return More::Decline;
+            }
+            let epoch = scope.classes().const_epoch();
+            match scope
+                .call_caches()
+                .scoped_constant(frame.cache_base + site, epoch, frame.cref)
+            {
+                Some(value) => More::Push(value),
+                None => More::Decline,
+            }
+        }
+        Insn::SetIvar(_, site) => match top {
+            Some(value)
+                if scope.cached_set_ivar(
+                    frame.receiver,
+                    frame.cache_base + site,
+                    SLOT_IVARS,
+                    value,
+                ) =>
+            {
+                More::Pop
+            }
+            _ => More::Decline,
+        },
+        _ => More::Decline,
     }
 }
 
-/// [`light_step`]'s `GetConst` from a scope: the site's cache, when it holds
-/// the read for this scope at the current epoch and no autoload waits on
-/// the name.
+/// [`flonum_binop`] out of line, for [`light_step`]'s `BinOp` of a pair that
+/// is not two fixnums, for the reason [`light_more`] is. It takes the
+/// operands alone: handed the light run's state, that state would have to
+/// live in memory for the whole run.
 #[inline(never)]
-fn light_constant(scope: &HandleScope<'_>, frame: &Call, name: u32, site: u32) -> Option<Value> {
-    let symbol = frame.iseq.symbol_ids()[name as usize];
-    if scope.any_autoloads() && scope.autoloads(symbol) {
-        return None;
-    }
-    let epoch = scope.classes().const_epoch();
-    scope
-        .call_caches()
-        .scoped_constant(frame.cache_base + site, epoch, frame.cref)
-}
-
-/// [`light_step`]'s `SetIvar`: [`HandleScope::cached_set_ivar`] on `self`.
-#[inline(never)]
-fn light_set_ivar(scope: &mut HandleScope<'_>, frame: &Call, site: u32, value: Value) -> bool {
-    scope.cached_set_ivar(frame.receiver, frame.cache_base + site, SLOT_IVARS, value)
-}
-
-/// [`light_step`]'s `BinOp` for a pair that is not two fixnums: two flonums
-/// under an operator `Float` still has as its own. Out of line, so that the
-/// fixnum case keeps the registers it had.
-#[inline(never)]
-fn light_flonum_binop(
-    scope: &mut HandleScope<'_>,
-    frame: &Call,
-    lazy: &mut Lazy,
-    op: BinOp,
-    left: Value,
-    right: Value,
-) -> Option<Value> {
-    let value = flonum_binop(op, left, right)?;
-    let ops = *lazy
-        .float_ops
-        .get_or_insert_with(|| native_ops(scope, frame, 1));
-    (ops & (1 << op as usize) != 0).then_some(value)
+fn light_flonum_binop(op: BinOp, left: Value, right: Value) -> Option<Value> {
+    flonum_binop(op, left, right)
 }
 
 /// `left op right` for two flonums whose answer is a flonum or a boolean,
@@ -18403,7 +18444,6 @@ fn materialise<'h>(
     string_class: Handle<'h>,
 ) -> Result<Value, Error> {
     match literal {
-        Literal::Float(f) => Ok(Value::flonum(*f).expect("checked at compile time")),
         // A fresh cell per evaluation, as a String literal is.
         Literal::BoxedFloat(f) => Ok(crate::float::value(scope, *f)),
         Literal::BigInt(digits) => {
@@ -25831,7 +25871,7 @@ mod tests {
         let program = Iseq {
             name: "<test>".into(),
             insns: vec![
-                Insn::PushLit(0),
+                Insn::PushFloat(1.5f64.to_bits()),
                 Insn::SetIvar(0, 1),
                 Insn::PushInt(0),
                 Insn::SetLocal(0, 0),
@@ -25842,10 +25882,10 @@ mod tests {
                 Insn::JumpUnless(13),
                 // @a = @a + 0.25; @b = "s"; ::Object
                 Insn::GetIvar(0, 0),
-                Insn::PushLit(1),
+                Insn::PushFloat(0.25f64.to_bits()),
                 Insn::BinOp(BinOp::Add),
                 Insn::SetIvar(0, 1),
-                Insn::PushLit(2),
+                Insn::PushLit(0),
                 Insn::SetIvar(1, 2),
                 Insn::GetConst(2, ConstScope::Top, 4),
                 Insn::Pop,
@@ -25861,11 +25901,7 @@ mod tests {
                 Insn::NewArray(3),
                 Insn::Leave,
             ],
-            literals: vec![
-                Literal::Float(1.5),
-                Literal::Float(0.25),
-                Literal::Str(Box::from(&b"s"[..]), crate::strings::UTF_8),
-            ],
+            literals: vec![Literal::Str(Box::from(&b"s"[..]), crate::strings::UTF_8)],
             symbols: vec!["@a".into(), "@b".into(), "Object".into()],
             locals: vec!["i".into()],
             ivar_sites: 4,

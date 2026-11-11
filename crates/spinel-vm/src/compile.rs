@@ -700,6 +700,7 @@ impl Compiler {
             | Insn::PushFalse
             | Insn::PushSelf
             | Insn::PushInt(_)
+            | Insn::PushFloat(_)
             | Insn::PushLit(_)
             | Insn::PushSym(_)
             | Insn::LastMatch(_)
@@ -1087,13 +1088,12 @@ impl Compiler {
             }
 
             ExprKind::Float(f) => {
-                let literal = if Value::flonum(*f).is_some() {
-                    Literal::Float(*f)
+                if Value::flonum(*f).is_some() {
+                    self.emit(Insn::PushFloat(f.to_bits()));
                 } else {
-                    Literal::BoxedFloat(*f)
-                };
-                let index = self.literal(literal);
-                self.emit(Insn::PushLit(index));
+                    let index = self.literal(Literal::BoxedFloat(*f));
+                    self.emit(Insn::PushLit(index));
+                }
             }
 
             ExprKind::Str(string) => match flat_bytes(&string.parts) {

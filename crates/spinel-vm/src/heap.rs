@@ -150,8 +150,11 @@ const _: () = {
 /// Raw pointers, because what makes them good is not something a borrow can
 /// say: the object keeps its shape and its storage, and no cache is filled,
 /// for as long as nothing allocates, collects, assigns an instance variable
-/// or runs the closure that fills caches. A run of the interpreter's light
-/// instructions does none of those.
+/// other than in place or runs the closure that fills caches. A run of the
+/// interpreter's light instructions does none of those: the only write it
+/// makes, [`HandleScope::cached_set_ivar`]'s, overwrites a slot of storage
+/// that stays where it was, in the shape it had, and a read through the view
+/// after it reads the slot as it is then.
 pub(crate) struct IvarView {
     /// The object's shape, or [`IvarView::NOTHING`] when its instance
     /// variables are not in storage of its own: then nothing is answered.
@@ -173,8 +176,9 @@ impl IvarView {
     /// # Safety
     ///
     /// Nothing may have allocated, collected, assigned an instance variable
-    /// or filled a cache since [`HandleScope::ivar_view`] made this view, on
-    /// the heap it was made from.
+    /// other than through [`HandleScope::cached_set_ivar`], or filled a
+    /// cache since [`HandleScope::ivar_view`] made this view, on the heap it
+    /// was made from.
     #[inline(always)]
     pub(crate) unsafe fn read(&self, slot: u32) -> Option<Value> {
         let slot = slot as usize;

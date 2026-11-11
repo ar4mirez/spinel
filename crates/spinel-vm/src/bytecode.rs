@@ -53,6 +53,11 @@ pub enum Insn {
     /// An integer that fits a fixnum. Larger ones go through the literal pool
     /// once bignums exist.
     PushInt(i64),
+    /// A Float that fits a flonum, as the bits of the double: a description
+    /// of the number, as a literal is, not a [`Value`](crate::Value), so the
+    /// `Iseq` stays position-independent. Pushed without the literal pool,
+    /// which is what lets the light loop run it (#750).
+    PushFloat(u64),
     /// Index into [`Iseq::literals`].
     PushLit(u32),
     /// Index into [`Iseq::symbols`].
@@ -646,12 +651,9 @@ pub enum Literal {
     /// bignums exist.
     BigInt(Box<str>),
     /// Outside flonum range — NaN, the infinities, `-0.0`, the extremes — so it
-    /// is boxed: a fresh heap cell each time the literal is evaluated.
+    /// is boxed: a fresh heap cell each time the literal is evaluated. A float
+    /// that fits an immediate is [`Insn::PushFloat`] instead.
     BoxedFloat(f64),
-    /// A float that fits an immediate. Held here rather than in the instruction
-    /// because `Insn` stays `Copy` and small either way, and this keeps one
-    /// materialisation path.
-    Float(f64),
     /// Ruby strings are byte strings, not UTF-8: the bytes, and the index of
     /// the encoding they are in (#19).
     Str(Box<[u8]>, u8),
