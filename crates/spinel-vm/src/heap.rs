@@ -296,18 +296,23 @@ pub enum ParseFailure {
 /// How many class objects [`Heap`] remembers the ids of.
 const CLASS_IDS: usize = 64;
 
-/// The entry of `class_ids` the class object at `address` is remembered in.
+/// The entry of `class_ids_behind` the class object at `address` waits
+/// in, once another took its entry in `class_ids`.
 ///
-/// Fibonacci hashing of the address rather than its low bits: a class
-/// object is a cell of 128 or 256 bytes, so `(address >> 4) % CLASS_IDS`
-/// reached only a few of the entries, and two classes a loop alternates
-/// between — `Thread` and `Fiber`, both asked `current` in `Mutex#lock` —
-/// could share one and evict each other at every call, by an accident of
-/// where the core library's boot happened to place them (#751).
+/// `class_ids` is indexed by `(address >> 4) % CLASS_IDS`, and a class
+/// object is a cell of 128 or 256 bytes, so it reaches only 8 or 4 of its
+/// entries: two classes a loop alternates between — `Thread` and `Fiber`,
+/// both asked `current` in `Mutex#lock` — could share one and evict each
+/// other at every call, by an accident of where the core library's boot
+/// placed them (#751), each time reading the class's `@__id__` again. The
+/// one a collision displaces goes behind, at an entry the bits a block's
+/// worth higher pick, which spreads such cells over the whole table, and
+/// `class_of` brings it back from there. The lookup in front is left as it
+/// was, and does not look behind: it is inlined into the light loop, whose
+/// code any change to it measurably slowed.
 #[inline]
-fn class_ids_entry(address: usize) -> usize {
-    const SHIFT: u32 = usize::BITS - CLASS_IDS.trailing_zeros();
-    ((address >> 4).wrapping_mul(0x9E37_79B9_7F4A_7C15_u64 as usize) >> SHIFT) % CLASS_IDS
+fn class_ids_behind_entry(address: usize) -> usize {
+    ((address >> 4) ^ (address >> 10)) % CLASS_IDS
 }
 
 pub struct Heap {
@@ -348,6 +353,9 @@ pub struct Heap {
     /// freed class's address can be another's afterwards, and checked
     /// against the class table on every hit.
     class_ids: [(usize, u32); CLASS_IDS],
+    /// What a collision in `class_ids` displaced: see
+    /// [`class_ids_behind_entry`].
+    class_ids_behind: [(usize, u32); CLASS_IDS],
     regexps: crate::regexp::Regexps,
     /// Every fiber this heap has made, and the vectors of those not running
     /// (#16). Traced: a suspended fiber's frames hold values nothing else does.
@@ -722,6 +730,7 @@ impl Heap {
             definitions: crate::method::Definitions::new(),
             call_caches: crate::callcache::CallCaches::new(),
             class_ids: [(0, 0); CLASS_IDS],
+            class_ids_behind: [(0, 0); CLASS_IDS],
             regexps: crate::regexp::Regexps::new(),
             fibers: crate::interp::FiberTable::default(),
             last_match: Value::NIL,
@@ -1107,6 +1116,7 @@ impl Heap {
     pub fn collect(&mut self) {
         let started = std::time::Instant::now();
         self.class_ids = [(0, 0); CLASS_IDS];
+        self.class_ids_behind = [(0, 0); CLASS_IDS];
         self.mark();
         self.trace_weak();
         self.queue_finalizers();
@@ -1656,7 +1666,17 @@ impl<'h> HandleScope<'h> {
 
     /// The class id remembered for the class object at `address`, if any.
     pub(crate) fn remembered_class_id(&self, address: usize) -> Option<u32> {
-        let (at, id) = self.heap.class_ids[class_ids_entry(address)];
+        let (at, id) = self.heap.class_ids[(address >> 4) % CLASS_IDS];
+        (at == address).then_some(id)
+    }
+
+    /// The id remembered for the class object at `address` behind
+    /// `class_ids`, where a collision there put it: what
+    /// [`HandleScope::class_of`] asks before it reads the class's `@__id__`.
+    /// Not asked by [`HandleScope::remembered_class_id`], which is inlined
+    /// into the light loop.
+    pub(crate) fn remembered_behind(&self, address: usize) -> Option<u32> {
+        let (at, id) = self.heap.class_ids_behind[class_ids_behind_entry(address)];
         (at == address).then_some(id)
     }
 
@@ -1671,7 +1691,12 @@ impl<'h> HandleScope<'h> {
     }
 
     pub(crate) fn remember_class_id(&mut self, address: usize, id: u32) {
-        self.heap.class_ids[class_ids_entry(address)] = (address, id);
+        let heap = &mut *self.heap;
+        let front = &mut heap.class_ids[(address >> 4) % CLASS_IDS];
+        let displaced = std::mem::replace(front, (address, id));
+        if displaced.0 != 0 && displaced.0 != address {
+            heap.class_ids_behind[class_ids_behind_entry(displaced.0)] = displaced;
+        }
     }
 
     pub fn call_caches_mut(&mut self) -> &mut crate::callcache::CallCaches {
@@ -2851,25 +2876,49 @@ mod tests {
         assert!(scope.allocation_site(reused).is_none());
     }
 
-    /// Class objects are cells of 128 or 256 bytes; the entries their
-    /// addresses pick in `class_ids` are spread over the table rather than
-    /// the few the low bits of such an address reach (#751).
+    /// Class objects are cells of 128 or 256 bytes. The entries their
+    /// addresses pick behind `class_ids` are spread over the table rather
+    /// than the few the low bits of such an address reach in front, and of
+    /// two classes that share an entry in front, the one displaced is
+    /// remembered behind until it comes back in front (#751).
     #[test]
-    fn class_ids_spreads_cell_aligned_addresses() {
+    fn class_ids_keeps_two_classes_that_collide() {
         for cell in [128usize, 256] {
             let at = |k: usize| 0x7f00_0000_0000 + k * cell;
-            let used: std::collections::HashSet<usize> =
-                (0..CLASS_IDS).map(|k| class_ids_entry(at(k))).collect();
-            let low_bits: std::collections::HashSet<usize> =
+            let behind: std::collections::HashSet<usize> = (0..CLASS_IDS)
+                .map(|k| class_ids_behind_entry(at(k)))
+                .collect();
+            let front: std::collections::HashSet<usize> =
                 (0..CLASS_IDS).map(|k| (at(k) >> 4) % CLASS_IDS).collect();
             assert!(
-                used.len() >= 3 * low_bits.len(),
-                "{cell}-byte cells reach {} entries, the low bits {}",
-                used.len(),
-                low_bits.len()
+                behind.len() >= 3 * front.len(),
+                "{cell}-byte cells reach {} entries behind, {} in front",
+                behind.len(),
+                front.len()
             );
-            assert!(used.iter().all(|&entry| entry < CLASS_IDS));
         }
+        let mut heap = Heap::new();
+        let mut scope = heap.scope();
+        // 1024 bytes apart: the same entry in front, different ones behind.
+        let (first, second) = (0x7f00_0000_0400, 0x7f00_0000_0800);
+        assert_eq!((first >> 4) % CLASS_IDS, (second >> 4) % CLASS_IDS);
+        scope.remember_class_id(first, 7);
+        scope.remember_class_id(second, 9);
+        assert_eq!(scope.remembered_class_id(second), Some(9));
+        assert_eq!(
+            scope.remembered_class_id(first),
+            None,
+            "displaced from in front"
+        );
+        assert_eq!(scope.remembered_behind(first), Some(7));
+        scope.remember_class_id(first, 7);
+        assert_eq!(scope.remembered_class_id(first), Some(7));
+        assert_eq!(
+            scope.remembered_behind(second),
+            Some(9),
+            "and the other behind"
+        );
+        assert_eq!(scope.remembered_behind(0x7f00_0000_0c00), None);
     }
 
     /// `alloc_slots` makes an object already holding its values, which

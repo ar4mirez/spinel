@@ -11707,16 +11707,27 @@ fn empty_array_of<'h>(scope: &mut HandleScope<'h>, id: ClassId) -> Handle<'h> {
 /// A new `Array` of `elements`, which must be rooted, as anything held
 /// across an allocation must.
 ///
-/// The storage is exactly as long as `elements`, which is CRuby's
-/// `rb_ary_new_from_values`: a literal is mostly read, and one that grows
-/// doubles from there as any other does. Made first, so that the `Array` is
-/// the newer of the two cells.
+/// Both cells are written once, the storage straight from `elements`, with
+/// room for [`ARRAY_MIN_CAPACITY`] at least, as `array_reserve` gave it.
+/// ponytail: storage exactly as long as a literal, CRuby's
+/// `rb_ary_new_from_values`, was 8% faster on yjit-bench `binarytrees`, but
+/// it moves where the core library's boot places every later object, and so
+/// which class objects share an entry of the heap's remembered class ids:
+/// `Thread` and `Fiber` came to, and `Mutex#lock` read `@__id__` twice a
+/// call. Worth taking once that table cannot be made to collide by layout.
+/// Made first, so that the `Array` is the newer of the two cells.
 fn new_array(scope: &mut HandleScope<'_>, elements: &[Value]) -> Value {
     if elements.is_empty() {
         let handle = empty_array(scope);
         return scope.get(handle);
     }
-    let storage = scope.alloc_slots(None, elements);
+    let storage = if elements.len() < ARRAY_MIN_CAPACITY as usize {
+        let mut padded = [Value::NIL; ARRAY_MIN_CAPACITY as usize];
+        padded[..elements.len()].copy_from_slice(elements);
+        scope.alloc_slots(None, &padded)
+    } else {
+        scope.alloc_slots(None, elements)
+    };
     let class = scope.classes().object(Builtin::Array.id());
     let class = scope.root(class);
     let length = i64::try_from(elements.len())

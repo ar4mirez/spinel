@@ -3208,6 +3208,15 @@ impl<'h> HandleScope<'h> {
         {
             return Some(id);
         }
+        // Displaced from there by another class, as two classes a loop
+        // alternates between can be (#751): brought back in front.
+        if let Some(id) = self.remembered_behind(address).map(ClassId)
+            && id.index() < self.classes().len()
+            && self.classes().object(id) == class
+        {
+            self.remember_class_id(address, id.0);
+            return Some(id);
+        }
         let id = self.class_id_from_ivar(class);
         self.remember_class_id(address, id.0);
         Some(id)
