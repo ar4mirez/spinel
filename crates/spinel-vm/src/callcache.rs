@@ -171,8 +171,10 @@ pub struct Direct {
     /// The receiver class the entry holds the method for.
     pub class: ClassId,
     /// `class`'s object, which a receiver whose header names it is an
-    /// instance of: the site's guard, short of the class id. `nil` when
-    /// that does not follow from the header, for `Class` (see `send_simple`).
+    /// instance of: the site's guard, short of the class id. Never `Class`'s,
+    /// the one class that does not follow from the header — a singleton
+    /// class's own singleton may be due — since `known_class_of` never
+    /// answers it and no plan is made without that answer.
     pub class_object: Value,
     /// For each keyword the site writes, in the site's order, the callee
     /// local it binds.

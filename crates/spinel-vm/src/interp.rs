@@ -5165,8 +5165,7 @@ fn send_simple(
     // object names one class for the life of the heap.
     let class = match scope.call_caches().plan(slot) {
         Plan::Direct(plan)
-            if plan.class_object != Value::NIL
-                && scope.class_object_of(receiver) == Some(plan.class_object) =>
+            if scope.class_object_of(receiver) == Some(plan.class_object) =>
         {
             plan.class
         }
@@ -5200,14 +5199,7 @@ fn send_simple(
         let plan = match scope.definitions().get(method.body) {
             Some(Definition::Iseq(iseq)) => {
                 let iseq = Arc::clone(iseq);
-                // `Class` is the one class `class_of` may answer something
-                // else for, given an object whose header names it: a
-                // singleton class's own singleton, made on first dispatch.
-                let class_object = if class == Builtin::Class.id() {
-                    Value::NIL
-                } else {
-                    scope.classes().object(class)
-                };
+                let class_object = scope.classes().object(class);
                 direct_plan(
                     scope.call_caches_mut(),
                     site,
