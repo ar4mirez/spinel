@@ -5134,6 +5134,12 @@ fn returns_in_place(frame: &Call, pc: usize) -> bool {
 /// where every rule this skips — a refinement, a cache miss,
 /// `method_missing`, a visibility refusal, a native, a block's warning, an
 /// arity or keyword error — is decided.
+///
+/// It never allocates, so it cannot collect: [`run_calls`] reaches it
+/// straight from a light stretch, with what the stretch left on the stack
+/// not yet rooted. A receiver whose class only [`class_of`] can find — not
+/// remembered, or `Class`, which may need a singleton made — is declined for
+/// `dispatch`, which runs after the loop has rooted the stack.
 fn send_simple(
     scope: &mut HandleScope<'_>,
     stack: &mut Stack,
@@ -5164,7 +5170,7 @@ fn send_simple(
         {
             plan.class
         }
-        _ => class_of(scope, receiver)?,
+        _ => known_class_of(scope, receiver)?,
     };
     if scope.classes().cref_refined(frame.cref)
         && scope
@@ -5309,6 +5315,10 @@ fn send_simple(
 /// the yield, which is where everything this skips — no block, a lambda's
 /// arity, an `Array` spread across the parameters, a native or
 /// `Symbol#to_proc` body — is decided.
+///
+/// It never allocates, so it cannot collect, for the reason [`send_simple`]
+/// cannot: a block whose class is not remembered is declined for `dispatch`
+/// rather than looked up through a handle.
 fn yield_simple(
     scope: &mut HandleScope<'_>,
     stack: &mut Stack,
@@ -5327,7 +5337,7 @@ fn yield_simple(
         return None;
     }
     let block = frame.block;
-    let body = proc_body_of(scope, block).or_else(|| proc_body(scope, block))?;
+    let body = proc_body_of(scope, block)?;
     if scope.slot_of(block, PROC_LAMBDA).is_truthy() {
         return None;
     }
@@ -7564,7 +7574,7 @@ fn cref_from(value: Value) -> CrefId {
 /// The definition id inside a `Proc`, or `None` if the value is not one.
 /// [`proc_body`] without a handle, for a `Proc` whose class is remembered;
 /// `None` when it is not one, or its class is not remembered, which
-/// `proc_body` then answers.
+/// `proc_body` answers for `dispatch`.
 fn proc_body_of(scope: &HandleScope<'_>, value: Value) -> Option<Value> {
     if scope.layout_of(value)? != (Payload::Slots, PROC_SLOTS) {
         return None;
@@ -9221,6 +9231,22 @@ fn no_class(value: Value) -> Error {
 /// class that would answer the wrong methods.
 #[inline]
 fn class_of(scope: &mut HandleScope<'_>, value: Value) -> Option<ClassId> {
+    match known_class_of(scope, value) {
+        Some(id) => Some(id),
+        None if value.is_immediate() => None,
+        None => heap_class_of(scope, value),
+    }
+}
+
+/// [`class_of`]'s answer when it needs no handle and cannot allocate: an
+/// immediate's class, or a heap object's class remembered from an earlier
+/// ask. `None` when only `class_of` can say — a class not remembered, or
+/// `Class` itself, which may need a singleton made first — and for
+/// `undefined`, the marker a call leaves in a slot no argument filled, which
+/// is not a Ruby value and has no class on purpose: reaching one through
+/// `class_of` means the binder let it escape.
+#[inline]
+fn known_class_of(scope: &HandleScope<'_>, value: Value) -> Option<ClassId> {
     use crate::value::Unpacked;
     match value.unpack() {
         Unpacked::Fixnum(_) => Some(Builtin::Integer.id()),
@@ -9229,21 +9255,10 @@ fn class_of(scope: &mut HandleScope<'_>, value: Value) -> Option<ClassId> {
         Unpacked::True => Some(Builtin::TrueClass.id()),
         Unpacked::False => Some(Builtin::FalseClass.id()),
         Unpacked::Flonum(_) => Some(Builtin::Float.id()),
-        // `undefined` is the marker a call leaves in a slot no argument filled.
-        // It is not a Ruby value and has no class on purpose: reaching one
-        // through `class_of` means the binder let it escape.
         Unpacked::Undef => None,
-        Unpacked::Heap(_) => {
-            // The common case, answered without a handle: a class remembered
-            // from an earlier ask. `Class` itself is the one that may need a
-            // singleton made first, below.
-            if let Some(id) = scope.remembered_class_of(value)
-                && id != Builtin::Class.id()
-            {
-                return Some(id);
-            }
-            heap_class_of(scope, value)
-        }
+        Unpacked::Heap(_) => scope
+            .remembered_class_of(value)
+            .filter(|&id| id != Builtin::Class.id()),
     }
 }
 

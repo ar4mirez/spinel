@@ -2811,3 +2811,7 @@ def y748b = yield(6); def o748 = (y748b { |v| return v * 7 }; :no); o748  #=> 42
 # its own: here the callee drops the only other reference, after the handles the
 # loop took have been let go, and then allocates under GC.stress.
 class Box748; def initialize(v) = (@v = v); def swap(h) = (h.clear; s = "tmp" * 2; [@v, s]); end; class Holder748; def initialize = (@b = Box748.new("held" + "!")); def run = @b.swap(self); def clear = (@b = nil); end; 3.times { Holder748.new.run }; h = Holder748.new; i = 0; while i < 20000; s = "a" + "b"; i += 1; end; GC.stress = true; r = h.run; GC.stress = false; r  #=> ["held!", "tmptmp"]
+# A fast send never allocates: a fresh singleton class needs its own singleton
+# made on first dispatch, which the general path does once the loop has rooted
+# the stack, here the only reference to the argument the block just overwrote.
+class Sing748; def self.keep(a, b) = a; end; r = []; 3.times { h = "v" + "1"; 1.times { sc = Sing748.new.singleton_class; GC.stress = true; r << sc.keep(h, h = 0); GC.stress = false } }; r  #=> ["v1", "v1", "v1"]
