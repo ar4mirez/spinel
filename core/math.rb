@@ -13,9 +13,13 @@ module Math
   end
 
   # CRuby's `rb_to_float`: a Float as it is, an Integer converted, any other
-  # Numeric asked for `to_f`, and nothing else — not a String, not nil.
+  # Numeric asked for `to_f`, and nothing else — not a String, not nil. The
+  # first question is the class table's, as CRuby's type check is, rather
+  # than a send of `===` to `Float`; and each caller below asks it first
+  # itself, so a Float, which is what nearly every call passes, costs no
+  # call of this at all.
   def self.__float__(value)
-    return value if Float === value
+    return value if __reflect_kind_of__(value, Float)
     return value.to_f if Integer === value
     if value.nil? || true.equal?(value) || false.equal?(value)
       raise TypeError, "can't convert #{value.inspect} into Float"
@@ -32,54 +36,58 @@ module Math
     raise DomainError, "Numerical argument is out of domain - #{name}"
   end
 
-  def sin(x) = __math__(:sin, Math.__float__(x))
-  def cos(x) = __math__(:cos, Math.__float__(x))
-  def tan(x) = __math__(:tan, Math.__float__(x))
-  def atan(x) = __math__(:atan, Math.__float__(x))
-  def sinh(x) = __math__(:sinh, Math.__float__(x))
-  def cosh(x) = __math__(:cosh, Math.__float__(x))
-  def tanh(x) = __math__(:tanh, Math.__float__(x))
-  def asinh(x) = __math__(:asinh, Math.__float__(x))
-  def exp(x) = __math__(:exp, Math.__float__(x))
-  def expm1(x) = __math__(:expm1, Math.__float__(x))
-  def cbrt(x) = __math__(:cbrt, Math.__float__(x))
-  def erf(x) = __math__(:erf, Math.__float__(x))
-  def erfc(x) = __math__(:erfc, Math.__float__(x))
+  def sin(x) = __math__(:sin, (__reflect_kind_of__(x, Float) ? x : Math.__float__(x)))
+  def cos(x) = __math__(:cos, (__reflect_kind_of__(x, Float) ? x : Math.__float__(x)))
+  def tan(x) = __math__(:tan, (__reflect_kind_of__(x, Float) ? x : Math.__float__(x)))
+  def atan(x) = __math__(:atan, (__reflect_kind_of__(x, Float) ? x : Math.__float__(x)))
+  def sinh(x) = __math__(:sinh, (__reflect_kind_of__(x, Float) ? x : Math.__float__(x)))
+  def cosh(x) = __math__(:cosh, (__reflect_kind_of__(x, Float) ? x : Math.__float__(x)))
+  def tanh(x) = __math__(:tanh, (__reflect_kind_of__(x, Float) ? x : Math.__float__(x)))
+  def asinh(x) = __math__(:asinh, (__reflect_kind_of__(x, Float) ? x : Math.__float__(x)))
+  def exp(x) = __math__(:exp, (__reflect_kind_of__(x, Float) ? x : Math.__float__(x)))
+  def expm1(x) = __math__(:expm1, (__reflect_kind_of__(x, Float) ? x : Math.__float__(x)))
+  def cbrt(x) = __math__(:cbrt, (__reflect_kind_of__(x, Float) ? x : Math.__float__(x)))
+  def erf(x) = __math__(:erf, (__reflect_kind_of__(x, Float) ? x : Math.__float__(x)))
+  def erfc(x) = __math__(:erfc, (__reflect_kind_of__(x, Float) ? x : Math.__float__(x)))
 
   def asin(x)
-    x = Math.__float__(x)
+    x = Math.__float__(x) unless __reflect_kind_of__(x, Float)
     Math.__domain__("asin") if x < -1.0 || x > 1.0
     __math__(:asin, x)
   end
 
   def acos(x)
-    x = Math.__float__(x)
+    x = Math.__float__(x) unless __reflect_kind_of__(x, Float)
     Math.__domain__("acos") if x < -1.0 || x > 1.0
     __math__(:acos, x)
   end
 
   def acosh(x)
-    x = Math.__float__(x)
+    x = Math.__float__(x) unless __reflect_kind_of__(x, Float)
     Math.__domain__("acosh") if x < 1.0
     __math__(:acosh, x)
   end
 
   def atanh(x)
-    x = Math.__float__(x)
+    x = Math.__float__(x) unless __reflect_kind_of__(x, Float)
     Math.__domain__("atanh") if x < -1.0 || x > 1.0
     __math__(:atanh, x)
   end
 
   def atan2(y, x)
-    __math__(:atan2, Math.__float__(y), Math.__float__(x))
+    y = Math.__float__(y) unless __reflect_kind_of__(y, Float)
+    x = Math.__float__(x) unless __reflect_kind_of__(x, Float)
+    __math__(:atan2, y, x)
   end
 
   def hypot(a, b)
-    __math__(:hypot, Math.__float__(a), Math.__float__(b))
+    a = Math.__float__(a) unless __reflect_kind_of__(a, Float)
+    b = Math.__float__(b) unless __reflect_kind_of__(b, Float)
+    __math__(:hypot, a, b)
   end
 
   def sqrt(x)
-    x = Math.__float__(x)
+    x = Math.__float__(x) unless __reflect_kind_of__(x, Float)
     Math.__domain__("sqrt") if x < 0.0
     __math__(:sqrt, x)
   end
@@ -102,7 +110,7 @@ module Math
       shift = x.bit_length - 1000
       return __math__(:log, (x >> shift).to_f) + shift * 0.6931471805599453
     end
-    x = Math.__float__(x)
+    x = Math.__float__(x) unless __reflect_kind_of__(x, Float)
     Math.__domain__(name) if x < 0.0
     __math__(:log, x)
   end
@@ -112,7 +120,7 @@ module Math
       shift = x.bit_length - 1000
       return __math__(:log2, (x >> shift).to_f) + shift
     end
-    x = Math.__float__(x)
+    x = Math.__float__(x) unless __reflect_kind_of__(x, Float)
     Math.__domain__("log2") if x < 0.0
     __math__(:log2, x)
   end
@@ -122,24 +130,24 @@ module Math
       shift = x.bit_length - 1000
       return __math__(:log10, (x >> shift).to_f) + shift * 0.3010299956639812
     end
-    x = Math.__float__(x)
+    x = Math.__float__(x) unless __reflect_kind_of__(x, Float)
     Math.__domain__("log10") if x < 0.0
     __math__(:log10, x)
   end
 
   def log1p(x)
-    x = Math.__float__(x)
+    x = Math.__float__(x) unless __reflect_kind_of__(x, Float)
     Math.__domain__("log1p") if x < -1.0
     __math__(:log1p, x)
   end
 
   # `[fraction, exponent]` with `x == fraction * 2**exponent`.
   def frexp(x)
-    __math__(:frexp, Math.__float__(x))
+    __math__(:frexp, (__reflect_kind_of__(x, Float) ? x : Math.__float__(x)))
   end
 
   def ldexp(fraction, exponent)
-    fraction = Math.__float__(fraction)
+    fraction = Math.__float__(fraction) unless __reflect_kind_of__(fraction, Float)
     if Float === exponent
       raise RangeError, "float #{exponent} out of range of integer" unless exponent.finite?
       exponent = exponent.to_i
@@ -150,7 +158,7 @@ module Math
   # (n - 1)! exactly for the whole numbers a Float holds one for, and libm
   # for the rest. A negative whole number, and -Infinity, have no gamma.
   def gamma(x)
-    x = Math.__float__(x)
+    x = Math.__float__(x) unless __reflect_kind_of__(x, Float)
     return x if x.nan?
     Math.__domain__("gamma") if x == -Float::INFINITY
     return x if x == Float::INFINITY
@@ -172,7 +180,7 @@ module Math
 
   # `[log(|gamma(x)|), sign of gamma(x)]`.
   def lgamma(x)
-    x = Math.__float__(x)
+    x = Math.__float__(x) unless __reflect_kind_of__(x, Float)
     Math.__domain__("lgamma") if x == -Float::INFINITY
     return [Float::INFINITY, x.__bits__(64) >> 63 == 1 ? -1 : 1] if x == 0.0
     __math__(:lgamma, x)

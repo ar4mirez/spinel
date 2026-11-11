@@ -2838,3 +2838,48 @@ class Sub749 < String; end; def u749(s, x) = (i = 0; while i < 3; s << x; i += 1
 module R749; refine(String) { def <<(o) = "refined" }; end; class C749; def plain(s) = (s << "p"; s << "p"); using R749; def ref(s) = (s << "r"; s << "r"); end; c = C749.new; [c.plain(+"x"), c.ref(+"x"), c.plain(+"y"), c.ref(+"y")]  #=> ["xpp", "refined", "ypp", "refined"]
 def v749; s = +""; a = []; i = 0; while i < 3; a << (s << "q"); i += 1; end; [a.map(&:object_id).uniq.size, a[0].equal?(s), s]; end; v749  #=> [1, true, "qqq"]
 def gs749; s = +""; GC.stress = true; i = 0; while i < 40; s << "ab" + i.to_s; i += 1; end; GC.stress = false; [s.size, s[0, 6], s[-4..]]; end; gs749  #=> [150, "ab0ab1", "ab39"]
+
+# ---------------------------- Float arithmetic, constants and calls (#750)
+# A multiple assignment whose value nothing reads, of an array literal with no
+# splat into distinct locals and instance variables, is compiled as pushes and
+# sets; every value is evaluated, in order, before any target is written.
+def m750; a, b = 1, 2; a, b = b, a; c, d, e = 1, 2; f, g = 1, 2, 3; @x, @y = 4, 5; h, h = 6, 7; [a, b, c, d, e, f, g, @x, @y, h]; end; m750  #=> [2, 1, 1, 2, nil, 1, 2, 4, 5, 7]
+def m750b; r = []; a, b = (r << 1; :a), (r << 2; :b), (r << 3; :c); [a, b, r]; end; m750b  #=> [:a, :b, [1, 2, 3]]
+def m750c; x = (a, b = 1, 2); [x, a, b]; end; m750c  #=> [[1, 2], 1, 2]
+o = Object.new.freeze; begin; o.instance_eval { @a, @b = 1, 2 }; rescue => e; [e.class, o.instance_variables]; end  #=> [FrozenError, []]
+# Float operators on two flonums answer in the light loop when the answer is a
+# flonum; one that needs a heap Float, a redefinition and a refinement still go
+# the general way. A Float literal that fits an immediate is pushed as one.
+def f750(a, b) = [a + b, a - b, a * b, a / b, a < b, a <= b, a > b, a >= b, a == b, a != b]; [f750(1.5, 0.25), f750(1.0e200, 1.0e200), f750(1.0, 0.0), f750(2.5, 2.5)]  #=> [[1.75, 1.25, 0.375, 6.0, false, false, true, true, false, true], [2.0e+200, 0.0, Infinity, 1.0, false, true, false, true, true, false], [1.0, 1.0, 0.0, Infinity, false, false, true, true, false, true], [5.0, 0.0, 6.25, 1.0, false, true, false, true, true, false]]
+def f750b(a, b) = (a / b).nan?; f750b(0.0, 0.0)  #=> true
+def f750c; s = 0.0; i = 0; while i < 1000; s += 0.1 * i; i += 1; end; s; end; f750c  #=> 49950.0
+class Float; alias_method :plus750, :+; def +(o) = :mine; end; def p750(a, b) = a + b; r = p750(1.5, 2.5); class Float; alias_method :+, :plus750; remove_method :plus750; end; [r, p750(1.5, 2.5)]  #=> [:mine, 4.0]
+module Ref750; refine(Float) { def *(o) = :refined }; end; class U750; def plain(a) = a * 2.0; using Ref750; def ref(a) = a * 2.0; end; u = U750.new; [u.plain(1.5), u.ref(1.5), u.plain(1.5)]  #=> [3.0, :refined, 3.0]
+def l750 = [1.5, 1.0e300, -0.0, 0.0, 2.0e-300]; [l750, l750]  #=> [[1.5, 1.0e+300, -0.0, 0.0, 2.0e-300], [1.5, 1.0e+300, -0.0, 0.0, 2.0e-300]]
+# A constant read answers from its site's cache until anything that could
+# change it does: a constant removed or set, an include that shadows it, a
+# change of visibility, another module at a qualified site, a deprecation.
+module K750; X = 1; def self.x = X; end; a = K750.x; K750.send(:remove_const, :X); K750.const_set(:X, 2); [a, K750.x, K750.x]  #=> [1, 2, 2]
+Y750 = :top; class A750; def y = Y750; end; module M750; Y750 = :mod; end; a = A750.new.y; A750.include(M750); [a, A750.new.y]  #=> [:top, :mod]
+class P750; Z = 1; end; def z750 = P750::Z; a = z750; P750.send(:private_constant, :Z); b = (z750 rescue $!.class); P750.send(:public_constant, :Z); [a, b, z750]  #=> [1, NameError, 1]
+module Q1x750; V = 1; end; module Q2x750; V = 2; end; def q750(m) = m::V; [q750(Q1x750), q750(Q2x750), q750(Q1x750)]  #=> [1, 2, 1]
+$w750 = []; def Warning.warn(m, **) = ($w750 << m); Warning[:deprecated] = true; module D750; W = 5; end; def d750 = D750::W; r = [d750, d750]; D750.deprecate_constant(:W); r << d750 << d750; Warning[:deprecated] = false; [r, $w750.size > 0]  #=> [[5, 5, 5, 5], true]
+# An instance-variable write answers from its site's cache for an overwrite
+# in the shape it saw last; a frozen object, another shape, and a removed
+# variable go the general way.
+class S750; def initialize = (@a = 0); def set(v) = (@a = v); attr_reader :a; end; s = S750.new; 3.times { |i| s.set(i) }; s.freeze; [s.a, (s.set(9) rescue $!.class), s.a]  #=> [2, FrozenError, 2]
+class T750; def initialize(f) = (f ? (@a = 1; @b = 2) : (@b = 3; @a = 4)); def bump = (@b = @b + 10; [@a, @b]); end; [T750.new(true).bump, T750.new(false).bump, T750.new(true).bump]  #=> [[1, 12], [4, 13], [1, 12]]
+class V750; def initialize = (@a = 1; @b = 2); def set = (@b = 9); attr_reader :a, :b; end; v = V750.new; v.set; v.remove_instance_variable(:@a); v.set; [v.a, v.b, v.instance_variables]  #=> [nil, 9, [:@b]]
+# attr_reader, Array#[] with an index, Module#===, and __math__ answer from
+# the operand stack where they can, and the general way otherwise.
+class R750; attr_reader :v; def initialize(x) = (@v = x if x); end; [R750.new(1).v, R750.new(nil).v, R750.new(2).v, R750.new(3).v]  #=> [1, nil, 2, 3]
+# A site whose method is refilled with a reader of another name forgets
+# where the old name sat, though the receiver wears the same shape.
+class B750r; attr_reader :x; def initialize = (@x = 10; @y = 20); end; class A750r; attr_reader :y; alias_method :x, :y; def initialize = (@x = 1; @y = 2); end; def g750r(o) = o.x; [g750r(B750r.new), g750r(A750r.new), g750r(B750r.new)]  #=> [10, 2, 10]
+class C750r; attr_reader :a, :b; def initialize = (@a = 1; @b = 2); end; def h750r(o) = o.a; c = C750r.new; r = [h750r(c), h750r(c)]; class C750r; alias_method :a, :b; end; r << h750r(c)  #=> [1, 1, 2]
+class W750; attr_reader :v; private :v; def get = v; def initialize = (@v = :p); end; w = W750.new; [w.get, (w.v rescue $!.class)]  #=> [:p, NoMethodError]
+def i750(a, i) = a[i]; a = [1, 2, 3]; [i750(a, 0), i750(a, -1), i750(a, 5), i750(a, 1.9), i750(a, 0..1), i750(a, -4)]  #=> [1, 3, nil, 2, [1, 2], nil]
+def j750(a) = a[0]; a = [1]; r = [j750(a), j750(a)]; def a.[](i) = :single; r << j750(a); class SubA750 < Array; end; r << j750(SubA750[7])  #=> [1, 1, :single, 7]
+module E750; end; def k750(m, o) = m === o; o = Object.new; [k750(E750, o), (o.extend(E750); k750(E750, o)), k750(Integer, 3), k750(Float, 3), k750(Comparable, 2.5), k750(Kernel, BasicObject.new)]  #=> [false, true, true, false, true, false]
+[Math.sqrt(4.0), Math.sqrt(2), Math.hypot(3, 4), Math.atan2(1, 1), Math.exp(710.0), Math.sqrt(1.0e-300), Math.cbrt(27), 2.7.floor, 2.5.round]  #=> [2.0, 1.4142135623730951, 5.0, 0.7853981633974483, Infinity, 1.0e-150, 3.0, 2, 3]
+r = []; [4.0, -1.0, "x", nil, 4].each { |v| begin; r << Math.sqrt(v); rescue => e; r << e.class; end }; r  #=> [2.0, Math::DomainError, TypeError, TypeError, 2.0]

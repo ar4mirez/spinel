@@ -2799,7 +2799,7 @@ fn run<'h>(
             // done, nor the look at the frames. `light_stretch` runs them, and
             // stops at anything else, which comes back here unrun.
             let mut operands = LightStack::<false>::new(&mut stack, 0);
-            let ran = light_step(
+            let ran = light_step::<false, false>(
                 scope,
                 &mut operands,
                 &frames[top],
@@ -2816,14 +2816,25 @@ fn run<'h>(
             if ran > 0 {
                 // The top of the loop counted the first.
                 budget = budget.saturating_sub(ran - 1);
-                light_stretch(
-                    scope,
-                    &mut stack,
-                    &frames[top],
-                    &mut cur_pc,
-                    &mut budget,
-                    limit,
-                );
+                if scope.call_caches().wants_more(frames[top].cache_base) {
+                    more_stretch(
+                        scope,
+                        &mut stack,
+                        &frames[top],
+                        &mut cur_pc,
+                        &mut budget,
+                        limit,
+                    );
+                } else {
+                    light_stretch(
+                        scope,
+                        &mut stack,
+                        &frames[top],
+                        &mut cur_pc,
+                        &mut budget,
+                        limit,
+                    );
+                }
                 // A stretch that stopped at a call the fast paths may take
                 // goes on into it, and the frames it reaches, without the
                 // trip through the top of this loop each call and return
@@ -2926,6 +2937,69 @@ fn run<'h>(
                     reload!();
                     continue;
                 }
+                // Float arithmetic on two flonums, a Float literal, and a
+                // constant read or an instance-variable write their sites'
+                // caches answer (#750): answered here, without the
+                // closure, and the stretch after one run in `more_stretch`,
+                // the light loop that runs them too. See `light_more`.
+                Insn::BinOp(_) | Insn::PushFloat(_) | Insn::GetConst(..) | Insn::SetIvar(..) => {
+                    let depth = stack.len();
+                    let top_value = stack.last().copied();
+                    let below = if depth > 1 {
+                        stack[depth - 2]
+                    } else {
+                        Value::NIL
+                    };
+                    let ran = match light_more(scope, &frames[top], insn, top_value, below) {
+                        More::Push(value) => {
+                            stack.push(value);
+                            true
+                        }
+                        More::Pop => {
+                            stack.pop();
+                            true
+                        }
+                        More::Replace(value) => {
+                            stack.truncate(depth - 2);
+                            stack.push(value);
+                            true
+                        }
+                        More::Decline => false,
+                    };
+                    if ran {
+                        // What it pushed is immediate or a constant's, which
+                        // the constant table roots. Float arithmetic is what
+                        // says a body's stretches should run in
+                        // `more_stretch` from now on: a constant read or an
+                        // ivar write alone is in nearly every body, and
+                        // `more_stretch` costs a loop of the other
+                        // instructions a little.
+                        let base = frames[top].cache_base;
+                        if matches!(insn, Insn::BinOp(_)) {
+                            scope.call_caches_mut().set_wants_more(base);
+                        }
+                        if scope.call_caches().wants_more(base) {
+                            more_stretch(
+                                scope,
+                                &mut stack,
+                                &frames[top],
+                                &mut cur_pc,
+                                &mut budget,
+                                limit,
+                            );
+                        } else {
+                            light_stretch(
+                                scope,
+                                &mut stack,
+                                &frames[top],
+                                &mut cur_pc,
+                                &mut budget,
+                                limit,
+                            );
+                        }
+                        continue;
+                    }
+                }
                 _ => {}
             }
 
@@ -2946,6 +3020,12 @@ fn run<'h>(
                             op: "Integer",
                             operands: "a value wider than a fixnum",
                         })?);
+                    }
+                    // The light loop runs it; here for a run of the closure
+                    // that reaches one anyway. The compiler only emits one
+                    // for a double that fits.
+                    Insn::PushFloat(bits) => {
+                        stack.push(crate::float::value(scope, f64::from_bits(bits)));
                     }
                     Insn::PushLit(index) => {
                         let literal = frames[top].iseq.literals[index as usize].clone();
@@ -3041,9 +3121,17 @@ fn run<'h>(
                         stack.push(value);
                     }
 
-                    Insn::SetIvar(name) => {
+                    Insn::SetIvar(name, site) => {
                         let symbol = frames[top].iseq.symbol_ids()[name as usize];
                         let receiver = frames[top].receiver;
+                        let slot = frames[top].cache_base + site;
+                        // The value was on the stack, so rooted, since the
+                        // top of the loop.
+                        let value = *stack.last().expect("setivar on an empty stack");
+                        if scope.cached_set_ivar(receiver, slot, SLOT_IVARS, value) {
+                            stack.pop();
+                            return Ok(Step::Next);
+                        }
                         if let Some(thawing) = thaw_chilled(
                             scope,
                             &mut stack,
@@ -3056,6 +3144,10 @@ fn run<'h>(
                         }
                         let value = stack.pop().expect("setivar on an empty stack");
                         ivar_set(scope, receiver, symbol, value)?;
+                        // Where the name is now, for the next write from here.
+                        if let (_, Some((shape, index))) = ivar_read(scope, receiver, symbol) {
+                            scope.call_caches_mut().fill_ivar(slot, shape, index);
+                        }
                     }
 
                     Insn::DefinedIvar(name) => {
@@ -3927,10 +4019,25 @@ fn run<'h>(
                         }
                     }
 
-                    Insn::GetConst(name, how) => {
+                    Insn::GetConst(name, how, site) => {
                         let symbol = frames[top].iseq.symbol_ids()[name as usize];
                         let cref = frames[top].cref;
                         let from = const_base(scope, &mut stack, cref, how)?;
+                        // The site's inline cache (#750): what this read found
+                        // last, still true while no constant anywhere has
+                        // changed since. A name with an autoload waiting is
+                        // never answered from it, since registering one moves
+                        // no epoch: the full read decides whether it shadows.
+                        let slot = frames[top].cache_base + site;
+                        let epoch = scope.classes().const_epoch();
+                        let autoloads = scope.any_autoloads() && scope.autoloads(symbol);
+                        if !autoloads
+                            && let Some(value) =
+                                scope.call_caches().constant(slot, epoch, cref, from)
+                        {
+                            stack.push(value);
+                            return Ok(Step::Next);
+                        }
                         let found = match how {
                             ConstScope::Lexical => scope.classes().const_get(cref, symbol),
                             ConstScope::Qualified | ConstScope::Top => {
@@ -4000,7 +4107,21 @@ fn run<'h>(
                         stack.push(value);
                         // `deprecate_constant` (#268). The list is empty unless
                         // a program called it, so a read costs one length check.
-                        if let Some(holder) = scope.classes().deprecated_const(symbol, value) {
+                        // A deprecated constant warns at every read, so only
+                        // the others are cached.
+                        let deprecated = scope.classes().deprecated_const(symbol, value);
+                        if deprecated.is_none() && !autoloads {
+                            scope.call_caches_mut().fill_constant(
+                                slot,
+                                crate::callcache::ConstEntry {
+                                    epoch,
+                                    cref,
+                                    from,
+                                    value,
+                                },
+                            );
+                        }
+                        if let Some(holder) = deprecated {
                             let message = format!(
                                 "constant {} is deprecated",
                                 qualified_name(scope, holder, symbol)
@@ -5226,9 +5347,13 @@ fn send_simple(
                     (class, class_object),
                 )
             }
+            // Public, or private from a site with no receiver written, which
+            // is a call `visible` above answers yes for every time: the plan
+            // then needs no visibility check of its own.
             Some(&Definition::Native(native))
                 if given == 0
-                    && method.visibility == Visibility::Public
+                    && (method.visibility == Visibility::Public
+                        || (method.visibility == Visibility::Private && site.implicit_self))
                     && has_native_light(native, argc) =>
             {
                 Plan::Native(NativePlan {
@@ -5347,9 +5472,57 @@ fn append_plain(
 /// `argc` positional arguments and nothing else.
 fn has_native_light(native: Native, argc: usize) -> bool {
     match native {
-        Native::StringAppend(_) => argc == 1,
+        Native::StringAppend(_) | Native::ArrayIndex => argc == 1,
+        Native::IvarReader(_) => argc == 0,
+        Native::Math => argc == 2 || argc == 3,
+        Native::Reflect(ReflectOp::KindOf) => argc == 2,
         _ => false,
     }
+}
+
+/// `__math__`'s operations whose answer is one Float: libm's `name` of `x`,
+/// and of `second` for the two-operand ones. `None` for a name that is not
+/// one of them — `lgamma`, `frexp` and `truncate` answer something else, and
+/// any other name is no operation at all.
+fn math_float(name: &[u8], x: f64, second: f64) -> Option<f64> {
+    Some(match name {
+        b"sin" => x.sin(),
+        b"cos" => x.cos(),
+        b"tan" => x.tan(),
+        b"asin" => x.asin(),
+        b"acos" => x.acos(),
+        b"atan" => x.atan(),
+        b"atan2" => x.atan2(second),
+        b"sinh" => x.sinh(),
+        b"cosh" => x.cosh(),
+        b"tanh" => x.tanh(),
+        b"asinh" => x.asinh(),
+        b"acosh" => x.acosh(),
+        b"atanh" => x.atanh(),
+        b"exp" => x.exp(),
+        b"expm1" => x.exp_m1(),
+        b"log" => x.ln(),
+        b"log2" => x.log2(),
+        b"log10" => x.log10(),
+        b"log1p" => x.ln_1p(),
+        b"sqrt" => x.sqrt(),
+        b"cbrt" => x.cbrt(),
+        b"hypot" => x.hypot(second),
+        b"pow" => x.powf(second),
+        b"floor" => x.floor(),
+        b"ceil" => x.ceil(),
+        // Half away from zero, and half to even: both exact.
+        b"round" => x.round(),
+        b"round_even" => x.round_ties_even(),
+        // SAFETY: each takes doubles by value and an `int` by value,
+        // touches no memory, and is in the libm every target links.
+        b"erf" => unsafe { libm_erf(x) },
+        b"erfc" => unsafe { libm_erfc(x) },
+        b"gamma" => unsafe { libm_tgamma(x) },
+        b"ldexp" => unsafe { libm_ldexp(x, second as libc::c_int) },
+        b"nextafter" => unsafe { libm_nextafter(x, second) },
+        _ => return None,
+    })
 }
 
 /// A primitive's light form: its answer for `receiver`, an instance of
@@ -5368,6 +5541,7 @@ fn has_native_light(native: Native, argc: usize) -> bool {
 fn native_light(
     scope: &mut HandleScope<'_>,
     plan: &NativePlan,
+    slot: u32,
     receiver: Value,
     args: &[Value],
     may_allocate: bool,
@@ -5375,6 +5549,10 @@ fn native_light(
     let is_string =
         |scope: &HandleScope<'_>, class| scope.classes().repr(class) == Some(Builtin::String);
     match plan.native {
+        Native::IvarReader(name) => light_ivar_reader(scope, slot, receiver, name),
+        Native::Math => light_math(args),
+        Native::Reflect(ReflectOp::KindOf) => light_kind_of(scope, args),
+        Native::ArrayIndex => light_array_index(scope, receiver, args),
         Native::StringAppend(_) => {
             let &[other] = args else { return None };
             if !is_string(scope, plan.class) {
@@ -5389,6 +5567,98 @@ fn native_light(
         }
         _ => None,
     }
+}
+
+/// `attr_reader`'s method: the read `GetIvar` makes, with the site's own
+/// slot of the ivar caches as its cache — a call site's slot there is one no
+/// `GetIvar` uses (see `CallCaches::ivars`). A miss is the full read, which
+/// takes no handle that outlives it and allocates nothing, and fills the
+/// slot as `GetIvar`'s miss does.
+///
+/// This and the light forms after it are out of line, so that the one a
+/// loop of appends runs in [`native_light`] keeps the shape it had.
+#[inline(never)]
+fn light_ivar_reader(
+    scope: &mut HandleScope<'_>,
+    slot: u32,
+    receiver: Value,
+    name: SymbolId,
+) -> Option<Value> {
+    if let Some(value) = scope.cached_ivar(receiver, slot, SLOT_IVARS) {
+        return Some(value);
+    }
+    let (value, found) = ivar_read(scope, receiver, name);
+    if let Some((shape, index)) = found {
+        scope.call_caches_mut().fill_ivar(slot, shape, index);
+    }
+    Some(value)
+}
+
+/// `__math__(:name, x)` and `(:name, x, y)` for operands that are
+/// fixnums or flonums and an answer that is a flonum, as the
+/// primitive's own arm answers them. A heap Float or a bignum operand,
+/// an answer that needs a heap Float, and the operations that answer
+/// something else are the primitive's.
+#[inline(never)]
+fn light_math(args: &[Value]) -> Option<Value> {
+    let operand = |value: Value| match value.as_fixnum() {
+        Some(n) => Some(n as f64),
+        None => value.as_flonum(),
+    };
+    let (name, x, second) = match *args {
+        [name, x] => (name.as_symbol()?, operand(x)?, 0.0),
+        [name, x, y] => (name.as_symbol()?, operand(x)?, operand(y)?),
+        _ => return None,
+    };
+    let value = crate::shared::symbols::with_bytes(name, |name| math_float(name, x, second))??;
+    Value::flonum(value)
+}
+
+/// `__reflect_kind_of__(object, module)`, `Module#===`'s question,
+/// when the object's class is known without a handle.
+#[inline(never)]
+fn light_kind_of(scope: &mut HandleScope<'_>, args: &[Value]) -> Option<Value> {
+    let &[object, module] = args else { return None };
+    let class = known_class_of(scope, object)?;
+    let module = match scope.remembered_class_id_of(module) {
+        Some(module) => Some(module),
+        None => {
+            // Remembered from here on, as `class_of` remembers the class of
+            // an instance, which cannot collect.
+            let found = class_id_of(&mut scope.nested(), module);
+            if let (Some(id), Some(at)) = (found, module.as_heap()) {
+                scope.remember_class_id(at.as_ptr() as usize, id.index() as u32);
+            }
+            found
+        }
+    };
+    Some(match module {
+        Some(module) => bool_value(scope.classes().reaches(class, module)),
+        None => Value::FALSE,
+    })
+}
+
+/// `a[i]` for an index `index_arg` reads, as the primitive's own arm
+/// answers it: the element, or nil past either end. A Range, a pair,
+/// and anything that needs `to_int` are the primitive's.
+#[inline(never)]
+fn light_array_index(
+    scope: &mut HandleScope<'_>,
+    receiver: Value,
+    args: &[Value],
+) -> Option<Value> {
+    let &[index] = args else { return None };
+    let index = index_arg(index)?;
+    if heap_kind(scope, receiver) != Some(HeapKind::Array) {
+        return None;
+    }
+    let mut nested = scope.nested();
+    let array = nested.root(receiver);
+    let length = array_len(&mut nested, array);
+    Some(match resolve_index(index, length) {
+        Some(index) => array_get(&mut nested, array, index),
+        None => Value::NIL,
+    })
 }
 
 /// `Insn::Send` to a primitive's light form, when the site's plan is one:
@@ -5460,7 +5730,8 @@ fn native_send(
     if scope.has_pending_warning() || scope.classes().has_redefined() {
         return None;
     }
-    let value = native_light(scope, plan, receiver, &stack[at + 1..], may_allocate)?;
+    let slot = frame.cache_base + index;
+    let value = native_light(scope, plan, slot, receiver, &stack[at + 1..], may_allocate)?;
     Some((at, value))
 }
 
@@ -9841,6 +10112,12 @@ fn subseq_bounds(start: i64, count: i64, length: usize) -> Option<(usize, usize)
 
 /// Whether `value` is a `Range`, or an instance of a subclass of one.
 fn is_range(scope: &mut HandleScope<'_>, value: Value) -> bool {
+    // An immediate — the Integer index almost every `a[i]` passes — is an
+    // instance of a class that cannot have `Range` among its ancestors, so it
+    // is answered before the constant is looked up (#750).
+    if value.is_immediate() {
+        return false;
+    }
     let Some(class) = class_of(scope, value) else {
         return false;
     };
@@ -9854,7 +10131,7 @@ fn is_range(scope: &mut HandleScope<'_>, value: Value) -> bool {
     else {
         return false;
     };
-    scope.classes().ancestors(class).contains(&range)
+    scope.classes().reaches(class, range)
 }
 
 /// A Range's ends as indexes — nil for a beginless or endless one — and
@@ -12229,42 +12506,12 @@ fn native_call<'h>(
             };
             let name = symbol_name(name);
             let second = y.unwrap_or(0.0);
-            let value = match name.as_str() {
-                "sin" => x.sin(),
-                "cos" => x.cos(),
-                "tan" => x.tan(),
-                "asin" => x.asin(),
-                "acos" => x.acos(),
-                "atan" => x.atan(),
-                "atan2" => x.atan2(second),
-                "sinh" => x.sinh(),
-                "cosh" => x.cosh(),
-                "tanh" => x.tanh(),
-                "asinh" => x.asinh(),
-                "acosh" => x.acosh(),
-                "atanh" => x.atanh(),
-                "exp" => x.exp(),
-                "expm1" => x.exp_m1(),
-                "log" => x.ln(),
-                "log2" => x.log2(),
-                "log10" => x.log10(),
-                "log1p" => x.ln_1p(),
-                "sqrt" => x.sqrt(),
-                "cbrt" => x.cbrt(),
-                "hypot" => x.hypot(second),
-                "pow" => x.powf(second),
-                "floor" => x.floor(),
-                "ceil" => x.ceil(),
-                // Half away from zero, and half to even: both exact.
-                "round" => x.round(),
-                "round_even" => x.round_ties_even(),
-                // SAFETY: each takes doubles by value and an `int` by value,
-                // touches no memory, and is in the libm every target links.
-                "erf" => unsafe { libm_erf(x) },
-                "erfc" => unsafe { libm_erfc(x) },
-                "gamma" => unsafe { libm_tgamma(x) },
-                "ldexp" => unsafe { libm_ldexp(x, second as libc::c_int) },
-                "nextafter" => unsafe { libm_nextafter(x, second) },
+            if let Some(value) = math_float(name.as_bytes(), x, second) {
+                let value = crate::float::value(scope, value);
+                stack.push(value);
+                return Ok(None);
+            }
+            match name.as_str() {
                 "lgamma" => {
                     let mut sign: libc::c_int = 0;
                     // SAFETY: `sign` is a live `int` for the call to write.
@@ -12273,7 +12520,7 @@ fn native_call<'h>(
                     let sign = Value::fixnum(if sign < 0 { -1 } else { 1 }).expect("a sign");
                     let pair = new_array(scope, &[value, sign]);
                     stack.push(pair);
-                    return Ok(None);
+                    Ok(None)
                 }
                 "frexp" => {
                     let mut exponent: libc::c_int = 0;
@@ -12283,7 +12530,7 @@ fn native_call<'h>(
                     let exponent = Value::fixnum(i64::from(exponent)).expect("an exponent");
                     let pair = new_array(scope, &[fraction, exponent]);
                     stack.push(pair);
-                    return Ok(None);
+                    Ok(None)
                 }
                 // `Float#to_i`: toward zero, as an Integer of any size.
                 "truncate" => {
@@ -12300,18 +12547,13 @@ fn native_call<'h>(
                     };
                     let value = crate::bignum::value(scope, &whole);
                     stack.push(value);
-                    return Ok(None);
+                    Ok(None)
                 }
-                _ => {
-                    return Err(Error::NoDispatch {
-                        op: "__math__",
-                        operands: "an operation it does not have",
-                    });
-                }
-            };
-            let value = crate::float::value(scope, value);
-            stack.push(value);
-            Ok(None)
+                _ => Err(Error::NoDispatch {
+                    op: "__math__",
+                    operands: "an operation it does not have",
+                }),
+            }
         }
 
         Native::NumOp(op) => {
@@ -17392,15 +17634,16 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
     }
 }
 
-/// Which [`BinOp`]s a fixnum on the left may answer itself in `frame`, as a
-/// mask over `op as usize`: [`operator_fast_path`]'s answer for every
-/// operator at once, for a run of instructions that cannot change it. `!=`
-/// is answered as `==` is, which is [`operator_guard`]'s rule.
-fn native_fixnum_ops(scope: &mut HandleScope<'_>, frame: &Call) -> u32 {
+/// Which [`BinOp`]s a fixnum on the left (`which` 0) or a Float (`which` 1)
+/// may answer itself in `frame`, as a mask over `op as usize`:
+/// [`operator_fast_path`]'s answer for every operator at once, for a run of
+/// instructions that cannot change it. `!=` is answered as `==` is, which is
+/// [`operator_guard`]'s rule.
+fn native_ops(scope: &mut HandleScope<'_>, frame: &Call, which: usize) -> u32 {
     let native = if scope.classes().cref_refined(frame.cref) {
         0
     } else {
-        let native = scope.classes_mut().native_operators(0);
+        let native = scope.classes_mut().native_operators(which);
         let eq = (native >> operator_guard(BinOp::Neq)) & 1;
         (native & !(1 << BinOp::Neq as usize)) | (eq << BinOp::Neq as usize)
     };
@@ -17433,7 +17676,7 @@ fn native_fixnum_ops(scope: &mut HandleScope<'_>, frame: &Call) -> u32 {
 /// and `spent` whether it has reached [`light_stretch`]'s limit.
 #[inline(always)]
 #[expect(clippy::too_many_arguments, reason = "the loop's own registers")]
-fn light_step<const LIGHT: bool>(
+fn light_step<const LIGHT: bool, const MORE: bool>(
     scope: &mut HandleScope<'_>,
     stack: &mut LightStack<'_, LIGHT>,
     frame: &Call,
@@ -17516,6 +17759,23 @@ fn light_step<const LIGHT: bool>(
                 *pc = jump(*pc, displacement);
             }
         }
+        // A Float literal, a constant read from a scope or an
+        // instance-variable write its site's cache answers — of an
+        // immediate in a light run, as its `SetLocal` takes one — in
+        // `more_stretch` alone: see there.
+        Insn::PushFloat(_) | Insn::GetConst(..) | Insn::SetIvar(..) if MORE => {
+            let top = stack.last();
+            if LIGHT && top.is_some_and(|value| !value.is_immediate()) {
+                return 0;
+            }
+            match light_more(scope, frame, insn, top, Value::NIL) {
+                More::Push(value) => stack.push(value),
+                More::Pop => {
+                    stack.pop();
+                }
+                More::Replace(_) | More::Decline => return 0,
+            }
+        }
         // A read the site's inline cache answers: the receiver wears the
         // shape it held last time. Anything else is the closure's, which
         // fills the cache.
@@ -17530,7 +17790,8 @@ fn light_step<const LIGHT: bool>(
                     .get_or_insert_with(|| scope.ivar_view(frame.receiver, SLOT_IVARS));
                 // SAFETY: the view is `light_stretch`'s, made during this run,
                 // and a light run neither allocates, collects, assigns an
-                // instance variable nor fills a cache: a miss stops it.
+                // instance variable other than in place, nor fills a cache: a
+                // miss stops it.
                 unsafe { view.read(slot) }
             } else {
                 scope.cached_ivar(frame.receiver, slot, SLOT_IVARS)
@@ -17542,17 +17803,27 @@ fn light_step<const LIGHT: bool>(
         }
         // Two fixnums whose answer is a fixnum or a boolean, under an
         // operator the program has not redefined. Anything else — overflow,
-        // a Float, a division — is the closure's.
+        // a Float, a division — is `run`'s, but for two flonums in
+        // `more_stretch`, which answers those too.
         Insn::BinOp(op) => {
             let depth = stack.len();
-            let ops = *lazy
-                .ops
-                .get_or_insert_with(|| native_fixnum_ops(scope, frame));
+            let ops = *lazy.ops.get_or_insert_with(|| native_ops(scope, frame, 0));
             if depth < 2 || ops & (1 << op as usize) == 0 {
                 return 0;
             }
-            let Some(value) = fixnum_binop(op, stack.get(depth - 2), stack.get(depth - 1)) else {
-                return 0;
+            let (left, right) = (stack.get(depth - 2), stack.get(depth - 1));
+            let Some(value) = fixnum_binop(op, left, right) else {
+                if !MORE {
+                    return 0;
+                }
+                match light_more(scope, frame, insn, Some(right), left) {
+                    More::Replace(value) => {
+                        stack.truncate(depth - 2);
+                        stack.push(value);
+                        return 1;
+                    }
+                    _ => return 0,
+                }
             };
             stack.truncate(depth - 2);
             // The answer is a fixnum or a boolean, so immediate: nothing
@@ -17616,7 +17887,7 @@ fn set_env_local(scope: &mut HandleScope<'_>, frame: &Call, depth: u16, slot: u1
 /// instruction needs it, rather than on entry, since most runs need neither.
 #[derive(Default)]
 struct Lazy {
-    /// [`native_fixnum_ops`], for a `BinOp`.
+    /// [`native_ops`] for `Integer`, for a `BinOp`.
     ops: Option<u32>,
     /// `self`'s instance variables, for a `GetIvar` in a light run.
     view: Option<crate::heap::IvarView>,
@@ -17639,6 +17910,115 @@ fn fixnum_binop(op: BinOp, left: Value, right: Value) -> Option<Value> {
         BinOp::Neq => left.fixnum_order(right).map(|(a, b)| bool_value(a != b)),
         BinOp::Mul | BinOp::Div | BinOp::Mod => None,
     }
+}
+
+/// What [`light_more`] answers [`run`].
+enum More {
+    /// Push this.
+    Push(Value),
+    /// Pop the top.
+    Pop,
+    /// Replace the top two with this.
+    Replace(Value),
+    /// Not one it answers: nothing changed, and the closure decides.
+    Decline,
+}
+
+/// The instructions `run` answers before its closure besides calls and
+/// returns, and [`more_stretch`] in its light loop (#750): a Float literal that fits a flonum; a `GetConst` from a
+/// scope whose site's cache holds the read for that scope at the current
+/// epoch, with no autoload waiting on the name; a `SetIvar` of `top` that
+/// [`HandleScope::cached_set_ivar`] answers on `self`; and a `BinOp` of two
+/// flonums, `below` and `top`, whose answer is a flonum or a boolean, under
+/// an operator `Float` still has as its own. `Decline` leaves everything as
+/// it was, for the closure.
+///
+/// Only `light_step`'s `MORE` form runs them, the one `more_stretch` is
+/// made of: every instruction `light_step` runs is code in each loop of
+/// light instructions, and, measured in instructions retired against main,
+/// any of these in the loops every body runs, inline or out of line, cost
+/// the loops that never run them 2% to 5%. A body's stretches run in
+/// `more_stretch` once `run` has answered Float arithmetic in it, which
+/// [`CallCaches::wants_more`] remembers; until then, and in every other
+/// body, the stretches are the ones they were.
+///
+/// [`CallCaches::wants_more`]: crate::callcache::CallCaches::wants_more
+#[inline(never)]
+fn light_more(
+    scope: &mut HandleScope<'_>,
+    frame: &Call,
+    insn: Insn,
+    top: Option<Value>,
+    below: Value,
+) -> More {
+    match insn {
+        Insn::PushFloat(bits) => match Value::flonum(f64::from_bits(bits)) {
+            Some(value) => More::Push(value),
+            None => More::Decline,
+        },
+        Insn::GetConst(name, how, site) if how != ConstScope::Qualified => {
+            let symbol = frame.iseq.symbol_ids()[name as usize];
+            if scope.any_autoloads() && scope.autoloads(symbol) {
+                return More::Decline;
+            }
+            let epoch = scope.classes().const_epoch();
+            match scope
+                .call_caches()
+                .scoped_constant(frame.cache_base + site, epoch, frame.cref)
+            {
+                Some(value) => More::Push(value),
+                None => More::Decline,
+            }
+        }
+        Insn::SetIvar(_, site) => match top {
+            Some(value)
+                if scope.cached_set_ivar(
+                    frame.receiver,
+                    frame.cache_base + site,
+                    SLOT_IVARS,
+                    value,
+                ) =>
+            {
+                More::Pop
+            }
+            _ => More::Decline,
+        },
+        Insn::BinOp(op) => {
+            let Some(value) = top.and_then(|top| flonum_binop(op, below, top)) else {
+                return More::Decline;
+            };
+            if native_ops(scope, frame, 1) & (1 << op as usize) == 0 {
+                return More::Decline;
+            }
+            More::Replace(value)
+        }
+        _ => More::Decline,
+    }
+}
+
+/// `left op right` for two flonums whose answer is a flonum or a boolean,
+/// as [`float_op`] and [`ruby_eq`] answer it; `None` for anything else — an
+/// operand that is not a flonum, `%`, whose zero divisor raises, or an
+/// answer that needs a heap `Float` (NaN, an infinity, `-0.0`, the
+/// extremes) — which the closure answers. Whether the program redefined the
+/// operator is the caller's to have asked.
+#[inline(always)]
+fn flonum_binop(op: BinOp, left: Value, right: Value) -> Option<Value> {
+    let (a, b) = (left.as_flonum()?, right.as_flonum()?);
+    let answer = match op {
+        BinOp::Add => a + b,
+        BinOp::Sub => a - b,
+        BinOp::Mul => a * b,
+        BinOp::Div => a / b,
+        BinOp::Lt => return Some(bool_value(a < b)),
+        BinOp::Le => return Some(bool_value(a <= b)),
+        BinOp::Gt => return Some(bool_value(a > b)),
+        BinOp::Ge => return Some(bool_value(a >= b)),
+        BinOp::Eq => return Some(bool_value(a == b)),
+        BinOp::Neq => return Some(bool_value(a != b)),
+        BinOp::Mod => return None,
+    };
+    Value::flonum(answer)
 }
 
 /// [`light_step`] for as long as it takes the instruction at `pc`, counting
@@ -17673,7 +18053,33 @@ fn light_stretch(
     // How many may run before the budget reaches `limit`.
     let room = *budget - limit;
     let mut ran = 0;
-    stretch(scope, stack, frame, pc, &mut ran, room);
+    stretch::<false>(scope, stack, frame, pc, &mut ran, room);
+    *budget = budget.saturating_sub(ran);
+}
+
+/// [`light_stretch`] with [`light_step`]'s `MORE` instructions too: Float
+/// arithmetic on flonums, a Float literal, a cached constant read from a
+/// scope and a cached instance-variable write (#750). [`run`] enters it only
+/// after answering one of those itself, so that a frame doing Float
+/// arithmetic runs on in here, while every other loop runs in
+/// `light_stretch`, whose code those instructions would make slower even
+/// where they never run — measured in instructions retired, 2% to 5%.
+#[inline(never)]
+fn more_stretch(
+    scope: &mut HandleScope<'_>,
+    stack: &mut Stack,
+    frame: &Call,
+    pc: &mut usize,
+    budget: &mut u64,
+    limit: u64,
+) {
+    if *budget <= limit {
+        return;
+    }
+    // How many may run before the budget reaches `limit`.
+    let room = *budget - limit;
+    let mut ran = 0;
+    stretch::<true>(scope, stack, frame, pc, &mut ran, room);
     *budget = budget.saturating_sub(ran);
 }
 
@@ -17689,7 +18095,21 @@ fn counted_stretch(
     ran: &mut u64,
     room: u64,
 ) -> Insn {
-    stretch(scope, stack, frame, pc, ran, room)
+    stretch::<false>(scope, stack, frame, pc, ran, room)
+}
+
+/// [`counted_stretch`] in [`more_stretch`]'s loop, for a body whose
+/// stretches run there.
+#[inline(never)]
+fn counted_more_stretch(
+    scope: &mut HandleScope<'_>,
+    stack: &mut Stack,
+    frame: &Call,
+    pc: &mut usize,
+    ran: &mut u64,
+    room: u64,
+) -> Insn {
+    stretch::<true>(scope, stack, frame, pc, ran, room)
 }
 
 /// [`run_calls`]'s call to a primitive's light form at `at`: answered
@@ -17712,7 +18132,11 @@ fn native_calls(
     stack.push(value);
     *at += 1;
     *ran += 1;
-    Some(native_stretch(scope, stack, frame, at, ran, room))
+    Some(if scope.call_caches().wants_more(frame.cache_base) {
+        native_stretch::<true>(scope, stack, frame, at, ran, room)
+    } else {
+        native_stretch::<false>(scope, stack, frame, at, ran, room)
+    })
 }
 
 /// [`counted_stretch`] for a frame [`run_calls`] has just answered a
@@ -17731,7 +18155,7 @@ fn native_calls(
 /// frame runs in, [`light_stretch`] and `counted_stretch`, keep the
 /// registers they had: a call inside their loop costs them those.
 #[inline(never)]
-fn native_stretch(
+fn native_stretch<const MORE: bool>(
     scope: &mut HandleScope<'_>,
     stack: &mut Stack,
     frame: &Call,
@@ -17746,7 +18170,7 @@ fn native_stretch(
     let mut lazy = Lazy::default();
     loop {
         let mut after = at + 1;
-        let step = light_step(
+        let step = light_step::<true, MORE>(
             scope,
             &mut stack,
             frame,
@@ -17791,7 +18215,7 @@ fn native_stretch(
 /// the instruction it stopped at, read again once the loop is done rather
 /// than carried through it, so the loop keeps its registers.
 #[inline(always)]
-fn stretch(
+fn stretch<const MORE: bool>(
     scope: &mut HandleScope<'_>,
     stack: &mut Stack,
     frame: &Call,
@@ -17808,7 +18232,7 @@ fn stretch(
     let mut lazy = Lazy::default();
     loop {
         let mut after = at + 1;
-        let step = light_step(
+        let step = light_step::<true, MORE>(
             scope,
             &mut stack,
             frame,
@@ -17960,7 +18384,11 @@ fn run_calls(
         }
         ran += 1;
         let top = frames.len() - 1;
-        insn = counted_stretch(scope, stack, &frames[top], &mut at, &mut ran, room);
+        insn = if scope.call_caches().wants_more(frames[top].cache_base) {
+            counted_more_stretch(scope, stack, &frames[top], &mut at, &mut ran, room)
+        } else {
+            counted_stretch(scope, stack, &frames[top], &mut at, &mut ran, room)
+        };
         if ran >= room {
             break;
         }
@@ -18144,7 +18572,6 @@ fn materialise<'h>(
     string_class: Handle<'h>,
 ) -> Result<Value, Error> {
     match literal {
-        Literal::Float(f) => Ok(Value::flonum(*f).expect("checked at compile time")),
         // A fresh cell per evaluation, as a String literal is.
         Literal::BoxedFloat(f) => Ok(crate::float::value(scope, *f)),
         Literal::BigInt(digits) => {
@@ -25558,6 +25985,73 @@ mod tests {
         assert_eq!(inspect(&mut scope, value), format!("{want:?}"));
     }
 
+    /// Instance-variable writes and constant reads from their sites' caches
+    /// (#750), in a loop: the first write moves `self` to a new shape through
+    /// the full path and fills the site, and the rest overwrite in place — a
+    /// flonum in the light loop, a heap String in `run`'s arm after its
+    /// rooting — while a top-level constant read fills its site and then
+    /// answers light. Every allocation collects, so a String the cached
+    /// write stored without its being rooted would be read after it was
+    /// freed, which miri reports. Built by hand for miri.
+    #[test]
+    fn ivar_writes_and_constant_reads_answer_from_their_caches_under_miri() {
+        let rounds: i64 = if cfg!(miri) { 6 } else { 40 };
+        let program = Iseq {
+            name: "<test>".into(),
+            insns: vec![
+                Insn::PushFloat(1.5f64.to_bits()),
+                Insn::SetIvar(0, 1),
+                Insn::PushInt(0),
+                Insn::SetLocal(0, 0),
+                // while i < rounds
+                Insn::GetLocal(0, 0),
+                Insn::PushInt(rounds),
+                Insn::BinOp(BinOp::Lt),
+                Insn::JumpUnless(13),
+                // @a = @a + 0.25; @b = "s"; ::Object
+                Insn::GetIvar(0, 0),
+                Insn::PushFloat(0.25f64.to_bits()),
+                Insn::BinOp(BinOp::Add),
+                Insn::SetIvar(0, 1),
+                Insn::PushLit(0),
+                Insn::SetIvar(1, 2),
+                Insn::GetConst(2, ConstScope::Top, 4),
+                Insn::Pop,
+                // i += 1
+                Insn::GetLocal(0, 0),
+                Insn::PushInt(1),
+                Insn::BinOp(BinOp::Add),
+                Insn::SetLocal(0, 0),
+                Insn::Jump(-17),
+                Insn::GetIvar(0, 0),
+                Insn::GetIvar(1, 3),
+                Insn::GetConst(2, ConstScope::Top, 4),
+                Insn::NewArray(3),
+                Insn::Leave,
+            ],
+            literals: vec![Literal::Str(Box::from(&b"s"[..]), crate::strings::UTF_8)],
+            symbols: vec!["@a".into(), "@b".into(), "Object".into()],
+            locals: vec!["i".into()],
+            ivar_sites: 4,
+            const_sites: 1,
+            max_stack: 3,
+            ..Iseq::default()
+        };
+
+        let mut heap = Heap::new();
+        let mut frame = Frame::new(1);
+        let mut scope = heap.scope();
+        scope.bootstrap();
+        scope.set_gc_stress(true);
+        let value = eval_in(&mut scope, &mut frame, &program).expect("should run");
+        scope.set_gc_stress(false);
+        let a = 1.5 + 0.25 * rounds as f64;
+        assert_eq!(
+            inspect(&mut scope, value),
+            format!("[{a:?}, \"s\", Object]")
+        );
+    }
+
     #[test]
     fn arithmetic_that_leaves_the_fast_path_refuses() {
         for (op, left, right) in [
@@ -25575,5 +26069,50 @@ mod tests {
                 "{op:?} should refuse rather than guess"
             );
         }
+    }
+
+    /// The light loop's Float operators answer what `float_op` and `ruby_eq`
+    /// answer for two flonums, and decline an answer that needs a heap
+    /// Float, `%`, and an operand that is not a flonum (#750).
+    #[test]
+    fn flonum_operators_agree_with_the_general_path_and_decline_the_rest() {
+        let float = |f: f64| Value::flonum(f).expect("a flonum");
+        let ops = [
+            BinOp::Add,
+            BinOp::Sub,
+            BinOp::Mul,
+            BinOp::Div,
+            BinOp::Lt,
+            BinOp::Le,
+            BinOp::Gt,
+            BinOp::Ge,
+            BinOp::Eq,
+            BinOp::Neq,
+        ];
+        let mut heap = Heap::new();
+        let mut scope = heap.scope();
+        scope.bootstrap();
+        for (a, b) in [(1.5, 0.25), (2.5, 2.5), (-3.0, 0.5), (0.0, 1.0)] {
+            for op in ops {
+                let light = flonum_binop(op, float(a), float(b)).expect("a flonum answer");
+                let general = binop(&mut scope, op, float(a), float(b)).expect("an answer");
+                assert_eq!(light, general, "{a} {op:?} {b}");
+            }
+        }
+        // Infinity, NaN, an answer past either end of the flonum band and
+        // -0.0 each need a heap Float.
+        for (op, a, b) in [
+            (BinOp::Div, 1.0, 0.0),
+            (BinOp::Div, 0.0, 0.0),
+            (BinOp::Mul, 1.0e70, 1.0e70),
+            (BinOp::Mul, -1.0, 0.0),
+            (BinOp::Mul, 1.0e-70, 1.0e-70),
+        ] {
+            assert_eq!(flonum_binop(op, float(a), float(b)), None, "{a} {op:?} {b}");
+        }
+        assert_eq!(flonum_binop(BinOp::Mod, float(5.5), float(2.0)), None);
+        let one = Value::fixnum(1).expect("a fixnum");
+        assert_eq!(flonum_binop(BinOp::Add, one, float(1.0)), None);
+        assert_eq!(flonum_binop(BinOp::Add, float(1.0), one), None);
     }
 }

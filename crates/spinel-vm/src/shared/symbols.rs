@@ -145,6 +145,17 @@ pub fn name(id: SymbolId) -> Option<String> {
         .map(|(bytes, _)| String::from_utf8_lossy(bytes).into_owned())
 }
 
+/// `f` of the bytes `id` was interned under, borrowed under the table's read
+/// lock rather than copied out as [`bytes`] and [`name`] copy them: for a
+/// primitive that reads a name on a hot path, such as `__math__`'s operation.
+/// `None` if it was never interned.
+pub fn with_bytes<R>(id: SymbolId, f: impl FnOnce(&[u8]) -> R) -> Option<R> {
+    lock!(read)
+        .names
+        .get(id.0 as usize)
+        .map(|(bytes, _)| f(bytes))
+}
+
 /// The bytes and encoding `id` was interned under, or `None` if it was never
 /// interned: US-ASCII for an ASCII name in any ASCII-compatible encoding.
 #[must_use]

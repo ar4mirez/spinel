@@ -710,6 +710,15 @@ pub struct Classes {
     /// One list rather than a field per entry: it is empty in almost every
     /// program, and a constant read asks only whether it is.
     deprecated_constants: Vec<(ClassId, SymbolId)>,
+    /// Moved by everything that can change what a constant read answers: a
+    /// constant assigned, removed or copied, made private or public or
+    /// deprecated, and any change to a class's ancestry (#750). A
+    /// `GetConst` site's inline cache holds the epoch it was filled at, and
+    /// is believed only while that is still this — CRuby's
+    /// `ruby_vm_constant_cache_invalidations`, for the whole table at once
+    /// rather than per name, since a program that defines constants as it
+    /// runs is rare and one that reads them in a loop is not.
+    const_epoch: u64,
     /// The methods CRuby's interpreter and JIT optimise, with the body each
     /// class owned when the core library finished loading (#320). A program
     /// that changes one while it is still that body has disabled an
@@ -837,6 +846,18 @@ impl Classes {
     /// An empty table. [`HandleScope::bootstrap`] is what fills it.
     pub fn new() -> Classes {
         Classes::default()
+    }
+
+    /// See the field: what a `GetConst` cache entry is checked against.
+    #[inline]
+    #[must_use]
+    pub fn const_epoch(&self) -> u64 {
+        self.const_epoch
+    }
+
+    /// A constant read anywhere may now answer differently.
+    fn constants_moved(&mut self) {
+        self.const_epoch += 1;
     }
 
     /// This class's invalidation serial: bumped by anything that can change what
@@ -1042,6 +1063,7 @@ impl Classes {
         entry.repr = repr;
         self.entry_mut(superclass).subclasses.push(id);
         self.invalidate(id);
+        self.constants_moved();
     }
 
     /// `Module#dup` and `#clone`'s table half (#28): make `to`, which nothing
@@ -1115,6 +1137,7 @@ impl Classes {
         target.class_variables = class_variables;
         target.cvar_order = cvar_order;
         self.invalidate(to);
+        self.constants_moved();
     }
 
     /// The heap object Ruby sees, which is what an instance's header points at.
@@ -1679,6 +1702,7 @@ impl Classes {
     /// Reassignment is the caller's to warn about: `Insn::SetConst` and
     /// `Module#const_set` both ask [`Classes::const_get_here`] first (#268).
     pub fn const_set(&mut self, id: ClassId, name: SymbolId, value: Value) {
+        self.constants_moved();
         let entry = self.entry_mut(id);
         entry.constant_locations.remove(&name);
         if entry.constants.insert(name, value).is_none() {
@@ -1801,6 +1825,7 @@ impl Classes {
     pub fn deprecate_const(&mut self, id: ClassId, name: SymbolId) {
         if !self.deprecated_constants.contains(&(id, name)) {
             self.deprecated_constants.push((id, name));
+            self.constants_moved();
         }
     }
 
@@ -1840,11 +1865,13 @@ impl Classes {
         target.private_constants = private_constants;
         target.constant_locations = constant_locations;
         self.invalidate(to);
+        self.constants_moved();
     }
 
     /// `Module#remove_const`: take one of this module's own constants away,
     /// answering its value.
     pub fn const_remove(&mut self, id: ClassId, name: SymbolId) -> Option<Value> {
+        self.constants_moved();
         self.deprecated_constants
             .retain(|&(i, n)| (i, n) != (id, name));
         let entry = self.entry_mut(id);
@@ -1857,6 +1884,7 @@ impl Classes {
 
     /// `Module#public_constant`: the inverse of [`Classes::mark_const_private`].
     pub fn mark_const_public(&mut self, id: ClassId, name: SymbolId) {
+        self.constants_moved();
         self.entry_mut(id).private_constants.retain(|&n| n != name);
     }
 
@@ -1934,6 +1962,7 @@ impl Classes {
     /// `NameError: constant A::X not defined` for a name the module does not
     /// hold, so the caller checks first and this only records.
     pub fn mark_const_private(&mut self, id: ClassId, name: SymbolId) {
+        self.constants_moved();
         let entry = self.entry_mut(id);
         if !entry.private_constants.contains(&name) {
             entry.private_constants.push(name);
@@ -2079,6 +2108,7 @@ impl Classes {
     pub fn push_constant_scope(&mut self, outer: CrefId, class: ClassId) -> CrefId {
         let id = self.push_cref_node(outer, class, true);
         self.crefs[id.0 as usize].consts_only = true;
+        self.constants_moved();
         id
     }
 
@@ -2648,6 +2678,7 @@ impl Classes {
     /// Put `module` at `at` in `target`'s run, moving the class itself along if
     /// the module went in front of it, and recording the target as an includer.
     fn insert(&mut self, target: ClassId, at: usize, module: ClassId) {
+        self.constants_moved();
         let entry = self.entry_mut(target);
         entry.own.insert(at, module);
         if at <= entry.origin {
