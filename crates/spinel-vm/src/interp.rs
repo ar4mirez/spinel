@@ -2799,7 +2799,7 @@ fn run<'h>(
             // done, nor the look at the frames. `light_stretch` runs them, and
             // stops at anything else, which comes back here unrun.
             let mut operands = LightStack::<false>::new(&mut stack, 0);
-            let ran = light_step(
+            let ran = light_step::<false, false>(
                 scope,
                 &mut operands,
                 &frames[top],
@@ -2816,14 +2816,25 @@ fn run<'h>(
             if ran > 0 {
                 // The top of the loop counted the first.
                 budget = budget.saturating_sub(ran - 1);
-                light_stretch(
-                    scope,
-                    &mut stack,
-                    &frames[top],
-                    &mut cur_pc,
-                    &mut budget,
-                    limit,
-                );
+                if scope.call_caches().wants_more(frames[top].cache_base) {
+                    more_stretch(
+                        scope,
+                        &mut stack,
+                        &frames[top],
+                        &mut cur_pc,
+                        &mut budget,
+                        limit,
+                    );
+                } else {
+                    light_stretch(
+                        scope,
+                        &mut stack,
+                        &frames[top],
+                        &mut cur_pc,
+                        &mut budget,
+                        limit,
+                    );
+                }
                 // A stretch that stopped at a call the fast paths may take
                 // goes on into it, and the frames it reaches, without the
                 // trip through the top of this loop each call and return
@@ -2925,6 +2936,69 @@ fn run<'h>(
                     leave_in_place(scope, &mut stack, &mut frames, false);
                     reload!();
                     continue;
+                }
+                // Float arithmetic on two flonums, a Float literal, and a
+                // constant read or an instance-variable write their sites'
+                // caches answer (#750): answered here, without the
+                // closure, and the stretch after one run in `more_stretch`,
+                // the light loop that runs them too. See `light_more`.
+                Insn::BinOp(_) | Insn::PushFloat(_) | Insn::GetConst(..) | Insn::SetIvar(..) => {
+                    let depth = stack.len();
+                    let top_value = stack.last().copied();
+                    let below = if depth > 1 {
+                        stack[depth - 2]
+                    } else {
+                        Value::NIL
+                    };
+                    let ran = match light_more(scope, &frames[top], insn, top_value, below) {
+                        More::Push(value) => {
+                            stack.push(value);
+                            true
+                        }
+                        More::Pop => {
+                            stack.pop();
+                            true
+                        }
+                        More::Replace(value) => {
+                            stack.truncate(depth - 2);
+                            stack.push(value);
+                            true
+                        }
+                        More::Decline => false,
+                    };
+                    if ran {
+                        // What it pushed is immediate or a constant's, which
+                        // the constant table roots. Float arithmetic is what
+                        // says a body's stretches should run in
+                        // `more_stretch` from now on: a constant read or an
+                        // ivar write alone is in nearly every body, and
+                        // `more_stretch` costs a loop of the other
+                        // instructions a little.
+                        let base = frames[top].cache_base;
+                        if matches!(insn, Insn::BinOp(_)) {
+                            scope.call_caches_mut().set_wants_more(base);
+                        }
+                        if scope.call_caches().wants_more(base) {
+                            more_stretch(
+                                scope,
+                                &mut stack,
+                                &frames[top],
+                                &mut cur_pc,
+                                &mut budget,
+                                limit,
+                            );
+                        } else {
+                            light_stretch(
+                                scope,
+                                &mut stack,
+                                &frames[top],
+                                &mut cur_pc,
+                                &mut budget,
+                                limit,
+                            );
+                        }
+                        continue;
+                    }
                 }
                 _ => {}
             }
@@ -17602,7 +17676,7 @@ fn native_ops(scope: &mut HandleScope<'_>, frame: &Call, which: usize) -> u32 {
 /// and `spent` whether it has reached [`light_stretch`]'s limit.
 #[inline(always)]
 #[expect(clippy::too_many_arguments, reason = "the loop's own registers")]
-fn light_step<const LIGHT: bool>(
+fn light_step<const LIGHT: bool, const MORE: bool>(
     scope: &mut HandleScope<'_>,
     stack: &mut LightStack<'_, LIGHT>,
     frame: &Call,
@@ -17685,25 +17759,21 @@ fn light_step<const LIGHT: bool>(
                 *pc = jump(*pc, displacement);
             }
         }
-        // A Float literal that fits a flonum; a constant read from a scope
-        // that its site's cache answers; and an instance-variable write its
-        // site's cache answers, of an immediate in a light run, as its
-        // `SetLocal` takes one (#750). One arm and one call out of line:
-        // every instruction added here costs the loops of the others a little,
-        // whether or not they run it, and of the arrangements measured this
-        // one cost them least — see `light_more`.
-        Insn::PushFloat(_) | Insn::GetConst(..) | Insn::SetIvar(..) => {
+        // A Float literal, a constant read from a scope or an
+        // instance-variable write its site's cache answers — of an
+        // immediate in a light run, as its `SetLocal` takes one — in
+        // `more_stretch` alone: see there.
+        Insn::PushFloat(_) | Insn::GetConst(..) | Insn::SetIvar(..) if MORE => {
             let top = stack.last();
-            if LIGHT && matches!(insn, Insn::SetIvar(..)) && top.is_some_and(|v| !v.is_immediate())
-            {
+            if LIGHT && top.is_some_and(|value| !value.is_immediate()) {
                 return 0;
             }
-            match light_more(scope, frame, insn, top) {
+            match light_more(scope, frame, insn, top, Value::NIL) {
                 More::Push(value) => stack.push(value),
                 More::Pop => {
                     stack.pop();
                 }
-                More::Decline => return 0,
+                More::Replace(_) | More::Decline => return 0,
             }
         }
         // A read the site's inline cache answers: the receiver wears the
@@ -17731,38 +17801,32 @@ fn light_step<const LIGHT: bool>(
                 None => return 0,
             }
         }
-        // Two fixnums whose answer is a fixnum or a boolean, or two flonums
-        // whose answer is a flonum or a boolean, under an operator the
-        // program has not redefined for the left one's class. Anything else —
-        // overflow, a Float that needs a heap cell, a mixed pair, a division
-        // of fixnums — is the closure's.
+        // Two fixnums whose answer is a fixnum or a boolean, under an
+        // operator the program has not redefined. Anything else — overflow,
+        // a Float, a division — is `run`'s, but for two flonums in
+        // `more_stretch`, which answers those too.
         Insn::BinOp(op) => {
             let depth = stack.len();
-            // `Integer`'s seal is asked first, as it is the common case's;
-            // a Float pair while it is broken is the closure's too, which
-            // only ever costs time.
             let ops = *lazy.ops.get_or_insert_with(|| native_ops(scope, frame, 0));
             if depth < 2 || ops & (1 << op as usize) == 0 {
                 return 0;
             }
             let (left, right) = (stack.get(depth - 2), stack.get(depth - 1));
-            let value = match fixnum_binop(op, left, right) {
-                Some(value) => value,
-                None => {
-                    let Some(value) = light_flonum_binop(op, left, right) else {
-                        return 0;
-                    };
-                    let ops = *lazy
-                        .float_ops
-                        .get_or_insert_with(|| native_ops(scope, frame, 1));
-                    if ops & (1 << op as usize) == 0 {
-                        return 0;
+            let Some(value) = fixnum_binop(op, left, right) else {
+                if !MORE {
+                    return 0;
+                }
+                match light_more(scope, frame, insn, Some(right), left) {
+                    More::Replace(value) => {
+                        stack.truncate(depth - 2);
+                        stack.push(value);
+                        return 1;
                     }
-                    value
+                    _ => return 0,
                 }
             };
             stack.truncate(depth - 2);
-            // The answer is a fixnum, a flonum or a boolean, so immediate: nothing
+            // The answer is a fixnum or a boolean, so immediate: nothing
             // about it needs rooting, and the next instruction can take it
             // straight from here.
             match code.get(*pc).filter(|_| pair) {
@@ -17825,8 +17889,6 @@ fn set_env_local(scope: &mut HandleScope<'_>, frame: &Call, depth: u16, slot: u1
 struct Lazy {
     /// [`native_ops`] for `Integer`, for a `BinOp`.
     ops: Option<u32>,
-    /// [`native_ops`] for `Float`, for a `BinOp` of two flonums.
-    float_ops: Option<u32>,
     /// `self`'s instance variables, for a `GetIvar` in a light run.
     view: Option<crate::heap::IvarView>,
 }
@@ -17850,27 +17912,45 @@ fn fixnum_binop(op: BinOp, left: Value, right: Value) -> Option<Value> {
     }
 }
 
-/// What [`light_more`] answers [`light_step`].
+/// What [`light_more`] answers [`run`].
 enum More {
+    /// Push this.
     Push(Value),
+    /// Pop the top.
     Pop,
+    /// Replace the top two with this.
+    Replace(Value),
+    /// Not one it answers: nothing changed, and the closure decides.
     Decline,
 }
 
-/// [`light_step`]'s rarer instructions, out of line: a Float literal that
-/// fits a flonum; a `GetConst` from a scope whose site's cache holds the
-/// read for that scope at the current epoch, with no autoload waiting on
-/// the name; and a `SetIvar` of `top` that [`HandleScope::cached_set_ivar`]
-/// answers on `self`. `Decline` leaves everything as it was.
+/// The instructions `run` answers before its closure besides calls and
+/// returns, and [`more_stretch`] in its light loop (#750): a Float literal that fits a flonum; a `GetConst` from a
+/// scope whose site's cache holds the read for that scope at the current
+/// epoch, with no autoload waiting on the name; a `SetIvar` of `top` that
+/// [`HandleScope::cached_set_ivar`] answers on `self`; and a `BinOp` of two
+/// flonums, `below` and `top`, whose answer is a flonum or a boolean, under
+/// an operator `Float` still has as its own. `Decline` leaves everything as
+/// it was, for the closure.
 ///
-/// Each instruction `light_step` runs is code in every loop of light
-/// instructions, and costs the others a few instructions each, run or not.
-/// Measured in instructions retired against main (#750), these three as one
-/// arm and one call, taking values rather than the run's operand stack or
-/// [`Lazy`], cost those loops least: inline, or as an arm each, or called
-/// from outside `light_step`'s loop, they cost more.
+/// Only `light_step`'s `MORE` form runs them, the one `more_stretch` is
+/// made of: every instruction `light_step` runs is code in each loop of
+/// light instructions, and, measured in instructions retired against main,
+/// any of these in the loops every body runs, inline or out of line, cost
+/// the loops that never run them 2% to 5%. A body's stretches run in
+/// `more_stretch` once `run` has answered Float arithmetic in it, which
+/// [`CallCaches::wants_more`] remembers; until then, and in every other
+/// body, the stretches are the ones they were.
+///
+/// [`CallCaches::wants_more`]: crate::callcache::CallCaches::wants_more
 #[inline(never)]
-fn light_more(scope: &mut HandleScope<'_>, frame: &Call, insn: Insn, top: Option<Value>) -> More {
+fn light_more(
+    scope: &mut HandleScope<'_>,
+    frame: &Call,
+    insn: Insn,
+    top: Option<Value>,
+    below: Value,
+) -> More {
     match insn {
         Insn::PushFloat(bits) => match Value::flonum(f64::from_bits(bits)) {
             Some(value) => More::Push(value),
@@ -17903,17 +17983,17 @@ fn light_more(scope: &mut HandleScope<'_>, frame: &Call, insn: Insn, top: Option
             }
             _ => More::Decline,
         },
+        Insn::BinOp(op) => {
+            let Some(value) = top.and_then(|top| flonum_binop(op, below, top)) else {
+                return More::Decline;
+            };
+            if native_ops(scope, frame, 1) & (1 << op as usize) == 0 {
+                return More::Decline;
+            }
+            More::Replace(value)
+        }
         _ => More::Decline,
     }
-}
-
-/// [`flonum_binop`] out of line, for [`light_step`]'s `BinOp` of a pair that
-/// is not two fixnums, for the reason [`light_more`] is. It takes the
-/// operands alone: handed the light run's state, that state would have to
-/// live in memory for the whole run.
-#[inline(never)]
-fn light_flonum_binop(op: BinOp, left: Value, right: Value) -> Option<Value> {
-    flonum_binop(op, left, right)
 }
 
 /// `left op right` for two flonums whose answer is a flonum or a boolean,
@@ -17973,7 +18053,33 @@ fn light_stretch(
     // How many may run before the budget reaches `limit`.
     let room = *budget - limit;
     let mut ran = 0;
-    stretch(scope, stack, frame, pc, &mut ran, room);
+    stretch::<false>(scope, stack, frame, pc, &mut ran, room);
+    *budget = budget.saturating_sub(ran);
+}
+
+/// [`light_stretch`] with [`light_step`]'s `MORE` instructions too: Float
+/// arithmetic on flonums, a Float literal, a cached constant read from a
+/// scope and a cached instance-variable write (#750). [`run`] enters it only
+/// after answering one of those itself, so that a frame doing Float
+/// arithmetic runs on in here, while every other loop runs in
+/// `light_stretch`, whose code those instructions would make slower even
+/// where they never run — measured in instructions retired, 2% to 5%.
+#[inline(never)]
+fn more_stretch(
+    scope: &mut HandleScope<'_>,
+    stack: &mut Stack,
+    frame: &Call,
+    pc: &mut usize,
+    budget: &mut u64,
+    limit: u64,
+) {
+    if *budget <= limit {
+        return;
+    }
+    // How many may run before the budget reaches `limit`.
+    let room = *budget - limit;
+    let mut ran = 0;
+    stretch::<true>(scope, stack, frame, pc, &mut ran, room);
     *budget = budget.saturating_sub(ran);
 }
 
@@ -17989,7 +18095,21 @@ fn counted_stretch(
     ran: &mut u64,
     room: u64,
 ) -> Insn {
-    stretch(scope, stack, frame, pc, ran, room)
+    stretch::<false>(scope, stack, frame, pc, ran, room)
+}
+
+/// [`counted_stretch`] in [`more_stretch`]'s loop, for a body whose
+/// stretches run there.
+#[inline(never)]
+fn counted_more_stretch(
+    scope: &mut HandleScope<'_>,
+    stack: &mut Stack,
+    frame: &Call,
+    pc: &mut usize,
+    ran: &mut u64,
+    room: u64,
+) -> Insn {
+    stretch::<true>(scope, stack, frame, pc, ran, room)
 }
 
 /// [`run_calls`]'s call to a primitive's light form at `at`: answered
@@ -18012,7 +18132,11 @@ fn native_calls(
     stack.push(value);
     *at += 1;
     *ran += 1;
-    Some(native_stretch(scope, stack, frame, at, ran, room))
+    Some(if scope.call_caches().wants_more(frame.cache_base) {
+        native_stretch::<true>(scope, stack, frame, at, ran, room)
+    } else {
+        native_stretch::<false>(scope, stack, frame, at, ran, room)
+    })
 }
 
 /// [`counted_stretch`] for a frame [`run_calls`] has just answered a
@@ -18031,7 +18155,7 @@ fn native_calls(
 /// frame runs in, [`light_stretch`] and `counted_stretch`, keep the
 /// registers they had: a call inside their loop costs them those.
 #[inline(never)]
-fn native_stretch(
+fn native_stretch<const MORE: bool>(
     scope: &mut HandleScope<'_>,
     stack: &mut Stack,
     frame: &Call,
@@ -18046,7 +18170,7 @@ fn native_stretch(
     let mut lazy = Lazy::default();
     loop {
         let mut after = at + 1;
-        let step = light_step(
+        let step = light_step::<true, MORE>(
             scope,
             &mut stack,
             frame,
@@ -18091,7 +18215,7 @@ fn native_stretch(
 /// the instruction it stopped at, read again once the loop is done rather
 /// than carried through it, so the loop keeps its registers.
 #[inline(always)]
-fn stretch(
+fn stretch<const MORE: bool>(
     scope: &mut HandleScope<'_>,
     stack: &mut Stack,
     frame: &Call,
@@ -18108,7 +18232,7 @@ fn stretch(
     let mut lazy = Lazy::default();
     loop {
         let mut after = at + 1;
-        let step = light_step(
+        let step = light_step::<true, MORE>(
             scope,
             &mut stack,
             frame,
@@ -18260,7 +18384,11 @@ fn run_calls(
         }
         ran += 1;
         let top = frames.len() - 1;
-        insn = counted_stretch(scope, stack, &frames[top], &mut at, &mut ran, room);
+        insn = if scope.call_caches().wants_more(frames[top].cache_base) {
+            counted_more_stretch(scope, stack, &frames[top], &mut at, &mut ran, room)
+        } else {
+            counted_stretch(scope, stack, &frames[top], &mut at, &mut ran, room)
+        };
         if ran >= room {
             break;
         }

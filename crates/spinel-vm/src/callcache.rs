@@ -254,6 +254,11 @@ pub struct CallCaches {
     /// reason: an `Iseq`'s run there is its call sites, its ivar sites and
     /// then its [`Iseq::const_sites`].
     consts: Vec<Option<ConstEntry>>,
+    /// Whether the body whose run starts at that index has had `run` answer
+    /// one of the instructions only `more_stretch` runs light — Float
+    /// arithmetic, chiefly — so that its stretches run there (#750).
+    /// Indexed by a run's base, which is why every run has a slot.
+    more: Vec<bool>,
     /// Where each `Iseq`'s run starts, by `Arc` address.
     ///
     /// An address is only a safe key because `iseqs` below holds a clone of the
@@ -287,6 +292,7 @@ impl Default for CallCaches {
             plans: Vec::new(),
             ivars: Vec::new(),
             consts: Vec::new(),
+            more: Vec::new(),
             bases: HashMap::new(),
             iseqs: Vec::new(),
             recent: [(0, 0); RECENT],
@@ -338,11 +344,15 @@ impl CallCaches {
             return (base, entered);
         }
         let base = u32::try_from(self.entries.len()).expect("a heap under 2^32 call sites");
-        let run = iseq.call_sites.len() + iseq.ivar_sites as usize + iseq.const_sites as usize;
+        // At least one slot, so that a body with no sites still has a base
+        // of its own for `more`.
+        let run =
+            (iseq.call_sites.len() + iseq.ivar_sites as usize + iseq.const_sites as usize).max(1);
         self.entries.resize(self.entries.len() + run, None);
         self.plans.resize(self.entries.len(), Plan::Unknown);
         self.ivars.resize(self.entries.len(), IvarEntry::EMPTY);
         self.consts.resize(self.entries.len(), None);
+        self.more.resize(self.entries.len(), false);
         self.bases.insert(key, base);
         self.iseqs.push(Arc::clone(iseq));
         self.recent[recent] = (key, base);
@@ -468,6 +478,22 @@ impl CallCaches {
     /// As [`CallCaches::get`].
     pub fn fill_constant(&mut self, slot: u32, entry: ConstEntry) {
         self.consts[slot as usize] = Some(entry);
+    }
+
+    /// Whether the body whose run starts at `base` runs its stretches in
+    /// `more_stretch`: see the field.
+    #[inline]
+    #[must_use]
+    pub fn wants_more(&self, base: u32) -> bool {
+        self.more.get(base as usize).copied().unwrap_or(false)
+    }
+
+    /// From now on, the body whose run starts at `base` runs its stretches
+    /// in `more_stretch`.
+    pub fn set_wants_more(&mut self, base: u32) {
+        if let Some(more) = self.more.get_mut(base as usize) {
+            *more = true;
+        }
     }
 
     /// How many call sites are currently memoised. For tests, the way
