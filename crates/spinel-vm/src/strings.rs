@@ -227,17 +227,7 @@ pub fn splice<'h>(
         live.copy_within(end..old_len, start + with.len());
         live[start..start + with.len()].copy_from_slice(with);
     } else {
-        // A shared buffer was sized for the String that first had it, so a
-        // copy for this one is sized from this one's length.
-        let mut grown = if shared {
-            old_len.min(new_len)
-        } else {
-            capacity
-        }
-        .max(MIN_CAPACITY);
-        while grown < new_len {
-            grown *= 2;
-        }
+        let grown = grown_capacity(shared, capacity, old_len, new_len);
         let at = offset(scope, string);
         let fresh = scope.alloc(None, Payload::Bytes, grown as u32);
         scope.copy_bytes(buffer, at, fresh, 0, start);
@@ -248,6 +238,160 @@ pub fn splice<'h>(
         scope.set_slot(string, OFFSET, fixnum(0));
     }
     scope.set_slot(string, BYTESIZE, fixnum(new_len));
+}
+
+/// The buffer [`splice`] and [`append`] replace one with: doubling from the
+/// old capacity to grow, or, for a shared buffer — sized for the String that
+/// first had it — from this String's own length.
+fn grown_capacity(shared: bool, capacity: usize, old_len: usize, new_len: usize) -> usize {
+    let mut grown = if shared {
+        old_len.min(new_len)
+    } else {
+        capacity
+    }
+    .max(MIN_CAPACITY);
+    while grown < new_len {
+        grown *= 2;
+    }
+    grown
+}
+
+/// A `String`'s four slots, read at once and decoded as the one-slot
+/// readers above decode each, when asked.
+struct Fields([Value; SLOTS as usize]);
+
+impl Fields {
+    fn size(value: Value) -> usize {
+        value
+            .as_fixnum()
+            .and_then(|n| usize::try_from(n).ok())
+            .unwrap_or(0)
+    }
+
+    fn buffer(&self) -> Value {
+        self.0[BUFFER]
+    }
+
+    fn bytesize(&self) -> usize {
+        Fields::size(self.0[BYTESIZE])
+    }
+
+    fn offset(&self) -> usize {
+        Fields::size(self.0[OFFSET])
+    }
+
+    fn encoding(&self) -> u8 {
+        self.0[ENCODING]
+            .as_fixnum()
+            .and_then(|n| u8::try_from(n).ok())
+            .unwrap_or(UTF_8)
+    }
+
+    /// Whether the two are in the same encoding: the same slot value is,
+    /// which saves decoding either.
+    fn same_encoding(&self, other: &Fields) -> bool {
+        self.0[ENCODING] == other.0[ENCODING] || self.encoding() == other.encoding()
+    }
+}
+
+/// `string`'s [`Fields`], read without a handle, under
+/// [`HandleScope::remembered_class_of`]'s rule; `None` when it is not an
+/// object of a String's slots.
+#[inline(always)]
+fn fields_of(scope: &HandleScope<'_>, string: Value) -> Option<Fields> {
+    scope.slots_of(string).map(Fields)
+}
+
+/// Whether `bytes`, in `theirs`, go on the end of a String in `mine` as they
+/// are, the String keeping `mine`: the same encoding, or ASCII into anything
+/// ASCII-compatible. Both sides ASCII-compatible: UTF-16 text can be all
+/// bytes below 0x80 and is not ASCII for that.
+#[must_use]
+pub fn appends_as_is(mine: u8, theirs: u8, bytes: &[u8]) -> bool {
+    mine == theirs || (ascii_compatible(mine) && ascii_compatible(theirs) && bytes.is_ascii())
+}
+
+/// `string << other` for two Strings whose bytes go on as they are (see
+/// [`appends_as_is`]): `other`'s live bytes copied from its buffer to the end
+/// of `string`'s, without the copy out into a `Vec` that [`splice`] takes.
+/// The buffer grows as `splice`'s does, and `string` may be `other`, or share
+/// its buffer.
+///
+/// By value rather than by handle, which is what lets a primitive answer
+/// from its operands where they stand on the stack: both must be live
+/// objects of this heap, and kept alive by the caller should the buffer have
+/// to grow, which allocates. The collector does not move objects, so the
+/// buffers they name stay where they are read from.
+///
+/// Answers `false`, having changed nothing, when either is not a String's
+/// slots, when the encodings do not allow it, or when `may_allocate` is
+/// false and the buffer would have to grow — which is what lets a caller
+/// holding values it has not rooted ask.
+pub fn append(
+    scope: &mut HandleScope<'_>,
+    string: Value,
+    other: Value,
+    may_allocate: bool,
+) -> bool {
+    let (Some(theirs), Some(mine)) = (fields_of(scope, other), fields_of(scope, string)) else {
+        return false;
+    };
+    let (from, len) = (theirs.offset(), theirs.bytesize());
+    let Some(source) = scope.bytes_of(theirs.buffer()) else {
+        return false;
+    };
+    let Some(bytes) = source.get(from..from + len) else {
+        return false;
+    };
+    if !mine.same_encoding(&theirs) && !appends_as_is(mine.encoding(), theirs.encoding(), bytes) {
+        return false;
+    }
+    let old_len = mine.bytesize();
+    let new_len = old_len + len;
+    let Some((capacity, shared)) = scope.bytes_layout_of(mine.buffer()) else {
+        return false;
+    };
+    let target = if !shared && new_len <= capacity {
+        debug_assert_eq!(mine.offset(), 0, "an unshared buffer is at 0");
+        mine.buffer()
+    } else {
+        if !may_allocate {
+            return false;
+        }
+        let grown = grown_capacity(shared, capacity, old_len, new_len);
+        grow(scope, string, mine.buffer(), mine.offset(), old_len, grown)
+    };
+    // `theirs.buffer()` is still the bytes to read: when `string` is
+    // `other`, or shares its buffer, a grown `string` names a new one, and
+    // the old one stays where it was — the collector moves nothing, and
+    // nothing has collected since `grow` allocated.
+    scope.copy_bytes_of(theirs.buffer(), from, target, old_len, len);
+    scope.set_immediate_slot_of(string, BYTESIZE, fixnum(new_len));
+    true
+}
+
+/// [`append`]'s buffer when the one `string` has is shared or too short: a
+/// fresh one of `capacity` bytes, holding the `len` live bytes from `at` of
+/// `buffer`, which becomes `string`'s at offset 0. Out of line, since it
+/// allocates and most appends do not. `string` is kept alive by the caller,
+/// and so `buffer`, which it still names, through the allocation.
+#[inline(never)]
+fn grow(
+    scope: &mut HandleScope<'_>,
+    string: Value,
+    buffer: Value,
+    at: usize,
+    len: usize,
+    capacity: usize,
+) -> Value {
+    let mut scope = scope.nested();
+    let string = scope.root(string);
+    let fresh = scope.alloc(None, Payload::Bytes, capacity as u32);
+    let fresh = scope.get(fresh);
+    scope.copy_bytes_of(buffer, at, fresh, 0, len);
+    scope.set_slot(string, BUFFER, fresh);
+    scope.set_slot(string, OFFSET, fixnum(0));
+    fresh
 }
 
 /// A deep copy's buffer: `dup` must not share bytes, or `s.dup << "x"` would
@@ -1234,6 +1378,75 @@ mod tests {
 
     fn text(n: usize) -> Vec<u8> {
         (0..n).map(|i| b'a' + (i % 26) as u8).collect()
+    }
+
+    /// `append` by value (#749): it declines, changing nothing, what it may
+    /// not do — grow without leave to allocate, or put bytes on as they are
+    /// across encodings that do not allow it — and otherwise copies buffer
+    /// to buffer, growing as `splice` does, onto itself, and onto and off a
+    /// shared buffer, which it never writes.
+    #[test]
+    fn append_copies_buffer_to_buffer_or_declines_unchanged() {
+        let mut heap = Heap::new();
+        let mut scope = heap.scope();
+        let s = string(&mut scope, b"ab");
+        let x = string(&mut scope, b"cd");
+        let (sv, xv) = (scope.get(s), scope.get(x));
+
+        // A two-byte buffer has no room: only leave to allocate grows it.
+        assert!(!append(&mut scope, sv, xv, false));
+        assert_eq!(live(&mut scope, s), b"ab");
+        assert!(append(&mut scope, sv, xv, true));
+        assert_eq!(live(&mut scope, s), b"abcd");
+        assert_eq!(capacity(&mut scope, s), MIN_CAPACITY as u32);
+        // Now it has room, and needs no allocation.
+        assert!(append(&mut scope, sv, xv, false));
+        assert!(append(&mut scope, sv, sv, false));
+        assert_eq!(live(&mut scope, s), b"abcdcdabcdcd");
+        assert!(append(&mut scope, sv, sv, true));
+        assert_eq!(live(&mut scope, s), b"abcdcdabcdcdabcdcdabcdcd");
+        assert_eq!(capacity(&mut scope, s), 2 * MIN_CAPACITY as u32);
+
+        // Bytes that are not ASCII go on only in the receiver's encoding; ASCII
+        // goes on across two ASCII-compatible ones, and the receiver keeps its.
+        let utf8 = string(&mut scope, "é".as_bytes());
+        set_encoding(&mut scope, utf8, UTF_8);
+        let high = string(&mut scope, b"\xff");
+        let ascii = string(&mut scope, b"z");
+        let (uv, hv, av) = (scope.get(utf8), scope.get(high), scope.get(ascii));
+        assert!(!append(&mut scope, uv, hv, true));
+        assert_eq!(live(&mut scope, utf8), "é".as_bytes());
+        assert!(append(&mut scope, uv, av, true));
+        assert_eq!(live(&mut scope, utf8), "éz".as_bytes());
+        assert_eq!(encoding(&mut scope, utf8), UTF_8);
+        assert!(!append(&mut scope, hv, uv, true));
+        assert!(append(&mut scope, hv, av, true));
+        assert_eq!(encoding(&mut scope, high), BINARY);
+        assert_eq!(live(&mut scope, high), b"\xffz");
+
+        // A slice sharing a long String's buffer, and that String: each gets
+        // a buffer of its own to append into, and the other keeps its bytes.
+        let all = text(100);
+        let long = string(&mut scope, &all);
+        let part = slice(&mut scope, long, 0, 80);
+        assert!(shares(&mut scope, long, part));
+        let (lv, pv) = (scope.get(long), scope.get(part));
+        assert!(
+            !append(&mut scope, pv, xv, false),
+            "a shared buffer is never written"
+        );
+        assert!(append(&mut scope, pv, xv, true));
+        assert!(!shares(&mut scope, long, part));
+        assert_eq!(live(&mut scope, part), [&all[..80], b"cd"].concat());
+        assert_eq!(live(&mut scope, long), &all[..]);
+        let other = slice(&mut scope, long, 10, 90);
+        assert!(shares(&mut scope, long, other));
+        assert!(append(&mut scope, lv, pv, true));
+        assert_eq!(
+            live(&mut scope, long),
+            [&all[..], &all[..80], b"cd"].concat()
+        );
+        assert_eq!(live(&mut scope, other), &all[10..]);
     }
 
     /// A long slice is the source's buffer at an offset, frozen; a short one,

@@ -19,6 +19,7 @@ use std::sync::Arc;
 
 use crate::bytecode::Iseq;
 use crate::class::{ClassId, Method};
+use crate::method::Native;
 use crate::shape::ShapeId;
 use crate::value::{SymbolId, Value};
 
@@ -84,6 +85,30 @@ pub enum Plan {
     /// A `yield` site's: the block body it last yielded to, and whether a
     /// yield from it binds on the stack. See [`Yielded`].
     Yielded(Arc<Yielded>),
+    /// The call is to a primitive that answers from the operand stack, for
+    /// the cases it can, without a `Pending`: see [`NativePlan`].
+    Native(NativePlan),
+}
+
+/// A call to a primitive with a light form: one that takes its receiver and
+/// arguments where they stand on the operand stack and answers the cases it
+/// can — `String#<<` of a String it can append in place, for one — leaving
+/// every other to the general path, which then decides them as it always
+/// has. Made only for a public method, a site with positional arguments
+/// alone, and a receiver class `known_class_of` answers.
+#[derive(Debug, Clone, Copy)]
+pub struct NativePlan {
+    /// The primitive.
+    pub native: Native,
+    /// The receiver class the entry holds the method for.
+    pub class: ClassId,
+    /// `class`'s object, the guard on the receiver's header, as
+    /// [`Direct::class_object`] is.
+    pub class_object: Value,
+    /// The name the site calls, which a refinement is looked up by.
+    pub name: SymbolId,
+    /// How many arguments the site passes, above its receiver.
+    pub argc: u16,
 }
 
 /// An `Iseq` this heap has entered, held by a frame without a count of its

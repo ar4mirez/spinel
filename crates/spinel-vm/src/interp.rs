@@ -43,7 +43,7 @@ use crate::bytecode::{
     BinOp, BlockRef, CallSite, CatchKind, ClassDef, ConstScope, DefKind, Insn, Iseq, Literal,
     MatchRef, ParamSpec,
 };
-use crate::callcache::{CallCaches, Direct, Entered, Plan, Yielded};
+use crate::callcache::{CallCaches, Direct, Entered, NativePlan, Plan, Yielded};
 use crate::class::Builtin;
 use crate::class::{ClassId, CrefId, Kind, Method, ScopeDefault, Visibility};
 use crate::heap::{Handle, HandleScope, Heap, Payload};
@@ -2868,15 +2868,35 @@ fn run<'h>(
                 // it again for as long as its entry holds what it said it
                 // for, and a refill forgets it: such a send goes straight to
                 // the closure's `dispatch`, without the fast path's lookups.
+                //
+                // A primitive with a light form is answered where it stands,
+                // allocating if it must — the stack was rooted at the top of
+                // the loop — since `run_calls` declines one that would. No
+                // frame changed.
                 Insn::Send(index) => {
                     sync_out!();
                     let slot = frames[top].cache_base + index;
-                    if !std::mem::take(&mut declined)
-                        && !matches!(scope.call_caches().plan(slot), Plan::General)
-                        && send_simple(scope, &mut stack, &mut frames, index, &mut ids).is_some()
-                    {
-                        reload!();
-                        continue;
+                    let declined = std::mem::take(&mut declined);
+                    match scope.call_caches().plan(slot) {
+                        Plan::General => {}
+                        Plan::Native(_) => {
+                            if let Some((at, value)) =
+                                light_send(scope, &frames[top], index, &stack, true)
+                            {
+                                stack.truncate(at);
+                                stack.push(value);
+                                continue;
+                            }
+                        }
+                        _ => {
+                            if !declined
+                                && send_simple(scope, &mut stack, &mut frames, index, &mut ids)
+                                    .is_some()
+                            {
+                                reload!();
+                                continue;
+                            }
+                        }
                     }
                 }
                 // The yield most are — see `yield_simple`.
@@ -5206,6 +5226,19 @@ fn send_simple(
                     (class, class_object),
                 )
             }
+            Some(&Definition::Native(native))
+                if given == 0
+                    && method.visibility == Visibility::Public
+                    && has_native_light(native, argc) =>
+            {
+                Plan::Native(NativePlan {
+                    native,
+                    class,
+                    class_object: scope.classes().object(class),
+                    name: frame.iseq.symbol_ids()[site.name as usize],
+                    argc: site.argc,
+                })
+            }
             _ => Plan::General,
         };
         scope.call_caches_mut().set_plan(slot, plan);
@@ -5289,6 +5322,146 @@ fn send_simple(
         },
     );
     Some(receiver)
+}
+
+/// `String#<<`'s own case, for two values the caller knows are Strings: an
+/// unfrozen, unchilled receiver, and bytes that go on its end as they are
+/// (see [`crate::strings::appends_as_is`]). Answers whether it appended; when
+/// it did not, nothing has changed, and the Ruby half decides the call. With
+/// `may_allocate` false it also declines an append the receiver's buffer has
+/// no room for, so that it cannot collect. Both are the call's operands,
+/// which the caller keeps alive — rooted, should it allocate — and are read
+/// where they are, without a handle.
+#[inline(always)]
+fn append_plain(
+    scope: &mut HandleScope<'_>,
+    receiver: Value,
+    other: Value,
+    may_allocate: bool,
+) -> bool {
+    !scope.is_frozen_or_chilled_of(receiver)
+        && crate::strings::append(scope, receiver, other, may_allocate)
+}
+
+/// Whether `native` has a light form, [`native_light`], for a site passing
+/// `argc` positional arguments and nothing else.
+fn has_native_light(native: Native, argc: usize) -> bool {
+    match native {
+        Native::StringAppend(_) => argc == 1,
+        _ => false,
+    }
+}
+
+/// A primitive's light form: its answer for `receiver`, an instance of
+/// `plan.class`, and `args`, where they stand on the operand stack, for the cases
+/// it takes, without the `Pending` the general path builds. `None` declines,
+/// having changed nothing, and the general path then decides the call as it
+/// would have. A case it takes is one the general path would have answered
+/// the same way, with no warning, no raise and no frame of its own.
+///
+/// With `may_allocate` false it declines anything that would allocate, and
+/// so cannot collect: [`run_calls`] asks it with what a light stretch left
+/// on the stack not yet rooted. The receiver's class is the plan's, so only
+/// the arguments' classes are asked, and only of their headers and
+/// [`known_class_of`], which cannot allocate either.
+#[inline(always)]
+fn native_light(
+    scope: &mut HandleScope<'_>,
+    plan: &NativePlan,
+    receiver: Value,
+    args: &[Value],
+    may_allocate: bool,
+) -> Option<Value> {
+    let is_string =
+        |scope: &HandleScope<'_>, class| scope.classes().repr(class) == Some(Builtin::String);
+    match plan.native {
+        Native::StringAppend(_) => {
+            let &[other] = args else { return None };
+            if !is_string(scope, plan.class) {
+                return None;
+            }
+            // An argument of the receiver's own class is a String too, which
+            // its header says in one load.
+            let theirs = scope.class_object_of(other) == Some(plan.class_object)
+                || (!other.is_immediate()
+                    && known_class_of(scope, other).is_some_and(|class| is_string(scope, class)));
+            (theirs && append_plain(scope, receiver, other, may_allocate)).then_some(receiver)
+        }
+        _ => None,
+    }
+}
+
+/// `Insn::Send` to a primitive's light form, when the site's plan is one:
+/// [`native_send`], with leave to allocate from `run`'s own arm, which has
+/// rooted the stack, and without from [`run_calls`] and [`native_stretch`].
+/// Out of line, so that those loops carry a call rather than the light
+/// form's code.
+#[inline(never)]
+fn light_send(
+    scope: &mut HandleScope<'_>,
+    frame: &Call,
+    index: u32,
+    stack: &[Value],
+    may_allocate: bool,
+) -> Option<(usize, Value)> {
+    let Plan::Native(plan) = *scope.call_caches().plan(frame.cache_base + index) else {
+        return None;
+    };
+    native_send(scope, frame, index, &plan, stack, may_allocate)
+}
+
+/// `Insn::Send` to a primitive with a light form, as its site's plan says
+/// (see [`NativePlan`]): the call from site `index` of `frame`, whose
+/// receiver and arguments are the top of `stack`, answered without a
+/// `Pending`. Answers the length the stack is cut to, where the call's
+/// receiver was, and the value to push there; `None` when the plan does not
+/// hold or the primitive declines, and then nothing has changed and
+/// `dispatch` takes the call, which is where a refinement, a cache miss, a
+/// warning the last primitive left and everything the light form does not
+/// take are decided. A primitive pushes no frame, so a backtrace is the same
+/// either way.
+///
+/// It takes no handle that outlives it, so that a run of these leaves no
+/// more of them than it found; and with `may_allocate` false it cannot
+/// collect, which is how [`run_calls`] asks it, holding what a light stretch
+/// left on the stack not yet rooted. With `may_allocate` true the stack must
+/// be rooted, as `run` has it at the top of its loop.
+///
+/// [`NativePlan`]: crate::callcache::NativePlan
+#[inline(always)]
+fn native_send(
+    scope: &mut HandleScope<'_>,
+    frame: &Call,
+    index: u32,
+    plan: &NativePlan,
+    stack: &[Value],
+    may_allocate: bool,
+) -> Option<(usize, Value)> {
+    let at = stack.len().checked_sub(usize::from(plan.argc) + 1)?;
+    let receiver = stack[at];
+    if scope.class_object_of(receiver) != Some(plan.class_object) {
+        return None;
+    }
+    if scope.classes().cref_refined(frame.cref)
+        && scope
+            .classes()
+            .refined_lookup(plan.class, plan.name, frame.cref)
+            .is_some()
+    {
+        return None;
+    }
+    let serial = scope.classes().serial(plan.class);
+    scope
+        .call_caches()
+        .get(frame.cache_base + index, plan.class, serial)?;
+    // What `dispatch` does after any primitive: say the warning it left,
+    // and the redefinitions since the last. With either waiting, it is
+    // `dispatch`'s call.
+    if scope.has_pending_warning() || scope.classes().has_redefined() {
+        return None;
+    }
+    let value = native_light(scope, plan, receiver, &stack[at + 1..], may_allocate)?;
+    Some((at, value))
 }
 
 /// `Insn::Yield` without a `Pending`, for the yield most are: positional
@@ -12813,32 +12986,21 @@ fn native_call<'h>(
         }
         Native::StringAppend(rest) => {
             let other = first_arg(&call);
-            let plain = call.args.len() == 1
+            if call.args.len() == 1
                 && !call.receiver.is_immediate()
                 && heap_kind(scope, call.receiver) == Some(HeapKind::Str)
                 && heap_kind(scope, other) == Some(HeapKind::Str)
                 && {
-                    let handle = scope.root(call.receiver);
-                    !scope.is_frozen(handle) && scope.chilled(handle).is_none()
-                };
-            if plain {
-                let mine = string_encoding(scope, call.receiver).unwrap_or(crate::strings::UTF_8);
-                let theirs = string_encoding(scope, other).unwrap_or(crate::strings::UTF_8);
-                let bytes = string_bytes(scope, other).unwrap_or_default();
-                // The same encoding, or ASCII into anything ASCII-compatible:
-                // the receiver's encoding stands and the bytes go on the end.
-                // Both sides ASCII-compatible: UTF-16 text can be all bytes
-                // below 0x80 and is not ASCII for that.
-                let ascii = bytes.is_ascii()
-                    && crate::strings::ascii_compatible(mine)
-                    && crate::strings::ascii_compatible(theirs);
-                if mine == theirs || ascii {
-                    let receiver = scope.root(call.receiver);
-                    let at = crate::strings::bytesize(scope, receiver);
-                    crate::strings::splice(scope, receiver, at, 0, &bytes);
-                    stack.push(call.receiver);
-                    return Ok(None);
+                    // Held, since the append reads both by value and may
+                    // allocate: this path is reached from more places than
+                    // the loop that rooted the stack.
+                    scope.root(call.receiver);
+                    scope.root(other);
+                    append_plain(scope, call.receiver, other, true)
                 }
+            {
+                stack.push(call.receiver);
+                return Ok(None);
             }
             let forwarded = Pending {
                 cache: None,
@@ -17530,6 +17692,100 @@ fn counted_stretch(
     stretch(scope, stack, frame, pc, ran, room)
 }
 
+/// [`run_calls`]'s call to a primitive's light form at `at`: answered
+/// without allocating, and the frame run on from it in [`native_stretch`],
+/// whose stop it answers. `None`, with nothing changed, when the primitive
+/// declines. Out of line, so that `run_calls` carries a call rather than
+/// this.
+#[inline(never)]
+fn native_calls(
+    scope: &mut HandleScope<'_>,
+    stack: &mut Stack,
+    frame: &Call,
+    index: u32,
+    at: &mut usize,
+    ran: &mut u64,
+    room: u64,
+) -> Option<Insn> {
+    let (to, value) = light_send(scope, frame, index, stack, false)?;
+    stack.truncate(to);
+    stack.push(value);
+    *at += 1;
+    *ran += 1;
+    Some(native_stretch(scope, stack, frame, at, ran, room))
+}
+
+/// [`counted_stretch`] for a frame [`run_calls`] has just answered a
+/// primitive's light form in: [`light_step`]s, and each call to a light form
+/// it can answer without allocating answered where it stands, as
+/// [`light_send`] answers it, so that a loop around one — `s << x` in a
+/// `while` — runs in here, rather than leaving a stretch for `run_calls` and
+/// entering another at every call. Stops where a stretch would, or at a call
+/// it cannot answer, which `run_calls` then sees as it would have.
+///
+/// An answer the next instruction throws away — `s << x` as a statement — is
+/// not pushed, and that `Pop` is run here, counted as a stretch would have
+/// counted it.
+///
+/// Its own loop rather than [`stretch`]'s, so that the stretches every other
+/// frame runs in, [`light_stretch`] and `counted_stretch`, keep the
+/// registers they had: a call inside their loop costs them those.
+#[inline(never)]
+fn native_stretch(
+    scope: &mut HandleScope<'_>,
+    stack: &mut Stack,
+    frame: &Call,
+    pc: &mut usize,
+    ran: &mut u64,
+    room: u64,
+) -> Insn {
+    let code = &frame.iseq.insns[..];
+    let mut stack = LightStack::<true>::new(stack, frame.iseq.max_stack);
+    let mut at = *pc;
+    let mut count = *ran;
+    let mut lazy = Lazy::default();
+    loop {
+        let mut after = at + 1;
+        let step = light_step(
+            scope,
+            &mut stack,
+            frame,
+            code,
+            code[at],
+            &mut after,
+            &mut lazy,
+            true,
+            count >= room,
+        );
+        if step > 0 {
+            count += step;
+            at = after;
+            continue;
+        }
+        let Insn::Send(index) = code[at] else { break };
+        let Some((to, value)) = light_send(scope, frame, index, stack.live(), false) else {
+            break;
+        };
+        // What `IvarView::read` asks of the view: made since nothing wrote.
+        // A light form assigns no instance variable, but the view is let go
+        // rather than kept on that.
+        lazy.view = None;
+        stack.truncate(to);
+        if matches!(code.get(at + 1), Some(Insn::Pop)) {
+            at += 2;
+            count += 2;
+        } else {
+            stack.push(value);
+            at += 1;
+            count += 1;
+        }
+    }
+    stack.finish();
+    *pc = at;
+    *ran = count;
+    code[at]
+}
+
 /// The loop both stretches are: `ran` counts on from what it was, and the
 /// stretch stops early at a backward jump once it reaches `room`. Answers
 /// the instruction it stopped at, read again once the loop is done rather
@@ -17585,7 +17841,7 @@ fn may_run_call(scope: &HandleScope<'_>, frame: &Call, insn: Insn) -> bool {
             match scope.call_caches().plan(frame.cache_base + index) {
                 Plan::General => false,
                 Plan::Yielded(plan) => plan.fits,
-                Plan::Unknown | Plan::Direct(_) => true,
+                Plan::Unknown | Plan::Direct(_) | Plan::Native(_) => true,
             }
         }
         _ => false,
@@ -17641,6 +17897,27 @@ fn run_calls(
         let frame = &frames[top];
         match insn {
             Insn::Send(index) | Insn::Yield(index) => {
+                // A primitive's light form, if it needs no allocation: the
+                // call is answered where it stands, with no frame and no
+                // handle kept, and the stretch goes on in this frame.
+                if let Insn::Send(index) = insn
+                    && matches!(
+                        scope.call_caches().plan(frame.cache_base + index),
+                        Plan::Native(_)
+                    )
+                {
+                    let Some(next) =
+                        native_calls(scope, stack, frame, index, &mut at, &mut ran, room)
+                    else {
+                        declined = true;
+                        break;
+                    };
+                    insn = next;
+                    if ran >= room {
+                        break;
+                    }
+                    continue;
+                }
                 if scope.rooted() > calls.root_limit {
                     break;
                 }
@@ -17792,6 +18069,14 @@ impl<'s, const LIGHT: bool> LightStack<'s, LIGHT> {
         assert!(at < len, "operand {at} past a stack of {len}");
         // SAFETY: below `len`, so within the buffer.
         unsafe { self.values.add(at).write(value) }
+    }
+
+    /// The values on the stack, bottom first.
+    #[inline(always)]
+    fn live(&self) -> &[Value] {
+        // SAFETY: every value below `len` was written, and the buffer is
+        // not moved while this borrow of `self` lasts.
+        unsafe { std::slice::from_raw_parts(self.values, self.len) }
     }
 
     #[inline(always)]
@@ -25194,6 +25479,83 @@ mod tests {
 
         let value = eval_in(&mut scope, &mut frame, &caller).expect("should run");
         assert_eq!(inspect(&mut scope, value), "14");
+    }
+
+    /// `String#<<` in a loop (#749): the first call fills the site's cache
+    /// through `dispatch` and makes its plan, and the rest take the primitive's
+    /// light form on the stack — in `native_stretch` while the receiver's
+    /// buffer has room, and in `run`'s own arm, which grows it, when it has
+    /// not — then the receiver appended to itself. Every allocation collects,
+    /// so a value the growth needs and the loop has not rooted would be read
+    /// after it was freed, which miri reports. Built by hand for miri.
+    #[test]
+    fn string_appends_answer_on_the_stack_under_miri() {
+        let rounds: i64 = if cfg!(miri) { 12 } else { 40 };
+        let site = crate::bytecode::CallSite {
+            name: 0,
+            argc: 1,
+            splats: Vec::new(),
+            keywords: Vec::new(),
+            block: crate::bytecode::BlockRef::None,
+            implicit_self: false,
+            variable_call: false,
+            kwsplat: false,
+        };
+        // A `while i < n; s << arg; i += 1; end` over locals s, x and i.
+        let append_loop = |n: i64, arg: u16, site: u32| {
+            vec![
+                Insn::PushInt(0),
+                Insn::SetLocal(2, 0),
+                Insn::GetLocal(2, 0),
+                Insn::PushInt(n),
+                Insn::BinOp(BinOp::Lt),
+                Insn::JumpUnless(9),
+                Insn::GetLocal(0, 0),
+                Insn::GetLocal(arg, 0),
+                Insn::Send(site),
+                Insn::Pop,
+                Insn::GetLocal(2, 0),
+                Insn::PushInt(1),
+                Insn::BinOp(BinOp::Add),
+                Insn::SetLocal(2, 0),
+                Insn::Jump(-13),
+            ]
+        };
+        let mut insns = vec![
+            Insn::PushLit(0),
+            Insn::SetLocal(0, 0),
+            Insn::PushLit(1),
+            Insn::SetLocal(1, 0),
+        ];
+        insns.extend(append_loop(rounds, 1, 0));
+        insns.extend(append_loop(3, 0, 1));
+        insns.extend([Insn::GetLocal(0, 0), Insn::Leave]);
+        let program = Iseq {
+            name: "<test>".into(),
+            insns,
+            literals: vec![
+                Literal::Str(Box::from(&b"ab"[..]), crate::strings::UTF_8),
+                Literal::Str(Box::from(&b"cd"[..]), crate::strings::UTF_8),
+            ],
+            symbols: vec!["<<".into()],
+            locals: vec!["s".into(), "x".into(), "i".into()],
+            call_sites: vec![site.clone(), site],
+            max_stack: 3,
+            ..Iseq::default()
+        };
+
+        let mut heap = Heap::new();
+        let mut frame = Frame::new(3);
+        let mut scope = heap.scope();
+        scope.bootstrap();
+        scope.set_gc_stress(true);
+        let value = eval_in(&mut scope, &mut frame, &program).expect("should run");
+        scope.set_gc_stress(false);
+        let mut want = format!("ab{}", "cd".repeat(rounds as usize));
+        for _ in 0..3 {
+            want = want.repeat(2);
+        }
+        assert_eq!(inspect(&mut scope, value), format!("{want:?}"));
     }
 
     #[test]
