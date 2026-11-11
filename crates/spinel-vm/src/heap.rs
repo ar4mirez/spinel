@@ -296,6 +296,20 @@ pub enum ParseFailure {
 /// How many class objects [`Heap`] remembers the ids of.
 const CLASS_IDS: usize = 64;
 
+/// The entry of `class_ids` the class object at `address` is remembered in.
+///
+/// Fibonacci hashing of the address rather than its low bits: a class
+/// object is a cell of 128 or 256 bytes, so `(address >> 4) % CLASS_IDS`
+/// reached only a few of the entries, and two classes a loop alternates
+/// between — `Thread` and `Fiber`, both asked `current` in `Mutex#lock` —
+/// could share one and evict each other at every call, by an accident of
+/// where the core library's boot happened to place them (#751).
+#[inline]
+fn class_ids_entry(address: usize) -> usize {
+    const SHIFT: u32 = usize::BITS - CLASS_IDS.trailing_zeros();
+    ((address >> 4).wrapping_mul(0x9E37_79B9_7F4A_7C15_u64 as usize) >> SHIFT) % CLASS_IDS
+}
+
 pub struct Heap {
     /// Whether any module holds an autoload entry (#709): the one test a
     /// constant read pays, kept first beside the fields the loop reads most.
@@ -952,6 +966,49 @@ impl Heap {
     /// no handle yet, so a collection between allocating it and rooting it would free
     /// the thing the caller is about to be handed.
     fn allocate(&mut self, class: Option<Value>, payload: Payload, len: u32) -> Value {
+        let (obj, zeroed) = self.allocate_header(class, payload, len);
+        // SAFETY: `allocate_header` made `len` slots or bytes after the
+        // header, in a cell nothing else can reach yet.
+        unsafe {
+            match payload {
+                // A zeroed slot is not a `Value` — #6 spent the niche on exactly that —
+                // so the payload is filled before anything can trace it.
+                Payload::Slots => {
+                    let slots = obj.slots();
+                    for i in 0..len as usize {
+                        ptr::write(slots.add(i), Value::NIL);
+                    }
+                }
+                // A reused cell still holds the dead object's bytes; a large
+                // object's are the zeroes `large_object` asked for, and
+                // writing them again would touch every page of a buffer that
+                // may never be read past its first bytes.
+                Payload::Bytes if !zeroed => ptr::write_bytes(obj.bytes(), 0, len as usize),
+                Payload::Bytes => {}
+            }
+        }
+        Value::heap(obj.0.cast())
+    }
+
+    /// [`Heap::allocate`] of an object of slots holding `values`, written
+    /// once rather than filled with `nil` first. Every heap object among
+    /// `values` must survive the collection this may start, as for any value
+    /// held across an allocation.
+    fn allocate_slots(&mut self, class: Option<Value>, values: &[Value]) -> Value {
+        let len = u32::try_from(values.len()).expect("an object has fewer than 2^32 slots");
+        let (obj, _) = self.allocate_header(class, Payload::Slots, len);
+        // SAFETY: `allocate_header` made `len` slots after the header, in a
+        // cell nothing else can reach yet, and `values` lives outside the heap.
+        unsafe { ptr::copy_nonoverlapping(values.as_ptr(), obj.slots(), values.len()) };
+        Value::heap(obj.0.cast())
+    }
+
+    /// The part of an allocation both of the above share: collect if this
+    /// one crosses the threshold, take a cell, and write its header. The
+    /// payload is the caller's to initialise before anything can trace it.
+    /// Answers whether the payload came zeroed.
+    #[inline(always)]
+    fn allocate_header(&mut self, class: Option<Value>, payload: Payload, len: u32) -> (Obj, bool) {
         let size = Heap::object_size(payload, len);
         if !self.gc_disabled && (self.gc_stress || self.bytes_since_gc >= self.next_gc) {
             self.collect();
@@ -984,24 +1041,8 @@ impl Heap {
                     shape: ShapeId::NONE,
                 },
             );
-            match payload {
-                // A zeroed slot is not a `Value` — #6 spent the niche on exactly that —
-                // so the payload is filled before anything can trace it.
-                Payload::Slots => {
-                    let slots = obj.slots();
-                    for i in 0..len as usize {
-                        ptr::write(slots.add(i), Value::NIL);
-                    }
-                }
-                // A reused cell still holds the dead object's bytes; a large
-                // object's are the zeroes `large_object` asked for, and
-                // writing them again would touch every page of a buffer that
-                // may never be read past its first bytes.
-                Payload::Bytes if !zeroed => ptr::write_bytes(obj.bytes(), 0, len as usize),
-                Payload::Bytes => {}
-            }
         }
-        Value::heap(obj.0.cast())
+        (obj, zeroed)
     }
 
     /// Leave a new object's address for the interpreter loop to stamp with
@@ -1414,6 +1455,26 @@ impl<'h> HandleScope<'h> {
         self.root(value)
     }
 
+    /// Allocate an object of `values.len()` slots holding `values`, rooted in
+    /// this scope: [`HandleScope::alloc`] and a `set_slot` for each, in one
+    /// copy.
+    ///
+    /// The allocation can collect before the copy, so every heap object
+    /// among `values` must be reachable from a root already, as it must be
+    /// for any `Value` held across an allocation.
+    ///
+    /// # Panics
+    ///
+    /// If `values` has more than `u32::MAX` elements.
+    pub fn alloc_slots(&mut self, class: Option<Handle<'h>>, values: &[Value]) -> Handle<'h> {
+        let class = class.map(|handle| self.get(handle));
+        let value = self.heap.allocate_slots(class, values);
+        for &slot in values {
+            self.storable(slot);
+        }
+        self.root(value)
+    }
+
     /// A scope whose handles are popped when it drops, and cannot escape into this one.
     pub fn nested(&mut self) -> HandleScope<'_> {
         HandleScope {
@@ -1523,6 +1584,36 @@ impl<'h> HandleScope<'h> {
         Some(unsafe { ptr::read(object.slots().cast::<[Value; N]>()) })
     }
 
+    /// Every slot of `value`, under the rule above — a live object of this
+    /// heap, and a read that cannot collect: the `&self` borrow keeps a
+    /// write, and so an allocation, from happening while the slice is held.
+    /// `None` for an immediate or an object that holds bytes.
+    #[inline]
+    pub(crate) fn slice_of(&self, value: Value) -> Option<&[Value]> {
+        let object = Obj(value.as_heap()?.cast());
+        // SAFETY: a live object of this heap, per the contract above.
+        let header = unsafe { &*object.header() };
+        if header.payload != Payload::Slots {
+            return None;
+        }
+        // SAFETY: `len` slots, every one initialised by `allocate`, and
+        // `&self` keeps them from being written while they are borrowed.
+        Some(unsafe { std::slice::from_raw_parts(object.slots(), header.len as usize) })
+    }
+
+    /// [`HandleScope::is_keywords`] for `value` under the rule above;
+    /// `false` for an immediate.
+    #[inline]
+    pub(crate) fn is_keywords_of(&self, value: Value) -> bool {
+        let Some(pointer) = value.as_heap() else {
+            return false;
+        };
+        let object = Obj(pointer.cast());
+        // SAFETY: a live object of this heap, per the contract above.
+        let flags = unsafe { (*object.header()).flags };
+        flags & KEYWORDS != 0
+    }
+
     /// A byte object's length and whether it is frozen, for `value` under
     /// the rule above; `None` for an immediate or an object of slots.
     #[inline]
@@ -1565,7 +1656,7 @@ impl<'h> HandleScope<'h> {
 
     /// The class id remembered for the class object at `address`, if any.
     pub(crate) fn remembered_class_id(&self, address: usize) -> Option<u32> {
-        let (at, id) = self.heap.class_ids[(address >> 4) % CLASS_IDS];
+        let (at, id) = self.heap.class_ids[class_ids_entry(address)];
         (at == address).then_some(id)
     }
 
@@ -1580,7 +1671,7 @@ impl<'h> HandleScope<'h> {
     }
 
     pub(crate) fn remember_class_id(&mut self, address: usize, id: u32) {
-        self.heap.class_ids[(address >> 4) % CLASS_IDS] = (address, id);
+        self.heap.class_ids[class_ids_entry(address)] = (address, id);
     }
 
     pub fn call_caches_mut(&mut self) -> &mut crate::callcache::CallCaches {
@@ -2758,6 +2849,59 @@ mod tests {
         let reused = scope.alloc(Some(class), Payload::Slots, 1);
         assert!(!scope.has_fresh_allocations());
         assert!(scope.allocation_site(reused).is_none());
+    }
+
+    /// Class objects are cells of 128 or 256 bytes; the entries their
+    /// addresses pick in `class_ids` are spread over the table rather than
+    /// the few the low bits of such an address reach (#751).
+    #[test]
+    fn class_ids_spreads_cell_aligned_addresses() {
+        for cell in [128usize, 256] {
+            let at = |k: usize| 0x7f00_0000_0000 + k * cell;
+            let used: std::collections::HashSet<usize> =
+                (0..CLASS_IDS).map(|k| class_ids_entry(at(k))).collect();
+            let low_bits: std::collections::HashSet<usize> =
+                (0..CLASS_IDS).map(|k| (at(k) >> 4) % CLASS_IDS).collect();
+            assert!(
+                used.len() >= 3 * low_bits.len(),
+                "{cell}-byte cells reach {} entries, the low bits {}",
+                used.len(),
+                low_bits.len()
+            );
+            assert!(used.iter().all(|&entry| entry < CLASS_IDS));
+        }
+    }
+
+    /// `alloc_slots` makes an object already holding its values, which
+    /// survive the collection the allocation may start when they are rooted,
+    /// and `slice_of` and `is_keywords_of` read an object where it stands
+    /// (#751).
+    #[test]
+    fn alloc_slots_holds_its_values_and_reads_back_without_a_handle() {
+        let mut heap = Heap::new();
+        let mut scope = heap.scope();
+        let first = scope.alloc(None, Payload::Slots, 1);
+        let second = scope.alloc(None, Payload::Bytes, 3);
+        let values = [
+            scope.get(first),
+            Value::fixnum(7).unwrap(),
+            scope.get(second),
+        ];
+        scope.set_gc_stress(true);
+        let object = scope.alloc_slots(None, &values);
+        let empty = scope.alloc_slots(None, &[]);
+        scope.set_gc_stress(false);
+        scope.collect();
+        let (object, empty) = (scope.get(object), scope.get(empty));
+        assert_eq!(scope.slice_of(object), Some(&values[..]));
+        assert_eq!(scope.slice_of(empty), Some(&[][..]));
+        assert_eq!(scope.slice_of(values[2]), None, "bytes are not slots");
+        assert_eq!(scope.slice_of(Value::NIL), None);
+        let handle = scope.root(object);
+        assert!(!scope.is_keywords_of(object));
+        scope.mark_keywords(handle);
+        assert!(scope.is_keywords_of(object));
+        assert!(!scope.is_keywords_of(Value::fixnum(1).unwrap()));
     }
 
     /// An object's size counts the classless storage it owns and not the

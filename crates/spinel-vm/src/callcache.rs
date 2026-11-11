@@ -1,11 +1,16 @@
-//! Monomorphic inline caches, one entry per call site.
+//! Inline caches, one entry per call site, with one more kept behind it.
 //!
-//! `docs/engine.md`: "Call sites carry a monomorphic inline cache
-//! `(class serial, target)`. Because bytecode is shared across Ractors, inline
+//! `docs/engine.md`: "Call sites carry a monomorphic inline cache `(class,
+//! serial, target)` [...] Because bytecode is shared across Ractors, inline
 //! caches do not live in the bytecode; each heap owns a side table indexed by
 //! call-site id."
 //!
-//! This is that side table. It sits in front of [`Classes::lookup`], which is
+//! This is that side table. The entry a site reads is monomorphic; the one
+//! a second receiver class displaced waits behind it, with its plan, and
+//! [`CallCaches::promote`] swaps the two back when that class returns. A site
+//! that sees two classes in turn — `left.nil?` over a tree whose leaves are
+//! `nil` — then keeps both resolved instead of looking up and planning again
+//! at every call. It sits in front of [`Classes::lookup`], which is
 //! itself a memo in front of the chain walk — so the thing to beat is not the
 //! walk but the one hash probe the per-class cache costs. That is why the hot
 //! path here is a `Vec` index and two integer comparisons, and why the one
@@ -22,6 +27,23 @@ use crate::class::{ClassId, CrefId, Method};
 use crate::method::Native;
 use crate::shape::ShapeId;
 use crate::value::{SymbolId, Value};
+
+/// The entry, plan and instance-variable cache a site held for the receiver
+/// class before the one it holds now: see [`CallCaches::promote`].
+#[derive(Debug, Clone)]
+struct Behind {
+    entry: Option<Entry>,
+    plan: Plan,
+    ivar: IvarEntry,
+}
+
+impl Behind {
+    const EMPTY: Behind = Behind {
+        entry: None,
+        plan: Plan::Unknown,
+        ivar: IvarEntry::EMPTY,
+    };
+}
 
 /// What one call site last resolved, and what has to still be true to reuse it.
 ///
@@ -218,6 +240,11 @@ pub struct Direct {
     pub name: SymbolId,
     /// The receiver class the entry holds the method for.
     pub class: ClassId,
+    /// How many positional arguments the plan binds. The site's own count,
+    /// except at a site that splats: there it is the count the splatted
+    /// Arrays came to when the plan was made, and a call whose Arrays come
+    /// to another count is the general path's.
+    pub argc: u16,
     /// `class`'s object, which a receiver whose header names it is an
     /// instance of: the site's guard, short of the class id. Never `Class`'s,
     /// the one class that does not follow from the header — a singleton
@@ -245,6 +272,9 @@ pub struct CallCaches {
     entries: Vec<Option<Entry>>,
     /// How the call each entry answers binds, indexed as `entries` is.
     plans: Vec<Plan>,
+    /// What each call site held for the receiver class before its entry's,
+    /// indexed as `entries` is. See [`CallCaches::promote`].
+    behind: Vec<Behind>,
     /// The instance-variable sites' caches, indexed as `entries` is: an
     /// `Iseq`'s run there is its call sites and then its
     /// [`Iseq::ivar_sites`], so each table has a slot the other never reads.
@@ -290,6 +320,7 @@ impl Default for CallCaches {
         CallCaches {
             entries: Vec::new(),
             plans: Vec::new(),
+            behind: Vec::new(),
             ivars: Vec::new(),
             consts: Vec::new(),
             more: Vec::new(),
@@ -350,6 +381,7 @@ impl CallCaches {
             (iseq.call_sites.len() + iseq.ivar_sites as usize + iseq.const_sites as usize).max(1);
         self.entries.resize(self.entries.len() + run, None);
         self.plans.resize(self.entries.len(), Plan::Unknown);
+        self.behind.resize(self.entries.len(), Behind::EMPTY);
         self.ivars.resize(self.entries.len(), IvarEntry::EMPTY);
         self.consts.resize(self.entries.len(), None);
         self.more.resize(self.entries.len(), false);
@@ -377,9 +409,10 @@ impl CallCaches {
 
     /// Memoise what a full lookup just answered.
     ///
-    /// Monomorphic: a second receiver class at the same site overwrites rather
-    /// than extending. A polymorphic site pays the probe it would have paid
-    /// anyway, plus the guard.
+    /// The entry it replaces, if it was for another class, goes behind the
+    /// new one with its plan, where [`CallCaches::promote`] finds it; one for
+    /// the same class is stale, its serial behind the class's, and goes. A
+    /// site that sees a third class overwrites what was behind.
     ///
     /// # Panics
     ///
@@ -389,13 +422,62 @@ impl CallCaches {
     /// site keeps there where its reader's name sat, and the new method may
     /// read another name from the same shape.
     pub fn fill(&mut self, slot: u32, class: ClassId, serial: u64, method: Method) {
-        self.entries[slot as usize] = Some(Entry {
+        let slot = slot as usize;
+        let fresh = Some(Entry {
             class,
             serial,
             method,
         });
-        self.plans[slot as usize] = Plan::Unknown;
-        self.ivars[slot as usize] = IvarEntry::EMPTY;
+        match std::mem::replace(&mut self.entries[slot], fresh) {
+            Some(old) if old.class != class => {
+                self.behind[slot] = Behind {
+                    entry: Some(old),
+                    plan: std::mem::take(&mut self.plans[slot]),
+                    ivar: self.ivars[slot],
+                };
+            }
+            _ => self.plans[slot] = Plan::Unknown,
+        }
+        self.ivars[slot] = IvarEntry::EMPTY;
+    }
+
+    /// Whether `slot` holds anything behind its entry: one load, which a
+    /// site that has only ever seen one class answers no to, before
+    /// [`CallCaches::promote`] is worth asking.
+    ///
+    /// # Panics
+    ///
+    /// As [`CallCaches::get`].
+    #[inline]
+    #[must_use]
+    pub fn has_behind(&self, slot: u32) -> bool {
+        self.behind[slot as usize].entry.is_some()
+    }
+
+    /// Bring what `slot` held for `class` back in front, when that is what
+    /// waits behind its entry and `class` has not changed since: the entry,
+    /// and the plan and instance-variable cache that went with it, swap
+    /// with the ones in front. Answers whether it did, and then
+    /// [`CallCaches::get`] answers for `class`.
+    ///
+    /// What a fast path that found the entry was for another class asks
+    /// before it gives the call to the general path, and what `dispatch`
+    /// asks before it looks the method up.
+    ///
+    /// # Panics
+    ///
+    /// As [`CallCaches::get`].
+    pub fn promote(&mut self, slot: u32, class: ClassId, serial: u64) -> bool {
+        let slot = slot as usize;
+        let behind = &mut self.behind[slot];
+        match behind.entry {
+            Some(entry) if entry.class == class && entry.serial == serial => {}
+            _ => return false,
+        }
+        std::mem::swap(&mut self.entries[slot], &mut behind.entry);
+        std::mem::swap(&mut self.plans[slot], &mut behind.plan);
+        std::mem::swap(&mut self.ivars[slot], &mut behind.ivar);
+        true
     }
 
     /// How a call from `slot` binds the method its entry holds, if that has
@@ -437,7 +519,8 @@ impl CallCaches {
     }
 
     /// Remember that the site at `slot` found its name at `index` of an
-    /// object wearing `shape`. Monomorphic, as [`CallCaches::fill`] is.
+    /// object wearing `shape`. Monomorphic, as the entry [`CallCaches::get`]
+    /// reads is.
     ///
     /// # Panics
     ///
@@ -475,8 +558,8 @@ impl CallCaches {
         (entry.epoch == epoch && entry.cref == cref).then_some(entry.value)
     }
 
-    /// Remember what the constant site at `slot` found. Monomorphic, as
-    /// [`CallCaches::fill`] is.
+    /// Remember what the constant site at `slot` found. Monomorphic, as the
+    /// entry [`CallCaches::get`] reads is.
     ///
     /// # Panics
     ///
@@ -783,7 +866,8 @@ mod tests {
             caches.get(base, d, scope.classes().serial(d)).is_none(),
             "`C`'s answer is not `D`'s"
         );
-        // And re-filling for `D` replaces rather than extends: monomorphic.
+        // And re-filling for `D` replaces what `get` reads: `C`'s waits
+        // behind it, for `promote`, but `get` itself is monomorphic.
         let from_d = scope.classes_mut().lookup(d, name).unwrap();
         caches.fill(base, d, scope.classes().serial(d), from_d);
         assert_eq!(caches.filled(), 1);
@@ -795,6 +879,72 @@ mod tests {
             d
         );
         assert!(caches.get(base, c, scope.classes().serial(c)).is_none());
+    }
+
+    /// A site that sees two receiver classes in turn keeps both: the one a
+    /// fill displaced comes back in front, with the plan it had, while its
+    /// class is unchanged — and not once it has changed, nor for a third
+    /// class, nor after a third fill displaced it (#751).
+    #[test]
+    fn the_displaced_class_comes_back_with_its_plan() {
+        let mut heap = booted();
+        let mut scope = heap.scope();
+        let name = crate::shared::symbols::intern("inline_cache_two_classes");
+        let c = scope.define_class(Some("C2"), Some(Builtin::Object.id()));
+        let d = scope.define_class(Some("D2"), Some(Builtin::Object.id()));
+        let e = scope.define_class(Some("E2"), Some(Builtin::Object.id()));
+        for (class, body) in [(c, 1), (d, 2), (e, 3)] {
+            scope
+                .classes_mut()
+                .define_method(class, name, Value::fixnum(body).unwrap());
+        }
+        let found = |scope: &mut crate::heap::HandleScope<'_>, class| {
+            scope.classes_mut().lookup(class, name).unwrap()
+        };
+        let (from_c, from_d, from_e) = (
+            found(&mut scope, c),
+            found(&mut scope, d),
+            found(&mut scope, e),
+        );
+
+        let mut caches = CallCaches::new();
+        let base = caches.base(&iseq_with(1));
+        let serial = |scope: &crate::heap::HandleScope<'_>, class| scope.classes().serial(class);
+        caches.fill(base, c, serial(&scope, c), from_c);
+        caches.set_plan(base, Plan::General);
+        caches.fill(base, d, serial(&scope, d), from_d);
+        assert!(
+            matches!(caches.plan(base), Plan::Unknown),
+            "`D`'s plan is its own"
+        );
+
+        assert!(
+            !caches.promote(base, e, serial(&scope, e)),
+            "nothing was held for `E`"
+        );
+        assert!(caches.promote(base, c, serial(&scope, c)));
+        assert_eq!(caches.get(base, c, serial(&scope, c)).unwrap().owner, c);
+        assert!(
+            matches!(caches.plan(base), Plan::General),
+            "`C`'s plan came back with it"
+        );
+        assert!(caches.get(base, d, serial(&scope, d)).is_none());
+        assert!(
+            caches.promote(base, d, serial(&scope, d)),
+            "and `D` is behind it now"
+        );
+        assert_eq!(caches.get(base, d, serial(&scope, d)).unwrap().owner, d);
+
+        // A change to `C` leaves what is behind for it stale.
+        scope
+            .classes_mut()
+            .define_method(c, name, Value::fixnum(4).unwrap());
+        assert!(!caches.promote(base, c, serial(&scope, c)));
+
+        // A third class displaces `D`, and `C`'s entry goes for good.
+        caches.fill(base, e, serial(&scope, e), from_e);
+        assert!(caches.promote(base, d, serial(&scope, d)));
+        assert!(!caches.promote(base, c, serial(&scope, c)));
     }
 
     /// Narrowing a method's visibility must invalidate a warm site (#161).
