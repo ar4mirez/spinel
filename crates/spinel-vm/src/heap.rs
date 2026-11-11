@@ -296,25 +296,6 @@ pub enum ParseFailure {
 /// How many class objects [`Heap`] remembers the ids of.
 const CLASS_IDS: usize = 64;
 
-/// The entry of `class_ids_behind` the class object at `address` waits
-/// in, once another took its entry in `class_ids`.
-///
-/// `class_ids` is indexed by `(address >> 4) % CLASS_IDS`, and a class
-/// object is a cell of 128 or 256 bytes, so it reaches only 8 or 4 of its
-/// entries: two classes a loop alternates between — `Thread` and `Fiber`,
-/// both asked `current` in `Mutex#lock` — could share one and evict each
-/// other at every call, by an accident of where the core library's boot
-/// placed them (#751), each time reading the class's `@__id__` again. The
-/// one a collision displaces goes behind, at an entry the bits a block's
-/// worth higher pick, which spreads such cells over the whole table, and
-/// `class_of` brings it back from there. The lookup in front is left as it
-/// was, and does not look behind: it is inlined into the light loop, whose
-/// code any change to it measurably slowed.
-#[inline]
-fn class_ids_behind_entry(address: usize) -> usize {
-    ((address >> 4) ^ (address >> 10)) % CLASS_IDS
-}
-
 pub struct Heap {
     /// Whether any module holds an autoload entry (#709): the one test a
     /// constant read pays, kept first beside the fields the loop reads most.
@@ -353,10 +334,6 @@ pub struct Heap {
     /// freed class's address can be another's afterwards, and checked
     /// against the class table on every hit.
     class_ids: [(usize, u32); CLASS_IDS],
-    /// What a collision in `class_ids` displaced: see
-    /// [`class_ids_behind_entry`]. Boxed, so that the fields the light loop
-    /// reads keep the places they had in the heap.
-    class_ids_behind: Box<[(usize, u32); CLASS_IDS]>,
     regexps: crate::regexp::Regexps,
     /// Every fiber this heap has made, and the vectors of those not running
     /// (#16). Traced: a suspended fiber's frames hold values nothing else does.
@@ -731,7 +708,6 @@ impl Heap {
             definitions: crate::method::Definitions::new(),
             call_caches: crate::callcache::CallCaches::new(),
             class_ids: [(0, 0); CLASS_IDS],
-            class_ids_behind: Box::new([(0, 0); CLASS_IDS]),
             regexps: crate::regexp::Regexps::new(),
             fibers: crate::interp::FiberTable::default(),
             last_match: Value::NIL,
@@ -1117,7 +1093,6 @@ impl Heap {
     pub fn collect(&mut self) {
         let started = std::time::Instant::now();
         self.class_ids = [(0, 0); CLASS_IDS];
-        *self.class_ids_behind = [(0, 0); CLASS_IDS];
         self.mark();
         self.trace_weak();
         self.queue_finalizers();
@@ -1671,16 +1646,6 @@ impl<'h> HandleScope<'h> {
         (at == address).then_some(id)
     }
 
-    /// The id remembered for the class object at `address` behind
-    /// `class_ids`, where a collision there put it: what
-    /// [`HandleScope::class_of`] asks before it reads the class's `@__id__`.
-    /// Not asked by [`HandleScope::remembered_class_id`], which is inlined
-    /// into the light loop.
-    pub(crate) fn remembered_behind(&self, address: usize) -> Option<u32> {
-        let (at, id) = self.heap.class_ids_behind[class_ids_behind_entry(address)];
-        (at == address).then_some(id)
-    }
-
     /// The id of the class or module `value` is the object of, when it is
     /// remembered: [`HandleScope::remembered_class_of`]'s lookup, for the
     /// class object itself rather than for an instance of it.
@@ -1692,12 +1657,7 @@ impl<'h> HandleScope<'h> {
     }
 
     pub(crate) fn remember_class_id(&mut self, address: usize, id: u32) {
-        let heap = &mut *self.heap;
-        let front = &mut heap.class_ids[(address >> 4) % CLASS_IDS];
-        let displaced = std::mem::replace(front, (address, id));
-        if displaced.0 != 0 && displaced.0 != address {
-            heap.class_ids_behind[class_ids_behind_entry(displaced.0)] = displaced;
-        }
+        self.heap.class_ids[(address >> 4) % CLASS_IDS] = (address, id);
     }
 
     pub fn call_caches_mut(&mut self) -> &mut crate::callcache::CallCaches {
@@ -2875,51 +2835,6 @@ mod tests {
         let reused = scope.alloc(Some(class), Payload::Slots, 1);
         assert!(!scope.has_fresh_allocations());
         assert!(scope.allocation_site(reused).is_none());
-    }
-
-    /// Class objects are cells of 128 or 256 bytes. The entries their
-    /// addresses pick behind `class_ids` are spread over the table rather
-    /// than the few the low bits of such an address reach in front, and of
-    /// two classes that share an entry in front, the one displaced is
-    /// remembered behind until it comes back in front (#751).
-    #[test]
-    fn class_ids_keeps_two_classes_that_collide() {
-        for cell in [128usize, 256] {
-            let at = |k: usize| 0x7f00_0000_0000 + k * cell;
-            let behind: std::collections::HashSet<usize> = (0..CLASS_IDS)
-                .map(|k| class_ids_behind_entry(at(k)))
-                .collect();
-            let front: std::collections::HashSet<usize> =
-                (0..CLASS_IDS).map(|k| (at(k) >> 4) % CLASS_IDS).collect();
-            assert!(
-                behind.len() >= 3 * front.len(),
-                "{cell}-byte cells reach {} entries behind, {} in front",
-                behind.len(),
-                front.len()
-            );
-        }
-        let mut heap = Heap::new();
-        let mut scope = heap.scope();
-        // 1024 bytes apart: the same entry in front, different ones behind.
-        let (first, second) = (0x7f00_0000_0400, 0x7f00_0000_0800);
-        assert_eq!((first >> 4) % CLASS_IDS, (second >> 4) % CLASS_IDS);
-        scope.remember_class_id(first, 7);
-        scope.remember_class_id(second, 9);
-        assert_eq!(scope.remembered_class_id(second), Some(9));
-        assert_eq!(
-            scope.remembered_class_id(first),
-            None,
-            "displaced from in front"
-        );
-        assert_eq!(scope.remembered_behind(first), Some(7));
-        scope.remember_class_id(first, 7);
-        assert_eq!(scope.remembered_class_id(first), Some(7));
-        assert_eq!(
-            scope.remembered_behind(second),
-            Some(9),
-            "and the other behind"
-        );
-        assert_eq!(scope.remembered_behind(0x7f00_0000_0c00), None);
     }
 
     /// `alloc_slots` makes an object already holding its values, which
