@@ -11708,7 +11708,10 @@ fn empty_array_of<'h>(scope: &mut HandleScope<'h>, id: ClassId) -> Handle<'h> {
 /// across an allocation must.
 ///
 /// Both cells are written once, the storage straight from `elements`, with
-/// room for [`ARRAY_MIN_CAPACITY`] at least, as `array_reserve` gave it.
+/// the room `array_reserve` gave it: [`ARRAY_MIN_CAPACITY`], doubled until
+/// the elements fit. The same bytes as before, so a collection comes when it
+/// came.
+///
 /// ponytail: storage exactly as long as a literal, CRuby's
 /// `rb_ary_new_from_values`, was 8% faster on yjit-bench `binarytrees`, but
 /// it moves where the core library's boot places every later object, and so
@@ -11721,13 +11724,12 @@ fn new_array(scope: &mut HandleScope<'_>, elements: &[Value]) -> Value {
         let handle = empty_array(scope);
         return scope.get(handle);
     }
-    let storage = if elements.len() < ARRAY_MIN_CAPACITY as usize {
-        let mut padded = [Value::NIL; ARRAY_MIN_CAPACITY as usize];
-        padded[..elements.len()].copy_from_slice(elements);
-        scope.alloc_slots(None, &padded)
-    } else {
-        scope.alloc_slots(None, elements)
-    };
+    let mut capacity = ARRAY_MIN_CAPACITY as usize;
+    while capacity < elements.len() {
+        capacity *= 2;
+    }
+    let capacity = u32::try_from(capacity).expect("an Array storage under 2^32 slots");
+    let storage = scope.alloc_slots(None, elements, capacity);
     let class = scope.classes().object(Builtin::Array.id());
     let class = scope.root(class);
     let length = i64::try_from(elements.len())
@@ -11738,7 +11740,7 @@ fn new_array(scope: &mut HandleScope<'_>, elements: &[Value]) -> Value {
     let mut cell = [Value::NIL; ARRAY_SLOTS as usize];
     cell[ARRAY_STORAGE] = scope.get(storage);
     cell[ARRAY_LENGTH] = length;
-    let handle = scope.alloc_slots(Some(class), &cell);
+    let handle = scope.alloc_slots(Some(class), &cell, ARRAY_SLOTS);
     scope.get(handle)
 }
 

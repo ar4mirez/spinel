@@ -37,14 +37,6 @@ struct Behind {
     ivar: IvarEntry,
 }
 
-impl Behind {
-    const EMPTY: Behind = Behind {
-        entry: None,
-        plan: Plan::Unknown,
-        ivar: IvarEntry::EMPTY,
-    };
-}
-
 /// What one call site last resolved, and what has to still be true to reuse it.
 ///
 /// `Copy`, and three words: the guard reads the whole entry, so splitting the
@@ -272,9 +264,16 @@ pub struct CallCaches {
     entries: Vec<Option<Entry>>,
     /// How the call each entry answers binds, indexed as `entries` is.
     plans: Vec<Plan>,
-    /// What each call site held for the receiver class before its entry's,
-    /// indexed as `entries` is. See [`CallCaches::promote`].
-    behind: Vec<Behind>,
+    /// What a call site held for the receiver class before its entry's, for
+    /// the sites that have seen a second class, by slot. See
+    /// [`CallCaches::promote`]. A map rather than a run beside `entries`:
+    /// most sites never see a second class, and an entry with its plan is
+    /// a hundred bytes or so, which every slot of every body entered would
+    /// otherwise pay.
+    behind: HashMap<u32, Behind>,
+    /// Whether `behind` holds an entry for the slot, indexed as `entries`
+    /// is: the one load [`CallCaches::has_behind`] answers from.
+    held_behind: Vec<bool>,
     /// The instance-variable sites' caches, indexed as `entries` is: an
     /// `Iseq`'s run there is its call sites and then its
     /// [`Iseq::ivar_sites`], so each table has a slot the other never reads.
@@ -320,7 +319,8 @@ impl Default for CallCaches {
         CallCaches {
             entries: Vec::new(),
             plans: Vec::new(),
-            behind: Vec::new(),
+            behind: HashMap::new(),
+            held_behind: Vec::new(),
             ivars: Vec::new(),
             consts: Vec::new(),
             more: Vec::new(),
@@ -381,7 +381,7 @@ impl CallCaches {
             (iseq.call_sites.len() + iseq.ivar_sites as usize + iseq.const_sites as usize).max(1);
         self.entries.resize(self.entries.len() + run, None);
         self.plans.resize(self.entries.len(), Plan::Unknown);
-        self.behind.resize(self.entries.len(), Behind::EMPTY);
+        self.held_behind.resize(self.entries.len(), false);
         self.ivars.resize(self.entries.len(), IvarEntry::EMPTY);
         self.consts.resize(self.entries.len(), None);
         self.more.resize(self.entries.len(), false);
@@ -430,11 +430,15 @@ impl CallCaches {
         });
         match std::mem::replace(&mut self.entries[slot], fresh) {
             Some(old) if old.class != class => {
-                self.behind[slot] = Behind {
-                    entry: Some(old),
-                    plan: std::mem::take(&mut self.plans[slot]),
-                    ivar: self.ivars[slot],
-                };
+                self.behind.insert(
+                    slot as u32,
+                    Behind {
+                        entry: Some(old),
+                        plan: std::mem::take(&mut self.plans[slot]),
+                        ivar: self.ivars[slot],
+                    },
+                );
+                self.held_behind[slot] = true;
             }
             _ => self.plans[slot] = Plan::Unknown,
         }
@@ -451,7 +455,7 @@ impl CallCaches {
     #[inline]
     #[must_use]
     pub fn has_behind(&self, slot: u32) -> bool {
-        self.behind[slot as usize].entry.is_some()
+        self.held_behind[slot as usize]
     }
 
     /// Bring what `slot` held for `class` back in front, when that is what
@@ -468,8 +472,13 @@ impl CallCaches {
     ///
     /// As [`CallCaches::get`].
     pub fn promote(&mut self, slot: u32, class: ClassId, serial: u64) -> bool {
+        if !self.held_behind[slot as usize] {
+            return false;
+        }
+        let Some(behind) = self.behind.get_mut(&slot) else {
+            return false;
+        };
         let slot = slot as usize;
-        let behind = &mut self.behind[slot];
         match behind.entry {
             Some(entry) if entry.class == class && entry.serial == serial => {}
             _ => return false,

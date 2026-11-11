@@ -976,16 +976,23 @@ impl Heap {
         Value::heap(obj.0.cast())
     }
 
-    /// [`Heap::allocate`] of an object of slots holding `values`, written
-    /// once rather than filled with `nil` first. Every heap object among
-    /// `values` must survive the collection this may start, as for any value
-    /// held across an allocation.
-    fn allocate_slots(&mut self, class: Option<Value>, values: &[Value]) -> Value {
-        let len = u32::try_from(values.len()).expect("an object has fewer than 2^32 slots");
+    /// [`Heap::allocate`] of an object of `len` slots holding `values` and
+    /// then `nil`, each written once rather than filled with `nil` first.
+    /// Every heap object among `values` must survive the collection this may
+    /// start, as for any value held across an allocation.
+    fn allocate_slots(&mut self, class: Option<Value>, values: &[Value], len: u32) -> Value {
+        debug_assert!(values.len() <= len as usize, "more values than slots");
         let (obj, _) = self.allocate_header(class, Payload::Slots, len);
         // SAFETY: `allocate_header` made `len` slots after the header, in a
-        // cell nothing else can reach yet, and `values` lives outside the heap.
-        unsafe { ptr::copy_nonoverlapping(values.as_ptr(), obj.slots(), values.len()) };
+        // cell nothing else can reach yet, `values` lives outside the heap,
+        // and there are no more of them than slots.
+        unsafe {
+            let slots = obj.slots();
+            ptr::copy_nonoverlapping(values.as_ptr(), slots, values.len());
+            for i in values.len()..len as usize {
+                ptr::write(slots.add(i), Value::NIL);
+            }
+        }
         Value::heap(obj.0.cast())
     }
 
@@ -1441,9 +1448,9 @@ impl<'h> HandleScope<'h> {
         self.root(value)
     }
 
-    /// Allocate an object of `values.len()` slots holding `values`, rooted in
-    /// this scope: [`HandleScope::alloc`] and a `set_slot` for each, in one
-    /// copy.
+    /// Allocate an object of `len` slots holding `values` and then `nil`,
+    /// rooted in this scope: [`HandleScope::alloc`] and a `set_slot` for each
+    /// value, in one copy.
     ///
     /// The allocation can collect before the copy, so every heap object
     /// among `values` must be reachable from a root already, as it must be
@@ -1451,10 +1458,16 @@ impl<'h> HandleScope<'h> {
     ///
     /// # Panics
     ///
-    /// If `values` has more than `u32::MAX` elements.
-    pub fn alloc_slots(&mut self, class: Option<Handle<'h>>, values: &[Value]) -> Handle<'h> {
+    /// If `values` is longer than `len`.
+    pub fn alloc_slots(
+        &mut self,
+        class: Option<Handle<'h>>,
+        values: &[Value],
+        len: u32,
+    ) -> Handle<'h> {
+        assert!(values.len() <= len as usize, "more values than slots");
         let class = class.map(|handle| self.get(handle));
-        let value = self.heap.allocate_slots(class, values);
+        let value = self.heap.allocate_slots(class, values, len);
         for &slot in values {
             self.storable(slot);
         }
@@ -2853,12 +2866,17 @@ mod tests {
             scope.get(second),
         ];
         scope.set_gc_stress(true);
-        let object = scope.alloc_slots(None, &values);
-        let empty = scope.alloc_slots(None, &[]);
+        let object = scope.alloc_slots(None, &values, 3);
+        let empty = scope.alloc_slots(None, &[], 0);
+        let padded = scope.alloc_slots(None, &values[..1], 3);
         scope.set_gc_stress(false);
         scope.collect();
-        let (object, empty) = (scope.get(object), scope.get(empty));
+        let (object, empty, padded) = (scope.get(object), scope.get(empty), scope.get(padded));
         assert_eq!(scope.slice_of(object), Some(&values[..]));
+        assert_eq!(
+            scope.slice_of(padded),
+            Some(&[values[0], Value::NIL, Value::NIL][..])
+        );
         assert_eq!(scope.slice_of(empty), Some(&[][..]));
         assert_eq!(scope.slice_of(values[2]), None, "bytes are not slots");
         assert_eq!(scope.slice_of(Value::NIL), None);
