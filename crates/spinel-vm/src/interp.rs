@@ -2879,9 +2879,9 @@ fn run<'h>(
                     let declined = std::mem::take(&mut declined);
                     match scope.call_caches().plan(slot) {
                         Plan::General => {}
-                        &Plan::Native(plan) => {
+                        Plan::Native(_) => {
                             if let Some((at, value)) =
-                                native_send(scope, &frames[top], index, &plan, &stack, true)
+                                light_send(scope, &frames[top], index, &stack, true)
                             {
                                 stack.truncate(at);
                                 stack.push(value);
@@ -5391,19 +5391,23 @@ fn native_light(
     }
 }
 
-/// [`run_calls`]'s `Insn::Send` to a primitive's light form, and
-/// [`native_stretch`]'s: [`native_send`], without allocating, when the
-/// site's plan is one.
+/// `Insn::Send` to a primitive's light form, when the site's plan is one:
+/// [`native_send`], with leave to allocate from `run`'s own arm, which has
+/// rooted the stack, and without from [`run_calls`] and [`native_stretch`].
+/// Out of line, so that those loops carry a call rather than the light
+/// form's code.
+#[inline(never)]
 fn light_send(
     scope: &mut HandleScope<'_>,
     frame: &Call,
     index: u32,
     stack: &[Value],
+    may_allocate: bool,
 ) -> Option<(usize, Value)> {
     let Plan::Native(plan) = *scope.call_caches().plan(frame.cache_base + index) else {
         return None;
     };
-    native_send(scope, frame, index, &plan, stack, false)
+    native_send(scope, frame, index, &plan, stack, may_allocate)
 }
 
 /// `Insn::Send` to a primitive with a light form, as its site's plan says
@@ -17688,6 +17692,29 @@ fn counted_stretch(
     stretch(scope, stack, frame, pc, ran, room)
 }
 
+/// [`run_calls`]'s call to a primitive's light form at `at`: answered
+/// without allocating, and the frame run on from it in [`native_stretch`],
+/// whose stop it answers. `None`, with nothing changed, when the primitive
+/// declines. Out of line, so that `run_calls` carries a call rather than
+/// this.
+#[inline(never)]
+fn native_calls(
+    scope: &mut HandleScope<'_>,
+    stack: &mut Stack,
+    frame: &Call,
+    index: u32,
+    at: &mut usize,
+    ran: &mut u64,
+    room: u64,
+) -> Option<Insn> {
+    let (to, value) = light_send(scope, frame, index, stack, false)?;
+    stack.truncate(to);
+    stack.push(value);
+    *at += 1;
+    *ran += 1;
+    Some(native_stretch(scope, stack, frame, at, ran, room))
+}
+
 /// [`counted_stretch`] for a frame [`run_calls`] has just answered a
 /// primitive's light form in: [`light_step`]s, and each call to a light form
 /// it can answer without allocating answered where it stands, as
@@ -17736,7 +17763,7 @@ fn native_stretch(
             continue;
         }
         let Insn::Send(index) = code[at] else { break };
-        let Some((to, value)) = light_send(scope, frame, index, stack.live()) else {
+        let Some((to, value)) = light_send(scope, frame, index, stack.live(), false) else {
             break;
         };
         // What `IvarView::read` asks of the view: made since nothing wrote.
@@ -17879,15 +17906,13 @@ fn run_calls(
                         Plan::Native(_)
                     )
                 {
-                    let Some((to, value)) = light_send(scope, frame, index, stack) else {
+                    let Some(next) =
+                        native_calls(scope, stack, frame, index, &mut at, &mut ran, room)
+                    else {
                         declined = true;
                         break;
                     };
-                    stack.truncate(to);
-                    stack.push(value);
-                    at += 1;
-                    ran += 1;
-                    insn = native_stretch(scope, stack, &frames[top], &mut at, &mut ran, room);
+                    insn = next;
                     if ran >= room {
                         break;
                     }
