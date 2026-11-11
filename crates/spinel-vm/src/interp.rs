@@ -17600,12 +17600,9 @@ fn light_step<const LIGHT: bool>(
         // A Float literal that fits an immediate is that immediate, which
         // `materialise` would answer without the heap. Every other literal
         // allocates, so is the closure's.
-        Insn::PushLit(index) => match frame.iseq.literals.get(index as usize) {
-            Some(&Literal::Float(f)) => match Value::flonum(f) {
-                Some(value) => stack.push(value),
-                None => return 0,
-            },
-            _ => return 0,
+        Insn::PushLit(index) => match light_literal(frame, index) {
+            Some(value) => stack.push(value),
+            None => return 0,
         },
         Insn::Pop => {
             stack.pop();
@@ -17678,15 +17675,7 @@ fn light_step<const LIGHT: bool>(
         // follows from the frame's scope, which the entry is keyed by. The
         // value is a constant's, which the constant table roots.
         Insn::GetConst(name, how, site) if how != ConstScope::Qualified => {
-            let symbol = frame.iseq.symbol_ids()[name as usize];
-            if scope.any_autoloads() && scope.autoloads(symbol) {
-                return 0;
-            }
-            let epoch = scope.classes().const_epoch();
-            match scope
-                .call_caches()
-                .scoped_constant(frame.cache_base + site, epoch, frame.cref)
-            {
+            match light_constant(scope, frame, name, site) {
                 Some(value) => stack.push(value),
                 None => return 0,
             }
@@ -17701,7 +17690,7 @@ fn light_step<const LIGHT: bool>(
                 return 0;
             }
             lazy.view = None;
-            if !scope.cached_set_ivar(frame.receiver, frame.cache_base + site, SLOT_IVARS, value) {
+            if !light_set_ivar(scope, frame, site, value) {
                 return 0;
             }
             stack.pop();
@@ -17731,24 +17720,21 @@ fn light_step<const LIGHT: bool>(
         // of fixnums — is the closure's.
         Insn::BinOp(op) => {
             let depth = stack.len();
-            if depth < 2 {
+            // `Integer`'s seal is asked first, as it is the common case's;
+            // a Float pair while it is broken is the closure's too, which
+            // only ever costs time.
+            let ops = *lazy.ops.get_or_insert_with(|| native_ops(scope, frame, 0));
+            if depth < 2 || ops & (1 << op as usize) == 0 {
                 return 0;
             }
             let (left, right) = (stack.get(depth - 2), stack.get(depth - 1));
-            // The answer is worked out before the seal is asked, since
-            // which class's seal decides depends on what the operands were;
-            // working it out has no effect to undo when the seal says no.
-            let (value, which) = if let Some(value) = fixnum_binop(op, left, right) {
-                (value, 0)
-            } else if let Some(value) = flonum_binop(op, left, right) {
-                (value, 1)
-            } else {
-                return 0;
+            let value = match fixnum_binop(op, left, right) {
+                Some(value) => value,
+                None => match light_flonum_binop(scope, frame, lazy, op, left, right) {
+                    Some(value) => value,
+                    None => return 0,
+                },
             };
-            let ops = *lazy.ops[which].get_or_insert_with(|| native_ops(scope, frame, which));
-            if ops & (1 << op as usize) == 0 {
-                return 0;
-            }
             stack.truncate(depth - 2);
             // The answer is a fixnum, a flonum or a boolean, so immediate: nothing
             // about it needs rooting, and the next instruction can take it
@@ -17811,8 +17797,10 @@ fn set_env_local(scope: &mut HandleScope<'_>, frame: &Call, depth: u16, slot: u1
 /// instruction needs it, rather than on entry, since most runs need neither.
 #[derive(Default)]
 struct Lazy {
-    /// [`native_ops`] for `Integer` and for `Float`, for a `BinOp`.
-    ops: [Option<u32>; 2],
+    /// [`native_ops`] for `Integer`, for a `BinOp`.
+    ops: Option<u32>,
+    /// [`native_ops`] for `Float`, for a `BinOp` of two flonums.
+    float_ops: Option<u32>,
     /// `self`'s instance variables, for a `GetIvar` in a light run.
     view: Option<crate::heap::IvarView>,
 }
@@ -17834,6 +17822,57 @@ fn fixnum_binop(op: BinOp, left: Value, right: Value) -> Option<Value> {
         BinOp::Neq => left.fixnum_order(right).map(|(a, b)| bool_value(a != b)),
         BinOp::Mul | BinOp::Div | BinOp::Mod => None,
     }
+}
+
+/// [`light_step`]'s `PushLit`: a Float literal that fits a flonum. Out of
+/// line, as the rest of these, so that the instructions `light_step` has
+/// always run keep the registers they had.
+#[inline(never)]
+fn light_literal(frame: &Call, index: u32) -> Option<Value> {
+    match frame.iseq.literals.get(index as usize) {
+        Some(&Literal::Float(f)) => Value::flonum(f),
+        _ => None,
+    }
+}
+
+/// [`light_step`]'s `GetConst` from a scope: the site's cache, when it holds
+/// the read for this scope at the current epoch and no autoload waits on
+/// the name.
+#[inline(never)]
+fn light_constant(scope: &HandleScope<'_>, frame: &Call, name: u32, site: u32) -> Option<Value> {
+    let symbol = frame.iseq.symbol_ids()[name as usize];
+    if scope.any_autoloads() && scope.autoloads(symbol) {
+        return None;
+    }
+    let epoch = scope.classes().const_epoch();
+    scope
+        .call_caches()
+        .scoped_constant(frame.cache_base + site, epoch, frame.cref)
+}
+
+/// [`light_step`]'s `SetIvar`: [`HandleScope::cached_set_ivar`] on `self`.
+#[inline(never)]
+fn light_set_ivar(scope: &mut HandleScope<'_>, frame: &Call, site: u32, value: Value) -> bool {
+    scope.cached_set_ivar(frame.receiver, frame.cache_base + site, SLOT_IVARS, value)
+}
+
+/// [`light_step`]'s `BinOp` for a pair that is not two fixnums: two flonums
+/// under an operator `Float` still has as its own. Out of line, so that the
+/// fixnum case keeps the registers it had.
+#[inline(never)]
+fn light_flonum_binop(
+    scope: &mut HandleScope<'_>,
+    frame: &Call,
+    lazy: &mut Lazy,
+    op: BinOp,
+    left: Value,
+    right: Value,
+) -> Option<Value> {
+    let value = flonum_binop(op, left, right)?;
+    let ops = *lazy
+        .float_ops
+        .get_or_insert_with(|| native_ops(scope, frame, 1));
+    (ops & (1 << op as usize) != 0).then_some(value)
 }
 
 /// `left op right` for two flonums whose answer is a flonum or a boolean,
