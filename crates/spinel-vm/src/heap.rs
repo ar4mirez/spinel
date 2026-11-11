@@ -354,8 +354,9 @@ pub struct Heap {
     /// against the class table on every hit.
     class_ids: [(usize, u32); CLASS_IDS],
     /// What a collision in `class_ids` displaced: see
-    /// [`class_ids_behind_entry`].
-    class_ids_behind: [(usize, u32); CLASS_IDS],
+    /// [`class_ids_behind_entry`]. Boxed, so that the fields the light loop
+    /// reads keep the places they had in the heap.
+    class_ids_behind: Box<[(usize, u32); CLASS_IDS]>,
     regexps: crate::regexp::Regexps,
     /// Every fiber this heap has made, and the vectors of those not running
     /// (#16). Traced: a suspended fiber's frames hold values nothing else does.
@@ -730,7 +731,7 @@ impl Heap {
             definitions: crate::method::Definitions::new(),
             call_caches: crate::callcache::CallCaches::new(),
             class_ids: [(0, 0); CLASS_IDS],
-            class_ids_behind: [(0, 0); CLASS_IDS],
+            class_ids_behind: Box::new([(0, 0); CLASS_IDS]),
             regexps: crate::regexp::Regexps::new(),
             fibers: crate::interp::FiberTable::default(),
             last_match: Value::NIL,
@@ -1116,7 +1117,7 @@ impl Heap {
     pub fn collect(&mut self) {
         let started = std::time::Instant::now();
         self.class_ids = [(0, 0); CLASS_IDS];
-        self.class_ids_behind = [(0, 0); CLASS_IDS];
+        *self.class_ids_behind = [(0, 0); CLASS_IDS];
         self.mark();
         self.trace_weak();
         self.queue_finalizers();
