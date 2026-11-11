@@ -5164,9 +5164,7 @@ fn send_simple(
     // object is never collected — the class table roots every one — so the
     // object names one class for the life of the heap.
     let class = match scope.call_caches().plan(slot) {
-        Plan::Direct(plan)
-            if scope.class_object_of(receiver) == Some(plan.class_object) =>
-        {
+        Plan::Direct(plan) if scope.class_object_of(receiver) == Some(plan.class_object) => {
             plan.class
         }
         _ => known_class_of(scope, receiver)?,
