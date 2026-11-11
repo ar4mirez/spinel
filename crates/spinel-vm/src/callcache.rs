@@ -384,6 +384,10 @@ impl CallCaches {
     /// # Panics
     ///
     /// As [`CallCaches::get`].
+    ///
+    /// Also empties the slot's instance-variable cache: an `attr_reader` call
+    /// site keeps there where its reader's name sat, and the new method may
+    /// read another name from the same shape.
     pub fn fill(&mut self, slot: u32, class: ClassId, serial: u64, method: Method) {
         self.entries[slot as usize] = Some(Entry {
             class,
@@ -391,6 +395,7 @@ impl CallCaches {
             method,
         });
         self.plans[slot as usize] = Plan::Unknown;
+        self.ivars[slot as usize] = IvarEntry::EMPTY;
     }
 
     /// How a call from `slot` binds the method its entry holds, if that has
@@ -698,6 +703,31 @@ mod tests {
         assert!(matches!(caches.plan(base), Plan::General));
         caches.fill(base, c, serial + 1, method);
         assert!(matches!(caches.plan(base), Plan::Unknown), "forgotten");
+    }
+
+    /// Refilling a site also empties its instance-variable cache: an
+    /// `attr_reader` site kept there where its old reader's name sat, and the
+    /// new method may read another name from an object of the same shape.
+    #[test]
+    fn a_refill_empties_the_sites_ivar_cache() {
+        let mut heap = booted();
+        let mut scope = heap.scope();
+        let name = crate::shared::symbols::intern("inline_cache_ivar");
+        let c = scope.define_class(Some("C"), Some(Builtin::Object.id()));
+        scope
+            .classes_mut()
+            .define_method(c, name, Value::fixnum(1).unwrap());
+        let method = scope.classes_mut().lookup(c, name).unwrap();
+        let serial = scope.classes().serial(c);
+
+        let mut caches = CallCaches::new();
+        let base = caches.base(&iseq_with(2));
+        caches.fill(base, c, serial, method);
+        caches.fill_ivar(base, ShapeId(7), 1);
+        caches.fill_ivar(base + 1, ShapeId(7), 0);
+        caches.fill(base, c, serial + 1, method);
+        assert_eq!(caches.ivar(base).shape, ShapeId::NONE, "emptied");
+        assert_eq!(caches.ivar(base + 1).shape, ShapeId(7), "another site kept");
     }
 
     /// A hit: fill a slot, and read it back through a guard that agrees.
