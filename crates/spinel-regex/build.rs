@@ -6,6 +6,14 @@
 //! measured ranges, take a Unicode-tables dependency, or generate Rust from the
 //! oracle — and this is the third.
 //!
+//! Three more, `alpha`, `upper` and `lower`, joined them when Rust 1.100 moved
+//! to a newer Unicode than the one CRuby's Onigmo was built against. Those were
+//! still on `char::is_alphabetic`, `is_uppercase` and `is_lowercase`, which had
+//! agreed with Onigmo on every codepoint only because the two Unicode versions
+//! happened to match; the new toolchain's tables accepted letters Onigmo does
+//! not know yet (U+A7DD, U+1DF40, ...). A predicate whose answer moves with the
+//! compiler is the drift this measurement exists to stop.
+//!
 //! A dependency was the one rejected on purpose. Its Unicode version has to be
 //! kept in step with the one CRuby was built against, and a mismatch shows up as
 //! exactly the kind of quiet per-codepoint disagreement `#178`'s audit was
@@ -13,8 +21,8 @@
 //! the source of truth: that file is regenerated from a live CRuby by
 //! `scripts/regexp-oracle.rb --generate` and re-checked against one by CI.
 //!
-//! Ranges rather than a bitset: 2,353 of them across the six, sorted, so a
-//! lookup is a binary search over ~19 KB of `.rodata` and costs nothing at boot
+//! Ranges rather than a bitset: 5,451 of them across the nine, sorted, so a
+//! lookup is a binary search over ~43 KB of `.rodata` and costs nothing at boot
 //! — which matters, because every `spinel` process boots a heap.
 //!
 //! `tests/properties.txt`, the `\p{}` properties, is turned into Rust the same
@@ -23,10 +31,14 @@
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
-/// The brackets that need a table. The other eight are exact on `char`'s own
+/// The brackets that need a table. The other five are exact on `char`'s own
 /// predicates and stay there — cheaper than a binary search, and already
-/// measured as agreeing on every codepoint.
-const GENERATED: &[&str] = &["digit", "alnum", "print", "graph", "word", "punct"];
+/// measured as agreeing on every codepoint. If a toolchain's Unicode ever moves
+/// one of them, `exec.rs`'s replay of `posix.txt` is what fails, as it did for
+/// `alpha`, `upper` and `lower` on Rust 1.100.
+const GENERATED: &[&str] = &[
+    "alpha", "digit", "alnum", "upper", "lower", "print", "graph", "word", "punct",
+];
 
 fn main() {
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets this"));

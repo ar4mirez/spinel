@@ -6959,8 +6959,8 @@ fn bind(
     }
     // Ruby pads a block's missing required parameters with `nil`; a lambda
     // never gets here, because `check_arity` refused first.
-    for index in leading..required {
-        env.set(scope, spec.required[index] as usize, Value::NIL);
+    for &slot in &spec.required[leading..required] {
+        env.set(scope, slot as usize, Value::NIL);
     }
 
     let after_required = available.saturating_sub(leading);
