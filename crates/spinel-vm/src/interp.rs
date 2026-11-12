@@ -11710,7 +11710,8 @@ fn empty_array_of<'h>(scope: &mut HandleScope<'h>, id: ClassId) -> Handle<'h> {
 /// Both cells are written once, the storage straight from `elements`, with
 /// the room `array_reserve` gave it: [`ARRAY_MIN_CAPACITY`], doubled until
 /// the elements fit. The same bytes as before, so a collection comes when it
-/// came.
+/// came. The storage is made first, so that the `Array` is the newer of the
+/// two cells.
 ///
 /// ponytail: storage exactly as long as a literal, CRuby's
 /// `rb_ary_new_from_values`, was 8% faster on yjit-bench `binarytrees`, but
@@ -11718,7 +11719,6 @@ fn empty_array_of<'h>(scope: &mut HandleScope<'h>, id: ClassId) -> Handle<'h> {
 /// which class objects share an entry of the heap's remembered class ids:
 /// `Thread` and `Fiber` came to, and `Mutex#lock` read `@__id__` twice a
 /// call. Worth taking once that table cannot be made to collide by layout.
-/// Made first, so that the `Array` is the newer of the two cells.
 fn new_array(scope: &mut HandleScope<'_>, elements: &[Value]) -> Value {
     if elements.is_empty() {
         let handle = empty_array(scope);
