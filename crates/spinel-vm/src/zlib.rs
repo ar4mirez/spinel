@@ -1803,14 +1803,14 @@ impl<'b> Deflate<'b> {
     }
 
     fn init_block(&mut self) {
-        for n in 0..L_CODES {
-            self.ltree[n].fc = 0;
+        for node in &mut self.ltree[..L_CODES] {
+            node.fc = 0;
         }
-        for n in 0..D_CODES {
-            self.dtree[n].fc = 0;
+        for node in &mut self.dtree[..D_CODES] {
+            node.fc = 0;
         }
-        for n in 0..BL_CODES {
-            self.bltree[n].fc = 0;
+        for node in &mut self.bltree[..BL_CODES] {
+            node.fc = 0;
         }
         self.ltree[END_BLOCK].fc = 1;
         self.s.opt_len = 0;
@@ -2303,8 +2303,8 @@ impl<'b> Deflate<'b> {
 
     fn detect_data_type(&self) -> i32 {
         let mut block_mask: u64 = 0xf3ff_c07f;
-        for n in 0..=31 {
-            if block_mask & 1 != 0 && self.ltree[n].fc != 0 {
+        for node in &self.ltree[..=31] {
+            if block_mask & 1 != 0 && node.fc != 0 {
                 return Z_BINARY;
             }
             block_mask >>= 1;
@@ -2312,10 +2312,8 @@ impl<'b> Deflate<'b> {
         if self.ltree[9].fc != 0 || self.ltree[10].fc != 0 || self.ltree[13].fc != 0 {
             return Z_TEXT;
         }
-        for n in 32..LITERALS {
-            if self.ltree[n].fc != 0 {
-                return Z_TEXT;
-            }
+        if self.ltree[32..LITERALS].iter().any(|node| node.fc != 0) {
+            return Z_TEXT;
         }
         Z_BINARY
     }

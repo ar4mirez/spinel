@@ -1577,14 +1577,17 @@ fn perl_matches(kind: Perl, c: char) -> bool {
     }
 }
 
-// The six brackets whose meaning is a union of Unicode general categories, as
-// sorted range tables generated from the measured `tests/posix.txt`.
+// The nine brackets whose meaning depends on Unicode data, as sorted range
+// tables generated from the measured `tests/posix.txt`.
 //
-// `char`'s predicates cannot express them: they are unions Rust chose for
-// Rust's purposes, and Onigmo's are different ones — `Nd` alone rather than
+// Six of them `char`'s predicates cannot express: they are unions Rust chose
+// for Rust's purposes, and Onigmo's are different ones — `Nd` alone rather than
 // `Nd + Nl + No`, `P*` rather than "not anything else", "assigned minus `C*`"
-// rather than "not a control". See `build.rs` for why this is generated from a
-// measurement rather than taken from a Unicode-tables crate (#180).
+// rather than "not a control" (#180). The other three, `alpha`, `upper` and
+// `lower`, are the same properties `char` reads, but of the Unicode version the
+// Rust toolchain ships rather than the one CRuby's Onigmo was built against,
+// and Rust 1.100 moved past it. See `build.rs` for why this is generated from a
+// measurement rather than taken from a Unicode-tables crate.
 include!(concat!(env!("OUT_DIR"), "/posix_tables.rs"));
 
 /// Whether a sorted, disjoint range table contains `c`.
@@ -1606,17 +1609,19 @@ pub(crate) fn in_ranges(ranges: &[(u32, u32)], c: char) -> bool {
 /// The POSIX brackets, which unlike the shorthands *are* Unicode-aware — the
 /// same divergence in the other direction.
 ///
-/// Eight of the fourteen are exact on `char`'s own predicates and stay there:
+/// Five of the fourteen are exact on `char`'s own predicates and stay there:
 /// cheaper than a binary search, and #178's audit measured them as agreeing on
-/// every one of the 1,114,112 scalar values. The other six are the tables
-/// above, because the unions Onigmo means are not ones `char` exposes.
+/// every one of the 1,114,112 scalar values. The other nine are the tables
+/// above: six because the unions Onigmo means are not ones `char` exposes, and
+/// three because `char`'s answer follows the toolchain's Unicode version and
+/// Onigmo's does not.
 fn posix_matches(kind: Posix, c: char) -> bool {
     match kind {
-        Posix::Alpha => c.is_alphabetic(),
+        Posix::Alpha => in_ranges(ALPHA, c),
         Posix::Digit => in_ranges(DIGIT, c),
         Posix::Alnum => in_ranges(ALNUM, c),
-        Posix::Upper => c.is_uppercase(),
-        Posix::Lower => c.is_lowercase(),
+        Posix::Upper => in_ranges(UPPER, c),
+        Posix::Lower => in_ranges(LOWER, c),
         Posix::Space => c.is_whitespace(),
         // Onigmo's `blank` is horizontal space: tab plus every Zs. Small
         // enough to write out, and measured — `posix.txt`'s `blank` line is
@@ -1699,13 +1704,16 @@ mod posix_oracle {
     /// closed at once by generating range tables from this very file.
     ///
     /// Which makes the replay below partly a tautology, and it is worth saying
-    /// so plainly: six of the fourteen brackets are now checked against the
+    /// so plainly: nine of the fourteen brackets are now checked against the
     /// table they were generated from. The oracle that still bites is
     /// `scripts/regexp-oracle.rb --check`, which CI runs against a live CRuby —
     /// if Ruby's answer moves, `posix.txt` moves, the generated tables move with
     /// it, and this test goes on passing because the engine followed. What this
-    /// test still catches on its own is the other eight, which are `char`
-    /// predicates and could drift with a Rust upgrade.
+    /// test still catches on its own is the other five, which are `char`
+    /// predicates and could drift with a Rust upgrade — as `alpha`, `upper` and
+    /// `lower` did when Rust 1.100's newer Unicode tables accepted letters
+    /// Onigmo does not know yet (U+A7DD, U+1DF40), which moved those three onto
+    /// tables too.
     ///
     /// Nothing is added here to make a run green. The list is printed on every
     /// run, and the test fails if an entry is stale as well as if a new
