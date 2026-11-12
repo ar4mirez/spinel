@@ -33,10 +33,14 @@ randomisation off where this machine has working `taskset` and `setarch` (the
 line above the table says which applied), and under a 1.5 GB memory cap where
 `systemd-run --user` works. The medians are written
 to `yjit-bench/results.tsv`, and the table is rendered from that file; never
-edit either by hand. `cargo test` runs the check.
+edit either by hand. The `results.tsv` committed now is not one run's output:
+it is the per-cell median of eight `scripts/bench.sh --yjit-bench` runs at
+`e7c85f4`, aggregated outside the script, and its `iterations` line says so;
+the next `--yjit-bench` run replaces it with that run's medians. `cargo test`
+runs the check.
 
 <!-- yjit-bench table: written by scripts/bench.sh --yjit-bench; do not edit -->
-Spinel at `e7c85f4`, against `ruby 4.0.9 (2026-10-23 revision 3e93b23afc) +PRISM [x86_64-linux]`. The median across eight runs, each started with the 1-minute load under 2, of 1 warmup and the median of 5 timed iterations each, one CPU, ASLR off.
+Spinel at `e7c85f4`, against `ruby 4.0.9 (2026-10-23 revision 3e93b23afc) +PRISM [x86_64-linux]`. The per-cell median, aggregated outside scripts/bench.sh, of eight scripts/bench.sh --yjit-bench runs, each started with the 1-minute load under 2, of 1 warmup and the median of 5 timed iterations each, one CPU, ASLR off.
 
 | benchmark | Spinel | `ruby --disable-yjit` | Spinel ÷ interpreter | within 1.5× | `ruby --yjit` |
 |---|---:|---:|---:|:---:|---:|
