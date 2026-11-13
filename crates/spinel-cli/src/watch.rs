@@ -107,13 +107,15 @@ pub fn run(root: &Path, child_args: &[OsString]) -> ExitCode {
         });
         match messages.recv_timeout(wait) {
             Ok(Message::Changed(Ok(event))) => {
-                let before = changed.len();
-                collect(&event, &mut ignored, &mut changed);
+                let mut kept = collect(&event, &mut ignored, &mut changed);
                 // Events were lost, so any file may have changed.
-                if event.need_rescan() && !changed.contains(&root) {
-                    changed.push(root.clone());
+                if event.need_rescan() {
+                    kept = true;
+                    if !changed.contains(&root) {
+                        changed.push(root.clone());
+                    }
                 }
-                if changed.len() > before {
+                if kept {
                     deadline = Some(Instant::now() + DEBOUNCE);
                 }
             }
@@ -140,13 +142,15 @@ pub fn run(root: &Path, child_args: &[OsString]) -> ExitCode {
     }
 }
 
-/// Add each path an event names that `.gitignore` keeps, once, to `changed`.
+/// Add each path an event names that `.gitignore` keeps, once, to `changed`,
+/// and report whether the event named any such path, pending already or not.
 /// Reading a file is not a change: the child reads the program every time it
 /// starts, and counting that would restart it forever.
-fn collect(event: &Event, ignored: &mut Ignored, changed: &mut Vec<PathBuf>) {
+fn collect(event: &Event, ignored: &mut Ignored, changed: &mut Vec<PathBuf>) -> bool {
     if matches!(event.kind, EventKind::Access(_)) {
-        return;
+        return false;
     }
+    let mut kept = false;
     let dir_kind = matches!(
         event.kind,
         EventKind::Create(CreateKind::Folder) | EventKind::Remove(RemoveKind::Folder)
@@ -156,10 +160,15 @@ fn collect(event: &Event, ignored: &mut Ignored, changed: &mut Vec<PathBuf>) {
             ignored.forget(path.parent().unwrap_or(path));
         }
         let is_dir = dir_kind || path.is_dir();
-        if !ignored.is_ignored(path, is_dir) && !changed.contains(path) {
+        if ignored.is_ignored(path, is_dir) {
+            continue;
+        }
+        kept = true;
+        if !changed.contains(path) {
             changed.push(path.clone());
         }
     }
+    kept
 }
 
 /// The changed paths for the restart line: relative to the project, the first

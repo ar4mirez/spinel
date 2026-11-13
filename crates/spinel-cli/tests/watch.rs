@@ -1,11 +1,13 @@
 //! `spinel run --watch` (#69, docs/cli.md): an edit restarts the program as a
 //! fresh process, and the old one and its process group are gone; a path
 //! `.gitignore` excludes, at the top or in a nested directory, restarts
-//! nothing; a burst of saves within the 100 ms debounce restarts it once; a
-//! program that ends on its own is started again by the next change; and
-//! SIGINT ends the supervisor and its program together.
+//! nothing; a burst of saves within the 100 ms debounce restarts it once, as
+//! does a save whose writes each come within it but span longer; a program
+//! that ends on its own is started again by the next change; and SIGINT ends
+//! the supervisor and its program together.
 //!
-//! Nothing here sleeps for a guessed time. The supervisor reports each restart
+//! Nothing here sleeps for a guessed time, beyond the deliberate spacing of
+//! one save's writes. The supervisor reports each restart
 //! on stderr with the paths that caused it, and it handles events in the order
 //! the file system delivered them. So a test that must show some change did
 //! not restart the program makes that change, then a change that must, and
@@ -309,6 +311,47 @@ fn a_burst_of_saves_restarts_the_program_once() {
         .filter(|l| l.contains("burst.rb"))
         .collect();
     assert_eq!(burst.len(), 1, "one save, one restart: {burst:#?}");
+}
+
+#[test]
+fn a_save_longer_than_the_debounce_restarts_the_program_once() {
+    let mut watch = Watch::start("spaced", &[]);
+    watch.started();
+
+    // One save as a formatter makes it: writes to one file, each within the
+    // debounce of the last, the whole longer than it. The restart must wait
+    // for the last write, not fire 100 ms after the first.
+    const GAP: Duration = Duration::from_millis(50);
+    let began = Instant::now();
+    let mut last = began;
+    for n in 0..5 {
+        if n > 0 {
+            thread::sleep(GAP);
+        }
+        watch.write("spaced.rb", &format!("SPACED = {n}\n"));
+        let now = Instant::now();
+        let gap = now - last;
+        assert!(
+            gap < DEBOUNCE,
+            "write {n} came {gap:?} after the last, longer than the debounce; nothing can be concluded"
+        );
+        last = now;
+    }
+    let span = last - began;
+    assert!(span > DEBOUNCE, "the writes spanned only {span:?}");
+    watch.expect(Stream::Err, |l| l.contains("spaced.rb"));
+    watch.started();
+
+    // As in the burst test, a second restart for the save would be read
+    // before the one this change causes.
+    watch.write("config/settings.rb", "SETTINGS = 2\n");
+    watch.expect(Stream::Err, |l| l.contains("config/settings.rb"));
+    let spaced: Vec<&str> = watch
+        .restart_lines()
+        .into_iter()
+        .filter(|l| l.contains("spaced.rb"))
+        .collect();
+    assert_eq!(spaced.len(), 1, "one save, one restart: {spaced:#?}");
 }
 
 #[test]
