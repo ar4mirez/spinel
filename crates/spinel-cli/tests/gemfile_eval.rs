@@ -209,6 +209,22 @@ fn one_rubygems_source_spelled_with_and_without_a_slash_is_a_warning() {
 }
 
 #[test]
+fn one_gem_from_two_different_rubygems_remotes_is_a_warning() {
+    let (out, _) = eval_contents(
+        "tworemotes",
+        "gem \"rack\", source: \"https://a.example.com\"\n\
+         source \"https://b.example.com\" do\n  gem \"rack\"\nend\n",
+    );
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    assert!(
+        stderr(&out).starts_with("Your Gemfile lists the gem rack (>= 0) more than once.\n"),
+        "stderr: {}",
+        stderr(&out)
+    );
+    assert_eq!(stdout(&out).matches("\"name\": \"rack\"").count(), 2);
+}
+
+#[test]
 fn an_absolute_ruby_version_file_is_read_as_given() {
     let (out, _) = eval_files(
         "rubyfile",

@@ -371,8 +371,10 @@ class GemfileEval
     list.empty? ? [">= 0"] : list
   end
 
+  # Bundler compares `source.to_s`, and while the Gemfile is evaluated every
+  # Source::Rubygems prints as "locally installed gems", whatever its remote.
   def source_key(source)
-    source && source["type"] == "rubygems" ? remote_key(source["remote"]) : source
+    source && source["type"] == "rubygems" ? "rubygems" : source
   end
 
   def describe(source)
