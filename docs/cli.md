@@ -7,6 +7,7 @@ What `spinel` does outside the engine: how it runs a file, how it reports itself
 | command | does |
 |---|---|
 | `spinel run <file> [args]` | run a file on the VM with the project's gems visible |
+| `spinel run --watch <file> [args]` | run it again whenever the project changes; see `--watch` below |
 | `spinel run --dump-bytecode <file>` | compile the file and print its bytecode instead of running it; see below |
 | `spinel <file.rb>` | same as `run`. Subcommand names win: `spinel install` is the subcommand even if `install` exists as a file; use `spinel run install` or `spinel ./install` for the file. |
 | `spinel -e CODE`, `-r LIB`, `-I DIR`, `-w`, `-v`, … | `ruby`'s command line, parsed as `ruby.c`'s `proc_options` parses it: `-e`, `-r`, `-I`, `-w`/`-W[level]`/`-W:category`, `-v`, `-d`, `-n`/`-p`/`-l`/`-a`/`-F`, `-0[octal]`, `-s`, `-x[dir]`, `-C dir`, `-c`, `-E`, and `-` for a program on standard input; `RUBYOPT`, `RUBYLIB` and, for `-S`, `RUBYPATH` are read as `ruby` reads them (#314). Feature switches Spinel has nothing behind (`--disable-gems`, `--enable=…`, the JITs) are accepted and do nothing. Any first word that starts with `-`, other than `-h`, `--help` and `-V`, means this form; a flag `ruby` does not have is its `invalid option` error (#62). |
@@ -84,7 +85,16 @@ The instructions after it are the ones it stands for, still in place. A jump int
 
 ## `--watch`
 
-`spinel run --watch app.rb` and `spinel test --watch` use the `notify` crate on the project directory, honor `.gitignore`, debounce 100 ms, and restart the child process. There is no in-process reload; Zeitwerk and similar already do that inside the app.
+`spinel run --watch app.rb [args]` runs the program, and runs it again whenever the project changes. `spinel test --watch` is to do the same once the test runner exists, with #97 choosing the tests a change affects; the supervisor, `crates/spinel-cli/src/watch.rs`, takes any `spinel` command line to restart.
+
+- **Watched:** the current directory and everything under it, through the `notify` crate (inotify on Linux, FSEvents on macOS). Run it from the project's root.
+- **A change:** a file or directory created, written, renamed or removed, or its metadata changed. Reading is not, as every run reads the program.
+- **Not a change:** a path `.gitignore` excludes, as git decides it: the `.gitignore` files in the directory and its subdirectories, the nearest first, then `.git/info/exclude`, then the user's global excludes file (`core.excludesFile`, else `~/.config/git/ignore`). A path under an excluded directory stays excluded, `.git/` never counts, and an edited `.gitignore` is read again. A `.gitignore` above the current directory is not read.
+- **Debounce:** a restart waits until 100 ms pass with no further change, so one save an editor writes in several steps restarts the program once.
+- **Restart:** the program runs as a child `spinel run`, without `--watch`, in a process group of its own. A restart sends that group SIGTERM, then SIGKILL to whatever is left after two seconds, and starts a fresh child; nothing is reloaded in place, as Zeitwerk and similar already do that inside the app. Each restart is one line on stderr naming what changed, such as `spinel: restarting: config/settings.rb changed`. The child reads `.ruby-version` and the Gemfile itself, so each run reports a mismatch afresh.
+- **A program that ends** on its own is reported, as in `spinel: the program exited with status 1; waiting for a change`, and the next change starts it again.
+- **Ctrl-C**, SIGTERM or SIGHUP end the program's group the same way, then `spinel`, which exits with 128 plus the signal's number: 130 for Ctrl-C.
+- **Not yet:** the program's group is not the terminal's foreground group, so a program that reads from the terminal is stopped (SIGTTIN) rather than handed it; standard input from a pipe or a file works. One recursive watch covers ignored directories too, whose events are then dropped, so a very large ignored tree can reach the inotify watch limit.
 
 ## Bundler running on Spinel
 

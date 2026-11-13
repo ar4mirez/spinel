@@ -13,6 +13,10 @@ path = "src/main.rs"
 
 [dependencies]
 clap.workspace = true
+ignore = "0.4"
+libc = "0.2.189"
+notify = "8"
+signal-hook = "0.4"
 spinel-ast.workspace = true
 spinel-core.workspace = true
 spinel-ext.workspace = true
