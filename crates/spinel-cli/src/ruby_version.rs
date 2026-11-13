@@ -14,6 +14,8 @@ use std::path::{Path, PathBuf};
 
 use spinel_vm::{ENGINE, ENGINE_VERSION, LANGUAGE_VERSION};
 
+use crate::gem_version::Version;
+
 /// One request this build does not satisfy, already worded for the user.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Mismatch {
@@ -61,7 +63,7 @@ fn check_ruby_version_file(text: &str) -> Option<String> {
         return None;
     }
     if let Some(version) = word.strip_prefix("spinel-") {
-        return match parse(version) {
+        return match parse_leniently(version) {
             Some(wanted) if at_least(ENGINE_VERSION, &wanted) => None,
             Some(_) => Some(format!(
                 "asks for Spinel {version}; this is {}",
@@ -72,7 +74,7 @@ fn check_ruby_version_file(text: &str) -> Option<String> {
     }
     let version = word.strip_prefix("ruby-").unwrap_or(word);
     if version.starts_with(|c: char| c.is_ascii_digit()) {
-        return match parse(version) {
+        return match parse_leniently(version) {
             Some(wanted) if at_least(LANGUAGE_VERSION, &wanted) => None,
             _ => Some(format!("asks for Ruby {version}; {}", implemented())),
         };
@@ -151,33 +153,43 @@ fn split_requirement(requirement: &str) -> (&str, &str) {
     ("=", requirement)
 }
 
-/// A version's leading numeric segments: `"3.4.0-preview1"` is `[3, 4, 0]`.
-/// `None` when it does not start with a number.
-fn parse(version: &str) -> Option<Vec<u64>> {
-    let mut segments = Vec::new();
-    for part in version.split('.') {
-        let digits: String = part.chars().take_while(char::is_ascii_digit).collect();
-        if digits.is_empty() {
-            break;
-        }
-        segments.push(digits.parse().ok()?);
-        if digits.len() < part.len() {
-            break;
-        }
+/// A requested version, read as RubyGems reads it (`Gem::Version`), so
+/// `3.4.0-preview1` is a prerelease of `3.4.0` and sorts before it. `None`
+/// for a blank string, which RubyGems would read as `0`, and for anything
+/// RubyGems would reject.
+fn parse(version: &str) -> Option<Version> {
+    if version.trim().is_empty() {
+        return None;
     }
-    (!segments.is_empty()).then_some(segments)
+    Version::new(version).ok()
 }
 
-/// Whether `have` is `wanted` or later, a missing segment counting as zero.
-fn at_least(have: &str, wanted: &[u64]) -> bool {
-    let have = parse(have).unwrap_or_default();
-    let len = have.len().max(wanted.len());
-    let pad = |v: &[u64]| {
-        (0..len)
-            .map(|i| v.get(i).copied().unwrap_or(0))
-            .collect::<Vec<_>>()
-    };
-    pad(&have) >= pad(wanted)
+/// A `.ruby-version`'s version, read as `parse` reads it when RubyGems takes
+/// it (`3.3.0p0` is a prerelease of `3.3.0`), and otherwise by its leading
+/// numeric segments, as version managers write words RubyGems rejects:
+/// `2.7.8_1` is `2.7.8`, `3.3.0@gemset` is `3.3.0`.
+fn parse_leniently(version: &str) -> Option<Version> {
+    parse(version).or_else(|| {
+        let mut numbers = Vec::new();
+        for part in version.split('.') {
+            let digits = &part[..part
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(part.len())];
+            if digits.is_empty() {
+                break;
+            }
+            numbers.push(digits);
+            if digits.len() < part.len() {
+                break;
+            }
+        }
+        parse(&numbers.join("."))
+    })
+}
+
+/// Whether `have`, this build's version, is `wanted` or later.
+fn at_least(have: &str, wanted: &Version) -> bool {
+    Version::new(have).is_ok_and(|have| have >= *wanted)
 }
 
 #[cfg(test)]
@@ -197,6 +209,25 @@ mod tests {
         assert_eq!(check_ruby_version_file(LANGUAGE_VERSION), None);
         assert!(check_ruby_version_file("99.0.0").is_some());
         assert!(check_ruby_version_file("ruby-99.1").is_some());
+    }
+
+    #[test]
+    fn a_patchlevel_word_is_a_prerelease_of_its_release() {
+        assert_eq!(parse("3.3.0p0").map(|v| v.prerelease()), Some(true));
+        assert_eq!(check_ruby_version_file("3.3.0p0\n"), None);
+    }
+
+    #[test]
+    fn version_manager_words_rubygems_rejects_are_read_by_leading_numbers() {
+        assert_eq!(parse("2.7.8_1"), None);
+        assert_eq!(parse("3.3.0@gemset"), None);
+        assert_eq!(check_ruby_version_file("2.7.8_1\n"), None);
+        assert_eq!(check_ruby_version_file("ruby-3.3.0@gemset\n"), None);
+        assert!(check_ruby_version_file("99.0.0_1").is_some());
+        assert!(check_ruby_version_file("ruby-99.0@gemset").is_some());
+        assert_eq!(parse_leniently("2.7.8_1"), parse("2.7.8"));
+        assert_eq!(parse_leniently("4.0.0-preview1"), parse("4.0.0-preview1"));
+        assert!(check_gemfile("ruby \"2.7.8_1\"\n").is_some());
     }
 
     #[test]
@@ -231,11 +262,19 @@ mod tests {
     }
 
     #[test]
-    fn versions_compare_by_segment() {
-        assert!(at_least("4.0.0", &[4]));
-        assert!(at_least("4.0.0", &[3, 10]));
-        assert!(!at_least("4.0.0", &[4, 0, 1]));
-        assert_eq!(parse("3.4.0-preview1"), Some(vec![3, 4, 0]));
+    fn versions_compare_as_rubygems_compares_them() {
+        let v = |s: &str| parse(s).expect(s);
+        assert!(at_least("4.0.0", &v("4")));
+        assert!(at_least("4.0.0", &v("3.10")));
+        assert!(!at_least("4.0.0", &v("4.0.1")));
+        // A prerelease comes before its release, not level with it.
+        assert!(at_least("4.0.0", &v("4.0.0-preview1")));
+        assert!(!at_least("4.0.0-preview1", &v("4.0.0")));
+        assert!(!at_least("4.0.0", &v("4.0.1.rc1")));
+        // Segments are numbers of any size.
+        assert!(at_least("4.0.0", &v("3.99999999999999999999999")));
         assert_eq!(parse("head"), None);
+        assert_eq!(parse(""), None);
+        assert_eq!(parse("3.3.0_1"), None);
     }
 }

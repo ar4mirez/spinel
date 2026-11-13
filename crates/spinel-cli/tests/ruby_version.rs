@@ -114,6 +114,33 @@ fn a_satisfied_cruby_version_says_nothing_even_when_strict() {
     }
 }
 
+/// Versions compare as RubyGems compares them (`Gem::Version`, #75): a
+/// prerelease of Ruby 4.0.0, written either way RubyGems reads one, comes
+/// before 4.0.0, so this build meets it.
+#[test]
+fn a_prerelease_of_the_implemented_ruby_says_nothing_even_when_strict() {
+    let out = spinel_in(
+        &fixture("prerelease"),
+        &["run", "--strict-ruby-version", "main.rb"],
+    );
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    assert_eq!(stdout(&out), "ran\n");
+    assert_eq!(stderr(&out), "");
+}
+
+/// Segments are numbers of any size, as in RubyGems: a request for
+/// `3.99999999999999999999999` is still before 4.0.0, so this build meets it.
+#[test]
+fn a_segment_past_u64_is_compared_not_rejected_even_when_strict() {
+    let out = spinel_in(
+        &fixture("big_segment"),
+        &["run", "--strict-ruby-version", "main.rb"],
+    );
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    assert_eq!(stdout(&out), "ran\n");
+    assert_eq!(stderr(&out), "");
+}
+
 #[test]
 fn what_spinel_init_writes_says_nothing_even_when_strict() {
     let dir = std::env::temp_dir().join(format!("spinel-ruby-version-{}", std::process::id()));

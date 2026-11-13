@@ -45,7 +45,7 @@ Fetched with `reqwest`, concurrent (limit 32), ETag-validated. Private sources (
 
 `pubgrub` crate. Spinel supplies:
 
-- **Version type**: `Gem::Version` semantics ported to Rust (segments, prerelease ordering, `~>` pessimistic operator). ~150 lines plus a test table copied from RubyGems' own spec.
+- **Version type**: `Gem::Version` semantics ported to Rust (segments, prerelease ordering, `~>` pessimistic operator), in `crates/spinel-cli/src/gem_version.rs`, with RubyGems' own `test_gem_version.rb` table and the `~>` cases of `test_gem_requirement.rb` beside it. `spinel run`'s language-version check (cli.md) compares versions with it until the resolver does.
 - **Dependency provider**: reads `/info` lines, filters by platform (`ruby`, `x86_64-linux`, `arm64-darwin-24`, ... using RubyGems' platform matching rules) and by `required_ruby_version`.
 - **Locked preferences**: when `Gemfile.lock` exists and the user did not ask to update, locked versions are the only candidates for unchanged deps (this is how `bundle install` stays stable and fast).
 

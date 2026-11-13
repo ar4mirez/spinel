@@ -5,6 +5,7 @@
 //! later phase is built through. Subcommands land one issue at a time; see
 //! `docs/cli.md` for the full surface.
 
+mod gem_version;
 mod init;
 mod ruby_args;
 mod ruby_version;
