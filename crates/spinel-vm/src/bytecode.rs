@@ -550,6 +550,14 @@ pub enum Insn {
     PushSelfGetLocal {
         slot: u16,
     },
+    /// `GetLocal(slot, 0); BinOp(op)`: a local as the right operand of what
+    /// is on the stack, `dx * mag`. Answered as [`Insn::GetLocalGetLocalBinOp`]
+    /// is, with the left operand read from the stack. One also stands inside
+    /// each run of that one, at its second `GetLocal`.
+    GetLocalBinOp {
+        slot: u16,
+        op: BinOp,
+    },
 }
 
 /// The binary operators the compiler emits directly.
@@ -651,6 +659,7 @@ impl Insn {
             Insn::GetLocalGetLocalBinOp { left, .. } => Insn::GetLocal(left, 0),
             Insn::GetLocalGetIvarBinOp { slot, .. } => Insn::GetLocal(slot, 0),
             Insn::PushSelfGetLocal { .. } => Insn::PushSelf,
+            Insn::GetLocalBinOp { slot, .. } => Insn::GetLocal(slot, 0),
             other => other,
         }
     }
@@ -698,6 +707,9 @@ fn superinstruction(run: &[Insn]) -> Option<Insn> {
         ] if op.light() => Some(Insn::GetLocalGetIvarBinOp { slot, site, op }),
         [Insn::PushSelf, Insn::GetLocal(slot, 0), ..] if superinstruction(&run[1..]).is_none() => {
             Some(Insn::PushSelfGetLocal { slot })
+        }
+        [Insn::GetLocal(slot, 0), Insn::BinOp(op), ..] if op.light() => {
+            Some(Insn::GetLocalBinOp { slot, op })
         }
         _ => None,
     }
@@ -1465,6 +1477,45 @@ mod tests {
                 int: 1,
                 op: BinOp::Sub
             }
+        );
+    }
+
+    /// A local as the right operand of what is on the stack is one
+    /// [`Insn::GetLocalBinOp`], and one stands inside every run of two
+    /// locals and an operator, where a jump or a decline lands.
+    #[test]
+    fn a_local_and_an_operator_fuse_inside_a_longer_run_too() {
+        let mut insns = vec![
+            Insn::GetLocal(0, 0),
+            Insn::GetLocal(1, 0),
+            Insn::BinOp(BinOp::Add),
+            Insn::GetLocal(2, 0),
+            Insn::BinOp(BinOp::Mul),
+            Insn::GetLocal(3, 0),
+            Insn::BinOp(BinOp::Mod),
+            Insn::Leave,
+        ];
+        fuse(&mut insns);
+        assert_eq!(
+            insns[..6],
+            [
+                Insn::GetLocalGetLocalBinOp {
+                    left: 0,
+                    right: 1,
+                    op: BinOp::Add
+                },
+                Insn::GetLocalBinOp {
+                    slot: 1,
+                    op: BinOp::Add
+                },
+                Insn::BinOp(BinOp::Add),
+                Insn::GetLocalBinOp {
+                    slot: 2,
+                    op: BinOp::Mul
+                },
+                Insn::BinOp(BinOp::Mul),
+                Insn::GetLocal(3, 0),
+            ]
         );
     }
 

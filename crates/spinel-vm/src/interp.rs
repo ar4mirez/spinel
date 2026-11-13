@@ -3314,7 +3314,8 @@ fn run<'h>(
                     | Insn::GetLocalPushIntBinOp { .. }
                     | Insn::GetLocalGetLocalBinOp { .. }
                     | Insn::GetLocalGetIvarBinOp { .. }
-                    | Insn::PushSelfGetLocal { .. } => {
+                    | Insn::PushSelfGetLocal { .. }
+                    | Insn::GetLocalBinOp { .. } => {
                         unreachable!("the loop answers local access itself")
                     }
 
@@ -18316,6 +18317,43 @@ fn light_step<const LIGHT: bool, const MORE: bool>(
         // `PushSelf; GetLocal` in one dispatch: the receiver and a local of a
         // frame whose locals are on its stack, in a stretch. Otherwise its
         // `PushSelf` alone, as above.
+        // `GetLocal; BinOp` in one dispatch (#750): what is on the stack
+        // under the operator with a local, `dx * mag`, answered as the
+        // `GetLocalGetLocalBinOp` above answers its two locals. One also
+        // stands inside each run of two locals and an operator, where a jump
+        // into the run or that one's decline lands. What it does not answer
+        // is its `GetLocal` alone.
+        Insn::GetLocalBinOp { slot, op } => {
+            if !frame.locals_on_stack {
+                stack.push(env_local(scope, frame, 0, slot));
+                return 1;
+            }
+            let local = stack.get(frame.floor + slot as usize);
+            if LIGHT
+                && pair
+                && let Some(left) = stack.last()
+            {
+                let ops = *lazy.ops.get_or_insert_with(|| native_ops(scope, frame, 0));
+                let value = if ops & (1 << op as usize) == 0 {
+                    None
+                } else if let Some(value) = fixnum_binop(op, left, local) {
+                    Some(value)
+                } else if MORE {
+                    let floats = *lazy
+                        .float_ops
+                        .get_or_insert_with(|| native_ops(scope, frame, 1));
+                    flonum_binop(op, left, local).filter(|_| floats & (1 << op as usize) != 0)
+                } else {
+                    None
+                };
+                if let Some(value) = value {
+                    stack.pop();
+                    *pc += 1;
+                    return 1 + pair_after(scope, stack, frame, code, pc, value, pair, spent);
+                }
+            }
+            stack.push(local);
+        }
         Insn::PushSelfGetLocal { slot } => {
             stack.push(frame.receiver);
             if LIGHT && pair && frame.locals_on_stack {
@@ -27098,7 +27136,7 @@ mod tests {
         });
         // s = 0; i = 0; n = rounds; y = 1.5; t = 0; @v = 3
         // while i < n; s = s + f(i); w = y * y; t = t + @v; i += 1; end
-        // z = 2**62 - 1; [s, y + 1, i, z + 1, w, t]
+        // z = 2**62 - 1; [s, y + 1, i, z + 1, w, t, s + i - n]
         let mut insns = vec![
             Insn::PushInt(0),
             Insn::SetLocal(0, 0),
@@ -27147,7 +27185,12 @@ mod tests {
             Insn::BinOp(BinOp::Add),
             Insn::GetLocal(5, 0),
             Insn::GetLocal(6, 0),
-            Insn::NewArray(6),
+            Insn::GetLocal(0, 0),
+            Insn::GetLocal(1, 0),
+            Insn::BinOp(BinOp::Add),
+            Insn::GetLocal(4, 0),
+            Insn::BinOp(BinOp::Sub),
+            Insn::NewArray(7),
             Insn::Leave,
         ];
         fuse(&mut insns);
@@ -27159,7 +27202,7 @@ mod tests {
         );
         assert_eq!(
             count(|insn| matches!(insn, Insn::GetLocalGetLocalBinOp { .. })),
-            2,
+            3,
             "{insns:?}"
         );
         assert_eq!(
@@ -27170,6 +27213,11 @@ mod tests {
         assert_eq!(
             count(|insn| matches!(insn, Insn::PushSelfGetLocal { .. })),
             1,
+            "{insns:?}"
+        );
+        assert_eq!(
+            count(|insn| matches!(insn, Insn::GetLocalBinOp { .. })),
+            4,
             "{insns:?}"
         );
         let program = Iseq {
@@ -27196,7 +27244,7 @@ mod tests {
                 variable_call: false,
                 kwsplat: false,
             }],
-            max_stack: 6,
+            max_stack: 8,
             ..Iseq::default()
         };
 
@@ -27218,7 +27266,7 @@ mod tests {
         assert_eq!(
             inspect(&mut scope, value),
             format!(
-                "[{sum}, 2.5, {rounds}, 4611686018427387904, 2.25, {}]",
+                "[{sum}, 2.5, {rounds}, 4611686018427387904, 2.25, {}, {sum}]",
                 3 * rounds
             )
         );

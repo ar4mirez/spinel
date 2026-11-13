@@ -2952,3 +2952,8 @@ class F7u; def initialize = (@v = 0.5); def s; t = 0.0; i = 0; while i < 10; t =
 # argument; a frame whose locals a block captured pushes self alone.
 class A7v; def a(x) = b(x); def b(y) = [y, y * 2]; def c(x); g = -> { x += 1 }; r = b(x); g.call; [r, b(x)]; end; end; [A7v.new.a(3), A7v.new.c(3), A7v.new.a("s")]  #=> [[3, 6], [[3, 6], [4, 8]], ["s", "ss"]]
 def b7v(t) = t.nil? ? 0 : 1 + b7v(t[0]) + b7v(t[1]); def m7v(d) = d == 0 ? [nil, nil] : [m7v(d - 1), m7v(d - 1)]; GC.stress = true; r = b7v(m7v(3)); GC.stress = false; r  #=> 15
+# A local as the right operand of what is on the stack is one instruction where
+# the two are fixnums, or flonums in a body that does Float arithmetic.
+def a7w(a, b, c) = [(a + b) * c, (a + b) - c, (a + b) < c, (a * 1) / c]; [a7w(1, 2, 3), a7w(1.5, 2.5, 2.0), a7w(4611686018427387903, 0, 2), a7w(2, 3, 4.0)]  #=> [[9, 0, false, 0], [8.0, 2.0, false, 0.75], [9223372036854775806, 4611686018427387901, false, 2305843009213693951], [20.0, 1.0, false, 0.5]]
+def b7w(a, b, c) = (a + b) + c; [b7w("x", "y", "z"), b7w([1], [2], [3]), (b7w(nil, 1, 2) rescue $!.class)]  #=> ["xyz", [1, 2, 3], NoMethodError]
+def c7w(a, b) = (a + 0) * b; r = [c7w(2, 3)]; class Integer; alias_method :t7w, :*; def *(o) = :times; end; r << c7w(2, 3); class Integer; alias_method :*, :t7w; remove_method :t7w; end; r << c7w(2, 3)  #=> [6, :times, 6]
