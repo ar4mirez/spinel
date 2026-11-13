@@ -500,6 +500,64 @@ pub enum Insn {
     /// parked. A parked value is pushed and execution falls through; a parked
     /// unwind resumes.
     LeaveEnsure,
+
+    // -- superinstructions -------------------------------------------------
+    //
+    // A superinstruction is a run of ordinary instructions answered in one
+    // dispatch, written by [`fuse`] once a body is compiled. Its name is the
+    // instructions it stands for, in order, and its fields are theirs. It
+    // replaces only the first of them: the rest stay where they were, so no
+    // `pc` moves, a jump into the middle of the run lands on a real
+    // instruction, and the run's own instructions are what executes when the
+    // superinstruction cannot answer, which it does by running only the first
+    // of them, [`Insn::head`], and going on at the next `pc`. See
+    // `docs/engine.md`.
+    /// `GetLocal(slot, 0); PushInt(int); BinOp(op)`: a local of this frame and
+    /// a small integer under an operator, `i + 1` or `n < 2`. Answered in the
+    /// light loops, for a frame whose locals are on its stack, when the local
+    /// is a fixnum and the operator answers two fixnums there; the `SetLocal`
+    /// or conditional jump right after it runs with it, as after a `BinOp`.
+    GetLocalPushIntBinOp {
+        slot: u16,
+        int: i64,
+        op: BinOp,
+    },
+    /// `GetLocal(left, 0); GetLocal(right, 0); BinOp(op)`: two locals of this
+    /// frame under an operator, `i < n` or `dx * dx`. Answered in the light
+    /// loops, for a frame whose locals are on its stack, when they are two
+    /// fixnums, or two flonums in a body whose stretches answer Float
+    /// arithmetic, under an operator the program has not redefined, as the
+    /// light loop answers a `BinOp`; the `SetLocal` or conditional jump after
+    /// it runs with it, as after a `BinOp`.
+    GetLocalGetLocalBinOp {
+        left: u16,
+        right: u16,
+        op: BinOp,
+    },
+    /// `GetLocal(slot, 0); GetIvar(name, site); BinOp(op)`: a local and an
+    /// instance variable of `self` under an operator, `sum + @v`. Answered
+    /// as [`Insn::GetLocalGetLocalBinOp`] is, when the read is one the site's
+    /// cache answers. The name is not carried: a read the cache does not
+    /// answer declines, and the `GetIvar` after it, which has it, runs.
+    GetLocalGetIvarBinOp {
+        slot: u16,
+        site: u32,
+        op: BinOp,
+    },
+    /// `PushSelf; GetLocal(slot, 0)`: the receiver and an argument of a call
+    /// on `self`, `check(tree)`. Not written where its `GetLocal` starts a
+    /// longer run, so that `fib(n - 1)` keeps the one that runs `n - 1`.
+    PushSelfGetLocal {
+        slot: u16,
+    },
+    /// `GetLocal(slot, 0); BinOp(op)`: a local as the right operand of what
+    /// is on the stack, `dx * mag`. Answered as [`Insn::GetLocalGetLocalBinOp`]
+    /// is, with the left operand read from the stack. One also stands inside
+    /// each run of that one, at its second `GetLocal`.
+    GetLocalBinOp {
+        slot: u16,
+        op: BinOp,
+    },
 }
 
 /// The binary operators the compiler emits directly.
@@ -568,6 +626,92 @@ impl BinOp {
             ">=" => BinOp::Ge,
             _ => return None,
         })
+    }
+
+    /// Whether the light loop answers this operator for two fixnums, with a
+    /// fixnum or a boolean: everything but `*`, `/` and `%`, which `run`
+    /// answers. [`fuse`] writes a [`Insn::GetLocalPushIntBinOp`] only for
+    /// these, since it could answer no other.
+    #[must_use]
+    pub const fn light_on_fixnums(self) -> bool {
+        !matches!(self, BinOp::Mul | BinOp::Div | BinOp::Mod)
+    }
+
+    /// Whether the light loop answers this operator for two fixnums or for
+    /// two flonums: everything but `%`, whose zero divisor raises.
+    /// [`fuse`] writes a [`Insn::GetLocalGetLocalBinOp`] only for these.
+    #[must_use]
+    pub const fn light(self) -> bool {
+        !matches!(self, BinOp::Mod)
+    }
+}
+
+impl Insn {
+    /// The first instruction a superinstruction stands for, which is all it
+    /// runs when it cannot answer its whole run; any other instruction is its
+    /// own head. A tool reading [`Iseq::insns`] that does not know a
+    /// superinstruction reads it as this, and finds the rest of its run after
+    /// it, where the compiler wrote them.
+    #[must_use]
+    pub const fn head(self) -> Insn {
+        match self {
+            Insn::GetLocalPushIntBinOp { slot, .. } => Insn::GetLocal(slot, 0),
+            Insn::GetLocalGetLocalBinOp { left, .. } => Insn::GetLocal(left, 0),
+            Insn::GetLocalGetIvarBinOp { slot, .. } => Insn::GetLocal(slot, 0),
+            Insn::PushSelfGetLocal { .. } => Insn::PushSelf,
+            Insn::GetLocalBinOp { slot, .. } => Insn::GetLocal(slot, 0),
+            other => other,
+        }
+    }
+}
+
+/// Write superinstructions over `insns`, a finished body (#746, #750): an
+/// instruction that starts a run a superinstruction stands for is replaced by
+/// it, and the rest of the run is left in place. Nothing moves, so the jumps,
+/// the catch table, the line table and the inline-cache sites stay as the
+/// compiler wrote them.
+///
+/// Each run is matched against the instructions as the compiler wrote them,
+/// which the replacements so far have not touched, since only an
+/// instruction already passed is replaced. So runs may overlap: the second
+/// instruction of one may start another, which is where a jump into the
+/// middle lands, and what runs when the first declines.
+pub fn fuse(insns: &mut [Insn]) {
+    for at in 0..insns.len() {
+        if let Some(fused) = superinstruction(&insns[at..]) {
+            insns[at] = fused;
+        }
+    }
+}
+
+/// The superinstruction for the run `run` starts with, if there is one.
+fn superinstruction(run: &[Insn]) -> Option<Insn> {
+    match *run {
+        [
+            Insn::GetLocal(slot, 0),
+            Insn::PushInt(int),
+            Insn::BinOp(op),
+            ..,
+        ] if op.light_on_fixnums() => Some(Insn::GetLocalPushIntBinOp { slot, int, op }),
+        [
+            Insn::GetLocal(left, 0),
+            Insn::GetLocal(right, 0),
+            Insn::BinOp(op),
+            ..,
+        ] if op.light() => Some(Insn::GetLocalGetLocalBinOp { left, right, op }),
+        [
+            Insn::GetLocal(slot, 0),
+            Insn::GetIvar(_, site),
+            Insn::BinOp(op),
+            ..,
+        ] if op.light() => Some(Insn::GetLocalGetIvarBinOp { slot, site, op }),
+        [Insn::PushSelf, Insn::GetLocal(slot, 0), ..] if superinstruction(&run[1..]).is_none() => {
+            Some(Insn::PushSelfGetLocal { slot })
+        }
+        [Insn::GetLocal(slot, 0), Insn::BinOp(op), ..] if op.light() => {
+            Some(Insn::GetLocalBinOp { slot, op })
+        }
+        _ => None,
     }
 }
 
@@ -1145,6 +1289,234 @@ mod tests {
         ] {
             assert_eq!(BinOp::from_name(op.name()), Some(op));
         }
+    }
+
+    /// `fuse` replaces the first instruction of each run it knows and nothing
+    /// else, so reading every instruction as its head gives back the body
+    /// the compiler wrote, jumps and all.
+    #[test]
+    fn fusing_replaces_only_the_first_instruction_of_a_run() {
+        let written = vec![
+            Insn::GetLocal(0, 0),
+            Insn::PushInt(1),
+            Insn::BinOp(BinOp::Add),
+            Insn::SetLocal(0, 0),
+            // An outer local, `*` and a jump between are not fused.
+            Insn::GetLocal(1, 1),
+            Insn::PushInt(2),
+            Insn::BinOp(BinOp::Lt),
+            Insn::GetLocal(0, 0),
+            Insn::PushInt(2),
+            Insn::BinOp(BinOp::Mul),
+            Insn::GetLocal(0, 0),
+            Insn::Jump(1),
+            Insn::PushInt(3),
+            Insn::BinOp(BinOp::Sub),
+            // Two runs, the second starting inside the first.
+            Insn::GetLocal(2, 0),
+            Insn::GetLocal(3, 0),
+            Insn::PushInt(-4),
+            Insn::BinOp(BinOp::Ge),
+            Insn::JumpUnless(-19),
+            Insn::Leave,
+        ];
+        let mut insns = written.clone();
+        fuse(&mut insns);
+        let fused: Vec<usize> = (0..insns.len())
+            .filter(|&at| insns[at] != written[at])
+            .collect();
+        assert_eq!(fused, vec![0, 15]);
+        assert_eq!(
+            insns[0],
+            Insn::GetLocalPushIntBinOp {
+                slot: 0,
+                int: 1,
+                op: BinOp::Add
+            }
+        );
+        assert_eq!(
+            insns[15],
+            Insn::GetLocalPushIntBinOp {
+                slot: 3,
+                int: -4,
+                op: BinOp::Ge
+            }
+        );
+        let heads: Vec<Insn> = insns.iter().map(|insn| insn.head()).collect();
+        assert_eq!(heads, written);
+    }
+
+    /// The operators [`Insn::GetLocalPushIntBinOp`] is written for are
+    /// those the light loop answers for two fixnums.
+    #[test]
+    fn only_an_operator_the_light_loop_answers_on_fixnums_is_fused() {
+        for (op, fused) in [
+            (BinOp::Add, true),
+            (BinOp::Sub, true),
+            (BinOp::Mul, false),
+            (BinOp::Div, false),
+            (BinOp::Mod, false),
+            (BinOp::Eq, true),
+            (BinOp::Neq, true),
+            (BinOp::Lt, true),
+            (BinOp::Le, true),
+            (BinOp::Gt, true),
+            (BinOp::Ge, true),
+        ] {
+            let mut insns = vec![
+                Insn::GetLocal(0, 0),
+                Insn::PushInt(7),
+                Insn::BinOp(op),
+                Insn::Leave,
+            ];
+            fuse(&mut insns);
+            assert_eq!(insns[0] != Insn::GetLocal(0, 0), fused, "{op:?}");
+        }
+    }
+
+    /// Two locals of this frame under any operator but `%` are one
+    /// [`Insn::GetLocalGetLocalBinOp`]; an outer local is not.
+    #[test]
+    fn two_locals_and_an_operator_fuse_unless_the_operator_is_modulo() {
+        for (op, fused) in [
+            (BinOp::Add, true),
+            (BinOp::Mul, true),
+            (BinOp::Div, true),
+            (BinOp::Mod, false),
+            (BinOp::Lt, true),
+            (BinOp::Neq, true),
+        ] {
+            let mut insns = vec![
+                Insn::GetLocal(0, 0),
+                Insn::GetLocal(1, 0),
+                Insn::BinOp(op),
+                Insn::Leave,
+            ];
+            fuse(&mut insns);
+            let expected = if fused {
+                Insn::GetLocalGetLocalBinOp {
+                    left: 0,
+                    right: 1,
+                    op,
+                }
+            } else {
+                Insn::GetLocal(0, 0)
+            };
+            assert_eq!(insns[0], expected, "{op:?}");
+            assert_eq!(insns[0].head(), Insn::GetLocal(0, 0));
+        }
+        let mut outer = vec![
+            Insn::GetLocal(0, 0),
+            Insn::GetLocal(1, 1),
+            Insn::BinOp(BinOp::Add),
+            Insn::Leave,
+        ];
+        let written = outer.clone();
+        fuse(&mut outer);
+        assert_eq!(outer, written);
+    }
+
+    /// A local and an instance variable under an operator are one
+    /// [`Insn::GetLocalGetIvarBinOp`], carrying the read's cache site.
+    #[test]
+    fn a_local_and_an_instance_variable_fuse_with_the_reads_site() {
+        let mut insns = vec![
+            Insn::GetLocal(2, 0),
+            Insn::GetIvar(5, 9),
+            Insn::BinOp(BinOp::Add),
+            Insn::SetLocal(2, 0),
+            Insn::GetLocal(2, 0),
+            Insn::GetIvar(5, 10),
+            Insn::BinOp(BinOp::Mod),
+            Insn::Leave,
+        ];
+        let written = insns.clone();
+        fuse(&mut insns);
+        assert_eq!(
+            insns[0],
+            Insn::GetLocalGetIvarBinOp {
+                slot: 2,
+                site: 9,
+                op: BinOp::Add
+            }
+        );
+        assert_eq!(insns[1..], written[1..], "`%` is not fused");
+        assert_eq!(insns[0].head(), written[0]);
+    }
+
+    /// `PushSelf; GetLocal` is one [`Insn::PushSelfGetLocal`], unless its
+    /// `GetLocal` starts a longer run: fib's `fib(n - 1)` keeps the
+    /// superinstruction that runs `n - 1`, and pushes `self` alone.
+    #[test]
+    fn self_and_a_local_fuse_unless_the_local_starts_a_longer_run() {
+        let mut call = vec![
+            Insn::PushSelf,
+            Insn::GetLocal(1, 0),
+            Insn::Send(0),
+            Insn::Leave,
+        ];
+        fuse(&mut call);
+        assert_eq!(call[0], Insn::PushSelfGetLocal { slot: 1 });
+        assert_eq!(call[0].head(), Insn::PushSelf);
+        assert_eq!(call[1], Insn::GetLocal(1, 0));
+
+        let mut fib = vec![
+            Insn::PushSelf,
+            Insn::GetLocal(0, 0),
+            Insn::PushInt(1),
+            Insn::BinOp(BinOp::Sub),
+            Insn::Send(0),
+            Insn::Leave,
+        ];
+        fuse(&mut fib);
+        assert_eq!(fib[0], Insn::PushSelf);
+        assert_eq!(
+            fib[1],
+            Insn::GetLocalPushIntBinOp {
+                slot: 0,
+                int: 1,
+                op: BinOp::Sub
+            }
+        );
+    }
+
+    /// A local as the right operand of what is on the stack is one
+    /// [`Insn::GetLocalBinOp`], and one stands inside every run of two
+    /// locals and an operator, where a jump or a decline lands.
+    #[test]
+    fn a_local_and_an_operator_fuse_inside_a_longer_run_too() {
+        let mut insns = vec![
+            Insn::GetLocal(0, 0),
+            Insn::GetLocal(1, 0),
+            Insn::BinOp(BinOp::Add),
+            Insn::GetLocal(2, 0),
+            Insn::BinOp(BinOp::Mul),
+            Insn::GetLocal(3, 0),
+            Insn::BinOp(BinOp::Mod),
+            Insn::Leave,
+        ];
+        fuse(&mut insns);
+        assert_eq!(
+            insns[..6],
+            [
+                Insn::GetLocalGetLocalBinOp {
+                    left: 0,
+                    right: 1,
+                    op: BinOp::Add
+                },
+                Insn::GetLocalBinOp {
+                    slot: 1,
+                    op: BinOp::Add
+                },
+                Insn::BinOp(BinOp::Add),
+                Insn::GetLocalBinOp {
+                    slot: 2,
+                    op: BinOp::Mul
+                },
+                Insn::BinOp(BinOp::Mul),
+                Insn::GetLocal(3, 0),
+            ]
+        );
     }
 
     #[test]

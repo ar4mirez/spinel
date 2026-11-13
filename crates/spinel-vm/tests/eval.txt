@@ -2915,3 +2915,45 @@ def s746(x) = Math.sqrt(x) + Math.sqrt(x * 4.0); def t746(a) = (b = a.map { |x| 
 def a746(a, i) = a[i]; a = [1, 2, 3, 4]; a.shift; [a746(a, 0), a746(a, -1), a746(a, 2), a746(a, 3), a746(a, -4), a746([], 0)]  #=> [2, 4, 4, nil, nil, nil]
 # A call whose receiver is its caller's own self, and one whose is not.
 class R746; def initialize(n) = (@n = n); def f(k) = k == 0 ? "e" + @n.to_s : f(k - 1); def g(o) = o.f(2); end; a = R746.new(1); b = R746.new(2); GC.stress = true; r = [a.f(5), a.g(b), b.g(a)]; GC.stress = false; r  #=> ["e1", "e2", "e1"]
+
+# ------------------------------------------------- superinstructions (#746, #750)
+# A local read, a small integer and an operator are one instruction where the
+# local is a fixnum and the operator its own; anything else runs the three as
+# written, from the read on.
+def a7s(x) = [x + 1, x - 1, x < 2, x <= 2, x > 2, x >= 2, x == 2, x != 2, x * 3, x / 2, x % 2]; [a7s(2), a7s(-5), a7s(0)]  #=> [[3, 1, false, true, false, true, true, false, 6, 1, 0], [-4, -6, true, true, false, false, false, true, -15, -3, 1], [1, -1, true, true, false, false, false, true, 0, 0, 0]]
+def b7s(x) = [x + 1, x - 1]; o = Object.new; def o.+(v) = [:plus, v]; def o.-(v) = [:minus, v]; [b7s(4611686018427387903), b7s(-4611686018427387904), b7s(2**70), b7s(1.5), b7s(o)]  #=> [[4611686018427387904, 4611686018427387902], [-4611686018427387903, -4611686018427387905], [1180591620717411303425, 1180591620717411303423], [2.5, 0.5], [[:plus, 1], [:minus, 1]]]
+def c7s(x) = (x + 1 rescue $!.class); [c7s(nil), c7s("a"), c7s(:s), c7s(2)]  #=> [NoMethodError, TypeError, NoMethodError, 3]
+class Integer; alias_method :p7s, :+; alias_method :l7s, :<; def +(o) = :plus; def <(o) = :less; end; def d7s(x) = [x + 1, x < 1]; r = d7s(1); class Integer; alias_method :+, :p7s; alias_method :<, :l7s; remove_method :p7s; remove_method :l7s; end; [r, d7s(1)]  #=> [[:plus, :less], [2, false]]
+module R7s; refine(Integer) { def +(o) = :refined }; end; class U7s; def plain(a) = a + 1; using R7s; def ref(a) = a + 1; end; u = U7s.new; [u.plain(1), u.ref(1), u.plain(1)]  #=> [2, :refined, 2]
+def e7s(x); g = -> { x += 10 }; a = x + 1; g.call; [a, x + 1, x < 20]; end; e7s(2)  #=> [3, 13, true]
+def f7s(c, x, y) = (c ? x : y) + 1; [f7s(true, 1, 10), f7s(false, 1, 10), f7s(true, 1.5, 10)]  #=> [2, 11, 2.5]
+def g7s(n); s = []; i = 0; while i < n; s << "x" + i.to_s if i > 2; i += 1; end; s; end; GC.stress = true; r = g7s(6); GC.stress = false; r  #=> ["x3", "x4", "x5"]
+def h7s(n) = n < 2 ? n : h7s(n - 1) + h7s(n - 2); [h7s(15), [1, 2, 3].map { |v| v + 1 }, [1, 2, 3].select { |v| v > 1 }]  #=> [610, [2, 3, 4], [2, 3]]
+# Two locals and an operator are one instruction where they are two fixnums,
+# or two flonums in a body that does Float arithmetic, under an operator of
+# their own; anything else runs the three as written.
+def a7t(x, y) = [x + y, x - y, x * y, x / y, x % y, x < y, x <= y, x > y, x >= y, x == y, x != y]; [a7t(7, 2), a7t(-7, 2), a7t(7.5, 2.5), a7t(7, 2.5), a7t(7.5, 2)]  #=> [[9, 5, 14, 3, 1, false, false, true, true, false, true], [-5, -9, -14, -4, 1, true, true, false, false, false, true], [10.0, 5.0, 18.75, 3.0, 0.0, false, false, true, true, false, true], [9.5, 4.5, 17.5, 2.8, 2.0, false, false, true, true, false, true], [9.5, 5.5, 15.0, 3.75, 1.5, false, false, true, true, false, true]]
+def b7t(x, y) = x + y; [b7t(4611686018427387903, 1), b7t(2**64, 1), b7t(1.0e308, 1.0e308), b7t(0.1, 0.2), b7t("a", "b"), b7t([1], [2])]  #=> [4611686018427387904, 18446744073709551617, Infinity, 0.30000000000000004, "ab", [1, 2]]
+def c7t(x, y) = (x * y rescue $!.class); [c7t(nil, 1), c7t(1, nil), c7t(3, 4), c7t(1.5, 2.0)]  #=> [NoMethodError, TypeError, 12, 3.0]
+def d7t; s = 0.0; x = 1.5; i = 0; n = 100; while i < n; s = s + x * x; i += 1; end; s; end; d7t  #=> 225.0
+def e7t(x, y) = x * y; r = [e7t(1.5, 2.0), e7t(1.5, 2.0)]; class Float; alias_method :m7t, :*; def *(o) = :times; end; r << e7t(1.5, 2.0); class Float; alias_method :*, :m7t; remove_method :m7t; end; r << e7t(1.5, 2.0)  #=> [3.0, 3.0, :times, 3.0]
+def f7t(x, y); g = -> { x = 10.5 }; a = x * y; g.call; [a, x * y, x < y]; end; f7t(2.0, 3.0)  #=> [6.0, 31.5, false]
+def g7t(c, x, y) = (c ? x : y) * y; [g7t(true, 2, 3), g7t(false, 2, 3), g7t(true, 2.5, 2.0)]  #=> [6, 9, 5.0]
+# A local and an instance variable under an operator are one instruction where
+# the read is one the site's cache answers; anything else runs the three as
+# written.
+class A7u; def initialize(v) = (@v = v); def s(x) = [x + @v, x - @v, x * @v, x < @v, x == @v]; end; [A7u.new(3).s(5), A7u.new(2.5).s(1.5), A7u.new(3).s(2.5), (A7u.new(nil).s(1) rescue $!.class)]  #=> [[8, 2, 15, false, false], [4.0, -1.0, 3.75, true, false], [5.5, -0.5, 7.5, true, false], TypeError]
+class B7u; def initialize(f) = (f ? (@a = 1; @v = 10) : (@v = 20)); def s(x) = x + @v; end; [B7u.new(true).s(1), B7u.new(false).s(1), B7u.new(true).s(1), B7u.new(false).s(1)]  #=> [11, 21, 11, 21]
+class C7u; def s(x) = (x + @v rescue $!.class); end; c = C7u.new; r = [c.s(1)]; c.instance_variable_set(:@v, 4); r << c.s(1) << c.freeze.s(2)  #=> [TypeError, 5, 6]
+class D7u; def initialize = (@v = 2); def s(x) = x + @v; end; d = D7u.new; r = [d.s(1)]; class Integer; alias_method :p7u, :+; def +(o) = :plus; end; r << d.s(1); class Integer; alias_method :+, :p7u; remove_method :p7u; end; r << d.s(1)  #=> [3, :plus, 3]
+class E7u < Array; def s(x) = x + @v; end; e = E7u.new; e.instance_variable_set(:@v, 7); [e.s(1), e.s(2)]  #=> [8, 9]
+class F7u; def initialize = (@v = 0.5); def s; t = 0.0; i = 0; while i < 10; t = t + @v; i += 1; end; t; end; end; F7u.new.s  #=> 5.0
+# The receiver and a local are one instruction for a call on self with a local
+# argument; a frame whose locals a block captured pushes self alone.
+class A7v; def a(x) = b(x); def b(y) = [y, y * 2]; def c(x); g = -> { x += 1 }; r = b(x); g.call; [r, b(x)]; end; end; [A7v.new.a(3), A7v.new.c(3), A7v.new.a("s")]  #=> [[3, 6], [[3, 6], [4, 8]], ["s", "ss"]]
+def b7v(t) = t.nil? ? 0 : 1 + b7v(t[0]) + b7v(t[1]); def m7v(d) = d == 0 ? [nil, nil] : [m7v(d - 1), m7v(d - 1)]; GC.stress = true; r = b7v(m7v(3)); GC.stress = false; r  #=> 15
+# A local as the right operand of what is on the stack is one instruction where
+# the two are fixnums, or flonums in a body that does Float arithmetic.
+def a7w(a, b, c) = [(a + b) * c, (a + b) - c, (a + b) < c, (a * 1) / c]; [a7w(1, 2, 3), a7w(1.5, 2.5, 2.0), a7w(4611686018427387903, 0, 2), a7w(2, 3, 4.0)]  #=> [[9, 0, false, 0], [8.0, 2.0, false, 0.75], [9223372036854775806, 4611686018427387901, false, 2305843009213693951], [20.0, 1.0, false, 0.5]]
+def b7w(a, b, c) = (a + b) + c; [b7w("x", "y", "z"), b7w([1], [2], [3]), (b7w(nil, 1, 2) rescue $!.class)]  #=> ["xyz", [1, 2, 3], NoMethodError]
+def c7w(a, b) = (a + 0) * b; r = [c7w(2, 3)]; class Integer; alias_method :t7w, :*; def *(o) = :times; end; r << c7w(2, 3); class Integer; alias_method :*, :t7w; remove_method :t7w; end; r << c7w(2, 3)  #=> [6, :times, 6]

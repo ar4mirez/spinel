@@ -2808,7 +2808,7 @@ fn run<'h>(
                 insn,
                 &mut cur_pc,
                 &mut Lazy::default(),
-                budget.saturating_sub(1) > limit,
+                budget.saturating_sub(STEP_MOST - 1) > limit,
                 // Exact here: the top of the loop has just compared.
                 false,
             );
@@ -3306,7 +3306,16 @@ fn run<'h>(
 
                     // Answered by the loop above, which never falls through
                     // for either.
-                    Insn::GetLocal(..) | Insn::SetLocal(..) => {
+                    // So does a superinstruction: when it declines its run, it
+                    // runs its first instruction, a local read or `PushSelf`,
+                    // which the loop answers too.
+                    Insn::GetLocal(..)
+                    | Insn::SetLocal(..)
+                    | Insn::GetLocalPushIntBinOp { .. }
+                    | Insn::GetLocalGetLocalBinOp { .. }
+                    | Insn::GetLocalGetIvarBinOp { .. }
+                    | Insn::PushSelfGetLocal { .. }
+                    | Insn::GetLocalBinOp { .. } => {
                         unreachable!("the loop answers local access itself")
                     }
 
@@ -17996,21 +18005,27 @@ fn native_ops(scope: &mut HandleScope<'_>, frame: &Call, which: usize) -> u32 {
     native
 }
 
+/// The most instructions one [`light_step`] runs: a superinstruction's three
+/// and the `SetLocal` or conditional jump after them.
+const STEP_MOST: u64 = 4;
+
 /// Run the instruction `code[*pc - 1]`, `insn`, if it is one of those [`run`]
 /// answers before its closure: those that neither allocate, nor root, nor
 /// change the frames. Answers how many instructions ran — a fixnum `BinOp`
 /// also runs a `SetLocal` or a conditional jump right after it, which is what
-/// its answer is for most often — and 0, with nothing changed, for anything
-/// else: another instruction, or one of these on operands it does not take,
-/// such as a `+` that overflows.
+/// its answer is for most often, and a superinstruction runs the run of them
+/// it stands for, at most [`STEP_MOST`] — and 0, with nothing changed, for
+/// anything else: another instruction, or one of these on operands it does
+/// not take, such as a `+` that overflows.
 ///
 /// `LIGHT` is whether the loop skipped its rooting of what is fresh on the
 /// stack for this one, as [`light_stretch`] does. A value is stored into a local
 /// on the stack only once it is rooted, which a light instruction cannot know
 /// of a heap value, so a light `SetLocal` of one is not taken. `lazy` holds
 /// what a run works out about `frame` once, at the first instruction that
-/// needs it. `pair` is whether the budget has room for a second instruction,
-/// and `spent` whether it has reached [`light_stretch`]'s limit.
+/// needs it. `pair` is whether the budget has room for more than one
+/// instruction — [`STEP_MOST`] of them, where [`run`] counts exactly — and
+/// `spent` whether it has reached [`light_stretch`]'s limit.
 #[inline(always)]
 #[expect(clippy::too_many_arguments, reason = "the loop's own registers")]
 fn light_step<const LIGHT: bool, const MORE: bool>(
@@ -18214,6 +18229,138 @@ fn light_step<const LIGHT: bool, const MORE: bool>(
                     return 2;
                 }
                 _ => stack.push(value),
+            }
+        }
+        // `GetLocal; PushInt; BinOp` in one dispatch (#746): the local and the
+        // integer under the operator, answered as the three would answer
+        // them, and the `SetLocal` or conditional jump after them run as a
+        // `BinOp`'s is. What it does not answer — a local that is not a
+        // fixnum, an operator the program redefined, an answer that
+        // overflows, or a budget with room for one instruction — is its
+        // `GetLocal` alone, and the `PushInt` and `BinOp` after it, still
+        // where the compiler wrote them, run as they always did.
+        //
+        // Only in the stretches, the light loops, and only for a frame whose
+        // locals are on the stack: `run`'s own step, which runs the first
+        // instruction of each stretch, and a frame whose locals a capture
+        // moved to a heap environment run the `GetLocal` alone. Measured in
+        // instructions retired, the run in `run`'s code cost every
+        // instruction it dispatches, and an environment read in the run cost
+        // the call loop's registers, `fib` 2% (#746).
+        Insn::GetLocalPushIntBinOp { slot, int, op } => {
+            if !frame.locals_on_stack {
+                stack.push(env_local(scope, frame, 0, slot));
+                return 1;
+            }
+            let local = stack.get(frame.floor + slot as usize);
+            if LIGHT && pair {
+                let ops = *lazy.ops.get_or_insert_with(|| native_ops(scope, frame, 0));
+                if ops & (1 << op as usize) != 0
+                    && let Some(value) =
+                        Value::fixnum(int).and_then(|right| fixnum_binop(op, local, right))
+                {
+                    *pc += 2;
+                    return 2 + pair_after(scope, stack, frame, code, pc, value, pair, spent);
+                }
+            }
+            stack.push(local);
+        }
+        // `GetLocal; GetLocal; BinOp` in one dispatch (#750): two locals
+        // under the operator, answered as the three would answer them — two
+        // fixnums, or in `more_stretch` two flonums — and the `SetLocal` or
+        // conditional jump after them run as a `BinOp`'s is. What it does not
+        // answer is its first `GetLocal` alone, as above, and so are `run`'s
+        // own step and a frame whose locals are in a heap environment.
+        //
+        // `GetLocal; GetIvar; BinOp` is the same with an instance variable of
+        // `self` for the second operand, read when the site's cache answers
+        // it, through the safe read `run` makes rather than the view a light
+        // `GetIvar` takes; a read it does not answer declines (#746).
+        Insn::GetLocalGetLocalBinOp { left: slot, op, .. }
+        | Insn::GetLocalGetIvarBinOp { slot, op, .. } => {
+            if !frame.locals_on_stack {
+                stack.push(env_local(scope, frame, 0, slot));
+                return 1;
+            }
+            let first = stack.get(frame.floor + slot as usize);
+            let second = match insn {
+                _ if !(LIGHT && pair) => None,
+                Insn::GetLocalGetLocalBinOp { right, .. } => {
+                    Some(stack.get(frame.floor + right as usize))
+                }
+                Insn::GetLocalGetIvarBinOp { site, .. } => {
+                    scope.cached_ivar(frame.receiver, frame.cache_base + site, SLOT_IVARS)
+                }
+                _ => None,
+            };
+            if let Some(second) = second {
+                let ops = *lazy.ops.get_or_insert_with(|| native_ops(scope, frame, 0));
+                let value = if ops & (1 << op as usize) == 0 {
+                    None
+                } else if let Some(value) = fixnum_binop(op, first, second) {
+                    Some(value)
+                } else if MORE {
+                    let floats = *lazy
+                        .float_ops
+                        .get_or_insert_with(|| native_ops(scope, frame, 1));
+                    flonum_binop(op, first, second).filter(|_| floats & (1 << op as usize) != 0)
+                } else {
+                    None
+                };
+                if let Some(value) = value {
+                    *pc += 2;
+                    return 2 + pair_after(scope, stack, frame, code, pc, value, pair, spent);
+                }
+            }
+            stack.push(first);
+        }
+        // `PushSelf; GetLocal` in one dispatch: the receiver and a local of a
+        // frame whose locals are on its stack, in a stretch. Otherwise its
+        // `PushSelf` alone, as above.
+        // `GetLocal; BinOp` in one dispatch (#750): what is on the stack
+        // under the operator with a local, `dx * mag`, answered as the
+        // `GetLocalGetLocalBinOp` above answers its two locals. One also
+        // stands inside each run of two locals and an operator, where a jump
+        // into the run or that one's decline lands. What it does not answer
+        // is its `GetLocal` alone.
+        Insn::GetLocalBinOp { slot, op } => {
+            if !frame.locals_on_stack {
+                stack.push(env_local(scope, frame, 0, slot));
+                return 1;
+            }
+            let local = stack.get(frame.floor + slot as usize);
+            if LIGHT
+                && pair
+                && let Some(left) = stack.last()
+            {
+                let ops = *lazy.ops.get_or_insert_with(|| native_ops(scope, frame, 0));
+                let value = if ops & (1 << op as usize) == 0 {
+                    None
+                } else if let Some(value) = fixnum_binop(op, left, local) {
+                    Some(value)
+                } else if MORE {
+                    let floats = *lazy
+                        .float_ops
+                        .get_or_insert_with(|| native_ops(scope, frame, 1));
+                    flonum_binop(op, left, local).filter(|_| floats & (1 << op as usize) != 0)
+                } else {
+                    None
+                };
+                if let Some(value) = value {
+                    stack.pop();
+                    *pc += 1;
+                    return 1 + pair_after(scope, stack, frame, code, pc, value, pair, spent);
+                }
+            }
+            stack.push(local);
+        }
+        Insn::PushSelfGetLocal { slot } => {
+            stack.push(frame.receiver);
+            if LIGHT && pair && frame.locals_on_stack {
+                let local = stack.get(frame.floor + slot as usize);
+                stack.push(local);
+                *pc += 1;
+                return 2;
             }
         }
         _ => return 0,
@@ -26921,5 +27068,207 @@ mod tests {
         let value = eval_in(&mut scope, &mut frame, &program).expect("should run");
         scope.set_gc_stress(false);
         assert_eq!(inspect(&mut scope, value), "[[3.0, :sym], :k]");
+    }
+
+    /// What `fuse` writes a `GetLocalPushIntBinOp` for is what the light
+    /// loop answers for two fixnums: an operator it declines would make the
+    /// superinstruction decline every time.
+    #[test]
+    fn the_operators_fused_with_an_integer_are_those_fixnums_answer_light() {
+        let (seven, two) = (
+            Value::fixnum(7).expect("a fixnum"),
+            Value::fixnum(2).expect("a fixnum"),
+        );
+        for op in [
+            BinOp::Add,
+            BinOp::Sub,
+            BinOp::Mul,
+            BinOp::Div,
+            BinOp::Mod,
+            BinOp::Eq,
+            BinOp::Neq,
+            BinOp::Lt,
+            BinOp::Le,
+            BinOp::Gt,
+            BinOp::Ge,
+        ] {
+            assert_eq!(
+                fixnum_binop(op, seven, two).is_some(),
+                op.light_on_fixnums(),
+                "{op:?}"
+            );
+        }
+    }
+
+    /// The superinstructions answered in a stretch, in `calls_loop`'s and in
+    /// `more_stretch`'s, for fixnums and for flonums, and declined to their
+    /// first instruction in `run`'s step, for a Float and for an answer that
+    /// overflows to a bignum, which allocates (#746, #750).
+    #[test]
+    fn superinstructions_answer_and_decline_under_miri() {
+        use crate::bytecode::{BlockRef, CallSite, fuse};
+        let rounds: i64 = if cfg!(miri) { 4 } else { 30 };
+        // def f(x) = x < 2 ? x : x - 1
+        let mut body = vec![
+            Insn::GetLocal(0, 0),
+            Insn::PushInt(2),
+            Insn::BinOp(BinOp::Lt),
+            Insn::JumpUnless(2),
+            Insn::GetLocal(0, 0),
+            Insn::Leave,
+            Insn::GetLocal(0, 0),
+            Insn::PushInt(1),
+            Insn::BinOp(BinOp::Sub),
+            Insn::Leave,
+        ];
+        fuse(&mut body);
+        let f = Arc::new(Iseq {
+            name: "f".into(),
+            insns: body,
+            locals: vec!["x".into()],
+            max_stack: 2,
+            params: ParamSpec {
+                required: vec![0],
+                ..ParamSpec::default()
+            },
+            scope_barrier: true,
+            ..Iseq::default()
+        });
+        // s = 0; i = 0; n = rounds; y = 1.5; t = 0; @v = 3
+        // while i < n; s = s + f(i); w = y * y; t = t + @v; i += 1; end
+        // z = 2**62 - 1; [s, y + 1, i, z + 1, w, t, s + i - n]
+        let mut insns = vec![
+            Insn::PushInt(0),
+            Insn::SetLocal(0, 0),
+            Insn::PushInt(0),
+            Insn::SetLocal(1, 0),
+            Insn::PushInt(rounds),
+            Insn::SetLocal(4, 0),
+            Insn::PushFloat(1.5f64.to_bits()),
+            Insn::SetLocal(2, 0),
+            Insn::PushInt(0),
+            Insn::SetLocal(6, 0),
+            Insn::PushInt(3),
+            Insn::SetIvar(1, 1),
+            Insn::GetLocal(1, 0),
+            Insn::GetLocal(4, 0),
+            Insn::BinOp(BinOp::Lt),
+            Insn::JumpUnless(19),
+            Insn::GetLocal(0, 0),
+            Insn::PushSelf,
+            Insn::GetLocal(1, 0),
+            Insn::Send(0),
+            Insn::BinOp(BinOp::Add),
+            Insn::SetLocal(0, 0),
+            Insn::GetLocal(2, 0),
+            Insn::GetLocal(2, 0),
+            Insn::BinOp(BinOp::Mul),
+            Insn::SetLocal(5, 0),
+            Insn::GetLocal(6, 0),
+            Insn::GetIvar(1, 2),
+            Insn::BinOp(BinOp::Add),
+            Insn::SetLocal(6, 0),
+            Insn::GetLocal(1, 0),
+            Insn::PushInt(1),
+            Insn::BinOp(BinOp::Add),
+            Insn::SetLocal(1, 0),
+            Insn::Jump(-23),
+            Insn::PushInt((1 << 62) - 1),
+            Insn::SetLocal(3, 0),
+            Insn::GetLocal(0, 0),
+            Insn::GetLocal(2, 0),
+            Insn::PushInt(1),
+            Insn::BinOp(BinOp::Add),
+            Insn::GetLocal(1, 0),
+            Insn::GetLocal(3, 0),
+            Insn::PushInt(1),
+            Insn::BinOp(BinOp::Add),
+            Insn::GetLocal(5, 0),
+            Insn::GetLocal(6, 0),
+            Insn::GetLocal(0, 0),
+            Insn::GetLocal(1, 0),
+            Insn::BinOp(BinOp::Add),
+            Insn::GetLocal(4, 0),
+            Insn::BinOp(BinOp::Sub),
+            Insn::NewArray(7),
+            Insn::Leave,
+        ];
+        fuse(&mut insns);
+        let count = |pattern: fn(&Insn) -> bool| insns.iter().filter(|insn| pattern(insn)).count();
+        assert_eq!(
+            count(|insn| matches!(insn, Insn::GetLocalPushIntBinOp { .. })),
+            3,
+            "{insns:?}"
+        );
+        assert_eq!(
+            count(|insn| matches!(insn, Insn::GetLocalGetLocalBinOp { .. })),
+            3,
+            "{insns:?}"
+        );
+        assert_eq!(
+            count(|insn| matches!(insn, Insn::GetLocalGetIvarBinOp { .. })),
+            1,
+            "{insns:?}"
+        );
+        assert_eq!(
+            count(|insn| matches!(insn, Insn::PushSelfGetLocal { .. })),
+            1,
+            "{insns:?}"
+        );
+        assert_eq!(
+            count(|insn| matches!(insn, Insn::GetLocalBinOp { .. })),
+            4,
+            "{insns:?}"
+        );
+        let program = Iseq {
+            name: "<test>".into(),
+            insns,
+            symbols: vec!["f".into(), "@v".into()],
+            locals: vec![
+                "s".into(),
+                "i".into(),
+                "y".into(),
+                "z".into(),
+                "n".into(),
+                "w".into(),
+                "t".into(),
+            ],
+            ivar_sites: 2,
+            call_sites: vec![CallSite {
+                name: 0,
+                argc: 1,
+                splats: Vec::new(),
+                keywords: Vec::new(),
+                block: BlockRef::None,
+                implicit_self: true,
+                variable_call: false,
+                kwsplat: false,
+            }],
+            max_stack: 8,
+            ..Iseq::default()
+        };
+
+        let mut heap = Heap::new();
+        let mut frame = Frame::new(7);
+        let mut scope = heap.scope();
+        scope.bootstrap();
+        let name = crate::shared::symbols::intern("f");
+        let body = scope
+            .definitions_mut()
+            .intern_iseq(&f, Arc::as_ptr(&f) as usize);
+        scope
+            .classes_mut()
+            .define_method(Builtin::Object.id(), name, body);
+        scope.set_gc_stress(true);
+        let value = eval_in(&mut scope, &mut frame, &program).expect("should run");
+        scope.set_gc_stress(false);
+        let sum = if rounds == 4 { 4 } else { 407 };
+        assert_eq!(
+            inspect(&mut scope, value),
+            format!(
+                "[{sum}, 2.5, {rounds}, 4611686018427387904, 2.25, {}, {sum}]",
+                3 * rounds
+            )
+        );
     }
 }

@@ -288,6 +288,37 @@ fn dump_bytecode_prints_instructions_without_running() {
     );
 }
 
+/// A superinstruction prints as the instructions it stands for, named in
+/// order with their fields, and the instructions themselves follow it,
+/// unchanged (#746): `docs/cli.md` says how to read one.
+#[test]
+fn dump_bytecode_shows_a_superinstruction_before_the_run_it_stands_for() {
+    let out = spinel(&[
+        "run",
+        "--dump-bytecode",
+        &fixture("run/superinstruction.rb"),
+    ]);
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    let dump = stdout(&out);
+    let words = dump.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        words.contains(
+            "GetLocalPushIntBinOp { slot: 0, int: 3, op: Lt, }, \
+             PushInt( 3, ), BinOp( Lt, ), JumpUnless("
+        ),
+        "the dump should show `i < 3` fused and its run after it: {dump}"
+    );
+    assert!(
+        words.contains(
+            "GetLocalPushIntBinOp { slot: 0, int: 1, op: Add, }, \
+             PushInt( 1, ), BinOp( Add, ), SetLocal("
+        ),
+        "the dump should show `i += 1` fused and its run after it: {dump}"
+    );
+    let ran = spinel(&["run", &fixture("run/superinstruction.rb")]);
+    assert_eq!(stdout(&ran), "3\n");
+}
+
 #[test]
 fn unknown_flag_names_the_flag_and_fails() {
     let out = spinel(&["--frobnicate"]);

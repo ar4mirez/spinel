@@ -236,3 +236,68 @@ fn only_a_splat_something_can_outrun_is_captured() {
     // Two splats: the first can be outrun, the last cannot.
     assert_eq!(captures("def m(*a); a; end; x = [1]; m(*x, *x)"), 1);
 }
+
+/// Superinstructions (#746, #750) are written over a finished body: the
+/// first instruction of a run is replaced, and the run's own instructions stay
+/// after it, so a body read instruction by instruction through
+/// [`Insn::head`] is the body the compiler wrote.
+#[test]
+fn a_local_an_integer_and_an_operator_become_one_instruction() {
+    let program = iseq("def m(i, n); while i < 10; i += 1; end; i * 2 + n; end");
+    let body = &program.children[0].insns;
+    let fused: Vec<Insn> = body
+        .iter()
+        .copied()
+        .filter(|insn| *insn != insn.head())
+        .collect();
+    assert_eq!(
+        fused,
+        vec![
+            Insn::GetLocalPushIntBinOp {
+                slot: 0,
+                int: 10,
+                op: spinel_vm::bytecode::BinOp::Lt
+            },
+            Insn::GetLocalPushIntBinOp {
+                slot: 0,
+                int: 1,
+                op: spinel_vm::bytecode::BinOp::Add
+            },
+            // `+ n`: `i * 2` is not fused, since two fixnums never answer
+            // `*` light, but the local after it is.
+            Insn::GetLocalBinOp {
+                slot: 1,
+                op: spinel_vm::bytecode::BinOp::Add
+            },
+        ],
+        "{body:?}"
+    );
+    // Each is followed by the instructions it stands for.
+    for (at, insn) in body.iter().enumerate() {
+        if let Insn::GetLocalPushIntBinOp { int, op, .. } = *insn {
+            assert_eq!(body[at + 1..at + 3], [Insn::PushInt(int), Insn::BinOp(op)]);
+        }
+    }
+}
+
+/// What a fused body jumps to is what the unfused body jumped to: nothing
+/// moved, so the jumps are the same displacements wherever they sit.
+#[test]
+fn superinstructions_leave_the_jumps_where_they_were() {
+    let program = iseq("i = 0; while i < 3; i += 1; end; i");
+    assert!(
+        program
+            .insns
+            .iter()
+            .any(|insn| matches!(insn, Insn::GetLocalPushIntBinOp { .. })),
+        "{:?}",
+        program.insns
+    );
+    let unfused = Iseq {
+        insns: program.insns.iter().map(|insn| insn.head()).collect(),
+        ..program.clone()
+    };
+    assert_eq!(jumps(&program), jumps(&unfused));
+    assert_eq!(run(&program), run(&unfused));
+    assert_eq!(run(&program), "3");
+}
