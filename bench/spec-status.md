@@ -11,7 +11,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/array` | 132 | 2898 | 2886 | 0 | 12 | 0 | 100% |
 | `core/basicobject` | 14 | 172 | 169 | 0 | 0 | 3 | 98% |
 | `core/binding` | 12 | 98 | 98 | 0 | 0 | 0 | 100% |
-| `core/builtin_constants` | 1 | 27 | 17 | 0 | 10 | 0 | 63% |
+| `core/builtin_constants` | 1 | 27 | 27 | 0 | 0 | 0 | 100% |
 | `core/class` | 8 | 54 | 54 | 0 | 0 | 0 | 100% |
 | `core/comparable` | 7 | 54 | 54 | 0 | 0 | 0 | 100% |
 | `core/complex` | 43 | 169 | 169 | 0 | 0 | 0 | 100% |
@@ -131,4 +131,4 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `optional/capi` | 47 | 0 | 0 | 0 | 0 | 0 | — |
 | `optional/thread_safety` | 1 | 5 | 0 | 0 | 5 | 0 | 0% |
 | `security` | 13 | 31 | 29 | 0 | 2 | 0 | 94% |
-| **total** | 3841 | 32914 | 29775 | 0 | 2928 | 211 | 90% |
+| **total** | 3841 | 32914 | 29785 | 0 | 2918 | 211 | 90% |
