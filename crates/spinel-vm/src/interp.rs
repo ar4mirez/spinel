@@ -5884,14 +5884,12 @@ fn light_array_index(
 ) -> Option<Value> {
     let &[index] = args else { return None };
     let index = index_arg(index)?;
-    if heap_kind(scope, receiver) != Some(HeapKind::Array) {
-        return None;
-    }
-    let mut nested = scope.nested();
-    let array = nested.root(receiver);
-    let length = array_len(&mut nested, array);
-    Some(match resolve_index(index, length) {
-        Some(index) => array_get(&mut nested, array, index),
+    // Read where the elements stand, without a handle (#750): an Array
+    // whose class is not remembered, or whose storage is not what an
+    // Array's is, is declined for the general path.
+    let elements = array_slice_of(scope, receiver)?;
+    Some(match resolve_index(index, elements.len()) {
+        Some(index) => elements[index],
         None => Value::NIL,
     })
 }
