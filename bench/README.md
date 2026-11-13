@@ -40,14 +40,14 @@ so a pull request that changes the table says what its other runs read.
 `cargo test` runs the check.
 
 <!-- yjit-bench table: written by scripts/bench.sh --yjit-bench; do not edit -->
-Spinel at `4006eb6`, against `ruby 4.0.9 (2026-10-23 revision 3e93b23afc) +PRISM [x86_64-linux]`. 1 warmup and the median of 5 timed iterations each, one CPU, ASLR off.
+Spinel at `012d463`, against `ruby 4.0.9 (2026-10-23 revision 3e93b23afc) +PRISM [x86_64-linux]`. 1 warmup and the median of 5 timed iterations each, one CPU, ASLR off.
 
 | benchmark | Spinel | `ruby --disable-yjit` | Spinel ÷ interpreter | within 1.5× | `ruby --yjit` |
 |---|---:|---:|---:|:---:|---:|
-| binarytrees | 872.2 ms | 317.6 ms | 2.75× | no | 143.9 ms |
-| fib | 412.3 ms | 180.1 ms | 2.29× | no | 23.1 ms |
-| getivar | 121.8 ms | 87.5 ms | 1.39× | yes | 93.2 ms |
-| keyword_args | 288.2 ms | 224.0 ms | 1.29× | yes | 32.3 ms |
-| nbody | 188.6 ms | 87.8 ms | 2.15× | no | 36.8 ms |
-| str_concat | 94.6 ms | 68.3 ms | 1.39× | yes | 23.5 ms |
+| binarytrees | 835.3 ms | 295.8 ms | 2.82× | no | 133.0 ms |
+| fib | 382.4 ms | 179.1 ms | 2.14× | no | 23.6 ms |
+| getivar | 76.7 ms | 94.9 ms | 0.81× | yes | 89.0 ms |
+| keyword_args | 261.6 ms | 208.6 ms | 1.25× | yes | 30.7 ms |
+| nbody | 162.6 ms | 88.4 ms | 1.84× | no | 36.2 ms |
+| str_concat | 76.9 ms | 71.8 ms | 1.07× | yes | 25.8 ms |
 <!-- end yjit-bench table -->
