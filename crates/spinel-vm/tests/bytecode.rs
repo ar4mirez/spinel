@@ -263,6 +263,12 @@ fn a_local_an_integer_and_an_operator_become_one_instruction() {
                 int: 1,
                 op: spinel_vm::bytecode::BinOp::Add
             },
+            // `+ n`: `i * 2` is not fused, since two fixnums never answer
+            // `*` light, but the local after it is.
+            Insn::GetLocalBinOp {
+                slot: 1,
+                op: spinel_vm::bytecode::BinOp::Add
+            },
         ],
         "{body:?}"
     );
