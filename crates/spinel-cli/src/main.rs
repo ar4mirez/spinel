@@ -5,6 +5,14 @@
 //! later phase is built through. Subcommands land one issue at a time; see
 //! `docs/cli.md` for the full surface.
 
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the resolver's platform filter; only tests call it until the resolver lands"
+    )
+)]
+mod gem_platform;
 mod gem_version;
 mod init;
 mod ruby_args;
