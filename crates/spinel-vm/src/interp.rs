@@ -2884,6 +2884,11 @@ fn run<'h>(
                 // allocating if it must — the stack was rooted at the top of
                 // the loop — since `run_calls` declines one that would. No
                 // frame changed.
+                //
+                // A receiver of the class the site's cache holds behind its
+                // entry brings that entry back, and the fast paths are tried
+                // once more for it, out of line: see `send_promoted`.
+                // `run_calls` has done that already for a call it declined.
                 Insn::Send(index) => {
                     sync_out!();
                     let slot = frames[top].cache_base + index;
@@ -2904,6 +2909,16 @@ fn run<'h>(
                                 && send_simple(scope, &mut stack, &mut frames, index, &mut ids)
                                     .is_some()
                             {
+                                reload!();
+                                continue;
+                            }
+                        }
+                    }
+                    if !declined && scope.call_caches().has_behind(slot) {
+                        match send_promoted(scope, &mut stack, &mut frames, index, &mut ids) {
+                            Promoted::No => {}
+                            Promoted::Answered => continue,
+                            Promoted::Pushed => {
                                 reload!();
                                 continue;
                             }
@@ -3542,10 +3557,12 @@ fn run<'h>(
                         }
                     }
 
+                    // The elements are read where they stand: the top of the
+                    // loop rooted them.
                     Insn::NewArray(count) => {
                         let at = stack.len() - count as usize;
-                        let elements: Vec<Value> = stack.drain(at..).collect();
-                        let value = new_array(scope, &elements);
+                        let value = new_array(scope, &stack[at..]);
+                        stack.truncate(at);
                         stack.push(value);
                     }
 
@@ -5257,8 +5274,9 @@ fn returns_in_place(frame: &Call, pc: usize) -> bool {
         .any(|entry| entry.kind == CatchKind::Ensure && entry.covers(at))
 }
 
-/// `Insn::Send` without a `Pending`, for the call most sends are: no block
-/// and no splat, a receiver whose class the site's inline cache already
+/// `Insn::Send` without a `Pending`, for the call most sends are: no block,
+/// and nothing splatted but Arrays and `nil` (see [`splatted_argc`]), a
+/// receiver whose class the site's inline cache already
 /// resolved to a Ruby method this caller may call, and a body whose
 /// parameters are required and optional positionals and keywords, which the
 /// site's arguments fill without anything left to collect or to complain
@@ -5271,8 +5289,10 @@ fn returns_in_place(frame: &Call, pc: usize) -> bool {
 /// which [`direct_plan`] did once for the site.
 ///
 /// Answers the receiver of the frame it pushed, or `None` when it pushed
-/// none. Then nothing has changed and `dispatch` takes the call, which is
-/// where every rule this skips — a refinement, a cache miss,
+/// none. Then the stack and the frames are as they were — the site's cache
+/// may have brought the entry for the receiver's class in front, whose plan
+/// the caller may try — and `dispatch` takes the call, which is where every
+/// rule this skips — a refinement, a cache miss,
 /// `method_missing`, a visibility refusal, a native, a block's warning, an
 /// arity or keyword error — is decided.
 ///
@@ -5281,7 +5301,44 @@ fn returns_in_place(frame: &Call, pc: usize) -> bool {
 /// not yet rooted. A receiver whose class only [`class_of`] can find — not
 /// remembered, or `Class`, which may need a singleton made — is declined for
 /// `dispatch`, which runs after the loop has rooted the stack.
+///
+/// A site that splats takes [`send_splatted`], the same body for it, out of
+/// line, so that the call most sends are pays one test for it.
+#[inline(always)]
 fn send_simple(
+    scope: &mut HandleScope<'_>,
+    stack: &mut Stack,
+    frames: &mut Vec<Call>,
+    index: u32,
+    ids: &mut u64,
+) -> Option<Value> {
+    let top = frames.len() - 1;
+    let site = &frames[top].iseq.call_sites[index as usize];
+    if site.block != BlockRef::None || !site.splats.is_empty() || site.kwsplat {
+        if site.block == BlockRef::None && !site.kwsplat {
+            return send_splatted(scope, stack, frames, index, ids);
+        }
+        return None;
+    }
+    send_bound::<false>(scope, stack, frames, index, ids)
+}
+
+/// [`send_simple`] for a site that splats.
+#[inline(never)]
+fn send_splatted(
+    scope: &mut HandleScope<'_>,
+    stack: &mut Stack,
+    frames: &mut Vec<Call>,
+    index: u32,
+    ids: &mut u64,
+) -> Option<Value> {
+    send_bound::<true>(scope, stack, frames, index, ids)
+}
+
+/// The body of [`send_simple`], for a site that passes no block and no
+/// keyword splat, and splats something when `SPLATS`.
+#[inline(always)]
+fn send_bound<const SPLATS: bool>(
     scope: &mut HandleScope<'_>,
     stack: &mut Stack,
     frames: &mut Vec<Call>,
@@ -5292,13 +5349,17 @@ fn send_simple(
     let frame = &frames[top];
     let slot = frame.cache_base + index;
     let site = &frame.iseq.call_sites[index as usize];
-    if site.block != BlockRef::None || !site.splats.is_empty() || site.kwsplat {
-        return None;
-    }
-    let argc = site.argc as usize;
+    let pushed = site.argc as usize;
     let given = site.keywords.len();
-    let at = stack.len().checked_sub(argc + given + 1)?;
+    let at = stack.len().checked_sub(pushed + given + 1)?;
     let receiver = stack[at];
+    // How many positionals the call passes: what the site pushed, or what
+    // its splatted Arrays come to.
+    let argc = if SPLATS {
+        splatted_argc(scope, &stack[at + 1..], site)?
+    } else {
+        pushed
+    };
     // The class the site's plan was worked out for, when the receiver's
     // header names that class's object: one load and a compare, where
     // `class_of` goes through the table of remembered class ids. A class
@@ -5323,7 +5384,16 @@ fn send_simple(
         return None;
     }
     let serial = scope.classes().serial(class);
-    let method = scope.call_caches().get(slot, class, serial)?;
+    // An entry for another class may have this one's behind it. Brought in
+    // front here; when its plan is not one this binds, the caller tries the
+    // call again by that plan.
+    let method = match scope.call_caches().get(slot, class, serial) {
+        Some(method) => method,
+        None if scope.call_caches_mut().promote(slot, class, serial) => {
+            scope.call_caches().get(slot, class, serial)?
+        }
+        None => return None,
+    };
     // `visibility_refusal`'s answer for the two cases that need no class
     // lookup; `protected` is `dispatch`'s.
     let visible = match method.visibility {
@@ -5342,6 +5412,7 @@ fn send_simple(
                 direct_plan(
                     scope.call_caches_mut(),
                     site,
+                    argc,
                     frame.iseq.symbol_ids(),
                     &iseq,
                     (class, class_object),
@@ -5352,6 +5423,7 @@ fn send_simple(
             // then needs no visibility check of its own.
             Some(&Definition::Native(native))
                 if given == 0
+                    && !SPLATS
                     && (method.visibility == Visibility::Public
                         || (method.visibility == Visibility::Private && site.implicit_self))
                     && has_native_light(native, argc) =>
@@ -5371,6 +5443,15 @@ fn send_simple(
     let Plan::Direct(plan) = scope.call_caches().plan(slot) else {
         return None;
     };
+    // Nothing declines past here, so the splatted Arrays can give way to
+    // their elements, which is the layout every check above was made for.
+    // A site that splats nothing passes the count its plan was made for.
+    if SPLATS {
+        if usize::from(plan.argc) != argc {
+            return None;
+        }
+        splat_in_place(scope, &mut stack.values, at + 1, pushed, &site.splats);
+    }
     *ids += 1;
     let id = *ids;
     // Element by element rather than through `remove`, `copy_from_slice`
@@ -5449,6 +5530,176 @@ fn send_simple(
     Some(receiver)
 }
 
+/// Bring the entry `frame`'s site `index` holds behind its own back in
+/// front, when the call's receiver — on `stack` under its arguments — is of
+/// the class that entry was for (see [`CallCaches::promote`]). Answers
+/// whether it did; then the site's plan is that class's, and the fast paths
+/// that just declined the call may take it.
+///
+/// Allocates nothing, so it cannot collect: [`run_calls`] asks it with what
+/// a light stretch left on the stack not yet rooted.
+#[inline]
+fn promote_site(scope: &mut HandleScope<'_>, stack: &[Value], frame: &Call, index: u32) -> bool {
+    // Most sites have only ever seen one class.
+    scope.call_caches().has_behind(frame.cache_base + index)
+        && promote_held(scope, stack, frame, index)
+}
+
+/// The rest of [`promote_site`], out of line: only a site that has seen a
+/// second class reaches it.
+#[cold]
+#[inline(never)]
+fn promote_held(scope: &mut HandleScope<'_>, stack: &[Value], frame: &Call, index: u32) -> bool {
+    let site = &frame.iseq.call_sites[index as usize];
+    if site.block != BlockRef::None || site.kwsplat {
+        return false;
+    }
+    let Some(at) = stack
+        .len()
+        .checked_sub(usize::from(site.argc) + site.keywords.len() + 1)
+    else {
+        return false;
+    };
+    let Some(class) = known_class_of(scope, stack[at]) else {
+        return false;
+    };
+    let serial = scope.classes().serial(class);
+    scope
+        .call_caches_mut()
+        .promote(frame.cache_base + index, class, serial)
+}
+
+/// Whether [`run_calls`] should try the `Send` at site `index` again, after
+/// [`send_simple`] declined it: when the site's plan is a primitive's —
+/// `send_simple` brought that entry in front, or made the plan, itself — or
+/// [`promote_site`] brings the entry for the receiver's class in front now.
+/// It answers yes a bounded number of times for one call: `send_simple` is
+/// not asked of a primitive's plan, and an entry comes in front only for the
+/// receiver's class, after which what is behind is another class's. Out of
+/// line, so that the call loop keeps its shape for the calls that never get
+/// here.
+#[cold]
+#[inline(never)]
+fn retries_promoted(
+    scope: &mut HandleScope<'_>,
+    stack: &[Value],
+    frame: &Call,
+    index: u32,
+) -> bool {
+    matches!(
+        scope.call_caches().plan(frame.cache_base + index),
+        Plan::Native(_)
+    ) || promote_site(scope, stack, frame, index)
+}
+
+/// What [`send_promoted`] did with a call.
+enum Promoted {
+    /// Nothing: the general path takes it.
+    No,
+    /// A primitive's light form answered it on the stack.
+    Answered,
+    /// [`send_simple`] pushed its frame.
+    Pushed,
+}
+
+/// `run`'s `Insn::Send` once its fast paths declined the call and the
+/// site's cache holds an entry behind its own: brings that entry in front
+/// when the receiver is of its class (see [`promote_site`]) and tries the
+/// fast path its plan names once more. Out of line, so that `run`'s loop
+/// keeps the shape it has for every other send.
+#[cold]
+#[inline(never)]
+fn send_promoted(
+    scope: &mut HandleScope<'_>,
+    stack: &mut Stack,
+    frames: &mut Vec<Call>,
+    index: u32,
+    ids: &mut u64,
+) -> Promoted {
+    let top = frames.len() - 1;
+    if !promote_site(scope, stack, &frames[top], index) {
+        return Promoted::No;
+    }
+    match scope.call_caches().plan(frames[top].cache_base + index) {
+        Plan::General => Promoted::No,
+        Plan::Native(_) => match light_send(scope, &frames[top], index, stack, true) {
+            Some((at, value)) => {
+                stack.truncate(at);
+                stack.push(value);
+                Promoted::Answered
+            }
+            None => Promoted::No,
+        },
+        _ => match send_simple(scope, stack, frames, index, ids) {
+            Some(_) => Promoted::Pushed,
+            None => Promoted::No,
+        },
+    }
+}
+
+/// The most values a site that splats may push for [`send_simple`] to
+/// expand them: [`splat_in_place`] holds them in an array of this size.
+const MAX_SPLAT_PUSHED: usize = 8;
+
+/// How many positionals the values a splatting `site` pushed come to —
+/// `args`, from the first positional up — when [`send_simple`] can expand
+/// them where they stand: every splatted one `nil`, which contributes
+/// nothing, or an `Array`, which contributes its elements, as
+/// [`expand_splats`] would. `None` for anything else — an object `to_a`
+/// converts, a Hash, keywords written at the site — and when the last
+/// argument would be a Hash `ruby2_keywords` collected, which
+/// [`pop_call`] passes as keywords again (#200).
+fn splatted_argc(scope: &HandleScope<'_>, args: &[Value], site: &CallSite) -> Option<usize> {
+    let pushed = usize::from(site.argc);
+    if !site.keywords.is_empty() || pushed > MAX_SPLAT_PUSHED {
+        return None;
+    }
+    let mut count = 0;
+    let mut last = None;
+    for (index, &value) in args[..pushed].iter().enumerate() {
+        if !site.splats.contains(&(index as u16)) {
+            count += 1;
+            last = Some(value);
+        } else if value != Value::NIL {
+            let elements = array_slice_of(scope, value)?;
+            count += elements.len();
+            last = elements.last().copied().or(last);
+        }
+    }
+    if last.is_some_and(|value| scope.is_keywords_of(value)) {
+        return None;
+    }
+    Some(count)
+}
+
+/// Replace the `pushed` values from `from` up with what they pass, once
+/// [`splatted_argc`] has said they can be: each splatted `Array`'s
+/// elements in its place, nothing for a splatted `nil`.
+///
+/// Allocates nothing on the heap, so it cannot collect. The elements are
+/// left above the stack's rooted mark by the caller, and reachable from
+/// their Arrays until then.
+fn splat_in_place(
+    scope: &HandleScope<'_>,
+    values: &mut Vec<Value>,
+    from: usize,
+    pushed: usize,
+    splats: &[u16],
+) {
+    let mut written = [Value::NIL; MAX_SPLAT_PUSHED];
+    written[..pushed].copy_from_slice(&values[from..from + pushed]);
+    values.truncate(from);
+    for (index, &value) in written[..pushed].iter().enumerate() {
+        if !splats.contains(&(index as u16)) {
+            values.push(value);
+        } else if value != Value::NIL {
+            values.extend_from_slice(
+                array_slice_of(scope, value).expect("splatted_argc read it as an Array"),
+            );
+        }
+    }
+}
+
 /// `String#<<`'s own case, for two values the caller knows are Strings: an
 /// unfrozen, unchilled receiver, and bytes that go on its end as they are
 /// (see [`crate::strings::appends_as_is`]). Answers whether it appended; when
@@ -5476,6 +5727,7 @@ fn has_native_light(native: Native, argc: usize) -> bool {
         Native::IvarReader(_) => argc == 0,
         Native::Math => argc == 2 || argc == 3,
         Native::Reflect(ReflectOp::KindOf) => argc == 2,
+        Native::NilP => argc == 0,
         _ => false,
     }
 }
@@ -5565,6 +5817,9 @@ fn native_light(
                     && known_class_of(scope, other).is_some_and(|class| is_string(scope, class)));
             (theirs && append_plain(scope, receiver, other, may_allocate)).then_some(receiver)
         }
+        // `Kernel#nil?`, the general path's answer. Last, so that the forms
+        // before it keep the tests they had.
+        Native::NilP => Some(bool_value(receiver == Value::NIL)),
         _ => None,
     }
 }
@@ -5908,7 +6163,9 @@ const MAX_DIRECT_KEYWORDS: usize = 16;
 /// Whether a call from `site` to a method whose body is `iseq` can bind on
 /// the operand stack ([`send_simple`]), and where each argument goes if so.
 ///
-/// `site` has already been checked to pass no block and splat nothing.
+/// `site` has already been checked to pass no block, and `argc` is how
+/// many positionals it passes: its own count, or at a site that splats, what
+/// the splatted Arrays came to this time (see [`Direct::argc`]).
 /// What is left is the callee's side: only parameters `bind` fills one
 /// argument at a time — required and optional positionals, in the leading
 /// slots, and keywords — so nothing is collected into a rest, a `**kw` or a
@@ -5919,12 +6176,12 @@ const MAX_DIRECT_KEYWORDS: usize = 16;
 fn direct_plan(
     caches: &mut CallCaches,
     site: &CallSite,
+    argc: usize,
     caller_symbols: &[SymbolId],
     iseq: &Arc<Iseq>,
     (class, class_object): (ClassId, Value),
 ) -> Plan {
     let params = &iseq.params;
-    let argc = usize::from(site.argc);
     let required = params.required.len();
     let optional = params.optional.len();
     let in_order = params
@@ -5987,6 +6244,7 @@ fn direct_plan(
         in_order,
         name: caller_symbols[site.name as usize],
         class,
+        argc: u16::try_from(argc).unwrap_or(u16::MAX),
         class_object,
         keywords: keywords.into_boxed_slice(),
         undef: undef.into_boxed_slice(),
@@ -6150,7 +6408,6 @@ fn expand_splats(
     args: Vec<Value>,
     splats: &[u16],
 ) -> Result<Vec<Value>, Error> {
-    let to_a = crate::shared::symbols::intern("to_a");
     // Rooted, every one: the arguments have left the stack, and copying a
     // Hash's pairs allocates, which may collect.
     let args: Vec<_> = args.into_iter().map(|arg| scope.root(arg)).collect();
@@ -6165,6 +6422,9 @@ fn expand_splats(
                 out.extend(elements.into_iter().map(|e| scope.root(e)));
                 continue;
             }
+            // Interned only here, past the Arrays: hashing the name is most of
+            // what an Array's splat would otherwise cost.
+            let to_a = crate::shared::symbols::intern("to_a");
             let owner = class_of(scope, arg)
                 .and_then(|class| scope.classes_mut().lookup(class, to_a))
                 .map(|method| method.owner);
@@ -6252,6 +6512,9 @@ fn dispatch<'h>(
                             let serial = scope.classes().serial(class);
                             match scope.call_caches().get(slot, class, serial) {
                                 hit @ Some(_) => hit,
+                                None if scope.call_caches_mut().promote(slot, class, serial) => {
+                                    scope.call_caches().get(slot, class, serial)
+                                }
                                 None => {
                                     let found = scope.classes_mut().lookup(class, call.name);
                                     if let Some(method) = found {
@@ -9779,6 +10042,32 @@ fn array_window<'h>(scope: &mut HandleScope<'h>, array: Handle<'h>) -> (usize, u
     (head, length)
 }
 
+/// The live elements of `value` when it is an `Array` — a subclass's too —
+/// read where they stand: no handle, no copy. `None` for anything else, and
+/// for an Array whose class is not remembered (see [`known_class_of`]).
+///
+/// `value` must be a live object of this heap, as for
+/// [`HandleScope::slots_of`]; the slice borrows the scope, so nothing can
+/// allocate, and so collect or write, while it is held.
+#[inline]
+fn array_slice_of<'s>(scope: &'s HandleScope<'_>, value: Value) -> Option<&'s [Value]> {
+    if value.is_immediate() {
+        return None;
+    }
+    let class = known_class_of(scope, value)?;
+    if scope.classes().repr(class) != Some(Builtin::Array) {
+        return None;
+    }
+    let [storage, packed] = scope.slots_of::<{ ARRAY_SLOTS as usize }>(value)?;
+    let packed = packed.as_fixnum()?;
+    let head = usize::try_from(packed >> ARRAY_LENGTH_BITS).ok()?;
+    let length = usize::try_from(packed & ARRAY_LENGTH_MASK).ok()?;
+    if length == 0 {
+        return Some(&[]);
+    }
+    scope.slice_of(storage)?.get(head..head + length)
+}
+
 /// Write the head offset and the live element count back.
 fn array_set_window<'h>(
     scope: &mut HandleScope<'h>,
@@ -11415,17 +11704,43 @@ fn empty_array_of<'h>(scope: &mut HandleScope<'h>, id: ClassId) -> Handle<'h> {
     handle
 }
 
+/// A new `Array` of `elements`, which must be rooted, as anything held
+/// across an allocation must.
+///
+/// Both cells are written once, the storage straight from `elements`, with
+/// the room `array_reserve` gave it: [`ARRAY_MIN_CAPACITY`], doubled until
+/// the elements fit. The same bytes as before, so a collection comes when it
+/// came. The storage is made first, so that the `Array` is the newer of the
+/// two cells.
+///
+/// ponytail: storage exactly as long as a literal, CRuby's
+/// `rb_ary_new_from_values`, was 8% faster on yjit-bench `binarytrees`, but
+/// it moves where the core library's boot places every later object, and so
+/// which class objects share an entry of the heap's remembered class ids:
+/// `Thread` and `Fiber` came to, and `Mutex#lock` read `@__id__` twice a
+/// call. Worth taking once that table cannot be made to collide by layout.
 fn new_array(scope: &mut HandleScope<'_>, elements: &[Value]) -> Value {
-    let handle = empty_array(scope);
-    array_reserve(scope, handle, elements.len());
-    let storage = scope.slot(handle, ARRAY_STORAGE);
-    if storage != Value::NIL {
-        let storage = scope.root(storage);
-        for (index, value) in elements.iter().enumerate() {
-            scope.set_slot(storage, index, *value);
-        }
+    if elements.is_empty() {
+        let handle = empty_array(scope);
+        return scope.get(handle);
     }
-    array_set_len(scope, handle, elements.len());
+    let mut capacity = ARRAY_MIN_CAPACITY as usize;
+    while capacity < elements.len() {
+        capacity *= 2;
+    }
+    let capacity = u32::try_from(capacity).expect("an Array storage under 2^32 slots");
+    let storage = scope.alloc_slots(None, elements, capacity);
+    let class = scope.classes().object(Builtin::Array.id());
+    let class = scope.root(class);
+    let length = i64::try_from(elements.len())
+        .ok()
+        .filter(|&length| length <= ARRAY_LENGTH_MASK)
+        .and_then(Value::fixnum)
+        .unwrap_or_else(|| array_window_overflow(0, elements.len()));
+    let mut cell = [Value::NIL; ARRAY_SLOTS as usize];
+    cell[ARRAY_STORAGE] = scope.get(storage);
+    cell[ARRAY_LENGTH] = length;
+    let handle = scope.alloc_slots(Some(class), &cell, ARRAY_SLOTS);
     scope.get(handle)
 }
 
@@ -18274,7 +18589,9 @@ fn may_run_call(scope: &HandleScope<'_>, frame: &Call, insn: Insn) -> bool {
 
 /// The call a [`light_stretch`] stopped at, and the light stretches after
 /// it, for as long as they keep stopping at calls [`send_simple`] and
-/// [`yield_simple`] take and at the returns from the frames this pushed:
+/// [`yield_simple`] take, at the returns from the frames this pushed, and at
+/// Array literals, which [`calls_new_array`] makes once it has rooted what
+/// is fresh on the stack:
 /// the frame is pushed and popped here, and the stretch goes on in the
 /// callee, then in the caller again, without the trip through [`run`]'s
 /// loop each call and each return made. [`run`] enters it at a `Send` or a
@@ -18333,6 +18650,11 @@ fn run_calls(
                     let Some(next) =
                         native_calls(scope, stack, frame, index, &mut at, &mut ran, room)
                     else {
+                        // Tried again only when the entry for the receiver's
+                        // class comes in front, which it does once.
+                        if promote_site(scope, stack, &frames[top], index) {
+                            continue;
+                        }
                         declined = true;
                         break;
                     };
@@ -18351,6 +18673,11 @@ fn run_calls(
                     yield_simple(scope, stack, frames, index, calls.ids)
                 };
                 let Some(receiver) = pushed else {
+                    if let Insn::Send(index) = insn
+                        && retries_promoted(scope, stack, &frames[top], index)
+                    {
+                        continue;
+                    }
                     declined = true;
                     break;
                 };
@@ -18380,6 +18707,19 @@ fn run_calls(
                 entered -= 1;
                 at = frames.last().expect("the caller").pc;
             }
+            // An Array literal, `[left, right]`: answered here rather than by
+            // the trip back to `run` an allocation would otherwise take, once
+            // what is fresh on the stack is rooted, as `run` roots it at the
+            // top of its loop. A collection it starts may queue finalizers,
+            // which `run` runs at its next call or return, so the calls stop
+            // here for it then.
+            Insn::NewArray(count) if scope.rooted() + stack.len() <= calls.root_limit => {
+                calls_new_array(scope, stack, count as usize);
+                at += 1;
+                if scope.has_pending_finalizers() {
+                    break;
+                }
+            }
             _ => break,
         }
         ran += 1;
@@ -18396,6 +18736,23 @@ fn run_calls(
     *pc = at;
     *budget = budget.saturating_sub(ran);
     declined
+}
+
+/// `Insn::NewArray` for [`run_calls`]: the `count` values on top of the
+/// stack become an `Array` in their place. Roots what is fresh on the stack
+/// first — what a light stretch or a call left there since `run` last did —
+/// since the allocation may collect. Out of line, as the stretches are.
+#[inline(never)]
+fn calls_new_array(scope: &mut HandleScope<'_>, stack: &mut Stack, count: usize) {
+    for &value in stack.fresh() {
+        if !value.is_immediate() {
+            scope.root(value);
+        }
+    }
+    let at = stack.len() - count;
+    let value = new_array(scope, &stack[at..]);
+    stack.truncate(at);
+    stack.push(value);
 }
 
 /// What [`run_calls`] is handed for the calls it pushes.
@@ -25560,6 +25917,66 @@ mod tests {
         scope.bootstrap();
         let value = eval_in(&mut scope, &mut frame, &iseq).expect("should run");
         assert_eq!(inspect(&mut scope, value), "[\"hi\", :a_symbol]");
+    }
+
+    /// What a call that splats binds from on the operand stack (#751): an
+    /// Array's live elements read where they stand, from its head; how many
+    /// positionals the pushed values come to, `nil` adding none; a decline
+    /// for anything else splatted or a flagged keywords Hash last; and the
+    /// expansion in place.
+    #[test]
+    fn a_splat_expands_in_place_under_miri() {
+        let mut heap = Heap::new();
+        let mut scope = heap.scope();
+        scope.bootstrap();
+        let int = |n| Value::fixnum(n).unwrap();
+        let pair = new_array(&mut scope, &[int(1), int(2)]);
+        let empty = new_array(&mut scope, &[]);
+        // Remembered, as a dispatch on an Array first does.
+        assert_eq!(class_of(&mut scope, pair), Some(Builtin::Array.id()));
+        assert_eq!(array_slice_of(&scope, pair), Some(&[int(1), int(2)][..]));
+        assert_eq!(array_slice_of(&scope, empty), Some(&[][..]));
+        assert_eq!(array_slice_of(&scope, int(3)), None);
+
+        let site = |argc: u16, splats: Vec<u16>| CallSite {
+            name: 0,
+            argc,
+            splats,
+            keywords: Vec::new(),
+            block: BlockRef::None,
+            implicit_self: false,
+            variable_call: false,
+            kwsplat: false,
+        };
+        let three = site(3, vec![0, 2]);
+        assert_eq!(
+            splatted_argc(&scope, &[pair, int(9), empty], &three),
+            Some(3)
+        );
+        assert_eq!(
+            splatted_argc(&scope, &[Value::NIL, int(9), pair], &three),
+            Some(3)
+        );
+        assert_eq!(splatted_argc(&scope, &[int(4), int(9), pair], &three), None);
+        let mut values = vec![Value::NIL, pair, int(9), empty];
+        splat_in_place(&scope, &mut values, 1, 3, &three.splats);
+        assert_eq!(values, [Value::NIL, int(1), int(2), int(9)]);
+
+        let flagged = scope.alloc(None, Payload::Slots, 1);
+        scope.mark_keywords(flagged);
+        let flagged = scope.get(flagged);
+        let last = new_array(&mut scope, &[int(1), flagged]);
+        assert_eq!(splatted_argc(&scope, &[last], &site(1, vec![0])), None);
+        assert_eq!(
+            splatted_argc(&scope, &[last, int(5)], &site(2, vec![0])),
+            Some(3),
+            "a flagged Hash that is not last is an argument"
+        );
+
+        // A shifted Array's elements start at its head.
+        let handle = scope.root(pair);
+        array_set_window(&mut scope, handle, 1, 1);
+        assert_eq!(array_slice_of(&scope, pair), Some(&[int(2)][..]));
     }
 
     #[test]

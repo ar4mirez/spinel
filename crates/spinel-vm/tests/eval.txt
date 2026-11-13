@@ -2883,3 +2883,19 @@ def j750(a) = a[0]; a = [1]; r = [j750(a), j750(a)]; def a.[](i) = :single; r <<
 module E750; end; def k750(m, o) = m === o; o = Object.new; [k750(E750, o), (o.extend(E750); k750(E750, o)), k750(Integer, 3), k750(Float, 3), k750(Comparable, 2.5), k750(Kernel, BasicObject.new)]  #=> [false, true, true, false, true, false]
 [Math.sqrt(4.0), Math.sqrt(2), Math.hypot(3, 4), Math.atan2(1, 1), Math.exp(710.0), Math.sqrt(1.0e-300), Math.cbrt(27), 2.7.floor, 2.5.round]  #=> [2.0, 1.4142135623730951, 5.0, 0.7853981633974483, Infinity, 1.0e-150, 3.0, 2, 3]
 r = []; [4.0, -1.0, "x", nil, 4].each { |v| begin; r << Math.sqrt(v); rescue => e; r << e.class; end }; r  #=> [2.0, Math::DomainError, TypeError, TypeError, 2.0]
+# A call that splats Arrays binds on the operand stack from its site's plan
+# while the Arrays come to the count it was made for, and takes the general
+# path for any other count, a splatted Hash, an Array a `ruby2_keywords`
+# method ends with a flagged Hash, and an arity error (#751).
+def o751(a, b = :d) = [a, b]; def c751(x) = o751(*x); [c751([1]), c751([1, 2]), c751([1]), (c751([1, 2, 3]) rescue $!.class), c751([5, 6])]  #=> [[1, :d], [1, 2], [1, :d], ArgumentError, [5, 6]]
+def m751(a, b, c) = [a, b, c]; def n751(x, y) = m751(1, *x, *y); [n751([2], [3]), n751([], [2, 3]), n751(nil, [2, 3]), n751([2, 3], nil), n751([2], [3])]  #=> [[1, 2, 3], [1, 2, 3], [1, 2, 3], [1, 2, 3], [1, 2, 3]]
+def k751(a, b = :none, x: :nokw) = [a, (b.is_a?(Hash) ? b.to_a : b), x]; ruby2_keywords def r751(*a) = k751(*a); [r751(1), r751(1, 2), r751(1, x: 2), r751(1, {x: 2}), r751(1)]  #=> [[1, :none, :nokw], [1, 2, :nokw], [1, :none, 2], [1, [[:x, 2]], :nokw], [1, :none, :nokw]]
+class A751 < Array; def to_a = [:no]; end; def t751(a, b) = [a, b]; def u751(x) = t751(*x); [u751([3, 4]), u751(A751[1, 2]), u751({a: 1, b: 2}), u751([5, 6])]  #=> [[3, 4], [1, 2], [[:a, 1], [:b, 2]], [5, 6]]
+def g751(a, b) = [a, b]; def h751 = g751(*["x" + "1", "y" + "2"]); r = [h751, h751]; GC.stress = true; r << h751 << h751; GC.stress = false; r  #=> [["x1", "y2"], ["x1", "y2"], ["x1", "y2"], ["x1", "y2"]]
+# A site that sees two receiver classes in turn keeps both answers, and
+# neither outlives a redefinition; a third class displaces one of them.
+class P751; def w = :p; end; class Q751; def w = :q; end; class S751; def w = :s; end; def w751(o) = o.w; os = [P751.new, Q751.new] * 3; r = os.map { |o| w751(o) }; class P751; def w = :p2; end; r += os.first(2).map { |o| w751(o) }; r + [S751.new, P751.new, Q751.new, S751.new].map { |o| w751(o) }  #=> [:p, :q, :p, :q, :p, :q, :p2, :q, :s, :p2, :q, :s]
+def z751(o) = o.nil?; r = [z751(nil), z751([1]), z751(nil), z751(Object.new), z751(false), z751(nil)]; class NilClass; alias_method :nil751, :nil?; def nil? = :redefined; end; r << z751(nil) << z751(1); class NilClass; alias_method :nil?, :nil751; remove_method :nil751; end; r << z751(nil) << z751([])  #=> [true, false, true, false, false, true, :redefined, false, true, false]
+class O751; def nil? = :mine; end; def y751(o) = o.nil?; [y751(O751.new), y751(1), y751(O751.new), y751(nil), y751(1)]  #=> [:mine, false, :mine, true, false]
+# Array literals made between calls, and splatted back out, under GC.stress.
+def b751(d) = d == 0 ? [nil, nil] : [b751(d - 1), b751(d - 1)]; def e751(l, r) = l.nil? ? 1 : 1 + e751(*l) + e751(*r); GC.stress = true; t = b751(4); n = e751(*t); GC.stress = false; [n, t.flatten.size, e751(*b751(6))]  #=> [31, 32, 127]

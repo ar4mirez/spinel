@@ -952,6 +952,56 @@ impl Heap {
     /// no handle yet, so a collection between allocating it and rooting it would free
     /// the thing the caller is about to be handed.
     fn allocate(&mut self, class: Option<Value>, payload: Payload, len: u32) -> Value {
+        let (obj, zeroed) = self.allocate_header(class, payload, len);
+        // SAFETY: `allocate_header` made `len` slots or bytes after the
+        // header, in a cell nothing else can reach yet.
+        unsafe {
+            match payload {
+                // A zeroed slot is not a `Value` — #6 spent the niche on exactly that —
+                // so the payload is filled before anything can trace it.
+                Payload::Slots => {
+                    let slots = obj.slots();
+                    for i in 0..len as usize {
+                        ptr::write(slots.add(i), Value::NIL);
+                    }
+                }
+                // A reused cell still holds the dead object's bytes; a large
+                // object's are the zeroes `large_object` asked for, and
+                // writing them again would touch every page of a buffer that
+                // may never be read past its first bytes.
+                Payload::Bytes if !zeroed => ptr::write_bytes(obj.bytes(), 0, len as usize),
+                Payload::Bytes => {}
+            }
+        }
+        Value::heap(obj.0.cast())
+    }
+
+    /// [`Heap::allocate`] of an object of `len` slots holding `values` and
+    /// then `nil`, each written once rather than filled with `nil` first.
+    /// Every heap object among `values` must survive the collection this may
+    /// start, as for any value held across an allocation.
+    fn allocate_slots(&mut self, class: Option<Value>, values: &[Value], len: u32) -> Value {
+        debug_assert!(values.len() <= len as usize, "more values than slots");
+        let (obj, _) = self.allocate_header(class, Payload::Slots, len);
+        // SAFETY: `allocate_header` made `len` slots after the header, in a
+        // cell nothing else can reach yet, `values` lives outside the heap,
+        // and there are no more of them than slots.
+        unsafe {
+            let slots = obj.slots();
+            ptr::copy_nonoverlapping(values.as_ptr(), slots, values.len());
+            for i in values.len()..len as usize {
+                ptr::write(slots.add(i), Value::NIL);
+            }
+        }
+        Value::heap(obj.0.cast())
+    }
+
+    /// The part of an allocation both of the above share: collect if this
+    /// one crosses the threshold, take a cell, and write its header. The
+    /// payload is the caller's to initialise before anything can trace it.
+    /// Answers whether the payload came zeroed.
+    #[inline(always)]
+    fn allocate_header(&mut self, class: Option<Value>, payload: Payload, len: u32) -> (Obj, bool) {
         let size = Heap::object_size(payload, len);
         if !self.gc_disabled && (self.gc_stress || self.bytes_since_gc >= self.next_gc) {
             self.collect();
@@ -984,24 +1034,8 @@ impl Heap {
                     shape: ShapeId::NONE,
                 },
             );
-            match payload {
-                // A zeroed slot is not a `Value` — #6 spent the niche on exactly that —
-                // so the payload is filled before anything can trace it.
-                Payload::Slots => {
-                    let slots = obj.slots();
-                    for i in 0..len as usize {
-                        ptr::write(slots.add(i), Value::NIL);
-                    }
-                }
-                // A reused cell still holds the dead object's bytes; a large
-                // object's are the zeroes `large_object` asked for, and
-                // writing them again would touch every page of a buffer that
-                // may never be read past its first bytes.
-                Payload::Bytes if !zeroed => ptr::write_bytes(obj.bytes(), 0, len as usize),
-                Payload::Bytes => {}
-            }
         }
-        Value::heap(obj.0.cast())
+        (obj, zeroed)
     }
 
     /// Leave a new object's address for the interpreter loop to stamp with
@@ -1414,6 +1448,32 @@ impl<'h> HandleScope<'h> {
         self.root(value)
     }
 
+    /// Allocate an object of `len` slots holding `values` and then `nil`,
+    /// rooted in this scope: [`HandleScope::alloc`] and a `set_slot` for each
+    /// value, in one copy.
+    ///
+    /// The allocation can collect before the copy, so every heap object
+    /// among `values` must be reachable from a root already, as it must be
+    /// for any `Value` held across an allocation.
+    ///
+    /// # Panics
+    ///
+    /// If `values` is longer than `len`.
+    pub fn alloc_slots(
+        &mut self,
+        class: Option<Handle<'h>>,
+        values: &[Value],
+        len: u32,
+    ) -> Handle<'h> {
+        assert!(values.len() <= len as usize, "more values than slots");
+        let class = class.map(|handle| self.get(handle));
+        let value = self.heap.allocate_slots(class, values, len);
+        for &slot in values {
+            self.storable(slot);
+        }
+        self.root(value)
+    }
+
     /// A scope whose handles are popped when it drops, and cannot escape into this one.
     pub fn nested(&mut self) -> HandleScope<'_> {
         HandleScope {
@@ -1521,6 +1581,36 @@ impl<'h> HandleScope<'h> {
         }
         // SAFETY: `N` slots, every one initialised by `allocate`.
         Some(unsafe { ptr::read(object.slots().cast::<[Value; N]>()) })
+    }
+
+    /// Every slot of `value`, under the rule above — a live object of this
+    /// heap, and a read that cannot collect: the `&self` borrow keeps a
+    /// write, and so an allocation, from happening while the slice is held.
+    /// `None` for an immediate or an object that holds bytes.
+    #[inline]
+    pub(crate) fn slice_of(&self, value: Value) -> Option<&[Value]> {
+        let object = Obj(value.as_heap()?.cast());
+        // SAFETY: a live object of this heap, per the contract above.
+        let header = unsafe { &*object.header() };
+        if header.payload != Payload::Slots {
+            return None;
+        }
+        // SAFETY: `len` slots, every one initialised by `allocate`, and
+        // `&self` keeps them from being written while they are borrowed.
+        Some(unsafe { std::slice::from_raw_parts(object.slots(), header.len as usize) })
+    }
+
+    /// [`HandleScope::is_keywords`] for `value` under the rule above;
+    /// `false` for an immediate.
+    #[inline]
+    pub(crate) fn is_keywords_of(&self, value: Value) -> bool {
+        let Some(pointer) = value.as_heap() else {
+            return false;
+        };
+        let object = Obj(pointer.cast());
+        // SAFETY: a live object of this heap, per the contract above.
+        let flags = unsafe { (*object.header()).flags };
+        flags & KEYWORDS != 0
     }
 
     /// A byte object's length and whether it is frozen, for `value` under
@@ -2758,6 +2848,43 @@ mod tests {
         let reused = scope.alloc(Some(class), Payload::Slots, 1);
         assert!(!scope.has_fresh_allocations());
         assert!(scope.allocation_site(reused).is_none());
+    }
+
+    /// `alloc_slots` makes an object already holding its values, which
+    /// survive the collection the allocation may start when they are rooted,
+    /// and `slice_of` and `is_keywords_of` read an object where it stands
+    /// (#751).
+    #[test]
+    fn alloc_slots_holds_its_values_and_reads_back_without_a_handle() {
+        let mut heap = Heap::new();
+        let mut scope = heap.scope();
+        let first = scope.alloc(None, Payload::Slots, 1);
+        let second = scope.alloc(None, Payload::Bytes, 3);
+        let values = [
+            scope.get(first),
+            Value::fixnum(7).unwrap(),
+            scope.get(second),
+        ];
+        scope.set_gc_stress(true);
+        let object = scope.alloc_slots(None, &values, 3);
+        let empty = scope.alloc_slots(None, &[], 0);
+        let padded = scope.alloc_slots(None, &values[..1], 3);
+        scope.set_gc_stress(false);
+        scope.collect();
+        let (object, empty, padded) = (scope.get(object), scope.get(empty), scope.get(padded));
+        assert_eq!(scope.slice_of(object), Some(&values[..]));
+        assert_eq!(
+            scope.slice_of(padded),
+            Some(&[values[0], Value::NIL, Value::NIL][..])
+        );
+        assert_eq!(scope.slice_of(empty), Some(&[][..]));
+        assert_eq!(scope.slice_of(values[2]), None, "bytes are not slots");
+        assert_eq!(scope.slice_of(Value::NIL), None);
+        let handle = scope.root(object);
+        assert!(!scope.is_keywords_of(object));
+        scope.mark_keywords(handle);
+        assert!(scope.is_keywords_of(object));
+        assert!(!scope.is_keywords_of(Value::fixnum(1).unwrap()));
     }
 
     /// An object's size counts the classless storage it owns and not the
