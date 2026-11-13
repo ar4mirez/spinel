@@ -830,7 +830,9 @@ impl Compiler {
             // depths were counted from the instructions it stands for. What
             // they come to together: a local and an integer pushed, and an
             // operator taking both for its answer; two locals the same.
-            Insn::GetLocalPushIntBinOp { .. } | Insn::GetLocalGetLocalBinOp { .. } => 1,
+            Insn::GetLocalPushIntBinOp { .. }
+            | Insn::GetLocalGetLocalBinOp { .. }
+            | Insn::GetLocalGetIvarBinOp { .. } => 1,
         }
     }
 

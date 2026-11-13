@@ -3311,7 +3311,8 @@ fn run<'h>(
                     Insn::GetLocal(..)
                     | Insn::SetLocal(..)
                     | Insn::GetLocalPushIntBinOp { .. }
-                    | Insn::GetLocalGetLocalBinOp { .. } => {
+                    | Insn::GetLocalGetLocalBinOp { .. }
+                    | Insn::GetLocalGetIvarBinOp { .. } => {
                         unreachable!("the loop answers local access itself")
                     }
 
@@ -18267,14 +18268,29 @@ fn light_step<const LIGHT: bool, const MORE: bool>(
         // conditional jump after them run as a `BinOp`'s is. What it does not
         // answer is its first `GetLocal` alone, as above, and so are `run`'s
         // own step and a frame whose locals are in a heap environment.
-        Insn::GetLocalGetLocalBinOp { left, right, op } => {
+        //
+        // `GetLocal; GetIvar; BinOp` is the same with an instance variable of
+        // `self` for the second operand, read when the site's cache answers
+        // it, through the safe read `run` makes rather than the view a light
+        // `GetIvar` takes; a read it does not answer declines (#746).
+        Insn::GetLocalGetLocalBinOp { left: slot, op, .. }
+        | Insn::GetLocalGetIvarBinOp { slot, op, .. } => {
             if !frame.locals_on_stack {
-                stack.push(env_local(scope, frame, 0, left));
+                stack.push(env_local(scope, frame, 0, slot));
                 return 1;
             }
-            let first = stack.get(frame.floor + left as usize);
-            if LIGHT && pair {
-                let second = stack.get(frame.floor + right as usize);
+            let first = stack.get(frame.floor + slot as usize);
+            let second = match insn {
+                _ if !(LIGHT && pair) => None,
+                Insn::GetLocalGetLocalBinOp { right, .. } => {
+                    Some(stack.get(frame.floor + right as usize))
+                }
+                Insn::GetLocalGetIvarBinOp { site, .. } => {
+                    scope.cached_ivar(frame.receiver, frame.cache_base + site, SLOT_IVARS)
+                }
+                _ => None,
+            };
+            if let Some(second) = second {
                 let ops = *lazy.ops.get_or_insert_with(|| native_ops(scope, frame, 0));
                 let value = if ops & (1 << op as usize) == 0 {
                     None
@@ -27066,9 +27082,9 @@ mod tests {
             scope_barrier: true,
             ..Iseq::default()
         });
-        // s = 0; i = 0; n = rounds; y = 1.5
-        // while i < n; s = s + f(i); w = y * y; i += 1; end
-        // z = 2**62 - 1; [s, y + 1, i, z + 1, w]
+        // s = 0; i = 0; n = rounds; y = 1.5; t = 0; @v = 3
+        // while i < n; s = s + f(i); w = y * y; t = t + @v; i += 1; end
+        // z = 2**62 - 1; [s, y + 1, i, z + 1, w, t]
         let mut insns = vec![
             Insn::PushInt(0),
             Insn::SetLocal(0, 0),
@@ -27078,10 +27094,14 @@ mod tests {
             Insn::SetLocal(4, 0),
             Insn::PushFloat(1.5f64.to_bits()),
             Insn::SetLocal(2, 0),
+            Insn::PushInt(0),
+            Insn::SetLocal(6, 0),
+            Insn::PushInt(3),
+            Insn::SetIvar(1, 1),
             Insn::GetLocal(1, 0),
             Insn::GetLocal(4, 0),
             Insn::BinOp(BinOp::Lt),
-            Insn::JumpUnless(15),
+            Insn::JumpUnless(19),
             Insn::GetLocal(0, 0),
             Insn::PushSelf,
             Insn::GetLocal(1, 0),
@@ -27092,11 +27112,15 @@ mod tests {
             Insn::GetLocal(2, 0),
             Insn::BinOp(BinOp::Mul),
             Insn::SetLocal(5, 0),
+            Insn::GetLocal(6, 0),
+            Insn::GetIvar(1, 2),
+            Insn::BinOp(BinOp::Add),
+            Insn::SetLocal(6, 0),
             Insn::GetLocal(1, 0),
             Insn::PushInt(1),
             Insn::BinOp(BinOp::Add),
             Insn::SetLocal(1, 0),
-            Insn::Jump(-19),
+            Insn::Jump(-23),
             Insn::PushInt((1 << 62) - 1),
             Insn::SetLocal(3, 0),
             Insn::GetLocal(0, 0),
@@ -27108,7 +27132,8 @@ mod tests {
             Insn::PushInt(1),
             Insn::BinOp(BinOp::Add),
             Insn::GetLocal(5, 0),
-            Insn::NewArray(5),
+            Insn::GetLocal(6, 0),
+            Insn::NewArray(6),
             Insn::Leave,
         ];
         fuse(&mut insns);
@@ -27123,10 +27148,15 @@ mod tests {
             2,
             "{insns:?}"
         );
+        assert_eq!(
+            count(|insn| matches!(insn, Insn::GetLocalGetIvarBinOp { .. })),
+            1,
+            "{insns:?}"
+        );
         let program = Iseq {
             name: "<test>".into(),
             insns,
-            symbols: vec!["f".into()],
+            symbols: vec!["f".into(), "@v".into()],
             locals: vec![
                 "s".into(),
                 "i".into(),
@@ -27134,7 +27164,9 @@ mod tests {
                 "z".into(),
                 "n".into(),
                 "w".into(),
+                "t".into(),
             ],
+            ivar_sites: 2,
             call_sites: vec![CallSite {
                 name: 0,
                 argc: 1,
@@ -27145,12 +27177,12 @@ mod tests {
                 variable_call: false,
                 kwsplat: false,
             }],
-            max_stack: 5,
+            max_stack: 6,
             ..Iseq::default()
         };
 
         let mut heap = Heap::new();
-        let mut frame = Frame::new(6);
+        let mut frame = Frame::new(7);
         let mut scope = heap.scope();
         scope.bootstrap();
         let name = crate::shared::symbols::intern("f");
@@ -27166,7 +27198,10 @@ mod tests {
         let sum = if rounds == 4 { 4 } else { 407 };
         assert_eq!(
             inspect(&mut scope, value),
-            format!("[{sum}, 2.5, {rounds}, 4611686018427387904, 2.25]")
+            format!(
+                "[{sum}, 2.5, {rounds}, 4611686018427387904, 2.25, {}]",
+                3 * rounds
+            )
         );
     }
 }

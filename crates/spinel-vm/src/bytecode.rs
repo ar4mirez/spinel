@@ -534,6 +534,16 @@ pub enum Insn {
         right: u16,
         op: BinOp,
     },
+    /// `GetLocal(slot, 0); GetIvar(name, site); BinOp(op)`: a local and an
+    /// instance variable of `self` under an operator, `sum + @v`. Answered
+    /// as [`Insn::GetLocalGetLocalBinOp`] is, when the read is one the site's
+    /// cache answers. The name is not carried: a read the cache does not
+    /// answer declines, and the `GetIvar` after it, which has it, runs.
+    GetLocalGetIvarBinOp {
+        slot: u16,
+        site: u32,
+        op: BinOp,
+    },
 }
 
 /// The binary operators the compiler emits directly.
@@ -633,6 +643,7 @@ impl Insn {
         match self {
             Insn::GetLocalPushIntBinOp { slot, .. } => Insn::GetLocal(slot, 0),
             Insn::GetLocalGetLocalBinOp { left, .. } => Insn::GetLocal(left, 0),
+            Insn::GetLocalGetIvarBinOp { slot, .. } => Insn::GetLocal(slot, 0),
             other => other,
         }
     }
@@ -672,6 +683,12 @@ fn superinstruction(run: &[Insn]) -> Option<Insn> {
             Insn::BinOp(op),
             ..,
         ] if op.light() => Some(Insn::GetLocalGetLocalBinOp { left, right, op }),
+        [
+            Insn::GetLocal(slot, 0),
+            Insn::GetIvar(_, site),
+            Insn::BinOp(op),
+            ..,
+        ] if op.light() => Some(Insn::GetLocalGetIvarBinOp { slot, site, op }),
         _ => None,
     }
 }
@@ -1375,6 +1392,34 @@ mod tests {
         let written = outer.clone();
         fuse(&mut outer);
         assert_eq!(outer, written);
+    }
+
+    /// A local and an instance variable under an operator are one
+    /// [`Insn::GetLocalGetIvarBinOp`], carrying the read's cache site.
+    #[test]
+    fn a_local_and_an_instance_variable_fuse_with_the_reads_site() {
+        let mut insns = vec![
+            Insn::GetLocal(2, 0),
+            Insn::GetIvar(5, 9),
+            Insn::BinOp(BinOp::Add),
+            Insn::SetLocal(2, 0),
+            Insn::GetLocal(2, 0),
+            Insn::GetIvar(5, 10),
+            Insn::BinOp(BinOp::Mod),
+            Insn::Leave,
+        ];
+        let written = insns.clone();
+        fuse(&mut insns);
+        assert_eq!(
+            insns[0],
+            Insn::GetLocalGetIvarBinOp {
+                slot: 2,
+                site: 9,
+                op: BinOp::Add
+            }
+        );
+        assert_eq!(insns[1..], written[1..], "`%` is not fused");
+        assert_eq!(insns[0].head(), written[0]);
     }
 
     #[test]
