@@ -51,6 +51,11 @@ Reporting `"spinel"` rather than `"ruby"` is honest and is what JRuby and Truffl
 
 **Language version.** Spinel implements one Ruby language version at a time, the latest stable, and follows Ruby's December releases. `ruby "3.3"` in a Gemfile and a `.ruby-version` that names a CRuby version are read and produce a warning, never an error, because the intent is "this app expects at least that Ruby". `--strict-ruby-version` turns the warning into an error for CI.
 
+- Who reads them: `spinel run` and `spinel <file>`, before the program starts. Only `run` takes `--strict-ruby-version`, which exits 1 without running anything. `ruby`'s command line (`spinel -e`, `spinel -w app.rb`) reads neither, as `ruby` does not.
+- Where: the nearest `.ruby-version` and the nearest `Gemfile`, each looked for from the current directory upward. Each request that is not met is one line on stderr naming the file.
+- `.ruby-version`, first word: `spinel-<version>` (what `spinel init` writes) is met by this Spinel or a later one; `<version>` or `ruby-<version>` is a CRuby version, met when `RUBY_VERSION` is that version or later; bare `spinel` or `ruby` is always met. Any other word, such as `jruby-9.4` or `ruby-head`, is not.
+- Gemfile: the quoted requirements of a `ruby` line, each read as a minimum, so `ruby "~> 3.3.0"` and `ruby ">= 3.1", "< 5"` are met by Ruby 4.0. Upper bounds and `!=` are passed over, and keyword options (`engine:`, `file:`) are not read. The Gemfile is scanned line by line, not evaluated, so a version computed at runtime is not seen.
+
 ## `--dump-bytecode`
 
 `spinel run --dump-bytecode file.rb` is to the compiler what `spinel parse` is to the tree. It compiles the file and prints its `Iseq` in Rust's `Debug` form, without running it: the instructions, one per `pc`, with the literal and symbol pools, the locals, the call sites and the nested bodies (`children`). A file that does not parse reports its syntax errors and exits with the status `spinel run` gives them.

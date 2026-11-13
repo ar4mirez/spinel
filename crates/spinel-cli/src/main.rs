@@ -7,6 +7,7 @@
 
 mod init;
 mod ruby_args;
+mod ruby_version;
 mod stdlib;
 mod tree;
 
@@ -75,6 +76,13 @@ enum Command {
         /// the syntax tree.
         #[arg(long)]
         dump_bytecode: bool,
+
+        /// Fail when the project's `.ruby-version` or Gemfile `ruby` directive
+        /// asks for a Ruby this build does not implement.
+        ///
+        /// Without it the mismatch is a warning and the program runs.
+        #[arg(long)]
+        strict_ruby_version: bool,
     },
 
     /// Scaffold a project in the current directory.
@@ -143,7 +151,13 @@ fn main() -> ExitCode {
             path,
             args,
             dump_bytecode,
-        }) => return run_command(&path, &args, dump_bytecode),
+            strict_ruby_version,
+        }) => {
+            if !project_ruby_version_ok(strict_ruby_version) {
+                return ExitCode::FAILURE;
+            }
+            return run_command(&path, &args, dump_bytecode);
+        }
         None => {}
     }
 
@@ -156,6 +170,8 @@ fn main() -> ExitCode {
         // of it; anything else is a script, as `ruby` takes it, and a missing
         // one is `ruby`'s LoadError.
         if looks_like_a_ruby_file(&argument) || !looks_like_a_subcommand_typo(&argument) {
+            // The same as `spinel run`, which reads the project's Ruby.
+            project_ruby_version_ok(false);
             let mut words = vec![argument];
             words.extend(cli.args);
             let raw: Vec<Vec<u8>> = words.iter().map(|w| w.clone().into_bytes()).collect();
@@ -224,6 +240,28 @@ fn init_command() -> ExitCode {
 // ---------------------------------------------------------------------------
 // spinel run
 // ---------------------------------------------------------------------------
+
+/// Report each Ruby the project asks for that this build does not implement
+/// (docs/cli.md, "Language version"): a warning, or with `strict` an error.
+/// Returns false only when `strict` and something did not match.
+fn project_ruby_version_ok(strict: bool) -> bool {
+    let Ok(dir) = std::env::current_dir() else {
+        return true;
+    };
+    let mismatches = ruby_version::check(&dir);
+    for mismatch in &mismatches {
+        let file = mismatch.file.display();
+        if strict {
+            eprintln!(
+                "spinel: {file} {} (--strict-ruby-version)",
+                mismatch.message
+            );
+        } else {
+            eprintln!("spinel: warning: {file} {}", mismatch.message);
+        }
+    }
+    !(strict && !mismatches.is_empty())
+}
 
 /// Exit code for a Ruby program that ended in an uncaught exception. Ruby exits
 /// 1, and a script wrapping `spinel run` should not have to tell the two apart.
