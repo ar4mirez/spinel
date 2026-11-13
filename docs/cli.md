@@ -26,13 +26,18 @@ Before user code, and before any `-r` file, the VM runs the embedded `shims/setu
 
 1. Walk up from the current directory to find `.spinel/gem_home/`. If found, set `GEM_HOME` and `GEM_PATH` to it, as `bundle exec` does for a `BUNDLE_PATH`, and put its `bin/` first on `PATH` (once, so a nested `spinel` does not grow it). They are set in the environment, so child processes see the same gems and executables; RubyGems reads them when it first needs its paths, and a `Gem` already loaded is told with `Gem.paths=`. RubyGems does not load at boot yet (#319), so today the environment is what carries the gem home. Outside a project nothing changes.
 2. Load `.spinel/require_map.bin` if present (see below). Not yet: #66.
-3. Register the bytecode cache directory, `.spinel/bytecode/` beside the gem home. Not yet: there is no cache to register until #40.
+3. Register the bytecode cache directory, `.spinel/bytecode/` beside the gem home (#40), so `require` reads and writes it. Outside a project there is none, and nothing is read or written.
 
 Bin stubs in `.spinel/gem_home/bin/` start with `#!/usr/bin/env spinel` and call `Gem.activate_bin_path`, the same shape RubyGems generates. `Gem.ruby` returns the absolute path of the running `spinel` binary so anything that spawns "the current Ruby" spawns Spinel.
 
 ## Bytecode cache and require map
 
-- `.spinel/bytecode/<sha256 of source>.sbc` holds compiled bytecode. `require` checks it before parsing. The format is position-independent: symbols are stored by name and relinked on load, so a cache file is valid across processes and Ractors.
+- `.spinel/bytecode/<sha256 of source>.sbc` holds compiled bytecode (#40, `crates/spinel-vm/src/sbc.rs`). `require`, `require_relative` and `load` check it before parsing a file from disk, and write it after compiling one. The format is position-independent: symbols are stored by name and relinked on load, so a cache file is valid across processes and Ractors; what a read gives back is the same immutable, `Send + Sync` `Iseq` the compiler makes.
+  - A file is used only when its header matches: the format, a fingerprint of the compiler (a hash, made by `crates/spinel-vm/build.rs`, of the sources of `spinel-vm`, `spinel-parse`, `spinel-ast` and `spinel-regex`, of `spinel-core`'s parse hook, and of `Cargo.lock`), the source's hash, the path the source was compiled under — `__FILE__`, `__dir__` and backtraces carry it — and the `frozen_string_literal` setting. Then the payload's length and SHA-256 are checked, and the payload is decoded with every length and tag checked. Anything else — another build's file, a truncated or corrupted one — is parsed past as if there were no cache, and overwritten.
+  - The parser's warnings about the file are kept in the entry and given again on a hit, so a run with the cache prints what a run without it prints. A file that does not parse, or that the compiler refused part of, is never written.
+  - Writes go to a temporary file in the same directory and are renamed into place, so processes sharing a cache never read half a file. A file that cannot be written is a slower next run, never an error.
+  - The main script, `-e` and standard input are compiled every time, so `--dump-bytecode` and syntax errors in them read as before; and a file shipped inside the binary is not the project's to cache.
+  - `// ponytail:` two files with the same bytes at different paths share one cache file name, and each run that loads both rewrites it for the other. The upgrade, if a project shows it, is the path's hash in the name.
 - `.spinel/require_map.bin` maps feature name to absolute path for every file under every installed gem's `require_paths` plus the stdlib. `require` consults it first and falls back to a normal `$LOAD_PATH` search on a miss, so the map can be stale without being wrong. `spinel install` regenerates both.
 
 ## How Spinel identifies itself

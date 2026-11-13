@@ -1,2 +1,3 @@
 # The repository ignores `.spinel/`; this fixture is a project that has one.
 !.spinel/
+.spinel/bytecode/

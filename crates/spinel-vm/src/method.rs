@@ -496,6 +496,9 @@ pub enum Native {
     /// the top level, in a frame of its own (#39). `require` and `load` are
     /// Ruby around it.
     LoadFile,
+    /// `Kernel#__bytecode_cache__(dir)`: keep compiled files in `dir` (#40).
+    /// `shims/setup.rb` calls it with the project's `.spinel/bytecode/`.
+    BytecodeCache,
     /// `Kernel#__refusal_boundary__(limit) { ... }`: run the block with a
     /// budget of `limit` instructions. A refusal inside it — something this
     /// VM cannot run yet, or running past the budget — ends the block and

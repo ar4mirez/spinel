@@ -39,7 +39,9 @@ use std::alloc;
 use std::collections::HashMap;
 use std::fmt;
 use std::marker::PhantomData;
+use std::path::{Path, PathBuf};
 use std::ptr::{self, NonNull};
+use std::sync::Arc;
 
 use crate::class::Classes;
 use crate::shape::{ShapeId, Shapes};
@@ -390,6 +392,10 @@ pub struct Heap {
     /// `spinel_core::boot`. This crate does not depend on Prism, so without
     /// one `eval` of a String is refused.
     parser: Option<Parser>,
+    /// Where `require` keeps compiled files (#40): the project's
+    /// `.spinel/bytecode/`, which `shims/setup.rb` registers. `None` outside
+    /// a project, and then nothing is read or written.
+    bytecode_cache: Option<Arc<Path>>,
     /// See [`Libraries`]. Installed by `spinel_core::boot`, beside the parser.
     libraries: Option<Libraries>,
     /// Whether code this heap was meant to run did not all run — see
@@ -717,6 +723,7 @@ impl Heap {
             errinfo: Value::NIL,
             main: Value::NIL,
             parser: None,
+            bytecode_cache: None,
             libraries: None,
             partial: false,
             autoloads: Vec::new(),
@@ -1764,6 +1771,16 @@ impl<'h> HandleScope<'h> {
 
     pub(crate) fn parser(&self) -> Option<Parser> {
         self.heap.parser
+    }
+
+    /// Read and write compiled files in `dir` from now on (#40). `None`
+    /// turns the cache off.
+    pub fn set_bytecode_cache(&mut self, dir: Option<PathBuf>) {
+        self.heap.bytecode_cache = dir.map(Arc::from);
+    }
+
+    pub fn bytecode_cache(&self) -> Option<Arc<Path>> {
+        self.heap.bytecode_cache.clone()
     }
 
     /// Install the table of libraries shipped inside the binary.

@@ -14,8 +14,10 @@
 #    ponytail: RubyGems is not loaded at boot yet (#319), so today it is the
 #    environment that carries the gem home; `Gem.paths=` starts mattering then.
 # 2. `.spinel/require_map.bin`: not read yet (#66).
-# 3. The bytecode cache, `.spinel/bytecode/` beside the gem home: there is no
-#    cache to register yet (#40), which reads it from here when it lands.
+# 3. The bytecode cache (#40): `.spinel/bytecode/` beside the gem home is
+#    where `require` keeps each file's compiled bytecode, named by the
+#    SHA-256 of its source, and looks before it parses. The directory is
+#    made on the first write.
 #
 # Outside a project nothing changes, and that is not an error.
 
@@ -50,4 +52,5 @@ if gem_home
   if defined?(Gem) && Gem.respond_to?(:paths=)
     Gem.paths = { "GEM_HOME" => gem_home, "GEM_PATH" => gem_home }
   end
+  __bytecode_cache__(File.join(File.dirname(gem_home), "bytecode"))
 end

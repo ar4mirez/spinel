@@ -5,9 +5,17 @@
 //! (`Gem::Platform.local`). So Spinel spells it the same way and also decides it
 //! when it is built: `x86_64-linux`, `aarch64-linux`, `x86_64-linux-musl`,
 //! `arm64-darwin24`. The result reaches `lib.rs` as `SPINEL_RUBY_PLATFORM`.
+//!
+//! It also fingerprints the compiler for the bytecode cache (#40,
+//! `src/sbc.rs`): a hash of every source that decides what a file compiles
+//! to, as `SPINEL_BYTECODE_FINGERPRINT`. A cache file written by a build with
+//! another fingerprint is stale and is parsed again.
 
 use std::env;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+
+use sha2::{Digest, Sha256};
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
@@ -20,6 +28,75 @@ fn main() {
         "cargo:rustc-env=SPINEL_RUBY_PLATFORM={}",
         platform(&arch, &os, &target_env, native)
     );
+    println!(
+        "cargo:rustc-env=SPINEL_BYTECODE_FINGERPRINT={}",
+        bytecode_fingerprint()
+    );
+}
+
+/// What a file compiles to depends on the lowering (`spinel-parse`, and
+/// through its lock entry the Prism it wraps), on the regexp checks it runs
+/// while lowering (`spinel-regex`, with the tables its build generates), on
+/// the parse hook that turns the result into warnings or a SyntaxError
+/// (`spinel-core`'s `parse_eval`), on the tree it lowers to (`spinel-ast`),
+/// and on the compiler and the instruction set (this crate). So the
+/// fingerprint hashes all of their sources, by path and contents, and the
+/// lock file. Coarser than it has to be — a change to the interpreter
+/// alone also invalidates every cache — but never finer, which is the
+/// direction that would run stale bytecode.
+///
+/// A source tree without the sibling crates (a packaged build) hashes what
+/// it has: this crate's own sources still pin the instruction set.
+fn bytecode_fingerprint() -> String {
+    let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap_or_default());
+    let crates = manifest.parent().map(Path::to_path_buf).unwrap_or_default();
+    let mut inputs = vec![
+        manifest.join("src"),
+        crates.join("spinel-parse/src"),
+        crates.join("spinel-parse/Cargo.toml"),
+        crates.join("spinel-ast/src"),
+        crates.join("spinel-ast/Cargo.toml"),
+        crates.join("spinel-regex"),
+        crates.join("spinel-core/src"),
+    ];
+    if let Some(root) = crates.parent() {
+        inputs.push(root.join("Cargo.lock"));
+    }
+    let mut files = Vec::new();
+    for input in &inputs {
+        println!("cargo:rerun-if-changed={}", input.display());
+        collect(input, &mut files);
+    }
+    files.sort();
+    let mut hasher = Sha256::new();
+    hasher.update(env::var("CARGO_PKG_VERSION").unwrap_or_default().as_bytes());
+    for file in &files {
+        let Ok(contents) = std::fs::read(file) else {
+            continue;
+        };
+        let name = file.strip_prefix(&crates).unwrap_or(file);
+        let name = name.to_string_lossy();
+        hasher.update((name.len() as u64).to_le_bytes());
+        hasher.update(name.as_bytes());
+        hasher.update((contents.len() as u64).to_le_bytes());
+        hasher.update(&contents);
+    }
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// Every file at or under `path`.
+fn collect(path: &Path, files: &mut Vec<PathBuf>) {
+    if path.is_file() {
+        files.push(path.to_path_buf());
+    } else if let Ok(entries) = std::fs::read_dir(path) {
+        for entry in entries.flatten() {
+            collect(&entry.path(), files);
+        }
+    }
 }
 
 fn platform(arch: &str, os: &str, target_env: &str, native: bool) -> String {
