@@ -98,12 +98,20 @@ fn bundle_gemfile_names_the_gemfile_wherever_it_runs() {
 /// A Gemfile of `contents` in a directory of its own, and what the shim
 /// makes of it, with the Gemfile's path.
 fn eval_contents(name: &str, contents: &str) -> (Output, PathBuf) {
+    eval_files(name, contents, &[])
+}
+
+/// As `eval_contents`, with `files` (name, contents) beside the Gemfile.
+fn eval_files(name: &str, contents: &str, files: &[(&str, &str)]) -> (Output, PathBuf) {
     let dir =
         std::env::temp_dir().join(format!("spinel-gemfile-eval-{name}-{}", std::process::id()));
     fs::create_dir_all(&dir).expect("the temporary directory is writable");
     let dir = fs::canonicalize(&dir).expect("the temporary directory exists");
     let gemfile = dir.join("Gemfile");
     fs::write(&gemfile, contents).expect("the Gemfile is writable");
+    for (file, text) in files {
+        fs::write(dir.join(file), text).expect("the file is writable");
+    }
     let out = eval_in(&dir, &[]);
     let _ = fs::remove_dir_all(&dir);
     (out, gemfile)
@@ -182,4 +190,45 @@ fn a_gem_listed_twice_alike_is_a_warning() {
          While it's not a problem now, it could cause errors if you change the version of one of them later.\n"
     );
     assert_eq!(stdout(&out).matches("\"name\": \"rack\"").count(), 2);
+}
+
+#[test]
+fn one_rubygems_source_spelled_with_and_without_a_slash_is_a_warning() {
+    let (out, _) = eval_contents(
+        "sameremote",
+        "gem \"rack\", source: \"https://gems.example.com\"\n\
+         source \"https://gems.example.com/\" do\n  gem \"rack\"\nend\n",
+    );
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    assert!(
+        stderr(&out).starts_with("Your Gemfile lists the gem rack (>= 0) more than once.\n"),
+        "stderr: {}",
+        stderr(&out)
+    );
+    assert_eq!(stdout(&out).matches("\"name\": \"rack\"").count(), 2);
+}
+
+#[test]
+fn an_absolute_ruby_version_file_is_read_as_given() {
+    let (out, _) = eval_files(
+        "rubyfile",
+        "ruby file: File.expand_path(\".ruby-version\", __dir__)\n",
+        &[(".ruby-version", "ruby-3.4.1\n")],
+    );
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    assert!(
+        stdout(&out).contains("\"versions\": [\n      \"3.4.1\"\n    ]"),
+        "stdout: {}",
+        stdout(&out)
+    );
+}
+
+#[test]
+fn a_missing_ruby_version_file_is_an_error() {
+    assert_rejected(
+        "norubyfile",
+        "ruby file: \".ruby-version\"\n",
+        "Could not find version file .ruby-version",
+        1,
+    );
 }

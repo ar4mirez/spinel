@@ -355,7 +355,7 @@ class GemfileEval
   end
 
   def ruby_file(name)
-    content = File.read(File.join(gemfile_root, name.to_s))
+    content = File.read(File.expand_path(name.to_s, gemfile_root))
     m = /^ruby[\s-]*(?:=\s*)?(?:"([^"]+)"|'([^']+)'|([^\s#"']+))/.match(content)
     m ? m[1] || m[2] || m[3] : content.strip
   rescue Errno::ENOENT
@@ -369,6 +369,10 @@ class GemfileEval
       "#{m[1] || "="} #{m[2].gsub("-", ".pre.")}"
     end
     list.empty? ? [">= 0"] : list
+  end
+
+  def source_key(source)
+    source && source["type"] == "rubygems" ? remote_key(source["remote"]) : source
   end
 
   def describe(source)
@@ -390,7 +394,7 @@ class GemfileEval
         raise Error, "You cannot specify the same gem twice with different version requirements.\n" \
           "You specified: #{shown.(current)} and #{shown.(dep)}"
       end
-      if current["source"] != dep["source"]
+      if source_key(current["source"]) != source_key(dep["source"])
         raise Error, "You cannot specify the same gem twice coming from different sources.\n" \
           "You specified that #{shown.(dep)} should come from #{describe(current["source"])} and #{describe(dep["source"])}\n"
       end
