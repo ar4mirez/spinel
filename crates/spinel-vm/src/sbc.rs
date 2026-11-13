@@ -51,7 +51,8 @@ const MAGIC: &[u8; 8] = b"SPINELBC";
 const FORMAT: u32 = 1;
 
 /// The compiler's identity, from `build.rs`: hex SHA-256 over the sources of
-/// `spinel-vm`, `spinel-parse` and `spinel-ast` and the lock file.
+/// `spinel-vm`, `spinel-parse`, `spinel-ast` and `spinel-regex`, the parse
+/// hook in `spinel-core`, and the lock file.
 pub const FINGERPRINT: &str = env!("SPINEL_BYTECODE_FINGERPRINT");
 
 /// The deepest nesting of bodies the cache writes or reads. A real program's

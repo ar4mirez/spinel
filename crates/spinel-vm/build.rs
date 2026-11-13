@@ -35,10 +35,13 @@ fn main() {
 }
 
 /// What a file compiles to depends on the lowering (`spinel-parse`, and
-/// through its lock entry the Prism it wraps), on the tree it lowers to
-/// (`spinel-ast`), and on the compiler and the instruction set (this crate).
-/// So the fingerprint hashes all of their sources, by path and contents, and
-/// the lock file. Coarser than it has to be — a change to the interpreter
+/// through its lock entry the Prism it wraps), on the regexp checks it runs
+/// while lowering (`spinel-regex`, with the tables its build generates), on
+/// the parse hook that turns the result into warnings or a SyntaxError
+/// (`spinel-core`'s `parse_eval`), on the tree it lowers to (`spinel-ast`),
+/// and on the compiler and the instruction set (this crate). So the
+/// fingerprint hashes all of their sources, by path and contents, and the
+/// lock file. Coarser than it has to be — a change to the interpreter
 /// alone also invalidates every cache — but never finer, which is the
 /// direction that would run stale bytecode.
 ///
@@ -53,6 +56,8 @@ fn bytecode_fingerprint() -> String {
         crates.join("spinel-parse/Cargo.toml"),
         crates.join("spinel-ast/src"),
         crates.join("spinel-ast/Cargo.toml"),
+        crates.join("spinel-regex"),
+        crates.join("spinel-core/src"),
     ];
     if let Some(root) = crates.parent() {
         inputs.push(root.join("Cargo.lock"));
