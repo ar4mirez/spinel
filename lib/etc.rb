@@ -18,17 +18,22 @@ module Etc
 
   # --- conversions, as etc.c's macros make them ------------------------------
 
+  # A Float as `rb_num2long` takes it: finite and within a C long.
+  def self.__float_long__(value)
+    unless value.finite? && value >= -9_223_372_036_854_775_808.0 && value < 9_223_372_036_854_775_808.0
+      raise RangeError, "float #{format("%-.10g", value)} out of range of integer"
+    end
+    value.to_i
+  end
+  private_class_method :__float_long__
+
   # `NUM2UINT`, which `uid_t` and `gid_t` go through: a C long, then the
   # range of an unsigned int, where -1 stands for the largest.
   def self.__uid_value__(value)
     value =
       case value
       when Integer then value
-      when Float
-        unless value.finite? && value >= -9_223_372_036_854_775_808.0 && value < 9_223_372_036_854_775_808.0
-          raise RangeError, "float #{format("%-.10g", value)} out of range of integer"
-        end
-        value.to_i
+      when Float then __float_long__(value)
       when nil then raise TypeError, "no implicit conversion of nil into Integer"
       else Integer.__index__(value)
       end
@@ -47,7 +52,7 @@ module Etc
 
   # `NUM2INT`, for a `sysconf`, `confstr` or `pathconf` name.
   def self.__c_int__(value)
-    value = Float === value ? value.to_i : Integer.__index__(value)
+    value = Float === value ? __float_long__(value) : Integer.__index__(value)
     if value > 0x7FFF_FFFF_FFFF_FFFF || value < -0x8000_0000_0000_0000
       raise RangeError, "bignum too big to convert into 'long'"
     end
