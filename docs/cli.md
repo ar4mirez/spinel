@@ -21,11 +21,11 @@ What `spinel` does outside the engine: how it runs a file, how it reports itself
 
 ## What `spinel run` sets up
 
-Before user code, the VM runs the embedded `shims/setup.rb`:
+Before user code, and before any `-r` file, the VM runs the embedded `shims/setup.rb`. `spinel run` and `spinel <file>` run it; `ruby`'s command line (`spinel -e`, `spinel -w app.rb`) does not, as `ruby` looks for no project.
 
-1. Walk up from the current directory to find `.spinel/gem_home/`. If found, set `Gem.paths` to it and prepend its `bin/` to `PATH` for child processes.
-2. Load `.spinel/require_map.bin` if present (see below).
-3. Register the bytecode cache directory.
+1. Walk up from the current directory to find `.spinel/gem_home/`. If found, set `GEM_HOME` and `GEM_PATH` to it, as `bundle exec` does for a `BUNDLE_PATH`, and put its `bin/` first on `PATH` (once, so a nested `spinel` does not grow it). They are set in the environment, so child processes see the same gems and executables; RubyGems reads them when it first needs its paths, and a `Gem` already loaded is told with `Gem.paths=`. RubyGems does not load at boot yet (#319), so today the environment is what carries the gem home. Outside a project nothing changes.
+2. Load `.spinel/require_map.bin` if present (see below). Not yet: #66.
+3. Register the bytecode cache directory, `.spinel/bytecode/` beside the gem home. Not yet: there is no cache to register until #40.
 
 Bin stubs in `.spinel/gem_home/bin/` start with `#!/usr/bin/env spinel` and call `Gem.activate_bin_path`, the same shape RubyGems generates. `Gem.ruby` returns the absolute path of the running `spinel` binary so anything that spawns "the current Ruby" spawns Spinel.
 
