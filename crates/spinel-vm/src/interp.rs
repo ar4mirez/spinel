@@ -17970,13 +17970,7 @@ fn native_ops(scope: &mut HandleScope<'_>, frame: &Call, which: usize) -> u32 {
         let eq = (native >> operator_guard(BinOp::Neq)) & 1;
         (native & !(1 << BinOp::Neq as usize)) | (eq << BinOp::Neq as usize)
     };
-    if native != u32::MAX
-        && frame
-            .iseq
-            .path
-            .as_deref()
-            .is_some_and(|path| path.starts_with("<internal:"))
-    {
+    if native != u32::MAX && scope.call_caches().internal(frame.cache_base) {
         return u32::MAX;
     }
     native
