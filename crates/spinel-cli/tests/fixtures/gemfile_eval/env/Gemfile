@@ -1,0 +1,11 @@
+source "https://rubygems.org"
+
+gem "rake", "~> 13.0"
+
+if ENV["GEMFILE_EVAL_REDIS"]
+  gem "redis", "~> 5.0", require: "redis/client"
+else
+  gem "sqlite3"
+end
+
+gem "puma" unless ENV.fetch("GEMFILE_EVAL_REDIS", "").empty?

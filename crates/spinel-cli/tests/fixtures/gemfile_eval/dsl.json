@@ -1,0 +1,495 @@
+{
+  "gemfiles": [
+    "@ROOT@/dsl/Gemfile",
+    "@ROOT@/dsl/gemfiles/common.rb",
+    "@ROOT@/dsl/gemfiles/nested.rb"
+  ],
+  "source": {
+    "type": "rubygems",
+    "remote": "https://rubygems.org",
+    "cooldown": 2
+  },
+  "ruby": {
+    "versions": [
+      "3.4.1"
+    ],
+    "engine": "ruby",
+    "engine_versions": [
+      "3.4.1"
+    ],
+    "patchlevel": null
+  },
+  "optional_groups": [
+    "ci"
+  ],
+  "gemspecs": [
+    {
+      "path": ".",
+      "root": "@ROOT@/dsl",
+      "files": [
+        "@ROOT@/dsl/dsl_fixture.gemspec"
+      ],
+      "name": null,
+      "glob": null,
+      "development_group": "development",
+      "gemfile": "@ROOT@/dsl/Gemfile"
+    }
+  ],
+  "dependencies": [
+    {
+      "name": "rails",
+      "requirements": [
+        "~> 8.0",
+        ">= 8.0.1"
+      ],
+      "groups": [
+        "default"
+      ],
+      "platforms": [],
+      "source": null,
+      "require": null,
+      "install_if": true,
+      "env": null,
+      "force_ruby_platform": null,
+      "gemfile": "@ROOT@/dsl/Gemfile",
+      "options": {}
+    },
+    {
+      "name": "pg",
+      "requirements": [
+        "= 1.5.0.pre.rc1"
+      ],
+      "groups": [
+        "default"
+      ],
+      "platforms": [],
+      "source": null,
+      "require": [],
+      "install_if": true,
+      "env": null,
+      "force_ruby_platform": null,
+      "gemfile": "@ROOT@/dsl/Gemfile",
+      "options": {}
+    },
+    {
+      "name": "bootsnap",
+      "requirements": [
+        ">= 0"
+      ],
+      "groups": [
+        "default"
+      ],
+      "platforms": [],
+      "source": null,
+      "require": [
+        "bootsnap",
+        "bootsnap/setup"
+      ],
+      "install_if": true,
+      "env": null,
+      "force_ruby_platform": null,
+      "gemfile": "@ROOT@/dsl/Gemfile",
+      "options": {}
+    },
+    {
+      "name": "tzinfo-data",
+      "requirements": [
+        ">= 0"
+      ],
+      "groups": [
+        "default"
+      ],
+      "platforms": [
+        "windows",
+        "jruby"
+      ],
+      "source": null,
+      "require": null,
+      "install_if": true,
+      "env": null,
+      "force_ruby_platform": null,
+      "gemfile": "@ROOT@/dsl/Gemfile",
+      "options": {}
+    },
+    {
+      "name": "racc",
+      "requirements": [
+        ">= 0"
+      ],
+      "groups": [
+        "default"
+      ],
+      "platforms": [],
+      "source": null,
+      "require": null,
+      "install_if": true,
+      "env": null,
+      "force_ruby_platform": true,
+      "gemfile": "@ROOT@/dsl/Gemfile",
+      "options": {}
+    },
+    {
+      "name": "rack",
+      "requirements": [
+        ">= 0"
+      ],
+      "groups": [
+        "default"
+      ],
+      "platforms": [],
+      "source": {
+        "type": "git",
+        "uri": "https://github.com/rack/rack.git",
+        "branch": null,
+        "ref": "abc123",
+        "tag": null,
+        "submodules": null,
+        "glob": null
+      },
+      "require": null,
+      "install_if": true,
+      "env": null,
+      "force_ruby_platform": null,
+      "gemfile": "@ROOT@/dsl/Gemfile",
+      "options": {}
+    },
+    {
+      "name": "sinatra",
+      "requirements": [
+        ">= 0"
+      ],
+      "groups": [
+        "default"
+      ],
+      "platforms": [],
+      "source": {
+        "type": "git",
+        "uri": "https://github.com/sinatra/sinatra.git",
+        "branch": null,
+        "ref": "refs/pull/42/head",
+        "tag": null,
+        "submodules": null,
+        "glob": null
+      },
+      "require": null,
+      "install_if": true,
+      "env": null,
+      "force_ruby_platform": null,
+      "gemfile": "@ROOT@/dsl/Gemfile",
+      "options": {}
+    },
+    {
+      "name": "edge",
+      "requirements": [
+        ">= 0"
+      ],
+      "groups": [
+        "default"
+      ],
+      "platforms": [],
+      "source": {
+        "type": "git",
+        "uri": "https://example.com/edge.git",
+        "branch": "main",
+        "ref": null,
+        "tag": null,
+        "submodules": true,
+        "glob": null
+      },
+      "require": null,
+      "install_if": true,
+      "env": null,
+      "force_ruby_platform": null,
+      "gemfile": "@ROOT@/dsl/Gemfile",
+      "options": {}
+    },
+    {
+      "name": "forged",
+      "requirements": [
+        ">= 0"
+      ],
+      "groups": [
+        "default"
+      ],
+      "platforms": [],
+      "source": {
+        "type": "git",
+        "uri": "https://forge.example.com/team/forged.git",
+        "branch": null,
+        "ref": null,
+        "tag": "v2",
+        "submodules": null,
+        "glob": null
+      },
+      "require": null,
+      "install_if": true,
+      "env": null,
+      "force_ruby_platform": null,
+      "gemfile": "@ROOT@/dsl/Gemfile",
+      "options": {}
+    },
+    {
+      "name": "admin",
+      "requirements": [
+        ">= 0"
+      ],
+      "groups": [
+        "default"
+      ],
+      "platforms": [],
+      "source": {
+        "type": "path",
+        "path": "engines/admin",
+        "root": "@ROOT@/dsl",
+        "glob": null
+      },
+      "require": null,
+      "install_if": true,
+      "env": null,
+      "force_ruby_platform": null,
+      "gemfile": "@ROOT@/dsl/Gemfile",
+      "options": {}
+    },
+    {
+      "name": "custom",
+      "requirements": [
+        "~> 1.2"
+      ],
+      "groups": [
+        "default"
+      ],
+      "platforms": [],
+      "source": null,
+      "require": null,
+      "install_if": true,
+      "env": null,
+      "force_ruby_platform": null,
+      "gemfile": "@ROOT@/dsl/Gemfile",
+      "options": {
+        "sinatra_option": "kept",
+        "name": "custom"
+      }
+    },
+    {
+      "name": "rspec",
+      "requirements": [
+        "~> 3.13"
+      ],
+      "groups": [
+        "development",
+        "test"
+      ],
+      "platforms": [],
+      "source": null,
+      "require": null,
+      "install_if": true,
+      "env": null,
+      "force_ruby_platform": null,
+      "gemfile": "@ROOT@/dsl/Gemfile",
+      "options": {}
+    },
+    {
+      "name": "debug",
+      "requirements": [
+        ">= 0"
+      ],
+      "groups": [
+        "development",
+        "test",
+        "debugger"
+      ],
+      "platforms": [
+        "mri"
+      ],
+      "source": null,
+      "require": null,
+      "install_if": true,
+      "env": null,
+      "force_ruby_platform": null,
+      "gemfile": "@ROOT@/dsl/Gemfile",
+      "options": {}
+    },
+    {
+      "name": "simplecov",
+      "requirements": [
+        ">= 0"
+      ],
+      "groups": [
+        "ci"
+      ],
+      "platforms": [],
+      "source": null,
+      "require": null,
+      "install_if": true,
+      "env": null,
+      "force_ruby_platform": null,
+      "gemfile": "@ROOT@/dsl/Gemfile",
+      "options": {}
+    },
+    {
+      "name": "private",
+      "requirements": [
+        ">= 0"
+      ],
+      "groups": [
+        "default"
+      ],
+      "platforms": [],
+      "source": {
+        "type": "rubygems",
+        "remote": "https://gems.example.com",
+        "cooldown": null
+      },
+      "require": null,
+      "install_if": true,
+      "env": null,
+      "force_ruby_platform": null,
+      "gemfile": "@ROOT@/dsl/Gemfile",
+      "options": {}
+    },
+    {
+      "name": "vendored",
+      "requirements": [
+        ">= 0"
+      ],
+      "groups": [
+        "default"
+      ],
+      "platforms": [],
+      "source": {
+        "type": "path",
+        "path": "vendor",
+        "root": "@ROOT@/dsl",
+        "glob": null
+      },
+      "require": null,
+      "install_if": true,
+      "env": null,
+      "force_ruby_platform": null,
+      "gemfile": "@ROOT@/dsl/Gemfile",
+      "options": {}
+    },
+    {
+      "name": "mono-core",
+      "requirements": [
+        ">= 0"
+      ],
+      "groups": [
+        "default"
+      ],
+      "platforms": [],
+      "source": {
+        "type": "git",
+        "uri": "https://example.com/mono.git",
+        "branch": null,
+        "ref": null,
+        "tag": "v1",
+        "submodules": null,
+        "glob": "gems/*/*.gemspec"
+      },
+      "require": null,
+      "install_if": true,
+      "env": null,
+      "force_ruby_platform": null,
+      "gemfile": "@ROOT@/dsl/Gemfile",
+      "options": {}
+    },
+    {
+      "name": "json",
+      "requirements": [
+        ">= 0"
+      ],
+      "groups": [
+        "default"
+      ],
+      "platforms": [],
+      "source": {
+        "type": "git",
+        "uri": "https://github.com/ruby/json.git",
+        "branch": "master",
+        "ref": null,
+        "tag": null,
+        "submodules": null,
+        "glob": null
+      },
+      "require": null,
+      "install_if": true,
+      "env": null,
+      "force_ruby_platform": null,
+      "gemfile": "@ROOT@/dsl/Gemfile",
+      "options": {}
+    },
+    {
+      "name": "never",
+      "requirements": [
+        ">= 0"
+      ],
+      "groups": [
+        "default"
+      ],
+      "platforms": [],
+      "source": null,
+      "require": null,
+      "install_if": false,
+      "env": null,
+      "force_ruby_platform": null,
+      "gemfile": "@ROOT@/dsl/Gemfile",
+      "options": {}
+    },
+    {
+      "name": "feature",
+      "requirements": [
+        ">= 0"
+      ],
+      "groups": [
+        "default"
+      ],
+      "platforms": [],
+      "source": null,
+      "require": null,
+      "install_if": true,
+      "env": "GEMFILE_EVAL_FEATURE",
+      "force_ruby_platform": null,
+      "gemfile": "@ROOT@/dsl/Gemfile",
+      "options": {}
+    },
+    {
+      "name": "common",
+      "requirements": [
+        "= 1.0"
+      ],
+      "groups": [
+        "default"
+      ],
+      "platforms": [],
+      "source": null,
+      "require": null,
+      "install_if": true,
+      "env": null,
+      "force_ruby_platform": null,
+      "gemfile": "@ROOT@/dsl/gemfiles/common.rb",
+      "options": {}
+    },
+    {
+      "name": "nested",
+      "requirements": [
+        ">= 0"
+      ],
+      "groups": [
+        "default"
+      ],
+      "platforms": [],
+      "source": {
+        "type": "rubygems",
+        "remote": "https://nested.example.com",
+        "cooldown": null
+      },
+      "require": null,
+      "install_if": true,
+      "env": null,
+      "force_ruby_platform": null,
+      "gemfile": "@ROOT@/dsl/gemfiles/nested.rb",
+      "options": {}
+    }
+  ]
+}

@@ -1,0 +1,56 @@
+# Every Bundler::Dsl method shims/gemfile_eval.rb handles, once each.
+source "https://rubygems.org", cooldown: 2
+ruby file: ".ruby-version"
+plugin "bundler-graph"
+git_source(:forge) { |repo| "https://forge.example.com/#{repo}.git" }
+
+gemspec
+
+gem "rails", "~> 8.0", ">= 8.0.1"
+gem "pg", "1.5.0-rc1", require: false
+gem "bootsnap", require: ["bootsnap", "bootsnap/setup"]
+gem "tzinfo-data", platforms: %i[windows jruby]
+gem "racc", force_ruby_platform: true
+gem "rack", github: "rack/rack", ref: "abc123"
+gem "sinatra", github: "https://github.com/sinatra/sinatra/pull/42"
+gem "edge", git: "https://example.com/edge.git", branch: "main", submodules: true
+gem "forged", forge: "team/forged", tag: "v2"
+gem "admin", path: "engines/admin"
+gem "custom", "~> 1.2", sinatra_option: "kept", name: "custom"
+
+group :development, :test do
+  gem "rspec", "~> 3.13"
+  platforms :mri do
+    gem "debug", group: :debugger
+  end
+end
+
+group :ci, optional: true do
+  gem "simplecov"
+end
+
+source "https://gems.example.com" do
+  gem "private"
+end
+
+path "vendor" do
+  gem "vendored"
+end
+
+git "https://example.com/mono.git", tag: "v1", glob: "gems/*/*.gemspec" do
+  gem "mono-core"
+end
+
+github "ruby/json", branch: "master" do
+  gem "json"
+end
+
+install_if -> { RUBY_PLATFORM.include?("no-such-platform") } do
+  gem "never"
+end
+
+env "GEMFILE_EVAL_FEATURE" do
+  gem "feature"
+end
+
+eval_gemfile "gemfiles/common.rb"
