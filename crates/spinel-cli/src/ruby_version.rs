@@ -165,9 +165,9 @@ fn parse(version: &str) -> Option<Version> {
 }
 
 /// A `.ruby-version`'s version, read as `parse` reads it when RubyGems takes
-/// it (`3.3.0p0` is a prerelease of `3.3.0`), and otherwise by its leading numeric segments, as version managers
-/// write words RubyGems rejects: `2.7.8_1` is `2.7.8`, `3.3.0@gemset` is
-/// `3.3.0`.
+/// it (`3.3.0p0` is a prerelease of `3.3.0`), and otherwise by its leading
+/// numeric segments, as version managers write words RubyGems rejects:
+/// `2.7.8_1` is `2.7.8`, `3.3.0@gemset` is `3.3.0`.
 fn parse_leniently(version: &str) -> Option<Version> {
     parse(version).or_else(|| {
         let mut numbers = Vec::new();
