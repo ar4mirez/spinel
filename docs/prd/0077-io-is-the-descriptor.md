@@ -63,8 +63,9 @@ for `FNM_EXTGLOB`. `File::Stat` gains its times, `<=>`, device numbers and
 the permission questions of `rb_stat_r` and friends. `File.utime`, `lutime`,
 `chown`, `truncate`, `link`, `mkfifo`, `split`, `identical?`, and the
 `File.pipe?` family asked of a path that may not exist. `Dir.home` reads
-`HOME` and then `/etc/passwd`, and `expand_path` takes `~user`.
-`ponytail:` users only that file lists; NSS is `etc`'s (#111).
+`HOME` and then the password database, and `expand_path` takes `~user`.
+Since `etc` (#111) the database is asked through NSS, not read from
+`/etc/passwd`.
 
 **Two built-in libraries,** `fcntl` and `io/nonblock`, each a few lines in
 `lib/` over primitives `IO` already uses, because fixtures load them.
