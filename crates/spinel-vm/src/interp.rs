@@ -2854,7 +2854,7 @@ fn run<'h>(
                     && !scope.has_pending_finalizers()
                     && !threads::turn_owed(scope)
                 {
-                    declined = run_calls(
+                    let ran = run_calls(
                         scope,
                         &mut stack,
                         &mut frames,
@@ -2866,6 +2866,12 @@ fn run<'h>(
                             ids: &mut ids,
                         },
                     );
+                    declined = ran.declined;
+                    if ran.left {
+                        // The frame-change block runs and reloads even if
+                        // the count of frames is what it was.
+                        seen_frames = usize::MAX;
+                    }
                 }
                 continue;
             }
@@ -18608,9 +18614,19 @@ fn may_run_call(scope: &HandleScope<'_>, frame: &Call, insn: Insn) -> bool {
 /// fast path declined it, which [`run`] then need not try again. A call and
 /// a return count against the
 /// budget and compare it, as a backward jump does, since a recursion may
-/// have none. Only a frame pushed here is popped here, so it ends in the
-/// frame it started in or in one it entered; `pc` is that frame's, and
-/// [`run`] reloads the frame when the count of them moved.
+/// have none. A return is taken here under the conditions [`run`]'s own arm
+/// takes it, from a frame pushed here or one below where it started; `pc`
+/// is the frame's it ends in, and [`run`] reloads the frame when the count
+/// of them moved, or, when it returned past the frame it started in, always
+/// (see [`Ran`]).
+///
+/// The instructions [`run`] answers before its closure that a light stretch
+/// does not take — a symbol literal, a cached constant read, Float
+/// arithmetic on flonums, a cached instance-variable write, and a local set
+/// to a heap value — are answered here too, as `run` answers them, rather
+/// than by the trip back to `run` each would otherwise take (#750). Those
+/// that store a heap value root what is fresh on the stack first, as `run`
+/// has rooted it at the top of its loop.
 ///
 /// Out of line, as the stretches are, for the same reason: inlined into
 /// [`run`], the call loop's state shares that function's registers.
@@ -18623,15 +18639,17 @@ fn run_calls(
     budget: &mut u64,
     limit: u64,
     calls: LightCalls<'_>,
-) -> bool {
+) -> Ran {
     let mut at = *pc;
     // Whether it stopped at a call its fast path declined.
     let mut declined = false;
     // How many may run before the budget reaches `limit`, and how many have.
     let room = budget.saturating_sub(limit);
     let mut ran: u64 = 0;
-    // The frames pushed here that are still there.
+    // The frames pushed here that are still there, and whether a return has
+    // gone below the frame it started in.
     let mut entered: usize = 0;
+    let mut left = false;
     // The instruction at `at`: read here once, and then answered by each
     // stretch, which has it in hand.
     let mut insn = frames[frames.len() - 1].iseq.insns[at];
@@ -18698,16 +18716,40 @@ fn run_calls(
                 entered += 1;
                 at = 0;
             }
-            // `run`'s own arms for these, for a frame pushed here.
-            Insn::Leave if entered > 0 && !frame.raises_receiver => {
+            // `run`'s own arms for these, under its conditions.
+            Insn::Leave if top > 0 && !frame.raises_receiver => {
                 leave_in_place(scope, stack, frames, true);
-                entered -= 1;
+                left |= entered == 0;
+                entered = entered.saturating_sub(1);
                 at = frames.last().expect("the caller").pc;
             }
-            Insn::Return if entered > 0 && returns_in_place(frame, at + 1) => {
+            Insn::Return if top > 0 && returns_in_place(frame, at + 1) => {
                 leave_in_place(scope, stack, frames, false);
-                entered -= 1;
+                left |= entered == 0;
+                entered = entered.saturating_sub(1);
                 at = frames.last().expect("the caller").pc;
+            }
+            // A symbol literal: an immediate, as `run`'s arm pushes it.
+            Insn::PushSym(index) => {
+                stack.push(Value::symbol(frame.iseq.symbol_ids()[index as usize]));
+                at += 1;
+            }
+            // What `run` answers before its closure through `light_more`,
+            // as it answers it; a value it stores may be one a stretch left
+            // on the stack unrooted, so what is fresh is rooted first.
+            Insn::BinOp(_) | Insn::PushFloat(_) | Insn::GetConst(..) | Insn::SetIvar(..)
+                if scope.rooted() + stack.len() <= calls.root_limit =>
+            {
+                if !calls_more(scope, stack, frame, insn) {
+                    break;
+                }
+                at += 1;
+            }
+            // A local set to a heap value, which a light stretch leaves for
+            // the loop to root first.
+            Insn::SetLocal(slot, depth) if scope.rooted() + stack.len() <= calls.root_limit => {
+                calls_set_local(scope, stack, frame, slot, depth);
+                at += 1;
             }
             // An Array literal, `[left, right]`: answered here rather than by
             // the trip back to `run` an allocation would otherwise take, once
@@ -18737,7 +18779,81 @@ fn run_calls(
     }
     *pc = at;
     *budget = budget.saturating_sub(ran);
-    declined
+    Ran { declined, left }
+}
+
+/// How [`run_calls`] stopped.
+struct Ran {
+    /// At a call whose fast path declined it, which [`run`] then need not
+    /// try again.
+    declined: bool,
+    /// In a frame below the one it started in, which a later call may have
+    /// put as many frames above as there were: so [`run`] cannot tell from
+    /// the count of them alone that the running frame changed.
+    left: bool,
+}
+
+/// `run`'s answer before its closure, through [`light_more`], for
+/// [`run_calls`]: Float arithmetic on two flonums, a Float literal, a cached
+/// constant read from a scope or a cached instance-variable write, with
+/// what is fresh on the stack rooted first, as `run` roots it. Answers
+/// whether it ran; Float arithmetic says the body's stretches run in
+/// `more_stretch` from now on, as it does in `run`. Out of line, as the
+/// stretches are.
+#[inline(never)]
+fn calls_more(scope: &mut HandleScope<'_>, stack: &mut Stack, frame: &Call, insn: Insn) -> bool {
+    for &value in stack.fresh() {
+        if !value.is_immediate() {
+            scope.root(value);
+        }
+    }
+    let depth = stack.len();
+    let top = stack.last().copied();
+    let below = if depth > 1 {
+        stack[depth - 2]
+    } else {
+        Value::NIL
+    };
+    match light_more(scope, frame, insn, top, below) {
+        More::Push(value) => stack.push(value),
+        More::Pop => {
+            stack.pop();
+        }
+        More::Replace(value) => {
+            stack.truncate(depth - 2);
+            stack.push(value);
+        }
+        More::Decline => return false,
+    }
+    if matches!(insn, Insn::BinOp(_)) {
+        scope.call_caches_mut().set_wants_more(frame.cache_base);
+    }
+    true
+}
+
+/// `Insn::SetLocal` for [`run_calls`], of the heap value a light stretch
+/// stopped at: what is fresh on the stack is rooted first, as `run` roots
+/// it, so the value may then be stored below the operands. Out of line, as
+/// the stretches are.
+#[inline(never)]
+fn calls_set_local(
+    scope: &mut HandleScope<'_>,
+    stack: &mut Stack,
+    frame: &Call,
+    slot: u16,
+    depth: u16,
+) {
+    for &value in stack.fresh() {
+        if !value.is_immediate() {
+            scope.root(value);
+        }
+    }
+    let value = stack.pop().expect("setlocal on an empty stack");
+    if depth | u16::from(!frame.locals_on_stack) == 0 {
+        stack.values[frame.floor + slot as usize] = value;
+    } else {
+        set_env_local(scope, frame, depth, slot, value);
+    }
 }
 
 /// `Insn::NewArray` for [`run_calls`]: the `count` values on top of the
