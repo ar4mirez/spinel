@@ -10,7 +10,7 @@ What `spinel` does outside the engine: how it runs a file, how it reports itself
 | `spinel <file.rb>` | same as `run`. Subcommand names win: `spinel install` is the subcommand even if `install` exists as a file; use `spinel run install` or `spinel ./install` for the file. |
 | `spinel -e CODE`, `-r LIB`, `-I DIR`, `-w`, `-v`, … | `ruby`'s command line, parsed as `ruby.c`'s `proc_options` parses it: `-e`, `-r`, `-I`, `-w`/`-W[level]`/`-W:category`, `-v`, `-d`, `-n`/`-p`/`-l`/`-a`/`-F`, `-0[octal]`, `-s`, `-x[dir]`, `-C dir`, `-c`, `-E`, and `-` for a program on standard input; `RUBYOPT`, `RUBYLIB` and, for `-S`, `RUBYPATH` are read as `ruby` reads them (#314). Feature switches Spinel has nothing behind (`--disable-gems`, `--enable=…`, the JITs) are accepted and do nothing. Any first word that starts with `-`, other than `-h`, `--help` and `-V`, means this form; a flag `ruby` does not have is its `invalid option` error (#62). |
 | `spinel x <gem>[@req] [args]` | run a gem's executable from an ephemeral GEM_HOME under `~/.spinel/x/`, project untouched |
-| `spinel init` | Gemfile, `.ruby-version` containing `spinel-<version>`, `test/`, `.gitignore` entry for `.spinel/` |
+| `spinel init` | in the current directory: Gemfile, `.ruby-version` containing `spinel-<version>`, `test/`, `.gitignore` entry for `.spinel/`. Never overwrites: an existing Gemfile, `.ruby-version` or `test/` is kept as it is, and an existing `.gitignore` gets the `.spinel/` line appended only when no line already names `.spinel` (with or without slashes, or negated). Prints one line per path saying whether it was created, appended to, or already existed. |
 | `spinel install/add/remove/update` | package-manager.md |
 | `spinel test` | test-runner.md |
 | `spinel build` | build.md |

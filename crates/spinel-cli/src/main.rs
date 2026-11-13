@@ -5,6 +5,7 @@
 //! later phase is built through. Subcommands land one issue at a time; see
 //! `docs/cli.md` for the full surface.
 
+mod init;
 mod ruby_args;
 mod stdlib;
 mod tree;
@@ -25,7 +26,7 @@ This build runs Ruby. The core library is minimal — Kernel, Object, Integer,
 String, Symbol, Array, Hash, Comparable — and a program that reaches past it
 says which method is missing rather than failing quietly.
 
-Planned surface (docs/cli.md): x, init, install, add, remove, update, test, build.
+Planned surface (docs/cli.md): x, install, add, remove, update, test, build.
 Progress: https://github.com/ar4mirez/spinel/milestones";
 
 #[derive(Parser, Debug)]
@@ -75,6 +76,13 @@ enum Command {
         #[arg(long)]
         dump_bytecode: bool,
     },
+
+    /// Scaffold a project in the current directory.
+    ///
+    /// Writes a Gemfile, a `.ruby-version` naming this Spinel, a `test/`
+    /// directory and a `.gitignore` entry for `.spinel/`. Anything already
+    /// there is kept: nothing is overwritten.
+    Init,
 
     /// Parse Ruby and print the syntax tree.
     ///
@@ -130,6 +138,7 @@ fn main() -> ExitCode {
 
     match cli.command {
         Some(Command::Parse { path, format }) => return parse_command(&path, format),
+        Some(Command::Init) => return init_command(),
         Some(Command::Run {
             path,
             args,
@@ -153,7 +162,7 @@ fn main() -> ExitCode {
             return ruby_command(&words, &raw);
         }
         eprintln!("spinel: unknown subcommand `{argument}`.");
-        eprintln!("        This build has two: run, parse. Try `spinel --help`.");
+        eprintln!("        This build has three: run, init, parse. Try `spinel --help`.");
         return ExitCode::from(EXIT_USAGE);
     }
 
@@ -164,7 +173,7 @@ fn main() -> ExitCode {
 /// Named `.rb`, or on disk under any name — `spinel Rakefile` should be read as
 /// a file, and `spinel pasre` should not.
 fn looks_like_a_subcommand_typo(argument: &str) -> bool {
-    ["run", "parse", "help"]
+    ["run", "init", "parse", "help"]
         .iter()
         .any(|name| edit_distance(argument, name) <= 2)
 }
@@ -189,6 +198,27 @@ fn edit_distance(a: &str, b: &str) -> usize {
 fn looks_like_a_ruby_file(argument: &str) -> bool {
     let path = Path::new(argument);
     path.extension().is_some_and(|e| e == "rb") || path.is_file()
+}
+
+// ---------------------------------------------------------------------------
+// spinel init
+// ---------------------------------------------------------------------------
+
+fn init_command() -> ExitCode {
+    let dir = match std::env::current_dir() {
+        Ok(dir) => dir,
+        Err(err) => {
+            eprintln!("spinel: cannot read the current directory: {err}");
+            return ExitCode::from(EXIT_USAGE);
+        }
+    };
+    match init::run(&dir) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("spinel: init failed in `{}`: {err}", dir.display());
+            ExitCode::FAILURE
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
