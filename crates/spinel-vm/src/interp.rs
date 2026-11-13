@@ -18087,6 +18087,14 @@ fn light_step<const LIGHT: bool, const MORE: bool>(
         // immediate in a light run, as its `SetLocal` takes one — in
         // `more_stretch` alone: see there.
         Insn::PushFloat(_) | Insn::GetConst(..) | Insn::SetIvar(..) if MORE => {
+            // A Float literal here rather than out of line (#746).
+            if let Insn::PushFloat(bits) = insn {
+                let Some(value) = Value::flonum(f64::from_bits(bits)) else {
+                    return 0;
+                };
+                stack.push(value);
+                return 1;
+            }
             let top = stack.last();
             if LIGHT && top.is_some_and(|value| !value.is_immediate()) {
                 return 0;
@@ -18139,14 +18147,20 @@ fn light_step<const LIGHT: bool, const MORE: bool>(
                 if !MORE {
                     return 0;
                 }
-                match light_more(scope, frame, insn, Some(right), left) {
-                    More::Replace(value) => {
-                        stack.truncate(depth - 2);
-                        stack.push(value);
-                        return 1;
-                    }
-                    _ => return 0,
-                }
+                // Two flonums, here rather than out of line (#746), under
+                // `Float`'s own operator mask, worked out once per run as
+                // `Integer`'s is; the answer is a flonum or a boolean, so
+                // the instruction after it pairs as it does for a fixnum.
+                let floats = *lazy
+                    .float_ops
+                    .get_or_insert_with(|| native_ops(scope, frame, 1));
+                let Some(value) =
+                    flonum_binop(op, left, right).filter(|_| floats & (1 << op as usize) != 0)
+                else {
+                    return 0;
+                };
+                stack.truncate(depth - 2);
+                return pair_after(scope, stack, frame, code, pc, value, pair, spent);
             };
             stack.truncate(depth - 2);
             // The answer is a fixnum or a boolean, so immediate: nothing
@@ -18188,6 +18202,54 @@ fn light_step<const LIGHT: bool, const MORE: bool>(
     1
 }
 
+/// The tail of [`light_step`]'s `BinOp` for an immediate answer `value` in
+/// `more_stretch`: the `SetLocal` or conditional jump right after it run
+/// with it, as for a fixnum, or `value` pushed. Answers how many
+/// instructions ran.
+#[inline(always)]
+#[expect(clippy::too_many_arguments, reason = "the loop's own registers")]
+fn pair_after<const LIGHT: bool>(
+    scope: &mut HandleScope<'_>,
+    stack: &mut LightStack<'_, LIGHT>,
+    frame: &Call,
+    code: &[Insn],
+    pc: &mut usize,
+    value: Value,
+    pair: bool,
+    spent: bool,
+) -> u64 {
+    let declined = |displacement: i32| spent && displacement < 0;
+    match code.get(*pc).filter(|_| pair) {
+        Some(&Insn::SetLocal(slot, depth)) => {
+            *pc += 1;
+            if depth | u16::from(!frame.locals_on_stack) == 0 {
+                stack.set(frame.floor + slot as usize, value);
+            } else {
+                set_env_local(scope, frame, depth, slot, value);
+            }
+            2
+        }
+        Some(&Insn::JumpUnless(displacement)) if value.is_truthy() || !declined(displacement) => {
+            *pc += 1;
+            if !value.is_truthy() {
+                *pc = jump(*pc, displacement);
+            }
+            2
+        }
+        Some(&Insn::JumpIf(displacement)) if !value.is_truthy() || !declined(displacement) => {
+            *pc += 1;
+            if value.is_truthy() {
+                *pc = jump(*pc, displacement);
+            }
+            2
+        }
+        _ => {
+            stack.push(value);
+            1
+        }
+    }
+}
+
 /// A local of `frame`'s that is not on the stack: `depth` scopes out from
 /// its environment, or one fewer when that environment is the enclosing
 /// scope's because its own locals are on the stack (see [`Call::env`]).
@@ -18212,6 +18274,9 @@ fn set_env_local(scope: &mut HandleScope<'_>, frame: &Call, depth: u16, slot: u1
 struct Lazy {
     /// [`native_ops`] for `Integer`, for a `BinOp`.
     ops: Option<u32>,
+    /// [`native_ops`] for `Float`, for a `BinOp` of two flonums in
+    /// `more_stretch`.
+    float_ops: Option<u32>,
     /// `self`'s instance variables, for a `GetIvar` in a light run.
     view: Option<crate::heap::IvarView>,
 }
