@@ -289,7 +289,7 @@ The package-manager.md, cli.md, test-runner.md and build.md designs. Slices as l
 
 - `spinel-ext` public API, versioned ABI, loader, an example extension gem, `Spinel::FFI` on libffi. *Check:* a gem with a `.spinel` extension installs and loads; `library/fiddle/` subset.
 - `openssl` (phased: digests, HMAC, random, then TLS for `net/https`), `psych`, `bigdecimal`, `io/console`, `etc`. *Check:* `library/` for each; `net/https` fetches a page.
-- Install-time substitution and `.spinel/substitutions.json`; `pg` and `sqlite3` Spinel-native gems published under `<cpu>-<os>-spinel`. *Check:* a Sinatra + sqlite fixture; `bundle install` on the same Gemfile and lock ignores the Spinel gems and the lock is unchanged.
+- Install-time substitution and `.spinel/substitutions.json`; `pg` and `sqlite3` Spinel-native gems published under `<cpu>-<os>-spinel`, which is safe only on linux and mingw (#76); the naming for macOS and other systems is an open owner decision (package-manager.md, section 6). *Check:* a Sinatra + sqlite fixture; `bundle install` on the same Gemfile and lock ignores the Spinel gems and the lock is unchanged.
 - `puma` and `nio4r` Spinel-native gems. *Check:* the Sinatra fixture serves on Puma.
 - Ractors: creation, message passing, shareability checks, parallel execution on separate OS threads. *Check:* `core/ractor/`; a CPU-bound benchmark scales with Ractor count.
 
