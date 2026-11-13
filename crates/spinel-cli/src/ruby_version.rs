@@ -63,7 +63,7 @@ fn check_ruby_version_file(text: &str) -> Option<String> {
         return None;
     }
     if let Some(version) = word.strip_prefix("spinel-") {
-        return match parse(version) {
+        return match parse_leniently(version) {
             Some(wanted) if at_least(ENGINE_VERSION, &wanted) => None,
             Some(_) => Some(format!(
                 "asks for Spinel {version}; this is {}",
@@ -74,7 +74,7 @@ fn check_ruby_version_file(text: &str) -> Option<String> {
     }
     let version = word.strip_prefix("ruby-").unwrap_or(word);
     if version.starts_with(|c: char| c.is_ascii_digit()) {
-        return match parse(version) {
+        return match parse_leniently(version) {
             Some(wanted) if at_least(LANGUAGE_VERSION, &wanted) => None,
             _ => Some(format!("asks for Ruby {version}; {}", implemented())),
         };
@@ -164,6 +164,29 @@ fn parse(version: &str) -> Option<Version> {
     Version::new(version).ok()
 }
 
+/// A `.ruby-version`'s version, read as `parse` reads it when RubyGems takes
+/// it, and otherwise by its leading numeric segments, as version managers
+/// write words RubyGems rejects: `2.7.8_1` is `2.7.8`, `3.3.0@gemset` is
+/// `3.3.0`.
+fn parse_leniently(version: &str) -> Option<Version> {
+    parse(version).or_else(|| {
+        let mut numbers = Vec::new();
+        for part in version.split('.') {
+            let digits = &part[..part
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(part.len())];
+            if digits.is_empty() {
+                break;
+            }
+            numbers.push(digits);
+            if digits.len() < part.len() {
+                break;
+            }
+        }
+        parse(&numbers.join("."))
+    })
+}
+
 /// Whether `have`, this build's version, is `wanted` or later.
 fn at_least(have: &str, wanted: &Version) -> bool {
     Version::new(have).is_ok_and(|have| have >= *wanted)
@@ -186,6 +209,18 @@ mod tests {
         assert_eq!(check_ruby_version_file(LANGUAGE_VERSION), None);
         assert!(check_ruby_version_file("99.0.0").is_some());
         assert!(check_ruby_version_file("ruby-99.1").is_some());
+    }
+
+    #[test]
+    fn version_manager_words_rubygems_rejects_are_read_by_leading_numbers() {
+        assert_eq!(check_ruby_version_file("3.3.0p0\n"), None);
+        assert_eq!(check_ruby_version_file("2.7.8_1\n"), None);
+        assert_eq!(check_ruby_version_file("ruby-3.3.0@gemset\n"), None);
+        assert!(check_ruby_version_file("99.0.0_1").is_some());
+        assert!(check_ruby_version_file("ruby-99.0@gemset").is_some());
+        assert_eq!(parse_leniently("2.7.8_1"), parse("2.7.8"));
+        assert_eq!(parse_leniently("4.0.0-preview1"), parse("4.0.0-preview1"));
+        assert!(check_gemfile("ruby \"2.7.8_1\"\n").is_some());
     }
 
     #[test]
