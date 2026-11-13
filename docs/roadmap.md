@@ -285,7 +285,7 @@ The package-manager.md, cli.md, test-runner.md and build.md designs. Slices as l
 
 **Milestone:** `spinel add sinatra`, a Sinatra app serves requests on WEBrick, `spinel test` runs its Minitest suite in parallel, `spinel build --compile` produces a binary that runs on a clean machine, `require "bundler/setup"` works inside the app.
 
-- **Part done for `--watch` (#69):** `spinel run --watch` restarts the program as a fresh process in its own process group when a file under the current directory changes, through `notify`, skipping what `.gitignore` excludes as git decides it, with a 100 ms debounce. `crates/spinel-cli/tests/watch.rs` checks that an edit restarts it and the old group is gone, that ignored paths do not, that a burst of saves restarts it once, and that Ctrl-C leaves nothing behind. `spinel test --watch` waits for `spinel test`; the supervisor takes its command line as it takes `run`'s.
+- **Part done for `--watch` (#69):** `spinel run --watch` restarts the program as a fresh process in its own process group when a file under the current directory changes, through `notify`, skipping what `.gitignore` excludes as git decides it, with a 100 ms debounce. `crates/spinel-cli/tests/watch.rs` checks that an edit restarts it and the old group is gone, that ignored paths do not, that a burst of saves restarts it once, as does one save whose writes span longer than the debounce, and that Ctrl-C leaves nothing behind. `spinel test --watch` waits for `spinel test`; the supervisor takes its command line as it takes `run`'s.
 
 ## Phase 5: extensions and Ractors
 
