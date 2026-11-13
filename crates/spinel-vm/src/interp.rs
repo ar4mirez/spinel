@@ -14415,7 +14415,9 @@ fn native_call<'h>(
                 ("RUBY_VERSION", crate::LANGUAGE_VERSION.to_owned()),
                 ("RUBY_ENGINE", crate::ENGINE.to_owned()),
                 ("RUBY_ENGINE_VERSION", crate::ENGINE_VERSION.to_owned()),
-                ("RUBY_PLATFORM", crate::platform()),
+                ("RUBY_PLATFORM", crate::PLATFORM.to_owned()),
+                ("RUBY_RELEASE_DATE", crate::RELEASE_DATE.to_owned()),
+                ("RUBY_COPYRIGHT", crate::COPYRIGHT.to_owned()),
                 ("RUBY_DESCRIPTION", crate::description()),
             ];
             let mut flat = Vec::new();

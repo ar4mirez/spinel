@@ -2,12 +2,20 @@
 # (#145, which needs them to run mspec). `Process` itself is #43.
 
 # How Spinel identifies itself: the Ruby it implements, and itself as the
-# engine. The same constants `spinel --version` prints.
+# engine. The same constants `spinel --version` prints (docs/cli.md).
 __ruby_constants__.each_slice(2) { |name, value| Object.const_set(name, value.freeze) }
-RUBY_PATCHLEVEL = 0
-RUBY_RELEASE_DATE = "2025-12-25".freeze
+# -1 as JRuby and TruffleRuby report it: Spinel is not a CRuby patch release.
+RUBY_PATCHLEVEL = -1
 RUBY_REVISION = "spinel".freeze
-RUBY_COPYRIGHT = "ruby - Copyright (C) 1993-2025 Yukihiro Matsumoto".freeze
+
+# Ruby 4.0's home for the same values, each the very object its `RUBY_`
+# constant holds.
+module Ruby
+  %i[VERSION PATCHLEVEL RELEASE_DATE PLATFORM DESCRIPTION COPYRIGHT ENGINE
+     ENGINE_VERSION REVISION].each do |name|
+    const_set(name, Object.const_get(:"RUBY_#{name}"))
+  end
+end
 
 ARGV = __argv__
 $0 = ARGV.shift

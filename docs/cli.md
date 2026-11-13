@@ -44,6 +44,8 @@ Bin stubs in `.spinel/gem_home/bin/` start with `#!/usr/bin/env spinel` and call
 | `RUBY_PATCHLEVEL` | `-1` |
 | `RUBY_RELEASE_DATE`, `RUBY_COPYRIGHT`, `RUBY_DESCRIPTION` | Spinel's |
 
+Ruby 4.0's `Ruby` module holds the same objects (`Ruby::VERSION.equal?(RUBY_VERSION)`). Like CRuby, Spinel fixes `RUBY_PLATFORM` when it is built (`crates/spinel-vm/build.rs`), and `RbConfig::CONFIG["arch"]` repeats it, which is what `Gem::Platform.local` parses.
+
 Reporting `"spinel"` rather than `"ruby"` is honest and is what JRuby and TruffleRuby do. The cost: Bundler's `platforms :ruby` / `:mri` groups are defined as a list of known engines, and unknown engines are excluded from those groups. Two mitigations, both required: Spinel's own Gemfile evaluator treats `:ruby` as matching, and we upstream a one-line Bundler change adding `spinel` to `Bundler::CurrentRuby` so `require "bundler/setup"` inside apps behaves the same. Until that lands, `bundler/setup` on Spinel logs a warning naming any gem it skipped for platform reasons.
 
 **Language version.** Spinel implements one Ruby language version at a time, the latest stable, and follows Ruby's December releases. `ruby "3.3"` in a Gemfile and a `.ruby-version` that names a CRuby version are read and produce a warning, never an error, because the intent is "this app expects at least that Ruby". `--strict-ruby-version` turns the warning into an error for CI.
