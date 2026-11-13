@@ -500,6 +500,28 @@ pub enum Insn {
     /// parked. A parked value is pushed and execution falls through; a parked
     /// unwind resumes.
     LeaveEnsure,
+
+    // -- superinstructions -------------------------------------------------
+    //
+    // A superinstruction is a run of ordinary instructions answered in one
+    // dispatch, written by [`fuse`] once a body is compiled. Its name is the
+    // instructions it stands for, in order, and its fields are theirs. It
+    // replaces only the first of them: the rest stay where they were, so no
+    // `pc` moves, a jump into the middle of the run lands on a real
+    // instruction, and the run's own instructions are what executes when the
+    // superinstruction cannot answer, which it does by running only the first
+    // of them, [`Insn::head`], and going on at the next `pc`. See
+    // `docs/engine.md`.
+    /// `GetLocal(slot, 0); PushInt(int); BinOp(op)`: a local of this frame and
+    /// a small integer under an operator, `i + 1` or `n < 2`. Answered when
+    /// the local is a fixnum and the operator answers two fixnums in the
+    /// light loop, which also runs a `SetLocal` or conditional jump right
+    /// after it, as it does after a `BinOp`.
+    GetLocalPushIntBinOp {
+        slot: u16,
+        int: i64,
+        op: BinOp,
+    },
 }
 
 /// The binary operators the compiler emits directly.
@@ -568,6 +590,62 @@ impl BinOp {
             ">=" => BinOp::Ge,
             _ => return None,
         })
+    }
+
+    /// Whether the light loop answers this operator for two fixnums, with a
+    /// fixnum or a boolean: everything but `*`, `/` and `%`, which `run`
+    /// answers. [`fuse`] writes a [`Insn::GetLocalPushIntBinOp`] only for
+    /// these, since it could answer no other.
+    #[must_use]
+    pub const fn light_on_fixnums(self) -> bool {
+        !matches!(self, BinOp::Mul | BinOp::Div | BinOp::Mod)
+    }
+}
+
+impl Insn {
+    /// The first instruction a superinstruction stands for, which is all it
+    /// runs when it cannot answer its whole run; any other instruction is its
+    /// own head. A tool reading [`Iseq::insns`] that does not know a
+    /// superinstruction reads it as this, and finds the rest of its run after
+    /// it, where the compiler wrote them.
+    #[must_use]
+    pub const fn head(self) -> Insn {
+        match self {
+            Insn::GetLocalPushIntBinOp { slot, .. } => Insn::GetLocal(slot, 0),
+            other => other,
+        }
+    }
+}
+
+/// Write superinstructions over `insns`, a finished body (#746, #750): an
+/// instruction that starts a run a superinstruction stands for is replaced by
+/// it, and the rest of the run is left in place. Nothing moves, so the jumps,
+/// the catch table, the line table and the inline-cache sites stay as the
+/// compiler wrote them.
+///
+/// Each run is matched against the instructions as the compiler wrote them,
+/// which the replacements so far have not touched, since only an
+/// instruction already passed is replaced. So runs may overlap: the second
+/// instruction of one may start another, which is where a jump into the
+/// middle lands, and what runs when the first declines.
+pub fn fuse(insns: &mut [Insn]) {
+    for at in 0..insns.len() {
+        if let Some(fused) = superinstruction(&insns[at..]) {
+            insns[at] = fused;
+        }
+    }
+}
+
+/// The superinstruction for the run `run` starts with, if there is one.
+fn superinstruction(run: &[Insn]) -> Option<Insn> {
+    match *run {
+        [
+            Insn::GetLocal(slot, 0),
+            Insn::PushInt(int),
+            Insn::BinOp(op),
+            ..,
+        ] if op.light_on_fixnums() => Some(Insn::GetLocalPushIntBinOp { slot, int, op }),
+        _ => None,
     }
 }
 
@@ -1144,6 +1222,89 @@ mod tests {
             BinOp::Ge,
         ] {
             assert_eq!(BinOp::from_name(op.name()), Some(op));
+        }
+    }
+
+    /// `fuse` replaces the first instruction of each run it knows and nothing
+    /// else, so reading every instruction as its head gives back the body
+    /// the compiler wrote, jumps and all.
+    #[test]
+    fn fusing_replaces_only_the_first_instruction_of_a_run() {
+        let written = vec![
+            Insn::GetLocal(0, 0),
+            Insn::PushInt(1),
+            Insn::BinOp(BinOp::Add),
+            Insn::SetLocal(0, 0),
+            // An outer local, `*` and a jump between are not fused.
+            Insn::GetLocal(1, 1),
+            Insn::PushInt(2),
+            Insn::BinOp(BinOp::Lt),
+            Insn::GetLocal(0, 0),
+            Insn::PushInt(2),
+            Insn::BinOp(BinOp::Mul),
+            Insn::GetLocal(0, 0),
+            Insn::Jump(1),
+            Insn::PushInt(3),
+            Insn::BinOp(BinOp::Sub),
+            // Two runs, the second starting inside the first.
+            Insn::GetLocal(2, 0),
+            Insn::GetLocal(3, 0),
+            Insn::PushInt(-4),
+            Insn::BinOp(BinOp::Ge),
+            Insn::JumpUnless(-19),
+            Insn::Leave,
+        ];
+        let mut insns = written.clone();
+        fuse(&mut insns);
+        let fused: Vec<usize> = (0..insns.len())
+            .filter(|&at| insns[at] != written[at])
+            .collect();
+        assert_eq!(fused, vec![0, 15]);
+        assert_eq!(
+            insns[0],
+            Insn::GetLocalPushIntBinOp {
+                slot: 0,
+                int: 1,
+                op: BinOp::Add
+            }
+        );
+        assert_eq!(
+            insns[15],
+            Insn::GetLocalPushIntBinOp {
+                slot: 3,
+                int: -4,
+                op: BinOp::Ge
+            }
+        );
+        let heads: Vec<Insn> = insns.iter().map(|insn| insn.head()).collect();
+        assert_eq!(heads, written);
+    }
+
+    /// The operators [`Insn::GetLocalPushIntBinOp`] is written for are
+    /// those the light loop answers for two fixnums.
+    #[test]
+    fn only_an_operator_the_light_loop_answers_on_fixnums_is_fused() {
+        for (op, fused) in [
+            (BinOp::Add, true),
+            (BinOp::Sub, true),
+            (BinOp::Mul, false),
+            (BinOp::Div, false),
+            (BinOp::Mod, false),
+            (BinOp::Eq, true),
+            (BinOp::Neq, true),
+            (BinOp::Lt, true),
+            (BinOp::Le, true),
+            (BinOp::Gt, true),
+            (BinOp::Ge, true),
+        ] {
+            let mut insns = vec![
+                Insn::GetLocal(0, 0),
+                Insn::PushInt(7),
+                Insn::BinOp(op),
+                Insn::Leave,
+            ];
+            fuse(&mut insns);
+            assert_eq!(insns[0] != Insn::GetLocal(0, 0), fused, "{op:?}");
         }
     }
 

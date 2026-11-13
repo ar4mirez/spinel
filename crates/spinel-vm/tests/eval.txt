@@ -2915,3 +2915,17 @@ def s746(x) = Math.sqrt(x) + Math.sqrt(x * 4.0); def t746(a) = (b = a.map { |x| 
 def a746(a, i) = a[i]; a = [1, 2, 3, 4]; a.shift; [a746(a, 0), a746(a, -1), a746(a, 2), a746(a, 3), a746(a, -4), a746([], 0)]  #=> [2, 4, 4, nil, nil, nil]
 # A call whose receiver is its caller's own self, and one whose is not.
 class R746; def initialize(n) = (@n = n); def f(k) = k == 0 ? "e" + @n.to_s : f(k - 1); def g(o) = o.f(2); end; a = R746.new(1); b = R746.new(2); GC.stress = true; r = [a.f(5), a.g(b), b.g(a)]; GC.stress = false; r  #=> ["e1", "e2", "e1"]
+
+# ------------------------------------------------- superinstructions (#746, #750)
+# A local read, a small integer and an operator are one instruction where the
+# local is a fixnum and the operator its own; anything else runs the three as
+# written, from the read on.
+def a7s(x) = [x + 1, x - 1, x < 2, x <= 2, x > 2, x >= 2, x == 2, x != 2, x * 3, x / 2, x % 2]; [a7s(2), a7s(-5), a7s(0)]  #=> [[3, 1, false, true, false, true, true, false, 6, 1, 0], [-4, -6, true, true, false, false, false, true, -15, -3, 1], [1, -1, true, true, false, false, false, true, 0, 0, 0]]
+def b7s(x) = [x + 1, x - 1]; o = Object.new; def o.+(v) = [:plus, v]; def o.-(v) = [:minus, v]; [b7s(4611686018427387903), b7s(-4611686018427387904), b7s(2**70), b7s(1.5), b7s(o)]  #=> [[4611686018427387904, 4611686018427387902], [-4611686018427387903, -4611686018427387905], [1180591620717411303425, 1180591620717411303423], [2.5, 0.5], [[:plus, 1], [:minus, 1]]]
+def c7s(x) = (x + 1 rescue $!.class); [c7s(nil), c7s("a"), c7s(:s), c7s(2)]  #=> [NoMethodError, TypeError, NoMethodError, 3]
+class Integer; alias_method :p7s, :+; alias_method :l7s, :<; def +(o) = :plus; def <(o) = :less; end; def d7s(x) = [x + 1, x < 1]; r = d7s(1); class Integer; alias_method :+, :p7s; alias_method :<, :l7s; remove_method :p7s; remove_method :l7s; end; [r, d7s(1)]  #=> [[:plus, :less], [2, false]]
+module R7s; refine(Integer) { def +(o) = :refined }; end; class U7s; def plain(a) = a + 1; using R7s; def ref(a) = a + 1; end; u = U7s.new; [u.plain(1), u.ref(1), u.plain(1)]  #=> [2, :refined, 2]
+def e7s(x); g = -> { x += 10 }; a = x + 1; g.call; [a, x + 1, x < 20]; end; e7s(2)  #=> [3, 13, true]
+def f7s(c, x, y) = (c ? x : y) + 1; [f7s(true, 1, 10), f7s(false, 1, 10), f7s(true, 1.5, 10)]  #=> [2, 11, 2.5]
+def g7s(n); s = []; i = 0; while i < n; s << "x" + i.to_s if i > 2; i += 1; end; s; end; GC.stress = true; r = g7s(6); GC.stress = false; r  #=> ["x3", "x4", "x5"]
+def h7s(n) = n < 2 ? n : h7s(n - 1) + h7s(n - 2); [h7s(15), [1, 2, 3].map { |v| v + 1 }, [1, 2, 3].select { |v| v > 1 }]  #=> [610, [2, 3, 4], [2, 3]]

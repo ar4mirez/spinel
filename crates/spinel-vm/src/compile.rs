@@ -645,6 +645,8 @@ impl Compiler {
                 _ => {}
             }
         }
+        // Last, over the instructions as they will run, sites and all.
+        crate::bytecode::fuse(&mut self.insns);
         Iseq {
             name: self.name,
             insns: self.insns,
@@ -824,6 +826,11 @@ impl Compiler {
             Insn::Yield(site) => 1 - self.site_operands(site, false),
             // `super` too: the receiver is the frame's, never pushed.
             Insn::Super(site) => 1 - self.site_operands(site, false),
+            // Never emitted: `fuse` writes it over a finished body, whose
+            // depths were counted from the instructions it stands for. What
+            // they come to together: a local and an integer pushed, and an
+            // operator taking both for its answer.
+            Insn::GetLocalPushIntBinOp { .. } => 1,
         }
     }
 
