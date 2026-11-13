@@ -896,12 +896,15 @@ fn real_platforms_match_as_rubygems_does() {
     }
 }
 
-/// `<cpu>-<os>-spinel`, the platform docs/package-manager.md (section 6) names
-/// for Spinel-native gems: how RubyGems reads it, what `gem build` names it
-/// (`to_s`), and which runtimes' `Gem.platforms` (`ruby` and the local
-/// platform) accept it. RubyGems must accept none for the scheme to be safe;
-/// only the linux and mingw spellings without a libc pass. Every darwin one is
-/// read as plain `<cpu>-darwin` and installs on every version of macOS.
+/// `<cpu>-<os>-spinel`, the platform Spinel-native gems were first to be
+/// published under: how RubyGems reads it, what `gem build` names it (`to_s`),
+/// and which runtimes' `Gem.platforms` (`ruby` and the local platform) accept
+/// it. RubyGems had to accept none for that scheme to be safe; only the linux
+/// and mingw spellings without a libc pass. Every darwin one is read as plain
+/// `<cpu>-darwin` and installs on every version of macOS. This is why
+/// Spinel-native gems are named `<gem>-spinel` instead, with standard platforms
+/// (docs/package-manager.md, section 6; `gem_substitute`). The table stays as
+/// the record of that, and of RubyGems' reading of these strings.
 const SPINEL: &[(&str, Parts, &str, &[&str])] = &[
     (
         "x86_64-linux-spinel",
