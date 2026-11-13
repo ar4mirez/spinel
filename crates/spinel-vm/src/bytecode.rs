@@ -513,13 +513,25 @@ pub enum Insn {
     // of them, [`Insn::head`], and going on at the next `pc`. See
     // `docs/engine.md`.
     /// `GetLocal(slot, 0); PushInt(int); BinOp(op)`: a local of this frame and
-    /// a small integer under an operator, `i + 1` or `n < 2`. Answered when
-    /// the local is a fixnum and the operator answers two fixnums in the
-    /// light loop, which also runs a `SetLocal` or conditional jump right
-    /// after it, as it does after a `BinOp`.
+    /// a small integer under an operator, `i + 1` or `n < 2`. Answered in the
+    /// light loops, for a frame whose locals are on its stack, when the local
+    /// is a fixnum and the operator answers two fixnums there; the `SetLocal`
+    /// or conditional jump right after it runs with it, as after a `BinOp`.
     GetLocalPushIntBinOp {
         slot: u16,
         int: i64,
+        op: BinOp,
+    },
+    /// `GetLocal(left, 0); GetLocal(right, 0); BinOp(op)`: two locals of this
+    /// frame under an operator, `i < n` or `dx * dx`. Answered in the light
+    /// loops, for a frame whose locals are on its stack, when they are two
+    /// fixnums, or two flonums in a body whose stretches answer Float
+    /// arithmetic, under an operator the program has not redefined, as the
+    /// light loop answers a `BinOp`; the `SetLocal` or conditional jump after
+    /// it runs with it, as after a `BinOp`.
+    GetLocalGetLocalBinOp {
+        left: u16,
+        right: u16,
         op: BinOp,
     },
 }
@@ -600,6 +612,14 @@ impl BinOp {
     pub const fn light_on_fixnums(self) -> bool {
         !matches!(self, BinOp::Mul | BinOp::Div | BinOp::Mod)
     }
+
+    /// Whether the light loop answers this operator for two fixnums or for
+    /// two flonums: everything but `%`, whose zero divisor raises.
+    /// [`fuse`] writes a [`Insn::GetLocalGetLocalBinOp`] only for these.
+    #[must_use]
+    pub const fn light(self) -> bool {
+        !matches!(self, BinOp::Mod)
+    }
 }
 
 impl Insn {
@@ -612,6 +632,7 @@ impl Insn {
     pub const fn head(self) -> Insn {
         match self {
             Insn::GetLocalPushIntBinOp { slot, .. } => Insn::GetLocal(slot, 0),
+            Insn::GetLocalGetLocalBinOp { left, .. } => Insn::GetLocal(left, 0),
             other => other,
         }
     }
@@ -645,6 +666,12 @@ fn superinstruction(run: &[Insn]) -> Option<Insn> {
             Insn::BinOp(op),
             ..,
         ] if op.light_on_fixnums() => Some(Insn::GetLocalPushIntBinOp { slot, int, op }),
+        [
+            Insn::GetLocal(left, 0),
+            Insn::GetLocal(right, 0),
+            Insn::BinOp(op),
+            ..,
+        ] if op.light() => Some(Insn::GetLocalGetLocalBinOp { left, right, op }),
         _ => None,
     }
 }
@@ -1306,6 +1333,48 @@ mod tests {
             fuse(&mut insns);
             assert_eq!(insns[0] != Insn::GetLocal(0, 0), fused, "{op:?}");
         }
+    }
+
+    /// Two locals of this frame under any operator but `%` are one
+    /// [`Insn::GetLocalGetLocalBinOp`]; an outer local is not.
+    #[test]
+    fn two_locals_and_an_operator_fuse_unless_the_operator_is_modulo() {
+        for (op, fused) in [
+            (BinOp::Add, true),
+            (BinOp::Mul, true),
+            (BinOp::Div, true),
+            (BinOp::Mod, false),
+            (BinOp::Lt, true),
+            (BinOp::Neq, true),
+        ] {
+            let mut insns = vec![
+                Insn::GetLocal(0, 0),
+                Insn::GetLocal(1, 0),
+                Insn::BinOp(op),
+                Insn::Leave,
+            ];
+            fuse(&mut insns);
+            let expected = if fused {
+                Insn::GetLocalGetLocalBinOp {
+                    left: 0,
+                    right: 1,
+                    op,
+                }
+            } else {
+                Insn::GetLocal(0, 0)
+            };
+            assert_eq!(insns[0], expected, "{op:?}");
+            assert_eq!(insns[0].head(), Insn::GetLocal(0, 0));
+        }
+        let mut outer = vec![
+            Insn::GetLocal(0, 0),
+            Insn::GetLocal(1, 1),
+            Insn::BinOp(BinOp::Add),
+            Insn::Leave,
+        ];
+        let written = outer.clone();
+        fuse(&mut outer);
+        assert_eq!(outer, written);
     }
 
     #[test]

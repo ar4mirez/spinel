@@ -2929,3 +2929,13 @@ def e7s(x); g = -> { x += 10 }; a = x + 1; g.call; [a, x + 1, x < 20]; end; e7s(
 def f7s(c, x, y) = (c ? x : y) + 1; [f7s(true, 1, 10), f7s(false, 1, 10), f7s(true, 1.5, 10)]  #=> [2, 11, 2.5]
 def g7s(n); s = []; i = 0; while i < n; s << "x" + i.to_s if i > 2; i += 1; end; s; end; GC.stress = true; r = g7s(6); GC.stress = false; r  #=> ["x3", "x4", "x5"]
 def h7s(n) = n < 2 ? n : h7s(n - 1) + h7s(n - 2); [h7s(15), [1, 2, 3].map { |v| v + 1 }, [1, 2, 3].select { |v| v > 1 }]  #=> [610, [2, 3, 4], [2, 3]]
+# Two locals and an operator are one instruction where they are two fixnums,
+# or two flonums in a body that does Float arithmetic, under an operator of
+# their own; anything else runs the three as written.
+def a7t(x, y) = [x + y, x - y, x * y, x / y, x % y, x < y, x <= y, x > y, x >= y, x == y, x != y]; [a7t(7, 2), a7t(-7, 2), a7t(7.5, 2.5), a7t(7, 2.5), a7t(7.5, 2)]  #=> [[9, 5, 14, 3, 1, false, false, true, true, false, true], [-5, -9, -14, -4, 1, true, true, false, false, false, true], [10.0, 5.0, 18.75, 3.0, 0.0, false, false, true, true, false, true], [9.5, 4.5, 17.5, 2.8, 2.0, false, false, true, true, false, true], [9.5, 5.5, 15.0, 3.75, 1.5, false, false, true, true, false, true]]
+def b7t(x, y) = x + y; [b7t(4611686018427387903, 1), b7t(2**64, 1), b7t(1.0e308, 1.0e308), b7t(0.1, 0.2), b7t("a", "b"), b7t([1], [2])]  #=> [4611686018427387904, 18446744073709551617, Infinity, 0.30000000000000004, "ab", [1, 2]]
+def c7t(x, y) = (x * y rescue $!.class); [c7t(nil, 1), c7t(1, nil), c7t(3, 4), c7t(1.5, 2.0)]  #=> [NoMethodError, TypeError, 12, 3.0]
+def d7t; s = 0.0; x = 1.5; i = 0; n = 100; while i < n; s = s + x * x; i += 1; end; s; end; d7t  #=> 225.0
+def e7t(x, y) = x * y; r = [e7t(1.5, 2.0), e7t(1.5, 2.0)]; class Float; alias_method :m7t, :*; def *(o) = :times; end; r << e7t(1.5, 2.0); class Float; alias_method :*, :m7t; remove_method :m7t; end; r << e7t(1.5, 2.0)  #=> [3.0, 3.0, :times, 3.0]
+def f7t(x, y); g = -> { x = 10.5 }; a = x * y; g.call; [a, x * y, x < y]; end; f7t(2.0, 3.0)  #=> [6.0, 31.5, false]
+def g7t(c, x, y) = (c ? x : y) * y; [g7t(true, 2, 3), g7t(false, 2, 3), g7t(true, 2.5, 2.0)]  #=> [6, 9, 5.0]
