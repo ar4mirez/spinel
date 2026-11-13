@@ -3306,13 +3306,15 @@ fn run<'h>(
 
                     // Answered by the loop above, which never falls through
                     // for either.
-                    // So does a superinstruction whose first instruction is a
-                    // local read: when it declines its run, it runs that.
+                    // So does a superinstruction: when it declines its run, it
+                    // runs its first instruction, a local read or `PushSelf`,
+                    // which the loop answers too.
                     Insn::GetLocal(..)
                     | Insn::SetLocal(..)
                     | Insn::GetLocalPushIntBinOp { .. }
                     | Insn::GetLocalGetLocalBinOp { .. }
-                    | Insn::GetLocalGetIvarBinOp { .. } => {
+                    | Insn::GetLocalGetIvarBinOp { .. }
+                    | Insn::PushSelfGetLocal { .. } => {
                         unreachable!("the loop answers local access itself")
                     }
 
@@ -18311,6 +18313,18 @@ fn light_step<const LIGHT: bool, const MORE: bool>(
             }
             stack.push(first);
         }
+        // `PushSelf; GetLocal` in one dispatch: the receiver and a local of a
+        // frame whose locals are on its stack, in a stretch. Otherwise its
+        // `PushSelf` alone, as above.
+        Insn::PushSelfGetLocal { slot } => {
+            stack.push(frame.receiver);
+            if LIGHT && pair && frame.locals_on_stack {
+                let local = stack.get(frame.floor + slot as usize);
+                stack.push(local);
+                *pc += 1;
+                return 2;
+            }
+        }
         _ => return 0,
     }
     1
@@ -27150,6 +27164,11 @@ mod tests {
         );
         assert_eq!(
             count(|insn| matches!(insn, Insn::GetLocalGetIvarBinOp { .. })),
+            1,
+            "{insns:?}"
+        );
+        assert_eq!(
+            count(|insn| matches!(insn, Insn::PushSelfGetLocal { .. })),
             1,
             "{insns:?}"
         );

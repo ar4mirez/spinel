@@ -833,6 +833,8 @@ impl Compiler {
             Insn::GetLocalPushIntBinOp { .. }
             | Insn::GetLocalGetLocalBinOp { .. }
             | Insn::GetLocalGetIvarBinOp { .. } => 1,
+            // The receiver and a local.
+            Insn::PushSelfGetLocal { .. } => 2,
         }
     }
 

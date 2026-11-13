@@ -544,6 +544,12 @@ pub enum Insn {
         site: u32,
         op: BinOp,
     },
+    /// `PushSelf; GetLocal(slot, 0)`: the receiver and an argument of a call
+    /// on `self`, `check(tree)`. Not written where its `GetLocal` starts a
+    /// longer run, so that `fib(n - 1)` keeps the one that runs `n - 1`.
+    PushSelfGetLocal {
+        slot: u16,
+    },
 }
 
 /// The binary operators the compiler emits directly.
@@ -644,6 +650,7 @@ impl Insn {
             Insn::GetLocalPushIntBinOp { slot, .. } => Insn::GetLocal(slot, 0),
             Insn::GetLocalGetLocalBinOp { left, .. } => Insn::GetLocal(left, 0),
             Insn::GetLocalGetIvarBinOp { slot, .. } => Insn::GetLocal(slot, 0),
+            Insn::PushSelfGetLocal { .. } => Insn::PushSelf,
             other => other,
         }
     }
@@ -689,6 +696,9 @@ fn superinstruction(run: &[Insn]) -> Option<Insn> {
             Insn::BinOp(op),
             ..,
         ] if op.light() => Some(Insn::GetLocalGetIvarBinOp { slot, site, op }),
+        [Insn::PushSelf, Insn::GetLocal(slot, 0), ..] if superinstruction(&run[1..]).is_none() => {
+            Some(Insn::PushSelfGetLocal { slot })
+        }
         _ => None,
     }
 }
@@ -1420,6 +1430,42 @@ mod tests {
         );
         assert_eq!(insns[1..], written[1..], "`%` is not fused");
         assert_eq!(insns[0].head(), written[0]);
+    }
+
+    /// `PushSelf; GetLocal` is one [`Insn::PushSelfGetLocal`], unless its
+    /// `GetLocal` starts a longer run: fib's `fib(n - 1)` keeps the
+    /// superinstruction that runs `n - 1`, and pushes `self` alone.
+    #[test]
+    fn self_and_a_local_fuse_unless_the_local_starts_a_longer_run() {
+        let mut call = vec![
+            Insn::PushSelf,
+            Insn::GetLocal(1, 0),
+            Insn::Send(0),
+            Insn::Leave,
+        ];
+        fuse(&mut call);
+        assert_eq!(call[0], Insn::PushSelfGetLocal { slot: 1 });
+        assert_eq!(call[0].head(), Insn::PushSelf);
+        assert_eq!(call[1], Insn::GetLocal(1, 0));
+
+        let mut fib = vec![
+            Insn::PushSelf,
+            Insn::GetLocal(0, 0),
+            Insn::PushInt(1),
+            Insn::BinOp(BinOp::Sub),
+            Insn::Send(0),
+            Insn::Leave,
+        ];
+        fuse(&mut fib);
+        assert_eq!(fib[0], Insn::PushSelf);
+        assert_eq!(
+            fib[1],
+            Insn::GetLocalPushIntBinOp {
+                slot: 0,
+                int: 1,
+                op: BinOp::Sub
+            }
+        );
     }
 
     #[test]

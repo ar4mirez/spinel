@@ -2948,3 +2948,7 @@ class C7u; def s(x) = (x + @v rescue $!.class); end; c = C7u.new; r = [c.s(1)]; 
 class D7u; def initialize = (@v = 2); def s(x) = x + @v; end; d = D7u.new; r = [d.s(1)]; class Integer; alias_method :p7u, :+; def +(o) = :plus; end; r << d.s(1); class Integer; alias_method :+, :p7u; remove_method :p7u; end; r << d.s(1)  #=> [3, :plus, 3]
 class E7u < Array; def s(x) = x + @v; end; e = E7u.new; e.instance_variable_set(:@v, 7); [e.s(1), e.s(2)]  #=> [8, 9]
 class F7u; def initialize = (@v = 0.5); def s; t = 0.0; i = 0; while i < 10; t = t + @v; i += 1; end; t; end; end; F7u.new.s  #=> 5.0
+# The receiver and a local are one instruction for a call on self with a local
+# argument; a frame whose locals a block captured pushes self alone.
+class A7v; def a(x) = b(x); def b(y) = [y, y * 2]; def c(x); g = -> { x += 1 }; r = b(x); g.call; [r, b(x)]; end; end; [A7v.new.a(3), A7v.new.c(3), A7v.new.a("s")]  #=> [[3, 6], [[3, 6], [4, 8]], ["s", "ss"]]
+def b7v(t) = t.nil? ? 0 : 1 + b7v(t[0]) + b7v(t[1]); def m7v(d) = d == 0 ? [nil, nil] : [m7v(d - 1), m7v(d - 1)]; GC.stress = true; r = b7v(m7v(3)); GC.stress = false; r  #=> 15
