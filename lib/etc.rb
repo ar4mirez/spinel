@@ -18,9 +18,10 @@ module Etc
 
   # --- conversions, as etc.c's macros make them ------------------------------
 
-  # A Float as `rb_num2long` takes it: finite and within a C long.
-  def self.__float_long__(value)
-    unless value.finite? && value >= -9_223_372_036_854_775_808.0 && value < 9_223_372_036_854_775_808.0
+  # A Float as `rb_num2long` takes it: finite, at least LONG_MIN and below
+  # `upper`, which `rb_num2ulong` raises to ULONG_MAX + 1.
+  def self.__float_long__(value, upper = 9_223_372_036_854_775_808.0)
+    unless value.finite? && value >= -9_223_372_036_854_775_808.0 && value < upper
       raise RangeError, "float #{format("%-.10g", value)} out of range of integer"
     end
     value.to_i
@@ -33,7 +34,7 @@ module Etc
     value =
       case value
       when Integer then value
-      when Float then __float_long__(value)
+      when Float then __float_long__(value, 18_446_744_073_709_551_616.0)
       when nil then raise TypeError, "no implicit conversion of nil into Integer"
       else Integer.__index__(value)
       end
