@@ -6,8 +6,9 @@
 //! that ends on its own is started again by the next change; and SIGINT ends
 //! the supervisor and its program together.
 //!
-//! Nothing here sleeps for a guessed time, beyond the deliberate spacing of
-//! one save's writes; a save a busy runner stalls past that spacing proves
+//! Nothing here sleeps for a guessed time; the deliberate spacing of one
+//! save's writes is a spin on the clock, since a timed sleep can overrun it
+//! many times over. A save a busy runner stalls past that spacing proves
 //! nothing, so it is made again rather than failed or passed. The supervisor reports each restart
 //! on stderr with the paths that caused it, and it handles events in the order
 //! the file system delivered them. So a test that must show some change did
@@ -182,8 +183,10 @@ impl Watch {
             let mut last = began;
             let mut longest_gap = Duration::ZERO;
             for n in 0..writes {
-                if n > 0 {
-                    thread::sleep(gap);
+                // Spun, not slept: a macOS runner stretched each 20 ms sleep
+                // to over 100 ms, past the debounce, on every attempt.
+                while n > 0 && last.elapsed() < gap {
+                    thread::yield_now();
                 }
                 self.write(file, &format!("SAVED = {attempt}_{n}\n"));
                 let now = Instant::now();
