@@ -18,6 +18,10 @@ sha2 = "0.11.0"
 spinel-ast.workspace = true
 spinel-regex.workspace = true
 
+# The bytecode cache's compiler fingerprint (`build.rs`, #40).
+[build-dependencies]
+sha2 = "0.11.0"
+
 # Test-only, and not a layering violation: the tests read Ruby source, which
 # needs the parser, and `spinel-parse` depends on `spinel-ast` rather than on
 # this crate. Prism still lives in exactly one place.

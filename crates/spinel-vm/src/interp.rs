@@ -14354,6 +14354,12 @@ fn native_call<'h>(
 
         Native::Binding(op) => binding_native(scope, stack, frames, &call, op, ids),
         Native::LoadFile => load_file(scope, stack, frames, &call, ids),
+        Native::BytecodeCache => {
+            let dir = path_arg(scope, &call, 0)?;
+            scope.set_bytecode_cache(Some(dir));
+            stack.push(Value::NIL);
+            Ok(None)
+        }
         Native::RefusalBoundary => {
             let limit = call.args.first().and_then(|v| v.as_fixnum()).unwrap_or(0);
             if call.block == Value::NIL || limit <= 0 {
@@ -17268,6 +17274,11 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             Native::Binding(BindingOp::SetPlace),
         ),
         (Builtin::Kernel, &["__load_file__"], Native::LoadFile),
+        (
+            Builtin::Kernel,
+            &["__bytecode_cache__"],
+            Native::BytecodeCache,
+        ),
         (
             Builtin::Kernel,
             &["__refusal_boundary__"],
@@ -25124,6 +25135,7 @@ fn load_file(
     // A library shipped inside the binary comes with its source: see
     // `Kernel.__library__`.
     let shipped = call.args.get(3).and_then(|&v| string_bytes(scope, v));
+    let from_disk = shipped.is_none();
     let source = match shipped.map_or_else(|| std::fs::read(&path), Ok) {
         Ok(source) => source,
         Err(_) => {
@@ -25134,26 +25146,41 @@ fn load_file(
         }
     };
     let name = path.to_string_lossy().into_owned();
-    let (program, warnings) = match parser(&name, &source, 1, false, None, &[]) {
-        Ok(parsed) => (parsed.program, parsed.warnings),
-        Err(crate::heap::ParseFailure::Syntax(message)) => {
-            return Err(syntax_error(scope, message, &name));
-        }
-        Err(crate::heap::ParseFailure::Unsupported) => {
-            return Err(Error::Unknowable {
-                what: "a file the parser cannot lower",
-                needs: "the lowering to cover it",
-            });
-        }
-    };
     let frozen = scope.frozen_string_literal();
-    let iseq = match crate::compile::program_with(&program, "<top (required)>", frozen) {
-        Ok(iseq) => Arc::new(iseq),
-        Err(unsupported) => {
-            return Err(Error::Unknowable {
-                what: unsupported.node,
-                needs: "the compiler to lower it in a required file",
-            });
+    // The project's bytecode cache (#40), for a file read from disk: one
+    // shipped in the binary is not the project's.
+    let cache = scope.bytecode_cache().filter(|_| from_disk);
+    let cached = cache
+        .as_deref()
+        .and_then(|dir| crate::sbc::read(dir, &name, &source, frozen));
+    let (iseq, warnings) = match cached {
+        Some(entry) => (entry.iseq, entry.warnings),
+        None => {
+            let (program, warnings) = match parser(&name, &source, 1, false, None, &[]) {
+                Ok(parsed) => (parsed.program, parsed.warnings),
+                Err(crate::heap::ParseFailure::Syntax(message)) => {
+                    return Err(syntax_error(scope, message, &name));
+                }
+                Err(crate::heap::ParseFailure::Unsupported) => {
+                    return Err(Error::Unknowable {
+                        what: "a file the parser cannot lower",
+                        needs: "the lowering to cover it",
+                    });
+                }
+            };
+            let iseq = match crate::compile::program_with(&program, "<top (required)>", frozen) {
+                Ok(iseq) => Arc::new(iseq),
+                Err(unsupported) => {
+                    return Err(Error::Unknowable {
+                        what: unsupported.node,
+                        needs: "the compiler to lower it in a required file",
+                    });
+                }
+            };
+            if let Some(dir) = cache.as_deref() {
+                crate::sbc::write(dir, &name, &source, frozen, &iseq, &warnings);
+            }
+            (iseq, warnings)
         }
     };
     note_block_users(scope, &iseq);
