@@ -18096,6 +18096,11 @@ fn light_step<const LIGHT: bool, const MORE: bool>(
                 *pc = jump(*pc, displacement);
             }
         }
+        // A symbol literal, an immediate — `__math__(:sqrt, x)` — in
+        // `more_stretch` alone, as the other instructions below (#750).
+        Insn::PushSym(index) if MORE => {
+            stack.push(Value::symbol(frame.iseq.symbol_ids()[index as usize]));
+        }
         // A Float literal, a constant read from a scope or an
         // instance-variable write its site's cache answers — of an
         // immediate in a light run, as its `SetLocal` takes one — in

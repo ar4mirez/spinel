@@ -2735,6 +2735,17 @@ impl Compiler {
             (&node.then_body[..], node.else_body.as_deref())
         };
 
+        // `x unless c` as a statement: the test's other jump around the one
+        // arm there is, rather than a jump to it and another past it.
+        if !keep
+            && then_body.is_empty()
+            && let Some(body) = else_body
+        {
+            let to_end = self.emit_jump(Insn::JumpIf);
+            self.statements(body, false)?;
+            self.patch_here(to_end);
+            return Ok(());
+        }
         let to_else = self.emit_jump(Insn::JumpUnless);
         let before = self.depth;
         self.statements(then_body, keep)?;
