@@ -165,7 +165,7 @@ fn parse(version: &str) -> Option<Version> {
 }
 
 /// A `.ruby-version`'s version, read as `parse` reads it when RubyGems takes
-/// it, and otherwise by its leading numeric segments, as version managers
+/// it (`3.3.0p0` is a prerelease of `3.3.0`), and otherwise by its leading numeric segments, as version managers
 /// write words RubyGems rejects: `2.7.8_1` is `2.7.8`, `3.3.0@gemset` is
 /// `3.3.0`.
 fn parse_leniently(version: &str) -> Option<Version> {
@@ -212,8 +212,15 @@ mod tests {
     }
 
     #[test]
-    fn version_manager_words_rubygems_rejects_are_read_by_leading_numbers() {
+    fn a_patchlevel_word_is_a_prerelease_of_its_release() {
+        assert_eq!(parse("3.3.0p0").map(|v| v.prerelease()), Some(true));
         assert_eq!(check_ruby_version_file("3.3.0p0\n"), None);
+    }
+
+    #[test]
+    fn version_manager_words_rubygems_rejects_are_read_by_leading_numbers() {
+        assert_eq!(parse("2.7.8_1"), None);
+        assert_eq!(parse("3.3.0@gemset"), None);
         assert_eq!(check_ruby_version_file("2.7.8_1\n"), None);
         assert_eq!(check_ruby_version_file("ruby-3.3.0@gemset\n"), None);
         assert!(check_ruby_version_file("99.0.0_1").is_some());
