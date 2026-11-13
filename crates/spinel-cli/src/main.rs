@@ -13,6 +13,14 @@
     )
 )]
 mod gem_platform;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the installer's substitution step; only tests call it until the installer lands"
+    )
+)]
+mod gem_substitute;
 mod gem_version;
 mod init;
 mod ruby_args;
