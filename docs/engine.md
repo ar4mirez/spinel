@@ -56,6 +56,60 @@ wider than these operators — is what `Warning[:performance]` reports, once per
 body the core library installed (#320).
 Integer overflow promotes to a bignum.
 
+**Superinstructions** ([#746](https://github.com/ar4mirez/spinel/issues/746),
+[#750](https://github.com/ar4mirez/spinel/issues/750)). Once a body is
+compiled, `bytecode::fuse` writes a superinstruction over the first instruction
+of each run of instructions that has one. The runs were chosen by counting,
+over the yjit-bench programs and `bench/interp_loops.rb`, which instructions
+run one after another in the same frame:
+
+| superinstruction | stands for | e.g. |
+|---|---|---|
+| `GetLocalPushIntBinOp { slot, int, op }` | `GetLocal(slot, 0); PushInt(int); BinOp(op)` | `n < 2`, `i += 1` |
+| `GetLocalGetLocalBinOp { left, right, op }` | `GetLocal(left, 0); GetLocal(right, 0); BinOp(op)` | `i < n`, `dx * dx` |
+| `GetLocalGetIvarBinOp { slot, site, op }` | `GetLocal(slot, 0); GetIvar(_, site); BinOp(op)` | `sum += @v` |
+| `GetLocalBinOp { slot, op }` | `GetLocal(slot, 0); BinOp(op)`, the left operand already on the stack | `dx * mag` |
+| `PushSelfGetLocal { slot }` | `PushSelf; GetLocal(slot, 0)` | `check(tree)` |
+
+A superinstruction's name is the instructions it stands for, in order, and its
+fields are theirs. It replaces only the first of them. The rest of the run
+stays where the compiler wrote it, so nothing moves. The jumps, the catch
+table, the line table and the inline-cache sites are untouched, and a jump
+into the middle of a run lands on a real instruction. A run can start inside
+another: in `GetLocal a; GetLocal b; PushInt 1; BinOp(+)` the first
+`GetLocal` heads nothing, and the second heads a `GetLocalPushIntBinOp`. In
+`GetLocal a; GetLocal b; BinOp(*)`, the first heads a `GetLocalGetLocalBinOp`
+and the second a `GetLocalBinOp`, which is reached only by a jump into the run
+or by a decline of the first.
+
+The light loops answer a superinstruction in one dispatch when every
+instruction of its run would have run light, as it would have answered there:
+
+- a local of a frame whose locals are on its stack;
+- a fixnum, or in `more_stretch` a flonum, under an operator the program has
+  not redefined, with an immediate answer;
+- an instance-variable read that its site's cache answers.
+
+The `SetLocal` or conditional jump after the run is run with it, as after a
+`BinOp`. Anything else is a *decline*. The superinstruction then runs only its
+first instruction (`Insn::head`), and the loop goes on at the next `pc`, where
+the rest of the run executes as it always did. So every send, error,
+backtrace line and allocation is the unfused program's. `run`'s own step
+always declines: it runs the first instruction of every stretch, and the
+fused path in its code cost each instruction it dispatches.
+
+The operators fused are those the light loop answers. `%` is never fused.
+`*` and `/` are fused with a local or an instance variable, for flonums, but
+not with an integer literal, since two fixnums never answer light. A
+`PushSelfGetLocal` is not written where its `GetLocal` heads a longer run: fib's
+`fib(n - 1)` pushes `self` and then runs `n - 1` as one instruction.
+
+Each superinstruction is code in every light loop, and an arm that some loops
+never run costs them registers, as the Float arms did (#750). Each one was
+kept only if it paid in instructions retired across the yjit-bench programs and
+`bench/*.rb`. The roadmap lists the forms measured and not kept, and the
+candidates not built, with their numbers.
+
 ## Values
 
 Landed in [#6](https://github.com/ar4mirez/spinel/issues/6). A 64-bit tagged word,

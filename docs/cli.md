@@ -7,6 +7,7 @@ What `spinel` does outside the engine: how it runs a file, how it reports itself
 | command | does |
 |---|---|
 | `spinel run <file> [args]` | run a file on the VM with the project's gems visible |
+| `spinel run --dump-bytecode <file>` | compile the file and print its bytecode instead of running it; see below |
 | `spinel <file.rb>` | same as `run`. Subcommand names win: `spinel install` is the subcommand even if `install` exists as a file; use `spinel run install` or `spinel ./install` for the file. |
 | `spinel -e CODE`, `-r LIB`, `-I DIR`, `-w`, `-v`, … | `ruby`'s command line, parsed as `ruby.c`'s `proc_options` parses it: `-e`, `-r`, `-I`, `-w`/`-W[level]`/`-W:category`, `-v`, `-d`, `-n`/`-p`/`-l`/`-a`/`-F`, `-0[octal]`, `-s`, `-x[dir]`, `-C dir`, `-c`, `-E`, and `-` for a program on standard input; `RUBYOPT`, `RUBYLIB` and, for `-S`, `RUBYPATH` are read as `ruby` reads them (#314). Feature switches Spinel has nothing behind (`--disable-gems`, `--enable=…`, the JITs) are accepted and do nothing. Any first word that starts with `-`, other than `-h`, `--help` and `-V`, means this form; a flag `ruby` does not have is its `invalid option` error (#62). |
 | `spinel x <gem>[@req] [args]` | run a gem's executable from an ephemeral GEM_HOME under `~/.spinel/x/`, project untouched |
@@ -49,6 +50,31 @@ Ruby 4.0's `Ruby` module holds the same objects (`Ruby::VERSION.equal?(RUBY_VERS
 Reporting `"spinel"` rather than `"ruby"` is honest and is what JRuby and TruffleRuby do. The cost: Bundler's `platforms :ruby` / `:mri` groups are defined as a list of known engines, and unknown engines are excluded from those groups. Two mitigations, both required: Spinel's own Gemfile evaluator treats `:ruby` as matching, and we upstream a one-line Bundler change adding `spinel` to `Bundler::CurrentRuby` so `require "bundler/setup"` inside apps behaves the same. Until that lands, `bundler/setup` on Spinel logs a warning naming any gem it skipped for platform reasons.
 
 **Language version.** Spinel implements one Ruby language version at a time, the latest stable, and follows Ruby's December releases. `ruby "3.3"` in a Gemfile and a `.ruby-version` that names a CRuby version are read and produce a warning, never an error, because the intent is "this app expects at least that Ruby". `--strict-ruby-version` turns the warning into an error for CI.
+
+## `--dump-bytecode`
+
+`spinel run --dump-bytecode file.rb` is to the compiler what `spinel parse` is to the tree. It compiles the file and prints its `Iseq` in Rust's `Debug` form, without running it: the instructions, one per `pc`, with the literal and symbol pools, the locals, the call sites and the nested bodies (`children`). A file that does not parse reports its syntax errors and exits with the status `spinel run` gives them.
+
+The format is the instruction set's, and it changes when the instruction set changes; `CHANGELOG.md` records each change. A superinstruction (engine.md, Bytecode) prints as a struct named for the instructions it stands for, with their operands as fields:
+
+```
+GetLocalPushIntBinOp {
+    slot: 0,
+    int: 2,
+    op: Lt,
+},
+PushInt(
+    2,
+),
+BinOp(
+    Lt,
+),
+JumpUnless(
+    3,
+),
+```
+
+The instructions after it are the ones it stands for, still in place. A jump into the middle of the run lands on them, and they are what runs when the superinstruction declines. Each line is one `pc`: read the stream with nothing skipped, and a jump's displacement counts every line.
 
 ## `--watch`
 
