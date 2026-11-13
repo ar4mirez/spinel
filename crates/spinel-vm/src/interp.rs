@@ -26469,23 +26469,35 @@ mod tests {
         );
     }
 
+    /// `left op right` on a freshly bootstrapped heap refuses rather than
+    /// guesses. One case per test, each on its own heap as before: nearly all
+    /// of a case's time under miri is its bootstrap, so one test holding both
+    /// cases held two bootstraps of the job's wall time (#653).
+    fn arithmetic_that_leaves_the_fast_path_refuses(op: BinOp, left: Value, right: Value) {
+        let mut heap = Heap::new();
+        let mut scope = heap.scope();
+        scope.bootstrap();
+        assert!(
+            matches!(
+                binop(&mut scope, op, left, right),
+                Err(Error::NoDispatch { .. })
+            ),
+            "{op:?} should refuse rather than guess"
+        );
+    }
+
     #[test]
-    fn arithmetic_that_leaves_the_fast_path_refuses() {
-        for (op, left, right) in [
-            (BinOp::Add, Value::TRUE, Value::fixnum(1).unwrap()),
-            (BinOp::Lt, Value::NIL, Value::NIL),
-        ] {
-            let mut heap = Heap::new();
-            let mut scope = heap.scope();
-            scope.bootstrap();
-            assert!(
-                matches!(
-                    binop(&mut scope, op, left, right),
-                    Err(Error::NoDispatch { .. })
-                ),
-                "{op:?} should refuse rather than guess"
-            );
-        }
+    fn arithmetic_that_leaves_the_fast_path_refuses_true_plus_one() {
+        arithmetic_that_leaves_the_fast_path_refuses(
+            BinOp::Add,
+            Value::TRUE,
+            Value::fixnum(1).unwrap(),
+        );
+    }
+
+    #[test]
+    fn arithmetic_that_leaves_the_fast_path_refuses_nil_less_than_nil() {
+        arithmetic_that_leaves_the_fast_path_refuses(BinOp::Lt, Value::NIL, Value::NIL);
     }
 
     /// The light loop's Float operators answer what `float_op` and `ruby_eq`
