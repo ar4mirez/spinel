@@ -5464,39 +5464,13 @@ fn send_bound<const SPLATS: bool>(
     // and `resize`, each a call for a handful of values.
     let base = at + plan.iseq.locals.len();
     let values = &mut stack.values;
-    let mut keywords = [Value::NIL; MAX_DIRECT_KEYWORDS];
-    let placed = if plan.in_order {
+    if plan.in_order {
         // The keywords are written in the order their parameters' slots
         // follow the positionals: once the receiver goes, every argument is
         // where its local is.
-        argc + given
+        place_arguments(values, at, argc + given, base);
     } else {
-        // The keywords leave the stack for a moment, since their slots may
-        // be where another keyword or a positional is still standing.
-        // Nothing between here and their return can collect.
-        for (index, keyword) in keywords[..given].iter_mut().enumerate() {
-            *keyword = values[at + 1 + argc + index];
-        }
-        argc
-    };
-    // The receiver goes, and the arguments placed are the first locals.
-    for index in at..at + placed {
-        values[index] = values[index + 1];
-    }
-    // Every parameter is a local, so the frame is at least one shorter than
-    // what the call pushed: the receiver.
-    if base < values.len() {
-        values.truncate(base);
-    } else {
-        values.resize(base, Value::NIL);
-    }
-    for value in &mut values[at + placed..base] {
-        *value = Value::NIL;
-    }
-    if !plan.in_order {
-        for (&value, &local) in keywords[..given].iter().zip(plan.keywords.iter()) {
-            values[at + usize::from(local)] = value;
-        }
+        place_reordered(values, at, argc, given, base, &plan.keywords);
     }
     for &local in plan.undef.iter() {
         values[at + usize::from(local)] = Value::UNDEF;
@@ -6159,6 +6133,54 @@ fn push_call(frames: &mut Vec<Call>, frame: Call) {
     unsafe {
         frames.as_mut_ptr().add(len).write(frame);
         frames.set_len(len + 1);
+    }
+}
+
+/// [`send_bound`]'s binding of the arguments a call left on the stack above
+/// its receiver at `at`: the receiver goes, the first `placed` arguments
+/// become the first locals, and the frame's other locals up to `base` start
+/// `nil`. Element by element rather than through `remove`,
+/// `copy_from_slice` and `resize`, each a call for a handful of values.
+#[inline(always)]
+fn place_arguments(values: &mut Vec<Value>, at: usize, placed: usize, base: usize) {
+    for index in at..at + placed {
+        values[index] = values[index + 1];
+    }
+    // Every parameter is a local, so the frame is at least one shorter than
+    // what the call pushed: the receiver.
+    if base < values.len() {
+        values.truncate(base);
+    } else {
+        values.resize(base, Value::NIL);
+    }
+    for value in &mut values[at + placed..base] {
+        *value = Value::NIL;
+    }
+}
+
+/// [`place_arguments`] for a site whose `given` keywords are not written in
+/// the order of their parameters' slots, each of which `slots` names: they
+/// leave the stack for a moment, since their slots may be where another
+/// keyword or a positional is still standing, and go to their slots once
+/// the positionals are placed. Nothing between can collect. Out of line, so
+/// that a call with its keywords in order, or none, does not set aside the
+/// room for them (#746).
+#[inline(never)]
+fn place_reordered(
+    values: &mut Vec<Value>,
+    at: usize,
+    argc: usize,
+    given: usize,
+    base: usize,
+    slots: &[u16],
+) {
+    let mut keywords = [Value::NIL; MAX_DIRECT_KEYWORDS];
+    for (index, keyword) in keywords[..given].iter_mut().enumerate() {
+        *keyword = values[at + 1 + argc + index];
+    }
+    place_arguments(values, at, argc, base);
+    for (&value, &local) in keywords[..given].iter().zip(slots.iter()) {
+        values[at + usize::from(local)] = value;
     }
 }
 
@@ -18807,11 +18829,13 @@ fn calls_loop<const MORE: bool>(
                 };
                 // The receiver has moved off the stack into the frame, so it
                 // takes a handle, as the loop's rooting of what is fresh on
-                // the stack would have given it before the send. Everything
-                // else the call took is still on the stack, as the callee's
-                // locals, for the next such rooting; nothing between here and
-                // it can collect.
-                if !receiver.is_immediate() {
+                // the stack would have given it before the send — unless it
+                // is the caller's own `self`, which every frame's receiver
+                // is rooted as already, from its push or the last
+                // `release_roots` (#746). Everything else the call took is
+                // still on the stack, as the callee's locals, for the next
+                // such rooting; nothing between here and it can collect.
+                if !receiver.is_immediate() && receiver != frames[top].receiver {
                     scope.root(receiver);
                 }
                 // Where the caller resumes, and what a backtrace taken in the
