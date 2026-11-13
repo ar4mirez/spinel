@@ -43,7 +43,7 @@ use std::ptr::{self, NonNull};
 
 use crate::class::Classes;
 use crate::shape::{ShapeId, Shapes};
-use crate::value::{SymbolId, Value};
+use crate::value::{SymbolId, SymbolMap, SymbolSet, Value};
 
 /// Cell sizes, in bytes. Powers of two so the class index is one shift.
 const SIZE_CLASSES: [usize; 5] = [32, 64, 128, 256, 512];
@@ -417,7 +417,7 @@ pub struct Heap {
     /// The name is the key and a *slot* is the value, so `alias $b $a` can
     /// point two names at one cell. Ruby's global alias shares storage rather
     /// than copying: a later write through either name is visible through both.
-    globals: HashMap<SymbolId, usize>,
+    globals: SymbolMap<usize>,
     /// The cells. Never shrinks — a global's storage outlives the name that
     /// reached it, because an alias may still hold the slot after the original
     /// name was pointed somewhere else. Measured: `$a = 1; alias $b $a; alias
@@ -427,17 +427,17 @@ pub struct Heap {
     /// derived from the last match — so an alias to one records *which*
     /// derivation, and reading the name runs it. Writing raises: these are
     /// read-only, and Ruby names the alias in the message.
-    global_specials: HashMap<SymbolId, crate::bytecode::MatchRef>,
+    global_specials: SymbolMap<crate::bytecode::MatchRef>,
     /// Globals the runtime owns and a program may not assign: `$:` and
     /// `$LOADED_FEATURES` (#39). By name, so an alias is marked separately.
-    readonly_globals: std::collections::HashSet<SymbolId>,
+    readonly_globals: SymbolSet,
     /// `--enable=frozen-string-literal` or `--disable=frozen-string-literal`,
     /// for every compile after it is set; `None` when neither was given.
     frozen_string_literal: Option<bool>,
     /// Globals whose assignment, or read, is a Ruby method rather than a cell
     /// (#268): bit 0 for writes, bit 1 for reads. `$,` warns when set, `$=`
     /// when read.
-    hooked_globals: std::collections::HashMap<SymbolId, u8>,
+    hooked_globals: SymbolMap<u8>,
     /// `GC.disable`: an allocation past the threshold does not collect. An
     /// explicit collection still does, as CRuby's `GC.start` does (#36).
     gc_disabled: bool,
@@ -725,12 +725,12 @@ impl Heap {
             argv: Vec::new(),
             program_name: String::new(),
             budget: Some(crate::interp::BUDGET),
-            globals: HashMap::new(),
+            globals: SymbolMap::default(),
             global_slots: Vec::new(),
-            global_specials: HashMap::new(),
-            readonly_globals: std::collections::HashSet::new(),
+            global_specials: SymbolMap::default(),
+            readonly_globals: SymbolSet::default(),
             frozen_string_literal: None,
-            hooked_globals: std::collections::HashMap::new(),
+            hooked_globals: SymbolMap::default(),
             gc_disabled: false,
             gc_stress: false,
             gc_requested: false,

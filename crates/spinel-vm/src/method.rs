@@ -19,7 +19,7 @@
 use std::sync::Arc;
 
 use crate::bytecode::Iseq;
-use crate::value::{SymbolId, Value};
+use crate::value::{SymbolId, SymbolSet, Value};
 
 /// Which of `Module`'s four class-variable reflection methods is being run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1318,7 +1318,7 @@ pub struct Definitions {
     /// does not. Filled when a file or `eval` string is loaded, as CRuby fills
     /// its table when it compiles one, so a `def` that has not run yet counts.
     /// The core library's are left out, as CRuby's C methods are.
-    block_users: std::collections::HashSet<SymbolId>,
+    block_users: SymbolSet,
 }
 
 impl Definitions {
@@ -1329,7 +1329,7 @@ impl Definitions {
             interned: std::collections::HashMap::new(),
             ruby2_keywords: std::collections::HashSet::new(),
             unused_block_warned: std::collections::HashSet::new(),
-            block_users: std::collections::HashSet::new(),
+            block_users: SymbolSet::default(),
         }
     }
 

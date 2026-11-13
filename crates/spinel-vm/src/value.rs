@@ -49,6 +49,72 @@ pub struct Value(NonZeroU64);
 #[repr(transparent)]
 pub struct SymbolId(pub u32);
 
+/// A `HashMap` keyed by [`SymbolId`], hashed with [`SymbolHasher`] rather than
+/// SipHash: method tables, method caches, constant and class-variable tables,
+/// globals and shape transitions.
+pub type SymbolMap<V> = std::collections::HashMap<SymbolId, V, BuildSymbolHasher>;
+
+/// A `HashSet` of [`SymbolId`]s, hashed with [`SymbolHasher`].
+pub type SymbolSet = std::collections::HashSet<SymbolId, BuildSymbolHasher>;
+
+/// Builds a [`SymbolHasher`]. It carries no keys, so every map built with it
+/// hashes the same id the same way.
+pub type BuildSymbolHasher = std::hash::BuildHasherDefault<SymbolHasher>;
+
+/// The hasher for [`SymbolId`] keys: one multiply and a rotate, the FxHash
+/// step `rustc` hashes its own interned symbols with (#652).
+///
+/// SipHash is what `HashMap` uses by default because its keys are random per
+/// process, which is what keeps someone who chooses the keys from choosing a
+/// set that lands in one bucket. That is the defence for keys that come from
+/// input, such as a Ruby `Hash`'s or the symbol table's own index of names,
+/// and neither uses this hasher. A `SymbolId` is not such a key: it is the
+/// index the symbol table hands out, in order, starting at zero (see
+/// [`crate::shared::symbols`]). A program, or the input it reads, decides
+/// which names get interned and in what order, never the number a name gets,
+/// so the keys of a table here are a subset of a dense run of integers. The
+/// multiply spreads that run over the top bits, which `HashMap` filters on,
+/// and the rotate brings bits that depend on every bit of the id down to the
+/// bottom ones it picks a bucket with. Choosing ids that share a bucket still
+/// costs about one interned name per bucket of the table for each colliding
+/// key, so a collision costs whoever causes it as much as it costs the table:
+/// there is nothing to amplify, and no key to keep secret.
+///
+/// What it buys is the cost of a hash. Bootstrap does thousands of inserts
+/// into these tables and every method call that misses its inline cache does
+/// a lookup; natively SipHash's rounds are a small part of that, but Miri
+/// interprets every one of them, which made them much of a heap's bootstrap
+/// there (#652).
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SymbolHasher(u64);
+
+impl SymbolHasher {
+    /// FxHash's multiplier: odd, so the multiply is a bijection on `u64`.
+    const K: u64 = 0xf135_7aea_2e62_a9c5;
+
+    fn add(&mut self, word: u64) {
+        self.0 = self.0.wrapping_add(word).wrapping_mul(Self::K);
+    }
+}
+
+impl std::hash::Hasher for SymbolHasher {
+    fn write_u32(&mut self, id: u32) {
+        self.add(u64::from(id));
+    }
+
+    // `SymbolId` hashes as its `u32`, so nothing else reaches this; it is here
+    // so the hasher is correct, if slower, for any key.
+    fn write(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.add(u64::from(byte));
+        }
+    }
+
+    fn finish(&self) -> u64 {
+        self.0.rotate_left(26)
+    }
+}
+
 /// A [`Value`] with its tag read, for exhaustive matching.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Unpacked {
@@ -567,5 +633,33 @@ mod tests {
         assert_eq!(format!("{:?}", Value::NIL), "nil");
         assert_eq!(format!("{:?}", Value::TRUE), "true");
         assert_eq!(format!("{:?}", Value::symbol(SymbolId(3))), "Symbol(3)");
+    }
+
+    /// The property [`SymbolHasher`]'s comment leans on: a dense run of ids,
+    /// which is what a table of them holds, spreads over both the bucket bits
+    /// and the seven top bits `HashMap` filters a probe with.
+    #[test]
+    fn symbol_hasher_spreads_a_dense_run_of_ids() {
+        use std::hash::BuildHasher as _;
+        const IDS: u32 = 1024;
+        let build = BuildSymbolHasher::default();
+        let hashes: Vec<u64> = (0..IDS).map(|id| build.hash_one(SymbolId(id))).collect();
+
+        let mut buckets = vec![0_u32; IDS as usize];
+        let mut tags = [false; 128];
+        for &hash in &hashes {
+            buckets[(hash % u64::from(IDS)) as usize] += 1;
+            tags[(hash >> 57) as usize] = true;
+        }
+        let fullest = buckets.iter().copied().max().unwrap();
+        assert!(fullest <= 4, "{fullest} ids share one of {IDS} buckets");
+        let used = tags.iter().filter(|&&used| used).count();
+        assert!(used >= 64, "only {used} of 128 tags used");
+
+        let mut map: SymbolMap<u32> = SymbolMap::default();
+        for id in 0..IDS {
+            map.insert(SymbolId(id), id);
+        }
+        assert!((0..IDS).all(|id| map[&SymbolId(id)] == id));
     }
 }
