@@ -26,6 +26,7 @@ mod init;
 mod ruby_args;
 mod ruby_version;
 mod stdlib;
+mod trailer;
 mod tree;
 mod watch;
 
@@ -142,6 +143,13 @@ enum Format {
 }
 
 fn main() -> ExitCode {
+    // A compiled app is this binary with a payload and trailer appended
+    // (docs/build.md, "Format"). Checked before anything reads the command
+    // line, because a compiled app's command line belongs to the app.
+    if let Some(code) = compiled_app() {
+        return code;
+    }
+
     // `spinel -e CODE`, `spinel -w script.rb`: a `ruby` command line, parsed
     // as `ruby` parses one (#62). `spinel`'s own `-h` and `-V` stay clap's.
     // The words as bytes, so a `-e` in another encoding arrives unmangled,
@@ -213,6 +221,38 @@ fn main() -> ExitCode {
     }
 
     ExitCode::SUCCESS
+}
+
+/// What this executable does when it is a compiled app: `None` when it is
+/// a plain `spinel`, which costs one seek and one 48-byte read of its own file.
+fn compiled_app() -> Option<ExitCode> {
+    // An executable that cannot read itself has no payload it could run.
+    let mut file = trailer::open_self().ok()?;
+    let found = trailer::read(&mut file);
+    if let Ok(None) = found {
+        return None;
+    }
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("spinel"));
+    match found {
+        Ok(None) => None,
+        Ok(Some(app)) => {
+            // ponytail: verifies and stops. Extracting the payload and running
+            // its entry point is #101, which also skips the re-hash on a cache hit.
+            eprintln!(
+                "spinel: `{}` is a compiled app ({} byte payload, sha256 {}), \
+                 but running compiled apps is not built yet: \
+                 https://github.com/ar4mirez/spinel/issues/101",
+                exe.display(),
+                app.trailer.payload_len,
+                trailer::hex(&app.trailer.sha256),
+            );
+            Some(ExitCode::FAILURE)
+        }
+        Err(err) => {
+            eprintln!("spinel: `{}`: {err}", exe.display());
+            Some(ExitCode::FAILURE)
+        }
+    }
 }
 
 /// Whether a bare argument is a Ruby file rather than a mistyped subcommand.

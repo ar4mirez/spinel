@@ -16,6 +16,7 @@ clap.workspace = true
 ignore = "0.4"
 libc = "0.2.189"
 notify = "8"
+sha2 = "0.11.0"
 signal-hook = "0.4"
 spinel-ast.workspace = true
 spinel-core.workspace = true

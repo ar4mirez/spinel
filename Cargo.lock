@@ -780,6 +780,7 @@ dependencies = [
  "ignore",
  "libc",
  "notify",
+ "sha2",
  "signal-hook",
  "spinel-ast",
  "spinel-core",
