@@ -7,7 +7,8 @@
 //! the supervisor and its program together.
 //!
 //! Nothing here sleeps for a guessed time, beyond the deliberate spacing of
-//! one save's writes. The supervisor reports each restart
+//! one save's writes; a save a busy runner stalls past that spacing proves
+//! nothing, so it is made again rather than failed or passed. The supervisor reports each restart
 //! on stderr with the paths that caused it, and it handles events in the order
 //! the file system delivered them. So a test that must show some change did
 //! not restart the program makes that change, then a change that must, and
@@ -30,6 +31,16 @@ const DEBOUNCE: Duration = Duration::from_millis(100);
 /// The longest any one expected line may take: a cold debug build on a busy
 /// CI runner, not a timing the test depends on.
 const PATIENCE: Duration = Duration::from_secs(60);
+
+/// One save's writes as they happened, and the restarts that named its file.
+#[derive(Debug)]
+struct Save {
+    restarts: usize,
+    /// The longest time from one write to the next.
+    longest_gap: Duration,
+    /// From the first write to the last.
+    span: Duration,
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Stream {
@@ -147,6 +158,63 @@ impl Watch {
             })
             .map(|(_, line)| line.as_str())
             .collect()
+    }
+
+    /// Save `file` with `writes` writes `gap` apart, and count the restarts
+    /// that name it. A second restart for the save would be read before the
+    /// one a later change causes, so that change ends the count. A busy runner
+    /// can stall the writes past the spacing a test means, and then the save
+    /// is not the one it means; `meant` says whether it was, and an attempt
+    /// that was not is drained the same way and made again, a bounded number
+    /// of times.
+    fn one_save(
+        &mut self,
+        file: &str,
+        writes: usize,
+        gap: Duration,
+        meant: impl Fn(&Save) -> bool,
+    ) -> Save {
+        const ATTEMPTS: usize = 5;
+        let mut tried = Vec::new();
+        for attempt in 0..ATTEMPTS {
+            let from = self.seen.len();
+            let began = Instant::now();
+            let mut last = began;
+            let mut longest_gap = Duration::ZERO;
+            for n in 0..writes {
+                if n > 0 {
+                    thread::sleep(gap);
+                }
+                self.write(file, &format!("SAVED = {attempt}_{n}\n"));
+                let now = Instant::now();
+                longest_gap = longest_gap.max(now - last);
+                last = now;
+            }
+            let span = last - began;
+            self.expect(Stream::Err, |l| l.contains(file));
+            self.started();
+            self.write("config/settings.rb", &format!("SETTINGS = {attempt}\n"));
+            self.expect(Stream::Err, |l| l.contains("config/settings.rb"));
+            self.started();
+            let restarts = self.seen[from..]
+                .iter()
+                .filter(|(stream, line)| {
+                    *stream == Stream::Err
+                        && line.starts_with("spinel: restarting")
+                        && line.contains(file)
+                })
+                .count();
+            let save = Save {
+                restarts,
+                longest_gap,
+                span,
+            };
+            if meant(&save) {
+                return save;
+            }
+            tried.push(save);
+        }
+        panic!("the runner never wrote the save as meant in {ATTEMPTS} attempts: {tried:#?}");
     }
 
     fn write(&self, path: &str, contents: &str) {
@@ -288,29 +356,10 @@ fn a_burst_of_saves_restarts_the_program_once() {
     let mut watch = Watch::start("burst", &[]);
     watch.started();
 
-    // One save as editors make it: several writes to the file in a row.
-    let began = Instant::now();
-    for n in 0..10 {
-        watch.write("burst.rb", &format!("BURST = {n}\n"));
-    }
-    let took = began.elapsed();
-    assert!(
-        took < DEBOUNCE,
-        "ten small writes took {took:?}, longer than the debounce; nothing can be concluded"
-    );
-    watch.expect(Stream::Err, |l| l.contains("burst.rb"));
-    watch.started();
-
-    // Every event of the burst reached the supervisor before this one did, so
-    // a second restart for the burst would be read before this line.
-    watch.write("config/settings.rb", "SETTINGS = 2\n");
-    watch.expect(Stream::Err, |l| l.contains("config/settings.rb"));
-    let burst: Vec<&str> = watch
-        .restart_lines()
-        .into_iter()
-        .filter(|l| l.contains("burst.rb"))
-        .collect();
-    assert_eq!(burst.len(), 1, "one save, one restart: {burst:#?}");
+    // One save as editors make it: several writes to the file in a row, all
+    // within the debounce.
+    let save = watch.one_save("burst.rb", 10, Duration::ZERO, |save| save.span < DEBOUNCE);
+    assert_eq!(save.restarts, 1, "one save, one restart: {save:#?}");
 }
 
 #[test]
@@ -321,37 +370,10 @@ fn a_save_longer_than_the_debounce_restarts_the_program_once() {
     // One save as a formatter makes it: writes to one file, each within the
     // debounce of the last, the whole longer than it. The restart must wait
     // for the last write, not fire 100 ms after the first.
-    const GAP: Duration = Duration::from_millis(50);
-    let began = Instant::now();
-    let mut last = began;
-    for n in 0..5 {
-        if n > 0 {
-            thread::sleep(GAP);
-        }
-        watch.write("spaced.rb", &format!("SPACED = {n}\n"));
-        let now = Instant::now();
-        let gap = now - last;
-        assert!(
-            gap < DEBOUNCE,
-            "write {n} came {gap:?} after the last, longer than the debounce; nothing can be concluded"
-        );
-        last = now;
-    }
-    let span = last - began;
-    assert!(span > DEBOUNCE, "the writes spanned only {span:?}");
-    watch.expect(Stream::Err, |l| l.contains("spaced.rb"));
-    watch.started();
-
-    // As in the burst test, a second restart for the save would be read
-    // before the one this change causes.
-    watch.write("config/settings.rb", "SETTINGS = 2\n");
-    watch.expect(Stream::Err, |l| l.contains("config/settings.rb"));
-    let spaced: Vec<&str> = watch
-        .restart_lines()
-        .into_iter()
-        .filter(|l| l.contains("spaced.rb"))
-        .collect();
-    assert_eq!(spaced.len(), 1, "one save, one restart: {spaced:#?}");
+    let save = watch.one_save("spaced.rb", 8, Duration::from_millis(20), |save| {
+        save.longest_gap < DEBOUNCE && save.span > DEBOUNCE
+    });
+    assert_eq!(save.restarts, 1, "one save, one restart: {save:#?}");
 }
 
 #[test]
