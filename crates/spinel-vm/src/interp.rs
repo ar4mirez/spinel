@@ -18465,35 +18465,6 @@ fn more_stretch(
     *budget = budget.saturating_sub(ran);
 }
 
-/// [`light_stretch`] for [`run_calls`], which counts what its stretches ran
-/// against the room the budget had when it began, rather than the budget,
-/// and is answered the instruction the stretch stopped at.
-#[inline(never)]
-fn counted_stretch(
-    scope: &mut HandleScope<'_>,
-    stack: &mut Stack,
-    frame: &Call,
-    pc: &mut usize,
-    ran: &mut u64,
-    room: u64,
-) -> Insn {
-    stretch::<false>(scope, stack, frame, pc, ran, room)
-}
-
-/// [`counted_stretch`] in [`more_stretch`]'s loop, for a body whose
-/// stretches run there.
-#[inline(never)]
-fn counted_more_stretch(
-    scope: &mut HandleScope<'_>,
-    stack: &mut Stack,
-    frame: &Call,
-    pc: &mut usize,
-    ran: &mut u64,
-    room: u64,
-) -> Insn {
-    stretch::<true>(scope, stack, frame, pc, ran, room)
-}
-
 /// [`run_calls`]'s call to a primitive's light form at `at`: answered
 /// without allocating, and the frame run on from it in [`native_stretch`],
 /// whose stop it answers. `None`, with nothing changed, when the primitive
@@ -18521,7 +18492,7 @@ fn native_calls(
     })
 }
 
-/// [`counted_stretch`] for a frame [`run_calls`] has just answered a
+/// A stretch for a frame [`run_calls`] has just answered a
 /// primitive's light form in: [`light_step`]s, and each call to a light form
 /// it can answer without allocating answered where it stands, as
 /// [`light_send`] answers it, so that a loop around one — `s << x` in a
@@ -18534,7 +18505,7 @@ fn native_calls(
 /// counted it.
 ///
 /// Its own loop rather than [`stretch`]'s, so that the stretches every other
-/// frame runs in, [`light_stretch`] and `counted_stretch`, keep the
+/// frame runs in, [`light_stretch`] and [`calls_loop`]'s, keep the
 /// registers they had: a call inside their loop costs them those.
 #[inline(never)]
 fn native_stretch<const MORE: bool>(
@@ -18699,20 +18670,97 @@ fn run_calls(
     limit: u64,
     calls: LightCalls<'_>,
 ) -> Ran {
-    let mut at = *pc;
-    // Whether it stopped at a call its fast path declined.
-    let mut declined = false;
-    // How many may run before the budget reaches `limit`, and how many have.
-    let room = budget.saturating_sub(limit);
-    let mut ran: u64 = 0;
-    // The frames pushed here that are still there, and whether a return has
-    // gone below the frame it started in.
-    let mut entered: usize = 0;
-    let mut left = false;
-    // The instruction at `at`: read here once, and then answered by each
-    // stretch, which has it in hand.
-    let mut insn = frames[frames.len() - 1].iseq.insns[at];
+    let mut state = CallsState {
+        at: *pc,
+        declined: false,
+        // How many may run before the budget reaches `limit`.
+        room: budget.saturating_sub(limit),
+        ran: 0,
+        entered: 0,
+        left: false,
+        // Entered at the call a stretch stopped at.
+        stretch_first: false,
+        root_limit: calls.root_limit,
+    };
+    // Each flavour of the loop runs until a frame of the other flavour is
+    // reached, and hands over to it there.
     loop {
+        let more = scope
+            .call_caches()
+            .wants_more(frames[frames.len() - 1].cache_base);
+        let switched = if more {
+            calls_loop::<true>(scope, stack, frames, &mut state, calls.ids)
+        } else {
+            calls_loop::<false>(scope, stack, frames, &mut state, calls.ids)
+        };
+        if !switched {
+            break;
+        }
+    }
+    *pc = state.at;
+    *budget = budget.saturating_sub(state.ran);
+    Ran {
+        declined: state.declined,
+        left: state.left,
+    }
+}
+
+/// What [`run_calls`]'s loops share: where the running frame is, what has
+/// run, and how they stopped.
+struct CallsState {
+    /// The running frame's `pc`.
+    at: usize,
+    /// Whether it stopped at a call its fast path declined.
+    declined: bool,
+    /// How many may run before the budget reaches `limit`, and how many have.
+    room: u64,
+    ran: u64,
+    /// The frames pushed here that are still there, and whether a return has
+    /// gone below the frame it started in.
+    entered: usize,
+    left: bool,
+    /// Whether the loop starts with a stretch of the running frame, rather
+    /// than at the instruction a stretch stopped at: so when one flavour of
+    /// [`calls_loop`] hands over to the other at a call or a return.
+    stretch_first: bool,
+    /// See [`LightCalls::root_limit`].
+    root_limit: usize,
+}
+
+/// [`run_calls`]'s loop for frames whose stretches run in `more_stretch`'s
+/// loop when `MORE`, and in `light_stretch`'s otherwise: the instruction a
+/// stretch stopped at, then the stretch after it, inlined here rather than
+/// called (#746) — a stretch of its own function paid a call, a prologue
+/// saving the registers and loading the frame's fields, an epilogue, and
+/// the instruction it stopped at answered through memory and dispatched on
+/// again, twice for each Ruby call. Answers whether it stopped at a frame
+/// of the other flavour, which `run_calls` then runs in the other loop.
+///
+/// Out of line, one for each flavour, so that each keeps the registers its
+/// stretch's light instructions want.
+#[inline(never)]
+fn calls_loop<const MORE: bool>(
+    scope: &mut HandleScope<'_>,
+    stack: &mut Stack,
+    frames: &mut Vec<Call>,
+    state: &mut CallsState,
+    ids: &mut u64,
+) -> bool {
+    let mut at = state.at;
+    let room = state.room;
+    let mut ran = state.ran;
+    let mut insn = if std::mem::take(&mut state.stretch_first) {
+        let top = frames.len() - 1;
+        stretch::<MORE>(scope, stack, &frames[top], &mut at, &mut ran, room)
+    } else {
+        // The instruction at `at`: read here once, and then answered by
+        // each stretch, which has it in hand.
+        frames[frames.len() - 1].iseq.insns[at]
+    };
+    let switched = loop {
+        if ran >= room {
+            break false;
+        }
         let top = frames.len() - 1;
         let frame = &frames[top];
         match insn {
@@ -18734,22 +18782,19 @@ fn run_calls(
                         if promote_site(scope, stack, &frames[top], index) {
                             continue;
                         }
-                        declined = true;
-                        break;
+                        state.declined = true;
+                        break false;
                     };
                     insn = next;
-                    if ran >= room {
-                        break;
-                    }
                     continue;
                 }
-                if scope.rooted() > calls.root_limit {
-                    break;
+                if scope.rooted() > state.root_limit {
+                    break false;
                 }
                 let pushed = if matches!(insn, Insn::Send(_)) {
-                    send_simple(scope, stack, frames, index, calls.ids)
+                    send_simple(scope, stack, frames, index, ids)
                 } else {
-                    yield_simple(scope, stack, frames, index, calls.ids)
+                    yield_simple(scope, stack, frames, index, ids)
                 };
                 let Some(receiver) = pushed else {
                     if let Insn::Send(index) = insn
@@ -18757,8 +18802,8 @@ fn run_calls(
                     {
                         continue;
                     }
-                    declined = true;
-                    break;
+                    state.declined = true;
+                    break false;
                 };
                 // The receiver has moved off the stack into the frame, so it
                 // takes a handle, as the loop's rooting of what is fresh on
@@ -18772,20 +18817,20 @@ fn run_calls(
                 // Where the caller resumes, and what a backtrace taken in the
                 // callee reads for the caller's line.
                 frames[top].pc = at + 1;
-                entered += 1;
+                state.entered += 1;
                 at = 0;
             }
             // `run`'s own arms for these, under its conditions.
             Insn::Leave if top > 0 && !frame.raises_receiver => {
                 leave_in_place(scope, stack, frames, true);
-                left |= entered == 0;
-                entered = entered.saturating_sub(1);
+                state.left |= state.entered == 0;
+                state.entered = state.entered.saturating_sub(1);
                 at = frames.last().expect("the caller").pc;
             }
             Insn::Return if top > 0 && returns_in_place(frame, at + 1) => {
                 leave_in_place(scope, stack, frames, false);
-                left |= entered == 0;
-                entered = entered.saturating_sub(1);
+                state.left |= state.entered == 0;
+                state.entered = state.entered.saturating_sub(1);
                 at = frames.last().expect("the caller").pc;
             }
             // A symbol literal: an immediate, as `run`'s arm pushes it.
@@ -18797,16 +18842,16 @@ fn run_calls(
             // as it answers it; a value it stores may be one a stretch left
             // on the stack unrooted, so what is fresh is rooted first.
             Insn::BinOp(_) | Insn::PushFloat(_) | Insn::GetConst(..) | Insn::SetIvar(..)
-                if scope.rooted() + stack.len() <= calls.root_limit =>
+                if scope.rooted() + stack.len() <= state.root_limit =>
             {
                 if !calls_more(scope, stack, frame, insn) {
-                    break;
+                    break false;
                 }
                 at += 1;
             }
             // A local set to a heap value, which a light stretch leaves for
             // the loop to root first.
-            Insn::SetLocal(slot, depth) if scope.rooted() + stack.len() <= calls.root_limit => {
+            Insn::SetLocal(slot, depth) if scope.rooted() + stack.len() <= state.root_limit => {
                 calls_set_local(scope, stack, frame, slot, depth);
                 at += 1;
             }
@@ -18816,29 +18861,29 @@ fn run_calls(
             // top of its loop. A collection it starts may queue finalizers,
             // which `run` runs at its next call or return, so the calls stop
             // here for it then.
-            Insn::NewArray(count) if scope.rooted() + stack.len() <= calls.root_limit => {
+            Insn::NewArray(count) if scope.rooted() + stack.len() <= state.root_limit => {
                 calls_new_array(scope, stack, count as usize);
                 at += 1;
                 if scope.has_pending_finalizers() {
-                    break;
+                    break false;
                 }
             }
-            _ => break,
+            _ => break false,
         }
         ran += 1;
         let top = frames.len() - 1;
-        insn = if scope.call_caches().wants_more(frames[top].cache_base) {
-            counted_more_stretch(scope, stack, &frames[top], &mut at, &mut ran, room)
-        } else {
-            counted_stretch(scope, stack, &frames[top], &mut at, &mut ran, room)
-        };
-        if ran >= room {
-            break;
+        // A Float operator run above may have just made this frame's
+        // stretches `more_stretch`'s; a call or a return may have reached a
+        // frame of the other flavour.
+        if scope.call_caches().wants_more(frames[top].cache_base) != MORE {
+            state.stretch_first = true;
+            break true;
         }
-    }
-    *pc = at;
-    *budget = budget.saturating_sub(ran);
-    Ran { declined, left }
+        insn = stretch::<MORE>(scope, stack, &frames[top], &mut at, &mut ran, room);
+    };
+    state.at = at;
+    state.ran = ran;
+    switched
 }
 
 /// How [`run_calls`] stopped.
