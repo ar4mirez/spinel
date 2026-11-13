@@ -27,6 +27,7 @@ mod ruby_args;
 mod ruby_version;
 mod stdlib;
 mod tree;
+mod watch;
 
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -100,6 +101,14 @@ enum Command {
         /// Without it the mismatch is a warning and the program runs.
         #[arg(long)]
         strict_ruby_version: bool,
+
+        /// Run it again whenever a file in the current directory changes.
+        ///
+        /// Paths `.gitignore` excludes do not count, and a burst of changes
+        /// within 100 ms restarts it once. The program runs as a fresh process
+        /// each time; nothing is reloaded in place.
+        #[arg(long)]
+        watch: bool,
     },
 
     /// Scaffold a project in the current directory.
@@ -169,7 +178,11 @@ fn main() -> ExitCode {
             args,
             dump_bytecode,
             strict_ruby_version,
+            watch,
         }) => {
+            if watch {
+                return watch_run(&path, &args, dump_bytecode, strict_ruby_version);
+            }
             if !project_ruby_version_ok(strict_ruby_version) {
                 return ExitCode::FAILURE;
             }
@@ -297,6 +310,31 @@ fn run_command(path: &Path, args: &[String], dump_bytecode: bool) -> ExitCode {
         ..Around::default()
     };
     run_program(path, &source, args, dump_bytecode, around)
+}
+
+/// `spinel run --watch`: the same `spinel run`, without `--watch`, as a child
+/// the supervisor restarts when the current directory changes. The child reads
+/// the project's Ruby version itself, so each run reports it afresh.
+fn watch_run(path: &Path, args: &[String], dump_bytecode: bool, strict: bool) -> ExitCode {
+    let root = match std::env::current_dir() {
+        Ok(dir) => dir,
+        Err(err) => {
+            eprintln!("spinel: cannot read the current directory: {err}");
+            return ExitCode::from(EXIT_USAGE);
+        }
+    };
+    let mut child: Vec<std::ffi::OsString> = vec!["run".into()];
+    if dump_bytecode {
+        child.push("--dump-bytecode".into());
+    }
+    if strict {
+        child.push("--strict-ruby-version".into());
+    }
+    // After `--`, a file named like a flag is still the file.
+    child.push("--".into());
+    child.push(path.into());
+    child.extend(args.iter().map(Into::into));
+    watch::run(&root, &child)
 }
 
 /// `spinel` given `ruby`'s flags: the prelude they mean, then the program
