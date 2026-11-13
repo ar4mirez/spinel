@@ -1,0 +1,68 @@
+{
+  "gemfiles": [
+    "@ROOT@/env/Gemfile"
+  ],
+  "source": {
+    "type": "rubygems",
+    "remote": "https://rubygems.org",
+    "cooldown": null
+  },
+  "ruby": null,
+  "optional_groups": [],
+  "gemspecs": [],
+  "dependencies": [
+    {
+      "name": "rake",
+      "requirements": [
+        "~> 13.0"
+      ],
+      "groups": [
+        "default"
+      ],
+      "platforms": [],
+      "source": null,
+      "require": null,
+      "install_if": true,
+      "env": null,
+      "force_ruby_platform": null,
+      "gemfile": "@ROOT@/env/Gemfile",
+      "options": {}
+    },
+    {
+      "name": "redis",
+      "requirements": [
+        "~> 5.0"
+      ],
+      "groups": [
+        "default"
+      ],
+      "platforms": [],
+      "source": null,
+      "require": [
+        "redis/client"
+      ],
+      "install_if": true,
+      "env": null,
+      "force_ruby_platform": null,
+      "gemfile": "@ROOT@/env/Gemfile",
+      "options": {}
+    },
+    {
+      "name": "puma",
+      "requirements": [
+        ">= 0"
+      ],
+      "groups": [
+        "default"
+      ],
+      "platforms": [],
+      "source": null,
+      "require": null,
+      "install_if": true,
+      "env": null,
+      "force_ruby_platform": null,
+      "gemfile": "@ROOT@/env/Gemfile",
+      "options": {}
+    }
+  ]
+}

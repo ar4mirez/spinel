@@ -29,7 +29,44 @@ Gemfile ──(ruby: gemfile_eval.rb)──▶ deps JSON ──▶ resolver ◀�
 
 ### 1. Gemfile evaluation
 
-`shims/gemfile_eval.rb` defines a tiny `Bundler::Dsl`-shaped object (`source`, `gem`, `group`, `platforms`, `git`, `path`, `ruby`, `gemspec`, `eval_gemfile`) and prints JSON. Evaluating it as Ruby means every Gemfile that Bundler accepts, Spinel accepts, including the ones with `if ENV[...]` logic. ~80 lines. Do not try to parse Gemfiles with Prism.
+`shims/gemfile_eval.rb` defines a small `Bundler::Dsl`-shaped object (`source`, `gem`, `group`, `platforms`, `git`, `path`, `ruby`, `gemspec`, `eval_gemfile`, and the rest of Bundler 4's DSL: `platform`, `github`, `git_source`, `install_if`, `env`, `plugin`) and prints JSON. Evaluating it as Ruby means every Gemfile that Bundler accepts, Spinel accepts, including the ones with `if ENV[...]` logic. Do not try to parse Gemfiles with Prism.
+
+`spinel run shims/gemfile_eval.rb` evaluates `BUNDLE_GEMFILE` when it is set and not empty, otherwise the nearest `gems.rb` or `Gemfile` from the current directory upward, as Bundler finds it. Each method records what `Bundler::Dsl` records and rejects what it rejects, with Bundler's message: a Symbol gem name, an unknown platform, the same gem twice with different requirements or sources, a `branch` without a git source, `git` or `path` without a block, a second global `source`, an undefined method. An error prints `There was an error parsing \`<file>\`: <message>` and `  from <file>:<line>` on stderr and exits 1; a gem listed twice alike is Bundler's warning on stderr and both entries stay. The one rule it does not copy is Bundler's rejection of an unknown `gem` option: those are kept, in `options`, for the resolver to judge. `crates/spinel-cli/tests/gemfile_eval.rs` checks every method against fixtures whose dependency lists match Bundler 4.0.20's `Bundler::Dsl`.
+
+The JSON is pretty-printed, keys always in the order below and always present (`null` when unset); arrays keep declaration order.
+
+```json
+{
+  "gemfiles": ["/abs/Gemfile", "/abs/gemfiles/common.rb"],
+  "source": {"type": "rubygems", "remote": "https://rubygems.org", "cooldown": null},
+  "ruby": {"versions": ["3.4.1"], "engine": "ruby", "engine_versions": ["3.4.1"], "patchlevel": null},
+  "optional_groups": ["ci"],
+  "gemspecs": [{"path": ".", "root": "/abs", "files": ["/abs/app.gemspec"], "name": null, "glob": null,
+                "development_group": "development", "gemfile": "/abs/Gemfile"}],
+  "dependencies": [
+    {"name": "pg", "requirements": ["= 1.5.0.pre.rc1"], "groups": ["default"], "platforms": [],
+     "source": null, "require": [], "install_if": true, "env": null, "force_ruby_platform": null,
+     "gemfile": "/abs/Gemfile", "options": {}}
+  ]
+}
+```
+
+- `gemfiles`: every file evaluated, the Gemfile first, then each `eval_gemfile` (resolved against the directory of the file that calls it), absolute.
+- `source`: the global rubygems source, or `null` when the Gemfile names none. `remote` is as written; Bundler compares remotes with a trailing `/`. `cooldown` is `source`'s `cooldown:` option.
+- `ruby`: the `ruby` directive as Bundler's `RubyVersion` holds it, or `null`. `versions` are requirements with `=` dropped and `-` read as `.`; `file:` reads the version from the named file, in `.ruby-version` or `.tool-versions` form, relative to the file with the directive. `engine` defaults to `ruby`, `engine_versions` to `versions`, and `patchlevel` is `"-1"` for a prerelease Ruby.
+- `optional_groups`: groups declared with `optional: true`.
+- `gemspecs`: each `gemspec` directive, with the gemspec files it found in `path` (relative to `root`, the directory of the file that has the directive). They are not evaluated yet, since RubyGems does not load (#319); evaluating one into its gem (from a path source) and its development dependencies (in `development_group`) is #88.
+- `dependencies`: one per `gem` call that ran.
+  - `requirements`: `Gem::Requirement#as_list`, so `"1.0-rc1"` is `"= 1.0.pre.rc1"` and no requirement is `[">= 0"]`.
+  - `groups`: the enclosing `group` blocks then the gem's `group:`/`groups:`; `["default"]` when there are none.
+  - `platforms`: the enclosing `platforms` blocks then the gem's `platform:`/`platforms:`, each one of Bundler's platform names.
+  - `source`: `null` for the global source. Otherwise the gem's own `path:`, else its `git:` or git-source option (`github:`, `gitlab:`, one from `git_source`), else its `source:`, else the enclosing `source`, `git`, `github` or `path` block. One of `{"type": "rubygems", "remote", "cooldown"}`, `{"type": "git", "uri", "branch", "ref", "tag", "submodules", "glob"}`, `{"type": "path", "path", "root", "glob"}` (`path` as written, relative to `root`), or `{"type": "plugin", "plugin", "uri", "options"}` for `source "...", type: ...`.
+  - `require`: `null` when not given (require the gem's name), else Bundler's autorequire list: `require: false` is `[]`.
+  - `install_if`: the enclosing `install_if` conditions and the gem's `install_if:`, evaluated now, as Bundler does.
+  - `env`: the enclosing `env` block's variable name (or Hash, with a Regexp written as its `inspect`), else `null`; Bundler checks it at install time, and so should Spinel.
+  - `force_ruby_platform`: as given, else `null`.
+  - `gemfile`: the file the `gem` call is in.
+  - `options`: every other option, keys as strings.
 
 ### 2. Index client
 
