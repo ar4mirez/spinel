@@ -2899,3 +2899,19 @@ def z751(o) = o.nil?; r = [z751(nil), z751([1]), z751(nil), z751(Object.new), z7
 class O751; def nil? = :mine; end; def y751(o) = o.nil?; [y751(O751.new), y751(1), y751(O751.new), y751(nil), y751(1)]  #=> [:mine, false, :mine, true, false]
 # Array literals made between calls, and splatted back out, under GC.stress.
 def b751(d) = d == 0 ? [nil, nil] : [b751(d - 1), b751(d - 1)]; def e751(l, r) = l.nil? ? 1 : 1 + e751(*l) + e751(*r); GC.stress = true; t = b751(4); n = e751(*t); GC.stress = false; [n, t.flatten.size, e751(*b751(6))]  #=> [31, 32, 127]
+# ------------------------------- the call loop's own instructions and returns (#746, #750)
+# An if or unless whose value nothing reads compiles to its test and its arms
+# alone; a missing arm pushes nothing, and `x unless c` is one jump.
+def n746(x); r = []; if x > 1 then r << :big end; unless x > 1 then r << :small end; if x == 5 then r << :five elsif x == 6 then r << :six else r << :other end; r << :late unless x < 3; r; end; [n746(0), n746(5), n746(6)]  #=> [[:small, :other], [:big, :five, :late], [:big, :six, :late]]
+def w746; y = 0; r = []; while y < 5; if y == 1 then y += 1; next end; if y == 4 then break end; r << y unless y == 3; y += 1; end; r; end; w746  #=> [0, 2]
+def v746(x) = (if x then :t end); def u746(x) = (unless x then :f end); [v746(true), v746(false), u746(true), u746(false)]  #=> [:t, nil, nil, :f]
+def fib746(n); if n < 2; return n; end; fib746(n - 1) + fib746(n - 2); end; fib746(20)  #=> 6765
+# A symbol literal, a constant read, Float arithmetic, a heap value set into a
+# local and an instance-variable write between calls, under GC.stress, and
+# returns to frames the loop did not push.
+class Q746; def initialize = (@v = nil); def inner(x) = (y = x * 1.5; @v = y; [y, :sym]); def outer(x) = (s = inner(x); Object; t = "o" + s[1].to_s; [s, t, :k]); def deep(n) = n == 0 ? outer(2.0) : deep(n - 1); attr_reader :v; end; q = Q746.new; GC.stress = true; r = [q.deep(3), q.deep(0), q.v]; GC.stress = false; r  #=> [[[3.0, :sym], "osym", :k], [[3.0, :sym], "osym", :k], 3.0]
+def s746(x) = Math.sqrt(x) + Math.sqrt(x * 4.0); def t746(a) = (b = a.map { |x| s746(x) }; b.sum); GC.stress = true; r = t746([1.0, 4.0, 9.0]); GC.stress = false; r  #=> 18.0
+# a[i]'s light form reads an Array from its head, which a shift moves.
+def a746(a, i) = a[i]; a = [1, 2, 3, 4]; a.shift; [a746(a, 0), a746(a, -1), a746(a, 2), a746(a, 3), a746(a, -4), a746([], 0)]  #=> [2, 4, 4, nil, nil, nil]
+# A call whose receiver is its caller's own self, and one whose is not.
+class R746; def initialize(n) = (@n = n); def f(k) = k == 0 ? "e" + @n.to_s : f(k - 1); def g(o) = o.f(2); end; a = R746.new(1); b = R746.new(2); GC.stress = true; r = [a.f(5), a.g(b), b.g(a)]; GC.stress = false; r  #=> ["e1", "e2", "e1"]

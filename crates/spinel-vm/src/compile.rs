@@ -1011,10 +1011,19 @@ impl Compiler {
     /// `Pop`. An assignment is the exception, because its target already pops
     /// the value: `a = v` as a statement is `v; SetLocal` rather than
     /// `v; Dup; SetLocal; Pop`, which is how YARV compiles it too.
+    ///
+    /// An `if` or `unless` is another: each arm's statements are discarded
+    /// in turn, so a missing arm pushes no `nil` and nothing is popped after
+    /// it — `if n < 2 then return n end` as a statement is the test, its
+    /// jump and the arm, as YARV compiles it (#746).
     fn discarded(&mut self, expr: &Expr) -> Emit {
         if let ExprKind::Assign(assign) = &expr.kind {
             self.at(expr.span.start);
             return self.assign(assign, expr.span, false);
+        }
+        if let ExprKind::If(node) = &expr.kind {
+            self.at(expr.span.start);
+            return self.if_arms(node, false);
         }
         self.expr(expr)?;
         self.emit(Insn::Pop);
@@ -2707,6 +2716,12 @@ impl Compiler {
     }
 
     fn if_expr(&mut self, node: &If) -> Emit {
+        self.if_arms(node, true)
+    }
+
+    /// An `if` or `unless`, leaving its value when `keep` and nothing
+    /// otherwise: see [`Compiler::discarded`].
+    fn if_arms(&mut self, node: &If, keep: bool) -> Emit {
         self.expr(&node.predicate)?;
         // `unless` is the same shape with the arms swapped. The AST keeps the
         // flag rather than negating the predicate, so the formatter can reprint
@@ -2720,17 +2735,34 @@ impl Compiler {
             (&node.then_body[..], node.else_body.as_deref())
         };
 
+        // `x unless c` as a statement: the test's other jump around the one
+        // arm there is, rather than a jump to it and another past it.
+        if !keep
+            && then_body.is_empty()
+            && let Some(body) = else_body
+        {
+            let to_end = self.emit_jump(Insn::JumpIf);
+            self.statements(body, false)?;
+            self.patch_here(to_end);
+            return Ok(());
+        }
         let to_else = self.emit_jump(Insn::JumpUnless);
         let before = self.depth;
-        self.statements(then_body, true)?;
+        self.statements(then_body, keep)?;
         let after_then = self.depth;
+        if !keep && else_body.is_none() {
+            // No arm to jump over: the test's jump lands past the one there
+            // is.
+            self.patch_here(to_else);
+            return Ok(());
+        }
         let to_end = self.emit_jump(Insn::Jump);
 
         self.patch_here(to_else);
         // Both arms start from the same depth and must reach the same one.
         self.depth = before;
         match else_body {
-            Some(body) => self.statements(body, true)?,
+            Some(body) => self.statements(body, keep)?,
             None => self.emit(Insn::PushNil),
         }
         debug_assert_eq!(

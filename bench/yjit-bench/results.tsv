@@ -1,11 +1,11 @@
 # Written by scripts/bench.sh --yjit-bench. Medians in milliseconds; do not edit.
-spinel	e7c85f4
+spinel	4006eb6
 ruby	ruby 4.0.9 (2026-10-23 revision 3e93b23afc) +PRISM [x86_64-linux]
-iterations	The per-cell median, aggregated outside scripts/bench.sh, of eight scripts/bench.sh --yjit-bench runs, each started with the 1-minute load under 2, of 1 warmup and the median of 5 timed iterations each, one CPU, ASLR off
+iterations	1 warmup and the median of 5 timed iterations each, one CPU, ASLR off
 #	benchmark	spinel	ruby --disable-yjit	ruby --yjit
-bench	binarytrees	1015.8	335.0	171.7
-bench	fib	517.3	195.2	24.7
-bench	getivar	139.2	92.0	95.2
-bench	keyword_args	318.0	205.9	31.6
-bench	nbody	248.0	88.5	38.5
-bench	str_concat	103.0	75.4	25.9
+bench	binarytrees	872.2	317.6	143.9
+bench	fib	412.3	180.1	23.1
+bench	getivar	121.8	87.5	93.2
+bench	keyword_args	288.2	224.0	32.3
+bench	nbody	188.6	87.8	36.8
+bench	str_concat	94.6	68.3	23.5

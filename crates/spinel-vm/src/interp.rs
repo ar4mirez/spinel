@@ -2854,7 +2854,7 @@ fn run<'h>(
                     && !scope.has_pending_finalizers()
                     && !threads::turn_owed(scope)
                 {
-                    declined = run_calls(
+                    let ran = run_calls(
                         scope,
                         &mut stack,
                         &mut frames,
@@ -2866,6 +2866,12 @@ fn run<'h>(
                             ids: &mut ids,
                         },
                     );
+                    declined = ran.declined;
+                    if ran.left {
+                        // The frame-change block runs and reloads even if
+                        // the count of frames is what it was.
+                        seen_frames = usize::MAX;
+                    }
                 }
                 continue;
             }
@@ -5458,39 +5464,13 @@ fn send_bound<const SPLATS: bool>(
     // and `resize`, each a call for a handful of values.
     let base = at + plan.iseq.locals.len();
     let values = &mut stack.values;
-    let mut keywords = [Value::NIL; MAX_DIRECT_KEYWORDS];
-    let placed = if plan.in_order {
+    if plan.in_order {
         // The keywords are written in the order their parameters' slots
         // follow the positionals: once the receiver goes, every argument is
         // where its local is.
-        argc + given
+        place_arguments(values, at, argc + given, base);
     } else {
-        // The keywords leave the stack for a moment, since their slots may
-        // be where another keyword or a positional is still standing.
-        // Nothing between here and their return can collect.
-        for (index, keyword) in keywords[..given].iter_mut().enumerate() {
-            *keyword = values[at + 1 + argc + index];
-        }
-        argc
-    };
-    // The receiver goes, and the arguments placed are the first locals.
-    for index in at..at + placed {
-        values[index] = values[index + 1];
-    }
-    // Every parameter is a local, so the frame is at least one shorter than
-    // what the call pushed: the receiver.
-    if base < values.len() {
-        values.truncate(base);
-    } else {
-        values.resize(base, Value::NIL);
-    }
-    for value in &mut values[at + placed..base] {
-        *value = Value::NIL;
-    }
-    if !plan.in_order {
-        for (&value, &local) in keywords[..given].iter().zip(plan.keywords.iter()) {
-            values[at + usize::from(local)] = value;
-        }
+        place_reordered(values, at, argc, given, base, &plan.keywords);
     }
     for &local in plan.undef.iter() {
         values[at + usize::from(local)] = Value::UNDEF;
@@ -5904,14 +5884,12 @@ fn light_array_index(
 ) -> Option<Value> {
     let &[index] = args else { return None };
     let index = index_arg(index)?;
-    if heap_kind(scope, receiver) != Some(HeapKind::Array) {
-        return None;
-    }
-    let mut nested = scope.nested();
-    let array = nested.root(receiver);
-    let length = array_len(&mut nested, array);
-    Some(match resolve_index(index, length) {
-        Some(index) => array_get(&mut nested, array, index),
+    // Read where the elements stand, without a handle (#750): an Array
+    // whose class is not remembered, or whose storage is not what an
+    // Array's is, is declined for the general path.
+    let elements = array_slice_of(scope, receiver)?;
+    Some(match resolve_index(index, elements.len()) {
+        Some(index) => elements[index],
         None => Value::NIL,
     })
 }
@@ -6153,6 +6131,54 @@ fn push_call(frames: &mut Vec<Call>, frame: Call) {
     unsafe {
         frames.as_mut_ptr().add(len).write(frame);
         frames.set_len(len + 1);
+    }
+}
+
+/// [`send_bound`]'s binding of the arguments a call left on the stack above
+/// its receiver at `at`: the receiver goes, the first `placed` arguments
+/// become the first locals, and the frame's other locals up to `base` start
+/// `nil`. Element by element rather than through `remove`,
+/// `copy_from_slice` and `resize`, each a call for a handful of values.
+#[inline(always)]
+fn place_arguments(values: &mut Vec<Value>, at: usize, placed: usize, base: usize) {
+    for index in at..at + placed {
+        values[index] = values[index + 1];
+    }
+    // Every parameter is a local, so the frame is at least one shorter than
+    // what the call pushed: the receiver.
+    if base < values.len() {
+        values.truncate(base);
+    } else {
+        values.resize(base, Value::NIL);
+    }
+    for value in &mut values[at + placed..base] {
+        *value = Value::NIL;
+    }
+}
+
+/// [`place_arguments`] for a site whose `given` keywords are not written in
+/// the order of their parameters' slots, each of which `slots` names: they
+/// leave the stack for a moment, since their slots may be where another
+/// keyword or a positional is still standing, and go to their slots once
+/// the positionals are placed. Nothing between can collect. Out of line, so
+/// that a call with its keywords in order, or none, does not set aside the
+/// room for them (#746).
+#[inline(never)]
+fn place_reordered(
+    values: &mut Vec<Value>,
+    at: usize,
+    argc: usize,
+    given: usize,
+    base: usize,
+    slots: &[u16],
+) {
+    let mut keywords = [Value::NIL; MAX_DIRECT_KEYWORDS];
+    for (index, keyword) in keywords[..given].iter_mut().enumerate() {
+        *keyword = values[at + 1 + argc + index];
+    }
+    place_arguments(values, at, argc, base);
+    for (&value, &local) in keywords[..given].iter().zip(slots.iter()) {
+        values[at + usize::from(local)] = value;
     }
 }
 
@@ -17964,13 +17990,7 @@ fn native_ops(scope: &mut HandleScope<'_>, frame: &Call, which: usize) -> u32 {
         let eq = (native >> operator_guard(BinOp::Neq)) & 1;
         (native & !(1 << BinOp::Neq as usize)) | (eq << BinOp::Neq as usize)
     };
-    if native != u32::MAX
-        && frame
-            .iseq
-            .path
-            .as_deref()
-            .is_some_and(|path| path.starts_with("<internal:"))
-    {
+    if native != u32::MAX && scope.call_caches().internal(frame.cache_base) {
         return u32::MAX;
     }
     native
@@ -18076,11 +18096,24 @@ fn light_step<const LIGHT: bool, const MORE: bool>(
                 *pc = jump(*pc, displacement);
             }
         }
+        // A symbol literal, an immediate — `__math__(:sqrt, x)` — in
+        // `more_stretch` alone, as the other instructions below (#750).
+        Insn::PushSym(index) if MORE => {
+            stack.push(Value::symbol(frame.iseq.symbol_ids()[index as usize]));
+        }
         // A Float literal, a constant read from a scope or an
         // instance-variable write its site's cache answers — of an
         // immediate in a light run, as its `SetLocal` takes one — in
         // `more_stretch` alone: see there.
         Insn::PushFloat(_) | Insn::GetConst(..) | Insn::SetIvar(..) if MORE => {
+            // A Float literal here rather than out of line (#746).
+            if let Insn::PushFloat(bits) = insn {
+                let Some(value) = Value::flonum(f64::from_bits(bits)) else {
+                    return 0;
+                };
+                stack.push(value);
+                return 1;
+            }
             let top = stack.last();
             if LIGHT && top.is_some_and(|value| !value.is_immediate()) {
                 return 0;
@@ -18133,14 +18166,20 @@ fn light_step<const LIGHT: bool, const MORE: bool>(
                 if !MORE {
                     return 0;
                 }
-                match light_more(scope, frame, insn, Some(right), left) {
-                    More::Replace(value) => {
-                        stack.truncate(depth - 2);
-                        stack.push(value);
-                        return 1;
-                    }
-                    _ => return 0,
-                }
+                // Two flonums, here rather than out of line (#746), under
+                // `Float`'s own operator mask, worked out once per run as
+                // `Integer`'s is; the answer is a flonum or a boolean, so
+                // the instruction after it pairs as it does for a fixnum.
+                let floats = *lazy
+                    .float_ops
+                    .get_or_insert_with(|| native_ops(scope, frame, 1));
+                let Some(value) =
+                    flonum_binop(op, left, right).filter(|_| floats & (1 << op as usize) != 0)
+                else {
+                    return 0;
+                };
+                stack.truncate(depth - 2);
+                return pair_after(scope, stack, frame, code, pc, value, pair, spent);
             };
             stack.truncate(depth - 2);
             // The answer is a fixnum or a boolean, so immediate: nothing
@@ -18182,6 +18221,54 @@ fn light_step<const LIGHT: bool, const MORE: bool>(
     1
 }
 
+/// The tail of [`light_step`]'s `BinOp` for an immediate answer `value` in
+/// `more_stretch`: the `SetLocal` or conditional jump right after it run
+/// with it, as for a fixnum, or `value` pushed. Answers how many
+/// instructions ran.
+#[inline(always)]
+#[expect(clippy::too_many_arguments, reason = "the loop's own registers")]
+fn pair_after<const LIGHT: bool>(
+    scope: &mut HandleScope<'_>,
+    stack: &mut LightStack<'_, LIGHT>,
+    frame: &Call,
+    code: &[Insn],
+    pc: &mut usize,
+    value: Value,
+    pair: bool,
+    spent: bool,
+) -> u64 {
+    let declined = |displacement: i32| spent && displacement < 0;
+    match code.get(*pc).filter(|_| pair) {
+        Some(&Insn::SetLocal(slot, depth)) => {
+            *pc += 1;
+            if depth | u16::from(!frame.locals_on_stack) == 0 {
+                stack.set(frame.floor + slot as usize, value);
+            } else {
+                set_env_local(scope, frame, depth, slot, value);
+            }
+            2
+        }
+        Some(&Insn::JumpUnless(displacement)) if value.is_truthy() || !declined(displacement) => {
+            *pc += 1;
+            if !value.is_truthy() {
+                *pc = jump(*pc, displacement);
+            }
+            2
+        }
+        Some(&Insn::JumpIf(displacement)) if !value.is_truthy() || !declined(displacement) => {
+            *pc += 1;
+            if value.is_truthy() {
+                *pc = jump(*pc, displacement);
+            }
+            2
+        }
+        _ => {
+            stack.push(value);
+            1
+        }
+    }
+}
+
 /// A local of `frame`'s that is not on the stack: `depth` scopes out from
 /// its environment, or one fewer when that environment is the enclosing
 /// scope's because its own locals are on the stack (see [`Call::env`]).
@@ -18206,6 +18293,9 @@ fn set_env_local(scope: &mut HandleScope<'_>, frame: &Call, depth: u16, slot: u1
 struct Lazy {
     /// [`native_ops`] for `Integer`, for a `BinOp`.
     ops: Option<u32>,
+    /// [`native_ops`] for `Float`, for a `BinOp` of two flonums in
+    /// `more_stretch`.
+    float_ops: Option<u32>,
     /// `self`'s instance variables, for a `GetIvar` in a light run.
     view: Option<crate::heap::IvarView>,
 }
@@ -18400,35 +18490,6 @@ fn more_stretch(
     *budget = budget.saturating_sub(ran);
 }
 
-/// [`light_stretch`] for [`run_calls`], which counts what its stretches ran
-/// against the room the budget had when it began, rather than the budget,
-/// and is answered the instruction the stretch stopped at.
-#[inline(never)]
-fn counted_stretch(
-    scope: &mut HandleScope<'_>,
-    stack: &mut Stack,
-    frame: &Call,
-    pc: &mut usize,
-    ran: &mut u64,
-    room: u64,
-) -> Insn {
-    stretch::<false>(scope, stack, frame, pc, ran, room)
-}
-
-/// [`counted_stretch`] in [`more_stretch`]'s loop, for a body whose
-/// stretches run there.
-#[inline(never)]
-fn counted_more_stretch(
-    scope: &mut HandleScope<'_>,
-    stack: &mut Stack,
-    frame: &Call,
-    pc: &mut usize,
-    ran: &mut u64,
-    room: u64,
-) -> Insn {
-    stretch::<true>(scope, stack, frame, pc, ran, room)
-}
-
 /// [`run_calls`]'s call to a primitive's light form at `at`: answered
 /// without allocating, and the frame run on from it in [`native_stretch`],
 /// whose stop it answers. `None`, with nothing changed, when the primitive
@@ -18456,7 +18517,7 @@ fn native_calls(
     })
 }
 
-/// [`counted_stretch`] for a frame [`run_calls`] has just answered a
+/// A stretch for a frame [`run_calls`] has just answered a
 /// primitive's light form in: [`light_step`]s, and each call to a light form
 /// it can answer without allocating answered where it stands, as
 /// [`light_send`] answers it, so that a loop around one — `s << x` in a
@@ -18469,7 +18530,7 @@ fn native_calls(
 /// counted it.
 ///
 /// Its own loop rather than [`stretch`]'s, so that the stretches every other
-/// frame runs in, [`light_stretch`] and `counted_stretch`, keep the
+/// frame runs in, [`light_stretch`] and [`calls_loop`]'s, keep the
 /// registers they had: a call inside their loop costs them those.
 #[inline(never)]
 fn native_stretch<const MORE: bool>(
@@ -18608,9 +18669,19 @@ fn may_run_call(scope: &HandleScope<'_>, frame: &Call, insn: Insn) -> bool {
 /// fast path declined it, which [`run`] then need not try again. A call and
 /// a return count against the
 /// budget and compare it, as a backward jump does, since a recursion may
-/// have none. Only a frame pushed here is popped here, so it ends in the
-/// frame it started in or in one it entered; `pc` is that frame's, and
-/// [`run`] reloads the frame when the count of them moved.
+/// have none. A return is taken here under the conditions [`run`]'s own arm
+/// takes it, from a frame pushed here or one below where it started; `pc`
+/// is the frame's it ends in, and [`run`] reloads the frame when the count
+/// of them moved, or, when it returned past the frame it started in, always
+/// (see [`Ran`]).
+///
+/// The instructions [`run`] answers before its closure that a light stretch
+/// does not take — a symbol literal, a cached constant read, Float
+/// arithmetic on flonums, a cached instance-variable write, and a local set
+/// to a heap value — are answered here too, as `run` answers them, rather
+/// than by the trip back to `run` each would otherwise take (#750). Those
+/// that store a heap value root what is fresh on the stack first, as `run`
+/// has rooted it at the top of its loop.
 ///
 /// Out of line, as the stretches are, for the same reason: inlined into
 /// [`run`], the call loop's state shares that function's registers.
@@ -18623,19 +18694,98 @@ fn run_calls(
     budget: &mut u64,
     limit: u64,
     calls: LightCalls<'_>,
-) -> bool {
-    let mut at = *pc;
-    // Whether it stopped at a call its fast path declined.
-    let mut declined = false;
-    // How many may run before the budget reaches `limit`, and how many have.
-    let room = budget.saturating_sub(limit);
-    let mut ran: u64 = 0;
-    // The frames pushed here that are still there.
-    let mut entered: usize = 0;
-    // The instruction at `at`: read here once, and then answered by each
-    // stretch, which has it in hand.
-    let mut insn = frames[frames.len() - 1].iseq.insns[at];
+) -> Ran {
+    let mut state = CallsState {
+        at: *pc,
+        declined: false,
+        // How many may run before the budget reaches `limit`.
+        room: budget.saturating_sub(limit),
+        ran: 0,
+        entered: 0,
+        left: false,
+        // Entered at the call a stretch stopped at.
+        stretch_first: false,
+        root_limit: calls.root_limit,
+    };
+    // Each flavour of the loop runs until a frame of the other flavour is
+    // reached, and hands over to it there.
     loop {
+        let more = scope
+            .call_caches()
+            .wants_more(frames[frames.len() - 1].cache_base);
+        let switched = if more {
+            calls_loop::<true>(scope, stack, frames, &mut state, calls.ids)
+        } else {
+            calls_loop::<false>(scope, stack, frames, &mut state, calls.ids)
+        };
+        if !switched {
+            break;
+        }
+    }
+    *pc = state.at;
+    *budget = budget.saturating_sub(state.ran);
+    Ran {
+        declined: state.declined,
+        left: state.left,
+    }
+}
+
+/// What [`run_calls`]'s loops share: where the running frame is, what has
+/// run, and how they stopped.
+struct CallsState {
+    /// The running frame's `pc`.
+    at: usize,
+    /// Whether it stopped at a call its fast path declined.
+    declined: bool,
+    /// How many may run before the budget reaches `limit`, and how many have.
+    room: u64,
+    ran: u64,
+    /// The frames pushed here that are still there, and whether a return has
+    /// gone below the frame it started in.
+    entered: usize,
+    left: bool,
+    /// Whether the loop starts with a stretch of the running frame, rather
+    /// than at the instruction a stretch stopped at: so when one flavour of
+    /// [`calls_loop`] hands over to the other at a call or a return.
+    stretch_first: bool,
+    /// See [`LightCalls::root_limit`].
+    root_limit: usize,
+}
+
+/// [`run_calls`]'s loop for frames whose stretches run in `more_stretch`'s
+/// loop when `MORE`, and in `light_stretch`'s otherwise: the instruction a
+/// stretch stopped at, then the stretch after it, inlined here rather than
+/// called (#746) — a stretch of its own function paid a call, a prologue
+/// saving the registers and loading the frame's fields, an epilogue, and
+/// the instruction it stopped at answered through memory and dispatched on
+/// again, twice for each Ruby call. Answers whether it stopped at a frame
+/// of the other flavour, which `run_calls` then runs in the other loop.
+///
+/// Out of line, one for each flavour, so that each keeps the registers its
+/// stretch's light instructions want.
+#[inline(never)]
+fn calls_loop<const MORE: bool>(
+    scope: &mut HandleScope<'_>,
+    stack: &mut Stack,
+    frames: &mut Vec<Call>,
+    state: &mut CallsState,
+    ids: &mut u64,
+) -> bool {
+    let mut at = state.at;
+    let room = state.room;
+    let mut ran = state.ran;
+    let mut insn = if std::mem::take(&mut state.stretch_first) {
+        let top = frames.len() - 1;
+        stretch::<MORE>(scope, stack, &frames[top], &mut at, &mut ran, room)
+    } else {
+        // The instruction at `at`: read here once, and then answered by
+        // each stretch, which has it in hand.
+        frames[frames.len() - 1].iseq.insns[at]
+    };
+    let switched = loop {
+        if ran >= room {
+            break false;
+        }
         let top = frames.len() - 1;
         let frame = &frames[top];
         match insn {
@@ -18657,22 +18807,19 @@ fn run_calls(
                         if promote_site(scope, stack, &frames[top], index) {
                             continue;
                         }
-                        declined = true;
-                        break;
+                        state.declined = true;
+                        break false;
                     };
                     insn = next;
-                    if ran >= room {
-                        break;
-                    }
                     continue;
                 }
-                if scope.rooted() > calls.root_limit {
-                    break;
+                if scope.rooted() > state.root_limit {
+                    break false;
                 }
                 let pushed = if matches!(insn, Insn::Send(_)) {
-                    send_simple(scope, stack, frames, index, calls.ids)
+                    send_simple(scope, stack, frames, index, ids)
                 } else {
-                    yield_simple(scope, stack, frames, index, calls.ids)
+                    yield_simple(scope, stack, frames, index, ids)
                 };
                 let Some(receiver) = pushed else {
                     if let Insn::Send(index) = insn
@@ -18680,34 +18827,60 @@ fn run_calls(
                     {
                         continue;
                     }
-                    declined = true;
-                    break;
+                    state.declined = true;
+                    break false;
                 };
                 // The receiver has moved off the stack into the frame, so it
                 // takes a handle, as the loop's rooting of what is fresh on
-                // the stack would have given it before the send. Everything
-                // else the call took is still on the stack, as the callee's
-                // locals, for the next such rooting; nothing between here and
-                // it can collect.
-                if !receiver.is_immediate() {
+                // the stack would have given it before the send — unless it
+                // is the caller's own `self`, which every frame's receiver
+                // is rooted as already, from its push or the last
+                // `release_roots` (#746). Everything else the call took is
+                // still on the stack, as the callee's locals, for the next
+                // such rooting; nothing between here and it can collect.
+                if !receiver.is_immediate() && receiver != frames[top].receiver {
                     scope.root(receiver);
                 }
                 // Where the caller resumes, and what a backtrace taken in the
                 // callee reads for the caller's line.
                 frames[top].pc = at + 1;
-                entered += 1;
+                state.entered += 1;
                 at = 0;
             }
-            // `run`'s own arms for these, for a frame pushed here.
-            Insn::Leave if entered > 0 && !frame.raises_receiver => {
+            // `run`'s own arms for these, under its conditions.
+            Insn::Leave if top > 0 && !frame.raises_receiver => {
                 leave_in_place(scope, stack, frames, true);
-                entered -= 1;
+                state.left |= state.entered == 0;
+                state.entered = state.entered.saturating_sub(1);
                 at = frames.last().expect("the caller").pc;
             }
-            Insn::Return if entered > 0 && returns_in_place(frame, at + 1) => {
+            Insn::Return if top > 0 && returns_in_place(frame, at + 1) => {
                 leave_in_place(scope, stack, frames, false);
-                entered -= 1;
+                state.left |= state.entered == 0;
+                state.entered = state.entered.saturating_sub(1);
                 at = frames.last().expect("the caller").pc;
+            }
+            // A symbol literal: an immediate, as `run`'s arm pushes it.
+            Insn::PushSym(index) => {
+                stack.push(Value::symbol(frame.iseq.symbol_ids()[index as usize]));
+                at += 1;
+            }
+            // What `run` answers before its closure through `light_more`,
+            // as it answers it; a value it stores may be one a stretch left
+            // on the stack unrooted, so what is fresh is rooted first.
+            Insn::BinOp(_) | Insn::PushFloat(_) | Insn::GetConst(..) | Insn::SetIvar(..)
+                if scope.rooted() + stack.len() <= state.root_limit =>
+            {
+                if !calls_more(scope, stack, frame, insn) {
+                    break false;
+                }
+                at += 1;
+            }
+            // A local set to a heap value, which a light stretch leaves for
+            // the loop to root first.
+            Insn::SetLocal(slot, depth) if scope.rooted() + stack.len() <= state.root_limit => {
+                calls_set_local(scope, stack, frame, slot, depth);
+                at += 1;
             }
             // An Array literal, `[left, right]`: answered here rather than by
             // the trip back to `run` an allocation would otherwise take, once
@@ -18715,29 +18888,103 @@ fn run_calls(
             // top of its loop. A collection it starts may queue finalizers,
             // which `run` runs at its next call or return, so the calls stop
             // here for it then.
-            Insn::NewArray(count) if scope.rooted() + stack.len() <= calls.root_limit => {
+            Insn::NewArray(count) if scope.rooted() + stack.len() <= state.root_limit => {
                 calls_new_array(scope, stack, count as usize);
                 at += 1;
                 if scope.has_pending_finalizers() {
-                    break;
+                    break false;
                 }
             }
-            _ => break,
+            _ => break false,
         }
         ran += 1;
         let top = frames.len() - 1;
-        insn = if scope.call_caches().wants_more(frames[top].cache_base) {
-            counted_more_stretch(scope, stack, &frames[top], &mut at, &mut ran, room)
-        } else {
-            counted_stretch(scope, stack, &frames[top], &mut at, &mut ran, room)
-        };
-        if ran >= room {
-            break;
+        // A Float operator run above may have just made this frame's
+        // stretches `more_stretch`'s; a call or a return may have reached a
+        // frame of the other flavour.
+        if scope.call_caches().wants_more(frames[top].cache_base) != MORE {
+            state.stretch_first = true;
+            break true;
+        }
+        insn = stretch::<MORE>(scope, stack, &frames[top], &mut at, &mut ran, room);
+    };
+    state.at = at;
+    state.ran = ran;
+    switched
+}
+
+/// How [`run_calls`] stopped.
+struct Ran {
+    /// At a call whose fast path declined it, which [`run`] then need not
+    /// try again.
+    declined: bool,
+    /// In a frame below the one it started in, which a later call may have
+    /// put as many frames above as there were: so [`run`] cannot tell from
+    /// the count of them alone that the running frame changed.
+    left: bool,
+}
+
+/// `run`'s answer before its closure, through [`light_more`], for
+/// [`run_calls`]: Float arithmetic on two flonums, a Float literal, a cached
+/// constant read from a scope or a cached instance-variable write, with
+/// what is fresh on the stack rooted first, as `run` roots it. Answers
+/// whether it ran; Float arithmetic says the body's stretches run in
+/// `more_stretch` from now on, as it does in `run`. Out of line, as the
+/// stretches are.
+#[inline(never)]
+fn calls_more(scope: &mut HandleScope<'_>, stack: &mut Stack, frame: &Call, insn: Insn) -> bool {
+    for &value in stack.fresh() {
+        if !value.is_immediate() {
+            scope.root(value);
         }
     }
-    *pc = at;
-    *budget = budget.saturating_sub(ran);
-    declined
+    let depth = stack.len();
+    let top = stack.last().copied();
+    let below = if depth > 1 {
+        stack[depth - 2]
+    } else {
+        Value::NIL
+    };
+    match light_more(scope, frame, insn, top, below) {
+        More::Push(value) => stack.push(value),
+        More::Pop => {
+            stack.pop();
+        }
+        More::Replace(value) => {
+            stack.truncate(depth - 2);
+            stack.push(value);
+        }
+        More::Decline => return false,
+    }
+    if matches!(insn, Insn::BinOp(_)) {
+        scope.call_caches_mut().set_wants_more(frame.cache_base);
+    }
+    true
+}
+
+/// `Insn::SetLocal` for [`run_calls`], of the heap value a light stretch
+/// stopped at: what is fresh on the stack is rooted first, as `run` roots
+/// it, so the value may then be stored below the operands. Out of line, as
+/// the stretches are.
+#[inline(never)]
+fn calls_set_local(
+    scope: &mut HandleScope<'_>,
+    stack: &mut Stack,
+    frame: &Call,
+    slot: u16,
+    depth: u16,
+) {
+    for &value in stack.fresh() {
+        if !value.is_immediate() {
+            scope.root(value);
+        }
+    }
+    let value = stack.pop().expect("setlocal on an empty stack");
+    if depth | u16::from(!frame.locals_on_stack) == 0 {
+        stack.values[frame.floor + slot as usize] = value;
+    } else {
+        set_env_local(scope, frame, depth, slot, value);
+    }
 }
 
 /// `Insn::NewArray` for [`run_calls`]: the `count` values on top of the
@@ -26545,5 +26792,134 @@ mod tests {
         let one = Value::fixnum(1).expect("a fixnum");
         assert_eq!(flonum_binop(BinOp::Add, one, float(1.0)), None);
         assert_eq!(flonum_binop(BinOp::Add, float(1.0), one), None);
+    }
+
+    /// `run_calls`'s loops in a loop of calls (#746, #750), every
+    /// allocation collecting: a call into a body whose Float arithmetic
+    /// makes its stretches `more_stretch`'s, and the return to one whose
+    /// are not; a symbol literal light in the one and pushed by the call
+    /// loop in the other; a cached instance-variable write; a heap value
+    /// set into a local on the stack and into a heap environment's, rooted
+    /// first; a cached constant read; Array literals between calls; and a
+    /// return below the frame the call loop started in — `outer` leaves for
+    /// `run` at its String literal, so the loop next starts in it. A heap
+    /// value the loop stored or answered without its being rooted would be
+    /// read after it was freed, which miri reports. Built by hand for miri.
+    #[test]
+    fn the_call_loop_runs_both_flavours_and_their_returns_under_miri() {
+        use crate::bytecode::{BlockRef, CallSite};
+        let rounds: i64 = if cfg!(miri) { 4 } else { 30 };
+        let site = |name: u32| CallSite {
+            name,
+            argc: 1,
+            splats: Vec::new(),
+            keywords: Vec::new(),
+            block: BlockRef::None,
+            implicit_self: true,
+            variable_call: false,
+            kwsplat: false,
+        };
+        // def inner(x) = (y = x * 1.5; @v = y; [y, :sym])
+        let inner = Arc::new(Iseq {
+            name: "inner".into(),
+            insns: vec![
+                Insn::GetLocal(0, 0),
+                Insn::PushFloat(1.5f64.to_bits()),
+                Insn::BinOp(BinOp::Mul),
+                Insn::SetLocal(1, 0),
+                Insn::GetLocal(1, 0),
+                Insn::SetIvar(1, 0),
+                Insn::GetLocal(1, 0),
+                Insn::PushSym(0),
+                Insn::NewArray(2),
+                Insn::Leave,
+            ],
+            symbols: vec!["sym".into(), "@v".into()],
+            locals: vec!["x".into(), "y".into()],
+            ivar_sites: 1,
+            max_stack: 2,
+            params: ParamSpec {
+                required: vec![0],
+                ..ParamSpec::default()
+            },
+            scope_barrier: true,
+            ..Iseq::default()
+        });
+        // def outer(x) = ("str"; s = inner(x); Object; [s, :k])
+        let outer = Arc::new(Iseq {
+            name: "outer".into(),
+            insns: vec![
+                Insn::PushLit(0),
+                Insn::Pop,
+                Insn::PushSelf,
+                Insn::GetLocal(0, 0),
+                Insn::Send(0),
+                Insn::SetLocal(1, 0),
+                Insn::GetConst(1, ConstScope::Top, 0),
+                Insn::Pop,
+                Insn::GetLocal(1, 0),
+                Insn::PushSym(2),
+                Insn::NewArray(2),
+                Insn::Leave,
+            ],
+            literals: vec![Literal::Str(Box::from(&b"str"[..]), crate::strings::UTF_8)],
+            symbols: vec!["inner".into(), "Object".into(), "k".into()],
+            locals: vec!["x".into(), "s".into()],
+            call_sites: vec![site(0)],
+            const_sites: 1,
+            max_stack: 3,
+            params: ParamSpec {
+                required: vec![0],
+                ..ParamSpec::default()
+            },
+            scope_barrier: true,
+            ..Iseq::default()
+        });
+        // i = 0; while i < rounds; r = outer(2.0); i += 1; end; r
+        let program = Iseq {
+            name: "<test>".into(),
+            insns: vec![
+                Insn::PushInt(0),
+                Insn::SetLocal(0, 0),
+                Insn::GetLocal(0, 0),
+                Insn::PushInt(rounds),
+                Insn::BinOp(BinOp::Lt),
+                Insn::JumpUnless(9),
+                Insn::PushSelf,
+                Insn::PushFloat(2.0f64.to_bits()),
+                Insn::Send(0),
+                Insn::SetLocal(1, 0),
+                Insn::GetLocal(0, 0),
+                Insn::PushInt(1),
+                Insn::BinOp(BinOp::Add),
+                Insn::SetLocal(0, 0),
+                Insn::Jump(-13),
+                Insn::GetLocal(1, 0),
+                Insn::Leave,
+            ],
+            symbols: vec!["outer".into()],
+            locals: vec!["i".into(), "r".into()],
+            call_sites: vec![site(0)],
+            max_stack: 3,
+            ..Iseq::default()
+        };
+
+        let mut heap = Heap::new();
+        let mut frame = Frame::new(2);
+        let mut scope = heap.scope();
+        scope.bootstrap();
+        for (name, iseq) in [("inner", &inner), ("outer", &outer)] {
+            let name = crate::shared::symbols::intern(name);
+            let body = scope
+                .definitions_mut()
+                .intern_iseq(iseq, Arc::as_ptr(iseq) as usize);
+            scope
+                .classes_mut()
+                .define_method(Builtin::Object.id(), name, body);
+        }
+        scope.set_gc_stress(true);
+        let value = eval_in(&mut scope, &mut frame, &program).expect("should run");
+        scope.set_gc_stress(false);
+        assert_eq!(inspect(&mut scope, value), "[[3.0, :sym], :k]");
     }
 }

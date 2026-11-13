@@ -288,6 +288,12 @@ pub struct CallCaches {
     /// arithmetic, chiefly — so that its stretches run there (#750).
     /// Indexed by a run's base, which is why every run has a slot.
     more: Vec<bool>,
+    /// Whether the body whose run starts at that index is the core
+    /// library's, an `<internal:` path, where the operator instructions
+    /// answer for numbers whatever a program redefined: decided once, when
+    /// the run is made, rather than by a string compare at every run of
+    /// light instructions that meets a `BinOp` (#746).
+    internal: Vec<bool>,
     /// Where each `Iseq`'s run starts, by `Arc` address.
     ///
     /// An address is only a safe key because `iseqs` below holds a clone of the
@@ -324,6 +330,7 @@ impl Default for CallCaches {
             ivars: Vec::new(),
             consts: Vec::new(),
             more: Vec::new(),
+            internal: Vec::new(),
             bases: HashMap::new(),
             iseqs: Vec::new(),
             recent: [(0, 0); RECENT],
@@ -385,6 +392,11 @@ impl CallCaches {
         self.ivars.resize(self.entries.len(), IvarEntry::EMPTY);
         self.consts.resize(self.entries.len(), None);
         self.more.resize(self.entries.len(), false);
+        self.internal.resize(self.entries.len(), false);
+        self.internal[base as usize] = iseq
+            .path
+            .as_deref()
+            .is_some_and(|path| path.starts_with("<internal:"));
         self.bases.insert(key, base);
         self.iseqs.push(Arc::clone(iseq));
         self.recent[recent] = (key, base);
@@ -583,6 +595,14 @@ impl CallCaches {
     #[must_use]
     pub fn wants_more(&self, base: u32) -> bool {
         self.more.get(base as usize).copied().unwrap_or(false)
+    }
+
+    /// Whether the body whose run starts at `base` is the core library's:
+    /// see the field.
+    #[inline]
+    #[must_use]
+    pub fn internal(&self, base: u32) -> bool {
+        self.internal.get(base as usize).copied().unwrap_or(false)
     }
 
     /// From now on, the body whose run starts at `base` runs its stretches

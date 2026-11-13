@@ -33,21 +33,21 @@ randomisation off where this machine has working `taskset` and `setarch` (the
 line above the table says which applied), and under a 1.5 GB memory cap where
 `systemd-run --user` works. The medians are written
 to `yjit-bench/results.tsv`, and the table is rendered from that file; never
-edit either by hand. The `results.tsv` committed now is not one run's output:
-it is the per-cell median of eight `scripts/bench.sh --yjit-bench` runs at
-`e7c85f4`, aggregated outside the script, and its `iterations` line says so;
-the next `--yjit-bench` run replaces it with that run's medians. `cargo test`
-runs the check.
+edit either by hand. The `results.tsv` committed now is one
+`scripts/bench.sh --yjit-bench` run's output, started with the 1-minute load
+under 2; one run on a shared machine moves by several percent from the next,
+so a pull request that changes the table says what its other runs read.
+`cargo test` runs the check.
 
 <!-- yjit-bench table: written by scripts/bench.sh --yjit-bench; do not edit -->
-Spinel at `e7c85f4`, against `ruby 4.0.9 (2026-10-23 revision 3e93b23afc) +PRISM [x86_64-linux]`. The per-cell median, aggregated outside scripts/bench.sh, of eight scripts/bench.sh --yjit-bench runs, each started with the 1-minute load under 2, of 1 warmup and the median of 5 timed iterations each, one CPU, ASLR off.
+Spinel at `4006eb6`, against `ruby 4.0.9 (2026-10-23 revision 3e93b23afc) +PRISM [x86_64-linux]`. 1 warmup and the median of 5 timed iterations each, one CPU, ASLR off.
 
 | benchmark | Spinel | `ruby --disable-yjit` | Spinel ÷ interpreter | within 1.5× | `ruby --yjit` |
 |---|---:|---:|---:|:---:|---:|
-| binarytrees | 1015.8 ms | 335.0 ms | 3.03× | no | 171.7 ms |
-| fib | 517.3 ms | 195.2 ms | 2.65× | no | 24.7 ms |
-| getivar | 139.2 ms | 92.0 ms | 1.51× | no | 95.2 ms |
-| keyword_args | 318.0 ms | 205.9 ms | 1.54× | no | 31.6 ms |
-| nbody | 248.0 ms | 88.5 ms | 2.80× | no | 38.5 ms |
-| str_concat | 103.0 ms | 75.4 ms | 1.37× | yes | 25.9 ms |
+| binarytrees | 872.2 ms | 317.6 ms | 2.75× | no | 143.9 ms |
+| fib | 412.3 ms | 180.1 ms | 2.29× | no | 23.1 ms |
+| getivar | 121.8 ms | 87.5 ms | 1.39× | yes | 93.2 ms |
+| keyword_args | 288.2 ms | 224.0 ms | 1.29× | yes | 32.3 ms |
+| nbody | 188.6 ms | 87.8 ms | 2.15× | no | 36.8 ms |
+| str_concat | 94.6 ms | 68.3 ms | 1.39× | yes | 23.5 ms |
 <!-- end yjit-bench table -->
