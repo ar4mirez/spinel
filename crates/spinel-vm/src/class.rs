@@ -39,7 +39,7 @@ use std::sync::Arc;
 
 use crate::heap::{Handle, HandleScope, Payload};
 use crate::shared::symbols::class_id_ivar;
-use crate::value::{SymbolId, Value};
+use crate::value::{SymbolId, SymbolMap, Value};
 
 /// An index into one heap's [`Classes`] table.
 ///
@@ -588,7 +588,7 @@ struct Entry {
     own: Vec<ClassId>,
     /// Index of this class within `own`. CRuby's origin iclass.
     origin: usize,
-    methods: HashMap<SymbolId, MethodEntry>,
+    methods: SymbolMap<MethodEntry>,
     /// Every class or module whose `own` holds this one. Flat, not just the
     /// direct includers, which is what lets a later `include` on a module reach
     /// everything that already mixed it in — Ruby 3.0's [Feature #9573] — in one
@@ -614,7 +614,7 @@ struct Entry {
     /// Living in the entry rather than in one table keyed by `(class, name)` is
     /// what makes eviction precise: invalidating a class is clearing *its* map,
     /// and no key has to be scanned to find out who it belonged to.
-    cache: HashMap<SymbolId, Option<Method>>,
+    cache: SymbolMap<Option<Method>>,
     /// Which walk last visited this entry, so [`Classes::invalidate`] can skip
     /// a class it has already reached without carrying a set. A diamond — two
     /// modules that both include a third — reaches the same entry twice.
@@ -643,14 +643,14 @@ struct Entry {
     /// walk and then an ancestor walk, and a class variable only by the
     /// ancestor walk — and a *write* to one an ancestor already holds lands on
     /// the ancestor, which no constant does.
-    class_variables: HashMap<SymbolId, Value>,
+    class_variables: SymbolMap<Value>,
     /// The names in `class_variables`, in the order they were first set:
     /// `Module#class_variables` answers in definition order.
     cvar_order: Vec<SymbolId>,
     /// This module's own constants. Not the ancestors' — [`Classes::const_get`]
     /// is the walk, and every rule Ruby has about which table wins depends on
     /// this one holding only what was assigned *here*.
-    constants: HashMap<SymbolId, Value>,
+    constants: SymbolMap<Value>,
     /// The names in `constants`, in the order they were first assigned:
     /// `Module#constants` answers in definition order (#28).
     constant_order: Vec<SymbolId>,
@@ -662,7 +662,7 @@ struct Entry {
     /// Where each of `constants` was last assigned, as file and line:
     /// `Module#const_source_location` (#128). A constant the VM or the core
     /// library defined has none, which Ruby spells `[]`.
-    constant_locations: HashMap<SymbolId, (Arc<str>, i32)>,
+    constant_locations: SymbolMap<(Arc<str>, i32)>,
 }
 
 /// One heap's classes and modules.
@@ -1086,7 +1086,7 @@ impl Classes {
             .map(|&c| if c == from { to } else { c })
             .collect();
         let origin = source.origin;
-        let methods: HashMap<SymbolId, MethodEntry> = source
+        let methods: SymbolMap<MethodEntry> = source
             .methods
             .iter()
             .map(|(&name, &(body, cref, visibility, stands_for))| {
@@ -2809,20 +2809,20 @@ impl Classes {
             superclass,
             own: vec![id],
             origin: 0,
-            methods: HashMap::new(),
+            methods: SymbolMap::default(),
             includers: Vec::new(),
             subclasses: Vec::new(),
             serial: 0,
-            cache: HashMap::new(),
+            cache: SymbolMap::default(),
             visited: 0,
             singleton: None,
             is_singleton,
             attached: None,
-            constants: HashMap::new(),
+            constants: SymbolMap::default(),
             constant_order: Vec::new(),
             private_constants: Vec::new(),
-            constant_locations: HashMap::new(),
-            class_variables: HashMap::new(),
+            constant_locations: SymbolMap::default(),
+            class_variables: SymbolMap::default(),
             cvar_order: Vec::new(),
         });
         // The inverse edge, so a later definition on the superclass can find

@@ -19,9 +19,7 @@
 //! pointing at storage that is replaced when it grows, the way an `Array`'s
 //! elements already work.
 
-use std::collections::HashMap;
-
-use crate::value::SymbolId;
+use crate::value::{SymbolId, SymbolMap};
 
 /// An index into a heap's shape tree, small enough for the two bytes #7
 /// reserved in the object header.
@@ -61,7 +59,7 @@ struct Shape {
     count: u16,
     /// Names already transitioned away from here, so two objects built the same
     /// way meet at the same node instead of each growing their own.
-    children: HashMap<SymbolId, ShapeId>,
+    children: SymbolMap<ShapeId>,
 }
 
 /// One heap's shape tree.
@@ -83,14 +81,14 @@ impl Shapes {
             name: SymbolId(0),
             index: 0,
             count: 0,
-            children: HashMap::new(),
+            children: SymbolMap::default(),
         };
         let root = Shape {
             parent: ShapeId::ROOT,
             name: SymbolId(0),
             index: 0,
             count: 0,
-            children: HashMap::new(),
+            children: SymbolMap::default(),
         };
         Shapes {
             nodes: vec![sentinel, root],
@@ -155,7 +153,7 @@ impl Shapes {
             name,
             index,
             count: index.checked_add(1)?,
-            children: HashMap::new(),
+            children: SymbolMap::default(),
         });
         self.nodes[shape.index()].children.insert(name, id);
         Some((id, index))
