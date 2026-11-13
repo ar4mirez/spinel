@@ -82,7 +82,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `library/digest` | 68 | 129 | 129 | 0 | 0 | 0 | 100% |
 | `library/drb` | 1 | 2 | 0 | 0 | 2 | 0 | 0% |
 | `library/erb` | 13 | 53 | 53 | 0 | 0 | 0 | 100% |
-| `library/etc` | 19 | 50 | 0 | 0 | 50 | 0 | 0% |
+| `library/etc` | 19 | 50 | 50 | 0 | 0 | 0 | 100% |
 | `library/expect` | 1 | 6 | 0 | 0 | 6 | 0 | 0% |
 | `library/fiddle` | 1 | 1 | 0 | 0 | 1 | 0 | 0% |
 | `library/find` | 2 | 3 | 3 | 0 | 0 | 0 | 100% |
@@ -129,6 +129,6 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `library/yaml` | 9 | 46 | 1 | 0 | 45 | 0 | 2% |
 | `library/zlib` | 42 | 148 | 148 | 0 | 0 | 0 | 100% |
 | `optional/capi` | 47 | 0 | 0 | 0 | 0 | 0 | — |
-| `optional/thread_safety` | 1 | 5 | 0 | 0 | 5 | 0 | 0% |
+| `optional/thread_safety` | 1 | 5 | 5 | 0 | 0 | 0 | 100% |
 | `security` | 13 | 31 | 29 | 0 | 2 | 0 | 94% |
-| **total** | 3841 | 32914 | 29785 | 0 | 2918 | 211 | 90% |
+| **total** | 3841 | 32914 | 29840 | 0 | 2863 | 211 | 91% |

@@ -48,8 +48,8 @@ use crate::class::Builtin;
 use crate::class::{ClassId, CrefId, Kind, Method, ScopeDefault, Visibility};
 use crate::heap::{Handle, HandleScope, Heap, Payload};
 use crate::method::{
-    BindingOp, BitOp, CvarOp, Definition, FiberOp, FsOp, GcOp, IvarOp, Native, ReflectOp, SockOp,
-    StrOp, SysOp, ThreadOp,
+    BindingOp, BitOp, CvarOp, Definition, EtcOp, FiberOp, FsOp, GcOp, IvarOp, Native, ReflectOp,
+    SockOp, StrOp, SysOp, ThreadOp,
 };
 use crate::shape::ShapeId;
 use crate::value::SymbolId;
@@ -14545,6 +14545,7 @@ fn native_call<'h>(
         Native::Fs(op) => fs_native(scope, stack, frames, &call, op, ids),
         Native::Sys(op) => sys_native(scope, stack, &call, op),
         Native::Sock(op) => sock_native(scope, stack, frames, &call, op, ids),
+        Native::Etc(op) => etc_native(scope, stack, &call, op),
 
         Native::FrameNesting => {
             let cref = frames.last().map_or(CrefId::ROOT, |frame| frame.cref);
@@ -17509,6 +17510,61 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             Builtin::Kernel,
             &["__poll_constants__"],
             Native::Sock(SockOp::PollConstants),
+        ),
+        (
+            Builtin::Kernel,
+            &["__etc_passwd__"],
+            Native::Etc(EtcOp::Passwd),
+        ),
+        (
+            Builtin::Kernel,
+            &["__etc_group__"],
+            Native::Etc(EtcOp::Group),
+        ),
+        (
+            Builtin::Kernel,
+            &["__etc_pwent__"],
+            Native::Etc(EtcOp::Pwent),
+        ),
+        (
+            Builtin::Kernel,
+            &["__etc_grent__"],
+            Native::Etc(EtcOp::Grent),
+        ),
+        (
+            Builtin::Kernel,
+            &["__etc_login__"],
+            Native::Etc(EtcOp::Login),
+        ),
+        (
+            Builtin::Kernel,
+            &["__etc_sysconf__"],
+            Native::Etc(EtcOp::Sysconf),
+        ),
+        (
+            Builtin::Kernel,
+            &["__etc_confstr__"],
+            Native::Etc(EtcOp::Confstr),
+        ),
+        (
+            Builtin::Kernel,
+            &["__etc_fpathconf__"],
+            Native::Etc(EtcOp::Fpathconf),
+        ),
+        (
+            Builtin::Kernel,
+            &["__etc_uname__"],
+            Native::Etc(EtcOp::Uname),
+        ),
+        (
+            Builtin::Kernel,
+            &["__etc_nprocessors__"],
+            Native::Etc(EtcOp::Nprocessors),
+        ),
+        (
+            Builtin::Kernel,
+            &["__etc_constants__"],
+            Native::Etc(EtcOp::Constants),
         ),
         (Builtin::Kernel, &["__fd_dup__"], Native::Fs(FsOp::FdDup)),
         (Builtin::Kernel, &["__fd_dup2__"], Native::Fs(FsOp::FdDup2)),
@@ -25678,6 +25734,151 @@ fn sys_native(
     };
     stack.push(value);
     Ok(None)
+}
+
+// ---------------------------------------------------------------------------
+// `etc` (#111)
+// ---------------------------------------------------------------------------
+
+/// The C library calls `lib/etc.rb` is Ruby over; `etc.rs` makes them.
+/// Strings go back BINARY, for the Ruby side to give an encoding.
+fn etc_native(
+    scope: &mut HandleScope<'_>,
+    stack: &mut Stack,
+    call: &Pending,
+    op: EtcOp,
+) -> Result<Option<Unwind>, Error> {
+    use crate::etc;
+    let int = |n: i64| Value::fixnum(n).expect("an etc answer is a fixnum");
+    let cursor = || match int_arg(call, 0) {
+        Some(0) => etc::Cursor::Rewind,
+        Some(1) => etc::Cursor::Next,
+        _ => etc::Cursor::Close,
+    };
+    let limit = |scope: &mut HandleScope<'_>, answer: std::io::Result<Option<i64>>| match answer {
+        Ok(Some(value)) => new_array(scope, &[int(value)]),
+        Ok(None) => Value::NIL,
+        Err(error) => errno_value(&error),
+    };
+    let value = match op {
+        EtcOp::Passwd | EtcOp::Group => {
+            let key = call.args.first().copied().unwrap_or(Value::NIL);
+            let id = key.as_fixnum().and_then(|id| u32::try_from(id).ok());
+            let name = if id.is_none() {
+                string_bytes(scope, key)
+            } else {
+                None
+            };
+            match (op, id, name) {
+                (EtcOp::Passwd, Some(uid), _) => passwd_value(scope, etc::passwd_by_uid(uid)),
+                (EtcOp::Passwd, None, Some(name)) => {
+                    passwd_value(scope, etc::passwd_by_name(&name))
+                }
+                (_, Some(gid), _) => group_value(scope, etc::group_by_gid(gid)),
+                (_, None, Some(name)) => group_value(scope, etc::group_by_name(&name)),
+                // An id out of range names no one, as a failed lookup.
+                _ => Value::NIL,
+            }
+        }
+        EtcOp::Pwent => passwd_value(scope, etc::pwent(cursor())),
+        EtcOp::Grent => group_value(scope, etc::grent(cursor())),
+        EtcOp::Login => match etc::login() {
+            Some(name) => binary_value(scope, &name),
+            None => Value::NIL,
+        },
+        EtcOp::Sysconf => {
+            let name = int_arg(call, 0)
+                .and_then(|n| libc::c_int::try_from(n).ok())
+                .unwrap_or(-1);
+            limit(scope, etc::sysconf(name))
+        }
+        EtcOp::Fpathconf => {
+            let fd = int_arg(call, 0)
+                .and_then(|n| libc::c_int::try_from(n).ok())
+                .unwrap_or(-1);
+            let name = int_arg(call, 1)
+                .and_then(|n| libc::c_int::try_from(n).ok())
+                .unwrap_or(-1);
+            limit(scope, etc::fpathconf(fd, name))
+        }
+        EtcOp::Confstr => {
+            let name = int_arg(call, 0)
+                .and_then(|n| libc::c_int::try_from(n).ok())
+                .unwrap_or(-1);
+            match etc::confstr(name) {
+                Ok(Some(text)) => binary_value(scope, &text),
+                Ok(None) => Value::NIL,
+                Err(error) => errno_value(&error),
+            }
+        }
+        EtcOp::Uname => match etc::uname() {
+            Ok(fields) => rooted_array(scope, fields, |scope, field| binary_value(scope, &field)),
+            Err(error) => errno_value(&error),
+        },
+        EtcOp::Nprocessors => match etc::nprocessors() {
+            Ok(count) => new_array(scope, &[int(count)]),
+            Err(error) => errno_value(&error),
+        },
+        EtcOp::Constants => rooted_array(scope, etc::constants(), |scope, (name, value)| {
+            let name = string_new(scope, name);
+            new_array(scope, &[name, int(value)])
+        }),
+    };
+    stack.push(value);
+    Ok(None)
+}
+
+/// An `etc::Passwd` as `__etc_passwd__` answers it, nil for none.
+fn passwd_value(scope: &mut HandleScope<'_>, entry: Option<crate::etc::Passwd>) -> Value {
+    let Some(entry) = entry else {
+        return Value::NIL;
+    };
+    let int = |n: u32| Value::fixnum(i64::from(n)).expect("an id is a fixnum");
+    let strings = [
+        entry.name,
+        entry.passwd,
+        entry.gecos,
+        entry.dir,
+        entry.shell,
+    ];
+    let handles: Vec<_> = strings
+        .iter()
+        .map(|bytes| {
+            let value = binary_value(scope, bytes);
+            scope.root(value)
+        })
+        .collect();
+    let [name, passwd, gecos, dir, shell] = [0, 1, 2, 3, 4].map(|i| scope.get(handles[i]));
+    new_array(
+        scope,
+        &[
+            name,
+            passwd,
+            int(entry.uid),
+            int(entry.gid),
+            gecos,
+            dir,
+            shell,
+        ],
+    )
+}
+
+/// An `etc::Group` as `__etc_group__` answers it, nil for none.
+fn group_value(scope: &mut HandleScope<'_>, entry: Option<crate::etc::Group>) -> Value {
+    let Some(entry) = entry else {
+        return Value::NIL;
+    };
+    let name = binary_value(scope, &entry.name);
+    let name = scope.root(name);
+    let passwd = binary_value(scope, &entry.passwd);
+    let passwd = scope.root(passwd);
+    let mem = rooted_array(scope, entry.mem, |scope, member| {
+        binary_value(scope, &member)
+    });
+    let mem = scope.root(mem);
+    let gid = Value::fixnum(i64::from(entry.gid)).expect("an id is a fixnum");
+    let (name, passwd, mem) = (scope.get(name), scope.get(passwd), scope.get(mem));
+    new_array(scope, &[name, passwd, gid, mem])
 }
 
 /// A BINARY String of `bytes`.
