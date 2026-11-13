@@ -26793,4 +26793,133 @@ mod tests {
         assert_eq!(flonum_binop(BinOp::Add, one, float(1.0)), None);
         assert_eq!(flonum_binop(BinOp::Add, float(1.0), one), None);
     }
+
+    /// `run_calls`'s loops in a loop of calls (#746, #750), every
+    /// allocation collecting: a call into a body whose Float arithmetic
+    /// makes its stretches `more_stretch`'s, and the return to one whose
+    /// are not; a symbol literal light in the one and pushed by the call
+    /// loop in the other; a cached instance-variable write; a heap value
+    /// set into a local on the stack and into a heap environment's, rooted
+    /// first; a cached constant read; Array literals between calls; and a
+    /// return below the frame the call loop started in — `outer` leaves for
+    /// `run` at its String literal, so the loop next starts in it. A heap
+    /// value the loop stored or answered without its being rooted would be
+    /// read after it was freed, which miri reports. Built by hand for miri.
+    #[test]
+    fn the_call_loop_runs_both_flavours_and_their_returns_under_miri() {
+        use crate::bytecode::{BlockRef, CallSite};
+        let rounds: i64 = if cfg!(miri) { 4 } else { 30 };
+        let site = |name: u32| CallSite {
+            name,
+            argc: 1,
+            splats: Vec::new(),
+            keywords: Vec::new(),
+            block: BlockRef::None,
+            implicit_self: true,
+            variable_call: false,
+            kwsplat: false,
+        };
+        // def inner(x) = (y = x * 1.5; @v = y; [y, :sym])
+        let inner = Arc::new(Iseq {
+            name: "inner".into(),
+            insns: vec![
+                Insn::GetLocal(0, 0),
+                Insn::PushFloat(1.5f64.to_bits()),
+                Insn::BinOp(BinOp::Mul),
+                Insn::SetLocal(1, 0),
+                Insn::GetLocal(1, 0),
+                Insn::SetIvar(1, 0),
+                Insn::GetLocal(1, 0),
+                Insn::PushSym(0),
+                Insn::NewArray(2),
+                Insn::Leave,
+            ],
+            symbols: vec!["sym".into(), "@v".into()],
+            locals: vec!["x".into(), "y".into()],
+            ivar_sites: 1,
+            max_stack: 2,
+            params: ParamSpec {
+                required: vec![0],
+                ..ParamSpec::default()
+            },
+            scope_barrier: true,
+            ..Iseq::default()
+        });
+        // def outer(x) = ("str"; s = inner(x); Object; [s, :k])
+        let outer = Arc::new(Iseq {
+            name: "outer".into(),
+            insns: vec![
+                Insn::PushLit(0),
+                Insn::Pop,
+                Insn::PushSelf,
+                Insn::GetLocal(0, 0),
+                Insn::Send(0),
+                Insn::SetLocal(1, 0),
+                Insn::GetConst(1, ConstScope::Top, 0),
+                Insn::Pop,
+                Insn::GetLocal(1, 0),
+                Insn::PushSym(2),
+                Insn::NewArray(2),
+                Insn::Leave,
+            ],
+            literals: vec![Literal::Str(Box::from(&b"str"[..]), crate::strings::UTF_8)],
+            symbols: vec!["inner".into(), "Object".into(), "k".into()],
+            locals: vec!["x".into(), "s".into()],
+            call_sites: vec![site(0)],
+            const_sites: 1,
+            max_stack: 3,
+            params: ParamSpec {
+                required: vec![0],
+                ..ParamSpec::default()
+            },
+            scope_barrier: true,
+            ..Iseq::default()
+        });
+        // i = 0; while i < rounds; r = outer(2.0); i += 1; end; r
+        let program = Iseq {
+            name: "<test>".into(),
+            insns: vec![
+                Insn::PushInt(0),
+                Insn::SetLocal(0, 0),
+                Insn::GetLocal(0, 0),
+                Insn::PushInt(rounds),
+                Insn::BinOp(BinOp::Lt),
+                Insn::JumpUnless(9),
+                Insn::PushSelf,
+                Insn::PushFloat(2.0f64.to_bits()),
+                Insn::Send(0),
+                Insn::SetLocal(1, 0),
+                Insn::GetLocal(0, 0),
+                Insn::PushInt(1),
+                Insn::BinOp(BinOp::Add),
+                Insn::SetLocal(0, 0),
+                Insn::Jump(-13),
+                Insn::GetLocal(1, 0),
+                Insn::Leave,
+            ],
+            symbols: vec!["outer".into()],
+            locals: vec!["i".into(), "r".into()],
+            call_sites: vec![site(0)],
+            max_stack: 3,
+            ..Iseq::default()
+        };
+
+        let mut heap = Heap::new();
+        let mut frame = Frame::new(2);
+        let mut scope = heap.scope();
+        scope.bootstrap();
+        for (name, iseq) in [("inner", &inner), ("outer", &outer)] {
+            let name = crate::shared::symbols::intern(name);
+            let body = scope
+                .definitions_mut()
+                .intern_iseq(iseq, Arc::as_ptr(iseq) as usize);
+            scope
+                .classes_mut()
+                .define_method(Builtin::Object.id(), name, body);
+        }
+        scope.set_gc_stress(true);
+        let value = eval_in(&mut scope, &mut frame, &program).expect("should run");
+        scope.set_gc_stress(false);
+        assert_eq!(inspect(&mut scope, value), "[[3.0, :sym], :k]");
+    }
 }
