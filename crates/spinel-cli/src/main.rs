@@ -149,7 +149,7 @@ fn main() -> ExitCode {
         .first()
         .is_some_and(|first| ruby_args::is_ruby_invocation(first))
     {
-        return ruby_command(&words, &raw);
+        return ruby_command(&words, &raw, false);
     }
 
     // `arg_required_else_help` means a bare `spinel` never reaches this point: clap
@@ -192,7 +192,7 @@ fn main() -> ExitCode {
             let mut words = vec![argument];
             words.extend(cli.args);
             let raw: Vec<Vec<u8>> = words.iter().map(|w| w.clone().into_bytes()).collect();
-            return ruby_command(&words, &raw);
+            return ruby_command(&words, &raw, true);
         }
         eprintln!("spinel: unknown subcommand `{argument}`.");
         eprintln!("        This build has three: run, init, parse. Try `spinel --help`.");
@@ -292,12 +292,18 @@ fn run_command(path: &Path, args: &[String], dump_bytecode: bool) -> ExitCode {
             return ExitCode::from(EXIT_USAGE);
         }
     };
-    run_program(path, &source, args, dump_bytecode, Around::default())
+    let around = Around {
+        setup: true,
+        ..Around::default()
+    };
+    run_program(path, &source, args, dump_bytecode, around)
 }
 
 /// `spinel` given `ruby`'s flags: the prelude they mean, then the program
-/// from `-e`, standard input or a file, as `ruby` would run it.
-fn ruby_command(words: &[String], raw: &[Vec<u8>]) -> ExitCode {
+/// from `-e`, standard input or a file, as `ruby` would run it. `setup` is
+/// for `spinel <file>`, which is `spinel run` and so finds the project's gems;
+/// `ruby`'s own command line does not.
+fn ruby_command(words: &[String], raw: &[Vec<u8>], setup: bool) -> ExitCode {
     let parsed = ruby_args::parse(words).and_then(|mut args| {
         // `RUBYOPT`'s switches come after the command line's, and
         // `RUBYLIB`'s directories after every `-I`.
@@ -464,6 +470,7 @@ fn ruby_command(words: &[String], raw: &[Vec<u8>]) -> ExitCode {
             data,
             loop_template: around.as_deref(),
             frozen_string_literal: ruby_args::feature_setting(&args, "frozen_string_literal"),
+            setup,
         },
     )
 }
@@ -483,7 +490,13 @@ struct Around<'a> {
     /// `--enable=frozen-string-literal` or `--disable=frozen-string-literal`;
     /// `None` when neither is given.
     frozen_string_literal: Option<bool>,
+    /// Run `shims/setup.rb` first: the project's gems, for `spinel run` and
+    /// `spinel <file>`.
+    setup: bool,
 }
+
+/// Spinel's setup shim (docs/cli.md, "What `spinel run` sets up").
+const SETUP: &str = include_str!("../../../shims/setup.rb");
 
 /// The vendored standard library on `$LOAD_PATH`, last, as CRuby has its
 /// `rubylibdir`; the flags' `-I` directories go before it.
@@ -516,6 +529,7 @@ fn run_program(
         data,
         loop_template,
         frozen_string_literal,
+        setup,
     } = around;
     let source = source.to_vec();
     if dump_bytecode {
@@ -552,7 +566,19 @@ fn run_program(
     // program: an `at_exit` a required file registers runs even when the
     // program does not parse.
     let mut outcome = Ok(spinel_vm::Value::NIL);
-    if let Some(prelude) = prelude.filter(|p| !p.is_empty()) {
+    // The project's gems before anything is required: a `-r` file or the
+    // program's first line may be `require "bundler/setup"`.
+    if setup {
+        let parsed = spinel_parse::parse_file("<setup>", SETUP.as_bytes());
+        let compiled =
+            spinel_vm::compile::program(&parsed.program).expect("shims/setup.rb compiles");
+        let mut frame = spinel_vm::interp::Frame::new(0);
+        outcome = spinel_vm::interp::eval_in(&mut scope, &mut frame, &compiled)
+            .map(|_| spinel_vm::Value::NIL);
+    }
+    if outcome.is_ok()
+        && let Some(prelude) = prelude.filter(|p| !p.is_empty())
+    {
         // Spinel's own Ruby, so failing to compile it is a bug, not the
         // program's.
         let parsed = spinel_parse::parse_file("<flags>", prelude.as_bytes());
