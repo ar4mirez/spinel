@@ -41,6 +41,7 @@ module Etc
     if value > 0xFFFF_FFFF_FFFF_FFFF || value < -0xFFFF_FFFF_FFFF_FFFF
       raise RangeError, "bignum too big to convert into 'unsigned long'"
     end
+    raise RangeError, "bignum out of range of unsigned long" if value < -0x8000_0000_0000_0000
     raise RangeError, "integer #{value} too big to convert to 'unsigned int'" if value > 0xFFFF_FFFF
     raise RangeError, "integer #{value} too small to convert to 'unsigned int'" if value < -0x8000_0000
     value & 0xFFFF_FFFF
