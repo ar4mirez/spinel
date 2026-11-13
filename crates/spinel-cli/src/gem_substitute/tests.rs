@@ -1,6 +1,4 @@
-//! The naming and selection rules of docs/package-manager.md, section 6. The
-//! name table is recorded from RubyGems 4.0.20's
-//! `Gem::SpecificationPolicy#validate_name` (ruby 4.0.9).
+//! The naming and selection rules of docs/package-manager.md, section 6.
 
 use super::*;
 
@@ -19,79 +17,15 @@ fn build(version: &str, platform: &str) -> Build {
     }
 }
 
-/// Which `validate_name` error RubyGems raises (`None`: the name is valid).
-type Expected = Option<fn(String) -> InvalidName>;
-
-/// Name, then what RubyGems says of it.
-const NAMES: &[(&str, Expected)] = &[
-    ("pg", None),
-    ("sqlite3", None),
-    ("nio4r", None),
-    ("rack-test", None),
-    ("net_http2", None),
-    ("a.b", None),
-    ("pg-", None),
-    ("pg_", None),
-    ("pg.", None),
-    ("1pg", None),
-    ("9-a", None),
-    ("a", None),
-    ("PG", None),
-    ("", Some(InvalidName::NoLetter)),
-    ("1", Some(InvalidName::NoLetter)),
-    ("123", Some(InvalidName::NoLetter)),
-    ("-", Some(InvalidName::NoLetter)),
-    ("_", Some(InvalidName::NoLetter)),
-    (".", Some(InvalidName::NoLetter)),
-    ("-pg", Some(InvalidName::LeadingSpecial)),
-    ("_pg", Some(InvalidName::LeadingSpecial)),
-    (".pg", Some(InvalidName::LeadingSpecial)),
-    ("p g", Some(InvalidName::BadCharacter)),
-    ("pg/x", Some(InvalidName::BadCharacter)),
-    ("pg\n", Some(InvalidName::BadCharacter)),
-    ("\npg", Some(InvalidName::BadCharacter)),
-    ("pg\u{e9}", Some(InvalidName::BadCharacter)),
-    ("pg+", Some(InvalidName::BadCharacter)),
-];
-
-#[test]
-fn names_are_validated_as_rubygems_does() {
-    for &(name, error) in NAMES {
-        assert_eq!(
-            valid_name(name),
-            error.map_or(Ok(()), |e| Err(e(name.to_owned()))),
-            "{name:?}"
-        );
-    }
-}
-
 #[test]
 fn a_substitute_is_named_gem_dash_spinel() {
-    assert_eq!(substitute_name("pg").unwrap(), "pg-spinel");
-    assert_eq!(substitute_name("sqlite3").unwrap(), "sqlite3-spinel");
-    assert_eq!(substitute_name("nio4r").unwrap(), "nio4r-spinel");
-    assert_eq!(substitute_name("puma").unwrap(), "puma-spinel");
+    assert_eq!(substitute_name("pg"), "pg-spinel");
+    assert_eq!(substitute_name("sqlite3"), "sqlite3-spinel");
+    assert_eq!(substitute_name("nio4r"), "nio4r-spinel");
+    assert_eq!(substitute_name("puma"), "puma-spinel");
     // The rule is mechanical: a gem that already ends in -spinel is not
     // special, and whether anything is substituted is Spinel's list's call.
-    assert_eq!(
-        substitute_name("bundler-spinel").unwrap(),
-        "bundler-spinel-spinel"
-    );
-    assert_eq!(
-        substitute_name("-pg"),
-        Err(InvalidName::LeadingSpecial("-pg".into()))
-    );
-}
-
-#[test]
-fn every_substitute_name_of_a_valid_name_is_valid() {
-    for &(name, error) in NAMES {
-        if error.is_none() {
-            let substitute = substitute_name(name).unwrap();
-            assert_eq!(valid_name(&substitute), Ok(()), "{substitute:?}");
-            assert!(substitute.ends_with(SUFFIX));
-        }
-    }
+    assert_eq!(substitute_name("bundler-spinel"), "bundler-spinel-spinel");
 }
 
 #[test]

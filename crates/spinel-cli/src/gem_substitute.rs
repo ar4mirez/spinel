@@ -33,7 +33,6 @@
 //! into the GEM_HOME and `.spinel/substitutions.json`. They need the resolver
 //! and installer, which do not exist yet.
 
-use std::fmt;
 use std::num::NonZeroU64;
 
 use crate::gem_platform::{GemPlatform, Platform, match_platforms, sort_best_platform_match};
@@ -42,64 +41,10 @@ use crate::gem_version::Version;
 /// What a Spinel-native gem's name adds to the upstream name.
 pub const SUFFIX: &str = "-spinel";
 
-/// A gem name RubyGems would refuse. Each variant is one of
-/// `Gem::SpecificationPolicy#validate_name`'s errors, checked in its order.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum InvalidName {
-    /// `must include at least one letter`.
-    NoLetter(String),
-    /// `can only include letters, numbers, dashes, and underscores` (and
-    /// periods, which the pattern allows but the message omits).
-    BadCharacter(String),
-    /// `cannot begin with a period, dash, or underscore`.
-    LeadingSpecial(String),
-}
-
-impl fmt::Display for InvalidName {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let (name, problem) = match self {
-            InvalidName::NoLetter(name) => (name, "must include at least one letter"),
-            InvalidName::BadCharacter(name) => (
-                name,
-                "can only include letters, numbers, dashes, and underscores",
-            ),
-            InvalidName::LeadingSpecial(name) => {
-                (name, "cannot begin with a period, dash, or underscore")
-            }
-        };
-        write!(f, "invalid value for attribute name: {name:?} {problem}")
-    }
-}
-
-impl std::error::Error for InvalidName {}
-
-/// `Gem::SpecificationPolicy#validate_name`: at least one ASCII letter
-/// (`/[a-zA-Z]/`), nothing but `[a-zA-Z0-9._-]` (`VALID_NAME_PATTERN`, anchored
-/// with `\A` and `\z`, so a trailing newline is refused too), and no leading
-/// `.`, `-` or `_` (`SPECIAL_CHARACTERS`).
-pub fn valid_name(name: &str) -> Result<(), InvalidName> {
-    let bytes = name.as_bytes();
-    if !bytes.iter().any(u8::is_ascii_alphabetic) {
-        return Err(InvalidName::NoLetter(name.to_owned()));
-    }
-    if !bytes
-        .iter()
-        .all(|&b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
-    {
-        return Err(InvalidName::BadCharacter(name.to_owned()));
-    }
-    if matches!(bytes.first(), Some(b'.' | b'-' | b'_')) {
-        return Err(InvalidName::LeadingSpecial(name.to_owned()));
-    }
-    Ok(())
-}
-
-/// The name of `gem`'s Spinel-native substitute: `pg` is `pg-spinel`. A valid
-/// name with [`SUFFIX`] appended is always valid: it still has its letter and
-/// its first byte, and the suffix adds only letters and a dash.
-pub fn substitute_name(gem: &str) -> Result<String, InvalidName> {
-    valid_name(gem)?;
-    Ok(format!("{gem}{SUFFIX}"))
+/// The name of `gem`'s Spinel-native substitute: `pg` is `pg-spinel`. `gem`
+/// comes from Spinel's own list of substituted gems, all valid RubyGems names.
+pub fn substitute_name(gem: &str) -> String {
+    format!("{gem}{SUFFIX}")
 }
 
 /// Revision `revision` of the substitute for `upstream`: `1.5.0` and 2 give
