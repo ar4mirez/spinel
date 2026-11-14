@@ -27,8 +27,7 @@ module RbConfig
   sitedir = File.join(rubylibprefix, "site_ruby")
   vendordir = File.join(rubylibprefix, "vendor_ruby")
   CONFIG = {
-    # A copy: CONFIG's values are not frozen, and `RUBY_PLATFORM` is.
-    "arch" => RUBY_PLATFORM.dup,
+    "arch" => RUBY_PLATFORM,
     "bindir" => bindir,
     "prefix" => prefix,
     "exec_prefix" => prefix,
@@ -54,20 +53,6 @@ module RbConfig
     "TEENY" => teeny,
     "PATCHLEVEL" => RUBY_PATCHLEVEL.to_s,
     "ENABLE_SHARED" => "no",
-    # No `libruby` to link against: Spinel is one binary, as a CRuby built
-    # without `--enable-shared` is. These are the names such a build reports,
-    # for a library that is not installed; `libdirname` and `LIBPATHENV` say
-    # where one would be looked for.
-    "RUBY_SO_NAME" => "spinel",
-    "LIBRUBY_A" => "libspinel-static.a",
-    "LIBRUBY" => "libspinel-static.a",
-    "LIBRUBY_SO" => if os.start_with?("darwin")
-                      "libspinel.#{major}.#{minor}.#{teeny}.dylib"
-                    else
-                      "libspinel.so.#{major}.#{minor}.#{teeny}"
-                    end,
-    "libdirname" => "libdir",
-    "LIBPATHENV" => os.start_with?("darwin") ? "DYLD_LIBRARY_PATH" : "LD_LIBRARY_PATH",
     # The extensions Spinel ships are inside the binary, as a CRuby built
     # with `--with-static-linked-ext` has them: `require "etc"` records
     # `etc.so` with no directory, and `resolve_feature_path` says so.
