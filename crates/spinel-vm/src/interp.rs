@@ -14592,6 +14592,16 @@ fn native_call<'h>(
             stack.push(value);
             Ok(None)
         }
+        Native::GlobalNames => {
+            let names: Vec<Value> = scope
+                .global_names()
+                .into_iter()
+                .map(Value::symbol)
+                .collect();
+            let value = new_array(scope, &names);
+            stack.push(value);
+            Ok(None)
+        }
         Native::GlobalFetch => {
             let value = call
                 .args
@@ -17355,6 +17365,7 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         (Builtin::Kernel, &["__hook_global__"], Native::HookGlobal),
         (Builtin::Kernel, &["__global_store__"], Native::GlobalStore),
         (Builtin::Kernel, &["__global_fetch__"], Native::GlobalFetch),
+        (Builtin::Kernel, &["__global_names__"], Native::GlobalNames),
         (Builtin::Kernel, &["__argv__"], Native::Argv),
         (Builtin::Kernel, &["__mark_partial__"], Native::MarkPartial),
         (

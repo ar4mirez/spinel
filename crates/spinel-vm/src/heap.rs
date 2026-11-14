@@ -859,6 +859,24 @@ impl Heap {
         slot
     }
 
+    /// Every name the globals table knows, for `Kernel#global_variables`:
+    /// the assigned and aliased ones, those aliased to a regexp special, and
+    /// those the core library put a rule on (`$!`, `$<`), which may never
+    /// have been stored. In interning order, so the answer is stable.
+    pub fn global_names(&self) -> Vec<SymbolId> {
+        let mut names: Vec<SymbolId> = self
+            .globals
+            .keys()
+            .chain(self.global_specials.keys())
+            .chain(self.hooked_globals.keys())
+            .chain(self.readonly_globals.iter())
+            .copied()
+            .collect();
+        names.sort_unstable_by_key(|name| name.0);
+        names.dedup();
+        names
+    }
+
     /// `alias $new $old`: point `new` at the cell `old` names.
     pub fn alias_global(&mut self, new: SymbolId, old: SymbolId) {
         let slot = self.global_slot(old);
@@ -1912,6 +1930,10 @@ impl<'h> HandleScope<'h> {
     pub fn set_global(&mut self, name: SymbolId, value: Value) {
         self.storable(value);
         self.heap.set_global(name, value);
+    }
+
+    pub fn global_names(&self) -> Vec<SymbolId> {
+        self.heap.global_names()
     }
 
     pub fn alias_global(&mut self, new: SymbolId, old: SymbolId) {

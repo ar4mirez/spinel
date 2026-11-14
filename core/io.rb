@@ -4703,5 +4703,8 @@ module Kernel
     end
   end
 
-  module_function :puts, :print, :p, :warn, :printf, :putc, :open, :gets, :readline, :readlines
+  # `IO.select`, as CRuby's `rb_f_select` is.
+  def select(*args) = IO.select(*args)
+
+  module_function :puts, :print, :p, :warn, :printf, :putc, :open, :gets, :readline, :readlines, :select
 end
