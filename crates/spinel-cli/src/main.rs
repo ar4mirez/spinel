@@ -814,10 +814,18 @@ fn run_program(
     // `exit` is a `SystemExit` that nothing rescued: not an error to report,
     // and its status is the process's. A `SignalException` ends the process
     // by its signal, below, and CRuby prints nothing for one.
-    let quiet = matches!(
-        &outcome,
-        Err(spinel_vm::Error::Uncaught { class, .. }) if class == "SystemExit" || class == "SignalException"
-    );
+    // `STDOUT`'s broken pipe is an `Errno::EPIPE` that ends the process by
+    // SIGPIPE, with nothing printed, when nothing rescued it.
+    let signalled = if matches!(&outcome, Err(spinel_vm::Error::Uncaught { .. })) {
+        spinel_core::uncaught_signal(&mut scope)
+    } else {
+        None
+    };
+    let quiet = signalled.is_some()
+        || matches!(
+            &outcome,
+            Err(spinel_vm::Error::Uncaught { class, .. }) if class == "SystemExit" || class == "SignalException"
+        );
     // An exception is reported by Ruby, as CRuby's top level reports it;
     // anything else is the engine saying it could not go on.
     if let Err(err) = &outcome
@@ -829,12 +837,21 @@ fn run_program(
             // The one hint Spinel adds to Ruby's report: a missing method may
             // be its own, while the core library is still growing.
             if matches!(err, spinel_vm::Error::Uncaught { class, .. } if class == "NoMethodError") {
-                eprintln!(
+                let _ = writeln!(
+                    std::io::stderr(),
                     "        Spinel's core library is still minimal, so this may be Spinel rather than your program.\n        What exists: {MILESTONES}"
                 );
             }
         } else {
-            eprintln!("{}: {}", path.display(), describe_error(err));
+            // A report the standard error cannot take is dropped, as CRuby
+            // drops it, so a broken STDERR still ends with status 1 rather
+            // than `eprintln!`'s panic.
+            let _ = writeln!(
+                std::io::stderr(),
+                "{}: {}",
+                path.display(),
+                describe_error(err)
+            );
         }
     }
     // Threads, finalizers and IOs are finished after the report, so an IO's
@@ -851,6 +868,11 @@ fn run_program(
         if let Some(name) = name {
             spinel_vm::signal::die_by(name);
         }
+    }
+    if let Some(number) = signalled
+        && let Some((name, _)) = spinel_vm::signal::list().find(|&(_, n)| n == number)
+    {
+        spinel_vm::signal::die_by(name);
     }
     let fallback = if syntax_error {
         EXIT_SYNTAX

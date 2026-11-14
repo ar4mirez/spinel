@@ -4,6 +4,12 @@
 # one system call and answer an errno on failure.
 
 class File < IO
+  # Whether this is macOS, whose `stat` has a birth time and which has
+  # `lchmod(2)`: where it is not, those are CRuby's not-implemented methods.
+  # Asked of the primitive, as `RUBY_PLATFORM` is defined after this file.
+  DARWIN__ = __ruby_constants__.then { |pairs| pairs[pairs.index("RUBY_PLATFORM") + 1] }.include?("darwin")
+  private_constant :DARWIN__
+
   SEPARATOR = "/"
   Separator = SEPARATOR
   ALT_SEPARATOR = nil
@@ -105,8 +111,15 @@ class File < IO
 
   def self.dirname(path, level = 1)
     path = __path__(path)
+    # A C integer, so a level is anything with a `to_int`.
+    level = Integer.__c_long__(level)
     raise ArgumentError, "negative level: #{level}" if level < 0
-    level.times { path = __dirname__(path) }
+    level.times do
+      parent = __dirname__(path)
+      # Past the root, or ".", every further level is the same answer.
+      break if parent == path
+      path = parent
+    end
     path
   end
 
@@ -210,9 +223,86 @@ class File < IO
     # The result is in the encoding of `path` as given, not of its join with
     # `dir`. Measured.
     encoding = path.encoding
-    path = join(__path__(dir), path) unless dir.nil? || path.start_with?("/")
-    resolved = __check__(__fs_realpath__(path), path, "rb_check_realpath_internal")
+    given, base = path, dir.nil? ? nil : __path__(dir)
+    path = join(base, path) unless base.nil? || path.start_with?("/")
+    resolved = __fs_realpath__(path)
+    # glibc's `realpath(3)` refuses `file/..`, which CRuby's
+    # `rb_check_realpath_internal` then works out by `realpath_rec`, as it
+    # does for an ENOENT on a path that is there.
+    if resolved == Errno::ENOTDIR::Errno || (resolved == Errno::ENOENT::Errno && exist?(path))
+      resolved = __realpath_rec__(given.b, base&.b, true)
+    end
+    resolved = __check__(resolved, path, "rb_check_realpath_internal")
     __in_path_encoding__(__fs_string__(resolved), encoding)
+  end
+
+  # CRuby's `rb_check_realpath_emulate` and `realpath_rec`, on raw bytes: the
+  # working directory, `dir` and `path` resolved one component at a time
+  # from the root, a symlink by what it names and `..` by dropping what was
+  # resolved last. Strict, every component has to be there; otherwise the
+  # last of `path` need not be, as for `realdirpath`.
+  def self.__realpath_rec__(path, dir, strict)
+    parts = []
+    unless path.start_with?("/")
+      parts << Dir.pwd.b if dir.nil? || !dir.start_with?("/")
+      parts << dir unless dir.nil?
+    end
+    parts << path
+    resolved = "/".b
+    loopcheck = {}
+    parts.each_with_index do |part, index|
+      resolved = __realpath_names__(resolved, part, nil, loopcheck, strict, index == parts.size - 1)
+    end
+    resolved
+  end
+
+  # One `realpath_rec` over the names of `unresolved`, onto `resolved`.
+  # `fallback` is the symlink being followed, which answers for a target
+  # that is not there if the system can still `stat` it.
+  def self.__realpath_names__(resolved, unresolved, fallback, loopcheck, strict, last)
+    names = unresolved.split("/").reject(&:empty?)
+    names.each_with_index do |name, index|
+      # Nothing after it, not even a separator.
+      final = index == names.size - 1 && !unresolved.end_with?("/")
+      next if name == "."
+      if name == ".."
+        cut = resolved.rindex("/")
+        resolved = cut.nil? || cut == 0 ? "/".b : resolved.byteslice(0, cut)
+        next
+      end
+      testpath = resolved == "/" ? "/#{name}".b : "#{resolved}/#{name}".b
+      seen = loopcheck[testpath]
+      if seen == :resolving
+        raise SystemCallError.new(testpath, Errno::ELOOP::Errno, "realpath_rec")
+      elsif !seen.nil?
+        resolved = seen.dup
+        next
+      end
+      stat = __fs_stat__(testpath, false)
+      if Integer === stat
+        if stat == Errno::ENOENT::Errno && !fallback.nil? && !(Integer === __fs_stat__(fallback, true))
+          return fallback.dup
+        end
+        if stat == Errno::ENOENT::Errno && !strict && last && final
+          resolved = testpath
+          break
+        end
+        raise SystemCallError.new(testpath, stat, "realpath_rec")
+      end
+      if stat[2] & 0170000 == 0120000
+        loopcheck[testpath] = :resolving
+        link = __check__(__fs_readlink__(testpath), testpath, "rb_readlink").b
+        resolved = "/".b if link.start_with?("/")
+        # As CRuby's, a link that ends the names it is in may name what is
+        # not there, whichever of the paths those names are part of.
+        resolved = __realpath_names__(resolved, link, testpath, loopcheck, strict, final)
+        loopcheck[testpath] = resolved.dup.freeze
+      else
+        loopcheck[testpath] = testpath
+        resolved = testpath
+      end
+    end
+    resolved
   end
 
   # A path the system resolved, in the encoding of the one it was asked
@@ -233,17 +323,10 @@ class File < IO
   def self.realdirpath(path, dir = nil)
     path = __path__(path)
     dir = __path__(dir) unless dir.nil?
-    cwd = Dir.pwd.b
-    # `absolute_path`, not `expand_path`: a leading "~" in `path` or `dir` is
-    # a file name here, as it is to `rb_check_realpath_emulate` (#410).
-    base = dir.nil? ? cwd : absolute_path(dir.b, cwd).b
-    expanded = absolute_path(path.b, base).b
-    resolved = if exist?(expanded) || symlink?(expanded)
-      realpath(expanded)
-    else
-      join(realpath(dirname(expanded)), basename(expanded))
-    end
-    __realpath_rec_encoding__(resolved.b, path, dir)
+    # A leading "~" in `path` or `dir` is a file name here, as it is to
+    # `rb_check_realpath_emulate` (#410).
+    resolved = __realpath_rec__(path.b, dir&.b, false)
+    __realpath_rec_encoding__(resolved, path, dir)
   end
 
   # The encoding `rb_check_realpath_emulate` gives the path it resolved.
@@ -272,15 +355,28 @@ class File < IO
     resolved
   end
 
+  # CRuby's `rb_stat`, which asks an IO, or what `to_io` makes of an object
+  # that is no String, about its descriptor rather than a path: the IO, or
+  # nil for a path.
+  def self.__io_of__(path)
+    String === path ? nil : IO.try_convert(path)
+  end
+
   def self.exist?(path)
+    io = __io_of__(path)
+    return !__stat_or_nil__(io).nil? unless io.nil?
     !__fs_kind__(__path__(path), true).nil?
   end
 
   def self.file?(path)
+    io = __io_of__(path)
+    return __stat_or_nil__(io)&.file? == true unless io.nil?
     __fs_kind__(__path__(path), true) == :file
   end
 
   def self.directory?(path)
+    io = __io_of__(path)
+    return __stat_or_nil__(io)&.directory? == true unless io.nil?
     __fs_kind__(__path__(path), true) == :directory
   end
 
@@ -375,9 +471,12 @@ class File < IO
   def mtime = stat.mtime
   def ctime = stat.ctime
 
-  def birthtime
-    __check_open__
-    raise NotImplementedError, "birthtime() function is unimplemented on this machine"
+  # CRuby's `File#birthtime`, where the platform's stat has one, and its
+  # not-implemented method where it does not: there `respond_to?` says no.
+  if DARWIN__
+    def birthtime = stat.birthtime
+  else
+    __notimplement__ :birthtime
   end
 
   # --- what a path names -------------------------------------------------------
@@ -450,6 +549,21 @@ class File < IO
       __check__(__fs_chmod__(path, mode), path, "apply2files")
     end
     paths.size
+  end
+
+  # `lchmod(2)` is macOS's; Linux has none, so there `File.lchmod` is
+  # CRuby's not-implemented method, which `respond_to?` says is not there.
+  if DARWIN__
+    def self.lchmod(mode, *paths)
+      mode = IO.__c_uint__(mode)
+      paths.each do |path|
+        path = __path__(path)
+        __check__(__fs_chmod__(path, mode, false), path, "apply2files")
+      end
+      paths.size
+    end
+  else
+    singleton_class.__notimplement__ :lchmod
   end
 
   # A nil owner or group, or -1, leaves that one as it is.
@@ -539,9 +653,10 @@ class File < IO
   def self.mtime(path) = __stat_of__(path).mtime
   def self.ctime(path) = __stat_of__(path).ctime
 
-  def self.birthtime(path)
-    __stat_of__(path)
-    raise NotImplementedError, "birthtime() function is unimplemented on this machine"
+  if DARWIN__
+    def self.birthtime(path) = __stat_of__(path).birthtime
+  else
+    singleton_class.__notimplement__ :birthtime
   end
 
   def self.ftype(path)
@@ -809,8 +924,10 @@ class File < IO
     def mtime = Time.at(@fields[12], @fields[13], :nanosecond)
     def ctime = Time.at(@fields[14], @fields[15], :nanosecond)
 
-    def birthtime
-      raise NotImplementedError, "birthtime() function is unimplemented on this machine"
+    if DARWIN__
+      def birthtime = Time.at(@fields[16], @fields[17], :nanosecond)
+    else
+      __notimplement__ :birthtime
     end
 
     def <=>(other)
