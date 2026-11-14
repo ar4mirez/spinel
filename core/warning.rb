@@ -191,6 +191,8 @@ module Kernel
       $!
     when :$@
       $@
+    when :$-W
+      $VERBOSE.nil? ? 0 : $VERBOSE ? 2 : 1
     end
   end
   private :__global_assign__, :__global_read__
@@ -207,4 +209,36 @@ __global_store__(:$@, nil)
 __global_store__(:$<, nil)
 __global_store__(:$FILENAME, nil)
 __freeze_global__(:$!, :$<, :$FILENAME)
+# `$-F` is `$;` by another name, rules and all, so the alias comes after the
+# hook it takes along. `$-W` is the warning level `$VERBOSE` stands for, read
+# each time and never assigned. `$-i` is ARGF's in-place extension, nil
+# without `-i`. All three measured on 4.0.9.
+# `$,`, `$;` and `$\` start nil, which is still defined, as in CRuby.
+__global_store__(:$,, nil)
+__global_store__(:$;, nil)
+__global_store__(:$\, nil)
+alias $-F $;
+__hook_global__(true, :$-W)
+__global_store__(:$-W, nil)
+__freeze_global__(:$-W)
+# ponytail: a plain cell. CRuby reads and writes `ARGF.inplace_mode` through
+# it; tie the two together when ARGF lands (#41).
+__global_store__(:$-i, nil)
 __global_store__(:$., 0)
+
+# `Kernel#global_variables` (#41): every name the globals table knows, the
+# regexp specials, which are read off the last match rather than stored, and
+# `$1` up to the last match's group count, as CRuby's
+# `rb_f_global_variables` adds them.
+module Kernel
+  def global_variables
+    names = __global_names__
+    %i[$~ $& $` $' $+ $_].each { |name| names << name unless names.include?(name) }
+    # ponytail: `$~` is one per heap, so this is the caller's match. When it
+    # moves to the frame, read the caller's instead, as the C function does.
+    match = $~
+    (1...match.size).each { |group| names << :"$#{group}" } unless match.nil?
+    names
+  end
+  module_function :global_variables
+end

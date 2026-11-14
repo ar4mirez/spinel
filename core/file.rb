@@ -936,6 +936,86 @@ module FileTest
   module_function(*instance_methods(false))
 end
 
+# `Kernel#test` (#41), CRuby's `rb_f_test`: a one-letter command, then one
+# path for a question about a file or two for a comparison of them.
+module Kernel
+  def test(*args)
+    raise ArgumentError, "wrong number of arguments (given 0, expected 2..3)" if args.empty?
+    cmd = args[0]
+    # `NUM2CHR`: a String's first byte, anything else as a C int's low byte.
+    cmd = String === cmd && !cmd.empty? ? cmd.getbyte(0) : Array.__long__(cmd) & 0xff
+    letter = cmd.chr
+    if cmd != 0 && "bcdefgGkloOprRsSuwWxXz".include?(letter)
+      __test_arity__(args, 2)
+      path = args[1]
+      return case letter
+             when "b" then File.blockdev?(path)
+             when "c" then File.chardev?(path)
+             when "d" then File.directory?(path)
+             when "e" then File.exist?(path)
+             when "f" then File.file?(path)
+             when "g" then File.setgid?(path)
+             when "G" then File.grpowned?(path)
+             when "k" then File.sticky?(path)
+             when "l" then File.symlink?(path)
+             when "o" then File.owned?(path)
+             # `rb_file_rowned_p`: owned by the real user, which `File` has no
+             # method for.
+             when "O" then (stat = File.__stat_or_nil__(path)) ? stat.uid == Process.uid : false
+             when "p" then File.pipe?(path)
+             when "r" then File.readable?(path)
+             when "R" then File.readable_real?(path)
+             when "s" then File.size?(path)
+             when "S" then File.socket?(path)
+             when "u" then File.setuid?(path)
+             when "w" then File.writable?(path)
+             when "W" then File.writable_real?(path)
+             when "x" then File.executable?(path)
+             when "X" then File.executable_real?(path)
+             when "z" then File.zero?(path)
+             end
+    end
+    if cmd != 0 && "MAC".include?(letter)
+      __test_arity__(args, 2)
+      stat = __test_stat__(args[1])
+      return letter == "M" ? stat.mtime : letter == "A" ? stat.atime : stat.ctime
+    end
+    if cmd != 0 && "-=<>".include?(letter)
+      __test_arity__(args, 3)
+      return File.identical?(args[1], args[2]) if letter == "-"
+      # A file that cannot be stat'ed compares false, not an error.
+      first = File.__stat_or_nil__(args[1])
+      second = File.__stat_or_nil__(args[2])
+      return false if first.nil? || second.nil?
+      order = first.mtime <=> second.mtime
+      return letter == "=" ? order == 0 : letter == ">" ? order > 0 : order < 0
+    end
+    # CRuby prints the command as a C `char`, so a high byte is negative and
+    # `%02X` shows it sign-extended.
+    if cmd >= 0x20 && cmd < 0x7f
+      raise ArgumentError, "unknown command '#{"\\" if letter == "'" || letter == "\\"}#{letter}'"
+    end
+    raise ArgumentError, "unknown command \"\\x#{cmd >= 0x80 ? "FFFFFF" : ""}#{cmd.to_s(16).upcase.rjust(2, "0")}\""
+  end
+
+  def __test_arity__(args, count)
+    return if args.size == count
+    raise ArgumentError, "wrong number of arguments (given #{args.size}, expected #{count})"
+  end
+
+  # `rb_stat`, failing as `rb_f_test` does: an IO is asked about its
+  # descriptor, anything else is a path.
+  def __test_stat__(path)
+    io = String === path ? nil : IO.try_convert(path)
+    return io.stat unless io.nil?
+    path = File.__path__(path)
+    File::Stat.__from__(File.__check__(__fs_stat__(path, true), path, "rb_f_test"))
+  end
+
+  private :__test_arity__, :__test_stat__
+  module_function :test
+end
+
 class Dir
   include Enumerable
 

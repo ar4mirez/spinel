@@ -87,7 +87,11 @@ fix is a different slice. The reason says which slice, by number.
 
 ## What is here now
 
-A hundred and fifty-seven tags across eighty-six files. A sweep for #41 (S0)
+A hundred and fifty-one tags across eighty-three files. `Kernel#test`,
+`#select` and `#global_variables` (#41, S1) removed six, and three files:
+`core/kernel/{test,select,global_variables}`'s "is a private method" and
+"`Kernel.X` is a public method", which pass now that the methods exist.
+Before it, a hundred and fifty-seven across eighty-six. A sweep for #41 (S0)
 removed four whose examples pass, and three files: `File.expand_path` raising
 `Encoding::CompatibilityError`, `Kernel#singleton_class` after `reopen`, a
 flip-flop's Integer literal against `$.`, and `STDOUT` keeping what

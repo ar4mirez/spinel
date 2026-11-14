@@ -523,6 +523,9 @@ pub enum Native {
     GlobalStore,
     /// `__global_fetch__(name)`: the cell itself, nil when never assigned.
     GlobalFetch,
+    /// `Kernel#__global_names__`: every name in the globals table, as
+    /// Symbols. `Kernel#global_variables` is Ruby around it.
+    GlobalNames,
     /// `Kernel#__argv__`: `[$0, *ARGV]` as the embedder set them.
     Argv,
     /// `Kernel#__mark_partial__`: a file this heap was meant to load did not
