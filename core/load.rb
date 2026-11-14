@@ -402,7 +402,11 @@ module Kernel
   # The `$LOADED_FEATURES` entries `feature` is part of, in order. The scan
   # is a search of the entries joined into one string, so an entry costs a
   # look at its bytes rather than a block call; only one that contains
-  # `feature` is handed back to be matched.
+  # `feature` is handed back to be matched. The joined copy is there for
+  # speed: with the plain `select` scan, a Ruby block per entry, the
+  # `bench/bytecode_cache.rb` warm run took about 970 ms, against about 525 ms
+  # with the copy and about 500 ms before this lookup. It is still the linear
+  # scan above, with no index; the `features_index` is #66's.
   def self.__features_containing__(feature)
     __sync_features__
     text = @__features_text__
