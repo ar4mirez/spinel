@@ -319,7 +319,7 @@ Bytecode to Cranelift IR, method at a time, after a call count threshold, with i
 
 **Decision:** `spinel-ext` crate, no CRuby C API.
 
-- Extensions are `cdylib` crates built with `spinel-ext`, exporting `spinel_ext_init`. `require "foo"` finds `foo.spinel` the way it finds `foo.so` today. The boundary is a versioned `extern "C"` function table with `#[repr(C)]` handles, because Rust's own ABI is not stable across compiler versions; the `spinel-ext` crate is a safe wrapper over that table. A version mismatch is a clean error.
+- Extensions are `cdylib` crates built with `spinel-ext`, exporting `spinel_ext_init`. `require "foo"` looks for `foo.rb`, then `foo.spinel`, then `foo.so`, each across the whole load path, and `require "foo.so"` also finds `foo.spinel` (#39). A `.so` found is a CRuby C extension, refused with a `LoadError` that has no `path`; a `.spinel` found is refused the same way until the loader (#104) lands. The boundary is a versioned `extern "C"` function table with `#[repr(C)]` handles, because Rust's own ABI is not stable across compiler versions; the `spinel-ext` crate is a safe wrapper over that table. A version mismatch is a clean error.
 - Values are opaque handles rooted in a `HandleScope`. Extensions never see raw pointers, so the GC is free to move.
 - `Spinel::FFI` (default: built on `libffi`) covers the `fiddle`/`ffi` gem use case: load a C library, declare functions, call them.
 
