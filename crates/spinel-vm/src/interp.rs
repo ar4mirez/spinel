@@ -15449,13 +15449,18 @@ fn native_call<'h>(
                 );
             };
             let include_all = call.args.get(1).is_some_and(|&v| v.is_truthy());
-            let found = scope
+            let visible = scope
                 .classes_mut()
                 .lookup_in(class, symbol, call.cref)
-                .is_some_and(|method| {
-                    (include_all || method.visibility == Visibility::Public)
-                        && !not_implemented(scope, &method)
-                });
+                .filter(|method| include_all || method.visibility == Visibility::Public);
+            if visible
+                .as_ref()
+                .is_some_and(|method| not_implemented(scope, method))
+            {
+                stack.push(Value::FALSE);
+                return Ok(None);
+            }
+            let found = visible.is_some();
             // Not in the table: a program's `respond_to_missing?` decides
             // (#28), as a frame whose answer comes back as a boolean.
             let asks = crate::shared::symbols::intern("respond_to_missing?");
