@@ -38,7 +38,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/matchdata` | 30 | 186 | 186 | 0 | 0 | 0 | 100% |
 | `core/math` | 29 | 243 | 243 | 0 | 0 | 0 | 100% |
 | `core/method` | 27 | 199 | 199 | 0 | 0 | 0 | 100% |
-| `core/module` | 86 | 1052 | 1042 | 0 | 0 | 10 | 99% |
+| `core/module` | 86 | 1052 | 1043 | 0 | 0 | 9 | 99% |
 | `core/mutex` | 7 | 35 | 35 | 0 | 0 | 0 | 100% |
 | `core/nil` | 18 | 27 | 25 | 0 | 2 | 0 | 93% |
 | `core/numeric` | 46 | 326 | 324 | 0 | 0 | 2 | 99% |
@@ -69,7 +69,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `language` | 67 | 2669 | 2535 | 0 | 106 | 28 | 95% |
 | `language/predefined` | 2 | 14 | 14 | 0 | 0 | 0 | 100% |
 | `language/regexp` | 11 | 258 | 258 | 0 | 0 | 0 | 100% |
-| `library/English` | 2 | 27 | 1 | 0 | 0 | 26 | 4% |
+| `library/English` | 2 | 27 | 19 | 0 | 0 | 8 | 70% |
 | `library/abbrev` | 1 | 4 | 0 | 0 | 4 | 0 | 0% |
 | `library/base64` | 6 | 26 | 0 | 0 | 26 | 0 | 0% |
 | `library/bigdecimal` | 57 | 341 | 4 | 0 | 337 | 0 | 1% |
@@ -131,4 +131,4 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `optional/capi` | 47 | 0 | 0 | 0 | 0 | 0 | — |
 | `optional/thread_safety` | 1 | 5 | 4 | 0 | 0 | 1 | 80% |
 | `security` | 13 | 34 | 32 | 0 | 2 | 0 | 94% |
-| **total** | 3841 | 32925 | 29897 | 0 | 2822 | 206 | 91% |
+| **total** | 3841 | 32925 | 29916 | 0 | 2822 | 187 | 91% |
