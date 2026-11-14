@@ -1,1 +1,0 @@
-fails(#41: an Integer literal in a flip-flop is compared with $., which IO does not track yet):The if expression with a boolean range ('flip-flop' operator) warns when Integer literals are used instead of predicates
