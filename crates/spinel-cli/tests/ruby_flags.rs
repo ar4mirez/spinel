@@ -183,6 +183,9 @@ fn gems_and_did_you_mean_load_unless_disabled() {
         (&["--disable=all", "--enable=gems"][..], gems_only),
         (&["--disable=did_you_mean"][..], gems_only),
         (&["--disable-did-you-mean"][..], gems_only),
+        // Each part of a name may be shortened, in any case.
+        (&["--disable=d-y-m"][..], gems_only),
+        (&["--disable=GEMS"][..], neither),
         // `did_you_mean` is only loaded with RubyGems.
         (&["--disable-gems", "--enable=did_you_mean"][..], neither),
     ] {

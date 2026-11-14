@@ -12,8 +12,10 @@ module RbConfig
   # directories hang off it. Spinel installs nothing beside its binary, so
   # its prefix is the home it keeps the extracted stdlib in, found as
   # `crates/spinel-cli/src/stdlib.rs` finds it: `$SPINEL_HOME`, else
-  # `~/.spinel`, else the directory above the binary's. RubyGems derives its
-  # default gem directory from these (`Gem.default_dir`, #319).
+  # `~/.spinel`. When neither `SPINEL_HOME` nor `HOME` is set, stdlib.rs has
+  # no home, and RbConfig's own fallback is the directory above the binary's.
+  # RubyGems derives its default gem directory from these (`Gem.default_dir`,
+  # #319).
   prefix = ENV["SPINEL_HOME"]
   if prefix.nil? || prefix.empty?
     home = ENV["HOME"]

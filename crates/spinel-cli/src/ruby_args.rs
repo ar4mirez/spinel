@@ -88,17 +88,29 @@ const FEATURES: &[&str] = &[
     "zjit",
 ];
 
-/// The feature a word names, as `ruby.c`'s `feature_option` reads it: any
-/// prefix of a feature's name, `-` and `_` alike, and the first feature in
-/// [`FEATURES`] it begins wins, so `gem` is `gems` and `frozen` is
-/// `frozen_string_literal`. After the features come `jit` and `all`.
+/// The feature a word names, as `ruby.c`'s `feature_option` reads it with
+/// `name_match_p`: case aside, and `-` and `_` alike, each `_`-separated
+/// part of the word begins the matching part of a feature's name, and the
+/// first feature in [`FEATURES`] it names wins, so `gem` is `gems`, `d-y-m`
+/// is `did_you_mean` and `f-s` is `frozen_string_literal`. After the
+/// features come `jit` and `all`.
 fn feature_named(word: &str) -> Option<&'static str> {
-    let word = word.replace('-', "_");
+    let word = word.to_ascii_lowercase().replace('-', "_");
     FEATURES
         .iter()
         .chain(&["jit", "all"])
-        .find(|name| name.starts_with(word.as_str()))
+        .find(|name| name_match(name, &word))
         .copied()
+}
+
+/// `ruby.c`'s `name_match_p`, on a lowercased word with `-` read as `_`.
+fn name_match(name: &str, word: &str) -> bool {
+    if word.is_empty() {
+        return false;
+    }
+    let mut names = name.split('_');
+    word.split('_')
+        .all(|part| names.next().is_some_and(|whole| whole.starts_with(part)))
 }
 
 /// Whether a command line is a `ruby` one: a flag that is not one of
@@ -694,6 +706,14 @@ mod tests {
         assert_eq!(feature_named("j"), Some("jit"));
         assert_eq!(feature_named("al"), Some("all"));
         assert_eq!(feature_named("gemsx"), None);
+        assert_eq!(feature_named("GEMS"), Some("gems"));
+        assert_eq!(feature_named("Did_You_Mean"), Some("did_you_mean"));
+        assert_eq!(feature_named("d-y-m"), Some("did_you_mean"));
+        assert_eq!(feature_named("f-s"), Some("frozen_string_literal"));
+        assert_eq!(feature_named("f-s-l"), Some("frozen_string_literal"));
+        assert_eq!(feature_named("e-h"), Some("error_highlight"));
+        assert_eq!(feature_named("gems-"), None);
+        assert_eq!(feature_named("did-you-mean-x"), None);
     }
 
     #[test]
