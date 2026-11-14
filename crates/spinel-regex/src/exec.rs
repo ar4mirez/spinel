@@ -402,8 +402,8 @@ fn behind_width(ast: &Ast) -> (Option<usize>, bool) {
         }
         Ast::Repeat { body, min, max, .. } => {
             let (len, folds) = behind_width(body);
-            let joined = *min > 1
-                && string_of(body).is_some_and(|text| !fold::one_to_one(&text.repeat(3)));
+            let joined =
+                *min > 1 && string_of(body).is_some_and(|text| !fold::one_to_one(&text.repeat(3)));
             let fixed = (Some(*min) == *max).then_some(*min as usize);
             (len.zip(fixed).map(|(len, n)| len * n), folds || joined)
         }
