@@ -56,13 +56,15 @@ module Kernel
   # What CRuby has loaded before a program starts, so `require` of one
   # answers false rather than looking for a file: here, the core classes
   # Spinel defines in `core/`.
-  BUILTIN_FEATURES = %w[
-    enumerator enumerator.so thread thread.rb fiber fiber.so rbconfig rbconfig.rb set set.rb io/wait io/wait.so
-  ].freeze
+  def self.__builtin_features__
+    @__builtin_features__ ||= %w[
+      enumerator enumerator.so thread thread.rb fiber fiber.so rbconfig rbconfig.rb set set.rb io/wait io/wait.so
+    ].freeze
+  end
 
   def self.__require__(name)
     name = File.__path__(name)
-    return false if BUILTIN_FEATURES.include?(name)
+    return false if __builtin_features__.include?(name)
     # A built-in gem: its source is in the binary, and it is recorded the way
     # CRuby records the extension it stands in for.
     shipped = name.end_with?(".so") ? name[0, name.length - 3] : name
@@ -188,9 +190,14 @@ module Kernel
 
   # The extensions a name without one is tried with, in order. ponytail: Ruby
   # only, until the native-extension slot (#39's S2) adds `DLEXT` here.
-  LOADABLE_EXT = [".rb"].freeze
+  def self.__loadable_ext__
+    @__loadable_ext__ ||= [".rb"].freeze
+  end
+
   # A name a shared object provides is searched for as Ruby only.
-  RUBY_EXT = [".rb"].freeze
+  def self.__ruby_ext__
+    @__ruby_ext__ ||= [".rb"].freeze
+  end
 
   # CRuby's `IS_DLEXT`, and `IS_SOEXT` or `IS_DLEXT`, for matching recorded
   # features. Worked out on first use: `RUBY_PLATFORM` comes after this file.
@@ -233,7 +240,7 @@ module Kernel
       ft, loading = __feature_p__(name, nil, false, false)
       return [:r, loading] if ft == :r
     end
-    found = __search__(name, ft == :s ? RUBY_EXT : LOADABLE_EXT)
+    found = __search__(name, ft == :s ? __ruby_ext__ : __loadable_ext__)
     if found.nil?
       return [ft, loading] if ft
       ft, = __feature_p__(name, nil, false, true)
@@ -480,7 +487,7 @@ module Kernel
   def self.__find_feature__(name)
     ext = __ext_of__(name)
     raise LoadError.__cannot_load__(name) if __so_exts__.include?(ext) || ext == ".bundle" || ext == ".dll"
-    found = ext == ".rb" ? __search__(name) : __search__(name, LOADABLE_EXT)
+    found = ext == ".rb" ? __search__(name) : __search__(name, __loadable_ext__)
     raise LoadError.__cannot_load__(name) if found.nil?
     found[1]
   end
