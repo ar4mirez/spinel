@@ -546,7 +546,7 @@ class Integer
     # CRuby words nil's refusal its own way. Measured.
     raise TypeError, "no implicit conversion from nil to integer" if value.nil?
     unless value.respond_to?(:to_int)
-      raise TypeError, "no implicit conversion of #{value.class} into Integer"
+      raise TypeError, "no implicit conversion of #{true.equal?(value) || false.equal?(value) ? value : value.class} into Integer"
     end
     converted = value.to_int
     unless converted.is_a?(Integer)

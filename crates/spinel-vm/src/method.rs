@@ -545,6 +545,8 @@ pub enum Native {
     /// The socket calls `lib/socket.rb` is Ruby over, and `poll(2)` for
     /// `IO.select` (#61).
     Sock(SockOp),
+    /// The C library calls `lib/etc.rb` is Ruby over (#111).
+    Etc(EtcOp),
     /// `Kernel#__sleep__(seconds)`: block the thread, answer the whole
     /// seconds slept. `Kernel#sleep` is Ruby around it.
     Sleep,
@@ -867,6 +869,39 @@ pub enum SockOp {
     Poll,
     /// `__poll_constants__`: `[name, value]` pairs for the `POLL*` bits.
     PollConstants,
+}
+
+/// Which `etc` call. See `etc.rs` for the calls and `interp.rs`,
+/// `etc_native`, for what each takes and answers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EtcOp {
+    /// `__etc_passwd__(uid or name)`: `[name, passwd, uid, gid, gecos, dir,
+    /// shell]`, or nil when there is no such user.
+    Passwd,
+    /// `__etc_group__(gid or name)`: `[name, passwd, gid, [member, ...]]`,
+    /// or nil.
+    Group,
+    /// `__etc_pwent__(op)`: `setpwent`, `getpwent`, `endpwent` (ops 0 to 2);
+    /// `getpwent`'s entry as `__etc_passwd__` answers it, else nil.
+    Pwent,
+    /// `__etc_grent__(op)`: the same for the group database.
+    Grent,
+    /// `__etc_login__`: `getlogin(3)`, or nil.
+    Login,
+    /// `__etc_sysconf__(name)`: `[value]`, nil for no limit, or an errno.
+    Sysconf,
+    /// `__etc_confstr__(name)`: the String, nil for none, or an errno.
+    Confstr,
+    /// `__etc_fpathconf__(fd, name)`: as `__etc_sysconf__`.
+    Fpathconf,
+    /// `__etc_uname__`: `[sysname, nodename, release, version, machine]`,
+    /// or an errno.
+    Uname,
+    /// `__etc_nprocessors__`: `[count]`, or an errno.
+    Nprocessors,
+    /// `__etc_constants__`: `[name, value]` pairs for `Etc::SC_*`, `CS_*`
+    /// and `PC_*`.
+    Constants,
 }
 
 /// Which process query. See `interp.rs`, `sys_native`.

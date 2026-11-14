@@ -1,0 +1,1 @@
+fails(kept on purpose - guarded to implementations other than CRuby, since CRuby raises on adding a key during iteration, so CRuby never runs it and scripts/verify-passes.rb cannot confirm a pass):Hash thread safety supports concurrent #[]= and #delete and iteration

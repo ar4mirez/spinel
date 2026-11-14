@@ -87,7 +87,12 @@ fix is a different slice. The reason says which slice, by number.
 
 ## What is here now
 
-Two hundred and eight tags across ninety-four files. Moving ruby/spec to
+Two hundred and nine tags across ninety-five files. `etc` (#111) added one, and
+its file: `optional/thread_safety`'s concurrent `#[]=`, `#delete` and
+iteration on a Hash, which runs now that its fixture's `Etc.nprocessors`
+loads. It is guarded to implementations other than CRuby, so
+`scripts/verify-passes.rb` cannot confirm the pass. Before it, two hundred and
+eight across ninety-four. Moving ruby/spec to
 upstream's `484c424b08` (#368) removed six, and their five files: the
 `core/set` examples #365 moved to #368, which now assert that `&`, `map!`,
 `classify`, `divide`, `flatten` and `flatten!` keep `compare_by_identity`, as

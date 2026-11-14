@@ -962,18 +962,13 @@ def self.home(user = nil)
   home
 end
 
-# `getpwnam(3)` and `getpwuid(3)`, read from `/etc/passwd`.
-# ponytail: only the users that file lists. One that NSS finds elsewhere
-# (LDAP, systemd-homed) needs the libc call, which is `etc`'s (#111).
+# `getpwnam(3)` and `getpwuid(3)` through NSS, as `etc` asks them. The
+# directory comes back in the default external encoding, as a read of
+# `/etc/passwd` would give it.
 def self.__passwd_home__(user, uid)
-  File.foreach("/etc/passwd") do |line|
-    fields = line.chomp.split(":")
-    next if fields.size < 6
-    return fields[5] if user.nil? ? fields[2].to_i == uid : fields[0] == user
-  end
-  nil
-rescue SystemCallError
-  nil
+  entry = __etc_passwd__(user.nil? ? uid : user.b)
+  return nil if entry.nil?
+  entry[5].force_encoding(Encoding.default_external)
 end
 
   def self.exist?(path)

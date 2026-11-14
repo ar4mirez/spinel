@@ -79,6 +79,7 @@ pub mod compile;
 pub mod cp5022x;
 pub mod encoding_table;
 pub mod errno;
+pub mod etc;
 pub mod euckr;
 pub mod euckr_table;
 pub mod float;
