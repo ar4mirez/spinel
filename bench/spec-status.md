@@ -66,7 +66,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/true` | 9 | 13 | 11 | 0 | 2 | 0 | 85% |
 | `core/unboundmethod` | 21 | 109 | 109 | 0 | 0 | 0 | 100% |
 | `core/warning` | 5 | 31 | 31 | 0 | 0 | 0 | 100% |
-| `language` | 67 | 2669 | 2535 | 0 | 106 | 28 | 95% |
+| `language` | 67 | 2669 | 2539 | 0 | 103 | 27 | 95% |
 | `language/predefined` | 2 | 14 | 14 | 0 | 0 | 0 | 100% |
 | `language/regexp` | 11 | 258 | 258 | 0 | 0 | 0 | 100% |
 | `library/English` | 2 | 27 | 19 | 0 | 0 | 8 | 70% |
@@ -106,11 +106,11 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `library/pp` | 1 | 3 | 3 | 0 | 0 | 0 | 100% |
 | `library/prime` | 11 | 36 | 0 | 0 | 36 | 0 | 0% |
 | `library/random` | 1 | 8 | 2 | 0 | 6 | 0 | 25% |
-| `library/rbconfig` | 5 | 21 | 11 | 0 | 10 | 0 | 52% |
+| `library/rbconfig` | 5 | 30 | 20 | 0 | 10 | 0 | 67% |
 | `library/readline` | 25 | 46 | 0 | 0 | 45 | 1 | 0% |
 | `library/resolv` | 4 | 6 | 6 | 0 | 0 | 0 | 100% |
 | `library/ripper` | 2 | 2 | 0 | 0 | 2 | 0 | 0% |
-| `library/rubygems` | 2 | 1 | 1 | 0 | 0 | 0 | 100% |
+| `library/rubygems` | 2 | 2 | 2 | 0 | 0 | 0 | 100% |
 | `library/securerandom` | 5 | 42 | 28 | 0 | 14 | 0 | 67% |
 | `library/shellwords` | 1 | 7 | 7 | 0 | 0 | 0 | 100% |
 | `library/singleton` | 7 | 14 | 14 | 0 | 0 | 0 | 100% |
@@ -131,4 +131,4 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `optional/capi` | 47 | 0 | 0 | 0 | 0 | 0 | — |
 | `optional/thread_safety` | 1 | 5 | 4 | 0 | 0 | 1 | 80% |
 | `security` | 13 | 34 | 32 | 0 | 2 | 0 | 94% |
-| **total** | 3841 | 32925 | 29928 | 0 | 2818 | 179 | 91% |
+| **total** | 3841 | 32935 | 29942 | 0 | 2815 | 178 | 91% |
