@@ -10,12 +10,14 @@
 # the pins and `LICENSE/` holds the license files; both are written here too,
 # so the check covers them.
 #
-# Two gems are laid over it the same way. `webrick` (#54) left the standard
+# Three gems are laid over it the same way. `webrick` (#54) left the standard
 # library in Ruby 3.0 but is what the phase 4 milestone serves a Sinatra app
 # on. `json` (#55) is a default gem whose Ruby half lives in ruby/ruby's
 # `ext/json/lib`, not `lib/`, so it comes from ruby/json at the release Ruby
 # bundles; its C half is Spinel's, in `lib/json/ext/` (docs/engine.md,
-# "Built-in gems"). Each gem's `lib/` lands beside Ruby's, verbatim, at a
+# "Built-in gems"). `io-console` (#110) is the same: its Ruby half,
+# `io/console/size.rb`, is in ruby/ruby's `ext/io/console/lib`, and its C half
+# is Spinel's `lib/io/console.rb`. Each gem's `lib/` lands beside Ruby's, verbatim, at a
 # pinned release, and its license in `LICENSE/<gem>/`. No file of one may
 # shadow a file of another; the script stops if one would.
 #
@@ -25,8 +27,8 @@
 # upstream, so `git subtree pull` would never merge cleanly. A pinned copy plus
 # the drift check below buys everything a subtree would have, for less.
 #
-# To bump: edit RUBY_TAG, WEBRICK_TAG or JSON_TAG, run this script, commit `stdlib/` in
-# its own commit.
+# To bump: edit RUBY_TAG, WEBRICK_TAG, JSON_TAG or IO_CONSOLE_TAG, run this
+# script, commit `stdlib/` in its own commit.
 
 set -euo pipefail
 
@@ -42,6 +44,9 @@ WEBRICK_REPO="https://github.com/ruby/webrick.git"
 # built-in is the version Spinel claims to be.
 JSON_TAG="v2.18.0"
 JSON_REPO="https://github.com/ruby/json.git"
+# The io-console Ruby 4.0 bundles (its gemspec in ext/io/console at RUBY_TAG).
+IO_CONSOLE_TAG="v0.8.2"
+IO_CONSOLE_REPO="https://github.com/ruby/io-console.git"
 
 # Upstream's license files, copied to `stdlib/LICENSE/`. LEGAL is not optional
 # paperwork: `lib/` mixes licenses, and LEGAL is the per-file record of which.
@@ -112,6 +117,15 @@ echo "fetching ruby/json at $JSON_TAG"
 fetch_gem json "$JSON_REPO" "$JSON_TAG" "${JSON_LICENSES[@]}"
 json_sha="$(git -C "$work/json" rev-parse 'FETCH_HEAD^{commit}')"
 
+# io-console is under Ruby's license or the 2-clause BSDL. Its `lib/ffi/` is
+# JRuby's backend, the C half in Ruby over FFI; ruby/ruby does not ship it and
+# neither does Spinel, so only `lib/io/` is laid over.
+IO_CONSOLE_LICENSES=(COPYING BSDL)
+echo "fetching ruby/io-console at $IO_CONSOLE_TAG"
+fetch_gem io-console "$IO_CONSOLE_REPO" "$IO_CONSOLE_TAG" "${IO_CONSOLE_LICENSES[@]}"
+io_console_sha="$(git -C "$work/io-console" rev-parse 'FETCH_HEAD^{commit}')"
+rm -rf "$work/io-console/lib/ffi"
+
 # Assemble what `stdlib/` should look like, then either install it or diff
 # against it. Building it once and comparing keeps the two modes honest: the
 # check tests the same tree the vendor step would write.
@@ -144,6 +158,7 @@ lay_over() {
 }
 lay_over webrick "${WEBRICK_LICENSES[@]}"
 lay_over json "${JSON_LICENSES[@]}"
+lay_over io-console "${IO_CONSOLE_LICENSES[@]}"
 cat > "$staged/UPSTREAM" <<EOF
 Ruby's pure-Ruby standard library, vendored verbatim.
 
@@ -152,10 +167,11 @@ Ruby's pure-Ruby standard library, vendored verbatim.
     commit    $sha
     path      lib/ (flattened to this directory, so stdlib/ is a \$LOAD_PATH root)
 
-Laid over it, also verbatim, the lib/ of two gems that are not in Ruby's lib/:
-webrick, which left the standard library, and json, a default gem whose Ruby
-half ruby/ruby keeps in ext/json/lib. json's C half is Spinel's own, in the
-repository's lib/json/ext/, embedded in the binary.
+Laid over it, also verbatim, the lib/ of three gems that are not in Ruby's
+lib/: webrick, which left the standard library, and json and io-console,
+default gems whose Ruby halves ruby/ruby keeps in ext/json/lib and
+ext/io/console/lib. Their C halves are Spinel's own, in the repository's
+lib/json/ext/ and lib/io/console.rb, embedded in the binary.
 
     upstream  $WEBRICK_REPO
     tag       $WEBRICK_TAG
@@ -167,13 +183,18 @@ repository's lib/json/ext/, embedded in the binary.
     commit    $json_sha
     files     json.rb, json/
 
+    upstream  $IO_CONSOLE_REPO
+    tag       $IO_CONSOLE_TAG
+    commit    $io_console_sha
+    files     io/console/size.rb (not lib/ffi/, JRuby's backend)
+
 Licenses are upstream's, in LICENSE/. LEGAL records the per-file terms for the
 files here from ruby/ruby that are not under Ruby's own license; each gem's own
 are in LICENSE/<gem>/.
 
 Do not edit anything under stdlib/ by hand. CI diffs this tree against the tags
-above and fails on any difference. To update, edit RUBY_TAG, WEBRICK_TAG or
-JSON_TAG in scripts/vendor-stdlib.sh and run it.
+above and fails on any difference. To update, edit RUBY_TAG, WEBRICK_TAG,
+JSON_TAG or IO_CONSOLE_TAG in scripts/vendor-stdlib.sh and run it.
 EOF
 
 if $check_only; then
@@ -183,9 +204,9 @@ if $check_only; then
   # place to add one, with the reason next to it.
   if diff -r -q "$staged" "$stdlib"; then
     files="$(find "$stdlib" -name '*.rb' | wc -l | tr -d ' ')"
-    echo "stdlib/ matches ruby/ruby $RUBY_TAG, ruby/webrick $WEBRICK_TAG and ruby/json $JSON_TAG ($files .rb files)"
+    echo "stdlib/ matches ruby/ruby $RUBY_TAG, ruby/webrick $WEBRICK_TAG, ruby/json $JSON_TAG and ruby/io-console $IO_CONSOLE_TAG ($files .rb files)"
   else
-    echo "::error::stdlib/ has drifted from ruby/ruby $RUBY_TAG ($sha), ruby/webrick $WEBRICK_TAG or ruby/json $JSON_TAG" >&2
+    echo "::error::stdlib/ has drifted from ruby/ruby $RUBY_TAG ($sha), ruby/webrick $WEBRICK_TAG, ruby/json $JSON_TAG or ruby/io-console $IO_CONSOLE_TAG" >&2
     echo "run scripts/vendor-stdlib.sh and commit the result" >&2
     exit 1
   fi
@@ -193,5 +214,5 @@ else
   rm -rf "$stdlib"
   mv "$staged" "$stdlib"
   files="$(find "$stdlib" -name '*.rb' | wc -l | tr -d ' ')"
-  echo "vendored ruby/ruby $RUBY_TAG, ruby/webrick $WEBRICK_TAG and ruby/json $JSON_TAG into stdlib/ ($files .rb files)"
+  echo "vendored ruby/ruby $RUBY_TAG, ruby/webrick $WEBRICK_TAG, ruby/json $JSON_TAG and ruby/io-console $IO_CONSOLE_TAG into stdlib/ ($files .rb files)"
 fi

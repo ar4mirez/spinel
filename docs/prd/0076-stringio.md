@@ -40,8 +40,10 @@ time.
   Marked `ponytail:`.
 - `-@` keeps what it interns for good, where CRuby's table is weak (#36). A
   frozen String *literal* is not the interned one; tagged.
-- `getch` and `getpass` wait on `io/console`; five examples on `Thread`;
-  sixteen on `format` conversions that `Kernel#format` does not have.
+- Five examples on `Thread`; sixteen on `format` conversions that
+  `Kernel#format` does not have. (`getch` and `getpass` waited on
+  `io/console`, which came with #110: they are `IO::generic_readable`'s,
+  which `StringIO` includes.)
 
 ## Check
 

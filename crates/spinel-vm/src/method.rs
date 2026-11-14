@@ -547,6 +547,8 @@ pub enum Native {
     Sock(SockOp),
     /// The C library calls `lib/etc.rb` is Ruby over (#111).
     Etc(EtcOp),
+    /// The terminal calls `lib/io/console.rb` is Ruby over (#110).
+    Console(ConsoleOp),
     /// `Kernel#__sleep__(seconds)`: block the thread, answer the whole
     /// seconds slept. `Kernel#sleep` is Ruby around it.
     Sleep,
@@ -901,6 +903,30 @@ pub enum EtcOp {
     Nprocessors,
     /// `__etc_constants__`: `[name, value]` pairs for `Etc::SC_*`, `CS_*`
     /// and `PC_*`.
+    Constants,
+}
+
+/// Which terminal call. See `console.rs` for the calls and `interp.rs`,
+/// `console_native`, for what each takes and answers. A failed call answers
+/// its errno, an Integer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsoleOp {
+    /// `__console_getattr__(fd)`: `[iflag, oflag, cflag, lflag, cc, ispeed,
+    /// ospeed]`, `cc` a BINARY String.
+    Getattr,
+    /// `__console_setattr__(fd, iflag, oflag, cflag, lflag, cc, ispeed,
+    /// ospeed)`: nil.
+    Setattr,
+    /// `__console_winsize__(fd)`: `[rows, columns, xpixel, ypixel]`.
+    Winsize,
+    /// `__console_set_winsize__(fd, rows, columns, xpixel, ypixel)`: nil.
+    SetWinsize,
+    /// `__console_flush__(fd, queue)`: nil.
+    Flush,
+    /// `__console_ttyname__(fd)`: the name, BINARY, or nil for no terminal.
+    Ttyname,
+    /// `__console_constants__`: `[name, value]` pairs of the termios flags,
+    /// control character indices and queue selectors.
     Constants,
 }
 

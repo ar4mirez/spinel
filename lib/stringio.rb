@@ -11,8 +11,8 @@
 # overwrites bytes at the position, padding with NULs past the end.
 class StringIO
   include Enumerable
-  include IO::Readable if defined?(IO::Readable)
-  include IO::Writable if defined?(IO::Writable)
+  include IO.__generic_module__(:generic_readable)
+  include IO.__generic_module__(:generic_writable)
 
   # CRuby's is a data object, so `Marshal.dump` refuses one.
   Marshal.__opaque_class__(self)
