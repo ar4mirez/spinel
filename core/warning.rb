@@ -112,17 +112,22 @@ end
 # The globals whose assignment is more than a store (#268). The VM sends an
 # assignment to one of these here, and a read of `$=` to `__global_read__`;
 # `__global_store__` is the cell itself.
+#
+# `name` is the global the hook was installed on and `as` the one the program
+# wrote, which differ through an alias: `alias $NR $.` assigns by `$.`'s rule,
+# and CRuby's messages name the alias — "value of $x must be String" after
+# `alias $x $,`. Measured on 4.0.9 (#789).
 module Kernel
-  def __global_assign__(name, value)
+  def __global_assign__(name, value, as = name)
     case name
     when :$VERBOSE, :$-v, :$-w
       # nil is "no warnings at all"; anything else is a boolean.
       value = value ? true : false unless value.nil?
     when :$,, :$/, :$-0, :$\
       unless value.nil? || value.is_a?(String)
-        raise TypeError, "value of #{name} must be String"
+        raise TypeError, "value of #{as} must be String"
       end
-      __warning__("non-nil '#{name}' is deprecated", false, :deprecated) unless value.nil?
+      __warning__("non-nil '#{as}' is deprecated", false, :deprecated) unless value.nil?
       # CRuby's `$/` setter keeps a frozen copy with no class or instance
       # variables of its own, or the default separator itself (#484).
       if (name == :$/ || name == :$-0) && !value.nil?
@@ -134,9 +139,9 @@ module Kernel
       end
     when :$;
       unless value.nil? || value.is_a?(String) || value.is_a?(Regexp)
-        raise TypeError, "value of $; must be String or Regexp"
+        raise TypeError, "value of #{as} must be String or Regexp"
       end
-      __warning__("non-nil '$;' is deprecated", false, :deprecated) unless value.nil?
+      __warning__("non-nil '#{as}' is deprecated", false, :deprecated) unless value.nil?
     when :$=
       __warning__("variable $= is no longer effective; ignored", false, :deprecated)
       return nil
@@ -153,16 +158,53 @@ module Kernel
       __sys_proctitle__(value)
       __global_store__(:$0, value)
       return value
+    when :$stdout, :$stderr, :$>
+      # CRuby's `stdout_setter`: anything that answers `write`. Measured on
+      # 4.0.9: "$stdout must have write method, NilClass given" (#789).
+      unless value.respond_to?(:write)
+        raise TypeError, "#{as} must have write method, #{value.class} given"
+      end
+    when :$.
+      # `NUM2LONG`: a Float truncates, anything else goes through `to_int`.
+      # Measured on 4.0.9: `$. = 123.5` reads back 123, and a `to_int` that
+      # answers a String is "can't convert Object to Integer (...)" (#789).
+      value = value.is_a?(Float) ? Array.__long__(value) : Integer.__c_long__(value)
+    when :$@
+      # `$@ = x` sets the backtrace of `$!`, so with no `$!` there is nothing
+      # to set. Measured on 4.0.9.
+      raise ArgumentError, "$! not set" if $!.nil?
+      # ponytail: the value is kept in the cell, and `$@` still reads
+      # `$!.backtrace`, so the assignment is not seen yet. Making it
+      # `$!.set_backtrace(value)` is #29's, with the examples tagged for it.
     end
     __global_store__(name, value)
   end
 
-  def __global_read__(name)
-    __warning__("variable $= is no longer effective", false, :deprecated) if name == :$=
-    false
+  def __global_read__(name, as = name)
+    case name
+    when :$=
+      __warning__("variable $= is no longer effective", false, :deprecated)
+      false
+    # Only an alias reads these here — `$!` and `$@` themselves compile to
+    # the handler's exception — so `$ERROR_INFO` follows it as they do (#789).
+    when :$!
+      $!
+    when :$@
+      $@
+    end
   end
   private :__global_assign__, :__global_read__
 end
 
-__hook_global__(false, :$VERBOSE, :$-v, :$-w, :$,, :$/, :$-0, :$\, :$;)
-__hook_global__(true, :$=)
+__hook_global__(false, :$VERBOSE, :$-v, :$-w, :$,, :$/, :$-0, :$\, :$;, :$stdout, :$stderr, :$>, :$.)
+__hook_global__(true, :$=, :$!, :$@)
+# `$!` is read-only; its cell holds nil only so that an alias of it reads as
+# defined, as `$!` itself does. `$<` and `$FILENAME` belong to ARGF (#41) and
+# are read-only whatever they hold; they are defined from the start too. `$.`
+# counts lines from 0. All measured on 4.0.9 (#789).
+__global_store__(:$!, nil)
+__global_store__(:$@, nil)
+__global_store__(:$<, nil)
+__global_store__(:$FILENAME, nil)
+__freeze_global__(:$!, :$<, :$FILENAME)
+__global_store__(:$., 0)

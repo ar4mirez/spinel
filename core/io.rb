@@ -2614,7 +2614,7 @@ end
       line = read
       return nil if line.empty?
       @lineno += 1
-      $. = @lineno
+      __global_store__(:$., @lineno)
       return line
     end
     # An empty separator is paragraph mode: a blank line ends the record.
@@ -2686,7 +2686,7 @@ end
     line = __chomp_line__(line, separator) if chomp && !separator.nil?
     if counted
       @lineno += 1
-      $. = @lineno
+      __global_store__(:$., @lineno)
     end
     line
   end

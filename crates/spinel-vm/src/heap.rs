@@ -435,15 +435,18 @@ pub struct Heap {
     /// read-only, and Ruby names the alias in the message.
     global_specials: SymbolMap<crate::bytecode::MatchRef>,
     /// Globals the runtime owns and a program may not assign: `$:` and
-    /// `$LOADED_FEATURES` (#39). By name, so an alias is marked separately.
+    /// `$LOADED_FEATURES` (#39). By name; `alias $new $old` copies the mark,
+    /// because in CRuby the alias shares the old name's whole variable,
+    /// setter included (#789).
     readonly_globals: SymbolSet,
     /// `--enable=frozen-string-literal` or `--disable=frozen-string-literal`,
     /// for every compile after it is set; `None` when neither was given.
     frozen_string_literal: Option<bool>,
     /// Globals whose assignment, or read, is a Ruby method rather than a cell
     /// (#268): bit 0 for writes, bit 1 for reads. `$,` warns when set, `$=`
-    /// when read.
-    hooked_globals: SymbolMap<u8>,
+    /// when read. The symbol is the name the hook was installed on, which an
+    /// alias keeps: `alias $NR $.` assigns through `$.`'s rule (#789).
+    hooked_globals: SymbolMap<(u8, SymbolId)>,
     /// `GC.disable`: an allocation past the threshold does not collect. An
     /// explicit collection still does, as CRuby's `GC.start` does (#36).
     gc_disabled: bool,
@@ -862,12 +865,31 @@ impl Heap {
         self.globals.insert(new, slot);
         // An alias replaces any read-only derivation the name had.
         self.global_specials.remove(&new);
+        // And takes the old name's rules with its cell: CRuby's alias points
+        // the new entry at the old one's variable, getter and setter both.
+        // Measured on 4.0.9: after `alias $x $<`, `$x = 1` is
+        // "$x is a read-only variable".
+        if self.readonly_globals.contains(&old) {
+            self.readonly_globals.insert(new);
+        } else {
+            self.readonly_globals.remove(&new);
+        }
+        match self.hooked_globals.get(&old).copied() {
+            Some(hook) => {
+                self.hooked_globals.insert(new, hook);
+            }
+            None => {
+                self.hooked_globals.remove(&new);
+            }
+        }
     }
 
     /// `alias $new $&`: `new` reads the derivation and refuses writes.
     pub fn alias_global_special(&mut self, new: SymbolId, which: crate::bytecode::MatchRef) {
         self.global_specials.insert(new, which);
         self.globals.remove(&new);
+        self.hooked_globals.remove(&new);
+        self.readonly_globals.remove(&new);
     }
 
     /// Which regexp special `name` was aliased to, if it was.
@@ -887,12 +909,20 @@ impl Heap {
     /// Route `name` through `Kernel#__global_assign__`, and through
     /// `__global_read__` too when `reads`.
     pub fn hook_global(&mut self, name: SymbolId, reads: bool) {
-        self.hooked_globals.insert(name, if reads { 3 } else { 1 });
+        self.hooked_globals
+            .insert(name, (if reads { 3 } else { 1 }, name));
     }
 
     /// Which of `name`'s accesses are hooked: bit 0 writes, bit 1 reads.
     pub fn global_hooks(&self, name: SymbolId) -> u8 {
-        self.hooked_globals.get(&name).copied().unwrap_or(0)
+        self.hooked_globals.get(&name).map_or(0, |&(bits, _)| bits)
+    }
+
+    /// The name `name`'s hook was installed on: itself, or what it aliases.
+    pub fn global_hook_name(&self, name: SymbolId) -> SymbolId {
+        self.hooked_globals
+            .get(&name)
+            .map_or(name, |&(_, owner)| owner)
     }
 
     pub fn definitions_mut(&mut self) -> &mut crate::method::Definitions {
@@ -1910,6 +1940,10 @@ impl<'h> HandleScope<'h> {
 
     pub fn global_hooks(&self, name: SymbolId) -> u8 {
         self.heap.global_hooks(name)
+    }
+
+    pub fn global_hook_name(&self, name: SymbolId) -> SymbolId {
+        self.heap.global_hook_name(name)
     }
 
     /// Point a handle at a different object. The old one loses this root.

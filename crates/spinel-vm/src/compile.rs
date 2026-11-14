@@ -2553,14 +2553,6 @@ impl Compiler {
             // because they are read off that value rather than out of a table.
             // Only `$~` is writable — `$1 = x` is a syntax error in Ruby, so
             // no other ref can reach here.
-            // `$! = e` is a `NameError: $! is a read-only variable` in Ruby —
-            // measured on 4.0.6, and raised before the program runs — so no
-            // valid program contains one. Refused rather than written to the
-            // global table, where it would silently succeed and be invisible to
-            // the reads, which come off the cell (#206).
-            TargetKind::Var(VarRef::Global(name)) if name.as_ref() == ERRINFO => Err(
-                Unsupported::at("assigning `$!`, which Ruby rejects", target.span),
-            ),
             TargetKind::Var(VarRef::Global(name)) if match_ref(name).is_some() => {
                 match match_ref(name) {
                     Some(MatchRef::Data) => Ok(Slot::LastMatch),
@@ -2570,6 +2562,10 @@ impl Compiler {
                     )),
                 }
             }
+            // `$! = e` included: it is a `NameError: $! is a read-only
+            // variable` when it runs, measured on 4.0.9, which the runtime's
+            // read-only mark on `$!` raises (#789). Reads of `$!` never look
+            // at that cell; they come off the handler's (#206).
             TargetKind::Var(VarRef::Global(name)) => Ok(Slot::Global(self.symbol(name))),
             TargetKind::Var(_) | TargetKind::ConstPath(_) => {
                 Err(Unsupported::at("assigning a constant", target.span))

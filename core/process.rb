@@ -19,6 +19,9 @@ end
 
 ARGV = __argv__
 $0 = ARGV.shift
+# `$*` is ARGV itself, and read-only. Measured on 4.0.9 (#789).
+__global_store__(:$*, ARGV)
+__freeze_global__(:$*)
 alias $PROGRAM_NAME $0
 # Assigned from now on through `Kernel#__global_assign__`, which renames the
 # process (#44).
