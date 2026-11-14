@@ -9,6 +9,18 @@ bytecode a tool reads.
 
 ### Added
 
+- **RubyGems and `did_you_mean` at boot**
+  ([#319](https://github.com/ar4mirez/spinel/issues/319)). Every program,
+  from `spinel run` or `ruby`'s command line, starts with `Gem` and
+  `DidYouMean` loaded, as `ruby` does, unless `--disable-gems` or
+  `--disable=did_you_mean` says otherwise; `shims/gem_prelude.rb` is CRuby's
+  `gem_prelude.rb`. A feature flag may name its feature by a prefix
+  (`--disable=gem`). `RbConfig::CONFIG` gains CRuby's install directories,
+  under the Spinel home, and is no longer frozen; `$LOAD_PATH` gains its
+  `sitelibdir`, before the stdlib. `Thread.each_caller_location`,
+  `String#codepoints` and `String#each_codepoint` came with it, as
+  `bundled_gems.rb` and `did_you_mean` call them. `docs/cli.md` has the rest.
+
 - **The bytecode cache** ([#40](https://github.com/ar4mirez/spinel/issues/40)).
   Inside a project, a required file's compiled bytecode is kept in
   `.spinel/bytecode/<sha256 of source>.sbc` and read back on the next run

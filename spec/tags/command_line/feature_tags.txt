@@ -1,4 +1,0 @@
-fails(#319: RubyGems and did_you_mean are not loaded at boot):The --enable and --disable flags can be used with gems
-fails(#319: RubyGems and did_you_mean are not loaded at boot):The --enable and --disable flags can be used with gem
-fails(#319: RubyGems and did_you_mean are not loaded at boot):The --enable and --disable flags can be used with did_you_mean
-fails(#319: RubyGems and did_you_mean are not loaded at boot):The --enable and --disable flags can be used with all for enable

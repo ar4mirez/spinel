@@ -152,9 +152,72 @@ fn record_separator() {
 #[test]
 fn features_spinel_does_not_have_are_accepted() {
     assert_eq!(
-        out(&["--disable-gems", "--disable=did_you_mean", "-e", "puts :ok"]),
+        out(&[
+            "--disable=error_highlight,syntax_suggest",
+            "--enable=jit",
+            "-e",
+            "puts :ok"
+        ]),
         "ok\n"
     );
+}
+
+/// RubyGems and `did_you_mean` are loaded before the program unless the
+/// command line turns them off (#319). Measured on ruby 4.0.9.
+#[test]
+fn gems_and_did_you_mean_load_unless_disabled() {
+    let probe = "p [defined?(Gem::Specification), defined?(DidYouMean::SpellChecker)]";
+    let both = "[\"constant\", \"constant\"]\n";
+    let gems_only = "[\"constant\", nil]\n";
+    let neither = "[nil, nil]\n";
+    for (flags, expected) in [
+        (&[][..], both),
+        (&["--enable=gems"][..], both),
+        (&["--enable-all"][..], both),
+        (&["--disable=gems"][..], neither),
+        (&["--disable-gems"][..], neither),
+        // A prefix names the first feature it begins, as `ruby` reads it.
+        (&["--disable-gem"][..], neither),
+        (&["--disable=g"][..], neither),
+        (&["--disable-all"][..], neither),
+        (&["--disable=all", "--enable=gems"][..], gems_only),
+        (&["--disable=did_you_mean"][..], gems_only),
+        (&["--disable-did-you-mean"][..], gems_only),
+        // Each part of a name may be shortened, in any case.
+        (&["--disable=d-y-m"][..], gems_only),
+        (&["--disable=GEMS"][..], neither),
+        // `did_you_mean` is only loaded with RubyGems.
+        (&["--disable-gems", "--enable=did_you_mean"][..], neither),
+    ] {
+        let mut args = flags.to_vec();
+        args.extend(["-e", probe]);
+        assert_eq!(out(&args), expected, "{flags:?}");
+    }
+}
+
+#[test]
+fn rubyopt_can_disable_gems() {
+    let output = Command::new(SPINEL)
+        .args(["-e", "p defined?(Gem)"])
+        .env("RUBYOPT", "--disable-gems")
+        .output()
+        .expect("spinel runs");
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "nil\n");
+}
+
+/// `-r` files come after the gem prelude, and `-I` before it, as in `ruby`.
+#[test]
+fn require_flags_see_rubygems() {
+    assert_eq!(out(&["-I.", "-rgem_probe", "-e", "0"]), "\"constant\"\n");
+}
+
+/// `spinel run` and `spinel <file>` load them too, after the setup shim.
+#[test]
+fn spinel_run_loads_rubygems() {
+    for args in [&["run", "gem_probe.rb"][..], &["gem_probe.rb"][..]] {
+        assert_eq!(out(args), "\"constant\"\n", "{args:?}");
+    }
 }
 
 #[test]

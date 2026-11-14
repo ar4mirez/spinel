@@ -98,7 +98,30 @@ fn cache_file(dir: &Path, source: &Path) -> PathBuf {
     cache_dir(dir).join(format!("{hex}.sbc"))
 }
 
-/// The cache file for each of the fixture's three required files.
+/// The cache files every program in a project starts with: the stdlib
+/// files the gem prelude requires (#319), RubyGems and `did_you_mean`,
+/// cached as any required file is. Found by running an empty program in a
+/// project of its own, next to the test's project `beside` (one per test,
+/// as the tests run at once).
+fn boot_files(beside: &Path) -> Vec<String> {
+    let mut name = beside
+        .file_name()
+        .expect("the project has a name")
+        .to_owned();
+    name.push("-boot");
+    let dir = beside.with_file_name(name);
+    let _ = fs::remove_dir_all(&dir);
+    make_project(&dir);
+    fs::write(dir.join("empty.rb"), "").expect("the program is written");
+    let out = spinel(&dir, &["run", "empty.rb"]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let names = cache_files(&dir);
+    let _ = fs::remove_dir_all(&dir);
+    names
+}
+
+/// The cache file for each of the fixture's three required files, and the
+/// [`boot_files`].
 fn expected_files(dir: &Path) -> Vec<String> {
     let mut names: Vec<String> = ["lib/greeting.rb", "lib/failing.rb", "lib/conditional.rb"]
         .iter()
@@ -110,6 +133,7 @@ fn expected_files(dir: &Path) -> Vec<String> {
                 .into_owned()
         })
         .collect();
+    names.extend(boot_files(dir));
     names.sort();
     names
 }
@@ -287,7 +311,7 @@ fn a_syntax_error_reads_the_same_and_is_never_cached() {
             baseline
         );
     }
-    assert_eq!(cache_files(&dir), Vec::<String>::new());
+    assert_eq!(cache_files(&dir), boot_files(&dir));
     let _ = fs::remove_dir_all(&dir);
 }
 

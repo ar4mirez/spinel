@@ -13,9 +13,9 @@
 # and the exit status is 1.
 #
 # ponytail: `gemspec` records the directive and the gemspec files it finds,
-# but does not evaluate them, because RubyGems does not load yet (#319).
-# Turning one into the gem and its development dependencies is the gemspec
-# evaluation of git and path sources (#88).
+# but does not evaluate them yet. Turning one into the gem and its
+# development dependencies is the gemspec evaluation of git and path sources
+# (#88).
 
 require "json"
 

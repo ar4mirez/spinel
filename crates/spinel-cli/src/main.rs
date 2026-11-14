@@ -537,6 +537,7 @@ fn ruby_command(words: &[String], raw: &[Vec<u8>], setup: bool) -> ExitCode {
         source
     };
     let prelude = ruby_args::prelude(&args);
+    let requires = ruby_args::requires(&args);
     run_program(
         Path::new(&name),
         &source,
@@ -544,6 +545,8 @@ fn ruby_command(words: &[String], raw: &[Vec<u8>], setup: bool) -> ExitCode {
         false,
         Around {
             prelude: Some(&prelude),
+            requires: Some(&requires),
+            gem_features: ruby_args::gem_features(&args),
             source_encoding: args.source_encoding.as_deref(),
             data,
             loop_template: around.as_deref(),
@@ -559,6 +562,10 @@ fn ruby_command(words: &[String], raw: &[Vec<u8>], setup: bool) -> ExitCode {
 struct Around<'a> {
     /// Ruby the flags mean, run first.
     prelude: Option<&'a str>,
+    /// The flags' `-r` libraries, as Ruby, run after the gem prelude.
+    requires: Option<&'a str>,
+    /// What `shims/gem_prelude.rb` loads; everything for `spinel run`.
+    gem_features: ruby_args::GemFeatures,
     /// `-K`'s source encoding, for a script without a magic comment.
     source_encoding: Option<&'a str>,
     /// The file `DATA` reads and the offset it starts at.
@@ -576,8 +583,31 @@ struct Around<'a> {
 /// Spinel's setup shim (docs/cli.md, "What `spinel run` sets up").
 const SETUP: &str = include_str!("../../../shims/setup.rb");
 
+/// CRuby's `gem_prelude.rb`, Spinel's (docs/cli.md, "What every program
+/// starts with").
+const GEM_PRELUDE: &str = include_str!("../../../shims/gem_prelude.rb");
+
+/// The gem prelude's Ruby: the modules for the features left on, defined
+/// first as `ruby.c` defines them, then the shim, which loads each one.
+fn gem_prelude(features: ruby_args::GemFeatures) -> String {
+    let mut code = String::new();
+    if features.gems {
+        code.push_str("module Gem; end\n");
+    }
+    if features.did_you_mean {
+        code.push_str("module DidYouMean; end\n");
+    }
+    if !code.is_empty() {
+        code.push_str(GEM_PRELUDE);
+    }
+    code
+}
+
 /// The vendored standard library on `$LOAD_PATH`, last, as CRuby has its
-/// `rubylibdir`; the flags' `-I` directories go before it.
+/// `rubylibdir` (and `RbConfig` says so, as `bundled_gems.rb` reads it),
+/// with `RbConfig`'s `sitelibdir` before it as CRuby has that: RubyGems puts
+/// the gems it activates ahead of `sitelibdir`, so after `-I`. The flags'
+/// `-I` directories go before both.
 fn library_path(scope: &mut spinel_vm::HandleScope<'_>) {
     let Some(dir) = stdlib::directory() else {
         return;
@@ -585,7 +615,11 @@ fn library_path(scope: &mut spinel_vm::HandleScope<'_>) {
     // Rust's escapes are Ruby's too, once `#` cannot start an
     // interpolation.
     let literal = format!("{:?}", dir.to_string_lossy()).replace('#', "\\#");
-    let code = format!("$LOAD_PATH.push({literal}.freeze)");
+    let code = format!(
+        "RbConfig::CONFIG[\"rubylibdir\"] = {literal}.dup\n\
+         RbConfig::CONFIG[\"rubyarchdir\"] = File.join({literal}, RUBY_PLATFORM)\n\
+         $LOAD_PATH.push(RbConfig::CONFIG[\"sitelibdir\"].dup.freeze, {literal}.freeze)"
+    );
     let parsed = spinel_parse::parse_file("<stdlib>", code.as_bytes());
     let compiled =
         spinel_vm::compile::program(&parsed.program).expect("a push onto $LOAD_PATH compiles");
@@ -603,6 +637,8 @@ fn run_program(
 ) -> ExitCode {
     let Around {
         prelude,
+        requires,
+        gem_features,
         source_encoding,
         data,
         loop_template,
@@ -662,6 +698,23 @@ fn run_program(
         let parsed = spinel_parse::parse_file("<flags>", prelude.as_bytes());
         let compiled = spinel_vm::compile::program(&parsed.program)
             .expect("the prelude the flags make compiles");
+        let mut frame = spinel_vm::interp::Frame::new(0);
+        outcome = spinel_vm::interp::eval_in(&mut scope, &mut frame, &compiled)
+            .map(|_| spinel_vm::Value::NIL);
+    }
+    // RubyGems and did_you_mean, after `-I` and before `-r`, as `ruby` runs
+    // `gem_prelude.rb` between them.
+    let gem_prelude = gem_prelude(gem_features);
+    for (name, code) in [
+        ("<internal:gem_prelude>", gem_prelude.as_str()),
+        ("<flags>", requires.unwrap_or("")),
+    ] {
+        if outcome.is_err() || code.is_empty() {
+            continue;
+        }
+        let parsed = spinel_parse::parse_file(name, code.as_bytes());
+        let compiled =
+            spinel_vm::compile::program(&parsed.program).expect("Spinel's own prelude compiles");
         let mut frame = spinel_vm::interp::Frame::new(0);
         outcome = spinel_vm::interp::eval_in(&mut scope, &mut frame, &compiled)
             .map(|_| spinel_vm::Value::NIL);

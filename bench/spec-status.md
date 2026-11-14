@@ -6,7 +6,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 
 | directory | files | examples | passed | failed | blocked | skipped | passed % |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| `command_line` | 32 | 175 | 168 | 0 | 0 | 7 | 96% |
+| `command_line` | 32 | 175 | 172 | 0 | 0 | 3 | 98% |
 | `core/argf` | 35 | 139 | 0 | 0 | 120 | 19 | 0% |
 | `core/array` | 132 | 2898 | 2886 | 0 | 12 | 0 | 100% |
 | `core/basicobject` | 14 | 172 | 169 | 0 | 0 | 3 | 98% |
@@ -32,7 +32,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/hash` | 69 | 562 | 535 | 0 | 25 | 2 | 95% |
 | `core/integer` | 70 | 598 | 598 | 0 | 0 | 0 | 100% |
 | `core/io` | 104 | 1650 | 1431 | 0 | 214 | 5 | 87% |
-| `core/kernel` | 118 | 2241 | 2067 | 0 | 135 | 39 | 92% |
+| `core/kernel` | 118 | 2241 | 2068 | 0 | 135 | 38 | 92% |
 | `core/main` | 7 | 27 | 27 | 0 | 0 | 0 | 100% |
 | `core/marshal` | 6 | 502 | 502 | 0 | 0 | 0 | 100% |
 | `core/matchdata` | 30 | 186 | 186 | 0 | 0 | 0 | 100% |
@@ -55,11 +55,11 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/set` | 57 | 170 | 166 | 0 | 1 | 3 | 98% |
 | `core/signal` | 3 | 53 | 53 | 0 | 0 | 0 | 100% |
 | `core/sizedqueue` | 16 | 61 | 61 | 0 | 0 | 0 | 100% |
-| `core/string` | 151 | 3964 | 3670 | 0 | 271 | 23 | 93% |
+| `core/string` | 151 | 3964 | 3699 | 0 | 242 | 23 | 93% |
 | `core/struct` | 30 | 170 | 169 | 0 | 1 | 0 | 99% |
 | `core/symbol` | 29 | 270 | 269 | 0 | 0 | 1 | 100% |
 | `core/systemexit` | 2 | 6 | 6 | 0 | 0 | 0 | 100% |
-| `core/thread` | 55 | 398 | 384 | 0 | 11 | 3 | 96% |
+| `core/thread` | 55 | 398 | 390 | 0 | 5 | 3 | 98% |
 | `core/threadgroup` | 5 | 8 | 8 | 0 | 0 | 0 | 100% |
 | `core/time` | 66 | 652 | 634 | 0 | 5 | 13 | 97% |
 | `core/tracepoint` | 19 | 76 | 0 | 0 | 76 | 0 | 0% |
@@ -110,7 +110,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `library/readline` | 25 | 46 | 0 | 0 | 45 | 1 | 0% |
 | `library/resolv` | 4 | 6 | 6 | 0 | 0 | 0 | 100% |
 | `library/ripper` | 2 | 2 | 0 | 0 | 2 | 0 | 0% |
-| `library/rubygems` | 2 | 1 | 0 | 0 | 1 | 0 | 0% |
+| `library/rubygems` | 2 | 1 | 1 | 0 | 0 | 0 | 100% |
 | `library/securerandom` | 5 | 42 | 28 | 0 | 14 | 0 | 67% |
 | `library/shellwords` | 1 | 7 | 7 | 0 | 0 | 0 | 100% |
 | `library/singleton` | 7 | 14 | 14 | 0 | 0 | 0 | 100% |
@@ -130,5 +130,5 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `library/zlib` | 42 | 148 | 148 | 0 | 0 | 0 | 100% |
 | `optional/capi` | 47 | 0 | 0 | 0 | 0 | 0 | — |
 | `optional/thread_safety` | 1 | 5 | 4 | 0 | 0 | 1 | 80% |
-| `security` | 13 | 31 | 29 | 0 | 2 | 0 | 94% |
-| **total** | 3841 | 32922 | 29853 | 0 | 2858 | 211 | 91% |
+| `security` | 13 | 34 | 32 | 0 | 2 | 0 | 94% |
+| **total** | 3841 | 32925 | 29897 | 0 | 2822 | 206 | 91% |
