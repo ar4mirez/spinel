@@ -8,8 +8,10 @@ p require("pathname.so")
 p require("pathname")
 p Pathname.method_defined?(:find)
 $LOAD_PATH.unshift File.join(__dir__, "native")
+# The platform's shared-object extension, as CRuby looks for: `.so`, or
+# `.bundle` on macOS.
 begin
   require "cext"
 rescue LoadError => e
-  p [e.message.include?("cext.so"), e.path]
+  p [e.message.include?("cext.#{RbConfig::CONFIG["DLEXT"]}"), e.path]
 end
