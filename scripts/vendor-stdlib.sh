@@ -193,7 +193,7 @@ files here from ruby/ruby that are not under Ruby's own license; each gem's own
 are in LICENSE/<gem>/.
 
 Do not edit anything under stdlib/ by hand. CI diffs this tree against the tags
-above and fails on any difference. To update, edit RUBY_TAG, WEBRICK_TAG or
+above and fails on any difference. To update, edit RUBY_TAG, WEBRICK_TAG,
 JSON_TAG or IO_CONSOLE_TAG in scripts/vendor-stdlib.sh and run it.
 EOF
 
