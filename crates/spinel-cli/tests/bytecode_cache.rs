@@ -12,7 +12,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime};
 
 use sha2::{Digest, Sha256};
@@ -102,15 +101,15 @@ fn cache_file(dir: &Path, source: &Path) -> PathBuf {
 /// The cache files every program in a project starts with: the stdlib
 /// files the gem prelude requires (#319), RubyGems and `did_you_mean`,
 /// cached as any required file is. Found by running an empty program in a
-/// project of its own.
-fn boot_files() -> Vec<String> {
-    // One directory per call: the tests run at once.
-    static CALLS: AtomicUsize = AtomicUsize::new(0);
-    let call = CALLS.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!(
-        "spinel-bytecode-boot-{}-{call}",
-        std::process::id()
-    ));
+/// project of its own, next to the test's project `beside` (one per test,
+/// as the tests run at once).
+fn boot_files(beside: &Path) -> Vec<String> {
+    let mut name = beside
+        .file_name()
+        .expect("the project has a name")
+        .to_owned();
+    name.push("-boot");
+    let dir = beside.with_file_name(name);
     let _ = fs::remove_dir_all(&dir);
     make_project(&dir);
     fs::write(dir.join("empty.rb"), "").expect("the program is written");
@@ -134,7 +133,7 @@ fn expected_files(dir: &Path) -> Vec<String> {
                 .into_owned()
         })
         .collect();
-    names.extend(boot_files());
+    names.extend(boot_files(dir));
     names.sort();
     names
 }
@@ -312,7 +311,7 @@ fn a_syntax_error_reads_the_same_and_is_never_cached() {
             baseline
         );
     }
-    assert_eq!(cache_files(&dir), boot_files());
+    assert_eq!(cache_files(&dir), boot_files(&dir));
     let _ = fs::remove_dir_all(&dir);
 }
 
