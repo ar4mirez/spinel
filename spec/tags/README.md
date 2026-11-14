@@ -87,11 +87,11 @@ fix is a different slice. The reason says which slice, by number.
 
 ## What is here now
 
-A hundred and fifty-one tags across eighty-six files. A sweep for #41 (S0)
+A hundred and fifty-seven tags across eighty-six files. A sweep for #41 (S0)
 removed four whose examples pass, and three files: `File.expand_path` raising
 `Encoding::CompatibilityError`, `Kernel#singleton_class` after `reopen`, a
 flip-flop's Integer literal against `$.`, and `STDOUT` keeping what
-`set_encoding` gave it. Before it, a hundred and fifty-five across
+`set_encoding` gave it. Before it, a hundred and sixty-one across
 eighty-nine; the count below went stale over the slices between.
 Two hundred and eight tags across ninety-four files. `IO#reopen` with an IO
 taking that IO's class (#569) removed one, and its file: `core/io/reopen`'s
