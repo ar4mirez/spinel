@@ -157,9 +157,17 @@ pub fn ttyname(fd: libc::c_int) -> io::Result<Option<Vec<u8>>> {
 /// The termios flags, control character indices and queue selectors
 /// `console.c` uses, by name, and `NCCS`, the count of control characters.
 pub fn constants() -> Vec<(&'static str, i64)> {
+    // The flags' type, `tcflag_t`, is `u32` on Linux and `u64` on macOS, so
+    // the conversion is fallible on some platform; every value fits.
+    fn value<T: TryInto<i64>>(value: T) -> i64 {
+        value
+            .try_into()
+            .ok()
+            .expect("a termios constant fits in i64")
+    }
     macro_rules! table {
         ($($name:ident),* $(,)?) => {
-            vec![$((stringify!($name), i64::from(libc::$name))),*]
+            vec![$((stringify!($name), value(libc::$name))),*]
         };
     }
     let mut names = table![
@@ -172,7 +180,7 @@ pub fn constants() -> Vec<(&'static str, i64)> {
         ("VTIME", libc::VTIME),
         ("NCCS", libc::NCCS),
     ] {
-        names.push((name, i64::try_from(index).expect("an index into c_cc")));
+        names.push((name, value(index)));
     }
     names
 }
