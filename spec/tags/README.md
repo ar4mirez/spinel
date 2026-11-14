@@ -87,7 +87,10 @@ fix is a different slice. The reason says which slice, by number.
 
 ## What is here now
 
-Two hundred and nine tags across ninety-five files. `etc` (#111) added one, and
+Two hundred and eight tags across ninety-four files. `IO#reopen` with an IO
+taking that IO's class (#569) removed one, and its file: `core/io/reopen`'s
+"does not call #to_io", which passes now that the receiver wears the class.
+Before it, two hundred and nine across ninety-five. `etc` (#111) added one, and
 its file: `optional/thread_safety`'s concurrent `#[]=`, `#delete` and
 iteration on a Hash, which runs now that its fixture's `Etc.nprocessors`
 loads. It is guarded to implementations other than CRuby, so

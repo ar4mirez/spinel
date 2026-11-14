@@ -944,8 +944,13 @@ end
 
   # CRuby's `GetWriteIO` before `rb_io_check_writable`: a write goes to a
   # duplex child's write end, which stays closed once `close` let it go.
+  # That write end is an IO of its own, which writes whatever mode a `reopen`
+  # with a path gave the side that reads, and it has no reader's bytes to put
+  # back: `f.reopen(path, "r")` on `IO.popen(cmd, "r+")` still writes to the
+  # child (#569). Measured.
   def __write_side__
     __check_write_open__
+    return if __tied__? && !@wclosed
     __writable__
   end
 
@@ -4100,7 +4105,10 @@ end
       end
     end
     __keep_readconv__
-    self
+    # CRuby's `io_reopen` gives the IO the other's class where theirs differ,
+    # and never a singleton, so `reopen(file)` makes a pipe a `File`, a `File`
+    # an `IO` again, and the singleton methods either had go (#569). Measured.
+    __reclass_as__(other)
   end
 
   # 0 reads, 1 writes, 2 does both and 3 does neither, which a closed IO is
