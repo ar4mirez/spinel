@@ -15,6 +15,12 @@ $LOADED_FEATURES = %w[
   enumerator.so thread.rb fiber.so rational.so complex.so pathname.so ruby2_keywords.rb set.rb
 ]
 alias $" $LOADED_FEATURES
+# What `require` would load for a feature, without loading it or asking
+# `$LOADED_FEATURES`: `[:rb, path]`, `[:so, path]`, or nil. CRuby defines it
+# on this one Array, as RubyGems and `bundled_gems.rb` expect.
+def $LOAD_PATH.resolve_feature_path(feature)
+  Kernel.__resolve_feature_path__(feature)
+end
 # The command line's `-a`, `-l` and `-p`, which Spinel does not take.
 $-a = false
 $-l = false
@@ -72,11 +78,42 @@ module Kernel
   # The first `require` of one records it, under the architecture directory
   # as CRuby does, and answers true; the class is already there.
   def self.__require_core_feature__(file)
-    archdir = RbConfig::CONFIG["rubyarchdir"]
-    feature = archdir ? File.join(archdir, file) : file
+    feature = __core_feature_path__(file)
     return false if $LOADED_FEATURES.include?(feature)
     $LOADED_FEATURES.push(feature)
     true
+  end
+
+  def self.__core_feature_path__(file)
+    archdir = RbConfig::CONFIG["rubyarchdir"]
+    archdir ? File.join(archdir, file) : file
+  end
+
+  # CRuby's `rb_resolve_feature_path`: `search_required` with every feature
+  # counted as not yet provided, so the answer is the file `require` would
+  # load were the feature not loaded, in the order `__require__` looks.
+  # Built-in gems answer as CRuby's statically linked extensions do
+  # (`RbConfig::CONFIG["EXTSTATIC"]`): the feature's `.so` name, with no
+  # directory.
+  def self.__resolve_feature_path__(name)
+    name = File.__path__(name)
+    core = __core_features__[name]
+    return [core.end_with?(".so") ? :so : :rb, __core_feature_path__(core)] if core
+    shipped = name.end_with?(".so") ? name[0, name.length - 3] : name
+    return [:so, shipped + ".so"] unless __library__(shipped).nil?
+    return [:so, "rbconfig/sizeof.so"] if name == "rbconfig/sizeof"
+    ext = __ext_of__(name)
+    if ext == ".rb"
+      found = __search__(name[0, name.length - ext.length], __ruby_ext__)
+    elsif __so_exts__.include?(ext)
+      found = __search__(name[0, name.length - ext.length], __native_ext__)
+    elsif ext == ".bundle" || ext == ".dll"
+      return nil
+    else
+      found = __search__(name, __loadable_ext__)
+    end
+    return nil if found.nil?
+    [found[0] == ".rb" ? :rb : :so, found[1]]
   end
 
   def self.__require__(name)
