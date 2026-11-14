@@ -6,9 +6,10 @@
 //! tried. Since [#243] the captures are shared and copied only on a write, and
 //! the loop marks are restored from a trail rather than copied per backtrack
 //! point — the copy that mattered was the marks', each holding its own capture
-//! vector, which this file's numbers did not separate from the clone. The issue makes a benchmark the gating item and says, in as many
-//! words, that if the clone cost cannot be shown to matter the right outcome is
-//! to close it rather than do the rewrite.
+//! vector, which this file's numbers did not separate from the clone. The
+//! issue makes a benchmark the gating item and says, in as many words, that if
+//! the clone cost cannot be shown to matter the right outcome is to close it
+//! rather than do the rewrite.
 //!
 //! So this measures the one thing that decides it: **hold the backtracking
 //! fixed and vary the group count.** If the clone dominates, time grows with
