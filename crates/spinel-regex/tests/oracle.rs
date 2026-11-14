@@ -134,13 +134,17 @@ struct Tally {
 }
 
 fn replay() -> Tally {
+    replay_table(TABLE, INPUTS)
+}
+
+fn replay_table(table: &str, inputs: &[&str]) -> Tally {
     let mut tally = Tally {
         agreed: 0,
         refused: Vec::new(),
         disagreed: Vec::new(),
     };
 
-    for line in TABLE.lines() {
+    for line in table.lines() {
         if line.starts_with('#') || line.trim().is_empty() {
             continue;
         }
@@ -177,14 +181,14 @@ fn replay() -> Tally {
             }
         };
 
-        let got: Vec<String> = INPUTS.iter().map(|s| answer(&re, s)).collect();
+        let got: Vec<String> = inputs.iter().map(|s| answer(&re, s)).collect();
         let want: Vec<&str> = expected.split(' ').collect();
         if got.len() != want.len() {
             tally.disagreed.push(format!("{quoted}: field count"));
             continue;
         }
         let mut mismatched = Vec::new();
-        for ((subject, want), got) in INPUTS.iter().zip(&want).zip(&got) {
+        for ((subject, want), got) in inputs.iter().zip(&want).zip(&got) {
             if want != got {
                 mismatched.push(format!("    on {subject:?}: ruby {want}, engine {got}"));
             }
@@ -255,6 +259,58 @@ fn refusals_stay_within_their_budget() {
         "agreed {}, refused {} ({kinds:?})",
         tally.agreed,
         tally.refused.len()
+    );
+}
+
+/// The double-quoted strings in `text`, each with its quotes.
+fn quoted_strings(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c != '"' {
+            continue;
+        }
+        let mut quoted = String::from('"');
+        while let Some(c) = chars.next() {
+            quoted.push(c);
+            match c {
+                '\\' => quoted.extend(chars.next()),
+                '"' => break,
+                _ => {}
+            }
+        }
+        out.push(quoted);
+    }
+    out
+}
+
+/// The folds past one character to one (#788), measured against subjects of
+/// their own: `ß` against `ss` both ways round, in strings Onigmo expands and
+/// ones it compares folded, in classes, under repetition, in backreferences
+/// and look-behind. No divergence is allowed here and no pattern refused.
+#[test]
+fn agrees_with_cruby_on_multi_character_folds() {
+    const FOLDS: &str = include_str!("folds.txt");
+    // The subjects are the header's, quoted as Ruby inspects them, rather
+    // than a second copy here: several are lookalikes, and a copy that drifts
+    // compares the wrong strings.
+    let quoted: Vec<String> = FOLDS
+        .lines()
+        .skip_while(|line| !line.ends_with("in order:"))
+        .skip(1)
+        .take_while(|line| line.starts_with("#   "))
+        .flat_map(|line| quoted_strings(&line[4..]))
+        .collect();
+    let subjects: Vec<String> = quoted.iter().map(|q| unquote(q)).collect();
+    let inputs: Vec<&str> = subjects.iter().map(String::as_str).collect();
+    let tally = replay_table(FOLDS, &inputs);
+    assert!(tally.refused.is_empty(), "refused: {:?}", tally.refused);
+    assert!(
+        tally.disagreed.is_empty(),
+        "{} of {} patterns disagree with CRuby:\n\n{}",
+        tally.disagreed.len(),
+        tally.agreed + tally.disagreed.len(),
+        tally.disagreed.join("\n\n")
     );
 }
 

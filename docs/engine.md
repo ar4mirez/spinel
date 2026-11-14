@@ -427,6 +427,36 @@ POSIX brackets are, and baked into range tables by `build.rs`. An age is
 stored as what its version added, and `\p{Age=V}` is the union up to `V`. In
 any other encoding `\p{}` takes only the POSIX bracket names.
 
+Under `/i` a UTF-8 subject folds by Unicode's full case folding, measured
+into `tests/casefold.txt` (#788), so `ß` matches `ss` and `ﬃ` matches `ffi`.
+Onigmo gets there by rewriting each string the pattern spells into the ways
+it may be spelled, until there are more than eight alternatives, and
+comparing the rest folded (`regcomp.c`'s `expand_case_fold_string`); a class
+adds the strings its characters fold to, `s{2}` is the string `ss`, and a
+look-behind expands nothing. `src/fold.rs` is that rewrite, and
+`tests/folds.txt` measures it against subjects of its own. Every other
+encoding folds one character to one.
+
+The engine follows Onigmo's matcher here, not its search, and the two
+disagree in CRuby itself:
+
+- The search picks the starts it tries from a first-byte map built with the
+  multi-character folds turned off, so `/(?i)S{2,3}/` finds `"ẞ"` and
+  `/(?i)(?:x|S{2,3})/` does not. Spinel finds both.
+- A look-behind whose folded body takes more or fewer characters than Onigmo
+  counted lets CRuby carry on from wherever the body ended, and what it then
+  finds depends on the search. Spinel steps back as far as Onigmo counts and
+  asks a positive body to end at the look-behind; a negative one forbids any
+  match of its body. Every measured case agrees.
+- CRuby compiles a pattern of ASCII alone for US-ASCII against a subject of
+  ASCII alone, and US-ASCII folds nothing past one character to one, but it
+  keeps a UTF-8 recompilation once a subject past ASCII asked for one: the
+  same `Regexp` answers `"ss"` differently depending on what it matched
+  before. The VM reads that pair as BINARY, CRuby's first answer, and
+  `tests/folds.txt` compiles every pattern for UTF-8 to stay deterministic.
+
+None of these is in the oracle tables.
+
 Matching is byte-oriented and reports byte offsets; `MatchData` converts to
 characters, because that is what `#begin` answers. A match reads its subject
 in one of five ways, `spinel_regex::Encoding`: as UTF-8; a character per byte

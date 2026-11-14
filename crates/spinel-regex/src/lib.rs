@@ -39,6 +39,7 @@
 
 mod chars;
 mod exec;
+mod fold;
 mod grapheme;
 mod parse;
 mod property;

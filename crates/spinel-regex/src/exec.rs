@@ -9,6 +9,7 @@
 //! parenthesis. Past [`MAX_NESTING`] the search refuses with [`Error::Budget`]
 //! rather than overflow the native stack.
 
+use crate::fold::{self, Piece};
 use crate::grapheme::grapheme_end;
 use crate::parse::{Anchor, Ast, Class, ClassItem, Perl, Posix};
 use crate::{Charset, Encoding, Error};
@@ -46,10 +47,18 @@ enum Inst {
     /// `\K`: the match now starts here.
     Keep,
     /// Run the sub-program at `start` without consuming input.
+    ///
+    /// A look-behind whose body folds a string past one character to one has
+    /// `chars`, the body's length in characters as Onigmo counts it, folded:
+    /// in a UTF-8 subject it steps back exactly that far and runs the body
+    /// once, wherever the body then ends, as Onigmo's `OP_LOOK_BEHIND` does.
+    /// So `/(?i)(?<=ß)x/`, whose body is the two characters `ss`, misses
+    /// `"ßx"` (#788).
     Look {
         behind: bool,
         negate: bool,
         start: usize,
+        chars: Option<usize>,
     },
     /// Run the sub-program at `start`, keep its first match, discard its
     /// alternatives. `(?>...)` and every possessive quantifier.
@@ -106,6 +115,17 @@ enum Inst {
     },
     /// `\X`: one extended grapheme cluster, taken atomically.
     Grapheme,
+    /// The subject, folded a character at a time, spells this folded text
+    /// exactly: Onigmo's `EXACT*_IC`, for a string under `/i` whose folds are
+    /// not one character to one (#788). Only a UTF-8 subject reaches it.
+    Folded(Box<[char]>),
+    /// Carry on in a UTF-8 subject, and go to `otherwise` in any other. The
+    /// folds past one character to one are UTF-8's alone, so a string or a
+    /// class that has them is compiled twice, and this picks the copy the
+    /// subject's encoding reads.
+    Unicode {
+        otherwise: usize,
+    },
 }
 
 /// A compiled pattern.
@@ -161,6 +181,7 @@ pub fn compile(ast: &Ast, groups: usize) -> Result<Program, Error> {
         called: called.clone(),
         calls: Vec::new(),
         history: !called.is_empty(),
+        behind: 0,
     };
     if called.contains(&0) {
         // `\g<0>` calls the whole pattern, so the whole pattern is a
@@ -241,6 +262,153 @@ fn collect_calls(ast: &Ast, called: &mut Vec<usize>) {
     }
 }
 
+/// The characters of the string Onigmo makes from the start of `items`
+/// under `/i`: a character, or a class of one, which Onigmo turns into a
+/// string too, and the plain characters after it. A byte escape, `\x73`,
+/// is a string of its own, and so is anything after one. Empty when
+/// `items` does not start with a character Onigmo folds this way.
+fn string_at(items: &[Ast]) -> Vec<char> {
+    let mut text = Vec::new();
+    match items.first() {
+        Some(Ast::Literal {
+            ch,
+            icase: true,
+            raw,
+        }) => {
+            text.push(*ch);
+            if *raw {
+                return text;
+            }
+        }
+        Some(Ast::Class(class)) if class.icase => match folds_as_literal(class) {
+            Some(only) => text.push(only),
+            None => return text,
+        },
+        _ => return text,
+    }
+    for item in &items[1..] {
+        match item {
+            Ast::Literal {
+                ch,
+                icase: true,
+                raw: false,
+            } => text.push(*ch),
+            _ => break,
+        }
+    }
+    text
+}
+
+/// The characters of `ast` when it is one string Onigmo folds under `/i`,
+/// seeing through `(?:...)`, which Onigmo does not keep as a node.
+fn string_of(ast: &Ast) -> Option<Vec<char>> {
+    match ast {
+        Ast::Group {
+            index: None,
+            plain: true,
+            body,
+        } => string_of(body),
+        Ast::Concat(items) => {
+            let text = string_at(items);
+            (!text.is_empty() && text.len() == items.len()).then_some(text)
+        }
+        other => {
+            let text = string_at(std::slice::from_ref(other));
+            (!text.is_empty()).then_some(text)
+        }
+    }
+}
+
+/// The folded strings a class also matches under `/i` in UTF-8, in the order
+/// Onigmo's `i_apply_case_fold` adds them: one for each character that folds
+/// to two or three and is in the class. A negated class adds none.
+///
+/// CRuby compiles a pattern of ASCII alone for US-ASCII when the subject is
+/// ASCII too, and US-ASCII folds nothing past one character to one, so
+/// `/(?i)\A[[:lower:]]\z/ =~ "ss"` is nil there; the VM reads that pair as
+/// BINARY and gets the same answer. Compiled for UTF-8, it is 0.
+fn longer_strings(class: &Class) -> Vec<Vec<char>> {
+    if !class.icase || class.negated {
+        return Vec::new();
+    }
+    let mut out: Vec<Vec<char>> = Vec::new();
+    for (folded, source) in fold::multi_folds() {
+        let text = folded.as_slice();
+        if out.last().is_some_and(|last| last == text) {
+            continue;
+        }
+        if class_matches(class, source, Encoding::Utf8) {
+            out.push(text.to_vec());
+        }
+    }
+    out
+}
+
+/// A look-behind body's length in characters as Onigmo counts it in UTF-8,
+/// strings folded and none expanded, if it has one length; and whether
+/// anything in it folds past one character to one, the only case where
+/// [`Inst::Look`] needs the length.
+///
+/// ponytail: Onigmo also splits a top-level alternation of different
+/// lengths into one look-behind per branch. With such a body and a fold past
+/// one character to one, this keeps the search for a start that ends at the
+/// look-behind instead.
+fn behind_width(ast: &Ast) -> (Option<usize>, bool) {
+    let string = |text: &[char]| {
+        (
+            Some(text.iter().map(|&c| fold::fold(c).as_slice().len()).sum()),
+            !fold::one_to_one(text),
+        )
+    };
+    let all = |parts: &mut dyn Iterator<Item = (Option<usize>, bool)>| {
+        parts.fold((Some(0), false), |(sum, folds), (len, more)| {
+            (sum.zip(len).map(|(a, b)| a + b), folds || more)
+        })
+    };
+    match ast {
+        Ast::Empty | Ast::Anchor(_) | Ast::Look { .. } | Ast::Keep => (Some(0), false),
+        Ast::Any { .. } => (Some(1), false),
+        Ast::Literal {
+            ch, icase: true, ..
+        } => string(&[*ch]),
+        Ast::Literal { .. } => (Some(1), false),
+        Ast::Class(class) => match folds_as_literal(class) {
+            Some(only) if class.icase => string(&[only]),
+            _ if longer_strings(class).is_empty() => (Some(1), false),
+            _ => (None, true),
+        },
+        Ast::Group { body, .. } => behind_width(body),
+        Ast::Concat(items) => {
+            let mut parts = Vec::new();
+            let mut at = 0;
+            while at < items.len() {
+                let run = string_at(&items[at..]);
+                if run.len() > 1 {
+                    parts.push(string(&run));
+                    at += run.len();
+                } else {
+                    parts.push(behind_width(&items[at]));
+                    at += 1;
+                }
+            }
+            all(&mut parts.into_iter())
+        }
+        Ast::Alt(branches) => {
+            let widths: Vec<_> = branches.iter().map(behind_width).collect();
+            let folds = widths.iter().any(|(_, folds)| *folds);
+            let first = widths.first().and_then(|(len, _)| *len);
+            let same = widths.iter().all(|(len, _)| *len == first);
+            (first.filter(|_| same), folds)
+        }
+        Ast::Repeat { body, min, max, .. } => {
+            let (len, folds) = behind_width(body);
+            let fixed = (Some(*min) == *max).then_some(*min as usize);
+            (len.zip(fixed).map(|(len, n)| len * n), folds)
+        }
+        _ => (None, false),
+    }
+}
+
 struct Compiler {
     insts: Vec<Inst>,
     /// Each class, with the one character it folds as under `/i`, if any.
@@ -253,6 +421,9 @@ struct Compiler {
     calls: Vec<(usize, usize)>,
     /// Whether the program keeps an [`Event`] history.
     history: bool,
+    /// How many look-behinds the node being compiled sits in. Onigmo expands
+    /// no string inside one.
+    behind: usize,
 }
 
 impl Compiler {
@@ -313,18 +484,17 @@ impl Compiler {
             Ast::Grapheme => {
                 self.emit(Inst::Grapheme);
             }
-            Ast::Literal { ch, icase } => {
-                self.emit(Inst::Char {
-                    ch: *ch,
-                    icase: *icase,
-                });
+            Ast::Literal { ch, icase, .. } => {
+                if *icase && !fold::one_to_one(&[*ch]) {
+                    self.string(&[*ch])?;
+                } else {
+                    self.emit(Inst::Char {
+                        ch: *ch,
+                        icase: *icase,
+                    });
+                }
             }
-            Ast::Class(class) => {
-                let index = u32::try_from(self.classes.len())
-                    .map_err(|_| Error::Syntax("too many character classes".into()))?;
-                self.classes.push((class.clone(), folds_as_literal(class)));
-                self.emit(Inst::Class(index));
-            }
+            Ast::Class(class) => self.class(class)?,
             Ast::Any { nl } => {
                 self.emit(Inst::Any { nl: *nl });
             }
@@ -338,8 +508,16 @@ impl Compiler {
                 });
             }
             Ast::Concat(items) => {
-                for item in items {
-                    self.node(item)?;
+                let mut at = 0;
+                while at < items.len() {
+                    let run = string_at(&items[at..]);
+                    if run.len() > 1 {
+                        self.string(&run)?;
+                        at += run.len();
+                    } else {
+                        self.node(&items[at])?;
+                        at += 1;
+                    }
                 }
             }
             Ast::Cond { group, yes, no } => {
@@ -374,7 +552,14 @@ impl Compiler {
                 min,
                 max,
                 greedy,
-            } => self.repeat(body, *min, *max, *greedy)?,
+            } => match string_of(body) {
+                // `s{2}` under `/i` is the string `ss`, which matches `"ß"`.
+                Some(text) if *min > 1 && !fold::one_to_one(&text.repeat(3)) => self.unicode(
+                    |c| c.string_repeat(&text, *min, *max, *greedy),
+                    |c| c.repeat(&mut |c| c.node(body), *min, *max, *greedy),
+                )?,
+                _ => self.repeat(&mut |c| c.node(body), *min, *max, *greedy)?,
+            },
             Ast::Atomic(body) => {
                 self.sub_program(body, |start| Inst::Atomic { start })?;
             }
@@ -384,11 +569,23 @@ impl Compiler {
                 body,
             } => {
                 let (behind, negate) = (*behind, *negate);
-                self.sub_program(body, move |start| Inst::Look {
+                let chars = if behind {
+                    match behind_width(body) {
+                        (Some(chars), true) => Some(chars),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                self.behind += usize::from(behind);
+                let compiled = self.sub_program(body, move |start| Inst::Look {
                     behind,
                     negate,
                     start,
-                })?;
+                    chars,
+                });
+                self.behind -= usize::from(behind);
+                compiled?;
             }
         }
         Ok(())
@@ -410,19 +607,28 @@ impl Compiler {
     }
 
     fn alternation(&mut self, branches: &[Ast]) -> Result<(), Error> {
-        let Some((last, rest)) = branches.split_last() else {
+        self.alternatives(branches.len(), |c, i| c.node(&branches[i]))
+    }
+
+    /// `count` branches, each written by `branch`, tried in order.
+    fn alternatives(
+        &mut self,
+        count: usize,
+        mut branch: impl FnMut(&mut Self, usize) -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        let Some(last) = count.checked_sub(1) else {
             return Ok(());
         };
         let mut jumps = Vec::new();
-        for branch in rest {
+        for i in 0..last {
             let split = self.emit(Inst::Split { prefer: 0, alt: 0 });
             let prefer = self.here();
-            self.node(branch)?;
+            branch(self, i)?;
             jumps.push(self.emit(Inst::Jump(0)));
             let alt = self.here();
             self.insts[split] = Inst::Split { prefer, alt };
         }
-        self.node(last)?;
+        branch(self, last)?;
         let end = self.here();
         for jump in jumps {
             self.insts[jump] = Inst::Jump(end);
@@ -430,16 +636,149 @@ impl Compiler {
         Ok(())
     }
 
+    /// `utf8` for a UTF-8 subject and `other` for any other, behind an
+    /// [`Inst::Unicode`].
+    fn unicode(
+        &mut self,
+        utf8: impl FnOnce(&mut Self) -> Result<(), Error>,
+        other: impl FnOnce(&mut Self) -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        let test = self.emit(Inst::Jump(0));
+        utf8(self)?;
+        let skip = self.emit(Inst::Jump(0));
+        let otherwise = self.here();
+        other(self)?;
+        let end = self.here();
+        self.insts[test] = Inst::Unicode { otherwise };
+        self.insts[skip] = Inst::Jump(end);
+        Ok(())
+    }
+
+    /// A string the pattern spells under `/i`: Onigmo's string node, every
+    /// character of it. When its folds are one character to one it matches a
+    /// character at a time, as in every encoding; otherwise a UTF-8 subject
+    /// gets the alternatives Onigmo rewrites it into (#788).
+    fn string(&mut self, text: &[char]) -> Result<(), Error> {
+        let per_char = |c: &mut Self| {
+            for &ch in text {
+                c.emit(Inst::Char { ch, icase: true });
+            }
+            Ok(())
+        };
+        if fold::one_to_one(text) {
+            return per_char(self);
+        }
+        let piece = fold::expand(text, self.behind > 0);
+        self.unicode(|c| c.piece(&piece), per_char)
+    }
+
+    fn piece(&mut self, piece: &Piece) -> Result<(), Error> {
+        self.too_large()?;
+        match piece {
+            Piece::Exact(chars) => {
+                for &ch in chars {
+                    self.emit(Inst::Char { ch, icase: false });
+                }
+            }
+            // Folded text that can only match a character for a character
+            // is the same `Char`s any other string compiles to.
+            Piece::Folded(text) if fold::one_to_one(text) => {
+                for &ch in text {
+                    self.emit(Inst::Char { ch, icase: true });
+                }
+            }
+            Piece::Folded(text) => {
+                self.emit(Inst::Folded(text.clone().into_boxed_slice()));
+            }
+            Piece::List(pieces) => {
+                for piece in pieces {
+                    self.piece(piece)?;
+                }
+            }
+            Piece::Alt(pieces) => self.alternatives(pieces.len(), |c, i| c.piece(&pieces[i]))?,
+        }
+        Ok(())
+    }
+
+    /// `text{min,max}` in UTF-8, for a string `text`. Onigmo writes a string
+    /// out `min` times as one string before anything else, so `/(?i)s{2}/`
+    /// is `/(?i)ss/` compared folded and matches `"ß"`, where `/(?i)s+/` does
+    /// not. Only a string that stays a string once expanded is written out —
+    /// one compared folded whole — and only to 100 bytes; the rest of the
+    /// count stays a repeat (`regcomp.c`, `EXPAND_STRING_MAX_LENGTH`).
+    fn string_repeat(
+        &mut self,
+        text: &[char],
+        min: u32,
+        max: Option<u32>,
+        greedy: bool,
+    ) -> Result<(), Error> {
+        const EXPAND_STRING_MAX_LENGTH: usize = 100;
+        let piece = fold::expand(text, self.behind > 0);
+        let Piece::Folded(folded) = &piece else {
+            return self.repeat(&mut |c| c.piece(&piece), min, max, greedy);
+        };
+        let len: usize = folded.iter().map(|c| c.len_utf8()).sum();
+        let mut copies = 1;
+        while copies < min && (copies as usize + 1) * len <= EXPAND_STRING_MAX_LENGTH {
+            copies += 1;
+        }
+        self.piece(&Piece::Folded(folded.repeat(copies as usize)))?;
+        if max.is_none_or(|max| copies < max) {
+            self.repeat(
+                &mut |c| c.piece(&piece),
+                min - copies,
+                max.map(|max| max - copies),
+                greedy,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// A class, with the strings it also matches under `/i` in UTF-8: `[ß]`
+    /// with two characters or more is `(?:[ßa]|ss)`, class first (#788).
+    fn class(&mut self, class: &Class) -> Result<(), Error> {
+        if let Some(only) = folds_as_literal(class)
+            && !fold::one_to_one(&[only])
+        {
+            // A class of one character is that character's string.
+            return self.string(&[only]);
+        }
+        let index = u32::try_from(self.classes.len())
+            .map_err(|_| Error::Syntax("too many character classes".into()))?;
+        self.classes.push((class.clone(), folds_as_literal(class)));
+        let longer = longer_strings(class);
+        if longer.is_empty() {
+            self.emit(Inst::Class(index));
+            return Ok(());
+        }
+        self.unicode(
+            |c| {
+                c.alternatives(longer.len() + 1, |c, i| match i {
+                    0 => {
+                        c.emit(Inst::Class(index));
+                        Ok(())
+                    }
+                    _ => c.piece(&Piece::Folded(longer[i - 1].clone())),
+                })
+            },
+            |c| {
+                c.emit(Inst::Class(index));
+                Ok(())
+            },
+        )
+    }
+
     fn repeat(
         &mut self,
-        body: &Ast,
+        body: &mut dyn FnMut(&mut Self) -> Result<(), Error>,
         min: u32,
         max: Option<u32>,
         greedy: bool,
     ) -> Result<(), Error> {
         // The mandatory part is written out in full.
         for _ in 0..min {
-            self.node(body)?;
+            body(self)?;
             self.too_large()?;
         }
         match max {
@@ -457,7 +796,7 @@ impl Compiler {
                     let split = self.emit(Inst::Split { prefer: 0, alt: 0 });
                     let target = self.here();
                     splits.push((split, target));
-                    self.node(body)?;
+                    body(self)?;
                     self.too_large()?;
                 }
                 let end = self.here();
@@ -480,7 +819,11 @@ impl Compiler {
     }
 
     /// `x*`, as a loop rather than as unrolled copies.
-    fn star(&mut self, body: &Ast, greedy: bool) -> Result<(), Error> {
+    fn star(
+        &mut self,
+        body: &mut dyn FnMut(&mut Self) -> Result<(), Error>,
+        greedy: bool,
+    ) -> Result<(), Error> {
         let slot = self.marks;
         self.marks += 1;
 
@@ -488,7 +831,7 @@ impl Compiler {
         let split = self.emit(Inst::Split { prefer: 0, alt: 0 });
         let body_start = self.here();
         self.emit(Inst::Mark(slot));
-        self.node(body)?;
+        body(self)?;
         let progress = self.emit(Inst::Progress { slot, exit: 0 });
         self.emit(Inst::Jump(head));
         let end = self.here();
@@ -830,15 +1173,33 @@ impl Program {
                     } => match level_capture(&ctx.history, *group, *level) {
                         Some((s, e)) if s <= e => {
                             let text = haystack.bytes[s..e].to_owned();
-                            if text_at(haystack, sp, &text, *icase) {
-                                sp += text.len();
-                                true
-                            } else {
-                                false
+                            match text_at(haystack, sp, &text, *icase) {
+                                Some(end) => {
+                                    sp = end;
+                                    true
+                                }
+                                None => false,
                             }
                         }
                         _ => false,
                     },
+                    Inst::Folded(text) => {
+                        match fold::folded_end(|at| haystack.next_char(at), sp, text) {
+                            Some(end) => {
+                                sp = end;
+                                true
+                            }
+                            None => false,
+                        }
+                    }
+                    Inst::Unicode { otherwise } => {
+                        pc = if haystack.enc == Encoding::Utf8 {
+                            pc + 1
+                        } else {
+                            *otherwise
+                        };
+                        continue;
+                    }
                     Inst::Grapheme => match grapheme_end(haystack, sp) {
                         Some(end) => {
                             sp = end;
@@ -969,11 +1330,12 @@ impl Program {
                             // end, mid-recursion; that pair holds no text.
                             (Some(s), Some(e)) if s <= e => {
                                 let text = haystack.bytes[s..e].to_owned();
-                                if text_at(haystack, sp, &text, *icase) {
-                                    sp += text.len();
-                                    true
-                                } else {
-                                    false
+                                match text_at(haystack, sp, &text, *icase) {
+                                    Some(end) => {
+                                        sp = end;
+                                        true
+                                    }
+                                    None => false,
                                 }
                             }
                             // A backreference to a group that never matched
@@ -1007,9 +1369,39 @@ impl Program {
                         behind,
                         negate,
                         start,
+                        chars,
                     } => {
                         let before = ctx.history.len();
-                        let found = if *behind {
+                        let stepped = match chars {
+                            Some(n) if *behind && haystack.enc == Encoding::Utf8 => {
+                                Some(haystack.step_back(sp, *n))
+                            }
+                            _ => None,
+                        };
+                        let found = if let Some(from) = stepped {
+                            // Too short a subject behind: no match there. A
+                            // negative body that matches at all, wherever it
+                            // ends, is a match it forbids, as in Onigmo. A
+                            // positive one that ends anywhere but here is no
+                            // match: Onigmo would carry on from where it
+                            // ended, and what it finds then hangs on its
+                            // search's optimizations — `/(?i)(?<=ß)x/` finds
+                            // nothing in `"ẞßx"`.
+                            match from {
+                                Some(from) => self
+                                    .run(
+                                        haystack,
+                                        *start,
+                                        from,
+                                        anchor,
+                                        Rc::clone(&saves),
+                                        marks.clone(),
+                                        ctx,
+                                    )?
+                                    .filter(|(end, _)| *negate || *end == sp),
+                                None => None,
+                            }
+                        } else if *behind {
                             self.look_behind(haystack, *start, sp, anchor, &saves, &marks, ctx)?
                         } else {
                             self.run(
@@ -1287,6 +1679,17 @@ impl Subject<'_> {
     /// The character that ends at `sp`. In EUC-JP and Shift_JIS that means
     /// reading forward from somewhere known, because a trail byte can also be
     /// a lead, or an `a`.
+    /// Where `chars` characters before `sp` start, if there are that many.
+    fn step_back(&self, mut sp: usize, chars: usize) -> Option<usize> {
+        for _ in 0..chars {
+            if sp == 0 {
+                return None;
+            }
+            sp = self.enc.char_start_before(self.bytes, sp);
+        }
+        Some(sp)
+    }
+
     fn prev_char(&self, sp: usize) -> Option<char> {
         if sp == 0 {
             return None;
@@ -1371,9 +1774,14 @@ fn chars_equal(a: char, b: char, icase: bool, enc: Encoding, fold: Fold) -> bool
     if kind(a, enc) != Kind::Unicode || kind(b, enc) != Kind::Unicode {
         return false;
     }
-    // ponytail: simple case folding, one character to one character. Full
-    // Unicode folding (ß to ss) needs a table; add it with the Encoding slice.
-    a.to_lowercase().eq(b.to_lowercase())
+    // Unicode's full case folding, measured from CRuby (#788): two
+    // characters match when they fold alike, which is how Onigmo's tables
+    // relate `ß` to `ẞ` and `s` to `ſ`. A fold of several characters
+    // matching several characters is the compiler's business, not this one.
+    if a.is_ascii() && b.is_ascii() {
+        return a.eq_ignore_ascii_case(&b);
+    }
+    fold::fold(a) == fold::fold(b)
 }
 
 /// Whether `test` holds for some other case of the subject's `c`: some
@@ -1395,17 +1803,23 @@ fn any_other_case(c: char, enc: Encoding, mut test: impl FnMut(char) -> bool) ->
     match kind(c, enc) {
         Kind::Byte | Kind::Single(..) => false,
         Kind::Multibyte => enc.other_case(c).is_some_and(test),
-        Kind::Unicode => c
-            .to_lowercase()
-            .chain(c.to_uppercase())
-            .any(|folded| folded != c && test(folded)),
+        Kind::Unicode => fold::same_fold(fold::fold(c)).any(|other| other != c && test(other)),
     }
 }
 
-fn text_at(haystack: Subject<'_>, sp: usize, text: &[u8], icase: bool) -> bool {
+/// Where a backreference to `text` ends if it matches at `sp`.
+///
+/// Under `/i` a character and its other case need not be as long, so the
+/// match need not be either: `/(?i)(ß)\1/` takes all of `"ßẞ"`. Onigmo still
+/// asks for as many bytes after `sp` as the capture holds before it compares
+/// anything, so `/(?i)(ẞ)\1/` misses `"ẞß"` and finds `"ẞßx"`, measured.
+fn text_at(haystack: Subject<'_>, sp: usize, text: &[u8], icase: bool) -> Option<usize> {
     let rest = &haystack.bytes[sp..];
     if !icase {
-        return rest.starts_with(text);
+        return rest.starts_with(text).then_some(sp + text.len());
+    }
+    if rest.len() < text.len() {
+        return None;
     }
     let want = Subject {
         bytes: text,
@@ -1422,11 +1836,11 @@ fn text_at(haystack: Subject<'_>, sp: usize, text: &[u8], icase: bool) -> bool {
             {
                 got += used;
             }
-            _ => return false,
+            _ => return None,
         }
         at += width;
     }
-    true
+    Some(got)
 }
 
 /// Ruby's `\b` is defined in terms of a word character: ASCII's in UTF-8
@@ -1545,10 +1959,23 @@ fn class_matches(class: &Class, c: char, enc: Encoding) -> bool {
     // Case folding inside a class: `[a]` under `/i` also matches `A`.
     if !held && class.icase {
         held = any_other_case(c, enc, |folded| {
+            // A fold between ASCII and past it — `s` and `ſ`, `k` and `K` —
+            // does not reach through `\w`, `[:word:]` or `[:ascii:]`, which
+            // Onigmo leaves out of the class it checks those against
+            // (`i_apply_case_fold`'s `asc_cc`): `/(?i)[\W]/` misses `"s"`.
+            let crosses = folded.is_ascii() != c.is_ascii();
             class
                 .items
                 .iter()
                 .filter(|item| !matches!(item, ClassItem::Nested(_)))
+                .filter(|item| {
+                    !crosses
+                        || !matches!(
+                            item,
+                            ClassItem::Perl(Perl::Word, _)
+                                | ClassItem::Posix(Posix::Word | Posix::Ascii, _)
+                        )
+                })
                 .any(|item| item_matches(item, folded, false, enc))
         });
     }

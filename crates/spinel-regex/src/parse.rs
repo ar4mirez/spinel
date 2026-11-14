@@ -24,9 +24,15 @@ pub enum Ast {
     /// Matches nothing and consumes nothing. `()` and `a|` produce these.
     Empty,
     /// One character. `icase` is baked in from the flags in force here.
+    ///
+    /// `raw` marks a byte escape — `\x73`, `\163`, an ASCII `\u0073` —
+    /// which Onigmo keeps as a string of its own rather than joining it to
+    /// the characters around it. Only case folding can tell: `/(?i)ss/`
+    /// matches `"ß"` and `/(?i)s\x73/` does not (#788).
     Literal {
         ch: char,
         icase: bool,
+        raw: bool,
     },
     /// A bracket class, a `\w`-style shorthand, or a POSIX bracket.
     Class(Class),
@@ -684,6 +690,16 @@ impl Parser {
                 None | Some('|') | Some(')') => break,
                 _ => {}
             }
+            // A `(?#...)` comment is not there at all to Onigmo, which reads
+            // the characters either side of one as one string: `/(?i)s(?#c)s/`
+            // matches `"ß"` as `/(?i)ss/` does (#788).
+            if self.peek() == Some('(')
+                && self.peek_at(1) == Some('?')
+                && self.peek_at(2) == Some('#')
+            {
+                self.atom()?;
+                continue;
+            }
             let atom = self.atom()?;
             // A `(?i)` mid-pattern parses as `Empty` after mutating flags; it
             // must not then pick up a quantifier of its own.
@@ -939,6 +955,16 @@ impl Parser {
         Ast::Literal {
             ch,
             icase: self.flags.icase,
+            raw: false,
+        }
+    }
+
+    /// A character a byte escape spells. See [`Ast::Literal`].
+    fn raw_literal(&self, ch: char) -> Ast {
+        Ast::Literal {
+            ch,
+            icase: self.flags.icase,
+            raw: true,
         }
     }
 
@@ -1291,7 +1317,7 @@ impl Parser {
                 if value > self.groups && digits.len() > 1 {
                     self.pos = start;
                     let ch = self.octal_escape()?;
-                    return Ok(self.literal(ch));
+                    return Ok(self.raw_literal(ch));
                 }
                 self.numeric_backref = true;
                 Ast::Backref {
@@ -1301,7 +1327,13 @@ impl Parser {
             }
             _ => {
                 let ch = self.escaped_char(c)?;
-                self.literal(ch)
+                // Ruby turns `\u` into the character it names before Onigmo
+                // reads the pattern, and an ASCII one into a `\x` byte escape.
+                if matches!(c, 'x' | '0'..='7') || (c == 'u' && ch.is_ascii()) {
+                    self.raw_literal(ch)
+                } else {
+                    self.literal(ch)
+                }
             }
         })
     }
@@ -1384,10 +1416,12 @@ impl Parser {
             Ast::Literal {
                 ch: '\r',
                 icase: false,
+                raw: false,
             },
             Ast::Literal {
                 ch: '\n',
                 icase: false,
+                raw: false,
             },
         ]);
         let single = Ast::Class(Class {
@@ -1440,9 +1474,12 @@ impl Parser {
             'h' => (Perl::Hex, false),
             _ => (Perl::Hex, true),
         };
+        // Outside a bracket a shorthand is a character type to Onigmo, which
+        // `/i` does not fold: `/(?i)\w/` misses `"ſ"` and `/(?i)\W/` misses
+        // `"s"`, though `ſ` folds to `s`. Measured.
         Class {
             negated: false,
-            icase: self.flags.icase,
+            icase: false,
             items: vec![self.ranged(ClassItem::Perl(kind, negated))],
             intersect: Vec::new(),
         }
@@ -1912,11 +1949,13 @@ mod tests {
             Ast::Concat(vec![
                 Ast::Literal {
                     ch: 'a',
-                    icase: false
+                    icase: false,
+                    raw: false,
                 },
                 Ast::Literal {
                     ch: 'b',
-                    icase: false
+                    icase: false,
+                    raw: false,
                 },
             ])
         );
@@ -1938,14 +1977,16 @@ mod tests {
             items[0],
             Ast::Literal {
                 ch: 'a',
-                icase: false
+                icase: false,
+                raw: false,
             }
         );
         assert_eq!(
             items[2],
             Ast::Literal {
                 ch: 'b',
-                icase: true
+                icase: true,
+                raw: false,
             }
         );
     }
@@ -1959,7 +2000,8 @@ mod tests {
             items[1],
             Ast::Literal {
                 ch: 'b',
-                icase: false
+                icase: false,
+                raw: false,
             }
         );
     }
