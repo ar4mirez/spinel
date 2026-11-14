@@ -87,7 +87,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `library/fiddle` | 1 | 1 | 0 | 0 | 1 | 0 | 0% |
 | `library/find` | 2 | 3 | 3 | 0 | 0 | 0 | 100% |
 | `library/getoptlong` | 10 | 27 | 0 | 0 | 27 | 0 | 0% |
-| `library/io-wait` | 3 | 28 | 23 | 0 | 5 | 0 | 82% |
+| `library/io-wait` | 3 | 28 | 28 | 0 | 0 | 0 | 100% |
 | `library/ipaddr` | 6 | 29 | 25 | 0 | 3 | 1 | 86% |
 | `library/irb` | 1 | 1 | 0 | 0 | 0 | 1 | 0% |
 | `library/logger` | 14 | 55 | 0 | 0 | 52 | 3 | 0% |
@@ -131,4 +131,4 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `optional/capi` | 47 | 0 | 0 | 0 | 0 | 0 | — |
 | `optional/thread_safety` | 1 | 5 | 4 | 0 | 0 | 1 | 80% |
 | `security` | 13 | 31 | 29 | 0 | 2 | 0 | 94% |
-| **total** | 3841 | 32922 | 29847 | 0 | 2863 | 212 | 91% |
+| **total** | 3841 | 32922 | 29852 | 0 | 2858 | 212 | 91% |
