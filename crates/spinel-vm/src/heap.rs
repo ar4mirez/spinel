@@ -888,6 +888,8 @@ impl Heap {
     pub fn alias_global_special(&mut self, new: SymbolId, which: crate::bytecode::MatchRef) {
         self.global_specials.insert(new, which);
         self.globals.remove(&new);
+        self.hooked_globals.remove(&new);
+        self.readonly_globals.remove(&new);
     }
 
     /// Which regexp special `name` was aliased to, if it was.

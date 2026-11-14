@@ -1495,6 +1495,8 @@ case 5 when *[] then :yes else :no end  #=> :no
 ("ab" =~ /a/; alias $amp234 $&; "zz" =~ /z/; $amp234)  #=> "z"
 (alias $amp235 $&; "ab" =~ /a/; (begin; $amp235 = ""; rescue NameError => e; e.message; end))  #=> "$amp235 is a read-only variable"
 (alias $pre234 $`; "abc" =~ /b/; $pre234)  #=> "a"
+# Re-aliasing a name to a special drops the rules it took from its old target.
+(alias $err236 $!; alias $err236 $&; "a" =~ /a/; $err236)  #=> "a"
 
 # --- PRD 0035 #230: a flip-flop ---------------------------------------------
 #
