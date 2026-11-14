@@ -3193,12 +3193,15 @@ fn run<'h>(
                         // rather than reading a cell, so it tracks the *current*
                         // match: measured, a second `=~` moves it.
                         if scope.global_hooks(symbol) & 2 != 0 {
-                            // A read that is a method (#268): `$=` warns.
+                            // A read that is a method (#268): `$=` warns. It
+                            // is told the name the hook is on and the name
+                            // written, which differ through an alias (#789).
+                            let owner = scope.global_hook_name(symbol);
                             let call = Pending {
                                 cache: None,
                                 name: crate::shared::symbols::intern("__global_read__"),
                                 receiver: scope.classes().object(Builtin::Kernel.id()),
-                                args: vec![Value::symbol(symbol)],
+                                args: vec![Value::symbol(owner), Value::symbol(symbol)],
                                 keywords: Vec::new(),
                                 block: Value::NIL,
                                 block_is_literal: false,
@@ -3277,7 +3280,10 @@ fn run<'h>(
                         if scope.global_hooks(symbol) & 1 != 0 {
                             // An assignment that is a method (#268): `$, = "x"`
                             // warns, `$VERBOSE = 1` stores `true`. The method
-                            // stores, through `__global_store__`.
+                            // stores, through `__global_store__`. Through an
+                            // alias it runs the old name's rule, and the
+                            // messages name the alias, as CRuby's do (#789).
+                            let owner = scope.global_hook_name(symbol);
                             let kernel = scope.classes().object(Builtin::Kernel.id());
                             if let Some(unwind) = call_discarded(
                                 scope,
@@ -3287,7 +3293,7 @@ fn run<'h>(
                                 &mut ids,
                                 kernel,
                                 crate::shared::symbols::intern("__global_assign__"),
-                                vec![Value::symbol(symbol), value],
+                                vec![Value::symbol(owner), value, Value::symbol(symbol)],
                             )? {
                                 return Ok(Step::Unwind(unwind));
                             }
