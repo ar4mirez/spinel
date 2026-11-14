@@ -145,7 +145,6 @@ module Kernel
       return true
     end
     features = $LOADED_FEATURES
-    loading = (@__loading__ ||= [])
     loaders = (@__loaders__ ||= {})
     me = __thread_current__
     path = nil
@@ -160,13 +159,14 @@ module Kernel
       # since a load that raised leaves the file to load here.
       owner = loaders[path]
       break unless owner && owner != me && __thread_status__(owner) != :dead
-      sleep(0.001) while loaders[path] == owner && __thread_status__(owner) != :dead
+      __await_load__(@__barriers__ ||= {}, path) do
+        loaders[path] == owner && __thread_status__(owner) != :dead
+      end
     end
     if loaders.key?(path)
-      # Still running: the file, or one it required, asked for it again.
-      if loading.include?(path)
-        __warning__("loading in progress, circular require considered harmful - #{path}", true)
-      end
+      # Still running in this thread: the file, or one it required, asked for
+      # it again.
+      __warning__("loading in progress, circular require considered harmful - #{path}", true)
       return false
     end
     # The same file by another name, through a symlink: loaded once.
@@ -178,7 +178,6 @@ module Kernel
     # loads answers false rather than recursing; removed again if it raises.
     features.push(path)
     __provided__(path, real)
-    loading.push(path)
     loaders[path] = me
     autoloads = __autoload_feature__(path, me)
     loaded = false
@@ -190,11 +189,58 @@ module Kernel
       # A load that did not finish — an exception, or a `throw` out of the
       # file — is not recorded, so the next `require` runs it again.
       features.delete(path) unless loaded
-      loading.delete(path)
       loaders.delete(path)
-      autoloads&.each { |owner, name| owner.instance_variable_get(:@__autoloading__)&.delete(name) }
+      __load_ended__(@__barriers__, path)
+      autoloads&.each { |owner, name| __autoload_ended__(owner, name) }
     end
     true
+  end
+
+  # --- Waiting for another thread's load ---------------------------------------
+  #
+  # A thread that finds a feature, or an autoload, part-way through loading
+  # in another thread waits for that load to end, as CRuby's `load_lock`
+  # does: on a `Mutex` and `ConditionVariable` the first thread to wait makes,
+  # dropped when the load ends, so a load no thread waits for costs nothing
+  # more. The wait is the scheduler's like any other, so threads that wait on
+  # each other's loads end in the deadlock `fatal`, not a hang.
+  #
+  # All of the loader's state is here, on `Kernel` — what is loaded, what is
+  # loading and by which thread, who waits — or on the module an autoload is
+  # registered on, and none of it is per thread. A `require` in a Ractor that
+  # is not the main one can then run on the main Ractor, as CRuby 3.4's does
+  # (#39's D3), by one hook at the top of `__require__`.
+
+  # Wait on the barrier `barriers[key]` while the block answers true.
+  def self.__await_load__(barriers, key)
+    mutex, cond = barriers[key] ||= [Thread::Mutex.new, Thread::ConditionVariable.new]
+    mutex.synchronize { cond.wait(mutex) while yield }
+  end
+
+  # The load `key` names has ended: wake every thread waiting on it.
+  def self.__load_ended__(barriers, key)
+    barrier = barriers&.delete(key)
+    return if barrier.nil?
+    mutex, cond = barrier
+    mutex.synchronize { cond.broadcast }
+  end
+
+  # Wait while another thread is part-way through the autoload of `name` on
+  # `owner`.
+  def self.__await_autoload__(owner, name)
+    table = (@__autoload_barriers__ ||= {}.compare_by_identity)
+    __await_load__(table[owner] ||= {}, name) { owner.__autoloading_elsewhere__(name) }
+  end
+
+  # The autoload of `name` on `owner` has ended, whether it defined the name
+  # or not: the threads waiting on it look again.
+  def self.__autoload_ended__(owner, name)
+    owner.instance_variable_get(:@__autoloading__)&.delete(name)
+    table = @__autoload_barriers__
+    barriers = table && table[owner]
+    return if barriers.nil?
+    __load_ended__(barriers, name)
+    table.delete(owner) if barriers.empty?
   end
 
   # A file an autoload names is that autoload running, however it came to be

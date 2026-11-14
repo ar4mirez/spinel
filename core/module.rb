@@ -388,7 +388,7 @@ class Module
       begin
         TOPLEVEL_BINDING.receiver.__send__(:require, path)
       ensure
-        loading.delete(symbol)
+        Kernel.__autoload_ended__(self, symbol)
       end
     end
     __autoload_forget__(symbol)
@@ -438,7 +438,7 @@ class Module
     owners.each do |owner|
       # Another thread is loading it: wait for that load, then look again.
       if owner.__autoloading_elsewhere__(name)
-        sleep(0.001) while owner.__autoloading_elsewhere__(name)
+        Kernel.__await_autoload__(owner, name)
         search.call.each do |scope|
           found = __reflect_const_lookup__(scope, name, false)
           return found[0] unless found.nil?

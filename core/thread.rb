@@ -770,12 +770,16 @@ class Thread
       unlock
       begin
         Thread.__before_wait__
-        reason = __thread_wait__(timeout, nil, 0, false, true)
+        # A sleep with no timeout counts toward a deadlock, as CRuby's
+        # `rb_mutex_sleep_forever` does: `ConditionVariable#wait` that no
+        # thread is left to signal raises the `fatal`. Measured on 4.0.9.
+        reason = __thread_wait__(timeout, nil, 0, timeout.nil?, true)
       ensure
         # Taken back before anything else, a kill included: the caller's
         # `ensure` runs holding it, as CRuby's does.
         Thread.current.__uninterruptibly__ { lock }
       end
+      Thread.__deadlock__ if reason == :deadlock
       # nil when the timeout ran out, as CRuby's `rb_mutex_sleep`: what
       # `ConditionVariable#wait` hands back, and Monitor reads, to tell a
       # timeout from a signal.
