@@ -129,6 +129,6 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `library/yaml` | 9 | 46 | 1 | 0 | 45 | 0 | 2% |
 | `library/zlib` | 42 | 148 | 148 | 0 | 0 | 0 | 100% |
 | `optional/capi` | 47 | 0 | 0 | 0 | 0 | 0 | — |
-| `optional/thread_safety` | 1 | 5 | 5 | 0 | 0 | 0 | 100% |
+| `optional/thread_safety` | 1 | 5 | 4 | 0 | 0 | 1 | 80% |
 | `security` | 13 | 31 | 29 | 0 | 2 | 0 | 94% |
-| **total** | 3841 | 32914 | 29840 | 0 | 2863 | 211 | 91% |
+| **total** | 3841 | 32914 | 29839 | 0 | 2863 | 212 | 91% |
