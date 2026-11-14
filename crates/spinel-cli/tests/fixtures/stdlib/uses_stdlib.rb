@@ -6,4 +6,5 @@ puts IPAddr.new("192.168.1.7/24").to_s
 options = {}
 OptionParser.new { |o| o.on("-v", "--verbose") { options[:verbose] = true } }.parse!(%w[-v])
 p options
-puts $LOAD_PATH.last == File.dirname($LOADED_FEATURES.grep(/ipaddr\.rb\z/).first)
+# Load-path entries are realpath'd as CRuby does (macOS /var is /private/var).
+puts File.realpath($LOAD_PATH.last) == File.dirname($LOADED_FEATURES.grep(/ipaddr\.rb\z/).first)
