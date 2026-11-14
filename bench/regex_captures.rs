@@ -1,9 +1,12 @@
 //! What the capture-vector clone in `spinel-regex` costs, if anything.
 //!
 //! [#184] proposes replacing snapshot-and-restore with Onigmo's restore
-//! records: today `exec.rs` clones the whole capture vector at every backtrack
-//! point, so a pattern with `n` groups pays `O(n)` allocation per alternative
-//! tried. The issue makes a benchmark the gating item and says, in as many
+//! records: `exec.rs` then cloned the whole capture vector at every backtrack
+//! point, so a pattern with `n` groups paid `O(n)` allocation per alternative
+//! tried. Since [#243] the captures are shared and copied only on a write, and
+//! the loop marks are restored from a trail rather than copied per backtrack
+//! point — the copy that mattered was the marks', each holding its own capture
+//! vector, which this file's numbers did not separate from the clone. The issue makes a benchmark the gating item and says, in as many
 //! words, that if the clone cost cannot be shown to matter the right outcome is
 //! to close it rather than do the rewrite.
 //!
@@ -27,6 +30,7 @@
 //! "order of magnitude or noise", and `Instant` answers it.
 //!
 //! [#184]: https://github.com/ar4mirez/spinel/issues/184
+//! [#243]: https://github.com/ar4mirez/spinel/issues/243
 
 use std::time::{Duration, Instant};
 

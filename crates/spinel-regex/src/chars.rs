@@ -387,6 +387,12 @@ impl Encoding {
     /// [`Encoding::uncarried`] refuses before matching.
     pub(crate) fn decode(self, bytes: &[u8]) -> Option<(char, usize)> {
         let first = *bytes.first()?;
+        // Every encoding here reads a byte below `0x80` at a character's start
+        // as that ASCII character alone, so the usual subject skips measuring
+        // it — which in UTF-8 meant validating it twice per character read.
+        if first < 0x80 {
+            return Some((char::from(first), 1));
+        }
         let Some(len) = self.char_len(bytes) else {
             return Some(('\u{fffd}', 1));
         };

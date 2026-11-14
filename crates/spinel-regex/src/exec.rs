@@ -511,20 +511,12 @@ impl Compiler {
 
 /// The state at the top of a loop iteration, for the empty check below it.
 ///
-/// ponytail: the captures are cloned once per iteration. Onigmo tracks only
-/// the groups that live inside the loop; narrow this the same way if a real
-/// pattern ever makes it the hot path.
-///
-/// Measured, and it is not the hot path yet — `bench/regex_captures.rs`, #184.
-/// The whole capture machinery, clone included, is 11% of a three-group match
-/// and 31% of the worst nine-group one; the same engine is 27x slower than
-/// `ruby --yjit` on that pattern for reasons this clone is not. Narrowing it
-/// buys back at most a third of a number that is off by more than an order of
-/// magnitude elsewhere.
+/// The captures are shared with the path, not copied: a mark costs a
+/// reference count, and the empty check compares the two by pointer first.
 #[derive(Clone)]
 struct Mark {
     sp: usize,
-    saves: Vec<Option<usize>>,
+    saves: Saves,
     depth: usize,
 }
 
@@ -532,12 +524,22 @@ struct Mark {
 struct Backtrack {
     pc: usize,
     sp: usize,
-    saves: Vec<Option<usize>>,
-    marks: Vec<Option<Mark>>,
+    saves: Saves,
+    /// How long the [`Trail`] was, which is as long as it is again.
+    trail: usize,
     frames: Frames,
     /// How long the [`Event`] history was, which is as long as it is again.
     history: usize,
 }
+
+/// Each loop mark a path overwrote, with what it held before, newest last.
+///
+/// A backtrack point notes only how long this was, and coming back to it
+/// undoes the writes since, newest first, which leaves every mark as it stood
+/// when the point was pushed. A copy of the marks in each point was the same
+/// answer at one allocation per `Split`, on every loop iteration, whether or
+/// not anything ever came back to it — #243.
+type Trail = Vec<(usize, Option<Mark>)>;
 
 /// The calls a path is inside, innermost first. Shared rather than copied,
 /// because every backtrack point holds the whole chain.
@@ -621,7 +623,16 @@ impl Ctx {
 }
 
 /// Each capture slot's byte offset, two per group.
-type Saves = Vec<Option<usize>>;
+///
+/// Shared, and copied only when a path writes to it: every backtrack point
+/// and every loop mark holds the captures as they stood, and almost none of
+/// them is ever written to again. Owned vectors made each `Split` copy the
+/// captures once for itself and once more for every loop mark it held, so a
+/// pattern with `n` loops and `g` groups paid `O(n * g)` per alternative
+/// pushed even on a walk that never backtracks — the nine-group log line in
+/// `bench/regex_captures.rs` copied 117KB of captures to take 62 of them,
+/// #243. Onigmo pays for a capture only where one is written.
+type Saves = Rc<Vec<Option<usize>>>;
 
 /// What a sub-program hands back: where it finished, and the captures it set.
 type SubMatch = (usize, Saves);
@@ -683,7 +694,7 @@ impl Program {
         start: usize,
         ctx: &mut Ctx,
     ) -> Result<Option<Match>, Error> {
-        let saves = vec![None; (self.groups + 1) * 2];
+        let saves = Rc::new(vec![None; (self.groups + 1) * 2]);
         let marks = vec![None; self.marks];
         ctx.history.clear();
         let Some((_, saves)) = self.run(haystack, 0, at, start, saves, marks, ctx)? else {
@@ -707,7 +718,7 @@ impl Program {
         pc: usize,
         sp: usize,
         anchor: usize,
-        saves: Vec<Option<usize>>,
+        saves: Saves,
         marks: Vec<Option<Mark>>,
         ctx: &mut Ctx,
     ) -> Result<Option<SubMatch>, Error> {
@@ -727,11 +738,12 @@ impl Program {
         mut pc: usize,
         mut sp: usize,
         anchor: usize,
-        mut saves: Vec<Option<usize>>,
+        mut saves: Saves,
         mut marks: Vec<Option<Mark>>,
         ctx: &mut Ctx,
     ) -> Result<Option<SubMatch>, Error> {
         let mut stack: Vec<Backtrack> = Vec::new();
+        let mut trail: Trail = Vec::new();
         let mut frames: Frames = None;
         let begun = ctx.history.len();
 
@@ -769,7 +781,7 @@ impl Program {
                     }
                     Inst::Anchor(a) => anchor_holds(*a, haystack, sp, anchor),
                     Inst::Save(slot) => {
-                        saves[*slot] = Some(sp);
+                        set(&mut saves, *slot, Some(sp));
                         if self.history {
                             ctx.history.push(Event::Save {
                                 slot: *slot,
@@ -780,8 +792,8 @@ impl Program {
                         continue;
                     }
                     Inst::SaveRec(group) => {
-                        saves[group * 2] = rec_start(&ctx.history, *group);
-                        saves[group * 2 + 1] = Some(sp);
+                        set(&mut saves, group * 2, rec_start(&ctx.history, *group));
+                        set(&mut saves, group * 2 + 1, Some(sp));
                         ctx.history.push(Event::Save {
                             slot: group * 2 + 1,
                             at: sp,
@@ -802,7 +814,10 @@ impl Program {
                     Inst::Return => {
                         let frame = frames.take().expect("a return with no call to return from");
                         pc = frame.ret;
-                        marks.clone_from(&frame.marks);
+                        for (slot, mark) in frame.marks.iter().enumerate() {
+                            let old = std::mem::replace(&mut marks[slot], mark.clone());
+                            trail.push((slot, old));
+                        }
                         frames.clone_from(&frame.next);
                         ctx.history.push(Event::Return);
                         continue;
@@ -846,8 +861,8 @@ impl Program {
                                     stack.push(Backtrack {
                                         pc: pc + 1,
                                         sp: point,
-                                        saves: saves.clone(),
-                                        marks: marks.clone(),
+                                        saves: Rc::clone(&saves),
+                                        trail: trail.len(),
                                         frames: frames.clone(),
                                         history: ctx.history.len(),
                                     });
@@ -859,18 +874,23 @@ impl Program {
                         }
                     }
                     Inst::Mark(slot) => {
-                        marks[*slot] = Some(Mark {
+                        let mark = Some(Mark {
                             sp,
-                            saves: saves.clone(),
+                            saves: Rc::clone(&saves),
                             depth: stack.len(),
                         });
+                        let old = std::mem::replace(&mut marks[*slot], mark);
+                        // With nothing to come back to, nothing will undo it.
+                        if !stack.is_empty() {
+                            trail.push((*slot, old));
+                        }
                         pc += 1;
                         continue;
                     }
                     Inst::Progress { slot, exit } => {
                         let stalled = marks[*slot]
                             .as_ref()
-                            .is_some_and(|mark| mark.sp == sp && mark.saves == saves);
+                            .is_some_and(|mark| mark.sp == sp && same(&mark.saves, &saves));
                         if stalled {
                             // Nothing moved and nothing changed: end the loop,
                             // and cut away the alternatives this iteration
@@ -895,16 +915,15 @@ impl Program {
                             // this iteration opened: everything the mark did not
                             // already see.
                             //
-                            // ponytail: rewrites one capture vector per surviving
-                            // alternative, so a body with many alternatives pays
-                            // per iteration. Onigmo instead pushes a restore
-                            // record only for the groups that need one; narrow it
-                            // the same way if a real pattern makes this the hot
-                            // path. Measured and deferred with the clone above —
-                            // see `bench/regex_captures.rs` and #184.
+                            // ponytail: visits every surviving alternative, so a
+                            // body with many alternatives pays per iteration —
+                            // a reference count each, now the captures are
+                            // shared. Onigmo instead pushes a restore record
+                            // only for the groups that need one; do the same if
+                            // a real pattern makes this the hot path.
                             if let Some(mark) = &marks[*slot] {
                                 for entry in stack.iter_mut().skip(mark.depth) {
-                                    entry.saves.clone_from(&saves);
+                                    entry.saves = Rc::clone(&saves);
                                 }
                             }
                             pc += 1;
@@ -922,7 +941,7 @@ impl Program {
                         continue;
                     }
                     Inst::Keep => {
-                        saves[0] = Some(sp);
+                        set(&mut saves, 0, Some(sp));
                         if self.history {
                             ctx.history.push(Event::Save { slot: 0, at: sp });
                         }
@@ -933,8 +952,8 @@ impl Program {
                         stack.push(Backtrack {
                             pc: *alt,
                             sp,
-                            saves: saves.clone(),
-                            marks: marks.clone(),
+                            saves: Rc::clone(&saves),
+                            trail: trail.len(),
                             frames: frames.clone(),
                             history: ctx.history.len(),
                         });
@@ -968,7 +987,7 @@ impl Program {
                             *start,
                             sp,
                             anchor,
-                            saves.clone(),
+                            Rc::clone(&saves),
                             marks.clone(),
                             ctx,
                         )?;
@@ -998,7 +1017,7 @@ impl Program {
                                 *start,
                                 sp,
                                 anchor,
-                                saves.clone(),
+                                Rc::clone(&saves),
                                 marks.clone(),
                                 ctx,
                             )?
@@ -1036,7 +1055,9 @@ impl Program {
                         pc = entry.pc;
                         sp = entry.sp;
                         saves = entry.saves;
-                        marks = entry.marks;
+                        for (slot, old) in trail.drain(entry.trail..).rev() {
+                            marks[slot] = old;
+                        }
                         frames = entry.frames;
                         ctx.history.truncate(entry.history);
                     }
@@ -1065,7 +1086,7 @@ impl Program {
         start: usize,
         sp: usize,
         anchor: usize,
-        saves: &[Option<usize>],
+        saves: &Saves,
         marks: &[Option<Mark>],
         ctx: &mut Ctx,
     ) -> Result<Option<SubMatch>, Error> {
@@ -1077,7 +1098,7 @@ impl Program {
                 start,
                 from,
                 anchor,
-                saves.to_vec(),
+                Rc::clone(saves),
                 marks.to_vec(),
                 ctx,
             )? {
@@ -1126,7 +1147,7 @@ impl Program {
         start: usize,
         origin: usize,
         anchor: usize,
-        saves: &[Option<usize>],
+        saves: &Saves,
         marks: &[Option<Mark>],
         ctx: &mut Ctx,
     ) -> Result<(Vec<usize>, Option<Saves>), Error> {
@@ -1157,7 +1178,7 @@ impl Program {
                 start,
                 s,
                 anchor,
-                saves.to_vec(),
+                Rc::clone(saves),
                 marks.to_vec(),
                 ctx,
             )? {
@@ -1177,6 +1198,21 @@ impl Program {
         }
         Ok((points, leaked))
     }
+}
+
+/// Write one capture slot, copying the captures first only if a backtrack
+/// point or a loop mark still holds them, and not at all if the slot already
+/// says `at`: a write that changes nothing must not cost a copy.
+fn set(saves: &mut Saves, slot: usize, at: Option<usize>) {
+    if saves[slot] != at {
+        Rc::make_mut(saves)[slot] = at;
+    }
+}
+
+/// Whether two sets of captures agree: the same allocation always does, which
+/// is the usual answer at the bottom of a loop iteration that wrote nothing.
+fn same(a: &Saves, b: &Saves) -> bool {
+    Rc::ptr_eq(a, b) || a == b
 }
 
 /// Where a called group opened, for the close at `group`'s current depth:
