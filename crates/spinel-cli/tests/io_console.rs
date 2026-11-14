@@ -92,6 +92,7 @@ getpass: ["", "secret", true]
 ttyname: [true, true, #<Encoding:US-ASCII>, true]
 console: [File, "/dev/tty", true, true, true, true]
 console send: [1, 65535]
+console type: ["wrong argument type nil (expected Symbol)", "wrong argument type false (expected Symbol)", "wrong argument type String (expected Symbol)"]
 console close: [nil, true, false]
 flushes: true
 final: true

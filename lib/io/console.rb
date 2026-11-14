@@ -468,7 +468,8 @@ class IO
   # this moves to Ractor-local storage then.
   def self.console(*args)
     unless args.empty? || Symbol === args[0]
-      raise TypeError, "wrong argument type #{args[0].class} (expected Symbol)"
+      name = case args[0] when nil, true, false then args[0].inspect else args[0].class end
+      raise TypeError, "wrong argument type #{name} (expected Symbol)"
     end
     klass = equal?(IO) ? File : self
     console = klass.instance_variable_get(:@__console__)

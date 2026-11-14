@@ -51,6 +51,7 @@ check.("getpass") { [io.getpass, io.getpass("pw: "), `stty -g` == initial] }
 check.("ttyname") { name = io.ttyname; [name.start_with?("/dev/"), name.frozen?, name.encoding, $stdout.ttyname == name] }
 check.("console") { c = IO.console; [c.class, c.path, c.sync, c.tty?, IO.console.equal?(c), File.console.equal?(c)] }
 check.("console send") { IO.console(:winsize) }
+check.("console type") { [nil, false, "x"].map { |a| begin; IO.console(a); rescue TypeError => e; e.message; end } }
 check.("console close") { c = IO.console; [IO.console(:close), c.closed?, IO.console.equal?(c)] }
 check.("flushes") { [io.iflush, $stdout.oflush, io.ioflush, $stdout.beep].all? }
 check.("final") { `stty -g` == initial }
