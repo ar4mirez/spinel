@@ -11,4 +11,3 @@ fails(#29: the $@ global: an expectation about an error, newly reported since PR
 fails(#29: the $@ global: an expectation about an error, newly reported since PRD 0077 let mspec's raise matcher run inside its BasicObject proxy):Predefined global $@ raises a TypeError when the Array contains a Symbol
 fails(#29: the $@ global: an expectation about an error, newly reported since PRD 0077 let mspec's raise matcher run inside its BasicObject proxy):Predefined global $@ raises a TypeError when the array contains nil
 fails(#29: the $@ global: an expectation about an error, newly reported since PRD 0077 let mspec's raise matcher run inside its BasicObject proxy):Predefined global $@ raises a TypeError when the argument is a nested array
-fails(#41: STDOUT does not keep the encodings set_encoding gives it across a ruby_exe child):The predefined global constant STDOUT has the encodings set by #set_encoding
