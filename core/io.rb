@@ -316,8 +316,21 @@ end
     begin
       yield io
     ensure
-      io.close unless io.closed?
+      IO.__close_quietly__(io)
     end
+  end
+
+  # CRuby's `io_close`, which `IO.open` ensures after its block: a `close`
+  # that says the stream was already closed is not news, so that IOError is
+  # dropped, and `$!` with it; any other is raised.
+  def self.__close_quietly__(io)
+    return io if io.closed?
+    begin
+      io.close
+    rescue IOError => error
+      raise unless String === error.message && error.message == "closed stream"
+    end
+    io
   end
 
   def self.sysopen(path, mode = nil, perm = nil)
@@ -361,7 +374,8 @@ end
     io = Kernel.__check_funcall__(object, :to_io) { nil }
     unless nil.equal?(io) || IO === io
       klass = Kernel.__class_of__(object)
-      raise TypeError, "can't convert #{klass} to IO (#{klass}#to_io gives #{Kernel.__class_of__(io)})"
+      # The wording ruby-lang #21864 settled on, as `Array.try_convert`'s.
+      raise TypeError, "can't convert #{klass} into IO (#{klass}#to_io gives #{Kernel.__class_of__(io)})"
     end
     io
   end
@@ -808,10 +822,83 @@ end
     IO.__check__(__fd_fcntl__(@fileno, Integer.__index__(command), argument), @path)[0]
   end
 
-  # ponytail: every `ioctl` request is a pointer to something different.
-  def ioctl(*)
+  # CRuby's `rb_ioctl`. The argument is made into what the call is handed,
+  # as `setup_narg` makes it, before the stream is looked at.
+  def ioctl(request, argument = nil)
+    request = Integer.__c_long__(request)
+    narg = IO.__narg__(argument, IO.__ioctl_narg_len__(request))
     __check_open__
-    raise NotImplementedError, "ioctl() function is unimplemented on this machine"
+    answer = IO.__check__(__fd_ioctl__(@fileno, request, narg), @path, "finish_narg")
+    IO.__finish_narg__(narg, answer)
+  end
+
+  # `ioctl_narg_len`: how much a request may write through its pointer. A
+  # BSD request carries its size; Linux's carries it too, but drivers do not
+  # keep to that, so CRuby never gives one less than 256 bytes there.
+  def self.__ioctl_narg_len__(request)
+    unless RUBY_PLATFORM.include?("linux")
+      return RUBY_PLATFORM.include?("darwin") ? (request >> 16) & 0x1fff : 256
+    end
+    return 256 if request & 0xffff0000 == 0
+    [(request >> 16) & 0x3fff, 256].max
+  end
+
+  # The sentinel `setup_narg` writes after the room a request may fill.
+  NARG_SENTINEL__ = 17
+  private_constant :NARG_SENTINEL__
+
+  # CRuby's `setup_narg`: an Integer for nil, false, true or an Integer, else
+  # the caller's own String grown to `length` bytes and a sentinel, which the
+  # call fills in place.
+  def self.__narg__(argument, length)
+    return 0 if nil.equal?(argument) || false.equal?(argument)
+    return 1 if true.equal?(argument)
+    return Integer.__c_long__(argument) if Integer === argument
+    string = Kernel.__check_funcall__(argument, :to_str) { nil } unless String === argument
+    string = argument if String === argument
+    return Integer.__c_long__(argument) if string.nil?
+    unless String === string
+      klass = Kernel.__class_of__(argument)
+      raise TypeError, "can't convert #{klass} to String (#{klass}#to_str gives #{Kernel.__class_of__(string)})"
+    end
+    raise FrozenError, "can't modify frozen String: #{string.inspect}" if string.frozen?
+    if string.bytesize < length + 1
+      encoding = string.encoding
+      string.force_encoding(Encoding::BINARY)
+      string << "\0" * (length + 1 - string.bytesize)
+      string.force_encoding(encoding)
+    end
+    string.setbyte(-1, NARG_SENTINEL__)
+    string
+  end
+
+  # CRuby's `finish_narg`: what the call answered, with what it wrote back in
+  # the caller's String, which is refused if it ran over the sentinel.
+  def self.__finish_narg__(narg, answer)
+    return answer[0] unless String === narg
+    encoding = narg.encoding
+    narg.replace(answer[1]).force_encoding(encoding)
+    raise ArgumentError, "return value overflowed string" if narg.getbyte(-1) != NARG_SENTINEL__
+    narg.setbyte(-1, 0)
+    answer[0]
+  end
+
+  # CRuby's `rb_io_advise`: the advice is checked before the stream is, and
+  # the hint goes to a duplex child's write end, as `GetWriteIO` sends it.
+  def advise(advice, offset = nil, length = nil)
+    raise TypeError, "advice must be a Symbol" unless Symbol === advice
+    unless %i[normal sequential random willneed dontneed noreuse].include?(advice)
+      raise NotImplementedError, "Unsupported advice: #{advice.inspect}"
+    end
+    fd = __tied__? && !@wclosed ? @wfileno : @fileno
+    __check_open__
+    offset = offset.nil? ? 0 : Integer.__c_long__(offset)
+    length = length.nil? ? 0 : Integer.__c_long__(length)
+    answer = __fd_advise__(fd, offset, length, advice.name)
+    # `posix_fadvise` answers its error rather than setting errno, and
+    # `do_io_advise` names the arguments after the path.
+    raise SystemCallError.new("#{@path} (#{offset}, #{length}, #{advice})", answer) if Integer === answer
+    nil
   end
 
   def pid
@@ -2326,6 +2413,7 @@ end
         IO.__wait__([[self, IO::WRITABLE]], @timeout) || raise(IO::TimeoutError, "Blocking operation timed out!")
         next
       end
+      __epipe__(result) if @sigpipe
       written = IO.__check__(result, @path)[0]
       return total if written >= text.bytesize
       text = text.byteslice(written, text.bytesize - written)
@@ -2488,6 +2576,32 @@ end
     buffer.force_encoding(encoding)
   end
 
+  # CRuby's `rb_sys_fail_on_write` for an IO with `FMODE_SIGNAL_ON_EPIPE`,
+  # which only `STDOUT` starts with: the `Errno::EPIPE` is raised as any
+  # other, but if nothing rescues it the program ends by SIGPIPE, saying
+  # nothing, as the `id_signo` CRuby hides in it asks (ruby-lang #14413).
+  def __epipe__(result)
+    return unless result == Errno::EPIPE::Errno
+    error = SystemCallError.new(@path, result, "rb_sys_fail_on_write")
+    IO.__epipe_signal__ = error
+    raise error
+  end
+
+  class << self
+    # The last `Errno::EPIPE` that ends the program by SIGPIPE if it is what
+    # ended it.
+    attr_accessor :__epipe_signal__
+  end
+
+  def __signal_on_epipe__ = @sigpipe
+
+  # Only `STDOUT` has CRuby's `FMODE_SIGNAL_ON_EPIPE`. Measured: a broken
+  # STDERR is an `Errno::EPIPE` and status 1.
+  def __signal_on_epipe__!
+    @sigpipe = true
+    self
+  end
+
   def self.__eagain__
     @__eagain__ ||= Errno::EAGAIN::Errno
   end
@@ -2529,6 +2643,9 @@ end
     length = Integer.__index__(length)
     offset = Integer.__index__(offset)
     raise ArgumentError, "negative string size (or size too big)" if length < 0
+    # `io_setstrbuf` converts the buffer through `to_str` before anything
+    # is read, and the String it answers is the one filled in.
+    buffer = IO.__str__(buffer) unless buffer.nil?
     # Measured: a zero length hands the buffer back as it was.
     return buffer || "" if length == 0
     chunk = __pread_bytes__(length, offset)
@@ -3777,6 +3894,10 @@ end
 
   def lineno=(number)
     __readable__
+    # ruby/spec's `raise_consistent_error` asks every Ruby but CRuby before
+    # 4.1 for the wording ruby-lang #21864 settled on, not `NUM2INT`'s own
+    # "from nil to integer".
+    raise TypeError, "no implicit conversion of nil into Integer" if number.nil?
     @lineno = IO.__c_int__(number)
   end
 
@@ -4026,6 +4147,8 @@ end
       return __reopen_io__(other) if IO === other
     end
     path = File.__path__(other)
+    # `rb_io_reopen` with a path sets the mode afresh, without the flag.
+    @sigpipe = nil
     if mode.nil? && options.empty?
       # Everything stays, the mode's creating and truncating among it.
       # Neither reading nor writing opens as a reader does.
@@ -4083,6 +4206,8 @@ end
     other.__check_open__
     __check_open__
     return self if other.equal?(self)
+    # `io_reopen` takes the other IO's mode, the flag with it.
+    @sigpipe = other.__signal_on_epipe__
     # Only here is it `stdio_file` that counts: an `autoclose = false` IO can
     # take any access from an IO, and a standard stream only one it has.
     if @stdio && !@autoclose && other.__side__ != 2 && other.__side__ != (@fileno == 0 ? 0 : 1)
@@ -4180,7 +4305,6 @@ end
   # A command's standard output to read, its standard input to write, or
   # both, as one IO; `close` waits for it. The command is what `spawn` takes,
   # an Array holding its own options and environment included.
-  # ponytail: `"-"`, which forks and runs the block on both sides, refuses.
   def self.popen(*args, **options, &block)
     env = Hash === args.first ? args.shift : {}
     # The options may come as a last positional Hash, as they did before
@@ -4193,13 +4317,13 @@ end
     mode = "r" if mode.nil?
     # Converted once, here: it is read twice below.
     mode = mode.to_str unless String === mode || Integer === mode
-    if command == "-"
-      raise NotImplementedError, "IO.popen(\"-\"): a fork with the block on both sides is not supported yet"
-    end
-    spawn_args = Array === command ? command.dup : [IO.__str__(command)]
-    command_options = Hash === spawn_args.last ? spawn_args.pop : {}
-    if Hash === spawn_args.first
-      env = env.merge(spawn_args.shift)
+    forked = String === command && command == "-"
+    unless forked
+      spawn_args = Array === command ? command.dup : [IO.__str__(command)]
+      command_options = Hash === spawn_args.last ? spawn_args.pop : {}
+      if Hash === spawn_args.first
+        env = env.merge(spawn_args.shift)
+      end
     end
     flags, = IO.__mode_flags__(mode)
     access = flags & 3
@@ -4207,7 +4331,7 @@ end
     io_options = options.select { |key, _| io_keys.include?(key) }
     # A key `spawn` does not know is left for the IO, as `rb_execarg_extract_options`
     # leaves it, where it is ignored; in the command it is still refused.
-    spawn_options = command_options.merge(options.select { |key, _| Process::Spawn.option?(key) })
+    spawn_options = command_options.merge(options.select { |key, _| Process::Spawn.option?(key) }) unless forked
     # Read before the child starts, as `rb_io_popen` does, in the mode as it
     # was given. A pipe has no BOM read past, however the mode names one.
     io = allocate
@@ -4223,7 +4347,20 @@ end
     extra << [0, child_in] unless child_in.nil?
     extra << [1, child_out] unless child_out.nil?
     begin
-      pid = Process::Spawn.start([env] + spawn_args + [spawn_options], extra, name: "popen")
+      if forked
+        # `"-"` is CRuby's `pipe_open` with no command: a fork, the child's
+        # standard input and output made the pipe's other ends.
+        pid = Process._fork
+        if pid == 0
+          extra.each { |target, source| __fd_dup2__(source, target) }
+          [child_in, child_out, parent_r, parent_w].each { |fd| __fd_close__(fd) unless fd.nil? }
+          child_in = child_out = nil
+          return nil if block.nil?
+          IO.__popen_child__(block)
+        end
+      else
+        pid = Process::Spawn.start([env] + spawn_args + [spawn_options], extra, name: "popen")
+      end
     ensure
       __fd_close__(child_in) unless child_in.nil?
       __fd_close__(child_out) unless child_out.nil?
@@ -4239,6 +4376,21 @@ end
     end
   ensure
     [parent_r, parent_w].each { |fd| __fd_close__(fd) unless fd.nil? } if pid.nil?
+  end
+
+  # CRuby's `popen_finish` in the child of `IO.popen("-")`: the block is
+  # given nil, under `rb_protect`, so whatever it raises, `exit` included, is
+  # dropped without a word, and the child ends with status 0 without running
+  # what `at_exit` registered.
+  def self.__popen_child__(block)
+    begin
+      block.call(nil)
+    rescue Exception
+      nil
+    end
+    STDOUT.flush
+    STDERR.flush
+    exit!(0)
   end
 
   # --- reading and writing whole files -------------------------------------
@@ -4275,8 +4427,17 @@ end
     end
   end
 
+  # CRuby's `rb_io_s_binread`, which is not `read`'s: the offset is a seek
+  # made before the length is looked at, so a negative one is the seek's
+  # `Errno::EINVAL` and a negative length `io_read`'s `ArgumentError`.
   def self.binread(name, length = nil, offset = nil)
-    read(name, length, offset, mode: "rb")
+    file = __open_for__(name, "rb", {})
+    begin
+      file.seek(offset) unless offset.nil?
+      file.read(length)
+    ensure
+      file.close
+    end
   end
 
   def self.write(name, data, offset = nil, **options)
@@ -4477,7 +4638,7 @@ end
 # process may start with one of them closed.
 # Measured: `autoclose?` is false, and `close` leaves the descriptor open.
 STDIN = IO.allocate.__setup__(0, "r", { path: "<STDIN>", autoclose: false }).__stdio__
-STDOUT = IO.allocate.__setup__(1, "w", { path: "<STDOUT>", autoclose: false }).__stdio__
+STDOUT = IO.allocate.__setup__(1, "w", { path: "<STDOUT>", autoclose: false }).__stdio__.__signal_on_epipe__!
 STDERR = IO.allocate.__setup__(2, "w", { path: "<STDERR>", autoclose: false }).__stdio__
 # Measured: only STDERR starts unbuffered.
 STDERR.sync = true
@@ -4534,7 +4695,9 @@ module Kernel
         __puts_line__(line)
         next
       end
-      array = Array === line ? line : (line.respond_to?(:to_ary, true) ? line.to_ary : nil)
+      # `rb_check_array_type`, so a `method_missing` of the object's own is
+      # asked for `to_ary` too, as `rb_check_funcall` asks it.
+      array = Array.__check_array__(line)
       if Array === array
         if seen.any? { |outer| outer.equal?(array) }
           __puts_line__("[...]".b)

@@ -1768,8 +1768,13 @@ fn reflect_native(
                             | Native::ArrayPlus
                             | Native::ProcEq,
                         )) => (1, None, 0),
+                        // CRuby's not-implemented entry reports no
+                        // parameters, though it takes any.
                         Some(Definition::Native(
-                            Native::NumNeg | Native::Getter(_) | Native::IvarReader(_),
+                            Native::NumNeg
+                            | Native::Getter(_)
+                            | Native::IvarReader(_)
+                            | Native::NotImplemented,
                         )) => (0, None, 0),
                         // Any other primitive, or a `define_method` body: no
                         // fixed count to report and no line it was written on.
@@ -12046,6 +12051,35 @@ fn native_call<'h>(
             stack.push(bool_value(equal));
             Ok(None)
         }
+        Native::NotImplemented => {
+            let name = crate::shared::symbols::name(call.name).unwrap_or_default();
+            Err(Error::raise(
+                "NotImplementedError",
+                format!("{name}() function is unimplemented on this machine"),
+            ))
+        }
+        Native::DefineNotImplemented => {
+            let Some(id) = class_id_of(scope, call.receiver) else {
+                return Err(Error::NoDispatch {
+                    op: "Module#__notimplement__",
+                    operands: "a receiver that is not a Module",
+                });
+            };
+            let body = scope
+                .definitions_mut()
+                .add(Definition::Native(Native::NotImplemented));
+            for &name in &call.args {
+                let Some(symbol) = name.as_symbol() else {
+                    return Err(Error::NoDispatch {
+                        op: "Module#__notimplement__",
+                        operands: "a name that is not a Symbol",
+                    });
+                };
+                scope.classes_mut().define_method(id, symbol, body);
+            }
+            stack.push(Value::NIL);
+            Ok(None)
+        }
         Native::BlockGiven => {
             // The block of the frame that called `block_given?`, which is the
             // one still on top: a primitive does not push a frame.
@@ -15179,7 +15213,9 @@ fn native_call<'h>(
                 );
             };
             let found = lookup_inherited(scope, id, symbol, call.args.get(1));
-            let matched = found.is_some_and(|method| method.visibility == visibility);
+            let matched = found.is_some_and(|method| {
+                method.visibility == visibility && !not_implemented(scope, &method)
+            });
             stack.push(bool_value(matched));
             Ok(None)
         }
@@ -15382,7 +15418,9 @@ fn native_call<'h>(
                 );
             };
             let found = lookup_inherited(scope, id, symbol, call.args.get(1));
-            let matched = found.is_some_and(|method| method.visibility != Visibility::Private);
+            let matched = found.is_some_and(|method| {
+                method.visibility != Visibility::Private && !not_implemented(scope, &method)
+            });
             stack.push(bool_value(matched));
             Ok(None)
         }
@@ -15411,10 +15449,18 @@ fn native_call<'h>(
                 );
             };
             let include_all = call.args.get(1).is_some_and(|&v| v.is_truthy());
-            let found = scope
+            let visible = scope
                 .classes_mut()
                 .lookup_in(class, symbol, call.cref)
-                .is_some_and(|method| include_all || method.visibility == Visibility::Public);
+                .filter(|method| include_all || method.visibility == Visibility::Public);
+            if visible
+                .as_ref()
+                .is_some_and(|method| not_implemented(scope, method))
+            {
+                stack.push(Value::FALSE);
+                return Ok(None);
+            }
+            let found = visible.is_some();
             // Not in the table: a program's `respond_to_missing?` decides
             // (#28), as a frame whose answer comes back as a boolean.
             let asks = crate::shared::symbols::intern("respond_to_missing?");
@@ -16740,6 +16786,11 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         ),
         (Builtin::Module, &["ancestors"], Native::Ancestors),
         (Builtin::Module, &["method_defined?"], Native::MethodDefined),
+        (
+            Builtin::Module,
+            &["__notimplement__"],
+            Native::DefineNotImplemented,
+        ),
         (Builtin::Module, &["alias_method"], Native::AliasMethod),
         (
             Builtin::Module,
@@ -17695,6 +17746,16 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             Builtin::Kernel,
             &["__fd_fcntl_constants__"],
             Native::Fs(FsOp::FcntlConstants),
+        ),
+        (
+            Builtin::Kernel,
+            &["__fd_ioctl__"],
+            Native::Fs(FsOp::FdIoctl),
+        ),
+        (
+            Builtin::Kernel,
+            &["__fd_advise__"],
+            Native::Fs(FsOp::FdAdvise),
         ),
         (
             Builtin::Kernel,
@@ -19680,6 +19741,15 @@ fn int_eq_float(i: i64, f: f64) -> bool {
         return false;
     }
     f as i64 == i
+}
+
+/// Whether `method` is CRuby's not-implemented entry, which `respond_to?` and
+/// `method_defined?` look past.
+fn not_implemented(scope: &HandleScope<'_>, method: &Method) -> bool {
+    matches!(
+        scope.definitions().get(method.body),
+        Some(Definition::Native(Native::NotImplemented))
+    )
 }
 
 /// Whether `builtin`'s `name` is still the primitive `wanted`: a program that
@@ -24407,6 +24477,70 @@ fn fd_result(scope: &mut HandleScope<'_>, answer: i64) -> Value {
     }
 }
 
+/// `posix_fadvise(2)` for `IO#advise`: true, an errno, or nil for an advice
+/// the platform has no constant for, which CRuby's `do_io_advise` ignores as
+/// only a hint.
+#[cfg(target_os = "linux")]
+fn advise(fd: libc::c_int, offset: i64, length: i64, advice: &[u8]) -> Value {
+    let advice = match advice {
+        b"normal" => libc::POSIX_FADV_NORMAL,
+        b"sequential" => libc::POSIX_FADV_SEQUENTIAL,
+        b"random" => libc::POSIX_FADV_RANDOM,
+        b"willneed" => libc::POSIX_FADV_WILLNEED,
+        b"dontneed" => libc::POSIX_FADV_DONTNEED,
+        b"noreuse" => libc::POSIX_FADV_NOREUSE,
+        _ => return Value::NIL,
+    };
+    // SAFETY: `posix_fadvise` takes integers and touches no memory. It answers
+    // the error itself, rather than setting `errno`.
+    match unsafe { libc::posix_fadvise(fd, offset as libc::off_t, length as libc::off_t, advice) } {
+        0 => Value::TRUE,
+        code => errno_value(&std::io::Error::from_raw_os_error(code)),
+    }
+}
+
+/// Where there is no `posix_fadvise` (macOS), CRuby's `rb_io_advise` checks
+/// its arguments and ignores the hint.
+#[cfg(not(target_os = "linux"))]
+fn advise(_fd: libc::c_int, _offset: i64, _length: i64, _advice: &[u8]) -> Value {
+    Value::NIL
+}
+
+/// `lchmod(2)`, where the platform has it.
+#[cfg(target_vendor = "apple")]
+fn lchmod(path: PathBuf, mode: i64) -> Value {
+    // libSystem exports `lchmod(2)`, but the `libc` crate does not declare it
+    // for Apple targets.
+    unsafe extern "C" {
+        fn lchmod(path: *const libc::c_char, mode: libc::mode_t) -> libc::c_int;
+    }
+    with_cpath(path, |path| {
+        // SAFETY: `path` is NUL-terminated and outlives the call.
+        unit_result(unsafe { lchmod(path.as_ptr(), mode as libc::mode_t) })
+    })
+}
+
+/// Linux has no `lchmod(2)`, so CRuby's `File.lchmod` is not implemented
+/// there and nothing asks for this.
+#[cfg(not(target_vendor = "apple"))]
+fn lchmod(_path: PathBuf, _mode: i64) -> Value {
+    errno_value(&std::io::Error::from_raw_os_error(libc::ENOSYS))
+}
+
+/// A stat's birth time, seconds and nanoseconds, after its other fields,
+/// where `struct stat` has one: macOS's `st_birthtime`. Linux's `stat` has
+/// none, and CRuby's `File::Stat#birthtime` is not implemented there.
+#[cfg(target_os = "macos")]
+fn birthtime(m: &std::fs::Metadata) -> Vec<i64> {
+    use std::os::macos::fs::MetadataExt as _;
+    vec![m.st_birthtime(), m.st_birthtime_nsec()]
+}
+
+#[cfg(not(target_os = "macos"))]
+fn birthtime(_m: &std::fs::Metadata) -> Vec<i64> {
+    Vec::new()
+}
+
 /// A system call that answers 0 or -1: true, or an errno.
 fn unit_result(answer: libc::c_int) -> Value {
     if answer < 0 {
@@ -24814,9 +24948,17 @@ fn fs_native(
             use std::os::unix::fs::PermissionsExt as _;
             let path = path_arg(scope, call, 0)?;
             let mode = call.args.get(1).and_then(|v| v.as_fixnum()).unwrap_or(0);
-            match std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode as u32)) {
-                Ok(()) => Value::TRUE,
-                Err(error) => errno_value(&error),
+            // A false third argument is `lchmod(2)`, the link itself, which
+            // only some platforms have; `core/file.rb` defines `File.lchmod`
+            // where it is, and CRuby's not-implemented method elsewhere.
+            if call.args.get(2).is_some_and(|v| !v.is_truthy()) {
+                lchmod(path, mode)
+            } else {
+                match std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode as u32))
+                {
+                    Ok(()) => Value::TRUE,
+                    Err(error) => errno_value(&error),
+                }
             }
         }
         FsOp::Stat => {
@@ -24851,8 +24993,8 @@ fn fs_native(
                         m.ctime(),
                         m.ctime_nsec(),
                     ];
-                    let mut values = Vec::with_capacity(fields.len());
-                    for field in fields {
+                    let mut values = Vec::with_capacity(fields.len() + 2);
+                    for field in fields.into_iter().chain(birthtime(&m)) {
                         let value = match Value::fixnum(field) {
                             Some(value) => value,
                             None => crate::bignum::value(scope, &num_bigint::BigInt::from(field)),
@@ -25118,6 +25260,47 @@ fn fs_native(
             }
             let out: Vec<Value> = out.into_iter().map(|h| scope.get(h)).collect();
             new_array(scope, &out)
+        }
+        FsOp::FdIoctl => {
+            let fd = fd_arg(call)?;
+            let request = int_arg(call, 1).unwrap_or(0);
+            if let Some(mut bytes) = call.args.get(2).and_then(|&v| string_bytes(scope, v)) {
+                // `core/io.rb` has sized the String as CRuby's `setup_narg`
+                // does, with room for what the request writes and a sentinel
+                // byte after it, so the call is handed memory it may fill.
+                // SAFETY: `bytes` is writable for its whole length for the
+                // call, which is as long as the request's argument or longer.
+                let answer = unsafe { libc::ioctl(fd, request as _, bytes.as_mut_ptr()) };
+                if answer < 0 {
+                    errno_value(&std::io::Error::last_os_error())
+                } else {
+                    let class = class_handle(scope, Builtin::String);
+                    let out = string_alloc(scope, class, &bytes, crate::strings::BINARY);
+                    let answer = Value::fixnum(i64::from(answer)).expect("an int is a fixnum");
+                    new_array(scope, &[answer, out])
+                }
+            } else {
+                // An Integer argument is passed as the pointer-sized value
+                // itself, as CRuby's `narg` is.
+                let argument = int_arg(call, 2).unwrap_or(0) as libc::c_long;
+                // SAFETY: the request was given an integer, which is the
+                // caller's promise that it reads no memory through it.
+                fd_result(
+                    scope,
+                    i64::from(unsafe { libc::ioctl(fd, request as _, argument) }),
+                )
+            }
+        }
+        FsOp::FdAdvise => {
+            let fd = fd_arg(call)?;
+            let offset = int_arg(call, 1).unwrap_or(0);
+            let length = int_arg(call, 2).unwrap_or(0);
+            let advice = call
+                .args
+                .get(3)
+                .and_then(|&v| string_bytes(scope, v))
+                .unwrap_or_default();
+            advise(fd, offset, length, &advice)
         }
         FsOp::FdFlock => {
             let fd = fd_arg(call)?;

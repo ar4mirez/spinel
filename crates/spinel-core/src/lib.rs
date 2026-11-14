@@ -293,6 +293,21 @@ pub fn report_uncaught(scope: &mut HandleScope<'_>) -> bool {
     interp::eval_in(scope, &mut frame, &iseq).is_ok_and(|value| value.is_truthy())
 }
 
+/// The signal, by number, that the error which ended the program ends the
+/// process by although it is no `SignalException`: CRuby's `id_signo`,
+/// which only a broken `STDOUT` sets. None for every other error, and for
+/// none.
+pub fn uncaught_signal(scope: &mut HandleScope<'_>) -> Option<i32> {
+    let parsed = spinel_parse::parse_file(
+        "<exit>",
+        b"(name = Kernel.__signal_of__) && Signal.list[name]",
+    );
+    let iseq = compile::program(&parsed.program).ok()?;
+    let mut frame = interp::Frame::new(0);
+    let number = interp::eval_in(scope, &mut frame, &iseq).ok()?;
+    number.as_fixnum().and_then(|n| i32::try_from(n).ok())
+}
+
 /// Finish the program once its error is reported: kill the other threads,
 /// run the finalizers left, and finish every IO's converter, in that order.
 pub fn cleanup(scope: &mut HandleScope<'_>) {

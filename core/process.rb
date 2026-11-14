@@ -104,10 +104,18 @@ module Kernel
   def self.__report__(error = @__uncaught__)
     return false if error.nil?
     return true if SystemExit === error || (SignalException === error && !(Interrupt === error))
+    return true unless __signal_of__(error).nil?
     $stderr.write(error.full_message(highlight: false))
     true
   rescue Exception
     false
+  end
+
+  # The signal an error that ended the program ends the process by, beyond
+  # a `SignalException`'s own: SIGPIPE for `STDOUT`'s broken pipe.
+  def self.__signal_of__(error = @__uncaught__)
+    return nil if error.nil?
+    error.equal?(IO.__epipe_signal__) ? "PIPE" : nil
   end
 
   def self.__status_of__(error)

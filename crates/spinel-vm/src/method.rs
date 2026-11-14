@@ -98,6 +98,15 @@ pub enum Native {
     ProcBinding,
     /// `Kernel#block_given?`
     BlockGiven,
+    /// CRuby's `rb_f_notimplement`: a method this platform has no system
+    /// call for, which raises `NotImplementedError` whatever it is passed.
+    /// `respond_to?` and the `method_defined?` family say it is not there,
+    /// though `instance_methods` lists it, as CRuby's
+    /// `VM_METHOD_TYPE_NOTIMPLEMENTED` entry does.
+    NotImplemented,
+    /// `Module#__notimplement__(*names)`: each name defined, public, as a
+    /// [`Native::NotImplemented`]. Answers nil.
+    DefineNotImplemented,
     /// `Object#class`
     ClassOf,
     /// `Class#new`: allocate, then run `initialize` if there is one.
@@ -742,7 +751,8 @@ pub enum FsOp {
     Umask,
     /// `__fs_mkdir__(path, mode)`, `__fs_rmdir__(path)`, `__fs_unlink__(path)`,
     /// `__fs_rename__(from, to)`, `__fs_symlink__(target, link)` and
-    /// `__fs_chmod__(path, mode)`: true.
+    /// `__fs_chmod__(path, mode, follow = true)`: true. Not following is
+    /// `lchmod(2)`, which only macOS here has.
     Mkdir,
     Rmdir,
     Unlink,
@@ -754,7 +764,8 @@ pub enum FsOp {
     /// `__fs_stat__(path, follow)`: `stat(2)`'s fields — `fstat(2)`'s when
     /// the path is an Integer descriptor — as sixteen Integers:
     /// dev, ino, mode, nlink, uid, gid, rdev, size, blksize, blocks, then
-    /// seconds and nanoseconds for atime, mtime and ctime.
+    /// seconds and nanoseconds for atime, mtime and ctime; then, on macOS,
+    /// seconds and nanoseconds for the birth time.
     Stat,
     /// `__fd_open__(path, flags, perm)`: `[fd]`.
     Open,
@@ -783,6 +794,13 @@ pub enum FsOp {
     /// `__fd_fcntl_constants__`: `[name, value]` pairs for `Fcntl` and the
     /// descriptor flags `IO` reads.
     FcntlConstants,
+    /// `__fd_ioctl__(fd, request, argument)`: `[what ioctl answered]` for an
+    /// Integer argument, `[answer, bytes]` for a String one, whose bytes are
+    /// handed to the call and come back as it left them.
+    FdIoctl,
+    /// `__fd_advise__(fd, offset, length, advice)`: true, nil where the
+    /// platform has no `posix_fadvise` or no such advice, or an errno.
+    FdAdvise,
     /// `__fd_flock__(fd, operation)`: true.
     FdFlock,
     /// `__fd_fsync__(fd, data_only)`: true.

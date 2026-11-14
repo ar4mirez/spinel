@@ -87,7 +87,11 @@ fix is a different slice. The reason says which slice, by number.
 
 ## What is here now
 
-A hundred and fifty-one tags across eighty-three files. `Kernel#test`,
+A hundred and forty-nine tags across eighty-one files. The `IO` and `File`
+edges (#41, S2) removed two, and their files: `IO#puts` asking `to_ary`
+through a `method_missing` of the object's own, as `rb_check_funcall` does,
+and `STDOUT` ending the program by SIGPIPE when its reader has gone.
+Before it, a hundred and fifty-one across eighty-three. `Kernel#test`,
 `#select` and `#global_variables` (#41, S1) removed six, and three files:
 `core/kernel/{test,select,global_variables}`'s "is a private method" and
 "`Kernel.X` is a public method", which pass now that the methods exist.
