@@ -89,8 +89,9 @@ pub enum Native {
     /// class, CRuby's `RBASIC_SET_CLASS(io, rb_obj_class(nfile))` in
     /// `io_reopen`: only when the two headers name different classes, and
     /// then never a singleton, so one the receiver had is dropped. Refused
-    /// unless both are heap objects of one representation and layout, so it
-    /// cannot make bytes of one built-in read as another's.
+    /// unless both are IOs and heap objects of one representation and layout,
+    /// so it cannot make bytes of one built-in read as another's. Installed on
+    /// `Kernel` only because `IO` is defined in `core/io.rb`, not a `Builtin`.
     ReclassAs,
     /// `Kernel#__proc_binding__(proc)` (#27): a `Binding` of the scope a block
     /// was written in, which `Proc#binding` answers.

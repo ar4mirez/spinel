@@ -14236,9 +14236,21 @@ fn native_call<'h>(
             let receiver = call.receiver;
             let refused = Error::NoDispatch {
                 op: "__reclass_as__",
-                operands: "objects that are not both of one representation and layout",
+                operands: "objects that are not both IOs of one representation and layout",
             };
             if receiver.is_immediate() || other.is_immediate() {
+                return Err(refused);
+            }
+            let io = scope
+                .classes()
+                .const_get_here(Builtin::Object.id(), symbol("IO"))
+                .and_then(|class| class_id_of(scope, class));
+            let (Some(io), Some(own), Some(their)) =
+                (io, class_of(scope, receiver), class_of(scope, other))
+            else {
+                return Err(refused);
+            };
+            if !scope.classes().reaches(own, io) || !scope.classes().reaches(their, io) {
                 return Err(refused);
             }
             let (mine, theirs) = (
@@ -14246,11 +14258,7 @@ fn native_call<'h>(
                 scope.class_object_of(other),
             );
             if mine != theirs {
-                let (Some(mut class), Some(own)) =
-                    (class_of(scope, other), class_of(scope, receiver))
-                else {
-                    return Err(refused);
-                };
+                let mut class = their;
                 if scope.classes().repr(class) != scope.classes().repr(own)
                     || scope.layout_of(receiver) != scope.layout_of(other)
                 {
