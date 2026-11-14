@@ -230,8 +230,12 @@ mod tests {
             ispeed: 0,
             ospeed: 0,
         };
-        let error = mode_into(&mode, &mut termios).unwrap_err();
-        assert_eq!(error.raw_os_error(), Some(libc::EINVAL));
+        // A flag word is only too wide where `tcflag_t` is narrower than
+        // 64 bits: Linux's is `u32`, macOS's is `u64`.
+        if std::mem::size_of::<libc::tcflag_t>() < std::mem::size_of::<u64>() {
+            let error = mode_into(&mode, &mut termios).unwrap_err();
+            assert_eq!(error.raw_os_error(), Some(libc::EINVAL));
+        }
         mode.lflag = u64::from(libc::ECHO);
         // The speeds go through the C library, which miri cannot call.
         if cfg!(not(miri)) {
@@ -275,8 +279,8 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     fn a_pseudo_terminal_keeps_its_mode_and_size() {
         // SAFETY: `posix_openpt` and the calls after it take no memory but
-        // the descriptor, and `ptsname_r` writes into a buffer as long as
-        // the length given.
+        // the descriptor, and `ptsname` returns a NUL-terminated name that
+        // is copied out before any other call can overwrite it.
         unsafe {
             let master = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
             if master < 0 {
@@ -284,8 +288,11 @@ mod tests {
             }
             assert_eq!(libc::grantpt(master), 0);
             assert_eq!(libc::unlockpt(master), 0);
-            let mut name = [0 as libc::c_char; 128];
-            assert_eq!(libc::ptsname_r(master, name.as_mut_ptr(), name.len()), 0);
+            // `ptsname_r` is not in macOS's libc; this test is the only
+            // caller of `ptsname`, so its static buffer is not shared.
+            let name = libc::ptsname(master);
+            assert!(!name.is_null());
+            let name = std::ffi::CStr::from_ptr(name).to_owned();
             let slave = libc::open(name.as_ptr(), libc::O_RDWR | libc::O_NOCTTY);
             assert!(slave >= 0);
 
@@ -299,7 +306,7 @@ mod tests {
             assert_eq!(winsize(slave).unwrap(), [40, 100, 7, 9]);
             flush(slave, libc::TCIOFLUSH).expect("the queues are flushed");
             let tty = ttyname(slave).unwrap().expect("a terminal has a name");
-            assert!(tty.starts_with(b"/dev/pts/"));
+            assert_eq!(tty, name.to_bytes());
 
             libc::close(slave);
             libc::close(master);
