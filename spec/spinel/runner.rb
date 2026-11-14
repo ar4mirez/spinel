@@ -91,7 +91,10 @@ module Kernel
           @__in_library_require__ = true
           return __spinel_require__(path)
         rescue LoadError => e
-          SpinelRunner.formatter&.fixture_stopped(path, "#{e.class}: #{e.message}")
+          # `to_s`, not `message`: `bundled_gems.rb` (#319) makes `message`
+          # ask `defined?(Bundler)`, which a heap a fixture left partial
+          # refuses. The text is the same.
+          SpinelRunner.formatter&.fixture_stopped(path, "#{e.class}: #{e.to_s}")
           return false
         ensure
           @__in_library_require__ = false
@@ -108,7 +111,8 @@ module Kernel
         result = begin
           __spinel_require__(path)
         rescue StandardError, ScriptError => e
-          SpinelRunner.formatter&.fixture_stopped(path, "#{e.class}: #{e.message.to_s.split("\n").first.to_s}")
+          text = LoadError === e ? e.to_s : e.message
+          SpinelRunner.formatter&.fixture_stopped(path, "#{e.class}: #{text.to_s.split("\n").first.to_s}")
           __mark_partial__
           true
         end

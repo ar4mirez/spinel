@@ -492,6 +492,22 @@ class String
     out
   end
 
+  # Each character's `ord`, so a character that is not valid in the
+  # encoding is an ArgumentError when it is reached, as in CRuby.
+  # `did_you_mean`'s spell checker reads them (#319).
+  def each_codepoint
+    return to_enum(:each_codepoint) { length } unless block_given?
+    each_char { |c| yield c.ord }
+    self
+  end
+
+  def codepoints(&block)
+    return each_codepoint(&block) unless block.nil?
+    out = []
+    each_char { |c| out.push(c.ord) }
+    out
+  end
+
   def reverse
     offsets = __char_offsets__
     out = String.new(encoding: encoding)

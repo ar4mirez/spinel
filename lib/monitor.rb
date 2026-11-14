@@ -2,7 +2,7 @@
 # `Monitor` class first below, in Ruby over `Thread::Mutex`; its Ruby half,
 # `MonitorMixin` and the rest of `Monitor`, is upstream's
 # `ext/monitor/lib/monitor.rb` (Ruby 4.0), after it, unchanged but for its
-# `require 'monitor.so'`, which is the half above.
+# `require 'monitor.so'`, which is the half above, and its magic comment.
 #
 # A monitor is a reentrant mutex: its owner is a fiber, as in CRuby, and a
 # count of how many times that fiber has entered it. Blocking is the mutex's,
@@ -90,7 +90,10 @@ class Monitor
   private :__owned__?
 end
 
-# frozen_string_literal: false
+# Upstream's file starts with a magic comment leaving string literals
+# unfrozen, the default; here, after the half above, `ruby -w` would only
+# warn that it is ignored, so it is left out.
+#
 # = monitor.rb
 #
 # Copyright (C) 2001  Shugo Maeda <shugo@ruby-lang.org>

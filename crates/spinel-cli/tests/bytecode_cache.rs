@@ -12,6 +12,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime};
 
 use sha2::{Digest, Sha256};
@@ -98,7 +99,30 @@ fn cache_file(dir: &Path, source: &Path) -> PathBuf {
     cache_dir(dir).join(format!("{hex}.sbc"))
 }
 
-/// The cache file for each of the fixture's three required files.
+/// The cache files every program in a project starts with: the stdlib
+/// files the gem prelude requires (#319), RubyGems and `did_you_mean`,
+/// cached as any required file is. Found by running an empty program in a
+/// project of its own.
+fn boot_files() -> Vec<String> {
+    // One directory per call: the tests run at once.
+    static CALLS: AtomicUsize = AtomicUsize::new(0);
+    let call = CALLS.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!(
+        "spinel-bytecode-boot-{}-{call}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    make_project(&dir);
+    fs::write(dir.join("empty.rb"), "").expect("the program is written");
+    let out = spinel(&dir, &["run", "empty.rb"]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let names = cache_files(&dir);
+    let _ = fs::remove_dir_all(&dir);
+    names
+}
+
+/// The cache file for each of the fixture's three required files, and the
+/// [`boot_files`].
 fn expected_files(dir: &Path) -> Vec<String> {
     let mut names: Vec<String> = ["lib/greeting.rb", "lib/failing.rb", "lib/conditional.rb"]
         .iter()
@@ -110,6 +134,7 @@ fn expected_files(dir: &Path) -> Vec<String> {
                 .into_owned()
         })
         .collect();
+    names.extend(boot_files());
     names.sort();
     names
 }
@@ -287,7 +312,7 @@ fn a_syntax_error_reads_the_same_and_is_never_cached() {
             baseline
         );
     }
-    assert_eq!(cache_files(&dir), Vec::<String>::new());
+    assert_eq!(cache_files(&dir), boot_files());
     let _ = fs::remove_dir_all(&dir);
 }
 

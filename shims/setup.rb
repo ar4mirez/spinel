@@ -10,9 +10,9 @@
 #    are set in the environment, so a child process — a gem's executable, a
 #    nested `spinel` — finds the same gems and the same executables. RubyGems
 #    reads GEM_HOME and GEM_PATH when it first needs its paths; a `Gem`
-#    already loaded is told with `Gem.paths=`.
-#    ponytail: RubyGems is not loaded at boot yet (#319), so today it is the
-#    environment that carries the gem home; `Gem.paths=` starts mattering then.
+#    already loaded is told with `Gem.paths=`. This runs before the gem
+#    prelude loads RubyGems (#319), so RubyGems starts with these paths; the
+#    `Gem.paths=` is for a program that loaded it some other way first.
 # 2. `.spinel/require_map.bin`: not read yet (#66).
 # 3. The bytecode cache (#40): `.spinel/bytecode/` beside the gem home is
 #    where `require` keeps each file's compiled bytecode, named by the

@@ -55,7 +55,7 @@ The JSON is pretty-printed, keys always in the order below and always present (`
 - `source`: the global rubygems source, or `null` when the Gemfile names none. `remote` is as written; Bundler compares remotes with a trailing `/`. `cooldown` is `source`'s `cooldown:` option.
 - `ruby`: the `ruby` directive as Bundler's `RubyVersion` holds it, or `null`. `versions` are requirements with `=` dropped and `-` read as `.`; `file:` reads the version from the named file, in `.ruby-version` or `.tool-versions` form, relative to the file with the directive. `engine` defaults to `ruby`, `engine_versions` to `versions`, and `patchlevel` is `"-1"` for a prerelease Ruby.
 - `optional_groups`: groups declared with `optional: true`.
-- `gemspecs`: each `gemspec` directive, with the gemspec files it found in `path` (relative to `root`, the directory of the file that has the directive). They are not evaluated yet, since RubyGems does not load (#319); evaluating one into its gem (from a path source) and its development dependencies (in `development_group`) is #88.
+- `gemspecs`: each `gemspec` directive, with the gemspec files it found in `path` (relative to `root`, the directory of the file that has the directive). They are not evaluated yet; evaluating one into its gem (from a path source) and its development dependencies (in `development_group`) is #88.
 - `dependencies`: one per `gem` call that ran.
   - `requirements`: `Gem::Requirement#as_list`, so `"1.0-rc1"` is `"= 1.0.pre.rc1"` and no requirement is `[">= 0"]`.
   - `groups`: the enclosing `group` blocks then the gem's `group:`/`groups:`; `["default"]` when there are none.

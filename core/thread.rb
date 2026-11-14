@@ -117,6 +117,25 @@ class Thread
     end
   end
 
+  # The frames `caller_locations(start, length)` would give the caller, one
+  # at a time; `bundled_gems.rb`'s `LoadError#message` walks them (#319).
+  # As in CRuby, a missing block is only an error once there is a frame to
+  # give it.
+  def self.each_caller_location(*args, **keywords)
+    unless keywords.empty?
+      names = keywords.keys.map(&:inspect).join(", ")
+      raise ArgumentError, "unknown keyword#{keywords.size == 1 ? "" : "s"}: #{names}"
+    end
+    if args.size > 2
+      raise ArgumentError, "wrong number of arguments (given #{args.size}, expected 0..2)"
+    end
+    lines = __caller_select__(__backtrace_here__, args.empty? ? 1 : args[0], args[1])
+    return nil if lines.nil? || lines.empty?
+    raise LocalJumpError, "no block given" unless block_given?
+    lines.each { |path, line, label| yield Thread::Backtrace::Location.__from__(path, line, label) }
+    nil
+  end
+
   def self.list
     main
     @all.reject! { |t| !t.alive? }

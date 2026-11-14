@@ -88,6 +88,19 @@ const FEATURES: &[&str] = &[
     "zjit",
 ];
 
+/// The feature a word names, as `ruby.c`'s `feature_option` reads it: any
+/// prefix of a feature's name, `-` and `_` alike, and the first feature in
+/// [`FEATURES`] it begins wins, so `gem` is `gems` and `frozen` is
+/// `frozen_string_literal`. After the features come `jit` and `all`.
+fn feature_named(word: &str) -> Option<&'static str> {
+    let word = word.replace('-', "_");
+    FEATURES
+        .iter()
+        .chain(&["jit", "all"])
+        .find(|name| name.starts_with(word.as_str()))
+        .copied()
+}
+
 /// Whether a command line is a `ruby` one: a flag that is not one of
 /// `spinel`'s own, or `-` for a script on standard input.
 pub fn is_ruby_invocation(first: &str) -> bool {
@@ -391,16 +404,15 @@ fn parse_long(long: &str, next: Option<&String>, out: &mut RubyArgs) -> Result<b
                 },
             };
             for feature in list.split(',').filter(|f| !f.is_empty()) {
-                let feature = feature.replace('-', "_");
-                if feature != "all" && !FEATURES.contains(&feature.as_str()) {
+                let Some(known) = feature_named(feature) else {
                     out.warnings.push(format!(
                         "warning: unknown argument for --{verb}: '{feature}'"
                     ));
                     out.warnings
                         .push(format!("warning: features are [{}].", FEATURES.join(", ")));
                     continue;
-                }
-                out.features.push((feature, on));
+                };
+                out.features.push((known.to_owned(), on));
             }
         }
         // The JITs, dumps and the like Spinel has nothing behind.
@@ -548,10 +560,46 @@ pub fn prelude(args: &RubyArgs) -> String {
              end\n",
         );
     }
+    out
+}
+
+/// The `-r` libraries, as Ruby: run after the gem prelude, as `ruby` requires
+/// them after `gem_prelude.rb`, so RubyGems can find a gem's file.
+pub fn requires(args: &RubyArgs) -> String {
+    let mut out = String::new();
     for library in &args.requires {
-        let _ = writeln!(out, "require {}", lit(library));
+        let _ = writeln!(out, "require {}", ruby_string(library));
     }
     out
+}
+
+/// What the gem prelude loads: `--disable-gems` turns off both, as `ruby.c`
+/// defines the other features' modules only with `gems` on.
+pub fn gem_features(args: &RubyArgs) -> GemFeatures {
+    let gems = feature_enabled(args, "gems", true);
+    GemFeatures {
+        gems,
+        did_you_mean: gems && feature_enabled(args, "did_you_mean", true),
+    }
+}
+
+/// The features `shims/gem_prelude.rb` acts on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GemFeatures {
+    /// RubyGems, `--disable-gems`.
+    pub gems: bool,
+    /// `did_you_mean`, `--disable=did_you_mean`.
+    pub did_you_mean: bool,
+}
+
+impl Default for GemFeatures {
+    /// A program run with no flags has both.
+    fn default() -> Self {
+        GemFeatures {
+            gems: true,
+            did_you_mean: true,
+        }
+    }
 }
 
 /// Wrap the program as `-n` and `-p` do: the loop opens on the program's
@@ -633,6 +681,46 @@ mod tests {
         assert_eq!(parsed.requires, ["json"]);
         assert_eq!(parsed.code.as_deref(), Some("p 1\np 2"));
         assert_eq!(parsed.argv, ["a"]);
+    }
+
+    #[test]
+    fn a_feature_is_named_by_any_prefix() {
+        assert_eq!(feature_named("gem"), Some("gems"));
+        assert_eq!(
+            feature_named("frozen-string"),
+            Some("frozen_string_literal")
+        );
+        assert_eq!(feature_named("did-you-mean"), Some("did_you_mean"));
+        assert_eq!(feature_named("j"), Some("jit"));
+        assert_eq!(feature_named("al"), Some("all"));
+        assert_eq!(feature_named("gemsx"), None);
+    }
+
+    #[test]
+    fn did_you_mean_needs_gems() {
+        let features = |words: &[&str]| gem_features(&parse(&args(words)).unwrap());
+        assert_eq!(features(&["-e", "0"]), GemFeatures::default());
+        assert_eq!(
+            features(&["--disable=did_you_mean", "-e", "0"]),
+            GemFeatures {
+                gems: true,
+                did_you_mean: false
+            }
+        );
+        assert_eq!(
+            features(&["--disable-gems", "--enable=did_you_mean", "-e", "0"]),
+            GemFeatures {
+                gems: false,
+                did_you_mean: false
+            }
+        );
+    }
+
+    #[test]
+    fn requires_are_not_in_the_prelude() {
+        let parsed = parse(&args(&["-rjson", "-e", "0"])).unwrap();
+        assert!(!prelude(&parsed).contains("require"));
+        assert_eq!(requires(&parsed), "require \"json\"\n");
     }
 
     #[test]
