@@ -59,10 +59,10 @@ fn an_xml_attr_quote_left_open_is_closed_at_exit() {
     );
 }
 
-/// `exit!` runs nothing, so it finishes nothing: the quote stays open.
-/// CRuby loses the `"a` too, still in its write buffer; Spinel has none.
+/// `exit!` runs nothing, so it finishes nothing and flushes nothing: the
+/// `"a` is still in the write buffer and is lost with it, as on ruby 4.0.9.
 #[test]
-fn exit_bang_leaves_an_xml_attr_quote_open() {
+fn exit_bang_loses_what_the_write_buffer_holds() {
     let path = std::env::temp_dir().join(format!("spinel-io-exit-bang-{}", std::process::id()));
     let output = Command::new(SPINEL)
         .arg("-e")
@@ -73,7 +73,7 @@ fn exit_bang_leaves_an_xml_attr_quote_open() {
     let written = std::fs::read(&path).expect("the file was written");
     std::fs::remove_file(&path).ok();
     assert!(output.status.success());
-    assert_eq!(written, b"\"a");
+    assert_eq!(written, b"");
 }
 
 /// The uncaught error is reported before the IOs are finished, as CRuby's

@@ -9,6 +9,15 @@ bytecode a tool reads.
 
 ### Added
 
+- **A write buffer for `IO`**
+  ([#41](https://github.com/ar4mirez/spinel/issues/41)). An IO that is
+  neither `sync` nor a terminal holds up to 8 KiB of what it writes, as
+  CRuby's does, so `$stdout` to a pipe or a file reaches it when it is
+  flushed, by `flush`, a read, a seek, `close`, `fork`, `system` or `spawn`,
+  `p`, or the program's end, rather than at each `write`; `exit!` loses it.
+  A program that writes lines to a pipe another process reads as they come
+  sets `sync = true` on it, as under `ruby`. `docs/roadmap.md` has the rest.
+
 - **RubyGems and `did_you_mean` at boot**
   ([#319](https://github.com/ar4mirez/spinel/issues/319)). Every program,
   from `spinel run` or `ruby`'s command line, starts with `Gem` and
