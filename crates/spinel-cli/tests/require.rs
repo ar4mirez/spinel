@@ -1,6 +1,7 @@
 //! `require`'s feature lookup on the `spinel` binary (#39): `$LOADED_FEATURES`
-//! is asked before the disk, against the load path as it is now. Each
-//! expectation is CRuby 4.0.9's output for the same fixture.
+//! is asked before the disk, against the load path as it is now, and holds
+//! what CRuby provides at boot. Each expectation is CRuby 4.0.9's output
+//! for the same fixture.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -34,5 +35,15 @@ fn a_feature_is_not_loaded_again_after_a_directory_is_put_ahead_on_the_load_path
     assert_eq!(
         run("double_load.rb"),
         "stdlib copy\ntrue\nfalse\nfalse\n:stdlib\n[\"stdlib/double_load.rb\"]\n"
+    );
+}
+
+#[test]
+fn provided_features_answer_false_and_a_c_extension_is_refused_without_a_path() {
+    assert_eq!(
+        run("provided.rb"),
+        "[\"enumerator.so\", \"thread.rb\", \"fiber.so\", \"rational.so\", \"complex.so\", \
+         \"pathname.so\", \"ruby2_keywords.rb\", \"set.rb\"]\n\
+         false\nfalse\nfalse\ntrue\ntrue\n[true, nil]\n"
     );
 }

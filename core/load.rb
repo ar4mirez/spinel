@@ -7,7 +7,13 @@
 $LOAD_PATH = []
 alias $: $LOAD_PATH
 alias $-I $LOAD_PATH
-$LOADED_FEATURES = []
+# What CRuby 4.0 has provided before a program starts, recorded as it
+# records them: here, the classes Spinel defines in `core/`. `pathname.so`
+# is only `Pathname`'s core half, so `require "pathname"` still loads
+# `pathname.rb` from the standard library.
+$LOADED_FEATURES = %w[
+  enumerator.so thread.rb fiber.so rational.so complex.so pathname.so ruby2_keywords.rb set.rb
+]
 alias $" $LOADED_FEATURES
 # The command line's `-a`, `-l` and `-p`, which Spinel does not take.
 $-a = false
@@ -53,18 +59,30 @@ module Kernel
 
   module_function :require, :require_relative, :load
 
-  # What CRuby has loaded before a program starts, so `require` of one
-  # answers false rather than looking for a file: here, the core classes
-  # Spinel defines in `core/`.
-  def self.__builtin_features__
-    @__builtin_features__ ||= %w[
-      enumerator enumerator.so thread thread.rb fiber fiber.so rbconfig rbconfig.rb set set.rb io/wait io/wait.so
-    ].freeze
+  # Features CRuby loads from a file of its architecture directory when
+  # asked, and Spinel defines in `core/` before a program starts: the names
+  # `require` takes for each, and the file CRuby records for it.
+  def self.__core_features__
+    @__core_features__ ||= {
+      "rbconfig" => "rbconfig.rb", "rbconfig.rb" => "rbconfig.rb",
+      "io/wait" => "io/wait.so", "io/wait.so" => "io/wait.so",
+    }.freeze
+  end
+
+  # The first `require` of one records it, under the architecture directory
+  # as CRuby does, and answers true; the class is already there.
+  def self.__require_core_feature__(file)
+    archdir = RbConfig::CONFIG["rubyarchdir"]
+    feature = archdir ? File.join(archdir, file) : file
+    return false if $LOADED_FEATURES.include?(feature)
+    $LOADED_FEATURES.push(feature)
+    true
   end
 
   def self.__require__(name)
     name = File.__path__(name)
-    return false if __builtin_features__.include?(name)
+    core = __core_features__[name]
+    return __require_core_feature__(core) if core
     # A built-in gem: its source is in the binary, and it is recorded the way
     # CRuby records the extension it stands in for.
     shipped = name.end_with?(".so") ? name[0, name.length - 3] : name
@@ -98,6 +116,7 @@ module Kernel
       raise LoadError.__cannot_load__(name) if found.nil?
       # Provided already, by a file that finished loading.
       return false if path.nil?
+      __native_extension__(path) if found == :s
       # Another thread is part-way through loading it: wait for it to finish,
       # as CRuby does, rather than answer as if it had (#45). Then look again,
       # since a load that raised leaves the file to load here.
@@ -188,10 +207,28 @@ module Kernel
   # where CRuby keeps a `features_index` by short name; the index goes in with
   # #66's require map, which is where lookup speed is the goal.
 
-  # The extensions a name without one is tried with, in order. ponytail: Ruby
-  # only, until the native-extension slot (#39's S2) adds `DLEXT` here.
+  # The extensions a name without one is tried with, in order: Ruby, then a
+  # Spinel extension, then a CRuby one, which is found only to say so.
   def self.__loadable_ext__
-    @__loadable_ext__ ||= [".rb"].freeze
+    @__loadable_ext__ ||= [".rb", *__native_ext__].freeze
+  end
+
+  # A shared object's extensions, in the order they are looked for: a name
+  # that asks for `foo.so` is answered by `foo.spinel` first.
+  def self.__native_ext__
+    @__native_ext__ ||= [".spinel", __dlext__].freeze
+  end
+
+  # A shared object `require` found and cannot load: a CRuby C extension, or
+  # a Spinel one before its loader (#104). Like CRuby's failed `dlopen`, the
+  # `LoadError` has no `path`, since the file is there.
+  # ponytail: `.spinel` extensions are found but not loaded; #104 loads them.
+  def self.__native_extension__(path)
+    if path.end_with?(".spinel")
+      raise LoadError, "Spinel extensions cannot be loaded yet (#104) - #{path}"
+    end
+    raise LoadError, "#{path} is a CRuby C extension, which Spinel cannot load; " \
+                     "the gem needs a Spinel version - #{path}"
   end
 
   # A name a shared object provides is searched for as Ruby only.
@@ -205,8 +242,10 @@ module Kernel
     @__dlext__ ||= RUBY_PLATFORM.include?("darwin") ? ".bundle" : ".so"
   end
 
+  # `.spinel` is one too, so `foo.so` and `foo.spinel` each answer for the
+  # other when `require` asks whether a feature is loaded.
   def self.__so_exts__
-    @__so_exts__ ||= [".so", ".o", __dlext__].uniq.freeze
+    @__so_exts__ ||= [".so", ".o", __dlext__, ".spinel"].uniq.freeze
   end
 
   # CRuby's `search_required`: what kind of file `name` is (`:r` for Ruby,
@@ -229,9 +268,11 @@ module Kernel
       elsif __so_exts__.include?(ext)
         ft, loading = __feature_p__(name, ext, false, false)
         return [:s, loading] if ft
-        # ponytail: CRuby goes on to look for `name` as a shared object; the
-        # native-extension slot (#39's S2) adds that, and its `LoadError`.
-        return nil
+        found = __search__(name[0, name.length - ext.length], __native_ext__)
+        return nil if found.nil?
+        path = found[1]
+        ft, loading = __feature_p__(path, found[0], false, true)
+        return [:s, ft.nil? || loading ? path : nil]
       elsif ext == ".bundle" || ext == ".dll"
         # Another platform's shared object: never one Spinel loads.
         return nil
@@ -332,7 +373,7 @@ module Kernel
     end
     return nil if plen > 0 && name[plen - 1] != "/"
     rest = name[(plen + len)..]
-    return nil if type == :s && rest != __dlext__
+    return nil if type == :s && rest != __dlext__ && rest != ".spinel"
     return nil if type == :r && rest != ".rb"
     plen -= 1 if plen > 0
     prefix = name[0, plen]
@@ -477,7 +518,10 @@ module Kernel
     @__realpaths__[real] = true
   end
 
+  # A feature recorded without a directory, as the provided ones are, is not
+  # a file in the working directory.
   def self.__realpath_of__(path)
+    return path unless path.start_with?("/")
     real = __fs_realpath__(path)
     String === real ? real : path
   end
