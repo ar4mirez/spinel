@@ -27,7 +27,8 @@ module RbConfig
   sitedir = File.join(rubylibprefix, "site_ruby")
   vendordir = File.join(rubylibprefix, "vendor_ruby")
   CONFIG = {
-    "arch" => RUBY_PLATFORM,
+    # A copy: CONFIG's values are not frozen, and RUBY_PLATFORM is.
+    "arch" => RUBY_PLATFORM.dup,
     "bindir" => bindir,
     "prefix" => prefix,
     "exec_prefix" => prefix,
@@ -53,6 +54,18 @@ module RbConfig
     "TEENY" => teeny,
     "PATCHLEVEL" => RUBY_PATCHLEVEL.to_s,
     "ENABLE_SHARED" => "no",
+    # Spinel is one binary with no libruby, as a CRuby built without
+    # `--enable-shared`: these name a library that is not installed.
+    "LIBRUBY_A" => "libspinel-static.a",
+    "LIBRUBY" => "libspinel-static.a",
+    "LIBRUBY_SO" => os.start_with?("darwin") ?
+      "libspinel.#{major}.#{minor}.#{teeny}.dylib" :
+      "libspinel.so.#{major}.#{minor}.#{teeny}",
+    "libdirname" => "libdir",
+    # The extensions Spinel ships are inside the binary, as a CRuby built
+    # with `--with-static-linked-ext` has them: `require "etc"` records
+    # `etc.so` with no directory, and `resolve_feature_path` says so.
+    "EXTSTATIC" => "static",
     # The tables in `crates/spinel-vm/src/encoding_table.rs` are generated
     # from ruby 4.0, which ships these.
     "UNICODE_VERSION" => "17.0.0",
@@ -60,6 +73,12 @@ module RbConfig
   }
   # Not frozen, as CRuby's is not: `mkmf` writes to it, and the CLI adds
   # `rubylibdir` and `rubyarchdir` once it knows where the stdlib is.
+
+  # Where Ruby is installed: CRuby's is the prefix its `rbconfig.rb` sits
+  # under, and Spinel's is its home, the prefix above. RubyGems reads it
+  # (`Gem::Installer`), and ruby/spec guards what only an installed Ruby has
+  # on it.
+  TOPDIR = prefix
 
   # The interpreter's own path, as CRuby's `rbconfig.rb` builds it: what a
   # program runs to start another Ruby (WEBrick's CGI handler, #54).

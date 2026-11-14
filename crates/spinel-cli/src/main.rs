@@ -608,6 +608,10 @@ fn gem_prelude(features: ruby_args::GemFeatures) -> String {
 /// with `RbConfig`'s `sitelibdir` before it as CRuby has that: RubyGems puts
 /// the gems it activates ahead of `sitelibdir`, so after `-I`. The flags'
 /// `-I` directories go before both.
+///
+/// Each of these default entries carries `@gem_prelude_index`, set to the
+/// entry itself, as `ruby.c` marks its own: `Gem.load_path_insert_index`
+/// finds the first marked entry, and that is where activated gems go.
 fn library_path(scope: &mut spinel_vm::HandleScope<'_>) {
     let Some(dir) = stdlib::directory() else {
         return;
@@ -618,7 +622,10 @@ fn library_path(scope: &mut spinel_vm::HandleScope<'_>) {
     let code = format!(
         "RbConfig::CONFIG[\"rubylibdir\"] = {literal}.dup\n\
          RbConfig::CONFIG[\"rubyarchdir\"] = File.join({literal}, RUBY_PLATFORM)\n\
-         $LOAD_PATH.push(RbConfig::CONFIG[\"sitelibdir\"].dup.freeze, {literal}.freeze)"
+         [RbConfig::CONFIG[\"sitelibdir\"].dup, {literal}.dup].each do |path|\n\
+           path.instance_variable_set(:@gem_prelude_index, path)\n\
+           $LOAD_PATH.push(path.freeze)\n\
+         end"
     );
     let parsed = spinel_parse::parse_file("<stdlib>", code.as_bytes());
     let compiled =
