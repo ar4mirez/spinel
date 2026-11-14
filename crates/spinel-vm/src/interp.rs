@@ -14231,6 +14231,45 @@ fn native_call<'h>(
             Ok(None)
         }
 
+        Native::ReclassAs => {
+            let other = call.args.first().copied().unwrap_or(Value::NIL);
+            let receiver = call.receiver;
+            let refused = Error::NoDispatch {
+                op: "__reclass_as__",
+                operands: "objects that are not both of one representation and layout",
+            };
+            if receiver.is_immediate() || other.is_immediate() {
+                return Err(refused);
+            }
+            let (mine, theirs) = (
+                scope.class_object_of(receiver),
+                scope.class_object_of(other),
+            );
+            if mine != theirs {
+                let (Some(mut class), Some(own)) =
+                    (class_of(scope, other), class_of(scope, receiver))
+                else {
+                    return Err(refused);
+                };
+                if scope.classes().repr(class) != scope.classes().repr(own)
+                    || scope.layout_of(receiver) != scope.layout_of(other)
+                {
+                    return Err(refused);
+                }
+                while scope.classes().is_singleton(class) {
+                    class = scope
+                        .classes()
+                        .superclass(class)
+                        .expect("a singleton class has a superclass");
+                }
+                let object = scope.classes().object(class);
+                let handle = scope.root(receiver);
+                scope.set_class(handle, object);
+            }
+            stack.push(receiver);
+            Ok(None)
+        }
+
         Native::ProcBinding => {
             let block = call.args.first().copied().unwrap_or(Value::NIL);
             let binding = proc_binding(scope, block)?;
@@ -17028,6 +17067,7 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             &["__proc_with_class__"],
             Native::ProcWithClass,
         ),
+        (Builtin::Kernel, &["__reclass_as__"], Native::ReclassAs),
         (Builtin::Kernel, &["__proc_binding__"], Native::ProcBinding),
         (
             Builtin::Module,
