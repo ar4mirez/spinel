@@ -5,10 +5,11 @@ Ruby's pure-Ruby standard library, vendored verbatim.
     commit    03b6d3f8898a28604fe6cb00eae3226b821168f4
     path      lib/ (flattened to this directory, so stdlib/ is a $LOAD_PATH root)
 
-Laid over it, also verbatim, the lib/ of two gems that are not in Ruby's lib/:
-webrick, which left the standard library, and json, a default gem whose Ruby
-half ruby/ruby keeps in ext/json/lib. json's C half is Spinel's own, in the
-repository's lib/json/ext/, embedded in the binary.
+Laid over it, also verbatim, the lib/ of three gems that are not in Ruby's
+lib/: webrick, which left the standard library, and json and io-console,
+default gems whose Ruby halves ruby/ruby keeps in ext/json/lib and
+ext/io/console/lib. Their C halves are Spinel's own, in the repository's
+lib/json/ext/ and lib/io/console.rb, embedded in the binary.
 
     upstream  https://github.com/ruby/webrick.git
     tag       v1.9.2
@@ -20,10 +21,15 @@ repository's lib/json/ext/, embedded in the binary.
     commit    1cdd2122d537d93b32d554dd013f607148291ba4
     files     json.rb, json/
 
+    upstream  https://github.com/ruby/io-console.git
+    tag       v0.8.2
+    commit    fbc7e1f31f1fc2cf21baf96a845bfdbc88e47f95
+    files     io/console/size.rb (not lib/ffi/, JRuby's backend)
+
 Licenses are upstream's, in LICENSE/. LEGAL records the per-file terms for the
 files here from ruby/ruby that are not under Ruby's own license; each gem's own
 are in LICENSE/<gem>/.
 
 Do not edit anything under stdlib/ by hand. CI diffs this tree against the tags
 above and fails on any difference. To update, edit RUBY_TAG, WEBRICK_TAG or
-JSON_TAG in scripts/vendor-stdlib.sh and run it.
+JSON_TAG or IO_CONSOLE_TAG in scripts/vendor-stdlib.sh and run it.

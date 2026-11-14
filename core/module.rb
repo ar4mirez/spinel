@@ -283,7 +283,9 @@ class Module
   end
 
   def constants(inherit = true)
-    names = __reflect_const_names__(self, inherit)
+    # Not a name only `rb_define_module_under` can give, such as
+    # `IO::generic_readable`'s: `rb_const_list` keeps constant names only.
+    names = __reflect_const_names__(self, inherit).reject { |name| name.to_s.match?(/\A[a-z_]/) }
     owners = inherit ? ancestors : [self]
     owners.each do |owner|
       entries = owner.instance_variable_get(:@__autoloads__)

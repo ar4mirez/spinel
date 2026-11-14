@@ -202,6 +202,7 @@ const LIBRARIES: &[(&str, &str)] = &[
         "digest/bubblebabble",
         include_str!("../../../lib/digest/bubblebabble.rb"),
     ),
+    ("io/console", include_str!("../../../lib/io/console.rb")),
     ("io/nonblock", include_str!("../../../lib/io/nonblock.rb")),
     ("socket", include_str!("../../../lib/socket.rb")),
     ("date", include_str!("../../../lib/date.rb")),

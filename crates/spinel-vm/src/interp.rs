@@ -48,8 +48,8 @@ use crate::class::Builtin;
 use crate::class::{ClassId, CrefId, Kind, Method, ScopeDefault, Visibility};
 use crate::heap::{Handle, HandleScope, Heap, Payload};
 use crate::method::{
-    BindingOp, BitOp, CvarOp, Definition, EtcOp, FiberOp, FsOp, GcOp, IvarOp, Native, ReflectOp,
-    SockOp, StrOp, SysOp, ThreadOp,
+    BindingOp, BitOp, ConsoleOp, CvarOp, Definition, EtcOp, FiberOp, FsOp, GcOp, IvarOp, Native,
+    ReflectOp, SockOp, StrOp, SysOp, ThreadOp,
 };
 use crate::shape::ShapeId;
 use crate::value::SymbolId;
@@ -12188,6 +12188,13 @@ fn native_call<'h>(
             let object = allocate_instance(scope, id)?;
             let initialize = crate::shared::symbols::intern("initialize");
             match scope.classes_mut().lookup(id, initialize) {
+                // An `initialize` undefined on purpose is a call to nothing,
+                // as `rb_obj_call_init` makes it: `undef_method :initialize`
+                // is how `IO::ConsoleMode` refuses `new` (#110).
+                None if scope.classes().undefined_along(id, initialize) => {
+                    let exception = no_method_error(scope, object, initialize, &call.args);
+                    Ok(Some(Unwind::Exception(exception)))
+                }
                 None => {
                     // No `initialize` anywhere is `BasicObject#initialize`,
                     // which takes none: `BasicObject.new("x")` raises in Ruby
@@ -14546,6 +14553,7 @@ fn native_call<'h>(
         Native::Sys(op) => sys_native(scope, stack, &call, op),
         Native::Sock(op) => sock_native(scope, stack, frames, &call, op, ids),
         Native::Etc(op) => etc_native(scope, stack, &call, op),
+        Native::Console(op) => console_native(scope, stack, &call, op),
 
         Native::FrameNesting => {
             let cref = frames.last().map_or(CrefId::ROOT, |frame| frame.cref);
@@ -17565,6 +17573,41 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             Builtin::Kernel,
             &["__etc_constants__"],
             Native::Etc(EtcOp::Constants),
+        ),
+        (
+            Builtin::Kernel,
+            &["__console_getattr__"],
+            Native::Console(ConsoleOp::Getattr),
+        ),
+        (
+            Builtin::Kernel,
+            &["__console_setattr__"],
+            Native::Console(ConsoleOp::Setattr),
+        ),
+        (
+            Builtin::Kernel,
+            &["__console_winsize__"],
+            Native::Console(ConsoleOp::Winsize),
+        ),
+        (
+            Builtin::Kernel,
+            &["__console_set_winsize__"],
+            Native::Console(ConsoleOp::SetWinsize),
+        ),
+        (
+            Builtin::Kernel,
+            &["__console_flush__"],
+            Native::Console(ConsoleOp::Flush),
+        ),
+        (
+            Builtin::Kernel,
+            &["__console_ttyname__"],
+            Native::Console(ConsoleOp::Ttyname),
+        ),
+        (
+            Builtin::Kernel,
+            &["__console_constants__"],
+            Native::Console(ConsoleOp::Constants),
         ),
         (Builtin::Kernel, &["__fd_dup__"], Native::Fs(FsOp::FdDup)),
         (Builtin::Kernel, &["__fd_dup2__"], Native::Fs(FsOp::FdDup2)),
@@ -25823,6 +25866,109 @@ fn etc_native(
             let name = string_new(scope, name);
             new_array(scope, &[name, int(value)])
         }),
+    };
+    stack.push(value);
+    Ok(None)
+}
+
+// ---------------------------------------------------------------------------
+// `io/console` (#110)
+// ---------------------------------------------------------------------------
+
+/// The terminal calls `lib/io/console.rb` is Ruby over; `console.rs` makes
+/// them. A failed call answers its errno.
+fn console_native(
+    scope: &mut HandleScope<'_>,
+    stack: &mut Stack,
+    call: &Pending,
+    op: ConsoleOp,
+) -> Result<Option<Unwind>, Error> {
+    use crate::console;
+    let fd = int_arg(call, 0)
+        .and_then(|n| libc::c_int::try_from(n).ok())
+        .unwrap_or(-1);
+    // A flag word, speed or size from Ruby, which has checked its range.
+    let word = |index: usize| {
+        int_arg(call, index)
+            .and_then(|n| u64::try_from(n).ok())
+            .unwrap_or(0)
+    };
+    let done = |answer: std::io::Result<()>| match answer {
+        Ok(()) => Value::NIL,
+        Err(error) => errno_value(&error),
+    };
+    let int = |n: u64| Value::fixnum(n as i64).expect("a terminal word is a fixnum");
+    let value = match op {
+        ConsoleOp::Getattr => match console::getattr(fd) {
+            Ok(mode) => {
+                let cc = binary_value(scope, &mode.cc);
+                let cc = scope.root(cc);
+                let cc = scope.get(cc);
+                new_array(
+                    scope,
+                    &[
+                        int(mode.iflag),
+                        int(mode.oflag),
+                        int(mode.cflag),
+                        int(mode.lflag),
+                        cc,
+                        int(mode.ispeed),
+                        int(mode.ospeed),
+                    ],
+                )
+            }
+            Err(error) => errno_value(&error),
+        },
+        ConsoleOp::Setattr => {
+            let cc = call
+                .args
+                .get(5)
+                .copied()
+                .and_then(|value| string_bytes(scope, value))
+                .unwrap_or_default();
+            let mode = console::Mode {
+                iflag: word(1),
+                oflag: word(2),
+                cflag: word(3),
+                lflag: word(4),
+                cc,
+                ispeed: word(6),
+                ospeed: word(7),
+            };
+            done(console::setattr(fd, &mode))
+        }
+        ConsoleOp::Winsize => match console::winsize(fd) {
+            Ok(size) => {
+                let size = size.map(|n| int(u64::from(n)));
+                new_array(scope, &size)
+            }
+            Err(error) => errno_value(&error),
+        },
+        ConsoleOp::SetWinsize => {
+            // `console.c` casts each to an unsigned short.
+            let size = [1, 2, 3, 4].map(|index| word(index) as u16);
+            done(console::set_winsize(fd, size))
+        }
+        ConsoleOp::Flush => {
+            let queue = int_arg(call, 1)
+                .and_then(|n| libc::c_int::try_from(n).ok())
+                .unwrap_or(-1);
+            done(console::flush(fd, queue))
+        }
+        ConsoleOp::Ttyname => match console::ttyname(fd) {
+            Ok(Some(name)) => binary_value(scope, &name),
+            Ok(None) => Value::NIL,
+            Err(error) => errno_value(&error),
+        },
+        ConsoleOp::Constants => {
+            rooted_array(scope, console::constants(), |scope, (name, value)| {
+                let name = string_new(scope, name);
+                new_array(
+                    scope,
+                    &[name, Value::fixnum(value).expect("a constant is a fixnum")],
+                )
+            })
+        }
     };
     stack.push(value);
     Ok(None)

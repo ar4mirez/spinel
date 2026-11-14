@@ -260,6 +260,17 @@ class IO
     value
   end
 
+  # `IO::generic_readable` or `IO::generic_writable`, made the first time it
+  # is asked for. `stringio` includes them and `io/console` adds to the first;
+  # CRuby's `rb_define_module_under` names them as no constant can be named,
+  # so `IO.constants` does not list them and `IO::generic_readable` is no
+  # constant reference.
+  def self.__generic_module__(name)
+    found = __reflect_const_lookup__(IO, name, false)
+    return found[0] unless found.nil?
+    __reflect_const_set__(IO, name, Module.new)
+  end
+
   # A String argument: one, or what `to_str` makes of one.
   def self.__str__(value)
     return value if String === value
