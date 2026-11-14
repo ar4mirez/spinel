@@ -83,7 +83,8 @@ class IO
 
   # `poll(2)` over `[io, events]` pairs: the events each is ready for, or
   # nil when the timeout passed first. A reader with bytes buffered is ready
-  # without asking.
+  # without asking. A third element names the descriptor to poll, in place
+  # of the one `__poll_fd__` picks.
   def self.__wait__(pairs, timeout, descriptor_only = false)
     unless timeout.nil?
       timeout = Float === timeout || Integer === timeout ? timeout : Float(timeout)
@@ -93,12 +94,12 @@ class IO
       !descriptor_only && events & IO::READABLE != 0 && io.__buffered__? ? IO::READABLE : 0
     end
     return buffered if buffered.any? { |b| b != 0 }
-    polls = pairs.map do |io, events|
+    polls = pairs.map do |io, events, fd|
       bits = 0
       bits |= __poll__("POLLIN") if events & IO::READABLE != 0
       bits |= __poll__("POLLOUT") if events & IO::WRITABLE != 0
       bits |= __poll__("POLLPRI") if events & IO::PRIORITY != 0
-      [io.__poll_fd__(events), bits]
+      [fd || io.__poll_fd__(events), bits]
     end
     deadline = timeout && Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
     loop do
@@ -186,6 +187,11 @@ class IO
   # The descriptor to poll: a duplex child's write end for writing.
   def __poll_fd__(events) = events == IO::WRITABLE ? __wfd__ : @fileno
 
+  # The descriptor `wait` polls, whatever the events: CRuby's looks at a duplex
+  # child's read side, and at the write side only once `close_read` leaves that
+  # one (#568).
+  def __wait_fd__ = @rclosed ? __wfd__ : @fileno
+
   def timeout = @timeout
 
   def timeout=(value)
@@ -194,10 +200,12 @@ class IO
 
   def wait(*args)
     __check_open__
-    if args.size == 2 || (args.size == 1 && Integer === args[0] && !(Float === args[0]))
+    # Two arguments, neither a Symbol, are events and a timeout; anything else
+    # is the old form, as CRuby's `io_wait` splits them.
+    if args.size == 2 && args.none?(Symbol)
       events = Integer.__index__(args[0])
       raise ArgumentError, "Events must be positive integer!" if events <= 0
-      ready = IO.__wait__([[self, events]], args[1])
+      ready = IO.__wait__([[self, events, __wait_fd__]], args[1])
       return ready.nil? ? nil : ready[0]
     end
     # The old form: a timeout, and modes as Symbols.
@@ -215,7 +223,7 @@ class IO
       end
     end
     events = IO::READABLE if events == 0
-    ready = IO.__wait__([[self, events]], timeout)
+    ready = IO.__wait__([[self, events, __wait_fd__]], timeout)
     ready.nil? ? nil : self
   end
 
