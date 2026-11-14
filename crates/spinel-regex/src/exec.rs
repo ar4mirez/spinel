@@ -402,8 +402,10 @@ fn behind_width(ast: &Ast) -> (Option<usize>, bool) {
         }
         Ast::Repeat { body, min, max, .. } => {
             let (len, folds) = behind_width(body);
+            let joined = *min > 1
+                && string_of(body).is_some_and(|text| !fold::one_to_one(&text.repeat(3)));
             let fixed = (Some(*min) == *max).then_some(*min as usize);
-            (len.zip(fixed).map(|(len, n)| len * n), folds)
+            (len.zip(fixed).map(|(len, n)| len * n), folds || joined)
         }
         _ => (None, false),
     }
@@ -1676,9 +1678,6 @@ impl Subject<'_> {
         self.enc.decode(self.bytes.get(sp..)?)
     }
 
-    /// The character that ends at `sp`. In EUC-JP and Shift_JIS that means
-    /// reading forward from somewhere known, because a trail byte can also be
-    /// a lead, or an `a`.
     /// Where `chars` characters before `sp` start, if there are that many.
     fn step_back(&self, mut sp: usize, chars: usize) -> Option<usize> {
         for _ in 0..chars {
@@ -1690,6 +1689,9 @@ impl Subject<'_> {
         Some(sp)
     }
 
+    /// The character that ends at `sp`. In EUC-JP and Shift_JIS that means
+    /// reading forward from somewhere known, because a trail byte can also be
+    /// a lead, or an `a`.
     fn prev_char(&self, sp: usize) -> Option<char> {
         if sp == 0 {
             return None;
