@@ -24509,9 +24509,14 @@ fn advise(_fd: libc::c_int, _offset: i64, _length: i64, _advice: &[u8]) -> Value
 /// `lchmod(2)`, where the platform has it.
 #[cfg(target_vendor = "apple")]
 fn lchmod(path: PathBuf, mode: i64) -> Value {
+    // libSystem exports `lchmod(2)`, but the `libc` crate does not declare it
+    // for Apple targets.
+    unsafe extern "C" {
+        fn lchmod(path: *const libc::c_char, mode: libc::mode_t) -> libc::c_int;
+    }
     with_cpath(path, |path| {
         // SAFETY: `path` is NUL-terminated and outlives the call.
-        unit_result(unsafe { libc::lchmod(path.as_ptr(), mode as libc::mode_t) })
+        unit_result(unsafe { lchmod(path.as_ptr(), mode as libc::mode_t) })
     })
 }
 
