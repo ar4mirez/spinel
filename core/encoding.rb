@@ -7,8 +7,12 @@
 # and refuses a character operation in any other rather than counting wrongly;
 # the rest of this file is names and rules, which every encoding has.
 class Encoding
-  # The names CRuby resolves from the process at boot rather than from the
-  # table. Spinel's process is UTF-8, as CRuby's is under a UTF-8 locale.
+  # The names CRuby resolves from the process rather than from the table:
+  # `locale` is the encoding the environment's locale names, read once at
+  # boot, and `external` and `filesystem` are the default external encoding,
+  # which is the locale's unless `-E` or `default_external=` says otherwise.
+  # Under `LANG=C` or POSIX, or no locale at all, that is US-ASCII; under any
+  # UTF-8 locale, UTF-8 (#41). Measured on 4.0.9.
   RUNTIME_ALIASES = ["locale", "external", "filesystem"].freeze
 
   def __index__
@@ -23,11 +27,14 @@ class Encoding
     name
   end
 
-  # The runtime aliases are names of the default external encoding, and of no
-  # other. Measured: `Encoding::UTF_8.names` ends with them.
+  # The runtime aliases are names of the encodings they resolve to, and of no
+  # other: `locale` of the locale's, the other two of the default external
+  # encoding. Measured: under `LANG=C`, `Encoding::US_ASCII.names` ends with
+  # all three.
   def names
     list = @__names__.dup
-    list.concat(RUNTIME_ALIASES) if equal?(Encoding.default_external)
+    list << "locale" if equal?(Encoding.__locale__)
+    list.push("external", "filesystem") if equal?(Encoding.default_external)
     list
   end
 
@@ -93,7 +100,8 @@ class Encoding
         own = encoding.__names_without_runtime__
         own.drop(1).each { |name| table[name] = own[0] }
       end
-      RUNTIME_ALIASES.each { |name| table[name] = default_external.name }
+      table["locale"] = __locale__.name
+      table["external"] = table["filesystem"] = default_external.name
       internal = default_internal
       table["internal"] = internal.name unless internal.nil?
       table
@@ -110,7 +118,8 @@ class Encoding
         name = name.to_str
       end
       key = name.__ascii_upcase__
-      return default_external if key == "LOCALE" || key == "EXTERNAL" || key == "FILESYSTEM"
+      return __locale__ if key == "LOCALE"
+      return default_external if key == "EXTERNAL" || key == "FILESYSTEM"
       return default_internal if key == "INTERNAL"
       found = __by_name__[key]
       return found unless found.nil?
@@ -128,7 +137,7 @@ class Encoding
     end
 
     def default_external
-      @__default_external__ || Encoding::UTF_8
+      @__default_external__ || __locale__
     end
 
     def default_external=(encoding)
@@ -148,6 +157,27 @@ class Encoding
     # changes nothing.
     def locale_charmap
       @__locale_charmap__ ||= __sys_locale_charmap__.freeze
+    end
+
+    # The encoding the locale's charmap names — `ANSI_X3.4-1968` is
+    # US-ASCII's alias, `CP1252` Windows-1252's — or UTF-8 for a charmap no
+    # encoding is named, as CRuby's `rb_locale_encindex` falls back.
+    # Measured on 4.0.9, with an ARMSCII-8 locale.
+    #
+    # The two charmaps nearly every machine has are answered without the name
+    # table, which boot would otherwise build for `ARGV`.
+    def __locale__
+      @__locale__ ||=
+        case locale_charmap
+        when "UTF-8" then Encoding::UTF_8
+        when "ANSI_X3.4-1968" then Encoding::US_ASCII
+        else
+          begin
+            find(locale_charmap)
+          rescue ArgumentError
+            Encoding::UTF_8
+          end
+        end
     end
 
     # CRuby's `enc_compatible_latter`, ported line for line — including that

@@ -128,6 +128,10 @@ done
 # starts: the interpreter, and its flags, none (`config[:flags]` is `[]`).
 # `core/process/fixtures/kill.rb` splits `RUBY_FLAGS` to start another one.
 export RUBY_EXE="$spinel" RUBY_FLAGS="${RUBY_FLAGS-}" SPINEL_SPEC_LIST=1
+# The default external encoding is the locale's, as CRuby's is (#41), so a
+# run under `LANG=C` would read every file as US-ASCII. The corpus is run in
+# one UTF-8 locale wherever it runs, rather than in whatever the machine has.
+export LC_ALL=C.UTF-8
 if [[ -n "$tagged" ]]; then export SPINEL_SPEC_TAGGED=1; fi
 for index in "${!units[@]}"; do
   printf '%s\0' "$index"

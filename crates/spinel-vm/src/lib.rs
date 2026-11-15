@@ -75,6 +75,8 @@ pub mod bignum;
 pub mod bytecode;
 pub mod callcache;
 pub mod class;
+pub mod codepage;
+pub mod codepage_table;
 pub mod compile;
 pub mod console;
 pub mod cp5022x;
