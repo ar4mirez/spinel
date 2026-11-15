@@ -258,6 +258,45 @@ impl Client {
         }
     }
 
+    /// Download `gems/<file_name>` from the source to `dest`, as Bundler's
+    /// `download_gem` fetches it, and answer the SHA-256 of what was written,
+    /// in hex, and its length. The body is hashed as it streams to disk, so a
+    /// gem is never held in memory whole, and one permit is held for the whole
+    /// download: the gem store's fetches and the index's updates share the
+    /// one limit. A connection that ends before the body does is an error;
+    /// `dest` may then hold part of the file, which the caller removes.
+    pub async fn download(&self, file_name: &str, dest: &Path) -> Result<(String, u64), Error> {
+        use std::io::Write as _;
+        let _permit = self
+            .limit
+            .acquire()
+            .await
+            .expect("the semaphore is never closed");
+        let url = self
+            .base
+            .join(&format!("gems/{file_name}"))
+            .map_err(|_| Error::Source(self.base.to_string()))?;
+        let mut response = self.get(&url, None, None).await?;
+        if response.status() != StatusCode::OK {
+            return Err(Error::Status(url, response.status()));
+        }
+        let io_error = |e| Error::Io(dest.to_owned(), e);
+        let mut file = std::fs::File::create(dest).map_err(io_error)?;
+        let mut hasher = Sha256::new();
+        let mut size = 0u64;
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|e| Error::Http(url.clone(), e))?
+        {
+            hasher.update(&chunk);
+            file.write_all(&chunk).map_err(io_error)?;
+            size += chunk.len() as u64;
+        }
+        file.flush().map_err(io_error)?;
+        Ok((hex(&hasher.finalize()), size))
+    }
+
     /// Bundler's `Updater#update`: append to the cached copy if that can be
     /// verified, else fetch it whole. One permit covers both requests, so the
     /// limit counts requests in flight.
@@ -415,7 +454,7 @@ fn cache_name(base: &Url) -> String {
 }
 
 /// rubygems.org's rule for a gem name: letters, digits, `.`, `-` and `_`.
-fn valid_name(gem: &str) -> bool {
+pub(crate) fn valid_name(gem: &str) -> bool {
     !gem.is_empty()
         && gem
             .bytes()
@@ -451,6 +490,39 @@ pub fn info_checksums(versions: &[u8], gems: &[&str]) -> HashMap<String, String>
             String::from_utf8_lossy(name).into_owned(),
             String::from_utf8_lossy(checksum).into_owned(),
         );
+    }
+    found
+}
+
+/// What an `/info/<gem>` file says of one `version[-platform]` (the line's
+/// first field, `1.5.0` or `1.5.0-x86_64-linux`): `None` when no line has it,
+/// else the `checksum:` requirement of the last line that does, the SHA-256
+/// of its `.gem` in hex, which an old server may leave out. A line is
+/// `<version> <dependencies>|<requirements>`, the requirements
+/// comma-separated, as Bundler's `CompactIndexClient::Parser` reads it.
+pub fn version_checksum(info: &[u8], version: &str) -> Option<Option<String>> {
+    let lines: Vec<&[u8]> = info.split(|&b| b == b'\n').collect();
+    let body = match lines.iter().position(|line| *line == b"---") {
+        Some(header) => &lines[header + 1..],
+        None => &lines[..],
+    };
+    let mut found = None;
+    for line in body {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        let first = line.split(|&b| b == b' ').next().unwrap_or_default();
+        if first != version.as_bytes() {
+            continue;
+        }
+        let requirements = line
+            .iter()
+            .position(|&b| b == b'|')
+            .map_or(&[][..], |bar| &line[bar + 1..]);
+        let checksum = requirements.split(|&b| b == b',').find_map(|req| {
+            let req = String::from_utf8_lossy(req);
+            let (key, value) = req.split_once(':')?;
+            (key.trim() == "checksum").then(|| value.trim().to_ascii_lowercase())
+        });
+        found = Some(checksum);
     }
     found
 }
@@ -539,7 +611,7 @@ fn file_md5(path: &Path) -> Option<String> {
     Some(hex(&Md5::digest(&data)))
 }
 
-fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
     bytes
         .iter()

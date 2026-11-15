@@ -1,0 +1,3 @@
+#!/usr/bin/env ruby
+require "alpha"
+puts Alpha::VERSION

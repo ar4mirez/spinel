@@ -107,11 +107,19 @@ The lockfile never mentions Spinel. `PLATFORMS` lists `ruby` and the usual RubyG
 
 ### 5. Global store
 
-`~/.spinel/store/gems/<name>-<version>-<platform>/` holds the unpacked `.gem` (verified against the index's sha256). Per project, `.spinel/gem_home/gems/<name>-<version>` is a **symlink** into the store, `specifications/*.gemspec` is a real file (RubyGems wants to read it), `bin/` gets generated stubs.
+`<home>/store/gems/<name>-<version>-<platform>-<sha256>/` holds one gem, keyed by its content: `<sha256>` is the SHA-256 of its `.gem` in hex, as the index's `/info` line (later the lockfile's `CHECKSUMS`) lists it, and `<platform>` is `ruby` for a gem with none. In it, `gem/` is `data.tar.gz` unpacked and `metadata` is the gemspec as YAML, from `metadata.gz`. A gem is fetched once for every project: one already stored with that checksum costs no request, and two sources serving different bytes under one name never share an entry. Per project, `.spinel/gem_home/gems/<name>-<version>` is a **symlink** to the entry's `gem/`, `specifications/*.gemspec` is a real file (RubyGems wants to read it), `bin/` gets generated stubs.
 
 // ponytail: symlinks. Hardlink-per-file (pnpm style) if a gem ever needs to write into its own directory; none of the top 1000 do.
 
-Fetch and unpack run in parallel (`tokio`), so a cold Rails install is network-bound, not CPU-bound. A warm install (everything in the store) is link creation only: sub-second.
+The store is `crates/spinel-cli/src/gem_store.rs`:
+
+- **Fetch.** `GET <source>/gems/<full name>.gem` through the index client's HTTP client, under its limit of 32 requests in flight, streamed to `store/tmp/` and hashed as it arrives. A `.gem` whose SHA-256 is not the listed one is refused, and a gem the index lists with no checksum is refused too, since the store is keyed by it.
+- **Unpack**, as `Gem::Package` verifies and extracts one: a part named twice, a missing `metadata.gz` or `data.tar.gz`, or a part whose SHA256 or SHA512 differs from `checksums.yaml.gz` refuses the gem (SHA1, which RubyGems 2 also wrote, is not checked; those gems list SHA512 too). Signatures are not checked, as `gem install` does not check them without a trust policy. Every entry of `data.tar.gz` must name a path inside the gem's directory; directories, files (with their permission bits, never setuid, setgid or sticky) and symlinks are written, and any other kind of entry is passed over. Symlinks are made last, so nothing is written through one, and each must point inside the gem by its spelling, as RubyGems requires, and also where it physically leads once made, which catches `a/b/c/up -> ../..` followed by `a/b/c/up/x -> ../../..`. A dangling one is left out with RubyGems' warning.
+- **Atomicity.** The entry is built in `store/tmp/<pid>-<n>/` and renamed into `store/gems/` whole, so an entry that exists is complete; a cut connection, a refused archive or a killed process leaves only staging files, which the next run removes once the process that made them has exited. Two `spinel`s storing one gem at once both fetch it, and the second rename finds the first's entry and keeps it. Nothing is fsynced (a `ponytail:` in `gem_store.rs`).
+
+Fetch and unpack run in parallel (`tokio`: downloads on the runtime, unpacking on blocking threads, at most one per CPU), so a cold install is network-bound, not CPU-bound: `bench/install.sh` times a cold and a warm store for the Sinatra fixture's lockfile beside `curl` fetching the same files. A warm install (everything in the store) is link creation only: sub-second.
+
+`spinel fetch [--source URL] <name@version[-platform]>...` (hidden) brings the index up to date, reads each gem's checksum from its `/info` line, and fetches into the store, printing one line per gem; `crates/spinel-cli/tests/gem_store.rs` drives it against a local server with real `.gem`s that `tests/fixtures/gem_store/build.sh` builds with `gem build`.
 
 ### 6. Native extensions
 
@@ -161,4 +169,4 @@ The `spinel-ext` ABI version is part of the ext cache key `~/.spinel/store/ext/<
    `crates/spinel-cli/tests/fixtures/builtin-gem`: a lock pinning `json` and `bigdecimal`; install uses the built-ins and skips `ext/`.
 3. `crates/spinel-cli/tests/fixtures/sinatra-lock`: a real Sinatra app lockfile; install, serve a request. Run the same `Gemfile.lock` through `bundle install` and diff.
 4. `crates/spinel-cli/tests/fixtures/rails-lock` (phase 7): a `rails new` lockfile; install, `spinel run bin/rails runner 'puts Rails.version'`.
-5. `bench/install.sh`: cold and warm install of the Rails fixture, Spinel vs Bundler.
+5. `bench/install.sh`: cold and warm install of the Rails fixture, Spinel vs Bundler. Until `spinel install` lands, it times the store alone, cold and warm, for the Sinatra fixture's lockfile, against `curl`.

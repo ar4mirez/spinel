@@ -14,6 +14,7 @@ mod compact_index;
     )
 )]
 mod gem_platform;
+mod gem_store;
 #[cfg_attr(
     not(test),
     expect(
@@ -142,6 +143,26 @@ enum Command {
         gems: Vec<String>,
     },
 
+    /// Fetch gems into the global store, and print what each one needed.
+    ///
+    /// The debugging window onto the store `spinel install` will link
+    /// projects to (docs/package-manager.md, "Global store"): each gem's
+    /// checksum is read from the source's compact index, which is brought up
+    /// to date first, and a gem already stored with that checksum is not
+    /// fetched again. Hidden: `spinel install` is the command that will use
+    /// the store.
+    #[command(hide = true)]
+    Fetch {
+        /// The source to fetch from, and whose index lists the checksums.
+        #[arg(long, default_value = compact_index::DEFAULT_SOURCE)]
+        source: String,
+
+        /// Gems, each `name@version` or `name@version-platform`, the version
+        /// as the gem's `/info` line spells it.
+        #[arg(required = true)]
+        gems: Vec<String>,
+    },
+
     /// Parse Ruby and print the syntax tree.
     ///
     /// Give it a file to see one tree. Give it a directory to sweep every `.rb`
@@ -209,6 +230,7 @@ fn main() -> ExitCode {
             names,
             gems,
         }) => return index_command(&source, names, &gems),
+        Some(Command::Fetch { source, gems }) => return fetch_command(&source, &gems),
         Some(Command::Run {
             path,
             args,
@@ -333,6 +355,125 @@ fn init_command() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// spinel fetch
+// ---------------------------------------------------------------------------
+
+/// Fetch each gem into the store under the Spinel home and print the store's
+/// directory, then one line per gem: `rack-3.1.8: fetched 89088 bytes`, or
+/// `rack-3.1.8: in the store`. The checksum each is verified against is its
+/// `/info` line's, after the index is brought up to date. Exits 1 if any gem
+/// failed, after reporting every one.
+fn fetch_command(source: &str, specs: &[String]) -> ExitCode {
+    let mut gems = Vec::new();
+    for spec in specs {
+        match gem_store::GemId::parse(spec) {
+            Ok(gem) => gems.push(gem),
+            Err(err) => {
+                eprintln!("spinel: fetch: {err}");
+                return ExitCode::from(EXIT_USAGE);
+            }
+        }
+    }
+    let Some(home) = home::spinel_home() else {
+        eprintln!("spinel: fetch: neither SPINEL_HOME nor HOME is set");
+        return ExitCode::FAILURE;
+    };
+    let client = match compact_index::Client::new(source, &home) {
+        Ok(client) => client,
+        Err(err) => {
+            eprintln!("spinel: fetch: {err}");
+            return ExitCode::from(EXIT_USAGE);
+        }
+    };
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(err) => {
+            eprintln!("spinel: fetch: cannot start the async runtime: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+    runtime.block_on(async {
+        let mut ok = true;
+        if let Err(err) = client.versions().await {
+            eprintln!("spinel: fetch: {err}");
+            return ExitCode::FAILURE;
+        }
+        let names: Vec<String> = gems.iter().map(|g| g.name.clone()).collect();
+        match client.info(&names).await {
+            Ok(results) => {
+                for (_, result) in results {
+                    if let Err(err) = result {
+                        eprintln!("spinel: fetch: {err}");
+                        ok = false;
+                    }
+                }
+            }
+            Err(err) => {
+                eprintln!("spinel: fetch: {err}");
+                return ExitCode::FAILURE;
+            }
+        }
+        let mut wants = Vec::new();
+        for gem in gems {
+            let info = std::fs::read(client.info_path(&gem.name)).unwrap_or_default();
+            match compact_index::version_checksum(&info, &gem.index_version()) {
+                Some(Some(sha256)) => wants.push((gem, sha256)),
+                Some(None) => {
+                    // ponytail: a gem the index gives no checksum for is
+                    // refused, since the store is keyed by it. Upgrade: take
+                    // the lockfile's CHECKSUMS entry (#80) when there is one.
+                    eprintln!(
+                        "spinel: fetch: {}: {source} lists no checksum for it",
+                        gem.full_name()
+                    );
+                    ok = false;
+                }
+                None => {
+                    eprintln!(
+                        "spinel: fetch: {}: {source} does not list it",
+                        gem.full_name()
+                    );
+                    ok = false;
+                }
+            }
+        }
+        let store = gem_store::Store::new(&home);
+        println!("store: {}", store.root().display());
+        for (gem, result) in store.fetch(&client, &wants).await {
+            match result {
+                Ok(fetched) => {
+                    let entry = fetched
+                        .path
+                        .strip_prefix(store.root())
+                        .unwrap_or(&fetched.path);
+                    println!(
+                        "{}: {} ({})",
+                        gem.full_name(),
+                        fetched.outcome,
+                        entry.display()
+                    );
+                    for warning in fetched.warnings {
+                        eprintln!("spinel: fetch: warning: {warning}");
+                    }
+                }
+                Err(err) => {
+                    eprintln!("spinel: fetch: {err}");
+                    ok = false;
+                }
+            }
+        }
+        if ok {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------

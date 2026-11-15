@@ -14,6 +14,8 @@ path = "src/main.rs"
 [dependencies]
 base64 = "0.22"
 clap.workspace = true
+# The gem store (#81): a `.gem` is a tar of gzipped parts.
+flate2 = "1"
 ignore = "0.4"
 libc = "0.2.189"
 md5 = { package = "md-5", version = "0.11" }
@@ -29,6 +31,7 @@ spinel-ext.workspace = true
 spinel-jit.workspace = true
 spinel-parse.workspace = true
 spinel-vm.workspace = true
+tar = { version = "0.4", default-features = false }
 tokio = { version = "1", features = ["rt", "sync"] }
 zstd = "0.13"
 
@@ -37,3 +40,4 @@ zstd = "0.13"
 
 [lints]
 workspace = true
+

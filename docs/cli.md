@@ -20,6 +20,7 @@ What `spinel` does outside the engine: how it runs a file, how it reports itself
 | `spinel parse <dir>` | lower every `.rb` file under a directory and report only what failed. Exits non-zero on an unhandled node, never on a syntax error, because a corpus may legitimately contain invalid Ruby. This is the check behind the `sweep` CI job. |
 | `spinel spec [dir]` | run ruby/spec (development only, hidden from `--help` in release builds) |
 | `spinel index [--source URL] [--names] [gem...]` | bring the compact index cache up to date: `/versions`, `/names` with `--names`, `/info/<gem>` for each gem named; prints the cache directory, then one line per file (`fetched N bytes`, `appended N bytes`, `not modified`, `current`, `not in the index`). The debugging window onto the index client (package-manager.md, "Index client"); hidden from `--help`. Exits 1 if any request failed. |
+| `spinel fetch [--source URL] <name@version[-platform]>...` | fetch gems into the global store: brings the index up to date, takes each gem's checksum from its `/info` line, and prints the store directory, then one line per gem (`fetched N bytes` or `in the store`, with its entry). The debugging window onto the store (package-manager.md, "Global store"); hidden from `--help`. Exits 1 if any gem failed, 2 for a gem it cannot parse. |
 
 ## What `spinel run` sets up
 
