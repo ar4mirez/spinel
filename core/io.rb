@@ -346,7 +346,18 @@ end
     path = File.__path__(path)
     flags = mode.nil? ? File::RDONLY : IO.__mode_flags__(mode)[0]
     perm = perm.nil? ? 0666 : Integer.__index__(perm)
-    IO.__check__(__fd_open__(path, flags, perm), path, "rb_sysopen")[0]
+    IO.__sysopen__(path, flags, perm)
+  end
+
+  # `open(2)`, made outside the lock (a FIFO waits for its other end), and
+  # made again when a kill, raise or signal cut that wait short and nothing
+  # raised, as CRuby's `rb_sysopen_internal` loops on EINTR.
+  def self.__sysopen__(path, flags, perm)
+    loop do
+      result = __fd_open__(path, flags, perm)
+      return IO.__check__(result, path, "rb_sysopen")[0] unless result == IO.__eintr__
+      Thread.__check_interrupts__
+    end
   end
 
   def self.pipe(*encodings, **options)
@@ -954,19 +965,34 @@ end
   end
 
   # The write buffer is sent first, as CRuby's `rb_io_fsync` flushes it. So
-  # for `fdatasync`.
+  # for `fdatasync`. Both are made outside the lock (`__outside__`).
   def fsync
     __check_write_open__
     __flush_buffer__
-    IO.__check__(__fd_fsync__(@fileno, false), @path)
+    IO.__check__(__outside__ { __fd_fsync__(@fileno, false) }, @path)
     0
   end
 
   def fdatasync
     __check_write_open__
     __flush_buffer__
-    IO.__check__(__fd_fsync__(@fileno, true), @path)
+    IO.__check__(__outside__ { __fd_fsync__(@fileno, true) }, @path)
     0
+  end
+
+  # What a primitive made outside the lock (`threads::outside_interruptibly`)
+  # answers, made again until it is not cut short: what cut it short —
+  # another thread's kill or raise, a signal for the main thread, this IO
+  # closed in another thread — is met first, as CRuby's blocking region meets
+  # it after EINTR (`RUBY_VM_CHECK_INTS_BLOCKING`, then `rb_notify_fd_close`'s
+  # `IOError`).
+  def __outside__
+    loop do
+      result = yield
+      return result unless result == IO.__eintr__
+      Thread.__check_interrupts__
+      raise IOError, "stream closed in another thread" if @closed
+    end
   end
 
   def flush = __flush_raw__
@@ -2420,6 +2446,7 @@ end
   # A read that waits for a nonblocking descriptor to have something, as
   # CRuby does for the pipes and sockets it makes nonblocking.
   def __read_wait__(want)
+    waits = @__read_kind_fd__ == @fileno ? @__read_waits__ : __waits_in_read__?
     loop do
       # A blocking descriptor would stop every thread: wait for it first.
       # Alone, the main thread waits first too on a pipe or a terminal, in a
@@ -2430,10 +2457,17 @@ end
       if __thread_others__
         IO.__wait__([[self, IO::READABLE]], @timeout, true) || raise(IO::TimeoutError, "Blocking operation timed out!")
         raise IOError, "stream closed in another thread" if @closed
-      elsif @__read_kind_fd__ == @fileno ? @__read_waits__ : __waits_in_read__?
+      elsif waits
         IO.__wait__([[self, IO::READABLE]], @timeout, true) || raise(IO::TimeoutError, "Blocking operation timed out!")
       end
-      chunk = __fd_read__(@fileno, want)
+      # A blocking pipe or terminal is read outside the lock while another
+      # thread is alive; what cuts that short is met here.
+      chunk = __fd_read__(@fileno, want, waits)
+      if chunk == IO.__eintr__
+        Thread.__check_interrupts__
+        raise IOError, "stream closed in another thread" if @closed
+        next
+      end
       return chunk unless chunk == IO.__eagain__
       IO.__wait__([[self, IO::READABLE]], @timeout) || raise(IO::TimeoutError, "Blocking operation timed out!")
     end
@@ -2442,13 +2476,30 @@ end
   # Whether a `read(2)` of this descriptor can block for ever: a pipe, a FIFO
   # or a character device. Asked once per descriptor; the answer is kept in
   # `@__read_waits__` for the `@fileno` in `@__read_kind_fd__`, which is all
-  # a fill reads afterwards. Alone, the running thread is the main thread,
-  # so a fill needs no look at which thread it is.
+  # a fill reads afterwards.
   def __waits_in_read__?
-    stat = __fs_stat__(@fileno, true)
-    kind = !(Integer === stat) && (File::Stat.__from__(stat).pipe? || File::Stat.__from__(stat).chardev?)
     @__read_kind_fd__ = @fileno
-    @__read_waits__ = kind
+    @__read_waits__ = IO.__can_block__?(@fileno)
+  end
+
+  # Whether a `write(2)` of the descriptor writes go to can block for ever,
+  # as `__waits_in_read__?` asks for a read, kept in `@__write_waits__` for
+  # the descriptor in `@__write_kind_fd__`.
+  def __waits_in_write__?
+    fd = __wfd__
+    return @__write_waits__ if @__write_kind_fd__ == fd
+    @__write_kind_fd__ = fd
+    @__write_waits__ = IO.__can_block__?(fd)
+  end
+
+  # A pipe, a FIFO or a character device: what a read or write of `fd` can
+  # wait on for ever. Not a socket, which Spinel makes nonblocking, and a
+  # listening one is never ready.
+  def self.__can_block__?(fd)
+    stat = __fs_stat__(fd, true)
+    return false if Integer === stat
+    stat = File::Stat.__from__(stat)
+    stat.pipe? || stat.chardev?
   end
 
   # Every byte of `text`, waiting whenever a nonblocking descriptor is full.
@@ -2467,17 +2518,39 @@ end
 
   # One `write(2)` of what it takes of `text`, waiting first when another
   # thread could run meanwhile, and whenever a nonblocking descriptor is full.
+  #
+  # A pipe or terminal that is blocking is written outside the lock while
+  # another thread is alive, and alone answers EAGAIN when it is full, as a
+  # nonblocking one does, so the wait for room is in a `poll(2)` a signal cuts
+  # short (`__fd_write__`). A write cut short — by a signal, or by another
+  # thread's kill, raise or `close` while it waited — meets what cut it short
+  # before it answers what it took.
   def __write_once__(text)
+    waits = __waits_in_write__?
     loop do
       IO.__wait__([[self, IO::WRITABLE]], @timeout, true) || raise(IO::TimeoutError, "Blocking operation timed out!") if __thread_others__
-      result = __fd_write__(__wfd__, text)
+      result = __fd_write__(__wfd__, text, waits)
       if result == IO.__eagain__
         IO.__wait__([[self, IO::WRITABLE]], @timeout) || raise(IO::TimeoutError, "Blocking operation timed out!")
         next
       end
+      if result == IO.__eintr__
+        __write_interrupted__
+        next
+      end
       __epipe__(result) if @sigpipe
-      return IO.__check__(result, @path)[0]
+      written = IO.__check__(result, @path)[0]
+      __write_interrupted__ if waits && written < text.bytesize
+      return written
     end
+  end
+
+  # A write was cut short: what cut it short is met, and one this IO's
+  # `close` in another thread cut short raises as CRuby's
+  # `rb_notify_fd_close` makes it.
+  def __write_interrupted__
+    Thread.__check_interrupts__
+    raise IOError, "stream closed in another thread" if @closed || @wclosed
   end
 
   # CRuby's `io_binwrite`, for bytes a write has converted. A `sync` IO or a
@@ -2697,6 +2770,12 @@ end
 
   def self.__eagain__
     @__eagain__ ||= Errno::EAGAIN::Errno
+  end
+
+  # What a primitive made outside the lock answers when it was cut short, or
+  # not made because something waited for its thread (`__outside__`).
+  def self.__eintr__
+    @__eintr__ ||= Errno::EINTR::Errno
   end
 
   def read_nonblock(length, buffer = nil, exception: true)
@@ -4112,8 +4191,13 @@ end
     __write_side__
     text = String === object ? object : object.to_s
     warn("syswrite for buffered IO", uplevel: 1) unless @wbuf.nil? || @wbuf.empty?
+    waits = __waits_in_write__?
     loop do
-      result = __fd_write__(__wfd__, text)
+      result = __fd_write__(__wfd__, text, waits)
+      if result == IO.__eintr__
+        __write_interrupted__
+        next
+      end
       return IO.__check__(result, @path)[0] unless result == IO.__eagain__
       IO.__wait__([[self, IO::WRITABLE]], @timeout) || raise(IO::TimeoutError, "Blocking operation timed out!")
     end
@@ -4234,7 +4318,7 @@ end
     __flush_buffer__ if !@closed && __writes__?
     @rbuf = "".b
     __keep_readconv__
-    fd = IO.__check__(__fd_open__(path, flags, 0666), path, "rb_sysopen")[0]
+    fd = IO.__sysopen__(path, flags, 0666)
     __untie__
     if @closed
       @fileno = fd
@@ -4243,6 +4327,7 @@ end
       IO.__check__(__fd_dup2__(fd, @fileno), path)
       __fd_close__(fd)
     end
+    @__read_kind_fd__ = @__write_kind_fd__ = nil
     @path = path.dup
     __arm__
     self
@@ -4298,6 +4383,7 @@ end
         IO.__check__(__fd_seek__(@fileno, position, IO::SEEK_SET))
       end
     end
+    @__read_kind_fd__ = @__write_kind_fd__ = nil
     __keep_readconv__
     # CRuby's `io_reopen` gives the IO the other's class where theirs differ,
     # and never a singleton, so `reopen(file)` makes a pipe a `File`, a `File`

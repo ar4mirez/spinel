@@ -2080,7 +2080,18 @@ fn thread_native(
                 ids,
             );
         }
-        ThreadOp::Outside => bool_value(threads::is_outside(scope, index(0).unwrap_or(usize::MAX))),
+        ThreadOp::Outside => bool_value(threads::is_outside_for_good(
+            scope,
+            index(0).unwrap_or(usize::MAX),
+        )),
+        ThreadOp::Check => {
+            // Its frame on top, nil below it: the interrupt runs before
+            // this call answers.
+            if threads::check(scope, stack, frames) {
+                return Ok(None);
+            }
+            Value::NIL
+        }
         ThreadOp::NativeId => {
             match threads::native_thread_id(scope, index(0).unwrap_or(usize::MAX)) {
                 Some(id) => Value::fixnum(id).expect("a thread id is a fixnum"),
@@ -17094,6 +17105,11 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         ),
         (
             Builtin::Kernel,
+            &["__thread_check__"],
+            Native::Thread(ThreadOp::Check),
+        ),
+        (
+            Builtin::Kernel,
             &["__thread_native_id__"],
             Native::Thread(ThreadOp::NativeId),
         ),
@@ -24551,6 +24567,27 @@ fn birthtime(_m: &std::fs::Metadata) -> Vec<i64> {
     Vec::new()
 }
 
+/// A call's -1 as its errno, read on the OS thread that made it, before
+/// anything else can change it: a call made outside the lock comes back
+/// through mutexes and a pipe.
+fn unit_errno(answer: libc::c_int) -> Result<(), libc::c_int> {
+    if answer < 0 {
+        Err(std::io::Error::last_os_error()
+            .raw_os_error()
+            .unwrap_or(libc::EIO))
+    } else {
+        Ok(())
+    }
+}
+
+/// What [`unit_errno`] answered, as `unit_result` answers it.
+fn errno_answer(answer: Result<(), libc::c_int>) -> Value {
+    match answer {
+        Ok(()) => Value::TRUE,
+        Err(errno) => Value::fixnum(i64::from(errno)).expect("an errno is a fixnum"),
+    }
+}
+
 /// A system call that answers 0 or -1: true, or an errno.
 fn unit_result(answer: libc::c_int) -> Value {
     if answer < 0 {
@@ -24576,6 +24613,69 @@ fn set_cloexec(fd: libc::c_int) {
             libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
         }
     }
+}
+
+/// Whether a descriptor's open file description is `O_NONBLOCK`. A
+/// descriptor that is not open answers false: the call made on it next
+/// answers EBADF.
+fn nonblocking(fd: libc::c_int) -> bool {
+    // SAFETY: an integer `fcntl`.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    flags >= 0 && flags & libc::O_NONBLOCK != 0
+}
+
+/// Whether `fd` has room for a write now: a `poll(2)` that does not wait.
+/// One that answers an error or a hangup has, for the write to report it.
+fn writable(fd: libc::c_int) -> bool {
+    let mut pollfd = libc::pollfd {
+        fd,
+        events: libc::POLLOUT,
+        revents: 0,
+    };
+    // SAFETY: one `pollfd`, read and written by `poll`, which does not wait.
+    unsafe { libc::poll(&raw mut pollfd, 1, 0) != 0 }
+}
+
+/// Every byte of `bytes` to `fd`, `write(2)` after `write(2)`: how many went,
+/// and the error that stopped it, if one did before any went. A nonblocking
+/// descriptor that took some and is full answers the count, for the Ruby side
+/// to wait and write the rest. A `blocking` one comes back with what it took
+/// when a call is cut short — EINTR, or a short count — and `stop` says
+/// something asked it to, for the Ruby side to meet that and write the rest;
+/// otherwise EINTR is made again.
+fn write_all(
+    fd: libc::c_int,
+    bytes: &[u8],
+    blocking: bool,
+    stop: impl Fn() -> bool,
+) -> (usize, Option<std::io::Error>) {
+    let mut written = 0usize;
+    while written < bytes.len() {
+        let rest = &bytes[written..];
+        // SAFETY: `rest` is readable for its length, and `write` reads at
+        // most that many bytes.
+        let n = unsafe { libc::write(fd, rest.as_ptr().cast(), rest.len()) };
+        if n < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted && !(blocking && stop()) {
+                continue;
+            }
+            if written > 0
+                && matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                )
+            {
+                break;
+            }
+            return (written, Some(error));
+        }
+        written += n as usize;
+        if blocking && written < bytes.len() && stop() {
+            break;
+        }
+    }
+    (written, None)
 }
 
 /// `O_NONBLOCK` set or cleared on a descriptor's open file description,
@@ -25055,8 +25155,15 @@ fn fs_native(
                 return Ok(None);
             };
             // Outside the lock: opening a FIFO blocks until its other end
-            // is opened, which another thread may be about to do.
-            let (fd, error) = threads::outside(scope, stack, frames, ids, || {
+            // is opened, which another thread may be about to do. A kill or
+            // raise ends the wait, EINTR for the Ruby side to meet it.
+            //
+            // ponytail: the main thread alone opens with the signals Ruby
+            // handles still restarting what they cut short, so Ctrl-C waits
+            // for a FIFO's other end; `restartless` would cost every `open`
+            // a `sigaction` per signal. The upgrade is a `stat` first, and
+            // `restartless` for a FIFO.
+            let opened = threads::outside_interruptibly(scope, stack, frames, ids, None, |_| {
                 // SAFETY: `path` is NUL-terminated and outlives the call;
                 // `open` reads it and answers a descriptor or -1.
                 let fd = unsafe {
@@ -25068,6 +25175,8 @@ fn fs_native(
                 };
                 (fd, std::io::Error::last_os_error())
             });
+            let (fd, error) =
+                opened.unwrap_or_else(|| (-1, std::io::Error::from_raw_os_error(libc::EINTR)));
             if fd < 0 {
                 errno_value(&error)
             } else {
@@ -25084,11 +25193,26 @@ fn fs_native(
                 .unwrap_or(0)
                 .max(0);
             let mut buffer = vec![0u8; wanted as usize];
-            // SAFETY: `buffer` is `wanted` writable bytes for the length of
-            // the call, and `read` writes at most that many.
-            let got = unsafe { libc::read(fd, buffer.as_mut_ptr().cast(), buffer.len()) };
+            let mut read = || {
+                // SAFETY: `buffer` is `wanted` writable bytes for the length
+                // of the call, and `read` writes at most that many.
+                let got = unsafe { libc::read(fd, buffer.as_mut_ptr().cast(), buffer.len()) };
+                (got, std::io::Error::last_os_error())
+            };
+            // A descriptor the Ruby side says can block (`IO#__read_waits__`)
+            // that is blocking — one Spinel did not make, or one a child made
+            // blocking — is read outside the lock while another thread is
+            // alive, as CRuby's read is a blocking region: another thread
+            // reading it first leaves this one waiting, and the others run.
+            let waits = call.args.get(2).is_some_and(|v| v.is_truthy());
+            let (got, error) = if waits && !threads::alone(scope) && !nonblocking(fd) {
+                threads::outside_interruptibly(scope, stack, frames, ids, Some(fd), |_| read())
+                    .unwrap_or_else(|| (-1, std::io::Error::from_raw_os_error(libc::EINTR)))
+            } else {
+                read()
+            };
             if got < 0 {
-                errno_value(&std::io::Error::last_os_error())
+                errno_value(&error)
             } else {
                 buffer.truncate(got as usize);
                 let class = class_handle(scope, Builtin::String);
@@ -25103,28 +25227,31 @@ fn fs_native(
                     operands: "an argument that is not a String",
                 });
             };
-            let mut written = 0usize;
-            let mut failed = None;
-            while written < bytes.len() {
-                let rest = &bytes[written..];
-                // SAFETY: `rest` is readable for its length, and `write`
-                // reads at most that many bytes.
-                let n = unsafe { libc::write(fd, rest.as_ptr().cast(), rest.len()) };
-                if n < 0 {
-                    let error = std::io::Error::last_os_error();
-                    if error.kind() == std::io::ErrorKind::Interrupted {
-                        continue;
-                    }
-                    // A nonblocking descriptor that took some: the count, for
-                    // the Ruby side to wait and write the rest, or to answer.
-                    if error.kind() == std::io::ErrorKind::WouldBlock && written > 0 {
-                        break;
-                    }
-                    failed = Some(error);
-                    break;
-                }
-                written += n as usize;
-            }
+            // A descriptor the Ruby side says can block (`IO#__write_waits__`)
+            // that is blocking — one Spinel did not make, or one a child made
+            // blocking — is written outside the lock while another thread is
+            // alive, as CRuby's write is a blocking region: another thread
+            // runs, and may be the one to drain the pipe, while this one
+            // waits for room. A kill, a raise, a `close` or a signal for the
+            // main thread ends it with what it wrote. The main thread alone
+            // writes only once there is room, so its write takes some before
+            // it can block, and a signal then cuts it short with what it
+            // took, for the handler to run: a full one answers EAGAIN, as a
+            // nonblocking one does, and the Ruby side waits for room in a
+            // `poll(2)` a signal cuts short, where a `write(2)` would be
+            // restarted (as a read waits first, #44).
+            let waits = call.args.get(2).is_some_and(|v| v.is_truthy());
+            let blocking = waits && !nonblocking(fd);
+            let (written, failed) = if blocking && !threads::alone(scope) {
+                threads::outside_interruptibly(scope, stack, frames, ids, Some(fd), |unblock| {
+                    write_all(fd, &bytes, true, || unblock.asked())
+                })
+                .unwrap_or_else(|| (0, Some(std::io::Error::from_raw_os_error(libc::EINTR))))
+            } else if blocking && !bytes.is_empty() && !writable(fd) {
+                (0, Some(std::io::Error::from_raw_os_error(libc::EAGAIN)))
+            } else {
+                write_all(fd, &bytes, waits, crate::shared::signals::any)
+            };
             match failed {
                 Some(error) => errno_value(&error),
                 None => {
@@ -25148,6 +25275,9 @@ fn fs_native(
         }
         FsOp::FdClose => {
             let fd = fd_arg(call)?;
+            // A thread using it outside the lock is woken first, and waited
+            // for (D1, as `rb_notify_fd_close`): it finds its IO closed.
+            threads::close_fd(scope, fd);
             // SAFETY: `close` takes a descriptor and touches no memory. The
             // Ruby side closes each one once.
             if unsafe { libc::close(fd) } < 0 {
@@ -25348,30 +25478,59 @@ fn fs_native(
         FsOp::FdFlock => {
             let fd = fd_arg(call)?;
             let operation = int_arg(call, 1).unwrap_or(0) as libc::c_int;
-            // SAFETY: `flock` takes two integers and touches no memory.
-            unit_result(unsafe { libc::flock(fd, operation) })
+            let lock = move || {
+                // SAFETY: `flock` takes two integers and touches no memory.
+                unit_errno(unsafe { libc::flock(fd, operation) })
+            };
+            if operation & (libc::LOCK_NB | libc::LOCK_UN) != 0 {
+                // Neither waits.
+                errno_answer(lock())
+            } else {
+                // A lock someone else holds is waited for outside the lock,
+                // as CRuby's `rb_file_flock` waits in a blocking region: the
+                // other threads run, and a kill, raise, `close` or signal ends
+                // the wait. The main thread alone has nothing to send it the
+                // unblocking signal, so the signals Ruby handles end it there.
+                let alone = threads::alone(scope);
+                let done =
+                    threads::outside_interruptibly(scope, stack, frames, ids, Some(fd), |_| {
+                        if alone {
+                            crate::shared::signals::restartless(lock)
+                        } else {
+                            Some(lock())
+                        }
+                    });
+                errno_answer(done.flatten().unwrap_or(Err(libc::EINTR)))
+            }
         }
         FsOp::FdFsync => {
             let fd = fd_arg(call)?;
             let data_only = call.args.get(1).is_some_and(|v| v.is_truthy());
-            // `fdatasync` is not on every target Spinel builds for; where it
-            // is missing, `fsync` does what it would have and more.
-            #[cfg(target_os = "linux")]
-            // SAFETY: both take a descriptor and touch no memory.
-            let done = unsafe {
-                if data_only {
-                    libc::fdatasync(fd)
-                } else {
-                    libc::fsync(fd)
-                }
+            let sync = move || {
+                // `fdatasync` is not on every target Spinel builds for; where
+                // it is missing, `fsync` does what it would have and more.
+                #[cfg(target_os = "linux")]
+                // SAFETY: both take a descriptor and touch no memory.
+                let done = unsafe {
+                    if data_only {
+                        libc::fdatasync(fd)
+                    } else {
+                        libc::fsync(fd)
+                    }
+                };
+                #[cfg(not(target_os = "linux"))]
+                let done = {
+                    let _ = data_only;
+                    // SAFETY: as above.
+                    unsafe { libc::fsync(fd) }
+                };
+                unit_errno(done)
             };
-            #[cfg(not(target_os = "linux"))]
-            let done = {
-                let _ = data_only;
-                // SAFETY: as above.
-                unsafe { libc::fsync(fd) }
-            };
-            unit_result(done)
+            // Outside the lock, as CRuby's `rb_io_fsync` is a blocking
+            // region: the disk can take its time, and the other threads run.
+            let done =
+                threads::outside_interruptibly(scope, stack, frames, ids, Some(fd), |_| sync());
+            errno_answer(done.unwrap_or(Err(libc::EINTR)))
         }
         FsOp::Truncate => {
             let length = int_arg(call, 1).unwrap_or(0) as libc::off_t;

@@ -167,8 +167,9 @@ class Thread
   # The end of the program, once its `at_exit` blocks have run: every other
   # thread is killed — the `ensure` clauses of the fiber it is in run, a
   # suspended fiber's do not — and waited for, as CRuby's
-  # `rb_thread_terminate_all` does. One in a call outside the lock is left to
-  # the process's end, which CRuby would interrupt instead.
+  # `rb_thread_terminate_all` does. One in a call outside the lock is sent
+  # the unblocking signal by the kill, and comes back to die; one in a call
+  # nothing can end early (`getaddrinfo`) is left to the process's end.
   def self.__terminate_all__
     return unless __thread_others__
     me = current
@@ -339,6 +340,19 @@ class Thread
   def self.__before_wait__
     me = __thread_object__(__thread_current__)
     me&.__deliver__(true)
+  end
+
+  # What CRuby's `RUBY_VM_CHECK_INTS_BLOCKING` does after a blocking region,
+  # for a call made outside the lock that came back cut short (EINTR), or was
+  # not made because something waited for this thread: for the main thread a
+  # signal's handler runs, then a kill or raise another thread left runs here
+  # (`__thread_check__`), and an `:on_blocking` one held back goes. The
+  # caller makes the call again if nothing raised.
+  def self.__check_interrupts__
+    Signal.__run_pending__ if __thread_current__ == __thread_main__
+    __thread_check__
+    __before_wait__
+    nil
   end
 
   # A thread every thread waits on, with nothing left that could end it.

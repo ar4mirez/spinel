@@ -135,13 +135,10 @@ fn close_pipe(fds: [libc::c_int; 2]) {
 /// Set what `signo` does. `SA_RESTART`, so a call the VM makes under its
 /// lock — a `WNOHANG` `waitpid`, `read` of a ready descriptor — is never cut short by a
 /// signal it has no way to answer; the waits a program spends its time in
-/// (`poll(2)`, which is never restarted) wake for one.
-///
-/// ponytail: a call that blocks in the kernel under the lock and is not a
-/// `poll(2)` — `accept`, `flock`, a write to a full pipe — meets a
-/// signal only when it returns, where CRuby's blocking region is interrupted
-/// and the call retried after the handler. Each is one wait-for-readiness or
-/// one EINTR loop away.
+/// (`poll(2)`, which is never restarted) wake for one. A call that blocks in
+/// the kernel is made outside the lock (`threads::outside_interruptibly`),
+/// where a signal for the main thread ends it: by [`UNBLOCK`], which another
+/// thread sends, or, with no other thread to send it, by [`restartless`].
 pub fn install(signo: i32, disposition: Disposition) -> std::io::Result<()> {
     let handler = match disposition {
         Disposition::Default => libc::SIG_DFL,
@@ -165,6 +162,79 @@ pub fn install(signo: i32, disposition: Disposition) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// The signal Spinel keeps for itself, as CRuby keeps SIGVTALRM
+/// (`reserved_signal_p`), so `trap(:VTALRM)` raises: the unblocking
+/// function's. Sent by `pthread_kill` to the OS thread of a thread blocked
+/// in the kernel outside the lock, it does nothing, and is installed without
+/// `SA_RESTART`, so the call it cuts short answers EINTR and the thread
+/// comes back to meet what was asked of it.
+pub const UNBLOCK: libc::c_int = libc::SIGVTALRM;
+
+extern "C" fn on_unblock(_signo: libc::c_int) {}
+
+/// Install [`UNBLOCK`]'s handler, which does nothing, without `SA_RESTART`.
+/// Every thread's OS thread leaves it unblocked. Installing it again is
+/// harmless; it has to be installed before the first `pthread_kill` of it,
+/// whose default would end the process.
+pub fn install_unblock() {
+    // SAFETY: a zeroed `sigaction` filled in here, read by `sigaction` only.
+    unsafe {
+        let mut action: libc::sigaction = std::mem::zeroed();
+        action.sa_sigaction = on_unblock as extern "C" fn(libc::c_int) as libc::sighandler_t;
+        action.sa_flags = 0;
+        libc::sigemptyset(&raw mut action.sa_mask);
+        libc::sigaction(UNBLOCK, &raw const action, std::ptr::null_mut());
+    }
+}
+
+/// Make `call` with every signal Ruby handles set not to restart the call it
+/// cuts short, as CRuby's handlers are installed: one that arrives while
+/// `call` blocks in the kernel ends it with EINTR, for the handler to run.
+/// None, without making it, when a signal is already waiting.
+///
+/// For the main thread with no other thread, which nothing else can send
+/// [`UNBLOCK`] to: only the main thread's OS thread takes these signals, and
+/// no `trap` can install a handler while it is in `call`. It costs a
+/// `sigaction` per signal number, so it is for a call that is going to
+/// block — `flock` — not one that only may.
+///
+/// ponytail: a signal that arrives between the look at what is waiting and
+/// the call's entry into the kernel is met when the call returns. CRuby's
+/// timer thread sends its unblocking signal again until the call is left;
+/// here nothing is left to send it. Per Ractor, only the main Ractor's main
+/// thread may make this call, once Ractors run beside it (#117).
+pub fn restartless<R>(call: impl FnOnce() -> R) -> Option<R> {
+    let ours = on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
+    let mut changed = [false; SLOTS];
+    for (signo, flag) in changed.iter_mut().enumerate().skip(1) {
+        // SAFETY: a null action asks only for the current one, written to
+        // `old`; the second call sets it again, as it was but for one flag.
+        unsafe {
+            let mut old: libc::sigaction = std::mem::zeroed();
+            if libc::sigaction(signo as libc::c_int, std::ptr::null(), &raw mut old) == 0
+                && old.sa_sigaction == ours
+                && old.sa_flags & libc::SA_RESTART != 0
+            {
+                old.sa_flags &= !libc::SA_RESTART;
+                *flag = libc::sigaction(signo as libc::c_int, &raw const old, std::ptr::null_mut())
+                    == 0;
+            }
+        }
+    }
+    let answer = (!any()).then(call);
+    for (signo, _) in changed.iter().enumerate().filter(|(_, flag)| **flag) {
+        // SAFETY: as above, the flag put back.
+        unsafe {
+            let mut old: libc::sigaction = std::mem::zeroed();
+            if libc::sigaction(signo as libc::c_int, std::ptr::null(), &raw mut old) == 0 {
+                old.sa_flags |= libc::SA_RESTART;
+                libc::sigaction(signo as libc::c_int, &raw const old, std::ptr::null_mut());
+            }
+        }
+    }
+    answer
 }
 
 /// What `signo` was set to when the process started, before Spinel set it:
@@ -229,7 +299,7 @@ pub fn drain() {
 /// operating system delivers them to the main thread's, which is the one
 /// that runs their handlers and the one whose waits they should cut short.
 /// What a fault raises (SEGV, BUS, ILL, FPE, TRAP, SYS) stays the faulting
-/// thread's.
+/// thread's, and so does [`UNBLOCK`], which is sent to this thread alone.
 pub fn block_on_this_thread() {
     // SAFETY: `set` is a local `sigset_t` built here; `pthread_sigmask` reads it.
     unsafe {
@@ -243,6 +313,7 @@ pub fn block_on_this_thread() {
             libc::SIGTRAP,
             libc::SIGSYS,
             libc::SIGABRT,
+            UNBLOCK,
         ] {
             libc::sigdelset(&raw mut set, fault);
         }

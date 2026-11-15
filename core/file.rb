@@ -409,7 +409,7 @@ class File < IO
     options = options.reject { |key, _| key == :perm }
     bom = __modeenc__(mode, options)
     perm = perm.nil? ? 0666 : Integer.__index__(perm)
-    fd = IO.__check__(__fd_open__(path, flags, perm), path, "rb_sysopen")[0]
+    fd = IO.__sysopen__(path, flags, perm)
     @path = path.dup
     begin
       __open_fd__(fd, options, bom)
@@ -457,11 +457,15 @@ class File < IO
 
   # `flock(2)`. With `LOCK_NB`, a lock someone else holds is `false`. The
   # write buffer is sent first, as `rb_file_flock` flushes an IO that writes.
+  # A lock that waits, waits outside the lock (`__outside__`): another
+  # thread's kill or raise, a signal, or this File's `close` in another
+  # thread ends the wait, as each ends CRuby's.
   def flock(operation)
     __check_open__
     __flush_buffer__ if __writes__?
-    result = __fd_flock__(@fileno, Integer.__index__(operation))
-    return false if result == Errno::EWOULDBLOCK::Errno && Integer.__index__(operation) & LOCK_NB != 0
+    operation = Integer.__index__(operation)
+    result = __outside__ { __fd_flock__(@fileno, operation) }
+    return false if result == Errno::EWOULDBLOCK::Errno && operation & LOCK_NB != 0
     IO.__check__(result, @path)
     0
   end

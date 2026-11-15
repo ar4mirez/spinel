@@ -87,7 +87,11 @@ fix is a different slice. The reason says which slice, by number.
 
 ## What is here now
 
-A hundred and forty-six tags across seventy-eight files. Nonblocking pipes
+A hundred and forty-five tags across seventy-seven files. Calls outside the
+lock (#41, S5) removed one, and its file: `File#flock` blocking while
+another thread waits, whose `ruby_exe` child hung mspec, ignoring SIGTERM,
+until its `flock` was made outside the lock where a kill ends it.
+Before it, a hundred and forty-six across seventy-eight. Nonblocking pipes
 (#41, S4) removed one, and its file: `IO#nonblock?` true for a pipe, which
 it is now that Spinel makes both ends `O_NONBLOCK` as CRuby does.
 Before it, a hundred and forty-seven across seventy-nine. The write buffer

@@ -14,9 +14,21 @@
 //! it the heap and waits to be handed it back; the next takes its own back
 //! from here and goes on in its own loop. So a switch is what it was when the
 //! threads took turns on one OS thread, and the scheduler is the same; what
-//! the OS threads add is a call that blocks in the kernel — `open(2)` of a
-//! FIFO, `getaddrinfo` — made [`outside`] the lock, its thread parked as if it
+//! the OS threads add is a call that blocks in the kernel — `flock`, `fsync`,
+//! `open(2)` of a FIFO, a read or write of a blocking pipe or terminal,
+//! `getaddrinfo` — made [`outside`] the lock, its thread parked as if it
 //! waited while the others run.
+//!
+//! Such a call is interrupted as CRuby's blocking region is, by an unblocking
+//! function ([`outside_interruptibly`]): its OS thread is recorded in the
+//! lock, and a kill or raise for it, a signal for the main thread, a `close`
+//! of the descriptor it uses and the program's end send that OS thread
+//! [`UNBLOCK`], installed without `SA_RESTART`, so the call answers EINTR.
+//! The thread comes back, gets in line, and meets what was asked of it
+//! (`Thread.__check_interrupts__`), then makes the call again if nothing
+//! raised. The signal is sent again a [`RESEND`] apart until it comes back,
+//! as CRuby's timer thread sends it, since the first may arrive before the
+//! call enters the kernel.
 //!
 //! What a thread *does* — `join`, `Mutex`, `Queue`, `Thread#raise`'s
 //! exception, `report_on_exception` — is `core/thread.rb`. This file is the
@@ -29,11 +41,12 @@
 //! preempts the running thread every time slice, so a thread that never
 //! waits does not starve the others.
 //!
-//! ponytail: only `open(2)` and `getaddrinfo` are made outside the lock so
-//! far, and a call made there cannot be interrupted — `Thread#raise` and
-//! `Thread#kill` are met when it returns, where CRuby's unblocking function
-//! ends it early. Each blocking primitive is one [`outside`] call away; the
-//! interruption is a signal to the waiting OS thread.
+//! ponytail: `getaddrinfo` is made outside the lock with no unblocking
+//! function — glibc's resolver restarts what EINTR cuts short — so a kill or
+//! raise for a thread in it is met when it returns, where CRuby 3.3 resolves
+//! on a thread of its own it can leave. A signal for the main thread while
+//! every thread is outside the lock is met when one comes back: nothing is
+//! running the scheduler to send [`UNBLOCK`].
 
 use std::collections::VecDeque;
 use std::mem::ManuallyDrop;
@@ -44,9 +57,14 @@ use super::{
     Call, Context, Error, HandleScope, Heap, Pending, Stack, Target, Unwind, Value, adopt_roots,
     frame_roots, push_proc_frame,
 };
+use crate::shared::signals::UNBLOCK;
 
 /// How long a thread runs before the loop lets another have a turn.
 const SLICE: Duration = Duration::from_millis(10);
+
+/// How long a thread asked to stop outside the lock is given before it is
+/// sent [`UNBLOCK`] again: CRuby's timer thread's quantum for its `ubf_list`.
+const RESEND: Duration = Duration::from_millis(10);
 
 /// Instructions between the loop's looks at the clock.
 pub(super) const SLICE_INSNS: u64 = 4096;
@@ -76,8 +94,9 @@ pub(super) enum ThreadState {
         deadlockable: bool,
     },
     /// In a call made [`outside`] the lock, its vectors here, until the call
-    /// returns and it gets back in line.
-    Outside { context: Context },
+    /// returns and it gets back in line; `unblockable` when an unblocking
+    /// function can end the call early ([`outside_interruptibly`]).
+    Outside { context: Context, unblockable: bool },
     /// Finished.
     Dead,
 }
@@ -151,7 +170,8 @@ impl ThreadTable {
                         f(*value);
                     }
                 }
-                ThreadState::Blocked { context: c, .. } | ThreadState::Outside { context: c } => {
+                ThreadState::Blocked { context: c, .. }
+                | ThreadState::Outside { context: c, .. } => {
                     context_roots(c, f);
                 }
                 ThreadState::Running | ThreadState::Dead => {}
@@ -193,6 +213,9 @@ struct Lock {
     /// scheduler waiting in `poll(2)` for something else wakes to put it
     /// back in line.
     wake: [libc::c_int; 2],
+    /// Told when a thread leaves a call made [`outside_interruptibly`], for
+    /// a `close` waiting for the ones using its descriptor ([`close_fd`]).
+    left: Condvar,
 }
 
 struct Held {
@@ -205,6 +228,78 @@ struct Held {
     turns: Vec<Arc<Condvar>>,
     /// Threads back from outside the lock, to be put back in line.
     back: Vec<usize>,
+    /// Each thread's call made [`outside_interruptibly`], while it is in one:
+    /// what its unblocking function needs. By index, beside `turns`.
+    blocking: Vec<Option<Blocking>>,
+}
+
+/// A call made outside the lock that an unblocking function can end, as
+/// CRuby keeps a thread's `unblock` while it is in a blocking region.
+struct Blocking {
+    /// The OS thread making it, which [`UNBLOCK`] is sent to.
+    os: OsThread,
+    /// The descriptor it uses, for a `close` in another thread.
+    fd: Option<libc::c_int>,
+    /// Whether it has been asked to stop: looked at once before the call,
+    /// and the signal is sent again while it stays.
+    asked: bool,
+    /// When the signal last went.
+    sent: Instant,
+}
+
+/// A `pthread_t`, which is a pointer on macOS.
+struct OsThread(libc::pthread_t);
+
+// SAFETY: a `pthread_t` names an OS thread to the C library from any thread;
+// nothing is reached through it but `pthread_kill`.
+unsafe impl Send for OsThread {}
+
+impl Held {
+    /// Ask thread `index`, if it is in a call made outside the lock that an
+    /// unblocking function can end, to stop: [`UNBLOCK`] to its OS thread,
+    /// unless it went less than a [`RESEND`] ago.
+    fn unblock(&mut self, index: usize) {
+        if let Some(call) = self.blocking.get_mut(index).and_then(Option::as_mut)
+            && !(call.asked && call.sent.elapsed() < RESEND)
+        {
+            call.asked = true;
+            call.sent = Instant::now();
+            // SAFETY: the OS thread is alive — it empties this slot, under
+            // this mutex, before it can end — and `pthread_kill` reads
+            // nothing else. `UNBLOCK`'s handler was installed with the lock.
+            unsafe { libc::pthread_kill(call.os.0, UNBLOCK) };
+        }
+    }
+
+    /// Send [`UNBLOCK`] again to each thread asked to stop that is still in
+    /// its call; whether any is.
+    fn unblock_again(&mut self) -> bool {
+        let mut any = false;
+        for index in 0..self.blocking.len() {
+            if self.blocking[index].as_ref().is_some_and(|call| call.asked) {
+                any = true;
+                self.unblock(index);
+            }
+        }
+        any
+    }
+
+    /// Whether a thread but `me` is in a call outside the lock using `fd`;
+    /// each is asked to stop.
+    fn unblock_users(&mut self, me: usize, fd: libc::c_int) -> bool {
+        let mut any = false;
+        for index in 0..self.blocking.len() {
+            if index != me
+                && self.blocking[index]
+                    .as_ref()
+                    .is_some_and(|call| call.fd == Some(fd))
+            {
+                any = true;
+                self.unblock(index);
+            }
+        }
+        any
+    }
 }
 
 struct HeapPtr(*mut Heap);
@@ -226,14 +321,18 @@ impl Lock {
                 }
             }
         }
+        // Before any thread could be sent it.
+        crate::shared::signals::install_unblock();
         Lock {
             held: Mutex::new(Held {
                 holder: Some(holder),
                 heap: HeapPtr(heap),
                 turns: (0..threads).map(|_| Arc::new(Condvar::new())).collect(),
                 back: Vec::new(),
+                blocking: (0..threads).map(|_| None).collect(),
             }),
             wake,
+            left: Condvar::new(),
         }
     }
 
@@ -274,8 +373,11 @@ impl Lock {
         }
         held.back.push(me);
         // SAFETY: one byte, from a live local, to the pipe's write end. A
-        // full pipe answers EAGAIN, and is waking the scheduler already.
-        unsafe { libc::write(self.wake[1], [1u8].as_ptr().cast(), 1) };
+        // full pipe answers EAGAIN, and is waking the scheduler already; an
+        // unblocking signal sent as the call returned may cut it short.
+        while unsafe { libc::write(self.wake[1], [1u8].as_ptr().cast(), 1) } < 0
+            && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted
+        {}
         Self::wait_in(held, me)
     }
 
@@ -371,7 +473,11 @@ pub(super) fn spawn(
     )?;
     let index = scope.fibers().threads.entries.len();
     let lock = lock(scope);
-    lock.held().turns.push(Arc::new(Condvar::new()));
+    {
+        let mut held = lock.held();
+        held.turns.push(Arc::new(Condvar::new()));
+        held.blocking.push(None);
+    }
     let (told, started) = std::sync::mpsc::channel();
     let its_lock = Arc::clone(&lock);
     let spawned = std::thread::Builder::new()
@@ -384,7 +490,10 @@ pub(super) fn spawn(
             os_thread(&its_lock, index);
         });
     if let Err(error) = spawned {
-        lock.held().turns.pop();
+        let mut held = lock.held();
+        held.turns.pop();
+        held.blocking.pop();
+        drop(held);
         let reason = error
             .raw_os_error()
             .map_or_else(|| error.to_string(), crate::errno::message);
@@ -465,9 +574,13 @@ fn finish(scope: &mut HandleScope<'_>, me: usize, result: Result<Value, Error>, 
                     push: None,
                 }
             }
-            // Outside the lock: it meets the refusal at its next turn check.
+            // Outside the lock: it meets the refusal at its next turn
+            // check, its call ended early where one can be.
             other => other,
         };
+        if let Some(lock) = &threads.lock {
+            lock.held().unblock(main);
+        }
     }
     if me == threads.main {
         // ponytail: this thread forked, and in the child it is the main
@@ -570,14 +683,47 @@ pub(super) fn is_kill(scope: &HandleScope<'_>, tag: Value) -> bool {
             .is_some_and(|e| e.object == tag)
 }
 
-/// Whether a thread is in a call made [`outside`] the lock.
-pub(super) fn is_outside(scope: &HandleScope<'_>, index: usize) -> bool {
-    scope
-        .fibers()
-        .threads
-        .entries
-        .get(index)
-        .is_some_and(|e| matches!(e.state, ThreadState::Outside { .. }))
+/// Whether a thread is in a call made [`outside`] the lock that nothing can
+/// end early: one the program's end leaves to the process's end.
+pub(super) fn is_outside_for_good(scope: &HandleScope<'_>, index: usize) -> bool {
+    scope.fibers().threads.entries.get(index).is_some_and(|e| {
+        matches!(
+            e.state,
+            ThreadState::Outside {
+                unblockable: false,
+                ..
+            }
+        )
+    })
+}
+
+/// Whether a thread is in a call made outside the lock that an unblocking
+/// function can end.
+fn is_unblockable(scope: &HandleScope<'_>, index: usize) -> bool {
+    scope.fibers().threads.entries.get(index).is_some_and(|e| {
+        matches!(
+            e.state,
+            ThreadState::Outside {
+                unblockable: true,
+                ..
+            }
+        )
+    })
+}
+
+/// Ask thread `index` to stop the call it makes outside the lock, if an
+/// unblocking function can end it.
+fn unblock(scope: &HandleScope<'_>, index: usize) {
+    if let Some(lock) = &scope.fibers().threads.lock {
+        lock.held().unblock(index);
+    }
+}
+
+/// Whether the running thread is the only one alive, which no other thread
+/// can interrupt: the main thread.
+pub(super) fn alone(scope: &HandleScope<'_>) -> bool {
+    let threads = &scope.fibers().threads;
+    threads.entries.len() < 2 || !threads.others()
 }
 
 /// The OS thread a thread runs on.
@@ -609,7 +755,9 @@ pub(super) fn wakeup(scope: &mut HandleScope<'_>, index: usize, reason: Value) -
     true
 }
 
-/// Leave `interrupt` for a thread to meet when it next runs, and wake it.
+/// Leave `interrupt` for a thread to meet when it next runs, and wake it: from
+/// its wait, or from a call it makes outside the lock that an unblocking
+/// function can end, as CRuby's `rb_threadptr_interrupt` calls its `unblock`.
 pub(super) fn interrupt(scope: &mut HandleScope<'_>, index: usize, interrupt: Call) {
     let interrupted = Value::symbol(crate::shared::symbols::intern("interrupted"));
     if let Some(entry) = scope.fibers_mut().threads.entries.get_mut(index) {
@@ -619,6 +767,61 @@ pub(super) fn interrupt(scope: &mut HandleScope<'_>, index: usize, interrupt: Ca
         entry.pending.push_back(interrupt);
     }
     wakeup(scope, index, interrupted);
+    unblock(scope, index);
+}
+
+/// Meet the running thread's first interrupt waiting, now, as CRuby's
+/// `RUBY_VM_CHECK_INTS` meets one: its frame goes on top, as a call the
+/// primitive asking returns to, with nil, the primitive's answer, below it.
+/// False, and nothing pushed, when none waits.
+pub(super) fn check(
+    scope: &mut HandleScope<'_>,
+    stack: &mut Stack,
+    frames: &mut Vec<Call>,
+) -> bool {
+    let threads = &mut scope.fibers_mut().threads;
+    let me = threads.current;
+    let Some(mut frame) = threads
+        .entries
+        .get_mut(me)
+        .and_then(|e| e.pending.pop_front())
+    else {
+        return false;
+    };
+    stack.push(Value::NIL);
+    frame.floor = stack.len();
+    frame.base = stack.len();
+    frame.errinfo_on_entry = scope.errinfo();
+    // The table held it; the loop's frames are held by handles.
+    frame_roots(&frame, &mut |value| {
+        if !value.is_immediate() {
+            scope.root(value);
+        }
+    });
+    frames.push(frame);
+    true
+}
+
+/// `close(2)` of `fd` is about to be made: every other thread in a call
+/// outside the lock that uses it is asked to stop, and waited for, as CRuby's
+/// `rb_notify_fd_close` and `rb_thread_io_close_wait` do, so the descriptor
+/// is not closed — and maybe made again for something else — under a call
+/// still using it. Each finds its IO closed when it next runs. The heap stays
+/// this thread's meanwhile: theirs leave the call without it.
+pub(super) fn close_fd(scope: &HandleScope<'_>, fd: libc::c_int) {
+    let threads = &scope.fibers().threads;
+    let Some(lock) = &threads.lock else {
+        return;
+    };
+    let me = threads.current;
+    let mut held = lock.held();
+    while held.unblock_users(me, fd) {
+        held = lock
+            .left
+            .wait_timeout(held, RESEND)
+            .unwrap_or_else(PoisonError::into_inner)
+            .0;
+    }
 }
 
 /// How the running thread leaves the processor.
@@ -646,7 +849,7 @@ fn take_back(scope: &mut HandleScope<'_>) -> usize {
     let mut woken = 0;
     for index in back {
         let entry = &mut scope.fibers_mut().threads.entries[index];
-        let ThreadState::Outside { context } =
+        let ThreadState::Outside { context, .. } =
             std::mem::replace(&mut entry.state, ThreadState::Dead)
         else {
             unreachable!("only a thread outside the lock comes back")
@@ -664,6 +867,15 @@ fn take_back(scope: &mut HandleScope<'_>) -> usize {
 /// is ready, and every thread back from outside the lock, waiting up to
 /// `timeout` for one to be; how many woke.
 fn wake_ready(scope: &mut HandleScope<'_>, timeout: Option<Duration>) -> usize {
+    // A thread asked to stop a call outside the lock that has not come back
+    // is sent the signal again, and the wait below looks again a resend from
+    // now: the first may have come before its call entered the kernel.
+    let mut timeout = timeout;
+    if let Some(lock) = &scope.fibers().threads.lock
+        && lock.held().unblock_again()
+    {
+        timeout = Some(timeout.map_or(RESEND, |t| t.min(RESEND)));
+    }
     let now = Instant::now();
     let mut woken = 0;
     let mut polled: Vec<(usize, libc::pollfd)> = Vec::new();
@@ -697,10 +909,12 @@ fn wake_ready(scope: &mut HandleScope<'_>, timeout: Option<Duration>) -> usize {
         }
     }
     woken += wake_for_signal(scope);
-    // A signal ends the main thread's wait, on the signals' own wake pipe;
-    // a look that waits for nothing has already seen whether one came.
+    // A signal ends the main thread's wait, or the call it makes outside the
+    // lock, on the signals' own wake pipe; a look that waits for nothing has
+    // already seen whether one came.
+    let main = scope.fibers().threads.main;
     if timeout.is_none_or(|t| !t.is_zero())
-        && main_blocked(scope)
+        && (main_blocked(scope) || is_unblockable(scope, main))
         && !scope.fibers().threads.trapping
         && let Some(fd) = crate::shared::signals::wake_fd()
     {
@@ -797,10 +1011,19 @@ fn main_blocked(scope: &HandleScope<'_>) -> bool {
 /// A signal waiting wakes the main thread from its wait, answering
 /// `:signal`, for the wait to run the handlers and go on waiting, or hand
 /// back to its caller to look again (`Kernel#__thread_wait__`). How many
-/// woke: one or none.
+/// woke: one or none. A main thread in a call outside the lock is asked to
+/// stop it instead, and runs them when it is back (`__check_interrupts__`):
+/// the signal itself restarts the call it cuts short (`SA_RESTART`).
 fn wake_for_signal(scope: &mut HandleScope<'_>) -> usize {
+    if !signal_waits(scope) {
+        return 0;
+    }
     let main = scope.fibers().threads.main;
-    usize::from(signal_waits(scope) && wakeup(scope, main, reason("signal")))
+    if is_unblockable(scope, main) {
+        unblock(scope, main);
+        return 0;
+    }
+    usize::from(wakeup(scope, main, reason("signal")))
 }
 
 /// Whether a signal waits to be handled now: none does while a trap
@@ -1192,21 +1415,130 @@ pub(super) fn outside<R>(
     ids: &mut u64,
     call: impl FnOnce() -> R,
 ) -> R {
-    let threads = &scope.fibers().threads;
-    if threads.entries.len() < 2 || !threads.others() {
+    if alone(scope) {
         return call();
     }
+    let me = scope.fibers().threads.current;
+    away(scope, stack, frames, ids, me, false, call)
+}
+
+/// What a call made [`outside_interruptibly`] can look at while it runs.
+pub(super) struct Unblock {
+    /// The lock its thread's unblocking function is kept in; none for the
+    /// main thread alone.
+    lock: Option<Arc<Lock>>,
+    me: usize,
+    /// Whether a signal waiting asks it to stop: the main thread's, outside
+    /// a trap handler.
+    signals: bool,
+}
+
+impl Unblock {
+    /// Whether something has asked the call to stop — a kill or raise for its
+    /// thread, a signal for the main thread, a `close` of its descriptor —
+    /// for a call that loops, as a write of what is left does, to come back
+    /// with what it did rather than go on.
+    pub(super) fn asked(&self) -> bool {
+        (self.signals && crate::shared::signals::any())
+            || self.lock.as_ref().is_some_and(|lock| {
+                lock.held()
+                    .blocking
+                    .get(self.me)
+                    .and_then(Option::as_ref)
+                    .is_some_and(|call| call.asked)
+            })
+    }
+}
+
+/// [`outside`], with an unblocking function, as CRuby's blocking region has
+/// one: a kill or raise for the thread, a signal for the main thread, a
+/// `close` of `fd` in another thread and the program's end each send its OS
+/// thread [`UNBLOCK`], which cuts `call` short with EINTR, and `call` can
+/// look whether it was asked to stop ([`Unblock::asked`]). None, and `call`
+/// not made, when something asked before it began: the primitive answers
+/// EINTR, and the Ruby side meets what asked (`Thread.__check_interrupts__`)
+/// and makes the call again, as CRuby's does after `RUBY_VM_CHECK_INTS`.
+///
+/// The main thread alone makes `call` holding the lock, since no other
+/// thread needs it, and nothing but a signal can interrupt it; a call that
+/// blocks in the kernel there is `shared::signals::restartless`'s to cut
+/// short. This is what an FFI call declared `blocking: true` (#105) is to be
+/// made through.
+pub(super) fn outside_interruptibly<R>(
+    scope: &mut HandleScope<'_>,
+    stack: &mut Stack,
+    frames: &mut Vec<Call>,
+    ids: &mut u64,
+    fd: Option<libc::c_int>,
+    call: impl FnOnce(&Unblock) -> R,
+) -> Option<R> {
+    let threads = &scope.fibers().threads;
     let me = threads.current;
+    let signals = me == threads.main && !threads.trapping;
+    let waiting = signals && crate::shared::signals::any();
+    if alone(scope) {
+        let unblock = Unblock {
+            lock: None,
+            me,
+            signals,
+        };
+        return (!waiting).then(|| call(&unblock));
+    }
+    // A kill or raise left for it, a signal for the main thread, or a refusal
+    // another thread left for it, is met before it goes.
+    if waiting
+        || !threads.entries[me].pending.is_empty()
+        || (me == threads.main && threads.refusal.is_some())
+    {
+        return None;
+    }
+    let lock = lock(scope);
+    // Recorded before the heap goes on, so whoever has it next and asks this
+    // thread to stop finds the OS thread to send it to.
+    lock.held().blocking[me] = Some(Blocking {
+        // SAFETY: `pthread_self` has no preconditions.
+        os: OsThread(unsafe { libc::pthread_self() }),
+        fd,
+        asked: false,
+        sent: Instant::now(),
+    });
+    let unblock = Unblock {
+        lock: Some(Arc::clone(&lock)),
+        me,
+        signals,
+    };
+    away(scope, stack, frames, ids, me, true, || {
+        let answer = (!unblock.asked()).then(|| call(&unblock));
+        lock.held().blocking[me] = None;
+        lock.left.notify_all();
+        answer
+    })
+}
+
+/// Park the running thread, `me`, outside the lock, hand the heap on, make
+/// `call`, and get back in line and in again.
+fn away<R>(
+    scope: &mut HandleScope<'_>,
+    stack: &mut Stack,
+    frames: &mut Vec<Call>,
+    ids: &mut u64,
+    me: usize,
+    unblockable: bool,
+    call: impl FnOnce() -> R,
+) -> R {
     let lock = lock(scope);
     park(scope, stack, frames, me, *ids, |context| {
-        ThreadState::Outside { context }
+        ThreadState::Outside {
+            context,
+            unblockable,
+        }
     });
     release(scope, me, None);
     let answer = call();
     lock.come_back(me);
     let entry = &mut scope.fibers_mut().threads.entries[me];
     // Put back in line by whoever had the heap, or the heap taken from nobody.
-    let (ThreadState::Ready { context, .. } | ThreadState::Outside { context }) =
+    let (ThreadState::Ready { context, .. } | ThreadState::Outside { context, .. }) =
         std::mem::replace(&mut entry.state, ThreadState::Dead)
     else {
         unreachable!("a thread outside the lock waits for nothing else")
@@ -1231,7 +1563,7 @@ pub(super) fn take_frames(scope: &mut HandleScope<'_>, index: usize) -> Option<V
     match &mut entry.state {
         ThreadState::Ready { context, .. }
         | ThreadState::Blocked { context, .. }
-        | ThreadState::Outside { context } => Some(std::mem::take(&mut context.frames)),
+        | ThreadState::Outside { context, .. } => Some(std::mem::take(&mut context.frames)),
         ThreadState::Running | ThreadState::Dead => None,
     }
 }
@@ -1241,7 +1573,7 @@ pub(super) fn give_frames(scope: &mut HandleScope<'_>, index: usize, frames: Vec
     if let Some(entry) = scope.fibers_mut().threads.entries.get_mut(index)
         && let ThreadState::Ready { context, .. }
         | ThreadState::Blocked { context, .. }
-        | ThreadState::Outside { context } = &mut entry.state
+        | ThreadState::Outside { context, .. } = &mut entry.state
     {
         context.frames = frames;
     }
