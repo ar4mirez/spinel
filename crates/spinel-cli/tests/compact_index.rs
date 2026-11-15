@@ -640,7 +640,9 @@ fn an_info_file_that_differs_from_its_listed_checksum_is_repaired() {
     fs::write(info.join("rails"), &infos[1].1[..10]).unwrap();
     let report = index_ok(&home, &server, &["rack", "rails"]);
     assert!(
-        report[1..].iter().all(|line| !line.ends_with("not modified")),
+        report[1..]
+            .iter()
+            .all(|line| !line.ends_with("not modified")),
         "{report:?}"
     );
     for (gem, body) in &infos {
