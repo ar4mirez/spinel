@@ -240,6 +240,32 @@ pub fn splice<'h>(
     scope.set_slot(string, BYTESIZE, fixnum(new_len));
 }
 
+/// Cut the first `n` live bytes off `string`, in place, without moving the
+/// rest: its start moves past them in the buffer, as CRuby's `rbuf.off`
+/// moves past what a read takes, so a reader taking a line at a time from
+/// the front costs the line and not the rest (#41). That makes the buffer
+/// shared, written to again only by a copy, which is what [`splice`] makes
+/// of a shared one; the bytes cut stay alive until then, at most what the
+/// buffer held. Cut to nothing, a buffer that was not shared stays the
+/// String's own, at 0, for what is appended next.
+pub fn drop_front<'h>(scope: &mut HandleScope<'h>, string: Handle<'h>, n: usize) {
+    let len = bytesize(scope, string);
+    let n = n.min(len);
+    if n == 0 {
+        return;
+    }
+    let buffer = scope.slot(string, BUFFER);
+    let buffer = scope.root(buffer);
+    if n == len && !scope.is_frozen(buffer) {
+        scope.set_slot(string, BYTESIZE, fixnum(0));
+        return;
+    }
+    scope.freeze(buffer);
+    let at = offset(scope, string);
+    scope.set_slot(string, OFFSET, fixnum(at + n));
+    scope.set_slot(string, BYTESIZE, fixnum(len - n));
+}
+
 /// The buffer [`splice`] and [`append`] replace one with: doubling from the
 /// old capacity to grow, or, for a shared buffer — sized for the String that
 /// first had it — from this String's own length.
@@ -1447,6 +1473,49 @@ mod tests {
             [&all[..], &all[..80], b"cd"].concat()
         );
         assert_eq!(live(&mut scope, other), &all[10..]);
+    }
+
+    /// `drop_front` (#41): the rest stays where it lies, the buffer now
+    /// shared, and what is appended after goes into a copy; cut to nothing,
+    /// a buffer of its own is kept, at 0, and appended into in place; a
+    /// slice sharing the buffer keeps its bytes.
+    #[test]
+    fn drop_front_moves_the_start_and_never_writes_a_shared_buffer() {
+        let mut heap = Heap::new();
+        let mut scope = heap.scope();
+        let all = text(100);
+        let s = string(&mut scope, &all);
+        let before = scope.slot(s, BUFFER);
+        drop_front(&mut scope, s, 0);
+        assert_eq!(live(&mut scope, s), &all[..]);
+        drop_front(&mut scope, s, 30);
+        assert_eq!(live(&mut scope, s), &all[30..]);
+        assert_eq!(scope.slot(s, BUFFER), before);
+        assert_eq!(offset(&mut scope, s), 30);
+        let view = slice(&mut scope, s, 0, 70);
+        assert!(shares(&mut scope, s, view));
+        drop_front(&mut scope, s, 60);
+        assert_eq!(live(&mut scope, s), &all[90..]);
+        assert_eq!(live(&mut scope, view), &all[30..]);
+        // Past the end is to the end; a shared buffer stays shared.
+        drop_front(&mut scope, s, 50);
+        assert_eq!(bytesize(&mut scope, s), 0);
+        assert_eq!(live(&mut scope, view), &all[30..]);
+        let tail = string(&mut scope, b"xy");
+        let (sv, tv) = (scope.get(s), scope.get(tail));
+        assert!(append(&mut scope, sv, tv, true));
+        assert_eq!(live(&mut scope, s), b"xy");
+        assert_eq!(live(&mut scope, view), &all[30..]);
+
+        // A buffer of its own, cut to nothing, is kept for the next append.
+        let own = string(&mut scope, b"line\n");
+        let kept = scope.slot(own, BUFFER);
+        drop_front(&mut scope, own, 5);
+        assert_eq!(bytesize(&mut scope, own), 0);
+        assert_eq!(scope.slot(own, BUFFER), kept);
+        splice(&mut scope, own, 0, 0, b"next");
+        assert_eq!(live(&mut scope, own), b"next");
+        assert_eq!(scope.slot(own, BUFFER), kept);
     }
 
     /// A long slice is the source's buffer at an offset, frozen; a short one,

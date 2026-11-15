@@ -1056,6 +1056,44 @@ fn str_native(
         stack.push(value);
         return Ok(None);
     }
+    // IO's line off the front of its read buffer (#41): one scan, one new
+    // String, and the buffer's start moved past it rather than its rest
+    // copied, as CRuby's `rbuf.off` moves.
+    if op == StrOp::TakeLine {
+        let Some(separator) = string_bytes(scope, arg(0)) else {
+            return Err(Error::NoDispatch {
+                op: "String take line",
+                operands: "a separator that is not a String",
+            });
+        };
+        let index = u8::try_from(index_arg(1)?).map_err(|_| Error::NoDispatch {
+            op: "String take line",
+            operands: "an encoding index out of range",
+        })?;
+        if scope.is_frozen(receiver) {
+            return Err(Error::NoDispatch {
+                op: "String take line",
+                operands: "a frozen buffer",
+            });
+        }
+        let found = if separator.is_empty() {
+            None
+        } else {
+            crate::strings::find(strings::live(scope, receiver), &separator, 0)
+        };
+        let Some(at) = found else {
+            stack.push(Value::NIL);
+            return Ok(None);
+        };
+        let len = at + separator.len();
+        let class = class_handle(scope, Builtin::String);
+        let line = scope.alloc(Some(class), Payload::Slots, crate::strings::SLOTS);
+        crate::strings::init_slice(scope, line, receiver, 0, len, index);
+        crate::strings::drop_front(scope, receiver, len);
+        let line = scope.get(line);
+        stack.push(line);
+        return Ok(None);
+    }
     let fixnum = |n: i64| Value::fixnum(n).expect("a string offset fits a fixnum");
     // These only read the receiver, so they read a long buffer where it lies
     // rather than copying it: a search near the start of a long String costs
@@ -1329,6 +1367,7 @@ fn str_native(
         }
         StrOp::Splice
         | StrOp::ByteSlice
+        | StrOp::TakeLine
         | StrOp::ByteIndex
         | StrOp::ByteRindex
         | StrOp::CharByte
@@ -17999,6 +18038,11 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             Builtin::String,
             &["__byte_rindex__"],
             Native::Str(StrOp::ByteRindex),
+        ),
+        (
+            Builtin::String,
+            &["__take_line__"],
+            Native::Str(StrOp::TakeLine),
         ),
         (
             Builtin::String,
