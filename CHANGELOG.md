@@ -77,8 +77,9 @@ bytecode a tool reads.
   `find("filesystem")` are US-ASCII, so `File.read` returns US-ASCII strings,
   `$0` and `ENV` are US-ASCII (BINARY where their bytes are not ASCII), and
   `Dir.pwd` is BINARY. `ARGV` is in the default external encoding, so it is
-  US-ASCII or BINARY too, but UTF-8 under `-E UTF-8` or `RUBYOPT=-EUTF-8`;
-  its elements are frozen under every locale. A program that reads UTF-8
+  US-ASCII or BINARY too, but UTF-8 under `-E UTF-8` or `RUBYOPT=-EUTF-8`,
+  and transcoded into the internal encoding `-E ext:int` names, as `ruby`
+  does; its elements are frozen under every locale. A program that reads UTF-8
   files in such an environment sets `LANG=C.UTF-8`, passes `-E UTF-8`, or
   names the encoding when it opens the file, as it would under `ruby`.
 

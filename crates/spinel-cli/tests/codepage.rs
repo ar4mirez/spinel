@@ -155,3 +155,31 @@ fn argv_follows_the_default_external_encoding() {
         "[[#<Encoding:ISO-8859-1>, true], [#<Encoding:ISO-8859-1>, true]]\n#<Encoding:UTF-8>\n"
     );
 }
+
+/// `-E ext:int` transcodes `ARGV` into the default internal encoding, as
+/// CRuby's `rb_external_str_new_cstr` does, and keeps an element it cannot
+/// convert as it was. Measured on 4.0.9.
+#[test]
+fn argv_is_transcoded_into_the_default_internal_encoding() {
+    let args = ["é", "x"].map(std::ffi::OsStr::new);
+    let report = |flags: &[&str], lang: &str| {
+        let out = run(flags, "argv_internal.rb", &args, &[("LANG", lang)]);
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    assert_eq!(
+        report(&["-E", "UTF-8:ISO-8859-1"], "C"),
+        "[[#<Encoding:ISO-8859-1>, true, [233]], [#<Encoding:ISO-8859-1>, true, [120]]]\n"
+    );
+    assert_eq!(
+        report(&["-E", ":ISO-8859-1"], UTF8_LOCALE),
+        "[[#<Encoding:ISO-8859-1>, true, [233]], [#<Encoding:ISO-8859-1>, true, [120]]]\n"
+    );
+    assert_eq!(
+        report(&["-E", "UTF-8:US-ASCII"], "C"),
+        "[[#<Encoding:UTF-8>, true, [195, 169]], [#<Encoding:US-ASCII>, true, [120]]]\n"
+    );
+    assert_eq!(
+        report(&["-E", "US-ASCII:UTF-8"], "C"),
+        "[[#<Encoding:BINARY (ASCII-8BIT)>, true, [195, 169]], [#<Encoding:UTF-8>, true, [120]]]\n"
+    );
+}

@@ -182,11 +182,26 @@ class Encoding
 
     # A string from outside the program, as CRuby's `rb_external_str_new_cstr`
     # makes it: in the default external encoding, BINARY instead when that is
-    # US-ASCII and the bytes are not, and frozen. Measured on 4.0.9.
+    # US-ASCII and the bytes are not, and frozen. With a default internal
+    # encoding it is transcoded into that one, an ASCII-only string merely
+    # retagged, and left as it was when the conversion fails. Measured on 4.0.9.
     def __external_str__(str)
       encoding = default_external
       str = str.dup.force_encoding(encoding)
-      str.force_encoding(Encoding::BINARY) if encoding == Encoding::US_ASCII && !str.ascii_only?
+      if encoding == Encoding::US_ASCII && !str.ascii_only?
+        return str.force_encoding(Encoding::BINARY).freeze
+      end
+      internal = default_internal
+      return str.freeze if internal.nil? || internal == encoding || encoding == Encoding::BINARY
+      if internal.ascii_compatible? &&
+         (encoding == Encoding::US_ASCII || (encoding.ascii_compatible? && str.ascii_only?))
+        return str.force_encoding(internal).freeze
+      end
+      begin
+        str = str.encode(internal)
+      rescue EncodingError
+        # CRuby's `rb_str_conv_enc` keeps the string when it cannot convert.
+      end
       str.freeze
     end
 
