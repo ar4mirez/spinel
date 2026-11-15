@@ -612,8 +612,9 @@ end
   # wherever the encodings, the options, `@textmode` or the duplex child's
   # write end change: `__modeenc__` (open and `reopen` with a path),
   # `binmode`, `set_encoding` and the BOM, `reopen` with an IO, `close_read`
-  # and the child's pipes. `ungetc` and `ungetbyte` turn the read side off
-  # until one of those: what they give back is read the long way. Anything
+  # and the child's pipes. What `ungetc` and `ungetbyte` give back on an IO
+  # without a read converter goes in front of the read buffer as bytes, so
+  # the short path reads it as the long path would. Anything
   # the flags do not say is checked at each call, and a flag that is off is
   # only ever the long path, which is the whole of the behaviour.
   #
@@ -4118,8 +4119,8 @@ end
     __readable__
     bytes = Integer === char ? (char.chr(__read_encoding__) rescue (char & 0xff).chr) : IO.__str__(char)
     __readconv__
-    @rplain = false
     if __read_converter__?
+      @rplain = false
       __hold_chars__(bytes.b)
     else
       @rbuf = bytes.b + @rbuf
@@ -4133,7 +4134,6 @@ end
     return nil if byte.nil?
     bytes = Integer === byte ? (byte & 0xff).chr : (String === byte ? byte : byte.to_str)
     @rbuf = bytes.b + @rbuf
-    @rplain = false
     nil
   end
 
