@@ -8,6 +8,11 @@ use std::process::Command;
 
 const SPINEL: &str = env!("CARGO_BIN_EXE_spinel");
 
+#[cfg(not(target_os = "macos"))]
+const UTF8_LOCALE: &str = "C.UTF-8";
+#[cfg(target_os = "macos")]
+const UTF8_LOCALE: &str = "en_US.UTF-8";
+
 #[test]
 fn pushed_back_bytes_read_as_cruby_reads_them() {
     let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/io/ungetc_plain.rb");
@@ -17,6 +22,9 @@ fn pushed_back_bytes_read_as_cruby_reads_them() {
         .arg("run")
         .arg(&script)
         .arg(&dir)
+        .env_remove("LANG")
+        .env_remove("LC_CTYPE")
+        .env("LC_ALL", UTF8_LOCALE)
         .output()
         .expect("spinel runs");
     std::fs::remove_dir_all(&dir).ok();
