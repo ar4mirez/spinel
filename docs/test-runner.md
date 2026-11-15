@@ -26,7 +26,7 @@ spinel test ──fork N workers──▶ each worker: Spinel VM, -r shims/test_
 - Test files are handed out longest-first using timings recorded from the previous run in `.spinel/test_timings.json`.
 - Per-worker databases: if `Rails` is defined, set `ENV["TEST_ENV_NUMBER"]` and `ActiveRecord::TestDatabases.create_and_load_schema` the way Rails' parallelization does. // ponytail: Rails only; other frameworks set `TEST_ENV_NUMBER` themselves.
 
-`shims/test_worker.rb` (~120 lines) registers a Minitest reporter and an RSpec formatter that emit one JSON line per event: `{"event":"pass|fail|error|skip","file":..,"line":..,"name":..,"ms":..,"message":..,"backtrace":[..]}`.
+`shims/test_worker.rb` (~120 lines) registers a Minitest reporter and an RSpec formatter that emit one JSON line per event: `{"event":"pass|fail|error|skip","file":..,"line":..,"name":..,"ms":..,"message":..,"backtrace":[..]}`. An `IO` that is not `sync` buffers what it writes, as CRuby's does (#41), so the shim sets `sync = true` on the pipe back to the parent, or writes each event in one `write`, and a line never straddles two flushes.
 
 ## Output
 
