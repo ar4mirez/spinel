@@ -87,7 +87,15 @@ fix is a different slice. The reason says which slice, by number.
 
 ## What is here now
 
-A hundred and forty-five tags across seventy-seven files. The single-byte
+A hundred and twenty-eight tags across sixty-eight files. Reading through
+`ARGF` (#41, S7a) removed seventeen, and nine files: fifteen of
+`core/argf`'s, the `ruby_exe` ones reading standard input, `$.`,
+`$FILENAME`, `rewind` and `close` among them, and `ARGF.skip` before
+anything was read, which raised `NameError` while there was no `ARGF`; the
+predefined objects including `ARGF`; and `$DEFAULT_INPUT`, which is `$<`.
+The four left in `core/argf/{gets,readline}` are in-place editing, `-i`,
+which is the slice after it.
+Before it, a hundred and forty-five across seventy-seven. The single-byte
 code pages and the locale's default external encoding (#41, S6) added none
 and removed none: the eighteen examples they let run were refusals, not tags,
 and all pass. Before it, the same. Calls outside the

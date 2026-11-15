@@ -1,1 +1,0 @@
-fails(#41: $< is ARGF, which reads the files named on the command line and needs IO and File; until then $< and so $DEFAULT_INPUT are nil):English aliases $DEFAULT_INPUT to $<

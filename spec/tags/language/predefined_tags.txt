@@ -1,4 +1,3 @@
-fails(#41: `ARGF` reads the files named on the command line, which needs IO and File):The predefined standard objects includes ARGF
 fails(#29: assigning $@ sets the backtrace of $!, and $! is restored after a rescue that returns):Predefined global $! should be set to the value of $! before the begin after a rescue which returns
 fails(#29: assigning $@ sets the backtrace of $!, and $! is restored after a rescue that returns):Predefined global $@ is not read-only
 fails(#29: assigning $@ sets the backtrace of $!, and $! is restored after a rescue that returns):Predefined global $@ accepts an Array of Strings

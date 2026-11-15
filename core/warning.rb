@@ -165,10 +165,14 @@ module Kernel
         raise TypeError, "#{as} must have write method, #{value.class} given"
       end
     when :$.
-      # `NUM2LONG`: a Float truncates, anything else goes through `to_int`.
-      # Measured on 4.0.9: `$. = 123.5` reads back 123, and a `to_int` that
-      # answers a String is "can't convert Object to Integer (...)" (#789).
-      value = value.is_a?(Float) ? Array.__long__(value) : Integer.__c_long__(value)
+      # `NUM2INT`: a Float truncates, anything else goes through `to_int`,
+      # and either must fit a C int. Measured on 4.0.9: `$. = 123.5` reads
+      # back 123, a `to_int` that answers a String is "can't convert Object
+      # to Integer (...)" (#789), and `2**31` is a RangeError. It is the
+      # global `ARGF`'s line number too, as CRuby's `argf_lineno_setter`
+      # sets both (#41).
+      value = ARGF.class.__c_int__(value)
+      ARGF.__send__(:__lineno_set__, value)
     when :$@
       # `$@ = x` sets the backtrace of `$!`, so with no `$!` there is nothing
       # to set. Measured on 4.0.9.
@@ -193,6 +197,8 @@ module Kernel
       $@
     when :$-W
       $VERBOSE.nil? ? 0 : $VERBOSE ? 2 : 1
+    when :$FILENAME
+      ARGF.filename
     end
   end
   private :__global_assign__, :__global_read__
@@ -201,14 +207,11 @@ end
 __hook_global__(false, :$VERBOSE, :$-v, :$-w, :$,, :$/, :$-0, :$\, :$;, :$stdout, :$stderr, :$>, :$.)
 __hook_global__(true, :$=, :$!, :$@)
 # `$!` is read-only; its cell holds nil only so that an alias of it reads as
-# defined, as `$!` itself does. `$<` and `$FILENAME` belong to ARGF (#41) and
-# are read-only whatever they hold; they are defined from the start too. `$.`
-# counts lines from 0. All measured on 4.0.9 (#789).
+# defined, as `$!` itself does. `$<` and `$FILENAME` are `core/argf.rb`'s.
+# `$.` counts lines from 0. All measured on 4.0.9 (#789).
 __global_store__(:$!, nil)
 __global_store__(:$@, nil)
-__global_store__(:$<, nil)
-__global_store__(:$FILENAME, nil)
-__freeze_global__(:$!, :$<, :$FILENAME)
+__freeze_global__(:$!)
 # `$-F` is `$;` by another name, rules and all, so the alias comes after the
 # hook it takes along. `$-W` is the warning level `$VERBOSE` stands for, read
 # each time and never assigned. `$-i` is ARGF's in-place extension, nil
@@ -222,7 +225,7 @@ __hook_global__(true, :$-W)
 __global_store__(:$-W, nil)
 __freeze_global__(:$-W)
 # ponytail: a plain cell. CRuby reads and writes `ARGF.inplace_mode` through
-# it; tie the two together when ARGF lands (#41).
+# it; tie the two together when its in-place mode lands (#41, S7b).
 __global_store__(:$-i, nil)
 __global_store__(:$., 0)
 

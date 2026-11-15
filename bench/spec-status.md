@@ -7,7 +7,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | directory | files | examples | passed | failed | blocked | skipped | passed % |
 |---|---:|---:|---:|---:|---:|---:|---:|
 | `command_line` | 32 | 175 | 172 | 0 | 0 | 3 | 98% |
-| `core/argf` | 35 | 139 | 0 | 0 | 120 | 19 | 0% |
+| `core/argf` | 35 | 139 | 135 | 0 | 0 | 4 | 97% |
 | `core/array` | 132 | 2898 | 2886 | 0 | 12 | 0 | 100% |
 | `core/basicobject` | 14 | 172 | 169 | 0 | 0 | 3 | 98% |
 | `core/binding` | 12 | 98 | 98 | 0 | 0 | 0 | 100% |
@@ -32,7 +32,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/hash` | 69 | 562 | 535 | 0 | 25 | 2 | 95% |
 | `core/integer` | 70 | 598 | 598 | 0 | 0 | 0 | 100% |
 | `core/io` | 104 | 1650 | 1461 | 0 | 189 | 0 | 89% |
-| `core/kernel` | 118 | 2241 | 2104 | 0 | 114 | 23 | 94% |
+| `core/kernel` | 118 | 2241 | 2105 | 0 | 113 | 23 | 94% |
 | `core/main` | 7 | 27 | 27 | 0 | 0 | 0 | 100% |
 | `core/marshal` | 6 | 502 | 502 | 0 | 0 | 0 | 100% |
 | `core/matchdata` | 30 | 186 | 186 | 0 | 0 | 0 | 100% |
@@ -66,10 +66,10 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/true` | 9 | 13 | 11 | 0 | 2 | 0 | 85% |
 | `core/unboundmethod` | 21 | 109 | 109 | 0 | 0 | 0 | 100% |
 | `core/warning` | 5 | 31 | 31 | 0 | 0 | 0 | 100% |
-| `language` | 67 | 2669 | 2550 | 0 | 102 | 17 | 96% |
+| `language` | 67 | 2669 | 2551 | 0 | 102 | 16 | 96% |
 | `language/predefined` | 2 | 14 | 14 | 0 | 0 | 0 | 100% |
 | `language/regexp` | 11 | 258 | 258 | 0 | 0 | 0 | 100% |
-| `library/English` | 2 | 27 | 26 | 0 | 0 | 1 | 96% |
+| `library/English` | 2 | 27 | 27 | 0 | 0 | 0 | 100% |
 | `library/abbrev` | 1 | 4 | 0 | 0 | 4 | 0 | 0% |
 | `library/base64` | 6 | 26 | 0 | 0 | 26 | 0 | 0% |
 | `library/bigdecimal` | 57 | 341 | 4 | 0 | 337 | 0 | 1% |
@@ -131,4 +131,4 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `optional/capi` | 47 | 0 | 0 | 0 | 0 | 0 | — |
 | `optional/thread_safety` | 1 | 5 | 4 | 0 | 0 | 1 | 80% |
 | `security` | 13 | 34 | 32 | 0 | 2 | 0 | 94% |
-| **total** | 3841 | 32935 | 30038 | 0 | 2750 | 147 | 91% |
+| **total** | 3841 | 32935 | 30176 | 0 | 2629 | 130 | 92% |
