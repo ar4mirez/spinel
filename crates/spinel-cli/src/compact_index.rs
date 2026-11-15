@@ -28,7 +28,7 @@
 //! place, so a reader (another `spinel` running now) sees the old copy or the
 //! new one, never half of one.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -421,13 +421,14 @@ pub fn info_checksums(versions: &[u8], gems: &[&str]) -> HashMap<String, String>
         Some(header) => &lines[header + 1..],
         None => &lines[..],
     };
+    let wanted: HashSet<&[u8]> = gems.iter().map(|g| g.as_bytes()).collect();
     let mut found = HashMap::new();
     for line in body {
         let Some(name_end) = line.iter().position(|&b| b == b' ') else {
             continue;
         };
         let name = &line[..name_end];
-        if !gems.iter().any(|g| g.as_bytes() == name) {
+        if !wanted.contains(name) {
             continue;
         }
         let Some(gap) = line[name_end + 1..].iter().position(|&b| b == b' ') else {
