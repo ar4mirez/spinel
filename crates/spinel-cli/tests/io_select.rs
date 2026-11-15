@@ -2,7 +2,9 @@
 //! twice (#41): the same IO in two sets of one `IO.select`, and two threads
 //! waiting on one pipe. macOS's `poll` keeps one registration per
 //! descriptor, so the second entry replaced the first and the wait never
-//! ended; ruby/spec's `core/io/select_spec.rb` hung there on macOS.
+//! ended; ruby/spec's `core/io/select_spec.rb` hung there on macOS. Then a
+//! pipe's read end asked whether it is writable, which macOS's `select(2)`
+//! says it is and `poll(2)` says it is not.
 //!
 //! The expected output is ruby 4.0's, which ran the same fixture. A hang
 //! fails the test instead of wedging it.
@@ -56,5 +58,8 @@ fn one_io_asked_about_twice_is_answered() {
         err.join().unwrap_or_default(),
     );
     assert!(status.success(), "stderr: {stderr}");
-    assert_eq!(stdout, "[1, 0, 0]\n[1, 0, 0]\n[0, 1]\n", "stderr: {stderr}");
+    assert_eq!(
+        stdout, "[1, 0, 0]\n[1, 0, 0]\n[0, 1]\nnil\n1\n",
+        "stderr: {stderr}"
+    );
 }

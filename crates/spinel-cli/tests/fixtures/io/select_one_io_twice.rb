@@ -19,3 +19,10 @@ waiters = 2.times.map { |i| Thread.new { IO.select([r2]); i } }
 sleep 0.2
 w2.write("z")
 p waiters.map(&:value)
+
+# A pipe's read end is never writable, though macOS's select(2) says it is:
+# only a wait for priority goes through select there.
+r3, w3 = IO.pipe
+p r3.wait(IO::WRITABLE, 0)
+w3.write("a")
+p r3.wait(IO::READABLE | IO::WRITABLE, 0)

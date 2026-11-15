@@ -771,7 +771,11 @@ pub fn poll(fds: &mut [libc::pollfd], timeout: libc::c_int) -> io::Result<usize>
         }
     }
     #[cfg(target_os = "macos")]
-    select_distinct(&mut once, timeout)?;
+    if once.iter().any(|p| p.events & libc::POLLPRI != 0) {
+        select_distinct(&mut once, timeout)?;
+    } else {
+        poll_plain(&mut once, timeout)?;
+    }
     #[cfg(not(target_os = "macos"))]
     poll_plain(&mut once, timeout)?;
     let always = libc::POLLERR | libc::POLLHUP | libc::POLLNVAL;
@@ -797,10 +801,12 @@ fn poll_plain(fds: &mut [libc::pollfd], timeout: libc::c_int) -> io::Result<()> 
     Ok(())
 }
 
-/// On macOS, `select(2)`, which CRuby waits with there: macOS's `poll`
-/// answers `POLLPRI` for any readable descriptor asked about it, as kqueue
-/// hands back the out-of-band flag the descriptor was registered with, so a
-/// pipe with bytes in it was ready in `IO.select`'s error set (#41).
+/// On macOS, `select(2)` for a wait that asks about `POLLPRI`: macOS's
+/// `poll` answers `POLLPRI` for any readable descriptor asked about it, as
+/// kqueue hands back the out-of-band flag the descriptor was registered
+/// with, so a pipe with bytes in it was ready in `IO.select`'s error set
+/// (#41). Only then: macOS's `select` says a pipe's read end is writable,
+/// where `poll`, like Linux, says it is not.
 #[cfg(target_os = "macos")]
 fn select_distinct(fds: &mut [libc::pollfd], timeout: libc::c_int) -> io::Result<()> {
     // ponytail: a descriptor at or past FD_SETSIZE is polled, and keeps
