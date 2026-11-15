@@ -159,18 +159,18 @@ class Encoding
       @__locale_charmap__ ||= __sys_locale_charmap__.freeze
     end
 
-    # The encoding the locale's charmap names — `ANSI_X3.4-1968` is
-    # US-ASCII's alias, `CP1252` Windows-1252's — or UTF-8 for a charmap no
-    # encoding is named, as CRuby's `rb_locale_encindex` falls back.
+    # The encoding the locale's charmap names — glibc's `ANSI_X3.4-1968` and
+    # macOS's `US-ASCII` are US-ASCII, `CP1252` Windows-1252 — or UTF-8 for a
+    # charmap no encoding is named, as CRuby's `rb_locale_encindex` falls back.
     # Measured on 4.0.9, with an ARMSCII-8 locale.
     #
-    # The two charmaps nearly every machine has are answered without the name
+    # The charmaps nearly every machine has are answered without the name
     # table, which boot would otherwise build for `ARGV`.
     def __locale__
       @__locale__ ||=
         case locale_charmap
         when "UTF-8" then Encoding::UTF_8
-        when "ANSI_X3.4-1968" then Encoding::US_ASCII
+        when "ANSI_X3.4-1968", "US-ASCII" then Encoding::US_ASCII
         else
           begin
             find(locale_charmap)
@@ -178,6 +178,16 @@ class Encoding
             Encoding::UTF_8
           end
         end
+    end
+
+    # A string from outside the program, as CRuby's `rb_external_str_new_cstr`
+    # makes it: in the default external encoding, BINARY instead when that is
+    # US-ASCII and the bytes are not, and frozen. Measured on 4.0.9.
+    def __external_str__(str)
+      encoding = default_external
+      str = str.dup.force_encoding(encoding)
+      str.force_encoding(Encoding::BINARY) if encoding == Encoding::US_ASCII && !str.ascii_only?
+      str.freeze
     end
 
     # CRuby's `enc_compatible_latter`, ported line for line — including that

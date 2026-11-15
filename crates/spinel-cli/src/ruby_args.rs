@@ -514,6 +514,7 @@ pub fn prelude(args: &RubyArgs) -> String {
     }
     if let Some(external) = &args.external_encoding {
         let _ = writeln!(out, "Encoding.default_external = {}", lit(external));
+        out.push_str("ARGV.map! { |arg| Encoding.__external_str__(arg) }\n");
     }
     if let Some(internal) = &args.internal_encoding {
         let _ = writeln!(out, "Encoding.default_internal = {}", lit(internal));

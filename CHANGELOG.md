@@ -75,10 +75,12 @@ bytecode a tool reads.
   Under `LANG=C`, `POSIX`, or no `LANG` at all, as in many Docker images,
   `Encoding.default_external`, `Encoding.find("locale")` and
   `find("filesystem")` are US-ASCII, so `File.read` returns US-ASCII strings,
-  `ARGV` and `ENV` are US-ASCII (BINARY where their bytes are not ASCII), and
-  `Dir.pwd` is BINARY. A program that reads UTF-8 files in such an
-  environment sets `LANG=C.UTF-8`, passes `-E UTF-8`, or names the encoding
-  when it opens the file, as it would under `ruby`.
+  `$0` and `ENV` are US-ASCII (BINARY where their bytes are not ASCII), and
+  `Dir.pwd` is BINARY. `ARGV` is in the default external encoding, so it is
+  US-ASCII or BINARY too, but UTF-8 under `-E UTF-8` or `RUBYOPT=-EUTF-8`;
+  its elements are frozen under every locale. A program that reads UTF-8
+  files in such an environment sets `LANG=C.UTF-8`, passes `-E UTF-8`, or
+  names the encoding when it opens the file, as it would under `ruby`.
 
 ### Breaking: bytecode format
 

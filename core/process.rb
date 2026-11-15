@@ -17,16 +17,11 @@ module Ruby
   end
 end
 
-# Each in the locale's encoding, BINARY instead when that is US-ASCII and the
-# bytes are not, and frozen, as CRuby's `rb_external_str_new_cstr` makes
-# them. Measured on 4.0.9, under `LANG=C` and a UTF-8 locale (#41).
-ARGV = __argv__.map do |arg|
-  locale = Encoding.__locale__
-  next arg if locale == Encoding::UTF_8 && arg.encoding == locale
-  arg = arg.dup.force_encoding(locale)
-  arg.force_encoding(Encoding::BINARY) if locale == Encoding::US_ASCII && !arg.ascii_only?
-  arg.freeze
-end
+# Each in the default external encoding, which at boot is the locale's, and
+# frozen; `-E` and `RUBYOPT=-E` tag them again once they have set it, while
+# `$0` stays in the locale's. Measured on 4.0.9, under `LANG=C` and a UTF-8
+# locale (#41).
+ARGV = __argv__.map { |arg| Encoding.__external_str__(arg) }
 $0 = ARGV.shift
 # `$*` is ARGV itself, and read-only. Measured on 4.0.9 (#789).
 __global_store__(:$*, ARGV)
