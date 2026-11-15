@@ -1,0 +1,110 @@
+--- !ruby/object:Gem::Specification
+name: debug
+version: !ruby/object:Gem::Version
+  version: 1.11.1
+platform: ruby
+authors:
+- Koichi Sasada
+bindir: exe
+cert_chain: []
+date: 2025-12-19 00:00:00.000000000 Z
+dependencies:
+- !ruby/object:Gem::Dependency
+  name: irb
+  requirement: !ruby/object:Gem::Requirement
+    requirements:
+    - - "~>"
+      - !ruby/object:Gem::Version
+        version: '1.10'
+  type: :runtime
+  prerelease: false
+  version_requirements: !ruby/object:Gem::Requirement
+    requirements:
+    - - "~>"
+      - !ruby/object:Gem::Version
+        version: '1.10'
+- !ruby/object:Gem::Dependency
+  name: reline
+  requirement: !ruby/object:Gem::Requirement
+    requirements:
+    - - ">="
+      - !ruby/object:Gem::Version
+        version: 0.3.8
+  type: :runtime
+  prerelease: false
+  version_requirements: !ruby/object:Gem::Requirement
+    requirements:
+    - - ">="
+      - !ruby/object:Gem::Version
+        version: 0.3.8
+description: Debugging functionality for Ruby. This is completely rewritten debug.rb
+  which was contained by the ancient Ruby versions.
+email:
+- ko1@atdot.net
+executables:
+- rdbg
+extensions:
+- ext/debug/extconf.rb
+extra_rdoc_files: []
+files:
+- CONTRIBUTING.md
+- Gemfile
+- LICENSE.txt
+- README.md
+- Rakefile
+- TODO.md
+- debug.gemspec
+- exe/rdbg
+- ext/debug/debug.c
+- ext/debug/extconf.rb
+- ext/debug/iseq_collector.c
+- lib/debug.rb
+- lib/debug/abbrev_command.rb
+- lib/debug/breakpoint.rb
+- lib/debug/client.rb
+- lib/debug/color.rb
+- lib/debug/config.rb
+- lib/debug/console.rb
+- lib/debug/dap_custom/traceInspector.rb
+- lib/debug/frame_info.rb
+- lib/debug/irb_integration.rb
+- lib/debug/local.rb
+- lib/debug/open.rb
+- lib/debug/open_nonstop.rb
+- lib/debug/prelude.rb
+- lib/debug/server.rb
+- lib/debug/server_cdp.rb
+- lib/debug/server_dap.rb
+- lib/debug/session.rb
+- lib/debug/source_repository.rb
+- lib/debug/start.rb
+- lib/debug/thread_client.rb
+- lib/debug/tracer.rb
+- lib/debug/version.rb
+- misc/README.md.erb
+homepage: https://github.com/ruby/debug
+licenses:
+- Ruby
+- BSD-2-Clause
+metadata:
+  homepage_uri: https://github.com/ruby/debug
+  source_code_uri: https://github.com/ruby/debug
+  changelog_uri: https://github.com/ruby/debug/releases/tag/v1.11.1
+rdoc_options: []
+require_paths:
+- lib
+required_ruby_version: !ruby/object:Gem::Requirement
+  requirements:
+  - - ">="
+    - !ruby/object:Gem::Version
+      version: 2.7.0
+required_rubygems_version: !ruby/object:Gem::Requirement
+  requirements:
+  - - ">="
+    - !ruby/object:Gem::Version
+      version: '0'
+requirements: []
+rubygems_version: 3.6.2
+specification_version: 4
+summary: Debugging functionality for Ruby
+test_files: []

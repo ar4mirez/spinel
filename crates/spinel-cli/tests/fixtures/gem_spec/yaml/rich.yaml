@@ -1,0 +1,110 @@
+--- !ruby/object:Gem::Specification
+name: rich
+version: !ruby/object:Gem::Version
+  version: 2.0.0.pre.rc1
+platform: ruby
+authors:
+- Ada Lovelace
+- Grace Hopper
+autorequire:
+bindir: bin
+cert_chain:
+- |
+  -----BEGIN CERTIFICATE-----
+  MIIDdDCCAlygAwIBAgIBATANBgkqhkiG9w0BAQsFADBA
+  -----END CERTIFICATE-----
+date: 2024-02-29 00:00:00.000000000 Z
+dependencies:
+- !ruby/object:Gem::Dependency
+  name: rack
+  requirement: !ruby/object:Gem::Requirement
+    requirements:
+    - - ">="
+      - !ruby/object:Gem::Version
+        version: '2.2'
+    - - "<"
+      - !ruby/object:Gem::Version
+        version: '4'
+  type: :runtime
+  prerelease: false
+  version_requirements: !ruby/object:Gem::Requirement
+    requirements:
+    - - ">="
+      - !ruby/object:Gem::Version
+        version: '2.2'
+    - - "<"
+      - !ruby/object:Gem::Version
+        version: '4'
+- !ruby/object:Gem::Dependency
+  name: minitest
+  requirement: !ruby/object:Gem::Requirement
+    requirements:
+    - - "~>"
+      - !ruby/object:Gem::Version
+        version: '5.0'
+  type: :development
+  prerelease: false
+  version_requirements: !ruby/object:Gem::Requirement
+    requirements:
+    - - "~>"
+      - !ruby/object:Gem::Version
+        version: '5.0'
+description: |-
+  A gem with every attribute set.
+  It says "hello" with #{interpolation}, #$globals and #@ivars, a tab	here,
+  a backslash \ and a trailing space 
+email:
+- ada@example.com
+- grace@example.com
+executables:
+- rich
+- rich-server
+extensions:
+- ext/rich/extconf.rb
+extra_rdoc_files:
+- README.md
+- LICENSE.txt
+files:
+- README.md
+- LICENSE.txt
+- bin/rich
+- bin/rich-server
+- ext/rich/extconf.rb
+- lib/rich.rb
+homepage: https://example.com/rich
+licenses:
+- MIT
+- Apache-2.0
+metadata:
+  source_code_uri: https://example.com/rich/src
+  changelog_uri: https://example.com/rich/CHANGELOG.md
+  allowed_push_host: https://rubygems.org
+  rubygems_mfa_required: 'true'
+post_install_message: "Thanks for installing rich!\n\tRun `rich --help`.\n"
+rdoc_options:
+- "--main"
+- README.md
+require_paths:
+- lib
+- ext
+required_ruby_version: !ruby/object:Gem::Requirement
+  requirements:
+  - - ">="
+    - !ruby/object:Gem::Version
+      version: 3.1.0
+  - - "<"
+    - !ruby/object:Gem::Version
+      version: '4.1'
+required_rubygems_version: !ruby/object:Gem::Requirement
+  requirements:
+  - - ">"
+    - !ruby/object:Gem::Version
+      version: 1.3.1
+requirements:
+- libyaml, any version
+rubygems_version: 3.5.11
+signing_key: certs/gem-private_key.pem
+specification_version: 4
+summary: Every attribute, and the strings dump has to escape.
+test_files:
+- test/test_rich.rb

@@ -384,7 +384,7 @@ impl Store {
 
 /// Whether a process with this id exists. `kill(pid, 0)` checks without
 /// sending anything; EPERM means it exists under another user.
-fn running(pid: u32) -> bool {
+pub(crate) fn running(pid: u32) -> bool {
     let Ok(pid) = libc::pid_t::try_from(pid) else {
         return false;
     };

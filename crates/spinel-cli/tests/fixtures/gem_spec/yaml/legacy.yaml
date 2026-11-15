@@ -1,0 +1,92 @@
+--- !ruby/object:Gem::Specification 
+name: legacy
+version: !ruby/object:Gem::Version 
+  hash: 27
+  prerelease: false
+  segments: 
+  - 0
+  - 1
+  - 0
+  version: 0.1.0
+platform: ruby
+authors: 
+- Old Timer
+autorequire: legacy
+bindir: bin
+cert_chain: []
+
+date: 2010-07-04 00:00:00 -04:00
+default_executable: legacy
+dependencies: 
+- !ruby/object:Gem::Dependency 
+  name: json
+  prerelease: false
+  requirement: &id001 !ruby/object:Gem::Requirement 
+    none: false
+    requirements: 
+    - - ">="
+      - !ruby/object:Gem::Version 
+        hash: 3
+        segments: 
+        - 0
+        version: "0"
+  type: :runtime
+  version_requirements: *id001
+- !ruby/object:Gem::Dependency 
+  name: rspec
+  version_requirements: !ruby/object:Gem::Requirement 
+    requirements: 
+    - - "="
+      - !ruby/object:Gem::Version 
+        version: 1.3.0
+  type: :development
+description: !binary |
+  T2xkIGdlbXMgd3JvdGUgc29tZSBzdHJpbmdzIGFzIGJpbmFyeTogw6k=
+
+email: old@example.com
+executables: 
+- legacy
+extensions: []
+
+extra_rdoc_files: 
+- README
+files: 
+- bin/legacy
+- lib/legacy.rb
+- README
+has_rdoc: true
+homepage: http://legacy.example.com
+licenses: []
+
+post_install_message: 
+rdoc_options: 
+- --charset=UTF-8
+require_paths: 
+- lib
+required_ruby_version: !ruby/object:Gem::Requirement 
+  none: false
+  requirements: 
+  - - ">="
+    - !ruby/object:Gem::Version 
+      hash: 3
+      segments: 
+      - 0
+      version: "0"
+required_rubygems_version: !ruby/object:Gem::Requirement 
+  none: false
+  requirements: 
+  - - ">="
+    - !ruby/object:Gem::Version 
+      hash: 3
+      segments: 
+      - 0
+      version: "0"
+requirements: []
+
+rubyforge_project: legacy
+rubygems_version: 1.3.7
+signing_key: 
+specification_version: 3
+summary: A gem as RubyGems 1.3 wrote one
+test_files: 
+- spec/legacy_spec.rb

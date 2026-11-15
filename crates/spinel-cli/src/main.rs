@@ -6,6 +6,7 @@
 //! `docs/cli.md` for the full surface.
 
 mod compact_index;
+mod gem_home;
 #[cfg_attr(
     not(test),
     expect(
@@ -14,6 +15,7 @@ mod compact_index;
     )
 )]
 mod gem_platform;
+mod gem_spec;
 mod gem_store;
 #[cfg_attr(
     not(test),
@@ -157,6 +159,12 @@ enum Command {
         #[arg(long, default_value = compact_index::DEFAULT_SOURCE)]
         source: String,
 
+        /// Then link them into this GEM_HOME, laid out as `gem install`
+        /// lays one out, and remove what an earlier link made for gems not
+        /// named.
+        #[arg(long, value_name = "DIR")]
+        gem_home: Option<PathBuf>,
+
         /// Gems, each `name@version` or `name@version-platform`, the version
         /// as the gem's `/info` line spells it.
         #[arg(required = true)]
@@ -230,7 +238,11 @@ fn main() -> ExitCode {
             names,
             gems,
         }) => return index_command(&source, names, &gems),
-        Some(Command::Fetch { source, gems }) => return fetch_command(&source, &gems),
+        Some(Command::Fetch {
+            source,
+            gem_home,
+            gems,
+        }) => return fetch_command(&source, gem_home.as_deref(), &gems),
         Some(Command::Run {
             path,
             args,
@@ -364,9 +376,10 @@ fn init_command() -> ExitCode {
 /// Fetch each gem into the store under the Spinel home and print the store's
 /// directory, then one line per gem: `rack-3.1.8: fetched 89088 bytes`, or
 /// `rack-3.1.8: in the store`. The checksum each is verified against is its
-/// `/info` line's, after the index is brought up to date. Exits 1 if any gem
-/// failed, after reporting every one.
-fn fetch_command(source: &str, specs: &[String]) -> ExitCode {
+/// `/info` line's, after the index is brought up to date. With a `gem_home`,
+/// and every gem stored, then link them into it. Exits 1 if any gem failed,
+/// after reporting every one.
+fn fetch_command(source: &str, gem_home: Option<&Path>, specs: &[String]) -> ExitCode {
     let mut gems = Vec::new();
     for spec in specs {
         match gem_store::GemId::parse(spec) {
@@ -445,9 +458,11 @@ fn fetch_command(source: &str, specs: &[String]) -> ExitCode {
         }
         let store = gem_store::Store::new(&home);
         println!("store: {}", store.root().display());
+        let mut stored = Vec::new();
         for (gem, result) in store.fetch(&client, &wants).await {
             match result {
                 Ok(fetched) => {
+                    stored.push((gem.clone(), fetched.path.clone()));
                     let entry = fetched
                         .path
                         .strip_prefix(store.root())
@@ -468,12 +483,52 @@ fn fetch_command(source: &str, specs: &[String]) -> ExitCode {
                 }
             }
         }
+        // A GEM_HOME gets every gem or none of them: one that failed to
+        // fetch leaves it as it was.
+        if let Some(gem_home) = gem_home.filter(|_| ok) {
+            ok = link_gem_home(gem_home, &store, &stored);
+        }
         if ok {
             ExitCode::SUCCESS
         } else {
             ExitCode::FAILURE
         }
     })
+}
+
+/// Link stored gems into `gem_home` and print it, then one line per gem
+/// (`linked` or `current`) and per gem removed.
+fn link_gem_home(
+    gem_home: &Path,
+    store: &gem_store::Store,
+    stored: &[(gem_store::GemId, PathBuf)],
+) -> bool {
+    // Symlinks name the store by an absolute path, whatever SPINEL_HOME is.
+    let absolute = |p: &Path| std::path::absolute(p).unwrap_or_else(|_| p.to_owned());
+    let stored: Vec<_> = stored
+        .iter()
+        .map(|(gem, entry)| (gem.clone(), absolute(entry)))
+        .collect();
+    let gem_home = absolute(gem_home);
+    match gem_home::link(&gem_home, &absolute(&store.root().join("gems")), &stored) {
+        Ok(report) => {
+            println!("gem home: {}", gem_home.display());
+            for (gem, outcome) in &report.linked {
+                println!("{gem}: {outcome}");
+            }
+            for gem in &report.removed {
+                println!("{gem}: removed");
+            }
+            for warning in &report.warnings {
+                eprintln!("spinel: fetch: warning: {warning}");
+            }
+            true
+        }
+        Err(err) => {
+            eprintln!("spinel: fetch: {err}");
+            false
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -705,14 +760,17 @@ fn ruby_command(words: &[String], raw: &[Vec<u8>], setup: bool) -> ExitCode {
         }
     };
     // A first line that is a `#!` for something other than ruby means the
-    // program starts further down, as if `-x` had been given.
+    // program starts further down, as if `-x` had been given. CRuby looks
+    // for its engine's name, `ruby`; Spinel's is `spinel`, the name its bin
+    // stubs start with (`#!/usr/bin/env spinel`), and it runs scripts
+    // written for `ruby` too, so either name marks a Ruby line.
+    let names_ruby = |line: &[u8]| {
+        line.windows(4).any(|w| w == b"ruby") || line.windows(6).any(|w| w == b"spinel")
+    };
     if args.skip_to_ruby.is_none()
         && args.code.is_none()
         && source.starts_with(b"#!")
-        && !source
-            .split(|&b| b == b'\n')
-            .next()
-            .is_some_and(|line| line.windows(4).any(|w| w == b"ruby"))
+        && !source.split(|&b| b == b'\n').next().is_some_and(names_ruby)
     {
         args.skip_to_ruby = Some(None);
     }
@@ -724,7 +782,7 @@ fn ruby_command(words: &[String], raw: &[Vec<u8>], setup: bool) -> ExitCode {
         let mut offset = 0;
         let mut found = None;
         for line in text.split_inclusive('\n') {
-            if line.starts_with("#!") && line.contains("ruby") {
+            if line.starts_with("#!") && names_ruby(line.as_bytes()) {
                 found = Some(offset);
                 break;
             }

@@ -1,0 +1,20 @@
+--- !ruby/object:Gem::Specification
+name: unicode
+version: !ruby/object:Gem::Version
+  version: 1.0.0
+authors:
+- "José Müller"
+- 山田太郎
+- "Emoji \U0001F600 Person"
+date: 2020-01-01 00:00:00.000000000 Z
+description: "Controls: \a\b\e\f\v\x01\x7F and a nul \0 and quotes \" '"
+email: "jose@example.com"
+metadata:
+  "z_last": "ü"
+  "a_first": "#{not interpolated}"
+  "number": 1
+summary: "Ünïcödé ✓"
+homepage: yes
+post_install_message: ~
+rubygems_version: 3.0.3
+specification_version: 4

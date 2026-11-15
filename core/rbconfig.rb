@@ -96,3 +96,7 @@ module RbConfig
     }.freeze)
   end
 end
+
+# CRuby's rbconfig.rb sets this beside RbConfig: nil unless Ruby was built
+# to run on another platform than the one building it. Bundler reads it.
+CROSS_COMPILING = nil unless defined? CROSS_COMPILING
