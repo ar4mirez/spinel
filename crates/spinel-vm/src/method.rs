@@ -1100,6 +1100,12 @@ pub enum StrOp {
     /// `(needle, byte_start)` → the byte offset of the last `needle` starting
     /// at or before `byte_start`, or nil.
     ByteRindex,
+    /// `(separator, encoding_index)` → the receiver's bytes up to and with
+    /// the first `separator`, a new String tagged with that encoding, cut
+    /// from the front of the receiver in place; or nil, the receiver as it
+    /// was, when the separator is not in it. A byte scan with no character
+    /// boundaries: IO's read buffer, which is bytes (#41).
+    TakeLine,
     /// `(kind, ascii_only, turkic)` → a new String, case-mapped: kind 0 is
     /// upcase, 1 downcase, 2 swapcase, 3 capitalize, 4 fold. Unicode for a
     /// UTF-8 string, ASCII for US-ASCII and BINARY.

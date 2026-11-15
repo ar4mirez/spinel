@@ -618,11 +618,14 @@ end
   # the flags do not say is checked at each call, and a flag that is off is
   # only ever the long path, which is the whole of the behaviour.
   #
-  # ponytail: the short path is still Ruby, so a line or a write costs the
-  # call and its guards, each a send, and `gets`'s keyword rest makes a Hash
-  # on every call. The upgrade is a primitive that cuts the line from the
-  # buffer and tags it in one step (`__take_line__(buffer, separator)`), and
-  # a call that makes no Hash for an empty keyword rest.
+  # A line is cut from the read buffer and tagged in one step,
+  # `String#__take_line__`, the byte scan for the separator being the one
+  # thing here Ruby cannot do at a byte's cost.
+  #
+  # ponytail: the rest of the short path is still Ruby, so a line or a write
+  # costs the call and its guards, each a send, and `gets`'s keyword rest
+  # makes a Hash on every call. The upgrade is a call that makes no Hash for
+  # an empty keyword rest, which is the VM's and every `**` method's.
   def __replain__
     @rplain = @enc2.nil? && @ecopts.empty? && (@enc.nil? || @enc.ascii_compatible?)
     @wplain = @wfileno.nil? && !__need_writeconv__?
@@ -2914,17 +2917,12 @@ end
     return false unless enc.ascii_compatible?
     written = @wbuf
     __flush_buffer__ if written && written.bytesize > 0
-    buffer = @rbuf
-    at = buffer.__byte_index__(NEWLINE__, 0)
-    if at.nil?
+    line = @rbuf.__take_line__(NEWLINE__, enc.__index__)
+    if line.nil?
       line = __line_bytes__(NEWLINE__, nil, true)
       return nil if line.nil?
-    else
-      at += 1
-      line = buffer.byteslice(0, at)
-      @rbuf = buffer.byteslice(at, buffer.bytesize - at)
+      line.__force_encoding__(enc.__index__)
     end
-    line.__force_encoding__(enc.__index__)
     __global_store__(:$., ARGF.__io_line__(self, @lineno += 1))
     line
   end
