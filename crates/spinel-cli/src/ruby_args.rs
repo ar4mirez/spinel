@@ -518,6 +518,9 @@ pub fn prelude(args: &RubyArgs) -> String {
     if let Some(internal) = &args.internal_encoding {
         let _ = writeln!(out, "Encoding.default_internal = {}", lit(internal));
     }
+    if args.external_encoding.is_some() || args.internal_encoding.is_some() {
+        out.push_str("ARGV.map! { |arg| Encoding.__external_str__(arg) }\n");
+    }
     if let Some(digits) = &args.record_separator {
         let value = u32::from_str_radix(digits, 8).unwrap_or(0);
         // Frozen, as `ruby` makes it.

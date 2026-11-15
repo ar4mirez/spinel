@@ -2,8 +2,8 @@
 # `crates/spinel-vm/src/transcode.rs` one step at a time. The VM converts
 # between the encodings whose mapping is arithmetic — UTF-8, US-ASCII,
 # BINARY, ISO-8859-1, UTF-16 and UTF-32 — EUC-JP, Shift_JIS,
-# Windows-31J, CP51932 and EUC-KR, whose mapping is CRuby's table (#378,
-# #419, #725),
+# Windows-31J, CP51932, EUC-KR and the single-byte code pages, whose mapping
+# is CRuby's table (#378, #419, #725, #41),
 # ISO-2022-JP and stateless-ISO-2022-JP (#404), and CP50220 and CP50221
 # (#419), and refuses any other. This file finds the
 # path of CRuby's converters a conversion takes, and is CRuby's rules about
@@ -16,7 +16,7 @@ class Encoding
     def readagain_bytes = @__readagain_bytes__
     def source_encoding = @__source_encoding__
     def destination_encoding = @__destination_encoding__
-    def source_encoding_name = @__source_encoding__&.name
+    def source_encoding_name = @__source_encoding__ && String.__converter_label__(@__source_encoding__)
     def destination_encoding_name = @__destination_encoding_name__ || @__destination_encoding__&.name
     # nil until a conversion sets it, then true or false. Measured.
     def incomplete_input? = @__incomplete__
@@ -36,8 +36,8 @@ class Encoding
     def error_char = @__error_char__
     def source_encoding = @__source_encoding__
     def destination_encoding = @__destination_encoding__
-    def source_encoding_name = @__source_encoding__&.name
-    def destination_encoding_name = @__destination_encoding__&.name
+    def source_encoding_name = @__source_encoding__ && String.__converter_label__(@__source_encoding__)
+    def destination_encoding_name = @__destination_encoding__ && String.__converter_label__(@__destination_encoding__)
 
     def __set__(char, source, destination)
       @__error_char__ = char
@@ -73,6 +73,12 @@ class String
 
   # CP50220 and CP50221, by index.
   CP5022X = [87, 88].freeze
+
+  # The single-byte code pages, by index, which convert to and from UTF-8 by
+  # CRuby's table (`codepage.rs`) and whose converters are named by their
+  # names upcased: `WINDOWS-1252`, `MACROMAN`. `scripts/codepage-table.rb`
+  # keeps the list. Measured.
+  CODE_PAGES = [23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 67, 68, 69, 70, 71, 72, 74, 75, 89, 90, 91, 92].freeze
 
   def encode(*args, **options)
     __transcoded__(args, options)
@@ -561,7 +567,8 @@ class String
   end
 
   def self.__supported_target__(encoding)
-    [0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 18, 22, 39, 79, 81, 85, 87, 88].include?(encoding.__index__)
+    [0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 18, 22, 39, 79, 81, 85, 87, 88].include?(encoding.__index__) ||
+      CODE_PAGES.include?(encoding.__index__)
   end
 
   # Every encoding a conversion passes through, `source` to `target`, along
@@ -696,7 +703,13 @@ class String
   # for CP50220's and CP50221's decoders, which write `cp51932`. Measured.
   def self.__converter_name__(from, to)
     return nil if to.nil?
-    !from.nil? && [87, 88].include?(from.__index__) && to.__index__ == 81 ? "cp51932" : to.name
+    !from.nil? && [87, 88].include?(from.__index__) && to.__index__ == 81 ? "cp51932" : __converter_label__(to)
+  end
+
+  # The name CRuby's converters give `encoding`: a code page's, upcased, and
+  # any other's own. Measured.
+  def self.__converter_label__(encoding)
+    CODE_PAGES.include?(encoding.__index__) ? encoding.name.__ascii_upcase__ : encoding.name
   end
 
   # A codepoint names itself as `U+00E9`; a character with none — a BINARY
@@ -708,11 +721,11 @@ class String
     shown = code.nil? ? error.inspect : "U+#{Integer.__hex__(code, 4)}"
     message =
       if from.equal?(source) && to.equal?(target)
-        "#{shown} from #{source.name} to #{target.name}"
+        "#{shown} from #{__converter_label__(source)} to #{__converter_label__(target)}"
       else
         path = __path__(source, target)
-        names = [path.first.name] + path.each_cons(2).map { |a, b| __converter_name__(a, b) }
-        "#{shown} to #{to.name} in conversion from #{names.join(" to ")}"
+        names = [__converter_label__(path.first)] + path.each_cons(2).map { |a, b| __converter_name__(a, b) }
+        "#{shown} to #{__converter_label__(to)} in conversion from #{names.join(" to ")}"
       end
     Encoding::UndefinedConversionError.new(message).__set__(__error_char__(code, error, from), from, to)
   end
@@ -954,9 +967,15 @@ class Encoding
     # CRuby's `econv_description`: the names, joined by " to " when both are
     # given, then the decorators after " with ", or the decorators alone for a
     # converter of no names, and "no-conversion" for one of neither. A side is
-    # an Encoding, a name that is none, or nil for none. Measured.
-    def self.__description__(source, destination, flags)
-      names = [source, destination].map { |side| side.is_a?(Encoding) ? side.name : side.to_s }.reject(&:empty?).join(" to ")
+    # an Encoding, a name that is none, or nil for none. A converter's
+    # `inspect` names its encodings as its converters do, `labels:`, where a
+    # converter that is not found names them as given. Measured.
+    def self.__description__(source, destination, flags, labels: false)
+      names = [source, destination].map do |side|
+        next side.to_s unless side.is_a?(Encoding)
+        labels ? String.__converter_label__(side) : side.name
+      end
+      names = names.reject(&:empty?).join(" to ")
       decorators = __decorator_names__(flags).join(",")
       return decorators.empty? ? "no-conversion" : decorators if names.empty?
       decorators.empty? ? names : "#{names} with #{decorators}"
@@ -1111,7 +1130,7 @@ class Encoding
 
     # In BINARY, as CRuby's. Measured.
     def inspect
-      "#<Encoding::Converter: #{Converter.__description__(@source_encoding, @destination_encoding, @flags)}>".b
+      "#<Encoding::Converter: #{Converter.__description__(@source_encoding, @destination_encoding, @flags, labels: true)}>".b
     end
 
     # The transcoders a conversion runs, in order, as CRuby's
@@ -1786,11 +1805,11 @@ class Encoding
       to = @error_element.dst
       if stop == :undefined
         @last_error = String.__undefined_error__(code, error, from, to, @source_encoding, @destination_encoding)
-        @errinfo = [result, from.name, String.__converter_name__(from, to), @last_error.error_char.b, "".b]
+        @errinfo = [result, String.__converter_label__(from), String.__converter_name__(from, to), @last_error.error_char.b, "".b]
       else
         readagain = @error_element.readagain
         @last_error = String.__invalid_error__(stop, error.b, readagain.b, from, to, to)
-        @errinfo = [result, from.name, String.__converter_name__(from, to), error.b, readagain.b]
+        @errinfo = [result, String.__converter_label__(from), String.__converter_name__(from, to), error.b, readagain.b]
       end
     end
 

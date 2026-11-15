@@ -9,6 +9,16 @@ bytecode a tool reads.
 
 ### Added
 
+- **The single-byte code pages**
+  ([#41](https://github.com/ar4mirez/spinel/issues/41)). `encode`,
+  `Encoding::Converter` and an IO's encodings convert to and from
+  ISO-8859-2 to -16, KOI8-R and KOI8-U, Windows-1250 to -1257 and
+  Windows-874, the IBM and CP code pages from 437 to 869, the Mac ones and
+  TIS-620, by CRuby's own tables, so `File.open(path, "r:Windows-1252:UTF-8")`
+  reads a legacy file as it does under `ruby`, and a character a page lacks is
+  CRuby's `Encoding::UndefinedConversionError`, named as CRuby names the
+  converter: `U+3042 from UTF-8 to WINDOWS-1252`.
+
 - **Blocking calls that let the other threads run, and end when asked**
   ([#41](https://github.com/ar4mirez/spinel/issues/41)). `File#flock`,
   `fsync`, `fdatasync`, opening a FIFO, and reading or writing a blocking
@@ -56,6 +66,22 @@ bytecode a tool reads.
   Spinel: its header carries a fingerprint of the compiler, and a file
   written by another build is ignored and rewritten. `docs/cli.md` has the
   rest.
+
+### Breaking: the default external encoding follows the locale
+
+- **`Encoding.default_external` is the locale's**
+  ([#41](https://github.com/ar4mirez/spinel/issues/41)), as under `ruby`, not
+  UTF-8 whatever the environment. Under any UTF-8 locale nothing changes.
+  Under `LANG=C`, `POSIX`, or no `LANG` at all, as in many Docker images,
+  `Encoding.default_external`, `Encoding.find("locale")` and
+  `find("filesystem")` are US-ASCII, so `File.read` returns US-ASCII strings,
+  `$0` and `ENV` are US-ASCII (BINARY where their bytes are not ASCII), and
+  `Dir.pwd` is BINARY. `ARGV` is in the default external encoding, so it is
+  US-ASCII or BINARY too, but UTF-8 under `-E UTF-8` or `RUBYOPT=-EUTF-8`,
+  and transcoded into the internal encoding `-E ext:int` names, as `ruby`
+  does; its elements are frozen under every locale. A program that reads UTF-8
+  files in such an environment sets `LANG=C.UTF-8`, passes `-E UTF-8`, or
+  names the encoding when it opens the file, as it would under `ruby`.
 
 ### Breaking: bytecode format
 

@@ -1139,8 +1139,12 @@ end
 class Dir
   include Enumerable
 
+  # In the filesystem encoding, or BINARY where that is US-ASCII, as CRuby's
+  # `rb_dir_getwd` tags it. Measured on 4.0.9, under `LANG=C` (#41).
   def self.pwd
-    File.__check__(__fs_getcwd__, ".")
+    path = File.__check__(__fs_getcwd__, ".")
+    encoding = Encoding.find("filesystem")
+    path.force_encoding(encoding == Encoding::US_ASCII ? Encoding::BINARY : encoding)
   end
 
   def self.getwd

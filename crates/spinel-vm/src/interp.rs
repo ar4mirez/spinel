@@ -26186,13 +26186,22 @@ fn sys_native(
             new_array(scope, &values)
         }
         SysOp::LocaleCharmap => {
-            // The character type the environment's locale names, then back
-            // to the C locale, so nothing else in the process sees a change.
-            // SAFETY: `setlocale` and `nl_langinfo` are called with valid
-            // arguments, and the codeset is copied before the locale changes
-            // back, which may free it.
+            // The character type the environment's locale names, read in a
+            // locale of this thread's own: `setlocale` changes the whole
+            // process's, which another Ractor, or another heap's boot, may be
+            // reading at the same moment. A locale the environment names but
+            // the machine lacks leaves the thread in the process's, which is
+            // C, as `setlocale` leaves it when it fails.
+            // SAFETY: `newlocale`, `uselocale` and `nl_langinfo` are called
+            // with valid arguments, and the codeset is copied before the
+            // thread's locale is restored and freed, which may free it.
             let codeset = unsafe {
-                libc::setlocale(libc::LC_CTYPE, c"".as_ptr());
+                let own = libc::newlocale(libc::LC_CTYPE_MASK, c"".as_ptr(), std::ptr::null_mut());
+                let previous = if own.is_null() {
+                    own
+                } else {
+                    libc::uselocale(own)
+                };
                 let name = libc::nl_langinfo(libc::CODESET);
                 let codeset = if name.is_null() {
                     String::new()
@@ -26201,7 +26210,10 @@ fn sys_native(
                         .to_string_lossy()
                         .into_owned()
                 };
-                libc::setlocale(libc::LC_CTYPE, c"C".as_ptr());
+                if !own.is_null() {
+                    libc::uselocale(previous);
+                    libc::freelocale(own);
+                }
                 codeset
             };
             string_new(scope, &codeset)

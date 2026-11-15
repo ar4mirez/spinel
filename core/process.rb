@@ -17,7 +17,11 @@ module Ruby
   end
 end
 
-ARGV = __argv__
+# Each in the default external encoding, which at boot is the locale's, and
+# frozen; `-E` and `RUBYOPT=-E` tag them again once they have set it, while
+# `$0` stays in the locale's. Measured on 4.0.9, under `LANG=C` and a UTF-8
+# locale (#41).
+ARGV = __argv__.map { |arg| Encoding.__external_str__(arg) }
 $0 = ARGV.shift
 # `$*` is ARGV itself, and read-only. Measured on 4.0.9 (#789).
 __global_store__(:$*, ARGV)

@@ -87,7 +87,10 @@ fix is a different slice. The reason says which slice, by number.
 
 ## What is here now
 
-A hundred and forty-five tags across seventy-seven files. Calls outside the
+A hundred and forty-five tags across seventy-seven files. The single-byte
+code pages and the locale's default external encoding (#41, S6) added none
+and removed none: the eighteen examples they let run were refusals, not tags,
+and all pass. Before it, the same. Calls outside the
 lock (#41, S5) removed one, and its file: `File#flock` blocking while
 another thread waits, whose `ruby_exe` child hung mspec, ignoring SIGTERM,
 until its `flock` was made outside the lock where a kill ends it.

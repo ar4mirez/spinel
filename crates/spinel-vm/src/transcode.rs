@@ -5,8 +5,8 @@
 //! Windows-31J (#378, in `jis.rs`), ISO-2022-JP and stateless-ISO-2022-JP
 //! (#404, in `iso2022jp.rs`), CP51932, by CRuby's table too, with CP50220
 //! and CP50221 through it (#419, in `cp5022x.rs`), and EUC-KR, by CRuby's
-//! table (#725, in `euckr.rs`). Any other pair is refused
-//! by the caller.
+//! table (#725, in `euckr.rs`), and the single-byte code pages, by CRuby's
+//! table (#41, in `codepage.rs`). Any other pair is refused by the caller.
 //!
 //! The unit of work is [`step`]: convert from a byte offset until the input
 //! ends or a character cannot be converted, and report which and why. A
@@ -46,6 +46,7 @@ pub fn supported(encoding: u8) -> bool {
             | CP50221
     ) || crate::jis::supported(encoding)
         || crate::euckr::supported(encoding)
+        || crate::codepage::supported(encoding)
 }
 
 /// One source character, or why there is none.
@@ -57,8 +58,9 @@ enum Decoded {
     Invalid { error: usize, readagain: usize },
     /// A sequence the input ended in the middle of.
     Incomplete(usize),
-    /// A BINARY byte past ASCII, or a JIS character Unicode has none for: a
-    /// character here, but no character anywhere else.
+    /// A BINARY byte past ASCII, a JIS character Unicode has none for, or a
+    /// code page's byte CRuby reads as none: a character here, but no
+    /// character anywhere else.
     Undefined(usize),
 }
 
@@ -204,6 +206,11 @@ fn decode(encoding: u8, bytes: &[u8], at: usize) -> Decoded {
             }
             crate::euckr::Read::Incomplete(len) => Decoded::Incomplete(len),
         },
+        _ if crate::codepage::supported(encoding) => match crate::codepage::read(encoding, rest[0])
+        {
+            Some(code) => Decoded::Char(code, 1),
+            None => Decoded::Undefined(1),
+        },
         _ => Decoded::Invalid {
             error: 1,
             readagain: 0,
@@ -261,6 +268,7 @@ pub fn encode(encoding: u8, code: u32) -> Option<Vec<u8>> {
             crate::jis::write(encoding, crate::jis::from_unicode(encoding, code)?)
         }
         _ if crate::euckr::supported(encoding) => crate::euckr::encode(code),
+        _ if crate::codepage::supported(encoding) => crate::codepage::encode(encoding, code),
         _ => None,
     }
 }
@@ -455,6 +463,7 @@ fn by_codepoint(encoding: u8) -> bool {
         BINARY | UTF_8 | US_ASCII | UTF_16BE | UTF_16LE | UTF_32BE | UTF_32LE | ISO_8859_1
     ) || crate::jis::supported(encoding)
         || crate::euckr::supported(encoding)
+        || crate::codepage::supported(encoding)
 }
 
 /// Whether CRuby has a converter from `from` to `to` that this VM runs:
