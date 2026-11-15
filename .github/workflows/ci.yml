@@ -58,13 +58,42 @@ jobs:
       # release build above and held to the same zero failures. `spec.sh`
       # exits non-zero on a failure, a bad tag or a process that stopped; the
       # floor is what makes an empty corpus fail as well.
+      #
+      # Each directory is bounded at 5 minutes (they take seconds on Linux),
+      # and the step at 20. `spec.sh` prints nothing until every mspec process
+      # has ended, so a hang would otherwise leave a log that names no spec
+      # file. Past the bound, the step lists the mspec processes still running
+      # (each one's command line is the spec files it was given) and kills
+      # them, so `spec.sh` reports each as stopped, with the end of its stderr,
+      # and the step fails. macOS has no coreutils `timeout`, hence the loop.
       - name: ruby/spec core/{io,file,dir,filetest}
         if: runner.os == 'macOS'
+        timeout-minutes: 20
         shell: bash
         run: |
-          set -o pipefail
+          bound=300
           for dir in core/io core/file core/dir core/filetest; do
-            ./scripts/spec.sh "$dir" | tee spec-report.txt
+            ./scripts/spec.sh "$dir" > spec-report.txt &
+            pid=$!
+            waited=0
+            while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt "$bound" ]; do
+              sleep 5
+              waited=$((waited + 5))
+            done
+            if kill -0 "$pid" 2>/dev/null; then
+              echo "::error::$dir was still running after ${bound}s; the mspec processes left, with the spec files each was given:"
+              ps -ax -ww -o pid,etime,command | grep '[m]spec-run' || true
+              pkill -f 'release/spinel run .*mspec-run' || true
+              wait "$pid" || true
+              cat spec-report.txt
+              exit 1
+            fi
+            status=0
+            wait "$pid" || status=$?
+            cat spec-report.txt
+            if [ "$status" -ne 0 ]; then
+              exit "$status"
+            fi
             examples=$(sed -nE 's/^[0-9]+ files? · ([0-9]+) examples ·.*/\1/p' spec-report.txt)
             if [ "${examples:-0}" -lt 50 ]; then
               echo "::error::$dir reported ${examples:-no} examples: the corpus is not all there"
