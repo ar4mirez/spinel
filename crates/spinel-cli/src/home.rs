@@ -1,5 +1,5 @@
 //! The Spinel home: `$SPINEL_HOME` when set, else `~/.spinel`. The stdlib
-//! copy, the compact index cache and (later) the gem store live under it.
+//! copy, the compact index cache and the gem store live under it.
 
 use std::path::PathBuf;
 

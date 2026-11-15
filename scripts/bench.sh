@@ -5,6 +5,7 @@
 #   scripts/bench.sh                 every benchmark
 #   scripts/bench.sh regex_captures  one of them
 #   scripts/bench.sh io_gets         a Ruby one, `bench/io_gets.rb`, on Spinel
+#   scripts/bench.sh install         a script one, `bench/install.sh` (#81)
 #   scripts/bench.sh --ruby          the same regex patterns on system ruby
 #   scripts/bench.sh --yjit-bench    the yjit-bench subset on Spinel and ruby
 #                                    (#63); rewrites the table in bench/README.md
@@ -221,6 +222,11 @@ run_ruby_bench() {
 # `cargo bench` with `harness = false` just runs each `main`, so a name selects
 # one the way `--bench` does.
 if [[ $# -gt 0 ]]; then
+  # A `bench/*.sh` is a script of its own, such as `install` (#81), which
+  # needs the network and so is never part of the run of everything.
+  if [[ -f "$repo_root/bench/$1.sh" ]]; then
+    exec "$repo_root/bench/$1.sh" "${@:2}"
+  fi
   if [[ -f "$repo_root/bench/$1.rb" ]]; then
     cargo build --release -p spinel-cli
     run_ruby_bench "$repo_root/bench/$1.rb"

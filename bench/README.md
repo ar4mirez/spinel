@@ -6,6 +6,11 @@ comparison), and a `bench/*.rs` is a `cargo bench` target. Their numbers go in
 the pull request that changes them, not into the repo (`docs/roadmap.md`,
 rule 7).
 
+A `bench/*.sh` is a script of its own, run by name (`scripts/bench.sh install`)
+and never as part of the run of everything: `install.sh` (#81) needs the
+network, and times the gem store cold and warm for a lockfile's gems beside
+`curl` fetching the same files.
+
 Two files are the exception, because a script writes them and a check fails
 when they drift: `spec-status.md`, from `scripts/spec-status.sh`, and the table
 below.

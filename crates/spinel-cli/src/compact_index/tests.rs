@@ -128,3 +128,21 @@ fn names_outside_rubygems_charset_are_refused() {
         assert!(!valid_name(bad), "{bad}");
     }
 }
+
+#[test]
+fn an_info_line_gives_its_version_s_checksum() {
+    let info = b"---\n1.0.0 |checksum:AA11,ruby:>= 2.7\n1.0.0-x86_64-linux rack:>= 2.0&< 4|checksum:bb22\n2.0.0 rack:>= 2.0|ruby:>= 3.0\n";
+    assert_eq!(
+        version_checksum(info, "1.0.0"),
+        Some(Some("aa11".to_owned()))
+    );
+    assert_eq!(
+        version_checksum(info, "1.0.0-x86_64-linux"),
+        Some(Some("bb22".to_owned()))
+    );
+    // Listed, but by a server that gives no checksum.
+    assert_eq!(version_checksum(info, "2.0.0"), Some(None));
+    assert_eq!(version_checksum(info, "3.0.0"), None);
+    // A prefix of a version is not the version.
+    assert_eq!(version_checksum(info, "1.0"), None);
+}
