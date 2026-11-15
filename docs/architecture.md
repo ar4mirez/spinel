@@ -23,7 +23,7 @@
                      ▼                                              ▼
    ~/.spinel/                                        project/
      stdlib/<ver>-<digest>/        extracted once      Gemfile, Gemfile.lock      (Bundler-compatible)
-     store/gems/<name>-<ver>/                          .spinel/gem_home/          (standard RubyGems layout)
+     store/gems/<name>-<ver>-<platform>-<sha256>/      .spinel/gem_home/          (standard RubyGems layout)
      store/ext/<name>-<ver>-<abi>/                     .spinel/bytecode/          (compiled .rb cache)
      index/<host>/
 ```

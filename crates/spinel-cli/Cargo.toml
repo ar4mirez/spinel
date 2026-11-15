@@ -40,4 +40,3 @@ zstd = "0.13"
 
 [lints]
 workspace = true
-
