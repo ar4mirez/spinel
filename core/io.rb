@@ -12,6 +12,12 @@
 # seek, `flush`, `close` and the rest CRuby flushes at send it first, and so do
 # the collector's finalizer and the program's end (`__flush_buffer__`).
 #
+# An IO with no converter and no options takes a short path (#41) for
+# `gets` and `each_line` with the default separator, `read(n)` of what is
+# buffered, and `write`, `puts`, `print` and `<<` of Strings that fit in the
+# write buffer: the bytes are cut from `@rbuf` or put in `@wbuf` as the long
+# path would, without asking it everything it asks (`__replain__`).
+#
 # The descriptors Spinel makes for a pipe, `IO.pipe`'s and `IO.popen`'s, are
 # nonblocking, as CRuby's are: a write takes what fits and waits for the rest
 # in the scheduler (`__write_once__`), where another thread can drain it and a
@@ -593,7 +599,33 @@ end
     # here, so `"r+t"` but not `"wt"`, which has none. Measured.
     @textmode = __newline_decorator__? ? true : false
     @oflags = flags
+    __replain__
     bom
+  end
+
+  # Whether reads and writes can take the short path (#41): `@rplain`, no
+  # read converter and no options at all, so a line or a sized read is bytes
+  # cut from the read buffer, with `@enc`, when there is one,
+  # ASCII-compatible (the default external, which can change, is asked at
+  # each read); `@wplain`, no write converter (CRuby's `NEED_WRITECONV`), so
+  # a String written goes into the write buffer as it is. Worked out again
+  # wherever the encodings, the options, `@textmode` or the duplex child's
+  # write end change: `__modeenc__` (open and `reopen` with a path),
+  # `binmode`, `set_encoding` and the BOM, `reopen` with an IO, `close_read`
+  # and the child's pipes. What `ungetc` and `ungetbyte` give back on an IO
+  # without a read converter goes in front of the read buffer as bytes, so
+  # the short path reads it as the long path would. Anything
+  # the flags do not say is checked at each call, and a flag that is off is
+  # only ever the long path, which is the whole of the behaviour.
+  #
+  # ponytail: the short path is still Ruby, so a line or a write costs the
+  # call and its guards, each a send, and `gets`'s keyword rest makes a Hash
+  # on every call. The upgrade is a primitive that cuts the line from the
+  # buffer and tags it in one step (`__take_line__(buffer, separator)`), and
+  # a call that makes no Hash for an empty keyword rest.
+  def __replain__
+    @rplain = @enc2.nil? && @ecopts.empty? && (@enc.nil? || @enc.ascii_compatible?)
+    @wplain = @wfileno.nil? && !__need_writeconv__?
   end
 
   # The descriptor of an IO `__modeenc__` has read the mode of.
@@ -792,6 +824,7 @@ end
         @enc2 = nil
         @binmode = true if @wbinary
         @ecopts = {}
+        __replain__
       end
       @rclosed = true
       @finalizer&.fd = nil
@@ -943,6 +976,7 @@ end
     @wfileno = writer
     @finalizer&.wfd = writer
     @duplex = true
+    __replain__
     self
   end
 
@@ -1037,6 +1071,7 @@ end
     return __ascii8bit_binmode__ unless __tied__?
     @wbinary = true
     @textmode = false
+    __replain__
   end
 
   # CRuby's `rb_io_ascii8bit_binmode`.
@@ -1051,6 +1086,7 @@ end
     # the flags and drops the rest, so `xml:` and the error handling go with
     # the newline decorators.
     @ecopts = {}
+    __replain__
   end
 
   def binmode?
@@ -1227,6 +1263,7 @@ end
     @ecopts = ecopts
     # From here `@ecopts` says, but a duplex child's write side is not this.
     @textmode = false unless __tied__?
+    __replain__
     # CRuby drops the converter unfinished: an attribute's quote open is
     # never closed, and the next write opens another. The read converter
     # goes too, and the characters it held count until a read of characters
@@ -1307,6 +1344,7 @@ end
       end
     end
     @enc2 = nil
+    __replain__
     nil
   end
 
@@ -2635,6 +2673,13 @@ end
   # --- reading -------------------------------------------------------------
 
   def read(length = nil, buffer = nil)
+    # The short path (#41): what is asked for is buffered already, on an IO
+    # that reads with no converter and holds no characters, so it is those
+    # bytes, as the long path comes to them.
+    if @rplain && buffer.nil? && Integer === length && length > 0 && length <= @rbuf.bytesize && !(@closed || @access == 1 || @access == 3) &&
+       (@wbuf.nil? || @wbuf.bytesize == 0) && (@cbuf.nil? || @cbuf.bytesize == 0)
+      return __take__(length)
+    end
     __readable__
     __readconv__ if length.nil?
     __byte_readable__ unless length.nil?
@@ -2849,9 +2894,43 @@ end
 
   # Only `gets` and `readline` set `$_`: `readlines` and `each_line` leave it.
   def gets(*args, chomp: false, **)
+    if args.empty? && !chomp && DEFAULT_RS.equal?($/)
+      line = __plain_line__
+      return $_ = line unless false.equal?(line)
+    end
     separator, limit = __line_args__(args)
     $_ = __gets__(separator, limit, chomp)
   end
+
+  # The short path of a line with the default separator, no limit and no
+  # `chomp:` (#41): on an IO with neither converter nor options, whose bytes
+  # are in an ASCII-compatible encoding, `__gets__` comes to the bytes to the
+  # next "\n" taken from the read buffer and given the encoding, which this
+  # is without the dozen questions it asks on the way. False where it does
+  # not apply, for the long path to read the line; nil at the end.
+  def __plain_line__
+    return false if @closed || !@rplain || @access == 1 || @access == 3
+    enc = @enc || Encoding.default_external
+    return false unless enc.ascii_compatible?
+    written = @wbuf
+    __flush_buffer__ if written && written.bytesize > 0
+    buffer = @rbuf
+    at = buffer.__byte_index__(NEWLINE__, 0)
+    if at.nil?
+      line = __line_bytes__(NEWLINE__, nil, true)
+      return nil if line.nil?
+    else
+      at += 1
+      line = buffer.byteslice(0, at)
+      @rbuf = buffer.byteslice(at, buffer.bytesize - at)
+    end
+    line.__force_encoding__(enc.__index__)
+    __global_store__(:$., ARGF.__io_line__(self, @lineno += 1))
+    line
+  end
+
+  NEWLINE__ = "\n".b.freeze
+  private_constant :NEWLINE__
 
   # `(separator = $/, limit = nil)`, where a lone Integer is the limit.
   # Measured: a negative limit is no limit.
@@ -3731,7 +3810,13 @@ end
     return enum_for(:each_line, *args, chomp: chomp) unless block_given?
     separator, limit = __line_args__(args)
     raise ArgumentError, "invalid limit: 0 for each_line" if limit == 0
-    while (line = __gets__(separator, limit, chomp))
+    # The block can change the IO, so whether a line can take the short
+    # path is asked of each.
+    plain = !chomp && limit.nil? && DEFAULT_RS.equal?(separator)
+    while true
+      line = plain ? __plain_line__ : false
+      line = __gets__(separator, limit, chomp) if false.equal?(line)
+      break if line.nil?
       yield line
     end
     self
@@ -4035,6 +4120,7 @@ end
     bytes = Integer === char ? (char.chr(__read_encoding__) rescue (char & 0xff).chr) : IO.__str__(char)
     __readconv__
     if __read_converter__?
+      @rplain = false
       __hold_chars__(bytes.b)
     else
       @rbuf = bytes.b + @rbuf
@@ -4143,13 +4229,46 @@ end
   def write(*objects)
     if objects.size == 1
       text = objects[0]
+      if String === text && (buffer = __plain_wbuf__) && (length = text.bytesize) > 0 && buffer.bytesize + length < WBUF_CAPA__
+        buffer.__splice__(buffer.bytesize, 0, text)
+        return length
+      end
       text = text.to_s unless String === text
       return 0 if text.empty?
       __write_side__
       return __binwrite__(__encode_out__(text))
     end
+    # Strings that all fit, `puts`'s line and its newline among them, the
+    # same way: `__write_gathered__` puts each in the buffer in turn.
+    if objects.size > 1 && (buffer = __plain_wbuf__)
+      count = objects.size
+      total = 0
+      index = 0
+      while index < count && String === (object = objects[index])
+        total += object.bytesize
+        index += 1
+      end
+      if index == count && buffer.bytesize + total < WBUF_CAPA__
+        index = 0
+        while index < count
+          buffer.__splice__(buffer.bytesize, 0, objects[index])
+          index += 1
+        end
+        return total
+      end
+    end
     __write_side__
     __write_gathered__(objects)
+  end
+
+  # The short path of a write (#41): the write buffer, where a String written
+  # goes into it as it is, which is where `__binwrite__` puts one that fits
+  # on an IO that writes, has no converter, is neither `sync` nor a terminal,
+  # and has no bytes read ahead to give back first. Nil otherwise, and before
+  # the first write that buffers has made it.
+  def __plain_wbuf__
+    return nil if @closed || @wgone || @sync || @tty || !@wplain || @access == 0 || @access == 3 || @rbuf.bytesize > 0
+    @wbuf
   end
 
   # CRuby's `io_writev`. Each object is made a String and converted, and goes
@@ -4235,6 +4354,12 @@ end
   end
 
   def print(*objects)
+    # One object and no `$\` is one write of it, as below.
+    if objects.size == 1 && $\.nil?
+      object = objects[0]
+      write(object.nil? ? "" : object)
+      return nil
+    end
     objects = [$_] if objects.empty?
     separator = $,
     out = []
@@ -4271,9 +4396,35 @@ end
       write(DEFAULT_RS)
       return nil
     end
+    # One String in an ASCII-compatible encoding (#41), as `__puts_line__`
+    # writes it, without asking `end_with?` and `method(:write)` for it: its
+    # last byte says whether it ends in a newline, and only a `write` of one
+    # argument, the old interface, has the line and the newline one at a time.
+    if lines.size == 1 && String === (line = lines[0]) && IO.__ascii_index__?(line.__encoding_index__)
+      size = line.bytesize
+      if size == 0
+        write(DEFAULT_RS)
+      elsif line.__getbyte__(size - 1) == 10
+        write(line)
+      elsif (found = __reflect_method_lookup__(self, nil, :write, false)).nil? || found[1] == 1
+        __puts_lines__(lines, [])
+      else
+        write(line, DEFAULT_RS)
+      end
+      return nil
+    end
     __puts_lines__(lines, [])
     nil
   end
+
+  # Whether an encoding index is UTF-8's, US-ASCII's or BINARY's, the
+  # ASCII-compatible encodings `puts` is asked to write most.
+  def self.__ascii_index__?(index)
+    index == 0 || index == UTF_8_INDEX__ || index == US_ASCII_INDEX__
+  end
+  UTF_8_INDEX__ = Encoding::UTF_8.__index__
+  US_ASCII_INDEX__ = Encoding::US_ASCII.__index__
+  private_constant :UTF_8_INDEX__, :US_ASCII_INDEX__
 
   # --- another descriptor ----------------------------------------------------
 
@@ -4342,6 +4493,7 @@ end
     @wclosed = false
     @rclosed = false
     @finalizer&.wfd = nil
+    __replain__
   end
 
   # CRuby's `io_reopen`. A reader's bytes buffered go, and the read converter
@@ -4372,6 +4524,7 @@ end
     position = other.__seekable_pos__ if other.__reads__?
     other.__flush_buffer__
     @access, @oflags, @binmode, @textmode, @sync, @enc, @enc2, @ecopts, @lineno, @pid, @duplex, @tty = other.__modes__
+    __replain__
     @rmoded = !other.__tied__? || other.__rmoded__
     @wpre = @wpre.reject { |key, _| %i[newline universal_newline crlf_newline cr_newline lf_newline].include?(key) } if @wpre && @binmode
     @autoclose &&= other.autoclose?
