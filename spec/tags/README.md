@@ -87,7 +87,11 @@ fix is a different slice. The reason says which slice, by number.
 
 ## What is here now
 
-A hundred and forty-nine tags across eighty-one files. The `IO` and `File`
+A hundred and forty-seven tags across seventy-nine files. The write buffer
+(#41, S3) removed two, and their files: `IO#flush` raising `Errno::EPIPE` on
+a pipe whose reader has gone, which a write that went straight out met
+first, and `IO#syswrite` warning after a write the buffer holds.
+Before it, a hundred and forty-nine across eighty-one. The `IO` and `File`
 edges (#41, S2) removed two, and their files: `IO#puts` asking `to_ary`
 through a `method_missing` of the object's own, as `rb_check_funcall` does,
 and `STDOUT` ending the program by SIGPIPE when its reader has gone.

@@ -725,6 +725,7 @@ module Process
   # The fork itself, which `fork` calls so a program can hook it, as Ruby 3.1
   # made it: the pid, 0 in the child.
   def self._fork
+    IO.__prefork__
     result = __sys_fork__
     raise SystemCallError.new("fork(2)", result) if Integer === result
     if result[0] == 0
@@ -1018,6 +1019,14 @@ module Process
         raise name == "system" ? Opening.new(failed) : failed
       end
       raise ArgumentError, "fd #{twice} specified twice" unless twice.nil?
+      # Once the redirections have opened, and before the command is found
+      # missing, which CRuby finds out in the child it has forked. `system`
+      # raises what this does, as it does a redirection's. Measured.
+      begin
+        IO.__prefork__ unless replace
+      rescue Exception => failed
+        raise name == "system" ? Opening.new(failed) : failed
+      end
       unless unfound.nil?
         # CRuby finds out in the child it forked, which then exits 127.
         __global_store__(:$?, Process::Status.__make__(0, 127 << 8)) unless replace

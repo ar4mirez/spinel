@@ -1,14 +1,18 @@
 # `IO` is a descriptor (#41): opened by something else and handed over as an
-# Integer, or by `File`, `IO.sysopen` and `IO.pipe`. Reads are buffered,
-# writes go straight out, and every system call is one primitive that
-# answers an errno on failure. The rest, which is most of it, is Ruby.
+# Integer, or by `File`, `IO.sysopen` and `IO.pipe`. Reads and writes are
+# buffered, and every system call is one primitive that answers an errno on
+# failure. The rest, which is most of it, is Ruby.
 #
 # The read buffer is `@rbuf`, bytes the descriptor has moved past and the
 # reader has not: `pos` gives it back and counts what stays, a relative seek
 # adjusts for it, and a write after a read seeks back over it first.
 #
-# ponytail: no write buffer, so `flush` has nothing to do and `sync` only says
-# what a `write` of several does with what it has gathered; and conversion between an external and an internal encoding
+# The write buffer is `@wbuf`, CRuby's `wbuf`: up to 8 KiB written and not yet
+# sent, unless the IO is `sync` or a terminal, which write through. A read, a
+# seek, `flush`, `close` and the rest CRuby flushes at send it first, and so do
+# the collector's finalizer and the program's end (`__flush_buffer__`).
+#
+# ponytail: conversion between an external and an internal encoding
 # is done a whole read or a whole line at a time, by `String#encode`, unless
 # one of them is stateful or `reopen` left one, where the IO keeps a converter
 # (`__stream_in__?`).
@@ -588,7 +592,8 @@ end
     path = options[:path]
     @path = (String === path ? path : File.__path__(path)).dup unless path.nil?
     # CRuby's `io_check_tty`: only here, so a `reopen` onto a terminal is not.
-    @duplex = true if __fs_isatty__(fd)
+    # `@tty` is its `FMODE_TTY`, which writes through the write buffer.
+    @tty = @duplex = true if __fs_isatty__(fd)
     __bom__ if bom
     __arm__
     self
@@ -607,12 +612,13 @@ end
     @finalizer.autoclose = @autoclose
     @finalizer.quote = __closing_quote__(@xml_quote)
     @finalizer.writeconv = @writeconv
+    @finalizer.wbuf = @wbuf
   end
 
   # A copy has a descriptor of its own, `dup(2)` of the original's, at the
-  # original's position. The two share an offset, so what the original's writes
-  # in progress have gathered is written and its read-ahead given back first, as
-  # CRuby's `rb_io_init_copy` flushes both, and what that finds out about the
+  # original's position. The two share an offset, so the original's write
+  # buffer is sent and its read-ahead given back first, as CRuby's
+  # `rb_io_init_copy` flushes both, and what that finds out about the
   # descriptor the copy is told too.
   def initialize_copy(original)
     # A finalizer of its own, for the descriptor of its own: `dup` gave
@@ -623,7 +629,7 @@ end
     kept.each { |callable| __finalizer_add__(self, callable) }
     @finalizer = nil
     original.__check_open__
-    original.__flush_gathered__
+    original.__flush_buffer__
     original.__unread__(true)
     @duplex = original.__duplex__
     @fileno = IO.__check__(__fd_dup__(original.fileno), @path)[0]
@@ -637,8 +643,8 @@ end
     @writeconv = nil
     @wpre = nil
     @xml_quote = nil
-    # The writes in progress are the original's.
-    @wgathered = nil
+    # A write buffer of its own, empty: `dup` gave it the original's.
+    @wbuf = nil
     @wsynced = false
     # A copy is no standard stream, whatever it copies.
     @stdio = nil
@@ -720,6 +726,9 @@ end
       @finalizer&.disarm
       @rbuf = "".b
       @cbuf = "".b
+      # CRuby frees the write buffer, sent or not: what a write from a `to_s`
+      # adds after this goes in another that nothing sends.
+      @wbuf = nil
       # CRuby's `close` leaves `readconv` freed, and a `reopen` crashes on it.
       __drop_readconv__
       unless @wfileno.nil? || @wclosed
@@ -783,11 +792,18 @@ end
       # A second `close_write` finds the write side untied and closes the IO
       # itself, as CRuby's does once `GetWriteIO` gives back the reader.
       return close if @wclosed
-      __finish_writeconv__
-      __fd_close__(@wfileno)
-      @wclosed = true
-      @finalizer&.wfd = nil
-      @access = 0
+      # CRuby closes its write IO, which closes even when sending what is
+      # buffered fails, and then raises; the buffer goes with it.
+      begin
+        __finish_writeconv__
+      ensure
+        @wbuf = nil
+        @finalizer&.wbuf = nil
+        __fd_close__(@wfileno)
+        @wclosed = true
+        @finalizer&.wfd = nil
+        @access = 0
+      end
       return @rclosed ? close : nil
     end
     raise IOError, "closing non-duplex IO for writing" if __reads__?
@@ -924,34 +940,42 @@ end
     @sync
   end
 
+  # CRuby's `rb_io_set_sync` sends nothing: what is buffered goes with the
+  # next write, which writes through. Measured.
   def sync=(value)
     __check_write_open__
     @sync = value ? true : false
     value
   end
 
-  # What writes in progress have gathered goes first, as CRuby's `rb_io_fsync`
-  # flushes its write buffer. So for `fdatasync`.
+  # The write buffer is sent first, as CRuby's `rb_io_fsync` flushes it. So
+  # for `fdatasync`.
   def fsync
     __check_write_open__
-    __flush_gathered__
+    __flush_buffer__
     IO.__check__(__fd_fsync__(@fileno, false), @path)
     0
   end
 
   def fdatasync
     __check_write_open__
-    __flush_gathered__
+    __flush_buffer__
     IO.__check__(__fd_fsync__(@fileno, true), @path)
     0
   end
 
-  # CRuby's `rb_io_flush_raw`: writes go at once here, so what is left is what
-  # writes in progress have gathered, then `io_unread` of a reader, discarding
-  # what a pipe cannot give back.
-  def flush
+  def flush = __flush_raw__
+
+  # CRuby's `rb_io_synchronized`: `sync` on, whatever state the IO is in.
+  def __synchronized__ = (@sync = true; self)
+
+  # CRuby's `rb_io_flush_raw`: the write buffer is sent, then `io_unread` of
+  # a reader, discarding what a pipe cannot give back. What `IO#flush` is,
+  # and what `p` and a new child (`IO.__prefork__`) call without asking the
+  # IO for its `flush`.
+  def __flush_raw__
     __check_write_open__
-    __flush_gathered__
+    __flush_buffer__
     __unread__(true)
     self
   end
@@ -1013,12 +1037,11 @@ end
     raise IOError, "closed stream" if @closed
   end
 
-  # CRuby's `rb_io_check_char_readable`, which flushes the write buffer first:
-  # here what writes in progress have gathered.
+  # CRuby's `rb_io_check_char_readable`, which flushes the write buffer first.
   def __readable__
     __check_open__
     raise IOError, "not opened for reading" unless __reads__?
-    __flush_gathered__ if @wgathered && !@wgathered.empty?
+    __flush_buffer__ unless @wbuf.nil? || @wbuf.empty?
   end
 
   # CRuby's `rb_io_check_writable`. Bytes read ahead are bytes the descriptor
@@ -2213,10 +2236,14 @@ end
   # What CRuby's `finish_writeconv` writes when the IO closes: the closing
   # quote, or `""` if no character opened it, and the converter's end, the
   # escape back to ASCII. An error raises having written nothing more: a
-  # character a write began and none finished. What writes in progress have
-  # gathered goes first, as CRuby flushes its write buffer. Measured.
+  # character a write began and none finished. The write buffer goes first,
+  # as CRuby's closing write follows it there. Measured.
+  #
+  # `@wsynced` is `sync` as it reached the write side when that closes, for
+  # `__wsync__`: a `sync=` after a `close_write` reaches only the read side.
   def __finish_writeconv__
-    __flush_gathered__
+    @wsynced = @sync
+    __flush_buffer__
     quote = __closing_quote__(@xml_quote)
     converter = @writeconv
     __clear_writeconv__
@@ -2225,25 +2252,38 @@ end
     __write_all__(closing) unless closing.empty?
   end
 
-  # Each write in progress, oldest first, and emptied, as it may yet write the
-  # rest. A tty has no write buffer: the list goes, which tells each of them
-  # to look at the IO itself. A write with none nested in it never asks `tty?`.
-  # With the write side closed, a `close_write` has flushed them and the rest go
-  # nowhere. All are taken before they are written, as a thread may flush too.
-  # `@wsynced` is `sync` as it reached the write side, for `__write_gathered__`:
-  # a `sync=` after a `close_write` reaches only the read side, and no later
-  # flush comes here.
-  def __flush_gathered__
-    return if @wclosed || @wgathered.nil? || @wgathered.empty?
-    return @wgathered = nil if tty?
-    @wsynced = @sync
-    bytes = "".b
-    @wgathered.each do |text|
-      bytes << text
-      text.clear
+  # CRuby's `io_fflush`: what the write buffer holds, sent. It is taken
+  # before it is written, as a thread may write more while this one waits;
+  # what a failure leaves unsent goes back at its front, ahead of that, so
+  # the next flush tries it again, as CRuby keeps it, and a closed IO's,
+  # which nothing can send, stays where it is.
+  def __flush_buffer__
+    buffer = @wbuf
+    return if buffer.nil? || buffer.empty? || @closed || @wclosed
+    bytes = buffer.b
+    buffer.__splice__(0, buffer.bytesize, "")
+    sent = 0
+    begin
+      sent += __write_once__(sent == 0 ? bytes : bytes.byteslice(sent, bytes.bytesize - sent)) while sent < bytes.bytesize
+    rescue Exception
+      buffer.__splice__(0, 0, bytes.byteslice(sent, bytes.bytesize - sent))
+      raise
     end
-    __write_all__(bytes) unless bytes.empty?
+    nil
   end
+
+  # The write buffer, made by the first write that buffers: told to the
+  # finalizer, which sends it if the collector frees the IO, and the IO kept
+  # among those the program's end finishes, which sends it then.
+  def __wbuf__
+    @wbuf = "".b
+    @finalizer&.wbuf = @wbuf
+    IO.__unfinished__[self] = true
+    @wbuf
+  end
+
+  # The write side's `FMODE_SYNC`.
+  def __wsync__ = @wclosed ? @wsynced : @sync
 
   # The converter gone unfinished, with the quote.
   def __clear_writeconv__
@@ -2276,41 +2316,47 @@ end
   end
 
   # The IOs with a converter to finish, `xml: :attr`'s quote or one a write
-  # goes on through, held weakly. CRuby finishes an IO's converter when it
-  # finalizes the IO, so the program's end closes the quote of each still open
-  # (#456); one collected before then has had its `Finalizer` do it (#460).
+  # goes on through, or a write buffer to send, held weakly. CRuby finishes an
+  # IO's converter and flushes its buffer when it finalizes the IO, so the
+  # program's end closes the quote of each still open (#456) and sends what it
+  # buffered; one collected before then has had its `Finalizer` do it (#460).
   def self.__unfinished__
     @__unfinished__ ||= ObjectSpace::WeakMap.new
   end
 
   # What finalizing an IO the collector freed does, CRuby's
-  # `rb_io_fptr_finalize`: it finishes the write converter, which closes an
-  # `xml: :attr` quote and goes back to ASCII, and closes the descriptor,
-  # unless it is 0, 1 or 2 or
-  # the IO is not to `autoclose` it. It is told what that needs as the IO
-  # changes, and never holds the IO, which would keep it alive.
+  # `rb_io_fptr_finalize`: it sends the write buffer, finishes the write
+  # converter, which closes an `xml: :attr` quote and goes back to ASCII, and
+  # closes the descriptor, unless it is 0, 1 or 2 or the IO is not to
+  # `autoclose` it. It is told what that needs as the IO changes, and never
+  # holds the IO, which would keep it alive: the buffer is the IO's own String,
+  # which holds nothing.
   #
   # At the program's end it does nothing: the IOs still alive then are
   # finished by `IO.__finish_all__`, after every other finalizer, and their
   # descriptors close with the process.
   class Finalizer
-    attr_writer :fd, :wfd, :autoclose, :quote, :writeconv
+    attr_writer :fd, :wfd, :autoclose, :quote, :writeconv, :wbuf
 
     def disarm
-      @fd = @wfd = @quote = @writeconv = nil
+      @fd = @wfd = @quote = @writeconv = @wbuf = nil
     end
 
     def call(_id)
       return if IO.__ending__
-      fd, wfd, quote, writeconv = @fd, @wfd, @quote, @writeconv
+      fd, wfd, quote, writeconv, wbuf = @fd, @wfd, @quote, @writeconv, @wbuf
       disarm
-      unless (quote.nil? && writeconv.nil?) || (wfd || fd).nil?
-        # An error finishing is dropped, and the descriptor still closes.
-        quote = IO.__closing__(quote, writeconv) rescue "".b
-        until quote.empty?
-          written = __fd_write__(wfd || fd, quote)
+      unless (wfd || fd).nil?
+        # An error sending or finishing is dropped, and the descriptor still
+        # closes, as CRuby's finalizer flushes with `noraise`.
+        pending = wbuf.nil? ? "".b : wbuf.b
+        unless quote.nil? && writeconv.nil?
+          pending << (IO.__closing__(quote, writeconv) rescue "".b)
+        end
+        until pending.empty?
+          written = __fd_write__(wfd || fd, pending)
           break unless Array === written && written[0] > 0
-          quote = quote.byteslice(written[0], quote.bytesize - written[0])
+          pending = pending.byteslice(written[0], pending.bytesize - written[0])
         end
       end
       __fd_close__(wfd) unless wfd.nil?
@@ -2401,11 +2447,22 @@ end
   end
 
   # Every byte of `text`, waiting whenever a nonblocking descriptor is full.
-  # What writes in progress have gathered goes first, as it is in CRuby's write
-  # buffer ahead of these bytes.
+  # The write buffer goes first, as CRuby's `writev` sends it ahead of these
+  # bytes; with no descriptor left to write to, that is a closed stream.
   def __write_all__(text)
-    __flush_gathered__ if @wgathered && !@wgathered.empty?
+    __flush_buffer__ unless @wbuf.nil? || @wbuf.empty?
+    raise IOError, "closed stream" if @closed || @wclosed
     total = text.bytesize
+    loop do
+      written = __write_once__(text)
+      return total if written >= text.bytesize
+      text = text.byteslice(written, text.bytesize - written)
+    end
+  end
+
+  # One `write(2)` of what it takes of `text`, waiting first when another
+  # thread could run meanwhile, and whenever a nonblocking descriptor is full.
+  def __write_once__(text)
     loop do
       IO.__wait__([[self, IO::WRITABLE]], @timeout, true) || raise(IO::TimeoutError, "Blocking operation timed out!") if __thread_others__
       result = __fd_write__(__wfd__, text)
@@ -2414,11 +2471,42 @@ end
         next
       end
       __epipe__(result) if @sigpipe
-      written = IO.__check__(result, @path)[0]
-      return total if written >= text.bytesize
-      text = text.byteslice(written, text.bytesize - written)
+      return IO.__check__(result, @path)[0]
     end
   end
+
+  # CRuby's `io_binwrite`, for bytes a write has converted. A `sync` IO or a
+  # terminal writes them through, unless more of the same write is to come
+  # (`nosync`, every object of a write of several but the last). Otherwise
+  # they go in the write buffer, unless that would fill it: then the buffer
+  # and they are written together. Answers how many there were.
+  def __binwrite__(bytes, nosync = false)
+    length = bytes.bytesize
+    return 0 if length == 0
+    return __write_all__(bytes) if !nosync && (@tty || __wsync__)
+    buffer = @wbuf || __wbuf__
+    return __write_all__(bytes) if buffer.bytesize + length >= WBUF_CAPA__
+    buffer.__splice__(buffer.bytesize, 0, bytes)
+    length
+  end
+
+  # CRuby's `io_binwritev`, for what a write of several gathered for one
+  # `writev` once it met a `sync` IO or a terminal: into the write buffer if
+  # that holds something and there is room, as CRuby's does, and otherwise
+  # written with it. Nothing to write writes nothing, closed or not.
+  def __binwritev__(bytes)
+    buffer = @wbuf
+    if !buffer.nil? && !buffer.empty? && buffer.bytesize + bytes.bytesize <= WBUF_CAPA__
+      buffer.__splice__(buffer.bytesize, 0, bytes)
+      return bytes.bytesize
+    end
+    return 0 if bytes.empty?
+    __write_all__(bytes)
+  end
+
+  # CRuby's `IO_WBUF_CAPA_MIN`.
+  WBUF_CAPA__ = 8192
+  private_constant :WBUF_CAPA__
 
   def __held_bytes__ = @rbuf.bytesize
 
@@ -3907,10 +3995,10 @@ end
     __check_open__
     whence = __whence__(whence)
     offset = Integer.__c_long__(offset)
-    # What writes in progress have gathered is written, and bytes buffered are
-    # given back, first, as CRuby's `flush_before_seek`, and the converters
-    # with them, even if the seek then fails; with none, they stay. Measured.
-    __flush_gathered__
+    # The write buffer is sent, and bytes buffered are given back, first, as
+    # CRuby's `flush_before_seek`, and the converters with them, even if the
+    # seek then fails; with none, they stay. Measured.
+    __flush_buffer__
     __unread__(true)
     IO.__check__(__fd_seek__(@fileno, offset, whence), @path)
     0
@@ -3924,11 +4012,11 @@ end
   end
 
   # CRuby's `rb_io_sysseek` refuses bytes read ahead, and only warns of a write
-  # buffer holding bytes, here what writes in progress have gathered.
+  # buffer holding bytes, which it leaves there.
   def sysseek(offset, whence = IO::SEEK_SET)
     __check_open__
     raise IOError, "sysseek for buffered IO" unless @rbuf.empty? && !__chars_held__?
-    warn("sysseek for buffered IO", uplevel: 1) if @wgathered&.any? { |text| !text.empty? }
+    warn("sysseek for buffered IO", uplevel: 1) unless @wbuf.nil? || @wbuf.empty?
     IO.__check__(__fd_seek__(@fileno, Integer.__c_long__(offset), __whence__(whence)), @path)[0]
   end
 
@@ -3945,11 +4033,11 @@ end
   # CRuby gives the bytes buffered back to find where the reader is, and
   # drops the converters with them, as `seek` does: what `ungetc` put there
   # goes too, unless that would seek before the start, and then they all
-  # stay and count. What writes in progress have gathered is written first, as
-  # `flush_before_seek` flushes the write buffer. Measured.
+  # stay and count. The write buffer is sent first, as `flush_before_seek`
+  # flushes it. Measured.
   def pos
     __check_open__
-    __flush_gathered__
+    __flush_buffer__
     __unread__
     IO.__check__(__fd_seek__(@fileno, 0, IO::SEEK_CUR), @path)[0] - @rbuf.bytesize
   end
@@ -3973,67 +4061,29 @@ end
       text = text.to_s unless String === text
       return 0 if text.empty?
       __write_side__
-      return __write_all__(__encode_out__(text))
+      return __binwrite__(__encode_out__(text))
     end
     __write_side__
     __write_gathered__(objects)
   end
 
-  # CRuby's `io_writev` walks the objects, and each one meeting a sync IO or a
-  # tty takes all the rest to `writev`, one system call; before that they go to
-  # the write buffer. So `text` is that buffer, listed in `@wgathered` while a
-  # `to_s` can run, one for each write in progress, so a `close` or a write there
-  # writes what came before, and `rest` is for `writev`. What comes after a close
-  # goes in the buffer with no descriptor to reach, and counts. So does `rest`
-  # if the buffer holds any, or if there are no bytes for `writev` to send; any
-  # other `rest` finds the stream closed. So does the last object if it brought
-  # the close with sync on, as `io_fwrite` tests sync after its `to_s`, and has
-  # bytes. A tty is found only when a `to_s` flushes, where the list goes, so its
-  # text is `rest`. A `flush`, `fsync`, `seek`, `pos`, `dup`, `truncate`,
-  # `reopen` with a path, a read, `File#size` or `File#flock` there writes it
-  # too, as each flushes CRuby's buffer, and `sysseek` warns of it. Measured.
+  # CRuby's `io_writev`. Each object is made a String and converted, and goes
+  # to the write buffer, the last as a write of one; once the IO is `sync` or a
+  # terminal, which a `to_s` can make it, the rest are gathered for one
+  # `writev`. A `to_s` sees what came before it in the buffer, so a `close`, a
+  # flush or a write there sends that first. What comes after a `close` goes
+  # in a buffer with no descriptor to reach, and counts. Measured.
   def __write_gathered__(objects)
-    if @sync
-      rest = __gather__(objects, 0)
-      return 0 if rest.empty?
-      raise IOError, "closed stream" if @closed || @wclosed
-      return __write_all__(rest)
-    end
-    text = "".b
-    rest = nil
-    piece = nil
     total = 0
+    last = objects.size - 1
     index = 0
-    (@wgathered ||= []) << text
-    converted = false
-    begin
-      while index < objects.size
-        if @wclosed ? @wsynced : @sync
-          rest = __gather__(objects, index)
-          total += rest.bytesize
-          break
-        end
-        object = objects[index]
-        object = object.to_s unless String === object
-        piece = __encode_out__(object).b
-        total += piece.bytesize
-        text << piece
-        index += 1
-      end
-      converted = true
-    ensure
-      flushed = @wgathered&.reject! { |listed| listed.equal?(text) }
-      __write_partial__(text) unless converted
+    while index <= last
+      return total + __binwritev__(__gather__(objects, index)) if @tty || __wsync__
+      object = objects[index]
+      object = object.to_s unless String === object
+      total += __binwrite__(__encode_out__(object), index < last)
+      index += 1
     end
-    if @closed || @wclosed
-      unsent = flushed ? (rest ? text.empty? && !rest.empty? : @wsynced && !piece.empty?) : total > 0
-      raise IOError, "closed stream" if unsent
-      return total
-    end
-    if rest
-      text.empty? ? text = rest : text << rest
-    end
-    __write_all__(text) unless text.empty?
     total
   end
 
@@ -4049,22 +4099,19 @@ end
     text
   end
 
-  def __write_partial__(text)
-    __write_all__(text) unless @wclosed || text.empty? || tty?
-  rescue StandardError
-    nil
-  end
-
+  # CRuby's `rb_io_syswrite` warns of a write buffer holding bytes, and
+  # writes past it.
   def syswrite(object)
     __write_side__
     text = String === object ? object : object.to_s
+    warn("syswrite for buffered IO", uplevel: 1) unless @wbuf.nil? || @wbuf.empty?
     IO.__check__(__fd_write__(__wfd__, text), @path)[0]
   end
 
   def write_nonblock(object, exception: true)
     __write_side__
     IO.__exception_flag__(exception)
-    __flush_gathered__
+    __flush_buffer__
     __nonblock__
     text = String === object ? object : object.to_s
     result = __fd_write__(__wfd__, text)
@@ -4155,19 +4202,25 @@ end
       flags = (@access == 3 ? File::RDONLY : @access) | (@oflags & (File::CREAT | File::TRUNC | File::APPEND | File::EXCL))
     else
       # The mode starts again, and with it `sync` and `autoclose`, but no BOM
-      # is read past: only opening a file does that. `lineno` stays.
-      __modeenc__(mode, options) { |flags, binmode, ecopts| __check_access__(flags, binmode, ecopts) }
+      # is read past: only opening a file does that. `lineno` stays. The write
+      # buffer is sent once the new mode is accepted and before it is taken,
+      # deliberately unlike CRuby, whose flush by a mode that does not write
+      # goes to a descriptor that does not, and loses the bytes (#534).
+      __modeenc__(mode, options) do |flags, binmode, ecopts|
+        __check_access__(flags, binmode, ecopts)
+        __flush_buffer__ if !@closed && __writes__?
+      end
       flags = @oflags
       @sync = false
       @autoclose = true
-      @duplex = nil
+      @duplex = @tty = nil
       @rmoded = true
     end
-    # What writes in progress have gathered is written if the IO now writes,
-    # as `rb_io_reopen` flushes by the new mode. The bytes buffered go, even if
-    # what is named does not open; the read converter and the characters it
-    # holds stay, whatever was opened.
-    __flush_gathered__ if !@closed && __writes__?
+    # The write buffer is sent if the IO now writes, as `rb_io_reopen` flushes
+    # by the new mode. The bytes buffered go, even if what is named does not
+    # open; the read converter and the characters it holds stay, whatever was
+    # opened.
+    __flush_buffer__ if !@closed && __writes__?
     @rbuf = "".b
     __keep_readconv__
     fd = IO.__check__(__fd_open__(path, flags, 0666), path, "rb_sysopen")[0]
@@ -4213,10 +4266,15 @@ end
     if @stdio && !@autoclose && other.__side__ != 2 && other.__side__ != (@fileno == 0 ? 0 : 1)
       __refuse_access__(other.__modestr__)
     end
+    # Both write buffers are sent first, this one's and then, once where the
+    # other is reading has been found, the other's, as `io_reopen` flushes
+    # them.
+    __flush_buffer__
     __unread__(true) if @access == 0
     __untie__
     position = other.__seekable_pos__ if other.__reads__?
-    @access, @oflags, @binmode, @textmode, @sync, @enc, @enc2, @ecopts, @lineno, @pid, @duplex = other.__modes__
+    other.__flush_buffer__
+    @access, @oflags, @binmode, @textmode, @sync, @enc, @enc2, @ecopts, @lineno, @pid, @duplex, @tty = other.__modes__
     @rmoded = !other.__tied__? || other.__rmoded__
     @wpre = @wpre.reject { |key, _| %i[newline universal_newline crlf_newline cr_newline lf_newline].include?(key) } if @wpre && @binmode
     @autoclose &&= other.autoclose?
@@ -4290,7 +4348,7 @@ end
 
   # What `reopen` takes from this IO.
   def __modes__
-    [@access, @oflags, @binmode, @textmode, @sync, @enc, @enc2, @ecopts.dup, @lineno, @pid, @duplex]
+    [@access, @oflags, @binmode, @textmode, @sync, @enc, @enc2, @ecopts.dup, @lineno, @pid, @duplex, @tty]
   end
 
   # Where the descriptor is, once it has given back what is buffered.
@@ -4355,6 +4413,10 @@ end
           extra.each { |target, source| __fd_dup2__(source, target) }
           [child_in, child_out, parent_r, parent_w].each { |fd| __fd_close__(fd) unless fd.nil? }
           child_in = child_out = nil
+          # The child's `$stdout` and `$stderr` write through, as `pipe_open`
+          # makes them with `rb_io_synchronized`, so what it prints reaches
+          # the parent before an `exit!`. Measured.
+          [$stdout, $stderr].each { |out| out.__synchronized__ if IO === out }
           return nil if block.nil?
           IO.__popen_child__(block)
         end
@@ -4376,6 +4438,16 @@ end
     end
   ensure
     [parent_r, parent_w].each { |fd| __fd_close__(fd) unless fd.nil? } if pid.nil?
+  end
+
+  # CRuby's `prefork`, before a child is forked or spawned, but not before
+  # `exec`: `$stdout` and then `$stderr` are flushed, so neither child nor
+  # parent writes what they buffered twice and a child's output comes after
+  # theirs. An IO is flushed as `IO#flush` does whatever `flush` it has, and
+  # anything else is asked for its own; an error raises. Measured.
+  def self.__prefork__
+    [$stdout, $stderr].each { |out| IO === out ? out.__flush_raw__ : out.flush }
+    nil
   end
 
   # CRuby's `popen_finish` in the child of `IO.popen("-")`: the block is
@@ -4732,8 +4804,12 @@ module Kernel
     nil
   end
 
+  # CRuby's `rb_f_p`, which flushes `$stdout` once it has written, if that
+  # is an IO, whatever `flush` it has: `puts` and `print` leave it buffered.
   def p(*values)
     values.each { |value| $stdout.write(value.inspect, "\n") }
+    out = $stdout
+    out.__flush_raw__ if IO === out
     return nil if values.empty?
     values.size == 1 ? values[0] : values
   end
