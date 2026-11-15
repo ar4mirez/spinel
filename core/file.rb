@@ -230,7 +230,7 @@ class File < IO
     # `rb_check_realpath_internal` then works out by `realpath_rec`, as it
     # does for an ENOENT on a path that is there.
     if resolved == Errno::ENOTDIR::Errno || (resolved == Errno::ENOENT::Errno && exist?(path))
-      resolved = __realpath_rec__(given.b, base&.b, true)
+      resolved = __realpath_rec__(given.b, base&.b, true, __realpath_os__(given, base))
     end
     resolved = __check__(resolved, path, "rb_check_realpath_internal")
     __in_path_encoding__(__fs_string__(resolved), encoding)
@@ -241,7 +241,10 @@ class File < IO
   # from the root, a symlink by what it names and `..` by dropping what was
   # resolved last. Strict, every component has to be there; otherwise the
   # last of `path` need not be, as for `realdirpath`.
-  def self.__realpath_rec__(path, dir, strict)
+  #
+  # `os` is the encoding the paths it builds are in, where that matters to
+  # the system they are handed to: see `__realpath_os__`.
+  def self.__realpath_rec__(path, dir, strict, os = nil)
     parts = []
     unless path.start_with?("/")
       parts << Dir.pwd.b if dir.nil? || !dir.start_with?("/")
@@ -251,15 +254,24 @@ class File < IO
     resolved = "/".b
     loopcheck = {}
     parts.each_with_index do |part, index|
-      resolved = __realpath_names__(resolved, part, nil, loopcheck, strict, index == parts.size - 1)
+      resolved = __realpath_names__(resolved, part, nil, loopcheck, strict, index == parts.size - 1, os)
     end
     resolved
   end
 
+  # On macOS, the encoding `realpath_rec` builds its paths in, for
+  # `rb_str_encode_ospath` to convert to UTF-8 before each `lstat` and
+  # `readlink`: what `rb_check_realpath_emulate` starts the result in. Linux
+  # takes the bytes, so there it is nil and they are handed over as binary.
+  def self.__realpath_os__(path, dir) = DARWIN__ ? __realpath_root__(path, dir) : nil
+
+  # A path the walk built, in `os` where that is set.
+  def self.__realpath_test__(path, os) = os.nil? ? path : path.dup.force_encoding(os)
+
   # One `realpath_rec` over the names of `unresolved`, onto `resolved`.
   # `fallback` is the symlink being followed, which answers for a target
   # that is not there if the system can still `stat` it.
-  def self.__realpath_names__(resolved, unresolved, fallback, loopcheck, strict, last)
+  def self.__realpath_names__(resolved, unresolved, fallback, loopcheck, strict, last, os = nil)
     names = unresolved.split("/").reject(&:empty?)
     names.each_with_index do |name, index|
       # Nothing after it, not even a separator.
@@ -278,9 +290,9 @@ class File < IO
         resolved = seen.dup
         next
       end
-      stat = __fs_stat__(testpath, false)
+      stat = __fs_stat__(__realpath_test__(testpath, os), false)
       if Integer === stat
-        if stat == Errno::ENOENT::Errno && !fallback.nil? && !(Integer === __fs_stat__(fallback, true))
+        if stat == Errno::ENOENT::Errno && !fallback.nil? && !(Integer === __fs_stat__(__realpath_test__(fallback, os), true))
           return fallback.dup
         end
         if stat == Errno::ENOENT::Errno && !strict && last && final
@@ -291,11 +303,11 @@ class File < IO
       end
       if stat[2] & 0170000 == 0120000
         loopcheck[testpath] = :resolving
-        link = __check__(__fs_readlink__(testpath), testpath, "rb_readlink").b
+        link = __check__(__fs_readlink__(__realpath_test__(testpath, os)), testpath, "rb_readlink").b
         resolved = "/".b if link.start_with?("/")
         # As CRuby's, a link that ends the names it is in may name what is
         # not there, whichever of the paths those names are part of.
-        resolved = __realpath_names__(resolved, link, testpath, loopcheck, strict, final)
+        resolved = __realpath_names__(resolved, link, testpath, loopcheck, strict, final, os)
         loopcheck[testpath] = resolved.dup.freeze
       else
         loopcheck[testpath] = testpath
@@ -325,7 +337,7 @@ class File < IO
     dir = __path__(dir) unless dir.nil?
     # A leading "~" in `path` or `dir` is a file name here, as it is to
     # `rb_check_realpath_emulate` (#410).
-    resolved = __realpath_rec__(path.b, dir&.b, false)
+    resolved = __realpath_rec__(path.b, dir&.b, false, __realpath_os__(path, dir))
     __realpath_rec_encoding__(resolved, path, dir)
   end
 
@@ -339,20 +351,21 @@ class File < IO
   # cannot. Measured.
   def self.__realpath_rec_encoding__(resolved, path, dir)
     encoding = path.encoding
-    root = if path.b.start_with?("/")
-      encoding
-    elsif !dir.nil? && dir.b.start_with?("/")
-      dir.encoding
-    else
-      Encoding::BINARY
-    end
-    root = Encoding.find("filesystem") if encoding == Encoding::BINARY || encoding == Encoding::US_ASCII
+    root = __realpath_root__(path, dir)
     resolved = resolved.force_encoding(root)
     return resolved if root == encoding
     return resolved.force_encoding(encoding) if resolved.ascii_only? || encoding == Encoding::BINARY
     resolved.encode(encoding)
   rescue EncodingError
     resolved
+  end
+
+  def self.__realpath_root__(path, dir)
+    encoding = path.encoding
+    return Encoding.find("filesystem") if encoding == Encoding::BINARY || encoding == Encoding::US_ASCII
+    return encoding if path.b.start_with?("/")
+    return dir.encoding if !dir.nil? && dir.b.start_with?("/")
+    Encoding::BINARY
   end
 
   # CRuby's `rb_stat`, which asks an IO, or what `to_io` makes of an object
@@ -1018,7 +1031,8 @@ class File < IO
     def inspect
       "#<File::Stat dev=0x#{dev.to_s(16)}, ino=#{ino}, mode=0#{mode.to_s(8)}, nlink=#{nlink}, " \
         "uid=#{uid}, gid=#{gid}, rdev=0x#{rdev.to_s(16)}, size=#{size}, blksize=#{blksize}, blocks=#{blocks}, " \
-        "atime=#{atime.inspect}, mtime=#{mtime.inspect}, ctime=#{ctime.inspect}>"
+        "atime=#{atime.inspect}, mtime=#{mtime.inspect}, ctime=#{ctime.inspect}" \
+        "#{", birthtime=#{birthtime.inspect}" if DARWIN__}>"
     end
   end
 end
@@ -1649,6 +1663,12 @@ end
       names.unshift(+".")
       names.sort!
       names.each do |name|
+        # ponytail: on macOS a name read here is UTF-8 and is tagged with the
+        # pattern's encoding, where CRuby's glob converts the pattern to UTF-8
+        # first and each result back (`push_pattern`). The two agree for every
+        # ASCII name, and the path a name is joined to is converted when it is
+        # handed over (`rb_str_encode_ospath`); a non-ASCII name under a
+        # non-UTF-8 pattern needs CRuby's way.
         name.force_encoding(encoding)
         kind = :unknown
         dotfile = 0

@@ -749,6 +749,122 @@ pub fn pton(family: i32, text: &[u8]) -> Option<Vec<u8>> {
     Some(buffer[..if family == libc::AF_INET { 4 } else { 16 }].to_vec())
 }
 
+/// `poll(2)` over `fds`, asking about each descriptor once: the number of
+/// entries that answered.
+///
+/// macOS's `poll` is kqueue's, which keeps one registration per descriptor
+/// and filter, so a second entry for a descriptor — `IO.select([r], nil,
+/// [r])`, or two threads waiting on one pipe — replaces the first, and
+/// readiness that only the replaced entry asked about never ends the wait
+/// (#41). Entries for one descriptor are polled as one, and each answers
+/// what it asked about, or an error or hangup, as `poll` itself would.
+pub fn poll(fds: &mut [libc::pollfd], timeout: libc::c_int) -> io::Result<usize> {
+    let mut once: Vec<libc::pollfd> = Vec::with_capacity(fds.len());
+    for entry in fds.iter() {
+        match once.iter_mut().find(|seen| seen.fd == entry.fd) {
+            Some(seen) => seen.events |= entry.events,
+            None => once.push(libc::pollfd {
+                fd: entry.fd,
+                events: entry.events,
+                revents: 0,
+            }),
+        }
+    }
+    #[cfg(target_os = "macos")]
+    if once.iter().any(|p| p.events & libc::POLLPRI != 0) {
+        select_distinct(&mut once, timeout)?;
+    } else {
+        poll_plain(&mut once, timeout)?;
+    }
+    #[cfg(not(target_os = "macos"))]
+    poll_plain(&mut once, timeout)?;
+    let always = libc::POLLERR | libc::POLLHUP | libc::POLLNVAL;
+    let mut answered = 0;
+    for entry in fds.iter_mut() {
+        let revents = once
+            .iter()
+            .find(|seen| seen.fd == entry.fd)
+            .map_or(0, |seen| seen.revents);
+        entry.revents = revents & (entry.events | always);
+        answered += usize::from(entry.revents != 0);
+    }
+    Ok(answered)
+}
+
+/// `poll(2)` over `fds`, each descriptor in it once.
+fn poll_plain(fds: &mut [libc::pollfd], timeout: libc::c_int) -> io::Result<()> {
+    // SAFETY: `fds` is `fds.len()` `pollfd`s, read and written by `poll`.
+    let ready = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout) };
+    if ready < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// On macOS, `select(2)` for a wait that asks about `POLLPRI`: macOS's
+/// `poll` answers `POLLPRI` for any readable descriptor asked about it, as
+/// kqueue hands back the out-of-band flag the descriptor was registered
+/// with, so a pipe with bytes in it was ready in `IO.select`'s error set
+/// (#41). Only then: macOS's `select` says a pipe's read end is writable,
+/// where `poll`, like Linux, says it is not.
+#[cfg(target_os = "macos")]
+fn select_distinct(fds: &mut [libc::pollfd], timeout: libc::c_int) -> io::Result<()> {
+    // ponytail: a descriptor at or past FD_SETSIZE is polled, and keeps
+    // poll's POLLPRI answer; the upgrade is a heap fd_set grown past
+    // FD_SETSIZE, as `_DARWIN_UNLIMITED_SELECT` allows.
+    if fds.iter().any(|p| p.fd >= libc::FD_SETSIZE as libc::c_int) {
+        return poll_plain(fds, timeout);
+    }
+    // SAFETY: an all-zero `fd_set` is an empty one.
+    let mut sets: [libc::fd_set; 3] = unsafe { zeroed() };
+    let asked = [libc::POLLIN, libc::POLLOUT, libc::POLLPRI];
+    let mut nfds = 0;
+    for p in fds.iter().filter(|p| p.fd >= 0) {
+        for (set, bit) in sets.iter_mut().zip(asked) {
+            if p.events & bit != 0 {
+                // SAFETY: `p.fd` is below FD_SETSIZE, checked above.
+                unsafe { libc::FD_SET(p.fd, set) };
+                nfds = nfds.max(p.fd + 1);
+            }
+        }
+    }
+    let mut wait = libc::timeval {
+        tv_sec: libc::time_t::from(timeout / 1000),
+        tv_usec: ((timeout % 1000) * 1000) as libc::suseconds_t,
+    };
+    let wait: *mut libc::timeval = if timeout < 0 {
+        std::ptr::null_mut()
+    } else {
+        &mut wait
+    };
+    let [reads, writes, errors] = &mut sets;
+    // SAFETY: three live `fd_set`s holding descriptors below `nfds`, and a
+    // live `timeval` or null for no timeout.
+    if unsafe { libc::select(nfds, reads, writes, errors, wait) } < 0 {
+        let error = io::Error::last_os_error();
+        // A descriptor closed under a waiter is `poll`'s POLLNVAL, which
+        // wakes the waiter; `select` only fails.
+        return if error.raw_os_error() == Some(libc::EBADF) {
+            poll_plain(fds, 0)
+        } else {
+            Err(error)
+        };
+    }
+    for p in fds.iter_mut() {
+        p.revents = 0;
+        if p.fd < 0 {
+            continue;
+        }
+        for (set, bit) in sets.iter().zip(asked) {
+            // SAFETY: `p.fd` is below FD_SETSIZE, checked above.
+            if p.events & bit != 0 && unsafe { libc::FD_ISSET(p.fd, set) } {
+                p.revents |= bit;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// `Socket::Constants`: CRuby's list, with each value this platform's.
 // `SOCK_PACKET` is deprecated for `AF_PACKET`, and CRuby still defines it.
 #[allow(deprecated)]
@@ -1121,6 +1237,38 @@ mod tests {
             panic!("an AF_INET address")
         };
         assert_eq!((port, addr), (80, [127, 0, 0, 1]));
+    }
+
+    // Miri cannot call into libc.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn one_descriptor_asked_about_twice_answers_each_entry() {
+        let mut pipe = [0; 2];
+        // SAFETY: `pipe` is the two descriptors `pipe(2)` writes.
+        assert_eq!(unsafe { libc::pipe(pipe.as_mut_ptr()) }, 0);
+        let [reader, writer] = pipe;
+        // SAFETY: one byte from a live buffer, to a descriptor just opened.
+        assert_eq!(unsafe { libc::write(writer, b"x".as_ptr().cast(), 1) }, 1);
+        let entry = |fd, events| libc::pollfd {
+            fd,
+            events,
+            revents: 0,
+        };
+        // What `IO.select([r], [w], [r, w])` asks, the reader readable.
+        let mut fds = [
+            entry(reader, libc::POLLIN),
+            entry(writer, libc::POLLOUT),
+            entry(reader, libc::POLLPRI),
+            entry(writer, libc::POLLPRI),
+        ];
+        assert_eq!(poll(&mut fds, 0).expect("a pipe polls"), 2);
+        let revents: Vec<_> = fds.iter().map(|p| p.revents).collect();
+        assert_eq!(revents, [libc::POLLIN, libc::POLLOUT, 0, 0]);
+        // SAFETY: both descriptors are this test's, closed once.
+        unsafe {
+            libc::close(reader);
+            libc::close(writer);
+        }
     }
 
     // Miri cannot call into libc.

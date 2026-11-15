@@ -954,9 +954,9 @@ fn wake_ready(scope: &mut HandleScope<'_>, timeout: Option<Duration>) -> usize {
         }
     };
     let mut fds: Vec<libc::pollfd> = polled.iter().map(|(_, p)| *p).collect();
-    // SAFETY: `fds` is `fds.len()` `pollfd`s, read and written by `poll`.
-    let ready = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, ms) };
-    if ready > 0 {
+    // Two threads may wait on one descriptor, which macOS's `poll` cannot be
+    // asked twice about.
+    if crate::socket::poll(&mut fds, ms).is_ok_and(|ready| ready > 0) {
         for ((index, _), pollfd) in polled.iter().zip(&fds) {
             if pollfd.revents == 0 {
                 continue;

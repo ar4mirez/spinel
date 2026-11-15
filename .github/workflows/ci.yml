@@ -51,6 +51,60 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+      # ruby/spec runs on Linux in the jobs below. These four directories are
+      # where the platform shows (#41, S10): `platform_is :darwin` examples —
+      # a path in Windows-31J, `birthtime`, `lchmod` — and the stat, advice
+      # and pipe calls whose answers differ, so macOS runs them too, on the
+      # release build above and held to the same zero failures. `spec.sh`
+      # exits non-zero on a failure, a bad tag or a process that stopped; the
+      # floor is what makes an empty corpus fail as well.
+      #
+      # Each directory is bounded at 5 minutes (they take seconds on Linux),
+      # and the step at 20. `spec.sh` prints nothing until every mspec process
+      # has ended, so a hang would otherwise leave a log that names no spec
+      # file. Each file runs in a process of its own (`SPEC_CHUNK=1`, which
+      # gives the same counts as the default 16 do), so past the bound the
+      # mspec processes still running, which the step lists, are the hung
+      # files themselves. It then kills them with SIGTERM; mspec reports the
+      # example that was running as blocked by it, or `spec.sh` reports the
+      # process as stopped, and the step fails. macOS has no coreutils
+      # `timeout`, hence the loop.
+      - name: ruby/spec core/{io,file,dir,filetest}
+        if: runner.os == 'macOS'
+        timeout-minutes: 20
+        shell: bash
+        run: |
+          bound=300
+          for dir in core/io core/file core/dir core/filetest; do
+            SPEC_CHUNK=1 ./scripts/spec.sh "$dir" > spec-report.txt &
+            pid=$!
+            waited=0
+            while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt "$bound" ]; do
+              sleep 5
+              waited=$((waited + 5))
+            done
+            if kill -0 "$pid" 2>/dev/null; then
+              echo "::error::$dir was still running after ${bound}s; the mspec processes left, each with the spec file it was given:"
+              ps -ax -ww -o pid,etime,command | grep '[m]spec-run' || true
+              pkill -f 'release/spinel run .*mspec-run' || true
+              wait "$pid" || true
+              cat spec-report.txt
+              exit 1
+            fi
+            status=0
+            wait "$pid" || status=$?
+            cat spec-report.txt
+            if [ "$status" -ne 0 ]; then
+              exit "$status"
+            fi
+            examples=$(sed -nE 's/^[0-9]+ files? · ([0-9]+) examples ·.*/\1/p' spec-report.txt)
+            if [ "${examples:-0}" -lt 50 ]; then
+              echo "::error::$dir reported ${examples:-no} examples: the corpus is not all there"
+              exit 1
+            fi
+            echo "$dir: $(grep -E '^[0-9]+ files? ·' spec-report.txt)" >> "$GITHUB_STEP_SUMMARY"
+          done
+
   lint:
     name: fmt + clippy
     runs-on: ubuntu-latest
