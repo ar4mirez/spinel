@@ -7,7 +7,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | directory | files | examples | passed | failed | blocked | skipped | passed % |
 |---|---:|---:|---:|---:|---:|---:|---:|
 | `command_line` | 32 | 175 | 172 | 0 | 0 | 3 | 98% |
-| `core/argf` | 35 | 139 | 135 | 0 | 0 | 4 | 97% |
+| `core/argf` | 35 | 139 | 139 | 0 | 0 | 0 | 100% |
 | `core/array` | 132 | 2898 | 2886 | 0 | 12 | 0 | 100% |
 | `core/basicobject` | 14 | 172 | 169 | 0 | 0 | 3 | 98% |
 | `core/binding` | 12 | 98 | 98 | 0 | 0 | 0 | 100% |
@@ -131,4 +131,4 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `optional/capi` | 47 | 0 | 0 | 0 | 0 | 0 | — |
 | `optional/thread_safety` | 1 | 5 | 4 | 0 | 0 | 1 | 80% |
 | `security` | 13 | 34 | 32 | 0 | 2 | 0 | 94% |
-| **total** | 3841 | 32935 | 30176 | 0 | 2629 | 130 | 92% |
+| **total** | 3841 | 32935 | 30180 | 0 | 2629 | 126 | 92% |

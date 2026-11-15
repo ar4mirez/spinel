@@ -173,6 +173,9 @@ module Kernel
       # sets both (#41).
       value = ARGF.class.__c_int__(value)
       ARGF.__send__(:__lineno_set__, value)
+    when :$-i
+      ARGF.inplace_mode = value
+      return value
     when :$@
       # `$@ = x` sets the backtrace of `$!`, so with no `$!` there is nothing
       # to set. Measured on 4.0.9.
@@ -197,6 +200,8 @@ module Kernel
       $@
     when :$-W
       $VERBOSE.nil? ? 0 : $VERBOSE ? 2 : 1
+    when :$-i
+      ARGF.inplace_mode
     when :$FILENAME
       ARGF.filename
     end
@@ -224,8 +229,9 @@ alias $-F $;
 __hook_global__(true, :$-W)
 __global_store__(:$-W, nil)
 __freeze_global__(:$-W)
-# ponytail: a plain cell. CRuby reads and writes `ARGF.inplace_mode` through
-# it; tie the two together when its in-place mode lands (#41, S7b).
+# `$-i` reads and writes the global `ARGF`'s `inplace_mode`, as CRuby's
+# `opt_i_get` and `opt_i_set` do.
+__hook_global__(true, :$-i)
 __global_store__(:$-i, nil)
 __global_store__(:$., 0)
 

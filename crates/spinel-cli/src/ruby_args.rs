@@ -34,6 +34,9 @@ pub struct RubyArgs {
     pub autosplit: bool,
     pub line_ending: bool,
     pub split_pattern: Option<String>,
+    /// `-i[ext]`: edit `ARGV`'s files in place, keeping each as itself plus
+    /// `ext` when there is one.
+    pub inplace: Option<String>,
     /// `-0`'s octal digits as written: none is NUL, `0` paragraph mode,
     /// anything past a byte (`777`) the whole file.
     pub record_separator: Option<String>,
@@ -323,6 +326,11 @@ fn options(
                     out.split_pattern = Some(rest);
                     break;
                 }
+                // The rest of the word is the extension, `-ip` and all.
+                'i' => {
+                    out.inplace = Some(rest);
+                    break;
+                }
                 '0' => {
                     let digits: String = rest.chars().take_while(|d| d.is_digit(8)).collect();
                     out.record_separator = Some(digits.clone());
@@ -537,6 +545,9 @@ pub fn prelude(args: &RubyArgs) -> String {
     if let Some(pattern) = &args.split_pattern {
         let _ = writeln!(out, "$; = {}", lit(pattern));
     }
+    if let Some(extension) = &args.inplace {
+        let _ = writeln!(out, "ARGF.inplace_mode = {}", lit(extension));
+    }
     if args.line_ending {
         out.push_str("$\\ = $/\n");
     }
@@ -737,6 +748,17 @@ mod tests {
                 did_you_mean: false
             }
         );
+    }
+
+    #[test]
+    fn in_place_takes_the_rest_of_the_word() {
+        let inplace = |words: &[&str]| parse(&args(words)).unwrap().inplace;
+        assert_eq!(inplace(&["-i.bak", "-e", "0"]), Some(".bak".to_owned()));
+        assert_eq!(inplace(&["-i", "-e", "0"]), Some(String::new()));
+        assert_eq!(inplace(&["-ip", "-e", "0"]), Some("p".to_owned()));
+        assert_eq!(inplace(&["-e", "0"]), None);
+        let parsed = parse(&args(&["-i.bak", "-e", "0"])).unwrap();
+        assert!(prelude(&parsed).contains("ARGF.inplace_mode = \".bak\"\n"));
     }
 
     #[test]
