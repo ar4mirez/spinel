@@ -12,10 +12,15 @@ name = "spinel"
 path = "src/main.rs"
 
 [dependencies]
+base64 = "0.22"
 clap.workspace = true
 ignore = "0.4"
 libc = "0.2.189"
+md5 = { package = "md-5", version = "0.11" }
 notify = "8"
+# The compact index client (#77). rustls is reqwest's default TLS, verified
+# against the platform's trust store; gzip because `/versions` is large.
+reqwest = { version = "0.13", default-features = false, features = ["default-tls", "http2", "system-proxy", "gzip"] }
 sha2 = "0.11.0"
 signal-hook = "0.4"
 spinel-ast.workspace = true
@@ -24,6 +29,7 @@ spinel-ext.workspace = true
 spinel-jit.workspace = true
 spinel-parse.workspace = true
 spinel-vm.workspace = true
+tokio = { version = "1", features = ["rt", "sync"] }
 zstd = "0.13"
 
 [build-dependencies]

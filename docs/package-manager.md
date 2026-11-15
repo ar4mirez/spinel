@@ -78,6 +78,17 @@ rubygems.org's compact index, the same API Bundler uses:
 
 Fetched with `reqwest`, concurrent (limit 32), ETag-validated. Private sources (`source "https://gems.example"`) use the same API; fall back to the legacy `specs.4.8.gz` only if compact index returns 404. Git and path sources are resolved by cloning and evaluating the gemspec.
 
+The client is `crates/spinel-cli/src/compact_index.rs`, and it updates each file as Bundler 4's `CompactIndexClient::Updater` does:
+
+- **Cache layout.** `<home>/index/<host>/` (`<home>` is `$SPINEL_HOME`, else `~/.spinel`; a source on a port other than its scheme's adds `:<port>`, and one under a path adds `-` and 16 hex digits of the path's SHA-256, so two sources never share a cache). In it: `versions`, `versions.etag`, `names`, `names.etag`, `info/<gem>`, and `info-special-characters/<gem>-<md5 of name>` for a name with anything but lowercase letters, digits, `_` and `-`, as Bundler lays them out. A gem name outside rubygems.org's `[A-Za-z0-9._-]` is refused rather than made into a path. Every file is written beside itself and renamed into place.
+- **Incremental update.** With a non-empty cached copy, one request: `Range: bytes=<size - 1>-` (one byte back, so the range is never empty) and `If-None-Match` with the stored ETag. A 304 keeps the copy. A 206 is appended without its first byte and kept only when the whole result matches the SHA-256 in `Repr-Digest` (else `Digest`; as a byte sequence, a quoted string as rubygems.org sends it, or bare base64). With no digest nothing is appended, as in Bundler: appending unverified is too error prone. A 200, a server ignoring the range, replaces the copy.
+- **Fallback.** No cached copy, a 206 with no digest or a mismatch (a stale or corrupt cache), or a 416 (a cache longer than the file now is): fetch the whole file, with the ETag but no range. A whole file whose digest does not match is an error and is not written. Two differences from Bundler, both toward refetching: with no cached copy no ETag is sent (Bundler's would get a 304 and keep nothing), and a response with no ETag removes the stored one rather than leaving it to vouch for a file it was not sent with.
+- **`/info` skip.** An `/info/<gem>` is requested only when its cached file's MD5 differs from the checksum the cached `/versions` lists last for the gem, so a warm cache costs one request (the `/versions` 304) however many gems are asked for. A gem `/versions` does not list is not requested. That request carries no ETag, and none is stored for `/info`: the copy is already known to differ from the server's, and rubygems.org's ETag for an info file is its MD5, so a stored one still current would get a 304 that keeps the wrong copy on every run (Bundler sends it). Without one, a truncated copy is completed by the range and any other is fetched again.
+- **Concurrency.** At most 32 requests in flight per client: a permit covers one file's update, which makes at most one request at a time.
+- **What a 304 vouches for.** A 304 carries no digest, so a cached `/versions` or `/names` damaged after it was written, with its ETag still current, is trusted until the file changes upstream, as it is by Bundler. The cache's own writes cannot leave one: the data is renamed into place before its ETag is written.
+
+`spinel index [--source URL] [--names] [gem...]` (hidden) runs the client and prints one line per file; `crates/spinel-cli/tests/compact_index.rs` drives it against a local server.
+
 ### 3. Resolver
 
 `pubgrub` crate. Spinel supplies:

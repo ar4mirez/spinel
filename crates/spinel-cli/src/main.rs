@@ -5,6 +5,7 @@
 //! later phase is built through. Subcommands land one issue at a time; see
 //! `docs/cli.md` for the full surface.
 
+mod compact_index;
 #[cfg_attr(
     not(test),
     expect(
@@ -22,6 +23,7 @@ mod gem_platform;
 )]
 mod gem_substitute;
 mod gem_version;
+mod home;
 mod init;
 mod ruby_args;
 mod ruby_version;
@@ -119,6 +121,27 @@ enum Command {
     /// there is kept: nothing is overwritten.
     Init,
 
+    /// Bring the compact index cache up to date, and print what each request
+    /// did.
+    ///
+    /// The debugging window onto the index client the resolver reads through
+    /// (docs/package-manager.md, "Index client"): `/versions` always, `/names`
+    /// with `--names`, and `/info/<gem>` for each gem named. Hidden: `spinel
+    /// install` is the command that uses the index.
+    #[command(hide = true)]
+    Index {
+        /// The compact index to read.
+        #[arg(long, default_value = compact_index::DEFAULT_SOURCE)]
+        source: String,
+
+        /// Also update `/names`.
+        #[arg(long)]
+        names: bool,
+
+        /// Gems whose `/info` to update.
+        gems: Vec<String>,
+    },
+
     /// Parse Ruby and print the syntax tree.
     ///
     /// Give it a file to see one tree. Give it a directory to sweep every `.rb`
@@ -181,6 +204,11 @@ fn main() -> ExitCode {
     match cli.command {
         Some(Command::Parse { path, format }) => return parse_command(&path, format),
         Some(Command::Init) => return init_command(),
+        Some(Command::Index {
+            source,
+            names,
+            gems,
+        }) => return index_command(&source, names, &gems),
         Some(Command::Run {
             path,
             args,
@@ -305,6 +333,69 @@ fn init_command() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// spinel index
+// ---------------------------------------------------------------------------
+
+/// Update the compact index cache for `source` and print its directory, then
+/// one line per file: `versions: appended 120 bytes`, `info/rack: current`. Exits 1 if any
+/// request failed, after reporting every one.
+fn index_command(source: &str, names: bool, gems: &[String]) -> ExitCode {
+    let Some(home) = home::spinel_home() else {
+        eprintln!("spinel: index: neither SPINEL_HOME nor HOME is set");
+        return ExitCode::FAILURE;
+    };
+    let client = match compact_index::Client::new(source, &home) {
+        Ok(client) => client,
+        Err(err) => {
+            eprintln!("spinel: index: {err}");
+            return ExitCode::from(EXIT_USAGE);
+        }
+    };
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(err) => {
+            eprintln!("spinel: index: cannot start the async runtime: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+    runtime.block_on(async {
+        let mut ok = true;
+        let mut report =
+            |what: &str, result: Result<compact_index::Outcome, compact_index::Error>| match result
+            {
+                Ok(outcome) => println!("{what}: {outcome}"),
+                Err(err) => {
+                    eprintln!("spinel: index: {err}");
+                    ok = false;
+                }
+            };
+        println!("index: {}", client.directory().display());
+        report("versions", client.versions().await);
+        if names {
+            report("names", client.names().await);
+        }
+        if !gems.is_empty() {
+            match client.info(gems).await {
+                Ok(results) => {
+                    for (gem, result) in results {
+                        report(&format!("info/{gem}"), result);
+                    }
+                }
+                Err(err) => report("info", Err(err)),
+            }
+        }
+        if ok {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------
