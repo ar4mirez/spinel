@@ -163,12 +163,26 @@ module ObjectSpace
   # with what is not UTF-8 replaced. Each character to escape is split on
   # and joined back escaped, the backslash first, since the escapes are
   # written with one.
+  #
+  # A long text is searched a character at a time with `include?`, not
+  # with one regexp: the regexp engine refuses a search past 5,000,000
+  # steps, which a text of 2,509,103 bytes with nothing to escape took, and
+  # the heap can hold one that long, an earlier `dump_all`'s output among
+  # them. Under 100,000 bytes a search stays far inside that.
+  # ponytail: the ceiling is one `include?` for each of the 34 characters
+  # escaped, over a long text; a byte scan as a primitive is the upgrade.
   def self._json_string(bytes)
     text = bytes.b.force_encoding(Encoding::UTF_8).scrub("�")
-    return %("#{text}") unless text.match?(/["\\\x00-\x1f\x7f]/)
+    long = text.bytesize >= 100_000
+    plain = if long
+              ["\"", "\\", "\x7f", *(0..0x1f).map(&:chr)].none? { |ch| text.include?(ch) }
+            else
+              !text.match?(/["\\\x00-\x1f\x7f]/)
+            end
+    return %("#{text}") if plain
     text = text.split("\\", -1).join("\\\\") if text.include?("\\")
     text = text.split('"', -1).join('\\"') if text.include?('"')
-    if text.match?(/[\x00-\x1f\x7f]/)
+    if long || text.match?(/[\x00-\x1f\x7f]/)
       [*0..0x1f, 0x7f].each do |code|
         ch = code.chr
         next unless text.include?(ch)

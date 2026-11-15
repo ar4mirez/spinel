@@ -121,3 +121,28 @@ fn dumping_the_heap_makes_no_singleton_classes() {
     );
     assert_eq!(String::from_utf8_lossy(&output.stdout), "1\n");
 }
+
+/// A String longer than the regexp engine searches in one go is dumped, with
+/// and without characters to escape, as ruby 4.0.9 dumps it. A search of one
+/// that long used to refuse, and `dumping_the_heap_makes_no_singleton_classes`,
+/// whose heap holds each dump's output, met one: an escaped dump of 2,509,103
+/// bytes (#798).
+#[test]
+fn dumping_a_long_string_searches_it_without_one_regexp() {
+    let script =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/gc/dump_long_string.rb");
+    let output = Command::new(SPINEL)
+        .arg("run")
+        .arg(&script)
+        .output()
+        .expect("spinel runs");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "true\ntrue\ntrue\n"
+    );
+}

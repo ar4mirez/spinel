@@ -25,14 +25,14 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/exception` | 39 | 250 | 250 | 0 | 0 | 0 | 100% |
 | `core/false` | 9 | 13 | 11 | 0 | 2 | 0 | 85% |
 | `core/fiber` | 15 | 189 | 142 | 0 | 42 | 5 | 75% |
-| `core/file` | 111 | 924 | 901 | 0 | 23 | 0 | 98% |
+| `core/file` | 111 | 924 | 924 | 0 | 0 | 0 | 100% |
 | `core/filetest` | 25 | 95 | 95 | 0 | 0 | 0 | 100% |
 | `core/float` | 50 | 261 | 261 | 0 | 0 | 0 | 100% |
 | `core/gc` | 18 | 41 | 41 | 0 | 0 | 0 | 100% |
 | `core/hash` | 69 | 562 | 535 | 0 | 25 | 2 | 95% |
 | `core/integer` | 70 | 598 | 598 | 0 | 0 | 0 | 100% |
 | `core/io` | 104 | 1650 | 1461 | 0 | 189 | 0 | 89% |
-| `core/kernel` | 118 | 2241 | 2105 | 0 | 113 | 23 | 94% |
+| `core/kernel` | 118 | 2241 | 2174 | 0 | 44 | 23 | 97% |
 | `core/main` | 7 | 27 | 27 | 0 | 0 | 0 | 100% |
 | `core/marshal` | 6 | 502 | 502 | 0 | 0 | 0 | 100% |
 | `core/matchdata` | 30 | 186 | 186 | 0 | 0 | 0 | 100% |
@@ -55,7 +55,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `core/set` | 57 | 170 | 166 | 0 | 1 | 3 | 98% |
 | `core/signal` | 3 | 53 | 53 | 0 | 0 | 0 | 100% |
 | `core/sizedqueue` | 16 | 61 | 61 | 0 | 0 | 0 | 100% |
-| `core/string` | 151 | 3964 | 3712 | 0 | 229 | 23 | 94% |
+| `core/string` | 151 | 3964 | 3757 | 0 | 194 | 13 | 95% |
 | `core/struct` | 30 | 170 | 169 | 0 | 1 | 0 | 99% |
 | `core/symbol` | 29 | 270 | 269 | 0 | 0 | 1 | 100% |
 | `core/systemexit` | 2 | 6 | 6 | 0 | 0 | 0 | 100% |
@@ -115,7 +115,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `library/shellwords` | 1 | 7 | 7 | 0 | 0 | 0 | 100% |
 | `library/singleton` | 7 | 14 | 14 | 0 | 0 | 0 | 100% |
 | `library/socket` | 188 | 1818 | 1818 | 0 | 0 | 0 | 100% |
-| `library/stringio` | 64 | 682 | 656 | 0 | 23 | 3 | 96% |
+| `library/stringio` | 64 | 682 | 679 | 0 | 0 | 3 | 100% |
 | `library/stringscanner` | 44 | 240 | 240 | 0 | 0 | 0 | 100% |
 | `library/syslog` | 20 | 75 | 0 | 0 | 75 | 0 | 0% |
 | `library/tempfile` | 10 | 45 | 45 | 0 | 0 | 0 | 100% |
@@ -131,4 +131,4 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `optional/capi` | 47 | 0 | 0 | 0 | 0 | 0 | — |
 | `optional/thread_safety` | 1 | 5 | 4 | 0 | 0 | 1 | 80% |
 | `security` | 13 | 34 | 32 | 0 | 2 | 0 | 94% |
-| **total** | 3841 | 32935 | 30180 | 0 | 2629 | 126 | 92% |
+| **total** | 3841 | 32935 | 30340 | 0 | 2479 | 116 | 92% |

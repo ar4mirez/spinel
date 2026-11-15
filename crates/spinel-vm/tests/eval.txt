@@ -2967,3 +2967,18 @@ def b7w(a, b, c) = (a + b) + c; [b7w("x", "y", "z"), b7w([1], [2], [3]), (b7w(ni
 def c7w(a, b) = (a + 0) * b; r = [c7w(2, 3)]; class Integer; alias_method :t7w, :*; def *(o) = :times; end; r << c7w(2, 3); class Integer; alias_method :*, :t7w; remove_method :t7w; end; r << c7w(2, 3)  #=> [6, :times, 6]
 # A `respond_to_missing?` is not asked about a not-implemented method, as CRuby's `basic_obj_respond_to` answers when `method_boundp` gives 2, so `File.lchmod` responds from a subclass that says yes to anything only where it is real.
 k = Class.new(File); def k.respond_to_missing?(*) = true; [k.respond_to?(:lchmod) == File.respond_to?(:lchmod), k.respond_to?(:lchmod, true) == File.respond_to?(:lchmod), k.respond_to?(:no_such_method)]  #=> [true, true, true]
+
+# ------------------------------- format's %a and %A, %c, %{name}'s KeyError, and String#%'s to_ary (#798)
+[0.0, -0.0, 1.0, 5e-324, 1.0e-310, Float::MAX, 0.1].map { |f| format("%a", f) }  #=> ["0x0p+0", "-0x0p+0", "0x1p+0", "0x1p-1074", "0x1.2688b70e62bp-1030", "0x1.fffffffffffffp+1023", "0x1.999999999999ap-4"]
+[0, 1, 12, 13, 14].map { |p| format("%.#{p}a", 1.0 / 3) }  #=> ["0x1p-2", "0x1.5p-2", "0x1.555555555555p-2", "0x1.5555555555554p-2", "0x1.55555555555550p-2"]
+[1.5, 2.5, 0.75, 1.5000000000000002].map { |f| format("%.0a", f) } + [1.03125, 1.09375, 1.96875].map { |f| format("%.1a", f) }  #=> ["0x1p+1", "0x1p+1", "0x1p+0", "0x1p+1", "0x1.0p+0", "0x1.2p+0", "0x1.0p+1"]
+[format("%.12a", Float::MAX), format("%.3a", 5e-324), format("%.20a", 1.0)]  #=> ["0x1.000000000000p+1024", "0x1.000p-1074", "0x1.00000000000000000000p+0"]
+[format("%#a", 1.0), format("%#.0a", 0.0), format("%.2a", 0.0), format("%020a", -196.0), format("% 020A", 196.0), format("%-+12a|", 1.0), format("%020a", -Float::INFINITY)]  #=> ["0x1.p+0", "0x0.p+0", "0x0.00p+0", "-0x00000000001.88p+7", " 0X00000000001.88P+7", "+0x1p+0     |", "                -Inf"]
+[format("%a", 2**53 + 1), format("%a", 10**400), format("%a", Rational(-1, 3)), format("%a", "1.5"), (format("%a", nil) rescue $!.message)]  #=> ["0x1p+53", "Inf", "-0x1.5555555555555p-2", "0x1.8p+0", "can't convert nil into Float"]
+[format("%c", 0xD800).bytes, format("%c", 1.9).ord, format("%-5c|", "あい"), format("%05c", 97), (format("%c", -1) rescue $!.message), (format("%c", 0x110000) rescue $!.message), (format("%c", 2**40) rescue $!.message), (format("%c", 2**64) rescue $!.message)]  #=> [[237, 160, 128], 1, "あ    |", "    a", "invalid character", "invalid character", "integer 1099511627776 too big to convert to 'int'", "bignum too big to convert into 'long'"]
+r = "%c".encode("US-ASCII") % 200; [r.bytes, r.encoding.name]  #=> [[200], "ASCII-8BIT"]
+[(format("%{foo}", Hash.new { nil }) rescue $!.message), (format("%<foo>s", {}) rescue $!.message), format("%{foo}", Hash.new(1))]  #=> ["key{foo} not found", "key<foo> not found", "1"]
+["%*1$.*2$3$d" % [10, 5, 1], "%*1$.*2$3$d" % [-10, 5, 1], "%*1$.*2$3$d" % [10, -5, 1]]  #=> ["     00001", "00001     ", "         1"]
+o = Object.new; def o.to_ary; [1, 2]; end; ["%s %s" % o, ("%s" % Class.new { def to_ary; "x"; end }.new rescue $!.class)]  #=> ["1 2", TypeError]
+[("%d" % "5x" rescue $!.message), ("%d" % "" rescue $!.message), "%d" % "0x1f", "%x" % " 0b11 "]  #=> ["invalid value for Integer(): \"5x\"", "invalid value for Integer(): \"\"", "31", "3"]
+[Float::NAN, 1e20, -Float::INFINITY, 9.3e18].map { |f| format("%c", f) rescue $!.message } + [format("%c", 97.5)]  #=> ["float NaN out of range of integer", "float 1e+20 out of range of integer", "float -Inf out of range of integer", "float 9.3e+18 out of range of integer", "a"]
