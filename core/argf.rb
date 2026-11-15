@@ -17,9 +17,20 @@
 # one read from any other IO makes `$.` that IO's line number
 # (`__io_line__`, CRuby's `rb_io_getline_1`).
 #
-# ponytail: in-place mode is not here yet. `inplace_mode`, `$-i`, `-i[ext]`
-# and the writing methods (`write`, `print`, `putc`, `puts`, `printf`,
-# `to_write_io`) that write to the file being edited are #41's next slice.
+# In-place mode (`-i[ext]`, `$-i`, `inplace_mode=`) is CRuby's: each file is
+# renamed to its backup, or unlinked when there is no extension, and opened
+# afresh for writing with the old one's mode and owner. That new file is
+# `$stdout` until the next one opens, and after the last as well, and it is
+# what `ARGF.write` and its kin write to.
+#
+# - `@__inplace__` is false when the mode is off, nil when it is on with no
+#   backup, and the backup's extension, frozen, otherwise;
+# - `@__write_io__` is the file being written, CRuby's `write_io` of the
+#   file being read.
+#
+# ponytail: CRuby ties the written file to the read one as its `write_io`,
+# so `ARGF.file.write` writes it too; here only `ARGF`'s own writers and
+# `$stdout` do. Tying an IO object, not a descriptor, to an IO is the upgrade.
 ARGF = Class.new do
   include Enumerable
 
@@ -32,6 +43,8 @@ ARGF = Class.new do
     @__init_p__ = 0
     @__next_p__ = 0
     @__binmode__ = false
+    @__inplace__ = false
+    @__write_io__ = nil
   end
 
   def initialize_copy(orig)
@@ -75,6 +88,69 @@ ARGF = Class.new do
     __next_argv__
     return @__current_file__.to_io if __generic_input__
     @__current_file__
+  end
+
+  # The file being written in place, or else the one being read, which then
+  # refuses to be written. Nothing is opened here, as in CRuby.
+  def to_write_io
+    raise IOError, "not opened for writing" unless @__current_file__
+    @__write_io__ || @__current_file__
+  end
+
+  def write(*objects) = to_write_io.write(*objects)
+
+  # `IO#print`, `#printf`, `#putc` and `#puts`, as CRuby defines them on
+  # `ARGF` too: every piece goes to this `ARGF`'s own `write`.
+  def print(*objects)
+    objects = [$_] if objects.empty?
+    separator = $,
+    objects.each_with_index do |object, index|
+      write(separator) if index > 0 && !separator.nil?
+      write(object.nil? ? "" : object)
+    end
+    write($\) unless $\.nil?
+    nil
+  end
+
+  def printf(format = nil, *args)
+    return nil if format.nil?
+    write(Kernel.format(format, *args))
+    nil
+  end
+
+  def putc(char)
+    write(String === char ? char[0].to_s : (Integer.__index__(char) & 0xff).chr)
+    char
+  end
+
+  def puts(*lines)
+    if lines.empty?
+      write(IO.__default_rs__)
+      return nil
+    end
+    __puts_lines__(lines, [])
+    nil
+  end
+
+  # The backup's extension: nil when the mode is off, and an empty String
+  # when it is on with no backup. A copy each time.
+  def inplace_mode
+    return nil if false.equal?(@__inplace__)
+    return +"" if @__inplace__.nil?
+    @__inplace__.dup
+  end
+
+  # CRuby's `argf_inplace_mode_set`: anything falsy turns the mode off, and
+  # anything else is a String with no NUL, kept as a frozen copy.
+  def inplace_mode=(value)
+    if !value
+      @__inplace__ = false
+    else
+      value = IO.__str__(value)
+      raise ArgumentError, "string contains null byte" if value.include?("\0")
+      @__inplace__ = value.empty? ? nil : String.new(value).freeze
+    end
+    self
   end
 
   def gets(*args, **options)
@@ -328,17 +404,36 @@ ARGF = Class.new do
     end
 
     if @__next_p__ == 1
+      # What `$stdout` was before a file is opened in place, which closes it.
+      stdout = $stdout
+      binmode = !false.equal?(@__inplace__) && IO === stdout && !stdout.closed? && stdout.binmode?
       __close_current__ if @__init_p__ == 1
-      if @__argv__.empty?
-        @__next_p__ = 1
-        return false
-      end
-      filename = File.__path__(@__argv__.shift)
-      @__filename__ = filename
-      if filename == "-"
-        @__current_file__ = $stdin
-      else
-        @__current_file__ = File.new(filename, "r")
+      loop do
+        if @__argv__.empty?
+          @__next_p__ = 1
+          return false
+        end
+        filename = File.__path__(@__argv__.shift)
+        @__filename__ = filename
+        @__write_io__ = nil
+        if filename == "-"
+          @__current_file__ = $stdin
+          unless false.equal?(@__inplace__)
+            __warning__("Can't do inplace edit for stdio; skipping")
+            next
+          end
+        else
+          reader = File.new(filename, "r")
+          unless false.equal?(@__inplace__)
+            writer = __inplace_writer__(reader, filename, stdout)
+            next if writer.nil?
+            $stdout = writer
+            writer.binmode if binmode
+            @__write_io__ = writer
+          end
+          @__current_file__ = reader
+        end
+        break
       end
       current = @__current_file__
       # CRuby takes the IO's state here, which a `$stdin` that is no IO
@@ -354,6 +449,10 @@ ARGF = Class.new do
     elsif @__next_p__ == -1
       @__current_file__ = $stdin
       @__filename__ = +"-"
+      unless false.equal?(@__inplace__)
+        __warning__("Can't do inplace edit for stdio")
+        $stdout = STDOUT
+      end
     end
     @__init_p__ = 1 if @__init_p__ == -1
     true
@@ -364,8 +463,51 @@ ARGF = Class.new do
   def __close_current__
     file = @__current_file__
     return if file.equal?($stdin)
+    @__write_io__ = nil
     ARGF.class.__close__(file)
     @__init_p__ = -1
+  end
+
+  # CRuby's in-place half of `argf_next_argv`: `filename`, open as `reader`,
+  # moved to its backup or unlinked, and a new file of that name opened for
+  # writing with the old one's mode and owner, which `$stdout` is from now
+  # on. Any other file `$stdout` was is closed first. A file that cannot be
+  # moved is skipped with a warning, and nil answered. Measured on 4.0.9.
+  def __inplace_writer__(reader, filename, stdout)
+    stdout.close if IO === stdout && !stdout.equal?(STDOUT)
+    stat = reader.stat
+    backup = filename
+    if @__inplace__.nil?
+      error = __fs_unlink__(filename)
+      if Integer === error
+        reader.close
+        return __warning__("Can't remove #{filename}: #{ARGF.class.__strerror__(error)}, skipping file")
+      end
+    else
+      backup = filename + @__inplace__
+      error = __fs_rename__(filename, backup)
+      if Integer === error
+        reader.close
+        return __warning__("Can't rename #{filename} to #{backup}: #{ARGF.class.__strerror__(error)}, skipping file")
+      end
+    end
+    writer = File.new(filename, File::WRONLY | File::CREAT | File::TRUNC, 0o666)
+    written = writer.stat
+    writer.chmod(stat.mode & 0o7777)
+    if stat.uid != written.uid || stat.gid != written.gid
+      begin
+        File.chown(stat.uid, stat.gid, filename)
+      rescue SystemCallError => e
+        # Only root, which could, is told; anyone else keeps the file as theirs.
+        if Process.uid == 0 && written.uid == 0
+          reader.close
+          writer.close
+          __fs_unlink__(filename)
+          return __warning__("Can't set owner/group of #{filename} to same as #{backup}: #{ARGF.class.__strerror__(e.errno)}, skipping file")
+        end
+      end
+    end
+    writer
   end
 
   # CRuby's `argf_getline`: the next line of the stream, going on to the next
@@ -455,8 +597,11 @@ ARGF = Class.new do
     @__lineno__ -= lineno if io.equal?(@__current_file__)
   end
 
-  private :__generic_input__, :__next_argv__, :__close_current__, :__getline__, :__getpartial__,
-          :__block_call__, :__lineno_set__
+  private :__generic_input__, :__next_argv__, :__close_current__, :__inplace_writer__, :__getline__,
+          :__getpartial__, :__block_call__, :__lineno_set__
+
+  # `strerror(errno)`, which the in-place warnings end with.
+  def self.__strerror__(errno) = SystemCallError.new(nil, errno).message
 
   # `NUM2INT`, which `ARGF.lineno=` and `$.` take their value by: a Float
   # truncated, anything else by `to_int`, and either held to a C int.

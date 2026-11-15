@@ -87,7 +87,12 @@ fix is a different slice. The reason says which slice, by number.
 
 ## What is here now
 
-A hundred and twenty-eight tags across sixty-eight files. Reading through
+A hundred and twenty-four tags across sixty-six files. In-place editing
+through `ARGF` (#41, S7b), `-i[ext]`, `$-i` and `ARGF.inplace_mode`,
+removed four, and two files: the last of `core/argf`'s, the
+`core/argf/{gets,readline}` examples that edit two files with `-i` and
+`-i.bak`, so `core/argf` has no tags left.
+Before it, a hundred and twenty-eight across sixty-eight. Reading through
 `ARGF` (#41, S7a) removed seventeen, and nine files: fifteen of
 `core/argf`'s, the `ruby_exe` ones reading standard input, `$.`,
 `$FILENAME`, `rewind` and `close` among them, and `ARGF.skip` before
