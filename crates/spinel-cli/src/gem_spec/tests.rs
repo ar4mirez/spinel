@@ -165,7 +165,14 @@ fn an_alias_bomb_is_refused_not_expanded() {
         bomb.push_str(&format!("bomb{level}: &l{level} [{items}]\n"));
     }
     let err = with(&bomb).unwrap_err();
-    assert!(err.contains("values"), "{err}");
+    assert!(err.contains("bytes"), "{err}");
+    let big = format!(
+        "big: &s \"{}\"\nfiles: [{}]\n",
+        "x".repeat(1 << 20),
+        ["*s"; 2_000].join(", ")
+    );
+    let err = with(&big).unwrap_err();
+    assert!(err.contains("bytes"), "{err}");
     let shared = with("files: &f [a, b]\ntest_files: *f\n").unwrap();
     assert_eq!(shared.verify(), Ok(()));
 }

@@ -1176,7 +1176,7 @@ fn load(text: &str) -> Result<Value, String> {
         at: 0,
         anchors: Vec::new(),
         built: 0,
-        values: 0,
+        bytes: 0,
     };
     while let Some(ev) = builder.events.get(builder.at) {
         match ev {
@@ -1190,24 +1190,24 @@ fn load(text: &str) -> Result<Value, String> {
     Err("the gemspec's YAML is empty".to_owned())
 }
 
-// ponytail: an alias is a deep copy, so the values built (aliases expanded,
-// and the copy each anchor keeps) are capped at VALUE_LIMIT, and the nesting,
-// which the builder recurses on, at DEPTH_LIMIT. A gemspec past either is
-// refused where Psych, which shares one object per alias, loads it. Upgrade
-// path: hold values behind `Rc` so an alias costs one value, and build from an
-// explicit stack instead of recursing.
-const VALUE_LIMIT: usize = 4_000_000;
+// ponytail: an alias is a deep copy, so the bytes built (each value's own size
+// plus a scalar's text, aliases expanded, and the copy each anchor keeps) are
+// capped at BUILD_LIMIT, and the nesting, which the builder recurses on, at
+// DEPTH_LIMIT. A gemspec past either is refused where Psych, which shares one
+// object per alias, loads it. Upgrade path: hold values behind `Rc` so an
+// alias costs one value, and build from an explicit stack instead of recursing.
+const BUILD_LIMIT: usize = 1 << 30;
 const DEPTH_LIMIT: usize = 256;
 
 struct Builder {
     events: Vec<Event>,
     at: usize,
-    /// Each anchor's value and how many values it counts for.
+    /// Each anchor's value and how many bytes it counts for.
     anchors: Vec<(usize, Value, usize)>,
-    /// Values built, aliases expanded.
+    /// Bytes built, aliases expanded.
     built: usize,
-    /// Those and the values in each anchor's copy, which VALUE_LIMIT caps.
-    values: usize,
+    /// Those and the bytes in each anchor's copy, which BUILD_LIMIT caps.
+    bytes: usize,
 }
 
 /// A tag as Psych sees it: `!foo` stays `!foo`; `!!foo` is
@@ -1249,30 +1249,35 @@ impl Builder {
         Ok(ev)
     }
 
-    fn count(&mut self, values: usize) -> Result<(), String> {
-        self.values = self.values.saturating_add(values);
-        if self.values > VALUE_LIMIT {
+    /// Counts `bytes` more built.
+    fn build(&mut self, bytes: usize) -> Result<(), String> {
+        self.built += bytes;
+        self.count(bytes)
+    }
+
+    fn count(&mut self, bytes: usize) -> Result<(), String> {
+        self.bytes = self.bytes.saturating_add(bytes);
+        if self.bytes > BUILD_LIMIT {
             return Err(format!(
-                "the gemspec's YAML builds more than {VALUE_LIMIT} values"
+                "the gemspec's YAML builds more than {BUILD_LIMIT} bytes"
             ));
         }
         Ok(())
     }
 
-    /// Keeps a copy of an anchored value, which counts as values too.
+    /// Keeps a copy of an anchored value, whose bytes count too.
     fn anchor(&mut self, id: usize, value: &Value, from: usize) -> Result<(), String> {
         if id > 0 {
-            let values = self.built - from;
-            self.count(values)?;
-            self.anchors.push((id, value.clone(), values));
+            let bytes = self.built - from;
+            self.count(bytes)?;
+            self.anchors.push((id, value.clone(), bytes));
         }
         Ok(())
     }
 
     fn node(&mut self) -> Result<Value, String> {
         let from = self.built;
-        self.built += 1;
-        self.count(1)?;
+        self.build(std::mem::size_of::<Value>())?;
         match self.next()? {
             Event::Alias(id) => {
                 let at = self
@@ -1280,12 +1285,11 @@ impl Builder {
                     .iter()
                     .rposition(|(a, _, _)| *a == id)
                     .ok_or_else(|| "the gemspec's YAML has an unknown alias".to_owned())?;
-                let values = self.anchors[at].2 - 1;
-                self.built += values;
-                self.count(values)?;
+                self.build(self.anchors[at].2 - std::mem::size_of::<Value>())?;
                 Ok(self.anchors[at].1.clone())
             }
             Event::Scalar(text, style, anchor, tag) => {
+                self.build(text.len())?;
                 let value = scalar(&text, style, tag.as_ref())?;
                 self.anchor(anchor, &value, from)?;
                 Ok(value)
