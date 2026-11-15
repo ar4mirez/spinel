@@ -21,7 +21,9 @@
 //!
 //! An `/info/<gem>` file is fetched only when its MD5 differs from the one the
 //! cached `/versions` lists last for that gem, as Bundler skips it, so a warm
-//! cache costs one request for any number of gems. At most [`MAX_CONCURRENT`]
+//! cache costs one request for any number of gems. That request carries no
+//! ETag: the copy is already known to differ from the server's, and a stored
+//! ETag still current would get a 304 that keeps it. At most [`MAX_CONCURRENT`]
 //! requests are in flight at once.
 //!
 //! Every file is written to a temporary name beside it and renamed into
@@ -161,7 +163,7 @@ impl Client {
         self.update(
             "versions",
             &self.dir.join("versions"),
-            &self.dir.join("versions.etag"),
+            Some(&self.dir.join("versions.etag")),
         )
         .await
     }
@@ -171,7 +173,7 @@ impl Client {
         self.update(
             "names",
             &self.dir.join("names"),
-            &self.dir.join("names.etag"),
+            Some(&self.dir.join("names.etag")),
         )
         .await
     }
@@ -216,10 +218,12 @@ impl Client {
                 results[i] = Some(Ok(Outcome::Current));
                 continue;
             }
+            // No ETag: the copy is already known not to be the server's, and
+            // rubygems.org's ETag for it is its MD5, so a stored one that is
+            // still current would get a 304 that keeps the wrong copy.
             let client = self.clone();
-            let etag = self.info_etag_path(gem);
             let remote_path = format!("info/{gem}");
-            tasks.spawn(async move { (i, client.update(&remote_path, &local, &etag).await) });
+            tasks.spawn(async move { (i, client.update(&remote_path, &local, None).await) });
         }
         while let Some(joined) = tasks.join_next().await {
             let (i, result) = joined.expect("an index task panicked");
@@ -254,16 +258,15 @@ impl Client {
         }
     }
 
-    fn info_etag_path(&self, gem: &str) -> PathBuf {
-        self.dir
-            .join("info-etags")
-            .join(format!("{gem}-{}", hex(&Md5::digest(gem))))
-    }
-
     /// Bundler's `Updater#update`: append to the cached copy if that can be
     /// verified, else fetch it whole. One permit covers both requests, so the
     /// limit counts requests in flight.
-    async fn update(&self, remote: &str, local: &Path, etag_path: &Path) -> Result<Outcome, Error> {
+    async fn update(
+        &self,
+        remote: &str,
+        local: &Path,
+        etag_path: Option<&Path>,
+    ) -> Result<Outcome, Error> {
         let _permit = self
             .limit
             .acquire()
@@ -285,13 +288,13 @@ impl Client {
         &self,
         url: &Url,
         local: &Path,
-        etag_path: &Path,
+        etag_path: Option<&Path>,
     ) -> Result<Option<Outcome>, Error> {
         let size = match std::fs::metadata(local) {
             Ok(meta) if meta.is_file() && meta.len() > 0 => meta.len(),
             _ => return Ok(None),
         };
-        let etag = read_etag(etag_path);
+        let etag = etag_path.and_then(read_etag);
         let response = self.get(url, etag.as_deref(), Some(size - 1)).await?;
         match response.status() {
             StatusCode::NOT_MODIFIED => Ok(Some(Outcome::NotModified)),
@@ -311,7 +314,9 @@ impl Client {
                     return Ok(None);
                 }
                 write_atomic(local, &data)?;
-                write_etag(etag_path, new_etag.as_deref())?;
+                if let Some(etag_path) = etag_path {
+                    write_etag(etag_path, new_etag.as_deref())?;
+                }
                 Ok(Some(Outcome::Appended(tail.len() as u64)))
             }
             // Asked for a range starting inside the cached copy, a server that
@@ -327,10 +332,15 @@ impl Client {
     }
 
     /// The full request, with the ETag but no range.
-    async fn replace(&self, url: &Url, local: &Path, etag_path: &Path) -> Result<Outcome, Error> {
+    async fn replace(
+        &self,
+        url: &Url,
+        local: &Path,
+        etag_path: Option<&Path>,
+    ) -> Result<Outcome, Error> {
         // Bundler sends the ETag even with no cached copy; a 304 would then
         // leave nothing, so without one there is no ETag to send.
-        let etag = local.is_file().then(|| read_etag(etag_path)).flatten();
+        let etag = etag_path.filter(|_| local.is_file()).and_then(read_etag);
         let response = self.get(url, etag.as_deref(), None).await?;
         match response.status() {
             StatusCode::NOT_MODIFIED if etag.is_some() => Ok(Outcome::NotModified),
@@ -344,7 +354,7 @@ impl Client {
         url: &Url,
         response: reqwest::Response,
         local: &Path,
-        etag_path: &Path,
+        etag_path: Option<&Path>,
     ) -> Result<Outcome, Error> {
         let digest = parse_digest(response.headers());
         let new_etag = etag_from_response(response.headers());
@@ -356,7 +366,9 @@ impl Client {
             return Err(Error::Digest(url.clone()));
         }
         write_atomic(local, &body)?;
-        write_etag(etag_path, new_etag.as_deref())?;
+        if let Some(etag_path) = etag_path {
+            write_etag(etag_path, new_etag.as_deref())?;
+        }
         Ok(Outcome::Fetched(body.len() as u64))
     }
 

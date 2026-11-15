@@ -616,6 +616,44 @@ fn info_requests_are_capped_at_32_in_flight_and_skipped_when_current() {
 }
 
 #[test]
+fn an_info_file_that_differs_from_its_listed_checksum_is_repaired() {
+    let infos: Vec<(String, Vec<u8>)> = ["rack", "rails"]
+        .iter()
+        .map(|gem| {
+            let info = format!("---\n1.0.0 |checksum:{}\n", hex(&Sha256::digest(gem)));
+            (gem.to_string(), info.into_bytes())
+        })
+        .collect();
+    let server = Server::start();
+    server.put("/versions", &versions_for(&infos));
+    for (gem, info) in &infos {
+        server.put(&format!("/info/{gem}"), info);
+    }
+    let home = Home::new("info-repair");
+    index_ok(&home, &server, &["rack", "rails"]);
+    server.take_seen();
+
+    // Overwrite one and cut the other short, leaving whatever else the first
+    // run stored: the server's copies have not changed.
+    let info = home.cache(&server).join("info");
+    fs::write(info.join("rack"), b"---\nnot what the server has\n").unwrap();
+    fs::write(info.join("rails"), &infos[1].1[..10]).unwrap();
+    let report = index_ok(&home, &server, &["rack", "rails"]);
+    assert!(
+        report[1..].iter().all(|line| !line.ends_with("not modified")),
+        "{report:?}"
+    );
+    for (gem, body) in &infos {
+        assert_eq!(&read(&info.join(gem)), body, "info/{gem} is repaired");
+    }
+    // And stays repaired: the next run makes no /info request.
+    server.take_seen();
+    let report = index_ok(&home, &server, &["rack", "rails"]);
+    assert_eq!(report[1..], ["info/rack: current", "info/rails: current"]);
+    assert_eq!(server.take_seen().len(), 1);
+}
+
+#[test]
 fn a_gem_name_that_could_leave_the_cache_is_refused() {
     let (before, _) = versions_before_and_after();
     let server = Server::start();
