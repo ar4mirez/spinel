@@ -52,7 +52,7 @@ if [[ "$mode" == table ]]; then
   echo
   # The platform is part of the measurement: ruby/spec's `platform_is` guards
   # run a different set of examples on each one.
-  echo "Guards are answered for the platform the run is on. CI generates this file on Linux, so regenerate it there."
+  echo "Guards are answered for the platform the run is on. CI generates this file on Linux, so regenerate it there; its macOS leg runs \`core/io\`, \`core/file\`, \`core/dir\` and \`core/filetest\` too, held to zero failures, and reports their counts in the job summary."
   echo
   echo "| directory | files | examples | passed | failed | blocked | skipped | passed % |"
   echo "|---|---:|---:|---:|---:|---:|---:|---:|"

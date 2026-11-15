@@ -51,6 +51,28 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+      # ruby/spec runs on Linux in the jobs below. These four directories are
+      # where the platform shows (#41, S10): `platform_is :darwin` examples —
+      # a path in Windows-31J, `birthtime`, `lchmod` — and the stat, advice
+      # and pipe calls whose answers differ, so macOS runs them too, on the
+      # release build above and held to the same zero failures. `spec.sh`
+      # exits non-zero on a failure, a bad tag or a process that stopped; the
+      # floor is what makes an empty corpus fail as well.
+      - name: ruby/spec core/{io,file,dir,filetest}
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -o pipefail
+          for dir in core/io core/file core/dir core/filetest; do
+            ./scripts/spec.sh "$dir" | tee spec-report.txt
+            examples=$(sed -nE 's/^[0-9]+ files? · ([0-9]+) examples ·.*/\1/p' spec-report.txt)
+            if [ "${examples:-0}" -lt 50 ]; then
+              echo "::error::$dir reported ${examples:-no} examples: the corpus is not all there"
+              exit 1
+            fi
+            echo "$dir: $(grep -E '^[0-9]+ files? ·' spec-report.txt)" >> "$GITHUB_STEP_SUMMARY"
+          done
+
   lint:
     name: fmt + clippy
     runs-on: ubuntu-latest

@@ -87,7 +87,10 @@ fix is a different slice. The reason says which slice, by number.
 
 ## What is here now
 
-A hundred and twenty-four tags across sixty-six files. In-place editing
+A hundred and twenty-four tags across sixty-six files. They are read on
+macOS too, where CI runs `core/{io,file,dir,filetest}` (#41, S10), and
+that run added none: an example that disagrees with Ruby there is fixed
+for that platform, as it would be for this one. In-place editing
 through `ARGF` (#41, S7b), `-i[ext]`, `$-i` and `ARGF.inplace_mode`,
 removed four, and two files: the last of `core/argf`'s, the
 `core/argf/{gets,readline}` examples that edit two files with `-i` and

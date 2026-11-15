@@ -23248,6 +23248,13 @@ fn path_arg(scope: &mut HandleScope<'_>, call: &Pending, index: usize) -> Result
             operands: "a path that is not a String",
         });
     };
+    // macOS is handed a path in UTF-8, as CRuby's `rb_str_encode_ospath`
+    // hands it there; Linux takes its bytes.
+    #[cfg(target_vendor = "apple")]
+    let bytes = {
+        let encoding = string_encoding(scope, call.args[index]).unwrap_or(crate::strings::BINARY);
+        crate::transcode::ospath(encoding, bytes)
+    };
     Ok(PathBuf::from(std::ffi::OsString::from_vec(bytes)))
 }
 

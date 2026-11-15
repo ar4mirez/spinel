@@ -1117,9 +1117,54 @@ pub fn valid(encoding: u8, bytes: &[u8]) -> Option<bool> {
     }
 }
 
+/// A path as macOS is handed it: CRuby's `rb_str_encode_ospath`, which on
+/// Apple's platforms converts a path that is neither binary nor UTF-8 to
+/// UTF-8, the file system's encoding, by `rb_str_conv_enc` — so ASCII is
+/// kept as it is, and a path that does not convert, or that this VM has no
+/// converter for, is handed over as its bytes. Linux takes a path's bytes
+/// as they are, and does not ask for this.
+#[must_use]
+pub fn ospath(encoding: u8, bytes: Vec<u8>) -> Vec<u8> {
+    if encoding == BINARY || encoding == UTF_8 || bytes.is_ascii() {
+        return bytes;
+    }
+    let mut state = State::default();
+    match step(
+        &[encoding, UTF_8],
+        &bytes,
+        0,
+        &mut state,
+        Decorators::default(),
+        true,
+        false,
+    ) {
+        Some(Step {
+            output,
+            stop: Stop::Done,
+            ..
+        }) => output,
+        _ => bytes,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ospath_converts_to_utf8_or_keeps_the_bytes() {
+        use crate::strings::WINDOWS_31J;
+        // "あ" in Windows-31J is 0x82 0xA0; in UTF-8, E3 81 82.
+        assert_eq!(
+            ospath(WINDOWS_31J, b"/t/\x82\xa0".to_vec()),
+            "/t/\u{3042}".as_bytes()
+        );
+        assert_eq!(ospath(WINDOWS_31J, b"/plain".to_vec()), b"/plain");
+        // Not Windows-31J at all: handed over as it is.
+        assert_eq!(ospath(WINDOWS_31J, b"/t/\x82".to_vec()), b"/t/\x82");
+        assert_eq!(ospath(BINARY, b"/t/\x82\xa0".to_vec()), b"/t/\x82\xa0");
+        assert_eq!(ospath(UTF_8, b"/t/\xff".to_vec()), b"/t/\xff");
+    }
 
     /// `super::step` to the end of the input.
     fn step(
