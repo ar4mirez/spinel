@@ -12,6 +12,11 @@
 # seek, `flush`, `close` and the rest CRuby flushes at send it first, and so do
 # the collector's finalizer and the program's end (`__flush_buffer__`).
 #
+# The descriptors Spinel makes for a pipe, `IO.pipe`'s and `IO.popen`'s, are
+# nonblocking, as CRuby's are: a write takes what fits and waits for the rest
+# in the scheduler (`__write_once__`), where another thread can drain it and a
+# signal is handled. A child is given its standard streams blocking.
+#
 # ponytail: conversion between an external and an internal encoding
 # is done a whole read or a whole line at a time, by `String#encode`, unless
 # one of them is stateful or `reopen` left one, where the IO keeps a converter
@@ -2413,7 +2418,7 @@ end
   end
 
   # A read that waits for a nonblocking descriptor to have something, as
-  # CRuby does for the sockets it makes nonblocking.
+  # CRuby does for the pipes and sockets it makes nonblocking.
   def __read_wait__(want)
     loop do
       # A blocking descriptor would stop every thread: wait for it first.
@@ -4100,12 +4105,18 @@ end
   end
 
   # CRuby's `rb_io_syswrite` warns of a write buffer holding bytes, and
-  # writes past it.
+  # writes past it. One `write(2)`, of what fits: a nonblocking descriptor
+  # that is full is waited for, as CRuby's `rb_thread_io_blocking_call`
+  # waits, and then takes what it can. Measured.
   def syswrite(object)
     __write_side__
     text = String === object ? object : object.to_s
     warn("syswrite for buffered IO", uplevel: 1) unless @wbuf.nil? || @wbuf.empty?
-    IO.__check__(__fd_write__(__wfd__, text), @path)[0]
+    loop do
+      result = __fd_write__(__wfd__, text)
+      return IO.__check__(result, @path)[0] unless result == IO.__eagain__
+      IO.__wait__([[self, IO::WRITABLE]], @timeout) || raise(IO::TimeoutError, "Blocking operation timed out!")
+    end
   end
 
   def write_nonblock(object, exception: true)

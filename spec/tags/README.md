@@ -87,7 +87,10 @@ fix is a different slice. The reason says which slice, by number.
 
 ## What is here now
 
-A hundred and forty-seven tags across seventy-nine files. The write buffer
+A hundred and forty-six tags across seventy-eight files. Nonblocking pipes
+(#41, S4) removed one, and its file: `IO#nonblock?` true for a pipe, which
+it is now that Spinel makes both ends `O_NONBLOCK` as CRuby does.
+Before it, a hundred and forty-seven across seventy-nine. The write buffer
 (#41, S3) removed two, and their files: `IO#flush` raising `Errno::EPIPE` on
 a pipe whose reader has gone, which a write that went straight out met
 first, and `IO#syswrite` warning after a write the buffer holds.
