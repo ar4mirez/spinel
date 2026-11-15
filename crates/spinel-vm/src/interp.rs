@@ -26894,14 +26894,13 @@ fn sock_native(
                 });
             }
             let timeout = int_arg(call, 1).unwrap_or(-1) as libc::c_int;
-            // SAFETY: `fds` is `fds.len()` `pollfd`s, which `poll` reads and
-            // writes the `revents` of.
-            let ready = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout) };
-            if ready < 0 {
-                errno(std::io::Error::last_os_error())
-            } else {
-                let revents: Vec<Value> = fds.iter().map(|p| int(i64::from(p.revents))).collect();
-                new_array(scope, &revents)
+            match sock::poll(&mut fds, timeout) {
+                Err(error) => errno(error),
+                Ok(_) => {
+                    let revents: Vec<Value> =
+                        fds.iter().map(|p| int(i64::from(p.revents))).collect();
+                    new_array(scope, &revents)
+                }
             }
         }
         SockOp::PollConstants => {
