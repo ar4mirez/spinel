@@ -770,11 +770,10 @@ pub fn poll(fds: &mut [libc::pollfd], timeout: libc::c_int) -> io::Result<usize>
             }),
         }
     }
-    // SAFETY: `once` is `once.len()` `pollfd`s, read and written by `poll`.
-    let ready = unsafe { libc::poll(once.as_mut_ptr(), once.len() as libc::nfds_t, timeout) };
-    if ready < 0 {
-        return Err(io::Error::last_os_error());
-    }
+    #[cfg(target_os = "macos")]
+    select_distinct(&mut once, timeout)?;
+    #[cfg(not(target_os = "macos"))]
+    poll_plain(&mut once, timeout)?;
     let always = libc::POLLERR | libc::POLLHUP | libc::POLLNVAL;
     let mut answered = 0;
     for entry in fds.iter_mut() {
@@ -786,6 +785,78 @@ pub fn poll(fds: &mut [libc::pollfd], timeout: libc::c_int) -> io::Result<usize>
         answered += usize::from(entry.revents != 0);
     }
     Ok(answered)
+}
+
+/// `poll(2)` over `fds`, each descriptor in it once.
+fn poll_plain(fds: &mut [libc::pollfd], timeout: libc::c_int) -> io::Result<()> {
+    // SAFETY: `fds` is `fds.len()` `pollfd`s, read and written by `poll`.
+    let ready = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout) };
+    if ready < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// On macOS, `select(2)`, which CRuby waits with there: macOS's `poll`
+/// answers `POLLPRI` for any readable descriptor asked about it, as kqueue
+/// hands back the out-of-band flag the descriptor was registered with, so a
+/// pipe with bytes in it was ready in `IO.select`'s error set (#41).
+#[cfg(target_os = "macos")]
+fn select_distinct(fds: &mut [libc::pollfd], timeout: libc::c_int) -> io::Result<()> {
+    // ponytail: a descriptor at or past FD_SETSIZE is polled, and keeps
+    // poll's POLLPRI answer; the upgrade is a heap fd_set grown past
+    // FD_SETSIZE, as `_DARWIN_UNLIMITED_SELECT` allows.
+    if fds.iter().any(|p| p.fd >= libc::FD_SETSIZE as libc::c_int) {
+        return poll_plain(fds, timeout);
+    }
+    // SAFETY: an all-zero `fd_set` is an empty one.
+    let mut sets: [libc::fd_set; 3] = unsafe { zeroed() };
+    let asked = [libc::POLLIN, libc::POLLOUT, libc::POLLPRI];
+    let mut nfds = 0;
+    for p in fds.iter().filter(|p| p.fd >= 0) {
+        for (set, bit) in sets.iter_mut().zip(asked) {
+            if p.events & bit != 0 {
+                // SAFETY: `p.fd` is below FD_SETSIZE, checked above.
+                unsafe { libc::FD_SET(p.fd, set) };
+                nfds = nfds.max(p.fd + 1);
+            }
+        }
+    }
+    let mut wait = libc::timeval {
+        tv_sec: libc::time_t::from(timeout / 1000),
+        tv_usec: ((timeout % 1000) * 1000) as libc::suseconds_t,
+    };
+    let wait: *mut libc::timeval = if timeout < 0 {
+        std::ptr::null_mut()
+    } else {
+        &mut wait
+    };
+    let [reads, writes, errors] = &mut sets;
+    // SAFETY: three live `fd_set`s holding descriptors below `nfds`, and a
+    // live `timeval` or null for no timeout.
+    if unsafe { libc::select(nfds, reads, writes, errors, wait) } < 0 {
+        let error = io::Error::last_os_error();
+        // A descriptor closed under a waiter is `poll`'s POLLNVAL, which
+        // wakes the waiter; `select` only fails.
+        return if error.raw_os_error() == Some(libc::EBADF) {
+            poll_plain(fds, 0)
+        } else {
+            Err(error)
+        };
+    }
+    for p in fds.iter_mut() {
+        p.revents = 0;
+        if p.fd < 0 {
+            continue;
+        }
+        for (set, bit) in sets.iter().zip(asked) {
+            // SAFETY: `p.fd` is below FD_SETSIZE, checked above.
+            if p.events & bit != 0 && unsafe { libc::FD_ISSET(p.fd, set) } {
+                p.revents |= bit;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// `Socket::Constants`: CRuby's list, with each value this platform's.
