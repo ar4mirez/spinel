@@ -9,6 +9,15 @@ bytecode a tool reads.
 
 ### Added
 
+- **Nonblocking pipes**
+  ([#41](https://github.com/ar4mirez/spinel/issues/41)). The ends of
+  `IO.pipe` and `IO.popen` are `O_NONBLOCK`, as CRuby's are, so
+  `nonblock?` is true for them, and a write bigger than the pipe holds waits
+  for room without stopping the other threads: a thread reading the pipe
+  drains it, and a signal ends the wait. A child program is given blocking
+  standard streams, which leaves the parent's end of the same pipe blocking
+  afterwards, as under `ruby`.
+
 - **A write buffer for `IO`**
   ([#41](https://github.com/ar4mirez/spinel/issues/41)). An IO that is
   neither `sync` nor a terminal holds up to 8 KiB of what it writes, as

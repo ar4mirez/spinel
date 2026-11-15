@@ -23470,6 +23470,16 @@ fn spawn_process(
                     }
                 }
             }
+            // The program gets blocking standard streams, as CRuby's child
+            // does: a pipe Spinel made is nonblocking, and a program that
+            // never asked for that would see EAGAIN. The flag is the open
+            // file description's, so the parent's descriptors for these
+            // lose it too, for good, as CRuby's do. Measured on ruby 4.0.9:
+            // 0, 1 and 2 only, redirected or inherited; `fork` alone clears
+            // nothing.
+            for fd in 0..=2 {
+                set_nonblock(fd, false);
+            }
             if let Some(mask) = request.umask {
                 libc::umask(mask as libc::mode_t);
             }
@@ -24568,6 +24578,27 @@ fn set_cloexec(fd: libc::c_int) {
     }
 }
 
+/// `O_NONBLOCK` set or cleared on a descriptor's open file description,
+/// which every descriptor `dup`ed from it shares. Async-signal-safe: a
+/// forked child calls it.
+fn set_nonblock(fd: libc::c_int, on: bool) {
+    // SAFETY: integer `fcntl`s; a descriptor that is not open answers EBADF.
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFL);
+        if flags < 0 {
+            return;
+        }
+        let wanted = if on {
+            flags | libc::O_NONBLOCK
+        } else {
+            flags & !libc::O_NONBLOCK
+        };
+        if wanted != flags {
+            libc::fcntl(fd, libc::F_SETFL, wanted);
+        }
+    }
+}
+
 /// `fstat(2)` on a descriptor, as the `Metadata` `std` gives for a path.
 fn fd_metadata(fd: i64) -> std::io::Result<std::fs::Metadata> {
     use std::os::fd::{FromRawFd as _, IntoRawFd as _};
@@ -25127,12 +25158,24 @@ fn fs_native(
         }
         FsOp::Pipe => {
             let mut fds = [0 as libc::c_int; 2];
+            // Close-on-exec and nonblocking, as CRuby's `rb_cloexec_pipe`
+            // makes them: a full pipe answers EAGAIN, and the write waits
+            // for it in the scheduler, where another thread can drain it and
+            // a signal is handled. A child given an end as its standard
+            // input or output gets it blocking (`spawn_process`).
             // SAFETY: `fds` is room for the two descriptors `pipe` writes.
-            if unsafe { libc::pipe(fds.as_mut_ptr()) } < 0 {
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            let made = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) };
+            // SAFETY: as above.
+            #[cfg(not(any(target_os = "linux", target_os = "android")))]
+            let made = unsafe { libc::pipe(fds.as_mut_ptr()) };
+            if made < 0 {
                 errno_value(&std::io::Error::last_os_error())
             } else {
+                #[cfg(not(any(target_os = "linux", target_os = "android")))]
                 for fd in fds {
                     set_cloexec(fd);
+                    set_nonblock(fd, true);
                 }
                 let [r, w] = fds.map(|fd| Value::fixnum(i64::from(fd)).expect("a descriptor"));
                 new_array(scope, &[r, w])
