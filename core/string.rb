@@ -2208,10 +2208,20 @@ end
 # directive is `%`, flags (`-+ 0#`), a width, a precision (either may be `*`),
 # and a conversion; arguments are taken in order, by `%1$` position, or by
 # `%<name>` / `%{name}` from one Hash, and mixing the styles is refused.
-# Float digits come from `Float#__format__`. Every message is measured.
+# `%f`, `%e` and `%g` digits come from `Float#__format__`; `%a`'s are
+# written here, from the float's bits. Every message is measured.
 class String
+  # The argument list is what `to_ary` answers, as `rb_check_array_type`
+  # asks it, or else the argument alone.
   def %(args)
-    String.__format__(self, args.is_a?(Array) ? args : [args])
+    list = Array === args ? args : Kernel.__check_funcall__(args, :to_ary) { nil }
+    if list.nil?
+      list = [args]
+    elsif !(Array === list)
+      klass = Kernel.__class_of__(args)
+      raise TypeError, "can't convert #{klass} into Array (#{klass}#to_ary gives #{Kernel.__class_of__(list)})"
+    end
+    String.__format__(self, list)
   end
 
   class Formatter
@@ -2222,6 +2232,7 @@ class String
       @numbered = false
       @unnumbered = false
       @named = false
+      @binary = false
     end
 
     def run
@@ -2237,12 +2248,14 @@ class String
         end
         i = directive(chars, i + 1, out)
       end
-      # CRuby's check, under `-w` only: positional arguments left over, unless
-      # the one argument is the Hash a `%{name}` would have read.
+      # CRuby's check: positional arguments left over, unless the one
+      # argument is the Hash a `%{name}` would have read. A warning under
+      # `-w`, and an ArgumentError under `$DEBUG`, which Ruby 4.1 dropped.
       if !@numbered && !@named && @next < @args.size && !(@args.size == 1 && @args[0].is_a?(Hash))
+        raise ArgumentError, "too many arguments for format string" if $DEBUG
         __warning__("too many arguments for format string", true)
       end
-      out
+      @binary ? out.force_encoding(Encoding::BINARY) : out
     end
 
     def take(position = nil)
@@ -2269,13 +2282,18 @@ class String
       @args[0]
     end
 
-    def named(name)
+    # `brace` is `%{name}`'s spelling, which its KeyError names the key in:
+    # `key{name} not found`, where `%<name>` says `key<name>`. Measured.
+    def named(name, brace = false)
       hash = hash_argument
       key = name.to_sym
       unless hash.key?(key)
-        # A default or a default proc answers, through `[]`. Measured.
-        return hash[key] unless hash.default.nil? && hash.default_proc.nil?
-        raise KeyError.new("key<#{name}> not found", receiver: hash, key: key)
+        # A default or a default proc answers, through `[]`, and nil from
+        # either is no answer. Measured.
+        value = hash.default.nil? && hash.default_proc.nil? ? nil : hash[key]
+        return value unless value.nil?
+        shown = brace ? "{#{name}}" : "<#{name}>"
+        raise KeyError.new("key#{shown} not found", receiver: hash, key: key)
       end
       hash[key]
     end
@@ -2335,9 +2353,16 @@ class String
           precision_set = true
           i += 1
           if chars[i] == "*"
-            precision = Integer.__index__(take)
+            # The star may name its argument, `%.*2$d`, as the width's can.
+            number, after = digits(chars, i + 1)
+            if number && chars[after] == "$"
+              precision = Integer.__index__(take(number))
+              i = after + 1
+            else
+              precision = Integer.__index__(take)
+              i += 1
+            end
             precision = nil if precision < 0
-            i += 1
           else
             number, after = digits(chars, i)
             precision = number || 0
@@ -2353,7 +2378,7 @@ class String
         when "{"
           close = (i...chars.size).find { |j| chars[j] == "}" }
           raise ArgumentError, "malformed name - unmatched parenthesis" if close.nil?
-          text = named(chars[i + 1...close].join).to_s
+          text = named(chars[i + 1...close].join, true).to_s
           text = text[0, precision] if precision
           out << pad(text, width, flags, false)
           return close + 1
@@ -2393,8 +2418,7 @@ class String
       when "f", "e", "E", "g", "G", "a", "A"
         float(Kernel.__format_float__(value), conversion, flags, width, precision)
       when "c"
-        char = value.is_a?(Integer) ? value.chr(@format.encoding) : String.__coerce__(value)[0].to_s
-        pad(char, width, flags, false)
+        pad(char(value), width, flags, false)
       when "p"
         text = value.inspect
         text = text[0, precision] if precision
@@ -2404,6 +2428,69 @@ class String
         text = text[0, precision] if precision
         pad(text, width, flags, false)
       end
+    end
+
+    # `%c`'s character: a String's first, or the one an Integer codes in the
+    # format's encoding. As `sprintf.c` converts it: `to_str` first, through
+    # `rb_check_string_type`, then `NUM2INT`, so a `BasicObject` with either
+    # is asked, and nothing else is sent to it. The messages for a conversion
+    # that answers the wrong class are CRuby 4.1's, `into` where 4.0 said
+    # `to` (bugs.ruby-lang.org/issues/21864), as ruby/spec checks them on
+    # every engine but CRuby before 4.1.
+    def char(value)
+      string = String === value ? value : Kernel.__check_funcall__(value, :to_str) { nil }
+      unless string.nil?
+        unless String === string
+          klass = Kernel.__class_of__(value)
+          raise TypeError, "can't convert #{klass} into String (#{klass}#to_str gives #{Kernel.__class_of__(string)})"
+        end
+        return string[0].to_s
+      end
+      code = char_code(value)
+      raise ArgumentError, "invalid character" if code < 0
+      encoding = @format.encoding
+      if encoding == Encoding::UTF_8
+        # Any code point UTF-8 can spell, surrogates too. Measured.
+        raise ArgumentError, "invalid character" if code > 0x10FFFF
+        return [code].pack("U")
+      end
+      if encoding == Encoding::US_ASCII && code > 127 && code < 256
+        # The one byte, and the result becomes BINARY: CRuby's
+        # `rb_ascii8bit_appendable_encoding_index`. Measured.
+        @binary = true
+        return code.chr
+      end
+      code.chr(encoding)
+    end
+
+    # `NUM2INT`: an Integer, a Float truncated, or what `to_int` answers,
+    # which must fit in a C int.
+    def char_code(value)
+      code = if Integer === value
+               value
+             elsif Float === value
+               # `rb_num2long`'s range check, the float written `%-.10g`.
+               unless value > -9223372036854775809.0 && value < 9223372036854775808.0
+                 raise RangeError, "float #{String.__format__('%-.10g', [value])} out of range of integer"
+               end
+               value.to_i
+             else
+               klass = Kernel.__class_of__(value)
+               shown = nil.equal?(value) || true.equal?(value) || false.equal?(value) ? value.inspect : klass.to_s
+               converted = Kernel.__check_funcall__(value, :to_int) do
+                 raise TypeError, "no implicit conversion of #{shown} into Integer"
+               end
+               unless Integer === converted
+                 raise TypeError, "can't convert #{klass} into Integer (#{klass}#to_int gives #{Kernel.__class_of__(converted)})"
+               end
+               converted
+             end
+      if code > 9223372036854775807 || code < -9223372036854775808
+        raise RangeError, "bignum too big to convert into 'long'"
+      end
+      raise RangeError, "integer #{code} too big to convert to 'int'" if code > 2147483647
+      raise RangeError, "integer #{code} too small to convert to 'int'" if code < -2147483648
+      code
     end
 
     def pad(text, width, flags, numeric)
@@ -2467,10 +2554,66 @@ class String
         sign = negative ? "-" : (flags.include?("+") ? "+" : (flags.include?(" ") ? " " : ""))
         return pad(sign + (f.nan? ? "NaN" : "Inf"), width, flags - ["0"], true)
       end
-      digits = f.__format__(conversion.ord, precision || 6, flags.include?("#"))
+      digits = if conversion == "a" || conversion == "A"
+                 hex_float(f, conversion == "A", precision, flags.include?("#"))
+               else
+                 f.__format__(conversion.ord, precision || 6, flags.include?("#"))
+               end
       negative = f < 0 || (f == 0.0 && f.to_s.start_with?("-"))
       sign = negative ? "-" : (flags.include?("+") ? "+" : (flags.include?(" ") ? " " : ""))
       pad(sign + digits, width, flags, true)
+    end
+
+    # `%a`: a finite float's magnitude in hexadecimal, `0x1.8p+1`, as CRuby
+    # writes it with its copy of BSD's `hdtoa`. A subnormal is normalized, so
+    # the leading digit is 1 for any float but zero. Without a precision the
+    # fraction is every digit up to the last nonzero one; with one it is
+    # rounded half to even to that many digits, and a carry moves the
+    # exponent. `hdtoa` rounds by adding 1.0 in float arithmetic, which at
+    # precision 13 keeps 51 of the fraction's 52 bits, not 52:
+    # `"%.13a" % (1.0 / 3)` is `0x1.5555555555554p-2`. That is kept. From
+    # precision 14 on nothing is rounded and zeros are added. Measured.
+    def hex_float(f, upper, precision, alternate)
+      bits = f.__bits__(64) & 0x7fff_ffff_ffff_ffff
+      if bits == 0
+        fraction = ""
+        lead = "0"
+        exponent = 0
+      else
+        biased = bits >> 52
+        mantissa = bits & 0xf_ffff_ffff_ffff
+        if biased == 0
+          shift = 53 - mantissa.bit_length
+          mantissa <<= shift
+          exponent = -1022 - shift
+        else
+          mantissa |= 1 << 52
+          exponent = biased - 1023
+        end
+        lead = "1"
+        if precision && precision < 14
+          kept = precision == 13 ? 51 : 4 * precision
+          drop = 52 - kept
+          if drop > 0
+            quotient = mantissa >> drop
+            rest = mantissa & ((1 << drop) - 1)
+            half = 1 << (drop - 1)
+            quotient += 1 if rest > half || (rest == half && quotient.odd?)
+            if quotient >> (kept + 1) == 1
+              quotient >>= 1
+              exponent += 1
+            end
+            mantissa = quotient << drop
+          end
+        end
+        fraction = (mantissa & 0xf_ffff_ffff_ffff).to_s(16).rjust(13, "0")
+        fraction = precision ? fraction[0, precision] : fraction.sub(/0+\z/, "")
+      end
+      fraction = fraction.ljust(precision, "0") if precision
+      text = "0x" + lead
+      text << "." if alternate || !fraction.empty?
+      text << fraction << "p" << (exponent < 0 ? "-" : "+") << exponent.abs.to_s
+      upper ? text.upcase : text
     end
   end
 
@@ -2490,18 +2633,11 @@ module Kernel
 
   module_function :format, :sprintf
 
-  # `%d`'s argument: an Integer, a Float truncated, or a String read as
-  # `Integer()` reads one; nil is CRuby's TypeError.
+  # `%d`'s argument, as `sprintf.c` reads it: a String strictly, with
+  # `rb_str_to_inum`'s check, so `"5x"` is an ArgumentError, and anything
+  # else through `rb_Integer`. Both are `Kernel#Integer` without a base.
   def self.__format_integer__(value)
-    case value
-    when Integer then value
-    when Float then __float_to_i__(value)
-    when String then value.__parse_integer__(0, false)
-    when nil then raise TypeError, "can't convert nil into Integer"
-    else
-      raise TypeError, "can't convert #{value.class} into Integer" unless value.respond_to?(:to_int) || value.respond_to?(:to_i)
-      value.respond_to?(:to_int) ? value.to_int : value.to_i
-    end
+    __integer__(value, nil)
   end
 
   # Truncation toward zero, as `%d` reads a Float: the digits at a precision

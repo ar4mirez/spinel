@@ -87,7 +87,13 @@ fix is a different slice. The reason says which slice, by number.
 
 ## What is here now
 
-A hundred and twenty-four tags across sixty-six files. They are read on
+A hundred and fourteen tags across sixty-five files. The `format` engine's
+`%a`, `%A` and `%c` (#798) removed ten, and their file: all of
+`core/string/modulo`'s, the `String#%` examples tagged under #19, which
+pass now that `String#%` asks `to_ary` as `rb_check_array_type` does, `%d`
+reads a String as `Integer()` does, `"5x"` an ArgumentError, and an
+argument left over is an ArgumentError under `$DEBUG`, as in Ruby 4.0.
+Before it, a hundred and twenty-four across sixty-six. They are read on
 macOS too, where CI runs `core/{io,file,dir,filetest}` (#41, S10), and
 that run added none: an example that disagrees with Ruby there is fixed
 for that platform, as it would be for this one. In-place editing
