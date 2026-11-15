@@ -186,8 +186,23 @@ pub fn link(home: &Path, store_gems: &Path, gems: &[(GemId, PathBuf)]) -> Result
         fs::create_dir_all(&dir).map_err(|e| Error::Io(dir.clone(), e))?;
         sweep(&dir);
     }
+    // A later gem's executable replaces an earlier one's, so only its stub
+    // is written.
+    let mut stub_owner: HashMap<&str, (&str, &str)> = HashMap::new();
+    for plan in &plans {
+        for (exe, text) in &plan.stubs {
+            if let Some((other, _)) =
+                stub_owner.insert(exe.as_str(), (plan.full_name.as_str(), text.as_str()))
+                && other != plan.full_name
+            {
+                report.warnings.push(format!(
+                    "bin/{exe}: {} and {other} both have it; {} wins",
+                    plan.full_name, plan.full_name
+                ));
+            }
+        }
+    }
     let mut wanted: HashSet<String> = HashSet::new();
-    let mut stub_owner: HashMap<String, String> = HashMap::new();
     for plan in &plans {
         let mut changed = false;
         let link = home.join("gems").join(&plan.full_name);
@@ -197,15 +212,9 @@ pub fn link(home: &Path, store_gems: &Path, gems: &[(GemId, PathBuf)]) -> Result
             .join(format!("{}.gemspec", plan.full_name));
         changed |= place_file(&gemspec, plan.gemspec.as_bytes(), None)?;
         for (exe, text) in &plan.stubs {
-            if let Some(other) = stub_owner.insert(exe.clone(), plan.full_name.clone())
-                && other != plan.full_name
-            {
-                report.warnings.push(format!(
-                    "bin/{exe}: {} and {other} both have it; {} wins",
-                    plan.full_name, plan.full_name
-                ));
+            if stub_owner[exe.as_str()].0 == plan.full_name {
+                changed |= place_file(&home.join("bin").join(exe), text.as_bytes(), Some(0o755))?;
             }
-            changed |= place_file(&home.join("bin").join(exe), text.as_bytes(), Some(0o755))?;
         }
         wanted.insert(plan.full_name.clone());
         let outcome = if changed {
@@ -215,9 +224,9 @@ pub fn link(home: &Path, store_gems: &Path, gems: &[(GemId, PathBuf)]) -> Result
         };
         report.linked.push((plan.full_name.clone(), outcome));
     }
-    let stubs: HashMap<&str, &str> = plans
-        .iter()
-        .flat_map(|p| p.stubs.iter().map(|(e, t)| (e.as_str(), t.as_str())))
+    let stubs: HashMap<&str, &str> = stub_owner
+        .into_iter()
+        .map(|(exe, (_, text))| (exe, text))
         .collect();
     report.removed = prune(home, store_gems, &wanted, &stubs)?;
     Ok(report)

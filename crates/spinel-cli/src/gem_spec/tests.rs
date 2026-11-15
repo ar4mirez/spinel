@@ -157,6 +157,40 @@ fn what_rubygems_refuses_is_refused() {
 }
 
 #[test]
+fn an_alias_bomb_is_refused_not_expanded() {
+    let mut bomb = String::from("bomb0: &l0 [x, x, x, x, x, x, x, x, x, x]\n");
+    for level in 1..10 {
+        let prev = format!("*l{}", level - 1);
+        let items = [prev.as_str(); 10].join(", ");
+        bomb.push_str(&format!("bomb{level}: &l{level} [{items}]\n"));
+    }
+    let err = with(&bomb).unwrap_err();
+    assert!(err.contains("values"), "{err}");
+    let shared = with("files: &f [a, b]\ntest_files: *f\n").unwrap();
+    assert_eq!(shared.verify(), Ok(()));
+}
+
+#[test]
+fn deep_nesting_is_refused_not_recursed_on() {
+    let flow = format!(
+        "files: {}{}\n",
+        "[".repeat(1_000_000),
+        "]".repeat(1_000_000)
+    );
+    assert!(with(&flow).is_err());
+    let deep = format!(
+        "files:\n{}{}{}\n",
+        "- ".repeat(10),
+        "[".repeat(250),
+        "]".repeat(250)
+    );
+    let err = with(&deep).unwrap_err();
+    assert!(err.contains("nests deeper"), "{err}");
+    let nested = format!("metadata_x: {}{}\n", "[".repeat(100), "]".repeat(100));
+    assert!(with(&nested).is_ok());
+}
+
+#[test]
 fn civil_dates() {
     assert_eq!(civil(0), (1970, 1, 1));
     assert_eq!(civil(19_675), (2023, 11, 14));
@@ -178,7 +212,10 @@ fn what_gem_install_verifies_is_verified() {
     assert_eq!(with("").unwrap().verify(), Ok(()));
     // `from_yaml` gives a spec with none -1, which `verify_spec` refuses.
     let none = from_yaml(b"--- !ruby/object:Gem::Specification\nname: x\n").unwrap();
-    assert_eq!(none.verify(), Err("an invalid specification_version".to_owned()));
+    assert_eq!(
+        none.verify(),
+        Err("an invalid specification_version".to_owned())
+    );
     let refused = [
         ("name", "name: \"a b\"\n"),
         ("require_paths", "require_paths:\n- \"lib\\nsystem('x')\"\n"),

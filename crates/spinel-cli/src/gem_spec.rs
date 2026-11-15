@@ -27,7 +27,7 @@
 
 use std::fmt::Write as _;
 
-use yaml_rust2::parser::{Event, EventReceiver, Parser, Tag};
+use yaml_rust2::parser::{Event, Parser, Tag};
 use yaml_rust2::scanner::TScalarStyle;
 
 use crate::gem_platform::Platform;
@@ -1138,25 +1138,45 @@ fn civil(days: i64) -> (i64, u32, u32) {
 // The YAML, read as Psych reads it
 // ---------------------------------------------------------------------------
 
-#[derive(Default)]
-struct Events(Vec<Event>);
-
-impl EventReceiver for Events {
-    fn on_event(&mut self, ev: Event) {
-        self.0.push(ev);
+/// The first document's events, read one at a time rather than with
+/// `Parser::load`, which recurses once per nesting level.
+fn first_document(text: &str) -> Result<Vec<Event>, String> {
+    let mut parser = Parser::new_from_str(text);
+    let mut events = Vec::new();
+    let mut depth = 0usize;
+    loop {
+        let (ev, _) = parser
+            .next_token()
+            .map_err(|e| format!("the gemspec's YAML does not parse: {e}"))?;
+        match ev {
+            Event::SequenceStart(..) | Event::MappingStart(..) => {
+                depth += 1;
+                if depth > DEPTH_LIMIT {
+                    return Err(format!(
+                        "the gemspec's YAML nests deeper than {DEPTH_LIMIT}"
+                    ));
+                }
+            }
+            Event::SequenceEnd | Event::MappingEnd => depth -= 1,
+            _ => {}
+        }
+        let end = matches!(ev, Event::DocumentEnd | Event::StreamEnd);
+        events.push(ev);
+        if end {
+            return Ok(events);
+        }
     }
 }
 
 /// The first document, as Psych's `ToRuby` builds it.
 fn load(text: &str) -> Result<Value, String> {
-    let mut events = Events::default();
-    Parser::new_from_str(text)
-        .load(&mut events, false)
-        .map_err(|e| format!("the gemspec's YAML does not parse: {e}"))?;
+    let events = first_document(text)?;
     let mut builder = Builder {
-        events: events.0,
+        events,
         at: 0,
         anchors: Vec::new(),
+        built: 0,
+        values: 0,
     };
     while let Some(ev) = builder.events.get(builder.at) {
         match ev {
@@ -1170,10 +1190,24 @@ fn load(text: &str) -> Result<Value, String> {
     Err("the gemspec's YAML is empty".to_owned())
 }
 
+// ponytail: an alias is a deep copy, so the values built (aliases expanded,
+// and the copy each anchor keeps) are capped at VALUE_LIMIT, and the nesting,
+// which the builder recurses on, at DEPTH_LIMIT. A gemspec past either is
+// refused where Psych, which shares one object per alias, loads it. Upgrade
+// path: hold values behind `Rc` so an alias costs one value, and build from an
+// explicit stack instead of recursing.
+const VALUE_LIMIT: usize = 4_000_000;
+const DEPTH_LIMIT: usize = 256;
+
 struct Builder {
     events: Vec<Event>,
     at: usize,
-    anchors: Vec<(usize, Value)>,
+    /// Each anchor's value and how many values it counts for.
+    anchors: Vec<(usize, Value, usize)>,
+    /// Values built, aliases expanded.
+    built: usize,
+    /// Those and the values in each anchor's copy, which VALUE_LIMIT caps.
+    values: usize,
 }
 
 /// A tag as Psych sees it: `!foo` stays `!foo`; `!!foo` is
@@ -1215,24 +1249,45 @@ impl Builder {
         Ok(ev)
     }
 
-    fn anchor(&mut self, id: usize, value: &Value) {
-        if id > 0 {
-            self.anchors.push((id, value.clone()));
+    fn count(&mut self, values: usize) -> Result<(), String> {
+        self.values = self.values.saturating_add(values);
+        if self.values > VALUE_LIMIT {
+            return Err(format!(
+                "the gemspec's YAML builds more than {VALUE_LIMIT} values"
+            ));
         }
+        Ok(())
+    }
+
+    /// Keeps a copy of an anchored value, which counts as values too.
+    fn anchor(&mut self, id: usize, value: &Value, from: usize) -> Result<(), String> {
+        if id > 0 {
+            let values = self.built - from;
+            self.count(values)?;
+            self.anchors.push((id, value.clone(), values));
+        }
+        Ok(())
     }
 
     fn node(&mut self) -> Result<Value, String> {
+        let from = self.built;
+        self.built += 1;
+        self.count(1)?;
         match self.next()? {
-            Event::Alias(id) => self
-                .anchors
-                .iter()
-                .rev()
-                .find(|(a, _)| *a == id)
-                .map(|(_, v)| v.clone())
-                .ok_or_else(|| "the gemspec's YAML has an unknown alias".to_owned()),
+            Event::Alias(id) => {
+                let at = self
+                    .anchors
+                    .iter()
+                    .rposition(|(a, _, _)| *a == id)
+                    .ok_or_else(|| "the gemspec's YAML has an unknown alias".to_owned())?;
+                let values = self.anchors[at].2 - 1;
+                self.built += values;
+                self.count(values)?;
+                Ok(self.anchors[at].1.clone())
+            }
             Event::Scalar(text, style, anchor, tag) => {
                 let value = scalar(&text, style, tag.as_ref())?;
-                self.anchor(anchor, &value);
+                self.anchor(anchor, &value, from)?;
                 Ok(value)
             }
             Event::SequenceStart(anchor, _tag) => {
@@ -1245,7 +1300,7 @@ impl Builder {
                     items.push(self.node()?);
                 }
                 let value = Value::Seq(items);
-                self.anchor(anchor, &value);
+                self.anchor(anchor, &value, from)?;
                 Ok(value)
             }
             Event::MappingStart(anchor, tag) => {
@@ -1264,7 +1319,7 @@ impl Builder {
                     entries.push((key, value));
                 }
                 let value = Value::Map { class, entries };
-                self.anchor(anchor, &value);
+                self.anchor(anchor, &value, from)?;
                 Ok(value)
             }
             other => Err(format!("unexpected YAML event {other:?}")),
