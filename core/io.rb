@@ -4327,6 +4327,7 @@ end
       IO.__check__(__fd_dup2__(fd, @fileno), path)
       __fd_close__(fd)
     end
+    @__read_kind_fd__ = @__write_kind_fd__ = nil
     @path = path.dup
     __arm__
     self
@@ -4382,6 +4383,7 @@ end
         IO.__check__(__fd_seek__(@fileno, position, IO::SEEK_SET))
       end
     end
+    @__read_kind_fd__ = @__write_kind_fd__ = nil
     __keep_readconv__
     # CRuby's `io_reopen` gives the IO the other's class where theirs differ,
     # and never a singleton, so `reopen(file)` makes a pipe a `File`, a `File`
