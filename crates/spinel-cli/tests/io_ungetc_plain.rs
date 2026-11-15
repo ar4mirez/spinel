@@ -15,7 +15,8 @@ const UTF8_LOCALE: &str = "en_US.UTF-8";
 
 #[test]
 fn pushed_back_bytes_read_as_cruby_reads_them() {
-    let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/io/ungetc_plain.rb");
+    let script =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/io/ungetc_plain.rb");
     let dir = std::env::temp_dir().join(format!("spinel-io-ungetc-plain-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("a scratch directory");
     let output = Command::new(SPINEL)
