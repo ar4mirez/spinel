@@ -76,12 +76,22 @@ fn checksums_yaml_is_read_as_rubygems_writes_it() {
     );
 }
 
-/// A data.tar.gz-shaped tar (uncompressed) of symlinks and files.
+/// A data.tar.gz-shaped tar (uncompressed) of symlinks, files, and
+/// directories (a name ending in `/`).
 fn tar_of(entries: &[(&str, Option<&str>)]) -> Vec<u8> {
     let mut builder = tar::Builder::new(Vec::new());
     for (name, link) in entries {
         let mut header = tar::Header::new_gnu();
         header.set_mode(0o644);
+        if name.ends_with('/') {
+            header.set_mode(0o755);
+            header.set_entry_type(tar::EntryType::Directory);
+            header.set_size(0);
+            header.set_path(name).unwrap();
+            header.set_cksum();
+            builder.append(&header, &[][..]).unwrap();
+            continue;
+        }
         match link {
             Some(target) => {
                 header.set_entry_type(tar::EntryType::Symlink);
@@ -128,6 +138,53 @@ fn a_symlink_inside_by_its_spelling_but_outside_through_another_is_refused() {
     let dir = scratch("inside");
     let data = tar_of(&[("a/b/c/up", Some("../.."))]);
     assert!(extract("ok-1.0", &data[..], &dir.join("gem")).is_ok());
+}
+
+#[test]
+fn a_symlink_may_not_replace_a_directory_another_symlink_leads_through() {
+    let dir = scratch("redirect");
+    fs::create_dir_all(dir.join("n")).unwrap();
+    fs::write(dir.join("n/victim"), "kept\n").unwrap();
+    let data = tar_of(&[
+        ("p/q/", None),
+        ("n/", None),
+        ("x/", None),
+        ("k/l", Some("../p/q/../../n")),
+        ("p/q", Some("../x")),
+        ("k/l/victim", Some("y")),
+    ]);
+    let err = extract("evil-1.0", &data[..], &dir.join("gem")).unwrap_err();
+    assert!(
+        matches!(&err, Error::Symlink { entry, .. } if entry == "p/q"),
+        "{err}"
+    );
+    assert!(dir.join("gem/p/q").is_dir());
+    let victim = fs::symlink_metadata(dir.join("n/victim")).unwrap();
+    assert!(victim.is_file());
+    assert_eq!(fs::read_to_string(dir.join("n/victim")).unwrap(), "kept\n");
+    let mut outside: Vec<_> = fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    outside.sort();
+    assert_eq!(outside, ["gem", "n"]);
+    assert_eq!(fs::read_dir(dir.join("n")).unwrap().count(), 1);
+}
+
+#[test]
+fn a_symlink_may_not_replace_an_earlier_symlink() {
+    let dir = scratch("twice");
+    let data = tar_of(&[
+        ("lib/a.rb", None),
+        ("lib/b.rb", None),
+        ("lib/link.rb", Some("a.rb")),
+        ("lib/link.rb", Some("b.rb")),
+    ]);
+    let err = extract("twice-1.0", &data[..], &dir.join("gem")).unwrap_err();
+    assert!(
+        matches!(&err, Error::Symlink { entry, target, .. } if entry == "lib/link.rb" && target == "b.rb"),
+        "{err}"
+    );
 }
 
 #[test]

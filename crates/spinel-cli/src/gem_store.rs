@@ -635,6 +635,9 @@ fn joined(dest: &Path, parts: &[Vec<u8>]) -> PathBuf {
 /// exists, as well as by its spelling: `a/b/c/up -> ../..` is inside by
 /// both, but `a/b/c/up/x -> ../../..` is inside by its spelling and outside
 /// through `up`, which RubyGems' check of the spelling alone lets through.
+/// A symlink may not replace an existing directory or symlink, its directory
+/// must physically be inside `dest`, and every symlink is checked again once
+/// all are made, so a later entry cannot redirect one checked earlier.
 fn extract(gem: &str, data: impl Read, dest: &Path) -> Result<Vec<String>, Error> {
     let format = |e: io::Error| Error::Format {
         gem: gem.to_owned(),
@@ -695,23 +698,32 @@ fn extract(gem: &str, data: impl Read, dest: &Path) -> Result<Vec<String>, Error
         }
     }
     let root = fs::canonicalize(dest).map_err(io_error(dest))?;
+    let inside = |real: &Path| real != root && real.starts_with(&root);
     let mut warnings = Vec::new();
+    let mut made = Vec::new();
     for (name, path, target) in symlinks {
-        // Every symlink made so far leads inside `dest`, and an entry's name
-        // has no `..` left in it, so this path does too.
+        let escape = || Error::Symlink {
+            gem: gem.to_owned(),
+            entry: name.clone(),
+            target: String::from_utf8_lossy(&target).into_owned(),
+        };
         let parent = path.parent().expect("an entry is inside dest");
         fs::create_dir_all(parent).map_err(io_error(parent))?;
-        remove(&path);
+        match fs::canonicalize(parent) {
+            Ok(real) if real == root || inside(&real) => {}
+            _ => return Err(escape()),
+        }
+        match fs::symlink_metadata(&path) {
+            Ok(meta) if meta.is_dir() || meta.is_symlink() => return Err(escape()),
+            Ok(_) => remove(&path),
+            Err(_) => {}
+        }
         std::os::unix::fs::symlink(OsStr::from_bytes(&target), &path).map_err(io_error(&path))?;
         match fs::canonicalize(&path) {
-            Ok(real) if real != root && real.starts_with(&root) => {}
+            Ok(real) if inside(&real) => made.push((name, path, target)),
             Ok(_) => {
                 remove(&path);
-                return Err(Error::Symlink {
-                    gem: gem.to_owned(),
-                    entry: name,
-                    target: String::from_utf8_lossy(&target).into_owned(),
-                });
+                return Err(escape());
             }
             Err(_) => {
                 remove(&path);
@@ -720,6 +732,15 @@ fn extract(gem: &str, data: impl Read, dest: &Path) -> Result<Vec<String>, Error
                     String::from_utf8_lossy(&target)
                 ));
             }
+        }
+    }
+    for (name, path, target) in made {
+        if !fs::canonicalize(&path).is_ok_and(|real| inside(&real)) {
+            return Err(Error::Symlink {
+                gem: gem.to_owned(),
+                entry: name,
+                target: String::from_utf8_lossy(&target).into_owned(),
+            });
         }
     }
     Ok(warnings)
