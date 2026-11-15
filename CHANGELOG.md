@@ -9,6 +9,16 @@ bytecode a tool reads.
 
 ### Added
 
+- **The compact index client**
+  ([#77](https://github.com/ar4mirez/spinel/issues/77)). The first piece of
+  `spinel install`: rubygems.org's `/versions`, `/names` and `/info/<gem>`,
+  cached under `~/.spinel/index/<host>/` (`$SPINEL_HOME/index/` when set)
+  and kept current as Bundler keeps its copy — a `Range` request for what was
+  appended, checked against the server's SHA-256 before it is kept, a full
+  refetch when it does not match, and no `/info` request for a gem whose
+  cached file is current. At most 32 requests are in flight. The hidden
+  `spinel index [--source URL] [--names] [gem...]` runs it.
+
 - **The single-byte code pages**
   ([#41](https://github.com/ar4mirez/spinel/issues/41)). `encode`,
   `Encoding::Converter` and an IO's encodings convert to and from

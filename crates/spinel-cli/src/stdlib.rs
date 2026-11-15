@@ -17,20 +17,11 @@ use std::path::{Path, PathBuf};
 const ARCHIVE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/stdlib.zst"));
 const DIGEST: &str = include_str!(concat!(env!("OUT_DIR"), "/stdlib.digest"));
 
-/// Where Spinel keeps what it writes for the user.
-fn spinel_home() -> Option<PathBuf> {
-    if let Some(home) = std::env::var_os("SPINEL_HOME").filter(|h| !h.is_empty()) {
-        return Some(PathBuf::from(home));
-    }
-    let home = std::env::var_os("HOME").filter(|h| !h.is_empty())?;
-    Some(PathBuf::from(home).join(".spinel"))
-}
-
 /// The extracted standard library, extracting it first if no copy is there.
 /// None when it can be neither found nor written; a program that requires
 /// none of it runs as before.
 pub fn directory() -> Option<PathBuf> {
-    let root = spinel_home()?.join("stdlib");
+    let root = crate::home::spinel_home()?.join("stdlib");
     let target = root.join(format!("{}-{DIGEST}", env!("CARGO_PKG_VERSION")));
     if target.is_dir() {
         return Some(target);
