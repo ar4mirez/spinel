@@ -9,6 +9,16 @@ bytecode a tool reads.
 
 ### Added
 
+- **Blocking calls that let the other threads run, and end when asked**
+  ([#41](https://github.com/ar4mirez/spinel/issues/41)). `File#flock`,
+  `fsync`, `fdatasync`, opening a FIFO, and reading or writing a blocking
+  pipe or terminal Spinel did not make leave the other threads running while
+  they wait, and `Thread#kill`, `Thread#raise`, a signal, closing the IO in
+  another thread (`IOError: stream closed in another thread`) and the
+  program's end cut the wait short, as under `ruby`. A program writing to a
+  full standard output pipe ends on SIGTERM, and Ctrl-C ends a `flock` wait.
+  SIGVTALRM is Spinel's own, as it is Ruby's.
+
 - **Nonblocking pipes**
   ([#41](https://github.com/ar4mirez/spinel/issues/41)). The ends of
   `IO.pipe` and `IO.popen` are `O_NONBLOCK`, as CRuby's are, so

@@ -133,10 +133,13 @@ pub fn die_by(name: &str) -> bool {
 /// does when a program starts: HUP, INT, QUIT, ALRM, TERM, USR1 and USR2
 /// raise a `SignalException` in the main thread — an `Interrupt` for INT —
 /// which ends the program by that signal unless something rescues it. One a
-/// parent left ignored (`nohup`'s HUP) stays ignored. For `spinel` to call
-/// before a program, not for every heap: a test's heaps share a process.
+/// parent left ignored (`nohup`'s HUP) stays ignored. VTALRM, which Ruby
+/// reserves, gets the unblocking function's handler, as CRuby's
+/// `Init_native_thread` gives it one. For `spinel` to call before a program,
+/// not for every heap: a test's heaps share a process.
 pub fn install_ruby_defaults() {
     use crate::shared::signals::{Disposition, inherited_ignored, install};
+    crate::shared::signals::install_unblock();
     for signo in [
         libc::SIGHUP,
         libc::SIGINT,

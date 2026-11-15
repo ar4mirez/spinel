@@ -1331,8 +1331,11 @@ pub enum ThreadOp {
     /// `__thread_pass__`: let another thread run first.
     Pass,
     /// `__thread_outside__(index)`: whether it is in a call that blocks in
-    /// the kernel, made outside the lock.
+    /// the kernel, made outside the lock, that nothing can end early.
     Outside,
+    /// `__thread_check__`: meet the running thread's first kill or raise
+    /// waiting, now; nil.
+    Check,
     /// `__thread_native_id__(index)`: the id of the OS thread it runs on, or
     /// nil once it is dead.
     NativeId,
