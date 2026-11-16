@@ -245,7 +245,12 @@ fn plain_installs_rake_and_run_requires_it() {
             server.url
         )
     );
-    assert!(section(&lock, "PLATFORMS").starts_with("PLATFORMS\n  ruby\n"));
+    // `ruby` and the local platform, sorted as Bundler sorts them: on
+    // macOS `arm64-darwin-*` comes before `ruby`, on Linux after it.
+    let platforms = section(&lock, "PLATFORMS");
+    let platforms: Vec<&str> = platforms.lines().skip(1).collect();
+    assert!(platforms.contains(&"  ruby"), "{platforms:?}");
+    assert!(platforms.is_sorted(), "{platforms:?}");
     assert_eq!(section(&lock, "DEPENDENCIES"), "DEPENDENCIES\n  rake\n");
     assert_eq!(
         section(&lock, "CHECKSUMS"),
