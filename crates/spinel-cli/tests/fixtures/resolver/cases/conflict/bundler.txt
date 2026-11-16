@@ -1,0 +1,7 @@
+Could not find compatible versions
+
+Because sinatra >= 4.0.0 depends on rack >= 3.0.0, < 4
+  and Gemfile depends on sinatra ~> 4.0,
+  rack >= 3.0.0, < 4 is required.
+So, because Gemfile depends on rack ~> 2.2,
+  version solving has failed.

@@ -240,13 +240,6 @@ impl Version {
     }
 
     /// `version` / `to_s`.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the resolver's API; only tests read it until the resolver lands"
-        )
-    )]
     pub fn as_str(&self) -> &str {
         &self.version
     }
@@ -254,10 +247,7 @@ impl Version {
     /// `segments`.
     #[cfg_attr(
         not(test),
-        expect(
-            dead_code,
-            reason = "the resolver's API; only tests read it until the resolver lands"
-        )
+        expect(dead_code, reason = "`Gem::Version`'s API; only tests read it so far")
     )]
     pub fn segments(&self) -> &[Segment] {
         &self.segments
@@ -266,10 +256,7 @@ impl Version {
     /// `canonical_segments`: what `<=>` and `hash` see.
     #[cfg_attr(
         not(test),
-        expect(
-            dead_code,
-            reason = "the resolver's API; only tests read it until the resolver lands"
-        )
+        expect(dead_code, reason = "`Gem::Version`'s API; only tests read it so far")
     )]
     pub fn canonical_segments(&self) -> &[Segment] {
         &self.canonical
@@ -281,13 +268,6 @@ impl Version {
     }
 
     /// `eql?`: the same version string, which `1.0` and `1` are not.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the resolver's API; only tests read it until the resolver lands"
-        )
-    )]
     pub fn eql(&self, other: &Version) -> bool {
         self.version == other.version
     }
@@ -350,13 +330,6 @@ fn succ(digits: &str) -> String {
 /// including `2.0`; `~> 1.4.4` allows `1.4.4` up to but not including `1.5`;
 /// `~> 1` allows `1.0` up to but not including `2`. A prerelease of the bump
 /// (`2.0.a` for `~> 1.0`) is outside, because its release is the bump.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the resolver's API; only tests read it until the resolver lands"
-    )
-)]
 pub fn pessimistic_satisfied_by(requirement: &Version, version: &Version) -> bool {
     version >= requirement && version.release() < requirement.bump()
 }

@@ -1,0 +1,10 @@
+Could not find compatible versions
+
+Because sinatra >= 2.1.0, < 3.0.0 depends on rack ~> 2.2
+  and sinatra >= 2.0.0.beta1, < 2.1.0 depends on rack ~> 2.0,
+  sinatra >= 2.0.0, < 3.0.0 requires rack >= 2.0, < 3.A.
+And because rackup >= 2.0.0 depends on rack >= 3,
+  rackup >= 2.0.0 is incompatible with sinatra >= 2.0.0, < 3.0.0.
+So, because Gemfile depends on sinatra ~> 2.0
+  and Gemfile depends on rackup >= 2,
+  version solving has failed.
