@@ -393,3 +393,118 @@ fn explains_a_conflict() {
          version solving has failed."
     );
 }
+
+/// What `resolve_locked` chose, by `full_name`.
+fn resolved_locked(request: &Request, index: &Index, locked: &Locked) -> Vec<String> {
+    let mut names: Vec<String> = resolve_locked(request, index, locked)
+        .unwrap_or_else(|e| panic!("{e}"))
+        .iter()
+        .map(Spec::full_name)
+        .collect();
+    names.sort();
+    names
+}
+
+/// A lockfile's builds of one gem, as `crate::locked` hands them over.
+fn locked_of(index: &Index, name: &str, version: &str) -> Locked {
+    let base: Vec<Spec> = index[name]
+        .iter()
+        .filter(|s| s.version.as_str() == version)
+        .cloned()
+        .collect();
+    Locked {
+        versions: [(name.to_owned(), v(version))].into_iter().collect(),
+        requirements: [(name.to_owned(), req(&[&format!(">= {version}")]))]
+            .into_iter()
+            .collect(),
+        locked_specs: base.clone(),
+        base,
+        ..Locked::default()
+    }
+}
+
+#[test]
+fn a_locked_prerelease_lets_the_gems_prereleases_in() {
+    let index = index(&[("g", "1.0\n2.0.pre\n")]);
+    let request = request(vec![dep("g", &[])], &["x86_64-linux"], "4.0.0");
+    assert_eq!(resolved(&request, &index), ["g (1.0)"]);
+    let locked = locked_of(&index, "g", "2.0.pre");
+    assert_eq!(resolved_locked(&request, &index, &locked), ["g-2.0.pre"]);
+}
+
+#[test]
+fn the_locked_version_is_tried_first_and_its_floor_gives_way_in_a_conflict() {
+    let index = index(&[("g", "1.0\n2.0\n3.0\n"), ("h", "1.0 g:< 2\n")]);
+    let request = request(vec![dep("g", &[])], &["x86_64-linux"], "4.0.0");
+    let locked = locked_of(&index, "g", "2.0");
+    assert_eq!(resolved_locked(&request, &index, &locked), ["g-2.0"]);
+    // A new gem that needs g below its floor: the floor goes on the retry.
+    let mut request = request.clone();
+    request.dependencies.push(dep("h", &[]));
+    assert_eq!(
+        resolved_locked(&request, &index, &locked),
+        ["g-1.0", "h-1.0"]
+    );
+}
+
+#[test]
+fn unlock_names_loosens_indirect_pins_then_pins_then_floors() {
+    let index = index(&[("a", "1.0\n"), ("b", "2.0\n"), ("c", "3.0\n")]);
+    let mut locked = Locked {
+        base: index.values().flatten().cloned().collect(),
+        requirements: [
+            ("a".to_owned(), req(&["= 1.0"])),
+            ("b".to_owned(), req(&["= 2.0"])),
+            ("c".to_owned(), req(&[">= 3.0"])),
+        ]
+        .into_iter()
+        .collect(),
+        ..Locked::default()
+    };
+    let names = |n: &[&str]| n.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+    let reqs = |l: &Locked| {
+        let mut r: Vec<String> = l
+            .requirements
+            .iter()
+            .map(|(name, req)| format!("{name} {req}"))
+            .collect();
+        r.sort();
+        r
+    };
+    // `b` is pinned and the Gemfile does not name it: it goes first.
+    locked.unlock_names(&names(&["a", "b", "c"]), &["a"]);
+    assert_eq!(reqs(&locked), ["a = 1.0", "b >= 2.0", "c >= 3.0"]);
+    assert!(!locked.base.iter().any(|s| s.name == "b"));
+    // Then the pins the Gemfile names.
+    locked.unlock_names(&names(&["a", "c"]), &["a"]);
+    assert_eq!(reqs(&locked), ["a >= 1.0", "b >= 2.0", "c >= 3.0"]);
+    // With no pins left, the requirements go.
+    locked.unlock_names(&names(&["a", "c"]), &["a"]);
+    assert_eq!(reqs(&locked), ["b >= 2.0"]);
+}
+
+#[test]
+fn a_locked_platform_build_is_preferred_on_a_platform_the_lockfile_has() {
+    let index = index(&[("g", "1.0\n1.0-x86_64-linux\n1.0-x86_64-linux-gnu\n")]);
+    let request = request(vec![dep("g", &[])], &["x86_64-linux-gnu"], "4.0.0");
+    let mut locked = locked_of(&index, "g", "1.0");
+    locked
+        .base
+        .retain(|s| s.platform == platform("x86_64-linux"));
+    locked.locked_specs = locked.base.clone();
+    // The index's exact build without the lockfile; the locked one with it.
+    let unlocked = resolved_locked(&request, &index, &Locked::default());
+    assert_eq!(unlocked, ["g-1.0-x86_64-linux-gnu"]);
+    assert_eq!(
+        resolved_locked(&request, &index, &locked),
+        ["g-1.0-x86_64-linux"]
+    );
+    // Not on a platform new to the lockfile: the index's exact build is
+    // chosen there, and the locked build of the same version comes back
+    // with it as an additional variant, for `SpecSet#for` to choose from.
+    locked.new_platforms = vec![platform("x86_64-linux-gnu")];
+    assert_eq!(
+        resolved_locked(&request, &index, &locked),
+        ["g-1.0-x86_64-linux", "g-1.0-x86_64-linux-gnu"]
+    );
+}

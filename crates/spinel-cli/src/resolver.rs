@@ -45,8 +45,20 @@
 //! it only the version running; no index is read for it, and no resolution
 //! lists it.
 //!
-//! Not here yet: locked versions (#79), git and path sources (#88), and
-//! sources scoped to a gem.
+//! **Locked versions** (#79) come in as a [`Locked`], what
+//! `Definition#resolution_base` hands `Bundler::Resolver::Base` when a
+//! lockfile exists and no update was asked for (`crate::locked` works it
+//! out). Bundler 4 does not pin an unchanged gem to its locked version: it
+//! gives every locked gem but the Gemfile's changed ones a floor of `>=` the
+//! locked version (`additional_base_requirements_to_prevent_downgrades`),
+//! tries the locked version first (`GemVersionPromoter#post_sort`), and
+//! resolves the locked builds still good for the Gemfile from the lockfile
+//! itself, its dependencies and its platform builds before the index's
+//! (`@base`, `prefer_locked`). A locked prerelease lets that gem's
+//! prereleases in. A gem whose floor is in a conflict loses it, and the
+//! resolution is tried again (`find_names_to_relax`, `Base#unlock_names`).
+//!
+//! Not here yet: git and path sources (#88), and sources scoped to a gem.
 
 mod report;
 
@@ -240,6 +252,69 @@ pub struct GemfileDependency {
     /// Bundler's platform names (`ruby`, `jruby`, `windows`, `mri_33`, ...).
     pub platforms: Vec<String>,
     pub force_ruby_platform: bool,
+}
+
+/// A lockfile's hold on a resolution (#79): `Resolver::Base` as
+/// `Definition#resolution_base` makes it. The default holds nothing, which is
+/// a resolution with no lockfile.
+#[derive(Debug, Clone, Default)]
+pub struct Locked {
+    /// `Package#locked_version`: each locked gem's version.
+    pub versions: HashMap<String, Version>,
+    /// `@base`: the locked builds still good for the Gemfile, as the
+    /// lockfile has them (its dependencies, no Ruby requirement), in the
+    /// order `SpecSet#for` found them.
+    pub base: Vec<Spec>,
+    /// `base_requirements`: `= version` for each gem of `base`, then
+    /// `>= version` for every locked gem whose Gemfile dependency did not
+    /// change.
+    pub requirements: HashMap<String, Requirement>,
+    /// `@gems_to_unlock`: gems the lockfile does not hold, whose locked
+    /// version is neither tried first nor its builds preferred.
+    pub unlock: HashSet<String>,
+    /// Resolution platforms the lockfile does not have, on which locked
+    /// builds are not preferred (`new_platforms`).
+    pub new_platforms: Vec<GemPlatform>,
+    /// `@base.locked_specs`: every locked build, for
+    /// `SpecSet#specs_with_additional_variants_from`.
+    pub locked_specs: Vec<Spec>,
+}
+
+impl Locked {
+    /// `Base#unlock_names`: the gems in a conflict with their requirement.
+    /// Of those pinned exactly that the Gemfile does not name, or else of
+    /// all pinned exactly, the pin becomes a floor and the locked builds go
+    /// from the base; with none pinned, each requirement goes.
+    fn unlock_names(&mut self, names: &[String], gemfile: &[&str]) {
+        let exact = |locked: &Locked, name: &String| {
+            locked
+                .requirements
+                .get(name)
+                .is_some_and(|r| matches!(r.requirements(), [(Op::Eq, _)]))
+        };
+        let indirect: Vec<&String> = names
+            .iter()
+            .filter(|n| exact(self, n) && !gemfile.contains(&n.as_str()))
+            .collect();
+        let pins: Vec<&String> = if indirect.is_empty() {
+            names.iter().filter(|n| exact(self, n)).collect()
+        } else {
+            indirect
+        };
+        if pins.is_empty() {
+            for name in names {
+                self.requirements.remove(name);
+            }
+            return;
+        }
+        for name in pins {
+            let version = self.requirements[name].requirements()[0].1.clone();
+            let floor = Requirement::new([format!(">= {version}").as_str()])
+                .expect("a version makes a floor");
+            self.requirements.insert(name.clone(), floor);
+            self.base.retain(|s| &s.name != name);
+        }
+    }
 }
 
 /// What to resolve, and for what.
@@ -606,7 +681,7 @@ fn expanded_platforms(names: &[String]) -> Vec<GemPlatform> {
 impl GemfileDependency {
     /// `Bundler::Dependency#gem_platforms`: the resolution platforms this
     /// dependency applies on; `ruby` alone when it forces the ruby build.
-    fn gem_platforms(&self, valid: &[GemPlatform]) -> Vec<GemPlatform> {
+    pub(crate) fn gem_platforms(&self, valid: &[GemPlatform]) -> Vec<GemPlatform> {
         if self.force_ruby_platform {
             return vec![GemPlatform::Ruby];
         }
@@ -627,7 +702,7 @@ impl GemfileDependency {
     // ponytail: only `ruby` (and its versions) counts as the current Ruby;
     // upgrade with `Bundler::CurrentRuby`'s engine and Windows checks when
     // Spinel runs on Windows.
-    fn current_platform(&self) -> bool {
+    pub(crate) fn current_platform(&self) -> bool {
         self.platforms.is_empty()
             || self.platforms.iter().any(|p| {
                 p == "ruby"
@@ -644,14 +719,20 @@ struct PackageState {
     top_level: bool,
     force_ruby_platform: bool,
     prereleases: Prereleases,
-    /// `@sorted_versions[package]`, with each candidate's group, ascending.
-    candidates: Option<Vec<(Candidate, SpecGroup)>>,
+    /// `@sorted_versions[package]`, with each candidate's group, ascending,
+    /// and the builds the groups index: the locked ones first.
+    candidates: Option<Versions>,
 }
+
+/// A package's builds, the locked ones first, and its candidates, each with
+/// its group of those builds, ascending.
+type Versions = (std::rc::Rc<Vec<Spec>>, Vec<(Candidate, SpecGroup)>);
 
 /// The `PubGrub` source: `Bundler::Resolver` over one index.
 struct Provider<'a> {
     request: &'a Request,
     index: &'a Index,
+    locked: &'a Locked,
     /// Each gem's builds, without the ones that depend on themselves
     /// impossibly, sorted by version, then platform.
     specs: RefCell<HashMap<String, std::rc::Rc<Vec<Spec>>>>,
@@ -665,10 +746,16 @@ struct Provider<'a> {
 }
 
 impl<'a> Provider<'a> {
-    fn new(request: &'a Request, index: &'a Index, relaxed: &HashSet<String>) -> Provider<'a> {
+    fn new(
+        request: &'a Request,
+        index: &'a Index,
+        locked: &'a Locked,
+        relaxed: &HashSet<String>,
+    ) -> Provider<'a> {
         let provider = Provider {
             request,
             index,
+            locked,
             specs: RefCell::new(HashMap::new()),
             packages: RefCell::new(HashMap::new()),
             root_dependencies: Vec::new(),
@@ -730,8 +817,14 @@ impl<'a> Provider<'a> {
     }
 
     /// The state of a gem not in the Gemfile, made on first sight with every
-    /// resolution platform and prereleases left out.
+    /// resolution platform and prereleases left out, unless its locked
+    /// version is one.
     fn package_state(&self, name: &PackageName) {
+        let prereleases = if self.locked_prerelease(name) {
+            Prereleases::ConsiderFirst
+        } else {
+            Prereleases::Ignore
+        };
         self.packages
             .borrow_mut()
             .entry(name.clone())
@@ -739,9 +832,31 @@ impl<'a> Provider<'a> {
                 platforms: self.request.platforms.clone(),
                 top_level: false,
                 force_ruby_platform: false,
-                prereleases: Prereleases::Ignore,
+                prereleases,
                 candidates: None,
             });
+    }
+
+    /// `Package#locked_version`.
+    fn locked_version(&self, name: &PackageName) -> Option<&Version> {
+        match name {
+            PackageName::Gem(gem) => self.locked.versions.get(gem),
+            _ => None,
+        }
+    }
+
+    /// Whether the gem's locked version is a prerelease, which lets its
+    /// prereleases in as `Package` does.
+    fn locked_prerelease(&self, name: &PackageName) -> bool {
+        self.locked_version(name).is_some_and(Version::prerelease)
+    }
+
+    /// `Package#unlock?`.
+    fn unlocked(&self, name: &PackageName) -> bool {
+        match name {
+            PackageName::Gem(gem) => self.locked.unlock.contains(gem),
+            _ => false,
+        }
     }
 
     /// `@sorted_versions[package]`, worked out on first use.
@@ -760,17 +875,20 @@ impl<'a> Provider<'a> {
         if state.candidates.is_none() {
             state.candidates = Some(self.all_versions_for(name, state, &all));
         }
-        f(state.candidates.as_deref().expect("set above"), &all)
+        let (builds, candidates) = state.candidates.as_ref().expect("set above");
+        f(candidates, builds)
     }
 
-    /// `Resolver#all_versions_for`: group the builds by version and make up
-    /// to two candidates of each, as the module notes say.
+    /// `Resolver#all_versions_for`: the locked builds and the index's, the
+    /// locked ones first and an index build of the same version and
+    /// platform left out; those the gem's base requirement allows, grouped
+    /// by version, up to two candidates of each, as the module notes say.
     fn all_versions_for(
         &self,
         name: &PackageName,
         state: &PackageState,
-        all: &[Spec],
-    ) -> Vec<(Candidate, SpecGroup)> {
+        index_specs: &[Spec],
+    ) -> Versions {
         let meta = match name {
             PackageName::Ruby => Some(&self.request.ruby_version),
             PackageName::RubyGems => Some(&self.request.rubygems_version),
@@ -781,30 +899,82 @@ impl<'a> Provider<'a> {
                 specs: Vec::new(),
                 dependencies: Vec::new(),
             };
-            return vec![(Candidate::new(version.clone(), -1), group)];
+            let candidates = vec![(Candidate::new(version.clone(), -1), group)];
+            return (std::rc::Rc::new(Vec::new()), candidates);
         }
-        // `filter_prereleases`.
-        let indices: Vec<usize> = (0..all.len())
-            .filter(|&i| {
-                !(state.prereleases == Prereleases::Ignore
-                    && all.len() > 1
-                    && all[i].version.prerelease())
-            })
+        let PackageName::Gem(gem) = name else {
+            unreachable!("the meta packages returned above");
+        };
+        // `@base[name]`: `SpecSet#[]` lists a name's builds last first.
+        let mut builds: Vec<Spec> = self
+            .locked
+            .base
+            .iter()
+            .rev()
+            .filter(|s| &s.name == gem)
+            .cloned()
             .collect();
-        // `group_by(&:version)`, which groups by `eql?`: the version string.
-        let mut groups: Vec<(&Version, Vec<usize>)> = Vec::new();
-        for i in indices {
-            match groups.last_mut() {
-                Some((v, members)) if v.as_str() == all[i].version.as_str() => members.push(i),
-                _ => groups.push((&all[i].version, vec![i])),
+        let mut locked_builds = builds.len();
+        // `uniq {|spec| [spec.version.hash, spec.platform] }`.
+        let mut seen: HashSet<(&Version, &GemPlatform)> =
+            builds.iter().map(|b| (&b.version, &b.platform)).collect();
+        let mut fresh: Vec<&Spec> = Vec::new();
+        // `filter_prereleases`, of the index's builds only.
+        for spec in index_specs {
+            if state.prereleases == Prereleases::Ignore
+                && index_specs.len() > 1
+                && spec.version.prerelease()
+            {
+                continue;
+            }
+            if seen.insert((&spec.version, &spec.platform)) {
+                fresh.push(spec);
             }
         }
+        builds.extend(fresh.into_iter().cloned());
+        if let Some(requirement) = self.locked.requirements.get(gem) {
+            locked_builds = builds[..locked_builds]
+                .iter()
+                .filter(|b| requirement.satisfied_by(&b.version))
+                .count();
+            builds.retain(|b| requirement.satisfied_by(&b.version));
+        }
+        let all = &builds[..];
+        // `group_by(&:version)`, which groups by `eql?`, the version
+        // string, in the order first seen.
+        let mut groups: Vec<(&Version, Vec<usize>)> = Vec::new();
+        let mut group_of: HashMap<&str, usize> = HashMap::new();
+        for (i, spec) in all.iter().enumerate() {
+            match group_of.get(spec.version.as_str()) {
+                Some(&g) => groups[g].1.push(i),
+                None => {
+                    group_of.insert(spec.version.as_str(), groups.len());
+                    groups.push((&spec.version, vec![i]));
+                }
+            }
+        }
+        let unlocked = self.unlocked(name);
         let mut candidates = Vec::new();
         for (version, specs) in groups {
+            // `Package#platform_specs`: on a platform the lockfile has, the
+            // locked builds that install there, when there are any, as
+            // `select_all_platform_match(prefer_locked: true)` keeps them.
             let platform_specs: Vec<Vec<usize>> = state
                 .platforms
                 .iter()
-                .map(|p| best_platform_match(&specs, all, p))
+                .map(|p| {
+                    let prefer_locked = !unlocked && !self.locked.new_platforms.contains(p);
+                    let locked: Vec<usize> = specs
+                        .iter()
+                        .copied()
+                        .filter(|&i| i < locked_builds && installable_on(&all[i].platform, p))
+                        .collect();
+                    if prefer_locked && !locked.is_empty() {
+                        best_platform_match(&locked, all, p)
+                    } else {
+                        best_platform_match(&specs, all, p)
+                    }
+                })
                 .collect();
             let skip = if state.top_level {
                 platform_specs.iter().any(Vec::is_empty)
@@ -837,7 +1007,10 @@ impl<'a> Provider<'a> {
             }
             candidates.push((Candidate::new(version.clone(), 1), platform_group));
         }
-        candidates
+        // `@sorted_versions`: `sort`, which the locked versions coming first
+        // can leave to do.
+        candidates.sort_by(|a, b| a.0.cmp(&b.0));
+        (std::rc::Rc::new(builds), candidates)
     }
 
     /// `versions_for(package, range)`: the candidates in `range`.
@@ -874,9 +1047,11 @@ impl<'a> Provider<'a> {
         self.packages.borrow()[name].prereleases
     }
 
-    /// `GemVersionPromoter#sort_versions` with no lockfile: newest first,
-    /// releases before prereleases unless prereleases were asked for.
-    fn sort_preferred(&self, name: &PackageName, versions: &mut [Candidate]) {
+    /// `GemVersionPromoter#sort_versions` at its default level, `major`:
+    /// newest first, releases before prereleases unless prereleases were
+    /// asked for, and then (`post_sort`) the locked version moved to the
+    /// front unless the gem is unlocked.
+    fn sort_preferred(&self, name: &PackageName, versions: &mut Vec<Candidate>) {
         let specified = self.prereleases(name) == Prereleases::ConsiderFirst;
         versions.sort_by(|a, b| {
             if !specified {
@@ -888,6 +1063,17 @@ impl<'a> Provider<'a> {
             }
             b.cmp(a)
         });
+        if self.unlocked(name) {
+            return;
+        }
+        if let Some(locked) = self.locked_version(name) {
+            // `move_version_to_beginning`, by `to_s`.
+            let (mut front, rest): (Vec<Candidate>, Vec<Candidate>) = versions
+                .drain(..)
+                .partition(|c| c.version.as_str() == locked.as_str());
+            front.extend(rest);
+            *versions = front;
+        }
     }
 
     /// `to_dependency_hash`: each dependency as a package and range, the
@@ -932,7 +1118,7 @@ impl<'a> Provider<'a> {
                     platforms,
                     top_level: true,
                     force_ruby_platform: dep.force_ruby_platform,
-                    prereleases: if dep.requirement.prerelease() {
+                    prereleases: if dep.requirement.prerelease() || self.locked_prerelease(&name) {
                         Prereleases::ConsiderFirst
                     } else if relaxed {
                         Prereleases::ConsiderLast
@@ -1083,6 +1269,17 @@ impl<'a> Provider<'a> {
         })
     }
 
+    /// Every build of a chosen candidate: `SpecGroup#to_specs`.
+    fn group_specs(&self, name: &PackageName, candidate: &Candidate) -> Vec<Spec> {
+        self.with_candidates(name, |candidates, all| {
+            candidates
+                .iter()
+                .find(|(c, _)| c == candidate)
+                .map(|(_, group)| group.specs.iter().map(|&i| all[i].clone()).collect())
+                .unwrap_or_default()
+        })
+    }
+
     /// The candidates of a package, for the report: Bundler's ranges in
     /// explanations run between them.
     fn sorted_candidates(&self, package: &Package) -> Vec<Candidate> {
@@ -1132,8 +1329,10 @@ impl<'a> Provider<'a> {
         })
     }
 
-    /// The packages with prereleases left out that the conflict ran
-    /// through: `Resolver#find_names_to_relax`. Bundler walks from the
+    /// What to relax for the next try, `Resolver#find_names_to_relax`: the
+    /// gems with a base requirement that the conflict ran through, to
+    /// unlock, and those with prereleases left out, to let them in. Bundler
+    /// walks from the
     /// failure along each derivation's first cause (pubgrub-ruby's
     /// `cause.incompatibility`, pubgrub-rs's `cause1`: the incompatibility
     /// being resolved) and looks at the terms of each; what the other cause,
@@ -1146,7 +1345,11 @@ impl<'a> Provider<'a> {
     /// with a prerelease of `g2` and Bundler reports the conflict (#816).
     /// Without it, `needs_pre`, `case1` and 40 of those 400 indexes that
     /// Bundler resolves would fail.
-    fn names_to_relax(&self, tree: &DerivationTree<Package, VersionSet, String>) -> Vec<String> {
+    fn names_to_relax(
+        &self,
+        tree: &DerivationTree<Package, VersionSet, String>,
+    ) -> (Vec<String>, Vec<String>) {
+        let mut unlock: Vec<String> = Vec::new();
         let mut names = Vec::new();
         let mut chains = vec![tree];
         while let Some(mut node) = chains.pop() {
@@ -1159,7 +1362,11 @@ impl<'a> Provider<'a> {
                     let Package::Name(name @ PackageName::Gem(gem)) = package else {
                         continue;
                     };
-                    if self.prereleases(name) == Prereleases::Ignore
+                    if self.locked.requirements.contains_key(gem) {
+                        if !unlock.contains(gem) {
+                            unlock.push(gem.clone());
+                        }
+                    } else if self.prereleases(name) == Prereleases::Ignore
                         && self.all_specs(gem).iter().any(|s| s.version.prerelease())
                         && !names.contains(gem)
                     {
@@ -1168,7 +1375,7 @@ impl<'a> Provider<'a> {
                 }
             }
         }
-        names
+        (unlock, names)
     }
 }
 
@@ -1298,7 +1505,6 @@ impl DependencyProvider for Provider<'_> {
             let next = seen.len();
             seen.entry(dep.clone()).or_insert(next);
         }
-        drop(seen);
         Ok(Dependencies::Available(deps.into_iter().collect()))
     }
 }
@@ -1307,52 +1513,130 @@ impl DependencyProvider for Provider<'_> {
 /// no lockfile: the builds to install, in the lockfile's order (`full_name`),
 /// or why there are none.
 pub fn resolve(request: &Request, index: &Index) -> Result<Vec<Resolved>, Failure> {
-    // ponytail: no lockfile, so every gem is free to move. Upgrade: locked
-    // versions as the only candidates of unchanged gems (#79, `@base`).
-    let mut relaxed: HashSet<String> = HashSet::new();
-    loop {
-        let mut provider = Provider::new(request, index, &relaxed);
-        provider.prepare_root()?;
-        let root = Package::Root(request.gemfile.clone());
-        match pubgrub::resolve(&provider, root, root_candidate()) {
-            Ok(solution) => {
-                let mut resolved = Vec::new();
-                for (package, candidate) in solution {
-                    let Package::Name(name @ PackageName::Gem(gem)) = &package else {
-                        continue;
-                    };
-                    // `SpecSet#for` never materializes `bundler`, so neither
-                    // the lockfile nor the install plan has it.
-                    if gem == "bundler" {
-                        continue;
-                    }
-                    for spec in provider.chosen_specs(name, &candidate) {
-                        resolved.push(Resolved {
-                            name: spec.name,
-                            version: spec.version,
-                            platform: spec.platform,
-                        });
-                    }
-                }
-                // `LockfileGenerator`'s order: by `full_name`.
-                resolved.sort_by_cached_key(Resolved::full_name);
-                return Ok(resolved);
+    solve(request, index, Locked::default(), |provider, solution| {
+        let mut resolved = Vec::new();
+        for (package, candidate) in solution {
+            let Package::Name(name @ PackageName::Gem(gem)) = &package else {
+                continue;
+            };
+            // `SpecSet#for` never materializes `bundler`, so neither the
+            // lockfile nor the install plan has it.
+            if gem == "bundler" {
+                continue;
             }
-            Err(PubGrubError::NoSolution(tree)) => {
-                let names = provider.names_to_relax(&tree);
-                if !names.is_empty() {
-                    relaxed.extend(names);
-                    continue;
-                }
-                let explanation = report::explain(&tree, &provider);
-                return Err(Failure::Conflict(format!(
-                    "Could not find compatible versions\n\n{explanation}"
-                )));
+            for spec in provider.chosen_specs(name, &candidate) {
+                resolved.push(Resolved {
+                    name: spec.name,
+                    version: spec.version,
+                    platform: spec.platform,
+                });
             }
-            // The provider never fails, so the solver has nothing else to
-            // pass on.
-            Err(error) => return Err(Failure::Conflict(error.to_string())),
         }
+        // `LockfileGenerator`'s order: by `full_name`.
+        resolved.sort_by_cached_key(Resolved::full_name);
+        resolved
+    })
+}
+
+/// Resolve `request` against `index` with a lockfile's hold on it (#79), as
+/// `Resolver#start` does for `Definition#start_resolution`: every build of
+/// each candidate chosen (`Candidate#to_specs`), the lockfile's own where
+/// they were preferred, then each locked build of a version chosen whose
+/// dependencies the result satisfies
+/// (`SpecSet#specs_with_additional_variants_from`). `SpecSet#for` of the
+/// Gemfile on the lockfile's platforms, which `crate::locked` runs, then
+/// keeps the builds the lockfile lists.
+pub fn resolve_locked(
+    request: &Request,
+    index: &Index,
+    locked: &Locked,
+) -> Result<Vec<Spec>, Failure> {
+    solve(request, index, locked.clone(), |provider, solution| {
+        let mut specs: Vec<Spec> = Vec::new();
+        for (package, candidate) in solution {
+            let Package::Name(name @ PackageName::Gem(gem)) = &package else {
+                continue;
+            };
+            if gem == "bundler" {
+                continue;
+            }
+            specs.extend(provider.group_specs(name, &candidate));
+        }
+        let mut variants: Vec<Spec> = Vec::new();
+        for other in &locked.locked_specs {
+            // `exemplary_spec`: the last build of the gem the result has.
+            let Some(spec) = specs.iter().rev().find(|s| s.name == other.name) else {
+                continue;
+            };
+            let known = |s: &Spec| s.full_name() == other.full_name();
+            if spec.version == other.version
+                && valid_dependencies(other, &specs)
+                && !specs.iter().any(known)
+                && !variants.iter().any(known)
+            {
+                variants.push(other.clone());
+            }
+        }
+        specs.extend(variants);
+        specs
+    })
+}
+
+/// `SpecSet#validate_deps(s) == :valid`: each of the build's dependencies
+/// but `bundler` names a gem of `set` with a build that satisfies it.
+pub(crate) fn valid_dependencies(spec: &Spec, set: &[Spec]) -> bool {
+    spec.dependencies.iter().all(|(name, req)| {
+        name == "bundler"
+            || set
+                .iter()
+                .any(|s| &s.name == name && req.satisfied_by(&s.version))
+    })
+}
+
+/// The solver loop of `Resolver#start`: resolve, and on a conflict unlock
+/// the gems `Resolver#find_names_to_relax` names and let in the
+/// prereleases it names, then try again; `finish` reads the solution.
+fn solve<T>(
+    request: &Request,
+    index: &Index,
+    mut locked: Locked,
+    finish: impl FnOnce(&Provider<'_>, pubgrub::SelectedDependencies<Package, Candidate>) -> T,
+) -> Result<T, Failure> {
+    // `Base#requirements`: the Gemfile's dependencies that apply on some
+    // resolution platform, which `indirect_pins` leaves to the last.
+    let gemfile: Vec<&str> = request
+        .dependencies
+        .iter()
+        .filter(|d| !d.gem_platforms(&request.platforms).is_empty())
+        .map(|d| d.name.as_str())
+        .collect();
+    let mut relaxed: HashSet<String> = HashSet::new();
+    let root = Package::Root(request.gemfile.clone());
+    loop {
+        let (unlock, prereleases) = {
+            let mut provider = Provider::new(request, index, &locked, &relaxed);
+            provider.prepare_root()?;
+            match pubgrub::resolve(&provider, root.clone(), root_candidate()) {
+                Ok(solution) => return Ok(finish(&provider, solution)),
+                Err(PubGrubError::NoSolution(tree)) => {
+                    let (unlock, prereleases) = provider.names_to_relax(&tree);
+                    if unlock.is_empty() && prereleases.is_empty() {
+                        let explanation = report::explain(&tree, &provider);
+                        return Err(Failure::Conflict(format!(
+                            "Could not find compatible versions\n\n{explanation}"
+                        )));
+                    }
+                    (unlock, prereleases)
+                }
+                // The provider never fails, so the solver has nothing else
+                // to pass on.
+                Err(error) => return Err(Failure::Conflict(error.to_string())),
+            }
+        };
+        if !unlock.is_empty() {
+            locked.unlock_names(&unlock, &gemfile);
+        }
+        relaxed.extend(prereleases);
     }
 }
 

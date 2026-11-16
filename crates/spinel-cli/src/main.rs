@@ -29,6 +29,7 @@ mod gem_substitute;
 mod gem_version;
 mod home;
 mod init;
+mod locked;
 mod lockfile;
 mod resolver;
 mod ruby_args;
@@ -201,6 +202,15 @@ enum Command {
         #[arg(long)]
         lockfile: bool,
 
+        /// The `Gemfile.lock` the Gemfile was locked to, whose versions are
+        /// kept as Bundler keeps them when no update is asked for
+        /// (docs/package-manager.md, "Locked preferences"). Its `PLATFORMS`
+        /// are the resolution platforms; the first `--platform` is the local
+        /// one, and each other is added as `bundle lock --add-platform`
+        /// adds it. When nothing changed, the index is not read.
+        #[arg(long, value_name = "LOCKFILE")]
+        locked: Option<PathBuf>,
+
         /// The Ruby to resolve for, which `required_ruby_version` is checked
         /// against. Spinel's `RUBY_VERSION` when not given.
         #[arg(long, value_name = "VERSION")]
@@ -300,6 +310,7 @@ fn main() -> ExitCode {
             deps,
             platforms,
             lockfile,
+            locked,
             ruby_version,
             rubygems_version,
         }) => {
@@ -307,6 +318,7 @@ fn main() -> ExitCode {
                 &deps,
                 &platforms,
                 lockfile,
+                locked.as_deref(),
                 ruby_version.as_deref(),
                 rubygems_version.as_deref(),
             );
@@ -610,8 +622,8 @@ fn link_gem_home(
 struct GemfileJson {
     gemfiles: Vec<String>,
     source: Option<GemfileSource>,
-    /// The `ruby` directive; only whether there is one is read, since the
-    /// lockfile locks the Ruby resolved for.
+    /// The `ruby` directive: whether there is one, and its `versions`, which
+    /// decide whether a locked `RUBY VERSION` still holds.
     #[serde(default)]
     ruby: Option<serde_json::Value>,
     #[serde(default)]
@@ -645,6 +657,7 @@ fn resolve_command(
     deps: &Path,
     platforms: &[String],
     lockfile: bool,
+    locked: Option<&Path>,
     ruby_version: Option<&str>,
     rubygems_version: Option<&str>,
 ) -> ExitCode {
@@ -733,7 +746,7 @@ fn resolve_command(
     } else {
         format!("{remote}/")
     };
-    let request = resolver::Request {
+    let mut request = resolver::Request {
         gemfile: gemfile_name,
         source: format!("rubygems repository {shown_remote}"),
         dependencies,
@@ -741,6 +754,56 @@ fn resolve_command(
         ruby_version,
         rubygems_version,
     };
+
+    // A lockfile to keep to (#79): `Definition` reads it, and when nothing
+    // changed it is the resolution, with no index read.
+    let mut definition = None;
+    let mut current = String::new();
+    if let Some(path) = locked {
+        current = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(err) => return usage(format!("{}: {err}", path.display())),
+        };
+        let lock = match lockfile::Lockfile::parse(&current, &path.display().to_string(), &local) {
+            Ok(lock) => lock,
+            Err(err) => {
+                eprintln!("{err}");
+                return ExitCode::FAILURE;
+            }
+        };
+        let versions: Option<Vec<String>> =
+            gemfile.ruby.as_ref().filter(|r| !r.is_null()).map(|r| {
+                r.get("versions")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|vs| {
+                        vs.iter()
+                            .filter_map(|v| v.as_str().map(str::to_owned))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            });
+        let local_platform = request.platforms[0].clone();
+        let def = match locked::Definition::new(
+            &lock,
+            &remote,
+            &request.dependencies,
+            versions.as_deref(),
+            &local_platform,
+            &request.platforms[1..],
+        ) {
+            Ok(def) => def,
+            Err(err) => {
+                eprintln!("{err}");
+                return ExitCode::FAILURE;
+            }
+        };
+        request.platforms = def.platforms().to_vec();
+        if !def.resolve_needed() {
+            let specs = def.unchanged(&request.dependencies);
+            return print_resolution(&def, &current, &remote, &request, None, &specs, lockfile);
+        }
+        definition = Some(def);
+    }
 
     let Some(home) = home::spinel_home() else {
         eprintln!("spinel: resolve: neither SPINEL_HOME nor HOME is set");
@@ -772,6 +835,23 @@ fn resolve_command(
             return ExitCode::FAILURE;
         }
     };
+    if let Some(mut def) = definition {
+        return match def.start_resolution(&request, &index) {
+            Ok(specs) => print_resolution(
+                &def,
+                &current,
+                &remote,
+                &request,
+                Some(&index),
+                &specs,
+                lockfile,
+            ),
+            Err(failure) => {
+                eprintln!("{}", failure.to_string().trim_end());
+                ExitCode::FAILURE
+            }
+        };
+    }
     match resolver::resolve(&request, &index) {
         Ok(resolved) if lockfile => {
             let ruby_directive = gemfile.ruby.as_ref().is_some_and(|r| !r.is_null());
@@ -796,6 +876,43 @@ fn resolve_command(
             ExitCode::FAILURE
         }
     }
+}
+
+/// Print a resolution kept to `current`, the lockfile's text: the
+/// `Gemfile.lock` `write_lock` leaves, or one line per build as `specs:`
+/// lists it.
+fn print_resolution(
+    definition: &locked::Definition,
+    current: &str,
+    remote: &str,
+    request: &resolver::Request,
+    index: Option<&resolver::Index>,
+    specs: &[resolver::Spec],
+    lockfile: bool,
+) -> ExitCode {
+    if lockfile {
+        print!(
+            "{}",
+            definition.write_lock(current, remote, request, index, specs)
+        );
+    } else {
+        let mut lines: Vec<(String, String)> = specs
+            .iter()
+            .map(|s| {
+                let resolved = resolver::Resolved {
+                    name: s.name.clone(),
+                    version: s.version.clone(),
+                    platform: s.platform.clone(),
+                };
+                (resolved.full_name(), resolved.to_string())
+            })
+            .collect();
+        lines.sort();
+        for (_, line) in lines {
+            println!("{line}");
+        }
+    }
+    ExitCode::SUCCESS
 }
 
 /// The builds of every gem `roots` can reach through any version's

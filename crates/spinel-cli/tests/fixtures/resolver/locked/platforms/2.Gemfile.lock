@@ -1,0 +1,20 @@
+GEM
+  remote: @SOURCE@/
+  specs:
+    json (2.9.1)
+    json (2.9.1-java)
+
+PLATFORMS
+  java
+  ruby
+  x86_64-linux
+
+DEPENDENCIES
+  json
+
+CHECKSUMS
+  json (2.9.1) sha256=d2bdef4644052fad91c1785d48263756fe32fcac08b96a20bb15840e96550d11
+  json (2.9.1-java) sha256=88de8c79b54fee6ae1b4854bc48b8d7089f524cbacaf4596df24f86b10896ee8
+
+BUNDLED WITH
+  4.0.20
