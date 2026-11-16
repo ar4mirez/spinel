@@ -362,6 +362,35 @@ fn applies_gemfile_platforms_and_force_ruby_platform() {
     );
 }
 
+/// `CurrentRuby` on a Ruby counted as `ruby` (#72): `ruby` and the
+/// `ruby_NN` of its own minor version, and no other engine's name.
+#[test]
+fn counts_spinel_as_ruby_of_its_own_version() {
+    for (name, here) in [
+        ("ruby", true),
+        ("ruby_40", true),
+        ("ruby_33", false),
+        ("ruby_4", false),
+        ("ruby_400", false),
+        ("ruby_", false),
+        ("mri", false),
+        ("mri_40", false),
+        ("truffleruby", false),
+        ("jruby", false),
+        ("windows_40", false),
+    ] {
+        assert_eq!(ruby_platform_here(name, "4.0.3"), here, "{name}");
+    }
+    assert!(ruby_platform_here("ruby_34", "3.4.9"));
+    assert!(!ruby_platform_here("ruby_34", "13.4.0"));
+    let mut dep = dep("lib", &[]);
+    assert!(dep.current_platform());
+    dep.platforms = vec!["mri".to_owned(), "ruby_33".to_owned()];
+    assert!(!dep.current_platform());
+    dep.platforms.push("ruby_40".to_owned());
+    assert!(dep.current_platform());
+}
+
 #[test]
 fn ignores_builds_that_depend_on_themselves_impossibly() {
     let index = index(&[("lib", "1.0\n2.0 lib:< 2\n")]);

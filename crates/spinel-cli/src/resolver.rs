@@ -697,18 +697,37 @@ impl GemfileDependency {
     }
 
     /// `Bundler::Dependency#current_platform?`: whether the Ruby running is
-    /// one the dependency names. Spinel's generic platform is `ruby`, which
-    /// makes `ruby?` true and every engine-specific name false.
+    /// one the dependency names. Spinel counts as `ruby`, as
+    /// `Bundler::CurrentRuby#ruby?` is true whenever the generic local
+    /// platform is `ruby` (`generic_local_platform_is_ruby?`, Bundler 2.1+,
+    /// docs/cli.md), and as no other engine, so `mri`, `jruby` and the rest
+    /// are false. `ruby_40` is `ruby?` on a Ruby whose version starts `4.0.`
+    /// (`on_40?`), the language version Spinel implements.
     // ponytail: only `ruby` (and its versions) counts as the current Ruby;
     // upgrade with `Bundler::CurrentRuby`'s engine and Windows checks when
     // Spinel runs on Windows.
     pub(crate) fn current_platform(&self) -> bool {
         self.platforms.is_empty()
-            || self.platforms.iter().any(|p| {
-                p == "ruby"
-                    || p.strip_prefix("ruby_")
-                        .is_some_and(|v| v.bytes().all(|b| b.is_ascii_digit()))
-            })
+            || self
+                .platforms
+                .iter()
+                .any(|p| ruby_platform_here(p, spinel_vm::LANGUAGE_VERSION))
+    }
+}
+
+/// Whether `CurrentRuby` answers the Gemfile platform `name` with true on
+/// a Ruby counted as `ruby` whose `RUBY_VERSION` is `version`: `ruby`, or
+/// `ruby_<major><minor>` when `version` starts `<major>.<minor>.`
+/// (`KNOWN_MINOR_VERSIONS`, two digits each).
+fn ruby_platform_here(name: &str, version: &str) -> bool {
+    if name == "ruby" {
+        return true;
+    }
+    match name.strip_prefix("ruby_").map(str::as_bytes) {
+        Some(&[major, minor]) if major.is_ascii_digit() && minor.is_ascii_digit() => {
+            version.starts_with(&format!("{}.{}.", major as char, minor as char))
+        }
+        _ => false,
     }
 }
 

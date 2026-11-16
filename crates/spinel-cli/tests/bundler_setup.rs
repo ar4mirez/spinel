@@ -8,8 +8,9 @@
 //! `bundle check` and `bundle exec ruby app.rb` in the same project, which
 //! must find the same gems through the `.bundle/config` `spinel install`
 //! wrote. And `fixtures/plain` (rake) installed, whose executable each
-//! engine's `bundle exec rake` runs on that engine. Nothing touches the
-//! network beyond 127.0.0.1.
+//! engine's `bundle exec rake` runs on that engine. And `fixtures/bundler-platforms`
+//! (#72), whose `platforms` gems Spinel installs and Bundler on Spinel loads
+//! alike. Nothing touches the network beyond 127.0.0.1.
 
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
@@ -146,12 +147,15 @@ impl Sandbox {
     /// it is. Frozen, so the lockfile is the fixture's on any platform: one
     /// whose platform it does not list would otherwise add it.
     fn install(&self) {
+        self.install_frozen("+ base64 0.3.0\n+ rack 3.2.8\n+ rack-session 2.1.2\n");
+    }
+
+    /// `spinel install --frozen`, expecting it to install `installed` and
+    /// keep the lockfile as it is.
+    fn install_frozen(&self, installed: &str) {
         let lock = self.read("Gemfile.lock");
         let out = self.spinel(&["install", "--frozen"]);
-        assert_eq!(
-            ok(&out, "spinel install --frozen"),
-            "+ base64 0.3.0\n+ rack 3.2.8\n+ rack-session 2.1.2\n"
-        );
+        assert_eq!(ok(&out, "spinel install --frozen"), installed);
         assert_eq!(self.read("Gemfile.lock"), lock, "the lockfile is kept");
     }
 }
@@ -317,4 +321,33 @@ fn plain_bundle_exec_runs_gem_executables_on_cruby() {
         sandbox.read(".spinel/gem_home/ruby/4.0.0/bin/rake"),
         fs::read_to_string(install_dir.join("bin/rake")).unwrap()
     );
+}
+
+/// `fixtures/bundler-platforms` (#72): a gem in `platforms :ruby`, one for
+/// `ruby_40`, the Ruby Spinel is, one for `ruby_33`, one for `mri` and one
+/// for `jruby`. `spinel install` installs the first two and not the rest,
+/// and stock Bundler running on Spinel loads exactly those two: its
+/// `CurrentRuby#ruby?` is true on any engine whose generic local platform
+/// is `ruby` (every platform but Java and Windows), and `mri?` only on
+/// RUBY_ENGINE "ruby". Nothing is skipped that Spinel installed, so
+/// `bundler/setup` has nothing to say.
+#[test]
+fn bundler_setup_loads_the_platforms_ruby_gems_spinel_installed() {
+    let sandbox = Sandbox::new("bundler-platforms", "platforms");
+    sandbox.install_frozen("+ base64 0.3.0\n+ rack 3.2.8\n+ tilt 2.9.0\n");
+    let gems = sandbox.project().join(".spinel/gem_home/gems");
+    let mut installed: Vec<String> = fs::read_dir(&gems)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    installed.sort();
+    assert_eq!(installed, ["base64-0.3.0", "rack-3.2.8", "tilt-2.9.0"]);
+
+    let out = sandbox.spinel(&["run", "app.rb"]);
+    assert_eq!(
+        ok(&out, "spinel run app.rb"),
+        "spinel true false\nbase64-0.3.0 rack-3.2.8 tilt-2.9.0\n"
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "");
 }
