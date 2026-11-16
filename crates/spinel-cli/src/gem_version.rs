@@ -247,10 +247,7 @@ impl Version {
     /// `segments`.
     #[cfg_attr(
         not(test),
-        expect(
-            dead_code,
-            reason = "the resolver's API; only tests read it until the resolver lands"
-        )
+        expect(dead_code, reason = "`Gem::Version`'s API; only tests read it so far")
     )]
     pub fn segments(&self) -> &[Segment] {
         &self.segments
@@ -259,10 +256,7 @@ impl Version {
     /// `canonical_segments`: what `<=>` and `hash` see.
     #[cfg_attr(
         not(test),
-        expect(
-            dead_code,
-            reason = "the resolver's API; only tests read it until the resolver lands"
-        )
+        expect(dead_code, reason = "`Gem::Version`'s API; only tests read it so far")
     )]
     pub fn canonical_segments(&self) -> &[Segment] {
         &self.canonical
