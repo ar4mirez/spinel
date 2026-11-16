@@ -865,17 +865,21 @@ impl Session {
                     }
                     for spec in &to_install {
                         let platform = spec.platform.to_string();
-                        let gem =
-                            match gem_store::GemId::new(&spec.name, &spec.version.to_string(), &platform) {
-                                Ok(gem) => gem,
-                                Err(err) => {
-                                    self.fail(err);
-                                    ok = false;
-                                    continue;
-                                }
-                            };
+                        let gem = match gem_store::GemId::new(
+                            &spec.name,
+                            &spec.version.to_string(),
+                            &platform,
+                        ) {
+                            Ok(gem) => gem,
+                            Err(err) => {
+                                self.fail(err);
+                                ok = false;
+                                continue;
+                            }
+                        };
                         let sha = sums.get(&lock_name_of(spec)).cloned().or_else(|| {
-                            let info = std::fs::read(client.info_path(&spec.name)).unwrap_or_default();
+                            let info =
+                                std::fs::read(client.info_path(&spec.name)).unwrap_or_default();
                             compact_index::version_checksum(&info, &gem.index_version()).flatten()
                         });
                         match sha {
