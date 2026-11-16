@@ -192,6 +192,18 @@ fn a_stale_map_resolves_as_the_disk_does() {
 }
 
 #[test]
+fn a_file_written_while_the_program_runs_is_found() {
+    let dir = project("written");
+    write_map(&dir);
+    let (status, stdout, stderr) = same_with_and_without_map(&dir, &["run", "written.rb"]);
+    assert_eq!((status, stderr.as_str()), (Some(0), ""));
+    assert_eq!(
+        stdout,
+        "cannot load such file -- written\ntrue\nalpha written\n"
+    );
+}
+
+#[test]
 fn a_directory_replaced_since_the_map_is_looked_at_on_disk() {
     let dir = project("replaced");
     write_map(&dir);

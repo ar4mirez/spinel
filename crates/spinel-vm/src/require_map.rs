@@ -16,10 +16,11 @@
 //! Each directory is listed with a [`Stamp`]: its device, inode, and
 //! modification and change times. Adding, removing or renaming anything in
 //! a directory changes its times, and replacing the directory changes its
-//! inode, so before the map answers for a directory, the first time a
-//! process asks about it, the directory is looked at once and the answer is
-//! given only if the stamp is the same. A directory that changed, or is
-//! gone, answers [`Probe::Unknown`], which is a normal look on disk.
+//! inode, so the directory is looked at the first time a process asks about
+//! it, and again every time the map would answer that it does not have a
+//! file, and the answer is given only if the stamp is the same. A directory
+//! that changed, or is gone, answers [`Probe::Unknown`], a normal look on
+//! disk, from then on.
 //!
 //! A file system keeps times in ticks, so a change in the same tick as the
 //! listing can leave the times as they were: git's "racily clean" index
@@ -38,11 +39,6 @@
 //! The file is checked as a bytecode cache file is: magic, format, payload
 //! length and SHA-256, and then every length, kind and index as it is read.
 //! A map that fails any of them is not used.
-//!
-//! ponytail: a directory is checked once per process. A file added to a
-//! gem's directory or the standard library while a program runs, after
-//! `require` has looked in that directory, is not seen until the next run.
-//! Upgrade, if a program needs it: check the stamp again on every miss.
 
 use std::collections::HashMap;
 use std::io;
@@ -556,31 +552,40 @@ impl RequireMap {
         let mut node = root;
         let mut path = dir.to_vec();
         let (last, dirs) = parts.split_last().expect("split yields one part at least");
-        for part in dirs {
+        let answer = 'walk: {
+            for part in dirs {
+                if !self.fresh(node, &path) {
+                    return Probe::Unknown;
+                }
+                match self.lookup(node, part) {
+                    Some((Kind::Dir, child)) => {
+                        node = child;
+                        path.push(b'/');
+                        path.extend_from_slice(part);
+                    }
+                    // A file where a directory would be: nothing under it.
+                    Some((Kind::File, _)) => break 'walk Probe::Absent,
+                    Some((Kind::Other, _)) => return Probe::Unknown,
+                    None => break 'walk self.absent(node, part),
+                }
+            }
             if !self.fresh(node, &path) {
                 return Probe::Unknown;
             }
-            match self.lookup(node, part) {
-                Some((Kind::Dir, child)) => {
-                    node = child;
-                    path.push(b'/');
-                    path.extend_from_slice(part);
-                }
-                // A file where a directory would be: nothing under it.
-                Some((Kind::File, _)) => return Probe::Absent,
-                Some((Kind::Other, _)) => return Probe::Unknown,
-                None => return self.absent(node, part),
+            match self.lookup(node, last) {
+                Some((Kind::File, _)) => Probe::Present,
+                Some((Kind::Dir, _)) => Probe::Absent,
+                Some((Kind::Other, _)) => Probe::Unknown,
+                None => self.absent(node, last),
             }
-        }
-        if !self.fresh(node, &path) {
+        };
+        // A file added since the directory was first looked at would be
+        // missed by an absent answer alone, so the directory that gave it is
+        // looked at again.
+        if answer == Probe::Absent && !self.check(node, &path) {
             return Probe::Unknown;
         }
-        match self.lookup(node, last) {
-            Some((Kind::File, _)) => Probe::Present,
-            Some((Kind::Dir, _)) => Probe::Absent,
-            Some((Kind::Other, _)) => Probe::Unknown,
-            None => self.absent(node, last),
-        }
+        answer
     }
 
     fn lookup(&self, node: u32, name: &[u8]) -> Option<(Kind, u32)> {
@@ -611,14 +616,28 @@ impl RequireMap {
     /// Whether `node`'s listing still holds for the directory at `path`,
     /// checked the first time it is asked.
     fn fresh(&mut self, node: u32, path: &[u8]) -> bool {
-        let check = self.nodes[node as usize].check;
-        if check != Check::Unchecked {
-            return check == Check::Fresh;
+        match self.nodes[node as usize].check {
+            Check::Fresh => true,
+            Check::Stale => false,
+            Check::Unchecked => self.check(node, path),
         }
+    }
+
+    /// Look at the directory at `path` now: whether `node`'s listing still
+    /// holds for it. One that does not is [`Check::Stale`] for good.
+    fn check(&mut self, node: u32, path: &[u8]) -> bool {
         let path = Path::new(std::ffi::OsStr::from_bytes(path));
         let stored = &self.nodes[node as usize];
-        let fresh = Stamp::of(path) == Some(stored.stamp)
-            && (!stored.stamp.racy(stored.listed) || self.same_listing(node, path));
+        let mut fresh = Stamp::of(path) == Some(stored.stamp);
+        if fresh && stored.stamp.racy(stored.listed) {
+            // Listed again as of now, so a later look need not list it again
+            // once a change after now could no longer keep the stamp.
+            let at = now();
+            fresh = self.same_listing(node, path);
+            if fresh {
+                self.nodes[node as usize].listed = at;
+            }
+        }
         self.nodes[node as usize].check = if fresh { Check::Fresh } else { Check::Stale };
         fresh
     }
@@ -703,6 +722,25 @@ mod tests {
         let root = real(&lib);
         assert_eq!(map.probe(&root, b"foo/new.rb"), Probe::Unknown);
         assert_eq!(map.probe(&root, b"other.rb"), Probe::Absent);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_file_added_after_an_absent_answer_is_looked_at_on_disk() {
+        let dir = scratch("added");
+        std::fs::create_dir_all(dir.join("lib/foo")).unwrap();
+        let lib = dir.join("lib");
+        let mut map = map_of(std::slice::from_ref(&lib));
+        let root = real(&lib);
+        assert_eq!(map.probe(&root, b"new.rb"), Probe::Absent);
+        assert_eq!(map.probe(&root, b"foo/new.rb"), Probe::Absent);
+        std::fs::write(lib.join("foo/new.rb"), "").unwrap();
+        assert_eq!(map.probe(&root, b"foo/new.rb"), Probe::Unknown);
+        assert_eq!(map.probe(&root, b"foo/other.rb"), Probe::Unknown);
+        assert_eq!(map.probe(&root, b"other.rb"), Probe::Absent);
+        std::fs::write(lib.join("new.rb"), "").unwrap();
+        assert_eq!(map.probe(&root, b"new.rb"), Probe::Unknown);
+        assert_eq!(map.probe(&root, b"other.rb"), Probe::Unknown);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
