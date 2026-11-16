@@ -229,6 +229,30 @@ fn loaded(sandbox: &Sandbox, json_spec: &str) {
     assert_eq!(lines[6], r#"["x\n", "y"]"#, "{out}");
 }
 
+/// Each built-in, once required, reports the upstream gem version the
+/// built-in table claims for it.
+#[test]
+fn each_built_in_reports_the_version_it_is_substituted_at() {
+    let out = Command::new(SPINEL)
+        .args([
+            "-e",
+            r#"%w[date digest etc fcntl io/console json stringio strscan zlib].each { |f| require f }
+puts Date::VERSION, Digest::VERSION, Etc::VERSION, Fcntl::VERSION,
+  IO::ConsoleMode::VERSION, JSON::VERSION, StringIO::VERSION,
+  StringScanner::Version, Zlib::VERSION"#,
+        ])
+        .output()
+        .expect("spinel runs");
+    let out = ok(&out, "spinel -e");
+    assert_eq!(
+        out.lines().collect::<Vec<_>>(),
+        [
+            "3.5.1", "3.2.1", "1.4.6", "1.3.0", "0.8.2", "2.18.0", "3.2.0", "3.1.6", "3.2.3"
+        ],
+        "{out}"
+    );
+}
+
 #[test]
 fn the_lock_installs_the_built_ins_and_skips_ext() {
     let server = Server::start();

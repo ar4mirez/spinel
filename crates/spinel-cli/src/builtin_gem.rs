@@ -37,7 +37,8 @@ pub struct Builtin {
 }
 
 /// The built-in gems a lockfile's pin is substituted for, each at the version
-/// its Ruby source claims (the test below reads each one's constant).
+/// its Ruby source claims (an integration test, `tests/builtin_gem.rs`,
+/// requires each one and checks its runtime constant).
 ///
 /// ponytail: only the built-ins whose source names a gem version are listed.
 /// `monitor` (#46) declares none, `socket` and `objspace` are not gems, and
@@ -236,34 +237,9 @@ mod tests {
         assert_eq!(skew(&v("1.18.0"), &v("2.18.0")), Skew::Major);
     }
 
-    /// Each built-in's version is the one its Ruby source claims, so the
-    /// table cannot drift from what `require` loads.
     #[test]
-    fn each_version_is_the_one_its_source_claims() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let sources = [
-            ("date", "lib/date.rb", "VERSION = \""),
-            ("digest", "lib/digest.rb", "VERSION = \""),
-            ("etc", "lib/etc.rb", "VERSION = \""),
-            ("fcntl", "lib/fcntl.rb", "VERSION = \""),
-            ("io-console", "lib/io/console.rb", "VERSION = \""),
-            ("json", "stdlib/json/version.rb", "VERSION = '"),
-            ("stringio", "lib/stringio.rb", "VERSION = \""),
-            ("strscan", "lib/strscan.rb", "Version = \""),
-            ("zlib", "lib/zlib.rb", "  VERSION = \""),
-        ];
-        assert_eq!(sources.len(), BUILTINS.len());
-        for (name, file, marker) in sources {
-            let text = std::fs::read_to_string(root.join(file)).unwrap();
-            let claimed = text
-                .lines()
-                .find_map(|l| {
-                    let rest = &l[l.find(marker)? + marker.len()..];
-                    Some(rest[..rest.find(['"', '\''])?].to_owned())
-                })
-                .unwrap_or_else(|| panic!("{file} names no version"));
-            assert_eq!(find(name).unwrap().version, claimed, "{name}");
-        }
+    fn only_the_listed_gems_are_built_ins() {
+        assert_eq!(find("json").map(|b| b.version), Some("2.18.0"));
         assert_eq!(find("bigdecimal"), None);
     }
 

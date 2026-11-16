@@ -811,14 +811,29 @@ impl Session {
 
         // A gem Spinel ships as a built-in is not fetched: the built-in
         // stands in for it (#83, docs/package-manager.md, section 6). Its
-        // skew from the lock is judged for every one before anything is
-        // written, so a major version apart fails the install as it was.
+        // gemspec is checked and its skew from the lock judged for every one
+        // before anything is written, so a gemspec RubyGems would refuse or
+        // a major version apart fails the install as it was.
         let (builtins, to_install): (Vec<Spec>, Vec<Spec>) = to_fetch
             .into_iter()
             .partition(|s| builtin_gem::find(&s.name).is_some());
-        let mut skewed = false;
+        let mut refused = false;
+        let mut gemspecs = Vec::with_capacity(builtins.len());
         for spec in &builtins {
             let builtin = builtin_gem::find(&spec.name).expect("partitioned on it");
+            match gem_spec::from_yaml(builtin_gem::gemspec_yaml(spec, builtin).as_bytes()).and_then(
+                |s| {
+                    s.verify()
+                        .map_err(|e| format!("RubyGems would refuse it: {e}"))?;
+                    s.to_ruby_for_cache()
+                },
+            ) {
+                Ok(gemspec) => gemspecs.push(gemspec),
+                Err(err) => {
+                    self.fail(format!("{}: {err}", spec.full_name()));
+                    refused = true;
+                }
+            }
             let shipped = gem_version::Version::new(builtin.version)
                 .expect("a built-in's version is a version");
             match builtin_gem::skew(&spec.version, &shipped) {
@@ -844,20 +859,17 @@ impl Session {
                         spec.name,
                         format!("~> {}", builtin.version)
                     ));
-                    skewed = true;
+                    refused = true;
                 }
             }
         }
-        if skewed {
+        if refused {
             return Err(Stop(ExitCode::FAILURE));
         }
-        for spec in &builtins {
+        for (spec, gemspec) in builtins.iter().zip(gemspecs) {
             let builtin = builtin_gem::find(&spec.name).expect("partitioned on it");
             let gem_dir = builtin_gem::make_gem_dir(&self.home, builtin)
                 .and_then(std::path::absolute)
-                .map_err(|err| self.fail(format!("{}: {err}", spec.full_name())))?;
-            let gemspec = gem_spec::from_yaml(builtin_gem::gemspec_yaml(spec, builtin).as_bytes())
-                .and_then(|s| s.to_ruby_for_cache())
                 .map_err(|err| self.fail(format!("{}: {err}", spec.full_name())))?;
             local_links.push(gem_home::LocalLink {
                 full_name: spec.full_name(),
@@ -1344,10 +1356,6 @@ fn bundler_scopes() -> [String; 2] {
     ["ruby", spinel_vm::ENGINE].map(|engine| format!("{engine}/{ruby_version}"))
 }
 
-/// Point Bundler at the GEM_HOME: `BUNDLE_PATH` in the project's
-/// `.bundle/config`, written as `bundle config set --local path` writes it,
-/// keeping every other setting there. Nothing is written when it is
-/// already so.
 /// `.spinel/substitutions.json`, beside the GEM_HOME.
 const SUBSTITUTIONS: &str = "substitutions.json";
 
@@ -1379,6 +1387,10 @@ fn write_substitutions(root: &Path, builtins: &[Spec]) -> std::io::Result<()> {
     write_atomically(&path, text.as_bytes())
 }
 
+/// Point Bundler at the GEM_HOME: `BUNDLE_PATH` in the project's
+/// `.bundle/config`, written as `bundle config set --local path` writes it,
+/// keeping every other setting there. Nothing is written when it is
+/// already so.
 fn write_bundle_config(root: &Path) -> std::io::Result<()> {
     let path = root.join(".bundle/config");
     let existing = match std::fs::read_to_string(&path) {
