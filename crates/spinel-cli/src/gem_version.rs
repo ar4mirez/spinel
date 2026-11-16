@@ -59,7 +59,9 @@ impl Segment {
         matches!(self, Segment::Number(n) if n == "0")
     }
 
-    fn as_str(&self) -> &str {
+    /// The segment as `segments` lists it: digits without their leading
+    /// zeros, or the letters.
+    pub fn as_str(&self) -> &str {
         match self {
             Segment::Number(s) | Segment::Letters(s) => s,
         }
@@ -245,10 +247,6 @@ impl Version {
     }
 
     /// `segments`.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "`Gem::Version`'s API; only tests read it so far")
-    )]
     pub fn segments(&self) -> &[Segment] {
         &self.segments
     }

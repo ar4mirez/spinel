@@ -33,6 +33,9 @@ class GemfileEval
   # Bundler::Dsl::VALID_KEYS, the names a git_source may not take.
   RESERVED = %w[group groups git path glob name branch ref tag require submodules
                 platform platforms source install_if force_ruby_platform].freeze
+  # Bundler::Injector::INJECTED_GEMS: the name `spinel add` evaluates its
+  # new `gem` lines under.
+  INJECTED_GEMS = "injected gems"
   # Gem::Requirement::PATTERN.
   REQUIREMENT = /\A\s*(=|!=|>=|<=|~>|>|<)?\s*([0-9]+(?:\.[0-9a-zA-Z]+)*(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?)\s*\z/
 
@@ -393,8 +396,22 @@ class GemfileEval
       # ponytail: compares requirement strings, where Gem::Requirement#== compares
       # versions, so `= 1` and `= 1.0` count as different here.
       if current["requirements"].sort != dep["requirements"].sort
+        # What `spinel add` evaluates as `injected gems`, as Bundler's
+        # Injector does, says why, word for word.
+        # ponytail: the prompt names `bundle update`, which works on the
+        # GEM_HOME `spinel install` writes. Upgrade: `spinel update` (#87).
+        prompt = ""
+        if File.basename(@gemfile) == INJECTED_GEMS
+          open = current["requirements"].include?(">= 0")
+          prompt = if dep["requirements"].include?(">= 0") && !open
+            ". Gem already added"
+          else
+            ". If you want to update the gem version, run `bundle update #{dep["name"]}`" +
+              (open ? "" : ". You may also need to change the version requirement specified in the Gemfile if it's too restrictive.")
+          end
+        end
         raise Error, "You cannot specify the same gem twice with different version requirements.\n" \
-          "You specified: #{shown.(current)} and #{shown.(dep)}"
+          "You specified: #{shown.(current)} and #{shown.(dep)}#{prompt}"
       end
       if source_key(current["source"]) != source_key(dep["source"])
         raise Error, "You cannot specify the same gem twice coming from different sources.\n" \
@@ -425,7 +442,11 @@ end
 
 dsl = GemfileEval.new
 begin
-  dsl.eval_gemfile(gemfile)
+  # `spinel add` puts these in front of this file: the Gemfile as it would
+  # be, read in place of the one on disk, and the lines Bundler's Injector
+  # evaluates after it.
+  dsl.eval_gemfile(gemfile, $spinel_gemfile_contents)
+  dsl.eval_gemfile(GemfileEval::INJECTED_GEMS, $spinel_injected_gems) if $spinel_injected_gems
   result = dsl.to_h
 rescue StandardError, ScriptError => e
   where = e.backtrace.to_a.find { |line| dsl.gemfiles.any? { |file| line.start_with?("#{file}:") } }
