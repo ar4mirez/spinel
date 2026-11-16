@@ -271,8 +271,8 @@ const EMPTIED_BLOCKS: [&str; 4] = ["group", "source", "env", "install_if"];
 /// `gem` statement naming one of `names`, the whole lines it is on taken
 /// out (with a comment after it, and every line of a call written across
 /// several), and without a `group`, `source`, `env` or `install_if` block
-/// that removal leaves empty, as `bundle remove` takes those out. Every
-/// other byte stays. A statement that shares a line with other code is left
+/// that removal leaves empty, with a blank line right after its `end`, as
+/// `bundle remove` takes those out. Every other byte stays. A statement that shares a line with other code is left
 /// where it is; the evaluation after says it could not be removed.
 pub(crate) fn remove(source: &[u8], names: &[String]) -> Vec<u8> {
     let parsed = spinel_parse::parse(source);
@@ -442,12 +442,17 @@ fn emptied_block(
     if at > end_line || !source[at..end_line].iter().all(u8::is_ascii_whitespace) {
         return None;
     }
-    whole_lines(source, expr.span.start as usize, end).filter(|_| {
+    let lines = whole_lines(source, expr.span.start as usize, end).filter(|_| {
         let last = &source[end_line..line_end(source, end)];
         last.iter()
             .filter(|b| !b.is_ascii_whitespace())
             .eq(b"end".iter())
-    })
+    })?;
+    // A blank line (exactly "\n") right after the `end` goes with it, as
+    // `bundle remove` glues a lone "\n" onto the line before it before
+    // `remove_nested_blocks` drops that line.
+    let to = lines.end + usize::from(source[lines.end..].starts_with(b"\n"));
+    Some(lines.start..to)
 }
 
 /// The end of the line `at` is on, past its newline (or the end of the
@@ -642,6 +647,20 @@ mod tests {
                 &["minitest", "tilt"]
             ),
             "source \"x\"\n\n# gem \"tilt\" is commented\ngem \"rake\" # tasks\n\ngem \"x\", git: \"https://e/x\" if false\n"
+        );
+        // The blank line after its `end` goes with it, nested or not; one
+        // after a gem line stays. What `bundle remove tilt rake` 4.0.20
+        // left of the same file, but for the last newline.
+        assert_eq!(
+            removed(
+                "# my app\nsource \"x\"\n\ngem \"rack-session\"\n\ngroup :development, :test do\n  gem \"tilt\"\nend\n\ngroup :test do\n  # keep me\n  gem \"rake\"\nend\n\ngroup :a do\n  group :b do\n    gem \"tilt\"\n  end\n\n  gem \"x\"\nend\n",
+                &["tilt", "rake"]
+            ),
+            "# my app\nsource \"x\"\n\ngem \"rack-session\"\n\ngroup :test do\n  # keep me\nend\n\ngroup :a do\n  gem \"x\"\nend\n"
+        );
+        assert_eq!(
+            removed("gem \"a\"\n\ngem \"b\"\n", &["a"]),
+            "\ngem \"b\"\n"
         );
         // Blank lines inside go with it, and a comment after its `do`.
         assert_eq!(
