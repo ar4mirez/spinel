@@ -208,13 +208,26 @@ The `spinel-ext` ABI version is part of the ext cache key `~/.spinel/store/ext/<
 
 `crates/spinel-cli/tests/add.rs` runs it against the resolver's snapshot of rubygems.org's index and the install snapshot's `.gem`s, served on 127.0.0.1, on Gemfiles it writes, and checks every byte of each Gemfile after: `spinel add sinatra` on one with comments, single quotes, odd spacing and no last newline, which `spinel install --frozen` then finds unchanged; requirements given and not; groups into the blocks that name them and, with none, as an option; a gem already listed, with the same requirement and with another; and an unmet requirement, an unknown gem, a gem whose `.gem` cannot be fetched and `--git`, each leaving the Gemfile, the lockfile and the GEM_HOME as they were. The lines expected are what `bundle add` 4.0.20 wrote for the same Gemfiles and index, but for those a block takes.
 
+### 10. `spinel remove`
+
+`crates/spinel-cli/src/remove.rs` is `bundle remove` (`CLI::Remove`, `Injector#remove`) followed by section 8, and `gemfile_edit::remove` takes the lines out:
+
+- **Arguments.** `spinel remove GEM...`. None is Bundler's `Please specify gems to remove.`, exit 15. It prints `Removing gems from <the Gemfile's absolute path>`, then each gem must be one the evaluated Gemfile lists, else Bundler's `` `name` is not specified in <path> so it could not be removed. ``, exit 4; a name given twice is not listed the second time.
+- **The edit.** `spinel_ast` finds every `gem` statement whose first argument is the gem's name, written as a String or a Symbol, with or without parentheses, at the top level, in a block or in either branch of an `if`, and the modifier form `gem "name" if cond` as a whole. Each goes with the whole lines it is written on, a comment after it and every line of a call written across several included. A top-level or nested `group`, `source`, `env` or `install_if` block left with nothing but blank lines between its `do` line and an `end` alone on its line goes too, as `remove_nested_blocks` takes it, with the one blank line right after its `end`, which Bundler's merge of a lone `"\n"` onto the line before has glued to it; a blank line after a removed `gem` line stays, as it does under Bundler; a block that keeps a comment, a `platforms` block and a block already empty stay, as they do under Bundler. Nothing else in the file changes, its last newline or the lack of one included, where `bundle remove` rewrites the file with exactly one. A statement sharing its line with other code is left where it is.
+- **The check.** The edited Gemfile is evaluated before anything is written, as `cross_check_for_errors` evaluates it: a gem not asked for that would go too is Bundler's `Gems could not be removed. name (req) would also have been removed. Bundler cannot continue.`, exit 15, and a gem asked for that is still listed (its line shared, or only in a file `eval_gemfile` reads) is `name could not be removed.`, then `No gems were removed from the gemfile.` when none was. Each one removed is `name (req) was removed.`, as `pretty_dependency` writes it.
+- **The lockfile.** The Gemfile as it now reads is resolved with the lockfile held (#79), so the gems removed and those nothing left depends on leave the lockfile, its `CHECKSUMS` and the GEM_HOME, and every other locked version stays; a removal needs no index. Then section 8 installs it.
+- **Nothing half-written.** As with `spinel add`, the Gemfile is written just before the lockfile, once everything is linked, and put back if the lockfile cannot be; a failed removal leaves both byte for byte.
+- `// ponytail:` only the Gemfile itself is edited; a gem a file `eval_gemfile` reads lists could not be removed, where Bundler also edits that file. Upgrade: run the edit over each file the evaluator names.
+
+`crates/spinel-cli/tests/remove.rs` runs it against the same snapshots as `tests/add.rs`, on Gemfiles it writes: Sinatra and Tilt taken out of one with comments, single quotes, odd spacing, a call across two lines, a `group` block and no last newline, with the index gone, leaving every other byte, the lockfile without Sinatra and the gems only it needed (rack-session's rack and base64 stay), and a Gemfile `spinel install --frozen` finds unchanged; Bundler's errors for a gem not listed, one named twice and none; a gem sharing its line, and a line that would take another gem with it; and an install that cannot link, each leaving the Gemfile and the lockfile as they were. The Gemfiles expected are what `bundle remove` 4.0.20 left of the same files, but for the last newline.
+
 ## Commands
 
 | command | does |
 |---|---|
 | `spinel install [--frozen]` | resolve (respecting lock) + install. `--frozen` errors if lock would change (CI). Section 8. |
 | `spinel add <gem>[@req]... [--group dev] [--git url]` | write a `gem` line into the Gemfile where `spinel_ast` finds its place, then install; nothing is written if that fails. Section 9. |
-| `spinel remove <gem>` | inverse |
+| `spinel remove <gem>...` | take each gem's `gem` lines out of the Gemfile, and a `group` block that leaves empty, then install with the lockfile held, so only it and what only it needed leave the lock; nothing is written if that fails. Section 10. |
 | `spinel update [gem...]` | unlock named gems (or all) and resolve |
 | `spinel x <gem> [args]` | see cli.md |
 | `spinel outdated` | phase 5 |

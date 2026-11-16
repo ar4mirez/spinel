@@ -12,6 +12,9 @@
 //! exactly put the lines at the end of that block instead, indented as its
 //! last statement is, and without the option, which the block supplies;
 //! Bundler appends those too.
+//!
+//! [`remove`] is the inverse, for `spinel remove` (#86): the lines of each
+//! `gem` statement taken out of those same bytes.
 
 use spinel_ast::{BlockArg, Expr, ExprKind, StrPart};
 
@@ -260,6 +263,207 @@ fn leading_space(source: &[u8], start: usize) -> Vec<u8> {
         .collect()
 }
 
+/// The blocks `bundle remove` takes out once a removal leaves them empty
+/// (`Injector#remove_nested_blocks`).
+const EMPTIED_BLOCKS: [&str; 4] = ["group", "source", "env", "install_if"];
+
+/// The Gemfile edit behind `spinel remove` (#86): `source` without each
+/// `gem` statement naming one of `names`, the whole lines it is on taken
+/// out (with a comment after it, and every line of a call written across
+/// several), and without a `group`, `source`, `env` or `install_if` block
+/// that removal leaves empty, with a blank line right after its `end`, as
+/// `bundle remove` takes those out. Every other byte stays. A statement that shares a line with other code is left
+/// where it is; the evaluation after says it could not be removed.
+pub(crate) fn remove(source: &[u8], names: &[String]) -> Vec<u8> {
+    let parsed = spinel_parse::parse(source);
+    if !parsed.is_ok() {
+        return source.to_vec();
+    }
+    let mut ranges = Vec::new();
+    removals(source, &parsed.program.body, names, &mut ranges);
+    ranges.sort_unstable_by_key(|r| r.start);
+    let mut out = Vec::with_capacity(source.len());
+    let mut at = 0;
+    for range in ranges {
+        if range.start >= at {
+            out.extend_from_slice(&source[at..range.start]);
+            at = range.end;
+        }
+    }
+    out.extend_from_slice(&source[at..]);
+    out
+}
+
+/// The byte ranges to take out of `body`'s statements, into `out`. Whether
+/// every statement of `body` goes.
+fn removals(
+    source: &[u8],
+    body: &[Expr],
+    names: &[String],
+    out: &mut Vec<std::ops::Range<usize>>,
+) -> bool {
+    let mut all = !body.is_empty();
+    for expr in body {
+        if names_gem(expr, names) || modifier_of_gem(expr, names) {
+            match whole_lines(source, expr.span.start as usize, expr.span.end as usize) {
+                Some(range) => out.push(range),
+                None => all = false,
+            }
+            continue;
+        }
+        let mut gone = false;
+        match &expr.kind {
+            ExprKind::Call(call) => {
+                let Some(BlockArg::Block(block)) = &call.block else {
+                    continue;
+                };
+                let mut inner = Vec::new();
+                let emptied = removals(source, &block.body, names, &mut inner);
+                let whole = if emptied
+                    && call.receiver.is_none()
+                    && EMPTIED_BLOCKS.contains(&&*call.name)
+                {
+                    emptied_block(source, expr, call, &inner)
+                } else {
+                    None
+                };
+                match whole {
+                    Some(range) => {
+                        out.push(range);
+                        gone = true;
+                    }
+                    None => out.extend(inner),
+                }
+            }
+            ExprKind::If(branch) => {
+                removals(source, &branch.then_body, names, out);
+                if let Some(other) = &branch.else_body {
+                    removals(source, other, names, out);
+                }
+            }
+            _ => {}
+        }
+        all &= gone;
+    }
+    all
+}
+
+/// `gem "name", ...` for one of `names`, written as a String or Symbol.
+fn names_gem(expr: &Expr, names: &[String]) -> bool {
+    let ExprKind::Call(call) = &expr.kind else {
+        return false;
+    };
+    if call.receiver.is_some() || &*call.name != "gem" {
+        return false;
+    }
+    let Some(first) = call.args.first() else {
+        return false;
+    };
+    let (ExprKind::Str(lit) | ExprKind::Sym(lit)) = &first.kind else {
+        return false;
+    };
+    let [StrPart::Bytes(bytes)] = lit.parts.as_slice() else {
+        return false;
+    };
+    names.iter().any(|n| n.as_bytes() == &bytes[..])
+}
+
+/// `gem "name" if cond` (or `unless`): the modifier form, which `bundle
+/// remove` takes out with its line.
+fn modifier_of_gem(expr: &Expr, names: &[String]) -> bool {
+    let ExprKind::If(branch) = &expr.kind else {
+        return false;
+    };
+    match (branch.then_body.as_slice(), &branch.else_body) {
+        ([gem], None) => gem.span.start < branch.predicate.span.start && names_gem(gem, names),
+        _ => false,
+    }
+}
+
+/// The whole lines from `start` to `end`, through the newline after `end`,
+/// when nothing but space comes before `start` on its line and nothing but
+/// space and a comment after `end` on its.
+fn whole_lines(source: &[u8], start: usize, end: usize) -> Option<std::ops::Range<usize>> {
+    let from = line_start(source, start);
+    if !source[from..start].iter().all(|&b| b == b' ' || b == b'\t') {
+        return None;
+    }
+    let to = line_end(source, end);
+    let rest = &source[end..to];
+    let rest = rest.strip_suffix(b"\n").unwrap_or(rest);
+    let rest = rest.strip_suffix(b"\r").unwrap_or(rest);
+    let code = rest
+        .iter()
+        .position(|&b| b == b'#')
+        .map_or(rest, |hash| &rest[..hash]);
+    code.iter()
+        .all(|&b| b == b' ' || b == b'\t')
+        .then_some(from..to)
+}
+
+/// The lines of a `name ... do ... end` block whose statements `inner` takes
+/// out, when what is left between its `do` line and its `end` line is blank
+/// and the `end` is alone on its line, as `remove_nested_blocks` finds them.
+fn emptied_block(
+    source: &[u8],
+    expr: &Expr,
+    call: &spinel_ast::Call,
+    inner: &[std::ops::Range<usize>],
+) -> Option<std::ops::Range<usize>> {
+    let end = expr.span.end as usize;
+    if !source[..end].ends_with(b"end") {
+        return None;
+    }
+    let end_line = line_start(source, end - 3);
+    // The `do`: after the arguments, the last thing on its line but for a
+    // comment.
+    let after_args = call.args.last().map_or(call.name_span.end, |a| a.span.end) as usize;
+    let header = line_end(source, after_args);
+    let opening = &source[after_args..header];
+    let opening = std::str::from_utf8(opening).ok()?;
+    let opening = opening.trim_start_matches([' ', '\t', ')']);
+    let opening = opening.strip_prefix("do")?;
+    let opening = opening.split('#').next().unwrap_or("");
+    if !opening.trim().is_empty() || header > end_line {
+        return None;
+    }
+    let mut at = header;
+    let mut sorted: Vec<_> = inner.to_vec();
+    sorted.sort_unstable_by_key(|r| r.start);
+    for range in &sorted {
+        if !source[at..range.start.max(at)]
+            .iter()
+            .all(u8::is_ascii_whitespace)
+        {
+            return None;
+        }
+        at = at.max(range.end);
+    }
+    if at > end_line || !source[at..end_line].iter().all(u8::is_ascii_whitespace) {
+        return None;
+    }
+    let lines = whole_lines(source, expr.span.start as usize, end).filter(|_| {
+        let last = &source[end_line..line_end(source, end)];
+        last.iter()
+            .filter(|b| !b.is_ascii_whitespace())
+            .eq(b"end".iter())
+    })?;
+    // A blank line (exactly "\n") right after the `end` goes with it, as
+    // `bundle remove` glues a lone "\n" onto the line before it before
+    // `remove_nested_blocks` drops that line.
+    let to = lines.end + usize::from(source[lines.end..].starts_with(b"\n"));
+    Some(lines.start..to)
+}
+
+/// The end of the line `at` is on, past its newline (or the end of the
+/// file).
+fn line_end(source: &[u8], at: usize) -> usize {
+    source[at..]
+        .iter()
+        .position(|&b| b == b'\n')
+        .map_or(source.len(), |nl| at + nl + 1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -385,6 +589,114 @@ mod tests {
         assert_eq!(
             added("", &[gem("b", "~> 1.0")], &[]),
             "\ngem \"b\", \"~> 1.0\"\n"
+        );
+    }
+
+    fn removed(source: &str, names: &[&str]) -> String {
+        let names: Vec<String> = names.iter().map(|n| (*n).to_owned()).collect();
+        String::from_utf8(remove(source.as_bytes(), &names)).unwrap()
+    }
+
+    #[test]
+    fn a_gem_line_goes_and_nothing_else_does() {
+        let source = "# frozen_string_literal: true\nsource  'x'   # index\n\n# Tools\ngem 'rake',   '~> 13.0' # tasks\n\ngem \"tilt\"";
+        assert_eq!(
+            removed(source, &["rake"]),
+            "# frozen_string_literal: true\nsource  'x'   # index\n\n# Tools\n\ngem \"tilt\""
+        );
+        // The last line, without its newline; a commented-out one stays.
+        assert_eq!(
+            removed("# gem \"tilt\"\ngem \"rake\"\ngem \"tilt\"", &["tilt"]),
+            "# gem \"tilt\"\ngem \"rake\"\n"
+        );
+        // Parentheses, a Symbol, several lines, `\r\n`, a modifier.
+        assert_eq!(
+            removed(
+                "gem(\"a\", \"~> 1\")\r\ngem :b\r\ngem \"c\",\r\n  \"~> 2\",\r\n  require: false\r\ngem \"d\" if ENV[\"D\"]\r\nkeep\r\n",
+                &["a", "b", "c", "d"]
+            ),
+            "keep\r\n"
+        );
+    }
+
+    #[test]
+    fn a_gem_sharing_its_line_stays() {
+        for source in [
+            "gem \"a\"; gem \"b\"\n",
+            "x = 1; gem \"a\"\n",
+            "group :dev do gem \"a\" end\n",
+        ] {
+            assert_eq!(removed(source, &["a"]), source, "{source:?}");
+        }
+        // `if` around it stays; the line inside goes.
+        assert_eq!(
+            removed(
+                "if true\n  gem \"a\"\nelse\n  gem \"a\", \"1\"\nend\n",
+                &["a"]
+            ),
+            "if true\nelse\nend\n"
+        );
+    }
+
+    #[test]
+    fn a_block_left_empty_goes_as_bundle_remove_takes_it() {
+        // What `bundle remove minitest tilt` 4.0.20 left of the same file.
+        assert_eq!(
+            removed(
+                "source \"x\"\n\n# gem \"tilt\" is commented\ngem \"rake\" # tasks\n\ngroup :test do\n  group :ci do\n    gem \"minitest\",\n      \"~> 6.0\",\n      require: false\n  end\nend\ngem(\"tilt\", \"~> 2.0\")\ngem \"x\", git: \"https://e/x\" if false\n",
+                &["minitest", "tilt"]
+            ),
+            "source \"x\"\n\n# gem \"tilt\" is commented\ngem \"rake\" # tasks\n\ngem \"x\", git: \"https://e/x\" if false\n"
+        );
+        // The blank line after its `end` goes with it, nested or not; one
+        // after a gem line stays. What `bundle remove tilt rake` 4.0.20
+        // left of the same file, but for the last newline.
+        assert_eq!(
+            removed(
+                "# my app\nsource \"x\"\n\ngem \"rack-session\"\n\ngroup :development, :test do\n  gem \"tilt\"\nend\n\ngroup :test do\n  # keep me\n  gem \"rake\"\nend\n\ngroup :a do\n  group :b do\n    gem \"tilt\"\n  end\n\n  gem \"x\"\nend\n",
+                &["tilt", "rake"]
+            ),
+            "# my app\nsource \"x\"\n\ngem \"rack-session\"\n\ngroup :test do\n  # keep me\nend\n\ngroup :a do\n  gem \"x\"\nend\n"
+        );
+        assert_eq!(removed("gem \"a\"\n\ngem \"b\"\n", &["a"]), "\ngem \"b\"\n");
+        // Blank lines inside go with it, and a comment after its `do`.
+        assert_eq!(
+            removed(
+                "group :dev do # tools\n\n  gem \"a\"\n\nend\nkeep\n",
+                &["a"]
+            ),
+            "keep\n"
+        );
+        // A comment inside, a gem left, a comment after `end`, a block
+        // `bundle remove` keeps, or one already empty: the block stays.
+        for (source, left) in [
+            (
+                "group :dev do\n  # tools\n  gem \"a\"\nend\n",
+                "group :dev do\n  # tools\nend\n",
+            ),
+            (
+                "group :dev do\n  gem \"a\"\n  gem \"b\"\nend\n",
+                "group :dev do\n  gem \"b\"\nend\n",
+            ),
+            (
+                "group :dev do\n  gem \"a\"\nend # dev\n",
+                "group :dev do\nend # dev\n",
+            ),
+            (
+                "platforms :ruby do\n  gem \"a\"\nend\n",
+                "platforms :ruby do\nend\n",
+            ),
+            ("group :test do\nend\ngem \"a\"\n", "group :test do\nend\n"),
+        ] {
+            assert_eq!(removed(source, &["a"]), left, "{source:?}");
+        }
+        // `source`, `env` and `install_if` blocks go as `group` ones do.
+        assert_eq!(
+            removed(
+                "source \"https://e\" do\n  gem \"a\"\nend\nenv \"X\" do\n  gem \"a\"\nend\ninstall_if -> { true } do\n  gem \"a\"\nend\n",
+                &["a"]
+            ),
+            ""
         );
     }
 }

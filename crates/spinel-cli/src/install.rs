@@ -229,8 +229,8 @@ pub(crate) async fn read_index(
     Ok(index)
 }
 
-/// Why `spinel install` (or `spinel add`) stopped: the exit status, after
-/// what to say was printed.
+/// Why `spinel install` (or `add`, or `remove`) stopped: the exit status,
+/// after what to say was printed.
 pub(crate) struct Stop(pub ExitCode);
 
 impl Stop {
@@ -255,9 +255,9 @@ pub fn run(frozen: bool) -> ExitCode {
     }
 }
 
-/// A new Gemfile `spinel add` writes once everything it installs is in
-/// place, just before the lockfile, and puts back if the lockfile cannot be
-/// written.
+/// A new Gemfile `spinel add` or `spinel remove` writes once everything it
+/// installs is in place, just before the lockfile, and puts back if the
+/// lockfile cannot be written.
 pub(crate) struct GemfileWrite<'a> {
     pub old: &'a [u8],
     pub new: &'a [u8],
@@ -273,7 +273,7 @@ pub(crate) struct Resolved {
 /// One evaluated Gemfile on its way to the GEM_HOME: where its project and
 /// lockfile are, the resolver's request, and the index client.
 pub(crate) struct Session {
-    /// The command whose messages these are: `install` or `add`.
+    /// The command whose messages these are: `install`, `add` or `remove`.
     command: &'static str,
     frozen: bool,
     gemfile_path: PathBuf,
