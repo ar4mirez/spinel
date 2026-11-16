@@ -3,7 +3,9 @@
 # Cold and warm fetch of a lockfile's gems into the global store (#81,
 # docs/package-manager.md, "Global store"), beside the same `.gem` files
 # fetched by `curl` alone, which is what the network costs; then a warm
-# install (#82): every gem already stored, linked into a project's GEM_HOME.
+# link (#82): every gem already stored, linked into a project's GEM_HOME;
+# then the whole `spinel install` (#84) of the lockfile and its Gemfile,
+# cold and warm, beside `bundle install` of the same when `bundle` is found.
 #
 #   bench/install.sh                  the Sinatra fixture's Gemfile.lock
 #   bench/install.sh path/Gemfile.lock
@@ -20,8 +22,11 @@
 # stub written) and into one already linked (nothing written). Both still
 # bring the index up to date first, one request.
 #
-# `spinel install` (#84) is what will time a whole install against
-# `bundle install`; until it lands this is the store and the linking.
+# `spinel install`, cold: an empty store and an empty GEM_HOME, the index
+# already up to date. Warm: every gem stored, the GEM_HOME empty. Again:
+# everything in place. `bundle install` (system Ruby) runs with a
+# `BUNDLE_PATH` and a cache of its own, cold with both empty and warm with
+# both full. Both read the lockfile, so neither resolves.
 #
 # Numbers go in the pull request, not into the repo (docs/roadmap.md, rule 7).
 
@@ -96,6 +101,37 @@ install_again_once() {
   "$spinel" fetch --source "$source_url" --gem-home "$work/project/.spinel/gem_home" "${gems[@]}"
 }
 
+# A project with the lockfile and the Gemfile beside it.
+app="$work/app"
+mkdir -p "$app"
+cp "$lock" "$app/Gemfile.lock"
+cp "$(dirname "$lock")/Gemfile" "$app/Gemfile"
+
+spinel_install_cold_once() {
+  rm -rf "$SPINEL_HOME/store" "$app/.spinel"
+  (cd "$app" && "$spinel" install)
+}
+
+spinel_install_warm_once() {
+  rm -rf "$app/.spinel"
+  (cd "$app" && "$spinel" install)
+}
+
+spinel_install_again_once() {
+  (cd "$app" && "$spinel" install)
+}
+
+bundle_cold_once() {
+  rm -rf "$work/bundle"
+  (cd "$app" && BUNDLE_PATH="$work/bundle/path" BUNDLE_USER_HOME="$work/bundle/home" \
+    BUNDLE_APP_CONFIG="$work/bundle/config" bundle install --quiet)
+}
+
+bundle_warm_once() {
+  (cd "$app" && BUNDLE_PATH="$work/bundle/path" BUNDLE_USER_HOME="$work/bundle/home" \
+    BUNDLE_APP_CONFIG="$work/bundle/config" bundle install --quiet)
+}
+
 # Report the medians of `runs` runs of one function: wall, and user + sys.
 report() {
   local label="$1" fn="$2" walls=() cpus=() line real user sys
@@ -118,3 +154,12 @@ report "spinel fetch, warm" warm_once
 install_fresh_once > /dev/null
 report "warm install, empty home" install_fresh_once
 report "warm install, linked home" install_again_once
+report "spinel install, cold" spinel_install_cold_once
+spinel_install_cold_once > /dev/null
+report "spinel install, warm" spinel_install_warm_once
+report "spinel install, again" spinel_install_again_once
+if command -v bundle > /dev/null; then
+  report "bundle install, cold" bundle_cold_once
+  bundle_cold_once > /dev/null
+  report "bundle install, warm" bundle_warm_once
+fi

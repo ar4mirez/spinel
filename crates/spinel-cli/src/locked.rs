@@ -66,6 +66,8 @@ pub struct Definition {
     gems_to_unlock: Vec<String>,
     changed_dependencies: Vec<String>,
     resolve_needed: bool,
+    /// Why a resolution is needed, as `lockfile_changed_reason` names it.
+    reasons: Reasons,
     /// A `DEPENDENCIES` line no Gemfile dependency equals (`deleted_deps`).
     deleted_deps: bool,
     /// `may_include_redundant_platform_specific_gems?`.
@@ -77,6 +79,27 @@ pub struct Definition {
     ruby_directive: bool,
     /// `@locked_bundler_version`: the lockfile's `BUNDLED WITH`.
     locked_bundler: Option<Version>,
+}
+
+/// What `Definition#initialize` notes as it converges the lockfile with the
+/// Gemfile, each named as `lockfile_changed_reason` names it.
+#[derive(Debug, Clone, Default)]
+struct Reasons {
+    /// `@source_changes`.
+    source_changes: bool,
+    /// `@missing_lockfile_dep`: a Gemfile gem the lockfile lists in
+    /// `DEPENDENCIES` but has no spec for.
+    missing_lockfile_dep: Option<String>,
+    /// `@locked_spec_with_missing_checksums`.
+    missing_checksums: Option<String>,
+    /// `@locked_spec_with_empty_checksums`.
+    empty_checksums: Option<String>,
+    /// `@locked_spec_with_missing_deps`: a spec depending on a gem the
+    /// lockfile does not have.
+    missing_deps: Option<String>,
+    /// `@locked_spec_with_invalid_deps`: a spec whose dependency no locked
+    /// version meets.
+    invalid_deps: Option<String>,
 }
 
 /// `Gem::Dependency#matches_spec?`: any version for no requirement.
@@ -195,7 +218,7 @@ impl Definition {
         // `converge_dependencies`, for the dependencies relevant here.
         let mut gems_to_unlock = Vec::new();
         let mut changed_dependencies = Vec::new();
-        let mut missing_lockfile_dep = false;
+        let mut missing_lockfile_dep = None;
         let generic_local = [gem_platform::generic(local)];
         for dep in dependencies {
             if dep.gem_platforms(&generic_local).is_empty() || !dep.current_platform() {
@@ -205,13 +228,13 @@ impl Definition {
             if dep.name != "bundler" {
                 // `@originally_locked_specs[name].first`: the last of them.
                 match locked.iter().rev().find(|b| b.spec.name == dep.name) {
-                    None => missing_lockfile_dep |= !changed,
-                    Some(build) => {
-                        if !matches(&dep.requirement, &build.spec.version) {
-                            gems_to_unlock.push(dep.name.clone());
-                            changed = true;
-                        }
+                    None if !changed => missing_lockfile_dep = Some(dep.name.clone()),
+                    None => {}
+                    Some(build) if !matches(&dep.requirement, &build.spec.version) => {
+                        gems_to_unlock.push(dep.name.clone());
+                        changed = true;
                     }
+                    Some(_) => {}
                 }
             }
             if changed {
@@ -228,28 +251,59 @@ impl Definition {
                     .map(|c| c.checksums.is_empty())
             })
         };
-        let missing_checksums = locked.iter().any(|b| checksum(b) == Some(None));
+        let missing_checksums = locked
+            .iter()
+            .find(|b| checksum(b) == Some(None))
+            .map(|b| b.spec.name.clone());
         let empty_checksums = locked
             .iter()
-            .any(|b| b.rubygems && checksum(b) == Some(Some(true)));
+            .find(|b| b.rubygems && checksum(b) == Some(Some(true)))
+            .map(|b| b.spec.name.clone());
         let specs: Vec<Spec> = locked.iter().map(|b| b.spec.clone()).collect();
         let names: HashSet<&str> = specs.iter().map(|s| s.name.as_str()).collect();
-        let mut bad_deps = false;
-        let bad: Vec<String> = specs
+        // `SpecSet#validate_deps`: the first dependency that fails says
+        // which, a gem missing or a version no locked spec meets.
+        let validate = |s: &Spec| {
+            for (name, req) in &s.dependencies {
+                if name == "bundler" {
+                    continue;
+                }
+                if !names.contains(name.as_str()) {
+                    return Some(true);
+                }
+                if !specs
+                    .iter()
+                    .any(|o| &o.name == name && matches(req, &o.version))
+                {
+                    return Some(false);
+                }
+            }
+            None
+        };
+        let mut missing_deps = Vec::new();
+        let mut invalid_deps = Vec::new();
+        for spec in &specs {
+            match validate(spec) {
+                Some(true) => missing_deps.push(spec),
+                Some(false) => invalid_deps.push(spec),
+                None => {}
+            }
+        }
+        let bad: Vec<String> = missing_deps
             .iter()
-            .filter(|s| {
-                !s.dependencies.iter().all(|(name, req)| {
-                    name == "bundler"
-                        || (names.contains(name.as_str())
-                            && specs
-                                .iter()
-                                .any(|o| &o.name == name && matches(req, &o.version)))
-                })
-            })
-            .map(Spec::full_name)
+            .chain(&invalid_deps)
+            .map(|s| s.full_name())
             .collect();
-        if !bad.is_empty() {
-            bad_deps = true;
+        let bad_deps = !bad.is_empty();
+        let reasons = Reasons {
+            source_changes,
+            missing_lockfile_dep,
+            missing_checksums,
+            empty_checksums,
+            missing_deps: missing_deps.first().map(|s| s.name.clone()),
+            invalid_deps: invalid_deps.first().map(|s| s.name.clone()),
+        };
+        if bad_deps {
             locked.retain(|b| !bad.contains(&b.spec.full_name()));
         }
 
@@ -257,9 +311,9 @@ impl Definition {
             || !changed_dependencies.is_empty()
             || current_platform_missing
             || !new_platforms.is_empty()
-            || missing_lockfile_dep
-            || missing_checksums
-            || empty_checksums
+            || reasons.missing_lockfile_dep.is_some()
+            || reasons.missing_checksums.is_some()
+            || reasons.empty_checksums.is_some()
             || bad_deps;
         let deleted_deps = lock.dependencies.iter().any(|locked_dep| {
             !dependencies
@@ -281,6 +335,7 @@ impl Definition {
             gems_to_unlock,
             changed_dependencies,
             resolve_needed: unlocking_ruby || something_changed,
+            reasons,
             deleted_deps,
             redundant_platform_gems,
             locked_ruby: lock.ruby_version.clone(),
@@ -299,6 +354,140 @@ impl Definition {
     /// `@platforms`: the resolution platforms.
     pub fn platforms(&self) -> &[GemPlatform] {
         &self.platforms
+    }
+
+    /// `lockfile_changes_summary("frozen mode is set")`, which
+    /// `ensure_equivalent_gemfile_and_lockfile` raises for an explicit
+    /// `--frozen`: why the lockfile would change and what the Gemfile added
+    /// and deleted, or `None` when it would not. `lock` is the lockfile this
+    /// was made from, `dependencies` every Gemfile dependency, and
+    /// `lockfile_name` the lockfile as the message names it. The command
+    /// that would update it is `spinel install`.
+    pub fn frozen_summary(
+        &self,
+        lock: &Lockfile,
+        dependencies: &[GemfileDependency],
+        lockfile_name: &str,
+    ) -> Option<String> {
+        // `SharedHelpers.pretty_dependency`.
+        let pretty = |name: &str, requirement: &Requirement, platforms: &[String]| {
+            let mut text = format!("* {name}");
+            if !requirement.none() {
+                text.push_str(&format!(" ({requirement})"));
+            }
+            let platforms = platforms.join(", ");
+            if !platforms.is_empty() && platforms != "ruby" {
+                text.push_str(&format!(" {platforms}"));
+            }
+            text
+        };
+        // `new_deps` and `deleted_deps`, as `Gem::Dependency#==` compares
+        // them: by name and requirement.
+        let added: Vec<String> = dependencies
+            .iter()
+            .filter(|d| {
+                !lock
+                    .dependencies
+                    .iter()
+                    .any(|l| l.name == d.name && l.requirement == d.requirement)
+            })
+            .map(|d| pretty(&d.name, &d.requirement, &d.platforms))
+            .collect();
+        let deleted: Vec<String> = lock
+            .dependencies
+            .iter()
+            .filter(|l| {
+                !dependencies
+                    .iter()
+                    .any(|d| l.name == d.name && l.requirement == d.requirement)
+            })
+            .map(|l| pretty(&l.name, &l.requirement, &[]))
+            .collect();
+        // ponytail: `@new_platforms` and `@removed_platforms` are empty, as
+        // nothing adds or removes a platform yet, and a dependency's source
+        // never changes, with one rubygems source. Upgrade with `spinel
+        // lock --add-platform` and git and path sources (#88).
+        if added.is_empty() && deleted.is_empty() && !self.resolve_needed {
+            return None;
+        }
+        // `change_reason`.
+        let reason = if !self.resolve_needed {
+            "some dependencies were deleted from your gemfile".to_owned()
+        } else if self.unlocking_ruby {
+            // `unlocking_reason`.
+            if self.gems_to_unlock.is_empty() {
+                "bundler is unlocking ruby".to_owned()
+            } else {
+                format!(
+                    "bundler is unlocking gems: ({})",
+                    self.gems_to_unlock.join(", ")
+                )
+            }
+        } else {
+            // `lockfile_changed_reason`.
+            let r = &self.reasons;
+            let quoted = |text: &str, name: &Option<String>| {
+                name.as_ref()
+                    .map(|n| text.replace("{}", &format!("\"{n}\"")))
+            };
+            [
+                r.source_changes
+                    .then(|| "the list of sources changed".to_owned()),
+                (!self.changed_dependencies.is_empty())
+                    .then(|| "the dependencies in your gemfile changed".to_owned()),
+                self.current_platform_missing
+                    .then(|| "your lockfile is missing the current platform".to_owned()),
+                (!self.new_platforms.is_empty())
+                    .then(|| "you are adding a new platform to your lockfile".to_owned()),
+                quoted("your lockfile is missing {}", &r.missing_lockfile_dep),
+                quoted(
+                    "your lockfile is missing a CHECKSUMS entry for {}",
+                    &r.missing_checksums,
+                ),
+                quoted(
+                    "your lockfile has an empty CHECKSUMS entry for {}",
+                    &r.empty_checksums,
+                ),
+                quoted(
+                    "your lockfile includes {} but not some of its dependencies",
+                    &r.missing_deps,
+                ),
+                quoted(
+                    "your lockfile does not satisfy dependencies of {}",
+                    &r.invalid_deps,
+                ),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(", ")
+        };
+        let mut chars = reason.chars();
+        let mut message: String = chars
+            .next()
+            .map(|c| c.to_ascii_uppercase())
+            .into_iter()
+            .collect();
+        message.push_str(chars.as_str().trim());
+        message.push_str(", but ");
+        if !message.starts_with("Your lockfile") {
+            message.push_str("the lockfile ");
+        }
+        message.push_str("can't be updated because frozen mode is set");
+        if !added.is_empty() {
+            message.push_str("\n\nYou have added to the Gemfile:\n");
+            message.push_str(&added.join("\n"));
+        }
+        if !deleted.is_empty() {
+            message.push_str("\n\nYou have deleted from the Gemfile:\n");
+            message.push_str(&deleted.join("\n"));
+        }
+        if !self.unlocking_ruby {
+            message.push_str(&format!(
+                "\n\nRun `spinel install` elsewhere and add the updated {lockfile_name} to version control.\n"
+            ));
+        }
+        Some(message)
     }
 
     /// The resolution when nothing changed: the lockfile's specs, or, when
@@ -651,7 +840,7 @@ fn normalized_remote(remote: &str) -> String {
 }
 
 /// A lockfile spec as the resolver reads it.
-fn locked_spec(spec: &LockedSpec) -> Spec {
+pub(crate) fn locked_spec(spec: &LockedSpec) -> Spec {
     Spec {
         name: spec.name.clone(),
         version: spec.version.clone(),
