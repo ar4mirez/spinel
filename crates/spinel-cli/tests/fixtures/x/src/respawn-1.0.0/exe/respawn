@@ -1,0 +1,6 @@
+#!/usr/bin/env ruby
+require "respawn"
+puts "engine #{RUBY_ENGINE}"
+puts "gem_ruby #{Gem.ruby}"
+puts "rbconfig_ruby #{RbConfig.ruby}"
+Respawn.children.each { |how, line| puts "child_#{how} #{line}" }
