@@ -484,6 +484,7 @@ fn new_lockfile(request: &Request, index: &Index, ruby_directive: bool) -> Strin
         index,
         &resolved,
         ruby_directive,
+        &[],
     )
     .write()
 }

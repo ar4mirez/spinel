@@ -336,12 +336,15 @@ fn a_failed_add_writes_nothing() {
     let out = sandbox.add(&["json"]);
     unchanged(&out, "a gem that does not fetch");
     assert!(stderr(&out).contains("json-"), "{}", stderr(&out));
-    // A git source, which does not install yet.
-    let out = sandbox.add(&["tilt", "--git", "https://example.com/tilt.git"]);
+    // A git repository that is not there (tests/git_path.rs adds one that
+    // is).
+    let missing = sandbox.root.join("no-such-repo");
+    let out = sandbox.add(&["tilt", "--git", &format!("file://{}", missing.display())]);
     unchanged(&out, "--git");
-    assert_eq!(
-        stderr(&out),
-        "spinel: add: tilt: a source of its own is not supported yet (#88)\n"
+    assert!(
+        stderr(&out).starts_with("Git error: command `git clone --bare"),
+        "{}",
+        stderr(&out)
     );
 }
 

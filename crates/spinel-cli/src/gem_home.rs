@@ -7,16 +7,21 @@
 //!
 //! ```text
 //! build_info/ cache/ doc/ extensions/ plugins/   Gem.ensure_gem_subdirectories
-//! gems/<full name>               a symlink to the store entry's gem/
+//! gems/<full name>               a symlink to the store entry's gem/, or to
+//!                                a git or path gem's directory (#88)
 //! specifications/<full name>.gemspec
 //!                                a real file: Gem::Installer#write_spec's text
 //! bin/<executable>               Gem::Installer#app_script_text, run by spinel
+//! bundler/gems/<base>-<rev>      a symlink to a git source's checkout, where
+//!                                Bundler looks for it (link_checkouts)
 //! ruby/<ver>/, spinel/<ver>/      where Bundler reads it (scope_view)
 //! ```
 //!
 //! Linking is idempotent: what is already right is left alone (a warm
 //! install writes nothing), and what a previous link made for a gem no
-//! longer asked for is removed. Nothing it did not make is touched. Every
+//! longer asked for is removed. Nothing it did not make is touched: a
+//! symlink in `gems/` is a link's, as `gem install` makes directories
+//! there, and nothing else is removed but the gemspec and stubs it wrote. Every
 //! file and symlink is made beside its place and renamed into it, so a
 //! reader never sees half of one. Every gem's gemspec is read before
 //! anything is written, so a gem RubyGems would refuse leaves the GEM_HOME
@@ -38,6 +43,10 @@ use std::path::{Path, PathBuf};
 
 use crate::gem_spec;
 use crate::gem_store::{self, GemId};
+
+/// What a scope view links besides [`SUBDIRECTORIES`]: `bundler/`, where
+/// Bundler looks for git checkouts (`Bundler.install_path`).
+const BUNDLER_DIR: &str = "bundler";
 
 /// `Gem::REPOSITORY_SUBDIRECTORIES`, which `gem install` makes in every
 /// GEM_HOME, and `bin/`, where it puts the executables.
@@ -69,6 +78,11 @@ pub enum Error {
     },
     /// Something not made by a link is where a link would go.
     Occupied(PathBuf),
+    /// A git or path gem's gemspec is one RubyGems would refuse.
+    Local {
+        gem: String,
+        message: String,
+    },
     Io(PathBuf, io::Error),
 }
 
@@ -81,9 +95,10 @@ impl fmt::Display for Error {
             }
             Error::Occupied(path) => write!(
                 f,
-                "{}: already there, and not a link into the store",
+                "{}: already there, and not a link Spinel made",
                 path.display()
             ),
+            Error::Local { gem, message } => write!(f, "{gem}: {message}"),
             Error::Io(path, e) => write!(f, "{}: {e}", path.display()),
         }
     }
@@ -133,11 +148,36 @@ struct Plan {
     stubs: Vec<(String, String)>,
 }
 
+/// A gem of a git or path source (#88), linked where its source has it: its
+/// gemspec evaluated, so nothing of it is read from a store entry.
+#[derive(Debug, Clone)]
+pub struct LocalLink {
+    pub full_name: String,
+    pub name: String,
+    /// `full_gem_path`: the directory of its gemspec.
+    pub gem_dir: PathBuf,
+    /// `to_ruby_for_cache`, written to `specifications/`.
+    pub gemspec: String,
+    pub require_paths: Vec<String>,
+    pub bindir: Option<String>,
+    pub executables: Vec<String>,
+    pub extensions: Vec<String>,
+}
+
 /// Link each stored gem, given with its store entry, into `home`, and remove
-/// what an earlier link made for gems not given. `store_gems` is the store's
-/// `gems/` directory; a symlink into it, or into another Spinel home's store,
-/// counts as made by a link.
-pub fn link(home: &Path, store_gems: &Path, gems: &[(GemId, PathBuf)]) -> Result<Report, Error> {
+/// what an earlier link made for gems not given.
+pub fn link(home: &Path, gems: &[(GemId, PathBuf)]) -> Result<Report, Error> {
+    link_all(home, gems, &[])
+}
+
+/// [`link`], with the gems of git and path sources beside the stored ones:
+/// `gems/<full name>` leads to the gem's own directory, so a path gem is
+/// read where it is and never copied.
+pub fn link_all(
+    home: &Path,
+    gems: &[(GemId, PathBuf)],
+    local: &[LocalLink],
+) -> Result<Report, Error> {
     let mut report = Report::default();
     let mut plans = Vec::new();
     for (id, entry) in gems {
@@ -193,6 +233,49 @@ pub fn link(home: &Path, store_gems: &Path, gems: &[(GemId, PathBuf)]) -> Result
             stubs,
         });
     }
+    for gem in local {
+        let gem_dir = gem.gem_dir.clone();
+        for path in &gem.require_paths {
+            report.require_dirs.push(gem_dir.join(path));
+        }
+        let mut stubs = Vec::new();
+        for exe in &gem.executables {
+            let bin_path = match &gem.bindir {
+                Some(dir) => gem_dir.join(dir).join(exe),
+                None => gem_dir.join(exe),
+            };
+            if !bin_path.exists() || !inside(&bin_path, &gem_dir) {
+                continue;
+            }
+            make_executable(&bin_path)?;
+            stubs.push((
+                exe.clone(),
+                app_script_text(spinel_vm::ENGINE, &gem.name, exe),
+            ));
+        }
+        report.executables.push((
+            gem.name.clone(),
+            stubs.iter().map(|(exe, _)| exe.clone()).collect(),
+        ));
+        if !gem.extensions.is_empty() {
+            report.warnings.push(format!(
+                "{} has extensions, which Spinel does not build: RubyGems will not activate it",
+                gem.full_name
+            ));
+        }
+        if gem.gemspec.contains('\0') {
+            return Err(Error::Local {
+                gem: gem.full_name.clone(),
+                message: "its gemspec has a NUL in it".to_owned(),
+            });
+        }
+        plans.push(Plan {
+            full_name: gem.full_name.clone(),
+            gem_dir,
+            gemspec: gem.gemspec.clone(),
+            stubs,
+        });
+    }
 
     for sub in SUBDIRECTORIES {
         let dir = home.join(sub);
@@ -220,7 +303,7 @@ pub fn link(home: &Path, store_gems: &Path, gems: &[(GemId, PathBuf)]) -> Result
     for plan in &plans {
         let mut changed = false;
         let link = home.join("gems").join(&plan.full_name);
-        changed |= place_symlink(&link, &plan.gem_dir, store_gems, &mut seq)?;
+        changed |= place_symlink(&link, &plan.gem_dir, &mut seq)?;
         let gemspec = home
             .join("specifications")
             .join(format!("{}.gemspec", plan.full_name));
@@ -243,8 +326,53 @@ pub fn link(home: &Path, store_gems: &Path, gems: &[(GemId, PathBuf)]) -> Result
         .into_iter()
         .map(|(exe, (_, text))| (exe, text))
         .collect();
-    report.removed = prune(home, store_gems, &wanted, &stubs)?;
+    report.removed = prune(home, &wanted, &stubs)?;
     Ok(report)
+}
+
+/// Make `home/bundler/gems/` hold a symlink to each git source's checkout
+/// under the name Bundler gives it (`<base name>-<12 digits of the
+/// revision>`, `Source::Git#install_path`), so Bundler reading this GEM_HOME
+/// finds the checkout it would have made; and remove the symlinks there
+/// that lead into a store and are not wanted any more. Anything else there,
+/// such as a checkout Bundler itself made, is left alone.
+pub fn link_checkouts(home: &Path, checkouts: &[(String, PathBuf)]) -> Result<(), Error> {
+    let dir = home.join(BUNDLER_DIR).join("gems");
+    if checkouts.is_empty() && !dir.is_dir() {
+        return Ok(());
+    }
+    fs::create_dir_all(&dir).map_err(|e| Error::Io(dir.clone(), e))?;
+    sweep(&dir);
+    let mut seq = 0;
+    for (name, target) in checkouts {
+        let link = dir.join(name);
+        match fs::symlink_metadata(&link) {
+            Ok(meta) if !meta.file_type().is_symlink() => continue,
+            _ => {}
+        }
+        place_symlink(&link, target, &mut seq)?;
+    }
+    for entry in fs::read_dir(&dir)
+        .map_err(|e| Error::Io(dir.clone(), e))?
+        .flatten()
+    {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if checkouts.iter().any(|(n, _)| *n == name) {
+            continue;
+        }
+        let path = entry.path();
+        let into_store = fs::read_link(&path).is_ok_and(|target| {
+            target
+                .components()
+                .collect::<Vec<_>>()
+                .windows(2)
+                .any(|w| w[0].as_os_str() == "store" && w[1].as_os_str() == "git")
+        });
+        if into_store {
+            fs::remove_file(&path).map_err(|e| Error::Io(path, e))?;
+        }
+    }
+    Ok(())
 }
 
 /// Make `home` readable at `home/<scope>` too, as Bundler reads a
@@ -269,7 +397,8 @@ pub fn scope_view(home: &Path, scope: &str) -> Result<Vec<String>, Error> {
     let engine = scope.split('/').next().unwrap_or(scope);
     let mut warnings = Vec::new();
     let mut seq = 0;
-    for sub in SUBDIRECTORIES {
+    fs::create_dir_all(home.join(BUNDLER_DIR)).map_err(|e| Error::Io(home.join(BUNDLER_DIR), e))?;
+    for sub in SUBDIRECTORIES.iter().copied().chain([BUNDLER_DIR]) {
         let link = dir.join(sub);
         if sub == "bin" && engine != spinel_vm::ENGINE {
             engine_bin(home, &link, engine, &mut seq)?;
@@ -475,37 +604,15 @@ fn tmp_beside(path: &Path, seq: &mut u64) -> PathBuf {
     path.with_file_name(format!("{TMP_PREFIX}{}-{n}-{name}", std::process::id()))
 }
 
-/// Whether a symlink in `gems/` leads where a link makes them: into this
-/// store's `gems/`, or to `<anything>/store/gems/<entry>/gem`, an entry of
-/// the store under another Spinel home, as when `SPINEL_HOME` changed.
-fn made_by_link(target: &Path, store_gems: &Path) -> bool {
-    if target.starts_with(store_gems) {
-        return true;
-    }
-    let mut up = target.components().rev().map(|c| c.as_os_str());
-    target.is_absolute()
-        && up.next().is_some_and(|c| c == "gem")
-        && up.next().is_some()
-        && up.next().is_some_and(|c| c == "gems")
-        && up.next().is_some_and(|c| c == "store")
-}
-
 /// Make `link` a symlink to `target`, unless it already is one. Whatever is
-/// there must be a symlink: a link replaces only what a link made.
-fn place_symlink(
-    link: &Path,
-    target: &Path,
-    store_gems: &Path,
-    seq: &mut u64,
-) -> Result<bool, Error> {
+/// there must be a symlink: a link replaces only what a link made, and
+/// `gem install` makes directories.
+fn place_symlink(link: &Path, target: &Path, seq: &mut u64) -> Result<bool, Error> {
     match fs::symlink_metadata(link) {
         Ok(meta) if meta.file_type().is_symlink() => {
             let current = fs::read_link(link).map_err(|e| Error::Io(link.to_owned(), e))?;
             if current == target {
                 return Ok(false);
-            }
-            if !made_by_link(&current, store_gems) {
-                return Err(Error::Occupied(link.to_owned()));
             }
         }
         Ok(_) => return Err(Error::Occupied(link.to_owned())),
@@ -573,12 +680,12 @@ fn sweep(dir: &Path) {
     }
 }
 
-/// Remove each gem an earlier link made that is not `wanted`: its symlink
-/// into the store, its gemspec, and the bin stubs it would have, when they
-/// are still the ones a link writes. Returns their full names, sorted.
+/// Remove each gem an earlier link made that is not `wanted`: its symlink,
+/// its gemspec, and the bin stubs a link wrote for it, when they are still
+/// the ones a link writes and no gem the GEM_HOME still has owns them.
+/// Returns their full names, sorted.
 fn prune(
     home: &Path,
-    store_gems: &Path,
     wanted: &HashSet<String>,
     stubs: &HashMap<&str, &str>,
 ) -> Result<Vec<String>, Error> {
@@ -593,17 +700,9 @@ fn prune(
             continue;
         }
         let path = entry.path();
-        let Ok(target) = fs::read_link(&path) else {
-            continue;
-        };
-        if !made_by_link(&target, store_gems) {
+        if fs::read_link(&path).is_err() {
             continue;
         }
-        // The entry's gemspec names the stubs the link wrote for it.
-        let spec = target
-            .parent()
-            .and_then(|entry| fs::read(entry.join("metadata")).ok())
-            .and_then(|yaml| gem_spec::from_yaml(&yaml).ok());
         fs::remove_file(&path).map_err(|e| Error::Io(path.clone(), e))?;
         let gemspec = home
             .join("specifications")
@@ -613,22 +712,28 @@ fn prune(
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
             Err(e) => return Err(Error::Io(gemspec, e)),
         }
-        if let Some(spec) = spec
-            && let (Ok(name), Ok(exes)) = (spec.name(), spec.executables())
+        removed.push(full_name);
+    }
+    // A stub a link wrote whose gem the GEM_HOME no longer has.
+    if !removed.is_empty() {
+        let bin = home.join("bin");
+        for entry in fs::read_dir(&bin)
+            .map_err(|e| Error::Io(bin.clone(), e))?
+            .flatten()
         {
-            for exe in exes {
-                if stubs.contains_key(exe.as_str()) {
-                    continue;
-                }
-                let stub = home.join("bin").join(&exe);
-                if fs::read(&stub)
-                    .is_ok_and(|t| t == app_script_text(spinel_vm::ENGINE, &name, &exe).as_bytes())
-                {
-                    let _ = fs::remove_file(&stub);
-                }
+            let Some(exe) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            if stubs.contains_key(exe.as_str()) {
+                continue;
+            }
+            let gone = fs::read_to_string(entry.path()).is_ok_and(|text| {
+                stub_gem(&text, spinel_vm::ENGINE, &exe).is_some_and(|name| !installed(home, &name))
+            });
+            if gone {
+                let _ = fs::remove_file(entry.path());
             }
         }
-        removed.push(full_name);
     }
     removed.sort();
     Ok(removed)

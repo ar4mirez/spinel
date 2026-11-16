@@ -30,9 +30,11 @@ mod gem_store;
 mod gem_substitute;
 mod gem_version;
 mod gemfile_edit;
+mod git_source;
 mod home;
 mod init;
 mod install;
+mod local_source;
 mod locked;
 mod lockfile;
 mod remove;
@@ -165,8 +167,8 @@ enum Command {
         #[arg(short, long, value_name = "GROUPS")]
         group: Option<String>,
 
-        /// The git repository to take them from. Git sources do not install
-        /// yet (#88), so this fails and writes nothing.
+        /// The git repository to take them from, written as `git:` on each
+        /// line.
         #[arg(long, value_name = "URL")]
         git: Option<String>,
     },
@@ -811,7 +813,7 @@ fn fetch_command(source: &str, gem_home: Option<&Path>, specs: &[String]) -> Exi
         // A GEM_HOME gets every gem or none of them: one that failed to
         // fetch leaves it as it was.
         if let Some(gem_home) = gem_home.filter(|_| ok) {
-            ok = link_gem_home(gem_home, &store, &stored);
+            ok = link_gem_home(gem_home, &stored);
         }
         if ok {
             ExitCode::SUCCESS
@@ -823,11 +825,7 @@ fn fetch_command(source: &str, gem_home: Option<&Path>, specs: &[String]) -> Exi
 
 /// Link stored gems into `gem_home` and print it, then one line per gem
 /// (`linked` or `current`) and per gem removed.
-fn link_gem_home(
-    gem_home: &Path,
-    store: &gem_store::Store,
-    stored: &[(gem_store::GemId, PathBuf)],
-) -> bool {
+fn link_gem_home(gem_home: &Path, stored: &[(gem_store::GemId, PathBuf)]) -> bool {
     // Symlinks name the store by an absolute path, whatever SPINEL_HOME is.
     let absolute = |p: &Path| std::path::absolute(p).unwrap_or_else(|_| p.to_owned());
     let stored: Vec<_> = stored
@@ -835,7 +833,7 @@ fn link_gem_home(
         .map(|(gem, entry)| (gem.clone(), absolute(entry)))
         .collect();
     let gem_home = absolute(gem_home);
-    match gem_home::link(&gem_home, &absolute(&store.root().join("gems")), &stored) {
+    match gem_home::link(&gem_home, &stored) {
         Ok(report) => {
             println!("gem home: {}", gem_home.display());
             for (gem, outcome) in &report.linked {
@@ -898,9 +896,20 @@ fn resolve_command(
         remote,
         mut request,
         local,
+        sources,
+        ..
     } = match install::prepare(&gemfile, platforms, ruby_version, rubygems_version) {
         Ok(prepared) => prepared,
         Err(message) => return usage(message),
+    };
+    // ponytail: git and path sources are read by `spinel install`, which
+    // clones and evaluates them; this tool resolves against the index only.
+    // Upgrade by reading them here as `Session::resolve` does.
+    if !sources.is_empty() {
+        return usage("git and path sources are resolved by `spinel install`".to_owned());
+    }
+    let Some(remote) = remote else {
+        return usage("the Gemfile names no rubygems source".to_owned());
     };
 
     // A lockfile to keep to (#79): `Definition` reads it, and when nothing
@@ -1000,6 +1009,7 @@ fn resolve_command(
                 &index,
                 &resolved,
                 ruby_directive,
+                &[],
             );
             print!("{}", lock.write());
             ExitCode::SUCCESS
@@ -1032,7 +1042,7 @@ fn print_resolution(
     if lockfile {
         print!(
             "{}",
-            definition.write_lock(current, remote, request, index, specs)
+            definition.write_lock(current, remote, request, index, specs, &[])
         );
     } else {
         let mut lines: Vec<(String, String)> = specs

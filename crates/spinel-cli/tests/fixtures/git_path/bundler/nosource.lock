@@ -1,0 +1,20 @@
+PATH
+  remote: ../gadget
+  specs:
+    gadget (0.1.0)
+
+GEM
+  specs:
+
+PLATFORMS
+  ruby
+  x86_64-linux
+
+DEPENDENCIES
+  gadget!
+
+CHECKSUMS
+  gadget (0.1.0)
+
+BUNDLED WITH
+  4.0.20

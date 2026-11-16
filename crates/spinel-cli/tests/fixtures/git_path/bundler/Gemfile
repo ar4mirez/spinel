@@ -1,0 +1,4 @@
+source "@SOURCE@"
+
+gem "widget", git: "@REPO@", branch: "main"
+gem "gadget", path: "../gadget"

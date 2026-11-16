@@ -110,6 +110,12 @@ fn update(gems: &[String], all: bool, unsupported: &Unsupported) -> Result<(), S
             else {
                 continue;
             };
+            // `CLI::Update` passes over a gem whose source is not the one it
+            // was locked from (`identifier`): a git source whose locked
+            // revision was let go.
+            if session.git_source_unlocked(name) {
+                continue;
+            }
             if new.version < old.version {
                 eprintln!(
                     "Note: {name} version regressed from {} to {}",

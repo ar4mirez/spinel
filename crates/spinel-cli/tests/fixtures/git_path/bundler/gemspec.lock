@@ -1,0 +1,24 @@
+PATH
+  remote: .
+  specs:
+    app (0.3.0)
+
+GEM
+  remote: @SOURCE@/
+  specs:
+    shared (1.0.0)
+
+PLATFORMS
+  ruby
+  x86_64-linux
+
+DEPENDENCIES
+  app!
+  shared (~> 1.0)
+
+CHECKSUMS
+  app (0.3.0)
+  shared (1.0.0) sha256=5ed0d9b36dabbf1fe60545d24f35048eaf639da35343134a74a52a48cafe83a2
+
+BUNDLED WITH
+  4.0.20

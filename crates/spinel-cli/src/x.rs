@@ -125,7 +125,9 @@ fn prepare(request: &Request) -> Result<(PathBuf, PathBuf), Stop> {
     let Some(home) = home::spinel_home() else {
         return Err(Stop::failure("neither SPINEL_HOME nor HOME is set"));
     };
-    let client = compact_index::Client::new(&prepared.remote, &home).map_err(Stop::failure)?;
+    // The request above names a rubygems source.
+    let remote = prepared.remote.clone().unwrap_or_default();
+    let client = compact_index::Client::new(&remote, &home).map_err(Stop::failure)?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -145,7 +147,7 @@ fn prepare(request: &Request) -> Result<(PathBuf, PathBuf), Stop> {
     if !builds.iter().any(|b| requirement.satisfied_by(&b.version)) {
         return Err(Stop::not_found(format!(
             "could not find a valid gem '{gem}' ({shown}) in {}",
-            prepared.remote
+            remote
         )));
     }
     let resolved = resolver::resolve(&prepared.request, &index).map_err(|failure| {
@@ -179,7 +181,7 @@ fn prepare(request: &Request) -> Result<(PathBuf, PathBuf), Stop> {
                 return Err(Stop::failure(format!(
                     "{}: {} lists no checksum for it",
                     id.full_name(),
-                    prepared.remote
+                    remote
                 )));
             }
         }
@@ -212,8 +214,7 @@ fn prepare(request: &Request) -> Result<(PathBuf, PathBuf), Stop> {
         .find(|r| r.name == gem)
         .ok_or_else(|| Stop::failure(format!("the resolution has no {gem}")))?;
     let gem_home = absolute(&home.join("x").join(directory_name(root, &wants)));
-    let report = gem_home::link(&gem_home, &absolute(&store.root().join("gems")), &stored)
-        .map_err(Stop::failure)?;
+    let report = gem_home::link(&gem_home, &stored).map_err(Stop::failure)?;
     let choice = choose_executable(&report.executables, gem, executable);
     // What this run installed, uv-style, on standard error so the
     // command's own output is all that standard output carries, with what

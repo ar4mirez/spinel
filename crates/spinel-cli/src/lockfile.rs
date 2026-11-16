@@ -695,6 +695,45 @@ fn dependency_to_lock(name: &str, requirement: &Requirement) -> String {
 }
 
 impl SourceKind {
+    /// `to_gemfile`: a git source's URI with the options it was given, a
+    /// path source's path, a rubygems source's remote.
+    pub fn to_gemfile(&self) -> String {
+        match self {
+            SourceKind::Git {
+                remote,
+                git_ref,
+                branch,
+                tag,
+                submodules,
+                glob,
+                ..
+            } => {
+                let specifiers: Vec<String> = [
+                    ("ref", git_ref),
+                    ("branch", branch),
+                    ("tag", tag),
+                    ("submodules", submodules),
+                    ("glob", glob),
+                ]
+                .into_iter()
+                .filter_map(|(k, v)| v.as_ref().map(|v| format!("{k}: {v}")))
+                .collect();
+                if specifiers.is_empty() {
+                    remote.clone()
+                } else {
+                    format!("{remote} ({})", specifiers.join(", "))
+                }
+            }
+            SourceKind::Path { remote, .. } => remote.clone(),
+            SourceKind::Gem { remotes } => remotes.first().cloned().unwrap_or_default(),
+            SourceKind::Plugin { options } => options
+                .iter()
+                .find(|(k, _)| k == "remote")
+                .map(|(_, v)| v.clone())
+                .unwrap_or_default(),
+        }
+    }
+
     /// `to_lock`: the header and the options, up to `specs:`.
     fn to_lock(&self, out: &mut String) {
         match self {
@@ -857,6 +896,81 @@ fn section(out: &mut String, name: &str, mut values: Vec<String>) {
 // ---------------------------------------------------------------------------
 // A new lockfile
 // ---------------------------------------------------------------------------
+
+/// A git or path source as a lockfile writes it: its section's options,
+/// `identifier` (what `SourceList#lock_other_sources` sorts by), the gems
+/// whose specs it has (`SourceMap#all_requirements`), and the Gemfile gems
+/// pinned to it, `!` in `DEPENDENCIES`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LockSource {
+    pub kind: SourceKind,
+    pub identifier: String,
+    pub names: Vec<String>,
+    pub pinned: Vec<String>,
+}
+
+/// The remotes of the `GEM` section for the rubygems source at `remote`:
+/// no credentials, a trailing `/`. An empty `remote` is a Gemfile with no
+/// rubygems source, whose `GEM` section Bundler writes with no remote.
+pub(crate) fn gem_remotes(remote: &str) -> Vec<String> {
+    if remote.is_empty() {
+        return Vec::new();
+    }
+    let mut remote = credless(remote);
+    if !remote.ends_with('/') {
+        remote.push('/');
+    }
+    vec![remote]
+}
+
+/// `SourceList#lock_sources`: the git and path sources sorted by identifier,
+/// then the rubygems source at `remote` (see [`gem_remotes`]), each with the
+/// specs of the gems it provides.
+pub(crate) fn lock_sources(
+    remote: &str,
+    locals: &[LockSource],
+    specs: Vec<LockedSpec>,
+) -> Vec<Source> {
+    let mut order: Vec<&LockSource> = locals.iter().collect();
+    order.sort_by(|a, b| a.identifier.cmp(&b.identifier));
+    let mut sources: Vec<Source> = order
+        .iter()
+        .map(|l| Source {
+            kind: l.kind.clone(),
+            specs: Vec::new(),
+        })
+        .collect();
+    let mut gem = Source {
+        kind: SourceKind::Gem {
+            remotes: gem_remotes(remote),
+        },
+        specs: Vec::new(),
+    };
+    for spec in specs {
+        match order.iter().position(|l| l.names.contains(&spec.name)) {
+            Some(at) => sources[at].specs.push(spec),
+            None => gem.specs.push(spec),
+        }
+    }
+    sources.push(gem);
+    sources
+}
+
+/// The `DEPENDENCIES` of a Gemfile's dependencies, `!` on those pinned to
+/// a git or path source (`Dependency#to_lock`).
+pub(crate) fn lock_dependencies(
+    dependencies: &[resolver::GemfileDependency],
+    locals: &[LockSource],
+) -> Vec<Dependency> {
+    dependencies
+        .iter()
+        .map(|d| Dependency {
+            name: d.name.clone(),
+            requirement: d.requirement.clone(),
+            pinned: locals.iter().any(|l| l.pinned.contains(&d.name)),
+        })
+        .collect()
+}
 
 /// `Source::Rubygems#remove_auth`: a remote without its user and password.
 pub(crate) fn credless(remote: &str) -> String {
@@ -1084,6 +1198,7 @@ impl Lockfile {
         index: &Index,
         resolved: &[Resolved],
         ruby_directive: bool,
+        locals: &[LockSource],
     ) -> Lockfile {
         let shaping = Shaping { request, index };
         let mut set: Vec<Spec> = resolved
@@ -1116,10 +1231,6 @@ impl Lockfile {
         }
         let specs = spec_set_for(&set, &request.dependencies, &materialize_for);
 
-        let mut remote = credless(remote);
-        if !remote.ends_with('/') {
-            remote.push('/');
-        }
         let checksums = specs
             .iter()
             .map(|s| Checksum {
@@ -1141,22 +1252,9 @@ impl Lockfile {
             })
             .collect();
         Lockfile {
-            sources: vec![Source {
-                kind: SourceKind::Gem {
-                    remotes: vec![remote],
-                },
-                specs: locked,
-            }],
+            sources: lock_sources(remote, locals, locked),
             platforms,
-            dependencies: request
-                .dependencies
-                .iter()
-                .map(|d| Dependency {
-                    name: d.name.clone(),
-                    requirement: d.requirement.clone(),
-                    pinned: false,
-                })
-                .collect(),
+            dependencies: lock_dependencies(&request.dependencies, locals),
             checksums: Some(checksums),
             // `RubyVersion.system`: the engine's version, for `ruby`, is the
             // Ruby version; the lockfile never names Spinel.

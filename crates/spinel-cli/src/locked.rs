@@ -29,15 +29,43 @@
 //! keep a locked gem from going down stay either way.
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 use crate::gem_platform::{self, GemPlatform};
 use crate::gem_requirement::Requirement;
 use crate::gem_version::Version;
+use crate::local_source::{Declared, DeclaredSource, Materialized};
+use crate::lockfile::LockSource;
 use crate::lockfile::{
-    self, BUNDLER_VERSION, Checksum, Dependency, LockedSpec, Lockfile, LockfileError, Source,
-    SourceKind,
+    self, BUNDLER_VERSION, Checksum, LockedSpec, Lockfile, LockfileError, Source, SourceKind,
 };
 use crate::resolver::{self, Failure, GemfileDependency, Index, Locked, Request, Spec};
+
+/// The Gemfile's git and path sources (#88), as `Definition` compares them
+/// with the lockfile's.
+#[derive(Debug, Clone, Copy)]
+pub struct Locals<'a> {
+    pub sources: &'a [DeclaredSource],
+    /// Each path source's gems, read now; `None` for a git source, which is
+    /// read once its revision is known.
+    pub read: &'a [Option<Materialized>],
+    /// For each Gemfile dependency, the source it is pinned to.
+    pub pins: &'a [Option<usize>],
+    /// `Bundler.root`, which a path source's `remote:` is relative to.
+    pub project: &'a Path,
+}
+
+impl Locals<'static> {
+    /// A Gemfile with no git or path source.
+    pub fn none() -> Locals<'static> {
+        Locals {
+            sources: &[],
+            read: &[],
+            pins: &[],
+            project: Path::new(""),
+        }
+    }
+}
 
 /// A spec the lockfile has, as the resolver reads it.
 #[derive(Debug, Clone)]
@@ -110,6 +138,15 @@ pub struct Definition {
     ruby_directive: bool,
     /// `@locked_bundler_version`: the lockfile's `BUNDLED WITH`.
     locked_bundler: Option<Version>,
+    /// For each git source of the Gemfile, the revision it stays at: the
+    /// locked one, unless the source is new or unlocked (`unlock!`).
+    locked_revisions: Vec<Option<String>>,
+    /// `@path_changes`: a path source's gemspecs no longer what the
+    /// lockfile has (`converge_paths`).
+    path_changes: bool,
+    /// What `lockfile_changes_summary` lists under `You have changed in the
+    /// Gemfile`: a gem whose source is not the lockfile's.
+    source_moves: Vec<String>,
 }
 
 /// What `Definition#initialize` notes as it converges the lockfile with the
@@ -175,25 +212,72 @@ impl Definition {
         add: &[GemPlatform],
         unlock: &Unlock,
     ) -> Result<Definition, LockfileError> {
+        Definition::with_locals(
+            lock,
+            remote,
+            dependencies,
+            ruby,
+            local,
+            add,
+            unlock,
+            Locals::none(),
+        )
+    }
+
+    /// [`Definition::unlocking`] for a Gemfile with git and path sources.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_locals(
+        lock: &Lockfile,
+        remote: &str,
+        dependencies: &[GemfileDependency],
+        ruby: Option<&[String]>,
+        local: &GemPlatform,
+        add: &[GemPlatform],
+        unlock: &Unlock,
+        locals: Locals<'_>,
+    ) -> Result<Definition, LockfileError> {
         let unlocking_all = *unlock == Unlock::All;
         let explicit_unlocks = match unlock {
             Unlock::Gems(gems) => gems.clone(),
             _ => Vec::new(),
         };
-        // `converge_sources`: the lockfile's source is the Gemfile's when it
-        // is its one `GEM` section, with the Gemfile's remote.
+        // `converge_sources`: the lockfile's rubygems source is the
+        // Gemfile's when it is its one `GEM` section, with the Gemfile's
+        // remote; each git and path source is the lockfile's that is `==`
+        // to it (`replace_sources!`), and the list changed unless every
+        // source is one the lockfile has, and it has no other.
         // ponytail: one rubygems source, compared by its one remote. Upgrade
-        // with `Source::Rubygems#==` over several remotes, and git and path
-        // sources (#88).
-        let remote = normalized_remote(remote);
-        let same_source = |source: &Source| matches!(&source.kind, SourceKind::Gem { remotes } if remotes == std::slice::from_ref(&remote));
-        let source_changes = !(lock.sources.len() == 1 && same_source(&lock.sources[0]));
+        // with `Source::Rubygems#==` over several remotes.
+        let wanted = lockfile::gem_remotes(remote);
+        let same_source = |source: &Source| matches!(&source.kind, SourceKind::Gem { remotes } if *remotes == wanted);
+        let mut matched: Vec<Option<usize>> = Vec::new();
+        for declared in locals.sources {
+            let found = lock.sources.iter().enumerate().position(|(i, s)| {
+                !matched.contains(&Some(i)) && declared.kind.same_as_locked(&s.kind, locals.project)
+            });
+            matched.push(found);
+        }
+        let gem_sources: Vec<&Source> = lock
+            .sources
+            .iter()
+            .filter(|s| matches!(s.kind, SourceKind::Gem { .. }))
+            .collect();
+        let others_matched =
+            lock.sources.iter().enumerate().all(|(i, s)| {
+                matches!(s.kind, SourceKind::Gem { .. }) || matched.contains(&Some(i))
+            });
+        let source_changes = !(gem_sources.len() == 1
+            && same_source(gem_sources[0])
+            && others_matched
+            && matched.iter().all(Option::is_some));
+        let kept_source = |i: usize| same_source(&lock.sources[i]) || matched.contains(&Some(i));
         let mut locked: Vec<LockedBuild> = lock
             .sources
             .iter()
-            .flat_map(|source| {
+            .enumerate()
+            .flat_map(|(i, source)| {
                 let rubygems = matches!(source.kind, SourceKind::Gem { .. });
-                let kept = same_source(source);
+                let kept = kept_source(i);
                 source.specs.iter().map(move |s| LockedBuild {
                     spec: locked_spec(s),
                     rubygems,
@@ -370,10 +454,144 @@ impl Definition {
             locked.retain(|b| !bad.contains(&b.spec.full_name()));
         }
 
+        // `converge_paths`: a path source changed when the lockfile has no
+        // source `==` to it, the Gemfile gems pinned to it are not the ones
+        // the lockfile pins there (`dependencies_for_source_changed?`), or
+        // a spec the lockfile has from it is not one it has now, with the
+        // same dependencies (`specs_for_source_changed?`). And
+        // `converge_specs`: a locked spec of a path source takes the
+        // dependencies its gemspec has now, and one the source no longer
+        // has is unlocked.
+        let mut path_changes = false;
+        for (i, declared) in locals.sources.iter().enumerate() {
+            if !matches!(declared.kind, Declared::Path { .. }) {
+                continue;
+            }
+            let Some(at) = matched[i] else {
+                path_changes = true;
+                continue;
+            };
+            let source = &lock.sources[at];
+            let mut gemfile_deps: Vec<String> = dependencies
+                .iter()
+                .zip(locals.pins)
+                .filter(|(_, pin)| **pin == Some(i))
+                .map(|(d, _)| format!("{} ({})", d.name, d.requirement))
+                .collect();
+            let mut locked_deps: Vec<String> = lock
+                .dependencies
+                .iter()
+                .filter(|d| d.pinned && source.specs.iter().any(|s| s.name == d.name))
+                .map(|d| format!("{} ({})", d.name, d.requirement))
+                .collect();
+            gemfile_deps.sort();
+            gemfile_deps.dedup();
+            locked_deps.sort();
+            if gemfile_deps != locked_deps {
+                path_changes = true;
+            }
+            let Some(read) = locals.read.get(i).and_then(Option::as_ref) else {
+                continue;
+            };
+            let dep_set = |deps: &[(String, Requirement)]| {
+                let mut set: Vec<String> = deps.iter().map(|(n, r)| format!("{n} ({r})")).collect();
+                set.sort();
+                set
+            };
+            for spec in &source.specs {
+                let full_name = spec.full_name();
+                let now = read.gems.iter().find(|g| g.full_name() == full_name);
+                if now.is_none_or(|g| dep_set(&g.spec.dependencies) != dep_set(&spec.dependencies))
+                {
+                    path_changes = true;
+                }
+                for build in locked
+                    .iter_mut()
+                    .filter(|b| b.spec.full_name() == full_name)
+                {
+                    match now {
+                        Some(gem) => build.spec.dependencies = gem.spec.dependencies.clone(),
+                        None => {
+                            if !gems_to_unlock.contains(&spec.name) {
+                                gems_to_unlock.push(spec.name.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // `converge_locked_specs`: a git source keeps its locked revision
+        // unless everything is unlocked, or every gem the lockfile has from
+        // it is (`bundle update` of its gems), when the revision its ref is
+        // at now is taken (`unlock!`).
+        let locked_revisions: Vec<Option<String>> = locals
+            .sources
+            .iter()
+            .zip(&matched)
+            .map(|(declared, at)| {
+                let source = &lock.sources[(*at)?];
+                let SourceKind::Git { revision, .. } = &source.kind else {
+                    return None;
+                };
+                if !matches!(declared.kind, Declared::Git { .. }) || unlocking_all {
+                    return None;
+                }
+                let all_unlocked = !source.specs.is_empty()
+                    && source
+                        .specs
+                        .iter()
+                        .all(|s| gems_to_unlock.contains(&s.name));
+                (!all_unlocked).then(|| revision.clone())
+            })
+            .collect();
+
+        // `lockfile_changes_summary`'s changed sources: a gem the Gemfile
+        // and the lockfile both list, from sources that are not the same
+        // (`include?`), as `to_gemfile` names them.
+        let mut source_moves = Vec::new();
+        for (dep, pin) in dependencies
+            .iter()
+            .zip(locals.pins.iter().chain(std::iter::repeat(&None)))
+        {
+            let Some(lock_dep) = lock.dependencies.iter().find(|d| d.name == dep.name) else {
+                continue;
+            };
+            let lock_source = lock_dep
+                .pinned
+                .then(|| {
+                    lock.sources
+                        .iter()
+                        .position(|s| s.specs.iter().any(|sp| sp.name == dep.name))
+                })
+                .flatten();
+            let same = match (*pin, lock_source) {
+                (None, None) => true,
+                (Some(i), Some(at)) => {
+                    matched[i] == Some(at)
+                        || locals.sources[i]
+                            .kind
+                            .includes_locked(&lock.sources[at].kind, locals.project)
+                }
+                _ => false,
+            };
+            if !same {
+                let named =
+                    |s: Option<String>| s.unwrap_or_else(|| "no specified source".to_owned());
+                source_moves.push(format!(
+                    "* {} from `{}` to `{}`",
+                    dep.name,
+                    named(lock_source.map(|at| lock.sources[at].kind.to_gemfile())),
+                    named(pin.map(|i| locals.sources[i].kind.to_gemfile())),
+                ));
+            }
+        }
+
         let something_changed = source_changes
             || !changed_dependencies.is_empty()
             || current_platform_missing
             || !new_platforms.is_empty()
+            || path_changes
             || reasons.missing_lockfile_dep.is_some()
             || reasons.missing_checksums.is_some()
             || reasons.empty_checksums.is_some()
@@ -411,7 +629,16 @@ impl Definition {
             unlocking_ruby,
             ruby_directive: ruby.is_some(),
             locked_bundler: lock.bundled_with.clone(),
+            locked_revisions,
+            path_changes,
+            source_moves,
         })
+    }
+
+    /// The revision the Gemfile's git source `i` stays at: its locked one,
+    /// unless it is new or unlocked.
+    pub fn locked_revision(&self, i: usize) -> Option<&str> {
+        self.locked_revisions.get(i)?.as_deref()
     }
 
     /// `resolve_needed?`: whether the Gemfile asks for something the
@@ -473,10 +700,13 @@ impl Definition {
             .map(|l| pretty(&l.name, &l.requirement, &[]))
             .collect();
         // ponytail: `@new_platforms` and `@removed_platforms` are empty, as
-        // nothing adds or removes a platform yet, and a dependency's source
-        // never changes, with one rubygems source. Upgrade with `spinel
-        // lock --add-platform` and git and path sources (#88).
-        if added.is_empty() && deleted.is_empty() && !self.resolve_needed {
+        // nothing adds or removes a platform yet. Upgrade with `spinel lock
+        // --add-platform`.
+        if added.is_empty()
+            && deleted.is_empty()
+            && self.source_moves.is_empty()
+            && !self.resolve_needed
+        {
             return None;
         }
         // `change_reason`.
@@ -508,6 +738,8 @@ impl Definition {
                     .then(|| "your lockfile is missing the current platform".to_owned()),
                 (!self.new_platforms.is_empty())
                     .then(|| "you are adding a new platform to your lockfile".to_owned()),
+                self.path_changes
+                    .then(|| "the gemspecs for path gems changed".to_owned()),
                 quoted("your lockfile is missing {}", &r.missing_lockfile_dep),
                 quoted(
                     "your lockfile is missing a CHECKSUMS entry for {}",
@@ -550,6 +782,10 @@ impl Definition {
         if !deleted.is_empty() {
             message.push_str("\n\nYou have deleted from the Gemfile:\n");
             message.push_str(&deleted.join("\n"));
+        }
+        if !self.source_moves.is_empty() {
+            message.push_str("\n\nYou have changed in the Gemfile:\n");
+            message.push_str(&self.source_moves.join("\n"));
         }
         if !self.unlocking {
             message.push_str(&format!(
@@ -727,9 +963,10 @@ impl Definition {
         request: &Request,
         index: Option<&Index>,
         specs: &[Spec],
+        locals: &[LockSource],
     ) -> Lockfile {
         let bundler = Version::new(BUNDLER_VERSION).expect("a version");
-        self.lockfile_for(remote, request, index, specs, &bundler)
+        self.lockfile_for(remote, request, index, specs, locals, &bundler)
     }
 
     /// `Definition#write_lock` over `current`, the lockfile's text, when no
@@ -748,8 +985,9 @@ impl Definition {
         request: &Request,
         index: Option<&Index>,
         specs: &[Spec],
+        locals: &[LockSource],
     ) -> String {
-        let proposed = self.lockfile(remote, request, index, specs).write();
+        let proposed = self.lockfile(remote, request, index, specs, locals).write();
         if self.unlocking {
             return proposed;
         }
@@ -758,7 +996,7 @@ impl Definition {
         let kept = match &self.locked_bundler {
             Some(locked) if locked.release() < current_major => return proposed,
             Some(locked) => self
-                .lockfile_for(remote, request, index, specs, locked)
+                .lockfile_for(remote, request, index, specs, locals, locked)
                 .write(),
             None => proposed.clone(),
         };
@@ -776,6 +1014,7 @@ impl Definition {
         request: &Request,
         index: Option<&Index>,
         specs: &[Spec],
+        locals: &[LockSource],
         bundler: &Version,
     ) -> Lockfile {
         let checksums = self.checksums.as_ref().map(|locked| {
@@ -821,31 +1060,19 @@ impl Definition {
                     (Some(locked), false) => locked.clone(),
                     _ => format!("ruby {}", request.ruby_version),
                 });
+        let locked_specs = specs
+            .iter()
+            .map(|s| LockedSpec {
+                name: s.name.clone(),
+                version: s.version.clone(),
+                platform: s.platform.clone(),
+                dependencies: s.dependencies.clone(),
+            })
+            .collect();
         Lockfile {
-            sources: vec![Source {
-                kind: SourceKind::Gem {
-                    remotes: vec![normalized_remote(remote)],
-                },
-                specs: specs
-                    .iter()
-                    .map(|s| LockedSpec {
-                        name: s.name.clone(),
-                        version: s.version.clone(),
-                        platform: s.platform.clone(),
-                        dependencies: s.dependencies.clone(),
-                    })
-                    .collect(),
-            }],
+            sources: lockfile::lock_sources(remote, locals, locked_specs),
             platforms: self.platforms.clone(),
-            dependencies: request
-                .dependencies
-                .iter()
-                .map(|d| Dependency {
-                    name: d.name.clone(),
-                    requirement: d.requirement.clone(),
-                    pinned: false,
-                })
-                .collect(),
+            dependencies: lockfile::lock_dependencies(&request.dependencies, locals),
             checksums,
             ruby_version,
             bundled_with: Some(bundler.clone()),
@@ -932,16 +1159,6 @@ fn without_sections(text: &str, sections: &[&str]) -> String {
         }
     }
     collapsed.trim().to_owned()
-}
-
-/// A remote as a lockfile's `GEM` section has it: no credentials, a
-/// trailing `/`.
-fn normalized_remote(remote: &str) -> String {
-    let mut remote = lockfile::credless(remote);
-    if !remote.ends_with('/') {
-        remote.push('/');
-    }
-    remote
 }
 
 /// A lockfile spec as the resolver reads it.
