@@ -22,13 +22,14 @@ mod gem_store;
     not(test),
     expect(
         dead_code,
-        reason = "the installer's substitution step; only tests call it until the installer lands"
+        reason = "the installer's substitution step; only tests call it until install substitutes gems (#83)"
     )
 )]
 mod gem_substitute;
 mod gem_version;
 mod home;
 mod init;
+mod install;
 mod locked;
 mod lockfile;
 mod resolver;
@@ -55,7 +56,7 @@ This build runs Ruby. The core library is minimal — Kernel, Object, Integer,
 String, Symbol, Array, Hash, Comparable — and a program that reaches past it
 says which method is missing rather than failing quietly.
 
-Planned surface (docs/cli.md): x, install, add, remove, update, test, build.
+Planned surface (docs/cli.md): x, add, remove, update, test, build.
 Progress: https://github.com/ar4mirez/spinel/milestones";
 
 #[derive(Parser, Debug)]
@@ -121,6 +122,21 @@ enum Command {
         watch: bool,
     },
 
+    /// Install the Gemfile's gems into the project's `.spinel/gem_home/`.
+    ///
+    /// Resolves the Gemfile, keeping to `Gemfile.lock` as Bundler does when
+    /// no update is asked for, fetches each gem into the global store once
+    /// for every project, links them into the project as `gem install` lays
+    /// out a GEM_HOME, points `.bundle/config` at it, and writes the
+    /// lockfile if it changed. Prints `+ gem version` for each gem added and
+    /// `- gem version` for each one removed.
+    Install {
+        /// Fail, and write nothing, when the lockfile would change: Bundler's
+        /// frozen mode, for CI. Exits 16 as Bundler does.
+        #[arg(long)]
+        frozen: bool,
+    },
+
     /// Scaffold a project in the current directory.
     ///
     /// Writes a Gemfile, a `.ruby-version` naming this Spinel, a `test/`
@@ -151,12 +167,12 @@ enum Command {
 
     /// Fetch gems into the global store, and print what each one needed.
     ///
-    /// The debugging window onto the store `spinel install` will link
+    /// The debugging window onto the store `spinel install` links
     /// projects to (docs/package-manager.md, "Global store"): each gem's
     /// checksum is read from the source's compact index, which is brought up
     /// to date first, and a gem already stored with that checksum is not
-    /// fetched again. Hidden: `spinel install` is the command that will use
-    /// the store.
+    /// fetched again. Hidden: `spinel install` is the command that uses the
+    /// store.
     #[command(hide = true)]
     Fetch {
         /// The source to fetch from, and whose index lists the checksums.
@@ -178,13 +194,13 @@ enum Command {
     /// Resolve a Gemfile's dependencies against its source's compact index,
     /// and print the gems chosen.
     ///
-    /// The debugging window onto the resolver `spinel install` will run
+    /// The debugging window onto the resolver `spinel install` runs
     /// (docs/package-manager.md, "Resolver"): it reads the dependency JSON
     /// `shims/gemfile_eval.rb` prints, brings the index up to date for every
     /// gem those dependencies can reach, and prints one line per gem as a
     /// lockfile's `specs:` lists it, or Bundler's explanation of why there
-    /// is no resolution. Hidden: `spinel install` is the command that will
-    /// resolve.
+    /// is no resolution. Hidden: `spinel install` is the command that
+    /// resolves.
     #[command(hide = true)]
     Resolve {
         /// The dependency JSON, or `-` for standard input.
@@ -226,8 +242,8 @@ enum Command {
     ///
     /// The debugging window onto the lockfile reader and writer
     /// (docs/package-manager.md, "Lockfile"): a lockfile Bundler wrote comes
-    /// back byte for byte. Hidden: `spinel install` is the command that will
-    /// read and write lockfiles.
+    /// back byte for byte. Hidden: `spinel install` is the command that
+    /// reads and writes lockfiles.
     #[command(hide = true)]
     Lockfile {
         /// The lockfile, or `-` for standard input.
@@ -283,6 +299,21 @@ fn main() -> ExitCode {
     {
         return ruby_command(&words, &raw, false);
     }
+    // `spinel run -e CODE`, `spinel run -w app.rb`: `ruby`'s command line,
+    // with the project's gems visible as `spinel run` makes them. `run`'s
+    // own flags stay clap's.
+    if words.first().is_some_and(|w| w == "run")
+        && words.get(1).is_some_and(|second| {
+            ruby_args::is_ruby_invocation(second)
+                && !matches!(
+                    second.split('=').next().unwrap_or_default(),
+                    "--watch" | "--dump-bytecode" | "--strict-ruby-version" | "--"
+                )
+        })
+    {
+        project_ruby_version_ok(false);
+        return ruby_command(&words[1..], &raw[1..], true);
+    }
 
     // `arg_required_else_help` means a bare `spinel` never reaches this point: clap
     // prints help and exits non-zero, so a typo is never a silent success.
@@ -296,6 +327,7 @@ fn main() -> ExitCode {
     match cli.command {
         Some(Command::Parse { path, format }) => return parse_command(&path, format),
         Some(Command::Init) => return init_command(),
+        Some(Command::Install { frozen }) => return install::run(frozen),
         Some(Command::Index {
             source,
             names,
@@ -359,7 +391,7 @@ fn main() -> ExitCode {
             return ruby_command(&words, &raw, true);
         }
         eprintln!("spinel: unknown subcommand `{argument}`.");
-        eprintln!("        This build has three: run, init, parse. Try `spinel --help`.");
+        eprintln!("        This build has four: run, init, install, parse. Try `spinel --help`.");
         return ExitCode::from(EXIT_USAGE);
     }
 
@@ -402,7 +434,7 @@ fn compiled_app() -> Option<ExitCode> {
 /// Named `.rb`, or on disk under any name — `spinel Rakefile` should be read as
 /// a file, and `spinel pasre` should not.
 fn looks_like_a_subcommand_typo(argument: &str) -> bool {
-    ["run", "init", "parse", "help"]
+    ["run", "init", "install", "parse", "help"]
         .iter()
         .any(|name| edit_distance(argument, name) <= 2)
 }
@@ -616,38 +648,6 @@ fn link_gem_home(
 // spinel resolve
 // ---------------------------------------------------------------------------
 
-/// The parts of `shims/gemfile_eval.rb`'s JSON the resolver reads
-/// (docs/package-manager.md, "1. Gemfile evaluation").
-#[derive(serde::Deserialize)]
-struct GemfileJson {
-    gemfiles: Vec<String>,
-    source: Option<GemfileSource>,
-    /// The `ruby` directive: whether there is one, and its `versions`, which
-    /// decide whether a locked `RUBY VERSION` still holds.
-    #[serde(default)]
-    ruby: Option<serde_json::Value>,
-    #[serde(default)]
-    gemspecs: Vec<serde_json::Value>,
-    dependencies: Vec<GemfileJsonDependency>,
-}
-
-#[derive(serde::Deserialize)]
-struct GemfileSource {
-    #[serde(rename = "type")]
-    kind: String,
-    remote: Option<String>,
-}
-
-#[derive(serde::Deserialize)]
-struct GemfileJsonDependency {
-    name: String,
-    requirements: Vec<String>,
-    #[serde(default)]
-    platforms: Vec<String>,
-    source: Option<serde_json::Value>,
-    force_ruby_platform: Option<bool>,
-}
-
 /// Resolve the dependency JSON at `deps` (`-`: standard input) and print one
 /// line per gem chosen, as `specs:` lists it (or, with `lockfile`, the new
 /// `Gemfile.lock`), or the explanation of why there is none on standard
@@ -677,82 +677,17 @@ fn resolve_command(
             Err(err) => return usage(format!("{}: {err}", deps.display())),
         }
     };
-    let gemfile: GemfileJson = match serde_json::from_str(&text) {
+    let gemfile: install::GemfileJson = match serde_json::from_str(&text) {
         Ok(gemfile) => gemfile,
         Err(err) => return usage(format!("{}: {err}", deps.display())),
     };
-    let remote = match &gemfile.source {
-        Some(GemfileSource {
-            kind,
-            remote: Some(remote),
-        }) if kind == "rubygems" => remote.clone(),
-        _ => return usage("the Gemfile names no rubygems source".to_owned()),
-    };
-    // ponytail: one global rubygems source. Upgrade: git and path sources
-    // (#88), and a source scoped to some gems, each resolved with its own
-    // index.
-    if !gemfile.gemspecs.is_empty() {
-        return usage("`gemspec` is not supported yet (#88)".to_owned());
-    }
-    let local = gem_platform::Platform::local(spinel_vm::PLATFORM);
-    let mut dependencies = Vec::new();
-    for dep in &gemfile.dependencies {
-        if dep.source.is_some() {
-            return usage(format!(
-                "{}: a source of its own is not supported yet (#88)",
-                dep.name
-            ));
-        }
-        let requirement =
-            match gem_requirement::Requirement::new(dep.requirements.iter().map(String::as_str)) {
-                Ok(requirement) => requirement,
-                Err(err) => return usage(format!("{}: {err}", dep.name)),
-            };
-        dependencies.push(resolver::GemfileDependency {
-            name: dep.name.clone(),
-            requirement,
-            platforms: dep.platforms.clone(),
-            force_ruby_platform: dep.force_ruby_platform.unwrap_or(false),
-        });
-    }
-    let platforms: Vec<gem_platform::GemPlatform> = if platforms.is_empty() {
-        vec![gem_platform::GemPlatform::Platform(local.clone())]
-    } else {
-        platforms
-            .iter()
-            .map(|p| gem_platform::GemPlatform::new(Some(p), &local))
-            .collect()
-    };
-    let version =
-        |given: Option<&str>, default: &str| gem_version::Version::new(given.unwrap_or(default));
-    let (ruby_version, rubygems_version) = match (
-        version(ruby_version, spinel_vm::LANGUAGE_VERSION),
-        version(rubygems_version, gem_spec::RUBYGEMS_VERSION),
-    ) {
-        (Ok(ruby), Ok(rubygems)) => (ruby, rubygems),
-        (Err(err), _) | (_, Err(err)) => return usage(err.to_string()),
-    };
-    let gemfile_name = gemfile
-        .gemfiles
-        .first()
-        .and_then(|f| Path::new(f).file_name())
-        .map_or_else(
-            || "Gemfile".to_owned(),
-            |f| f.to_string_lossy().into_owned(),
-        );
-    // Bundler names a rubygems source by its remote with a trailing `/`.
-    let shown_remote = if remote.ends_with('/') {
-        remote.clone()
-    } else {
-        format!("{remote}/")
-    };
-    let mut request = resolver::Request {
-        gemfile: gemfile_name,
-        source: format!("rubygems repository {shown_remote}"),
-        dependencies,
-        platforms,
-        ruby_version,
-        rubygems_version,
+    let install::Prepared {
+        remote,
+        mut request,
+        local,
+    } = match install::prepare(&gemfile, platforms, ruby_version, rubygems_version) {
+        Ok(prepared) => prepared,
+        Err(message) => return usage(message),
     };
 
     // A lockfile to keep to (#79): `Definition` reads it, and when nothing
@@ -771,17 +706,7 @@ fn resolve_command(
                 return ExitCode::FAILURE;
             }
         };
-        let versions: Option<Vec<String>> =
-            gemfile.ruby.as_ref().filter(|r| !r.is_null()).map(|r| {
-                r.get("versions")
-                    .and_then(serde_json::Value::as_array)
-                    .map(|vs| {
-                        vs.iter()
-                            .filter_map(|v| v.as_str().map(str::to_owned))
-                            .collect()
-                    })
-                    .unwrap_or_default()
-            });
+        let versions = gemfile.ruby_versions();
         let local_platform = request.platforms[0].clone();
         let def = match locked::Definition::new(
             &lock,
@@ -828,7 +753,7 @@ fn resolve_command(
         .iter()
         .map(|d| d.name.clone())
         .collect();
-    let index = match runtime.block_on(read_index(&client, roots, &local)) {
+    let index = match runtime.block_on(install::read_index(&client, roots, &local)) {
         Ok(index) => index,
         Err(err) => {
             eprintln!("spinel: resolve: {err}");
@@ -913,47 +838,6 @@ fn print_resolution(
         }
     }
     ExitCode::SUCCESS
-}
-
-/// The builds of every gem `roots` can reach through any version's
-/// dependencies, as Bundler reads them before it resolves: `/versions`, then
-/// `/info` of the roots, then of every gem those name, and so on, each round
-/// fetched at once. A gem `/versions` does not list has no builds. `bundler`
-/// is never read: it resolves to the Bundler the lockfile is written for.
-async fn read_index(
-    client: &compact_index::Client,
-    roots: Vec<String>,
-    local: &gem_platform::Platform,
-) -> Result<resolver::Index, Box<dyn std::error::Error>> {
-    client.versions().await?;
-    let mut index = resolver::Index::new();
-    let mut wanted: Vec<String> = roots.into_iter().filter(|r| r != "bundler").collect();
-    while !wanted.is_empty() {
-        let mut next = Vec::new();
-        for (gem, result) in client.info(&wanted).await? {
-            let specs = match result? {
-                compact_index::Outcome::Unknown => Vec::new(),
-                _ => {
-                    let path = client.info_path(&gem);
-                    let data =
-                        std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-                    resolver::parse_info(&gem, &data, local)?
-                }
-            };
-            for dep in resolver::dependency_names(&specs) {
-                if dep != "bundler"
-                    && !index.contains_key(dep)
-                    && !next.iter().any(|n: &String| n == dep)
-                {
-                    next.push(dep.to_owned());
-                }
-            }
-            index.insert(gem, specs);
-        }
-        next.retain(|gem| !index.contains_key(gem));
-        wanted = next;
-    }
-    Ok(index)
 }
 
 // ---------------------------------------------------------------------------

@@ -7,6 +7,7 @@ What `spinel` does outside the engine: how it runs a file, how it reports itself
 | command | does |
 |---|---|
 | `spinel run <file> [args]` | run a file on the VM with the project's gems visible |
+| `spinel run -e CODE`, `spinel run -I DIR app.rb`, … | `ruby`'s command line (the row below), with the project's gems visible as `spinel run` makes them: `shims/setup.rb` runs first. Any first word after `run` that starts with `-`, other than `run`'s own `--watch`, `--dump-bytecode`, `--strict-ruby-version` and `--`, means this form. |
 | `spinel run --watch <file> [args]` | run it again whenever the project changes; see `--watch` below |
 | `spinel run --dump-bytecode <file>` | compile the file and print its bytecode instead of running it; see below |
 | `spinel <file.rb>` | same as `run`. Subcommand names win: `spinel install` is the subcommand even if `install` exists as a file; use `spinel run install` or `spinel ./install` for the file. |
@@ -117,4 +118,4 @@ The instructions after it are the ones it stands for, still in place. A jump int
 
 ## Bundler running on Spinel
 
-Apps call `require "bundler/setup"` in their own boot files, so Bundler the gem must run on Spinel and read Spinel's `.spinel/gem_home` and `Gemfile.lock`. Bundler is pure Ruby, and the GEM_HOME layout is standard, so this is a compatibility test rather than new code: `crates/spinel-cli/tests/fixtures/bundler-setup` boots an app through `bundler/setup` with `BUNDLE_PATH` pointed at `.spinel/gem_home`. `spinel install` writes `.bundle/config` with that `BUNDLE_PATH` so plain Bundler commands in the same project agree with Spinel.
+Apps call `require "bundler/setup"` in their own boot files, so Bundler the gem must run on Spinel and read Spinel's `.spinel/gem_home` and `Gemfile.lock`. Bundler is pure Ruby, and the GEM_HOME layout is standard, so this is a compatibility test rather than new code: `crates/spinel-cli/tests/fixtures/bundler-setup` boots an app through `bundler/setup` with `BUNDLE_PATH` pointed at `.spinel/gem_home`. `spinel install` writes `.bundle/config` with `BUNDLE_PATH: ".spinel/gem_home"`, as `bundle config set --local path .spinel/gem_home` writes it. That is not yet enough for plain Bundler commands to agree with Spinel: Bundler reads an explicit path's gems from `<path>/<engine>/<ruby ABI>` (`.spinel/gem_home/ruby/4.0.0` under CRuby), and refuses `path.system` beside it. Making the two meet is #71.

@@ -138,7 +138,7 @@ The store is `crates/spinel-cli/src/gem_store.rs`:
 - **Unpack**, as `Gem::Package` verifies and extracts one: a part named twice, a missing `metadata.gz` or `data.tar.gz`, or a part whose SHA256 or SHA512 differs from `checksums.yaml.gz` refuses the gem (SHA1, which RubyGems 2 also wrote, is not checked; those gems list SHA512 too). Signatures are not checked, as `gem install` does not check them without a trust policy. Every entry of `data.tar.gz` must name a path inside the gem's directory; directories, files (with their permission bits, never setuid, setgid or sticky) and symlinks are written, and any other kind of entry is passed over. Symlinks are made last, so nothing is written through one, and each must point inside the gem by its spelling, as RubyGems requires, and also where it physically leads once made, which catches `a/b/c/up -> ../..` followed by `a/b/c/up/x -> ../../..`. A symlink may not replace an existing directory or symlink, so no symlink checked earlier can be redirected through one made later; every symlink is checked again once all are made. A dangling one is left out with RubyGems' warning.
 - **Atomicity.** The entry is built in `store/tmp/<pid>-<n>/` and renamed into `store/gems/` whole, so an entry that exists is complete; a cut connection, a refused archive or a killed process leaves only staging files, which the next run removes once the process that made them has exited. Two `spinel`s storing one gem at once both fetch it, and the second rename finds the first's entry and keeps it. Nothing is fsynced (a `ponytail:` in `gem_store.rs`).
 
-Fetch and unpack run in parallel (`tokio`: downloads on the runtime, unpacking on blocking threads, at most one per CPU), so a cold install is network-bound, not CPU-bound: `bench/install.sh` times a cold and a warm store for the Sinatra fixture's lockfile beside `curl` fetching the same files. A warm install (everything in the store) is link creation only, plus the one index request: sub-second, and `bench/install.sh` times it too.
+Fetch and unpack run in parallel (`tokio`: downloads on the runtime, unpacking on blocking threads, at most one per CPU), so a cold install is network-bound, not CPU-bound: `bench/install.sh` times a cold and a warm store for the Sinatra fixture's lockfile beside `curl` fetching the same files. A warm install (everything in the store) is link creation only: `spinel install` takes each checksum from the lockfile's `CHECKSUMS`, so with nothing to resolve it makes no request at all, and `bench/install.sh` times it too, beside `bundle install`.
 
 `spinel fetch [--source URL] <name@version[-platform]>...` (hidden) brings the index up to date, reads each gem's checksum from its `/info` line, and fetches into the store, printing one line per gem; `crates/spinel-cli/tests/gem_store.rs` drives it against a local server with real `.gem`s that `tests/fixtures/gem_store/build.sh` builds with `gem build`.
 
@@ -177,17 +177,30 @@ The `spinel-ext` ABI version is part of the ext cache key `~/.spinel/store/ext/<
 
 ### 7. Post-install
 
-- Warm the bytecode cache for every new file (in-process, parallel).
-- Regenerate `.spinel/require_map.bin` (cli.md).
-- Write `.spinel/substitutions.json` and `.bundle/config` with `BUNDLE_PATH` (cli.md, "Bundler running on Spinel").
+- Warm the bytecode cache for every new file (in-process, parallel). Not yet: it follows the require map.
+- Regenerate `.spinel/require_map.bin` (cli.md). Not yet: #66, which hooks in where `spinel install` leaves a `ponytail:` for it.
+- Write `.spinel/substitutions.json` (not yet: nothing is substituted before #83) and `.bundle/config` with `BUNDLE_PATH` (cli.md, "Bundler running on Spinel").
 - Write `Gemfile.lock` if it changed.
 - Print what changed, uv-style: `+ rails 8.1.0`, `- foo 1.2`.
+
+### 8. `spinel install`
+
+`crates/spinel-cli/src/install.rs` runs the steps above in order and adds nothing of its own:
+
+- **Gemfile.** `shims/gemfile_eval.rb`, embedded in the binary, runs on the VM in a child `spinel`, from the current directory, so it finds `BUNDLE_GEMFILE` or the nearest `gems.rb`/`Gemfile` as Bundler does. The project is the Gemfile's directory, and the lockfile is beside it: `Gemfile.lock`, or `gems.locked` for a `gems.rb`. An error in the Gemfile is the evaluator's, exit 1.
+- **Resolution.** With a lockfile, `locked::Definition` holds the resolution to it (section 3, "Locked preferences"): nothing changed, nothing resolved and the index never read; otherwise the index is read and the lockfile `write_lock` leaves is written. With none, a fresh resolution and the lockfile `bundle lock` writes (section 4). A conflict is the resolver's explanation, exit 1.
+- **What is installed** is `SpecSet#for` of the lockfile's builds on the local platform, from the Gemfile dependencies `Definition#requested_dependencies` installs: those on this platform whose `install_if` held and whose `env` is set, in any group that is not only `optional: true` ones. Spinel reads no Bundler settings, so there is no `--without`.
+- **Store and GEM_HOME.** Each gem's checksum is its `CHECKSUMS` line, else the index's `/info` line; the store fetches what it does not have (section 5), and every gem is linked into `.spinel/gem_home/` at once, which removes what an earlier install linked and the lockfile no longer names. A gem that fails to fetch or verify fails the install before the GEM_HOME or the lockfile is touched.
+- **Then** `.bundle/config` and the lockfile, each written only when it changed, beside itself and renamed into place; the other settings in `.bundle/config` are kept. The output is one line per gem added (`+ rack 3.2.8`) and per gem removed (`- webrick 1.9.2`), sorted, and nothing when nothing changed.
+- **`--frozen`** is Bundler's frozen mode (`ensure_equivalent_gemfile_and_lockfile` for an explicit flag): before anything is resolved or written, a Gemfile the lockfile no longer holds (a gem added, taken out or with a requirement its locked version no longer meets, a changed source, a lockfile missing a checksum or a dependency, a `ruby` directive come or gone) is `lockfile_changes_summary`'s message, word for word as Bundler 4.0.20 writes it but for `spinel install` in place of `bundle install`, and exit 16, Bundler's `ProductionError` status; no lockfile is `Frozen mode is set, but there's no lockfile`. Otherwise it installs from the lockfile and never writes it. `crates/spinel-cli/tests/install.rs` checks each message against Bundler's.
+
+`crates/spinel-cli/tests/install.rs` runs it against rubygems.org's own files served on 127.0.0.1 (`tests/fixtures/install/`, which `snapshot.sh` takes: `/info/rake`, and the real `.gem`s of the newest rake and of every gem the Sinatra fixture locks, each checked against its checksum): `fixtures/plain` resolved afresh to the lockfile `bundle lock` writes, rake installed and `spinel run -e 'require "rake"'`; a second install that fetches and writes nothing, and a second project that links from the store; a gem taken out of the Gemfile and so out of the GEM_HOME; `--frozen` silent on an unchanged lockfile and failing as Bundler does on each change; and `fixtures/sinatra-lock` installed from its lockfile, which comes back byte for byte, then its `app.rb` serving a request on WEBrick. That last one needs `openssl`, which Spinel does not have yet (#106): Sinatra names rack-session's cookie store as it loads, and that requires `openssl`. Until #106, the test puts a stand-in that only defines the constants (`tests/fixtures/install/openssl-standin/`) on the load path with `-I`; it is never on Spinel's own load path.
 
 ## Commands
 
 | command | does |
 |---|---|
-| `spinel install [--frozen]` | resolve (respecting lock) + install. `--frozen` errors if lock would change (CI). |
+| `spinel install [--frozen]` | resolve (respecting lock) + install. `--frozen` errors if lock would change (CI). Section 8. |
 | `spinel add <gem>[@req] [--group dev] [--git url]` | edit Gemfile (append a `gem` line using `spinel_ast` to find the insertion point), then install |
 | `spinel remove <gem>` | inverse |
 | `spinel update [gem...]` | unlock named gems (or all) and resolve |
@@ -198,9 +211,9 @@ The `spinel-ext` ABI version is part of the ext cache key `~/.spinel/store/ext/<
 
 ## Validation targets
 
-1. `crates/spinel-cli/tests/fixtures/plain`: `gem "rake"`; install, `spinel run -e 'require "rake"'`.
+1. `crates/spinel-cli/tests/fixtures/plain`: `gem "rake"`; install, `spinel run -e 'require "rake"'`. Done (#84).
 2. `crates/spinel-cli/tests/fixtures/native-gem`: a gem shipping a `.spinel` extension; install and load it (phase 5).
    `crates/spinel-cli/tests/fixtures/builtin-gem`: a lock pinning `json` and `bigdecimal`; install uses the built-ins and skips `ext/`.
-3. `crates/spinel-cli/tests/fixtures/sinatra-lock`: a real Sinatra app lockfile; install, serve a request. Run the same `Gemfile.lock` through `bundle install` and diff.
+3. `crates/spinel-cli/tests/fixtures/sinatra-lock`: a real Sinatra app lockfile; install, serve a request. Run the same `Gemfile.lock` through `bundle install` and diff. Installed and served (#84), with an `openssl` stand-in until #106.
 4. `crates/spinel-cli/tests/fixtures/rails-lock` (phase 7): a `rails new` lockfile; install, `spinel run bin/rails runner 'puts Rails.version'`.
-5. `bench/install.sh`: cold and warm install of the Rails fixture, Spinel vs Bundler. Until `spinel install` lands, it times the store alone, cold and warm, for the Sinatra fixture's lockfile, against `curl`.
+5. `bench/install.sh`: cold and warm install of the Rails fixture, Spinel vs Bundler. For now it times the Sinatra fixture's lockfile: the store alone, cold and warm, against `curl`, and `spinel install` cold and warm against `bundle install`.
