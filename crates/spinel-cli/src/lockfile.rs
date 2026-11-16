@@ -100,7 +100,7 @@ impl LockedSpec {
     }
 }
 
-fn lock_name(name: &str, version: &Version, platform: &GemPlatform) -> String {
+pub(crate) fn lock_name(name: &str, version: &Version, platform: &GemPlatform) -> String {
     match platform {
         GemPlatform::Ruby => format!("{name} ({version})"),
         platform => format!("{name} ({version}-{platform})"),
@@ -859,7 +859,7 @@ fn section(out: &mut String, name: &str, mut values: Vec<String>) {
 // ---------------------------------------------------------------------------
 
 /// `Source::Rubygems#remove_auth`: a remote without its user and password.
-fn credless(remote: &str) -> String {
+pub(crate) fn credless(remote: &str) -> String {
     let Some((scheme, rest)) = remote.split_once("://") else {
         return remote.to_owned();
     };
@@ -1006,47 +1006,70 @@ impl Shaping<'_> {
             platforms.retain(|p| *p != local);
         }
     }
+}
 
-    /// `SpecSet#for(dependencies, platforms)`: the builds of the set each
-    /// platform installs, from the Gemfile's dependencies down.
-    fn materialize(
-        &self,
-        set: &[Spec],
-        dependencies: &[resolver::GemfileDependency],
-        platforms: &[GemPlatform],
-    ) -> Vec<Spec> {
-        let mut handled: HashSet<(String, String)> = platforms
-            .iter()
-            .map(|p| ("bundler".to_owned(), p.to_string()))
-            .collect();
-        let mut queue: std::collections::VecDeque<(String, bool, GemPlatform)> = dependencies
-            .iter()
-            .flat_map(|d| {
-                platforms
-                    .iter()
-                    .map(|p| (d.name.clone(), d.force_ruby_platform, p.clone()))
-            })
-            .collect();
-        let mut out: Vec<Spec> = Vec::new();
-        while let Some((name, force_ruby, platform)) = queue.pop_front() {
-            if !handled.insert((name.clone(), platform.to_string())) {
-                continue;
-            }
-            let candidates: Vec<Spec> = named(set, &name).cloned().collect();
-            let specs = select_best_platform_match(&candidates, &platform, force_ruby);
-            if let Some(first) = specs.first() {
+/// `SpecSet#for(dependencies, platforms)`: the builds of the set each
+/// platform installs, from the Gemfile's dependencies down.
+pub(crate) fn spec_set_for(
+    set: &[Spec],
+    dependencies: &[resolver::GemfileDependency],
+    platforms: &[GemPlatform],
+) -> Vec<Spec> {
+    materialize_dependencies(set, dependencies, platforms).0
+}
+
+/// `SpecSet#incomplete_for_platform?`: whether some gem the Gemfile's
+/// dependencies reach has no build in the set for `platform`.
+pub(crate) fn incomplete_for_platform(
+    set: &[Spec],
+    dependencies: &[resolver::GemfileDependency],
+    platform: &GemPlatform,
+) -> bool {
+    !set.is_empty() && materialize_dependencies(set, dependencies, std::slice::from_ref(platform)).1
+}
+
+/// `SpecSet#materialize_dependencies`: the builds, and whether a gem was
+/// reached that has none for its platform.
+fn materialize_dependencies(
+    set: &[Spec],
+    dependencies: &[resolver::GemfileDependency],
+    platforms: &[GemPlatform],
+) -> (Vec<Spec>, bool) {
+    let mut handled: HashSet<(String, String)> = platforms
+        .iter()
+        .map(|p| ("bundler".to_owned(), p.to_string()))
+        .collect();
+    let mut queue: std::collections::VecDeque<(String, bool, GemPlatform)> = dependencies
+        .iter()
+        .flat_map(|d| {
+            platforms
+                .iter()
+                .map(|p| (d.name.clone(), d.force_ruby_platform, p.clone()))
+        })
+        .collect();
+    let mut out: Vec<Spec> = Vec::new();
+    let mut incomplete = false;
+    while let Some((name, force_ruby, platform)) = queue.pop_front() {
+        if !handled.insert((name.clone(), platform.to_string())) {
+            continue;
+        }
+        let candidates: Vec<Spec> = named(set, &name).cloned().collect();
+        let specs = select_best_platform_match(&candidates, &platform, force_ruby);
+        match specs.first() {
+            Some(first) => {
                 for (dep, _) in &first.dependencies {
                     queue.push_back((dep.clone(), false, platform.clone()));
                 }
             }
-            for spec in specs {
-                if !out.iter().any(|s| s.full_name() == spec.full_name()) {
-                    out.push(spec);
-                }
+            None => incomplete = true,
+        }
+        for spec in specs {
+            if !out.iter().any(|s| s.full_name() == spec.full_name()) {
+                out.push(spec);
             }
         }
-        out
     }
+    (out, incomplete)
 }
 
 impl Lockfile {
@@ -1091,7 +1114,7 @@ impl Lockfile {
         if !materialize_for.contains(&GemPlatform::Ruby) {
             materialize_for.push(GemPlatform::Ruby);
         }
-        let specs = shaping.materialize(&set, &request.dependencies, &materialize_for);
+        let specs = spec_set_for(&set, &request.dependencies, &materialize_for);
 
         let mut remote = credless(remote);
         if !remote.ends_with('/') {

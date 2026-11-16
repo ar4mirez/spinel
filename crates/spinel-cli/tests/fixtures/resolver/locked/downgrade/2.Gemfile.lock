@@ -1,0 +1,28 @@
+GEM
+  remote: @SOURCE@/
+  specs:
+    rack (2.2.25)
+    rackup (1.0.1)
+      rack (< 3)
+      webrick
+    sinatra (1.0)
+      rack (>= 1.0)
+    webrick (1.9.2)
+
+PLATFORMS
+  ruby
+  x86_64-linux
+
+DEPENDENCIES
+  rack (< 3)
+  rackup
+  sinatra
+
+CHECKSUMS
+  rack (2.2.25) sha256=a5b3cd8f2df29c36ede21aa797c21e643f06792fae7487926102e06abe6da0b8
+  rackup (1.0.1) sha256=ba86604a28989fe1043bff20d819b360944ca08156406812dca6742b24b3c249
+  sinatra (1.0) sha256=8a79ad3209baf34a4dfef6079a5461c381c755750f8a1234c36144a838f67a8a
+  webrick (1.9.2) sha256=beb4a15fc474defed24a3bda4ffd88a490d517c9e4e6118c3edce59e45864131
+
+BUNDLED WITH
+  4.0.20
