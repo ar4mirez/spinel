@@ -516,6 +516,16 @@ pub enum Native {
     /// `Kernel#__bytecode_cache__(dir)`: keep compiled files in `dir` (#40).
     /// `shims/setup.rb` calls it with the project's `.spinel/bytecode/`.
     BytecodeCache,
+    /// `Kernel#__require_map__(path)`: read the require map at `path` (#66)
+    /// and use it from now on; true if it could be read. `shims/setup.rb`
+    /// calls it with the project's `.spinel/require_map.bin`.
+    RequireMap,
+    /// `Kernel#__require_map_scan__(dirs, file, from)`: the first index `i`
+    /// from `from` on at which the expanded load path `dirs` may have `file`,
+    /// as `i` when `dirs[i]` must be looked at on disk and as `-i - 1` when
+    /// the map says it has the file; nil when the map says none of them
+    /// does. Without a map, `from` itself while it is in range.
+    RequireMapScan,
     /// `Kernel#__refusal_boundary__(limit) { ... }`: run the block with a
     /// budget of `limit` instructions. A refusal inside it — something this
     /// VM cannot run yet, or running past the budget — ends the block and

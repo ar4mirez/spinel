@@ -177,8 +177,8 @@ The `spinel-ext` ABI version is part of the ext cache key `~/.spinel/store/ext/<
 
 ### 7. Post-install
 
-- Warm the bytecode cache for every new file (in-process, parallel). Not yet: it follows the require map.
-- Regenerate `.spinel/require_map.bin` (cli.md). Not yet: #66, which hooks in where `spinel install` leaves a `ponytail:` for it.
+- Warm the bytecode cache for every new file (in-process, parallel). Not yet: `spinel install` leaves a `ponytail:` for it.
+- Regenerate `.spinel/require_map.bin` (cli.md, "Bytecode cache and require map", #66), every time, from each linked gem's `full_require_paths` in the store and the stdlib's `lib/`. A map that cannot be written is a warning: one already there is still checked against the disk as it is read.
 - Write `.spinel/substitutions.json` (not yet: nothing is substituted before #83) and `.bundle/config` with `BUNDLE_PATH`, and make the GEM_HOME readable where Bundler reads that path, `<path>/ruby/4.0.0` and `<path>/spinel/4.0.0` (cli.md, "Bundler running on Spinel").
 - Write `Gemfile.lock` if it changed.
 - Print what changed, uv-style: `+ rails 8.1.0`, `- foo 1.2`.

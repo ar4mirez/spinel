@@ -95,6 +95,7 @@ pub mod json;
 pub mod method;
 pub mod mt;
 pub mod regexp;
+pub mod require_map;
 pub mod sbc;
 pub mod shape;
 pub mod shared;

@@ -503,16 +503,24 @@ fn install(frozen: bool) -> Result<(), Stop> {
     }
 
     // Post-install (docs/package-manager.md, "7. Post-install").
-    // ponytail: the bytecode cache is not warmed and `.spinel/require_map.bin`
-    // is not written; a first `require` compiles and searches `$LOAD_PATH` as
-    // it would without them. Upgrade: the require map is #66, which
-    // regenerates it here, and the warm-up follows it.
+    // ponytail: the bytecode cache is not warmed; a first `require` compiles
+    // each file. Upgrade: warm it here, from the files the map lists.
     // ponytail: no gem is substituted, so `.spinel/substitutions.json` is not
     // written. Upgrade: built-in gems are #83, Spinel-native ones phase 5.
     for scope in bundler_scopes() {
         for warning in gem_home::scope_view(&gem_home_dir, &scope).map_err(Stop::failure)? {
             eprintln!("spinel: install: warning: {warning}");
         }
+    }
+    // The require map (#66), written every time: it is what the GEM_HOME
+    // and the standard library hold now.
+    let mut roots = report.require_dirs.clone();
+    roots.extend(crate::stdlib::directory());
+    let map = root.join(".spinel").join(spinel_vm::require_map::FILE_NAME);
+    // A map that cannot be written is a slower run, never a wrong one: an
+    // old map still in place is checked against the disk as it is read.
+    if let Err(err) = spinel_vm::require_map::write(&map, &roots) {
+        eprintln!("spinel: install: warning: {}: {err}", map.display());
     }
     write_bundle_config(&root).map_err(|err| Stop::failure(format!(".bundle/config: {err}")))?;
     if !frozen && current.as_deref() != Some(written.as_str()) {
