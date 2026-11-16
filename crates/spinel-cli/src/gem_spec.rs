@@ -380,6 +380,13 @@ impl Spec {
         strings(&self.list("executables"))
     }
 
+    /// `require_paths`: the gem's directories, relative to it unless
+    /// absolute, that `Gem::Specification#full_require_paths` puts on
+    /// `$LOAD_PATH`.
+    pub fn require_paths(&self) -> Result<Vec<String>, String> {
+        strings(&self.plain("require_paths"))
+    }
+
     /// `extensions`.
     pub fn extensions(&self) -> Result<Vec<String>, String> {
         strings(&self.list("extensions"))

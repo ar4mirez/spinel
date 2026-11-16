@@ -282,6 +282,63 @@ fn plain_installs_rake_and_run_requires_it() {
     assert_eq!(ok(&out, "spinel run -e in lib/"), format!("{rake}\n"));
 }
 
+/// Where the require map (#66) answers for each file, once `gem "rake"` has
+/// put rake's directory on `$LOAD_PATH`: `map` if the map says some entry
+/// has it, else `disk`. Then rake loads.
+const REQUIRE_MAP_PROBE: &str = r##"gem "rake"
+dirs = Kernel.__expanded_load_path__
+%w[rake.rb rake/version.rb optparse.rb].each do |file|
+  at = Kernel.__require_map_scan__(dirs, file, 0)
+  at = Kernel.__require_map_scan__(dirs, file, at + 1) while at && at >= 0
+  puts "#{file}: #{at ? "map" : "disk"}"
+end
+require "rake"
+puts Rake::VERSION
+"##;
+
+#[test]
+fn install_writes_the_require_map_and_programs_use_it() {
+    let server = Server::start();
+    let sandbox = Sandbox::new("require-map");
+    sandbox.copy("plain", &server);
+    ok(&sandbox.install(&[]), "the first install");
+    let map = sandbox.project().join(".spinel/require_map.bin");
+    assert!(map.is_file(), "spinel install writes {}", map.display());
+    let expected = format!(
+        "rake.rb: map\nrake/version.rb: map\noptparse.rb: map\n{}\n",
+        rake_version()
+    );
+    let probe = || {
+        let out = sandbox
+            .spinel()
+            .args(["run", "-e", REQUIRE_MAP_PROBE])
+            .output()
+            .unwrap();
+        ok(&out, "the probe")
+    };
+    assert_eq!(probe(), expected);
+
+    // Every install writes it again: a damaged map, and none at all, are
+    // replaced by one the next run uses.
+    fs::write(&map, b"not a require map").unwrap();
+    assert_eq!(
+        probe(),
+        format!(
+            "rake.rb: disk\nrake/version.rb: disk\noptparse.rb: disk\n{}\n",
+            rake_version()
+        )
+    );
+    let out = sandbox.install(&[]);
+    assert_eq!(
+        (ok(&out, "the second install"), stderr(&out)),
+        (String::new(), String::new())
+    );
+    assert_eq!(probe(), expected);
+    fs::remove_file(&map).unwrap();
+    ok(&sandbox.install(&["--frozen"]), "a frozen install");
+    assert_eq!(probe(), expected);
+}
+
 #[test]
 fn a_warm_install_fetches_nothing_and_writes_nothing() {
     let server = Server::start();

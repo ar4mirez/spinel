@@ -288,8 +288,10 @@ module Kernel
   # it is now (`__feature_p__`). Only a name nothing provides is searched for,
   # each extension across the whole load path before the next (`__search__`).
   # ponytail: a linear scan of `$LOADED_FEATURES` per `require` (#39's D1),
-  # where CRuby keeps a `features_index` by short name; the index goes in with
-  # #66's require map, which is where lookup speed is the goal.
+  # where CRuby keeps a `features_index` by short name. With the require map
+  # (#66) passing over the load path, it is the largest part of what
+  # `bench/require_map.rb` still spends in `require`, about a third of the
+  # run. Upgrade: the index, kept beside `@__features_snapshot__`.
 
   # The extensions a name without one is tried with, in order: Ruby, then a
   # Spinel extension, then a CRuby one, which is found only to say so.
@@ -538,7 +540,7 @@ module Kernel
   # speed: with the plain `select` scan, a Ruby block per entry, the
   # `bench/bytecode_cache.rb` warm run took about 970 ms, against about 525 ms
   # with the copy and about 500 ms before this lookup. It is still the linear
-  # scan above, with no index; the `features_index` is #66's.
+  # scan above, with no index (the `ponytail:` above).
   def self.__features_containing__(feature)
     __sync_features__
     text = @__features_text__
@@ -643,19 +645,18 @@ module Kernel
     dirs = __expanded_load_path__
     exts.each do |ext|
       file = name + ext
-      dirs.each do |dir|
-        path = __search_entry__(dir, file)
-        return [ext, path] unless path.nil?
+      # The require map (#66) passes over the entries it lists that do not
+      # have the file, and answers for one that does; the rest are looked at
+      # on disk. Without a map, every entry is.
+      at = __require_map_scan__(dirs, file, 0)
+      until at.nil?
+        return [ext, File.expand_path(file, dirs[-at - 1])] if at < 0
+        path = File.expand_path(file, dirs[at])
+        return [ext, path] if File.file?(path)
+        at = __require_map_scan__(dirs, file, at + 1)
       end
     end
     nil
-  end
-
-  # One expanded load path entry's answer for `file`: where a per-directory
-  # require map (#66) answers without a `stat`.
-  def self.__search_entry__(dir, file)
-    path = File.expand_path(file, dir)
-    File.file?(path) ? path : nil
   end
 
   # The `self` of a wrapped `load`: a stand-in for `main`, with the wrapper

@@ -250,6 +250,24 @@ enum Command {
         path: PathBuf,
     },
 
+    /// Write a require map of the standard library and the directories
+    /// given.
+    ///
+    /// The debugging window onto the map `spinel install` writes for the
+    /// installed gems' `require_paths` (docs/cli.md, "Bytecode cache and
+    /// require map"), for a GEM_HOME made some other way, and for
+    /// `bench/require_map.rb`. Hidden: `spinel install` is the command that
+    /// writes the map.
+    #[command(hide = true)]
+    RequireMap {
+        /// Where to write it: a project's `.spinel/require_map.bin` is the
+        /// one its programs read.
+        out: PathBuf,
+
+        /// Load path directories to list, besides the standard library.
+        dirs: Vec<PathBuf>,
+    },
+
     /// Parse Ruby and print the syntax tree.
     ///
     /// Give it a file to see one tree. Give it a directory to sweep every `.rb`
@@ -356,6 +374,17 @@ fn main() -> ExitCode {
             );
         }
         Some(Command::Lockfile { path }) => return lockfile_command(&path),
+        Some(Command::RequireMap { out, dirs }) => {
+            let mut roots = dirs;
+            roots.extend(stdlib::directory());
+            return match spinel_vm::require_map::write(&out, &roots) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(err) => {
+                    eprintln!("spinel: require-map: {}: {err}", out.display());
+                    ExitCode::FAILURE
+                }
+            };
+        }
         Some(Command::Run {
             path,
             args,

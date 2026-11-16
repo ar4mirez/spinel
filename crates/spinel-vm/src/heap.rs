@@ -396,6 +396,11 @@ pub struct Heap {
     /// `.spinel/bytecode/`, which `shims/setup.rb` registers. `None` outside
     /// a project, and then nothing is read or written.
     bytecode_cache: Option<Arc<Path>>,
+    /// The project's `.spinel/require_map.bin` (#66), which `shims/setup.rb`
+    /// loads: what every gem's and the standard library's directories held,
+    /// so `require` passes over the entries that do not have a file without a
+    /// look on disk. `None` outside a project or when there is no usable map.
+    require_map: Option<Box<crate::require_map::RequireMap>>,
     /// See [`Libraries`]. Installed by `spinel_core::boot`, beside the parser.
     libraries: Option<Libraries>,
     /// Whether code this heap was meant to run did not all run — see
@@ -727,6 +732,7 @@ impl Heap {
             main: Value::NIL,
             parser: None,
             bytecode_cache: None,
+            require_map: None,
             libraries: None,
             partial: false,
             autoloads: Vec::new(),
@@ -1829,6 +1835,15 @@ impl<'h> HandleScope<'h> {
 
     pub fn bytecode_cache(&self) -> Option<Arc<Path>> {
         self.heap.bytecode_cache.clone()
+    }
+
+    /// Use `map` for `require` from now on (#66). `None` stops using one.
+    pub fn set_require_map(&mut self, map: Option<crate::require_map::RequireMap>) {
+        self.heap.require_map = map.map(Box::new);
+    }
+
+    pub(crate) fn require_map_mut(&mut self) -> Option<&mut crate::require_map::RequireMap> {
+        self.heap.require_map.as_deref_mut()
     }
 
     /// Install the table of libraries shipped inside the binary.

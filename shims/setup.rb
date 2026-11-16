@@ -13,7 +13,13 @@
 #    already loaded is told with `Gem.paths=`. This runs before the gem
 #    prelude loads RubyGems (#319), so RubyGems starts with these paths; the
 #    `Gem.paths=` is for a program that loaded it some other way first.
-# 2. `.spinel/require_map.bin`: not read yet (#66).
+# 2. The require map (#66): `.spinel/require_map.bin` beside the gem home,
+#    which `spinel install` writes, lists what every installed gem's
+#    `require_paths` and the standard library held. `require` passes over
+#    the load path entries it lists that do not have a file, rather than
+#    looking on disk, and looks on disk for every other entry. A directory
+#    that changed since is looked at on disk too, so a stale map is slower,
+#    never wrong; a map that cannot be read is not used.
 # 3. The bytecode cache (#40): `.spinel/bytecode/` beside the gem home is
 #    where `require` keeps each file's compiled bytecode, named by the
 #    SHA-256 of its source, and looks before it parses. The directory is
@@ -52,5 +58,6 @@ if gem_home
   if defined?(Gem) && Gem.respond_to?(:paths=)
     Gem.paths = { "GEM_HOME" => gem_home, "GEM_PATH" => gem_home }
   end
+  __require_map__(File.join(File.dirname(gem_home), "require_map.bin"))
   __bytecode_cache__(File.join(File.dirname(gem_home), "bytecode"))
 end

@@ -14504,6 +14504,19 @@ fn native_call<'h>(
             stack.push(Value::NIL);
             Ok(None)
         }
+        Native::RequireMap => {
+            let path = path_arg(scope, &call, 0)?;
+            let map = crate::require_map::load(&path);
+            let loaded = map.is_some();
+            scope.set_require_map(map);
+            stack.push(if loaded { Value::TRUE } else { Value::FALSE });
+            Ok(None)
+        }
+        Native::RequireMapScan => {
+            let value = require_map_scan(scope, &call)?;
+            stack.push(value);
+            Ok(None)
+        }
         Native::RefusalBoundary => {
             let limit = call.args.first().and_then(|v| v.as_fixnum()).unwrap_or(0);
             if call.block == Value::NIL || limit <= 0 {
@@ -17457,6 +17470,12 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             Builtin::Kernel,
             &["__bytecode_cache__"],
             Native::BytecodeCache,
+        ),
+        (Builtin::Kernel, &["__require_map__"], Native::RequireMap),
+        (
+            Builtin::Kernel,
+            &["__require_map_scan__"],
+            Native::RequireMapScan,
         ),
         (
             Builtin::Kernel,
@@ -23283,6 +23302,55 @@ fn binding_eval(
 // ---------------------------------------------------------------------------
 // Loading files and the file system (#39)
 // ---------------------------------------------------------------------------
+
+/// `__require_map_scan__(dirs, file, from)`: see [`Native::RequireMapScan`].
+fn require_map_scan(scope: &mut HandleScope<'_>, call: &Pending) -> Result<Value, Error> {
+    let refused = || Error::NoDispatch {
+        op: "__require_map_scan__",
+        operands: "arguments that are not an Array, a String and an Integer",
+    };
+    let dirs = call.args.first().copied().ok_or_else(refused)?;
+    let file = call
+        .args
+        .get(1)
+        .and_then(|&v| string_bytes(scope, v))
+        .ok_or_else(refused)?;
+    let from = call
+        .args
+        .get(2)
+        .and_then(|v| v.as_fixnum())
+        .and_then(|from| usize::try_from(from).ok())
+        .ok_or_else(refused)?;
+    let index = |at: usize| Value::fixnum(at as i64).expect("an index is a fixnum");
+    // Read through a handle, not `array_slice_of`, which answers None for an
+    // Array whose class the scope does not have remembered.
+    if heap_kind(scope, dirs) != Some(HeapKind::Array) {
+        return Err(refused());
+    }
+    let dirs = scope.root(dirs);
+    let length = array_len(scope, dirs);
+    if from >= length {
+        return Ok(Value::NIL);
+    }
+    if scope.require_map_mut().is_none() {
+        return Ok(index(from));
+    }
+    for at in from..length {
+        let dir = array_get(scope, dirs, at);
+        let Some(dir) = string_bytes(scope, dir) else {
+            return Ok(index(at));
+        };
+        let map = scope.require_map_mut().expect("checked above");
+        match map.probe(&dir, &file) {
+            crate::require_map::Probe::Absent => {}
+            crate::require_map::Probe::Unknown => return Ok(index(at)),
+            crate::require_map::Probe::Present => {
+                return Ok(Value::fixnum(-(at as i64) - 1).expect("an index is a fixnum"));
+            }
+        }
+    }
+    Ok(Value::NIL)
+}
 
 /// A path argument as the OS takes it.
 fn path_arg(scope: &mut HandleScope<'_>, call: &Pending, index: usize) -> Result<PathBuf, Error> {

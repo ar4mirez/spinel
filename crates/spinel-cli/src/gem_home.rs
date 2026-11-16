@@ -117,6 +117,9 @@ pub struct Report {
     pub removed: Vec<String>,
     /// What RubyGems would warn about, and what Spinel does not do yet.
     pub warnings: Vec<String>,
+    /// Each gem's `full_require_paths`, in the store, in order: what the
+    /// require map lists (#66).
+    pub require_dirs: Vec<PathBuf>,
 }
 
 /// One gem ready to link: everything read and generated, nothing written.
@@ -152,6 +155,9 @@ pub fn link(home: &Path, store_gems: &Path, gems: &[(GemId, PathBuf)]) -> Result
         }
         let gemspec = spec.to_ruby_for_cache().map_err(spec_error)?;
         let gem_dir = entry.join("gem");
+        for path in spec.require_paths().map_err(spec_error)? {
+            report.require_dirs.push(gem_dir.join(path));
+        }
         let name = spec.name().map_err(spec_error)?;
         let bindir = spec.bindir().map_err(spec_error)?;
         let mut stubs = Vec::new();
