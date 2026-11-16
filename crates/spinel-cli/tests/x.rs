@@ -428,13 +428,25 @@ fn the_chosen_gem_runs_when_a_dependency_has_an_executable_of_the_same_name() {
 }
 
 /// What `respawn` reports, run by the `spinel` at `ruby`: Spinel, with
-/// `Gem.ruby` and `RbConfig.ruby` both `ruby`, and the child each of them
-/// starts Spinel again, agreeing.
+/// `Gem.ruby` and `RbConfig.ruby` both an absolute path to that binary, and
+/// the child each of them starts Spinel again, agreeing. The path is the
+/// running binary as the OS reports it: on Linux `/proc/self/exe`, so `ruby`
+/// itself; elsewhere (macOS) the path it was started by, which may still
+/// go through a symlink or a `./`, so only the file it names is compared.
 fn assert_respawns(out: &Output, ruby: &Path) {
     assert!(out.status.success(), "{}", text(&out.stderr));
-    let ruby = ruby.display().to_string();
+    let reported = field(out, "gem_ruby");
+    assert!(Path::new(&reported).is_absolute(), "{reported}");
+    assert_eq!(
+        fs::canonicalize(&reported).unwrap(),
+        fs::canonicalize(ruby).unwrap(),
+        "{reported}"
+    );
+    if cfg!(target_os = "linux") {
+        assert_eq!(reported, ruby.display().to_string());
+    }
+    let ruby = reported;
     assert_eq!(field(out, "engine"), "spinel");
-    assert_eq!(field(out, "gem_ruby"), ruby);
     assert_eq!(field(out, "rbconfig_ruby"), ruby);
     assert_eq!(field(out, "child_gem_ruby"), format!("spinel {ruby}"));
     assert_eq!(field(out, "child_rbconfig_ruby"), format!("spinel {ruby}"));
