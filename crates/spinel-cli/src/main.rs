@@ -34,6 +34,7 @@ mod init;
 mod install;
 mod locked;
 mod lockfile;
+mod remove;
 mod resolver;
 mod ruby_args;
 mod ruby_version;
@@ -59,7 +60,7 @@ This build runs Ruby. The core library is minimal — Kernel, Object, Integer,
 String, Symbol, Array, Hash, Comparable — and a program that reaches past it
 says which method is missing rather than failing quietly.
 
-Planned surface (docs/cli.md): add, remove, update, test, build.
+Planned surface (docs/cli.md): update, test, build.
 Progress: https://github.com/ar4mirez/spinel/milestones";
 
 #[derive(Parser, Debug)]
@@ -166,6 +167,19 @@ enum Command {
         /// yet (#88), so this fails and writes nothing.
         #[arg(long, value_name = "URL")]
         git: Option<String>,
+    },
+
+    /// Remove gems from the Gemfile and install what is left.
+    ///
+    /// Takes each gem's `gem` lines out of the Gemfile, as `bundle remove`
+    /// does, with a `group` block left empty; every other byte of the file
+    /// stays. Then installs, as `spinel install` does, keeping every other
+    /// locked version, so only the gems removed and those nothing else needs
+    /// leave the lockfile. Nothing is written when that fails.
+    Remove {
+        /// The gems to remove.
+        #[arg(value_name = "GEM")]
+        gems: Vec<String>,
     },
 
     /// Run a gem's executable without installing it into the project.
@@ -417,6 +431,7 @@ fn main() -> ExitCode {
                 git: git.as_deref(),
             });
         }
+        Some(Command::Remove { gems }) => return remove::run(&gems),
         Some(Command::X {
             source,
             gem,
