@@ -214,12 +214,24 @@ fn prepare(request: &Request) -> Result<(PathBuf, PathBuf), Stop> {
     let gem_home = absolute(&home.join("x").join(directory_name(root, &wants)));
     let report = gem_home::link(&gem_home, &absolute(&store.root().join("gems")), &stored)
         .map_err(Stop::failure)?;
-    for warning in &report.warnings {
-        eprintln!("spinel: x: warning: {warning}");
-    }
+    let choice = choose_executable(&report.executables, gem, executable);
     // What this run installed, uv-style, on standard error so the
-    // command's own output is all that standard output carries. A run
-    // that reuses the GEM_HOME prints nothing.
+    // command's own output is all that standard output carries, with what
+    // `link` warned of. A run that reuses the GEM_HOME prints nothing. The
+    // chosen executable runs from its own gem's stub, so which gem `bin/`
+    // gave it to is left out.
+    let linked = report
+        .linked
+        .iter()
+        .any(|(_, outcome)| matches!(outcome, gem_home::Outcome::Linked));
+    if linked {
+        let run_from = choice.as_ref().map(|(_, exe)| format!("bin/{exe}: ")).ok();
+        for warning in &report.warnings {
+            if run_from.as_ref().is_none_or(|p| !warning.starts_with(p)) {
+                eprintln!("spinel: x: warning: {warning}");
+            }
+        }
+    }
     for (full_name, outcome) in &report.linked {
         if matches!(outcome, gem_home::Outcome::Linked) {
             match resolved.iter().find(|r| r.full_name() == *full_name) {
@@ -229,8 +241,7 @@ fn prepare(request: &Request) -> Result<(PathBuf, PathBuf), Stop> {
         }
     }
 
-    let (owner, chosen) =
-        choose_executable(&report.executables, gem, executable).map_err(Stop::failure)?;
+    let (owner, chosen) = choice.map_err(Stop::failure)?;
     let stub = stub_for(&gem_home, &owner, &chosen).map_err(Stop::failure)?;
     Ok((gem_home, stub))
 }

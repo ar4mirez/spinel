@@ -404,6 +404,7 @@ fn the_chosen_gem_runs_when_a_dependency_has_an_executable_of_the_same_name() {
     let out = sandbox.x(&["clash"]);
     assert!(out.status.success(), "{}", text(&out.stderr));
     assert_eq!(text(&out.stdout), "clash from clash\nprogram clash\n");
+    assert_eq!(text(&out.stderr), "+ clash 1.0.0\n+ clash-dep 1.0.0\n");
     sandbox.server.take_gem_requests();
     // The same again, from the GEM_HOME as it is, writing nothing.
     let dirs = sandbox.x_dirs();
@@ -416,11 +417,7 @@ fn the_chosen_gem_runs_when_a_dependency_has_an_executable_of_the_same_name() {
     let again = sandbox.x(&["clash"]);
     assert!(again.status.success(), "{}", text(&again.stderr));
     assert_eq!(text(&again.stdout), "clash from clash\nprogram clash\n");
-    assert!(
-        !text(&again.stderr).contains("+ "),
-        "{}",
-        text(&again.stderr)
-    );
+    assert_eq!(text(&again.stderr), "");
     assert!(sandbox.server.take_gem_requests().is_empty());
     assert_eq!(fs::metadata(&own).unwrap().modified().unwrap(), modified);
     // `--gem` runs the dependency's.
