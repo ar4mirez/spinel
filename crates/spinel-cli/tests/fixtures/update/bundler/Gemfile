@@ -1,0 +1,4 @@
+source "@SOURCE@"
+
+gem "rake"
+gem "other"

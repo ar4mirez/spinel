@@ -66,13 +66,14 @@ fn dep(name: &str, requirement: &[&str]) -> GemfileDependency {
 
 fn definition(text: &str, deps: &[GemfileDependency], ruby: Option<&[&str]>) -> Definition {
     let ruby: Option<Vec<String>> = ruby.map(|r| r.iter().map(|s| (*s).to_owned()).collect());
-    Definition::new(
+    Definition::unlocking(
         &lock(text),
         REMOTE,
         deps,
         ruby.as_deref(),
         &platform("x86_64-linux"),
         &[],
+        &Unlock::Nothing,
     )
     .unwrap()
 }
@@ -218,13 +219,14 @@ fn a_locked_ruby_version_is_kept_while_the_directive_allows_it() {
 fn an_unreadable_locked_ruby_version_is_refused() {
     let text = LOCK.replace("BUNDLED WITH", "RUBY VERSION\n  jruby\n\nBUNDLED WITH");
     let ruby = vec![">= 3.0".to_owned()];
-    let err = Definition::new(
+    let err = Definition::unlocking(
         &lock(&text),
         REMOTE,
         &[dep("sinatra", &[])],
         Some(&ruby),
         &platform("x86_64-linux"),
         &[],
+        &Unlock::Nothing,
     )
     .unwrap_err();
     assert!(err.0.starts_with("The Ruby version jruby from"), "{err}");
@@ -260,13 +262,14 @@ fn a_spec_whose_dependencies_are_not_locked_is_dropped() {
 
 #[test]
 fn a_changed_source_holds_nothing_but_the_preference() {
-    let def = Definition::new(
+    let def = Definition::unlocking(
         &lock(LOCK),
         "https://elsewhere.example",
         &[dep("sinatra", &[])],
         None,
         &platform("x86_64-linux"),
         &[],
+        &Unlock::Nothing,
     )
     .unwrap();
     assert!(def.resolve_needed());
@@ -375,4 +378,77 @@ fn a_lockfile_from_an_earlier_bundler_that_changes_is_written_for_this_one() {
 fn a_lockfile_from_an_earlier_major_bundler_is_written_for_this_one() {
     let text = lock_from_4_0_10().replace("4.0.10", "2.6.9");
     assert_eq!(write_lock(&text, &[dep("sinatra", &[])]), LOCK);
+}
+
+fn updating(text: &str, deps: &[GemfileDependency], unlock: Unlock) -> Definition {
+    Definition::unlocking(
+        &lock(text),
+        REMOTE,
+        deps,
+        None,
+        &platform("x86_64-linux"),
+        &[],
+        &unlock,
+    )
+    .unwrap()
+}
+
+/// `bundle update sinatra`: Sinatra and the Rack it locks are unlocked
+/// (`@locked_specs.for(eager_unlock)`), the base holds neither, and Sinatra
+/// is pinned to what a full update gives it, so both move.
+#[test]
+fn updating_a_gem_unlocks_it_and_what_it_reaches() {
+    let deps = [dep("sinatra", &[])];
+    let mut def = updating(LOCK, &deps, Unlock::Gems(vec!["sinatra".to_owned()]));
+    assert!(def.resolve_needed());
+    assert_eq!(def.gems_to_unlock, ["sinatra", "rack"]);
+    let base = def.resolution_base(&deps);
+    assert!(base.base.is_empty(), "{:?}", base.base);
+    assert_eq!(base.requirements["rack"].to_string(), ">= 2.2.25");
+    let request = request(&def, deps.to_vec());
+    let index = index();
+    let specs = def.start_resolution(&request, &index).unwrap();
+    assert_eq!(names(&specs), ["rack-3.0.0", "sinatra-4.0.0"]);
+    let written = def.write_lock(LOCK, REMOTE, &request, Some(&index), &specs);
+    assert!(written.contains("    sinatra (4.0.0)\n"), "{written}");
+}
+
+/// `bundle update rack`: Rack alone is unlocked and Sinatra stays in the
+/// base at 3.2.0, but Rack is pinned to the 3.0.0 a full update gives it.
+/// The conflict loosens Rack's pin (a gem the Gemfile does not name), then
+/// Sinatra's, and both move, as Bundler 4.0.20 moves them for this index.
+#[test]
+fn updating_a_dependency_forces_it_up_past_what_holds_it() {
+    let deps = [dep("sinatra", &[])];
+    let mut def = updating(LOCK, &deps, Unlock::Gems(vec!["rack".to_owned()]));
+    assert_eq!(def.gems_to_unlock, ["rack"]);
+    let base = def.resolution_base(&deps);
+    assert_eq!(names(&base.base), ["sinatra-3.2.0"]);
+    let request = request(&def, deps.to_vec());
+    let specs = def.start_resolution(&request, &index()).unwrap();
+    assert_eq!(names(&specs), ["rack-3.0.0", "sinatra-4.0.0"]);
+}
+
+/// `bundle update`: no base, every gem unlocked, the floors kept.
+#[test]
+fn updating_everything_holds_only_the_floors() {
+    let deps = [dep("sinatra", &[])];
+    let mut def = updating(LOCK, &deps, Unlock::All);
+    assert!(def.resolve_needed());
+    let base = def.resolution_base(&deps);
+    assert!(base.unlock_all);
+    assert!(base.base.is_empty());
+    assert_eq!(base.requirements["sinatra"].to_string(), ">= 3.2.0");
+    assert_eq!(base.requirements["rack"].to_string(), ">= 2.2.25");
+    let request = request(&def, deps.to_vec());
+    let index = index();
+    let specs = def.start_resolution(&request, &index).unwrap();
+    assert_eq!(names(&specs), ["rack-3.0.0", "sinatra-4.0.0"]);
+    // Nothing moving still writes the lockfile Bundler writes, not the one
+    // on disk: `write_lock` keeps nothing when unlocking.
+    let def = updating(LOCK, &deps, Unlock::All);
+    let request = self::request(&def, deps.to_vec());
+    let old = LOCK.replace("BUNDLED WITH\n  4.0.20\n", "BUNDLED WITH\n  4.0.10\n");
+    let specs = def.unchanged(&deps);
+    assert_eq!(def.write_lock(&old, REMOTE, &request, None, &specs), LOCK);
 }

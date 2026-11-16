@@ -1,0 +1,54 @@
+GEM
+  remote: @SOURCE@/
+  specs:
+    base64 (0.3.0)
+    logger (1.7.0)
+    mustermann (3.1.1)
+    rack (3.0.18)
+    rack-protection (4.0.1)
+      base64 (>= 0.1.0)
+      logger (>= 1.6.0)
+      rack (>= 3.0.0, < 4)
+    rack-session (2.1.2)
+      base64 (>= 0.1.0)
+      rack (>= 3.0.0)
+    rackup (2.1.0)
+      rack (>= 3)
+      webrick (~> 1.8)
+    rake (13.2.1)
+    sinatra (4.0.1)
+      logger (>= 1.6.0)
+      mustermann (~> 3.0)
+      rack (>= 3.0.0, < 4)
+      rack-protection (= 4.0.1)
+      rack-session (>= 2.0.0, < 3)
+      tilt (~> 2.0)
+    tilt (2.4.0)
+    webrick (1.9.2)
+
+PLATFORMS
+  ruby
+  x86_64-linux
+
+DEPENDENCIES
+  rack (< 3.1)
+  rackup (< 2.2)
+  rake (< 13.3)
+  sinatra (< 4.1)
+  tilt (< 2.5)
+
+CHECKSUMS
+  base64 (0.3.0) sha256=27337aeabad6ffae05c265c450490628ef3ebd4b67be58257393227588f5a97b
+  logger (1.7.0) sha256=196edec7cc44b66cfb40f9755ce11b392f21f7967696af15d274dde7edff0203
+  mustermann (3.1.1) sha256=4c6170c7234d5499c345562ba7c7dfe73e1754286dcc1abb053064d66a127198
+  rack (3.0.18) sha256=8ef7fc1505b1077a149a39062bca0346f3c34e6cbdfe82d517733f9d9c40c877
+  rack-protection (4.0.1) sha256=15a4585e04c2595a86836929263f3547e3aa1e45d50c866f2817468d7635c8be
+  rack-session (2.1.2) sha256=595434f8c0c3473ae7d7ac56ecda6cc6dfd9d37c0b2b5255330aa1576967ffe8
+  rackup (2.1.0) sha256=6ecb884a581990332e45ee17bdfdc14ccbee46c2f710ae1566019907869a6c4d
+  rake (13.2.1) sha256=46cb38dae65d7d74b6020a4ac9d48afed8eb8149c040eccf0523bec91907059d
+  sinatra (4.0.1) sha256=a988fc5e4be15ccc63b466f4a8695b9ac7e4d24bf8a68f9ba8669da5758a25e7
+  tilt (2.4.0) sha256=df74f29a451daed26591a85e8e0cebb198892cb75b6573394303acda273fba4d
+  webrick (1.9.2) sha256=beb4a15fc474defed24a3bda4ffd88a490d517c9e4e6118c3edce59e45864131
+
+BUNDLED WITH
+  4.0.20

@@ -397,16 +397,15 @@ class GemfileEval
       # versions, so `= 1` and `= 1.0` count as different here.
       if current["requirements"].sort != dep["requirements"].sort
         # What `spinel add` evaluates as `injected gems`, as Bundler's
-        # Injector does, says why, word for word.
-        # ponytail: the prompt names `bundle update`, which works on the
-        # GEM_HOME `spinel install` writes. Upgrade: `spinel update` (#87).
+        # Injector does, says why, word for word but for the command it
+        # names: `spinel update` (#87), where Bundler names `bundle update`.
         prompt = ""
         if File.basename(@gemfile) == INJECTED_GEMS
           open = current["requirements"].include?(">= 0")
           prompt = if dep["requirements"].include?(">= 0") && !open
             ". Gem already added"
           else
-            ". If you want to update the gem version, run `bundle update #{dep["name"]}`" +
+            ". If you want to update the gem version, run `spinel update #{dep["name"]}`" +
               (open ? "" : ". You may also need to change the version requirement specified in the Gemfile if it's too restrictive.")
           end
         end
