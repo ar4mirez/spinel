@@ -1,0 +1,4 @@
+---
+0.2.2 timeout:>= 0|checksum:aa73e0cba6a125369de9837b8d8ef82a61849360eba0521900e2c3713aa162a8,ruby:>= 2.6.0
+0.3.0 timeout:>= 0|checksum:ba310c3d4f1cad46bb1ab20336b06669b1ff8f7c568d9cb9342b32a718547472,ruby:>= 2.6.0
+0.4.0 timeout:>= 0|checksum:f9f90c8c6f64794a45160bf422177a336db12809de3beeeaa26b88fcd2e8c853,ruby:>= 2.6.0

@@ -1,0 +1,5 @@
+---
+8.1.0 logger:>= 0,openssl:>= 3.2.0|checksum:c9b488c2fbb13a1770e833443b1ee447ca9a33d5cb57af2e6ab692d6fc25d3c1,ruby:>= 2.7
+8.1.1 logger:>= 0,openssl:>= 3.2.0|checksum:8283aa541f89155ce55296ee7888d7082dd9b7bb7c9b7bdbd114c4cc4b52508d,ruby:>= 2.7
+8.1.2 logger:>= 0,openssl:>= 3.2.0|checksum:78ce245aba70b5b8dab6226b335a7f359e0ba062fef6a1bc57bad32bee22778e,ruby:>= 2.7
+7.3.10 logger:>= 0|checksum:8b54591acc8f9dbb63cd906add66a816c302f950cf92137b14155e809abea472,ruby:>= 2.6

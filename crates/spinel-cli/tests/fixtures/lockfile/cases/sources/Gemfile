@@ -1,0 +1,10 @@
+source ENV.fetch("SPINEL_RESOLVER_SOURCE")
+
+gem "rack"
+gem "local_tool", path: "vendor/local_tool"
+gem "git_tool", git: ENV.fetch("LOCKFILE_GIT_TOOL"), branch: "main"
+gem "tagged_tool", git: ENV.fetch("LOCKFILE_TAGGED_TOOL"), tag: "v0.2.0", glob: "gems/*/*.gemspec"
+
+source ENV.fetch("SPINEL_RESOLVER_SOURCE_2") do
+  gem "rackup"
+end

@@ -1,0 +1,4 @@
+---
+2.9.0 public_suffix:< 8.0&>= 2.0.2|checksum:7fdf6ac3660f7f4e867a0838be3f6cf722ace541dd97767fa42bc6cfa980c7af,ruby:>= 2.2
+2.9.1 public_suffix:< 8.0&>= 2.0.2|checksum:f1212365945455c84e8d031eea40fc6bedf0c663a78d95b3ab93591040bc5c35,ruby:>= 2.2
+2.9.2 public_suffix:< 8.0&>= 2.0.2|checksum:9117c7e7d6ee07230e75ce41fb9401ae55354dc654fcd0e862ba41d539e9a610,ruby:>= 2.2

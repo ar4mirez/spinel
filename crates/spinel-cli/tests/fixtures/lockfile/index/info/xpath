@@ -1,0 +1,4 @@
+---
+3.0.0 nokogiri:~> 1.8|checksum:b14536a5faaf07b8e13abbdef67af85929cea71a395b4f7fdbbd5e185e6bb48b,ruby:>= 2.2
+3.1.0 nokogiri:~> 1.8|checksum:f14b207a21b78c3679ca8fa3434c649db9d37af1176901907a7c11b0b78cc1f8,ruby:>= 2.2
+3.2.0 nokogiri:~> 1.8|checksum:6dfda79d91bb3b949b947ecc5919f042ef2f399b904013eb3ef6d20dd3a4082e,ruby:>= 2.3

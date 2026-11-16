@@ -1,0 +1,4 @@
+---
+3.1.5 unicode-emoji:>= 4.0.4&~> 4.0|checksum:bf566817855ee7ee3adcf7bace0d5906cb14401417db59193f8a5fcedf02dd4e,ruby:>= 2.5.0
+3.2.0 unicode-emoji:~> 4.1|checksum:0cdd96b5681a5949cdbc2c55e7b420facae74c4aaf9a9815eee1087cb1853c42,ruby:>= 2.5.0
+3.3.0 unicode-emoji:~> 4.3|checksum:4b7aa66a4b11db50f6f7e98411215cd0dd10eaecb665d36eec5bcacb3fa0b613,ruby:>= 2.5.0

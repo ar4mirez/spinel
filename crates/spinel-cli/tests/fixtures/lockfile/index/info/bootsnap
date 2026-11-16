@@ -1,0 +1,4 @@
+---
+1.25.0 msgpack:~> 1.5|checksum:41059e7d0f9cb4023a33465d095f64b913fc9d1b808d6524c307da945fbcffcf,ruby:>= 2.7.0
+1.26.0 msgpack:~> 1.5|checksum:ca96237015e6cd74a02963d5821cf00ac5ea134653b323e8cd6d702a7718bf1b,ruby:>= 2.7.0
+1.26.1 msgpack:~> 1.5|checksum:5b5bd90f8f13ea338627c1d56ffbe2ea25e743ac48c2afec1a9bea3a06a264e2,ruby:>= 2.7.0

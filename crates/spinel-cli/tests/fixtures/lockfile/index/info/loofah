@@ -1,0 +1,4 @@
+---
+2.25.1 crass:~> 1.0.2,nokogiri:>= 1.12.0|checksum:d436c73dbd0c1147b16c4a41db097942d217303e1f7728704b37e4df9f6d2e04,ruby:>= 2.5.0
+2.25.2 crass:~> 1.0.2,nokogiri:>= 1.12.0|checksum:2007f746959ac65552456e04b433e83deb22759ab38c838b4445c70e43425918,ruby:>= 2.5.0
+2.25.3 crass:~> 1.0.2,nokogiri:>= 1.19.5|checksum:545f14eef0cc2a7de80df560530d593232b7c07e515c5c4e37532d9cb5b0185c,ruby:>= 3.2.0

@@ -1,0 +1,4 @@
+---
+2.0.21 actionpack:>= 7.1.0,railties:>= 7.1.0|checksum:02070ea29fd11d8c1a07d9d7be980729a20e94e39b8c6c819f690f7959216bc7,ruby:>= 3.1
+2.0.22 actionpack:>= 7.1.0,railties:>= 7.1.0|checksum:909f6f35a104aaad14cffbf43536aded9d4681352da6d8e79216fccd0282bb59,ruby:>= 3.1
+2.0.23 actionpack:>= 7.1.0,railties:>= 7.1.0|checksum:ee0d90733aafff056cf51ff11e803d65e43cae258cc55f6492020ec1f9f9315f,ruby:>= 3.1

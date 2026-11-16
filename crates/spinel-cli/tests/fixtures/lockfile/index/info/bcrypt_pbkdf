@@ -1,0 +1,20 @@
+---
+1.1.2.rc1 |checksum:152b7e7c48a57e7e8ad2f715b08a28dd671bf1fdbb1ec0693445663e0f3e55dc,rubygems:> 1.3.1
+1.1.2.rc1-arm64-darwin |checksum:d5f706048b9a74b4518506eccf85bf8ef60662aaf3ba4b5571680956a2f6cf2b,ruby:< 3.4.dev&>= 2.7,rubygems:> 1.3.1
+1.1.2.rc1-x64-mingw-ucrt |checksum:3151882dd1ad3338c321bd5b6c230ef362b2d00326fba1228102a6d80a2fe1b9,ruby:< 3.4.dev&>= 3.1,rubygems:> 1.3.1
+1.1.2.rc1-x64-mingw32 |checksum:d6bf523c6b716c4a8cde2d3cc1ac5263f0c939542ac51219647e9f2652715826,ruby:< 3.1.dev&>= 2.7,rubygems:> 1.3.1
+1.1.2.rc1-x86-mingw32 |checksum:82938ed9ab44ec73ca1484b5dd768dd1adf933fa092b16d38a167f6f6bdaafcd,ruby:< 3.4.dev&>= 2.7,rubygems:> 1.3.1
+1.1.2.rc1-x86_64-darwin |checksum:3b3c46334f4b7fac88aefed52617ed4ae415d682a0cff31e5c32285e25031ddf,ruby:< 3.4.dev&>= 2.7,rubygems:> 1.3.1
+1.1.2 |checksum:c2414c23ce66869b3eb9f643d6a3374d8322dfb5078125c82792304c10b94cf6
+1.1.2-arm64-darwin |checksum:afdd6feb6ed5a97b8e44caacb3f2d641b98af78e6a516d4a3520b69af5cf9fea,ruby:< 3.4.dev&>= 2.7
+1.1.2-x64-mingw-ucrt |checksum:8d84326d1a922d71b90a1522333299e1d0c5fea4513e54cd2ca8c13cfeb34911,ruby:< 3.4.dev&>= 3.1
+1.1.2-x64-mingw32 |checksum:652a41784d9de35aaf08084b2530b0c2dde1b5a6b6c624543ffff883f6533d92,ruby:< 3.1.dev&>= 2.7
+1.1.2-x86-mingw32 |checksum:4a6fcf83e78df087a1465491ab579793bffbf0c947b142e93d2989bec8f90394,ruby:< 3.4.dev&>= 2.7
+1.1.2-x86_64-darwin |checksum:35f5639d0058e6c2cc2f856f9c0b14080543268d3047abe6bc81c513093caa0e,ruby:< 3.4.dev&>= 2.7
+1.2.0.beta1 |checksum:b322f2a1f110ae4cd445a8bc7235677c1c7b6f899c2fffd15430225c39763e83,rubygems:> 1.3.1
+1.2.0.beta1-arm64-darwin |checksum:a6a1734c17c49856ebdb2bafeaa7b779d762d6558baa1ffc8c5e93be749ad3a5,ruby:< 3.4.dev&>= 2.7,rubygems:> 1.3.1
+1.2.0.beta1-x64-mingw-ucrt |checksum:00002c87c4197ed5230089c17a8861f73a13c326471ef64f9c06ee3bf861970a,ruby:< 3.4.dev&>= 3.1,rubygems:> 1.3.1
+1.2.0.beta1-x64-mingw32 |checksum:a961af228e3c4592bf4937ffb3fb550f5dde806ef2a34e8005f767376ed383ce,ruby:< 3.1.dev&>= 2.7,rubygems:> 1.3.1
+1.2.0.beta1-x86-mingw32 |checksum:72330ad4d4041ebcda0f74361235917191a157c2962145d7f5d33ee5e467ca62,ruby:< 3.4.dev&>= 2.7,rubygems:> 1.3.1
+1.2.0.beta1-x86_64-darwin |checksum:916e2a35fc78a47625e066efddf23d53176b81d30092b704b3f19023e9040390,ruby:< 3.4.dev&>= 2.7,rubygems:> 1.3.1
+1.2.0.beta1-java |checksum:9952a9967ee02c5a0f256918ae925f5b84b8873afe031d0ef3a5636cc93980f4,rubygems:> 1.3.1

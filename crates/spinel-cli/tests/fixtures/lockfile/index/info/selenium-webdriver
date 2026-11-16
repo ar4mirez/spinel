@@ -1,0 +1,4 @@
+---
+4.50.0 base64:~> 0.2,logger:~> 1.4,rubyzip:< 4.0&>= 1.2.2,websocket:~> 1.0|checksum:d12f94025bc33af44428ed6b8def4896a7bb9c4521212579241650d6cb060fcb,ruby:>= 3.3,rubygems:> 1.3.1
+4.51.0 base64:~> 0.2,logger:~> 1.4,rubyzip:< 4.0&>= 1.2.2,websocket:~> 1.0|checksum:09edf1b7fc360e0570bac609676f804ed527fe0b2f285e03233561e29b0ec105,ruby:>= 3.3,rubygems:> 1.3.1
+4.52.0 base64:~> 0.2,logger:~> 1.4,rubyzip:< 4.0&>= 1.2.2,websocket:~> 1.0|checksum:5d45ba100ea8b57f5a8c25979a636d48b4c60c39973478930d78e884bdeecd2d,ruby:>= 3.3,rubygems:> 1.3.1

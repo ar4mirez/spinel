@@ -1,0 +1,4 @@
+---
+1.0.8 activejob:>= 7.2,activerecord:>= 7.2,railties:>= 7.2|checksum:6afab113f966aa6cfccaa9a79d6e37479fb439e94e9d39d713e86fb1d778cc02
+1.0.9 activejob:>= 7.2,activerecord:>= 7.2,railties:>= 7.2|checksum:0fa0253d3eb0b1f4a4d228e08eaea65eb6843386ab91dc671586a6e85e616298
+1.0.10 activejob:>= 7.2,activerecord:>= 7.2,railties:>= 7.2|checksum:bc05a2fb3ac78a6f43cbb5946679cf9db67dd30d22939ededc385cb93e120d41

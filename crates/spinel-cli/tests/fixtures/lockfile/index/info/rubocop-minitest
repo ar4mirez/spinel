@@ -1,0 +1,4 @@
+---
+0.39.1 lint_roller:~> 1.1,rubocop:< 2.0&>= 1.75.0,rubocop-ast:< 2.0&>= 1.38.0|checksum:998398d6da4026d297f0f9bf709a1eac5f2b6947c24431f94af08138510cf7ed,ruby:>= 2.7.0
+0.40.0 lint_roller:~> 1.1,rubocop:< 2.0&>= 1.75.0,rubocop-ast:< 2.0&>= 1.38.0|checksum:353c698199115f12151144cf0b5a96f69bb9d77b660cf6536df2c4250c672a9d,ruby:>= 2.7.0
+0.41.0 lint_roller:~> 1.1,rubocop:< 2.0&>= 1.89.0,rubocop-ast:< 2.0&>= 1.38.0|checksum:c15bfe00134a30c8a00ce670b07ecc80440455ba277b8682cf0d515c98ee7426,ruby:>= 2.7.0

@@ -1,0 +1,4 @@
+---
+2.36.0 activesupport:>= 4.2.0,lint_roller:~> 1.1,rack:>= 1.1,rubocop:< 2.0&>= 1.75.0,rubocop-ast:< 2.0&>= 1.44.0|checksum:105a5f5b0001ff2ef28a3af90da50862464e0775e8d0016d599079c0ca408bdb,ruby:>= 2.7.0
+2.37.0 activesupport:>= 4.2.0,lint_roller:~> 1.1,rack:>= 1.1,rubocop:< 2.0&>= 1.89.0,rubocop-ast:< 2.0&>= 1.44.0|checksum:6e1645add5060e0328f8ddda0d820f55697c591394398bf14bb9dccb62f14b7e,ruby:>= 2.7.0
+2.38.0 activesupport:>= 4.2.0,lint_roller:~> 1.1,rack:>= 1.1,rubocop:< 2.0&>= 1.89.0,rubocop-ast:< 2.0&>= 1.44.0|checksum:6e2b7c532efa95e3050371bec20b8f5b025662acead8bc70ee31f0e3e6fa2f06,ruby:>= 2.7.0
