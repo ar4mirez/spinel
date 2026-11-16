@@ -658,10 +658,7 @@ mod tests {
             ),
             "# my app\nsource \"x\"\n\ngem \"rack-session\"\n\ngroup :test do\n  # keep me\nend\n\ngroup :a do\n  gem \"x\"\nend\n"
         );
-        assert_eq!(
-            removed("gem \"a\"\n\ngem \"b\"\n", &["a"]),
-            "\ngem \"b\"\n"
-        );
+        assert_eq!(removed("gem \"a\"\n\ngem \"b\"\n", &["a"]), "\ngem \"b\"\n");
         // Blank lines inside go with it, and a comment after its `do`.
         assert_eq!(
             removed(
