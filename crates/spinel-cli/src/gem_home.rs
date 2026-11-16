@@ -34,7 +34,6 @@ use std::fs;
 use std::io;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::gem_spec;
 use crate::gem_store::{self, GemId};
@@ -203,17 +202,19 @@ pub fn link(home: &Path, store_gems: &Path, gems: &[(GemId, PathBuf)]) -> Result
         }
     }
     let mut wanted: HashSet<String> = HashSet::new();
+    let mut seq = 0;
     for plan in &plans {
         let mut changed = false;
         let link = home.join("gems").join(&plan.full_name);
-        changed |= place_symlink(&link, &plan.gem_dir, store_gems)?;
+        changed |= place_symlink(&link, &plan.gem_dir, store_gems, &mut seq)?;
         let gemspec = home
             .join("specifications")
             .join(format!("{}.gemspec", plan.full_name));
-        changed |= place_file(&gemspec, plan.gemspec.as_bytes(), None)?;
+        changed |= place_file(&gemspec, plan.gemspec.as_bytes(), None, &mut seq)?;
         for (exe, text) in &plan.stubs {
             if stub_owner[exe.as_str()].0 == plan.full_name {
-                changed |= place_file(&home.join("bin").join(exe), text.as_bytes(), Some(0o755))?;
+                let stub = home.join("bin").join(exe);
+                changed |= place_file(&stub, text.as_bytes(), Some(0o755), &mut seq)?;
             }
         }
         wanted.insert(plan.full_name.clone());
@@ -314,11 +315,12 @@ end
     )
 }
 
-static NEXT: AtomicU64 = AtomicU64::new(0);
-
-/// A name beside `path` to make its replacement under.
-fn tmp_beside(path: &Path) -> PathBuf {
-    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+/// A name beside `path` to make its replacement under: the pid keeps it
+/// apart from other runs, and `seq`, owned by the caller's `link`, apart
+/// from the other temporaries of this one.
+fn tmp_beside(path: &Path, seq: &mut u64) -> PathBuf {
+    let n = *seq;
+    *seq += 1;
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -343,7 +345,12 @@ fn made_by_link(target: &Path, store_gems: &Path) -> bool {
 
 /// Make `link` a symlink to `target`, unless it already is one. Whatever is
 /// there must be a symlink: a link replaces only what a link made.
-fn place_symlink(link: &Path, target: &Path, store_gems: &Path) -> Result<bool, Error> {
+fn place_symlink(
+    link: &Path,
+    target: &Path,
+    store_gems: &Path,
+    seq: &mut u64,
+) -> Result<bool, Error> {
     match fs::symlink_metadata(link) {
         Ok(meta) if meta.file_type().is_symlink() => {
             let current = fs::read_link(link).map_err(|e| Error::Io(link.to_owned(), e))?;
@@ -358,7 +365,7 @@ fn place_symlink(link: &Path, target: &Path, store_gems: &Path) -> Result<bool, 
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
         Err(e) => return Err(Error::Io(link.to_owned(), e)),
     }
-    let tmp = tmp_beside(link);
+    let tmp = tmp_beside(link, seq);
     std::os::unix::fs::symlink(target, &tmp).map_err(|e| Error::Io(tmp.clone(), e))?;
     fs::rename(&tmp, link).map_err(|e| {
         let _ = fs::remove_file(&tmp);
@@ -369,7 +376,12 @@ fn place_symlink(link: &Path, target: &Path, store_gems: &Path) -> Result<bool, 
 
 /// Make `path` a file holding `contents` (with `mode`, else the umask's),
 /// unless it already is one.
-fn place_file(path: &Path, contents: &[u8], mode: Option<u32>) -> Result<bool, Error> {
+fn place_file(
+    path: &Path,
+    contents: &[u8],
+    mode: Option<u32>,
+    seq: &mut u64,
+) -> Result<bool, Error> {
     if let Ok(meta) = fs::symlink_metadata(path)
         && meta.is_file()
         && mode.is_none_or(|m| meta.permissions().mode() & 0o7777 == m)
@@ -380,7 +392,7 @@ fn place_file(path: &Path, contents: &[u8], mode: Option<u32>) -> Result<bool, E
     if fs::symlink_metadata(path).is_ok_and(|m| m.is_dir()) {
         return Err(Error::Occupied(path.to_owned()));
     }
-    let tmp = tmp_beside(path);
+    let tmp = tmp_beside(path, seq);
     let written = fs::write(&tmp, contents).and_then(|()| match mode {
         Some(mode) => fs::set_permissions(&tmp, fs::Permissions::from_mode(mode)),
         None => Ok(()),
