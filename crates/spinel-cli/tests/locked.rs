@@ -275,6 +275,32 @@ fn unchanged_gemfile_writes_the_same_lockfile_without_the_index() {
     assert_eq!(requests.load(Ordering::SeqCst), 0, "the index was read");
 }
 
+/// A lockfile Bundler 4.0.10 wrote, with its `BUNDLED WITH` and a checksum
+/// line for itself, and an unchanged Gemfile: `write_lock` crosses no major
+/// version and leaves it byte for byte, without the index.
+#[test]
+fn a_lockfile_from_an_earlier_bundler_4_comes_back_unchanged() {
+    let (source, requests) = serve_index("resolver");
+    let dir = fixtures().join("locked/add_gem");
+    let work = Path::new(env!("CARGO_TARGET_TMPDIR")).join("locked-bundler-4.0.10");
+    let _ = fs::remove_dir_all(&work);
+    fs::create_dir_all(&work).unwrap();
+    fs::copy(dir.join("2.Gemfile"), work.join("Gemfile")).unwrap();
+    let before = fs::read_to_string(dir.join("2.Gemfile.lock"))
+        .unwrap()
+        .replace(
+            "  mustermann (3.1.1) sha256=",
+            "  bundler (4.0.10) sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n  mustermann (3.1.1) sha256=",
+        )
+        .replace("BUNDLED WITH\n  4.0.20\n", "BUNDLED WITH\n  4.0.10\n");
+    assert!(before.contains("BUNDLED WITH\n  4.0.10\n") && before.contains("bundler (4.0.10)"));
+    let lock = work.join("Gemfile.lock");
+    fs::write(&lock, before.replace("@SOURCE@", &source)).unwrap();
+    let ours = resolve(&work, &dir, &source, &["x86_64-linux"], Some(&lock));
+    assert_eq!(ours, before);
+    assert_eq!(requests.load(Ordering::SeqCst), 0, "the index was read");
+}
+
 /// `~> 3.0` to `>= 3.0`: Sinatra 3.2.0 still meets it, so nothing moves and
 /// only `DEPENDENCIES` changes.
 #[test]

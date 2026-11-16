@@ -754,17 +754,17 @@ fn resolve_command(
         ruby_version,
         rubygems_version,
     };
-    let ruby_directive = gemfile.ruby.as_ref().is_some_and(|r| !r.is_null());
 
     // A lockfile to keep to (#79): `Definition` reads it, and when nothing
     // changed it is the resolution, with no index read.
     let mut definition = None;
+    let mut current = String::new();
     if let Some(path) = locked {
-        let text = match std::fs::read_to_string(path) {
+        current = match std::fs::read_to_string(path) {
             Ok(text) => text,
             Err(err) => return usage(format!("{}: {err}", path.display())),
         };
-        let lock = match lockfile::Lockfile::parse(&text, &path.display().to_string(), &local) {
+        let lock = match lockfile::Lockfile::parse(&current, &path.display().to_string(), &local) {
             Ok(lock) => lock,
             Err(err) => {
                 eprintln!("{err}");
@@ -800,15 +800,7 @@ fn resolve_command(
         request.platforms = def.platforms().to_vec();
         if !def.resolve_needed() {
             let specs = def.unchanged(&request.dependencies);
-            return print_resolution(
-                &def,
-                &remote,
-                &request,
-                None,
-                &specs,
-                lockfile,
-                ruby_directive,
-            );
+            return print_resolution(&def, &current, &remote, &request, None, &specs, lockfile);
         }
         definition = Some(def);
     }
@@ -847,12 +839,12 @@ fn resolve_command(
         return match def.start_resolution(&request, &index) {
             Ok(specs) => print_resolution(
                 &def,
+                &current,
                 &remote,
                 &request,
                 Some(&index),
                 &specs,
                 lockfile,
-                ruby_directive,
             ),
             Err(failure) => {
                 eprintln!("{}", failure.to_string().trim_end());
@@ -862,6 +854,7 @@ fn resolve_command(
     }
     match resolver::resolve(&request, &index) {
         Ok(resolved) if lockfile => {
+            let ruby_directive = gemfile.ruby.as_ref().is_some_and(|r| !r.is_null());
             let lock = lockfile::Lockfile::from_resolution(
                 &remote,
                 &request,
@@ -885,20 +878,23 @@ fn resolve_command(
     }
 }
 
-/// Print a resolution kept to a lockfile: the new `Gemfile.lock`, or one
-/// line per build as `specs:` lists it.
+/// Print a resolution kept to `current`, the lockfile's text: the
+/// `Gemfile.lock` `write_lock` leaves, or one line per build as `specs:`
+/// lists it.
 fn print_resolution(
     definition: &locked::Definition,
+    current: &str,
     remote: &str,
     request: &resolver::Request,
     index: Option<&resolver::Index>,
     specs: &[resolver::Spec],
     lockfile: bool,
-    ruby_directive: bool,
 ) -> ExitCode {
     if lockfile {
-        let lock = definition.lockfile(remote, request, index, specs, ruby_directive);
-        print!("{}", lock.write());
+        print!(
+            "{}",
+            definition.write_lock(current, remote, request, index, specs)
+        );
     } else {
         let mut lines: Vec<(String, String)> = specs
             .iter()

@@ -114,7 +114,7 @@ fn an_unchanged_gemfile_is_the_lockfile() {
     let specs = def.unchanged(&deps);
     assert_eq!(names(&specs), ["rack-2.2.25", "sinatra-3.2.0"]);
     let request = request(&def, deps.to_vec());
-    let written = def.lockfile(REMOTE, &request, None, &specs, false).write();
+    let written = def.lockfile(REMOTE, &request, None, &specs).write();
     assert_eq!(written, LOCK);
 }
 
@@ -132,9 +132,7 @@ fn a_missing_checksum_resolves_again_and_takes_the_index_one() {
     let specs = def.start_resolution(&request, &index).unwrap();
     // Sinatra 4 is newer, but the locked versions are tried first.
     assert_eq!(names(&specs), ["rack-2.2.25", "sinatra-3.2.0"]);
-    let written = def
-        .lockfile(REMOTE, &request, Some(&index), &specs, false)
-        .write();
+    let written = def.lockfile(REMOTE, &request, Some(&index), &specs).write();
     assert_eq!(written, LOCK);
 }
 
@@ -160,7 +158,7 @@ fn no_checksums_section_writes_none() {
     let request = request(&def, deps.to_vec());
     let index = index();
     let specs = def.start_resolution(&request, &index).unwrap();
-    let lock = def.lockfile(REMOTE, &request, Some(&index), &specs, false);
+    let lock = def.lockfile(REMOTE, &request, Some(&index), &specs);
     assert_eq!(lock.checksums, None);
 }
 
@@ -196,14 +194,14 @@ fn a_locked_ruby_version_is_kept_while_the_directive_allows_it() {
     assert!(!def.resolve_needed());
     let request = request(&def, deps.to_vec());
     let specs = def.unchanged(&deps);
-    let lock = def.lockfile(REMOTE, &request, None, &specs, true);
+    let lock = def.lockfile(REMOTE, &request, None, &specs);
     assert_eq!(lock.ruby_version.as_deref(), Some("ruby 3.4.1p0"));
     assert_eq!(lock.write(), text);
 
     // A directive the locked Ruby does not meet takes the Ruby resolved for.
     let def = definition(&text, &deps, Some(&["~> 4.0"]));
     assert!(def.resolve_needed());
-    let lock = def.lockfile(REMOTE, &request, None, &specs, true);
+    let lock = def.lockfile(REMOTE, &request, None, &specs);
     assert_eq!(lock.ruby_version.as_deref(), Some("ruby 4.0.0"));
 
     // So does a directive the lockfile had none for; and none drops it.
@@ -211,8 +209,7 @@ fn a_locked_ruby_version_is_kept_while_the_directive_allows_it() {
     let def = definition(&text, &deps, None);
     assert!(def.resolve_needed());
     assert_eq!(
-        def.lockfile(REMOTE, &request, None, &specs, false)
-            .ruby_version,
+        def.lockfile(REMOTE, &request, None, &specs).ruby_version,
         None
     );
 }
@@ -317,7 +314,7 @@ fn a_loosened_requirement_the_locked_version_meets_changes_nothing() {
     assert!(def.changed_dependencies.is_empty());
     let request = request(&def, deps.to_vec());
     let specs = def.unchanged(&deps);
-    let written = def.lockfile(REMOTE, &request, None, &specs, false).write();
+    let written = def.lockfile(REMOTE, &request, None, &specs).write();
     assert_eq!(
         written,
         LOCK.replace("  sinatra\n\nCHECKSUMS", "  sinatra (>= 3.0)\n\nCHECKSUMS")
@@ -334,4 +331,48 @@ fn a_gem_taken_out_takes_what_only_it_needed() {
     let def = definition(&text, &deps, None);
     assert!(!def.resolve_needed());
     assert_eq!(names(&def.unchanged(&deps)), ["rack-2.2.25"]);
+}
+
+/// `LOCK` as Bundler 4.0.10 wrote it: its `BUNDLED WITH`, and a checksum
+/// line for itself.
+fn lock_from_4_0_10() -> String {
+    LOCK.replace(
+        "CHECKSUMS\n",
+        "CHECKSUMS\n  bundler (4.0.10) sha256=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\n",
+    )
+    .replace("BUNDLED WITH\n  4.0.20\n", "BUNDLED WITH\n  4.0.10\n")
+}
+
+fn write_lock(text: &str, deps: &[GemfileDependency]) -> String {
+    let def = definition(text, deps, None);
+    let request = request(&def, deps.to_vec());
+    let specs = def.unchanged(deps);
+    def.write_lock(text, REMOTE, &request, None, &specs)
+}
+
+#[test]
+fn a_lockfile_from_an_earlier_bundler_4_is_left_as_it_was() {
+    let text = lock_from_4_0_10();
+    assert_eq!(write_lock(&text, &[dep("sinatra", &[])]), text);
+}
+
+#[test]
+fn a_lockfile_with_no_bundled_with_or_an_unknown_section_is_left_as_it_was() {
+    let text = LOCK.replace("\nBUNDLED WITH\n  4.0.20\n", "\nSOMETHING NEW\n  a value\n");
+    assert_eq!(write_lock(&text, &[dep("sinatra", &[])]), text);
+}
+
+#[test]
+fn a_lockfile_from_an_earlier_bundler_that_changes_is_written_for_this_one() {
+    let written = write_lock(&lock_from_4_0_10(), &[dep("sinatra", &[">= 3.0"])]);
+    assert_eq!(
+        written,
+        LOCK.replace("  sinatra\n\nCHECKSUMS", "  sinatra (>= 3.0)\n\nCHECKSUMS")
+    );
+}
+
+#[test]
+fn a_lockfile_from_an_earlier_major_bundler_is_written_for_this_one() {
+    let text = lock_from_4_0_10().replace("4.0.10", "2.6.9");
+    assert_eq!(write_lock(&text, &[dep("sinatra", &[])]), LOCK);
 }

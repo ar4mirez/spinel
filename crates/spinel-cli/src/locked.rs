@@ -17,7 +17,8 @@
 //! `SpecSet#for` keeps of the result on the lockfile's platforms.
 //! [`Definition::lockfile`] writes it as `LockfileGenerator` writes it: the
 //! lockfile's platforms, its checksums and its `RUBY VERSION` where they
-//! still hold.
+//! still hold; [`Definition::write_lock`] leaves the lockfile as it was
+//! when that differs from it only where `write_lock` looks past.
 
 use std::collections::{HashMap, HashSet};
 
@@ -72,6 +73,10 @@ pub struct Definition {
     /// `RUBY VERSION` as the lockfile has it.
     locked_ruby: Option<String>,
     unlocking_ruby: bool,
+    /// Whether the Gemfile has a `ruby` directive.
+    ruby_directive: bool,
+    /// `@locked_bundler_version`: the lockfile's `BUNDLED WITH`.
+    locked_bundler: Option<Version>,
 }
 
 /// `Gem::Dependency#matches_spec?`: any version for no requirement.
@@ -280,6 +285,8 @@ impl Definition {
             redundant_platform_gems,
             locked_ruby: lock.ruby_version.clone(),
             unlocking_ruby,
+            ruby_directive: ruby.is_some(),
+            locked_bundler: lock.bundled_with.clone(),
         })
     }
 
@@ -426,7 +433,56 @@ impl Definition {
         request: &Request,
         index: Option<&Index>,
         specs: &[Spec],
-        ruby_directive: bool,
+    ) -> Lockfile {
+        let bundler = Version::new(BUNDLER_VERSION).expect("a version");
+        self.lockfile_for(remote, request, index, specs, &bundler)
+    }
+
+    /// `Definition#write_lock` over `current`, the lockfile's text, when no
+    /// update was asked for: the lockfile [`Definition::lockfile`] writes,
+    /// unless nothing unlocks (the `ruby` directive unlocks the locked Ruby
+    /// when it comes, goes or no longer allows it: `@unlocking ||=
+    /// @unlocking_ruby`), no major version of Bundler is crossed and what the
+    /// lockfile's own Bundler would write differs from `current` only in
+    /// `RUBY VERSION`, `BUNDLED WITH`, sections that Bundler did not have
+    /// yet or sections Bundler does not know (`lockfiles_equal?` with
+    /// `preserve_unknown_sections`); then `current`, as it was.
+    pub fn write_lock(
+        &self,
+        current: &str,
+        remote: &str,
+        request: &Request,
+        index: Option<&Index>,
+        specs: &[Spec],
+    ) -> String {
+        let proposed = self.lockfile(remote, request, index, specs).write();
+        if self.unlocking_ruby {
+            return proposed;
+        }
+        let major = BUNDLER_VERSION.split('.').next().expect("a major version");
+        let current_major = Version::new(major).expect("a version");
+        let kept = match &self.locked_bundler {
+            Some(locked) if locked.release() < current_major => return proposed,
+            Some(locked) => self
+                .lockfile_for(remote, request, index, specs, locked)
+                .write(),
+            None => proposed.clone(),
+        };
+        if lockfiles_equal(current, &kept, self.locked_bundler.as_ref()) {
+            current.to_owned()
+        } else {
+            proposed
+        }
+    }
+
+    /// The lockfile `LockfileGenerator` of Bundler `bundler` writes.
+    fn lockfile_for(
+        &self,
+        remote: &str,
+        request: &Request,
+        index: Option<&Index>,
+        specs: &[Spec],
+        bundler: &Version,
     ) -> Lockfile {
         let checksums = self.checksums.as_ref().map(|locked| {
             let mut lines: Vec<Checksum> = specs
@@ -460,15 +516,17 @@ impl Definition {
                 })
                 .collect();
             // `bundler_checksum`: the lockfile's, for the Bundler written for.
-            let bundler = format!("bundler ({BUNDLER_VERSION})");
+            let bundler = format!("bundler ({bundler})");
             lines.extend(locked.iter().filter(|c| c.lock_name == bundler).cloned());
             lines
         });
         // `Definition#locked_ruby_version`.
-        let ruby_version = ruby_directive.then(|| match (&self.locked_ruby, self.unlocking_ruby) {
-            (Some(locked), false) => locked.clone(),
-            _ => format!("ruby {}", request.ruby_version),
-        });
+        let ruby_version =
+            self.ruby_directive
+                .then(|| match (&self.locked_ruby, self.unlocking_ruby) {
+                    (Some(locked), false) => locked.clone(),
+                    _ => format!("ruby {}", request.ruby_version),
+                });
         Lockfile {
             sources: vec![Source {
                 kind: SourceKind::Gem {
@@ -496,9 +554,90 @@ impl Definition {
                 .collect(),
             checksums,
             ruby_version,
-            bundled_with: Some(Version::new(BUNDLER_VERSION).expect("a version")),
+            bundled_with: Some(bundler.clone()),
         }
     }
+}
+
+/// `LockfileParser::SECTIONS_BY_VERSION_INTRODUCED`.
+const SECTIONS_BY_VERSION_INTRODUCED: &[(&str, &[&str])] = &[
+    ("1.0", &["DEPENDENCIES", "PLATFORMS", "GIT", "GEM", "PATH"]),
+    ("1.10", &["BUNDLED WITH"]),
+    ("1.12", &["RUBY VERSION"]),
+    ("1.13", &["PLUGIN SOURCE"]),
+    ("2.5.0", &["CHECKSUMS"]),
+];
+
+/// `Definition#lockfiles_equal?` with `preserve_unknown_sections`, when no
+/// update of Bundler was asked for: `current` and `proposed` are equal
+/// without `RUBY VERSION`, `BUNDLED WITH`, the sections introduced after
+/// `locked_bundler` (`sections_to_ignore`) and those `current` has that
+/// Bundler does not know (`unknown_sections_in_lockfile`).
+fn lockfiles_equal(current: &str, proposed: &str, locked_bundler: Option<&Version>) -> bool {
+    let base =
+        locked_bundler.map_or_else(|| Version::new("1.0").expect("a version"), Version::release);
+    let mut ignored: Vec<&str> = SECTIONS_BY_VERSION_INTRODUCED
+        .iter()
+        .filter(|(version, _)| Version::new(version).expect("a version") > base)
+        .flat_map(|(_, sections)| sections.iter().copied())
+        .collect();
+    // `sections_in_lockfile`: lines of `/^\w[\w ]*$/`.
+    for line in current.lines() {
+        let section = line.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
+            && line
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ' ');
+        let known = SECTIONS_BY_VERSION_INTRODUCED
+            .iter()
+            .any(|(_, sections)| sections.contains(&line));
+        if section && !known && !ignored.contains(&line) {
+            ignored.push(line);
+        }
+    }
+    ignored.extend(["RUBY VERSION", "BUNDLED WITH"]);
+    without_sections(current, &ignored) == without_sections(proposed, &ignored)
+}
+
+/// `text.gsub(/#{Regexp.union(sections)}\n(\s{2,}.*\n)+/, "\n")`, then
+/// `gsub(/\n{2,}/, "\n\n").strip`: each of `sections` with its indented
+/// lines taken out.
+fn without_sections(text: &str, sections: &[&str]) -> String {
+    let lines: Vec<&str> = text.split_inclusive('\n').collect();
+    let indented = |line: &str| {
+        line.ends_with('\n') && line.chars().take(2).filter(|c| c.is_whitespace()).count() == 2
+    };
+    let mut out = String::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        if line
+            .strip_suffix('\n')
+            .is_some_and(|name| sections.contains(&name))
+        {
+            let end = i + 1 + lines[i + 1..].iter().take_while(|l| indented(l)).count();
+            if end > i + 1 {
+                out.push('\n');
+                i = end;
+                continue;
+            }
+        }
+        out.push_str(line);
+        i += 1;
+    }
+    let mut collapsed = String::with_capacity(out.len());
+    let mut newlines = 0;
+    for c in out.chars() {
+        if c == '\n' {
+            newlines += 1;
+            if newlines <= 2 {
+                collapsed.push(c);
+            }
+        } else {
+            newlines = 0;
+            collapsed.push(c);
+        }
+    }
+    collapsed.trim().to_owned()
 }
 
 /// A remote as a lockfile's `GEM` section has it: no credentials, a

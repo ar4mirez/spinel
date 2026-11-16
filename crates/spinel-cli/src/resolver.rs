@@ -915,6 +915,10 @@ impl<'a> Provider<'a> {
             .cloned()
             .collect();
         let mut locked_builds = builds.len();
+        // `uniq {|spec| [spec.version.hash, spec.platform] }`.
+        let mut seen: HashSet<(&Version, &GemPlatform)> =
+            builds.iter().map(|b| (&b.version, &b.platform)).collect();
+        let mut fresh: Vec<&Spec> = Vec::new();
         // `filter_prereleases`, of the index's builds only.
         for spec in index_specs {
             if state.prereleases == Prereleases::Ignore
@@ -923,14 +927,11 @@ impl<'a> Provider<'a> {
             {
                 continue;
             }
-            // `uniq {|spec| [spec.version.hash, spec.platform] }`.
-            if !builds
-                .iter()
-                .any(|b| b.version == spec.version && b.platform == spec.platform)
-            {
-                builds.push(spec.clone());
+            if seen.insert((&spec.version, &spec.platform)) {
+                fresh.push(spec);
             }
         }
+        builds.extend(fresh.into_iter().cloned());
         if let Some(requirement) = self.locked.requirements.get(gem) {
             locked_builds = builds[..locked_builds]
                 .iter()
@@ -942,13 +943,14 @@ impl<'a> Provider<'a> {
         // `group_by(&:version)`, which groups by `eql?`, the version
         // string, in the order first seen.
         let mut groups: Vec<(&Version, Vec<usize>)> = Vec::new();
+        let mut group_of: HashMap<&str, usize> = HashMap::new();
         for (i, spec) in all.iter().enumerate() {
-            match groups
-                .iter_mut()
-                .find(|(v, _)| v.as_str() == spec.version.as_str())
-            {
-                Some((_, members)) => members.push(i),
-                None => groups.push((&spec.version, vec![i])),
+            match group_of.get(spec.version.as_str()) {
+                Some(&g) => groups[g].1.push(i),
+                None => {
+                    group_of.insert(spec.version.as_str(), groups.len());
+                    groups.push((&spec.version, vec![i]));
+                }
             }
         }
         let unlocked = self.unlocked(name);
@@ -1503,7 +1505,6 @@ impl DependencyProvider for Provider<'_> {
             let next = seen.len();
             seen.entry(dep.clone()).or_insert(next);
         }
-        drop(seen);
         Ok(Dependencies::Available(deps.into_iter().collect()))
     }
 }
