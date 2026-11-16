@@ -698,9 +698,9 @@ impl GemfileDependency {
 
     /// `Bundler::Dependency#current_platform?`: whether the Ruby running is
     /// one the dependency names. Spinel counts as `ruby`, as
-    /// `Bundler::CurrentRuby#ruby?` does once it lists RUBY_ENGINE "spinel"
-    /// (https://github.com/ruby/rubygems/pull/10070, docs/cli.md), and as
-    /// no other engine, so `mri`, `jruby` and the rest are false. `ruby_40`
+    /// `Bundler::CurrentRuby#ruby?` is true whenever the generic local
+    /// platform is `ruby` (`generic_local_platform_is_ruby?`, Bundler 2.1+,
+    /// docs/cli.md), and as no other engine, so `mri`, `jruby` and the rest are false. `ruby_40`
     /// is `ruby?` on a Ruby whose version starts `4.0.` (`on_40?`), the
     /// language version Spinel implements.
     // ponytail: only `ruby` (and its versions) counts as the current Ruby;
