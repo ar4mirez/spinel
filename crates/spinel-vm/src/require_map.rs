@@ -661,6 +661,9 @@ impl RequireMap {
 mod tests {
     use super::*;
 
+    // Every test here lists real directories and reads the clock, which miri's
+    // isolation forbids; the module has no `unsafe` for miri to check.
+
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "spinel-require-map-{name}-{}-{}",
@@ -684,6 +687,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn answers_for_what_it_listed() {
         let dir = scratch("listed");
         std::fs::create_dir_all(dir.join("lib/foo")).unwrap();
@@ -712,6 +716,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn a_changed_directory_is_looked_at_on_disk() {
         let dir = scratch("changed");
         std::fs::create_dir_all(dir.join("lib/foo")).unwrap();
@@ -726,6 +731,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn a_file_added_after_an_absent_answer_is_looked_at_on_disk() {
         let dir = scratch("added");
         std::fs::create_dir_all(dir.join("lib/foo")).unwrap();
@@ -745,6 +751,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn a_racy_directory_is_listed_again() {
         let dir = scratch("racy");
         std::fs::create_dir_all(dir.join("lib")).unwrap();
@@ -770,6 +777,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn a_damaged_map_is_not_read() {
         let dir = scratch("damaged");
         std::fs::create_dir_all(dir.join("lib")).unwrap();
