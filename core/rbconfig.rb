@@ -84,9 +84,10 @@ module RbConfig
   # (WEBrick's CGI handler, #54), and what `Gem.ruby` answers (#70). CRuby's
   # `rbconfig.rb` joins `bindir` and `ruby_install_name`, which name the
   # binary `make install` put there; Spinel's is wherever it runs from under
-  # whatever name it has, so this is the running binary itself, as
-  # `/proc/self/exe` names it: absolute, with symlinks resolved. Only when
-  # the platform cannot say does it fall back to CRuby's join.
+  # whatever name it has, so this is the running binary itself, as the OS
+  # reports it: on Linux, as `/proc/self/exe` names it, absolute with
+  # symlinks resolved. Only when the platform cannot say does it fall back
+  # to CRuby's join.
   def self.ruby
     __exe_path__ || File.join(CONFIG["bindir"], CONFIG["ruby_install_name"] + CONFIG["EXEEXT"])
   end

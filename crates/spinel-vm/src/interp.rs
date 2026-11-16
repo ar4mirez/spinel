@@ -14644,7 +14644,14 @@ fn native_call<'h>(
         }
         Native::ExePath => {
             let value = match std::env::current_exe() {
-                Ok(path) => os_string(scope, path.into_os_string()),
+                Ok(path) => {
+                    let live = path
+                        .to_str()
+                        .and_then(|s| s.strip_suffix(" (deleted)"))
+                        .filter(|_| !path.exists())
+                        .map(std::path::PathBuf::from);
+                    os_string(scope, live.unwrap_or(path).into_os_string())
+                }
                 Err(_) => Value::NIL,
             };
             stack.push(value);
