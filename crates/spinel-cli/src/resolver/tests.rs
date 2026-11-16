@@ -72,18 +72,8 @@ fn reads_info_lines_as_gem_parser_does() {
     assert_eq!(specs[1].dependencies.len(), 2);
     assert_eq!(specs[1].dependencies[0].0, "rack");
     assert_eq!(specs[1].dependencies[0].1.to_string(), "< 4, >= 3.0.0");
-    assert_eq!(
-        specs[1].required_ruby_version.as_ref().unwrap().to_string(),
-        ">= 2.7, < 4"
-    );
-    assert_eq!(
-        specs[1]
-            .required_rubygems_version
-            .as_ref()
-            .unwrap()
-            .to_string(),
-        "> 1.3.1"
-    );
+    assert_eq!(specs[1].required_ruby_version.to_string(), ">= 2.7, < 4");
+    assert_eq!(specs[1].required_rubygems_version.to_string(), "> 1.3.1");
     assert_eq!(specs[2].full_name(), "demo-1.1.0-java");
     assert_eq!(specs[2].platform, platform("java"));
     // A dependency with no requirement is `>= 0`.
@@ -186,6 +176,67 @@ fn leaves_prereleases_out_unless_asked_or_alone() {
     // A conflict on a gem whose prereleases were left out retries with them.
     let r = request(vec![dep("needs_pre", &[])], &platforms, "4.0.0");
     assert_eq!(resolved(&r, &index), ["lib (2.0.beta)", "needs_pre (1.0)"]);
+}
+
+// What Bundler 4.0.20 does with each index, run against it.
+#[test]
+fn retries_with_prereleases_of_the_gems_bundler_relaxes() {
+    let platforms = ["x86_64-linux"];
+    // pubgrub-rs learns `b 2.0` cannot be used from `y`'s missing versions,
+    // which pubgrub-ruby propagates instead, so `y` is on Bundler's chain.
+    let gems = index(&[
+        ("c", "1.0 b:>= 2\n"),
+        ("b", "1.0\n2.0 y:>= 2.0.a\n"),
+        ("y", "1.0\n2.0.beta\n"),
+    ]);
+    let r = request(vec![dep("c", &[]), dep("b", &[])], &platforms, "4.0.0");
+    assert_eq!(resolved(&r, &gems), ["b (2.0)", "c (1.0)", "y (2.0.beta)"]);
+    // `c` is only in what an earlier conflict taught, the cause of `y`'s
+    // assignment, so Bundler reports the conflict rather than take
+    // `c (3.0.rc1)`, which has no dependency on `y`.
+    let gems = index(&[
+        ("a", "2.0.beta c:>= 2.0.a,y:>= 3\n2.0 b:>= 3\n"),
+        ("b", "1.0\n"),
+        ("c", "3.0.rc1\n2.0.beta y:>= 1\n2.0 y:< 3\n"),
+        ("y", "3.0\n2.0.beta\n"),
+    ]);
+    let r = request(vec![dep("a", &[])], &platforms, "4.0.0");
+    let Err(Failure::Conflict(message)) = resolve(&r, &gems) else {
+        panic!("resolved with a prerelease Bundler leaves out");
+    };
+    assert!(
+        message.contains("every version of c depends on y < 3"),
+        "{message}"
+    );
+}
+
+#[test]
+fn narrows_to_builds_whose_requirements_are_equal_as_rubygems_compares_them() {
+    // As `Gem::Platform.sort_and_filter_best_platform_match` narrows them
+    // on RubyGems 4.0.20: the same pairs in another order, and no `ruby:`
+    // beside `ruby:>= 0`, are the same requirements; `~> 2.0` and `~> 2`
+    // are not.
+    let specs = parse_info(
+        "lib",
+        b"1.0-x86_64-darwin-22 rack:< 4&>= 2\n\
+          1.0-x86_64-darwin-21 rack:>= 2&< 4|ruby:>= 0\n\
+          1.0-x86_64-darwin-20 rack:~> 2.0\n\
+          1.0-x86_64-darwin-19 rack:~> 2\n",
+        &local(),
+    )
+    .unwrap();
+    let names = |picked: Vec<usize>| -> Vec<String> {
+        picked.iter().map(|&i| specs[i].full_name()).collect()
+    };
+    let darwin = platform("x86_64-darwin");
+    assert_eq!(
+        names(best_platform_match(&[0, 1], &specs, &darwin)),
+        ["lib-1.0-x86_64-darwin-22", "lib-1.0-x86_64-darwin-21"]
+    );
+    assert_eq!(
+        names(best_platform_match(&[2, 3], &specs, &darwin)),
+        ["lib-1.0-x86_64-darwin-20"]
+    );
 }
 
 #[test]

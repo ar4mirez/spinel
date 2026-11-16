@@ -274,13 +274,6 @@ impl Version {
     }
 
     /// `eql?`: the same version string, which `1.0` and `1` are not.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the resolver's API; only tests read it until the resolver lands"
-        )
-    )]
     pub fn eql(&self, other: &Version) -> bool {
         self.version == other.version
     }

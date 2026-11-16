@@ -10,6 +10,7 @@
 //! optional whitespace, a version, optional whitespace.
 
 use std::fmt;
+use std::hash::{Hash, Hasher};
 
 use crate::gem_version::{MalformedVersion, Version, pessimistic_satisfied_by};
 
@@ -58,7 +59,7 @@ impl From<MalformedVersion> for BadRequirement {
 }
 
 /// `Gem::Requirement`: every pair must hold.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone)]
 pub struct Requirement {
     requirements: Vec<(Op, Version)>,
 }
@@ -143,6 +144,44 @@ impl Requirement {
     }
 }
 
+impl Requirement {
+    /// `_sorted_requirements`: the pairs sorted by `to_s`, which orders them
+    /// by operator, then by how the version is written.
+    fn sorted(&self) -> Vec<&(Op, Version)> {
+        let mut pairs: Vec<&(Op, Version)> = self.requirements.iter().collect();
+        pairs.sort_by_cached_key(|(op, version)| (op.as_str(), version.to_string()));
+        pairs
+    }
+}
+
+/// `==`: the same pairs in any order, a `~>` version written the same way
+/// (`eql?`), any other version only equal.
+impl PartialEq for Requirement {
+    fn eq(&self, other: &Requirement) -> bool {
+        let (a, b) = (self.sorted(), other.sorted());
+        a == b
+            && a.iter()
+                .zip(&b)
+                .all(|(x, y)| x.0 != Op::Pessimistic || x.1.eql(&y.1))
+    }
+}
+
+impl Eq for Requirement {}
+
+/// `hash`: the sorted pairs', a `~>` version's spelling with it.
+impl Hash for Requirement {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        for (op, version) in self.sorted() {
+            op.hash(state);
+            if *op == Op::Pessimistic {
+                version.to_string().hash(state);
+            } else {
+                version.hash(state);
+            }
+        }
+    }
+}
+
 /// `Gem::Requirement.default`: `>= 0`.
 impl Default for Requirement {
     fn default() -> Requirement {
@@ -220,6 +259,21 @@ mod tests {
         }
         assert!(req(&["< 4", ">= 3.0.0"]).satisfied_by(&v("3.2.8")));
         assert!(!req(&["< 4", ">= 3.0.0"]).satisfied_by(&v("4.0")));
+    }
+
+    #[test]
+    fn equal_as_rubygems_compares() {
+        assert_eq!(req(&["< 4", ">= 2"]), req(&[">= 2", "< 4"]));
+        assert_eq!(req(&[">= 2.0", "< 4"]), req(&["< 4", ">= 2"]));
+        assert_eq!(req(&[]), req(&[">= 0"]));
+        assert_ne!(req(&["~> 1.0"]), req(&["~> 1"]));
+        assert_ne!(req(&["< 4", ">= 2"]), req(&[">= 2"]));
+        let hash = |r: &Requirement| {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            r.hash(&mut h);
+            h.finish()
+        };
+        assert_eq!(hash(&req(&["< 4", ">= 2"])), hash(&req(&[">= 2.0", "< 4"])));
     }
 
     #[test]

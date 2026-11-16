@@ -26,8 +26,8 @@
 //!   version is = 2.6.10").
 //! - **Prereleases** are left out of a gem's candidates unless its Gemfile
 //!   requirement names one, or it has no other version. When a resolution
-//!   fails on a gem with prereleases left out, it is retried with them in,
-//!   as Bundler retries.
+//!   fails through a gem with prereleases left out, along the failure's
+//!   first causes as Bundler follows them, it is retried with them in.
 //! - **Order.** The next gem decided is the one with at most one candidate
 //!   left, then the one with the fewest candidates above the range asked
 //!   for, ties going to the one found first; its candidate is the newest,
@@ -66,8 +66,10 @@ pub struct Spec {
     pub platform: GemPlatform,
     /// Runtime dependencies, as listed.
     pub dependencies: Vec<(String, Requirement)>,
-    pub required_ruby_version: Option<Requirement>,
-    pub required_rubygems_version: Option<Requirement>,
+    /// `>= 0` when the line has no `ruby:`, as `Gem::Specification`'s.
+    pub required_ruby_version: Requirement,
+    /// `>= 0` when the line has no `rubygems:`.
+    pub required_rubygems_version: Requirement,
 }
 
 impl Spec {
@@ -91,7 +93,7 @@ impl Spec {
             (PackageName::Ruby, &self.required_ruby_version),
             (PackageName::RubyGems, &self.required_rubygems_version),
         ] {
-            if let Some(req) = req.as_ref().filter(|r| !r.none()) {
+            if !req.none() {
                 deps.push((meta, req.clone()));
             }
         }
@@ -189,8 +191,8 @@ pub fn parse_info(gem: &str, data: &[u8], local: &Platform) -> Result<Vec<Spec>,
             version,
             platform: GemPlatform::new(platform, local),
             dependencies,
-            required_ruby_version: None,
-            required_rubygems_version: None,
+            required_ruby_version: Requirement::default(),
+            required_rubygems_version: Requirement::default(),
         };
         for field in requirements {
             let Some((key, value)) = field.split_once(':') else {
@@ -198,8 +200,8 @@ pub fn parse_info(gem: &str, data: &[u8], local: &Platform) -> Result<Vec<Spec>,
             };
             let read = || Requirement::new(value.split('&')).map_err(|e| error(e.to_string()));
             match key {
-                "ruby" => spec.required_ruby_version = Some(read()?),
-                "rubygems" => spec.required_rubygems_version = Some(read()?),
+                "ruby" => spec.required_ruby_version = read()?,
+                "rubygems" => spec.required_rubygems_version = read()?,
                 _ => {}
             }
         }
@@ -1106,31 +1108,52 @@ impl<'a> Provider<'a> {
     }
 
     /// The packages with prereleases left out that the conflict ran
-    /// through: `Resolver#find_names_to_relax`. Bundler walks each
-    /// derivation's first cause; pubgrub-rs orders a derivation's causes
-    /// otherwise, so every package in the derivation is looked at.
+    /// through: `Resolver#find_names_to_relax`. Bundler walks from the
+    /// failure along each derivation's first cause (pubgrub-ruby's
+    /// `cause.incompatibility`, pubgrub-rs's `cause1`: the incompatibility
+    /// being resolved) and looks at the terms of each; what the other cause,
+    /// the satisfier's, learned earlier it leaves alone. A learned
+    /// incompatibility is walked as well when it was learned by resolving one
+    /// of a single term: pubgrub-ruby learns nothing there, but backtracks and
+    /// propagates that term, so what pubgrub-rs learned it from is on
+    /// Bundler's first-cause chain.
     fn names_to_relax(&self, tree: &DerivationTree<Package, VersionSet, String>) -> Vec<String> {
         let mut names = Vec::new();
-        let mut stack = vec![tree];
-        while let Some(node) = stack.pop() {
-            if let DerivationTree::Derived(derived) = node {
-                stack.push(&derived.cause1);
-                stack.push(&derived.cause2);
-            }
-            for package in tree_packages(node) {
-                let Package::Name(name @ PackageName::Gem(gem)) = package else {
-                    continue;
-                };
-                if self.prereleases(name) == Prereleases::Ignore
-                    && self.all_specs(gem).iter().any(|s| s.version.prerelease())
-                    && !names.contains(gem)
-                {
-                    names.push(gem.clone());
+        let mut chains = vec![tree];
+        while let Some(mut node) = chains.pop() {
+            while let DerivationTree::Derived(derived) = node {
+                node = &derived.cause1;
+                if learned_from_one_term(&derived.cause2) {
+                    chains.push(&derived.cause2);
+                }
+                for package in tree_packages(node) {
+                    let Package::Name(name @ PackageName::Gem(gem)) = package else {
+                        continue;
+                    };
+                    if self.prereleases(name) == Prereleases::Ignore
+                        && self.all_specs(gem).iter().any(|s| s.version.prerelease())
+                        && !names.contains(gem)
+                    {
+                        names.push(gem.clone());
+                    }
                 }
             }
         }
         names
     }
+}
+
+/// Whether a derived incompatibility resolved, somewhere along its first
+/// causes, an incompatibility of one term.
+fn learned_from_one_term(tree: &DerivationTree<Package, VersionSet, String>) -> bool {
+    let mut node = tree;
+    while let DerivationTree::Derived(derived) = node {
+        if tree_packages(&derived.cause1).len() == 1 {
+            return true;
+        }
+        node = &derived.cause1;
+    }
+    false
 }
 
 /// The packages an incompatibility names.
