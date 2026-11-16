@@ -2,10 +2,11 @@
 //!
 //! `build.rs` packs `stdlib/` into the binary. The first run extracts it to
 //! `~/.spinel/stdlib/<version>-<digest>/` (`$SPINEL_HOME` in place of
-//! `~/.spinel` when set), and every run puts that directory on `$LOAD_PATH`
-//! after the program's own `-I` and `RUBYLIB` ones, where CRuby has its
-//! `rubylibdir`. The digest is the archive's, so a binary never reads a copy
-//! another build extracted.
+//! `~/.spinel` when set): the library in its `lib/`, which every run puts on
+//! `$LOAD_PATH` after the program's own `-I` and `RUBYLIB` ones, where CRuby
+//! has its `rubylibdir`, and Bundler's executable in its `libexec/`, where
+//! Bundler looks for it (#71). The digest is the archive's, so a binary
+//! never reads a copy another build extracted.
 //!
 //! First runs may race, so a copy is written to a directory of its own and
 //! renamed into place: `rename(2)` makes it appear whole or not at all, and
@@ -17,18 +18,18 @@ use std::path::{Path, PathBuf};
 const ARCHIVE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/stdlib.zst"));
 const DIGEST: &str = include_str!(concat!(env!("OUT_DIR"), "/stdlib.digest"));
 
-/// The extracted standard library, extracting it first if no copy is there.
-/// None when it can be neither found nor written; a program that requires
-/// none of it runs as before.
+/// The extracted standard library's `lib/`, extracting it first if no copy
+/// is there. None when it can be neither found nor written; a program that
+/// requires none of it runs as before.
 pub fn directory() -> Option<PathBuf> {
     let root = crate::home::spinel_home()?.join("stdlib");
     let target = root.join(format!("{}-{DIGEST}", env!("CARGO_PKG_VERSION")));
     if target.is_dir() {
-        return Some(target);
+        return Some(target.join("lib"));
     }
     match extract(&root, &target) {
-        Ok(()) => Some(target),
-        Err(_) => target.is_dir().then_some(target),
+        Ok(()) => Some(target.join("lib")),
+        Err(_) => target.is_dir().then(|| target.join("lib")),
     }
 }
 
@@ -76,6 +77,11 @@ fn write_archive(into: &Path) -> std::io::Result<()> {
             std::fs::create_dir_all(parent)?;
         }
         std::fs::File::create(&path)?.write_all(bytes)?;
+        // Bundler's executable is executable, as `make install` leaves it.
+        if relative.starts_with("libexec") {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
+        }
     }
     Ok(())
 }

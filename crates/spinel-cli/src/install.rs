@@ -509,6 +509,11 @@ fn install(frozen: bool) -> Result<(), Stop> {
     // regenerates it here, and the warm-up follows it.
     // ponytail: no gem is substituted, so `.spinel/substitutions.json` is not
     // written. Upgrade: built-in gems are #83, Spinel-native ones phase 5.
+    for scope in bundler_scopes() {
+        for warning in gem_home::scope_view(&gem_home_dir, &scope).map_err(Stop::failure)? {
+            eprintln!("spinel: install: warning: {warning}");
+        }
+    }
     write_bundle_config(&root).map_err(|err| Stop::failure(format!(".bundle/config: {err}")))?;
     if !frozen && current.as_deref() != Some(written.as_str()) {
         write_atomically(&lock_path, written.as_bytes())
@@ -696,6 +701,20 @@ fn split_full_name(full_name: &str) -> (String, String) {
             || (full_name.to_owned(), String::new()),
             |i| (full_name[..i - 1].to_owned(), full_name[i..].to_owned()),
         )
+}
+
+/// Where under the GEM_HOME Bundler looks for gems once `.bundle/config`
+/// names it as `BUNDLE_PATH`: `Bundler.ruby_scope`, the engine and
+/// `RbConfig::CONFIG["ruby_version"]` (the language version with its teeny
+/// set to 0). `ruby` is CRuby's Bundler, the plain `bundle exec` in the same
+/// project; `spinel` is Bundler running on Spinel, as `require
+/// "bundler/setup"` under `spinel run` runs it.
+fn bundler_scopes() -> [String; 2] {
+    let mut parts = spinel_vm::LANGUAGE_VERSION.split('.');
+    let major = parts.next().unwrap_or("0");
+    let minor = parts.next().unwrap_or("0");
+    let ruby_version = format!("{major}.{minor}.0");
+    ["ruby", spinel_vm::ENGINE].map(|engine| format!("{engine}/{ruby_version}"))
 }
 
 /// Point Bundler at the GEM_HOME: `BUNDLE_PATH` in the project's

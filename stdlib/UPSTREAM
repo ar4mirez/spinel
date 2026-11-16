@@ -4,6 +4,8 @@ Ruby's pure-Ruby standard library, vendored verbatim.
     tag       v4.0.6
     commit    03b6d3f8898a28604fe6cb00eae3226b821168f4
     path      lib/ (flattened to this directory, so stdlib/ is a $LOAD_PATH root)
+              libexec/bundle (to libexec/, Bundler's executable,
+              extracted beside the library rather than in it)
 
 Laid over it, also verbatim, the lib/ of three gems that are not in Ruby's
 lib/: webrick, which left the standard library, and json and io-console,
