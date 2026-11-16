@@ -6,6 +6,11 @@
 //! zstd-compressed. Beside it goes a digest of the uncompressed archive, which
 //! names the directory it is extracted to, so a binary built from a different
 //! `stdlib/` never reads another's copy.
+//!
+//! The paths are laid out as ruby/ruby lays its tree out: `stdlib/libexec/`,
+//! Bundler's executables, stays `libexec/`, and the rest, the library, goes
+//! under `lib/`. `Bundler.setup` looks for its executable at `libexec/bundle`
+//! beside the `lib/` it was loaded from (#71).
 
 use std::path::{Path, PathBuf};
 
@@ -21,7 +26,12 @@ fn main() {
     let mut archive = Vec::new();
     for relative in &files {
         let bytes = std::fs::read(stdlib.join(relative)).expect("a file under stdlib/ is readable");
-        let name = relative.to_string_lossy().replace('\\', "/");
+        let path = relative.to_string_lossy().replace('\\', "/");
+        let name = if path.starts_with("libexec/") {
+            path
+        } else {
+            format!("lib/{path}")
+        };
         archive.extend_from_slice(&(name.len() as u32).to_le_bytes());
         archive.extend_from_slice(name.as_bytes());
         archive.extend_from_slice(&(bytes.len() as u64).to_le_bytes());

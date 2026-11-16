@@ -69,3 +69,47 @@ fn an_executable_two_gems_share_is_written_once_for_the_later() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_scope_view_links_each_subdirectory_and_keeps_what_is_not_spinels() {
+    let dir = std::env::temp_dir().join(format!("spinel-gem-home-scope-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let home = dir.join("gem_home");
+    let store_gems = dir.join("store/gems");
+    link(&home, &store_gems, &[entry(&store_gems, "one", "1.0")]).unwrap();
+    // CRuby's Bundler, having installed into the scope itself, left a real
+    // directory where one link would go.
+    std::fs::create_dir_all(home.join("ruby/4.0.0/doc")).unwrap();
+    let warnings = scope_view(&home, "ruby/4.0.0").unwrap();
+    assert_eq!(
+        warnings,
+        [format!(
+            "{}: already there, and not Spinel's; Bundler reading ruby/4.0.0 will not see the gems Spinel installs",
+            home.join("ruby/4.0.0/doc").display()
+        )]
+    );
+    for sub in SUBDIRECTORIES {
+        let link = home.join("ruby/4.0.0").join(sub);
+        if sub == "doc" {
+            assert!(!link.is_symlink());
+            continue;
+        }
+        assert_eq!(
+            std::fs::read_link(&link).unwrap(),
+            Path::new("../..").join(sub)
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(home.join("ruby/4.0.0/specifications/one-1.0.gemspec")).unwrap(),
+        std::fs::read_to_string(home.join("specifications/one-1.0.gemspec")).unwrap()
+    );
+    // A symlink leading elsewhere is put right; one already right stays.
+    std::fs::remove_file(home.join("ruby/4.0.0/gems")).unwrap();
+    std::os::unix::fs::symlink("/nowhere", home.join("ruby/4.0.0/gems")).unwrap();
+    scope_view(&home, "ruby/4.0.0").unwrap();
+    assert_eq!(
+        std::fs::read_link(home.join("ruby/4.0.0/gems")).unwrap(),
+        Path::new("../../gems")
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

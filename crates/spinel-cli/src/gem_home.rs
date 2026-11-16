@@ -233,6 +233,53 @@ pub fn link(home: &Path, store_gems: &Path, gems: &[(GemId, PathBuf)]) -> Result
     Ok(report)
 }
 
+/// Make `home` readable at `home/<scope>` too, as Bundler reads a
+/// `BUNDLE_PATH` (docs/cli.md, "Bundler running on Spinel"): Bundler's
+/// `Settings::Path#path` is the path joined with `Bundler.ruby_scope`,
+/// `<RUBY_ENGINE>/<RbConfig ruby_version>`, so `ruby/4.0.0` for CRuby and
+/// `spinel/4.0.0` for Bundler running on Spinel. Each of the GEM_HOME's
+/// subdirectories gets a relative symlink there, `<scope>/gems` to
+/// `../../gems` and so on, so every reader sees the one GEM_HOME and a
+/// gem one of them installs the others see; a symlink to the scope's own
+/// parent would make a cycle. A symlink already right is left alone, one
+/// leading elsewhere is replaced, and anything else is kept, with a
+/// warning: it is not Spinel's to remove.
+pub fn scope_view(home: &Path, scope: &str) -> Result<Vec<String>, Error> {
+    let dir = home.join(scope);
+    fs::create_dir_all(&dir).map_err(|e| Error::Io(dir.clone(), e))?;
+    sweep(&dir);
+    let up = "../".repeat(Path::new(scope).components().count());
+    let mut warnings = Vec::new();
+    let mut seq = 0;
+    for sub in SUBDIRECTORIES {
+        let link = dir.join(sub);
+        let target = PathBuf::from(format!("{up}{sub}"));
+        match fs::symlink_metadata(&link) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                if fs::read_link(&link).is_ok_and(|current| current == target) {
+                    continue;
+                }
+            }
+            Ok(_) => {
+                warnings.push(format!(
+                    "{}: already there, and not Spinel's; Bundler reading {scope} will not see the gems Spinel installs",
+                    link.display()
+                ));
+                continue;
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(Error::Io(link, e)),
+        }
+        let tmp = tmp_beside(&link, &mut seq);
+        std::os::unix::fs::symlink(&target, &tmp).map_err(|e| Error::Io(tmp.clone(), e))?;
+        fs::rename(&tmp, &link).map_err(|e| {
+            let _ = fs::remove_file(&tmp);
+            Error::Io(link.clone(), e)
+        })?;
+    }
+    Ok(warnings)
+}
+
 fn read_spec(id: &GemId, entry: &Path) -> Result<gem_spec::Spec, Error> {
     let path = entry.join("metadata");
     let yaml = fs::read(&path).map_err(|e| Error::Io(path, e))?;

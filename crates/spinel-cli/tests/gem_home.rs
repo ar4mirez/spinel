@@ -485,34 +485,25 @@ puts Gem::Specification.map(&:full_name).sort.join(",")
 
 /// A Gemfile and the lockfile Bundler 4 writes for it, against `server`.
 ///
-/// And Bundler's `exe/bundle`. Spinel's stdlib carries Bundler's `lib/` but
-/// not its executable, nor the default gemspec CRuby installs for it, so the
-/// `Bundler.setup` it ships cannot find the executable it records in
-/// `BUNDLE_BIN_PATH` and raises before reading any gem. Giving it one is #71.
-/// Until then the test puts one where Bundler looks first, its
-/// `source_root`'s `exe/bundle` (`<SPINEL_HOME>/stdlib/exe/bundle`); nothing
-/// else is changed, so what Bundler reads of the GEM_HOME it reads as it is.
-/// Returns the executable's path.
+/// And Bundler's `bundle`: the `libexec/bundle` Spinel extracts beside its
+/// stdlib (#71), found as `Bundler.setup` finds it to record in
+/// `BUNDLE_BIN_PATH`. Returns the executable's path.
 fn bundle(sandbox: &Sandbox, server: &Server) -> PathBuf {
-    let exe = sandbox.home().join("stdlib/exe/bundle");
-    fs::create_dir_all(exe.parent().unwrap()).unwrap();
-    // `exe/bundle` as Bundler 4 has it, less its `bundler/setup` warnings.
-    fs::write(
-        &exe,
-        r#"#!/usr/bin/env spinel
-require "bundler"
-require "bundler/friendly_errors"
-Bundler.with_friendly_errors do
-  require "bundler/cli"
-  help_flags = %w[--help -h]
-  help_flag_used = ARGV.any? { |a| help_flags.include? a }
-  args = help_flag_used ? Bundler::CLI.reformatted_help_args(ARGV) : ARGV
-  Bundler::CLI.start(args, debug: true)
-end
-"#,
-    )
-    .unwrap();
-    fs::set_permissions(&exe, fs::Permissions::from_mode(0o755)).unwrap();
+    let out = sandbox
+        .spinel()
+        .args([
+            "run",
+            "-e",
+            "require 'bundler'; print Bundler::SharedHelpers.bundle_bin_path",
+        ])
+        .output()
+        .expect("spinel runs");
+    let exe = PathBuf::from(ok(&out, "bundle_bin_path"));
+    assert!(
+        exe.ends_with("libexec/bundle") && exe.is_file(),
+        "{}",
+        exe.display()
+    );
     sandbox.write(
         "Gemfile",
         &format!("source \"{}\"\n\ngem \"beta\"\n", server.url),
