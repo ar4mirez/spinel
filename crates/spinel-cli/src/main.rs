@@ -39,6 +39,7 @@ mod stdlib;
 mod trailer;
 mod tree;
 mod watch;
+mod x;
 
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -56,7 +57,7 @@ This build runs Ruby. The core library is minimal — Kernel, Object, Integer,
 String, Symbol, Array, Hash, Comparable — and a program that reaches past it
 says which method is missing rather than failing quietly.
 
-Planned surface (docs/cli.md): x, add, remove, update, test, build.
+Planned surface (docs/cli.md): add, remove, update, test, build.
 Progress: https://github.com/ar4mirez/spinel/milestones";
 
 #[derive(Parser, Debug)]
@@ -65,6 +66,9 @@ Progress: https://github.com/ar4mirez/spinel/milestones";
     about = "A Ruby engine and toolchain, in one binary.",
     disable_version_flag = true,
     arg_required_else_help = true,
+    // `spinel app.rb x`: once a file is named, the words after it are its
+    // `ARGV`, never a subcommand.
+    args_conflicts_with_subcommands = true,
     override_usage = "spinel [OPTIONS] [COMMAND]",
     after_help = AFTER_HELP,
 )]
@@ -135,6 +139,39 @@ enum Command {
         /// frozen mode, for CI. Exits 16 as Bundler does.
         #[arg(long)]
         frozen: bool,
+    },
+
+    /// Run a gem's executable without installing it into the project.
+    ///
+    /// Resolves the gem afresh, as `gem exec` does, fetches it and its
+    /// dependencies into the global store, links them into a GEM_HOME of
+    /// their own under `~/.spinel/x/`, named by what was resolved so a
+    /// second run reuses it, and runs the executable there with the
+    /// arguments that follow. The current directory's Gemfile, lockfile and
+    /// `.spinel/` are neither read nor written. Exits with the command's
+    /// status.
+    X {
+        /// The source to resolve against and fetch from.
+        #[arg(long, default_value = compact_index::DEFAULT_SOURCE)]
+        source: String,
+
+        /// The gem to run the executable from, when it is named otherwise:
+        /// `spinel x --gem rspec-core rspec`. The requirement after `@` is
+        /// then this gem's.
+        #[arg(short = 'g', long, value_name = "GEM")]
+        gem: Option<String>,
+
+        /// The gem, and the executable to run from it, with an optional
+        /// version requirement (`rubocop`, `rubocop@1.60.0`,
+        /// `rubocop@~> 1.60`), then the executable's arguments, its `ARGV`.
+        /// Everything after the gem is the executable's, `--help` included.
+        #[arg(
+            value_name = "GEM[@REQ] [ARGS]",
+            required = true,
+            trailing_var_arg = true,
+            allow_hyphen_values = true
+        )]
+        command: Vec<String>,
     },
 
     /// Scaffold a project in the current directory.
@@ -346,6 +383,20 @@ fn main() -> ExitCode {
         Some(Command::Parse { path, format }) => return parse_command(&path, format),
         Some(Command::Init) => return init_command(),
         Some(Command::Install { frozen }) => return install::run(frozen),
+        Some(Command::X {
+            source,
+            gem,
+            command,
+        }) => {
+            // `required` holds one word at least.
+            let (command, args) = command.split_first().expect("clap requires the gem");
+            return x::run(&x::Request {
+                source: &source,
+                gem: gem.as_deref(),
+                command,
+                args,
+            });
+        }
         Some(Command::Index {
             source,
             names,
@@ -420,7 +471,9 @@ fn main() -> ExitCode {
             return ruby_command(&words, &raw, true);
         }
         eprintln!("spinel: unknown subcommand `{argument}`.");
-        eprintln!("        This build has four: run, init, install, parse. Try `spinel --help`.");
+        eprintln!(
+            "        This build has five: run, init, install, x, parse. Try `spinel --help`."
+        );
         return ExitCode::from(EXIT_USAGE);
     }
 

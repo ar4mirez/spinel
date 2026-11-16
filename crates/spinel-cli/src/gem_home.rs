@@ -120,6 +120,9 @@ pub struct Report {
     /// Each gem's `full_require_paths`, in the store, in order: what the
     /// require map lists (#66).
     pub require_dirs: Vec<PathBuf>,
+    /// Each gem asked for, by name, with the executables it has a stub for,
+    /// in order: what `spinel x` chooses the one to run from.
+    pub executables: Vec<(String, Vec<String>)>,
 }
 
 /// One gem ready to link: everything read and generated, nothing written.
@@ -174,6 +177,10 @@ pub fn link(home: &Path, store_gems: &Path, gems: &[(GemId, PathBuf)]) -> Result
             make_executable(&bin_path)?;
             stubs.push((exe.clone(), app_script_text(spinel_vm::ENGINE, &name, &exe)));
         }
+        report.executables.push((
+            name.clone(),
+            stubs.iter().map(|(exe, _)| exe.clone()).collect(),
+        ));
         if !spec.extensions().map_err(spec_error)?.is_empty() {
             report.warnings.push(format!(
                 "{full_name} has extensions, which Spinel does not build: RubyGems will not activate it"

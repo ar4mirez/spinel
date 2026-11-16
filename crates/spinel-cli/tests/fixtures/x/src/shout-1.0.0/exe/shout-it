@@ -1,0 +1,3 @@
+#!/usr/bin/env ruby
+require "shout"
+puts Shout.up(ARGV.join(" "))

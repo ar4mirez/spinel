@@ -1,0 +1,7 @@
+#!/usr/bin/env ruby
+require "greet"
+puts Greet.line
+puts "argv #{ARGV.inspect}"
+puts "gem_home #{ENV["GEM_HOME"]}"
+puts "pwd #{Dir.pwd}"
+exit Integer(ARGV[1]) if ARGV[0] == "--exit"
