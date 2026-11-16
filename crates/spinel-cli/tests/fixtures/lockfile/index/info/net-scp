@@ -1,0 +1,4 @@
+---
+4.2.0 net-ssh:< 9.0.0&>= 2.6.5|checksum:7c85a88bcf975def58f35ffa1ea83345f018e368c97aa3b78a4fd116f4a9cd49,ruby:>= 2.6
+4.2.1 net-ssh:< 9.0.0&>= 2.6.5|checksum:5c9ff6743da37eef6746f248043d97d2bbf3910a4694ec8e372326ec588c2394,ruby:>= 2.6
+4.2.2 net-ssh:< 9.0.0&>= 2.6.5|checksum:af26fa536fb1fe5a3e77e0095d00685eca58fa49c28968f4fabc52fea21d35a2,ruby:>= 2.6

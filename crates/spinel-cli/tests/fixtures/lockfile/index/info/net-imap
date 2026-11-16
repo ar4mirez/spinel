@@ -1,0 +1,4 @@
+---
+0.6.6 date:>= 0,net-protocol:>= 0|checksum:96aa4ee50df3060203e649efc341f53480b791d49e150f2fdebf68beb141a8df,ruby:>= 3.2.0
+0.6.7 date:>= 0,net-protocol:>= 0|checksum:b5c9573be975d856de252ee851871724da66aa2d449b2482d5690bd12bc23660,ruby:>= 3.2.0
+0.6.8 date:>= 0,net-protocol:>= 0|checksum:eb30bb62227b64a3af6b518b04b2375113d69f68f15de59b0193b07d98acf6d9,ruby:>= 3.2.0

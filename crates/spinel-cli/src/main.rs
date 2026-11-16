@@ -29,6 +29,7 @@ mod gem_substitute;
 mod gem_version;
 mod home;
 mod init;
+mod lockfile;
 mod resolver;
 mod ruby_args;
 mod ruby_version;
@@ -189,9 +190,16 @@ enum Command {
         deps: PathBuf,
 
         /// A platform to resolve for, as a lockfile's `PLATFORMS` names it;
-        /// repeat for each. The local platform when none is given.
+        /// repeat for each, the local one first. The local platform when
+        /// none is given.
         #[arg(long = "platform", value_name = "PLATFORM")]
         platforms: Vec<String>,
+
+        /// Print the `Gemfile.lock` Bundler would write for the resolution,
+        /// as a new lockfile (docs/package-manager.md, "Lockfile"), instead
+        /// of the gems chosen.
+        #[arg(long)]
+        lockfile: bool,
 
         /// The Ruby to resolve for, which `required_ruby_version` is checked
         /// against. Spinel's `RUBY_VERSION` when not given.
@@ -202,6 +210,18 @@ enum Command {
         /// checked against. The RubyGems Spinel ships when not given.
         #[arg(long, value_name = "VERSION")]
         rubygems_version: Option<String>,
+    },
+
+    /// Read a `Gemfile.lock` and write it back out as Bundler would.
+    ///
+    /// The debugging window onto the lockfile reader and writer
+    /// (docs/package-manager.md, "Lockfile"): a lockfile Bundler wrote comes
+    /// back byte for byte. Hidden: `spinel install` is the command that will
+    /// read and write lockfiles.
+    #[command(hide = true)]
+    Lockfile {
+        /// The lockfile, or `-` for standard input.
+        path: PathBuf,
     },
 
     /// Parse Ruby and print the syntax tree.
@@ -279,16 +299,19 @@ fn main() -> ExitCode {
         Some(Command::Resolve {
             deps,
             platforms,
+            lockfile,
             ruby_version,
             rubygems_version,
         }) => {
             return resolve_command(
                 &deps,
                 &platforms,
+                lockfile,
                 ruby_version.as_deref(),
                 rubygems_version.as_deref(),
             );
         }
+        Some(Command::Lockfile { path }) => return lockfile_command(&path),
         Some(Command::Run {
             path,
             args,
@@ -587,6 +610,10 @@ fn link_gem_home(
 struct GemfileJson {
     gemfiles: Vec<String>,
     source: Option<GemfileSource>,
+    /// The `ruby` directive; only whether there is one is read, since the
+    /// lockfile locks the Ruby resolved for.
+    #[serde(default)]
+    ruby: Option<serde_json::Value>,
     #[serde(default)]
     gemspecs: Vec<serde_json::Value>,
     dependencies: Vec<GemfileJsonDependency>,
@@ -610,12 +637,14 @@ struct GemfileJsonDependency {
 }
 
 /// Resolve the dependency JSON at `deps` (`-`: standard input) and print one
-/// line per gem chosen, as `specs:` lists it, or the explanation of why there
-/// is none on standard error. Exits 1 when there is no resolution, 2 when the
-/// input is not one it can resolve.
+/// line per gem chosen, as `specs:` lists it (or, with `lockfile`, the new
+/// `Gemfile.lock`), or the explanation of why there is none on standard
+/// error. Exits 1 when there is no resolution, 2 when the input is not one
+/// it can resolve.
 fn resolve_command(
     deps: &Path,
     platforms: &[String],
+    lockfile: bool,
     ruby_version: Option<&str>,
     rubygems_version: Option<&str>,
 ) -> ExitCode {
@@ -744,6 +773,18 @@ fn resolve_command(
         }
     };
     match resolver::resolve(&request, &index) {
+        Ok(resolved) if lockfile => {
+            let ruby_directive = gemfile.ruby.as_ref().is_some_and(|r| !r.is_null());
+            let lock = lockfile::Lockfile::from_resolution(
+                &remote,
+                &request,
+                &index,
+                &resolved,
+                ruby_directive,
+            );
+            print!("{}", lock.write());
+            ExitCode::SUCCESS
+        }
         Ok(resolved) => {
             for spec in resolved {
                 println!("{spec}");
@@ -760,7 +801,8 @@ fn resolve_command(
 /// The builds of every gem `roots` can reach through any version's
 /// dependencies, as Bundler reads them before it resolves: `/versions`, then
 /// `/info` of the roots, then of every gem those name, and so on, each round
-/// fetched at once. A gem `/versions` does not list has no builds.
+/// fetched at once. A gem `/versions` does not list has no builds. `bundler`
+/// is never read: it resolves to the Bundler the lockfile is written for.
 async fn read_index(
     client: &compact_index::Client,
     roots: Vec<String>,
@@ -768,7 +810,7 @@ async fn read_index(
 ) -> Result<resolver::Index, Box<dyn std::error::Error>> {
     client.versions().await?;
     let mut index = resolver::Index::new();
-    let mut wanted = roots;
+    let mut wanted: Vec<String> = roots.into_iter().filter(|r| r != "bundler").collect();
     while !wanted.is_empty() {
         let mut next = Vec::new();
         for (gem, result) in client.info(&wanted).await? {
@@ -782,7 +824,10 @@ async fn read_index(
                 }
             };
             for dep in resolver::dependency_names(&specs) {
-                if !index.contains_key(dep) && !next.iter().any(|n: &String| n == dep) {
+                if dep != "bundler"
+                    && !index.contains_key(dep)
+                    && !next.iter().any(|n: &String| n == dep)
+                {
                     next.push(dep.to_owned());
                 }
             }
@@ -792,6 +837,42 @@ async fn read_index(
         wanted = next;
     }
     Ok(index)
+}
+
+// ---------------------------------------------------------------------------
+// spinel lockfile
+// ---------------------------------------------------------------------------
+
+/// Read the lockfile at `path` (`-`: standard input) and print it as Bundler
+/// would write it. Exits 1 when it cannot be read as a lockfile.
+fn lockfile_command(path: &Path) -> ExitCode {
+    let (text, name) = if path == Path::new("-") {
+        let mut text = String::new();
+        if let Err(err) = std::io::Read::read_to_string(&mut std::io::stdin(), &mut text) {
+            eprintln!("spinel: lockfile: standard input: {err}");
+            return ExitCode::FAILURE;
+        }
+        (text, "Gemfile.lock".to_owned())
+    } else {
+        match std::fs::read_to_string(path) {
+            Ok(text) => (text, path.display().to_string()),
+            Err(err) => {
+                eprintln!("spinel: lockfile: {}: {err}", path.display());
+                return ExitCode::FAILURE;
+            }
+        }
+    };
+    let local = gem_platform::Platform::local(spinel_vm::PLATFORM);
+    match lockfile::Lockfile::parse(&text, &name, &local) {
+        Ok(lock) => {
+            print!("{}", lock.write());
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("{err}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -1,0 +1,4 @@
+source ENV.fetch("SPINEL_RESOLVER_SOURCE")
+
+gem "nokogiri"
+gem "rack-session"

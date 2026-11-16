@@ -1,0 +1,4 @@
+---
+2.9.0.beta2 logger:>= 0,mini_mime:>= 0.1.1,net-imap:>= 0,net-pop:>= 0,net-smtp:>= 0|checksum:77c74e0a3a0160369ec32592b6a5356b46c90398bcec967f69b9921d32168561,ruby:>= 2.5
+2.9.0 logger:>= 0,mini_mime:>= 0.1.1,net-imap:>= 0,net-pop:>= 0,net-smtp:>= 0|checksum:6fa6673ecd71c60c2d996260f9ee3dd387d4673b8169b502134659ece6d34941,ruby:>= 2.5
+2.9.1 logger:>= 0,mini_mime:>= 0.1.1,net-imap:>= 0,net-pop:>= 0,net-smtp:>= 0|checksum:06574eca475253d6c18145dd70af80d0eb970182d55053497c5f4d797ea160e8,ruby:>= 2.5

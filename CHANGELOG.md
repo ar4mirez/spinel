@@ -9,6 +9,16 @@ bytecode a tool reads.
 
 ### Added
 
+- **`Gemfile.lock`, read and written as Bundler does**
+  ([#80](https://github.com/ar4mirez/spinel/issues/80)). A lockfile Bundler
+  4 wrote reads back and writes out byte for byte, GIT and PATH sections,
+  `CHECKSUMS` and `RUBY VERSION` included; a new one written from a
+  resolution is the one `bundle lock` writes, down to the extra platforms
+  Bundler adds for native gems, and `bundle install` leaves it unchanged.
+  `BUNDLED WITH` is 4.0.20. A dependency on `bundler` resolves to that
+  version. The hidden `spinel lockfile <file>` reads one and writes it back;
+  `spinel resolve --lockfile` prints a new one.
+
 - **A project's GEM_HOME, linked from the gem store**
   ([#82](https://github.com/ar4mirez/spinel/issues/82)). Stored gems are
   linked into `.spinel/gem_home/` as `gem install` lays one out:

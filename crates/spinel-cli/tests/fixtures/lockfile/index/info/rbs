@@ -1,0 +1,7 @@
+---
+4.2.0.pre.1 logger:>= 0,prism:>= 1.6.0,tsort:>= 0|checksum:8cd913fb30102828bd70edd459c28932f4efd401a57b69892cfa34caeb631096,ruby:>= 3.2
+4.2.0.pre.1-java jar-dependencies:>= 0.1.7,logger:>= 0,prism:>= 1.6.0,tsort:>= 0|checksum:a4be914640f59ccdbe8f721e5182c5dfc04a74fb489126cc52a30cec83c67b32,ruby:>= 3.2
+4.2.0 logger:>= 0,prism:>= 1.6.0,tsort:>= 0|checksum:51f7b886dcc05bc09e10b901daa6a81829f6adc03101d6ca9ea4aac6103e0674,ruby:>= 3.3
+4.2.0-java jar-dependencies:>= 0.1.7,logger:>= 0,prism:>= 1.6.0,tsort:>= 0|checksum:a19282d89c307dd6d33c6a72cc60f75b10d6d35a5996796e864789c903cddb3c,ruby:>= 3.3
+4.2.1.pre.1 logger:>= 0,prism:>= 1.6.0,tsort:>= 0|checksum:b8a90b70027f1cbaa177cc909b82bf841a24e259d6cde97af55cd18b10ffedae,ruby:>= 3.3
+4.2.1.pre.1-java jar-dependencies:>= 0.1.7,logger:>= 0,prism:>= 1.6.0,tsort:>= 0|checksum:1c634c1031d0d76c5842ef57f85a327eee8329fb785667f74aabdb5004faf3ba,ruby:>= 3.3

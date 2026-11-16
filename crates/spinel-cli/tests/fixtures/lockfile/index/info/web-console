@@ -1,0 +1,4 @@
+---
+4.2.0 actionview:>= 6.0.0,activemodel:>= 6.0.0,bindex:>= 0.4.0,railties:>= 6.0.0|checksum:e8f05057a83d6d305d5941fb828d13a25e9aa9b0f3a550f01c308711885433c3,ruby:>= 2.5
+4.2.1 actionview:>= 6.0.0,activemodel:>= 6.0.0,bindex:>= 0.4.0,railties:>= 6.0.0|checksum:e7bcf37a10ea2b4ec4281649d1cee461b32232d0a447e82c786e6841fd22fe20,ruby:>= 2.5
+4.3.0 actionview:>= 8.0.0,bindex:>= 0.4.0,railties:>= 8.0.0|checksum:e13b71301cdfc2093f155b5aa3a622db80b4672d1f2f713119cc7ec7ac6a6da4,ruby:>= 3.2

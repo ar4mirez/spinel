@@ -1,0 +1,4 @@
+---
+1.24.0 base64:>= 0,logger:>= 0,net-scp:>= 1.1.2,net-sftp:>= 2.1.2,net-ssh:>= 2.8.0,ostruct:>= 0|checksum:9597c1f984778ae9742f2dc839778d57a6a2efb868107046575c52ac7c628e6c,ruby:>= 2.5
+1.25.0 base64:>= 0,logger:>= 0,net-scp:>= 1.1.2,net-sftp:>= 2.1.2,net-ssh:>= 2.8.0,ostruct:>= 0|checksum:c8c6543cdb60f91f1d277306d585dd11b6a064cb44eab0972827e4311ff96744,ruby:>= 2.5
+1.25.1 base64:>= 0,logger:>= 0,net-scp:>= 1.1.2,net-sftp:>= 2.1.2,net-ssh:>= 2.8.0,ostruct:>= 0|checksum:be3f10b9d6eb0b44d5eaba3f7cbe41bc6bb894bce4339688ac20124391455b78,ruby:>= 2.5

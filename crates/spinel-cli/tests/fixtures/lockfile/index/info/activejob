@@ -1,0 +1,4 @@
+---
+8.1.3.1 activesupport:= 8.1.3.1,globalid:>= 0.3.6|checksum:1c8dd275df930df40deecffec63d913a550a33fd94bd298f69721dd96939954a,ruby:>= 3.2.0
+8.1.4 activesupport:= 8.1.4,globalid:>= 0.3.6|checksum:4ed5b2ed8d4cc5c8f5f09becfef8346f202a4884eee0c8c73cae5ac378824099,ruby:>= 3.2.0
+8.1.4.1 activesupport:= 8.1.4.1,globalid:>= 0.3.6|checksum:82c4c9311ea1016d5f7f134a0c5f9b6527cad5a6237f5f3f60aa17984ef36229,ruby:>= 3.2.0

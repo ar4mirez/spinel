@@ -1,0 +1,4 @@
+---
+1.15.0 concurrent-ruby:~> 1.0|checksum:ed20037ed7ca75dd36ec486b5fb9696e8e0cfe48f4f80980017932d93e70527f,ruby:>= 3.1,rubygems:>= 1.3.5
+1.15.1 concurrent-ruby:~> 1.0|checksum:505ec5de1f4e6c8a2cb028ef9700ca495f117911643455721dee5abdca797255,ruby:>= 3.2,rubygems:>= 1.3.5
+1.15.2 concurrent-ruby:~> 1.0|checksum:00f9eb62412fe593b2a65a97daa75300d37abb8f7202ec748e94b6d46a9dd1b5,ruby:>= 3.1,rubygems:>= 1.3.5

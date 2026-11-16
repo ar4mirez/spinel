@@ -1,0 +1,5 @@
+source ENV.fetch("SPINEL_RESOLVER_SOURCE")
+
+gem "nokogiri", "~> 1.19"
+gem "puma"
+gem "json", ">= 3.0", "< 4"

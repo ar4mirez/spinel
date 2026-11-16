@@ -40,9 +40,13 @@
 //! A conflict is explained as Bundler explains it: pubgrub-ruby's
 //! `FailureWriter`, ported in `resolver/report.rs`.
 //!
-//! Not here yet: the lockfile and locked versions (#79, #80), git and path
-//! sources (#88), sources scoped to a gem, and `bundler` itself as a
-//! dependency, which Bundler pins to the version running.
+//! `bundler` has one candidate, the Bundler version the lockfile is written
+//! for (`lockfile::BUNDLER_VERSION`), as Bundler's `Source::Metadata` gives
+//! it only the version running; no index is read for it, and no resolution
+//! lists it.
+//!
+//! Not here yet: locked versions (#79), git and path sources (#88), and
+//! sources scoped to a gem.
 
 mod report;
 
@@ -73,6 +77,9 @@ pub struct Spec {
     pub required_ruby_version: Requirement,
     /// `>= 0` when the line has no `rubygems:`.
     pub required_rubygems_version: Requirement,
+    /// The `checksum:` field: the SHA-256 of the `.gem`, as a lockfile's
+    /// `CHECKSUMS` records it.
+    pub checksum: Option<String>,
 }
 
 impl Spec {
@@ -148,8 +155,8 @@ fn split_fields(s: &str) -> Vec<&str> {
 
 /// `/info/<gem>`, as `Gem::Resolver::APISet::GemParser` reads each line after
 /// the `---` header: `version[-platform] dep:req&req,dep:req|key:value,...`.
-/// Of the keys, `ruby` and `rubygems` are read; `checksum` and `created_at`
-/// are the store's and Bundler's cooldown's.
+/// Of the keys, `ruby`, `rubygems` and `checksum` are read; `created_at` is
+/// Bundler's cooldown's.
 pub fn parse_info(gem: &str, data: &[u8], local: &Platform) -> Result<Vec<Spec>, InfoError> {
     let text = String::from_utf8_lossy(data);
     let lines: Vec<&str> = text.split('\n').collect();
@@ -196,6 +203,7 @@ pub fn parse_info(gem: &str, data: &[u8], local: &Platform) -> Result<Vec<Spec>,
             dependencies,
             required_ruby_version: Requirement::default(),
             required_rubygems_version: Requirement::default(),
+            checksum: None,
         };
         for field in requirements {
             let Some((key, value)) = field.split_once(':') else {
@@ -205,6 +213,7 @@ pub fn parse_info(gem: &str, data: &[u8], local: &Platform) -> Result<Vec<Spec>,
             match key {
                 "ruby" => spec.required_ruby_version = read()?,
                 "rubygems" => spec.required_rubygems_version = read()?,
+                "checksum" => spec.checksum = Some(value.to_owned()),
                 _ => {}
             }
         }
@@ -507,7 +516,11 @@ fn installable_on(spec: &GemPlatform, target: &GemPlatform) -> bool {
 /// `platform`, narrowed by `Gem::Platform.sort_and_filter_best_platform_match`
 /// to the exact match, or else to the best-ranked ones with the same
 /// requirements as the best.
-fn best_platform_match(specs: &[usize], all: &[Spec], platform: &GemPlatform) -> Vec<usize> {
+pub(crate) fn best_platform_match(
+    specs: &[usize],
+    all: &[Spec],
+    platform: &GemPlatform,
+) -> Vec<usize> {
     let mut matching: Vec<usize> = specs
         .iter()
         .copied()
@@ -675,10 +688,19 @@ impl<'a> Provider<'a> {
     }
 
     /// `@all_specs[name]`: the builds `filter_invalid_self_dependencies`
-    /// keeps, sorted by `[version, platform.to_s]`.
+    /// keeps, sorted by `[version, platform.to_s]`. `bundler`'s is the one
+    /// build of `Source::Metadata`, which `source_requirements` makes the
+    /// only source of `bundler`: the Bundler the lockfile is written for.
     fn all_specs(&self, name: &str) -> std::rc::Rc<Vec<Spec>> {
         if let Some(specs) = self.specs.borrow().get(name) {
             return specs.clone();
+        }
+        if name == "bundler" {
+            let specs = std::rc::Rc::new(vec![bundler_spec()]);
+            self.specs
+                .borrow_mut()
+                .insert(name.to_owned(), specs.clone());
+            return specs;
         }
         let mut specs: Vec<Spec> = self
             .index
@@ -1185,6 +1207,20 @@ fn other_specs_matching_message(specs: &[&Spec], requirement: &str) -> String {
     message
 }
 
+/// `Source::Metadata`'s `bundler`: the version the lockfile writer emulates,
+/// with no dependencies or requirements.
+fn bundler_spec() -> Spec {
+    Spec {
+        name: "bundler".to_owned(),
+        version: Version::new(crate::lockfile::BUNDLER_VERSION).expect("a version"),
+        platform: GemPlatform::Ruby,
+        dependencies: Vec::new(),
+        required_ruby_version: Requirement::default(),
+        required_rubygems_version: Requirement::default(),
+        checksum: None,
+    }
+}
+
 /// The root's one version.
 fn root_candidate() -> Candidate {
     Candidate::new(Version::new("0").expect("0 is a version"), -1)
@@ -1271,10 +1307,8 @@ impl DependencyProvider for Provider<'_> {
 /// no lockfile: the builds to install, in the lockfile's order (`full_name`),
 /// or why there are none.
 pub fn resolve(request: &Request, index: &Index) -> Result<Vec<Resolved>, Failure> {
-    // ponytail: no lockfile, so every gem is free to move and `bundler` is
-    // resolved from the index like any gem. Upgrade: locked versions as the
-    // only candidates of unchanged gems (#79, `@base`), and `bundler` pinned
-    // to the version the lockfile writer emulates (#80).
+    // ponytail: no lockfile, so every gem is free to move. Upgrade: locked
+    // versions as the only candidates of unchanged gems (#79, `@base`).
     let mut relaxed: HashSet<String> = HashSet::new();
     loop {
         let mut provider = Provider::new(request, index, &relaxed);
@@ -1284,9 +1318,14 @@ pub fn resolve(request: &Request, index: &Index) -> Result<Vec<Resolved>, Failur
             Ok(solution) => {
                 let mut resolved = Vec::new();
                 for (package, candidate) in solution {
-                    let Package::Name(name @ PackageName::Gem(_)) = &package else {
+                    let Package::Name(name @ PackageName::Gem(gem)) = &package else {
                         continue;
                     };
+                    // `SpecSet#for` never materializes `bundler`, so neither
+                    // the lockfile nor the install plan has it.
+                    if gem == "bundler" {
+                        continue;
+                    }
                     for spec in provider.chosen_specs(name, &candidate) {
                         resolved.push(Resolved {
                             name: spec.name,

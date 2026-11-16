@@ -1,0 +1,4 @@
+---
+4.0.1 actioncable:>= 7.2,activejob:>= 7.2,activerecord:>= 7.2,railties:>= 7.2|checksum:7d3188edfd547bd933ca52f021d4688ece6f3e062fe9a964ac17e5fb6d8ca717,ruby:>= 3.3.0
+4.0.2 actioncable:>= 7.2,activejob:>= 7.2,activerecord:>= 7.2,railties:>= 7.2|checksum:084636a67679ad00d23088b33c84047e614bcf41ee559db24b414d83cdc42d03,ruby:>= 3.3.0
+4.1.0 actioncable:>= 7.2,activejob:>= 7.2,activerecord:>= 7.2,railties:>= 7.2|checksum:828e3d509207b82b4f05f4e9c85f696994710679b52d511aa7f97ebd212d3226,ruby:>= 3.3.0

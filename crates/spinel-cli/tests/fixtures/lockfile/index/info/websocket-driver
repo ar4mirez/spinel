@@ -1,0 +1,7 @@
+---
+0.8.0 base64:>= 0,websocket-extensions:>= 0.1.0|checksum:ed0dba4b943c22f17f9a734817e808bc84cdce6a7e22045f5315aa57676d4962
+0.8.0-java base64:>= 0,websocket-extensions:>= 0.1.0|checksum:3316347282a14b347c15693e57d19f4e36f7c1461baaf51f2776f838c0e89812
+0.8.1 base64:>= 0,websocket-extensions:>= 0.1.0|checksum:5ab238238ce230e5d4b262d2be39624c867914eab99171dc4952b58b577c2d96
+0.8.1-java base64:>= 0,websocket-extensions:>= 0.1.0|checksum:196e6b4ede300dfa4ba39ef43aeac3b262f3d823a11934c966472d863a8b4721
+0.8.2 base64:>= 0,websocket-extensions:>= 0.1.0|checksum:97c556b019bf3410b4961002ac501621e9322d3f8a7bc02161a09301cc4c4146
+0.8.2-java base64:>= 0,websocket-extensions:>= 0.1.0|checksum:f60120d1377cccf24100bcd1ebc25ceea6f3d5a013fc8e9d16b721016200946e

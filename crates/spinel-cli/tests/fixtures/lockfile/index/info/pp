@@ -1,0 +1,4 @@
+---
+0.6.2 prettyprint:>= 0|checksum:947ec3120c6f92195f8ee8aa25a7b2c5297bb106d83b41baa02983686577b6ff,ruby:>= 2.7.0
+0.6.3 prettyprint:>= 0|checksum:2951d514450b93ccfeb1df7d021cae0da16e0a7f95ee1e2273719669d0ab9df6,ruby:>= 2.7.0
+0.6.4 prettyprint:>= 0|checksum:dfcb0fce700c41456265922884f9fe195d7fbb0674a3578e6c0f69588e82b570,ruby:>= 2.7.0

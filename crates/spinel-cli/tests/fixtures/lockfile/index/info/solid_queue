@@ -1,0 +1,4 @@
+---
+1.7.0 activejob:>= 7.1,activerecord:>= 7.1,concurrent-ruby:>= 1.3.1,fugit:~> 1.11,railties:>= 7.1,thor:>= 1.3.1|checksum:6566b70b801d1c317c81bba7bcdd5677c019afac584a30374b4164002ca356d3,ruby:>= 3.2
+1.7.1 activejob:>= 7.1,activerecord:>= 7.1,concurrent-ruby:>= 1.3.1,fugit:~> 1.11,railties:>= 7.1,thor:>= 1.3.1|checksum:3aa48ac47da4777c8e633a9a2295e02df7821e84ed7fbe504e39422515e4bfe3,ruby:>= 3.2
+1.7.2 activejob:>= 7.1,activerecord:>= 7.1,concurrent-ruby:>= 1.3.1,fugit:~> 1.11,railties:>= 7.1,thor:>= 1.3.1|checksum:a22685e1d2ee14ce7b4e5d4592c9d8e837951884c51555609dee58679ed03325,ruby:>= 3.2

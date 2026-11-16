@@ -1,0 +1,4 @@
+---
+2.14.1 actionview:>= 7.0.0,activesupport:>= 7.0.0|checksum:4eb26376ff60ef100cb4fd6fd7533cd271f9998327e86adf20fd8c0e69fabb42,ruby:>= 3.0.0
+2.15.0 actionview:>= 7.0.0,activesupport:>= 7.0.0|checksum:fe36cd45b47dd88cb2cbebc3adc4348f041825f580d503578594e8255817f889,ruby:>= 3.0.0
+2.15.1 actionview:>= 7.0.0,activesupport:>= 7.0.0|checksum:2430bec28fb0cebacb5875b1009cf9d8bc3c303ccb810c4c8b062a4b51457637,ruby:>= 3.0.0

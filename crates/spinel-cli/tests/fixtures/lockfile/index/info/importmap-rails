@@ -1,0 +1,4 @@
+---
+2.2.1 actionpack:>= 6.0.0,activesupport:>= 6.0.0,railties:>= 6.0.0|checksum:0d4e660966d7728a3574b303f5f0f073c5b5580131c87684098fbabec04d7b03,ruby:>= 3.1.0
+2.2.2 actionpack:>= 6.0.0,activesupport:>= 6.0.0,railties:>= 6.0.0|checksum:729f5b1092f832780829ade1d0b46c7e53d91c556f06da7254da2977e93fe614,ruby:>= 3.1.0
+2.2.3 actionpack:>= 6.0.0,activesupport:>= 6.0.0,railties:>= 6.0.0|checksum:7101be2a4dc97cf1558fb8f573a718404c5f6bcfe94f304bf1f39e444feeb16a,ruby:>= 3.1.0

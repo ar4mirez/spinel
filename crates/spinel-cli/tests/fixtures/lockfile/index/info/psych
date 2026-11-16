@@ -1,0 +1,7 @@
+---
+5.3.1 date:>= 0,stringio:>= 0|checksum:eb7a57cef10c9d70173ff74e739d843ac3b2c019a003de48447b2963d81b1974,ruby:>= 2.5.0
+5.3.1-java date:>= 0,jar-dependencies:>= 0.1.7|checksum:20a4a81ad01479ef060f604ed75ba42fe673169e67d923b1bae5aa4e13cc5820,ruby:>= 2.5.0
+5.4.0 date:>= 0,stringio:>= 0|checksum:14f72d69a611af663d7d70e4a7b67d9eb1f3ae9f8d916b478961d5a0075ba5b7,ruby:>= 2.5.0
+5.4.0-java date:>= 0,jar-dependencies:>= 0.1.7|checksum:5f948b27c94be491e6ae3e19484700fe87b7bea75f91a5ab8cdf18bb215b1a3b,ruby:>= 2.5.0
+5.5.0 date:>= 0,stringio:>= 0|checksum:4b245bbbd0f3238df8ccee766ebc1a6b062b10e4ee1d3284eb588739ba156a0a,ruby:>= 2.5.0
+5.5.0-java date:>= 0,jar-dependencies:>= 0.1.7|checksum:3b7cf3684c44d049c3dee87ec4118ec9cd6ac714cbdcfba386997f96dbbd36ab,ruby:>= 2.5.0
