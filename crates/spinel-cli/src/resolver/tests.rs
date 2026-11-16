@@ -178,12 +178,28 @@ fn leaves_prereleases_out_unless_asked_or_alone() {
     assert_eq!(resolved(&r, &index), ["lib (2.0.beta)", "needs_pre (1.0)"]);
 }
 
-// What Bundler 4.0.20 does with each index, run against it.
+// Each expectation is what Bundler 4.0.20 did with the same /info lines and
+// Gemfile, on Ruby 4.0.0, RubyGems 4.0.16 and x86_64-linux, run with
+// `tests/fixtures/resolver/bundle_case.sh` (the indexes are
+// `tests/fixtures/resolver/oracle/<name>/`).
 #[test]
 fn retries_with_prereleases_of_the_gems_bundler_relaxes() {
     let platforms = ["x86_64-linux"];
-    // pubgrub-rs learns `b 2.0` cannot be used from `y`'s missing versions,
-    // which pubgrub-ruby propagates instead, so `y` is on Bundler's chain.
+    // `needs_pre`: a gem asking for a prerelease of another. Bundler
+    // retries with `lib`'s prereleases: `lib (2.0.beta)`, `needs_pre (1.0)`.
+    // pubgrub-rs puts `lib` under the second cause of its first derivation,
+    // behind a fact about the gaps between `needs_pre`'s versions, which is
+    // why the walk follows what was learned from a single term.
+    let gems = index(&[
+        ("needs_pre", "1.0 lib:>= 2.0.a\n"),
+        ("lib", "1.0\n2.0.beta\n"),
+    ]);
+    let r = request(vec![dep("needs_pre", &[])], &platforms, "4.0.0");
+    assert_eq!(resolved(&r, &gems), ["lib (2.0.beta)", "needs_pre (1.0)"]);
+    // `case1`: Bundler retries with `y`'s prereleases: `b (2.0)`, `c (1.0)`,
+    // `y (2.0.beta)`. pubgrub-rs learns `b 2.0` cannot be used from `y`'s
+    // missing versions, which pubgrub-ruby propagates instead, so `y` is on
+    // Bundler's chain.
     let gems = index(&[
         ("c", "1.0 b:>= 2\n"),
         ("b", "1.0\n2.0 y:>= 2.0.a\n"),
@@ -191,9 +207,11 @@ fn retries_with_prereleases_of_the_gems_bundler_relaxes() {
     ]);
     let r = request(vec![dep("c", &[]), dep("b", &[])], &platforms, "4.0.0");
     assert_eq!(resolved(&r, &gems), ["b (2.0)", "c (1.0)", "y (2.0.beta)"]);
-    // `c` is only in what an earlier conflict taught, the cause of `y`'s
-    // assignment, so Bundler reports the conflict rather than take
-    // `c (3.0.rc1)`, which has no dependency on `y`.
+    // `case2`: Bundler reports the conflict, beginning `Because every version
+    // of c depends on y < 3`: `c` is only in what an earlier conflict taught,
+    // so its prereleases stay out, although `a 2.0.beta` asks for
+    // `c >= 2.0.a`, and `c (3.0.rc1)`, which has no dependency on `y`, is
+    // never taken.
     let gems = index(&[
         ("a", "2.0.beta c:>= 2.0.a,y:>= 3\n2.0 b:>= 3\n"),
         ("b", "1.0\n"),
@@ -205,8 +223,53 @@ fn retries_with_prereleases_of_the_gems_bundler_relaxes() {
         panic!("resolved with a prerelease Bundler leaves out");
     };
     assert!(
-        message.contains("every version of c depends on y < 3"),
+        message.starts_with(
+            "Could not find compatible versions\n\n\
+             Because every version of c depends on y < 3\n  \
+             and a < 2.0 depends on c >= 2.0.a,\n  \
+             a < 2.0 requires y < 3.\n\
+             And because a < 2.0 depends on y >= 3,\n  \
+             a < 2.0 cannot be used."
+        ),
         "{message}"
+    );
+}
+
+/// A known difference from Bundler (#816): `tests/fixtures/resolver/oracle/
+/// case0138`, the one of 400 random indexes (`differential.py`, seed 1) on
+/// which Spinel and Bundler 4.0.20 disagree. Bundler retries with `g1`'s
+/// prereleases but not `g2`'s, and reports the conflict ("g2 >= 2.0, < 3.0
+/// could not be found"); Spinel also retries with `g2`'s, through the
+/// single-term case of `names_to_relax`, and resolves with `g2 (2.1.rc1)`.
+/// This asserts what Spinel does, so a change to it is seen; closing the
+/// difference turns it into Bundler's conflict.
+#[test]
+fn known_difference_case0138_takes_a_prerelease_bundler_leaves_out() {
+    let gems = index(&[
+        (
+            "g0",
+            "2.1.rc1 g1:>= 0,g2:>= 2.0.a,g3:< 2.0.beta\n\
+             2.0 g1:~> 2.0.a\n\
+             3.0 g1:>= 1.0&< 3,g2:~> 1.0,g3:>= 1.0&< 3\n",
+        ),
+        (
+            "g1",
+            "2.0.beta g2:>= 2.0,g3:~> 2.0.a\n\
+             0.9\n\
+             2.1.rc1 g3:= 2.0.beta\n\
+             1.0 g2:>= 0,g3:= 2.0.beta\n",
+        ),
+        ("g2", "3.0 g3:~> 1.0\n2.0.beta\n1.1 g3:~> 2.0.a\n2.1.rc1\n"),
+        ("g3", "2.0.a\n2.1.rc1\n2.0\n"),
+    ]);
+    let r = request(
+        vec![dep("g0", &[]), dep("g3", &[])],
+        &["x86_64-linux"],
+        "4.0.0",
+    );
+    assert_eq!(
+        resolved(&r, &gems),
+        ["g0 (2.0)", "g1 (2.0.beta)", "g2 (2.1.rc1)", "g3 (2.0)"]
     );
 }
 

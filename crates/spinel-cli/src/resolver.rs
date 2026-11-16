@@ -28,6 +28,9 @@
 //!   requirement names one, or it has no other version. When a resolution
 //!   fails through a gem with prereleases left out, along the failure's
 //!   first causes as Bundler follows them, it is retried with them in.
+//!   Against Bundler 4.0.20 this matches on 399 of 400 random indexes and
+//!   on the hand cases in `tests/fixtures/resolver/oracle/`; the one that
+//!   does not, `case0138`, takes a prerelease Bundler leaves out (#816).
 //! - **Order.** The next gem decided is the one with at most one candidate
 //!   left, then the one with the fewest candidates above the range asked
 //!   for, ties going to the one found first; its candidate is the newest,
@@ -1116,7 +1119,11 @@ impl<'a> Provider<'a> {
     /// incompatibility is walked as well when it was learned by resolving one
     /// of a single term: pubgrub-ruby learns nothing there, but backtracks and
     /// propagates that term, so what pubgrub-rs learned it from is on
-    /// Bundler's first-cause chain.
+    /// Bundler's first-cause chain. That can name a gem Bundler's chain does
+    /// not: `tests/fixtures/resolver/oracle/case0138`, where Spinel resolves
+    /// with a prerelease of `g2` and Bundler reports the conflict (#816).
+    /// Without it, `needs_pre`, `case1` and 40 of those 400 indexes that
+    /// Bundler resolves would fail.
     fn names_to_relax(&self, tree: &DerivationTree<Package, VersionSet, String>) -> Vec<String> {
         let mut names = Vec::new();
         let mut chains = vec![tree];
