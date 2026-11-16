@@ -248,8 +248,8 @@ impl Definition {
         // source is one the lockfile has, and it has no other.
         // ponytail: one rubygems source, compared by its one remote. Upgrade
         // with `Source::Rubygems#==` over several remotes.
-        let remote = normalized_remote(remote);
-        let same_source = |source: &Source| matches!(&source.kind, SourceKind::Gem { remotes } if remotes == std::slice::from_ref(&remote));
+        let wanted = lockfile::gem_remotes(remote);
+        let same_source = |source: &Source| matches!(&source.kind, SourceKind::Gem { remotes } if *remotes == wanted);
         let mut matched: Vec<Option<usize>> = Vec::new();
         for declared in locals.sources {
             let found = lock.sources.iter().enumerate().position(|(i, s)| {
@@ -1159,16 +1159,6 @@ fn without_sections(text: &str, sections: &[&str]) -> String {
         }
     }
     collapsed.trim().to_owned()
-}
-
-/// A remote as a lockfile's `GEM` section has it: no credentials, a
-/// trailing `/`.
-fn normalized_remote(remote: &str) -> String {
-    let mut remote = lockfile::credless(remote);
-    if !remote.ends_with('/') {
-        remote.push('/');
-    }
-    remote
 }
 
 /// A lockfile spec as the resolver reads it.

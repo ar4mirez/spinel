@@ -909,18 +909,28 @@ pub struct LockSource {
     pub pinned: Vec<String>,
 }
 
+/// The remotes of the `GEM` section for the rubygems source at `remote`:
+/// no credentials, a trailing `/`. An empty `remote` is a Gemfile with no
+/// rubygems source, whose `GEM` section Bundler writes with no remote.
+pub(crate) fn gem_remotes(remote: &str) -> Vec<String> {
+    if remote.is_empty() {
+        return Vec::new();
+    }
+    let mut remote = credless(remote);
+    if !remote.ends_with('/') {
+        remote.push('/');
+    }
+    vec![remote]
+}
+
 /// `SourceList#lock_sources`: the git and path sources sorted by identifier,
-/// then the rubygems source at `remote` (no credentials, a trailing `/`),
-/// each with the specs of the gems it provides.
+/// then the rubygems source at `remote` (see [`gem_remotes`]), each with the
+/// specs of the gems it provides.
 pub(crate) fn lock_sources(
     remote: &str,
     locals: &[LockSource],
     specs: Vec<LockedSpec>,
 ) -> Vec<Source> {
-    let mut remote = credless(remote);
-    if !remote.ends_with('/') {
-        remote.push('/');
-    }
     let mut order: Vec<&LockSource> = locals.iter().collect();
     order.sort_by(|a, b| a.identifier.cmp(&b.identifier));
     let mut sources: Vec<Source> = order
@@ -932,7 +942,7 @@ pub(crate) fn lock_sources(
         .collect();
     let mut gem = Source {
         kind: SourceKind::Gem {
-            remotes: vec![remote],
+            remotes: gem_remotes(remote),
         },
         specs: Vec::new(),
     };

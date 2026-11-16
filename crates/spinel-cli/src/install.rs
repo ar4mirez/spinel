@@ -98,8 +98,9 @@ impl GemfileJson {
 
 /// A Gemfile ready to resolve.
 pub(crate) struct Prepared {
-    /// The global rubygems source, as written.
-    pub remote: String,
+    /// The global rubygems source, as written; `None` when the Gemfile has
+    /// none, its gems all coming from git and path sources.
+    pub remote: Option<String>,
     pub request: resolver::Request,
     /// `Platform.local`.
     pub local: gem_platform::Platform,
@@ -123,7 +124,8 @@ pub(crate) fn prepare(
         Some(GemfileSource {
             kind,
             remote: Some(remote),
-        }) if kind == "rubygems" => remote.clone(),
+        }) if kind == "rubygems" => Some(remote.clone()),
+        None => None,
         _ => return Err("the Gemfile names no rubygems source".to_owned()),
     };
     // ponytail: one global rubygems source beside git and path ones.
@@ -190,15 +192,15 @@ pub(crate) fn prepare(
             |f| f.to_string_lossy().into_owned(),
         );
     // Bundler names a rubygems source by its remote with a trailing `/`.
-    let shown_remote = if remote.ends_with('/') {
-        remote.clone()
-    } else {
-        format!("{remote}/")
+    let shown_source = match &remote {
+        Some(remote) if remote.ends_with('/') => format!("rubygems repository {remote}"),
+        Some(remote) => format!("rubygems repository {remote}/"),
+        None => "locally installed gems".to_owned(),
     };
     Ok(Prepared {
         request: resolver::Request {
             gemfile: gemfile_name,
-            source: format!("rubygems repository {shown_remote}"),
+            source: shown_source,
             dependencies,
             platforms,
             ruby_version,
@@ -221,14 +223,15 @@ pub(crate) async fn read_index(
     roots: Vec<String>,
     local: &gem_platform::Platform,
 ) -> Result<resolver::Index, Box<dyn std::error::Error>> {
-    read_index_over(client, roots, local, resolver::Index::new()).await
+    read_index_over(Some(client), roots, local, resolver::Index::new()).await
 }
 
 /// [`read_index`] with the builds of some gems already known: those of the
 /// git and path sources (`overlay`), which the index is not read for, and
-/// whose dependencies it is.
+/// whose dependencies it is. With no `client`, a Gemfile with no rubygems
+/// source, a gem they do not provide has no builds.
 pub(crate) async fn read_index_over(
-    client: &compact_index::Client,
+    client: Option<&compact_index::Client>,
     roots: Vec<String>,
     local: &gem_platform::Platform,
     overlay: resolver::Index,
@@ -251,6 +254,12 @@ pub(crate) async fn read_index_over(
     if wanted.is_empty() && !index.is_empty() {
         return Ok(index);
     }
+    let Some(client) = client else {
+        for gem in wanted {
+            index.insert(gem, Vec::new());
+        }
+        return Ok(index);
+    };
     client.versions().await?;
     while !wanted.is_empty() {
         let mut next = Vec::new();
@@ -351,7 +360,8 @@ pub(crate) struct Session {
     /// The lockfile as it is on disk, if there is one.
     current: Option<String>,
     home: PathBuf,
-    client: compact_index::Client,
+    /// The rubygems source's index; `None` when the Gemfile has none.
+    client: Option<compact_index::Client>,
     runtime: tokio::runtime::Runtime,
     /// What the git and path sources had, once resolved.
     locals: LocalState,
@@ -393,7 +403,11 @@ impl Session {
         let Some(home) = home::spinel_home() else {
             return Err(fail("neither SPINEL_HOME nor HOME is set".to_owned()));
         };
-        let client = compact_index::Client::new(&prepared.remote, &home)
+        let client = prepared
+            .remote
+            .as_deref()
+            .map(|remote| compact_index::Client::new(remote, &home))
+            .transpose()
             .map_err(|err| fail(err.to_string()))?;
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -474,7 +488,7 @@ impl Session {
         }
         self.runtime
             .block_on(read_index_over(
-                &self.client,
+                self.client.as_ref(),
                 roots,
                 &self.prepared.local,
                 overlay,
@@ -602,7 +616,7 @@ impl Session {
                     Stop(ExitCode::FAILURE)
                 })?;
             let lock = Lockfile::from_resolution(
-                &self.prepared.remote,
+                self.prepared.remote.as_deref().unwrap_or_default(),
                 &self.prepared.request,
                 &index,
                 &resolved,
@@ -621,7 +635,7 @@ impl Session {
             })?;
         let mut definition = locked::Definition::with_locals(
             &lock,
-            &self.prepared.remote,
+            self.prepared.remote.as_deref().unwrap_or_default(),
             &self.prepared.request.dependencies,
             self.ruby.as_deref(),
             &local,
@@ -666,7 +680,7 @@ impl Session {
                 })?;
             let written = definition.write_lock(
                 &text,
-                &self.prepared.remote,
+                self.prepared.remote.as_deref().unwrap_or_default(),
                 &self.prepared.request,
                 Some(&index),
                 &specs,
@@ -680,7 +694,7 @@ impl Session {
             let specs = definition.unchanged(&self.prepared.request.dependencies);
             let written = definition.write_lock(
                 &text,
-                &self.prepared.remote,
+                self.prepared.remote.as_deref().unwrap_or_default(),
                 &self.prepared.request,
                 None,
                 &specs,
@@ -825,73 +839,80 @@ impl Session {
             .into_iter()
             .collect();
 
-        let client = &self.client;
-        let store = gem_store::Store::new(&self.home);
-        let mut wants = Vec::new();
+        // A Gemfile with no rubygems source has nothing to fetch, unless its
+        // lockfile names gems from one.
+        let mut stored = Vec::new();
         let mut ok = true;
-        self.runtime.block_on(async {
-            if !unsummed.is_empty() {
-                // A lockfile without `CHECKSUMS`, and nothing resolved: the
-                // index's `/info` lines have them.
-                let fetched = match client.versions().await {
-                    Ok(_) => client.info(&unsummed).await.map(|_| ()),
-                    Err(err) => Err(err),
-                };
-                if let Err(err) = fetched {
-                    self.fail(err);
-                    ok = false;
-                    return;
+        match &self.client {
+            None if to_install.is_empty() => {}
+            None => return Err(self.fail("the Gemfile names no rubygems source")),
+            Some(client) => {
+                let store = gem_store::Store::new(&self.home);
+                let mut wants = Vec::new();
+                self.runtime.block_on(async {
+                    if !unsummed.is_empty() {
+                        // A lockfile without `CHECKSUMS`, and nothing resolved: the
+                        // index's `/info` lines have them.
+                        let fetched = match client.versions().await {
+                            Ok(_) => client.info(&unsummed).await.map(|_| ()),
+                            Err(err) => Err(err),
+                        };
+                        if let Err(err) = fetched {
+                            self.fail(err);
+                            ok = false;
+                            return;
+                        }
+                    }
+                    for spec in &to_install {
+                        let platform = spec.platform.to_string();
+                        let gem =
+                            match gem_store::GemId::new(&spec.name, &spec.version.to_string(), &platform) {
+                                Ok(gem) => gem,
+                                Err(err) => {
+                                    self.fail(err);
+                                    ok = false;
+                                    continue;
+                                }
+                            };
+                        let sha = sums.get(&lock_name_of(spec)).cloned().or_else(|| {
+                            let info = std::fs::read(client.info_path(&spec.name)).unwrap_or_default();
+                            compact_index::version_checksum(&info, &gem.index_version()).flatten()
+                        });
+                        match sha {
+                            Some(sha) => wants.push((gem, sha)),
+                            None => {
+                                // ponytail: a gem with no checksum anywhere is
+                                // refused, since the store is keyed by it. Upgrade:
+                                // hash the `.gem` as it arrives and key the entry by
+                                // that.
+                                self.fail(format!(
+                                    "{}: neither {lock_name} nor {} lists a checksum for it",
+                                    gem.full_name(),
+                                    prepared.remote.as_deref().unwrap_or_default()
+                                ));
+                                ok = false;
+                            }
+                        }
+                    }
+                });
+                if !ok {
+                    return Err(Stop(ExitCode::FAILURE));
                 }
-            }
-            for spec in &to_install {
-                let platform = spec.platform.to_string();
-                let gem =
-                    match gem_store::GemId::new(&spec.name, &spec.version.to_string(), &platform) {
-                        Ok(gem) => gem,
+
+                // Fetch what the store does not have, then link it all.
+                for (gem, result) in self.runtime.block_on(store.fetch(client, &wants)) {
+                    match result {
+                        Ok(fetched) => {
+                            for warning in fetched.warnings {
+                                eprintln!("spinel: {}: warning: {warning}", self.command);
+                            }
+                            stored.push((gem, fetched.path));
+                        }
                         Err(err) => {
                             self.fail(err);
                             ok = false;
-                            continue;
                         }
-                    };
-                let sha = sums.get(&lock_name_of(spec)).cloned().or_else(|| {
-                    let info = std::fs::read(client.info_path(&spec.name)).unwrap_or_default();
-                    compact_index::version_checksum(&info, &gem.index_version()).flatten()
-                });
-                match sha {
-                    Some(sha) => wants.push((gem, sha)),
-                    None => {
-                        // ponytail: a gem with no checksum anywhere is
-                        // refused, since the store is keyed by it. Upgrade:
-                        // hash the `.gem` as it arrives and key the entry by
-                        // that.
-                        self.fail(format!(
-                            "{}: neither {lock_name} nor {} lists a checksum for it",
-                            gem.full_name(),
-                            prepared.remote
-                        ));
-                        ok = false;
                     }
-                }
-            }
-        });
-        if !ok {
-            return Err(Stop(ExitCode::FAILURE));
-        }
-
-        // Fetch what the store does not have, then link it all.
-        let mut stored = Vec::new();
-        for (gem, result) in self.runtime.block_on(store.fetch(client, &wants)) {
-            match result {
-                Ok(fetched) => {
-                    for warning in fetched.warnings {
-                        eprintln!("spinel: {}: warning: {warning}", self.command);
-                    }
-                    stored.push((gem, fetched.path));
-                }
-                Err(err) => {
-                    self.fail(err);
-                    ok = false;
                 }
             }
         }

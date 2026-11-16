@@ -644,3 +644,44 @@ fn a_gemspec_gemfile_installs_its_gem_from_a_path_source() {
         ""
     );
 }
+
+#[test]
+fn a_gemfile_with_no_rubygems_source_installs_its_path_gem() {
+    let sandbox = Sandbox::new("nosource");
+    sandbox.write("Gemfile", "gem \"gadget\", path: \"../gadget\"\n");
+    // Bundler locks it with a `GEM` section of no remote and no specs, and
+    // reads no index.
+    assert_eq!(
+        ok(&sandbox.spinel(&["install"]), "spinel install"),
+        "+ gadget 0.1.0\n"
+    );
+    assert_eq!(
+        sandbox.read("Gemfile.lock"),
+        sandbox.bundlers("nosource.lock")
+    );
+    assert_eq!(
+        ok(
+            &sandbox.spinel(&["run", "-e", "require \"gadget\"; puts Gadget::NAME"]),
+            "spinel run"
+        ),
+        "gadget\n"
+    );
+    assert_eq!(
+        ok(
+            &sandbox.spinel(&["install", "--frozen"]),
+            "spinel install --frozen"
+        ),
+        ""
+    );
+
+    // A gem no source provides is not found, as Bundler words it.
+    sandbox.write(
+        "Gemfile",
+        "gem \"gadget\", path: \"../gadget\"\ngem \"shared\"\n",
+    );
+    let err = failed(&sandbox.spinel(&["install"]), 1, "a gem from no source");
+    assert!(
+        err.contains("Could not find gem 'shared' in locally installed gems."),
+        "{err}"
+    );
+}

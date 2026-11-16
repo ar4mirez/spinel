@@ -908,6 +908,9 @@ fn resolve_command(
     if !sources.is_empty() {
         return usage("git and path sources are resolved by `spinel install`".to_owned());
     }
+    let Some(remote) = remote else {
+        return usage("the Gemfile names no rubygems source".to_owned());
+    };
 
     // A lockfile to keep to (#79): `Definition` reads it, and when nothing
     // changed it is the resolution, with no index read.

@@ -14,6 +14,8 @@
 # Gemfile in `bundler/Gemfile` finds it. Then:
 #
 # - `bundle lock` writes `installed.lock`;
+# - in a project whose Gemfile names no source, only `gadget` from its
+#   path, `bundle lock` writes `nosource.lock`;
 # - `widget-1.1.0/` is committed on top, and `bundle update widget` from
 #   `installed.lock` writes `updated.lock` (`bundle update`, which `spinel
 #   update` is: Bundler 4.0.20's `bundle lock --update widget` locks widget
@@ -134,6 +136,12 @@ sed -e "s|@SOURCE@|$source_url|" -e "s|@REPO@|$repo_url|" "$out/Gemfile" >"$app/
 bundle_in "$app" lock >/dev/null
 record "$app/Gemfile.lock" installed.lock
 cp "$app/Gemfile.lock" "$work/installed.lock"
+
+nosource="$work/nosource"
+mkdir -p "$nosource"
+printf 'gem "gadget", path: "../gadget"\n' >"$nosource/Gemfile"
+bundle_in "$nosource" lock >/dev/null
+record "$nosource/Gemfile.lock" nosource.lock
 
 commit widget-1.1.0
 revision_2="$(git -C "$repo" rev-parse HEAD)"
