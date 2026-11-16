@@ -1,0 +1,17 @@
+GEM
+  remote: @SOURCE@/
+  specs:
+    rack (3.0.0.rc1)
+
+PLATFORMS
+  ruby
+  x86_64-linux
+
+DEPENDENCIES
+  rack (>= 3.0.0.beta1, < 3.0.0)
+
+CHECKSUMS
+  rack (3.0.0.rc1) sha256=9ded32f01d520c16076c72649873229fcd83a18e79d9ebd696fc22d34e484088
+
+BUNDLED WITH
+  4.0.20

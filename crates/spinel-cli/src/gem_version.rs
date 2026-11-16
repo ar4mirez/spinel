@@ -240,13 +240,6 @@ impl Version {
     }
 
     /// `version` / `to_s`.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the resolver's API; only tests read it until the resolver lands"
-        )
-    )]
     pub fn as_str(&self) -> &str {
         &self.version
     }
@@ -350,13 +343,6 @@ fn succ(digits: &str) -> String {
 /// including `2.0`; `~> 1.4.4` allows `1.4.4` up to but not including `1.5`;
 /// `~> 1` allows `1.0` up to but not including `2`. A prerelease of the bump
 /// (`2.0.a` for `~> 1.0`) is outside, because its release is the bump.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the resolver's API; only tests read it until the resolver lands"
-    )
-)]
 pub fn pessimistic_satisfied_by(requirement: &Version, version: &Version) -> bool {
     version >= requirement && version.release() < requirement.bump()
 }

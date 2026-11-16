@@ -1,0 +1,5 @@
+source ENV.fetch("SPINEL_RESOLVER_SOURCE")
+
+gem "sinatra", "~> 2.0"
+gem "rackup", ">= 2"
+gem "mustermann", "~> 3.0"

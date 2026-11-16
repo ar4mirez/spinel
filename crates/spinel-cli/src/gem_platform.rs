@@ -28,9 +28,10 @@
 //!   platform with no cpu runs the os and version together: `darwin0`.
 //! - Words no rule knows become the os `unknown`, so all of them are equal.
 //!
-//! Not ported: `sort_and_filter_best_platform_match`, which compares whole
-//! specifications (their dependencies and required versions) and belongs with
-//! the resolver that has them; and TruffleRuby's per-gem `match_gem?`.
+//! Not here: `sort_and_filter_best_platform_match`, which compares whole
+//! specifications (their dependencies and required versions), is the
+//! resolver's (`best_platform_match` in `resolver.rs`); TruffleRuby's per-gem
+//! `match_gem?` is not ported.
 
 use std::borrow::Cow;
 use std::fmt;

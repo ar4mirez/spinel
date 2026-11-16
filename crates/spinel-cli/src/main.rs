@@ -11,10 +11,11 @@ mod gem_home;
     not(test),
     expect(
         dead_code,
-        reason = "the resolver's platform filter; only tests call it until the resolver lands"
+        reason = "`=~` and the Array constructor; only tests call them until the lockfile reads platforms"
     )
 )]
 mod gem_platform;
+mod gem_requirement;
 mod gem_spec;
 mod gem_store;
 #[cfg_attr(
@@ -28,6 +29,7 @@ mod gem_substitute;
 mod gem_version;
 mod home;
 mod init;
+mod resolver;
 mod ruby_args;
 mod ruby_version;
 mod stdlib;
@@ -171,6 +173,37 @@ enum Command {
         gems: Vec<String>,
     },
 
+    /// Resolve a Gemfile's dependencies against its source's compact index,
+    /// and print the gems chosen.
+    ///
+    /// The debugging window onto the resolver `spinel install` will run
+    /// (docs/package-manager.md, "Resolver"): it reads the dependency JSON
+    /// `shims/gemfile_eval.rb` prints, brings the index up to date for every
+    /// gem those dependencies can reach, and prints one line per gem as a
+    /// lockfile's `specs:` lists it, or Bundler's explanation of why there
+    /// is no resolution. Hidden: `spinel install` is the command that will
+    /// resolve.
+    #[command(hide = true)]
+    Resolve {
+        /// The dependency JSON, or `-` for standard input.
+        deps: PathBuf,
+
+        /// A platform to resolve for, as a lockfile's `PLATFORMS` names it;
+        /// repeat for each. The local platform when none is given.
+        #[arg(long = "platform", value_name = "PLATFORM")]
+        platforms: Vec<String>,
+
+        /// The Ruby to resolve for, which `required_ruby_version` is checked
+        /// against. Spinel's `RUBY_VERSION` when not given.
+        #[arg(long, value_name = "VERSION")]
+        ruby_version: Option<String>,
+
+        /// The RubyGems to resolve for, which `required_rubygems_version` is
+        /// checked against. The RubyGems Spinel ships when not given.
+        #[arg(long, value_name = "VERSION")]
+        rubygems_version: Option<String>,
+    },
+
     /// Parse Ruby and print the syntax tree.
     ///
     /// Give it a file to see one tree. Give it a directory to sweep every `.rb`
@@ -243,6 +276,19 @@ fn main() -> ExitCode {
             gem_home,
             gems,
         }) => return fetch_command(&source, gem_home.as_deref(), &gems),
+        Some(Command::Resolve {
+            deps,
+            platforms,
+            ruby_version,
+            rubygems_version,
+        }) => {
+            return resolve_command(
+                &deps,
+                &platforms,
+                ruby_version.as_deref(),
+                rubygems_version.as_deref(),
+            );
+        }
         Some(Command::Run {
             path,
             args,
@@ -529,6 +575,223 @@ fn link_gem_home(
             false
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// spinel resolve
+// ---------------------------------------------------------------------------
+
+/// The parts of `shims/gemfile_eval.rb`'s JSON the resolver reads
+/// (docs/package-manager.md, "1. Gemfile evaluation").
+#[derive(serde::Deserialize)]
+struct GemfileJson {
+    gemfiles: Vec<String>,
+    source: Option<GemfileSource>,
+    #[serde(default)]
+    gemspecs: Vec<serde_json::Value>,
+    dependencies: Vec<GemfileJsonDependency>,
+}
+
+#[derive(serde::Deserialize)]
+struct GemfileSource {
+    #[serde(rename = "type")]
+    kind: String,
+    remote: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct GemfileJsonDependency {
+    name: String,
+    requirements: Vec<String>,
+    #[serde(default)]
+    platforms: Vec<String>,
+    source: Option<serde_json::Value>,
+    force_ruby_platform: Option<bool>,
+}
+
+/// Resolve the dependency JSON at `deps` (`-`: standard input) and print one
+/// line per gem chosen, as `specs:` lists it, or the explanation of why there
+/// is none on standard error. Exits 1 when there is no resolution, 2 when the
+/// input is not one it can resolve.
+fn resolve_command(
+    deps: &Path,
+    platforms: &[String],
+    ruby_version: Option<&str>,
+    rubygems_version: Option<&str>,
+) -> ExitCode {
+    let usage = |message: String| {
+        eprintln!("spinel: resolve: {message}");
+        ExitCode::from(EXIT_USAGE)
+    };
+    let text = if deps == Path::new("-") {
+        let mut text = String::new();
+        if let Err(err) = std::io::Read::read_to_string(&mut std::io::stdin(), &mut text) {
+            return usage(format!("standard input: {err}"));
+        }
+        text
+    } else {
+        match std::fs::read_to_string(deps) {
+            Ok(text) => text,
+            Err(err) => return usage(format!("{}: {err}", deps.display())),
+        }
+    };
+    let gemfile: GemfileJson = match serde_json::from_str(&text) {
+        Ok(gemfile) => gemfile,
+        Err(err) => return usage(format!("{}: {err}", deps.display())),
+    };
+    let remote = match &gemfile.source {
+        Some(GemfileSource {
+            kind,
+            remote: Some(remote),
+        }) if kind == "rubygems" => remote.clone(),
+        _ => return usage("the Gemfile names no rubygems source".to_owned()),
+    };
+    // ponytail: one global rubygems source. Upgrade: git and path sources
+    // (#88), and a source scoped to some gems, each resolved with its own
+    // index.
+    if !gemfile.gemspecs.is_empty() {
+        return usage("`gemspec` is not supported yet (#88)".to_owned());
+    }
+    let local = gem_platform::Platform::local(spinel_vm::PLATFORM);
+    let mut dependencies = Vec::new();
+    for dep in &gemfile.dependencies {
+        if dep.source.is_some() {
+            return usage(format!(
+                "{}: a source of its own is not supported yet (#88)",
+                dep.name
+            ));
+        }
+        let requirement =
+            match gem_requirement::Requirement::new(dep.requirements.iter().map(String::as_str)) {
+                Ok(requirement) => requirement,
+                Err(err) => return usage(format!("{}: {err}", dep.name)),
+            };
+        dependencies.push(resolver::GemfileDependency {
+            name: dep.name.clone(),
+            requirement,
+            platforms: dep.platforms.clone(),
+            force_ruby_platform: dep.force_ruby_platform.unwrap_or(false),
+        });
+    }
+    let platforms: Vec<gem_platform::GemPlatform> = if platforms.is_empty() {
+        vec![gem_platform::GemPlatform::Platform(local.clone())]
+    } else {
+        platforms
+            .iter()
+            .map(|p| gem_platform::GemPlatform::new(Some(p), &local))
+            .collect()
+    };
+    let version =
+        |given: Option<&str>, default: &str| gem_version::Version::new(given.unwrap_or(default));
+    let (ruby_version, rubygems_version) = match (
+        version(ruby_version, spinel_vm::LANGUAGE_VERSION),
+        version(rubygems_version, gem_spec::RUBYGEMS_VERSION),
+    ) {
+        (Ok(ruby), Ok(rubygems)) => (ruby, rubygems),
+        (Err(err), _) | (_, Err(err)) => return usage(err.to_string()),
+    };
+    let gemfile_name = gemfile
+        .gemfiles
+        .first()
+        .and_then(|f| Path::new(f).file_name())
+        .map_or_else(
+            || "Gemfile".to_owned(),
+            |f| f.to_string_lossy().into_owned(),
+        );
+    // Bundler names a rubygems source by its remote with a trailing `/`.
+    let shown_remote = if remote.ends_with('/') {
+        remote.clone()
+    } else {
+        format!("{remote}/")
+    };
+    let request = resolver::Request {
+        gemfile: gemfile_name,
+        source: format!("rubygems repository {shown_remote}"),
+        dependencies,
+        platforms,
+        ruby_version,
+        rubygems_version,
+    };
+
+    let Some(home) = home::spinel_home() else {
+        eprintln!("spinel: resolve: neither SPINEL_HOME nor HOME is set");
+        return ExitCode::FAILURE;
+    };
+    let client = match compact_index::Client::new(&remote, &home) {
+        Ok(client) => client,
+        Err(err) => return usage(err.to_string()),
+    };
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(err) => {
+            eprintln!("spinel: resolve: cannot start the async runtime: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let roots: Vec<String> = request
+        .dependencies
+        .iter()
+        .map(|d| d.name.clone())
+        .collect();
+    let index = match runtime.block_on(read_index(&client, roots, &local)) {
+        Ok(index) => index,
+        Err(err) => {
+            eprintln!("spinel: resolve: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match resolver::resolve(&request, &index) {
+        Ok(resolved) => {
+            for spec in resolved {
+                println!("{spec}");
+            }
+            ExitCode::SUCCESS
+        }
+        Err(failure) => {
+            eprintln!("{}", failure.to_string().trim_end());
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// The builds of every gem `roots` can reach through any version's
+/// dependencies, as Bundler reads them before it resolves: `/versions`, then
+/// `/info` of the roots, then of every gem those name, and so on, each round
+/// fetched at once. A gem `/versions` does not list has no builds.
+async fn read_index(
+    client: &compact_index::Client,
+    roots: Vec<String>,
+    local: &gem_platform::Platform,
+) -> Result<resolver::Index, Box<dyn std::error::Error>> {
+    client.versions().await?;
+    let mut index = resolver::Index::new();
+    let mut wanted = roots;
+    while !wanted.is_empty() {
+        let mut next = Vec::new();
+        for (gem, result) in client.info(&wanted).await? {
+            let specs = match result? {
+                compact_index::Outcome::Unknown => Vec::new(),
+                _ => {
+                    let path = client.info_path(&gem);
+                    let data =
+                        std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+                    resolver::parse_info(&gem, &data, local)?
+                }
+            };
+            for dep in resolver::dependency_names(&specs) {
+                if !index.contains_key(dep) && !next.iter().any(|n: &String| n == dep) {
+                    next.push(dep.to_owned());
+                }
+            }
+            index.insert(gem, specs);
+        }
+        next.retain(|gem| !index.contains_key(gem));
+        wanted = next;
+    }
+    Ok(index)
 }
 
 // ---------------------------------------------------------------------------
