@@ -755,7 +755,7 @@ fn write_bundle_config(root: &Path) -> std::io::Result<()> {
 
 /// Write `bytes` beside `path` and rename them into place, so a reader
 /// never sees half a file.
-fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())

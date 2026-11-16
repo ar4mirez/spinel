@@ -1,0 +1,2 @@
+#!/usr/bin/env ruby
+puts "clash from clash-dep"
