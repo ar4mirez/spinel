@@ -9,6 +9,16 @@ bytecode a tool reads.
 
 ### Added
 
+- **An existing `Gemfile.lock` keeps its versions, as Bundler keeps them**
+  ([#79](https://github.com/ar4mirez/spinel/issues/79)). When no update is
+  asked for, a Gemfile that asks for nothing new resolves to the lockfile
+  itself without reading the index, and the lockfile is written back byte
+  for byte, even one from an earlier Bundler 4. Otherwise each locked gem
+  the edit does not touch is tried at its locked version first and moves
+  only when the rest needs it to: up, or down only when a conflict loosens
+  its floor, as Bundler 4.0.20 does. The
+  hidden `spinel resolve --locked Gemfile.lock` runs it.
+
 - **`Gemfile.lock`, read and written as Bundler does**
   ([#80](https://github.com/ar4mirez/spinel/issues/80)). A lockfile Bundler
   4 wrote reads back and writes out byte for byte, GIT and PATH sections,
