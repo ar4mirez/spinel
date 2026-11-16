@@ -411,4 +411,8 @@ fn directories_and_the_path() {
     );
     // A `#!` line for something other than ruby is skipped to the ruby one.
     assert_eq!(out(&["launcher.sh"]), "the ruby part\n");
+    // Spinel's own name counts as ruby's, as a bin stub's `#!/usr/bin/env
+    // spinel` needs (#82), first or further down.
+    assert_eq!(out(&["spinel_shebang"]), "a spinel script\n");
+    assert_eq!(out(&["spinel_launcher.sh"]), "the spinel part\n");
 }

@@ -2,7 +2,8 @@
 #
 # Cold and warm fetch of a lockfile's gems into the global store (#81,
 # docs/package-manager.md, "Global store"), beside the same `.gem` files
-# fetched by `curl` alone, which is what the network costs.
+# fetched by `curl` alone, which is what the network costs; then a warm
+# install (#82): every gem already stored, linked into a project's GEM_HOME.
 #
 #   bench/install.sh                  the Sinatra fixture's Gemfile.lock
 #   bench/install.sh path/Gemfile.lock
@@ -14,10 +15,13 @@
 # store alone: download, verify, unpack, rename. A cold run starts from an
 # empty store; a warm run finds every gem stored. A cold install is
 # network-bound when its wall time is close to curl's and its CPU time is a
-# small part of its wall time.
+# small part of its wall time. A warm install is `spinel fetch --gem-home`
+# with the store full: into an empty GEM_HOME (every link, gemspec and bin
+# stub written) and into one already linked (nothing written). Both still
+# bring the index up to date first, one request.
 #
 # `spinel install` (#84) is what will time a whole install against
-# `bundle install`; until it lands this is the store's half.
+# `bundle install`; until it lands this is the store and the linking.
 #
 # Numbers go in the pull request, not into the repo (docs/roadmap.md, rule 7).
 
@@ -83,6 +87,15 @@ warm_once() {
   "$spinel" fetch --source "$source_url" "${gems[@]}"
 }
 
+install_fresh_once() {
+  rm -rf "$work/project/.spinel/gem_home"
+  "$spinel" fetch --source "$source_url" --gem-home "$work/project/.spinel/gem_home" "${gems[@]}"
+}
+
+install_again_once() {
+  "$spinel" fetch --source "$source_url" --gem-home "$work/project/.spinel/gem_home" "${gems[@]}"
+}
+
 # Report the medians of `runs` runs of one function: wall, and user + sys.
 report() {
   local label="$1" fn="$2" walls=() cpus=() line real user sys
@@ -102,3 +115,6 @@ echo "== $(basename "$(dirname "$lock")")/$(basename "$lock"): ${#gems[@]} gems,
 report "curl (the network alone)" curl_once
 report "spinel fetch, cold" cold_once
 report "spinel fetch, warm" warm_once
+install_fresh_once > /dev/null
+report "warm install, empty home" install_fresh_once
+report "warm install, linked home" install_again_once

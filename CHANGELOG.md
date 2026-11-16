@@ -9,6 +9,16 @@ bytecode a tool reads.
 
 ### Added
 
+- **A project's GEM_HOME, linked from the gem store**
+  ([#82](https://github.com/ar4mirez/spinel/issues/82)). Stored gems are
+  linked into `.spinel/gem_home/` as `gem install` lays one out:
+  `gems/<gem>` a symlink into the store, `specifications/<gem>.gemspec` the
+  file RubyGems itself writes, byte for byte, and `bin/` stubs that start
+  `#!/usr/bin/env spinel`. RubyGems, `Bundler.setup` and `bundle exec` read
+  it unchanged. Linking again writes nothing, and a gem no longer asked for
+  is removed. The hidden `spinel fetch --gem-home DIR` runs it. A program
+  whose `#!` line names `spinel` now runs as Ruby, as one naming `ruby` does.
+
 - **The compact index client**
   ([#77](https://github.com/ar4mirez/spinel/issues/77)). The first piece of
   `spinel install`: rubygems.org's `/versions`, `/names` and `/info/<gem>`,

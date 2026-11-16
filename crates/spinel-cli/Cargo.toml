@@ -32,6 +32,9 @@ spinel-jit.workspace = true
 spinel-parse.workspace = true
 spinel-vm.workspace = true
 tar = { version = "0.4", default-features = false }
+# A stored gem's gemspec is YAML (#82); its parser's events keep the tags and
+# scalar styles RubyGems' Psych load reads them by.
+yaml-rust2 = { version = "0.13", default-features = false }
 tokio = { version = "1", features = ["rt", "sync"] }
 zstd = "0.13"
 

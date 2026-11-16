@@ -1,0 +1,9 @@
+--- !ruby/object:Gem::Specification
+name: sparse
+version: !ruby/object:Gem::Version
+  version: '1'
+date: 2011-04-26 00:00:00.000000000Z
+summary: 
+executables:
+- tool
+bindir:

@@ -1,0 +1,15 @@
+bin/
+bin/alpha
+build_info/
+cache/
+doc/
+extensions/
+gems/
+gems/alpha-1.0.0/
+gems/beta-2.1.0/
+gems/gamma-0.3.0-x86_64-linux/
+plugins/
+specifications/
+specifications/alpha-1.0.0.gemspec
+specifications/beta-2.1.0.gemspec
+specifications/gamma-0.3.0-x86_64-linux.gemspec
