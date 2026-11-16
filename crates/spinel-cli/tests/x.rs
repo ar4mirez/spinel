@@ -36,12 +36,13 @@ struct Server {
 }
 
 /// Each fixture gem: name, version, its `/info` dependencies field.
-const GEMS: [(&str, &str, &str); 6] = [
+const GEMS: [(&str, &str, &str); 7] = [
     ("clash", "1.0.0", "clash-dep:~> 1.0"),
     ("clash-dep", "1.0.0", ""),
     ("greet", "1.0.0", ""),
     ("greet", "2.0.0", "shout:~> 1.0"),
     ("pair", "1.0.0", ""),
+    ("respawn", "1.0.0", ""),
     ("shout", "1.0.0", ""),
 ];
 
@@ -424,4 +425,93 @@ fn the_chosen_gem_runs_when_a_dependency_has_an_executable_of_the_same_name() {
     let out = sandbox.x(&["--gem", "clash-dep", "clash"]);
     assert!(out.status.success(), "{}", text(&out.stderr));
     assert_eq!(text(&out.stdout), "clash from clash-dep\n");
+}
+
+/// What `respawn` reports, run by the `spinel` at `ruby`: Spinel, with
+/// `Gem.ruby` and `RbConfig.ruby` both an absolute path to that binary, and
+/// the child each of them starts Spinel again, agreeing. The path is the
+/// running binary as the OS reports it: on Linux `/proc/self/exe`, so `ruby`
+/// itself; elsewhere (macOS) the path it was started by, which may still
+/// go through a symlink or a `./`, so only the file it names is compared.
+fn assert_respawns(out: &Output, ruby: &Path) {
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let reported = field(out, "gem_ruby");
+    assert!(Path::new(&reported).is_absolute(), "{reported}");
+    assert_eq!(
+        fs::canonicalize(&reported).unwrap(),
+        fs::canonicalize(ruby).unwrap(),
+        "{reported}"
+    );
+    if cfg!(target_os = "linux") {
+        assert_eq!(reported, ruby.display().to_string());
+    }
+    let ruby = reported;
+    assert_eq!(field(out, "engine"), "spinel");
+    assert_eq!(field(out, "rbconfig_ruby"), ruby);
+    assert_eq!(field(out, "child_gem_ruby"), format!("spinel {ruby}"));
+    assert_eq!(field(out, "child_rbconfig_ruby"), format!("spinel {ruby}"));
+}
+
+/// The bin stub RubyGems would write (#70, docs/cli.md): `spinel x` runs a
+/// gem's executable through it, and so does `#!/usr/bin/env spinel`. Either
+/// way `Gem.ruby` is the absolute path of the running binary, whatever path
+/// or name it was started by, so a gem that starts the current Ruby again
+/// starts Spinel.
+#[test]
+fn gem_ruby_is_the_running_spinel_and_a_respawn_runs_spinel() {
+    let sandbox = Sandbox::new("respawn");
+    let spinel = fs::canonicalize(SPINEL).unwrap();
+
+    let out = sandbox.x(&["respawn"]);
+    assert_respawns(&out, &spinel);
+    let dirs = sandbox.x_dirs();
+    assert_eq!(dirs.len(), 1, "{dirs:?}");
+    let gem_home = sandbox.home().join("x").join(&dirs[0]);
+    let stub = gem_home.join("bin/respawn");
+    let text_of_stub = fs::read_to_string(&stub).unwrap();
+    assert!(
+        text_of_stub.starts_with("#!/usr/bin/env spinel\n"),
+        "{text_of_stub}"
+    );
+    assert!(
+        text_of_stub.contains("Gem.activate_bin_path('respawn', 'respawn', version)"),
+        "{text_of_stub}"
+    );
+
+    // `spinel` found on PATH through a symlink, and a copy of the binary
+    // under another name started by a relative path.
+    let links = sandbox.root.join("links");
+    fs::create_dir_all(&links).unwrap();
+    std::os::unix::fs::symlink(SPINEL, links.join("spinel")).unwrap();
+    let renamed = links.join("spinel-renamed");
+    if fs::hard_link(SPINEL, &renamed).is_err() {
+        fs::copy(SPINEL, &renamed).unwrap();
+    }
+    let links = fs::canonicalize(&links).unwrap();
+    let path = std::env::join_paths(std::iter::once(links.clone()).chain(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    )))
+    .unwrap();
+    let run = |program: &Path, args: &[&Path]| {
+        Command::new(program)
+            .args(args)
+            .current_dir(&links)
+            .env("SPINEL_HOME", sandbox.home())
+            .env("GEM_HOME", &gem_home)
+            .env("GEM_PATH", &gem_home)
+            .env("PATH", &path)
+            .env_remove("RUBYOPT")
+            .env_remove("BUNDLE_GEMFILE")
+            .output()
+            .expect("run the stub")
+    };
+    // The stub run as a program: its shebang finds the symlink, and
+    // `Gem.ruby` is the binary the symlink leads to.
+    assert_respawns(&run(&stub, &[]), &spinel);
+    // The renamed copy, run as `./spinel-renamed -- <stub>`: its own path,
+    // made absolute.
+    assert_respawns(
+        &run(Path::new("./spinel-renamed"), &[Path::new("--"), &stub]),
+        &links.join("spinel-renamed"),
+    );
 }
