@@ -12,10 +12,9 @@
 # result goes to stdout as JSON; an error goes to stderr with the Gemfile line,
 # and the exit status is 1.
 #
-# ponytail: `gemspec` records the directive and the gemspec files it finds,
-# but does not evaluate them yet. Turning one into the gem and its
-# development dependencies is the gemspec evaluation of git and path sources
-# (#88).
+# `gemspec` records the directive and the gemspec files it finds; `spinel
+# install` evaluates the gemspec (shims/gemspec_eval.rb) and adds its gem and
+# development dependencies, as Bundler::Dsl#gemspec does (#88).
 
 require "json"
 

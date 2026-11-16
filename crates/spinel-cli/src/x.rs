@@ -212,8 +212,7 @@ fn prepare(request: &Request) -> Result<(PathBuf, PathBuf), Stop> {
         .find(|r| r.name == gem)
         .ok_or_else(|| Stop::failure(format!("the resolution has no {gem}")))?;
     let gem_home = absolute(&home.join("x").join(directory_name(root, &wants)));
-    let report = gem_home::link(&gem_home, &absolute(&store.root().join("gems")), &stored)
-        .map_err(Stop::failure)?;
+    let report = gem_home::link(&gem_home, &stored).map_err(Stop::failure)?;
     let choice = choose_executable(&report.executables, gem, executable);
     // What this run installed, uv-style, on standard error so the
     // command's own output is all that standard output carries, with what

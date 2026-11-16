@@ -15,7 +15,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 
 use crate::gem_platform::{self, GemPlatform};
-use crate::lockfile::{Lockfile, SourceKind};
+use crate::local_source::{self, Declared, DeclaredSource, LocalGem, Materialized};
+use crate::lockfile::{LockSource, Lockfile, SourceKind};
 use crate::resolver::{self, GemfileDependency, Spec};
 use crate::{compact_index, gem_home, gem_requirement, gem_spec, gem_store, gem_version, home};
 use crate::{locked, lockfile};
@@ -102,6 +103,10 @@ pub(crate) struct Prepared {
     pub request: resolver::Request,
     /// `Platform.local`.
     pub local: gem_platform::Platform,
+    /// The git and path sources (#88), in `SourceList#all_sources`' order.
+    pub sources: Vec<DeclaredSource>,
+    /// For each of the request's dependencies, the source it is pinned to.
+    pub pins: Vec<Option<usize>>,
 }
 
 /// Read the Gemfile's JSON into a resolver request for `platforms` (the
@@ -121,18 +126,34 @@ pub(crate) fn prepare(
         }) if kind == "rubygems" => remote.clone(),
         _ => return Err("the Gemfile names no rubygems source".to_owned()),
     };
-    // ponytail: one global rubygems source. Upgrade: git and path sources
-    // (#88), and a source scoped to some gems, each resolved with its own
+    // ponytail: one global rubygems source beside git and path ones.
+    // Upgrade: a rubygems source scoped to some gems, resolved with its own
     // index.
     if !gemfile.gemspecs.is_empty() {
-        return Err("`gemspec` is not supported yet (#88)".to_owned());
+        return Err("`gemspec` is read by `spinel install`".to_owned());
     }
     let local = gem_platform::Platform::local(spinel_vm::PLATFORM);
+    let project = gemfile
+        .gemfiles
+        .first()
+        .and_then(|f| Path::new(f).parent())
+        .map_or_else(|| PathBuf::from("."), Path::to_owned);
+    let declared: Vec<Option<&serde_json::Value>> = gemfile
+        .dependencies
+        .iter()
+        .map(|d| d.source.as_ref().filter(|s| !s.is_null()))
+        .collect();
+    let names: Vec<&str> = gemfile
+        .dependencies
+        .iter()
+        .map(|d| d.name.as_str())
+        .collect();
+    let (sources, pins) = local_source::declared(&declared, &names, &project)?;
     let mut dependencies = Vec::new();
-    for dep in &gemfile.dependencies {
-        if dep.source.is_some() {
+    for (dep, pin) in gemfile.dependencies.iter().zip(&pins) {
+        if pin.is_none() && dep.source.as_ref().is_some_and(|s| !s.is_null()) {
             return Err(format!(
-                "{}: a source of its own is not supported yet (#88)",
+                "{}: a source of its own other than git or path is not supported yet",
                 dep.name
             ));
         }
@@ -185,6 +206,8 @@ pub(crate) fn prepare(
         },
         remote,
         local,
+        sources,
+        pins,
     })
 }
 
@@ -198,9 +221,37 @@ pub(crate) async fn read_index(
     roots: Vec<String>,
     local: &gem_platform::Platform,
 ) -> Result<resolver::Index, Box<dyn std::error::Error>> {
+    read_index_over(client, roots, local, resolver::Index::new()).await
+}
+
+/// [`read_index`] with the builds of some gems already known: those of the
+/// git and path sources (`overlay`), which the index is not read for, and
+/// whose dependencies it is.
+pub(crate) async fn read_index_over(
+    client: &compact_index::Client,
+    roots: Vec<String>,
+    local: &gem_platform::Platform,
+    overlay: resolver::Index,
+) -> Result<resolver::Index, Box<dyn std::error::Error>> {
+    let mut index = overlay;
+    let mut roots = roots;
+    for specs in index.values() {
+        for dep in resolver::dependency_names(specs) {
+            if !roots.iter().any(|r| r == dep) {
+                roots.push(dep.to_owned());
+            }
+        }
+    }
+    let mut wanted: Vec<String> = roots
+        .into_iter()
+        .filter(|r| r != "bundler" && !index.contains_key(r))
+        .collect();
+    // Only git and path gems, needing nothing from the index: it is not
+    // read at all.
+    if wanted.is_empty() && !index.is_empty() {
+        return Ok(index);
+    }
     client.versions().await?;
-    let mut index = resolver::Index::new();
-    let mut wanted: Vec<String> = roots.into_iter().filter(|r| r != "bundler").collect();
     while !wanted.is_empty() {
         let mut next = Vec::new();
         for (gem, result) in client.info(&wanted).await? {
@@ -270,6 +321,18 @@ pub(crate) struct Resolved {
     index: Option<resolver::Index>,
 }
 
+/// The git and path sources a resolution read: what each has, and the
+/// sources as the lockfile writes them.
+#[derive(Default)]
+struct LocalState {
+    read: Vec<Materialized>,
+    /// Which source each gem a git or path source provides comes from.
+    providers: Vec<(String, usize)>,
+    lock_sources: Vec<LockSource>,
+    /// Git sources whose locked revision was let go (`unlock!`).
+    unlocked: Vec<bool>,
+}
+
 /// One evaluated Gemfile on its way to the GEM_HOME: where its project and
 /// lockfile are, the resolver's request, and the index client.
 pub(crate) struct Session {
@@ -290,6 +353,8 @@ pub(crate) struct Session {
     home: PathBuf,
     client: compact_index::Client,
     runtime: tokio::runtime::Runtime,
+    /// What the git and path sources had, once resolved.
+    locals: LocalState,
 }
 
 impl Session {
@@ -348,6 +413,7 @@ impl Session {
             home,
             client,
             runtime,
+            locals: LocalState::default(),
         })
     }
 
@@ -381,7 +447,8 @@ impl Session {
 
     /// The lockfile a resolution writes, read back.
     pub(crate) fn written_lockfile(&self, resolved: &Resolved) -> Result<Lockfile, Stop> {
-        self.read_written(&resolved.written).map(|(lock, _)| lock)
+        self.read_written(&resolved.written)
+            .map(|(lock, _, _)| lock)
     }
 
     fn read_index(&self) -> Result<resolver::Index, Stop> {
@@ -392,16 +459,142 @@ impl Session {
             .iter()
             .map(|d| d.name.clone())
             .collect();
+        // The gems the git and path sources provide come only from them.
+        // ponytail: a conflict's explanation names the rubygems source for
+        // them too. Upgrade with each package's source in the resolver.
+        let mut overlay = resolver::Index::new();
+        for (name, i) in &self.locals.providers {
+            let specs: Vec<Spec> = self.locals.read[*i]
+                .gems
+                .iter()
+                .filter(|g| &g.spec.name == name)
+                .map(|g| g.spec.clone())
+                .collect();
+            overlay.insert(name.clone(), specs);
+        }
         self.runtime
-            .block_on(read_index(&self.client, roots, &self.prepared.local))
+            .block_on(read_index_over(
+                &self.client,
+                roots,
+                &self.prepared.local,
+                overlay,
+            ))
             .map_err(|err| self.fail(err))
+    }
+
+    /// Read the path sources, where they are, as `Definition` compares them
+    /// with the lockfile before anything resolves.
+    fn read_paths(&self) -> Result<Vec<Option<Materialized>>, Stop> {
+        let paths: Vec<&Declared> = self
+            .prepared
+            .sources
+            .iter()
+            .map(|s| &s.kind)
+            .filter(|k| matches!(k, Declared::Path { .. }))
+            .collect();
+        let mut read = local_source::read_paths(&paths, &self.prepared.local)
+            .map_err(|message| self.gemspec_failure(message))?
+            .into_iter();
+        Ok(self
+            .prepared
+            .sources
+            .iter()
+            .map(|s| match s.kind {
+                Declared::Path { .. } => read.next(),
+                Declared::Git { .. } => None,
+            })
+            .collect())
+    }
+
+    /// A git or path source that cannot be read: Bundler's message alone,
+    /// as it prints one, exit 1.
+    fn gemspec_failure(&self, message: String) -> Stop {
+        if !message.is_empty() {
+            eprintln!("{message}");
+        }
+        Stop(ExitCode::FAILURE)
+    }
+
+    /// Read every git source at the revision `revisions` holds it to (a new
+    /// one where that is `None`), with the path sources already `read`;
+    /// work out which gems each provides, and how the lockfile writes them.
+    fn read_locals(
+        &mut self,
+        read: Vec<Option<Materialized>>,
+        revisions: &[Option<String>],
+        definition: Option<&locked::Definition>,
+    ) -> Result<(), Stop> {
+        let mut all = Vec::new();
+        for (i, (source, read)) in self.prepared.sources.iter().zip(read).enumerate() {
+            let materialized = match read {
+                Some(read) => read,
+                None => local_source::read_git(
+                    &self.home,
+                    &source.kind,
+                    revisions.get(i).and_then(Option::as_deref),
+                    &self.prepared.local,
+                )
+                .map_err(|message| self.gemspec_failure(message))?,
+            };
+            all.push(materialized);
+        }
+        let shown_revisions: Vec<Option<String>> = all.iter().map(|m| m.revision.clone()).collect();
+        let providers = local_source::providers(&self.prepared.sources, &all, &shown_revisions)
+            .map_err(|message| self.gemspec_failure(message))?;
+        // A gem pinned to a source that does not have it.
+        for (i, source) in self.prepared.sources.iter().enumerate() {
+            for name in &source.pinned {
+                if !all[i].gems.iter().any(|g| &g.spec.name == name) {
+                    let described = source.kind.describe(all[i].revision.as_deref());
+                    return Err(self.gemspec_failure(format!(
+                        "Could not find gem '{name}' in {described}.\n\n\
+                         The source does not contain any versions of '{name}'"
+                    )));
+                }
+            }
+        }
+        let mut lock_sources = Vec::new();
+        let mut unlocked = Vec::new();
+        for (i, source) in self.prepared.sources.iter().enumerate() {
+            let held = definition.and_then(|d| d.locked_revision(i));
+            let is_git = matches!(source.kind, Declared::Git { .. });
+            unlocked.push(is_git && held.is_none());
+            lock_sources.push(LockSource {
+                kind: source.kind.to_lock(all[i].revision.as_deref()),
+                identifier: source.kind.identifier(held),
+                names: providers
+                    .iter()
+                    .filter(|(_, at)| *at == i)
+                    .map(|(n, _)| n.clone())
+                    .collect(),
+                pinned: source.pinned.clone(),
+            });
+        }
+        self.locals = LocalState {
+            read: all,
+            providers,
+            lock_sources,
+            unlocked,
+        };
+        Ok(())
+    }
+
+    /// Whether `name` comes from a git source whose locked revision this
+    /// resolution let go, so its source is not the one it was locked from.
+    pub(crate) fn git_source_unlocked(&self, name: &str) -> bool {
+        self.locals
+            .providers
+            .iter()
+            .any(|(n, i)| n == name && self.locals.unlocked.get(*i).copied().unwrap_or(false))
     }
 
     /// Resolve, keeping to the lockfile when there is one (#79), into the
     /// lockfile Bundler would write. Nothing is written.
     pub(crate) fn resolve(&mut self) -> Result<Resolved, Stop> {
         let local = GemPlatform::Platform(self.prepared.local.clone());
+        let paths = self.read_paths()?;
         let Some(text) = self.current.clone() else {
+            self.read_locals(paths, &[], None)?;
             let index = self.read_index()?;
             let resolved =
                 resolver::resolve(&self.prepared.request, &index).map_err(|failure| {
@@ -414,6 +607,7 @@ impl Session {
                 &index,
                 &resolved,
                 self.ruby.is_some(),
+                &self.locals.lock_sources,
             );
             return Ok(Resolved {
                 written: lock.write(),
@@ -425,7 +619,7 @@ impl Session {
                 eprintln!("{err}");
                 Stop(ExitCode::FAILURE)
             })?;
-        let mut definition = locked::Definition::unlocking(
+        let mut definition = locked::Definition::with_locals(
             &lock,
             &self.prepared.remote,
             &self.prepared.request.dependencies,
@@ -433,6 +627,12 @@ impl Session {
             &local,
             &[],
             &self.unlock,
+            locked::Locals {
+                sources: &self.prepared.sources,
+                read: &paths,
+                pins: &self.prepared.pins,
+                project: &self.root,
+            },
         )
         .map_err(|err| {
             eprintln!("{err}");
@@ -452,6 +652,10 @@ impl Session {
             return Err(Stop(ExitCode::from(EXIT_FROZEN)));
         }
         self.prepared.request.platforms = definition.platforms().to_vec();
+        let revisions: Vec<Option<String>> = (0..self.prepared.sources.len())
+            .map(|i| definition.locked_revision(i).map(str::to_owned))
+            .collect();
+        self.read_locals(paths, &revisions, Some(&definition))?;
         if definition.resolve_needed() {
             let index = self.read_index()?;
             let specs = definition
@@ -466,6 +670,7 @@ impl Session {
                 &self.prepared.request,
                 Some(&index),
                 &specs,
+                &self.locals.lock_sources,
             );
             Ok(Resolved {
                 written,
@@ -479,6 +684,7 @@ impl Session {
                 &self.prepared.request,
                 None,
                 &specs,
+                &self.locals.lock_sources,
             );
             Ok(Resolved {
                 written,
@@ -487,24 +693,42 @@ impl Session {
         }
     }
 
-    /// The specs a resolution locks from the rubygems source, every
-    /// platform's build.
+    /// The specs a resolution locks, every platform's build, from every
+    /// source.
     pub(crate) fn locked_specs(&self, resolved: &Resolved) -> Result<Vec<Spec>, Stop> {
-        self.read_written(&resolved.written).map(|(_, specs)| specs)
+        self.read_written(&resolved.written)
+            .map(|(_, specs, _)| specs)
     }
 
-    /// The lockfile a resolution writes, read back, and its rubygems
-    /// source's specs.
-    fn read_written(&self, written: &str) -> Result<(Lockfile, Vec<Spec>), Stop> {
+    /// The lockfile a resolution writes, read back, its specs, and the
+    /// full names of those locked from a git or path source.
+    fn read_written(&self, written: &str) -> Result<(Lockfile, Vec<Spec>, HashSet<String>), Stop> {
         let lock = Lockfile::parse(written, &self.lock_name, &self.prepared.local)
             .map_err(|err| self.fail(format!("the lockfile written does not read back: {err}")))?;
         let specs = lock
             .sources
             .iter()
-            .filter(|s| matches!(s.kind, SourceKind::Gem { .. }))
             .flat_map(|s| s.specs.iter().map(locked::locked_spec))
             .collect();
-        Ok((lock, specs))
+        let local = lock
+            .sources
+            .iter()
+            .filter(|s| matches!(s.kind, SourceKind::Git { .. } | SourceKind::Path { .. }))
+            .flat_map(|s| s.specs.iter().map(lockfile::LockedSpec::full_name))
+            .collect();
+        Ok((lock, specs, local))
+    }
+
+    /// The gem a git or path source has for a spec the lockfile locks from
+    /// it.
+    fn local_gem(&self, spec: &Spec) -> Option<&LocalGem> {
+        let full_name = spec.full_name();
+        self.locals
+            .providers
+            .iter()
+            .filter(|(n, _)| *n == spec.name)
+            .flat_map(|(_, i)| &self.locals.read[*i].gems)
+            .find(|g| g.full_name() == full_name)
     }
 
     /// Fetch what `resolved` locks for this machine into the store, link it
@@ -523,10 +747,52 @@ impl Session {
 
         // What this machine installs: the lockfile's builds for the local
         // platform, from the dependencies Bundler installs here.
-        let (lock, specs) = self.read_written(&written)?;
+        let (lock, specs, local_names) = self.read_written(&written)?;
         let wanted = installed_dependencies(gemfile, &prepared.request.dependencies, &local);
         let mut to_install = lockfile::spec_set_for(&specs, &wanted, std::slice::from_ref(&local));
         to_install.sort_by_cached_key(Spec::full_name);
+        // A git or path gem is linked where its source has it; the rest come
+        // from the store.
+        let (local_specs, to_fetch): (Vec<Spec>, Vec<Spec>) = to_install
+            .iter()
+            .cloned()
+            .partition(|s| local_names.contains(&s.full_name()));
+        let mut local_links = Vec::new();
+        for spec in &local_specs {
+            let Some(gem) = self.local_gem(spec) else {
+                return Err(self.fail(format!(
+                    "{}: its git or path source does not have it",
+                    spec.full_name()
+                )));
+            };
+            local_links.push(gem_home::LocalLink {
+                full_name: gem.full_name(),
+                name: gem.spec.name.clone(),
+                gem_dir: gem.gem_dir.clone(),
+                gemspec: gem.gemspec.clone(),
+                require_paths: gem.require_paths.clone(),
+                bindir: gem.bindir.clone(),
+                executables: gem.executables.clone(),
+                extensions: gem.extensions.clone(),
+            });
+        }
+        // Where Bundler looks for each git source's checkout.
+        let checkouts: Vec<(String, PathBuf)> = self
+            .prepared
+            .sources
+            .iter()
+            .zip(&self.locals.read)
+            .filter_map(
+                |(source, read)| match (&source.kind, &read.revision, &read.checkout) {
+                    (Declared::Git { uri, .. }, Some(revision), Some(checkout)) => Some((
+                        local_source::bundler_checkout_name(uri, revision),
+                        checkout.clone(),
+                    )),
+                    _ => None,
+                },
+            )
+            .collect();
+        let to_install = to_fetch;
 
         // Each one's checksum: the lockfile's, else the index's.
         let mut sums: HashMap<String, String> = lock
@@ -639,12 +905,9 @@ impl Session {
             .into_iter()
             .map(|(gem, entry)| (gem, absolute(&entry)))
             .collect();
-        let report = gem_home::link(
-            &gem_home_dir,
-            &absolute(&store.root().join("gems")),
-            &stored,
-        )
-        .map_err(|err| self.fail(err))?;
+        let report = gem_home::link_all(&gem_home_dir, &stored, &local_links)
+            .map_err(|err| self.fail(err))?;
+        gem_home::link_checkouts(&gem_home_dir, &checkouts).map_err(|err| self.fail(err))?;
         for warning in &report.warnings {
             eprintln!("spinel: {}: warning: {warning}", self.command);
         }
@@ -701,7 +964,7 @@ impl Session {
 
         // What changed, uv-style.
         let mut lines: Vec<(String, String)> = Vec::new();
-        for spec in &to_install {
+        for spec in to_install.iter().chain(&local_specs) {
             if !before.contains(&spec.full_name()) {
                 lines.push((
                     spec.name.clone(),
@@ -783,12 +1046,79 @@ pub(crate) fn evaluate_gemfile(
     if !out.status.success() {
         return Err(Stop(ExitCode::FAILURE));
     }
-    serde_json::from_slice(&out.stdout).map_err(|err| {
+    let mut gemfile: GemfileJson = serde_json::from_slice(&out.stdout).map_err(|err| {
         Stop::failure(
             command,
             format!("the Gemfile evaluator printed no JSON: {err}"),
         )
-    })
+    })?;
+    expand_gemspecs(&mut gemfile)?;
+    Ok(gemfile)
+}
+
+/// What Bundler's `Dsl#gemspec` adds for each `gemspec` directive, once its
+/// gemspec is evaluated: the gem itself, from a path source at the
+/// directive's path, and its development dependencies in the directive's
+/// development group. A gem the Gemfile lists itself keeps its own line.
+// ponytail: these come after the Gemfile's own gems, where Bundler adds them
+// where the directive is, which can change the order the resolver meets
+// them in. Upgrade by having the evaluator mark the directive's place.
+fn expand_gemspecs(gemfile: &mut GemfileJson) -> Result<(), Stop> {
+    let local = gem_platform::Platform::local(spinel_vm::PLATFORM);
+    for directive in std::mem::take(&mut gemfile.gemspecs) {
+        let text = |key: &str| directive.get(key).and_then(serde_json::Value::as_str);
+        let path = text("path").unwrap_or(".");
+        let root = text("root").map_or_else(|| PathBuf::from("."), PathBuf::from);
+        let group = text("development_group").unwrap_or("development");
+        let dir = local_source::expand(path, &root);
+        let gem = local_source::read_gemspec(&dir, text("name"), &local).map_err(|message| {
+            eprintln!("{message}");
+            Stop(ExitCode::FAILURE)
+        })?;
+        let listed =
+            |gemfile: &GemfileJson, name: &str| gemfile.dependencies.iter().any(|d| d.name == name);
+        let dependency =
+            |name: &str, requirement: &gem_requirement::Requirement, group: &str, source| {
+                let mut requirements: Vec<String> = requirement
+                    .requirements()
+                    .iter()
+                    .map(|(op, version)| format!("{} {version}", op.as_str()))
+                    .collect();
+                if requirements.is_empty() {
+                    requirements.push(">= 0".to_owned());
+                }
+                GemfileJsonDependency {
+                    name: name.to_owned(),
+                    requirements,
+                    groups: vec![group.to_owned()],
+                    platforms: Vec::new(),
+                    source,
+                    install_if: true,
+                    env: None,
+                    force_ruby_platform: None,
+                }
+            };
+        if !listed(gemfile, &gem.spec.name) {
+            let source = serde_json::json!({
+                "type": "path",
+                "path": path,
+                "root": root.display().to_string(),
+                "glob": directive.get("glob").cloned().unwrap_or(serde_json::Value::Null),
+            });
+            let any = gem_requirement::Requirement::default();
+            gemfile
+                .dependencies
+                .push(dependency(&gem.spec.name, &any, "default", Some(source)));
+        }
+        for (name, requirement) in &gem.development {
+            if !listed(gemfile, name) {
+                gemfile
+                    .dependencies
+                    .push(dependency(name, requirement, group, None));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// `SharedHelpers.default_lockfile`: `gems.locked` beside a `gems.rb`,

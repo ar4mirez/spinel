@@ -50,7 +50,7 @@ fn an_executable_two_gems_share_is_written_once_for_the_later() {
         entry(&store_gems, "one", "1.0"),
         entry(&store_gems, "two", "1.0"),
     ];
-    let first = link(&home, &store_gems, &gems).unwrap();
+    let first = link(&home, &gems).unwrap();
     assert_eq!(
         first.warnings,
         ["bin/shared: two-1.0 and one-1.0 both have it; two-1.0 wins"]
@@ -59,7 +59,7 @@ fn an_executable_two_gems_share_is_written_once_for_the_later() {
         std::fs::read_to_string(home.join("bin/shared")).unwrap(),
         app_script_text("spinel", "two", "shared")
     );
-    let again = link(&home, &store_gems, &gems).unwrap();
+    let again = link(&home, &gems).unwrap();
     let outcomes: Vec<String> = again
         .linked
         .iter()
@@ -79,7 +79,7 @@ fn a_scope_view_links_each_subdirectory_and_keeps_what_is_not_spinels() {
     let _ = std::fs::remove_dir_all(&dir);
     let home = dir.join("gem_home");
     let store_gems = dir.join("store/gems");
-    link(&home, &store_gems, &[entry(&store_gems, "one", "1.0")]).unwrap();
+    link(&home, &[entry(&store_gems, "one", "1.0")]).unwrap();
     // CRuby's Bundler, having installed into the scope itself, left a real
     // directory where one link would go.
     std::fs::create_dir_all(home.join("ruby/4.0.0/doc")).unwrap();
@@ -104,6 +104,11 @@ fn a_scope_view_links_each_subdirectory_and_keeps_what_is_not_spinels() {
             Path::new("../..").join(sub)
         );
     }
+    // And `bundler/`, where Bundler looks for git checkouts.
+    assert_eq!(
+        std::fs::read_link(home.join("ruby/4.0.0/bundler")).unwrap(),
+        Path::new("../../bundler")
+    );
     assert_eq!(
         std::fs::read_to_string(home.join("ruby/4.0.0/specifications/one-1.0.gemspec")).unwrap(),
         std::fs::read_to_string(home.join("specifications/one-1.0.gemspec")).unwrap()
@@ -128,7 +133,7 @@ fn a_scope_view_links_each_subdirectory_and_keeps_what_is_not_spinels() {
         app_script_text("ruby", "foo", "foo"),
     )
     .unwrap();
-    link(&home, &store_gems, &[]).unwrap();
+    link(&home, &[]).unwrap();
     scope_view(&home, "ruby/4.0.0").unwrap();
     assert!(!home.join("ruby/4.0.0/bin/shared").exists());
     assert!(home.join("ruby/4.0.0/bin/theirs").exists());

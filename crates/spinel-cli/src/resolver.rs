@@ -58,7 +58,9 @@
 //! prereleases in. A gem whose floor is in a conflict loses it, and the
 //! resolution is tried again (`find_names_to_relax`, `Base#unlock_names`).
 //!
-//! Not here yet: git and path sources (#88), and sources scoped to a gem.
+//! Git and path sources (#88) come in as builds in the [`Index`] under the
+//! names they provide, in place of the index's (`crate::local_source`).
+//! Not here yet: a rubygems source scoped to a gem.
 
 mod report;
 

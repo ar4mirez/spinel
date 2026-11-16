@@ -115,7 +115,7 @@ fn an_unchanged_gemfile_is_the_lockfile() {
     let specs = def.unchanged(&deps);
     assert_eq!(names(&specs), ["rack-2.2.25", "sinatra-3.2.0"]);
     let request = request(&def, deps.to_vec());
-    let written = def.lockfile(REMOTE, &request, None, &specs).write();
+    let written = def.lockfile(REMOTE, &request, None, &specs, &[]).write();
     assert_eq!(written, LOCK);
 }
 
@@ -133,7 +133,9 @@ fn a_missing_checksum_resolves_again_and_takes_the_index_one() {
     let specs = def.start_resolution(&request, &index).unwrap();
     // Sinatra 4 is newer, but the locked versions are tried first.
     assert_eq!(names(&specs), ["rack-2.2.25", "sinatra-3.2.0"]);
-    let written = def.lockfile(REMOTE, &request, Some(&index), &specs).write();
+    let written = def
+        .lockfile(REMOTE, &request, Some(&index), &specs, &[])
+        .write();
     assert_eq!(written, LOCK);
 }
 
@@ -159,7 +161,7 @@ fn no_checksums_section_writes_none() {
     let request = request(&def, deps.to_vec());
     let index = index();
     let specs = def.start_resolution(&request, &index).unwrap();
-    let lock = def.lockfile(REMOTE, &request, Some(&index), &specs);
+    let lock = def.lockfile(REMOTE, &request, Some(&index), &specs, &[]);
     assert_eq!(lock.checksums, None);
 }
 
@@ -195,14 +197,14 @@ fn a_locked_ruby_version_is_kept_while_the_directive_allows_it() {
     assert!(!def.resolve_needed());
     let request = request(&def, deps.to_vec());
     let specs = def.unchanged(&deps);
-    let lock = def.lockfile(REMOTE, &request, None, &specs);
+    let lock = def.lockfile(REMOTE, &request, None, &specs, &[]);
     assert_eq!(lock.ruby_version.as_deref(), Some("ruby 3.4.1p0"));
     assert_eq!(lock.write(), text);
 
     // A directive the locked Ruby does not meet takes the Ruby resolved for.
     let def = definition(&text, &deps, Some(&["~> 4.0"]));
     assert!(def.resolve_needed());
-    let lock = def.lockfile(REMOTE, &request, None, &specs);
+    let lock = def.lockfile(REMOTE, &request, None, &specs, &[]);
     assert_eq!(lock.ruby_version.as_deref(), Some("ruby 4.0.0"));
 
     // So does a directive the lockfile had none for; and none drops it.
@@ -210,7 +212,8 @@ fn a_locked_ruby_version_is_kept_while_the_directive_allows_it() {
     let def = definition(&text, &deps, None);
     assert!(def.resolve_needed());
     assert_eq!(
-        def.lockfile(REMOTE, &request, None, &specs).ruby_version,
+        def.lockfile(REMOTE, &request, None, &specs, &[])
+            .ruby_version,
         None
     );
 }
@@ -317,7 +320,7 @@ fn a_loosened_requirement_the_locked_version_meets_changes_nothing() {
     assert!(def.changed_dependencies.is_empty());
     let request = request(&def, deps.to_vec());
     let specs = def.unchanged(&deps);
-    let written = def.lockfile(REMOTE, &request, None, &specs).write();
+    let written = def.lockfile(REMOTE, &request, None, &specs, &[]).write();
     assert_eq!(
         written,
         LOCK.replace("  sinatra\n\nCHECKSUMS", "  sinatra (>= 3.0)\n\nCHECKSUMS")
@@ -350,7 +353,7 @@ fn write_lock(text: &str, deps: &[GemfileDependency]) -> String {
     let def = definition(text, deps, None);
     let request = request(&def, deps.to_vec());
     let specs = def.unchanged(deps);
-    def.write_lock(text, REMOTE, &request, None, &specs)
+    def.write_lock(text, REMOTE, &request, None, &specs, &[])
 }
 
 #[test]
@@ -409,7 +412,7 @@ fn updating_a_gem_unlocks_it_and_what_it_reaches() {
     let index = index();
     let specs = def.start_resolution(&request, &index).unwrap();
     assert_eq!(names(&specs), ["rack-3.0.0", "sinatra-4.0.0"]);
-    let written = def.write_lock(LOCK, REMOTE, &request, Some(&index), &specs);
+    let written = def.write_lock(LOCK, REMOTE, &request, Some(&index), &specs, &[]);
     assert!(written.contains("    sinatra (4.0.0)\n"), "{written}");
 }
 
@@ -450,5 +453,8 @@ fn updating_everything_holds_only_the_floors() {
     let request = self::request(&def, deps.to_vec());
     let old = LOCK.replace("BUNDLED WITH\n  4.0.20\n", "BUNDLED WITH\n  4.0.10\n");
     let specs = def.unchanged(&deps);
-    assert_eq!(def.write_lock(&old, REMOTE, &request, None, &specs), LOCK);
+    assert_eq!(
+        def.write_lock(&old, REMOTE, &request, None, &specs, &[]),
+        LOCK
+    );
 }

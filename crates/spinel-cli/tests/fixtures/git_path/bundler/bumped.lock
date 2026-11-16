@@ -1,0 +1,33 @@
+GIT
+  remote: @REPO@
+  revision: @REVISION_1@
+  branch: main
+  specs:
+    widget (1.0.0)
+      shared (>= 1.0)
+
+PATH
+  remote: ../gadget
+  specs:
+    gadget (0.2.0)
+
+GEM
+  remote: @SOURCE@/
+  specs:
+    shared (2.0.0)
+
+PLATFORMS
+  ruby
+  x86_64-linux
+
+DEPENDENCIES
+  gadget!
+  widget!
+
+CHECKSUMS
+  gadget (0.2.0)
+  shared (2.0.0) sha256=a63db724e634f6fca3f52c9f70ed516d00b8fafa57d867d25dd5234f2d90323a
+  widget (1.0.0)
+
+BUNDLED WITH
+  4.0.20
