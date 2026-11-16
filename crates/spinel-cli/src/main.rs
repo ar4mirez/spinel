@@ -7,6 +7,7 @@
 
 mod add;
 mod compact_index;
+mod did_you_mean;
 mod gem_home;
 #[cfg_attr(
     not(test),
@@ -41,6 +42,7 @@ mod ruby_version;
 mod stdlib;
 mod trailer;
 mod tree;
+mod update;
 mod watch;
 mod x;
 
@@ -60,7 +62,7 @@ This build runs Ruby. The core library is minimal — Kernel, Object, Integer,
 String, Symbol, Array, Hash, Comparable — and a program that reaches past it
 says which method is missing rather than failing quietly.
 
-Planned surface (docs/cli.md): update, test, build.
+Planned surface (docs/cli.md): test, build.
 Progress: https://github.com/ar4mirez/spinel/milestones";
 
 #[derive(Parser, Debug)]
@@ -180,6 +182,44 @@ enum Command {
         /// The gems to remove.
         #[arg(value_name = "GEM")]
         gems: Vec<String>,
+    },
+
+    /// Update the gems named, or every gem, to the newest versions allowed.
+    ///
+    /// As `bundle update` does: each gem named is unlocked, with every
+    /// locked gem it depends on, and moved to the newest version the Gemfile
+    /// allows; every other gem keeps its locked version. With no gems, every
+    /// gem is unlocked. No gem goes below its locked version unless a
+    /// conflict takes it there. Then installs, as `spinel install` does.
+    /// Nothing is written when that fails: the lockfile stays as it was.
+    Update {
+        /// The gems to update; every gem when none is named.
+        #[arg(value_name = "GEM")]
+        gems: Vec<String>,
+
+        /// Update every gem, as no gems named does.
+        #[arg(long)]
+        all: bool,
+
+        /// Not supported yet.
+        #[arg(long, hide = true)]
+        conservative: bool,
+
+        /// Not supported yet.
+        #[arg(long, hide = true)]
+        patch: bool,
+
+        /// Not supported yet.
+        #[arg(long, hide = true)]
+        minor: bool,
+
+        /// Not supported yet.
+        #[arg(long, hide = true)]
+        major: bool,
+
+        /// Not supported yet.
+        #[arg(short, long, hide = true, value_name = "GROUP", num_args = 1..)]
+        group: Vec<String>,
     },
 
     /// Run a gem's executable without installing it into the project.
@@ -304,6 +344,19 @@ enum Command {
         /// adds it. When nothing changed, the index is not read.
         #[arg(long, value_name = "LOCKFILE")]
         locked: Option<PathBuf>,
+
+        /// With `--locked`, update as `bundle lock --update` does (#87):
+        /// `--update` unlocks every gem, `--update=GEM,...` the gems named
+        /// and the locked gems they reach.
+        #[arg(
+            long,
+            value_name = "GEM",
+            num_args = 0..=1,
+            require_equals = true,
+            value_delimiter = ',',
+            requires = "locked"
+        )]
+        update: Option<Vec<String>>,
 
         /// The Ruby to resolve for, which `required_ruby_version` is checked
         /// against. Spinel's `RUBY_VERSION` when not given.
@@ -432,6 +485,27 @@ fn main() -> ExitCode {
             });
         }
         Some(Command::Remove { gems }) => return remove::run(&gems),
+        Some(Command::Update {
+            gems,
+            all,
+            conservative,
+            patch,
+            minor,
+            major,
+            group,
+        }) => {
+            let unsupported = [
+                (conservative, "--conservative"),
+                (patch, "--patch"),
+                (minor, "--minor"),
+                (major, "--major"),
+                (!group.is_empty(), "--group"),
+            ]
+            .into_iter()
+            .filter_map(|(given, option)| given.then_some(option))
+            .collect();
+            return update::run(&gems, all, &update::Unsupported(unsupported));
+        }
         Some(Command::X {
             source,
             gem,
@@ -461,14 +535,21 @@ fn main() -> ExitCode {
             platforms,
             lockfile,
             locked,
+            update,
             ruby_version,
             rubygems_version,
         }) => {
+            let unlock = match update {
+                None => locked::Unlock::Nothing,
+                Some(gems) if gems.is_empty() => locked::Unlock::All,
+                Some(gems) => locked::Unlock::Gems(gems),
+            };
             return resolve_command(
                 &deps,
                 &platforms,
                 lockfile,
                 locked.as_deref(),
+                &unlock,
                 ruby_version.as_deref(),
                 rubygems_version.as_deref(),
             );
@@ -789,6 +870,7 @@ fn resolve_command(
     platforms: &[String],
     lockfile: bool,
     locked: Option<&Path>,
+    unlock: &locked::Unlock,
     ruby_version: Option<&str>,
     rubygems_version: Option<&str>,
 ) -> ExitCode {
@@ -839,13 +921,14 @@ fn resolve_command(
         };
         let versions = gemfile.ruby_versions();
         let local_platform = request.platforms[0].clone();
-        let def = match locked::Definition::new(
+        let def = match locked::Definition::unlocking(
             &lock,
             &remote,
             &request.dependencies,
             versions.as_deref(),
             &local_platform,
             &request.platforms[1..],
+            unlock,
         ) {
             Ok(def) => def,
             Err(err) => {

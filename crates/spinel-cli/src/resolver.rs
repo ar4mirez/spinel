@@ -272,6 +272,10 @@ pub struct Locked {
     /// `@gems_to_unlock`: gems the lockfile does not hold, whose locked
     /// version is neither tried first nor its builds preferred.
     pub unlock: HashSet<String>,
+    /// `unlock: true`, as `bundle update` with no gems (`@unlocking_all`)
+    /// and its full update for the gems named (`unlocked_resolution_base`)
+    /// pass it: every gem is unlocked.
+    pub unlock_all: bool,
     /// Resolution platforms the lockfile does not have, on which locked
     /// builds are not preferred (`new_platforms`).
     pub new_platforms: Vec<GemPlatform>,
@@ -873,7 +877,7 @@ impl<'a> Provider<'a> {
     /// `Package#unlock?`.
     fn unlocked(&self, name: &PackageName) -> bool {
         match name {
-            PackageName::Gem(gem) => self.locked.unlock.contains(gem),
+            PackageName::Gem(gem) => self.locked.unlock_all || self.locked.unlock.contains(gem),
             _ => false,
         }
     }

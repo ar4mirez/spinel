@@ -380,7 +380,7 @@ fn a_gem_already_in_the_gemfile() {
     assert!(
         stderr(&out).contains(
             "You specified: rake (>= 0) and rake (= 13.4.2). If you want to update the gem \
-             version, run `bundle update rake`\n"
+             version, run `spinel update rake`\n"
         ),
         "{}",
         stderr(&out)

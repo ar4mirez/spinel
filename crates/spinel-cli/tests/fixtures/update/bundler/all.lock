@@ -1,0 +1,27 @@
+GEM
+  remote: @SOURCE@/
+  specs:
+    other (2.0.0)
+      shared (>= 1.0)
+    rake (2.0.0)
+      rake-dep (>= 1.0)
+      shared (>= 1.0)
+    rake-dep (2.0.0)
+    shared (2.0.0)
+
+PLATFORMS
+  ruby
+  x86_64-linux
+
+DEPENDENCIES
+  other
+  rake
+
+CHECKSUMS
+  other (2.0.0) sha256=5b51e9241a796493dc26d0f118bd1b4d08fd08f77416f1c9b47c5e8bc465608f
+  rake (2.0.0) sha256=3544e0b83d9cfc7130e1bbb3c743be878663947353140c937077ea35a88cd253
+  rake-dep (2.0.0) sha256=fe8430ccca7a4b5892fe2394600cfe7b30e6c5803c5ee14ad19a161caa6c64a7
+  shared (2.0.0) sha256=a63db724e634f6fca3f52c9f70ed516d00b8fafa57d867d25dd5234f2d90323a
+
+BUNDLED WITH
+  4.0.20

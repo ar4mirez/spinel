@@ -19,6 +19,14 @@
 //! lockfile's platforms, its checksums and its `RUBY VERSION` where they
 //! still hold; [`Definition::write_lock`] leaves the lockfile as it was
 //! when that differs from it only where `write_lock` looks past.
+//!
+//! An update (#87, `bundle update`, `bundle lock --update`) is an
+//! [`Unlock`] passed to [`Definition::unlocking`]: every gem, with the
+//! lockfile's specs no longer the base, or the gems named and every locked
+//! gem they reach (`@gems_to_unlock` from `SpecSet#for`), each named one
+//! then pinned to the version a resolution with everything unlocked gives
+//! it (`additional_base_requirements_to_force_updates`). The floors that
+//! keep a locked gem from going down stay either way.
 
 use std::collections::{HashMap, HashSet};
 
@@ -43,6 +51,23 @@ struct LockedBuild {
     kept: bool,
 }
 
+/// What an update unlocks: `Definition#initialize`'s `unlock`, as `bundle
+/// update` and `bundle lock --update` pass it.
+// ponytail: no `--conservative`, `--patch`, `--minor`, `--major`, `--strict`,
+// `--pre`, `--group`, `--source`, `--ruby` or `--bundler`. Upgrade: the
+// conservative unlock of `Definition#initialize` and the levels of
+// `GemVersionPromoter`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Unlock {
+    /// `bundle install`: nothing asked for.
+    #[default]
+    Nothing,
+    /// `unlock == true`: `bundle update` with no gems (`@unlocking_all`).
+    All,
+    /// `{gems: [...]}`: `bundle update GEM...` (`@explicit_unlocks`).
+    Gems(Vec<String>),
+}
+
 /// `Definition`, for a lockfile that exists and a Gemfile with one rubygems
 /// source.
 #[derive(Debug, Clone)]
@@ -64,6 +89,12 @@ pub struct Definition {
     /// is written (`@locked_checksums`).
     checksums: Option<Vec<Checksum>>,
     gems_to_unlock: Vec<String>,
+    /// `@unlocking_all`: every gem unlocked, the lockfile's specs no base.
+    unlocking_all: bool,
+    /// `@explicit_unlocks`: the gems an update names.
+    explicit_unlocks: Vec<String>,
+    /// `unlocking?`: an update, or the `ruby` directive unlocking Ruby.
+    unlocking: bool,
     changed_dependencies: Vec<String>,
     resolve_needed: bool,
     /// Why a resolution is needed, as `lockfile_changed_reason` names it.
@@ -133,14 +164,22 @@ impl Definition {
     /// from the rubygems source at `remote`, with a `ruby` directive of
     /// `ruby` (its version requirements) or none, on `local`; `add` are
     /// platforms to add, as `bundle lock --add-platform` adds them.
-    pub fn new(
+    /// `unlock` is what an update unlocks, [`Unlock::Nothing`] when none
+    /// was asked for.
+    pub fn unlocking(
         lock: &Lockfile,
         remote: &str,
         dependencies: &[GemfileDependency],
         ruby: Option<&[String]>,
         local: &GemPlatform,
         add: &[GemPlatform],
+        unlock: &Unlock,
     ) -> Result<Definition, LockfileError> {
+        let unlocking_all = *unlock == Unlock::All;
+        let explicit_unlocks = match unlock {
+            Unlock::Gems(gems) => gems.clone(),
+            _ => Vec::new(),
+        };
         // `converge_sources`: the lockfile's source is the Gemfile's when it
         // is its one `GEM` section, with the Gemfile's remote.
         // ponytail: one rubygems source, compared by its one remote. Upgrade
@@ -215,8 +254,29 @@ impl Definition {
             }
         }
 
+        // `@gems_to_unlock`: the gems named, and every locked gem they
+        // reach (`@locked_specs.for(eager_unlock, platforms)`), which with
+        // everything unlocked is none, as `@locked_specs` is then empty.
+        let mut gems_to_unlock: Vec<String> = Vec::new();
+        if !unlocking_all && !explicit_unlocks.is_empty() {
+            let specs: Vec<Spec> = locked.iter().map(|b| b.spec.clone()).collect();
+            let eager: Vec<GemfileDependency> = explicit_unlocks
+                .iter()
+                .map(|name| GemfileDependency {
+                    name: name.clone(),
+                    requirement: Requirement::default(),
+                    platforms: Vec::new(),
+                    force_ruby_platform: false,
+                })
+                .collect();
+            for spec in lockfile::spec_set_for(&specs, &eager, &platforms) {
+                if !gems_to_unlock.contains(&spec.name) {
+                    gems_to_unlock.push(spec.name);
+                }
+            }
+        }
+
         // `converge_dependencies`, for the dependencies relevant here.
-        let mut gems_to_unlock = Vec::new();
         let mut changed_dependencies = Vec::new();
         let mut missing_lockfile_dep = None;
         let generic_local = [gem_platform::generic(local)];
@@ -303,7 +363,10 @@ impl Definition {
             missing_deps: missing_deps.first().map(|s| s.name.clone()),
             invalid_deps: invalid_deps.first().map(|s| s.name.clone()),
         };
-        if bad_deps {
+        // With everything unlocked `check_lockfile` reads `@locked_specs`,
+        // which is then empty: nothing is dropped, and the floors still see
+        // every locked spec.
+        if bad_deps && !unlocking_all {
             locked.retain(|b| !bad.contains(&b.spec.full_name()));
         }
 
@@ -333,8 +396,14 @@ impl Definition {
             locked,
             checksums: lock.checksums.clone(),
             gems_to_unlock,
+            unlocking_all,
+            unlocking: unlocking_all || !explicit_unlocks.is_empty() || unlocking_ruby,
+            resolve_needed: unlocking_all
+                || !explicit_unlocks.is_empty()
+                || unlocking_ruby
+                || something_changed,
+            explicit_unlocks,
             changed_dependencies,
-            resolve_needed: unlocking_ruby || something_changed,
             reasons,
             deleted_deps,
             redundant_platform_gems,
@@ -413,7 +482,7 @@ impl Definition {
         // `change_reason`.
         let reason = if !self.resolve_needed {
             "some dependencies were deleted from your gemfile".to_owned()
-        } else if self.unlocking_ruby {
+        } else if self.unlocking {
             // `unlocking_reason`.
             if self.gems_to_unlock.is_empty() {
                 "bundler is unlocking ruby".to_owned()
@@ -482,7 +551,7 @@ impl Definition {
             message.push_str("\n\nYou have deleted from the Gemfile:\n");
             message.push_str(&deleted.join("\n"));
         }
-        if !self.unlocking_ruby {
+        if !self.unlocking {
             message.push_str(&format!(
                 "\n\nRun `spinel install` elsewhere and add the updated {lockfile_name} to version control.\n"
             ));
@@ -508,10 +577,12 @@ impl Definition {
         // `converge_specs`: the locked specs a Gemfile dependency they meet
         // reaches, through no unlocked gem, from a source still the
         // Gemfile's.
+        // With everything unlocked, `@locked_specs` is empty and so is the
+        // base.
         let mut converged: Vec<Spec> = Vec::new();
         let mut deps: Vec<GemfileDependency> = Vec::new();
         for build in &self.locked {
-            if self.gems_to_unlock.contains(&build.spec.name) {
+            if self.unlocking_all || self.gems_to_unlock.contains(&build.spec.name) {
                 continue;
             }
             // `LazySpecification#satisfies?`.
@@ -556,9 +627,42 @@ impl Definition {
             base,
             requirements,
             unlock: self.gems_to_unlock.iter().cloned().collect(),
+            unlock_all: self.unlocking_all,
             new_platforms,
             locked_specs: self.locked.iter().map(|b| b.spec.clone()).collect(),
         }
+    }
+
+    /// `additional_base_requirements_to_force_updates`: each gem an update
+    /// names is pinned to the version a resolution of `request` with every
+    /// gem unlocked and no base gives it (`new_resolver_for_full_update`),
+    /// when that resolution has it.
+    fn force_updates(
+        &self,
+        base: &mut Locked,
+        request: &Request,
+        index: &Index,
+    ) -> Result<(), Failure> {
+        if self.explicit_unlocks.is_empty() {
+            return Ok(());
+        }
+        let unlocked = Locked {
+            versions: base.versions.clone(),
+            unlock_all: true,
+            new_platforms: base.new_platforms.clone(),
+            locked_specs: base.locked_specs.clone(),
+            ..Locked::default()
+        };
+        let full_update = resolver::resolve_locked(request, index, &unlocked)?;
+        for name in &self.explicit_unlocks {
+            // `SpecSet#version_for`: the first spec's.
+            if let Some(spec) = full_update.iter().find(|s| &s.name == name) {
+                let pin = Requirement::new([format!("= {}", spec.version).as_str()])
+                    .expect("a version makes one");
+                base.requirements.insert(name.clone(), pin);
+            }
+        }
+        Ok(())
     }
 
     /// `Definition#start_resolution`: resolve `request` against `index` on
@@ -581,7 +685,8 @@ impl Definition {
         }
         let mut request = request.clone();
         request.platforms = self.platforms.clone();
-        let base = self.resolution_base(&request.dependencies);
+        let mut base = self.resolution_base(&request.dependencies);
+        self.force_updates(&mut base, &request, index)?;
         let result = resolver::resolve_locked(&request, index, &base)?;
         if let Some(most_specific) = self.most_specific_non_local.clone() {
             let generic_local = [gem_platform::generic(&self.local)];
@@ -628,10 +733,10 @@ impl Definition {
     }
 
     /// `Definition#write_lock` over `current`, the lockfile's text, when no
-    /// update was asked for: the lockfile [`Definition::lockfile`] writes,
-    /// unless nothing unlocks (the `ruby` directive unlocks the locked Ruby
-    /// when it comes, goes or no longer allows it: `@unlocking ||=
-    /// @unlocking_ruby`), no major version of Bundler is crossed and what the
+    /// update of Bundler was asked for: the lockfile [`Definition::lockfile`]
+    /// writes, unless nothing unlocks (an update does, and the `ruby`
+    /// directive unlocks the locked Ruby when it comes, goes or no longer
+    /// allows it: `@unlocking ||= @unlocking_ruby`), no major version of Bundler is crossed and what the
     /// lockfile's own Bundler would write differs from `current` only in
     /// `RUBY VERSION`, `BUNDLED WITH`, sections that Bundler did not have
     /// yet or sections Bundler does not know (`lockfiles_equal?` with
@@ -645,7 +750,7 @@ impl Definition {
         specs: &[Spec],
     ) -> String {
         let proposed = self.lockfile(remote, request, index, specs).write();
-        if self.unlocking_ruby {
+        if self.unlocking {
             return proposed;
         }
         let major = BUNDLER_VERSION.split('.').next().expect("a major version");

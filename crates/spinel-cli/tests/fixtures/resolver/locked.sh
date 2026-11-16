@@ -14,6 +14,9 @@
 # `bundle lock` writes `<n>.Gemfile.lock`, the source spelled `@SOURCE@`.
 # `index=lockfile` in `case.env` resolves against the Rails-sized snapshot in
 # `../lockfile/index/` instead of this one.
+# A later step with a `<n>.update` file is locked as an update (#87): `bundle
+# lock --update` with the gems the file names, separated by spaces, or with
+# none when it is empty, as `bundle update` unlocks them.
 # Bundler leaves a lockfile it would only rewrite with a new `BUNDLED WITH`
 # or `RUBY VERSION` alone, so a step that changes nothing records the same
 # lockfile again. Everything resolves against a snapshot served on
@@ -66,6 +69,10 @@ for dir in "$here"/locked/*/; do
       for platform in "${platform_list[@]:1}"; do
         extra+=(--add-platform "$platform")
       done
+    fi
+    if [[ -f "$dir/$step.update" ]]; then
+      read -r -a gems <"$dir/$step.update" || true
+      extra+=(--update "${gems[@]}")
     fi
     (
       cd "$work/$name"

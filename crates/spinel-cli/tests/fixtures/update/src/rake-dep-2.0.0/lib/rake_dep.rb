@@ -1,0 +1,1 @@
+RAKE_DEP_VERSION = "2.0.0"

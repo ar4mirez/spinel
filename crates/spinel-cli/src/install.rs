@@ -273,9 +273,12 @@ pub(crate) struct Resolved {
 /// One evaluated Gemfile on its way to the GEM_HOME: where its project and
 /// lockfile are, the resolver's request, and the index client.
 pub(crate) struct Session {
-    /// The command whose messages these are: `install`, `add` or `remove`.
+    /// The command whose messages these are: `install`, `add`, `remove` or
+    /// `update`.
     command: &'static str,
     frozen: bool,
+    /// What `spinel update` unlocks; nothing for the others.
+    unlock: locked::Unlock,
     gemfile_path: PathBuf,
     root: PathBuf,
     lock_path: PathBuf,
@@ -334,6 +337,7 @@ impl Session {
         Ok(Session {
             command,
             frozen,
+            unlock: locked::Unlock::Nothing,
             gemfile_path,
             root,
             lock_path,
@@ -354,6 +358,30 @@ impl Session {
     /// The Gemfile this session read, as the evaluator found it.
     pub(crate) fn gemfile_path(&self) -> &Path {
         &self.gemfile_path
+    }
+
+    /// Resolve as an update that unlocks `unlock` (`spinel update`, #87).
+    pub(crate) fn set_unlock(&mut self, unlock: locked::Unlock) {
+        self.unlock = unlock;
+    }
+
+    /// The lockfile as it was on disk when the session began, read, or
+    /// `None` when there is none.
+    pub(crate) fn current_lockfile(&self) -> Result<Option<Lockfile>, Stop> {
+        let Some(text) = &self.current else {
+            return Ok(None);
+        };
+        Lockfile::parse(text, &self.lock_name, &self.prepared.local)
+            .map(Some)
+            .map_err(|err| {
+                eprintln!("{err}");
+                Stop(ExitCode::FAILURE)
+            })
+    }
+
+    /// The lockfile a resolution writes, read back.
+    pub(crate) fn written_lockfile(&self, resolved: &Resolved) -> Result<Lockfile, Stop> {
+        self.read_written(&resolved.written).map(|(lock, _)| lock)
     }
 
     fn read_index(&self) -> Result<resolver::Index, Stop> {
@@ -397,13 +425,14 @@ impl Session {
                 eprintln!("{err}");
                 Stop(ExitCode::FAILURE)
             })?;
-        let mut definition = locked::Definition::new(
+        let mut definition = locked::Definition::unlocking(
             &lock,
             &self.prepared.remote,
             &self.prepared.request.dependencies,
             self.ruby.as_deref(),
             &local,
             &[],
+            &self.unlock,
         )
         .map_err(|err| {
             eprintln!("{err}");

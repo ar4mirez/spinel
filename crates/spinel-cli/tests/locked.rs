@@ -110,13 +110,15 @@ fn optional_setting(case: &Path, key: &str) -> Option<String> {
 
 /// Evaluate the Gemfile in `dir` and resolve it with `spinel resolve
 /// --lockfile`, for `platforms` (the local one first) and the case's Ruby,
-/// with `--locked` the lockfile at `locked` when there is one.
+/// with `--locked` the lockfile at `locked` when there is one, updating the
+/// gems `update` names (`--update`, every gem when it names none).
 fn resolve(
     dir: &Path,
     case: &Path,
     source: &str,
     platforms: &[&str],
     locked: Option<&Path>,
+    update: Option<&[String]>,
 ) -> String {
     let shim = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../shims/gemfile_eval.rb");
     let eval = Command::new(SPINEL)
@@ -136,6 +138,15 @@ fn resolve(
     }
     if let Some(locked) = locked {
         cmd.arg("--locked").arg(locked);
+    }
+    match update {
+        None => {}
+        Some([]) => {
+            cmd.arg("--update");
+        }
+        Some(gems) => {
+            cmd.arg(format!("--update={}", gems.join(",")));
+        }
     }
     cmd.arg("--ruby-version")
         .arg(setting(case, "ruby"))
@@ -196,14 +207,25 @@ impl Step<'_> {
         let platforms = setting(&dir, "platforms");
         let platforms: Vec<&str> = platforms.split_whitespace().collect();
         if self.step == 1 {
-            return resolve(&work, &dir, self.source, &platforms, None);
+            return resolve(&work, &dir, self.source, &platforms, None, None);
         }
         let before = fs::read_to_string(dir.join(format!("{}.Gemfile.lock", self.step - 1)))
             .unwrap()
             .replace("@SOURCE@", self.source);
         let lock = work.join("Gemfile.lock");
         fs::write(&lock, before).unwrap();
-        resolve(&work, &dir, self.source, &platforms[..1], Some(&lock))
+        let update: Option<Vec<String>> =
+            fs::read_to_string(dir.join(format!("{}.update", self.step)))
+                .ok()
+                .map(|gems| gems.split_whitespace().map(str::to_owned).collect());
+        resolve(
+            &work,
+            &dir,
+            self.source,
+            &platforms[..1],
+            Some(&lock),
+            update.as_deref(),
+        )
     }
 
     fn bundlers(&self) -> String {
@@ -296,7 +318,7 @@ fn a_lockfile_from_an_earlier_bundler_4_comes_back_unchanged() {
     assert!(before.contains("BUNDLED WITH\n  4.0.10\n") && before.contains("bundler (4.0.10)"));
     let lock = work.join("Gemfile.lock");
     fs::write(&lock, before.replace("@SOURCE@", &source)).unwrap();
-    let ours = resolve(&work, &dir, &source, &["x86_64-linux"], Some(&lock));
+    let ours = resolve(&work, &dir, &source, &["x86_64-linux"], Some(&lock), None);
     assert_eq!(ours, before);
     assert_eq!(requests.load(Ordering::SeqCst), 0, "the index was read");
 }
@@ -334,8 +356,10 @@ fn keeps_each_platforms_locked_builds() {
 /// `rails new`'s Gemfile on its seven platforms: Rails 8.1.4, nokogiri
 /// 1.19.6 (six native builds), Puma 8.0.3 and Rack 3.2.7 locked under pins,
 /// kept when the pins are taken out; the same Gemfile again writes the same
-/// lockfile; rubocop-minitest added moves nothing else; and Puma's
-/// requirement raised past its locked version moves Puma alone.
+/// lockfile; rubocop-minitest added moves nothing else; Puma's
+/// requirement raised past its locked version moves Puma alone; `--update
+/// nokogiri` moves its six native builds to 1.19.7; and `--update` moves
+/// Rails and the rest (#87).
 #[test]
 fn rails_lockfile_keeps_its_versions_as_bundler_does() {
     replays_as_bundler_does("rails");
@@ -373,7 +397,7 @@ fn every_bundler_lockfile_comes_back_unchanged() {
         fs::write(&lock, bundlers.replace("@SOURCE@", &source)).unwrap();
         let platforms = setting(&case, "platforms");
         let local = platforms.split_whitespace().next().unwrap();
-        let ours = resolve(&work, &case, &source, &[local], Some(&lock));
+        let ours = resolve(&work, &case, &source, &[local], Some(&lock), None);
         assert_eq!(ours, bundlers, "{set}/{name}: the lockfile changed");
         assert_eq!(
             requests.load(Ordering::SeqCst),
@@ -399,4 +423,31 @@ fn an_exact_pin_on_a_newly_named_gem_gives_way_as_bundler_does() {
 #[test]
 fn ruby_version_is_kept_while_the_directive_allows_it() {
     replays_as_bundler_does("ruby_directive");
+}
+
+/// Updates (#87), as `bundle lock --update` makes them: Sinatra, rackup,
+/// rake, Rack and tilt locked old under pins, the pins taken out (nothing
+/// moves), then `--update rake` moves rake alone while newer versions of
+/// every other gem exist, `--update rackup` moves rackup and the Rack it
+/// depends on (WEBrick, which rackup 2.3 no longer needs, goes) and leaves
+/// Sinatra and tilt, and `--update` with no gems moves everything to the
+/// newest the Gemfile allows.
+#[test]
+fn updates_move_what_bundler_moves() {
+    replays_as_bundler_does("update");
+    let dir = fixtures().join("locked/update");
+    let specs_of =
+        |step: usize| specs(&fs::read_to_string(dir.join(format!("{step}.Gemfile.lock"))).unwrap());
+    let moved = |from: usize, to: usize| {
+        let (before, after) = (specs_of(from), specs_of(to));
+        let mut moved: Vec<String> = after.into_iter().filter(|s| !before.contains(s)).collect();
+        moved.sort();
+        moved
+    };
+    assert_eq!(moved(2, 3), ["rake (13.4.2)"]);
+    assert_eq!(moved(3, 4), ["rack (3.2.8)", "rackup (2.3.1)"]);
+    assert_eq!(
+        moved(4, 5),
+        ["rack-protection (4.2.1)", "sinatra (4.2.1)", "tilt (2.9.0)"]
+    );
 }
