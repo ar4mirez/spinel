@@ -388,6 +388,13 @@ fn an_unknown_gem_is_bundlers_error_and_writes_nothing() {
         failed(&out, 7, "spinel update rake rakedep"),
         "Could not find gem 'rakedep'.\nDid you mean 'rake-dep'?\n"
     );
+    // Every gem missing is named, once each, in the order given.
+    let out = sandbox.update(&["nope", "rake", "rakedep", "nope"]);
+    assert_eq!(
+        failed(&out, 7, "spinel update nope rake rakedep nope"),
+        "Could not find gem 'nope'.\n\
+         Could not find gem 'rakedep'.\nDid you mean 'rake-dep'?\n"
+    );
     assert_eq!(sandbox.lock_bytes(), before);
     assert_eq!(
         sandbox.linked(),

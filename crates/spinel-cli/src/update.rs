@@ -67,8 +67,18 @@ fn update(gems: &[String], all: bool, unsupported: &Unsupported) -> Result<(), S
         };
         // `ensure_all_gems_in_lockfile!`.
         let locked = locked_names(lock);
-        if let Some(missing) = gems.iter().find(|g| !locked.contains(g)) {
-            eprintln!("{}", gem_not_found_message(missing, &locked));
+        let mut missing: Vec<&String> = Vec::new();
+        for name in gems.iter().filter(|g| !locked.contains(g)) {
+            if !missing.contains(&name) {
+                missing.push(name);
+            }
+        }
+        if !missing.is_empty() {
+            let messages: Vec<String> = missing
+                .iter()
+                .map(|name| gem_not_found_message(name, &locked))
+                .collect();
+            eprintln!("{}", messages.join("\n"));
             return Err(Stop(ExitCode::from(EXIT_GEM_NOT_FOUND)));
         }
         Unlock::Gems(gems.to_vec())
