@@ -20,7 +20,8 @@ fn fixtures() -> PathBuf {
 }
 
 /// The index and the gems, on a port of its own. A gem the install
-/// snapshot does not hold (`json`) is listed by the index and then 404s.
+/// snapshot does not hold (`ruby2_keywords`) is listed by the index and then
+/// 404s.
 fn start_server() -> String {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let url = format!("http://{}", listener.local_addr().unwrap());
@@ -333,9 +334,9 @@ fn a_failed_add_writes_nothing() {
     unchanged(&out, "an unknown gem");
     assert!(stderr(&out).contains("no-such-gem"), "{}", stderr(&out));
     // Resolved, then its `.gem` cannot be fetched.
-    let out = sandbox.add(&["json"]);
+    let out = sandbox.add(&["ruby2_keywords"]);
     unchanged(&out, "a gem that does not fetch");
-    assert!(stderr(&out).contains("json-"), "{}", stderr(&out));
+    assert!(stderr(&out).contains("ruby2_keywords-"), "{}", stderr(&out));
     // A git repository that is not there (tests/git_path.rs adds one that
     // is).
     let missing = sandbox.root.join("no-such-repo");

@@ -30,9 +30,10 @@
 //! Two differences from `gem install`, both because the store already holds
 //! what they would: `cache/` is left empty, since the `.gem` is not kept once
 //! unpacked, and a gem's own files are shared through the symlink rather than
-//! copied. And extensions are not built (#83 substitutes the built-in gems,
-//! phase 5 the native ones): a gem that has some is linked with a warning,
-//! and RubyGems will say its extensions are not built.
+//! copied. And extensions are not built (`spinel install` links the built-in
+//! gems in place of theirs, #83, as a [`LocalLink`]; phase 5 substitutes the
+//! native ones): a gem that has some is linked with a warning, and RubyGems
+//! will say its extensions are not built.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;

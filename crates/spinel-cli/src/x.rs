@@ -214,6 +214,10 @@ fn prepare(request: &Request) -> Result<(PathBuf, PathBuf), Stop> {
         .find(|r| r.name == gem)
         .ok_or_else(|| Stop::failure(format!("the resolution has no {gem}")))?;
     let gem_home = absolute(&home.join("x").join(directory_name(root, &wants)));
+    // ponytail: a built-in gem is fetched and linked as the gem itself, so
+    // one with an `ext/` (`json`, which `rubocop` needs) is not activated.
+    // Upgrade: substitute the built-ins here as `spinel install` does
+    // (`crate::builtin_gem`, #83).
     let report = gem_home::link(&gem_home, &stored).map_err(Stop::failure)?;
     let choice = choose_executable(&report.executables, gem, executable);
     // What this run installed, uv-style, on standard error so the
