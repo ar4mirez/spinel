@@ -229,8 +229,31 @@ fn prepare(request: &Request) -> Result<(PathBuf, PathBuf), Stop> {
         }
     }
 
-    let chosen = choose_executable(&report.executables, gem, executable).map_err(Stop::failure)?;
-    Ok((gem_home.clone(), gem_home.join("bin").join(chosen)))
+    let (owner, chosen) =
+        choose_executable(&report.executables, gem, executable).map_err(Stop::failure)?;
+    let stub = stub_for(&gem_home, &owner, &chosen).map_err(Stop::failure)?;
+    Ok((gem_home, stub))
+}
+
+/// The stub that runs `owner`'s `exe`: the one in `bin/` when it is
+/// `owner`'s, as it is unless another gem resolved has an executable of the
+/// same name and `link` gave `bin/` to that one. Then `owner`'s own stub,
+/// written once to `x-bin/<owner>/<exe>`, where no link looks, so the
+/// command's `$0` is still named like the executable.
+fn stub_for(gem_home: &Path, owner: &str, exe: &str) -> Result<PathBuf, String> {
+    let text = gem_home::app_script_text(spinel_vm::ENGINE, owner, exe);
+    let shared = gem_home.join("bin").join(exe);
+    if std::fs::read(&shared).is_ok_and(|t| t == text.as_bytes()) {
+        return Ok(shared);
+    }
+    let own = gem_home.join("x-bin").join(owner).join(exe);
+    if !std::fs::read(&own).is_ok_and(|t| t == text.as_bytes()) {
+        let dir = own.parent().unwrap_or(gem_home);
+        std::fs::create_dir_all(dir)
+            .and_then(|()| install::write_atomically(&own, text.as_bytes()))
+            .map_err(|err| format!("{}: {err}", own.display()))?;
+    }
+    Ok(own)
 }
 
 /// `Gem::Requirement#to_s`: `>= 0` when none was given.
@@ -273,12 +296,13 @@ fn version_of(spec: &Resolved) -> String {
 /// executable named `executable`, narrowed to the one named `executable`
 /// too when it is among them. With none, the gem named `executable` (the
 /// gem asked for, unless `--gem` named another) and its only executable.
-/// Its messages are `gem exec`'s.
+/// Returns the gem the executable is chosen from, and the executable. Its
+/// messages are `gem exec`'s.
 fn choose_executable(
     executables: &[(String, Vec<String>)],
     gem: &str,
     executable: &str,
-) -> Result<String, String> {
+) -> Result<(String, String), String> {
     let mut containing: Vec<&str> = executables
         .iter()
         .filter(|(_, exes)| exes.iter().any(|e| e == executable))
@@ -288,7 +312,7 @@ fn choose_executable(
         containing.retain(|name| *name == executable);
     }
     match containing.as_slice() {
-        [_] => Ok(executable.to_owned()),
+        [owner] => Ok(((*owner).to_owned(), executable.to_owned())),
         [] => {
             let own = executables
                 .iter()
@@ -299,7 +323,7 @@ fn choose_executable(
                 [] => Err(format!(
                     "failed to load executable `{executable}`, are you sure the gem `{gem}` contains it?"
                 )),
-                [only] => Ok(only.clone()),
+                [only] => Ok((executable.to_owned(), only.clone())),
                 several => {
                     let mut options = several.to_vec();
                     options.sort();
@@ -394,23 +418,32 @@ mod tests {
         let set = exes(&[("rubocop", &["rubocop"]), ("parser", &["ruby-parse"])]);
         assert_eq!(
             choose_executable(&set, "rubocop", "rubocop"),
-            Ok("rubocop".into())
+            Ok(("rubocop".into(), "rubocop".into()))
         );
         // From a dependency: `gem exec rspec` runs rspec-core's.
         let set = exes(&[("rspec", &[]), ("rspec-core", &["rspec"])]);
         assert_eq!(
             choose_executable(&set, "rspec", "rspec"),
-            Ok("rspec".into())
+            Ok(("rspec-core".into(), "rspec".into()))
         );
         // The gem's only executable, named otherwise.
         let set = exes(&[("haml_lint", &["haml-lint"])]);
         assert_eq!(
             choose_executable(&set, "haml_lint", "haml_lint"),
-            Ok("haml-lint".into())
+            Ok(("haml_lint".into(), "haml-lint".into()))
         );
         // The gem of the same name wins over another that has it too.
         let set = exes(&[("a", &["a"]), ("b", &["a"])]);
-        assert_eq!(choose_executable(&set, "a", "a"), Ok("a".into()));
+        assert_eq!(
+            choose_executable(&set, "a", "a"),
+            Ok(("a".into(), "a".into()))
+        );
+        // `--gem` names the gem the executable comes from.
+        let set = exes(&[("pair", &["pair-a", "pair-b"]), ("other", &["pair-a"])]);
+        assert_eq!(
+            choose_executable(&set, "pair", "pair-b"),
+            Ok(("pair".into(), "pair-b".into()))
+        );
         // Several, and none named like the gem.
         let set = exes(&[("pair", &["pair-b", "pair-a"])]);
         let err = choose_executable(&set, "pair", "pair").unwrap_err();

@@ -36,7 +36,9 @@ struct Server {
 }
 
 /// Each fixture gem: name, version, its `/info` dependencies field.
-const GEMS: [(&str, &str, &str); 4] = [
+const GEMS: [(&str, &str, &str); 6] = [
+    ("clash", "1.0.0", "clash-dep:~> 1.0"),
+    ("clash-dep", "1.0.0", ""),
     ("greet", "1.0.0", ""),
     ("greet", "2.0.0", "shout:~> 1.0"),
     ("pair", "1.0.0", ""),
@@ -392,4 +394,37 @@ fn the_executable_is_chosen_as_gem_exec_chooses_it() {
         text(&out.stderr),
         "spinel: x: failed to load executable `pair-c`, are you sure the gem `pair` contains it?\n"
     );
+}
+
+#[test]
+fn the_chosen_gem_runs_when_a_dependency_has_an_executable_of_the_same_name() {
+    let sandbox = Sandbox::new("clash");
+    // `clash-dep` sorts after `clash`, so `bin/clash` is its stub; the gem
+    // named `clash` is the one `gem exec` chooses, and the one run.
+    let out = sandbox.x(&["clash"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(text(&out.stdout), "clash from clash\nprogram clash\n");
+    sandbox.server.take_gem_requests();
+    // The same again, from the GEM_HOME as it is, writing nothing.
+    let dirs = sandbox.x_dirs();
+    let own = sandbox
+        .home()
+        .join("x")
+        .join(&dirs[0])
+        .join("x-bin/clash/clash");
+    let modified = fs::metadata(&own).unwrap().modified().unwrap();
+    let again = sandbox.x(&["clash"]);
+    assert!(again.status.success(), "{}", text(&again.stderr));
+    assert_eq!(text(&again.stdout), "clash from clash\nprogram clash\n");
+    assert!(
+        !text(&again.stderr).contains("+ "),
+        "{}",
+        text(&again.stderr)
+    );
+    assert!(sandbox.server.take_gem_requests().is_empty());
+    assert_eq!(fs::metadata(&own).unwrap().modified().unwrap(), modified);
+    // `--gem` runs the dependency's.
+    let out = sandbox.x(&["--gem", "clash-dep", "clash"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(text(&out.stdout), "clash from clash-dep\n");
 }
