@@ -229,368 +229,537 @@ pub(crate) async fn read_index(
     Ok(index)
 }
 
-/// Why `spinel install` stopped: the exit status, after what to say was
-/// printed.
-struct Stop(ExitCode);
+/// Why `spinel install` (or `spinel add`) stopped: the exit status, after
+/// what to say was printed.
+pub(crate) struct Stop(pub ExitCode);
 
 impl Stop {
-    fn failure(message: impl std::fmt::Display) -> Stop {
-        eprintln!("spinel: install: {message}");
+    /// `spinel: <command>: <message>`, exit 1.
+    pub(crate) fn failure(command: &str, message: impl std::fmt::Display) -> Stop {
+        eprintln!("spinel: {command}: {message}");
         Stop(ExitCode::FAILURE)
     }
 }
 
 /// `spinel install [--frozen]`.
 pub fn run(frozen: bool) -> ExitCode {
-    match install(frozen) {
+    let install = || {
+        let gemfile = evaluate_gemfile("install", None, None)?;
+        let mut session = Session::new("install", &gemfile, frozen)?;
+        let resolved = session.resolve()?;
+        session.install(&gemfile, resolved, None)
+    };
+    match install() {
         Ok(()) => ExitCode::SUCCESS,
         Err(Stop(code)) => code,
     }
 }
 
-fn install(frozen: bool) -> Result<(), Stop> {
-    let gemfile = evaluate_gemfile()?;
-    let gemfile_path = gemfile
-        .gemfiles
-        .first()
-        .map(PathBuf::from)
-        .ok_or_else(|| Stop::failure("the Gemfile evaluator named no Gemfile"))?;
-    let root = gemfile_path
-        .parent()
-        .map(Path::to_owned)
-        .unwrap_or_else(|| PathBuf::from("."));
-    let lock_path = lockfile_path(&gemfile_path);
-    let lock_name = relative_to_cwd(&lock_path);
-    let mut prepared = prepare(&gemfile, &[], None, None).map_err(|message| {
-        eprintln!("spinel: install: {message}");
-        Stop(ExitCode::from(2))
-    })?;
-    let local = GemPlatform::Platform(prepared.local.clone());
+/// A new Gemfile `spinel add` writes once everything it installs is in
+/// place, just before the lockfile, and puts back if the lockfile cannot be
+/// written.
+pub(crate) struct GemfileWrite<'a> {
+    pub old: &'a [u8],
+    pub new: &'a [u8],
+}
 
-    let current = match std::fs::read_to_string(&lock_path) {
-        Ok(text) => Some(text),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
-        Err(err) => return Err(Stop::failure(format!("{lock_name}: {err}"))),
-    };
-    if frozen && current.is_none() {
-        eprintln!("Frozen mode is set, but there's no lockfile");
-        return Err(Stop(ExitCode::from(EXIT_FROZEN)));
+/// What a resolution leaves: the lockfile to write, and the index when it
+/// was read.
+pub(crate) struct Resolved {
+    pub written: String,
+    index: Option<resolver::Index>,
+}
+
+/// One evaluated Gemfile on its way to the GEM_HOME: where its project and
+/// lockfile are, the resolver's request, and the index client.
+pub(crate) struct Session {
+    /// The command whose messages these are: `install` or `add`.
+    command: &'static str,
+    frozen: bool,
+    gemfile_path: PathBuf,
+    root: PathBuf,
+    lock_path: PathBuf,
+    lock_name: String,
+    prepared: Prepared,
+    ruby: Option<Vec<String>>,
+    /// The lockfile as it is on disk, if there is one.
+    current: Option<String>,
+    home: PathBuf,
+    client: compact_index::Client,
+    runtime: tokio::runtime::Runtime,
+}
+
+impl Session {
+    pub(crate) fn new(
+        command: &'static str,
+        gemfile: &GemfileJson,
+        frozen: bool,
+    ) -> Result<Session, Stop> {
+        let fail = |message: String| Stop::failure(command, message);
+        let gemfile_path = gemfile
+            .gemfiles
+            .first()
+            .map(PathBuf::from)
+            .ok_or_else(|| fail("the Gemfile evaluator named no Gemfile".to_owned()))?;
+        let root = gemfile_path
+            .parent()
+            .map(Path::to_owned)
+            .unwrap_or_else(|| PathBuf::from("."));
+        let lock_path = lockfile_path(&gemfile_path);
+        let lock_name = relative_to_cwd(&lock_path);
+        let prepared = prepare(gemfile, &[], None, None).map_err(|message| {
+            eprintln!("spinel: {command}: {message}");
+            Stop(ExitCode::from(2))
+        })?;
+
+        let current = match std::fs::read_to_string(&lock_path) {
+            Ok(text) => Some(text),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+            Err(err) => return Err(fail(format!("{lock_name}: {err}"))),
+        };
+        if frozen && current.is_none() {
+            eprintln!("Frozen mode is set, but there's no lockfile");
+            return Err(Stop(ExitCode::from(EXIT_FROZEN)));
+        }
+
+        let Some(home) = home::spinel_home() else {
+            return Err(fail("neither SPINEL_HOME nor HOME is set".to_owned()));
+        };
+        let client = compact_index::Client::new(&prepared.remote, &home)
+            .map_err(|err| fail(err.to_string()))?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|err| fail(format!("cannot start the async runtime: {err}")))?;
+        Ok(Session {
+            command,
+            frozen,
+            gemfile_path,
+            root,
+            lock_path,
+            lock_name,
+            prepared,
+            ruby: gemfile.ruby_versions(),
+            current,
+            home,
+            client,
+            runtime,
+        })
     }
 
-    let Some(home) = home::spinel_home() else {
-        return Err(Stop::failure("neither SPINEL_HOME nor HOME is set"));
-    };
-    let client = compact_index::Client::new(&prepared.remote, &home).map_err(Stop::failure)?;
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|err| Stop::failure(format!("cannot start the async runtime: {err}")))?;
-    let roots: Vec<String> = prepared
-        .request
-        .dependencies
-        .iter()
-        .map(|d| d.name.clone())
-        .collect();
-    let read = |roots: Vec<String>| {
-        runtime
-            .block_on(read_index(&client, roots, &prepared.local))
-            .map_err(Stop::failure)
-    };
+    fn fail(&self, message: impl std::fmt::Display) -> Stop {
+        Stop::failure(self.command, message)
+    }
 
-    // Resolve, keeping to the lockfile when there is one (#79), and write
-    // the lockfile Bundler would.
-    let ruby = gemfile.ruby_versions();
-    let (written, index) = match &current {
-        Some(text) => {
-            let lock = Lockfile::parse(text, &lock_name, &prepared.local).map_err(|err| {
-                eprintln!("{err}");
-                Stop(ExitCode::FAILURE)
-            })?;
-            let mut definition = locked::Definition::new(
-                &lock,
-                &prepared.remote,
-                &prepared.request.dependencies,
-                ruby.as_deref(),
-                &local,
-                &[],
-            )
-            .map_err(|err| {
-                eprintln!("{err}");
-                Stop(ExitCode::FAILURE)
-            })?;
-            if frozen
-                && let Some(message) =
-                    definition.frozen_summary(&lock, &prepared.request.dependencies, &lock_name)
-            {
-                eprint!("{message}");
-                if !message.ends_with('\n') {
-                    eprintln!();
-                }
-                return Err(Stop(ExitCode::from(EXIT_FROZEN)));
-            }
-            prepared.request.platforms = definition.platforms().to_vec();
-            if definition.resolve_needed() {
-                let index = read(roots)?;
-                let specs = definition
-                    .start_resolution(&prepared.request, &index)
-                    .map_err(|failure| {
-                        eprintln!("{}", failure.to_string().trim_end());
-                        Stop(ExitCode::FAILURE)
-                    })?;
-                let written = definition.write_lock(
-                    text,
-                    &prepared.remote,
-                    &prepared.request,
-                    Some(&index),
-                    &specs,
-                );
-                (written, Some(index))
-            } else {
-                let specs = definition.unchanged(&prepared.request.dependencies);
-                let written =
-                    definition.write_lock(text, &prepared.remote, &prepared.request, None, &specs);
-                (written, None)
-            }
-        }
-        None => {
-            let index = read(roots)?;
-            let resolved = resolver::resolve(&prepared.request, &index).map_err(|failure| {
-                eprintln!("{}", failure.to_string().trim_end());
-                Stop(ExitCode::FAILURE)
-            })?;
+    /// The Gemfile this session read, as the evaluator found it.
+    pub(crate) fn gemfile_path(&self) -> &Path {
+        &self.gemfile_path
+    }
+
+    fn read_index(&self) -> Result<resolver::Index, Stop> {
+        let roots: Vec<String> = self
+            .prepared
+            .request
+            .dependencies
+            .iter()
+            .map(|d| d.name.clone())
+            .collect();
+        self.runtime
+            .block_on(read_index(&self.client, roots, &self.prepared.local))
+            .map_err(|err| self.fail(err))
+    }
+
+    /// Resolve, keeping to the lockfile when there is one (#79), into the
+    /// lockfile Bundler would write. Nothing is written.
+    pub(crate) fn resolve(&mut self) -> Result<Resolved, Stop> {
+        let local = GemPlatform::Platform(self.prepared.local.clone());
+        let Some(text) = self.current.clone() else {
+            let index = self.read_index()?;
+            let resolved =
+                resolver::resolve(&self.prepared.request, &index).map_err(|failure| {
+                    eprintln!("{}", failure.to_string().trim_end());
+                    Stop(ExitCode::FAILURE)
+                })?;
             let lock = Lockfile::from_resolution(
-                &prepared.remote,
-                &prepared.request,
+                &self.prepared.remote,
+                &self.prepared.request,
                 &index,
                 &resolved,
-                ruby.is_some(),
+                self.ruby.is_some(),
             );
-            (lock.write(), Some(index))
-        }
-    };
-
-    // What this machine installs: the lockfile's builds for the local
-    // platform, from the dependencies Bundler installs here.
-    let lock = Lockfile::parse(&written, &lock_name, &prepared.local)
-        .map_err(|err| Stop::failure(format!("the lockfile written does not read back: {err}")))?;
-    let specs: Vec<Spec> = lock
-        .sources
-        .iter()
-        .filter(|s| matches!(s.kind, SourceKind::Gem { .. }))
-        .flat_map(|s| s.specs.iter().map(locked::locked_spec))
-        .collect();
-    let wanted = installed_dependencies(&gemfile, &prepared.request.dependencies, &local);
-    let mut to_install = lockfile::spec_set_for(&specs, &wanted, std::slice::from_ref(&local));
-    to_install.sort_by_cached_key(Spec::full_name);
-
-    // Each one's checksum: the lockfile's, else the index's.
-    let mut sums: HashMap<String, String> = lock
-        .checksums
-        .iter()
-        .flatten()
-        .filter_map(|c| {
-            let sha = c.checksums.iter().find(|(algo, _)| algo == "sha256")?;
-            Some((c.lock_name.clone(), sha.1.clone()))
-        })
-        .collect();
-    let lock_name_of = |s: &Spec| lockfile::lock_name(&s.name, &s.version, &s.platform);
-    if let Some(index) = &index {
-        for spec in &to_install {
-            let found = index.get(&spec.name).and_then(|builds| {
-                builds
-                    .iter()
-                    .find(|b| b.version == spec.version && b.platform == spec.platform)
+            return Ok(Resolved {
+                written: lock.write(),
+                index: Some(index),
             });
-            if let Some(sha) = found.and_then(|b| b.checksum.clone()) {
-                sums.entry(lock_name_of(spec)).or_insert(sha);
+        };
+        let lock =
+            Lockfile::parse(&text, &self.lock_name, &self.prepared.local).map_err(|err| {
+                eprintln!("{err}");
+                Stop(ExitCode::FAILURE)
+            })?;
+        let mut definition = locked::Definition::new(
+            &lock,
+            &self.prepared.remote,
+            &self.prepared.request.dependencies,
+            self.ruby.as_deref(),
+            &local,
+            &[],
+        )
+        .map_err(|err| {
+            eprintln!("{err}");
+            Stop(ExitCode::FAILURE)
+        })?;
+        if self.frozen
+            && let Some(message) = definition.frozen_summary(
+                &lock,
+                &self.prepared.request.dependencies,
+                &self.lock_name,
+            )
+        {
+            eprint!("{message}");
+            if !message.ends_with('\n') {
+                eprintln!();
             }
+            return Err(Stop(ExitCode::from(EXIT_FROZEN)));
+        }
+        self.prepared.request.platforms = definition.platforms().to_vec();
+        if definition.resolve_needed() {
+            let index = self.read_index()?;
+            let specs = definition
+                .start_resolution(&self.prepared.request, &index)
+                .map_err(|failure| {
+                    eprintln!("{}", failure.to_string().trim_end());
+                    Stop(ExitCode::FAILURE)
+                })?;
+            let written = definition.write_lock(
+                &text,
+                &self.prepared.remote,
+                &self.prepared.request,
+                Some(&index),
+                &specs,
+            );
+            Ok(Resolved {
+                written,
+                index: Some(index),
+            })
+        } else {
+            let specs = definition.unchanged(&self.prepared.request.dependencies);
+            let written = definition.write_lock(
+                &text,
+                &self.prepared.remote,
+                &self.prepared.request,
+                None,
+                &specs,
+            );
+            Ok(Resolved {
+                written,
+                index: None,
+            })
         }
     }
-    let unsummed: Vec<String> = to_install
-        .iter()
-        .filter(|s| !sums.contains_key(&lock_name_of(s)))
-        .map(|s| s.name.clone())
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
 
-    let store = gem_store::Store::new(&home);
-    let mut wants = Vec::new();
-    let mut ok = true;
-    runtime.block_on(async {
-        if !unsummed.is_empty() {
-            // A lockfile without `CHECKSUMS`, and nothing resolved: the
-            // index's `/info` lines have them.
-            let fetched = match client.versions().await {
-                Ok(_) => client.info(&unsummed).await.map(|_| ()),
-                Err(err) => Err(err),
-            };
-            if let Err(err) = fetched {
-                eprintln!("spinel: install: {err}");
-                ok = false;
-                return;
+    /// The specs a resolution locks from the rubygems source, every
+    /// platform's build.
+    pub(crate) fn locked_specs(&self, resolved: &Resolved) -> Result<Vec<Spec>, Stop> {
+        self.read_written(&resolved.written).map(|(_, specs)| specs)
+    }
+
+    /// The lockfile a resolution writes, read back, and its rubygems
+    /// source's specs.
+    fn read_written(&self, written: &str) -> Result<(Lockfile, Vec<Spec>), Stop> {
+        let lock = Lockfile::parse(written, &self.lock_name, &self.prepared.local)
+            .map_err(|err| self.fail(format!("the lockfile written does not read back: {err}")))?;
+        let specs = lock
+            .sources
+            .iter()
+            .filter(|s| matches!(s.kind, SourceKind::Gem { .. }))
+            .flat_map(|s| s.specs.iter().map(locked::locked_spec))
+            .collect();
+        Ok((lock, specs))
+    }
+
+    /// Fetch what `resolved` locks for this machine into the store, link it
+    /// into the GEM_HOME, and write `.bundle/config`, then `gemfile_write`'s
+    /// Gemfile, then the lockfile; print what changed.
+    pub(crate) fn install(
+        &self,
+        gemfile: &GemfileJson,
+        resolved: Resolved,
+        gemfile_write: Option<GemfileWrite<'_>>,
+    ) -> Result<(), Stop> {
+        let Resolved { written, index } = resolved;
+        let prepared = &self.prepared;
+        let lock_name = &self.lock_name;
+        let local = GemPlatform::Platform(prepared.local.clone());
+
+        // What this machine installs: the lockfile's builds for the local
+        // platform, from the dependencies Bundler installs here.
+        let (lock, specs) = self.read_written(&written)?;
+        let wanted = installed_dependencies(gemfile, &prepared.request.dependencies, &local);
+        let mut to_install = lockfile::spec_set_for(&specs, &wanted, std::slice::from_ref(&local));
+        to_install.sort_by_cached_key(Spec::full_name);
+
+        // Each one's checksum: the lockfile's, else the index's.
+        let mut sums: HashMap<String, String> = lock
+            .checksums
+            .iter()
+            .flatten()
+            .filter_map(|c| {
+                let sha = c.checksums.iter().find(|(algo, _)| algo == "sha256")?;
+                Some((c.lock_name.clone(), sha.1.clone()))
+            })
+            .collect();
+        let lock_name_of = |s: &Spec| lockfile::lock_name(&s.name, &s.version, &s.platform);
+        if let Some(index) = &index {
+            for spec in &to_install {
+                let found = index.get(&spec.name).and_then(|builds| {
+                    builds
+                        .iter()
+                        .find(|b| b.version == spec.version && b.platform == spec.platform)
+                });
+                if let Some(sha) = found.and_then(|b| b.checksum.clone()) {
+                    sums.entry(lock_name_of(spec)).or_insert(sha);
+                }
             }
         }
-        for spec in &to_install {
-            let platform = spec.platform.to_string();
-            let gem = match gem_store::GemId::new(&spec.name, &spec.version.to_string(), &platform)
-            {
-                Ok(gem) => gem,
+        let unsummed: Vec<String> = to_install
+            .iter()
+            .filter(|s| !sums.contains_key(&lock_name_of(s)))
+            .map(|s| s.name.clone())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+
+        let client = &self.client;
+        let store = gem_store::Store::new(&self.home);
+        let mut wants = Vec::new();
+        let mut ok = true;
+        self.runtime.block_on(async {
+            if !unsummed.is_empty() {
+                // A lockfile without `CHECKSUMS`, and nothing resolved: the
+                // index's `/info` lines have them.
+                let fetched = match client.versions().await {
+                    Ok(_) => client.info(&unsummed).await.map(|_| ()),
+                    Err(err) => Err(err),
+                };
+                if let Err(err) = fetched {
+                    self.fail(err);
+                    ok = false;
+                    return;
+                }
+            }
+            for spec in &to_install {
+                let platform = spec.platform.to_string();
+                let gem =
+                    match gem_store::GemId::new(&spec.name, &spec.version.to_string(), &platform) {
+                        Ok(gem) => gem,
+                        Err(err) => {
+                            self.fail(err);
+                            ok = false;
+                            continue;
+                        }
+                    };
+                let sha = sums.get(&lock_name_of(spec)).cloned().or_else(|| {
+                    let info = std::fs::read(client.info_path(&spec.name)).unwrap_or_default();
+                    compact_index::version_checksum(&info, &gem.index_version()).flatten()
+                });
+                match sha {
+                    Some(sha) => wants.push((gem, sha)),
+                    None => {
+                        // ponytail: a gem with no checksum anywhere is
+                        // refused, since the store is keyed by it. Upgrade:
+                        // hash the `.gem` as it arrives and key the entry by
+                        // that.
+                        self.fail(format!(
+                            "{}: neither {lock_name} nor {} lists a checksum for it",
+                            gem.full_name(),
+                            prepared.remote
+                        ));
+                        ok = false;
+                    }
+                }
+            }
+        });
+        if !ok {
+            return Err(Stop(ExitCode::FAILURE));
+        }
+
+        // Fetch what the store does not have, then link it all.
+        let mut stored = Vec::new();
+        for (gem, result) in self.runtime.block_on(store.fetch(client, &wants)) {
+            match result {
+                Ok(fetched) => {
+                    for warning in fetched.warnings {
+                        eprintln!("spinel: {}: warning: {warning}", self.command);
+                    }
+                    stored.push((gem, fetched.path));
+                }
                 Err(err) => {
-                    eprintln!("spinel: install: {err}");
-                    ok = false;
-                    continue;
-                }
-            };
-            let sha = sums.get(&lock_name_of(spec)).cloned().or_else(|| {
-                let info = std::fs::read(client.info_path(&spec.name)).unwrap_or_default();
-                compact_index::version_checksum(&info, &gem.index_version()).flatten()
-            });
-            match sha {
-                Some(sha) => wants.push((gem, sha)),
-                None => {
-                    // ponytail: a gem with no checksum anywhere is refused,
-                    // since the store is keyed by it. Upgrade: hash the
-                    // `.gem` as it arrives and key the entry by that.
-                    eprintln!(
-                        "spinel: install: {}: neither {lock_name} nor {} lists a checksum for it",
-                        gem.full_name(),
-                        prepared.remote
-                    );
+                    self.fail(err);
                     ok = false;
                 }
             }
         }
-    });
-    if !ok {
-        return Err(Stop(ExitCode::FAILURE));
-    }
+        if !ok {
+            return Err(Stop(ExitCode::FAILURE));
+        }
+        let absolute = |p: &Path| std::path::absolute(p).unwrap_or_else(|_| p.to_owned());
+        let gem_home_dir = absolute(&self.root.join(GEM_HOME));
+        let before = linked_gems(&gem_home_dir);
+        let stored: Vec<_> = stored
+            .into_iter()
+            .map(|(gem, entry)| (gem, absolute(&entry)))
+            .collect();
+        let report = gem_home::link(
+            &gem_home_dir,
+            &absolute(&store.root().join("gems")),
+            &stored,
+        )
+        .map_err(|err| self.fail(err))?;
+        for warning in &report.warnings {
+            eprintln!("spinel: {}: warning: {warning}", self.command);
+        }
 
-    // Fetch what the store does not have, then link it all.
-    let mut stored = Vec::new();
-    for (gem, result) in runtime.block_on(store.fetch(&client, &wants)) {
-        match result {
-            Ok(fetched) => {
-                for warning in fetched.warnings {
-                    eprintln!("spinel: install: warning: {warning}");
+        // Post-install (docs/package-manager.md, "7. Post-install").
+        // ponytail: the bytecode cache is not warmed; a first `require`
+        // compiles each file. Upgrade: warm it here, from the files the map
+        // lists.
+        // ponytail: no gem is substituted, so `.spinel/substitutions.json` is
+        // not written. Upgrade: built-in gems are #83, Spinel-native ones
+        // phase 5.
+        for scope in bundler_scopes() {
+            for warning in
+                gem_home::scope_view(&gem_home_dir, &scope).map_err(|err| self.fail(err))?
+            {
+                eprintln!("spinel: {}: warning: {warning}", self.command);
+            }
+        }
+        // The require map (#66), written every time: it is what the GEM_HOME
+        // and the standard library hold now.
+        let mut roots = report.require_dirs.clone();
+        roots.extend(crate::stdlib::directory());
+        let map = self
+            .root
+            .join(".spinel")
+            .join(spinel_vm::require_map::FILE_NAME);
+        // A map that cannot be written is a slower run, never a wrong one: an
+        // old map still in place is checked against the disk as it is read.
+        if let Err(err) = spinel_vm::require_map::write(&map, &roots) {
+            eprintln!(
+                "spinel: {}: warning: {}: {err}",
+                self.command,
+                map.display()
+            );
+        }
+        write_bundle_config(&self.root)
+            .map_err(|err| self.fail(format!(".bundle/config: {err}")))?;
+        let gemfile_name = relative_to_cwd(&self.gemfile_path);
+        if let Some(write) = &gemfile_write {
+            write_in_place(&self.gemfile_path, write.new)
+                .map_err(|err| self.fail(format!("{gemfile_name}: {err}")))?;
+        }
+        if !self.frozen && self.current.as_deref() != Some(written.as_str()) {
+            write_atomically(&self.lock_path, written.as_bytes()).map_err(|err| {
+                // The Gemfile goes back as it was, so the two still agree.
+                if let Some(write) = &gemfile_write
+                    && let Err(err) = write_in_place(&self.gemfile_path, write.old)
+                {
+                    self.fail(format!("{gemfile_name}: cannot put it back: {err}"));
                 }
-                stored.push((gem, fetched.path));
-            }
-            Err(err) => {
-                eprintln!("spinel: install: {err}");
-                ok = false;
-            }
+                self.fail(format!("{lock_name}: {err}"))
+            })?;
         }
-    }
-    if !ok {
-        return Err(Stop(ExitCode::FAILURE));
-    }
-    let absolute = |p: &Path| std::path::absolute(p).unwrap_or_else(|_| p.to_owned());
-    let gem_home_dir = absolute(&root.join(GEM_HOME));
-    let before = linked_gems(&gem_home_dir);
-    let stored: Vec<_> = stored
-        .into_iter()
-        .map(|(gem, entry)| (gem, absolute(&entry)))
-        .collect();
-    let report = gem_home::link(
-        &gem_home_dir,
-        &absolute(&store.root().join("gems")),
-        &stored,
-    )
-    .map_err(Stop::failure)?;
-    for warning in &report.warnings {
-        eprintln!("spinel: install: warning: {warning}");
-    }
 
-    // Post-install (docs/package-manager.md, "7. Post-install").
-    // ponytail: the bytecode cache is not warmed; a first `require` compiles
-    // each file. Upgrade: warm it here, from the files the map lists.
-    // ponytail: no gem is substituted, so `.spinel/substitutions.json` is not
-    // written. Upgrade: built-in gems are #83, Spinel-native ones phase 5.
-    for scope in bundler_scopes() {
-        for warning in gem_home::scope_view(&gem_home_dir, &scope).map_err(Stop::failure)? {
-            eprintln!("spinel: install: warning: {warning}");
+        // What changed, uv-style.
+        let mut lines: Vec<(String, String)> = Vec::new();
+        for spec in &to_install {
+            if !before.contains(&spec.full_name()) {
+                lines.push((
+                    spec.name.clone(),
+                    format!("+ {} {}", spec.name, version_of(spec)),
+                ));
+            }
         }
-    }
-    // The require map (#66), written every time: it is what the GEM_HOME
-    // and the standard library hold now.
-    let mut roots = report.require_dirs.clone();
-    roots.extend(crate::stdlib::directory());
-    let map = root.join(".spinel").join(spinel_vm::require_map::FILE_NAME);
-    // A map that cannot be written is a slower run, never a wrong one: an
-    // old map still in place is checked against the disk as it is read.
-    if let Err(err) = spinel_vm::require_map::write(&map, &roots) {
-        eprintln!("spinel: install: warning: {}: {err}", map.display());
-    }
-    write_bundle_config(&root).map_err(|err| Stop::failure(format!(".bundle/config: {err}")))?;
-    if !frozen && current.as_deref() != Some(written.as_str()) {
-        write_atomically(&lock_path, written.as_bytes())
-            .map_err(|err| Stop::failure(format!("{lock_name}: {err}")))?;
-    }
-
-    // What changed, uv-style.
-    let mut lines: Vec<(String, String)> = Vec::new();
-    for spec in &to_install {
-        if !before.contains(&spec.full_name()) {
-            lines.push((
-                spec.name.clone(),
-                format!("+ {} {}", spec.name, version_of(spec)),
-            ));
+        let previous: HashMap<String, (String, String)> = self
+            .current
+            .as_deref()
+            .and_then(|text| Lockfile::parse(text, lock_name, &prepared.local).ok())
+            .map(|lock| {
+                lock.sources
+                    .iter()
+                    .flat_map(|s| &s.specs)
+                    .map(|s| {
+                        let spec = locked::locked_spec(s);
+                        (spec.full_name(), (spec.name.clone(), version_of(&spec)))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        for full_name in &report.removed {
+            let (name, version) = previous
+                .get(full_name)
+                .cloned()
+                .unwrap_or_else(|| split_full_name(full_name));
+            lines.push((name.clone(), format!("- {name} {version}")));
         }
+        lines.sort();
+        for (_, line) in lines {
+            println!("{line}");
+        }
+        Ok(())
     }
-    let previous: HashMap<String, (String, String)> = current
-        .as_deref()
-        .and_then(|text| Lockfile::parse(text, &lock_name, &prepared.local).ok())
-        .map(|lock| {
-            lock.sources
-                .iter()
-                .flat_map(|s| &s.specs)
-                .map(|s| {
-                    let spec = locked::locked_spec(s);
-                    (spec.full_name(), (spec.name.clone(), version_of(&spec)))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    for full_name in &report.removed {
-        let (name, version) = previous
-            .get(full_name)
-            .cloned()
-            .unwrap_or_else(|| split_full_name(full_name));
-        lines.push((name.clone(), format!("- {name} {version}")));
-    }
-    lines.sort();
-    for (_, line) in lines {
-        println!("{line}");
-    }
-    Ok(())
 }
 
 /// Evaluate the Gemfile as Ruby, in a child `spinel` running
 /// `shims/gemfile_eval.rb`, and read the JSON it prints. Its errors are
-/// Bundler's, on standard error, as it prints them.
-fn evaluate_gemfile() -> Result<GemfileJson, Stop> {
-    let exe = std::env::current_exe()
-        .map_err(|err| Stop::failure(format!("cannot find the spinel executable: {err}")))?;
+/// Bundler's, on standard error, as it prints them. `contents` is read in
+/// place of the Gemfile's own, and `injected` evaluated after it as Bundler's
+/// `Injector` evaluates the lines `bundle add` adds (`spinel add`).
+pub(crate) fn evaluate_gemfile(
+    command: &str,
+    contents: Option<&[u8]>,
+    injected: Option<&str>,
+) -> Result<GemfileJson, Stop> {
+    let exe = std::env::current_exe().map_err(|err| {
+        Stop::failure(command, format!("cannot find the spinel executable: {err}"))
+    })?;
     let mut child = Command::new(exe)
         .arg("-")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()
-        .map_err(|err| Stop::failure(format!("cannot evaluate the Gemfile: {err}")))?;
+        .map_err(|err| Stop::failure(command, format!("cannot evaluate the Gemfile: {err}")))?;
+    let mut script = String::new();
+    if let Some(contents) = contents {
+        script.push_str(&format!(
+            "$spinel_gemfile_contents = String.new({}, encoding: \"UTF-8\")\n",
+            crate::gemfile_edit::dump_bytes(contents)
+        ));
+    }
+    if let Some(injected) = injected {
+        script.push_str(&format!(
+            "$spinel_injected_gems = String.new({}, encoding: \"UTF-8\")\n",
+            crate::gemfile_edit::dump_bytes(injected.as_bytes())
+        ));
+    }
+    script.push_str(GEMFILE_EVAL);
     if let Some(mut stdin) = child.stdin.take() {
         // A child that exits early closes its end; its status says why.
-        let _ = stdin.write_all(GEMFILE_EVAL.as_bytes());
+        let _ = stdin.write_all(script.as_bytes());
     }
     let out = child
         .wait_with_output()
-        .map_err(|err| Stop::failure(format!("cannot evaluate the Gemfile: {err}")))?;
+        .map_err(|err| Stop::failure(command, format!("cannot evaluate the Gemfile: {err}")))?;
     if !out.status.success() {
         return Err(Stop(ExitCode::FAILURE));
     }
-    serde_json::from_slice(&out.stdout)
-        .map_err(|err| Stop::failure(format!("the Gemfile evaluator printed no JSON: {err}")))
+    serde_json::from_slice(&out.stdout).map_err(|err| {
+        Stop::failure(
+            command,
+            format!("the Gemfile evaluator printed no JSON: {err}"),
+        )
+    })
 }
 
 /// `SharedHelpers.default_lockfile`: `gems.locked` beside a `gems.rb`,
@@ -765,6 +934,25 @@ pub(crate) fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()>
     std::fs::rename(&staging, path).inspect_err(|_| {
         let _ = std::fs::remove_file(&staging);
     })
+}
+
+/// Write a file the user owns, as [`write_atomically`] does, but to the file
+/// a symlink names and with the permissions it had, so only its bytes
+/// change.
+fn write_in_place(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let target = std::fs::canonicalize(path)?;
+    let permissions = std::fs::metadata(&target)?.permissions();
+    let name = target
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let staging = target.with_file_name(format!(".{name}.{}.tmp", std::process::id()));
+    std::fs::write(&staging, bytes)?;
+    std::fs::set_permissions(&staging, permissions)
+        .and_then(|()| std::fs::rename(&staging, &target))
+        .inspect_err(|_| {
+            let _ = std::fs::remove_file(&staging);
+        })
 }
 
 #[cfg(test)]

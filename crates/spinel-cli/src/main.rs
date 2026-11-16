@@ -5,6 +5,7 @@
 //! later phase is built through. Subcommands land one issue at a time; see
 //! `docs/cli.md` for the full surface.
 
+mod add;
 mod compact_index;
 mod gem_home;
 #[cfg_attr(
@@ -27,6 +28,7 @@ mod gem_store;
 )]
 mod gem_substitute;
 mod gem_version;
+mod gemfile_edit;
 mod home;
 mod init;
 mod install;
@@ -139,6 +141,31 @@ enum Command {
         /// frozen mode, for CI. Exits 16 as Bundler does.
         #[arg(long)]
         frozen: bool,
+    },
+
+    /// Add gems to the Gemfile and install them.
+    ///
+    /// Writes a `gem` line for each, as `bundle add` writes it: at the end
+    /// of the Gemfile, or at the end of a `group` block naming exactly the
+    /// groups given, with the requirement `~>` the version resolved (`~> 4.2`
+    /// for 4.2.1) unless one is given after `@`. Then installs, as `spinel
+    /// install` does. Nothing is written when the gems do not resolve or
+    /// install: the Gemfile and the lockfile stay as they were. A gem the
+    /// Gemfile already lists with the same requirement is not added again.
+    Add {
+        /// Each gem, with an optional version requirement after `@`
+        /// (`sinatra`, `sinatra@4.2`, `sinatra@~> 4.1, >= 4.1.1`).
+        #[arg(value_name = "GEM[@REQ]", required = true)]
+        gems: Vec<String>,
+
+        /// The groups to add them to, separated by commas.
+        #[arg(short, long, value_name = "GROUPS")]
+        group: Option<String>,
+
+        /// The git repository to take them from. Git sources do not install
+        /// yet (#88), so this fails and writes nothing.
+        #[arg(long, value_name = "URL")]
+        git: Option<String>,
     },
 
     /// Run a gem's executable without installing it into the project.
@@ -383,6 +410,13 @@ fn main() -> ExitCode {
         Some(Command::Parse { path, format }) => return parse_command(&path, format),
         Some(Command::Init) => return init_command(),
         Some(Command::Install { frozen }) => return install::run(frozen),
+        Some(Command::Add { gems, group, git }) => {
+            return add::run(&add::Request {
+                gems: &gems,
+                group: group.as_deref(),
+                git: git.as_deref(),
+            });
+        }
         Some(Command::X {
             source,
             gem,
