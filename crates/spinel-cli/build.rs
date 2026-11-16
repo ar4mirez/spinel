@@ -8,7 +8,7 @@
 //! `stdlib/` never reads another's copy.
 //!
 //! The paths are laid out as ruby/ruby lays its tree out: `stdlib/libexec/`,
-//! Bundler's executables, stays `libexec/`, and the rest, the library, goes
+//! Bundler's executable, stays `libexec/`, and the rest, the library, goes
 //! under `lib/`. `Bundler.setup` looks for its executable at `libexec/bundle`
 //! beside the `lib/` it was loaded from (#71).
 

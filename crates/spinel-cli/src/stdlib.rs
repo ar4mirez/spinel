@@ -4,8 +4,8 @@
 //! `~/.spinel/stdlib/<version>-<digest>/` (`$SPINEL_HOME` in place of
 //! `~/.spinel` when set): the library in its `lib/`, which every run puts on
 //! `$LOAD_PATH` after the program's own `-I` and `RUBYLIB` ones, where CRuby
-//! has its `rubylibdir`, and Bundler's executables in its `libexec/`, where
-//! Bundler looks for them (#71). The digest is the archive's, so a binary
+//! has its `rubylibdir`, and Bundler's executable in its `libexec/`, where
+//! Bundler looks for it (#71). The digest is the archive's, so a binary
 //! never reads a copy another build extracted.
 //!
 //! First runs may race, so a copy is written to a directory of its own and
@@ -77,8 +77,7 @@ fn write_archive(into: &Path) -> std::io::Result<()> {
             std::fs::create_dir_all(parent)?;
         }
         std::fs::File::create(&path)?.write_all(bytes)?;
-        // Bundler's executables are executables, as `make install` leaves
-        // them.
+        // Bundler's executable is executable, as `make install` leaves it.
         if relative.starts_with("libexec") {
             use std::os::unix::fs::PermissionsExt as _;
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;

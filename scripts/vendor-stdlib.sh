@@ -9,10 +9,10 @@
 # `$LOAD_PATH` entry: `stdlib/set.rb`, `stdlib/net/http.rb`. `UPSTREAM` records
 # the pins and `LICENSE/` holds the license files; both are written here too,
 # so the check covers them. Beside them, `libexec/` holds upstream's
-# `libexec/bundle` and `libexec/bundler`, Bundler's executables (#71): the
-# binary extracts the library to `lib/` and these to `libexec/` next to it, as
-# ruby/ruby has them, where `Bundler.setup` looks for the executable it
-# records in `BUNDLE_BIN_PATH` (`crates/spinel-cli/build.rs`).
+# `libexec/bundle`, Bundler's executable (#71): the binary extracts the
+# library to `lib/` and it to `libexec/` next to it, as ruby/ruby has them,
+# where `Bundler.setup` looks for the executable it records in
+# `BUNDLE_BIN_PATH` (`crates/spinel-cli/build.rs`).
 #
 # Three gems are laid over it the same way. `webrick` (#54) left the standard
 # library in Ruby 3.0 but is what the phase 4 milestone serves a Sinatra app
@@ -52,8 +52,8 @@ JSON_REPO="https://github.com/ruby/json.git"
 IO_CONSOLE_TAG="v0.8.2"
 IO_CONSOLE_REPO="https://github.com/ruby/io-console.git"
 
-# Bundler's executables, copied to `stdlib/libexec/`.
-LIBEXEC_FILES=(bundle bundler)
+# Bundler's executable, copied to `stdlib/libexec/`.
+LIBEXEC_FILES=(bundle)
 
 # Upstream's license files, copied to `stdlib/LICENSE/`. LEGAL is not optional
 # paperwork: `lib/` mixes licenses, and LEGAL is the per-file record of which.
@@ -145,7 +145,7 @@ for file in "${LICENSE_FILES[@]}"; do
   cp "$work/ruby/$file" "$staged/LICENSE/$file"
 done
 if [[ -e "$staged/libexec" ]]; then
-  echo "::error::ruby/ruby's lib/ has a libexec/, which would clash with Bundler's executables" >&2
+  echo "::error::ruby/ruby's lib/ has a libexec/, which would clash with Bundler's executable" >&2
   exit 1
 fi
 mkdir -p "$staged/libexec"
@@ -182,8 +182,8 @@ Ruby's pure-Ruby standard library, vendored verbatim.
     tag       $RUBY_TAG
     commit    $sha
     path      lib/ (flattened to this directory, so stdlib/ is a \$LOAD_PATH root)
-              libexec/bundle, libexec/bundler (to libexec/, Bundler's
-              executables, extracted beside the library rather than in it)
+              libexec/bundle (to libexec/, Bundler's executable,
+              extracted beside the library rather than in it)
 
 Laid over it, also verbatim, the lib/ of three gems that are not in Ruby's
 lib/: webrick, which left the standard library, and json and io-console,

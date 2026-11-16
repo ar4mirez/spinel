@@ -52,7 +52,8 @@ jobs:
         run: cargo test --workspace
 
       # Plain Bundler in a project `spinel install` made (#71): CRuby's own
-      # `bundle check` and `bundle exec` must find the gems Spinel installed.
+      # `bundle check` and `bundle exec` must find the gems Spinel installed,
+      # and run their executables on CRuby.
       # After the step above, so no other test sees this Ruby on PATH; on
       # Linux only, as what it checks does not depend on the platform.
       - uses: ruby/setup-ruby@v1
@@ -61,7 +62,7 @@ jobs:
           ruby-version: '4.0'
       - name: Plain bundle exec agrees with spinel install
         if: matrix.name == 'linux-x64'
-        run: cargo test -p spinel-cli --test bundler_setup plain_bundle_exec_resolves_the_same_gems
+        run: cargo test -p spinel-cli --test bundler_setup plain_bundle_exec
         env:
           SPINEL_CRUBY_BUNDLER: '1'
 

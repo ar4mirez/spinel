@@ -11,6 +11,7 @@
 //! specifications/<full name>.gemspec
 //!                                a real file: Gem::Installer#write_spec's text
 //! bin/<executable>               Gem::Installer#app_script_text, run by spinel
+//! ruby/<ver>/, spinel/<ver>/      where Bundler reads it (scope_view)
 //! ```
 //!
 //! Linking is idempotent: what is already right is left alone (a warm
@@ -165,7 +166,7 @@ pub fn link(home: &Path, store_gems: &Path, gems: &[(GemId, PathBuf)]) -> Result
                 continue;
             }
             make_executable(&bin_path)?;
-            stubs.push((exe.clone(), app_script_text(&name, &exe)));
+            stubs.push((exe.clone(), app_script_text(spinel_vm::ENGINE, &name, &exe)));
         }
         if !spec.extensions().map_err(spec_error)?.is_empty() {
             report.warnings.push(format!(
@@ -243,16 +244,24 @@ pub fn link(home: &Path, store_gems: &Path, gems: &[(GemId, PathBuf)]) -> Result
 /// gem one of them installs the others see; a symlink to the scope's own
 /// parent would make a cycle. A symlink already right is left alone, one
 /// leading elsewhere is replaced, and anything else is kept, with a
-/// warning: it is not Spinel's to remove.
+/// warning: it is not Spinel's to remove. The exception is `bin/` for
+/// another engine, whose `bundle exec` puts it first on `PATH`: there it
+/// is a directory of the stubs that engine's RubyGems writes (`engine_bin`),
+/// so a gem's executable runs on the engine that execs it.
 pub fn scope_view(home: &Path, scope: &str) -> Result<Vec<String>, Error> {
     let dir = home.join(scope);
     fs::create_dir_all(&dir).map_err(|e| Error::Io(dir.clone(), e))?;
     sweep(&dir);
     let up = "../".repeat(Path::new(scope).components().count());
+    let engine = scope.split('/').next().unwrap_or(scope);
     let mut warnings = Vec::new();
     let mut seq = 0;
     for sub in SUBDIRECTORIES {
         let link = dir.join(sub);
+        if sub == "bin" && engine != spinel_vm::ENGINE {
+            engine_bin(home, &link, engine, &mut seq)?;
+            continue;
+        }
         let target = PathBuf::from(format!("{up}{sub}"));
         match fs::symlink_metadata(&link) {
             Ok(meta) if meta.file_type().is_symlink() => {
@@ -278,6 +287,64 @@ pub fn scope_view(home: &Path, scope: &str) -> Result<Vec<String>, Error> {
         })?;
     }
     Ok(warnings)
+}
+
+/// Make `bin` hold, for each stub a link wrote in `home/bin/`, the stub
+/// RubyGems writes on the engine whose `ruby_install_name` is `ruby_name`,
+/// and nothing else of that kind: a stub of `ruby_name`'s whose executable
+/// `home/bin/` no longer has is removed. Other files are left alone.
+fn engine_bin(home: &Path, bin: &Path, ruby_name: &str, seq: &mut u64) -> Result<(), Error> {
+    if fs::symlink_metadata(bin).is_ok_and(|m| m.file_type().is_symlink()) {
+        fs::remove_file(bin).map_err(|e| Error::Io(bin.to_owned(), e))?;
+    }
+    fs::create_dir_all(bin).map_err(|e| Error::Io(bin.to_owned(), e))?;
+    sweep(bin);
+    let home_bin = home.join("bin");
+    let mut wanted = HashSet::new();
+    for entry in fs::read_dir(&home_bin)
+        .map_err(|e| Error::Io(home_bin.clone(), e))?
+        .flatten()
+    {
+        let Some(exe) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let Some(name) = fs::read_to_string(entry.path())
+            .ok()
+            .and_then(|text| stub_gem(&text, spinel_vm::ENGINE, &exe))
+        else {
+            continue;
+        };
+        let text = app_script_text(ruby_name, &name, &exe);
+        place_file(&bin.join(&exe), text.as_bytes(), Some(0o755), seq)?;
+        wanted.insert(exe);
+    }
+    for entry in fs::read_dir(bin)
+        .map_err(|e| Error::Io(bin.to_owned(), e))?
+        .flatten()
+    {
+        let Some(exe) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if !wanted.contains(&exe)
+            && fs::read_to_string(entry.path())
+                .is_ok_and(|text| stub_gem(&text, ruby_name, &exe).is_some())
+        {
+            let path = entry.path();
+            fs::remove_file(&path).map_err(|e| Error::Io(path, e))?;
+        }
+    }
+    Ok(())
+}
+
+/// The gem whose `exe` the stub `text` runs, when `text` is the stub
+/// `app_script_text` writes for it and `ruby_name`.
+fn stub_gem(text: &str, ruby_name: &str, exe: &str) -> Option<String> {
+    let name = text
+        .split_once("# The application '")?
+        .1
+        .split_once("' is installed")?
+        .0;
+    (app_script_text(ruby_name, name, exe) == text).then(|| name.to_owned())
 }
 
 fn read_spec(id: &GemId, entry: &Path) -> Result<gem_spec::Spec, Error> {
@@ -311,9 +378,10 @@ fn make_executable(path: &Path) -> Result<(), Error> {
 }
 
 /// The bin stub `Gem::Installer#app_script_text` writes for `exe` of the gem
-/// `name`, with `--env-shebang`'s first line naming `spinel`, which is
-/// `RbConfig::CONFIG["ruby_install_name"]` on Spinel (docs/cli.md).
-pub fn app_script_text(name: &str, exe: &str) -> String {
+/// `name`, with `--env-shebang`'s first line naming `ruby_name`,
+/// `RbConfig::CONFIG["ruby_install_name"]`: `spinel` on Spinel (docs/cli.md),
+/// `ruby` on CRuby.
+pub fn app_script_text(ruby_name: &str, name: &str, exe: &str) -> String {
     let escaped: String = exe
         .chars()
         .flat_map(|c| match c {
@@ -332,7 +400,7 @@ pub fn app_script_text(name: &str, exe: &str) -> String {
         "version = str"
     };
     format!(
-        "#!/usr/bin/env spinel
+        "#!/usr/bin/env {ruby_name}
 #
 # This file was generated by RubyGems.
 #
@@ -521,7 +589,9 @@ fn prune(
                     continue;
                 }
                 let stub = home.join("bin").join(&exe);
-                if fs::read(&stub).is_ok_and(|t| t == app_script_text(&name, &exe).as_bytes()) {
+                if fs::read(&stub)
+                    .is_ok_and(|t| t == app_script_text(spinel_vm::ENGINE, &name, &exe).as_bytes())
+                {
                     let _ = fs::remove_file(&stub);
                 }
             }

@@ -11,11 +11,14 @@ fn fixture(name: &str) -> String {
 
 #[test]
 fn bin_stubs_are_the_ones_rubygems_writes() {
-    assert_eq!(app_script_text("alpha", "alpha"), fixture("bin/alpha"));
+    assert_eq!(
+        app_script_text("spinel", "alpha", "alpha"),
+        fixture("bin/alpha")
+    );
     // Bundler's own stub sets BUNDLER_VERSION and skips `Gem.use_gemdeps`;
     // the executable's name is escaped for its single quotes.
     assert_eq!(
-        app_script_text("bundler", "it's\\x"),
+        app_script_text("spinel", "bundler", "it's\\x"),
         fixture("bundler-stub")
     );
 }
@@ -54,7 +57,7 @@ fn an_executable_two_gems_share_is_written_once_for_the_later() {
     );
     assert_eq!(
         std::fs::read_to_string(home.join("bin/shared")).unwrap(),
-        app_script_text("two", "shared")
+        app_script_text("spinel", "two", "shared")
     );
     let again = link(&home, &store_gems, &gems).unwrap();
     let outcomes: Vec<String> = again
@@ -65,7 +68,7 @@ fn an_executable_two_gems_share_is_written_once_for_the_later() {
     assert_eq!(outcomes, ["one-1.0: current", "two-1.0: current"]);
     assert_eq!(
         std::fs::read_to_string(home.join("bin/shared")).unwrap(),
-        app_script_text("two", "shared")
+        app_script_text("spinel", "two", "shared")
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -80,6 +83,8 @@ fn a_scope_view_links_each_subdirectory_and_keeps_what_is_not_spinels() {
     // CRuby's Bundler, having installed into the scope itself, left a real
     // directory where one link would go.
     std::fs::create_dir_all(home.join("ruby/4.0.0/doc")).unwrap();
+    // An earlier `spinel install` linked `bin` too.
+    std::os::unix::fs::symlink("../../bin", home.join("ruby/4.0.0/bin")).unwrap();
     let warnings = scope_view(&home, "ruby/4.0.0").unwrap();
     assert_eq!(
         warnings,
@@ -90,7 +95,7 @@ fn a_scope_view_links_each_subdirectory_and_keeps_what_is_not_spinels() {
     );
     for sub in SUBDIRECTORIES {
         let link = home.join("ruby/4.0.0").join(sub);
-        if sub == "doc" {
+        if sub == "doc" || sub == "bin" {
             assert!(!link.is_symlink());
             continue;
         }
@@ -103,6 +108,22 @@ fn a_scope_view_links_each_subdirectory_and_keeps_what_is_not_spinels() {
         std::fs::read_to_string(home.join("ruby/4.0.0/specifications/one-1.0.gemspec")).unwrap(),
         std::fs::read_to_string(home.join("specifications/one-1.0.gemspec")).unwrap()
     );
+    // CRuby's view has CRuby's stubs; Spinel's view, Spinel's.
+    assert_eq!(
+        std::fs::read_to_string(home.join("ruby/4.0.0/bin/shared")).unwrap(),
+        app_script_text("ruby", "one", "shared")
+    );
+    scope_view(&home, "spinel/4.0.0").unwrap();
+    assert_eq!(
+        std::fs::read_link(home.join("spinel/4.0.0/bin")).unwrap(),
+        Path::new("../../bin")
+    );
+    // A stub of CRuby's own is kept; one for a gem no longer there goes.
+    std::fs::write(home.join("ruby/4.0.0/bin/theirs"), "#!/bin/sh\n").unwrap();
+    link(&home, &store_gems, &[]).unwrap();
+    scope_view(&home, "ruby/4.0.0").unwrap();
+    assert!(!home.join("ruby/4.0.0/bin/shared").exists());
+    assert!(home.join("ruby/4.0.0/bin/theirs").exists());
     // A symlink leading elsewhere is put right; one already right stays.
     std::fs::remove_file(home.join("ruby/4.0.0/gems")).unwrap();
     std::os::unix::fs::symlink("/nowhere", home.join("ruby/4.0.0/gems")).unwrap();

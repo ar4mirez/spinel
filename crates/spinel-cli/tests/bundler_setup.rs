@@ -7,7 +7,9 @@
 //! `SPINEL_CRUBY_BUNDLER` set and CRuby 4.0's `bundle` on `PATH`, CRuby's own
 //! `bundle check` and `bundle exec ruby app.rb` in the same project, which
 //! must find the same gems through the `.bundle/config` `spinel install`
-//! wrote. Nothing touches the network beyond 127.0.0.1.
+//! wrote. And `fixtures/plain` (rake) installed, whose executable each
+//! engine's `bundle exec rake` runs on that engine. Nothing touches the
+//! network beyond 127.0.0.1.
 
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
@@ -69,24 +71,21 @@ fn serve(stream: TcpStream) {
     let _ = stream.write_all(&body);
 }
 
-/// `fixtures/bundler-setup` copied into a project of its own, rubygems.org
+/// `fixtures/<fixture>` copied into a project of its own, rubygems.org
 /// replaced by the local server, with a Spinel home of its own.
 struct Sandbox {
     root: PathBuf,
 }
 
 impl Sandbox {
-    fn new(name: &str) -> Sandbox {
+    fn new(fixture: &str, name: &str) -> Sandbox {
         let root = Path::new(env!("CARGO_TARGET_TMPDIR"))
             .join("bundler-setup")
             .join(name);
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("project")).unwrap();
         let server = serve_rubygems();
-        for entry in fs::read_dir(fixtures().join("bundler-setup"))
-            .unwrap()
-            .flatten()
-        {
+        for entry in fs::read_dir(fixtures().join(fixture)).unwrap().flatten() {
             let text = fs::read_to_string(entry.path()).unwrap();
             fs::write(
                 root.join("project").join(entry.file_name()),
@@ -131,6 +130,16 @@ impl Sandbox {
             .args(args)
             .output()
             .expect("spinel runs")
+    }
+
+    /// CRuby's `bundle`, which `SPINEL_CRUBY_BUNDLER` says is on `PATH`,
+    /// with its own settings kept out of the user's home.
+    fn cruby_bundle(&self, args: &[&str]) -> Output {
+        self.command("bundle")
+            .args(args)
+            .env("BUNDLE_USER_HOME", self.root.join("bundle-user-home"))
+            .output()
+            .expect("CRuby's bundle runs")
     }
 
     /// `spinel install --frozen`, expecting it to install the lockfile as
@@ -178,18 +187,23 @@ fn app_output(engine: &str) -> String {
 
 #[test]
 fn bundler_setup_boots_the_app_spinel_install_installed() {
-    let sandbox = Sandbox::new("spinel");
+    let sandbox = Sandbox::new("bundler-setup", "spinel");
     sandbox.install();
     // `bundle config set --local path .spinel/gem_home`'s file.
     assert_eq!(
         sandbox.read(".bundle/config"),
         "---\nBUNDLE_PATH: \".spinel/gem_home\"\n"
     );
-    // Where each engine's Bundler reads that path: the GEM_HOME itself.
+    // Where each engine's Bundler reads that path: the GEM_HOME itself,
+    // but for CRuby's `bin/` (`gem_executables_run_on_spinel_...`).
     let gem_home = sandbox.project().join(".spinel/gem_home");
     for engine in ["ruby", "spinel"] {
         let scope = gem_home.join(engine).join("4.0.0");
         for sub in ["gems", "specifications", "bin", "extensions"] {
+            if engine == "ruby" && sub == "bin" {
+                assert!(scope.join(sub).is_dir() && !scope.join(sub).is_symlink());
+                continue;
+            }
             assert_eq!(
                 fs::read_link(scope.join(sub)).unwrap(),
                 Path::new("../..").join(sub),
@@ -215,22 +229,92 @@ fn plain_bundle_exec_resolves_the_same_gems() {
         eprintln!("skipped: set SPINEL_CRUBY_BUNDLER to run CRuby's bundle against the project");
         return;
     }
-    let sandbox = Sandbox::new("cruby");
+    let sandbox = Sandbox::new("bundler-setup", "cruby");
     sandbox.install();
-    // Bundler's own settings, kept out of the user's home.
-    let bundle = |args: &[&str]| {
-        sandbox
-            .command("bundle")
-            .args(args)
-            .env("BUNDLE_USER_HOME", sandbox.root.join("bundle-user-home"))
-            .output()
-            .expect("CRuby's bundle runs")
-    };
-    let check = bundle(&["check"]);
+    let check = sandbox.cruby_bundle(&["check"]);
     assert_eq!(
         ok(&check, "bundle check"),
         "The Gemfile's dependencies are satisfied\n"
     );
-    let exec = bundle(&["exec", "ruby", "app.rb"]);
+    let exec = sandbox.cruby_bundle(&["exec", "ruby", "app.rb"]);
     assert_eq!(ok(&exec, "bundle exec ruby app.rb"), app_output("ruby"));
+}
+
+/// `fixtures/plain` installed: rake, which has an executable.
+fn install_rake(name: &str) -> Sandbox {
+    let sandbox = Sandbox::new("plain", name);
+    let out = sandbox.spinel(&["install"]);
+    assert_eq!(ok(&out, "spinel install"), "+ rake 13.4.2\n");
+    sandbox
+}
+
+/// Bundler running on Spinel execs rake's stub from `spinel/4.0.0/bin`,
+/// the GEM_HOME's own, which runs it on Spinel.
+#[test]
+fn gem_executables_run_on_spinel_under_bundler_on_spinel() {
+    let sandbox = install_rake("rake-spinel");
+    let out = sandbox.spinel(&[
+        "run",
+        "-e",
+        "require 'bundler'; print Bundler::SharedHelpers.bundle_bin_path",
+    ]);
+    let bundle = ok(&out, "bundle_bin_path");
+    let spinel_dir = Path::new(SPINEL).parent().unwrap();
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let path = std::env::join_paths(
+        std::iter::once(spinel_dir.to_owned()).chain(std::env::split_paths(&path)),
+    )
+    .unwrap();
+    let exec = |args: &[&str]| {
+        let out = sandbox
+            .command(SPINEL)
+            .env("PATH", &path)
+            .args(["run", &bundle, "exec"])
+            .args(args)
+            .output()
+            .expect("spinel runs");
+        ok(&out, &format!("bundle exec {}", args.join(" ")))
+    };
+    assert_eq!(
+        exec(&["rake", "-e", "puts RUBY_ENGINE, Rake::VERSION"]),
+        "spinel\n13.4.2\n"
+    );
+}
+
+/// CRuby's plain `bundle exec` execs rake's stub from `ruby/4.0.0/bin`,
+/// the one CRuby's RubyGems writes, which runs it on CRuby.
+#[test]
+fn plain_bundle_exec_runs_gem_executables_on_cruby() {
+    if std::env::var_os("SPINEL_CRUBY_BUNDLER").is_none() {
+        eprintln!("skipped: set SPINEL_CRUBY_BUNDLER to run CRuby's bundle against the project");
+        return;
+    }
+    let sandbox = install_rake("rake-cruby");
+    let exec = |args: &[&str]| {
+        let out = sandbox.cruby_bundle(&[&["exec"], args].concat());
+        ok(&out, &format!("bundle exec {}", args.join(" ")))
+    };
+    assert_eq!(exec(&["rake", "--version"]), "rake, version 13.4.2\n");
+    assert_eq!(exec(&["rake", "-e", "puts RUBY_ENGINE"]), "ruby\n");
+    // Byte for byte the stub `gem install` writes on CRuby, with the
+    // `--env-shebang` Bundler installs with.
+    let install_dir = sandbox.root.join("gem-install");
+    let out = sandbox
+        .command("gem")
+        .args([
+            "install",
+            "--local",
+            "--env-shebang",
+            "--no-document",
+            "--install-dir",
+        ])
+        .arg(&install_dir)
+        .arg(fixtures().join("install/gems/rake-13.4.2.gem"))
+        .output()
+        .expect("CRuby's gem runs");
+    ok(&out, "gem install rake");
+    assert_eq!(
+        sandbox.read(".spinel/gem_home/ruby/4.0.0/bin/rake"),
+        fs::read_to_string(install_dir.join("bin/rake")).unwrap()
+    );
 }
