@@ -120,10 +120,19 @@ fn a_scope_view_links_each_subdirectory_and_keeps_what_is_not_spinels() {
     );
     // A stub of CRuby's own is kept; one for a gem no longer there goes.
     std::fs::write(home.join("ruby/4.0.0/bin/theirs"), "#!/bin/sh\n").unwrap();
+    // As is the stub CRuby's `bundle install` wrote for a gem it installed
+    // into the shared GEM_HOME and Spinel did not link.
+    std::fs::write(home.join("specifications/foo-2.0.gemspec"), "").unwrap();
+    std::fs::write(
+        home.join("ruby/4.0.0/bin/foo"),
+        app_script_text("ruby", "foo", "foo"),
+    )
+    .unwrap();
     link(&home, &store_gems, &[]).unwrap();
     scope_view(&home, "ruby/4.0.0").unwrap();
     assert!(!home.join("ruby/4.0.0/bin/shared").exists());
     assert!(home.join("ruby/4.0.0/bin/theirs").exists());
+    assert!(home.join("ruby/4.0.0/bin/foo").exists());
     // A symlink leading elsewhere is put right; one already right stays.
     std::fs::remove_file(home.join("ruby/4.0.0/gems")).unwrap();
     std::os::unix::fs::symlink("/nowhere", home.join("ruby/4.0.0/gems")).unwrap();

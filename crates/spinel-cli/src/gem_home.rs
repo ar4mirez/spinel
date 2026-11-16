@@ -290,9 +290,11 @@ pub fn scope_view(home: &Path, scope: &str) -> Result<Vec<String>, Error> {
 }
 
 /// Make `bin` hold, for each stub a link wrote in `home/bin/`, the stub
-/// RubyGems writes on the engine whose `ruby_install_name` is `ruby_name`,
-/// and nothing else of that kind: a stub of `ruby_name`'s whose executable
-/// `home/bin/` no longer has is removed. Other files are left alone.
+/// RubyGems writes on the engine whose `ruby_install_name` is `ruby_name`:
+/// a stub of `ruby_name`'s whose executable `home/bin/` no longer has is
+/// removed once its gem is gone from the GEM_HOME. A stub of a gem still
+/// there, such as one that engine's own `bundle install` put there, and
+/// other files are left alone.
 fn engine_bin(home: &Path, bin: &Path, ruby_name: &str, seq: &mut u64) -> Result<(), Error> {
     if fs::symlink_metadata(bin).is_ok_and(|m| m.file_type().is_symlink()) {
         fs::remove_file(bin).map_err(|e| Error::Io(bin.to_owned(), e))?;
@@ -326,14 +328,31 @@ fn engine_bin(home: &Path, bin: &Path, ruby_name: &str, seq: &mut u64) -> Result
             continue;
         };
         if !wanted.contains(&exe)
-            && fs::read_to_string(entry.path())
-                .is_ok_and(|text| stub_gem(&text, ruby_name, &exe).is_some())
+            && fs::read_to_string(entry.path()).is_ok_and(|text| {
+                stub_gem(&text, ruby_name, &exe).is_some_and(|name| !installed(home, &name))
+            })
         {
             let path = entry.path();
             fs::remove_file(&path).map_err(|e| Error::Io(path, e))?;
         }
     }
     Ok(())
+}
+
+/// Whether `home/specifications/` has a gemspec of a version of the gem
+/// `name`: `<name>-<version>[-<platform>].gemspec`.
+fn installed(home: &Path, name: &str) -> bool {
+    let prefix = format!("{name}-");
+    fs::read_dir(home.join("specifications")).is_ok_and(|entries| {
+        entries.flatten().any(|entry| {
+            entry.file_name().to_str().is_some_and(|file| {
+                file.ends_with(".gemspec")
+                    && file
+                        .strip_prefix(&prefix)
+                        .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
+            })
+        })
+    })
 }
 
 /// The gem whose `exe` the stub `text` runs, when `text` is the stub
