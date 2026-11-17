@@ -140,6 +140,17 @@ bytecode a tool reads.
   the details. **Breaking** for compiled apps' `manifest.json`:
   `spinel_ext_abi` is now 1.
 
+- **`spinel build --target <triple>` builds an app for another platform**
+  ([#102](https://github.com/ar4mirez/spinel/issues/102)). The payload is
+  written into the `spinel` release binary of the same version for
+  `x86_64-linux`, `aarch64-linux`, `x86_64-macos` or `aarch64-macos`,
+  downloaded over HTTPS from the GitHub release (or `SPINEL_RELEASES_URL`)
+  once and cached under `~/.spinel/targets/<version>/<triple>/`. The
+  download is checked to be an executable for the target. A gem with a
+  native extension stops a cross build, naming the gem, and an app for macOS
+  is still built on macOS. `docs/build.md`, "Cross-compiling", has the
+  details.
+
 - **A compiled app runs** ([#101](https://github.com/ar4mirez/spinel/issues/101)).
   An app `spinel build --compile` writes extracts its payload once, to
   `$XDG_CACHE_HOME/spinel/apps/<sha256>/` (`~/.cache` by default), and runs

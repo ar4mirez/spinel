@@ -20,6 +20,11 @@
 //! the extensions for the target chosen from `.spinel/substitutions.json`,
 //! comes with Spinel-native gems (#105), so a payload has none.
 //!
+//! The binary is this `spinel`, or with `--target` (#102) the release binary
+//! of this version for that platform (`target.rs`). A gem carrying a native
+//! extension's file then stops the build, naming the gem, since what was
+//! built for this machine does not load on the target.
+//!
 //! The archive is the same bytes for the same project: entries in a fixed
 //! order (each directory's names sorted), every mtime 0, every owner root
 //! with no names, and every mode 0755 or 0644 by whether the file is
@@ -37,6 +42,7 @@ use sha2::{Digest, Sha256};
 
 use crate::install::{GemfileJson, Stop};
 use crate::lockfile::Lockfile;
+use crate::target::{self as platform, Os, Target};
 use crate::trailer::{self, Payload, Trailer};
 use crate::watch::Ignored;
 
@@ -69,6 +75,8 @@ pub struct Request<'a> {
     pub groups: &'a [String],
     /// `KEY=VALUE` pairs for the manifest's `env`.
     pub env: &'a [String],
+    /// The platform `--target` names; this one's when `None`.
+    pub target: Option<&'a str>,
     /// The arguments the app's `ARGV` starts with.
     pub argv: &'a [String],
 }
@@ -101,6 +109,21 @@ fn fail(message: impl std::fmt::Display) -> Stop {
 }
 
 fn build(request: &Request<'_>) -> Result<(), Stop> {
+    let target = request
+        .target
+        .map(|name| {
+            let target = Target::parse(name)?;
+            if target.os == Os::Macos && !cfg!(target_os = "macos") {
+                // ponytail: see `macho::sign_ad_hoc`; an in-process ad hoc
+                // signer lifts this.
+                return Err(format!(
+                    "--target {name}: an app for macOS is signed with Apple's `codesign`, so it is built on macOS"
+                ));
+            }
+            Ok(target)
+        })
+        .transpose()
+        .map_err(fail)?;
     let mut env = BTreeMap::new();
     for pair in request.env {
         match pair.split_once('=') {
@@ -189,6 +212,21 @@ fn build(request: &Request<'_>) -> Result<(), Stop> {
         _ => None,
     };
 
+    // The binary the app is written into: fetched, or found in the cache,
+    // before the payload is assembled, so a target with no release stops
+    // the build before the work.
+    let binary = match target {
+        Some(target) => {
+            let home = crate::home::spinel_home()
+                .ok_or_else(|| fail("neither SPINEL_HOME nor HOME is set"))?;
+            target
+                .binary(env!("CARGO_PKG_VERSION"), &platform::base(), &home)
+                .map_err(fail)?
+        }
+        None => std::env::current_exe()
+            .map_err(|err| fail(format!("cannot find this executable: {err}")))?,
+    };
+
     let manifest = Manifest {
         entry,
         spinel_version: env!("CARGO_PKG_VERSION"),
@@ -205,11 +243,10 @@ fn build(request: &Request<'_>) -> Result<(), Stop> {
         &mut filter,
         gems.as_ref(),
         vec![output.clone(), staging.0.clone()],
+        target,
     )
     .map_err(fail)?;
 
-    let binary = std::env::current_exe()
-        .map_err(|err| fail(format!("cannot find this executable: {err}")))?;
     let mut payload = Payload {
         bytes: File::open(&payload_path)
             .map_err(|err| fail(format!("{}: {err}", payload_path.display())))?,
@@ -288,6 +325,7 @@ fn assemble(
     filter: &mut AppFilter,
     gems: Option<&Gems>,
     skip: Vec<PathBuf>,
+    target: Option<Target>,
 ) -> Result<Trailer, String> {
     let file = File::create(path).map_err(|err| format!("{}: {err}", path.display()))?;
     let hashed = Hashed {
@@ -301,6 +339,7 @@ fn assemble(
         bytecode: bytecode.to_path_buf(),
         stack: Vec::new(),
         skip,
+        target,
     };
 
     let mut json = serde_json::to_vec_pretty(manifest).map_err(|err| err.to_string())?;
@@ -646,6 +685,9 @@ struct Walk {
     stack: Vec<PathBuf>,
     /// The app being written and its staging directory, never taken.
     skip: Vec<PathBuf>,
+    /// The platform `--target` names, for which a gem's native extension
+    /// files, built for this one, stop the build.
+    target: Option<Target>,
 }
 
 impl Walk {
@@ -702,6 +744,15 @@ impl Walk {
 
     /// The file `src` at `dest`; a `.rb` file is compiled into the cache too.
     fn file(&mut self, src: &Path, dest: &Path, meta: &Metadata) -> Result<(), String> {
+        if let Some(target) = self.target
+            && let Some(gem) = native_gem(dest)
+        {
+            return Err(format!(
+                "{gem} has a native extension ({}), and --target {} takes pure-Ruby gems only: `.spinel` extensions for another platform come with the extension loader (#103-#105)",
+                src.display(),
+                target.name
+            ));
+        }
         if dest.extension().is_some_and(|ext| ext == "rb") {
             let source = fs::read(src).map_err(|err| format!("{}: {err}", src.display()))?;
             self.bytes(dest, mode(meta), &source)?;
@@ -745,6 +796,28 @@ impl Walk {
             .append_data(&mut header, dest, io::empty())
             .map_err(|err| format!("{}: {err}", dest.display()))
     }
+}
+
+/// The gem whose native extension file the payload's `dest` is, by the
+/// directory it is under: `gem_home/gems/<full name>/` or a git gem's
+/// `gem_home/bundler/gems/<checkout>/`.
+fn native_gem(dest: &Path) -> Option<String> {
+    const NATIVE: [&str; 5] = ["so", "bundle", "dylib", "dll", "spinel"];
+    let ext = dest.extension()?.to_str()?;
+    if !NATIVE.contains(&ext) {
+        return None;
+    }
+    let parts: Vec<_> = dest.components().map(Component::as_os_str).collect();
+    let gem = match parts.as_slice() {
+        [home, gems, gem, _, ..] if *home == "gem_home" && *gems == "gems" => gem,
+        [home, bundler, gems, gem, _, ..]
+            if *home == "gem_home" && *bundler == "bundler" && *gems == "gems" =>
+        {
+            gem
+        }
+        _ => return None,
+    };
+    Some(gem.to_string_lossy().into_owned())
 }
 
 /// A header with nothing of the machine it was written on in it.
