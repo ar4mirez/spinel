@@ -1,0 +1,18 @@
+#!/usr/bin/env spinel
+require_relative "../lib/mytool"
+require "shout"
+
+if ARGV.include?("--help")
+  puts "Usage: mytool [--help] [WORD...]"
+  puts "Prints its arguments, shouted."
+  exit 0
+end
+
+puts "argv: #{ARGV.inspect}"
+puts "program: #{$0}"
+puts "file: #{Mytool.file}"
+puts "dir: #{Mytool.dir}"
+puts "shout: #{ARGV.map { |word| Shout.up(word) }.join(" ")}"
+puts "gem_home: #{ENV["GEM_HOME"]}"
+puts "greeting: #{ENV["GREETING"]}"
+puts "pwd: #{Dir.pwd}"

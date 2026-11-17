@@ -74,8 +74,11 @@ fn app_bytes(payload: &[u8]) -> Vec<u8> {
     tail
 }
 
+/// Run `exe` with a cache directory beside it, so a compiled app that gets as
+/// far as extracting its payload (#101) writes nothing outside the test's own.
 fn run(exe: &Path, args: &[&str]) -> Output {
     Command::new(exe)
+        .env("XDG_CACHE_HOME", exe.with_file_name("cache"))
         .args(args)
         .output()
         .expect("the app executes")
@@ -99,7 +102,8 @@ fn a_binary_with_a_valid_trailer_executes_and_reaches_the_compiled_app_path() {
         "{err}"
     );
     assert!(err.contains(&sha), "{err}");
-    assert!(err.contains("not built yet"), "{err}");
+    // Its payload is not a `payload.tar.zst`, so there is nothing to run.
+    assert!(err.contains("cannot be extracted"), "{err}");
     // The app's command line is the app's: `--version` is not Spinel's banner.
     assert!(
         out.stdout.is_empty(),

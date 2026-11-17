@@ -150,6 +150,7 @@ fn a_packed_app_passes_codesign_verify_and_runs() {
     verify_strict(&exe);
 
     let out = Command::new(&exe)
+        .env("XDG_CACHE_HOME", exe.with_file_name("cache"))
         .arg("--version")
         .output()
         .expect("the app executes");
@@ -157,7 +158,8 @@ fn a_packed_app_passes_codesign_verify_and_runs() {
     assert!(err.contains("is a compiled app"), "{err}");
     assert!(err.contains("100000 byte payload"), "{err}");
     assert!(err.contains(&sha256_hex(&payload)), "{err}");
-    assert!(err.contains("not built yet"), "{err}");
+    // Its payload is not a `payload.tar.zst`, so there is nothing to run.
+    assert!(err.contains("cannot be extracted"), "{err}");
     assert!(
         out.stdout.is_empty(),
         "{:?}",
@@ -195,7 +197,10 @@ fn a_corrupt_payload_in_the_section_is_refused() {
     assert!(signed.status.success(), "{}", stderr(&signed));
     verify_strict(&exe);
 
-    let out = Command::new(&exe).output().expect("the app executes");
+    let out = Command::new(&exe)
+        .env("XDG_CACHE_HOME", exe.with_file_name("cache"))
+        .output()
+        .expect("the app executes");
     let err = stderr(&out);
     assert!(err.contains("payload is corrupt"), "{err}");
     assert!(
@@ -218,7 +223,10 @@ fn a_length_longer_than_the_section_is_refused_as_truncated() {
     let signed = codesign(&["--force", "--sign", "-"], &exe);
     assert!(signed.status.success(), "{}", stderr(&signed));
 
-    let out = Command::new(&exe).output().expect("the app executes");
+    let out = Command::new(&exe)
+        .env("XDG_CACHE_HOME", exe.with_file_name("cache"))
+        .output()
+        .expect("the app executes");
     let err = stderr(&out);
     assert!(err.contains("payload is truncated"), "{err}");
     // What the section holds before its trailer, not the whole file.

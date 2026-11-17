@@ -6,6 +6,7 @@
 //! `docs/cli.md` for the full surface.
 
 mod add;
+mod app;
 mod build;
 mod builtin_gem;
 mod compact_index;
@@ -762,29 +763,19 @@ fn main() -> ExitCode {
 /// What this executable does when it is a compiled app: `None` when it is
 /// a plain `spinel`, which costs one seek and one 48-byte read of its own file,
 /// after reading its load commands on macOS to find the payload section.
+/// A compiled app runs its entry point (`app.rs`), hashing its payload only
+/// when it first extracts it.
 fn compiled_app() -> Option<ExitCode> {
     // An executable that cannot read itself has no payload it could run.
     let mut file = trailer::open_self().ok()?;
-    let found = trailer::locate(&mut file);
+    let found = trailer::find(&mut file);
     if let Ok(None) = found {
         return None;
     }
     let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("spinel"));
     match found {
         Ok(None) => None,
-        Ok(Some(app)) => {
-            // ponytail: verifies and stops. Extracting the payload and running
-            // its entry point is #101, which also skips the re-hash on a cache hit.
-            eprintln!(
-                "spinel: `{}` is a compiled app ({} byte payload, sha256 {}), \
-                 but running compiled apps is not built yet: \
-                 https://github.com/ar4mirez/spinel/issues/101",
-                exe.display(),
-                app.trailer.payload_len,
-                trailer::hex(&app.trailer.sha256),
-            );
-            Some(ExitCode::FAILURE)
-        }
+        Ok(Some(found)) => Some(app::run(&mut file, found, &exe)),
         Err(err) => {
             eprintln!("spinel: `{}`: {err}", exe.display());
             Some(ExitCode::FAILURE)
@@ -1656,9 +1647,7 @@ fn library_path(scope: &mut spinel_vm::HandleScope<'_>) {
     let Some(dir) = stdlib::directory() else {
         return;
     };
-    // Rust's escapes are Ruby's too, once `#` cannot start an
-    // interpolation.
-    let literal = format!("{:?}", dir.to_string_lossy()).replace('#', "\\#");
+    let literal = ruby_literal(&dir.to_string_lossy());
     let code = format!(
         "RbConfig::CONFIG[\"rubylibdir\"] = {literal}.dup\n\
          RbConfig::CONFIG[\"rubyarchdir\"] = File.join({literal}, RUBY_PLATFORM)\n\
@@ -1672,6 +1661,12 @@ fn library_path(scope: &mut spinel_vm::HandleScope<'_>) {
         spinel_vm::compile::program(&parsed.program).expect("a push onto $LOAD_PATH compiles");
     let mut frame = spinel_vm::interp::Frame::new(0);
     let _ = spinel_vm::interp::eval_in(scope, &mut frame, &compiled);
+}
+
+/// `text` as a double-quoted Ruby String literal. Rust's escapes are Ruby's
+/// too, once `#` cannot start an interpolation.
+fn ruby_literal(text: &str) -> String {
+    format!("{text:?}").replace('#', "\\#")
 }
 
 /// Compile and run one program, after the prelude when there is one.

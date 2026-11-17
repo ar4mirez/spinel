@@ -403,18 +403,16 @@ fn the_payload_holds_the_documented_directories_and_nothing_else() {
     assert_eq!(cached, expected_bytecode(&entries));
     assert_eq!(cached.len(), 5);
 
-    // The app is this `spinel` with the payload: it finds it and says so
-    // until running one is built (#101).
-    let ran = Command::new(&app).output().expect("the app runs");
-    assert_eq!(ran.status.code(), Some(1));
-    assert!(
-        String::from_utf8_lossy(&ran.stderr).contains(&format!(
-            "is a compiled app ({} byte payload",
-            payload.len()
-        )),
-        "{}",
-        String::from_utf8_lossy(&ran.stderr)
-    );
+    // The app is this `spinel` with the payload, and runs its entry point
+    // (#101; `tests/app.rs` has the rest).
+    let ran = Command::new(&app)
+        .env("XDG_CACHE_HOME", sandbox.0.join("cache"))
+        .env("SPINEL_HOME", sandbox.0.join("home"))
+        .env_remove("GEM_HOME")
+        .env_remove("GEM_PATH")
+        .output()
+        .expect("the app runs");
+    assert_eq!(ok(&ran, "the app"), "hello from alpha\n");
 
     // The same project builds the same payload, byte for byte.
     ok(&sandbox.spinel(&project, &args), "spinel build again");
