@@ -556,3 +556,49 @@ fn what_cannot_be_packed_is_refused_and_nothing_is_written() {
         .collect();
     assert!(!left.iter().any(|name| name.starts_with("app")), "{left:?}");
 }
+
+#[test]
+fn a_gemspec_project_never_packs_its_app_or_its_ignored_files() {
+    // A `gemspec` Gemfile installs the project itself as a path gem, so
+    // `gem_home/gems/mytool-1.0.0` leads back to the project, where the app
+    // and its staging directory are written.
+    let sandbox = Sandbox::new("gemspec");
+    let project = sandbox.0.join("gemspec");
+    ok(&sandbox.spinel(&project, &["install"]), "spinel install");
+    fs::create_dir_all(project.join("tmp")).unwrap();
+    fs::write(project.join("tmp/scratch.txt"), "left out\n").unwrap();
+    let args = ["build", "--compile", "exe/mytool", "-o", "mytool"];
+
+    ok(&sandbox.spinel(&project, &args), "spinel build");
+    let first = payload(&project.join("mytool"));
+    let entries = unpack(&first);
+    assert!(
+        !entries.keys().any(|path| path.contains(".spinel-build-")),
+        "the staging directory is packed: {:?}",
+        entries.keys()
+    );
+    assert_eq!(
+        files_under(&entries, "app"),
+        BTreeSet::from([
+            ".bundle/config",
+            ".gitignore",
+            "Gemfile",
+            "Gemfile.lock",
+            "exe/mytool",
+            "lib/mytool.rb",
+            "mytool.gemspec",
+        ])
+    );
+    assert_eq!(
+        files_under(&entries, "gem_home/gems/mytool-1.0.0"),
+        files_under(&entries, "app"),
+        "the gem holds what app/ does: no tmp/, .spinel/ or app"
+    );
+
+    // A second build, with the first app in the project, packs the same.
+    ok(&sandbox.spinel(&project, &args), "spinel build again");
+    assert!(
+        payload(&project.join("mytool")) == first,
+        "the second build's payload equals the first"
+    );
+}

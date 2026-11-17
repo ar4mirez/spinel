@@ -152,13 +152,7 @@ fn build(request: &Request<'_>) -> Result<(), Stop> {
     let staging = Staging::new(parent.join(staging_name))
         .map_err(|err| fail(format!("{}: {err}", parent.display())))?;
 
-    let mut filter = AppFilter::new(
-        &root,
-        request.include,
-        request.exclude,
-        vec![output.clone(), staging.0.clone()],
-    )
-    .map_err(fail)?;
+    let mut filter = AppFilter::new(&root, request.include, request.exclude).map_err(fail)?;
     let entry = entry_point(&cwd, &root, request.entry, &mut filter).map_err(fail)?;
 
     // The gems the app needs, read before anything is written, so a project
@@ -206,9 +200,9 @@ fn build(request: &Request<'_>) -> Result<(), Stop> {
         &payload_path,
         &bytecode,
         &manifest,
-        &root,
         &mut filter,
         gems.as_ref(),
+        vec![output.clone(), staging.0.clone()],
     )
     .map_err(fail)?;
 
@@ -272,22 +266,7 @@ fn entry_point(
             root.display()
         ));
     };
-    // Each directory on the way, then the file, as the walk decides them.
-    let mut at = root.to_path_buf();
-    let mut seen = Seen::Kept;
-    let parts: Vec<_> = relative.components().collect();
-    for (i, part) in parts.iter().enumerate() {
-        at.push(part);
-        let is_dir = i + 1 < parts.len();
-        match filter.decide(&at, is_dir, seen) {
-            Some(next) => seen = next,
-            None => {
-                seen = Seen::Hidden;
-                break;
-            }
-        }
-    }
-    if seen != Seen::Kept {
+    if !filter.keeps(&path, false) {
         return Err(format!(
             "--compile {shown}: .gitignore or --exclude leaves it out of the app; --include it"
         ));
@@ -304,9 +283,9 @@ fn assemble(
     path: &Path,
     bytecode: &Path,
     manifest: &Manifest<'_>,
-    root: &Path,
     filter: &mut AppFilter,
     gems: Option<&Gems>,
+    skip: Vec<PathBuf>,
 ) -> Result<Trailer, String> {
     let file = File::create(path).map_err(|err| format!("{}: {err}", path.display()))?;
     let hashed = Hashed {
@@ -319,6 +298,7 @@ fn assemble(
         tar: tar::Builder::new(encoder),
         bytecode: bytecode.to_path_buf(),
         stack: Vec::new(),
+        skip,
     };
 
     let mut json = serde_json::to_vec_pretty(manifest).map_err(|err| err.to_string())?;
@@ -326,8 +306,9 @@ fn assemble(
     walk.bytes(Path::new("manifest.json"), 0o644, &json)?;
 
     walk.dir(Path::new("app"))?;
+    let root = filter.root.clone();
     walk.tree(
-        root,
+        &root,
         Path::new("app"),
         Seen::Kept,
         &mut |path, is_dir, seen| filter.decide(path, is_dir, seen),
@@ -335,7 +316,7 @@ fn assemble(
 
     walk.dir(Path::new("gem_home"))?;
     if let Some(gems) = gems {
-        gems.copy(&mut walk)?;
+        gems.copy(&mut walk, filter)?;
     }
 
     // The cache, once every `.rb` file is compiled into it.
@@ -382,17 +363,10 @@ struct AppFilter {
     ignored: Ignored,
     include: Gitignore,
     exclude: Gitignore,
-    /// The app being written and its staging directory.
-    skip: Vec<PathBuf>,
 }
 
 impl AppFilter {
-    fn new(
-        root: &Path,
-        include: &[String],
-        exclude: &[String],
-        skip: Vec<PathBuf>,
-    ) -> Result<AppFilter, String> {
+    fn new(root: &Path, include: &[String], exclude: &[String]) -> Result<AppFilter, String> {
         let patterns = |flag: &str, lines: &[String]| {
             let mut builder = GitignoreBuilder::new(root);
             for line in lines {
@@ -407,18 +381,33 @@ impl AppFilter {
             ignored: Ignored::new(root.to_path_buf()),
             include: patterns("include", include)?,
             exclude: patterns("exclude", exclude)?,
-            skip,
         })
+    }
+
+    /// Whether `path`, in the project, goes in `app/`: each directory on the
+    /// way, then `path` itself, as the walk decides them.
+    fn keeps(&mut self, path: &Path, is_dir: bool) -> bool {
+        let Ok(relative) = path.strip_prefix(&self.root) else {
+            return false;
+        };
+        let mut at = self.root.clone();
+        let parts: Vec<_> = relative.components().collect();
+        for (i, part) in parts.iter().enumerate() {
+            at.push(part);
+            let part_is_dir = i + 1 < parts.len() || is_dir;
+            match self.decide(&at, part_is_dir, Seen::Kept) {
+                Some(Seen::Kept) => {}
+                _ => return false,
+            }
+        }
+        true
     }
 
     /// How the walk takes `path`, an entry of a directory it took as
     /// `parent`: `None` to leave it out. `.git/` and `.spinel/` are never the
-    /// app's, nor the app being written. `--exclude` wins; an `--include`
-    /// takes a file back from `.gitignore`.
+    /// app's. `--exclude` wins; an `--include` takes a file back from
+    /// `.gitignore`.
     fn decide(&mut self, path: &Path, is_dir: bool, parent: Seen) -> Option<Seen> {
-        if self.skip.iter().any(|skip| skip == path) {
-            return None;
-        }
         let relative = path.strip_prefix(&self.root).ok()?;
         if relative
             .components()
@@ -522,8 +511,10 @@ impl Gems {
 
     /// Copy what the GEM_HOME has of these gems into `gem_home/`, following
     /// every symlink: each gem's directory, its gemspec, the `bin/` stubs of
-    /// its executables, and the git checkouts Bundler finds it in.
-    fn copy(&self, walk: &mut Walk) -> Result<(), String> {
+    /// its executables, and the git checkouts Bundler finds it in. A path gem
+    /// whose directory `app/` takes, as a `gemspec` project's own is, takes
+    /// the files `app/` does.
+    fn copy(&self, walk: &mut Walk, filter: &mut AppFilter) -> Result<(), String> {
         let dest = Path::new("gem_home");
         for dir in GEM_HOME_DIRS {
             walk.dir(&dest.join(dir))?;
@@ -536,14 +527,21 @@ impl Gems {
                 continue;
             }
             installed.insert(name.as_str());
-            gem_dirs
-                .push(fs::canonicalize(&dir).map_err(|err| format!("{}: {err}", dir.display()))?);
-            walk.tree(
-                &dir,
-                &dest.join("gems").join(full_name),
-                Seen::Kept,
-                &mut gem_file,
-            )?;
+            let resolved =
+                fs::canonicalize(&dir).map_err(|err| format!("{}: {err}", dir.display()))?;
+            let target = dest.join("gems").join(full_name);
+            // ponytail: a `gemspec` project's files go in twice, under `app/`
+            // and here, and each `.rb` is compiled twice. Upgrade, if payloads
+            // show it: copy only the gemspec's `files` for a path gem, or
+            // point the path gem at `app/`.
+            if filter.keeps(&resolved, true) {
+                walk.tree(&resolved, &target, Seen::Kept, &mut |path, is_dir, seen| {
+                    filter.decide(path, is_dir, seen)
+                })?;
+            } else {
+                walk.tree(&dir, &target, Seen::Kept, &mut gem_file)?;
+            }
+            gem_dirs.push(resolved);
             let spec = self
                 .home
                 .join("specifications")
@@ -643,6 +641,8 @@ struct Walk {
     /// The directories being copied, resolved, to stop at a symlink that
     /// leads back into one of them.
     stack: Vec<PathBuf>,
+    /// The app being written and its staging directory, never taken.
+    skip: Vec<PathBuf>,
 }
 
 impl Walk {
@@ -662,7 +662,7 @@ impl Walk {
                 src.display()
             ));
         }
-        self.stack.push(resolved);
+        self.stack.push(resolved.clone());
         let entries = fs::read_dir(src)
             .and_then(Iterator::collect::<io::Result<Vec<_>>>)
             .map_err(|err| format!("{}: {err}", src.display()))?;
@@ -672,6 +672,9 @@ impl Walk {
             .collect();
         entries.sort();
         for (name, path) in entries {
+            if self.skip.contains(&resolved.join(&name)) {
+                continue;
+            }
             let meta = fs::metadata(&path);
             let is_dir = meta.as_ref().is_ok_and(Metadata::is_dir);
             let Some(next) = decide(&path, is_dir, seen) else {
