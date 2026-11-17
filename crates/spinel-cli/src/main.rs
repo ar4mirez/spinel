@@ -142,8 +142,10 @@ enum Command {
     ///
     /// Finds `test/**/*_test.rb` under the current directory, requires
     /// `test/test_helper.rb` once, then forks the workers, so what the helper
-    /// boots is booted once. Each worker is handed one file at a time. A
-    /// worker that dies while running a file is reported with that file.
+    /// boots is booted once. Each worker is handed one file at a time, the
+    /// longest first by the times the last run kept in
+    /// `.spinel/test_timings.json`. A worker that dies while running a file
+    /// is reported with that file.
     /// `spec/**/*_spec.rb` files run after them the same way, `rspec/core`
     /// and `spec/spec_helper.rb` required once, each worker running its
     /// files' examples through RSpec's own runner. Prints a dot for each

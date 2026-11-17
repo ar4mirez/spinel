@@ -32,19 +32,72 @@
 //! framework's own report is left out. `--reporter junit` (#95) prints JUnit
 //! XML instead, checked against the schema CI systems read
 //! (`tests/fixtures/test_runner/junit.xsd`).
+//!
+//! A run keeps each file's time in `.spinel/test_timings.json` where it
+//! runs and hands the files out longest first next time (#96), so each run
+//! of a fixture here is in a copy of its own, which starts with no times
+//! kept and is removed after it.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde_json::{Value, json};
 
 const SPINEL: &str = env!("CARGO_BIN_EXE_spinel");
 
+fn fixtures() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/test_runner")
+}
+
 fn fixture(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/test_runner")
-        .join(name)
+    fixtures().join(name)
+}
+
+/// A copy of a fixture, with the stand-ins its `lib/` requires beside it,
+/// in a fresh directory that is removed when the copy is dropped.
+struct Copy {
+    root: PathBuf,
+    dir: PathBuf,
+}
+
+impl Drop for Copy {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.root).ok();
+    }
+}
+
+/// `dir` copied, when it is a fixture; a directory of a test's own is run
+/// in as it is.
+fn copy_of(dir: &Path) -> Option<Copy> {
+    static COPIES: AtomicUsize = AtomicUsize::new(0);
+    let name = dir.strip_prefix(fixtures()).ok()?;
+    let root = std::env::temp_dir().join(format!(
+        "spinel-test-runner-copy-{}-{}",
+        std::process::id(),
+        COPIES.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::remove_dir_all(&root).ok();
+    copy_tree(&fixtures().join("stand_ins"), &root.join("stand_ins"));
+    copy_tree(dir, &root.join(name));
+    Some(Copy {
+        dir: root.join(name),
+        root,
+    })
+}
+
+fn copy_tree(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).expect("a directory to copy into");
+    for entry in std::fs::read_dir(from).expect("a fixture directory") {
+        let entry = entry.expect("a fixture entry");
+        let path = entry.path();
+        if path.is_dir() {
+            copy_tree(&path, &to.join(entry.file_name()));
+        } else {
+            std::fs::copy(&path, to.join(entry.file_name())).expect("a fixture file copied");
+        }
+    }
 }
 
 /// A log file of its own for one test, in a fresh directory.
@@ -56,8 +109,11 @@ fn scratch(name: &str) -> PathBuf {
     dir
 }
 
-/// `spinel test` with `args` in `dir`, logging to `log`.
+/// `spinel test` with `args` in `dir`, or in a copy of it when it is a
+/// fixture, logging to `log`.
 fn spinel_test(dir: &Path, args: &[&str], log: &Path, env: &[(&str, &str)]) -> Output {
+    let copy = copy_of(dir);
+    let dir = copy.as_ref().map_or(dir, |copy| copy.dir.as_path());
     Command::new(SPINEL)
         .arg("test")
         .args(args)
@@ -804,10 +860,13 @@ fn the_exit_status_is_zero_when_nothing_failed() {
     assert!(!out.contains("Re-run"), "nothing to re-run: {out}");
 }
 
-/// `command` pasted into `sh` in `fixture`, with `spinel` on the PATH: its
-/// output, and the results it reports, from the same command pasted again
-/// with `spinel` a shell function that adds `--reporter json` after `test`.
+/// `command` pasted into `sh` in a copy of `fixture`, with `spinel` on the
+/// PATH: its output, and the results it reports, from the same command
+/// pasted again with `spinel` a shell function that adds `--reporter json`
+/// after `test`.
 fn paste(fixture: &Path, command: &str) -> (Output, Vec<Value>) {
+    let copy = copy_of(fixture);
+    let fixture = copy.as_ref().map_or(fixture, |copy| copy.dir.as_path());
     let bin = Path::new(SPINEL).parent().expect("the binary's directory");
     let path = std::env::join_paths(std::iter::once(bin.to_path_buf()).chain(
         std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
@@ -1756,4 +1815,229 @@ fn an_unknown_reporter_is_an_error() {
     let err = stderr(&output);
     assert!(err.contains("invalid value 'tap'"), "{err}");
     assert!(err.contains("progress, json, junit"), "{err}");
+}
+
+/// The times a run kept in `dir`, by path, as `.spinel/test_timings.json`
+/// holds them; checks that file's shape, and that nothing else was left
+/// beside it, such as the file it was written to before being renamed.
+fn timings(dir: &Path) -> BTreeMap<String, f64> {
+    let kept = dir.join(".spinel");
+    let names: Vec<String> = std::fs::read_dir(&kept)
+        .expect(".spinel/ exists")
+        .map(|entry| {
+            entry
+                .expect("an entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    assert_eq!(
+        names,
+        ["test_timings.json"],
+        "nothing else is left in .spinel/"
+    );
+    let text = std::fs::read_to_string(kept.join("test_timings.json")).expect("the timings");
+    let json: Value = serde_json::from_str(&text).expect("JSON");
+    assert_eq!(json["version"], 1, "{text}");
+    json["files"]
+        .as_object()
+        .unwrap_or_else(|| panic!("a file per path: {text}"))
+        .iter()
+        .map(|(path, ms)| {
+            let ms = ms
+                .as_f64()
+                .unwrap_or_else(|| panic!("milliseconds: {text}"));
+            (path.clone(), ms)
+        })
+        .collect()
+}
+
+/// The files each worker was handed, by its pid, from a `timings` log.
+fn handed(log: &Path) -> BTreeMap<String, BTreeSet<String>> {
+    let mut workers: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for line in lines(log) {
+        workers
+            .entry(line[1].clone())
+            .or_default()
+            .insert(line[2].clone());
+    }
+    workers
+}
+
+/// The files of the worker that ran the slow file in the `timings` fixture.
+fn with_the_slow_file(log: &Path) -> BTreeSet<String> {
+    let workers = handed(log);
+    let files = workers
+        .values()
+        .find(|files| files.contains("z_slow_test.rb"));
+    files
+        .cloned()
+        .unwrap_or_else(|| panic!("the slow file ran: {workers:?}"))
+}
+
+#[test]
+fn each_files_time_is_kept_and_the_next_run_hands_out_the_slowest_first() {
+    // Six quick files, then one slow one, last in file order, on two
+    // workers. The first run hands them out in file order, the slow file
+    // to a worker with three quick ones: the run takes the slow file and
+    // three quick ones. The second, with the times kept, hands the slow file
+    // out first, to a worker of its own, and the six quick ones, which take
+    // less than it together, to the other: the run takes the slow file.
+    let copy = copy_of(&fixture("timings")).expect("a copy");
+    let dir = scratch("timings");
+
+    let started = std::time::Instant::now();
+    let output = spinel_test(&copy.dir, &["-j", "2"], &dir.join("first"), &[]);
+    let first = started.elapsed();
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let kept = timings(&copy.dir);
+    let quick = ["a", "b", "c", "d", "e", "f"].map(|name| format!("test/{name}_test.rb"));
+    let names: BTreeSet<&str> = kept.keys().map(String::as_str).collect();
+    let mut expected: BTreeSet<&str> = quick.iter().map(String::as_str).collect();
+    expected.insert("test/z_slow_test.rb");
+    assert_eq!(names, expected, "every file's time is kept: {kept:?}");
+    let slow = kept["test/z_slow_test.rb"];
+    assert!(slow >= 2000.0, "the slow file's test sleeps 2s: {kept:?}");
+    for file in &quick {
+        assert!(kept[file] >= 250.0 && kept[file] < slow, "{file}: {kept:?}");
+    }
+    let shared = with_the_slow_file(&dir.join("first"));
+    assert_eq!(
+        shared.len(),
+        4,
+        "in file order, with three quick files: {shared:?}"
+    );
+
+    let started = std::time::Instant::now();
+    let output = spinel_test(&copy.dir, &["-j", "2"], &dir.join("second"), &[]);
+    let second = started.elapsed();
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let alone = with_the_slow_file(&dir.join("second"));
+    assert_eq!(
+        alone,
+        BTreeSet::from(["z_slow_test.rb".to_owned()]),
+        "longest first, on a worker of its own: {:?}",
+        handed(&dir.join("second"))
+    );
+    assert_eq!(handed(&dir.join("second")).len(), 2, "on two workers");
+    std::fs::remove_dir_all(&dir).ok();
+    // Three quick files' 0.75s fewer, with room for a slow machine.
+    assert!(
+        second < first,
+        "longest first finishes sooner: {second:?}, in file order {first:?}"
+    );
+    assert_eq!(timings(&copy.dir).len(), 7, "and keeps the times again");
+}
+
+#[test]
+fn times_missing_unreadable_or_stale_are_left_out_and_every_file_still_runs() {
+    let dir = scratch("timings-bad");
+    let stale = r#"{"version": 1, "files": {"test/gone_test.rb": 99999, "test/a_test.rb": "slow", "test/b_test.rb": -1}}"#;
+    for (case, kept) in [
+        ("missing", None),
+        ("not JSON", Some("{\"version\": 1, \"files\": {")),
+        ("not an object", Some("[1, 2]")),
+        (
+            "another version",
+            Some(r#"{"version": 2, "files": {"test/a_test.rb": 5}}"#),
+        ),
+        ("stale and wrong", Some(stale)),
+    ] {
+        let copy = copy_of(&fixture("reopened")).expect("a copy");
+        if let Some(kept) = kept {
+            std::fs::create_dir_all(copy.dir.join(".spinel")).expect(".spinel/");
+            std::fs::write(copy.dir.join(".spinel/test_timings.json"), kept).expect("written");
+        }
+        let output = spinel_test(&copy.dir, &["-j", "2"], &dir.join("log"), &[]);
+        let out = stdout(&output);
+        // `reopened` has a test that fails, and its time is still kept.
+        assert_eq!(output.status.code(), Some(1), "{case}: {}", stderr(&output));
+        assert!(
+            out.contains("2 tests, 1 failure, 0 errors, 0 skips"),
+            "{case}: {out}"
+        );
+        assert!(
+            !stderr(&output).contains("spinel test:"),
+            "{case}: {}",
+            stderr(&output)
+        );
+        let kept = timings(&copy.dir);
+        let names: Vec<&str> = kept.keys().map(String::as_str).collect();
+        assert_eq!(
+            names,
+            ["test/a_test.rb", "test/b_test.rb"],
+            "{case}: the files that ran, and no file that is gone: {kept:?}"
+        );
+    }
+
+    // A directory where the file goes: told, and nothing else changes.
+    let copy = copy_of(&fixture("reopened")).expect("a copy");
+    std::fs::create_dir_all(copy.dir.join(".spinel/test_timings.json")).expect("a directory");
+    let output = spinel_test(&copy.dir, &["-j", "2"], &dir.join("log"), &[]);
+    std::fs::remove_dir_all(&dir).ok();
+    let err = stderr(&output);
+    assert_eq!(output.status.code(), Some(1), "{err}");
+    assert!(
+        err.contains("spinel test: test times not kept in .spinel/test_timings.json"),
+        "{err}"
+    );
+    assert!(!err.contains("problem"), "{err}");
+    assert!(
+        stdout(&output).contains("2 tests, 1 failure, 0 errors, 0 skips\n"),
+        "{err}"
+    );
+    let left: Vec<_> = std::fs::read_dir(copy.dir.join(".spinel"))
+        .expect(".spinel/")
+        .map(|entry| entry.expect("an entry").file_name())
+        .collect();
+    assert_eq!(
+        left,
+        ["test_timings.json"],
+        "no file written to rename is left"
+    );
+}
+
+#[test]
+fn a_file_run_in_part_or_ending_in_a_problem_keeps_the_time_it_had() {
+    let dir = scratch("timings-partial");
+    let copy = copy_of(&fixture("reopened")).expect("a copy");
+    let kept_at = |a: f64, b: f64| {
+        std::fs::create_dir_all(copy.dir.join(".spinel")).expect(".spinel/");
+        let json = json!({"version": 1, "files": {"test/a_test.rb": a, "test/b_test.rb": b}});
+        std::fs::write(copy.dir.join(".spinel/test_timings.json"), json.to_string())
+            .expect("written");
+    };
+
+    // One test of a file, by its line: not the file's time.
+    kept_at(55555.0, 66666.0);
+    let output = spinel_test(&copy.dir, &["test/a_test.rb:5"], &dir.join("log"), &[]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let kept = timings(&copy.dir);
+    assert_eq!(kept["test/a_test.rb"], 55555.0, "{kept:?}");
+    assert_eq!(kept["test/b_test.rb"], 66666.0, "{kept:?}");
+
+    // A file given whole is timed again; the others keep theirs.
+    let output = spinel_test(&copy.dir, &["test/b_test.rb"], &dir.join("log"), &[]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    let kept = timings(&copy.dir);
+    assert_eq!(kept["test/a_test.rb"], 55555.0, "{kept:?}");
+    assert!(kept["test/b_test.rb"] < 66666.0, "{kept:?}");
+
+    // A file whose worker died, exited or whose loading raised keeps no new
+    // time; one whose worker ended well is timed.
+    let copy = copy_of(&fixture("crash")).expect("a copy");
+    let output = spinel_test(&copy.dir, &["-j", "2"], &dir.join("log"), &[]);
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    let kept = timings(&copy.dir);
+    for file in kept.keys() {
+        assert!(
+            ["a", "c", "e", "g"]
+                .map(|name| format!("test/{name}_test.rb"))
+                .contains(file),
+            "only files whose worker ended well: {kept:?}"
+        );
+    }
+    assert!(!kept.is_empty(), "the replacement workers' files: {kept:?}");
 }

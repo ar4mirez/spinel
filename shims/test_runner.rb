@@ -25,7 +25,8 @@
 #    pipes to the phase process: one it reads files from, one line each,
 #    `path` or `path:LINE`, and one it writes events to. A file is handed to
 #    a worker only when it has finished the one before, so the files are
-#    shared out one at a time and a slow file holds up only its own worker.
+#    shared out one at a time and a slow file holds up only its own worker;
+#    which worker takes it is step 8's.
 #    A worker requires each file it is given, as Rake's loader requires
 #    them. After its last file a Minitest worker ends as a program ends, so
 #    the `at_exit` a framework registered (`minitest/autorun`) runs its
@@ -69,18 +70,38 @@
 #    write to it, so what they print goes there, and the problems are still
 #    told on stderr too. A discovery error is a problem under either, and
 #    the reporter still prints its report.
+# 8. Timings (#96): each phase process times each file it ran, from being
+#    handed out to its `done`, plus the `ms` of each result whose `rerun`
+#    names it, and the runner keeps them in `.spinel/test_timings.json` once
+#    both phases have ended. The next run hands out first the files with no
+#    time kept, then the rest longest first, each to the worker given the
+#    least so far: a worker runs its tests only once it has loaded its last
+#    file, so what it is given, not when, is what balances the workers.
 #
 # A phase process and the runner end with `exit!`, so an `at_exit` a helper
 # registered runs in the workers, which ran the tests, and not again in a
 # process with none loaded.
 
+require "fileutils"
 require "json"
 require "shellwords"
 require "stringio"
 
 module Spinel
   module TestRunner
-    Worker = Struct.new(:number, :pid, :tasks, :events, :buffer, :file, :ran, :failed)
+    # A worker: `load` is what the files handed to it are expected to take,
+    # in milliseconds, and `started` when it was given the file it is
+    # loading.
+    Worker = Struct.new(:number, :pid, :tasks, :events, :buffer, :file, :ran, :failed, :load, :started)
+
+    # One phase's run of its files: its workers by their events pipe, the
+    # files waiting, longest first, what each is expected to take, and,
+    # by path, how long each file took to load and its tests to run, and
+    # the files whose time is not kept (see `timed`).
+    Run = Struct.new(:workers, :queue, :costs, :framework, :report, :spent, :unkept)
+
+    # Where each test file's time is kept from one run to the next.
+    TIMINGS = ".spinel/test_timings.json"
 
     # The events a test or an example ends with, each as the progress line
     # prints it; a skip is `S` for Minitest and `*` for RSpec, as each of
@@ -102,6 +123,8 @@ module Spinel
     # for `json` and `junit`, a copy of it once stdout itself is stderr.
     @reporter = "progress"
     @out = $stdout
+    # The times `TIMINGS` kept, by path, read before any phase runs.
+    @timings = {}
 
     # Each character XML 1.0 cannot hold, and each that needs escaping in
     # an attribute's value or in text. A newline, a return or a tab in an
@@ -164,6 +187,48 @@ module Spinel
       found.partition { |path, _| !path.end_with?("_spec.rb") }
     end
 
+    # The times `TIMINGS` keeps, in milliseconds, by path: `{"version": 1,
+    # "files": {path: ms}}`. A file that is missing, cannot be read, is not
+    # that shape, or holds anything but a number at least zero for a path,
+    # leaves out what it cannot give: a file with no time is handed out as
+    # one never timed, and nothing else changes.
+    def self.read_timings
+      data = JSON.parse(File.read(TIMINGS))
+      files = data["files"] if data.is_a?(Hash) && data["version"] == 1
+      return {} unless files.is_a?(Hash)
+
+      files.each_with_object({}) do |(path, ms), timings|
+        timings[path] = ms.to_f if ms.is_a?(Numeric) && ms.to_f.finite? && ms >= 0
+      end
+    rescue StandardError
+      {}
+    end
+
+    # Keep the times this run took, `timed`, over those `kept` from before,
+    # leaving out each file that no longer exists, so a file deleted or
+    # renamed drops out. Written to a file of its own, then renamed over
+    # `TIMINGS`, so a run killed while writing leaves the last one whole.
+    # One that cannot be written is told on stderr, and the run's status is
+    # the same.
+    def self.write_timings(kept, timed)
+      timings = kept.merge(timed).select { |path, _| File.file?(path) }
+      return if timed.empty? && timings == kept
+
+      temp = "#{TIMINGS}.#{Process.pid}.tmp"
+      begin
+        FileUtils.mkdir_p(File.dirname(TIMINGS))
+        File.write(temp, "#{JSON.pretty_generate({ "version" => 1, "files" => timings.sort.to_h })}\n")
+        File.rename(temp, TIMINGS)
+      rescue StandardError => e
+        warn "spinel test: test times not kept in #{TIMINGS}: #{e.message}"
+        begin
+          File.delete(temp)
+        rescue StandardError
+          nil
+        end
+      end
+    end
+
     def self.run(jobs, reporter, args)
       @reporter = reporter
       unless reporter == "progress"
@@ -171,7 +236,9 @@ module Spinel
         $stdout.reopen($stderr)
       end
       found = discover(args)
-      report = { "counts" => Hash.new(0), "failures" => [], "problems" => [], "results" => [] }
+      report = {
+        "counts" => Hash.new(0), "failures" => [], "problems" => [], "results" => [], "timings" => {},
+      }
       printed = false
       if found.is_a?(String)
         if reporter == "progress"
@@ -181,12 +248,14 @@ module Spinel
         report["problems"] << { "message" => found }
       else
         tests, specs = found
+        @timings = read_timings
         unless tests.empty?
           printed = true if phase(report, "Minitest") { |kept| run_tests(tests, jobs, kept) }
         end
         unless specs.empty?
           printed = true if phase(report, "RSpec") { |kept| run_specs(specs, jobs, kept) }
         end
+        write_timings(@timings, report["timings"])
       end
       case reporter
       when "json" then json_report(report)
@@ -208,7 +277,7 @@ module Spinel
       reader, writer = IO.pipe
       pid = fork do
         reader.close
-        kept = { "counts" => Hash.new(0), "failures" => [], "problems" => [] }
+        kept = { "counts" => Hash.new(0), "failures" => [], "problems" => [], "timings" => {} }
         # Every result, for a report that lists them all.
         kept["results"] = [] if @reporter == "junit"
         yield kept
@@ -236,6 +305,7 @@ module Spinel
       report["failures"].concat(by_location(kept["failures"]))
       report["results"].concat(by_location(kept["results"]).map { |event| [name, event] }) if kept["results"]
       report["problems"].concat(kept["problems"])
+      report["timings"].merge!(kept["timings"])
       kept["counts"].values.sum.positive?
     end
 
@@ -271,23 +341,23 @@ module Spinel
     end
 
     # Run `files` on up to `jobs` workers of `framework`, keeping what they
-    # did in `report`.
+    # did in `report`, and how long each file took in its `timings`.
     def self.run_files(files, jobs, framework, report)
-      queue = files.map { |path, line| task(path, line) }
-      workers = {}
+      queue, costs = schedule(files)
+      run = Run.new({}, queue, costs, framework, report, Hash.new(0.0), {})
       count = 0
       add_worker = lambda do
         count += 1
-        worker = start(count, workers, framework)
-        workers[worker.events] = worker
-        hand_out(worker, queue)
+        worker = start(count, run.workers, framework)
+        run.workers[worker.events] = worker
       end
       [jobs, queue.size].min.times { add_worker.call }
+      dispatch(run)
 
-      until workers.empty?
-        ready, = IO.select(workers.keys)
+      until run.workers.empty?
+        ready, = IO.select(run.workers.keys)
         ready.each do |io|
-          worker = workers[io]
+          worker = run.workers[io]
           chunk = begin
             io.read_nonblock(65_536)
           rescue IO::WaitReadable
@@ -298,13 +368,13 @@ module Spinel
           if chunk
             worker.buffer << chunk
             while (newline = worker.buffer.index("\n"))
-              line_from(worker, worker.buffer.slice!(0..newline), queue, framework, report)
+              line_from(run, worker, worker.buffer.slice!(0..newline))
             end
             next
           end
 
           # Its end of the events pipe is closed: the worker has ended.
-          workers.delete(io)
+          run.workers.delete(io)
           io.close
           worker.tasks.close unless worker.tasks.closed?
           _, status = Process.wait2(worker.pid)
@@ -313,6 +383,7 @@ module Spinel
               "message" => "worker #{worker.number} (pid #{worker.pid}) #{ending(status)} while running #{worker.file}",
               "rerun" => worker.file,
             }
+            unkeep(run, worker)
             add_worker.call unless queue.empty?
           elsif status.signaled? || (!status.success? && worker.failed.zero?)
             # A crash while the `at_exit` ran the tests, or a failing status
@@ -322,11 +393,75 @@ module Spinel
             report["problems"] << {
               "message" => "worker #{worker.number} (pid #{worker.pid}) #{ending(status)} after its last file; it ran #{ran}",
             }
+            unkeep(run, worker)
           end
+          dispatch(run)
         end
+      end
+      report["timings"] = timed(files, run)
+    end
+
+    # The order `files` are handed out in, as tasks, and what each is
+    # expected to take, by task, from the times kept from the last run: a
+    # file with no time kept first, in the order given, counted as the mean
+    # of the times kept (all alike when none is), as a file never timed may
+    # be the slowest; then the rest, longest first, those alike in the order
+    # given.
+    def self.schedule(files)
+      known, unknown = files.partition { |path, _| @timings.key?(path) }
+      times = known.map { |path, _| @timings[path] }
+      guess = times.empty? ? 1.0 : times.sum / times.size
+      ordered = unknown.map { |path, line| [task(path, line), guess] }
+      ordered.concat(
+        known.each_with_index
+             .sort_by { |(path, _), index| [-@timings[path], index] }
+             .map { |(path, line), _| [task(path, line), @timings[path]] }
+      )
+      [ordered.map(&:first), ordered.to_h]
+    end
+
+    # Hand out what is waiting, longest first, each to the worker with the
+    # least expected of it, as LPT (longest processing time first) shares
+    # jobs out: a worker that has loaded its file waits for its next while
+    # another, still loading, has been given less. Waiting costs no time,
+    # as a worker runs its files' tests only once it has loaded its last
+    # one: what each worker ends up running is what balances. With nothing
+    # waiting, each worker that has loaded its file is told so, and ends.
+    def self.dispatch(run)
+      loop do
+        idle = run.workers.values.select { |worker| worker.file.nil? && !worker.tasks.closed? }
+        return if idle.empty?
+
+        if run.queue.empty?
+          idle.each { |worker| worker.tasks.close }
+          return
+        end
+        worker = idle.min_by(&:load)
+        return if run.workers.each_value.any? { |other| other.file && other.load < worker.load }
+
+        hand_out(run, worker)
       end
     end
 
+    # The files of `worker`, which ended with a problem, whose time is not
+    # kept: what it ran may not have run its tests.
+    def self.unkeep(run, worker)
+      worker.ran.each { |file| run.unkept[file] = true }
+      run.unkept[worker.file] = true if worker.file
+    end
+
+    # How long each of `files` took, in milliseconds, by path: from being
+    # handed out to being loaded, then each result's own time, counted to
+    # the file its `rerun` names. Only a file given whole is timed, whose
+    # loading did not raise and whose worker ended with no problem; any
+    # other's kept time is kept as it was.
+    def self.timed(files, run)
+      files.each_with_object({}) do |(path, line), timed|
+        next if line || run.unkept[path] || !run.spent.key?(path)
+
+        timed[path] = run.spent[path].round(3)
+      end
+    end
     # Fork worker `number`. The child closes the parent's ends of every
     # other worker's pipes, so each pipe's end is seen when its own worker
     # ends and not when the last worker forked after it does.
@@ -345,7 +480,7 @@ module Spinel
       tasks_r.close
       events_w.close
       tasks_w.sync = true
-      Worker.new(number, pid, tasks_w, events_r, +"", nil, [], 0)
+      Worker.new(number, pid, tasks_w, events_r, +"", nil, [], 0, 0.0, nil)
     end
 
     # The worker: each line read is a file to require, then a `done` event.
@@ -392,26 +527,27 @@ module Spinel
     end
 
     # One line from `worker`. A line that is not an event is skipped.
-    def self.line_from(worker, line, queue, framework, report)
+    def self.line_from(run, worker, line)
       parsed = begin
         JSON.parse(line)
       rescue JSON::ParserError
         nil
       end
-      event(worker, parsed, queue, framework, report) if parsed.is_a?(Hash)
+      event(run, worker, parsed) if parsed.is_a?(Hash)
     end
 
     # One event from `worker`: a result is printed as progress, or as
     # itself for `--reporter json`, and counted, and kept when it failed, or
-    # whatever it was for `--reporter junit`; a file that failed to load is
-    # a problem.
-    def self.event(worker, event, queue, framework, report)
+    # whatever it was for `--reporter junit`, and its time counted to its
+    # file; a file that failed to load is a problem.
+    def self.event(run, worker, event)
+      report = run.report
       kind = event["event"]
       if RESULTS.include?(kind)
         report["counts"][kind] += 1
         case @reporter
         when "progress"
-          @out.write(PROGRESS[framework][kind])
+          @out.write(PROGRESS[run.framework][kind])
           @out.flush
         when "json" then emit(event)
         when "junit" then report["results"] << event
@@ -420,34 +556,45 @@ module Spinel
           worker.failed += 1
           report["failures"] << event
         end
+        if event["rerun"].is_a?(String) && event["ms"].is_a?(Numeric)
+          run.spent[location(event["rerun"]).first] += event["ms"]
+        end
         return
       end
       return unless kind == "done"
 
       emit(event) if @reporter == "json"
 
-      worker.ran << worker.file
+      file = worker.file
+      if file
+        run.spent[location(file).first] += (now - worker.started) * 1000
+        worker.ran << file
+      end
       worker.file = nil
-      hand_out(worker, queue)
-      return unless event["error"]
-
-      report["problems"] << { "message" => "#{event["file"]}: #{event["error"]}", "rerun" => event["file"] }
+      if event["error"]
+        report["problems"] << { "message" => "#{event["file"]}: #{event["error"]}", "rerun" => event["file"] }
+        run.unkept[file] = true if file
+      end
+      dispatch(run)
     end
 
-    # The next waiting file for `worker`, or, with none left, the end of its
-    # tasks pipe, which ends it. A worker that has already ended cannot take
-    # it; the end of its events pipe reports it with the file.
-    def self.hand_out(worker, queue)
-      if (file = queue.shift)
-        worker.file = file
-        begin
-          worker.tasks.write("#{file}\n")
-        rescue Errno::EPIPE
-          nil
-        end
-      else
-        worker.tasks.close
+    # The next waiting file, for `worker`. A worker that has already ended
+    # cannot take it; the end of its events pipe reports it with the file.
+    def self.hand_out(run, worker)
+      file = run.queue.shift
+      worker.file = file
+      worker.load += run.costs[file]
+      worker.started = now
+      begin
+        worker.tasks.write("#{file}\n")
+      rescue Errno::EPIPE
+        nil
       end
+    end
+
+    # A monotonic clock's seconds.
+    def self.now
+      Process.clock_gettime(Process::CLOCK_MONOTONIC)
     end
 
     # "1 failure", "2 failures".
