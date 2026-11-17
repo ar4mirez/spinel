@@ -9,6 +9,16 @@ bytecode a tool reads.
 
 ### Added
 
+- **`spinel build --compile <entry> -o <app>` packs a project into one
+  executable** ([#100](https://github.com/ar4mirez/spinel/issues/100)). The
+  app is this `spinel` with a payload of the project's files (as
+  `.gitignore` keeps them, `--include`/`--exclude` on top), the gems of the
+  lockfile's `default` group and each `--group` as real copies, a warmed
+  bytecode cache and a manifest (entry point, version, `spinel-ext` ABI,
+  `--env`, and the arguments after `--`). The same project builds the same
+  bytes. Running the app is #101; until then it verifies its payload and
+  says it cannot run yet. `docs/build.md`, "The payload", has the details.
+
 - **`spinel test` keeps each file's time and hands out the slowest first**
   ([#96](https://github.com/ar4mirez/spinel/issues/96)). After a run, each
   test file's time is kept in `.spinel/test_timings.json`; the next run hands
