@@ -9,13 +9,14 @@
 //!
 //! On Linux the payload is a plain append: the ELF loader maps what the
 //! program headers name and ignores anything past them. Reading a plain
-//! `spinel` costs one seek and one 48-byte read; the payload is hashed only
-//! once the magic says one is there.
+//! `spinel` costs one seek and one 48-byte read; a compiled app's payload is
+//! hashed only when it is extracted (`app.rs`, #101).
 //!
 //! On macOS the same bytes, payload then trailer, are the contents of a
 //! `__SPINEL,__payload` section instead, since appending to a signed Mach-O
-//! breaks its signature (`macho.rs`, #99). `locate` finds where they are and
-//! `read` parses them, the same parser for both.
+//! breaks its signature (`macho.rs`, #99). `find` locates them without hashing
+//! the payload, and `locate` and `read` also check its hash; one parser serves
+//! both.
 
 use std::fmt;
 use std::fs::File;
