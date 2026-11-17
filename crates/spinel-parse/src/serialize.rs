@@ -199,17 +199,21 @@ pub fn success(source: &[u8], options: &[u8]) -> Result<bool, MalformedOptions> 
 /// no, -1 an encoding Prism does not know.
 #[must_use]
 pub fn query(query: Query, string: &[u8], encoding: &CStr) -> i32 {
-    // SAFETY: `string` is valid for its length and `encoding` is a
-    // NUL-terminated name, for the call.
+    // Prism's `pm_slice_type` reads the byte at the slice's end, looking for
+    // a trailing `!`, `?` or `=`, even when the slice is used up. CRuby's
+    // strings always end in a NUL there; give Prism the same, so the byte
+    // past `string` cannot turn "foo" into a method name.
+    let mut terminated = Vec::with_capacity(string.len() + 1);
+    terminated.extend_from_slice(string);
+    terminated.push(0);
+    let (source, length) = (terminated.as_ptr(), string.len());
+    // SAFETY: `source` is valid for `length` bytes plus the NUL after them,
+    // and `encoding` is a NUL-terminated name, for the call.
     unsafe {
         match query {
-            Query::Local => pm_string_query_local(string.as_ptr(), string.len(), encoding.as_ptr()),
-            Query::Constant => {
-                pm_string_query_constant(string.as_ptr(), string.len(), encoding.as_ptr())
-            }
-            Query::MethodName => {
-                pm_string_query_method_name(string.as_ptr(), string.len(), encoding.as_ptr())
-            }
+            Query::Local => pm_string_query_local(source, length, encoding.as_ptr()),
+            Query::Constant => pm_string_query_constant(source, length, encoding.as_ptr()),
+            Query::MethodName => pm_string_query_method_name(source, length, encoding.as_ptr()),
         }
     }
 }
@@ -244,6 +248,16 @@ mod tests {
         assert_eq!(query(Query::Constant, b"foo", c"UTF-8"), 0);
         assert_eq!(query(Query::MethodName, b"foo?", c"UTF-8"), 1);
         assert_eq!(query(Query::Local, b"foo", c"NOPE"), -1);
+    }
+
+    #[test]
+    fn a_query_does_not_read_the_byte_after_the_string() {
+        // What lies past the slice is a `=`, the end Prism looks for.
+        let local = &b"foo="[..3];
+        let constant = &b"Foo?"[..3];
+        assert_eq!(query(Query::Local, local, c"UTF-8"), 1);
+        assert_eq!(query(Query::Constant, constant, c"UTF-8"), 1);
+        assert_eq!(query(Query::MethodName, local, c"UTF-8"), 1);
     }
 
     fn u32(n: u32) -> [u8; 4] {
