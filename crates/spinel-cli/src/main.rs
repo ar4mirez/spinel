@@ -155,9 +155,9 @@ enum Command {
         /// How many workers to fork; the physical cores when not given.
         #[arg(short, long, value_name = "N", value_parser = clap::value_parser!(u16).range(1..))]
         jobs: Option<u16>,
-        /// Files or directories to run instead of every test; `FILE:LINE`
-        /// runs only the test or example defined at or nearest above LINE.
-        #[arg(value_name = "PATH[:LINE]")]
+        /// Files to run instead of every test; `FILE:LINE` runs only the
+        /// test or example defined at or nearest above LINE.
+        #[arg(value_name = "FILE[:LINE]")]
         paths: Vec<String>,
     },
 

@@ -1,29 +1,43 @@
 # A stand-in for rspec-core, which is not installed here: what `spinel test`
 # calls of it (#837, #93), as rspec-core 3 answers it. `RSpec.describe`,
-# `it` and `xit` define examples, an example's `pending` marks it pending,
-# and `expect(..).to eq(..)` fails with `ExpectationNotMetError`.
+# `it` and `xit` define examples, `RSpec.shared_examples` and
+# `it_behaves_like` include examples in a group of their own, an example's
+# `pending` marks it pending, and `expect(..).to eq(..)` fails with
+# `ExpectationNotMetError`.
 # `RSpec::Core::Runner.disable_autorun!` and `.run(args, err, out)` run the
 # examples and answer the exit status: the `before(:suite)` hooks first,
 # then each example, its end sent to the reporter's listeners as
 # `example_passed`, `example_failed` or `example_pending`, and what failed
 # and the count written to `out`. `filter_manager.add_location(path, lines)`
-# keeps to the examples of that file declared, or in a group declared, at
-# the declaration nearest above each line, as rspec-core's location filter
-# does. Each run is logged with the pid that ran it and the examples it
-# ran. The real gem's run is checked by hand against CRuby in #837's, #93's
-# and #94's pull requests.
+# keeps to the examples whose top-level group is in that file and that are
+# declared, or in a group declared, at the declaration nearest above each
+# line, as rspec-core's location filter does. An example's
+# `location_rerun_argument` is the location of it or of the nearest group
+# around it in a file that defined a top-level group, as rspec-core's is.
+# Each run is logged with the pid that ran it and the examples it ran. The
+# real gem's run is checked by hand against CRuby in #837's, #93's and
+# #94's pull requests.
 module RSpec
   @examples = []
+  @shared = {}
+  @group_files = []
 
   class << self
-    attr_reader :examples
+    attr_reader :examples, :shared, :group_files
 
     def configuration
       @configuration ||= Core::Configuration.new
     end
 
     def describe(name, &block)
-      Group.new(name, caller_locations(1, 1).first.lineno).instance_eval(&block)
+      group = Group.new(name, caller_locations(1, 1).first, nil)
+      path = group.metadata[:absolute_file_path]
+      group_files << path unless group_files.include?(path)
+      group.instance_eval(&block)
+    end
+
+    def shared_examples(name, &block)
+      shared[name] = block
     end
   end
 
@@ -40,23 +54,41 @@ module RSpec
   end
 
   class Group
-    def initialize(name, line)
-      @name = name
-      @line = line
+    attr_reader :name, :metadata
+
+    def initialize(name, location, parent)
+      @name = parent ? "#{parent.name} #{name}" : name
+      @metadata = Core.metadata(location, parent&.metadata)
     end
 
     def it(name, &block)
-      RSpec.examples << Core::Example.new("#{@name} #{name}", caller_locations(1, 1).first, @line, block)
+      RSpec.examples << Core::Example.new("#{@name} #{name}", caller_locations(1, 1).first, metadata, block)
     end
 
     def xit(name, &block)
-      example = Core::Example.new("#{@name} #{name}", caller_locations(1, 1).first, @line, block)
+      example = Core::Example.new("#{@name} #{name}", caller_locations(1, 1).first, metadata, block)
       example.skip = "Temporarily skipped with xit"
       RSpec.examples << example
+    end
+
+    def it_behaves_like(name)
+      Group.new("behaves like #{name}", caller_locations(1, 1).first, self)
+        .instance_eval(&RSpec.shared.fetch(name))
     end
   end
 
   module Core
+    # An example's or a group's metadata, as far as locations go, its
+    # group's as `parent`.
+    def self.metadata(location, parent)
+      path = location.path.delete_prefix("#{Dir.pwd}/")
+      {
+        file_path: "./#{path}", line_number: location.lineno, location: "./#{path}:#{location.lineno}",
+        absolute_file_path: File.expand_path(location.path), parent: parent,
+        rerun_file_path: parent ? parent[:rerun_file_path] : "./#{path}",
+      }
+    end
+
     module Pending
       class PendingExampleFixedError < StandardError; end
     end
@@ -85,20 +117,27 @@ module RSpec
       attr_reader :full_description, :metadata, :execution_result
       attr_accessor :skip
 
-      def initialize(description, location, group_line, block)
+      def initialize(description, location, group, block)
         @full_description = description
         @block = block
-        path = location.path.delete_prefix("#{Dir.pwd}/")
-        @metadata = {
-          file_path: "./#{path}", line_number: location.lineno,
-          absolute_file_path: File.expand_path(location.path), group_line: group_line,
-        }
+        @metadata = Core.metadata(location, group)
         @execution_result = ExecutionResult.new
       end
 
-      # Its line and its group's, as rspec-core ascends its metadata.
-      def declaration_lines
-        [metadata[:line_number], metadata[:group_line]]
+      # Its metadata, then each group's around it, as rspec-core ascends it.
+      def ascending
+        list = []
+        meta = metadata
+        while meta
+          list << meta
+          meta = meta[:parent]
+        end
+        list
+      end
+
+      def location_rerun_argument
+        loaded = RSpec.configuration.loaded_spec_files
+        ascending.find { |meta| loaded.include?(meta[:absolute_file_path]) }&.fetch(:location)
       end
 
       # Its status, as rspec-core gives it: `pending` for an example
@@ -172,27 +211,32 @@ module RSpec
         @locations[File.expand_path(file_path)].concat(line_numbers)
       end
 
-      # The examples to run: each of a file with no location, else each
-      # declared at the declaration nearest above one of its lines.
+      # The examples to run: each whose top-level group's file has no
+      # location, else each that is, or is in a group, declared at the
+      # declaration nearest above one of its file's lines.
       def prune(examples)
+        declared = Hash.new { |hash, key| hash[key] = [] }
+        examples.each do |example|
+          example.ascending.each { |meta| declared[meta[:absolute_file_path]] << meta[:line_number] }
+        end
         examples.select do |example|
-          path = example.metadata[:absolute_file_path]
-          next true unless @locations.key?(path)
+          next true unless @locations.key?(File.expand_path(example.metadata[:rerun_file_path]))
 
-          declared = examples.select { |other| other.metadata[:absolute_file_path] == path }
-            .flat_map(&:declaration_lines).uniq.sort.reverse
-          @locations[path].any? do |line|
-            nearest = declared.find { |number| number <= line }
-            example.declaration_lines.include?(nearest)
+          example.ascending.any? do |meta|
+            path = meta[:absolute_file_path]
+            @locations.fetch(path, []).any? do |line|
+              meta[:line_number] == declared[path].select { |number| number <= line }.max
+            end
           end
         end
       end
     end
 
     class Configuration
-      attr_reader :backtrace_formatter, :filter_manager
+      attr_reader :backtrace_formatter, :filter_manager, :loaded_spec_files
 
       def initialize
+        @loaded_spec_files = []
         @before_suite = []
         @backtrace_formatter = BacktraceFormatter.new
         @filter_manager = FilterManager.new
@@ -223,6 +267,8 @@ module RSpec
         raise "paths given: #{args.inspect}" unless args.empty?
 
         config = RSpec.configuration
+        # `load_spec_files`: the files already loaded that defined groups.
+        config.loaded_spec_files.concat(RSpec.group_files - config.loaded_spec_files)
         config.run_before_suite
         examples = config.filter_manager.prune(RSpec.examples)
         failed = examples.select do |example|

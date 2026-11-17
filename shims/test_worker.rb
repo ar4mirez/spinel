@@ -5,7 +5,13 @@
 #
 #   {"event":"done","file":..,"error":..}   a file it was given is loaded
 #   {"event":"pass|fail|error|skip","file":..,"line":..,"name":..,"ms":..,
-#    "message":..,"backtrace":[..]}         a test or an example ended
+#    "message":..,"backtrace":[..],"rerun":..}
+#                                           a test or an example ended
+#
+# `file` and `line` are where the test or example is defined; `rerun` is
+# the `path` or `path:LINE` that `spinel test` runs it again with, which a
+# test defined outside the file that runs it (a Minitest module's, an RSpec
+# shared example's) cannot be found by.
 #
 # A Minitest reporter and an RSpec formatter write the second kind. Each
 # event is one `write`, under a lock, on a pipe that is `sync`, so a line is
@@ -26,6 +32,8 @@ module Spinel
     @lock = Mutex.new
     # How many failures and errors this worker has reported.
     @failed = 0
+    # The file each Minitest test class was defined by, by name.
+    @homes = {}
 
     class << self
       attr_reader :failed
@@ -44,14 +52,27 @@ module Spinel
     end
 
     # A test's or an example's end.
-    def self.result(event, file, line, name, seconds, message = nil, backtrace = [])
+    def self.result(event, file, line, name, seconds, message, backtrace, rerun)
       @failed += 1 if event == "fail" || event == "error"
       emit(
         "event" => event, "file" => file && relative(file.to_s), "line" => line,
         "name" => text(name), "ms" => (seconds.to_f * 1000).round(3),
         "message" => message && text(message),
-        "backtrace" => backtrace.map { |frame| relative(text(frame)) }
+        "backtrace" => backtrace.map { |frame| relative(text(frame)) },
+        "rerun" => rerun && relative(rerun)
       )
+    end
+
+    # Where a Minitest test of class `klass`, defined at `file`:`line`, runs
+    # again: the file given that defined its class, at the line when the
+    # test is defined there, else the whole file; nil for a class no file
+    # given defined.
+    def self.minitest_rerun(klass, file, line)
+      home = @homes[klass.to_s]
+      return unless home
+      return home unless file && line && File.expand_path(file) == File.expand_path(home)
+
+      "#{home}:#{line}"
     end
 
     # A path under the current directory as the test files are named, from
@@ -83,15 +104,18 @@ module Spinel
     # loading them on the Minitest 5 releases that load only into an empty
     # list.
     #
-    # `files` is what the worker loaded: each path, the lines asked for
-    # (none for all of it), and the test classes that appeared when it was
-    # required. When any has lines, only the tests at them run of the
-    # classes those files defined.
+    # `files` is what the worker loaded: each path, the line asked for (nil
+    # for all of it), and the test classes that appeared when it was
+    # required. When any has a line, only the tests at it run of the
+    # classes that file defined.
     # ponytail: a plugin's own printing reporter (Rails' `TestUnitReporter`)
     # still prints; `--reporter` (#95) is where to choose.
     def self.minitest(files = [])
       return unless defined?(::Minitest) && ::Minitest.respond_to?(:init_plugins)
 
+      files.each do |path, _, classes|
+        classes.each { |klass| @homes[klass.name] ||= path if klass.name }
+      end
       ours = MinitestReporter.new
       ::Minitest.singleton_class.prepend(Module.new do
         define_method(:init_plugins) do |options|
@@ -110,18 +134,18 @@ module Spinel
       only(files)
     end
 
-    # Run only the tests at the lines asked for, of the classes the files
-    # with lines defined; every test of any other class.
+    # Run only the tests at the line asked for, of the classes the files
+    # with a line defined; every test of any other class.
     def self.only(files)
-      return if files.none? { |_, lines, _| lines.any? } || !defined?(::Minitest::Test)
+      return if files.none? { |_, line, _| line } || !defined?(::Minitest::Test)
 
       restricted = []
       chosen = []
-      files.each do |path, lines, classes|
-        next if lines.empty?
+      files.each do |path, line, classes|
+        next unless line
 
         restricted.concat(classes)
-        chosen.concat(at_lines(File.expand_path(path), lines))
+        chosen.concat(at_line(File.expand_path(path), line))
       end
       ::Minitest::Test.singleton_class.prepend(Module.new do
         define_method(:runnable_methods) do
@@ -134,9 +158,9 @@ module Spinel
     end
 
     # `[class, method]` for each test whose method starts nearest above or
-    # at each line, in `path`: as `rspec` finds the declaration nearest
-    # above a line, and as a test's `source_location` names it.
-    def self.at_lines(path, lines)
+    # at `wanted`, in `path`: as `rspec` finds the declaration nearest above
+    # a line, and as a test's `source_location` names it.
+    def self.at_line(path, wanted)
       tests = runnables.flat_map do |klass|
         next [] unless klass.respond_to?(:methods_matching)
 
@@ -145,10 +169,8 @@ module Spinel
           [klass, name.to_s, line] if file && line && File.expand_path(file) == path
         end
       end
-      lines.flat_map do |wanted|
-        nearest = tests.map { |_, _, line| line }.select { |line| line <= wanted }.max
-        tests.select { |_, _, line| line == nearest }.map { |klass, name, _| [klass, name] }
-      end
+      nearest = tests.map { |_, _, line| line }.select { |line| line <= wanted }.max
+      tests.select { |_, _, line| line == nearest }.map { |klass, name, _| [klass, name] }
     end
 
     # Listen for each example's end, once RSpec has set up its own
@@ -157,12 +179,12 @@ module Spinel
     # ponytail: `--dry-run` runs no suite hooks, so it reports no results;
     # a hook on the reporter's `start` would catch it too.
     #
-    # `locations` are the files given with lines, each `[path, lines]`,
+    # `locations` are the files given with a line, each `[path, line]`,
     # added to RSpec's location filter as `rspec path:line` adds them: only
-    # the examples declared nearest above those lines run of those files.
+    # the examples declared nearest above that line run of that file.
     def self.rspec(locations = [])
       config = ::RSpec.configuration
-      locations.each { |path, lines| config.filter_manager.add_location(path, lines) }
+      locations.each { |path, line| config.filter_manager.add_location(path, [line]) }
       config.prepend_before(:suite) do
         config.reporter.register_listener(
           RSpecFormatter.new, :example_passed, :example_failed, :example_pending
@@ -203,11 +225,17 @@ module Spinel
           when "skip" then [failure.message, nil]
           end
         backtrace = backtrace ? ::Minitest.filter_backtrace(backtrace) : []
-        TestWorker.result(event, file, line, "#{klass}##{result.name}", result.time, message, backtrace)
+        TestWorker.result(
+          event, file, line, "#{klass}##{result.name}", result.time, message, backtrace,
+          TestWorker.minitest_rerun(klass, file, line)
+        )
       end
     end
 
-    # An RSpec formatter's example notifications.
+    # An RSpec formatter's example notifications. An example runs again at
+    # its `location_rerun_argument`, as RSpec's own summary prints it: its
+    # own location, or that of the group that included it from a spec file
+    # (`it_behaves_like`).
     class RSpecFormatter
       def example_passed(notification)
         example(notification.example, "pass")
@@ -238,7 +266,7 @@ module Spinel
         metadata = example.metadata
         TestWorker.result(
           event, metadata[:file_path], metadata[:line_number], example.full_description,
-          example.execution_result.run_time, message, backtrace
+          example.execution_result.run_time, message, backtrace, example.location_rerun_argument
         )
       end
     end

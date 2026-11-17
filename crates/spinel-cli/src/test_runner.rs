@@ -15,8 +15,7 @@ const TEST_RUNNER: &str = include_str!("../../../shims/test_runner.rb");
 const TEST_WORKER: &str = include_str!("../../../shims/test_worker.rb");
 
 /// Run the suite under the current directory, or the `paths` given (each a
-/// file, `FILE:LINE` or a directory), on `jobs` workers, or one per
-/// physical core.
+/// file or `FILE:LINE`), on `jobs` workers, or one per physical core.
 pub(crate) fn run(jobs: Option<usize>, paths: &[String]) -> ExitCode {
     let jobs = jobs.unwrap_or_else(physical_cores);
     let mut args = vec![jobs.to_string()];

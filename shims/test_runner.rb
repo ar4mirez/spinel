@@ -1,14 +1,14 @@
 # Spinel's test runner (docs/test-runner.md, "Execution" and "Output"): what
 # `spinel test` runs on the VM, after `shims/setup.rb` and the gem prelude,
 # as `spinel run` runs a program. `ARGV` is the worker count the CLI chose
-# (`-j`, else the physical cores), then the paths it was given, each a file
-# or a directory, a file with `:LINE` after it as often as wanted; it is
-# cleared before any test code can read it.
+# (`-j`, else the physical cores), then the files it was given, each with
+# an optional `:LINE` after it; it is cleared before any test code can read
+# it.
 #
 # 1. Discovery: with no paths, `test/**/*_test.rb` (Minitest) and
 #    `spec/**/*_spec.rb` (RSpec), relative to the current directory, each
-#    sorted; a directory given is searched the same way, and a file given is
-#    a spec file when its name ends `_spec.rb`, else a Minitest file. The
+#    sorted; a file given is a spec file when its name ends `_spec.rb`, else
+#    a Minitest file, and a path given that is not a file is an error. The
 #    Minitest files run first, then the RSpec files. Each phase runs in a
 #    process of its own forked from this one, the RSpec one only after the
 #    Minitest one has ended, so neither framework's helper or `at_exit`
@@ -31,8 +31,8 @@
 #    the `at_exit` a framework registered (`minitest/autorun`) runs its
 #    tests; an RSpec worker runs the examples its files defined through
 #    RSpec's own runner, as `rspec` does (`RSpec::Core::Runner.invoke`), and
-#    exits with its status. A file given with lines runs only the tests or
-#    examples at them (`shims/test_worker.rb`).
+#    exits with its status. A file given with a line runs only the tests or
+#    examples at it (`shims/test_worker.rb`).
 # 4. Results: a worker writes one JSON line per event, through
 #    `shims/test_worker.rb`, loaded before this file: `done` once a file is
 #    loaded, with the exception loading raised or `nil`, and, from the
@@ -56,8 +56,8 @@
 #    both have ended: each failure and error with the `file:line` of its
 #    test and its backtrace, trimmed, with each run of gem frames folded to
 #    one line; the problems, on stderr; a summary line counting each kind;
-#    and a `spinel test file:line` command that runs each failure again,
-#    pasted as it is. The exit status is 1 when anything failed, raised or
+#    and a `spinel test` command that runs each failure again, pasted as it
+#    is, from the location its event names to run it again (`rerun`). The exit status is 1 when anything failed, raised or
 #    went wrong, and 0 otherwise.
 #
 # A phase process and the runner end with `exit!`, so an `at_exit` a helper
@@ -99,18 +99,18 @@ module Spinel
       end
     end
 
-    # `path`, `path:LINE` or `path:LINE:LINE`: the path and its lines.
+    # `path` or `path:LINE`: the path and its line, or nil.
     def self.location(arg)
-      if (match = arg.match(/\A(.+?)((?::\d+)+)\z/))
-        [match[1], match[2].scan(/\d+/).map(&:to_i)]
+      if (match = arg.match(/\A(.+):(\d+)\z/))
+        [match[1], match[2].to_i]
       else
-        [arg, []]
+        [arg, nil]
       end
     end
 
-    # A file as the runner names it to workers: its path, then its lines.
-    def self.task(path, lines)
-      lines.empty? ? path : "#{path}:#{lines.join(":")}"
+    # A file as the runner names it to workers: its path, then its line.
+    def self.task(path, line)
+      line ? "#{path}:#{line}" : path
     end
 
     # A path under the current directory from it, as discovery names files.
@@ -118,38 +118,31 @@ module Spinel
       File.expand_path(path).delete_prefix("#{Dir.pwd}/")
     end
 
-    # The Minitest and RSpec files to run, each `[path, lines]`, lines empty
-    # for every test, from the paths given, else discovered; nil, after
-    # saying why, when there are none.
+    # The Minitest and RSpec files to run, each `[path, line]`, line nil for
+    # every test, from the files given, else discovered; nil, after saying
+    # why, when there are none or a path given is not one file once.
     def self.discover(args)
       found = {}
       if args.empty?
-        Dir.glob("test/**/*_test.rb").sort.each { |path| found[path] = [] }
-        Dir.glob("spec/**/*_spec.rb").sort.each { |path| found[path] = [] }
+        Dir.glob("test/**/*_test.rb").sort.each { |path| found[path] = nil }
+        Dir.glob("spec/**/*_spec.rb").sort.each { |path| found[path] = nil }
         if found.empty?
           warn "spinel test: no test files: nothing matches test/**/*_test.rb or spec/**/*_spec.rb"
           return nil
         end
       else
         args.each do |arg|
-          path, lines = location(arg)
-          if File.directory?(path)
-            files = Dir.glob(File.join(path, "**/*_{test,spec}.rb")).sort
-            files.each { |file| found[relative(file)] = [] }
-            next unless files.empty?
-
-            warn "spinel test: no test files under #{path}"
-            return nil
-          elsif File.file?(path)
-            path = relative(path)
-            # The whole file once it is asked for whole; else every line
-            # asked for.
-            whole = lines.empty? || (found.key?(path) && found[path].empty?)
-            found[path] = whole ? [] : found.fetch(path, []) | lines
-          else
-            warn "spinel test: no such file or directory: #{path}"
+          path, line = location(arg)
+          unless File.file?(path)
+            warn "spinel test: no such file: #{path}"
             return nil
           end
+          path = relative(path)
+          if found.key?(path)
+            warn "spinel test: #{path} is given more than once"
+            return nil
+          end
+          found[path] = line
         end
       end
       found.partition { |path, _| !path.end_with?("_spec.rb") }
@@ -242,7 +235,7 @@ module Spinel
     # Run `files` on up to `jobs` workers of `framework`, keeping what they
     # did in `report`.
     def self.run_files(files, jobs, framework, report)
-      queue = files.map { |path, lines| task(path, lines) }
+      queue = files.map { |path, line| task(path, line) }
       workers = {}
       count = 0
       add_worker = lambda do
@@ -320,12 +313,12 @@ module Spinel
     # The worker: each line read is a file to require, then a `done` event.
     # A Minitest worker then has its reporter added to the run the `at_exit`
     # its helper registered makes; an RSpec worker runs what its files
-    # defined, its formatter listening. Each is told the lines asked for.
+    # defined, its formatter listening. Each is told the line asked for.
     def self.work(tasks, events, framework)
       TestWorker.start(events)
       loaded = []
-      while (line = tasks.gets)
-        path, lines = location(line.chomp)
+      while (task = tasks.gets)
+        path, line = location(task.chomp)
         before = TestWorker.runnables
         error = nil
         begin
@@ -333,12 +326,12 @@ module Spinel
         rescue StandardError, ScriptError => e
           error = "#{e.class}: #{e.message}"
         end
-        loaded << [path, lines, TestWorker.runnables - before]
+        loaded << [path, line, TestWorker.runnables - before]
         TestWorker.emit({ "event" => "done", "file" => path, "error" => error })
       end
       case framework
       when :minitest then TestWorker.minitest(loaded)
-      when :rspec then run_examples(loaded.reject { |_, lines, _| lines.empty? }.map { |path, lines, _| [path, lines] })
+      when :rspec then run_examples(loaded.filter_map { |path, line, _| [path, line] if line })
       end
     end
 
@@ -447,9 +440,9 @@ module Spinel
       lines
     end
 
-    # The command that runs `file`, at `line` when there is one, again.
-    def self.rerun(file, line = nil, comment = nil)
-      command = "spinel test #{Shellwords.escape(line ? "#{file}:#{line}" : file)}"
+    # The command that runs `location`, `path` or `path:LINE`, again.
+    def self.rerun(location, comment = nil)
+      command = "spinel test #{Shellwords.escape(location)}"
       comment ? "#{command} # #{comment.gsub(/\s+/, " ")}" : command
     end
 
@@ -485,7 +478,7 @@ module Spinel
       out = +"\n#{summary.join(", ")}\n"
 
       reruns = failures.filter_map do |event|
-        rerun(event["file"], event["line"], event["name"]) if event["file"]
+        rerun(event["rerun"], event["name"]) if event["rerun"]
       end
       reruns.concat(problems.filter_map { |problem| rerun(problem["rerun"]) if problem["rerun"] })
       reruns.uniq! { |command| command.sub(/ # .*\z/, "") }

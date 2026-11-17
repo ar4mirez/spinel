@@ -473,7 +473,8 @@ fn without_ms(event: &Value) -> Value {
             "line",
             "message",
             "ms",
-            "name"
+            "name",
+            "rerun"
         ]),
         "{event}"
     );
@@ -531,11 +532,12 @@ fn minitest_and_rspec_each_report_every_test_as_one_event_line() {
     assert_eq!(
         take("ResultsTest#test_passes"),
         json!({"event": "pass", "file": file, "line": 4, "name": "ResultsTest#test_passes",
-               "message": null, "backtrace": []})
+               "message": null, "backtrace": [], "rerun": format!("{file}:4")})
     );
     let fails = take("ResultsTest#test_fails");
     assert_eq!(fails["event"], "fail", "{fails}");
     assert_eq!(fails["line"], 8, "{fails}");
+    assert_eq!(fails["rerun"], "test/results_test.rb:8", "{fails}");
     assert_eq!(fails["message"], "Expected: 3\n  Actual: 2", "{fails}");
     // Minitest's own frames filtered out, the test's first, relative.
     assert_eq!(
@@ -545,6 +547,7 @@ fn minitest_and_rspec_each_report_every_test_as_one_event_line() {
     let errors = take("ResultsTest#test_errors");
     assert_eq!(errors["event"], "error", "{errors}");
     assert_eq!(errors["line"], 12, "{errors}");
+    assert_eq!(errors["rerun"], "test/results_test.rb:12", "{errors}");
     assert_eq!(errors["message"], "ArgumentError: broken", "{errors}");
     assert_eq!(
         errors["backtrace"][0], "test/results_test.rb:13:in 'ResultsTest#test_errors'",
@@ -553,7 +556,7 @@ fn minitest_and_rspec_each_report_every_test_as_one_event_line() {
     assert_eq!(
         take("ResultsTest#test_skips"),
         json!({"event": "skip", "file": file, "line": 16, "name": "ResultsTest#test_skips",
-               "message": "not yet", "backtrace": []})
+               "message": "not yet", "backtrace": [], "rerun": format!("{file}:16")})
     );
 
     // RSpec's: an exception in an example is a failure, as `rspec` counts
@@ -563,33 +566,36 @@ fn minitest_and_rspec_each_report_every_test_as_one_event_line() {
     assert_eq!(
         take("results passes"),
         json!({"event": "pass", "file": file, "line": 4, "name": "results passes",
-               "message": null, "backtrace": []})
+               "message": null, "backtrace": [], "rerun": format!("{file}:4")})
     );
     assert_eq!(
         take("results fails"),
         json!({"event": "fail", "file": file, "line": 5, "name": "results fails",
-               "message": "\nexpected: 3\n     got: 2\n", "backtrace": [frame(5)]})
+               "message": "\nexpected: 3\n     got: 2\n", "backtrace": [frame(5)],
+               "rerun": format!("{file}:5")})
     );
     assert_eq!(
         take("results raises"),
         json!({"event": "fail", "file": file, "line": 6, "name": "results raises",
-               "message": "ArgumentError: broken", "backtrace": [frame(6)]})
+               "message": "ArgumentError: broken", "backtrace": [frame(6)],
+               "rerun": format!("{file}:6")})
     );
     assert_eq!(
         take("results is pending"),
         json!({"event": "skip", "file": file, "line": 7, "name": "results is pending",
-               "message": "not yet", "backtrace": []})
+               "message": "not yet", "backtrace": [], "rerun": format!("{file}:7")})
     );
     assert_eq!(
         take("results is skipped"),
         json!({"event": "skip", "file": file, "line": 11, "name": "results is skipped",
-               "message": "Temporarily skipped with xit", "backtrace": []})
+               "message": "Temporarily skipped with xit", "backtrace": [],
+               "rerun": format!("{file}:11")})
     );
     assert_eq!(
         take("results passes while pending"),
         json!({"event": "fail", "file": file, "line": 12, "name": "results passes while pending",
                "message": "Expected pending 'not yet' to fail. No error was raised.",
-               "backtrace": []})
+               "backtrace": [], "rerun": format!("{file}:12")})
     );
     assert!(by_name.is_empty(), "no other results: {by_name:?}");
 
@@ -767,16 +773,10 @@ fn gem_frames_are_folded_out_of_a_backtrace() {
 #[test]
 fn the_exit_status_is_zero_when_nothing_failed() {
     let dir = scratch("report-pass");
-    // The passing test, the skipped one and the passing example only.
+    // The skipped test and the passing example only.
     let output = spinel_test(
         &fixture("report"),
-        &[
-            "-j",
-            "2",
-            "test/report_test.rb:5",
-            "test/report_test.rb:22",
-            "spec/report_spec.rb:4",
-        ],
+        &["-j", "2", "test/report_test.rb:22", "spec/report_spec.rb:4"],
         &dir.join("log"),
         &[],
     );
@@ -784,10 +784,44 @@ fn the_exit_status_is_zero_when_nothing_failed() {
     let out = stdout(&output);
     assert_eq!(output.status.code(), Some(0), "{out}{}", stderr(&output));
     assert!(
-        out.ends_with("\n\n3 tests, 0 failures, 0 errors, 1 skip\n"),
+        out.ends_with("\n\n2 tests, 0 failures, 0 errors, 1 skip\n"),
         "{out}"
     );
     assert!(!out.contains("Re-run"), "nothing to re-run: {out}");
+}
+
+/// `command` pasted into `sh` in `fixture`, with `spinel` on the PATH: its
+/// output, and the results it reported.
+fn paste(fixture: &Path, command: &str, events: &Path) -> (Output, Vec<Value>) {
+    let bin = Path::new(SPINEL).parent().expect("the binary's directory");
+    let path = std::env::join_paths(std::iter::once(bin.to_path_buf()).chain(
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+    ))
+    .expect("a PATH");
+    std::fs::remove_file(events).ok();
+    let pasted = Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .current_dir(fixture)
+        .env("PATH", &path)
+        .env("SPINEL_TEST_EVENTS", events)
+        .output()
+        .expect("sh runs");
+    let results = std::fs::read_to_string(events)
+        .unwrap_or_default()
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("an event"))
+        .filter(is_result)
+        .collect();
+    (pasted, results)
+}
+
+/// A re-run command's location and the name of the test it is for.
+fn location_and_name(command: &str) -> (&str, &str) {
+    command
+        .strip_prefix("spinel test ")
+        .and_then(|rest| rest.split_once(" # "))
+        .expect("a command and the test's name")
 }
 
 #[test]
@@ -799,36 +833,12 @@ fn each_printed_re_run_command_runs_its_failure_alone_when_pasted() {
     let commands = reruns(&out);
     assert_eq!(commands.len(), 4, "{out}");
 
-    // `spinel` as a shell finds it on the PATH.
-    let bin = Path::new(SPINEL).parent().expect("the binary's directory");
-    let path = std::env::join_paths(std::iter::once(bin.to_path_buf()).chain(
-        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
-    ))
-    .expect("a PATH");
     for command in &commands {
-        let events = dir.join("events");
-        std::fs::remove_file(&events).ok();
-        let pasted = Command::new("sh")
-            .arg("-c")
-            .arg(command)
-            .current_dir(fixture("report"))
-            .env("PATH", &path)
-            .env("SPINEL_TEST_EVENTS", &events)
-            .output()
-            .expect("sh runs");
+        let (pasted, results) = paste(&fixture("report"), command, &dir.join("events"));
         let again = stdout(&pasted);
         assert_eq!(pasted.status.code(), Some(1), "{command}: {again}");
-        let results: Vec<Value> = std::fs::read_to_string(&events)
-            .unwrap_or_default()
-            .lines()
-            .map(|line| serde_json::from_str(line).expect("an event"))
-            .filter(is_result)
-            .collect();
         assert_eq!(results.len(), 1, "{command} runs one test: {results:?}");
-        let (location, name) = command
-            .strip_prefix("spinel test ")
-            .and_then(|rest| rest.split_once(" # "))
-            .expect("a command and the test's name");
+        let (location, name) = location_and_name(command);
         let result = &results[0];
         assert_eq!(result["name"], name, "{command}: {result}");
         assert!(
@@ -851,16 +861,60 @@ fn each_printed_re_run_command_runs_its_failure_alone_when_pasted() {
 }
 
 #[test]
+fn a_test_defined_outside_the_file_that_runs_it_re_runs_from_that_file() {
+    // A Minitest test from a module a test class includes, and an RSpec
+    // example from shared examples a group includes, each defined in a file
+    // under `support/` that `spinel test` cannot run.
+    let dir = scratch("report-shared");
+    let output = spinel_test(&fixture("shared"), &["-j", "1"], &dir.join("log"), &[]);
+    let out = stdout(&output);
+    assert_eq!(output.status.code(), Some(1), "{out}{}", stderr(&output));
+    assert!(
+        out.contains(
+            "  1) Failure: SharedTest#test_shared_fails [test/support/shared_tests.rb:3]\n"
+        ),
+        "the failure names where its test is defined: {out}"
+    );
+    assert!(
+        out.contains(
+            "  2) Failure: shared behaves like a sum adds up [spec/support/shared_examples.rb:3]\n"
+        ),
+        "{out}"
+    );
+    // The Minitest one runs again from the file that defined its class, all
+    // of it; the RSpec one from the line that included it, as `rspec`'s own
+    // summary prints it.
+    let commands = reruns(&out);
+    assert_eq!(
+        commands,
+        [
+            "spinel test test/shared_test.rb # SharedTest#test_shared_fails",
+            "spinel test spec/shared_spec.rb:6 # shared behaves like a sum adds up",
+        ],
+        "{out}"
+    );
+    for command in &commands {
+        let (pasted, results) = paste(&fixture("shared"), command, &dir.join("events"));
+        let again = stdout(&pasted);
+        assert_eq!(pasted.status.code(), Some(1), "{command}: {again}");
+        let (_, name) = location_and_name(command);
+        let failed: Vec<&Value> = results
+            .iter()
+            .filter(|result| result["event"] == "fail")
+            .collect();
+        assert_eq!(failed.len(), 1, "{command}: {results:?}");
+        assert_eq!(failed[0]["name"], name, "{command}: {results:?}");
+        assert_eq!(reruns(&again), std::slice::from_ref(command), "{again}");
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn a_line_runs_the_test_or_example_defined_nearest_above_it() {
     for (arg, expected) in [
         // Inside a test's body, and on the line its method starts.
         ("test/report_test.rb:20", vec!["ReportTest#test_errors"]),
         ("test/report_test.rb:4", vec!["ReportTest#test_passes"]),
-        // Two lines of one file.
-        (
-            "test/report_test.rb:6:23",
-            vec!["ReportTest#test_passes", "ReportTest#test_skips"],
-        ),
         // Above every test: none.
         ("test/report_test.rb:2", vec![]),
         // Inside an example's body; on a group's line, all of the group.
@@ -882,19 +936,23 @@ fn a_line_runs_the_test_or_example_defined_nearest_above_it() {
 }
 
 #[test]
-fn a_path_that_is_not_there_is_an_error() {
-    let dir = scratch("report-missing");
-    let output = spinel_test(
-        &fixture("report"),
-        &["test/missing_test.rb:3"],
-        &dir.join("log"),
-        &[],
-    );
-    std::fs::remove_dir_all(&dir).ok();
-    assert_eq!(output.status.code(), Some(1));
-    assert!(
-        stderr(&output).contains("no such file or directory: test/missing_test.rb"),
-        "{}",
-        stderr(&output)
-    );
+fn a_path_that_is_not_one_file_given_once_is_an_error() {
+    for (args, error) in [
+        (
+            &["test/missing_test.rb:3"][..],
+            "no such file: test/missing_test.rb",
+        ),
+        (&["test"][..], "no such file: test"),
+        (
+            &["test/report_test.rb:8", "test/report_test.rb"][..],
+            "test/report_test.rb is given more than once",
+        ),
+    ] {
+        let dir = scratch("report-missing");
+        let output = spinel_test(&fixture("report"), args, &dir.join("log"), &[]);
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(output.status.code(), Some(1), "{args:?}");
+        assert_eq!(stdout(&output), "", "nothing ran: {args:?}");
+        assert!(stderr(&output).contains(error), "{}", stderr(&output));
+    }
 }
