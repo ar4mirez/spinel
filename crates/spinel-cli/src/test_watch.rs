@@ -185,8 +185,9 @@ impl Tests {
     }
 
     /// `files`, with what the running child was to run when it is to be
-    /// stopped before it ends, so no change's tests go unrun.
-    fn with_unfinished(&self, mut files: Files, running: bool) -> Selection {
+    /// stopped before it ends, so no change's tests go unrun: each that is
+    /// still there under `root`, as the runner rejects a run naming one gone.
+    fn with_unfinished(&self, root: &Path, mut files: Files, running: bool) -> Selection {
         let unfinished = match running.then_some(self.running.as_ref()).flatten() {
             None => return Selection::Files(files),
             Some(Selection::All) => return Selection::All,
@@ -195,7 +196,9 @@ impl Tests {
             Some(Selection::Files(unfinished)) => unfinished,
         };
         for (file, part) in unfinished {
-            add(&mut files, file.clone(), *part);
+            if root.join(file).exists() {
+                add(&mut files, file.clone(), *part);
+            }
         }
         Selection::Files(files)
     }
@@ -320,7 +323,7 @@ impl Target for Tests {
                 args: None,
             };
         }
-        let selection = self.with_unfinished(files, running);
+        let selection = self.with_unfinished(root, files, running);
         let line = match &selection {
             Selection::Files(files) => format!("spinel: {what}; running {}", listed(files)),
             Selection::Given | Selection::All => format!("spinel: {what}; running every test"),
@@ -487,22 +490,59 @@ mod tests {
             .collect()
     }
 
+    /// A project holding `names`, in the supervisor's own directory.
+    fn project(watch: &Tests, names: &[&str]) -> PathBuf {
+        let root = watch.record.dir.join("project");
+        for name in names {
+            let path = root.join(name);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, "").unwrap();
+        }
+        root
+    }
+
     #[test]
     fn a_change_that_stops_the_given_paths_runs_them_and_its_own() {
         let mut watch = tests(&["test/a_test.rb:4"]);
+        let root = project(&watch, &["test/a_test.rb", "test/user_test.rb"]);
         watch.launch(Selection::Given);
         let change = files(&[("test/user_test.rb", Part::Whole)]);
         assert_eq!(
-            watch.with_unfinished(change.clone(), true),
+            watch.with_unfinished(&root, change.clone(), true),
             Selection::Files(files(&[
                 ("test/a_test.rb", Part::Line(4)),
                 ("test/user_test.rb", Part::Whole),
             ]))
         );
         assert_eq!(
-            watch.with_unfinished(change.clone(), false),
+            watch.with_unfinished(&root, change.clone(), false),
             Selection::Files(change)
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_stopped_run_s_file_gone_since_is_left_out() {
+        let mut watch = tests(&["test/old_test.rb", "test/models"]);
+        let root = project(&watch, &["test/new_test.rb", "test/models/a_test.rb"]);
+        watch.launch(Selection::Given);
+        let change = files(&[("test/new_test.rb", Part::Whole)]);
+        assert_eq!(
+            watch.with_unfinished(&root, change.clone(), true),
+            Selection::Files(files(&[
+                ("test/models", Part::Whole),
+                ("test/new_test.rb", Part::Whole),
+            ]))
+        );
+        watch.launch(Selection::Files(files(&[(
+            "test/gone_test.rb",
+            Part::Whole,
+        )])));
+        assert_eq!(
+            watch.with_unfinished(&root, change.clone(), true),
+            Selection::Files(change)
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -511,12 +551,15 @@ mod tests {
         let mut none_given = tests(&[]);
         none_given.launch(Selection::Given);
         assert_eq!(
-            none_given.with_unfinished(change.clone(), true),
+            none_given.with_unfinished(Path::new("/"), change.clone(), true),
             Selection::All
         );
         let mut entered = tests(&["test/a_test.rb"]);
         entered.launch(Selection::All);
-        assert_eq!(entered.with_unfinished(change, true), Selection::All);
+        assert_eq!(
+            entered.with_unfinished(Path::new("/"), change, true),
+            Selection::All
+        );
     }
 
     #[test]
