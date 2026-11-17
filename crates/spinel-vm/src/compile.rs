@@ -720,6 +720,9 @@ impl Compiler {
             | Insn::Refuse(_) => 1,
             // Pops the splatted array and pushes its snapshot: net zero.
             Insn::CaptureSplat => 0,
+            // Pops the value and pushes its Array, directly or as what the
+            // conversion's send returns: net zero either way.
+            Insn::SplatArray => 0,
             // Pops the built source and pushes the pattern: net zero.
             Insn::NewRegexp(_) | Insn::NewRegexpOnce(_, _) => 0,
             // The fall-through path, which goes on to build the value; the
@@ -4198,6 +4201,8 @@ impl Compiler {
             match &arg.kind {
                 ExprKind::Splat(Some(inner)) => {
                     self.expr(inner)?;
+                    // `to_a` runs where the splat is written (#835).
+                    self.emit(Insn::SplatArray);
                     site.splats.push(site.argc);
                     site.argc += 1;
                     // Ruby expands a splat where it is written; this convention

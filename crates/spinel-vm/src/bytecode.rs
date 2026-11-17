@@ -93,6 +93,22 @@ pub enum Insn {
     /// A value that is not an `Array` is left alone: expansion already passes
     /// it through, and there is nothing to copy.
     CaptureSplat,
+    /// Convert a splatted argument to the `Array` it spreads as (#835).
+    ///
+    /// CRuby's `splatarray`: `*x` spreads what `rb_check_to_array` makes of `x`.
+    /// An `Array` is itself and `nil` spreads nothing, both answered without a
+    /// send, as is a `Hash` whose `to_a` is still `core/hash.rb`'s and an object
+    /// with no `to_a` and no `method_missing` of its own — expansion at the call
+    /// passes those through already. Anything else is sent to
+    /// `Array#__concat_splat__`, which calls `to_a` the way `rb_check_funcall`
+    /// does: a `to_a` answering `nil` wraps the object, and one answering
+    /// anything but an `Array` is a `TypeError`.
+    ///
+    /// Emitted where the splat is written, so `to_a` runs before the arguments
+    /// to its right are evaluated, as it does in CRuby. An anonymous `*` or a
+    /// `...` forwards the method's own rest parameter, which is always an
+    /// `Array`, and gets none.
+    SplatArray,
 
     // -- locals -----------------------------------------------------------
     /// `(slot, depth)`. `depth` is how many lexical scopes up the slot lives:
@@ -317,7 +333,9 @@ pub enum Insn {
     /// body compiles to.
     Raise,
     /// Pops a class and peeks the exception beneath it; pushes whether the
-    /// exception is an instance of that class.
+    /// exception is an instance of that class. A class with a `===` of its own
+    /// is sent it instead, and its answer is pushed as returned (#835): only
+    /// the `JumpIf` after this reads it, and only for truthiness.
     ///
     /// Peeks rather than pops the exception because the next clause has to try
     /// its own class against the same one, and the handler ends by either

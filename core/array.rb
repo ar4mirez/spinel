@@ -707,14 +707,27 @@ class Array
   # answers this array, so the compiler can chain one call per piece.
   #
   # The splat conversion lives here rather than in the lowering because it is
-  # Ruby's rule, not the compiler's: `*x` spreads what `x.to_a` gives, and
-  # wraps anything that has no `to_a` in a one-element array. `nil.to_a` is
-  # `[]`, which is why `[*nil]` is empty rather than `[nil]`.
+  # Ruby's rule, not the compiler's: CRuby's `splatarray`, which spreads what
+  # `rb_check_to_array` makes of `x`. An Array, a subclass's included, is
+  # spread as it is. `nil` spreads nothing, and CRuby 4.0 no longer asks its
+  # `to_a` to say so. Anything else is asked for `to_a` the way
+  # `rb_check_funcall` asks — a private one counts, a `respond_to?` that says
+  # no is believed, and a `method_missing` may answer — and wrapped in a
+  # one-element array when there is none or it answers nil. A `to_a` that
+  # answers anything else is a TypeError naming both classes, in 4.0's words.
+  # `Insn::SplatArray` sends this for a call's `*x` too (#835).
   def __concat_splat__(other)
-    # A private `to_a` counts: the conversion is the language's, not a caller's.
-    spread = other.respond_to?(:to_a, true) ? other.__send__(:to_a) : [other]
-    unless spread.is_a?(Array)
-      raise TypeError, "can't convert " + other.class.to_s + " to Array"
+    return self if nil.equal?(other)
+    spread = other
+    unless Array === other
+      spread = Kernel.__check_funcall__(other, :to_a) { nil }
+      if nil.equal?(spread)
+        spread = [other]
+      elsif !(Array === spread)
+        klass = Kernel.__class_of__(other).to_s
+        raise TypeError, "can't convert " + klass + " to Array (" + klass + "#to_a gives " +
+                         Kernel.__class_of__(spread).to_s + ")"
+      end
     end
     i = 0
     while i < spread.size
