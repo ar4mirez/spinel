@@ -9,14 +9,16 @@
 //! - Anything else, including a file of those two kinds with no test to run,
 //!   runs what failed last; when nothing did, nothing runs, and a line says
 //!   so.
-//! - Enter, a line on standard input, runs every test, or the paths given.
+//! - Enter, a line on standard input, runs every test, as `spinel test`
+//!   with no paths finds them, whatever paths were given.
 //!
 //! What failed comes from the runner itself: each run is given a file to
-//! record, once it has ended, the location that runs each failure, error and
+//! record of its own, once it has ended, the location that runs each failure, error and
 //! problem again (`shims/test_runner.rb`, step 9), the same `rerun` its
 //! report lists them by. The supervisor keeps the set across runs: a run
 //! replaces what is known about the files it ran and leaves the rest. A run
-//! stopped by a change before it ended has its tests run with the next one.
+//! stopped by a change before it ended has its tests run with the next one;
+//! what it may still write as it is stopped is never read.
 //! `.spinel/`, where every run writes its timings and the bytecode cache, is
 //! not the project's change.
 
@@ -78,8 +80,11 @@ type Files = BTreeMap<String, Part>;
 /// What a run runs.
 #[derive(Clone, PartialEq, Eq, Debug)]
 enum Selection {
-    /// Every test, or the paths `spinel test --watch` was given.
-    Every,
+    /// The paths `spinel test --watch` was given, or every test when none
+    /// were: the first run.
+    Given,
+    /// Every test, whatever paths were given: Enter.
+    All,
     Files(Files),
 }
 
@@ -154,7 +159,7 @@ struct Tests {
 impl Tests {
     /// The command line that runs `selection`, recording what failed afresh.
     fn launch(&mut self, selection: Selection) -> Vec<OsString> {
-        self.record.clear();
+        let record = self.record.next();
         let mut args: Vec<OsString> = vec!["test".into()];
         if let Some(jobs) = self.jobs {
             args.push("-j".into());
@@ -163,11 +168,12 @@ impl Tests {
         args.push("--reporter".into());
         args.push(self.reporter.name().into());
         args.push("--record-failures".into());
-        args.push(self.record.file.clone().into());
+        args.push(record.into());
         // After `--`, a file named like a flag is still the file.
         args.push("--".into());
         match &selection {
-            Selection::Every => args.extend(self.paths.iter().map(Into::into)),
+            Selection::Given => args.extend(self.paths.iter().map(Into::into)),
+            Selection::All => {}
             Selection::Files(files) => args.extend(
                 files
                     .iter()
@@ -178,32 +184,29 @@ impl Tests {
         args
     }
 
-    /// `selection`, with what the running child was to run when it is to be
+    /// `files`, with what the running child was to run when it is to be
     /// stopped before it ends, so no change's tests go unrun.
-    fn with_unfinished(&self, selection: Selection, running: bool) -> Selection {
-        match (
-            selection,
-            running.then_some(self.running.as_ref()).flatten(),
-        ) {
-            (Selection::Files(mut files), Some(Selection::Files(unfinished))) => {
-                for (file, part) in unfinished {
-                    add(&mut files, file.clone(), *part);
-                }
-                Selection::Files(files)
-            }
-            (Selection::Files(_), Some(Selection::Every)) | (Selection::Every, _) => {
-                Selection::Every
-            }
-            (selection, None) => selection,
+    fn with_unfinished(&self, mut files: Files, running: bool) -> Selection {
+        let unfinished = match running.then_some(self.running.as_ref()).flatten() {
+            None => return Selection::Files(files),
+            Some(Selection::All) => return Selection::All,
+            Some(Selection::Given) if self.given.is_empty() => return Selection::All,
+            Some(Selection::Given) => &self.given,
+            Some(Selection::Files(unfinished)) => unfinished,
+        };
+        for (file, part) in unfinished {
+            add(&mut files, file.clone(), *part);
         }
+        Selection::Files(files)
     }
 
     /// What a run of `selection` that recorded `failed` leaves known: what
     /// it ran is replaced, the rest kept.
     fn update(&mut self, selection: &Selection, failed: Vec<String>) {
         match selection {
-            Selection::Every if self.given.is_empty() => self.failed.clear(),
-            Selection::Every => self.failed.retain(|file, _| !self.given.contains_key(file)),
+            Selection::All => self.failed.clear(),
+            Selection::Given if self.given.is_empty() => self.failed.clear(),
+            Selection::Given => self.failed.retain(|file, _| !self.given.contains_key(file)),
             Selection::Files(files) => self.failed.retain(|file, _| !files.contains_key(file)),
         }
         for rerun in failed {
@@ -284,7 +287,7 @@ fn listed(files: &Files) -> String {
 
 impl Target for Tests {
     fn first(&mut self) -> Vec<OsString> {
-        self.launch(Selection::Every)
+        self.launch(Selection::Given)
     }
 
     fn changed(&mut self, root: &Path, changed: &[PathBuf], running: bool) -> Next {
@@ -317,10 +320,10 @@ impl Target for Tests {
                 args: None,
             };
         }
-        let selection = self.with_unfinished(Selection::Files(files), running);
+        let selection = self.with_unfinished(files, running);
         let line = match &selection {
-            Selection::Every => format!("spinel: {what}; running every test"),
             Selection::Files(files) => format!("spinel: {what}; running {}", listed(files)),
+            Selection::Given | Selection::All => format!("spinel: {what}; running every test"),
         };
         Next {
             line,
@@ -331,7 +334,7 @@ impl Target for Tests {
     fn enter(&mut self, _running: bool) -> Next {
         Next {
             line: "spinel: running every test".to_owned(),
-            args: Some(self.launch(Selection::Every)),
+            args: Some(self.launch(Selection::All)),
         }
     }
 
@@ -358,11 +361,13 @@ impl Target for Tests {
     }
 }
 
-/// The file each run records what failed in, in a directory of the
-/// supervisor's own under the system's temporary directory, removed with it.
+/// The files runs record what failed in, one for each run, in a directory
+/// of the supervisor's own under the system's temporary directory, removed
+/// with it.
 struct Record {
     dir: PathBuf,
-    file: PathBuf,
+    /// The runs started so far; the last is the one whose file is read.
+    runs: u64,
 }
 
 impl Record {
@@ -375,10 +380,7 @@ impl Record {
             let dir = temp.join(format!("spinel-test-watch-{}-{n}", std::process::id()));
             match fs::DirBuilder::new().mode(0o700).create(&dir) {
                 Ok(()) => {
-                    return Ok(Record {
-                        file: dir.join("failed.json"),
-                        dir,
-                    });
+                    return Ok(Record { dir, runs: 0 });
                 }
                 Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => last = Some(err),
                 Err(err) => return Err(err),
@@ -387,13 +389,26 @@ impl Record {
         Err(last.unwrap_or_else(|| std::io::Error::other("no free name")))
     }
 
-    fn clear(&self) {
-        let _ = fs::remove_file(&self.file);
+    fn file(&self, run: u64) -> PathBuf {
+        self.dir.join(format!("failed-{run}.json"))
+    }
+
+    /// The file for the next run. The run before it may still write its own
+    /// as it is stopped, so that one goes when the run after this starts;
+    /// the one before that has been stopped already.
+    fn next(&mut self) -> PathBuf {
+        let _ = fs::remove_file(self.file(self.runs));
+        let _ = fs::remove_file(self.file(self.runs.saturating_sub(1)));
+        self.runs += 1;
+        self.file(self.runs)
     }
 
     /// What the last run recorded: `{"version": 1, "failed": [location]}`.
     fn read(&self) -> Option<Vec<String>> {
-        let text = fs::read_to_string(&self.file).ok()?;
+        let file = self.file(self.runs);
+        let text = fs::read_to_string(&file);
+        let _ = fs::remove_file(&file);
+        let text = text.ok()?;
         let value: serde_json::Value = serde_json::from_str(&text).ok()?;
         if value.get("version")?.as_u64()? != 1 {
             return None;
@@ -409,7 +424,8 @@ impl Record {
 
 impl Drop for Record {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.file);
+        let _ = fs::remove_file(self.file(self.runs));
+        let _ = fs::remove_file(self.file(self.runs.saturating_sub(1)));
         let _ = fs::remove_dir(&self.dir);
     }
 }
@@ -445,6 +461,96 @@ mod tests {
         assert_eq!(files["a"], Part::Whole);
         add(&mut files, "a".into(), Part::Line(3));
         assert_eq!(files["a"], Part::Whole);
+    }
+
+    fn tests(paths: &[&str]) -> Tests {
+        let mut given = Files::new();
+        for path in paths {
+            let (file, part) = location(path);
+            add(&mut given, file, part);
+        }
+        Tests {
+            jobs: None,
+            reporter: Reporter::Progress,
+            paths: paths.iter().map(|&path| path.to_owned()).collect(),
+            given,
+            failed: Files::new(),
+            running: None,
+            record: Record::create().expect("a record"),
+        }
+    }
+
+    fn files(names: &[(&str, Part)]) -> Files {
+        names
+            .iter()
+            .map(|&(name, part)| (name.to_owned(), part))
+            .collect()
+    }
+
+    #[test]
+    fn a_change_that_stops_the_given_paths_runs_them_and_its_own() {
+        let mut watch = tests(&["test/a_test.rb:4"]);
+        watch.launch(Selection::Given);
+        let change = files(&[("test/user_test.rb", Part::Whole)]);
+        assert_eq!(
+            watch.with_unfinished(change.clone(), true),
+            Selection::Files(files(&[
+                ("test/a_test.rb", Part::Line(4)),
+                ("test/user_test.rb", Part::Whole),
+            ]))
+        );
+        assert_eq!(
+            watch.with_unfinished(change.clone(), false),
+            Selection::Files(change)
+        );
+    }
+
+    #[test]
+    fn a_change_that_stops_every_test_runs_every_test() {
+        let change = files(&[("test/user_test.rb", Part::Whole)]);
+        let mut none_given = tests(&[]);
+        none_given.launch(Selection::Given);
+        assert_eq!(
+            none_given.with_unfinished(change.clone(), true),
+            Selection::All
+        );
+        let mut entered = tests(&["test/a_test.rb"]);
+        entered.launch(Selection::All);
+        assert_eq!(entered.with_unfinished(change, true), Selection::All);
+    }
+
+    #[test]
+    fn a_run_of_every_test_replaces_every_failure() {
+        let mut watch = tests(&["test/a_test.rb"]);
+        watch.failed = files(&[("test/b_test.rb", Part::Line(2))]);
+        watch.update(&Selection::Given, vec!["test/a_test.rb:3".into()]);
+        assert_eq!(
+            watch.failed,
+            files(&[
+                ("test/a_test.rb", Part::Line(3)),
+                ("test/b_test.rb", Part::Line(2)),
+            ])
+        );
+        watch.update(&Selection::All, vec!["test/c_test.rb:1".into()]);
+        assert_eq!(watch.failed, files(&[("test/c_test.rb", Part::Line(1))]));
+    }
+
+    #[test]
+    fn a_stopped_run_s_late_record_is_not_the_next_run_s() {
+        let mut watch = tests(&[]);
+        let args = watch.launch(Selection::Given);
+        let at = args
+            .iter()
+            .position(|arg| arg == "--record-failures")
+            .unwrap();
+        let stopped = PathBuf::from(&args[at + 1]);
+        watch.launch(Selection::All);
+        fs::write(
+            &stopped,
+            r#"{"version": 1, "failed": ["test/a_test.rb:1"]}"#,
+        )
+        .unwrap();
+        assert_eq!(watch.record.read(), None);
     }
 
     #[test]

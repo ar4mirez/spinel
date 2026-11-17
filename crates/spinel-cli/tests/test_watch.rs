@@ -4,7 +4,7 @@
 //! `app/models/account.rb` runs the tests named for it, under `test/` and
 //! `spec/` at any depth; any other change runs what failed last, by the
 //! location the runner recorded for it, and nothing when nothing did; Enter
-//! runs every test; and Ctrl-C ends the supervisor, the run and its workers,
+//! runs every test, whatever files were given; and Ctrl-C ends the supervisor, the run and its workers,
 //! and leaves no file of the supervisor's behind.
 //!
 //! Each test runs `spinel test --watch --reporter json` in a fresh copy of
@@ -68,6 +68,11 @@ struct Watch {
 
 impl Watch {
     fn start(name: &str) -> Watch {
+        Watch::start_with(name, &[])
+    }
+
+    /// `spinel test --watch` given `paths`.
+    fn start_with(name: &str, paths: &[&str]) -> Watch {
         let base =
             std::env::temp_dir().join(format!("spinel-test-watch-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
@@ -85,6 +90,7 @@ impl Watch {
         fs::create_dir_all(base.join("tmp")).expect("tmp dir");
         let mut supervisor = Command::new(SPINEL)
             .args(["test", "--watch", "-j", "2", "--reporter", "json"])
+            .args(paths)
             .current_dir(&project)
             .env("HOME", &home)
             .env("XDG_CONFIG_HOME", home.join(".config"))
@@ -401,6 +407,16 @@ fn enter_runs_every_test() {
     watch.run();
     watch.touch("test/user_test.rb");
     watch.changed("test/user_test.rb");
+    assert_eq!(watch.run().files, set(&["test/user_test.rb"]));
+
+    watch.enter();
+    watch.expect(Stream::Err, |l| l == "spinel: running every test");
+    assert_eq!(watch.run().files, set(&EVERY));
+}
+
+#[test]
+fn enter_runs_every_test_whatever_files_were_given() {
+    let mut watch = Watch::start_with("enter-given", &["test/user_test.rb"]);
     assert_eq!(watch.run().files, set(&["test/user_test.rb"]));
 
     watch.enter();
