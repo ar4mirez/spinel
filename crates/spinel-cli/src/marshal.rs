@@ -80,6 +80,8 @@ pub fn load(data: &[u8]) -> Result<Value, Error> {
         symbols: Vec::new(),
         objects: Vec::new(),
         depth: 0,
+        produced: 0,
+        budget: data.len().saturating_mul(BUDGET_PER_BYTE).max(MIN_BUDGET),
     };
     reader.value()
 }
@@ -88,15 +90,33 @@ struct Reader<'a> {
     data: &'a [u8],
     at: usize,
     symbols: Vec<String>,
-    /// Every object read, for `@` links; `None` while it is being read.
-    objects: Vec<Option<Value>>,
+    /// Every object read, for `@` links, with what it cost to produce;
+    /// `None` while it is being read.
+    objects: Vec<Option<(Value, usize)>>,
     depth: usize,
+    /// Values and bytes produced so far, links counted at the size of what
+    /// they copy.
+    produced: usize,
+    budget: usize,
 }
 
 /// Deeper than this, a dump is taken to be hostile.
 const MAX_DEPTH: usize = 256;
 
+/// A dump may produce this much per byte of it, or `MIN_BUDGET`, before
+/// its links are taken to be amplifying it.
+const BUDGET_PER_BYTE: usize = 16;
+const MIN_BUDGET: usize = 1 << 20;
+
 impl Reader<'_> {
+    fn produce(&mut self, n: usize) -> Result<(), Error> {
+        self.produced = self.produced.saturating_add(n);
+        if self.produced > self.budget {
+            return Err(Error("its links copy too much".to_owned()));
+        }
+        Ok(())
+    }
+
     fn byte(&mut self) -> Result<u8, Error> {
         let b = *self
             .data
@@ -152,6 +172,7 @@ impl Reader<'_> {
 
     fn raw_string(&mut self) -> Result<Vec<u8>, Error> {
         let n = self.len()?;
+        self.produce(n)?;
         Ok(self.bytes(n)?.to_vec())
     }
 
@@ -164,10 +185,13 @@ impl Reader<'_> {
             }
             b';' => {
                 let i = self.len()?;
-                self.symbols
+                let n = self
+                    .symbols
                     .get(i)
-                    .cloned()
-                    .ok_or_else(|| Error(format!("symbol link {i}")))
+                    .ok_or_else(|| Error(format!("symbol link {i}")))?
+                    .len();
+                self.produce(n)?;
+                Ok(self.symbols[i].clone())
             }
             b'I' => {
                 // A symbol with an encoding.
@@ -196,9 +220,10 @@ impl Reader<'_> {
         read: impl FnOnce(&mut Self) -> Result<Value, Error>,
     ) -> Result<Value, Error> {
         let slot = self.objects.len();
+        let before = self.produced;
         self.objects.push(None);
         let value = read(self)?;
-        self.objects[slot] = Some(value.clone());
+        self.objects[slot] = Some((value.clone(), self.produced - before));
         Ok(value)
     }
 
@@ -207,6 +232,7 @@ impl Reader<'_> {
         if self.depth > MAX_DEPTH {
             return Err(Error("it nests too deep".to_owned()));
         }
+        self.produce(1)?;
         let value = self.value_inner();
         self.depth -= 1;
         value
@@ -226,7 +252,11 @@ impl Reader<'_> {
             b'@' => {
                 let i = self.len()?;
                 match self.objects.get(i) {
-                    Some(Some(v)) => Ok(v.clone()),
+                    Some(Some((_, cost))) => {
+                        let cost = *cost;
+                        self.produce(cost)?;
+                        Ok(self.objects[i].as_ref().map_or(Value::Nil, |(v, _)| v.clone()))
+                    }
                     // A link to an object still being read: a cycle.
                     Some(None) => Ok(Value::Nil),
                     None => Err(Error(format!("object link {i}"))),
@@ -348,5 +378,18 @@ mod tests {
         assert_eq!(v.as_array().unwrap()[1].as_str(), Some("x"));
         assert!(load(b"\x04\x08[\x07I\"\x06x").is_err());
         assert!(load(b"\x04\x09[\x00").is_err());
+    }
+
+    #[test]
+    fn links_that_amplify_are_refused() {
+        // a0 = []; a(k) = [a(k-1), a(k-1)]; Marshal.dump([a0, a1, ..., a40])
+        let mut data = b"\x04\x08[".to_vec();
+        data.push(41 + 5);
+        data.extend_from_slice(b"[\x00");
+        for k in 1..=40u8 {
+            data.extend_from_slice(&[b'[', 2 + 5, b'@', k + 5, b'@', k + 5]);
+        }
+        let err = load(&data).unwrap_err();
+        assert!(err.0.contains("copy too much"), "{err}");
     }
 }

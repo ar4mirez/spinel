@@ -61,12 +61,26 @@ impl Tuple {
     }
 }
 
+/// The most a `specs.4.8.gz` or a `.gemspec.rz` may inflate to.
+const MAX_SPECS: u64 = 128 << 20;
+const MAX_GEMSPEC: u64 = 16 << 20;
+
+/// All of `reader`, or an error if it holds more than `limit` bytes.
+fn inflate(reader: impl std::io::Read, limit: u64) -> std::io::Result<Vec<u8>> {
+    let mut data = Vec::new();
+    reader.take(limit + 1).read_to_end(&mut data)?;
+    if data.len() as u64 > limit {
+        return Err(std::io::Error::other(format!(
+            "it inflates to more than {limit} bytes"
+        )));
+    }
+    Ok(data)
+}
+
 /// The triples of a gzipped `specs.4.8`, those that cannot name a file
 /// left out.
 pub fn parse_specs(gz: &[u8]) -> Result<Vec<Tuple>, String> {
-    let mut data = Vec::new();
-    flate2::read::GzDecoder::new(gz)
-        .read_to_end(&mut data)
+    let data = inflate(flate2::read::GzDecoder::new(gz), MAX_SPECS)
         .map_err(|e| format!("not gzip: {e}"))?;
     let value = marshal::load(&data).map_err(|e| e.to_string())?;
     let items = value.as_array().ok_or("not an Array of name tuples")?;
@@ -93,9 +107,7 @@ pub fn parse_specs(gz: &[u8]) -> Result<Vec<Tuple>, String> {
 
 /// The `/info` line of one build from its deflated `.gemspec.rz`.
 pub fn info_line(tuple: &Tuple, rz: &[u8]) -> Result<String, String> {
-    let mut data = Vec::new();
-    flate2::read::ZlibDecoder::new(rz)
-        .read_to_end(&mut data)
+    let data = inflate(flate2::read::ZlibDecoder::new(rz), MAX_GEMSPEC)
         .map_err(|e| format!("not deflated: {e}"))?;
     let spec = match marshal::load(&data).map_err(|e| e.to_string())? {
         Value::UserDump(class, dumped) if class == "Gem::Specification" => {
@@ -219,6 +231,30 @@ mod tests {
             "2.1.2 base64:>= 0.1.0,rack:>= 3.0.0|ruby:>= 2.5"
         );
         assert!(info_line(session, b"junk").is_err());
+    }
+
+    #[test]
+    fn an_index_that_inflates_too_far_is_refused() {
+        use std::io::Write as _;
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        gz.write_all(&[0; 4096]).unwrap();
+        let gz = gz.finish().unwrap();
+        assert!(inflate(flate2::read::GzDecoder::new(&gz[..]), 4095).is_err());
+        assert_eq!(
+            inflate(flate2::read::GzDecoder::new(&gz[..]), 4096).unwrap().len(),
+            4096
+        );
+
+        let mut rz = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+        rz.write_all(&vec![0; MAX_GEMSPEC as usize + 1]).unwrap();
+        let rz = rz.finish().unwrap();
+        let tuple = Tuple {
+            name: "rack".to_owned(),
+            version: "3.2.8".to_owned(),
+            platform: "ruby".to_owned(),
+        };
+        let err = info_line(&tuple, &rz).unwrap_err();
+        assert!(err.contains("inflates to more than"), "{err}");
     }
 
     #[test]
