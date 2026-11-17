@@ -1,9 +1,9 @@
 # Spinel's test runner (docs/test-runner.md, "Execution" and "Output"): what
 # `spinel test` runs on the VM, after `shims/setup.rb` and the gem prelude,
 # as `spinel run` runs a program. `ARGV` is the worker count the CLI chose
-# (`-j`, else the physical cores), then the files it was given, each with
-# an optional `:LINE` after it; it is cleared before any test code can read
-# it.
+# (`-j`, else the physical cores), the reporter (`--reporter`: `progress`,
+# `json` or `junit`), then the files it was given, each with an optional
+# `:LINE` after it; it is cleared before any test code can read it.
 #
 # 1. Discovery: with no paths, `test/**/*_test.rb` (Minitest) and
 #    `spec/**/*_spec.rb` (RSpec), relative to the current directory, each
@@ -57,8 +57,18 @@
 #    test and its backtrace, trimmed, with each run of gem frames folded to
 #    one line; the problems, on stderr; a summary line counting each kind;
 #    and a `spinel test` command that runs each failure again, pasted as it
-#    is, from the location its event names to run it again (`rerun`). The exit status is 1 when anything failed, raised or
-#    went wrong, and 0 otherwise.
+#    is, from the location its event names to run it again (`rerun`). The
+#    exit status is 1 when anything failed, raised or went wrong, and 0
+#    otherwise, whatever the reporter.
+# 7. `--reporter json` (#95) prints, in place of the progress and the
+#    report, each event as it is read, one JSON object per line, then a
+#    `problem` event for each problem and a `summary` event. `--reporter
+#    junit` prints one JUnit XML document once both phases have ended, a
+#    `testsuite` per file. Either way stdout gets that and nothing else:
+#    the runner's stdout is moved to stderr before any helper or test can
+#    write to it, so what they print goes there, and the problems are still
+#    told on stderr too. A discovery error is a problem under either, and
+#    the reporter still prints its report.
 #
 # A phase process and the runner end with `exit!`, so an `at_exit` a helper
 # registered runs in the workers, which ran the tests, and not again in a
@@ -87,6 +97,21 @@ module Spinel
 
     # How many frames of a backtrace that are not in gems are printed.
     FRAMES = 10
+
+    # What `--reporter` chose, and where what it prints goes: stdout, or,
+    # for `json` and `junit`, a copy of it once stdout itself is stderr.
+    @reporter = "progress"
+    @out = $stdout
+
+    # Each character XML 1.0 cannot hold, and each that needs escaping in
+    # an attribute's value or in text. A newline, a return or a tab in an
+    # attribute is written as a reference, as a parser reads a plain one
+    # there as a space.
+    XML_UNHELD = /[\x00-\x08\x0B\x0C\x0E-\x1F\uFFFE\uFFFF]/
+    XML_ESCAPES = {
+      "&" => "&amp;", "<" => "&lt;", ">" => "&gt;", '"' => "&quot;",
+      "\n" => "&#10;", "\r" => "&#13;", "\t" => "&#9;",
+    }.freeze
 
     # How the end of a process reads: a signal by its name, as `Process::Status`
     # names it, else the exit status.
@@ -119,48 +144,61 @@ module Spinel
     end
 
     # The Minitest and RSpec files to run, each `[path, line]`, line nil for
-    # every test, from the files given, else discovered; nil, after saying
-    # why, when there are none or a path given is not one file once.
+    # every test, from the files given, else discovered; or, when there are
+    # none or a path given is not one file once, why, as a String.
     def self.discover(args)
       found = {}
       if args.empty?
         Dir.glob("test/**/*_test.rb").sort.each { |path| found[path] = nil }
         Dir.glob("spec/**/*_spec.rb").sort.each { |path| found[path] = nil }
-        if found.empty?
-          warn "spinel test: no test files: nothing matches test/**/*_test.rb or spec/**/*_spec.rb"
-          return nil
-        end
+        return "no test files: nothing matches test/**/*_test.rb or spec/**/*_spec.rb" if found.empty?
       else
         args.each do |arg|
           path, line = location(arg)
-          unless File.file?(path)
-            warn "spinel test: no such file: #{path}"
-            return nil
-          end
+          return "no such file: #{path}" unless File.file?(path)
           path = relative(path)
-          if found.key?(path)
-            warn "spinel test: #{path} is given more than once"
-            return nil
-          end
+          return "#{path} is given more than once" if found.key?(path)
           found[path] = line
         end
       end
       found.partition { |path, _| !path.end_with?("_spec.rb") }
     end
 
-    def self.run(jobs, args)
-      tests, specs = discover(args)
-      return 1 unless tests
-
-      report = { "counts" => Hash.new(0), "failures" => [], "problems" => [] }
+    def self.run(jobs, reporter, args)
+      @reporter = reporter
+      unless reporter == "progress"
+        @out = $stdout.dup
+        $stdout.reopen($stderr)
+      end
+      found = discover(args)
+      report = { "counts" => Hash.new(0), "failures" => [], "problems" => [], "results" => [] }
       printed = false
-      unless tests.empty?
-        printed = true if phase(report, "Minitest") { |kept| run_tests(tests, jobs, kept) }
+      if found.is_a?(String)
+        if reporter == "progress"
+          warn "spinel test: #{found}"
+          return 1
+        end
+        report["problems"] << { "message" => found }
+      else
+        tests, specs = found
+        unless tests.empty?
+          printed = true if phase(report, "Minitest") { |kept| run_tests(tests, jobs, kept) }
+        end
+        unless specs.empty?
+          printed = true if phase(report, "RSpec") { |kept| run_specs(specs, jobs, kept) }
+        end
       end
-      unless specs.empty?
-        printed = true if phase(report, "RSpec") { |kept| run_specs(specs, jobs, kept) }
+      case reporter
+      when "json" then json_report(report)
+      when "junit" then junit_report(report)
+      else print_report(report, printed)
       end
-      print_report(report, printed)
+    end
+
+    # `events` in order of where their tests are, as they came from several
+    # workers in no order of their own.
+    def self.by_location(events)
+      events.sort_by.with_index { |event, index| [event["file"].to_s, event["line"].to_i, index] }
     end
 
     # The block, given a report to keep what its files did in, in a process
@@ -171,6 +209,8 @@ module Spinel
       pid = fork do
         reader.close
         kept = { "counts" => Hash.new(0), "failures" => [], "problems" => [] }
+        # Every result, for a report that lists them all.
+        kept["results"] = [] if @reporter == "junit"
         yield kept
         $stdout.flush
         $stderr.flush
@@ -192,11 +232,9 @@ module Spinel
         return false
       end
       kept["counts"].each { |kind, count| report["counts"][kind] += count }
-      # Each phase's by where its tests are, as they came from several
-      # workers in no order of their own.
-      report["failures"].concat(
-        kept["failures"].sort_by.with_index { |event, index| [event["file"].to_s, event["line"].to_i, index] }
-      )
+      # Each phase's by where its tests are.
+      report["failures"].concat(by_location(kept["failures"]))
+      report["results"].concat(by_location(kept["results"]).map { |event| [name, event] }) if kept["results"]
       report["problems"].concat(kept["problems"])
       kept["counts"].values.sum.positive?
     end
@@ -353,14 +391,8 @@ module Spinel
       exit(status)
     end
 
-    # One line from `worker`. A line that is not an event is skipped. Each
-    # is also appended, as it came, to the file `SPINEL_TEST_EVENTS` names,
-    # when it names one.
-    # ponytail: the raw stream for tools until `--reporter json` (#95).
+    # One line from `worker`. A line that is not an event is skipped.
     def self.line_from(worker, line, queue, framework, report)
-      if (path = ENV["SPINEL_TEST_EVENTS"]) && !path.empty?
-        File.open(path, "a") { |file| file.write(line) }
-      end
       parsed = begin
         JSON.parse(line)
       rescue JSON::ParserError
@@ -369,14 +401,21 @@ module Spinel
       event(worker, parsed, queue, framework, report) if parsed.is_a?(Hash)
     end
 
-    # One event from `worker`: a result is printed as progress and counted,
-    # and kept when it failed; a file that failed to load is a problem.
+    # One event from `worker`: a result is printed as progress, or as
+    # itself for `--reporter json`, and counted, and kept when it failed, or
+    # whatever it was for `--reporter junit`; a file that failed to load is
+    # a problem.
     def self.event(worker, event, queue, framework, report)
       kind = event["event"]
       if RESULTS.include?(kind)
         report["counts"][kind] += 1
-        $stdout.write(PROGRESS[framework][kind])
-        $stdout.flush
+        case @reporter
+        when "progress"
+          @out.write(PROGRESS[framework][kind])
+          @out.flush
+        when "json" then emit(event)
+        when "junit" then report["results"] << event
+        end
         if kind == "fail" || kind == "error"
           worker.failed += 1
           report["failures"] << event
@@ -384,6 +423,8 @@ module Spinel
         return
       end
       return unless kind == "done"
+
+      emit(event) if @reporter == "json"
 
       worker.ran << worker.file
       worker.file = nil
@@ -446,6 +487,171 @@ module Spinel
       comment ? "#{command} # #{comment.gsub(/\s+/, " ")}" : command
     end
 
+    # `event` as one line of JSON, for `--reporter json`.
+    def self.emit(event)
+      @out.write("#{JSON.generate(event)}\n")
+      @out.flush
+    end
+
+    # Each problem, on stderr.
+    def self.warn_problems(problems)
+      problems.each { |problem| warn "spinel test: #{problem["message"]}" }
+      $stderr.flush
+    end
+
+    # The exit status: 1 when anything failed, raised or went wrong.
+    def self.status(report)
+      report["failures"].empty? && report["problems"].empty? ? 0 : 1
+    end
+
+    # The counts the summary gives, by the word it gives each with.
+    def self.summary(report)
+      counts = report["counts"]
+      {
+        "tests" => RESULTS.sum { |kind| counts[kind] },
+        "failures" => counts["fail"],
+        "errors" => counts["error"],
+        "skips" => counts["skip"],
+        "problems" => report["problems"].size,
+      }
+    end
+
+    # `--reporter json`'s end, once every phase has ended, after the events
+    # it printed as they came: a `problem` event for each problem, with the
+    # file to run again or `null`, then a `summary` event with the counts;
+    # the exit status.
+    def self.json_report(report)
+      warn_problems(report["problems"])
+      report["problems"].each do |problem|
+        emit({ "event" => "problem", "message" => problem["message"], "rerun" => problem["rerun"] })
+      end
+      emit({ "event" => "summary" }.merge(summary(report)))
+      status(report)
+    end
+
+    # `text` for XML: each character XML cannot hold as `\uXXXX`, and the
+    # rest escaped for an attribute's value or text alike.
+    def self.xml(text)
+      text.to_s.scrub.gsub(XML_UNHELD) { |char| format("\\u%04X", char.ord) }.gsub(/[&<>"\n\r\t]/, XML_ESCAPES)
+    end
+
+    # ` name="value"` for each attribute that has a value.
+    def self.xml_attributes(attributes)
+      attributes.filter_map { |name, value| " #{name}=\"#{xml(value)}\"" unless value.nil? }.join
+    end
+
+    # Seconds, from milliseconds, as JUnit's `time` gives them.
+    def self.seconds(ms)
+      format("%.6f", ms.to_f / 1000)
+    end
+
+    # One `testcase`: `[attributes, element]`, `element` a `failure`,
+    # `error` or `skipped` (`[name, message, text]`), or nil for a pass.
+    def self.xml_testcase(out, attributes, element)
+      out << "    <testcase#{xml_attributes(attributes)}"
+      if element
+        tag, message, text = element
+        out << ">\n      <#{tag}#{xml_attributes("message" => message)}"
+        # Text, its line ends written as they are: in text a parser keeps them.
+        out << (text.empty? ? "/>\n" : ">#{xml(text).gsub("&#10;", "\n")}</#{tag}>\n")
+        out << "    </testcase>\n"
+      else
+        out << "/>\n"
+      end
+    end
+
+    # A result event's `testcase`. Minitest's `classname` is the test's
+    # class and its name the method, as Minitest's own JUnit reporters give
+    # them; RSpec's `classname` is its file's path with dots for slashes and
+    # no `.rb`, and its name the example's full description, as
+    # rspec_junit_formatter gives them.
+    def self.result_testcase(out, framework, event)
+      if framework == "Minitest"
+        classname, name = event["name"].to_s.split("#", 2)
+        name ||= classname
+      else
+        classname = event["file"].to_s.delete_suffix(".rb").tr("/", ".")
+        name = event["name"]
+      end
+      attributes = {
+        "name" => name, "classname" => classname, "file" => event["file"],
+        "line" => event["line"], "time" => seconds(event["ms"]),
+      }
+      message = event["message"].to_s.sub(/\A\n+/, "").rstrip
+      element =
+        case event["event"]
+        when "fail" then ["failure", message, ([message] + (event["backtrace"] || [])).join("\n")]
+        when "error" then ["error", message, ([message] + (event["backtrace"] || [])).join("\n")]
+        when "skip" then ["skipped", message, ""]
+        end
+      xml_testcase(out, attributes, element)
+    end
+
+    # `--reporter junit`'s report, once every phase has ended: one JUnit XML
+    # document, the shape CI systems read (Jenkins' JUnit schema), with a
+    # `testsuite` per file, the Minitest ones first, each by where its tests
+    # are, and a `testcase` per test or example, with a `failure`, `error`
+    # or `skipped` when it did not pass. Each problem is a `testcase` with
+    # an `error` too, in a last suite, `spinel test`, so CI shows it; the
+    # problems are told on stderr as well. The exit status.
+    def self.junit_report(report)
+      warn_problems(report["problems"])
+      suites = []
+      report["results"].each do |framework, event|
+        suite = suites.last
+        unless suite && suite[:name] == event["file"].to_s
+          suite = { name: event["file"].to_s, cases: [], tests: 0, failures: 0, errors: 0, skipped: 0, ms: 0.0 }
+          suites << suite
+        end
+        suite[:cases] << [framework, event]
+        suite[:tests] += 1
+        suite[:ms] += event["ms"].to_f
+        case event["event"]
+        when "fail" then suite[:failures] += 1
+        when "error" then suite[:errors] += 1
+        when "skip" then suite[:skipped] += 1
+        end
+      end
+      problems = report["problems"]
+      timestamp = Time.now.utc.strftime("%Y-%m-%dT%H:%M:%S")
+      total = suites.sum { |suite| suite[:tests] } + problems.size
+      failures = suites.sum { |suite| suite[:failures] }
+      errors = suites.sum { |suite| suite[:errors] } + problems.size
+      ms = suites.sum { |suite| suite[:ms] }
+
+      out = +"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+      out << "<testsuites#{xml_attributes(
+        "name" => "spinel test", "tests" => total, "failures" => failures, "errors" => errors, "time" => seconds(ms)
+      )}>\n"
+      suites.each do |suite|
+        out << "  <testsuite#{xml_attributes(
+          "name" => suite[:name], "tests" => suite[:tests], "failures" => suite[:failures],
+          "errors" => suite[:errors], "skipped" => suite[:skipped], "time" => seconds(suite[:ms]),
+          "timestamp" => timestamp
+        )}>\n"
+        suite[:cases].each { |framework, event| result_testcase(out, framework, event) }
+        out << "  </testsuite>\n"
+      end
+      unless problems.empty?
+        out << "  <testsuite#{xml_attributes(
+          "name" => "spinel test", "tests" => problems.size, "failures" => 0, "errors" => problems.size,
+          "skipped" => 0, "time" => seconds(0), "timestamp" => timestamp
+        )}>\n"
+        problems.each do |problem|
+          attributes = {
+            "name" => problem["rerun"] || problem["message"], "classname" => "spinel test",
+            "file" => problem["rerun"], "time" => seconds(0),
+          }
+          xml_testcase(out, attributes, ["error", problem["message"], ""])
+        end
+        out << "  </testsuite>\n"
+      end
+      out << "</testsuites>\n"
+      @out.write(out)
+      @out.flush
+      status(report)
+    end
+
     # The report, once every phase has ended; the exit status.
     def self.print_report(report, printed)
       counts = report["counts"]
@@ -462,11 +668,10 @@ module Spinel
         message.each_line { |text| out << (text.strip.empty? ? "\n" : "     #{text.chomp}\n") }
         trimmed(event["backtrace"] || []).each { |frame| out << "     # #{frame}\n" }
       end
-      $stdout.write(out)
-      $stdout.flush
+      @out.write(out)
+      @out.flush
 
-      problems.each { |problem| warn "spinel test: #{problem["message"]}" }
-      $stderr.flush
+      warn_problems(problems)
 
       summary = [
         count(RESULTS.sum { |kind| counts[kind] }, "test"),
@@ -486,17 +691,18 @@ module Spinel
         out << "\nRe-run each failure:\n\n"
         reruns.each { |command| out << "#{command}\n" }
       end
-      $stdout.write(out)
-      $stdout.flush
-      failures.empty? && problems.empty? ? 0 : 1
+      @out.write(out)
+      @out.flush
+      status(report)
     end
   end
 end
 
 jobs = Integer(ARGV.shift)
+reporter = ARGV.shift
 args = ARGV.dup
 ARGV.clear
-code = Spinel::TestRunner.run(jobs, args)
+code = Spinel::TestRunner.run(jobs, reporter, args)
 $stdout.flush
 $stderr.flush
 exit!(code)

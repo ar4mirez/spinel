@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  JUnit XML as CI systems read it, which `spinel test`'s JUnit reporter
+  (#95) is checked against. The shape is Jenkins' JUnit schema
+  (`jenkins-junit.xsd`, which GitLab, GitHub Actions' test reporters and
+  CircleCI read as well): `testsuites`, holding a `testsuite` per file,
+  each holding a `testcase` per test, with a `failure`, `error` or
+  `skipped` when it did not pass. Written for these tests rather than
+  copied; it adds the `file` and `line` a `testcase` carries in
+  rspec_junit_formatter's, pytest's and GitLab's reports.
+-->
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" elementFormDefault="qualified">
+  <xs:simpleType name="seconds">
+    <xs:restriction base="xs:decimal">
+      <xs:minInclusive value="0"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- A failure or an error: its message, and the message and backtrace as text. -->
+  <xs:complexType name="problem" mixed="true">
+    <xs:attribute name="message" type="xs:string"/>
+    <xs:attribute name="type" type="xs:string"/>
+  </xs:complexType>
+
+  <xs:complexType name="skipped" mixed="true">
+    <xs:attribute name="message" type="xs:string"/>
+  </xs:complexType>
+
+  <xs:element name="testcase">
+    <xs:complexType>
+      <xs:choice minOccurs="0" maxOccurs="unbounded">
+        <xs:element name="skipped" type="skipped"/>
+        <xs:element name="error" type="problem"/>
+        <xs:element name="failure" type="problem"/>
+        <xs:element name="system-out" type="xs:string"/>
+        <xs:element name="system-err" type="xs:string"/>
+      </xs:choice>
+      <xs:attribute name="name" type="xs:string" use="required"/>
+      <xs:attribute name="classname" type="xs:string"/>
+      <xs:attribute name="time" type="seconds"/>
+      <xs:attribute name="file" type="xs:string"/>
+      <xs:attribute name="line" type="xs:positiveInteger"/>
+      <xs:attribute name="assertions" type="xs:nonNegativeInteger"/>
+      <xs:attribute name="status" type="xs:string"/>
+    </xs:complexType>
+  </xs:element>
+
+  <xs:element name="testsuite">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:element name="properties" minOccurs="0">
+          <xs:complexType>
+            <xs:sequence>
+              <xs:element name="property" minOccurs="0" maxOccurs="unbounded">
+                <xs:complexType>
+                  <xs:attribute name="name" type="xs:string" use="required"/>
+                  <xs:attribute name="value" type="xs:string" use="required"/>
+                </xs:complexType>
+              </xs:element>
+            </xs:sequence>
+          </xs:complexType>
+        </xs:element>
+        <xs:element ref="testcase" minOccurs="0" maxOccurs="unbounded"/>
+        <xs:element name="system-out" type="xs:string" minOccurs="0"/>
+        <xs:element name="system-err" type="xs:string" minOccurs="0"/>
+      </xs:sequence>
+      <xs:attribute name="name" type="xs:string" use="required"/>
+      <xs:attribute name="tests" type="xs:nonNegativeInteger" use="required"/>
+      <xs:attribute name="failures" type="xs:nonNegativeInteger"/>
+      <xs:attribute name="errors" type="xs:nonNegativeInteger"/>
+      <xs:attribute name="skipped" type="xs:nonNegativeInteger"/>
+      <xs:attribute name="disabled" type="xs:nonNegativeInteger"/>
+      <xs:attribute name="time" type="seconds"/>
+      <xs:attribute name="timestamp" type="xs:dateTime"/>
+      <xs:attribute name="hostname" type="xs:string"/>
+      <xs:attribute name="id" type="xs:string"/>
+      <xs:attribute name="package" type="xs:string"/>
+      <xs:attribute name="file" type="xs:string"/>
+    </xs:complexType>
+  </xs:element>
+
+  <xs:element name="testsuites">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:element ref="testsuite" minOccurs="0" maxOccurs="unbounded"/>
+      </xs:sequence>
+      <xs:attribute name="name" type="xs:string"/>
+      <xs:attribute name="tests" type="xs:nonNegativeInteger"/>
+      <xs:attribute name="failures" type="xs:nonNegativeInteger"/>
+      <xs:attribute name="errors" type="xs:nonNegativeInteger"/>
+      <xs:attribute name="disabled" type="xs:nonNegativeInteger"/>
+      <xs:attribute name="time" type="seconds"/>
+    </xs:complexType>
+  </xs:element>
+</xs:schema>

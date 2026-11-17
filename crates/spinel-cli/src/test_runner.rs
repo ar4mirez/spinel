@@ -2,7 +2,8 @@
 //! `shims/test_runner.rb` run on the VM as `spinel run` runs a program, with
 //! the worker count it forks, after `shims/test_worker.rb`, as `-r` loads a
 //! library. What it discovers, loads, forks and reports is the shims'; this
-//! side only chooses how many workers and passes the paths it was given.
+//! side only chooses how many workers and the reporter, and passes the paths
+//! it was given.
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -14,11 +15,36 @@ const TEST_RUNNER: &str = include_str!("../../../shims/test_runner.rb");
 /// formatter that write them.
 const TEST_WORKER: &str = include_str!("../../../shims/test_worker.rb");
 
+/// How `spinel test` reports the run on stdout (docs/test-runner.md,
+/// "Output").
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Reporter {
+    /// A character per result, then each failure, a summary line and a
+    /// command to re-run each failure.
+    Progress,
+    /// One JSON object per line, per event, for tools.
+    Json,
+    /// JUnit XML, for CI.
+    Junit,
+}
+
+impl Reporter {
+    /// As `shims/test_runner.rb` takes it.
+    fn name(self) -> &'static str {
+        match self {
+            Reporter::Progress => "progress",
+            Reporter::Json => "json",
+            Reporter::Junit => "junit",
+        }
+    }
+}
+
 /// Run the suite under the current directory, or the `paths` given (each a
-/// file or `FILE:LINE`), on `jobs` workers, or one per physical core.
-pub(crate) fn run(jobs: Option<usize>, paths: &[String]) -> ExitCode {
+/// file or `FILE:LINE`), on `jobs` workers, or one per physical core,
+/// reported by `reporter`.
+pub(crate) fn run(jobs: Option<usize>, reporter: Reporter, paths: &[String]) -> ExitCode {
     let jobs = jobs.unwrap_or_else(physical_cores);
-    let mut args = vec![jobs.to_string()];
+    let mut args = vec![jobs.to_string(), reporter.name().to_owned()];
     args.extend(paths.iter().cloned());
     let around = crate::Around {
         setup: true,
