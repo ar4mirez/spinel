@@ -9,6 +9,14 @@ bytecode a tool reads.
 
 ### Added
 
+- **`spinel test` keeps each file's time and hands out the slowest first**
+  ([#96](https://github.com/ar4mirez/spinel/issues/96)). After a run, each
+  test file's time is kept in `.spinel/test_timings.json`; the next run hands
+  out files never timed first, then the rest longest first, each to the
+  worker given the least so far, so the workers finish together. A timings
+  file that is missing, unreadable or stale only leaves files untimed; one
+  that cannot be written is told on stderr and does not fail the run.
+
 - **`spinel test --reporter json` and `--reporter junit`**
   ([#95](https://github.com/ar4mirez/spinel/issues/95)). `json`, for tools,
   prints each event as one JSON object per line as it arrives, then a
