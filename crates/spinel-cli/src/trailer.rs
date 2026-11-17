@@ -11,6 +11,11 @@
 //! program headers name and ignores anything past them. Reading a plain
 //! `spinel` costs one seek and one 48-byte read; the payload is hashed only
 //! once the magic says one is there.
+//!
+//! On macOS the same bytes, payload then trailer, are the contents of a
+//! `__SPINEL,__payload` section instead, since appending to a signed Mach-O
+//! breaks its signature (`macho.rs`, #99). `locate` finds where they are and
+//! `read` parses them, the same parser for both.
 
 use std::fmt;
 use std::fs::File;
@@ -18,6 +23,8 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use sha2::{Digest, Sha256};
+
+use crate::macho;
 
 /// The last 8 bytes of every compiled app. The `01` is the trailer version: a
 /// change to this layout is a new magic, so an old `spinel` reading a new app
@@ -179,22 +186,88 @@ pub fn read<F: Read + Seek>(file: &mut F) -> Result<Option<App>, Error> {
     }))
 }
 
+/// The compiled app `file` holds, wherever its kind of executable keeps one:
+/// in the `__SPINEL,__payload` section of a Mach-O, and at the end of any
+/// other file. What `read` answers, with `payload_offset` from the start of
+/// the file either way.
+pub fn locate<F: Read + Seek>(file: &mut F) -> Result<Option<App>, Error> {
+    match macho::place(file)? {
+        macho::Place::NotMachO => read(file),
+        macho::Place::NoSection => Ok(None),
+        macho::Place::Section { offset, size } => {
+            let found = read(&mut Window {
+                inner: file,
+                start: offset,
+                len: size,
+                pos: 0,
+            })?;
+            Ok(found.map(|app| App {
+                payload_offset: offset + app.payload_offset,
+                ..app
+            }))
+        }
+    }
+}
+
+/// Write a compiled app: `binary` with `payload` and its trailer, to `out`.
+/// A Mach-O gets them in its reserved section and is signed again ad hoc;
+/// anything else, an ELF, gets them appended.
+pub fn write(binary: &Path, payload: &[u8], out: &Path) -> io::Result<()> {
+    let place = macho::place(&mut File::open(binary)?)?;
+    if place == macho::Place::NotMachO {
+        append(binary, payload, out)
+    } else {
+        macho::write(binary, payload, out)
+    }
+}
+
 /// Write `binary`, then `payload`, then the trailer for it, to `out`: a
 /// compiled app on Linux, where the loader ignores bytes past the ELF.
 /// The copy keeps `binary`'s permissions, so `out` is executable.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "`spinel build` (#100) is the caller; only tests call it until it lands"
-    )
-)]
 pub fn append(binary: &Path, payload: &[u8], out: &Path) -> io::Result<()> {
     std::fs::copy(binary, out)?;
     let mut file = std::fs::OpenOptions::new().append(true).open(out)?;
     file.write_all(payload)?;
     file.write_all(&Trailer::for_payload(payload).to_bytes())?;
     file.sync_all()
+}
+
+/// `len` bytes of `inner` from `start`, read as if they were a whole file:
+/// the section a Mach-O keeps its payload and trailer in.
+struct Window<'a, F> {
+    inner: &'a mut F,
+    start: u64,
+    len: u64,
+    pos: u64,
+}
+
+impl<F: Read + Seek> Read for Window<'_, F> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let left = self.len.saturating_sub(self.pos);
+        let want = usize::try_from(left).map_or(buf.len(), |left| left.min(buf.len()));
+        if want == 0 {
+            return Ok(0);
+        }
+        self.inner.seek(SeekFrom::Start(self.start + self.pos))?;
+        let got = self.inner.read(&mut buf[..want])?;
+        self.pos += got as u64;
+        Ok(got)
+    }
+}
+
+impl<F: Seek> Seek for Window<'_, F> {
+    fn seek(&mut self, to: SeekFrom) -> io::Result<u64> {
+        let pos = match to {
+            SeekFrom::Start(at) => Some(at),
+            SeekFrom::End(delta) => self.len.checked_add_signed(delta),
+            SeekFrom::Current(delta) => self.pos.checked_add_signed(delta),
+        };
+        let pos = pos.ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "seek before the section")
+        })?;
+        self.pos = pos;
+        Ok(pos)
+    }
 }
 
 /// Feeds what is written into a sha256.
@@ -332,6 +405,49 @@ mod tests {
             "{err:?}"
         );
         assert!(err.to_string().contains("truncated"), "{err}");
+    }
+
+    #[test]
+    fn locate_reads_a_macho_payload_from_its_section() {
+        let file = crate::macho::tests::embedded(&crate::macho::tests::fake_spinel(), b"hello");
+        let found = locate(&mut Cursor::new(&file))
+            .expect("reads")
+            .expect("an app");
+        let start = usize::try_from(found.payload_offset).expect("fits");
+        assert_eq!(&file[start..start + 5], b"hello");
+        assert_eq!(hex(&found.trailer.sha256), HELLO_SHA256);
+    }
+
+    #[test]
+    fn locate_checks_a_section_payload_as_read_checks_an_appended_one() {
+        let mut file = crate::macho::tests::embedded(&crate::macho::tests::fake_spinel(), b"hello");
+        let crate::macho::Place::Section { offset, .. } =
+            crate::macho::place(&mut Cursor::new(&file)).expect("reads")
+        else {
+            panic!("no section");
+        };
+        file[usize::try_from(offset).expect("fits")] ^= 1;
+        let err = locate(&mut Cursor::new(&file)).expect_err("corrupt");
+        assert!(matches!(err, Error::Corrupt { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn a_plain_macho_spinel_is_no_app_even_with_a_trailer_appended() {
+        // The section is where a Mach-O keeps its payload; bytes past the end
+        // of the file are not looked at.
+        let plain = crate::macho::tests::fake_spinel();
+        assert!(matches!(locate(&mut Cursor::new(&plain)), Ok(None)));
+        let appended = app(&plain, b"hello");
+        assert!(matches!(locate(&mut Cursor::new(&appended)), Ok(None)));
+    }
+
+    #[test]
+    fn locate_reads_an_elf_payload_from_the_end() {
+        let file = app(b"\x7fELF binary", b"hello");
+        let found = locate(&mut Cursor::new(&file))
+            .expect("reads")
+            .expect("an app");
+        assert_eq!(found.payload_offset, 11);
     }
 
     #[test]

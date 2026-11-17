@@ -39,6 +39,7 @@ mod install;
 mod local_source;
 mod locked;
 mod lockfile;
+mod macho;
 mod marshal;
 mod remove;
 mod resolver;
@@ -404,6 +405,27 @@ enum Command {
         dirs: Vec<PathBuf>,
     },
 
+    /// Write a compiled app: a `spinel` with a payload and its trailer.
+    ///
+    /// The debugging window onto the writer `spinel build --compile` (#100)
+    /// will pack its archive with (docs/build.md, "Format"): on Linux the
+    /// payload and trailer are appended, and on macOS they go in the
+    /// `__SPINEL,__payload` section and the result is signed again ad hoc
+    /// with `codesign`. Hidden: `spinel build` is the command that makes apps.
+    #[command(hide = true)]
+    Pack {
+        /// The payload, any bytes, written as they are.
+        payload: PathBuf,
+
+        /// Where to write the app.
+        #[arg(short, long, value_name = "FILE")]
+        output: PathBuf,
+
+        /// The `spinel` to start from. This one when not given.
+        #[arg(long, value_name = "FILE")]
+        binary: Option<PathBuf>,
+    },
+
     /// Parse Ruby and print the syntax tree.
     ///
     /// Give it a file to see one tree. Give it a directory to sweep every `.rb`
@@ -560,6 +582,11 @@ fn main() -> ExitCode {
             );
         }
         Some(Command::Lockfile { path }) => return lockfile_command(&path),
+        Some(Command::Pack {
+            payload,
+            output,
+            binary,
+        }) => return pack_command(&payload, &output, binary),
         Some(Command::RequireMap { out, dirs }) => {
             let mut roots = dirs;
             roots.extend(stdlib::directory());
@@ -616,11 +643,12 @@ fn main() -> ExitCode {
 }
 
 /// What this executable does when it is a compiled app: `None` when it is
-/// a plain `spinel`, which costs one seek and one 48-byte read of its own file.
+/// a plain `spinel`, which costs one seek and one 48-byte read of its own file,
+/// after reading its load commands on macOS to find the payload section.
 fn compiled_app() -> Option<ExitCode> {
     // An executable that cannot read itself has no payload it could run.
     let mut file = trailer::open_self().ok()?;
-    let found = trailer::read(&mut file);
+    let found = trailer::locate(&mut file);
     if let Ok(None) = found {
         return None;
     }
@@ -643,6 +671,32 @@ fn compiled_app() -> Option<ExitCode> {
         Err(err) => {
             eprintln!("spinel: `{}`: {err}", exe.display());
             Some(ExitCode::FAILURE)
+        }
+    }
+}
+
+/// `spinel pack`: write `payload` into a copy of `binary`, or of this
+/// `spinel`, at `output`.
+fn pack_command(payload: &Path, output: &Path, binary: Option<PathBuf>) -> ExitCode {
+    let binary = match binary.map_or_else(std::env::current_exe, Ok) {
+        Ok(binary) => binary,
+        Err(err) => {
+            eprintln!("spinel: pack: cannot find this executable: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let bytes = match std::fs::read(payload) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            eprintln!("spinel: pack: {}: {err}", payload.display());
+            return ExitCode::FAILURE;
+        }
+    };
+    match trailer::write(&binary, &bytes, output) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("spinel: pack: {}: {err}", output.display());
+            ExitCode::FAILURE
         }
     }
 }

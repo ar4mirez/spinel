@@ -2,6 +2,13 @@
 //! appended (#98, docs/build.md "Format"). On Linux that is a plain append the
 //! loader ignores: the result still executes, finds its trailer, and refuses a
 //! payload whose sha256 does not match.
+//!
+//! On macOS the same bytes go in a `__SPINEL,__payload` section instead (#99),
+//! so an appended trailer is not an app there; `trailer_macos.rs` checks that
+//! side, and the tests here that expect an appended app run everywhere else.
+
+// The trailer builders serve only those tests.
+#![cfg_attr(target_os = "macos", allow(dead_code, unused_imports))]
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -79,6 +86,7 @@ fn stderr(out: &Output) -> String {
 }
 
 #[test]
+#[cfg(not(target_os = "macos"))]
 fn a_binary_with_a_valid_trailer_executes_and_reaches_the_compiled_app_path() {
     let scratch = Scratch::new("valid");
     let exe = compiled(&scratch.0, &app_bytes(PAYLOAD));
@@ -102,6 +110,7 @@ fn a_binary_with_a_valid_trailer_executes_and_reaches_the_compiled_app_path() {
 }
 
 #[test]
+#[cfg(not(target_os = "macos"))]
 fn a_flipped_payload_byte_is_reported_as_corrupt() {
     let scratch = Scratch::new("flipped");
     let mut tail = app_bytes(PAYLOAD);
@@ -118,6 +127,7 @@ fn a_flipped_payload_byte_is_reported_as_corrupt() {
 }
 
 #[test]
+#[cfg(not(target_os = "macos"))]
 fn a_payload_missing_bytes_is_reported_as_corrupt() {
     // A payload cut short ahead of an intact trailer: the declared length now
     // reaches back into the binary, so the bytes hashed are not the payload.
@@ -132,6 +142,7 @@ fn a_payload_missing_bytes_is_reported_as_corrupt() {
 }
 
 #[test]
+#[cfg(not(target_os = "macos"))]
 fn a_length_longer_than_the_file_is_reported_as_truncated() {
     let scratch = Scratch::new("truncated");
     let mut tail = trailer(PAYLOAD);
@@ -167,4 +178,33 @@ fn bytes_appended_without_the_magic_leave_spinel_unchanged() {
     let out = run(&exe, &["-e", "puts 6 * 7"]);
     assert!(out.status.success(), "{}", stderr(&out));
     assert_eq!(out.stdout, b"42\n");
+}
+
+#[test]
+#[cfg(not(target_os = "macos"))]
+fn spinel_pack_appends_the_payload_and_its_trailer() {
+    // The writer `spinel build` (#100) will use, through the hidden `pack`.
+    let scratch = Scratch::new("pack");
+    let payload = scratch.0.join("payload");
+    fs::write(&payload, PAYLOAD).expect("write payload");
+    let exe = scratch.0.join("mytool");
+    let out = Command::new(SPINEL)
+        .arg("pack")
+        .arg(&payload)
+        .arg("-o")
+        .arg(&exe)
+        .output()
+        .expect("runs");
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    let spinel = fs::read(SPINEL).expect("read spinel");
+    let app = fs::read(&exe).expect("read app");
+    assert!(app.starts_with(&spinel));
+    assert!(app[spinel.len()..] == app_bytes(PAYLOAD)[..]);
+
+    let ran = run(&exe, &[]);
+    let err = stderr(&ran);
+    assert!(err.contains("is a compiled app"), "{err}");
+    assert!(err.contains(&sha256_hex(PAYLOAD)), "{err}");
+    assert_eq!(ran.status.code(), Some(1), "{err}");
 }
