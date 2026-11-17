@@ -2,8 +2,9 @@
 # `spinel test` runs on the VM, after `shims/setup.rb` and the gem prelude,
 # as `spinel run` runs a program. `ARGV` is the worker count the CLI chose
 # (`-j`, else the physical cores), the reporter (`--reporter`: `progress`,
-# `json` or `junit`), then the files it was given, each with an optional
-# `:LINE` after it; it is cleared before any test code can read it.
+# `json` or `junit`), the file to record what failed in for `spinel test
+# --watch`, or an empty string, then the files it was given, each with an
+# optional `:LINE` after it; it is cleared before any test code can read it.
 #
 # 1. Discovery: with no paths, `test/**/*_test.rb` (Minitest) and
 #    `spec/**/*_spec.rb` (RSpec), relative to the current directory, each
@@ -77,6 +78,11 @@
 #    time kept, then the rest longest first, each to the worker given the
 #    least so far: a worker runs its tests only once it has loaded its last
 #    file, so what it is given, not when, is what balances the workers.
+# 9. `spinel test --watch` (#97) names a file to record what failed in:
+#    once both phases have ended, the runner writes there the location that
+#    runs each failure, error and problem again (each one's `rerun`, as
+#    `Re-run each failure:` lists them), and the watcher reruns those when a
+#    change maps to no test. A discovery error writes nothing.
 #
 # A phase process and the runner end with `exit!`, so an `at_exit` a helper
 # registered runs in the workers, which ran the tests, and not again in a
@@ -229,7 +235,19 @@ module Spinel
       end
     end
 
-    def self.run(jobs, reporter, args)
+    # What failed, for `spinel test --watch` (step 9): `{"version": 1,
+    # "failed": [location, ...]}`, each the `path` or `path:LINE` that runs a
+    # failure, error or problem again, once each. The watcher reads it only
+    # after this process has ended, so it is written in place.
+    def self.record_failures(path, report)
+      failed = report["failures"].filter_map { |event| event["rerun"] }
+      failed.concat(report["problems"].filter_map { |problem| problem["rerun"] })
+      File.write(path, "#{JSON.generate({ "version" => 1, "failed" => failed.uniq })}\n")
+    rescue StandardError => e
+      warn "spinel test: what failed is not kept for --watch: #{e.message}"
+    end
+
+    def self.run(jobs, reporter, failures_file, args)
       @reporter = reporter
       unless reporter == "progress"
         @out = $stdout.dup
@@ -256,6 +274,7 @@ module Spinel
           printed = true if phase(report, "RSpec") { |kept| run_specs(specs, jobs, kept) }
         end
         write_timings(@timings, report["timings"])
+        record_failures(failures_file, report) unless failures_file.empty?
       end
       case reporter
       when "json" then json_report(report)
@@ -847,9 +866,10 @@ end
 
 jobs = Integer(ARGV.shift)
 reporter = ARGV.shift
+failures_file = ARGV.shift
 args = ARGV.dup
 ARGV.clear
-code = Spinel::TestRunner.run(jobs, reporter, args)
+code = Spinel::TestRunner.run(jobs, reporter, failures_file, args)
 $stdout.flush
 $stderr.flush
 exit!(code)

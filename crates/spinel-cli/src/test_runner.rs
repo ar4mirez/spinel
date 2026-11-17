@@ -29,8 +29,8 @@ pub(crate) enum Reporter {
 }
 
 impl Reporter {
-    /// As `shims/test_runner.rb` takes it.
-    fn name(self) -> &'static str {
+    /// As `shims/test_runner.rb` and `--reporter` take it.
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Reporter::Progress => "progress",
             Reporter::Json => "json",
@@ -41,10 +41,17 @@ impl Reporter {
 
 /// Run the suite under the current directory, or the `paths` given (each a
 /// file or `FILE:LINE`), on `jobs` workers, or one per physical core,
-/// reported by `reporter`.
-pub(crate) fn run(jobs: Option<usize>, reporter: Reporter, paths: &[String]) -> ExitCode {
+/// reported by `reporter`, recording what failed in `failures` for
+/// `--watch` when it is given.
+pub(crate) fn run(
+    jobs: Option<usize>,
+    reporter: Reporter,
+    failures: Option<&Path>,
+    paths: &[String],
+) -> ExitCode {
     let jobs = jobs.unwrap_or_else(physical_cores);
-    let mut args = vec![jobs.to_string(), reporter.name().to_owned()];
+    let failures = failures.map_or_else(String::new, |path| path.to_string_lossy().into_owned());
+    let mut args = vec![jobs.to_string(), reporter.name().to_owned(), failures];
     args.extend(paths.iter().cloned());
     let around = crate::Around {
         setup: true,
