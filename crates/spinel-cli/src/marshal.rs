@@ -4,8 +4,11 @@
 //! Marshal of a `Gem::Specification`. Every type `Marshal.dump` writes is
 //! read; objects come back as their class and instance variables, user
 //! dumps (`_dump`, `marshal_dump`) as their class and data, never run.
+//! A value shares its children, so an `@` link costs what Ruby's does: a
+//! reference to the object, never a copy.
 
 use std::fmt;
+use std::rc::Rc;
 
 /// A value as Marshal wrote it.
 #[derive(Debug, Clone, PartialEq)]
@@ -14,18 +17,18 @@ pub enum Value {
     Bool(bool),
     Int(i64),
     /// A Float or a Bignum, kept as Marshal writes it.
-    Number(String),
+    Number(Rc<str>),
     /// A String's bytes; its encoding is dropped.
-    Str(Vec<u8>),
-    Symbol(String),
-    Array(Vec<Value>),
-    Hash(Vec<(Value, Value)>),
+    Str(Rc<[u8]>),
+    Symbol(Rc<str>),
+    Array(Rc<[Value]>),
+    Hash(Rc<[(Value, Value)]>),
     /// `o`: a plain object's class and instance variables (`@name`).
-    Object(String, Vec<(String, Value)>),
+    Object(Rc<str>, Rc<[(Rc<str>, Value)]>),
     /// `u`: what a class's `_dump` returned.
-    UserDump(String, Vec<u8>),
+    UserDump(Rc<str>, Rc<[u8]>),
     /// `U`: what a class's `marshal_dump` returned.
-    UserMarshal(String, Box<Value>),
+    UserMarshal(Rc<str>, Rc<Value>),
     /// A class, module, regexp or struct, whose content nothing here reads.
     Other,
 }
@@ -80,7 +83,7 @@ pub fn load(data: &[u8]) -> Result<Value, Error> {
         symbols: Vec::new(),
         objects: Vec::new(),
         depth: 0,
-        produced: 0,
+        allocated: 0,
         budget: data.len().saturating_mul(BUDGET_PER_BYTE).max(MIN_BUDGET),
     };
     reader.value()
@@ -89,30 +92,28 @@ pub fn load(data: &[u8]) -> Result<Value, Error> {
 struct Reader<'a> {
     data: &'a [u8],
     at: usize,
-    symbols: Vec<String>,
-    /// Every object read, for `@` links, with what it cost to produce;
-    /// `None` while it is being read.
-    objects: Vec<Option<(Value, usize)>>,
+    symbols: Vec<Rc<str>>,
+    /// Every object read, for `@` links; `None` while it is being read.
+    objects: Vec<Option<Value>>,
     depth: usize,
-    /// Values and bytes produced so far, links counted at the size of what
-    /// they copy.
-    produced: usize,
+    /// Bytes of values and strings built so far; a link builds nothing.
+    allocated: usize,
     budget: usize,
 }
 
 /// Deeper than this, a dump is taken to be hostile.
 const MAX_DEPTH: usize = 256;
 
-/// A dump may produce this much per byte of it, or `MIN_BUDGET`, before
-/// its links are taken to be amplifying it.
-const BUDGET_PER_BYTE: usize = 16;
+/// A dump may build this many bytes of values per byte of it, or
+/// `MIN_BUDGET`, before it is refused.
+const BUDGET_PER_BYTE: usize = 2 * std::mem::size_of::<Value>();
 const MIN_BUDGET: usize = 1 << 20;
 
 impl Reader<'_> {
-    fn produce(&mut self, n: usize) -> Result<(), Error> {
-        self.produced = self.produced.saturating_add(n);
-        if self.produced > self.budget {
-            return Err(Error("its links copy too much".to_owned()));
+    fn allocate(&mut self, n: usize) -> Result<(), Error> {
+        self.allocated = self.allocated.saturating_add(n);
+        if self.allocated > self.budget {
+            return Err(Error("it builds too much".to_owned()));
         }
         Ok(())
     }
@@ -170,28 +171,29 @@ impl Reader<'_> {
             .ok_or_else(|| Error(format!("a length of {n}")))
     }
 
-    fn raw_string(&mut self) -> Result<Vec<u8>, Error> {
+    fn raw_string(&mut self) -> Result<&[u8], Error> {
         let n = self.len()?;
-        self.produce(n)?;
-        Ok(self.bytes(n)?.to_vec())
+        self.allocate(n)?;
+        self.bytes(n)
     }
 
-    fn symbol(&mut self) -> Result<String, Error> {
+    fn text(&mut self) -> Result<Rc<str>, Error> {
+        Ok(String::from_utf8_lossy(self.raw_string()?).into())
+    }
+
+    fn symbol(&mut self) -> Result<Rc<str>, Error> {
         match self.byte()? {
             b':' => {
-                let s = String::from_utf8_lossy(&self.raw_string()?).into_owned();
+                let s = self.text()?;
                 self.symbols.push(s.clone());
                 Ok(s)
             }
             b';' => {
                 let i = self.len()?;
-                let n = self
-                    .symbols
+                self.symbols
                     .get(i)
-                    .ok_or_else(|| Error(format!("symbol link {i}")))?
-                    .len();
-                self.produce(n)?;
-                Ok(self.symbols[i].clone())
+                    .cloned()
+                    .ok_or_else(|| Error(format!("symbol link {i}")))
             }
             b'I' => {
                 // A symbol with an encoding.
@@ -203,7 +205,7 @@ impl Reader<'_> {
         }
     }
 
-    fn ivars(&mut self) -> Result<Vec<(String, Value)>, Error> {
+    fn ivars(&mut self) -> Result<Vec<(Rc<str>, Value)>, Error> {
         let n = self.len()?;
         let mut ivars = Vec::new();
         for _ in 0..n {
@@ -220,10 +222,9 @@ impl Reader<'_> {
         read: impl FnOnce(&mut Self) -> Result<Value, Error>,
     ) -> Result<Value, Error> {
         let slot = self.objects.len();
-        let before = self.produced;
         self.objects.push(None);
         let value = read(self)?;
-        self.objects[slot] = Some((value.clone(), self.produced - before));
+        self.objects[slot] = Some(value.clone());
         Ok(value)
     }
 
@@ -232,7 +233,7 @@ impl Reader<'_> {
         if self.depth > MAX_DEPTH {
             return Err(Error("it nests too deep".to_owned()));
         }
-        self.produce(1)?;
+        self.allocate(std::mem::size_of::<Value>())?;
         let value = self.value_inner();
         self.depth -= 1;
         value
@@ -252,11 +253,7 @@ impl Reader<'_> {
             b'@' => {
                 let i = self.len()?;
                 match self.objects.get(i) {
-                    Some(Some((_, cost))) => {
-                        let cost = *cost;
-                        self.produce(cost)?;
-                        Ok(self.objects[i].as_ref().map_or(Value::Nil, |(v, _)| v.clone()))
-                    }
+                    Some(Some(v)) => Ok(v.clone()),
                     // A link to an object still being read: a cycle.
                     Some(None) => Ok(Value::Nil),
                     None => Err(Error(format!("object link {i}"))),
@@ -271,21 +268,17 @@ impl Reader<'_> {
                 self.symbol()?;
                 self.value()
             }
-            b'"' => self.object(|r| Ok(Value::Str(r.raw_string()?))),
-            b'f' => self.object(|r| {
-                Ok(Value::Number(
-                    String::from_utf8_lossy(&r.raw_string()?).into_owned(),
-                ))
-            }),
+            b'"' => self.object(|r| Ok(Value::Str(r.raw_string()?.into()))),
+            b'f' => self.object(|r| Ok(Value::Number(r.text()?))),
             b'l' => self.object(|r| {
                 let sign = r.byte()?;
                 let n = r.len()?;
                 let bytes = r.bytes(n.saturating_mul(2))?;
                 let hex: String = bytes.iter().rev().map(|b| format!("{b:02x}")).collect();
-                Ok(Value::Number(format!(
-                    "{}0x{hex}",
-                    if sign == b'-' { "-" } else { "" }
-                )))
+                r.allocate(hex.len())?;
+                Ok(Value::Number(
+                    format!("{}0x{hex}", if sign == b'-' { "-" } else { "" }).into(),
+                ))
             }),
             b'[' => self.object(|r| {
                 let n = r.len()?;
@@ -293,7 +286,7 @@ impl Reader<'_> {
                 for _ in 0..n {
                     items.push(r.value()?);
                 }
-                Ok(Value::Array(items))
+                Ok(Value::Array(items.into()))
             }),
             b'{' | b'}' => self.object(|r| {
                 let n = r.len()?;
@@ -306,20 +299,20 @@ impl Reader<'_> {
                 if t == b'}' {
                     r.value()?;
                 }
-                Ok(Value::Hash(pairs))
+                Ok(Value::Hash(pairs.into()))
             }),
             b'o' => self.object(|r| {
                 let class = r.symbol()?;
                 let ivars = r.ivars()?;
-                Ok(Value::Object(class, ivars))
+                Ok(Value::Object(class, ivars.into()))
             }),
             b'u' => self.object(|r| {
                 let class = r.symbol()?;
-                Ok(Value::UserDump(class, r.raw_string()?))
+                Ok(Value::UserDump(class, r.raw_string()?.into()))
             }),
             b'U' => self.object(|r| {
                 let class = r.symbol()?;
-                Ok(Value::UserMarshal(class, Box::new(r.value()?)))
+                Ok(Value::UserMarshal(class, Rc::new(r.value()?)))
             }),
             b'C' => {
                 self.symbol()?;
@@ -360,14 +353,14 @@ mod tests {
         assert_eq!(items[3], Value::Int(300));
         assert_eq!(items[4], Value::Int(-300));
         assert_eq!(items[5].as_str(), Some("é"));
-        assert_eq!(items[6], Value::Symbol("a".to_owned()));
-        assert_eq!(items[7], Value::Symbol("a".to_owned()));
+        assert_eq!(items[6], Value::Symbol("a".into()));
+        assert_eq!(items[7], Value::Symbol("a".into()));
         assert_eq!(
             items[8],
-            Value::Hash(vec![(
-                Value::Str(b"k".to_vec()),
-                Value::Number("1.5".to_owned())
-            )])
+            Value::Hash(Rc::new([(
+                Value::Str(b"k"[..].into()),
+                Value::Number("1.5".into())
+            )]))
         );
     }
 
@@ -381,15 +374,60 @@ mod tests {
     }
 
     #[test]
-    fn links_that_amplify_are_refused() {
-        // a0 = []; a(k) = [a(k-1), a(k-1)]; Marshal.dump([a0, a1, ..., a40])
+    fn links_share_what_they_point_to() {
+        // a0 = []; a(k) = [a(k-1), a(k-1)]; Marshal.dump([a0, a1, ..., a60])
         let mut data = b"\x04\x08[".to_vec();
-        data.push(41 + 5);
+        data.push(61 + 5);
         data.extend_from_slice(b"[\x00");
-        for k in 1..=40u8 {
+        for k in 1..=60u8 {
             data.extend_from_slice(&[b'[', 2 + 5, b'@', k + 5, b'@', k + 5]);
         }
-        let err = load(&data).unwrap_err();
-        assert!(err.0.contains("copy too much"), "{err}");
+        let v = load(&data).unwrap();
+        let items = v.as_array().unwrap();
+        let (Value::Array(last), Value::Array(prev)) = (&items[60], &items[59]) else {
+            panic!("{v:?}");
+        };
+        for child in last.iter() {
+            let Value::Array(child) = child else {
+                panic!("{child:?}");
+            };
+            assert!(Rc::ptr_eq(child, prev));
+        }
+    }
+
+    #[test]
+    fn nested_objects_are_not_copied_into_the_link_table() {
+        // Marshal.dump([[...[s]...]]) 250 deep around a 32 MB String.
+        const LEN: usize = 32 << 20;
+        let mut data = b"\x04\x08".to_vec();
+        for _ in 0..250 {
+            data.extend_from_slice(b"[\x06");
+        }
+        data.extend_from_slice(b"\"\x04");
+        data.extend_from_slice(&u32::try_from(LEN).unwrap().to_le_bytes());
+        data.resize(data.len() + LEN, b'x');
+        let mut v = &load(&data).unwrap();
+        for _ in 0..250 {
+            v = &v.as_array().unwrap()[0];
+        }
+        let Value::Str(s) = v else { panic!("{v:?}") };
+        assert_eq!(s.len(), LEN);
+        assert_eq!(Rc::strong_count(s), 1);
+    }
+
+    #[test]
+    fn a_dump_that_builds_more_than_its_budget_is_refused() {
+        let mut reader = Reader {
+            data: b"",
+            at: 0,
+            symbols: Vec::new(),
+            objects: Vec::new(),
+            depth: 0,
+            allocated: 0,
+            budget: 10,
+        };
+        assert!(reader.allocate(10).is_ok());
+        let err = reader.allocate(1).unwrap_err();
+        assert!(err.0.contains("builds too much"), "{err}");
     }
 }

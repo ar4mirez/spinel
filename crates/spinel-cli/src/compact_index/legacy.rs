@@ -110,7 +110,7 @@ pub fn info_line(tuple: &Tuple, rz: &[u8]) -> Result<String, String> {
     let data = inflate(flate2::read::ZlibDecoder::new(rz), MAX_GEMSPEC)
         .map_err(|e| format!("not deflated: {e}"))?;
     let spec = match marshal::load(&data).map_err(|e| e.to_string())? {
-        Value::UserDump(class, dumped) if class == "Gem::Specification" => {
+        Value::UserDump(class, dumped) if &*class == "Gem::Specification" => {
             marshal::load(&dumped).map_err(|e| e.to_string())?
         }
         _ => return Err("not a Gem::Specification".to_owned()),
@@ -121,7 +121,7 @@ pub fn info_line(tuple: &Tuple, rz: &[u8]) -> Result<String, String> {
     let mut deps: Vec<(String, String)> = Vec::new();
     for dep in field(9).as_array().unwrap_or_default() {
         let runtime = match dep.ivar("type") {
-            Some(Value::Symbol(t)) => t == "runtime",
+            Some(Value::Symbol(t)) => &**t == "runtime",
             _ => true,
         };
         let Some(name) = dep.ivar("name").and_then(Value::as_str) else {
@@ -241,7 +241,9 @@ mod tests {
         let gz = gz.finish().unwrap();
         assert!(inflate(flate2::read::GzDecoder::new(&gz[..]), 4095).is_err());
         assert_eq!(
-            inflate(flate2::read::GzDecoder::new(&gz[..]), 4096).unwrap().len(),
+            inflate(flate2::read::GzDecoder::new(&gz[..]), 4096)
+                .unwrap()
+                .len(),
             4096
         );
 
