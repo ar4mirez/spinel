@@ -9,6 +9,17 @@ bytecode a tool reads.
 
 ### Added
 
+- **`spinel test` reports the run and prints commands to re-run failures**
+  ([#94](https://github.com/ar4mirez/spinel/issues/94)). It prints a dot per
+  passing test, then each failure and error with its `file:line`, message and
+  backtrace, each run of gem frames folded to one line, then a summary line
+  and a `spinel test file:line # name` command for each failure that runs it
+  again when pasted into a shell. It exits 1 on any failure, error or crash,
+  0 otherwise. `spinel test FILE[:LINE]...` runs only the files given, a line
+  picking the test or example defined at or nearest above it. This report
+  takes the place of Minitest's and RSpec's own, and each JSON event gains a
+  `rerun` field naming where to run it again.
+
 - **`spinel test` workers report each test as a JSON event**
   ([#93](https://github.com/ar4mirez/spinel/issues/93)). A Minitest reporter
   and an RSpec formatter, registered in every worker, write one line per test
