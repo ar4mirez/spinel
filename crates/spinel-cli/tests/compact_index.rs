@@ -492,8 +492,12 @@ fn a_missing_index_is_an_error() {
     let home = Home::new("missing");
     let out = index(&home, &server, &[]);
     assert!(!out.status.success());
+    // A 404 for `/versions` sends the client to the legacy index (#89),
+    // which this server does not have either.
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("/versions: HTTP 404"), "{stderr}");
+    assert!(stderr.contains("/specs.4.8.gz: HTTP 404"), "{stderr}");
+    let paths: Vec<String> = server.take_seen().iter().map(|s| s.path.clone()).collect();
+    assert_eq!(paths, ["/versions", "/specs.4.8.gz"]);
 }
 
 #[test]

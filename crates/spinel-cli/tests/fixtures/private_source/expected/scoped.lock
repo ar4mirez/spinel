@@ -1,0 +1,25 @@
+GEM
+  remote: @PRIVATE@/
+  specs:
+    rackup (2.3.1)
+      rack (>= 3)
+
+GEM
+  remote: @SOURCE@/
+  specs:
+    rack (3.2.8)
+
+PLATFORMS
+  ruby
+  x86_64-linux
+
+DEPENDENCIES
+  rack
+  rackup!
+
+CHECKSUMS
+  rack (3.2.8) sha256=1fecc85e463ebc7a2a945fff829ffcd549babeb1556384796fad946c28dc4ec7
+  rackup (2.3.1) sha256=6c79c26753778e90983761d677a48937ee3192b3ffef6bc963c0950f94688868
+
+BUNDLED WITH
+  4.0.20

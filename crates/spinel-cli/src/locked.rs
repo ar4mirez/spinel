@@ -53,6 +53,9 @@ pub struct Locals<'a> {
     pub pins: &'a [Option<usize>],
     /// `Bundler.root`, which a path source's `remote:` is relative to.
     pub project: &'a Path,
+    /// The remotes of the rubygems sources scoped to some gems (#89), as
+    /// written.
+    pub scoped: &'a [String],
 }
 
 impl Locals<'static> {
@@ -63,6 +66,7 @@ impl Locals<'static> {
             read: &[],
             pins: &[],
             project: Path::new(""),
+            scoped: &[],
         }
     }
 }
@@ -248,8 +252,12 @@ impl Definition {
         // source is one the lockfile has, and it has no other.
         // ponytail: one rubygems source, compared by its one remote. Upgrade
         // with `Source::Rubygems#==` over several remotes.
-        let wanted = lockfile::gem_remotes(remote);
-        let same_source = |source: &Source| matches!(&source.kind, SourceKind::Gem { remotes } if *remotes == wanted);
+        // The scoped rubygems sources (#89) are compared the same way.
+        let wanted: Vec<Vec<String>> = std::iter::once(remote)
+            .chain(locals.scoped.iter().map(String::as_str))
+            .map(lockfile::gem_remotes)
+            .collect();
+        let same_source = |source: &Source| matches!(&source.kind, SourceKind::Gem { remotes } if wanted.contains(remotes));
         let mut matched: Vec<Option<usize>> = Vec::new();
         for declared in locals.sources {
             let found = lock.sources.iter().enumerate().position(|(i, s)| {
@@ -266,8 +274,13 @@ impl Definition {
             lock.sources.iter().enumerate().all(|(i, s)| {
                 matches!(s.kind, SourceKind::Gem { .. }) || matched.contains(&Some(i))
             });
-        let source_changes = !(gem_sources.len() == 1
-            && same_source(gem_sources[0])
+        let source_changes = !(gem_sources.len() == wanted.len()
+            && gem_sources.iter().all(|s| same_source(s))
+            && wanted.iter().all(|w| {
+                gem_sources
+                    .iter()
+                    .any(|s| matches!(&s.kind, SourceKind::Gem { remotes } if remotes == w))
+            })
             && others_matched
             && matched.iter().all(Option::is_some));
         let kept_source = |i: usize| same_source(&lock.sources[i]) || matched.contains(&Some(i));
