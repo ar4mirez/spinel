@@ -31,8 +31,21 @@
 # upstream, so `git subtree pull` would never merge cleanly. A pinned copy plus
 # the drift check below buys everything a subtree would have, for less.
 #
-# To bump: edit RUBY_TAG, WEBRICK_TAG, JSON_TAG or IO_CONSOLE_TAG, run this
-# script, commit `stdlib/` in its own commit.
+# `prism` (#837) is laid over differently: it replaces the copy in Ruby's
+# `lib/`. Its C half is the Prism Spinel's own parser links (the ruby-prism
+# crate, `crates/spinel-parse`), and its Ruby half reads that library's
+# serialized trees, which `Prism::Serialize` accepts only from its own
+# release, byte for byte. So the Ruby half is the gem at the crate's
+# release, from the packaged gem on rubygems.org rather than a git tag,
+# because `node.rb`, `serialize.rb` and the other generated files exist only
+# in the package. Its `prism/ffi.rb`, the backend for engines without the C
+# extension, is left out: Spinel's C half is `lib/prism/prism.rb`, embedded,
+# and `prism.rb` is patched to load it (see `patch_prism` below).
+#
+# To bump: edit RUBY_TAG, WEBRICK_TAG, JSON_TAG, IO_CONSOLE_TAG or
+# PRISM_VERSION (with PRISM_SHA256, and the ruby-prism crate in
+# `crates/spinel-parse/Cargo.toml` to the same release), run this script,
+# commit `stdlib/` in its own commit.
 
 set -euo pipefail
 
@@ -51,6 +64,12 @@ JSON_REPO="https://github.com/ruby/json.git"
 # The io-console Ruby 4.0 bundles (its gemspec in ext/io/console at RUBY_TAG).
 IO_CONSOLE_TAG="v0.8.2"
 IO_CONSOLE_REPO="https://github.com/ruby/io-console.git"
+
+# The prism gem, at the release of the ruby-prism crate Spinel parses with,
+# and the package's SHA-256 as rubygems.org publishes it.
+PRISM_VERSION="1.9.0"
+PRISM_SHA256="7b530c6a9f92c24300014919c9dcbc055bf4cdf51ec30aed099b06cd6674ef85"
+PRISM_URL="https://rubygems.org/downloads/prism-$PRISM_VERSION.gem"
 
 # Bundler's executable, copied to `stdlib/libexec/`.
 LIBEXEC_FILES=(bundle)
@@ -134,6 +153,48 @@ fetch_gem io-console "$IO_CONSOLE_REPO" "$IO_CONSOLE_TAG" "${IO_CONSOLE_LICENSES
 io_console_sha="$(git -C "$work/io-console" rev-parse 'FETCH_HEAD^{commit}')"
 rm -rf "$work/io-console/lib/ffi"
 
+# prism is MIT-licensed. A `.gem` is a tar of a gzipped `data.tar.gz`; only
+# its `lib/`, `prism.gemspec` and license are wanted.
+PRISM_LICENSES=(LICENSE.md)
+echo "fetching prism $PRISM_VERSION from rubygems.org"
+mkdir -p "$work/prism-gem" "$work/prism"
+curl -fsSL -o "$work/prism-gem/prism.gem" "$PRISM_URL"
+if command -v sha256sum >/dev/null; then
+  prism_sha="$(sha256sum "$work/prism-gem/prism.gem" | cut -d' ' -f1)"
+else
+  prism_sha="$(shasum -a 256 "$work/prism-gem/prism.gem" | cut -d' ' -f1)"
+fi
+if [[ "$prism_sha" != "$PRISM_SHA256" ]]; then
+  echo "::error::prism-$PRISM_VERSION.gem is $prism_sha, not $PRISM_SHA256" >&2
+  exit 1
+fi
+tar -xf "$work/prism-gem/prism.gem" -C "$work/prism-gem" data.tar.gz
+tar -xzf "$work/prism-gem/data.tar.gz" -C "$work/prism" lib prism.gemspec "${PRISM_LICENSES[@]}"
+rm "$work/prism/lib/prism/ffi.rb"
+# ruby/ruby keeps the gemspec beside the library, in `lib/prism/`.
+mv "$work/prism/prism.gemspec" "$work/prism/lib/prism/prism.gemspec"
+
+# The one patch to a vendored file. `prism.rb` loads the C extension only on
+# CRuby (`RUBY_ENGINE == "ruby"`) and the FFI backend everywhere else; on
+# Spinel the extension is `lib/prism/prism.rb`, embedded, so Spinel takes
+# the extension's branch. Upstream's own words, an engine added to its
+# condition; the script stops if the line it patches is not there exactly.
+patch_prism() {
+  local file="$1"
+  local from='if RUBY_ENGINE == "ruby" and !ENV["PRISM_FFI_BACKEND"]'
+  local to='if (RUBY_ENGINE == "ruby" || RUBY_ENGINE == "spinel") and !ENV["PRISM_FFI_BACKEND"]'
+  if [[ "$(grep -cxF "$from" "$file")" != 1 ]]; then
+    echo "::error::$file no longer has the line patch_prism replaces: $from" >&2
+    exit 1
+  fi
+  local patched="$file.patched"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" == "$from" ]]; then echo "$to"; else printf '%s\n' "$line"; fi
+  done < "$file" > "$patched"
+  mv "$patched" "$file"
+}
+patch_prism "$work/prism/lib/prism.rb"
+
 # Assemble what `stdlib/` should look like, then either install it or diff
 # against it. Building it once and comparing keeps the two modes honest: the
 # check tests the same tree the vendor step would write.
@@ -175,6 +236,10 @@ lay_over() {
 lay_over webrick "${WEBRICK_LICENSES[@]}"
 lay_over json "${JSON_LICENSES[@]}"
 lay_over io-console "${IO_CONSOLE_LICENSES[@]}"
+# Ruby's own prism goes first: the gem's replaces it rather than mixing two
+# releases' files (see PRISM_VERSION).
+rm -rf "$staged/prism.rb" "$staged/prism"
+lay_over prism "${PRISM_LICENSES[@]}"
 cat > "$staged/UPSTREAM" <<EOF
 Ruby's pure-Ruby standard library, vendored verbatim.
 
@@ -191,6 +256,14 @@ default gems whose Ruby halves ruby/ruby keeps in ext/json/lib and
 ext/io/console/lib. Their C halves are Spinel's own, in the repository's
 lib/json/ext/ and lib/io/console.rb, embedded in the binary.
 
+In place of Ruby's own prism.rb and prism/, the prism gem's lib/ at the
+release of the Prism library Spinel parses with, which is the C half its
+Ruby half reads serialized trees from (the repository's lib/prism/prism.rb,
+embedded in the binary). Its prism.gemspec is in prism/, where ruby/ruby
+keeps it. One file is patched: prism.rb loads the C extension when
+RUBY_ENGINE is "spinel" as well as "ruby", rather than prism/ffi.rb, the
+FFI backend, which is left out.
+
     upstream  $WEBRICK_REPO
     tag       $WEBRICK_TAG
     commit    $webrick_sha
@@ -206,13 +279,18 @@ lib/json/ext/ and lib/io/console.rb, embedded in the binary.
     commit    $io_console_sha
     files     io/console/size.rb (not lib/ffi/, JRuby's backend)
 
+    upstream  $PRISM_URL
+    sha256    $PRISM_SHA256
+    files     prism.rb (patched), prism/ (not prism/ffi.rb, the FFI backend)
+
 Licenses are upstream's, in LICENSE/. LEGAL records the per-file terms for the
 files here from ruby/ruby that are not under Ruby's own license; each gem's own
 are in LICENSE/<gem>/.
 
 Do not edit anything under stdlib/ by hand. CI diffs this tree against the tags
 above and fails on any difference. To update, edit RUBY_TAG, WEBRICK_TAG,
-JSON_TAG or IO_CONSOLE_TAG in scripts/vendor-stdlib.sh and run it.
+JSON_TAG, IO_CONSOLE_TAG or PRISM_VERSION in scripts/vendor-stdlib.sh and run
+it.
 EOF
 
 if $check_only; then
@@ -222,9 +300,9 @@ if $check_only; then
   # place to add one, with the reason next to it.
   if diff -r -q "$staged" "$stdlib"; then
     files="$(find "$stdlib" -name '*.rb' | wc -l | tr -d ' ')"
-    echo "stdlib/ matches ruby/ruby $RUBY_TAG, ruby/webrick $WEBRICK_TAG, ruby/json $JSON_TAG and ruby/io-console $IO_CONSOLE_TAG ($files .rb files)"
+    echo "stdlib/ matches ruby/ruby $RUBY_TAG, ruby/webrick $WEBRICK_TAG, ruby/json $JSON_TAG, ruby/io-console $IO_CONSOLE_TAG and prism $PRISM_VERSION ($files .rb files)"
   else
-    echo "::error::stdlib/ has drifted from ruby/ruby $RUBY_TAG ($sha), ruby/webrick $WEBRICK_TAG, ruby/json $JSON_TAG or ruby/io-console $IO_CONSOLE_TAG" >&2
+    echo "::error::stdlib/ has drifted from ruby/ruby $RUBY_TAG ($sha), ruby/webrick $WEBRICK_TAG, ruby/json $JSON_TAG, ruby/io-console $IO_CONSOLE_TAG or prism $PRISM_VERSION" >&2
     echo "run scripts/vendor-stdlib.sh and commit the result" >&2
     exit 1
   fi
@@ -232,5 +310,5 @@ else
   rm -rf "$stdlib"
   mv "$staged" "$stdlib"
   files="$(find "$stdlib" -name '*.rb' | wc -l | tr -d ' ')"
-  echo "vendored ruby/ruby $RUBY_TAG, ruby/webrick $WEBRICK_TAG, ruby/json $JSON_TAG and ruby/io-console $IO_CONSOLE_TAG into stdlib/ ($files .rb files)"
+  echo "vendored ruby/ruby $RUBY_TAG, ruby/webrick $WEBRICK_TAG, ruby/json $JSON_TAG, ruby/io-console $IO_CONSOLE_TAG and prism $PRISM_VERSION into stdlib/ ($files .rb files)"
 fi

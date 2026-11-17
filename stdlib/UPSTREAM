@@ -13,6 +13,14 @@ default gems whose Ruby halves ruby/ruby keeps in ext/json/lib and
 ext/io/console/lib. Their C halves are Spinel's own, in the repository's
 lib/json/ext/ and lib/io/console.rb, embedded in the binary.
 
+In place of Ruby's own prism.rb and prism/, the prism gem's lib/ at the
+release of the Prism library Spinel parses with, which is the C half its
+Ruby half reads serialized trees from (the repository's lib/prism/prism.rb,
+embedded in the binary). Its prism.gemspec is in prism/, where ruby/ruby
+keeps it. One file is patched: prism.rb loads the C extension when
+RUBY_ENGINE is "spinel" as well as "ruby", rather than prism/ffi.rb, the
+FFI backend, which is left out.
+
     upstream  https://github.com/ruby/webrick.git
     tag       v1.9.2
     commit    b1684cecf9eb87cb2ae20fd52fbb80cf3e859c8a
@@ -28,10 +36,15 @@ lib/json/ext/ and lib/io/console.rb, embedded in the binary.
     commit    fbc7e1f31f1fc2cf21baf96a845bfdbc88e47f95
     files     io/console/size.rb (not lib/ffi/, JRuby's backend)
 
+    upstream  https://rubygems.org/downloads/prism-1.9.0.gem
+    sha256    7b530c6a9f92c24300014919c9dcbc055bf4cdf51ec30aed099b06cd6674ef85
+    files     prism.rb (patched), prism/ (not prism/ffi.rb, the FFI backend)
+
 Licenses are upstream's, in LICENSE/. LEGAL records the per-file terms for the
 files here from ruby/ruby that are not under Ruby's own license; each gem's own
 are in LICENSE/<gem>/.
 
 Do not edit anything under stdlib/ by hand. CI diffs this tree against the tags
 above and fails on any difference. To update, edit RUBY_TAG, WEBRICK_TAG,
-JSON_TAG or IO_CONSOLE_TAG in scripts/vendor-stdlib.sh and run it.
+JSON_TAG, IO_CONSOLE_TAG or PRISM_VERSION in scripts/vendor-stdlib.sh and run
+it.
