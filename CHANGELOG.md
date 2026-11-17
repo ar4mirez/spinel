@@ -16,8 +16,7 @@ bytecode a tool reads.
   "line":..,"name":..,"ms":..,"message":..,"backtrace":[..]}`, each line
   whole however many workers write at once. Minitest's skips, errors and
   failures are told apart as its own summary tells them; RSpec's pending and
-  skipped examples are skips and every other failing example a failure. A
-  failing test now fails the run even when its worker exits 0.
+  skipped examples are skips and every other failing example a failure.
   `SPINEL_TEST_EVENTS=path` appends every event to `path`.
 
 - **`require "prism"` and `require "ripper"` work, so RSpec reports

@@ -25,11 +25,6 @@ module Spinel
     @events = nil
     @lock = Mutex.new
 
-    class << self
-      # The pipe back to the runner.
-      attr_reader :events
-    end
-
     # Write events to `io` from now on.
     def self.start(io)
       io.sync = true

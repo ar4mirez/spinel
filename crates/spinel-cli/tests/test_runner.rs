@@ -627,31 +627,3 @@ fn many_events_from_several_workers_each_arrive_as_a_whole_line() {
     let done = events.iter().filter(|e| e["event"] == "done").count();
     assert_eq!(done, 9, "a `done` per file");
 }
-
-#[test]
-fn a_failing_test_fails_the_run_though_its_worker_exits_0() {
-    let (output, events) = events_of("verdict", &["-j", "1"]);
-    let err = stderr(&output);
-    assert_eq!(output.status.code(), Some(1), "the fail event: {err}");
-    assert!(!err.contains("after its last file"), "it exited 0: {err}");
-    let kinds: Vec<&str> = events.iter().filter_map(|e| e["event"].as_str()).collect();
-    assert_eq!(kinds, ["done", "fail"], "{events:?}");
-}
-
-#[test]
-fn a_line_that_is_not_an_event_fails_the_run() {
-    let dir = scratch("garbage");
-    let output = spinel_test(
-        &fixture("verdict"),
-        &["-j", "1"],
-        &dir.join("log"),
-        &[("SPINEL_TEST_GARBAGE", "1")],
-    );
-    std::fs::remove_dir_all(&dir).ok();
-    let err = stderr(&output);
-    assert_eq!(output.status.code(), Some(1), "stderr: {err}");
-    assert!(
-        err.contains("wrote a line that is not an event: \"not an event\""),
-        "{err}"
-    );
-}

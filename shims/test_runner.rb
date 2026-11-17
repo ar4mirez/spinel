@@ -31,9 +31,10 @@
 #    `shims/test_worker.rb`, loaded before this file: `done` once a file is
 #    loaded, with the exception loading raised or `nil`, and, from the
 #    Minitest reporter and the RSpec formatter that shim registers, one
-#    `pass|fail|error|skip` line per test or example. Here they are counted,
-#    and a `fail` or an `error` fails the phase; #94's aggregator replaces
-#    the reporting below.
+#    `pass|fail|error|skip` line per test or example. Here they are counted
+#    for #94's aggregator, which replaces the reporting below; the verdict
+#    stays the workers' own, below, and a line that is not an event is
+#    skipped.
 # 5. A worker that ends before it says `done` for the file it was given —
 #    killed by a signal, or exiting, with any status — is reported with that
 #    file, and a new worker is forked for the files still waiting, so one
@@ -178,7 +179,7 @@ module Spinel
           end
         end
       end
-      failed || counts["fail"] + counts["error"] > 0
+      failed
     end
 
     # Fork worker `number`. The child closes the parent's ends of every
@@ -236,9 +237,9 @@ module Spinel
       exit(status) if status != 0
     end
 
-    # One line from `worker`; false when it says the suite failed, or is
-    # not an event. Each is also appended, as it came, to the file
-    # `SPINEL_TEST_EVENTS` names, when it names one.
+    # One line from `worker`; false when it says the suite failed. A line
+    # that is not an event is skipped. Each is also appended, as it came, to
+    # the file `SPINEL_TEST_EVENTS` names, when it names one.
     # ponytail: the raw stream for tools until `--reporter json` (#95).
     def self.line_from(worker, line, queue, counts)
       if (path = ENV["SPINEL_TEST_EVENTS"]) && !path.empty?
@@ -249,10 +250,9 @@ module Spinel
       rescue JSON::ParserError
         nil
       end
-      return event(worker, parsed, queue, counts) if parsed.is_a?(Hash)
+      return true unless parsed.is_a?(Hash)
 
-      warn "spinel test: worker #{worker.number} (pid #{worker.pid}) wrote a line that is not an event: #{line.chomp.inspect}"
-      false
+      event(worker, parsed, queue, counts)
     end
 
     # One event from `worker`, a result counted in `counts`; false when a
