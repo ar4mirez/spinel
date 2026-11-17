@@ -7,8 +7,9 @@
 //! `SPINEL_TEST_LOG` names, one line per helper load and per test file, with
 //! the pid that did it. Worker counts stay at 3 or under.
 //!
-//! Spec files run after the Minitest files, on workers of their own forked
-//! after `rspec/core` and `spec/spec_helper.rb` (#837), each worker running
+//! Spec files run after the Minitest files (#837), each phase in a process
+//! of its own forked from the runner, the RSpec one forking its workers
+//! after `rspec/core` and `spec/spec_helper.rb`, each worker running
 //! its files' examples through `RSpec::Core::Runner.run`. rspec-core is not
 //! installed here, so the RSpec fixtures carry a stand-in for the calls the
 //! runner makes, in their `lib/rspec/core.rb`, which logs each run; the real
@@ -232,20 +233,36 @@ fn spec_files_run_through_rspec_in_workers_after_the_tests() {
         ["test_helper", "spec_helper"],
         "each once: {lines:?}"
     );
-    let parent = helpers[0][1].as_str();
-    assert_eq!(helpers[1][1], parent, "both in the parent: {lines:?}");
+    let tests_parent = helpers[0][1].as_str();
+    let parent = helpers[1][1].as_str();
+    assert_ne!(
+        tests_parent, parent,
+        "each phase in a process of its own: {lines:?}"
+    );
 
-    let tests: BTreeSet<&str> = by_name(&lines, "file")
-        .into_iter()
-        .map(|(name, pid)| {
-            assert_ne!(pid, parent, "in a worker: {lines:?}");
-            name
-        })
-        .collect();
+    let tests = by_name(&lines, "file");
+    let test_workers: BTreeSet<&str> = tests.iter().map(|(_, pid)| *pid).collect();
+    for pid in &test_workers {
+        assert_ne!(*pid, tests_parent, "in a worker: {lines:?}");
+        assert_ne!(*pid, parent, "in a worker: {lines:?}");
+    }
+    let names: BTreeSet<&str> = tests.iter().map(|(name, _)| *name).collect();
     assert_eq!(
-        tests,
+        names,
         BTreeSet::from(["a_test.rb", "b_test.rb"]),
         "{lines:?}"
+    );
+
+    // The Minitest helper's `at_exit` runs in each Minitest worker, and in no
+    // process that ran spec files or examples, nor in either phase's process.
+    let at_exit: BTreeSet<&str> = lines
+        .iter()
+        .filter(|l| l[0] == "at_exit")
+        .map(|l| l[1].as_str())
+        .collect();
+    assert_eq!(
+        at_exit, test_workers,
+        "only the Minitest workers: {lines:?}"
     );
 
     let specs = by_name(&lines, "spec");
@@ -263,6 +280,7 @@ fn spec_files_run_through_rspec_in_workers_after_the_tests() {
             line[3], parent,
             "the helper booted in the parent: {lines:?}"
         );
+        assert!(!at_exit.contains(line[1].as_str()), "{lines:?}");
     }
 
     // Each worker that loaded spec files ran their examples, and only theirs.
@@ -279,6 +297,7 @@ fn spec_files_run_through_rspec_in_workers_after_the_tests() {
             !mine.is_empty(),
             "a run in a worker that loaded specs: {lines:?}"
         );
+        assert!(!at_exit.contains(pid), "{lines:?}");
         let examples: BTreeSet<&str> = run[2].split(',').collect();
         let expected: BTreeSet<&str> = mine
             .iter()

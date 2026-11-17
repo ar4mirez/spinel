@@ -5,25 +5,28 @@
 #
 # 1. Discovery: `test/**/*_test.rb` (Minitest) and `spec/**/*_spec.rb`
 #    (RSpec), relative to the current directory, each sorted. The Minitest
-#    files run first, then the RSpec files, each on workers of their own, so
-#    neither framework's `at_exit` decides the other's.
-# 2. Minitest: `lib/` and `test/` go on `$LOAD_PATH`, as Rake's TestTask puts
-#    them, and `test/test_helper.rb` is required here, once, before any
-#    worker exists: whatever it boots, every worker inherits through `fork`
-#    instead of booting again. RSpec (#837): `lib/` and `spec/` go on
-#    `$LOAD_PATH`, as the `rspec` command puts them, and `rspec/core` and
-#    `spec/spec_helper.rb` are required here, once, the same way.
-# 3. Workers: `fork` after the helpers, up to the worker count, never more
-#    than there are files. Each worker has two pipes to this process: one
-#    it reads paths from, one line each, and one it writes events to. A path
-#    is handed to a worker only when it has finished the one before, so the
-#    files are shared out one at a time and a slow file holds up only its
-#    own worker. A worker requires each file it is given, as Rake's loader
-#    requires them. After its last file a Minitest worker ends as a program
-#    ends, so the `at_exit` a framework registered (`minitest/autorun`) runs
-#    its tests; an RSpec worker runs the examples its files defined through
-#    RSpec's own runner, as `rspec` does (`RSpec::Core::Runner.invoke`), and
-#    exits with its status.
+#    files run first, then the RSpec files. Each phase runs in a process of
+#    its own forked from this one, the RSpec one only after the Minitest one
+#    has ended, so neither framework's helper or `at_exit` reaches the
+#    other's workers.
+# 2. Minitest: the phase process puts `lib/` and `test/` on `$LOAD_PATH`, as
+#    Rake's TestTask puts them, and requires `test/test_helper.rb` once,
+#    before any worker exists: whatever it boots, every worker inherits
+#    through `fork` instead of booting again. RSpec (#837): the phase
+#    process puts `lib/` and `spec/` on `$LOAD_PATH`, as the `rspec` command
+#    puts them, and requires `rspec/core` and `spec/spec_helper.rb` once,
+#    the same way.
+# 3. Workers: each phase process forks its workers after the helpers, up to
+#    the worker count, never more than there are files. Each worker has two
+#    pipes to the phase process: one it reads paths from, one line each, and
+#    one it writes events to. A path is handed to a worker only when it has
+#    finished the one before, so the files are shared out one at a time and
+#    a slow file holds up only its own worker. A worker requires each file
+#    it is given, as Rake's loader requires them. After its last file a
+#    Minitest worker ends as a program ends, so the `at_exit` a framework
+#    registered (`minitest/autorun`) runs its tests; an RSpec worker runs the
+#    examples its files defined through RSpec's own runner, as `rspec` does
+#    (`RSpec::Core::Runner.invoke`), and exits with its status.
 # 4. Results: a worker writes one JSON line per event, for now only
 #    `{"event":"done","file":..,"error":..}` once a file is loaded, `error`
 #    the exception that loading raised or `nil`. #93's reporter shim replaces
@@ -35,11 +38,13 @@
 #    crash costs one file, not the rest of the suite. A worker that ends by a
 #    signal or a failing status after its last file is reported too, with
 #    the files it ran, and so is a file whose loading raised. Any of these,
-#    or spec files when `rspec/core` cannot be loaded, makes the exit
-#    status 1.
+#    or spec files when `rspec/core` cannot be loaded, fails its phase, and
+#    the phase process says so through its exit status; either phase
+#    failing makes the exit status 1.
 #
-# The runner ends with `exit!`, so an `at_exit` a helper registered runs in
-# the workers, which ran the tests, and not again here with none loaded.
+# A phase process and the runner end with `exit!`, so an `at_exit` a helper
+# registered runs in the workers, which ran the tests, and not again in a
+# process with none loaded.
 
 require "json"
 
@@ -65,9 +70,23 @@ module Spinel
         warn "spinel test: no test files: nothing matches test/**/*_test.rb or spec/**/*_spec.rb"
         return 1
       end
-      failed = run_tests(files, jobs) unless files.empty?
-      failed = true if !specs.empty? && run_specs(specs, jobs)
+      failed = false
+      failed = true if !files.empty? && !phase { run_tests(files, jobs) }
+      failed = true if !specs.empty? && !phase { run_specs(specs, jobs) }
       failed ? 1 : 0
+    end
+
+    # The block, which answers true when its files failed, in a process of
+    # its own; true when that process passed.
+    def self.phase
+      pid = fork do
+        failed = yield
+        $stdout.flush
+        $stderr.flush
+        exit!(failed ? 1 : 0)
+      end
+      _, status = Process.wait2(pid)
+      status.success?
     end
 
     # `dirs` that exist, each put first on `$LOAD_PATH` in turn.

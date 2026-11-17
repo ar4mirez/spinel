@@ -80,19 +80,68 @@ pub enum Query {
     MethodName,
 }
 
+/// An options blob `pm_options_read` would read past the end of, or that
+/// has bytes left over after the layout it reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MalformedOptions;
+
+/// The bytes `pm_options_read` takes one at a time after the encoding name
+/// (prism 1.9.0, `src/options.c`): `frozen_string_literal`, `command_line`,
+/// `version`, `encoding_locked`, `main_script`, `partial_script`, `freeze`.
+const FLAG_BYTES: usize = 7;
+
 /// The options blob Prism reads (`pm_options_read`), or a null pointer for
-/// none. The Ruby half packs it, as the gem's `dump_options` does.
-fn options_ptr(options: &[u8]) -> *const c_char {
+/// none. The Ruby half packs it, as the gem's `dump_options` does. Prism
+/// checks none of the lengths the blob carries, so the layout it reads is
+/// walked here against the blob's length first, and a blob that does not
+/// fit it exactly is refused before Prism sees it.
+fn options_ptr(options: &[u8]) -> Result<*const c_char, MalformedOptions> {
+    struct Cursor<'a>(&'a [u8]);
+    impl<'a> Cursor<'a> {
+        fn skip(&mut self, n: usize) -> Result<&'a [u8], MalformedOptions> {
+            let (head, tail) = self.0.split_at_checked(n).ok_or(MalformedOptions)?;
+            self.0 = tail;
+            Ok(head)
+        }
+        fn length(&mut self) -> Result<usize, MalformedOptions> {
+            let bytes: [u8; 4] = self.skip(4)?.try_into().map_err(|_| MalformedOptions)?;
+            usize::try_from(u32::from_ne_bytes(bytes)).map_err(|_| MalformedOptions)
+        }
+        fn string(&mut self) -> Result<(), MalformedOptions> {
+            let n = self.length()?;
+            self.skip(n).map(drop)
+        }
+    }
+
     if options.is_empty() {
-        std::ptr::null()
+        return Ok(std::ptr::null());
+    }
+    let mut blob = Cursor(options);
+    blob.string()?;
+    blob.skip(4)?;
+    blob.string()?;
+    blob.skip(FLAG_BYTES)?;
+    for _ in 0..blob.length()? {
+        let locals = blob.length()?;
+        blob.skip(1)?;
+        for _ in 0..locals {
+            blob.string()?;
+        }
+    }
+    if blob.0.is_empty() {
+        Ok(options.as_ptr().cast())
     } else {
-        options.as_ptr().cast()
+        Err(MalformedOptions)
     }
 }
 
 /// Serialize `source` as `dump` asks, under the packed `options`.
-#[must_use]
-pub fn dump(dump: Dump, source: &[u8], options: &[u8]) -> Vec<u8> {
+///
+/// # Errors
+///
+/// [`MalformedOptions`] when `options` is not a blob Prism can read.
+pub fn dump(dump: Dump, source: &[u8], options: &[u8]) -> Result<Vec<u8>, MalformedOptions> {
+    let options = options_ptr(options)?;
     // Prism's own struct is three words; this one is too. Checked once
     // against the library rather than assumed.
     // SAFETY: `pm_buffer_sizeof` reads nothing and has no preconditions.
@@ -108,8 +157,8 @@ pub fn dump(dump: Dump, source: &[u8], options: &[u8]) -> Vec<u8> {
     };
     // SAFETY: `buffer` is a valid, writable `pm_buffer_t`; `pm_buffer_init`
     // allocates its storage, which `pm_buffer_free` below releases. The
-    // source and options pointers are valid for their lengths for the call,
-    // and Prism reads the options only up to the lengths they carry.
+    // source pointer is valid for its length for the call, and the options
+    // are null or a blob whose every length `options_ptr` checked.
     unsafe {
         assert!(
             pm_buffer_init(&raw mut buffer),
@@ -121,12 +170,7 @@ pub fn dump(dump: Dump, source: &[u8], options: &[u8]) -> Vec<u8> {
             Dump::ParseLex => pm_serialize_parse_lex,
             Dump::Comments => pm_serialize_parse_comments,
         };
-        run(
-            &raw mut buffer,
-            source.as_ptr(),
-            source.len(),
-            options_ptr(options),
-        );
+        run(&raw mut buffer, source.as_ptr(), source.len(), options);
         let length = pm_buffer_length(&raw const buffer);
         let value = pm_buffer_value(&raw const buffer);
         let bytes = if length == 0 || value.is_null() {
@@ -135,15 +179,20 @@ pub fn dump(dump: Dump, source: &[u8], options: &[u8]) -> Vec<u8> {
             std::slice::from_raw_parts(value.cast::<u8>(), length).to_vec()
         };
         pm_buffer_free(&raw mut buffer);
-        bytes
+        Ok(bytes)
     }
 }
 
 /// Whether `source` parses without errors under `options`.
-#[must_use]
-pub fn success(source: &[u8], options: &[u8]) -> bool {
-    // SAFETY: both pointers are valid for their lengths for the call.
-    unsafe { pm_parse_success_p(source.as_ptr(), source.len(), options_ptr(options)) }
+///
+/// # Errors
+///
+/// [`MalformedOptions`] when `options` is not a blob Prism can read.
+pub fn success(source: &[u8], options: &[u8]) -> Result<bool, MalformedOptions> {
+    let options = options_ptr(options)?;
+    // SAFETY: `source` is valid for its length for the call, and `options`
+    // is null or a blob whose every length `options_ptr` checked.
+    Ok(unsafe { pm_parse_success_p(source.as_ptr(), source.len(), options) })
 }
 
 /// Prism's answer for `string` in the encoding named `encoding`: 1 yes, 0
@@ -181,7 +230,7 @@ mod tests {
 
     #[test]
     fn dumps_a_parse_with_the_version_header() {
-        let bytes = dump(Dump::Parse, b"1 + 2", b"");
+        let bytes = dump(Dump::Parse, b"1 + 2", b"").unwrap();
         assert_eq!(&bytes[..5], b"PRISM");
         assert_eq!(&bytes[5..8], &[1, 9, 0]);
         assert_eq!(version(), "1.9.0");
@@ -189,11 +238,65 @@ mod tests {
 
     #[test]
     fn reports_success_and_queries() {
-        assert!(success(b"def m; end", b""));
-        assert!(!success(b"def m(", b""));
+        assert_eq!(success(b"def m; end", b""), Ok(true));
+        assert_eq!(success(b"def m(", b""), Ok(false));
         assert_eq!(query(Query::Local, b"foo", c"UTF-8"), 1);
         assert_eq!(query(Query::Constant, b"foo", c"UTF-8"), 0);
         assert_eq!(query(Query::MethodName, b"foo?", c"UTF-8"), 1);
         assert_eq!(query(Query::Local, b"foo", c"NOPE"), -1);
+    }
+
+    fn u32(n: u32) -> [u8; 4] {
+        n.to_ne_bytes()
+    }
+
+    /// The layout `lib/prism/prism.rb` packs: filepath "a.rb", line 3,
+    /// encoding "UTF-8", the seven flag bytes, and one scope with the
+    /// forwarding byte and two locals, "x" and "yz".
+    fn packed() -> Vec<u8> {
+        let mut blob = Vec::new();
+        blob.extend(u32(4));
+        blob.extend(b"a.rb");
+        blob.extend(3i32.to_ne_bytes());
+        blob.extend(u32(5));
+        blob.extend(b"UTF-8");
+        blob.extend([0u8; FLAG_BYTES]);
+        blob.extend(u32(1));
+        blob.extend(u32(2));
+        blob.push(0);
+        blob.extend(u32(1));
+        blob.extend(b"x");
+        blob.extend(u32(2));
+        blob.extend(b"yz");
+        blob
+    }
+
+    #[test]
+    fn accepts_the_options_the_ruby_half_packs() {
+        let blob = packed();
+        assert!(options_ptr(&blob).is_ok());
+        assert_eq!(success(b"x + yz", &blob), Ok(true));
+        assert!(dump(Dump::Parse, b"x + yz", &blob).is_ok());
+    }
+
+    #[test]
+    fn refuses_options_prism_would_read_past() {
+        let blob = packed();
+        for cut in 1..blob.len() {
+            assert_eq!(options_ptr(&blob[..cut]), Err(MalformedOptions), "{cut}");
+        }
+        assert_eq!(success(b"1", b"1"), Err(MalformedOptions));
+        let mut huge = u32(0x7fff_ffff).to_vec();
+        huge.extend([0u8; 16]);
+        assert_eq!(dump(Dump::Parse, b"1", &huge), Err(MalformedOptions));
+        assert_eq!(dump(Dump::Lex, b"1", b"x"), Err(MalformedOptions));
+    }
+
+    #[test]
+    fn refuses_options_with_bytes_left_over() {
+        let mut blob = packed();
+        blob.push(0);
+        assert_eq!(options_ptr(&blob), Err(MalformedOptions));
+        assert_eq!(success(b"1", &blob), Err(MalformedOptions));
     }
 }

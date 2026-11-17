@@ -24174,8 +24174,7 @@ fn prism_native(
             let kind = int_arg(call, 0).ok_or(refuse(op, "a kind that is not a Fixnum"))?;
             let source = bytes(scope, 1).ok_or(refuse(op, "a source that is not a String"))?;
             let options = bytes(scope, 2).ok_or(refuse(op, "options that are not a String"))?;
-            let dumped = (prism.dump)(kind, &source, &options)
-                .ok_or(refuse(op, "a kind that is not 0 to 3"))?;
+            let dumped = (prism.dump)(kind, &source, &options).map_err(|why| refuse(op, why))?;
             let class = class_handle(scope, Builtin::String);
             Ok(string_alloc(scope, class, &dumped, crate::strings::BINARY))
         }
@@ -24183,11 +24182,9 @@ fn prism_native(
             let op = "__prism_success__";
             let source = bytes(scope, 0).ok_or(refuse(op, "a source that is not a String"))?;
             let options = bytes(scope, 1).ok_or(refuse(op, "options that are not a String"))?;
-            Ok(if (prism.success)(&source, &options) {
-                Value::TRUE
-            } else {
-                Value::FALSE
-            })
+            let parsed = (prism.success)(&source, &options)
+                .ok_or(refuse(op, "options Prism cannot read"))?;
+            Ok(if parsed { Value::TRUE } else { Value::FALSE })
         }
         Native::PrismQuery => {
             let op = "__prism_query__";

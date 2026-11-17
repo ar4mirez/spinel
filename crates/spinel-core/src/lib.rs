@@ -244,11 +244,11 @@ const PRISM: spinel_vm::PrismApi = spinel_vm::PrismApi {
             1 => Dump::Lex,
             2 => Dump::ParseLex,
             3 => Dump::Comments,
-            _ => return None,
+            _ => return Err("a kind that is not 0 to 3"),
         };
-        Some(dump(kind, source, options))
+        dump(kind, source, options).map_err(|_| "options Prism cannot read")
     },
-    success: spinel_parse::serialize::success,
+    success: |source, options| spinel_parse::serialize::success(source, options).ok(),
     query: |kind, string, encoding| {
         use spinel_parse::serialize::{Query, query};
         let kind = match kind {

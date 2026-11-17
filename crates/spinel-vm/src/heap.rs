@@ -273,8 +273,9 @@ pub type Parser =
     fn(&str, &[u8], i64, bool, Option<&str>, &[u8]) -> Result<ParsedSource, ParseFailure>;
 
 /// Serialize a source under packed options: kind 0 a parse, 1 a lex, 2
-/// both, 3 the comments; `None` for another kind. See [`PrismApi`].
-pub type PrismDump = fn(i64, &[u8], &[u8]) -> Option<Vec<u8>>;
+/// both, 3 the comments. `Err` names what was refused: another kind, or
+/// options Prism cannot read. See [`PrismApi`].
+pub type PrismDump = fn(i64, &[u8], &[u8]) -> Result<Vec<u8>, &'static str>;
 
 /// Prism's serialization API (#837), which the prism gem's Ruby half reads
 /// its trees from (`lib/prism/prism.rb`). Installed by `spinel-core` from
@@ -283,8 +284,9 @@ pub type PrismDump = fn(i64, &[u8], &[u8]) -> Option<Vec<u8>>;
 pub struct PrismApi {
     /// Serialize a source; see [`PrismDump`].
     pub dump: PrismDump,
-    /// Whether the source parses without errors under packed options.
-    pub success: fn(&[u8], &[u8]) -> bool,
+    /// Whether the source parses without errors under packed options;
+    /// `None` for options Prism cannot read.
+    pub success: fn(&[u8], &[u8]) -> Option<bool>,
     /// Query a string in the named encoding: kind 0 a local, 1 a constant,
     /// 2 a method name. 1 yes, 0 no, -1 an encoding Prism does not know;
     /// `None` for another kind.
