@@ -319,7 +319,7 @@ fn a_private_compact_index_resolves_and_installs_with_the_credential_in_its_url(
 
     // Installed, it is left alone.
     let out = sandbox.install(&[]);
-    assert_eq!(ok(&out, "second install"), "");
+    assert_eq!(ok(&out, "second install"), "Nothing to change\n");
     no_secret(&sandbox, &out);
 }
 
@@ -420,7 +420,7 @@ fn a_source_with_no_compact_index_falls_back_to_specs_4_8() {
     }
 
     let out = sandbox.install(&[]);
-    assert_eq!(ok(&out, "second install"), "");
+    assert_eq!(ok(&out, "second install"), "Nothing to change\n");
 }
 
 #[test]
@@ -468,6 +468,6 @@ fn a_scoped_private_source_beside_a_public_one_locks_as_bundler_does() {
     // Nothing changed: nothing resolved, nothing written.
     let before = public.paths().len() + private.paths().len();
     let out = sandbox.install(&env);
-    assert_eq!(ok(&out, "second install"), "");
+    assert_eq!(ok(&out, "second install"), "Nothing to change\n");
     assert_eq!(public.paths().len() + private.paths().len(), before);
 }

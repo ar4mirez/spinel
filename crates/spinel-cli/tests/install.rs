@@ -331,7 +331,7 @@ fn install_writes_the_require_map_and_programs_use_it() {
     let out = sandbox.install(&[]);
     assert_eq!(
         (ok(&out, "the second install"), stderr(&out)),
-        (String::new(), String::new())
+        ("Nothing to change\n".to_owned(), String::new())
     );
     assert_eq!(probe(), expected);
     fs::remove_file(&map).unwrap();
@@ -351,7 +351,7 @@ fn a_warm_install_fetches_nothing_and_writes_nothing() {
 
     // Again: nothing added, nothing removed, nothing fetched.
     let out = sandbox.install(&[]);
-    assert_eq!(ok(&out, "the second install"), "");
+    assert_eq!(ok(&out, "the second install"), "Nothing to change\n");
     assert_eq!(stderr(&out), "");
     assert_eq!(sandbox.read("Gemfile.lock"), lock);
     assert_eq!(server.gems_served(), served);
@@ -402,7 +402,7 @@ fn frozen_is_silent_when_the_lock_would_not_change() {
     let lock = sandbox.read("Gemfile.lock");
 
     let out = sandbox.install(&["--frozen"]);
-    assert_eq!(ok(&out, "spinel install --frozen"), "");
+    assert_eq!(ok(&out, "spinel install --frozen"), "Nothing to change\n");
     assert_eq!(stderr(&out), "");
     assert_eq!(sandbox.read("Gemfile.lock"), lock);
 

@@ -210,8 +210,32 @@ fn add_sinatra_appends_its_line_and_installs_it() {
     // Installed as `spinel install` would install that Gemfile: a second
     // install changes nothing.
     let out = sandbox.spinel(&["install", "--frozen"]);
-    assert_eq!(ok(&out, "spinel install --frozen"), "");
+    assert_eq!(ok(&out, "spinel install --frozen"), "Nothing to change\n");
     assert_eq!(sandbox.read("Gemfile.lock"), lock);
+}
+
+#[test]
+fn a_gem_already_locked_as_a_dependency_changes_no_gems() {
+    let sandbox = Sandbox::new("transitive");
+    let before = sandbox.gemfile("source \"URL\"\ngem \"sinatra\"\n");
+    ok(&sandbox.spinel(&["install"]), "spinel install");
+    let linked = sandbox.linked();
+    assert!(linked.contains(&"rack-3.2.8".to_owned()), "{linked:?}");
+
+    let out = sandbox.add(&["rack"]);
+    assert_eq!(
+        ok(&out, "spinel add rack"),
+        "Updated Gemfile and Gemfile.lock; no gems changed\n"
+    );
+    assert_eq!(
+        sandbox.read("Gemfile"),
+        format!("{before}\ngem \"rack\", \"~> 3.2\"\n")
+    );
+    assert_eq!(
+        section(&sandbox.read("Gemfile.lock"), "DEPENDENCIES"),
+        "DEPENDENCIES\n  rack (~> 3.2)\n  sinatra\n"
+    );
+    assert_eq!(sandbox.linked(), linked);
 }
 
 #[test]
@@ -361,7 +385,10 @@ fn a_gem_already_in_the_gemfile() {
     // any group.
     for args in [&["rake"][..], &["rake", "--group", "dev"], &["tilt@~> 2.0"]] {
         let out = sandbox.add(args);
-        assert_eq!(ok(&out, &format!("spinel add {args:?}")), "");
+        assert_eq!(
+            ok(&out, &format!("spinel add {args:?}")),
+            "Nothing to change\n"
+        );
         assert_eq!(sandbox.read("Gemfile"), gemfile);
         assert_eq!(sandbox.read("Gemfile.lock"), lock);
     }

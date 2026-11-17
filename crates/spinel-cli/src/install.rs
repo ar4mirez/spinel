@@ -1306,7 +1306,8 @@ impl Session {
             write_in_place(&self.gemfile_path, write.new)
                 .map_err(|err| self.fail(format!("{gemfile_name}: {err}")))?;
         }
-        if !self.frozen && self.current.as_deref() != Some(written.as_str()) {
+        let lock_written = !self.frozen && self.current.as_deref() != Some(written.as_str());
+        if lock_written {
             write_atomically(&self.lock_path, written.as_bytes()).map_err(|err| {
                 // The Gemfile goes back as it was, so the two still agree.
                 if let Some(write) = &gemfile_write
@@ -1319,13 +1320,10 @@ impl Session {
         }
 
         // What changed, uv-style.
-        let mut lines: Vec<(String, String)> = Vec::new();
+        let mut changes: Vec<(String, String, bool)> = Vec::new();
         for spec in to_install.iter().chain(&local_specs).chain(&builtins) {
             if !before.contains(&spec.full_name()) {
-                lines.push((
-                    spec.name.clone(),
-                    format!("+ {} {}", spec.name, version_of(spec)),
-                ));
+                changes.push((spec.name.clone(), version_of(spec), true));
             }
         }
         let previous: HashMap<String, (String, String)> = self
@@ -1348,14 +1346,58 @@ impl Session {
                 .get(full_name)
                 .cloned()
                 .unwrap_or_else(|| split_full_name(full_name));
-            lines.push((name.clone(), format!("- {name} {version}")));
+            changes.push((name, version, false));
         }
-        lines.sort();
-        for (_, line) in lines {
+        let mut written_files: Vec<&str> = Vec::new();
+        if gemfile_write.is_some() {
+            written_files.push(&gemfile_name);
+        }
+        if lock_written {
+            written_files.push(lock_name);
+        }
+        for line in summarize_changes(changes, &written_files) {
             println!("{line}");
         }
         Ok(())
     }
+}
+
+/// The lines `spinel install` prints, from one `(name, version, added)`
+/// per gem added or removed: `+ name version` and `- name version`, but a
+/// gem one version of which came and one went is one `~ name old -> new`
+/// line, all sorted by name. No gem changed is one line: `Nothing to
+/// change` when `written` (the files this run wrote) is empty, else
+/// `Updated <files>; no gems changed`.
+fn summarize_changes(changes: Vec<(String, String, bool)>, written: &[&str]) -> Vec<String> {
+    let mut by_name: std::collections::BTreeMap<String, (Vec<String>, Vec<String>)> =
+        std::collections::BTreeMap::new();
+    for (name, version, added) in changes {
+        let entry = by_name.entry(name).or_default();
+        if added {
+            entry.0.push(version);
+        } else {
+            entry.1.push(version);
+        }
+    }
+    let mut out = Vec::new();
+    for (name, (mut added, mut removed)) in by_name {
+        if let ([new], [old]) = (added.as_slice(), removed.as_slice()) {
+            out.push(format!("~ {name} {old} -> {new}"));
+            continue;
+        }
+        added.sort();
+        removed.sort();
+        out.extend(added.iter().map(|version| format!("+ {name} {version}")));
+        out.extend(removed.iter().map(|version| format!("- {name} {version}")));
+    }
+    if out.is_empty() {
+        out.push(if written.is_empty() {
+            "Nothing to change".to_owned()
+        } else {
+            format!("Updated {}; no gems changed", written.join(" and "))
+        });
+    }
+    out
 }
 
 /// Evaluate the Gemfile as Ruby, in a child `spinel` running
