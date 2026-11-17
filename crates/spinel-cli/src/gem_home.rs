@@ -500,7 +500,7 @@ fn installed(home: &Path, name: &str) -> bool {
 
 /// The gem whose `exe` the stub `text` runs, when `text` is the stub
 /// `app_script_text` writes for it and `ruby_name`.
-fn stub_gem(text: &str, ruby_name: &str, exe: &str) -> Option<String> {
+pub(crate) fn stub_gem(text: &str, ruby_name: &str, exe: &str) -> Option<String> {
     let name = text
         .split_once("# The application '")?
         .1

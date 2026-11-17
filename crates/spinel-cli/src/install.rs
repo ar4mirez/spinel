@@ -1521,7 +1521,7 @@ fn expand_gemspecs(gemfile: &mut GemfileJson) -> Result<(), Stop> {
 
 /// `SharedHelpers.default_lockfile`: `gems.locked` beside a `gems.rb`,
 /// else the Gemfile's name with `.lock`.
-fn lockfile_path(gemfile: &Path) -> PathBuf {
+pub(crate) fn lockfile_path(gemfile: &Path) -> PathBuf {
     let name = gemfile
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())

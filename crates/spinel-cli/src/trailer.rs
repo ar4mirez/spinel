@@ -45,6 +45,7 @@ pub struct Trailer {
 
 impl Trailer {
     /// The trailer that vouches for `payload`.
+    #[cfg(test)]
     pub fn for_payload(payload: &[u8]) -> Trailer {
         Trailer {
             sha256: Sha256::digest(payload).into(),
@@ -209,13 +210,59 @@ pub fn locate<F: Read + Seek>(file: &mut F) -> Result<Option<App>, Error> {
     }
 }
 
+/// A payload on its way into an app: the reader its bytes come from, and the
+/// trailer that vouches for them, worked out before anything is written so a
+/// payload of any size is streamed rather than held in memory.
+pub struct Payload<R> {
+    pub bytes: R,
+    pub trailer: Trailer,
+}
+
+impl Payload<File> {
+    /// The payload in the file at `path`, hashed by reading it once, then
+    /// rewound to be read again as it is written.
+    pub fn from_file(path: &Path) -> io::Result<Payload<File>> {
+        let mut file = File::open(path)?;
+        let mut hasher = Sha256::new();
+        let payload_len = io::copy(&mut file, &mut HashWriter(&mut hasher))?;
+        file.seek(SeekFrom::Start(0))?;
+        Ok(Payload {
+            bytes: file,
+            trailer: Trailer {
+                sha256: hasher.finalize().into(),
+                payload_len,
+            },
+        })
+    }
+}
+
+#[cfg(test)]
+impl<'a> Payload<&'a [u8]> {
+    /// `bytes`, with the trailer for them.
+    pub fn from_slice(bytes: &'a [u8]) -> Payload<&'a [u8]> {
+        Payload {
+            bytes,
+            trailer: Trailer::for_payload(bytes),
+        }
+    }
+}
+
+impl<R: Read> Payload<R> {
+    /// The payload's bytes then its trailer, into `to`: exactly
+    /// `payload_len` bytes, failing if the reader ends first.
+    pub fn write_to<W: Write>(&mut self, to: &mut W) -> io::Result<()> {
+        macho::copy_exact(&mut self.bytes, to, self.trailer.payload_len)?;
+        to.write_all(&self.trailer.to_bytes())
+    }
+}
+
 /// Write a compiled app: `binary` with `payload` and its trailer, to `out`.
 /// A Mach-O gets them in its reserved section and is signed again ad hoc;
 /// anything else, an ELF, gets them appended. A Mach-O that is not thin
 /// 64-bit little-endian is refused. The app is written beside `out` and
 /// renamed onto it only once whole, so a failed write leaves `out` as it was
 /// and nothing of its own behind.
-pub fn write(binary: &Path, payload: &[u8], out: &Path) -> io::Result<()> {
+pub fn write<R: Read>(binary: &Path, payload: &mut Payload<R>, out: &Path) -> io::Result<()> {
     let mut name = out.file_name().unwrap_or_default().to_os_string();
     name.push(format!(".spinel-pack-{}", std::process::id()));
     let partial = out.with_file_name(name);
@@ -244,12 +291,13 @@ pub fn write(binary: &Path, payload: &[u8], out: &Path) -> io::Result<()> {
 /// Write `binary`, then `payload`, then the trailer for it, to `out`: a
 /// compiled app on Linux, where the loader ignores bytes past the ELF.
 /// The copy keeps `binary`'s permissions, so `out` is executable.
-pub fn append(binary: &Path, payload: &[u8], out: &Path) -> io::Result<()> {
+pub fn append<R: Read>(binary: &Path, payload: &mut Payload<R>, out: &Path) -> io::Result<()> {
     std::fs::copy(binary, out)?;
-    let mut file = std::fs::OpenOptions::new().append(true).open(out)?;
-    file.write_all(payload)?;
-    file.write_all(&Trailer::for_payload(payload).to_bytes())?;
-    file.sync_all()
+    let mut file = io::BufWriter::new(std::fs::OpenOptions::new().append(true).open(out)?);
+    payload.write_to(&mut file)?;
+    file.into_inner()
+        .map_err(io::IntoInnerError::into_error)?
+        .sync_all()
 }
 
 /// `len` bytes of `inner` from `start`, read as if they were a whole file:
@@ -479,7 +527,7 @@ mod tests {
         let mut fat = vec![0xca, 0xfe, 0xba, 0xbe];
         fat.resize(64, 0);
         std::fs::write(&binary, &fat).expect("write");
-        let err = write(&binary, b"hello", &out).expect_err("refused");
+        let err = write(&binary, &mut Payload::from_slice(b"hello"), &out).expect_err("refused");
         let exists = out.exists();
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{err}");
@@ -504,7 +552,7 @@ mod tests {
         file[at + 7] = b'X';
         std::fs::write(&binary, &file).expect("write");
         std::fs::write(&out, b"stale").expect("write");
-        let result = write(&binary, b"hello", &out);
+        let result = write(&binary, &mut Payload::from_slice(b"hello"), &out);
         let kept = std::fs::read(&out).ok();
         let mut left: Vec<_> = std::fs::read_dir(&dir)
             .expect("dir")
@@ -533,7 +581,7 @@ mod tests {
         let binary = dir.join("spinel");
         let out = dir.join("app");
         std::fs::write(&binary, b"binary").expect("write");
-        append(&binary, b"hello", &out).expect("append");
+        append(&binary, &mut Payload::from_slice(b"hello"), &out).expect("append");
         let written = std::fs::read(&out).expect("read");
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(written, app(b"binary", b"hello"));

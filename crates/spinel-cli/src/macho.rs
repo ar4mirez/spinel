@@ -22,7 +22,7 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::process::Command;
 
-use crate::trailer::Trailer;
+use crate::trailer::Payload;
 
 /// `MH_MAGIC_64`, as its little-endian bytes start the file.
 const MAGIC_64: u32 = 0xfeed_facf;
@@ -128,14 +128,14 @@ fn other_macho<F: Read + Seek>(file: &mut F) -> io::Result<bool> {
 /// Write a compiled app for macOS: `binary`, a Mach-O with the reserved
 /// section, with `payload` and its trailer in that section, to `out`, then
 /// signed again ad hoc with `codesign`, keeping `binary`'s permissions.
-pub fn write(binary: &Path, payload: &[u8], out: &Path) -> io::Result<()> {
+pub fn write<R: Read>(binary: &Path, payload: &mut Payload<R>, out: &Path) -> io::Result<()> {
     embed(binary, payload, out)?;
     sign_ad_hoc(out)
 }
 
 /// `write` without the signing: the bytes of the app, whose signature, if
 /// `binary` had one, no longer matches them.
-pub fn embed(binary: &Path, payload: &[u8], out: &Path) -> io::Result<()> {
+pub fn embed<R: Read>(binary: &Path, payload: &mut Payload<R>, out: &Path) -> io::Result<()> {
     let mut input = File::open(binary)?;
     let permissions = input.metadata()?.permissions();
     let file_len = input.seek(SeekFrom::End(0))?;
@@ -145,7 +145,7 @@ pub fn embed(binary: &Path, payload: &[u8], out: &Path) -> io::Result<()> {
             binary.display()
         )));
     };
-    let plan = image.plan(file_len, payload.len() as u64)?;
+    let plan = image.plan(file_len, payload.trailer.payload_len)?;
     image.apply(&plan)?;
 
     // A new file rather than the old one rewritten: macOS caches what it
@@ -169,8 +169,7 @@ pub fn embed(binary: &Path, payload: &[u8], out: &Path) -> io::Result<()> {
         plan.section_offset - image.head.len() as u64,
     )?;
     // The section: the payload, then its trailer, as Linux appends them.
-    output.write_all(payload)?;
-    output.write_all(&Trailer::for_payload(payload).to_bytes())?;
+    payload.write_to(&mut output)?;
     // Zeros to the end of the segment, where `__LINKEDIT` now starts.
     let written = plan.section_offset + plan.section_size;
     copy_exact(
@@ -217,7 +216,7 @@ fn invalid(message: String) -> io::Error {
 }
 
 /// Copy exactly `len` bytes, failing if `from` ends first.
-fn copy_exact<R: Read, W: Write>(from: &mut R, to: &mut W, len: u64) -> io::Result<()> {
+pub(crate) fn copy_exact<R: Read, W: Write>(from: &mut R, to: &mut W, len: u64) -> io::Result<()> {
     let copied = io::copy(&mut from.take(len), to)?;
     if copied == len {
         Ok(())
@@ -501,6 +500,7 @@ fn put_u64(bytes: &mut [u8], at: usize, value: u64) {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::trailer::Trailer;
     use std::io::Cursor;
 
     /// A small Mach-O laid out as the linker lays out `spinel`: `__PAGEZERO`,
@@ -627,7 +627,7 @@ pub(crate) mod tests {
         let input = dir.join("spinel");
         let out = dir.join("app");
         std::fs::write(&input, binary).expect("write");
-        embed(&input, payload, &out).expect("embed");
+        embed(&input, &mut Payload::from_slice(payload), &out).expect("embed");
         let written = std::fs::read(&out).expect("read");
         let _ = std::fs::remove_dir_all(&dir);
         written
@@ -780,7 +780,8 @@ pub(crate) mod tests {
         std::fs::create_dir_all(&dir).expect("dir");
         let input = dir.join("spinel");
         std::fs::write(&input, &file).expect("write");
-        let err = embed(&input, b"x", &dir.join("app")).expect_err("refused");
+        let err =
+            embed(&input, &mut Payload::from_slice(b"x"), &dir.join("app")).expect_err("refused");
         let _ = std::fs::remove_dir_all(&dir);
         assert!(err.to_string().contains("no `__SPINEL` segment"), "{err}");
     }

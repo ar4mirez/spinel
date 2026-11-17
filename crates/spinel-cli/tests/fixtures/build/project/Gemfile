@@ -1,0 +1,9 @@
+gem "alpha", path: "../gems/alpha"
+
+group :development do
+  gem "beta", path: "../gems/beta"
+end
+
+group :test do
+  gem "gamma", path: "../gems/gamma"
+end
