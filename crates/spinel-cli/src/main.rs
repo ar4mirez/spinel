@@ -1477,6 +1477,7 @@ fn ruby_command(words: &[String], raw: &[Vec<u8>], setup: bool) -> ExitCode {
         Around {
             prelude: Some(&prelude),
             requires: Some(&requires),
+            library: None,
             gem_features: ruby_args::gem_features(&args),
             source_encoding: args.source_encoding.as_deref(),
             data,
@@ -1495,6 +1496,9 @@ struct Around<'a> {
     prelude: Option<&'a str>,
     /// The flags' `-r` libraries, as Ruby, run after the gem prelude.
     requires: Option<&'a str>,
+    /// One of Spinel's own libraries, by the name its backtraces give and as
+    /// Ruby, run after the `-r` libraries, as one more would be.
+    library: Option<(&'a str, &'a str)>,
     /// What `shims/gem_prelude.rb` loads; everything for `spinel run`.
     gem_features: ruby_args::GemFeatures,
     /// `-K`'s source encoding, for a script without a magic comment.
@@ -1576,6 +1580,7 @@ fn run_program(
     let Around {
         prelude,
         requires,
+        library,
         gem_features,
         source_encoding,
         data,
@@ -1643,9 +1648,11 @@ fn run_program(
     // RubyGems and did_you_mean, after `-I` and before `-r`, as `ruby` runs
     // `gem_prelude.rb` between them.
     let gem_prelude = gem_prelude(gem_features);
+    let (library_name, library) = library.unwrap_or(("", ""));
     for (name, code) in [
         ("<internal:gem_prelude>", gem_prelude.as_str()),
         ("<flags>", requires.unwrap_or("")),
+        (library_name, library),
     ] {
         if outcome.is_err() || code.is_empty() {
             continue;

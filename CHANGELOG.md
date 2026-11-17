@@ -9,6 +9,17 @@ bytecode a tool reads.
 
 ### Added
 
+- **`spinel test` workers report each test as a JSON event**
+  ([#93](https://github.com/ar4mirez/spinel/issues/93)). A Minitest reporter
+  and an RSpec formatter, registered in every worker, write one line per test
+  or example to the runner, `{"event":"pass|fail|error|skip","file":..,
+  "line":..,"name":..,"ms":..,"message":..,"backtrace":[..]}`, each line
+  whole however many workers write at once. Minitest's skips, errors and
+  failures are told apart as its own summary tells them; RSpec's pending and
+  skipped examples are skips and every other failing example a failure. A
+  failing test now fails the run even when its worker exits 0.
+  `SPINEL_TEST_EVENTS=path` appends every event to `path`.
+
 - **`require "prism"` and `require "ripper"` work, so RSpec reports
   failures** ([#837](https://github.com/ar4mirez/spinel/issues/837)). The
   prism gem's Ruby half is vendored at the release Spinel's parser links

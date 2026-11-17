@@ -1,0 +1,172 @@
+# Spinel's test worker events (docs/test-runner.md, "Execution"): loaded
+# before `shims/test_runner.rb`, as `-r` loads a library before a program.
+# Each worker writes its events to the pipe back to the runner, one JSON
+# line per event:
+#
+#   {"event":"done","file":..,"error":..}   a file it was given is loaded
+#   {"event":"pass|fail|error|skip","file":..,"line":..,"name":..,"ms":..,
+#    "message":..,"backtrace":[..]}         a test or an example ended
+#
+# A Minitest reporter and an RSpec formatter write the second kind. Each
+# event is one `write`, under a lock, on a pipe that is `sync`, so a line is
+# never split across two flushes nor mixed with another.
+#
+# What counts as what is each framework's own: Minitest by a result's first
+# failure, as its `result_code` and its summary count them (`Skip` a skip,
+# `UnexpectedError` an error, any other assertion a failure); RSpec by an
+# example's status (`passed`, `failed`, `pending` for pending and skipped
+# examples). RSpec has no errors: an exception in an example is a failure,
+# as `rspec` counts it.
+
+require "json"
+
+module Spinel
+  module TestWorker
+    @events = nil
+    @lock = Mutex.new
+
+    class << self
+      # The pipe back to the runner.
+      attr_reader :events
+    end
+
+    # Write events to `io` from now on.
+    def self.start(io)
+      io.sync = true
+      @events = io
+    end
+
+    # One event, as one line in one write.
+    def self.emit(fields)
+      line = JSON.generate(fields) + "\n"
+      @lock.synchronize { @events.write(line) }
+    end
+
+    # A test's or an example's end.
+    def self.result(event, file, line, name, seconds, message = nil, backtrace = [])
+      emit(
+        "event" => event, "file" => file && relative(file.to_s), "line" => line,
+        "name" => text(name), "ms" => (seconds.to_f * 1000).round(3),
+        "message" => message && text(message),
+        "backtrace" => backtrace.map { |frame| relative(text(frame)) }
+      )
+    end
+
+    # A path under the current directory as the test files are named, from
+    # it: `test/a_test.rb`, not `/home/me/app/test/a_test.rb` or
+    # `./test/a_test.rb`.
+    def self.relative(path)
+      path.delete_prefix("#{Dir.pwd}/").delete_prefix("./")
+    end
+
+    # A string JSON can carry: UTF-8, with what is not valid replaced.
+    def self.text(value)
+      value.to_s.encode(Encoding::UTF_8, invalid: :replace, undef: :replace).scrub
+    rescue EncodingError
+      value.to_s.b.force_encoding(Encoding::UTF_8).scrub
+    end
+
+    # Add the reporter to the reporters `Minitest.run` makes, after its own
+    # plugins have had theirs added, so a plugin that replaces the default
+    # reporters (Rails') leaves this one. Not a plugin by name: adding to
+    # `Minitest.extensions` before it loads its plugins would stop it
+    # loading them on the Minitest 5 releases that load only into an empty
+    # list.
+    def self.minitest
+      return unless defined?(::Minitest) && ::Minitest.respond_to?(:init_plugins)
+
+      ours = MinitestReporter.new
+      ::Minitest.singleton_class.prepend(Module.new do
+        define_method(:init_plugins) do |options|
+          super(options)
+          reporter << ours if reporter
+        end
+      end)
+    end
+
+    # Listen for each example's end, once RSpec has set up its own
+    # formatters: an RSpec with none configured adds its default only when
+    # no other is there, so this one, added before, would replace it.
+    # ponytail: `--dry-run` runs no suite hooks, so it reports no results;
+    # a hook on the reporter's `start` would catch it too.
+    def self.rspec
+      config = ::RSpec.configuration
+      config.prepend_before(:suite) do
+        config.reporter.register_listener(
+          RSpecFormatter.new, :example_passed, :example_failed, :example_pending
+        )
+      end
+    end
+
+    # A Minitest reporter, as `Minitest::AbstractReporter` defines one.
+    class MinitestReporter
+      def start; end
+      def prerecord(_klass, _name); end
+      def report; end
+
+      def passed?
+        true
+      end
+
+      def synchronize
+        yield
+      end
+
+      def record(result)
+        failure = result.failure
+        event =
+          if failure.nil? then "pass"
+          elsif ::Minitest::Skip === failure then "skip"
+          elsif ::Minitest::UnexpectedError === failure then "error"
+          else "fail"
+          end
+        file, line = result.source_location if result.respond_to?(:source_location)
+        klass = result.respond_to?(:klass) ? result.klass : result.class.name
+        message, backtrace =
+          case event
+          when "error" then ["#{failure.error.class}: #{failure.error.message}", failure.backtrace]
+          when "fail" then [failure.message, failure.backtrace]
+          when "skip" then [failure.message, nil]
+          end
+        backtrace = backtrace ? ::Minitest.filter_backtrace(backtrace) : []
+        TestWorker.result(event, file, line, "#{klass}##{result.name}", result.time, message, backtrace)
+      end
+    end
+
+    # An RSpec formatter's example notifications.
+    class RSpecFormatter
+      def example_passed(notification)
+        example(notification.example, "pass")
+      end
+
+      def example_failed(notification)
+        exception = notification.example.execution_result.exception
+        backtrace = ::RSpec.configuration.backtrace_formatter
+          .format_backtrace(exception.backtrace || [], notification.example.metadata)
+        example(notification.example, "fail", message(exception), backtrace)
+      end
+
+      def example_pending(notification)
+        example(notification.example, "skip", notification.example.execution_result.pending_message)
+      end
+
+      private
+
+      # The exception as RSpec's failure report puts it: its class, then its
+      # message, leaving out a class whose name says `RSpec`
+      # (`ExpectationNotMetError`, a pending example that passed).
+      def message(exception)
+        name = exception.class.name.to_s
+        name.include?("RSpec") ? exception.message : "#{name}: #{exception.message}"
+      end
+
+      def example(example, event, message = nil, backtrace = [])
+        metadata = example.metadata
+        TestWorker.result(
+          event, metadata[:file_path], metadata[:line_number], example.full_description,
+          example.execution_result.run_time, message, backtrace
+        )
+      end
+    end
+  end
+end

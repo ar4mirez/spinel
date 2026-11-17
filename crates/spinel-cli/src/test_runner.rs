@@ -1,7 +1,8 @@
 //! `spinel test` (docs/test-runner.md, "Execution"): the embedded
 //! `shims/test_runner.rb` run on the VM as `spinel run` runs a program, with
-//! the worker count it forks. What it discovers, loads and forks is the
-//! shim's; this side only chooses how many workers.
+//! the worker count it forks, after `shims/test_worker.rb`, as `-r` loads a
+//! library. What it discovers, loads and forks is the shims'; this side
+//! only chooses how many workers.
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -9,12 +10,17 @@ use std::process::ExitCode;
 /// The parent and its workers, in Ruby.
 const TEST_RUNNER: &str = include_str!("../../../shims/test_runner.rb");
 
+/// The events a worker writes back, and the Minitest reporter and RSpec
+/// formatter that write them.
+const TEST_WORKER: &str = include_str!("../../../shims/test_worker.rb");
+
 /// Run the suite under the current directory on `jobs` workers, or one per
 /// physical core.
 pub(crate) fn run(jobs: Option<usize>) -> ExitCode {
     let jobs = jobs.unwrap_or_else(physical_cores);
     let around = crate::Around {
         setup: true,
+        library: Some(("<internal:test_worker>", TEST_WORKER)),
         ..crate::Around::default()
     };
     crate::run_program(
