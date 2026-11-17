@@ -924,15 +924,31 @@ pub(crate) fn gem_remotes(remote: &str) -> Vec<String> {
 }
 
 /// `SourceList#lock_sources`: the git and path sources sorted by identifier,
-/// then the rubygems source at `remote` (see [`gem_remotes`]), each with the
-/// specs of the gems it provides.
+/// then the rubygems sources sorted by theirs: the one at `remote` (see
+/// [`gem_remotes`]) and those `locals` scopes some gems to (#89), each with
+/// the specs of the gems it provides, the one at `remote` the rest.
 pub(crate) fn lock_sources(
     remote: &str,
     locals: &[LockSource],
     specs: Vec<LockedSpec>,
 ) -> Vec<Source> {
-    let mut order: Vec<&LockSource> = locals.iter().collect();
-    order.sort_by(|a, b| a.identifier.cmp(&b.identifier));
+    let (gems, others): (Vec<&LockSource>, Vec<&LockSource>) = locals
+        .iter()
+        .partition(|l| matches!(l.kind, SourceKind::Gem { .. }));
+    let mut others = others;
+    others.sort_by(|a, b| a.identifier.cmp(&b.identifier));
+    let global = LockSource {
+        kind: SourceKind::Gem {
+            remotes: gem_remotes(remote),
+        },
+        identifier: rubygems_identifier(remote),
+        names: Vec::new(),
+        pinned: Vec::new(),
+    };
+    let mut rubygems: Vec<&LockSource> = gems;
+    rubygems.push(&global);
+    rubygems.sort_by(|a, b| a.identifier.cmp(&b.identifier));
+    let order: Vec<&LockSource> = others.iter().chain(&rubygems).copied().collect();
     let mut sources: Vec<Source> = order
         .iter()
         .map(|l| Source {
@@ -940,24 +956,35 @@ pub(crate) fn lock_sources(
             specs: Vec::new(),
         })
         .collect();
-    let mut gem = Source {
-        kind: SourceKind::Gem {
-            remotes: gem_remotes(remote),
-        },
-        specs: Vec::new(),
-    };
+    let global_at = order
+        .iter()
+        .position(|l| std::ptr::eq(*l, &global))
+        .expect("the global source is listed");
     for spec in specs {
         match order.iter().position(|l| l.names.contains(&spec.name)) {
             Some(at) => sources[at].specs.push(spec),
-            None => gem.specs.push(spec),
+            None => sources[global_at].specs.push(spec),
         }
     }
-    sources.push(gem);
     sources
 }
 
+/// `Source::Rubygems#identifier` of the source at `remote`, as written,
+/// with the trailing `/` Bundler gives it: what lockfile sections are
+/// sorted by.
+pub(crate) fn rubygems_identifier(remote: &str) -> String {
+    if remote.is_empty() {
+        return "locally installed gems".to_owned();
+    }
+    if remote.ends_with('/') {
+        format!("rubygems repository {remote}")
+    } else {
+        format!("rubygems repository {remote}/")
+    }
+}
+
 /// The `DEPENDENCIES` of a Gemfile's dependencies, `!` on those pinned to
-/// a git or path source (`Dependency#to_lock`).
+/// a source of their own (`Dependency#to_lock`).
 pub(crate) fn lock_dependencies(
     dependencies: &[resolver::GemfileDependency],
     locals: &[LockSource],

@@ -29,12 +29,21 @@
 //! Every file is written to a temporary name beside it and renamed into
 //! place, so a reader (another `spinel` running now) sees the old copy or the
 //! new one, never half of one.
+//!
+//! A private source (#89) is the same API behind HTTP Basic credentials
+//! (`crate::credentials`), sent to its host only and never shown: the
+//! client's URL has had them taken out, so no message can carry them. A 401
+//! or 403 is Bundler's message for it. A source whose `/versions` is a 404
+//! has no compact index: the client reads its legacy index instead
+//! (`specs.4.8.gz`, [`legacy`]), only then, as Bundler falls back to it, and
+//! writes each gem's `/info` file from it, so everything after reads one
+//! shape.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use base64::Engine as _;
 use md5::Md5;
@@ -42,6 +51,10 @@ use reqwest::header::{self, HeaderMap, HeaderValue};
 use reqwest::{StatusCode, Url};
 use sha2::{Digest as _, Sha256};
 use tokio::sync::Semaphore;
+
+use crate::credentials::{self, Auth};
+
+mod legacy;
 
 /// The most requests one client has in flight at once.
 pub const MAX_CONCURRENT: usize = 32;
@@ -86,6 +99,16 @@ pub enum Error {
     Name(String),
     Http(Url, reqwest::Error),
     Status(Url, StatusCode),
+    /// A 401: Bundler's `BadAuthenticationError` when credentials were
+    /// sent, else its `AuthenticationRequiredError`. The host is named.
+    Unauthorized {
+        host: String,
+        sent: bool,
+    },
+    /// A 403: Bundler's `AuthenticationForbiddenError`.
+    Forbidden(String),
+    /// A legacy index that does not read.
+    Legacy(Url, String),
     /// A whole file that does not match the digest the server sent with it.
     Digest(Url),
     Io(PathBuf, io::Error),
@@ -98,6 +121,25 @@ impl fmt::Display for Error {
             Error::Name(n) => write!(f, "{n:?}: not a gem name"),
             Error::Http(url, e) => write!(f, "{}: {e}", redacted(url)),
             Error::Status(url, code) => write!(f, "{}: HTTP {code}", redacted(url)),
+            Error::Unauthorized { host, sent: true } => write!(
+                f,
+                "Bad username or password for {host}.\n\
+                 Please double-check your credentials and correct them."
+            ),
+            Error::Unauthorized { host, sent: false } => write!(
+                f,
+                "Authentication is required for {host}.\n\
+                 Please supply credentials for this source. You can do this by running:\n\
+                 `bundle config set --global {host} username:password`\n\
+                 or by storing the credentials in the `{}` environment variable",
+                credentials::key_for(host)
+            ),
+            Error::Forbidden(host) => write!(
+                f,
+                "Access token could not be authenticated for {host}.\n\
+                 Make sure it's valid and has the necessary scopes configured."
+            ),
+            Error::Legacy(url, why) => write!(f, "{}: {why}", redacted(url)),
             Error::Digest(url) => write!(
                 f,
                 "{}: the response does not match the digest the server sent with it",
@@ -110,36 +152,74 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-/// A URL with any password left out, for messages.
+impl Error {
+    /// The exit status Bundler gives this error, where it is one of its
+    /// `HTTPError`s a message alone explains: 17. `None` for the rest.
+    pub fn bundler_status(&self) -> Option<u8> {
+        matches!(self, Error::Unauthorized { .. } | Error::Forbidden(_)).then_some(17)
+    }
+}
+
+/// A URL with any credentials left out, for messages. A client's URLs
+/// never carry them; this is for one that might.
 fn redacted(url: &Url) -> Url {
     let mut url = url.clone();
+    let _ = url.set_username("");
     let _ = url.set_password(None);
     url
+}
+
+/// Which index a source serves, known once `/versions` has been asked for.
+#[derive(Clone)]
+enum Mode {
+    Compact,
+    /// No compact index: the legacy index's builds, by gem.
+    Legacy(Arc<HashMap<String, Vec<legacy::Tuple>>>),
 }
 
 /// One source's compact index and its cache.
 #[derive(Clone)]
 pub struct Client {
     http: reqwest::Client,
-    /// The source, ending in `/`, so a join appends to its path.
+    /// The source, ending in `/`, so a join appends to its path. Never with
+    /// credentials in it.
     base: Url,
+    /// The source's credentials, sent with every request to it.
+    auth: Option<Auth>,
     dir: PathBuf,
     limit: Arc<Semaphore>,
+    /// Set once, by the first `/versions` answer; never changed after.
+    mode: Arc<Mutex<Option<Mode>>>,
 }
 
 impl Client {
-    /// A client for `source`, caching under `home`'s `index/<host>/`.
+    /// A client for `source`, caching under `home`'s `index/<host>/`, with
+    /// the credentials its URL has, else those the environment and the
+    /// global Bundler config give it.
     pub fn new(source: &str, home: &Path) -> Result<Client, Error> {
-        let mut base = Url::parse(source).map_err(|_| Error::Source(source.to_owned()))?;
+        Client::with_settings(source, home, &credentials::Settings::load(None))
+    }
+
+    /// [`Client::new`] with the credentials of `settings`, a project's.
+    pub fn with_settings(
+        source: &str,
+        home: &Path,
+        settings: &credentials::Settings,
+    ) -> Result<Client, Error> {
+        let shown = || Error::Source(lockfile_remote(source));
+        let mut base = Url::parse(source).map_err(|_| shown())?;
         if !matches!(base.scheme(), "http" | "https") || base.host_str().is_none() {
-            return Err(Error::Source(source.to_owned()));
+            return Err(shown());
         }
+        let own = credentials::take_userinfo(&mut base);
         if !base.path().ends_with('/') {
             let path = format!("{}/", base.path());
             base.set_path(&path);
         }
         base.set_query(None);
         base.set_fragment(None);
+        // `Remote#apply_auth`: the configured ones only when the URL has none.
+        let auth = own.or_else(|| settings.credentials_for(&base));
         let http = reqwest::Client::builder()
             .user_agent(concat!("spinel/", env!("CARGO_PKG_VERSION")))
             .build()
@@ -148,9 +228,23 @@ impl Client {
         Ok(Client {
             http,
             base,
+            auth,
             dir,
             limit: Arc::new(Semaphore::new(MAX_CONCURRENT)),
+            mode: Arc::new(Mutex::new(None)),
         })
+    }
+
+    fn mode(&self) -> Option<Mode> {
+        self.mode.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Record how the source answers, unless it already is.
+    fn set_mode(&self, mode: Mode) {
+        self.mode
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_or_insert(mode);
     }
 
     /// The cache directory, `<home>/index/<host>/`.
@@ -158,14 +252,80 @@ impl Client {
         &self.dir
     }
 
-    /// Bring the cached `/versions` up to date.
+    /// Bring the cached `/versions` up to date, or, when the source has no
+    /// compact index (a 404), read its legacy index instead.
     pub async fn versions(&self) -> Result<Outcome, Error> {
-        self.update(
-            "versions",
-            &self.dir.join("versions"),
-            Some(&self.dir.join("versions.etag")),
-        )
-        .await
+        if let Some(Mode::Legacy(_)) = self.mode() {
+            return Ok(Outcome::NotModified);
+        }
+        let result = self
+            .update(
+                "versions",
+                &self.dir.join("versions"),
+                Some(&self.dir.join("versions.etag")),
+            )
+            .await;
+        match result {
+            Err(Error::Status(_, StatusCode::NOT_FOUND)) => self.legacy_specs().await,
+            result => {
+                self.set_mode(Mode::Compact);
+                result
+            }
+        }
+    }
+
+    /// `Fetcher::Index#specs`: `specs.4.8.gz`, which must be there, and
+    /// `prerelease_specs.4.8.gz`, which need not.
+    async fn legacy_specs(&self) -> Result<Outcome, Error> {
+        let (url, gz) = self.fetch_bytes("specs.4.8.gz").await?;
+        let mut tuples = legacy::parse_specs(&gz).map_err(|why| Error::Legacy(url, why))?;
+        let mut size = gz.len() as u64;
+        if let Ok((url, pre)) = self.fetch_bytes("prerelease_specs.4.8.gz").await {
+            tuples.extend(legacy::parse_specs(&pre).map_err(|why| Error::Legacy(url, why))?);
+            size += pre.len() as u64;
+        }
+        let mut by_name: HashMap<String, Vec<legacy::Tuple>> = HashMap::new();
+        for tuple in tuples {
+            by_name.entry(tuple.name.clone()).or_default().push(tuple);
+        }
+        self.set_mode(Mode::Legacy(Arc::new(by_name)));
+        Ok(Outcome::Fetched(size))
+    }
+
+    /// One file of the source, whole, as a 200 answers it.
+    async fn fetch_bytes(&self, remote: &str) -> Result<(Url, Vec<u8>), Error> {
+        let _permit = self
+            .limit
+            .acquire()
+            .await
+            .expect("the semaphore is never closed");
+        let url = self
+            .base
+            .join(remote)
+            .map_err(|_| Error::Source(self.base.to_string()))?;
+        let response = self.get(&url, None, None).await?;
+        if response.status() != StatusCode::OK {
+            return Err(self.status(&url, response.status()));
+        }
+        let body = response
+            .bytes()
+            .await
+            .map_err(|e| Error::Http(url.clone(), e))?;
+        Ok((url, body.to_vec()))
+    }
+
+    /// The error a status that is not an answer is: Bundler's message for a
+    /// 401 or a 403, else the status.
+    fn status(&self, url: &Url, status: StatusCode) -> Error {
+        let host = url.host_str().unwrap_or_default().to_owned();
+        match status {
+            StatusCode::UNAUTHORIZED => Error::Unauthorized {
+                host,
+                sent: self.auth.is_some(),
+            },
+            StatusCode::FORBIDDEN => Error::Forbidden(host),
+            status => Error::Status(url.clone(), status),
+        }
     }
 
     /// Bring the cached `/names` up to date.
@@ -194,6 +354,9 @@ impl Client {
             .filter(|g| seen.insert(g.as_str()))
             .cloned()
             .collect();
+        if let Some(Mode::Legacy(tuples)) = self.mode() {
+            return Ok(self.legacy_info(&gems, &tuples).await);
+        }
         let versions = self.dir.join("versions");
         let wanted: Vec<&str> = gems.iter().map(String::as_str).collect();
         let checksums = match std::fs::read(&versions) {
@@ -240,6 +403,83 @@ impl Client {
             .collect())
     }
 
+    /// Each gem's `/info` file, written from the legacy index: a line per
+    /// build, from its `quick/Marshal.4.8/<full name>.gemspec.rz`, which is
+    /// fetched once and kept, a build being immutable.
+    // ponytail: every build of a gem is fetched before resolving, where
+    // Bundler fetches a build's gemspec only when the resolver reaches it.
+    // Fine for a private server's handful of versions; upgrade with a lazy
+    // index in the resolver if a large legacy source shows up.
+    async fn legacy_info(
+        &self,
+        gems: &[String],
+        tuples: &HashMap<String, Vec<legacy::Tuple>>,
+    ) -> Vec<(String, Result<Outcome, Error>)> {
+        let mut results = Vec::new();
+        for gem in gems {
+            let result = if !valid_name(gem) {
+                Err(Error::Name(gem.clone()))
+            } else {
+                match tuples.get(gem) {
+                    None => Ok(Outcome::Unknown),
+                    Some(builds) => self.legacy_gem(gem, builds).await,
+                }
+            };
+            results.push((gem.clone(), result));
+        }
+        results
+    }
+
+    async fn legacy_gem(&self, gem: &str, builds: &[legacy::Tuple]) -> Result<Outcome, Error> {
+        let mut tasks = tokio::task::JoinSet::new();
+        for (i, tuple) in builds.iter().enumerate() {
+            let client = self.clone();
+            let tuple = tuple.clone();
+            tasks.spawn(async move { (i, client.legacy_gemspec(&tuple).await) });
+        }
+        let mut lines: Vec<Option<String>> = vec![None; builds.len()];
+        while let Some(joined) = tasks.join_next().await {
+            let (i, line) = joined.expect("an index task panicked");
+            lines[i] = Some(line?);
+        }
+        let mut info = String::from("---\n");
+        for line in lines.into_iter().flatten() {
+            info.push_str(&line);
+            info.push('\n');
+        }
+        let path = self.info_path(gem);
+        if std::fs::read(&path).is_ok_and(|old| old == info.as_bytes()) {
+            return Ok(Outcome::Current);
+        }
+        write_atomic(&path, info.as_bytes())?;
+        Ok(Outcome::Fetched(info.len() as u64))
+    }
+
+    /// One build's `/info` line, from its cached `.gemspec.rz` or the
+    /// source's.
+    async fn legacy_gemspec(&self, tuple: &legacy::Tuple) -> Result<String, Error> {
+        let file = format!("{}.gemspec.rz", tuple.full_name());
+        let cached = self.dir.join("quick").join(&file);
+        let remote = format!("quick/Marshal.4.8/{file}");
+        let (url, rz) = match std::fs::read(&cached) {
+            Ok(rz) => (
+                self.base
+                    .join(&remote)
+                    .unwrap_or_else(|_| self.base.clone()),
+                rz,
+            ),
+            Err(_) => {
+                let (url, rz) = self.fetch_bytes(&remote).await?;
+                (url, rz)
+            }
+        };
+        let line = legacy::info_line(tuple, &rz).map_err(|why| Error::Legacy(url, why))?;
+        if !cached.is_file() {
+            write_atomic(&cached, &rz)?;
+        }
+        Ok(line)
+    }
+
     /// Where `/info/<gem>` is cached. Bundler's layout: a name of only
     /// lowercase letters, digits, `_` and `-` is its own file name; any other
     /// goes under `info-special-characters/` with its MD5 after it, so two
@@ -278,7 +518,7 @@ impl Client {
             .map_err(|_| Error::Source(self.base.to_string()))?;
         let mut response = self.get(&url, None, None).await?;
         if response.status() != StatusCode::OK {
-            return Err(Error::Status(url, response.status()));
+            return Err(self.status(&url, response.status()));
         }
         let io_error = |e| Error::Io(dest.to_owned(), e);
         let mut file = std::fs::File::create(dest).map_err(io_error)?;
@@ -366,7 +606,7 @@ impl Client {
                 .write_whole(url, response, local, etag_path)
                 .await
                 .map(Some),
-            status => Err(Error::Status(url.clone(), status)),
+            status => Err(self.status(url, status)),
         }
     }
 
@@ -384,7 +624,7 @@ impl Client {
         match response.status() {
             StatusCode::NOT_MODIFIED if etag.is_some() => Ok(Outcome::NotModified),
             StatusCode::OK => self.write_whole(url, response, local, etag_path).await,
-            status => Err(Error::Status(url.clone(), status)),
+            status => Err(self.status(url, status)),
         }
     }
 
@@ -418,6 +658,11 @@ impl Client {
         from: Option<u64>,
     ) -> Result<reqwest::Response, Error> {
         let mut request = self.http.get(url.clone());
+        // Every URL is the source's own; reqwest drops the header on a
+        // redirect to another host.
+        if let Some(auth) = &self.auth {
+            request = request.basic_auth(&auth.user, auth.password.as_deref());
+        }
         if let Some(etag) = etag {
             request = request.header(header::IF_NONE_MATCH, format!("\"{etag}\""));
         }
@@ -451,6 +696,11 @@ fn cache_name(base: &Url) -> String {
         name.push_str(&hex(&Sha256::digest(base.path()))[..16]);
     }
     name
+}
+
+/// A source as the lockfile writes it, no credentials in it, for a message.
+fn lockfile_remote(source: &str) -> String {
+    crate::lockfile::credless(source)
 }
 
 /// rubygems.org's rule for a gem name: letters, digits, `.`, `-` and `_`.

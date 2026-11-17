@@ -201,6 +201,9 @@ impl fmt::Display for Outcome {
 pub struct Fetched {
     /// The entry: `gem/` and `metadata` are in it.
     pub path: PathBuf,
+    /// The SHA-256 of its `.gem`, in hex: the one asked for, or, for a gem
+    /// asked for with none, the one that arrived.
+    pub sha256: String,
     pub outcome: Outcome,
     /// What RubyGems would warn about while installing it: a dangling symlink
     /// left out.
@@ -238,7 +241,10 @@ impl Store {
 
     /// Fetch each gem, given with the SHA-256 of its `.gem` in hex, from
     /// `client`'s source into the store, as many at once as the client's
-    /// limit allows. One already stored costs no request. Results come back
+    /// limit allows. One already stored costs no request. An empty SHA-256
+    /// is a gem whose source lists none (a legacy index, #89): it is
+    /// fetched every time and kept under the SHA-256 that arrived, as
+    /// Bundler takes the checksum of such a gem from its `.gem`. Results come back
     /// in `wants`' order, a gem asked for twice once, as its first.
     pub async fn fetch(
         &self,
@@ -258,14 +264,15 @@ impl Store {
         let mut tasks = tokio::task::JoinSet::new();
         for (i, (gem, sha)) in wants.iter().enumerate() {
             results.push(None);
-            if sha.len() != 64 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+            if !sha.is_empty() && (sha.len() != 64 || !sha.bytes().all(|b| b.is_ascii_hexdigit())) {
                 results[i] = Some(Err(Error::Sha256(sha.clone())));
                 continue;
             }
             let path = self.entry(gem, sha);
-            if path.join("gem").is_dir() {
+            if !sha.is_empty() && path.join("gem").is_dir() {
                 results[i] = Some(Ok(Fetched {
                     path,
+                    sha256: sha.clone(),
                     outcome: Outcome::Stored,
                     warnings: Vec::new(),
                 }));
@@ -314,7 +321,7 @@ impl Store {
                 .download(&format!("{}.gem", gem.full_name()), &download)
                 .await
                 .map_err(Error::Index)?;
-            if actual != sha256 {
+            if !sha256.is_empty() && actual != sha256 {
                 return Err(Error::Checksum {
                     gem: gem.full_name(),
                     expected: sha256.to_owned(),
@@ -331,7 +338,7 @@ impl Store {
                     .await
                     .expect("unpacking a gem panicked")?
             };
-            let path = self.entry(gem, sha256);
+            let path = self.entry(gem, &actual);
             let parent = path.parent().expect("an entry is under store/gems");
             fs::create_dir_all(parent).map_err(|e| Error::Io(parent.to_owned(), e))?;
             // ponytail: nothing is fsynced, so a power cut (not a killed
@@ -347,6 +354,7 @@ impl Store {
             }
             Ok(Fetched {
                 path,
+                sha256: actual,
                 outcome: Outcome::Fetched(size),
                 warnings,
             })

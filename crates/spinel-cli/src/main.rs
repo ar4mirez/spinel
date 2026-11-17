@@ -8,6 +8,7 @@
 mod add;
 mod builtin_gem;
 mod compact_index;
+mod credentials;
 mod did_you_mean;
 mod gem_home;
 #[cfg_attr(
@@ -38,6 +39,7 @@ mod install;
 mod local_source;
 mod locked;
 mod lockfile;
+mod marshal;
 mod remove;
 mod resolver;
 mod ruby_args;
@@ -898,16 +900,20 @@ fn resolve_command(
         mut request,
         local,
         sources,
+        scoped,
         ..
     } = match install::prepare(&gemfile, platforms, ruby_version, rubygems_version) {
         Ok(prepared) => prepared,
         Err(message) => return usage(message),
     };
     // ponytail: git and path sources are read by `spinel install`, which
-    // clones and evaluates them; this tool resolves against the index only.
-    // Upgrade by reading them here as `Session::resolve` does.
-    if !sources.is_empty() {
-        return usage("git and path sources are resolved by `spinel install`".to_owned());
+    // clones and evaluates them, and so are scoped rubygems sources; this
+    // tool resolves against one index only. Upgrade by reading them here as
+    // `Session::resolve` does.
+    if !sources.is_empty() || !scoped.is_empty() {
+        return usage(
+            "git, path and scoped rubygems sources are resolved by `spinel install`".to_owned(),
+        );
     }
     let Some(remote) = remote else {
         return usage("the Gemfile names no rubygems source".to_owned());
