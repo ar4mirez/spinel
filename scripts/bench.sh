@@ -5,18 +5,20 @@
 #   scripts/bench.sh                 every benchmark
 #   scripts/bench.sh regex_captures  one of them
 #   scripts/bench.sh io_gets         a Ruby one, `bench/io_gets.rb`, on Spinel
-#   scripts/bench.sh install         a script one, `bench/install.sh` (#81)
+#   scripts/bench.sh install         a script one, `bench/install.sh` (#91)
 #   scripts/bench.sh --ruby          the same regex patterns on system ruby
 #   scripts/bench.sh --yjit-bench    the yjit-bench subset on Spinel and ruby
 #                                    (#63); rewrites the table in bench/README.md
 #   scripts/bench.sh --yjit-bench-table  re-render that table from results.tsv
 #   scripts/bench.sh --yjit-bench-check  fail if the table is not results.tsv
 #
-# Numbers go in the PR, not into the repo — `docs/roadmap.md`, rule 7. The two
-# exceptions are generated and committed on purpose: `bench/spec-status.md`,
-# by `scripts/spec-status.sh`, is the progress bar, and the yjit-bench table in
-# `bench/README.md`, by `--yjit-bench` here, is the interpreter's baseline. Both
-# are written by a script and checked against its output, never typed.
+# Numbers go in the PR, not into the repo — `docs/roadmap.md`, rule 7. The
+# three exceptions are generated and committed on purpose: `bench/spec-status.md`,
+# by `scripts/spec-status.sh`, is the progress bar, the yjit-bench table in
+# `bench/README.md`, by `--yjit-bench` here, is the interpreter's baseline, and
+# the install table beside it, by `bench/install.sh`, is a Rails app's lockfile
+# installed cold and warm. All are written by a script and checked against its
+# output, never typed.
 #
 # `--ruby` times `bench/regex-patterns.txt` on the system Ruby with YJIT, which
 # is the comparison `CLAUDE.md` asks engine benchmarks to make. Both sides read
@@ -222,7 +224,7 @@ run_ruby_bench() {
 # `cargo bench` with `harness = false` just runs each `main`, so a name selects
 # one the way `--bench` does.
 if [[ $# -gt 0 ]]; then
-  # A `bench/*.sh` is a script of its own, such as `install` (#81), which
+  # A `bench/*.sh` is a script of its own, such as `install` (#91), which
   # needs the network and so is never part of the run of everything.
   if [[ -f "$repo_root/bench/$1.sh" ]]; then
     exec "$repo_root/bench/$1.sh" "${@:2}"
