@@ -11,6 +11,11 @@
 //! program headers name and ignores anything past them. Reading a plain
 //! `spinel` costs one seek and one 48-byte read; the payload is hashed only
 //! once the magic says one is there.
+//!
+//! On macOS the same bytes, payload then trailer, are the contents of a
+//! `__SPINEL,__payload` section instead, since appending to a signed Mach-O
+//! breaks its signature (`macho.rs`, #99). `locate` finds where they are and
+//! `read` parses them, the same parser for both.
 
 use std::fmt;
 use std::fs::File;
@@ -18,6 +23,8 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use sha2::{Digest, Sha256};
+
+use crate::macho;
 
 /// The last 8 bytes of every compiled app. The `01` is the trailer version: a
 /// change to this layout is a new magic, so an old `spinel` reading a new app
@@ -179,22 +186,108 @@ pub fn read<F: Read + Seek>(file: &mut F) -> Result<Option<App>, Error> {
     }))
 }
 
+/// The compiled app `file` holds, wherever its kind of executable keeps one:
+/// in the `__SPINEL,__payload` section of a Mach-O, and at the end of any
+/// other file. What `read` answers, with `payload_offset` from the start of
+/// the file either way.
+pub fn locate<F: Read + Seek>(file: &mut F) -> Result<Option<App>, Error> {
+    match macho::place(file)? {
+        macho::Place::NotMachO => read(file),
+        macho::Place::NoSection | macho::Place::Unsupported => Ok(None),
+        macho::Place::Section { offset, size } => {
+            let found = read(&mut Window {
+                inner: file,
+                start: offset,
+                len: size,
+                pos: 0,
+            })?;
+            Ok(found.map(|app| App {
+                payload_offset: offset + app.payload_offset,
+                ..app
+            }))
+        }
+    }
+}
+
+/// Write a compiled app: `binary` with `payload` and its trailer, to `out`.
+/// A Mach-O gets them in its reserved section and is signed again ad hoc;
+/// anything else, an ELF, gets them appended. A Mach-O that is not thin
+/// 64-bit little-endian is refused. The app is written beside `out` and
+/// renamed onto it only once whole, so a failed write leaves `out` as it was
+/// and nothing of its own behind.
+pub fn write(binary: &Path, payload: &[u8], out: &Path) -> io::Result<()> {
+    let mut name = out.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".spinel-pack-{}", std::process::id()));
+    let partial = out.with_file_name(name);
+    let written = match macho::place(&mut File::open(binary)?)? {
+        macho::Place::NotMachO => append(binary, payload, &partial),
+        macho::Place::Unsupported => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "`{}` is a universal, 32-bit or big-endian Mach-O; only a thin 64-bit little-endian one can hold an app",
+                    binary.display()
+                ),
+            ));
+        }
+        macho::Place::NoSection | macho::Place::Section { .. } => {
+            macho::write(binary, payload, &partial)
+        }
+    };
+    written
+        .and_then(|()| std::fs::rename(&partial, out))
+        .inspect_err(|_| {
+            let _ = std::fs::remove_file(&partial);
+        })
+}
+
 /// Write `binary`, then `payload`, then the trailer for it, to `out`: a
 /// compiled app on Linux, where the loader ignores bytes past the ELF.
 /// The copy keeps `binary`'s permissions, so `out` is executable.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "`spinel build` (#100) is the caller; only tests call it until it lands"
-    )
-)]
 pub fn append(binary: &Path, payload: &[u8], out: &Path) -> io::Result<()> {
     std::fs::copy(binary, out)?;
     let mut file = std::fs::OpenOptions::new().append(true).open(out)?;
     file.write_all(payload)?;
     file.write_all(&Trailer::for_payload(payload).to_bytes())?;
     file.sync_all()
+}
+
+/// `len` bytes of `inner` from `start`, read as if they were a whole file:
+/// the section a Mach-O keeps its payload and trailer in.
+struct Window<'a, F> {
+    inner: &'a mut F,
+    start: u64,
+    len: u64,
+    pos: u64,
+}
+
+impl<F: Read + Seek> Read for Window<'_, F> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let left = self.len.saturating_sub(self.pos);
+        let want = usize::try_from(left).map_or(buf.len(), |left| left.min(buf.len()));
+        if want == 0 {
+            return Ok(0);
+        }
+        self.inner.seek(SeekFrom::Start(self.start + self.pos))?;
+        let got = self.inner.read(&mut buf[..want])?;
+        self.pos += got as u64;
+        Ok(got)
+    }
+}
+
+impl<F: Seek> Seek for Window<'_, F> {
+    fn seek(&mut self, to: SeekFrom) -> io::Result<u64> {
+        let pos = match to {
+            SeekFrom::Start(at) => Some(at),
+            SeekFrom::End(delta) => self.len.checked_add_signed(delta),
+            SeekFrom::Current(delta) => self.pos.checked_add_signed(delta),
+        };
+        let pos = pos.ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "seek before the section")
+        })?;
+        self.pos = pos;
+        Ok(pos)
+    }
 }
 
 /// Feeds what is written into a sha256.
@@ -332,6 +425,105 @@ mod tests {
             "{err:?}"
         );
         assert!(err.to_string().contains("truncated"), "{err}");
+    }
+
+    #[test]
+    fn locate_reads_a_macho_payload_from_its_section() {
+        let file = crate::macho::tests::embedded(&crate::macho::tests::fake_spinel(), b"hello");
+        let found = locate(&mut Cursor::new(&file))
+            .expect("reads")
+            .expect("an app");
+        let start = usize::try_from(found.payload_offset).expect("fits");
+        assert_eq!(&file[start..start + 5], b"hello");
+        assert_eq!(hex(&found.trailer.sha256), HELLO_SHA256);
+    }
+
+    #[test]
+    fn locate_checks_a_section_payload_as_read_checks_an_appended_one() {
+        let mut file = crate::macho::tests::embedded(&crate::macho::tests::fake_spinel(), b"hello");
+        let crate::macho::Place::Section { offset, .. } =
+            crate::macho::place(&mut Cursor::new(&file)).expect("reads")
+        else {
+            panic!("no section");
+        };
+        file[usize::try_from(offset).expect("fits")] ^= 1;
+        let err = locate(&mut Cursor::new(&file)).expect_err("corrupt");
+        assert!(matches!(err, Error::Corrupt { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn a_plain_macho_spinel_is_no_app_even_with_a_trailer_appended() {
+        // The section is where a Mach-O keeps its payload; bytes past the end
+        // of the file are not looked at.
+        let plain = crate::macho::tests::fake_spinel();
+        assert!(matches!(locate(&mut Cursor::new(&plain)), Ok(None)));
+        let appended = app(&plain, b"hello");
+        assert!(matches!(locate(&mut Cursor::new(&appended)), Ok(None)));
+    }
+
+    #[test]
+    fn a_fat_macho_is_no_app_even_with_a_trailer_appended() {
+        let mut fat = vec![0xca, 0xfe, 0xba, 0xbe];
+        fat.resize(64, 0);
+        assert!(matches!(locate(&mut Cursor::new(&fat)), Ok(None)));
+        let appended = app(&fat, b"hello");
+        assert!(matches!(locate(&mut Cursor::new(&appended)), Ok(None)));
+    }
+
+    #[test]
+    fn write_refuses_a_fat_macho_and_leaves_no_file() {
+        let dir = std::env::temp_dir().join(format!("spinel-trailer-fat-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let binary = dir.join("spinel");
+        let out = dir.join("app");
+        let mut fat = vec![0xca, 0xfe, 0xba, 0xbe];
+        fat.resize(64, 0);
+        std::fs::write(&binary, &fat).expect("write");
+        let err = write(&binary, b"hello", &out).expect_err("refused");
+        let exists = out.exists();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{err}");
+        assert!(err.to_string().contains("universal"), "{err}");
+        assert!(!exists);
+    }
+
+    #[test]
+    fn a_failed_write_leaves_out_as_it_was() {
+        // A Mach-O without the reserved section: `embed` refuses it after the
+        // place check. The file already at `out` is untouched, and nothing
+        // the failed write made is left beside it.
+        let dir = std::env::temp_dir().join(format!("spinel-trailer-fail-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let binary = dir.join("spinel");
+        let out = dir.join("app");
+        let mut file = crate::macho::tests::fake_spinel();
+        let at = file
+            .windows(8)
+            .position(|w| w == b"__SPINEL")
+            .expect("segname");
+        file[at + 7] = b'X';
+        std::fs::write(&binary, &file).expect("write");
+        std::fs::write(&out, b"stale").expect("write");
+        let result = write(&binary, b"hello", &out);
+        let kept = std::fs::read(&out).ok();
+        let mut left: Vec<_> = std::fs::read_dir(&dir)
+            .expect("dir")
+            .map(|entry| entry.expect("entry").file_name())
+            .collect();
+        left.sort();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(result.is_err());
+        assert_eq!(kept.as_deref(), Some(&b"stale"[..]));
+        assert_eq!(left, ["app", "spinel"]);
+    }
+
+    #[test]
+    fn locate_reads_an_elf_payload_from_the_end() {
+        let file = app(b"\x7fELF binary", b"hello");
+        let found = locate(&mut Cursor::new(&file))
+            .expect("reads")
+            .expect("an app");
+        assert_eq!(found.payload_offset, 11);
     }
 
     #[test]
