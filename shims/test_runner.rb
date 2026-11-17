@@ -5,10 +5,17 @@
 #
 # 1. Discovery: `test/**/*_test.rb` (Minitest) and `spec/**/*_spec.rb`
 #    (RSpec), relative to the current directory, each sorted.
-# 2. `lib/` and `test/` or `spec/` go on `$LOAD_PATH`, as Rake's TestTask and
-#    `rspec` put them, and `test/test_helper.rb` and `spec/spec_helper.rb`
-#    are required here, once, before any worker exists: whatever they boot,
-#    every worker inherits through `fork` instead of booting again.
+#    ponytail: RSpec files are found but not run, because RSpec cannot run
+#    its examples on the VM yet (#835, splatting an object whose `to_a` is
+#    Ruby). `spec/` is not put on `$LOAD_PATH`, `spec/spec_helper.rb` is not
+#    required, no spec file goes to a worker, and the run says so on stderr
+#    and exits 1, so a spec suite is never a silent green. Once #835 lands,
+#    the helper is required with the others and each worker runs the
+#    examples of the spec files it loaded through RSpec's own runner.
+# 2. `lib/` and `test/` go on `$LOAD_PATH`, as Rake's TestTask puts them, and
+#    `test/test_helper.rb` is required here, once, before any worker exists:
+#    whatever it boots, every worker inherits through `fork` instead of
+#    booting again.
 # 3. Workers: `fork` after the helpers, up to the worker count, never more
 #    than there are files. Each worker has two pipes to this process: one
 #    it reads paths from, one line each, and one it writes events to. A path
@@ -27,8 +34,8 @@
 #    file, and a new worker is forked for the files still waiting, so one
 #    crash costs one file, not the rest of the suite. A worker that ends by a
 #    signal or a failing status after its last file is reported too, with
-#    the files it ran, and so is a file whose loading raised. Any of these
-#    makes the exit status 1.
+#    the files it ran, and so is a file whose loading raised. Any of these,
+#    or a spec file found, makes the exit status 1.
 #
 # The runner ends with `exit!`, so an `at_exit` a helper registered runs in
 # the workers, which ran the tests, and not again here with none loaded.
@@ -51,23 +58,28 @@ module Spinel
     end
 
     def self.run(jobs)
-      files = Dir.glob("test/**/*_test.rb").sort + Dir.glob("spec/**/*_spec.rb").sort
-      if files.empty?
+      files = Dir.glob("test/**/*_test.rb").sort
+      specs = Dir.glob("spec/**/*_spec.rb").sort
+      if files.empty? && specs.empty?
         warn "spinel test: no test files: nothing matches test/**/*_test.rb or spec/**/*_spec.rb"
         return 1
       end
+      failed = run_tests(files, jobs) unless files.empty?
+      unless specs.empty?
+        failed = true
+        warn "spinel test: #{specs.size} RSpec file#{"s" unless specs.size == 1} under spec/ not run: " \
+             "RSpec suites cannot run on Spinel yet (https://github.com/ar4mirez/spinel/issues/835)"
+      end
+      failed ? 1 : 0
+    end
 
-      dirs = ["lib"]
-      dirs << "test" if files.any? { |f| f.start_with?("test/") }
-      dirs << "spec" if files.any? { |f| f.start_with?("spec/") }
-      dirs.reverse_each do |dir|
+    # Run `files` on up to `jobs` workers; true when the suite failed.
+    def self.run_tests(files, jobs)
+      %w[test lib].each do |dir|
         path = File.expand_path(dir)
         $LOAD_PATH.unshift(path) if File.directory?(path) && !$LOAD_PATH.include?(path)
       end
-      ["test/test_helper.rb", "spec/spec_helper.rb"].each do |helper|
-        dir = helper.split("/").first
-        require File.expand_path(helper) if File.file?(helper) && dirs.include?(dir)
-      end
+      require File.expand_path("test/test_helper.rb") if File.file?("test/test_helper.rb")
 
       queue = files.dup
       workers = {}
@@ -119,7 +131,7 @@ module Spinel
           end
         end
       end
-      failed ? 1 : 0
+      failed
     end
 
     # Fork worker `number`. The child closes the parent's ends of every

@@ -6,6 +6,10 @@
 //! Each fixture under `tests/fixtures/test_runner/` logs to the file
 //! `SPINEL_TEST_LOG` names, one line per helper load and per test file, with
 //! the pid that did it. Worker counts stay at 3 or under.
+//!
+//! RSpec cannot run its examples on Spinel yet (#835), so spec files are
+//! found, reported as not run, and fail the run, while the Minitest files
+//! beside them still run.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -54,7 +58,7 @@ fn stderr(output: &Output) -> String {
 
 /// Runs the `boot` fixture on `jobs` workers, with every file waiting until
 /// that many workers have each started one, and checks what the log shows:
-/// each helper loaded once, in the parent, and every file run in a worker
+/// the helper loaded once, in the parent, and every file run in a worker
 /// forked from it. Returns the workers' pids.
 fn boot_on(jobs: usize) -> BTreeSet<String> {
     let dir = scratch(&format!("boot-{jobs}"));
@@ -72,28 +76,17 @@ fn boot_on(jobs: usize) -> BTreeSet<String> {
 
     let helpers: Vec<&Vec<String>> = lines.iter().filter(|l| l[0].ends_with("_helper")).collect();
     let loaded: Vec<&str> = helpers.iter().map(|l| l[0].as_str()).collect();
-    assert_eq!(
-        loaded,
-        ["test_helper", "spec_helper"],
-        "each helper is loaded once: {lines:?}"
-    );
+    assert_eq!(loaded, ["test_helper"], "loaded once: {lines:?}");
     let parent = &helpers[0][1];
-    assert_eq!(&helpers[1][1], parent, "both in the parent: {lines:?}");
 
     let files: Vec<&Vec<String>> = lines.iter().filter(|l| l[0] == "file").collect();
     let names: BTreeSet<&str> = files.iter().map(|l| l[4].as_str()).collect();
     assert_eq!(
         names,
-        BTreeSet::from([
-            "a_test.rb",
-            "b_test.rb",
-            "c_test.rb",
-            "d_test.rb",
-            "e_spec.rb"
-        ]),
+        BTreeSet::from(["a_test.rb", "b_test.rb", "c_test.rb", "d_test.rb"]),
         "every file ran once: {lines:?}"
     );
-    assert_eq!(files.len(), 5, "and only once: {lines:?}");
+    assert_eq!(files.len(), 4, "and only once: {lines:?}");
     for file in &files {
         assert_ne!(
             &file[1], parent,
@@ -203,6 +196,62 @@ fn a_worker_failing_after_its_last_file_fails_the_run() {
             "{mode}: {err}"
         );
     }
+}
+
+const NOT_RUN: &str =
+    "RSpec suites cannot run on Spinel yet (https://github.com/ar4mirez/spinel/issues/835)";
+
+#[test]
+fn spec_files_are_reported_not_run_and_fail_while_the_tests_beside_them_run() {
+    let dir = scratch("rspec");
+    let log = dir.join("log");
+    let output = spinel_test(&fixture("rspec"), &["-j", "2"], &log, &[]);
+    let lines = lines(&log);
+    std::fs::remove_dir_all(&dir).ok();
+    let err = stderr(&output);
+
+    assert_eq!(output.status.code(), Some(1), "stderr: {err}");
+    assert!(
+        err.contains(&format!("2 RSpec files under spec/ not run: {NOT_RUN}")),
+        "{err}"
+    );
+    let loaded: Vec<&str> = lines.iter().map(|l| l[0].as_str()).collect();
+    assert!(
+        !loaded.contains(&"spec_helper") && !loaded.contains(&"spec"),
+        "no spec file or spec helper is loaded: {lines:?}"
+    );
+    let parent = &lines[0];
+    assert_eq!(parent[0], "test_helper", "{lines:?}");
+    let ran: BTreeSet<&str> = lines
+        .iter()
+        .filter(|l| l[0] == "file")
+        .map(|l| {
+            assert_ne!(l[1], parent[1], "in a worker: {lines:?}");
+            l[2].as_str()
+        })
+        .collect();
+    assert_eq!(
+        ran,
+        BTreeSet::from(["a_test.rb", "b_test.rb"]),
+        "the test files still ran: {lines:?}"
+    );
+}
+
+#[test]
+fn a_spec_only_project_is_reported_not_run_and_fails() {
+    let dir = scratch("rspec-only");
+    let log = dir.join("log");
+    let output = spinel_test(&fixture("rspec_only"), &["-j", "1"], &log, &[]);
+    let lines = lines(&log);
+    std::fs::remove_dir_all(&dir).ok();
+    let err = stderr(&output);
+
+    assert_eq!(output.status.code(), Some(1), "stderr: {err}");
+    assert!(
+        err.contains(&format!("1 RSpec file under spec/ not run: {NOT_RUN}")),
+        "{err}"
+    );
+    assert!(lines.is_empty(), "nothing is loaded: {lines:?}");
 }
 
 #[test]

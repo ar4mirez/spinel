@@ -140,11 +140,13 @@ enum Command {
 
     /// Run the project's tests in parallel workers.
     ///
-    /// Finds `test/**/*_test.rb` and `spec/**/*_spec.rb` under the current
-    /// directory, requires `test/test_helper.rb` and `spec/spec_helper.rb`
-    /// once, then forks the workers, so what the helpers boot is booted once.
-    /// Each worker is handed one file at a time. A worker that dies while
-    /// running a file is reported with that file, and the exit status is 1.
+    /// Finds `test/**/*_test.rb` under the current directory, requires
+    /// `test/test_helper.rb` once, then forks the workers, so what the helper
+    /// boots is booted once. Each worker is handed one file at a time. A
+    /// worker that dies while running a file is reported with that file, and
+    /// the exit status is 1. `spec/**/*_spec.rb` files are found but not run
+    /// until RSpec runs on Spinel (#835): they are reported, and the exit
+    /// status is 1.
     Test {
         /// How many workers to fork; the physical cores when not given.
         #[arg(short, long, value_name = "N", value_parser = clap::value_parser!(u16).range(1..))]
