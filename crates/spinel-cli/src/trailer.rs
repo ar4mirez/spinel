@@ -193,7 +193,7 @@ pub fn read<F: Read + Seek>(file: &mut F) -> Result<Option<App>, Error> {
 pub fn locate<F: Read + Seek>(file: &mut F) -> Result<Option<App>, Error> {
     match macho::place(file)? {
         macho::Place::NotMachO => read(file),
-        macho::Place::NoSection => Ok(None),
+        macho::Place::NoSection | macho::Place::Unsupported => Ok(None),
         macho::Place::Section { offset, size } => {
             let found = read(&mut Window {
                 inner: file,
@@ -211,14 +211,27 @@ pub fn locate<F: Read + Seek>(file: &mut F) -> Result<Option<App>, Error> {
 
 /// Write a compiled app: `binary` with `payload` and its trailer, to `out`.
 /// A Mach-O gets them in its reserved section and is signed again ad hoc;
-/// anything else, an ELF, gets them appended.
+/// anything else, an ELF, gets them appended. A Mach-O that is not thin
+/// 64-bit little-endian is refused. When writing fails, `out` is removed.
 pub fn write(binary: &Path, payload: &[u8], out: &Path) -> io::Result<()> {
-    let place = macho::place(&mut File::open(binary)?)?;
-    if place == macho::Place::NotMachO {
-        append(binary, payload, out)
-    } else {
-        macho::write(binary, payload, out)
-    }
+    let written = match macho::place(&mut File::open(binary)?)? {
+        macho::Place::NotMachO => append(binary, payload, out),
+        macho::Place::Unsupported => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "`{}` is a universal, 32-bit or big-endian Mach-O; only a thin 64-bit little-endian one can hold an app",
+                    binary.display()
+                ),
+            ));
+        }
+        macho::Place::NoSection | macho::Place::Section { .. } => {
+            macho::write(binary, payload, out)
+        }
+    };
+    written.inspect_err(|_| {
+        let _ = std::fs::remove_file(out);
+    })
 }
 
 /// Write `binary`, then `payload`, then the trailer for it, to `out`: a
@@ -439,6 +452,55 @@ mod tests {
         assert!(matches!(locate(&mut Cursor::new(&plain)), Ok(None)));
         let appended = app(&plain, b"hello");
         assert!(matches!(locate(&mut Cursor::new(&appended)), Ok(None)));
+    }
+
+    #[test]
+    fn a_fat_macho_is_no_app_even_with_a_trailer_appended() {
+        let mut fat = vec![0xca, 0xfe, 0xba, 0xbe];
+        fat.resize(64, 0);
+        assert!(matches!(locate(&mut Cursor::new(&fat)), Ok(None)));
+        let appended = app(&fat, b"hello");
+        assert!(matches!(locate(&mut Cursor::new(&appended)), Ok(None)));
+    }
+
+    #[test]
+    fn write_refuses_a_fat_macho_and_leaves_no_file() {
+        let dir = std::env::temp_dir().join(format!("spinel-trailer-fat-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let binary = dir.join("spinel");
+        let out = dir.join("app");
+        let mut fat = vec![0xca, 0xfe, 0xba, 0xbe];
+        fat.resize(64, 0);
+        std::fs::write(&binary, &fat).expect("write");
+        let err = write(&binary, b"hello", &out).expect_err("refused");
+        let exists = out.exists();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{err}");
+        assert!(err.to_string().contains("universal"), "{err}");
+        assert!(!exists);
+    }
+
+    #[test]
+    fn a_failed_write_removes_out() {
+        // A Mach-O without the reserved section: `embed` refuses it after the
+        // place check, and nothing is left at `out`, not even an older file.
+        let dir = std::env::temp_dir().join(format!("spinel-trailer-fail-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let binary = dir.join("spinel");
+        let out = dir.join("app");
+        let mut file = crate::macho::tests::fake_spinel();
+        let at = file
+            .windows(8)
+            .position(|w| w == b"__SPINEL")
+            .expect("segname");
+        file[at + 7] = b'X';
+        std::fs::write(&binary, &file).expect("write");
+        std::fs::write(&out, b"stale").expect("write");
+        let result = write(&binary, b"hello", &out);
+        let exists = out.exists();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(result.is_err());
+        assert!(!exists);
     }
 
     #[test]

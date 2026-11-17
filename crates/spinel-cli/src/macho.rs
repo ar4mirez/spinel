@@ -71,8 +71,11 @@ const PAGE: u64 = 0x4000;
 /// What a file holds where a payload would be.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Place {
-    /// Not a 64-bit Mach-O: the payload, if any, is appended (Linux).
+    /// Not a Mach-O: the payload, if any, is appended (Linux).
     NotMachO,
+    /// A Mach-O other than thin 64-bit little-endian: universal (fat),
+    /// 32-bit, or big-endian. It holds no payload, and none can be written.
+    Unsupported,
     /// A Mach-O with no `__SPINEL,__payload` section, so no payload.
     NoSection,
     /// The section's bytes are at `offset` in the file, `size` of them.
@@ -83,7 +86,13 @@ pub enum Place {
 /// commands, a few kilobytes, and nothing of the payload itself.
 pub fn place<F: Read + Seek>(file: &mut F) -> io::Result<Place> {
     let Some(image) = Image::read(file)? else {
-        return Ok(Place::NotMachO);
+        return other_macho(file).map(|other| {
+            if other {
+                Place::Unsupported
+            } else {
+                Place::NotMachO
+            }
+        });
     };
     Ok(match image.section() {
         Ok(found) => Place::Section {
@@ -94,14 +103,34 @@ pub fn place<F: Read + Seek>(file: &mut F) -> io::Result<Place> {
     })
 }
 
+/// Whether `file` starts with a Mach-O magic `Image::read` does not take:
+/// universal (`FAT_MAGIC`, `FAT_MAGIC_64`), 32-bit (`MH_MAGIC`), or
+/// big-endian (`MH_CIGAM`, `MH_CIGAM_64`).
+fn other_macho<F: Read + Seek>(file: &mut F) -> io::Result<bool> {
+    file.seek(SeekFrom::Start(0))?;
+    let mut magic = [0; 4];
+    if let Err(err) = file.read_exact(&mut magic) {
+        return match err.kind() {
+            io::ErrorKind::UnexpectedEof => Ok(false),
+            _ => Err(err),
+        };
+    }
+    Ok(matches!(
+        magic,
+        [0xca, 0xfe, 0xba, 0xbe]
+            | [0xca, 0xfe, 0xba, 0xbf]
+            | [0xce, 0xfa, 0xed, 0xfe]
+            | [0xfe, 0xed, 0xfa, 0xce]
+            | [0xfe, 0xed, 0xfa, 0xcf]
+    ))
+}
+
 /// Write a compiled app for macOS: `binary`, a Mach-O with the reserved
 /// section, with `payload` and its trailer in that section, to `out`, then
 /// signed again ad hoc with `codesign`, keeping `binary`'s permissions.
 pub fn write(binary: &Path, payload: &[u8], out: &Path) -> io::Result<()> {
     embed(binary, payload, out)?;
-    sign_ad_hoc(out).inspect_err(|_| {
-        let _ = std::fs::remove_file(out);
-    })
+    sign_ad_hoc(out)
 }
 
 /// `write` without the signing: the bytes of the app, whose signature, if
@@ -628,6 +657,25 @@ pub(crate) mod tests {
             place(&mut Cursor::new(b"\xcf\xfa")).expect("reads"),
             Place::NotMachO
         );
+    }
+
+    #[test]
+    fn fat_32_bit_and_big_endian_macho_are_unsupported() {
+        for magic in [
+            [0xca, 0xfe, 0xba, 0xbe],
+            [0xca, 0xfe, 0xba, 0xbf],
+            [0xce, 0xfa, 0xed, 0xfe],
+            [0xfe, 0xed, 0xfa, 0xce],
+            [0xfe, 0xed, 0xfa, 0xcf],
+        ] {
+            let mut file = magic.to_vec();
+            file.resize(64, 0);
+            assert_eq!(
+                place(&mut Cursor::new(&file)).expect("reads"),
+                Place::Unsupported,
+                "{magic:x?}"
+            );
+        }
     }
 
     #[test]
