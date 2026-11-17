@@ -936,6 +936,29 @@ fn a_line_runs_the_test_or_example_defined_nearest_above_it() {
 }
 
 #[test]
+fn a_test_in_a_class_reopened_by_a_second_file_re_runs_from_that_file() {
+    // Both files on one worker: the class appears with the first, and the
+    // failing test is defined in the second.
+    let dir = scratch("report-reopened");
+    let output = spinel_test(&fixture("reopened"), &["-j", "1"], &dir.join("log"), &[]);
+    let out = stdout(&output);
+    assert_eq!(output.status.code(), Some(1), "{out}{}", stderr(&output));
+    let commands = reruns(&out);
+    assert_eq!(
+        commands,
+        ["spinel test test/b_test.rb:5 # SplitTest#test_b"],
+        "{out}"
+    );
+    let (pasted, results) = paste(&fixture("reopened"), &commands[0], &dir.join("events"));
+    let again = stdout(&pasted);
+    assert_eq!(pasted.status.code(), Some(1), "{again}");
+    assert_eq!(results.len(), 1, "{results:?}");
+    assert_eq!(results[0]["name"], "SplitTest#test_b", "{results:?}");
+    assert_eq!(results[0]["event"], "fail", "{results:?}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn a_path_that_is_not_one_file_given_once_is_an_error() {
     for (args, error) in [
         (

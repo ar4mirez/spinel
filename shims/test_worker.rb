@@ -34,6 +34,8 @@ module Spinel
     @failed = 0
     # The file each Minitest test class was defined by, by name.
     @homes = {}
+    # The files this worker was given, by their expanded paths.
+    @given = {}
 
     class << self
       attr_reader :failed
@@ -64,15 +66,12 @@ module Spinel
     end
 
     # Where a Minitest test of class `klass`, defined at `file`:`line`, runs
-    # again: the file given that defined its class, at the line when the
-    # test is defined there, else the whole file; nil for a class no file
-    # given defined.
+    # again: that file at that line when it is a file given, else the whole
+    # file given that defined its class; nil for a class no file given
+    # defined.
     def self.minitest_rerun(klass, file, line)
-      home = @homes[klass.to_s]
-      return unless home
-      return home unless file && line && File.expand_path(file) == File.expand_path(home)
-
-      "#{home}:#{line}"
+      given = file && line && @given[File.expand_path(file)]
+      given ? "#{given}:#{line}" : @homes[klass.to_s]
     end
 
     # A path under the current directory as the test files are named, from
@@ -114,6 +113,7 @@ module Spinel
       return unless defined?(::Minitest) && ::Minitest.respond_to?(:init_plugins)
 
       files.each do |path, _, classes|
+        @given[File.expand_path(path)] = path
         classes.each { |klass| @homes[klass.name] ||= path if klass.name }
       end
       ours = MinitestReporter.new
