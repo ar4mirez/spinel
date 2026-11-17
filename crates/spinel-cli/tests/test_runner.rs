@@ -959,6 +959,41 @@ fn a_test_in_a_class_reopened_by_a_second_file_re_runs_from_that_file() {
 }
 
 #[test]
+fn an_inherited_test_re_runs_from_the_file_of_the_class_that_failed() {
+    // `SqliteTest` inherits `test_roundtrip` from `AdapterTest`, defined in
+    // another file given, and fails it; both files on one worker.
+    let dir = scratch("report-inherited");
+    let output = spinel_test(&fixture("inherited"), &["-j", "1"], &dir.join("log"), &[]);
+    let out = stdout(&output);
+    assert_eq!(output.status.code(), Some(1), "{out}{}", stderr(&output));
+    let commands = reruns(&out);
+    assert_eq!(
+        commands,
+        ["spinel test test/sqlite_test.rb # SqliteTest#test_roundtrip"],
+        "{out}"
+    );
+    let (pasted, results) = paste(&fixture("inherited"), &commands[0], &dir.join("events"));
+    let again = stdout(&pasted);
+    assert_eq!(pasted.status.code(), Some(1), "{again}");
+    let failed: Vec<&Value> = results
+        .iter()
+        .filter(|result| result["event"] != "pass")
+        .collect();
+    assert_eq!(failed.len(), 1, "{results:?}");
+    assert_eq!(
+        failed[0]["name"], "SqliteTest#test_roundtrip",
+        "{results:?}"
+    );
+    assert_eq!(failed[0]["event"], "fail", "{results:?}");
+    assert_eq!(
+        reruns(&again),
+        std::slice::from_ref(&commands[0]),
+        "{again}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn a_path_that_is_not_one_file_given_once_is_an_error() {
     for (args, error) in [
         (

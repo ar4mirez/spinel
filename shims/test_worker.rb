@@ -65,13 +65,24 @@ module Spinel
       )
     end
 
-    # Where a Minitest test of class `klass`, defined at `file`:`line`, runs
-    # again: that file at that line when it is a file given, else the whole
-    # file given that defined its class; nil for a class no file given
-    # defined.
-    def self.minitest_rerun(klass, file, line)
+    # Where test `name` of class `klass`, defined at `file`:`line`, runs
+    # again: that file at that line when it is a file given and the class
+    # defines the test itself, else the whole file given that defined the
+    # class; nil for a class no file given defined.
+    def self.minitest_rerun(klass, name, file, line)
       given = file && line && @given[File.expand_path(file)]
-      given ? "#{given}:#{line}" : @homes[klass.to_s]
+      return "#{given}:#{line}" if given && own_test?(klass, name)
+
+      @homes[klass.to_s]
+    end
+
+    # Whether the test class named `klass` defines method `name` itself,
+    # rather than inheriting it or including it from a module.
+    def self.own_test?(klass, name)
+      runnable = runnables.find { |candidate| candidate.name == klass.to_s }
+      return false unless runnable && runnable.method_defined?(name)
+
+      runnable.instance_method(name).owner == runnable
     end
 
     # A path under the current directory as the test files are named, from
@@ -227,7 +238,7 @@ module Spinel
         backtrace = backtrace ? ::Minitest.filter_backtrace(backtrace) : []
         TestWorker.result(
           event, file, line, "#{klass}##{result.name}", result.time, message, backtrace,
-          TestWorker.minitest_rerun(klass, file, line)
+          TestWorker.minitest_rerun(klass, result.name, file, line)
         )
       end
     end
