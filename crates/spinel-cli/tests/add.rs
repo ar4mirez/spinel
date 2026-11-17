@@ -210,7 +210,7 @@ fn add_sinatra_appends_its_line_and_installs_it() {
     // Installed as `spinel install` would install that Gemfile: a second
     // install changes nothing.
     let out = sandbox.spinel(&["install", "--frozen"]);
-    assert_eq!(ok(&out, "spinel install --frozen"), "");
+    assert_eq!(ok(&out, "spinel install --frozen"), "Nothing to change\n");
     assert_eq!(sandbox.read("Gemfile.lock"), lock);
 }
 
@@ -361,7 +361,10 @@ fn a_gem_already_in_the_gemfile() {
     // any group.
     for args in [&["rake"][..], &["rake", "--group", "dev"], &["tilt@~> 2.0"]] {
         let out = sandbox.add(args);
-        assert_eq!(ok(&out, &format!("spinel add {args:?}")), "");
+        assert_eq!(
+            ok(&out, &format!("spinel add {args:?}")),
+            "Nothing to change\n"
+        );
         assert_eq!(sandbox.read("Gemfile"), gemfile);
         assert_eq!(sandbox.read("Gemfile.lock"), lock);
     }

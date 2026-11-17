@@ -421,7 +421,7 @@ fn a_git_and_a_path_source_install_and_lock() {
     let lock = sandbox.read("Gemfile.lock");
     assert_eq!(
         ok(&sandbox.spinel(&["install"]), "spinel install again"),
-        ""
+        "Nothing to change\n"
     );
     assert_eq!(sandbox.read("Gemfile.lock"), lock);
     assert_eq!(
@@ -429,7 +429,7 @@ fn a_git_and_a_path_source_install_and_lock() {
             &sandbox.spinel(&["install", "--frozen"]),
             "spinel install --frozen"
         ),
-        ""
+        "Nothing to change\n"
     );
 }
 
@@ -444,7 +444,10 @@ fn a_locked_revision_is_kept_until_the_gem_is_updated() {
 
     // `main` moves on; the lockfile keeps its revision.
     let newer = sandbox.commit("widget-1.1.0");
-    assert_eq!(ok(&sandbox.spinel(&["install"]), "spinel install"), "");
+    assert_eq!(
+        ok(&sandbox.spinel(&["install"]), "spinel install"),
+        "Nothing to change\n"
+    );
     assert_eq!(sandbox.read("Gemfile.lock"), installed);
     assert_eq!(sandbox.linked()[2].0, "widget-1.0.0");
 
@@ -476,7 +479,7 @@ fn a_locked_revision_is_kept_until_the_gem_is_updated() {
             &sandbox.spinel(&["update", "widget"]),
             "spinel update widget"
         ),
-        "+ widget 1.1.0\n- widget 1.0.0\n"
+        "~ widget 1.0.0 -> 1.1.0\n"
     );
     let updated = sandbox.read("Gemfile.lock");
     assert_eq!(updated, sandbox.bundlers("updated.lock"));
@@ -526,7 +529,7 @@ fn a_changed_path_gemspec_is_read_again() {
 
     assert_eq!(
         ok(&sandbox.spinel(&["install"]), "spinel install"),
-        "+ gadget 0.2.0\n- gadget 0.1.0\n"
+        "~ gadget 0.1.0 -> 0.2.0\n"
     );
     assert_eq!(
         sandbox.read("Gemfile.lock"),
@@ -665,7 +668,7 @@ fn a_gemspec_gemfile_installs_its_gem_from_a_path_source() {
             &sandbox.spinel(&["install", "--frozen"]),
             "spinel install --frozen"
         ),
-        ""
+        "Nothing to change\n"
     );
 }
 
@@ -695,7 +698,7 @@ fn a_gemfile_with_no_rubygems_source_installs_its_path_gem() {
             &sandbox.spinel(&["install", "--frozen"]),
             "spinel install --frozen"
         ),
-        ""
+        "Nothing to change\n"
     );
 
     // A gem no source provides is not found, as Bundler words it.

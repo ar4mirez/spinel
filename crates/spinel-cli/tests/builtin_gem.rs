@@ -318,7 +318,7 @@ fn the_lock_installs_the_built_ins_and_skips_ext() {
 
     // A second install has nothing to do and says so.
     let out = sandbox.install();
-    assert_eq!(ok(&out, "a second spinel install"), "");
+    assert_eq!(ok(&out, "a second spinel install"), "Nothing to change\n");
     assert_eq!(stderr(&out), "");
     assert_eq!(server.requests(), 0);
 }

@@ -1350,12 +1350,45 @@ impl Session {
                 .unwrap_or_else(|| split_full_name(full_name));
             lines.push((name.clone(), format!("- {name} {version}")));
         }
-        lines.sort();
-        for (_, line) in lines {
+        for line in summarize_changes(lines) {
             println!("{line}");
         }
         Ok(())
     }
+}
+
+/// The lines `spinel install` prints, from one `+ name version` or
+/// `- name version` line per gem added or removed: a gem one version of
+/// which came and one went is one `~ name old -> new` line, all sorted by
+/// name, and nothing changed is the one line `Nothing to change`.
+fn summarize_changes(lines: Vec<(String, String)>) -> Vec<String> {
+    let mut by_name: std::collections::BTreeMap<String, (Vec<String>, Vec<String>)> =
+        std::collections::BTreeMap::new();
+    for (name, line) in lines {
+        let entry = by_name.entry(name).or_default();
+        if line.starts_with('+') {
+            entry.0.push(line);
+        } else {
+            entry.1.push(line);
+        }
+    }
+    let mut out = Vec::new();
+    for (name, (mut added, mut removed)) in by_name {
+        if added.len() == 1 && removed.len() == 1 {
+            let new = &added[0][name.len() + 3..];
+            let old = &removed[0][name.len() + 3..];
+            out.push(format!("~ {name} {old} -> {new}"));
+            continue;
+        }
+        added.sort();
+        removed.sort();
+        out.extend(added);
+        out.extend(removed);
+    }
+    if out.is_empty() {
+        out.push("Nothing to change".to_owned());
+    }
+    out
 }
 
 /// Evaluate the Gemfile as Ruby, in a child `spinel` running

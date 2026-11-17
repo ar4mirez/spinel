@@ -220,7 +220,7 @@ fn bundler_setup_boots_the_app_spinel_install_installed() {
     // A second install has nothing to do.
     assert_eq!(
         ok(&sandbox.spinel(&["install", "--frozen"]), "spinel install"),
-        ""
+        "Nothing to change\n"
     );
 }
 

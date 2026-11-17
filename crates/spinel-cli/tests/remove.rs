@@ -280,7 +280,7 @@ fn remove_takes_the_lines_out_and_the_orphans_with_them() {
 
     // What `spinel install` makes of that Gemfile: nothing to change.
     let out = sandbox.spinel(&["install", "--frozen"]);
-    assert_eq!(ok(&out, "spinel install --frozen"), "");
+    assert_eq!(ok(&out, "spinel install --frozen"), "Nothing to change\n");
 }
 
 #[test]
@@ -337,7 +337,8 @@ fn a_line_that_cannot_go_alone_writes_nothing() {
         format!(
             "Removing gems from {}\n\
              base64 could not be removed.\n\
-             No gems were removed from the gemfile.\n",
+             No gems were removed from the gemfile.\n\
+             Nothing to change\n",
             path.display()
         )
     );

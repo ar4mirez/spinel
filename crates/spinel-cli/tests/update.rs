@@ -282,12 +282,9 @@ fn update_rake_moves_only_rake_and_its_dependencies() {
     let out = sandbox.update(&["rake"]);
     assert_eq!(
         ok(&out, "spinel update rake"),
-        "+ rake 2.0.0\n\
-         - rake 1.0.0\n\
-         + rake-dep 2.0.0\n\
-         - rake-dep 1.0.0\n\
-         + shared 2.0.0\n\
-         - shared 1.0.0\n"
+        "~ rake 1.0.0 -> 2.0.0\n\
+         ~ rake-dep 1.0.0 -> 2.0.0\n\
+         ~ shared 1.0.0 -> 2.0.0\n"
     );
     assert_eq!(sandbox.lock(), sandbox.bundlers("rake.lock"));
     assert_eq!(
@@ -303,7 +300,7 @@ fn update_rake_moves_only_rake_and_its_dependencies() {
     // Again, with nothing newer: Bundler's warning, and nothing written.
     let out = sandbox.update(&["rake"]);
     assert!(out.status.success(), "{out:?}");
-    assert_eq!(String::from_utf8_lossy(&out.stdout), "");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "Nothing to change\n");
     assert_eq!(
         String::from_utf8_lossy(&out.stderr),
         "Bundler attempted to update rake but its version stayed the same\n"
@@ -319,14 +316,10 @@ fn update_with_no_gems_moves_everything() {
         let out = sandbox.update(args);
         assert_eq!(
             ok(&out, &format!("spinel update {args:?}")),
-            "+ other 2.0.0\n\
-             - other 1.0.0\n\
-             + rake 2.0.0\n\
-             - rake 1.0.0\n\
-             + rake-dep 2.0.0\n\
-             - rake-dep 1.0.0\n\
-             + shared 2.0.0\n\
-             - shared 1.0.0\n"
+            "~ other 1.0.0 -> 2.0.0\n\
+             ~ rake 1.0.0 -> 2.0.0\n\
+             ~ rake-dep 1.0.0 -> 2.0.0\n\
+             ~ shared 1.0.0 -> 2.0.0\n"
         );
         assert_eq!(sandbox.lock(), sandbox.bundlers("all.lock"));
         assert_eq!(
