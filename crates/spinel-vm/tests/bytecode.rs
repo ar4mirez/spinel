@@ -237,6 +237,40 @@ fn only_a_splat_something_can_outrun_is_captured() {
     assert_eq!(captures("def m(*a); a; end; x = [1]; m(*x, *x)"), 1);
 }
 
+/// A `*expr` argument is converted where it is written, and a forwarded rest
+/// parameter is not (#835).
+///
+/// `Insn::SplatArray` is what calls a Ruby `to_a` before the arguments to the
+/// splat's right are evaluated. An anonymous `*` and a `...` forward the
+/// method's own rest parameter, which is always an `Array`, so they pay nothing.
+#[test]
+fn a_written_splat_is_converted_where_it_is_written() {
+    let conversions = |source: &str| {
+        let body = iseq(source);
+        let mut count = body
+            .insns
+            .iter()
+            .filter(|insn| matches!(insn, Insn::SplatArray))
+            .count();
+        // The method bodies too: `def` compiles to a child iseq.
+        for child in &body.children {
+            count += child
+                .insns
+                .iter()
+                .filter(|insn| matches!(insn, Insn::SplatArray))
+                .count();
+        }
+        count
+    };
+
+    assert_eq!(conversions("x = [1]; p(*x)"), 1);
+    assert_eq!(conversions("x = [1]; p(*x, *x)"), 2);
+    assert_eq!(conversions("x = [1]; p(*x, 2) { 3 }"), 1);
+    assert_eq!(conversions("p(1)"), 0);
+    assert_eq!(conversions("def f(*) = p(*)"), 0);
+    assert_eq!(conversions("def f(...) = p(...)"), 0);
+}
+
 /// Superinstructions (#746, #750) are written over a finished body: the
 /// first instruction of a run is replaced, and the run's own instructions stay
 /// after it, so a body read instruction by instruction through

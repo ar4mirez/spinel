@@ -145,7 +145,7 @@ enum Command {
     /// boots is booted once. Each worker is handed one file at a time. A
     /// worker that dies while running a file is reported with that file, and
     /// the exit status is 1. `spec/**/*_spec.rb` files are found but not run
-    /// until RSpec runs on Spinel (#835): they are reported, and the exit
+    /// until RSpec runs on Spinel (#837): they are reported, and the exit
     /// status is 1.
     Test {
         /// How many workers to fork; the physical cores when not given.

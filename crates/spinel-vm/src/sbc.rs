@@ -634,6 +634,7 @@ wire_enum!(Insn {
     79 => GetLocalGetIvarBinOp { slot, site, op },
     80 => PushSelfGetLocal { slot },
     81 => GetLocalBinOp { slot, op },
+    82 => SplatArray,
 });
 
 wire_struct!(ClassDef {

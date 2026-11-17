@@ -3186,6 +3186,43 @@ fn run<'h>(
                         stack.push(captured);
                     }
 
+                    Insn::SplatArray => {
+                        let value = *stack.last().expect("a splat to convert");
+                        if splat_sends_to_a(scope, value) {
+                            // Allocated while the value is still on the stack,
+                            // which is what keeps it rooted through a collection.
+                            let into = empty_array(scope);
+                            let into = scope.get(into);
+                            let value = stack.pop().expect("a splat to convert");
+                            let call = Pending {
+                                cache: None,
+                                name: crate::shared::symbols::intern("__concat_splat__"),
+                                receiver: into,
+                                args: vec![value],
+                                keywords: Vec::new(),
+                                block: Value::NIL,
+                                block_is_literal: false,
+                                cref: frames[top].cref,
+                                implicit_self: false,
+                                variable_call: false,
+                                public_only: false,
+                                target: Target::Method,
+                                owner: None,
+                                defined_as: None,
+                            };
+                            if let Some(unwind) = dispatch(
+                                scope,
+                                &mut stack,
+                                &mut frames,
+                                call,
+                                proc_class,
+                                &mut ids,
+                            )? {
+                                return Ok(Step::Unwind(unwind));
+                            }
+                        }
+                    }
+
                     Insn::GetIvar(name, site) => {
                         let symbol = frames[top].iseq.symbol_ids()[name as usize];
                         let receiver = frames[top].receiver;
@@ -4619,8 +4656,42 @@ fn run<'h>(
                     Insn::CheckMatch => {
                         let class = stack.pop().expect("a rescue class on the stack");
                         let exception = *stack.last().expect("an exception to match against");
-                        let matched = exception_matches(scope, exception, class)?;
-                        stack.push(bool_value(matched));
+                        match rescue_match(scope, exception, class)? {
+                            Some(matched) => stack.push(bool_value(matched)),
+                            // `rescue X` is `X === exception`, and this `X`
+                            // has a `===` of its own (#835). Its answer is
+                            // pushed as it comes back: the `JumpIf` after a
+                            // `CheckMatch` reads only whether it is truthy,
+                            // which is all CRuby's `checkmatch` reads too.
+                            None => {
+                                let call = Pending {
+                                    cache: None,
+                                    name: crate::shared::symbols::intern("==="),
+                                    receiver: class,
+                                    args: vec![exception],
+                                    keywords: Vec::new(),
+                                    block: Value::NIL,
+                                    block_is_literal: false,
+                                    cref: frames[top].cref,
+                                    implicit_self: false,
+                                    variable_call: false,
+                                    public_only: false,
+                                    target: Target::Method,
+                                    owner: None,
+                                    defined_as: None,
+                                };
+                                if let Some(unwind) = dispatch(
+                                    scope,
+                                    &mut stack,
+                                    &mut frames,
+                                    call,
+                                    proc_class,
+                                    &mut ids,
+                                )? {
+                                    return Ok(Step::Unwind(unwind));
+                                }
+                            }
+                        }
                     }
 
                     Insn::CheckMatchAny => {
@@ -6481,6 +6552,34 @@ fn is_keywords_hash(scope: &mut HandleScope<'_>, value: Value) -> bool {
     scope.is_keywords(handle)
 }
 
+/// Whether `*value` needs Ruby to say what it spreads as: [`Insn::SplatArray`].
+///
+/// No for an `Array`, for `nil` — which CRuby 4.0 spreads as nothing without
+/// asking its `to_a` — for a `Hash` whose `to_a` is still `core/hash.rb`'s, and
+/// for an object with no `to_a` and no `method_missing` of its own, which
+/// spreads as itself. [`expand_splats`] answers all four without a send. Yes for
+/// everything else: a `to_a` written in Ruby, or a `method_missing` that may
+/// answer for one.
+fn splat_sends_to_a(scope: &mut HandleScope<'_>, value: Value) -> bool {
+    if value == Value::NIL || heap_kind(scope, value) == Some(HeapKind::Array) {
+        return false;
+    }
+    let Some(class) = class_of(scope, value) else {
+        return false;
+    };
+    let to_a = crate::shared::symbols::intern("to_a");
+    match scope.classes_mut().lookup(class, to_a) {
+        Some(method) => method.owner != Builtin::Hash.id(),
+        None => {
+            let missing = crate::shared::symbols::intern("method_missing");
+            scope
+                .classes_mut()
+                .lookup(class, missing)
+                .is_some_and(|method| method.owner != Builtin::BasicObject.id())
+        }
+    }
+}
+
 /// `f(a, *b)`: splice the elements of the splatted arguments into the list.
 ///
 /// Only the positions the call site marked. Expanding every array instead would
@@ -6495,10 +6594,10 @@ fn is_keywords_hash(scope: &mut HandleScope<'_>, value: Value) -> bool {
 /// which is that method's answer without a Ruby call. An object without `to_a`
 /// is passed as itself, which is Ruby.
 ///
-// ponytail: any other object that *has* a `to_a` is refused rather than sent
-// it: sending means re-entering the interpreter from argument assembly, and
-// passing it through was a wrong answer. The upgrade is to expand splats in the
-// compiler instead, where a send is just another instruction.
+/// Any other value was converted where the splat was written, by
+/// [`Insn::SplatArray`], and arrives here as an `Array`. One that still has a
+/// Ruby `to_a` reached the call some way that skipped the conversion, and is
+/// refused rather than passed through: that would be a wrong answer.
 fn expand_splats(
     scope: &mut HandleScope<'_>,
     args: Vec<Value>,
@@ -8313,37 +8412,52 @@ fn class_name_of(scope: &mut HandleScope<'_>, value: Value) -> String {
 /// `rescue` against something that is not a class or module is Ruby's
 /// `TypeError`, not a quiet `false`: a spec that writes `rescue 1` is asserting
 /// on that message.
+///
+// ponytail: `rescue *list` against a class with its own `===` is refused.
+// `CheckMatchAny` walks the list inside one instruction, so a send for one
+// element would have to resume the walk at the next. `CheckMatch` sends it
+// (#835); the upgrade is to compile `rescue *list` into a loop of those.
 fn exception_matches(
     scope: &mut HandleScope<'_>,
     exception: Value,
     class: Value,
 ) -> Result<bool, Error> {
+    rescue_match(scope, exception, class)?.ok_or(Error::Unknowable {
+        what: "`rescue *list` against a class with its own `===`",
+        needs: "a Ruby call from the exception matcher (#28)",
+    })
+}
+
+/// [`exception_matches`], or `None` when `class` has a `===` of its own and only
+/// a send can say.
+///
+/// Ruby's `rescue X` is `X === exception`, and `Module#===` is `is_a?` — the
+/// ancestor walk below, which is why it has always agreed. `core/module.rb`'s
+/// `Module#===` is the default, so the override test is "the method this lookup
+/// found is not that one". The `TypeError` for a non-`Module` comes first, as
+/// in CRuby's `checkmatch`, whatever `===` the value has.
+fn rescue_match(
+    scope: &mut HandleScope<'_>,
+    exception: Value,
+    class: Value,
+) -> Result<Option<bool>, Error> {
     let Some(wanted) = class_id_of(scope, class) else {
         return Err(Error::raise(
             "TypeError",
             "class or module required for rescue clause",
         ));
     };
-    // Ruby's `rescue X` is `X === exception`, and `Module#===` is `is_a?` —
-    // the ancestor walk below, which is why it has always agreed. A class that
-    // *overrides* `===` gets a different answer, and Spinel cannot ask it from
-    // here: `CheckMatch` is one instruction and a Ruby call needs a frame.
-    // `core/module.rb`'s `Module#===` is the default, so the override test is
-    // "the method this lookup found is not that one".
     let comparison = crate::shared::symbols::intern("===");
     if let Some(class_of_class) = class_of(scope, class)
         && let Some(method) = scope.classes_mut().lookup(class_of_class, comparison)
         && method.owner != Builtin::Module.id()
     {
-        return Err(Error::Unknowable {
-            what: "`rescue` against a class with its own `===`",
-            needs: "a Ruby call from the exception matcher (#28)",
-        });
+        return Ok(None);
     }
     let Some(actual) = class_of(scope, exception) else {
-        return Ok(false);
+        return Ok(Some(false));
     };
-    Ok(scope.classes().ancestors(actual).contains(&wanted))
+    Ok(Some(scope.classes().ancestors(actual).contains(&wanted)))
 }
 
 /// A [`CrefId`] as a `Value`, for the slots that must hold one.

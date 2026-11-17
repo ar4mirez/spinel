@@ -2982,3 +2982,26 @@ r = "%c".encode("US-ASCII") % 200; [r.bytes, r.encoding.name]  #=> [[200], "ASCI
 o = Object.new; def o.to_ary; [1, 2]; end; ["%s %s" % o, ("%s" % Class.new { def to_ary; "x"; end }.new rescue $!.class)]  #=> ["1 2", TypeError]
 [("%d" % "5x" rescue $!.message), ("%d" % "" rescue $!.message), "%d" % "0x1f", "%x" % " 0b11 "]  #=> ["invalid value for Integer(): \"5x\"", "invalid value for Integer(): \"\"", "31", "3"]
 [Float::NAN, 1e20, -Float::INFINITY, 9.3e18].map { |f| format("%c", f) rescue $!.message } + [format("%c", 97.5)]  #=> ["float NaN out of range of integer", "float 1e+20 out of range of integer", "float -Inf out of range of integer", "float 9.3e+18 out of range of integer", "a"]
+# ------------------------------- a splatted object whose `to_a` is Ruby, and `rescue` against a class's own `===` (#835)
+# CRuby's `splatarray`: `*x` spreads what `rb_check_to_array` makes of `x`, in a
+# call's arguments as in an array literal or a multiple assignment. A `to_a`
+# answering nil wraps the object, one answering anything else but an Array is
+# a TypeError, and the call is `rb_check_funcall`'s: private counts, a
+# `respond_to?` saying no is believed, a `method_missing` may answer.
+def s835(*a) = a; class S835A; def to_a = [1, 2]; end; o = S835A.new; [s835(*o), s835(0, *o, 9), [0, *o], (a, *b = *o; [a, b]), (c = *o; c)]  #=> [[1, 2], [0, 1, 2, 9], [0, 1, 2], [1, [2]], [1, 2]]
+def s835(*a) = a; class S835N; def to_a = nil; end; o = S835N.new; [s835(*o), [0, *o], (c = *o; c)].map { |r| r.map { |x| x.equal?(o) ? :self : x } }  #=> [[:self], [0, :self], [:self]]
+def s835(*a) = a; class S835I; def to_a = 5; end; o = S835I.new; [(s835(*o) rescue $!.message), ([*o] rescue $!.class), ((a, b = *o) rescue $!.class)]  #=> ["can't convert S835I to Array (S835I#to_a gives Integer)", TypeError, TypeError]
+def s835(*a) = a; class S835P; private def to_a = [:priv]; end; [s835(*S835P.new), [*S835P.new]]  #=> [[:priv], [:priv]]
+def s835(*a) = a; class S835M; def method_missing(n, *a) = n == :to_a ? [:mm] : super; end; [s835(*S835M.new), [*S835M.new]]  #=> [[:mm], [:mm]]
+def s835(*a) = a; class S835R; def to_a = [:rf]; def respond_to?(n, p = false) = n == :to_a ? false : super; end; o = S835R.new; s835(*o).map { |x| x.equal?(o) ? :self : x }  #=> [:self]
+def s835(*a) = a; class S835B < BasicObject; def to_a = [:basic]; end; s835(*S835B.new)  #=> [:basic]
+def s835(*a) = a; class S835E; def method_missing(n, *a) = raise(NoMethodError, "no"); end; s835(*S835E.new).size  #=> 1
+# `to_a` runs where the splat is written, before the arguments to its right.
+def s835(*a) = a; log = []; o = Object.new; o.define_singleton_method(:to_a) { log << :to_a; [1] }; s835(*o, (log << :right; 2)); log  #=> [:to_a, :right]
+class S835S; def f(*a) = a; end; class S835T < S835S; def f(o) = super(*o); end; o = Object.new; def o.to_a = [3, 4]; S835T.new.f(o)  #=> [3, 4]
+def s835y = yield(*$s835); $s835 = Object.new; def $s835.to_a = [5, 6]; s835y { |*a| a }  #=> [5, 6]
+h = Hash.new { |_, k| k }; o = Object.new; def o.to_a = [:k]; h[*o]  #=> :k
+def s835(*a) = a; class S835H < Hash; def to_a = [:hs]; end; [s835(*S835H.new), s835(*{a: 1}), s835(*1), s835(*nil), s835(*(1..3))]  #=> [[:hs], [[:a, 1]], [1], [], [1, 2, 3]]
+# `rescue X` is `X === exception`, so a class's own `===` decides.
+module R835; def self.===(e) = e.message == "mine"; end; [(begin; raise "mine"; rescue R835; :caught; end), (begin; begin; raise "other"; rescue R835; :caught; end; rescue; :passed; end)]  #=> [:caught, :passed]
+module R835T; def self.===(e) = 1; end; begin; raise "x"; rescue R835T; :truthy; end  #=> :truthy

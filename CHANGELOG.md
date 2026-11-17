@@ -16,7 +16,7 @@ bytecode a tool reads.
   what the helper boots is booted once. A worker that dies mid-file is
   reported with that file and replaced, and the run exits 1. RSpec files under
   `spec/` are found but not run until
-  [#835](https://github.com/ar4mirez/spinel/issues/835); finding any exits 1.
+  [#837](https://github.com/ar4mirez/spinel/issues/837); finding any exits 1.
 
 - **`spinel install` uses Spinel's built-in gems for the ones a lockfile
   pins** ([#83](https://github.com/ar4mirez/spinel/issues/83)). A lock
