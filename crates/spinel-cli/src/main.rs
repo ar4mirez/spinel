@@ -174,8 +174,8 @@ enum Command {
         /// A changed test or spec file runs itself; a changed
         /// `app/**/NAME.rb` or `lib/**/NAME.rb` runs `test/**/NAME_test.rb`
         /// and `spec/**/NAME_spec.rb`; any other change runs what failed
-        /// last. Enter runs every test, whatever paths were given. Paths `.gitignore` excludes do not
-        /// count, nor does `.spinel/`.
+        /// last. Enter runs every test, whatever paths were given. Paths
+        /// `.gitignore` excludes do not count, nor does `.spinel/`.
         #[arg(long)]
         watch: bool,
         /// Where `--watch` has each run record what failed.

@@ -12,9 +12,9 @@
 //! - Enter, a line on standard input, runs every test, as `spinel test`
 //!   with no paths finds them, whatever paths were given.
 //!
-//! What failed comes from the runner itself: each run is given a file to
-//! record of its own, once it has ended, the location that runs each failure, error and
-//! problem again (`shims/test_runner.rb`, step 9), the same `rerun` its
+//! What failed comes from the runner itself: each run is given a file of its
+//! own to record, once it has ended, the location that runs each failure,
+//! error and problem again (`shims/test_runner.rb`, step 9), the same `rerun` its
 //! report lists them by. The supervisor keeps the set across runs: a run
 //! replaces what is known about the files it ran and leaves the rest. A run
 //! stopped by a change before it ended has its tests run with the next one;
