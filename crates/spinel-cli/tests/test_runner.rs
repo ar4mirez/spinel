@@ -7,9 +7,12 @@
 //! `SPINEL_TEST_LOG` names, one line per helper load and per test file, with
 //! the pid that did it. Worker counts stay at 3 or under.
 //!
-//! RSpec cannot run a suite end to end on Spinel yet (#837), so spec files are
-//! found, reported as not run, and fail the run, while the Minitest files
-//! beside them still run.
+//! Spec files run after the Minitest files, on workers of their own forked
+//! after `rspec/core` and `spec/spec_helper.rb` (#837), each worker running
+//! its files' examples through `RSpec::Core::Runner.run`. rspec-core is not
+//! installed here, so the RSpec fixtures carry a stand-in for the calls the
+//! runner makes, in their `lib/rspec/core.rb`, which logs each run; the real
+//! gem's run is checked by hand against CRuby in #837's pull request.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -198,11 +201,17 @@ fn a_worker_failing_after_its_last_file_fails_the_run() {
     }
 }
 
-const NOT_RUN: &str =
-    "RSpec suites cannot run on Spinel yet (https://github.com/ar4mirez/spinel/issues/837)";
+/// The pids of the log lines that start with `kind`, by their third word.
+fn by_name<'a>(lines: &'a [Vec<String>], kind: &str) -> Vec<(&'a str, &'a str)> {
+    lines
+        .iter()
+        .filter(|l| l[0] == kind)
+        .map(|l| (l[2].as_str(), l[1].as_str()))
+        .collect()
+}
 
 #[test]
-fn spec_files_are_reported_not_run_and_fail_while_the_tests_beside_them_run() {
+fn spec_files_run_through_rspec_in_workers_after_the_tests() {
     let dir = scratch("rspec");
     let log = dir.join("log");
     let output = spinel_test(&fixture("rspec"), &["-j", "2"], &log, &[]);
@@ -210,35 +219,85 @@ fn spec_files_are_reported_not_run_and_fail_while_the_tests_beside_them_run() {
     std::fs::remove_dir_all(&dir).ok();
     let err = stderr(&output);
 
+    // `d_spec.rb`'s example fails, so its worker exits 1, and so does the run.
     assert_eq!(output.status.code(), Some(1), "stderr: {err}");
     assert!(
-        err.contains(&format!("2 RSpec files under spec/ not run: {NOT_RUN}")),
+        err.contains("d fails failed: a failing example fails the run"),
         "{err}"
     );
-    let loaded: Vec<&str> = lines.iter().map(|l| l[0].as_str()).collect();
-    assert!(
-        !loaded.contains(&"spec_helper") && !loaded.contains(&"spec"),
-        "no spec file or spec helper is loaded: {lines:?}"
+    let helpers: Vec<&Vec<String>> = lines.iter().filter(|l| l[0].ends_with("_helper")).collect();
+    let loaded: Vec<&str> = helpers.iter().map(|l| l[0].as_str()).collect();
+    assert_eq!(
+        loaded,
+        ["test_helper", "spec_helper"],
+        "each once: {lines:?}"
     );
-    let parent = &lines[0];
-    assert_eq!(parent[0], "test_helper", "{lines:?}");
-    let ran: BTreeSet<&str> = lines
-        .iter()
-        .filter(|l| l[0] == "file")
-        .map(|l| {
-            assert_ne!(l[1], parent[1], "in a worker: {lines:?}");
-            l[2].as_str()
+    let parent = helpers[0][1].as_str();
+    assert_eq!(helpers[1][1], parent, "both in the parent: {lines:?}");
+
+    let tests: BTreeSet<&str> = by_name(&lines, "file")
+        .into_iter()
+        .map(|(name, pid)| {
+            assert_ne!(pid, parent, "in a worker: {lines:?}");
+            name
         })
         .collect();
     assert_eq!(
-        ran,
+        tests,
         BTreeSet::from(["a_test.rb", "b_test.rb"]),
-        "the test files still ran: {lines:?}"
+        "{lines:?}"
     );
+
+    let specs = by_name(&lines, "spec");
+    let names: BTreeSet<&str> = specs.iter().map(|(name, _)| *name).collect();
+    assert_eq!(
+        names,
+        BTreeSet::from(["c_spec.rb", "d_spec.rb"]),
+        "{lines:?}"
+    );
+    assert_eq!(specs.len(), 2, "each once: {lines:?}");
+    for line in lines.iter().filter(|l| l[0] == "spec") {
+        assert_ne!(line[1], parent, "in a worker: {lines:?}");
+        // What the helper defined in the parent, as the worker saw it.
+        assert_eq!(
+            line[3], parent,
+            "the helper booted in the parent: {lines:?}"
+        );
+    }
+
+    // Each worker that loaded spec files ran their examples, and only theirs.
+    let runs: Vec<&Vec<String>> = lines.iter().filter(|l| l[0] == "run").collect();
+    let mut ran = BTreeSet::new();
+    for run in &runs {
+        let pid = run[1].as_str();
+        let mine: BTreeSet<&str> = specs
+            .iter()
+            .filter(|(_, p)| *p == pid)
+            .map(|(name, _)| *name)
+            .collect();
+        assert!(
+            !mine.is_empty(),
+            "a run in a worker that loaded specs: {lines:?}"
+        );
+        let examples: BTreeSet<&str> = run[2].split(',').collect();
+        let expected: BTreeSet<&str> = mine
+            .iter()
+            .map(|name| {
+                if *name == "c_spec.rb" {
+                    "c_passes"
+                } else {
+                    "d_fails"
+                }
+            })
+            .collect();
+        assert_eq!(examples, expected, "{lines:?}");
+        ran.extend(examples);
+    }
+    assert_eq!(ran, BTreeSet::from(["c_passes", "d_fails"]), "{lines:?}");
 }
 
 #[test]
-fn a_spec_only_project_is_reported_not_run_and_fails() {
+fn a_passing_spec_only_project_passes() {
     let dir = scratch("rspec-only");
     let log = dir.join("log");
     let output = spinel_test(&fixture("rspec_only"), &["-j", "1"], &log, &[]);
@@ -246,9 +305,42 @@ fn a_spec_only_project_is_reported_not_run_and_fails() {
     std::fs::remove_dir_all(&dir).ok();
     let err = stderr(&output);
 
+    assert!(output.status.success(), "stderr: {err}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "2 examples, 0 failures\n",
+        "one worker, one run of both files' examples"
+    );
+    let parent = &lines[0];
+    assert_eq!(parent[0], "spec_helper", "{lines:?}");
+    let runs: Vec<&Vec<String>> = lines.iter().filter(|l| l[0] == "run").collect();
+    assert_eq!(runs.len(), 1, "{lines:?}");
+    assert_ne!(runs[0][1], parent[1], "in a worker: {lines:?}");
+    assert_eq!(runs[0][2], "a_passes,b_passes", "in file order: {lines:?}");
+    assert_eq!(runs[0][3], "0", "{lines:?}");
+}
+
+#[test]
+fn spec_files_without_rspec_installed_fail_the_run_unloaded() {
+    let dir = scratch("rspec-missing");
+    let log = dir.join("log");
+    // An empty gem home, so no rspec-core installed elsewhere is found.
+    let gems = dir.join("gems");
+    std::fs::create_dir_all(&gems).expect("a gem home");
+    let gems = gems.to_str().expect("a UTF-8 path");
+    let output = spinel_test(
+        &fixture("rspec_missing"),
+        &["-j", "1"],
+        &log,
+        &[("GEM_HOME", gems), ("GEM_PATH", gems)],
+    );
+    let lines = lines(&log);
+    std::fs::remove_dir_all(&dir).ok();
+    let err = stderr(&output);
+
     assert_eq!(output.status.code(), Some(1), "stderr: {err}");
     assert!(
-        err.contains(&format!("1 RSpec file under spec/ not run: {NOT_RUN}")),
+        err.contains("1 RSpec file under spec/ not run: cannot load such file -- rspec/core"),
         "{err}"
     );
     assert!(lines.is_empty(), "nothing is loaded: {lines:?}");

@@ -109,7 +109,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `library/rbconfig` | 5 | 30 | 20 | 0 | 10 | 0 | 67% |
 | `library/readline` | 25 | 46 | 0 | 0 | 45 | 1 | 0% |
 | `library/resolv` | 4 | 6 | 6 | 0 | 0 | 0 | 100% |
-| `library/ripper` | 2 | 2 | 0 | 0 | 2 | 0 | 0% |
+| `library/ripper` | 2 | 2 | 2 | 0 | 0 | 0 | 100% |
 | `library/rubygems` | 2 | 2 | 2 | 0 | 0 | 0 | 100% |
 | `library/securerandom` | 5 | 42 | 28 | 0 | 14 | 0 | 67% |
 | `library/shellwords` | 1 | 7 | 7 | 0 | 0 | 0 | 100% |
@@ -131,4 +131,4 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `optional/capi` | 47 | 0 | 0 | 0 | 0 | 0 | — |
 | `optional/thread_safety` | 1 | 5 | 4 | 0 | 0 | 1 | 80% |
 | `security` | 13 | 34 | 32 | 0 | 2 | 0 | 94% |
-| **total** | 3841 | 32935 | 30386 | 0 | 2433 | 116 | 92% |
+| **total** | 3841 | 32935 | 30388 | 0 | 2431 | 116 | 92% |

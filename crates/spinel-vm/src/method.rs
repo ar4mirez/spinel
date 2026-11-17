@@ -65,6 +65,11 @@ pub enum Native {
     Send {
         public_only: bool,
     },
+    /// `Kernel#__public_send_to__(receiver, name, *args)`: `public_send` to
+    /// `receiver` without sending `public_send` itself, which a
+    /// `BasicObject` does not have — `Symbol#to_proc`'s call, as CRuby's
+    /// `rb_sym_proc_call` makes it. Pushes a frame when the target is Ruby.
+    SendTo,
     /// `Kernel#proc`, `Kernel#lambda`, `Proc.new`. Returns the block it was
     /// passed; `lambda` also marks it one.
     MakeProc {
@@ -713,6 +718,20 @@ pub enum Native {
     /// true; or false, with `buffer` untouched, at the first value it does
     /// not take, for the Ruby generator to write instead.
     JsonGenerate,
+    /// `Kernel#__prism_dump__(kind, source, options)`: Prism's serialization
+    /// of `source` (#837), a BINARY String for the prism gem's
+    /// `Prism::Serialize` to read — `kind` 0 a parse, 1 a lex, 2 both, 3 the
+    /// comments — under `options`, packed as the gem packs them.
+    PrismDump,
+    /// `Kernel#__prism_success__(source, options)`: whether Prism parses it
+    /// without errors.
+    PrismSuccess,
+    /// `Kernel#__prism_query__(kind, string, encoding_name)`: Prism's string
+    /// query, `kind` 0 a local, 1 a constant, 2 a method name; 1 yes, 0 no,
+    /// -1 an encoding Prism does not know.
+    PrismQuery,
+    /// `Kernel#__prism_version__`: the Prism release Spinel parses with.
+    PrismVersion,
     /// `Kernel#__zlib_init__(level, method, wbits, memlevel, strategy)` for a
     /// deflate stream, `__zlib_init__(wbits)` for an inflate one (#59): the
     /// new stream's state as a BINARY String, or zlib's error as an Integer.

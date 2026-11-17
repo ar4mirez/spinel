@@ -1821,6 +1821,7 @@ name = "spinel-parse"
 version = "0.0.1"
 dependencies = [
  "ruby-prism",
+ "ruby-prism-sys",
  "spinel-ast",
  "spinel-regex",
 ]

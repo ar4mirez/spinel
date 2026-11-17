@@ -223,6 +223,8 @@ const LIBRARIES: &[(&str, &str)] = &[
         include_str!("../../../lib/objspace/trace.rb"),
     ),
     ("zlib", include_str!("../../../lib/zlib.rb")),
+    ("prism/prism", include_str!("../../../lib/prism/prism.rb")),
+    ("ripper", include_str!("../../../lib/ripper.rb")),
 ];
 
 fn library(name: &str) -> Option<&'static str> {
@@ -232,12 +234,41 @@ fn library(name: &str) -> Option<&'static str> {
         .map(|(_, source)| *source)
 }
 
+/// Prism's serialization API for the prism gem's Ruby half (#837), from
+/// `spinel-parse`, the one crate that sees Prism.
+const PRISM: spinel_vm::PrismApi = spinel_vm::PrismApi {
+    dump: |kind, source, options| {
+        use spinel_parse::serialize::{Dump, dump};
+        let kind = match kind {
+            0 => Dump::Parse,
+            1 => Dump::Lex,
+            2 => Dump::ParseLex,
+            3 => Dump::Comments,
+            _ => return None,
+        };
+        Some(dump(kind, source, options))
+    },
+    success: spinel_parse::serialize::success,
+    query: |kind, string, encoding| {
+        use spinel_parse::serialize::{Query, query};
+        let kind = match kind {
+            0 => Query::Local,
+            1 => Query::Constant,
+            2 => Query::MethodName,
+            _ => return None,
+        };
+        Some(query(kind, string, encoding))
+    },
+    version: spinel_parse::serialize::version,
+};
+
 /// Define the core library's methods in this heap.
 ///
 /// Call once, after [`HandleScope::bootstrap`] has created the classes this
 /// fills in. Panics if `core/*.rb` raises, for the same reason the compile does.
 pub fn boot(scope: &mut HandleScope<'_>) {
     scope.set_parser(parse_eval);
+    scope.set_prism(PRISM);
     scope.set_libraries(library);
     for (index, iseq) in image().iter().enumerate() {
         let mut frame = interp::Frame::new(0);

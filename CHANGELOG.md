@@ -9,14 +9,27 @@ bytecode a tool reads.
 
 ### Added
 
+- **`require "prism"` and `require "ripper"` work, so RSpec reports
+  failures** ([#837](https://github.com/ar4mirez/spinel/issues/837)). The
+  prism gem's Ruby half is vendored at the release Spinel's parser links
+  (1.9.0, in place of the 1.8.1 copy in Ruby's `lib/`) and reads trees
+  serialized by that same library, so `Prism.parse`, `Prism.lex` and the
+  rest of the extension's API answer what CRuby's do with prism 1.9.0.
+  `ripper` is Prism's Ripper translation, reading its source as CRuby's
+  Ripper does, so an unmodified RSpec suite with a failing example prints
+  CRuby's report and exits 1. Where Prism's translation is not yet parse.y's
+  (a few lexer states, two tree shapes) Spinel answers as Prism does.
+
 - **`spinel test` runs the Minitest suite on forked workers**
   ([#92](https://github.com/ar4mirez/spinel/issues/92)). It finds
   `test/**/*_test.rb`, requires `test/test_helper.rb` once, then forks `-j N`
   workers (the physical cores by default) that take one file at a time, so
   what the helper boots is booted once. A worker that dies mid-file is
   reported with that file and replaced, and the run exits 1. RSpec files under
-  `spec/` are found but not run until
-  [#837](https://github.com/ar4mirez/spinel/issues/837); finding any exits 1.
+  `spec/` run after them since
+  [#837](https://github.com/ar4mirez/spinel/issues/837): `rspec/core` and
+  `spec/spec_helper.rb` are required once, and each worker runs its files'
+  examples through RSpec's own runner.
 
 - **`spinel install` uses Spinel's built-in gems for the ones a lockfile
   pins** ([#83](https://github.com/ar4mirez/spinel/issues/83)). A lock

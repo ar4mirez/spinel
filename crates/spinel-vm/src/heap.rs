@@ -272,6 +272,27 @@ pub struct Stats {
 pub type Parser =
     fn(&str, &[u8], i64, bool, Option<&str>, &[u8]) -> Result<ParsedSource, ParseFailure>;
 
+/// Serialize a source under packed options: kind 0 a parse, 1 a lex, 2
+/// both, 3 the comments; `None` for another kind. See [`PrismApi`].
+pub type PrismDump = fn(i64, &[u8], &[u8]) -> Option<Vec<u8>>;
+
+/// Prism's serialization API (#837), which the prism gem's Ruby half reads
+/// its trees from (`lib/prism/prism.rb`). Installed by `spinel-core` from
+/// `spinel-parse`, as the [`Parser`] is, so Prism stays in one crate.
+#[derive(Debug, Clone, Copy)]
+pub struct PrismApi {
+    /// Serialize a source; see [`PrismDump`].
+    pub dump: PrismDump,
+    /// Whether the source parses without errors under packed options.
+    pub success: fn(&[u8], &[u8]) -> bool,
+    /// Query a string in the named encoding: kind 0 a local, 1 a constant,
+    /// 2 a method name. 1 yes, 0 no, -1 an encoding Prism does not know;
+    /// `None` for another kind.
+    pub query: fn(i64, &[u8], &std::ffi::CStr) -> Option<i32>,
+    /// The Prism release.
+    pub version: fn() -> &'static str,
+}
+
 /// The libraries shipped inside the binary, by the name `require` is given:
 /// the Ruby source, or `None` for a name that is not one of them.
 pub type Libraries = fn(&str) -> Option<&'static str>;
@@ -392,6 +413,7 @@ pub struct Heap {
     /// `spinel_core::boot`. This crate does not depend on Prism, so without
     /// one `eval` of a String is refused.
     parser: Option<Parser>,
+    prism: Option<PrismApi>,
     /// Where `require` keeps compiled files (#40): the project's
     /// `.spinel/bytecode/`, which `shims/setup.rb` registers. `None` outside
     /// a project, and then nothing is read or written.
@@ -731,6 +753,7 @@ impl Heap {
             errinfo: Value::NIL,
             main: Value::NIL,
             parser: None,
+            prism: None,
             bytecode_cache: None,
             require_map: None,
             libraries: None,
@@ -1825,6 +1848,15 @@ impl<'h> HandleScope<'h> {
 
     pub(crate) fn parser(&self) -> Option<Parser> {
         self.heap.parser
+    }
+
+    /// Install Prism's serialization API for `require "prism"`.
+    pub fn set_prism(&mut self, prism: PrismApi) {
+        self.heap.prism = Some(prism);
+    }
+
+    pub(crate) fn prism(&self) -> Option<PrismApi> {
+        self.heap.prism
     }
 
     /// Read and write compiled files in `dir` from now on (#40). `None`
