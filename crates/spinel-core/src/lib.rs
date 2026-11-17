@@ -351,6 +351,13 @@ pub fn cleanup(scope: &mut HandleScope<'_>) {
     let _ = interp::eval_in(scope, &mut frame, &iseq);
 }
 
+/// A file as `require` and `load` parse it, through the same hook: what
+/// `spinel build --compile` (#100) compiles to warm a compiled app's
+/// bytecode cache, so each entry is what a `require` of the file would write.
+pub fn parse_required(path: &str, source: &[u8]) -> Result<ParsedSource, ParseFailure> {
+    parse_eval(path, source, 1, false, None, &[])
+}
+
 /// What string `eval` parses with (#38): the VM has no parser of its own.
 fn parse_eval(
     path: &str,

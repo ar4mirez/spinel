@@ -425,8 +425,9 @@ pub(crate) fn ended(status: ExitStatus) -> String {
 /// path is ignored when it, or a directory on the way to it, is matched by the
 /// nearest rule — `.gitignore` files from deepest to the project's own, then
 /// `.git/info/exclude`, then the user's global excludes file. `.git/` itself
-/// is always ignored, as git never tracks it.
-struct Ignored {
+/// is always ignored, as git never tracks it. `spinel build` (#100) collects
+/// the project's files by it too.
+pub(crate) struct Ignored {
     root: PathBuf,
     /// One matcher per directory that has been asked about, for its own
     /// `.gitignore`; dropped when that file changes.
@@ -436,7 +437,7 @@ struct Ignored {
 }
 
 impl Ignored {
-    fn new(root: PathBuf) -> Ignored {
+    pub(crate) fn new(root: PathBuf) -> Ignored {
         let mut exclude = GitignoreBuilder::new(&root);
         exclude.add(root.join(".git/info/exclude"));
         let exclude = exclude.build().unwrap_or_else(|_| Gitignore::empty());
@@ -462,7 +463,7 @@ impl Ignored {
         })
     }
 
-    fn is_ignored(&mut self, path: &Path, is_dir: bool) -> bool {
+    pub(crate) fn is_ignored(&mut self, path: &Path, is_dir: bool) -> bool {
         // Anything outside the project is not the project's change.
         let Ok(relative) = path.strip_prefix(&self.root) else {
             return true;

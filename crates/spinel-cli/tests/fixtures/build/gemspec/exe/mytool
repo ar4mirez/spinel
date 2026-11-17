@@ -1,0 +1,3 @@
+#!/usr/bin/env spinel
+require "mytool"
+puts Mytool::NAME

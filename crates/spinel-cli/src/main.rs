@@ -6,6 +6,7 @@
 //! `docs/cli.md` for the full surface.
 
 mod add;
+mod build;
 mod builtin_gem;
 mod compact_index;
 mod credentials;
@@ -70,7 +71,8 @@ This build runs Ruby. The core library is minimal — Kernel, Object, Integer,
 String, Symbol, Array, Hash, Comparable — and a program that reaches past it
 says which method is missing rather than failing quietly.
 
-Planned surface (docs/cli.md): build.
+Planned surface (docs/build.md): running the apps `spinel build` writes, and
+`--target`.
 Progress: https://github.com/ar4mirez/spinel/milestones";
 
 #[derive(Parser, Debug)]
@@ -451,13 +453,51 @@ enum Command {
         dirs: Vec<PathBuf>,
     },
 
+    /// Build a single executable: this `spinel` with a project packed in.
+    ///
+    /// The payload (docs/build.md) holds the project's files as `.gitignore`
+    /// keeps them, the gems of the lockfile's `default` group and of each
+    /// `--group`, a warmed bytecode cache, and a manifest naming the entry
+    /// point. Arguments after `--` are the ones the app's `ARGV` starts with.
+    Build {
+        /// The program the app runs, a file in the project.
+        #[arg(long, value_name = "ENTRY")]
+        compile: PathBuf,
+
+        /// Where to write the app.
+        #[arg(short, long, value_name = "FILE")]
+        output: PathBuf,
+
+        /// Take files `.gitignore` leaves out: a pattern as `.gitignore`
+        /// writes one, relative to the project. Repeatable.
+        #[arg(long, value_name = "PATTERN")]
+        include: Vec<String>,
+
+        /// Leave files out, whatever `.gitignore` and `--include` say: a
+        /// pattern as `.gitignore` writes one. Repeatable.
+        #[arg(long, value_name = "PATTERN")]
+        exclude: Vec<String>,
+
+        /// A Gemfile group whose gems go in besides `default`'s. Repeatable.
+        #[arg(long, value_name = "GROUP")]
+        group: Vec<String>,
+
+        /// A variable set in the app's environment. Repeatable.
+        #[arg(long, value_name = "KEY=VALUE")]
+        env: Vec<String>,
+
+        /// The arguments the app's `ARGV` starts with.
+        #[arg(last = true, value_name = "ARGS")]
+        argv: Vec<String>,
+    },
+
     /// Write a compiled app: a `spinel` with a payload and its trailer.
     ///
-    /// The debugging window onto the writer `spinel build --compile` (#100)
-    /// will pack its archive with (docs/build.md, "Format"): on Linux the
-    /// payload and trailer are appended, and on macOS they go in the
-    /// `__SPINEL,__payload` section and the result is signed again ad hoc
-    /// with `codesign`. Hidden: `spinel build` is the command that makes apps.
+    /// The debugging window onto the writer `spinel build --compile` packs
+    /// its payload with (docs/build.md, "Format"): on Linux the payload and
+    /// trailer are appended, and on macOS they go in the `__SPINEL,__payload`
+    /// section and the result is signed again ad hoc with `codesign`. Hidden:
+    /// `spinel build` is the command that makes apps.
     #[command(hide = true)]
     Pack {
         /// The payload, any bytes, written as they are.
@@ -645,6 +685,25 @@ fn main() -> ExitCode {
         }
         Some(Command::Lockfile { path }) => return lockfile_command(&path),
         Some(Command::Pack { payload, output }) => return pack_command(&payload, &output),
+        Some(Command::Build {
+            compile,
+            output,
+            include,
+            exclude,
+            group,
+            env,
+            argv,
+        }) => {
+            return build::run(&build::Request {
+                entry: &compile,
+                output: &output,
+                include: &include,
+                exclude: &exclude,
+                groups: &group,
+                env: &env,
+                argv: &argv,
+            });
+        }
         Some(Command::RequireMap { out, dirs }) => {
             let mut roots = dirs;
             roots.extend(stdlib::directory());
@@ -692,7 +751,7 @@ fn main() -> ExitCode {
         }
         eprintln!("spinel: unknown subcommand `{argument}`.");
         eprintln!(
-            "        This build has: run, init, install, add, remove, update, x, test, parse. Try `spinel --help`."
+            "        This build has: run, init, install, add, remove, update, x, test, build, parse. Try `spinel --help`."
         );
         return ExitCode::from(EXIT_USAGE);
     }
@@ -742,14 +801,14 @@ fn pack_command(payload: &Path, output: &Path) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let bytes = match std::fs::read(payload) {
-        Ok(bytes) => bytes,
+    let mut payload = match trailer::Payload::from_file(payload) {
+        Ok(payload) => payload,
         Err(err) => {
             eprintln!("spinel: pack: {}: {err}", payload.display());
             return ExitCode::FAILURE;
         }
     };
-    match trailer::write(&binary, &bytes, output) {
+    match trailer::write(&binary, &mut payload, output) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("spinel: pack: {}: {err}", output.display());
@@ -762,7 +821,7 @@ fn pack_command(payload: &Path, output: &Path) -> ExitCode {
 /// Named `.rb`, or on disk under any name — `spinel Rakefile` should be read as
 /// a file, and `spinel pasre` should not.
 fn looks_like_a_subcommand_typo(argument: &str) -> bool {
-    ["run", "init", "install", "parse", "help"]
+    ["run", "init", "install", "build", "parse", "help"]
         .iter()
         .any(|name| edit_distance(argument, name) <= 2)
 }

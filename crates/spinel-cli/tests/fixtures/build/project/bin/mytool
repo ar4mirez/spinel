@@ -1,0 +1,5 @@
+#!/usr/bin/env spinel
+require_relative "../lib/greet"
+require "alpha"
+
+puts Greet.line(Alpha.word)
