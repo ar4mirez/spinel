@@ -1,0 +1,3 @@
+require "minitest"
+
+Minitest.autorun

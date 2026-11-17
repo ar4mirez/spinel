@@ -14,10 +14,21 @@
 //! installed here, so the RSpec fixtures carry a stand-in for the calls the
 //! runner makes, in their `lib/rspec/core.rb`, which logs each run; the real
 //! gem's run is checked by hand against CRuby in #837's pull request.
+//!
+//! Each worker writes one JSON line per event (#93): `done` for each file,
+//! and, from the Minitest reporter and the RSpec formatter
+//! `shims/test_worker.rb` registers, one per test or example. The parent
+//! appends each line it reads to the file `SPINEL_TEST_EVENTS` names, which
+//! is what these tests read. minitest is not installed here either, so the
+//! fixtures that run tests carry a stand-in for the part of its API a run
+//! goes through, in `stand_ins/minitest.rb`; the real gems' events are
+//! checked by hand against CRuby in #93's pull request.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+
+use serde_json::{Value, json};
 
 const SPINEL: &str = env!("CARGO_BIN_EXE_spinel");
 
@@ -384,4 +395,235 @@ fn dash_j_must_be_at_least_one() {
     let output = spinel_test(&dir, &["-j", "0"], &dir.join("log"), &[]);
     std::fs::remove_dir_all(&dir).ok();
     assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+}
+
+/// `spinel test` with `args` on the fixture `name`, and every event line the
+/// parent read, each parsed: a line that is not one JSON object fails here.
+fn events_of(name: &str, args: &[&str]) -> (Output, Vec<Value>) {
+    let dir = scratch(&format!("events-{name}"));
+    let events = dir.join("events");
+    let events_path = events.to_str().expect("a UTF-8 path");
+    let output = spinel_test(
+        &fixture(name),
+        args,
+        &dir.join("log"),
+        &[("SPINEL_TEST_EVENTS", events_path)],
+    );
+    let raw = std::fs::read(&events).unwrap_or_default();
+    std::fs::remove_dir_all(&dir).ok();
+    let text = String::from_utf8(raw).expect("events are UTF-8");
+    assert!(
+        text.is_empty() || text.ends_with('\n'),
+        "every event ends its line"
+    );
+    let parsed = text
+        .lines()
+        .map(|line| {
+            let event: Value = serde_json::from_str(line)
+                .unwrap_or_else(|err| panic!("not one JSON event ({err}): {line:.200}"));
+            assert!(event.is_object(), "{line:.200}");
+            event
+        })
+        .collect();
+    (output, parsed)
+}
+
+/// A result event without its time, which varies, after checking it is a
+/// time and the event has exactly the documented fields.
+fn without_ms(event: &Value) -> Value {
+    let keys: BTreeSet<&str> = event
+        .as_object()
+        .expect("an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        keys,
+        BTreeSet::from([
+            "backtrace",
+            "event",
+            "file",
+            "line",
+            "message",
+            "ms",
+            "name"
+        ]),
+        "{event}"
+    );
+    let mut event = event.clone();
+    let ms = event
+        .as_object_mut()
+        .and_then(|fields| fields.remove("ms"))
+        .expect("ms");
+    assert!(ms.as_f64().is_some_and(|ms| ms >= 0.0), "ms: {ms}");
+    event
+}
+
+fn is_result(event: &Value) -> bool {
+    matches!(
+        event["event"].as_str(),
+        Some("pass" | "fail" | "error" | "skip")
+    )
+}
+
+#[test]
+fn minitest_and_rspec_each_report_every_test_as_one_event_line() {
+    let (output, events) = events_of("events", &["-j", "2"]);
+    let err = stderr(&output);
+    assert_eq!(output.status.code(), Some(1), "a test failed: {err}");
+
+    let done: Vec<&Value> = events.iter().filter(|e| e["event"] == "done").collect();
+    assert_eq!(
+        done,
+        [
+            &json!({"event": "done", "file": "test/results_test.rb", "error": null}),
+            &json!({"event": "done", "file": "spec/results_spec.rb", "error": null}),
+        ],
+        "{err}"
+    );
+    let results: Vec<&Value> = events.iter().filter(|e| is_result(e)).collect();
+    assert_eq!(results.len() + done.len(), events.len(), "{events:?}");
+
+    // Minitest's, in the order it ran them: each by its first failure, as
+    // its summary counts it.
+    let mut by_name: BTreeMap<String, Value> = results
+        .iter()
+        .map(|e| {
+            (
+                e["name"].as_str().expect("a name").to_owned(),
+                without_ms(e),
+            )
+        })
+        .collect();
+    let mut take = |name: &str| {
+        by_name
+            .remove(name)
+            .unwrap_or_else(|| panic!("{name}: {events:?}"))
+    };
+    let file = "test/results_test.rb";
+    assert_eq!(
+        take("ResultsTest#test_passes"),
+        json!({"event": "pass", "file": file, "line": 4, "name": "ResultsTest#test_passes",
+               "message": null, "backtrace": []})
+    );
+    let fails = take("ResultsTest#test_fails");
+    assert_eq!(fails["event"], "fail", "{fails}");
+    assert_eq!(fails["line"], 8, "{fails}");
+    assert_eq!(fails["message"], "Expected: 3\n  Actual: 2", "{fails}");
+    // Minitest's own frames filtered out, the test's first, relative.
+    assert_eq!(
+        fails["backtrace"][0], "test/results_test.rb:9:in 'ResultsTest#test_fails'",
+        "{fails}"
+    );
+    let errors = take("ResultsTest#test_errors");
+    assert_eq!(errors["event"], "error", "{errors}");
+    assert_eq!(errors["line"], 12, "{errors}");
+    assert_eq!(errors["message"], "ArgumentError: broken", "{errors}");
+    assert_eq!(
+        errors["backtrace"][0], "test/results_test.rb:13:in 'ResultsTest#test_errors'",
+        "{errors}"
+    );
+    assert_eq!(
+        take("ResultsTest#test_skips"),
+        json!({"event": "skip", "file": file, "line": 16, "name": "ResultsTest#test_skips",
+               "message": "not yet", "backtrace": []})
+    );
+
+    // RSpec's: an exception in an example is a failure, as `rspec` counts
+    // it, and a pending or skipped example a skip.
+    let file = "spec/results_spec.rb";
+    let frame = |line: u32| format!("{file}:{line}:in 'block (2 levels) in <top (required)>'");
+    assert_eq!(
+        take("results passes"),
+        json!({"event": "pass", "file": file, "line": 4, "name": "results passes",
+               "message": null, "backtrace": []})
+    );
+    assert_eq!(
+        take("results fails"),
+        json!({"event": "fail", "file": file, "line": 5, "name": "results fails",
+               "message": "\nexpected: 3\n     got: 2\n", "backtrace": [frame(5)]})
+    );
+    assert_eq!(
+        take("results raises"),
+        json!({"event": "fail", "file": file, "line": 6, "name": "results raises",
+               "message": "ArgumentError: broken", "backtrace": [frame(6)]})
+    );
+    assert_eq!(
+        take("results is pending"),
+        json!({"event": "skip", "file": file, "line": 7, "name": "results is pending",
+               "message": "not yet", "backtrace": []})
+    );
+    assert_eq!(
+        take("results is skipped"),
+        json!({"event": "skip", "file": file, "line": 11, "name": "results is skipped",
+               "message": "Temporarily skipped with xit", "backtrace": []})
+    );
+    assert_eq!(
+        take("results passes while pending"),
+        json!({"event": "fail", "file": file, "line": 12, "name": "results passes while pending",
+               "message": "Expected pending 'not yet' to fail. No error was raised.",
+               "backtrace": []})
+    );
+    assert!(by_name.is_empty(), "no other results: {by_name:?}");
+
+    // RSpec's own report still prints, the formatter beside it.
+    let out = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        out.contains("4 runs, 1 failures, 1 errors, 1 skips"),
+        "{out}"
+    );
+    assert!(out.contains("6 examples, 3 failures"), "{out}");
+}
+
+#[test]
+fn many_events_from_several_workers_each_arrive_as_a_whole_line() {
+    // Six Minitest files and three spec files of a hundred tests each, on
+    // three workers at once; every tenth is skipped with a message longer
+    // than a pipe holds and than the parent reads at once, which JSON
+    // escapes and whose characters are several bytes each.
+    let (output, events) = events_of("many", &["-j", "3"]);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(stderr(&output), "", "no line the parent could not read");
+
+    let long = "é\"\\\n\t".repeat(20_000);
+    let mut names = BTreeSet::new();
+    let mut per_file: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+    for event in events.iter().filter(|e| is_result(e)) {
+        let event = without_ms(event);
+        let name = event["name"].as_str().expect("a name").to_owned();
+        assert!(names.insert(name.clone()), "{name} reported once");
+        let file = event["file"].as_str().expect("a file").to_owned();
+        let counts = per_file.entry(file).or_default();
+        match event["event"].as_str() {
+            Some("pass") => counts.0 += 1,
+            Some("skip") => {
+                assert!(
+                    event["message"] == long.as_str(),
+                    "{name}: the long message whole"
+                );
+                counts.1 += 1;
+            }
+            _ => panic!("{event:.200}"),
+        }
+    }
+    let files: Vec<&str> = per_file.keys().map(String::as_str).collect();
+    assert_eq!(
+        files,
+        [
+            "spec/a_spec.rb",
+            "spec/b_spec.rb",
+            "spec/c_spec.rb",
+            "test/a_test.rb",
+            "test/b_test.rb",
+            "test/c_test.rb",
+            "test/d_test.rb",
+            "test/e_test.rb",
+            "test/f_test.rb",
+        ]
+    );
+    for (file, counts) in &per_file {
+        assert_eq!(*counts, (90, 10), "{file}");
+    }
+    let done = events.iter().filter(|e| e["event"] == "done").count();
+    assert_eq!(done, 9, "a `done` per file");
 }

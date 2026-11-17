@@ -27,11 +27,14 @@
 #    registered (`minitest/autorun`) runs its tests; an RSpec worker runs the
 #    examples its files defined through RSpec's own runner, as `rspec` does
 #    (`RSpec::Core::Runner.invoke`), and exits with its status.
-# 4. Results: a worker writes one JSON line per event, for now only
-#    `{"event":"done","file":..,"error":..}` once a file is loaded, `error`
-#    the exception that loading raised or `nil`. #93's reporter shim replaces
-#    this with one line per test (`pass|fail|error|skip`) on the same pipe,
-#    and #94's aggregator replaces the reporting below.
+# 4. Results: a worker writes one JSON line per event, through
+#    `shims/test_worker.rb`, loaded before this file: `done` once a file is
+#    loaded, with the exception loading raised or `nil`, and, from the
+#    Minitest reporter and the RSpec formatter that shim registers, one
+#    `pass|fail|error|skip` line per test or example. Here they are counted
+#    for #94's aggregator, which replaces the reporting below; the verdict
+#    stays the workers' own, below, and a line that is not an event is
+#    skipped.
 # 5. A worker that ends before it says `done` for the file it was given —
 #    killed by a signal, or exiting, with any status — is reported with that
 #    file, and a new worker is forked for the files still waiting, so one
@@ -51,6 +54,9 @@ require "json"
 module Spinel
   module TestRunner
     Worker = Struct.new(:number, :pid, :tasks, :events, :buffer, :file, :ran)
+
+    # The events a test or an example ends with.
+    RESULTS = %w[pass fail error skip].freeze
 
     # How the end of a process reads: a signal by its name, as `Process::Status`
     # names it, else the exit status.
@@ -124,6 +130,8 @@ module Spinel
       queue = files.dup
       workers = {}
       failed = false
+      # How many tests or examples ended each way, from every worker.
+      counts = Hash.new(0)
       count = 0
       add_worker = lambda do
         count += 1
@@ -148,7 +156,7 @@ module Spinel
             worker.buffer << chunk
             while (newline = worker.buffer.index("\n"))
               line = worker.buffer.slice!(0..newline)
-              failed = true unless event(worker, JSON.parse(line), queue)
+              failed = true unless line_from(worker, line, queue, counts)
             end
             next
           end
@@ -196,10 +204,11 @@ module Spinel
     end
 
     # The worker: each path read is a file to require, then a `done` event.
-    # An event is one `write` on a `sync` pipe, so a line never straddles two
-    # flushes. An RSpec worker then runs what its files defined.
+    # A Minitest worker then has its reporter added to the run the `at_exit`
+    # its helper registered makes; an RSpec worker runs what its files
+    # defined, its formatter listening.
     def self.work(tasks, events, framework)
-      events.sync = true
+      TestWorker.start(events)
       while (line = tasks.gets)
         file = line.chomp
         error = nil
@@ -208,9 +217,12 @@ module Spinel
         rescue StandardError, ScriptError => e
           error = "#{e.class}: #{e.message}"
         end
-        events.write(JSON.generate({ "event" => "done", "file" => file, "error" => error }) + "\n")
+        TestWorker.emit({ "event" => "done", "file" => file, "error" => error })
       end
-      run_examples if framework == :rspec
+      case framework
+      when :minitest then TestWorker.minitest
+      when :rspec then run_examples
+      end
     end
 
     # `rspec`'s own end, `RSpec::Core::Runner.invoke`, over the example
@@ -219,14 +231,36 @@ module Spinel
     # counts the ones already loaded), and it reads `.rspec` and `SPEC_OPTS`
     # as it always does.
     def self.run_examples
+      TestWorker.rspec
       RSpec::Core::Runner.disable_autorun!
       status = RSpec::Core::Runner.run([], $stderr, $stdout).to_i
       exit(status) if status != 0
     end
 
-    # One event from `worker`; false when it says the suite failed.
-    def self.event(worker, event, queue)
-      return true unless event["event"] == "done"
+    # One line from `worker`; false when it says the suite failed. A line
+    # that is not an event is skipped. Each is also appended, as it came, to
+    # the file `SPINEL_TEST_EVENTS` names, when it names one.
+    # ponytail: the raw stream for tools until `--reporter json` (#95).
+    def self.line_from(worker, line, queue, counts)
+      if (path = ENV["SPINEL_TEST_EVENTS"]) && !path.empty?
+        File.open(path, "a") { |file| file.write(line) }
+      end
+      parsed = begin
+        JSON.parse(line)
+      rescue JSON::ParserError
+        nil
+      end
+      return true unless parsed.is_a?(Hash)
+
+      event(worker, parsed, queue, counts)
+    end
+
+    # One event from `worker`, a result counted in `counts`; false when a
+    # file it was given failed to load.
+    def self.event(worker, event, queue, counts)
+      kind = event["event"]
+      counts[kind] += 1 if RESULTS.include?(kind)
+      return true unless kind == "done"
 
       worker.ran << worker.file
       worker.file = nil
