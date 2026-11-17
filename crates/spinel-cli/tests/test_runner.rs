@@ -7,7 +7,7 @@
 //! `SPINEL_TEST_LOG` names, one line per helper load and per test file, with
 //! the pid that did it. Worker counts stay at 3 or under.
 //!
-//! RSpec cannot run its examples on Spinel yet (#835), so spec files are
+//! RSpec cannot run a suite end to end on Spinel yet (#837), so spec files are
 //! found, reported as not run, and fail the run, while the Minitest files
 //! beside them still run.
 
@@ -199,7 +199,7 @@ fn a_worker_failing_after_its_last_file_fails_the_run() {
 }
 
 const NOT_RUN: &str =
-    "RSpec suites cannot run on Spinel yet (https://github.com/ar4mirez/spinel/issues/835)";
+    "RSpec suites cannot run on Spinel yet (https://github.com/ar4mirez/spinel/issues/837)";
 
 #[test]
 fn spec_files_are_reported_not_run_and_fail_while_the_tests_beside_them_run() {

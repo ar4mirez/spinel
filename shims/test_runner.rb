@@ -6,10 +6,11 @@
 # 1. Discovery: `test/**/*_test.rb` (Minitest) and `spec/**/*_spec.rb`
 #    (RSpec), relative to the current directory, each sorted.
 #    ponytail: RSpec files are found but not run, because RSpec cannot run
-#    its examples on the VM yet (#835, splatting an object whose `to_a` is
-#    Ruby). `spec/` is not put on `$LOAD_PATH`, `spec/spec_helper.rb` is not
-#    required, no spec file goes to a worker, and the run says so on stderr
-#    and exits 1, so a spec suite is never a silent green. Once #835 lands,
+#    a suite end to end on the VM yet (#837: its failure report requires
+#    `ripper`, which Spinel does not have). `spec/` is not put on
+#    `$LOAD_PATH`, `spec/spec_helper.rb` is not required, no spec file goes to
+#    a worker, and the run says so on stderr and exits 1, so a spec suite is
+#    never a silent green. Once #837 lands,
 #    the helper is required with the others and each worker runs the
 #    examples of the spec files it loaded through RSpec's own runner.
 # 2. `lib/` and `test/` go on `$LOAD_PATH`, as Rake's TestTask puts them, and
@@ -68,7 +69,7 @@ module Spinel
       unless specs.empty?
         failed = true
         warn "spinel test: #{specs.size} RSpec file#{"s" unless specs.size == 1} under spec/ not run: " \
-             "RSpec suites cannot run on Spinel yet (https://github.com/ar4mirez/spinel/issues/835)"
+             "RSpec suites cannot run on Spinel yet (https://github.com/ar4mirez/spinel/issues/837)"
       end
       failed ? 1 : 0
     end
