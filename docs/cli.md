@@ -15,7 +15,7 @@ What `spinel` does outside the engine: how it runs a file, how it reports itself
 | `spinel x [--source URL] [--gem GEM] <gem>[@req] [args]` | run a gem's executable from a GEM_HOME of its own under `~/.spinel/x/`, project untouched; see `spinel x` below |
 | `spinel init` | in the current directory: Gemfile, `.ruby-version` containing `spinel-<version>`, `test/`, `.gitignore` entry for `.spinel/`. Never overwrites: an existing Gemfile, `.ruby-version` or `test/` is kept as it is, and an existing `.gitignore` gets the `.spinel/` line appended only when no line already names `.spinel` (with or without slashes, or negated). Prints one line per path saying whether it was created, appended to, or already existed. |
 | `spinel install/add/remove/update` | package-manager.md |
-| `spinel test` | test-runner.md |
+| `spinel test [-j N]` | run `test/**/*_test.rb` and `spec/**/*_spec.rb` on `N` forked workers (the physical cores by default), the helpers loaded once before the fork; test-runner.md |
 | `spinel build` | build.md |
 | `spinel parse <file>` | print the `spinel_ast` tree for one file; `--format debug` for the derived `Debug`. Exits 1 on a syntax error, 2 if the file cannot be read. |
 | `spinel parse <dir>` | lower every `.rb` file under a directory and report only what failed. Exits non-zero on an unhandled node, never on a syntax error, because a corpus may legitimately contain invalid Ruby. This is the check behind the `sweep` CI job. |
