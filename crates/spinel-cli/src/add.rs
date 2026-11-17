@@ -181,7 +181,7 @@ fn add(request: &Request) -> Result<(), Stop> {
     session.install(
         &after,
         resolved,
-        Some(GemfileWrite {
+        (new != old).then_some(GemfileWrite {
             old: &old,
             new: &new,
         }),

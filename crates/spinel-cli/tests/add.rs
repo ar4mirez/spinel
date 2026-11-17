@@ -215,6 +215,30 @@ fn add_sinatra_appends_its_line_and_installs_it() {
 }
 
 #[test]
+fn a_gem_already_locked_as_a_dependency_changes_no_gems() {
+    let sandbox = Sandbox::new("transitive");
+    let before = sandbox.gemfile("source \"URL\"\ngem \"sinatra\"\n");
+    ok(&sandbox.spinel(&["install"]), "spinel install");
+    let linked = sandbox.linked();
+    assert!(linked.contains(&"rack-3.2.8".to_owned()), "{linked:?}");
+
+    let out = sandbox.add(&["rack"]);
+    assert_eq!(
+        ok(&out, "spinel add rack"),
+        "Updated Gemfile and Gemfile.lock; no gems changed\n"
+    );
+    assert_eq!(
+        sandbox.read("Gemfile"),
+        format!("{before}\ngem \"rack\", \"~> 3.2\"\n")
+    );
+    assert_eq!(
+        section(&sandbox.read("Gemfile.lock"), "DEPENDENCIES"),
+        "DEPENDENCIES\n  rack (~> 3.2)\n  sinatra\n"
+    );
+    assert_eq!(sandbox.linked(), linked);
+}
+
+#[test]
 fn a_requirement_after_at_is_written_as_given() {
     let sandbox = Sandbox::new("requirement");
     let before = sandbox.gemfile("source \"URL\"\n");
