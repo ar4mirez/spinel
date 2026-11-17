@@ -1,0 +1,13 @@
+# Written by bench/install.sh. Seconds; do not edit.
+spinel	0fcb55d
+lockfile	bench/install/rails/Gemfile.lock	a82a55e3d811102b2e55a4f1c2b5e7dd35a0ad8b6da7b96bcd831e51aecdbb65
+gems	121 gems installed, 118 of them fetched (131 MB unpacked)
+runs	the median and the fastest of 5 runs each
+bundler	4.0.20, ruby 4.0.9 (2026-10-23 revision 3e93b23afc) +PRISM [x86_64-linux]
+#	case	median wall	fastest wall	median cpu
+case	curl, the same .gem files	4.874	3.521	0.272
+case	spinel install, cold	8.155	4.515	1.378
+case	spinel install, warm	0.261	0.252	0.258
+case	spinel install, again	0.288	0.265	0.285
+case	bundle install, cold	51.230	39.970	161.773
+case	bundle install, again	0.476	0.466	0.471

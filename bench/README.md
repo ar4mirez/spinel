@@ -7,13 +7,46 @@ the pull request that changes them, not into the repo (`docs/roadmap.md`,
 rule 7).
 
 A `bench/*.sh` is a script of its own, run by name (`scripts/bench.sh install`)
-and never as part of the run of everything: `install.sh` (#81) needs the
-network, and times the gem store cold and warm for a lockfile's gems beside
-`curl` fetching the same files.
+and never as part of the run of everything: `install.sh` needs the network.
 
-Two files are the exception, because a script writes them and a check fails
-when they drift: `spec-status.md`, from `scripts/spec-status.sh`, and the table
-below.
+Three files are the exception, because a script writes them and a check fails
+when they drift: `spec-status.md`, from `scripts/spec-status.sh`, and the two
+tables below.
+
+## Installing a Rails app's lockfile (#91)
+
+`install/rails/` holds the Gemfile `rails new` writes and the lockfile Bundler
+resolves for it. `install.sh` installs it with `spinel install` cold (an empty
+store, nothing cached) and warm (every gem stored, a fresh project), and again
+with nothing to change, beside `curl` fetching the same `.gem` files and
+`bundle install` cold and again; its header says what each case does.
+
+```sh
+bench/install.sh           # measure again and rewrite the table (RUNS=5 by default)
+bench/install.sh --table   # re-render the table from install/results.tsv
+bench/install.sh --check   # fail if the table is not what results.tsv renders to,
+                           # the lockfile is not the one measured, or warm is not sub-second
+```
+
+Each case's median and fastest wall time are written to `install/results.tsv`,
+and the table is rendered from that file; never edit either by hand. A cold
+install's time is mostly the network's, so it moves with the connection from
+one run to the next; compare it with the `curl` row of the same run. `cargo
+test` runs the check.
+
+<!-- install table: written by bench/install.sh; do not edit -->
+Spinel at `0fcb55d`, `bench/install/rails/Gemfile.lock`: 121 gems installed, 118 of them fetched (131 MB unpacked); the median and the fastest of 5 runs each.
+Bundler: `4.0.20, ruby 4.0.9 (2026-10-23 revision 3e93b23afc) +PRISM [x86_64-linux]`.
+
+| case | median wall | fastest wall | median CPU |
+|---|---:|---:|---:|
+| curl, the same .gem files | 4.874 s | 3.521 s | 0.272 s |
+| spinel install, cold | 8.155 s | 4.515 s | 1.378 s |
+| spinel install, warm | 0.261 s | 0.252 s | 0.258 s |
+| spinel install, again | 0.288 s | 0.265 s | 0.285 s |
+| bundle install, cold | 51.230 s | 39.970 s | 161.773 s |
+| bundle install, again | 0.476 s | 0.466 s | 0.471 s |
+<!-- end install table -->
 
 ## The interpreter's baseline: a yjit-bench subset (#63)
 
