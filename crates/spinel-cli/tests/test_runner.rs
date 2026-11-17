@@ -1029,6 +1029,90 @@ fn a_path_that_is_not_one_file_given_once_is_an_error() {
     }
 }
 
+/// Each discovery error `reporter` is given: the directory to run in, the
+/// arguments, and the message.
+fn discovery_errors(reporter: &str) -> [(PathBuf, Vec<&'static str>, &'static str); 2] {
+    [
+        (
+            fixture("report"),
+            vec!["test/missing_test.rb"],
+            "no such file: test/missing_test.rb",
+        ),
+        (
+            scratch(&format!("discovery-empty-{reporter}")),
+            vec![],
+            "no test files: nothing matches test/**/*_test.rb or spec/**/*_spec.rb",
+        ),
+    ]
+}
+
+#[test]
+fn the_json_reporter_reports_a_discovery_error_as_a_problem_then_the_summary() {
+    for (dir, args, message) in discovery_errors("json") {
+        let log = scratch("json-discovery");
+        let args: Vec<&str> = ["--reporter", "json"]
+            .iter()
+            .chain(&args)
+            .copied()
+            .collect();
+        let output = spinel_test(&dir, &args, &log.join("log"), &[]);
+        std::fs::remove_dir_all(&log).ok();
+        if args.len() == 2 {
+            std::fs::remove_dir_all(&dir).ok();
+        }
+        let err = stderr(&output);
+        assert_eq!(output.status.code(), Some(1), "{args:?}: {err}");
+        assert_eq!(
+            json_lines(&output),
+            vec![
+                json!({"event": "problem", "message": message, "rerun": null}),
+                json!({"event": "summary", "tests": 0, "failures": 0, "errors": 0, "skips": 0,
+                       "problems": 1}),
+            ],
+            "{args:?}"
+        );
+        assert_eq!(
+            err.matches(&format!("spinel test: {message}\n")).count(),
+            1,
+            "told once on stderr: {err}"
+        );
+    }
+}
+
+#[test]
+fn the_junit_reporter_reports_a_discovery_error_as_an_error() {
+    for (dir, args, message) in discovery_errors("junit") {
+        let log = scratch("junit-discovery");
+        let args: Vec<&str> = ["--reporter", "junit"]
+            .iter()
+            .chain(&args)
+            .copied()
+            .collect();
+        let output = spinel_test(&dir, &args, &log.join("log"), &[]);
+        std::fs::remove_dir_all(&log).ok();
+        if args.len() == 2 {
+            std::fs::remove_dir_all(&dir).ok();
+        }
+        let err = stderr(&output);
+        assert_eq!(output.status.code(), Some(1), "{args:?}: {err}");
+        let xml = String::from_utf8(output.stdout.clone()).expect("UTF-8");
+        junit_valid(&xml);
+        assert_eq!(
+            junit_cases(&xml),
+            vec![(
+                "spinel test".to_owned(),
+                vec![case(["spinel test", message, "", "error", message, ""])],
+            )],
+            "{xml}"
+        );
+        assert_eq!(
+            err.matches(&format!("spinel test: {message}\n")).count(),
+            1,
+            "told once on stderr: {err}"
+        );
+    }
+}
+
 /// What every helper and test in the `noisy` fixture prints to stdout.
 const NOISY_PRINTS: [&str; 6] = [
     "test_helper prints",

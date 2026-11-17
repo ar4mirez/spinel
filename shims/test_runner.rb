@@ -67,7 +67,8 @@
 #    `testsuite` per file. Either way stdout gets that and nothing else:
 #    the runner's stdout is moved to stderr before any helper or test can
 #    write to it, so what they print goes there, and the problems are still
-#    told on stderr too.
+#    told on stderr too. A discovery error is a problem under either, and
+#    the reporter still prints its report.
 #
 # A phase process and the runner end with `exit!`, so an `at_exit` a helper
 # registered runs in the workers, which ran the tests, and not again in a
@@ -143,29 +144,20 @@ module Spinel
     end
 
     # The Minitest and RSpec files to run, each `[path, line]`, line nil for
-    # every test, from the files given, else discovered; nil, after saying
-    # why, when there are none or a path given is not one file once.
+    # every test, from the files given, else discovered; or, when there are
+    # none or a path given is not one file once, why, as a String.
     def self.discover(args)
       found = {}
       if args.empty?
         Dir.glob("test/**/*_test.rb").sort.each { |path| found[path] = nil }
         Dir.glob("spec/**/*_spec.rb").sort.each { |path| found[path] = nil }
-        if found.empty?
-          warn "spinel test: no test files: nothing matches test/**/*_test.rb or spec/**/*_spec.rb"
-          return nil
-        end
+        return "no test files: nothing matches test/**/*_test.rb or spec/**/*_spec.rb" if found.empty?
       else
         args.each do |arg|
           path, line = location(arg)
-          unless File.file?(path)
-            warn "spinel test: no such file: #{path}"
-            return nil
-          end
+          return "no such file: #{path}" unless File.file?(path)
           path = relative(path)
-          if found.key?(path)
-            warn "spinel test: #{path} is given more than once"
-            return nil
-          end
+          return "#{path} is given more than once" if found.key?(path)
           found[path] = line
         end
       end
@@ -178,16 +170,23 @@ module Spinel
         @out = $stdout.dup
         $stdout.reopen($stderr)
       end
-      tests, specs = discover(args)
-      return 1 unless tests
-
+      found = discover(args)
       report = { "counts" => Hash.new(0), "failures" => [], "problems" => [], "results" => [] }
       printed = false
-      unless tests.empty?
-        printed = true if phase(report, "Minitest") { |kept| run_tests(tests, jobs, kept) }
-      end
-      unless specs.empty?
-        printed = true if phase(report, "RSpec") { |kept| run_specs(specs, jobs, kept) }
+      if found.is_a?(String)
+        if reporter == "progress"
+          warn "spinel test: #{found}"
+          return 1
+        end
+        report["problems"] << { "message" => found }
+      else
+        tests, specs = found
+        unless tests.empty?
+          printed = true if phase(report, "Minitest") { |kept| run_tests(tests, jobs, kept) }
+        end
+        unless specs.empty?
+          printed = true if phase(report, "RSpec") { |kept| run_specs(specs, jobs, kept) }
+        end
       end
       case reporter
       when "json" then json_report(report)
