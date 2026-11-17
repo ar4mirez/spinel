@@ -377,7 +377,9 @@ class Symbol
       raise ArgumentError, "no receiver given" if args.empty?
       receiver = args[0]
       rest = args.__take__(1, args.size - 1)
-      receiver.public_send(name, *rest, **keywords, &block)
+      # A public send made here, not one asked of the receiver: a
+      # BasicObject has no `public_send` (#837).
+      __public_send_to__(receiver, name, *rest, **keywords, &block)
     end
     # It sends through the refinements active where it was asked for (#352).
     __refined_by_caller__(made)

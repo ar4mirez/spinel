@@ -21,9 +21,12 @@
 //! error on the node rather than panicking. That is the "unhandled node" the
 //! sweep in `spinel parse <dir>` looks for.
 
-#![forbid(unsafe_code)]
+// Safe Rust throughout, but for `serialize`, the calls into Prism's C
+// serialization API that `ruby-prism` does not wrap.
+#![deny(unsafe_code)]
 
 mod lower;
+pub mod serialize;
 
 use spinel_ast::{Program, Span};
 

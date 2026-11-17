@@ -12071,6 +12071,21 @@ fn native_call<'h>(
             push_proc_frame(scope, stack, frames, &call, call.receiver, ids)?;
             Ok(None)
         }
+        Native::SendTo => {
+            let mut args = call.args.clone();
+            if args.is_empty() {
+                return Err(Error::raise("ArgumentError", "no receiver given"));
+            }
+            let receiver = args.remove(0);
+            let call = Pending {
+                receiver,
+                args,
+                name: crate::shared::symbols::intern("public_send"),
+                ..call
+            };
+            let send = Native::Send { public_only: true };
+            native_call(scope, stack, frames, call, send, proc_class, ids)
+        }
         Native::Send { public_only } => {
             let mut args = call.args.clone();
             if args.is_empty() {
@@ -13928,6 +13943,11 @@ fn native_call<'h>(
             };
             let class = class_handle(scope, Builtin::String);
             let value = string_alloc(scope, class, &digest, crate::strings::BINARY);
+            stack.push(value);
+            Ok(None)
+        }
+        Native::PrismDump | Native::PrismSuccess | Native::PrismQuery | Native::PrismVersion => {
+            let value = prism_native(scope, native, &call)?;
             stack.push(value);
             Ok(None)
         }
@@ -18269,6 +18289,18 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         ),
         (Builtin::Kernel, &["__digest__"], Native::Digest),
         (Builtin::Kernel, &["__json_parse__"], Native::JsonParse),
+        (Builtin::Kernel, &["__prism_dump__"], Native::PrismDump),
+        (
+            Builtin::Kernel,
+            &["__prism_success__"],
+            Native::PrismSuccess,
+        ),
+        (Builtin::Kernel, &["__prism_query__"], Native::PrismQuery),
+        (
+            Builtin::Kernel,
+            &["__prism_version__"],
+            Native::PrismVersion,
+        ),
         (Builtin::Kernel, &["__json_where__"], Native::JsonWhere),
         (Builtin::Kernel, &["__json_float__"], Native::JsonFloat),
         (Builtin::Kernel, &["__json_escape__"], Native::JsonEscape),
@@ -18300,6 +18332,7 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             &["__raise_no_method__"],
             Native::RaiseNoMethod,
         ),
+        (Builtin::Kernel, &["__public_send_to__"], Native::SendTo),
         // `__send__` is BasicObject's, where a blank slate still has it.
         (
             Builtin::BasicObject,
@@ -24119,6 +24152,53 @@ mod json_flag {
     /// Numbers with a fraction or exponent as `[float_mark, text]` Arrays,
     /// for a `decimal_class`.
     pub const RAW_FLOATS: i64 = 256;
+}
+
+/// The `__prism_*__` primitives (#837), over the [`crate::PrismApi`]
+/// `spinel-core` installed; `lib/prism/prism.rb` is their one caller.
+fn prism_native(
+    scope: &mut HandleScope<'_>,
+    native: Native,
+    call: &Pending,
+) -> Result<Value, Error> {
+    let refuse = |op, operands| Error::NoDispatch { op, operands };
+    let Some(prism) = scope.prism() else {
+        return Err(refuse("__prism_dump__", "a heap without Prism installed"));
+    };
+    let bytes = |scope: &mut HandleScope<'_>, index: usize| {
+        call.args.get(index).and_then(|&v| string_bytes(scope, v))
+    };
+    match native {
+        Native::PrismDump => {
+            let op = "__prism_dump__";
+            let kind = int_arg(call, 0).ok_or(refuse(op, "a kind that is not a Fixnum"))?;
+            let source = bytes(scope, 1).ok_or(refuse(op, "a source that is not a String"))?;
+            let options = bytes(scope, 2).ok_or(refuse(op, "options that are not a String"))?;
+            let dumped = (prism.dump)(kind, &source, &options).map_err(|why| refuse(op, why))?;
+            let class = class_handle(scope, Builtin::String);
+            Ok(string_alloc(scope, class, &dumped, crate::strings::BINARY))
+        }
+        Native::PrismSuccess => {
+            let op = "__prism_success__";
+            let source = bytes(scope, 0).ok_or(refuse(op, "a source that is not a String"))?;
+            let options = bytes(scope, 1).ok_or(refuse(op, "options that are not a String"))?;
+            let parsed = (prism.success)(&source, &options)
+                .ok_or(refuse(op, "options Prism cannot read"))?;
+            Ok(if parsed { Value::TRUE } else { Value::FALSE })
+        }
+        Native::PrismQuery => {
+            let op = "__prism_query__";
+            let kind = int_arg(call, 0).ok_or(refuse(op, "a kind that is not a Fixnum"))?;
+            let string = bytes(scope, 1).ok_or(refuse(op, "a string that is not a String"))?;
+            let encoding = bytes(scope, 2)
+                .and_then(|name| std::ffi::CString::new(name).ok())
+                .ok_or(refuse(op, "an encoding name that is not a String"))?;
+            let answer = (prism.query)(kind, &string, &encoding)
+                .ok_or(refuse(op, "a kind that is not 0 to 2"))?;
+            Ok(Value::fixnum(i64::from(answer)).unwrap_or(Value::NIL))
+        }
+        _ => Ok(string_new(scope, (prism.version)())),
+    }
 }
 
 /// `Kernel#__json_parse__(source, max_nesting, flags, marks)` (#55).
