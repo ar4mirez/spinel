@@ -24,6 +24,12 @@ module Spinel
   module TestWorker
     @events = nil
     @lock = Mutex.new
+    # How many failures and errors this worker has reported.
+    @failed = 0
+
+    class << self
+      attr_reader :failed
+    end
 
     # Write events to `io` from now on.
     def self.start(io)
@@ -39,6 +45,7 @@ module Spinel
 
     # A test's or an example's end.
     def self.result(event, file, line, name, seconds, message = nil, backtrace = [])
+      @failed += 1 if event == "fail" || event == "error"
       emit(
         "event" => event, "file" => file && relative(file.to_s), "line" => line,
         "name" => text(name), "ms" => (seconds.to_f * 1000).round(3),
@@ -61,22 +68,87 @@ module Spinel
       value.to_s.b.force_encoding(Encoding::UTF_8).scrub
     end
 
+    # The Minitest test classes defined so far.
+    def self.runnables
+      return [] unless defined?(::Minitest::Runnable) && ::Minitest::Runnable.respond_to?(:runnables)
+
+      ::Minitest::Runnable.runnables.dup
+    end
+
     # Add the reporter to the reporters `Minitest.run` makes, after its own
     # plugins have had theirs added, so a plugin that replaces the default
-    # reporters (Rails') leaves this one. Not a plugin by name: adding to
+    # reporters (Rails') leaves this one, and take out the default ones,
+    # whose report the runner's replaces. Not a plugin by name: adding to
     # `Minitest.extensions` before it loads its plugins would stop it
     # loading them on the Minitest 5 releases that load only into an empty
     # list.
-    def self.minitest
+    #
+    # `files` is what the worker loaded: each path, the lines asked for
+    # (none for all of it), and the test classes that appeared when it was
+    # required. When any has lines, only the tests at them run of the
+    # classes those files defined.
+    # ponytail: a plugin's own printing reporter (Rails' `TestUnitReporter`)
+    # still prints; `--reporter` (#95) is where to choose.
+    def self.minitest(files = [])
       return unless defined?(::Minitest) && ::Minitest.respond_to?(:init_plugins)
 
       ours = MinitestReporter.new
       ::Minitest.singleton_class.prepend(Module.new do
         define_method(:init_plugins) do |options|
           super(options)
-          reporter << ours if reporter
+          if reporter
+            defaults = %i[SummaryReporter ProgressReporter].filter_map do |name|
+              ::Minitest.const_get(name) if ::Minitest.const_defined?(name)
+            end
+            if reporter.respond_to?(:reporters)
+              reporter.reporters.reject! { |r| defaults.any? { |klass| klass === r } }
+            end
+            reporter << ours
+          end
         end
       end)
+      only(files)
+    end
+
+    # Run only the tests at the lines asked for, of the classes the files
+    # with lines defined; every test of any other class.
+    def self.only(files)
+      return if files.none? { |_, lines, _| lines.any? } || !defined?(::Minitest::Test)
+
+      restricted = []
+      chosen = []
+      files.each do |path, lines, classes|
+        next if lines.empty?
+
+        restricted.concat(classes)
+        chosen.concat(at_lines(File.expand_path(path), lines))
+      end
+      ::Minitest::Test.singleton_class.prepend(Module.new do
+        define_method(:runnable_methods) do
+          names = super()
+          return names unless restricted.include?(self)
+
+          names.select { |name| chosen.include?([self, name.to_s]) }
+        end
+      end)
+    end
+
+    # `[class, method]` for each test whose method starts nearest above or
+    # at each line, in `path`: as `rspec` finds the declaration nearest
+    # above a line, and as a test's `source_location` names it.
+    def self.at_lines(path, lines)
+      tests = runnables.flat_map do |klass|
+        next [] unless klass.respond_to?(:methods_matching)
+
+        klass.methods_matching(/\Atest_/).filter_map do |name|
+          file, line = klass.instance_method(name).source_location
+          [klass, name.to_s, line] if file && line && File.expand_path(file) == path
+        end
+      end
+      lines.flat_map do |wanted|
+        nearest = tests.map { |_, _, line| line }.select { |line| line <= wanted }.max
+        tests.select { |_, _, line| line == nearest }.map { |klass, name, _| [klass, name] }
+      end
     end
 
     # Listen for each example's end, once RSpec has set up its own
@@ -84,8 +156,13 @@ module Spinel
     # no other is there, so this one, added before, would replace it.
     # ponytail: `--dry-run` runs no suite hooks, so it reports no results;
     # a hook on the reporter's `start` would catch it too.
-    def self.rspec
+    #
+    # `locations` are the files given with lines, each `[path, lines]`,
+    # added to RSpec's location filter as `rspec path:line` adds them: only
+    # the examples declared nearest above those lines run of those files.
+    def self.rspec(locations = [])
       config = ::RSpec.configuration
+      locations.each { |path, lines| config.filter_manager.add_location(path, lines) }
       config.prepend_before(:suite) do
         config.reporter.register_listener(
           RSpecFormatter.new, :example_passed, :example_failed, :example_pending
@@ -99,8 +176,10 @@ module Spinel
       def prerecord(_klass, _name); end
       def report; end
 
+      # False once a test failed or raised, as Minitest's own summary
+      # answers, so `minitest/autorun` exits 1 without it.
       def passed?
-        true
+        TestWorker.failed.zero?
       end
 
       def synchronize

@@ -5,9 +5,13 @@
 # `RSpec::Core::Runner.disable_autorun!` and `.run(args, err, out)` run the
 # examples and answer the exit status: the `before(:suite)` hooks first,
 # then each example, its end sent to the reporter's listeners as
-# `example_passed`, `example_failed` or `example_pending`. Each run is
-# logged with the pid that ran it and the examples it ran. The real gem's
-# run is checked by hand against CRuby in #837's and #93's pull requests.
+# `example_passed`, `example_failed` or `example_pending`, and what failed
+# and the count written to `out`. `filter_manager.add_location(path, lines)`
+# keeps to the examples of that file declared, or in a group declared, at
+# the declaration nearest above each line, as rspec-core's location filter
+# does. Each run is logged with the pid that ran it and the examples it
+# ran. The real gem's run is checked by hand against CRuby in #837's, #93's
+# and #94's pull requests.
 module RSpec
   @examples = []
 
@@ -19,7 +23,7 @@ module RSpec
     end
 
     def describe(name, &block)
-      Group.new(name).instance_eval(&block)
+      Group.new(name, caller_locations(1, 1).first.lineno).instance_eval(&block)
     end
   end
 
@@ -36,16 +40,17 @@ module RSpec
   end
 
   class Group
-    def initialize(name)
+    def initialize(name, line)
       @name = name
+      @line = line
     end
 
     def it(name, &block)
-      RSpec.examples << Core::Example.new("#{@name} #{name}", caller_locations(1, 1).first, block)
+      RSpec.examples << Core::Example.new("#{@name} #{name}", caller_locations(1, 1).first, @line, block)
     end
 
     def xit(name, &block)
-      example = Core::Example.new("#{@name} #{name}", caller_locations(1, 1).first, block)
+      example = Core::Example.new("#{@name} #{name}", caller_locations(1, 1).first, @line, block)
       example.skip = "Temporarily skipped with xit"
       RSpec.examples << example
     end
@@ -80,12 +85,20 @@ module RSpec
       attr_reader :full_description, :metadata, :execution_result
       attr_accessor :skip
 
-      def initialize(description, location, block)
+      def initialize(description, location, group_line, block)
         @full_description = description
         @block = block
         path = location.path.delete_prefix("#{Dir.pwd}/")
-        @metadata = { file_path: "./#{path}", line_number: location.lineno }
+        @metadata = {
+          file_path: "./#{path}", line_number: location.lineno,
+          absolute_file_path: File.expand_path(location.path), group_line: group_line,
+        }
         @execution_result = ExecutionResult.new
+      end
+
+      # Its line and its group's, as rspec-core ascends its metadata.
+      def declaration_lines
+        [metadata[:line_number], metadata[:group_line]]
       end
 
       # Its status, as rspec-core gives it: `pending` for an example
@@ -147,12 +160,42 @@ module RSpec
       end
     end
 
+    # rspec-core's, as far as locations go: each expanded path's lines.
+    class FilterManager
+      attr_reader :locations
+
+      def initialize
+        @locations = Hash.new { |hash, key| hash[key] = [] }
+      end
+
+      def add_location(file_path, line_numbers)
+        @locations[File.expand_path(file_path)].concat(line_numbers)
+      end
+
+      # The examples to run: each of a file with no location, else each
+      # declared at the declaration nearest above one of its lines.
+      def prune(examples)
+        examples.select do |example|
+          path = example.metadata[:absolute_file_path]
+          next true unless @locations.key?(path)
+
+          declared = examples.select { |other| other.metadata[:absolute_file_path] == path }
+            .flat_map(&:declaration_lines).uniq.sort.reverse
+          @locations[path].any? do |line|
+            nearest = declared.find { |number| number <= line }
+            example.declaration_lines.include?(nearest)
+          end
+        end
+      end
+    end
+
     class Configuration
-      attr_reader :backtrace_formatter
+      attr_reader :backtrace_formatter, :filter_manager
 
       def initialize
         @before_suite = []
         @backtrace_formatter = BacktraceFormatter.new
+        @filter_manager = FilterManager.new
       end
 
       def reporter
@@ -181,23 +224,24 @@ module RSpec
 
         config = RSpec.configuration
         config.run_before_suite
-        failed = RSpec.examples.select do |example|
+        examples = config.filter_manager.prune(RSpec.examples)
+        failed = examples.select do |example|
           status = example.run
           notification = Notification.new(example)
           case status
           when :passed then config.reporter.notify(:example_passed, notification)
           when :pending then config.reporter.notify(:example_pending, notification)
           else
-            err.puts "#{example.full_description} failed: #{example.execution_result.exception.message}"
+            out.puts "#{example.full_description} failed: #{example.execution_result.exception.message}"
             config.reporter.notify(:example_failed, notification)
           end
           status == :failed
         end
-        names = RSpec.examples.map { |example| example.full_description.tr(" ", "_") }.join(",")
+        names = examples.map { |example| example.full_description.tr(" ", "_") }.join(",")
         if (log = ENV["SPINEL_TEST_LOG"])
           File.open(log, "a") { |file| file.write("run #{Process.pid} #{names} #{failed.size}\n") }
         end
-        out.puts "#{RSpec.examples.size} examples, #{failed.size} failures"
+        out.puts "#{examples.size} examples, #{failed.size} failures"
         failed.empty? ? 0 : 1
       end
     end

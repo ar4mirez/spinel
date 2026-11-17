@@ -1,11 +1,13 @@
 # A stand-in for minitest, which is not installed here: the part of
 # Minitest 5 and 6's API a run goes through, as `shims/test_worker.rb`
 # meets it. `Minitest.autorun` registers the `at_exit` that runs the tests;
-# `Minitest.run` builds a `CompositeReporter`, sets `Minitest.reporter` for
-# `init_plugins` and clears it after, then records a `Result` per test
-# method, its first failure saying what it was: a `Skip`, an
+# `Minitest.run` builds a `CompositeReporter` with a `SummaryReporter` in
+# it, sets `Minitest.reporter` for `init_plugins` and clears it after, then
+# records a `Result` per method each `Runnable` class's `runnable_methods`
+# answers, its first failure saying what it was: a `Skip`, an
 # `UnexpectedError` wrapping an exception, else a plain `Assertion`. The
-# real gem's run is checked by hand against CRuby in #93's pull request.
+# real gem's run is checked by hand against CRuby in #93's and #94's pull
+# requests.
 module Minitest
   class Assertion < Exception; end
   class Skip < Assertion; end
@@ -55,8 +57,8 @@ module Minitest
       init_plugins({})
       self.reporter = nil
       reporter.start
-      Test.runnables.each do |klass|
-        klass.public_instance_methods(true).grep(/\Atest_/).sort.each do |name|
+      Runnable.runnables.each do |klass|
+        klass.runnable_methods.each do |name|
           reporter.prerecord(klass, name.to_s)
           reporter.record(klass.new(name.to_s).run)
         end
@@ -115,7 +117,7 @@ module Minitest
     end
   end
 
-  class Test
+  class Runnable
     @@runnables = []
 
     def self.runnables
@@ -123,8 +125,18 @@ module Minitest
     end
 
     def self.inherited(klass)
-      @@runnables << klass
+      runnables << klass
       super
+    end
+
+    def self.methods_matching(pattern)
+      public_instance_methods(true).grep(pattern).map(&:to_s)
+    end
+  end
+
+  class Test < Runnable
+    def self.runnable_methods
+      methods_matching(/\Atest_/).sort
     end
 
     def initialize(name)
