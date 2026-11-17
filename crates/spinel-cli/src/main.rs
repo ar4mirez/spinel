@@ -143,14 +143,22 @@ enum Command {
     /// Finds `test/**/*_test.rb` under the current directory, requires
     /// `test/test_helper.rb` once, then forks the workers, so what the helper
     /// boots is booted once. Each worker is handed one file at a time. A
-    /// worker that dies while running a file is reported with that file, and
-    /// the exit status is 1. `spec/**/*_spec.rb` files run after them the
-    /// same way, `rspec/core` and `spec/spec_helper.rb` required once, each
-    /// worker running its files' examples through RSpec's own runner.
+    /// worker that dies while running a file is reported with that file.
+    /// `spec/**/*_spec.rb` files run after them the same way, `rspec/core`
+    /// and `spec/spec_helper.rb` required once, each worker running its
+    /// files' examples through RSpec's own runner. Prints a dot for each
+    /// test as it passes, then each failure with its `file:line` and
+    /// backtrace, gem frames folded, a summary line, and a `spinel test
+    /// file:line` command to run each failure again. Exits 1 when anything
+    /// failed.
     Test {
         /// How many workers to fork; the physical cores when not given.
         #[arg(short, long, value_name = "N", value_parser = clap::value_parser!(u16).range(1..))]
         jobs: Option<u16>,
+        /// Files to run instead of every test; `FILE:LINE` runs only the
+        /// test or example defined at or nearest above LINE.
+        #[arg(value_name = "FILE[:LINE]")]
+        paths: Vec<String>,
     },
 
     /// Install the Gemfile's gems into the project's `.spinel/gem_home/`.
@@ -516,9 +524,9 @@ fn main() -> ExitCode {
         Some(Command::Parse { path, format }) => return parse_command(&path, format),
         Some(Command::Init) => return init_command(),
         Some(Command::Install { frozen }) => return install::run(frozen),
-        Some(Command::Test { jobs }) => {
+        Some(Command::Test { jobs, paths }) => {
             project_ruby_version_ok(false);
-            return test_runner::run(jobs.map(usize::from));
+            return test_runner::run(jobs.map(usize::from), &paths);
         }
         Some(Command::Add { gems, group, git }) => {
             return add::run(&add::Request {

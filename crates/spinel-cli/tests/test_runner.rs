@@ -23,6 +23,12 @@
 //! fixtures that run tests carry a stand-in for the part of its API a run
 //! goes through, in `stand_ins/minitest.rb`; the real gems' events are
 //! checked by hand against CRuby in #93's pull request.
+//!
+//! The runner prints the report itself (#94): a character per result as it
+//! comes, then each failure and error with its `file:line` and backtrace,
+//! gem frames folded, a summary line, and a `spinel test file:line` command
+//! per failure, which these tests paste into a shell and run. Each
+//! framework's own report is left out.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -158,6 +164,20 @@ fn a_worker_that_dies_is_reported_with_its_file_and_the_rest_still_run() {
         err.contains("test/f_raise_test.rb: ArgumentError: broken on load"),
         "a file whose loading raised is reported: {err}"
     );
+    // Each file that did not finish is printed to run again.
+    let out = String::from_utf8_lossy(&output.stdout);
+    for file in [
+        "test/b_killed_test.rb",
+        "test/d_exit_test.rb",
+        "test/f_raise_test.rb",
+    ] {
+        assert!(
+            out.lines()
+                .any(|line| line == format!("spinel test {file}")),
+            "{out}"
+        );
+    }
+    assert!(out.contains(", 3 problems\n"), "{out}");
     // The workers forked in place of the dead ones run what was waiting.
     let ran: BTreeSet<&str> = lines.iter().map(|l| l[2].as_str()).collect();
     assert_eq!(
@@ -233,9 +253,16 @@ fn spec_files_run_through_rspec_in_workers_after_the_tests() {
 
     // `d_spec.rb`'s example fails, so its worker exits 1, and so does the run.
     assert_eq!(output.status.code(), Some(1), "stderr: {err}");
+    let out = String::from_utf8_lossy(&output.stdout);
     assert!(
-        err.contains("d fails failed: a failing example fails the run"),
-        "{err}"
+        out.contains(
+            "  1) Failure: d fails [spec/models/d_spec.rb:4]\n     RuntimeError: a failing example fails the run\n"
+        ),
+        "{out}"
+    );
+    assert!(
+        !out.contains("examples,") && !err.contains("examples,"),
+        "RSpec's own report is left out: {out}{err}"
     );
     let helpers: Vec<&Vec<String>> = lines.iter().filter(|l| l[0].ends_with("_helper")).collect();
     let loaded: Vec<&str> = helpers.iter().map(|l| l[0].as_str()).collect();
@@ -338,8 +365,8 @@ fn a_passing_spec_only_project_passes() {
     assert!(output.status.success(), "stderr: {err}");
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "2 examples, 0 failures\n",
-        "one worker, one run of both files' examples"
+        "..\n\n2 tests, 0 failures, 0 errors, 0 skips\n",
+        "one worker, one run of both files' examples, reported by the runner"
     );
     let parent = &lines[0];
     assert_eq!(parent[0], "spec_helper", "{lines:?}");
@@ -446,7 +473,8 @@ fn without_ms(event: &Value) -> Value {
             "line",
             "message",
             "ms",
-            "name"
+            "name",
+            "rerun"
         ]),
         "{event}"
     );
@@ -504,11 +532,12 @@ fn minitest_and_rspec_each_report_every_test_as_one_event_line() {
     assert_eq!(
         take("ResultsTest#test_passes"),
         json!({"event": "pass", "file": file, "line": 4, "name": "ResultsTest#test_passes",
-               "message": null, "backtrace": []})
+               "message": null, "backtrace": [], "rerun": format!("{file}:4")})
     );
     let fails = take("ResultsTest#test_fails");
     assert_eq!(fails["event"], "fail", "{fails}");
     assert_eq!(fails["line"], 8, "{fails}");
+    assert_eq!(fails["rerun"], "test/results_test.rb:8", "{fails}");
     assert_eq!(fails["message"], "Expected: 3\n  Actual: 2", "{fails}");
     // Minitest's own frames filtered out, the test's first, relative.
     assert_eq!(
@@ -518,6 +547,7 @@ fn minitest_and_rspec_each_report_every_test_as_one_event_line() {
     let errors = take("ResultsTest#test_errors");
     assert_eq!(errors["event"], "error", "{errors}");
     assert_eq!(errors["line"], 12, "{errors}");
+    assert_eq!(errors["rerun"], "test/results_test.rb:12", "{errors}");
     assert_eq!(errors["message"], "ArgumentError: broken", "{errors}");
     assert_eq!(
         errors["backtrace"][0], "test/results_test.rb:13:in 'ResultsTest#test_errors'",
@@ -526,7 +556,7 @@ fn minitest_and_rspec_each_report_every_test_as_one_event_line() {
     assert_eq!(
         take("ResultsTest#test_skips"),
         json!({"event": "skip", "file": file, "line": 16, "name": "ResultsTest#test_skips",
-               "message": "not yet", "backtrace": []})
+               "message": "not yet", "backtrace": [], "rerun": format!("{file}:16")})
     );
 
     // RSpec's: an exception in an example is a failure, as `rspec` counts
@@ -536,43 +566,47 @@ fn minitest_and_rspec_each_report_every_test_as_one_event_line() {
     assert_eq!(
         take("results passes"),
         json!({"event": "pass", "file": file, "line": 4, "name": "results passes",
-               "message": null, "backtrace": []})
+               "message": null, "backtrace": [], "rerun": format!("{file}:4")})
     );
     assert_eq!(
         take("results fails"),
         json!({"event": "fail", "file": file, "line": 5, "name": "results fails",
-               "message": "\nexpected: 3\n     got: 2\n", "backtrace": [frame(5)]})
+               "message": "\nexpected: 3\n     got: 2\n", "backtrace": [frame(5)],
+               "rerun": format!("{file}:5")})
     );
     assert_eq!(
         take("results raises"),
         json!({"event": "fail", "file": file, "line": 6, "name": "results raises",
-               "message": "ArgumentError: broken", "backtrace": [frame(6)]})
+               "message": "ArgumentError: broken", "backtrace": [frame(6)],
+               "rerun": format!("{file}:6")})
     );
     assert_eq!(
         take("results is pending"),
         json!({"event": "skip", "file": file, "line": 7, "name": "results is pending",
-               "message": "not yet", "backtrace": []})
+               "message": "not yet", "backtrace": [], "rerun": format!("{file}:7")})
     );
     assert_eq!(
         take("results is skipped"),
         json!({"event": "skip", "file": file, "line": 11, "name": "results is skipped",
-               "message": "Temporarily skipped with xit", "backtrace": []})
+               "message": "Temporarily skipped with xit", "backtrace": [],
+               "rerun": format!("{file}:11")})
     );
     assert_eq!(
         take("results passes while pending"),
         json!({"event": "fail", "file": file, "line": 12, "name": "results passes while pending",
                "message": "Expected pending 'not yet' to fail. No error was raised.",
-               "backtrace": []})
+               "backtrace": [], "rerun": format!("{file}:12")})
     );
     assert!(by_name.is_empty(), "no other results: {by_name:?}");
 
-    // RSpec's own report still prints, the formatter beside it.
+    // The runner's report, in place of each framework's own.
     let out = String::from_utf8_lossy(&output.stdout);
     assert!(
-        out.contains("4 runs, 1 failures, 1 errors, 1 skips"),
+        out.contains("\n10 tests, 4 failures, 1 error, 3 skips\n"),
         "{out}"
     );
-    assert!(out.contains("6 examples, 3 failures"), "{out}");
+    assert!(!out.contains("runs,"), "Minitest's left out: {out}");
+    assert!(!out.contains("examples,"), "RSpec's left out: {out}");
 }
 
 #[test]
@@ -626,4 +660,357 @@ fn many_events_from_several_workers_each_arrive_as_a_whole_line() {
     }
     let done = events.iter().filter(|e| e["event"] == "done").count();
     assert_eq!(done, 9, "a `done` per file");
+}
+
+/// What `spinel test` printed on stdout.
+fn stdout(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// The commands under "Re-run each failure:", as printed.
+fn reruns(out: &str) -> Vec<String> {
+    let (_, after) = out
+        .split_once("\nRe-run each failure:\n\n")
+        .unwrap_or_else(|| panic!("no re-run commands: {out}"));
+    after.lines().map(str::to_owned).collect()
+}
+
+#[test]
+fn the_report_prints_progress_then_each_failure_then_a_summary() {
+    let dir = scratch("report");
+    let output = spinel_test(&fixture("report"), &["-j", "2"], &dir.join("log"), &[]);
+    std::fs::remove_dir_all(&dir).ok();
+    let out = stdout(&output);
+    assert_eq!(output.status.code(), Some(1), "a test failed: {out}");
+    assert_eq!(stderr(&output), "", "no problems");
+
+    // A character per result: the Minitest file's, then the RSpec file's,
+    // each as its framework's progress prints it.
+    let (progress, rest) = out.split_once('\n').expect("a progress line");
+    let mut minitest: Vec<char> = progress[..5].chars().collect();
+    minitest.sort_unstable();
+    assert_eq!(minitest, ['.', 'E', 'F', 'F', 'S'], "{out}");
+    let mut rspec: Vec<char> = progress[5..].chars().collect();
+    rspec.sort_unstable();
+    assert_eq!(rspec, ['*', '.', 'F'], "{out}");
+
+    // Each failure and error, in order of where its test is, with the
+    // `file:line` its test is defined at and its backtrace.
+    assert!(
+        rest.starts_with(
+            "\n  1) Failure: ReportTest#test_fails [test/report_test.rb:8]\n\
+             \x20    Expected: 3\n\
+             \x20      Actual: 2\n\
+             \x20    # test/report_test.rb:9:in 'ReportTest#test_fails'\n"
+        ),
+        "{out}"
+    );
+    assert!(
+        out.contains(
+            "\n  2) Failure: ReportTest#test_fails_through_a_gem [test/report_test.rb:12]\n"
+        ),
+        "{out}"
+    );
+    assert!(
+        out.contains(
+            "\n  3) Error: ReportTest#test_errors [test/report_test.rb:18]\n\
+             \x20    ArgumentError: broken\n\
+             \x20    # test/report_test.rb:19:in 'ReportTest#test_errors'\n"
+        ),
+        "{out}"
+    );
+    assert!(
+        out.contains(
+            "\n  4) Failure: report fails [spec/report_spec.rb:6]\n\
+             \x20    expected: 3\n\
+             \x20         got: 2\n\
+             \x20    # spec/report_spec.rb:7:in 'block (2 levels) in <top (required)>'\n"
+        ),
+        "{out}"
+    );
+    assert!(!out.contains("  5) "), "no other failures: {out}");
+    assert!(
+        out.contains("\n8 tests, 3 failures, 1 error, 2 skips\n"),
+        "{out}"
+    );
+    assert_eq!(
+        reruns(&out),
+        [
+            "spinel test test/report_test.rb:8 # ReportTest#test_fails",
+            "spinel test test/report_test.rb:12 # ReportTest#test_fails_through_a_gem",
+            "spinel test test/report_test.rb:18 # ReportTest#test_errors",
+            "spinel test spec/report_spec.rb:6 # report fails",
+        ],
+        "{out}"
+    );
+}
+
+#[test]
+fn gem_frames_are_folded_out_of_a_backtrace() {
+    let dir = scratch("report-gem");
+    let output = spinel_test(
+        &fixture("report"),
+        &["-j", "1", "test/report_test.rb:12"],
+        &dir.join("log"),
+        &[],
+    );
+    std::fs::remove_dir_all(&dir).ok();
+    let out = stdout(&output);
+    assert_eq!(output.status.code(), Some(1), "{out}");
+    // The test's block, called back from three frames of the gem, then the
+    // test's own frame: the gem's three folded to one line between them.
+    assert!(
+        out.contains(
+            "     # test/report_test.rb:14:in 'block in ReportTest#test_fails_through_a_gem'\n\
+             \x20    # (3 gem frames)\n\
+             \x20    # test/report_test.rb:13:in 'ReportTest#test_fails_through_a_gem'\n"
+        ),
+        "{out}"
+    );
+    assert!(!out.contains("checker"), "no gem frame printed: {out}");
+}
+
+#[test]
+fn the_exit_status_is_zero_when_nothing_failed() {
+    let dir = scratch("report-pass");
+    // The skipped test and the passing example only.
+    let output = spinel_test(
+        &fixture("report"),
+        &["-j", "2", "test/report_test.rb:22", "spec/report_spec.rb:4"],
+        &dir.join("log"),
+        &[],
+    );
+    std::fs::remove_dir_all(&dir).ok();
+    let out = stdout(&output);
+    assert_eq!(output.status.code(), Some(0), "{out}{}", stderr(&output));
+    assert!(
+        out.ends_with("\n\n2 tests, 0 failures, 0 errors, 1 skip\n"),
+        "{out}"
+    );
+    assert!(!out.contains("Re-run"), "nothing to re-run: {out}");
+}
+
+/// `command` pasted into `sh` in `fixture`, with `spinel` on the PATH: its
+/// output, and the results it reported.
+fn paste(fixture: &Path, command: &str, events: &Path) -> (Output, Vec<Value>) {
+    let bin = Path::new(SPINEL).parent().expect("the binary's directory");
+    let path = std::env::join_paths(std::iter::once(bin.to_path_buf()).chain(
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+    ))
+    .expect("a PATH");
+    std::fs::remove_file(events).ok();
+    let pasted = Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .current_dir(fixture)
+        .env("PATH", &path)
+        .env("SPINEL_TEST_EVENTS", events)
+        .output()
+        .expect("sh runs");
+    let results = std::fs::read_to_string(events)
+        .unwrap_or_default()
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("an event"))
+        .filter(is_result)
+        .collect();
+    (pasted, results)
+}
+
+/// A re-run command's location and the name of the test it is for.
+fn location_and_name(command: &str) -> (&str, &str) {
+    command
+        .strip_prefix("spinel test ")
+        .and_then(|rest| rest.split_once(" # "))
+        .expect("a command and the test's name")
+}
+
+#[test]
+fn each_printed_re_run_command_runs_its_failure_alone_when_pasted() {
+    let dir = scratch("report-rerun");
+    let output = spinel_test(&fixture("report"), &["-j", "2"], &dir.join("log"), &[]);
+    let out = stdout(&output);
+    assert_eq!(output.status.code(), Some(1), "{out}");
+    let commands = reruns(&out);
+    assert_eq!(commands.len(), 4, "{out}");
+
+    for command in &commands {
+        let (pasted, results) = paste(&fixture("report"), command, &dir.join("events"));
+        let again = stdout(&pasted);
+        assert_eq!(pasted.status.code(), Some(1), "{command}: {again}");
+        assert_eq!(results.len(), 1, "{command} runs one test: {results:?}");
+        let (location, name) = location_and_name(command);
+        let result = &results[0];
+        assert_eq!(result["name"], name, "{command}: {result}");
+        assert!(
+            matches!(result["event"].as_str(), Some("fail" | "error")),
+            "{command}: {result}"
+        );
+        assert_eq!(
+            format!(
+                "{}:{}",
+                result["file"].as_str().expect("a file"),
+                result["line"]
+            ),
+            location,
+            "{command}: {result}"
+        );
+        // And it prints itself to run again.
+        assert_eq!(reruns(&again), std::slice::from_ref(command), "{again}");
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_test_defined_outside_the_file_that_runs_it_re_runs_from_that_file() {
+    // A Minitest test from a module a test class includes, and an RSpec
+    // example from shared examples a group includes, each defined in a file
+    // under `support/` that `spinel test` cannot run.
+    let dir = scratch("report-shared");
+    let output = spinel_test(&fixture("shared"), &["-j", "1"], &dir.join("log"), &[]);
+    let out = stdout(&output);
+    assert_eq!(output.status.code(), Some(1), "{out}{}", stderr(&output));
+    assert!(
+        out.contains(
+            "  1) Failure: SharedTest#test_shared_fails [test/support/shared_tests.rb:3]\n"
+        ),
+        "the failure names where its test is defined: {out}"
+    );
+    assert!(
+        out.contains(
+            "  2) Failure: shared behaves like a sum adds up [spec/support/shared_examples.rb:3]\n"
+        ),
+        "{out}"
+    );
+    // The Minitest one runs again from the file that defined its class, all
+    // of it; the RSpec one from the line that included it, as `rspec`'s own
+    // summary prints it.
+    let commands = reruns(&out);
+    assert_eq!(
+        commands,
+        [
+            "spinel test test/shared_test.rb # SharedTest#test_shared_fails",
+            "spinel test spec/shared_spec.rb:6 # shared behaves like a sum adds up",
+        ],
+        "{out}"
+    );
+    for command in &commands {
+        let (pasted, results) = paste(&fixture("shared"), command, &dir.join("events"));
+        let again = stdout(&pasted);
+        assert_eq!(pasted.status.code(), Some(1), "{command}: {again}");
+        let (_, name) = location_and_name(command);
+        let failed: Vec<&Value> = results
+            .iter()
+            .filter(|result| result["event"] == "fail")
+            .collect();
+        assert_eq!(failed.len(), 1, "{command}: {results:?}");
+        assert_eq!(failed[0]["name"], name, "{command}: {results:?}");
+        assert_eq!(reruns(&again), std::slice::from_ref(command), "{again}");
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_line_runs_the_test_or_example_defined_nearest_above_it() {
+    for (arg, expected) in [
+        // Inside a test's body, and on the line its method starts.
+        ("test/report_test.rb:20", vec!["ReportTest#test_errors"]),
+        ("test/report_test.rb:4", vec!["ReportTest#test_passes"]),
+        // Above every test: none.
+        ("test/report_test.rb:2", vec![]),
+        // Inside an example's body; on a group's line, all of the group.
+        ("spec/report_spec.rb:12", vec!["report is pending"]),
+        (
+            "spec/report_spec.rb:3",
+            vec!["report fails", "report is pending", "report passes"],
+        ),
+    ] {
+        let (output, events) = events_of("report", &["-j", "1", arg]);
+        let mut names: Vec<&str> = events
+            .iter()
+            .filter(|e| is_result(e))
+            .map(|e| e["name"].as_str().expect("a name"))
+            .collect();
+        names.sort_unstable();
+        assert_eq!(names, expected, "{arg}: {}", stdout(&output));
+    }
+}
+
+#[test]
+fn a_test_in_a_class_reopened_by_a_second_file_re_runs_from_that_file() {
+    // Both files on one worker: the class appears with the first, and the
+    // failing test is defined in the second.
+    let dir = scratch("report-reopened");
+    let output = spinel_test(&fixture("reopened"), &["-j", "1"], &dir.join("log"), &[]);
+    let out = stdout(&output);
+    assert_eq!(output.status.code(), Some(1), "{out}{}", stderr(&output));
+    let commands = reruns(&out);
+    assert_eq!(
+        commands,
+        ["spinel test test/b_test.rb:5 # SplitTest#test_b"],
+        "{out}"
+    );
+    let (pasted, results) = paste(&fixture("reopened"), &commands[0], &dir.join("events"));
+    let again = stdout(&pasted);
+    assert_eq!(pasted.status.code(), Some(1), "{again}");
+    assert_eq!(results.len(), 1, "{results:?}");
+    assert_eq!(results[0]["name"], "SplitTest#test_b", "{results:?}");
+    assert_eq!(results[0]["event"], "fail", "{results:?}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn an_inherited_test_re_runs_from_the_file_of_the_class_that_failed() {
+    // `SqliteTest` inherits `test_roundtrip` from `AdapterTest`, defined in
+    // another file given, and fails it; both files on one worker.
+    let dir = scratch("report-inherited");
+    let output = spinel_test(&fixture("inherited"), &["-j", "1"], &dir.join("log"), &[]);
+    let out = stdout(&output);
+    assert_eq!(output.status.code(), Some(1), "{out}{}", stderr(&output));
+    let commands = reruns(&out);
+    assert_eq!(
+        commands,
+        ["spinel test test/sqlite_test.rb # SqliteTest#test_roundtrip"],
+        "{out}"
+    );
+    let (pasted, results) = paste(&fixture("inherited"), &commands[0], &dir.join("events"));
+    let again = stdout(&pasted);
+    assert_eq!(pasted.status.code(), Some(1), "{again}");
+    let failed: Vec<&Value> = results
+        .iter()
+        .filter(|result| result["event"] != "pass")
+        .collect();
+    assert_eq!(failed.len(), 1, "{results:?}");
+    assert_eq!(
+        failed[0]["name"], "SqliteTest#test_roundtrip",
+        "{results:?}"
+    );
+    assert_eq!(failed[0]["event"], "fail", "{results:?}");
+    assert_eq!(
+        reruns(&again),
+        std::slice::from_ref(&commands[0]),
+        "{again}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_path_that_is_not_one_file_given_once_is_an_error() {
+    for (args, error) in [
+        (
+            &["test/missing_test.rb:3"][..],
+            "no such file: test/missing_test.rb",
+        ),
+        (&["test"][..], "no such file: test"),
+        (
+            &["test/report_test.rb:8", "test/report_test.rb"][..],
+            "test/report_test.rb is given more than once",
+        ),
+    ] {
+        let dir = scratch("report-missing");
+        let output = spinel_test(&fixture("report"), args, &dir.join("log"), &[]);
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(output.status.code(), Some(1), "{args:?}");
+        assert_eq!(stdout(&output), "", "nothing ran: {args:?}");
+        assert!(stderr(&output).contains(error), "{}", stderr(&output));
+    }
 }
