@@ -46,6 +46,7 @@ mod resolver;
 mod ruby_args;
 mod ruby_version;
 mod stdlib;
+mod test_runner;
 mod trailer;
 mod tree;
 mod update;
@@ -68,7 +69,7 @@ This build runs Ruby. The core library is minimal — Kernel, Object, Integer,
 String, Symbol, Array, Hash, Comparable — and a program that reaches past it
 says which method is missing rather than failing quietly.
 
-Planned surface (docs/cli.md): test, build.
+Planned surface (docs/cli.md): build.
 Progress: https://github.com/ar4mirez/spinel/milestones";
 
 #[derive(Parser, Debug)]
@@ -135,6 +136,21 @@ enum Command {
         /// each time; nothing is reloaded in place.
         #[arg(long)]
         watch: bool,
+    },
+
+    /// Run the project's tests in parallel workers.
+    ///
+    /// Finds `test/**/*_test.rb` under the current directory, requires
+    /// `test/test_helper.rb` once, then forks the workers, so what the helper
+    /// boots is booted once. Each worker is handed one file at a time. A
+    /// worker that dies while running a file is reported with that file, and
+    /// the exit status is 1. `spec/**/*_spec.rb` files are found but not run
+    /// until RSpec runs on Spinel (#835): they are reported, and the exit
+    /// status is 1.
+    Test {
+        /// How many workers to fork; the physical cores when not given.
+        #[arg(short, long, value_name = "N", value_parser = clap::value_parser!(u16).range(1..))]
+        jobs: Option<u16>,
     },
 
     /// Install the Gemfile's gems into the project's `.spinel/gem_home/`.
@@ -500,6 +516,10 @@ fn main() -> ExitCode {
         Some(Command::Parse { path, format }) => return parse_command(&path, format),
         Some(Command::Init) => return init_command(),
         Some(Command::Install { frozen }) => return install::run(frozen),
+        Some(Command::Test { jobs }) => {
+            project_ruby_version_ok(false);
+            return test_runner::run(jobs.map(usize::from));
+        }
         Some(Command::Add { gems, group, git }) => {
             return add::run(&add::Request {
                 gems: &gems,
@@ -626,7 +646,7 @@ fn main() -> ExitCode {
         }
         eprintln!("spinel: unknown subcommand `{argument}`.");
         eprintln!(
-            "        This build has five: run, init, install, x, parse. Try `spinel --help`."
+            "        This build has: run, init, install, add, remove, update, x, test, parse. Try `spinel --help`."
         );
         return ExitCode::from(EXIT_USAGE);
     }
