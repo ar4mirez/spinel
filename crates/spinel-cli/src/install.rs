@@ -18,7 +18,9 @@ use crate::gem_platform::{self, GemPlatform};
 use crate::local_source::{self, Declared, DeclaredSource, LocalGem, Materialized};
 use crate::lockfile::{LockSource, Lockfile, SourceKind};
 use crate::resolver::{self, GemfileDependency, Spec};
-use crate::{compact_index, gem_home, gem_requirement, gem_spec, gem_store, gem_version, home};
+use crate::{
+    builtin_gem, compact_index, gem_home, gem_requirement, gem_spec, gem_store, gem_version, home,
+};
 use crate::{locked, lockfile};
 
 /// Spinel's Gemfile evaluator (docs/package-manager.md, "1. Gemfile
@@ -806,7 +808,80 @@ impl Session {
                 },
             )
             .collect();
-        let to_install = to_fetch;
+
+        // A gem Spinel ships as a built-in is not fetched: the built-in
+        // stands in for it (#83, docs/package-manager.md, section 6). Its
+        // gemspec is checked and its skew from the lock judged for every one
+        // before anything is written, so a gemspec RubyGems would refuse or
+        // a major version apart fails the install as it was.
+        let (builtins, to_install): (Vec<Spec>, Vec<Spec>) = to_fetch
+            .into_iter()
+            .partition(|s| builtin_gem::find(&s.name).is_some());
+        let mut refused = false;
+        let mut gemspecs = Vec::with_capacity(builtins.len());
+        for spec in &builtins {
+            let builtin = builtin_gem::find(&spec.name).expect("partitioned on it");
+            match gem_spec::from_yaml(builtin_gem::gemspec_yaml(spec, builtin).as_bytes()).and_then(
+                |s| {
+                    s.verify()
+                        .map_err(|e| format!("RubyGems would refuse it: {e}"))?;
+                    s.to_ruby_for_cache()
+                },
+            ) {
+                Ok(gemspec) => gemspecs.push(gemspec),
+                Err(err) => {
+                    self.fail(format!("{}: {err}", spec.full_name()));
+                    refused = true;
+                }
+            }
+            let shipped = gem_version::Version::new(builtin.version)
+                .expect("a built-in's version is a version");
+            match builtin_gem::skew(&spec.version, &shipped) {
+                builtin_gem::Skew::Patch => {}
+                builtin_gem::Skew::Minor => eprintln!(
+                    "spinel: {}: warning: {lock_name} pins {} {}, and Spinel's built-in {} is {}: \
+                     using the built-in",
+                    self.command,
+                    spec.name,
+                    version_of(spec),
+                    builtin.name,
+                    builtin.version
+                ),
+                builtin_gem::Skew::Major => {
+                    self.fail(format!(
+                        "{lock_name} pins {} {}, and Spinel's built-in {} is {}: a different major \
+                         version, whose Ruby half may expect other primitives than Spinel's; \
+                         `gem {:?}, {:?}` in the Gemfile keeps it to the built-in's version",
+                        spec.name,
+                        version_of(spec),
+                        builtin.name,
+                        builtin.version,
+                        spec.name,
+                        format!("~> {}", builtin.version)
+                    ));
+                    refused = true;
+                }
+            }
+        }
+        if refused {
+            return Err(Stop(ExitCode::FAILURE));
+        }
+        for (spec, gemspec) in builtins.iter().zip(gemspecs) {
+            let builtin = builtin_gem::find(&spec.name).expect("partitioned on it");
+            let gem_dir = builtin_gem::make_gem_dir(&self.home, builtin)
+                .and_then(std::path::absolute)
+                .map_err(|err| self.fail(format!("{}: {err}", spec.full_name())))?;
+            local_links.push(gem_home::LocalLink {
+                full_name: spec.full_name(),
+                name: spec.name.clone(),
+                gem_dir,
+                gemspec,
+                require_paths: vec!["lib".to_owned()],
+                bindir: None,
+                executables: Vec::new(),
+                extensions: Vec::new(),
+            });
+        }
 
         // Each one's checksum: the lockfile's, else the index's.
         let mut sums: HashMap<String, String> = lock
@@ -941,9 +1016,12 @@ impl Session {
         // ponytail: the bytecode cache is not warmed; a first `require`
         // compiles each file. Upgrade: warm it here, from the files the map
         // lists.
-        // ponytail: no gem is substituted, so `.spinel/substitutions.json` is
-        // not written. Upgrade: built-in gems are #83, Spinel-native ones
-        // phase 5.
+        // What stands in for which locked gem: the built-ins (#83).
+        // ponytail: Spinel-native gems are not substituted yet. Upgrade:
+        // phase 5 adds them here, `"kind": "native"` with the substitute's
+        // name, version and platform.
+        write_substitutions(&self.root, &builtins)
+            .map_err(|err| self.fail(format!(".spinel/{SUBSTITUTIONS}: {err}")))?;
         for scope in bundler_scopes() {
             for warning in
                 gem_home::scope_view(&gem_home_dir, &scope).map_err(|err| self.fail(err))?
@@ -989,7 +1067,7 @@ impl Session {
 
         // What changed, uv-style.
         let mut lines: Vec<(String, String)> = Vec::new();
-        for spec in to_install.iter().chain(&local_specs) {
+        for spec in to_install.iter().chain(&local_specs).chain(&builtins) {
             if !before.contains(&spec.full_name()) {
                 lines.push((
                     spec.name.clone(),
@@ -1276,6 +1354,37 @@ fn bundler_scopes() -> [String; 2] {
     let minor = parts.next().unwrap_or("0");
     let ruby_version = format!("{major}.{minor}.0");
     ["ruby", spinel_vm::ENGINE].map(|engine| format!("{engine}/{ruby_version}"))
+}
+
+/// `.spinel/substitutions.json`, beside the GEM_HOME.
+const SUBSTITUTIONS: &str = "substitutions.json";
+
+/// Record in `.spinel/substitutions.json` which locked gems the GEM_HOME
+/// holds something else for, the lockfile still naming them as Bundler
+/// does: each built-in, with the locked name, version and platform and the
+/// version Spinel ships. Written every time, so it is what this install did.
+fn write_substitutions(root: &Path, builtins: &[Spec]) -> std::io::Result<()> {
+    let list: Vec<serde_json::Value> = builtins
+        .iter()
+        .filter_map(|spec| {
+            let builtin = builtin_gem::find(&spec.name)?;
+            Some(serde_json::json!({
+                "name": spec.name,
+                "version": spec.version.to_string(),
+                "platform": spec.platform.to_string(),
+                "kind": "builtin",
+                "substitute_version": builtin.version,
+            }))
+        })
+        .collect();
+    let mut text = serde_json::to_string_pretty(&serde_json::json!({ "substitutions": list }))
+        .expect("JSON of strings serializes");
+    text.push('\n');
+    let path = root.join(".spinel").join(SUBSTITUTIONS);
+    if std::fs::read(&path).ok().as_deref() == Some(text.as_bytes()) {
+        return Ok(());
+    }
+    write_atomically(&path, text.as_bytes())
 }
 
 /// Point Bundler at the GEM_HOME: `BUNDLE_PATH` in the project's

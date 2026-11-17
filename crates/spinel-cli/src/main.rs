@@ -6,6 +6,7 @@
 //! `docs/cli.md` for the full surface.
 
 mod add;
+mod builtin_gem;
 mod compact_index;
 mod did_you_mean;
 mod gem_home;

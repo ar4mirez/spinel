@@ -9,6 +9,16 @@ bytecode a tool reads.
 
 ### Added
 
+- **`spinel install` uses Spinel's built-in gems for the ones a lockfile
+  pins** ([#83](https://github.com/ar4mirez/spinel/issues/83)). A lock
+  pinning `json`, `stringio`, `strscan`, `date`, `digest`, `zlib`, `etc`,
+  `io-console` or `fcntl` installs the built-in in its place: the gem is not
+  fetched and its `ext/` is not built, the GEM_HOME gets the locked name and
+  version so `Bundler.setup` activates it, `.spinel/substitutions.json`
+  records it, and the lockfile is unchanged. A minor version apart from the
+  built-in warns; a major version apart fails the install before anything is
+  written.
+
 - **The require map: `require` passes over the gem directories that do not
   have a file** ([#66](https://github.com/ar4mirez/spinel/issues/66)).
   `spinel install` writes `.spinel/require_map.bin`, what every installed
