@@ -44,6 +44,11 @@ yaml-rust2 = { version = "0.13", default-features = false }
 tokio = { version = "1", features = ["rt", "sync"] }
 zstd = "0.13"
 
+[dev-dependencies]
+# `spinel test --reporter junit` (#95): its XML read back as a CI system
+# reads it, to check it against the schema they expect.
+roxmltree = "0.21"
+
 [build-dependencies]
 zstd = "0.13"
 

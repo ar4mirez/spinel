@@ -150,11 +150,16 @@ enum Command {
     /// test as it passes, then each failure with its `file:line` and
     /// backtrace, gem frames folded, a summary line, and a `spinel test
     /// file:line` command to run each failure again. Exits 1 when anything
-    /// failed.
+    /// failed. `--reporter json` prints one JSON object per event instead,
+    /// for tools, and `--reporter junit` JUnit XML, for CI.
     Test {
         /// How many workers to fork; the physical cores when not given.
         #[arg(short, long, value_name = "N", value_parser = clap::value_parser!(u16).range(1..))]
         jobs: Option<u16>,
+        /// What stdout gets; with `json` or `junit` it gets only that, and
+        /// what tests print goes to stderr.
+        #[arg(long, value_enum, default_value_t = test_runner::Reporter::Progress)]
+        reporter: test_runner::Reporter,
         /// Files to run instead of every test; `FILE:LINE` runs only the
         /// test or example defined at or nearest above LINE.
         #[arg(value_name = "FILE[:LINE]")]
@@ -524,9 +529,13 @@ fn main() -> ExitCode {
         Some(Command::Parse { path, format }) => return parse_command(&path, format),
         Some(Command::Init) => return init_command(),
         Some(Command::Install { frozen }) => return install::run(frozen),
-        Some(Command::Test { jobs, paths }) => {
+        Some(Command::Test {
+            jobs,
+            reporter,
+            paths,
+        }) => {
             project_ruby_version_ok(false);
-            return test_runner::run(jobs.map(usize::from), &paths);
+            return test_runner::run(jobs.map(usize::from), reporter, &paths);
         }
         Some(Command::Add { gems, group, git }) => {
             return add::run(&add::Request {

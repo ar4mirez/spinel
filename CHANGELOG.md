@@ -9,6 +9,19 @@ bytecode a tool reads.
 
 ### Added
 
+- **`spinel test --reporter json` and `--reporter junit`**
+  ([#95](https://github.com/ar4mirez/spinel/issues/95)). `json`, for tools,
+  prints each event as one JSON object per line as it arrives, then a
+  `problem` event for each crash or file that raised loading, and a
+  `summary` event with the counts. `junit`, for CI, prints one JUnit XML
+  document in the shape Jenkins' schema gives and GitLab and GitHub
+  Actions' reporters read: a `testsuite` per file and a `testcase` per test
+  or example, with its `file` and `line`, and a `failure`, `error` or
+  `skipped`; each crash is a `testcase` with an `error`. Under either,
+  stdout holds only that, and what tests print goes to stderr. The exit
+  status is the default report's. This takes the place of
+  `SPINEL_TEST_EVENTS`.
+
 - **`spinel test` reports the run and prints commands to re-run failures**
   ([#94](https://github.com/ar4mirez/spinel/issues/94)). It prints a dot per
   passing test, then each failure and error with its `file:line`, message and
@@ -28,7 +41,7 @@ bytecode a tool reads.
   whole however many workers write at once. Minitest's skips, errors and
   failures are told apart as its own summary tells them; RSpec's pending and
   skipped examples are skips and every other failing example a failure.
-  `SPINEL_TEST_EVENTS=path` appends every event to `path`.
+  `spinel test --reporter json` prints them (#95).
 
 - **`require "prism"` and `require "ripper"` work, so RSpec reports
   failures** ([#837](https://github.com/ar4mirez/spinel/issues/837)). The

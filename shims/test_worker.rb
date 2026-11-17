@@ -119,7 +119,9 @@ module Spinel
     # required. When any has a line, only the tests at it run of the
     # classes that file defined.
     # ponytail: a plugin's own printing reporter (Rails' `TestUnitReporter`)
-    # still prints; `--reporter` (#95) is where to choose.
+    # still prints, on stderr under `--reporter json` or `junit` (#95);
+    # taking it out of the run too, as the `SummaryReporter` is, is the
+    # upgrade.
     def self.minitest(files = [])
       return unless defined?(::Minitest) && ::Minitest.respond_to?(:init_plugins)
 
