@@ -9,6 +9,15 @@ bytecode a tool reads.
 
 ### Added
 
+- **`spinel test` runs the Minitest suite on forked workers**
+  ([#92](https://github.com/ar4mirez/spinel/issues/92)). It finds
+  `test/**/*_test.rb`, requires `test/test_helper.rb` once, then forks `-j N`
+  workers (the physical cores by default) that take one file at a time, so
+  what the helper boots is booted once. A worker that dies mid-file is
+  reported with that file and replaced, and the run exits 1. RSpec files under
+  `spec/` are found but not run until
+  [#835](https://github.com/ar4mirez/spinel/issues/835); finding any exits 1.
+
 - **`spinel install` uses Spinel's built-in gems for the ones a lockfile
   pins** ([#83](https://github.com/ar4mirez/spinel/issues/83)). A lock
   pinning `json`, `stringio`, `strscan`, `date`, `digest`, `zlib`, `etc`,

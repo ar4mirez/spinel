@@ -27,9 +27,9 @@ pub(crate) fn run(jobs: Option<usize>) -> ExitCode {
 }
 
 /// The physical cores (docs/test-runner.md): a hyperthread's sibling shares
-/// its core's execution units, so it does not get a worker of its own. Never more than the CPUs this process may run on (a
-/// container's quota, an affinity mask), and those when the platform does
-/// not say.
+/// its core's execution units, so it does not get a worker of its own. Never
+/// more than the CPUs this process may run on (a container's quota, an
+/// affinity mask), and those when the platform does not say.
 fn physical_cores() -> usize {
     let available = std::thread::available_parallelism().map_or(1, usize::from);
     platform_physical_cores()
