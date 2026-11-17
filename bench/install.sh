@@ -225,7 +225,7 @@ for gem in "$app"/.spinel/gem_home/gems/*; do
     urls+=("https://rubygems.org/gems/$(basename "$gem").gem")
   fi
 done
-bytes="$(du -sb "$SPINEL_HOME/store/gems" | cut -f1)"
+bytes="$(( $(du -sk "$SPINEL_HOME/store/gems" | cut -f1) * 1024 ))"
 
 rev="$(git -C "$repo_root" rev-parse --short HEAD)"
 # Only the installer decides the numbers; an edit under bench/ does not.
