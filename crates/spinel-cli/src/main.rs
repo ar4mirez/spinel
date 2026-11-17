@@ -47,6 +47,7 @@ mod ruby_args;
 mod ruby_version;
 mod stdlib;
 mod test_runner;
+mod test_watch;
 mod trailer;
 mod tree;
 mod update;
@@ -154,6 +155,7 @@ enum Command {
     /// file:line` command to run each failure again. Exits 1 when anything
     /// failed. `--reporter json` prints one JSON object per event instead,
     /// for tools, and `--reporter junit` JUnit XML, for CI.
+    /// `--watch` runs them again as the project changes.
     Test {
         /// How many workers to fork; the physical cores when not given.
         #[arg(short, long, value_name = "N", value_parser = clap::value_parser!(u16).range(1..))]
@@ -166,6 +168,19 @@ enum Command {
         /// test or example defined at or nearest above LINE.
         #[arg(value_name = "FILE[:LINE]")]
         paths: Vec<String>,
+        /// Run the tests again whenever a file in the current directory
+        /// changes.
+        ///
+        /// A changed test or spec file runs itself; a changed
+        /// `app/**/NAME.rb` or `lib/**/NAME.rb` runs `test/**/NAME_test.rb`
+        /// and `spec/**/NAME_spec.rb`; any other change runs what failed
+        /// last. Enter runs every test. Paths `.gitignore` excludes do not
+        /// count, nor does `.spinel/`.
+        #[arg(long)]
+        watch: bool,
+        /// Where `--watch` has each run record what failed.
+        #[arg(long, hide = true, value_name = "FILE")]
+        record_failures: Option<PathBuf>,
     },
 
     /// Install the Gemfile's gems into the project's `.spinel/gem_home/`.
@@ -535,9 +550,21 @@ fn main() -> ExitCode {
             jobs,
             reporter,
             paths,
+            watch,
+            record_failures,
         }) => {
+            // Each run under `--watch` reads the project's Ruby version
+            // itself, so each reports it afresh.
+            if watch {
+                return test_watch::run(jobs, reporter, &paths);
+            }
             project_ruby_version_ok(false);
-            return test_runner::run(jobs.map(usize::from), reporter, &paths);
+            return test_runner::run(
+                jobs.map(usize::from),
+                reporter,
+                record_failures.as_deref(),
+                &paths,
+            );
         }
         Some(Command::Add { gems, group, git }) => {
             return add::run(&add::Request {
@@ -1321,7 +1348,7 @@ fn watch_run(path: &Path, args: &[String], dump_bytecode: bool, strict: bool) ->
     child.push("--".into());
     child.push(path.into());
     child.extend(args.iter().map(Into::into));
-    watch::run(&root, &child)
+    watch::run(&root, watch::Program { args: child })
 }
 
 /// `spinel` given `ruby`'s flags: the prelude they mean, then the program

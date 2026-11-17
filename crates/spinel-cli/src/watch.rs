@@ -6,15 +6,17 @@
 //! process group of its own, watches the project directory with `notify`, and
 //! on a change that `.gitignore` does not exclude it ends that group and
 //! starts a fresh child. Nothing is reloaded in place; Zeitwerk and its kind
-//! already do that inside an app. `spinel run --watch` builds the child's
-//! command line today, and `spinel test --watch` is meant to hand its own to
-//! [`run`] the same way.
+//! already do that inside an app. What the child is, and what a change runs
+//! next, is a [`Target`]'s: `spinel run --watch` runs the same program again
+//! ([`Program`]), and `spinel test --watch` the tests a change maps to
+//! (`test_watch.rs`).
 
 use std::collections::HashMap;
 use std::ffi::OsString;
+use std::io::BufRead;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitCode, ExitStatus};
+use std::process::{Child, Command, ExitCode, ExitStatus, Stdio};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -40,12 +42,81 @@ const POLL: Duration = Duration::from_millis(50);
 enum Message {
     Changed(notify::Result<Event>),
     Signal(i32),
+    /// A line on standard input, for a [`Target`] that reads Enter.
+    Enter,
 }
 
-/// Watch `root` and keep `spinel <child_args>` running against it until a
-/// signal ends the supervisor. Returns the exit code for that signal, as a
-/// shell reports a process it ended: 128 plus its number.
-pub fn run(root: &Path, child_args: &[OsString]) -> ExitCode {
+/// What a change, or Enter, runs next: the line the supervisor prints, and
+/// the child's command line after `spinel`, or `None` to start nothing and
+/// leave a running child be.
+pub(crate) struct Next {
+    pub(crate) line: String,
+    pub(crate) args: Option<Vec<OsString>>,
+}
+
+/// What the supervisor runs, and what each change runs next.
+pub(crate) trait Target {
+    /// The first child's command line, after `spinel`.
+    fn first(&mut self) -> Vec<OsString>;
+
+    /// What the paths in `changed`, each under `root` and kept by
+    /// `.gitignore`, run next. `running` says whether the last child is still
+    /// running, to be stopped if this starts another.
+    fn changed(&mut self, root: &Path, changed: &[PathBuf], running: bool) -> Next;
+
+    /// What Enter runs next, for a target that reads it ([`Target::reads_enter`]).
+    fn enter(&mut self, _running: bool) -> Next {
+        Next {
+            line: String::new(),
+            args: None,
+        }
+    }
+
+    /// Whether the supervisor reads standard input, each line an Enter. Its
+    /// children then get none, so they cannot take a line meant for it.
+    fn reads_enter(&self) -> bool {
+        false
+    }
+
+    /// Whether a change to `relative`, a path under the project that
+    /// `.gitignore` keeps, is the target's own and not the project's.
+    fn ignores(&self, _relative: &Path) -> bool {
+        false
+    }
+
+    /// The line to print once the child has ended on its own with `status`.
+    fn ended(&mut self, status: ExitStatus) -> String;
+}
+
+/// `spinel run --watch`: the same program, started again on any change.
+pub(crate) struct Program {
+    pub(crate) args: Vec<OsString>,
+}
+
+impl Target for Program {
+    fn first(&mut self) -> Vec<OsString> {
+        self.args.clone()
+    }
+
+    fn changed(&mut self, root: &Path, changed: &[PathBuf], _running: bool) -> Next {
+        Next {
+            line: format!("spinel: restarting: {}", describe(root, changed)),
+            args: Some(self.args.clone()),
+        }
+    }
+
+    fn ended(&mut self, status: ExitStatus) -> String {
+        format!(
+            "spinel: the program {}; waiting for a change",
+            ended(status)
+        )
+    }
+}
+
+/// Watch `root` and keep `target`'s child running against it until a signal
+/// ends the supervisor. Returns the exit code for that signal, as a shell
+/// reports a process it ended: 128 plus its number.
+pub(crate) fn run<T: Target>(root: &Path, mut target: T) -> ExitCode {
     let root = match root.canonicalize() {
         Ok(root) => root,
         Err(err) => {
@@ -77,6 +148,26 @@ pub fn run(root: &Path, child_args: &[OsString]) -> ExitCode {
             }
         }
     });
+    if target.reads_enter() {
+        // Each line is an Enter, whatever was typed before it; at the end of
+        // input, as from `/dev/null`, there is no Enter to wait for.
+        let on_enter = sender.clone();
+        thread::spawn(move || {
+            let mut stdin = std::io::stdin().lock();
+            let mut line = Vec::new();
+            loop {
+                line.clear();
+                match stdin.read_until(b'\n', &mut line) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        if on_enter.send(Message::Enter).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+    }
 
     let mut watcher = match notify::recommended_watcher(move |event| {
         let _ = sender.send(Message::Changed(event));
@@ -98,16 +189,18 @@ pub fn run(root: &Path, child_args: &[OsString]) -> ExitCode {
     eprintln!("spinel: watching {} for changes", root.display());
 
     let mut ignored = Ignored::new(root.clone());
-    let mut child = Running::start(&program, child_args, &root);
+    let stdin = !target.reads_enter();
+    let mut child = Running::start(&program, &target.first(), &root, stdin);
     let mut changed: Vec<PathBuf> = Vec::new();
     let mut deadline: Option<Instant> = None;
     loop {
         let wait = deadline.map_or(POLL, |at| {
             at.saturating_duration_since(Instant::now()).min(POLL)
         });
+        let mut next = None;
         match messages.recv_timeout(wait) {
             Ok(Message::Changed(Ok(event))) => {
-                let mut kept = collect(&event, &mut ignored, &mut changed);
+                let mut kept = collect(&event, &mut ignored, &target, &mut changed);
                 // Events were lost, so any file may have changed.
                 if event.need_rescan() {
                     kept = true;
@@ -120,6 +213,13 @@ pub fn run(root: &Path, child_args: &[OsString]) -> ExitCode {
                 }
             }
             Ok(Message::Changed(Err(err))) => eprintln!("spinel: warning: watching: {err}"),
+            Ok(Message::Enter) => {
+                reap(&mut child, &mut target);
+                // What Enter runs takes in whatever changed before it.
+                changed.clear();
+                deadline = None;
+                next = Some(target.enter(child.is_running()));
+            }
             Ok(Message::Signal(signal)) => {
                 child.stop();
                 return ExitCode::from(128 + u8::try_from(signal).unwrap_or(0));
@@ -132,21 +232,43 @@ pub fn run(root: &Path, child_args: &[OsString]) -> ExitCode {
             }
         }
         if deadline.is_some_and(|at| Instant::now() >= at) {
-            eprintln!("spinel: restarting: {}", describe(&root, &changed));
+            reap(&mut child, &mut target);
+            next = Some(target.changed(&root, &changed, child.is_running()));
             changed.clear();
             deadline = None;
-            child.stop();
-            child = Running::start(&program, child_args, &root);
         }
-        child.reap();
+        if let Some(next) = next {
+            if !next.line.is_empty() {
+                eprintln!("{}", next.line);
+            }
+            if let Some(args) = next.args {
+                child.stop();
+                child = Running::start(&program, &args, &root, stdin);
+            }
+        }
+        reap(&mut child, &mut target);
     }
 }
 
-/// Add each path an event names that `.gitignore` keeps, once, to `changed`,
-/// and report whether the event named any such path, pending already or not.
-/// Reading a file is not a change: the child reads the program every time it
-/// starts, and counting that would restart it forever.
-fn collect(event: &Event, ignored: &mut Ignored, changed: &mut Vec<PathBuf>) -> bool {
+/// Tell `target` the child ended, once it has ended on its own; the
+/// supervisor goes on watching, and the next change starts another.
+fn reap<T: Target>(child: &mut Running, target: &mut T) {
+    if let Some(status) = child.reap() {
+        eprintln!("{}", target.ended(status));
+    }
+}
+
+/// Add each path an event names that `.gitignore` keeps, and `target` does
+/// not take for its own, once, to `changed`, and report whether the event
+/// named any such path, pending already or not. Reading a file is not a
+/// change: the child reads the program every time it starts, and counting
+/// that would restart it forever.
+fn collect<T: Target>(
+    event: &Event,
+    ignored: &mut Ignored,
+    target: &T,
+    changed: &mut Vec<PathBuf>,
+) -> bool {
     if matches!(event.kind, EventKind::Access(_)) {
         return false;
     }
@@ -160,7 +282,11 @@ fn collect(event: &Event, ignored: &mut Ignored, changed: &mut Vec<PathBuf>) -> 
             ignored.forget(path.parent().unwrap_or(path));
         }
         let is_dir = dir_kind || path.is_dir();
-        if ignored.is_ignored(path, is_dir) {
+        if ignored.is_ignored(path, is_dir)
+            || path
+                .strip_prefix(&ignored.root)
+                .is_ok_and(|relative| target.ignores(relative))
+        {
             continue;
         }
         kept = true;
@@ -173,7 +299,7 @@ fn collect(event: &Event, ignored: &mut Ignored, changed: &mut Vec<PathBuf>) -> 
 
 /// The changed paths for the restart line: relative to the project, the first
 /// few named and the rest counted.
-fn describe(root: &Path, changed: &[PathBuf]) -> String {
+pub(crate) fn describe(root: &Path, changed: &[PathBuf]) -> String {
     const NAMED: usize = 3;
     let mut names: Vec<String> = changed
         .iter()
@@ -199,16 +325,19 @@ struct Running {
 }
 
 impl Running {
-    fn start(program: &Path, args: &[OsString], dir: &Path) -> Running {
+    /// Start `spinel <args>` in `dir`, with the supervisor's standard input
+    /// when `stdin`, else none.
+    fn start(program: &Path, args: &[OsString], dir: &Path, stdin: bool) -> Running {
         // ponytail: the child's group is not the terminal's foreground group,
         // so a program that reads the terminal is stopped by SIGTTIN, and
         // Ctrl-C reaches it only through the supervisor. Handing the terminal
         // to the child's group with `tcsetpgrp` while it runs lifts both.
-        let spawned = Command::new(program)
-            .args(args)
-            .current_dir(dir)
-            .process_group(0)
-            .spawn();
+        let mut command = Command::new(program);
+        command.args(args).current_dir(dir).process_group(0);
+        if !stdin {
+            command.stdin(Stdio::null());
+        }
+        let spawned = command.spawn();
         match spawned {
             Ok(child) => Running { child: Some(child) },
             Err(err) => {
@@ -218,22 +347,24 @@ impl Running {
         }
     }
 
-    /// Report the child once it has ended on its own; the supervisor goes on
-    /// watching, and the next change starts it again.
-    fn reap(&mut self) {
-        let Some(child) = &mut self.child else { return };
+    /// Whether the child was started and has not been seen to end.
+    fn is_running(&self) -> bool {
+        self.child.is_some()
+    }
+
+    /// The child's status, once, when it has ended on its own.
+    fn reap(&mut self) -> Option<ExitStatus> {
+        let child = self.child.as_mut()?;
         match child.try_wait() {
             Ok(Some(status)) => {
-                eprintln!(
-                    "spinel: the program {}; waiting for a change",
-                    ended(status)
-                );
                 self.child = None;
+                Some(status)
             }
-            Ok(None) => {}
+            Ok(None) => None,
             Err(err) => {
                 eprintln!("spinel: warning: cannot wait for the program: {err}");
                 self.child = None;
+                None
             }
         }
     }
@@ -281,7 +412,8 @@ fn signal_group(group: libc::pid_t, signal: libc::c_int) {
     }
 }
 
-fn ended(status: ExitStatus) -> String {
+/// How the child ended, as the lines after it name it.
+pub(crate) fn ended(status: ExitStatus) -> String {
     match (status.code(), status.signal()) {
         (Some(code), _) => format!("exited with status {code}"),
         (None, Some(signal)) => format!("was ended by signal {signal}"),

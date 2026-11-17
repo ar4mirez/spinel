@@ -55,6 +55,15 @@ spinel test ──fork N workers──▶ each worker: Spinel VM, -r shims/test_
 
 `--watch` maps changed files to tests to rerun: a changed `test/foo_test.rb` reruns itself; a changed `app/models/user.rb` or `lib/user.rb` reruns `test/**/user_test.rb` and `spec/**/user_spec.rb` by name convention; anything else reruns the last failed set, or everything on Enter. // ponytail: name convention only; a require-graph from the bytecode cache could do better later.
 
+Built (#97), on `--watch`'s supervisor (cli.md, "`--watch`": the `.gitignore` filtering, the 100 ms debounce, each run a fresh `spinel test` in a process group of its own, ended whole), in `crates/spinel-cli/src/test_watch.rs`. The changes one debounce gathers, each by its path under the project:
+
+- `test/**/*_test.rb` or `spec/**/*_spec.rb`, as discovery finds them, still a file: runs itself, whole.
+- `app/**/NAME.rb` or `lib/**/NAME.rb`, there or deleted: runs every `test/**/NAME_test.rb` and `spec/**/NAME_spec.rb`, at any depth, by name alone. One no test is named for counts as anything else.
+- Anything else, a test file deleted included: runs what failed last. `.spinel/`, where every run writes its timings and the bytecode cache, is no change at all, as a path `.gitignore` excludes is none.
+- Enter, a line on standard input: every test, or the files `spinel test --watch` was given; the first run is the same.
+
+Several changes run the files each maps to, together. What failed is the runner's own record, not its report: each run is given a file, in a directory of the supervisor's own under `$TMPDIR` that goes with it, and once both phases have ended the runner writes there, as `{"version": 1, "failed": [...]}`, the `rerun` of each failure and error and of each problem that has one, the locations `Re-run each failure:` lists (`shims/test_runner.rb`, step 9). The supervisor keeps the set from run to run: a run that ended replaces what was known of the files it ran and keeps the rest, so a passing run of `lib/user.rb`'s tests leaves another file's failure to run on the next change; a run that recorded nothing, a discovery error or a run stopped by the next change, changes nothing. A failure runs again at its line (`test/answer_test.rb:7`), a file with failures at two lines whole, as `spinel test` takes each file once; a file deleted since it failed is left out. When nothing failed last, anything else runs nothing, and the supervisor says so and waits: a change such as `config/settings.rb` could affect every test, and Enter is there for that. A change that starts a run stops one still going, and the tests the stopped one was to run run with it (every test, if it was every test), so no change's tests go unrun.
+
 ## Not in scope
 
 Coverage (use `simplecov`), mocking, snapshot testing, browser drivers. Spinel gets out of the way.
