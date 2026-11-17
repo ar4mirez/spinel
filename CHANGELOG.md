@@ -9,6 +9,16 @@ bytecode a tool reads.
 
 ### Added
 
+- **A compiled app runs** ([#101](https://github.com/ar4mirez/spinel/issues/101)).
+  An app `spinel build --compile` writes extracts its payload once, to
+  `$XDG_CACHE_HOME/spinel/apps/<sha256>/` (`~/.cache` by default), and runs
+  its entry point with the app's gems, environment and warmed bytecode cache;
+  later runs reuse the extracted copy without reading the payload. Every
+  argument is the app's: `mytool --help` is the app's help, never Spinel's.
+  `docs/build.md`, "Runtime behavior of a compiled app", has the details.
+  **Breaking** for `--dump-bytecode`: `__FILE__` is a `SourceFile` literal
+  rather than a `Str`, so the bytecode cache can move a compiled file.
+
 - **`spinel build --compile <entry> -o <app>` packs a project into one
   executable** ([#100](https://github.com/ar4mirez/spinel/issues/100)). The
   app is this `spinel` with a payload of the project's files (as
@@ -16,8 +26,7 @@ bytecode a tool reads.
   lockfile's `default` group and each `--group` as real copies, a warmed
   bytecode cache and a manifest (entry point, version, `spinel-ext` ABI,
   `--env`, and the arguments after `--`). The same project builds the same
-  bytes. Running the app is #101; until then it verifies its payload and
-  says it cannot run yet. `docs/build.md`, "The payload", has the details.
+  bytes. `docs/build.md`, "The payload", has the details.
 
 - **`spinel test` keeps each file's time and hands out the slowest first**
   ([#96](https://github.com/ar4mirez/spinel/issues/96)). After a run, each

@@ -141,7 +141,15 @@ pub fn hex(bytes: &[u8]) -> String {
 /// The compiled app `file` holds, if it holds one: `Ok(None)` when it does not
 /// end in the magic, an error when it does but the payload is short or does not
 /// match its sha256.
+#[cfg(test)]
 pub fn read<F: Read + Seek>(file: &mut F) -> Result<Option<App>, Error> {
+    read_with(file, true)
+}
+
+/// `read`, and the payload hashed only when `verify` says so: a compiled app
+/// whose payload is already extracted under its hash does not read it again
+/// (`app.rs`), and one that is not hashes it as it extracts it.
+fn read_with<F: Read + Seek>(file: &mut F, verify: bool) -> Result<Option<App>, Error> {
     let len = file.seek(SeekFrom::End(0))?;
     if len < LEN as u64 {
         return Ok(None);
@@ -160,6 +168,12 @@ pub fn read<F: Read + Seek>(file: &mut F) -> Result<Option<App>, Error> {
         });
     }
     let payload_offset = available - trailer.payload_len;
+    if !verify {
+        return Ok(Some(App {
+            payload_offset,
+            trailer,
+        }));
+    }
     file.seek(SeekFrom::Start(payload_offset))?;
     // Streamed, so a 150 MB payload is not read into memory to be hashed.
     let mut hasher = Sha256::new();
@@ -191,17 +205,33 @@ pub fn read<F: Read + Seek>(file: &mut F) -> Result<Option<App>, Error> {
 /// in the `__SPINEL,__payload` section of a Mach-O, and at the end of any
 /// other file. What `read` answers, with `payload_offset` from the start of
 /// the file either way.
+#[cfg(test)]
 pub fn locate<F: Read + Seek>(file: &mut F) -> Result<Option<App>, Error> {
+    locate_with(file, true)
+}
+
+/// `locate` without hashing the payload: where it is and what the trailer
+/// says it hashes to, the length checked against the file. The caller hashes
+/// the payload as it reads it, or trusts a copy already extracted under that
+/// hash (`app.rs`, #101).
+pub fn find<F: Read + Seek>(file: &mut F) -> Result<Option<App>, Error> {
+    locate_with(file, false)
+}
+
+fn locate_with<F: Read + Seek>(file: &mut F, verify: bool) -> Result<Option<App>, Error> {
     match macho::place(file)? {
-        macho::Place::NotMachO => read(file),
+        macho::Place::NotMachO => read_with(file, verify),
         macho::Place::NoSection | macho::Place::Unsupported => Ok(None),
         macho::Place::Section { offset, size } => {
-            let found = read(&mut Window {
-                inner: file,
-                start: offset,
-                len: size,
-                pos: 0,
-            })?;
+            let found = read_with(
+                &mut Window {
+                    inner: file,
+                    start: offset,
+                    len: size,
+                    pos: 0,
+                },
+                verify,
+            )?;
             Ok(found.map(|app| App {
                 payload_offset: offset + app.payload_offset,
                 ..app

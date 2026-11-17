@@ -769,10 +769,11 @@ fn mode(meta: &Metadata) -> u32 {
 /// Compile `source`, as `require` would compile it under `path`, into the
 /// cache in `dir`. A file that does not parse or compile is left to be
 /// compiled, and to fail, when it is required.
-// ponytail: compiled under its path in the payload (`app/lib/x.rb`), since
-// where the app is extracted (`$XDG_CACHE_HOME/spinel/apps/<hash>/`) depends
-// on the payload's hash, which this cache is part of. Running the app (#101)
-// reads the entries rebased onto that directory.
+///
+/// Compiled under its path in the payload (`app/lib/x.rb`), since where the
+/// app is extracted (`$XDG_CACHE_HOME/spinel/apps/<hash>/`) depends on the
+/// payload's hash, which this cache is part of. Running the app rebases each
+/// entry onto that directory as it extracts it (`app.rs`, `sbc::rebase`).
 fn warm(dir: &Path, path: &str, source: &[u8]) {
     let Ok(parsed) = spinel_core::parse_required(path, source) else {
         return;

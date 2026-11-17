@@ -211,6 +211,75 @@ pub fn decode(bytes: &[u8], path: &str, key: &[u8; 32], frozen: Option<bool>) ->
     })
 }
 
+/// A cache file written for a file at the relative `path` it names, moved to
+/// be the cache file for that file under `root`: `app/lib/greet.rb` under
+/// `/cache/apps/<hash>` is `/cache/apps/<hash>/app/lib/greet.rb`. A compiled
+/// app's payload is warmed under its own paths, since the directory it is
+/// extracted to is not known when it is built (docs/build.md, #101).
+///
+/// Every place a compiled file holds its path moves with it, and nothing
+/// else: each body's `path`, which backtraces, `__dir__` and
+/// `require_relative` read, each `__FILE__` ([`Literal::SourceFile`], never a
+/// string literal that only spells the path), and the parser's warnings,
+/// which begin `path:line:`. The source and its hash are unchanged, so the
+/// file keeps its name.
+///
+/// `None` for a file another build wrote, one that does not decode, and one
+/// already written for an absolute path; the caller leaves it out, and the
+/// file is compiled when it is required, as a miss always is.
+#[must_use]
+pub fn rebase(bytes: &[u8], root: &str) -> Option<Vec<u8>> {
+    let mut header = Reader::new(bytes);
+    if header.take(MAGIC.len())? != MAGIC
+        || u32::get(&mut header)? != FORMAT
+        || header.take(FINGERPRINT.len())? != FINGERPRINT.as_bytes()
+    {
+        return None;
+    }
+    let key: [u8; 32] = header.array()?;
+    let frozen = match u8::get(&mut header)? {
+        0 => None,
+        1 => Some(false),
+        2 => Some(true),
+        _ => return None,
+    };
+    let old = Box::<str>::get(&mut header)?;
+    if old.is_empty() || old.starts_with('/') {
+        return None;
+    }
+    let entry = decode(bytes, &old, &key, frozen)?;
+    let new: Arc<str> = format!("{}/{old}", root.trim_end_matches('/')).into();
+    let mut iseq = Arc::try_unwrap(entry.iseq).ok()?;
+    move_path(&mut iseq, &old, &new);
+    let warnings: Vec<(String, bool)> = entry
+        .warnings
+        .into_iter()
+        .map(|(text, verbose)| match text.strip_prefix(&*old) {
+            Some(rest) if rest.starts_with(':') => (format!("{new}{rest}"), verbose),
+            _ => (text, verbose),
+        })
+        .collect();
+    encode(&iseq, &warnings, &new, &key, frozen)
+}
+
+/// `iseq` and every body in it, compiled from the file at `old`, as if
+/// compiled from the same file at `new`.
+fn move_path(iseq: &mut Iseq, old: &str, new: &Arc<str>) {
+    if iseq.path.as_deref() == Some(old) {
+        iseq.path = Some(Arc::clone(new));
+    }
+    for literal in &mut iseq.literals {
+        if let Literal::SourceFile(bytes) = literal
+            && **bytes == *old.as_bytes()
+        {
+            *bytes = new.as_bytes().into();
+        }
+    }
+    for child in &mut iseq.children {
+        move_path(Arc::make_mut(child), old, new);
+    }
+}
+
 fn cacheable(iseq: &Iseq, depth: u32) -> bool {
     depth < MAX_DEPTH
         && iseq.refusals.is_empty()
@@ -549,6 +618,7 @@ wire_enum!(Literal {
     3 => FrozenStr(bytes, encoding),
     4 => ChilledStr(bytes, encoding),
     5 => Regexp { source, options, encoding, parser_warned },
+    6 => SourceFile(bytes),
 });
 
 wire_enum!(Insn {
@@ -901,6 +971,69 @@ mod tests {
         let parent = entry.iseq.path.as_ref().unwrap();
         let child = entry.iseq.children[0].path.as_ref().unwrap();
         assert!(Arc::ptr_eq(parent, child));
+    }
+
+    #[test]
+    fn rebase_moves_every_path_the_file_holds_and_nothing_else() {
+        // A body and its child compiled under the payload's relative path,
+        // with `__FILE__` and a string literal that only spells the path.
+        let child = Iseq {
+            name: "block".into(),
+            literals: vec![Literal::SourceFile((*b"app/a.rb").into())],
+            path: Some("app/a.rb".into()),
+            ..Iseq::default()
+        };
+        let iseq = Iseq {
+            name: "<top (required)>".into(),
+            literals: vec![
+                Literal::SourceFile((*b"app/a.rb").into()),
+                Literal::Str((*b"app/a.rb").into(), crate::strings::UTF_8),
+            ],
+            children: vec![Arc::new(child)],
+            path: Some("app/a.rb".into()),
+            ..Iseq::default()
+        };
+        let warnings = vec![
+            ("app/a.rb:1: warning: x\n".to_owned(), true),
+            ("app/a.rbx:1: not this file\n".to_owned(), false),
+        ];
+        let bytes = encode(&iseq, &warnings, "app/a.rb", &KEY, Some(false)).unwrap();
+        let moved = rebase(&bytes, "/cache/apps/h/").unwrap();
+        assert!(decode(&moved, "app/a.rb", &KEY, Some(false)).is_none());
+        let entry = decode(&moved, "/cache/apps/h/app/a.rb", &KEY, Some(false)).unwrap();
+        assert_eq!(entry.iseq.path.as_deref(), Some("/cache/apps/h/app/a.rb"));
+        assert_eq!(
+            entry.iseq.literals,
+            [
+                Literal::SourceFile((*b"/cache/apps/h/app/a.rb").into()),
+                Literal::Str((*b"app/a.rb").into(), crate::strings::UTF_8),
+            ]
+        );
+        let child = &entry.iseq.children[0];
+        assert_eq!(child.path.as_deref(), Some("/cache/apps/h/app/a.rb"));
+        assert_eq!(
+            child.literals,
+            [Literal::SourceFile((*b"/cache/apps/h/app/a.rb").into())]
+        );
+        assert_eq!(
+            entry.warnings,
+            [
+                ("/cache/apps/h/app/a.rb:1: warning: x\n".to_owned(), true),
+                ("app/a.rbx:1: not this file\n".to_owned(), false),
+            ]
+        );
+    }
+
+    #[test]
+    fn rebase_refuses_what_is_not_a_payload_entry() {
+        let absolute = encode(&sample(), &[], "/p/a.rb", &KEY, None).unwrap();
+        assert!(rebase(&absolute, "/root").is_none());
+        let relative = encode(&sample(), &[], "p/a.rb", &KEY, None).unwrap();
+        assert!(rebase(&relative, "/root").is_some());
+        let mut other_build = relative.clone();
+        other_build[MAGIC.len() + 4] ^= 1;
+        assert!(rebase(&other_build, "/root").is_none());
+        assert!(rebase(&relative[..relative.len() - 1], "/root").is_none());
     }
 
     #[test]

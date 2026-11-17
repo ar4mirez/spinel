@@ -1066,14 +1066,12 @@ impl Compiler {
             // sees them: the parser filled both in, because it is the last
             // stage that still has the bytes a line number is counted in.
             //
-            // A plain `Literal::Str`, not a frozen one: `__FILE__.frozen?` is
-            // false and `__FILE__.equal?(__FILE__)` is false, both measured, so
-            // each evaluation wants its own object.
+            // Not a frozen literal: `__FILE__.frozen?` is false and
+            // `__FILE__.equal?(__FILE__)` is false, both measured, so each
+            // evaluation wants its own object. `SourceFile` rather than a
+            // plain `Str` so a cached file can be moved (`sbc::rebase`).
             ExprKind::SourceFile(path) => {
-                let index = self.literal(Literal::Str(
-                    path.to_vec().into_boxed_slice(),
-                    crate::strings::UTF_8,
-                ));
+                let index = self.literal(Literal::SourceFile(path.to_vec().into_boxed_slice()));
                 self.emit(Insn::PushLit(index));
             }
             ExprKind::SourceLine(line) => self.emit(Insn::PushInt(*line)),

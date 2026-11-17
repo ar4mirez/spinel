@@ -19807,10 +19807,18 @@ fn materialise<'h>(
             encoding,
             parser_warned,
         } => regexp_literal(scope, source, *options, *encoding, *parser_warned),
-        Literal::Str(bytes, encoding)
-        | Literal::FrozenStr(bytes, encoding)
-        | Literal::ChilledStr(bytes, encoding) => {
-            let encoding = *encoding;
+        Literal::Str(..)
+        | Literal::FrozenStr(..)
+        | Literal::ChilledStr(..)
+        | Literal::SourceFile(..) => {
+            let (bytes, encoding) = match literal {
+                Literal::Str(bytes, encoding)
+                | Literal::FrozenStr(bytes, encoding)
+                | Literal::ChilledStr(bytes, encoding) => (bytes, *encoding),
+                // `__FILE__`, a plain UTF-8 String like any unfrozen literal.
+                Literal::SourceFile(bytes) => (bytes, crate::strings::UTF_8),
+                _ => unreachable!("the outer arm takes only strings"),
+            };
             // A frozen literal is interned by content, CRuby's fstring: every
             // evaluation of every site with these bytes answers one object.
             if matches!(literal, Literal::FrozenStr(..))

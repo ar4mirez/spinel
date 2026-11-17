@@ -819,6 +819,11 @@ pub enum Literal {
     /// Ruby strings are byte strings, not UTF-8: the bytes, and the index of
     /// the encoding they are in (#19).
     Str(Box<[u8]>, u8),
+    /// `__FILE__`: evaluated exactly as [`Literal::Str`] in UTF-8 is, a new
+    /// unfrozen String each time. A variant of its own so the bytecode cache
+    /// can tell the file's own path from a string that only spells it, and
+    /// move a compiled file to another directory (`sbc::rebase`, #101).
+    SourceFile(Box<[u8]>),
     /// A string literal that is frozen the moment it is made.
     ///
     /// `defined?` answers one, and `defined_spec.rb` checks `.frozen?` on every
