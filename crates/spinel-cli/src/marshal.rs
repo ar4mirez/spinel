@@ -83,6 +83,7 @@ pub fn load(data: &[u8]) -> Result<Value, Error> {
         symbols: Vec::new(),
         objects: Vec::new(),
         depth: 0,
+        deepest: 0,
         allocated: 0,
         budget: data.len().saturating_mul(BUDGET_PER_BYTE).max(MIN_BUDGET),
     };
@@ -93,9 +94,13 @@ struct Reader<'a> {
     data: &'a [u8],
     at: usize,
     symbols: Vec<Rc<str>>,
-    /// Every object read, for `@` links; `None` while it is being read.
-    objects: Vec<Option<Value>>,
+    /// Every object read, for `@` links, with how deep it nests; `None`
+    /// while it is being read.
+    objects: Vec<Option<(Value, usize)>>,
     depth: usize,
+    /// How deep the value being read nests so far, what links bring in
+    /// counted.
+    deepest: usize,
     /// Bytes of values and strings built so far; a link builds nothing.
     allocated: usize,
     budget: usize,
@@ -223,8 +228,11 @@ impl Reader<'_> {
     ) -> Result<Value, Error> {
         let slot = self.objects.len();
         self.objects.push(None);
+        let outer = std::mem::replace(&mut self.deepest, self.depth);
         let value = read(self)?;
-        self.objects[slot] = Some(value.clone());
+        let height = self.deepest - self.depth + 1;
+        self.deepest = self.deepest.max(outer);
+        self.objects[slot] = Some((value.clone(), height));
         Ok(value)
     }
 
@@ -233,6 +241,7 @@ impl Reader<'_> {
         if self.depth > MAX_DEPTH {
             return Err(Error("it nests too deep".to_owned()));
         }
+        self.deepest = self.deepest.max(self.depth);
         self.allocate(std::mem::size_of::<Value>())?;
         let value = self.value_inner();
         self.depth -= 1;
@@ -253,7 +262,15 @@ impl Reader<'_> {
             b'@' => {
                 let i = self.len()?;
                 match self.objects.get(i) {
-                    Some(Some(v)) => Ok(v.clone()),
+                    Some(Some((v, height))) => {
+                        let reach = self.depth + height - 1;
+                        if reach > MAX_DEPTH {
+                            return Err(Error("its links nest too deep".to_owned()));
+                        }
+                        let v = v.clone();
+                        self.deepest = self.deepest.max(reach);
+                        Ok(v)
+                    }
                     // A link to an object still being read: a cycle.
                     Some(None) => Ok(Value::Nil),
                     None => Err(Error(format!("object link {i}"))),
@@ -396,6 +413,29 @@ mod tests {
     }
 
     #[test]
+    fn a_chain_of_links_deeper_than_the_limit_is_refused() {
+        // a0 = []; a(k) = [a(k-1)]; Marshal.dump([a0, a1, ..., a100_000])
+        const N: i64 = 100_000;
+        fn int(n: i64, out: &mut Vec<u8>) {
+            if (1..123).contains(&n) {
+                out.push(u8::try_from(n + 5).unwrap());
+            } else {
+                out.push(4);
+                out.extend_from_slice(&u32::try_from(n).unwrap().to_le_bytes());
+            }
+        }
+        let mut data = b"\x04\x08[".to_vec();
+        int(N + 1, &mut data);
+        data.extend_from_slice(b"[\x00");
+        for k in 1..=N {
+            data.extend_from_slice(b"[\x06@");
+            int(k, &mut data);
+        }
+        let err = load(&data).unwrap_err();
+        assert!(err.0.contains("nest too deep"), "{err}");
+    }
+
+    #[test]
     fn nested_objects_are_not_copied_into_the_link_table() {
         // Marshal.dump([[...[s]...]]) 250 deep around a 32 MB String.
         const LEN: usize = 32 << 20;
@@ -423,6 +463,7 @@ mod tests {
             symbols: Vec::new(),
             objects: Vec::new(),
             depth: 0,
+            deepest: 0,
             allocated: 0,
             budget: 10,
         };
