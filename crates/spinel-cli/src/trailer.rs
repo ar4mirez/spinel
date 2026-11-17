@@ -212,10 +212,15 @@ pub fn locate<F: Read + Seek>(file: &mut F) -> Result<Option<App>, Error> {
 /// Write a compiled app: `binary` with `payload` and its trailer, to `out`.
 /// A Mach-O gets them in its reserved section and is signed again ad hoc;
 /// anything else, an ELF, gets them appended. A Mach-O that is not thin
-/// 64-bit little-endian is refused. When writing fails, `out` is removed.
+/// 64-bit little-endian is refused. The app is written beside `out` and
+/// renamed onto it only once whole, so a failed write leaves `out` as it was
+/// and nothing of its own behind.
 pub fn write(binary: &Path, payload: &[u8], out: &Path) -> io::Result<()> {
+    let mut name = out.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".spinel-pack-{}", std::process::id()));
+    let partial = out.with_file_name(name);
     let written = match macho::place(&mut File::open(binary)?)? {
-        macho::Place::NotMachO => append(binary, payload, out),
+        macho::Place::NotMachO => append(binary, payload, &partial),
         macho::Place::Unsupported => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -226,12 +231,14 @@ pub fn write(binary: &Path, payload: &[u8], out: &Path) -> io::Result<()> {
             ));
         }
         macho::Place::NoSection | macho::Place::Section { .. } => {
-            macho::write(binary, payload, out)
+            macho::write(binary, payload, &partial)
         }
     };
-    written.inspect_err(|_| {
-        let _ = std::fs::remove_file(out);
-    })
+    written
+        .and_then(|()| std::fs::rename(&partial, out))
+        .inspect_err(|_| {
+            let _ = std::fs::remove_file(&partial);
+        })
 }
 
 /// Write `binary`, then `payload`, then the trailer for it, to `out`: a
@@ -481,9 +488,10 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_write_removes_out() {
+    fn a_failed_write_leaves_out_as_it_was() {
         // A Mach-O without the reserved section: `embed` refuses it after the
-        // place check, and nothing is left at `out`, not even an older file.
+        // place check. The file already at `out` is untouched, and nothing
+        // the failed write made is left beside it.
         let dir = std::env::temp_dir().join(format!("spinel-trailer-fail-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("dir");
         let binary = dir.join("spinel");
@@ -497,10 +505,16 @@ mod tests {
         std::fs::write(&binary, &file).expect("write");
         std::fs::write(&out, b"stale").expect("write");
         let result = write(&binary, b"hello", &out);
-        let exists = out.exists();
+        let kept = std::fs::read(&out).ok();
+        let mut left: Vec<_> = std::fs::read_dir(&dir)
+            .expect("dir")
+            .map(|entry| entry.expect("entry").file_name())
+            .collect();
+        left.sort();
         let _ = std::fs::remove_dir_all(&dir);
         assert!(result.is_err());
-        assert!(!exists);
+        assert_eq!(kept.as_deref(), Some(&b"stale"[..]));
+        assert_eq!(left, ["app", "spinel"]);
     }
 
     #[test]
