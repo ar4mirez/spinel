@@ -41,7 +41,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde_json::{Value, json};
 
@@ -71,14 +70,22 @@ impl Drop for Copy {
 /// `dir` copied, when it is a fixture; a directory of a test's own is run
 /// in as it is.
 fn copy_of(dir: &Path) -> Option<Copy> {
-    static COPIES: AtomicUsize = AtomicUsize::new(0);
     let name = dir.strip_prefix(fixtures()).ok()?;
-    let root = std::env::temp_dir().join(format!(
-        "spinel-test-runner-copy-{}-{}",
-        std::process::id(),
-        COPIES.fetch_add(1, Ordering::Relaxed)
-    ));
-    std::fs::remove_dir_all(&root).ok();
+    // The first free name is claimed by creating it, which only one caller
+    // can do, so copies made at once by tests on other threads stay apart.
+    let root = (0..)
+        .map(|n| {
+            std::env::temp_dir().join(format!(
+                "spinel-test-runner-copy-{}-{n}",
+                std::process::id()
+            ))
+        })
+        .find(|root| match std::fs::create_dir(root) {
+            Ok(()) => true,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => false,
+            Err(e) => panic!("a fresh directory to copy into: {e}"),
+        })
+        .expect("a free name");
     copy_tree(&fixtures().join("stand_ins"), &root.join("stand_ins"));
     copy_tree(dir, &root.join(name));
     Some(Copy {
