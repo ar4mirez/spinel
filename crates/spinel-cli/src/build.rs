@@ -391,16 +391,17 @@ impl AppFilter {
             return false;
         };
         let mut at = self.root.clone();
+        let mut seen = Seen::Kept;
         let parts: Vec<_> = relative.components().collect();
         for (i, part) in parts.iter().enumerate() {
             at.push(part);
             let part_is_dir = i + 1 < parts.len() || is_dir;
-            match self.decide(&at, part_is_dir, Seen::Kept) {
-                Some(Seen::Kept) => {}
-                _ => return false,
-            }
+            seen = match self.decide(&at, part_is_dir, seen) {
+                Some(next) => next,
+                None => return false,
+            };
         }
-        true
+        seen == Seen::Kept
     }
 
     /// How the walk takes `path`, an entry of a directory it took as

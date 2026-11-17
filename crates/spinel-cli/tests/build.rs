@@ -602,3 +602,44 @@ fn a_gemspec_project_never_packs_its_app_or_its_ignored_files() {
         "the second build's payload equals the first"
     );
 }
+
+#[test]
+fn an_entry_point_an_include_takes_back_from_gitignore_builds() {
+    let sandbox = Sandbox::installed("include-entry");
+    let project = sandbox.project();
+    fs::write(project.join("tmp/main.rb"), "puts \"from tmp\"\n").unwrap();
+
+    // `/tmp/` is ignored, so without `--include` the entry is refused.
+    let stderr = failed(
+        &sandbox.spinel(
+            &project,
+            &["build", "--compile", "tmp/main.rb", "-o", "../app"],
+        ),
+        "spinel build of an ignored entry",
+    );
+    assert!(
+        stderr.contains("--compile tmp/main.rb: .gitignore or --exclude leaves it out of the app"),
+        "{stderr}"
+    );
+
+    ok(
+        &sandbox.spinel(
+            &project,
+            &[
+                "build",
+                "--compile",
+                "tmp/main.rb",
+                "--include",
+                "tmp/main.rb",
+                "-o",
+                "../app",
+            ],
+        ),
+        "spinel build --include of an ignored entry",
+    );
+    let entries = unpack(&payload(&sandbox.0.join("app")));
+    let manifest: serde_json::Value =
+        serde_json::from_slice(bytes(&entries, "manifest.json")).unwrap();
+    assert_eq!(manifest["entry"], "tmp/main.rb");
+    assert_eq!(bytes(&entries, "app/tmp/main.rb"), b"puts \"from tmp\"\n");
+}
