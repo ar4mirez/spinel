@@ -43,7 +43,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex};
 
 use base64::Engine as _;
 use md5::Md5;
@@ -170,10 +170,11 @@ fn redacted(url: &Url) -> Url {
 }
 
 /// Which index a source serves, known once `/versions` has been asked for.
+#[derive(Clone)]
 enum Mode {
     Compact,
     /// No compact index: the legacy index's builds, by gem.
-    Legacy(HashMap<String, Vec<legacy::Tuple>>),
+    Legacy(Arc<HashMap<String, Vec<legacy::Tuple>>>),
 }
 
 /// One source's compact index and its cache.
@@ -187,7 +188,8 @@ pub struct Client {
     auth: Option<Auth>,
     dir: PathBuf,
     limit: Arc<Semaphore>,
-    mode: Arc<OnceLock<Mode>>,
+    /// Set once, by the first `/versions` answer; never changed after.
+    mode: Arc<Mutex<Option<Mode>>>,
 }
 
 impl Client {
@@ -229,8 +231,20 @@ impl Client {
             auth,
             dir,
             limit: Arc::new(Semaphore::new(MAX_CONCURRENT)),
-            mode: Arc::new(OnceLock::new()),
+            mode: Arc::new(Mutex::new(None)),
         })
+    }
+
+    fn mode(&self) -> Option<Mode> {
+        self.mode.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Record how the source answers, unless it already is.
+    fn set_mode(&self, mode: Mode) {
+        self.mode
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_or_insert(mode);
     }
 
     /// The cache directory, `<home>/index/<host>/`.
@@ -241,7 +255,7 @@ impl Client {
     /// Bring the cached `/versions` up to date, or, when the source has no
     /// compact index (a 404), read its legacy index instead.
     pub async fn versions(&self) -> Result<Outcome, Error> {
-        if let Some(Mode::Legacy(_)) = self.mode.get() {
+        if let Some(Mode::Legacy(_)) = self.mode() {
             return Ok(Outcome::NotModified);
         }
         let result = self
@@ -254,7 +268,7 @@ impl Client {
         match result {
             Err(Error::Status(_, StatusCode::NOT_FOUND)) => self.legacy_specs().await,
             result => {
-                let _ = self.mode.set(Mode::Compact);
+                self.set_mode(Mode::Compact);
                 result
             }
         }
@@ -274,7 +288,7 @@ impl Client {
         for tuple in tuples {
             by_name.entry(tuple.name.clone()).or_default().push(tuple);
         }
-        let _ = self.mode.set(Mode::Legacy(by_name));
+        self.set_mode(Mode::Legacy(Arc::new(by_name)));
         Ok(Outcome::Fetched(size))
     }
 
@@ -340,8 +354,8 @@ impl Client {
             .filter(|g| seen.insert(g.as_str()))
             .cloned()
             .collect();
-        if let Some(Mode::Legacy(tuples)) = self.mode.get() {
-            return Ok(self.legacy_info(&gems, tuples).await);
+        if let Some(Mode::Legacy(tuples)) = self.mode() {
+            return Ok(self.legacy_info(&gems, &tuples).await);
         }
         let versions = self.dir.join("versions");
         let wanted: Vec<&str> = gems.iter().map(String::as_str).collect();

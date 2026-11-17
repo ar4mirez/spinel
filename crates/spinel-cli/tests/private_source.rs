@@ -250,7 +250,31 @@ fn expected(name: &str, sources: &[(&str, String)]) -> String {
     for (placeholder, url) in sources {
         text = text.replace(placeholder, url);
     }
-    text
+    // Bundler ran on x86_64-linux; its `PLATFORMS` names the local
+    // platform beside `ruby`, sorted, so name this host's instead.
+    let mut platforms = ["ruby".to_owned(), local_platform()];
+    platforms.sort();
+    text.replace(
+        "PLATFORMS\n  ruby\n  x86_64-linux\n",
+        &format!("PLATFORMS\n  {}\n  {}\n", platforms[0], platforms[1]),
+    )
+}
+
+/// This host as `Gem::Platform.local` spells it in a lockfile.
+fn local_platform() -> String {
+    let arch = std::env::consts::ARCH;
+    match std::env::consts::OS {
+        "linux" if cfg!(target_env = "musl") => format!("{arch}-linux-musl"),
+        "linux" => format!("{arch}-linux"),
+        "macos" => {
+            let cpu = if arch == "aarch64" { "arm64" } else { arch };
+            let out = Command::new("uname").arg("-r").output().unwrap();
+            let release = String::from_utf8(out.stdout).unwrap();
+            let major = release.trim().split('.').next().unwrap().to_owned();
+            format!("{cpu}-darwin-{major}")
+        }
+        os => panic!("no lockfile platform for {arch}-{os}"),
+    }
 }
 
 /// Neither the lockfile nor the output has the credential.
