@@ -99,7 +99,9 @@ pub fn place<F: Read + Seek>(file: &mut F) -> io::Result<Place> {
 /// signed again ad hoc with `codesign`, keeping `binary`'s permissions.
 pub fn write(binary: &Path, payload: &[u8], out: &Path) -> io::Result<()> {
     embed(binary, payload, out)?;
-    sign_ad_hoc(out)
+    sign_ad_hoc(out).inspect_err(|_| {
+        let _ = std::fs::remove_file(out);
+    })
 }
 
 /// `write` without the signing: the bytes of the app, whose signature, if

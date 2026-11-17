@@ -420,10 +420,6 @@ enum Command {
         /// Where to write the app.
         #[arg(short, long, value_name = "FILE")]
         output: PathBuf,
-
-        /// The `spinel` to start from. This one when not given.
-        #[arg(long, value_name = "FILE")]
-        binary: Option<PathBuf>,
     },
 
     /// Parse Ruby and print the syntax tree.
@@ -582,11 +578,7 @@ fn main() -> ExitCode {
             );
         }
         Some(Command::Lockfile { path }) => return lockfile_command(&path),
-        Some(Command::Pack {
-            payload,
-            output,
-            binary,
-        }) => return pack_command(&payload, &output, binary),
+        Some(Command::Pack { payload, output }) => return pack_command(&payload, &output),
         Some(Command::RequireMap { out, dirs }) => {
             let mut roots = dirs;
             roots.extend(stdlib::directory());
@@ -675,10 +667,9 @@ fn compiled_app() -> Option<ExitCode> {
     }
 }
 
-/// `spinel pack`: write `payload` into a copy of `binary`, or of this
-/// `spinel`, at `output`.
-fn pack_command(payload: &Path, output: &Path, binary: Option<PathBuf>) -> ExitCode {
-    let binary = match binary.map_or_else(std::env::current_exe, Ok) {
+/// `spinel pack`: write `payload` into a copy of this `spinel` at `output`.
+fn pack_command(payload: &Path, output: &Path) -> ExitCode {
+    let binary = match std::env::current_exe() {
         Ok(binary) => binary,
         Err(err) => {
             eprintln!("spinel: pack: cannot find this executable: {err}");
