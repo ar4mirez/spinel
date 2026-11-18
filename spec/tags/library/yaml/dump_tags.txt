@@ -1,0 +1,1 @@
+fails(#108: File keeps its state in instance variables that core/io.rb names, and Psych dumps an object by its instance variables; on CRuby that state is in the T_FILE struct, so there are none):YAML.dump dumps a File without any state

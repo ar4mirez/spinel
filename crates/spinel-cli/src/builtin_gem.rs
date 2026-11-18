@@ -42,9 +42,9 @@ pub struct Builtin {
 ///
 /// ponytail: only the built-ins whose source names a gem version are listed.
 /// `monitor` (#46) declares none, `socket` and `objspace` are not gems, and
-/// `bigdecimal` (#109), `psych` and `racc` are not built-ins yet, so a lock
-/// pinning one of them installs the gem itself, as before. Upgrade: add each
-/// one here with its version when it lands.
+/// `bigdecimal` (#109) and `racc` are not built-ins yet, so a lock pinning
+/// one of them installs the gem itself, as before. Upgrade: add each one here
+/// with its version when it lands.
 ///
 /// `openssl` is listed from its first phase (#106: digests, HMAC, random
 /// bytes), because the gem itself cannot be installed in its place: its
@@ -83,6 +83,10 @@ pub const BUILTINS: &[Builtin] = &[
     Builtin {
         name: "openssl",
         version: "4.0.2",
+    },
+    Builtin {
+        name: "psych",
+        version: "5.3.1",
     },
     Builtin {
         name: "stringio",

@@ -1,0 +1,6 @@
+--- !ruby/object:PsychCases::Account
+name: checking
+balance: 100.25
+tags:
+- a
+- b

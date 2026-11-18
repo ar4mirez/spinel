@@ -1,0 +1,4 @@
+--- !ruby/range
+begin: a
+end: z
+excl: true

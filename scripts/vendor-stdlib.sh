@@ -55,8 +55,14 @@
 # `openssl.rb` is patched to load it, and to load the Ruby half of each part
 # only when that part's C half is there (see `patch_openssl`).
 #
+# `psych` (#108) is a default gem like json: its Ruby half lives in ruby/ruby's
+# `ext/psych/lib`, so it comes from ruby/psych at the release Ruby bundles. Its
+# C half is Spinel's `lib/psych/spinel.rb`, embedded, over libyaml 0.2.5 as
+# Rust (`spinel-vm/src/psych.rs`), and `psych.rb` is patched to load it (see
+# `patch_psych`). `psych_jars.rb`, JRuby's SnakeYAML jars, is left out.
+#
 # To bump: edit RUBY_TAG, WEBRICK_TAG, JSON_TAG, IO_CONSOLE_TAG, OPENSSL_TAG,
-# PRISM_VERSION (with PRISM_SHA256, and the ruby-prism crate in
+# PSYCH_TAG, PRISM_VERSION (with PRISM_SHA256, and the ruby-prism crate in
 # `crates/spinel-parse/Cargo.toml` to the same release) or FIDDLE_VERSION
 # (with FIDDLE_SHA256), run this script, commit `stdlib/` in its own commit.
 
@@ -81,6 +87,9 @@ IO_CONSOLE_REPO="https://github.com/ruby/io-console.git"
 # RUBY_TAG).
 OPENSSL_TAG="v4.0.2"
 OPENSSL_REPO="https://github.com/ruby/openssl.git"
+# The psych Ruby 4.0 bundles (ext/psych/lib/psych/versions.rb at RUBY_TAG).
+PSYCH_TAG="v5.3.1"
+PSYCH_REPO="https://github.com/ruby/psych.git"
 
 # The prism gem, at the release of the ruby-prism crate Spinel parses with,
 # and the package's SHA-256 as rubygems.org publishes it.
@@ -181,6 +190,14 @@ OPENSSL_LICENSES=(COPYING BSDL)
 echo "fetching ruby/openssl at $OPENSSL_TAG"
 fetch_gem openssl "$OPENSSL_REPO" "$OPENSSL_TAG" "${OPENSSL_LICENSES[@]}"
 openssl_sha="$(git -C "$work/openssl" rev-parse 'FETCH_HEAD^{commit}')"
+
+# psych is MIT-licensed. `psych_jars.rb` loads JRuby's SnakeYAML jars, and is
+# required only on JRuby; ruby/ruby does not ship it and neither does Spinel.
+PSYCH_LICENSES=(LICENSE)
+echo "fetching ruby/psych at $PSYCH_TAG"
+fetch_gem psych "$PSYCH_REPO" "$PSYCH_TAG" "${PSYCH_LICENSES[@]}"
+psych_sha="$(git -C "$work/psych" rev-parse 'FETCH_HEAD^{commit}')"
+rm "$work/psych/lib/psych_jars.rb"
 
 # prism is MIT-licensed. A `.gem` is a tar of a gzipped `data.tar.gz`; only
 # its `lib/`, `prism.gemspec` and license are wanted.
@@ -298,6 +315,15 @@ patch_openssl() {
 }
 patch_openssl "$work/openssl/lib/openssl.rb"
 
+# `psych.rb` requires `psych.so`, the C half, on every engine but JRuby. On
+# Spinel the C half is `psych/spinel`, embedded.
+patch_psych() {
+  patch_line "$1" \
+    "  require 'psych.so'" \
+    "  require RUBY_ENGINE == 'spinel' ? 'psych/spinel' : 'psych.so'"
+}
+patch_psych "$work/psych/lib/psych.rb"
+
 # Assemble what `stdlib/` should look like, then either install it or diff
 # against it. Building it once and comparing keeps the two modes honest: the
 # check tests the same tree the vendor step would write.
@@ -340,6 +366,7 @@ lay_over webrick "${WEBRICK_LICENSES[@]}"
 lay_over json "${JSON_LICENSES[@]}"
 lay_over io-console "${IO_CONSOLE_LICENSES[@]}"
 lay_over openssl "${OPENSSL_LICENSES[@]}"
+lay_over psych "${PSYCH_LICENSES[@]}"
 # Ruby's own prism goes first: the gem's replaces it rather than mixing two
 # releases' files (see PRISM_VERSION).
 rm -rf "$staged/prism.rb" "$staged/prism"
@@ -368,6 +395,12 @@ patched: openssl.rb requires openssl/spinel in place of openssl.so when
 RUBY_ENGINE is "spinel", and requires the Ruby half of BN, Cipher, PKCS5,
 PKey, SSL and X509 only when the C half defined the class it reopens
 (OpenSSL::KDF for PKCS5), which on CRuby it always has.
+
+Also laid over it, the default gem psych's lib/, which ruby/ruby keeps in
+ext/psych/lib. Its C half is Spinel's lib/psych/spinel.rb, embedded in the
+binary, over libyaml 0.2.5 in Rust; psych_jars.rb, JRuby's, is left out. One
+file is patched: psych.rb requires psych/spinel in place of psych.so when
+RUBY_ENGINE is "spinel".
 
 Also laid over it, the bundled gem fiddle's lib/, from the packaged gem at
 the release Ruby bundles. Its C half is Spinel's lib/fiddle/spinel.rb, over
@@ -405,6 +438,11 @@ FFI backend, which is left out.
     commit    $openssl_sha
     files     openssl.rb (patched), openssl/
 
+    upstream  $PSYCH_REPO
+    tag       $PSYCH_TAG
+    commit    $psych_sha
+    files     psych.rb (patched), psych/ (not psych_jars.rb, JRuby's)
+
     upstream  $PRISM_URL
     sha256    $PRISM_SHA256
     files     prism.rb (patched), prism/ (not prism/ffi.rb, the FFI backend)
@@ -420,8 +458,8 @@ are in LICENSE/<gem>/.
 
 Do not edit anything under stdlib/ by hand. CI diffs this tree against the tags
 above and fails on any difference. To update, edit RUBY_TAG, WEBRICK_TAG,
-JSON_TAG, IO_CONSOLE_TAG, OPENSSL_TAG, PRISM_VERSION or FIDDLE_VERSION in
-scripts/vendor-stdlib.sh and run it.
+JSON_TAG, IO_CONSOLE_TAG, OPENSSL_TAG, PSYCH_TAG, PRISM_VERSION or
+FIDDLE_VERSION in scripts/vendor-stdlib.sh and run it.
 EOF
 
 if $check_only; then
@@ -431,9 +469,9 @@ if $check_only; then
   # place to add one, with the reason next to it.
   if diff -r -q "$staged" "$stdlib"; then
     files="$(find "$stdlib" -name '*.rb' | wc -l | tr -d ' ')"
-    echo "stdlib/ matches ruby/ruby $RUBY_TAG, ruby/webrick $WEBRICK_TAG, ruby/json $JSON_TAG, ruby/io-console $IO_CONSOLE_TAG, ruby/openssl $OPENSSL_TAG, prism $PRISM_VERSION and fiddle $FIDDLE_VERSION ($files .rb files)"
+    echo "stdlib/ matches ruby/ruby $RUBY_TAG, ruby/webrick $WEBRICK_TAG, ruby/json $JSON_TAG, ruby/io-console $IO_CONSOLE_TAG, ruby/openssl $OPENSSL_TAG, ruby/psych $PSYCH_TAG, prism $PRISM_VERSION and fiddle $FIDDLE_VERSION ($files .rb files)"
   else
-    echo "::error::stdlib/ has drifted from ruby/ruby $RUBY_TAG ($sha), ruby/webrick $WEBRICK_TAG, ruby/json $JSON_TAG, ruby/io-console $IO_CONSOLE_TAG, ruby/openssl $OPENSSL_TAG, prism $PRISM_VERSION or fiddle $FIDDLE_VERSION" >&2
+    echo "::error::stdlib/ has drifted from ruby/ruby $RUBY_TAG ($sha), ruby/webrick $WEBRICK_TAG, ruby/json $JSON_TAG, ruby/io-console $IO_CONSOLE_TAG, ruby/openssl $OPENSSL_TAG, ruby/psych $PSYCH_TAG, prism $PRISM_VERSION or fiddle $FIDDLE_VERSION" >&2
     echo "run scripts/vendor-stdlib.sh and commit the result" >&2
     exit 1
   fi
@@ -441,5 +479,5 @@ else
   rm -rf "$stdlib"
   mv "$staged" "$stdlib"
   files="$(find "$stdlib" -name '*.rb' | wc -l | tr -d ' ')"
-  echo "vendored ruby/ruby $RUBY_TAG, ruby/webrick $WEBRICK_TAG, ruby/json $JSON_TAG, ruby/io-console $IO_CONSOLE_TAG, ruby/openssl $OPENSSL_TAG, prism $PRISM_VERSION and fiddle $FIDDLE_VERSION into stdlib/ ($files .rb files)"
+  echo "vendored ruby/ruby $RUBY_TAG, ruby/webrick $WEBRICK_TAG, ruby/json $JSON_TAG, ruby/io-console $IO_CONSOLE_TAG, ruby/openssl $OPENSSL_TAG, ruby/psych $PSYCH_TAG, prism $PRISM_VERSION and fiddle $FIDDLE_VERSION into stdlib/ ($files .rb files)"
 fi

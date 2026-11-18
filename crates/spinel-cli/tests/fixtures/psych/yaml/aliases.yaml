@@ -1,0 +1,7 @@
+---
+first: &1
+- 1
+- two
+second: *1
+third:
+- *1

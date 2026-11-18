@@ -595,6 +595,8 @@ pub enum Native {
     Ffi(FfiOp),
     /// The OpenSSL calls `lib/openssl/spinel.rb` is Ruby over (#106).
     OpenSsl(OpenSslOp),
+    /// The libyaml calls `lib/psych/spinel.rb` is Ruby over (#108).
+    Psych(PsychOp),
     /// `Kernel#__sleep__(seconds)`: block the thread, answer the whole
     /// seconds slept. `Kernel#sleep` is Ruby around it.
     Sleep,
@@ -1068,6 +1070,38 @@ pub enum OpenSslOp {
     Memcmp,
     /// `__openssl_version__`: `[OPENSSL_VERSION, OPENSSL_VERSION_NUMBER]`.
     Version,
+}
+
+/// Which libyaml call. See `psych.rs` for the calls and `interp.rs`,
+/// `psych_native`, for what each takes and answers. An event, either way,
+/// is an Array whose first element is its kind: 0 stream start, 1 stream
+/// end, 2 document start, 3 document end, 4 alias, 5 scalar, 6 sequence
+/// start, 7 sequence end, 8 mapping start, 9 mapping end (and, parsed only,
+/// 10 for `YAML_NO_EVENT`), followed by what `Psych::Handler`'s method for
+/// it takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PsychOp {
+    /// `__psych_parse__(yaml, encoding, max_depth)`: `[events, error]`,
+    /// every event of the BINARY String `yaml` read as `encoding` (a
+    /// `Psych::Parser` constant) up to its end or its first error, nesting
+    /// deeper than `max_depth` collections an error (0 for no limit). An event is `[kind,
+    /// start_line, start_column, end_line, end_column, mark_index,
+    /// mark_line, mark_column, *arguments]`, the mark where the parser had
+    /// read to (`Psych::Parser#mark`), its Strings UTF-8. `error` is nil, or `[line, column, offset, problem,
+    /// context]` for `Psych::SyntaxError.new`, its Strings US-ASCII (line 0
+    /// when libyaml ran out of memory).
+    Parse,
+    /// `__psych_emitter_alloc__`: a new emitter's id, nil if libyaml could
+    /// not make one.
+    EmitterAlloc,
+    /// `__psych_emitter_free__(id)`: nil.
+    EmitterFree,
+    /// `__psych_emitter_set__(id, setting, value)`: true; setting 0 is the
+    /// line width, 1 the indentation (C ints) and 2 canonical (true/false).
+    EmitterSet,
+    /// `__psych_emit__(id, [kind, *arguments])`: the UTF-8 String libyaml
+    /// wrote (often empty), or `[problem]` when it refused the event.
+    Emit,
 }
 
 /// Which terminal call. See `console.rs` for the calls and `interp.rs`,

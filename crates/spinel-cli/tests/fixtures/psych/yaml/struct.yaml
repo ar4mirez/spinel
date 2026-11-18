@@ -1,0 +1,3 @@
+--- !ruby/struct:PsychCases::Point
+x: 1
+y: "y"

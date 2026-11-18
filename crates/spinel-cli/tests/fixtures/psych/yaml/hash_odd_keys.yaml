@@ -1,0 +1,8 @@
+---
+1: one
+! '': nil
+true: 'yes'
+2.5: float
+? - 1
+  - 2
+: array

@@ -1,0 +1,8 @@
+---
+list:
+- 1
+- k: v
+- -
+  - true
+when: 2020-01-01
+:sym: :val

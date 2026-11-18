@@ -29,6 +29,9 @@ spinel-ast.workspace = true
 # host side of.
 spinel-ext.workspace = true
 spinel-regex.workspace = true
+# `psych` (#108): libyaml 0.2.5, the release CRuby's Psych links, as its C
+# translated to Rust (`src/psych.rs` says why this crate).
+unsafe-libyaml-norway = "0.2.15"
 
 # The bytecode cache's compiler fingerprint (`build.rs`, #40).
 [build-dependencies]

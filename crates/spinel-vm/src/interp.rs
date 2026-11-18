@@ -49,7 +49,7 @@ use crate::class::{ClassId, CrefId, Kind, Method, ScopeDefault, Visibility};
 use crate::heap::{Handle, HandleScope, Heap, Payload};
 use crate::method::{
     BindingOp, BitOp, ConsoleOp, CvarOp, Definition, EtcOp, FfiOp, FiberOp, FsOp, GcOp, IvarOp,
-    Native, OpenSslOp, ReflectOp, SockOp, StrOp, SysOp, ThreadOp,
+    Native, OpenSslOp, PsychOp, ReflectOp, SockOp, StrOp, SysOp, ThreadOp,
 };
 use crate::shape::ShapeId;
 use crate::value::SymbolId;
@@ -14890,6 +14890,7 @@ fn native_call<'h>(
         Native::Console(op) => console_native(scope, stack, &call, op),
         Native::Ffi(op) => ffi_native(scope, stack, &call, op),
         Native::OpenSsl(op) => openssl_native(scope, stack, &call, op),
+        Native::Psych(op) => psych_native(scope, stack, &call, op),
 
         Native::FrameNesting => {
             let cref = frames.last().map_or(CrefId::ROOT, |frame| frame.cref);
@@ -18047,6 +18048,31 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             Builtin::Kernel,
             &["__ffi_constants__"],
             Native::Ffi(FfiOp::Constants),
+        ),
+        (
+            Builtin::Kernel,
+            &["__psych_parse__"],
+            Native::Psych(PsychOp::Parse),
+        ),
+        (
+            Builtin::Kernel,
+            &["__psych_emitter_alloc__"],
+            Native::Psych(PsychOp::EmitterAlloc),
+        ),
+        (
+            Builtin::Kernel,
+            &["__psych_emitter_free__"],
+            Native::Psych(PsychOp::EmitterFree),
+        ),
+        (
+            Builtin::Kernel,
+            &["__psych_emitter_set__"],
+            Native::Psych(PsychOp::EmitterSet),
+        ),
+        (
+            Builtin::Kernel,
+            &["__psych_emit__"],
+            Native::Psych(PsychOp::Emit),
         ),
         (
             Builtin::Kernel,
@@ -27074,6 +27100,328 @@ fn openssl_failure(scope: &mut HandleScope<'_>, failure: crate::openssl::Failure
     let errors = scope.root(errors);
     let (message, errors) = (scope.get(message), scope.get(errors));
     new_array(scope, &[class, message, errors])
+}
+
+// ---------------------------------------------------------------------------
+// `psych` (#108)
+// ---------------------------------------------------------------------------
+
+/// The libyaml calls `lib/psych/spinel.rb` is Ruby over (#108); `psych.rs`
+/// makes them. What the Ruby side checks first (Strings, C ints, an emitter
+/// that exists) is refused here rather than guessed at; see [`PsychOp`] for
+/// the shape of each answer.
+fn psych_native(
+    scope: &mut HandleScope<'_>,
+    stack: &mut Stack,
+    call: &Pending,
+    op: PsychOp,
+) -> Result<Option<Unwind>, Error> {
+    use crate::psych::{self, Setting};
+    let refuse = |operands| Error::NoDispatch {
+        op: "__psych__",
+        operands,
+    };
+    let id_at = |index: usize| {
+        int_arg(call, index)
+            .and_then(|n| u64::try_from(n).ok())
+            .ok_or(refuse("an emitter that is not an id"))
+    };
+    let value = match op {
+        PsychOp::Parse => {
+            let input = bytes_at(scope, call, 0, "__psych_parse__")?;
+            let encoding = int_arg(call, 1).ok_or(refuse("an encoding that is not an Integer"))?;
+            let max_depth = int_arg(call, 2)
+                .and_then(|n| usize::try_from(n).ok())
+                .ok_or(refuse("a depth limit that is not an Integer"))?;
+            let parsed = psych::parse(&input, encoding, max_depth);
+            let events = rooted_array(scope, parsed.events, psych_event);
+            let events = scope.root(events);
+            let error = match parsed.error {
+                None => Value::NIL,
+                Some(error) => {
+                    let ascii = |scope: &mut HandleScope<'_>, bytes: Option<Vec<u8>>| match bytes {
+                        None => Value::NIL,
+                        Some(bytes) => string_bytes_in(
+                            scope,
+                            Builtin::String.id(),
+                            &bytes,
+                            crate::strings::US_ASCII,
+                        ),
+                    };
+                    let problem = ascii(scope, error.problem);
+                    let problem = scope.root(problem);
+                    let context = ascii(scope, error.context);
+                    let context = scope.root(context);
+                    let (problem, context) = (scope.get(problem), scope.get(context));
+                    new_array(
+                        scope,
+                        &[
+                            psych_int(error.line),
+                            psych_int(error.column),
+                            psych_int(error.offset),
+                            problem,
+                            context,
+                        ],
+                    )
+                }
+            };
+            let error = scope.root(error);
+            let (events, error) = (scope.get(events), scope.get(error));
+            new_array(scope, &[events, error])
+        }
+        PsychOp::EmitterAlloc => match scope.psych_mut().alloc() {
+            Some(id) => i64::try_from(id)
+                .ok()
+                .and_then(Value::fixnum)
+                .ok_or(refuse("more emitters than a Fixnum counts"))?,
+            None => Value::NIL,
+        },
+        PsychOp::EmitterFree => {
+            let id = id_at(0)?;
+            scope.psych_mut().free(id);
+            Value::NIL
+        }
+        PsychOp::EmitterSet => {
+            let id = id_at(0)?;
+            let c_int = || {
+                int_arg(call, 2)
+                    .and_then(|n| i32::try_from(n).ok())
+                    .ok_or(refuse("a setting that is not a C int"))
+            };
+            let setting = match int_arg(call, 1) {
+                Some(0) => Setting::Width(c_int()?),
+                Some(1) => Setting::Indent(c_int()?),
+                Some(2) => Setting::Canonical(call.args.get(2).is_some_and(|v| v.is_truthy())),
+                _ => return Err(refuse("a setting that is not 0, 1 or 2")),
+            };
+            if !scope.psych_mut().set(id, setting) {
+                return Err(refuse("an emitter that was freed"));
+            }
+            Value::TRUE
+        }
+        PsychOp::Emit => {
+            let id = id_at(0)?;
+            let fields = call
+                .args
+                .get(1)
+                .and_then(|&v| array_elements(scope, v))
+                .ok_or(refuse("an event that is not an Array"))?;
+            let event = psych_emit_event(scope, &fields).ok_or(refuse("a malformed event"))?;
+            match scope.psych_mut().emit(id, &event) {
+                None => return Err(refuse("an emitter that was freed")),
+                Some(Ok(written)) => {
+                    string_bytes_in(scope, Builtin::String.id(), &written, crate::strings::UTF_8)
+                }
+                Some(Err(problem)) => {
+                    let problem = string_bytes_in(
+                        scope,
+                        Builtin::String.id(),
+                        &problem,
+                        crate::strings::US_ASCII,
+                    );
+                    new_array(scope, &[problem])
+                }
+            }
+        }
+    };
+    stack.push(value);
+    Ok(None)
+}
+
+/// A mark or a count from libyaml, which fits a Fixnum for any input that
+/// fits in memory.
+fn psych_int(n: u64) -> Value {
+    i64::try_from(n)
+        .ok()
+        .and_then(Value::fixnum)
+        .expect("a YAML mark is a Fixnum")
+}
+
+/// One parsed event as `__psych_parse__` answers it (see [`PsychOp`]).
+fn psych_event<'h>(scope: &mut HandleScope<'h>, marked: crate::psych::Marked) -> Value {
+    use crate::psych::Event;
+    let utf8 = |scope: &mut HandleScope<'_>, bytes: &[u8]| {
+        string_bytes_in(scope, Builtin::String.id(), bytes, crate::strings::UTF_8)
+    };
+    let opt = |scope: &mut HandleScope<'_>, bytes: &Option<Vec<u8>>| match bytes {
+        None => Value::NIL,
+        Some(bytes) => utf8(scope, bytes),
+    };
+    let bool_value = |b: bool| if b { Value::TRUE } else { Value::FALSE };
+    let int = |n: i64| Value::fixnum(n).expect("a libyaml code is a Fixnum");
+    let mut handles: Vec<Handle<'h>> = Vec::new();
+    // Each value rooted until the Array holds it.
+    macro_rules! push {
+        ($scope:expr, $value:expr) => {{
+            let value = $value;
+            let handle = $scope.root(value);
+            handles.push(handle);
+        }};
+    }
+    let kind = match &marked.event {
+        Event::StreamStart { .. } => 0,
+        Event::StreamEnd => 1,
+        Event::DocumentStart { .. } => 2,
+        Event::DocumentEnd { .. } => 3,
+        Event::Alias { .. } => 4,
+        Event::Scalar { .. } => 5,
+        Event::SequenceStart { .. } => 6,
+        Event::SequenceEnd => 7,
+        Event::MappingStart { .. } => 8,
+        Event::MappingEnd => 9,
+        Event::Empty => 10,
+    };
+    for value in [
+        int(kind),
+        psych_int(marked.start.line),
+        psych_int(marked.start.column),
+        psych_int(marked.end.line),
+        psych_int(marked.end.column),
+        psych_int(marked.parser.0),
+        psych_int(marked.parser.1),
+        psych_int(marked.parser.2),
+    ] {
+        push!(scope, value);
+    }
+    match marked.event {
+        Event::StreamStart { encoding } => push!(scope, int(encoding)),
+        Event::DocumentStart {
+            version,
+            tags,
+            implicit,
+        } => {
+            let version = match version {
+                Some((major, minor)) => new_array(scope, &[int(major), int(minor)]),
+                None => new_array(scope, &[]),
+            };
+            push!(scope, version);
+            let tags = rooted_array(scope, tags, |scope, (handle, prefix)| {
+                let handle = utf8(scope, &handle);
+                let handle = scope.root(handle);
+                let prefix = utf8(scope, &prefix);
+                let handle = scope.get(handle);
+                new_array(scope, &[handle, prefix])
+            });
+            push!(scope, tags);
+            push!(scope, bool_value(implicit));
+        }
+        Event::DocumentEnd { implicit } => push!(scope, bool_value(implicit)),
+        Event::Alias { anchor } => {
+            let anchor = opt(scope, &anchor);
+            push!(scope, anchor);
+        }
+        Event::Scalar {
+            value,
+            anchor,
+            tag,
+            plain_implicit,
+            quoted_implicit,
+            style,
+        } => {
+            let value = utf8(scope, &value);
+            push!(scope, value);
+            let anchor = opt(scope, &anchor);
+            push!(scope, anchor);
+            let tag = opt(scope, &tag);
+            push!(scope, tag);
+            push!(scope, bool_value(plain_implicit));
+            push!(scope, bool_value(quoted_implicit));
+            push!(scope, int(style));
+        }
+        Event::SequenceStart {
+            anchor,
+            tag,
+            implicit,
+            style,
+        }
+        | Event::MappingStart {
+            anchor,
+            tag,
+            implicit,
+            style,
+        } => {
+            let anchor = opt(scope, &anchor);
+            push!(scope, anchor);
+            let tag = opt(scope, &tag);
+            push!(scope, tag);
+            push!(scope, bool_value(implicit));
+            push!(scope, int(style));
+        }
+        Event::StreamEnd | Event::SequenceEnd | Event::MappingEnd | Event::Empty => {}
+    }
+    let values: Vec<Value> = handles.into_iter().map(|h| scope.get(h)).collect();
+    new_array(scope, &values)
+}
+
+/// An event for `__psych_emit__`, from `[kind, *arguments]` (see
+/// [`PsychOp`]); None when it is not one.
+fn psych_emit_event(scope: &mut HandleScope<'_>, fields: &[Value]) -> Option<crate::psych::Emit> {
+    use crate::psych::Emit;
+    let bytes = |scope: &mut HandleScope<'_>, index: usize| {
+        fields.get(index).and_then(|&v| string_bytes(scope, v))
+    };
+    let opt_bytes = |scope: &mut HandleScope<'_>, index: usize| match fields.get(index) {
+        Some(v) if v.is_nil() => Some(None),
+        Some(&v) => string_bytes(scope, v).map(Some),
+        None => None,
+    };
+    let flag = |index: usize| fields.get(index).map(|v| v.is_truthy());
+    let int = |index: usize| fields.get(index).and_then(|v| v.as_fixnum());
+    Some(match int(0)? {
+        0 => Emit::StreamStart { encoding: int(1)? },
+        1 => Emit::StreamEnd,
+        2 => {
+            let version = array_elements(scope, *fields.get(1)?)?;
+            let version = match version[..] {
+                [] => None,
+                [major, minor] => Some((
+                    i32::try_from(major.as_fixnum()?).ok()?,
+                    i32::try_from(minor.as_fixnum()?).ok()?,
+                )),
+                _ => return None,
+            };
+            let mut tags = Vec::new();
+            for tag in array_elements(scope, *fields.get(2)?)? {
+                let pair = array_elements(scope, tag)?;
+                let [handle, prefix] = pair[..] else {
+                    return None;
+                };
+                tags.push((string_bytes(scope, handle)?, string_bytes(scope, prefix)?));
+            }
+            Emit::DocumentStart {
+                version,
+                tags,
+                implicit: flag(3)?,
+            }
+        }
+        3 => Emit::DocumentEnd { implicit: flag(1)? },
+        4 => Emit::Alias {
+            anchor: opt_bytes(scope, 1)?,
+        },
+        5 => Emit::Scalar {
+            value: bytes(scope, 1)?,
+            anchor: opt_bytes(scope, 2)?,
+            tag: opt_bytes(scope, 3)?,
+            plain_implicit: flag(4)?,
+            quoted_implicit: flag(5)?,
+            style: int(6)?,
+        },
+        6 => Emit::SequenceStart {
+            anchor: opt_bytes(scope, 1)?,
+            tag: opt_bytes(scope, 2)?,
+            implicit: flag(3)?,
+            style: int(4)?,
+        },
+        7 => Emit::SequenceEnd,
+        8 => Emit::MappingStart {
+            anchor: opt_bytes(scope, 1)?,
+            tag: opt_bytes(scope, 2)?,
+            implicit: flag(3)?,
+            style: int(4)?,
+        },
+        9 => Emit::MappingEnd,
+        _ => return None,
+    })
 }
 
 // ---------------------------------------------------------------------------

@@ -1,0 +1,120 @@
+Psych 5.3.1, libyaml 0.2.5
+ok       nil nil
+ok       true true
+ok       false false
+ok       integer 42
+ok       negative -17
+ok       bignum 1208925819614629174706176
+ok       float 3.25
+ok       float_small 1.5e-10
+ok       float_large 1.0e+100
+ok       float_negative_zero -0.0
+ok       infinity Infinity
+ok       negative_infinity -Infinity
+ok       nan NaN
+ok       symbol :locked
+ok       symbol_quoted :"with space"
+ok       symbol_colon :"a:b"
+ok       string "plain"@UTF-8
+ok       string_empty ""@UTF-8
+ok       string_true "true"@UTF-8
+ok       string_yes "yes"@UTF-8
+ok       string_null "null"@UTF-8
+ok       string_tilde "~"@UTF-8
+ok       string_integer "123"@UTF-8
+ok       string_float "1.5"@UTF-8
+ok       string_octal "0o17"@UTF-8
+ok       string_hex "0x1F"@UTF-8
+ok       string_underscored "1_000"@UTF-8
+ok       string_exponent "1e3"@UTF-8
+ok       string_date "2024-11-19"@UTF-8
+ok       string_colon "a: b"@UTF-8
+ok       string_symbolish ":notasymbol"@UTF-8
+ok       string_dash "- item"@UTF-8
+ok       string_comment "# not a comment"@UTF-8
+ok       string_indicators "@at `tick %pct !bang &amp *star |pipe >gt"@UTF-8
+ok       string_quotes "it's \"quoted\""@UTF-8
+ok       string_leading_space "  leading"@UTF-8
+ok       string_trailing_space "trailing  "@UTF-8
+ok       string_multiline "first\nsecond"@UTF-8
+ok       string_multiline_final_newline "first\nsecond\n"@UTF-8
+ok       string_trailing_newlines "text\n\n\n"@UTF-8
+ok       string_tab "tab\there"@UTF-8
+ok       string_control "bell\a and \e escape"@UTF-8
+ok       string_unicode "café ✓ 日本語"@UTF-8
+ok       string_long "word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word "@UTF-8
+ok       string_long_multiline "word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word \nword word word word word word word word word word word word word word word word word word word word word word word word word word word word word word "@UTF-8
+ok       string_binary "\xFF\x00\xFE binary"@ASCII-8BIT
+ok       array [1, "two"@UTF-8, :three, nil, 4.5]
+ok       array_empty []
+ok       array_nested [[1, [2, [3, []]]], {}]
+ok       hash {"name"@UTF-8 => "Spinel"@UTF-8, "version"@UTF-8 => 1, "tags"@UTF-8 => ["ruby"@UTF-8, "rust"@UTF-8]}
+ok       hash_empty {}
+ok       hash_symbol_keys {:a => 1, :b => {:c => [2, 3]}}
+ok       hash_odd_keys {1 => "one"@UTF-8, nil => "nil"@UTF-8, true => "yes"@UTF-8, 2.5 => "float"@UTF-8, [1, 2] => "array"@UTF-8}
+ok       hash_nested {"a"@UTF-8 => {"b"@UTF-8 => {"c"@UTF-8 => {"d"@UTF-8 => [1, {"e"@UTF-8 => nil}]}}}}
+ok       aliases {"first"@UTF-8 => [1, "two"@UTF-8], "second"@UTF-8 => [1, "two"@UTF-8], "third"@UTF-8 => [[1, "two"@UTF-8]]}
+ok       time_utc Time(2024-02-29 23:59:58.123456000 +00:00 utc=true)
+ok       time_offset Time(2001-12-14 21:59:43.000000000 -05:00 utc=false)
+ok       time_east Time(2023-07-04 09:30:00.000000000 +09:30 utc=false)
+ok       date Date(2024-02-29)
+ok       date_time DateTime(2001-02-03T04:05:06+07:00)
+ok       range Range(1, 10, false)
+ok       range_exclusive Range("a"@UTF-8, "z"@UTF-8, true)
+ok       regexp /ab+c/ix
+ok       rational (3/4)
+ok       complex (1-2i)
+ok       struct PsychCases::Point(1, "y"@UTF-8)
+ok       object PsychCases::Account{@name="checking"@UTF-8, @balance=100.25, @tags=["a"@UTF-8, "b"@UTF-8]}
+ok       encode_with PsychCases::Temperature{@degrees=21.5}
+ok       exception ArgumentError("bad input")
+ok       mixed {"list"@UTF-8 => [1, {"k"@UTF-8 => "v"@UTF-8}, [nil, true]], "when"@UTF-8 => Date(2020-01-01), :sym => :val}
+ok       option_line_width {"text"@UTF-8 => "word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word "@UTF-8}
+ok       option_unlimited_width {"text"@UTF-8 => "word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word "@UTF-8}
+ok       option_indentation {"a"@UTF-8 => {"b"@UTF-8 => [1, {"c"@UTF-8 => 2}]}}
+ok       option_canonical {"a"@UTF-8 => [1, "b"@UTF-8, nil]}
+ok       option_header {"a"@UTF-8 => 1}
+ok       option_version [1, 2]
+aliases share one object: true
+ok       stream [1, "two"@UTF-8, [3], {"four"@UTF-8 => 4}]
+ok       stream_strings ["first\nline"@UTF-8, ""@UTF-8, "true"@UTF-8]
+ok       reemit_flow Scalar@0:1-0:2 Scalar@0:5-0:6 Scalar@0:8-0:9 Sequence@0:4-0:10 Scalar@0:12-0:13 Scalar@0:16-0:17 Scalar@0:19-0:20 Mapping@0:15-0:21 Mapping@0:0-0:22 Document@0:0-1:0 Stream@0:0-1:0
+ok       reemit_block Scalar@0:0-0:1 Scalar@1:4-1:5 Scalar@2:4-2:9 Scalar@3:4-3:11 Sequence@1:2-4:0 Scalar@4:0-4:1 Scalar@4:3-7:0 Scalar@7:0-7:1 Scalar@7:3-10:0 Mapping@0:0-10:0 Document@0:0-10:0 Stream@0:0-10:0
+ok       reemit_tags Scalar@2:0-2:1 Scalar@2:3-2:10 Scalar@3:0-3:1 Scalar@3:3-3:15 Mapping@1:4-4:0 Document@0:0-4:0 Stream@0:0-4:0
+ok       reemit_anchors Scalar@0:0-0:4 Scalar@1:2-1:3 Scalar@1:5-1:6 Mapping@0:6-2:0 Scalar@2:0-2:7 Scalar@3:2-3:4 Alias@3:6-3:11 Scalar@4:2-4:3 Scalar@4:5-4:6 Mapping@3:2-5:0 Mapping@0:0-5:0 Document@0:0-5:0 Stream@0:0-5:0
+ok       reemit_documents Scalar@0:4-0:5 Document@0:0-1:3 Scalar@2:5-2:6 Sequence@2:4-2:7 Document@2:0-3:0 Scalar@3:5-3:10 Scalar@3:12-3:13 Mapping@3:4-3:14 Document@3:0-4:0 Stream@0:0-4:0
+ok       reemit_version Scalar@1:4-1:8 Document@0:0-2:0 Stream@0:0-2:0
+ok       reemit_comments Scalar@1:0-1:1 Scalar@1:3-1:4 Scalar@3:0-3:1 Scalar@3:4-3:5 Scalar@3:7-3:8 Sequence@3:3-3:9 Mapping@1:0-4:0 Document@1:0-4:0 Stream@0:0-4:0
+ok       reemit_complex_key Scalar@0:3-0:4 Scalar@0:6-0:7 Sequence@0:2-0:8 Scalar@1:2-1:7 Scalar@2:3-2:4 Scalar@2:6-2:7 Mapping@2:2-2:8 Scalar@3:2-3:7 Mapping@0:0-4:0 Document@0:0-4:0 Stream@0:0-4:0
+ok       reemit_empty_values Scalar@0:0-0:1 Scalar@0:2-0:2 Scalar@1:0-1:1 Scalar@1:3-1:4 Scalar@2:0-2:1 Scalar@2:3-2:5 Scalar@3:0-3:1 Sequence@3:3-3:5 Mapping@0:0-4:0 Document@0:0-4:0 Stream@0:0-4:0
+load_object !! Psych::DisallowedClass: Tried to load unspecified class: Object
+load_alias !! Psych::AliasesNotEnabled: Alias parsing was not enabled. To enable it, pass `aliases: true` to `Psych::load` or `Psych::safe_load`.
+load_unknown_alias !! Psych::AnchorNotDefined: An alias referenced an unknown anchor: nowhere
+load_syntax !! Psych::SyntaxError: (<unknown>): did not find expected ',' or ']' while parsing a flow sequence at line 1 column 4
+load_syntax_file !! Psych::SyntaxError: (config.yml): mapping values are not allowed in this context at line 1 column 5
+load_bad_escape !! Psych::SyntaxError: (<unknown>): found unknown escape character while parsing a quoted scalar at line 1 column 6
+load_tab !! Psych::SyntaxError: (<unknown>): found character that cannot start any token while scanning for the next token at line 2 column 1
+load_symbol => :sym
+load_date !! Psych::DisallowedClass: Tried to load unspecified class: Date
+safe_load_symbol !! Psych::DisallowedClass: Tried to load unspecified class: Symbol
+safe_load_symbol_permitted => :sym
+safe_load_symbols_listed !! Psych::DisallowedClass: Tried to load unspecified class: Symbol
+safe_load_date !! Psych::DisallowedClass: Tried to load unspecified class: Date
+safe_load_date_permitted => Date(2024-01-01)
+safe_load_time !! Psych::DisallowedClass: Tried to load unspecified class: Time
+safe_load_alias !! Psych::AliasesNotEnabled: Alias parsing was not enabled. To enable it, pass `aliases: true` to `Psych::load` or `Psych::safe_load`.
+safe_load_alias_enabled => {"a"@UTF-8 => [1], "b"@UTF-8 => [1]}
+safe_load_struct !! Psych::DisallowedClass: Tried to load unspecified class: PsychCases::Point
+safe_load_struct_permitted !! Psych::DisallowedClass: Tried to load unspecified class: Symbol
+safe_load_object !! Psych::DisallowedClass: Tried to load unspecified class: PsychCases::Account
+unsafe_load_unknown_class !! ArgumentError: undefined class/module NoSuch::
+safe_dump_symbol !! Psych::DisallowedClass: Tried to dump unspecified class: Symbol(:sym)
+safe_dump_symbol_permitted => "---\n:a: :b\n"@UTF-8
+safe_dump_object !! Psych::DisallowedClass: Tried to dump unspecified class: PsychCases::Point
+load_freeze => [true, true, true]
+load_symbolize_names => {:a => {:b => 1}}
+load_fallback => :none
+load_stream => [1, [2]]
+parse_error_fields => ["f.yml"@UTF-8, 1, 4, 0, "did not find expected ',' or ']'"@US-ASCII, "while parsing a flow sequence"@US-ASCII]
+billion_laughs !! Psych::AliasesNotEnabled: Alias parsing was not enabled. To enable it, pass `aliases: true` to `Psych::load` or `Psych::safe_load`.
+billion_laughs_aliases_enabled => [9, 10, true]
