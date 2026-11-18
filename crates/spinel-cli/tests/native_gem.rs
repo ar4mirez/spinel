@@ -12,7 +12,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::sync::OnceLock;
 
 const SPINEL: &str = env!("CARGO_BIN_EXE_spinel");
 
@@ -52,11 +51,11 @@ fn copy_dir(from: &Path, to: &Path) {
 }
 
 /// Build the extension crate at `source` as a `cdylib` named `name`,
-/// against this checkout's `spinel-ext`, from a copy under the scratch
-/// directory so that no lockfile or target is written in the source tree;
-/// answer the library's path.
-fn cargo_build(source: &Path, name: &str, spinel_ext_path: &str) -> PathBuf {
-    let root = scratch().join("build");
+/// against this checkout's `spinel-ext`, from a copy under `root` so that no
+/// lockfile or target is written in the source tree and no two tests share a
+/// build; answer the library's path.
+fn cargo_build(root: &Path, source: &Path, name: &str, spinel_ext_path: &str) -> PathBuf {
+    let root = root.join("build");
     let crate_dir = root.join(name);
     let _ = fs::remove_dir_all(&crate_dir);
     copy_dir(source, &crate_dir);
@@ -86,22 +85,21 @@ fn cargo_build(source: &Path, name: &str, spinel_ext_path: &str) -> PathBuf {
     ))
 }
 
-/// The example gem's extension, built once for every test in this file.
-fn native_gem_library() -> &'static Path {
-    static BUILT: OnceLock<PathBuf> = OnceLock::new();
-    BUILT.get_or_init(|| {
-        cargo_build(
-            &manifest_dir().join("tests/fixtures/native-gem/ext/native_gem"),
-            "native_gem",
-            "../../../../../../spinel-ext",
-        )
-    })
+/// The example gem's extension, built under `root`.
+fn native_gem_library(root: &Path) -> PathBuf {
+    cargo_build(
+        root,
+        &manifest_dir().join("tests/fixtures/native-gem/ext/native_gem"),
+        "native_gem",
+        "../../../../../../spinel-ext",
+    )
 }
 
 /// `spinel-vm`'s `stale` fixture (#103): an extension whose header says ABI
 /// 0, which no `spinel` loads, and whose init aborts the process.
-fn stale_library() -> PathBuf {
+fn stale_library(root: &Path) -> PathBuf {
     cargo_build(
+        root,
         &manifest_dir().join("../spinel-vm/tests/fixtures/ext/stale"),
         "stale",
         "../../../../../spinel-ext",
@@ -126,7 +124,7 @@ impl Sandbox {
         let gem = sandbox.0.join("native_gem");
         copy_dir(&manifest_dir().join("tests/fixtures/native-gem"), &gem);
         fs::copy(
-            native_gem_library(),
+            native_gem_library(&sandbox.0),
             gem.join("lib/native_gem/native_gem.spinel"),
         )
         .expect("the extension is put in the gem");
@@ -295,8 +293,11 @@ fn an_extension_spinel_will_not_load_is_a_load_error() {
     // Its init aborts the process, so getting an answer at all is the proof
     // that a refused extension runs none of its code.
     fs::create_dir_all(sandbox.project().join("lib")).expect("lib/ is made");
-    fs::copy(stale_library(), sandbox.project().join("lib/stale.spinel"))
-        .expect("the stale extension is copied");
+    fs::copy(
+        stale_library(&sandbox.0),
+        sandbox.project().join("lib/stale.spinel"),
+    )
+    .expect("the stale extension is copied");
     sandbox.write("lib/garbage.spinel", "not a shared object\n");
     let program = r#"
 %w[stale garbage].each do |name|
@@ -328,7 +329,7 @@ fn an_extensions_definitions_run_their_hooks_and_a_rerequire_runs_its_init_again
     let sandbox = Sandbox::new("hooks");
     fs::create_dir_all(sandbox.project().join("lib/native_gem")).expect("lib/ is made");
     fs::copy(
-        native_gem_library(),
+        native_gem_library(&sandbox.0),
         sandbox.project().join("lib/native_gem/native_gem.spinel"),
     )
     .expect("the extension is copied");
