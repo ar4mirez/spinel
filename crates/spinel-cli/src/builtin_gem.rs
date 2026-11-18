@@ -183,6 +183,36 @@ fn requirement_yaml(out: &mut String, indent: &str, list: &[(String, String)]) {
 /// name, version, platform and runtime dependencies, nothing to build and
 /// nothing to run.
 pub fn gemspec_yaml(spec: &Spec, builtin: Builtin) -> String {
+    locked_identity_yaml(
+        spec,
+        &format!("Spinel's built-in {} {}", builtin.name, builtin.version),
+        &["lib".to_owned()],
+        "bin",
+        &[],
+    )
+}
+
+/// The gemspec, as YAML, of the locked identity something else stands in
+/// for (a built-in, or a Spinel-native substitute, `gem_substitute`): the
+/// locked name, version, platform and runtime dependencies, nothing to
+/// build, and the stand-in's own require paths, `bindir` and executables.
+pub fn locked_identity_yaml(
+    spec: &Spec,
+    summary: &str,
+    require_paths: &[String],
+    bindir: &str,
+    executables: &[String],
+) -> String {
+    let list = |out: &mut String, key: &str, items: &[String]| {
+        if items.is_empty() {
+            out.push_str(&format!("{key}: []\n"));
+        } else {
+            out.push_str(&format!("{key}:\n"));
+            for item in items {
+                out.push_str(&format!("- {}\n", quoted(item)));
+            }
+        }
+    };
     let mut out = String::from("--- !ruby/object:Gem::Specification\n");
     out.push_str(&format!("name: {}\n", quoted(&spec.name)));
     out.push_str(&format!(
@@ -193,7 +223,10 @@ pub fn gemspec_yaml(spec: &Spec, builtin: Builtin) -> String {
         "platform: {}\n",
         quoted(&spec.platform.to_string())
     ));
-    out.push_str("authors: []\nbindir: bin\ncert_chain: []\n");
+    out.push_str(&format!(
+        "authors: []\nbindir: {}\ncert_chain: []\n",
+        quoted(bindir)
+    ));
     out.push_str("date: 1980-01-02 00:00:00.000000000 Z\n");
     if spec.dependencies.is_empty() {
         out.push_str("dependencies: []\n");
@@ -218,21 +251,17 @@ pub fn gemspec_yaml(spec: &Spec, builtin: Builtin) -> String {
             requirement_yaml(&mut out, "    ", &list);
         }
     }
-    out.push_str("executables: []\nextensions: []\nextra_rdoc_files: []\nfiles: []\n");
-    out.push_str("licenses: []\nmetadata: {}\nrequire_paths:\n- lib\n");
+    list(&mut out, "executables", executables);
+    out.push_str("extensions: []\nextra_rdoc_files: []\nfiles: []\n");
+    out.push_str("licenses: []\nmetadata: {}\n");
+    list(&mut out, "require_paths", require_paths);
     let any = [(">=".to_owned(), "0".to_owned())];
     out.push_str("required_ruby_version: ");
     requirement_yaml(&mut out, "  ", &any);
     out.push_str("required_rubygems_version: ");
     requirement_yaml(&mut out, "  ", &any);
     out.push_str("requirements: []\nspecification_version: 4\n");
-    out.push_str(&format!(
-        "summary: {}\ntest_files: []\n",
-        quoted(&format!(
-            "Spinel's built-in {} {}",
-            builtin.name, builtin.version
-        ))
-    ));
+    out.push_str(&format!("summary: {}\ntest_files: []\n", quoted(summary)));
     out
 }
 

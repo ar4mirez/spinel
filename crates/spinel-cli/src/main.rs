@@ -24,13 +24,6 @@ mod gem_platform;
 mod gem_requirement;
 mod gem_spec;
 mod gem_store;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the installer's substitution step; only tests call it until install substitutes gems (#83)"
-    )
-)]
 mod gem_substitute;
 mod gem_version;
 mod gemfile_edit;
