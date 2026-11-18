@@ -1,0 +1,3 @@
+--- !ruby/exception:ArgumentError
+message: bad input
+backtrace:

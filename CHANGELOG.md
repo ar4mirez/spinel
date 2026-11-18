@@ -9,6 +9,19 @@ bytecode a tool reads.
 
 ### Added
 
+- **`psych` and `yaml`, on libyaml**
+  ([#108](https://github.com/ar4mirez/spinel/issues/108)). `require "yaml"`
+  is psych 5.3.1, the version Ruby 4.0 bundles, over libyaml 0.2.5, the
+  release CRuby's Psych links, built into `spinel`: `YAML.load`,
+  `safe_load` and `unsafe_load` with their permitted classes, symbols and
+  aliases, `YAML.dump` writing what CRuby writes byte for byte,
+  `Psych::Parser` and its handlers with libyaml's events and marks,
+  `Psych::Emitter`, `Psych::Stream` and the node tree. `YAML.load` is as safe
+  as Psych 4 makes it, aliases load as shared objects rather than copies, and
+  a document nested more than 10,000 collections deep is refused with a
+  `Psych::SyntaxError`. A lockfile pinning `psych` installs the built-in. A
+  `Set` made with `Set.allocate` is now an empty Set, as on CRuby.
+
 - **`fiddle`, on `Spinel::FFI` and libffi**
   ([#105](https://github.com/ar4mirez/spinel/issues/105)). `require "fiddle"`
   is fiddle 1.1.8, the version Ruby 4.0 bundles: load a C library, declare

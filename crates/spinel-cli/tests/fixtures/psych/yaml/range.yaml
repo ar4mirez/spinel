@@ -1,0 +1,4 @@
+--- !ruby/range
+begin: 1
+end: 10
+excl: false

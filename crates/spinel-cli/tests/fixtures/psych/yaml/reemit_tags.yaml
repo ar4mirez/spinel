@@ -1,0 +1,4 @@
+%TAG !e! tag:example.com,2000:
+--- !e!thing
+x: !!str 1
+y: !local value

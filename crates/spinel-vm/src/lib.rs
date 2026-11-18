@@ -96,6 +96,7 @@ pub mod json;
 pub mod method;
 pub mod mt;
 pub mod openssl;
+pub mod psych;
 pub mod regexp;
 pub mod require_map;
 pub mod sbc;

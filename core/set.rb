@@ -10,6 +10,19 @@ class Set
     new(elements)
   end
 
+  class << self
+    alias_method :__allocate__, :allocate
+
+    # An empty Set, as CRuby's is, whose table is made with the object
+    # rather than by `initialize`: Psych revives a Set with `allocate` and
+    # then `init_with`, which `replace`s its elements (#108).
+    def allocate
+      set = __allocate__
+      set.instance_variable_set(:@__hash__, {})
+      set
+    end
+  end
+
   def initialize(enum = nil, &block)
     @__hash__ = {}
     return if enum.nil?

@@ -531,6 +531,8 @@ pub struct Heap {
     ffi: crate::ffi::Ffi,
     /// The OpenSSL contexts `openssl`'s digests and HMACs hash in (#106).
     openssl: crate::openssl::Contexts,
+    /// The libyaml emitters `Psych::Emitter`s write with (#108).
+    psych: crate::psych::Emitters,
 }
 
 /// Where `ObjectSpace.trace_object_allocations` saw an object allocated
@@ -769,6 +771,7 @@ impl Heap {
             autoload_total: 0,
             ffi: crate::ffi::Ffi::default(),
             openssl: crate::openssl::Contexts::default(),
+            psych: crate::psych::Emitters::default(),
             any_autoloads: false,
             argv: Vec::new(),
             program_name: String::new(),
@@ -993,6 +996,11 @@ impl Heap {
     /// The heap's OpenSSL contexts (#106): see [`crate::openssl`].
     pub fn openssl_mut(&mut self) -> &mut crate::openssl::Contexts {
         &mut self.openssl
+    }
+
+    /// The heap's libyaml emitters (#108): see [`crate::psych`].
+    pub fn psych_mut(&mut self) -> &mut crate::psych::Emitters {
+        &mut self.psych
     }
 
     /// What each call site last resolved to. Read on every `Send`, so the
@@ -1823,6 +1831,11 @@ impl<'h> HandleScope<'h> {
     /// The heap's OpenSSL contexts (#106): see [`crate::openssl`].
     pub fn openssl_mut(&mut self) -> &mut crate::openssl::Contexts {
         self.heap.openssl_mut()
+    }
+
+    /// The heap's libyaml emitters (#108): see [`crate::psych`].
+    pub fn psych_mut(&mut self) -> &mut crate::psych::Emitters {
+        self.heap.psych_mut()
     }
 
     /// The heap's compiled patterns and literal cache.
