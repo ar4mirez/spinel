@@ -7,3 +7,4 @@ stat: []
 through the pipe
 # What reflection sees of an IO, a File and a File::Stat: nothing, as on
 state.rb
+Marshal File::Stat: TypeError: no _dump_data is defined for class File::Stat

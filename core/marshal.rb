@@ -118,7 +118,7 @@ module Marshal
   # written as an object nor filled in as one.
   def self.__opaque__
     @__opaque__ ||= %w[Proc Method UnboundMethod Binding Thread Enumerator Fiber Dir
-                       Encoding Random Mutex Thread::Mutex Thread::Queue IO MatchData].map do |path|
+                       Encoding Random Mutex Thread::Mutex Thread::Queue IO MatchData File::Stat].map do |path|
       begin
         __constant__(path)
       rescue ::ArgumentError, ::TypeError

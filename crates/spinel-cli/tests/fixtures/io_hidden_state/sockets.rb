@@ -37,3 +37,13 @@ puts peer.read(4)
 puts peer_address.ipv4_loopback?
 
 [client, accepted, server, dialer, peer, listener].each(&:close)
+
+# Socket::Ifaddr is a T_DATA on CRuby, with nothing Marshal can write; an
+# Option and an AncillaryData keep their state through Marshal.
+begin
+  Marshal.dump(Socket.getifaddrs.first)
+rescue TypeError => e
+  puts "Marshal Socket::Ifaddr: #{e.class}: #{e.message}"
+end
+puts Marshal.load(Marshal.dump(Socket::Option.int(:INET, :SOCKET, :KEEPALIVE, 1))).inspect
+puts Marshal.load(Marshal.dump(Socket::AncillaryData.int(:UNIX, :SOCKET, :RIGHTS, 1))).inspect

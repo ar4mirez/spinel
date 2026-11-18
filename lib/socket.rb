@@ -2048,6 +2048,14 @@ class Socket
     def optname = @__optname__
     def data = @__data__
 
+    def marshal_dump = [@__family__, @__level__, @__optname__, @__data__]
+
+    def marshal_load(state)
+      @__family__, @__level__, @__optname__, data = state
+      @__data__ = data.freeze
+    end
+    private :marshal_dump, :marshal_load
+
     def to_s = @__data__
 
     def int
@@ -2181,6 +2189,13 @@ class Socket
     def data = @__data__
     attr_writer :__ios__
 
+    def marshal_dump = [@__family__, @__level__, @__type__, @__data__]
+
+    def marshal_load(state)
+      @__family__, @__level__, @__type__, @__data__ = state
+    end
+    private :marshal_dump, :marshal_load
+
     def cmsg_is?(level, type)
       level = Socket.__level__(@__family__, level)
       type = Socket.__cmsg_type__(@__family__, level, type)
@@ -2247,6 +2262,8 @@ class Socket
   end
 
   class Ifaddr
+    Marshal.__opaque_class__(self)
+
     def self.__new__(name, flags, ifindex, addr, netmask, broadaddr, dstaddr)
       ifaddr = allocate
       ifaddr.__init__(name, flags, ifindex, addr, netmask, broadaddr, dstaddr)

@@ -23,3 +23,10 @@ puts File.basename(file.path)
 
 file.close
 reader.close
+
+# A File::Stat is a T_DATA on CRuby, with nothing Marshal can write.
+begin
+  Marshal.dump(File.stat(__FILE__))
+rescue TypeError => e
+  puts "Marshal File::Stat: #{e.class}: #{e.message}"
+end
