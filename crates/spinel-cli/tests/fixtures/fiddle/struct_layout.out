@@ -1,0 +1,26 @@
+Mixed: size 32 alignment 8 members ["c", "i", "d", "s", "name"]
+Packedish: size 8 alignment 4 members ["a", "b", "c", "d"]
+Arrays: size 32 alignment 8 members ["tag", "values", "weight"]
+Tail: size 16 alignment 8 members ["d", "c"]
+Unsigned: size 40 alignment 8 members ["uc", "us", "ui", "ul", "ll", "ull", "f"]
+Choice: size 16 alignment 8 members ["c", "i", "d", "l"]
+Nested: size 24 alignment 8 members ["head", ["inner", ["x", "y"]], "tail"]
+Tm: size 56 alignment 8 members ["tm_sec", "tm_min", "tm_hour", "tm_mday", "tm_mon", "tm_year", "tm_wday", "tm_yday", "tm_isdst", "tm_gmtoff", "tm_zone"]
+Timeval: size 16 alignment 8 members ["tv_sec", "tv_usec"]
+Mixed offsets: [0, 4, 8, 16, 24]
+Tm offsets: [0, 4, 8, 12, 16, 20, 24, 28, 32, 40, 48]
+Arrays offsets: [0, 4, 24]
+Mixed values: [-3, 123456, 2.5, -2, "fiddle"]
+Mixed bytes: c=-3 i=123456 d=2.5 s=-2
+Mixed [] and to_h: 123456 {"c" => -3, "i" => 123456, "d" => 2.5, "s" => -2}
+Arrays values: [[65, 66, 67], [10, -20, 30, -40], 0.125]
+Arrays bytes: "ABC" [10, -20, 30, -40]
+Arrays element write: [10, -20, 30, -40]
+Choice as long: [4607182418800017408, 0]
+Choice overlaps: [68, 1094861636]
+Nested: [1, 77, 8, 9.75] x at 4: 77 tail at 16: 9.75
+Unsigned: [255, 65535, 4294967295, 18446744073709551615, -9223372036854775808, 18446744073709551615, 0.10000000149011612]
+gmtime_r: true [2000, 2, 29, 3, 25, 9, 2, 59, 0, 0] zone true
+gettimeofday: 0 true true
+qsort structs: [[1, 10], [2, 20], [3, 30]]
+sizeof: [4, 8, 8, 32, 56]

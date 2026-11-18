@@ -8,7 +8,13 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+# The C stack a Fiddle call runs on while closures are live, so a callback
+# can suspend it and hand Ruby the arguments (#105, `src/ffi.rs`).
+corosensei = "0.3.4"
 libc = "0.2.189"
+# `Spinel::FFI` (#105): libffi, built from the copy the crate vendors, so
+# neither a system libffi nor its headers are needed.
+libffi = "5.2.0"
 md-5 = "0.11.0"
 num-bigint = "0.4.8"
 num-traits = "0.2.19"

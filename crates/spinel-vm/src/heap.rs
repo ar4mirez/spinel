@@ -526,6 +526,9 @@ pub struct Heap {
     autoloads: Vec<u32>,
     /// The sum of `autoloads`.
     autoload_total: u32,
+    /// The FFI state `Spinel::FFI` and `fiddle` use (#105): live closures
+    /// and the calls suspended in one, waiting for Ruby's answer.
+    ffi: crate::ffi::Ffi,
 }
 
 /// Where `ObjectSpace.trace_object_allocations` saw an object allocated
@@ -762,6 +765,7 @@ impl Heap {
             partial: false,
             autoloads: Vec::new(),
             autoload_total: 0,
+            ffi: crate::ffi::Ffi::default(),
             any_autoloads: false,
             argv: Vec::new(),
             program_name: String::new(),
@@ -976,6 +980,11 @@ impl Heap {
 
     pub fn definitions_mut(&mut self) -> &mut crate::method::Definitions {
         &mut self.definitions
+    }
+
+    /// The heap's FFI state (#105): see [`crate::ffi`].
+    pub fn ffi_mut(&mut self) -> &mut crate::ffi::Ffi {
+        &mut self.ffi
     }
 
     /// What each call site last resolved to. Read on every `Send`, so the
@@ -1796,6 +1805,11 @@ impl<'h> HandleScope<'h> {
 
     pub fn definitions_mut(&mut self) -> &mut crate::method::Definitions {
         self.heap.definitions_mut()
+    }
+
+    /// The heap's FFI state (#105): see [`crate::ffi`].
+    pub fn ffi_mut(&mut self) -> &mut crate::ffi::Ffi {
+        self.heap.ffi_mut()
     }
 
     /// The heap's compiled patterns and literal cache.

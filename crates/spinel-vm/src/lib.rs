@@ -85,6 +85,7 @@ pub mod errno;
 pub mod etc;
 pub mod euckr;
 pub mod euckr_table;
+pub mod ffi;
 pub mod float;
 pub mod heap;
 pub mod interp;

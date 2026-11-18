@@ -1,0 +1,42 @@
+malloc: size 16 zeroed true null? false freed? false
+free function: Fiddle::Function true
+bytes: "hello!" 104 33
+a byte reads back signed: -56
+to_s: "hello!" to_s(3): "hel" to_str: 16 to_str(2): "he"
+encodings: ASCII-8BIT ASCII-8BIT
+plus: 2 size 14 "llo!" free nil
+minus: 1 size 15 "ello"
+compare: [-1, 1, 0, nil]
+equal: [true, false, true, false]
+to_i and to_int: true true
+negative and wrapped: [-1, -1, -1, 4611686018427387904]
+too big: bignum too big to convert into 'unsigned long'
+ptr: true "hello!"
+ref: true "hello!"
+memcpy: true "hello!" Fiddle::Pointer
+strcpy: "hello! world"
+snprintf into a String: 11 "pi=3 3.14 !" 32
+a char is no variadic argument: error creating CIF 3
+Pointer[String]: "chars" size 5
+Pointer[Integer]: true 0
+Pointer[Pointer]: true
+Pointer[to_ptr]: 1234
+to_ptr not a Pointer: to_ptr should return a Fiddle::Pointer object
+Pointer.read: "ABClo"
+size=: 4 "hell"
+NULL: true 0 0 0
+NULL[0]: NULL pointer dereference
+NULL[0]=: NULL pointer dereference
+inspect: #<Fiddle::Pointer:ADDR ptr=ADDR size=4 free=FREE>
+NULL inspect: #<Fiddle::Pointer:ADDR ptr=0x0000000000000000 size=0 free=0x0000000000000000>
+call_free: true
+call_free twice: true
+no free function: nil false
+free= then call_free: true
+malloc block: 8 false
+after the block: true
+malloc block without free: a free function must be supplied to Fiddle::Pointer.malloc when it is called with a block
+Fiddle.malloc and realloc: "xyz"
+dlwrap round trip: [:sym, nil, 42, true]
+Pinned: true false
+cleared: true `ref` called on a cleared object

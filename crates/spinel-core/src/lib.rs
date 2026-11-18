@@ -225,6 +225,11 @@ const LIBRARIES: &[(&str, &str)] = &[
     ("zlib", include_str!("../../../lib/zlib.rb")),
     ("prism/prism", include_str!("../../../lib/prism/prism.rb")),
     ("ripper", include_str!("../../../lib/ripper.rb")),
+    ("spinel/ffi", include_str!("../../../lib/spinel/ffi.rb")),
+    (
+        "fiddle/spinel",
+        include_str!("../../../lib/fiddle/spinel.rb"),
+    ),
 ];
 
 fn library(name: &str) -> Option<&'static str> {

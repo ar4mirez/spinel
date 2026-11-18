@@ -48,8 +48,8 @@ use crate::class::Builtin;
 use crate::class::{ClassId, CrefId, Kind, Method, ScopeDefault, Visibility};
 use crate::heap::{Handle, HandleScope, Heap, Payload};
 use crate::method::{
-    BindingOp, BitOp, ConsoleOp, CvarOp, Definition, EtcOp, FiberOp, FsOp, GcOp, IvarOp, Native,
-    ReflectOp, SockOp, StrOp, SysOp, ThreadOp,
+    BindingOp, BitOp, ConsoleOp, CvarOp, Definition, EtcOp, FfiOp, FiberOp, FsOp, GcOp, IvarOp,
+    Native, ReflectOp, SockOp, StrOp, SysOp, ThreadOp,
 };
 use crate::shape::ShapeId;
 use crate::value::SymbolId;
@@ -12487,6 +12487,24 @@ fn native_call<'h>(
                             frames[last].keeps_receiver = true;
                             Ok(None)
                         }
+                        // `define_method(:initialize) { ... }`, as `fiddle`'s
+                        // `CStructBuilder.create` makes one (#105): the Proc
+                        // run as the method, as `dispatch` runs it.
+                        Some(Definition::Proc(block)) => {
+                            push_proc_frame_as(
+                                scope,
+                                BlockStack::Running(stack),
+                                frames,
+                                &call,
+                                block,
+                                ids,
+                                ProcRole::Method,
+                            )?;
+                            let last = frames.len() - 1;
+                            set_break_target(scope, call.block, frames[last].id);
+                            frames[last].keeps_receiver = true;
+                            Ok(None)
+                        }
                         // A native `initialize` is `Object#initialize`, which
                         // does nothing; there is no other one yet.
                         _ => Ok(None),
@@ -14870,6 +14888,7 @@ fn native_call<'h>(
         Native::Etc(op) => etc_native(scope, stack, &call, op),
         Native::Ext(index) => ext::call(scope, stack, frames, proc_class, ids, &call, index),
         Native::Console(op) => console_native(scope, stack, &call, op),
+        Native::Ffi(op) => ffi_native(scope, stack, &call, op),
 
         Native::FrameNesting => {
             let cref = frames.last().map_or(CrefId::ROOT, |frame| frame.cref);
@@ -17959,6 +17978,74 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             Builtin::Kernel,
             &["__console_constants__"],
             Native::Console(ConsoleOp::Constants),
+        ),
+        (
+            Builtin::Kernel,
+            &["__ffi_dlopen__"],
+            Native::Ffi(FfiOp::Dlopen),
+        ),
+        (
+            Builtin::Kernel,
+            &["__ffi_dlsym__"],
+            Native::Ffi(FfiOp::Dlsym),
+        ),
+        (
+            Builtin::Kernel,
+            &["__ffi_dlclose__"],
+            Native::Ffi(FfiOp::Dlclose),
+        ),
+        (
+            Builtin::Kernel,
+            &["__ffi_malloc__"],
+            Native::Ffi(FfiOp::Malloc),
+        ),
+        (
+            Builtin::Kernel,
+            &["__ffi_realloc__"],
+            Native::Ffi(FfiOp::Realloc),
+        ),
+        (Builtin::Kernel, &["__ffi_free__"], Native::Ffi(FfiOp::Free)),
+        (Builtin::Kernel, &["__ffi_read__"], Native::Ffi(FfiOp::Read)),
+        (
+            Builtin::Kernel,
+            &["__ffi_write__"],
+            Native::Ffi(FfiOp::Write),
+        ),
+        (
+            Builtin::Kernel,
+            &["__ffi_strlen__"],
+            Native::Ffi(FfiOp::Strlen),
+        ),
+        (Builtin::Kernel, &["__ffi_call__"], Native::Ffi(FfiOp::Call)),
+        (
+            Builtin::Kernel,
+            &["__ffi_resume__"],
+            Native::Ffi(FfiOp::Resume),
+        ),
+        (
+            Builtin::Kernel,
+            &["__ffi_abandon__"],
+            Native::Ffi(FfiOp::Abandon),
+        ),
+        (
+            Builtin::Kernel,
+            &["__ffi_closure__"],
+            Native::Ffi(FfiOp::Closure),
+        ),
+        (
+            Builtin::Kernel,
+            &["__ffi_closure_free__"],
+            Native::Ffi(FfiOp::ClosureFree),
+        ),
+        (
+            Builtin::Kernel,
+            &["__ffi_layout__"],
+            Native::Ffi(FfiOp::Layout),
+        ),
+        (
+            Builtin::Kernel,
+            &["__ffi_constants__"],
+            Native::Ffi(FfiOp::Constants),
         ),
         (Builtin::Kernel, &["__fd_dup__"], Native::Fs(FsOp::FdDup)),
         (Builtin::Kernel, &["__fd_dup2__"], Native::Fs(FsOp::FdDup2)),
@@ -26676,6 +26763,257 @@ fn etc_native(
             let name = string_new(scope, name);
             new_array(scope, &[name, int(value)])
         }),
+    };
+    stack.push(value);
+    Ok(None)
+}
+
+// ---------------------------------------------------------------------------
+// `Spinel::FFI` (#105)
+// ---------------------------------------------------------------------------
+
+/// The address at argument `index`: an Integer from `-2**63` to `2**64 - 1`,
+/// as `fiddle`'s `NUM2PTR` takes one, wrapped to a machine word.
+fn address_arg(scope: &mut HandleScope<'_>, call: &Pending, index: usize) -> Result<usize, Error> {
+    let value = call.args.get(index).copied().unwrap_or(Value::NIL);
+    if let Some(n) = value.as_fixnum() {
+        return Ok(n as usize);
+    }
+    let word = crate::bignum::read(scope, value).and_then(|big| {
+        use num_traits::ToPrimitive;
+        big.to_u64().or_else(|| big.to_i64().map(|n| n as u64))
+    });
+    match word {
+        Some(word) => usize::try_from(word).map_err(|_| {
+            Error::raise(
+                "RangeError",
+                "bignum too big to convert into 'unsigned long'",
+            )
+        }),
+        None if crate::bignum::is_big(scope, value) => Err(Error::raise(
+            "RangeError",
+            "bignum too big to convert into 'unsigned long'",
+        )),
+        None => Err(Error::raise("TypeError", "an address is an Integer")),
+    }
+}
+
+/// An address as `fiddle`'s `PTR2NUM` answers it: the word, signed.
+fn address_value(scope: &mut HandleScope<'_>, address: usize) -> Value {
+    let signed = address as i64;
+    Value::fixnum(signed)
+        .unwrap_or_else(|| crate::bignum::value(scope, &num_bigint::BigInt::from(signed)))
+}
+
+/// A count or size at argument `index`, which the Ruby side has checked.
+fn size_arg(call: &Pending, index: usize) -> Result<usize, Error> {
+    int_arg(call, index)
+        .and_then(|n| usize::try_from(n).ok())
+        .ok_or_else(|| Error::raise("ArgumentError", "a size is a non-negative Integer"))
+}
+
+/// The type codes in the Array at argument `index`.
+fn type_codes(
+    scope: &mut HandleScope<'_>,
+    call: &Pending,
+    index: usize,
+) -> Result<Vec<i64>, Error> {
+    let value = call.args.get(index).copied().unwrap_or(Value::NIL);
+    array_elements(scope, value)
+        .and_then(|codes| codes.iter().map(|code| code.as_fixnum()).collect())
+        .ok_or_else(|| Error::raise("TypeError", "types are an Array of Integers"))
+}
+
+/// The 8-byte slots in the BINARY String at argument `index`.
+fn slots_at(scope: &mut HandleScope<'_>, call: &Pending, index: usize) -> Result<Vec<u64>, Error> {
+    let bytes = bytes_at(scope, call, index, "__ffi_call__")?;
+    Ok(bytes
+        .chunks_exact(8)
+        .map(|slot| u64::from_ne_bytes(slot.try_into().expect("eight bytes")))
+        .collect())
+}
+
+fn slots_value(scope: &mut HandleScope<'_>, slots: &[u64]) -> Value {
+    let bytes: Vec<u8> = slots.iter().flat_map(|slot| slot.to_ne_bytes()).collect();
+    binary_value(scope, &bytes)
+}
+
+/// What `__ffi_call__` and `__ffi_resume__` answer for an outcome.
+fn outcome_value(scope: &mut HandleScope<'_>, outcome: crate::ffi::Outcome) -> Value {
+    let int = |n: i64| Value::fixnum(n).expect("a call id or errno is a fixnum");
+    match outcome {
+        crate::ffi::Outcome::Done { value, errno } => {
+            let slot = slots_value(scope, &[value]);
+            new_array(scope, &[int(0), slot, int(i64::from(errno))])
+        }
+        crate::ffi::Outcome::Callback {
+            call,
+            closure,
+            args,
+        } => {
+            let slots = slots_value(scope, &args);
+            let call = Value::fixnum(call as i64).expect("a call id is a fixnum");
+            new_array(scope, &[int(1), call, int(i64::from(closure)), slots])
+        }
+    }
+}
+
+/// The C calls `lib/spinel/ffi.rb` is Ruby over; `ffi.rs` makes them.
+/// Memory at an address the program gives is the program's to get right, as
+/// it is in C and in CRuby's `fiddle`: Spinel's own heap is never one of them.
+fn ffi_native(
+    scope: &mut HandleScope<'_>,
+    stack: &mut Stack,
+    call: &Pending,
+    op: FfiOp,
+) -> Result<Option<Unwind>, Error> {
+    use crate::ffi;
+    let int = |n: i64| Value::fixnum(n).expect("a small Integer");
+    let failed = |scope: &mut HandleScope<'_>, message: String| string_new(scope, &message);
+    let value = match op {
+        FfiOp::Dlopen => {
+            let path = bytes_or_nil(scope, call, 0, "__ffi_dlopen__")?;
+            let flags = int_arg(call, 1)
+                .and_then(|n| i32::try_from(n).ok())
+                .unwrap_or(libc::RTLD_LAZY | libc::RTLD_GLOBAL);
+            match ffi::dlopen(path.as_deref(), flags) {
+                Ok(handle) => address_value(scope, handle),
+                Err(message) => failed(scope, message),
+            }
+        }
+        FfiOp::Dlsym => {
+            let handle = address_arg(scope, call, 0)?;
+            let name = bytes_at(scope, call, 1, "__ffi_dlsym__")?;
+            match ffi::dlsym(handle, &name) {
+                Ok(Some(address)) => address_value(scope, address),
+                Ok(None) => Value::NIL,
+                Err(message) => return Err(Error::raise("ArgumentError", message)),
+            }
+        }
+        FfiOp::Dlclose => {
+            let handle = address_arg(scope, call, 0)?;
+            match ffi::dlclose(handle) {
+                Ok(()) => Value::NIL,
+                Err(message) => failed(scope, message),
+            }
+        }
+        FfiOp::Malloc => {
+            let size = size_arg(call, 0)?;
+            address_value(scope, ffi::malloc(size))
+        }
+        FfiOp::Realloc => {
+            let address = address_arg(scope, call, 0)?;
+            let size = size_arg(call, 1)?;
+            // SAFETY: an address `Fiddle.malloc` gave, as the program says.
+            let address = unsafe { ffi::realloc(address, size) };
+            address_value(scope, address)
+        }
+        FfiOp::Free => {
+            let address = address_arg(scope, call, 0)?;
+            // SAFETY: as for `Realloc`.
+            unsafe { ffi::free(address) };
+            Value::NIL
+        }
+        FfiOp::Read => {
+            let address = address_arg(scope, call, 0)?;
+            let len = size_arg(call, 1)?;
+            if address == 0 && len > 0 {
+                return Err(Error::raise("ArgumentError", "NULL pointer given"));
+            }
+            // SAFETY: readable memory there is the program's to get right.
+            let bytes = unsafe { ffi::read(address, len) };
+            binary_value(scope, &bytes)
+        }
+        FfiOp::Write => {
+            let address = address_arg(scope, call, 0)?;
+            let bytes = bytes_at(scope, call, 1, "__ffi_write__")?;
+            if address == 0 && !bytes.is_empty() {
+                return Err(Error::raise("ArgumentError", "NULL pointer given"));
+            }
+            // SAFETY: as for `Read`, writable.
+            unsafe { ffi::write(address, &bytes) };
+            Value::NIL
+        }
+        FfiOp::Strlen => {
+            let address = address_arg(scope, call, 0)?;
+            if address == 0 {
+                return Err(Error::raise("ArgumentError", "NULL pointer given"));
+            }
+            // SAFETY: a C string there is the program's to get right.
+            let len = unsafe { ffi::strlen(address) };
+            int(i64::try_from(len).expect("a string's length is a fixnum"))
+        }
+        FfiOp::Call => {
+            let func = address_arg(scope, call, 0)?;
+            let abi = int_arg(call, 1).unwrap_or_else(ffi::default_abi);
+            let types = type_codes(scope, call, 2)?;
+            let fixed = size_arg(call, 3)?;
+            let ret = int_arg(call, 4).unwrap_or(ffi::VOID);
+            let slots = slots_at(scope, call, 5)?;
+            // SAFETY: a function of this signature at `func`, and arguments
+            // pointing where it expects, are the program's to get right.
+            let outcome = unsafe { scope.ffi_mut().call(func, abi, &types, fixed, ret, &slots) }
+                .map_err(|message| Error::raise("RuntimeError", message))?;
+            outcome_value(scope, outcome)
+        }
+        FfiOp::Resume => {
+            let id = int_arg(call, 0)
+                .and_then(|n| u64::try_from(n).ok())
+                .ok_or_else(|| Error::raise("ArgumentError", "a call id is an Integer"))?;
+            let answer = slots_at(scope, call, 1)?.first().copied().unwrap_or(0);
+            let outcome = scope
+                .ffi_mut()
+                .resume(id, answer)
+                .map_err(|message| Error::raise("RuntimeError", message))?;
+            outcome_value(scope, outcome)
+        }
+        FfiOp::Abandon => {
+            if let Some(id) = int_arg(call, 0).and_then(|n| u64::try_from(n).ok()) {
+                scope.ffi_mut().abandon(id);
+            }
+            Value::NIL
+        }
+        FfiOp::Closure => {
+            let ret = int_arg(call, 0).unwrap_or(ffi::VOID);
+            let types = type_codes(scope, call, 1)?;
+            let abi = int_arg(call, 2).unwrap_or_else(ffi::default_abi);
+            match scope.ffi_mut().closure(ret, &types, abi) {
+                Ok((id, code)) => {
+                    let code = address_value(scope, code);
+                    new_array(scope, &[int(i64::from(id)), code])
+                }
+                Err(message) => failed(scope, message),
+            }
+        }
+        FfiOp::ClosureFree => {
+            if let Some(id) = int_arg(call, 0).and_then(|n| u32::try_from(n).ok()) {
+                scope.ffi_mut().free_closure(id);
+            }
+            Value::NIL
+        }
+        FfiOp::Layout => match int_arg(call, 0).and_then(ffi::layout) {
+            Some((size, align)) => new_array(scope, &[int(size as i64), int(align as i64)]),
+            None => Value::NIL,
+        },
+        FfiOp::Constants => {
+            let (default, next) = ffi::pseudo_handles();
+            let pairs: [(&str, i64); 7] = [
+                ("RTLD_GLOBAL", i64::from(libc::RTLD_GLOBAL)),
+                ("RTLD_LAZY", i64::from(libc::RTLD_LAZY)),
+                ("RTLD_NOW", i64::from(libc::RTLD_NOW)),
+                ("RTLD_DEFAULT", default as i64),
+                ("RTLD_NEXT", next as i64),
+                ("DEFAULT_ABI", ffi::default_abi()),
+                ("FREE", ffi::free_function() as i64),
+            ];
+            rooted_array(scope, pairs, |scope, (name, value)| {
+                let name = string_new(scope, name);
+                let name = scope.root(name);
+                let value = address_value(scope, value as usize);
+                let name = scope.get(name);
+                new_array(scope, &[name, value])
+            })
+        }
     };
     stack.push(value);
     Ok(None)

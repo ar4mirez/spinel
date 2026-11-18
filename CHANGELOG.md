@@ -9,6 +9,19 @@ bytecode a tool reads.
 
 ### Added
 
+- **`fiddle`, on `Spinel::FFI` and libffi**
+  ([#105](https://github.com/ar4mirez/spinel/issues/105)). `require "fiddle"`
+  is fiddle 1.1.8, the version Ruby 4.0 bundles: load a C library, declare
+  its functions, call them, lay out C structs with `Fiddle::Importer`, work
+  with `Fiddle::Pointer`, and hand C a `Fiddle::Closure` that calls a Ruby
+  block — `qsort` comparing in Ruby, a block raising out of C, callbacks on
+  several threads at once. `require "spinel/ffi"` gives the layer under it,
+  `Spinel::FFI`, directly. libffi is built into `spinel`, so nothing needs to
+  be installed. Spinel never hands C an address inside its own heap: a String
+  argument is a copy, written back into the String when the call returns.
+  A lockfile pinning `fiddle` installs the built-in. `Class#new` now runs an
+  `initialize` defined with `define_method`.
+
 - **`require` loads Spinel native extensions**
   ([#104](https://github.com/ar4mirez/spinel/issues/104)). A `.spinel` file
   `require` finds — `require "foo"` with no `foo.rb`, or `require "foo.so"` —

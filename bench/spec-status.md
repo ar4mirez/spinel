@@ -84,7 +84,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `library/erb` | 13 | 53 | 53 | 0 | 0 | 0 | 100% |
 | `library/etc` | 19 | 50 | 50 | 0 | 0 | 0 | 100% |
 | `library/expect` | 1 | 6 | 0 | 0 | 6 | 0 | 0% |
-| `library/fiddle` | 1 | 1 | 0 | 0 | 1 | 0 | 0% |
+| `library/fiddle` | 1 | 1 | 1 | 0 | 0 | 0 | 100% |
 | `library/find` | 2 | 3 | 3 | 0 | 0 | 0 | 100% |
 | `library/getoptlong` | 10 | 27 | 0 | 0 | 27 | 0 | 0% |
 | `library/io-wait` | 3 | 28 | 28 | 0 | 0 | 0 | 100% |
@@ -131,4 +131,4 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `optional/capi` | 47 | 0 | 0 | 0 | 0 | 0 | — |
 | `optional/thread_safety` | 1 | 5 | 4 | 0 | 0 | 1 | 80% |
 | `security` | 13 | 34 | 32 | 0 | 2 | 0 | 94% |
-| **total** | 3841 | 32935 | 30388 | 0 | 2431 | 116 | 92% |
+| **total** | 3841 | 32935 | 30389 | 0 | 2430 | 116 | 92% |
