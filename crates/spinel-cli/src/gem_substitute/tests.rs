@@ -247,14 +247,72 @@ fn only_listed_gems_are_substituted() {
 }
 
 #[test]
-fn a_substitute_may_need_only_what_upstream_needs() {
-    use crate::gem_requirement::Requirement;
-    let dep = |name: &str| (name.to_owned(), Requirement::new([">= 0"]).unwrap());
-    let upstream = [dep("gizmo"), dep("base64")];
-    assert!(unlocked_dependencies(&[dep("gizmo")], &upstream).is_empty());
-    assert!(unlocked_dependencies(&[], &upstream).is_empty());
+fn a_substitute_may_need_only_what_upstream_needs_at_the_locked_versions() {
+    let dep = |name: &str, req: &str| (name.to_owned(), Requirement::new([req]).unwrap());
+    let gizmo = v("1.0.0");
+    let base64 = v("0.2.0");
+    let locked = |name: &str| match name {
+        "gizmo" => Some(&gizmo),
+        "base64" => Some(&base64),
+        _ => None,
+    };
+    let upstream = [dep("gizmo", "~> 1.0"), dep("base64", ">= 0")];
+    let names = |unlocked: Vec<Unlocked<'_, '_>>| -> Vec<(String, String, Option<String>)> {
+        unlocked
+            .iter()
+            .map(|u| {
+                (
+                    u.name.to_owned(),
+                    u.requirement.to_string(),
+                    u.locked.map(Version::to_string),
+                )
+            })
+            .collect()
+    };
+
+    // Met: upstream depends on it and the locked version satisfies it.
+    assert!(unlocked_dependencies(&[dep("gizmo", ">= 1")], &upstream, locked).is_empty());
+    assert!(unlocked_dependencies(&[], &upstream, locked).is_empty());
+    // Name missing: upstream does not depend on it, so nothing is locked for
+    // it, whatever else the lockfile holds.
     assert_eq!(
-        unlocked_dependencies(&[dep("ffi"), dep("gizmo"), dep("extra")], &upstream),
-        ["ffi", "extra"]
+        names(unlocked_dependencies(
+            &[dep("ffi", ">= 0")],
+            &upstream,
+            locked
+        )),
+        [("ffi".to_owned(), ">= 0".to_owned(), None)]
+    );
+    // Requirement unmet: the locked version does not satisfy it.
+    assert_eq!(
+        names(unlocked_dependencies(
+            &[dep("gizmo", ">= 2")],
+            &upstream,
+            locked
+        )),
+        [(
+            "gizmo".to_owned(),
+            ">= 2".to_owned(),
+            Some("1.0.0".to_owned())
+        )]
+    );
+    // Every one of them, in the substitute's order.
+    let substitute = [
+        dep("ffi", ">= 0"),
+        dep("gizmo", ">= 2"),
+        dep("base64", ">= 0"),
+        dep("extra", "~> 1.0"),
+    ];
+    assert_eq!(
+        names(unlocked_dependencies(&substitute, &upstream, locked)),
+        [
+            ("ffi".to_owned(), ">= 0".to_owned(), None),
+            (
+                "gizmo".to_owned(),
+                ">= 2".to_owned(),
+                Some("1.0.0".to_owned())
+            ),
+            ("extra".to_owned(), "~> 1.0".to_owned(), None),
+        ]
     );
 }

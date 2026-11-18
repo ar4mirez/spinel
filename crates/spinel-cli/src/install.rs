@@ -1000,8 +1000,9 @@ impl Session {
     /// from the source the gem comes from: the build of `<gem>-spinel`
     /// [`gem_substitute::pick`] chooses for the locked version on this
     /// platform. A gem with none is installed as itself. A substitute that
-    /// depends on a gem the locked one does not fails the install, naming
-    /// every such gem, before anything is fetched or written.
+    /// depends on a gem the locked one does not, or on a version of one that
+    /// `locked`, all the lockfile's specs, does not lock, fails the install,
+    /// naming every such dependency, before anything is fetched or written.
     // ponytail: a listed gem's substitute's `/info` is brought up to date on
     // every install, so an install with such a gem locked asks its source
     // even when nothing changed. Upgrade: keep `.spinel/substitutions.json`'s
@@ -1010,6 +1011,7 @@ impl Session {
         &self,
         list: &gem_substitute::List,
         specs: &[Spec],
+        locked: &[Spec],
         source_of: &dyn Fn(&Spec) -> Option<usize>,
     ) -> Result<Vec<Native>, Stop> {
         let mut by_source: Vec<(Option<usize>, Vec<&Spec>)> = Vec::new();
@@ -1076,17 +1078,29 @@ impl Session {
                 let unlocked = gem_substitute::unlocked_dependencies(
                     &substitute.dependencies,
                     &upstream.dependencies,
+                    |name| locked.iter().find(|s| s.name == name).map(|s| &s.version),
                 );
                 if !unlocked.is_empty() {
+                    let reasons: Vec<String> = unlocked
+                        .iter()
+                        .map(|dep| match dep.locked {
+                            None => format!(
+                                "it depends on {} ({}), which {} does not, so {} locks nothing \
+                                 for it",
+                                dep.name, dep.requirement, upstream.name, self.lock_name
+                            ),
+                            Some(version) => format!(
+                                "it depends on {} ({}), which {} locks at {version}",
+                                dep.name, dep.requirement, self.lock_name
+                            ),
+                        })
+                        .collect();
                     self.fail(format!(
-                        "{} cannot stand in for {} {}: it depends on {}, which {} does not, so \
-                         {} locks nothing for it",
+                        "{} cannot stand in for {} {}: {}",
                         substitute.full_name(),
                         upstream.name,
                         version_of(upstream),
-                        unlocked.join(", "),
-                        upstream.name,
-                        self.lock_name
+                        reasons.join("; ")
                     ));
                     refused = true;
                     continue;
@@ -1360,7 +1374,7 @@ impl Session {
         // lockfile, resolved before this, still names the gem itself.
         let substitutes = gem_substitute::List::from_env();
         self.warn_named_substitutes(gemfile, &substitutes);
-        let natives = self.find_natives(&substitutes, &to_install, &source_of)?;
+        let natives = self.find_natives(&substitutes, &to_install, &specs, &source_of)?;
         let to_install: Vec<Spec> = to_install
             .into_iter()
             .filter(|s| !natives.iter().any(|n| n.upstream == *s))

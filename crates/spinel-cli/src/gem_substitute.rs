@@ -31,7 +31,8 @@
 //! - **List**: [`List`]. Spinel's own list of substituted gems,
 //!   [`SUBSTITUTED`], and the names [`ENV`] adds to it.
 //! - **Dependencies**: [`unlocked_dependencies`]. A substitute may need only
-//!   what upstream needs, since the lockfile holds nothing else.
+//!   gems upstream needs, at versions the lockfile locks, since the lockfile
+//!   holds nothing else.
 //!
 //! The installer (`install.rs`, #112) reads a listed gem's substitute's
 //! `/info` from the source the locked gem comes from, picks a build, fetches
@@ -42,6 +43,7 @@
 use std::num::NonZeroU64;
 
 use crate::gem_platform::{GemPlatform, Platform, match_platforms, sort_best_platform_match};
+use crate::gem_requirement::Requirement;
 use crate::gem_version::Version;
 
 /// What a Spinel-native gem's name adds to the upstream name.
@@ -100,18 +102,44 @@ impl List {
     }
 }
 
-/// The names among a substitute's runtime dependencies that the locked
-/// upstream gem does not depend on, in the substitute's order. The lockfile
-/// was resolved for upstream's, so it holds none of these, and a substitute
-/// that needs one cannot be installed in upstream's place.
-pub fn unlocked_dependencies<'a>(
-    substitute: &'a [(String, crate::gem_requirement::Requirement)],
-    upstream: &[(String, crate::gem_requirement::Requirement)],
-) -> Vec<&'a str> {
+/// A runtime dependency of a substitute that the lockfile does not provide.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unlocked<'a, 'v> {
+    pub name: &'a str,
+    pub requirement: &'a Requirement,
+    /// The version the lockfile locks for `name`; `None` when the locked
+    /// upstream gem does not depend on `name`, so the lockfile was not
+    /// resolved for it.
+    pub locked: Option<&'v Version>,
+}
+
+/// The runtime dependencies of a substitute that the lockfile does not
+/// provide, in the substitute's order: those the locked upstream gem does
+/// not depend on, and those whose requirement the version the lockfile
+/// locks (`locked`, over all its specs) does not satisfy. A substitute with
+/// any cannot be installed in upstream's place.
+pub fn unlocked_dependencies<'a, 'v>(
+    substitute: &'a [(String, Requirement)],
+    upstream: &[(String, Requirement)],
+    locked: impl Fn(&str) -> Option<&'v Version>,
+) -> Vec<Unlocked<'a, 'v>> {
     substitute
         .iter()
-        .map(|(name, _)| name.as_str())
-        .filter(|name| !upstream.iter().any(|(u, _)| u == name))
+        .filter_map(|(name, requirement)| {
+            let locked = upstream
+                .iter()
+                .any(|(u, _)| u == name)
+                .then(|| locked(name))
+                .flatten();
+            match locked {
+                Some(version) if requirement.satisfied_by(version) => None,
+                locked => Some(Unlocked {
+                    name,
+                    requirement,
+                    locked,
+                }),
+            }
+        })
         .collect()
 }
 

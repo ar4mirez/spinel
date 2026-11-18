@@ -376,7 +376,7 @@ fn a_substitute_that_needs_a_gem_upstream_does_not_fails_the_install() {
     assert_eq!(
         String::from_utf8_lossy(&out.stderr),
         "spinel: install: gadget-spinel-2.0.0.1 cannot stand in for gadget 2.0.0: it depends \
-         on gizmo, which gadget does not, so Gemfile.lock locks nothing for it\n"
+         on gizmo (>= 0), which gadget does not, so Gemfile.lock locks nothing for it\n"
     );
     // Failed before anything was fetched or written.
     assert!(
