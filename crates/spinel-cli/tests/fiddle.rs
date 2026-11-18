@@ -179,3 +179,37 @@ p [ffi.sizeof(ffi::INT), ffi.alignof(ffi::DOUBLE), ffi.type(:size_t)]
         "5\n\"hello\"\n\"hel\"\n42\nnil\ntrue\n[4, 8, -5]\n"
     );
 }
+
+/// A Closure freed by `#free` leaves its finalizer behind, and the id it had
+/// goes to the next Closure made. When the freed one is collected, its
+/// finalizer must not free the closure that now has the id: here, a hundred
+/// freed closures each leave a finalizer for the id the kept one is given,
+/// and the kept one is still called through C after they run. Measured on
+/// ruby 4.0.9, which prints `false` and `42`; before the fix, Spinel freed the
+/// kept closure and the call crashed.
+#[test]
+fn a_freed_closures_finalizer_leaves_its_ids_next_owner_alone() {
+    let script = r#"
+require "fiddle"
+include Fiddle
+def churn = 100.times { Closure::BlockCaller.new(TYPE_INT, [TYPE_INT]) { |x| x }.free }
+churn
+kept = Closure::BlockCaller.new(TYPE_INT, [TYPE_INT]) { |x| x * 2 }
+call = Function.new(kept, [TYPE_INT], TYPE_INT)
+GC.start
+GC.start
+puts kept.freed?, call.call(21)
+p Spinel::FFI.instance_variable_get(:@closures).size
+"#;
+    let output = Command::new(SPINEL)
+        .args(["-e", script])
+        .output()
+        .expect("spinel runs");
+    assert!(
+        output.status.success(),
+        "spinel failed ({}): {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "false\n42\n1\n");
+}

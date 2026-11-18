@@ -688,8 +688,21 @@ module Fiddle
   class Closure
     @live = ObjectSpace::WeakMap.new
 
-    def self.__finalizer__(id)
-      proc { Spinel::FFI.free_closure(id) }
+    # `state` is `[id, freed, string]`, shared by the Closure and its
+    # finalizer, so whichever runs first frees the C closure and the other
+    # does nothing: a finalizer left over from a Closure already freed never
+    # frees the closure that has since been given its id.
+    def self.__finalizer__(state)
+      proc { Closure.__release__(state) }
+    end
+
+    def self.__release__(state)
+      return if state[1]
+      state[1] = true
+      Spinel::FFI.free_closure(state[0])
+      Spinel::FFI.free(state[2]) if state[2]
+      state[2] = nil
+      nil
     end
 
     # The block `Spinel::FFI` runs for a closure: made here, not in
@@ -717,10 +730,10 @@ module Fiddle
       made = Spinel::FFI.closure(@ctype, types.take_while { |t| t != Types::VOID },
         Spinel::FFI.int(abi), &Closure.__handler__(holder))
       holder[0] = made[0]
-      @__id__ = made[0]
       @__code__ = made[1]
+      @__state__ = [made[0], false, nil]
       Closure.instance_variable_get(:@live)[made[0]] = self
-      ObjectSpace.define_finalizer(self, Closure.__finalizer__(made[0]))
+      ObjectSpace.define_finalizer(self, Closure.__finalizer__(@__state__))
     end
 
     def __call_from_c__(raw)
@@ -743,8 +756,8 @@ module Fiddle
       when Types::CONST_STRING
         # C reads the String after the callback returns, so the copy stays
         # until the next one replaces it or the closure is freed.
-        Spinel::FFI.free(@__string__) if @__string__
-        @__string__ = Fiddle.__c_string__(result)
+        Spinel::FFI.free(@__state__[2]) if @__state__[2]
+        @__state__[2] = Fiddle.__c_string__(result)
       else result
       end
     end
@@ -756,15 +769,11 @@ module Fiddle
 
     def free
       return nil if freed?
-      Spinel::FFI.free_closure(@__id__)
-      Closure.instance_variable_get(:@live).delete(@__id__)
-      Spinel::FFI.free(@__string__) if @__string__
-      @__string__ = nil
-      @__id__ = nil
-      nil
+      Closure.instance_variable_get(:@live).delete(@__state__[0])
+      Closure.__release__(@__state__)
     end
 
-    def freed? = @__id__.nil?
+    def freed? = @__state__[1]
   end
 
   # --- Fiddle::Pinned (pinned.c) ----------------------------------------------
