@@ -295,6 +295,12 @@ class Rational < Numeric
       [other, to_f]
     elsif other.is_a?(Rational)
       [other, self]
+    elsif other.is_a?(Complex)
+      # nurat_coerce: a Complex whose imaginary part is an exact zero is its
+      # real part as a Rational; any other meets self as a Complex.
+      imaginary = other.imaginary
+      return [other, Complex(self, 0)] if imaginary.is_a?(Float) || imaginary != 0
+      [other.real.to_r, self]
     else
       raise TypeError, other.class.to_s + " can't be coerced into Rational"
     end
@@ -414,6 +420,13 @@ module Kernel
       # A Float is the fraction it exactly is.
       first = first.to_r if Float === first
       second = second.to_r if Float === second
+      # A number of another class (a BigDecimal) is what its `to_r` answers,
+      # nurat_convert's to_rational: `Rational(BigDecimal("1.5"))` is (3/2),
+      # and `Rational(x, y)` divides that by `y`.
+      if Numeric === first && !(Integer === first || Rational === first || Complex === first) &&
+         first.respond_to?(:to_r)
+        first = first.to_r
+      end
       return first if second == 1 && Rational === first
       answer = first / second
       answer.is_a?(Integer) ? Rational.__make__(answer, 1) : answer

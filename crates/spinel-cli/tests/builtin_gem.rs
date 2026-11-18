@@ -12,8 +12,8 @@
 //!
 //! The fixture's rubygems.org is a server on 127.0.0.1 that has nothing and
 //! counts what it is asked, so nothing touches the network and a gem fetched
-//! would fail the install. (`bigdecimal`, which #83 also names, is not a
-//! built-in yet, #109.)
+//! would fail the install. (`bigdecimal`, which #83 also names, became a
+//! built-in with #109; the version test below requires it with the rest.)
 
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
@@ -236,8 +236,8 @@ fn each_built_in_reports_the_version_it_is_substituted_at() {
     let out = Command::new(SPINEL)
         .args([
             "-e",
-            r#"%w[date digest etc fcntl fiddle io/console json openssl psych stringio strscan zlib].each { |f| require f }
-puts Date::VERSION, Digest::VERSION, Etc::VERSION, Fcntl::VERSION, Fiddle::VERSION,
+            r#"%w[bigdecimal date digest etc fcntl fiddle io/console json openssl psych stringio strscan zlib].each { |f| require f }
+puts BigDecimal::VERSION, Date::VERSION, Digest::VERSION, Etc::VERSION, Fcntl::VERSION, Fiddle::VERSION,
   IO::ConsoleMode::VERSION, JSON::VERSION, OpenSSL::VERSION, Psych::VERSION, StringIO::VERSION,
   StringScanner::Version, Zlib::VERSION"#,
         ])
@@ -247,8 +247,8 @@ puts Date::VERSION, Digest::VERSION, Etc::VERSION, Fcntl::VERSION, Fiddle::VERSI
     assert_eq!(
         out.lines().collect::<Vec<_>>(),
         [
-            "3.5.1", "3.2.1", "1.4.6", "1.3.0", "1.1.8", "0.8.2", "2.18.0", "4.0.2", "5.3.1",
-            "3.2.0", "3.1.6", "3.2.3"
+            "4.0.1", "3.5.1", "3.2.1", "1.4.6", "1.3.0", "1.1.8", "0.8.2", "2.18.0", "4.0.2",
+            "5.3.1", "3.2.0", "3.1.6", "3.2.3"
         ],
         "{out}"
     );
