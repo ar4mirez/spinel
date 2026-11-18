@@ -1815,9 +1815,6 @@ dependencies = [
 [[package]]
 name = "spinel-ext"
 version = "0.0.1"
-dependencies = [
- "spinel-vm",
-]
 
 [[package]]
 name = "spinel-jit"
@@ -1853,6 +1850,7 @@ dependencies = [
  "sha2",
  "spinel-ast",
  "spinel-core",
+ "spinel-ext",
  "spinel-parse",
  "spinel-regex",
 ]

@@ -16,6 +16,9 @@ ripemd = "0.2.0"
 sha1 = "0.11.0"
 sha2 = "0.11.0"
 spinel-ast.workspace = true
+# The extension ABI's declarations (#103), which `src/ext.rs` implements the
+# host side of.
+spinel-ext.workspace = true
 spinel-regex.workspace = true
 
 # The bytecode cache's compiler fingerprint (`build.rs`, #40).

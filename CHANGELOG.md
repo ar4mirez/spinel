@@ -9,6 +9,17 @@ bytecode a tool reads.
 
 ### Added
 
+- **`spinel-ext`: the native-extension API and its versioned ABI**
+  ([#103](https://github.com/ar4mirez/spinel/issues/103)). An extension is a
+  Rust `cdylib` built against the `spinel-ext` crate alone, naming its init
+  with `spinel_ext::extension!`; its crate documentation is the worked
+  example. The ABI the extension was built against is embedded in a frozen
+  header and checked before any of its code runs, and a mismatch is a
+  `LoadError` saying what to do, never a crash. `require` loading a
+  `.spinel` file is #104. `docs/engine.md`, "Native extensions and FFI", has
+  the details. **Breaking** for compiled apps' `manifest.json`:
+  `spinel_ext_abi` is now 1.
+
 - **A compiled app runs** ([#101](https://github.com/ar4mirez/spinel/issues/101)).
   An app `spinel build --compile` writes extracts its payload once, to
   `$XDG_CACHE_HOME/spinel/apps/<sha256>/` (`~/.cache` by default), and runs

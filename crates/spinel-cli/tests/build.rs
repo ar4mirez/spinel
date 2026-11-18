@@ -313,7 +313,7 @@ fn the_payload_holds_the_documented_directories_and_nothing_else() {
         serde_json::json!({
             "entry": "bin/mytool",
             "spinel_version": env!("CARGO_PKG_VERSION"),
-            "spinel_ext_abi": 0,
+            "spinel_ext_abi": spinel_ext::ABI,
             "argv": ["--verbose", "serve"],
             "env": {"APP_ENV": "production"},
         })

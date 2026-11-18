@@ -1,0 +1,15 @@
+# An extension built against an ABI no `spinel` loads: `tests/ext.rs` checks
+# that it is refused with a clear message before any of its code runs.
+[package]
+name = "stale"
+version = "0.3.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+spinel-ext = { path = "../../../../../spinel-ext" }
+
+[workspace]

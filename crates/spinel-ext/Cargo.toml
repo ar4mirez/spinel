@@ -8,7 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-spinel-vm.workspace = true
+# None, on purpose: an extension builds against this crate alone.
 
 [lints]
 workspace = true

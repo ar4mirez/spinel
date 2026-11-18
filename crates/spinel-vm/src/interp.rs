@@ -627,6 +627,9 @@ enum Unwind {
 #[path = "threads.rs"]
 mod threads;
 
+#[path = "ext.rs"]
+pub mod ext;
+
 // ---------------------------------------------------------------------------
 // Fibers (#16)
 // ---------------------------------------------------------------------------
@@ -1815,6 +1818,16 @@ fn reflect_native(
                             | Native::IvarReader(_)
                             | Native::NotImplemented,
                         )) => (0, None, 0),
+                        // An extension's method takes what it was defined
+                        // to, as a C method's arity is its `argc` (#103).
+                        Some(Definition::Native(Native::Ext(index))) => (
+                            scope
+                                .definitions()
+                                .ext(*index)
+                                .map_or(-1, |method| i64::from(method.arity)),
+                            None,
+                            0,
+                        ),
                         // Any other primitive, or a `define_method` body: no
                         // fixed count to report and no line it was written on.
                         _ => (-1, None, 0),
@@ -14854,6 +14867,7 @@ fn native_call<'h>(
         Native::Sys(op) => sys_native(scope, stack, &call, op),
         Native::Sock(op) => sock_native(scope, stack, frames, &call, op, ids),
         Native::Etc(op) => etc_native(scope, stack, &call, op),
+        Native::Ext(index) => ext::call(scope, stack, &call, index),
         Native::Console(op) => console_native(scope, stack, &call, op),
 
         Native::FrameNesting => {
