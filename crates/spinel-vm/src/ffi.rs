@@ -780,6 +780,8 @@ pub fn default_abi() -> i64 {
 mod tests {
     use super::*;
 
+    // The calls below go through dlsym and libffi into C, which miri cannot make.
+
     fn symbol(name: &str) -> usize {
         let (default, _) = pseudo_handles();
         dlsym(default, name.as_bytes())
@@ -795,6 +797,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn calls_a_c_function_with_integers_and_doubles() {
         let mut ffi = Ffi::default();
         let abs = symbol("labs");
@@ -807,6 +810,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn narrow_returns_are_sign_or_zero_extended() {
         let mut ffi = Ffi::default();
         let abs = symbol("abs");
@@ -827,6 +831,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn a_closure_called_from_c_suspends_the_call_until_ruby_answers() {
         let mut ffi = Ffi::default();
         let (id, code) = ffi
@@ -866,6 +871,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn an_abandoned_call_leaves_the_heap_able_to_call_again() {
         let mut ffi = Ffi::default();
         let (id, code) = ffi
