@@ -660,6 +660,25 @@ fn value_at(raw: *const ffi::PGresult, row: c_int, column: c_int) -> Option<&'st
     }
 }
 
+/// libpq's `SockAddr` (`libpq-int.h`): an address and its length, a struct
+/// of its own, so padded to the address's alignment.
+#[repr(C)]
+struct SockAddr {
+    addr: libc::sockaddr_storage,
+    salen: libc::socklen_t,
+}
+
+/// libpq's `pg_cancel` before 17 (`libpq-int.h`), as far as the key: the
+/// server's address, then the backend's pid and key. libpq 17 changed it,
+/// which is why upstream reads it, and `conn_backend_key` answers it, only
+/// for an older libpq.
+#[repr(C)]
+struct PgCancel {
+    raddr: SockAddr,
+    be_pid: c_int,
+    be_key: c_int,
+}
+
 /// The libpq call that a `describe_*`/`close_*` method makes.
 type NameCall = unsafe extern "C" fn(*mut ffi::PGconn, *const c_char) -> *mut ffi::PGresult;
 type SendNameCall = unsafe extern "C" fn(*mut ffi::PGconn, *const c_char) -> c_int;
@@ -1000,15 +1019,6 @@ methods! {
     /// then). nil when `PQgetCancel` answers none, false when the struct
     /// does not hold the backend's pid where it should.
     fn conn_backend_key(cx, args) {
-        /// libpq's `pg_cancel` before 17: the server's address, then the
-        /// pid and key.
-        #[repr(C)]
-        struct PgCancel {
-            raddr: libc::sockaddr_storage,
-            salen: libc::socklen_t,
-            be_pid: c_int,
-            be_key: c_int,
-        }
         let raw = pgconn(cx, args[0])?;
         // SAFETY: an open connection.
         let cancel = unsafe { ffi::PQgetCancel(raw) };
@@ -2074,4 +2084,26 @@ fn send_name_call<'cx>(
     // SAFETY: an open connection and a C string or null.
     let sent = unsafe { call(raw, as_ptr(&name)) };
     Ok(int(cx, sent))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The mirror of libpq's `pg_cancel` puts the pid where libpq 10 to 16
+    /// do: after a `SockAddr` that is a 128-byte `sockaddr_storage` and a
+    /// `socklen_t`, padded to 136 bytes on the 64-bit Linux and macOS libpq
+    /// is built for, as libpq's own `offsetof(struct pg_cancel, be_pid)`
+    /// answers. Flattening the `SockAddr` puts it at 132.
+    #[cfg(all(
+        target_pointer_width = "64",
+        any(target_os = "linux", target_os = "macos")
+    ))]
+    #[test]
+    fn pg_cancel_mirror_has_libpq_16s_layout() {
+        assert_eq!(std::mem::size_of::<libc::sockaddr_storage>(), 128);
+        assert_eq!(std::mem::size_of::<SockAddr>(), 136);
+        assert_eq!(std::mem::offset_of!(PgCancel, be_pid), 136);
+        assert_eq!(std::mem::offset_of!(PgCancel, be_key), 140);
+    }
 }
