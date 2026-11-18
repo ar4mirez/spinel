@@ -221,6 +221,23 @@ fn ok(out: &Output, what: &str) -> String {
     String::from_utf8(out.stdout.clone()).unwrap()
 }
 
+/// This host as `Gem::Platform.local` spells it in a lockfile.
+fn local_platform() -> String {
+    let arch = std::env::consts::ARCH;
+    match std::env::consts::OS {
+        "linux" if cfg!(target_env = "musl") => format!("{arch}-linux-musl"),
+        "linux" => format!("{arch}-linux"),
+        "macos" => {
+            let cpu = if arch == "aarch64" { "arm64" } else { arch };
+            let out = Command::new("uname").arg("-r").output().unwrap();
+            let release = String::from_utf8(out.stdout).unwrap();
+            let major = release.trim().split('.').next().unwrap().to_owned();
+            format!("{cpu}-darwin-{major}")
+        }
+        os => panic!("no lockfile platform for {arch}-{os}"),
+    }
+}
+
 /// The `.gem` SHA-256 `info/<gem>` lists for `version`.
 fn checksum(gem: &str, version: &str) -> String {
     let info = fs::read_to_string(fixture().join("index/info").join(gem)).unwrap();
@@ -349,7 +366,14 @@ fn a_listed_gem_is_installed_as_its_substitute_and_the_lock_is_untouched() {
 fn a_fresh_resolution_locks_what_bundler_locks() {
     let server = Server::start();
     let sandbox = Sandbox::new("app", "fresh", &server);
-    let bundlers = sandbox.read("Gemfile.lock");
+    // Bundler ran on x86_64-linux; its `PLATFORMS` names the local
+    // platform beside `ruby`, sorted, so name this host's instead.
+    let mut platforms = ["ruby".to_owned(), local_platform()];
+    platforms.sort();
+    let bundlers = sandbox.read("Gemfile.lock").replace(
+        "PLATFORMS\n  ruby\n  x86_64-linux\n",
+        &format!("PLATFORMS\n  {}\n  {}\n", platforms[0], platforms[1]),
+    );
     fs::remove_file(sandbox.project().join("Gemfile.lock")).unwrap();
 
     let out = sandbox.install(Some("widget"));
