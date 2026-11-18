@@ -20,8 +20,9 @@ bytecode a tool reads.
   as Psych 4 makes it, aliases load as shared objects rather than copies, and
   loading a document nested more than 10,000 collections deep is refused
   with a `Psych::SyntaxError`, while a `Psych::Parser` handing events to a
-  handler that builds nothing parses any depth. A lockfile pinning `psych` installs the built-in. A
-  `Set` made with `Set.allocate` is now an empty Set, as on CRuby.
+  handler that builds nothing parses any depth. A lockfile pinning `psych`
+  installs the built-in. A `Set` made with `Set.allocate` is now an empty
+  Set, as on CRuby.
 
 - **`fiddle`, on `Spinel::FFI` and libffi**
   ([#105](https://github.com/ar4mirez/spinel/issues/105)). `require "fiddle"`
