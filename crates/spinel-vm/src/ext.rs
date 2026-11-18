@@ -15,8 +15,10 @@
 //! stale pointer: it is refused with an `ArgumentError`, or, if it falls in
 //! this call's range, names a value of this call.
 //!
-//! `require` finding a `.spinel` file and calling [`Extension::open`] is
-//! #104; until then a `.spinel` on the load path is refused as it was.
+//! `require` loads a `.spinel` file it finds through [`load`] (#104),
+//! `Kernel#__load_extension__`: `core/load.rb` decides whether the feature
+//! is already provided and records it in `$LOADED_FEATURES`, as it does for
+//! a Ruby file, and this opens, checks and initialises it.
 
 use std::ffi::{CStr, CString, c_void};
 use std::fmt;
@@ -438,6 +440,39 @@ pub(super) fn call(
             let handle = scope.root(exception);
             Ok(Some(Unwind::Exception(scope.get(handle))))
         }
+    }
+}
+
+/// `Kernel#__load_extension__(path)` (#104): open the extension at `path`,
+/// check it, and run its init in this heap, answering true. A library this
+/// `spinel` will not load is a `LoadError` saying why, with none of its code
+/// run; an exception its init raises leaves as that exception, and whatever
+/// it defined before raising stays defined, as a C extension's would.
+///
+/// `require` calls it once per feature. An extension this heap opened before
+/// — its feature since deleted from `$LOADED_FEATURES` — is not opened
+/// again: its library is still open, so the init runs again, as CRuby's
+/// `dln_load` runs `Init_` again on the handle `dlopen` hands back.
+pub(super) fn load(
+    scope: &mut HandleScope<'_>,
+    stack: &mut Stack,
+    call: &Pending,
+) -> Result<Option<Unwind>, Error> {
+    let path = super::path_arg(scope, call, 0)?;
+    let extension = match scope.extension_at(&path) {
+        Some(extension) => extension,
+        None => {
+            let extension = Extension::open(&path)?;
+            scope.add_extension(extension.clone());
+            extension
+        }
+    };
+    match extension.init_in(scope)? {
+        None => {
+            stack.push(Value::TRUE);
+            Ok(None)
+        }
+        Some(exception) => Ok(Some(Unwind::Exception(exception))),
     }
 }
 
@@ -913,8 +948,8 @@ fn define(
     let symbol = crate::shared::symbols::intern(&name);
     // ponytail: the hooks a new definition owes — `inherited` on a Ruby
     // superclass — are dropped, since an init has no frames to run them on.
-    // The upgrade is to queue them on the `require` that loads the extension
-    // (#104), which does.
+    // The upgrade is to queue them for `ext::load`, the `require` that runs
+    // the init, to run once it returns.
     match define_or_reopen(host.scope, cbase, symbol, kind, superclass, None) {
         Ok((id, _hooks)) => {
             let object = host.scope.classes().object(id);

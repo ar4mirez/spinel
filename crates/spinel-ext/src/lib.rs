@@ -88,9 +88,9 @@
 //! Greeter.add(1)          # ArgumentError: wrong number of arguments (given 1, expected 2)
 //! ```
 //!
-//! `require` finding and loading a `.spinel` file is #104; until it lands,
-//! a `.spinel` on the load path is refused with a `LoadError`. What this crate
-//! and the host's check settle is the contract that loader calls.
+//! `require "greeter"` loads `greeter.spinel` from the load path (#104):
+//! the host checks the header, then calls the init. What this crate and the
+//! host's check settle is the contract that loader calls.
 
 pub mod abi;
 

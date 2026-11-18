@@ -4,8 +4,9 @@
 //! and opened, and an extension built against an ABI no `spinel` loads,
 //! refused before any of its code runs.
 //!
-//! `require` finding a `.spinel` file is #104, so these call the loader's
-//! half — `Extension::open`, the check, `Extension::init` — directly.
+//! These call the loader's half — `Extension::open`, the check,
+//! `Extension::init` — directly; `require` loading a `.spinel` (#104) is
+//! checked end to end by `spinel-cli`'s `tests/native_gem.rs`.
 
 #![cfg(not(miri))]
 

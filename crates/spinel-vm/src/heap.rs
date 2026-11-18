@@ -425,6 +425,12 @@ pub struct Heap {
     /// so `require` passes over the entries that do not have a file without a
     /// look on disk. `None` outside a project or when there is no usable map.
     require_map: Option<Box<crate::require_map::RequireMap>>,
+    /// The native extensions `require` has loaded into this heap (#104), in
+    /// the order it loaded them. Each library stays open for the life of the
+    /// process (`Extension::open` never closes one it accepts), so the
+    /// functions its methods name in [`Definitions`] stay callable for as
+    /// long as this heap, or any other that loaded it, holds them.
+    extensions: Vec<crate::interp::ext::Extension>,
     /// See [`Libraries`]. Installed by `spinel_core::boot`, beside the parser.
     libraries: Option<Libraries>,
     /// Whether code this heap was meant to run did not all run — see
@@ -758,6 +764,7 @@ impl Heap {
             prism: None,
             bytecode_cache: None,
             require_map: None,
+            extensions: Vec::new(),
             libraries: None,
             partial: false,
             autoloads: Vec::new(),
@@ -1886,6 +1893,20 @@ impl<'h> HandleScope<'h> {
 
     pub fn bytecode_cache(&self) -> Option<Arc<Path>> {
         self.heap.bytecode_cache.clone()
+    }
+
+    /// The extension this heap already opened from `path` (#104), if any.
+    pub(crate) fn extension_at(&self, path: &Path) -> Option<crate::interp::ext::Extension> {
+        self.heap
+            .extensions
+            .iter()
+            .find(|extension| extension.path() == path)
+            .cloned()
+    }
+
+    /// Record an extension `require` opened in this heap (#104).
+    pub(crate) fn add_extension(&mut self, extension: crate::interp::ext::Extension) {
+        self.heap.extensions.push(extension);
     }
 
     /// Use `map` for `require` from now on (#66). `None` stops using one.

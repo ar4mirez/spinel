@@ -1,0 +1,17 @@
+# The native half of the example gem (#104): a `cdylib` built against
+# `spinel-ext` alone. Its own workspace, so that the repository's does not
+# claim it; `tests/native_gem.rs` builds a copy outside the source tree, so
+# no lockfile is written here.
+[package]
+name = "native_gem"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+spinel-ext = { path = "../../../../../../spinel-ext" }
+
+[workspace]
