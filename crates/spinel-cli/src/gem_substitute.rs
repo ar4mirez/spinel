@@ -116,8 +116,10 @@ pub struct Unlocked<'a, 'v> {
 /// The runtime dependencies of a substitute that the lockfile does not
 /// provide, in the substitute's order: those the locked upstream gem does
 /// not depend on, and those whose requirement the version the lockfile
-/// locks (`locked`, over all its specs) does not satisfy. A substitute with
-/// any cannot be installed in upstream's place.
+/// locks (`locked`, over all its specs) does not satisfy. `bundler` is never
+/// one: as in `SpecSet#valid?`, it is the Bundler the lockfile is written
+/// for, never a locked spec. A substitute with any cannot be installed in
+/// upstream's place.
 pub fn unlocked_dependencies<'a, 'v>(
     substitute: &'a [(String, Requirement)],
     upstream: &[(String, Requirement)],
@@ -125,6 +127,7 @@ pub fn unlocked_dependencies<'a, 'v>(
 ) -> Vec<Unlocked<'a, 'v>> {
     substitute
         .iter()
+        .filter(|(name, _)| name != "bundler")
         .filter_map(|(name, requirement)| {
             let locked = upstream
                 .iter()

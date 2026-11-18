@@ -273,6 +273,13 @@ fn a_substitute_may_need_only_what_upstream_needs_at_the_locked_versions() {
     // Met: upstream depends on it and the locked version satisfies it.
     assert!(unlocked_dependencies(&[dep("gizmo", ">= 1")], &upstream, locked).is_empty());
     assert!(unlocked_dependencies(&[], &upstream, locked).is_empty());
+    // bundler is the Bundler the lockfile is written for, never a locked
+    // spec, whether upstream names it or not.
+    assert!(unlocked_dependencies(&[dep("bundler", ">= 1")], &upstream, locked).is_empty());
+    assert!(
+        unlocked_dependencies(&[dep("bundler", ">= 1")], &[dep("bundler", ">= 1")], locked)
+            .is_empty()
+    );
     // Name missing: upstream does not depend on it, so nothing is locked for
     // it, whatever else the lockfile holds.
     assert_eq!(
