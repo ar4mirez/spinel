@@ -15,8 +15,10 @@
 //! ```
 //!
 //! The core image and the standard library are inside the `spinel` binary the
-//! payload is packed into, so neither is copied. `ext/`, the `.spinel`
-//! extensions for the target, is phase 5 (#103-#105); a payload has none.
+//! payload is packed into, so neither is copied. A gem's own `.spinel`
+//! extension (#104) is one of its files and is copied with the rest; `ext/`,
+//! the extensions for the target chosen from `.spinel/substitutions.json`,
+//! comes with Spinel-native gems (#105), so a payload has none.
 //!
 //! The archive is the same bytes for the same project: entries in a fixed
 //! order (each directory's names sorted), every mtime 0, every owner root

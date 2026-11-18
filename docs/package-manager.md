@@ -274,7 +274,7 @@ The `spinel-ext` ABI version is part of the ext cache key `~/.spinel/store/ext/<
 ## Validation targets
 
 1. `crates/spinel-cli/tests/fixtures/plain`: `gem "rake"`; install, `spinel run -e 'require "rake"'`. Done (#84).
-2. `crates/spinel-cli/tests/fixtures/native-gem`: a gem shipping a `.spinel` extension; install and load it (phase 5).
+2. `crates/spinel-cli/tests/fixtures/native-gem`: a gem shipping a `.spinel` extension; install and load it. Done (#104), `crates/spinel-cli/tests/native_gem.rs`: the extension is built with cargo into the gem's `lib/`, as a precompiled native gem ships one, and the gem installs from a path.
    `crates/spinel-cli/tests/fixtures/builtin-gem`: a lock pinning `json` and `stringio`; install uses the built-ins and skips `ext/`. Done (#83), `crates/spinel-cli/tests/builtin_gem.rs`, with a patch, a minor and a major version apart. The issue named `bigdecimal`, which is not a built-in yet (#109); it joins the list then.
 3. `crates/spinel-cli/tests/fixtures/sinatra-lock`: a real Sinatra app lockfile; install, serve a request. Run the same `Gemfile.lock` through `bundle install` and diff. Installed and served (#84), with an `openssl` stand-in until #106.
 4. `crates/spinel-cli/tests/fixtures/rails-lock` (phase 7): a `rails new` lockfile; install, `spinel run bin/rails runner 'puts Rails.version'`.

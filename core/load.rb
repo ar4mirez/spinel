@@ -153,7 +153,7 @@ module Kernel
       raise LoadError.__cannot_load__(name) if found.nil?
       # Provided already, by a file that finished loading.
       return false if path.nil?
-      __native_extension__(path) if found == :s
+      __native_extension__(path) if found == :s && !path.end_with?(".spinel")
       # Another thread is part-way through loading it: wait for it to finish,
       # as CRuby does, rather than answer as if it had (#45). Then look again,
       # since a load that raised leaves the file to load here.
@@ -182,7 +182,11 @@ module Kernel
     autoloads = __autoload_feature__(path, me)
     loaded = false
     begin
-      __load_file__(path, nil)
+      if found == :s
+        __load_extension__(path)
+      else
+        __load_file__(path, nil)
+      end
       __autoload_feature_done__(autoloads, path)
       loaded = true
     ensure
@@ -305,14 +309,11 @@ module Kernel
     @__native_ext__ ||= [".spinel", __dlext__].freeze
   end
 
-  # A shared object `require` found and cannot load: a CRuby C extension, or
-  # a Spinel one before its loader (#104). Like CRuby's failed `dlopen`, the
-  # `LoadError` has no `path`, since the file is there.
-  # ponytail: `.spinel` extensions are found but not loaded; #104 loads them.
+  # A shared object `require` found and cannot load: a CRuby C extension.
+  # Like CRuby's failed `dlopen`, the `LoadError` has no `path`, since the
+  # file is there. A `.spinel` one is loaded (#104), by `__load_extension__`
+  # where a Ruby file is run, so it is recorded and waited for alike.
   def self.__native_extension__(path)
-    if path.end_with?(".spinel")
-      raise LoadError, "Spinel extensions cannot be loaded yet (#104) - #{path}"
-    end
     raise LoadError, "#{path} is a CRuby C extension, which Spinel cannot load; " \
                      "the gem needs a Spinel version - #{path}"
   end

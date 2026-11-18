@@ -15,8 +15,10 @@
 //! stale pointer: it is refused with an `ArgumentError`, or, if it falls in
 //! this call's range, names a value of this call.
 //!
-//! `require` finding a `.spinel` file and calling [`Extension::open`] is
-//! #104; until then a `.spinel` on the load path is refused as it was.
+//! `require` loads a `.spinel` file it finds through [`load`] (#104),
+//! `Kernel#__load_extension__`: `core/load.rb` decides whether the feature
+//! is already provided and records it in `$LOADED_FEATURES`, as it does for
+//! a Ruby file, and this opens, checks and initialises it.
 
 use std::ffi::{CStr, CString, c_void};
 use std::fmt;
@@ -29,10 +31,10 @@ use spinel_ext::abi::{
 };
 
 use super::{
-    Builtin, ClassId, DefKind, Definition, Error, HandleScope, Native, Pending, Stack, Unwind,
-    Value, class_id_of, class_name_of, class_of, define_or_reopen, exception_message,
-    exception_new, exception_of, hash_of_pairs, inspect, is_exception_class, singleton_of,
-    string_bytes,
+    Builtin, Call, ClassId, DefKind, Definition, Error, Handle, HandleScope, Hooks, Native,
+    Pending, Stack, Unwind, Value, class_id_of, class_name_of, class_of, define_or_reopen,
+    exception_message, exception_new, exception_of, fire_hook, hash_of_pairs, inspect,
+    is_exception_class, singleton_of, string_bytes,
 };
 use crate::method::{ExtData, ExtMethod};
 
@@ -246,8 +248,10 @@ impl Extension {
     /// Run the extension's init in this heap: define its modules, classes
     /// and methods. An exception it raises is [`Error::Uncaught`], as one
     /// that leaves a program is; a table it finds too short, a `LoadError`.
+    /// With no Ruby frames to run them on, the `const_added` and `inherited`
+    /// hooks its definitions owe are not run; `require` runs them.
     pub fn init(&self, scope: &mut HandleScope<'_>) -> Result<(), Error> {
-        match self.init_in(scope)? {
+        match self.init_in(scope)?.0 {
             None => Ok(()),
             Some(exception) => Err(Error::Uncaught {
                 class: class_name_of(scope, exception),
@@ -257,9 +261,13 @@ impl Extension {
     }
 
     /// [`Extension::init`], answering the exception the init raised, rooted
-    /// in `scope`, for a caller inside the interpreter to raise.
-    pub(super) fn init_in(&self, scope: &mut HandleScope<'_>) -> Result<Option<Value>, Error> {
-        let outcome = {
+    /// in `scope`, for a caller inside the interpreter to raise, and the
+    /// hooks its definitions owe, in the order they were owed.
+    pub(super) fn init_in(
+        &self,
+        scope: &mut HandleScope<'_>,
+    ) -> Result<(Option<Value>, Hooks), Error> {
+        let (outcome, hooks) = {
             let mut inner = scope.nested();
             let mut host = Host::new(&mut inner);
             let mut raw = host.context();
@@ -274,13 +282,14 @@ impl Extension {
                 }
                 .into());
             }
-            host.finish(status, None)
+            let hooks = std::mem::take(&mut host.hooks);
+            (host.finish(status, None), hooks)
         };
         match outcome? {
-            Answer::Value(_) => Ok(None),
+            Answer::Value(_) => Ok((None, hooks)),
             Answer::Raised(exception) => {
                 let handle = scope.root(exception);
-                Ok(Some(scope.get(handle)))
+                Ok((Some(scope.get(handle)), hooks))
             }
         }
     }
@@ -370,9 +379,12 @@ fn read_header(at: *const u8) -> Result<Header, String> {
 }
 
 /// Call the extension method [`Native::Ext`] `index` names.
-pub(super) fn call(
-    scope: &mut HandleScope<'_>,
+pub(super) fn call<'h>(
+    scope: &mut HandleScope<'h>,
     stack: &mut Stack,
+    frames: &mut Vec<Call>,
+    proc_class: Handle<'h>,
+    ids: &mut u64,
     call: &Pending,
     index: u32,
 ) -> Result<Option<Unwind>, Error> {
@@ -398,7 +410,7 @@ pub(super) fn call(
             ));
         }
     }
-    let outcome = {
+    let (outcome, hooks) = {
         let mut inner = scope.nested();
         let receiver = inner.root(call.receiver);
         let receiver = RawValue(inner.handle_index(receiver));
@@ -425,19 +437,75 @@ pub(super) fn call(
                 &raw mut out,
             )
         };
-        host.finish(status, Some(out))
+        let hooks = std::mem::take(&mut host.hooks);
+        (host.finish(status, Some(out)), hooks)
     };
     // The answer was rooted only in the call's scope, which is gone; nothing
     // has allocated since, and the stack or the unwind roots it from here.
     match outcome? {
         Answer::Value(value) => {
             stack.push(value);
-            Ok(None)
+            run_hooks(scope, stack, frames, proc_class, ids, hooks)
         }
         Answer::Raised(exception) => {
             let handle = scope.root(exception);
             Ok(Some(Unwind::Exception(scope.get(handle))))
         }
+    }
+}
+
+/// Run the hooks an extension's definitions owed, in order, as frames above
+/// the caller's, once the extension has returned: it has no frames of its
+/// own to run them on.
+fn run_hooks<'h>(
+    scope: &mut HandleScope<'h>,
+    stack: &mut Stack,
+    frames: &mut Vec<Call>,
+    proc_class: Handle<'h>,
+    ids: &mut u64,
+    hooks: Hooks,
+) -> Result<Option<Unwind>, Error> {
+    for (receiver, name, args) in hooks.into_iter().rev() {
+        if let Some(unwind) =
+            fire_hook(scope, stack, frames, proc_class, ids, receiver, name, args)?
+        {
+            return Ok(Some(unwind));
+        }
+    }
+    Ok(None)
+}
+
+/// `Kernel#__load_extension__(path)` (#104): open the extension at `path`,
+/// check it, and run its init in this heap, answering true. A library this
+/// `spinel` will not load is a `LoadError` saying why, with none of its code
+/// run; an exception its init raises leaves as that exception, and whatever
+/// it defined before raising stays defined, as a C extension's would. The
+/// `const_added` and `inherited` hooks its definitions owe run once the init
+/// returns, in the order they were owed, before `require` answers.
+///
+/// `require` calls it once per feature. An extension whose feature was
+/// deleted from `$LOADED_FEATURES` is opened again, and its init runs again,
+/// as CRuby's `dln_load` runs `Init_` again on the handle `dlopen` hands
+/// back.
+pub(super) fn load<'h>(
+    scope: &mut HandleScope<'h>,
+    stack: &mut Stack,
+    frames: &mut Vec<Call>,
+    proc_class: Handle<'h>,
+    ids: &mut u64,
+    call: &Pending,
+) -> Result<Option<Unwind>, Error> {
+    let path = super::path_arg(scope, call, 0)?;
+    let extension = Extension::open(&path)?;
+    // ponytail: an init that raises leaves without the hooks its earlier
+    // definitions owed, which CRuby would have run before the raise; running
+    // them first and raising from the last one's return is the upgrade.
+    match extension.init_in(scope)? {
+        (None, hooks) => {
+            stack.push(Value::TRUE);
+            run_hooks(scope, stack, frames, proc_class, ids, hooks)
+        }
+        (Some(exception), _) => Ok(Some(Unwind::Exception(exception))),
     }
 }
 
@@ -456,6 +524,9 @@ struct Host<'s, 'h> {
     /// Something the VM cannot run, which is not a Ruby exception and must
     /// leave as the [`Error`] it is.
     refusal: Option<Error>,
+    /// The hooks the call's definitions owe, for its caller to run once it
+    /// returns.
+    hooks: Hooks,
 }
 
 impl<'s, 'h> Host<'s, 'h> {
@@ -464,6 +535,7 @@ impl<'s, 'h> Host<'s, 'h> {
             scope,
             pending: None,
             refusal: None,
+            hooks: Vec::new(),
         }
     }
 
@@ -911,12 +983,9 @@ fn define(
         Some(host.value_or_raise(superclass)?)
     };
     let symbol = crate::shared::symbols::intern(&name);
-    // ponytail: the hooks a new definition owes — `inherited` on a Ruby
-    // superclass — are dropped, since an init has no frames to run them on.
-    // The upgrade is to queue them on the `require` that loads the extension
-    // (#104), which does.
     match define_or_reopen(host.scope, cbase, symbol, kind, superclass, None) {
-        Ok((id, _hooks)) => {
+        Ok((id, hooks)) => {
+            host.hooks.extend(hooks);
             let object = host.scope.classes().object(id);
             Ok(host.handle(object))
         }

@@ -9,6 +9,16 @@ bytecode a tool reads.
 
 ### Added
 
+- **`require` loads Spinel native extensions**
+  ([#104](https://github.com/ar4mirez/spinel/issues/104)). A `.spinel` file
+  `require` finds — `require "foo"` with no `foo.rb`, or `require "foo.so"` —
+  is opened, checked against this `spinel`'s extension ABI, and initialised,
+  and recorded in `$LOADED_FEATURES` once. An extension built for another ABI,
+  or a file that is not one, is a `LoadError` saying why, raised before any of
+  its code runs. A gem ships its extension built in its `lib/`, as a
+  precompiled native gem does; `crates/spinel-cli/tests/fixtures/native-gem`
+  is the example. A CRuby `.so` is still refused.
+
 - **`spinel-ext`: the native-extension API and its versioned ABI**
   ([#103](https://github.com/ar4mirez/spinel/issues/103)). An extension is a
   Rust `cdylib` built against the `spinel-ext` crate alone, naming its init

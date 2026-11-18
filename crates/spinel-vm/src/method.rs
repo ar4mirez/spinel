@@ -521,6 +521,10 @@ pub enum Native {
     /// the top level, in a frame of its own (#39). `require` and `load` are
     /// Ruby around it.
     LoadFile,
+    /// `Kernel#__load_extension__(path)`: open the native extension at
+    /// `path`, check its ABI, and run its init in this heap (#104). `require`
+    /// is Ruby around it, as around [`Native::LoadFile`].
+    LoadExtension,
     /// `Kernel#__bytecode_cache__(dir)`: keep compiled files in `dir` (#40).
     /// `shims/setup.rb` calls it with the project's `.spinel/bytecode/`.
     BytecodeCache,

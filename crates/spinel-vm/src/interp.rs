@@ -14645,6 +14645,7 @@ fn native_call<'h>(
 
         Native::Binding(op) => binding_native(scope, stack, frames, &call, op, ids),
         Native::LoadFile => load_file(scope, stack, frames, &call, ids),
+        Native::LoadExtension => ext::load(scope, stack, frames, proc_class, ids, &call),
         Native::BytecodeCache => {
             let dir = path_arg(scope, &call, 0)?;
             scope.set_bytecode_cache(Some(dir));
@@ -14867,7 +14868,7 @@ fn native_call<'h>(
         Native::Sys(op) => sys_native(scope, stack, &call, op),
         Native::Sock(op) => sock_native(scope, stack, frames, &call, op, ids),
         Native::Etc(op) => etc_native(scope, stack, &call, op),
-        Native::Ext(index) => ext::call(scope, stack, &call, index),
+        Native::Ext(index) => ext::call(scope, stack, frames, proc_class, ids, &call, index),
         Native::Console(op) => console_native(scope, stack, &call, op),
 
         Native::FrameNesting => {
@@ -17621,6 +17622,11 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             Native::Binding(BindingOp::SetPlace),
         ),
         (Builtin::Kernel, &["__load_file__"], Native::LoadFile),
+        (
+            Builtin::Kernel,
+            &["__load_extension__"],
+            Native::LoadExtension,
+        ),
         (
             Builtin::Kernel,
             &["__bytecode_cache__"],
