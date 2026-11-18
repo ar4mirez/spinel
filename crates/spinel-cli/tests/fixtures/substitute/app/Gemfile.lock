@@ -1,0 +1,20 @@
+GEM
+  remote: https://rubygems.org/
+  specs:
+    gizmo (1.0.0)
+    widget (1.0.0)
+      gizmo (~> 1.0)
+
+PLATFORMS
+  ruby
+  x86_64-linux
+
+DEPENDENCIES
+  widget
+
+CHECKSUMS
+  gizmo (1.0.0) sha256=f87e38b6d77afa0f1b482042baa5624d57c3b06991db0bc574bcedda77e4f0de
+  widget (1.0.0) sha256=9d15c75b5b5e649ccc78370bbb84e4399ea709d8acd12151cce3df631b085bf9
+
+BUNDLED WITH
+  4.0.20

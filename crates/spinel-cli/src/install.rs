@@ -19,7 +19,8 @@ use crate::local_source::{self, Declared, DeclaredSource, LocalGem, Materialized
 use crate::lockfile::{LockSource, Lockfile, SourceKind};
 use crate::resolver::{self, GemfileDependency, Spec};
 use crate::{
-    builtin_gem, compact_index, gem_home, gem_requirement, gem_spec, gem_store, gem_version, home,
+    builtin_gem, compact_index, gem_home, gem_requirement, gem_spec, gem_store, gem_substitute,
+    gem_version, home,
 };
 use crate::{locked, lockfile};
 
@@ -960,6 +961,219 @@ impl Session {
             .find(|g| g.full_name() == full_name)
     }
 
+    /// The rubygems source a gem comes from: a scoped one, by its index in
+    /// `prepared.scoped`, else the global one.
+    fn client_at(&self, at: Option<usize>) -> Result<&compact_index::Client, Stop> {
+        match at {
+            Some(at) => Ok(&self.scoped_clients[at]),
+            None => self
+                .client
+                .as_ref()
+                .ok_or_else(|| self.fail("the Gemfile names no rubygems source")),
+        }
+    }
+
+    /// Warn of each Gemfile gem that is a listed gem's Spinel-native
+    /// substitute: it is installed as an ordinary gem under its own name,
+    /// in no gem's place (docs/package-manager.md, section 6, step 2).
+    fn warn_named_substitutes(&self, gemfile: &GemfileJson, list: &gem_substitute::List) {
+        let mut named: Vec<&str> = gemfile
+            .dependencies
+            .iter()
+            .map(|d| d.name.as_str())
+            .collect();
+        named.sort_unstable();
+        named.dedup();
+        for name in named {
+            if let Some(upstream) = list.upstream_of(name) {
+                eprintln!(
+                    "spinel: {}: warning: the Gemfile names {name}, Spinel's substitute for \
+                     {upstream}: it is installed as an ordinary gem, not in {upstream}'s place; \
+                     `gem {upstream:?}` gets it in {upstream}'s place",
+                    self.command
+                );
+            }
+        }
+    }
+
+    /// The Spinel-native substitute each of `specs` on `list` gets, read
+    /// from the source the gem comes from: the build of `<gem>-spinel`
+    /// [`gem_substitute::pick`] chooses for the locked version on this
+    /// platform. A gem with none is installed as itself. A substitute that
+    /// depends on a gem the locked one does not fails the install, naming
+    /// every such gem, before anything is fetched or written.
+    // ponytail: a listed gem's substitute's `/info` is brought up to date on
+    // every install, so an install with such a gem locked asks its source
+    // even when nothing changed. Upgrade: keep `.spinel/substitutions.json`'s
+    // choice while the lockfile is unchanged, and look again on `update`.
+    fn find_natives(
+        &self,
+        list: &gem_substitute::List,
+        specs: &[Spec],
+        source_of: &dyn Fn(&Spec) -> Option<usize>,
+    ) -> Result<Vec<Native>, Stop> {
+        let mut by_source: Vec<(Option<usize>, Vec<&Spec>)> = Vec::new();
+        for spec in specs.iter().filter(|s| list.contains(&s.name)) {
+            let at = source_of(spec);
+            match by_source.iter_mut().find(|(g, _)| *g == at) {
+                Some((_, specs)) => specs.push(spec),
+                None => by_source.push((at, vec![spec])),
+            }
+        }
+        let local = &self.prepared.local;
+        let mut natives = Vec::new();
+        let mut refused = false;
+        for (at, upstreams) in by_source {
+            let client = self.client_at(at)?;
+            let names: Vec<String> = upstreams
+                .iter()
+                .map(|s| gem_substitute::substitute_name(&s.name))
+                .collect();
+            let outcomes = self
+                .runtime
+                .block_on(async {
+                    client.versions().await?;
+                    client.info(&names).await
+                })
+                .map_err(|err| self.index_failure(&err))?;
+            let mut listed = HashSet::new();
+            for (name, outcome) in outcomes {
+                match outcome {
+                    Ok(compact_index::Outcome::Unknown) => {}
+                    Ok(_) => {
+                        listed.insert(name);
+                    }
+                    Err(err) => return Err(self.index_failure(&err)),
+                }
+            }
+            for upstream in upstreams {
+                let name = gem_substitute::substitute_name(&upstream.name);
+                if !listed.contains(&name) {
+                    continue;
+                }
+                let path = client.info_path(&name);
+                let data = std::fs::read(&path)
+                    .map_err(|err| self.fail(format!("{}: {err}", path.display())))?;
+                let builds = resolver::parse_info(&name, &data, local).map_err(|e| self.fail(e))?;
+                let candidates: Vec<gem_substitute::Build> = builds
+                    .iter()
+                    .map(|b| gem_substitute::Build {
+                        version: b.version.clone(),
+                        platform: b.platform.clone(),
+                    })
+                    .collect();
+                let Some(picked) = gem_substitute::pick(&upstream.version, &candidates, local)
+                else {
+                    continue;
+                };
+                // The last line naming a build is the one RubyGems reads.
+                let substitute = builds
+                    .iter()
+                    .rev()
+                    .find(|b| b.version == picked.version && b.platform == picked.platform)
+                    .cloned()
+                    .expect("the build picked is one of them");
+                let unlocked = gem_substitute::unlocked_dependencies(
+                    &substitute.dependencies,
+                    &upstream.dependencies,
+                );
+                if !unlocked.is_empty() {
+                    self.fail(format!(
+                        "{} cannot stand in for {} {}: it depends on {}, which {} does not, so \
+                         {} locks nothing for it",
+                        substitute.full_name(),
+                        upstream.name,
+                        version_of(upstream),
+                        unlocked.join(", "),
+                        upstream.name,
+                        self.lock_name
+                    ));
+                    refused = true;
+                    continue;
+                }
+                natives.push(Native {
+                    upstream: upstream.clone(),
+                    substitute,
+                    source: at,
+                });
+            }
+        }
+        if refused {
+            return Err(Stop(ExitCode::FAILURE));
+        }
+        Ok(natives)
+    }
+
+    /// How `native`'s substitute, fetched into `stored`, is linked into the
+    /// GEM_HOME: as the locked gem, `gems/<locked full name>` leading to the
+    /// substitute's files, its gemspec the locked name, version, platform
+    /// and runtime dependencies with the substitute's require paths and
+    /// executables.
+    fn native_link(
+        &self,
+        native: &Native,
+        stored: &[(gem_store::GemId, PathBuf)],
+    ) -> Result<gem_home::LocalLink, Stop> {
+        let (upstream, sub) = (&native.upstream, &native.substitute);
+        let sub_name = sub.full_name();
+        let fail = |message: String| self.fail(format!("{sub_name}: {message}"));
+        let entry = stored
+            .iter()
+            .find(|(gem, _)| gem.full_name() == sub_name)
+            .map(|(_, entry)| entry)
+            .ok_or_else(|| fail("it was not fetched".to_owned()))?;
+        let metadata = entry.join("metadata");
+        let yaml = std::fs::read(&metadata)
+            .map_err(|err| fail(format!("{}: {err}", metadata.display())))?;
+        let spec = gem_spec::from_yaml(&yaml).map_err(fail)?;
+        spec.verify()
+            .map_err(|e| fail(format!("RubyGems would refuse it: {e}")))?;
+        let metadata_name = spec.full_name().map_err(fail)?;
+        if metadata_name != sub_name {
+            return Err(fail(format!("its gemspec names {metadata_name}")));
+        }
+        let require_paths = spec.require_paths().map_err(fail)?;
+        // A gem with no `bindir` keeps its executables at its top, which
+        // the locked identity's gemspec does not say: it gets none.
+        let (bindir, executables) = match spec.bindir().map_err(fail)? {
+            Some(bindir) => (bindir, spec.executables().map_err(fail)?),
+            None => ("bin".to_owned(), Vec::new()),
+        };
+        let summary = format!(
+            "Spinel's {} {} in place of {} {}",
+            sub.name,
+            version_of(sub),
+            upstream.name,
+            version_of(upstream)
+        );
+        let identity = builtin_gem::locked_identity_yaml(
+            upstream,
+            &summary,
+            &require_paths,
+            &bindir,
+            &executables,
+        );
+        let gemspec = gem_spec::from_yaml(identity.as_bytes())
+            .and_then(|s| {
+                s.verify()
+                    .map_err(|e| format!("RubyGems would refuse it: {e}"))?;
+                s.to_ruby_for_cache()
+            })
+            .map_err(|err| self.fail(format!("{}: {err}", upstream.full_name())))?;
+        let gem_dir =
+            std::path::absolute(entry.join("gem")).map_err(|err| fail(err.to_string()))?;
+        Ok(gem_home::LocalLink {
+            full_name: upstream.full_name(),
+            name: upstream.name.clone(),
+            gem_dir,
+            gemspec,
+            require_paths,
+            bindir: Some(bindir),
+            executables,
+            extensions: Vec::new(),
+        })
+    }
+
     /// Fetch what `resolved` locks for this machine into the store, link it
     /// into the GEM_HOME, and write `.bundle/config`, then `gemfile_write`'s
     /// Gemfile, then the lockfile; print what changed.
@@ -1139,9 +1353,30 @@ impl Session {
                 .iter()
                 .position(|names| names.contains(&full_name))
         };
+
+        // A gem on Spinel's list of substitutes whose source has a
+        // Spinel-native build for its locked version gets that build in its
+        // place (#112, docs/package-manager.md, section 6, step 2); the
+        // lockfile, resolved before this, still names the gem itself.
+        let substitutes = gem_substitute::List::from_env();
+        self.warn_named_substitutes(gemfile, &substitutes);
+        let natives = self.find_natives(&substitutes, &to_install, &source_of)?;
+        let to_install: Vec<Spec> = to_install
+            .into_iter()
+            .filter(|s| !natives.iter().any(|n| n.upstream == *s))
+            .collect();
+        for native in &natives {
+            if let Some(sha) = &native.substitute.checksum {
+                sums.insert(lock_name_of(&native.substitute), sha.clone());
+            }
+        }
+
         let mut groups: Vec<(Option<usize>, Vec<&Spec>)> = Vec::new();
-        for spec in &to_install {
-            let at = source_of(spec);
+        let fetched = to_install
+            .iter()
+            .map(|s| (source_of(s), s))
+            .chain(natives.iter().map(|n| (n.source, &n.substitute)));
+        for (at, spec) in fetched {
             match groups.iter_mut().find(|(g, _)| *g == at) {
                 Some((_, specs)) => specs.push(spec),
                 None => groups.push((at, vec![spec])),
@@ -1240,6 +1475,18 @@ impl Session {
                 return Err(Stop(ExitCode::FAILURE));
             }
         }
+        // Each substitute is linked as the gem it stands in for.
+        let ordinary: HashSet<String> = to_install.iter().map(Spec::full_name).collect();
+        for native in &natives {
+            let link = self.native_link(native, &stored)?;
+            local_links.push(link);
+        }
+        stored.retain(|(gem, _)| {
+            ordinary.contains(&gem.full_name())
+                || !natives
+                    .iter()
+                    .any(|n| n.substitute.full_name() == gem.full_name())
+        });
         if !learned.is_empty() && lock.checksums.is_some() {
             let mut lock = lock.clone();
             for line in lock.checksums.iter_mut().flatten() {
@@ -1269,11 +1516,9 @@ impl Session {
         // ponytail: the bytecode cache is not warmed; a first `require`
         // compiles each file. Upgrade: warm it here, from the files the map
         // lists.
-        // What stands in for which locked gem: the built-ins (#83).
-        // ponytail: Spinel-native gems are not substituted yet. Upgrade:
-        // phase 5 adds them here, `"kind": "native"` with the substitute's
-        // name, version and platform.
-        write_substitutions(&self.root, &builtins)
+        // What stands in for which locked gem: the built-ins (#83) and the
+        // Spinel-native substitutes (#112).
+        write_substitutions(&self.root, &builtins, &natives)
             .map_err(|err| self.fail(format!(".spinel/{SUBSTITUTIONS}: {err}")))?;
         for scope in bundler_scopes() {
             for warning in
@@ -1321,7 +1566,13 @@ impl Session {
 
         // What changed, uv-style.
         let mut changes: Vec<(String, String, bool)> = Vec::new();
-        for spec in to_install.iter().chain(&local_specs).chain(&builtins) {
+        let substituted = natives.iter().map(|n| &n.upstream);
+        for spec in to_install
+            .iter()
+            .chain(&local_specs)
+            .chain(&builtins)
+            .chain(substituted)
+        {
             if !before.contains(&spec.full_name()) {
                 changes.push((spec.name.clone(), version_of(spec), true));
             }
@@ -1651,27 +1902,56 @@ fn bundler_scopes() -> [String; 2] {
     ["ruby", spinel_vm::ENGINE].map(|engine| format!("{engine}/{ruby_version}"))
 }
 
+/// A locked gem a Spinel-native substitute stands in for (#112): the
+/// lockfile's spec, the substitute's build from its source's `/info`, and
+/// that source (a scoped one's index, else the global one).
+struct Native {
+    upstream: Spec,
+    substitute: Spec,
+    source: Option<usize>,
+}
+
 /// `.spinel/substitutions.json`, beside the GEM_HOME.
 const SUBSTITUTIONS: &str = "substitutions.json";
 
 /// Record in `.spinel/substitutions.json` which locked gems the GEM_HOME
 /// holds something else for, the lockfile still naming them as Bundler
 /// does: each built-in, with the locked name, version and platform and the
-/// version Spinel ships. Written every time, so it is what this install did.
-fn write_substitutions(root: &Path, builtins: &[Spec]) -> std::io::Result<()> {
-    let list: Vec<serde_json::Value> = builtins
-        .iter()
-        .filter_map(|spec| {
-            let builtin = builtin_gem::find(&spec.name)?;
-            Some(serde_json::json!({
+/// version Spinel ships, then each Spinel-native substitute, with the
+/// substitute's name, version and platform too, all sorted by locked name.
+/// Written every time, so it is what this install did.
+fn write_substitutions(root: &Path, builtins: &[Spec], natives: &[Native]) -> std::io::Result<()> {
+    let builtin = builtins.iter().filter_map(|spec| {
+        let builtin = builtin_gem::find(&spec.name)?;
+        Some((
+            spec.full_name(),
+            serde_json::json!({
                 "name": spec.name,
                 "version": spec.version.to_string(),
                 "platform": spec.platform.to_string(),
                 "kind": "builtin",
                 "substitute_version": builtin.version,
-            }))
-        })
-        .collect();
+            }),
+        ))
+    });
+    let native = natives.iter().map(|native| {
+        let (spec, sub) = (&native.upstream, &native.substitute);
+        (
+            spec.full_name(),
+            serde_json::json!({
+                "name": spec.name,
+                "version": spec.version.to_string(),
+                "platform": spec.platform.to_string(),
+                "kind": "native",
+                "substitute": sub.name,
+                "substitute_version": sub.version.to_string(),
+                "substitute_platform": sub.platform.to_string(),
+            }),
+        )
+    });
+    let mut entries: Vec<(String, serde_json::Value)> = builtin.chain(native).collect();
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    let list: Vec<serde_json::Value> = entries.into_iter().map(|(_, v)| v).collect();
     let mut text = serde_json::to_string_pretty(&serde_json::json!({ "substitutions": list }))
         .expect("JSON of strings serializes");
     text.push('\n');

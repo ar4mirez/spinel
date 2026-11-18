@@ -28,10 +28,16 @@
 //!   and the local platform) accepts, the highest revision, and within it the
 //!   platform RubyGems ranks best (`sort_best_platform_match`).
 //!
-//! Not here: the list of substituted gems, the compact-index client that reads
-//! a substitute's builds, and the installer that writes the upstream identity
-//! into the GEM_HOME and `.spinel/substitutions.json`. They need the resolver
-//! and installer, which do not exist yet.
+//! - **List**: [`List`]. Spinel's own list of substituted gems,
+//!   [`SUBSTITUTED`], and the names [`ENV`] adds to it.
+//! - **Dependencies**: [`unlocked_dependencies`]. A substitute may need only
+//!   what upstream needs, since the lockfile holds nothing else.
+//!
+//! The installer (`install.rs`, #112) reads a listed gem's substitute's
+//! `/info` from the source the locked gem comes from, picks a build, fetches
+//! it into the store, links it into the GEM_HOME under the locked identity,
+//! and records it in `.spinel/substitutions.json`. The lockfile is never
+//! touched: it is resolved before any of this, as Bundler resolves it.
 
 use std::num::NonZeroU64;
 
@@ -40,6 +46,74 @@ use crate::gem_version::Version;
 
 /// What a Spinel-native gem's name adds to the upstream name.
 pub const SUFFIX: &str = "-spinel";
+
+/// The gems Spinel substitutes: a name joins once the project owns its
+/// `<gem>-spinel` on rubygems.org, so that nobody else's gem of that name is
+/// ever installed in a gem's place.
+///
+/// ponytail: empty, as the project owns no such name yet (`pg-spinel` and
+/// `sqlite3-spinel` are the first planned, docs/roadmap.md). Upgrade: add
+/// each name here as its substitute is published.
+pub const SUBSTITUTED: &[&str] = &[];
+
+/// The environment variable whose comma-separated names join
+/// [`SUBSTITUTED`] for one run: a substitute's author trying it from their
+/// own source before it is listed, and the integration tests. Setting it
+/// trusts whatever `<gem>-spinel` the locked gem's source serves.
+pub const ENV: &str = "SPINEL_SUBSTITUTES";
+
+/// The gems one install substitutes: [`SUBSTITUTED`] and what [`ENV`] adds.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct List {
+    names: Vec<String>,
+}
+
+impl List {
+    /// [`SUBSTITUTED`] and the names in `extra`, a comma-separated list as
+    /// [`ENV`] holds it; empty names and whitespace around one are dropped.
+    pub fn new(extra: Option<&str>) -> List {
+        let mut names: Vec<String> = SUBSTITUTED.iter().map(|&n| n.to_owned()).collect();
+        for name in extra.unwrap_or("").split(',').map(str::trim) {
+            if !name.is_empty() && !names.iter().any(|n| n == name) {
+                names.push(name.to_owned());
+            }
+        }
+        List { names }
+    }
+
+    /// The list for this process: [`SUBSTITUTED`] and [`ENV`]'s names.
+    pub fn from_env() -> List {
+        List::new(std::env::var(ENV).ok().as_deref())
+    }
+
+    /// Whether `gem` is substituted.
+    pub fn contains(&self, gem: &str) -> bool {
+        self.names.iter().any(|n| n == gem)
+    }
+
+    /// The listed gem `name` is the substitute of, if any: `pg` for
+    /// `pg-spinel` when `pg` is listed. `bundler-spinel` is nobody's while
+    /// `bundler` is not listed.
+    pub fn upstream_of<'a>(&self, name: &'a str) -> Option<&'a str> {
+        name.strip_suffix(SUFFIX)
+            .filter(|upstream| self.contains(upstream))
+    }
+}
+
+/// The names among a substitute's runtime dependencies that the locked
+/// upstream gem does not depend on, in the substitute's order. The lockfile
+/// was resolved for upstream's, so it holds none of these, and a substitute
+/// that needs one cannot be installed in upstream's place.
+pub fn unlocked_dependencies<'a>(
+    substitute: &'a [(String, crate::gem_requirement::Requirement)],
+    upstream: &[(String, crate::gem_requirement::Requirement)],
+) -> Vec<&'a str> {
+    substitute
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .filter(|name| !upstream.iter().any(|(u, _)| u == name))
+        .collect()
+}
 
 /// The name of `gem`'s Spinel-native substitute: `pg` is `pg-spinel`. `gem`
 /// comes from Spinel's own list of substituted gems, all valid RubyGems names.
@@ -51,6 +125,13 @@ pub fn substitute_name(gem: &str) -> String {
 /// `1.5.0.2`. `upstream` is spelled as RubyGems normalizes it, so `2.0.0-rc1`
 /// gives `2.0.0.pre.rc1.1`, and a substitute for a prerelease is itself a
 /// prerelease.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the rule's other direction, for publishing a substitute; install reads revisions with `revision_of`"
+    )
+)]
 pub fn substitute_version(upstream: &Version, revision: NonZeroU64) -> Version {
     let joined = format!("{}.{revision}", upstream.as_str());
     // A version followed by `.` and digits is still a version: the pattern

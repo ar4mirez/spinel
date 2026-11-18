@@ -79,6 +79,15 @@ jobs:
         run: cargo test -p spinel-cli --test bundler_setup plain_bundle_exec
         env:
           SPINEL_CRUBY_BUNDLER: '1'
+      # Stock Bundler on a project whose gem `spinel install` substituted
+      # with its Spinel-native build (#112): `bundle install` installs the
+      # gem itself, never asks for `<gem>-spinel`, and leaves the lockfile
+      # byte for byte as it was.
+      - name: Stock Bundler ignores Spinel-native substitutes
+        if: matrix.name == 'linux-x64'
+        run: cargo test -p spinel-cli --test substitute stock_bundler
+        env:
+          SPINEL_CRUBY_BUNDLER: '1'
 
       # ruby/spec runs on Linux in the jobs below. These four directories are
       # where the platform shows (#41, S10): `platform_is :darwin` examples —

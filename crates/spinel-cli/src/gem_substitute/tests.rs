@@ -231,3 +231,30 @@ fn pick_never_moves_the_locked_version() {
         pair("1.5.1.1", "x86_64-linux-gnu")
     );
 }
+
+#[test]
+fn only_listed_gems_are_substituted() {
+    let list = List::new(Some(" widget, ,gadget,widget"));
+    assert!(list.contains("widget"));
+    assert!(list.contains("gadget"));
+    assert!(!list.contains("pg"));
+    assert_eq!(list.upstream_of("widget-spinel"), Some("widget"));
+    assert_eq!(list.upstream_of("widget"), None);
+    // A name that ends in -spinel is nobody's substitute unless what it
+    // stands in for is listed.
+    assert_eq!(list.upstream_of("bundler-spinel"), None);
+    assert_eq!(List::new(None), List::new(Some("")));
+}
+
+#[test]
+fn a_substitute_may_need_only_what_upstream_needs() {
+    use crate::gem_requirement::Requirement;
+    let dep = |name: &str| (name.to_owned(), Requirement::new([">= 0"]).unwrap());
+    let upstream = [dep("gizmo"), dep("base64")];
+    assert!(unlocked_dependencies(&[dep("gizmo")], &upstream).is_empty());
+    assert!(unlocked_dependencies(&[], &upstream).is_empty());
+    assert_eq!(
+        unlocked_dependencies(&[dep("ffi"), dep("gizmo"), dep("extra")], &upstream),
+        ["ffi", "extra"]
+    );
+}
