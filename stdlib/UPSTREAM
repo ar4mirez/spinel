@@ -13,6 +13,14 @@ default gems whose Ruby halves ruby/ruby keeps in ext/json/lib and
 ext/io/console/lib. Their C halves are Spinel's own, in the repository's
 lib/json/ext/ and lib/io/console.rb, embedded in the binary.
 
+Also laid over it, the default gem openssl's lib/, which ruby/ruby keeps in
+ext/openssl/lib. Its C half is Spinel's lib/openssl/spinel.rb, embedded in
+the binary, which has digests, HMAC and random bytes so far. One file is
+patched: openssl.rb requires openssl/spinel in place of openssl.so when
+RUBY_ENGINE is "spinel", and requires the Ruby half of BN, Cipher, PKCS5,
+PKey, SSL and X509 only when the C half defined the class it reopens
+(OpenSSL::KDF for PKCS5), which on CRuby it always has.
+
 Also laid over it, the bundled gem fiddle's lib/, from the packaged gem at
 the release Ruby bundles. Its C half is Spinel's lib/fiddle/spinel.rb, over
 Spinel::FFI (lib/spinel/ffi.rb), embedded in the binary; fiddle/ffi_backend.rb,
@@ -44,6 +52,11 @@ FFI backend, which is left out.
     commit    fbc7e1f31f1fc2cf21baf96a845bfdbc88e47f95
     files     io/console/size.rb (not lib/ffi/, JRuby's backend)
 
+    upstream  https://github.com/ruby/openssl.git
+    tag       v4.0.2
+    commit    6e410b804f4c6a52c146fe651941bafdbb332754
+    files     openssl.rb (patched), openssl/
+
     upstream  https://rubygems.org/downloads/prism-1.9.0.gem
     sha256    7b530c6a9f92c24300014919c9dcbc055bf4cdf51ec30aed099b06cd6674ef85
     files     prism.rb (patched), prism/ (not prism/ffi.rb, the FFI backend)
@@ -59,5 +72,5 @@ are in LICENSE/<gem>/.
 
 Do not edit anything under stdlib/ by hand. CI diffs this tree against the tags
 above and fails on any difference. To update, edit RUBY_TAG, WEBRICK_TAG,
-JSON_TAG, IO_CONSOLE_TAG, PRISM_VERSION or FIDDLE_VERSION in
+JSON_TAG, IO_CONSOLE_TAG, OPENSSL_TAG, PRISM_VERSION or FIDDLE_VERSION in
 scripts/vendor-stdlib.sh and run it.
