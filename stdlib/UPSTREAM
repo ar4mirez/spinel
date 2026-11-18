@@ -35,6 +35,11 @@ branches when RUBY_ENGINE is "spinel", requiring fiddle/spinel in place of
 fiddle.so, and fiddle/cparser.rb reads an array member's count before it
 calls parse_ctype, since Spinel's $~ is not yet frame-local.
 
+Also laid over it, the bundled gem bigdecimal's lib/, from the packaged gem
+at the release Ruby bundles. Its C half is Spinel's lib/bigdecimal/spinel.rb,
+embedded in the binary. One file is patched: bigdecimal.rb requires
+bigdecimal/spinel in place of bigdecimal.so when RUBY_ENGINE is "spinel".
+
 In place of Ruby's own prism.rb and prism/, the prism gem's lib/ at the
 release of the Prism library Spinel parses with, which is the C half its
 Ruby half reads serialized trees from (the repository's lib/prism/prism.rb,
@@ -77,11 +82,15 @@ FFI backend, which is left out.
     files     fiddle.rb (patched), fiddle/ (cparser.rb patched; not
               fiddle/ffi_backend.rb, the FFI backend)
 
+    upstream  https://rubygems.org/downloads/bigdecimal-4.0.1.gem
+    sha256    8b07d3d065a9f921c80ceaea7c9d4ae596697295b584c296fe599dd0ad01c4a7
+    files     bigdecimal.rb (patched), bigdecimal/
+
 Licenses are upstream's, in LICENSE/. LEGAL records the per-file terms for the
 files here from ruby/ruby that are not under Ruby's own license; each gem's own
 are in LICENSE/<gem>/.
 
 Do not edit anything under stdlib/ by hand. CI diffs this tree against the tags
 above and fails on any difference. To update, edit RUBY_TAG, WEBRICK_TAG,
-JSON_TAG, IO_CONSOLE_TAG, OPENSSL_TAG, PSYCH_TAG, PRISM_VERSION or
-FIDDLE_VERSION in scripts/vendor-stdlib.sh and run it.
+JSON_TAG, IO_CONSOLE_TAG, OPENSSL_TAG, PSYCH_TAG, PRISM_VERSION,
+FIDDLE_VERSION or BIGDECIMAL_VERSION in scripts/vendor-stdlib.sh and run it.

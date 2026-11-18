@@ -42,9 +42,9 @@ pub struct Builtin {
 ///
 /// ponytail: only the built-ins whose source names a gem version are listed.
 /// `monitor` (#46) declares none, `socket` and `objspace` are not gems, and
-/// `bigdecimal` (#109) and `racc` are not built-ins yet, so a lock pinning
-/// one of them installs the gem itself, as before. Upgrade: add each one here
-/// with its version when it lands.
+/// `racc` is not a built-in yet, so a lock pinning it installs the gem
+/// itself, as before. Upgrade: add each one here with its version when it
+/// lands.
 ///
 /// `openssl` is listed from its first phase (#106: digests, HMAC, random
 /// bytes), because the gem itself cannot be installed in its place: its
@@ -52,6 +52,10 @@ pub struct Builtin {
 /// builds. A program that needs a part not there yet (`Cipher`, `SSL`, TLS
 /// is #107) finds the constant undefined, as it would with no openssl.
 pub const BUILTINS: &[Builtin] = &[
+    Builtin {
+        name: "bigdecimal",
+        version: "4.0.1",
+    },
     Builtin {
         name: "date",
         version: "3.5.1",
@@ -258,7 +262,8 @@ mod tests {
     #[test]
     fn only_the_listed_gems_are_built_ins() {
         assert_eq!(find("json").map(|b| b.version), Some("2.18.0"));
-        assert_eq!(find("bigdecimal"), None);
+        assert_eq!(find("bigdecimal").map(|b| b.version), Some("4.0.1"));
+        assert_eq!(find("racc"), None);
     }
 
     #[test]

@@ -9,6 +9,20 @@ bytecode a tool reads.
 
 ### Added
 
+- **`bigdecimal`**
+  ([#109](https://github.com/ar4mirez/spinel/issues/109)).
+  `require "bigdecimal"` is bigdecimal 4.0.1, the version Ruby 4.0 bundles,
+  built into `spinel`: `BigDecimal()` from Strings, Integers, Floats and
+  Rationals, arithmetic at a precision or to the precision limit in every
+  rounding mode, `round`, `floor`, `ceil` and `truncate`, NaN, the
+  infinities and signed zeros with the exception modes, `to_s` in every
+  format, Marshal, `sqrt`, `**`, `BigMath`, and `bigdecimal/util`'s `to_d`.
+  Results, printed digits and error messages are CRuby's, down to the word
+  count `_dump` writes. A lockfile pinning `bigdecimal` installs the
+  built-in. `[0] == [obj]` now asks `obj`, as `0 == obj` does;
+  `Rational#coerce` takes a Complex; and `Rational(x)` calls `x.to_r` for
+  a number of another class.
+
 - **`psych` and `yaml`, on libyaml**
   ([#108](https://github.com/ar4mirez/spinel/issues/108)). `require "yaml"`
   is psych 5.3.1, the version Ruby 4.0 bundles, over libyaml 0.2.5, the

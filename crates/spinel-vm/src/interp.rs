@@ -20726,6 +20726,17 @@ fn ruby_eq_in(
             (None, None) => {}
         }
     }
+    // A number against an object that is not one is the object's to answer
+    // (CRuby's `num_equal` asks `right == left`), which takes a send. The
+    // operator instruction swaps such a pair itself, so this is an element of
+    // an Array: the whole comparison goes to `Array#==`, whose element `==`
+    // asks the object. `[0] == [BigDecimal("0")]` is true.
+    if eq_asks_other(scope, left, right) {
+        return Err(Error::NoDispatch {
+            op: "==",
+            operands: "a number and an object that decides",
+        });
+    }
     // Ruby dispatches `a == b` on `a`, so the *left* operand decides. Every
     // immediate's `==` is identity once the numeric case above is out of the
     // way: `nil == false`, `:a == 1` and `1 == "1"` are all simply false.

@@ -235,6 +235,10 @@ const LIBRARIES: &[(&str, &str)] = &[
         include_str!("../../../lib/openssl/spinel.rb"),
     ),
     ("psych/spinel", include_str!("../../../lib/psych/spinel.rb")),
+    (
+        "bigdecimal/spinel",
+        include_str!("../../../lib/bigdecimal/spinel.rb"),
+    ),
 ];
 
 fn library(name: &str) -> Option<&'static str> {

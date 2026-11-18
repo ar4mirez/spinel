@@ -143,3 +143,14 @@
 2 ** "x"  #=> !TypeError: String can't be coerced into Integer
 (2**64) ** :s  #=> !TypeError: :s can't be coerced into Integer
 2 ** Class.new { def coerce(n); ["a", "b"]; end }.new  #=> !NoMethodError: undefined method '**' for an instance of String
+
+# -- `==`: a number asks the object, inside an Array too ------------------
+#
+# CRuby's `num_equal` answers `obj == 1` for `1 == obj`, and `Array#==`
+# compares elements with `==`, so an element pair is asked the same way.
+
+1 == Class.new { def ==(o); true; end }.new  #=> true
+[1] == [Class.new { def ==(o); true; end }.new]  #=> true
+[1.5, 2] == [1.5, Class.new { def ==(o); o == 2; end }.new]  #=> true
+[2**70] == [Class.new { def ==(o); true; end }.new]  #=> true
+[1] == [Object.new]  #=> false
