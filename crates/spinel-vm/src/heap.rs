@@ -1823,7 +1823,11 @@ impl<'h> HandleScope<'h> {
     }
 
     /// [`Classes::deprecated_const`], for a value as this heap sees it.
-    pub fn deprecated_const(&mut self, name: SymbolId, value: Value) -> Option<crate::class::ClassId> {
+    pub fn deprecated_const(
+        &mut self,
+        name: SymbolId,
+        value: Value,
+    ) -> Option<crate::class::ClassId> {
         if !self.classes().deprecates(name) {
             return None;
         }
@@ -1844,7 +1848,11 @@ impl<'h> HandleScope<'h> {
     }
 
     /// [`Classes::const_get_qualified`], as this heap sees the value.
-    pub fn const_get_qualified(&mut self, id: crate::class::ClassId, name: SymbolId) -> Option<Value> {
+    pub fn const_get_qualified(
+        &mut self,
+        id: crate::class::ClassId,
+        name: SymbolId,
+    ) -> Option<Value> {
         let value = self.classes().const_get_qualified(id, name)?;
         Some(self.shared_to_local(value))
     }
@@ -3219,6 +3227,15 @@ impl fmt::Debug for HandleScope<'_> {
     }
 }
 
+/// Whether a class with this representation has classes and modules for its
+/// instances: `Class`, `Module`, and everything below them.
+fn is_class_repr(repr: Option<crate::class::Builtin>) -> bool {
+    matches!(
+        repr,
+        Some(crate::class::Builtin::Class | crate::class::Builtin::Module)
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3949,13 +3966,4 @@ mod tests {
             assert_eq!(inner.slot(handle, 0), Value::fixnum(i as i64).unwrap());
         }
     }
-}
-
-/// Whether a class with this representation has classes and modules for its
-/// instances: `Class`, `Module`, and everything below them.
-fn is_class_repr(repr: Option<crate::class::Builtin>) -> bool {
-    matches!(
-        repr,
-        Some(crate::class::Builtin::Class | crate::class::Builtin::Module)
-    )
 }
