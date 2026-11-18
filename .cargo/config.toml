@@ -1,0 +1,7 @@
+# The sqlite3-spinel gem's SQLite (gems/sqlite3-spinel/ext/sqlite3_spinel)
+# compiled as the sqlite3 gem compiles its own: libsqlite3-sys's bundled
+# amalgamation turns foreign keys on by default, which SQLite and the sqlite3
+# gem leave off, and lacks the three options the sqlite3 gem's extconf.rb
+# adds. Read only by libsqlite3-sys's build script.
+[env]
+LIBSQLITE3_FLAGS = "-USQLITE_DEFAULT_FOREIGN_KEYS -DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1 -DSQLITE_ENABLE_DBPAGE_VTAB=1 -DSQLITE_ENABLE_DBSTAT_VTAB=1"

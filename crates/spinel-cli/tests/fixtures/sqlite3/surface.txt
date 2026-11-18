@@ -1,0 +1,82 @@
+VERSION: "2.10.2"
+SQLITE_VERSION: ["3.54.1", 3054001, 3054001, true, false]
+Open: [[:AUTOPROXY, 32], [:CREATE, 4], [:DELETEONCLOSE, 8], [:EXCLUSIVE, 16], [:FULLMUTEX, 65536], [:MAIN_DB, 256], [:MAIN_JOURNAL, 2048], [:MASTER_JOURNAL, 16384], [:MEMORY, 128], [:NOMUTEX, 32768], [:PRIVATECACHE, 262144], [:READONLY, 1], [:READWRITE, 2], [:SHAREDCACHE, 131072], [:SUBJOURNAL, 8192], [:SUPER_JOURNAL, 16384], [:TEMP_DB, 512], [:TEMP_JOURNAL, 4096], [:TRANSIENT_DB, 1024], [:URI, 64], [:WAL, 524288]]
+ancestors: [SQLite3::SQLException, SQLite3::Exception, StandardError]
+new: [SQLite3::Database, false, false, nil, true]
+ivars: [:@collations, :@default_transaction_mode, :@functions, :@progress_handler, :@readonly, :@results_as_hash]
+create: []
+insert: []
+last_insert_row_id: [1, 1, 1]
+insert named: []
+insert sym: []
+bignum: 1.1805916207174113e+21
+select: [[1, "hé llo", 1.5, "\x00\xFF", 1099511627776], [2, "two", 0.1, nil, nil], [3, "three", nil, nil, nil], [4, "big", nil, nil, 1.1805916207174113e+21]]
+select encodings: [[#<Encoding:UTF-8>, true], [#<Encoding:BINARY (ASCII-8BIT)>, true]]
+execute2: [["id", "body"], [1, "hé llo"], [2, "two"]]
+get_first_row: ["two", 0.1]
+get_first_value: 4
+get_first_value none: nil
+block: [[1], [2], [3], [4]]
+hash: [{"id" => 1, "body" => "hé llo"}]
+hash first row: {"id" => 1, "body" => "hé llo"}
+hash first value: "hé llo"
+prepare: [["id", "body", "score"], ["integer", "text", "real"], 1, "SELECT id, body, score FROM notes WHERE id > ? ORDER BY id", 3, [[2, "two", 0.1], [3, "three", nil], [4, "big", nil]], [[3, "three", nil], [4, "big", nil]], "SELECT id, body, score FROM notes WHERE id > 2 ORDER BY id", [3, "three", nil], false, true, true]
+closed stmt: SQLite3::Exception: "cannot use a closed statement" code=nil
+closed stmt close: SQLite3::Exception: "cannot use a closed statement" code=nil
+named_params: ["a", "b", "c"]
+remainder: [" SELECT 2", #<Encoding:UTF-8>]
+bind no such: SQLite3::Exception: "no such bind parameter" code=nil
+bind bad type: RuntimeError: "can't prepare Class" code=-
+bind true: RuntimeError: "can't prepare TrueClass" code=-
+bind sym: RuntimeError: "can't prepare Symbol" code=-
+blob class: [["blob"]]
+to_blob: [["blob", "blob"]]
+syntax: SQLite3::SQLException: "near \"SELEC\": syntax error:\nSELEC 1\n^" code=1
+syntax sql: [SQLite3::SQLException, "SELECT * FROM\n  nope", #<Encoding:BINARY (ASCII-8BIT)>, -1, "no such table: nope:\nSELECT * FROM\n  nope"]
+no table: SQLite3::SQLException: "no such table: missing:\nSELECT * FROM missing" code=1
+constraint: SQLite3::ConstraintException: "NOT NULL constraint failed: notes.body" code=19
+constraint code: [SQLite3::ConstraintException, 19, "UNIQUE constraint failed: notes.id", nil]
+extended: [SQLite3::ConstraintException, 1555, "UNIQUE constraint failed: notes.id"]
+transaction: [true, true]
+after tx: [false, 1]
+rollback: ["boom", 0]
+nested tx: SQLite3::SQLException: "cannot start a transaction within a transaction" code=1
+tx no block: [true, true, true, false]
+rollback none: SQLite3::SQLException: "cannot rollback - no transaction is active" code=1
+query: [SQLite3::ResultSet, ["hé llo"], nil, true, ["body"]]
+execute_batch: nil
+execute_batch2: [["1", "1.5", nil], ["2", "1.5", nil], ["x"]]
+execute_batch2 hash: [[["a", #<Encoding:BINARY (ASCII-8BIT)>, "1", #<Encoding:BINARY (ASCII-8BIT)>]], [["a", #<Encoding:BINARY (ASCII-8BIT)>, "2", #<Encoding:BINARY (ASCII-8BIT)>]]]
+execute_batch2 err: SQLite3::SQLException: "no such column: nope" code=1
+pragmas: [false, "delete", #<Encoding:UTF-8>, 0]
+busy_timeout: true
+busy_handler nil: true
+errmsg: ["not an error", #<Encoding:BINARY (ASCII-8BIT)>, 0]
+complete?: [true, false]
+stat: [[:fullscan_steps, :sorts, :autoindexes, :vm_steps, :reprepares, :runs, :filter_misses, :filter_hits], true]
+stat bad: ArgumentError: "unknown key: nope" code=-
+float: [[0.30000000000000004, 1.0e+301, -0.0, 3.0]]
+int64: [[9223372036854775807, -9223372036854775808, -9223372036854775808]]
+quote: "it''s"
+statement types: ["integer", "text", nil]
+each frozen: true
+row frozen: true
+empty sql: SQLite3::Exception: "cannot use a closed statement" code=nil
+comment sql: SQLite3::Exception: "cannot use a closed statement" code=nil
+close: [true, true]
+closed use: ArgumentError: "prepare called on a closed database" code=-
+closed changes: SQLite3::Exception: "cannot use a closed database" code=nil
+readonly: [true, [[5]], [SQLite3::ReadOnlyException, "attempt to write a readonly database", 8]]
+cantopen: SQLite3::CantOpenException: "unable to open database file" code=14
+cantopen ro: SQLite3::CantOpenException: "unable to open database file" code=14
+open block: [[2]]
+new block: [3, true]
+memory filename: ""
+strict: SQLite3::SQLException: "no such column: \"x\" - should this be a string literal in single-quotes?:\nSELECT \"x\"\n       ^" code=1
+not strict: [["x"]]
+default tx mode: true
+flags: false
+version_info keys: [:compiled, :loaded, :packaged, :precompiled, :sqlcipher, :threadsafe]
+status: [:current, :highwater]
+open bad type: NoMethodError: "undefined method 'encoding' for nil" code=-
+utf16: [#<Encoding:UTF-16LE>, [["hé"]]]
