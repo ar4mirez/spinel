@@ -236,9 +236,9 @@ fn each_built_in_reports_the_version_it_is_substituted_at() {
     let out = Command::new(SPINEL)
         .args([
             "-e",
-            r#"%w[date digest etc fcntl fiddle io/console json stringio strscan zlib].each { |f| require f }
+            r#"%w[date digest etc fcntl fiddle io/console json openssl stringio strscan zlib].each { |f| require f }
 puts Date::VERSION, Digest::VERSION, Etc::VERSION, Fcntl::VERSION, Fiddle::VERSION,
-  IO::ConsoleMode::VERSION, JSON::VERSION, StringIO::VERSION,
+  IO::ConsoleMode::VERSION, JSON::VERSION, OpenSSL::VERSION, StringIO::VERSION,
   StringScanner::Version, Zlib::VERSION"#,
         ])
         .output()
@@ -247,8 +247,8 @@ puts Date::VERSION, Digest::VERSION, Etc::VERSION, Fcntl::VERSION, Fiddle::VERSI
     assert_eq!(
         out.lines().collect::<Vec<_>>(),
         [
-            "3.5.1", "3.2.1", "1.4.6", "1.3.0", "1.1.8", "0.8.2", "2.18.0", "3.2.0", "3.1.6",
-            "3.2.3"
+            "3.5.1", "3.2.1", "1.4.6", "1.3.0", "1.1.8", "0.8.2", "2.18.0", "4.0.2", "3.2.0",
+            "3.1.6", "3.2.3"
         ],
         "{out}"
     );

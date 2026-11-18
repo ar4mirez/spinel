@@ -99,7 +99,7 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `library/objectspace` | 7 | 46 | 46 | 0 | 0 | 0 | 100% |
 | `library/observer` | 5 | 8 | 0 | 0 | 8 | 0 | 0% |
 | `library/open3` | 11 | 14 | 14 | 0 | 0 | 0 | 100% |
-| `library/openssl` | 19 | 132 | 0 | 0 | 132 | 0 | 0% |
+| `library/openssl` | 19 | 173 | 112 | 0 | 61 | 0 | 65% |
 | `library/openstruct` | 13 | 32 | 0 | 0 | 32 | 0 | 0% |
 | `library/optionparser` | 2 | 4 | 4 | 0 | 0 | 0 | 100% |
 | `library/pathname` | 21 | 77 | 77 | 0 | 0 | 0 | 100% |
@@ -131,4 +131,4 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `optional/capi` | 47 | 0 | 0 | 0 | 0 | 0 | — |
 | `optional/thread_safety` | 1 | 5 | 4 | 0 | 0 | 1 | 80% |
 | `security` | 13 | 34 | 32 | 0 | 2 | 0 | 94% |
-| **total** | 3841 | 32935 | 30389 | 0 | 2430 | 116 | 92% |
+| **total** | 3841 | 32976 | 30501 | 0 | 2359 | 116 | 92% |

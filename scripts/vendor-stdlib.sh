@@ -49,7 +49,13 @@
 # `lib/fiddle/spinel.rb` over `Spinel::FFI` (`lib/spinel/ffi.rb`), embedded,
 # and `fiddle.rb` and `fiddle/cparser.rb` are patched (see `patch_fiddle`).
 #
-# To bump: edit RUBY_TAG, WEBRICK_TAG, JSON_TAG, IO_CONSOLE_TAG,
+# `openssl` (#106) is a default gem like json: its Ruby half lives in
+# ruby/ruby's `ext/openssl/lib`, so it comes from ruby/openssl at the release
+# Ruby bundles. Its C half is Spinel's `lib/openssl/spinel.rb`, embedded, and
+# `openssl.rb` is patched to load it, and to load the Ruby half of each part
+# only when that part's C half is there (see `patch_openssl`).
+#
+# To bump: edit RUBY_TAG, WEBRICK_TAG, JSON_TAG, IO_CONSOLE_TAG, OPENSSL_TAG,
 # PRISM_VERSION (with PRISM_SHA256, and the ruby-prism crate in
 # `crates/spinel-parse/Cargo.toml` to the same release) or FIDDLE_VERSION
 # (with FIDDLE_SHA256), run this script, commit `stdlib/` in its own commit.
@@ -71,6 +77,10 @@ JSON_REPO="https://github.com/ruby/json.git"
 # The io-console Ruby 4.0 bundles (its gemspec in ext/io/console at RUBY_TAG).
 IO_CONSOLE_TAG="v0.8.2"
 IO_CONSOLE_REPO="https://github.com/ruby/io-console.git"
+# The openssl Ruby 4.0 bundles (ext/openssl/lib/openssl/version.rb at
+# RUBY_TAG).
+OPENSSL_TAG="v4.0.2"
+OPENSSL_REPO="https://github.com/ruby/openssl.git"
 
 # The prism gem, at the release of the ruby-prism crate Spinel parses with,
 # and the package's SHA-256 as rubygems.org publishes it.
@@ -166,6 +176,12 @@ fetch_gem io-console "$IO_CONSOLE_REPO" "$IO_CONSOLE_TAG" "${IO_CONSOLE_LICENSES
 io_console_sha="$(git -C "$work/io-console" rev-parse 'FETCH_HEAD^{commit}')"
 rm -rf "$work/io-console/lib/ffi"
 
+# openssl is under Ruby's license or the 2-clause BSDL.
+OPENSSL_LICENSES=(COPYING BSDL)
+echo "fetching ruby/openssl at $OPENSSL_TAG"
+fetch_gem openssl "$OPENSSL_REPO" "$OPENSSL_TAG" "${OPENSSL_LICENSES[@]}"
+openssl_sha="$(git -C "$work/openssl" rev-parse 'FETCH_HEAD^{commit}')"
+
 # prism is MIT-licensed. A `.gem` is a tar of a gzipped `data.tar.gz`; only
 # its `lib/`, `prism.gemspec` and license are wanted.
 PRISM_LICENSES=(LICENSE.md)
@@ -260,6 +276,28 @@ patch_fiddle() {
 }
 patch_fiddle "$work/fiddle/lib"
 
+# `openssl.rb` requires `openssl.so`, the whole C half, and then the Ruby
+# half of every part of it. Spinel's C half is `openssl/spinel`, embedded,
+# and has the parts of one phase at a time (#106 has digests, HMAC and
+# random bytes; TLS is #107), so each Ruby half that reopens a class only
+# the C half defines is required only when the C half defined it. On CRuby
+# every condition holds. `const_defined?`, not `defined?`, so the condition
+# is answered even in a heap a spec fixture left partial.
+patch_openssl() {
+  local file="$1" part constant
+  patch_line "$file" \
+    "require 'openssl.so'" \
+    "require RUBY_ENGINE == 'spinel' ? 'openssl/spinel' : 'openssl.so'"
+  for part in bn:BN cipher:Cipher pkcs5:KDF pkey:PKey ssl:SSL x509:X509; do
+    constant="${part#*:}"
+    part="${part%%:*}"
+    patch_line "$file" \
+      "require_relative 'openssl/$part'" \
+      "require_relative 'openssl/$part' if OpenSSL.const_defined?(:$constant, false)"
+  done
+}
+patch_openssl "$work/openssl/lib/openssl.rb"
+
 # Assemble what `stdlib/` should look like, then either install it or diff
 # against it. Building it once and comparing keeps the two modes honest: the
 # check tests the same tree the vendor step would write.
@@ -301,6 +339,7 @@ lay_over() {
 lay_over webrick "${WEBRICK_LICENSES[@]}"
 lay_over json "${JSON_LICENSES[@]}"
 lay_over io-console "${IO_CONSOLE_LICENSES[@]}"
+lay_over openssl "${OPENSSL_LICENSES[@]}"
 # Ruby's own prism goes first: the gem's replaces it rather than mixing two
 # releases' files (see PRISM_VERSION).
 rm -rf "$staged/prism.rb" "$staged/prism"
@@ -321,6 +360,14 @@ lib/: webrick, which left the standard library, and json and io-console,
 default gems whose Ruby halves ruby/ruby keeps in ext/json/lib and
 ext/io/console/lib. Their C halves are Spinel's own, in the repository's
 lib/json/ext/ and lib/io/console.rb, embedded in the binary.
+
+Also laid over it, the default gem openssl's lib/, which ruby/ruby keeps in
+ext/openssl/lib. Its C half is Spinel's lib/openssl/spinel.rb, embedded in
+the binary, which has digests, HMAC and random bytes so far. One file is
+patched: openssl.rb requires openssl/spinel in place of openssl.so when
+RUBY_ENGINE is "spinel", and requires the Ruby half of BN, Cipher, PKCS5,
+PKey, SSL and X509 only when the C half defined the class it reopens
+(OpenSSL::KDF for PKCS5), which on CRuby it always has.
 
 Also laid over it, the bundled gem fiddle's lib/, from the packaged gem at
 the release Ruby bundles. Its C half is Spinel's lib/fiddle/spinel.rb, over
@@ -353,6 +400,11 @@ FFI backend, which is left out.
     commit    $io_console_sha
     files     io/console/size.rb (not lib/ffi/, JRuby's backend)
 
+    upstream  $OPENSSL_REPO
+    tag       $OPENSSL_TAG
+    commit    $openssl_sha
+    files     openssl.rb (patched), openssl/
+
     upstream  $PRISM_URL
     sha256    $PRISM_SHA256
     files     prism.rb (patched), prism/ (not prism/ffi.rb, the FFI backend)
@@ -368,7 +420,7 @@ are in LICENSE/<gem>/.
 
 Do not edit anything under stdlib/ by hand. CI diffs this tree against the tags
 above and fails on any difference. To update, edit RUBY_TAG, WEBRICK_TAG,
-JSON_TAG, IO_CONSOLE_TAG, PRISM_VERSION or FIDDLE_VERSION in
+JSON_TAG, IO_CONSOLE_TAG, OPENSSL_TAG, PRISM_VERSION or FIDDLE_VERSION in
 scripts/vendor-stdlib.sh and run it.
 EOF
 
@@ -379,9 +431,9 @@ if $check_only; then
   # place to add one, with the reason next to it.
   if diff -r -q "$staged" "$stdlib"; then
     files="$(find "$stdlib" -name '*.rb' | wc -l | tr -d ' ')"
-    echo "stdlib/ matches ruby/ruby $RUBY_TAG, ruby/webrick $WEBRICK_TAG, ruby/json $JSON_TAG, ruby/io-console $IO_CONSOLE_TAG, prism $PRISM_VERSION and fiddle $FIDDLE_VERSION ($files .rb files)"
+    echo "stdlib/ matches ruby/ruby $RUBY_TAG, ruby/webrick $WEBRICK_TAG, ruby/json $JSON_TAG, ruby/io-console $IO_CONSOLE_TAG, ruby/openssl $OPENSSL_TAG, prism $PRISM_VERSION and fiddle $FIDDLE_VERSION ($files .rb files)"
   else
-    echo "::error::stdlib/ has drifted from ruby/ruby $RUBY_TAG ($sha), ruby/webrick $WEBRICK_TAG, ruby/json $JSON_TAG, ruby/io-console $IO_CONSOLE_TAG, prism $PRISM_VERSION or fiddle $FIDDLE_VERSION" >&2
+    echo "::error::stdlib/ has drifted from ruby/ruby $RUBY_TAG ($sha), ruby/webrick $WEBRICK_TAG, ruby/json $JSON_TAG, ruby/io-console $IO_CONSOLE_TAG, ruby/openssl $OPENSSL_TAG, prism $PRISM_VERSION or fiddle $FIDDLE_VERSION" >&2
     echo "run scripts/vendor-stdlib.sh and commit the result" >&2
     exit 1
   fi
@@ -389,5 +441,5 @@ else
   rm -rf "$stdlib"
   mv "$staged" "$stdlib"
   files="$(find "$stdlib" -name '*.rb' | wc -l | tr -d ' ')"
-  echo "vendored ruby/ruby $RUBY_TAG, ruby/webrick $WEBRICK_TAG, ruby/json $JSON_TAG, ruby/io-console $IO_CONSOLE_TAG, prism $PRISM_VERSION and fiddle $FIDDLE_VERSION into stdlib/ ($files .rb files)"
+  echo "vendored ruby/ruby $RUBY_TAG, ruby/webrick $WEBRICK_TAG, ruby/json $JSON_TAG, ruby/io-console $IO_CONSOLE_TAG, ruby/openssl $OPENSSL_TAG, prism $PRISM_VERSION and fiddle $FIDDLE_VERSION into stdlib/ ($files .rb files)"
 fi

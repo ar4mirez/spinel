@@ -593,6 +593,8 @@ pub enum Native {
     Console(ConsoleOp),
     /// The C calls `lib/spinel/ffi.rb` is Ruby over (#105).
     Ffi(FfiOp),
+    /// The OpenSSL calls `lib/openssl/spinel.rb` is Ruby over (#106).
+    OpenSsl(OpenSslOp),
     /// `Kernel#__sleep__(seconds)`: block the thread, answer the whole
     /// seconds slept. `Kernel#sleep` is Ruby around it.
     Sleep,
@@ -1017,6 +1019,55 @@ pub enum FfiOp {
     /// `__ffi_constants__`: `[name, value]` pairs: the `RTLD_*` flags and
     /// pseudo-handles, the default ABI and the C library's `free`.
     Constants,
+}
+
+/// Which OpenSSL primitive. See `openssl.rs` for the calls and `interp.rs`,
+/// `openssl_native`, for what each takes and answers. A context is an
+/// Integer id; a kind is 1 for a digest's context and 2 for an HMAC's. A
+/// call that fails answers `[class, message, [error, ...]]`, the exception
+/// `ossl_raise` would raise, for the Ruby side to raise (class 1 is
+/// `DigestError`, 2 `HMACError`, 3 `RandomError`, 4 `ArgumentError`, 5
+/// `RangeError`, 6 `RuntimeError`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenSslOp {
+    /// `__openssl_alloc__(kind)`: a new, uninitialised context's id.
+    Alloc,
+    /// `__openssl_free__(id)`: nil, the context freed.
+    Free,
+    /// `__openssl_digest_init__(id or nil, name or digest id)`: the id of
+    /// the context (a new one for nil) set to hash with that algorithm.
+    DigestInit,
+    /// `__openssl_hmac_init__(id, key, name or digest id)`: true.
+    HmacInit,
+    /// `__openssl_copy__(id, kind)`: a new context's id, a copy of `id`.
+    Copy,
+    /// `__openssl_reset__(id, kind)`: true.
+    Reset,
+    /// `__openssl_update__(id, kind, string)`: true.
+    Update,
+    /// `__openssl_final__(id, kind)`: the digest or MAC, BINARY.
+    Final,
+    /// `__openssl_digest_info__(id)`: `[name, digest_length, block_length]`.
+    DigestInfo,
+    /// `__openssl_digests__`: every digest name, sorted.
+    Digests,
+    /// `__openssl_random_bytes__(length)`: that many random bytes.
+    RandomBytes,
+    /// `__openssl_random_seed__(string)`: nil.
+    RandomSeed,
+    /// `__openssl_random_add__(string, entropy)`: nil.
+    RandomAdd,
+    /// `__openssl_random_status__`: true or false.
+    RandomStatus,
+    /// `__openssl_random_load__(path)`: true.
+    RandomLoad,
+    /// `__openssl_random_write__(path)`: true.
+    RandomWrite,
+    /// `__openssl_memcmp__(a, b)`: whether two equal-length Strings are
+    /// equal, in time that does not depend on where they differ.
+    Memcmp,
+    /// `__openssl_version__`: `[OPENSSL_VERSION, OPENSSL_VERSION_NUMBER]`.
+    Version,
 }
 
 /// Which terminal call. See `console.rs` for the calls and `interp.rs`,
