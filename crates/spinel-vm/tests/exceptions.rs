@@ -29,7 +29,7 @@ fn rows() -> Vec<(&'static str, &'static str)> {
 /// The class object bound to a top-level constant, or `None`.
 fn class_named(heap: &mut Heap, name: &str) -> Option<Value> {
     let symbol = spinel_vm::shared::symbols::intern(name);
-    let scope = heap.scope();
+    let mut scope = heap.scope();
     scope.const_get_here(Builtin::Object.id(), symbol)
 }
 

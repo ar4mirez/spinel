@@ -164,3 +164,52 @@ fn a_class_a_joined_heap_defines_is_each_heaps_own() {
     assert_eq!(eval(&mut child.0, &again), "[true, 1, nil]");
     child.0.release_classes();
 }
+
+/// One heap defines classes and stores each in a constant while the other
+/// writes the tables too, so that the other is often parked in its write
+/// while a class it has no object for yet goes in. Reading the newest
+/// constant right after its write answers that heap's own object for it.
+#[test]
+fn a_heap_reads_a_class_defined_while_it_waited_to_write() {
+    let mut main = Heap::new();
+    {
+        let mut scope = main.scope();
+        scope.bootstrap();
+        spinel_core::boot(&mut scope);
+    }
+    let child = Moved(main.new_ractor());
+    let define = compile(
+        "i = 0
+         while i < 300
+           Object.const_set(:\"K#{i}\", Class.new)
+           Object.const_set(:LAST, i)
+           i += 1
+         end
+         i",
+    );
+    let worker = std::thread::spawn(move || {
+        let mut child = child;
+        let answer = eval(&mut child.0, &define);
+        child.0.release_classes();
+        (child, answer)
+    });
+
+    let read = compile(
+        "ok = true
+         n = 0
+         while n < 300
+           def written = 1
+           if Object.const_defined?(:LAST)
+             k = Object.const_get(:\"K#{LAST}\")
+             ok &&= k.new.class.equal?(k)
+           end
+           n += 1
+         end
+         ok",
+    );
+    let answer = eval(&mut main, &read);
+    main.release_classes();
+    let (_child, defined) = worker.join().expect("the joined heap's thread finishes");
+    assert_eq!(defined, "300");
+    assert_eq!(answer, "true");
+}

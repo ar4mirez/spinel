@@ -765,7 +765,7 @@ impl Heap {
     /// holds the class lock from here on, as a running one does, so it is to
     /// be run or released (`Heap::release_classes`) without delay.
     pub fn new_ractor(&mut self) -> Heap {
-        self.class_safe_point();
+        self.scope().class_safe_point();
         self.vm.lock().join(&self.class_lock);
         let mut heap = Heap::with_vm(Arc::clone(&self.vm), false);
         heap.budget = self.budget;
@@ -1077,7 +1077,7 @@ impl Heap {
     /// has more than one Ractor (#117).
     #[inline]
     pub fn definitions_mut(&mut self) -> &mut crate::method::Definitions {
-        self.vm.lock().write(&mut self.class_lock);
+        self.begin_class_write();
         // SAFETY: `write` made this heap the one writer, or there is one heap;
         // `&mut self` rules out any other borrow of the tables from it.
         unsafe { self.vm.definitions_mut() }
@@ -1112,9 +1112,17 @@ impl Heap {
     /// has more than one Ractor (#117).
     #[inline]
     pub fn classes_mut(&mut self) -> &mut Classes {
-        self.vm.lock().write(&mut self.class_lock);
+        self.begin_class_write();
         // SAFETY: as `definitions_mut`.
         unsafe { self.vm.classes_mut() }
+    }
+
+    /// Make this heap the class tables' writer, as [`crate::vm::ClassLock::write`]
+    /// does, answering whether it waited for other heaps, which may have
+    /// defined classes meanwhile.
+    #[inline]
+    fn begin_class_write(&mut self) -> bool {
+        self.vm.lock().write(&mut self.class_lock)
     }
 
     /// This heap's shape tree — what an object's instance variables are called
@@ -1766,11 +1774,14 @@ impl<'h> HandleScope<'h> {
     // code runs in a joined heap until `Ractor` does, and #117's runtime
     // half is what copies it, or raises `Ractor::IsolationError`, there.
     #[inline]
-    pub fn shared_to_local(&self, value: Value) -> Value {
-        match value.as_class_ref() {
-            Some(index) => self.class_object(crate::class::ClassId::from_index(index)),
-            None => value,
+    pub fn shared_to_local(&mut self, value: Value) -> Value {
+        let Some(index) = value.as_class_ref() else {
+            return value;
+        };
+        if index as usize >= self.heap.class_objects.len() {
+            self.catch_up_classes();
         }
+        self.class_object(crate::class::ClassId::from_index(index))
     }
 
     /// A value about to go into the class tables, as they hold it: a class
@@ -1779,13 +1790,32 @@ impl<'h> HandleScope<'h> {
     ///
     // ponytail: as `shared_to_local`, a joined heap's own object that is not a
     // class goes in as it is, for #117's runtime half to refuse.
+    ///
+    /// A class object's class is `Class`, `Module`, a metaclass or a subclass
+    /// of `Module`, each of which has `Class` or `Module` for its
+    /// representation, so an object whose class has neither is no class and
+    /// goes in as it is, once its class is remembered.
     #[inline]
     pub fn local_to_shared(&mut self, value: Value) -> Value {
         if value.is_immediate() {
             return value;
         }
+        if let Some(class) = self.remembered_class_of(value)
+            && !is_class_repr(self.classes().repr(class))
+        {
+            return value;
+        }
+        self.local_to_shared_slow(value)
+    }
+
+    #[cold]
+    fn local_to_shared_slow(&mut self, value: Value) -> Value {
         let mut scope = self.nested();
         let handle = scope.root(value);
+        let class = scope.class_of(handle);
+        if !class.is_some_and(|class| is_class_repr(scope.classes().repr(class))) {
+            return value;
+        }
         match scope.class_id_of(handle) {
             Some(id) => Value::class_ref(id.index() as u32),
             None => value,
@@ -1793,32 +1823,32 @@ impl<'h> HandleScope<'h> {
     }
 
     /// [`Classes::deprecated_const`], for a value as this heap sees it.
-    pub fn deprecated_const(&self, name: SymbolId, value: Value) -> Option<crate::class::ClassId> {
-        self.classes()
-            .deprecated_const(name, value, |held| self.shared_to_local(held))
+    pub fn deprecated_const(&mut self, name: SymbolId, value: Value) -> Option<crate::class::ClassId> {
+        let value = self.local_to_shared(value);
+        self.classes().deprecated_const(name, value)
     }
 
     /// [`Classes::const_get`], as this heap sees the value.
-    pub fn const_get(&self, cref: crate::class::CrefId, name: SymbolId) -> Option<Value> {
+    pub fn const_get(&mut self, cref: crate::class::CrefId, name: SymbolId) -> Option<Value> {
         let value = self.classes().const_get(cref, name)?;
         Some(self.shared_to_local(value))
     }
 
     /// [`Classes::const_get_here`], as this heap sees the value.
-    pub fn const_get_here(&self, id: crate::class::ClassId, name: SymbolId) -> Option<Value> {
+    pub fn const_get_here(&mut self, id: crate::class::ClassId, name: SymbolId) -> Option<Value> {
         let value = self.classes().const_get_here(id, name)?;
         Some(self.shared_to_local(value))
     }
 
     /// [`Classes::const_get_qualified`], as this heap sees the value.
-    pub fn const_get_qualified(&self, id: crate::class::ClassId, name: SymbolId) -> Option<Value> {
+    pub fn const_get_qualified(&mut self, id: crate::class::ClassId, name: SymbolId) -> Option<Value> {
         let value = self.classes().const_get_qualified(id, name)?;
         Some(self.shared_to_local(value))
     }
 
     /// [`Classes::const_qualified_owner`], as this heap sees the value.
     pub fn const_qualified_owner(
-        &self,
+        &mut self,
         id: crate::class::ClassId,
         name: SymbolId,
     ) -> Option<(crate::class::ClassId, Value)> {
@@ -1834,7 +1864,7 @@ impl<'h> HandleScope<'h> {
 
     /// [`Classes::cvar_get`], as this heap sees the value.
     pub fn cvar_get(
-        &self,
+        &mut self,
         id: crate::class::ClassId,
         name: SymbolId,
     ) -> Result<Option<Value>, crate::class::ClassId> {
@@ -1851,7 +1881,7 @@ impl<'h> HandleScope<'h> {
     }
 
     /// [`Classes::attached`], as this heap sees the value.
-    pub fn attached(&self, id: crate::class::ClassId) -> Option<Value> {
+    pub fn attached(&mut self, id: crate::class::ClassId) -> Option<Value> {
         Some(self.shared_to_local(self.classes().attached(id)?))
     }
 
@@ -1890,13 +1920,25 @@ impl<'h> HandleScope<'h> {
     #[inline]
     pub(crate) fn class_safe_point(&mut self) {
         self.heap.class_safe_point();
+        self.catch_up_classes();
+    }
+
+    /// Give this heap its object for each class another Ractor's heap defined
+    /// while this one waited for the class lock.
+    #[inline]
+    fn catch_up_classes(&mut self) {
         let classes = self.classes().len();
         if self.heap.class_objects.len() < classes {
             self.materialize_class_objects(classes);
         }
     }
 
+    /// See [`Heap::classes_mut`]. A write that waited for other heaps catches
+    /// up on the classes they defined before it hands out the table.
     pub fn classes_mut(&mut self) -> &mut Classes {
+        if self.heap.begin_class_write() {
+            self.catch_up_classes();
+        }
         self.heap.classes_mut()
     }
 
@@ -2081,7 +2123,11 @@ impl<'h> HandleScope<'h> {
         }
     }
 
+    /// See [`HandleScope::classes_mut`].
     pub fn definitions_mut(&mut self) -> &mut crate::method::Definitions {
+        if self.heap.begin_class_write() {
+            self.catch_up_classes();
+        }
         self.heap.definitions_mut()
     }
 
@@ -3900,4 +3946,13 @@ mod tests {
             assert_eq!(inner.slot(handle, 0), Value::fixnum(i as i64).unwrap());
         }
     }
+}
+
+/// Whether a class with this representation has classes and modules for its
+/// instances: `Class`, `Module`, and everything below them.
+fn is_class_repr(repr: Option<crate::class::Builtin>) -> bool {
+    matches!(
+        repr,
+        Some(crate::class::Builtin::Class | crate::class::Builtin::Module)
+    )
 }

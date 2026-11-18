@@ -180,11 +180,13 @@ impl ClassLock {
     /// Make `me` the writer, unless it is already or the program has one heap.
     /// Called before every write to the tables.
     #[inline]
-    pub(crate) fn write(&self, me: &mut Holder) {
+    /// Whether it waited for the others, which may have written meanwhile.
+    pub(crate) fn write(&self, me: &mut Holder) -> bool {
         if me.writing || !self.shared.load(Ordering::Acquire) {
-            return;
+            return false;
         }
         self.write_slow(me);
+        true
     }
 
     #[cold]

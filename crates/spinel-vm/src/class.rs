@@ -1836,19 +1836,13 @@ impl Classes {
     /// The module whose deprecated `name` a read that found `value` reached,
     /// if it reached one. Matched by the value the read found, which is what
     /// lets every kind of lookup — lexical, qualified, `const_get` — ask the
-    /// same question without each reporting where it stopped.
-    /// `local` is how the reading heap names what the table holds
-    /// ([`HandleScope::shared_to_local`]).
+    /// same question without each reporting where it stopped. `value` is as
+    /// the table holds it ([`HandleScope::local_to_shared`]).
     #[must_use]
-    pub(crate) fn deprecated_const(
-        &self,
-        name: SymbolId,
-        value: Value,
-        local: impl Fn(Value) -> Value,
-    ) -> Option<ClassId> {
+    pub(crate) fn deprecated_const(&self, name: SymbolId, value: Value) -> Option<ClassId> {
         self.deprecated_constants
             .iter()
-            .find(|&&(id, n)| n == name && self.const_get_here(id, name).map(&local) == Some(value))
+            .find(|&&(id, n)| n == name && self.const_get_here(id, name) == Some(value))
             .map(|&(id, _)| id)
     }
 
