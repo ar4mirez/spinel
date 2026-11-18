@@ -353,8 +353,8 @@ pub struct Heap {
     /// library's hidden instance variables on it are its own. A root source.
     class_objects: Vec<Value>,
     /// Whether this heap made [`Heap::vm`] rather than joining it: the main
-    /// Ractor's. The values the tables hold are its objects, so it is the
-    /// heap that traces them.
+    /// Ractor's. The values the tables hold, other than the classes they
+    /// hold by id, are its objects, so it is the heap that traces them.
     owns_vm: bool,
     /// This heap's part of the class lock: whether it is writing now.
     class_lock: crate::vm::Holder,
@@ -765,7 +765,8 @@ impl Heap {
     /// holds the class lock from here on, as a running one does, so it is to
     /// be run or released (`Heap::release_classes`) without delay.
     pub fn new_ractor(&mut self) -> Heap {
-        self.vm.lock().join();
+        self.class_safe_point();
+        self.vm.lock().join(&self.class_lock);
         let mut heap = Heap::with_vm(Arc::clone(&self.vm), false);
         heap.budget = self.budget;
         let classes = heap.classes().len();
@@ -886,9 +887,6 @@ impl Heap {
             "class objects are made in id order"
         );
         self.class_objects.push(object);
-        if self.owns_vm {
-            self.classes_mut().set_canonical(id, object);
-        }
     }
 
     /// A safe point for the class lock: this heap holds no borrow of the
@@ -1336,8 +1334,9 @@ impl Heap {
         // so that this is two disjoint field borrows and not a table moved out
         // and put back — a walk that panicked halfway through the second shape
         // would leave the heap with no classes at all.
-        // Each heap traces its own class objects; the values the shared
-        // tables hold are the main Ractor's, and only its heap traces them.
+        // Each heap traces its own class objects. The tables hold a class by
+        // id, which `shade` passes over; the other values they hold are the
+        // main Ractor's, and only its heap traces them.
         for i in 0..self.class_objects.len() {
             Heap::shade(&mut self.mark_stack, self.class_objects[i]);
         }
@@ -1759,9 +1758,8 @@ impl<'h> HandleScope<'h> {
     }
 
     /// A value the class tables hold, as this heap sees it (#117). The
-    /// tables hold the main Ractor's values, so in its heap this is the value
-    /// itself; in a heap that joined the program a class is this heap's own
-    /// object for it.
+    /// tables hold a class by id ([`Value::class_ref`]), and this is this
+    /// heap's own object for it; any other value is itself.
     ///
     // ponytail: a value that is neither a class nor an immediate is the
     // main heap's object, and a joined heap is given it as it is. No Ruby
@@ -1769,41 +1767,35 @@ impl<'h> HandleScope<'h> {
     // half is what copies it, or raises `Ractor::IsolationError`, there.
     #[inline]
     pub fn shared_to_local(&self, value: Value) -> Value {
-        if self.heap.owns_vm || value.as_heap().is_none() {
-            return value;
-        }
-        self.shared_to_local_slow(value)
-    }
-
-    #[cold]
-    fn shared_to_local_slow(&self, value: Value) -> Value {
-        match self.classes().canonical_id(value) {
-            Some(id) => self.class_object(id),
+        match value.as_class_ref() {
+            Some(index) => self.class_object(crate::class::ClassId::from_index(index)),
             None => value,
         }
     }
 
-    /// A value about to go into the class tables, as the main Ractor's heap
-    /// names it: the inverse of [`HandleScope::shared_to_local`].
+    /// A value about to go into the class tables, as they hold it: a class
+    /// by id, anything else as it is. The inverse of
+    /// [`HandleScope::shared_to_local`].
     ///
     // ponytail: as `shared_to_local`, a joined heap's own object that is not a
     // class goes in as it is, for #117's runtime half to refuse.
     #[inline]
     pub fn local_to_shared(&mut self, value: Value) -> Value {
-        if self.heap.owns_vm || value.as_heap().is_none() {
+        if value.is_immediate() {
             return value;
         }
-        self.local_to_shared_slow(value)
-    }
-
-    #[cold]
-    fn local_to_shared_slow(&mut self, value: Value) -> Value {
         let mut scope = self.nested();
         let handle = scope.root(value);
         match scope.class_id_of(handle) {
-            Some(id) => scope.classes().canonical_object(id),
+            Some(id) => Value::class_ref(id.index() as u32),
             None => value,
         }
+    }
+
+    /// [`Classes::deprecated_const`], for a value as this heap sees it.
+    pub fn deprecated_const(&self, name: SymbolId, value: Value) -> Option<crate::class::ClassId> {
+        self.classes()
+            .deprecated_const(name, value, |held| self.shared_to_local(held))
     }
 
     /// [`Classes::const_get`], as this heap sees the value.

@@ -1690,7 +1690,7 @@ fn reflect_native(
                 let found = scope
                     .const_get_here(module, name)
                     .or_else(|| scope.const_get_qualified(module, name));
-                match found.and_then(|value| scope.classes().deprecated_const(name, value)) {
+                match found.and_then(|value| scope.deprecated_const(name, value)) {
                     Some(holder) => scope.class_object(holder),
                     None => Value::NIL,
                 }
@@ -4251,7 +4251,7 @@ fn run<'h>(
                         // a program called it, so a read costs one length check.
                         // A deprecated constant warns at every read, so only
                         // the others are cached.
-                        let deprecated = scope.classes().deprecated_const(symbol, value);
+                        let deprecated = scope.deprecated_const(symbol, value);
                         if deprecated.is_none() && !autoloads {
                             scope.call_caches_mut().fill_constant(
                                 slot,

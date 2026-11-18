@@ -625,7 +625,8 @@ struct Entry {
     instance_of: Option<ClassId>,
     is_singleton: bool,
     /// For a singleton class, the object it belongs to (#28):
-    /// `singleton_method_added` is sent to it. Traced with the table.
+    /// `singleton_method_added` is sent to it. Traced with the table; a class
+    /// is held by id ([`Value::class_ref`]), as every value the table holds.
     attached: Option<Value>,
     /// The representation instances of this class have, where it is not the
     /// plain object shape.
@@ -720,15 +721,6 @@ pub struct Classes {
     /// rather than per name, since a program that defines constants as it
     /// runs is rare and one that reads them in a loop is not.
     const_epoch: u64,
-    /// The main Ractor's object for each class, by id, and the id of each by
-    /// its address (#117). The values the table holds are the main heap's,
-    /// a class among them; a heap that joined the program reads one through
-    /// these to find its own object for the same class
-    /// ([`HandleScope::shared_to_local`]), and writes its own back as the main
-    /// heap's ([`HandleScope::local_to_shared`]). Not a root source: the main heap
-    /// traces its class objects itself.
-    canonical: Vec<Value>,
-    canonical_ids: HashMap<usize, ClassId>,
     /// The methods CRuby's interpreter and JIT optimise, with the body each
     /// class owned when the core library finished loading (#320). A program
     /// that changes one while it is still that body has disabled an
@@ -856,28 +848,6 @@ impl Classes {
     /// An empty table. [`HandleScope::bootstrap`] is what fills it.
     pub fn new() -> Classes {
         Classes::default()
-    }
-
-    /// Record the main Ractor's object for class `id`. Its heap calls this as
-    /// it makes each class's object, in id order.
-    pub(crate) fn set_canonical(&mut self, id: ClassId, object: Value) {
-        debug_assert_eq!(id.index(), self.canonical.len());
-        self.canonical.push(object);
-        if let Some(address) = object.as_heap() {
-            self.canonical_ids.insert(address.as_ptr() as usize, id);
-        }
-    }
-
-    /// The main Ractor's object for class `id`: what the table's values name
-    /// it by.
-    pub(crate) fn canonical_object(&self, id: ClassId) -> Value {
-        self.canonical[id.index()]
-    }
-
-    /// The class `value` is the main Ractor's object for, if it is one.
-    pub(crate) fn canonical_id(&self, value: Value) -> Option<ClassId> {
-        let address = value.as_heap()?.as_ptr() as usize;
-        self.canonical_ids.get(&address).copied()
     }
 
     /// See the field: what a `GetConst` cache entry is checked against.
@@ -1191,7 +1161,7 @@ impl Classes {
 
     /// The object a singleton class belongs to; `None` for any other class.
     #[must_use]
-    pub fn attached(&self, id: ClassId) -> Option<Value> {
+    pub(crate) fn attached(&self, id: ClassId) -> Option<Value> {
         self.entry(id).attached
     }
 
@@ -1457,7 +1427,7 @@ impl Classes {
     ///
     /// The `Ok` case answers the nearest, which is why the ordinary
     /// write-through-to-the-ancestor rule can never produce two.
-    pub fn cvar_get(&self, id: ClassId, name: SymbolId) -> Result<Option<Value>, ClassId> {
+    pub(crate) fn cvar_get(&self, id: ClassId, name: SymbolId) -> Result<Option<Value>, ClassId> {
         let mut found: Option<ClassId> = None;
         for owner in self.ancestors(id) {
             if self.entry(owner).class_variables.contains_key(&name) {
@@ -1480,7 +1450,7 @@ impl Classes {
     /// class B < A; def w; @@a = 2; end; end
     /// B.new.w; [A.new.r, B.new.r]   #=> [2, 2]
     /// ```
-    pub fn cvar_set(&mut self, id: ClassId, name: SymbolId, value: Value) {
+    pub(crate) fn cvar_set(&mut self, id: ClassId, name: SymbolId, value: Value) {
         let owner = self.cvar_owner(id, name).unwrap_or(id);
         let entry = self.entry_mut(owner);
         if entry.class_variables.insert(name, value).is_none() {
@@ -1490,7 +1460,7 @@ impl Classes {
 
     /// `Module#remove_class_variable`: take `@@a` out of this module's own
     /// table, answering what it held. An ancestor's is not this one's to take.
-    pub fn cvar_remove(&mut self, id: ClassId, name: SymbolId) -> Option<Value> {
+    pub(crate) fn cvar_remove(&mut self, id: ClassId, name: SymbolId) -> Option<Value> {
         let entry = self.entry_mut(id);
         let value = entry.class_variables.remove(&name)?;
         entry.cvar_order.retain(|&n| n != name);
@@ -1727,7 +1697,7 @@ impl Classes {
     /// scope. The building block the three lookup rules are written from, and
     /// what `class C` itself checks when deciding to reopen or to create.
     #[must_use]
-    pub fn const_get_here(&self, id: ClassId, name: SymbolId) -> Option<Value> {
+    pub(crate) fn const_get_here(&self, id: ClassId, name: SymbolId) -> Option<Value> {
         self.entry(id).constants.get(&name).copied()
     }
 
@@ -1735,7 +1705,7 @@ impl Classes {
     ///
     /// Reassignment is the caller's to warn about: `Insn::SetConst` and
     /// `Module#const_set` both ask [`Classes::const_get_here`] first (#268).
-    pub fn const_set(&mut self, id: ClassId, name: SymbolId, value: Value) {
+    pub(crate) fn const_set(&mut self, id: ClassId, name: SymbolId, value: Value) {
         self.constants_moved();
         let entry = self.entry_mut(id);
         entry.constant_locations.remove(&name);
@@ -1747,7 +1717,7 @@ impl Classes {
     /// [`Classes::const_set`], remembering where the program assigned it.
     /// `None` is an assignment with no place in the program, as one made by
     /// the core library is.
-    pub fn const_set_at(
+    pub(crate) fn const_set_at(
         &mut self,
         id: ClassId,
         name: SymbolId,
@@ -1867,11 +1837,18 @@ impl Classes {
     /// if it reached one. Matched by the value the read found, which is what
     /// lets every kind of lookup — lexical, qualified, `const_get` — ask the
     /// same question without each reporting where it stopped.
+    /// `local` is how the reading heap names what the table holds
+    /// ([`HandleScope::shared_to_local`]).
     #[must_use]
-    pub fn deprecated_const(&self, name: SymbolId, value: Value) -> Option<ClassId> {
+    pub(crate) fn deprecated_const(
+        &self,
+        name: SymbolId,
+        value: Value,
+        local: impl Fn(Value) -> Value,
+    ) -> Option<ClassId> {
         self.deprecated_constants
             .iter()
-            .find(|&&(id, n)| n == name && self.const_get_here(id, name) == Some(value))
+            .find(|&&(id, n)| n == name && self.const_get_here(id, name).map(&local) == Some(value))
             .map(|&(id, _)| id)
     }
 
@@ -1904,7 +1881,7 @@ impl Classes {
 
     /// `Module#remove_const`: take one of this module's own constants away,
     /// answering its value.
-    pub fn const_remove(&mut self, id: ClassId, name: SymbolId) -> Option<Value> {
+    pub(crate) fn const_remove(&mut self, id: ClassId, name: SymbolId) -> Option<Value> {
         self.constants_moved();
         self.deprecated_constants
             .retain(|&(i, n)| (i, n) != (id, name));
@@ -1962,7 +1939,7 @@ impl Classes {
     /// Object::TOP  # 1      — unless Object is the receiver
     /// ```
     #[must_use]
-    pub fn const_get_qualified(&self, id: ClassId, name: SymbolId) -> Option<Value> {
+    pub(crate) fn const_get_qualified(&self, id: ClassId, name: SymbolId) -> Option<Value> {
         let (owner, value) = self.const_qualified_owner(id, name)?;
         // `private_constant` hides it from every qualified reference, which is
         // this walk and nothing else: the lexical one in `const_get` *is* the
@@ -2009,7 +1986,7 @@ impl Classes {
     /// skipping `Object` unless `A` *is* `Object`. Ruby 2.5's change is
     /// narrower than "no fallback": `Object` alone is skipped, while `Kernel`
     /// and `BasicObject` are searched like any other ancestor.
-    pub fn const_qualified_owner(&self, id: ClassId, name: SymbolId) -> Option<(ClassId, Value)> {
+    pub(crate) fn const_qualified_owner(&self, id: ClassId, name: SymbolId) -> Option<(ClassId, Value)> {
         let object = Builtin::Object.id();
         let skip_object = id != object;
         self.ancestors(id)
@@ -2032,7 +2009,7 @@ impl Classes {
     /// chain", but not inside `BasicObject` or below it, where the chain never
     /// reaches `Object` and the fallback still must not fire (#185).
     #[must_use]
-    pub fn const_get(&self, cref: CrefId, name: SymbolId) -> Option<Value> {
+    pub(crate) fn const_get(&self, cref: CrefId, name: SymbolId) -> Option<Value> {
         let mut scope = Some(cref);
         while let Some(c) = scope {
             let node = self.cref(c);
@@ -2868,9 +2845,10 @@ impl Classes {
         id
     }
 
-    /// Every `Value` the table keeps alive: each singleton class's object,
-    /// every method body, constant and class variable. The main Ractor's
-    /// heap traces them; each heap traces its own class objects (#117). The
+    /// Every `Value` the table keeps alive: each singleton class's attached
+    /// object, every method body, constant and class variable. The main
+    /// Ractor's heap traces them; a class among them is held by id, which is
+    /// no heap's pointer, and each heap traces its own class objects (#117). The
     /// collector calls this; see `Heap::mark`.
     ///
     // ponytail: linear in the number of methods defined, on every collection,
@@ -2978,8 +2956,7 @@ impl<'h> HandleScope<'h> {
         for builtin in Builtin::ALL {
             let name = crate::shared::symbols::intern(builtin.name());
             let object = self.class_object(builtin.id());
-            self.classes_mut()
-                .const_set(Builtin::Object.id(), name, object);
+            self.const_set(Builtin::Object.id(), name, object);
         }
 
         // The exception hierarchy, below the `Exception` the loop above just
@@ -2989,7 +2966,6 @@ impl<'h> HandleScope<'h> {
         // table, so one pass never has to look ahead.
         for (name, superclass) in exception_hierarchy() {
             let superclass = self
-                .classes()
                 .const_get_here(
                     Builtin::Object.id(),
                     crate::shared::symbols::intern(superclass),
@@ -3004,8 +2980,7 @@ impl<'h> HandleScope<'h> {
             let id = self.define_class(Some(name), Some(superclass));
             let symbol = crate::shared::symbols::intern(name);
             let object = self.class_object(id);
-            self.classes_mut()
-                .const_set(Builtin::Object.id(), symbol, object);
+            self.const_set(Builtin::Object.id(), symbol, object);
         }
         self.bootstrap_errno();
 
@@ -3026,13 +3001,12 @@ impl<'h> HandleScope<'h> {
         let object = Builtin::Object.id();
         let errno_module = self.define_module(Some("Errno"));
         let module_object = self.class_object(errno_module);
-        self.classes_mut().const_set(
+        self.const_set(
             object,
             crate::shared::symbols::intern("Errno"),
             module_object,
         );
         let system_call_error = self
-            .classes()
             .const_get_here(object, crate::shared::symbols::intern("SystemCallError"))
             .and_then(|value| {
                 let handle = self.root(value);
@@ -3056,8 +3030,7 @@ impl<'h> HandleScope<'h> {
                     class
                 }
             };
-            self.classes_mut()
-                .const_set(errno_module, crate::shared::symbols::intern(name), class);
+            self.const_set(errno_module, crate::shared::symbols::intern(name), class);
         }
     }
 
@@ -3193,8 +3166,7 @@ impl<'h> HandleScope<'h> {
             .map(|name| format!("#<Class:{name}>"));
         let singleton = self.define(name.as_deref(), Kind::Class, superclass, true);
         self.classes_mut().entry_mut(id).singleton = Some(singleton);
-        let owner = self.class_object(id);
-        self.classes_mut().entry_mut(singleton).attached = Some(owner);
+        self.classes_mut().entry_mut(singleton).attached = Some(Value::class_ref(id.0));
         // The same header write `singleton_class_of` makes for an ordinary
         // object, and for the same reason: dispatch reads the header, so a
         // metaclass the table knows about and the header does not is a
@@ -3241,6 +3213,7 @@ impl<'h> HandleScope<'h> {
         // Anonymous: naming it needs `inspect` on the object it belongs to.
         let singleton = self.define(None, Kind::Class, Some(class), true);
         let owner = self.get(handle);
+        let owner = self.local_to_shared(owner);
         self.classes_mut().entry_mut(singleton).attached = Some(owner);
         let object = self.class_object(singleton);
         self.set_class(handle, object);
@@ -3655,7 +3628,6 @@ mod tests {
         scope.collect();
 
         let found = scope
-            .classes()
             .const_get_here(c, name)
             .expect("the constant survived");
         let handle = scope.root(found);

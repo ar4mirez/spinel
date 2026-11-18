@@ -167,11 +167,12 @@ impl ClassLock {
     }
 
     /// A new heap joins the program, holding the lock. Its creator holds the
-    /// lock while it calls this, so no writer is active: the new heap starts
-    /// as a reader among readers.
-    pub(crate) fn join(&self) {
+    /// lock to read while it calls this, and is not writing, so no writer is
+    /// active: the new heap starts as a reader among readers.
+    pub(crate) fn join(&self, creator: &Holder) {
+        assert!(!creator.writing, "a heap joins the program between writes");
         let mut state = self.state();
-        debug_assert!(!state.writing || state.holding == 0);
+        debug_assert!(!state.writing && state.holding > 0);
         state.holding += 1;
         self.shared.store(true, Ordering::Release);
     }
@@ -284,8 +285,9 @@ mod tests {
     fn a_writer_is_alone_and_readers_never_see_half_a_write() {
         let lock = Arc::new(ClassLock::new());
         // The creator joins the others in; each joiner holds from the start.
-        lock.join();
-        lock.join();
+        let creator = Holder::default();
+        lock.join(&creator);
+        lock.join(&creator);
         let halves = Arc::new([AtomicU64::new(0), AtomicU64::new(0)]);
         let readers: Vec<_> = (0..2)
             .map(|_| {

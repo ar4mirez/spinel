@@ -111,3 +111,56 @@ fn a_joined_heap_calls_what_the_main_heap_defines_while_it_defines_more() {
     let probe = compile("1.class.instance_variable_get(:@__probe__)");
     assert_eq!(eval(&mut main, &probe), ":main");
 }
+
+/// A class a joined heap defines, held by the shared tables in a constant, a
+/// class variable and a singleton's object, is each heap's own object for
+/// that class when either reads it back.
+#[test]
+fn a_class_a_joined_heap_defines_is_each_heaps_own() {
+    let mut main = Heap::new();
+    {
+        let mut scope = main.scope();
+        scope.bootstrap();
+        spinel_core::boot(&mut scope);
+    }
+    let child = Moved(main.new_ractor());
+    main.release_classes();
+
+    let define = compile(
+        "class Foo
+           @@held = Foo
+           def self.held = @@held
+         end
+         Bar = Foo
+         Baz = Class.new
+         [Foo.new.class == Foo, Bar.equal?(Foo), Foo.held.equal?(Foo), Baz.new.class == Baz]",
+    );
+    let worker = std::thread::spawn(move || {
+        let mut child = child;
+        let answer = eval(&mut child.0, &define);
+        child.0.release_classes();
+        (child, answer)
+    });
+    let (mut child, answer) = worker.join().expect("the joined heap's thread finishes");
+    assert_eq!(answer, "[true, true, true, true]", "in the joined heap");
+
+    main.reacquire_classes();
+    let read = compile(
+        "class Foo
+           def self.singleton_method_added(name) = ($added = name)
+         end
+         def Foo.later = 1
+         [Foo.new.class == Foo, Bar.equal?(Foo), Foo.held.equal?(Foo), Baz.new.class == Baz, $added]",
+    );
+    assert_eq!(
+        eval(&mut main, &read),
+        "[true, true, true, true, :later]",
+        "in the main heap, `Foo`'s metaclass, made by the joined heap, is attached to its own `Foo`",
+    );
+    main.release_classes();
+
+    child.0.reacquire_classes();
+    let again = compile("[Foo.held.equal?(Foo), Foo.later, $added]");
+    assert_eq!(eval(&mut child.0, &again), "[true, 1, nil]");
+    child.0.release_classes();
+}
