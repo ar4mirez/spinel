@@ -61,10 +61,16 @@
 # Rust (`spinel-vm/src/psych.rs`), and `psych.rb` is patched to load it (see
 # `patch_psych`). `psych_jars.rb`, JRuby's SnakeYAML jars, is left out.
 #
+# `bigdecimal` (#109) is a bundled gem like fiddle: its Ruby half comes from
+# the packaged gem at the release Ruby 4.0 bundles, and its C half is
+# Spinel's `lib/bigdecimal/spinel.rb`, embedded, which `bigdecimal.rb` is
+# patched to load (see `patch_bigdecimal`).
+#
 # To bump: edit RUBY_TAG, WEBRICK_TAG, JSON_TAG, IO_CONSOLE_TAG, OPENSSL_TAG,
 # PSYCH_TAG, PRISM_VERSION (with PRISM_SHA256, and the ruby-prism crate in
-# `crates/spinel-parse/Cargo.toml` to the same release) or FIDDLE_VERSION
-# (with FIDDLE_SHA256), run this script, commit `stdlib/` in its own commit.
+# `crates/spinel-parse/Cargo.toml` to the same release), FIDDLE_VERSION
+# (with FIDDLE_SHA256) or BIGDECIMAL_VERSION (with BIGDECIMAL_SHA256), run
+# this script, commit `stdlib/` in its own commit.
 
 set -euo pipefail
 
@@ -102,6 +108,12 @@ PRISM_URL="https://rubygems.org/downloads/prism-$PRISM_VERSION.gem"
 FIDDLE_VERSION="1.1.8"
 FIDDLE_SHA256="7fa8ee3627271497f3add5503acdbc3f40b32f610fc1cf49634f083ef3f32eee"
 FIDDLE_URL="https://rubygems.org/downloads/fiddle-$FIDDLE_VERSION.gem"
+
+# The bigdecimal Ruby 4.0 bundles (gems/bundled_gems at RUBY_TAG), and the
+# package's SHA-256 as rubygems.org publishes it.
+BIGDECIMAL_VERSION="4.0.1"
+BIGDECIMAL_SHA256="8b07d3d065a9f921c80ceaea7c9d4ae596697295b584c296fe599dd0ad01c4a7"
+BIGDECIMAL_URL="https://rubygems.org/downloads/bigdecimal-$BIGDECIMAL_VERSION.gem"
 
 # Bundler's executable, copied to `stdlib/libexec/`.
 LIBEXEC_FILES=(bundle)
@@ -293,6 +305,22 @@ patch_fiddle() {
 }
 patch_fiddle "$work/fiddle/lib"
 
+# bigdecimal is under Ruby's license or the 2-clause BSDL, in one file.
+BIGDECIMAL_LICENSES=(LICENSE)
+echo "fetching bigdecimal $BIGDECIMAL_VERSION from rubygems.org"
+fetch_package bigdecimal "$BIGDECIMAL_URL" "$BIGDECIMAL_SHA256"
+tar -xf "$work/bigdecimal-gem/bigdecimal.gem" -C "$work/bigdecimal-gem" data.tar.gz
+tar -xzf "$work/bigdecimal-gem/data.tar.gz" -C "$work/bigdecimal" lib "${BIGDECIMAL_LICENSES[@]}"
+
+# `bigdecimal.rb` requires `bigdecimal.so`, the C half, on every engine but
+# JRuby. On Spinel the C half is `bigdecimal/spinel`, embedded.
+patch_bigdecimal() {
+  patch_line "$1" \
+    "  require 'bigdecimal.so'" \
+    "  require RUBY_ENGINE == 'spinel' ? 'bigdecimal/spinel' : 'bigdecimal.so'"
+}
+patch_bigdecimal "$work/bigdecimal/lib/bigdecimal.rb"
+
 # `openssl.rb` requires `openssl.so`, the whole C half, and then the Ruby
 # half of every part of it. Spinel's C half is `openssl/spinel`, embedded,
 # and has the parts of one phase at a time (#106 has digests, HMAC and
@@ -372,6 +400,7 @@ lay_over psych "${PSYCH_LICENSES[@]}"
 rm -rf "$staged/prism.rb" "$staged/prism"
 lay_over prism "${PRISM_LICENSES[@]}"
 lay_over fiddle "${FIDDLE_LICENSES[@]}"
+lay_over bigdecimal "${BIGDECIMAL_LICENSES[@]}"
 cat > "$staged/UPSTREAM" <<EOF
 Ruby's pure-Ruby standard library, vendored verbatim.
 
@@ -409,6 +438,11 @@ the FFI backend, is left out. Two files are patched: fiddle.rb takes CRuby's
 branches when RUBY_ENGINE is "spinel", requiring fiddle/spinel in place of
 fiddle.so, and fiddle/cparser.rb reads an array member's count before it
 calls parse_ctype, since Spinel's $~ is not yet frame-local.
+
+Also laid over it, the bundled gem bigdecimal's lib/, from the packaged gem
+at the release Ruby bundles. Its C half is Spinel's lib/bigdecimal/spinel.rb,
+embedded in the binary. One file is patched: bigdecimal.rb requires
+bigdecimal/spinel in place of bigdecimal.so when RUBY_ENGINE is "spinel".
 
 In place of Ruby's own prism.rb and prism/, the prism gem's lib/ at the
 release of the Prism library Spinel parses with, which is the C half its
@@ -452,14 +486,18 @@ FFI backend, which is left out.
     files     fiddle.rb (patched), fiddle/ (cparser.rb patched; not
               fiddle/ffi_backend.rb, the FFI backend)
 
+    upstream  $BIGDECIMAL_URL
+    sha256    $BIGDECIMAL_SHA256
+    files     bigdecimal.rb (patched), bigdecimal/
+
 Licenses are upstream's, in LICENSE/. LEGAL records the per-file terms for the
 files here from ruby/ruby that are not under Ruby's own license; each gem's own
 are in LICENSE/<gem>/.
 
 Do not edit anything under stdlib/ by hand. CI diffs this tree against the tags
 above and fails on any difference. To update, edit RUBY_TAG, WEBRICK_TAG,
-JSON_TAG, IO_CONSOLE_TAG, OPENSSL_TAG, PSYCH_TAG, PRISM_VERSION or
-FIDDLE_VERSION in scripts/vendor-stdlib.sh and run it.
+JSON_TAG, IO_CONSOLE_TAG, OPENSSL_TAG, PSYCH_TAG, PRISM_VERSION,
+FIDDLE_VERSION or BIGDECIMAL_VERSION in scripts/vendor-stdlib.sh and run it.
 EOF
 
 if $check_only; then
@@ -469,9 +507,9 @@ if $check_only; then
   # place to add one, with the reason next to it.
   if diff -r -q "$staged" "$stdlib"; then
     files="$(find "$stdlib" -name '*.rb' | wc -l | tr -d ' ')"
-    echo "stdlib/ matches ruby/ruby $RUBY_TAG, ruby/webrick $WEBRICK_TAG, ruby/json $JSON_TAG, ruby/io-console $IO_CONSOLE_TAG, ruby/openssl $OPENSSL_TAG, ruby/psych $PSYCH_TAG, prism $PRISM_VERSION and fiddle $FIDDLE_VERSION ($files .rb files)"
+    echo "stdlib/ matches ruby/ruby $RUBY_TAG, ruby/webrick $WEBRICK_TAG, ruby/json $JSON_TAG, ruby/io-console $IO_CONSOLE_TAG, ruby/openssl $OPENSSL_TAG, ruby/psych $PSYCH_TAG, prism $PRISM_VERSION, fiddle $FIDDLE_VERSION and bigdecimal $BIGDECIMAL_VERSION ($files .rb files)"
   else
-    echo "::error::stdlib/ has drifted from ruby/ruby $RUBY_TAG ($sha), ruby/webrick $WEBRICK_TAG, ruby/json $JSON_TAG, ruby/io-console $IO_CONSOLE_TAG, ruby/openssl $OPENSSL_TAG, ruby/psych $PSYCH_TAG, prism $PRISM_VERSION or fiddle $FIDDLE_VERSION" >&2
+    echo "::error::stdlib/ has drifted from ruby/ruby $RUBY_TAG ($sha), ruby/webrick $WEBRICK_TAG, ruby/json $JSON_TAG, ruby/io-console $IO_CONSOLE_TAG, ruby/openssl $OPENSSL_TAG, ruby/psych $PSYCH_TAG, prism $PRISM_VERSION, fiddle $FIDDLE_VERSION or bigdecimal $BIGDECIMAL_VERSION" >&2
     echo "run scripts/vendor-stdlib.sh and commit the result" >&2
     exit 1
   fi
@@ -479,5 +517,5 @@ else
   rm -rf "$stdlib"
   mv "$staged" "$stdlib"
   files="$(find "$stdlib" -name '*.rb' | wc -l | tr -d ' ')"
-  echo "vendored ruby/ruby $RUBY_TAG, ruby/webrick $WEBRICK_TAG, ruby/json $JSON_TAG, ruby/io-console $IO_CONSOLE_TAG, ruby/openssl $OPENSSL_TAG, ruby/psych $PSYCH_TAG, prism $PRISM_VERSION and fiddle $FIDDLE_VERSION into stdlib/ ($files .rb files)"
+  echo "vendored ruby/ruby $RUBY_TAG, ruby/webrick $WEBRICK_TAG, ruby/json $JSON_TAG, ruby/io-console $IO_CONSOLE_TAG, ruby/openssl $OPENSSL_TAG, ruby/psych $PSYCH_TAG, prism $PRISM_VERSION, fiddle $FIDDLE_VERSION and bigdecimal $BIGDECIMAL_VERSION into stdlib/ ($files .rb files)"
 fi
