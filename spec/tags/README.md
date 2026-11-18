@@ -87,7 +87,12 @@ fix is a different slice. The reason says which slice, by number.
 
 ## What is here now
 
-A hundred and fourteen tags across sixty-five files. The `format` engine's
+A hundred and fourteen tags across sixty-five files. Keeping the state of
+`IO`, `File` and the socket classes in hidden instance variables, as CRuby
+keeps it in the object's struct, removed one, and its file:
+`library/yaml/dump`'s "dumps a File without any state", which psych (#108)
+added, and which passes now that a `File` has no instance variables for
+Psych to dump. Before it, a hundred and fifteen across sixty-six. The `format` engine's
 `%a`, `%A` and `%c` (#798) removed ten, and their file: all of
 `core/string/modulo`'s, the `String#%` examples tagged under #19, which
 pass now that `String#%` asks `to_ary` as `rb_check_array_type` does, `%d`

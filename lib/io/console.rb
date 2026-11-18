@@ -130,7 +130,7 @@ class IO
 
   # `sys_fail`: the errno, with the IO's path when it has one.
   def __console_fail__(errno)
-    raise SystemCallError.new(@path, errno)
+    raise SystemCallError.new(@__path__, errno)
   end
 
   # `GetWriteFD`: the descriptor writes go to, the IO checked open.
@@ -502,8 +502,8 @@ class IO
   # `FMODE_DUPLEX`, since it skips `io_check_tty`, so the first write after a
   # read ahead discards what was read, as `rb_io_check_writable` does.
   def __console_device__
-    @sync = true
-    @duplex = nil
+    @__sync__ = true
+    @__duplex__ = nil
   end
 
   # `IO::generic_readable`, which `stringio` includes: `getc` and `gets` for

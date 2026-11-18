@@ -1,0 +1,9 @@
+file: []
+pipe reader: []
+pipe writer: []
+stdout: []
+stat: []
+--- !ruby/object:File {}
+through the pipe
+# What reflection sees of an IO, a File and a File::Stat: nothing, as on
+state.rb
