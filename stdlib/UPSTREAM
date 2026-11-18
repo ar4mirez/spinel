@@ -21,6 +21,12 @@ RUBY_ENGINE is "spinel", and requires the Ruby half of BN, Cipher, PKCS5,
 PKey, SSL and X509 only when the C half defined the class it reopens
 (OpenSSL::KDF for PKCS5), which on CRuby it always has.
 
+Also laid over it, the default gem psych's lib/, which ruby/ruby keeps in
+ext/psych/lib. Its C half is Spinel's lib/psych/spinel.rb, embedded in the
+binary, over libyaml 0.2.5 in Rust; psych_jars.rb, JRuby's, is left out. One
+file is patched: psych.rb requires psych/spinel in place of psych.so when
+RUBY_ENGINE is "spinel".
+
 Also laid over it, the bundled gem fiddle's lib/, from the packaged gem at
 the release Ruby bundles. Its C half is Spinel's lib/fiddle/spinel.rb, over
 Spinel::FFI (lib/spinel/ffi.rb), embedded in the binary; fiddle/ffi_backend.rb,
@@ -57,6 +63,11 @@ FFI backend, which is left out.
     commit    6e410b804f4c6a52c146fe651941bafdbb332754
     files     openssl.rb (patched), openssl/
 
+    upstream  https://github.com/ruby/psych.git
+    tag       v5.3.1
+    commit    8345af9ffbac73aa53a9513efa222c5fa267cc48
+    files     psych.rb (patched), psych/ (not psych_jars.rb, JRuby's)
+
     upstream  https://rubygems.org/downloads/prism-1.9.0.gem
     sha256    7b530c6a9f92c24300014919c9dcbc055bf4cdf51ec30aed099b06cd6674ef85
     files     prism.rb (patched), prism/ (not prism/ffi.rb, the FFI backend)
@@ -72,5 +83,5 @@ are in LICENSE/<gem>/.
 
 Do not edit anything under stdlib/ by hand. CI diffs this tree against the tags
 above and fails on any difference. To update, edit RUBY_TAG, WEBRICK_TAG,
-JSON_TAG, IO_CONSOLE_TAG, OPENSSL_TAG, PRISM_VERSION or FIDDLE_VERSION in
-scripts/vendor-stdlib.sh and run it.
+JSON_TAG, IO_CONSOLE_TAG, OPENSSL_TAG, PSYCH_TAG, PRISM_VERSION or
+FIDDLE_VERSION in scripts/vendor-stdlib.sh and run it.
