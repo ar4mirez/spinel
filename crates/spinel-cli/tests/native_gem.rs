@@ -322,3 +322,49 @@ p $LOADED_FEATURES.grep(/\.spinel\z/)
     assert!(stderr.contains("ABI 0"), "{stderr}");
     assert!(stderr.contains("(LoadError)"), "{stderr}");
 }
+
+#[test]
+fn an_extensions_definitions_run_their_hooks_and_a_rerequire_runs_its_init_again() {
+    let sandbox = Sandbox::new("hooks");
+    fs::create_dir_all(sandbox.project().join("lib/native_gem")).expect("lib/ is made");
+    fs::copy(
+        native_gem_library(),
+        sandbox.project().join("lib/native_gem/native_gem.spinel"),
+    )
+    .expect("the extension is copied");
+    // A Ruby-defined superclass hook and a Ruby-defined `const_added` on the
+    // module the extension reopens, recording in the order CRuby fires them.
+    let program = r#"
+$log = []
+class StandardError
+  def self.inherited(subclass)
+    $log << [:inherited, self, subclass]
+    super
+  end
+end
+module NativeGem
+  def self.const_added(name)
+    $log << [:const_added, name]
+    super
+  end
+end
+p require("native_gem/native_gem")
+p $log
+p NativeGem::Error.superclass
+$log.clear
+$LOADED_FEATURES.reject! { |f| f.end_with?("native_gem.spinel") }
+p require("native_gem/native_gem")
+p $log
+p NativeGem.reverse("ab")
+"#;
+    let out = sandbox.spinel(&["run", "-I", "lib", "-e", program]);
+    assert_eq!(
+        ok(&out, "spinel run"),
+        "true\n\
+         [[:const_added, :Error], [:inherited, StandardError, NativeGem::Error], [:const_added, :Words]]\n\
+         StandardError\n\
+         true\n\
+         []\n\
+         \"ba\"\n"
+    );
+}
