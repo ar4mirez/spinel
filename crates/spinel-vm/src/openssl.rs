@@ -44,7 +44,6 @@ unsafe extern "C" {
     fn RAND_seed(buf: *const c_void, num: c_int);
     fn RAND_load_file(name: *const c_char, max: c_long) -> c_int;
     fn RAND_write_file(name: *const c_char) -> c_int;
-    fn ERR_error_string_n(code: std::ffi::c_ulong, buf: *mut c_char, len: usize);
     #[cfg(ossl_ctx_size_ex)]
     fn EVP_MD_CTX_get_size_ex(ctx: *const sys::EVP_MD_CTX) -> c_int;
 }
@@ -89,8 +88,6 @@ const EVP_MAX_MD_SIZE: usize = 64;
 /// class by [`Class::code`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Class {
-    /// `OpenSSL::OpenSSLError`.
-    OpenSsl,
     /// `OpenSSL::Digest::DigestError`.
     Digest,
     /// `OpenSSL::HMACError`.
@@ -111,7 +108,6 @@ impl Class {
     #[must_use]
     pub fn code(self) -> i64 {
         match self {
-            Class::OpenSsl => 0,
             Class::Digest => 1,
             Class::Hmac => 2,
             Class::Random => 3,
@@ -634,57 +630,6 @@ pub fn random_write_file(path: &CStr) -> Result<(), Failure> {
         return Err(failure(Class::Random, b""));
     }
     Ok(())
-}
-
-/// `OpenSSL.errors`: this thread's OpenSSL error queue, drained, each as
-/// `ERR_error_string` writes it.
-#[must_use]
-pub fn error_strings() -> Vec<Vec<u8>> {
-    let mut errors = Vec::new();
-    loop {
-        // SAFETY: no preconditions.
-        let code = unsafe { sys::ERR_get_error() };
-        if code == 0 {
-            break;
-        }
-        // `ERR_error_string`'s own buffer size.
-        let mut buf: [c_char; 256] = [0; 256];
-        // SAFETY: `buf` is `buf.len()` writable bytes, which OpenSSL
-        // NUL-terminates.
-        let entry = unsafe {
-            ERR_error_string_n(code, buf.as_mut_ptr(), buf.len());
-            text(buf.as_ptr(), b"")
-        };
-        errors.push(entry);
-    }
-    errors
-}
-
-/// `OpenSSL.fips_mode`: whether the default library context fetches only
-/// FIPS-approved algorithms.
-#[must_use]
-pub fn fips_mode() -> bool {
-    sys::init();
-    // SAFETY: null is the default library context.
-    unsafe { sys::EVP_default_properties_is_fips_enabled(ptr::null_mut()) == 1 }
-}
-
-/// `OpenSSL.fips_mode = enabled`. This is OpenSSL's process-wide default
-/// library context, which CRuby sets the same way.
-pub fn set_fips_mode(enabled: bool) -> Result<(), Failure> {
-    sys::init();
-    // SAFETY: null is the default library context.
-    if unsafe { sys::EVP_default_properties_enable_fips(ptr::null_mut(), c_int::from(enabled)) }
-        == 1
-    {
-        return Ok(());
-    }
-    let message: &[u8] = if enabled {
-        b"Turning on FIPS mode failed"
-    } else {
-        b"Turning off FIPS mode failed"
-    };
-    Err(failure(Class::OpenSsl, message))
 }
 
 /// `OpenSSL.fixed_length_secure_compare` on two equal-length strings:

@@ -4,7 +4,6 @@ true
 true
 true
 true
-false
 [OpenSSL::Digest, Digest::Class, Digest::Instance]
 [OpenSSL::Digest::DigestError, OpenSSL::OpenSSLError, StandardError]
 [OpenSSL::HMACError, OpenSSL::OpenSSLError, StandardError]

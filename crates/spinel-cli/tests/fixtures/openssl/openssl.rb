@@ -35,7 +35,6 @@ puts OpenSSL::OPENSSL_VERSION.start_with?("OpenSSL 3.")
 puts OpenSSL::OPENSSL_LIBRARY_VERSION.start_with?("OpenSSL 3.")
 puts OpenSSL::OPENSSL_VERSION_NUMBER >= 0x3000_0000
 puts OpenSSL::OPENSSL_FIPS
-puts OpenSSL.fips_mode
 p OpenSSL::Digest.ancestors.take(3)
 p OpenSSL::Digest::DigestError.ancestors.take(3)
 p OpenSSL::HMACError.ancestors.take(3)

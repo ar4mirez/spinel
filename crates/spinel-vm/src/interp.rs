@@ -18138,16 +18138,6 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             &["__openssl_version__"],
             Native::OpenSsl(OpenSslOp::Version),
         ),
-        (
-            Builtin::Kernel,
-            &["__openssl_errors__"],
-            Native::OpenSsl(OpenSslOp::Errors),
-        ),
-        (
-            Builtin::Kernel,
-            &["__openssl_fips_mode__"],
-            Native::OpenSsl(OpenSslOp::FipsMode),
-        ),
         (Builtin::Kernel, &["__fd_dup__"], Native::Fs(FsOp::FdDup)),
         (Builtin::Kernel, &["__fd_dup2__"], Native::Fs(FsOp::FdDup2)),
         (
@@ -27062,22 +27052,6 @@ fn openssl_native(
             let number = Value::fixnum(number).expect("a version number is a Fixnum");
             new_array(scope, &[text, number])
         }
-        OpenSslOp::Errors => rooted_array(scope, openssl::error_strings(), |scope, error| {
-            string_bytes_in(scope, Builtin::String.id(), &error, crate::strings::UTF_8)
-        }),
-        OpenSslOp::FipsMode => match call.args.first().copied().unwrap_or(Value::NIL) {
-            v if v.is_nil() => {
-                if openssl::fips_mode() {
-                    Value::TRUE
-                } else {
-                    Value::FALSE
-                }
-            }
-            v => match openssl::set_fips_mode(v.is_truthy()) {
-                Ok(()) => Value::TRUE,
-                Err(failure) => openssl_failure(scope, failure),
-            },
-        },
     };
     stack.push(value);
     Ok(None)

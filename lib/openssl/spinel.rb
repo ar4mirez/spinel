@@ -69,29 +69,6 @@ module OpenSSL
     __openssl_memcmp__(a, b)
   end
 
-  # :call-seq:
-  #   OpenSSL.fips_mode -> true | false
-  #
-  # Whether the default library context fetches only FIPS-approved
-  # algorithms.
-  def self.fips_mode = __openssl_fips_mode__(nil)
-
-  # :call-seq:
-  #   OpenSSL.fips_mode = boolean -> boolean
-  #
-  # Turns FIPS mode on or off, for the whole process, as CRuby does.
-  def self.fips_mode=(enabled)
-    ok = __openssl_fips_mode__(enabled ? true : false)
-    raise __error__(ok) if Array === ok
-    enabled
-  end
-
-  # :call-seq:
-  #   OpenSSL.errors -> [String...]
-  #
-  # Empties OpenSSL's error queue and returns what was in it.
-  def self.errors = __openssl_errors__
-
   # The exception a primitive's failure, `[class, message, errors]`,
   # stands for. The OpenSSL error classes carry the queued errors, as
   # `ossl_make_error` leaves them in `@errors`.
@@ -104,7 +81,6 @@ module OpenSSL
     end
     klass =
       case code
-      when 0 then OpenSSLError
       when 1 then Digest::DigestError
       when 2 then HMACError
       else Random::RandomError

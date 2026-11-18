@@ -1025,8 +1025,8 @@ pub enum FfiOp {
 /// `openssl_native`, for what each takes and answers. A context is an
 /// Integer id; a kind is 1 for a digest's context and 2 for an HMAC's. A
 /// call that fails answers `[class, message, [error, ...]]`, the exception
-/// `ossl_raise` would raise, for the Ruby side to raise (class 0 is
-/// `OpenSSLError`, 1 `DigestError`, 2 `HMACError`, 3 `RandomError`, 4 `ArgumentError`, 5
+/// `ossl_raise` would raise, for the Ruby side to raise (class 1 is
+/// `DigestError`, 2 `HMACError`, 3 `RandomError`, 4 `ArgumentError`, 5
 /// `RangeError`, 6 `RuntimeError`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpenSslOp {
@@ -1068,11 +1068,6 @@ pub enum OpenSslOp {
     Memcmp,
     /// `__openssl_version__`: `[OPENSSL_VERSION, OPENSSL_VERSION_NUMBER]`.
     Version,
-    /// `__openssl_errors__`: the OpenSSL error queue, drained.
-    Errors,
-    /// `__openssl_fips_mode__(nil or enabled)`: whether FIPS mode is on, or
-    /// true once it is set.
-    FipsMode,
 }
 
 /// Which terminal call. See `console.rs` for the calls and `interp.rs`,
