@@ -71,11 +71,7 @@ fn positive<'cx>(
 
 /// `NativeGem::Words#count(text)`: how many whitespace-separated words
 /// `text` has, or nil for none.
-fn count<'cx>(
-    cx: &mut Context<'cx>,
-    _self: Value<'cx>,
-    args: &[Value<'cx>],
-) -> Result<Value<'cx>> {
+fn count<'cx>(cx: &mut Context<'cx>, _self: Value<'cx>, args: &[Value<'cx>]) -> Result<Value<'cx>> {
     let text = cx.to_string(args[0])?;
     match text.split_whitespace().count() {
         0 => Ok(cx.nil()),
