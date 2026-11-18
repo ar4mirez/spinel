@@ -272,8 +272,8 @@ fn a_mismatched_abi_is_refused_with_what_to_do() {
         error.to_string(),
         format!(
             "the extension greeter 0.1.0 ({}) was built against spinel-ext ABI 0, older than \
-             the ABI {running} this spinel {spinel} loads (ABI {running}); rebuild it against \
-             this spinel by reinstalling the gem that ships it",
+             the ABI {running} this spinel {spinel} loads; rebuild it against this \
+             spinel by reinstalling the gem that ships it",
             path.display()
         )
     );

@@ -11,8 +11,9 @@
 //! Values cross as root-stack indexes ([`RawValue`]). Each call into an
 //! extension opens a scope of its own, so every handle it is given or makes
 //! lives as long as the call; an index handed back is checked against that
-//! scope, never trusted, so a stale or made-up one is an `ArgumentError`
-//! rather than a read of the wrong memory.
+//! scope, never trusted, so a stale or made-up one is never a read through a
+//! stale pointer: it is refused with an `ArgumentError`, or, if it falls in
+//! this call's range, names a value of this call.
 //!
 //! `require` finding a `.spinel` file and calling [`Extension::open`] is
 //! #104; until then a `.spinel` on the load path is refused as it was.
@@ -106,7 +107,7 @@ impl fmt::Display for LoadError {
             } => write!(
                 f,
                 "{} was built against spinel-ext ABI {built}, older than the ABI {} this \
-                 spinel {spinel} loads (ABI {running}); rebuild it against this spinel by \
+                 spinel {spinel} loads; rebuild it against this spinel by \
                  reinstalling the gem that ships it",
                 LoadError::label(path, name, version),
                 if spinel_ext::OLDEST_ABI == running {
@@ -188,13 +189,25 @@ impl Extension {
     /// Open the library at `path`, read its header, and check it, before
     /// any of the extension's own code is called.
     ///
-    /// The library is never closed: the methods it defines are in the heap's
-    /// tables for as long as the process runs, as CRuby never unloads an
-    /// extension either. Opening one runs whatever constructors its object
-    /// format declares, which is the platform loader's doing and nothing
-    /// `spinel-ext` emits.
+    /// A library this refuses is closed again, so a rebuilt file at the same
+    /// path is read afresh the next time. One it accepts is never closed:
+    /// the methods it defines are in the heap's tables for as long as the
+    /// process runs, as CRuby never unloads an extension either. Opening one
+    /// runs whatever constructors its object format declares, which is the
+    /// platform loader's doing and nothing `spinel-ext` emits.
     pub fn open(path: &Path) -> Result<Extension, LoadError> {
         let library = dlopen(path)?;
+        let opened = Extension::from_library(path, library);
+        if opened.is_err() {
+            // SAFETY: `library` came from `dlopen` and nothing read from it
+            // outlives this call: the header and every message are copies.
+            unsafe { libc::dlclose(library) };
+        }
+        opened
+    }
+
+    /// [`Extension::open`]'s checks, on a library already open.
+    fn from_library(path: &Path, library: *mut c_void) -> Result<Extension, LoadError> {
         let not_one = |reason: String| LoadError::NotAnExtension {
             path: path.to_owned(),
             reason,
