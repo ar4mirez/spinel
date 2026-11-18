@@ -15,11 +15,13 @@
 # The parser runs over the whole input in one primitive call, which answers
 # every event and the syntax error that stopped it, if one did; the events
 # then go to the handler in order, each after `event_location`, as
-# `psych_parser.c` calls them, and the error is raised after the last. A
-# document nested deeper than 10,000 collections stops with a
-# `Psych::SyntaxError` at the collection past it (`psych.rs`, `MAX_DEPTH`),
-# where CRuby's Psych would parse on and raise `SystemStackError` building
-# objects a few thousand levels down. Aliases are never expanded, here or
+# `psych_parser.c` calls them, and the error is raised after the last. When
+# the handler builds objects (a `Psych::TreeBuilder`, as `load`, `safe_load`,
+# `parse` and `parse_stream` use), a document nested deeper than 10,000
+# collections stops with a `Psych::SyntaxError` at the collection past it
+# (`psych.rs`, `MAX_DEPTH`), where CRuby's Psych would raise
+# `SystemStackError` building objects a few thousand levels down; event
+# parsing for any other handler is unbounded, as libyaml's is. Aliases are never expanded, here or
 # by Psych's Ruby half: an alias loads as the object its anchor made, so a
 # "billion laughs" document costs what its text does, and `Psych.load` and
 # `safe_load` refuse aliases unless given `aliases: true`.
@@ -39,11 +41,15 @@ module Psych
   # psych.c: the libyaml `spinel-vm/src/psych.rs` is.
   def self.libyaml_version = [0, 2, 5]
 
-  # `rb_str_export_to_enc(string, UTF-8)`: `string` in UTF-8, or as it is
-  # when it cannot be converted.
+  # `rb_str_export_to_enc(string, UTF-8)`: `string` in UTF-8, a copy retagged
+  # when it is ASCII-only or the target is BINARY, or as it is when it cannot
+  # be converted.
   def self.__export__(string, encoding = Encoding::UTF_8)
     return string if string.encoding == encoding
-    return string if string.ascii_only? && string.encoding.ascii_compatible? && encoding.ascii_compatible?
+    if encoding == Encoding::BINARY ||
+       (encoding.ascii_compatible? && string.encoding.ascii_compatible? && string.ascii_only?)
+      return string.dup.force_encoding(encoding)
+    end
     string.encode(encoding)
   rescue EncodingError
     string
@@ -155,6 +161,11 @@ module Psych
   end
 
   class Parser
+    # How deeply a document whose objects are built may nest (`psych.rs`,
+    # `MAX_DEPTH`).
+    MAX_DEPTH = 10_000
+    private_constant :MAX_DEPTH
+
     # Any encoding: Let the parser choose the encoding
     ANY = 0
     # UTF-8 Encoding
@@ -192,7 +203,8 @@ module Psych
       else
         input, encoding = Parser.__transcode__(IO.__str__(yaml))
       end
-      events, error = __psych_parse__(input, encoding)
+      max_depth = Psych::TreeBuilder === handler ? MAX_DEPTH : 0
+      events, error = __psych_parse__(input, encoding, max_depth)
       internal = Encoding.default_internal
       Parser.__internal__(events, internal) unless internal.nil?
       events.each do |event|

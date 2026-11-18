@@ -1081,9 +1081,10 @@ pub enum OpenSslOp {
 /// it takes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PsychOp {
-    /// `__psych_parse__(yaml, encoding)`: `[events, error]`, every event of
-    /// the BINARY String `yaml` read as `encoding` (a `Psych::Parser`
-    /// constant) up to its end or its first error. An event is `[kind,
+    /// `__psych_parse__(yaml, encoding, max_depth)`: `[events, error]`,
+    /// every event of the BINARY String `yaml` read as `encoding` (a
+    /// `Psych::Parser` constant) up to its end or its first error, nesting
+    /// deeper than `max_depth` collections an error (0 for no limit). An event is `[kind,
     /// start_line, start_column, end_line, end_column, mark_index,
     /// mark_line, mark_column, *arguments]`, the mark where the parser had
     /// read to (`Psych::Parser#mark`), its Strings UTF-8. `error` is nil, or `[line, column, offset, problem,

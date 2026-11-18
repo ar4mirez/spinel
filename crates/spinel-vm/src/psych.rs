@@ -17,8 +17,9 @@
 //! - [`parse`] runs one parser over a whole input and answers its events, in
 //!   order, and the syntax error that stopped it, if one did, as
 //!   `psych_parser.c`'s `parse` would see them. The Ruby side hands each
-//!   event to the handler. Nesting deeper than [`MAX_DEPTH`] stops the parse
-//!   with an error of its own.
+//!   event to the handler. Given a depth limit, as it is when the handler
+//!   builds objects, nesting deeper than it stops the parse with an error of
+//!   its own; event parsing alone is unbounded, as libyaml's is.
 //! - An [`Emitter`] is one `Psych::Emitter`'s `yaml_emitter_t`, kept in its
 //!   heap's [`Emitters`] under an id never handed out twice. [`Emitters::emit`]
 //!   emits one event and answers the bytes libyaml wrote, which the Ruby side
@@ -34,16 +35,19 @@ use std::ptr::{self, NonNull};
 #[allow(clippy::unsafe_removed_from_name)]
 use unsafe_libyaml_norway as sys;
 
-/// How deeply sequences and mappings may nest before a parse stops, with an
-/// error, at the collection that went past it.
+/// How deeply sequences and mappings may nest, when a parse builds objects,
+/// before it stops, with an error, at the collection that went past it.
 ///
 /// libyaml 0.2.5 has no such limit, and its parser keeps its states in a
-/// heap stack, so a deep document parses; CRuby's Psych then raises
-/// `SystemStackError` building the objects, a few thousand levels down. The
-/// interpreter's frames are on the heap rather than a C stack, so here the
-/// same document would recurse until memory ran out: this bound keeps a
-/// document's cost proportional to its size. It is well past what CRuby
-/// loads, so nothing CRuby loads is refused.
+/// heap stack, so a deep document parses, and a parse that only hands
+/// events to a handler is unbounded here too; CRuby's Psych then raises
+/// `SystemStackError` building the objects, a few thousand levels down. It
+/// is well past what CRuby loads, so nothing CRuby loads is refused.
+// ponytail: the ceiling is 10,000 collections when building objects. The
+// interpreter's frames are on the heap rather than a C stack, so building a
+// deeper document would recurse until memory runs out where CRuby raises
+// `SystemStackError`. Upgrade: a recursion limit in the interpreter that
+// raises `SystemStackError` as CRuby does, after which this bound can go.
 pub const MAX_DEPTH: usize = 10_000;
 
 /// Where an event starts or ends: libyaml's mark, without the index, which
@@ -209,7 +213,8 @@ fn mark(mark: sys::yaml_mark_t) -> Mark {
 
 /// Parse `input`, read as `encoding` (a `Psych::Parser` constant), to its
 /// end or its first error: `psych_parser.c`'s loop, the handler aside.
-pub fn parse(input: &[u8], encoding_code: i64) -> Parsed {
+/// Nesting deeper than `max_depth` collections is an error; 0 is no limit.
+pub fn parse(input: &[u8], encoding_code: i64, max_depth: usize) -> Parsed {
     let mut parsed = Parsed::default();
     let mut parser = Box::new(MaybeUninit::<sys::yaml_parser_t>::uninit());
     let p = parser.as_mut_ptr();
@@ -247,13 +252,13 @@ pub fn parse(input: &[u8], encoding_code: i64) -> Parsed {
             Event::SequenceEnd | Event::MappingEnd => depth = depth.saturating_sub(1),
             _ => {}
         }
-        if depth > MAX_DEPTH {
+        if max_depth != 0 && depth > max_depth {
             parsed.error = Some(SyntaxError {
                 line: marked.start.line + 1,
                 column: marked.start.column + 1,
                 offset: 0,
                 problem: Some(
-                    format!("exceeded the maximum nesting depth of {MAX_DEPTH}").into_bytes(),
+                    format!("exceeded the maximum nesting depth of {max_depth}").into_bytes(),
                 ),
                 context: Some(b"while parsing a node".to_vec()),
             });
@@ -771,7 +776,7 @@ mod tests {
 
     #[test]
     fn parses_events_with_marks() {
-        let parsed = parse(b"a: [1, &x b, *x]\n", 1);
+        let parsed = parse(b"a: [1, &x b, *x]\n", 1, 0);
         assert!(parsed.error.is_none());
         assert_eq!(
             kinds(&parsed),
@@ -808,7 +813,7 @@ mod tests {
     fn the_parser_mark_is_libyamls() {
         // What CRuby's Psych (libyaml 0.2.5) answers for `parser.mark` in
         // each callback.
-        let parsed = parse(b"a: [1, 2]\nb: {c: d}\n---\n- x\n", 1);
+        let parsed = parse(b"a: [1, 2]\nb: {c: d}\n---\n- x\n", 1, 0);
         let marks: Vec<_> = parsed.events.iter().map(|m| m.parser).collect();
         assert_eq!(
             marks,
@@ -840,7 +845,7 @@ mod tests {
 
     #[test]
     fn a_syntax_error_reports_the_context_mark() {
-        let parsed = parse(b"a: [1", 1);
+        let parsed = parse(b"a: [1", 1, 0);
         let error = parsed.error.clone().expect("an error");
         assert_eq!((error.line, error.column), (1, 4));
         assert_eq!(
@@ -862,10 +867,25 @@ mod tests {
     #[test]
     fn nesting_past_the_bound_stops_the_parse() {
         let deep = format!("{}{}", "[".repeat(MAX_DEPTH + 1), "]".repeat(MAX_DEPTH + 1));
-        let error = parse(deep.as_bytes(), 1).error.expect("an error");
+        let error = parse(deep.as_bytes(), 1, MAX_DEPTH)
+            .error
+            .expect("an error");
         assert_eq!((error.line, error.column), (1, MAX_DEPTH as u64 + 1));
         let shallow = format!("{}{}", "[".repeat(MAX_DEPTH), "]".repeat(MAX_DEPTH));
-        assert!(parse(shallow.as_bytes(), 1).error.is_none());
+        assert!(parse(shallow.as_bytes(), 1, MAX_DEPTH).error.is_none());
+    }
+
+    #[test]
+    fn nesting_is_unbounded_without_a_limit() {
+        let deep = format!("{}{}", "[".repeat(MAX_DEPTH + 1), "]".repeat(MAX_DEPTH + 1));
+        let parsed = parse(deep.as_bytes(), 1, 0);
+        assert!(parsed.error.is_none());
+        let starts = parsed
+            .events
+            .iter()
+            .filter(|e| matches!(e.event, Event::SequenceStart { .. }))
+            .count();
+        assert_eq!(starts, MAX_DEPTH + 1);
     }
 
     #[test]

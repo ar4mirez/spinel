@@ -213,3 +213,41 @@ puts depth"##,
         "(<unknown>): exceeded the maximum nesting depth of 10000 while parsing a node at line 1 column 10001\n4999\n"
     );
 }
+
+/// The bound is on building objects: a handler that only sees events gets
+/// every level of a document deeper than it, with no error, as libyaml
+/// gives them.
+#[test]
+fn event_parsing_is_unbounded() {
+    let out = spinel(
+        r##"require "yaml"
+class Counter < Psych::Handler
+  attr_reader :starts, :ends
+  def initialize = (@starts = 0; @ends = 0)
+  def start_sequence(*) = @starts += 1
+  def end_sequence = @ends += 1
+end
+counter = Counter.new
+Psych::Parser.new(counter).parse("[" * 10_050 + "]" * 10_050)
+puts counter.starts, counter.ends"##,
+    );
+    assert_eq!(out, "10050\n10050\n");
+}
+
+/// With `Encoding.default_internal` set, every String a parse gives is in
+/// it, ASCII-only ones too, as `rb_str_conv_enc` retags them on CRuby.
+#[test]
+fn parsed_strings_take_the_default_internal_encoding() {
+    let out = spinel(
+        r##"require "yaml"
+Encoding.default_internal = Encoding::ISO_8859_1
+doc = YAML.load("foo: bar\nn: \"caf\u00e9\"\n")
+p doc.keys.map(&:encoding), doc.values.map(&:encoding)
+Encoding.default_internal = Encoding::BINARY
+p YAML.load("- x").first.encoding"##,
+    );
+    assert_eq!(
+        out,
+        "[#<Encoding:ISO-8859-1>, #<Encoding:ISO-8859-1>]\n[#<Encoding:ISO-8859-1>, #<Encoding:ISO-8859-1>]\n#<Encoding:BINARY (ASCII-8BIT)>\n"
+    );
+}

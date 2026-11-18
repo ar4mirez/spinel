@@ -27130,7 +27130,10 @@ fn psych_native(
         PsychOp::Parse => {
             let input = bytes_at(scope, call, 0, "__psych_parse__")?;
             let encoding = int_arg(call, 1).ok_or(refuse("an encoding that is not an Integer"))?;
-            let parsed = psych::parse(&input, encoding);
+            let max_depth = int_arg(call, 2)
+                .and_then(|n| usize::try_from(n).ok())
+                .ok_or(refuse("a depth limit that is not an Integer"))?;
+            let parsed = psych::parse(&input, encoding, max_depth);
             let events = rooted_array(scope, parsed.events, psych_event);
             let events = scope.root(events);
             let error = match parsed.error {

@@ -18,8 +18,9 @@ bytecode a tool reads.
   `Psych::Parser` and its handlers with libyaml's events and marks,
   `Psych::Emitter`, `Psych::Stream` and the node tree. `YAML.load` is as safe
   as Psych 4 makes it, aliases load as shared objects rather than copies, and
-  a document nested more than 10,000 collections deep is refused with a
-  `Psych::SyntaxError`. A lockfile pinning `psych` installs the built-in. A
+  loading a document nested more than 10,000 collections deep is refused
+  with a `Psych::SyntaxError`, while a `Psych::Parser` handing events to a
+  handler that builds nothing parses any depth. A lockfile pinning `psych` installs the built-in. A
   `Set` made with `Set.allocate` is now an empty Set, as on CRuby.
 
 - **`fiddle`, on `Spinel::FFI` and libffi**
