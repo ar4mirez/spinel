@@ -69,6 +69,7 @@ Target size: under 30 MB. No libruby. OpenSSL is the system's, linked for the `o
 | `cranelift-codegen`, `cranelift-frontend` | JIT (phase 6) |
 | `corosensei` | stackful coroutines for fibers when a primitive must re-enter the interpreter |
 | `libffi` | `Spinel::FFI` |
+| `openssl-sys` | the `openssl` built-in, on the system's OpenSSL 3 |
 | `pubgrub`, `reqwest`, `tokio`, `serde`, `notify`, `clap`, `zstd` | tooling |
 | none — `spinel-regex` is this workspace's own | Ruby regex semantics; measured against CRuby by `scripts/regexp-oracle.rb` (see engine.md, "Regex") |
 
