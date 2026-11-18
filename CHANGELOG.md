@@ -13,7 +13,8 @@ bytecode a tool reads.
   ([#114](https://github.com/ar4mirez/spinel/issues/114)).
   `gems/pg-spinel/` is pg 1.7.0's Ruby API, upstream's `lib/` unchanged,
   over a `spinel-ext` extension linked with the system's libpq, as
-  upstream's source gem is (building the workspace now needs libpq).
+  upstream's source gem is (only building that extension needs libpq; it is
+  not a default workspace member).
   `spinel install` puts it in place of a locked `pg 1.7.0` when
   `SPINEL_SUBSTITUTES=pg`, leaving the lockfile as Bundler wrote it, and a
   fixture connects to PostgreSQL and round-trips a query through it.

@@ -17,6 +17,14 @@ module PG
         cancon
       end
 
+      private def initialize_copy(original)
+        super
+        ObjectSpace.undefine_finalizer(self)
+        @__pg_cancon__ = nil
+        @__pg_socket_io__ = nil
+        self
+      end
+
       def initialize(conn)
         h = conn.__send__(:__pg_conn__)
         handle = Spinel.cancon_new(h)

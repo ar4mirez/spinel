@@ -15,12 +15,34 @@ module PG
     # pgconn_s_allocate.
     def self.allocate
       conn = super
-      handle = Spinel.conn_new
-      conn.instance_variable_set(:@__pg_conn__, handle)
-      ObjectSpace.define_finalizer(conn, Spinel.conn_finalizer(handle))
+      conn.__send__(:__pg_alloc__)
       conn.instance_variable_set(:@calls_to_put_copy_data, 0)
       conn.instance_variable_set(:@iopts_for_reset, nil)
       conn
+    end
+
+    private def __pg_alloc__
+      handle = Spinel.conn_new
+      @__pg_conn__ = handle
+      ObjectSpace.define_finalizer(self, Spinel.conn_finalizer(handle))
+    end
+
+    private def initialize_copy(original)
+      super
+      ObjectSpace.undefine_finalizer(self)
+      @__pg_socket_io__ = nil
+      @__pg_enc__ = nil
+      @__pg_type_map_for_queries__ = nil
+      @__pg_type_map_for_results__ = nil
+      @__pg_encoder_for_put_copy_data__ = nil
+      @__pg_decoder_for_get_copy_data__ = nil
+      @__pg_field_names_symbol__ = nil
+      @__pg_flush_data__ = nil
+      @__pg_trace_stream__ = nil
+      @__pg_notice_receiver__ = nil
+      @__pg_notice_processor__ = nil
+      __pg_alloc__
+      self
     end
 
     class << self

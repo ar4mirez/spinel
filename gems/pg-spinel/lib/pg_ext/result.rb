@@ -33,6 +33,12 @@ module PG
       end
     end
 
+    private def initialize_copy(original)
+      ObjectSpace.undefine_finalizer(self)
+      @__pg_res__ = nil
+      raise TypeError, "allocator undefined for PG::Result"
+    end
+
     private def __pg_init__(handle, connection)
       @__pg_res__ = handle
       @__pg_connection__ = connection

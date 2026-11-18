@@ -23,6 +23,11 @@
 //! lists, so a resolution leaves the lockfile as it was and an install goes
 //! for upstream's own build.
 //!
+//! The extension links the system's libpq, which `pg_config` (or
+//! `$PG_CONFIG`) or `$PQ_LIB_DIR` finds, as its `build.rs` does; it is not a
+//! default workspace member, so a machine without libpq builds Spinel. There
+//! each test says it skipped, except under `CI`, where it fails.
+//!
 //! Nothing touches the network but the PostgreSQL server: cargo builds
 //! `--offline` from what the workspace build fetched, and every gem comes
 //! from the local source.
@@ -67,6 +72,29 @@ fn server_url() -> Option<String> {
     std::env::var("SPINEL_PG_TEST_URL")
         .ok()
         .filter(|url| !url.is_empty())
+}
+
+/// Whether libpq is there to build the extension with, found as its
+/// `build.rs` finds it. Where it is not, a test skips, saying so, but on CI
+/// (`CI` set), whose legs install it, it fails.
+fn libpq_found() -> bool {
+    let found = std::env::var_os("PQ_LIB_DIR").is_some_and(|dir| !dir.is_empty()) || {
+        let pg_config = std::env::var_os("PG_CONFIG").unwrap_or_else(|| "pg_config".into());
+        Command::new(pg_config)
+            .arg("--libdir")
+            .output()
+            .is_ok_and(|out| out.status.success() && !out.stdout.trim_ascii().is_empty())
+    };
+    if !found {
+        let why = "libpq (libpq-dev, or Homebrew's libpq), found by pg_config ($PG_CONFIG) \
+                   or $PQ_LIB_DIR, is needed to build the pg-spinel gem's extension";
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "{why}, and CI must build it"
+        );
+        eprintln!("skipped: {why}");
+    }
+    found
 }
 
 /// Scrub what would change where gems come from or go, or reach a proxy.
@@ -342,6 +370,9 @@ fn installed(name: &str) -> (Sandbox, Source, String) {
 /// server needed.
 #[test]
 fn pg_spinel_installs_in_pgs_place_and_loads() {
+    if !libpq_found() {
+        return;
+    }
     let (sandbox, _source, lock) = installed("install");
     let locked_platform = platforms().1;
 
@@ -363,17 +394,26 @@ begin
   PG.connect(host: "127.0.0.1", port: 1, connect_timeout: 5)
 rescue PG::ConnectionBad => e
   p [e.class, e.message.include?("Connection refused")]
-end"#,
+end
+conn = PG::Connection.allocate
+copies = [conn.dup, conn.clone]
+p copies.map { |c| [c.class, c.equal?(conn), c.finished?] }
+copies.each(&:finish) rescue p [$!.class, $!.message]
+p conn.finished?"#,
         ])
         .output()
         .unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "");
     assert_eq!(
         ok(&out, "spinel run -e"),
         format!(
             "pg-1.7.0-{locked_platform}\npg_spinel.spinel\n1.7.0\ntrue\nfalse\n\
              \"O''Reilly\"\n\"\\\"s\\\".\\\"t\\\"\"\n\
              PG::UniqueViolation\n[PG::UniqueViolation, PG::IntegrityConstraintViolation, PG::ServerError, PG::Error]\n\
-             [PG::ConnectionBad, true]\n"
+             [PG::ConnectionBad, true]\n\
+             [[PG::Connection, false, true], [PG::Connection, false, true]]\n\
+             [PG::ConnectionBad, \"connection is closed\"]\n\
+             true\n"
         )
     );
     assert_eq!(sandbox.read("Gemfile.lock"), lock);
@@ -391,6 +431,9 @@ fn a_fixture_connects_to_postgres_and_round_trips_a_query() {
         );
         return;
     };
+    if !libpq_found() {
+        return;
+    }
     let (sandbox, _source, lock) = installed("round-trip");
 
     // The app: a table made, rows written with parameters and in a
@@ -439,6 +482,57 @@ fn a_fixture_connects_to_postgres_and_round_trips_a_query() {
         expected.lines().count(),
         "{printed}"
     );
+
+    // A copy is upstream's: a connection's a fresh, unconnected one, a
+    // result's refused, a cancel connection's closed; the original keeps
+    // its own libpq handle, freed once.
+    let out = sandbox
+        .spinel()
+        .args([
+            "run",
+            "-e",
+            r#"require "bundler/setup"
+require "pg"
+conn = PG.connect(ENV.fetch("SPINEL_PG_TEST_URL"))
+copy = conn.dup
+p [copy.finished?, conn.finished?]
+copy.exec("SELECT 1") rescue p [$!.class, $!.message]
+res = conn.exec("SELECT 1 AS one")
+[:dup, :clone].each { |m| res.public_send(m) rescue p [$!.class, $!.message] }
+if defined?(PG::CancelConnection)
+  cancel = PG::CancelConnection.new(conn).dup
+  cancel.start rescue p [$!.class, $!.message]
+else
+  p :no_cancel_connection
+end
+copy = nil
+GC.start
+p res.values, conn.exec("SELECT 2").getvalue(0, 0)
+conn.finish"#,
+        ])
+        .env("SPINEL_PG_TEST_URL", &url)
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "");
+    let printed = ok(&out, "spinel run -e (copies)");
+    // PG::CancelConnection exists only with libpq 17 or later.
+    let cancel = if printed.contains(":no_cancel_connection\n") {
+        ":no_cancel_connection"
+    } else {
+        "[PG::ConnectionBad, \"PG::CancelConnection is closed\"]"
+    };
+    assert_eq!(
+        printed,
+        format!(
+            "[true, false]\n\
+             [PG::ConnectionBad, \"connection is closed\"]\n\
+             [TypeError, \"allocator undefined for PG::Result\"]\n\
+             [TypeError, \"allocator undefined for PG::Result\"]\n\
+             {cancel}\n\
+             [[\"1\"]]\n\
+             \"2\"\n"
+        )
+    );
     assert_eq!(sandbox.read("Gemfile.lock"), lock);
 }
 
@@ -455,6 +549,9 @@ fn stock_rubygems_and_bundler_never_pick_the_spinel_gem() {
             "skipped: set SPINEL_CRUBY_BUNDLER, with CRuby 4.0's gem and bundle on PATH, to run \
              stock RubyGems and Bundler against the source with pg-spinel"
         );
+        return;
+    }
+    if !libpq_found() {
         return;
     }
     let (sandbox, source, lock) = installed("stock");
