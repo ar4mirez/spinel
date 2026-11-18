@@ -1,0 +1,14 @@
+TCPServer: []
+TCPSocket client: []
+TCPSocket accepted: []
+Socket listener: []
+Socket dialer: []
+Socket peer: []
+Addrinfo: []
+ping
+pong
+true
+Marshal Socket::Ifaddr: TypeError: no _dump_data is defined for class Socket::Ifaddr
+#<Socket::Option: INET SOCKET KEEPALIVE 1>
+#<Socket::AncillaryData: UNIX SOCKET RIGHTS 1>
+Marshal ResolutionError: true

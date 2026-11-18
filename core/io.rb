@@ -3,11 +3,11 @@
 # buffered, and every system call is one primitive that answers an errno on
 # failure. The rest, which is most of it, is Ruby.
 #
-# The read buffer is `@rbuf`, bytes the descriptor has moved past and the
+# The read buffer is `@__rbuf__`, bytes the descriptor has moved past and the
 # reader has not: `pos` gives it back and counts what stays, a relative seek
 # adjusts for it, and a write after a read seeks back over it first.
 #
-# The write buffer is `@wbuf`, CRuby's `wbuf`: up to 8 KiB written and not yet
+# The write buffer is `@__wbuf__`, CRuby's `wbuf`: up to 8 KiB written and not yet
 # sent, unless the IO is `sync` or a terminal, which write through. A read, a
 # seek, `flush`, `close` and the rest CRuby flushes at send it first, and so do
 # the collector's finalizer and the program's end (`__flush_buffer__`).
@@ -15,7 +15,7 @@
 # An IO with no converter and no options takes a short path (#41) for
 # `gets` and `each_line` with the default separator, `read(n)` of what is
 # buffered, and `write`, `puts`, `print` and `<<` of Strings that fit in the
-# write buffer: the bytes are cut from `@rbuf` or put in `@wbuf` as the long
+# write buffer: the bytes are cut from `@__rbuf__` or put in `@__wbuf__` as the long
 # path would, without asking it everything it asks (`__replain__`).
 #
 # The descriptors Spinel makes for a pipe, `IO.pipe`'s and `IO.popen`'s, are
@@ -197,20 +197,20 @@ class IO
     io
   end
 
-  def __buffered__? = !@rbuf.empty?
+  def __buffered__? = !@__rbuf__.empty?
 
   # The descriptor to poll: a duplex child's write end for writing.
-  def __poll_fd__(events) = events == IO::WRITABLE ? __wfd__ : @fileno
+  def __poll_fd__(events) = events == IO::WRITABLE ? __wfd__ : @__fileno__
 
   # The descriptor `wait` polls, whatever the events: CRuby's looks at a duplex
   # child's read side, and at the write side only once `close_read` leaves that
   # one (#568).
-  def __wait_fd__ = @rclosed ? __wfd__ : @fileno
+  def __wait_fd__ = @__rclosed__ ? __wfd__ : @__fileno__
 
-  def timeout = @timeout
+  def timeout = @__timeout__
 
   def timeout=(value)
-    @timeout = value
+    @__timeout__ = value
   end
 
   def wait(*args)
@@ -249,10 +249,10 @@ class IO
 
   # CRuby's duplex child is two IOs, and this looks at the side that reads,
   # however much a write goes through to the other, until `reopen` gives that
-  # side a mode of its own (`@rmoded`).
+  # side a mode of its own (`@__rmoded__`).
   def wait_writable(timeout = nil)
     __writable__
-    raise IOError, "not opened for writing" if __tied__? && !@rmoded
+    raise IOError, "not opened for writing" if __tied__? && !@__rmoded__
     IO.__wait__([[self, IO::WRITABLE]], timeout).nil? ? nil : self
   end
 
@@ -508,11 +508,11 @@ end
     end
     __setup__(fd, mode, options)
     # The descriptor has to allow what the mode asks for.
-    wanted = @access
+    wanted = @__access__
     have = current & 3
     if (wanted != 0 && have == 0) || (wanted != 1 && have == 1)
       # Not this IO's to close: CRuby checks before the IO takes it.
-      @finalizer&.fd = nil
+      @__finalizer__&.fd = nil
       raise Errno::EINVAL
     end
   end
@@ -589,27 +589,27 @@ end
     # Checked before any of it is assigned: `reopen` keeps what it refuses.
     __validate_enc_binmode__(access, binmode, enc, enc2, ecopts)
     yield flags, binmode, ecopts if block_given?
-    @access = access
-    @binmode = binmode
-    @enc = enc
-    @enc2 = enc2
-    @ecopts = ecopts
+    @__access__ = access
+    @__binmode__ = binmode
+    @__enc__ = enc
+    @__enc2__ = enc2
+    @__ecopts__ = ecopts
     # What makes a write want an ASCII-compatible String, on a duplex child's
     # write side too, which has no decorator of its own: a newline decorator
     # here, so `"r+t"` but not `"wt"`, which has none. Measured.
-    @textmode = __newline_decorator__? ? true : false
-    @oflags = flags
+    @__textmode__ = __newline_decorator__? ? true : false
+    @__oflags__ = flags
     __replain__
     bom
   end
 
-  # Whether reads and writes can take the short path (#41): `@rplain`, no
+  # Whether reads and writes can take the short path (#41): `@__rplain__`, no
   # read converter and no options at all, so a line or a sized read is bytes
-  # cut from the read buffer, with `@enc`, when there is one,
+  # cut from the read buffer, with `@__enc__`, when there is one,
   # ASCII-compatible (the default external, which can change, is asked at
-  # each read); `@wplain`, no write converter (CRuby's `NEED_WRITECONV`), so
+  # each read); `@__wplain__`, no write converter (CRuby's `NEED_WRITECONV`), so
   # a String written goes into the write buffer as it is. Worked out again
-  # wherever the encodings, the options, `@textmode` or the duplex child's
+  # wherever the encodings, the options, `@__textmode__` or the duplex child's
   # write end change: `__modeenc__` (open and `reopen` with a path),
   # `binmode`, `set_encoding` and the BOM, `reopen` with an IO, `close_read`
   # and the child's pipes. What `ungetc` and `ungetbyte` give back on an IO
@@ -627,24 +627,24 @@ end
   # makes a Hash on every call. The upgrade is a call that makes no Hash for
   # an empty keyword rest, which is the VM's and every `**` method's.
   def __replain__
-    @rplain = @enc2.nil? && @ecopts.empty? && (@enc.nil? || @enc.ascii_compatible?)
-    @wplain = @wfileno.nil? && !__need_writeconv__?
+    @__rplain__ = @__enc2__.nil? && @__ecopts__.empty? && (@__enc__.nil? || @__enc__.ascii_compatible?)
+    @__wplain__ = @__wfileno__.nil? && !__need_writeconv__?
   end
 
   # The descriptor of an IO `__modeenc__` has read the mode of.
   def __open_fd__(fd, options, bom)
-    @fileno = fd
-    @rbuf = "".b
-    @cbuf = "".b
-    @lineno = 0
-    @closed = false
-    @sync = false
-    @autoclose = options.key?(:autoclose) ? (options[:autoclose] ? true : false) : true
+    @__fileno__ = fd
+    @__rbuf__ = "".b
+    @__cbuf__ = "".b
+    @__lineno__ = 0
+    @__closed__ = false
+    @__sync__ = false
+    @__autoclose__ = options.key?(:autoclose) ? (options[:autoclose] ? true : false) : true
     path = options[:path]
-    @path = (String === path ? path : File.__path__(path)).dup unless path.nil?
+    @__path__ = (String === path ? path : File.__path__(path)).dup unless path.nil?
     # CRuby's `io_check_tty`: only here, so a `reopen` onto a terminal is not.
-    # `@tty` is its `FMODE_TTY`, which writes through the write buffer.
-    @tty = @duplex = true if __fs_isatty__(fd)
+    # `@__tty__` is its `FMODE_TTY`, which writes through the write buffer.
+    @__tty__ = @__duplex__ = true if __fs_isatty__(fd)
     __bom__ if bom
     __arm__
     self
@@ -654,16 +654,16 @@ end
   # `reopen` sets up again keeps the one it has, and the attribute's quote
   # still open, which `close` would write to the new file (#488).
   def __arm__
-    if @finalizer.nil?
-      @finalizer = Finalizer.new
-      __finalizer_add__(self, @finalizer)
+    if @__finalizer__.nil?
+      @__finalizer__ = Finalizer.new
+      __finalizer_add__(self, @__finalizer__)
     end
-    @finalizer.fd = @fileno
-    @finalizer.wfd = nil
-    @finalizer.autoclose = @autoclose
-    @finalizer.quote = __closing_quote__(@xml_quote)
-    @finalizer.writeconv = @writeconv
-    @finalizer.wbuf = @wbuf
+    @__finalizer__.fd = @__fileno__
+    @__finalizer__.wfd = nil
+    @__finalizer__.autoclose = @__autoclose__
+    @__finalizer__.quote = __closing_quote__(@__xml_quote__)
+    @__finalizer__.writeconv = @__writeconv__
+    @__finalizer__.wbuf = @__wbuf__
   end
 
   # A copy has a descriptor of its own, `dup(2)` of the original's, at the
@@ -678,48 +678,48 @@ end
     kept = __finalizer_list__(self).reject { |callable| IO.__finalizer__?(callable) }
     __finalizer_remove__(self)
     kept.each { |callable| __finalizer_add__(self, callable) }
-    @finalizer = nil
+    @__finalizer__ = nil
     original.__check_open__
     original.__flush_buffer__
     original.__unread__(true)
-    @duplex = original.__duplex__
-    @fileno = IO.__check__(__fd_dup__(original.fileno), @path)[0]
-    @rbuf = "".b
-    @cbuf = "".b
+    @__duplex__ = original.__duplex__
+    @__fileno__ = IO.__check__(__fd_dup__(original.fileno), @__path__)[0]
+    @__rbuf__ = "".b
+    @__cbuf__ = "".b
     __drop_readconv__
-    @closed = false
-    @autoclose = true
-    @ecopts = @ecopts.dup
+    @__closed__ = false
+    @__autoclose__ = true
+    @__ecopts__ = @__ecopts__.dup
     # A converter of its own, so an attribute's quote of its own.
-    @writeconv = nil
-    @wpre = nil
-    @xml_quote = nil
+    @__writeconv__ = nil
+    @__wpre__ = nil
+    @__xml_quote__ = nil
     # A write buffer of its own, empty: `dup` gave it the original's.
-    @wbuf = nil
-    @wsynced = false
+    @__wbuf__ = nil
+    @__wsynced__ = false
     # A copy is no standard stream, whatever it copies.
-    @stdio = nil
+    @__stdio__ = nil
     __arm__
     self
   end
 
   # CRuby's `io_unread`: seek the descriptor back over what is buffered and
   # forget it, and both converters with it. What cannot seek keeps its buffer
-  # unless it is to be discarded all the same. `@duplex` is `FMODE_DUPLEX`, of
+  # unless it is to be discarded all the same. `@__duplex__` is `FMODE_DUPLEX`, of
   # a socket, a tty or a child, or of what this finds cannot seek, and such an
   # IO keeps its buffer from then on, whatever its descriptor comes to be.
   def __unread__(discard = false)
-    return if @rbuf.empty? || @duplex
-    result = __fd_seek__(@fileno, -@rbuf.bytesize, IO::SEEK_CUR)
+    return if @__rbuf__.empty? || @__duplex__
+    result = __fd_seek__(@__fileno__, -@__rbuf__.bytesize, IO::SEEK_CUR)
     if Integer === result
-      @duplex = true if result == Errno::ESPIPE::Errno
+      @__duplex__ = true if result == Errno::ESPIPE::Errno
       return unless discard
     end
-    @rbuf = "".b
+    @__rbuf__ = "".b
     __clear_codeconv__
   end
 
-  def __duplex__ = @duplex
+  def __duplex__ = @__duplex__
 
   # The options that say how to convert, kept for `String#encode`.
   def __ecopts__(options)
@@ -743,120 +743,120 @@ end
 
   def fileno
     __check_open__
-    @fileno
+    @__fileno__
   end
   alias to_i fileno
 
   def to_io = self
 
-  def closed? = @closed
+  def closed? = @__closed__
 
   def autoclose?
     __check_open__
-    @autoclose
+    @__autoclose__
   end
 
   def autoclose=(value)
     __check_open__
-    @autoclose = value ? true : false
-    @finalizer&.autoclose = @autoclose
+    @__autoclose__ = value ? true : false
+    @__finalizer__&.autoclose = @__autoclose__
     value
   end
 
   # A child's IO (`IO.popen`) waits for the child once it is closed, and
   # `$?` is how it went: nil when another IO for the child reaped it first.
   def close
-    return nil if @closed
+    return nil if @__closed__
     begin
       __finish_writeconv__
     ensure
-      @closed = true
+      @__closed__ = true
       # The access goes and the rest of the mode stays, for `reopen`.
-      @access = 3
-      @stdio = nil
-      @finalizer&.disarm
-      @rbuf = "".b
-      @cbuf = "".b
+      @__access__ = 3
+      @__stdio__ = nil
+      @__finalizer__&.disarm
+      @__rbuf__ = "".b
+      @__cbuf__ = "".b
       # CRuby frees the write buffer, sent or not: what a write from a `to_s`
       # adds after this goes in another that nothing sends.
-      @wbuf = nil
+      @__wbuf__ = nil
       # CRuby's `close` leaves `readconv` freed, and a `reopen` crashes on it.
       __drop_readconv__
-      unless @wfileno.nil? || @wclosed
-        __fd_close__(@wfileno)
+      unless @__wfileno__.nil? || @__wclosed__
+        __fd_close__(@__wfileno__)
         # The write end is gone for good, so a `reopen` does not take it back.
         # CRuby's `close` leaves the tied write IO closed, not untied, and a
         # write after `reopen` finds it so; `close_write` and `close_read`
         # untie it.
-        @wclosed = true
-        @wgone = true unless @rclosed
-        @finalizer&.wfd = nil
+        @__wclosed__ = true
+        @__wgone__ = true unless @__rclosed__
+        @__finalizer__&.wfd = nil
       end
-      IO.__check__(__fd_close__(@fileno), @path) if @autoclose && !@rclosed && @fileno > 2
+      IO.__check__(__fd_close__(@__fileno__), @__path__) if @__autoclose__ && !@__rclosed__ && @__fileno__ > 2
       __reap__
     end
     nil
   end
 
   def __reap__
-    return if @pid.nil?
-    pid = @pid
-    @pid = nil
+    return if @__pid__.nil?
+    pid = @__pid__
+    @__pid__ = nil
     __global_store__(:$?, Process::Status.wait(pid))
   end
 
   # The descriptor writes go to: a duplex child's own write end, or the one.
-  def __wfd__ = @wclosed ? @fileno : (@wfileno || @fileno)
+  def __wfd__ = @__wclosed__ ? @__fileno__ : (@__wfileno__ || @__fileno__)
 
   # Whether this is a duplex child still read from. CRuby makes that two IOs,
   # and the one `tied_io_for_writing` holds has no encoding and no options:
   # what `IO.popen` was given, and `set_encoding`, are the read side's, so a
-  # write goes out as it is. `@textmode` is both sides', and `@wbinary` says
+  # write goes out as it is. `@__textmode__` is both sides', and `@__wbinary__` says
   # the write side has been made binary, for when `close_read` leaves only it.
-  def __tied__? = !@wfileno.nil? && !@rclosed
+  def __tied__? = !@__wfileno__.nil? && !@__rclosed__
 
-  def __rmoded__ = @rmoded
+  def __rmoded__ = @__rmoded__
 
   def close_read
-    return nil if @closed
-    unless @wfileno.nil?
-      unless @rclosed
-        __fd_close__(@fileno)
+    return nil if @__closed__
+    unless @__wfileno__.nil?
+      unless @__rclosed__
+        __fd_close__(@__fileno__)
         # What is left is CRuby's write side, whose encodings are its own.
-        @enc = @wbinary ? Encoding::BINARY : nil
-        @enc2 = nil
-        @binmode = true if @wbinary
-        @ecopts = {}
+        @__enc__ = @__wbinary__ ? Encoding::BINARY : nil
+        @__enc2__ = nil
+        @__binmode__ = true if @__wbinary__
+        @__ecopts__ = {}
         __replain__
       end
-      @rclosed = true
-      @finalizer&.fd = nil
-      @access = 1
-      return @wclosed ? close : nil
+      @__rclosed__ = true
+      @__finalizer__&.fd = nil
+      @__access__ = 1
+      return @__wclosed__ ? close : nil
     end
     raise IOError, "closing non-duplex IO for reading" if __writes__?
     close
   end
 
   def close_write
-    return nil if @closed || @wgone
-    unless @wfileno.nil?
+    return nil if @__closed__ || @__wgone__
+    unless @__wfileno__.nil?
       # A second `close_write` finds the write side untied and closes the IO
       # itself, as CRuby's does once `GetWriteIO` gives back the reader.
-      return close if @wclosed
+      return close if @__wclosed__
       # CRuby closes its write IO, which closes even when sending what is
       # buffered fails, and then raises; the buffer goes with it.
       begin
         __finish_writeconv__
       ensure
-        @wbuf = nil
-        @finalizer&.wbuf = nil
-        __fd_close__(@wfileno)
-        @wclosed = true
-        @finalizer&.wfd = nil
-        @access = 0
+        @__wbuf__ = nil
+        @__finalizer__&.wbuf = nil
+        __fd_close__(@__wfileno__)
+        @__wclosed__ = true
+        @__finalizer__&.wfd = nil
+        @__access__ = 0
       end
-      return @rclosed ? close : nil
+      return @__rclosed__ ? close : nil
     end
     raise IOError, "closing non-duplex IO for writing" if __reads__?
     close
@@ -864,16 +864,16 @@ end
 
   def close_on_exec?
     __check_open__
-    flags = IO.__check__(__fd_fcntl__(@fileno, IO.__fcntl__("F_GETFD"), 0))[0]
+    flags = IO.__check__(__fd_fcntl__(@__fileno__, IO.__fcntl__("F_GETFD"), 0))[0]
     flags & IO.__fcntl__("FD_CLOEXEC") != 0
   end
 
   def close_on_exec=(value)
     __check_open__
-    flags = IO.__check__(__fd_fcntl__(@fileno, IO.__fcntl__("F_GETFD"), 0))[0]
+    flags = IO.__check__(__fd_fcntl__(@__fileno__, IO.__fcntl__("F_GETFD"), 0))[0]
     cloexec = IO.__fcntl__("FD_CLOEXEC")
     flags = value ? flags | cloexec : flags & ~cloexec
-    IO.__check__(__fd_fcntl__(@fileno, IO.__fcntl__("F_SETFD"), flags))
+    IO.__check__(__fd_fcntl__(@__fileno__, IO.__fcntl__("F_SETFD"), flags))
     value
   end
 
@@ -887,7 +887,7 @@ end
                # needs a primitive that copies it in and out.
                else raise NotImplementedError, "fcntl with a String argument"
                end
-    IO.__check__(__fd_fcntl__(@fileno, Integer.__index__(command), argument), @path)[0]
+    IO.__check__(__fd_fcntl__(@__fileno__, Integer.__index__(command), argument), @__path__)[0]
   end
 
   # CRuby's `rb_ioctl`. The argument is made into what the call is handed,
@@ -896,7 +896,7 @@ end
     request = Integer.__c_long__(request)
     narg = IO.__narg__(argument, IO.__ioctl_narg_len__(request))
     __check_open__
-    answer = IO.__check__(__fd_ioctl__(@fileno, request, narg), @path, "finish_narg")
+    answer = IO.__check__(__fd_ioctl__(@__fileno__, request, narg), @__path__, "finish_narg")
     IO.__finish_narg__(narg, answer)
   end
 
@@ -958,46 +958,46 @@ end
     unless %i[normal sequential random willneed dontneed noreuse].include?(advice)
       raise NotImplementedError, "Unsupported advice: #{advice.inspect}"
     end
-    fd = __tied__? && !@wclosed ? @wfileno : @fileno
+    fd = __tied__? && !@__wclosed__ ? @__wfileno__ : @__fileno__
     __check_open__
     offset = offset.nil? ? 0 : Integer.__c_long__(offset)
     length = length.nil? ? 0 : Integer.__c_long__(length)
     answer = __fd_advise__(fd, offset, length, advice.name)
     # `posix_fadvise` answers its error rather than setting errno, and
     # `do_io_advise` names the arguments after the path.
-    raise SystemCallError.new("#{@path} (#{offset}, #{length}, #{advice})", answer) if Integer === answer
+    raise SystemCallError.new("#{@__path__} (#{offset}, #{length}, #{advice})", answer) if Integer === answer
     nil
   end
 
   def pid
     __check_open__
-    @pid
+    @__pid__
   end
 
   def __pid__(pid, writer = nil)
-    @pid = pid
-    @wfileno = writer
-    @finalizer&.wfd = writer
-    @duplex = true
+    @__pid__ = pid
+    @__wfileno__ = writer
+    @__finalizer__&.wfd = writer
+    @__duplex__ = true
     __replain__
     self
   end
 
   def path
-    @path.nil? ? nil : @path.dup
+    @__path__.nil? ? nil : @__path__.dup
   end
   alias to_path path
 
   def sync
     __check_write_open__
-    @sync
+    @__sync__
   end
 
   # CRuby's `rb_io_set_sync` sends nothing: what is buffered goes with the
   # next write, which writes through. Measured.
   def sync=(value)
     __check_write_open__
-    @sync = value ? true : false
+    @__sync__ = value ? true : false
     value
   end
 
@@ -1006,14 +1006,14 @@ end
   def fsync
     __check_write_open__
     __flush_buffer__
-    IO.__check__(__outside__ { __fd_fsync__(@fileno, false) }, @path)
+    IO.__check__(__outside__ { __fd_fsync__(@__fileno__, false) }, @__path__)
     0
   end
 
   def fdatasync
     __check_write_open__
     __flush_buffer__
-    IO.__check__(__outside__ { __fd_fsync__(@fileno, true) }, @path)
+    IO.__check__(__outside__ { __fd_fsync__(@__fileno__, true) }, @__path__)
     0
   end
 
@@ -1028,14 +1028,14 @@ end
       result = yield
       return result unless result == IO.__eintr__
       Thread.__check_interrupts__
-      raise IOError, "stream closed in another thread" if @closed
+      raise IOError, "stream closed in another thread" if @__closed__
     end
   end
 
   def flush = __flush_raw__
 
   # CRuby's `rb_io_synchronized`: `sync` on, whatever state the IO is in.
-  def __synchronized__ = (@sync = true; self)
+  def __synchronized__ = (@__sync__ = true; self)
 
   # CRuby's `rb_io_flush_raw`: the write buffer is sent, then `io_unread` of
   # a reader, discarding what a pipe cannot give back. What `IO#flush` is,
@@ -1050,7 +1050,7 @@ end
 
   def tty?
     __check_open__
-    __fs_isatty__(@fileno)
+    __fs_isatty__(@__fileno__)
   end
   alias isatty tty?
 
@@ -1059,11 +1059,11 @@ end
     __stat__
   end
 
-  def __stat__ = File::Stat.__from__(IO.__check__(__fs_stat__(@fileno, true), @path))
+  def __stat__ = File::Stat.__from__(IO.__check__(__fs_stat__(@__fileno__, true), @__path__))
 
   def binmode
     __check_open__
-    @wbinary = true
+    @__wbinary__ = true
     __ascii8bit_binmode__
     self
   end
@@ -1072,46 +1072,46 @@ end
   # the write side, as `rb_io_get_write_io` gives it.
   def __write_binmode__
     return __ascii8bit_binmode__ unless __tied__?
-    @wbinary = true
-    @textmode = false
+    @__wbinary__ = true
+    @__textmode__ = false
     __replain__
   end
 
   # CRuby's `rb_io_ascii8bit_binmode`.
   def __ascii8bit_binmode__
-    @binmode = true
-    @textmode = false
-    @enc = Encoding::BINARY
-    @enc2 = nil
+    @__binmode__ = true
+    @__textmode__ = false
+    @__enc__ = Encoding::BINARY
+    @__enc2__ = nil
     # CRuby drops the converter unfinished, an attribute's quote and all.
     __clear_codeconv__
     # And no conversion options at all: CRuby's `io_ascii8bit_binmode` zeroes
     # the flags and drops the rest, so `xml:` and the error handling go with
     # the newline decorators.
-    @ecopts = {}
+    @__ecopts__ = {}
     __replain__
   end
 
   def binmode?
     __check_open__
-    @binmode
+    @__binmode__
   end
 
   def inspect
-    name = @path || { 0 => "<STDIN>", 1 => "<STDOUT>", 2 => "<STDERR>" }[@fileno] || "fd #{@fileno}"
-    return "#<#{self.class}:#{@path.nil? ? "" : "#{@path} "}(closed)>" if @closed
+    name = @__path__ || { 0 => "<STDIN>", 1 => "<STDOUT>", 2 => "<STDERR>" }[@__fileno__] || "fd #{@__fileno__}"
+    return "#<#{self.class}:#{@__path__.nil? ? "" : "#{@__path__} "}(closed)>" if @__closed__
     "#<#{self.class}:#{name}>"
   end
 
   def __check_open__
-    raise IOError, "closed stream" if @closed
+    raise IOError, "closed stream" if @__closed__
   end
 
   # CRuby's `rb_io_check_char_readable`, which flushes the write buffer first.
   def __readable__
     __check_open__
     raise IOError, "not opened for reading" unless __reads__?
-    __flush_buffer__ unless @wbuf.nil? || @wbuf.empty?
+    __flush_buffer__ unless @__wbuf__.nil? || @__wbuf__.empty?
   end
 
   # CRuby's `rb_io_check_writable`. Bytes read ahead are bytes the descriptor
@@ -1130,21 +1130,21 @@ end
   # child (#569). Measured.
   def __write_side__
     __check_write_open__
-    return if __tied__? && !@wclosed
+    return if __tied__? && !@__wclosed__
     __writable__
   end
 
   def __check_write_open__
     __check_open__
-    raise IOError, "closed stream" if @wgone
+    raise IOError, "closed stream" if @__wgone__
   end
 
   # --- encodings ---------------------------------------------------------------
   #
-  # CRuby's two slots. `@enc` is the encoding reads answer in, nil for the
-  # default external as it is when asked; `@enc2`, when there is one, is the
-  # encoding the bytes are in, so reads convert from it to `@enc` and writes
-  # back. Without `@enc2` nothing is converted on the way in.
+  # CRuby's two slots. `@__enc__` is the encoding reads answer in, nil for the
+  # default external as it is when asked; `@__enc2__`, when there is one, is the
+  # encoding the bytes are in, so reads convert from it to `@__enc__` and writes
+  # back. Without `@__enc2__` nothing is converted on the way in.
 
   # `rb_io_ext_int_to_encs`: the slots for an external and an internal
   # encoding asked for, as `[enc, enc2]`. A nil external is the default, a nil
@@ -1178,29 +1178,29 @@ end
     end
   end
 
-  def __newline_decorator__?(ecopts = @ecopts)
+  def __newline_decorator__?(ecopts = @__ecopts__)
     ecopts[:universal_newline] || ecopts[:crlf_newline] || ecopts[:cr_newline] || ecopts[:lf_newline] || !ecopts[:newline].nil?
   end
 
   # What reads answer in.
   def __read_encoding__
-    @enc || Encoding.default_external
+    @__enc__ || Encoding.default_external
   end
 
   # What the bytes read are in.
   def __encoding__
-    @enc2 || __read_encoding__
+    @__enc2__ || __read_encoding__
   end
 
   def external_encoding
-    return @enc2 unless @enc2.nil?
+    return @__enc2__ unless @__enc2__.nil?
     # One that writes has an encoding only when it was given one.
-    return @enc if __writes__? && !__tied__?
+    return @__enc__ if __writes__? && !__tied__?
     __read_encoding__
   end
 
   def internal_encoding
-    @enc2.nil? ? nil : __read_encoding__
+    @__enc2__.nil? ? nil : __read_encoding__
   end
 
   # The encoding a name or an object stands for, as `set_encoding` takes one.
@@ -1260,12 +1260,12 @@ end
   # The end of CRuby's `io_encoding_set`: nothing is assigned until the check
   # has passed.
   def __encoding_set__(enc, enc2, ecopts)
-    __validate_enc_binmode__(@access, @binmode, enc, enc2, ecopts)
-    @enc = enc
-    @enc2 = enc2
-    @ecopts = ecopts
-    # From here `@ecopts` says, but a duplex child's write side is not this.
-    @textmode = false unless __tied__?
+    __validate_enc_binmode__(@__access__, @__binmode__, enc, enc2, ecopts)
+    @__enc__ = enc
+    @__enc2__ = enc2
+    @__ecopts__ = ecopts
+    # From here `@__ecopts__` says, but a duplex child's write side is not this.
+    @__textmode__ = false unless __tied__?
     __replain__
     # CRuby drops the converter unfinished: an attribute's quote open is
     # never closed, and the next write opens another. The read converter
@@ -1287,9 +1287,9 @@ end
   # `XML_BOTH`, for which a conversion then finds no converter (#458).
   def __kept_ecopts__(options)
     given = __ecopts__(options)
-    given.delete(:undef) if options[:undef] != :replace && @ecopts[:invalid] == :replace
+    given.delete(:undef) if options[:undef] != :replace && @__ecopts__[:invalid] == :replace
     newlines = %i[newline universal_newline crlf_newline cr_newline lf_newline]
-    kept = @ecopts.reject { |key, _| %i[replace fallback].include?(key) }
+    kept = @__ecopts__.reject { |key, _| %i[replace fallback].include?(key) }
     kept = kept.reject { |key, _| newlines.include?(key) } if newlines.any? { |key| !given[key].nil? }
     xml = kept[:xml]
     given.each { |key, value| kept[key] = value unless value.nil? }
@@ -1306,10 +1306,10 @@ end
 
   def set_encoding_by_bom
     __check_open__
-    raise ArgumentError, "ASCII incompatible encoding needs binmode" unless @binmode
-    raise ArgumentError, "encoding conversion is set" unless @enc2.nil?
-    unless @enc.nil? || @enc == Encoding::BINARY
-      raise ArgumentError, "encoding is set to #{@enc} already"
+    raise ArgumentError, "ASCII incompatible encoding needs binmode" unless @__binmode__
+    raise ArgumentError, "encoding conversion is set" unless @__enc2__.nil?
+    unless @__enc__.nil? || @__enc__ == Encoding::BINARY
+      raise ArgumentError, "encoding is set to #{@__enc__} already"
     end
     __byte_readable__
     __bom__
@@ -1331,22 +1331,22 @@ end
   # read has no mark.
   def __bom__
     if __reads__?
-      nil while @rbuf.bytesize < 4 && __fill__
+      nil while @__rbuf__.bytesize < 4 && __fill__
       BOMS.each do |mark, name|
-        next unless @rbuf.byteslice(0, mark.bytesize) == mark
+        next unless @__rbuf__.byteslice(0, mark.bytesize) == mark
         __take__(mark.bytesize)
         external = Encoding.find(name)
-        if @enc2.nil?
+        if @__enc2__.nil?
           enc, enc2 = __ext_int_to_encs__(external, nil)
         else
-          enc = @enc
+          enc = @__enc__
           enc2 = enc == external ? nil : external
         end
         __encoding_set__(enc, enc2, __kept_ecopts__({}))
         return external
       end
     end
-    @enc2 = nil
+    @__enc2__ = nil
     __replain__
     nil
   end
@@ -1361,13 +1361,13 @@ end
     return __convert_in__(bytes) || __in_read__("") if __stream_in__?
     bytes.force_encoding(__encoding__)
     xml = __xml_in__
-    if @enc2.nil?
+    if @__enc2__.nil?
       return bytes if xml.nil?
       out = String.__escape_xml__(bytes, xml)
       out = out.byteslice(1, out.bytesize - 2).force_encoding(bytes.encoding) if xml == :attr
     else
       begin
-        options = __read_options__(@ecopts)
+        options = __read_options__(@__ecopts__)
         options[:universal_newline] = true if universal
         out = bytes.encode(__read_encoding__, **options)
       rescue Encoding::InvalidByteSequenceError, Encoding::UndefinedConversionError => error
@@ -1376,8 +1376,8 @@ end
       end
       out = out[1...-1] if xml == :attr
     end
-    return out unless xml == :attr && !@rquote && !out.empty?
-    @rquote = true
+    return out unless xml == :attr && !@__rquote__ && !out.empty?
+    @__rquote__ = true
     (__in_read__("\"").b << out.b).force_encoding(out.encoding)
   end
 
@@ -1396,17 +1396,17 @@ end
     options = __read_ecopts__
     options[:universal_newline] = true if __universal_newline__?
     converter = __converter__(__encoding__, __read_encoding__, options)
-    converter.primitive_convert("a".encode(__encoding__), "".b, nil, nil, Encoding::Converter::PARTIAL_INPUT) if @rquote
+    converter.primitive_convert("a".encode(__encoding__), "".b, nil, nil, Encoding::Converter::PARTIAL_INPUT) if @__rquote__
     made = nil
     loop do
       made = "".b
       result = converter.primitive_convert(bytes, made, nil, nil, Encoding::Converter::AFTER_OUTPUT)
-      @rquote = true if __xml_in__ == :attr && !made.empty?
+      @__rquote__ = true if __xml_in__ == :attr && !made.empty?
       break unless result == :after_output
     end
-    @rbuf = converter.putback.b + bytes.b + @rbuf
+    @__rbuf__ = converter.putback.b + bytes.b + @__rbuf__
     if options[:universal_newline] && converter.finish.b.start_with?("\n".encode(__read_encoding__).b)
-      @rpend = "\r".encode(__encoding__).b
+      @__rpend__ = "\r".encode(__encoding__).b
     end
     __hold_chars__(made)
   end
@@ -1414,17 +1414,17 @@ end
   # Whether the IO has a read converter, as CRuby's `NEED_READCONV`: an
   # internal encoding, or a newline option.
   def __read_converter__?
-    !@enc2.nil? || __newline_decorator__?
+    !@__enc2__.nil? || __newline_decorator__?
   end
 
   # The `xml:` decorator a read converter has, or nil: without one, reads
   # are not decorated. Measured.
   def __xml_in__
-    xml = @ecopts[:xml]
+    xml = @__ecopts__[:xml]
     (xml == :text || xml == :attr) && __read_converter__? ? xml : nil
   end
 
-  # Whether reads go through the IO's own `Encoding::Converter`, `@readconv`,
+  # Whether reads go through the IO's own `Encoding::Converter`, `@__readconv__`,
   # because what a conversion knows carries from one read to the next:
   # ISO-2022-JP's G0, the byte order a BOM'd UTF-16 or UTF-32 read, the mark
   # one writes first (#420). `String#encode` starts and finishes each time.
@@ -1433,9 +1433,9 @@ end
   # `__newline_on_bytes__?`, which it could not either, and once a decorator
   # moved what came before a separator past it (#566).
   def __stream_in__?
-    return __read_converter__? if @rkept || @rstream
-    return __newline_on_bytes__? if @enc2.nil?
-    __stateful__?(@enc2) || __stateful__?(__read_encoding__)
+    return __read_converter__? if @__rkept__ || @__rstream__
+    return __newline_on_bytes__? if @__enc2__.nil?
+    __stateful__?(@__enc2__) || __stateful__?(__read_encoding__)
   end
 
   # Whether universal newline has only bytes to go on: `BOM|` that finds no
@@ -1445,7 +1445,7 @@ end
   # so a CR in the bytes is a CR, and the characters are cut from what it
   # makes (#525).
   def __newline_on_bytes__?
-    @enc2.nil? && !@enc.nil? && !@enc.ascii_compatible? && __universal_newline__?
+    @__enc2__.nil? && !@__enc__.nil? && !@__enc__.ascii_compatible? && __universal_newline__?
   end
 
   def __stateful__?(encoding)
@@ -1459,8 +1459,8 @@ end
   # the IO reads through it itself (#550).
   def __make_readconv__
     __readconv__
-    source, target, ecopts = @rmade
-    return NewlineBytes.new(__read_encoding__, ecopts[:xml]) if source.nil? && !@rkept
+    source, target, ecopts = @__rmade__
+    return NewlineBytes.new(__read_encoding__, ecopts[:xml]) if source.nil? && !@__rkept__
     options = __read_options__(ecopts)
     options[:universal_newline] = true if __universal_newline__?(ecopts)
     return Encoding::Converter.new("", "", **options) if source.nil?
@@ -1473,26 +1473,26 @@ end
   # and all, and what it writes is called what the IO reads in now. Reads
   # that have no converter leave it there for a later `reopen` to come back
   # to. It carries on where the old one was: an attribute's quote is open, a
-  # CR or the first byte of a character is inside, which `@rpend` holds for
+  # CR or the first byte of a character is inside, which `@__rpend__` holds for
   # the next read that reaches it, and one that has finished reads nothing.
   # Whatever drops the converter ends this. Measured.
   # One of decorators alone is kept too, a `NewlineBytes` as it is, so what
   # it writes is the bytes, called what the IO reads in now (#550).
   def __keep_readconv__
-    made = @rmade
-    return if made.nil? || @rkept || made == __read_made__
-    @rkept = true
-    return unless @readconv.nil?
+    made = @__rmade__
+    return if made.nil? || @__rkept__ || made == __read_made__
+    @__rkept__ = true
+    return unless @__readconv__.nil?
     begin
-      @readconv = __make_readconv__
+      @__readconv__ = __make_readconv__
     rescue Encoding::ConverterNotFoundError
       # The read that asked for it raised this too, and so made none.
-      @rmade = nil
-      @rkept = false
+      @__rmade__ = nil
+      @__rkept__ = false
       return
     end
-    @readconv.primitive_convert(made[0] ? "a".encode(made[0]) : "a".b, "".b, nil, nil, Encoding::Converter::PARTIAL_INPUT) if @rquote
-    @readconv.finish if @rfinished
+    @__readconv__.primitive_convert(made[0] ? "a".encode(made[0]) : "a".b, "".b, nil, nil, Encoding::Converter::PARTIAL_INPUT) if @__rquote__
+    @__readconv__.finish if @__rfinished__
   end
 
   # A converter the IO keeps. One whose `replace:` has no spelling in what it
@@ -1583,26 +1583,26 @@ end
   # `goes_on`, a conversion that never ends stops short each call and the
   # next goes on with it (#611).
   def __convert_onto__(bytes, out, room, flags, goes_on = false)
-    @readconv ||= __make_readconv__
+    @__readconv__ ||= __make_readconv__
     if goes_on
-      @readconv.__goes_on__ = true
+      @__readconv__.__goes_on__ = true
       begin
-        result = @readconv.primitive_convert(bytes, out, nil, room, flags)
+        result = @__readconv__.primitive_convert(bytes, out, nil, room, flags)
       ensure
-        @readconv.__goes_on__ = false
+        @__readconv__.__goes_on__ = false
       end
     else
-      result = @readconv.primitive_convert(bytes, out, nil, room, flags)
+      result = @__readconv__.primitive_convert(bytes, out, nil, room, flags)
     end
-    out.force_encoding(__read_encoding__) if @rkept
+    out.force_encoding(__read_encoding__) if @__rkept__
     return out if result == :source_buffer_empty
     if result == :after_output || result == :destination_buffer_full || result == :finished
-      @rbuf = bytes.b + @rbuf
+      @__rbuf__ = bytes.b + @__rbuf__
       return result == :finished && out.empty? ? nil : out
     end
-    @rbuf = @readconv.putback.b + bytes.b + @rbuf
+    @__rbuf__ = @__readconv__.putback.b + bytes.b + @__rbuf__
     __hold_chars__(out.b) if flags & Encoding::Converter::AFTER_OUTPUT != 0
-    raise @readconv.last_error
+    raise @__readconv__.last_error
   end
 
   # CRuby's `rbuf` and `cbuf` for an IO with a read converter: what a fill of
@@ -1638,16 +1638,16 @@ end
   # that much of what it makes, and the next read goes on with it (#611).
   # Without it the read ends there, where CRuby's never does.
   def __next_chars__(goes_on = false)
-    __unpend__ if @rkept
-    return nil if @rfinished
+    __unpend__ if @__rkept__
+    return nil if @__rfinished__
     flags = Encoding::Converter::PARTIAL_INPUT | Encoding::Converter::AFTER_OUTPUT
     out = String.new(encoding: __read_encoding__)
-    while !@rbuf.empty? || goes_on && @readconv&.__suspended__? || __fill__
+    while !@__rbuf__.empty? || goes_on && @__readconv__&.__suspended__? || __fill__
       plain = __plain_readconv__?
-      count = NewlineBytes === @readconv ? 1 : (plain ? NEXT_CHARS_BYTES : @rbuf.bytesize)
+      count = NewlineBytes === @__readconv__ ? 1 : (plain ? NEXT_CHARS_BYTES : @__rbuf__.bytesize)
       return nil unless __convert_onto__(__take__(count), out, plain ? nil : READ_CONVERTER_BYTES, flags, goes_on)
       next if out.empty?
-      @rnewline = out.getbyte(-1) == 0x0A
+      @__rnewline__ = out.getbyte(-1) == 0x0A
       return out
     end
     nil
@@ -1663,9 +1663,9 @@ end
   # ponytail: any other line stays a character at a time at `__next_chars__`'s
   # cost; upgrade with the cheaper call that names.
   def __line_runs__?(sep, enc)
-    return false if @rkept
+    return false if @__rkept__
     return false unless enc.ascii_compatible? ? sep.nil? || sep.dup.force_encoding(enc)[-1].ascii_only? : __newline_on_bytes__?
-    @ecopts.empty? || (@ecopts.size == 1 && __universal_newline__?)
+    @__ecopts__.empty? || (@__ecopts__.size == 1 && __universal_newline__?)
   end
 
   # `__next_chars__` for a line, which `__line_runs__?` lets go faster: what
@@ -1685,21 +1685,21 @@ end
   # converter holds among them. Answers "" where the bytes made nothing yet,
   # and nil where the converter has finished.
   def __chars_to_line_end__(sep, room)
-    return __next_chars__ if @rnewline
-    return nil if @rfinished || @rbuf.empty? && !__fill__
+    return __next_chars__ if @__rnewline__
+    return nil if @__rfinished__ || @__rbuf__.empty? && !__fill__
     bytes = __newline_on_bytes__?
-    at = sep && @rbuf.index(sep[-1])
+    at = sep && @__rbuf__.index(sep[-1])
     at += 1 if at && (bytes || __encoding__ == Encoding::ISO_2022_JP)
     if sep&.end_with?("\n") && __universal_newline__?
-      cr = @rbuf.index("\r")
+      cr = @__rbuf__.index("\r")
       if cr && (at.nil? || cr < at)
         at = cr
-        at += 2 if bytes && @rbuf.getbyte(cr + 1) == 10
+        at += 2 if bytes && @__rbuf__.getbyte(cr + 1) == 10
       end
     end
-    count = at || @rbuf.bytesize
+    count = at || @__rbuf__.bytesize
     count = [count, room / 4].min if room && room > 0
-    count -= 1 if bytes && count > 0 && @rbuf.getbyte(count - 1) == 13
+    count -= 1 if bytes && count > 0 && @__rbuf__.getbyte(count - 1) == 13
     count == 0 ? __next_chars__ : __convert_in__(__take__(count))
   end
 
@@ -1721,36 +1721,36 @@ end
   def __finish_in__
     return __finish_readconv__ if __stream_in__?
     unless __xml_in__ == :attr
-      @rfinished = false
+      @__rfinished__ = false
       __read_ended__
       return nil
     end
-    if @rfinished
-      @rfinished = false
-      @rquote = nil
-      @rmade = nil
+    if @__rfinished__
+      @__rfinished__ = false
+      @__rquote__ = nil
+      @__rmade__ = nil
       return nil
     end
-    quote = @rquote ? "\"" : "\"\""
-    @rquote = false
-    @rfinished = true
+    quote = @__rquote__ ? "\"" : "\"\""
+    @__rquote__ = false
+    @__rfinished__ = true
     __in_read__(quote)
   end
 
   # Whether the read converter has finished, for the next read of characters
   # to find nothing. One a `reopen` with no converter left waits for a later
   # `reopen` that has one, and reads go past it (#551). Measured.
-  def __finished_in__? = @rfinished && __read_converter__?
+  def __finished_in__? = @__rfinished__ && __read_converter__?
 
   # A read of characters that ran the read converter to the end of the bytes,
   # which finished it (#551). One of `xml: :attr` makes the attribute's
   # quotes as it finishes, which are held, as in CRuby's `cbuf`. Measured.
   def __finished_at_end__
-    return if @rfinished
+    return if @__rfinished__
     if __xml_in__ == :attr
-      @cbuf = (@cbuf || "".b) << __finish_in__.b
+      @__cbuf__ = (@__cbuf__ || "".b) << __finish_in__.b
     else
-      @rfinished = true
+      @__rfinished__ = true
     end
   end
 
@@ -1758,7 +1758,7 @@ end
   # line through `__converted_line__` goes on to `__finish_in__` for that, and
   # one read `whole` by bytes says so itself: a limit can stop the other first.
   def __read_ended__
-    @rmade = nil if __read_converter__?
+    @__rmade__ = nil if __read_converter__?
   end
 
   # `__finish_in__` where the IO keeps a converter, which writes what it has
@@ -1770,20 +1770,20 @@ end
   # raises stays, as CRuby's `fill_cbuf` keeps it, for the next read to have
   # what it has left, a CR it held as a newline among it. Measured.
   def __finish_readconv__
-    if @rfinished
-      @rfinished = false
-      @readconv = nil
+    if @__rfinished__
+      @__rfinished__ = false
+      @__readconv__ = nil
       __forget_readconv__
       return nil
     end
-    @readconv ||= __make_readconv__
-    out = @readconv.finish
+    @__readconv__ ||= __make_readconv__
+    out = @__readconv__.finish
     if out.empty?
-      @readconv = nil
+      @__readconv__ = nil
       __forget_readconv__
       return nil
     end
-    @rfinished = true
+    @__rfinished__ = true
     out
   end
 
@@ -1793,7 +1793,7 @@ end
   # read past a lone CR to tell it from a CRLF (#468, #470). CRuby's
   # `cbuf`; `pos` does not count them, as they are read.
   def __chars_held__?
-    !@cbuf.nil? && !@cbuf.empty?
+    !@__cbuf__.nil? && !@__cbuf__.empty?
   end
 
   # Whether a read of characters takes what is held. `reopen` can leave
@@ -1807,22 +1807,22 @@ end
 
   # The characters held, taken, as bytes.
   def __take_chars__
-    held = @cbuf || "".b
-    @cbuf = "".b
+    held = @__cbuf__ || "".b
+    @__cbuf__ = "".b
     held.b
   end
 
   # Puts characters back before those held.
   def __hold_chars__(text)
     return if text.empty?
-    @cbuf = text.b << (@cbuf || "".b)
+    @__cbuf__ = text.b << (@__cbuf__ || "".b)
   end
 
   # The first character held, in the encoding reads answer in.
   def __take_char__
-    held = @cbuf.force_encoding(__read_encoding__)
+    held = @__cbuf__.force_encoding(__read_encoding__)
     char = held[0]
-    @cbuf = held.byteslice(char.bytesize, held.bytesize - char.bytesize).b
+    @__cbuf__ = held.byteslice(char.bytesize, held.bytesize - char.bytesize).b
     char
   end
 
@@ -1832,19 +1832,19 @@ end
   # and the converter stays finished until the last has. Measured.
   def __kept_char__
     enc = __read_encoding__
-    while !__chars_held__? || __held_cut_short__?(@cbuf, enc)
+    while !__chars_held__? || __held_cut_short__?(@__cbuf__, enc)
       made = __next_chars__
-      readconv = @readconv
-      kept = @rmade
+      readconv = @__readconv__
+      kept = @__rmade__
       made ||= __finish_in__
       unless made.nil?
-        @cbuf = (@cbuf || "".b) << made.b
+        @__cbuf__ = (@__cbuf__ || "".b) << made.b
         next
       end
       return nil unless __chars_held__?
-      unit = @cbuf.byteslice(0, 1).force_encoding(enc)
-      @cbuf = @cbuf.byteslice(1, @cbuf.bytesize - 1).b
-      @readconv, @rmade, @rkept, @rfinished = readconv, kept, true, true if __chars_held__?
+      unit = @__cbuf__.byteslice(0, 1).force_encoding(enc)
+      @__cbuf__ = @__cbuf__.byteslice(1, @__cbuf__.bytesize - 1).b
+      @__readconv__, @__rmade__, @__rkept__, @__rfinished__ = readconv, kept, true, true if __chars_held__?
       return unit
     end
     __take_char__
@@ -1884,19 +1884,19 @@ end
   # refuses and `eof?` is false, until a read of characters makes a converter
   # again, which starts without them. Measured.
   def __drop_readconv__
-    @readconv = nil
-    @rpend = nil
-    @rfinished = false
-    @readconv_dropped = __chars_held__?
+    @__readconv__ = nil
+    @__rpend__ = nil
+    @__rfinished__ = false
+    @__readconv_dropped__ = __chars_held__?
     __forget_readconv__
   end
 
   # No read has made a converter, so the next makes one of the IO's encodings.
   def __forget_readconv__
-    @rmade = nil
-    @rkept = false
-    @rstream = false
-    @rquote = nil
+    @__rmade__ = nil
+    @__rkept__ = false
+    @__rstream__ = false
+    @__rquote__ = nil
   end
 
   # A read of bytes, where the read converter holds characters: CRuby's
@@ -1928,21 +1928,21 @@ end
   # in the buffer, `pos` a unit short; upgrade by keeping it as the first
   # byte of a longer character is.
   def __read_ahead__(cr, unit)
-    if @rbuf.bytesize < unit
-      __finished_at_end__ if @rbuf.empty?
+    if @__rbuf__.bytesize < unit
+      __finished_at_end__ if @__rbuf__.empty?
       return
     end
-    head = @rbuf.byteslice(0, unit)
+    head = @__rbuf__.byteslice(0, unit)
     if head == cr
-      @rpend = __take__(unit)
+      @__rpend__ = __take__(unit)
       return
     end
     case unit
     when 1
       enc = __encoding__
       unless head.dup.force_encoding(enc).valid_encoding?
-        if @enc2.nil?
-          @cbuf = (@cbuf || "".b) << __take__(1)
+        if @__enc2__.nil?
+          @__cbuf__ = (@__cbuf__ || "".b) << __take__(1)
           return
         end
         if enc == Encoding::UTF_8 && !__read_encoding__.ascii_compatible?
@@ -1951,10 +1951,10 @@ end
         else
           nil while __char_cut_short__ && __fill__(1)
           unit = __char_length__
-          unit = @rbuf.bytesize if unit > @rbuf.bytesize
-          unless @rbuf.byteslice(0, unit).force_encoding(enc).valid_encoding?
+          unit = @__rbuf__.bytesize if unit > @__rbuf__.bytesize
+          unless @__rbuf__.byteslice(0, unit).force_encoding(enc).valid_encoding?
             # What the error names reads past the character, as on the stream.
-            return __decode__(cr + __take__([@rbuf.bytesize, 4].min)) if __raises_past_cr__?
+            return __decode__(cr + __take__([@__rbuf__.bytesize, 4].min)) if __raises_past_cr__?
             unit = 1
           end
         end
@@ -1965,24 +1965,24 @@ end
           # so where that is replaced `pos` is past both and drops them
           # (#644), and past any more it hands on after them (#661). Measured.
           lead = head.getbyte(0)
-          past = enc == Encoding::UTF_8 && !__read_encoding__.ascii_compatible? && @ecopts[:invalid] == :replace && (lead < 0xC2 || lead > 0xF4)
-          @rpend = past ? __handed_on__ : __take__(1)
+          past = enc == Encoding::UTF_8 && !__read_encoding__.ascii_compatible? && @__ecopts__[:invalid] == :replace && (lead < 0xC2 || lead > 0xF4)
+          @__rpend__ = past ? __handed_on__ : __take__(1)
           return
         end
       end
-      if __replaces_past_cr__? && __undefined_in__?(@rbuf.byteslice(0, unit))
+      if __replaces_past_cr__? && __undefined_in__?(@__rbuf__.byteslice(0, unit))
         # Into UTF-16 or UTF-32 the transcoder reads on past it as past
         # bytes that make none (#677). Measured.
-        return __replaced_past_cr__(cr, unit) if @ecopts[:undef] == :replace && !__read_encoding__.ascii_compatible?
+        return __replaced_past_cr__(cr, unit) if @__ecopts__[:undef] == :replace && !__read_encoding__.ascii_compatible?
         out = __decode__(__take__(unit))
-        @rpend = cr
+        @__rpend__ = cr
         return out
       end
     when 2
       high = __encoding__ == Encoding::UTF_16LE ? head.getbyte(1) : head.getbyte(0)
       return if high & 0xF8 == 0xD8
     end
-    @cbuf = (@cbuf || "".b) << __decode__(__take__(unit)).b
+    @__cbuf__ = (@__cbuf__ || "".b) << __decode__(__take__(unit)).b
     nil
   end
 
@@ -1994,8 +1994,8 @@ end
     taken = __take__(1)
     prev = nil
     loop do
-      nil while @rbuf.empty? && __fill__(1)
-      byte = @rbuf.getbyte(0)
+      nil while @__rbuf__.empty? && __fill__(1)
+      byte = @__rbuf__.getbyte(0)
       return taken if byte.nil?
       taken << __take__(1)
       broken = byte >= 0x80 && (byte < 0xC2 || byte > 0xF4)
@@ -2011,11 +2011,11 @@ end
   # after it makes a CRLF of the CR (#626). Measured. From UTF-8 into UTF-16
   # or UTF-32 the decorator comes first, and so does the `"\n"`.
   def __replaces_past_cr__?
-    !@enc2.nil? && !__stream_in__? && (__encoding__ != Encoding::UTF_8 || __read_encoding__.ascii_compatible?)
+    !@__enc2__.nil? && !__stream_in__? && (__encoding__ != Encoding::UTF_8 || __read_encoding__.ascii_compatible?)
   end
 
   # The replacement for bytes past a lone CR that make no character. The
-  # CR is held again, `@rpend`, and so is what the transcoder read past
+  # CR is held again, `@__rpend__`, and so is what the transcoder read past
   # them to tell, which is its own, so `pos` is past both and the next read
   # starts with them (#626). Measured. `undefined` is the length of a whole
   # character with no spelling there instead (#677).
@@ -2023,7 +2023,7 @@ end
     broken = undefined || 1
     again = 0
     unless undefined
-      window = @rbuf.byteslice(0, [@rbuf.bytesize, 4].min).force_encoding(__encoding__)
+      window = @__rbuf__.byteslice(0, [@__rbuf__.bytesize, 4].min).force_encoding(__encoding__)
       begin
         window.encode(__read_encoding__)
       rescue Encoding::InvalidByteSequenceError => error
@@ -2038,11 +2038,11 @@ end
       # CRuby's converter still holds the replacement and the CR, for the
       # next read to give them, unless a `pos` drops them (#663, #673).
       # Measured.
-      @cbuf = (@cbuf || "".b) << out.b
-      @rpend = cr
+      @__cbuf__ = (@__cbuf__ || "".b) << out.b
+      @__rpend__ = cr
       raise
     end
-    @rpend = cr + __take__(again)
+    @__rpend__ = cr + __take__(again)
     out
   end
 
@@ -2058,9 +2058,9 @@ end
     enc = __encoding__
     past = 0
     loop do
-      nil while @rbuf.bytesize < past + 4 && __fill__(past + 4 - @rbuf.bytesize)
-      return past if @rbuf.bytesize <= past
-      window = @rbuf.byteslice(past, 4).force_encoding(enc)
+      nil while @__rbuf__.bytesize < past + 4 && __fill__(past + 4 - @__rbuf__.bytesize)
+      return past if @__rbuf__.bytesize <= past
+      window = @__rbuf__.byteslice(past, 4).force_encoding(enc)
       char = window[0]
       begin
         (char.valid_encoding? ? char : window).encode(Encoding::UTF_8)
@@ -2075,7 +2075,7 @@ end
         # the one this read answers and ahead of the CR, after the
         # replacements of the bytes before it that make none, and the
         # transcoder reads on past it as past a broken byte (#671). Measured.
-        if @ecopts[:undef] == :replace
+        if @__ecopts__[:undef] == :replace
           out << __decode__(__take__(past + char.bytesize))
           past = 0
           next
@@ -2090,7 +2090,7 @@ end
   # in, and `undef: :replace` replaces it, or `xml:` makes it a charref
   # (#675).
   def __undefined_in__?(bytes)
-    return false unless @ecopts[:undef] == :replace || __xml_in__
+    return false unless @__ecopts__[:undef] == :replace || __xml_in__
     bytes.dup.force_encoding(__encoding__).encode(__read_encoding__)
     false
   rescue Encoding::UndefinedConversionError
@@ -2113,8 +2113,8 @@ end
       return text.force_encoding(__read_encoding__) if room && text.bytesize >= room && __read_encoding__.ascii_compatible?
       __unpend__
       __take__(cr.bytesize)
-      nil while @rbuf.bytesize < lf.bytesize && __fill__(lf.bytesize - @rbuf.bytesize)
-      if @rbuf.byteslice(0, lf.bytesize) == lf
+      nil while @__rbuf__.bytesize < lf.bytesize && __fill__(lf.bytesize - @__rbuf__.bytesize)
+      if @__rbuf__.byteslice(0, lf.bytesize) == lf
         __take__(lf.bytesize)
         break
       end
@@ -2126,23 +2126,23 @@ end
 
   # Whether bytes past a lone CR that make no character raise on that read:
   # a replacement is made there, `__replaced_past_cr__` (#626), and a read
-  # through `@readconv` has the converter read past the CR itself.
-  def __raises_past_cr__? = @ecopts[:invalid] != :replace && !__stream_in__?
+  # through `@__readconv__` has the converter read past the CR itself.
+  def __raises_past_cr__? = @__ecopts__[:invalid] != :replace && !__stream_in__?
 
   # The bytes the converter kept past a lone CR go back before the buffer,
   # for a read of characters to convert them first (#472). A read that does
   # not go through the converter `reopen` left passes them by, as it does it.
   def __unpend__
-    return if @rpend.nil? || @rkept && !__read_converter__?
-    @rbuf = @rpend + @rbuf
-    @rpend = nil
+    return if @__rpend__.nil? || @__rkept__ && !__read_converter__?
+    @__rbuf__ = @__rpend__ + @__rbuf__
+    @__rpend__ = nil
   end
 
   # The options a read transcodes with: CRuby's `make_readconv` leaves out
   # the decorators for writing. Universal newline is done on the way in.
   def __read_ecopts__
     __readconv__
-    __read_options__(@ecopts)
+    __read_options__(@__ecopts__)
   end
 
   def __read_options__(ecopts)
@@ -2150,12 +2150,12 @@ end
   end
 
   # Whether the converter reads go through has no options.
-  def __plain_readconv__? = (@rkept ? @rmade[2] : @ecopts).empty?
+  def __plain_readconv__? = (@__rkept__ ? @__rmade__[2] : @__ecopts__).empty?
 
   # What a converter made now would convert: without an internal encoding,
   # CRuby's is the decorators alone.
   def __read_made__
-    @enc2.nil? ? [nil, nil, @ecopts] : [__encoding__, __read_encoding__, @ecopts]
+    @__enc2__.nil? ? [nil, nil, @__ecopts__] : [__encoding__, __read_encoding__, @__ecopts__]
   end
 
   # CRuby's `make_readconv`, which a read that converts makes before it reads
@@ -2167,26 +2167,26 @@ end
   # that need nothing kept from one to the next have no converter to leave
   # (#517). Measured.
   def __readconv__
-    if @readconv_dropped && __read_converter__?
-      @cbuf = "".b
-      @readconv_dropped = false
+    if @__readconv_dropped__ && __read_converter__?
+      @__cbuf__ = "".b
+      @__readconv_dropped__ = false
     end
     # An IO with neither has no converter, and is most of what reads here.
-    return unless @rmade.nil? && (@enc2 || !@ecopts.empty?) && __read_converter__?
-    unless @ecopts[:xml].equal?(XML_BOTH)
-      @rmade = __read_made__
+    return unless @__rmade__.nil? && (@__enc2__ || !@__ecopts__.empty?) && __read_converter__?
+    unless @__ecopts__[:xml].equal?(XML_BOTH)
+      @__rmade__ = __read_made__
       return
     end
     newlines = __universal_newline__? ? ["universal_newline"] : []
-    raise String.__decorators_not_found__(@enc2 || __encoding__, __read_encoding__, newlines + %w[xml_text xml_attr_content xml_attr_quote], nil)
+    raise String.__decorators_not_found__(@__enc2__ || __encoding__, __read_encoding__, newlines + %w[xml_text xml_attr_content xml_attr_quote], nil)
   end
 
-  def __universal_newline__?(ecopts = @ecopts)
+  def __universal_newline__?(ecopts = @__ecopts__)
     ecopts[:universal_newline] || ecopts[:newline] == :universal
   end
 
-  # A String about to be written, in the encoding the IO writes: `@enc2`, or
-  # `@enc` unless that is BINARY. CRuby's `do_writeconv`, with the newline
+  # A String about to be written, in the encoding the IO writes: `@__enc2__`, or
+  # `@__enc__` unless that is BINARY. CRuby's `do_writeconv`, with the newline
   # decorators run by `String#encode`. Measured.
   #
   # `xml: :attr`'s quote is the stream's, not each write's: CRuby's
@@ -2194,31 +2194,31 @@ end
   # made by the first write of a String that is not empty or of any number
   # other than one, which opens the quote with the first character it is given
   # and closes it when the IO closes. So a write is escaped without its quotes,
-  # and the first with anything in it opens one. `@xml_quote` is nil before
+  # and the first with anything in it opens one. `@__xml_quote__` is nil before
   # there is a converter, then whether the quote is open.
   #
   # What the first write that needs a conversion finds stays: the options in
-  # `@wpre`, and in `@wtarget` the encoding, unless that is `:current`, which
+  # `@__wpre__`, and in `@__wtarget__` the encoding, unless that is `:current`, which
   # goes on following the IO's. `reopen` leaves them, whatever it takes, but
   # for the newlines, which a binary IO it took with an IO drops. They go with
   # the converter, as bytes buffered given back take it too. Measured.
   def __encode_out__(text)
     if __tied__?
-      __refuse_for_text_mode__(text) if @textmode && !text.encoding.ascii_compatible?
+      __refuse_for_text_mode__(text) if @__textmode__ && !text.encoding.ascii_compatible?
       return text
     end
     return text unless __need_writeconv__?
     __make_writeconv__
-    options = @wpre
-    target = @wtarget
+    options = @__wpre__
+    target = @__wtarget__
     if target.equal?(:current)
       target = __write_target__
       return text if target.nil?
     end
     newline = String.__newline_decorators__(options).first
-    ascii = @writeconv&.source_encoding
+    ascii = @__writeconv__&.source_encoding
     xml = options[:xml]
-    if (xml == :attr || xml.equal?(XML_BOTH)) && @xml_quote.nil?
+    if (xml == :attr || xml.equal?(XML_BOTH)) && @__xml_quote__.nil?
       __xml_quote__(false)
       IO.__unfinished__[self] = true
     end
@@ -2236,7 +2236,7 @@ end
       # No conversion: the decorators work on the bytes, which a text mode
       # IO — any newline option makes one, `xml:` does not — wants
       # ASCII-compatible.
-      if !text.encoding.ascii_compatible? && (@textmode || %i[newline universal_newline crlf_newline cr_newline lf_newline].any? { |key| @ecopts[key] })
+      if !text.encoding.ascii_compatible? && (@__textmode__ || %i[newline universal_newline crlf_newline cr_newline lf_newline].any? { |key| @__ecopts__[key] })
         __refuse_for_text_mode__(text)
       end
       return text if newline.nil? && xml.nil?
@@ -2252,7 +2252,7 @@ end
       # through (#420).
       # The quote goes in before the second, so one that raises leaves it
       # open but unwritten, as CRuby's converter does. Measured.
-      return @writeconv.convert(__open_quote__(text.encode(ascii, **options), xml))
+      return @__writeconv__.convert(__open_quote__(text.encode(ascii, **options), xml))
     end
     # In its own encoding a String is still decorated: CRuby's `encode`
     # runs the decorators over its bytes, invalid ones and all.
@@ -2264,12 +2264,12 @@ end
     raise ArgumentError, "ASCII incompatible string written for text mode IO without encoding conversion: #{text.encoding}"
   end
 
-  # The encoding the IO writes: `@enc2`, or `@enc` unless that is BINARY.
-  def __write_target__ = @enc2 || (@enc == Encoding::BINARY ? nil : @enc)
+  # The encoding the IO writes: `@__enc2__`, or `@__enc__` unless that is BINARY.
+  def __write_target__ = @__enc2__ || (@__enc__ == Encoding::BINARY ? nil : @__enc__)
 
   # CRuby's `NEED_WRITECONV`.
   def __need_writeconv__?
-    !(@enc.nil? || @enc == Encoding::BINARY) || @textmode || __newline_decorator__? || !@ecopts[:xml].nil?
+    !(@__enc__.nil? || @__enc__ == Encoding::BINARY) || @__textmode__ || __newline_decorator__? || !@__ecopts__[:xml].nil?
   end
 
   # CRuby's `make_writeconv`. For an encoding that is not ASCII-compatible it
@@ -2280,18 +2280,18 @@ end
   # an encoding, or with a converter to go on through, the encoding stays as
   # well. Measured.
   def __make_writeconv__
-    return if @wpre
+    return if @__wpre__
     options = __write_ecopts__
     target = __write_target__
     ascii = target && Encoding::Converter.asciicompat_encoding(target)
     unless ascii.nil?
-      @writeconv = __converter__(ascii, target, options.slice(:invalid, :undef, :replace))
-      @finalizer&.writeconv = @writeconv
+      @__writeconv__ = __converter__(ascii, target, options.slice(:invalid, :undef, :replace))
+      @__finalizer__&.writeconv = @__writeconv__
       IO.__unfinished__[self] = true
     end
     stateful = options[:xml] == :attr || options[:xml].equal?(XML_BOTH)
-    @wtarget = target.nil? || ascii || stateful ? target : :current
-    @wpre = options
+    @__wtarget__ = target.nil? || ascii || stateful ? target : :current
+    @__wpre__ = options
   end
 
   # What `encode` with `xml: :attr` made, in an ASCII-compatible encoding,
@@ -2300,7 +2300,7 @@ end
   def __open_quote__(quoted, xml)
     return quoted unless xml == :attr
     content = quoted.byteslice(1, quoted.bytesize - 2)
-    return content if content.empty? || @xml_quote
+    return content if content.empty? || @__xml_quote__
     __xml_quote__(true)
     "\"".b.force_encoding(content.encoding) << content
   end
@@ -2311,13 +2311,13 @@ end
   # character a write began and none finished. The write buffer goes first,
   # as CRuby's closing write follows it there. Measured.
   #
-  # `@wsynced` is `sync` as it reached the write side when that closes, for
+  # `@__wsynced__` is `sync` as it reached the write side when that closes, for
   # `__wsync__`: a `sync=` after a `close_write` reaches only the read side.
   def __finish_writeconv__
-    @wsynced = @sync
+    @__wsynced__ = @__sync__
     __flush_buffer__
-    quote = __closing_quote__(@xml_quote)
-    converter = @writeconv
+    quote = __closing_quote__(@__xml_quote__)
+    converter = @__writeconv__
     __clear_writeconv__
     return if quote.nil? && converter.nil?
     closing = IO.__closing__(quote, converter)
@@ -2330,8 +2330,8 @@ end
   # the next flush tries it again, as CRuby keeps it, and a closed IO's,
   # which nothing can send, stays where it is.
   def __flush_buffer__
-    buffer = @wbuf
-    return if buffer.nil? || buffer.empty? || @closed || @wclosed
+    buffer = @__wbuf__
+    return if buffer.nil? || buffer.empty? || @__closed__ || @__wclosed__
     bytes = buffer.b
     buffer.__splice__(0, buffer.bytesize, "")
     sent = 0
@@ -2348,28 +2348,28 @@ end
   # finalizer, which sends it if the collector frees the IO, and the IO kept
   # among those the program's end finishes, which sends it then.
   def __wbuf__
-    @wbuf = "".b
-    @finalizer&.wbuf = @wbuf
+    @__wbuf__ = "".b
+    @__finalizer__&.wbuf = @__wbuf__
     IO.__unfinished__[self] = true
-    @wbuf
+    @__wbuf__
   end
 
   # The write side's `FMODE_SYNC`.
-  def __wsync__ = @wclosed ? @wsynced : @sync
+  def __wsync__ = @__wclosed__ ? @__wsynced__ : @__sync__
 
   # The converter gone unfinished, with the quote.
   def __clear_writeconv__
-    @writeconv = nil
-    @wpre = nil
+    @__writeconv__ = nil
+    @__wpre__ = nil
     __xml_quote__(nil)
   end
 
   # Where the attribute's quote is, and what the converter is, which the
   # finalizer is told.
   def __xml_quote__(state)
-    @xml_quote = state
-    @finalizer&.quote = __closing_quote__(state)
-    @finalizer&.writeconv = @writeconv
+    @__xml_quote__ = state
+    @__finalizer__&.quote = __closing_quote__(state)
+    @__finalizer__&.writeconv = @__writeconv__
   end
 
   def __closing_quote__(open)
@@ -2458,15 +2458,15 @@ end
   end
 
   def __finish__
-    __finish_writeconv__ unless @closed || @wclosed
+    __finish_writeconv__ unless @__closed__ || @__wclosed__
   end
 
   # The options a write transcodes with: CRuby's `make_writeconv` leaves out
   # the decorator for reading, universal newline, and `newline:` overrides
   # the other newline options.
   def __write_ecopts__
-    return @ecopts.reject { |key, _| %i[newline universal_newline crlf_newline cr_newline lf_newline].include?(key) } if @ecopts[:newline] == :universal
-    @ecopts.reject { |key, _| key == :universal_newline }
+    return @__ecopts__.reject { |key, _| %i[newline universal_newline crlf_newline cr_newline lf_newline].include?(key) } if @__ecopts__[:newline] == :universal
+    @__ecopts__.reject { |key, _| key == :universal_newline }
   end
 
   # --- the read buffer -----------------------------------------------------
@@ -2478,16 +2478,16 @@ end
   # of CRuby's 128KB. The upgrade is a line read that does not cost with the
   # buffer, and 128KB for any read converter.
   def __fill__(want = __stream_in__? && !__plain_readconv__? ? READ_CONVERTER_BYTES : 65536)
-    chunk = IO.__check__(__read_wait__(want), @path)
+    chunk = IO.__check__(__read_wait__(want), @__path__)
     return false if chunk.empty?
-    @rbuf << chunk
+    @__rbuf__ << chunk
     true
   end
 
   # A read that waits for a nonblocking descriptor to have something, as
   # CRuby does for the pipes and sockets it makes nonblocking.
   def __read_wait__(want)
-    waits = @__read_kind_fd__ == @fileno ? @__read_waits__ : __waits_in_read__?
+    waits = @__read_kind_fd__ == @__fileno__ ? @__read_waits__ : __waits_in_read__?
     loop do
       # A blocking descriptor would stop every thread: wait for it first.
       # Alone, the main thread waits first too on a pipe or a terminal, in a
@@ -2496,31 +2496,31 @@ end
       # read answers EAGAIN and waits below, and a listening one is never
       # readable but answers ENOTCONN — nor on a file, which never waits.
       if __thread_others__
-        IO.__wait__([[self, IO::READABLE]], @timeout, true) || raise(IO::TimeoutError, "Blocking operation timed out!")
-        raise IOError, "stream closed in another thread" if @closed
+        IO.__wait__([[self, IO::READABLE]], @__timeout__, true) || raise(IO::TimeoutError, "Blocking operation timed out!")
+        raise IOError, "stream closed in another thread" if @__closed__
       elsif waits
-        IO.__wait__([[self, IO::READABLE]], @timeout, true) || raise(IO::TimeoutError, "Blocking operation timed out!")
+        IO.__wait__([[self, IO::READABLE]], @__timeout__, true) || raise(IO::TimeoutError, "Blocking operation timed out!")
       end
       # A blocking pipe or terminal is read outside the lock while another
       # thread is alive; what cuts that short is met here.
-      chunk = __fd_read__(@fileno, want, waits)
+      chunk = __fd_read__(@__fileno__, want, waits)
       if chunk == IO.__eintr__
         Thread.__check_interrupts__
-        raise IOError, "stream closed in another thread" if @closed
+        raise IOError, "stream closed in another thread" if @__closed__
         next
       end
       return chunk unless chunk == IO.__eagain__
-      IO.__wait__([[self, IO::READABLE]], @timeout) || raise(IO::TimeoutError, "Blocking operation timed out!")
+      IO.__wait__([[self, IO::READABLE]], @__timeout__) || raise(IO::TimeoutError, "Blocking operation timed out!")
     end
   end
 
   # Whether a `read(2)` of this descriptor can block for ever: a pipe, a FIFO
   # or a character device. Asked once per descriptor; the answer is kept in
-  # `@__read_waits__` for the `@fileno` in `@__read_kind_fd__`, which is all
+  # `@__read_waits__` for the `@__fileno__` in `@__read_kind_fd__`, which is all
   # a fill reads afterwards.
   def __waits_in_read__?
-    @__read_kind_fd__ = @fileno
-    @__read_waits__ = IO.__can_block__?(@fileno)
+    @__read_kind_fd__ = @__fileno__
+    @__read_waits__ = IO.__can_block__?(@__fileno__)
   end
 
   # Whether a `write(2)` of the descriptor writes go to can block for ever,
@@ -2547,8 +2547,8 @@ end
   # The write buffer goes first, as CRuby's `writev` sends it ahead of these
   # bytes; with no descriptor left to write to, that is a closed stream.
   def __write_all__(text)
-    __flush_buffer__ unless @wbuf.nil? || @wbuf.empty?
-    raise IOError, "closed stream" if @closed || @wclosed
+    __flush_buffer__ unless @__wbuf__.nil? || @__wbuf__.empty?
+    raise IOError, "closed stream" if @__closed__ || @__wclosed__
     total = text.bytesize
     loop do
       written = __write_once__(text)
@@ -2569,18 +2569,18 @@ end
   def __write_once__(text)
     waits = __waits_in_write__?
     loop do
-      IO.__wait__([[self, IO::WRITABLE]], @timeout, true) || raise(IO::TimeoutError, "Blocking operation timed out!") if __thread_others__
+      IO.__wait__([[self, IO::WRITABLE]], @__timeout__, true) || raise(IO::TimeoutError, "Blocking operation timed out!") if __thread_others__
       result = __fd_write__(__wfd__, text, waits)
       if result == IO.__eagain__
-        IO.__wait__([[self, IO::WRITABLE]], @timeout) || raise(IO::TimeoutError, "Blocking operation timed out!")
+        IO.__wait__([[self, IO::WRITABLE]], @__timeout__) || raise(IO::TimeoutError, "Blocking operation timed out!")
         next
       end
       if result == IO.__eintr__
         __write_interrupted__
         next
       end
-      __epipe__(result) if @sigpipe
-      written = IO.__check__(result, @path)[0]
+      __epipe__(result) if @__sigpipe__
+      written = IO.__check__(result, @__path__)[0]
       __write_interrupted__ if waits && written < text.bytesize
       return written
     end
@@ -2591,7 +2591,7 @@ end
   # `rb_notify_fd_close` makes it.
   def __write_interrupted__
     Thread.__check_interrupts__
-    raise IOError, "stream closed in another thread" if @closed || @wclosed
+    raise IOError, "stream closed in another thread" if @__closed__ || @__wclosed__
   end
 
   # CRuby's `io_binwrite`, for bytes a write has converted. A `sync` IO or a
@@ -2602,8 +2602,8 @@ end
   def __binwrite__(bytes, nosync = false)
     length = bytes.bytesize
     return 0 if length == 0
-    return __write_all__(bytes) if !nosync && (@tty || __wsync__)
-    buffer = @wbuf || __wbuf__
+    return __write_all__(bytes) if !nosync && (@__tty__ || __wsync__)
+    buffer = @__wbuf__ || __wbuf__
     return __write_all__(bytes) if buffer.bytesize + length >= WBUF_CAPA__
     buffer.__splice__(buffer.bytesize, 0, bytes)
     length
@@ -2614,7 +2614,7 @@ end
   # that holds something and there is room, as CRuby's does, and otherwise
   # written with it. Nothing to write writes nothing, closed or not.
   def __binwritev__(bytes)
-    buffer = @wbuf
+    buffer = @__wbuf__
     if !buffer.nil? && !buffer.empty? && buffer.bytesize + bytes.bytesize <= WBUF_CAPA__
       buffer.__splice__(buffer.bytesize, 0, bytes)
       return bytes.bytesize
@@ -2627,12 +2627,12 @@ end
   WBUF_CAPA__ = 8192
   private_constant :WBUF_CAPA__
 
-  def __held_bytes__ = @rbuf.bytesize
+  def __held_bytes__ = @__rbuf__.bytesize
 
   def __take__(count)
-    count = @rbuf.bytesize if count > @rbuf.bytesize
-    taken = @rbuf.byteslice(0, count)
-    @rbuf = @rbuf.byteslice(count, @rbuf.bytesize - count)
+    count = @__rbuf__.bytesize if count > @__rbuf__.bytesize
+    taken = @__rbuf__.byteslice(0, count)
+    @__rbuf__ = @__rbuf__.byteslice(count, @__rbuf__.bytesize - count)
     taken
   end
 
@@ -2679,8 +2679,8 @@ end
     # The short path (#41): what is asked for is buffered already, on an IO
     # that reads with no converter and holds no characters, so it is those
     # bytes, as the long path comes to them.
-    if @rplain && buffer.nil? && Integer === length && length > 0 && length <= @rbuf.bytesize && !(@closed || @access == 1 || @access == 3) &&
-       (@wbuf.nil? || @wbuf.bytesize == 0) && (@cbuf.nil? || @cbuf.bytesize == 0)
+    if @__rplain__ && buffer.nil? && Integer === length && length > 0 && length <= @__rbuf__.bytesize && !(@__closed__ || @__access__ == 1 || @__access__ == 3) &&
+       (@__wbuf__.nil? || @__wbuf__.bytesize == 0) && (@__cbuf__.nil? || @__cbuf__.bytesize == 0)
       return __take__(length)
     end
     __readable__
@@ -2705,17 +2705,17 @@ end
         # A replacement past a lone CR comes before its `"\n"`, as the
         # transcoder that comes first makes it (#626), and so does an `xml:`
         # charref (#675).
-        bytes = __take__(@rbuf.bytesize)
+        bytes = __take__(@__rbuf__.bytesize)
         # One that opens the quote on a character with no spelling is the
         # converter's to make, the replacement before the quote, as `gets`
         # and `getc` do (#636, #657, #679). Measured.
-        if __opens_on_replacement__?(bytes, @rquote)
-          __stream_from__(bytes, @rquote)
-          bytes = __take__(@rbuf.bytesize)
+        if __opens_on_replacement__?(bytes, @__rquote__)
+          __stream_from__(bytes, @__rquote__)
+          bytes = __take__(@__rbuf__.bytesize)
         end
         out = if __stream_in__?
           __decode__(bytes)
-        elsif __replaces_past_cr__? && __universal_newline__? && (__replaces_invalid__? || @ecopts[:undef] == :replace || __xml_in__)
+        elsif __replaces_past_cr__? && __universal_newline__? && (__replaces_invalid__? || @__ecopts__[:undef] == :replace || __xml_in__)
           __decode__(bytes, bytes, true)
         else
           __newlines_in__(__decode__(bytes))
@@ -2734,10 +2734,10 @@ end
     else
       length = Integer.__index__(length)
       raise ArgumentError, "negative length #{length} given" if length < 0
-      while @rbuf.bytesize < length
-        break unless __fill__(length - @rbuf.bytesize)
+      while @__rbuf__.bytesize < length
+        break unless __fill__(length - @__rbuf__.bytesize)
       end
-      if @rbuf.empty? && length > 0
+      if @__rbuf__.empty? && length > 0
         buffer.clear unless buffer.nil?
         return nil
       end
@@ -2772,17 +2772,17 @@ end
       buffer&.clear
       return buffer || ""
     end
-    if @rbuf.empty?
-      chunk = blocking ? __read_wait__(length) : __fd_read__(@fileno, length)
+    if @__rbuf__.empty?
+      chunk = blocking ? __read_wait__(length) : __fd_read__(@__fileno__, length)
       return :wait_readable if !blocking && chunk == IO.__eagain__
-      IO.__check__(chunk, @path)
+      IO.__check__(chunk, @__path__)
       if chunk.empty?
         buffer&.clear
         return nil
       end
-      @rbuf << chunk
+      @__rbuf__ << chunk
     end
-    out = __take__(length < @rbuf.bytesize ? length : @rbuf.bytesize)
+    out = __take__(length < @__rbuf__.bytesize ? length : @__rbuf__.bytesize)
     return out if buffer.nil?
     # The caller's buffer keeps its encoding.
     encoding = buffer.encoding
@@ -2796,7 +2796,7 @@ end
   # nothing, as the `id_signo` CRuby hides in it asks (ruby-lang #14413).
   def __epipe__(result)
     return unless result == Errno::EPIPE::Errno
-    error = SystemCallError.new(@path, result, "rb_sys_fail_on_write")
+    error = SystemCallError.new(@__path__, result, "rb_sys_fail_on_write")
     IO.__epipe_signal__ = error
     raise error
   end
@@ -2807,12 +2807,12 @@ end
     attr_accessor :__epipe_signal__
   end
 
-  def __signal_on_epipe__ = @sigpipe
+  def __signal_on_epipe__ = @__sigpipe__
 
   # Only `STDOUT` has CRuby's `FMODE_SIGNAL_ON_EPIPE`. Measured: a broken
   # STDERR is an `Errno::EPIPE` and status 1.
   def __signal_on_epipe__!
-    @sigpipe = true
+    @__sigpipe__ = true
     self
   end
 
@@ -2844,14 +2844,14 @@ end
 
   def __nonblock__
     nonblock = File::NONBLOCK
-    flags = IO.__check__(__fd_fcntl__(@fileno, IO.__fcntl__("F_GETFL"), 0))[0]
-    IO.__check__(__fd_fcntl__(@fileno, IO.__fcntl__("F_SETFL"), flags | nonblock)) if flags & nonblock == 0
+    flags = IO.__check__(__fd_fcntl__(@__fileno__, IO.__fcntl__("F_GETFL"), 0))[0]
+    IO.__check__(__fd_fcntl__(@__fileno__, IO.__fcntl__("F_SETFL"), flags | nonblock)) if flags & nonblock == 0
   end
 
   def sysread(length, buffer = nil)
     __readable__
     __byte_readable__
-    raise IOError, "sysread for buffered IO" unless @rbuf.empty?
+    raise IOError, "sysread for buffered IO" unless @__rbuf__.empty?
     # Measured: a zero length hands the buffer back as it was.
     return buffer || "" if Integer.__index__(length) == 0
     readpartial(length, buffer)
@@ -2882,17 +2882,17 @@ end
   end
 
   # `IO.copy_stream` names the call where `pread` names the path.
-  def __pread_bytes__(length, offset, path = @path)
-    IO.__check__(__fd_pread__(@fileno, length, offset), path)
+  def __pread_bytes__(length, offset, path = @__path__)
+    IO.__check__(__fd_pread__(@__fileno__, length, offset), path)
   end
 
   # Where the descriptor is, whatever is buffered.
   def __fd_pos__
-    IO.__check__(__fd_seek__(@fileno, 0, IO::SEEK_CUR), @path)[0]
+    IO.__check__(__fd_seek__(@__fileno__, 0, IO::SEEK_CUR), @__path__)[0]
   end
 
   def __fd_pos__=(offset)
-    IO.__check__(__fd_seek__(@fileno, offset, IO::SEEK_SET), @path)
+    IO.__check__(__fd_seek__(@__fileno__, offset, IO::SEEK_SET), @__path__)
   end
 
   # Only `gets` and `readline` set `$_`: `readlines` and `each_line` leave it.
@@ -2912,18 +2912,18 @@ end
   # is without the dozen questions it asks on the way. False where it does
   # not apply, for the long path to read the line; nil at the end.
   def __plain_line__
-    return false if @closed || !@rplain || @access == 1 || @access == 3
-    enc = @enc || Encoding.default_external
+    return false if @__closed__ || !@__rplain__ || @__access__ == 1 || @__access__ == 3
+    enc = @__enc__ || Encoding.default_external
     return false unless enc.ascii_compatible?
-    written = @wbuf
+    written = @__wbuf__
     __flush_buffer__ if written && written.bytesize > 0
-    line = @rbuf.__take_line__(NEWLINE__, enc.__index__)
+    line = @__rbuf__.__take_line__(NEWLINE__, enc.__index__)
     if line.nil?
       line = __line_bytes__(NEWLINE__, nil, true)
       return nil if line.nil?
       line.__force_encoding__(enc.__index__)
     end
-    __global_store__(:$., ARGF.__io_line__(self, @lineno += 1))
+    __global_store__(:$., ARGF.__io_line__(self, @__lineno__ += 1))
     line
   end
 
@@ -2979,7 +2979,7 @@ end
     if separator.nil? && limit.nil?
       line = read
       return nil if line.empty?
-      __global_store__(:$., ARGF.__io_line__(self, @lineno += 1))
+      __global_store__(:$., ARGF.__io_line__(self, @__lineno__ += 1))
       return line
     end
     # An empty separator is paragraph mode: a blank line ends the record.
@@ -2992,11 +2992,11 @@ end
     # one character in UTF-16 (#477). So does a limit on any line where the
     # converter makes other bytes than it reads (#479).
     stream = __stream_in__?
-    kept = @rkept || __newline_on_bytes__?
+    kept = @__rkept__ || __newline_on_bytes__?
     # So does one with a converter that has finished, which it finds (#551).
     # A read without options has no decorator, and looks no further.
-    options = !@ecopts.empty?
-    converted = paragraph ? __read_converter__? : stream || __chars_read__? || options && __xml_in__ || @rfinished && __read_converter__? || !limit.nil? && __converts_bytes__?
+    options = !@__ecopts__.empty?
+    converted = paragraph ? __read_converter__? : stream || __chars_read__? || options && __xml_in__ || @__rfinished__ && __read_converter__? || !limit.nil? && __converts_bytes__?
     # Blank lines before a record are not part of it.
     __swallow__(unit) if paragraph
     wanted = nil
@@ -3006,7 +3006,7 @@ end
         wanted = wanted.encode(__encoding__) unless wanted.encoding == __encoding__ || wanted.ascii_only? && __encoding__.ascii_compatible?
         wanted = wanted.b
       rescue EncodingError
-        raise if @enc2.nil?
+        raise if @__enc2__.nil?
         wanted = nil
       end
       # CRuby's `at_char_boundary`: with an internal encoding the separator
@@ -3014,7 +3014,7 @@ end
       # character starts. Where its bytes as read could be found inside a
       # character, or it has none, the line is read from what the
       # converter makes, a line of bytes at a time (#552).
-      if !@enc2.nil? && (wanted.nil? || !__starts_char__?(wanted))
+      if !@__enc2__.nil? && (wanted.nil? || !__starts_char__?(wanted))
         converted = true
         wanted = __newline_read__
       end
@@ -3028,7 +3028,7 @@ end
       # A line with a byte to replace goes back, CRs and all, to be read as
       # the converter makes it, its universal newline in it (#610).
       if line && options && __replaces_invalid__? && !bytes.valid_encoding?
-        @rbuf = taken.b + @rbuf
+        @__rbuf__ = taken.b + @__rbuf__
         line = __converted_line__(separator, wanted, limit, unit)
       elsif cr
         line = __before_newline__(line, __read_ahead__(cr, unit), cr, unit, limit && limit > 0 ? limit : nil)
@@ -3039,7 +3039,7 @@ end
       # A line with a byte to replace goes back, to be read as the converter
       # makes it, which `__moved_past__?` sends on past it (#609).
       if line && options && __replaces_invalid__? && !bytes.valid_encoding?
-        @rbuf = bytes.b + @rbuf
+        @__rbuf__ = bytes.b + @__rbuf__
         line = __converted_line__(separator, wanted, limit, unit)
       end
     end
@@ -3051,7 +3051,7 @@ end
     line = __chomp_line__(line, separator) if chomp && !separator.nil?
     # `$.` is this IO's line number, or `ARGF`'s when this is the file
     # `ARGF` is reading, as CRuby's `rb_io_getline_1` sets it (#41).
-    __global_store__(:$., ARGF.__io_line__(self, @lineno += 1)) if counted
+    __global_store__(:$., ARGF.__io_line__(self, @__lineno__ += 1)) if counted
     line
   end
 
@@ -3073,7 +3073,7 @@ end
   # Whether the read converter makes other bytes than it reads: an internal
   # encoding, or an external one that is not ASCII-compatible.
   def __converts_bytes__?
-    __read_converter__? && (!@enc2.nil? || !__encoding__.ascii_compatible?)
+    __read_converter__? && (!@__enc2__.nil? || !__encoding__.ascii_compatible?)
   end
 
   # Whether the limit, rather than the separator or the end, ended a line
@@ -3149,13 +3149,13 @@ end
         room = limit.nil? || limit <= 0 ? limit : [limit - out.bytesize, 1].max
         if stream
           piece = runs ? __chars_to_line_end__(sep, room) : __next_chars__(goes_on)
-        elsif @rfinished
+        elsif @__rfinished__
           piece = nil
         elsif unit
           bytes, cr, taken = __universal_line__(wanted, room, unit)
-          quote = @rquote
+          quote = @__rquote__
           piece = bytes.nil? ? nil : __decode__(bytes, taken)
-          if piece && !@ecopts.empty? && (__moved_past__?(piece, bytes, sep, wanted, enc) || __opens_on_replacement__?(bytes, quote))
+          if piece && !@__ecopts__.empty? && (__moved_past__?(piece, bytes, sep, wanted, enc) || __opens_on_replacement__?(bytes, quote))
             # The bytes as read go back, CRs and all, for the converter's
             # universal newline to make them as CRuby's does (#610, #636).
             __stream_from__(taken, quote)
@@ -3168,9 +3168,9 @@ end
           end
         else
           bytes = __line_bytes__(wanted, room)
-          quote = @rquote
+          quote = @__rquote__
           piece = bytes.nil? ? nil : __newlines_in__(__decode__(__rest_of_char__(bytes, wanted)))
-          if piece && !@ecopts.empty? && __moved_past__?(piece, bytes, sep, wanted, enc)
+          if piece && !@__ecopts__.empty? && __moved_past__?(piece, bytes, sep, wanted, enc)
             __stream_from__(bytes, quote)
             stream = true
             piece = __next_chars__(goes_on)
@@ -3204,9 +3204,9 @@ end
   # byte would go a character at a time, ten times slower. With `xml:` the
   # converter keeps an attribute's quote, so it stays (#566).
   def __leave_stream__
-    return unless @rstream && __xml_in__.nil? && @readconv&.__idle__?
-    @rstream = false
-    @readconv = nil
+    return unless @__rstream__ && __xml_in__.nil? && @__readconv__&.__idle__?
+    @__rstream__ = false
+    @__readconv__ = nil
   end
 
   # Whether the decorator moved what came before the separator in a line of
@@ -3223,10 +3223,10 @@ end
     return false if sep.nil? || wanted.nil?
     xml = __xml_in__
     # Without an internal encoding only a decorator converts.
-    return !xml.nil? || !@enc2.nil? unless bytes.valid_encoding?
+    return !xml.nil? || !@__enc2__.nil? unless bytes.valid_encoding?
     return false if xml.nil?
     # Valid bytes are replaced only where they have no character there.
-    return false if @ecopts[:undef] != :replace || __ends_in__?(piece, sep) || !__ends_in__?(bytes, wanted)
+    return false if @__ecopts__[:undef] != :replace || __ends_in__?(piece, sep) || !__ends_in__?(bytes, wanted)
     made = piece.b
     at = made.index(sep)
     at = made.index(sep, at + 1) until at.nil? || __char_edge__(made, 0, at, enc) == at
@@ -3239,7 +3239,7 @@ end
   # replacement comes out before the quote opens, where `String#encode`
   # puts the quote first (#636). Measured.
   def __opens_on_replacement__?(bytes, quote)
-    return false if quote || @enc2.nil? || __xml_in__ != :attr || !__universal_newline__?
+    return false if quote || @__enc2__.nil? || __xml_in__ != :attr || !__universal_newline__?
     char = bytes.byteslice(0, 4).force_encoding(__encoding__)[0]
     return false if char.nil? || !char.valid_encoding?
     char.encode(__read_encoding__)
@@ -3251,7 +3251,7 @@ end
   # Whether the read converter replaces bytes that make no character: an
   # internal encoding and `invalid: :replace`. Without one nothing converts.
   def __replaces_invalid__?
-    !@enc2.nil? && @ecopts[:invalid] == :replace
+    !@__enc2__.nil? && @__ecopts__[:invalid] == :replace
   end
 
   # Whether `text` ends in the bytes of `tail`, a byte at a time: a copy of
@@ -3272,11 +3272,11 @@ end
   # finishes a conversion that CRuby's goes on with. One that opened an
   # attribute's quote before has it open.
   def __stream_from__(bytes, quote)
-    @rbuf = bytes.b + @rbuf
-    @rquote = quote
-    @rstream = true
-    @readconv = __make_readconv__
-    @readconv.primitive_convert("a".encode(__encoding__), "".b, nil, nil, Encoding::Converter::PARTIAL_INPUT) if @rquote
+    @__rbuf__ = bytes.b + @__rbuf__
+    @__rquote__ = quote
+    @__rstream__ = true
+    @__readconv__ = __make_readconv__
+    @__readconv__.primitive_convert("a".encode(__encoding__), "".b, nil, nil, Encoding::Converter::PARTIAL_INPUT) if @__rquote__
   end
 
   # The start of the character of `out` that `at` is in, or `at` itself
@@ -3303,7 +3303,7 @@ end
   # Where a limit ends a line of what the read converter made: after the
   # character it lands in.
   def __limit_cut__(out, limit, enc)
-    return __kept_limit_cut__(out, limit, enc) if @rkept || __newline_on_bytes__?
+    return __kept_limit_cut__(out, limit, enc) if @__rkept__ || __newline_on_bytes__?
     cut = 0
     out.dup.force_encoding(enc).each_char { |char| break if cut >= limit; cut += char.bytesize }
     cut
@@ -3349,7 +3349,7 @@ end
     end
     read = read[0, count]
     back = taken.bytesize == bytes.bytesize ? read.bytesize : __taken_of__(read, taken)
-    @rbuf = taken.byteslice(back, taken.bytesize - back).b << @rbuf
+    @__rbuf__ = taken.byteslice(back, taken.bytesize - back).b << @__rbuf__
     made.byteslice(0, upto)
   end
 
@@ -3383,11 +3383,11 @@ end
   # What a character read makes on its own through the read converter, as
   # `__decode__` makes it, without an attribute's quotes; nil where it raises.
   def __made_alone__(char, xml)
-    if @enc2.nil?
+    if @__enc2__.nil?
       return char if xml.nil?
       one = String.__escape_xml__(char, xml)
     else
-      one = char.encode(__read_encoding__, **__read_options__(@ecopts))
+      one = char.encode(__read_encoding__, **__read_options__(@__ecopts__))
     end
     xml == :attr ? one[1...-1] : one
   rescue EncodingError
@@ -3445,7 +3445,7 @@ end
       high = __encoding__ == Encoding::UTF_16BE ? bytes.getbyte(-2) : bytes.getbyte(-1)
       want = 2 if high & 0xFC == 0xD8
     end
-    while want > 0 && (!@rbuf.empty? || __fill__)
+    while want > 0 && (!@__rbuf__.empty? || __fill__)
       more = __take__(want)
       bytes << more
       want -= more.bytesize
@@ -3462,7 +3462,7 @@ end
     return bytes if enc == Encoding::UTF_8 || enc.dummy? || enc.__single_byte__
     return bytes if wanted && bytes.end_with?(wanted)
     extra = 0
-    while extra < 4 && __last_cut_short__?(bytes, enc) && (!@rbuf.empty? || __fill__)
+    while extra < 4 && __last_cut_short__?(bytes, enc) && (!@__rbuf__.empty? || __fill__)
       bytes << __take__(1)
       extra += 1
     end
@@ -3487,7 +3487,7 @@ end
     from = 0
     cut = nil
     # In UTF-16 or UTF-32 a separator counts only at a character's start.
-    step = @enc2.nil? ? 1 : (__newline_unit__ || 1)
+    step = @__enc2__.nil? ? 1 : (__newline_unit__ || 1)
     # With no read converter too, CRuby's `at_char_boundary` takes it only
     # where a character of the external encoding starts, so a "\\" that
     # ends one in Shift_JIS, Big5 or GBK is no separator (#597). `edge` is
@@ -3497,20 +3497,20 @@ end
     while cut.nil?
       # The buffer is bytes: `String#index` would tabulate every character
       # of it on each line, so a file a line at a time was quadratic (#585).
-      at = wanted.nil? ? nil : @rbuf.__byte_index__(wanted, from)
-      at = @rbuf.__byte_index__(wanted, at + 1) while at && at % step != 0
-      until chars.nil? || at.nil? || (edge = __char_edge__(@rbuf, edge, at, chars)) == at
-        at = @rbuf.__byte_index__(wanted, at + 1)
+      at = wanted.nil? ? nil : @__rbuf__.__byte_index__(wanted, from)
+      at = @__rbuf__.__byte_index__(wanted, at + 1) while at && at % step != 0
+      until chars.nil? || at.nil? || (edge = __char_edge__(@__rbuf__, edge, at, chars)) == at
+        at = @__rbuf__.__byte_index__(wanted, at + 1)
       end
       if at
         cut = at + wanted.bytesize
-      elsif !limit.nil? && limit > 0 && @rbuf.bytesize >= limit
+      elsif !limit.nil? && limit > 0 && @__rbuf__.bytesize >= limit
         cut = limit
       else
-        from = @rbuf.bytesize - (wanted.nil? ? 0 : wanted.bytesize) + 1
+        from = @__rbuf__.bytesize - (wanted.nil? ? 0 : wanted.bytesize) + 1
         from = 0 if from < 0
         unless __fill__
-          cut = @rbuf.bytesize
+          cut = @__rbuf__.bytesize
           __read_ended__ if whole
         end
       end
@@ -3525,22 +3525,22 @@ end
       enc = __encoding__
       if enc == Encoding::UTF_8
         extra = 0
-        while extra < 16 && __partial_character__(cut, @rbuf) && (cut < @rbuf.bytesize || __fill__)
+        while extra < 16 && __partial_character__(cut, @__rbuf__) && (cut < @__rbuf__.bytesize || __fill__)
           cut += 1
           extra += 1
         end
       elsif !enc.ascii_compatible? && (unit = __newline_unit__)
         loop do
           at = cut - 1 - (cut - 1) % unit
-          at -= unit if unit == 2 && at >= unit && (@rbuf.getbyte(enc == Encoding::UTF_16LE ? at + 1 : at) || 0) & 0xFC == 0xDC
-          break unless __held_cut_short__?(@rbuf.byteslice(at, cut - at), enc) && (cut < @rbuf.bytesize || __fill__)
+          at -= unit if unit == 2 && at >= unit && (@__rbuf__.getbyte(enc == Encoding::UTF_16LE ? at + 1 : at) || 0) & 0xFC == 0xDC
+          break unless __held_cut_short__?(@__rbuf__.byteslice(at, cut - at), enc) && (cut < @__rbuf__.bytesize || __fill__)
           cut += 1
         end
       elsif !enc.dummy? && !enc.__single_byte__
         # In Shift_JIS, EUC-JP, Big5, GBK and the like to the end of the
         # character, as the universal newline path does (#553, #628).
         extra = 0
-        while extra < 4 && __last_cut_short__?(@rbuf.byteslice(0, cut), enc) && (cut < @rbuf.bytesize || __fill__)
+        while extra < 4 && __last_cut_short__?(@__rbuf__.byteslice(0, cut), enc) && (cut < @__rbuf__.bytesize || __fill__)
           cut += 1
           extra += 1
         end
@@ -3635,28 +3635,28 @@ end
     unit = line[:unit]
     loop do
       scanned = line[:scanned]
-      at = @rbuf.index(line[:newline], scanned)
-      at = @rbuf.index(line[:newline], at + 1) while at && at % unit != 0
+      at = @__rbuf__.index(line[:newline], scanned)
+      at = @__rbuf__.index(line[:newline], at + 1) while at && at % unit != 0
       upto = nil
       if at.nil?
         # Whole characters only, until the end.
-        upto = line[:ended] ? @rbuf.bytesize : @rbuf.bytesize / unit * unit
-      elsif @rbuf.byteslice(at, unit) == line[:lf]
+        upto = line[:ended] ? @__rbuf__.bytesize : @__rbuf__.bytesize / unit * unit
+      elsif @__rbuf__.byteslice(at, unit) == line[:lf]
         upto = at + unit
-      elsif line[:ended] || @rbuf.bytesize >= at + 2 * unit
-        crlf = @rbuf.byteslice(at + unit, unit) == line[:lf]
-        view << @rbuf.byteslice(scanned, at - scanned)
+      elsif line[:ended] || @__rbuf__.bytesize >= at + 2 * unit
+        crlf = @__rbuf__.byteslice(at + unit, unit) == line[:lf]
+        view << @__rbuf__.byteslice(scanned, at - scanned)
         line[:crlfs] << view.bytesize if crlf
         view << line[:lf]
-        line[:lone] << view.bytesize if !crlf && @rbuf.bytesize >= at + 2 * unit
-        line[:end_cr] = view.bytesize if line[:ended] && @rbuf.bytesize == at + unit
+        line[:lone] << view.bytesize if !crlf && @__rbuf__.bytesize >= at + 2 * unit
+        line[:end_cr] = view.bytesize if line[:ended] && @__rbuf__.bytesize == at + unit
         line[:scanned] = at + (crlf ? 2 : 1) * unit
         return true
       else
         upto = at
       end
       if upto > scanned
-        view << @rbuf.byteslice(scanned, upto - scanned)
+        view << @__rbuf__.byteslice(scanned, upto - scanned)
         line[:scanned] = upto
         return true
       end
@@ -3680,9 +3680,9 @@ end
   # until the encoding changes.
   def __newline_bytes__(unit)
     enc = __encoding__
-    return @newline_bytes if @newline_bytes && @newline_bytes[0] == enc
+    return @__newline_bytes__ if @__newline_bytes__ && @__newline_bytes__[0] == enc
     cr, lf = unit == 1 ? ["\r".b, "\n".b] : ["\r".encode(enc).b, "\n".encode(enc).b]
-    @newline_bytes = [enc, cr, lf, Regexp.union(cr, lf)]
+    @__newline_bytes__ = [enc, cr, lf, Regexp.union(cr, lf)]
   end
 
   # Takes the blank lines before or between records in paragraph mode. With
@@ -3694,14 +3694,14 @@ end
     universal = !unit.nil?
     unit ||= __newline_unit__ if __read_converter__? && !__encoding__.ascii_compatible?
     unless unit
-      __take__(1) while (@rbuf.empty? ? __fill__ : true) && @rbuf.getbyte(0) == 10
+      __take__(1) while (@__rbuf__.empty? ? __fill__ : true) && @__rbuf__.getbyte(0) == 10
       return
     end
     __unpend__
     cr, lf = __newline_bytes__(unit)[1, 2]
     loop do
-      next if @rbuf.bytesize < unit && __fill__
-      head = @rbuf.byteslice(0, unit)
+      next if @__rbuf__.bytesize < unit && __fill__
+      head = @__rbuf__.byteslice(0, unit)
       break unless head == lf || (universal && head == cr)
       __take__(unit)
     end
@@ -3719,15 +3719,15 @@ end
     while __chars_read__? || stream
       if __chars_read__?
         lf = __separator_in__("\n", __read_encoding__)
-        held = @cbuf.b
+        held = @__cbuf__.b
         at = 0
         at += lf.bytesize while held.byteslice(at, lf.bytesize) == lf
-        @cbuf = held.byteslice(at, held.bytesize - at)
+        @__cbuf__ = held.byteslice(at, held.bytesize - at)
         return if __chars_held__?
       end
       next unless stream
-      return if @rfinished
-      made = __next_chars__ || (__finish_in__ if @readconv)
+      return if @__rfinished__
+      made = __next_chars__ || (__finish_in__ if @__readconv__)
       return if made.nil?
       __hold_chars__(made.b)
     end
@@ -3748,30 +3748,30 @@ end
   # CRuby's; upgrade by asking the transcoder how many bytes its first
   # character takes.
   def __hold_next__
-    if @rbuf.empty? && !__fill__
-      __finished_at_end__ unless @rmade.nil?
+    if @__rbuf__.empty? && !__fill__
+      __finished_at_end__ unless @__rmade__.nil?
       return
     end
     size = 1
-    unless @enc2.nil?
+    unless @__enc2__.nil?
       enc = __encoding__
       return if enc.dummy?
-      while @rbuf.bytesize < 4
+      while @__rbuf__.bytesize < 4
         break unless __fill__
       end
-      head = @rbuf.byteslice(0, 4).force_encoding(enc)
+      head = @__rbuf__.byteslice(0, 4).force_encoding(enc)
       size = (1..head.bytesize).find { |n| head.byteslice(0, n).valid_encoding? }
       if size.nil?
         # None is valid: converting them raises the transcoder's error.
         __take__(head.bytesize)
         __decode__(head)
-        @rbuf = head.b + @rbuf
+        @__rbuf__ = head.b + @__rbuf__
         return
       end
       # One with no spelling that opens a quote is the converter's to make,
       # the replacement before the quote (#636).
-      if __opens_on_replacement__?(head.b, @rquote)
-        __stream_from__("".b, @rquote)
+      if __opens_on_replacement__?(head.b, @__rquote__)
+        __stream_from__("".b, @__rquote__)
         made = __next_chars__
         __hold_chars__(made.b) if made
         return
@@ -3838,7 +3838,7 @@ end
   end
 
   def __next_byte__
-    return nil if @rbuf.empty? && !__fill__
+    return nil if @__rbuf__.empty? && !__fill__
     __take__(1).getbyte(0)
   end
 
@@ -3855,9 +3855,9 @@ end
   def each_byte
     return enum_for(:each_byte) unless block_given?
     __check_open__
-    until @rbuf.empty? && !__fillbuf__
-      byte = @rbuf.getbyte(0)
-      @rbuf = @rbuf.__byteslice__(1, @rbuf.bytesize - 1)
+    until @__rbuf__.empty? && !__fillbuf__
+      byte = @__rbuf__.getbyte(0)
+      @__rbuf__ = @__rbuf__.__byteslice__(1, @__rbuf__.bytesize - 1)
       yield byte
       __readable__
       __byte_readable__
@@ -3868,29 +3868,29 @@ end
   # CRuby's `io_fillbuf`, whose failure names the descriptor and the path.
   def __fillbuf__
     chunk = __read_wait__(65536)
-    raise SystemCallError.new("fd:#{@fileno} #{@path}", chunk, "io_fillbuf") if Integer === chunk
+    raise SystemCallError.new("fd:#{@__fileno__} #{@__path__}", chunk, "io_fillbuf") if Integer === chunk
     return false if chunk.empty?
-    @rbuf << chunk
+    @__rbuf__ << chunk
     true
   end
 
   # The bytes of the next character in the IO's encoding.
   def __char_length__
     encoding = __encoding__
-    first = @rbuf.getbyte(0)
+    first = @__rbuf__.getbyte(0)
     case encoding
     when Encoding::UTF_8
       return 1 if first < 0xC2 || first > 0xF4
       first >= 0xF0 ? 4 : (first >= 0xE0 ? 3 : 2)
     when Encoding::UTF_16LE, Encoding::UTF_16BE
-      high = encoding == Encoding::UTF_16LE ? @rbuf.getbyte(1).to_i : first
+      high = encoding == Encoding::UTF_16LE ? @__rbuf__.getbyte(1).to_i : first
       high & 0xFC == 0xD8 ? 4 : 2
     when Encoding::UTF_32LE, Encoding::UTF_32BE then 4
     else
       return 1 if first < 0x80 || !encoding.ascii_compatible?
       # EUC-JP, Shift_JIS and the other multibyte encodings: the String's
       # own boundaries, over the longest any of their characters is.
-      @rbuf.byteslice(0, 4).force_encoding(encoding).__char_len_at__(0)
+      @__rbuf__.byteslice(0, 4).force_encoding(encoding).__char_len_at__(0)
     end
   end
 
@@ -3898,22 +3898,22 @@ end
   # the bytes still to come would finish: `"\xA4"` in EUC-JP, where
   # `"\xA4A"` is a broken byte and then an `A`.
   def __char_cut_short__
-    @rbuf.bytesize < 4 && @rbuf.getbyte(0) >= 0x80 &&
-      @rbuf.byteslice(0, 4).force_encoding(__encoding__).__cut_short__
+    @__rbuf__.bytesize < 4 && @__rbuf__.getbyte(0) >= 0x80 &&
+      @__rbuf__.byteslice(0, 4).force_encoding(__encoding__).__cut_short__
   end
 
   def getc
     __readable__
     __readconv__
-    return __kept_char__ if @rkept && __read_converter__? || __newline_on_bytes__?
+    return __kept_char__ if @__rkept__ && __read_converter__? || __newline_on_bytes__?
     if __chars_read__?
-      held = @cbuf.dup.force_encoding(__read_encoding__)
-      return __take_char__ unless @enc2.nil? && !held.valid_encoding? && held[0].bytesize == held.bytesize
+      held = @__cbuf__.dup.force_encoding(__read_encoding__)
+      return __take_char__ unless @__enc2__.nil? && !held.valid_encoding? && held[0].bytesize == held.bytesize
       # The first byte of a longer character, read past a lone CR, is all
       # that is held: it is read again with the bytes after it (#472).
-      @rbuf = __take_chars__ << @rbuf
+      @__rbuf__ = __take_chars__ << @__rbuf__
     end
-    pended = !@rpend.nil?
+    pended = !@__rpend__.nil?
     __unpend__
     if __stream_in__?
       made = __next_chars__ || __finish_in__
@@ -3922,8 +3922,8 @@ end
       __leave_stream__
       return __take_char__
     end
-    return __finish_in__ if @rfinished && __read_converter__?
-    if @rbuf.empty? && !__fill__
+    return __finish_in__ if @__rfinished__ && __read_converter__?
+    if @__rbuf__.empty? && !__fill__
       finish = __finish_in__
       return nil if finish.nil?
       __hold_chars__(finish.b)
@@ -3931,18 +3931,18 @@ end
     end
     # The lead byte says how many more there are: reading further ahead
     # would wait on a pipe for bytes nobody has written.
-    nil while @rbuf.bytesize < 2 && __encoding__.name.start_with?("UTF-16") && __fill__(1)
+    nil while @__rbuf__.bytesize < 2 && __encoding__.name.start_with?("UTF-16") && __fill__(1)
     nil while __char_cut_short__ && __fill__(1)
     length = __char_length__
-    nil while @rbuf.bytesize < length && __fill__(length - @rbuf.bytesize)
-    length = @rbuf.bytesize if length > @rbuf.bytesize
+    nil while @__rbuf__.bytesize < length && __fill__(length - @__rbuf__.bytesize)
+    length = @__rbuf__.bytesize if length > @__rbuf__.bytesize
     char = __take__(length).force_encoding(__encoding__)
     unless char.valid_encoding?
       # A byte to replace: CRuby's converter is given all that is buffered
       # and does not stop for a replacement, so `pos` is past what it went on
       # to (#609). From here the IO reads through it, as after such a line.
       if __replaces_invalid__?
-        __stream_from__(char, @rquote)
+        __stream_from__(char, @__rquote__)
         return getc
       end
       return __hand_out__(__broken_char__(char))
@@ -3951,16 +3951,16 @@ end
     # character for, through a converter of more than one transcoder: it goes
     # on past the replacement too, where one transcoder stops (#634). Telling
     # an undefined character costs a conversion, so only where it is set.
-    if @ecopts[:undef] == :replace && !@enc2.nil? && __xml_in__.nil? && __undefined_in_read__?(char)
-      __stream_from__(char, @rquote)
+    if @__ecopts__[:undef] == :replace && !@__enc2__.nil? && __xml_in__.nil? && __undefined_in_read__?(char)
+      __stream_from__(char, @__rquote__)
       return getc
     end
     # Without an internal encoding CRuby's converter is the decorators alone,
     # which go a byte at a time, and the first output it stops after is an
     # attribute's quote with the first byte: the rest is still to be read,
     # for `pos` and for a `reopen` that keeps the converter (#593). Measured.
-    if char.bytesize > 1 && !@rquote && @enc2.nil? && __xml_in__ == :attr
-      @rbuf = char.byteslice(1, char.bytesize - 1).b << @rbuf
+    if char.bytesize > 1 && !@__rquote__ && @__enc2__.nil? && __xml_in__ == :attr
+      @__rbuf__ = char.byteslice(1, char.bytesize - 1).b << @__rbuf__
       char = char.byteslice(0, 1)
     end
     # With an internal encoding CRuby's first read stops after the
@@ -3969,26 +3969,26 @@ end
     # the UTF-8 it is read from, so that output is the quote and the first
     # byte: the converter holds the rest of what it took, which `pos` drops
     # with it, and the bytes after are read again without it (#633). Measured.
-    if char.bytesize > 1 && !@rquote && !@enc2.nil? && __xml_in__ == :attr && __encoding__ == Encoding::UTF_8 && !__read_encoding__.ascii_compatible?
-      @rbuf = char.byteslice(1, char.bytesize - 1).b << @rbuf
-      @rpend = char.byteslice(0, 1).b
-      @rquote = true
+    if char.bytesize > 1 && !@__rquote__ && !@__enc2__.nil? && __xml_in__ == :attr && __encoding__ == Encoding::UTF_8 && !__read_encoding__.ascii_compatible?
+      @__rbuf__ = char.byteslice(1, char.bytesize - 1).b << @__rbuf__
+      @__rpend__ = char.byteslice(0, 1).b
+      @__rquote__ = true
       return __hand_out__(__in_read__("\""))
     end
     # Under universal newline the decorators come before `xml:`, so one with
     # no spelling that opens a quote is the converter's to make, the
     # replacement before the quote, as `gets` does (#636, #657). Measured.
-    if __opens_on_replacement__?(char.b, @rquote)
-      __stream_from__(char, @rquote)
+    if __opens_on_replacement__?(char.b, @__rquote__)
+      __stream_from__(char, @__rquote__)
       return getc
     end
     # Into one that is, they come after it, and a character it cannot convert
     # is inserted as a reference, which is no output to stop after: the read
     # goes on to the next it can, or to the end of what is buffered, or to a
     # CR the universal newline decorator would hold (#633).
-    if !@rquote && !@enc2.nil? && __xml_in__ == :attr && __read_encoding__.ascii_compatible? && __undefined_in_read__?(char)
-      while !@rbuf.empty? && !(__universal_newline__? && @rbuf.getbyte(0) == 13)
-        more = @rbuf.byteslice(0, __char_length__).force_encoding(__encoding__)
+    if !@__rquote__ && !@__enc2__.nil? && __xml_in__ == :attr && __read_encoding__.ascii_compatible? && __undefined_in_read__?(char)
+      while !@__rbuf__.empty? && !(__universal_newline__? && @__rbuf__.getbyte(0) == 13)
+        more = @__rbuf__.byteslice(0, __char_length__).force_encoding(__encoding__)
         break unless more.valid_encoding?
         char = (char.b << __take__(more.bytesize)).force_encoding(__encoding__)
         break unless __undefined_in_read__?(more)
@@ -3999,9 +3999,9 @@ end
     # `pos` is past the CR alone (#624). With an internal encoding that is
     # ASCII-compatible the decorators come after the transcoder and hold it
     # the same way (#667). Measured.
-    if !pended && (@enc2.nil? || __read_encoding__.ascii_compatible?) && __xml_in__ == :attr && __universal_newline__? && char.b == "\r".b
-      @rpend = char.b
-      return __hand_out__(@rquote ? "" : (@rquote = true; __in_read__("\"")))
+    if !pended && (@__enc2__.nil? || __read_encoding__.ascii_compatible?) && __xml_in__ == :attr && __universal_newline__? && char.b == "\r".b
+      @__rpend__ = char.b
+      return __hand_out__(@__rquote__ ? "" : (@__rquote__ = true; __in_read__("\"")))
     end
     char, cr = __newline_char_in__(char)
     out = __decode__(char)
@@ -4043,8 +4043,8 @@ end
     enc = char.encoding
     cr, lf = enc.ascii_compatible? ? ["\r".b, "\n".b] : ["\r".encode(enc).b, "\n".encode(enc).b]
     return char unless char.b == cr
-    nil while @rbuf.bytesize < lf.bytesize && __fill__(lf.bytesize - @rbuf.bytesize)
-    lone = @rbuf.byteslice(0, lf.bytesize) != lf
+    nil while @__rbuf__.bytesize < lf.bytesize && __fill__(lf.bytesize - @__rbuf__.bytesize)
+    lone = @__rbuf__.byteslice(0, lf.bytesize) != lf
     __take__(lf.bytesize) unless lone
     [lf.force_encoding(enc), lone ? cr : nil]
   end
@@ -4056,13 +4056,13 @@ end
   # sequence of two bytes. The bytes its error names are read; the rest are
   # read again.
   def __broken_char__(char)
-    @rbuf = char.b + @rbuf
+    @__rbuf__ = char.b + @__rbuf__
     length = 1
     error = nil
-    if @enc2
+    if @__enc2__
       size = char.bytesize
       loop do
-        window = @rbuf.byteslice(0, size + 1).force_encoding(__encoding__)
+        window = @__rbuf__.byteslice(0, size + 1).force_encoding(__encoding__)
         begin
           window.encode(__read_encoding__)
           break
@@ -4073,7 +4073,7 @@ end
           # for the bytes that say what it is, and only then.
           break unless e.incomplete_input?
           size = window.bytesize
-          break unless @rbuf.bytesize > size || __fill__(1)
+          break unless @__rbuf__.bytesize > size || __fill__(1)
         end
       end
     end
@@ -4118,10 +4118,10 @@ end
     bytes = Integer === char ? (char.chr(__read_encoding__) rescue (char & 0xff).chr) : IO.__str__(char)
     __readconv__
     if __read_converter__?
-      @rplain = false
+      @__rplain__ = false
       __hold_chars__(bytes.b)
     else
-      @rbuf = bytes.b + @rbuf
+      @__rbuf__ = bytes.b + @__rbuf__
     end
     nil
   end
@@ -4131,19 +4131,19 @@ end
     __byte_readable__
     return nil if byte.nil?
     bytes = Integer === byte ? (byte & 0xff).chr : (String === byte ? byte : byte.to_str)
-    @rbuf = bytes.b + @rbuf
+    @__rbuf__ = bytes.b + @__rbuf__
     nil
   end
 
   def eof?
     __readable__
-    !__chars_held__? && @rbuf.empty? && !__fill__
+    !__chars_held__? && @__rbuf__.empty? && !__fill__
   end
   alias eof eof?
 
   def lineno
     __readable__
-    @lineno
+    @__lineno__
   end
 
   def lineno=(number)
@@ -4152,7 +4152,7 @@ end
     # 4.1 for the wording ruby-lang #21864 settled on, not `NUM2INT`'s own
     # "from nil to integer".
     raise TypeError, "no implicit conversion of nil into Integer" if number.nil?
-    @lineno = IO.__c_int__(number)
+    @__lineno__ = IO.__c_int__(number)
   end
 
   # --- positions -------------------------------------------------------------
@@ -4166,7 +4166,7 @@ end
     # seek then fails; with none, they stay. Measured.
     __flush_buffer__
     __unread__(true)
-    IO.__check__(__fd_seek__(@fileno, offset, whence), @path)
+    IO.__check__(__fd_seek__(@__fileno__, offset, whence), @__path__)
     0
   end
 
@@ -4181,9 +4181,9 @@ end
   # buffer holding bytes, which it leaves there.
   def sysseek(offset, whence = IO::SEEK_SET)
     __check_open__
-    raise IOError, "sysseek for buffered IO" unless @rbuf.empty? && !__chars_held__?
-    warn("sysseek for buffered IO", uplevel: 1) unless @wbuf.nil? || @wbuf.empty?
-    IO.__check__(__fd_seek__(@fileno, Integer.__c_long__(offset), __whence__(whence)), @path)[0]
+    raise IOError, "sysseek for buffered IO" unless @__rbuf__.empty? && !__chars_held__?
+    warn("sysseek for buffered IO", uplevel: 1) unless @__wbuf__.nil? || @__wbuf__.empty?
+    IO.__check__(__fd_seek__(@__fileno__, Integer.__c_long__(offset), __whence__(whence)), @__path__)[0]
   end
 
   # `rewind` drops the read converter as CRuby's does, where `seek` drops it
@@ -4193,9 +4193,9 @@ end
   # lines read from it, as in CRuby's `rb_io_rewind` (#41).
   def rewind
     seek(0)
-    ARGF.__io_rewound__(self, @lineno)
+    ARGF.__io_rewound__(self, @__lineno__)
     __drop_readconv__
-    @lineno = 0
+    @__lineno__ = 0
     0
   end
 
@@ -4208,7 +4208,7 @@ end
     __check_open__
     __flush_buffer__
     __unread__
-    IO.__check__(__fd_seek__(@fileno, 0, IO::SEEK_CUR), @path)[0] - @rbuf.bytesize
+    IO.__check__(__fd_seek__(@__fileno__, 0, IO::SEEK_CUR), @__path__)[0] - @__rbuf__.bytesize
   end
   alias tell pos
 
@@ -4265,8 +4265,8 @@ end
   # and has no bytes read ahead to give back first. Nil otherwise, and before
   # the first write that buffers has made it.
   def __plain_wbuf__
-    return nil if @closed || @wgone || @sync || @tty || !@wplain || @access == 0 || @access == 3 || @rbuf.bytesize > 0
-    @wbuf
+    return nil if @__closed__ || @__wgone__ || @__sync__ || @__tty__ || !@__wplain__ || @__access__ == 0 || @__access__ == 3 || @__rbuf__.bytesize > 0
+    @__wbuf__
   end
 
   # CRuby's `io_writev`. Each object is made a String and converted, and goes
@@ -4280,7 +4280,7 @@ end
     last = objects.size - 1
     index = 0
     while index <= last
-      return total + __binwritev__(__gather__(objects, index)) if @tty || __wsync__
+      return total + __binwritev__(__gather__(objects, index)) if @__tty__ || __wsync__
       object = objects[index]
       object = object.to_s unless String === object
       total += __binwrite__(__encode_out__(object), index < last)
@@ -4308,7 +4308,7 @@ end
   def syswrite(object)
     __write_side__
     text = String === object ? object : object.to_s
-    warn("syswrite for buffered IO", uplevel: 1) unless @wbuf.nil? || @wbuf.empty?
+    warn("syswrite for buffered IO", uplevel: 1) unless @__wbuf__.nil? || @__wbuf__.empty?
     waits = __waits_in_write__?
     loop do
       result = __fd_write__(__wfd__, text, waits)
@@ -4316,8 +4316,8 @@ end
         __write_interrupted__
         next
       end
-      return IO.__check__(result, @path)[0] unless result == IO.__eagain__
-      IO.__wait__([[self, IO::WRITABLE]], @timeout) || raise(IO::TimeoutError, "Blocking operation timed out!")
+      return IO.__check__(result, @__path__)[0] unless result == IO.__eagain__
+      IO.__wait__([[self, IO::WRITABLE]], @__timeout__) || raise(IO::TimeoutError, "Blocking operation timed out!")
     end
   end
 
@@ -4332,7 +4332,7 @@ end
       return :wait_writable unless exception
       raise IO::EAGAINWaitWritable, "write would block"
     end
-    IO.__check__(result, @path)[0]
+    IO.__check__(result, @__path__)[0]
   end
 
   def self.__exception_flag__(value)
@@ -4343,7 +4343,7 @@ end
   def pwrite(object, offset)
     __write_side__
     text = String === object ? object : object.to_s
-    IO.__check__(__fd_pwrite__(__wfd__, text, Integer.__index__(offset)), @path)[0]
+    IO.__check__(__fd_pwrite__(__wfd__, text, Integer.__index__(offset)), @__path__)[0]
   end
 
   def <<(object)
@@ -4440,11 +4440,11 @@ end
     end
     path = File.__path__(other)
     # `rb_io_reopen` with a path sets the mode afresh, without the flag.
-    @sigpipe = nil
+    @__sigpipe__ = nil
     if mode.nil? && options.empty?
       # Everything stays, the mode's creating and truncating among it.
       # Neither reading nor writing opens as a reader does.
-      flags = (@access == 3 ? File::RDONLY : @access) | (@oflags & (File::CREAT | File::TRUNC | File::APPEND | File::EXCL))
+      flags = (@__access__ == 3 ? File::RDONLY : @__access__) | (@__oflags__ & (File::CREAT | File::TRUNC | File::APPEND | File::EXCL))
     else
       # The mode starts again, and with it `sync` and `autoclose`, but no BOM
       # is read past: only opening a file does that. `lineno` stays. The write
@@ -4453,44 +4453,44 @@ end
       # goes to a descriptor that does not, and loses the bytes (#534).
       __modeenc__(mode, options) do |flags, binmode, ecopts|
         __check_access__(flags, binmode, ecopts)
-        __flush_buffer__ if !@closed && __writes__?
+        __flush_buffer__ if !@__closed__ && __writes__?
       end
-      flags = @oflags
-      @sync = false
-      @autoclose = true
-      @duplex = @tty = nil
-      @rmoded = true
+      flags = @__oflags__
+      @__sync__ = false
+      @__autoclose__ = true
+      @__duplex__ = @__tty__ = nil
+      @__rmoded__ = true
     end
     # The write buffer is sent if the IO now writes, as `rb_io_reopen` flushes
     # by the new mode. The bytes buffered go, even if what is named does not
     # open; the read converter and the characters it holds stay, whatever was
     # opened.
-    __flush_buffer__ if !@closed && __writes__?
-    @rbuf = "".b
+    __flush_buffer__ if !@__closed__ && __writes__?
+    @__rbuf__ = "".b
     __keep_readconv__
     fd = IO.__sysopen__(path, flags, 0666)
     __untie__
-    if @closed
-      @fileno = fd
-      @closed = false
+    if @__closed__
+      @__fileno__ = fd
+      @__closed__ = false
     else
-      IO.__check__(__fd_dup2__(fd, @fileno), path)
+      IO.__check__(__fd_dup2__(fd, @__fileno__), path)
       __fd_close__(fd)
     end
     @__read_kind_fd__ = @__write_kind_fd__ = nil
-    @path = path.dup
+    @__path__ = path.dup
     __arm__
     self
   end
 
   # A duplex child whose write end is closed is one IO from here on, as CRuby's
-  # is once `close_write` unties it; what `close` left tied stays in `@wgone`.
+  # is once `close_write` unties it; what `close` left tied stays in `@__wgone__`.
   def __untie__
-    return if @wfileno.nil? || !@wclosed
-    @wfileno = nil
-    @wclosed = false
-    @rclosed = false
-    @finalizer&.wfd = nil
+    return if @__wfileno__.nil? || !@__wclosed__
+    @__wfileno__ = nil
+    @__wclosed__ = false
+    @__rclosed__ = false
+    @__finalizer__&.wfd = nil
     __replain__
   end
 
@@ -4507,32 +4507,32 @@ end
     __check_open__
     return self if other.equal?(self)
     # `io_reopen` takes the other IO's mode, the flag with it.
-    @sigpipe = other.__signal_on_epipe__
+    @__sigpipe__ = other.__signal_on_epipe__
     # Only here is it `stdio_file` that counts: an `autoclose = false` IO can
     # take any access from an IO, and a standard stream only one it has.
-    if @stdio && !@autoclose && other.__side__ != 2 && other.__side__ != (@fileno == 0 ? 0 : 1)
+    if @__stdio__ && !@__autoclose__ && other.__side__ != 2 && other.__side__ != (@__fileno__ == 0 ? 0 : 1)
       __refuse_access__(other.__modestr__)
     end
     # Both write buffers are sent first, this one's and then, once where the
     # other is reading has been found, the other's, as `io_reopen` flushes
     # them.
     __flush_buffer__
-    __unread__(true) if @access == 0
+    __unread__(true) if @__access__ == 0
     __untie__
     position = other.__seekable_pos__ if other.__reads__?
     other.__flush_buffer__
-    @access, @oflags, @binmode, @textmode, @sync, @enc, @enc2, @ecopts, @lineno, @pid, @duplex, @tty = other.__modes__
+    @__access__, @__oflags__, @__binmode__, @__textmode__, @__sync__, @__enc__, @__enc2__, @__ecopts__, @__lineno__, @__pid__, @__duplex__, @__tty__ = other.__modes__
     __replain__
-    @rmoded = !other.__tied__? || other.__rmoded__
-    @wpre = @wpre.reject { |key, _| %i[newline universal_newline crlf_newline cr_newline lf_newline].include?(key) } if @wpre && @binmode
-    @autoclose &&= other.autoclose?
-    @finalizer&.autoclose = @autoclose
-    @path = other.path || (@path unless @autoclose)
-    unless other.fileno == @fileno
-      IO.__check__(__fd_dup2__(other.fileno, @fileno), @path)
+    @__rmoded__ = !other.__tied__? || other.__rmoded__
+    @__wpre__ = @__wpre__.reject { |key, _| %i[newline universal_newline crlf_newline cr_newline lf_newline].include?(key) } if @__wpre__ && @__binmode__
+    @__autoclose__ &&= other.autoclose?
+    @__finalizer__&.autoclose = @__autoclose__
+    @__path__ = other.path || (@__path__ unless @__autoclose__)
+    unless other.fileno == @__fileno__
+      IO.__check__(__fd_dup2__(other.fileno, @__fileno__), @__path__)
       unless position.nil?
         __unread__(true)
-        IO.__check__(__fd_seek__(@fileno, position, IO::SEEK_SET))
+        IO.__check__(__fd_seek__(@__fileno__, position, IO::SEEK_SET))
       end
     end
     @__read_kind_fd__ = @__write_kind_fd__ = nil
@@ -4545,30 +4545,30 @@ end
 
   # 0 reads, 1 writes, 2 does both and 3 does neither, which a closed IO is
   # and stays when `reopen` gives it a path and no mode.
-  def __reads__? = @access == 0 || @access == 2
+  def __reads__? = @__access__ == 0 || @__access__ == 2
 
-  def __writes__? = @access == 1 || @access == 2
+  def __writes__? = @__access__ == 1 || @__access__ == 2
 
   # CRuby's `rb_io_reopen`: an IO that is `RUBY_IO_EXTERNAL_P`, a standard
   # stream or one with `autoclose = false`, keeps the access it has. What it
   # does not have it may take. Asked with a mode that is about to be assigned.
   def __check_access__(flags, binmode, ecopts)
     access = flags & 3
-    return if @autoclose || access == 2 || __side__ == 3 || __side__ == access
+    return if @__autoclose__ || access == 2 || __side__ == 3 || __side__ == access
     __refuse_access__(IO.__modestr__(access, flags, binmode, __newline_decorator__?(ecopts)))
   end
 
   # ponytail: CRuby takes the path for the name and crashes on an IO without
   # one, a pipe or `IO.for_fd`, which here says its descriptor instead.
   def __refuse_access__(mode)
-    raise ArgumentError, "#{@path || "fd #{@fileno}"} can't change access mode from #{__modestr__.inspect} to #{mode.inspect}"
+    raise ArgumentError, "#{@__path__ || "fd #{@__fileno__}"} can't change access mode from #{__modestr__.inspect} to #{mode.inspect}"
   end
 
   # A duplex child's access as a mode counts it: CRuby makes that two IOs, and
   # this one is the side that reads.
-  def __side__ = @access != 3 && __tied__? ? 0 : @access
+  def __side__ = @__access__ != 3 && __tied__? ? 0 : @__access__
 
-  def __modestr__ = IO.__modestr__(__side__, @oflags, @binmode, __newline_decorator__?)
+  def __modestr__ = IO.__modestr__(__side__, @__oflags__, @__binmode__, __newline_decorator__?)
 
   # What a mode is called, CRuby's `rb_io_fmode_modestr`.
   # The `t` is a newline decorator's: what was asked for without one is lost.
@@ -4591,19 +4591,19 @@ end
 
   # What only `STDIN`, `STDOUT` and `STDERR` are, until they are closed.
   def __stdio__
-    @stdio = true
+    @__stdio__ = true
     self
   end
 
   # What `reopen` takes from this IO.
   def __modes__
-    [@access, @oflags, @binmode, @textmode, @sync, @enc, @enc2, @ecopts.dup, @lineno, @pid, @duplex, @tty]
+    [@__access__, @__oflags__, @__binmode__, @__textmode__, @__sync__, @__enc__, @__enc2__, @__ecopts__.dup, @__lineno__, @__pid__, @__duplex__, @__tty__]
   end
 
   # Where the descriptor is, once it has given back what is buffered.
   def __seekable_pos__
     __unread__
-    position = __fd_seek__(@fileno, 0, IO::SEEK_CUR)
+    position = __fd_seek__(@__fileno__, 0, IO::SEEK_CUR)
     Integer === position ? nil : position[0]
   end
 

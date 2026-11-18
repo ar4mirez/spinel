@@ -18,10 +18,10 @@ class Socket < BasicSocket
   class ResolutionError < SocketError
     def initialize(message = nil, error_code = nil)
       super(message)
-      @error_code = error_code
+      @__error_code__ = error_code
     end
 
-    attr_reader :error_code
+    def error_code = @__error_code__
   end
 
   module Constants
@@ -465,12 +465,12 @@ class Socket < BasicSocket
 end
 
 class BasicSocket < IO
-  @do_not_reverse_lookup = true
+  @__do_not_reverse_lookup__ = true
 
-  def self.do_not_reverse_lookup = BasicSocket.instance_variable_get(:@do_not_reverse_lookup)
+  def self.do_not_reverse_lookup = BasicSocket.instance_variable_get(:@__do_not_reverse_lookup__)
 
   def self.do_not_reverse_lookup=(value)
-    BasicSocket.instance_variable_set(:@do_not_reverse_lookup, value ? true : false)
+    BasicSocket.instance_variable_set(:@__do_not_reverse_lookup__, value ? true : false)
   end
 
   # Whether to look a name up: the argument, which may be a Symbol, or the
@@ -493,23 +493,23 @@ class BasicSocket < IO
 
   def __setup_socket__(fd)
     __setup__(fd, "r+", { binmode: true })
-    @sync = true
-    @duplex = true
+    @__sync__ = true
+    @__duplex__ = true
     # Nonblocking, as every socket CRuby 3 makes; the blocking calls wait.
     __nonblock__
-    @do_not_reverse_lookup = BasicSocket.do_not_reverse_lookup
+    @__do_not_reverse_lookup__ = BasicSocket.do_not_reverse_lookup
     self
   end
 
-  def do_not_reverse_lookup = @do_not_reverse_lookup
+  def do_not_reverse_lookup = @__do_not_reverse_lookup__
 
   # Wait for a nonblocking socket to be ready, for as long as its timeout.
   def __wait_for__(events)
-    IO.__wait__([[self, events]], @timeout) || raise(IO::TimeoutError, "Blocking operation timed out!")
+    IO.__wait__([[self, events]], @__timeout__) || raise(IO::TimeoutError, "Blocking operation timed out!")
   end
 
   def do_not_reverse_lookup=(value)
-    @do_not_reverse_lookup = value ? true : false
+    @__do_not_reverse_lookup__ = value ? true : false
   end
 
   def shutdown(how = Socket::SHUT_RDWR)
@@ -531,34 +531,34 @@ class BasicSocket < IO
 
   def close_read
     __check_open__
-    if @wclosed_socket
+    if @__wclosed_socket__
       close
     else
-      __sock_shutdown__(@fileno, Socket::SHUT_RD)
-      @rclosed_socket = true
+      __sock_shutdown__(@__fileno__, Socket::SHUT_RD)
+      @__rclosed_socket__ = true
     end
     nil
   end
 
   def close_write
     __check_open__
-    if @rclosed_socket
+    if @__rclosed_socket__
       close
     else
-      __sock_shutdown__(@fileno, Socket::SHUT_WR)
-      @wclosed_socket = true
+      __sock_shutdown__(@__fileno__, Socket::SHUT_WR)
+      @__wclosed_socket__ = true
     end
     nil
   end
 
   def __readable__
     super
-    raise IOError, "not opened for reading" if @rclosed_socket
+    raise IOError, "not opened for reading" if @__rclosed_socket__
   end
 
   def __writable__
     super
-    raise IOError, "not opened for writing" if @wclosed_socket
+    raise IOError, "not opened for writing" if @__wclosed_socket__
   end
 
   def __family__
@@ -873,14 +873,14 @@ class BasicSocket < IO
       str&.clear
       return str || ""
     end
-    return __partial__(len, str, "read_nonblock", false) unless @rbuf.empty?
+    return __partial__(len, str, "read_nonblock", false) unless @__rbuf__.empty?
     result = __sock_recv__(fileno, len, Socket::MSG_DONTWAIT)
     if Integer === result
       if result == IO.__eagain__
         return :wait_readable unless exception
         raise IO::EAGAINWaitReadable, "read would block"
       end
-      IO.__check__(result, @path)
+      IO.__check__(result, @__path__)
     end
     data = result[0]
     if data.empty?
@@ -901,7 +901,7 @@ class BasicSocket < IO
         return :wait_writable unless exception
         raise IO::EAGAINWaitWritable, "write would block"
       end
-      IO.__check__(result, @path)
+      IO.__check__(result, @__path__)
     end
     result[0]
   end
@@ -989,10 +989,10 @@ class Socket < BasicSocket
     end
   end
 
-  def self.tcp_fast_fallback = @tcp_fast_fallback.nil? ? true : @tcp_fast_fallback
+  def self.tcp_fast_fallback = @__tcp_fast_fallback__.nil? ? true : @__tcp_fast_fallback__
 
   def self.tcp_fast_fallback=(value)
-    @tcp_fast_fallback = value
+    @__tcp_fast_fallback__ = value
   end
 
   # From upstream's `lib/socket.rb`.
@@ -1301,12 +1301,12 @@ class Addrinfo
   end
 
   def __init__(sockaddr, pfamily, socktype, protocol, canonname, inspectname)
-    @sockaddr = sockaddr.b.freeze
-    @pfamily = pfamily
-    @socktype = socktype
-    @protocol = protocol
-    @canonname = canonname
-    @inspectname = inspectname
+    @__sockaddr__ = sockaddr.b.freeze
+    @__pfamily__ = pfamily
+    @__socktype__ = socktype
+    @__protocol__ = protocol
+    @__canonname__ = canonname
+    @__inspectname__ = inspectname
     self
   end
 
@@ -1393,13 +1393,16 @@ class Addrinfo
     Addrinfo.getaddrinfo(nodename, service, family, socktype, protocol, flags, timeout: timeout).each(&block)
   end
 
-  attr_reader :pfamily, :socktype, :protocol, :canonname
+  def pfamily = @__pfamily__
+  def socktype = @__socktype__
+  def protocol = @__protocol__
+  def canonname = @__canonname__
 
-  def __parsed__ = (@__parsed__ ||= Socket.__sockaddr_parse__(@sockaddr))
+  def __parsed__ = (@__parsed__ ||= Socket.__sockaddr_parse__(@__sockaddr__))
 
   def afamily = __parsed__&.first || Socket::AF_UNSPEC
 
-  def to_sockaddr = @sockaddr
+  def to_sockaddr = @__sockaddr__
   alias to_s to_sockaddr
 
   def ip? = Socket.__inet__(afamily)
@@ -1466,16 +1469,16 @@ class Addrinfo
     return nil unless ipv6?
     return nil unless ipv6_v4mapped? || ipv6_v4compat?
     bytes = __parsed__[2].byteslice(12, 4)
-    Addrinfo.__new__(Socket.__sockaddr_in__(bytes, ip_port, 0, 0), Socket::PF_INET, @socktype, @protocol)
+    Addrinfo.__new__(Socket.__sockaddr_in__(bytes, ip_port, 0, 0), Socket::PF_INET, @__socktype__, @__protocol__)
   end
 
   def getnameinfo(flags = 0)
-    Socket.__getnameinfo__(@sockaddr, Integer.__index__(flags))
+    Socket.__getnameinfo__(@__sockaddr__, Integer.__index__(flags))
   end
 
   def inspect_sockaddr
     parsed = __parsed__
-    return "UNSPEC" if parsed.nil? || (@sockaddr.bytesize <= 2)
+    return "UNSPEC" if parsed.nil? || (@__sockaddr__.bytesize <= 2)
     case parsed[0]
     when Socket::AF_INET
       text = Socket.__ip_text__(parsed)
@@ -1501,29 +1504,29 @@ class Addrinfo
   def inspect
     out = "#<Addrinfo: #{inspect_sockaddr}"
     afamily = self.afamily
-    if @pfamily != 0 && @pfamily != afamily && !(@sockaddr.bytesize <= 2)
-      name = Socket.__name_of__("PF", @pfamily)
-      out << " #{name ? "PF_#{name}" : "PF_\?\?\?(#{@pfamily})"}"
+    if @__pfamily__ != 0 && @__pfamily__ != afamily && !(@__sockaddr__.bytesize <= 2)
+      name = Socket.__name_of__("PF", @__pfamily__)
+      out << " #{name ? "PF_#{name}" : "PF_\?\?\?(#{@__pfamily__})"}"
     end
-    internet = Socket.__inet__(@pfamily)
-    if internet && @socktype == Socket::SOCK_STREAM && (@protocol == 0 || @protocol == Socket::IPPROTO_TCP)
+    internet = Socket.__inet__(@__pfamily__)
+    if internet && @__socktype__ == Socket::SOCK_STREAM && (@__protocol__ == 0 || @__protocol__ == Socket::IPPROTO_TCP)
       out << " TCP"
-    elsif internet && @socktype == Socket::SOCK_DGRAM && (@protocol == 0 || @protocol == Socket::IPPROTO_UDP)
+    elsif internet && @__socktype__ == Socket::SOCK_DGRAM && (@__protocol__ == 0 || @__protocol__ == Socket::IPPROTO_UDP)
       out << " UDP"
     else
-      if @socktype != 0
-        name = Socket.__name_of__("SOCK", @socktype)
-        out << " #{name ? "SOCK_#{name}" : "SOCK_\?\?\?(#{@socktype})"}"
+      if @__socktype__ != 0
+        name = Socket.__name_of__("SOCK", @__socktype__)
+        out << " #{name ? "SOCK_#{name}" : "SOCK_\?\?\?(#{@__socktype__})"}"
       end
-      if @protocol != 0
-        name = internet ? Socket.__name_of__("IPPROTO", @protocol) : nil
-        out << " #{name ? "IPPROTO_#{name}" : "UNKNOWN_PROTOCOL(#{@protocol})"}"
+      if @__protocol__ != 0
+        name = internet ? Socket.__name_of__("IPPROTO", @__protocol__) : nil
+        out << " #{name ? "IPPROTO_#{name}" : "UNKNOWN_PROTOCOL(#{@__protocol__})"}"
       end
     end
-    if @inspectname
-      out << " (#{@inspectname})"
-    elsif @canonname
-      out << " #{@canonname}"
+    if @__inspectname__
+      out << " (#{@__inspectname__})"
+    elsif @__canonname__
+      out << " #{@__canonname__}"
     end
     out << ">"
   end
@@ -1531,14 +1534,14 @@ class Addrinfo
   def marshal_dump
     afamily = self.afamily
     sockaddr = unix? ? unix_path : getnameinfo(Socket::NI_NUMERICHOST | Socket::NI_NUMERICSERV)
-    pfamily = Socket.__name_of__("PF", @pfamily)
-    socktype = Socket.__name_of__("SOCK", @socktype)
-    protocol = Socket.__inet__(@pfamily) ? Socket.__name_of__("IPPROTO", @protocol) : nil
+    pfamily = Socket.__name_of__("PF", @__pfamily__)
+    socktype = Socket.__name_of__("SOCK", @__socktype__)
+    protocol = Socket.__inet__(@__pfamily__) ? Socket.__name_of__("IPPROTO", @__protocol__) : nil
     [Socket.__family_name__(afamily), sockaddr,
-     pfamily ? "PF_#{pfamily}" : @pfamily,
-     socktype ? "SOCK_#{socktype}" : @socktype,
-     protocol ? "IPPROTO_#{protocol}" : @protocol,
-     @canonname, @inspectname]
+     pfamily ? "PF_#{pfamily}" : @__pfamily__,
+     socktype ? "SOCK_#{socktype}" : @__socktype__,
+     protocol ? "IPPROTO_#{protocol}" : @__protocol__,
+     @__canonname__, @__inspectname__]
   end
 
   def marshal_load(data)
@@ -1683,7 +1686,7 @@ class IPSocket < BasicSocket
 
   # `["AF_INET", port, host, address]`, the host looked up when asked to.
   def __describe__(sockaddr, reverse)
-    reverse = BasicSocket.__reverse_lookup__(reverse, !@do_not_reverse_lookup)
+    reverse = BasicSocket.__reverse_lookup__(reverse, !@__do_not_reverse_lookup__)
     parsed = Socket.__sockaddr_parse__(sockaddr)
     address = Socket.__ip_text__(parsed)
     host = reverse ? Socket.__getnameinfo__(sockaddr, 0)[0] : address
@@ -1922,11 +1925,11 @@ class UNIXSocket < BasicSocket
       raise SystemCallError.new("connect(2) for #{path}", done)
     end
     __setup_socket__(fd)
-    @path = nil
+    @__path__ = nil
   end
 
   def path
-    @__path__ ||= begin
+    @__unix_path__ ||= begin
       parsed = Socket.__sockaddr_parse__(getsockname)
       parsed ? parsed[1] : ""
     end
@@ -2034,64 +2037,75 @@ class Socket
     end
 
     def initialize(family, level, optname, data)
-      @family = Socket.__family__(family)
-      @level = Socket.__level__(@family, level)
-      @optname = Socket.__optname__(@family, @level, optname)
-      @data = IO.__str__(data).b.freeze
+      @__family__ = Socket.__family__(family)
+      @__level__ = Socket.__level__(@__family__, level)
+      @__optname__ = Socket.__optname__(@__family__, @__level__, optname)
+      @__data__ = IO.__str__(data).b.freeze
     end
 
-    attr_reader :family, :level, :optname, :data
+    def family = @__family__
+    def level = @__level__
+    def optname = @__optname__
+    def data = @__data__
 
-    def to_s = @data
+    def marshal_dump = [@__family__, @__level__, @__optname__, @__data__]
+
+    def marshal_load(state)
+      @__family__, @__level__, @__optname__, data = state
+      @__data__ = data.freeze
+    end
+    private :marshal_dump, :marshal_load
+
+    def to_s = @__data__
 
     def int
-      unless @data.bytesize == 4
-        raise TypeError, "size differ.  expected as sizeof(int)=4 but #{@data.bytesize}"
+      unless @__data__.bytesize == 4
+        raise TypeError, "size differ.  expected as sizeof(int)=4 but #{@__data__.bytesize}"
       end
-      @data.unpack1("i")
+      @__data__.unpack1("i")
     end
 
     def bool
-      case @data.bytesize
-      when 1 then @data.unpack1("C") != 0
-      when 4 then @data.unpack1("i") != 0
-      else raise TypeError, "size differ.  expected as sizeof(int)=4 but #{@data.bytesize}"
+      case @__data__.bytesize
+      when 1 then @__data__.unpack1("C") != 0
+      when 4 then @__data__.unpack1("i") != 0
+      else raise TypeError, "size differ.  expected as sizeof(int)=4 but #{@__data__.bytesize}"
       end
     end
 
     def byte
-      unless @data.bytesize == 1
-        raise TypeError, "size differ.  expected as sizeof(char)=1 but #{@data.bytesize}"
+      unless @__data__.bytesize == 1
+        raise TypeError, "size differ.  expected as sizeof(char)=1 but #{@__data__.bytesize}"
       end
-      @data.unpack1("C")
+      @__data__.unpack1("C")
     end
 
     def linger
-      unless @level == SOL_SOCKET && @optname == SO_LINGER
+      unless @__level__ == SOL_SOCKET && @__optname__ == SO_LINGER
         raise TypeError, "linger socket option expected"
       end
-      unless @data.bytesize == 8
-        raise TypeError, "size differ.  expected as sizeof(struct linger)=8 but #{@data.bytesize}"
+      unless @__data__.bytesize == 8
+        raise TypeError, "size differ.  expected as sizeof(struct linger)=8 but #{@__data__.bytesize}"
       end
-      onoff, secs = @data.unpack("ii")
+      onoff, secs = @__data__.unpack("ii")
       [onoff == 0 ? false : (onoff == 1 ? true : onoff), secs]
     end
 
     def ipv4_multicast_loop
-      unless @level == IPPROTO_IP && @optname == IP_MULTICAST_LOOP
+      unless @__level__ == IPPROTO_IP && @__optname__ == IP_MULTICAST_LOOP
         raise TypeError, "ipv4_multicast_loop socket option expected"
       end
-      @data.bytesize == 1 ? @data.unpack1("C") : @data.unpack1("i")
+      @__data__.bytesize == 1 ? @__data__.unpack1("C") : @__data__.unpack1("i")
     end
 
     def ipv4_multicast_ttl
-      unless @level == IPPROTO_IP && @optname == IP_MULTICAST_TTL
+      unless @__level__ == IPPROTO_IP && @__optname__ == IP_MULTICAST_TTL
         raise TypeError, "ipv4_multicast_ttl socket option expected"
       end
-      @data.bytesize == 1 ? @data.unpack1("C") : @data.unpack1("i")
+      @__data__.bytesize == 1 ? @__data__.unpack1("C") : @__data__.unpack1("i")
     end
 
-    def unpack(template) = @data.unpack(template)
+    def unpack(template) = @__data__.unpack(template)
 
     INTEGER_OPTIONS = {
       Constants::SOL_SOCKET => %w[DEBUG REUSEADDR REUSEPORT KEEPALIVE DONTROUTE BROADCAST OOBINLINE SNDBUF RCVBUF
@@ -2103,36 +2117,36 @@ class Socket
     private_constant :INTEGER_OPTIONS
 
     def __value_inspect__
-      prefix = Socket.__level_prefix__(@level)
-      name = prefix && Socket.__name_of__(prefix, @optname)
-      if @level == SOL_SOCKET && @optname == SO_LINGER && @data.bytesize == 8
-        onoff, secs = @data.unpack("ii")
+      prefix = Socket.__level_prefix__(@__level__)
+      name = prefix && Socket.__name_of__(prefix, @__optname__)
+      if @__level__ == SOL_SOCKET && @__optname__ == SO_LINGER && @__data__.bytesize == 8
+        onoff, secs = @__data__.unpack("ii")
         return "#{onoff == 0 ? "off" : (onoff == 1 ? "on" : onoff)} #{secs}sec"
       end
-      if @level == SOL_SOCKET && @optname == SO_TYPE && @data.bytesize == 4
-        type = Socket.__name_of__("SOCK", @data.unpack1("i"))
-        return type ? "SOCK_#{type}" : @data.unpack1("i").to_s
+      if @__level__ == SOL_SOCKET && @__optname__ == SO_TYPE && @__data__.bytesize == 4
+        type = Socket.__name_of__("SOCK", @__data__.unpack1("i"))
+        return type ? "SOCK_#{type}" : @__data__.unpack1("i").to_s
       end
-      if @level == SOL_SOCKET && @optname == SO_ERROR && @data.bytesize == 4
-        errno = @data.unpack1("i")
+      if @__level__ == SOL_SOCKET && @__optname__ == SO_ERROR && @__data__.bytesize == 4
+        errno = @__data__.unpack1("i")
         klass = SystemCallError.new(nil, errno).class
         return klass == SystemCallError ? errno.to_s : klass.name.delete_prefix("Errno::")
       end
-      if name && (INTEGER_OPTIONS[@level] || []).include?(name) && @data.bytesize == 4
-        return @data.unpack1("i").to_s
+      if name && (INTEGER_OPTIONS[@__level__] || []).include?(name) && @__data__.bytesize == 4
+        return @__data__.unpack1("i").to_s
       end
-      @data.inspect
+      @__data__.inspect
     end
 
     def inspect
-      family = Socket.__name_of__("AF", @family) || @family.to_s
-      prefix = Socket.__level_prefix__(@level)
-      level = @level == SOL_SOCKET ? "SOCKET" : (Socket.__inet__(@family) && Socket.__name_of__("IPPROTO", @level))
-      optname = prefix && Socket.__name_of__(prefix, @optname)
-      if level && optname && (Socket.__inet__(@family) || @level == SOL_SOCKET)
+      family = Socket.__name_of__("AF", @__family__) || @__family__.to_s
+      prefix = Socket.__level_prefix__(@__level__)
+      level = @__level__ == SOL_SOCKET ? "SOCKET" : (Socket.__inet__(@__family__) && Socket.__name_of__("IPPROTO", @__level__))
+      optname = prefix && Socket.__name_of__(prefix, @__optname__)
+      if level && optname && (Socket.__inet__(@__family__) || @__level__ == SOL_SOCKET)
         "#<Socket::Option: #{family} #{level} #{optname} #{__value_inspect__}>"
       else
-        "#<Socket::Option: #{family} level:#{level || @level} optname:#{@optname} #{@data.inspect}>"
+        "#<Socket::Option: #{family} level:#{level || @__level__} optname:#{@__optname__} #{@__data__.inspect}>"
       end
     end
   end
@@ -2163,59 +2177,69 @@ class Socket
     end
 
     def initialize(family, cmsg_level, cmsg_type, data)
-      @family = Socket.__family__(family)
-      @level = Socket.__level__(@family, cmsg_level)
-      @type = Socket.__cmsg_type__(@family, @level, cmsg_type)
-      @data = IO.__str__(data).b
+      @__family__ = Socket.__family__(family)
+      @__level__ = Socket.__level__(@__family__, cmsg_level)
+      @__type__ = Socket.__cmsg_type__(@__family__, @__level__, cmsg_type)
+      @__data__ = IO.__str__(data).b
     end
 
-    attr_reader :family, :level, :type, :data
+    def family = @__family__
+    def level = @__level__
+    def type = @__type__
+    def data = @__data__
     attr_writer :__ios__
 
+    def marshal_dump = [@__family__, @__level__, @__type__, @__data__]
+
+    def marshal_load(state)
+      @__family__, @__level__, @__type__, @__data__ = state
+    end
+    private :marshal_dump, :marshal_load
+
     def cmsg_is?(level, type)
-      level = Socket.__level__(@family, level)
-      type = Socket.__cmsg_type__(@family, level, type)
-      @level == level && @type == type
+      level = Socket.__level__(@__family__, level)
+      type = Socket.__cmsg_type__(@__family__, level, type)
+      @__level__ == level && @__type__ == type
     end
 
     def int
-      unless @data.bytesize == 4
-        raise TypeError, "size differ.  expected as sizeof(int)=4 but #{@data.bytesize}"
+      unless @__data__.bytesize == 4
+        raise TypeError, "size differ.  expected as sizeof(int)=4 but #{@__data__.bytesize}"
       end
-      @data.unpack1("i")
+      @__data__.unpack1("i")
     end
 
     def unix_rights
-      unless @level == SOL_SOCKET && @type == SCM_RIGHTS
+      unless @__level__ == SOL_SOCKET && @__type__ == SCM_RIGHTS
         raise TypeError, "SCM_RIGHTS ancillary data expected"
       end
       @__ios__
     end
 
     def timestamp
-      unless @level == SOL_SOCKET && @type == SCM_TIMESTAMP
+      unless @__level__ == SOL_SOCKET && @__type__ == SCM_TIMESTAMP
         raise TypeError, "SCM_TIMESTAMP ancillary data expected"
       end
-      sec, usec = @data.unpack("q!q!")
+      sec, usec = @__data__.unpack("q!q!")
       Time.at(sec, usec)
     end
 
     def ip_pktinfo
-      unless @level == IPPROTO_IP && @type == IP_PKTINFO && @data.bytesize >= 12
+      unless @__level__ == IPPROTO_IP && @__type__ == IP_PKTINFO && @__data__.bytesize >= 12
         raise TypeError, "IP_PKTINFO ancillary data expected"
       end
-      ifindex = @data.unpack1("I")
-      addr = Addrinfo.__new__(Socket.__sockaddr_in__(@data.byteslice(8, 4), 0, 0, 0), PF_INET, 0, 0)
-      spec = Addrinfo.__new__(Socket.__sockaddr_in__(@data.byteslice(4, 4), 0, 0, 0), PF_INET, 0, 0)
+      ifindex = @__data__.unpack1("I")
+      addr = Addrinfo.__new__(Socket.__sockaddr_in__(@__data__.byteslice(8, 4), 0, 0, 0), PF_INET, 0, 0)
+      spec = Addrinfo.__new__(Socket.__sockaddr_in__(@__data__.byteslice(4, 4), 0, 0, 0), PF_INET, 0, 0)
       [addr, ifindex, spec]
     end
 
     def ipv6_pktinfo
-      unless @level == IPPROTO_IPV6 && @type == IPV6_PKTINFO && @data.bytesize == 20
+      unless @__level__ == IPPROTO_IPV6 && @__type__ == IPV6_PKTINFO && @__data__.bytesize == 20
         raise TypeError, "IPV6_PKTINFO ancillary data expected"
       end
-      ifindex = @data.byteslice(16, 4).unpack1("I")
-      addr = Addrinfo.__new__(Socket.__sockaddr_in__(@data.byteslice(0, 16), 0, 0, 0), PF_INET6, 0, 0)
+      ifindex = @__data__.byteslice(16, 4).unpack1("I")
+      addr = Addrinfo.__new__(Socket.__sockaddr_in__(@__data__.byteslice(0, 16), 0, 0, 0), PF_INET6, 0, 0)
       [addr, ifindex]
     end
 
@@ -2223,21 +2247,23 @@ class Socket
     def ipv6_pktinfo_ifindex = ipv6_pktinfo[1]
 
     def inspect
-      family = Socket.__name_of__("AF", @family) || @family.to_s
-      prefix = @level == SOL_SOCKET ? "SCM" : Socket.__level_prefix__(@level)
-      level = @level == SOL_SOCKET ? "SOCKET" : Socket.__name_of__("IPPROTO", @level)
-      type = prefix && Socket.__name_of__(prefix, @type)
-      out = "#<Socket::AncillaryData: #{family} #{level || "cmsg_level:#{@level}"} #{type || "cmsg_type:#{@type}"}"
-      if @level == SOL_SOCKET && @type == SCM_RIGHTS
-        out << " " << @data.unpack("i*").join(" ")
+      family = Socket.__name_of__("AF", @__family__) || @__family__.to_s
+      prefix = @__level__ == SOL_SOCKET ? "SCM" : Socket.__level_prefix__(@__level__)
+      level = @__level__ == SOL_SOCKET ? "SOCKET" : Socket.__name_of__("IPPROTO", @__level__)
+      type = prefix && Socket.__name_of__(prefix, @__type__)
+      out = "#<Socket::AncillaryData: #{family} #{level || "cmsg_level:#{@__level__}"} #{type || "cmsg_type:#{@__type__}"}"
+      if @__level__ == SOL_SOCKET && @__type__ == SCM_RIGHTS
+        out << " " << @__data__.unpack("i*").join(" ")
       else
-        out << " " << @data.inspect
+        out << " " << @__data__.inspect
       end
       out << ">"
     end
   end
 
   class Ifaddr
+    Marshal.__opaque_class__(self)
+
     def self.__new__(name, flags, ifindex, addr, netmask, broadaddr, dstaddr)
       ifaddr = allocate
       ifaddr.__init__(name, flags, ifindex, addr, netmask, broadaddr, dstaddr)
@@ -2249,26 +2275,32 @@ class Socket
     end
 
     def __init__(name, flags, ifindex, addr, netmask, broadaddr, dstaddr)
-      @name = name.force_encoding(Encoding::US_ASCII)
-      @flags = flags
-      @ifindex = ifindex
+      @__name__ = name.force_encoding(Encoding::US_ASCII)
+      @__flags__ = flags
+      @__ifindex__ = ifindex
       info = ->(bytes) { bytes && Addrinfo.__new__(bytes, Socket.__sockaddr_parse__(bytes)&.first || 0, 0, 0) }
-      @addr = info.(addr)
-      @netmask = info.(netmask)
-      @broadaddr = info.(broadaddr)
-      @dstaddr = info.(dstaddr)
+      @__addr__ = info.(addr)
+      @__netmask__ = info.(netmask)
+      @__broadaddr__ = info.(broadaddr)
+      @__dstaddr__ = info.(dstaddr)
     end
 
-    attr_reader :name, :flags, :ifindex, :addr, :netmask, :broadaddr, :dstaddr
+    def name = @__name__
+    def flags = @__flags__
+    def ifindex = @__ifindex__
+    def addr = @__addr__
+    def netmask = @__netmask__
+    def broadaddr = @__broadaddr__
+    def dstaddr = @__dstaddr__
 
     def inspect
-      flags = Socket.__names__("IFF").sort.filter_map { |bit, name| name if @flags & bit != 0 && bit.to_s(2).count("1") == 1 }
-      out = "#<Socket::Ifaddr #{@name}"
+      flags = Socket.__names__("IFF").sort.filter_map { |bit, name| name if @__flags__ & bit != 0 && bit.to_s(2).count("1") == 1 }
+      out = "#<Socket::Ifaddr #{@__name__}"
       out << " #{flags.join(",")}" unless flags.empty?
-      out << " #{@addr.inspect_sockaddr}" if @addr
-      out << " netmask=#{@netmask.inspect_sockaddr}" if @netmask
-      out << " broadcast=#{@broadaddr.inspect_sockaddr}" if @broadaddr
-      out << " dstaddr=#{@dstaddr.inspect_sockaddr}" if @dstaddr
+      out << " #{@__addr__.inspect_sockaddr}" if @__addr__
+      out << " netmask=#{@__netmask__.inspect_sockaddr}" if @__netmask__
+      out << " broadcast=#{@__broadaddr__.inspect_sockaddr}" if @__broadaddr__
+      out << " dstaddr=#{@__dstaddr__.inspect_sockaddr}" if @__dstaddr__
       out << ">"
     end
   end

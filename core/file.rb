@@ -423,7 +423,7 @@ class File < IO
     bom = __modeenc__(mode, options)
     perm = perm.nil? ? 0666 : Integer.__index__(perm)
     fd = IO.__sysopen__(path, flags, perm)
-    @path = path.dup
+    @__path__ = path.dup
     begin
       __open_fd__(fd, options, bom)
     rescue Exception
@@ -442,18 +442,18 @@ class File < IO
 
   def lstat
     __check_open__
-    File.lstat(@path)
+    File.lstat(@__path__)
   end
 
   def chmod(mode)
     __check_open__
-    IO.__check__(__fs_chmod__(@path, IO.__c_uint__(mode)), @path)
+    IO.__check__(__fs_chmod__(@__path__, IO.__c_uint__(mode)), @__path__)
     0
   end
 
   def chown(owner, group)
     __check_open__
-    File.chown(owner, group, @path)
+    File.chown(owner, group, @__path__)
     0
   end
 
@@ -464,7 +464,7 @@ class File < IO
     length = Integer.__index__(length)
     __writable__
     __flush_buffer__
-    IO.__check__(__fs_truncate__(@fileno, length), @path)
+    IO.__check__(__fs_truncate__(@__fileno__, length), @__path__)
     0
   end
 
@@ -477,9 +477,9 @@ class File < IO
     __check_open__
     __flush_buffer__ if __writes__?
     operation = Integer.__index__(operation)
-    result = __outside__ { __fd_flock__(@fileno, operation) }
+    result = __outside__ { __fd_flock__(@__fileno__, operation) }
     return false if result == Errno::EWOULDBLOCK::Errno && operation & LOCK_NB != 0
-    IO.__check__(result, @path)
+    IO.__check__(result, @__path__)
     0
   end
 
@@ -901,7 +901,7 @@ class File < IO
 
     def initialize(path)
       path = File.__path__(path)
-      @fields = File.__check__(__fs_stat__(path, true), path, "rb_file_s_stat")
+      @__fields__ = File.__check__(__fs_stat__(path, true), path, "rb_file_s_stat")
     end
 
     def self.__lstat__(path)
@@ -916,32 +916,32 @@ class File < IO
     end
 
     def __fields__(fields)
-      @fields = fields
+      @__fields__ = fields
     end
 
     def initialize_copy(other)
-      @fields = other.__fields_of__.dup
+      @__fields__ = other.__fields_of__.dup
     end
 
-    def __fields_of__ = @fields
+    def __fields_of__ = @__fields__
 
-    def dev = @fields[0]
-    def ino = @fields[1]
-    def mode = @fields[2]
-    def nlink = @fields[3]
-    def uid = @fields[4]
-    def gid = @fields[5]
-    def rdev = @fields[6]
-    def size = @fields[7]
-    def blksize = @fields[8]
-    def blocks = @fields[9]
+    def dev = @__fields__[0]
+    def ino = @__fields__[1]
+    def mode = @__fields__[2]
+    def nlink = @__fields__[3]
+    def uid = @__fields__[4]
+    def gid = @__fields__[5]
+    def rdev = @__fields__[6]
+    def size = @__fields__[7]
+    def blksize = @__fields__[8]
+    def blocks = @__fields__[9]
 
-    def atime = Time.at(@fields[10], @fields[11], :nanosecond)
-    def mtime = Time.at(@fields[12], @fields[13], :nanosecond)
-    def ctime = Time.at(@fields[14], @fields[15], :nanosecond)
+    def atime = Time.at(@__fields__[10], @__fields__[11], :nanosecond)
+    def mtime = Time.at(@__fields__[12], @__fields__[13], :nanosecond)
+    def ctime = Time.at(@__fields__[14], @__fields__[15], :nanosecond)
 
     if DARWIN__
-      def birthtime = Time.at(@fields[16], @fields[17], :nanosecond)
+      def birthtime = Time.at(@__fields__[16], @__fields__[17], :nanosecond)
     else
       __notimplement__ :birthtime
     end
