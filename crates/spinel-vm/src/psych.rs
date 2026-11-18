@@ -864,20 +864,26 @@ mod tests {
         );
     }
 
+    /// The depth the nesting tests go to. Under miri, which interprets
+    /// libyaml, ten thousand levels take over an hour; what is checked there
+    /// is the counting, which a shallow limit exercises the same way.
+    #[cfg(not(miri))]
+    const DEPTH: usize = MAX_DEPTH;
+    #[cfg(miri)]
+    const DEPTH: usize = 20;
+
     #[test]
     fn nesting_past_the_bound_stops_the_parse() {
-        let deep = format!("{}{}", "[".repeat(MAX_DEPTH + 1), "]".repeat(MAX_DEPTH + 1));
-        let error = parse(deep.as_bytes(), 1, MAX_DEPTH)
-            .error
-            .expect("an error");
-        assert_eq!((error.line, error.column), (1, MAX_DEPTH as u64 + 1));
-        let shallow = format!("{}{}", "[".repeat(MAX_DEPTH), "]".repeat(MAX_DEPTH));
-        assert!(parse(shallow.as_bytes(), 1, MAX_DEPTH).error.is_none());
+        let deep = format!("{}{}", "[".repeat(DEPTH + 1), "]".repeat(DEPTH + 1));
+        let error = parse(deep.as_bytes(), 1, DEPTH).error.expect("an error");
+        assert_eq!((error.line, error.column), (1, DEPTH as u64 + 1));
+        let shallow = format!("{}{}", "[".repeat(DEPTH), "]".repeat(DEPTH));
+        assert!(parse(shallow.as_bytes(), 1, DEPTH).error.is_none());
     }
 
     #[test]
     fn nesting_is_unbounded_without_a_limit() {
-        let deep = format!("{}{}", "[".repeat(MAX_DEPTH + 1), "]".repeat(MAX_DEPTH + 1));
+        let deep = format!("{}{}", "[".repeat(DEPTH + 1), "]".repeat(DEPTH + 1));
         let parsed = parse(deep.as_bytes(), 1, 0);
         assert!(parsed.error.is_none());
         let starts = parsed
@@ -885,7 +891,7 @@ mod tests {
             .iter()
             .filter(|e| matches!(e.event, Event::SequenceStart { .. }))
             .count();
-        assert_eq!(starts, MAX_DEPTH + 1);
+        assert_eq!(starts, DEPTH + 1);
     }
 
     #[test]
