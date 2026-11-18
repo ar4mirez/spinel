@@ -47,3 +47,12 @@ rescue TypeError => e
 end
 puts Marshal.load(Marshal.dump(Socket::Option.int(:INET, :SOCKET, :KEEPALIVE, 1))).inspect
 puts Marshal.load(Marshal.dump(Socket::AncillaryData.int(:UNIX, :SOCKET, :RIGHTS, 1))).inspect
+
+# A resolution error keeps its code through Marshal. A name under the
+# reserved `.invalid` TLD fails without asking the network.
+begin
+  Addrinfo.getaddrinfo("no.such.host.invalid", 80)
+rescue Socket::ResolutionError => e
+  restored = Marshal.load(Marshal.dump(e)).error_code
+  puts "Marshal ResolutionError: #{Integer === restored && restored == e.error_code}"
+end

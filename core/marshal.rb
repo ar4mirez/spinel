@@ -514,7 +514,8 @@ module Marshal
       class_of("o", value, true)
       pairs = ivar_pairs(value)
       cause = KERNEL_IVAR_GET.bind(value).call(:@__cause__)
-      long(pairs.size + (cause.nil? ? 2 : 3))
+      code = KERNEL_IVAR_GET.bind(value).call(:@__error_code__)
+      long(pairs.size + 2 + (cause.nil? ? 0 : 1) + (code.nil? ? 0 : 1))
       symbol(:mesg)
       object(KERNEL_IVAR_GET.bind(value).call(:@__message__), limit)
       symbol(:bt)
@@ -522,6 +523,10 @@ module Marshal
       unless cause.nil?
         symbol(:cause)
         object(cause, limit)
+      end
+      unless code.nil?
+        symbol(:error_code)
+        object(code, limit)
       end
       pairs.each do |name, held|
         symbol(name)
@@ -1101,6 +1106,7 @@ module Marshal
         when :mesg then KERNEL_IVAR_SET.bind(value).call(:@__message__, held)
         when :bt then KERNEL_IVAR_SET.bind(value).call(:@__backtrace__, held)
         when :cause then KERNEL_IVAR_SET.bind(value).call(:@__cause__, held)
+        when :error_code then KERNEL_IVAR_SET.bind(value).call(:@__error_code__, held)
         else
           # ponytail: `bt_locations`, and the `name` and `key` CRuby keeps
           # outside instance variables, are read and dropped.

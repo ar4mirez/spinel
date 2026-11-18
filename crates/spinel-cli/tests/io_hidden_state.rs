@@ -7,7 +7,7 @@
 //! as CRuby's does, `--- !ruby/object:File {}`.
 //! Marshal cannot write a `File::Stat` or a `Socket::Ifaddr` and says so as
 //! CRuby does, while a `Socket::Option` and a `Socket::AncillaryData` still
-//! come back whole.
+//! come back whole, as does a `Socket::ResolutionError`'s `error_code`.
 //!
 //! `fixtures/io_hidden_state/` holds the scripts and what ruby 4.0.9 printed
 //! for them. Everything runs offline; the sockets are loopback, and a
