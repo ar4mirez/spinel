@@ -160,6 +160,12 @@ module SQLite3
         raise_status(status, db_errmsg(db))
       end
 
+      # statement.c's CHECK(sqlite3_db_handle(ctx->st), value).
+      def check_stmt(stmt, status)
+        return if status & 0xff == 0
+        raise_status(status, stmt_errmsg(stmt))
+      end
+
       def db_finalizer(state)
         proc { release(state) }
       end
@@ -508,7 +514,7 @@ module SQLite3
                else
                  raise RuntimeError, "can't prepare #{value.class}"
                end
-      Spinel.check(db_handle, status)
+      Spinel.check_stmt(handle, status)
       self
     end
 
@@ -554,7 +560,7 @@ module SQLite3
       else
         Spinel.stmt_reset(handle)
         @__sqlite3_done__ = false
-        Spinel.check(db_handle, value)
+        Spinel.check_stmt(handle, value)
       end
       list.freeze
     end
@@ -660,10 +666,6 @@ module SQLite3
         raise SQLite3::Exception, "cannot use a statement associated with a discarded database"
       end
       open_stmt
-    end
-
-    def db_handle
-      Spinel.db_of(@__sqlite3_database__)
     end
   end
 end

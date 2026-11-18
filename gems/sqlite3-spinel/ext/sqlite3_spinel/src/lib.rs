@@ -116,6 +116,7 @@ fn init(cx: &mut Context<'_>) -> Result<()> {
         ("stmt_reset", 1, stmt_reset),
         ("stmt_clear_bindings", 1, stmt_clear_bindings),
         ("stmt_busy", 1, stmt_busy),
+        ("stmt_errmsg", 1, stmt_errmsg),
         ("stmt_column_count", 1, stmt_column_count),
         ("stmt_column_type", 2, stmt_column_type),
         ("stmt_column_int64", 2, stmt_column_int64),
@@ -685,6 +686,16 @@ methods! {
         // SAFETY: a prepared statement.
         let busy = unsafe { ffi::sqlite3_stmt_busy(raw) } != 0;
         Ok(cx.boolean(busy))
+    }
+
+    /// `stmt_errmsg(stmt)`: `sqlite3_errmsg(sqlite3_db_handle(stmt))`, the
+    /// statement's own connection, which outlives a closed `Database`.
+    fn stmt_errmsg(cx, args) {
+        let raw = prepared(stmt(cx, args[0])?)?;
+        // SAFETY: a prepared statement, whose connection lives until it is
+        // finalized.
+        let text = unsafe { ffi::sqlite3_errmsg(ffi::sqlite3_db_handle(raw)) };
+        Ok(c_str_or_nil(cx, text))
     }
 
     /// `stmt_column_count(stmt)`: `sqlite3_column_count`.

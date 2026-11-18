@@ -395,6 +395,32 @@ puts SQLite3::VERSION, SQLite3::SQLITE_VERSION"#,
         format!("sqlite3-2.10.2-{platform}\nsqlite3_spinel.spinel\n2.10.2\n3.54.1\n")
     );
 
+    // A statement outlives its closed Database on SQLite's zombie
+    // connection, and its errors carry that connection's message, as
+    // upstream reads it through `sqlite3_db_handle`.
+    let out = sandbox
+        .spinel()
+        .args([
+            "run",
+            "-e",
+            r#"require "sqlite3"
+db = SQLite3::Database.new(":memory:")
+db.execute("CREATE TABLE t (a UNIQUE)")
+db.execute("INSERT INTO t VALUES (1)")
+stmt = db.prepare("INSERT INTO t VALUES (?)")
+db.close
+begin; stmt.bind_param(9, 1); rescue => e; p [e.class, e.message, e.code]; end
+stmt.bind_param(1, 1)
+begin; stmt.step; rescue => e; p [e.class, e.message, e.code]; end"#,
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        ok(&out, "spinel run -e"),
+        "[SQLite3::RangeException, \"bad parameter or other API misuse\", 25]\n\
+         [SQLite3::ConstraintException, \"bad parameter or other API misuse\", 19]\n"
+    );
+
     // The API as CRuby's sqlite3 2.10.2 answers it.
     sandbox.write(
         "surface.rb",
