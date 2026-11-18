@@ -1824,6 +1824,9 @@ impl<'h> HandleScope<'h> {
 
     /// [`Classes::deprecated_const`], for a value as this heap sees it.
     pub fn deprecated_const(&mut self, name: SymbolId, value: Value) -> Option<crate::class::ClassId> {
+        if !self.classes().deprecates(name) {
+            return None;
+        }
         let value = self.local_to_shared(value);
         self.classes().deprecated_const(name, value)
     }

@@ -1833,6 +1833,14 @@ impl Classes {
         }
     }
 
+    /// Whether any module's constant `name` is deprecated: one length check
+    /// while no program has called `deprecate_constant`.
+    #[must_use]
+    pub(crate) fn deprecates(&self, name: SymbolId) -> bool {
+        !self.deprecated_constants.is_empty()
+            && self.deprecated_constants.iter().any(|&(_, n)| n == name)
+    }
+
     /// The module whose deprecated `name` a read that found `value` reached,
     /// if it reached one. Matched by the value the read found, which is what
     /// lets every kind of lookup — lexical, qualified, `const_get` — ask the
