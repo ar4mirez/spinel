@@ -213,3 +213,38 @@ p Spinel::FFI.instance_variable_get(:@closures).size
     );
     assert_eq!(String::from_utf8_lossy(&output.stdout), "false\n42\n1\n");
 }
+
+/// A closure whose block frees it while `qsort` is suspended in it: the
+/// answer still goes back to C at the closure's own return type. The block
+/// makes a closure returning `unsigned char` right after the free, which
+/// takes the freed closure's memory; read from there, `-1` would reach
+/// `qsort` as `255` and swap the pair.
+#[test]
+fn a_closure_freed_inside_its_own_callback_still_answers_c() {
+    let script = r#"
+require "fiddle"
+include Fiddle
+qsort = Function.new(Handle::DEFAULT["qsort"], [TYPE_VOIDP, TYPE_SIZE_T, TYPE_SIZE_T, TYPE_VOIDP], TYPE_VOID)
+data = Pointer.malloc(2 * SIZEOF_INT, RUBY_FREE)
+data[0, 8] = [1, 2].pack("i*")
+replacement = nil
+compare = Closure::BlockCaller.new(TYPE_INT, [TYPE_VOIDP, TYPE_VOIDP]) do |a, b|
+  compare.free
+  replacement = Closure::BlockCaller.new(TYPE_UCHAR, [TYPE_VOIDP, TYPE_VOIDP]) { 0 }
+  a[0, 4].unpack1("i") <=> b[0, 4].unpack1("i")
+end
+qsort.call(data, 2, SIZEOF_INT, compare)
+p compare.freed?, data[0, 8].unpack("i*")
+"#;
+    let output = Command::new(SPINEL)
+        .args(["-e", script])
+        .output()
+        .expect("spinel runs");
+    assert!(
+        output.status.success(),
+        "spinel failed ({}): {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "true\n[1, 2]\n");
+}

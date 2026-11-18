@@ -401,12 +401,13 @@ unsafe extern "C" fn trampoline(
             std::process::exit(1);
         };
         let yielder = &*(yielder as *const CallYielder);
+        let ret = record.ret;
         let answer = yielder.suspend(Request {
             closure: record.id,
             args: slots,
         });
         running.push(std::ptr::from_ref(yielder) as usize);
-        store_return(record.ret, answer, result);
+        store_return(ret, answer, result);
     }
 }
 
