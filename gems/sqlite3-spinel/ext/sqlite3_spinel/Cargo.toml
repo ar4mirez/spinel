@@ -1,0 +1,34 @@
+# The native half of the sqlite3-spinel gem: SQLite's C API, one call per
+# method, on `SQLite3::Spinel`, which `lib/sqlite3/sqlite3_native.rb` builds
+# the sqlite3 gem's C half on in Ruby (docs/package-manager.md, section 6).
+#
+# SQLite comes as upstream's precompiled gems get it: the amalgamation of the
+# release sqlite3 2.10.2 bundles, 3.54.1, compiled into the extension, here by
+# libsqlite3-sys 0.40.0's `bundled`. `.cargo/config.toml` brings its compile
+# options to upstream's.
+#
+# A workspace member so that `cargo` fetches libsqlite3-sys with everything
+# else and `tests/sqlite3.rs` can build the library `--offline`; `build.rb`
+# builds it and puts it in the gem.
+[package]
+name = "sqlite3-spinel"
+description = "The native half of the sqlite3-spinel gem: SQLite through spinel-ext."
+# The gem's version, 2.10.2.1, as SemVer: the upstream version and the
+# revision as build metadata.
+version = "2.10.2+1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "sqlite3_spinel"
+crate-type = ["cdylib"]
+
+[dependencies]
+spinel-ext.workspace = true
+libsqlite3-sys = { version = "=0.40.0", features = ["bundled"] }
+
+[lints]
+workspace = true

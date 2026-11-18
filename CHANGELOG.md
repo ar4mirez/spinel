@@ -9,6 +9,18 @@ bytecode a tool reads.
 
 ### Added
 
+- **`sqlite3-spinel`, the sqlite3 gem for Spinel**
+  ([#113](https://github.com/ar4mirez/spinel/issues/113)).
+  `gems/sqlite3-spinel/` is sqlite3 2.10.2's Ruby API, upstream's `lib/`
+  unchanged, over a `spinel-ext` extension with SQLite 3.54.1 compiled in,
+  the release upstream bundles. `spinel install` puts it in place of a
+  locked `sqlite3 2.10.2` when `SPINEL_SUBSTITUTES=sqlite3`, leaving the
+  lockfile as Bundler wrote it, and a Sinatra app reads and writes SQLite
+  through it. `gems/sqlite3-spinel/build.rb` builds
+  `sqlite3-spinel-2.10.2.1-<platform>.gem`; it is not on rubygems.org yet.
+  Callbacks from SQLite into Ruby (`create_function`, aggregates,
+  collations, `trace`, busy handler blocks) raise `NotImplementedError`.
+
 - **`bigdecimal`**
   ([#109](https://github.com/ar4mirez/spinel/issues/109)).
   `require "bigdecimal"` is bigdecimal 4.0.1, the version Ruby 4.0 bundles,
