@@ -107,6 +107,7 @@ pub mod socket;
 pub mod strings;
 pub mod transcode;
 pub mod value;
+pub(crate) mod vm;
 pub mod zlib;
 pub use bytecode::{BinOp, Insn, Iseq, Literal};
 pub use class::{Builtin, ClassId, Classes, CrefId, Kind, Method, Mixin, MixinError};

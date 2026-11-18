@@ -37,7 +37,7 @@ pub fn value(scope: &mut HandleScope<'_>, n: &BigInt) -> Value {
         return small;
     }
     let bytes = n.to_signed_bytes_le();
-    let class = scope.classes().object(Builtin::Integer.id());
+    let class = scope.class_object(Builtin::Integer.id());
     let class = scope.root(class);
     let handle = scope.alloc(Some(class), Payload::Bytes, bytes.len() as u32);
     scope.bytes_mut(handle).copy_from_slice(&bytes);

@@ -1019,13 +1019,9 @@ fn str_native(
         let list_value = new_array(scope, &list);
         let list_handle = scope.root(list_value);
         scope.freeze(list_handle);
-        scope
-            .classes_mut()
-            .const_set(class_id, symbol("LIST"), list_value);
+        scope.const_set(class_id, symbol("LIST"), list_value);
         for &(name, index) in crate::encoding_table::CONSTANTS {
-            scope
-                .classes_mut()
-                .const_set(class_id, symbol(name), list[usize::from(index)]);
+            scope.const_set(class_id, symbol(name), list[usize::from(index)]);
         }
         stack.push(Value::NIL);
         return Ok(None);
@@ -1469,7 +1465,7 @@ fn reflect_native(
             // `:qualified` is `A::B`'s walk — the ancestors without `Object`'s
             // fallback — which `const_get` uses past a path's first segment.
             if arg(2).as_symbol() == Some(symbol("qualified")) {
-                let found = scope.classes().const_get_qualified(module, name);
+                let found = scope.const_get_qualified(module, name);
                 let value = match found {
                     Some(value) => new_array(scope, &[value]),
                     None => Value::NIL,
@@ -1479,7 +1475,7 @@ fn reflect_native(
             }
             let inherit = arg(2).is_truthy();
             let found = const_get_owner(scope.classes(), module, name, inherit)
-                .and_then(|owner| scope.classes().const_get_here(owner, name));
+                .and_then(|owner| scope.const_get_here(owner, name));
             match found {
                 Some(value) => new_array(scope, &[value]),
                 None => Value::NIL,
@@ -1507,7 +1503,7 @@ fn reflect_native(
                 .classes()
                 .subclasses(class)
                 .into_iter()
-                .map(|id| scope.classes().object(id))
+                .map(|id| scope.class_object(id))
                 .collect();
             new_array(scope, &subclasses)
         }
@@ -1532,9 +1528,7 @@ fn reflect_native(
             let module = module_arg(scope, 0)?;
             let name = symbol_arg(1)?;
             let value = arg(2);
-            scope
-                .classes_mut()
-                .const_set_at(module, name, value, position);
+            scope.const_set_at(module, name, value, position);
             // `m.const_set(:X, Module.new)` names the module, as `X = ...` would.
             name_if_anonymous(scope, module, name, value);
             value
@@ -1571,7 +1565,7 @@ fn reflect_native(
         ReflectOp::ConstRemove => {
             let module = module_arg(scope, 0)?;
             let name = symbol_arg(1)?;
-            match scope.classes_mut().const_remove(module, name) {
+            match scope.const_remove(module, name) {
                 Some(value) => new_array(scope, &[value]),
                 None => Value::NIL,
             }
@@ -1579,7 +1573,7 @@ fn reflect_native(
         ReflectOp::ConstPublic => {
             let module = module_arg(scope, 0)?;
             let name = symbol_arg(1)?;
-            let held = scope.classes().const_get_here(module, name).is_some();
+            let held = scope.const_get_here(module, name).is_some();
             scope.classes_mut().mark_const_public(module, name);
             bool_value(held)
         }
@@ -1624,11 +1618,11 @@ fn reflect_native(
         }
         ReflectOp::ClassOf => {
             let class = class_of(scope, arg(0)).ok_or_else(|| no_class(arg(0)))?;
-            scope.classes().object(class)
+            scope.class_object(class)
         }
         ReflectOp::ClassIn => {
             let class = class_of(scope, arg(0)).ok_or_else(|| no_class(arg(0)))?;
-            let class = scope.classes().object(class);
+            let class = scope.class_object(class);
             let list = arg(1);
             if heap_kind(scope, list) != Some(HeapKind::Array) {
                 return Err(Error::raise("TypeError", "expected an Array"));
@@ -1648,7 +1642,7 @@ fn reflect_native(
                 return Err(Error::raise("TypeError", "can't define singleton"));
             }
             let class = singleton_of(scope, target)?;
-            scope.classes().object(class)
+            scope.class_object(class)
         }
         ReflectOp::RemoveMethod => {
             let module = module_arg(scope, 0)?;
@@ -1694,11 +1688,10 @@ fn reflect_native(
                 Value::NIL
             } else {
                 let found = scope
-                    .classes()
                     .const_get_here(module, name)
-                    .or_else(|| scope.classes().const_get_qualified(module, name));
+                    .or_else(|| scope.const_get_qualified(module, name));
                 match found.and_then(|value| scope.classes().deprecated_const(name, value)) {
-                    Some(holder) => scope.classes().object(holder),
+                    Some(holder) => scope.class_object(holder),
                     None => Value::NIL,
                 }
             }
@@ -1706,7 +1699,7 @@ fn reflect_native(
         ReflectOp::CvarRemove => {
             let module = module_arg(scope, 0)?;
             let name = symbol_arg(1)?;
-            match scope.classes_mut().cvar_remove(module, name) {
+            match scope.cvar_remove(module, name) {
                 Some(value) => new_array(scope, &[value]),
                 None => Value::NIL,
             }
@@ -1837,7 +1830,7 @@ fn reflect_native(
                         None => Value::NIL,
                     };
                     let parameters = scope.root(parameters);
-                    let owner = scope.classes().object(method.owner);
+                    let owner = scope.class_object(method.owner);
                     let owner = scope.root(owner);
                     let path = match path {
                         Some(path) if line > 0 => string_new(scope, &path),
@@ -1848,13 +1841,13 @@ fn reflect_native(
                     // The module whose entry holds the body, when this one
                     // stands in for it: what `inspect` names beside the owner.
                     let defined = match method.origin {
-                        Some(origin) => scope.classes().object(origin.owner),
+                        Some(origin) => scope.class_object(origin.owner),
                         None => Value::NIL,
                     };
                     let defined = scope.root(defined);
                     let aliased = method.origin.is_some_and(|origin| origin.aliased);
                     let narrowed = match method.origin.and_then(|origin| origin.narrowed) {
-                        Some(holder) => scope.classes().object(holder),
+                        Some(holder) => scope.class_object(holder),
                         None => Value::NIL,
                     };
                     let narrowed = scope.root(narrowed);
@@ -1919,7 +1912,7 @@ fn reflect_native(
         }
         ReflectOp::RefinedClass => {
             match class_id_of(scope, arg(0)).and_then(|id| scope.classes().refined_target(id)) {
-                Some(target) => scope.classes().object(target),
+                Some(target) => scope.class_object(target),
                 None => Value::NIL,
             }
         }
@@ -2200,7 +2193,6 @@ fn fiber_native(
                         // The root fiber is an ordinary `Fiber`, made the first
                         // time anything asks for it.
                         let class = scope
-                            .classes()
                             .const_get_here(Builtin::Object.id(), symbol("Fiber"))
                             .expect("core/fiber.rb defines Fiber");
                         let class = scope.root(class);
@@ -2462,7 +2454,7 @@ fn main_object(scope: &mut HandleScope<'_>) -> Value {
 pub fn define_toplevel_binding(scope: &mut HandleScope<'_>) -> Result<(), Error> {
     let object = Builtin::Object.id();
     let name = crate::shared::symbols::intern("TOPLEVEL_BINDING");
-    if scope.classes().const_get_here(object, name).is_some() {
+    if scope.const_get_here(object, name).is_some() {
         return Ok(());
     }
     let receiver = main_object(scope);
@@ -2491,7 +2483,7 @@ pub fn define_toplevel_binding(scope: &mut HandleScope<'_>) -> Result<(), Error>
             line: 0,
         },
     )?;
-    scope.classes_mut().const_set(object, name, binding);
+    scope.const_set(object, name, binding);
     Ok(())
 }
 
@@ -2513,7 +2505,7 @@ pub fn eval_main(
 ) -> Result<Value, Error> {
     let object = Builtin::Object.id();
     let name = crate::shared::symbols::intern("TOPLEVEL_BINDING");
-    let binding = scope.classes().const_get_here(object, name);
+    let binding = scope.const_get_here(object, name);
     let Some(binding) = binding.filter(|&b| is_binding(scope, b)) else {
         return eval_in(scope, frame, iseq);
     };
@@ -2591,6 +2583,9 @@ pub fn eval_in(
     let (result, ids) = run(scope, stack, frames, ids);
     scope.fibers_mut().frame_ids = ids;
     scope.fibers_mut().abandon();
+    // Back to the embedder, holding no borrow of the class tables: a write
+    // this evaluation made ends here rather than outlasting it (#117).
+    scope.class_safe_point();
     result
 }
 
@@ -2716,7 +2711,7 @@ fn run<'h>(
                 }
                 if scope.has_pending_finalizers() {
                     let list = take_finalizers(scope, false);
-                    let kernel = scope.classes().object(Builtin::Kernel.id());
+                    let kernel = scope.class_object(Builtin::Kernel.id());
                     if let Some(unwind) = call_discarded(
                         scope,
                         &mut stack,
@@ -2765,6 +2760,10 @@ fn run<'h>(
                     if budget <= slice_end && budget > deadline {
                         // A turn check, not the budget: another thread may run.
                         slice_end = budget.saturating_sub(threads::SLICE_INSNS);
+                        // And a safe point for the class lock (#117): another
+                        // Ractor's write waits for this one, and this one's
+                        // write ends here.
+                        scope.class_safe_point();
                         limit = deadline.max(slice_end).max(trace_floor);
                         seen_frames = usize::MAX;
                         // A signal that arrived is handled here, a safe point
@@ -2789,7 +2788,7 @@ fn run<'h>(
                             } else {
                                 let object = Builtin::Object.id();
                                 let name = crate::shared::symbols::intern("Signal");
-                                if let Some(signal) = scope.classes().const_get_here(object, name) {
+                                if let Some(signal) = scope.const_get_here(object, name) {
                                     if let Some(unwind) = call_discarded(
                                         scope,
                                         &mut stack,
@@ -3305,7 +3304,7 @@ fn run<'h>(
                             let call = Pending {
                                 cache: None,
                                 name: crate::shared::symbols::intern("__global_read__"),
-                                receiver: scope.classes().object(Builtin::Kernel.id()),
+                                receiver: scope.class_object(Builtin::Kernel.id()),
                                 args: vec![Value::symbol(owner), Value::symbol(symbol)],
                                 keywords: Vec::new(),
                                 block: Value::NIL,
@@ -3389,7 +3388,7 @@ fn run<'h>(
                             // alias it runs the old name's rule, and the
                             // messages name the alias, as CRuby's do (#789).
                             let owner = scope.global_hook_name(symbol);
-                            let kernel = scope.classes().object(Builtin::Kernel.id());
+                            let kernel = scope.class_object(Builtin::Kernel.id());
                             if let Some(unwind) = call_discarded(
                                 scope,
                                 &mut stack,
@@ -3860,7 +3859,7 @@ fn run<'h>(
                         // module function's `singleton_method_added` is pushed
                         // first and `method_added` runs before it: CRuby's
                         // order, measured.
-                        let module = scope.classes().object(owner);
+                        let module = scope.class_object(owner);
                         if default == ScopeDefault::ModuleFunction
                             && let Some(unwind) = fire_hook(
                                 scope,
@@ -3996,7 +3995,7 @@ fn run<'h>(
                                     .classes()
                                     .name(owner)
                                     .map_or_else(|| "an anonymous class".to_owned(), str::to_owned);
-                                let receiver = scope.classes().object(owner);
+                                let receiver = scope.class_object(owner);
                                 return Err(name_error(
                                     scope,
                                     format!(
@@ -4013,7 +4012,7 @@ fn run<'h>(
                         let symbol = frames[top].iseq.symbol_ids()[name as usize];
                         let owner = cvar_owner(scope, frames[top].cref)?;
                         let value = stack.pop().expect("setcvar on an empty stack");
-                        scope.classes_mut().cvar_set(owner, symbol, value);
+                        scope.cvar_set(owner, symbol, value);
                     }
                     Insn::DefinedCvar(name) => {
                         let symbol = frames[top].iseq.symbol_ids()[name as usize];
@@ -4182,9 +4181,9 @@ fn run<'h>(
                             return Ok(Step::Next);
                         }
                         let found = match how {
-                            ConstScope::Lexical => scope.classes().const_get(cref, symbol),
+                            ConstScope::Lexical => scope.const_get(cref, symbol),
                             ConstScope::Qualified | ConstScope::Top => {
-                                scope.classes().const_get_qualified(from, symbol)
+                                scope.const_get_qualified(from, symbol)
                             }
                         };
                         // An autoload in a scope searched before the one that
@@ -4204,7 +4203,7 @@ fn run<'h>(
                             // program's, gets its turn: `Module#__const_missing__`
                             // answers the value, or has the `NameError` raised
                             // below raised after all (#39).
-                            let module = scope.classes().object(from);
+                            let module = scope.class_object(from);
                             let how_name = match how {
                                 ConstScope::Lexical => "lexical",
                                 ConstScope::Qualified => "qualified",
@@ -4215,7 +4214,7 @@ fn run<'h>(
                                     .classes()
                                     .nesting(cref)
                                     .into_iter()
-                                    .map(|id| scope.classes().object(id))
+                                    .map(|id| scope.class_object(id))
                                     .collect()
                             } else {
                                 Vec::new()
@@ -4270,7 +4269,7 @@ fn run<'h>(
                                 qualified_name(scope, holder, symbol)
                             );
                             let text = string_new(scope, &message);
-                            let kernel = scope.classes().object(Builtin::Kernel.id());
+                            let kernel = scope.class_object(Builtin::Kernel.id());
                             let category =
                                 Value::symbol(crate::shared::symbols::intern("deprecated"));
                             if let Some(unwind) = call_discarded(
@@ -4293,11 +4292,9 @@ fn run<'h>(
                         let cref = frames[top].cref;
                         let value = stack.pop().expect("a value to assign");
                         let target = const_base(scope, &mut stack, cref, how)?;
-                        let redefined = scope.classes().const_get_here(target, symbol).is_some();
+                        let redefined = scope.const_get_here(target, symbol).is_some();
                         let location = frame_position(&frames[top]);
-                        scope
-                            .classes_mut()
-                            .const_set_at(target, symbol, value, location);
+                        scope.const_set_at(target, symbol, value, location);
                         // `Foo = Class.new` is how an anonymous class gets a name,
                         // and the only way one ever does. Only the first assignment
                         // names it: `A = Class.new; B = A` leaves both `"A"`.
@@ -4306,7 +4303,7 @@ fn run<'h>(
                         // assigned — not the module it landed on.
                         stack.push(value);
                         // `const_added` on the module it landed on (#28).
-                        let module = scope.classes().object(target);
+                        let module = scope.class_object(target);
                         if let Some(unwind) = fire_hook(
                             scope,
                             &mut stack,
@@ -4350,9 +4347,9 @@ fn run<'h>(
                         let cref = frames[top].cref;
                         let from = const_base(scope, &mut stack, cref, how)?;
                         let found = match how {
-                            ConstScope::Lexical => scope.classes().const_get(cref, symbol),
+                            ConstScope::Lexical => scope.const_get(cref, symbol),
                             ConstScope::Qualified | ConstScope::Top => {
-                                scope.classes().const_get_qualified(from, symbol)
+                                scope.const_get_qualified(from, symbol)
                             }
                         };
                         // An autoload not yet loaded is a constant, and
@@ -5568,7 +5565,7 @@ fn send_bound<const SPLATS: bool>(
         let plan = match scope.definitions().get(method.body) {
             Some(Definition::Iseq(iseq)) => {
                 let iseq = Arc::clone(iseq);
-                let class_object = scope.classes().object(class);
+                let class_object = scope.class_object(class);
                 direct_plan(
                     scope.call_caches_mut(),
                     site,
@@ -5591,7 +5588,7 @@ fn send_bound<const SPLATS: bool>(
                 Plan::Native(NativePlan {
                     native,
                     class,
-                    class_object: scope.classes().object(class),
+                    class_object: scope.class_object(class),
                     name: frame.iseq.symbol_ids()[site.name as usize],
                     argc: site.argc,
                 })
@@ -6818,7 +6815,7 @@ fn dispatch<'h>(
                             .definitions_mut()
                             .mark_unused_block_warned(method.body);
                         let text = string_new(scope, &text);
-                        let kernel = scope.classes().object(Builtin::Kernel.id());
+                        let kernel = scope.class_object(Builtin::Kernel.id());
                         return call_discarded(
                             scope,
                             stack,
@@ -7995,12 +7992,11 @@ fn exception_of(scope: &mut HandleScope<'_>, class: Value, message: &str) -> Val
 fn exception_new(scope: &mut HandleScope<'_>, class: &str, message: &str) -> Value {
     // A path walks from `Object`: `Encoding::CompatibilityError` is defined by
     // `core/encoding.rb`, under a class the exception table does not list.
-    let mut object = scope.classes().object(Builtin::Object.id());
+    let mut object = scope.class_object(Builtin::Object.id());
     for segment in class.split("::") {
         let owner = class_id_of(scope, object).expect("a path segment names a module");
         let symbol = crate::shared::symbols::intern(segment);
         object = scope
-            .classes()
             .const_get_here(owner, symbol)
             .expect("every class the VM raises is defined");
     }
@@ -8601,7 +8597,7 @@ fn open_class<'h>(
     };
 
     let cref = scope.classes_mut().push_cref(outer, id);
-    let receiver = scope.classes().object(id);
+    let receiver = scope.class_object(id);
     let body = Arc::clone(&iseq.children[def.body as usize]);
     let env = env_alloc(scope, Value::NIL, body.locals.len());
     let (cache_base, entered) = scope.call_caches_mut().enter(&body);
@@ -8719,7 +8715,7 @@ fn define_or_reopen(
         }
     };
 
-    if let Some(existing) = scope.classes().const_get_here(cbase, name) {
+    if let Some(existing) = scope.const_get_here(cbase, name) {
         let Some(id) = class_id_of(scope, existing) else {
             return Err(Error::raise(
                 "TypeError",
@@ -8765,24 +8761,20 @@ fn define_or_reopen(
     if kind != DefKind::Module {
         scope.singleton_class(id);
     }
-    let object = scope.classes().object(id);
-    scope
-        .classes_mut()
-        .const_set_at(cbase, name, object, location);
+    let object = scope.class_object(id);
+    scope.const_set_at(cbase, name, object, location);
     // The hooks a new definition owes (#28), in CRuby's order, measured:
     // `const_added` on the module it is named in — `class A::C` is a constant
     // assignment like any other — then, for a class, `inherited` on its
     // superclass, both before the body runs. Reopening fires neither, and
     // returned above.
     let mut hooks: Hooks = vec![(
-        scope.classes().object(cbase),
+        scope.class_object(cbase),
         "const_added",
         vec![Value::symbol(name)],
     )];
     if kind != DefKind::Module {
-        let parent = scope
-            .classes()
-            .object(wanted.unwrap_or(Builtin::Object.id()));
+        let parent = scope.class_object(wanted.unwrap_or(Builtin::Object.id()));
         hooks.push((parent, "inherited", vec![object]));
     }
     Ok((id, hooks))
@@ -8835,7 +8827,7 @@ fn anonymous_module<'h>(
         scope.define_module(None)
     };
 
-    let object = scope.classes().object(id);
+    let object = scope.class_object(id);
     // Below the block's frame base, so `Insn::Leave` leaves it behind when the
     // block ends: `Class.new { 42 }` answers the class, not 42. The same trick
     // `new` uses to answer the object rather than what `initialize` returned.
@@ -8848,7 +8840,7 @@ fn anonymous_module<'h>(
             .classes()
             .superclass(id)
             .unwrap_or(Builtin::Object.id());
-        scope.classes().object(parent)
+        scope.class_object(parent)
     });
 
     if call.block == Value::NIL {
@@ -8972,7 +8964,7 @@ fn cvar_read(
     id: ClassId,
     name: SymbolId,
 ) -> Result<Option<Value>, Error> {
-    match scope.classes().cvar_get(id, name) {
+    match scope.cvar_get(id, name) {
         Ok(value) => Ok(value),
         Err(overtaken) => {
             let of = class_or_anonymous(scope, id);
@@ -9076,7 +9068,7 @@ fn to_method_missing(
 
 /// The object a singleton class belongs to, or nil for one that is not.
 fn singleton_attached(scope: &mut HandleScope<'_>, class: ClassId) -> Value {
-    scope.classes().attached(class).unwrap_or(Value::NIL)
+    scope.attached(class).unwrap_or(Value::NIL)
 }
 
 /// `method_<event>` on `owner`, or `singleton_method_<event>` on the object
@@ -9099,7 +9091,7 @@ fn fire_method_hook<'h>(
             singleton_attached(scope, owner),
         )
     } else {
-        (format!("method_{event}"), scope.classes().object(owner))
+        (format!("method_{event}"), scope.class_object(owner))
     };
     if let Some(unwind) = fire_hook(
         scope,
@@ -9200,7 +9192,7 @@ fn warn_redefined<'h>(
     if !scope.classes().has_redefined() {
         return Ok(None);
     }
-    let kernel = scope.classes().object(Builtin::Kernel.id());
+    let kernel = scope.class_object(Builtin::Kernel.id());
     let category = Value::symbol(crate::shared::symbols::intern("performance"));
     for (owner, name) in scope.classes_mut().take_redefined().into_iter().rev() {
         let method = crate::shared::symbols::name(name).unwrap_or_default();
@@ -9370,7 +9362,7 @@ fn vm_warn<'h>(
     verbose: bool,
 ) -> Result<Option<Unwind>, Error> {
     let text = string_new(scope, message);
-    let kernel = scope.classes().object(Builtin::Kernel.id());
+    let kernel = scope.class_object(Builtin::Kernel.id());
     call_discarded(
         scope,
         stack,
@@ -9416,7 +9408,7 @@ fn thaw_chilled<'h>(
     }
     let top = frames.len() - 1;
     frames[top].pc -= 1;
-    let kernel = scope.classes().object(Builtin::Kernel.id());
+    let kernel = scope.class_object(Builtin::Kernel.id());
     let unwind = call_discarded(
         scope,
         stack,
@@ -9440,7 +9432,7 @@ fn autoload_pending(
     owner: ClassId,
     name: SymbolId,
 ) -> Result<bool, Error> {
-    let module = scope.classes().object(owner);
+    let module = scope.class_object(owner);
     let entries = ivar_get(scope, module, symbol("@__autoloads__"))?;
     if entries.is_nil() {
         return Ok(false);
@@ -9508,7 +9500,7 @@ fn autoload_shadows(
         return false;
     }
     for owner in const_owners(scope, cref, from, how) {
-        if scope.classes().const_get_here(owner, name).is_some() {
+        if scope.const_get_here(owner, name).is_some() {
             // Assigned by a file another thread is still autoloading: to this
             // thread it is that autoload yet, and reading it waits (#709).
             return autoloading_elsewhere(scope, owner, name).unwrap_or(false);
@@ -9558,7 +9550,7 @@ fn autoloading_elsewhere(
     owner: ClassId,
     name: SymbolId,
 ) -> Result<bool, Error> {
-    let module = scope.classes().object(owner);
+    let module = scope.class_object(owner);
     let loading = ivar_get(scope, module, symbol("@__autoloading__"))?;
     if loading.is_nil() {
         return Ok(false);
@@ -9622,13 +9614,13 @@ fn autoload_definee<'h>(
         scope.classes().cref_base(frames[top].cref)
     };
     let name = frames[top].iseq.symbol_ids()[def.name as usize];
-    if scope.classes().const_get_here(cbase, name).is_some() {
+    if scope.const_get_here(cbase, name).is_some() {
         return Ok(None);
     }
     if !autoload_pending(scope, cbase, name)? {
         return Ok(None);
     }
-    let module = scope.classes().object(cbase);
+    let module = scope.class_object(cbase);
     let key = Value::symbol(name);
     frames[top].pc -= 1;
     let unwind = call_discarded(
@@ -9704,7 +9696,7 @@ fn name_if_anonymous(scope: &mut HandleScope<'_>, cbase: ClassId, name: SymbolId
     let mut pending = vec![(id, path)];
     while let Some((outer, path)) = pending.pop() {
         for (constant, _) in scope.classes().const_names(outer) {
-            let Some(inner) = scope.classes().const_get_here(outer, constant) else {
+            let Some(inner) = scope.const_get_here(outer, constant) else {
                 continue;
             };
             let Some(inner) = class_id_of(scope, inner) else {
@@ -9732,7 +9724,7 @@ fn set_temporary_name(scope: &mut HandleScope<'_>, id: ClassId, name: Option<Str
         // Matched against the old path, so before `outer` is renamed.
         let mut held = Vec::new();
         for (constant, _) in scope.classes().const_names(outer) {
-            let Some(inner) = scope.classes().const_get_here(outer, constant) else {
+            let Some(inner) = scope.const_get_here(outer, constant) else {
                 continue;
             };
             let Some(inner) = class_id_of(scope, inner) else {
@@ -9770,7 +9762,7 @@ fn qualified_name(scope: &mut HandleScope<'_>, cbase: ClassId, name: SymbolId) -
         //
         // That name is temporary: see [`name_if_anonymous`].
         None if cbase != Builtin::Object.id() => {
-            let object = scope.classes().object(cbase);
+            let object = scope.class_object(cbase);
             let handle = scope.root(object);
             let id = crate::heap::object_id(scope.address(handle));
             let noun = match scope.classes().kind(cbase) {
@@ -9938,7 +9930,7 @@ fn uninitialized(
     let constant = symbol_name(name);
     // The receiver is the module that was asked: `Object` for a bare name at
     // the top level, the cref's class inside one. Measured.
-    let receiver = scope.classes().object(from);
+    let receiver = scope.class_object(from);
     let name_value = Value::symbol(name);
     match how {
         // A bare name inside a class names the class it was asked of:
@@ -9962,7 +9954,7 @@ fn uninitialized(
             // never found, and ruby/spec asserts on both (#185).
             // The module that *holds* the private name is the one named and
             // the receiver, not the subclass it was asked through. Measured.
-            if let Some((holder, _)) = scope.classes().const_qualified_owner(from, name)
+            if let Some((holder, _)) = scope.const_qualified_owner(from, name)
                 && scope.classes().const_is_private(holder, name)
             {
                 let owner = scope
@@ -9970,7 +9962,7 @@ fn uninitialized(
                     .name(holder)
                     .unwrap_or("an anonymous module")
                     .to_string();
-                let receiver = scope.classes().object(holder);
+                let receiver = scope.class_object(holder);
                 return name_error(
                     scope,
                     format!("private constant {owner}::{constant} referenced"),
@@ -10008,10 +10000,9 @@ fn pop_name(stack: &mut Stack, keyword: &'static str) -> Result<crate::value::Sy
 /// `rb_class_modify_check` does, and is frozen whenever that object is: `class
 /// << frozen; def m; end; end` refuses.
 fn module_frozen_check(scope: &mut HandleScope<'_>, id: ClassId) -> Result<(), Error> {
-    let object = scope.classes().object(id);
+    let object = scope.class_object(id);
     let handle = scope.root(object);
     let attached = scope
-        .classes()
         .attached(id)
         .filter(|_| scope.classes().is_singleton(id));
     if let Some(attached) = attached {
@@ -10634,7 +10625,6 @@ fn is_range(scope: &mut HandleScope<'_>, value: Value) -> bool {
         return false;
     };
     let Some(range) = scope
-        .classes()
         .const_get_here(
             Builtin::Object.id(),
             crate::shared::symbols::intern("Range"),
@@ -11316,7 +11306,7 @@ fn float_to_s(f: f64) -> String {
 
 /// A new `String` of class `id` holding `bytes` in `encoding`.
 fn string_bytes_in(scope: &mut HandleScope<'_>, id: ClassId, bytes: &[u8], encoding: u8) -> Value {
-    let class = scope.classes().object(id);
+    let class = scope.class_object(id);
     let class = scope.root(class);
     string_alloc(scope, class, bytes, encoding)
 }
@@ -11423,7 +11413,7 @@ fn copy_module(scope: &mut HandleScope<'_>, from: ClassId) -> Result<Value, Erro
     if scope.classes().is_singleton(from) {
         return Err(Error::raise("TypeError", "can't copy singleton class"));
     }
-    let object = scope.classes().object(from);
+    let object = scope.class_object(from);
     let kind = scope.classes().kind(from);
     let class = class_of(scope, object);
     let to = new_module_of(scope, kind, class);
@@ -11432,7 +11422,7 @@ fn copy_module(scope: &mut HandleScope<'_>, from: ClassId) -> Result<Value, Erro
         let target = scope.singleton_class(to);
         scope.classes_mut().copy_singleton(singleton, target);
     }
-    let copy = scope.classes().object(to);
+    let copy = scope.class_object(to);
     // Not its id, nor the memo `Module#name` keeps: the copy has a name of
     // its own to acquire.
     let skipped = [crate::shared::symbols::class_id_ivar(), symbol("@__name__")];
@@ -11532,7 +11522,6 @@ fn refine(
         Some(refinement) => refinement,
         None => {
             let class = scope
-                .classes()
                 .const_get_here(Builtin::Object.id(), symbol("Refinement"))
                 .and_then(|class| class_id_of(scope, class))
                 .ok_or(Error::NoDispatch {
@@ -11543,13 +11532,13 @@ fn refine(
             scope.classes_mut().add_refinement(owner, target, id);
             // What `Refinement#target` and `#inspect` read, as CRuby keeps
             // `__refined_class__` and `__defined_at__`.
-            let object = scope.classes().object(id);
+            let object = scope.class_object(id);
             ivar_set(scope, object, symbol("@__target__"), target_object)?;
             ivar_set(scope, object, symbol("@__defined_at__"), call.receiver)?;
             id
         }
     };
-    let object = scope.classes().object(refinement);
+    let object = scope.class_object(refinement);
     // Below the block's frame base, which leaves it as the answer: see
     // `anonymous_module`.
     stack.push(object);
@@ -11683,8 +11672,9 @@ fn new_module_of(scope: &mut HandleScope<'_>, kind: Kind, class: Option<ClassId>
     if let Some(class) = class
         && class != default
     {
-        let object = scope.classes().object(id);
-        let meta = scope.classes().object(class);
+        scope.classes_mut().set_instance_of(id, class);
+        let object = scope.class_object(id);
+        let meta = scope.class_object(class);
         let mut nested = scope.nested();
         let handle = nested.root(object);
         nested.set_class(handle, meta);
@@ -11702,7 +11692,7 @@ fn dup_class_of(scope: &mut HandleScope<'_>, value: Value) -> Option<Value> {
     while scope.classes().is_singleton(id) {
         id = scope.classes().superclass(id)?;
     }
-    Some(scope.classes().object(id))
+    Some(scope.class_object(id))
 }
 
 /// Which class `allocate` refused on, as a `&'static str` the reason can carry.
@@ -11760,7 +11750,7 @@ fn allocate_instance(scope: &mut HandleScope<'_>, id: ClassId) -> Result<Value, 
         let name = match scope.classes().name(id) {
             Some(name) => name.to_owned(),
             None => {
-                let class = scope.classes().object(id);
+                let class = scope.class_object(id);
                 inspect(scope, class)
             }
         };
@@ -11775,14 +11765,14 @@ fn allocate_instance(scope: &mut HandleScope<'_>, id: ClassId) -> Result<Value, 
         // until then. `Class.new` never comes here — see `anonymous_module`.
         Some(Builtin::Class) => {
             let class = new_module_of(scope, Kind::Class, Some(id));
-            Ok(scope.classes().object(class))
+            Ok(scope.class_object(class))
         }
         // An instance of a subclass of `Module` (#28): an anonymous module
         // whose class is the subclass, which `initialize` then runs on.
         // `Module.new` itself is `anonymous_module`.
         Some(Builtin::Module) => {
             let module = new_module_of(scope, Kind::Module, Some(id));
-            Ok(scope.classes().object(module))
+            Ok(scope.class_object(module))
         }
         // A user-defined class, or `Object` itself: one slot, for the ivar
         // storage a shape transition will hang off it.
@@ -11790,7 +11780,7 @@ fn allocate_instance(scope: &mut HandleScope<'_>, id: ClassId) -> Result<Value, 
         // written under it — `Rational`, or a program's — keeps its parts in
         // instance variables like any other.
         None | Some(Builtin::Object | Builtin::BasicObject | Builtin::Numeric) => {
-            let class = scope.classes().object(id);
+            let class = scope.class_object(id);
             let class = scope.root(class);
             let handle = alloc_ivar_object(scope, Some(class));
             Ok(scope.get(handle))
@@ -11803,7 +11793,7 @@ fn allocate_instance(scope: &mut HandleScope<'_>, id: ClassId) -> Result<Value, 
         // `Regexp#initialize` compiles into it, and every reader but `inspect`
         // a `TypeError` before then, as CRuby's `rb_reg_check` makes them.
         Some(Builtin::Regexp) => {
-            let class = scope.classes().object(id);
+            let class = scope.class_object(id);
             let class = scope.root(class);
             let (payload, slots) = crate::regexp::regexp_shape();
             let handle = scope.alloc(Some(class), payload, slots);
@@ -11818,7 +11808,7 @@ fn allocate_instance(scope: &mut HandleScope<'_>, id: ClassId) -> Result<Value, 
             // fixed slots with three `Getter`/`Setter` pairs in front of them
             // until shapes landed; `core/hash.rb` now reads `@__pairs__` like any
             // other Ruby class.
-            let class = scope.classes().object(id);
+            let class = scope.class_object(id);
             let class = scope.root(class);
             let handle = alloc_ivar_object(scope, Some(class));
             let object = scope.get(handle);
@@ -11834,7 +11824,7 @@ fn allocate_instance(scope: &mut HandleScope<'_>, id: ClassId) -> Result<Value, 
             let name = match scope.classes().name(id) {
                 Some(name) => name.to_owned(),
                 None => {
-                    let class = scope.classes().object(id);
+                    let class = scope.class_object(id);
                     inspect(scope, class)
                 }
             };
@@ -11845,7 +11835,7 @@ fn allocate_instance(scope: &mut HandleScope<'_>, id: ClassId) -> Result<Value, 
         }
         Some(other) => {
             if is_exception_class(scope, id) {
-                let class = scope.classes().object(id);
+                let class = scope.class_object(id);
                 // Allocated with no message, as CRuby's: `to_s` answers the class
                 // when an `initialize` never set one.
                 let exception = exception_of(scope, class, "");
@@ -11919,7 +11909,7 @@ fn empty_array<'h>(scope: &mut HandleScope<'h>) -> Handle<'h> {
 
 /// The same, wearing `id` — what a subclass of `Array` allocates.
 fn empty_array_of<'h>(scope: &mut HandleScope<'h>, id: ClassId) -> Handle<'h> {
-    let class = scope.classes().object(id);
+    let class = scope.class_object(id);
     let class = scope.root(class);
     let handle = scope.alloc(Some(class), Payload::Slots, ARRAY_SLOTS);
     scope.set_slot(handle, ARRAY_STORAGE, Value::NIL);
@@ -11953,7 +11943,7 @@ fn new_array(scope: &mut HandleScope<'_>, elements: &[Value]) -> Value {
     }
     let capacity = u32::try_from(capacity).expect("an Array storage under 2^32 slots");
     let storage = scope.alloc_slots(None, elements, capacity);
-    let class = scope.classes().object(Builtin::Array.id());
+    let class = scope.class_object(Builtin::Array.id());
     let class = scope.root(class);
     let length = i64::try_from(elements.len())
         .ok()
@@ -12016,7 +12006,7 @@ fn undefined_method_in<'h>(
     let forwarded = Pending {
         cache: None,
         name: crate::shared::symbols::intern("__undefined_method__"),
-        receiver: scope.classes().object(id),
+        receiver: scope.class_object(id),
         args: vec![
             Value::symbol(name),
             if undef { Value::TRUE } else { Value::FALSE },
@@ -12126,7 +12116,7 @@ fn native_call<'h>(
                 let forwarded = Pending {
                     cache: None,
                     name: crate::shared::symbols::intern("__send_name__"),
-                    receiver: scope.classes().object(Builtin::Kernel.id()),
+                    receiver: scope.class_object(Builtin::Kernel.id()),
                     args: forwarded_args,
                     implicit_self: true,
                     variable_call: false,
@@ -12386,7 +12376,7 @@ fn native_call<'h>(
                         .name(id)
                         .map_or_else(String::new, str::to_owned),
                 };
-                let class = scope.classes().object(id);
+                let class = scope.class_object(id);
                 let exception = exception_of(scope, class, &message);
                 // No message is kept as none: `to_s` answers the class name,
                 // and `Marshal` writes the nil. A String is kept as the
@@ -12525,7 +12515,7 @@ fn native_call<'h>(
                     .superclass(class)
                     .expect("a singleton class has a superclass");
             }
-            stack.push(scope.classes().object(class));
+            stack.push(scope.class_object(class));
             Ok(None)
         }
         Native::Equal => {
@@ -13695,7 +13685,6 @@ fn native_call<'h>(
             // `Errno::NOERROR` whose message is the platform's "Success".
             let found = crate::errno::table().find(|&(_, known)| i64::from(known) == number);
             let errno_module = scope
-                .classes()
                 .const_get_here(
                     Builtin::Object.id(),
                     crate::shared::symbols::intern("Errno"),
@@ -13703,7 +13692,6 @@ fn native_call<'h>(
                 .and_then(|value| class_id_of(scope, value));
             let class = match (found, errno_module) {
                 (Some((name, _)), Some(module)) => scope
-                    .classes()
                     .const_get_here(module, crate::shared::symbols::intern(name))
                     .unwrap_or(Value::NIL),
                 _ => Value::NIL,
@@ -14245,7 +14233,7 @@ fn native_call<'h>(
             let holder = if singleton {
                 call.receiver
             } else {
-                scope.classes().object(target)
+                scope.class_object(target)
             };
             if !holder.is_immediate() {
                 let handle = scope.root(holder);
@@ -14349,7 +14337,7 @@ fn native_call<'h>(
                     let forwarded = Pending {
                         cache: None,
                         name: crate::shared::symbols::intern("__eval_string_args__"),
-                        receiver: scope.classes().object(Builtin::Kernel.id()),
+                        receiver: scope.class_object(Builtin::Kernel.id()),
                         args,
                         keywords: Vec::new(),
                         implicit_self: true,
@@ -14497,7 +14485,6 @@ fn native_call<'h>(
                 return Err(refused);
             }
             let io = scope
-                .classes()
                 .const_get_here(Builtin::Object.id(), symbol("IO"))
                 .and_then(|class| class_id_of(scope, class));
             let (Some(io), Some(own), Some(their)) =
@@ -14525,7 +14512,7 @@ fn native_call<'h>(
                         .superclass(class)
                         .expect("a singleton class has a superclass");
                 }
-                let object = scope.classes().object(class);
+                let object = scope.class_object(class);
                 let handle = scope.root(receiver);
                 scope.set_class(handle, object);
             }
@@ -14552,7 +14539,7 @@ fn native_call<'h>(
                 .and_then(|frame| frame.owner)
                 .filter(|&owner| !scope.classes().is_singleton(owner));
             let base = owner.unwrap_or_else(|| scope.classes().cref_base(cref));
-            let value = scope.classes().object(base);
+            let value = scope.class_object(base);
             stack.push(value);
             Ok(None)
         }
@@ -14898,7 +14885,7 @@ fn native_call<'h>(
                 .classes()
                 .nesting(cref)
                 .into_iter()
-                .map(|id| scope.classes().object(id))
+                .map(|id| scope.class_object(id))
                 .collect();
             let value = new_array(scope, &scopes);
             stack.push(value);
@@ -14916,7 +14903,7 @@ fn native_call<'h>(
                 .classes()
                 .refinements_made_by(owner)
                 .into_iter()
-                .map(|id| scope.classes().object(id))
+                .map(|id| scope.class_object(id))
                 .collect();
             let value = new_array(scope, &made);
             stack.push(value);
@@ -14977,7 +14964,7 @@ fn native_call<'h>(
                 .classes()
                 .used_modules(cref)
                 .into_iter()
-                .map(|id| scope.classes().object(id))
+                .map(|id| scope.class_object(id))
                 .collect();
             let value = new_array(scope, &used);
             stack.push(value);
@@ -14989,7 +14976,7 @@ fn native_call<'h>(
                 .classes()
                 .used_refinements(cref)
                 .into_iter()
-                .map(|id| scope.classes().object(id))
+                .map(|id| scope.class_object(id))
                 .collect();
             let value = new_array(scope, &used);
             stack.push(value);
@@ -15222,10 +15209,7 @@ fn native_call<'h>(
                 });
             };
             let ids = scope.classes().ancestors(id);
-            let objects: Vec<Value> = ids
-                .into_iter()
-                .map(|id| scope.classes().object(id))
-                .collect();
+            let objects: Vec<Value> = ids.into_iter().map(|id| scope.class_object(id)).collect();
             let value = new_array(scope, &objects);
             stack.push(value);
             Ok(None)
@@ -15254,7 +15238,7 @@ fn native_call<'h>(
                 return Err(Error::raise("TypeError", "uninitialized class"));
             }
             let value = match scope.classes().superclass(id) {
-                Some(parent) => scope.classes().object(parent),
+                Some(parent) => scope.class_object(parent),
                 None => Value::NIL,
             };
             stack.push(value);
@@ -15538,7 +15522,7 @@ fn native_call<'h>(
                     // included.
                     frozen_check(scope, call.receiver)?;
                     let value = call.args.get(1).copied().unwrap_or(Value::NIL);
-                    scope.classes_mut().cvar_set(id, symbol, value);
+                    scope.cvar_set(id, symbol, value);
                     // `class_variable_set` answers the value it wrote.
                     stack.push(value);
                 }
@@ -15763,7 +15747,7 @@ fn native_call<'h>(
                 };
                 // An autoload not yet loaded is marked without loading it:
                 // privacy is by name, so it holds once the file defines it.
-                if scope.classes().const_get_here(id, symbol).is_none()
+                if scope.const_get_here(id, symbol).is_none()
                     && !autoload_pending(scope, id, symbol)?
                 {
                     return Err(Error::raise(
@@ -16600,7 +16584,7 @@ fn raise_argument(
             .name(id)
             .map_or_else(String::new, str::to_owned),
     };
-    let class = scope.classes().object(id);
+    let class = scope.class_object(id);
     let exception = exception_of(scope, class, &message);
     if args.len() < 2 {
         ivar_set(scope, exception, symbol(EXC_MESSAGE), Value::NIL)?;
@@ -18648,7 +18632,7 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
     // The Ruby-side half of the same list — `loop`, `p`, `print`, `puts` — is
     // in `core/kernel.rb`, next to the definitions, where it reads as Ruby.
     let kernel = Builtin::Kernel.id();
-    let kernel_object = scope.classes().object(kernel);
+    let kernel_object = scope.class_object(kernel);
     let singleton = singleton_of(scope, kernel_object)
         .expect("the Kernel module object takes a singleton class");
     for name in [
@@ -20003,7 +19987,7 @@ fn bool_value(b: bool) -> Value {
 }
 
 fn class_handle<'h>(scope: &mut HandleScope<'h>, builtin: Builtin) -> Handle<'h> {
-    let object = scope.classes().object(builtin.id());
+    let object = scope.class_object(builtin.id());
     scope.root(object)
 }
 
@@ -22653,7 +22637,7 @@ fn each_object(scope: &mut HandleScope<'_>, module: Value) -> Value {
         }
         if let Some(id) = scope.class_id_of(handle)
             && scope.classes().is_singleton(id)
-            && let Some(attached) = scope.classes().attached(id)
+            && let Some(attached) = scope.attached(id)
             && class_id_of(scope, attached).is_some_and(|inner| scope.classes().is_singleton(inner))
         {
             continue;
@@ -23017,7 +23001,7 @@ const BINDING_SLOTS: u32 = 11;
 fn binding_class(scope: &mut HandleScope<'_>) -> Option<Value> {
     let object = Builtin::Object.id();
     let symbol = crate::shared::symbols::intern("Binding");
-    scope.classes().const_get_here(object, symbol)
+    scope.const_get_here(object, symbol)
 }
 
 fn is_binding(scope: &mut HandleScope<'_>, value: Value) -> bool {
@@ -23155,7 +23139,7 @@ fn capture_binding(
     let line = frame.iseq.line_at(frame.pc.saturating_sub(1)).unwrap_or(0);
     let owner = frame
         .owner
-        .map_or(Value::NIL, |owner| scope.classes().object(owner));
+        .map_or(Value::NIL, |owner| scope.class_object(owner));
     let method = frame.defined_as.map_or(Value::NIL, Value::symbol);
     let visibility = match frame.scope_default {
         ScopeDefault::Public => 0,
@@ -26363,7 +26347,7 @@ fn parse_warnings(
         return Ok(None);
     }
     let proc_class = class_handle(scope, Builtin::Proc);
-    let kernel = scope.classes().object(Builtin::Kernel.id());
+    let kernel = scope.class_object(Builtin::Kernel.id());
     let name = crate::shared::symbols::intern("__parse_warning__");
     for (text, verbose) in warnings.iter().rev() {
         let text = string_new(scope, text);
