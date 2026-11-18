@@ -126,9 +126,9 @@ Guards are answered for the platform the run is on. CI generates this file on Li
 | `library/uri` | 105 | 204 | 204 | 0 | 0 | 0 | 100% |
 | `library/weakref` | 5 | 9 | 9 | 0 | 0 | 0 | 100% |
 | `library/win32ole` | 74 | 0 | 0 | 0 | 0 | 0 | — |
-| `library/yaml` | 9 | 61 | 60 | 0 | 0 | 1 | 98% |
+| `library/yaml` | 9 | 61 | 61 | 0 | 0 | 0 | 100% |
 | `library/zlib` | 42 | 148 | 148 | 0 | 0 | 0 | 100% |
 | `optional/capi` | 47 | 0 | 0 | 0 | 0 | 0 | — |
 | `optional/thread_safety` | 1 | 5 | 4 | 0 | 0 | 1 | 80% |
 | `security` | 13 | 34 | 32 | 0 | 2 | 0 | 94% |
-| **total** | 3841 | 32991 | 30560 | 0 | 2314 | 117 | 93% |
+| **total** | 3841 | 32991 | 30561 | 0 | 2314 | 116 | 93% |
