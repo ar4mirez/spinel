@@ -6,6 +6,10 @@
 //! when it is built: `x86_64-linux`, `aarch64-linux`, `x86_64-linux-musl`,
 //! `arm64-darwin24`. The result reaches `lib.rs` as `SPINEL_RUBY_PLATFORM`.
 //!
+//! It also checks the OpenSSL `openssl-sys` found (#106, `src/openssl.rs`):
+//! OpenSSL 3.0 or later, not LibreSSL, whose headers' version reaches
+//! `lib.rs`'s `OPENSSL_VERSION_NUMBER` as `SPINEL_OPENSSL_VERSION_NUMBER`.
+//!
 //! It also fingerprints the compiler for the bytecode cache (#40,
 //! `src/sbc.rs`): a hash of every source that decides what a file compiles
 //! to, as `SPINEL_BYTECODE_FINGERPRINT`. A cache file written by a build with
@@ -32,6 +36,38 @@ fn main() {
         "cargo:rustc-env=SPINEL_BYTECODE_FINGERPRINT={}",
         bytecode_fingerprint()
     );
+    println!(
+        "cargo:rustc-env=SPINEL_OPENSSL_VERSION_NUMBER={}",
+        openssl_version()
+    );
+}
+
+/// The version number of the OpenSSL headers `openssl-sys` built against,
+/// in hex, as it hands it to the crates that link it. `src/openssl.rs`
+/// calls OpenSSL 3.0's API, so an older OpenSSL, or LibreSSL, stops the
+/// build here with what to install rather than failing to link.
+fn openssl_version() -> String {
+    println!("cargo:rerun-if-env-changed=DEP_OPENSSL_VERSION_NUMBER");
+    println!("cargo:rerun-if-env-changed=DEP_OPENSSL_LIBRESSL_VERSION_NUMBER");
+    let install = "install OpenSSL 3 and its headers (libssl-dev, openssl-devel, \
+                   or Homebrew's openssl@3), or point OPENSSL_DIR at one";
+    if env::var("DEP_OPENSSL_LIBRESSL_VERSION_NUMBER").is_ok() {
+        panic!("Spinel's `openssl` needs OpenSSL 3, not LibreSSL: {install}");
+    }
+    let version = env::var("DEP_OPENSSL_VERSION_NUMBER").unwrap_or_default();
+    let number = u64::from_str_radix(&version, 16).unwrap_or(0);
+    assert!(
+        number >= 0x3000_0000,
+        "Spinel's `openssl` needs OpenSSL 3.0 or later, found {version:?}: {install}"
+    );
+    // From 3.4 the headers make `EVP_MD_CTX_size` the context's own size,
+    // `EVP_MD_CTX_get_size_ex`, rather than its algorithm's; CRuby calls the
+    // macro, so `src/openssl.rs` calls what it names.
+    println!("cargo:rustc-check-cfg=cfg(ossl_ctx_size_ex)");
+    if number >= 0x3040_0000 {
+        println!("cargo:rustc-cfg=ossl_ctx_size_ex");
+    }
+    version
 }
 
 /// What a file compiles to depends on the lowering (`spinel-parse`, and

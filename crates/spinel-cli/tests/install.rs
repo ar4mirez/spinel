@@ -545,17 +545,12 @@ fn sinatra_lock_serves_a_request() {
         .local_addr()
         .unwrap()
         .port();
-    // ponytail: Spinel has no openssl yet, which rack-session's cookie
-    // store requires as Sinatra loads it, so a stand-in for it goes on the
-    // load path (`fixtures/install/openssl-standin/`). Upgrade: drop the
-    // `-I` once openssl lands (#106).
-    let standin = fixtures().join("install/openssl-standin");
+    // rack-session's cookie store requires `openssl` as Sinatra loads it,
+    // and gets Spinel's built-in (#106).
     let mut child = Child(
         sandbox
             .spinel()
             .arg("run")
-            .arg("-I")
-            .arg(&standin)
             .arg("app.rb")
             .env("PORT", port.to_string())
             .stdout(std::process::Stdio::null())

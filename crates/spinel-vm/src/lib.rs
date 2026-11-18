@@ -95,6 +95,7 @@ pub mod jis_table;
 pub mod json;
 pub mod method;
 pub mod mt;
+pub mod openssl;
 pub mod regexp;
 pub mod require_map;
 pub mod sbc;

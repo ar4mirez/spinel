@@ -529,6 +529,8 @@ pub struct Heap {
     /// The FFI state `Spinel::FFI` and `fiddle` use (#105): live closures
     /// and the calls suspended in one, waiting for Ruby's answer.
     ffi: crate::ffi::Ffi,
+    /// The OpenSSL contexts `openssl`'s digests and HMACs hash in (#106).
+    openssl: crate::openssl::Contexts,
 }
 
 /// Where `ObjectSpace.trace_object_allocations` saw an object allocated
@@ -766,6 +768,7 @@ impl Heap {
             autoloads: Vec::new(),
             autoload_total: 0,
             ffi: crate::ffi::Ffi::default(),
+            openssl: crate::openssl::Contexts::default(),
             any_autoloads: false,
             argv: Vec::new(),
             program_name: String::new(),
@@ -985,6 +988,11 @@ impl Heap {
     /// The heap's FFI state (#105): see [`crate::ffi`].
     pub fn ffi_mut(&mut self) -> &mut crate::ffi::Ffi {
         &mut self.ffi
+    }
+
+    /// The heap's OpenSSL contexts (#106): see [`crate::openssl`].
+    pub fn openssl_mut(&mut self) -> &mut crate::openssl::Contexts {
+        &mut self.openssl
     }
 
     /// What each call site last resolved to. Read on every `Send`, so the
@@ -1810,6 +1818,11 @@ impl<'h> HandleScope<'h> {
     /// The heap's FFI state (#105): see [`crate::ffi`].
     pub fn ffi_mut(&mut self) -> &mut crate::ffi::Ffi {
         self.heap.ffi_mut()
+    }
+
+    /// The heap's OpenSSL contexts (#106): see [`crate::openssl`].
+    pub fn openssl_mut(&mut self) -> &mut crate::openssl::Contexts {
+        self.heap.openssl_mut()
     }
 
     /// The heap's compiled patterns and literal cache.

@@ -42,9 +42,15 @@ pub struct Builtin {
 ///
 /// ponytail: only the built-ins whose source names a gem version are listed.
 /// `monitor` (#46) declares none, `socket` and `objspace` are not gems, and
-/// `bigdecimal` (#109), `psych`, `openssl` (#106) and `racc` are not built-ins
-/// yet, so a lock pinning one of them installs the gem itself, as before.
-/// Upgrade: add each one here with its version when it lands.
+/// `bigdecimal` (#109), `psych` and `racc` are not built-ins yet, so a lock
+/// pinning one of them installs the gem itself, as before. Upgrade: add each
+/// one here with its version when it lands.
+///
+/// `openssl` is listed from its first phase (#106: digests, HMAC, random
+/// bytes), because the gem itself cannot be installed in its place: its
+/// `lib/openssl.rb` requires `openssl.so`, a CRuby C extension Spinel never
+/// builds. A program that needs a part not there yet (`Cipher`, `SSL`, TLS
+/// is #107) finds the constant undefined, as it would with no openssl.
 pub const BUILTINS: &[Builtin] = &[
     Builtin {
         name: "date",
@@ -73,6 +79,10 @@ pub const BUILTINS: &[Builtin] = &[
     Builtin {
         name: "json",
         version: "2.18.0",
+    },
+    Builtin {
+        name: "openssl",
+        version: "4.0.2",
     },
     Builtin {
         name: "stringio",

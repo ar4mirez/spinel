@@ -49,7 +49,7 @@ use crate::class::{ClassId, CrefId, Kind, Method, ScopeDefault, Visibility};
 use crate::heap::{Handle, HandleScope, Heap, Payload};
 use crate::method::{
     BindingOp, BitOp, ConsoleOp, CvarOp, Definition, EtcOp, FfiOp, FiberOp, FsOp, GcOp, IvarOp,
-    Native, ReflectOp, SockOp, StrOp, SysOp, ThreadOp,
+    Native, OpenSslOp, ReflectOp, SockOp, StrOp, SysOp, ThreadOp,
 };
 use crate::shape::ShapeId;
 use crate::value::SymbolId;
@@ -14889,6 +14889,7 @@ fn native_call<'h>(
         Native::Ext(index) => ext::call(scope, stack, frames, proc_class, ids, &call, index),
         Native::Console(op) => console_native(scope, stack, &call, op),
         Native::Ffi(op) => ffi_native(scope, stack, &call, op),
+        Native::OpenSsl(op) => openssl_native(scope, stack, &call, op),
 
         Native::FrameNesting => {
             let cref = frames.last().map_or(CrefId::ROOT, |frame| frame.cref);
@@ -18046,6 +18047,106 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             Builtin::Kernel,
             &["__ffi_constants__"],
             Native::Ffi(FfiOp::Constants),
+        ),
+        (
+            Builtin::Kernel,
+            &["__openssl_alloc__"],
+            Native::OpenSsl(OpenSslOp::Alloc),
+        ),
+        (
+            Builtin::Kernel,
+            &["__openssl_free__"],
+            Native::OpenSsl(OpenSslOp::Free),
+        ),
+        (
+            Builtin::Kernel,
+            &["__openssl_digest_init__"],
+            Native::OpenSsl(OpenSslOp::DigestInit),
+        ),
+        (
+            Builtin::Kernel,
+            &["__openssl_hmac_init__"],
+            Native::OpenSsl(OpenSslOp::HmacInit),
+        ),
+        (
+            Builtin::Kernel,
+            &["__openssl_copy__"],
+            Native::OpenSsl(OpenSslOp::Copy),
+        ),
+        (
+            Builtin::Kernel,
+            &["__openssl_reset__"],
+            Native::OpenSsl(OpenSslOp::Reset),
+        ),
+        (
+            Builtin::Kernel,
+            &["__openssl_update__"],
+            Native::OpenSsl(OpenSslOp::Update),
+        ),
+        (
+            Builtin::Kernel,
+            &["__openssl_final__"],
+            Native::OpenSsl(OpenSslOp::Final),
+        ),
+        (
+            Builtin::Kernel,
+            &["__openssl_digest_info__"],
+            Native::OpenSsl(OpenSslOp::DigestInfo),
+        ),
+        (
+            Builtin::Kernel,
+            &["__openssl_digests__"],
+            Native::OpenSsl(OpenSslOp::Digests),
+        ),
+        (
+            Builtin::Kernel,
+            &["__openssl_random_bytes__"],
+            Native::OpenSsl(OpenSslOp::RandomBytes),
+        ),
+        (
+            Builtin::Kernel,
+            &["__openssl_random_seed__"],
+            Native::OpenSsl(OpenSslOp::RandomSeed),
+        ),
+        (
+            Builtin::Kernel,
+            &["__openssl_random_add__"],
+            Native::OpenSsl(OpenSslOp::RandomAdd),
+        ),
+        (
+            Builtin::Kernel,
+            &["__openssl_random_status__"],
+            Native::OpenSsl(OpenSslOp::RandomStatus),
+        ),
+        (
+            Builtin::Kernel,
+            &["__openssl_random_load__"],
+            Native::OpenSsl(OpenSslOp::RandomLoad),
+        ),
+        (
+            Builtin::Kernel,
+            &["__openssl_random_write__"],
+            Native::OpenSsl(OpenSslOp::RandomWrite),
+        ),
+        (
+            Builtin::Kernel,
+            &["__openssl_memcmp__"],
+            Native::OpenSsl(OpenSslOp::Memcmp),
+        ),
+        (
+            Builtin::Kernel,
+            &["__openssl_version__"],
+            Native::OpenSsl(OpenSslOp::Version),
+        ),
+        (
+            Builtin::Kernel,
+            &["__openssl_errors__"],
+            Native::OpenSsl(OpenSslOp::Errors),
+        ),
+        (
+            Builtin::Kernel,
+            &["__openssl_fips_mode__"],
+            Native::OpenSsl(OpenSslOp::FipsMode),
         ),
         (Builtin::Kernel, &["__fd_dup__"], Native::Fs(FsOp::FdDup)),
         (Builtin::Kernel, &["__fd_dup2__"], Native::Fs(FsOp::FdDup2)),
@@ -26766,6 +26867,239 @@ fn etc_native(
     };
     stack.push(value);
     Ok(None)
+}
+
+// ---------------------------------------------------------------------------
+// `openssl` (#106)
+// ---------------------------------------------------------------------------
+
+/// The OpenSSL calls `lib/openssl/spinel.rb` is Ruby over (#106);
+/// `openssl.rs` makes them. A failed call answers `[class, message,
+/// errors]` for the Ruby side to raise (see [`OpenSslOp`]); everything the
+/// Ruby side checks first — Strings, C ints, a context that exists — is
+/// refused here rather than guessed at.
+fn openssl_native(
+    scope: &mut HandleScope<'_>,
+    stack: &mut Stack,
+    call: &Pending,
+    op: OpenSslOp,
+) -> Result<Option<Unwind>, Error> {
+    use crate::openssl::{self, Algorithm, Kind};
+    let refuse = |operands| Error::NoDispatch {
+        op: "__openssl__",
+        operands,
+    };
+    let id_at = |index: usize| {
+        int_arg(call, index)
+            .and_then(|n| u64::try_from(n).ok())
+            .ok_or(refuse("a context that is not an id"))
+    };
+    let id_value = |id: u64| {
+        i64::try_from(id)
+            .ok()
+            .and_then(Value::fixnum)
+            .ok_or(refuse("more contexts than a Fixnum counts"))
+    };
+    let kind_at = |index: usize| match int_arg(call, index) {
+        Some(1) => Ok(Kind::Digest),
+        Some(2) => Ok(Kind::Hmac),
+        _ => Err(refuse("a kind that is not 1 or 2")),
+    };
+    let algorithm_at = |scope: &mut HandleScope<'_>, index: usize| {
+        let value = call.args.get(index).copied().unwrap_or(Value::NIL);
+        if let Some(id) = value.as_fixnum() {
+            return u64::try_from(id)
+                .map(Algorithm::Of)
+                .map_err(|_| refuse("a digest that is not an id"));
+        }
+        let name = string_bytes(scope, value).ok_or(refuse("an algorithm that is not a String"))?;
+        std::ffi::CString::new(name)
+            .map(Algorithm::Name)
+            .map_err(|_| refuse("an algorithm name with a NUL in it"))
+    };
+    let cstr_at = |scope: &mut HandleScope<'_>, index: usize| {
+        let bytes = bytes_at(scope, call, index, "__openssl__")?;
+        std::ffi::CString::new(bytes).map_err(|_| refuse("a path with a NUL in it"))
+    };
+    let value = match op {
+        OpenSslOp::Alloc => {
+            let kind = kind_at(0)?;
+            match scope.openssl_mut().alloc(kind) {
+                Ok(id) => id_value(id)?,
+                Err(failure) => openssl_failure(scope, failure),
+            }
+        }
+        OpenSslOp::Free => {
+            let id = id_at(0)?;
+            scope.openssl_mut().free(id);
+            Value::NIL
+        }
+        OpenSslOp::DigestInit => {
+            let id = match call.args.first() {
+                Some(v) if v.is_nil() => None,
+                _ => Some(id_at(0)?),
+            };
+            let algorithm = algorithm_at(scope, 1)?;
+            match scope.openssl_mut().digest_init(id, &algorithm) {
+                Ok(id) => id_value(id)?,
+                Err(failure) => openssl_failure(scope, failure),
+            }
+        }
+        OpenSslOp::HmacInit => {
+            let id = id_at(0)?;
+            let key = bytes_at(scope, call, 1, "__openssl_hmac_init__")?;
+            let algorithm = algorithm_at(scope, 2)?;
+            match scope.openssl_mut().hmac_init(id, &key, &algorithm) {
+                Ok(()) => Value::TRUE,
+                Err(failure) => openssl_failure(scope, failure),
+            }
+        }
+        OpenSslOp::Copy => {
+            let (id, kind) = (id_at(0)?, kind_at(1)?);
+            match scope.openssl_mut().copy(id, kind) {
+                Ok(id) => id_value(id)?,
+                Err(failure) => openssl_failure(scope, failure),
+            }
+        }
+        OpenSslOp::Reset => {
+            let (id, kind) = (id_at(0)?, kind_at(1)?);
+            match scope.openssl_mut().reset(id, kind) {
+                Ok(()) => Value::TRUE,
+                Err(failure) => openssl_failure(scope, failure),
+            }
+        }
+        OpenSslOp::Update => {
+            let (id, kind) = (id_at(0)?, kind_at(1)?);
+            let data = bytes_at(scope, call, 2, "__openssl_update__")?;
+            match scope.openssl_mut().update(id, kind, &data) {
+                Ok(()) => Value::TRUE,
+                Err(failure) => openssl_failure(scope, failure),
+            }
+        }
+        OpenSslOp::Final => {
+            let (id, kind) = (id_at(0)?, kind_at(1)?);
+            match scope.openssl_mut().finish(id, kind) {
+                Ok(bytes) => binary_value(scope, &bytes),
+                Err(failure) => openssl_failure(scope, failure),
+            }
+        }
+        OpenSslOp::DigestInfo => {
+            let id = id_at(0)?;
+            match scope.openssl_mut().digest_info(id) {
+                Ok((name, size, block)) => {
+                    let name =
+                        string_bytes_in(scope, Builtin::String.id(), &name, crate::strings::UTF_8);
+                    let name = scope.root(name);
+                    let size = Value::fixnum(size).expect("a digest size is a Fixnum");
+                    let block = Value::fixnum(block).expect("a block size is a Fixnum");
+                    let name = scope.get(name);
+                    new_array(scope, &[name, size, block])
+                }
+                Err(failure) => openssl_failure(scope, failure),
+            }
+        }
+        OpenSslOp::Digests => rooted_array(scope, openssl::digest_names(), |scope, name| {
+            string_bytes_in(scope, Builtin::String.id(), &name, crate::strings::UTF_8)
+        }),
+        OpenSslOp::RandomBytes => {
+            let length = int_arg(call, 0)
+                .and_then(|n| i32::try_from(n).ok())
+                .ok_or(refuse("a length that is not a C int"))?;
+            match openssl::random_bytes(length) {
+                Ok(bytes) => binary_value(scope, &bytes),
+                Err(failure) => openssl_failure(scope, failure),
+            }
+        }
+        OpenSslOp::RandomSeed => {
+            let data = bytes_at(scope, call, 0, "__openssl_random_seed__")?;
+            openssl::random_seed(&data);
+            Value::NIL
+        }
+        OpenSslOp::RandomAdd => {
+            let data = bytes_at(scope, call, 0, "__openssl_random_add__")?;
+            let entropy = call
+                .args
+                .get(1)
+                .and_then(|&v| crate::float::read(scope, v))
+                .ok_or(refuse("an entropy that is not a Float"))?;
+            openssl::random_add(&data, entropy);
+            Value::NIL
+        }
+        OpenSslOp::RandomStatus => {
+            if openssl::random_status() {
+                Value::TRUE
+            } else {
+                Value::FALSE
+            }
+        }
+        OpenSslOp::RandomLoad | OpenSslOp::RandomWrite => {
+            let path = cstr_at(scope, 0)?;
+            let done = if op == OpenSslOp::RandomLoad {
+                openssl::random_load_file(&path)
+            } else {
+                openssl::random_write_file(&path)
+            };
+            match done {
+                Ok(()) => Value::TRUE,
+                Err(failure) => openssl_failure(scope, failure),
+            }
+        }
+        OpenSslOp::Memcmp => {
+            let a = bytes_at(scope, call, 0, "__openssl_memcmp__")?;
+            let b = bytes_at(scope, call, 1, "__openssl_memcmp__")?;
+            if a.len() != b.len() {
+                return Err(refuse("Strings of different lengths"));
+            }
+            if openssl::secure_equal(&a, &b) {
+                Value::TRUE
+            } else {
+                Value::FALSE
+            }
+        }
+        OpenSslOp::Version => {
+            let (text, number) = openssl::versions();
+            let text = string_bytes_in(scope, Builtin::String.id(), &text, crate::strings::UTF_8);
+            let number = Value::fixnum(number).expect("a version number is a Fixnum");
+            new_array(scope, &[text, number])
+        }
+        OpenSslOp::Errors => rooted_array(scope, openssl::error_strings(), |scope, error| {
+            string_bytes_in(scope, Builtin::String.id(), &error, crate::strings::UTF_8)
+        }),
+        OpenSslOp::FipsMode => match call.args.first().copied().unwrap_or(Value::NIL) {
+            v if v.is_nil() => {
+                if openssl::fips_mode() {
+                    Value::TRUE
+                } else {
+                    Value::FALSE
+                }
+            }
+            v => match openssl::set_fips_mode(v.is_truthy()) {
+                Ok(()) => Value::TRUE,
+                Err(failure) => openssl_failure(scope, failure),
+            },
+        },
+    };
+    stack.push(value);
+    Ok(None)
+}
+
+/// A failed OpenSSL call as the Ruby side raises it: `[class, message,
+/// [error, ...]]`.
+fn openssl_failure(scope: &mut HandleScope<'_>, failure: crate::openssl::Failure) -> Value {
+    let class = Value::fixnum(failure.class.code()).expect("a class code is a Fixnum");
+    let message = string_bytes_in(
+        scope,
+        Builtin::String.id(),
+        &failure.message,
+        crate::strings::UTF_8,
+    );
+    let message = scope.root(message);
+    let errors = rooted_array(scope, failure.errors, |scope, error| {
+        string_bytes_in(scope, Builtin::String.id(), &error, crate::strings::UTF_8)
+    });
+    let errors = scope.root(errors);
+    let (message, errors) = (scope.get(message), scope.get(errors));
+    new_array(scope, &[class, message, errors])
 }
 
 // ---------------------------------------------------------------------------

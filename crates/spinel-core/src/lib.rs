@@ -230,6 +230,10 @@ const LIBRARIES: &[(&str, &str)] = &[
         "fiddle/spinel",
         include_str!("../../../lib/fiddle/spinel.rb"),
     ),
+    (
+        "openssl/spinel",
+        include_str!("../../../lib/openssl/spinel.rb"),
+    ),
 ];
 
 fn library(name: &str) -> Option<&'static str> {

@@ -1,0 +1,144 @@
+== the gem
+4.0.2
+true
+true
+true
+true
+false
+[OpenSSL::Digest, Digest::Class, Digest::Instance]
+[OpenSSL::Digest::DigestError, OpenSSL::OpenSSLError, StandardError]
+[OpenSSL::HMACError, OpenSSL::OpenSSLError, StandardError]
+[OpenSSL::Random::RandomError, OpenSSL::OpenSSLError, StandardError]
+true
+true
+== SHA-1, SHA-2 (FIPS 180 examples)
+ok       SHA1(0 bytes) da39a3ee5e6b4b0d3255bfef95601890afd80709
+ok       SHA1(3 bytes) a9993e364706816aba3e25717850c26c9cd0d89d
+ok       SHA1(56 bytes) 84983e441c3bd26ebaae4aa1f95129e5e54670f1
+ok       SHA1(1000000 bytes) 34aa973cd4c4daa4f61eeb2bdbad27316534016f
+ok       SHA256(0 bytes) e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+ok       SHA256(3 bytes) ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+ok       SHA256(56 bytes) 248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1
+ok       SHA256(1000000 bytes) cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0
+ok       SHA224(3 bytes) 23097d223405d8228642a477bda255b32aadbce4bda0b3f7e36c9da7
+ok       SHA384(3 bytes) cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7
+ok       SHA512(3 bytes) ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f
+== MD5 (RFC 1321, A.5)
+ok       MD5("") d41d8cd98f00b204e9800998ecf8427e
+ok       MD5("a") 0cc175b9c0f1b6a831c399e269772661
+ok       MD5("abc") 900150983cd24fb0d6963f7d28e17f72
+ok       MD5("message digest") f96b697d7cb7938d525a2f31aaf161d0
+ok       MD5("abcdefghijklmnopqrs) c3fcd3d76192e4007dfb496cca67e13b
+ok       MD5("ABCDEFGHIJKLMNOPQRS) d174ab98d277d9f5a5611c2c9f419d9f
+ok       MD5("1234567890123456789) 57edf4a22be3c955ac49da2e2107b67a
+== HMAC-SHA256 (RFC 4231, 4.2 to 4.8)
+ok       test case 1 b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7
+ok       test case 2 5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843
+ok       test case 3 773ea91e36800e46854db8ebd09181a72959098b3ef8c122d9635514ced565fe
+ok       test case 4 82558a389a443c0ea4cc819899f2083a85f0faa3e578f8077a2e3ff46729665b
+ok       test case 5 a3b6167473100ee06e0c796c2955552b
+ok       test case 6 60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54
+ok       test case 7 9b09ffa71b942fcb27635fbcd5b0e944bfdc63644f0713938a7f51535c3a35e2
+== HMAC-SHA1 and HMAC-MD5 (RFC 2202)
+ok       HMAC-SHA1 test case 2 effcdf6ae5eb2fa2d27416d5f184df9c259a7c79
+ok       HMAC-MD5 test case 2 750c783e6ab0b503eaa86e310a5db738
+ok       HMAC-SHA1 test case 1 b617318655057264e28bc0b6fb378c8ef146be00
+== Digest objects
+"SHA256"
+32
+64
+#<OpenSSL::Digest: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855>
+"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+"fb8e20fc2e4c3f248c60c39bd652f3c1347298bb977b8b4d5903b85055620603"
+#<Encoding:US-ASCII>
+#<Encoding:BINARY (ASCII-8BIT)>
+32
+true
+true
+false
+true
+"ungWv48Bz+pBQUDeXa4iI7ADYaOWF3qctBD/YfIAFa0="
+32
+"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+true
+"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+"da39a3ee5e6b4b0d3255bfef95601890afd80709"
+"SHA512"
+48
+20
+"qZk+NkcGgWq6PiVxeFDCbJzQ2J0="
+true
+"kAFQmDzST7DWlj99KOF/cg=="
+OpenSSL::Digest::SHA256
+OpenSSL::Digest
+"RIPEMD160"
+"SHA512-256"
+"SHA256"
+"fcf671e89fb905364a64b6f42704b86ec1a5a3b8"
+true
+!! TypeError: no implicit conversion of Symbol into String
+!! TypeError: no implicit conversion of Class into String
+!! ArgumentError: string contains null byte
+!! ArgumentError: wrong number of arguments (given 0, expected 1..2)
+!! TypeError: no implicit conversion of Integer into String
+!! RuntimeError: Digest CTX wasn't initialized!
+!! RuntimeError: Digest CTX wasn't initialized!
+!! TypeError: no _dump_data is defined for class OpenSSL::Digest::SHA1
+!! OpenSSL::Digest::DigestError: starts "unsupported digest algorithm: wd40": true, errors: Array, detailed: true
+== HMAC objects
+"f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8"
+"f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8"
+"f20c67b56ce1a2503c6ab37f2932307fcee1c9e9b786cce7f76d55bdac12a73f"
+true
+true
+#<Encoding:BINARY (ASCII-8BIT)>
+#<Encoding:BINARY (ASCII-8BIT)>
+"97yD9DBThCSxMpjmqm+xQ+9NWaFJRhdZl0edvC0aPNg="
+true
+false
+false
+true
+"5d5d139563c95b5967b9bd9a8c9b233a9dedb45072794cd232dc1b74832607d0"
+32
+"KgDo6DQ9+GxMGIsmPuyjMa+jFUg="
+"d82f454980c91fc8c35b45912a68ce5f44c1adb1782ec6f3a139396df64524ab"
+"b613679a0814d9ec772f95d778c35fc5ff1697c493715653c6c712144292c5ad"
+!! TypeError: no implicit conversion of Symbol into String
+!! ArgumentError: wrong number of arguments (given 1, expected 2)
+!! TypeError: no implicit conversion of nil into String
+!! TypeError: no _dump_data is defined for class OpenSSL::HMAC
+!! OpenSSL::Digest::DigestError: starts "unsupported digest algorithm: wd40": true, errors: Array, detailed: true
+== Random
+[0, String, 0, #<Encoding:BINARY (ASCII-8BIT)>]
+[1, String, 1, #<Encoding:BINARY (ASCII-8BIT)>]
+[16, String, 16, #<Encoding:BINARY (ASCII-8BIT)>]
+[64, String, 64, #<Encoding:BINARY (ASCII-8BIT)>]
+[1000, String, 1000, #<Encoding:BINARY (ASCII-8BIT)>]
+32
+64
+2
+true
+"more entropy"
+OpenSSL::Random
+!! ArgumentError: negative string size (or size too big)
+!! TypeError: no implicit conversion of String into Integer
+!! TypeError: no implicit conversion from nil to integer
+!! RangeError: integer 2147483648 too big to convert to 'int'
+!! TypeError: no implicit conversion to float from string
+[:load_random_file, :pseudo_bytes, :random_add, :random_bytes, :seed, :status?, :write_random_file]
+== secure_compare
+true
+false
+true
+false
+!! ArgumentError: inputs must be of equal length
+!! TypeError: no implicit conversion of Symbol into String
+== what is not here yet is not here
+[:Cipher, true]
+[:PKey, true]
+[:X509, true]
+[:SSL, true]
+[:BN, true]
+[:KDF, true]
+[:Buffering, true]
+[:PKCS5, true]

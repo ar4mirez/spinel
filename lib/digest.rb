@@ -71,15 +71,15 @@ module Digest
 
     def inspect = "#<#{self.class.name}: #{hexdigest}>"
 
-    # Another digest is equal when the digests are; a String, when it is
-    # this one's digest or, at twice the length, its hex.
+    # Another digest is equal when the digests are; anything else that is
+    # or converts to a String, when it is this one's `to_s`, its hex. Never
+    # the binary digest: `rb_digest_instance_equal` compares only `to_s`.
     def ==(other)
       if Instance === other
         digest == other.digest
       else
         return false unless other.respond_to?(:to_str)
-        string = other.to_str
-        string == (string.bytesize == digest_length * 2 ? hexdigest : digest)
+        to_s == other.to_str
       end
     end
 

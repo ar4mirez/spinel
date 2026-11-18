@@ -35,6 +35,20 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      # `openssl` (#106) builds against the system's OpenSSL 3, headers and
+      # all (`crates/spinel-vm/build.rs` refuses an older one): libssl-dev on
+      # Linux, Homebrew's openssl@3 on macOS, named by OPENSSL_DIR so the
+      # build cannot pick up anything else. Both runner images have it; this
+      # says so rather than relying on it.
+      - name: OpenSSL 3 (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y --no-install-recommends libssl-dev pkg-config
+      - name: OpenSSL 3 (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew list openssl@3 >/dev/null 2>&1 || HOMEBREW_NO_AUTO_UPDATE=1 brew install openssl@3
+          echo "OPENSSL_DIR=$(brew --prefix openssl@3)" >> "$GITHUB_ENV"
+
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.name }}
@@ -130,6 +144,12 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      # `openssl` (#106) builds against the system's OpenSSL 3, headers and
+      # all (`crates/spinel-vm/build.rs` refuses an older one). The runner
+      # image has it; this says so rather than relying on it.
+      - name: OpenSSL 3
+        run: sudo apt-get install -y --no-install-recommends libssl-dev pkg-config
+
       - uses: Swatinem/rust-cache@v2
         with:
           key: lint
@@ -162,6 +182,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: miri
+
+      # `openssl` (#106) builds against the system's OpenSSL 3, headers and
+      # all (`crates/spinel-vm/build.rs` refuses an older one). The runner
+      # image has it; this says so rather than relying on it.
+      - name: OpenSSL 3
+        run: sudo apt-get install -y --no-install-recommends libssl-dev pkg-config
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -418,6 +444,12 @@ jobs:
         with:
           ruby-version: '4.0'
       - uses: dtolnay/rust-toolchain@stable
+      # `openssl` (#106) builds against the system's OpenSSL 3, headers and
+      # all (`crates/spinel-vm/build.rs` refuses an older one). The runner
+      # image has it; this says so rather than relying on it.
+      - name: OpenSSL 3
+        run: sudo apt-get install -y --no-install-recommends libssl-dev pkg-config
+
       - uses: Swatinem/rust-cache@v2
         with:
           key: passes
@@ -440,6 +472,12 @@ jobs:
           submodules: true
 
       - uses: dtolnay/rust-toolchain@stable
+
+      # `openssl` (#106) builds against the system's OpenSSL 3, headers and
+      # all (`crates/spinel-vm/build.rs` refuses an older one). The runner
+      # image has it; this says so rather than relying on it.
+      - name: OpenSSL 3
+        run: sudo apt-get install -y --no-install-recommends libssl-dev pkg-config
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -470,6 +508,12 @@ jobs:
           submodules: true
 
       - uses: dtolnay/rust-toolchain@stable
+
+      # `openssl` (#106) builds against the system's OpenSSL 3, headers and
+      # all (`crates/spinel-vm/build.rs` refuses an older one). The runner
+      # image has it; this says so rather than relying on it.
+      - name: OpenSSL 3
+        run: sudo apt-get install -y --no-install-recommends libssl-dev pkg-config
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -515,6 +559,12 @@ jobs:
           submodules: true
 
       - uses: dtolnay/rust-toolchain@stable
+
+      # `openssl` (#106) builds against the system's OpenSSL 3, headers and
+      # all (`crates/spinel-vm/build.rs` refuses an older one). The runner
+      # image has it; this says so rather than relying on it.
+      - name: OpenSSL 3
+        run: sudo apt-get install -y --no-install-recommends libssl-dev pkg-config
 
       - uses: Swatinem/rust-cache@v2
         with:
