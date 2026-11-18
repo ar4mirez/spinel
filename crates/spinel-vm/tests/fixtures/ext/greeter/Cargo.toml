@@ -1,0 +1,17 @@
+# The worked example of `spinel-ext` (its crate documentation, and
+# docs/engine.md), built as a real extension by `tests/ext.rs`. Its own
+# workspace, so that the repository's does not claim it; the test builds a
+# copy outside the source tree, so no lockfile is written here.
+[package]
+name = "greeter"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+spinel-ext = { path = "../../../../../spinel-ext" }
+
+[workspace]

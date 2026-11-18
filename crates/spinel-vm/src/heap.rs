@@ -1572,6 +1572,23 @@ impl<'h> HandleScope<'h> {
         self.heap.roots[handle.index]
     }
 
+    /// The root-stack index `handle` names: what crosses the extension ABI
+    /// (#103) in its place, so that an extension holds an index and never a
+    /// pointer.
+    pub(crate) fn handle_index(&self, handle: Handle<'h>) -> usize {
+        handle.index
+    }
+
+    /// The value at root-stack index `index`, when that is one of this
+    /// scope's own handles: the way back from [`HandleScope::handle_index`],
+    /// for an index an extension handed back, which is checked rather than
+    /// trusted.
+    pub(crate) fn rooted_at(&self, index: usize) -> Option<Value> {
+        (self.base..self.heap.roots.len())
+            .contains(&index)
+            .then(|| self.heap.roots[index])
+    }
+
     /// Repoint an object's class. The header field the collector traces.
     ///
     /// Two callers, both of which Ruby has and neither of which is "reopening a

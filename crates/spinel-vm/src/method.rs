@@ -112,6 +112,9 @@ pub enum Native {
     /// `Module#__notimplement__(*names)`: each name defined, public, as a
     /// [`Native::NotImplemented`]. Answers nil.
     DefineNotImplemented,
+    /// A method a native extension defined (#103): the index of its
+    /// [`ExtMethod`] in the heap's [`Definitions`].
+    Ext(u32),
     /// `Object#class`
     ClassOf,
     /// `Class#new`: allocate, then run `initialize` if there is one.
@@ -1418,6 +1421,29 @@ pub enum Definition {
     Proc(Value),
 }
 
+/// A method a native extension defined (#103): the function the extension
+/// registered, the data it is called with, and the argument count the host
+/// checks before calling it.
+#[derive(Debug, Clone, Copy)]
+pub struct ExtMethod {
+    pub func: spinel_ext::abi::MethodFn,
+    pub data: ExtData,
+    /// How many arguments it takes, or -1 for any number.
+    pub arity: i32,
+}
+
+/// The opaque pointer an extension registered a method with, handed back to
+/// it on every call and never read by the VM.
+#[derive(Debug, Clone, Copy)]
+pub struct ExtData(pub *const std::ffi::c_void);
+
+// SAFETY: the VM never dereferences it; it only hands it back to the
+// extension that registered it, and `spinel-ext`'s ABI requires that data
+// be usable from whichever thread runs the heap, as a fn pointer is.
+unsafe impl Send for ExtData {}
+// SAFETY: as for `Send`: shared references never read through it.
+unsafe impl Sync for ExtData {}
+
 /// One heap's method bodies, indexed by the fixnum in [`Method::body`].
 ///
 /// Append-only within a heap: redefining a method points the class table at a
@@ -1443,6 +1469,10 @@ pub struct Definitions {
     /// (#273). Once per method definition, measured on ruby 4.0.7: a second
     /// call site to the same `def` stays quiet, a redefinition warns again.
     unused_block_warned: std::collections::HashSet<i64>,
+    /// The methods native extensions defined (#103), indexed by
+    /// [`Native::Ext`]: each is a function across the extension ABI, never
+    /// freed, since a library once loaded is never unloaded.
+    ext: Vec<ExtMethod>,
     /// The names of the program's methods whose bodies use a block — CRuby's
     /// duck-typing relief outside `Warning[:strict_unused_block]`: a block
     /// passed to one `m` that ignores it may be meant for another `m` that
@@ -1461,7 +1491,26 @@ impl Definitions {
             ruby2_keywords: std::collections::HashSet::new(),
             unused_block_warned: std::collections::HashSet::new(),
             block_users: SymbolSet::default(),
+            ext: Vec::new(),
         }
+    }
+
+    /// Add a method a native extension defined, answering the index
+    /// [`Native::Ext`] names it by.
+    ///
+    /// # Panics
+    ///
+    /// If a heap ever holds more than `u32::MAX` of them.
+    pub fn add_ext(&mut self, method: ExtMethod) -> u32 {
+        let index = u32::try_from(self.ext.len()).expect("fewer than 2^32 extension methods");
+        self.ext.push(method);
+        index
+    }
+
+    /// The extension method [`Native::Ext`] `index` names.
+    #[must_use]
+    pub fn ext(&self, index: u32) -> Option<ExtMethod> {
+        self.ext.get(index as usize).copied()
     }
 
     /// Whether a call has already warned about passing `body` a block it
