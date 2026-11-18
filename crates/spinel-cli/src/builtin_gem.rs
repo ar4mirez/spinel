@@ -63,6 +63,10 @@ pub const BUILTINS: &[Builtin] = &[
         version: "1.3.0",
     },
     Builtin {
+        name: "fiddle",
+        version: "1.1.8",
+    },
+    Builtin {
         name: "io-console",
         version: "0.8.2",
     },

@@ -42,10 +42,17 @@
 # extension, is left out: Spinel's C half is `lib/prism/prism.rb`, embedded,
 # and `prism.rb` is patched to load it (see `patch_prism` below).
 #
-# To bump: edit RUBY_TAG, WEBRICK_TAG, JSON_TAG, IO_CONSOLE_TAG or
+# `fiddle` (#105) is a bundled gem, so it is in neither Ruby's `lib/` nor its
+# `ext/`; its Ruby half comes from the packaged gem at the release Ruby 4.0
+# bundles, as prism's does, with `fiddle/ffi_backend.rb`, the backend for
+# engines without the C extension, left out. Its C half is Spinel's
+# `lib/fiddle/spinel.rb` over `Spinel::FFI` (`lib/spinel/ffi.rb`), embedded,
+# and `fiddle.rb` and `fiddle/cparser.rb` are patched (see `patch_fiddle`).
+#
+# To bump: edit RUBY_TAG, WEBRICK_TAG, JSON_TAG, IO_CONSOLE_TAG,
 # PRISM_VERSION (with PRISM_SHA256, and the ruby-prism crate in
-# `crates/spinel-parse/Cargo.toml` to the same release), run this script,
-# commit `stdlib/` in its own commit.
+# `crates/spinel-parse/Cargo.toml` to the same release) or FIDDLE_VERSION
+# (with FIDDLE_SHA256), run this script, commit `stdlib/` in its own commit.
 
 set -euo pipefail
 
@@ -70,6 +77,12 @@ IO_CONSOLE_REPO="https://github.com/ruby/io-console.git"
 PRISM_VERSION="1.9.0"
 PRISM_SHA256="7b530c6a9f92c24300014919c9dcbc055bf4cdf51ec30aed099b06cd6674ef85"
 PRISM_URL="https://rubygems.org/downloads/prism-$PRISM_VERSION.gem"
+
+# The fiddle Ruby 4.0 bundles (gems/bundled_gems at RUBY_TAG), and the
+# package's SHA-256 as rubygems.org publishes it.
+FIDDLE_VERSION="1.1.8"
+FIDDLE_SHA256="7fa8ee3627271497f3add5503acdbc3f40b32f610fc1cf49634f083ef3f32eee"
+FIDDLE_URL="https://rubygems.org/downloads/fiddle-$FIDDLE_VERSION.gem"
 
 # Bundler's executable, copied to `stdlib/libexec/`.
 LIBEXEC_FILES=(bundle)
@@ -156,44 +169,96 @@ rm -rf "$work/io-console/lib/ffi"
 # prism is MIT-licensed. A `.gem` is a tar of a gzipped `data.tar.gz`; only
 # its `lib/`, `prism.gemspec` and license are wanted.
 PRISM_LICENSES=(LICENSE.md)
+
+# Fetch a packaged gem from rubygems.org to `$work/<name>-gem/<name>.gem` and
+# stop unless its SHA-256 is the one pinned.
+fetch_package() {
+  local name="$1" url="$2" pinned="$3" got
+  mkdir -p "$work/$name-gem" "$work/$name"
+  curl -fsSL -o "$work/$name-gem/$name.gem" "$url"
+  if command -v sha256sum >/dev/null; then
+    got="$(sha256sum "$work/$name-gem/$name.gem" | cut -d' ' -f1)"
+  else
+    got="$(shasum -a 256 "$work/$name-gem/$name.gem" | cut -d' ' -f1)"
+  fi
+  if [[ "$got" != "$pinned" ]]; then
+    echo "::error::$(basename "$url") is $got, not $pinned" >&2
+    exit 1
+  fi
+}
+
 echo "fetching prism $PRISM_VERSION from rubygems.org"
-mkdir -p "$work/prism-gem" "$work/prism"
-curl -fsSL -o "$work/prism-gem/prism.gem" "$PRISM_URL"
-if command -v sha256sum >/dev/null; then
-  prism_sha="$(sha256sum "$work/prism-gem/prism.gem" | cut -d' ' -f1)"
-else
-  prism_sha="$(shasum -a 256 "$work/prism-gem/prism.gem" | cut -d' ' -f1)"
-fi
-if [[ "$prism_sha" != "$PRISM_SHA256" ]]; then
-  echo "::error::prism-$PRISM_VERSION.gem is $prism_sha, not $PRISM_SHA256" >&2
-  exit 1
-fi
+fetch_package prism "$PRISM_URL" "$PRISM_SHA256"
 tar -xf "$work/prism-gem/prism.gem" -C "$work/prism-gem" data.tar.gz
 tar -xzf "$work/prism-gem/data.tar.gz" -C "$work/prism" lib prism.gemspec "${PRISM_LICENSES[@]}"
 rm "$work/prism/lib/prism/ffi.rb"
 # ruby/ruby keeps the gemspec beside the library, in `lib/prism/`.
 mv "$work/prism/prism.gemspec" "$work/prism/lib/prism/prism.gemspec"
 
-# The one patch to a vendored file. `prism.rb` loads the C extension only on
-# CRuby (`RUBY_ENGINE == "ruby"`) and the FFI backend everywhere else; on
-# Spinel the extension is `lib/prism/prism.rb`, embedded, so Spinel takes
-# the extension's branch. Upstream's own words, an engine added to its
-# condition; the script stops if the line it patches is not there exactly.
-patch_prism() {
-  local file="$1"
-  local from='if RUBY_ENGINE == "ruby" and !ENV["PRISM_FFI_BACKEND"]'
-  local to='if (RUBY_ENGINE == "ruby" || RUBY_ENGINE == "spinel") and !ENV["PRISM_FFI_BACKEND"]'
+# Replace the one line of `file` that is exactly `from` with `to`. The script
+# stops if the line is not there exactly once, so an upstream change to it is
+# looked at rather than patched blind.
+patch_line() {
+  local file="$1" from="$2" to="$3"
   if [[ "$(grep -cxF "$from" "$file")" != 1 ]]; then
-    echo "::error::$file no longer has the line patch_prism replaces: $from" >&2
+    echo "::error::$file no longer has the line a patch replaces: $from" >&2
     exit 1
   fi
   local patched="$file.patched"
   while IFS= read -r line || [[ -n "$line" ]]; do
-    if [[ "$line" == "$from" ]]; then echo "$to"; else printf '%s\n' "$line"; fi
+    if [[ "$line" == "$from" ]]; then printf '%s\n' "$to"; else printf '%s\n' "$line"; fi
   done < "$file" > "$patched"
   mv "$patched" "$file"
 }
+
+# `prism.rb` loads the C extension only on CRuby (`RUBY_ENGINE == "ruby"`) and
+# the FFI backend everywhere else; on Spinel the extension is
+# `lib/prism/prism.rb`, embedded, so Spinel takes the extension's branch.
+# Upstream's own words, an engine added to its condition.
+patch_prism() {
+  patch_line "$1" \
+    'if RUBY_ENGINE == "ruby" and !ENV["PRISM_FFI_BACKEND"]' \
+    'if (RUBY_ENGINE == "ruby" || RUBY_ENGINE == "spinel") and !ENV["PRISM_FFI_BACKEND"]'
+}
 patch_prism "$work/prism/lib/prism.rb"
+
+# fiddle is under Ruby's license or the 2-clause BSDL, in one file.
+FIDDLE_LICENSES=(LICENSE.txt)
+echo "fetching fiddle $FIDDLE_VERSION from rubygems.org"
+fetch_package fiddle "$FIDDLE_URL" "$FIDDLE_SHA256"
+tar -xf "$work/fiddle-gem/fiddle.gem" -C "$work/fiddle-gem" data.tar.gz
+tar -xzf "$work/fiddle-gem/data.tar.gz" -C "$work/fiddle" lib "${FIDDLE_LICENSES[@]}"
+rm "$work/fiddle/lib/fiddle/ffi_backend.rb"
+
+# Two patches to fiddle, each the least that works:
+#
+# - `fiddle.rb` requires `fiddle.so` on CRuby and the FFI backend elsewhere.
+#   On Spinel the C half is `fiddle/spinel`, embedded, and `last_error` is
+#   kept as `fiddle.so` keeps it, so Spinel takes CRuby's branches.
+# - `fiddle/cparser.rb` reads `$3` (and `$2`) after calling `parse_ctype`,
+#   whose own matches CRuby keeps out of the caller's `$~`. Spinel's `$~` is
+#   one per heap, not per frame (the ponytail on `last_match` in
+#   `spinel-vm/src/heap.rs`), so the count is read first. Drop this patch
+#   when `$~` is frame-local.
+patch_fiddle() {
+  local lib="$1"
+  patch_line "$lib/fiddle.rb" \
+    "if RUBY_ENGINE == 'ruby'" \
+    "if RUBY_ENGINE == 'ruby' || RUBY_ENGINE == 'spinel'"
+  patch_line "$lib/fiddle.rb" \
+    "  require 'fiddle.so'" \
+    "  require RUBY_ENGINE == 'spinel' ? 'fiddle/spinel' : 'fiddle.so'"
+  patch_line "$lib/fiddle.rb" \
+    "  if RUBY_ENGINE != 'ruby' # FFI backend" \
+    "  if RUBY_ENGINE != 'ruby' && RUBY_ENGINE != 'spinel' # FFI backend"
+  patch_line "$lib/fiddle/cparser.rb" \
+    '          tys.push([parse_ctype($1.strip, tymap), $3.to_i])' \
+    '          count = $3.to_i; tys.push([parse_ctype($1.strip, tymap), count])'
+  patch_line "$lib/fiddle/cparser.rb" \
+    '          tys.push([parse_ctype($1.strip, tymap), $2.to_i])' \
+    '          count = $2.to_i; tys.push([parse_ctype($1.strip, tymap), count])'
+}
+patch_fiddle "$work/fiddle/lib"
 
 # Assemble what `stdlib/` should look like, then either install it or diff
 # against it. Building it once and comparing keeps the two modes honest: the
@@ -240,6 +305,7 @@ lay_over io-console "${IO_CONSOLE_LICENSES[@]}"
 # releases' files (see PRISM_VERSION).
 rm -rf "$staged/prism.rb" "$staged/prism"
 lay_over prism "${PRISM_LICENSES[@]}"
+lay_over fiddle "${FIDDLE_LICENSES[@]}"
 cat > "$staged/UPSTREAM" <<EOF
 Ruby's pure-Ruby standard library, vendored verbatim.
 
@@ -255,6 +321,14 @@ lib/: webrick, which left the standard library, and json and io-console,
 default gems whose Ruby halves ruby/ruby keeps in ext/json/lib and
 ext/io/console/lib. Their C halves are Spinel's own, in the repository's
 lib/json/ext/ and lib/io/console.rb, embedded in the binary.
+
+Also laid over it, the bundled gem fiddle's lib/, from the packaged gem at
+the release Ruby bundles. Its C half is Spinel's lib/fiddle/spinel.rb, over
+Spinel::FFI (lib/spinel/ffi.rb), embedded in the binary; fiddle/ffi_backend.rb,
+the FFI backend, is left out. Two files are patched: fiddle.rb takes CRuby's
+branches when RUBY_ENGINE is "spinel", requiring fiddle/spinel in place of
+fiddle.so, and fiddle/cparser.rb reads an array member's count before it
+calls parse_ctype, since Spinel's $~ is not yet frame-local.
 
 In place of Ruby's own prism.rb and prism/, the prism gem's lib/ at the
 release of the Prism library Spinel parses with, which is the C half its
@@ -283,14 +357,19 @@ FFI backend, which is left out.
     sha256    $PRISM_SHA256
     files     prism.rb (patched), prism/ (not prism/ffi.rb, the FFI backend)
 
+    upstream  $FIDDLE_URL
+    sha256    $FIDDLE_SHA256
+    files     fiddle.rb (patched), fiddle/ (cparser.rb patched; not
+              fiddle/ffi_backend.rb, the FFI backend)
+
 Licenses are upstream's, in LICENSE/. LEGAL records the per-file terms for the
 files here from ruby/ruby that are not under Ruby's own license; each gem's own
 are in LICENSE/<gem>/.
 
 Do not edit anything under stdlib/ by hand. CI diffs this tree against the tags
 above and fails on any difference. To update, edit RUBY_TAG, WEBRICK_TAG,
-JSON_TAG, IO_CONSOLE_TAG or PRISM_VERSION in scripts/vendor-stdlib.sh and run
-it.
+JSON_TAG, IO_CONSOLE_TAG, PRISM_VERSION or FIDDLE_VERSION in
+scripts/vendor-stdlib.sh and run it.
 EOF
 
 if $check_only; then
@@ -300,9 +379,9 @@ if $check_only; then
   # place to add one, with the reason next to it.
   if diff -r -q "$staged" "$stdlib"; then
     files="$(find "$stdlib" -name '*.rb' | wc -l | tr -d ' ')"
-    echo "stdlib/ matches ruby/ruby $RUBY_TAG, ruby/webrick $WEBRICK_TAG, ruby/json $JSON_TAG, ruby/io-console $IO_CONSOLE_TAG and prism $PRISM_VERSION ($files .rb files)"
+    echo "stdlib/ matches ruby/ruby $RUBY_TAG, ruby/webrick $WEBRICK_TAG, ruby/json $JSON_TAG, ruby/io-console $IO_CONSOLE_TAG, prism $PRISM_VERSION and fiddle $FIDDLE_VERSION ($files .rb files)"
   else
-    echo "::error::stdlib/ has drifted from ruby/ruby $RUBY_TAG ($sha), ruby/webrick $WEBRICK_TAG, ruby/json $JSON_TAG, ruby/io-console $IO_CONSOLE_TAG or prism $PRISM_VERSION" >&2
+    echo "::error::stdlib/ has drifted from ruby/ruby $RUBY_TAG ($sha), ruby/webrick $WEBRICK_TAG, ruby/json $JSON_TAG, ruby/io-console $IO_CONSOLE_TAG, prism $PRISM_VERSION or fiddle $FIDDLE_VERSION" >&2
     echo "run scripts/vendor-stdlib.sh and commit the result" >&2
     exit 1
   fi
@@ -310,5 +389,5 @@ else
   rm -rf "$stdlib"
   mv "$staged" "$stdlib"
   files="$(find "$stdlib" -name '*.rb' | wc -l | tr -d ' ')"
-  echo "vendored ruby/ruby $RUBY_TAG, ruby/webrick $WEBRICK_TAG, ruby/json $JSON_TAG, ruby/io-console $IO_CONSOLE_TAG and prism $PRISM_VERSION into stdlib/ ($files .rb files)"
+  echo "vendored ruby/ruby $RUBY_TAG, ruby/webrick $WEBRICK_TAG, ruby/json $JSON_TAG, ruby/io-console $IO_CONSOLE_TAG, prism $PRISM_VERSION and fiddle $FIDDLE_VERSION into stdlib/ ($files .rb files)"
 fi

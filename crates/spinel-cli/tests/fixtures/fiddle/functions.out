@@ -1,0 +1,49 @@
+dlopen(nil): Fiddle::Handle true
+sym: true true
+Handle::DEFAULT: true true true
+Handle.sym: true true
+sym_defined?: true nil nil
+unknown symbol: unknown symbol "no_such_function_here"
+symbol name: no implicit conversion of Symbol into String
+missing library: Fiddle::DLError true
+library not a String: no implicit conversion of Integer into String
+close_enabled?: false nil true nil
+close: 0
+close twice: dlclose() called too many times
+closed handle: closed handle
+block form: #<Fiddle::Handle:ADDR>
+Fiddle::Handle constants: true
+strlen: 6 0 name "strlen" true
+Function: [true, true, true, false]
+to_proc: [1, 2, 3]
+NUL in a const string: string contains null byte
+const string not a String: no implicit conversion of Integer into String
+arity: wrong number of arguments (given 0, expected 1)
+integers: [7, 2147483647, 1099511627776, 4611686018427387904, 3, 2]
+abs(2147483648): RangeError integer 2147483648 too big to convert to 'int'
+abs(-2147483649): RangeError integer -2147483649 too small to convert to 'int'
+abs(18446744073709551616): RangeError bignum too big to convert into 'long'
+abs("x"): TypeError no implicit conversion of String into Integer
+abs(nil): TypeError no implicit conversion from nil to integer
+abs(Infinity): RangeError float Inf out of range of integer
+toupper: A
+doubles: 1024.0 6.25 3.0
+double from a String: no implicit conversion to float from string
+unsigned long: 18446744073709551615 255
+out parameter: 123 rest "abc"
+const string return: "from C" nil ASCII-8BIT
+pointer return: Fiddle::Pointer "duplicate" size 0 free nil
+variadic: 39 "-5|1099511627776|str|0.333|4000000000|Z"
+unpaired variadic: variadic arguments must be type and value pairs: ["-5|1099511627776|str|0.333|4000000000|Z\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000", "%d", :int]
+variadic arity: wrong number of arguments (given 0, expected 2+)
+variadic not last: Fiddle::TYPE_VARIADIC must be the last argument type: [9, 4]
+unknown argument type: unknown type 99
+argument types not an Array: wrong argument type Integer (expected Array)
+errno: -1 2
+errno after success: 0 Integer
+last_error=: 7
+types: [0, 1, 2, -2, 4, -5, 5, 5, -5, 11, 9, 10]
+sizes: [8, 1, 2, 4, 8, 8, 4, 8, 8, 1, 8]
+alignments: [8, 1, 2, 4, 8, 8, 4, 8, 8, 1]
+WINDOWS: false RUBY_FREE: true BUILD_RUBY_PLATFORM: true
+errors: [Fiddle::Error, StandardError, Fiddle::Error]

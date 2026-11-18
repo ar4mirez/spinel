@@ -13,6 +13,14 @@ default gems whose Ruby halves ruby/ruby keeps in ext/json/lib and
 ext/io/console/lib. Their C halves are Spinel's own, in the repository's
 lib/json/ext/ and lib/io/console.rb, embedded in the binary.
 
+Also laid over it, the bundled gem fiddle's lib/, from the packaged gem at
+the release Ruby bundles. Its C half is Spinel's lib/fiddle/spinel.rb, over
+Spinel::FFI (lib/spinel/ffi.rb), embedded in the binary; fiddle/ffi_backend.rb,
+the FFI backend, is left out. Two files are patched: fiddle.rb takes CRuby's
+branches when RUBY_ENGINE is "spinel", requiring fiddle/spinel in place of
+fiddle.so, and fiddle/cparser.rb reads an array member's count before it
+calls parse_ctype, since Spinel's $~ is not yet frame-local.
+
 In place of Ruby's own prism.rb and prism/, the prism gem's lib/ at the
 release of the Prism library Spinel parses with, which is the C half its
 Ruby half reads serialized trees from (the repository's lib/prism/prism.rb,
@@ -40,11 +48,16 @@ FFI backend, which is left out.
     sha256    7b530c6a9f92c24300014919c9dcbc055bf4cdf51ec30aed099b06cd6674ef85
     files     prism.rb (patched), prism/ (not prism/ffi.rb, the FFI backend)
 
+    upstream  https://rubygems.org/downloads/fiddle-1.1.8.gem
+    sha256    7fa8ee3627271497f3add5503acdbc3f40b32f610fc1cf49634f083ef3f32eee
+    files     fiddle.rb (patched), fiddle/ (cparser.rb patched; not
+              fiddle/ffi_backend.rb, the FFI backend)
+
 Licenses are upstream's, in LICENSE/. LEGAL records the per-file terms for the
 files here from ruby/ruby that are not under Ruby's own license; each gem's own
 are in LICENSE/<gem>/.
 
 Do not edit anything under stdlib/ by hand. CI diffs this tree against the tags
 above and fails on any difference. To update, edit RUBY_TAG, WEBRICK_TAG,
-JSON_TAG, IO_CONSOLE_TAG or PRISM_VERSION in scripts/vendor-stdlib.sh and run
-it.
+JSON_TAG, IO_CONSOLE_TAG, PRISM_VERSION or FIDDLE_VERSION in
+scripts/vendor-stdlib.sh and run it.

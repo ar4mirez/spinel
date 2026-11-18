@@ -1,0 +1,27 @@
+qsort: [-100, -7, 0, 3, 3, 8, 19, 42] (true)
+qsort descending: [42, 19, 8, 3, 3, 0, -7, -100]
+bsearch 19: found 19 at 6
+bsearch 5: not found
+through C: 42
+argument types: [5, 8] -> 5
+callback arguments: [-5, 250, -300, 65000, -70000, 4000000000, -1099511627776, 9223372036854775808, -1125899906842624, 18446744073709551615, 1.5, -2.25, true, "text"]
+callback returns 2: 44
+callback returns -2: 255
+callback returns 3: 4464
+callback returns -4: 4294967295
+callback returns 8: 3.0
+callback returns 7: 0.10000000149011612
+callback returns 11: true
+callback returns 10: "back"
+callback returns a pointer: true
+raised out of qsort: no comparing today after 2 comparisons
+throw out of a callback: :thrown
+after: [-100, -7, 0, 3, 3, 8, 19, 42]
+nested: [[8, 9], [1, 2, 3], [4, 5, 6, 7]]
+Importer bind: [42, 19, 8, 3, 3, 0, -7, -100]
+created freed?: false
+create frees after the block: true
+to_i after free: already freed: #<Fiddle::Closure:ADDR @ctype=4, @args=[4]>
+free twice: true
+args not an Array: wrong argument type Integer (expected Array)
+unknown type: unknown type 99

@@ -591,6 +591,8 @@ pub enum Native {
     Etc(EtcOp),
     /// The terminal calls `lib/io/console.rb` is Ruby over (#110).
     Console(ConsoleOp),
+    /// The C calls `lib/spinel/ffi.rb` is Ruby over (#105).
+    Ffi(FfiOp),
     /// `Kernel#__sleep__(seconds)`: block the thread, answer the whole
     /// seconds slept. `Kernel#sleep` is Ruby around it.
     Sleep,
@@ -968,6 +970,52 @@ pub enum EtcOp {
     Nprocessors,
     /// `__etc_constants__`: `[name, value]` pairs for `Etc::SC_*`, `CS_*`
     /// and `PC_*`.
+    Constants,
+}
+
+/// Which FFI primitive. See `ffi.rs` for the calls and `interp.rs`,
+/// `ffi_native`, for what each takes and answers. An address is an Integer,
+/// signed as `fiddle`'s `PTR2NUM` makes it; a value crosses as an 8-byte
+/// slot in a BINARY String (see `ffi.rs`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FfiOp {
+    /// `__ffi_dlopen__(path or nil, flags)`: the handle, or `dlerror`'s
+    /// message, a String.
+    Dlopen,
+    /// `__ffi_dlsym__(handle, name)`: the address, or nil.
+    Dlsym,
+    /// `__ffi_dlclose__(handle)`: nil, or `dlerror`'s message.
+    Dlclose,
+    /// `__ffi_malloc__(size)`: zeroed memory's address, 0 for none.
+    Malloc,
+    /// `__ffi_realloc__(address, size)`: the new address, 0 for none.
+    Realloc,
+    /// `__ffi_free__(address)`: nil.
+    Free,
+    /// `__ffi_read__(address, length)`: a BINARY copy of the bytes there.
+    Read,
+    /// `__ffi_write__(address, string)`: nil, the bytes copied there.
+    Write,
+    /// `__ffi_strlen__(address)`: the C string's length.
+    Strlen,
+    /// `__ffi_call__(address, abi, [type, ...], fixed, return_type, slots)`:
+    /// `[0, value_slot, errno]` when the call returns, or `[1, call,
+    /// closure, argument_slots]` when it calls a closure, for Ruby to answer
+    /// with `__ffi_resume__` or give up on with `__ffi_abandon__`.
+    Call,
+    /// `__ffi_resume__(call, answer_slot)`: as `__ffi_call__`.
+    Resume,
+    /// `__ffi_abandon__(call)`: nil, the suspended call dropped.
+    Abandon,
+    /// `__ffi_closure__(return_type, [type, ...], abi)`: `[id, address]`,
+    /// or the error's message.
+    Closure,
+    /// `__ffi_closure_free__(id)`: nil.
+    ClosureFree,
+    /// `__ffi_layout__(type)`: `[size, alignment]`, or nil.
+    Layout,
+    /// `__ffi_constants__`: `[name, value]` pairs: the `RTLD_*` flags and
+    /// pseudo-handles, the default ABI and the C library's `free`.
     Constants,
 }
 
