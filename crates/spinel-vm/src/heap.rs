@@ -766,6 +766,10 @@ struct Foreign {
     /// ([`Heap::fingerprint_of_cell`]), so a freed and reused address is not
     /// taken for the object it was.
     copies: HashMap<usize, (u64, Value)>,
+    /// Its copies of the main Ractor's `define_method` bodies, by the
+    /// address of the original, which the definitions table keeps alive:
+    /// looked up before any barrier is taken (`HandleScope::local_proc`).
+    procs: HashMap<usize, Value>,
     /// The objects of its own the singleton classes it made are attached
     /// to, by class index: the tables hold none of its objects.
     attached: HashMap<u32, Value>,
@@ -778,6 +782,10 @@ struct Foreign {
     /// Set by a read of the tables that found a value it may not have, for
     /// the instruction that read it to raise `Ractor::IsolationError`.
     isolated: bool,
+    /// The same, for a class's instance variable: kept apart, since a read
+    /// of one happens inside other reads (`class_of` reads a class's
+    /// `@__id__`) and must not take the other's.
+    isolated_ivar: bool,
     /// Whether the constant read under way is the program's, which gets a
     /// copy only of what is shareable. Any other — the core library's, the
     /// VM's own — gets a copy of its own of whatever the main Ractor's
@@ -792,10 +800,12 @@ impl Default for Foreign {
             released: false,
             program: Arc::default(),
             copies: HashMap::new(),
+            procs: HashMap::new(),
             attached: HashMap::new(),
             boxes: HashMap::new(),
             inherited: std::collections::HashSet::new(),
             isolated: false,
+            isolated_ivar: false,
             program_read: false,
         }
     }
@@ -806,7 +816,12 @@ impl Foreign {
         for &(_, value) in self.copies.values() {
             f(value);
         }
-        for &value in self.attached.values().chain(self.boxes.values()) {
+        for &value in self
+            .attached
+            .values()
+            .chain(self.boxes.values())
+            .chain(self.procs.values())
+        {
             f(value);
         }
     }
@@ -2014,7 +2029,16 @@ impl<'h> HandleScope<'h> {
         if owner != crate::interp::ractor::MAIN {
             return None;
         }
-        self.pull(block, false, &[])
+        // Copied once, it is that copy from then on, with no barrier: the
+        // definitions table holds the main Ractor's `Proc` for as long as
+        // the program runs, so its address names it alone.
+        let address = block.as_heap()?.as_ptr() as usize;
+        if let Some(&copy) = self.heap.foreign.procs.get(&address) {
+            return Some(copy);
+        }
+        let copy = self.pull(block, false, &[])?;
+        self.heap.foreign.procs.insert(address, copy);
+        Some(copy)
     }
 
     /// Whether a read of the tables just found a value this Ractor may not
@@ -2033,6 +2057,11 @@ impl<'h> HandleScope<'h> {
     /// `Foreign::program_read`.
     pub(crate) fn program_read(&self) -> bool {
         self.heap.foreign.program_read
+    }
+
+    /// [`HandleScope::take_isolated`] for a class's instance variable.
+    pub(crate) fn take_isolated_ivar(&mut self) -> bool {
+        std::mem::take(&mut self.heap.foreign.isolated_ivar)
     }
 
     /// Note a refusal, for the instruction that read the tables to raise.
@@ -2095,7 +2124,7 @@ impl<'h> HandleScope<'h> {
         }
         let copied = self.pull(value, shareable_only, &[]);
         if copied.is_none() && shareable_only {
-            self.set_isolated();
+            self.heap.foreign.isolated_ivar = true;
         }
         copied
     }
@@ -2348,7 +2377,11 @@ impl<'h> HandleScope<'h> {
 
     /// [`Classes::cvar_set`], with the value as the tables name it.
     pub fn cvar_set(&mut self, id: crate::class::ClassId, name: SymbolId, value: Value) {
+        self.heap.foreign.isolated = false;
         let value = self.local_to_shared(value);
+        if self.heap.foreign.isolated {
+            return;
+        }
         self.classes_mut().cvar_set(id, name, value);
     }
 

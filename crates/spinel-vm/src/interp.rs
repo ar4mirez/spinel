@@ -3246,7 +3246,7 @@ fn run<'h>(
                         let symbol = frames[top].iseq.symbol_ids()[name as usize];
                         let receiver = frames[top].receiver;
                         if !scope.is_main_ractor() {
-                            scope.take_isolated();
+                            scope.take_isolated_ivar();
                             scope.set_program_read(!threads::in_core_library(&frames));
                         }
                         let (value, found) = ivar_read(scope, receiver, symbol);
@@ -3257,7 +3257,7 @@ fn run<'h>(
                             let slot = frames[top].cache_base + site;
                             scope.call_caches_mut().fill_ivar(slot, shape, index);
                         }
-                        if !scope.is_main_ractor() && scope.take_isolated() {
+                        if !scope.is_main_ractor() && scope.take_isolated_ivar() {
                             return Err(class_ivar_isolation(scope, receiver, symbol, false));
                         }
                         stack.push(value);
@@ -11014,7 +11014,7 @@ fn ivar_got_elsewhere(
     name: SymbolId,
     value: Value,
 ) -> Result<Value, Error> {
-    if scope.take_isolated() {
+    if scope.take_isolated_ivar() {
         return Err(class_ivar_isolation(scope, object, name, false));
     }
     Ok(value)
@@ -11140,6 +11140,80 @@ fn ivar_set_elsewhere<'h>(
         return Err(class_ivar_isolation(scope, value, name, true));
     }
     Ok(())
+}
+
+/// Whether the primitive about to run answers the program: its caller is
+/// the program's code, or a core-library method the program called — as
+/// `Module#const_get` is, over `__reflect_const_lookup__` (#117).
+fn called_by_program(frames: &[Call]) -> bool {
+    let core = |frame: &Call| {
+        frame
+            .iseq
+            .path
+            .as_deref()
+            .is_some_and(|path| path.starts_with("<internal:"))
+    };
+    match frames {
+        [] => false,
+        [.., last] if !core(last) => true,
+        [.., below, _] => !core(below),
+        _ => false,
+    }
+}
+
+/// [`reflect_native`] in a Ractor other than the main one (#117), where a
+/// constant the program reads through `Module#const_get` follows the rule a
+/// constant it names does, and one it sets through `Module#const_set` the
+/// rule an assignment does: CRuby's `Ractor::IsolationError` for what may
+/// not cross. Out of line, so the main Ractor's reflection keeps its code.
+#[cold]
+#[inline(never)]
+fn reflect_elsewhere(
+    scope: &mut HandleScope<'_>,
+    stack: &mut Stack,
+    frames: &[Call],
+    call: &Pending,
+    op: ReflectOp,
+    position: Option<(Arc<str>, i32)>,
+) -> Result<Option<Unwind>, Error> {
+    scope.take_isolated();
+    let program = op == ReflectOp::ConstLookup && called_by_program(frames);
+    scope.set_program_read(program);
+    let answered = reflect_native(scope, stack, call, op, position);
+    scope.set_program_read(false);
+    let refused = scope.take_isolated();
+    let answered = answered?;
+    if refused {
+        let module = call
+            .args
+            .first()
+            .and_then(|&module| class_id_of(scope, module))
+            .unwrap_or(Builtin::Object.id());
+        let name = call
+            .args
+            .get(1)
+            .and_then(|v| v.as_symbol())
+            .unwrap_or_else(|| symbol("?"));
+        match op {
+            ReflectOp::ConstSet => {
+                return Err(Error::raise(
+                    "Ractor::IsolationError",
+                    "can not set constants with non-shareable objects by non-main Ractors",
+                ));
+            }
+            ReflectOp::ConstLookup if program => {
+                return Err(constant_isolation(
+                    scope,
+                    CrefId::ROOT,
+                    module,
+                    ConstScope::Qualified,
+                    name,
+                ));
+            }
+            _ => {}
+        }
+    }
+    Ok(answered)
 }
 
 /// What a Ractor other than the main one meets reading a class's instance
@@ -14070,7 +14144,10 @@ fn native_call<'h>(
                 ReflectOp::ConstSet => program_position(frames),
                 _ => None,
             };
-            reflect_native(scope, stack, &call, op, position)
+            if scope.is_main_ractor() {
+                return reflect_native(scope, stack, &call, op, position);
+            }
+            reflect_elsewhere(scope, stack, frames, &call, op, position)
         }
         Native::Str(op) => str_native(scope, stack, &call, op),
         Native::NumCompare => {
@@ -15799,6 +15876,12 @@ fn native_call<'h>(
                     call.receiver,
                 ));
             }
+            // In a Ractor other than the main one these raise, as the
+            // instructions do (#117); `class_variables` and
+            // `remove_class_variable` do not, measured on CRuby 4.0.9.
+            if !scope.is_main_ractor() {
+                return Err(cvar_isolation(scope, id, symbol));
+            }
             match op {
                 CvarOp::Names => unreachable!("answered above"),
                 CvarOp::Defined => {
@@ -16311,22 +16394,27 @@ fn native_call<'h>(
                             call.receiver,
                         ));
                     }
-                    match op {
-                        IvarOp::Get => ivar_get(scope, call.receiver, ivar)?,
-                        IvarOp::Defined => {
-                            if ivar_defined(scope, call.receiver, ivar)? {
-                                Value::TRUE
-                            } else {
-                                Value::FALSE
-                            }
-                        }
+                    // The program's `instance_variable_get`/`set` on a class,
+                    // in a Ractor other than the main one, reads and writes as
+                    // its `@a` does (#117).
+                    let child = !scope.is_main_ractor();
+                    if child {
+                        scope.set_program_read(called_by_program(frames));
+                    }
+                    let answered = match op {
+                        IvarOp::Get => ivar_get(scope, call.receiver, ivar),
+                        IvarOp::Defined => ivar_defined(scope, call.receiver, ivar).map(bool_value),
                         IvarOp::Set => {
                             let to = call.args.get(1).copied().unwrap_or(Value::NIL);
-                            ivar_set(scope, call.receiver, ivar, to)?
+                            ivar_set(scope, call.receiver, ivar, to)
                         }
-                        IvarOp::Remove => ivar_remove(scope, call.receiver, ivar, argument)?,
+                        IvarOp::Remove => ivar_remove(scope, call.receiver, ivar, argument),
                         IvarOp::Names => unreachable!("handled above"),
+                    };
+                    if child {
+                        scope.set_program_read(false);
                     }
+                    answered?
                 }
             };
             stack.push(value);

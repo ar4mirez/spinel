@@ -25,9 +25,14 @@
 //! read before the condition was looked at, so no byte is lost between the
 //! two; the scheduler empties the pipe when it finds it readable.
 //!
-//! While a heap waits that way, or a call blocks outside the per-Ractor
-//! lock, it lets go of the class lock, so a Ractor that defines a method
-//! meanwhile does not wait for it.
+//! While a heap waits that way, in the scheduler's `poll(2)`, it lets go of
+//! the class lock, so a Ractor that defines a method meanwhile does not wait
+//! for it.
+//!
+//! ponytail: a call made outside the per-Ractor lock (`threads::outside`)
+//! keeps the class lock, so another Ractor's write waits for it to return.
+//! Letting it go there needs the scheduler to tell the last thread leaving
+//! the heap from one handing it to another.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -668,13 +673,10 @@ pub(super) fn native(
         }
         RactorOp::Finish => {
             let ok = arg(0).is_truthy();
-            let msg = match export(scope, arg(1), None) {
-                Ok(msg) => msg,
-                // A value that cannot be copied ends the Ractor with the
-                // exception copying it raised.
-                Err(_) if ok => Msg::immediate(Value::NIL),
-                Err(error) => return Err(error),
-            };
+            // A value that cannot be copied raises, and `core/ractor.rb`
+            // ends the Ractor with that exception instead; an exception that
+            // cannot be copied it copies again, stripped.
+            let msg = export(scope, arg(1), None)?;
             registry(scope).finish(current(scope), ok, msg);
             Value::NIL
         }

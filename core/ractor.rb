@@ -140,15 +140,13 @@ class Ractor
   #
   # ponytail: it freezes what it reaches and does not check a `Proc` for the
   # variables it captures, as CRuby's does; that check, and the shareable
-  # procs, are #118's.
+  # procs (`Ractor.shareable_proc`, `shareable_lambda`), are #118's.
   def self.make_shareable(object, copy: false)
     object = __make_shareable_copy__(object) if copy
     __ractor_freeze_deep__(object).each(&:freeze)
     object
   end
 
-  def self.shareable_proc(self: nil, &block) = block.freeze
-  def self.shareable_lambda(self: nil, &block) = lambda(&block).freeze
 
   # The first of `ports` with a message, as `[port, message]`; a Ractor
   # among them is waited for to end, as `[ractor, value]`.
@@ -198,6 +196,13 @@ class Ractor
     begin
       value = block.call(*args)
       $stdout.flush
+      # A value that cannot be copied raises here, and the Ractor ends with
+      # that exception.
+      #
+      # ponytail: CRuby moves a Ractor's last value to whoever takes it, so
+      # a `Proc` or an `Enumerator` reaches the caller; here every value
+      # crosses as a copy, and those are refused. Moving one needs a heap to
+      # take another's object, which decision 2a rules out.
       __ractor_finish__(true, value)
     rescue Exception => e
       begin
@@ -208,10 +213,30 @@ class Ractor
       if Thread.current.report_on_exception
         Thread.current.__send__(:__report__, e)
       end
-      __ractor_finish__(false, e)
+      __finish_raised__(e)
     end
   ensure
     Thread.__terminate_all__
+  end
+
+  # End the running Ractor with exception `e`. One that cannot be copied —
+  # a `NoMethodError` whose receiver is an `Enumerator` — is copied as its
+  # class, message and backtrace, so `RemoteError#cause` still says what
+  # happened.
+  def self.__finish_raised__(e)
+    __ractor_finish__(false, e)
+  rescue Exception
+    stripped = begin
+      e.class.new(e.message)
+    rescue Exception
+      RuntimeError.new(e.message.to_s)
+    end
+    stripped.set_backtrace(e.backtrace) if e.backtrace
+    begin
+      __ractor_finish__(false, stripped)
+    rescue Exception
+      __ractor_finish__(false, RuntimeError.new(e.message.to_s))
+    end
   end
 
   def __ractor_id__ = @__id__
