@@ -222,6 +222,9 @@ show("tcp writable") { s.select(1).map { |x| [x.equal?(cm), x.readiness] } }
 client.write("ping")
 show("tcp readable") { s.select(1).map { |x| [x.equal?(cm) ? :client : :peer, x.readiness] }.sort }
 show("tcp buffer") { x = NIO::ByteBuffer.new(4); [x.read_from(peer), x.flip.get] }
+# Deregistered first: what a backend reports for a descriptor closed while
+# registered depends on the platform (epoll drops it, select reports it).
+s.deregister(client)
 client.close
 show("tcp hangup") { s.select(1).map { |x| [x.equal?(pm), x.readiness] } }
 s.close
