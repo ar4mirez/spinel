@@ -18,7 +18,9 @@
 //! it holds, a compiled `Regexp` by the pattern itself. What holds per-heap
 //! state that has no such translation — a `Proc`'s frames, a `Thread`'s
 //! entry, a `Method` — is refused, as CRuby refuses it, by the classes the
-//! caller names.
+//! caller names. A `Proc` made shareable (#118) is the exception: it crosses
+//! as a copy, and the copy names no frame, so a `return` or `break` in it
+//! has no target in the heap that reads it.
 //!
 //! An object whose class is a singleton class is copied as an instance of
 //! the class it was made from: the singleton belongs to the object left
@@ -673,6 +675,16 @@ impl<'h> HandleScope<'h> {
                     }
                 }
                 Body::Bytes(_) => {}
+            }
+            if let Body::Slots(slots) = &node.body
+                && slots.len() == crate::interp::PROC_SLOTS as usize
+                && node
+                    .class
+                    .is_some_and(|id| scope.classes().repr(id) == Some(Builtin::Proc))
+            {
+                let none = Value::fixnum(0).expect("zero is a fixnum");
+                scope.set_slot(handle, crate::interp::PROC_HOME, none);
+                scope.set_slot(handle, crate::interp::PROC_BREAK, none);
             }
             if let Body::Regexp(compiled, _) = &node.body {
                 let index = scope.regexps_mut().adopt(Arc::clone(compiled));

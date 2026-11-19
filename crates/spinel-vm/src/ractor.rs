@@ -1315,9 +1315,10 @@ mod tests {
             Value::NIL,
             false,
             CrefId::ROOT,
-            0,
+            1,
         );
         let block = scope.root(block);
+        scope.set_slot(block, super::super::PROC_BREAK, int(2));
         let refusal = Refusal {
             class: Builtin::Proc.id(),
             error: "TypeError".into(),
@@ -1360,6 +1361,14 @@ mod tests {
             scope.freeze(handle);
         }
         assert_eq!(scope.class_of(built), Some(Builtin::Proc.id()));
+        assert_eq!(scope.slot(block, super::super::PROC_HOME), int(1));
+        assert_eq!(scope.slot(block, super::super::PROC_BREAK), int(2));
+        assert_eq!(
+            scope.slot(built, super::super::PROC_HOME),
+            int(0),
+            "the copy names no frame of the heap it came from"
+        );
+        assert_eq!(scope.slot(built, super::super::PROC_BREAK), int(0));
         assert!(
             scope
                 .heap_ref()
