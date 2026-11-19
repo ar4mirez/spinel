@@ -4,6 +4,7 @@
 //! zlib's. `fixtures/zlib/zlib.rb` deflates at every level and strategy,
 //! over several window sizes and memory levels, streams with every flush,
 //! inflates corrupt, truncated and oversized streams and 300 mutated ones,
+//! inflates and deflates with a block that clears the input it was given,
 //! and writes and reads gzip files, and its output must be what ruby 4.0.9
 //! prints, which is `fixtures/zlib/zlib.out`.
 
@@ -79,6 +80,28 @@ fn a_bomb_inflates_in_bounded_pieces() {
         p [bomb.bytesize < 60_000, total, largest, count > 3000]
     "#;
     assert_eq!(spinel(script), "[true, 50000000, 16384, true]\n");
+}
+
+/// Net::HTTP's inflate_adapter clears the chunk it gave `Zlib::Inflate#inflate`
+/// from inside the block it passes: the run reads its own copy, so a gzip
+/// body larger than the 16 KiB zlib.c yields at comes back whole, as ruby
+/// 4.0.9 returns it (`fixtures/zlib/net_http_gzip.out`). The server is on
+/// 127.0.0.1, in the fixture's own process.
+#[test]
+fn net_http_inflates_a_gzip_body_larger_than_16_kib_whole() {
+    let output = Command::new(SPINEL)
+        .arg("run")
+        .arg(fixtures().join("net_http_gzip.rb"))
+        .output()
+        .expect("spinel runs");
+    assert!(
+        output.status.success(),
+        "spinel failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let expected = std::fs::read_to_string(fixtures().join("net_http_gzip.out"))
+        .expect("the .out is readable");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), expected);
 }
 
 /// The built-in is the zlib Spinel claims: the gem's version is 3.2.3, the

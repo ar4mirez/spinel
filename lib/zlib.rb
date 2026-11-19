@@ -598,9 +598,12 @@ module Zlib
       left = true
       begin
         if @input.nil? || @input.empty?
-          # Nothing waits: the run reads `src` itself, which zlib.c copies
-          # into the input buffer first, and what it leaves is copied after.
-          input = src
+          # Nothing waits: zlib.c copies `src` into the input buffer first,
+          # and what the run leaves is copied after. The copy matters: a
+          # block yielded the output between calls may change `src` (Net::HTTP's
+          # inflate_adapter clears it), and the run must still read what was
+          # given. Only a frozen `src`, which nothing can change, is read as is.
+          input = src.frozen? ? src : src.b
           @input = nil
         else
           append_input(src)
