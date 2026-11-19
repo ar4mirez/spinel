@@ -11177,7 +11177,9 @@ fn reflect_elsewhere(
     position: Option<(Arc<str>, i32)>,
 ) -> Result<Option<Unwind>, Error> {
     scope.take_isolated();
-    let program = op == ReflectOp::ConstLookup && called_by_program(frames);
+    let program = op == ReflectOp::ConstLookup
+        && frames.last().is_some_and(|frame| &*frame.iseq.name == "const_get")
+        && called_by_program(frames);
     scope.set_program_read(program);
     let answered = reflect_native(scope, stack, call, op, position);
     scope.set_program_read(false);

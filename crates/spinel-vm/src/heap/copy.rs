@@ -162,6 +162,7 @@ impl Heap {
             work: Vec::new(),
             storage: HashMap::new(),
             known: options.known,
+            shareable_only: options.shareable_only,
         };
         let root = export.item(root, false);
         while let Some((value, index, internal)) = export.work.pop() {
@@ -336,6 +337,7 @@ struct Export<'a> {
     /// recorded by the object it belongs to.
     storage: HashMap<usize, Vec<SymbolId>>,
     known: Option<&'a HashMap<usize, Value>>,
+    shareable_only: bool,
 }
 
 impl Export<'_> {
@@ -350,7 +352,9 @@ impl Export<'_> {
             return Item::Class(id);
         }
         let address = pointer.as_ptr() as usize;
-        if let Some(known) = self.known.and_then(|known| known.get(&address)) {
+        if let Some(known) = self.known.and_then(|known| known.get(&address))
+            && !(self.shareable_only && !internal && self.is_unfrozen(value))
+        {
             return Item::Known(*known);
         }
         if let Some(&index) = self.seen.get(&address) {
@@ -362,6 +366,17 @@ impl Export<'_> {
         self.sources.push(address);
         self.work.push((value, index, internal));
         Item::Node(index)
+    }
+
+    /// Whether `value` is an object Ruby sees that is not frozen.
+    fn is_unfrozen(&self, value: Value) -> bool {
+        let Some(pointer) = value.as_heap() else {
+            return false;
+        };
+        let object = Obj(pointer.cast());
+        // SAFETY: a live object of the exported heap.
+        let header = unsafe { &*object.header() };
+        header.class.is_some() && header.flags & FROZEN == 0
     }
 
     /// Whether `value` is a cell Ruby never sees.
