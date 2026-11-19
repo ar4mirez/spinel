@@ -1074,6 +1074,10 @@ pub enum OpenSslOp {
     Memcmp,
     /// `__openssl_version__`: `[OPENSSL_VERSION, OPENSSL_VERSION_NUMBER]`.
     Version,
+    /// `__openssl_tls__(op, *args)`: one operation of phase 2's keys,
+    /// certificates and TLS (#107); `openssl/tls.rs`'s `call` says what
+    /// each takes and answers, and a failure is `[class, message, errors]`.
+    Tls,
 }
 
 /// Which libyaml call. See `psych.rs` for the calls and `interp.rs`,

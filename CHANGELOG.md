@@ -9,6 +9,22 @@ bytecode a tool reads.
 
 ### Added
 
+- **`openssl` TLS, so `net/https` works**
+  ([#107](https://github.com/ar4mirez/spinel/issues/107)).
+  The built-in openssl 4.0.2 gains keys, certificates and TLS on the
+  system's OpenSSL 3: `PKey` (`PKey::RSA.new(2048)`, `PKey.read`, sign and
+  verify), `X509::Certificate` built and `#sign`ed, `Name`, `Extension`,
+  `Store`, `SSLContext` and `SSLSocket`, blocking and nonblocking, so
+  `Net::HTTP` with `use_ssl` fetches an HTTPS page. Certificate
+  verification is CRuby's: off on a bare context, on with `set_params`
+  against the system's trust store with CRuby's host name check, and a
+  failure raises CRuby's `SSLError`. `verify_callback`, `servername_cb`,
+  `alpn_select_cb` and `client_cert_cb` run Ruby mid-handshake; the
+  callbacks OpenSSL cannot pause for (`session_get_cb`,
+  `session_remove_cb`, `renegotiation_cb`, `tmp_dh_callback`, NPN, a
+  server's `verify_callback`) raise `NotImplementedError`. `Cipher` and
+  `KDF` are not there yet.
+
 - **`pg-spinel`, the pg gem for Spinel**
   ([#114](https://github.com/ar4mirez/spinel/issues/114)).
   `gems/pg-spinel/` is pg 1.7.0's Ruby API, upstream's `lib/` unchanged,

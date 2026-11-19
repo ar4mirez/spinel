@@ -235,6 +235,26 @@ const LIBRARIES: &[(&str, &str)] = &[
         "openssl/spinel",
         include_str!("../../../lib/openssl/spinel.rb"),
     ),
+    (
+        "openssl/spinel/asn1",
+        include_str!("../../../lib/openssl/spinel/asn1.rb"),
+    ),
+    (
+        "openssl/spinel/bn",
+        include_str!("../../../lib/openssl/spinel/bn.rb"),
+    ),
+    (
+        "openssl/spinel/pkey",
+        include_str!("../../../lib/openssl/spinel/pkey.rb"),
+    ),
+    (
+        "openssl/spinel/x509",
+        include_str!("../../../lib/openssl/spinel/x509.rb"),
+    ),
+    (
+        "openssl/spinel/ssl",
+        include_str!("../../../lib/openssl/spinel/ssl.rb"),
+    ),
     ("psych/spinel", include_str!("../../../lib/psych/spinel.rb")),
     (
         "bigdecimal/spinel",

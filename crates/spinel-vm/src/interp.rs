@@ -18679,6 +18679,11 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             &["__openssl_version__"],
             Native::OpenSsl(OpenSslOp::Version),
         ),
+        (
+            Builtin::Kernel,
+            &["__openssl_tls__"],
+            Native::OpenSsl(OpenSslOp::Tls),
+        ),
         (Builtin::Kernel, &["__fd_dup__"], Native::Fs(FsOp::FdDup)),
         (Builtin::Kernel, &["__fd_dup2__"], Native::Fs(FsOp::FdDup2)),
         (
@@ -27625,9 +27630,83 @@ fn openssl_native(
             let number = Value::fixnum(number).expect("a version number is a Fixnum");
             new_array(scope, &[text, number])
         }
+        OpenSslOp::Tls => {
+            let op = bytes_at(scope, call, 0, "__openssl_tls__")?;
+            let mut args = Vec::with_capacity(call.args.len().saturating_sub(1));
+            for &value in call.args.iter().skip(1) {
+                args.push(openssl_arg(scope, value, 0).ok_or(refuse(
+                    "an argument that is not nil, a Boolean, an Integer, a String or an Array",
+                ))?);
+            }
+            // A failure is `[:__failure__, [class, message, errors]]`, as
+            // an answer can itself be an Array that starts with an Integer.
+            match openssl::tls::call(scope.openssl_mut(), &op, &args) {
+                Ok(out) => openssl_out(scope, out),
+                Err(failure) => {
+                    let failed = openssl_failure(scope, failure);
+                    let failed = scope.root(failed);
+                    let failed = scope.get(failed);
+                    new_array(scope, &[Value::symbol(symbol("__failure__")), failed])
+                }
+            }
+        }
     };
     stack.push(value);
     Ok(None)
+}
+
+/// A Ruby value as `openssl::tls` takes it: nil, true or false, a Fixnum,
+/// a String's bytes, or an Array of these, nested no deeper than a few.
+fn openssl_arg(
+    scope: &mut HandleScope<'_>,
+    value: Value,
+    depth: usize,
+) -> Option<crate::openssl::tls::Arg> {
+    use crate::openssl::tls::Arg;
+    if value.is_nil() {
+        return Some(Arg::Nil);
+    }
+    if value == Value::TRUE {
+        return Some(Arg::Bool(true));
+    }
+    if value == Value::FALSE {
+        return Some(Arg::Bool(false));
+    }
+    if let Some(n) = value.as_fixnum() {
+        return Some(Arg::Int(n));
+    }
+    if let Some(bytes) = string_bytes(scope, value) {
+        return Some(Arg::Bytes(bytes));
+    }
+    if depth < 4 {
+        let elements = array_elements(scope, value)?;
+        let handles: Vec<_> = elements.into_iter().map(|v| scope.root(v)).collect();
+        let mut items = Vec::with_capacity(handles.len());
+        for handle in handles {
+            let element = scope.get(handle);
+            items.push(openssl_arg(scope, element, depth + 1)?);
+        }
+        return Some(Arg::List(items));
+    }
+    None
+}
+
+/// What `openssl::tls` answers, as a Ruby value: BINARY Strings for bytes,
+/// UTF-8 ones for text.
+fn openssl_out(scope: &mut HandleScope<'_>, out: crate::openssl::tls::Out) -> Value {
+    use crate::openssl::tls::Out;
+    match out {
+        Out::Nil => Value::NIL,
+        Out::Bool(true) => Value::TRUE,
+        Out::Bool(false) => Value::FALSE,
+        Out::Int(n) => Value::fixnum(n).unwrap_or(Value::NIL),
+        Out::Bytes(bytes) => binary_value(scope, &bytes),
+        Out::Text(bytes) => {
+            string_bytes_in(scope, Builtin::String.id(), &bytes, crate::strings::UTF_8)
+        }
+        Out::Sym(name) => Value::symbol(symbol(name)),
+        Out::List(items) => rooted_array(scope, items, openssl_out),
+    }
 }
 
 /// A failed OpenSSL call as the Ruby side raises it: `[class, message,

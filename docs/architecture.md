@@ -59,7 +59,7 @@ The release binary is Rust code plus an embedded zstd archive:
 
 Default gems whose parts are C in CRuby (`json` parser, `openssl`, `zlib`, `socket`, `io-console`, `digest`, `date`, `bigdecimal`, `psych`, `etc`, `fiddle`, `monitor`) ship as built-in gems: their Ruby halves in the asset archive, their C halves as Spinel primitives. See engine.md, "Built-in gems".
 
-Target size: under 30 MB. No libruby. OpenSSL is the system's, linked for the `openssl` built-in (#106): OpenSSL 3, found by `openssl-sys` at build time. libpq is the system's too, linked by the pg-spinel gem's extension (`gems/pg-spinel/ext/pg_spinel`, #114), a workspace member left out of `default-members`, so only building that extension (`--workspace`, `--package pg-spinel`, or its test) needs it; neither the default build nor the `spinel` binary does.
+Target size: under 30 MB. No libruby. OpenSSL is the system's, linked for the `openssl` built-in (#106, TLS since #107): OpenSSL 3, found by `openssl-sys` at build time. libpq is the system's too, linked by the pg-spinel gem's extension (`gems/pg-spinel/ext/pg_spinel`, #114), a workspace member left out of `default-members`, so only building that extension (`--workspace`, `--package pg-spinel`, or its test) needs it; neither the default build nor the `spinel` binary does.
 
 ## Dependencies
 

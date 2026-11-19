@@ -1,5 +1,6 @@
 //! `openssl` (#106), phase 1: digests, HMAC and random bytes, on the
-//! system's OpenSSL 3.
+//! system's OpenSSL 3. Phase 2 (#107), keys, certificates and TLS, is
+//! [`tls`], whose objects live in the same [`Contexts`].
 //!
 //! What Ruby cannot say for the `openssl` gem's C half: an `EVP_MD_CTX`, the
 //! context OpenSSL hashes and MACs in, and the calls on it. Everything above
@@ -29,6 +30,9 @@ use std::ffi::{CStr, CString, c_char, c_int, c_long, c_void};
 use std::ptr::{self, NonNull};
 
 use openssl_sys as sys;
+
+mod ffi;
+pub mod tls;
 
 // What `openssl-sys` does not bind. All are in OpenSSL 3.0's libcrypto,
 // which `openssl-sys` links and `build.rs` requires.
@@ -101,6 +105,26 @@ pub enum Class {
     Range,
     /// `RuntimeError`: a context that was never initialised.
     Runtime,
+    /// `OpenSSL::PKey::PKeyError`.
+    PKey,
+    /// `OpenSSL::X509::CertificateError`.
+    Cert,
+    /// `OpenSSL::X509::NameError`.
+    Name,
+    /// `OpenSSL::X509::ExtensionError`.
+    Ext,
+    /// `OpenSSL::X509::StoreError`.
+    Store,
+    /// `OpenSSL::SSL::SSLError`.
+    Ssl,
+    /// `OpenSSL::ASN1::ASN1Error`.
+    Asn1,
+    /// `OpenSSL::SSL::Session::SessionError`.
+    Session,
+    /// `TypeError`.
+    Type,
+    /// `OpenSSL::BNError`.
+    Bn,
 }
 
 impl Class {
@@ -114,6 +138,16 @@ impl Class {
             Class::Argument => 4,
             Class::Range => 5,
             Class::Runtime => 6,
+            Class::PKey => 7,
+            Class::Cert => 8,
+            Class::Name => 9,
+            Class::Ext => 10,
+            Class::Store => 11,
+            Class::Ssl => 12,
+            Class::Asn1 => 13,
+            Class::Session => 14,
+            Class::Type => 15,
+            Class::Bn => 16,
         }
     }
 }
@@ -287,6 +321,9 @@ impl Drop for Md {
 #[derive(Debug, Default)]
 pub struct Contexts {
     live: HashMap<u64, Context>,
+    /// Phase 2's keys, certificates, stores and connections ([`tls`]),
+    /// numbered from the same counter.
+    objects: HashMap<u64, tls::Object>,
     next: u64,
 }
 
@@ -317,6 +354,7 @@ impl Contexts {
     /// Free context `id`; an id already freed is no context.
     pub fn free(&mut self, id: u64) {
         self.live.remove(&id);
+        self.objects.remove(&id);
     }
 
     /// `ossl_evp_md_fetch`: the algorithm a name or a digest names.
