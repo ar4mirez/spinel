@@ -9,6 +9,19 @@ bytecode a tool reads.
 
 ### Added
 
+- **`nio4r-spinel`, the nio4r gem for Spinel**
+  ([#115](https://github.com/ar4mirez/spinel/issues/115)).
+  `gems/nio4r-spinel/` is nio4r 2.7.5's Ruby API, upstream's `lib/`
+  unchanged, over a `spinel-ext` extension that makes the epoll (Linux) or
+  kqueue (macOS) calls libev makes for upstream, plus `poll(2)` for the
+  `:poll` and `:select` backends; a `select` waits through Spinel's
+  scheduler, so other threads run meanwhile. `spinel install` puts it in
+  place of a locked `nio4r 2.7.5` when `SPINEL_SUBSTITUTES=nio4r`, leaving
+  the lockfile as Bundler wrote it, and nio4r's own test suite, all 112
+  examples, runs green on it under RSpec 3.13.
+  `gems/nio4r-spinel/build.rb` builds `nio4r-spinel-2.7.5.1-<platform>.gem`;
+  it is not on rubygems.org yet.
+
 - **`openssl` TLS, so `net/https` works**
   ([#107](https://github.com/ar4mirez/spinel/issues/107)).
   The built-in openssl 4.0.2 gains keys, certificates and TLS on the

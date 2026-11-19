@@ -1,0 +1,213 @@
+VERSION: ["2.7.5", "libev", false, true]
+classes: [Object, Object, [NIO::ByteBuffer, Enumerable, Object]]
+errors: [IOError, IOError, IOError]
+backends: [Array, true]
+default backend: true
+backend nil: true
+new :derp: ArgumentError: "unsupported backend: :derp"
+new 42: ArgumentError: "unsupported backend: 42"
+new string: ArgumentError: "unsupported backend: \"epoll\""
+new other queue: ArgumentError: "unsupported backend: :kqueue"
+new 2 args: ArgumentError: "wrong number of arguments (given 2, expected 0..1)"
+instance_variables: [[], []]
+inspect: ["#<NIO::Selector:0x>", "#<NIO::Monitor:0x>"]
+epoll backend: true
+epoll empty: [true, false, false]
+epoll register: [NIO::Monitor, true, true, :r, false, false, true]
+epoll register again: ArgumentError: "this IO is already registered with selector"
+epoll readiness before: [nil, false, false, false, nil]
+epoll select 0, none ready: nil
+epoll select 0.05, none ready: nil
+epoll select 0: [[true, :r, true, false]]
+epoll select nil: 1
+epoll select block: [1, [:r]]
+epoll select drained: [nil, :r]
+epoll writer: [[:w], :rw]
+epoll interests=: [:r, :r, nil, :w]
+epoll interests= nil: [nil, nil]
+epoll add_interest: [:w, :rw, :rw]
+epoll remove_interest: [:w, :w, nil, nil]
+epoll bad interests: ArgumentError: "invalid interest type :x (must be :r, :w, or :rw)"
+epoll string interest: TypeError: "wrong argument type String (expected Symbol)"
+epoll integer interest: TypeError: "wrong argument type Integer (expected Symbol)"
+epoll bad add: ArgumentError: "invalid interest type :derp (must be :r, :w, or :rw)"
+epoll value: [42, 42]
+epoll deregister: [true, true, false, nil]
+epoll closed monitor interests=: EOFError: "monitor is closed"
+epoll closed monitor add_interest: EOFError: "monitor is closed"
+epoll wakeup: nil
+epoll select after wakeup: nil
+epoll wakeup from another thread: []
+epoll wakeup with a block: 0
+epoll peer closed: [:r]
+epoll monitor close: [nil, true, false, nil, nil]
+epoll deregister closed io: true
+epoll register closed io: IOError: "closed stream"
+epoll close: [nil, true, nil, false]
+epoll closed backend: IOError: "selector is closed"
+epoll closed register: IOError: "selector is closed"
+epoll closed select: IOError: "selector is closed"
+epoll closed wakeup: IOError: "selector is closed"
+epoll closed deregister: [true, true, false]
+epoll monitor close after selector: [nil, true, false]
+poll backend: true
+poll empty: [true, false, false]
+poll register: [NIO::Monitor, true, true, :r, false, false, true]
+poll register again: ArgumentError: "this IO is already registered with selector"
+poll readiness before: [nil, false, false, false, nil]
+poll select 0, none ready: nil
+poll select 0.05, none ready: nil
+poll select 0: [[true, :r, true, false]]
+poll select nil: 1
+poll select block: [1, [:r]]
+poll select drained: [nil, :r]
+poll writer: [[:w], :rw]
+poll interests=: [:r, :r, nil, :w]
+poll interests= nil: [nil, nil]
+poll add_interest: [:w, :rw, :rw]
+poll remove_interest: [:w, :w, nil, nil]
+poll bad interests: ArgumentError: "invalid interest type :x (must be :r, :w, or :rw)"
+poll string interest: TypeError: "wrong argument type String (expected Symbol)"
+poll integer interest: TypeError: "wrong argument type Integer (expected Symbol)"
+poll bad add: ArgumentError: "invalid interest type :derp (must be :r, :w, or :rw)"
+poll value: [42, 42]
+poll deregister: [true, true, false, nil]
+poll closed monitor interests=: EOFError: "monitor is closed"
+poll closed monitor add_interest: EOFError: "monitor is closed"
+poll wakeup: nil
+poll select after wakeup: nil
+poll wakeup from another thread: []
+poll wakeup with a block: 0
+poll peer closed: [:r]
+poll monitor close: [nil, true, false, nil, nil]
+poll deregister closed io: true
+poll register closed io: IOError: "closed stream"
+poll close: [nil, true, nil, false]
+poll closed backend: IOError: "selector is closed"
+poll closed register: IOError: "selector is closed"
+poll closed select: IOError: "selector is closed"
+poll closed wakeup: IOError: "selector is closed"
+poll closed deregister: [true, true, false]
+poll monitor close after selector: [nil, true, false]
+select backend: true
+select empty: [true, false, false]
+select register: [NIO::Monitor, true, true, :r, false, false, true]
+select register again: ArgumentError: "this IO is already registered with selector"
+select readiness before: [nil, false, false, false, nil]
+select select 0, none ready: nil
+select select 0.05, none ready: nil
+select select 0: [[true, :r, true, false]]
+select select nil: 1
+select select block: [1, [:r]]
+select select drained: [nil, :r]
+select writer: [[:w], :rw]
+select interests=: [:r, :r, nil, :w]
+select interests= nil: [nil, nil]
+select add_interest: [:w, :rw, :rw]
+select remove_interest: [:w, :w, nil, nil]
+select bad interests: ArgumentError: "invalid interest type :x (must be :r, :w, or :rw)"
+select string interest: TypeError: "wrong argument type String (expected Symbol)"
+select integer interest: TypeError: "wrong argument type Integer (expected Symbol)"
+select bad add: ArgumentError: "invalid interest type :derp (must be :r, :w, or :rw)"
+select value: [42, 42]
+select deregister: [true, true, false, nil]
+select closed monitor interests=: EOFError: "monitor is closed"
+select closed monitor add_interest: EOFError: "monitor is closed"
+select wakeup: nil
+select select after wakeup: nil
+select wakeup from another thread: []
+select wakeup with a block: 0
+select peer closed: [:r]
+select monitor close: [nil, true, false, nil, nil]
+select deregister closed io: true
+select register closed io: IOError: "closed stream"
+select close: [nil, true, nil, false]
+select closed backend: IOError: "selector is closed"
+select closed register: IOError: "selector is closed"
+select closed select: IOError: "selector is closed"
+select closed wakeup: IOError: "selector is closed"
+select closed deregister: [true, true, false]
+select monitor close after selector: [nil, true, false]
+register 42: TypeError: "no implicit conversion of Integer into IO"
+register nil: TypeError: "no implicit conversion of nil into IO"
+register string interest: TypeError: "wrong argument type String (expected Symbol)"
+register integer interest: TypeError: "wrong argument type Integer (expected Symbol)"
+register bad interest: ArgumentError: "invalid event type :x (must be :r, :w, or :rw)"
+register to_io non-IO: TypeError: "can't convert Object to IO (Object#to_io gives Integer)"
+register to_io: [true, true, false]
+select string: TypeError: "no implicit conversion to float from string"
+select symbol: TypeError: "can't convert Symbol into Float"
+select true: TypeError: "no implicit conversion to float from true"
+select object: TypeError: "can't convert Object into Float"
+select negative: ArgumentError: "time interval must be positive"
+select negative integer: ArgumentError: "time interval must be positive"
+select rational: nil
+select 2 args: ArgumentError: "wrong number of arguments (given 2, expected 0..1)"
+monitor close 2 args: ArgumentError: "wrong number of arguments (given 2, expected 0..1)"
+monitor close false: [nil, true, true]
+Monitor.new: ArgumentError: "invalid event type :x (must be :r, :w, or :rw)"
+ByteBuffer.new: [8, 8, 0, 8, 8, false]
+ByteBuffer.new symbol: TypeError: "no implicit conversion of Symbol into Integer"
+ByteBuffer.new nil: TypeError: "no implicit conversion from nil to integer"
+ByteBuffer.new string: TypeError: "no implicit conversion of String into Integer"
+ByteBuffer.new float: 2
+ByteBuffer.new big: RangeError: "integer 1099511627776 too big to convert to 'int'"
+ByteBuffer.new no args: ArgumentError: "wrong number of arguments (given 0, expected 1)"
+inspect: "#<NIO::ByteBuffer:0x @position=0 @limit=16 @capacity=16>"
+<<: true
+<< position: [7, 16, 9]
+<< integer: TypeError: "no implicit conversion of Integer into String"
+<< nil: TypeError: "no implicit conversion of nil into String"
+<< to_str: 9
+<< multibyte: 11
+<< overflow: NIO::ByteBuffer::OverflowError: "buffer is full"
+flip: [true, 0, 11]
+get 3: ["Hel", "ASCII-8BIT", false]
+get rest: ["lo, ab\xC3\xA9", "ASCII-8BIT"]
+get empty: ["", ""]
+get more: NIO::ByteBuffer::UnderflowError: "not enough data in buffer"
+get negative: ArgumentError: "negative length given"
+get nil: ""
+get float: "He"
+[]: [72, 101, -87]
+[] negative: ArgumentError: "negative index given"
+[] limit: ArgumentError: "specified index exceeds limit"
+[] string: TypeError: "no implicit conversion of String into Integer"
+each: [true, [72, 101, 108, 108, 111, 44, 32, 97, 98, -61, -87]]
+each no block: ArgumentError: "no block given"
+to_a: [72, 101, 108, 108, 111, 44, 32, 97, 98, -61, -87]
+map: 11
+position=: [2, 2]
+position= float: [1.9, 1]
+position= negative: ArgumentError: "negative position given"
+position= beyond limit: ArgumentError: "specified position exceeds limit"
+limit=: [5, 5, 1]
+limit= negative: ArgumentError: "negative limit given"
+limit= beyond capacity: ArgumentError: "specified limit exceeds capacity"
+limit= capacity: [16, 16]
+mark: [true, 3]
+reset: [3]
+mark cleared by position: NIO::ByteBuffer::MarkUnsetError: "mark has not been set"
+mark cleared by limit: NIO::ByteBuffer::MarkUnsetError: "mark has not been set"
+mark cleared by flip: NIO::ByteBuffer::MarkUnsetError: "mark has not been set"
+mark cleared by rewind: NIO::ByteBuffer::MarkUnsetError: "mark has not been set"
+mark cleared by clear: NIO::ByteBuffer::MarkUnsetError: "mark has not been set"
+clear: [true, 0, 16, "\x00\x00\x00\x00"]
+compact: NIO::ByteBuffer::OverflowError: "buffer is full"
+full: [true, 0]
+bytes past 127: [-1, -128, 97, [-1, -128, 97]]
+instance_variables: []
+read_from empty: 0
+read_from: [8, 8, true]
+read_from full: NIO::ByteBuffer::OverflowError: "buffer is full"
+read_from 42: TypeError: "no implicit conversion of Integer into IO"
+read_from closed: IOError: "closed stream"
+write_to: [8, 8, "ijabcdefgh"]
+write_to empty: NIO::ByteBuffer::UnderflowError: "no data remaining in buffer"
+write_to 42: TypeError: "no implicit conversion of Integer into IO"
+read_from eof: EOFError: "end of file reached"
+write_to closed peer: Errno::EPIPE: "Broken pipe - write"
+tcp writable: [[true, :w]]
+tcp readable: [[:client, :w], [:peer, :r]]
+tcp buffer: [4, "ping"]
+tcp hangup: [[true, :r]]
