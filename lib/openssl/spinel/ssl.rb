@@ -234,11 +234,11 @@ module OpenSSL
       #    ctx.setup => nil # thereafter
       #
       # This method is called automatically when a new SSLSocket is created.
-      # It freezes the context, so nothing set after it can be lost.
+      # It freezes the context once it is set up, so nothing set after it can
+      # be lost; a setup that raises leaves it unfrozen, to be tried again.
       def setup
         return nil if frozen?
         ctx_id = __ctx_id__
-        Object.instance_method(:freeze).bind_call(self)
         {
           session_get_cb: "session_get_cb", session_remove_cb: "session_remove_cb",
           renegotiation_cb: "renegotiation_cb", tmp_dh_callback: "tmp_dh_callback",
@@ -266,6 +266,7 @@ module OpenSSL
         SSL.__send__(:__tls__, "ctx_setup", ctx_id, store, extra, cert, key, cas, ca_file, ca_path,
           verify_mode, timeout, depth, alpn, sid, !@session_new_cb.nil?, !@keylog_cb.nil?,
           !(@servername_cb.nil? && @alpn_select_cb.nil?), !@alpn_select_cb.nil?, !@client_cert_cb.nil?)
+        Object.instance_method(:freeze).bind_call(self)
         true
       end
       alias freeze setup
@@ -600,6 +601,7 @@ module OpenSSL
           if servername && ctx.servername_cb
             result = ctx.servername_cb.call([self, servername])
             if SSLContext === result
+              result.setup
               @context = result
               chosen = result.__send__(:__ctx_id__)
               ctx = result

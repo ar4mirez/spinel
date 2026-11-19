@@ -291,6 +291,29 @@ end
 show("read before start") { r, w = IO.pipe; OpenSSL::SSL::SSLSocket.new(r).sysread(1) }
 show("socket on a non-IO") { OpenSSL::SSL::SSLSocket.new(Object.new) }
 show("context frozen") { ctx = OpenSSL::SSL::SSLContext.new; OpenSSL::SSL::SSLSocket.new(IO.pipe[0], ctx); [ctx.frozen?, ctx.setup] }
+show("failed setup is tried again") do
+  ctx = OpenSSL::SSL::SSLContext.new
+  ctx.set_params(ca_file: File.join(Dir.tmpdir, "spinel-no-such-ca.pem"))
+  tries = 2.times.map do
+    OpenSSL::SSL::SSLSocket.new(IO.pipe[0], ctx)
+    :set_up
+  rescue OpenSSL::SSL::SSLError => e
+    e.class
+  end
+  [tries, ctx.frozen?]
+end
+
+show("servername_cb context is set up") do
+  sni_ctx = server_context(leaf, leaf_key)
+  bare = OpenSSL::SSL::SSLContext.new
+  bare.servername_cb = ->((_ssl, name)) { sni_ctx }
+  serve(bare) do |port|
+    ctx = OpenSSL::SSL::SSLContext.new
+    ctx.set_params(cert_store: store)
+    client(port, ctx, "localhost") { |ssl| ssl.puts("sni"); [ssl.gets, ssl.peer_cert.subject.to_s, sni_ctx.frozen?] }
+  end
+end
+
 show("bad version") { OpenSSL::SSL::SSLContext.new.min_version = :TLS9 }
 show("bad ciphers") { OpenSSL::SSL::SSLContext.new.ciphers = "nope" }
 show("default params") { c = OpenSSL::SSL::SSLContext.new; c.set_params; [c.verify_mode, c.verify_hostname, c.cert_store.equal?(OpenSSL::SSL::SSLContext::DEFAULT_CERT_STORE)] }

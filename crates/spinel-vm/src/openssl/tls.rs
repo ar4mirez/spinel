@@ -2467,12 +2467,18 @@ unsafe extern "C" fn keylog_cb(ssl: *const sys::SSL, line: *const c_char) {
 /// ca_path, verify_mode, timeout, verify_depth, alpn wire, session id
 /// context, session_new_cb?, keylog_cb?, servername_cb or alpn_select_cb?,
 /// alpn_select_cb?, client_cert_cb?)`: `ossl_sslctx_setup`, in its order,
-/// with its errors.
+/// with its errors, except that the verify mode and callback go on first, so
+/// a load that fails never leaves verification off.
 fn ctx_setup(contexts: &Contexts, args: &[Arg]) -> Result<Out, Failure> {
     let ctx = contexts.ctx(id(args, 0)?)?;
     // SAFETY: a live context; everything it is given it takes references
     // to, or copies.
     unsafe {
+        let mode = match args.get(8) {
+            Some(Arg::Int(_)) => c_int_at(args, 8)?,
+            _ => 0,
+        };
+        ffi::SSL_CTX_set_verify(ctx, mode, Some(ssl_verify_cb));
         if let Some(store) = opt_id(args, 1)? {
             let store = contexts.store(store)?;
             ffi::SSL_CTX_set_cert_store(ctx, store);
@@ -2517,11 +2523,6 @@ fn ctx_setup(contexts: &Contexts, args: &[Arg]) -> Result<Out, Failure> {
                 return Err(failure(Class::Ssl, b"SSL_CTX_load_verify_dir"));
             }
         }
-        let mode = match args.get(8) {
-            Some(Arg::Int(_)) => c_int_at(args, 8)?,
-            _ => 0,
-        };
-        ffi::SSL_CTX_set_verify(ctx, mode, Some(ssl_verify_cb));
         if let Some(Arg::Int(t)) = args.get(9) {
             ffi::SSL_CTX_set_timeout(ctx, c_long::try_from(*t).unwrap_or(c_long::MAX));
         }

@@ -53,6 +53,8 @@ connect_nonblock: [true, "echo: nonblock\n"]
 read before start: OpenSSL::SSL::SSLError: SSL session is not started yet
 socket on a non-IO: TypeError: wrong argument type Object (expected File)
 context frozen: [true, nil]
+failed setup is tried again: [[OpenSSL::SSL::SSLError, OpenSSL::SSL::SSLError], false]
+servername_cb context is set up: ["echo: sni\n", "/CN=localhost", true]
 bad version: ArgumentError: unrecognized version "TLS9"
 bad ciphers: OpenSSL::SSL::SSLError: SSL_CTX_set_cipher_list: no cipher match
 default params: [1, true, true]
