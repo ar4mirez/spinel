@@ -1315,7 +1315,10 @@ pub enum StrOp {
 /// Which class-table operation. See `interp.rs`, `reflect_native`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReflectOp {
-    /// `(mod, name, inherit)` → `[value]`, or nil when there is none.
+    /// `(mod, name, inherit, answers = false)` → `[value]`, or nil when there
+    /// is none. `answers` is true only where `Module#const_get` hands the
+    /// value to its caller, which in a non-main Ractor is the program's read
+    /// when the program called it (#117).
     ConstLookup,
     /// `(mod, name, value)` → value, naming an anonymous module it holds.
     ConstSet,
