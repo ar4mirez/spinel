@@ -921,6 +921,17 @@ impl Classes {
         self.operator_guards[which].native
     }
 
+    /// [`Classes::native_operators`] when nothing has been defined since the
+    /// last question, which a read of the table can answer; `None` when the
+    /// guards need refreshing first, which is a write. Every arithmetic
+    /// instruction asks, so asking takes no write: in a program with a second
+    /// heap a write is the class lock's.
+    #[inline]
+    pub fn fresh_native_operators(&self, which: usize) -> Option<u32> {
+        self.operators_fresh
+            .then(|| self.operator_guards[which].native)
+    }
+
     /// Re-resolve the sealed names of each numeric class whose serial moved.
     #[cold]
     fn refresh_operators(&mut self) {
@@ -3962,6 +3973,36 @@ mod tests {
         assert_eq!(classes.crefs.len(), len, "a hot `&:sym` allocates once");
         assert!(classes.cref_refined(first));
         assert_eq!(classes.with_refinements_of(CrefId::ROOT, top), top);
+    }
+
+    /// The program's first heap holds its tables alone until a second heap
+    /// joins (#117); then both reach the same tables, through the `Vm` they
+    /// moved into, and a class either one defines is the other's too, with an
+    /// object of each heap's own. One OS thread runs one heap at a time, so
+    /// each lets the class lock go while the other runs. Runs under Miri,
+    /// unlike `tests/ractor_heaps.rs`, which needs Prism.
+    #[test]
+    fn a_second_heap_reaches_the_tables_the_first_held_alone() {
+        let mut main = booted();
+        let booted_classes = main.classes().len();
+        let mut child = main.new_ractor();
+        assert_eq!(child.classes().len(), booted_classes);
+        main.release_classes();
+        let foo = child.scope().define_class(Some("Foo"), None);
+        child.release_classes();
+        main.reacquire_classes();
+        assert_eq!(main.classes().len(), booted_classes + 1);
+        assert_eq!(main.classes().name(foo), Some("Foo"));
+        assert_ne!(
+            main.class_object(foo),
+            child.class_object(foo),
+            "each heap has its own object for the class"
+        );
+        let bar = main.scope().define_class(Some("Bar"), None);
+        main.release_classes();
+        child.reacquire_classes();
+        assert_eq!(child.classes().name(bar), Some("Bar"));
+        child.release_classes();
     }
 
     #[test]

@@ -18672,7 +18672,10 @@ fn native_ops(scope: &mut HandleScope<'_>, frame: &Call, which: usize) -> u32 {
     let native = if scope.classes().cref_refined(frame.cref) {
         0
     } else {
-        let native = scope.classes_mut().native_operators(which);
+        let native = match scope.classes().fresh_native_operators(which) {
+            Some(native) => native,
+            None => scope.classes_mut().native_operators(which),
+        };
         let eq = (native >> operator_guard(BinOp::Neq)) & 1;
         (native & !(1 << BinOp::Neq as usize)) | (eq << BinOp::Neq as usize)
     };
@@ -20121,7 +20124,11 @@ fn operator_fast_path(scope: &mut HandleScope<'_>, left: Value, op: usize, frame
     };
     // A refinement can redefine the operator where it is active (#352), so
     // code with any active sends.
-    (scope.classes_mut().operator_is_native(which, op) && !scope.classes().cref_refined(frame.cref))
+    let native = match scope.classes().fresh_native_operators(which) {
+        Some(native) => native,
+        None => scope.classes_mut().native_operators(which),
+    };
+    (native & (1 << op) != 0 && !scope.classes().cref_refined(frame.cref))
         || frame
             .iseq
             .path

@@ -1946,11 +1946,22 @@ impl<'h> HandleScope<'h> {
 
     /// See [`Heap::classes_mut`]. A write that waited for other heaps catches
     /// up on the classes they defined before it hands out the table.
+    #[inline]
     pub fn classes_mut(&mut self) -> &mut Classes {
         if self.heap.begin_class_write() {
-            self.catch_up_classes();
+            self.catch_up_classes_after_wait();
         }
-        self.heap.classes_mut()
+        // SAFETY: as `Heap::classes_mut`, whose check `begin_class_write` just
+        // made.
+        unsafe { self.heap.vm.classes_mut() }
+    }
+
+    /// [`HandleScope::catch_up_classes`], out of line: only a write that
+    /// waited for another heap needs it.
+    #[cold]
+    #[inline(never)]
+    fn catch_up_classes_after_wait(&mut self) {
+        self.catch_up_classes();
     }
 
     /// This heap's shape tree.
@@ -2135,11 +2146,14 @@ impl<'h> HandleScope<'h> {
     }
 
     /// See [`HandleScope::classes_mut`].
+    #[inline]
     pub fn definitions_mut(&mut self) -> &mut crate::method::Definitions {
         if self.heap.begin_class_write() {
-            self.catch_up_classes();
+            self.catch_up_classes_after_wait();
         }
-        self.heap.definitions_mut()
+        // SAFETY: as `Heap::definitions_mut`, whose check `begin_class_write`
+        // just made.
+        unsafe { self.heap.vm.definitions_mut() }
     }
 
     /// The heap's FFI state (#105): see [`crate::ffi`].
