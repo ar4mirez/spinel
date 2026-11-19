@@ -48,28 +48,41 @@ use crate::heap::{ExportError, Msg, Options, Refusal};
 use crate::method::{Definition, RactorOp};
 
 /// What every heap of a program keeps for its Ractors, beside the [`Vm`]:
-/// the registry, made when the first Ractor is asked for, and where the main
-/// heap is as it last let the class lock go or parked at a safe point —
+/// the registry, with whether a Ractor has been asked for yet, and where the
+/// main heap is as it last let the class lock go or parked at a safe point —
 /// what another Ractor reads the main one's constants from while it stays
 /// parked (`HandleScope::pull`). Held outside the `Vm`, whose layout the
 /// interpreter's loop is measured with.
 ///
 /// [`Vm`]: crate::vm::Vm
-#[derive(Default)]
 pub(crate) struct Program {
-    registry: std::sync::OnceLock<Registry>,
+    registry: Registry,
+    asked: AtomicBool,
     main_heap: std::sync::atomic::AtomicPtr<Heap>,
+}
+
+impl Default for Program {
+    fn default() -> Program {
+        Program {
+            registry: Registry::new(),
+            asked: AtomicBool::new(false),
+            main_heap: std::sync::atomic::AtomicPtr::default(),
+        }
+    }
 }
 
 impl Program {
     /// The program's Ractors.
     pub(crate) fn ractors(&self) -> &Registry {
-        self.registry.get_or_init(Registry::new)
+        if !self.asked.load(Ordering::Acquire) {
+            self.asked.store(true, Ordering::Release);
+        }
+        &self.registry
     }
 
     /// Whether the program has asked for a Ractor yet.
     pub(crate) fn has_ractors(&self) -> bool {
-        self.registry.get().is_some()
+        self.asked.load(Ordering::Acquire)
     }
 
     pub(crate) fn set_main_heap(&self, heap: *mut Heap) {
