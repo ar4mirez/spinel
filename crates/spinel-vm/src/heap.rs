@@ -49,7 +49,7 @@ use crate::value::{SymbolId, SymbolMap, SymbolSet, Value};
 
 mod copy;
 pub use copy::{ExportError, Imported, Msg, Refusal};
-pub(crate) use copy::{Options, is_hidden};
+pub(crate) use copy::{Options, Stop, is_hidden};
 
 /// Cell sizes, in bytes. Powers of two so the class index is one shift.
 const SIZE_CLASSES: [usize; 5] = [32, 64, 128, 256, 512];
@@ -70,8 +70,8 @@ const MIN_GC_BYTES: usize = 1024 * 1024;
 
 /// Set while an object is reachable in the current cycle, cleared as it is swept.
 ///
-/// Bits 1 and 2 are `docs/engine.md`'s `frozen` and `ractor-shareable`. They are not
-/// defined here because nothing can set them until #8.
+/// `docs/engine.md`'s `frozen` and `ractor-shareable` bits are [`FROZEN`] and
+/// [`SHAREABLE`].
 const MARKED: u8 = 0b1;
 
 /// Set by `Object#freeze`, and never cleared: Ruby has no `unfreeze`.
@@ -105,6 +105,19 @@ const CHILLED_SYMBOL: u8 = 0b1_0000;
 /// A header bit rather than an ivar because `Hash#inspect` must not show it
 /// and `dup` must not copy it: the copy is a fresh cell, measured unmarked.
 const KEYWORDS: u8 = 0b10_0000;
+
+/// Set on a `Proc` made shareable (#118): by `Ractor.make_shareable`,
+/// `Ractor.shareable_proc` or `shareable_lambda`, once its `self` and the
+/// variables it reads outside itself were found shareable and its
+/// environment was replaced by a copy holding only those. Always with
+/// [`FROZEN`]. `docs/engine.md`'s `ractor-shareable` bit: a frozen `Proc` is
+/// not shareable without it, and one with it crosses between Ractors as a
+/// copy where any other `Proc` is refused.
+///
+/// ponytail: `Proc#dup` and `#clone` make a cell without it, so the copy of
+/// a shareable `Proc` is not shareable, where CRuby's is. Carrying it is a
+/// line in the `Proc` copy when a program needs it.
+const SHAREABLE: u8 = 0b100_0000;
 
 /// Set from allocation until the cell is swept onto a free list.
 ///
@@ -2015,13 +2028,11 @@ impl<'h> HandleScope<'h> {
     }
 
     /// A `define_method` body as this heap runs it (#117): its own, or a
-    /// copy of the main Ractor's. `None` for another Ractor's, which CRuby
-    /// refuses: "defined with an un-shareable Proc in a different Ractor".
-    ///
-    /// ponytail: CRuby runs the main Ractor's body in another only when it
-    /// is shareable; here every one is, as a copy, since the core library's
-    /// `Struct` and `Data` accessors are such bodies. The copy's captured
-    /// variables are its own.
+    /// copy of the main Ractor's when that one is shareable (#118). `None`
+    /// for any other, which CRuby refuses: "defined with an un-shareable
+    /// Proc in a different Ractor". A body the core library wrote, as the
+    /// `Struct` and `Data` accessors are, stands for CRuby's C and runs
+    /// anywhere, as a copy whose captured variables are its own.
     pub(crate) fn local_proc(&mut self, block: Value, owner: u32) -> Option<Value> {
         if owner == self.heap.foreign.ractor {
             return Some(block);
@@ -2037,6 +2048,20 @@ impl<'h> HandleScope<'h> {
             return Some(copy);
         }
         let copy = self.pull(block, false, &[])?;
+        let pointer = copy.as_heap()?;
+        // SAFETY: a live object of this heap, just made.
+        let shareable = unsafe { (*Obj(pointer.cast()).header()).flags & SHAREABLE != 0 };
+        // A `Proc`'s first slot is its body (`interp.rs`, `PROC_BODY`).
+        let core = match self.definitions().get(self.slot_of(copy, 0)) {
+            Some(crate::method::Definition::Iseq(iseq)) => iseq
+                .path
+                .as_deref()
+                .is_some_and(|path| path.starts_with("<internal:")),
+            _ => false,
+        };
+        if !shareable && !core {
+            return None;
+        }
         self.heap.foreign.procs.insert(address, copy);
         Some(copy)
     }
@@ -2129,9 +2154,21 @@ impl<'h> HandleScope<'h> {
         copied
     }
 
-    /// See [`Heap::freeze_deep`]. `root` is rooted by the caller.
-    pub(crate) fn freeze_deep(&mut self, root: Value) -> Vec<Value> {
-        self.heap.freeze_deep(root)
+    /// See [`Heap::make_shareable`]. `root` is rooted by the caller.
+    pub(crate) fn make_shareable(
+        &mut self,
+        root: Value,
+        unshareable: &[crate::class::ClassId],
+    ) -> (Vec<Value>, Option<Stop>) {
+        self.heap.make_shareable(root, unshareable)
+    }
+
+    /// Mark the object `handle` roots shareable and frozen: a `Proc` made
+    /// shareable (#118). See [`SHAREABLE`].
+    pub(crate) fn set_shareable(&mut self, handle: Handle<'h>) {
+        let object = self.object(handle);
+        // SAFETY: the handle roots a live object of this heap.
+        unsafe { (*object.header()).flags |= FROZEN | SHAREABLE };
     }
 
     /// See [`Heap::release_classes`].
@@ -2198,7 +2235,7 @@ impl<'h> HandleScope<'h> {
         let refusals = if core {
             Vec::new()
         } else {
-            self.heap.foreign.program.ractors().refusals()
+            self.heap.foreign.program.ractors().shareable_refusals()
         };
         match self.pull(value, !core, &refusals) {
             Some(copy) => copy,
@@ -2255,7 +2292,7 @@ impl<'h> HandleScope<'h> {
         if scope.heap.owns_vm {
             return value;
         }
-        let refusals = scope.heap.foreign.program.ractors().refusals();
+        let refusals = scope.heap.foreign.program.ractors().shareable_refusals();
         let options = Options {
             refusals: &refusals,
             shareable_only: true,

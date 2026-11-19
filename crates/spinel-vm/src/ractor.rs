@@ -44,7 +44,7 @@ use super::{
 };
 use crate::bytecode::{Insn, Iseq};
 use crate::class::{Builtin, ClassId, CrefId};
-use crate::heap::{ExportError, Msg, Options, Refusal};
+use crate::heap::{ExportError, Msg, Options, Refusal, Stop};
 use crate::method::{Definition, RactorOp};
 
 /// What every heap of a program keeps for its Ractors, beside the [`Vm`]:
@@ -112,6 +112,10 @@ struct Inner {
     /// The classes whose instances a copy refuses, and `Ractor::MovedObject`,
     /// as `core/ractor.rb` names them at boot.
     refusals: Vec<Refusal>,
+    /// The classes `Ractor.shareable?` says no to, frozen or not, and
+    /// `Ractor.make_shareable` refuses: `Proc`, but for one made shareable,
+    /// and CRuby's `T_DATA` that may not be shared frozen (#118).
+    unshareable: Vec<ClassId>,
     moved: Option<ClassId>,
     /// The values Ractors other than the main one put in the class tables,
     /// as copies: see [`Value::shared_ref`].
@@ -314,6 +318,25 @@ impl Registry {
         self.inner().refusals.clone()
     }
 
+    /// The refusals of a copy that only shareable objects may make: the
+    /// classes that are never shareable.
+    ///
+    /// ponytail: a frozen `Method` is shareable here, as CRuby's is, but a
+    /// copy of one sent is still refused (`allocator undefined for Method`),
+    /// where CRuby passes the shareable one. Letting it through needs its
+    /// `@__found__` checked to hold nothing per heap.
+    pub(crate) fn shareable_refusals(&self) -> Vec<Refusal> {
+        self.inner()
+            .unshareable
+            .iter()
+            .map(|&class| Refusal {
+                class,
+                error: String::new(),
+                message: String::new(),
+            })
+            .collect()
+    }
+
     /// Keep `msg` for every heap to build its own of; what the tables hold
     /// in its place.
     pub(crate) fn add_shared_box(&self, msg: Msg) -> Value {
@@ -412,42 +435,255 @@ pub(super) fn drain(scope: &HandleScope<'_>) {
     }
 }
 
-/// The names of the local variables of the scopes outside it that `block`
-/// reads or writes, in the order they are first met: what
-/// `Ractor.new` refuses (CRuby's "can not isolate a Proc because it accesses
-/// outer variables (x).").
-fn outer_variables(block: &Iseq) -> Vec<String> {
-    fn walk(iseq: &Iseq, base: usize, names: &mut Vec<String>) {
-        // How many blocks deep inside `block` this body is.
-        let level = iseq.outer.len().saturating_sub(base);
-        for insn in &iseq.insns {
-            let (Insn::GetLocal(slot, depth) | Insn::SetLocal(slot, depth)) = *insn else {
-                continue;
-            };
-            let depth = depth as usize;
-            if depth <= level {
-                continue;
+/// A local of a scope outside a block that the block reads or writes.
+struct OuterUse {
+    name: String,
+    /// How many environments out from the block's own it is: 1 for the
+    /// scope the block is written in.
+    depth: usize,
+    slot: u16,
+    written: bool,
+    /// Assigned more than once where it lives: see
+    /// [`Iseq::outer_reassigned`].
+    reassigned: bool,
+}
+
+/// What a block uses of the scopes outside it: CRuby's `outer_variables`.
+struct Outer {
+    /// In the order they are first met.
+    uses: Vec<OuterUse>,
+    yields: bool,
+}
+
+impl Outer {
+    /// What `block` and the blocks written inside it read and write of the
+    /// scopes outside it, and whether they `yield`.
+    fn of(block: &Iseq) -> Outer {
+        fn walk(iseq: &Iseq, base: usize, outer: &mut Outer) {
+            // How many blocks deep inside `block` this body is.
+            let level = iseq.outer.len().saturating_sub(base);
+            for insn in &iseq.insns {
+                let (slot, depth, written) = match *insn {
+                    Insn::GetLocal(slot, depth) => (slot, depth, false),
+                    Insn::SetLocal(slot, depth) => (slot, depth, true),
+                    Insn::Yield(_) => {
+                        outer.yields = true;
+                        continue;
+                    }
+                    _ => continue,
+                };
+                let depth = depth as usize;
+                if depth <= level {
+                    continue;
+                }
+                let from_block = depth - level;
+                if let Some(found) = outer
+                    .uses
+                    .iter_mut()
+                    .find(|used| used.depth == from_block && used.slot == slot)
+                {
+                    found.written |= written;
+                    continue;
+                }
+                let name = iseq
+                    .outer
+                    .get(depth - 1)
+                    .and_then(|env| env.get(slot as usize))
+                    .map_or_else(|| "?".to_string(), |name| name.to_string());
+                let reassigned = iseq
+                    .outer_reassigned
+                    .get(depth - 1)
+                    .is_some_and(|slots| slots.contains(&slot));
+                outer.uses.push(OuterUse {
+                    name,
+                    depth: from_block,
+                    slot,
+                    written,
+                    reassigned,
+                });
             }
-            let name = iseq
-                .outer
-                .get(depth - 1)
-                .and_then(|env| env.get(slot as usize))
-                .map_or_else(|| "?".to_string(), |name| name.to_string());
-            if !names.contains(&name) {
-                names.push(name);
+            for child in &iseq.children {
+                // A block written inside sits one environment further in; a
+                // method or a class body starts a scope of its own.
+                if child.outer.len() > iseq.outer.len() {
+                    walk(child, base, outer);
+                }
             }
         }
-        for child in &iseq.children {
-            // A block written inside sits one environment further in; a
-            // method or a class body starts a scope of its own.
-            if child.outer.len() > iseq.outer.len() {
-                walk(child, base, names);
+        let mut outer = Outer {
+            uses: Vec::new(),
+            yields: false,
+        };
+        walk(block, block.outer.len(), &mut outer);
+        outer
+    }
+
+    /// CRuby's `ArgumentError` for a block that may not use the variables
+    /// outside it that `all` says, or `yield`: every one for `Ractor.new`
+    /// ("isolate a Proc"), the ones it writes for a shareable `Proc` ("make
+    /// a Proc shareable"). Measured on 4.0.9.
+    fn refusal(&self, what: &str, all: bool) -> Option<String> {
+        let mut names: Vec<&str> = Vec::new();
+        for used in &self.uses {
+            if (all || used.written) && !names.contains(&used.name.as_str()) {
+                names.push(&used.name);
+            }
+        }
+        match (names.is_empty(), self.yields) {
+            (true, false) => None,
+            (true, true) => Some(format!("can not {what} because it uses 'yield'.")),
+            (false, yields) => Some(format!(
+                "can not {what} because it accesses outer variables ({}){}.",
+                names.join(", "),
+                if yields { " and uses 'yield'" } else { "" }
+            )),
+        }
+    }
+}
+
+/// Why a `Proc` may not be made shareable (#118), as CRuby 4.0.9 says it.
+enum ProcRefusal {
+    /// "Proc's self is not shareable: #{proc.inspect}".
+    SelfUnshareable(Value),
+    /// An `ArgumentError`, said in full: see [`Outer::refusal`].
+    Argument(String),
+    /// "cannot make a shareable Proc because the outer variable 'x' may be
+    /// reassigned."
+    Reassigned(String),
+    /// "cannot make a shareable Proc because it can refer unshareable object
+    /// #{value.inspect} from variable 'x'".
+    Refers(Value, String),
+    /// A `Proc` the core library made, `Method#to_proc`'s: "not supported
+    /// yet".
+    Unsupported,
+}
+
+/// Whether `value` is shareable: CRuby's `Ractor.shareable?`.
+fn is_shareable(scope: &HandleScope<'_>, value: Value) -> bool {
+    if value.is_immediate() {
+        return true;
+    }
+    let refusals = registry(scope).shareable_refusals();
+    scope
+        .heap_ref()
+        .export(
+            value,
+            &Options {
+                refusals: &refusals,
+                shareable_only: true,
+                ..Options::default()
+            },
+            None,
+        )
+        .is_ok()
+}
+
+/// Make the `Proc` `block` shareable, as CRuby's
+/// `rb_proc_ractor_make_shareable` does: its `self` (or `receiver`, which
+/// replaces it, for `Ractor.shareable_proc`) must be shareable; it may not
+/// write a variable outside itself or `yield`; each one it reads must be
+/// assigned once where it lives and hold a shareable object. Then its
+/// environment is a copy holding only those, so it shares nothing that
+/// changes, and it is marked shareable and frozen. Checked in CRuby's
+/// order: the variables of the innermost scope first, and of one scope,
+/// the last read first.
+///
+/// ponytail: `binding` and `eval` in the `Proc` see the copied environment,
+/// nil where it read nothing, where CRuby's refuse ("can not access
+/// variable 'x' from isolated Proc"); and a `Symbol#to_proc` `Proc` is
+/// refused as not supported, where CRuby's answers it as it is. Both want
+/// the isolation marked on the frame, for `binding` and `eval` to consult.
+fn make_proc_shareable(
+    scope: &mut HandleScope<'_>,
+    block: Value,
+    receiver: Option<Value>,
+) -> Result<(), ProcRefusal> {
+    let handle = scope.root(block);
+    let Some((iseq, env, own_self, ..)) = proc_parts(scope, block) else {
+        return Err(ProcRefusal::Unsupported);
+    };
+    // The core library's, `Method#to_proc`'s: CRuby's is no block of Ruby.
+    if iseq
+        .path
+        .as_deref()
+        .is_some_and(|path| path.starts_with("<internal:"))
+    {
+        return Err(ProcRefusal::Unsupported);
+    }
+    if receiver.is_none() && !is_shareable(scope, own_self) {
+        return Err(ProcRefusal::SelfUnshareable(scope.get(handle)));
+    }
+    let outer = Outer::of(&iseq);
+    if let Some(message) = outer.refusal("make a Proc shareable", false) {
+        return Err(ProcRefusal::Argument(message));
+    }
+    // The environments the body can reach, innermost first.
+    let mut envs = Vec::new();
+    let mut at = env;
+    while at != Value::NIL && envs.len() < iseq.outer.len() {
+        let cell = scope.root(at);
+        envs.push(cell);
+        at = scope.slot(cell, 0);
+    }
+    for (index, &cell) in envs.iter().enumerate() {
+        for used in outer
+            .uses
+            .iter()
+            .rev()
+            .filter(|used| used.depth == index + 1)
+        {
+            if used.reassigned {
+                return Err(ProcRefusal::Reassigned(used.name.clone()));
+            }
+            let value = scope.slot(cell, super::ENV_HEADER + used.slot as usize);
+            if !is_shareable(scope, value) {
+                return Err(ProcRefusal::Refers(value, used.name.clone()));
             }
         }
     }
-    let mut names = Vec::new();
-    walk(block, block.outer.len(), &mut names);
-    names
+    // The copy, outermost first, each holding only what the body reads.
+    let mut parent = scope.root(Value::NIL);
+    for (index, &cell) in envs.iter().enumerate().rev() {
+        let slots = (scope.len(cell) as usize).saturating_sub(super::ENV_HEADER);
+        let copy = super::env_alloc(scope, scope.get(parent), slots);
+        let copy = scope.root(copy);
+        for used in outer.uses.iter().filter(|used| used.depth == index + 1) {
+            let at = super::ENV_HEADER + used.slot as usize;
+            let value = scope.slot(cell, at);
+            scope.set_slot(copy, at, value);
+        }
+        parent = copy;
+    }
+    if !envs.is_empty() {
+        let copy = scope.get(parent);
+        scope.set_slot(handle, super::PROC_ENV, copy);
+    }
+    if let Some(receiver) = receiver {
+        scope.set_slot(handle, super::PROC_SELF, receiver);
+    }
+    scope.set_slot(handle, super::PROC_BLOCK, Value::NIL);
+    scope.set_shareable(handle);
+    Ok(())
+}
+
+/// A refusal as `core/ractor.rb` raises it: `[kind, object, text]`.
+fn refusal_value(scope: &mut HandleScope<'_>, refusal: ProcRefusal) -> Value {
+    let symbol = |name: &str| Value::symbol(crate::shared::symbols::intern(name));
+    let (kind, object, text) = match refusal {
+        ProcRefusal::SelfUnshareable(block) => ("self", block, None),
+        ProcRefusal::Argument(message) => ("argument", Value::NIL, Some(message)),
+        ProcRefusal::Reassigned(name) => ("reassigned", Value::NIL, Some(name)),
+        ProcRefusal::Refers(value, name) => ("refers", value, Some(name)),
+        ProcRefusal::Unsupported => ("unsupported", Value::NIL, None),
+    };
+    let object = scope.root(object);
+    let text = match text {
+        Some(text) => string_new(scope, &text),
+        None => Value::NIL,
+    };
+    let text = scope.root(text);
+    let (object, text) = (scope.get(object), scope.get(text));
+    new_array(scope, &[symbol(kind), object, text])
 }
 
 /// The exception a refused copy raises.
@@ -537,8 +773,16 @@ pub(super) fn native(
                     message: message.unwrap_or_default(),
                 });
             }
+            let mut unshareable = Vec::new();
+            for class in array_elements(scope, arg(2)).unwrap_or_default() {
+                let handle = scope.root(class);
+                if let Some(class) = scope.class_id_of(handle) {
+                    unshareable.push(class);
+                }
+            }
             let mut inner = registry(scope).inner();
             inner.refusals = refusals;
+            inner.unshareable = unshareable;
             inner.moved = moved;
             Value::NIL
         }
@@ -710,20 +954,7 @@ pub(super) fn native(
             let (block, args) = (scope.get(block), scope.get(args));
             new_array(scope, &[block, args])
         }
-        RactorOp::Shareable => bool_value(
-            arg(0).is_immediate()
-                || scope
-                    .heap_ref()
-                    .export(
-                        arg(0),
-                        &Options {
-                            shareable_only: true,
-                            ..Options::default()
-                        },
-                        None,
-                    )
-                    .is_ok(),
-        ),
+        RactorOp::Shareable => bool_value(is_shareable(scope, arg(0))),
         RactorOp::Monitor => {
             let port = id_arg(1);
             let add = arg(2).is_truthy();
@@ -751,11 +982,78 @@ pub(super) fn native(
             }
             Value::NIL
         }
-        RactorOp::FreezeDeep => {
+        RactorOp::MakeShareable => {
             let root = arg(0);
-            let handle = scope.root(root);
-            let hashes = scope.freeze_deep(scope.get(handle));
-            new_array(scope, &hashes)
+            let root = scope.root(root);
+            let unshareable = registry(scope).inner().unshareable.clone();
+            // Each `Proc` the walk stops at is made shareable, and the walk
+            // starts again, passing over it: what came before it is frozen
+            // already, and freezes again for nothing.
+            let (hashes, error) = loop {
+                let (hashes, stop) = scope.make_shareable(scope.get(root), &unshareable);
+                let hashes: Vec<_> = hashes.iter().map(|&hash| scope.root(hash)).collect();
+                let error = match stop {
+                    None => Value::NIL,
+                    Some(Stop::Refused(object)) => {
+                        let object = scope.root(object);
+                        let object = scope.get(object);
+                        new_array(scope, &[symbol("refused"), object, Value::NIL])
+                    }
+                    Some(Stop::Proc(block)) => match make_proc_shareable(scope, block, None) {
+                        Ok(()) => continue,
+                        Err(refusal) => refusal_value(scope, refusal),
+                    },
+                };
+                break (hashes, error);
+            };
+            let error = scope.root(error);
+            let hashes: Vec<Value> = hashes.iter().map(|&hash| scope.get(hash)).collect();
+            let hashes = new_array(scope, &hashes);
+            let error = scope.get(error);
+            new_array(scope, &[hashes, error])
+        }
+        RactorOp::Copy => {
+            let msg = export(scope, arg(0), None)?;
+            import(scope, &msg)
+        }
+        RactorOp::ShareableProc => {
+            // `__ractor_shareable_proc__(block, receiver, lambda)`: a copy of
+            // `block` made shareable with `receiver` for its `self`, as
+            // `[proc, nil]`, or `[nil, refusal]`.
+            let block = arg(0);
+            let receiver = scope.root(arg(1));
+            let lambda = arg(2).is_truthy();
+            let Some((iseq, env, own_self, captured, was_lambda, cref)) = proc_parts(scope, block)
+            else {
+                let error = refusal_value(scope, ProcRefusal::Unsupported);
+                stack.push(new_array(scope, &[Value::NIL, error]));
+                return Ok(None);
+            };
+            let (home, _) = super::proc_links(scope, block);
+            let proc_class = super::class_handle(scope, Builtin::Proc);
+            let copy = super::make_proc(
+                scope,
+                proc_class,
+                &iseq,
+                env,
+                own_self,
+                captured,
+                lambda || was_lambda,
+                cref,
+                home,
+            );
+            let copy = scope.root(copy);
+            let receiver = scope.get(receiver);
+            match make_proc_shareable(scope, scope.get(copy), Some(receiver)) {
+                Ok(()) => {
+                    let copy = scope.get(copy);
+                    new_array(scope, &[copy, Value::NIL])
+                }
+                Err(refusal) => {
+                    let error = refusal_value(scope, refusal);
+                    new_array(scope, &[Value::NIL, error])
+                }
+            }
         }
         RactorOp::Freeze => {
             for value in array_elements(scope, arg(0)).unwrap_or_default() {
@@ -806,15 +1104,8 @@ fn new(scope: &mut HandleScope<'_>, call: &Pending) -> Result<u32, Error> {
     let Some((iseq, ..)) = proc_parts(scope, block) else {
         return Err(Error::raise("ArgumentError", "must be called with a block"));
     };
-    let outer = outer_variables(&iseq);
-    if !outer.is_empty() {
-        return Err(Error::raise(
-            "ArgumentError",
-            format!(
-                "can not isolate a Proc because it accesses outer variables ({}).",
-                outer.join(", ")
-            ),
-        ));
+    if let Some(message) = Outer::of(&iseq).refusal("isolate a Proc", true) {
+        return Err(Error::raise("ArgumentError", message));
     }
     let block_handle = scope.root(block);
     let body = super::proc_body(scope, block).expect("a Proc's body");
@@ -916,7 +1207,7 @@ fn spawn(
 
 /// The block of `Ractor.new` again, in the new Ractor's heap: a `Proc` of
 /// the same body and lexical scope whose `self` is the Ractor. It reads no
-/// variable outside itself (`outer_variables`), so it captures none.
+/// variable outside itself (`Outer::refusal`), so it captures none.
 fn block_proc(
     scope: &mut HandleScope<'_>,
     body: Value,
@@ -943,4 +1234,183 @@ fn block_proc(
         cref,
         0,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    //! Shareability (#118) without the parser, so miri reaches the walk's
+    //! writes to headers, a `Proc`'s environment made again, and a marked
+    //! `Proc` copied.
+    use super::*;
+    use crate::heap::Heap;
+
+    fn int(n: i64) -> Value {
+        Value::fixnum(n).expect("small")
+    }
+
+    /// The walk freezes an object before what it holds, in order, and stops
+    /// at the first object of a refused class, leaving what comes after it
+    /// as it was.
+    #[test]
+    fn make_shareable_freezes_in_order_and_stops_at_a_refusal() {
+        let mut heap = Heap::new();
+        let mut scope = heap.scope();
+        scope.bootstrap();
+        let first = new_array(&mut scope, &[int(1)]);
+        let first = scope.root(first);
+        let refused = string_new(&mut scope, "x");
+        let refused = scope.root(refused);
+        let last = new_array(&mut scope, &[int(2)]);
+        let last = scope.root(last);
+        let parts = [scope.get(first), scope.get(refused), scope.get(last)];
+        let outer = new_array(&mut scope, &parts);
+        let outer = scope.root(outer);
+        let string = Builtin::String.id();
+        let (hashes, stop) = scope.make_shareable(scope.get(outer), &[string]);
+        assert!(hashes.is_empty());
+        assert!(matches!(stop, Some(Stop::Refused(value)) if value == scope.get(refused)));
+        assert!(scope.is_frozen(outer));
+        assert!(scope.is_frozen(first));
+        assert!(!scope.is_frozen(refused));
+        assert!(!scope.is_frozen(last), "after the refusal");
+        let (_, stop) = scope.make_shareable(scope.get(outer), &[]);
+        assert!(stop.is_none());
+        assert!(scope.is_frozen(last));
+    }
+
+    /// A `Proc` reading one variable outside itself is made shareable with
+    /// an environment of its own holding that one alone, marked and frozen,
+    /// and then copies out of the heap, where an unmarked one is refused.
+    #[test]
+    fn a_proc_made_shareable_has_its_own_environment_and_copies() {
+        let mut heap = Heap::new();
+        let mut scope = heap.scope();
+        scope.bootstrap();
+        let iseq = Arc::new(Iseq {
+            name: "block".into(),
+            insns: vec![Insn::GetLocal(1, 1), Insn::Leave],
+            max_stack: 1,
+            scope_barrier: false,
+            outer: vec![vec!["unread".into(), "read".into()]],
+            ..Iseq::default()
+        });
+        let held = new_array(&mut scope, &[int(3)]);
+        let held = scope.root(held);
+        scope.freeze(held);
+        let unread = new_array(&mut scope, &[]);
+        let unread = scope.root(unread);
+        let env = super::super::env_alloc(&mut scope, Value::NIL, 2);
+        let env = scope.root(env);
+        let (unread_value, held_value) = (scope.get(unread), scope.get(held));
+        scope.set_slot(env, super::super::ENV_HEADER, unread_value);
+        scope.set_slot(env, super::super::ENV_HEADER + 1, held_value);
+        let proc_class = super::super::class_handle(&mut scope, Builtin::Proc);
+        let env_value = scope.get(env);
+        let block = super::super::make_proc(
+            &mut scope,
+            proc_class,
+            &iseq,
+            env_value,
+            Value::NIL,
+            Value::NIL,
+            false,
+            CrefId::ROOT,
+            0,
+        );
+        let block = scope.root(block);
+        let refusal = Refusal {
+            class: Builtin::Proc.id(),
+            error: "TypeError".into(),
+            message: "allocator undefined for Proc".into(),
+        };
+        let options = Options {
+            refusals: std::slice::from_ref(&refusal),
+            shareable_only: true,
+            known: None,
+        };
+        assert!(
+            scope
+                .heap_ref()
+                .export(scope.get(block), &options, None)
+                .is_err()
+        );
+
+        let value = scope.get(block);
+        assert!(make_proc_shareable(&mut scope, value, None).is_ok());
+        assert!(scope.is_frozen(block));
+        let copy = scope.slot(block, super::super::PROC_ENV);
+        assert_ne!(copy, scope.get(env), "its environment is its own");
+        let copy = scope.root(copy);
+        assert_eq!(
+            scope.slot(copy, super::super::ENV_HEADER + 1),
+            scope.get(held)
+        );
+        assert_eq!(scope.slot(copy, super::super::ENV_HEADER), Value::NIL);
+        assert_eq!(scope.slot(env, super::super::ENV_HEADER), scope.get(unread));
+
+        let (msg, _) = scope
+            .heap_ref()
+            .export(scope.get(block), &options, None)
+            .expect("a shareable Proc copies");
+        let imported = scope.import(&msg);
+        let built = scope.root(imported.root);
+        // What was frozen is frozen by the caller, as `Ractor.__built__` does.
+        for &value in &imported.frozen {
+            let handle = scope.root(value);
+            scope.freeze(handle);
+        }
+        assert_eq!(scope.class_of(built), Some(Builtin::Proc.id()));
+        assert!(
+            scope
+                .heap_ref()
+                .export(scope.get(built), &options, None)
+                .is_ok(),
+            "the copy is marked shareable too"
+        );
+    }
+
+    /// A variable outside the block that holds a mutable object is refused,
+    /// and the `Proc` is left as it was.
+    #[test]
+    fn a_proc_reading_a_mutable_object_is_refused_and_left_as_it_was() {
+        let mut heap = Heap::new();
+        let mut scope = heap.scope();
+        scope.bootstrap();
+        let iseq = Arc::new(Iseq {
+            name: "block".into(),
+            insns: vec![Insn::GetLocal(0, 1), Insn::Leave],
+            max_stack: 1,
+            scope_barrier: false,
+            outer: vec![vec!["x".into()]],
+            ..Iseq::default()
+        });
+        let mutable = new_array(&mut scope, &[]);
+        let mutable = scope.root(mutable);
+        let env = super::super::env_alloc(&mut scope, Value::NIL, 1);
+        let env = scope.root(env);
+        let value = scope.get(mutable);
+        scope.set_slot(env, super::super::ENV_HEADER, value);
+        let proc_class = super::super::class_handle(&mut scope, Builtin::Proc);
+        let env_value = scope.get(env);
+        let block = super::super::make_proc(
+            &mut scope,
+            proc_class,
+            &iseq,
+            env_value,
+            Value::NIL,
+            Value::NIL,
+            false,
+            CrefId::ROOT,
+            0,
+        );
+        let block = scope.root(block);
+        let value = scope.get(block);
+        let refused = make_proc_shareable(&mut scope, value, None);
+        assert!(
+            matches!(refused, Err(ProcRefusal::Refers(value, ref name)) if value == scope.get(mutable) && name == "x")
+        );
+        assert!(!scope.is_frozen(block));
+        assert!(!scope.is_frozen(mutable));
+        assert_eq!(scope.slot(block, super::super::PROC_ENV), scope.get(env));
+    }
 }

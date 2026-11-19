@@ -17799,8 +17799,18 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         ),
         (
             Builtin::Kernel,
-            &["__ractor_freeze_deep__"],
-            Native::Ractor(crate::method::RactorOp::FreezeDeep),
+            &["__ractor_make_shareable__"],
+            Native::Ractor(crate::method::RactorOp::MakeShareable),
+        ),
+        (
+            Builtin::Kernel,
+            &["__ractor_copy__"],
+            Native::Ractor(crate::method::RactorOp::Copy),
+        ),
+        (
+            Builtin::Kernel,
+            &["__ractor_shareable_proc__"],
+            Native::Ractor(crate::method::RactorOp::ShareableProc),
         ),
         (
             Builtin::Kernel,

@@ -1,0 +1,8 @@
+#<Thread:0x00007f4ffb605070 run> terminated with exception (report_on_exception is true):
+refusals.rb:52:in 'block (2 levels) in <main>': can not access non-shareable objects in constant Object::LP by non-main Ractor. (Ractor::IsolationError)
+#<Thread:0x00007f4ffb604b70 run> terminated with exception (report_on_exception is true):
+refusals.rb:53:in 'block (2 levels) in <main>': can not access non-shareable objects in constant Object::FROZEN_WITH_PROC by non-main Ractor. (Ractor::IsolationError)
+#<Thread:0x00007f5016beff88 run> terminated with exception (report_on_exception is true):
+refusals.rb:54:in 'block (2 levels) in <main>': can not access non-shareable objects in constant Object::H by non-main Ractor. (Ractor::IsolationError)
+#<Thread:0x00007f5016befb50 run> terminated with exception (report_on_exception is true):
+refusals.rb:55:in 'block (2 levels) in <main>': defined with an un-shareable Proc in a different Ractor (RuntimeError)

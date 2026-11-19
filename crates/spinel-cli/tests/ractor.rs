@@ -1,11 +1,13 @@
-//! Ractors (#117), on the `spinel` binary: each case under
+//! Ractors (#117) and what may be shared between them (#118), on the
+//! `spinel` binary: each case under
 //! `tests/fixtures/ractor/` runs and writes, byte for byte, what CRuby 4.0.9
 //! wrote for it, recorded beside it as `<case>.stdout` and `<case>.stderr`.
 //! The one thing normalised is an object's address in a thread's report,
 //! `#<Thread:0x...>`, which no two runs share.
 //!
-//! ruby/spec has no Ractor specs (its `core/` has no `ractor/`), so these
-//! are #117's definition of done in their place. Recorded with
+//! ruby/spec has no Ractor specs (its `core/` has no `ractor/`, upstream
+//! either), so these are #117's and #118's definition of done in their
+//! place. Recorded with
 //! `ruby -v` = `ruby 4.0.9 (2026-10-23 revision 3e93b23afc) +PRISM
 //! [x86_64-linux]`, by running each case from this directory:
 //! `ruby <case>.rb > <case>.stdout 2> <case>.stderr`.
@@ -30,6 +32,20 @@
 //! - `concurrency`: Ractors running while the main one defines methods,
 //!   a thousand messages each way through a port, a Ractor made in a
 //!   Ractor, a thread in one, `Ractor.select` and `#monitor`.
+//! - `shareable`: `Ractor.shareable?` over immutable values, frozen
+//!   containers of mutable and of frozen objects, core classes' own state,
+//!   `Proc`s and `Thread`s.
+//! - `make_shareable`: the deep freeze, `copy: true`, the classes it
+//!   refuses and what it froze before one, and its checks of a `Proc`: its
+//!   `self`, and the variables outside it it reads or writes.
+//! - `shareable_proc`: `Ractor.shareable_proc` and `shareable_lambda`,
+//!   `self:`, the variables a shareable `Proc` may read (assigned once,
+//!   shareable) and may not write, `yield`, and one going to another Ractor
+//!   by a message, an argument, a constant and a `define_method` body.
+//! - `refusals`: `Ractor.new`'s isolation, a `Proc` sent, unshareable
+//!   constants and `define_method` bodies read by another Ractor, a
+//!   constant set to a mutable object there: each raises and leaves what it
+//!   refused as it was.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -97,4 +113,8 @@ cases!(
     own_heap,
     isolation,
     concurrency,
+    shareable,
+    make_shareable,
+    shareable_proc,
+    refusals,
 );

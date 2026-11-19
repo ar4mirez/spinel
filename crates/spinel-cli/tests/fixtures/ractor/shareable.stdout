@@ -1,0 +1,41 @@
+Integer: true
+Bignum: true
+Float: true
+Rational: true
+Complex: true
+Symbol: true
+nil: true
+true: true
+String: false
+frozen String: true
+frozen Array of mutable: false
+frozen Array of frozen: true
+frozen Array of mutable Array: false
+frozen Array of frozen Array: true
+frozen Hash: true
+frozen Hash, mutable value: false
+frozen Hash, mutable Array value: false
+frozen Hash, mutable default: false
+Range of mutable Strings: false
+Range of Arrays: false
+Struct: false
+frozen Struct: true
+frozen Struct, mutable Array: false
+Data: true
+Data, mutable member: false
+Class: true
+Module: true
+frozen Object: true
+frozen Object, mutable ivar: false
+frozen Object, frozen ivar: true
+Regexp literal: true
+frozen Exception, mutable message: false
+frozen Exception, frozen message: true
+Proc: false
+frozen Proc: false
+lambda: false
+Thread: false
+Ractor: true
+Port: true
+Encoding: true
+frozen Time: true
