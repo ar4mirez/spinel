@@ -384,8 +384,8 @@ jobs:
           # answers `C.ancestors` as [C, P2, P1, M, P2, ...] — P2 twice — where
           # 4.0.6 answers [C, P2, P1, M, Object, ...]. A module appearing twice
           # in one chain is a bug, not a semantics change, so the table keeps
-          # 4.0.6's answer. Back to '4.0' once a 4.0.x release answers it
-          # without the duplicate again.
+          # 4.0.6's answer. Back to the other jobs' pin once the release they
+          # pin answers it without the duplicate again.
           ruby-version: '4.0.6'
       - run: ruby scripts/ancestors-oracle.rb --check
 
