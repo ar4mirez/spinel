@@ -5528,9 +5528,9 @@ fn send_bound<const SPLATS: bool>(
         }
         _ => known_class_of(scope, receiver)?,
     };
-    if scope.classes().cref_refined(frame.cref)
-        && scope
-            .classes()
+    let classes = scope.classes();
+    if classes.cref_refined(frame.cref)
+        && classes
             .refined_lookup(
                 class,
                 frame.iseq.symbol_ids()[site.name as usize],
@@ -5540,7 +5540,7 @@ fn send_bound<const SPLATS: bool>(
     {
         return None;
     }
-    let serial = scope.classes().serial(class);
+    let serial = classes.serial(class);
     // An entry for another class may have this one's behind it. Brought in
     // front here; when its plan is not one this binds, the caller tries the
     // call again by that plan.
@@ -6096,22 +6096,24 @@ fn native_send(
     if scope.class_object_of(receiver) != Some(plan.class_object) {
         return None;
     }
-    if scope.classes().cref_refined(frame.cref)
-        && scope
-            .classes()
+    // One read of the class table for the three questions it answers here.
+    let classes = scope.classes();
+    if classes.cref_refined(frame.cref)
+        && classes
             .refined_lookup(plan.class, plan.name, frame.cref)
             .is_some()
     {
         return None;
     }
-    let serial = scope.classes().serial(plan.class);
+    let serial = classes.serial(plan.class);
+    let redefined = classes.has_redefined();
     scope
         .call_caches()
         .get(frame.cache_base + index, plan.class, serial)?;
     // What `dispatch` does after any primitive: say the warning it left,
     // and the redefinitions since the last. With either waiting, it is
     // `dispatch`'s call.
-    if scope.has_pending_warning() || scope.classes().has_redefined() {
+    if scope.has_pending_warning() || redefined {
         return None;
     }
     let slot = frame.cache_base + index;
@@ -18669,12 +18671,13 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
 /// instructions that cannot change it. `!=` is answered as `==` is, which is
 /// [`operator_guard`]'s rule.
 fn native_ops(scope: &mut HandleScope<'_>, frame: &Call, which: usize) -> u32 {
-    let native = if scope.classes().cref_refined(frame.cref) {
+    let classes = scope.classes();
+    let native = if classes.cref_refined(frame.cref) {
         0
     } else {
-        let native = match scope.classes().fresh_native_operators(which) {
+        let native = match classes.fresh_native_operators(which) {
             Some(native) => native,
-            None => scope.classes_mut().native_operators(which),
+            None => refresh_native_operators(scope, which),
         };
         let eq = (native >> operator_guard(BinOp::Neq)) & 1;
         (native & !(1 << BinOp::Neq as usize)) | (eq << BinOp::Neq as usize)
@@ -18683,6 +18686,18 @@ fn native_ops(scope: &mut HandleScope<'_>, frame: &Call, which: usize) -> u32 {
         return u32::MAX;
     }
     native
+}
+
+/// The operator guards of `which`, refreshed: the write, under the class lock
+/// in a program with a second heap, that a definition since the last question
+/// makes [`Classes::fresh_native_operators`] decline. Out of line, so the
+/// arithmetic paths that ask on every instruction carry only the read.
+///
+/// [`Classes::fresh_native_operators`]: crate::class::Classes::fresh_native_operators
+#[cold]
+#[inline(never)]
+fn refresh_native_operators(scope: &mut HandleScope<'_>, which: usize) -> u32 {
+    scope.classes_mut().native_operators(which)
 }
 
 /// The most instructions one [`light_step`] runs: a superinstruction's three
@@ -20124,9 +20139,10 @@ fn operator_fast_path(scope: &mut HandleScope<'_>, left: Value, op: usize, frame
     };
     // A refinement can redefine the operator where it is active (#352), so
     // code with any active sends.
-    let native = match scope.classes().fresh_native_operators(which) {
+    let classes = scope.classes();
+    let native = match classes.fresh_native_operators(which) {
         Some(native) => native,
-        None => scope.classes_mut().native_operators(which),
+        None => refresh_native_operators(scope, which),
     };
     (native & (1 << op) != 0 && !scope.classes().cref_refined(frame.cref))
         || frame
