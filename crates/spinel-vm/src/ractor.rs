@@ -27,12 +27,21 @@
 //!
 //! While a heap waits that way, in the scheduler's `poll(2)`, it lets go of
 //! the class lock, so a Ractor that defines a method meanwhile does not wait
-//! for it.
+//! for it. So does a heap whose last running thread leaves it for a call made
+//! outside the per-Ractor lock (`threads::outside`), a `flock` or a read of a
+//! blocking pipe that may wait for ever (#119): its one thread lets go around
+//! the call, and of several, the one that leaves the heap to nobody lets go as
+//! it does, and the one that takes it back from nobody takes the hold back.
 //!
-//! ponytail: a call made outside the per-Ractor lock (`threads::outside`)
-//! keeps the class lock, so another Ractor's write waits for it to return.
-//! Letting it go there needs the scheduler to tell the last thread leaving
-//! the heap from one handing it to another.
+//! # Running in parallel
+//!
+//! Each Ractor runs on its own OS thread, and they run at once (#119): a
+//! running heap reads the shared tables taking nothing, and a safe point is
+//! one more load while no heap writes or waits to (`vm::ClassLock`). What a
+//! running Ractor does every call — a send whose inline cache missed, a
+//! `respond_to?`, a block made into a `Proc` — reads the method cache and the
+//! interned bodies first, and writes, parking every other Ractor until its
+//! next safe point, only to fill them.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

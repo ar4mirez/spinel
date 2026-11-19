@@ -34,6 +34,14 @@
 //! While a program has only ever had one Ractor, none of that runs. The lock's
 //! `shared` flag is false, and a write pays one load of it and a branch.
 //!
+//! Once it has more, a safe point while no heap writes or waits to is one more
+//! load (`ClassLock::wanted`), not the mutex, so Ractors that only read run in
+//! parallel without meeting there every few thousand instructions (#119). What
+//! a write costs the others is a stop at their next safe point, so the reads
+//! that are on every call — a method-cache hit, a body interned before — are
+//! made as reads, and only a fill is a write (`HandleScope::lookup_method`,
+//! `Definitions::interned`).
+//!
 //! [`ClassId`]: crate::class::ClassId
 
 use std::cell::UnsafeCell;
@@ -130,8 +138,18 @@ impl Vm {
 /// it is the writer now. The rest is here, under one mutex. A write and a safe
 /// point are the only calls that touch it, and each is one relaxed-to-acquire
 /// load and a branch while `shared` is false.
+///
+/// Once it is true, a safe point is still one more load while no heap writes
+/// or waits to (`wanted`), so Ractors that only read the tables run in
+/// parallel without meeting at the mutex every turn check (#119).
 pub(crate) struct ClassLock {
     shared: AtomicBool,
+    /// Whether a heap is writing or waiting to: `state.writing ||
+    /// state.waiting > 0`, kept beside it under the mutex, for a safe point
+    /// to read without taking it. A reader that reads it false holds on;
+    /// a writer that set it waits for that reader's next safe point, which
+    /// reads it true.
+    wanted: AtomicBool,
     state: Mutex<LockState>,
     turn: Condvar,
 }
@@ -158,6 +176,7 @@ impl ClassLock {
     fn new() -> ClassLock {
         ClassLock {
             shared: AtomicBool::new(false),
+            wanted: AtomicBool::new(false),
             // The heap that makes the program holds it from the start.
             state: Mutex::new(LockState {
                 holding: 1,
@@ -169,6 +188,13 @@ impl ClassLock {
 
     fn state(&self) -> std::sync::MutexGuard<'_, LockState> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Keep `wanted` what `state` says, after a change to who writes or
+    /// waits to. Called with the mutex held.
+    fn publish(&self, state: &LockState) {
+        self.wanted
+            .store(state.writing || state.waiting > 0, Ordering::Release);
     }
 
     /// A new heap joins the program, holding the lock. Its creator holds the
@@ -199,6 +225,7 @@ impl ClassLock {
         let mut state = self.state();
         state.holding -= 1;
         state.waiting += 1;
+        self.publish(&state);
         self.turn.notify_all();
         while state.writing || state.holding > 0 {
             state = self
@@ -208,16 +235,20 @@ impl ClassLock {
         }
         state.waiting -= 1;
         state.writing = true;
+        self.publish(&state);
         me.writing = true;
     }
 
     /// A safe point: `me` holds no borrow of the tables. A writer stops
     /// writing and goes back to reading; a reader that a writer waits for
     /// parks until it is done. One load and a branch while the program has one
-    /// heap. The interpreter's turn check calls it.
+    /// heap, and one more while no heap writes or waits to. The interpreter's
+    /// turn check calls it.
     #[inline]
     pub(crate) fn safe_point(&self, me: &mut Holder) {
-        if self.shared.load(Ordering::Acquire) {
+        if self.shared.load(Ordering::Acquire)
+            && (me.writing || self.wanted.load(Ordering::Acquire))
+        {
             self.safe_point_slow(me);
         }
     }
@@ -229,6 +260,7 @@ impl ClassLock {
             me.writing = false;
             state.writing = false;
             state.holding += 1;
+            self.publish(&state);
             self.turn.notify_all();
         }
         if state.writing || state.waiting > 0 {
@@ -255,6 +287,7 @@ impl ClassLock {
         if me.writing {
             me.writing = false;
             state.writing = false;
+            self.publish(&state);
         } else {
             state.holding -= 1;
         }
@@ -324,6 +357,73 @@ mod tests {
             reader.join().expect("the reader finishes");
         }
         assert_eq!(halves[0].load(Ordering::Relaxed), 2_000);
+    }
+
+    /// Several writers and readers at once (#119): readers pass their safe
+    /// points without the mutex while nobody writes, so this is the protocol
+    /// with the `wanted` fast path on it. Each writer bumps a pair of
+    /// counters in two halves that no reader may see apart, and every write
+    /// any writer made is there at the end.
+    #[test]
+    fn writers_and_readers_meet_only_when_one_writes() {
+        const READERS: usize = 3;
+        const WRITERS: usize = 2;
+        let rounds: u64 = if cfg!(miri) { 40 } else { 2_000 };
+        let lock = Arc::new(ClassLock::new());
+        let creator = Holder::default();
+        for _ in 0..READERS + WRITERS - 1 {
+            lock.join(&creator);
+        }
+        let halves = Arc::new([AtomicU64::new(0), AtomicU64::new(0)]);
+        let mut threads = Vec::new();
+        for _ in 0..READERS {
+            let (lock, halves) = (Arc::clone(&lock), Arc::clone(&halves));
+            threads.push(std::thread::spawn(move || {
+                let mut me = Holder::default();
+                for _ in 0..rounds * 4 {
+                    let a = halves[0].load(Ordering::Relaxed);
+                    let b = halves[1].load(Ordering::Relaxed);
+                    assert_eq!(a, b, "a reader saw half a write");
+                    lock.safe_point(&mut me);
+                }
+                lock.release(&mut me);
+            }));
+        }
+        for writer in 0..WRITERS {
+            let (lock, halves) = (Arc::clone(&lock), Arc::clone(&halves));
+            threads.push(std::thread::spawn(move || {
+                let mut me = Holder::default();
+                // The creator is one of the writers: it held from the start.
+                for round in 0..rounds {
+                    if (round + writer as u64) % 3 == 0 {
+                        lock.write(&mut me);
+                        halves[0].fetch_add(1, Ordering::Relaxed);
+                        std::thread::yield_now();
+                        halves[1].fetch_add(1, Ordering::Relaxed);
+                    }
+                    lock.safe_point(&mut me);
+                }
+                lock.release(&mut me);
+            }));
+        }
+        for thread in threads {
+            thread.join().expect("every holder finishes");
+        }
+        let writes: u64 = (0..WRITERS as u64)
+            .map(|writer| {
+                (0..rounds)
+                    .filter(|round| (round + writer) % 3 == 0)
+                    .count() as u64
+            })
+            .sum();
+        assert_eq!(halves[0].load(Ordering::Relaxed), writes);
+        assert_eq!(halves[1].load(Ordering::Relaxed), writes);
+        let state = lock.state();
+        assert!(!state.writing && state.waiting == 0 && state.holding == 0);
+        assert!(
+            !lock.wanted.load(Ordering::Relaxed),
+            "nobody wants to write"
+        );
     }
 
     #[test]

@@ -1569,6 +1569,15 @@ impl Classes {
         found
     }
 
+    /// What the cache answers for `name` from `id`, without filling it: the
+    /// read [`Classes::lookup`] starts with, for a heap that would otherwise
+    /// make itself the tables' writer only to find the answer there (#119).
+    #[must_use]
+    #[inline]
+    pub fn cached_lookup(&self, id: ClassId, name: SymbolId) -> Option<Option<Method>> {
+        self.entry(id).cache.get(&name).copied()
+    }
+
     /// The chain walk the cache is in front of. No allocation: the chain is a
     /// run per class and a superclass pointer, so this is two nested loops.
     pub fn lookup_uncached(&self, id: ClassId, name: SymbolId) -> Option<Method> {

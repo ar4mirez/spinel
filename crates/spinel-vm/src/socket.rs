@@ -485,38 +485,140 @@ pub fn gethostname() -> io::Result<Vec<u8>> {
 }
 
 /// `getservbyname(3)`: the port in host order.
-///
-/// ponytail: the non-reentrant call, whose answer is libc's static buffer,
-/// read at once; a Ractor's threads call it holding its lock, so they never
-/// race it until Ractors run in parallel (#119), when `getservbyname_r`
-/// where there is one is the upgrade.
 pub fn service_port(name: &[u8], protocol: &[u8]) -> Option<u16> {
     let name = CString::new(name).ok()?;
     let protocol = CString::new(protocol).ok()?;
-    // SAFETY: both are C strings; the answer is read before any other call.
-    let entry = unsafe { libc::getservbyname(name.as_ptr(), protocol.as_ptr()) };
-    if entry.is_null() {
-        return None;
-    }
-    // SAFETY: a non-null answer is a valid `servent`.
-    Some(u16::from_be(unsafe { (*entry).s_port } as u16))
+    lookup_service(
+        // SAFETY: both are C strings; the rest is `lookup_service`'s.
+        |entry, buffer, length, result| unsafe {
+            getservbyname_r(
+                name.as_ptr(),
+                protocol.as_ptr(),
+                entry,
+                buffer,
+                length,
+                result,
+            )
+        },
+        |entry| u16::from_be(entry.s_port as u16),
+    )
 }
 
-/// `getservbyport(3)`: the service's name. As [`service_port`], the call
-/// is the non-reentrant one.
+/// `getservbyport(3)`: the service's name.
 pub fn service_name(port: u16, protocol: &[u8]) -> Option<Vec<u8>> {
     let protocol = CString::new(protocol).ok()?;
-    // SAFETY: `protocol` is a C string; the answer is read at once.
-    let entry = unsafe { libc::getservbyport(i32::from(port.to_be()), protocol.as_ptr()) };
-    if entry.is_null() {
-        return None;
-    }
-    // SAFETY: a non-null answer's name is a C string.
-    Some(
-        unsafe { CStr::from_ptr((*entry).s_name) }
-            .to_bytes()
-            .to_vec(),
+    let port = i32::from(port.to_be());
+    lookup_service(
+        // SAFETY: `protocol` is a C string; the rest is `lookup_service`'s.
+        |entry, buffer, length, result| unsafe {
+            getservbyport_r(port, protocol.as_ptr(), entry, buffer, length, result)
+        },
+        // SAFETY: an answer's name is a C string.
+        |entry| unsafe { CStr::from_ptr(entry.s_name) }.to_bytes().to_vec(),
     )
+}
+
+/// Run a services lookup shaped as `getservbyname_r(3)` past its keys: an
+/// entry to fill, the buffer its strings go in, and where the answer goes.
+/// The buffer grows while the call says `ERANGE`, and `read` copies what is
+/// wanted out of the answer before the entry and buffer it points into go.
+/// Where the lookup is the non-reentrant one (see `getservbyname_r` below)
+/// the services lock is held from the call until `read` returns, so no
+/// other Ractor's lookup overwrites the C library's answer meanwhile.
+fn lookup_service<T>(
+    mut call: impl FnMut(
+        *mut libc::servent,
+        *mut libc::c_char,
+        libc::size_t,
+        *mut *mut libc::servent,
+    ) -> libc::c_int,
+    read: impl FnOnce(&libc::servent) -> T,
+) -> Option<T> {
+    let _services = (!REENTRANT_SERVICES).then(crate::shared::services::lock);
+    let mut buffer = vec![0 as libc::c_char; 1024];
+    loop {
+        // SAFETY: `servent` is plain C data, for which all zeroes is valid.
+        let mut entry: libc::servent = unsafe { zeroed() };
+        let mut result: *mut libc::servent = std::ptr::null_mut();
+        let status = call(&mut entry, buffer.as_mut_ptr(), buffer.len(), &mut result);
+        if status == libc::ERANGE && buffer.len() < 1 << 20 {
+            let doubled = buffer.len() * 2;
+            buffer.resize(doubled, 0);
+            continue;
+        }
+        if status != 0 || result.is_null() {
+            return None;
+        }
+        // SAFETY: a non-null answer is a valid `servent`, pointing into
+        // `entry` and `buffer` or the C library's own, alive until here.
+        return Some(read(unsafe { &*result }));
+    }
+}
+
+#[cfg(target_os = "linux")]
+const REENTRANT_SERVICES: bool = true;
+
+// glibc and musl both have them, though the `libc` crate declares neither.
+#[cfg(target_os = "linux")]
+unsafe extern "C" {
+    fn getservbyname_r(
+        name: *const libc::c_char,
+        protocol: *const libc::c_char,
+        entry: *mut libc::servent,
+        buffer: *mut libc::c_char,
+        length: libc::size_t,
+        result: *mut *mut libc::servent,
+    ) -> libc::c_int;
+    fn getservbyport_r(
+        port: libc::c_int,
+        protocol: *const libc::c_char,
+        entry: *mut libc::servent,
+        buffer: *mut libc::c_char,
+        length: libc::size_t,
+        result: *mut *mut libc::servent,
+    ) -> libc::c_int;
+}
+
+/// Where there is no reentrant variant: the C library's own answer, read
+/// under the services lock `lookup_service` holds.
+#[cfg(not(target_os = "linux"))]
+const REENTRANT_SERVICES: bool = false;
+
+/// `getservbyname(3)` in `getservbyname_r`'s shape, answering in the C
+/// library's static entry; `lookup_service` holds the services lock.
+///
+/// # Safety
+/// `name` and `protocol` are C strings and `result` is writable.
+#[cfg(not(target_os = "linux"))]
+unsafe fn getservbyname_r(
+    name: *const libc::c_char,
+    protocol: *const libc::c_char,
+    _entry: *mut libc::servent,
+    _buffer: *mut libc::c_char,
+    _length: libc::size_t,
+    result: *mut *mut libc::servent,
+) -> libc::c_int {
+    // SAFETY: as the caller promises.
+    unsafe { *result = libc::getservbyname(name, protocol) };
+    0
+}
+
+/// `getservbyport(3)` in `getservbyport_r`'s shape, as `getservbyname_r`.
+///
+/// # Safety
+/// `protocol` is a C string and `result` is writable.
+#[cfg(not(target_os = "linux"))]
+unsafe fn getservbyport_r(
+    port: libc::c_int,
+    protocol: *const libc::c_char,
+    _entry: *mut libc::servent,
+    _buffer: *mut libc::c_char,
+    _length: libc::size_t,
+    result: *mut *mut libc::servent,
+) -> libc::c_int {
+    // SAFETY: as the caller promises.
+    unsafe { *result = libc::getservbyport(port, protocol) };
+    0
 }
 
 pub fn if_nametoindex(name: &[u8]) -> u32 {
