@@ -1995,7 +1995,9 @@ impl<'h> HandleScope<'h> {
         let class = unsafe { (*object.header()).class }?;
         let address = class.as_heap().map_or(0, |p| p.as_ptr() as usize);
         let id = crate::class::ClassId::from_index(self.remembered_class_id(address)?);
-        (id.index() < self.classes().len() && self.heap.class_object(id) == class).then_some(id)
+        // This heap's own objects answer it, with no read of the class table:
+        // a heap has an object for a class only once the table has the class.
+        (self.heap.class_objects.get(id.index()) == Some(&class)).then_some(id)
     }
 
     /// A heap object's payload kind and slot count, without a handle; `None`
@@ -2119,7 +2121,8 @@ impl<'h> HandleScope<'h> {
     pub(crate) fn remembered_class_id_of(&self, value: Value) -> Option<crate::class::ClassId> {
         let address = value.as_heap()?.as_ptr() as usize;
         let id = crate::class::ClassId::from_index(self.remembered_class_id(address)?);
-        (id.index() < self.classes().len() && self.heap.class_object(id) == value).then_some(id)
+        // As `remembered_class_of`.
+        (self.heap.class_objects.get(id.index()) == Some(&value)).then_some(id)
     }
 
     pub(crate) fn remember_class_id(&mut self, address: usize, id: u32) {

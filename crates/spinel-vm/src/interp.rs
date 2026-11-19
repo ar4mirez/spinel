@@ -6712,12 +6712,15 @@ fn dispatch<'h>(
                 // A refinement active where the call was written may answer
                 // instead (#352). Neither cache can say which scope it answered
                 // for, so such a call asks the walk, and fills neither.
-                _ => match scope.classes().refined_lookup(class, call.name, call.cref) {
-                    Some(found) => found,
-                    None => match call.cache {
-                        Some(slot) => {
-                            let serial = scope.classes().serial(class);
-                            match scope.call_caches().get(slot, class, serial) {
+                _ => {
+                    // One read of the class table for both of its questions.
+                    let classes = scope.classes();
+                    let refined = classes.refined_lookup(class, call.name, call.cref);
+                    let serial = classes.serial(class);
+                    match refined {
+                        Some(found) => found,
+                        None => match call.cache {
+                            Some(slot) => match scope.call_caches().get(slot, class, serial) {
                                 hit @ Some(_) => hit,
                                 None if scope.call_caches_mut().promote(slot, class, serial) => {
                                     scope.call_caches().get(slot, class, serial)
@@ -6729,11 +6732,11 @@ fn dispatch<'h>(
                                     }
                                     found
                                 }
-                            }
-                        }
-                        None => scope.classes_mut().lookup(class, call.name),
-                    },
-                },
+                            },
+                            None => scope.classes_mut().lookup(class, call.name),
+                        },
+                    }
+                }
             };
             // R8: an unknown method raises rather than answering `nil`. A
             // `nil` here would turn every matcher this VM does not implement
