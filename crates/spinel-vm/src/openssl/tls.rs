@@ -2468,7 +2468,9 @@ unsafe extern "C" fn keylog_cb(ssl: *const sys::SSL, line: *const c_char) {
 /// context, session_new_cb?, keylog_cb?, servername_cb or alpn_select_cb?,
 /// alpn_select_cb?, client_cert_cb?)`: `ossl_sslctx_setup`, in its order,
 /// with its errors, except that the verify mode and callback go on first, so
-/// a load that fails never leaves verification off.
+/// a load that fails never leaves verification off, and the extra chain and
+/// client CA list are emptied first, so a setup tried again after one that
+/// failed leaves what a first one does.
 fn ctx_setup(contexts: &Contexts, args: &[Arg]) -> Result<Out, Failure> {
     let ctx = contexts.ctx(id(args, 0)?)?;
     // SAFETY: a live context; everything it is given it takes references
@@ -2479,6 +2481,8 @@ fn ctx_setup(contexts: &Contexts, args: &[Arg]) -> Result<Out, Failure> {
             _ => 0,
         };
         ffi::SSL_CTX_set_verify(ctx, mode, Some(ssl_verify_cb));
+        ffi::SSL_CTX_ctrl(ctx, ffi::SSL_CTRL_CLEAR_EXTRA_CHAIN_CERTS, 0, ptr::null_mut());
+        ffi::SSL_CTX_set_client_CA_list(ctx, ptr::null_mut());
         if let Some(store) = opt_id(args, 1)? {
             let store = contexts.store(store)?;
             ffi::SSL_CTX_set_cert_store(ctx, store);

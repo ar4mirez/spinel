@@ -470,6 +470,7 @@ unsafe extern "C" {
     pub fn SSL_CTX_use_PrivateKey(ctx: *mut sys::SSL_CTX, pkey: *mut sys::EVP_PKEY) -> c_int;
     pub fn SSL_CTX_check_private_key(ctx: *const sys::SSL_CTX) -> c_int;
     pub fn SSL_CTX_add_client_CA(ctx: *mut sys::SSL_CTX, x: *mut sys::X509) -> c_int;
+    pub fn SSL_CTX_set_client_CA_list(ctx: *mut sys::SSL_CTX, list: *mut OPENSSL_STACK);
     pub fn SSL_CTX_load_verify_file(ctx: *mut sys::SSL_CTX, file: *const c_char) -> c_int;
     pub fn SSL_CTX_load_verify_dir(ctx: *mut sys::SSL_CTX, dir: *const c_char) -> c_int;
     pub fn SSL_CTX_set_verify(ctx: *mut sys::SSL_CTX, mode: c_int, cb: Option<VerifyCallback>);
@@ -614,6 +615,7 @@ pub const SSL_CTRL_GET_SESS_CACHE_SIZE: c_int = 43;
 pub const SSL_CTRL_SET_SESS_CACHE_MODE: c_int = 44;
 pub const SSL_CTRL_GET_SESS_CACHE_MODE: c_int = 45;
 pub const SSL_CTRL_SET_TLSEXT_HOSTNAME: c_int = 55;
+pub const SSL_CTRL_CLEAR_EXTRA_CHAIN_CERTS: c_int = 83;
 pub const SSL_CTRL_CHAIN: c_int = 88;
 pub const SSL_CTRL_SET_GROUPS_LIST: c_int = 92;
 pub const SSL_CTRL_SET_SIGALGS_LIST: c_int = 98;
