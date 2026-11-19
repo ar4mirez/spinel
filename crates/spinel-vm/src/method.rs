@@ -1776,12 +1776,22 @@ impl Definitions {
     /// the id without keeping the `Arc` would eventually answer with the wrong
     /// method body.
     pub fn intern_iseq(&mut self, iseq: &Arc<Iseq>, key: usize) -> Value {
-        if let Some(&body) = self.interned.get(&key) {
+        if let Some(body) = self.interned(key) {
             return body;
         }
         let body = self.add(Definition::Iseq(Arc::clone(iseq)));
         self.interned.insert(key, body);
         body
+    }
+
+    /// The body [`Definitions::intern_iseq`] gave `key`, if it has: a read,
+    /// so a heap of a program with several Ractors finds a body interned
+    /// before without making itself the tables' writer, which parks every
+    /// other Ractor (#119). A `Proc` is made with one on every block call.
+    #[must_use]
+    #[inline]
+    pub fn interned(&self, key: usize) -> Option<Value> {
+        self.interned.get(&key).copied()
     }
 
     /// Add a definition and return the [`Value`] that names it.

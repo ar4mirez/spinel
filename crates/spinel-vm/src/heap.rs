@@ -43,7 +43,7 @@ use std::path::{Path, PathBuf};
 use std::ptr::{self, NonNull};
 use std::sync::Arc;
 
-use crate::class::Classes;
+use crate::class::{ClassId, Classes, CrefId, Method};
 use crate::shape::{ShapeId, Shapes};
 use crate::value::{SymbolId, SymbolMap, SymbolSet, Value};
 
@@ -887,8 +887,15 @@ impl Heap {
 
     /// This heap stops using the class tables until
     /// [`Heap::reacquire_classes`]: it is about to wait, or it is done, and a
-    /// write it was making ends. While the program has one Ractor, nothing.
+    /// write it was making ends. While the program has one Ractor, nothing,
+    /// and nothing again for a heap that let it go already: the last of its
+    /// threads to leave it for a call outside the per-Ractor lock lets it go
+    /// for the heap (`threads::release`), and a Ractor's end lets it go
+    /// whether or not one did.
     pub fn release_classes(&mut self) {
+        if self.foreign.released {
+            return;
+        }
         if self.owns_vm && self.vm.is_shared() {
             let me: *mut Heap = self;
             self.foreign.program.set_main_heap(me);
@@ -897,6 +904,11 @@ impl Heap {
             self.foreign.released = true;
         }
         self.vm.lock().release(&mut self.class_lock);
+    }
+
+    /// Whether this heap let the class lock go and has not taken it back.
+    pub(crate) fn classes_released(&self) -> bool {
+        self.foreign.released
     }
 
     /// This heap is back from [`Heap::release_classes`], and may read the
@@ -2181,6 +2193,11 @@ impl<'h> HandleScope<'h> {
         self.heap.reacquire_classes();
     }
 
+    /// See [`Heap::classes_released`].
+    pub(crate) fn classes_released(&self) -> bool {
+        self.heap.classes_released()
+    }
+
     /// This heap's object for class `id`: see [`Heap::class_object`].
     #[inline]
     pub fn class_object(&self, id: crate::class::ClassId) -> Value {
@@ -2443,6 +2460,32 @@ impl<'h> HandleScope<'h> {
         let classes = self.classes().len();
         if self.heap.class_objects.len() < classes {
             self.materialize_class_objects(classes);
+        }
+    }
+
+    /// [`Classes::lookup`], answered from the method cache under this heap's
+    /// read of the tables when the cache has it, so a program with several
+    /// Ractors makes this heap the tables' writer, parking every other
+    /// Ractor, only to fill the cache (#119).
+    #[inline]
+    pub fn lookup_method(&mut self, id: ClassId, name: SymbolId) -> Option<Method> {
+        if let Some(hit) = self.classes().cached_lookup(id, name) {
+            return hit;
+        }
+        self.classes_mut().lookup(id, name)
+    }
+
+    /// [`Classes::lookup_in`], read first as [`HandleScope::lookup_method`] is.
+    #[inline]
+    pub fn lookup_method_in(
+        &mut self,
+        id: ClassId,
+        name: SymbolId,
+        cref: CrefId,
+    ) -> Option<Method> {
+        match self.classes().refined_lookup(id, name, cref) {
+            Some(found) => found,
+            None => self.lookup_method(id, name),
         }
     }
 

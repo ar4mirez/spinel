@@ -7,10 +7,11 @@ the pull request that changes them, not into the repo (`docs/roadmap.md`,
 rule 7).
 
 A `bench/*.sh` is a script of its own, run by name (`scripts/bench.sh install`)
-and never as part of the run of everything: `install.sh` needs the network.
+and never as part of the run of everything: `install.sh` needs the network,
+and `ractors.sh` CRuby and idle CPUs.
 
-Three files are the exception, because a script writes them and a check fails
-when they drift: `spec-status.md`, from `scripts/spec-status.sh`, and the two
+Four files are the exception, because a script writes them and a check fails
+when they drift: `spec-status.md`, from `scripts/spec-status.sh`, and the three
 tables below.
 
 ## Installing a Rails app's lockfile (#91)
@@ -89,3 +90,29 @@ Spinel at `012d463`, against `ruby 4.0.9 (2026-10-23 revision 3e93b23afc) +PRISM
 | nbody | 162.6 ms | 88.4 ms | 1.84× | no | 36.2 ms |
 | str_concat | 76.9 ms | 71.8 ms | 1.07× | yes | 25.8 ms |
 <!-- end yjit-bench table -->
+
+## Ractors in parallel (#119)
+
+`ractors/benchmark.rb` is one fixed amount of CPU-bound work — method calls,
+objects with instance variables, blocks, an Array, a Hash and a String —
+cut into as many equal parts as there are Ractors, each part run by a Ractor
+of its own. Run with no Ractor, then 1, 2 and 4, on Spinel and on CRuby, its
+time falls as Ractors are added when they run in parallel; the speedup is
+against 1 Ractor. The time is the program's own, from the first Ractor made to
+the last one's value, so boot is not part of it.
+
+```sh
+bench/ractors.sh           # measure again and rewrite the table (RUNS=5, UNITS=960 by default)
+bench/ractors.sh --table   # re-render the table from ractors/results.tsv
+bench/ractors.sh --check   # fail if the table is not what results.tsv renders to, a case
+                           # is missing, or Spinel's time does not fall from 1 Ractor to 2 to 4
+```
+
+Each case's median is written to `ractors/results.tsv`, and the table is
+rendered from that file; never edit either by hand. Parallel Ractors need idle
+CPUs, so the line above the table says how many the machine has and its load
+average before and after the run: a reading taken under load is marked as
+one. `cargo test` runs the check.
+
+<!-- ractors table: written by bench/ractors.sh; do not edit -->
+<!-- end ractors table -->

@@ -13,12 +13,13 @@
 #   scripts/bench.sh --yjit-bench-check  fail if the table is not results.tsv
 #
 # Numbers go in the PR, not into the repo — `docs/roadmap.md`, rule 7. The
-# three exceptions are generated and committed on purpose: `bench/spec-status.md`,
+# four exceptions are generated and committed on purpose: `bench/spec-status.md`,
 # by `scripts/spec-status.sh`, is the progress bar, the yjit-bench table in
-# `bench/README.md`, by `--yjit-bench` here, is the interpreter's baseline, and
-# the install table beside it, by `bench/install.sh`, is a Rails app's lockfile
-# installed cold and warm. All are written by a script and checked against its
-# output, never typed.
+# `bench/README.md`, by `--yjit-bench` here, is the interpreter's baseline, the
+# install table beside it, by `bench/install.sh`, is a Rails app's lockfile
+# installed cold and warm, and the ractors table, by `bench/ractors.sh`, is a
+# CPU-bound benchmark cut across 1, 2 and 4 Ractors (#119). All are written by
+# a script and checked against its output, never typed.
 #
 # `--ruby` times `bench/regex-patterns.txt` on the system Ruby with YJIT, which
 # is the comparison `CLAUDE.md` asks engine benchmarks to make. Both sides read

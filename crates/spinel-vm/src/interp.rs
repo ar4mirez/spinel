@@ -1670,7 +1670,7 @@ fn reflect_native(
         }
         ReflectOp::MethodArity => {
             let found = match (class_of(scope, arg(0)), arg(1).as_symbol()) {
-                (Some(class), Some(name)) => scope.classes_mut().lookup(class, name),
+                (Some(class), Some(name)) => scope.lookup_method(class, name),
                 _ => None,
             };
             match found.and_then(|method| scope.definitions().get(method.body).cloned()) {
@@ -1759,10 +1759,10 @@ fn reflect_native(
                 })
             } else if arg(1) == Value::NIL {
                 class_of(scope, object)
-                    .and_then(|class| scope.classes_mut().lookup_in(class, name, call.cref))
+                    .and_then(|class| scope.lookup_method_in(class, name, call.cref))
             } else {
                 let module = module_arg(scope, 1)?;
-                scope.classes_mut().lookup_in(module, name, call.cref)
+                scope.lookup_method_in(module, name, call.cref)
             };
             match found {
                 None => Value::NIL,
@@ -3628,8 +3628,7 @@ fn run<'h>(
                         let redefined = !value.is_immediate()
                             && class_of(scope, value).is_some_and(|class| {
                                 scope
-                                    .classes_mut()
-                                    .lookup(class, bang)
+                                    .lookup_method(class, bang)
                                     .is_some_and(|m| m.owner != Builtin::BasicObject.id())
                             });
                         if redefined {
@@ -3671,7 +3670,7 @@ fn run<'h>(
                             let name = crate::shared::symbols::intern("to_proc");
                             let cref = frames[top].cref;
                             let converts = class_of(scope, value)
-                                .and_then(|class| scope.classes_mut().lookup_in(class, name, cref))
+                                .and_then(|class| scope.lookup_method_in(class, name, cref))
                                 .is_some();
                             if !converts {
                                 return Err(Error::raise(
@@ -4269,9 +4268,8 @@ fn run<'h>(
                             };
                             let nesting = new_array(scope, &nesting);
                             let hook = crate::shared::symbols::intern("__const_missing__");
-                            let defined = class_of(scope, module).is_some_and(|class| {
-                                scope.classes_mut().lookup(class, hook).is_some()
-                            });
+                            let defined = class_of(scope, module)
+                                .is_some_and(|class| scope.lookup_method(class, hook).is_some());
                             if !defined {
                                 return Err(uninitialized(scope, from, symbol, how));
                             }
@@ -4427,7 +4425,7 @@ fn run<'h>(
                         // `nil`, `true`, and `false` have no class yet, so "does it have
                         // this method" has no answer rather than the answer `no`.
                         let class = class_of(scope, receiver).ok_or_else(|| no_class(receiver))?;
-                        let found = scope.classes_mut().lookup(class, symbol);
+                        let found = scope.lookup_method(class, symbol);
                         // A method this site could not call is not "method" (#161).
                         // `defined?` refuses `self.priv` where the call allows it,
                         // so `self_receiver_ok` is false here — measured, not
@@ -6028,15 +6026,52 @@ fn light_ivar_reader(
     if let Some(value) = scope.cached_ivar(receiver, slot, SLOT_IVARS) {
         return Some(value);
     }
-    // A Ractor other than the main one reads a miss the full way, which
-    // knows whose code is reading (#117).
+    // A Ractor other than the main one reads a name the object does not
+    // hold the full way, which knows whose code is reading (#117).
     if !scope.is_main_ractor() {
-        return None;
+        return light_ivar_reader_elsewhere(scope, slot, receiver, name);
     }
     let (value, found) = ivar_read(scope, receiver, name);
     if let Some((shape, index)) = found {
         scope.call_caches_mut().fill_ivar(slot, shape, index);
     }
+    Some(value)
+}
+
+/// [`light_ivar_reader`]'s miss in a Ractor other than the main one: a name
+/// the object holds in storage of its own is this heap's whoever reads it,
+/// so it is read and the slot filled as the main Ractor's miss fills it, and
+/// the next call hits (#119). Any other is the full read's, and so is any
+/// name of a class or module, whose storage here may hold a copy of the main
+/// Ractor's state that the program's read is held to its rules for.
+#[cold]
+#[inline(never)]
+fn light_ivar_reader_elsewhere(
+    scope: &mut HandleScope<'_>,
+    slot: u32,
+    receiver: Value,
+    name: SymbolId,
+) -> Option<Value> {
+    if receiver.is_immediate() {
+        return None;
+    }
+    let mut nested = scope.nested();
+    let handle = nested.root(receiver);
+    let shape = nested.shape(handle);
+    if shape == ShapeId::NONE || nested.has_side_ivars(handle) {
+        return None;
+    }
+    // A class or module object carries its table id as `@__id__`.
+    let class_id = crate::shared::symbols::class_id_ivar();
+    if nested.shapes().index_of(shape, class_id).is_some() {
+        return None;
+    }
+    let index = nested.shapes().index_of(shape, name)?;
+    let storage = ivar_storage(&nested, handle);
+    let storage = nested.root(storage);
+    let value = nested.slot(storage, index as usize);
+    drop(nested);
+    scope.call_caches_mut().fill_ivar(slot, shape, index);
     Some(value)
 }
 
@@ -6640,13 +6675,12 @@ fn splat_sends_to_a(scope: &mut HandleScope<'_>, value: Value) -> bool {
         return false;
     };
     let to_a = crate::shared::symbols::intern("to_a");
-    match scope.classes_mut().lookup(class, to_a) {
+    match scope.lookup_method(class, to_a) {
         Some(method) => method.owner != Builtin::Hash.id(),
         None => {
             let missing = crate::shared::symbols::intern("method_missing");
             scope
-                .classes_mut()
-                .lookup(class, missing)
+                .lookup_method(class, missing)
                 .is_some_and(|method| method.owner != Builtin::BasicObject.id())
         }
     }
@@ -6693,7 +6727,7 @@ fn expand_splats(
             // what an Array's splat would otherwise cost.
             let to_a = crate::shared::symbols::intern("to_a");
             let owner = class_of(scope, arg)
-                .and_then(|class| scope.classes_mut().lookup(class, to_a))
+                .and_then(|class| scope.lookup_method(class, to_a))
                 .map(|method| method.owner);
             match owner {
                 None => {}
@@ -6786,14 +6820,14 @@ fn dispatch<'h>(
                                     scope.call_caches().get(slot, class, serial)
                                 }
                                 None => {
-                                    let found = scope.classes_mut().lookup(class, call.name);
+                                    let found = scope.lookup_method(class, call.name);
                                     if let Some(method) = found {
                                         scope.call_caches_mut().fill(slot, class, serial, method);
                                     }
                                     found
                                 }
                             },
-                            None => scope.classes_mut().lookup(class, call.name),
+                            None => scope.lookup_method(class, call.name),
                         },
                     }
                 }
@@ -7793,9 +7827,13 @@ fn make_proc<'h>(
     cref: CrefId,
     home: u64,
 ) -> Value {
-    let body = scope
-        .definitions_mut()
-        .intern_iseq(iseq, Arc::as_ptr(iseq) as usize);
+    // Read first: a body interned before is found without the class lock's
+    // write, which would park every other Ractor (#119).
+    let key = Arc::as_ptr(iseq) as usize;
+    let body = match scope.definitions().interned(key) {
+        Some(body) => body,
+        None => scope.definitions_mut().intern_iseq(iseq, key),
+    };
     let handle = scope.alloc(Some(proc_class), Payload::Slots, PROC_SLOTS);
     scope.set_slot(handle, PROC_BODY, body);
     scope.set_slot(handle, PROC_ENV, env);
@@ -8285,7 +8323,7 @@ fn lookup_inherited(
     if inherit.is_some_and(|&v| !v.is_truthy()) {
         return scope.classes().own_method(id, name);
     }
-    scope.classes_mut().lookup(id, name)
+    scope.lookup_method(id, name)
 }
 
 /// Whether this call site may not reach `method`, and under which rule.
@@ -8615,7 +8653,7 @@ fn rescue_match(
     };
     let comparison = crate::shared::symbols::intern("===");
     if let Some(class_of_class) = class_of(scope, class)
-        && let Some(method) = scope.classes_mut().lookup(class_of_class, comparison)
+        && let Some(method) = scope.lookup_method(class_of_class, comparison)
         && method.owner != Builtin::Module.id()
     {
         return Ok(None);
@@ -9196,7 +9234,7 @@ fn to_method_missing(
     call: &Pending,
 ) -> Option<Pending> {
     let symbol = crate::shared::symbols::intern("method_missing");
-    let method = scope.classes_mut().lookup(class, symbol)?;
+    let method = scope.lookup_method(class, symbol)?;
     if method.owner == Builtin::BasicObject.id() {
         return None;
     }
@@ -9402,7 +9440,7 @@ fn fire_hook<'h>(
     // An `undef` of the default sends the call on to `method_missing` or a
     // NoMethodError, as in CRuby; no method at all is the core library still
     // loading, before the defaults exist.
-    match scope.classes_mut().lookup(class, symbol) {
+    match scope.lookup_method(class, symbol) {
         None if !scope.classes().undefined_along(class, symbol) => return Ok(None),
         None => {}
         Some(method) => {
@@ -12792,7 +12830,7 @@ fn native_call<'h>(
             // handing back a bare object wearing a class that would misread it.
             let object = allocate_instance(scope, id)?;
             let initialize = crate::shared::symbols::intern("initialize");
-            match scope.classes_mut().lookup(id, initialize) {
+            match scope.lookup_method(id, initialize) {
                 // An `initialize` undefined on purpose is a call to nothing,
                 // as `rb_obj_call_init` makes it: `undef_method :initialize`
                 // is how `IO::ConsoleMode` refuses `new` (#110).
@@ -15026,10 +15064,7 @@ fn native_call<'h>(
                     // `Iseq` is named after. A `define_method` body is a Proc
                     // whose `Iseq` is named after where it was written, so its
                     // name is the one it was defined as.
-                    let body = scope
-                        .classes_mut()
-                        .lookup(owner, called)
-                        .map(|method| method.body);
+                    let body = scope.lookup_method(owner, called).map(|method| method.body);
                     match body.and_then(|body| scope.definitions().get(body)) {
                         Some(Definition::Iseq(iseq)) => Value::symbol(symbol(&iseq.name)),
                         _ => Value::symbol(called),
@@ -15756,9 +15791,9 @@ fn native_call<'h>(
                 };
                 // A module's lookup falls back to `Object`'s, as CRuby's
                 // does: `module_function :require` copies `Kernel#require`.
-                let found = scope.classes_mut().lookup(id, symbol).or_else(|| {
+                let found = scope.lookup_method(id, symbol).or_else(|| {
                     (scope.classes().kind(id) == Kind::Module)
-                        .then(|| scope.classes_mut().lookup(Builtin::Object.id(), symbol))
+                        .then(|| scope.lookup_method(Builtin::Object.id(), symbol))
                         .flatten()
                 });
                 let Some(method) = found else {
@@ -16073,8 +16108,7 @@ fn native_call<'h>(
             };
             let include_all = call.args.get(1).is_some_and(|&v| v.is_truthy());
             let visible = scope
-                .classes_mut()
-                .lookup_in(class, symbol, call.cref)
+                .lookup_method_in(class, symbol, call.cref)
                 .filter(|method| include_all || method.visibility == Visibility::Public);
             if visible
                 .as_ref()
@@ -16088,7 +16122,7 @@ fn native_call<'h>(
             // (#28), as a frame whose answer comes back as a boolean.
             let asks = crate::shared::symbols::intern("respond_to_missing?");
             if !found
-                && let Some(method) = scope.classes_mut().lookup(class, asks)
+                && let Some(method) = scope.lookup_method(class, asks)
                 && method.owner != Builtin::Kernel.id()
                 && method.owner != Builtin::BasicObject.id()
             {
@@ -17022,13 +17056,12 @@ fn defines_to_ary(scope: &mut HandleScope<'_>, value: Value) -> bool {
         return false;
     };
     let name = crate::shared::symbols::intern("to_ary");
-    if scope.classes_mut().lookup(class, name).is_some() {
+    if scope.lookup_method(class, name).is_some() {
         return true;
     }
     let missing = crate::shared::symbols::intern("respond_to_missing?");
     scope
-        .classes_mut()
-        .lookup(class, missing)
+        .lookup_method(class, missing)
         .is_some_and(|method| method.owner != Builtin::Kernel.id())
 }
 
@@ -19194,7 +19227,7 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         // `module_function`, by hand: a public copy on `Kernel`'s singleton and
         // a private instance method. `Kernel.raise` answers and
         // `Object.new.raise` does not, which is the pair `defined?` asks about.
-        if let Some(method) = scope.classes_mut().lookup(kernel, symbol) {
+        if let Some(method) = scope.lookup_method(kernel, symbol) {
             scope.classes_mut().define_method_visibly(
                 singleton,
                 symbol,
@@ -20772,7 +20805,7 @@ fn not_implemented(scope: &HandleScope<'_>, method: &Method) -> bool {
 /// has written its own `<=>` must be asked.
 fn still_native(scope: &mut HandleScope<'_>, builtin: Builtin, name: &str, wanted: Native) -> bool {
     let symbol = crate::shared::symbols::intern(name);
-    let Some(method) = scope.classes_mut().lookup(builtin.id(), symbol) else {
+    let Some(method) = scope.lookup_method(builtin.id(), symbol) else {
         return false;
     };
     matches!(

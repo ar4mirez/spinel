@@ -1205,6 +1205,14 @@ fn release(scope: &mut HandleScope<'_>, me: usize, first: Option<usize>) {
             // One came back meanwhile: it is next.
             continue;
         }
+        if to.is_none() {
+            // The last thread leaves the heap, for a call outside the lock:
+            // nothing of it runs until one comes back, so its hold on the
+            // class lock goes too, before the heap is anyone's to take, and
+            // another Ractor's write does not wait for that call (#119). The
+            // one that takes it from nobody takes the hold back (`away`).
+            scope.release_classes();
+        }
         held.heap = HeapPtr(heap);
         held.holder = to;
         if let Some(to) = to {
@@ -1431,7 +1439,7 @@ pub(super) fn outside<R>(
     call: impl FnOnce() -> R,
 ) -> R {
     if alone(scope) {
-        return call();
+        return without_classes(scope, call);
     }
     let me = scope.fibers().threads.current;
     away(scope, stack, frames, ids, me, false, call)
@@ -1497,7 +1505,7 @@ pub(super) fn outside_interruptibly<R>(
             me,
             signals,
         };
-        return (!waiting).then(|| call(&unblock));
+        return (!waiting).then(|| without_classes(scope, || call(&unblock)));
     }
     // A kill or raise left for it, a signal for the main thread, or a refusal
     // another thread left for it, is met before it goes.
@@ -1530,6 +1538,18 @@ pub(super) fn outside_interruptibly<R>(
     })
 }
 
+/// Make `call`, a call outside the per-Ractor lock of a heap with no other
+/// thread, with the heap's hold on the class lock let go (#119): nothing of
+/// the heap runs while it does, and a call that blocks in the kernel would
+/// otherwise keep every other Ractor's write to the class tables waiting
+/// until it returned. While the program has one Ractor, two loads.
+fn without_classes<R>(scope: &mut HandleScope<'_>, call: impl FnOnce() -> R) -> R {
+    scope.release_classes();
+    let answer = call();
+    scope.reacquire_classes();
+    answer
+}
+
 /// Park the running thread, `me`, outside the lock, hand the heap on, make
 /// `call`, and get back in line and in again.
 fn away<R>(
@@ -1551,6 +1571,12 @@ fn away<R>(
     release(scope, me, None);
     let answer = call();
     lock.come_back(me);
+    // Taken from nobody, the heap's hold on the class lock was let go as the
+    // last thread left it (`release`), and is taken again before anything of
+    // the heap is touched.
+    if scope.classes_released() {
+        scope.reacquire_classes();
+    }
     let entry = &mut scope.fibers_mut().threads.entries[me];
     // Put back in line by whoever had the heap, or the heap taken from nobody.
     let (ThreadState::Ready { context, .. } | ThreadState::Outside { context, .. }) =
