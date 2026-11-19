@@ -11143,22 +11143,33 @@ fn ivar_set_elsewhere<'h>(
 }
 
 /// Whether the primitive about to run answers the program: its caller is
-/// the program's code, or a core-library method the program called — as
-/// `Module#const_get` is, over `__reflect_const_lookup__` (#117).
+/// the program's code, or a core-library method the program called (#117).
 fn called_by_program(frames: &[Call]) -> bool {
-    let core = |frame: &Call| {
-        frame
-            .iseq
-            .path
-            .as_deref()
-            .is_some_and(|path| path.starts_with("<internal:"))
-    };
     match frames {
         [] => false,
-        [.., last] if !core(last) => true,
-        [.., below, _] => !core(below),
+        [.., last] if !frame_in_core(last) => true,
+        [.., below, _] => !frame_in_core(below),
         _ => false,
     }
+}
+
+/// Whether `frame` runs the core library's code.
+fn frame_in_core(frame: &Call) -> bool {
+    frame
+        .iseq
+        .path
+        .as_deref()
+        .is_some_and(|path| path.starts_with("<internal:"))
+}
+
+/// Whether a `Module#const_get` lookup answers the program: the frame below
+/// the core library's run of `const_get` calls (a path's first segment is
+/// one more) is the program's.
+fn const_get_by_program(frames: &[Call]) -> bool {
+    frames
+        .iter()
+        .rposition(|frame| !(frame_in_core(frame) && &*frame.iseq.name == "const_get"))
+        .is_some_and(|below| !frame_in_core(&frames[below]))
 }
 
 /// [`reflect_native`] in a Ractor other than the main one (#117), where a
@@ -11178,8 +11189,8 @@ fn reflect_elsewhere(
 ) -> Result<Option<Unwind>, Error> {
     scope.take_isolated();
     let program = op == ReflectOp::ConstLookup
-        && frames.last().is_some_and(|frame| &*frame.iseq.name == "const_get")
-        && called_by_program(frames);
+        && call.args.get(3).is_some_and(|answers| answers.is_truthy())
+        && const_get_by_program(frames);
     scope.set_program_read(program);
     let answered = reflect_native(scope, stack, call, op, position);
     scope.set_program_read(false);

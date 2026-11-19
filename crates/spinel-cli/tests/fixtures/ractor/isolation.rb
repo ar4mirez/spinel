@@ -19,6 +19,7 @@ r = Ractor.new do
   out << (S rescue $!.message)
   out << Object.const_defined?(:H)
   out << (Object.const_get(:H) rescue $!.message)
+  out << (Object.const_get("::H") rescue $!.message)
   out << [FZ, FZ.frozen?, FZ.equal?(FZ)]
   out << [FA, FA.frozen?, FA[2].frozen?]
   out << [FH, FH[:a], FH["b"]]

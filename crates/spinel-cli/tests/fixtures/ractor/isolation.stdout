@@ -1,6 +1,7 @@
 "can not access non-shareable objects in constant Object::S by non-main Ractor."
 true
 "can not access non-shareable objects in constant Object::H by non-main Ractor."
+"can not access non-shareable objects in constant Object::H by non-main Ractor."
 ["fz", true, true]
 [[1, "two", [3]], true, true]
 [{a: 1, "b" => [2]}, 1, [2]]
