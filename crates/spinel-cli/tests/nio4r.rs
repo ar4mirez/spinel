@@ -475,7 +475,9 @@ load Gem.bin_path("rspec-core", "rspec")"#,
 /// upstream nio4r 2.7.5 give on Linux. A registration left in epoll by a
 /// descriptor closed before it was deregistered, its description still open
 /// in a `dup`, does not keep `select` from waiting, nor stand for another
-/// IO registered on its reused descriptor number.
+/// IO registered on its reused descriptor number. On every backend, a
+/// descriptor deregistered and registered again, or its interests set to
+/// none and back, is selected when it is ready.
 #[test]
 fn selectors_free_their_descriptors_and_wait_outside_the_lock() {
     let (sandbox, _source, _lock) = installed("descriptors");
@@ -544,7 +546,29 @@ p s.select(0.3)
 p (Process.clock_gettime(Process::CLOCK_MONOTONIC) - started).round(1), cpu.() - spent < 0.15
 w2.write("y")
 p s.select(1).map { |ready| ready.io.equal?(r2) }
-kept.close"#,
+kept.close
+NIO::Selector.backends.each do |backend|
+  %i[reregister interests].each do |way|
+    s = NIO::Selector.new(backend)
+    r, w = IO.pipe
+    m = s.register(r, :r)
+    if way == :reregister
+      s.deregister(r)
+      m = s.register(r, :r)
+    else
+      m.interests = nil
+      m.interests = :r
+    end
+    w.write("x")
+    started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    ready = s.select(1)
+    prompt = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started < 0.5
+    p [backend, way, ready.map(&:readiness), ready.map { |x| x.equal?(m) }, prompt]
+    s.close
+    r.close
+    w.close
+  end
+end"#,
         ])
         .output()
         .unwrap();
@@ -554,10 +578,22 @@ kept.close"#,
     } else {
         ":select"
     };
+    let backends: &[&str] = if cfg!(any(target_os = "linux", target_os = "android")) {
+        &["epoll", "poll", "select"]
+    } else {
+        &["poll", "kqueue", "select"]
+    };
+    let rewatched: String = backends
+        .iter()
+        .flat_map(|backend| {
+            ["reregister", "interests"]
+                .map(|way| format!("[:{backend}, :{way}, [:r], [true], true]\n"))
+        })
+        .collect();
     assert_eq!(
         ok(&out, "spinel run -e"),
         format!(
-            "0\ntrue\nnil\n0.4\n20\n[:r]\n1\n1\n[:rw]\nnil\nnil\n{backend}\nnil\n0.3\ntrue\n[true]\ntrue\nnil\n0.3\ntrue\n[true]\n"
+            "0\ntrue\nnil\n0.4\n20\n[:r]\n1\n1\n[:rw]\nnil\nnil\n{backend}\nnil\n0.3\ntrue\n[true]\ntrue\nnil\n0.3\ntrue\n[true]\n{rewatched}"
         )
     );
 }

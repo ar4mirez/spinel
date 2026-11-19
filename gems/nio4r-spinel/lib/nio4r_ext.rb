@@ -51,6 +51,9 @@ module NIO
     # In `NIO_Selector_supported_backends`' order.
     BACKENDS = (QUEUE == :epoll ? %i[epoll poll select] : %i[poll kqueue select]).freeze
     DEFAULT = QUEUE == :epoll ? :epoll : :select
+    # Whether the queue marks each registration with a generation, as only
+    # libev's epoll backend does: kqueue's go with their descriptor.
+    GENERATIONS = QUEUE == :epoll
     INT = (-2**31...2**31)
 
     class << self
@@ -278,7 +281,8 @@ module NIO
 
     # `fd` out of what the queue watches, its generation moved on.
     def __unwatch__(fd)
-      @__gens__[fd] = (@__gens__[fd] + 1) & 0x7FFF_FFFF if @__watched__.delete(fd)
+      return unless @__watched__.delete(fd) && Spinel::GENERATIONS
+      @__gens__[fd] = (@__gens__[fd] + 1) & 0x7FFF_FFFF
     end
 
     # NIO_Selector_synchronize: a lock the thread holding it takes again.
@@ -348,7 +352,7 @@ module NIO
     def __collect__(ready)
       queue = @__state__[0]
       if queue
-        events = Spinel.check(Spinel.queue_wait(queue), "epoll_wait").unpack("l<*").each_slice(3).to_a
+        events = Spinel.check(Spinel.queue_wait(queue), "epoll_wait").unpack("l<*").each_slice(Spinel::GENERATIONS ? 3 : 2).to_a
         events = __drop_strays__(queue, events)
         @__eperms__.each_key { |fd| events << [fd, Spinel::READ | Spinel::WRITE] }
       else
@@ -391,13 +395,13 @@ module NIO
     def __drop_strays__(queue, events)
       rebuild = false
       kept = events.filter_map do |fd, got, gen|
-        if gen != @__gens__[fd]
+        if Spinel::GENERATIONS && gen != @__gens__[fd]
           rebuild = true
           next
         end
         want = @__watched__.fetch(fd, 0)
         unless got & ~want == 0
-          status = Spinel.queue_set(queue, fd, Spinel::READ | Spinel::WRITE, want, gen)
+          status = Spinel.queue_set(queue, fd, Spinel::READ | Spinel::WRITE, want, @__gens__[fd])
           unless status.zero?
             rebuild = true
             next

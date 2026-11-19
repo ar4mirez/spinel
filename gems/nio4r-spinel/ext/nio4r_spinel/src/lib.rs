@@ -94,18 +94,6 @@ fn pack(pairs: impl IntoIterator<Item = (i32, i64)>) -> Vec<u8> {
     out
 }
 
-/// A queue's `(fd, mask, generation)` events as the Ruby side unpacks
-/// them: `"l<l<l<"` each.
-fn pack_events(events: impl IntoIterator<Item = (i32, i64, i32)>) -> Vec<u8> {
-    let mut out = Vec::new();
-    for (fd, mask, generation) in events {
-        out.extend_from_slice(&fd.to_le_bytes());
-        out.extend_from_slice(&(mask as i32).to_le_bytes());
-        out.extend_from_slice(&generation.to_le_bytes());
-    }
-    out
-}
-
 methods! {
     /// The readiness queue this platform has: `"epoll"` or `"kqueue"`.
     fn queue_backend(cx, _args) {
@@ -143,13 +131,14 @@ methods! {
         Ok(cx.integer(queue::set(queue, target, old, new, generation)))
     }
 
-    /// The events waiting on `queue`, without waiting: `(fd, mask,
-    /// generation)` records, libev's mask of what the descriptor is ready
-    /// for and the generation it was watched with, or `-errno`.
+    /// The events waiting on `queue`, without waiting: a record for each,
+    /// its descriptor and libev's mask of what it is ready for, and on
+    /// epoll the generation it was watched with (`"l<l<l<"`; kqueue's are
+    /// `"l<l<"`); or `-errno`.
     fn queue_wait(cx, args) {
         let queue = fd(cx, args[0])?;
         Ok(match queue::wait(queue) {
-            Ok(events) => cx.string_from_bytes(&pack_events(events)),
+            Ok(records) => cx.string_from_bytes(&records),
             Err(errno) => cx.integer(errno),
         })
     }
@@ -296,7 +285,7 @@ mod queue {
         }
     }
 
-    pub fn wait(queue: i32) -> Result<Vec<(i32, i64, i32)>, i64> {
+    pub fn wait(queue: i32) -> Result<Vec<u8>, i64> {
         let mut events = [libc::epoll_event { events: 0, u64: 0 }; MAX_EVENTS];
         // SAFETY: `events` holds MAX_EVENTS events.
         let count = unsafe { libc::epoll_wait(queue, events.as_mut_ptr(), MAX_EVENTS as i32, 0) };
@@ -307,26 +296,27 @@ mod queue {
                 Err(errno())
             };
         }
-        Ok(events[..count as usize]
-            .iter()
-            .map(|event| {
-                let got = event.events;
-                let (out, err) = (
-                    libc::EPOLLOUT as u32,
-                    (libc::EPOLLERR | libc::EPOLLHUP) as u32,
-                );
-                let mut mask = 0;
-                // ev_epoll.c's reading of an event.
-                if got & (out | err) != 0 {
-                    mask |= WRITE;
-                }
-                if got & (libc::EPOLLIN as u32 | err) != 0 {
-                    mask |= READ;
-                }
-                let data = event.u64;
-                (data as u32 as i32, mask, (data >> 32) as i32)
-            })
-            .collect())
+        let mut records = Vec::new();
+        for event in &events[..count as usize] {
+            let got = event.events;
+            let (out, err) = (
+                libc::EPOLLOUT as u32,
+                (libc::EPOLLERR | libc::EPOLLHUP) as u32,
+            );
+            let mut mask = 0;
+            // ev_epoll.c's reading of an event.
+            if got & (out | err) != 0 {
+                mask |= WRITE;
+            }
+            if got & (libc::EPOLLIN as u32 | err) != 0 {
+                mask |= READ;
+            }
+            let data = event.u64;
+            records.extend_from_slice(&(data as u32 as i32).to_le_bytes());
+            records.extend_from_slice(&(mask as i32).to_le_bytes());
+            records.extend_from_slice(&((data >> 32) as i32).to_le_bytes());
+        }
+        Ok(records)
     }
 }
 
@@ -395,7 +385,7 @@ mod queue {
         status
     }
 
-    pub fn wait(queue: i32) -> Result<Vec<(i32, i64, i32)>, i64> {
+    pub fn wait(queue: i32) -> Result<Vec<u8>, i64> {
         // SAFETY: kevents are plain data, valid zeroed.
         let mut events: [libc::kevent; MAX_EVENTS] = unsafe { std::mem::zeroed() };
         let timeout = libc::timespec {
@@ -439,6 +429,6 @@ mod queue {
                 None => ready.push((fd, mask)),
             }
         }
-        Ok(ready.into_iter().map(|(fd, mask)| (fd, mask, 0)).collect())
+        Ok(super::pack(ready))
     }
 }
