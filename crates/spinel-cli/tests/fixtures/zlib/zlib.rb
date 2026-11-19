@@ -446,3 +446,30 @@ sizes = []
 d.deflate(data, Zlib::FINISH) { |c| sizes << c.bytesize; break if sizes.size == 3 }
 p [sizes, d.avail_in, d.total_in]
 p d.finish.bytesize
+
+puts "== a block that clears its input"
+# Net::HTTP's inflate_adapter clears the chunk it gave `inflate` from inside
+# the block: the run has its own copy of the input, so all of it is read.
+[16_383, 16_384, 16_385, 40_000, 200_000].each do |n|
+  data = lcg_bytes(n, n, "abcdefghijklmnopqrstuvwxyz \n")
+  gz = Zlib.gzip(data)
+  4.upto(7) { |i| gz.setbyte(i, 0) }
+  [["deflate", Zlib.deflate(data), Zlib::MAX_WBITS], ["gzip", gz, 32 + Zlib::MAX_WBITS]].each do |kind, comp, wbits|
+    [1, 777, 16_384, comp.bytesize].each do |step|
+      inf = Zlib::Inflate.new(wbits)
+      out = "".b
+      slices(comp, step).each do |chunk|
+        chunk = chunk.dup
+        inf.inflate(chunk) { |c| chunk.clear; out << c }
+      end
+      out << inf.finish
+      puts "#{n} #{kind} #{step} #{digest(out)} #{out == data} #{inf.total_in} #{inf.total_out}"
+    end
+  end
+  src = data.dup
+  deflated = "".b
+  d = Zlib::Deflate.new(0)
+  d.deflate(src, Zlib::FINISH) { |c| src.clear; deflated << c }
+  deflated << d.finish
+  puts "deflate #{n} #{digest(deflated)} #{Zlib.inflate(deflated) == data}"
+end
