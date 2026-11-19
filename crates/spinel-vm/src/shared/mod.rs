@@ -16,8 +16,16 @@
 //! the process, on any OS thread, so its count cannot live on a heap; it is a
 //! number per signal and holds no VM object, and only the main Ractor takes
 //! from it.
+//!
+//! Two locks are here for the same reason: what they order is the C
+//! library's process-wide state, not a heap's. `env` is CRuby's `env_lock`,
+//! held around every `ENV` read and write, and `services` serialises
+//! `getservbyname(3)` and `getservbyport(3)` where no reentrant variant
+//! exists. Each is a `Mutex<()>`: it guards calls, and holds no VM object.
 
 pub mod core_image;
+pub mod env;
 pub mod hash_seed;
+pub mod services;
 pub mod signals;
 pub mod symbols;

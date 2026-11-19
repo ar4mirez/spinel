@@ -15122,7 +15122,11 @@ fn native_call<'h>(
         Native::Getenv => {
             let value = match call.args.first().and_then(|&v| string_bytes(scope, v)) {
                 Some(name) if !name.is_empty() && !name.contains(&b'=') && !name.contains(&0) => {
-                    match std::env::var_os(std::ffi::OsString::from_vec(name)) {
+                    let found = {
+                        let _env = crate::shared::env::lock();
+                        std::env::var_os(std::ffi::OsString::from_vec(name))
+                    };
+                    match found {
                         Some(value) => os_string(scope, value),
                         None => Value::NIL,
                     }
@@ -15141,16 +15145,17 @@ fn native_call<'h>(
             let answer = match name {
                 Some(name) if !name.is_empty() && !name.contains(&b'=') && !name.contains(&0) => {
                     let name = std::ffi::OsString::from_vec(name);
+                    let _env = crate::shared::env::lock();
                     match value {
                         // SAFETY: `set_var` and `remove_var` race only with a
                         // read of the environment that does not take std's
-                        // lock, made on another OS thread. Every Ruby thread
-                        // of this Ractor calls into the VM holding its lock,
-                        // and what runs outside it (`getaddrinfo`, `open`)
-                        // reads at most through glibc's `getenv`, which
-                        // tolerates a concurrent `setenv`.
-                        // ponytail: with Ractors in parallel (#119) every
-                        // Ractor's writes need one lock, as CRuby's `env_lock`.
+                        // lock, made on another OS thread. Every `ENV` read
+                        // and write of every Ractor holds the process's one
+                        // environment lock (`shared::env`, CRuby's
+                        // `env_lock`), held here too, so no two of them
+                        // overlap; what runs outside it (`getaddrinfo`,
+                        // `open`) reads at most through glibc's `getenv`,
+                        // which tolerates a concurrent `setenv`.
                         Some(value) if !value.contains(&0) => unsafe {
                             std::env::set_var(name, std::ffi::OsString::from_vec(value));
                             Value::NIL
@@ -15173,8 +15178,12 @@ fn native_call<'h>(
             Ok(None)
         }
         Native::Environ => {
+            let pairs: Vec<_> = {
+                let _env = crate::shared::env::lock();
+                std::env::vars_os().collect()
+            };
             let mut values = Vec::new();
-            for (name, value) in std::env::vars_os() {
+            for (name, value) in pairs {
                 let name = os_string(scope, name);
                 let name = scope.root(name);
                 let value = os_string(scope, value);
