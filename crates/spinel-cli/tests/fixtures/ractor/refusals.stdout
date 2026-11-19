@@ -1,0 +1,23 @@
+Ractor.new reading outside: ArgumentError: can not isolate a Proc because it accesses outer variables (x).
+Ractor.new reading two: ArgumentError: can not isolate a Proc because it accesses outer variables (x, y).
+Ractor.new with yield: ArgumentError: can not isolate a Proc because it uses 'yield'.
+Ractor.new writing, with yield: ArgumentError: can not isolate a Proc because it accesses outer variables (x) and uses 'yield'.
+Ractor.new self: Ractor
+  proc still callable: 1, frozen: false
+send a Proc: TypeError: allocator undefined for Proc
+send a frozen Proc: TypeError: allocator undefined for Proc
+  sender keeps: 2, false, 2
+send an Array holding a Proc: TypeError: allocator undefined for Proc
+unshareable Proc constant: Ractor::RemoteError: thrown by remote Ractor.
+  cause: Ractor::IsolationError: can not access non-shareable objects in constant Object::LP by non-main Ractor.
+frozen Array holding a Proc: Ractor::RemoteError: thrown by remote Ractor.
+  cause: Ractor::IsolationError: can not access non-shareable objects in constant Object::FROZEN_WITH_PROC by non-main Ractor.
+mutable Hash constant: Ractor::RemoteError: thrown by remote Ractor.
+  cause: Ractor::IsolationError: can not access non-shareable objects in constant Object::H by non-main Ractor.
+define_method with an unshareable Proc: Ractor::RemoteError: thrown by remote Ractor.
+  cause: RuntimeError: defined with an un-shareable Proc in a different Ractor
+constant set to a mutable object: [Ractor::IsolationError, "can not set constants with non-shareable objects by non-main Ractors", false]
+constant set to a shareable Proc: 7
+the main Ractor reads it: 7
+shareable_proc failing leaves the block: ["cannot make a shareable Proc because it can refer unshareable object \"s\" from variable 'x'", false, false, "s"]
+make_shareable copy failing leaves the original: [TypeError, false, false]

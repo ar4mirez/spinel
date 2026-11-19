@@ -616,8 +616,111 @@ impl Compiler {
         }
     }
 
+    /// Record, in every block written inside this scope, which of this
+    /// scope's locals are assigned more than once (#118): see
+    /// [`Iseq::outer_reassigned`]. Done once the scope is whole, since an
+    /// assignment can come after a block that reads the local. A parameter
+    /// counts as assigned once, except one the body's prologue writes: an
+    /// optional or keyword parameter's default, which it writes twice (nil,
+    /// then the default) and counts once, and `**kw`'s `Hash`, once. Measured
+    /// on CRuby 4.0.9, where `def m(a = 1)` leaves `a` assigned once and
+    /// `def m(a) = (a = 2)` twice.
+    ///
+    /// ponytail: an assignment in code CRuby's compiler drops (`x = 2 if
+    /// false`) counts here. Counting at the assignment, as CRuby does, needs
+    /// the enclosing scopes' counts open while a block compiles.
+    fn note_reassigned(&mut self) {
+        if !self.children.iter().any(|child| !child.scope_barrier) {
+            return;
+        }
+        let mut counts = vec![0i16; self.locals.len()];
+        let params = &self.params;
+        let defaulted = params.optional.iter().map(|optional| &optional.slot).chain(
+            params
+                .keywords
+                .iter()
+                .filter(|k| !k.required)
+                .map(|k| &k.slot),
+        );
+        for &slot in defaulted {
+            if let Some(count) = counts.get_mut(slot as usize) {
+                *count = -1;
+            }
+        }
+        let assigned = params
+            .required
+            .iter()
+            .chain(&params.post)
+            .chain(params.rest.as_ref())
+            .chain(params.block.as_ref())
+            .chain(
+                params
+                    .keywords
+                    .iter()
+                    .filter(|k| k.required)
+                    .map(|k| &k.slot),
+            );
+        for &slot in assigned {
+            if let Some(count) = counts.get_mut(slot as usize) {
+                *count = 1;
+            }
+        }
+        fn count(insns: &[Insn], depth: u16, counts: &mut [i16]) {
+            for insn in insns {
+                if let Insn::SetLocal(slot, d) = *insn
+                    && d == depth
+                    && let Some(count) = counts.get_mut(slot as usize)
+                {
+                    *count = count.saturating_add(1);
+                }
+            }
+        }
+        fn count_blocks(iseq: &Iseq, base: usize, counts: &mut [i16]) {
+            if iseq.scope_barrier || iseq.outer.len() <= base {
+                return;
+            }
+            let depth = u16::try_from(iseq.outer.len() - base).unwrap_or(u16::MAX);
+            count(&iseq.insns, depth, counts);
+            for child in &iseq.children {
+                count_blocks(child, base, counts);
+            }
+        }
+        let base = self.outer.len();
+        count(&self.insns, 0, &mut counts);
+        for child in &self.children {
+            count_blocks(child, base, &mut counts);
+        }
+        let reassigned: Vec<u16> = counts
+            .iter()
+            .enumerate()
+            .filter(|&(_, &count)| count > 1)
+            .map(|(slot, _)| u16::try_from(slot).expect("a scope has fewer than 2^16 locals"))
+            .collect();
+        if reassigned.is_empty() {
+            return;
+        }
+        fn mark(iseq: &mut Arc<Iseq>, base: usize, reassigned: &[u16]) {
+            if iseq.scope_barrier || iseq.outer.len() <= base {
+                return;
+            }
+            let iseq = Arc::make_mut(iseq);
+            let level = iseq.outer.len() - base - 1;
+            if iseq.outer_reassigned.len() <= level {
+                iseq.outer_reassigned.resize(level + 1, Vec::new());
+            }
+            iseq.outer_reassigned[level] = reassigned.to_vec();
+            for child in &mut iseq.children {
+                mark(child, base, reassigned);
+            }
+        }
+        for child in &mut self.children {
+            mark(child, base, &reassigned);
+        }
+    }
+
     fn finish(mut self) -> Iseq {
         self.emit(Insn::Leave);
+        self.note_reassigned();
         // A block's own `&b` is the block's, not its method's; its `yield` and
         // `super` reach the method's block, so they count for the method.
         let uses_block = (self.scope_barrier && self.params.block.is_some())
@@ -671,6 +774,7 @@ impl Compiler {
             block_level: self.block_level,
             first_line: self.first_line,
             outer: self.outer,
+            outer_reassigned: Vec::new(),
             from_eval: self.from_eval,
             eval_in_block: self.eval_in_block,
             refusals: self.refusals,

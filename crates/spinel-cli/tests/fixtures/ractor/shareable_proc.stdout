@@ -1,0 +1,39 @@
+no block: ArgumentError: tried to create Proc object without a block
+self is nil: [true, true, false, nil]
+self:: [6, true]
+self: nil: nil
+self: mutable: Ractor::IsolationError: self should be shareable: x
+unknown keyword: ArgumentError: unknown keyword: :foo
+arguments: [1, 2]
+lambda: [true, 3, true]
+lambda self:: :s
+lambda no block: ArgumentError: tried to create Proc object without a block
+from a Proc: [false, false, true, false, 1]
+from a lambda: true
+reads once-assigned: 2
+reads assigned twice: Ractor::IsolationError: cannot make a shareable Proc because the outer variable 'x' may be reassigned.
+reads assigned after: Ractor::IsolationError: cannot make a shareable Proc because the outer variable 'x' may be reassigned.
+reads op-assigned: Ractor::IsolationError: cannot make a shareable Proc because the outer variable 'x' may be reassigned.
+reads assigned in a block: Ractor::IsolationError: cannot make a shareable Proc because the outer variable 'x' may be reassigned.
+reads a block parameter: [7]
+reads one per iteration: [0, 1]
+reads a parameter: 9
+reads a reassigned parameter: Ractor::IsolationError: cannot make a shareable Proc because the outer variable 'a' may be reassigned.
+reads an optional parameter: 1
+reads a keyword: 1
+reads mutable: Ractor::IsolationError: cannot make a shareable Proc because it can refer unshareable object "s" from variable 'x'
+reads mutable in a nested block: Ractor::IsolationError: cannot make a shareable Proc because it can refer unshareable object [] from variable 'x'
+reads frozen: "a"
+writes: ArgumentError: can not make a Proc shareable because it accesses outer variables (x).
+writes two: ArgumentError: can not make a Proc shareable because it accesses outer variables (x, y).
+yield: ArgumentError: can not make a Proc shareable because it uses 'yield'.
+writes and yield: ArgumentError: can not make a Proc shareable because it accesses outer variables (x) and uses 'yield'.
+own locals: 2
+shadowing parameter: 1
+Method#to_proc: RuntimeError: not supported yet
+sent: 42
+argument: 42
+reads outside, in another Ractor: [true, 43, true]
+shareable Proc constant: 44
+define_method with a shareable Proc: 46
+made back in another Ractor: 3

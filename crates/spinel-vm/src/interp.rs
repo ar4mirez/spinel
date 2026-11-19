@@ -5358,13 +5358,13 @@ const PROC_BLOCK: usize = 4;
 const PROC_CREF: usize = 5;
 /// The frame a `return` in this body leaves: the method the block was *written*
 /// in, fixed when the `Proc` was made.
-const PROC_HOME: usize = 6;
+pub(crate) const PROC_HOME: usize = 6;
 /// The frame a `break` in this body ends: the call the block was *passed* to,
 /// which is not known until the call happens, so `dispatch` writes it — once.
 /// A `Proc` handed on with `&blk` keeps the first call's frame, which is Ruby:
 /// `def a(&b) = c(&b)` with `a { break 1 }` ends `a`, not `c`.
-const PROC_BREAK: usize = 7;
-const PROC_SLOTS: u32 = 8;
+pub(crate) const PROC_BREAK: usize = 7;
+pub(crate) const PROC_SLOTS: u32 = 8;
 
 /// What a call is going to run.
 enum Target {
@@ -17799,8 +17799,18 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
         ),
         (
             Builtin::Kernel,
-            &["__ractor_freeze_deep__"],
-            Native::Ractor(crate::method::RactorOp::FreezeDeep),
+            &["__ractor_make_shareable__"],
+            Native::Ractor(crate::method::RactorOp::MakeShareable),
+        ),
+        (
+            Builtin::Kernel,
+            &["__ractor_copy__"],
+            Native::Ractor(crate::method::RactorOp::Copy),
+        ),
+        (
+            Builtin::Kernel,
+            &["__ractor_shareable_proc__"],
+            Native::Ractor(crate::method::RactorOp::ShareableProc),
         ),
         (
             Builtin::Kernel,

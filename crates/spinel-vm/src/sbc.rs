@@ -783,6 +783,7 @@ impl Wire for Iseq {
             block_level,
             first_line,
             outer,
+            outer_reassigned,
             from_eval,
             eval_in_block,
             refusals: _,
@@ -811,6 +812,7 @@ impl Wire for Iseq {
         block_level.put(w);
         first_line.put(w);
         outer.put(w);
+        outer_reassigned.put(w);
         from_eval.put(w);
         eval_in_block.put(w);
         uses_block.put(w);
@@ -844,6 +846,7 @@ impl Wire for Iseq {
             block_level: Wire::get(r)?,
             first_line: Wire::get(r)?,
             outer: Wire::get(r)?,
+            outer_reassigned: Wire::get(r)?,
             from_eval: Wire::get(r)?,
             eval_in_block: Wire::get(r)?,
             refusals: Vec::new(),
@@ -889,6 +892,7 @@ mod tests {
             path: Some("/p/a.rb".into()),
             block_level: 1,
             outer: vec![vec!["x".into()]],
+            outer_reassigned: vec![vec![0]],
             ..Iseq::default()
         };
         Iseq {

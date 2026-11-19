@@ -7,10 +7,13 @@
 # Measured against CRuby 4.0.9: the Ruby 4 API, with ports in place of
 # `Ractor.yield` and `#take`.
 #
+# What may be shared is CRuby 4.0.9's (#118): `shareable?`,
+# `make_shareable` and the shareable procs follow its rules and say its
+# messages, measured.
+#
 # ponytail: a shareable object a Ractor is sent, or reads from a constant,
 # is a copy rather than the sender's object, so `equal?` and `object_id`
-# answer otherwise than CRuby's (decision 2a). `Ractor.make_shareable` and
-# the shareable procs are #118's.
+# answer otherwise than CRuby's (decision 2a).
 class Ractor
   class Error < RuntimeError; end
 
@@ -136,15 +139,63 @@ class Ractor
   def self.shareable?(object) = __ractor_shareable__(object)
 
   # `object` frozen, and everything it holds, as the standard library asks
-  # before it keeps a value in a constant.
-  #
-  # ponytail: it freezes what it reaches and does not check a `Proc` for the
-  # variables it captures, as CRuby's does; that check, and the shareable
-  # procs (`Ractor.shareable_proc`, `shareable_lambda`), are #118's.
+  # before it keeps a value in a constant. A `Proc` in it is made shareable
+  # as `shareable_proc` makes one, but keeping its `self`, which must be
+  # shareable already; a `Thread`, a `Mutex` and the rest of the classes
+  # registered at the end of this file as never shareable are refused. What
+  # it reaches before a refusal stays frozen, as CRuby's does. With `copy:`,
+  # a copy of it, as one sent to another Ractor is, unless it is shareable
+  # already.
   def self.make_shareable(object, copy: false)
-    object = __make_shareable_copy__(object) if copy
-    __ractor_freeze_deep__(object).each(&:freeze)
+    object = __built__(__ractor_copy__(object)) if copy && !shareable?(object)
+    hashes, refusal = __ractor_make_shareable__(object)
+    hashes.each(&:freeze)
+    __refuse__(refusal) unless refusal.nil?
     object
+  end
+
+  # A `Proc` of the block's body that may go to another Ractor: frozen,
+  # `self` the `self:` given, which must be shareable, and every variable
+  # outside it that it reads copied, each of which must hold a shareable
+  # object and be assigned once. It may not write one or `yield`.
+  #
+  # ponytail: `shareable_lambda(&a_proc)` answers a lambda, where CRuby's
+  # keeps the `Proc` a proc; telling a literal block from a passed one needs
+  # the method to be a primitive.
+  def self.shareable_proc(**options, &block) = __shareable__(options, block, false)
+  def self.shareable_lambda(**options, &block) = __shareable__(options, block, true)
+
+  def self.__shareable__(options, block, lambda)
+    unknown = options.keys - [:self]
+    unless unknown.empty?
+      raise ArgumentError, "unknown keyword#{"s" if unknown.size > 1}: #{unknown.map(&:inspect).join(", ")}"
+    end
+    raise ArgumentError, "tried to create Proc object without a block" if block.nil?
+    receiver = options[:self]
+    raise Ractor::IsolationError, "self should be shareable: #{receiver}" unless shareable?(receiver)
+    made, refusal = __ractor_shareable_proc__(block, receiver, lambda)
+    __refuse__(refusal) unless refusal.nil?
+    made
+  end
+
+  # Raise what `__ractor_make_shareable__` or `__ractor_shareable_proc__`
+  # stopped at, `[kind, object, text]`, in CRuby 4.0.9's words.
+  def self.__refuse__(refusal)
+    kind, object, text = refusal
+    case kind
+    when :refused
+      raise Ractor::Error, "can not make shareable object for #{object.inspect}"
+    when :self
+      raise Ractor::IsolationError, "Proc's self is not shareable: #{object.inspect}"
+    when :reassigned
+      raise Ractor::IsolationError, "cannot make a shareable Proc because the outer variable '#{text}' may be reassigned."
+    when :refers
+      raise Ractor::IsolationError, "cannot make a shareable Proc because it can refer unshareable object #{object.inspect} from variable '#{text}'"
+    when :argument
+      raise ArgumentError, text
+    else
+      raise RuntimeError, "not supported yet"
+    end
   end
 
 
@@ -315,6 +366,11 @@ class Ractor
   end
 end
 
+# What a copy refuses, and what is never shareable, frozen or not: `Proc`,
+# but for one made shareable, and CRuby's `T_DATA` that may not be shared
+# frozen, as `make_shareable` refuses them, measured on 4.0.9. Those of them
+# the core library defines; `TracePoint` and `Enumerator::Generator` join
+# when it does.
 __ractor_register__(Ractor::MovedObject, [
   [Proc, "TypeError", "allocator undefined for Proc"],
   [Method, "TypeError", "allocator undefined for Method"],
@@ -323,4 +379,8 @@ __ractor_register__(Ractor::MovedObject, [
   [Thread, "TypeError", "allocator undefined for Thread"],
   [Fiber, "TypeError", "allocator undefined for Fiber"],
   [Enumerator, "Ractor::Error", "can not copy Enumerator object."],
+], [
+  Proc, Thread, Thread::Mutex, Thread::Queue, Thread::SizedQueue, Thread::ConditionVariable,
+  Thread::Backtrace::Location, Enumerator, Enumerator::Yielder, Fiber, Binding, Random,
+  ObjectSpace::WeakMap, ObjectSpace::WeakKeyMap, Encoding::Converter, Dir, File::Stat, ARGF.class,
 ])

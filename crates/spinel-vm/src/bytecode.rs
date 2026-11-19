@@ -973,6 +973,15 @@ pub struct Iseq {
     /// a class body or a script. `binding` and string `eval` read it (#38),
     /// because an environment at run time is only slots.
     pub outer: Vec<Vec<Box<str>>>,
+    /// For each environment in [`Self::outer`], the slots of the locals that
+    /// scope assigns more than once, counting every assignment in it and in
+    /// the blocks written inside it, and a parameter as one (#118): what
+    /// CRuby 4.0.9's `lvar_states` call reassigned, and a shareable `Proc`
+    /// may not read ("the outer variable 'x' may be reassigned"). Filled in
+    /// when the enclosing scope finishes compiling, since an assignment can
+    /// come after the block; shorter than `outer`, or empty, where no scope
+    /// has one.
+    pub outer_reassigned: Vec<Vec<u16>>,
     /// Compiled from a string `eval`, whose `path` is the name it was given
     /// rather than a file on disk: `__dir__` does not resolve it.
     pub from_eval: bool,

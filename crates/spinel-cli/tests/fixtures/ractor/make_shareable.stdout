@@ -1,0 +1,28 @@
+deep: [true, true, true, true, true, true, true, true, true]
+copy: [false, false, false, true, true, true]
+copy of shareable: true
+copy Struct: [false, false, true, true]
+copy Proc: TypeError: allocator undefined for Proc
+copy Thread: TypeError: allocator undefined for Thread
+Class: String
+Ractor: true
+Thread: Ractor::Error: can not make shareable object for #<Thread:0x run>
+Mutex: Ractor::Error: can not make shareable object for #<Thread::Mutex:0x>
+Queue: Ractor::Error: can not make shareable object for #<Thread::Queue:0x>
+Enumerator: Ractor::Error: can not make shareable object for #<Enumerator: [1]:each>
+Array of Thread: Ractor::Error: can not make shareable object for #<Thread:0x run>
+frozen before the refusal: [true, true, false]
+unknown keyword: ArgumentError: unknown keyword: :foo
+Proc, main self: Ractor::IsolationError: Proc's self is not shareable: #<Proc:0x make_shareable.rb:48>
+Proc, frozen, main self: Ractor::IsolationError: Proc's self is not shareable: #<Proc:0x make_shareable.rb:49>
+Proc in an Array: Ractor::IsolationError: Proc's self is not shareable: #<Proc:0x make_shareable.rb:50>
+Hash default proc: Ractor::IsolationError: Proc's self is not shareable: #<Proc:0x make_shareable.rb:51>
+Proc, nil self: [true, true, 1]
+lambda, nil self: [true, true, 2]
+reads shareable: 3
+  x frozen: false, proc shareable: false
+reads mutable: Ractor::IsolationError: cannot make a shareable Proc because it can refer unshareable object "s" from variable 'x'
+reads a Thread: Ractor::IsolationError: cannot make a shareable Proc because it can refer unshareable object #<Thread:0x run> from variable 'x'
+writes: ArgumentError: can not make a Proc shareable because it accesses outer variables (x).
+reads reassigned: Ractor::IsolationError: cannot make a shareable Proc because the outer variable 'x' may be reassigned.
+self frozen Object: 4

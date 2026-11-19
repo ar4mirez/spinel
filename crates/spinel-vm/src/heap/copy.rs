@@ -18,7 +18,9 @@
 //! it holds, a compiled `Regexp` by the pattern itself. What holds per-heap
 //! state that has no such translation — a `Proc`'s frames, a `Thread`'s
 //! entry, a `Method` — is refused, as CRuby refuses it, by the classes the
-//! caller names.
+//! caller names. A `Proc` made shareable (#118) is the exception: it crosses
+//! as a copy, and the copy names no frame, so a `return` or `break` in it
+//! has no target in the heap that reads it.
 //!
 //! An object whose class is a singleton class is copied as an instance of
 //! the class it was made from: the singleton belongs to the object left
@@ -28,7 +30,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::{
-    CHILLED, CHILLED_SYMBOL, FROZEN, HandleScope, Heap, KEYWORDS, Obj, Payload, SIDE_IVARS,
+    CHILLED, CHILLED_SYMBOL, FROZEN, HandleScope, Heap, KEYWORDS, Obj, Payload, SHAREABLE,
+    SIDE_IVARS,
 };
 use crate::class::{Builtin, ClassId};
 use crate::shape::ShapeId;
@@ -36,7 +39,7 @@ use crate::value::{SymbolId, Value};
 
 /// The flags a copy keeps. The rest — the mark bit, the side-table bit,
 /// the allocation bit — are the heap's own bookkeeping.
-const COPIED_FLAGS: u8 = FROZEN | CHILLED | CHILLED_SYMBOL | KEYWORDS;
+const COPIED_FLAGS: u8 = FROZEN | CHILLED | CHILLED_SYMBOL | KEYWORDS | SHAREABLE;
 
 /// A class whose instances may not be copied, and the exception a copy of
 /// one raises, as CRuby 4.0.9 raises it: `allocator undefined for Proc`, a
@@ -126,14 +129,67 @@ pub(crate) struct Options<'a> {
     pub refusals: &'a [Refusal],
     /// Refuse any object Ruby sees that is not frozen: CRuby's "shareable",
     /// for what a copy reaches. A core class's own state, the instance
-    /// variables spelled `@__name__` (a `Hash`'s pairs, a `Struct`'s
-    /// values), is not held to it, though what it holds is: the Arrays it
-    /// is built of are its, the objects in them the program's.
+    /// variables spelled `@__name__`, is not held to it, as CRuby's C struct
+    /// is not, except where it holds the program's values: a `Hash`'s pairs
+    /// and default, a `Struct`'s or `Data`'s values, a `Set`'s items, a
+    /// `Range`'s ends, an exception's message, a `Method`'s receiver. The
+    /// Arrays and Hashes those
+    /// are kept in are the class's; the objects in them are the program's,
+    /// and held to it (see [`Reach`]). A `Proc` made shareable (#118) is
+    /// shareable; an Integer or a Float always is.
     pub shareable_only: bool,
     /// Objects of the exported heap already copied into the importing one,
     /// by address: the copy names them rather than copying them again, so
     /// one object read twice is one object (`HandleScope::pull`).
     pub known: Option<&'a HashMap<usize, Value>>,
+}
+
+/// How the copy reached an object, for [`Options::shareable_only`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reach {
+    /// The program's: held to `shareable_only`.
+    Program,
+    /// A core class's own state, as CRuby's C struct is, and all under it:
+    /// not held to it.
+    Hidden,
+    /// A container a core class keeps the program's values in, the values
+    /// `n` containers in: a `Hash`'s `@__pairs__` (2: the list, then each
+    /// `[key, value]`), a `Struct`'s `@__values__` (1). The Array or Hash
+    /// itself is not held to `shareable_only`; what it holds `n` deep is.
+    Container(u8),
+}
+
+impl Reach {
+    /// What the elements of an object reached this way are reached as.
+    fn inner(self) -> Reach {
+        match self {
+            Reach::Container(n) if n > 1 => Reach::Container(n - 1),
+            Reach::Container(_) => Reach::Program,
+            other => other,
+        }
+    }
+
+    /// What instance variable `name` of an object reached this way is
+    /// reached as: see [`Options::shareable_only`].
+    fn ivar(self, name: SymbolId) -> Reach {
+        if self == Reach::Hidden {
+            return Reach::Hidden;
+        }
+        let Some(name) = crate::shared::symbols::name(name) else {
+            return Reach::Program;
+        };
+        if !(name.len() > 5 && name.starts_with("@__") && name.ends_with("__")) {
+            return Reach::Program;
+        }
+        match name.as_str() {
+            "@__pairs__" => Reach::Container(2),
+            "@__values__" | "@__hash__" => Reach::Container(1),
+            "@__default__" | "@__begin__" | "@__end__" | "@__message__" | "@__receiver__" => {
+                Reach::Program
+            }
+            _ => Reach::Hidden,
+        }
+    }
 }
 
 /// What [`Heap::export`] also answers: the objects each node was copied
@@ -164,9 +220,9 @@ impl Heap {
             known: options.known,
             shareable_only: options.shareable_only,
         };
-        let root = export.item(root, false);
-        while let Some((value, index, internal)) = export.work.pop() {
-            let node = export.node(value, internal, options)?;
+        let root = export.item(root, Reach::Program);
+        while let Some((value, index, reach)) = export.work.pop() {
+            let node = export.node(value, reach, options)?;
             // A frozen object is shareable, and stays the sender's: one a
             // frozen literal answers is every use of that literal's.
             if node.class.is_some()
@@ -260,17 +316,37 @@ impl Heap {
     }
 }
 
+/// Where [`Heap::make_shareable`] stopped short of the end.
+pub(crate) enum Stop {
+    /// An object of a class `Ractor.make_shareable` refuses, as CRuby
+    /// refuses a `T_DATA` it may not share frozen: "can not make shareable
+    /// object for ...".
+    Refused(Value),
+    /// A `Proc` not yet shareable, for the caller to check and isolate
+    /// (`ractor.rs`) before it walks again.
+    Proc(Value),
+}
+
 impl Heap {
     /// Freeze every object under `root` that Ruby sees, but classes and
-    /// modules: `Ractor.make_shareable`. A `Proc` is frozen and not looked
-    /// into. A `Hash` is left for the caller to freeze with `Hash#freeze`,
-    /// which keeps its codes and table first, and is answered. Allocates
-    /// nothing in the heap, so a graph of any size is walked in a loop with
-    /// no handle taken.
+    /// modules and what is shareable already: `Ractor.make_shareable`. A
+    /// `Hash` is left for the caller to freeze with `Hash#freeze`, which
+    /// keeps its codes and table first, and is answered. Allocates nothing in
+    /// the heap, so a graph of any size is walked in a loop with no handle
+    /// taken.
+    ///
+    /// The walk is CRuby's: depth first, each object frozen before what it
+    /// holds, in order, so what it stops at leaves frozen what came before
+    /// it and no more. It stops at an instance of a class in `unshareable`,
+    /// and at a `Proc` that is not shareable yet; the caller makes that one
+    /// shareable and walks again, which passes over it.
     ///
     /// `root` and everything under it must be live objects of this heap.
-    pub(crate) fn freeze_deep(&mut self, root: Value) -> Vec<Value> {
-        let proc_class = self.class_objects.get(Builtin::Proc as usize).copied();
+    pub(crate) fn make_shareable(
+        &mut self,
+        root: Value,
+        unshareable: &[ClassId],
+    ) -> (Vec<Value>, Option<Stop>) {
         let hash = ClassId::from_index(Builtin::Hash as u32);
         let mut hashes = Vec::new();
         let mut seen = std::collections::HashSet::new();
@@ -286,23 +362,34 @@ impl Heap {
             // SAFETY: a live object of this heap; the walk writes only flags.
             let header = unsafe { &mut *object.header() };
             if let Some(class) = header.class {
+                if header.flags & SHAREABLE != 0 {
+                    continue;
+                }
                 // SAFETY: the tables are read under the class lock the heap
                 // running this holds.
                 let classes = unsafe { self.vm.classes() };
-                let is_hash = self
-                    .class_id_of_cell(class)
-                    .is_some_and(|id| classes.reaches(id, hash));
-                if is_hash {
-                    if header.flags & FROZEN == 0 {
-                        hashes.push(value);
+                if let Some(id) = self.class_id_of_cell(class) {
+                    if classes.repr(id) == Some(Builtin::Proc) {
+                        return (hashes, Some(Stop::Proc(value)));
+                    }
+                    if unshareable
+                        .iter()
+                        .any(|&refused| classes.reaches(id, refused))
+                    {
+                        return (hashes, Some(Stop::Refused(value)));
+                    }
+                    if classes.reaches(id, hash) {
+                        if header.flags & FROZEN == 0 {
+                            hashes.push(value);
+                        }
+                    } else {
+                        header.flags = (header.flags | FROZEN) & !(CHILLED | CHILLED_SYMBOL);
                     }
                 } else {
                     header.flags = (header.flags | FROZEN) & !(CHILLED | CHILLED_SYMBOL);
                 }
-                if Some(class) == proc_class {
-                    continue;
-                }
             }
+            let first = work.len();
             if header.flags & SIDE_IVARS != 0
                 && let Some(&storage) = self.side_ivars.get(&(object.0.as_ptr() as usize))
             {
@@ -314,8 +401,10 @@ impl Heap {
                     work.push(unsafe { object.slots().add(index).read() });
                 }
             }
+            // The first of them is the next one taken.
+            work[first..].reverse();
         }
-        hashes
+        (hashes, None)
     }
 }
 
@@ -330,9 +419,9 @@ struct Export<'a> {
     nodes: Vec<Option<Node>>,
     sources: Sources,
     seen: HashMap<usize, u32>,
-    /// Objects to read: the object, its node, and whether it is a core
-    /// class's own state (see [`Options::shareable_only`]).
-    work: Vec<(Value, u32, bool)>,
+    /// Objects to read: the object, its node, and how it was reached (see
+    /// [`Options::shareable_only`]).
+    work: Vec<(Value, u32, Reach)>,
     /// The names an instance-variable storage cell holds, by its address,
     /// recorded by the object it belongs to.
     storage: HashMap<usize, Vec<SymbolId>>,
@@ -344,7 +433,7 @@ impl Export<'_> {
     /// `value` as an item, queueing it to be read when it is an object seen
     /// for the first time. A graph of any depth is read in a loop, as the
     /// collector traces one.
-    fn item(&mut self, value: Value, internal: bool) -> Item {
+    fn item(&mut self, value: Value, reach: Reach) -> Item {
         let Some(pointer) = value.as_heap() else {
             return Item::Imm(value);
         };
@@ -353,7 +442,7 @@ impl Export<'_> {
         }
         let address = pointer.as_ptr() as usize;
         if let Some(known) = self.known.and_then(|known| known.get(&address))
-            && !(self.shareable_only && !internal && self.is_unfrozen(value))
+            && !(self.shareable_only && self.is_held_unfrozen(value, reach))
         {
             return Item::Known(*known);
         }
@@ -364,52 +453,54 @@ impl Export<'_> {
         self.seen.insert(address, index);
         self.nodes.push(None);
         self.sources.push(address);
-        self.work.push((value, index, internal));
+        self.work.push((value, index, reach));
         Item::Node(index)
     }
 
-    /// Whether `value` is an object Ruby sees that is not frozen.
-    fn is_unfrozen(&self, value: Value) -> bool {
+    /// Whether `value`, reached as `reach`, is an object Ruby sees that
+    /// `shareable_only` refuses for not being frozen.
+    fn is_held_unfrozen(&self, value: Value, reach: Reach) -> bool {
         let Some(pointer) = value.as_heap() else {
             return false;
         };
         let object = Obj(pointer.cast());
         // SAFETY: a live object of the exported heap.
         let header = unsafe { &*object.header() };
-        header.class.is_some() && header.flags & FROZEN == 0
-    }
-
-    /// Whether `value` is a cell Ruby never sees.
-    fn is_classless(&self, value: Value) -> bool {
-        let Some(pointer) = value.as_heap() else {
+        let Some(class) = header.class else {
             return false;
         };
-        let object = Obj(pointer.cast());
-        // SAFETY: a live object of the exported heap.
-        unsafe { (*object.header()).class.is_none() }
+        header.flags & FROZEN == 0
+            && !self
+                .heap
+                .class_id_of_cell(class)
+                .is_some_and(|id| self.exempt(id, reach))
     }
 
-    /// Whether `value` is an `Array` of the exported heap, and nothing else.
-    fn is_array(&self, value: Value) -> bool {
-        let Some(pointer) = value.as_heap() else {
-            return false;
-        };
-        let object = Obj(pointer.cast());
-        // SAFETY: a live object of the exported heap.
-        let class = unsafe { (*object.header()).class };
-        class.is_some()
-            && class
-                == self
-                    .heap
-                    .class_objects
-                    .get(Builtin::Array as usize)
-                    .copied()
+    /// Whether an object of class `id`, reached as `reach`, is not held to
+    /// `shareable_only`: see [`Options::shareable_only`].
+    fn exempt(&self, id: ClassId, reach: Reach) -> bool {
+        // SAFETY: as for the refusals in `node`.
+        let classes = unsafe { self.heap.vm.classes() };
+        matches!(
+            (reach, classes.repr(id)),
+            (Reach::Hidden, _)
+                | (_, Some(Builtin::Integer | Builtin::Float))
+                | (Reach::Container(_), Some(Builtin::Array | Builtin::Hash))
+        )
+    }
+
+    /// Whether `value` is the storage of the instance variables of an object
+    /// being read, recorded in [`Export::storage`] by that object.
+    fn is_ivar_storage(&self, value: Value) -> bool {
+        value
+            .as_heap()
+            .is_some_and(|pointer| self.storage.contains_key(&(pointer.as_ptr() as usize)))
     }
 
     fn node(
         &mut self,
         value: Value,
-        internal: bool,
+        reach: Reach,
         options: &Options<'_>,
     ) -> Result<Node, ExportError> {
         let heap = self.heap;
@@ -417,6 +508,9 @@ impl Export<'_> {
         // SAFETY: a live object of the exported heap, which nothing writes
         // meanwhile (see `Heap::export`).
         let header = unsafe { &*object.header() };
+        // The reach of what this object holds in slots that are not instance
+        // variables: a `Regexp`'s are its compiled pattern's, as CRuby's are.
+        let mut held = reach.inner();
         let class = match header.class {
             None => None,
             Some(class) => {
@@ -426,15 +520,21 @@ impl Export<'_> {
                 // SAFETY: the tables are read under the class lock, which the
                 // exporting OS thread holds or has parked every writer under.
                 let classes = unsafe { heap.vm.classes() };
-                if let Some(refusal) = options
-                    .refusals
-                    .iter()
-                    .find(|r| classes.reaches(id, r.class))
+                // A `Proc` made shareable crosses as a copy, as any shareable
+                // object does (decision 2a): what it captured is shareable.
+                if header.flags & SHAREABLE == 0
+                    && let Some(refusal) = options
+                        .refusals
+                        .iter()
+                        .find(|r| classes.reaches(id, r.class))
                 {
                     return Err(ExportError::Refused(refusal.clone()));
                 }
-                if options.shareable_only && !internal && header.flags & FROZEN == 0 {
+                if options.shareable_only && header.flags & FROZEN == 0 && !self.exempt(id, reach) {
                     return Err(ExportError::Unshareable);
+                }
+                if classes.repr(id) == Some(Builtin::Regexp) {
+                    held = Reach::Hidden;
                 }
                 let mut id = id;
                 while classes.is_singleton(id) {
@@ -458,14 +558,14 @@ impl Export<'_> {
             heap.side_ivars
                 .get(&(object.0.as_ptr() as usize))
                 .copied()
-                .map(|storage| self.item(storage, internal))
+                .map(|storage| self.item(storage, reach))
         } else {
             None
         };
         // What this cell's slots hold: the instance variables a shape names,
-        // each by its spelling; otherwise what an internal Array holds is
-        // internal when it is an Array too, and a classless cell passes on
-        // whatever its owner was.
+        // each by its spelling; the storage of an object's instance
+        // variables, as the object was reached; otherwise, from a classless
+        // cell, as it was reached, and from an object, as what it holds.
         let names = self.storage.remove(&(object.0.as_ptr() as usize));
         let len = header.len as usize;
         let body = match header.payload {
@@ -480,9 +580,10 @@ impl Export<'_> {
                     // SAFETY: within the object's slots.
                     let slot = unsafe { object.slots().add(index).read() };
                     let inner = match &names {
-                        Some(names) => names.get(index).is_some_and(|&name| is_hidden(name)),
-                        None if class.is_none() || self.is_classless(slot) => internal,
-                        None => internal && self.is_array(slot),
+                        Some(names) => names.get(index).map_or(reach, |&name| reach.ivar(name)),
+                        None if class.is_none() => reach,
+                        None if self.is_ivar_storage(slot) => reach,
+                        None => held,
                     };
                     slots.push(self.item(slot, inner));
                 }
@@ -574,6 +675,16 @@ impl<'h> HandleScope<'h> {
                     }
                 }
                 Body::Bytes(_) => {}
+            }
+            if let Body::Slots(slots) = &node.body
+                && slots.len() == crate::interp::PROC_SLOTS as usize
+                && node
+                    .class
+                    .is_some_and(|id| scope.classes().repr(id) == Some(Builtin::Proc))
+            {
+                let none = Value::fixnum(0).expect("zero is a fixnum");
+                scope.set_slot(handle, crate::interp::PROC_HOME, none);
+                scope.set_slot(handle, crate::interp::PROC_BREAK, none);
             }
             if let Body::Regexp(compiled, _) = &node.body {
                 let index = scope.regexps_mut().adopt(Arc::clone(compiled));

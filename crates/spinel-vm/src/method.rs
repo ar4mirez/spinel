@@ -1498,8 +1498,9 @@ pub enum GcOp {
 /// `core/ractor.rb` (#117). See `ractor.rs` for what each takes and answers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RactorOp {
-    /// `__ractor_register__(moved_class, [[class, error, message]...])`:
-    /// what a copy leaves after a move, and the classes it refuses.
+    /// `__ractor_register__(moved_class, [[class, error, message]...],
+    /// unshareable)`: what a copy leaves after a move, the classes it
+    /// refuses, and the classes that are never shareable.
     Register,
     /// `__ractor_warn_once__`: true the first time in the program.
     WarnOnce,
@@ -1543,9 +1544,16 @@ pub enum RactorOp {
     Monitor,
     /// `__ractor_freeze__(objects)`.
     Freeze,
-    /// `__ractor_freeze_deep__(object)`: `Ractor.make_shareable`, but for
-    /// the Hashes it answers, left to `Hash#freeze`.
-    FreezeDeep,
+    /// `__ractor_make_shareable__(object)`: `Ractor.make_shareable`, as
+    /// `[hashes, refusal]`: the Hashes it reached, left to `Hash#freeze`, and
+    /// nil or why it stopped, `[kind, object, text]` (#118).
+    MakeShareable,
+    /// `__ractor_copy__(object)`: a copy of it in this heap, as one sent to
+    /// another Ractor is built there: `[value, hashes, frozen]`.
+    Copy,
+    /// `__ractor_shareable_proc__(block, receiver, lambda)`:
+    /// `Ractor.shareable_proc`'s copy of `block`, as `[proc, refusal]`.
+    ShareableProc,
 }
 
 /// Which thread primitive. See `threads.rs` for the scheduler and
