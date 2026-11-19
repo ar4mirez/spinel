@@ -2482,7 +2482,12 @@ fn ctx_setup(contexts: &Contexts, args: &[Arg]) -> Result<Out, Failure> {
             _ => 0,
         };
         ffi::SSL_CTX_set_verify(ctx, mode, Some(ssl_verify_cb));
-        ffi::SSL_CTX_ctrl(ctx, ffi::SSL_CTRL_CLEAR_EXTRA_CHAIN_CERTS, 0, ptr::null_mut());
+        ffi::SSL_CTX_ctrl(
+            ctx,
+            ffi::SSL_CTRL_CLEAR_EXTRA_CHAIN_CERTS,
+            0,
+            ptr::null_mut(),
+        );
         ffi::SSL_CTX_set_client_CA_list(ctx, ptr::null_mut());
         if let Some(store) = opt_id(args, 1)? {
             let store = contexts.store(store)?;
