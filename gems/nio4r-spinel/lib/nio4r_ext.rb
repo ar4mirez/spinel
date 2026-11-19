@@ -162,6 +162,9 @@ module NIO
       # queue has for it.
       @__fds__ = {}
       @__watched__ = {}
+      # The descriptors epoll refuses, such as regular files', which libev
+      # keeps in `epoll_eperms` and reports ready on every run.
+      @__eperms__ = {}
       @__selectables__ = {}
       @__lock__ = Mutex.new
       @__lock_holder__ = nil
@@ -240,26 +243,32 @@ module NIO
     # the interests `mask` (0 for none), as `ev_io_start` and `ev_io_stop`.
     def __watch__(monitor, fd, mask)
       return if @__closed__
-      monitors = (@__fds__[fd] ||= {})
-      if mask.zero?
-        monitors.delete(monitor)
-      else
-        monitors[monitor] = mask
+      monitors = @__fds__.fetch(fd, {}).merge(monitor => mask)
+      monitors.delete(monitor) if mask.zero?
+      queue = @__state__[0]
+      if queue
+        old = @__watched__.fetch(fd, 0)
+        new = monitors.each_value.inject(0, :|)
+        status = old == new ? 0 : Spinel.queue_set(queue, fd, old, new)
+        if new.zero?
+          # A descriptor closed while watched has left the queue already, and
+          # epoll refuses to remove it; libev lets that pass too.
+          @__watched__.delete(fd)
+          @__eperms__.delete(fd)
+        elsif status == -Errno::EPERM::Errno
+          @__watched__.delete(fd)
+          @__eperms__[fd] = true
+        else
+          Spinel.check(status, "epoll_ctl")
+          @__watched__[fd] = new
+          @__eperms__.delete(fd)
+        end
       end
-      @__fds__.delete(fd) if monitors.empty?
-      return unless @__state__[0]
-      old = @__watched__.fetch(fd, 0)
-      new = monitors.each_value.inject(0, :|)
-      return if old == new
-      status = Spinel.queue_set(@__state__[0], fd, old, new)
-      if new.zero?
-        @__watched__.delete(fd)
+      if monitors.empty?
+        @__fds__.delete(fd)
       else
-        @__watched__[fd] = new
+        @__fds__[fd] = monitors
       end
-      # A descriptor closed while watched has left the queue already, and
-      # epoll refuses to remove it; libev lets that pass too.
-      Spinel.check(status, "epoll_ctl") unless new.zero?
     end
 
     private
@@ -329,14 +338,18 @@ module NIO
     # The ready descriptors now, without waiting: each event goes to the
     # monitors on its descriptor that asked for it, as libev's `fd_event`.
     def __collect__(ready)
-      events = if @__state__[0]
-                 Spinel.check(Spinel.queue_wait(@__state__[0]), "epoll_wait")
-               else
-                 pairs = @__fds__.map { |fd, monitors| [fd, monitors.each_value.inject(0, :|)] }
-                 pairs.empty? ? "".b : Spinel.check(Spinel.poll_ready(pairs.flatten.pack("l<*")), "poll")
-               end
+      queue = @__state__[0]
+      if queue
+        events = Spinel.check(Spinel.queue_wait(queue), "epoll_wait").unpack("l<*").each_slice(2).to_a
+        __drop_strays__(queue, events)
+        @__eperms__.each_key { |fd| events << [fd, Spinel::READ | Spinel::WRITE] }
+      else
+        pairs = @__fds__.map { |fd, monitors| [fd, monitors.each_value.inject(0, :|)] }
+        events = pairs.empty? ? "".b : Spinel.check(Spinel.poll_ready(pairs.flatten.pack("l<*")), "poll")
+        events = events.unpack("l<*").each_slice(2).to_a
+      end
       count = 0
-      events.unpack("l<*").each_slice(2) do |fd, got|
+      events.each do |fd, got|
         monitors = @__fds__[fd] or next
         if got & Spinel::INVALID != 0
           # fd_kill: a descriptor that is not open stops its watchers, each
@@ -358,6 +371,38 @@ module NIO
         end
       end
       count
+    end
+
+    # epoll_poll's check of what an event got against what the queue was
+    # asked for: a registration nobody wants, such as one a descriptor
+    # closed while its description stayed open elsewhere left behind, is
+    # changed to what is wanted, and when the queue refuses, the queue is
+    # made again from what is watched, as libev's `postfork |= 2` makes it.
+    def __drop_strays__(queue, events)
+      rebuild = false
+      events.each do |fd, got|
+        want = @__watched__.fetch(fd, 0)
+        next if got & ~want == 0
+        status = Spinel.queue_set(queue, fd, Spinel::READ | Spinel::WRITE, want)
+        rebuild = true unless status.zero?
+      end
+      __rebuild_queue__ if rebuild
+    end
+
+    # A new queue in the old one's place, watching what `@__watched__`
+    # holds; the old one closed.
+    def __rebuild_queue__
+      queue = Spinel.check(Spinel.queue_new, "epoll_create")
+      old = @__state__[0]
+      @__state__[0] = queue
+      @__queue_io__ = IO.for_fd(queue, autoclose: false)
+      Spinel.close(old)
+      @__watched__.to_a.each do |fd, mask|
+        status = Spinel.queue_set(queue, fd, 0, mask)
+        next if status.zero?
+        @__watched__.delete(fd)
+        @__eperms__[fd] = true if status == -Errno::EPERM::Errno
+      end
     end
   end
 
@@ -469,10 +514,11 @@ module NIO
     # NIO_Monitor_update_interests.
     def __update_interests__(mask)
       raise EOFError, "monitor is closed" if closed?
+      unless @__interests_mask__ == mask
+        @__loop__.__watch__(self, @__fd__, mask)
+        @__interests_mask__ = mask
+      end
       @__interests__ = Spinel::SYMBOLS[mask]
-      return if @__interests_mask__ == mask
-      @__interests_mask__ = mask
-      @__loop__.__watch__(self, @__fd__, mask)
     end
   end
 

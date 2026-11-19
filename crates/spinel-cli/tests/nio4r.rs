@@ -470,10 +470,15 @@ load Gem.bin_path("rspec-core", "rspec")"#,
 
 /// A selector's descriptors are closed with it, or by its finalizer when it
 /// is collected unclosed, and a wait in `select` lets the other threads of
-/// its Ractor run.
+/// its Ractor run. A regular file, which epoll refuses, is ready on every
+/// run, as libev's `epoll_eperms` make it, with the answers CRuby 4.0.9 and
+/// upstream nio4r 2.7.5 give on Linux. A registration left in epoll by a
+/// descriptor closed before it was deregistered, its description still open
+/// in a `dup`, does not keep `select` from waiting.
 #[test]
 fn selectors_free_their_descriptors_and_wait_outside_the_lock() {
     let (sandbox, _source, _lock) = installed("descriptors");
+    sandbox.write("plain.txt", "a regular file\n");
     let out = sandbox
         .spinel()
         .args([
@@ -493,12 +498,49 @@ t = Thread.new { 20.times { ticks += 1; sleep 0.01 } }
 started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 p s.select(0.4)
 p (Process.clock_gettime(Process::CLOCK_MONOTONIC) - started).round(1), ticks
-t.join"#,
+t.join
+s = NIO::Selector.new
+f = File.open("plain.txt")
+m = s.register(f, :r)
+p s.select(0).map(&:readiness), s.select(1).size, s.select { |x| }
+m.interests = :rw
+p s.select(0).map(&:readiness)
+m.interests = nil
+p s.select(0)
+s.deregister(f)
+p s.select(0), s.backend
+s = NIO::Selector.new
+r, w = IO.pipe
+kept = r.dup
+s.register(r, :r)
+w.write("x")
+r.close
+s.deregister(r)
+cpu = -> { Process.times.then { |t| t.utime + t.stime } }
+spent = cpu.()
+started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+p s.select(0.3)
+p (Process.clock_gettime(Process::CLOCK_MONOTONIC) - started).round(1), cpu.() - spent < 0.15
+r2, w2 = IO.pipe
+s.register(r2, :r)
+w2.write("y")
+p s.select(1).map { |ready| ready.io.equal?(r2) }
+kept.close"#,
         ])
         .output()
         .unwrap();
     assert_eq!(String::from_utf8_lossy(&out.stderr), "");
-    assert_eq!(ok(&out, "spinel run -e"), "0\ntrue\nnil\n0.4\n20\n");
+    let backend = if cfg!(any(target_os = "linux", target_os = "android")) {
+        ":epoll"
+    } else {
+        ":select"
+    };
+    assert_eq!(
+        ok(&out, "spinel run -e"),
+        format!(
+            "0\ntrue\nnil\n0.4\n20\n[:r]\n1\n1\n[:rw]\nnil\nnil\n{backend}\nnil\n0.3\ntrue\n[true]\n"
+        )
+    );
 }
 
 /// Stock RubyGems and Bundler against the source that lists nio4r-spinel:
