@@ -102,17 +102,27 @@ against 1 Ractor. The time is the program's own, from the first Ractor made to
 the last one's value, so boot is not part of it.
 
 ```sh
-bench/ractors.sh           # measure again and rewrite the table (RUNS=5, UNITS=960 by default)
+bench/ractors.sh           # measure again and rewrite the table (RUNS=7, UNITS=960 by default)
 bench/ractors.sh --table   # re-render the table from ractors/results.tsv
 bench/ractors.sh --check   # fail if the table is not what results.tsv renders to, a case
                            # is missing, or Spinel's time does not fall from 1 Ractor to 2 to 4
 ```
 
-Each case's median is written to `ractors/results.tsv`, and the table is
-rendered from that file; never edit either by hand. Parallel Ractors need idle
-CPUs, so the line above the table says how many the machine has and its load
-average before and after the run: a reading taken under load is marked as
-one. `cargo test` runs the check.
+The runs go round in turns, every case on both engines and then again, and
+each case's fastest run is written to `ractors/results.tsv`, as the
+`bench/*.rb` programs keep their fastest: the time with nothing else
+interfering. The table is rendered from that file; never edit either by hand.
+Parallel Ractors need idle CPUs, so the line above the table says how many the
+machine has and its load average before and after the run: a reading taken
+under load is marked as one. `cargo test` runs the check.
 
 <!-- ractors table: written by bench/ractors.sh; do not edit -->
+Spinel at `8a999cf`, against `ruby 4.0.9 (2026-10-23 revision 3e93b23afc) +PRISM [x86_64-linux]`. 960 units of work, the fastest of 7 runs each, taken in turns; 8 CPUs, 1-minute load average 8.75 before and 8.03 after.
+
+| Ractors | Spinel | Spinel speedup | CRuby | CRuby speedup |
+|---|---:|---:|---:|---:|
+| none (main only) | 2052.5 ms | – | 208.5 ms | – |
+| 1 | 2064.3 ms | 1.00× | 215.0 ms | 1.00× |
+| 2 | 1022.2 ms | 2.02× | 131.9 ms | 1.63× |
+| 4 | 661.2 ms | 3.12× | 91.2 ms | 2.36× |
 <!-- end ractors table -->

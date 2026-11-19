@@ -11,12 +11,15 @@
 #   bench/ractors.sh --check     fail if the table is not results.tsv, a case
 #                                is missing, or Spinel's time does not fall
 #                                from 1 Ractor to 2 to 4
-#   RUNS=9 bench/ractors.sh      more runs of each case (default 5)
+#   RUNS=9 bench/ractors.sh      more runs of each case (default 7)
 #   UNITS=480 bench/ractors.sh   another amount of work (default 960)
 #   RUBY=ruby-4.0.9 bench/ractors.sh   which CRuby (default `ruby`)
 #
 # Each case's time is the program's own, from the first Ractor made to the
-# last one's value, so boot is not part of it; the median of RUNS runs is kept.
+# last one's value, so boot is not part of it. The runs go round in turns —
+# every case on both engines, then again — and the fastest of RUNS is kept,
+# as `bench/*.rb` keep theirs: the quantity is the time with nothing else
+# interfering, and a burst of load lands on every case rather than on one.
 # Every run's checksum must be the same, or the run fails: cut any way, the
 # work is the same work.
 #
@@ -109,7 +112,7 @@ case "${1:-}" in
   --check) check; exit ;;
 esac
 
-runs="${RUNS:-5}"
+runs="${RUNS:-7}"
 units="${UNITS:-960}"
 ruby="${RUBY:-ruby}"
 spinel="$repo_root/target/release/spinel"
@@ -126,30 +129,26 @@ load() { cut -d' ' -f1 /proc/loadavg 2> /dev/null || uptime | sed 's/.*average[s
 cpus() { getconf _NPROCESSORS_ONLN 2> /dev/null || nproc; }
 
 checksum=""
-# The median time, in milliseconds, of `runs` runs of one engine on one case.
-measure() {
+# One run of one engine on one case: its time in milliseconds.
+once() {
   local ractors="$1"; shift
-  local out sum ms times=()
-  for _ in $(seq "$runs"); do
-    out="$("$@" "$program" "$ractors" "$units")" || {
-      echo "bench/ractors.sh: failed: $* $program $ractors $units" >&2
-      echo "$out" >&2
-      return 1
-    }
-    sum="$(sed -n 's/^checksum: //p' <<< "$out")"
-    ms="$(sed -n 's/^ms: //p' <<< "$out")"
-    [[ -n "$checksum" ]] || checksum="$sum"
-    if [[ "$sum" != "$checksum" ]]; then
-      echo "bench/ractors.sh: $* with $ractors Ractors answered checksum $sum, not $checksum" >&2
-      return 1
-    fi
-    times+=("$ms")
-  done
-  printf '%s\n' "${times[@]}" | LC_ALL=C sort -n | LC_ALL=C awk '
-    { v[NR] = $1 }
-    END { printf "%.1f", (NR % 2) ? v[(NR + 1) / 2] : (v[NR / 2] + v[NR / 2 + 1]) / 2 }
-  '
+  local out sum
+  out="$("$@" "$program" "$ractors" "$units")" || {
+    echo "bench/ractors.sh: failed: $* $program $ractors $units" >&2
+    echo "$out" >&2
+    return 1
+  }
+  sum="$(sed -n 's/^checksum: //p' <<< "$out")"
+  [[ -n "$checksum" ]] || checksum="$sum"
+  if [[ "$sum" != "$checksum" ]]; then
+    echo "bench/ractors.sh: $* with $ractors Ractors answered checksum $sum, not $checksum" >&2
+    return 1
+  fi
+  sed -n 's/^ms: //p' <<< "$out"
 }
+
+# The smaller of two times.
+fastest() { LC_ALL=C awk -v a="$1" -v b="$2" 'BEGIN { print (a == "" || b + 0 < a + 0) ? b : a }'; }
 
 rev="$(git -C "$repo_root" rev-parse --short HEAD)"
 # Only the engine decides the numbers; an edit under bench/ does not.
@@ -157,21 +156,31 @@ git -C "$repo_root" diff --quiet HEAD -- crates core lib stdlib || rev="$rev wit
 before="$(load)"
 out="$(mktemp "${TMPDIR:-/tmp}/spinel-bench-ractors.XXXXXX")"
 trap 'rm -f -- "$out"' EXIT
+# The fastest so far of each case, by its index in `cases` (bash 3 has no
+# associative arrays).
+best_spinel=() best_ruby=()
+for round in $(seq "$runs"); do
+  echo "== round $round of $runs" >&2
+  for i in "${!cases[@]}"; do
+    k="${cases[$i]}"
+    s="$(once "$k" "$spinel" run)"
+    r="$(once "$k" "$ruby")"
+    best_spinel[$i]="$(fastest "${best_spinel[$i]:-}" "$s")"
+    best_ruby[$i]="$(fastest "${best_ruby[$i]:-}" "$r")"
+    echo "   $k Ractors: spinel $s ms, ruby $r ms" >&2
+  done
+done
 rows=()
-for k in "${cases[@]}"; do
-  echo "== $k Ractors" >&2
-  s="$(measure "$k" "$spinel" run)"
-  r="$(measure "$k" "$ruby")"
-  echo "   spinel $s ms, ruby $r ms" >&2
-  rows+=("$(printf 'case\t%s\t%s\t%s' "$k" "$s" "$r")")
+for i in "${!cases[@]}"; do
+  rows+=("$(printf 'case\t%s\t%.1f\t%.1f' "${cases[$i]}" "${best_spinel[$i]}" "${best_ruby[$i]}")")
 done
 after="$(load)"
 {
-  echo "# Written by bench/ractors.sh. Medians in milliseconds; do not edit."
+  echo "# Written by bench/ractors.sh. Fastest runs in milliseconds; do not edit."
   printf 'spinel\t%s\n' "$rev"
   printf 'ruby\t%s\n' "$("$ruby" -e 'print RUBY_DESCRIPTION')"
   printf 'machine\t%s CPUs, 1-minute load average %s before and %s after\n' "$(cpus)" "$before" "$after"
-  printf 'runs\t%s units of work, the median of %s runs each\n' "$units" "$runs"
+  printf 'runs\t%s units of work, the fastest of %s runs each, taken in turns\n' "$units" "$runs"
   printf '#\tractors\tspinel\truby\n'
   printf '%s\n' "${rows[@]}"
 } > "$out"
