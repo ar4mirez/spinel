@@ -1,0 +1,29 @@
+"can not access non-shareable objects in constant Object::S by non-main Ractor."
+true
+"can not access non-shareable objects in constant Object::H by non-main Ractor."
+"can not access non-shareable objects in constant Object::H by non-main Ractor."
+["fz", true, true]
+[[1, "two", [3]], true, true]
+[{a: 1, "b" => [2]}, 1, [2]]
+"can not set constants with non-shareable objects by non-main Ractors"
+"can not access class variables from non-main Ractors (@@v from C)"
+"can not get unshareable values from instance variables of classes/modules from non-main Ractors (@civ from C)"
+5
+"can not set instance variables of classes/modules by non-main Ractors"
+"can not access global variable $g from non-main Ractor"
+"can not access global variable $g from non-main Ractor"
+[true, "UTF-8"]
+1
+2
+1
+12
+{b: 1, c: 2}
+"03.14"
+"[1, 2, 3]"
+[[1, 2, 3], [4, 5, 6], [7, 8, 9], [10]]
+43.5
+"STR"
+[nil, false]
+"xf"
+:hi
+#<RuntimeError: defined with an un-shareable Proc in a different Ractor>

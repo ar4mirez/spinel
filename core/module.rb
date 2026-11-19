@@ -176,7 +176,9 @@ class Module
       top, parts = __const_path__(path)
       raise NameError.new("wrong constant name #{path}", path.to_sym) if parts.empty?
       base = top ? Object : self
-      parts.each_with_index do |part, i|
+      i = 0
+      while i < parts.size
+        part = parts[i]
         unless base.is_a?(Module)
           raise TypeError, "#{base.inspect} does not refer to class/module"
         end
@@ -186,15 +188,16 @@ class Module
           # Past the first segment the walk is a qualified one, `A::B`'s:
           # it does not fall back to `Object`. Measured.
           symbol = __const_name__(part)
-          found = __reflect_const_lookup__(base, symbol, inherit ? :qualified : false)
+          found = __reflect_const_lookup__(base, symbol, inherit ? :qualified : false, true)
           # A miss is an autoload's turn first, then `const_missing`.
           base = found.nil? ? base.__send__(:__const_missing__, symbol, inherit ? :qualified : :own, []) : found[0]
         end
+        i += 1
       end
       return base
     end
     symbol = __const_name__(name)
-    found = __reflect_const_lookup__(self, symbol, inherit)
+    found = __reflect_const_lookup__(self, symbol, inherit, true)
     unless found.nil? || __autoload_awaited__(symbol, inherit)
       __const_deprecation__(symbol)
       return found[0]

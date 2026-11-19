@@ -8,7 +8,7 @@
 //! to the shared table while the other heap reads it, which is what the class
 //! lock (`src/vm.rs`) is for. The second heap has an object of its own for
 //! each class, and the core library's hidden instance variables on it are its
-//! own.
+//! own, starting as a copy of the main heap's (#117, decision 3a).
 //!
 //! Skipped under miri: `spinel_parse` calls into Prism, which is C. The lock's
 //! own coverage under Miri is `vm::tests`.
@@ -93,12 +93,15 @@ fn a_joined_heap_calls_what_the_main_heap_defines_while_it_defines_more() {
     // thread runs one heap at a time, so the main heap stays released while
     // this thread runs the other.
     child.0.reacquire_classes();
-    let later =
-        compile("[1.m199, answer.double, self.class, 1.class.instance_variable_get(:@__probe__)]");
+    let later = compile(
+        "probe = 1.class.instance_variable_get(:@__probe__)
+         1.class.instance_variable_set(:@__probe__, :child)
+         [1.m199, answer.double, self.class, probe]",
+    );
     assert_eq!(
         eval(&mut child.0, &later),
-        "[199, 84, Object, nil]",
-        "the methods are shared, and `@__probe__` on `Integer` is the main heap's alone",
+        "[199, 84, Object, :main]",
+        "the methods are shared, and `@__probe__` on `Integer` starts as the main heap's",
     );
     let object = Builtin::Object.id();
     assert_ne!(
@@ -109,12 +112,17 @@ fn a_joined_heap_calls_what_the_main_heap_defines_while_it_defines_more() {
     child.0.release_classes();
     main.reacquire_classes();
     let probe = compile("1.class.instance_variable_get(:@__probe__)");
-    assert_eq!(eval(&mut main, &probe), ":main");
+    assert_eq!(
+        eval(&mut main, &probe),
+        ":main",
+        "what the joined heap set is its own"
+    );
 }
 
-/// A class a joined heap defines, held by the shared tables in a constant, a
-/// class variable and a singleton's object, is each heap's own object for
-/// that class when either reads it back.
+/// A class a joined heap defines, held by the shared tables in a constant and
+/// a singleton's object, is each heap's own object for that class when either
+/// reads it back. (A class variable is no longer a way to hold it: a heap but
+/// the main one may not touch one, as in CRuby 4.0.9.)
 #[test]
 fn a_class_a_joined_heap_defines_is_each_heaps_own() {
     let mut main = Heap::new();
@@ -128,8 +136,8 @@ fn a_class_a_joined_heap_defines_is_each_heaps_own() {
 
     let define = compile(
         "class Foo
-           @@held = Foo
-           def self.held = @@held
+           HELD = Foo
+           def self.held = HELD
          end
          Bar = Foo
          Baz = Class.new
@@ -160,8 +168,8 @@ fn a_class_a_joined_heap_defines_is_each_heaps_own() {
     main.release_classes();
 
     child.0.reacquire_classes();
-    let again = compile("[Foo.held.equal?(Foo), Foo.later, $added]");
-    assert_eq!(eval(&mut child.0, &again), "[true, 1, nil]");
+    let again = compile("[Foo.held.equal?(Foo), Foo.later]");
+    assert_eq!(eval(&mut child.0, &again), "[true, 1]");
     child.0.release_classes();
 }
 

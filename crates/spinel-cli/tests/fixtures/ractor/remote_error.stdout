@@ -1,0 +1,6 @@
+Ractor::RemoteError
+"thrown by remote Ractor."
+RuntimeError
+"bad input"
+true
+"bad input"

@@ -149,6 +149,12 @@ const SYMBOL_SHIFT: u32 = 8;
 const CLASS_REF_MASK: u64 = 0xff;
 const CLASS_REF_TAG: u64 = 0x44;
 
+/// A value a Ractor other than the main one put in the class tables (#117),
+/// by its index among the program's copies (`ractor.rs`): each heap builds
+/// its own from the copy as it reads the tables. The constant ordinal after
+/// [`CLASS_REF_TAG`]'s, and like it never reaches Ruby code.
+const SHARED_REF_TAG: u64 = 0x54;
+
 const HEAP_MASK: u64 = 0b111;
 const HEAP_TAG: u64 = 0b000;
 
@@ -218,6 +224,22 @@ impl Value {
     #[inline]
     pub(crate) const fn as_class_ref(self) -> Option<u32> {
         if self.bits() & CLASS_REF_MASK == CLASS_REF_TAG {
+            Some((self.bits() >> SYMBOL_SHIFT) as u32)
+        } else {
+            None
+        }
+    }
+
+    /// Copy `index` as the class tables hold it. See [`SHARED_REF_TAG`].
+    #[inline]
+    pub(crate) const fn shared_ref(index: u32) -> Value {
+        Value::from_bits(((index as u64) << SYMBOL_SHIFT) | SHARED_REF_TAG)
+    }
+
+    /// The copy index a [`Value::shared_ref`] names.
+    #[inline]
+    pub(crate) const fn as_shared_ref(self) -> Option<u32> {
+        if self.bits() & CLASS_REF_MASK == SHARED_REF_TAG {
             Some((self.bits() >> SYMBOL_SHIFT) as u32)
         } else {
             None
@@ -410,6 +432,9 @@ impl fmt::Debug for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Some(index) = self.as_class_ref() {
             return write!(f, "class({index})");
+        }
+        if let Some(index) = self.as_shared_ref() {
+            return write!(f, "shared({index})");
         }
         match self.unpack() {
             Unpacked::Fixnum(n) => write!(f, "{n}"),

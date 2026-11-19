@@ -627,6 +627,9 @@ enum Unwind {
 #[path = "threads.rs"]
 mod threads;
 
+#[path = "ractor.rs"]
+pub(crate) mod ractor;
+
 #[path = "ext.rs"]
 pub mod ext;
 
@@ -1769,9 +1772,10 @@ fn reflect_native(
                     // method, so the block's parameters are the method's.
                     let body_iseq = match &definition {
                         Some(Definition::Iseq(iseq)) => Some(Arc::clone(iseq)),
-                        Some(Definition::Proc(body)) => {
-                            proc_parts(scope, *body).map(|(iseq, ..)| iseq)
-                        }
+                        Some(Definition::Proc(body, owner)) => scope
+                            .local_proc(*body, *owner)
+                            .and_then(|body| proc_parts(scope, body))
+                            .map(|(iseq, ..)| iseq),
                         _ => None,
                     };
                     // The name it was defined under, which an alias keeps. A
@@ -1883,7 +1887,10 @@ fn reflect_native(
                     proc_parts(scope, target).map(|(iseq, ..)| iseq)
                 }
                 Some(Definition::Iseq(iseq)) => Some(iseq),
-                Some(Definition::Proc(body)) => proc_parts(scope, body).map(|(iseq, ..)| iseq),
+                Some(Definition::Proc(body, owner)) => scope
+                    .local_proc(body, owner)
+                    .and_then(|body| proc_parts(scope, body))
+                    .map(|(iseq, ..)| iseq),
                 _ => None,
             };
             if let Some(iseq) = &iseq {
@@ -3238,10 +3245,20 @@ fn run<'h>(
                     Insn::GetIvar(name, site) => {
                         let symbol = frames[top].iseq.symbol_ids()[name as usize];
                         let receiver = frames[top].receiver;
+                        if !scope.is_main_ractor() {
+                            scope.take_isolated_ivar();
+                            scope.set_program_read(!threads::in_core_library(&frames));
+                        }
                         let (value, found) = ivar_read(scope, receiver, symbol);
+                        if !scope.is_main_ractor() {
+                            scope.set_program_read(false);
+                        }
                         if let Some((shape, index)) = found {
                             let slot = frames[top].cache_base + site;
                             scope.call_caches_mut().fill_ivar(slot, shape, index);
+                        }
+                        if !scope.is_main_ractor() && scope.take_isolated_ivar() {
+                            return Err(class_ivar_isolation(scope, receiver, symbol, false));
                         }
                         stack.push(value);
                     }
@@ -3268,7 +3285,14 @@ fn run<'h>(
                             return Ok(thawing);
                         }
                         let value = stack.pop().expect("setivar on an empty stack");
-                        ivar_set(scope, receiver, symbol, value)?;
+                        if !scope.is_main_ractor() {
+                            scope.set_program_read(!threads::in_core_library(&frames));
+                        }
+                        let set = ivar_set(scope, receiver, symbol, value);
+                        if !scope.is_main_ractor() {
+                            scope.set_program_read(false);
+                        }
+                        set?;
                         // Where the name is now, for the next write from here.
                         if let (_, Some((shape, index))) = ivar_read(scope, receiver, symbol) {
                             scope.call_caches_mut().fill_ivar(slot, shape, index);
@@ -3293,6 +3317,9 @@ fn run<'h>(
                     // assignment put there.
                     Insn::GetGlobal(name) => {
                         let symbol = frames[top].iseq.symbol_ids()[name as usize];
+                        if !scope.is_main_ractor() {
+                            global_isolation(symbol, &frames)?;
+                        }
                         // A name aliased to a regexp special runs the derivation
                         // rather than reading a cell, so it tracks the *current*
                         // match: measured, a second `=~` moves it.
@@ -3367,6 +3394,9 @@ fn run<'h>(
                     }
                     Insn::SetGlobal(name) => {
                         let symbol = frames[top].iseq.symbol_ids()[name as usize];
+                        if !scope.is_main_ractor() {
+                            global_isolation(symbol, &frames)?;
+                        }
                         // `alias $x $&` makes `$x` read-only, and Ruby names the
                         // alias rather than the special in the message. Measured.
                         if scope.global_special(symbol).is_some()
@@ -3988,6 +4018,9 @@ fn run<'h>(
                     Insn::GetCvar(name) => {
                         let symbol = frames[top].iseq.symbol_ids()[name as usize];
                         let owner = cvar_owner(scope, frames[top].cref)?;
+                        if !scope.is_main_ractor() {
+                            return Err(cvar_isolation(scope, owner, symbol));
+                        }
                         match cvar_read(scope, owner, symbol)? {
                             Some(value) => stack.push(value),
                             None => {
@@ -4011,6 +4044,9 @@ fn run<'h>(
                     Insn::SetCvar(name) => {
                         let symbol = frames[top].iseq.symbol_ids()[name as usize];
                         let owner = cvar_owner(scope, frames[top].cref)?;
+                        if !scope.is_main_ractor() {
+                            return Err(cvar_isolation(scope, owner, symbol));
+                        }
                         let value = stack.pop().expect("setcvar on an empty stack");
                         scope.cvar_set(owner, symbol, value);
                     }
@@ -4180,12 +4216,24 @@ fn run<'h>(
                             stack.push(value);
                             return Ok(Step::Next);
                         }
+                        if !scope.is_main_ractor() {
+                            scope.take_isolated();
+                            scope.set_program_read(!threads::in_core_library(&frames));
+                        }
                         let found = match how {
                             ConstScope::Lexical => scope.const_get(cref, symbol),
                             ConstScope::Qualified | ConstScope::Top => {
                                 scope.const_get_qualified(from, symbol)
                             }
                         };
+                        if !scope.is_main_ractor() {
+                            scope.set_program_read(false);
+                        }
+                        // A Ractor other than the main one may not have
+                        // what the main one set unshareable (#117).
+                        if !scope.is_main_ractor() && scope.take_isolated() {
+                            return Err(constant_isolation(scope, cref, from, how, symbol));
+                        }
                         // An autoload in a scope searched before the one that
                         // holds the constant comes first: it is the miss path's
                         // to load (#709).
@@ -4295,6 +4343,12 @@ fn run<'h>(
                         let redefined = scope.const_get_here(target, symbol).is_some();
                         let location = frame_position(&frames[top]);
                         scope.const_set_at(target, symbol, value, location);
+                        if !scope.is_main_ractor() && scope.take_isolated() {
+                            return Err(Error::raise(
+                                "Ractor::IsolationError",
+                                "can not set constants with non-shareable objects by non-main Ractors",
+                            ));
+                        }
                         // `Foo = Class.new` is how an anonymous class gets a name,
                         // and the only way one ever does. Only the first assignment
                         // names it: `A = Class.new; B = A` leaves both `"A"`.
@@ -4352,6 +4406,7 @@ fn run<'h>(
                                 scope.const_get_qualified(from, symbol)
                             }
                         };
+                        scope.take_isolated();
                         // An autoload not yet loaded is a constant, and
                         // `defined?` does not load it (#709).
                         let found = match found {
@@ -5973,6 +6028,11 @@ fn light_ivar_reader(
     if let Some(value) = scope.cached_ivar(receiver, slot, SLOT_IVARS) {
         return Some(value);
     }
+    // A Ractor other than the main one reads a miss the full way, which
+    // knows whose code is reading (#117).
+    if !scope.is_main_ractor() {
+        return None;
+    }
     let (value, found) = ivar_read(scope, receiver, name);
     if let Some((shape, index)) = found {
         scope.call_caches_mut().fill_ivar(slot, shape, index);
@@ -6834,10 +6894,11 @@ fn dispatch<'h>(
                     }
                     Ok(None)
                 }
-                Some(Definition::Proc(block)) => {
+                Some(Definition::Proc(block, owner)) => {
                     // `define_method`'s body (#28): the `Proc` run as this
                     // method, so `super` inside it starts from the class it was
                     // found on, under the name it was found by.
+                    let block = local_body(scope, block, owner)?;
                     let call = Pending {
                         owner: Some(method.owner),
                         defined_as: Some(call.name),
@@ -7627,6 +7688,97 @@ fn check_arity(spec: &ParamSpec, given: usize) -> Result<(), Error> {
 // ---------------------------------------------------------------------------
 // Procs, methods, and the classes of things
 // ---------------------------------------------------------------------------
+
+/// The globals a Ractor other than the main one has of its own, measured on
+/// CRuby 4.0.9; reading or writing any other there raises (#117). The core
+/// library's own reads — `Array#join`'s `$,` — are CRuby's C, which reads
+/// them unchecked.
+fn global_isolation(symbol: SymbolId, frames: &[Call]) -> Result<(), Error> {
+    const OWN: [&str; 21] = [
+        "$stdin", "$stdout", "$stderr", "$>", "$VERBOSE", "$-v", "$-w", "$DEBUG", "$-d", "$/",
+        "$-0", "$$", "$?", "$!", "$@", "$_", "$~", "$-i", "$-l", "$-p", "$-a",
+    ];
+    let name = symbol_name(symbol);
+    if OWN.contains(&name.as_str()) || threads::in_core_library(frames) {
+        return Ok(());
+    }
+    Err(Error::raise(
+        "Ractor::IsolationError",
+        format!("can not access global variable {name} from non-main Ractor"),
+    ))
+}
+
+/// A module as its own name, or its `inspect` when it has none.
+fn module_inspect(scope: &mut HandleScope<'_>, module: Value) -> String {
+    let id = class_id_of(scope, module);
+    match id.and_then(|id| scope.classes().name(id).map(str::to_owned)) {
+        Some(name) => name,
+        None => inspect(scope, module),
+    }
+}
+
+/// What a Ractor other than the main one meets touching a class variable:
+/// "can not access class variables from non-main Ractors (@@v from C)".
+fn cvar_isolation(scope: &mut HandleScope<'_>, owner: ClassId, symbol: SymbolId) -> Error {
+    let object = scope.class_object(owner);
+    let owner = module_inspect(scope, object);
+    Error::raise(
+        "Ractor::IsolationError",
+        format!(
+            "can not access class variables from non-main Ractors ({} from {owner})",
+            symbol_name(symbol)
+        ),
+    )
+}
+
+/// The `Ractor::IsolationError` a Ractor other than the main one meets
+/// reading a constant the main one set to an unshareable object, naming the
+/// module that holds it as CRuby does: "can not access non-shareable objects
+/// in constant Object::S by non-main Ractor.".
+fn constant_isolation(
+    scope: &mut HandleScope<'_>,
+    cref: CrefId,
+    from: ClassId,
+    how: ConstScope,
+    symbol: SymbolId,
+) -> Error {
+    let classes = scope.classes();
+    let lexical = if how == ConstScope::Lexical {
+        classes
+            .nesting(cref)
+            .into_iter()
+            .find(|&id| classes.const_get_here(id, symbol).is_some())
+    } else {
+        None
+    };
+    let owner = lexical
+        .or_else(|| {
+            classes
+                .const_qualified_owner(from, symbol)
+                .map(|(owner, _)| owner)
+        })
+        .unwrap_or(from);
+    let name = if owner == Builtin::Object.id() {
+        format!("Object::{}", symbol_name(symbol))
+    } else {
+        qualified_name(scope, owner, symbol)
+    };
+    Error::raise(
+        "Ractor::IsolationError",
+        format!("can not access non-shareable objects in constant {name} by non-main Ractor."),
+    )
+}
+
+/// A `define_method` body as this heap runs it: see
+/// [`HandleScope::local_proc`].
+fn local_body(scope: &mut HandleScope<'_>, block: Value, owner: u32) -> Result<Value, Error> {
+    scope.local_proc(block, owner).ok_or_else(|| {
+        Error::raise(
+            "RuntimeError",
+            "defined with an un-shareable Proc in a different Ractor",
+        )
+    })
+}
 
 /// Build a `Proc` capturing `env` and `receiver`.
 #[allow(clippy::too_many_arguments)]
@@ -8526,7 +8678,7 @@ fn proc_parts(
     let body = proc_body(scope, value)?;
     let iseq = match scope.definitions().get(body)? {
         Definition::Iseq(iseq) => Arc::clone(iseq),
-        Definition::Native(_) | Definition::Proc(_) => return None,
+        Definition::Native(_) | Definition::Proc(..) => return None,
     };
     let handle = scope.root(value);
     Some((
@@ -10844,7 +10996,28 @@ pub(crate) fn ivar_get(
     object: Value,
     name: SymbolId,
 ) -> Result<Value, Error> {
-    Ok(ivar_read(scope, object, name).0)
+    let value = ivar_read(scope, object, name).0;
+    if scope.is_main_ractor() {
+        return Ok(value);
+    }
+    ivar_got_elsewhere(scope, object, name, value)
+}
+
+/// [`ivar_get`]'s answer in a Ractor other than the main one, which a read
+/// of the main one's class may have refused (#117). Out of line, so the
+/// reads every `class_of` makes keep the code they had.
+#[cold]
+#[inline(never)]
+fn ivar_got_elsewhere(
+    scope: &mut HandleScope<'_>,
+    object: Value,
+    name: SymbolId,
+    value: Value,
+) -> Result<Value, Error> {
+    if scope.take_isolated_ivar() {
+        return Err(class_ivar_isolation(scope, object, name, false));
+    }
+    Ok(value)
 }
 
 /// [`ivar_get`], and where the value was found: the object's shape and the
@@ -10865,10 +11038,10 @@ fn ivar_read(
     let handle = nested.root(object);
     let shape = nested.shape(handle);
     if shape == ShapeId::NONE {
-        return (Value::NIL, None);
+        return (ivar_missing(&mut nested, handle, name), None);
     }
     let Some(index) = nested.shapes().index_of(shape, name) else {
-        return (Value::NIL, None);
+        return (ivar_missing(&mut nested, handle, name), None);
     };
     let storage = ivar_storage(&nested, handle);
     debug_assert!(storage != Value::NIL, "a shape with no storage behind it");
@@ -10876,6 +11049,208 @@ fn ivar_read(
     let storage = nested.root(storage);
     let value = nested.slot(storage, index as usize);
     (value, (!side).then_some((shape, index)))
+}
+
+/// What [`ivar_read`] answers for a name `object` holds none of: nil, but
+/// for a class in a Ractor other than the main one (#117), where it is the
+/// main one's, as [`foreign_class_ivar`] reads it.
+#[inline(always)]
+fn ivar_missing<'h>(scope: &mut HandleScope<'h>, object: Handle<'h>, name: SymbolId) -> Value {
+    if scope.is_main_ractor() {
+        return Value::NIL;
+    }
+    ivar_missing_elsewhere(scope, object, name)
+}
+
+#[cold]
+#[inline(never)]
+fn ivar_missing_elsewhere<'h>(
+    scope: &mut HandleScope<'h>,
+    object: Handle<'h>,
+    name: SymbolId,
+) -> Value {
+    if name == crate::shared::symbols::class_id_ivar() {
+        return Value::NIL;
+    }
+    match scope.class_id_of(object) {
+        Some(id) => foreign_class_ivar(scope, object, id, name),
+        None => Value::NIL,
+    }
+}
+
+/// The core library's class-level state that each Ractor starts afresh
+/// rather than from the main one's (decision 3a): which Ractor it is, its
+/// locals, recursion guards, handlers that hold `Proc`s.
+const RACTOR_OWN_IVARS: [&str; 11] = [
+    "@__current__",
+    "@__main__",
+    "@__locals__",
+    "@__inspecting__",
+    "@__hashing__",
+    "@__comparing__",
+    "@__at_exit__",
+    "@__handlers__",
+    "@__ending__",
+    "@__default__",
+    "@__unfinished__",
+];
+
+/// Instance variable `name` of class `id`, which `object` is this heap's
+/// object for, in a Ractor other than the main one, where it holds none of
+/// its own (#117). The core library's state, spelled `@__name__`, starts as
+/// a copy of the main Ractor's, kept from then on as this one's own; the
+/// program's is the main one's, read each time, when it is shareable, and
+/// otherwise nil with the read marked refused, for the instruction to raise.
+fn foreign_class_ivar<'h>(
+    scope: &mut HandleScope<'h>,
+    object: Handle<'h>,
+    id: ClassId,
+    name: SymbolId,
+) -> Value {
+    // The core library's own state, read by its own code (`Thread`'s
+    // `@all`), is the Ractor's as `@__name__` is.
+    if crate::heap::is_hidden(name) || !scope.program_read() {
+        let spelled = symbol_name(name);
+        if RACTOR_OWN_IVARS.contains(&spelled.as_str()) {
+            return Value::NIL;
+        }
+        let Some(value) = scope.inherit_ivar(id, name) else {
+            return Value::NIL;
+        };
+        let value = scope.root(value);
+        let (object, held) = (scope.get(object), scope.get(value));
+        let _ = ivar_set(scope, object, name, held);
+        return scope.get(value);
+    }
+    scope.main_class_ivar(id, name, true).unwrap_or(Value::NIL)
+}
+
+/// In a Ractor other than the main one, the program may not set a class's
+/// instance variable (#117). Out of line, as [`ivar_got_elsewhere`] is.
+#[cold]
+#[inline(never)]
+fn ivar_set_elsewhere<'h>(
+    scope: &mut HandleScope<'h>,
+    object: Handle<'h>,
+    name: SymbolId,
+) -> Result<(), Error> {
+    if scope.program_read() && !crate::heap::is_hidden(name) && scope.class_id_of(object).is_some()
+    {
+        let value = scope.get(object);
+        return Err(class_ivar_isolation(scope, value, name, true));
+    }
+    Ok(())
+}
+
+/// Whether the primitive about to run answers the program: its caller is
+/// the program's code, or a core-library method the program called (#117).
+fn called_by_program(frames: &[Call]) -> bool {
+    match frames {
+        [] => false,
+        [.., last] if !frame_in_core(last) => true,
+        [.., below, _] => !frame_in_core(below),
+        _ => false,
+    }
+}
+
+/// Whether `frame` runs the core library's code.
+fn frame_in_core(frame: &Call) -> bool {
+    frame
+        .iseq
+        .path
+        .as_deref()
+        .is_some_and(|path| path.starts_with("<internal:"))
+}
+
+/// Whether a `Module#const_get` lookup answers the program: the frame below
+/// the core library's run of `const_get` calls (a path's first segment is
+/// one more) is the program's.
+fn const_get_by_program(frames: &[Call]) -> bool {
+    frames
+        .iter()
+        .rposition(|frame| !(frame_in_core(frame) && &*frame.iseq.name == "const_get"))
+        .is_some_and(|below| !frame_in_core(&frames[below]))
+}
+
+/// [`reflect_native`] in a Ractor other than the main one (#117), where a
+/// constant the program reads through `Module#const_get` follows the rule a
+/// constant it names does, and one it sets through `Module#const_set` the
+/// rule an assignment does: CRuby's `Ractor::IsolationError` for what may
+/// not cross. Out of line, so the main Ractor's reflection keeps its code.
+#[cold]
+#[inline(never)]
+fn reflect_elsewhere(
+    scope: &mut HandleScope<'_>,
+    stack: &mut Stack,
+    frames: &[Call],
+    call: &Pending,
+    op: ReflectOp,
+    position: Option<(Arc<str>, i32)>,
+) -> Result<Option<Unwind>, Error> {
+    scope.take_isolated();
+    let program = op == ReflectOp::ConstLookup
+        && call.args.get(3).is_some_and(|answers| answers.is_truthy())
+        && const_get_by_program(frames);
+    scope.set_program_read(program);
+    let answered = reflect_native(scope, stack, call, op, position);
+    scope.set_program_read(false);
+    let refused = scope.take_isolated();
+    let answered = answered?;
+    if refused {
+        let module = call
+            .args
+            .first()
+            .and_then(|&module| class_id_of(scope, module))
+            .unwrap_or(Builtin::Object.id());
+        let name = call
+            .args
+            .get(1)
+            .and_then(|v| v.as_symbol())
+            .unwrap_or_else(|| symbol("?"));
+        match op {
+            ReflectOp::ConstSet => {
+                return Err(Error::raise(
+                    "Ractor::IsolationError",
+                    "can not set constants with non-shareable objects by non-main Ractors",
+                ));
+            }
+            ReflectOp::ConstLookup if program => {
+                return Err(constant_isolation(
+                    scope,
+                    CrefId::ROOT,
+                    module,
+                    ConstScope::Qualified,
+                    name,
+                ));
+            }
+            _ => {}
+        }
+    }
+    Ok(answered)
+}
+
+/// What a Ractor other than the main one meets reading a class's instance
+/// variable the main one set unshareable, or writing one of the program's.
+fn class_ivar_isolation(
+    scope: &mut HandleScope<'_>,
+    object: Value,
+    name: SymbolId,
+    set: bool,
+) -> Error {
+    if set {
+        return Error::raise(
+            "Ractor::IsolationError",
+            "can not set instance variables of classes/modules by non-main Ractors",
+        );
+    }
+    let owner = module_inspect(scope, object);
+    Error::raise(
+        "Ractor::IsolationError",
+        format!(
+            "can not get unshareable values from instance variables of classes/modules from non-main Ractors ({} from {owner})",
+            symbol_name(name)
+        ),
+    )
 }
 
 /// Whether `object` holds an instance variable called `name`.
@@ -10910,6 +11285,9 @@ pub(crate) fn ivar_set(
     }
     let mut nested = scope.nested();
     let handle = nested.root(object);
+    if !nested.is_main_ractor() {
+        ivar_set_elsewhere(&mut nested, handle, name)?;
+    }
     // Named only on refusal. `class_name` reaches `class_of`, which reads a
     // class object's own `@__id__` through this function — asking for it on
     // every write would make writing that very ivar a regress.
@@ -12485,7 +12863,8 @@ fn native_call<'h>(
                         // `define_method(:initialize) { ... }`, as `fiddle`'s
                         // `CStructBuilder.create` makes one (#105): the Proc
                         // run as the method, as `dispatch` runs it.
-                        Some(Definition::Proc(block)) => {
+                        Some(Definition::Proc(block, owner)) => {
+                            let block = local_body(scope, block, owner)?;
                             push_proc_frame_as(
                                 scope,
                                 BlockStack::Running(stack),
@@ -13758,6 +14137,7 @@ fn native_call<'h>(
 
         Native::Fiber(op) => fiber_native(scope, stack, frames, &call, op, ids),
         Native::Thread(op) => thread_native(scope, stack, frames, &call, op, ids),
+        Native::Ractor(op) => ractor::native(scope, stack, frames, &call, op, ids),
         Native::Gc(op) => {
             let value = gc_native(scope, &call, op);
             stack.push(value);
@@ -13777,7 +14157,10 @@ fn native_call<'h>(
                 ReflectOp::ConstSet => program_position(frames),
                 _ => None,
             };
-            reflect_native(scope, stack, &call, op, position)
+            if scope.is_main_ractor() {
+                return reflect_native(scope, stack, &call, op, position);
+            }
+            reflect_elsewhere(scope, stack, frames, &call, op, position)
         }
         Native::Str(op) => str_native(scope, stack, &call, op),
         Native::NumCompare => {
@@ -14270,7 +14653,12 @@ fn native_call<'h>(
                     (method.body, method.cref, Some(origin))
                 }
                 None => (
-                    scope.definitions_mut().add(Definition::Proc(body_value)),
+                    {
+                        let owner = scope.ractor_id();
+                        scope
+                            .definitions_mut()
+                            .add(Definition::Proc(body_value, owner))
+                    },
                     call.cref,
                     None,
                 ),
@@ -15501,6 +15889,12 @@ fn native_call<'h>(
                     call.receiver,
                 ));
             }
+            // In a Ractor other than the main one these raise, as the
+            // instructions do (#117); `class_variables` and
+            // `remove_class_variable` do not, measured on CRuby 4.0.9.
+            if !scope.is_main_ractor() {
+                return Err(cvar_isolation(scope, id, symbol));
+            }
             match op {
                 CvarOp::Names => unreachable!("answered above"),
                 CvarOp::Defined => {
@@ -15868,14 +16262,31 @@ fn native_call<'h>(
         }
 
         Native::IvarReader(name) => {
-            let value = ivar_get(scope, call.receiver, name)?;
-            stack.push(value);
+            // The program's `attr_reader` on a class, in a Ractor other than
+            // the main one, reads as the program's own `@a` does (#117).
+            let child = !scope.is_main_ractor();
+            if child {
+                scope.set_program_read(!threads::in_core_library(frames));
+            }
+            let value = ivar_get(scope, call.receiver, name);
+            if child {
+                scope.set_program_read(false);
+            }
+            stack.push(value?);
             Ok(None)
         }
 
         Native::IvarWriter(name) => {
             let value = call.args.first().copied().unwrap_or(Value::NIL);
-            ivar_set(scope, call.receiver, name, value)?;
+            let child = !scope.is_main_ractor();
+            if child {
+                scope.set_program_read(!threads::in_core_library(frames));
+            }
+            let set = ivar_set(scope, call.receiver, name, value);
+            if child {
+                scope.set_program_read(false);
+            }
+            set?;
             stack.push(value);
             Ok(None)
         }
@@ -15996,22 +16407,27 @@ fn native_call<'h>(
                             call.receiver,
                         ));
                     }
-                    match op {
-                        IvarOp::Get => ivar_get(scope, call.receiver, ivar)?,
-                        IvarOp::Defined => {
-                            if ivar_defined(scope, call.receiver, ivar)? {
-                                Value::TRUE
-                            } else {
-                                Value::FALSE
-                            }
-                        }
+                    // The program's `instance_variable_get`/`set` on a class,
+                    // in a Ractor other than the main one, reads and writes as
+                    // its `@a` does (#117).
+                    let child = !scope.is_main_ractor();
+                    if child {
+                        scope.set_program_read(called_by_program(frames));
+                    }
+                    let answered = match op {
+                        IvarOp::Get => ivar_get(scope, call.receiver, ivar),
+                        IvarOp::Defined => ivar_defined(scope, call.receiver, ivar).map(bool_value),
                         IvarOp::Set => {
                             let to = call.args.get(1).copied().unwrap_or(Value::NIL);
-                            ivar_set(scope, call.receiver, ivar, to)?
+                            ivar_set(scope, call.receiver, ivar, to)
                         }
-                        IvarOp::Remove => ivar_remove(scope, call.receiver, ivar, argument)?,
+                        IvarOp::Remove => ivar_remove(scope, call.receiver, ivar, argument),
                         IvarOp::Names => unreachable!("handled above"),
+                    };
+                    if child {
+                        scope.set_program_read(false);
                     }
+                    answered?
                 }
             };
             stack.push(value);
@@ -17275,6 +17691,116 @@ pub fn install_primitives(scope: &mut HandleScope<'_>) {
             Builtin::Kernel,
             &["__fiber_status__"],
             Native::Fiber(FiberOp::Status),
+        ),
+        (
+            Builtin::Kernel,
+            &["__ractor_register__"],
+            Native::Ractor(crate::method::RactorOp::Register),
+        ),
+        (
+            Builtin::Kernel,
+            &["__ractor_warn_once__"],
+            Native::Ractor(crate::method::RactorOp::WarnOnce),
+        ),
+        (
+            Builtin::Kernel,
+            &["__ractor_new__"],
+            Native::Ractor(crate::method::RactorOp::New),
+        ),
+        (
+            Builtin::Kernel,
+            &["__ractor_id__"],
+            Native::Ractor(crate::method::RactorOp::Id),
+        ),
+        (
+            Builtin::Kernel,
+            &["__ractor_count__"],
+            Native::Ractor(crate::method::RactorOp::Count),
+        ),
+        (
+            Builtin::Kernel,
+            &["__ractor_info__"],
+            Native::Ractor(crate::method::RactorOp::Info),
+        ),
+        (
+            Builtin::Kernel,
+            &["__ractor_port__"],
+            Native::Ractor(crate::method::RactorOp::Port),
+        ),
+        (
+            Builtin::Kernel,
+            &["__ractor_port_new__"],
+            Native::Ractor(crate::method::RactorOp::PortNew),
+        ),
+        (
+            Builtin::Kernel,
+            &["__ractor_port_owner__"],
+            Native::Ractor(crate::method::RactorOp::PortOwner),
+        ),
+        (
+            Builtin::Kernel,
+            &["__ractor_port_send__"],
+            Native::Ractor(crate::method::RactorOp::PortSend),
+        ),
+        (
+            Builtin::Kernel,
+            &["__ractor_port_take__"],
+            Native::Ractor(crate::method::RactorOp::PortTake),
+        ),
+        (
+            Builtin::Kernel,
+            &["__ractor_port_close__"],
+            Native::Ractor(crate::method::RactorOp::PortClose),
+        ),
+        (
+            Builtin::Kernel,
+            &["__ractor_port_closed__"],
+            Native::Ractor(crate::method::RactorOp::PortClosed),
+        ),
+        (
+            Builtin::Kernel,
+            &["__ractor_generation__"],
+            Native::Ractor(crate::method::RactorOp::Generation),
+        ),
+        (
+            Builtin::Kernel,
+            &["__ractor_wait__"],
+            Native::Ractor(crate::method::RactorOp::Wait),
+        ),
+        (
+            Builtin::Kernel,
+            &["__ractor_outcome__"],
+            Native::Ractor(crate::method::RactorOp::Outcome),
+        ),
+        (
+            Builtin::Kernel,
+            &["__ractor_finish__"],
+            Native::Ractor(crate::method::RactorOp::Finish),
+        ),
+        (
+            Builtin::Kernel,
+            &["__ractor_start__"],
+            Native::Ractor(crate::method::RactorOp::Start),
+        ),
+        (
+            Builtin::Kernel,
+            &["__ractor_shareable__"],
+            Native::Ractor(crate::method::RactorOp::Shareable),
+        ),
+        (
+            Builtin::Kernel,
+            &["__ractor_monitor__"],
+            Native::Ractor(crate::method::RactorOp::Monitor),
+        ),
+        (
+            Builtin::Kernel,
+            &["__ractor_freeze__"],
+            Native::Ractor(crate::method::RactorOp::Freeze),
+        ),
+        (
+            Builtin::Kernel,
+            &["__ractor_freeze_deep__"],
+            Native::Ractor(crate::method::RactorOp::FreezeDeep),
         ),
         (
             Builtin::Kernel,

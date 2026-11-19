@@ -1,0 +1,4 @@
+"MOVED"
+Ractor::MovedError
+"can not send any methods to a moved object"
+"can not send any methods to a moved object"

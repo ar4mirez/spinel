@@ -1,0 +1,3 @@
+remote_error.rb:1: warning: Ractor API is experimental and may change in future versions of Ruby.
+#<Thread:0x00007f66eb299768 run> terminated with exception (report_on_exception is true):
+remote_error.rb:1:in 'block in <main>': bad input (RuntimeError)

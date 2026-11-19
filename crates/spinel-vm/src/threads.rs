@@ -956,10 +956,25 @@ fn wake_ready(scope: &mut HandleScope<'_>, timeout: Option<Duration>) -> usize {
     let mut fds: Vec<libc::pollfd> = polled.iter().map(|(_, p)| *p).collect();
     // Two threads may wait on one descriptor, which macOS's `poll` cannot be
     // asked twice about.
-    if crate::socket::poll(&mut fds, ms).is_ok_and(|ready| ready > 0) {
+    // A heap that waits for nothing but descriptors and the clock holds no
+    // borrow of the class tables: another Ractor may write them meanwhile
+    // (#117). While the program has one Ractor this is two loads.
+    let waits = ms != 0;
+    if waits {
+        scope.release_classes();
+    }
+    let polled_ok = crate::socket::poll(&mut fds, ms);
+    if waits {
+        scope.reacquire_classes();
+    }
+    let ractor_fd = super::ractor::wake_fd(scope);
+    if polled_ok.is_ok_and(|ready| ready > 0) {
         for ((index, _), pollfd) in polled.iter().zip(&fds) {
             if pollfd.revents == 0 {
                 continue;
+            }
+            if pollfd.fd == ractor_fd {
+                super::ractor::drain(scope);
             }
             if *index == usize::MAX {
                 if let Some(lock) = &wake {

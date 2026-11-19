@@ -3229,8 +3229,16 @@ impl<'h> HandleScope<'h> {
         }
         // Anonymous: naming it needs `inspect` on the object it belongs to.
         let singleton = self.define(None, Kind::Class, Some(class), true);
-        let owner = self.get(handle);
-        let owner = self.local_to_shared(owner);
+        // A Ractor other than the main one keeps the object its singleton is
+        // attached to itself: the tables hold no object of its heap (#117).
+        let owner = if !self.is_main_ractor() && self.class_id_of(handle).is_none() {
+            let owner = self.get(handle);
+            self.set_local_attached(singleton, owner);
+            Value::NIL
+        } else {
+            let owner = self.get(handle);
+            self.local_to_shared(owner)
+        };
         self.classes_mut().entry_mut(singleton).attached = Some(owner);
         let object = self.class_object(singleton);
         self.set_class(handle, object);
