@@ -99,6 +99,10 @@ jobs:
 
       - name: Test
         run: cargo test --workspace
+        # The one test that leaves the machine: `net/https` fetches a real
+        # page (#107, tests/openssl_tls.rs); unset, it skips.
+        env:
+          SPINEL_TLS_NET_TEST_URL: https://example.com/
 
       # Plain Bundler in a project `spinel install` made (#71): CRuby's own
       # `bundle check` and `bundle exec` must find the gems Spinel installed,

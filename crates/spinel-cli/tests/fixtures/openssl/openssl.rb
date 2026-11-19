@@ -194,10 +194,11 @@ puts try { OpenSSL.fixed_length_secure_compare("abc", "abcd") }
 puts try { OpenSSL.fixed_length_secure_compare("abc", :abc) }
 
 # Defined on CRuby, whose C half has them all; undefined on Spinel until
-# their phase lands, rather than standing in for them. Either way the line
-# reads true.
+# their phase lands, rather than standing in for them. Phase 2 (#107) brought
+# PKey, X509, SSL, BN and, with SSL, Buffering. Either way the line reads true.
 puts "== what is not here yet is not here"
 cruby = RUBY_ENGINE == "ruby"
+landed = %i[PKey X509 SSL BN Buffering]
 %i[Cipher PKey X509 SSL BN KDF Buffering PKCS5].each do |name|
-  p [name, OpenSSL.const_defined?(name, false) == cruby]
+  p [name, OpenSSL.const_defined?(name, false) == (cruby || landed.include?(name))]
 end

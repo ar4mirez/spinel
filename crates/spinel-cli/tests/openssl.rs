@@ -126,8 +126,10 @@ puts grown < 16_384 ? "bounded" : "grew #{grown} KB""#,
     assert_eq!(out, "bounded\n");
 }
 
-/// What phase 1 does not have is not there: `require "openssl"` loads, and
-/// the classes of later phases are undefined rather than stood in for.
+/// What the phases so far do not have is not there: `require "openssl"`
+/// loads, phase 2's keys, certificates, TLS, big numbers and ASN.1 are
+/// defined (#107, `tests/openssl_tls.rs`), and the classes of later phases
+/// are undefined rather than stood in for.
 #[test]
 fn later_phases_are_absent_not_faked() {
     let out = spinel(
@@ -135,8 +137,5 @@ fn later_phases_are_absent_not_faked() {
 p %i[Cipher PKey X509 SSL BN KDF ASN1].map { |c| OpenSSL.const_defined?(c, false) }
 p 1.respond_to?(:to_bn)"#,
     );
-    assert_eq!(
-        out,
-        "[false, false, false, false, false, false, false]\nfalse\n"
-    );
+    assert_eq!(out, "[false, true, true, true, true, false, true]\ntrue\n");
 }

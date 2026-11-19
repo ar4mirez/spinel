@@ -13,10 +13,16 @@
 # the C does, on the system's OpenSSL 3, and answer a failure as the
 # `[class, message, errors]` that `ossl_raise` would have raised.
 #
-# Everything else in `ext/openssl` — `Cipher`, `PKey`, `X509`, `SSL`, `BN`,
-# `KDF`, `ASN1` and the rest — is not here, and neither is anything that
-# would stand in for it: those constants are undefined until their phase
-# lands (TLS is #107), and `openssl.rb` skips their Ruby halves.
+# Phase 2 (#107) adds keys, certificates and TLS: `ossl_asn1.c`, `ossl_bn.c`,
+# `ossl_pkey*.c`, `ossl_x509*.c`, `ossl_ssl.c` and `ossl_ssl_session.c`, in
+# `openssl/spinel/*.rb`, required at the end of this file, over
+# `__openssl_tls__` (`spinel-vm/src/openssl/tls.rs`).
+#
+# The rest of `ext/openssl` — `Cipher`, `KDF`, `PKCS7`, `PKCS12`, `OCSP`,
+# `Config`, `Engine`, `Timestamp`, `Netscape` and the rest — is not here,
+# and neither is anything that would stand in for it: those constants are
+# undefined until their phase lands, and `openssl.rb` skips their Ruby
+# halves.
 #
 # ponytail: `OpenSSL.debug` and `debug=` are not here either. With debug on,
 # CRuby warns about every OpenSSL error it collects, including the ones it
@@ -79,11 +85,21 @@ module OpenSSL
     when 5 then return RangeError.new(message)
     when 6 then return RuntimeError.new(message)
     end
+    return TypeError.new(message) if code == 15
     klass =
       case code
       when 1 then Digest::DigestError
       when 2 then HMACError
-      else Random::RandomError
+      when 3 then Random::RandomError
+      when 7 then PKey::PKeyError
+      when 8 then X509::CertificateError
+      when 9 then X509::NameError
+      when 10 then X509::ExtensionError
+      when 11 then X509::StoreError
+      when 12 then SSL::SSLError
+      when 13 then ASN1::ASN1Error
+      when 14 then SSL::Session::SessionError
+      else BNError
       end
     error = klass.new(message)
     error.instance_variable_set(:@errors, errors)
@@ -454,3 +470,9 @@ module OpenSSL
     end
   end
 end
+
+require "openssl/spinel/asn1"
+require "openssl/spinel/bn"
+require "openssl/spinel/pkey"
+require "openssl/spinel/x509"
+require "openssl/spinel/ssl"

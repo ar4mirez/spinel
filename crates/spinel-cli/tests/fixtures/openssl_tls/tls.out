@@ -1,0 +1,73 @@
+key class: [OpenSSL::PKey::RSA, "rsaEncryption", true, true]
+public key: [OpenSSL::PKey::RSA, false, true, true]
+pem: ["-----BEGIN RSA PRIVATE KEY-----\n", "-----BEGIN PUBLIC KEY-----\n", "-----BEGIN PRIVATE KEY-----\n"]
+read back: [true, OpenSSL::PKey::RSA]
+n bits: [2048, 65537]
+params: ["n", "e", "d", "p", "q", "dmp1", "dmq1", "iqmp"]
+sign/verify: [256, true, false]
+compare: [true, false]
+sign with public: ArgumentError: private key is needed
+garbage key: OpenSSL::PKey::PKeyError: Could not parse PKey
+garbage rsa: OpenSSL::PKey::PKeyError: Neither PUB key nor PRIV key
+bad option: OpenSSL::PKey::PKeyError: EVP_PKEY_CTX_ctrl_str(ctx, "rsa_keygen_bits", "x")
+name: ["/DC=org/DC=example/CN=Spinel Test CA", [["DC", "org", 22], ["DC", "example", 22], ["CN", "Spinel Test CA", 12]], "#<OpenSSL::X509::Name CN=Spinel Test CA,DC=example,DC=org>"]
+name rfc2253: ["CN=Spinel Test CA,DC=example,DC=org", "CN=Spinel Test CA,DC=example,DC=org"]
+name cmp: [true, 1, true]
+name comma: "/CN=a/O=b"
+name bad key: OpenSSL::X509::NameError: X509_NAME_add_entry_by_txt: invalid field name (name=hello)
+name no pairs: TypeError: no implicit conversion of nil into String
+cert fields: [2, 85968058283706962416180, OpenSSL::BN, "/CN=localhost", "/DC=org/DC=example/CN=Spinel Test CA", "sha256WithRSAEncryption"]
+cert times: [true, true, 3660.0]
+cert extensions: [["basicConstraints", false], ["keyUsage", true], ["extendedKeyUsage", false], ["subjectAltName", false]]
+san: "DNS:localhost, IP Address:127.0.0.1"
+ca extension: "basicConstraints = critical, CA:TRUE"
+signed by: [true, false, true, false]
+public key back: true
+pem round trip: [true, true, "/CN=localhost"]
+der round trip: true
+load: ["/DC=org/DC=example/CN=Spinel Test CA", "/CN=localhost"]
+garbage cert: OpenSSL::X509::CertificateError: PEM_read_bio_X509: no start line (Expecting: CERTIFICATE)
+empty cert: [0, 0, ""]
+empty not_before: OpenSSL::ASN1::ASN1Error: ASN1_TIME_to_tm
+identity: [true, true, false]
+extension new: ["basicConstraints", "CA:TRUE", false, "0\f\x06\x03U\x1D\x13\x04\x050\x03\x01\x01\xFF"]
+extension bad oid: OpenSSL::X509::ExtensionError: OBJ_txt2obj: unknown object name
+factory bad value: [OpenSSL::X509::ExtensionError, true, "error:1100006A:X509 V3 routines:v2i_BASIC_CONSTRAINTS:invalid name (name=garbage, value=<NULL>)"]
+store verify: [true, 0, "ok", ["/CN=localhost", "/DC=org/DC=example/CN=Spinel Test CA"]]
+empty store: [false, 20, "unable to get local issuer certificate"]
+callback sees: [true, [[true, 0, 1, "/DC=org/DC=example/CN=Spinel Test CA"], [true, 0, 0, "/CN=localhost"]]]
+callback overrides: [true, 0]
+callback rejects: [false, 28, "certificate rejected"]
+callback sets error: [false, 23]
+store add_file missing: OpenSSL::X509::StoreError: X509_LOOKUP_load_file: BIO lib
+store context: [true, 0, 2, "/CN=localhost"]
+round trip: ["TLSv1.3", 0, "/CN=localhost", 1, 4, "echo: hello over TLS\n", "localhost", OpenSSL::SSL::Session, "SSLOK"]
+untrusted: OpenSSL::SSL::SSLError: SSL_connect returned=1 errno=0 peeraddr=127.0.0.1:PORT state=error: certificate verify failed (unable to get local issuer certificate)
+hostname mismatch: OpenSSL::SSL::SSLError: SSL_connect returned=1 errno=0 peeraddr=127.0.0.1:PORT state=error: certificate verify failed (hostname mismatch)
+post_connection_check: OpenSSL::SSL::SSLError: hostname "example.com" does not match the server certificate
+verify_callback: ["echo: cb\n", [[true, 0, 1, "/DC=org/DC=example/CN=Spinel Test CA"], [true, 0, 0, "/CN=localhost"]]]
+verify_callback accepts untrusted: ["echo: anyway\n", 0]
+verify_callback rejects: OpenSSL::SSL::SSLError: SSL_connect returned=1 errno=0 peeraddr=127.0.0.1:PORT state=error: certificate verify failed (certificate rejected)
+verify none: ["echo: plain\n", 20]
+connect_nonblock: [true, "echo: nonblock\n"]
+read before start: OpenSSL::SSL::SSLError: SSL session is not started yet
+socket on a non-IO: TypeError: wrong argument type Object (expected File)
+context frozen: [true, nil]
+bad version: ArgumentError: unrecognized version "TLS9"
+bad ciphers: OpenSSL::SSL::SSLError: SSL_CTX_set_cipher_list: no cipher match
+default params: [1, true, true]
+TLSv1.2 connect: [true, "TLSv1.2", "TLSv1.2"]
+TLSv1.2 unreadable: [:wait_readable, nil]
+TLSv1.2 readable: [1, "data"]
+TLSv1.2 writable: 1
+TLSv1.2 fills: [OpenSSL::SSL::SSLErrorWaitWritable, true, "write would block"]
+TLSv1.2 peer closed: 1
+TLSv1.3 connect: [true, "TLSv1.3", "TLSv1.3"]
+TLSv1.3 unreadable: [:wait_readable, nil]
+TLSv1.3 readable: [1, "data"]
+TLSv1.3 writable: 1
+TLSv1.3 fills: [OpenSSL::SSL::SSLErrorWaitWritable, true, "write would block"]
+TLSv1.3 peer closed: 1
+net/https get: ["200", "text/plain", "hello from GET /spinel HTTP/1.1"]
+net/https by address: ["200", "hello from GET /by-ip HTTP/1.1"]
+net/https untrusted: OpenSSL::SSL::SSLError: SSL_connect returned=1 errno=0 peeraddr=127.0.0.1:PORT state=error: certificate verify failed (unable to get local issuer certificate)
