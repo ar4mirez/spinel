@@ -131,6 +131,14 @@ end
 # The environment, as `ENV`: a live view of the process's own, as CRuby's
 # is. Every read goes to the process and every write is `setenv(3)` or
 # `unsetenv(3)`, so a child, a C library and `ENV` all see one environment.
+# ponytail: unlike CRuby's, this `ENV` is not shareable, so a Ractor other
+# than the main one that touches it raises `Ractor::IsolationError` ("can not
+# access non-shareable objects in constant Object::ENV"). Its cache lives in
+# instance variables (`@cached`, `@cached_for`) on this object, and Spinel's
+# shareable flag also freezes, so making it shareable means moving that cache
+# off it while `ENV.frozen?` stays false. The upgrade, with a test of parallel
+# Ractors writing and reading ENV, is
+# https://github.com/ar4mirez/spinel/issues/865.
 ENV = Object.new
 
 class << ENV
