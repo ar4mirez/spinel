@@ -9,6 +9,20 @@ bytecode a tool reads.
 
 ### Added
 
+- **`pg-spinel`, the pg gem for Spinel**
+  ([#114](https://github.com/ar4mirez/spinel/issues/114)).
+  `gems/pg-spinel/` is pg 1.7.0's Ruby API, upstream's `lib/` unchanged,
+  over a `spinel-ext` extension linked with the system's libpq, as
+  upstream's source gem is (only building that extension needs libpq; it is
+  not a default workspace member).
+  `spinel install` puts it in place of a locked `pg 1.7.0` when
+  `SPINEL_SUBSTITUTES=pg`, leaving the lockfile as Bundler wrote it, and a
+  fixture connects to PostgreSQL and round-trips a query through it.
+  `gems/pg-spinel/build.rb` builds `pg-spinel-1.7.0.1-<platform>.gem`; it
+  is not on rubygems.org yet. Values come back as Strings, as under
+  upstream's default type map; the other type maps, the coders and notice
+  callbacks raise `NotImplementedError`.
+
 - **`sqlite3-spinel`, the sqlite3 gem for Spinel**
   ([#113](https://github.com/ar4mirez/spinel/issues/113)).
   `gems/sqlite3-spinel/` is sqlite3 2.10.2's Ruby API, upstream's `lib/`

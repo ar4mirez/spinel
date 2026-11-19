@@ -1,0 +1,171 @@
+VERSION: ["1.7.0", true, false, true, true]
+constants: [2, 0, 3, 67, 0, 0, 7]
+errors: [[PG::UniqueViolation, PG::IntegrityConstraintViolation, PG::ServerError, PG::Error, StandardError], PG::UniqueViolation, PG::IntegrityConstraintViolation, 291]
+error classes: [PG::Error, PG::SyntaxErrorOrAccessRuleViolation, PG::SyntaxErrorOrAccessRuleViolation, PG::Error]
+res_status: ["PGRES_COMMAND_OK", "UTF-8"]
+Result.new: TypeError: "allocator undefined for PG::Result"
+escape_string: ["O''Reilly", "a\\\\b"]
+quote_ident: ["\"ta\"\"ble\"", "\"sch\".\"tab\"", "UTF-8"]
+escape_bytea: ["\\\\000\\\\377ab", "\x00\xFFa", "a\x00b"]
+escape errors: TypeError: "no implicit conversion of nil into String"
+conninfo_parse: [["dbname", "d"], ["host", "h"], ["port", "1"]]
+conninfo_parse error: PG::Error: "missing \"=\" after \"host\" in connection info string\n"
+parse_connect_args: ["host='h'", "port='1'", "dbname='d'", "user='u'", "password='p'"]
+parse_connect_args hash: ["dbname='d'", "port='5432'"]
+allocate: [[:@calls_to_put_copy_data, :@iopts_for_reset], true]
+allocate db: PG::ConnectionBad: "connection is closed"
+refused: [PG::ConnectionBad, "ASCII-8BIT", true, PG::Connection]
+connect url: [PG::Connection, 0, false, 0]
+connect hash: [true, true, "1"]
+connect string: nil
+connect positional: true
+ivars: [:@calls_to_put_copy_data, :@iopts_for_reset]
+info: [true, "ASCII-8BIT", true, true, true, "", ""]
+versions: [18, 3, true]
+encoding: ["UTF8", #<Encoding:UTF-8>, #<Encoding:UTF-8>, "UTF8", nil]
+inspect: "#<PG::Connection:0x host port user"
+socket_io: [BasicSocket, false, true]
+type maps: [PG::TypeMapAllStrings, true, :string, nil]
+needs_password: [false, true, false]
+conninfo: [:keyword, :envvar, :val, :label, :dispchar, :dispsize]
+create: [PG::Result, 1, "PGRES_COMMAND_OK", "CREATE TABLE", 0, 0, 0, [], nil]
+insert: ["INSERT 0 1", 1, [["1"]], ["1", "UTF-8", false]]
+insert typed: 1
+insert nil: 1
+insert symbol: 1
+select: [4, 8, 4, "SELECT 4"]
+fields: [["id", "body", "score", "data", "n", "flag", "at", "nothing"], false, [true], "UTF-8"]
+values: [["1", "hé llo", "1.5", "\\x00ff", "1099511627776", "t", "2026-11-18 12:34:56", nil], ["2", "two", nil, nil, "7", nil, nil, nil], ["3", "three", nil, nil, nil, nil, nil, nil], ["4", "four", nil, nil, nil, nil, nil, nil]]
+value encodings: [["1", "UTF-8", false], ["hé llo", "UTF-8", false], ["1.5", "UTF-8", false], ["\\x00ff", "UTF-8", false], ["1099511627776", "UTF-8", false], ["t", "UTF-8", false], ["2026-11-18 12:34:56", "UTF-8", false], nil]
+[0]: {"id" => "1", "body" => "hé llo", "score" => "1.5", "data" => "\\x00ff", "n" => "1099511627776", "flag" => "t", "at" => "2026-11-18 12:34:56", "nothing" => nil}
+[3]: {"id" => "4", "body" => "four", "score" => nil, "data" => nil, "n" => nil, "flag" => nil, "at" => nil, "nothing" => nil}
+each: 4
+each enum: [Enumerator, 4, ["1", "hé llo", "1.5", "\\x00ff", "1099511627776", "t", "2026-11-18 12:34:56", nil]]
+map: ["hé llo", "two", "three", "four"]
+column_values: [["hé llo", "two", "three", "four"], [nil, nil, nil, nil]]
+field_values: [["1.5", nil, nil, nil], ["1099511627776", "7", nil, nil]]
+tuple_values: ["2", "two", nil, nil, "7", nil, nil, nil]
+getvalue: ["hé llo", nil, "t", "2026-11-18 12:34:56"]
+getisnull: [false, true, true]
+getlength: [7, 6, 0]
+fname: ["id", "nothing", true]
+fnumber: [1, 7]
+ftype: [23, 25, 701, 17, 20, 16, 1114, 25]
+fmod: [-1, -1, -1, -1, -1, -1, -1, -1]
+fsize: [4, -1, 8, -1, 8, 1, 8, -1]
+fformat: [0, 0, 0, 0, 0, 0, 0, 0]
+ftable: [true, 0, 2, 0]
+misc: [0, 0, nil, false, false, "", nil]
+result inspect: "#<PG::Result:0x status=PGRES_TUPLES_OK ntuples=4 nfields=8 cmd_tuples=4>"
+getvalue range: ArgumentError: "invalid tuple number 9"
+getvalue field range: ArgumentError: "invalid field number 99"
+getvalue type: TypeError: "no implicit conversion of String into Integer"
+[] range: IndexError: "Index 99 is out of range"
+fnumber unknown: ArgumentError: "Unknown field: zz"
+fnumber type: TypeError: "wrong argument type Symbol (expected String)"
+fname range: ArgumentError: "invalid field number -1"
+ftype range: ArgumentError: "invalid field number 8"
+fmod range: ArgumentError: "Column number is out of range: 8"
+ftable range: ArgumentError: "Invalid column index: 8"
+column_values range: IndexError: "no column 8 in result"
+field_values unknown: IndexError: "no such field 'zz' in result"
+tuple_values range: IndexError: "Index 4 is out of range"
+tuple: [PG::Tuple, 8, 8, ["id", "body", "score", "data", "n", "flag", "at", "nothing"], 1, nil]
+tuple values: ["hé llo", "hé llo", nil, nil, nil, "1", "hé llo", :default]
+tuple fetch missing: KeyError: "column not found"
+tuple fetch range: IndexError: "Index 42 is out of range"
+tuple each: [["id", "1"], ["body", "hé llo"]]
+tuple each_value: 8
+tuple inspect: "#<PG::Tuple id: \"2\", body: \"two\", score: nil, data: nil, n: \"7\", flag: nil, at: nil, nothing: nil>"
+tuple values all: ["3", "three", nil, nil, nil, nil, nil, nil]
+tuple has_key: [true, false]
+tuple marshal: [PG::Tuple, ["2", "two", nil, nil, "7", nil, nil, nil], ["id", "body", "score", "data", "n", "flag", "at", "nothing"]]
+each_tuple: ["1", "2", "3", "4"]
+tuple empty: TypeError: "tuple is empty"
+binary: [1, 1, [["\x00\x00\x00\x01", "ASCII-8BIT", false], ["x", "ASCII-8BIT", false], ["\x00\xFF", "ASCII-8BIT", false]]]
+frozen result: [true, [["1"]], {"x" => "1"}, "1"]
+frozen clear: FrozenError: "can't modify frozen PG::Result: #<PG::Result:0x status=PGRES_TUPLES_OK ntuples=1 nfields=1 cmd_tuples=1>"
+frozen field_name_type: FrozenError: "can't modify frozen PG::Result: #<PG::Result:0x status=PGRES_TUPLES_OK ntuples=1 nfields=1 cmd_tuples=1>"
+prepare: [1, "", 0]
+exec_prepared: 1
+describe_prepared: [2, 25, 701, 0]
+prepare typed: [["42"]]
+prepare again: PG::DuplicatePstatement: "ERROR:  prepared statement \"ins\" already exists\n"
+exec_prepared unknown: PG::InvalidSqlStatementName: "ERROR:  prepared statement \"nope\" does not exist\n"
+exec_prepared block: [[["2"]], false]
+unique violation: [PG::UniqueViolation, "ERROR:  duplicate key value violates unique constraint \"notes_body_key\"\nDETAIL:  Key (body)=(two) already exists.\n", "UTF-8", "ERROR:  duplicate key value violates unique constraint \"notes_body_key\"\nDETAIL:  Key (body)=(two) already exists.\n", true, PG::Result, 7, "23505", "notes_body_key", "notes", "ERROR", "duplicate key value violates unique constraint \"notes_body_key\"", "Key (body)=(two) already exists.", nil, true, "ERROR:  duplicate key value violates unique constraint \"notes_body_key\"\n"]
+not null: PG::NotNullViolation: "ERROR:  null value in column \"body\" of relation \"notes\" violates not-null constraint\nDETAIL:  Failing row contains (7, null, null, null, null, null, null).\n"
+syntax error: PG::SyntaxError: "ERROR:  syntax error at or near \"SELEC\"\nLINE 1: SELEC 1\n        ^\n"
+syntax error position: "1"
+undefined table: PG::UndefinedTable: "ERROR:  relation \"nope\" does not exist\nLINE 1: SELECT * FROM nope\n                      ^\n"
+undefined column: PG::UndefinedColumn: "ERROR:  column \"zz\" does not exist\nLINE 1: SELECT zz FROM notes WHERE id = $1\n               ^\n"
+division by zero: PG::DivisionByZero: "ERROR:  division by zero\n"
+invalid text: PG::InvalidTextRepresentation: "ERROR:  invalid input syntax for type integer: \"abc\"\nCONTEXT:  unnamed portal parameter $1 = '...'\n"
+too few params: PG::ProtocolViolation: "ERROR:  bind message supplies 1 parameters, but prepared statement \"\" requires 2\n"
+null byte: ArgumentError: "string contains null byte"
+null byte param: ArgumentError: "string contains null byte"
+params type: TypeError: "wrong argument type String (expected Array)"
+after error: [0, "5"]
+transaction commit: 2
+transaction rollback: nil
+transaction raise: ArgumentError: "boom"
+transaction error: PG::UniqueViolation: "ERROR:  duplicate key value violates unique constraint \"notes_body_key\"\nDETAIL:  Key (body)=(two) already exists.\n"
+after transactions: [0, ["hé llo", "two", "three", "four", "five", "six"]]
+in error: [3, 0]
+escape: ["O''Reilly", "x", "UTF-8"]
+escape_literal: ["'it''s'", " E'back\\\\slash'", "UTF-8"]
+escape_identifier: ["\"My \"\"Table\"\"\"", "\"a.b\"", "\"public\".\"notes\""]
+escape_bytea: ["\\x0001ff", "\x00\x01\xFF"]
+escape type: TypeError: "no implicit conversion of Integer into String"
+embed_params: "SELECT 'it''s', NULL"
+exec block: [[["1"]], PG::Result]
+exec block cleared: [true, PG::Error]
+cleared: [true, "#<PG::Result:0x cleared>"]
+cleared access: PG::Error: "result has been cleared"
+cleared values: PG::Error: "result has been cleared"
+empty query: [0, "PGRES_EMPTY_QUERY", "", 0]
+multi statement: [["2"]]
+make_empty_pgresult: [1, 0]
+make_empty_pgresult error: PG::UnableToSend: ""
+field_name_type: [:symbol, [:one, :two], {one: "1", two: "2"}, :two, "1"]
+field_name_type conn: [:one]
+field_name_type late: ArgumentError: "field names are already materialized"
+field_name_type bad: ArgumentError: "invalid argument :other"
+send_query: [[["1"]], [["2"]], nil]
+send_query_params: [TrueClass, [["42"]], nil]
+send_prepare: 1
+send_query_prepared: [false, [["x"]], nil]
+get_result block: [PG::Result, false]
+sync_exec: [[["1"]], [["3"]], [["2"]], [["4"]]]
+discard_results: [true, [["5"]]]
+single row mode: [[{"n" => "1"}, {"n" => "2"}, {"n" => "3"}], nil]
+single row stream_each_row: [[["1", "x"], ["2", "x"]], nil]
+single row stream_each_tuple: [[["1"], ["2"]], ["1", "2"], nil]
+stream not single: PG::InvalidResultStatus: "PG::Result is not in single row mode"
+nonblocking: [false, false, true]
+flush: [true, true]
+setnonblocking bad: ArgumentError: "Boolean value expected"
+copy in: [1, 2]
+copy out: [["copied\t1\n", "ASCII-8BIT", false], ["copied two\t\\N\n", "ASCII-8BIT", false]]
+copy in error: PG::InvalidTextRepresentation: "ERROR:  invalid input syntax for type bigint: \"notanumber\"\nCONTEXT:  COPY notes, line 1, column n: \"notanumber\"\n"
+copy not copy: ArgumentError: "SQL command is no COPY statement: SELECT 1"
+listen: [[:relname, :be_pid, :extra], "chan", ["payload", "UTF-8", false], true, nil]
+wait_for_notify: ["chan", ["chan", true, "second"], nil]
+large object: [true, 11, "large", "ASCII-8BIT", 11]
+client encoding: ["LATIN1", #<Encoding:ISO-8859-1>, ["\xE9", "ISO-8859-1", false], [233], "UTF8", #<Encoding:UTF-8>]
+client encoding bad: PG::InvalidParameterValue: "ERROR:  invalid value for parameter \"client_encoding\": \"NOPE\"\n"
+client encoding sync: #<Encoding:UTF-8>
+encrypt_password: ["md5871c429757b7a0bf1654fad112b77bd4", "md5871c429757b7a0bf1654fad112b77bd4"]
+ping: [0, 2]
+reset: false
+after reset: [0, [["1"]], 0]
+set_error_verbosity: [1, 2]
+cancel: nil
+finish: nil
+finished: [true, "#<PG::Connection:0x finished>"]
+finish again: PG::ConnectionBad: "connection is closed"
+exec closed: PG::ConnectionBad: "connection is closed"
+db closed: PG::ConnectionBad: "connection is closed"
+status closed: PG::ConnectionBad: "connection is closed"
+error connection: true
+frozen: [FrozenError, "can't modify frozen PG::Connection: #<PG::Connection:0x host port user"]

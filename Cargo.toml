@@ -1,6 +1,9 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "gems/sqlite3-spinel/ext/sqlite3_spinel"]
+members = ["crates/*", "gems/pg-spinel/ext/pg_spinel", "gems/sqlite3-spinel/ext/sqlite3_spinel"]
+# pg-spinel's extension links the system's libpq, so only `--workspace` and
+# `--package pg-spinel` build it.
+default-members = ["crates/*", "gems/sqlite3-spinel/ext/sqlite3_spinel"]
 
 [workspace.package]
 version = "0.0.1"
