@@ -1,0 +1,11 @@
+true
+true
+1
+"worker"
+["worker", false, false, "#<Ractor:#2 worker identity.rb:3 running>"]
+#<Ractor:#2 worker identity.rb:3 terminated>
+true
+#<Ractor:#1 running>
+nil
+#<Ractor:#3 identity.rb:11 terminated>
+2

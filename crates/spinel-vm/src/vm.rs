@@ -69,6 +69,11 @@ impl Vm {
         }
     }
 
+    /// Whether more than one heap has ever joined the program.
+    pub(crate) fn is_shared(&self) -> bool {
+        self.lock.shared.load(Ordering::Acquire)
+    }
+
     /// The table, to read.
     ///
     /// # Safety

@@ -1,0 +1,8 @@
+false
+1
+true
+Ractor::ClosedError
+"The port was already closed"
+2
+Ractor::ClosedError
+"The port was already closed"

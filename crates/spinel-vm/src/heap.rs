@@ -47,6 +47,10 @@ use crate::class::Classes;
 use crate::shape::{ShapeId, Shapes};
 use crate::value::{SymbolId, SymbolMap, SymbolSet, Value};
 
+mod copy;
+pub use copy::{ExportError, Imported, Msg, Refusal};
+pub(crate) use copy::{Options, is_hidden};
+
 /// Cell sizes, in bytes. Powers of two so the class index is one shift.
 const SIZE_CLASSES: [usize; 5] = [32, 64, 128, 256, 512];
 const CLASS_COUNT: usize = SIZE_CLASSES.len();
@@ -482,6 +486,9 @@ pub struct Heap {
     /// because in CRuby the alias shares the old name's whole variable,
     /// setter included (#789).
     readonly_globals: SymbolSet,
+    /// What a Ractor other than the main one keeps of the main one's (#117):
+    /// see [`Foreign`]. Empty in the main Ractor's heap.
+    foreign: Box<Foreign>,
     /// `--enable=frozen-string-literal` or `--disable=frozen-string-literal`,
     /// for every compile after it is set; `None` when neither was given.
     frozen_string_literal: Option<bool>,
@@ -741,6 +748,70 @@ fn size_class(bytes: usize) -> Option<usize> {
     Some(cell.trailing_zeros() as usize - MIN_CELL_SHIFT as usize)
 }
 
+/// What a heap that is not the main Ractor's keeps beside the shared class
+/// tables (#117), each traced as a root.
+struct Foreign {
+    /// The id of the Ractor this heap is: the main one's for a heap that
+    /// owns its program.
+    ractor: u32,
+    /// Whether the heap let the class lock go ([`Heap::release_classes`])
+    /// and has not taken it back: what dropping it while another Ractor
+    /// runs needs to know.
+    released: bool,
+    /// What every heap of the program shares for its Ractors.
+    program: Arc<crate::interp::ractor::Program>,
+    /// Its copies of the main Ractor's objects, by the address of the
+    /// original: a constant, a class's instance variable, a `define_method`
+    /// body. Each beside a fingerprint of the original
+    /// ([`Heap::fingerprint_of_cell`]), so a freed and reused address is not
+    /// taken for the object it was.
+    copies: HashMap<usize, (u64, Value)>,
+    /// The objects of its own the singleton classes it made are attached
+    /// to, by class index: the tables hold none of its objects.
+    attached: HashMap<u32, Value>,
+    /// The values the Ractors put in the tables as copies ([`Value::shared_ref`]),
+    /// built here, by index.
+    boxes: HashMap<u32, Value>,
+    /// The hidden class instance variables it has taken from the main
+    /// Ractor's class objects already, by class index and name.
+    inherited: std::collections::HashSet<(u32, SymbolId)>,
+    /// Set by a read of the tables that found a value it may not have, for
+    /// the instruction that read it to raise `Ractor::IsolationError`.
+    isolated: bool,
+    /// Whether the constant read under way is the program's, which gets a
+    /// copy only of what is shareable. Any other — the core library's, the
+    /// VM's own — gets a copy of its own of whatever the main Ractor's
+    /// constant holds (decision 4a).
+    program_read: bool,
+}
+
+impl Default for Foreign {
+    fn default() -> Foreign {
+        Foreign {
+            ractor: crate::interp::ractor::MAIN,
+            released: false,
+            program: Arc::default(),
+            copies: HashMap::new(),
+            attached: HashMap::new(),
+            boxes: HashMap::new(),
+            inherited: std::collections::HashSet::new(),
+            isolated: false,
+            program_read: false,
+        }
+    }
+}
+
+impl Foreign {
+    fn each_root(&self, mut f: impl FnMut(Value)) {
+        for &(_, value) in self.copies.values() {
+            f(value);
+        }
+        for &value in self.attached.values().chain(self.boxes.values()) {
+            f(value);
+        }
+    }
+}
+
 const fn block_layout() -> alloc::Layout {
     match alloc::Layout::from_size_align(BLOCK_SIZE, BLOCK_ALIGN) {
         Ok(l) => l,
@@ -766,9 +837,21 @@ impl Heap {
     /// be run or released (`Heap::release_classes`) without delay.
     pub fn new_ractor(&mut self) -> Heap {
         self.scope().class_safe_point();
+        if self.owns_vm {
+            let me: *mut Heap = self;
+            self.foreign.program.set_main_heap(me);
+        }
         self.vm.lock().join(&self.class_lock);
         let mut heap = Heap::with_vm(Arc::clone(&self.vm), false);
+        heap.foreign.program = Arc::clone(&self.foreign.program);
         heap.budget = self.budget;
+        heap.parser = self.parser;
+        heap.prism = self.prism;
+        heap.libraries = self.libraries;
+        heap.bytecode_cache = self.bytecode_cache.clone();
+        heap.frozen_string_literal = self.frozen_string_literal;
+        heap.argv = self.argv.clone();
+        heap.program_name = self.program_name.clone();
         let classes = heap.classes().len();
         heap.scope().materialize_class_objects(classes);
         heap
@@ -778,12 +861,20 @@ impl Heap {
     /// [`Heap::reacquire_classes`]: it is about to wait, or it is done, and a
     /// write it was making ends. While the program has one Ractor, nothing.
     pub fn release_classes(&mut self) {
+        if self.owns_vm && self.vm.is_shared() {
+            let me: *mut Heap = self;
+            self.foreign.program.set_main_heap(me);
+        }
+        if self.vm.is_shared() {
+            self.foreign.released = true;
+        }
         self.vm.lock().release(&mut self.class_lock);
     }
 
     /// This heap is back from [`Heap::release_classes`], and may read the
     /// class tables again once no other Ractor is writing them.
     pub fn reacquire_classes(&mut self) {
+        self.foreign.released = false;
         self.vm.lock().reacquire(&mut self.class_lock);
         let classes = self.classes().len();
         if self.class_objects.len() < classes {
@@ -838,6 +929,7 @@ impl Heap {
             global_slots: Vec::new(),
             global_specials: SymbolMap::default(),
             readonly_globals: SymbolSet::default(),
+            foreign: Box::default(),
             frozen_string_literal: None,
             hooked_globals: SymbolMap::default(),
             gc_disabled: false,
@@ -893,6 +985,21 @@ impl Heap {
     /// tables. One load and a branch while the program has one Ractor.
     #[inline]
     pub(crate) fn class_safe_point(&mut self) {
+        if self.vm.is_shared() {
+            self.class_safe_point_shared();
+        }
+    }
+
+    /// [`Heap::class_safe_point`] once the program has another Ractor: the
+    /// main heap says where it is before it may park, for another Ractor to
+    /// read its constants meanwhile (`HandleScope::pull`).
+    #[cold]
+    #[inline(never)]
+    fn class_safe_point_shared(&mut self) {
+        if self.owns_vm {
+            let me: *mut Heap = self;
+            self.foreign.program.set_main_heap(me);
+        }
         self.vm.lock().safe_point(&mut self.class_lock);
     }
 
@@ -1377,6 +1484,16 @@ impl Heap {
         // a handler is running.
         Heap::shade(&mut self.mark_stack, self.errinfo);
         Heap::shade(&mut self.mark_stack, self.main);
+        // Eighth: this Ractor's copies of the main one's objects, and what
+        // it keeps beside the shared tables (#117).
+        let (foreign, mark_stack) = (&self.foreign, &mut self.mark_stack);
+        foreign.each_root(|value| Heap::shade(mark_stack, value));
+        if !self.owns_vm {
+            let ractor = self.foreign.ractor;
+            // SAFETY: as the class table's walk above.
+            let definitions = unsafe { self.vm.definitions() };
+            definitions.each_root_of(ractor, |value| Heap::shade(&mut self.mark_stack, value));
+        }
         // Fourth root source: the global table. A global outlives every handle
         // to what it holds, by definition — that is what a global is.
         let (slots, mark_stack) = (&self.global_slots, &mut self.mark_stack);
@@ -1585,6 +1702,28 @@ impl Default for Heap {
 /// only checks liveness, so it is Miri that checks this one.
 impl Drop for Heap {
     fn drop(&mut self) {
+        // The main Ractor's heap, going while other Ractors may run (#117):
+        // with them parked, it stops being where they read the main one's
+        // constants, and lets the class lock go for good. While any is still
+        // alive the tables hold its objects, so its memory stays, as the
+        // process ends with it.
+        if self.owns_vm && self.vm.is_shared() {
+            if self.foreign.released {
+                self.vm.lock().reacquire(&mut self.class_lock);
+                self.foreign.released = false;
+            }
+            self.vm.lock().write(&mut self.class_lock);
+            self.foreign.program.set_main_heap(ptr::null_mut());
+            self.vm.lock().release(&mut self.class_lock);
+            if self.foreign.program.has_ractors() && self.foreign.program.ractors().others_alive() {
+                return;
+            }
+        } else if !self.owns_vm && !self.foreign.released && self.vm.is_shared() {
+            // Another Ractor's heap, going while it holds the lock — its OS
+            // thread unwinding, say — lets it go, or every write after it
+            // would wait for it.
+            self.vm.lock().release(&mut self.class_lock);
+        }
         for block in &self.blocks {
             // SAFETY: allocated by `add_block` with this exact layout, and the heap is
             // the only owner.
@@ -1755,6 +1894,227 @@ impl<'h> HandleScope<'h> {
         self.heap.classes()
     }
 
+    /// What the program this heap belongs to keeps for its Ractors (#117).
+    pub(crate) fn program(&self) -> &crate::interp::ractor::Program {
+        &self.heap.foreign.program
+    }
+
+    pub(crate) fn program_arc(&self) -> Arc<crate::interp::ractor::Program> {
+        Arc::clone(&self.heap.foreign.program)
+    }
+
+    /// The id of the Ractor this heap is.
+    pub(crate) fn ractor_id(&self) -> u32 {
+        self.heap.foreign.ractor
+    }
+
+    /// Whether this heap is the main Ractor's.
+    pub(crate) fn is_main_ractor(&self) -> bool {
+        self.heap.owns_vm
+    }
+
+    /// The heap itself, to read: what [`Heap::export`] copies out of.
+    pub(crate) fn heap_ref(&self) -> &Heap {
+        self.heap
+    }
+
+    /// A heap for Ractor `id`, joining this one's program: see
+    /// [`Heap::new_ractor`].
+    pub(crate) fn new_ractor_heap(&mut self, id: u32) -> Heap {
+        let mut heap = self.heap.new_ractor();
+        heap.foreign.ractor = id;
+        heap
+    }
+
+    /// A copy of `value`, an object of the main Ractor's heap that the
+    /// shared tables hold, built in this heap (#117): what a Ractor other
+    /// than the main one reads in its place. `None` when `shareable_only`
+    /// and it is not shareable, or a class of it may not be copied.
+    ///
+    /// The main heap is read while it is parked: this heap makes itself the
+    /// class tables' writer first, which parks every other heap at a safe
+    /// point or finds it waiting, and the main one says where it is before
+    /// it does either (`Vm::main_heap`). An object copied once is the same
+    /// copy the next time, whichever read reaches it.
+    ///
+    /// ponytail: a `Hash` copied this way keeps the codes its keys had, which
+    /// a key hashed by identity no longer has here; the one copied as a
+    /// message is rehashed (`core/ractor.rb`). Rehash these too when one
+    /// turns up: it needs Ruby code run from inside a constant read.
+    pub(crate) fn pull(
+        &mut self,
+        value: Value,
+        shareable_only: bool,
+        refusals: &[Refusal],
+    ) -> Option<Value> {
+        if self.heap.begin_class_write() {
+            self.catch_up_classes();
+        }
+        let main = self.heap.foreign.program.main_heap();
+        if main.is_null() {
+            return None;
+        }
+        // SAFETY: the main heap is parked or waiting (see above), recorded
+        // itself before it did, and outlives every other heap (the CLI ends
+        // the process with it; `Heap::drop` of a main heap with Ractors
+        // left keeps its memory).
+        let main: &Heap = unsafe { &*main };
+        let known: HashMap<usize, Value> = self
+            .heap
+            .foreign
+            .copies
+            .iter()
+            .filter(|&(&address, &(print, _))| {
+                let original = Value::heap(
+                    NonNull::new(ptr::with_exposed_provenance_mut(address))
+                        .expect("a remembered address is not null"),
+                );
+                main.fingerprint_of_cell(original) == print
+            })
+            .map(|(&address, &(_, copy))| (address, copy))
+            .collect();
+        let options = Options {
+            refusals,
+            shareable_only,
+            known: Some(&known),
+        };
+        let (msg, sources) = main.export(value, &options, None).ok()?;
+        let prints: Vec<u64> = sources
+            .iter()
+            .map(|&address| {
+                main.fingerprint_of_cell(Value::heap(
+                    NonNull::new(ptr::with_exposed_provenance_mut(address))
+                        .expect("an exported address is not null"),
+                ))
+            })
+            .collect();
+        let imported = self.import(&msg);
+        for &value in &imported.frozen {
+            let handle = self.root(value);
+            self.freeze(handle);
+        }
+        for ((&address, print), &copy) in sources.iter().zip(prints).zip(&imported.nodes) {
+            self.heap.foreign.copies.insert(address, (print, copy));
+        }
+        Some(imported.root)
+    }
+
+    /// A `define_method` body as this heap runs it (#117): its own, or a
+    /// copy of the main Ractor's. `None` for another Ractor's, which CRuby
+    /// refuses: "defined with an un-shareable Proc in a different Ractor".
+    ///
+    /// ponytail: CRuby runs the main Ractor's body in another only when it
+    /// is shareable; here every one is, as a copy, since the core library's
+    /// `Struct` and `Data` accessors are such bodies. The copy's captured
+    /// variables are its own.
+    pub(crate) fn local_proc(&mut self, block: Value, owner: u32) -> Option<Value> {
+        if owner == self.heap.foreign.ractor {
+            return Some(block);
+        }
+        if owner != crate::interp::ractor::MAIN {
+            return None;
+        }
+        self.pull(block, false, &[])
+    }
+
+    /// Whether a read of the tables just found a value this Ractor may not
+    /// have, clearing it. See [`HandleScope::shared_to_local`].
+    pub(crate) fn take_isolated(&mut self) -> bool {
+        std::mem::take(&mut self.heap.foreign.isolated)
+    }
+
+    /// Say whether the constant reads from here are the program's: see
+    /// `Foreign::program_read`.
+    pub(crate) fn set_program_read(&mut self, program: bool) {
+        self.heap.foreign.program_read = program;
+    }
+
+    /// Whether the read under way is the program's: see
+    /// `Foreign::program_read`.
+    pub(crate) fn program_read(&self) -> bool {
+        self.heap.foreign.program_read
+    }
+
+    /// Note a refusal, for the instruction that read the tables to raise.
+    pub(crate) fn set_isolated(&mut self) {
+        self.heap.foreign.isolated = true;
+    }
+
+    /// The object of this heap's own that singleton class `id`, which this
+    /// heap made, is attached to.
+    pub(crate) fn set_local_attached(&mut self, id: crate::class::ClassId, object: Value) {
+        self.storable(object);
+        self.heap.foreign.attached.insert(id.index() as u32, object);
+    }
+
+    /// Hidden class instance variable `name` of class `id`, as the main
+    /// Ractor's heap holds it, copied: what another Ractor starts its own
+    /// from (decision 3a). Once per class and name; `None` when the main one
+    /// holds none or it cannot be copied.
+    pub(crate) fn inherit_ivar(
+        &mut self,
+        id: crate::class::ClassId,
+        name: SymbolId,
+    ) -> Option<Value> {
+        if !self
+            .heap
+            .foreign
+            .inherited
+            .insert((id.index() as u32, name))
+        {
+            return None;
+        }
+        self.main_class_ivar(id, name, false)
+    }
+
+    /// Class `id`'s instance variable `name` in the main Ractor's heap,
+    /// copied here: `None` when it holds none, and `None` with the
+    /// isolation flag set when `shareable_only` and it is not shareable.
+    pub(crate) fn main_class_ivar(
+        &mut self,
+        id: crate::class::ClassId,
+        name: SymbolId,
+        shareable_only: bool,
+    ) -> Option<Value> {
+        if self.heap.begin_class_write() {
+            self.catch_up_classes();
+        }
+        let main = self.heap.foreign.program.main_heap();
+        if main.is_null() {
+            return None;
+        }
+        // SAFETY: as in `pull`.
+        let main_heap: &Heap = unsafe { &*main };
+        let object = *main_heap.class_objects.get(id.index())?;
+        let value = main_heap.ivar_of_cell(object, name)?;
+        if value.is_immediate() {
+            return Some(value);
+        }
+        if let Some(id) = main_heap.class_id_of_cell(value) {
+            return Some(self.class_object(id));
+        }
+        let copied = self.pull(value, shareable_only, &[]);
+        if copied.is_none() && shareable_only {
+            self.set_isolated();
+        }
+        copied
+    }
+
+    /// See [`Heap::freeze_deep`]. `root` is rooted by the caller.
+    pub(crate) fn freeze_deep(&mut self, root: Value) -> Vec<Value> {
+        self.heap.freeze_deep(root)
+    }
+
+    /// See [`Heap::release_classes`].
+    pub(crate) fn release_classes(&mut self) {
+        self.heap.release_classes();
+    }
+
+    /// See [`Heap::reacquire_classes`].
+    pub(crate) fn reacquire_classes(&mut self) {
+        self.heap.reacquire_classes();
+    }
+
     /// This heap's object for class `id`: see [`Heap::class_object`].
     #[inline]
     pub fn class_object(&self, id: crate::class::ClassId) -> Value {
@@ -1767,15 +2127,18 @@ impl<'h> HandleScope<'h> {
 
     /// A value the class tables hold, as this heap sees it (#117). The
     /// tables hold a class by id ([`Value::class_ref`]), and this is this
-    /// heap's own object for it; any other value is itself.
-    ///
-    // ponytail: a value that is neither a class nor an immediate is the
-    // main heap's object, and a joined heap is given it as it is. No Ruby
-    // code runs in a joined heap until `Ractor` does, and #117's runtime
-    // half is what copies it, or raises `Ractor::IsolationError`, there.
+    /// heap's own object for it; a value a Ractor put in them as a copy
+    /// ([`Value::shared_ref`]) is this heap's copy of it. In a Ractor other
+    /// than the main one, an object of the main one's is a copy of it when
+    /// it is shareable, and otherwise nil, with the read marked refused
+    /// ([`HandleScope::take_isolated`]) for the instruction to raise
+    /// `Ractor::IsolationError`. Anything else is itself.
     #[inline]
     pub fn shared_to_local(&mut self, value: Value) -> Value {
         let Some(index) = value.as_class_ref() else {
+            if value.as_shared_ref().is_some() || (!self.heap.owns_vm && !value.is_immediate()) {
+                return self.foreign_to_local(value);
+            }
             return value;
         };
         if index as usize >= self.heap.class_objects.len() {
@@ -1784,12 +2147,48 @@ impl<'h> HandleScope<'h> {
         self.class_object(crate::class::ClassId::from_index(index))
     }
 
+    #[cold]
+    #[inline(never)]
+    fn foreign_to_local(&mut self, value: Value) -> Value {
+        if let Some(index) = value.as_shared_ref() {
+            if let Some(&copy) = self.heap.foreign.boxes.get(&index) {
+                return copy;
+            }
+            let Some(msg) = self.heap.foreign.program.ractors().shared_box(index) else {
+                return Value::NIL;
+            };
+            let imported = self.import(&msg);
+            for &frozen in &imported.frozen {
+                let handle = self.root(frozen);
+                self.freeze(handle);
+            }
+            self.heap.foreign.boxes.insert(index, imported.root);
+            return imported.root;
+        }
+        let core = !self.heap.foreign.program_read;
+        let refusals = if core {
+            Vec::new()
+        } else {
+            self.heap.foreign.program.ractors().refusals()
+        };
+        match self.pull(value, !core, &refusals) {
+            Some(copy) => copy,
+            None => {
+                self.set_isolated();
+                Value::NIL
+            }
+        }
+    }
+
     /// A value about to go into the class tables, as they hold it: a class
     /// by id, anything else as it is. The inverse of
     /// [`HandleScope::shared_to_local`].
     ///
-    // ponytail: as `shared_to_local`, a joined heap's own object that is not a
-    // class goes in as it is, for #117's runtime half to refuse.
+    /// In a Ractor other than the main one, an object that is not a class
+    /// goes in as a copy every heap builds its own of, when it is shareable
+    /// ([`Value::shared_ref`]); otherwise nil goes in, with the write marked
+    /// refused ([`HandleScope::take_isolated`]). The tables hold no pointer
+    /// into a heap but the main one's.
     ///
     /// A class object's class is `Class`, `Module`, a metaclass or a subclass
     /// of `Module`, each of which has `Class` or `Module` for its
@@ -1799,6 +2198,9 @@ impl<'h> HandleScope<'h> {
     pub fn local_to_shared(&mut self, value: Value) -> Value {
         if value.is_immediate() {
             return value;
+        }
+        if !self.heap.owns_vm {
+            return self.local_to_shared_slow(value);
         }
         if let Some(class) = self.remembered_class_of(value)
             && !is_class_repr(self.classes().repr(class))
@@ -1813,12 +2215,29 @@ impl<'h> HandleScope<'h> {
         let mut scope = self.nested();
         let handle = scope.root(value);
         let class = scope.class_of(handle);
-        if !class.is_some_and(|class| is_class_repr(scope.classes().repr(class))) {
+        let id = if class.is_some_and(|class| is_class_repr(scope.classes().repr(class))) {
+            scope.class_id_of(handle)
+        } else {
+            None
+        };
+        if let Some(id) = id {
+            return Value::class_ref(id.index() as u32);
+        }
+        if scope.heap.owns_vm {
             return value;
         }
-        match scope.class_id_of(handle) {
-            Some(id) => Value::class_ref(id.index() as u32),
-            None => value,
+        let refusals = scope.heap.foreign.program.ractors().refusals();
+        let options = Options {
+            refusals: &refusals,
+            shareable_only: true,
+            known: None,
+        };
+        match scope.heap.export(value, &options, None) {
+            Ok((msg, _)) => scope.heap.foreign.program.ractors().add_shared_box(msg),
+            Err(_) => {
+                scope.set_isolated();
+                Value::NIL
+            }
         }
     }
 
@@ -1893,12 +2312,21 @@ impl<'h> HandleScope<'h> {
 
     /// [`Classes::attached`], as this heap sees the value.
     pub fn attached(&mut self, id: crate::class::ClassId) -> Option<Value> {
+        if !self.heap.owns_vm
+            && let Some(&object) = self.heap.foreign.attached.get(&(id.index() as u32))
+        {
+            return Some(object);
+        }
         Some(self.shared_to_local(self.classes().attached(id)?))
     }
 
     /// [`Classes::const_set`], with the value as the tables name it.
     pub fn const_set(&mut self, id: crate::class::ClassId, name: SymbolId, value: Value) {
+        self.heap.foreign.isolated = false;
         let value = self.local_to_shared(value);
+        if self.heap.foreign.isolated {
+            return;
+        }
         self.classes_mut().const_set(id, name, value);
     }
 
@@ -1910,7 +2338,11 @@ impl<'h> HandleScope<'h> {
         value: Value,
         location: Option<(Arc<str>, i32)>,
     ) {
+        self.heap.foreign.isolated = false;
         let value = self.local_to_shared(value);
+        if self.heap.foreign.isolated {
+            return;
+        }
         self.classes_mut().const_set_at(id, name, value, location);
     }
 

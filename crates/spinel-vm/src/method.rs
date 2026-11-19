@@ -760,6 +760,10 @@ pub enum Native {
     /// `Kernel#__zlib_checksum__(kind, sum, string)`: `adler32` (kind 0) or
     /// `crc32` (kind 1) of the bytes, from a 32-bit `sum`.
     ZlibChecksum,
+    /// The Ractors under `core/ractor.rb` (#117). See `ractor.rs`. Last,
+    /// so the variants before it keep the discriminants the interpreter's
+    /// light loop was measured with.
+    Ractor(RactorOp),
 }
 
 /// Which file system call. Each answers an Integer errno on failure, for the
@@ -1483,6 +1487,60 @@ pub enum GcOp {
     Contents,
 }
 
+/// Which Ractor primitive, each a `Kernel#__ractor_*__` under
+/// `core/ractor.rb` (#117). See `ractor.rs` for what each takes and answers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RactorOp {
+    /// `__ractor_register__(moved_class, [[class, error, message]...])`:
+    /// what a copy leaves after a move, and the classes it refuses.
+    Register,
+    /// `__ractor_warn_once__`: true the first time in the program.
+    WarnOnce,
+    /// `__ractor_new__(args, name, block, location)`: the new Ractor's id.
+    New,
+    /// `__ractor_id__`: the running Ractor's id.
+    Id,
+    /// `__ractor_count__`: how many Ractors have not ended.
+    Count,
+    /// `__ractor_info__(id)`: `[name, location, status]`.
+    Info,
+    /// `__ractor_port__(id)`: the Ractor's default port's id.
+    Port,
+    /// `__ractor_port_new__`: a new port of the running Ractor; its id.
+    PortNew,
+    /// `__ractor_port_owner__(port)`: the id of the Ractor that made it.
+    PortOwner,
+    /// `__ractor_port_send__(port, object, move)`: false when it is closed.
+    PortSend,
+    /// `__ractor_port_take__(port)`: `[value, hashes, frozen]`, `:empty` or
+    /// `:closed`.
+    PortTake,
+    /// `__ractor_port_close__(port)`: whether it was open.
+    PortClose,
+    /// `__ractor_port_closed__(port)`.
+    PortClosed,
+    /// `__ractor_generation__`: what `__ractor_wait__` waits to move past.
+    Generation,
+    /// `__ractor_wait__(generation)`: wait until something happens.
+    Wait,
+    /// `__ractor_outcome__(id)`: nil while it runs, then `[ok, [value,
+    /// hashes, frozen]]`.
+    Outcome,
+    /// `__ractor_finish__(ok, value)`: the running Ractor ends with it.
+    Finish,
+    /// `__ractor_start__(ractor)`: `[block, [args, hashes, frozen]]`, once.
+    Start,
+    /// `__ractor_shareable__(object)`.
+    Shareable,
+    /// `__ractor_monitor__(id, port, add)`.
+    Monitor,
+    /// `__ractor_freeze__(objects)`.
+    Freeze,
+    /// `__ractor_freeze_deep__(object)`: `Ractor.make_shareable`, but for
+    /// the Hashes it answers, left to `Hash#freeze`.
+    FreezeDeep,
+}
+
 /// Which thread primitive. See `threads.rs` for the scheduler and
 /// `interp.rs`, `thread_native`, for what each takes and answers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1555,7 +1613,8 @@ pub enum Definition {
     /// receiver as `self`, a method's arity and `return`, and the method's
     /// owner for `super`. Traced by the collector through
     /// [`Definitions::each_root`], since nothing else may hold the `Proc`.
-    Proc(Value),
+    /// A `define_method` body, and the Ractor whose heap it is in (#117).
+    Proc(Value, u32),
 }
 
 /// A method a native extension defined (#103): the function the extension
@@ -1735,9 +1794,17 @@ impl Definitions {
 
     /// Every heap value a definition holds: the `Proc`s `define_method` made
     /// into methods.
-    pub fn each_root(&self, mut f: impl FnMut(Value)) {
+    /// The main Ractor's `define_method` bodies, which its heap traces.
+    pub fn each_root(&self, f: impl FnMut(Value)) {
+        self.each_root_of(crate::interp::ractor::MAIN, f);
+    }
+
+    /// The `define_method` bodies in Ractor `ractor`'s heap (#117).
+    pub fn each_root_of(&self, ractor: u32, mut f: impl FnMut(Value)) {
         for definition in &self.entries {
-            if let Definition::Proc(block) = definition {
+            if let Definition::Proc(block, owner) = definition
+                && *owner == ractor
+            {
                 f(*block);
             }
         }

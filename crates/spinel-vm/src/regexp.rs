@@ -119,6 +119,13 @@ impl Regexps {
         Ok(self.compiled.len() - 1)
     }
 
+    /// Take a pattern another heap compiled (#117): a `Regexp` copied
+    /// between Ractors keeps its program, and indexes this heap's table.
+    pub fn adopt(&mut self, regex: Arc<Regex>) -> usize {
+        self.compiled.push(regex);
+        self.compiled.len() - 1
+    }
+
     #[must_use]
     pub fn get(&self, index: usize) -> Option<&Arc<Regex>> {
         self.compiled.get(index)
