@@ -1,0 +1,10 @@
+source "https://rubygems.org"
+
+gem "nio4r"
+
+# What runs nio4r's own suite, `spec/`, as its `gems.rb` has it.
+group :test do
+  gem "rspec-core"
+  gem "rspec-expectations"
+  gem "rspec-mocks"
+end

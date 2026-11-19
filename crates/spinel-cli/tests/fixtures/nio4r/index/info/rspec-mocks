@@ -1,0 +1,2 @@
+---
+3.13.9 diff-lcs:< 2.0&>= 1.2.0,rspec-support:~> 3.13.0|checksum:ea5c7ff3054a6098ca6039aacef80aec69d5a8a3ef80be8fc88337359b672a30,ruby:>= 1.8.7

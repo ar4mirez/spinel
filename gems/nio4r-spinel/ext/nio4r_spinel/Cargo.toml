@@ -1,0 +1,32 @@
+# The native half of the nio4r-spinel gem: the OS readiness calls, one per
+# method, on `NIO::Spinel`, which `lib/nio4r_ext.rb` builds the nio4r gem's
+# C half on in Ruby (docs/package-manager.md, section 6).
+#
+# epoll on Linux and kqueue on macOS and the BSDs, where upstream's
+# extension has libev make the same calls, plus poll(2) for the `:poll`
+# and `:select` backends, and the read(2) and write(2) of
+# `NIO::ByteBuffer`. It needs nothing a plain build lacks, so it is a
+# default workspace member, built by `cargo build` and `tests/nio4r.rs`
+# `--offline`; `build.rb` builds it and puts it in the gem.
+[package]
+name = "nio4r-spinel"
+description = "The native half of the nio4r-spinel gem: epoll and kqueue through spinel-ext."
+# The gem's version, 2.7.5.1, as SemVer: the upstream version and the
+# revision as build metadata.
+version = "2.7.5+1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "nio4r_spinel"
+crate-type = ["cdylib"]
+
+[dependencies]
+spinel-ext.workspace = true
+libc = "0.2.189"
+
+[lints]
+workspace = true
