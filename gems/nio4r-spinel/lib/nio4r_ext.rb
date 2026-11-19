@@ -165,6 +165,9 @@ module NIO
       # The descriptors epoll refuses, such as regular files', which libev
       # keeps in `epoll_eperms` and reports ready on every run.
       @__eperms__ = {}
+      # Each descriptor's generation, which the queue holds beside it, as
+      # libev's `egen`: a registration with another is a stray.
+      @__gens__ = Hash.new(0)
       @__selectables__ = {}
       @__lock__ = Mutex.new
       @__lock_holder__ = nil
@@ -249,14 +252,14 @@ module NIO
       if queue
         old = @__watched__.fetch(fd, 0)
         new = monitors.each_value.inject(0, :|)
-        status = old == new ? 0 : Spinel.queue_set(queue, fd, old, new)
+        status = old == new ? 0 : Spinel.queue_set(queue, fd, old, new, @__gens__[fd])
         if new.zero?
           # A descriptor closed while watched has left the queue already, and
           # epoll refuses to remove it; libev lets that pass too.
-          @__watched__.delete(fd)
+          __unwatch__(fd)
           @__eperms__.delete(fd)
         elsif status == -Errno::EPERM::Errno
-          @__watched__.delete(fd)
+          __unwatch__(fd)
           @__eperms__[fd] = true
         else
           Spinel.check(status, "epoll_ctl")
@@ -272,6 +275,11 @@ module NIO
     end
 
     private
+
+    # `fd` out of what the queue watches, its generation moved on.
+    def __unwatch__(fd)
+      @__gens__[fd] = (@__gens__[fd] + 1) & 0x7FFF_FFFF if @__watched__.delete(fd)
+    end
 
     # NIO_Selector_synchronize: a lock the thread holding it takes again.
     def __synchronize__
@@ -340,8 +348,8 @@ module NIO
     def __collect__(ready)
       queue = @__state__[0]
       if queue
-        events = Spinel.check(Spinel.queue_wait(queue), "epoll_wait").unpack("l<*").each_slice(2).to_a
-        __drop_strays__(queue, events)
+        events = Spinel.check(Spinel.queue_wait(queue), "epoll_wait").unpack("l<*").each_slice(3).to_a
+        events = __drop_strays__(queue, events)
         @__eperms__.each_key { |fd| events << [fd, Spinel::READ | Spinel::WRITE] }
       else
         pairs = @__fds__.map { |fd, monitors| [fd, monitors.each_value.inject(0, :|)] }
@@ -376,17 +384,29 @@ module NIO
     # epoll_poll's check of what an event got against what the queue was
     # asked for: a registration nobody wants, such as one a descriptor
     # closed while its description stayed open elsewhere left behind, is
-    # changed to what is wanted, and when the queue refuses, the queue is
-    # made again from what is watched, as libev's `postfork |= 2` makes it.
+    # changed to what is wanted; one of another generation, or one the
+    # queue refuses to change, is dropped and the queue made again from
+    # what is watched, as libev's `postfork |= 2` makes it. The events
+    # left, as `(fd, mask)` pairs.
     def __drop_strays__(queue, events)
       rebuild = false
-      events.each do |fd, got|
+      kept = events.filter_map do |fd, got, gen|
+        if gen != @__gens__[fd]
+          rebuild = true
+          next
+        end
         want = @__watched__.fetch(fd, 0)
-        next if got & ~want == 0
-        status = Spinel.queue_set(queue, fd, Spinel::READ | Spinel::WRITE, want)
-        rebuild = true unless status.zero?
+        unless got & ~want == 0
+          status = Spinel.queue_set(queue, fd, Spinel::READ | Spinel::WRITE, want, gen)
+          unless status.zero?
+            rebuild = true
+            next
+          end
+        end
+        [fd, got]
       end
       __rebuild_queue__ if rebuild
+      kept
     end
 
     # A new queue in the old one's place, watching what `@__watched__`
@@ -398,9 +418,9 @@ module NIO
       @__queue_io__ = IO.for_fd(queue, autoclose: false)
       Spinel.close(old)
       @__watched__.to_a.each do |fd, mask|
-        status = Spinel.queue_set(queue, fd, 0, mask)
+        status = Spinel.queue_set(queue, fd, 0, mask, @__gens__[fd])
         next if status.zero?
-        @__watched__.delete(fd)
+        __unwatch__(fd)
         @__eperms__[fd] = true if status == -Errno::EPERM::Errno
       end
     end

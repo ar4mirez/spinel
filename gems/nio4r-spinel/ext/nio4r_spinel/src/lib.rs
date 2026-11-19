@@ -52,7 +52,7 @@ fn init(cx: &mut Context<'_>) -> Result<()> {
         ("char_signed?", 0, char_signed),
         ("queue_new", 0, queue_new),
         ("close", 1, close),
-        ("queue_set", 4, queue_set),
+        ("queue_set", 5, queue_set),
         ("queue_wait", 1, queue_wait),
         ("poll_ready", 1, poll_ready),
         ("set_nonblock", 1, set_nonblock),
@@ -94,6 +94,18 @@ fn pack(pairs: impl IntoIterator<Item = (i32, i64)>) -> Vec<u8> {
     out
 }
 
+/// A queue's `(fd, mask, generation)` events as the Ruby side unpacks
+/// them: `"l<l<l<"` each.
+fn pack_events(events: impl IntoIterator<Item = (i32, i64, i32)>) -> Vec<u8> {
+    let mut out = Vec::new();
+    for (fd, mask, generation) in events {
+        out.extend_from_slice(&fd.to_le_bytes());
+        out.extend_from_slice(&(mask as i32).to_le_bytes());
+        out.extend_from_slice(&generation.to_le_bytes());
+    }
+    out
+}
+
 methods! {
     /// The readiness queue this platform has: `"epoll"` or `"kqueue"`.
     fn queue_backend(cx, _args) {
@@ -120,21 +132,24 @@ methods! {
         Ok(cx.integer(if status == 0 { 0 } else { errno() }))
     }
 
-    /// `queue_set(queue, fd, old, new)`: watch `fd` for the interests `new`
-    /// where it was watched for `old` (0 when it was not, 0 for none): 0,
-    /// or `-errno`.
+    /// `queue_set(queue, fd, old, new, generation)`: watch `fd` for the
+    /// interests `new` where it was watched for `old` (0 when it was not, 0
+    /// for none), its events marked with `generation` (libev's `egen`, 31
+    /// bits): 0, or `-errno`.
     fn queue_set(cx, args) {
         let (queue, target) = (fd(cx, args[0])?, fd(cx, args[1])?);
         let (old, new) = (cx.to_i64(args[2])?, cx.to_i64(args[3])?);
-        Ok(cx.integer(queue::set(queue, target, old, new)))
+        let generation = (cx.to_i64(args[4])? & 0x7FFF_FFFF) as u32;
+        Ok(cx.integer(queue::set(queue, target, old, new, generation)))
     }
 
-    /// The events waiting on `queue`, without waiting: `(fd, mask)` pairs,
-    /// libev's mask of what the descriptor is ready for, or `-errno`.
+    /// The events waiting on `queue`, without waiting: `(fd, mask,
+    /// generation)` records, libev's mask of what the descriptor is ready
+    /// for and the generation it was watched with, or `-errno`.
     fn queue_wait(cx, args) {
         let queue = fd(cx, args[0])?;
         Ok(match queue::wait(queue) {
-            Ok(events) => cx.string_from_bytes(&pack(events)),
+            Ok(events) => cx.string_from_bytes(&pack_events(events)),
             Err(errno) => cx.integer(errno),
         })
     }
@@ -243,10 +258,11 @@ mod queue {
         events
     }
 
-    fn ctl(queue: i32, op: i32, fd: i32, mask: i64) -> i64 {
+    fn ctl(queue: i32, op: i32, fd: i32, mask: i64, generation: u32) -> i64 {
+        // ev_epoll.c's `fd | (egen << 32)`.
         let mut event = libc::epoll_event {
             events: events(mask),
-            u64: fd as u64,
+            u64: u64::from(fd as u32) | (u64::from(generation) << 32),
         };
         // SAFETY: `event` is live for the call.
         if unsafe { libc::epoll_ctl(queue, op, fd, &mut event) } == 0 {
@@ -256,12 +272,12 @@ mod queue {
         }
     }
 
-    pub fn set(queue: i32, fd: i32, old: i64, new: i64) -> i64 {
+    pub fn set(queue: i32, fd: i32, old: i64, new: i64, generation: u32) -> i64 {
         if new == 0 {
             return if old == 0 {
                 0
             } else {
-                ctl(queue, libc::EPOLL_CTL_DEL, fd, 0)
+                ctl(queue, libc::EPOLL_CTL_DEL, fd, 0, generation)
             };
         }
         // What epoll holds can differ from what was asked: a descriptor
@@ -272,15 +288,15 @@ mod queue {
         } else {
             (libc::EPOLL_CTL_MOD, libc::EPOLL_CTL_ADD)
         };
-        match ctl(queue, first, fd, new) {
+        match ctl(queue, first, fd, new, generation) {
             status if status == -i64::from(libc::EEXIST) || status == -i64::from(libc::ENOENT) => {
-                ctl(queue, second, fd, new)
+                ctl(queue, second, fd, new, generation)
             }
             status => status,
         }
     }
 
-    pub fn wait(queue: i32) -> Result<Vec<(i32, i64)>, i64> {
+    pub fn wait(queue: i32) -> Result<Vec<(i32, i64, i32)>, i64> {
         let mut events = [libc::epoll_event { events: 0, u64: 0 }; MAX_EVENTS];
         // SAFETY: `events` holds MAX_EVENTS events.
         let count = unsafe { libc::epoll_wait(queue, events.as_mut_ptr(), MAX_EVENTS as i32, 0) };
@@ -307,7 +323,8 @@ mod queue {
                 if got & (libc::EPOLLIN as u32 | err) != 0 {
                     mask |= READ;
                 }
-                (event.u64 as i32, mask)
+                let data = event.u64;
+                (data as u32 as i32, mask, (data >> 32) as i32)
             })
             .collect())
     }
@@ -340,7 +357,8 @@ mod queue {
         event
     }
 
-    pub fn set(queue: i32, fd: i32, old: i64, new: i64) -> i64 {
+    /// No generation: a descriptor's knotes go when it is closed.
+    pub fn set(queue: i32, fd: i32, old: i64, new: i64, _generation: u32) -> i64 {
         let mut changes = Vec::new();
         for (bit, filter) in [(READ, libc::EVFILT_READ), (WRITE, libc::EVFILT_WRITE)] {
             match (old & bit != 0, new & bit != 0) {
@@ -377,7 +395,7 @@ mod queue {
         status
     }
 
-    pub fn wait(queue: i32) -> Result<Vec<(i32, i64)>, i64> {
+    pub fn wait(queue: i32) -> Result<Vec<(i32, i64, i32)>, i64> {
         // SAFETY: kevents are plain data, valid zeroed.
         let mut events: [libc::kevent; MAX_EVENTS] = unsafe { std::mem::zeroed() };
         let timeout = libc::timespec {
@@ -421,6 +439,6 @@ mod queue {
                 None => ready.push((fd, mask)),
             }
         }
-        Ok(ready)
+        Ok(ready.into_iter().map(|(fd, mask)| (fd, mask, 0)).collect())
     }
 }

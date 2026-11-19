@@ -474,7 +474,8 @@ load Gem.bin_path("rspec-core", "rspec")"#,
 /// run, as libev's `epoll_eperms` make it, with the answers CRuby 4.0.9 and
 /// upstream nio4r 2.7.5 give on Linux. A registration left in epoll by a
 /// descriptor closed before it was deregistered, its description still open
-/// in a `dup`, does not keep `select` from waiting.
+/// in a `dup`, does not keep `select` from waiting, nor stand for another
+/// IO registered on its reused descriptor number.
 #[test]
 fn selectors_free_their_descriptors_and_wait_outside_the_lock() {
     let (sandbox, _source, _lock) = installed("descriptors");
@@ -525,6 +526,24 @@ r2, w2 = IO.pipe
 s.register(r2, :r)
 w2.write("y")
 p s.select(1).map { |ready| ready.io.equal?(r2) }
+kept.close
+s = NIO::Selector.new
+r, w = IO.pipe
+kept = r.dup
+s.register(r, :r)
+w.write("x")
+reused = r.fileno
+r.close
+s.deregister(r)
+r2, w2 = IO.pipe
+p r2.fileno == reused
+s.register(r2, :r)
+spent = cpu.()
+started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+p s.select(0.3)
+p (Process.clock_gettime(Process::CLOCK_MONOTONIC) - started).round(1), cpu.() - spent < 0.15
+w2.write("y")
+p s.select(1).map { |ready| ready.io.equal?(r2) }
 kept.close"#,
         ])
         .output()
@@ -538,7 +557,7 @@ kept.close"#,
     assert_eq!(
         ok(&out, "spinel run -e"),
         format!(
-            "0\ntrue\nnil\n0.4\n20\n[:r]\n1\n1\n[:rw]\nnil\nnil\n{backend}\nnil\n0.3\ntrue\n[true]\n"
+            "0\ntrue\nnil\n0.4\n20\n[:r]\n1\n1\n[:rw]\nnil\nnil\n{backend}\nnil\n0.3\ntrue\n[true]\ntrue\nnil\n0.3\ntrue\n[true]\n"
         )
     );
 }
