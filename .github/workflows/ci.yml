@@ -108,7 +108,8 @@ jobs:
       - uses: ruby/setup-ruby@v1
         if: matrix.name == 'linux-x64'
         with:
-          ruby-version: '4.0'
+          # The oracles are recorded against CRuby 4.0.9; a newer patch is adopted deliberately.
+          ruby-version: '4.0.9'
       - name: Plain bundle exec agrees with spinel install
         if: matrix.name == 'linux-x64'
         run: cargo test -p spinel-cli --test bundler_setup plain_bundle_exec
@@ -357,7 +358,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: ruby/setup-ruby@v1
         with:
-          ruby-version: '4.0'
+          ruby-version: '4.0.9'
       - run: ruby scripts/encoding-table.rb --check
       - run: ruby scripts/jis-table.rb --check
       - run: ruby scripts/euckr-table.rb --check
@@ -383,8 +384,8 @@ jobs:
           # answers `C.ancestors` as [C, P2, P1, M, P2, ...] — P2 twice — where
           # 4.0.6 answers [C, P2, P1, M, Object, ...]. A module appearing twice
           # in one chain is a bug, not a semantics change, so the table keeps
-          # 4.0.6's answer. Back to '4.0' once a 4.0.x release answers it
-          # without the duplicate again.
+          # 4.0.6's answer. Back to the other jobs' pin once the release they
+          # pin answers it without the duplicate again.
           ruby-version: '4.0.6'
       - run: ruby scripts/ancestors-oracle.rb --check
 
@@ -402,7 +403,7 @@ jobs:
       - uses: ruby/setup-ruby@v1
         with:
           # The language version this build implements.
-          ruby-version: '4.0'
+          ruby-version: '4.0.9'
       - run: ruby scripts/exceptions-oracle.rb --check
 
   # The same arrangement for #10's answers. `crates/spinel-vm/tests/eval.txt` is
@@ -420,7 +421,7 @@ jobs:
       - uses: ruby/setup-ruby@v1
         with:
           # The language version this build implements.
-          ruby-version: '4.0'
+          ruby-version: '4.0.9'
       - run: ruby scripts/eval-oracle.rb --check
 
   # `Class.new` is four rules that read like one, and three of them run
@@ -437,7 +438,7 @@ jobs:
       - uses: ruby/setup-ruby@v1
         with:
           # The language version this build implements.
-          ruby-version: '4.0'
+          ruby-version: '4.0.9'
       - run: ruby scripts/anonymous-oracle.rb --check
 
   # Ruby's numeric operators do not fail on an operand they do not recognise:
@@ -454,7 +455,7 @@ jobs:
       - uses: ruby/setup-ruby@v1
         with:
           # The language version this build implements.
-          ruby-version: '4.0'
+          ruby-version: '4.0.9'
       - run: ruby scripts/coerce-oracle.rb --check
 
   # Every core method in Spinel is Ruby, but CRuby writes most of its own in C,
@@ -469,7 +470,7 @@ jobs:
       - uses: ruby/setup-ruby@v1
         with:
           # The language version this build implements.
-          ruby-version: '4.0'
+          ruby-version: '4.0.9'
       - run: ruby scripts/source-location-oracle.rb --check
 
   # Ruby's regex dialect is Onigmo's, and the parts of it that matter are the
@@ -489,7 +490,7 @@ jobs:
       - uses: ruby/setup-ruby@v1
         with:
           # The language version this build implements.
-          ruby-version: '4.0'
+          ruby-version: '4.0.9'
       - run: ruby scripts/regexp-oracle.rb --check
 
   # The anti-false-pass check, and the reason the pass count can be trusted at
@@ -507,7 +508,7 @@ jobs:
           submodules: true
       - uses: ruby/setup-ruby@v1
         with:
-          ruby-version: '4.0'
+          ruby-version: '4.0.9'
       - uses: dtolnay/rust-toolchain@stable
       # `openssl` (#106) builds against the system's OpenSSL 3, headers and
       # all (`crates/spinel-vm/build.rs` refuses an older one). The runner
