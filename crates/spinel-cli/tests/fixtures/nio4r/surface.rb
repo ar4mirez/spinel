@@ -7,9 +7,10 @@
 #
 # What depends on the machine is printed as whether it is what it should be:
 # the backends libev was compiled with past the three Spinel has (`:linuxaio`
-# and `:io_uring` on Linux), and object addresses, masked. A byte past 127
-# reads negative where a C `char` is signed, as on x86-64 Linux and Apple's
-# arm64, where CI runs this.
+# and `:io_uring` on Linux), the queue this platform lacks, each backend by
+# its place in `Selector.backends` rather than its name, and object
+# addresses, masked. A byte past 127 reads negative where a C `char` is
+# signed, as on x86-64 Linux and Apple's arm64, where CI runs this.
 require "nio"
 require "socket"
 
@@ -37,71 +38,77 @@ show("backend nil") { NIO::Selector.new(nil).backend == NIO::Selector.new.backen
 show("new :derp") { NIO::Selector.new(:derp) }
 show("new 42") { NIO::Selector.new(42) }
 show("new string") { NIO::Selector.new("epoll") }
-show("new other queue") { NIO::Selector.new(linux ? :kqueue : :epoll) }
+show("new other queue") do
+  other = linux ? :kqueue : :epoll
+  NIO::Selector.new(other)
+rescue ArgumentError => e
+  [e.class, e.message == "unsupported backend: #{other.inspect}"]
+end
 show("new 2 args") { NIO::Selector.new(nil, nil) }
 show("instance_variables") { [NIO::Selector.new.instance_variables, NIO::Selector.new.register(IO.pipe[0], :r).instance_variables] }
 show("inspect") { [NIO::Selector.new.inspect, NIO::Selector.new.register(IO.pipe[0], :r).inspect] }
 
-NIO::Selector.backends.first(3).each do |backend|
+NIO::Selector.backends.first(3).each.with_index(1) do |backend, i|
+  label = "backend #{i}"
   s = NIO::Selector.new(backend)
   r, w = IO.pipe
-  show("#{backend} backend") { s.backend == backend }
-  show("#{backend} empty") { [s.empty?, s.registered?(r), s.closed?] }
+  show("#{label} backend") { s.backend == backend }
+  show("#{label} empty") { [s.empty?, s.registered?(r), s.closed?] }
   m = s.register(r, :r)
-  show("#{backend} register") { [m.class, m.io.equal?(r), m.selector.equal?(s), m.interests, m.closed?, s.empty?, s.registered?(r)] }
-  show("#{backend} register again") { s.register(r, :w) }
-  show("#{backend} readiness before") { [m.readiness, m.readable?, m.writable?, m.writeable?, m.value] }
-  show("#{backend} select 0, none ready") { s.select(0) }
-  show("#{backend} select 0.05, none ready") { s.select(0.05) }
+  show("#{label} register") { [m.class, m.io.equal?(r), m.selector.equal?(s), m.interests, m.closed?, s.empty?, s.registered?(r)] }
+  show("#{label} register again") { s.register(r, :w) }
+  show("#{label} readiness before") { [m.readiness, m.readable?, m.writable?, m.writeable?, m.value] }
+  show("#{label} select 0, none ready") { s.select(0) }
+  show("#{label} select 0.05, none ready") { s.select(0.05) }
   w << "hi"
-  show("#{backend} select 0") { s.select(0).map { |x| [x.equal?(m), x.readiness, x.readable?, x.writable?] } }
-  show("#{backend} select nil") { s.select.size }
-  show("#{backend} select block") { got = []; [s.select(1) { |x| got << x.readiness }, got] }
+  show("#{label} select 0") { s.select(0).map { |x| [x.equal?(m), x.readiness, x.readable?, x.writable?] } }
+  show("#{label} select nil") { s.select.size }
+  show("#{label} select block") { got = []; [s.select(1) { |x| got << x.readiness }, got] }
   r.read_nonblock(2)
-  show("#{backend} select drained") { [s.select(0), m.readiness] }
+  show("#{label} select drained") { [s.select(0), m.readiness] }
   wm = s.register(w, :rw)
-  show("#{backend} writer") { [s.select(0).map(&:readiness), wm.interests] }
-  show("#{backend} interests=") { [wm.interests = :r, wm.interests, s.select(0), wm.readiness] }
-  show("#{backend} interests= nil") { [(wm.interests = nil), wm.interests] }
-  show("#{backend} add_interest") { [wm.add_interest(:w), wm.add_interest(:r), wm.interests] }
-  show("#{backend} remove_interest") { [wm.remove_interest(:r), wm.remove_interest(:r), wm.remove_interest(:w), wm.interests] }
-  show("#{backend} bad interests") { wm.interests = :x }
-  show("#{backend} string interest") { wm.add_interest("r") }
-  show("#{backend} integer interest") { wm.remove_interest(1) }
-  show("#{backend} bad add") { wm.add_interest(:derp) }
-  show("#{backend} value") { [wm.value = 42, wm.value] }
-  show("#{backend} deregister") { d = s.deregister(w); [d.equal?(wm), d.closed?, s.registered?(w), s.deregister(w)] }
-  show("#{backend} closed monitor interests=") { wm.interests = :rw }
-  show("#{backend} closed monitor add_interest") { wm.add_interest(:r) }
-  show("#{backend} wakeup") { s.wakeup }
-  show("#{backend} select after wakeup") { s.select(1) }
+  show("#{label} writer") { [s.select(0).map(&:readiness), wm.interests] }
+  show("#{label} interests=") { [wm.interests = :r, wm.interests, s.select(0), wm.readiness] }
+  show("#{label} interests= nil") { [(wm.interests = nil), wm.interests] }
+  show("#{label} add_interest") { [wm.add_interest(:w), wm.add_interest(:r), wm.interests] }
+  show("#{label} remove_interest") { [wm.remove_interest(:r), wm.remove_interest(:r), wm.remove_interest(:w), wm.interests] }
+  show("#{label} bad interests") { wm.interests = :x }
+  show("#{label} string interest") { wm.add_interest("r") }
+  show("#{label} integer interest") { wm.remove_interest(1) }
+  show("#{label} bad add") { wm.add_interest(:derp) }
+  show("#{label} value") { [wm.value = 42, wm.value] }
+  show("#{label} deregister") { d = s.deregister(w); [d.equal?(wm), d.closed?, s.registered?(w), s.deregister(w)] }
+  show("#{label} closed monitor interests=") { wm.interests = :rw }
+  show("#{label} closed monitor add_interest") { wm.add_interest(:r) }
+  show("#{label} wakeup") { s.wakeup }
+  show("#{label} select after wakeup") { s.select(1) }
   t = Thread.new { s.select }
   Thread.pass until t.status == "sleep" || !t.alive?
   sleep 0.05
   s.wakeup
-  show("#{backend} wakeup from another thread") { t.value }
+  show("#{label} wakeup from another thread") { t.value }
   t = Thread.new { s.select { |x| x } }
   Thread.pass until t.status == "sleep" || !t.alive?
   sleep 0.05
   s.wakeup
-  show("#{backend} wakeup with a block") { t.value }
+  show("#{label} wakeup with a block") { t.value }
   w.close
-  show("#{backend} peer closed") { s.select(1).map(&:readiness) }
-  show("#{backend} monitor close") { [m.close, m.closed?, s.registered?(r), m.close, m.selector] }
+  show("#{label} peer closed") { s.select(1).map(&:readiness) }
+  show("#{label} monitor close") { [m.close, m.closed?, s.registered?(r), m.close, m.selector] }
   r2, w2 = IO.pipe
   m2 = s.register(r2, :r)
   r2.close
-  show("#{backend} deregister closed io") { s.deregister(r2).equal?(m2) }
-  show("#{backend} register closed io") { s.register(r2, :r) }
+  show("#{label} deregister closed io") { s.deregister(r2).equal?(m2) }
+  show("#{label} register closed io") { s.register(r2, :r) }
   r3, = IO.pipe
   m3 = s.register(r3, :r)
-  show("#{backend} close") { [s.close, s.closed?, s.close, m3.closed?] }
-  show("#{backend} closed backend") { s.backend }
-  show("#{backend} closed register") { s.register(IO.pipe[0], :r) }
-  show("#{backend} closed select") { s.select(0) }
-  show("#{backend} closed wakeup") { s.wakeup }
-  show("#{backend} closed deregister") { [s.deregister(r).nil?, s.registered?(r3), s.empty?] }
-  show("#{backend} monitor close after selector") { [m3.close, m3.closed?, s.registered?(r3)] }
+  show("#{label} close") { [s.close, s.closed?, s.close, m3.closed?] }
+  show("#{label} closed backend") { s.backend }
+  show("#{label} closed register") { s.register(IO.pipe[0], :r) }
+  show("#{label} closed select") { s.select(0) }
+  show("#{label} closed wakeup") { s.wakeup }
+  show("#{label} closed deregister") { [s.deregister(r).nil?, s.registered?(r3), s.empty?] }
+  show("#{label} monitor close after selector") { [m3.close, m3.closed?, s.registered?(r3)] }
   w2.close
 end
 

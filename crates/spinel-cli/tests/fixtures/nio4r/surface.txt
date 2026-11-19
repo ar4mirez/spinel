@@ -7,127 +7,127 @@ backend nil: true
 new :derp: ArgumentError: "unsupported backend: :derp"
 new 42: ArgumentError: "unsupported backend: 42"
 new string: ArgumentError: "unsupported backend: \"epoll\""
-new other queue: ArgumentError: "unsupported backend: :kqueue"
+new other queue: [ArgumentError, true]
 new 2 args: ArgumentError: "wrong number of arguments (given 2, expected 0..1)"
 instance_variables: [[], []]
 inspect: ["#<NIO::Selector:0x>", "#<NIO::Monitor:0x>"]
-epoll backend: true
-epoll empty: [true, false, false]
-epoll register: [NIO::Monitor, true, true, :r, false, false, true]
-epoll register again: ArgumentError: "this IO is already registered with selector"
-epoll readiness before: [nil, false, false, false, nil]
-epoll select 0, none ready: nil
-epoll select 0.05, none ready: nil
-epoll select 0: [[true, :r, true, false]]
-epoll select nil: 1
-epoll select block: [1, [:r]]
-epoll select drained: [nil, :r]
-epoll writer: [[:w], :rw]
-epoll interests=: [:r, :r, nil, :w]
-epoll interests= nil: [nil, nil]
-epoll add_interest: [:w, :rw, :rw]
-epoll remove_interest: [:w, :w, nil, nil]
-epoll bad interests: ArgumentError: "invalid interest type :x (must be :r, :w, or :rw)"
-epoll string interest: TypeError: "wrong argument type String (expected Symbol)"
-epoll integer interest: TypeError: "wrong argument type Integer (expected Symbol)"
-epoll bad add: ArgumentError: "invalid interest type :derp (must be :r, :w, or :rw)"
-epoll value: [42, 42]
-epoll deregister: [true, true, false, nil]
-epoll closed monitor interests=: EOFError: "monitor is closed"
-epoll closed monitor add_interest: EOFError: "monitor is closed"
-epoll wakeup: nil
-epoll select after wakeup: nil
-epoll wakeup from another thread: []
-epoll wakeup with a block: 0
-epoll peer closed: [:r]
-epoll monitor close: [nil, true, false, nil, nil]
-epoll deregister closed io: true
-epoll register closed io: IOError: "closed stream"
-epoll close: [nil, true, nil, false]
-epoll closed backend: IOError: "selector is closed"
-epoll closed register: IOError: "selector is closed"
-epoll closed select: IOError: "selector is closed"
-epoll closed wakeup: IOError: "selector is closed"
-epoll closed deregister: [true, true, false]
-epoll monitor close after selector: [nil, true, false]
-poll backend: true
-poll empty: [true, false, false]
-poll register: [NIO::Monitor, true, true, :r, false, false, true]
-poll register again: ArgumentError: "this IO is already registered with selector"
-poll readiness before: [nil, false, false, false, nil]
-poll select 0, none ready: nil
-poll select 0.05, none ready: nil
-poll select 0: [[true, :r, true, false]]
-poll select nil: 1
-poll select block: [1, [:r]]
-poll select drained: [nil, :r]
-poll writer: [[:w], :rw]
-poll interests=: [:r, :r, nil, :w]
-poll interests= nil: [nil, nil]
-poll add_interest: [:w, :rw, :rw]
-poll remove_interest: [:w, :w, nil, nil]
-poll bad interests: ArgumentError: "invalid interest type :x (must be :r, :w, or :rw)"
-poll string interest: TypeError: "wrong argument type String (expected Symbol)"
-poll integer interest: TypeError: "wrong argument type Integer (expected Symbol)"
-poll bad add: ArgumentError: "invalid interest type :derp (must be :r, :w, or :rw)"
-poll value: [42, 42]
-poll deregister: [true, true, false, nil]
-poll closed monitor interests=: EOFError: "monitor is closed"
-poll closed monitor add_interest: EOFError: "monitor is closed"
-poll wakeup: nil
-poll select after wakeup: nil
-poll wakeup from another thread: []
-poll wakeup with a block: 0
-poll peer closed: [:r]
-poll monitor close: [nil, true, false, nil, nil]
-poll deregister closed io: true
-poll register closed io: IOError: "closed stream"
-poll close: [nil, true, nil, false]
-poll closed backend: IOError: "selector is closed"
-poll closed register: IOError: "selector is closed"
-poll closed select: IOError: "selector is closed"
-poll closed wakeup: IOError: "selector is closed"
-poll closed deregister: [true, true, false]
-poll monitor close after selector: [nil, true, false]
-select backend: true
-select empty: [true, false, false]
-select register: [NIO::Monitor, true, true, :r, false, false, true]
-select register again: ArgumentError: "this IO is already registered with selector"
-select readiness before: [nil, false, false, false, nil]
-select select 0, none ready: nil
-select select 0.05, none ready: nil
-select select 0: [[true, :r, true, false]]
-select select nil: 1
-select select block: [1, [:r]]
-select select drained: [nil, :r]
-select writer: [[:w], :rw]
-select interests=: [:r, :r, nil, :w]
-select interests= nil: [nil, nil]
-select add_interest: [:w, :rw, :rw]
-select remove_interest: [:w, :w, nil, nil]
-select bad interests: ArgumentError: "invalid interest type :x (must be :r, :w, or :rw)"
-select string interest: TypeError: "wrong argument type String (expected Symbol)"
-select integer interest: TypeError: "wrong argument type Integer (expected Symbol)"
-select bad add: ArgumentError: "invalid interest type :derp (must be :r, :w, or :rw)"
-select value: [42, 42]
-select deregister: [true, true, false, nil]
-select closed monitor interests=: EOFError: "monitor is closed"
-select closed monitor add_interest: EOFError: "monitor is closed"
-select wakeup: nil
-select select after wakeup: nil
-select wakeup from another thread: []
-select wakeup with a block: 0
-select peer closed: [:r]
-select monitor close: [nil, true, false, nil, nil]
-select deregister closed io: true
-select register closed io: IOError: "closed stream"
-select close: [nil, true, nil, false]
-select closed backend: IOError: "selector is closed"
-select closed register: IOError: "selector is closed"
-select closed select: IOError: "selector is closed"
-select closed wakeup: IOError: "selector is closed"
-select closed deregister: [true, true, false]
-select monitor close after selector: [nil, true, false]
+backend 1 backend: true
+backend 1 empty: [true, false, false]
+backend 1 register: [NIO::Monitor, true, true, :r, false, false, true]
+backend 1 register again: ArgumentError: "this IO is already registered with selector"
+backend 1 readiness before: [nil, false, false, false, nil]
+backend 1 select 0, none ready: nil
+backend 1 select 0.05, none ready: nil
+backend 1 select 0: [[true, :r, true, false]]
+backend 1 select nil: 1
+backend 1 select block: [1, [:r]]
+backend 1 select drained: [nil, :r]
+backend 1 writer: [[:w], :rw]
+backend 1 interests=: [:r, :r, nil, :w]
+backend 1 interests= nil: [nil, nil]
+backend 1 add_interest: [:w, :rw, :rw]
+backend 1 remove_interest: [:w, :w, nil, nil]
+backend 1 bad interests: ArgumentError: "invalid interest type :x (must be :r, :w, or :rw)"
+backend 1 string interest: TypeError: "wrong argument type String (expected Symbol)"
+backend 1 integer interest: TypeError: "wrong argument type Integer (expected Symbol)"
+backend 1 bad add: ArgumentError: "invalid interest type :derp (must be :r, :w, or :rw)"
+backend 1 value: [42, 42]
+backend 1 deregister: [true, true, false, nil]
+backend 1 closed monitor interests=: EOFError: "monitor is closed"
+backend 1 closed monitor add_interest: EOFError: "monitor is closed"
+backend 1 wakeup: nil
+backend 1 select after wakeup: nil
+backend 1 wakeup from another thread: []
+backend 1 wakeup with a block: 0
+backend 1 peer closed: [:r]
+backend 1 monitor close: [nil, true, false, nil, nil]
+backend 1 deregister closed io: true
+backend 1 register closed io: IOError: "closed stream"
+backend 1 close: [nil, true, nil, false]
+backend 1 closed backend: IOError: "selector is closed"
+backend 1 closed register: IOError: "selector is closed"
+backend 1 closed select: IOError: "selector is closed"
+backend 1 closed wakeup: IOError: "selector is closed"
+backend 1 closed deregister: [true, true, false]
+backend 1 monitor close after selector: [nil, true, false]
+backend 2 backend: true
+backend 2 empty: [true, false, false]
+backend 2 register: [NIO::Monitor, true, true, :r, false, false, true]
+backend 2 register again: ArgumentError: "this IO is already registered with selector"
+backend 2 readiness before: [nil, false, false, false, nil]
+backend 2 select 0, none ready: nil
+backend 2 select 0.05, none ready: nil
+backend 2 select 0: [[true, :r, true, false]]
+backend 2 select nil: 1
+backend 2 select block: [1, [:r]]
+backend 2 select drained: [nil, :r]
+backend 2 writer: [[:w], :rw]
+backend 2 interests=: [:r, :r, nil, :w]
+backend 2 interests= nil: [nil, nil]
+backend 2 add_interest: [:w, :rw, :rw]
+backend 2 remove_interest: [:w, :w, nil, nil]
+backend 2 bad interests: ArgumentError: "invalid interest type :x (must be :r, :w, or :rw)"
+backend 2 string interest: TypeError: "wrong argument type String (expected Symbol)"
+backend 2 integer interest: TypeError: "wrong argument type Integer (expected Symbol)"
+backend 2 bad add: ArgumentError: "invalid interest type :derp (must be :r, :w, or :rw)"
+backend 2 value: [42, 42]
+backend 2 deregister: [true, true, false, nil]
+backend 2 closed monitor interests=: EOFError: "monitor is closed"
+backend 2 closed monitor add_interest: EOFError: "monitor is closed"
+backend 2 wakeup: nil
+backend 2 select after wakeup: nil
+backend 2 wakeup from another thread: []
+backend 2 wakeup with a block: 0
+backend 2 peer closed: [:r]
+backend 2 monitor close: [nil, true, false, nil, nil]
+backend 2 deregister closed io: true
+backend 2 register closed io: IOError: "closed stream"
+backend 2 close: [nil, true, nil, false]
+backend 2 closed backend: IOError: "selector is closed"
+backend 2 closed register: IOError: "selector is closed"
+backend 2 closed select: IOError: "selector is closed"
+backend 2 closed wakeup: IOError: "selector is closed"
+backend 2 closed deregister: [true, true, false]
+backend 2 monitor close after selector: [nil, true, false]
+backend 3 backend: true
+backend 3 empty: [true, false, false]
+backend 3 register: [NIO::Monitor, true, true, :r, false, false, true]
+backend 3 register again: ArgumentError: "this IO is already registered with selector"
+backend 3 readiness before: [nil, false, false, false, nil]
+backend 3 select 0, none ready: nil
+backend 3 select 0.05, none ready: nil
+backend 3 select 0: [[true, :r, true, false]]
+backend 3 select nil: 1
+backend 3 select block: [1, [:r]]
+backend 3 select drained: [nil, :r]
+backend 3 writer: [[:w], :rw]
+backend 3 interests=: [:r, :r, nil, :w]
+backend 3 interests= nil: [nil, nil]
+backend 3 add_interest: [:w, :rw, :rw]
+backend 3 remove_interest: [:w, :w, nil, nil]
+backend 3 bad interests: ArgumentError: "invalid interest type :x (must be :r, :w, or :rw)"
+backend 3 string interest: TypeError: "wrong argument type String (expected Symbol)"
+backend 3 integer interest: TypeError: "wrong argument type Integer (expected Symbol)"
+backend 3 bad add: ArgumentError: "invalid interest type :derp (must be :r, :w, or :rw)"
+backend 3 value: [42, 42]
+backend 3 deregister: [true, true, false, nil]
+backend 3 closed monitor interests=: EOFError: "monitor is closed"
+backend 3 closed monitor add_interest: EOFError: "monitor is closed"
+backend 3 wakeup: nil
+backend 3 select after wakeup: nil
+backend 3 wakeup from another thread: []
+backend 3 wakeup with a block: 0
+backend 3 peer closed: [:r]
+backend 3 monitor close: [nil, true, false, nil, nil]
+backend 3 deregister closed io: true
+backend 3 register closed io: IOError: "closed stream"
+backend 3 close: [nil, true, nil, false]
+backend 3 closed backend: IOError: "selector is closed"
+backend 3 closed register: IOError: "selector is closed"
+backend 3 closed select: IOError: "selector is closed"
+backend 3 closed wakeup: IOError: "selector is closed"
+backend 3 closed deregister: [true, true, false]
+backend 3 monitor close after selector: [nil, true, false]
 register 42: TypeError: "no implicit conversion of Integer into IO"
 register nil: TypeError: "no implicit conversion of nil into IO"
 register string interest: TypeError: "wrong argument type String (expected Symbol)"
