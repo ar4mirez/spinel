@@ -642,11 +642,10 @@ pub const SSL_ERROR_WANT_X509_LOOKUP: c_int = 4;
 pub const SSL_ERROR_WANT_CLIENT_HELLO_CB: c_int = 11;
 pub const SSL_ERROR_WANT_RETRY_VERIFY: c_int = 12;
 
-// The client hello callback's answers, and the TLS alert it sends.
+// The client hello callback's answers; the TLS alert comes from Ruby.
 pub const SSL_CLIENT_HELLO_SUCCESS: c_int = 1;
 pub const SSL_CLIENT_HELLO_ERROR: c_int = 0;
 pub const SSL_CLIENT_HELLO_RETRY: c_int = -1;
-pub const SSL_AD_INTERNAL_ERROR: c_int = 80;
 pub const SSL_TLSEXT_ERR_OK: c_int = 0;
 pub const SSL_TLSEXT_ERR_ALERT_FATAL: c_int = 2;
 pub const SSL_TLSEXT_ERR_NOACK: c_int = 3;

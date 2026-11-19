@@ -314,6 +314,47 @@ show("servername_cb context is set up") do
   end
 end
 
+# A callback that raises aborts the handshake with the alert OpenSSL sends
+# for that callback: unrecognized_name, or no_application_protocol.
+def hello_alert(ctx, client_ctx)
+  server = TCPServer.new("127.0.0.1", 0)
+  port = server.local_address.ip_port
+  thread = Thread.new do
+    sock = server.accept
+    ssl = OpenSSL::SSL::SSLSocket.new(sock, ctx)
+    begin
+      ssl.accept
+    rescue StandardError => e
+      e.message
+    ensure
+      sock.close
+    end
+  ensure
+    server.close
+  end
+  seen =
+    begin
+      client(port, client_ctx, "localhost") { :connected }
+    rescue OpenSSL::SSL::SSLError => e
+      e.message[/SSL alert number \d+/]
+    end
+  [seen, thread.value]
+end
+
+show("servername_cb raises") do
+  ctx = server_context(leaf, leaf_key)
+  ctx.servername_cb = ->(_) { raise "no such name" }
+  hello_alert(ctx, OpenSSL::SSL::SSLContext.new)
+end
+
+show("alpn_select_cb raises") do
+  ctx = server_context(leaf, leaf_key)
+  ctx.alpn_select_cb = ->(_) { raise "no protocol" }
+  client_ctx = OpenSSL::SSL::SSLContext.new
+  client_ctx.alpn_protocols = ["h2"]
+  hello_alert(ctx, client_ctx)
+end
+
 show("bad version") { OpenSSL::SSL::SSLContext.new.min_version = :TLS9 }
 show("bad ciphers") { OpenSSL::SSL::SSLContext.new.ciphers = "nope" }
 show("default params") { c = OpenSSL::SSL::SSLContext.new; c.set_params; [c.verify_mode, c.verify_hostname, c.cert_store.equal?(OpenSSL::SSL::SSLContext::DEFAULT_CERT_STORE)] }

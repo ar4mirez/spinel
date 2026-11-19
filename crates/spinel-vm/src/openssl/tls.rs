@@ -222,7 +222,8 @@ enum Hello {
     #[default]
     Unasked,
     Asked(Option<Vec<u8>>, Option<Vec<Vec<u8>>>),
-    Answered(bool),
+    /// `None` to go on, or the TLS alert that aborts the handshake.
+    Answered(Option<c_int>),
 }
 
 #[derive(Debug, Default)]
@@ -2627,10 +2628,10 @@ unsafe extern "C" fn client_hello_cb(
         }
         let state = &mut *state;
         match state.hello {
-            Hello::Answered(true) => ffi::SSL_CLIENT_HELLO_SUCCESS,
-            Hello::Answered(false) => {
+            Hello::Answered(None) => ffi::SSL_CLIENT_HELLO_SUCCESS,
+            Hello::Answered(Some(code)) => {
                 if !alert.is_null() {
-                    *alert = ffi::SSL_AD_INTERNAL_ERROR;
+                    *alert = code;
                 }
                 ffi::SSL_CLIENT_HELLO_ERROR
             }
@@ -2703,11 +2704,15 @@ unsafe extern "C" fn client_cert_cb(
     }
 }
 
-/// `ssl_hello_answer(id, ok, context or nil, protocol or nil)`: Ruby's
-/// answer to a ClientHello question; a context `servername_cb` chose is
+/// `ssl_hello_answer(id, alert or nil, context or nil, protocol or nil)`:
+/// Ruby's answer to a ClientHello question, `alert` the TLS alert a failed
+/// callback aborts the handshake with; a context `servername_cb` chose is
 /// the connection's from here on.
 fn ssl_hello_answer(contexts: &mut Contexts, args: &[Arg]) -> Result<Out, Failure> {
-    let ok = truthy(args, 1);
+    let alert = match args.get(1) {
+        None | Some(Arg::Nil) => None,
+        _ => Some(c_int_at(args, 1)?),
+    };
     let ctx = opt_id(args, 2)?.map(|i| contexts.ctx(i)).transpose()?;
     let alpn = opt_bytes(args, 3)?.map(<[u8]>::to_vec);
     let state = contexts.ssl(id(args, 0)?)?;
@@ -2716,7 +2721,7 @@ fn ssl_hello_answer(contexts: &mut Contexts, args: &[Arg]) -> Result<Out, Failur
         unsafe { ffi::SSL_set_SSL_CTX(state.ssl.as_ptr(), ctx) };
     }
     state.alpn = alpn;
-    state.hello = Hello::Answered(ok);
+    state.hello = Hello::Answered(alert);
     Ok(Out::Nil)
 }
 

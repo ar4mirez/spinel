@@ -597,6 +597,10 @@ module OpenSSL
         ctx = @context
         chosen = nil
         alpn = nil
+        # The alert a failure sends, OpenSSL's for each callback under CRuby:
+        # unrecognized_name for servername_cb, no_application_protocol for
+        # alpn_select_cb.
+        alert = 112
         begin
           if servername && ctx.servername_cb
             result = ctx.servername_cb.call([self, servername])
@@ -610,6 +614,7 @@ module OpenSSL
             end
           end
           if protocols && ctx.alpn_select_cb
+            alert = 120
             selected = IO.__str__(ctx.alpn_select_cb.call(protocols))
             unless (1..255).cover?(selected.bytesize)
               raise SSLError, "Selected protocol name must have length 1..255"
@@ -618,10 +623,10 @@ module OpenSSL
           end
         rescue Exception => e
           @__callback_error__ = e
-          SSL.__send__(:__tls__, "ssl_hello_answer", __ssl_id__, false, nil, nil)
+          SSL.__send__(:__tls__, "ssl_hello_answer", __ssl_id__, alert, nil, nil)
           return
         end
-        SSL.__send__(:__tls__, "ssl_hello_answer", __ssl_id__, true, chosen, alpn)
+        SSL.__send__(:__tls__, "ssl_hello_answer", __ssl_id__, nil, chosen, alpn)
       end
 
       # `ossl_client_cert_cb`: `[cert, key]` from `client_cert_cb`, or none.
