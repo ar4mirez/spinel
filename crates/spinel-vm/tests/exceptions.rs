@@ -29,8 +29,8 @@ fn rows() -> Vec<(&'static str, &'static str)> {
 /// The class object bound to a top-level constant, or `None`.
 fn class_named(heap: &mut Heap, name: &str) -> Option<Value> {
     let symbol = spinel_vm::shared::symbols::intern(name);
-    let scope = heap.scope();
-    scope.classes().const_get_here(Builtin::Object.id(), symbol)
+    let mut scope = heap.scope();
+    scope.const_get_here(Builtin::Object.id(), symbol)
 }
 
 #[test]
@@ -52,7 +52,6 @@ fn every_measured_superclass_is_the_one_ruby_reports() {
     for (name, expected) in rows() {
         let mut scope = heap.scope();
         let object = scope
-            .classes()
             .const_get_here(
                 Builtin::Object.id(),
                 spinel_vm::shared::symbols::intern(name),
@@ -85,7 +84,6 @@ fn rescue_matching_walks_to_standard_error() {
     let mut scope = heap.scope();
     let id_of = |scope: &mut spinel_vm::HandleScope<'_>, name: &str| {
         let object = scope
-            .classes()
             .const_get_here(
                 Builtin::Object.id(),
                 spinel_vm::shared::symbols::intern(name),

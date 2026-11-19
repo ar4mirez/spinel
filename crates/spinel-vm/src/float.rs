@@ -21,7 +21,7 @@ pub fn value(scope: &mut HandleScope<'_>, f: f64) -> Value {
     if let Some(immediate) = Value::flonum(f) {
         return immediate;
     }
-    let class = scope.classes().object(Builtin::Float.id());
+    let class = scope.class_object(Builtin::Float.id());
     let class = scope.root(class);
     let handle = scope.alloc(Some(class), Payload::Bytes, 8);
     scope.bytes_mut(handle).copy_from_slice(&f.to_le_bytes());

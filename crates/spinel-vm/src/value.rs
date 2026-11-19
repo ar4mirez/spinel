@@ -10,6 +10,7 @@
 //! | `10`     | double, rotated left by three | flonum                       |
 //! | `0100`   | ordinal                       | `nil`/`false`/`true`/`undef` |
 //! | `1100`   | symbol id                     | static symbol                |
+//! | `0100_0100` | class id                   | a class, in the class tables |
 //! | `000`    | 8-byte-aligned pointer        | heap object                  |
 //!
 //! The zero word is deliberately not a `Value`, so `Option<Value>` is still one word
@@ -141,6 +142,12 @@ const SPECIAL_MASK: u64 = 0b1111;
 const CONST_TAG: u64 = 0b0100;
 const SYMBOL_TAG: u64 = 0b1100;
 const SYMBOL_SHIFT: u32 = 8;
+/// A class as the class tables every Ractor's heap shares hold it: by id,
+/// since each heap has an object of its own for it (#117). One more constant
+/// ordinal, in the byte the constants use. Never reaches Ruby code: each heap
+/// turns it into its own object as it reads the tables.
+const CLASS_REF_MASK: u64 = 0xff;
+const CLASS_REF_TAG: u64 = 0x44;
 
 const HEAP_MASK: u64 = 0b111;
 const HEAP_TAG: u64 = 0b000;
@@ -199,6 +206,22 @@ impl Value {
     #[inline]
     pub const fn symbol(id: SymbolId) -> Value {
         Value::from_bits(((id.0 as u64) << SYMBOL_SHIFT) | SYMBOL_TAG)
+    }
+
+    /// Class `index` as the class tables hold it. See [`CLASS_REF_TAG`].
+    #[inline]
+    pub(crate) const fn class_ref(index: u32) -> Value {
+        Value::from_bits(((index as u64) << SYMBOL_SHIFT) | CLASS_REF_TAG)
+    }
+
+    /// The class index a [`Value::class_ref`] names.
+    #[inline]
+    pub(crate) const fn as_class_ref(self) -> Option<u32> {
+        if self.bits() & CLASS_REF_MASK == CLASS_REF_TAG {
+            Some((self.bits() >> SYMBOL_SHIFT) as u32)
+        } else {
+            None
+        }
     }
 
     /// A pointer to a heap object.
@@ -385,6 +408,9 @@ impl Value {
 /// Reads like the Ruby object, because every future slice's failing assertion prints it.
 impl fmt::Debug for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(index) = self.as_class_ref() {
+            return write!(f, "class({index})");
+        }
         match self.unpack() {
             Unpacked::Fixnum(n) => write!(f, "{n}"),
             Unpacked::Flonum(d) => write!(f, "{d:?}"),

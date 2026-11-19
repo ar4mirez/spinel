@@ -920,7 +920,7 @@ unsafe extern "C" fn api_const_get(cx: *mut RawContext, path: Bytes, out: *mut R
         status(cx, |host| {
             let path = host.name(path)?;
             let mut owner = Builtin::Object.id();
-            let mut value = host.scope.classes().object(owner);
+            let mut value = host.scope.class_object(owner);
             let segments: Vec<&str> = path.split("::").collect();
             for (at, segment) in segments.iter().enumerate() {
                 if !segment.starts_with(|c: char| c.is_ascii_uppercase()) {
@@ -930,7 +930,7 @@ unsafe extern "C" fn api_const_get(cx: *mut RawContext, path: Bytes, out: *mut R
                     )));
                 }
                 let name = crate::shared::symbols::intern(segment);
-                let Some(found) = host.scope.classes().const_get_here(owner, name) else {
+                let Some(found) = host.scope.const_get_here(owner, name) else {
                     let error = super::uninitialized(
                         host.scope,
                         owner,
@@ -986,7 +986,7 @@ fn define(
     match define_or_reopen(host.scope, cbase, symbol, kind, superclass, None) {
         Ok((id, hooks)) => {
             host.hooks.extend(hooks);
-            let object = host.scope.classes().object(id);
+            let object = host.scope.class_object(id);
             Ok(host.handle(object))
         }
         Err(error) => Err(host.raise(error)),
@@ -1047,7 +1047,7 @@ unsafe extern "C" fn api_define_method(
                 )));
             }
             if singleton != 0 {
-                let object = host.scope.classes().object(id);
+                let object = host.scope.class_object(id);
                 id = singleton_of(host.scope, object).map_err(|error| host.raise(error))?;
             }
             let index = host.scope.definitions_mut().add_ext(ExtMethod {
