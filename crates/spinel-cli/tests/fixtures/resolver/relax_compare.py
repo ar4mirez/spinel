@@ -7,8 +7,8 @@ same seed makes the same cases), Bundler locks each through
 `Resolver#find_names_to_relax` returns on each try, and `spinel resolve`
 resolves it with SPINEL_DEBUG_RELAX set, which prints the same of each of
 its tries. A case's outcome is one of differential.py's kinds, and its tries
-differ when the prereleases let in on some try, or the number of tries,
-are not Bundler's:
+differ when what some try returns (`unlock` and `pre`, in order), or the
+number of tries, is not Bundler's:
 
   crates/spinel-cli/tests/fixtures/resolver/relax_compare.py \\
       --spinel target/debug/spinel --solver pubgrub-ruby --seed 816 --cases 1000
@@ -43,8 +43,14 @@ import differential  # noqa: E402
 RELAX = re.compile(r"^find_names_to_relax: (.*)$", re.M)
 
 
+def relaxed(line):
+    """One try's find_names_to_relax result, as logged, in its order."""
+    names = json.loads(line)
+    return {"unlock": names["unlock"], "pre": names["pre"]}
+
+
 def bundler(case_dir, source, gemfile):
-    """Bundler's outcome and, for each try, the prereleases it let in."""
+    """Bundler's outcome and, for each try, what find_names_to_relax returned."""
     app = os.path.join(case_dir, "bundler")
     os.makedirs(app)
     with open(os.path.join(app, "Gemfile"), "w") as f:
@@ -68,7 +74,7 @@ def bundler(case_dir, source, gemfile):
     tries = []
     if os.path.exists(log):
         with open(log) as f:
-            tries = [sorted(json.loads(line)["pre"]) for line in f]
+            tries = [relaxed(line) for line in f]
     if out.returncode == 0:
         with open(os.path.join(app, "Gemfile.lock")) as f:
             return {"ok": True, "specs": differential.specs_of(f.read()), "tries": tries}
@@ -76,7 +82,7 @@ def bundler(case_dir, source, gemfile):
 
 
 def spinel(binary, case_dir, source, gemfile, solver):
-    """Spinel's outcome and, for each try, the prereleases it let in."""
+    """Spinel's outcome and, for each try, what find_names_to_relax returned."""
     deps = {
         "gemfiles": [os.path.join(case_dir, "Gemfile")],
         "source": {"type": "rubygems", "remote": source, "cooldown": None},
@@ -96,7 +102,7 @@ def spinel(binary, case_dir, source, gemfile, solver):
         env={**os.environ, "SPINEL_HOME": os.path.join(case_dir, "spinel-home"), "SPINEL_DEBUG_RELAX": "1"},
         capture_output=True, text=True, timeout=300,
     )
-    tries = [sorted(json.loads(line)["pre"]) for line in RELAX.findall(out.stderr)]
+    tries = [relaxed(line) for line in RELAX.findall(out.stderr)]
     if out.returncode == 0:
         return {"ok": True, "specs": out.stdout.split("\n")[:-1], "tries": tries}
     return {"ok": False, "specs": None, "tries": tries}

@@ -12,8 +12,9 @@
 # `bundler_oracle.rb` makes Bundler see as its own. `bundle lock` writes
 # `Gemfile.lock` there, its remote spelled `@SOURCE@`; a case Bundler cannot
 # resolve gets `bundler.txt` instead, Bundler's explanation, which the PR
-# shows beside Spinel's. A case Bundler retried also gets `relax.log`, what
-# each try's `find_names_to_relax` returned, as `relax_hook.rb` logs it.
+# shows beside Spinel's. A case Bundler fails or retries also gets
+# `relax.log`, what each try's `find_names_to_relax` returned, the final
+# failing try's included, as `relax_hook.rb` logs it.
 # `crates/spinel-cli/tests/resolver.rs` compares Spinel's resolution of each
 # case with these.
 #
