@@ -116,6 +116,12 @@ where
         &self.source
     }
 
+    /// The logger back, for the next try's solver: Bundler logs every try
+    /// of a resolution to one logger.
+    pub fn into_logger(self) -> Option<Logger> {
+        self.logger
+    }
+
     pub fn solution(&self) -> &PartialSolution<P, V> {
         &self.solution
     }

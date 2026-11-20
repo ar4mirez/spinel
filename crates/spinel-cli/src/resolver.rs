@@ -44,8 +44,9 @@
 //!
 //! **The pubgrub-ruby port** (#816) replaces the `pubgrub` crate in slices:
 //! `resolver/solver/` is pubgrub-ruby's solver, and `resolver/source.rs`
-//! Bundler's side of it over the same candidates. [`Solver::PubgrubRuby`]
-//! resolves with them, for `spinel resolve --solver pubgrub-ruby` only.
+//! Bundler's side of it over the same candidates, with `find_names_to_relax`.
+//! [`Solver::PubgrubRuby`] resolves with them, retrying as Bundler does, for
+//! `spinel resolve --solver pubgrub-ruby` only.
 //!
 //! `bundler` has one candidate, the Bundler version the lockfile is written
 //! for (`lockfile::BUNDLER_VERSION`), as Bundler's `Source::Metadata` gives
@@ -70,10 +71,10 @@
 //! Not here yet: a rubygems source scoped to a gem.
 
 mod report;
-// ponytail: what reads the solver's derivations (a cause's parts, the custom
-// explanations, `conflict?`) arrives with slices 3 and 4 of #816
-// (`find_names_to_relax`, `FailureWriter`), and some of what its tests use
-// nothing else does yet; drop this `allow` with slice 4.
+// ponytail: what reads the rest of the solver's derivations (the custom
+// explanations, `failure?`) arrives with slice 4 of #816 (`FailureWriter`),
+// and some of what its tests use nothing else does yet; drop this `allow`
+// with slice 4.
 #[allow(dead_code)]
 mod solver;
 mod source;
@@ -413,6 +414,17 @@ pub enum PackageName {
     Gem(String),
     Ruby,
     RubyGems,
+}
+
+impl PackageName {
+    /// The name as Bundler spells it: a gem's, `Ruby\0` or `RubyGems\0`.
+    fn bundler_name(&self) -> String {
+        match self {
+            PackageName::Gem(name) => name.clone(),
+            PackageName::Ruby => "Ruby\0".to_owned(),
+            PackageName::RubyGems => "RubyGems\0".to_owned(),
+        }
+    }
 }
 
 /// What the solver resolves: the root (the Gemfile) or a [`PackageName`].
@@ -822,7 +834,7 @@ impl<'a> Provider<'a> {
         request: &'a Request,
         index: &'a Index,
         locked: &'a Locked,
-        relaxed: &HashSet<String>,
+        relaxed: &HashSet<PackageName>,
     ) -> Provider<'a> {
         let provider = Provider {
             request,
@@ -835,12 +847,8 @@ impl<'a> Provider<'a> {
             seen: RefCell::new(HashMap::new()),
         };
         for name in relaxed {
-            provider.package_state(&PackageName::Gem(name.clone()));
-            if let Some(state) = provider
-                .packages
-                .borrow_mut()
-                .get_mut(&PackageName::Gem(name.clone()))
-            {
+            provider.package_state(name);
+            if let Some(state) = provider.packages.borrow_mut().get_mut(name) {
                 state.prereleases = Prereleases::ConsiderLast;
             }
         }
@@ -1120,6 +1128,31 @@ impl<'a> Provider<'a> {
         self.packages.borrow()[name].prereleases
     }
 
+    /// `Package#ignores_prereleases?`.
+    fn ignores_prereleases(&self, name: &PackageName) -> bool {
+        self.prereleases(name) == Prereleases::Ignore
+    }
+
+    /// `@all_specs[name].any? {|s| s.version.prerelease? }`: the meta
+    /// packages' one version is the Ruby or RubyGems resolved for.
+    fn has_prereleases(&self, name: &PackageName) -> bool {
+        match name {
+            PackageName::Gem(gem) => self.all_specs(gem).iter().any(|s| s.version.prerelease()),
+            PackageName::Ruby => self.request.ruby_version.prerelease(),
+            PackageName::RubyGems => self.request.rubygems_version.prerelease(),
+        }
+    }
+
+    /// The gem's name when it has a base requirement (`base_requirements[name]`).
+    fn base_requirement_name(&self, name: &PackageName) -> Option<String> {
+        match name {
+            PackageName::Gem(gem) if self.locked.requirements.contains_key(gem) => {
+                Some(gem.clone())
+            }
+            _ => None,
+        }
+    }
+
     /// `GemVersionPromoter#sort_versions` at its default level, `major`:
     /// newest first, releases before prereleases unless prereleases were
     /// asked for, and then (`post_sort`) the locked version moved to the
@@ -1194,13 +1227,22 @@ impl<'a> Provider<'a> {
         ] {
             let exact = Requirement::new([format!("= {version}").as_str()])
                 .expect("a version makes an exact requirement");
+            let relaxed = self
+                .packages
+                .borrow()
+                .get(&meta)
+                .is_some_and(|s| s.prereleases == Prereleases::ConsiderLast);
             self.packages.borrow_mut().insert(
                 meta.clone(),
                 PackageState {
                     platforms: request.platforms.clone(),
                     top_level: true,
                     force_ruby_platform: false,
-                    prereleases: Prereleases::Ignore,
+                    prereleases: if relaxed {
+                        Prereleases::ConsiderLast
+                    } else {
+                        Prereleases::Ignore
+                    },
                     candidates: None,
                 },
             );
@@ -1617,8 +1659,7 @@ pub enum Solver {
     Pubgrub,
     /// The port of the pubgrub-ruby Bundler 4.0.20 vendors
     /// (`resolver/solver/`), fed by Bundler's source side
-    /// (`resolver/source.rs`). With no lockfile only, and no relaxation yet:
-    /// a failure is not retried.
+    /// (`resolver/source.rs`). With no lockfile only.
     PubgrubRuby,
 }
 
@@ -1637,9 +1678,13 @@ pub fn resolve_with(
 ) -> Result<Vec<Resolved>, Failure> {
     match solver {
         Solver::Pubgrub => solve(request, index, Locked::default(), resolved_builds),
-        Solver::PubgrubRuby => {
-            solve_pubgrub_ruby(request, index, debug_resolver(), resolved_builds)
-        }
+        Solver::PubgrubRuby => solve_pubgrub_ruby(
+            request,
+            index,
+            debug_resolver(),
+            print_relaxed,
+            resolved_builds,
+        ),
     }
 }
 
@@ -1740,7 +1785,7 @@ fn solve<T>(
         .filter(|d| !d.gem_platforms(&request.platforms).is_empty())
         .map(|d| d.name.as_str())
         .collect();
-    let mut relaxed: HashSet<String> = HashSet::new();
+    let mut relaxed: HashSet<PackageName> = HashSet::new();
     let root = Package::Root(request.gemfile.clone());
     loop {
         let (unlock, prereleases) = {
@@ -1750,6 +1795,11 @@ fn solve<T>(
                 Ok(solution) => return Ok(finish(&provider, solution.into_iter().collect())),
                 Err(PubGrubError::NoSolution(tree)) => {
                     let (unlock, prereleases) = provider.names_to_relax(&tree);
+                    print_relaxed(&source::NamesToRelax {
+                        unlock: unlock.clone(),
+                        prereleases: prereleases.iter().cloned().map(PackageName::Gem).collect(),
+                        extended_explanation: None,
+                    });
                     if unlock.is_empty() && prereleases.is_empty() {
                         let explanation = report::explain(&tree, &provider);
                         return Err(Failure::Conflict(format!(
@@ -1766,7 +1816,7 @@ fn solve<T>(
         if !unlock.is_empty() {
             locked.unlock_names(&unlock, &gemfile);
         }
-        relaxed.extend(prereleases);
+        relaxed.extend(prereleases.into_iter().map(PackageName::Gem));
     }
 }
 
@@ -1785,36 +1835,76 @@ fn debug_resolver() -> Option<solver::Logger> {
     debug.then(|| Box::new(|_, line: &str| eprintln!("{line}")) as solver::Logger)
 }
 
-/// `Resolver#solve_versions` on pubgrub-ruby's solver, with no lockfile:
-/// its first try, a failure not yet relaxed and retried. `logger` gets
-/// every line pubgrub-ruby logs.
+/// With `SPINEL_DEBUG_RELAX` set, a failed try's `find_names_to_relax`,
+/// printed to standard error as one JSON line, as
+/// `tests/fixtures/resolver/relax_hook.rb` logs Bundler's, for
+/// `relax_compare.py` to compare.
+fn print_relaxed(names: &source::NamesToRelax) {
+    if std::env::var_os("SPINEL_DEBUG_RELAX").is_some() {
+        eprintln!("find_names_to_relax: {}", names.to_json());
+    }
+}
+
+/// `Resolver#solve_versions` on pubgrub-ruby's solver, with no lockfile: on
+/// a failure, `find_names_to_relax` names what to relax, and the resolution
+/// is set up again (`setup_solver`) and retried with those gems unlocked
+/// (`Base#unlock_names`) and their prereleases let in
+/// (`Base#include_prereleases`), until it resolves or there is nothing to
+/// relax. `logger` gets every line pubgrub-ruby logs, on every try, and
+/// `relaxed_by` what each failed try's `find_names_to_relax` found.
 fn solve_pubgrub_ruby<T>(
     request: &Request,
     index: &Index,
-    logger: Option<solver::Logger>,
+    mut logger: Option<solver::Logger>,
+    mut relaxed_by: impl FnMut(&source::NamesToRelax),
     finish: impl FnOnce(&Provider<'_>, Vec<(Package, Candidate)>) -> T,
 ) -> Result<T, Failure> {
-    let locked = Locked::default();
-    let relaxed: HashSet<String> = HashSet::new();
-    let mut provider = Provider::new(request, index, &locked, &relaxed);
-    provider.prepare_root()?;
+    // ponytail: no lockfile yet, so no base requirements and nothing to
+    // unlock; slice 5 of #816 passes the lockfile's `Locked` in.
+    let mut locked = Locked::default();
+    let gemfile: Vec<&str> = request
+        .dependencies
+        .iter()
+        .filter(|d| !d.gem_platforms(&request.platforms).is_empty())
+        .map(|d| d.name.as_str())
+        .collect();
+    let mut relaxed: HashSet<PackageName> = HashSet::new();
     let root = Package::Root(request.gemfile.clone());
-    let mut version_solver = solver::VersionSolver::new(
-        source::BundlerSource::new(&provider),
-        root,
-        source::BundlerStrategy::default(),
-        logger,
-    );
-    match version_solver.solve() {
-        Ok(decisions) => Ok(finish(&provider, decisions)),
-        // ponytail: `find_names_to_relax` is slice 3 of #816; until then
-        // this path relaxes nothing, so a failure is final and only first
-        // tries compare with Bundler's. The explanation is the failing
-        // incompatibility alone until slice 4 ports `FailureWriter` over it.
-        Err(failure) => Err(Failure::Conflict(format!(
-            "Could not find compatible versions\n\n{}",
-            failure.incompatibility
-        ))),
+    loop {
+        let names = {
+            let mut provider = Provider::new(request, index, &locked, &relaxed);
+            provider.prepare_root()?;
+            let mut version_solver = solver::VersionSolver::new(
+                source::BundlerSource::new(&provider),
+                root.clone(),
+                source::BundlerStrategy::default(),
+                logger,
+            );
+            let failure = match version_solver.solve() {
+                Ok(decisions) => return Ok(finish(&provider, decisions)),
+                Err(failure) => failure,
+            };
+            logger = version_solver.into_logger();
+            let names = source::find_names_to_relax(&provider, &failure.incompatibility);
+            relaxed_by(&names);
+            if names.unlock.is_empty() && names.prereleases.is_empty() {
+                // ponytail: the explanation is the failing incompatibility
+                // alone until slice 4 of #816 ports `FailureWriter` over it.
+                let mut explanation = failure.incompatibility.to_string();
+                if let Some(extended) = names.extended_explanation {
+                    explanation.push_str("\n\n");
+                    explanation.push_str(&extended);
+                }
+                return Err(Failure::Conflict(format!(
+                    "Could not find compatible versions\n\n{explanation}"
+                )));
+            }
+            names
+        };
+        if !names.unlock.is_empty() {
+            locked.unlock_names(&names.unlock, &gemfile);
+        }
+        relaxed.extend(names.prereleases);
     }
 }
 

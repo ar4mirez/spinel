@@ -33,12 +33,14 @@ pub enum Cause<P, V> {
     },
 }
 
-/// `Incompatibility`.
+/// `Incompatibility`, with the `extended_explanation` Bundler's subclass
+/// (`Bundler::Resolver::Incompatibility`) adds.
 #[derive(Clone, Debug)]
 pub struct Incompatibility<P, V> {
     terms: Vec<Term<P, V>>,
     cause: Cause<P, V>,
     custom_explanation: Option<String>,
+    extended_explanation: Option<String>,
 }
 
 impl<P: Package, V: Version> Incompatibility<P, V> {
@@ -58,7 +60,16 @@ impl<P: Package, V: Version> Incompatibility<P, V> {
             terms,
             cause,
             custom_explanation,
+            extended_explanation: None,
         }
+    }
+
+    /// `Bundler::Resolver::Incompatibility.new(..., extended_explanation:)`:
+    /// what Bundler prints after the explanation when the failure's walk
+    /// (`find_names_to_relax`) meets this incompatibility.
+    pub fn with_extended_explanation(mut self, extended_explanation: Option<String>) -> Self {
+        self.extended_explanation = extended_explanation;
+        self
     }
 
     pub fn terms(&self) -> &[Term<P, V>] {
@@ -71,6 +82,10 @@ impl<P: Package, V: Version> Incompatibility<P, V> {
 
     pub fn custom_explanation(&self) -> Option<&str> {
         self.custom_explanation.as_deref()
+    }
+
+    pub fn extended_explanation(&self) -> Option<&str> {
+        self.extended_explanation.as_deref()
     }
 
     /// `failure?`: no terms, or only the root.

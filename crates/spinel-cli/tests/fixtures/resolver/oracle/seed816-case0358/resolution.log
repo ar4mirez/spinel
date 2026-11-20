@@ -1,0 +1,265 @@
+fact: (root dependency)
+derived: Gemfile
+attempting Gemfile 0
+fact: Gemfile depends on g0 >= 0
+fact: current Ruby version is = 4.0.0
+fact: current RubyGems version is = 4.0.16
+selected Gemfile 0
+derived: RubyGems = 4.0.16
+derived: Ruby = 4.0.0
+derived: g0 >= 0
+attempting RubyGems 4.0.16
+selected RubyGems 4.0.16
+attempting Ruby 4.0.0
+selected Ruby 4.0.0
+attempting g0 1.0
+fact: g0 >= 1.0 depends on g2 >= 2.0
+fact: g0 >= 1.0 depends on g4 ~> 1.0
+selected g0 1.0
+derived: g4 ~> 1.0
+derived: g2 >= 2.0
+attempting g2
+fact: g2 >= 2.0 could not be found in rubygems repository @SOURCE@ for any resolution platforms (x86_64-linux)
+conflict: g2 >= 2.0 could not be found in rubygems repository @SOURCE@ for any resolution platforms (x86_64-linux)
+backtracking to 1
+derived: not g2 >= 2.0
+derived: not g0 >= 1.0
+attempting RubyGems 4.0.16
+selected RubyGems 4.0.16
+attempting Ruby 4.0.0
+selected Ruby 4.0.0
+attempting g0 0.9
+fact: g0 < 1.0 depends on g4 < 2.0.beta
+selected g0 0.9
+derived: g4 < 2.0.beta
+attempting g4
+fact: g4 < 2.0.beta could not be found in rubygems repository @SOURCE@
+conflict: g4 < 2.0.beta could not be found in rubygems repository @SOURCE@
+backtracking to 1
+derived: not g4 < 2.0.beta
+conflict: g0 < 1.0 depends on g4 < 2.0.beta
+! not g4 < 2.0.beta is satisfied by not g4 < 2.0.beta
+! which is caused by g4 < 2.0.beta could not be found in rubygems repository @SOURCE@
+! thus g0 < 1.0 cannot be used
+! g0 < 1.0 is satisfied by not g0 >= 1.0
+! which is caused by g0 >= 1.0 depends on g2 >= 2.0
+! thus g2 >= 2.0 is required
+! not g2 >= 2.0 is satisfied by not g2 >= 2.0
+! which is caused by g2 >= 2.0 could not be found in rubygems repository @SOURCE@ for any resolution platforms (x86_64-linux)
+! thus version solving has failed
+fact: (root dependency)
+derived: Gemfile
+attempting Gemfile 0
+fact: Gemfile depends on g0 >= 0
+fact: current Ruby version is = 4.0.0
+fact: current RubyGems version is = 4.0.16
+selected Gemfile 0
+derived: RubyGems = 4.0.16
+derived: Ruby = 4.0.0
+derived: g0 >= 0
+attempting RubyGems 4.0.16
+selected RubyGems 4.0.16
+attempting Ruby 4.0.0
+selected Ruby 4.0.0
+attempting g0 1.0
+fact: g0 >= 1.0, < 2.0.beta depends on g2 >= 2.0
+fact: g0 >= 1.0, < 2.0.beta depends on g4 ~> 1.0
+selected g0 1.0
+derived: g4 ~> 1.0
+derived: g2 >= 2.0
+attempting g4
+fact: g4 ~> 1.0 could not be found in rubygems repository @SOURCE@
+conflict: g4 ~> 1.0 could not be found in rubygems repository @SOURCE@
+backtracking to 1
+derived: not g4 ~> 1.0
+derived: not g0 >= 1.0, < 2.0.beta
+attempting RubyGems 4.0.16
+selected RubyGems 4.0.16
+attempting Ruby 4.0.0
+selected Ruby 4.0.0
+attempting g0 0.9
+fact: g0 < 1.0 depends on g4 < 2.0.beta
+selected g0 0.9
+derived: g4 < 2.0.beta
+attempting g4
+fact: g4 < 1.0 OR >= 2.A, < 2.0.beta could not be found in rubygems repository @SOURCE@
+conflict: g4 < 1.0 OR >= 2.A, < 2.0.beta could not be found in rubygems repository @SOURCE@
+backtracking to 1
+derived: not g4 < 1.0 OR >= 2.A, < 2.0.beta
+derived: not g0 < 1.0
+attempting RubyGems 4.0.16
+selected RubyGems 4.0.16
+attempting Ruby 4.0.0
+selected Ruby 4.0.0
+attempting g0 2.1.rc1
+fact: g0 >= 2.1.rc1 depends on g1 >= 0
+fact: g0 >= 2.1.rc1 depends on g2 > 2.0
+selected g0 2.1.rc1
+derived: g2 > 2.0
+derived: g1 >= 0
+attempting g1 1.1
+fact: every version of g1 depends on g2 < 2.0.beta
+fact: every version of g1 depends on g4 >= 0
+conflict: true
+derived: g4 >= 0
+conflict: every version of g1 depends on g2 < 2.0.beta
+! g1 >= 0 is satisfied by g1 >= 0
+! which is caused by g0 >= 2.1.rc1 depends on g1 >= 0
+! thus g0 >= 2.1.rc1 requires g2 < 2.0.beta
+! not g2 < 2.0.beta is satisfied by g2 > 2.0
+! which is caused by g0 >= 2.1.rc1 depends on g2 > 2.0
+! thus g0 >= 2.1.rc1 cannot be used
+backtracking to 1
+fact: g0 >= 2.1.rc1 cannot be used
+derived: not g0 >= 2.1.rc1
+attempting RubyGems 4.0.16
+selected RubyGems 4.0.16
+attempting Ruby 4.0.0
+selected Ruby 4.0.0
+attempting g0 2.0.beta
+fact: g0 >= 2.0.beta, < 2.1.rc1 depends on g1 < 3
+fact: g0 >= 2.0.beta, < 2.1.rc1 depends on g3 < 2
+fact: g0 >= 2.0.beta, < 2.1.rc1 depends on g4 >= 3
+selected g0 2.0.beta
+derived: g4 >= 3
+derived: g3 < 2
+derived: g1 < 3
+derived: g2 < 2.0.beta
+attempting g4 3.0
+selected g4 3.0
+attempting g1 1.1
+knew: every version of g1 depends on g2 < 2.0.beta
+knew: every version of g1 depends on g4 >= 0
+selected g1 1.1
+attempting g3
+fact: g3 < 2 could not be found in rubygems repository @SOURCE@
+conflict: g3 < 2 could not be found in rubygems repository @SOURCE@
+backtracking to 1
+derived: not g3 < 2
+conflict: g0 >= 2.0.beta, < 2.1.rc1 depends on g3 < 2
+! not g3 < 2 is satisfied by not g3 < 2
+! which is caused by g3 < 2 could not be found in rubygems repository @SOURCE@
+! thus g0 >= 2.0.beta, < 2.1.rc1 cannot be used
+! g0 >= 2.0.beta, < 2.1.rc1 is partially satisfied by not g0 >= 2.1.rc1
+! which is caused by g0 >= 2.1.rc1 cannot be used
+! thus g0 >= 2.0.beta cannot be used
+! g0 >= 2.0.beta is partially satisfied by not g0 < 1.0
+! which is caused by g0 < 1.0 depends on g4 < 2.0.beta
+! thus g0 < 1.0 OR >= 2.0.beta requires g4 < 2.0.beta
+! not g4 < 2.0.beta is partially satisfied by not g4 < 1.0 OR >= 2.A, < 2.0.beta
+! which is caused by g4 < 1.0 OR >= 2.A, < 2.0.beta could not be found in rubygems repository @SOURCE@
+! thus g0 < 1.0 OR >= 2.0.beta requires g4 >= 1.0, < 2.A
+! g0 < 1.0 OR >= 2.0.beta is satisfied by not g0 >= 1.0, < 2.0.beta
+! which is caused by g0 >= 1.0, < 2.0.beta depends on g4 ~> 1.0
+! thus g4 >= 1.0, < 2.A is required
+! not g4 >= 1.0, < 2.A is satisfied by not g4 ~> 1.0
+! which is caused by g4 ~> 1.0 could not be found in rubygems repository @SOURCE@
+! thus version solving has failed
+fact: (root dependency)
+derived: Gemfile
+attempting Gemfile 0
+fact: Gemfile depends on g0 >= 0
+fact: current Ruby version is = 4.0.0
+fact: current RubyGems version is = 4.0.16
+selected Gemfile 0
+derived: RubyGems = 4.0.16
+derived: Ruby = 4.0.0
+derived: g0 >= 0
+attempting RubyGems 4.0.16
+selected RubyGems 4.0.16
+attempting Ruby 4.0.0
+selected Ruby 4.0.0
+attempting g0 1.0
+fact: g0 >= 1.0, < 2.0.beta depends on g2 >= 2.0
+fact: g0 >= 1.0, < 2.0.beta depends on g4 ~> 1.0
+selected g0 1.0
+derived: g4 ~> 1.0
+derived: g2 >= 2.0
+attempting g4
+fact: g4 ~> 1.0 could not be found in rubygems repository @SOURCE@
+conflict: g4 ~> 1.0 could not be found in rubygems repository @SOURCE@
+backtracking to 1
+derived: not g4 ~> 1.0
+derived: not g0 >= 1.0, < 2.0.beta
+attempting RubyGems 4.0.16
+selected RubyGems 4.0.16
+attempting Ruby 4.0.0
+selected Ruby 4.0.0
+attempting g0 0.9
+fact: g0 < 1.0 depends on g4 < 2.0.beta
+selected g0 0.9
+derived: g4 < 2.0.beta
+attempting g4
+fact: g4 < 1.0 OR >= 2.A, < 2.0.beta could not be found in rubygems repository @SOURCE@
+conflict: g4 < 1.0 OR >= 2.A, < 2.0.beta could not be found in rubygems repository @SOURCE@
+backtracking to 1
+derived: not g4 < 1.0 OR >= 2.A, < 2.0.beta
+derived: not g0 < 1.0
+attempting RubyGems 4.0.16
+selected RubyGems 4.0.16
+attempting Ruby 4.0.0
+selected Ruby 4.0.0
+attempting g0 2.1.rc1
+fact: g0 >= 2.1.rc1 depends on g1 >= 0
+fact: g0 >= 2.1.rc1 depends on g2 > 2.0
+selected g0 2.1.rc1
+derived: g2 > 2.0
+derived: g1 >= 0
+attempting g1 1.1
+fact: every version of g1 depends on g2 < 2.0.beta
+fact: every version of g1 depends on g4 >= 0
+conflict: true
+derived: g4 >= 0
+conflict: every version of g1 depends on g2 < 2.0.beta
+! g1 >= 0 is satisfied by g1 >= 0
+! which is caused by g0 >= 2.1.rc1 depends on g1 >= 0
+! thus g0 >= 2.1.rc1 requires g2 < 2.0.beta
+! not g2 < 2.0.beta is satisfied by g2 > 2.0
+! which is caused by g0 >= 2.1.rc1 depends on g2 > 2.0
+! thus g0 >= 2.1.rc1 cannot be used
+backtracking to 1
+fact: g0 >= 2.1.rc1 cannot be used
+derived: not g0 >= 2.1.rc1
+attempting RubyGems 4.0.16
+selected RubyGems 4.0.16
+attempting Ruby 4.0.0
+selected Ruby 4.0.0
+attempting g0 2.0.beta
+fact: g0 >= 2.0.beta, < 2.1.rc1 depends on g1 < 3
+fact: g0 >= 2.0.beta, < 2.1.rc1 depends on g3 < 2
+fact: g0 >= 2.0.beta, < 2.1.rc1 depends on g4 >= 3
+selected g0 2.0.beta
+derived: g4 >= 3
+derived: g3 < 2
+derived: g1 < 3
+derived: g2 < 2.0.beta
+attempting g4 3.0
+selected g4 3.0
+attempting g1 1.1
+knew: every version of g1 depends on g2 < 2.0.beta
+knew: every version of g1 depends on g4 >= 0
+selected g1 1.1
+attempting g3
+fact: g3 < 2 could not be found in rubygems repository @SOURCE@
+conflict: g3 < 2 could not be found in rubygems repository @SOURCE@
+backtracking to 1
+derived: not g3 < 2
+conflict: g0 >= 2.0.beta, < 2.1.rc1 depends on g3 < 2
+! not g3 < 2 is satisfied by not g3 < 2
+! which is caused by g3 < 2 could not be found in rubygems repository @SOURCE@
+! thus g0 >= 2.0.beta, < 2.1.rc1 cannot be used
+! g0 >= 2.0.beta, < 2.1.rc1 is partially satisfied by not g0 >= 2.1.rc1
+! which is caused by g0 >= 2.1.rc1 cannot be used
+! thus g0 >= 2.0.beta cannot be used
+! g0 >= 2.0.beta is partially satisfied by not g0 < 1.0
+! which is caused by g0 < 1.0 depends on g4 < 2.0.beta
+! thus g0 < 1.0 OR >= 2.0.beta requires g4 < 2.0.beta
+! not g4 < 2.0.beta is partially satisfied by not g4 < 1.0 OR >= 2.A, < 2.0.beta
+! which is caused by g4 < 1.0 OR >= 2.A, < 2.0.beta could not be found in rubygems repository @SOURCE@
+! thus g0 < 1.0 OR >= 2.0.beta requires g4 >= 1.0, < 2.A
+! g0 < 1.0 OR >= 2.0.beta is satisfied by not g0 >= 1.0, < 2.0.beta
+! which is caused by g0 >= 1.0, < 2.0.beta depends on g4 ~> 1.0
+! thus g4 >= 1.0, < 2.A is required
+! not g4 >= 1.0, < 2.A is satisfied by not g4 ~> 1.0
+! which is caused by g4 ~> 1.0 could not be found in rubygems repository @SOURCE@
+! thus version solving has failed

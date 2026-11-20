@@ -50,3 +50,50 @@ conflict: every version of g0 depends on g4 > 2.0
 ! g0 >= 0 is satisfied by g0 >= 0
 ! which is caused by Gemfile depends on g0 >= 0
 ! thus version solving has failed
+fact: (root dependency)
+derived: Gemfile
+attempting Gemfile 0
+fact: Gemfile depends on g0 >= 0
+fact: Gemfile depends on g1 >= 0
+fact: current Ruby version is = 4.0.0
+fact: current RubyGems version is = 4.0.16
+selected Gemfile 0
+derived: RubyGems = 4.0.16
+derived: Ruby = 4.0.0
+derived: g1 >= 0
+derived: g0 >= 0
+attempting RubyGems 4.0.16
+selected RubyGems 4.0.16
+attempting Ruby 4.0.0
+selected Ruby 4.0.0
+attempting g1 1.1
+fact: every version of g1 depends on g2 >= 0
+selected g1 1.1
+derived: g2 >= 0
+attempting g0 3.0.pre
+fact: every version of g0 depends on g4 > 2.0
+selected g0 3.0.pre
+derived: g4 > 2.0
+attempting g2 2.0
+fact: g2 >= 2.0 depends on g3 < 2.0.beta
+fact: g2 >= 2.0 depends on g4 < 2.0.beta
+conflict: true
+derived: not g2 >= 2.0
+attempting g2 1.1
+fact: g2 < 2.0 depends on g4 = 2.0.beta
+conflict: true
+conflict: g2 < 2.0 depends on g4 = 2.0.beta
+! g2 < 2.0 is satisfied by not g2 >= 2.0
+! which is caused by g2 >= 2.0 depends on g4 < 2.0.beta
+! thus g4 <= 2.0.beta is required
+backtracking to 1
+fact: g4 <= 2.0.beta is required
+derived: g4 <= 2.0.beta
+derived: g2 >= 0
+conflict: every version of g0 depends on g4 > 2.0
+! not g4 > 2.0 is satisfied by g4 <= 2.0.beta
+! which is caused by g4 <= 2.0.beta is required
+! thus g0 cannot be used
+! g0 >= 0 is satisfied by g0 >= 0
+! which is caused by Gemfile depends on g0 >= 0
+! thus version solving has failed

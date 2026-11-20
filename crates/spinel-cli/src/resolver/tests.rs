@@ -182,8 +182,24 @@ fn leaves_prereleases_out_unless_asked_or_alone() {
 // Gemfile, on Ruby 4.0.0, RubyGems 4.0.16 and x86_64-linux, run with
 // `tests/fixtures/resolver/bundle_case.sh` (the indexes are
 // `tests/fixtures/resolver/oracle/<name>/`).
+// The port of pubgrub-ruby (`Solver::PubgrubRuby`) relaxes the same gems on
+// each, by construction: its `find_names_to_relax` walks the same
+// derivation.
 #[test]
 fn retries_with_prereleases_of_the_gems_bundler_relaxes() {
+    for solver in [Solver::Pubgrub, Solver::PubgrubRuby] {
+        retries_with_prereleases_of_the_gems_bundler_relaxes_on(solver);
+    }
+}
+
+fn retries_with_prereleases_of_the_gems_bundler_relaxes_on(solver: Solver) {
+    let resolved = |r: &Request, gems: &Index| -> Vec<String> {
+        resolve_with(r, gems, solver)
+            .unwrap_or_else(|e| panic!("{solver:?}: {e}"))
+            .iter()
+            .map(ToString::to_string)
+            .collect()
+    };
     let platforms = ["x86_64-linux"];
     // `needs_pre`: a gem asking for a prerelease of another. Bundler
     // retries with `lib`'s prereleases: `lib (2.0.beta)`, `needs_pre (1.0)`.
@@ -219,9 +235,14 @@ fn retries_with_prereleases_of_the_gems_bundler_relaxes() {
         ("y", "3.0\n2.0.beta\n"),
     ]);
     let r = request(vec![dep("a", &[])], &platforms, "4.0.0");
-    let Err(Failure::Conflict(message)) = resolve(&r, &gems) else {
-        panic!("resolved with a prerelease Bundler leaves out");
+    let Err(Failure::Conflict(message)) = resolve_with(&r, &gems, solver) else {
+        panic!("{solver:?}: resolved with a prerelease Bundler leaves out");
     };
+    // The port's explanation is Bundler's once slice 4 of #816 ports
+    // `FailureWriter`.
+    if solver == Solver::PubgrubRuby {
+        return;
+    }
     assert!(
         message.starts_with(
             "Could not find compatible versions\n\n\
@@ -244,8 +265,9 @@ fn retries_with_prereleases_of_the_gems_bundler_relaxes() {
 // `find_names_to_relax` finds: Spinel lets in prereleases Bundler leaves out
 // and resolves where Bundler reports a conflict, or resolves to other
 // versions. Each test records both outcomes and asserts Spinel's, so a change
-// to it is seen; once the resolver derives as pubgrub-ruby does (#816), each
-// becomes a test that Spinel resolves as Bundler does.
+// to it is seen. The port of pubgrub-ruby (`Solver::PubgrubRuby`) derives as
+// Bundler does, and each test asserts that it resolves as Bundler does; once
+// it is the only solver (#816), each becomes a test of that alone.
 
 /// The index and Gemfile of `tests/fixtures/resolver/oracle/<name>`, as
 /// `bundle_case.sh` serves them to Bundler.
@@ -276,24 +298,40 @@ fn oracle_case(name: &str) -> (Request, Index) {
 /// Bundler reports a conflict.
 const CONFLICT: Option<&[&str]> = None;
 
-/// Asserts that Spinel still resolves `case` as `spinel` records (`None` for
-/// a conflict), where Bundler 4.0.20 does as `bundler` records.
-fn known_difference(case: &str, bundler: Option<&[&str]>, spinel: Option<&[&str]>) {
-    assert_ne!(bundler, spinel, "{case}: not a difference");
+/// The outcome as the tests below spell one.
+fn as_strs(outcome: &Option<Vec<String>>) -> Option<Vec<&str>> {
+    outcome
+        .as_ref()
+        .map(|s| s.iter().map(String::as_str).collect())
+}
+
+/// What `solver` resolves `case` to: the builds, or `None` for a conflict.
+fn oracle_outcome(case: &str, solver: Solver) -> Option<Vec<String>> {
     let (r, gems) = oracle_case(case);
-    let ours = match resolve(&r, &gems) {
-        Ok(specs) => Some(specs.iter().map(ToString::to_string).collect::<Vec<_>>()),
+    match resolve_with(&r, &gems, solver) {
+        Ok(specs) => Some(specs.iter().map(ToString::to_string).collect()),
         Err(Failure::Conflict(_)) => None,
         Err(e) => panic!("{case}: {e}"),
-    };
-    let ours: Option<Vec<&str>> = ours
-        .as_ref()
-        .map(|s| s.iter().map(String::as_str).collect());
+    }
+}
+
+/// Asserts that Spinel still resolves `case` as `spinel` records (`None` for
+/// a conflict), where Bundler 4.0.20 does as `bundler` records, and that the
+/// port of pubgrub-ruby resolves it as Bundler does.
+fn known_difference(case: &str, bundler: Option<&[&str]>, spinel: Option<&[&str]>) {
+    assert_ne!(bundler, spinel, "{case}: not a difference");
+    let ours = oracle_outcome(case, Solver::Pubgrub);
     assert_eq!(
-        ours.as_deref(),
+        as_strs(&ours).as_deref(),
         spinel,
         "{case}: Spinel's outcome changed; Bundler 4.0.20's is {bundler:?}. \
          If they now match, make this a test that Spinel resolves as Bundler does (#816)."
+    );
+    let port = oracle_outcome(case, Solver::PubgrubRuby);
+    assert_eq!(
+        as_strs(&port).as_deref(),
+        bundler,
+        "{case}: the port of pubgrub-ruby does not resolve as Bundler does"
     );
 }
 
@@ -379,25 +417,42 @@ known_differences! {
 /// What `Solver::PubgrubRuby` resolves `r` to, and every line pubgrub-ruby
 /// logged on the way, as `DEBUG_RESOLVER` makes Bundler print them.
 fn pubgrub_ruby_log(r: &Request, gems: &Index) -> (Result<Vec<String>, Failure>, Vec<String>) {
+    let (result, lines, _) = pubgrub_ruby_tries(r, gems);
+    (result, lines)
+}
+
+/// [`pubgrub_ruby_log`], and what each failed try's `find_names_to_relax`
+/// found, as `relax_hook.rb` logs Bundler's.
+fn pubgrub_ruby_tries(
+    r: &Request,
+    gems: &Index,
+) -> (Result<Vec<String>, Failure>, Vec<String>, Vec<String>) {
     let lines = std::rc::Rc::new(RefCell::new(Vec::new()));
     let sink = lines.clone();
     let logger: solver::Logger =
         Box::new(move |_, line: &str| sink.borrow_mut().push(line.to_owned()));
-    let result = solve_pubgrub_ruby(r, gems, Some(logger), resolved_builds)
-        .map(|specs| specs.iter().map(ToString::to_string).collect());
+    let mut relaxed = Vec::new();
+    let result = solve_pubgrub_ruby(
+        r,
+        gems,
+        Some(logger),
+        |names| relaxed.push(names.to_json()),
+        resolved_builds,
+    )
+    .map(|specs| specs.iter().map(ToString::to_string).collect());
     let lines = lines.borrow().clone();
-    (result, lines)
+    (result, lines, relaxed)
 }
 
 /// On every case in `tests/fixtures/resolver/oracle/`, the port logs what
-/// Bundler 4.0.20 logged on its first try, line for line: the facts it
-/// learned, each decision and derivation, each conflict and how it was
-/// resolved (`first_try.log`, recorded with `decision_log.py --write`; a
-/// line's trailing space, after `attempting` a gem with no version left, is
-/// not kept). Bundler's retries after `find_names_to_relax` are not
-/// compared: the port relaxes nothing yet.
+/// Bundler 4.0.20 logged on every try, line for line: the facts it learned,
+/// each decision and derivation, each conflict and how it was resolved
+/// (`resolution.log`, recorded with `decision_log.py --write`; a line's
+/// trailing space, after `attempting` a gem with no version left, is not
+/// kept). Between tries, its `find_names_to_relax` finds what Bundler's
+/// found (`relax.log`, as `relax_hook.rb` logs it).
 #[test]
-fn the_pubgrub_ruby_port_decides_as_bundler_does_on_the_first_try() {
+fn the_pubgrub_ruby_port_decides_and_relaxes_as_bundler_does_on_every_try() {
     let oracle =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/resolver/oracle");
     let mut cases: Vec<String> = std::fs::read_dir(&oracle)
@@ -410,11 +465,14 @@ fn the_pubgrub_ruby_port_decides_as_bundler_does_on_the_first_try() {
         let (mut r, gems) = oracle_case(&case);
         // As `decision_log.py` spells Bundler's source.
         r.source = "rubygems repository @SOURCE@".to_owned();
-        let (_, ours) = pubgrub_ruby_log(&r, &gems);
-        let bundler = std::fs::read_to_string(oracle.join(&case).join("first_try.log")).unwrap();
+        let (_, ours, relaxed) = pubgrub_ruby_tries(&r, &gems);
+        let bundler = std::fs::read_to_string(oracle.join(&case).join("resolution.log")).unwrap();
         let ours: Vec<&str> = ours.iter().map(|line| line.trim_end()).collect();
         let bundler: Vec<&str> = bundler.lines().collect();
-        assert_eq!(ours, bundler, "{case}: not Bundler's first try");
+        assert_eq!(ours, bundler, "{case}: not Bundler's resolution");
+        let bundler = std::fs::read_to_string(oracle.join(&case).join("relax.log")).unwrap();
+        let bundler: Vec<&str> = bundler.lines().collect();
+        assert_eq!(relaxed, bundler, "{case}: not what Bundler relaxed");
     }
 }
 
@@ -512,6 +570,20 @@ fn the_pubgrub_ruby_port_explains_a_missing_version_as_bundler_does() {
             "fact: native >= 1 could not be found in rubygems repository https://gems.example/ \
           for any resolution platforms (x86_64-linux)"
         ]
+    );
+    // `find_names_to_relax` picks up those builds as the extended
+    // explanation, which follows the explanation.
+    let r = request(vec![dep("native_app", &[])], &["x86_64-linux"], "4.0.0");
+    let (result, _) = pubgrub_ruby_log(&r, &gems);
+    let Err(Failure::Conflict(message)) = result else {
+        panic!("native_app resolved");
+    };
+    assert!(
+        message.ends_with(
+            "\n\nThe source contains the following gems matching 'native (>= 1)':\n  \
+             * native-1.0-java"
+        ),
+        "{message}"
     );
 }
 
