@@ -598,7 +598,6 @@ end"#,
     );
 }
 
-/// Stock RubyGems and Bundler against the source that lists nio4r-spinel:
 /// An IO closed while registered on the `:poll` and `:select` backends,
 /// then selected with and without a block (#864): `fixtures/nio4r/closed.rb`
 /// prints byte for byte what CRuby 4.0.9 with upstream nio4r 2.7.5 printed
@@ -624,6 +623,7 @@ fn an_io_closed_while_registered_is_selected_as_libev_selects_it() {
     );
 }
 
+/// Stock RubyGems and Bundler against the source that lists nio4r-spinel:
 /// CRuby 4.0's `gem` and `bundle`, which `SPINEL_CRUBY_BUNDLER` says are on
 /// `PATH`, resolve `nio4r` by name and never ask for `nio4r-spinel`. `bundle
 /// lock --update` resolves the project afresh to the same lockfile; `bundle
