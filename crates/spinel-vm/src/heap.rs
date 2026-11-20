@@ -117,8 +117,9 @@ const KEYWORDS: u8 = 0b10_0000;
 /// The one object that has it without [`FROZEN`] is `ENV` (#865), which
 /// CRuby 4.0.9 shares unfrozen: its state is the process's environment, not
 /// its own. A copy of an object with this bit is shareable whatever it
-/// holds, and keeps its singleton class, so each Ractor's `ENV` has
-/// `ENV`'s methods (`heap/copy.rs`).
+/// holds, keeps its singleton class, so each Ractor's `ENV` has `ENV`'s
+/// methods, and carries none of the original's instance variables
+/// (`heap/copy.rs`).
 ///
 /// ponytail: `Proc#dup` and `#clone` make a cell without it, so the copy of
 /// a shareable `Proc` is not shareable, where CRuby's is. Carrying it is a

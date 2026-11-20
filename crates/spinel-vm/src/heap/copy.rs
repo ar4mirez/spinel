@@ -26,7 +26,7 @@
 //! the class it was made from: the singleton belongs to the object left
 //! behind. One marked shareable while unfrozen keeps it, since in CRuby it
 //! is the one object every Ractor uses: `ENV` (#865), whose methods are its
-//! singleton's.
+//! singleton's. Its copy carries none of the original's instance variables.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -513,6 +513,8 @@ impl Export<'_> {
         let header = unsafe { &*object.header() };
         // One marked shareable unfrozen, `ENV` (#865), is shareable whatever
         // it holds, as CRuby's is: its state is the process's environment.
+        // Its copy carries none of its instance variables, which are the
+        // sender's own cache: each Ractor's `ENV` keeps its own.
         let marked = header.flags & SHAREABLE != 0 && header.flags & FROZEN == 0;
         let reach = if marked { Reach::Hidden } else { reach };
         // The reach of what this object holds in slots that are not instance
@@ -556,7 +558,9 @@ impl Export<'_> {
                 Some(id)
             }
         };
-        let shape = (header.shape != ShapeId::NONE).then(|| heap.shapes.names(header.shape));
+        let shape =
+            (!marked && header.shape != ShapeId::NONE).then(|| heap.shapes.names(header.shape));
+        let bare = marked && header.shape != ShapeId::NONE && header.flags & SIDE_IVARS == 0;
         if let Some(names) = &shape
             && let Some(storage) = heap.ivar_storage_of_cell(object, header)
             && let Some(pointer) = storage.as_heap()
@@ -564,7 +568,7 @@ impl Export<'_> {
             self.storage
                 .insert(pointer.as_ptr() as usize, names.clone());
         }
-        let side = if header.flags & SIDE_IVARS != 0 {
+        let side = if !marked && header.flags & SIDE_IVARS != 0 {
             heap.side_ivars
                 .get(&(object.0.as_ptr() as usize))
                 .copied()
@@ -587,6 +591,10 @@ impl Export<'_> {
             Payload::Slots => {
                 let mut slots = Vec::with_capacity(len);
                 for index in 0..len {
+                    if bare && index == 0 {
+                        slots.push(Item::Imm(Value::NIL));
+                        continue;
+                    }
                     // SAFETY: within the object's slots.
                     let slot = unsafe { object.slots().add(index).read() };
                     let inner = match &names {
