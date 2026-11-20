@@ -65,6 +65,12 @@
 //! Not here yet: a rubygems source scoped to a gem.
 
 mod report;
+// ponytail: the pubgrub-ruby port (#816) is built and tested but not yet
+// resolved with, so most of it is unused outside its tests. Slice 2 of #816
+// wires it in behind `spinel resolve --solver pubgrub-ruby`; drop this
+// `allow` then.
+#[allow(dead_code, unused_imports)]
+mod solver;
 
 use std::cell::RefCell;
 use std::cmp::{Ordering, Reverse};
@@ -456,6 +462,14 @@ impl PartialEq for Candidate {
 }
 
 impl Eq for Candidate {}
+
+/// `hash`: the version's and the priority's, so candidates `==` hash alike.
+impl std::hash::Hash for Candidate {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.version.hash(state);
+        self.priority.hash(state);
+    }
+}
 
 impl Ord for Candidate {
     fn cmp(&self, other: &Candidate) -> Ordering {
