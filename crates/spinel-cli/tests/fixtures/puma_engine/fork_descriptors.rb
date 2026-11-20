@@ -18,5 +18,7 @@ pid = fork do
   exit!(0)
 end
 Process.wait(pid)
+# How the child ended: a signal that killed it says nothing on stderr.
+p [$?.exitstatus, $?.termsig]
 threads.each(&:join)
 p open_fds - base
