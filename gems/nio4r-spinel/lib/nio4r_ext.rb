@@ -359,19 +359,26 @@ module NIO
         pairs = @__fds__.map { |fd, monitors| [fd, monitors.each_value.inject(0, :|)] }
         events = pairs.empty? ? "".b : Spinel.check(Spinel.poll_ready(pairs.flatten.pack("l<*")), "poll")
         events = events.unpack("l<*").each_slice(2).to_a
+        if @__backend__ == :select && events.any? { |_, got| got & Spinel::INVALID != 0 }
+          # select(2) fails with EBADF on a descriptor that is not open, and
+          # libev's select backend then kills those (`fd_ebadf`) and reports
+          # nothing else that run; poll(2) reports POLLNVAL beside the rest.
+          events = events.select { |_, got| got & Spinel::INVALID != 0 }
+        end
       end
       count = 0
       events.each do |fd, got|
         monitors = @__fds__[fd] or next
-        if got & Spinel::INVALID != 0
+        killed = got & Spinel::INVALID != 0
+        if killed
           # fd_kill: a descriptor that is not open stops its watchers, each
-          # handed one last event of everything.
+          # handed one last event of everything, whatever its interests.
           got = Spinel::READ | Spinel::WRITE
           monitors.each_key { |monitor| monitor.__stop__ }
           @__fds__.delete(fd)
         end
         monitors.to_a.each do |monitor, mask|
-          revents = got & mask
+          revents = killed ? got : got & mask
           next if revents.zero?
           monitor.__readiness__ = revents
           count += 1
