@@ -507,6 +507,22 @@ impl fmt::Display for Candidate {
 
 pub type VersionSet = Ranges<Candidate>;
 
+/// `to_dependency_hash`: each dependency as its package and range, the
+/// ranges on one package intersected, in the order first seen.
+fn dependency_hash<R>(
+    deps: impl IntoIterator<Item = (Package, R)>,
+    intersect: impl Fn(&R, &R) -> R,
+) -> Vec<(Package, R)> {
+    let mut out: Vec<(Package, R)> = Vec::new();
+    for (package, range) in deps {
+        match out.iter_mut().find(|(p, _)| *p == package) {
+            Some((_, existing)) => *existing = intersect(existing, &range),
+            None => out.push((package, range)),
+        }
+    }
+    out
+}
+
 /// `Resolver#requirement_to_range`: each pair as a range of candidates,
 /// intersected. `~>` ends before the bump's `.A`, the lowest prerelease of
 /// it, so no prerelease of the next release is in.
@@ -1133,37 +1149,6 @@ impl<'a> Provider<'a> {
         }
     }
 
-    /// `to_dependency_hash`: each dependency as a package and range, the
-    /// ranges of one name intersected, in the order first seen.
-    fn dependency_hash(
-        deps: impl IntoIterator<Item = (PackageName, VersionSet)>,
-    ) -> Vec<(Package, VersionSet)> {
-        let mut out: Vec<(Package, VersionSet)> = Vec::new();
-        for (name, range) in deps {
-            let package = Package::Name(name);
-            match out.iter_mut().find(|(p, _)| *p == package) {
-                Some((_, existing)) => *existing = existing.intersection(&range),
-                None => out.push((package, range)),
-            }
-        }
-        out
-    }
-
-    /// [`Provider::dependency_hash`] as pubgrub-ruby's ranges.
-    fn constraint_hash(
-        deps: impl IntoIterator<Item = (PackageName, solver::RangeSet<Candidate>)>,
-    ) -> Vec<(Package, solver::RangeSet<Candidate>)> {
-        let mut out: Vec<(Package, solver::RangeSet<Candidate>)> = Vec::new();
-        for (name, range) in deps {
-            let package = Package::Name(name);
-            match out.iter_mut().find(|(p, _)| *p == package) {
-                Some((_, existing)) => *existing = existing.intersect(&range),
-                None => out.push((package, range)),
-            }
-        }
-        out
-    }
-
     /// `Resolver::Base#initialize` and `Resolver#prepare_dependencies`: the
     /// Gemfile's dependencies that apply on some resolution platform, each
     /// making its gem top-level, and the two meta dependencies. A Gemfile gem
@@ -1221,13 +1206,15 @@ impl<'a> Provider<'a> {
             );
             deps.push((meta, exact));
         }
-        let ranges = Provider::dependency_hash(
+        let ranges = dependency_hash(
             deps.iter()
-                .map(|(name, req)| (name.clone(), requirement_to_range(req))),
+                .map(|(name, req)| (Package::Name(name.clone()), requirement_to_range(req))),
+            VersionSet::intersection,
         );
-        let constraints = Provider::constraint_hash(
+        let constraints = dependency_hash(
             deps.iter()
-                .map(|(name, req)| (name.clone(), solver::candidate_range(req))),
+                .map(|(name, req)| (Package::Name(name.clone()), solver::candidate_range(req))),
+            solver::RangeSet::intersect,
         );
         let mut root = Vec::new();
         let mut root_constraints = Vec::new();
@@ -1336,10 +1323,11 @@ impl<'a> Provider<'a> {
         name: &PackageName,
         candidate: &Candidate,
     ) -> Vec<(Package, VersionSet)> {
-        Provider::dependency_hash(
+        dependency_hash(
             self.candidate_requirements(name, candidate)
                 .into_iter()
-                .map(|(dep, req)| (dep, requirement_to_range(&req))),
+                .map(|(dep, req)| (Package::Name(dep), requirement_to_range(&req))),
+            VersionSet::intersection,
         )
     }
 

@@ -21,7 +21,7 @@ use super::solver::{
     Cause, Incompatibility, RangeSet, Source, Strategy, Term, VersionConstraint, VersionRange,
     candidate_range,
 };
-use super::{Candidate, Package, PackageName, Provider};
+use super::{Candidate, Package, PackageName, Provider, dependency_hash};
 
 type Constraint = VersionConstraint<Package, Candidate>;
 
@@ -100,6 +100,7 @@ impl<'p, 'a> BundlerSource<'p, 'a> {
                     .candidate_requirements(name, version)
                     .into_iter()
                     .map(|(dep, requirement)| parse_dependency(Package::Name(dep), &requirement)),
+                Constraint::intersect,
             ),
         };
         let deps = Rc::new(deps);
@@ -140,21 +141,6 @@ impl<'p, 'a> BundlerSource<'p, 'a> {
 fn parse_dependency(package: Package, requirement: &Requirement) -> (Package, Constraint) {
     let range = candidate_range(requirement);
     (package.clone(), Constraint::new(package, range))
-}
-
-/// `to_dependency_hash`: each dependency as its package and constraint, the
-/// constraints on one package intersected, in the order first seen.
-fn dependency_hash(
-    deps: impl IntoIterator<Item = (Package, Constraint)>,
-) -> Vec<(Package, Constraint)> {
-    let mut out: Vec<(Package, Constraint)> = Vec::new();
-    for (package, constraint) in deps {
-        match out.iter_mut().find(|(p, _)| *p == package) {
-            Some((_, current)) => *current = current.intersect(&constraint),
-            None => out.push((package, constraint)),
-        }
-    }
-    out
 }
 
 impl Source<Package, Candidate> for BundlerSource<'_, '_> {
