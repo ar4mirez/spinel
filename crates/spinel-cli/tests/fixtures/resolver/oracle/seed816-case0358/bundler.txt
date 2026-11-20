@@ -1,0 +1,17 @@
+Could not find compatible versions
+
+Because every version of g1 depends on g2 < 2.0.beta
+  and g0 >= 2.1.rc1 depends on g1 >= 0,
+  g0 >= 2.1.rc1 requires g2 < 2.0.beta.
+And because g0 >= 2.1.rc1 depends on g2 > 2.0,
+  g0 >= 2.1.rc1 cannot be used.
+Because g0 >= 2.0.beta, < 2.1.rc1 depends on g3 < 2
+  and g3 < 2 could not be found in rubygems repository @SOURCE@/ or installed locally,
+  g0 >= 2.0.beta, < 2.1.rc1 cannot be used.
+Thus, g0 >= 2.0.beta cannot be used.
+And because g0 < 1.0 depends on g4 < 2.0.beta
+  and g4 < 1.0 OR >= 2.A, < 2.0.beta could not be found in rubygems repository @SOURCE@/ or installed locally,
+  g0 < 1.0 OR >= 2.0.beta requires g4 >= 1.0, < 2.A.
+So, because g0 >= 1.0, < 2.0.beta depends on g4 ~> 1.0
+  and g4 ~> 1.0 could not be found in rubygems repository @SOURCE@/ or installed locally,
+  version solving has failed.

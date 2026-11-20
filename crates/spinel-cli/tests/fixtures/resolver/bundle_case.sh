@@ -12,6 +12,8 @@
 # platform in ORACLE_RUBY (4.0.0), ORACLE_RUBYGEMS (4.0.16) and
 # ORACLE_PLATFORM (x86_64-linux). Prints the lockfile's specs, one per line,
 # or Bundler's explanation, and exits 1 when Bundler could not resolve.
+# THOR_COLUMNS keeps Bundler's UI from rewrapping the explanation's long
+# lines at 80 columns (`Bundler::UI::Shell#word_wrap`).
 #
 # Written with Bundler 4.0.20 on Ruby 4.0.9; Python 3 serves the files.
 
@@ -61,6 +63,7 @@ if (
     ORACLE_RUBY="${ORACLE_RUBY:-4.0.0}" \
     ORACLE_RUBYGEMS="${ORACLE_RUBYGEMS:-4.0.16}" \
     RUBYOPT="-r$here/bundler_oracle.rb" \
+    THOR_COLUMNS=100000 \
     bundle lock >"$work/out.txt" 2>&1
 ); then
   sed -n '/^  specs:/,/^$/p' "$work/app/Gemfile.lock" | grep '^    [^ ]' | sed 's/^    //'

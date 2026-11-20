@@ -1,0 +1,8 @@
+Could not find compatible versions
+
+Because g2 < 2.0 depends on g4 = 2.0.beta
+  and g2 >= 2.0 depends on g4 < 2.0.beta,
+  g4 <= 2.0.beta is required.
+So, because every version of g0 depends on g4 > 2.0
+  and Gemfile depends on g0 >= 0,
+  version solving has failed.

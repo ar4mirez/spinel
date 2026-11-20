@@ -1,0 +1,10 @@
+Could not find compatible versions
+
+Because every version of c depends on y < 3
+  and a < 2.0 depends on c >= 2.0.a,
+  a < 2.0 requires y < 3.
+And because a < 2.0 depends on y >= 3,
+  a < 2.0 cannot be used.
+So, because a >= 2.0 depends on b >= 3
+  and b >= 3 could not be found in rubygems repository @SOURCE@/ or installed locally,
+  version solving has failed.

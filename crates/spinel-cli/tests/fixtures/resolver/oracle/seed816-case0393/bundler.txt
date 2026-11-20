@@ -1,0 +1,9 @@
+Could not find compatible versions
+
+Because g4 = 2.0.beta could not be found in rubygems repository @SOURCE@/ or installed locally
+  and every version of g3 depends on g4 = 2.0.beta,
+  g3 cannot be used.
+Because g1 < 3.0 depends on g3 >= 2.0
+  and g1 >= 3.0 depends on g3 ~> 1.0,
+  g3 ~> 1.0 OR >= 2.0 is required.
+Thus, version solving has failed.

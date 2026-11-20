@@ -1,4 +1,4 @@
-use super::report::constraint_string;
+use super::pubgrub_report::constraint_string;
 use super::*;
 
 fn local() -> Platform {
@@ -238,9 +238,9 @@ fn retries_with_prereleases_of_the_gems_bundler_relaxes_on(solver: Solver) {
     let Err(Failure::Conflict(message)) = resolve_with(&r, &gems, solver) else {
         panic!("{solver:?}: resolved with a prerelease Bundler leaves out");
     };
-    // The port's explanation is Bundler's once slice 4 of #816 ports
-    // `FailureWriter`.
+    // The port explains it as Bundler does, word for word.
     if solver == Solver::PubgrubRuby {
+        assert_explained_as_bundler("case2", &message);
         return;
     }
     assert!(
@@ -298,6 +298,24 @@ fn oracle_case(name: &str) -> (Request, Index) {
 /// Bundler reports a conflict.
 const CONFLICT: Option<&[&str]> = None;
 
+/// Asserts that `message` is Bundler's explanation of the conflict in
+/// `tests/fixtures/resolver/oracle/<case>`, as `bundle_case.sh` printed it
+/// (`bundler.txt`), word for word but for its source: Bundler's
+/// `rubygems repository @SOURCE@/ or installed locally` is the tests'
+/// `rubygems repository https://gems.example/`, as Spinel has no locally
+/// installed gems to resolve with.
+fn assert_explained_as_bundler(case: &str, message: &str) {
+    let bundler = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/resolver/oracle")
+            .join(case)
+            .join("bundler.txt"),
+    )
+    .unwrap();
+    let bundler = bundler.replace("@SOURCE@/ or installed locally", "https://gems.example/");
+    assert_eq!(format!("{message}\n"), bundler, "{case}");
+}
+
 /// The outcome as the tests below spell one.
 fn as_strs(outcome: &Option<Vec<String>>) -> Option<Vec<&str>> {
     outcome
@@ -317,7 +335,8 @@ fn oracle_outcome(case: &str, solver: Solver) -> Option<Vec<String>> {
 
 /// Asserts that Spinel still resolves `case` as `spinel` records (`None` for
 /// a conflict), where Bundler 4.0.20 does as `bundler` records, and that the
-/// port of pubgrub-ruby resolves it as Bundler does.
+/// port of pubgrub-ruby resolves it as Bundler does, or explains its
+/// conflict as Bundler does.
 fn known_difference(case: &str, bundler: Option<&[&str]>, spinel: Option<&[&str]>) {
     assert_ne!(bundler, spinel, "{case}: not a difference");
     let ours = oracle_outcome(case, Solver::Pubgrub);
@@ -333,6 +352,13 @@ fn known_difference(case: &str, bundler: Option<&[&str]>, spinel: Option<&[&str]
         bundler,
         "{case}: the port of pubgrub-ruby does not resolve as Bundler does"
     );
+    if bundler.is_none() {
+        let (r, gems) = oracle_case(case);
+        let Err(Failure::Conflict(message)) = resolve_with(&r, &gems, Solver::PubgrubRuby) else {
+            unreachable!("{case}: the port reports the conflict");
+        };
+        assert_explained_as_bundler(case, &message);
+    }
 }
 
 macro_rules! known_differences {
@@ -723,18 +749,21 @@ fn explains_a_conflict() {
         &["x86_64-linux"],
         "4.0.0",
     );
-    let Err(Failure::Conflict(message)) = resolve(&r, &index) else {
-        panic!("resolved");
-    };
-    assert_eq!(
-        message,
-        "Could not find compatible versions\n\n\
-         Because every version of app depends on lib ~> 1.0\n  \
-         and Gemfile depends on app >= 0,\n  \
-         lib ~> 1.0 is required.\n\
-         So, because Gemfile depends on lib >= 2,\n  \
-         version solving has failed."
-    );
+    for solver in [Solver::Pubgrub, Solver::PubgrubRuby] {
+        let Err(Failure::Conflict(message)) = resolve_with(&r, &index, solver) else {
+            panic!("{solver:?}: resolved");
+        };
+        assert_eq!(
+            message,
+            "Could not find compatible versions\n\n\
+             Because every version of app depends on lib ~> 1.0\n  \
+             and Gemfile depends on app >= 0,\n  \
+             lib ~> 1.0 is required.\n\
+             So, because Gemfile depends on lib >= 2,\n  \
+             version solving has failed.",
+            "{solver:?}"
+        );
+    }
 }
 
 /// What `resolve_locked` chose, by `full_name`.

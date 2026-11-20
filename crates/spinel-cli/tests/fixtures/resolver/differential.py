@@ -9,13 +9,21 @@ index is served on 127.0.0.1; Bundler resolves it through `bundler_oracle.rb`
 built `spinel resolve` resolves the same dependencies. Each case lands in one
 of:
 
-  same        both resolved to the same gems
-  both-failed both failed (explanations are not compared)
-  spinel-miss Spinel failed where Bundler resolved
-  differ      both resolved, to different gems
-  spinel-over Spinel resolved where Bundler failed
+  same           both resolved to the same gems
+  both-failed    both failed, explaining it the same way
+  explained-diff both failed, explaining it differently
+  spinel-miss    Spinel failed where Bundler resolved
+  differ         both resolved, to different gems
+  spinel-over    Spinel resolved where Bundler failed
 
-and a case of the last three kinds is kept under --out with both results.
+and a case of the last four kinds is kept under --out with both results.
+Explanations are compared word for word from Bundler's `Could not find`
+on, with the served URL written as `@SOURCE@` in both, and Bundler's source
+named as Spinel names it: Bundler's `rubygems repository <url> or installed
+locally` is Spinel's `rubygems repository <url>`, as Spinel has no locally
+installed gems to resolve with (`crates/spinel-cli/tests/resolver.rs`,
+`not_found`). With --locked, lockfiles are compared and explanations are
+not.
 
   crates/spinel-cli/tests/fixtures/resolver/differential.py \\
       --spinel target/debug/spinel --cases 300 --seed 1 --out /path/to/scratch
@@ -170,6 +178,10 @@ def run_bundler(case_dir, source, gemfile, app_name="bundler", lockfile=None, wh
         "ORACLE_RUBY": "4.0.0",
         "ORACLE_RUBYGEMS": "4.0.16",
         "RUBYOPT": f"-r{os.path.join(HERE, 'bundler_oracle.rb')}",
+        # Bundler's UI rewraps an error's lines longer than the terminal
+        # (`Bundler::UI::Shell#word_wrap`, 80 columns with no terminal);
+        # the explanation is what comes before that.
+        "THOR_COLUMNS": "100000",
     }
     command = ["bundle", "lock"] + ([] if update is None else ["--update", *update])
     out = subprocess.run(command, cwd=app, env=env, capture_output=True, text=True, timeout=300)
@@ -178,6 +190,17 @@ def run_bundler(case_dir, source, gemfile, app_name="bundler", lockfile=None, wh
             text = f.read()
             return True, text if whole else specs_of(text)
     return False, (out.stdout + out.stderr).strip()
+
+
+def explanation_of(output, source):
+    """A failure's explanation as compared: from its `Could not find` on,
+    the served URL written as `@SOURCE@`, and Bundler's `... or installed
+    locally` written as Spinel writes its source (see the module notes)."""
+    lines = output.split("\n")
+    start = next((i for i, line in enumerate(lines) if line.startswith("Could not find")), 0)
+    text = "\n".join(lines[start:]).replace(source, "@SOURCE@")
+    return (text.replace("@SOURCE@/\nor installed locally.", "@SOURCE@/.")
+            .replace("@SOURCE@/ or installed locally", "@SOURCE@/"))
 
 
 def run_spinel(spinel, case_dir, source, gemfile, locked=None, update=None, solver=None):
@@ -288,7 +311,8 @@ def main():
         if bundler[0] and ours[0]:
             kind = "same" if bundler[1] == ours[1] else "differ"
         elif not bundler[0] and not ours[0]:
-            kind = "both-failed"
+            same = args.locked or explanation_of(bundler[1], source) == explanation_of(ours[1], source)
+            kind = "both-failed" if same else "explained-diff"
         else:
             kind = "spinel-over" if ours[0] else "spinel-miss"
         if args.locked and kind not in ("same", "both-failed"):

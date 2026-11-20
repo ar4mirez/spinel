@@ -1,0 +1,12 @@
+Could not find compatible versions
+
+Because g3 >= 1.0, < 2 could not be found in rubygems repository @SOURCE@/ or installed locally for any resolution platforms (x86_64-linux)
+  and every version of g2 depends on g3 < 2,
+  every version of g2 requires g3 < 1.0.
+And because g0 >= 2.1.rc1 depends on g2 >= 1.0
+  and g0 >= 2.1.rc1 depends on g3 >= 1.0,
+  g0 >= 2.1.rc1 cannot be used.
+Because g0 < 2.1.rc1 depends on g1 >= 1.0
+  and g1 >= 1.0 could not be found in rubygems repository @SOURCE@/ or installed locally,
+  g0 < 2.1.rc1 cannot be used.
+Thus, version solving has failed.
