@@ -12,7 +12,8 @@
 //!   so far.
 //! - `version_solver.rs`: unit propagation, conflict resolution, decision
 //!   making, over a [`Source`] and a [`Strategy`].
-//! - `strategy.rs`: pubgrub-ruby's own `Strategy`.
+//! - `strategy.rs`: pubgrub-ruby's own `Strategy`, which the tests decide
+//!   by; Bundler's replaces it (`resolver/source.rs`).
 //! - `rubygems.rs`: `Gem::Requirement` as a range, over plain versions as
 //!   pubgrub-ruby's `RubyGems` makes it and over [`super::Candidate`] as
 //!   `Bundler::Resolver#requirement_to_range` does.
@@ -22,13 +23,15 @@
 //! never meets two spellings of one version of a package, so no derivation
 //! tells the two apart.
 //!
-//! Not yet used by resolution: the transition plan in #816 wires it in
-//! behind a hidden switch, then makes it the default.
+//! `spinel resolve --solver pubgrub-ruby` resolves with it, through
+//! Bundler's source side (`resolver/source.rs`); slice 5 of #816 makes it
+//! the default.
 
 mod assignment;
 mod incompatibility;
 mod partial_solution;
 mod rubygems;
+#[cfg(test)]
 mod strategy;
 mod term;
 mod version_constraint;
@@ -44,16 +47,16 @@ mod tests;
 use std::fmt;
 use std::hash::Hash;
 
-pub use assignment::{Assignment, AssignmentCause};
 pub use incompatibility::{Cause, Incompatibility};
-pub use partial_solution::PartialSolution;
 pub use rubygems::candidate_range;
+#[cfg(test)]
 pub use strategy::{DefaultStrategy, VersionSource};
 pub use term::Term;
 pub use version_constraint::VersionConstraint;
 pub use version_range::{RangeSet, VersionRange};
-pub use version_solver::{Level, Logger, SolveFailure, Source, Strategy, VersionSolver};
-pub use version_union::VersionUnion;
+#[cfg(test)]
+pub use version_solver::Level;
+pub use version_solver::{Logger, Source, Strategy, VersionSolver};
 
 /// A package as pubgrub-ruby takes one: compared, hashed, printed, and the
 /// root or not (`Package.root?`).

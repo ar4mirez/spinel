@@ -1,0 +1,77 @@
+fact: (root dependency)
+derived: Gemfile
+attempting Gemfile 0
+fact: Gemfile depends on g0 >= 0
+fact: current Ruby version is = 4.0.0
+fact: current RubyGems version is = 4.0.16
+selected Gemfile 0
+derived: RubyGems = 4.0.16
+derived: Ruby = 4.0.0
+derived: g0 >= 0
+attempting RubyGems 4.0.16
+selected RubyGems 4.0.16
+attempting Ruby 4.0.0
+selected Ruby 4.0.0
+attempting g0 2.1.rc1
+fact: g0 >= 2.1.rc1 depends on g2 >= 1.0
+fact: g0 >= 2.1.rc1 depends on g3 >= 1.0
+selected g0 2.1.rc1
+derived: g3 >= 1.0
+derived: g2 >= 1.0
+attempting g3 3.0
+selected g3 3.0
+attempting g2 3.0
+fact: every version of g2 depends on g3 < 2
+fact: every version of g2 depends on g4 < 2.0.beta
+conflict: true
+derived: g4 < 2.0.beta
+conflict: every version of g2 depends on g3 < 2
+backtracking to 4
+derived: g3 < 2
+attempting g2 3.0
+knew: every version of g2 depends on g3 < 2
+knew: every version of g2 depends on g4 < 2.0.beta
+selected g2 3.0
+derived: g4 < 2.0.beta
+attempting g3
+fact: g3 >= 1.0, < 2 could not be found in rubygems repository @SOURCE@ for any resolution platforms (x86_64-linux)
+conflict: g3 >= 1.0, < 2 could not be found in rubygems repository @SOURCE@ for any resolution platforms (x86_64-linux)
+! g3 >= 1.0, < 2 is partially satisfied by g3 < 2
+! which is caused by every version of g2 depends on g3 < 2
+! thus every version of g2 requires g3 < 1.0
+! g2 >= 0 is satisfied by g2 >= 1.0
+! which is caused by g0 >= 2.1.rc1 depends on g2 >= 1.0
+! thus g0 >= 2.1.rc1 requires g3 < 1.0
+! not g3 < 1.0 is satisfied by g3 >= 1.0
+! which is caused by g0 >= 2.1.rc1 depends on g3 >= 1.0
+! thus g0 >= 2.1.rc1 cannot be used
+backtracking to 1
+fact: g0 >= 2.1.rc1 cannot be used
+derived: not g0 >= 2.1.rc1
+attempting RubyGems 4.0.16
+selected RubyGems 4.0.16
+attempting Ruby 4.0.0
+selected Ruby 4.0.0
+attempting g0 2.0.beta
+fact: g0 < 2.1.rc1 depends on g1 >= 1.0
+fact: g0 < 2.1.rc1 depends on g2 < 2
+fact: g0 < 2.1.rc1 depends on g4 >= 2.0.a
+selected g0 2.0.beta
+derived: g4 >= 2.0.a
+derived: g2 < 2
+derived: g1 >= 1.0
+derived: g4 < 2.0.beta
+derived: g3 < 2
+derived: not g3 >= 1.0, < 2
+attempting g1
+fact: g1 >= 1.0 could not be found in rubygems repository @SOURCE@
+conflict: g1 >= 1.0 could not be found in rubygems repository @SOURCE@
+backtracking to 1
+derived: not g1 >= 1.0
+conflict: g0 < 2.1.rc1 depends on g1 >= 1.0
+! not g1 >= 1.0 is satisfied by not g1 >= 1.0
+! which is caused by g1 >= 1.0 could not be found in rubygems repository @SOURCE@
+! thus g0 < 2.1.rc1 cannot be used
+! g0 < 2.1.rc1 is satisfied by not g0 >= 2.1.rc1
+! which is caused by g0 >= 2.1.rc1 cannot be used
+! thus version solving has failed

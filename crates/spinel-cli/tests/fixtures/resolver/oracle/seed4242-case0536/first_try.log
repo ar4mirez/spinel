@@ -1,0 +1,69 @@
+fact: (root dependency)
+derived: Gemfile
+attempting Gemfile 0
+fact: Gemfile depends on g0 >= 0
+fact: Gemfile depends on g1 >= 0
+fact: current Ruby version is = 4.0.0
+fact: current RubyGems version is = 4.0.16
+selected Gemfile 0
+derived: RubyGems = 4.0.16
+derived: Ruby = 4.0.0
+derived: g1 >= 0
+derived: g0 >= 0
+attempting RubyGems 4.0.16
+selected RubyGems 4.0.16
+attempting Ruby 4.0.0
+selected Ruby 4.0.0
+attempting g0 1.1
+fact: every version of g0 depends on g1 ~> 2.0.a
+fact: every version of g0 depends on g4 >= 2.0.a
+selected g0 1.1
+derived: g4 >= 2.0.a
+derived: g1 ~> 2.0.a
+attempting g1 2.0
+fact: g1 >= 2.0 depends on g3 < 2.0.beta
+selected g1 2.0
+derived: g3 < 2.0.beta
+attempting g4 2.0
+selected g4 2.0
+attempting g3 1.0
+fact: g3 < 2.0 depends on g4 < 2
+conflict: true
+conflict: g3 < 2.0 depends on g4 < 2
+backtracking to 5
+derived: g4 < 2
+attempting g4
+fact: g4 >= 2.0.a, < 2 could not be found in rubygems repository @SOURCE@ for any resolution platforms (x86_64-linux)
+conflict: g4 >= 2.0.a, < 2 could not be found in rubygems repository @SOURCE@ for any resolution platforms (x86_64-linux)
+backtracking to 4
+derived: not g4 >= 2.0.a, < 2
+derived: not g3 < 2.0
+derived: not g1 >= 2.0
+attempting g4 2.0
+selected g4 2.0
+attempting g1
+fact: g1 >= 2.0.a, < 2.0 could not be found in rubygems repository @SOURCE@ for any resolution platforms (x86_64-linux)
+conflict: g1 >= 2.0.a, < 2.0 could not be found in rubygems repository @SOURCE@ for any resolution platforms (x86_64-linux)
+! g1 >= 2.0.a, < 2.0 is partially satisfied by not g1 >= 2.0
+! which is caused by g1 >= 2.0 depends on g3 < 2.0.beta
+! thus g1 >= 2.0.a requires g3 < 2.0.beta
+! not g3 < 2.0.beta is satisfied by not g3 < 2.0
+! which is caused by g3 < 2.0 depends on g4 < 2
+! thus g1 >= 2.0.a requires g4 < 2
+! not g4 < 2 is partially satisfied by not g4 >= 2.0.a, < 2
+! which is caused by g4 >= 2.0.a, < 2 could not be found in rubygems repository @SOURCE@ for any resolution platforms (x86_64-linux)
+! thus g1 >= 2.0.a requires g4 < 2.0.a
+! g1 >= 2.0.a is satisfied by g1 ~> 2.0.a
+! which is caused by every version of g0 depends on g1 ~> 2.0.a
+! thus every version of g0 requires g4 < 2.0.a
+backtracking to 1
+fact: every version of g0 requires g4 < 2.0.a
+derived: g4 < 2.0.a
+derived: g1 ~> 2.0.a
+conflict: every version of g0 depends on g4 >= 2.0.a
+! not g4 >= 2.0.a is satisfied by g4 < 2.0.a
+! which is caused by every version of g0 requires g4 < 2.0.a
+! thus g0 cannot be used
+! g0 >= 0 is satisfied by g0 >= 0
+! which is caused by Gemfile depends on g0 >= 0
+! thus version solving has failed

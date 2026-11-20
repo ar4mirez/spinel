@@ -36,6 +36,10 @@ With --locked --updates (#87), an edit may also be an update with the Gemfile
 left as it is: `bundle lock --update` of one gem the lockfile locks, or of
 every gem, against `spinel resolve --locked --update[=GEM]`.
 
+--solver passes `spinel resolve --solver` through, so each slice of the
+pubgrub-ruby port (#816) is measured against Bundler; `pubgrub-ruby` takes
+no lockfile yet, so not with --locked.
+
 Written with Bundler 4.0.20 on Ruby 4.0.9.
 """
 
@@ -176,7 +180,7 @@ def run_bundler(case_dir, source, gemfile, app_name="bundler", lockfile=None, wh
     return False, (out.stdout + out.stderr).strip()
 
 
-def run_spinel(spinel, case_dir, source, gemfile, locked=None, update=None):
+def run_spinel(spinel, case_dir, source, gemfile, locked=None, update=None, solver=None):
     deps = {
         "gemfiles": [os.path.join(case_dir, "Gemfile")],
         "source": {"type": "rubygems", "remote": source, "cooldown": None},
@@ -197,6 +201,8 @@ def run_spinel(spinel, case_dir, source, gemfile, locked=None, update=None):
         extra = ["--locked", lock_path, "--lockfile"]
         if update is not None:
             extra.append("--update" + (f"={','.join(update)}" if update else ""))
+    if solver is not None:
+        extra += ["--solver", solver]
     out = subprocess.run(
         [spinel, "resolve", path, "--platform", "x86_64-linux",
          "--ruby-version", "4.0.0", "--rubygems-version", "4.0.16", *extra],
@@ -219,7 +225,10 @@ def main():
     parser.add_argument("--locked", action="store_true", help="relock an edited Gemfile (#79)")
     parser.add_argument("--steps", type=int, default=1, help="with --locked, edits in a row")
     parser.add_argument("--updates", action="store_true", help="with --locked, updates among the edits (#87)")
+    parser.add_argument("--solver", help="spinel resolve --solver: pubgrub or pubgrub-ruby (#816)")
     args = parser.parse_args()
+    if args.locked and args.solver == "pubgrub-ruby":
+        parser.error("--solver pubgrub-ruby takes no lockfile yet")
     spinel = os.path.abspath(args.spinel)
     shutil.rmtree(args.out, ignore_errors=True)
     os.makedirs(args.out)
@@ -266,7 +275,7 @@ def main():
             for step, (edit, edited) in enumerate(edits[i]):
                 update = update_of(edit, lock)
                 bundler = run_bundler(case_dir, source, edited, f"relock{step}", lock, whole=True, update=update)
-                ours = run_spinel(spinel, case_dir, source, edited, locked=lock, update=update)
+                ours = run_spinel(spinel, case_dir, source, edited, locked=lock, update=update, solver=args.solver)
                 steps.append({"edit": edit, "edited": edited, "lock": lock})
                 if not bundler[0] or bundler != ours:
                     break
@@ -275,7 +284,7 @@ def main():
             gemfile = {"first": gemfile, "steps": steps}
         else:
             bundler = run_bundler(case_dir, source, gemfile)
-            ours = run_spinel(spinel, case_dir, source, gemfile)
+            ours = run_spinel(spinel, case_dir, source, gemfile, solver=args.solver)
         if bundler[0] and ours[0]:
             kind = "same" if bundler[1] == ours[1] else "differ"
         elif not bundler[0] and not ours[0]:
@@ -285,7 +294,7 @@ def main():
         if args.locked and kind not in ("same", "both-failed"):
             edited = gemfile["steps"][-1]["edited"]
             fresh_bundler = run_bundler(case_dir, source, edited, "unlocked")
-            fresh_ours = run_spinel(spinel, case_dir, source, edited)
+            fresh_ours = run_spinel(spinel, case_dir, source, edited, solver=args.solver)
             if fresh_bundler[0] != fresh_ours[0] or (fresh_bundler[0] and fresh_bundler[1] != fresh_ours[1]):
                 kind += "-unlocked-too"
         if kind in ("same", "both-failed"):
