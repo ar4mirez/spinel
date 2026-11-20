@@ -56,10 +56,6 @@ impl<P: Package, V: Version> PartialSolution<P, V> {
         }
     }
 
-    pub fn assignments(&self) -> &[Assignment<P, V>] {
-        &self.assignments
-    }
-
     /// The decisions, in the order made.
     pub fn decisions(&self) -> &[(P, V)] {
         &self.decisions

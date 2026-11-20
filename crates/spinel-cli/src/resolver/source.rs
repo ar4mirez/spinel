@@ -4,12 +4,11 @@
 //! and `Bundler::Resolver::Strategy` with `GemVersionPromoter`'s order, as
 //! Bundler 4.0.20 has them, over the candidates [`Provider`] makes.
 //!
-//! The candidate model is [`Provider`]'s, shared with the `pubgrub` crate's
-//! path: what a package's versions are, which builds each stands for, and
-//! their dependencies. What differs is how they reach the solver. Here a
-//! dependency is stated over the whole run of versions that share it, open
-//! at the first and last version, as Bundler states it, so the solver
-//! derives what pubgrub-ruby derives.
+//! The candidate model is [`Provider`]'s: what a package's versions are,
+//! which builds each stands for, and their dependencies. A dependency is
+//! stated over the whole run of versions that share it, open at the first
+//! and last version, as Bundler states it, so the solver derives what
+//! pubgrub-ruby derives.
 
 use std::collections::HashMap;
 use std::rc::Rc;

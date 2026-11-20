@@ -6,12 +6,10 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use pubgrub::Ranges;
-
 use crate::gem_requirement::Requirement;
 use crate::gem_version::Version as GemVersion;
 
-use super::super::{Candidate, requirement_to_range};
+use super::super::Candidate;
 use super::rubygems::parse_range;
 use super::static_package_source::{StaticPackage, StaticPackageSource, root_version};
 use super::{
@@ -151,38 +149,6 @@ fn candidate_ranges_are_bundler_s() {
         out.push(format!("select | {text} | | {}", selected.join(" ")));
     }
     assert_lines("candidates", &section("candidates"), &out);
-}
-
-/// The risk #816's plan names for this slice: over the two candidates of
-/// each version, the port's ranges hold exactly the candidates the
-/// resolver's `requirement_to_range` holds today, so `= 1.0` still covers
-/// both builds of 1.0 and `> 1.0` neither.
-#[test]
-fn candidate_ranges_hold_what_requirement_to_range_holds() {
-    let candidates = candidates();
-    for text in SETS {
-        let port = set(text, candidate_range);
-        let today = text
-            .split(" | ")
-            .map(|req| requirement_to_range(&requirement(req)))
-            .fold(Ranges::empty(), |acc, range| acc.union(&range));
-        for candidate in &candidates {
-            assert_eq!(
-                port.includes(candidate),
-                today.contains(candidate),
-                "{text} and {}/{}",
-                candidate.version,
-                candidate.priority
-            );
-        }
-        let selected = port.select_versions(&candidates);
-        let held: Vec<Candidate> = candidates
-            .iter()
-            .filter(|c| today.contains(*c))
-            .cloned()
-            .collect();
-        assert_eq!(selected, held, "{text}");
-    }
 }
 
 /// Dart pub's `doc/solver.md` examples, and the oracle's three more, as

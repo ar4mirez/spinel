@@ -415,23 +415,6 @@ enum Command {
         /// checked against. The RubyGems Spinel ships when not given.
         #[arg(long, value_name = "VERSION")]
         rubygems_version: Option<String>,
-
-        /// The solver to resolve with: `pubgrub`, the one `spinel install`
-        /// uses, or `pubgrub-ruby`, the port of Bundler's under way (#816),
-        /// which takes no lockfile yet. With `DEBUG_RESOLVER` set,
-        /// `pubgrub-ruby` logs its facts and decisions on standard error as
-        /// Bundler does, and with `SPINEL_DEBUG_RELAX` either solver prints
-        /// what each failed try relaxes.
-        // ponytail: the switch lives while #816 is ported in slices; slice 5
-        // makes `pubgrub-ruby` the only solver and removes it.
-        #[arg(
-            long,
-            value_enum,
-            default_value_t = SolverChoice::Pubgrub,
-            hide = true,
-            conflicts_with = "locked"
-        )]
-        solver: SolverChoice,
     },
 
     /// Read a `Gemfile.lock` and write it back out as Bundler would.
@@ -532,22 +515,6 @@ enum Command {
         #[arg(long, value_enum, default_value_t = Format::Tree)]
         format: Format,
     },
-}
-
-/// `spinel resolve --solver`.
-#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
-enum SolverChoice {
-    Pubgrub,
-    PubgrubRuby,
-}
-
-impl From<SolverChoice> for resolver::Solver {
-    fn from(choice: SolverChoice) -> resolver::Solver {
-        match choice {
-            SolverChoice::Pubgrub => resolver::Solver::Pubgrub,
-            SolverChoice::PubgrubRuby => resolver::Solver::PubgrubRuby,
-        }
-    }
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
@@ -694,7 +661,6 @@ fn main() -> ExitCode {
             update,
             ruby_version,
             rubygems_version,
-            solver,
         }) => {
             let unlock = match update {
                 None => locked::Unlock::Nothing,
@@ -709,7 +675,6 @@ fn main() -> ExitCode {
                 &unlock,
                 ruby_version.as_deref(),
                 rubygems_version.as_deref(),
-                solver.into(),
             );
         }
         Some(Command::Lockfile { path }) => return lockfile_command(&path),
@@ -1055,8 +1020,6 @@ fn link_gem_home(gem_home: &Path, stored: &[(gem_store::GemId, PathBuf)]) -> boo
 /// `Gemfile.lock`), or the explanation of why there is none on standard
 /// error. Exits 1 when there is no resolution, 2 when the input is not one
 /// it can resolve.
-// The eighth argument, `solver`, goes with slice 5 of #816.
-#[allow(clippy::too_many_arguments)]
 fn resolve_command(
     deps: &Path,
     platforms: &[String],
@@ -1065,7 +1028,6 @@ fn resolve_command(
     unlock: &locked::Unlock,
     ruby_version: Option<&str>,
     rubygems_version: Option<&str>,
-    solver: resolver::Solver,
 ) -> ExitCode {
     let usage = |message: String| {
         eprintln!("spinel: resolve: {message}");
@@ -1199,7 +1161,7 @@ fn resolve_command(
             }
         };
     }
-    match resolver::resolve_with(&request, &index, solver) {
+    match resolver::resolve(&request, &index) {
         Ok(resolved) if lockfile => {
             let ruby_directive = gemfile.ruby.as_ref().is_some_and(|r| !r.is_null());
             let lock = lockfile::Lockfile::from_resolution(

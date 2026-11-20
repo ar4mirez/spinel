@@ -20,9 +20,6 @@ ignore = "0.4"
 libc = "0.2.189"
 md5 = { package = "md-5", version = "0.11" }
 notify = "8"
-# The resolver (#78): Bundler resolves with PubGrub too, so its choices and
-# its conflict explanations have the same shape.
-pubgrub = "0.4"
 # The compact index client (#77). rustls is reqwest's default TLS, verified
 # against the platform's trust store; gzip because `/versions` is large.
 reqwest = { version = "0.13", default-features = false, features = ["default-tls", "http2", "system-proxy", "gzip"] }

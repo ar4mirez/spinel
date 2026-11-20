@@ -112,29 +112,16 @@ where
         solver
     }
 
-    pub fn source(&self) -> &S {
-        &self.source
-    }
-
     /// The logger back, for the next try's solver: Bundler logs every try
     /// of a resolution to one logger.
     pub fn into_logger(self) -> Option<Logger> {
         self.logger
     }
 
-    pub fn solution(&self) -> &PartialSolution<P, V> {
-        &self.solution
-    }
-
     fn log(&mut self, level: Level, message: impl FnOnce() -> String) {
         if let Some(logger) = &mut self.logger {
             logger(level, &message());
         }
-    }
-
-    /// `solved?`.
-    pub fn is_solved(&self) -> bool {
-        self.solution.unsatisfied().is_empty()
     }
 
     /// `work`: one decision and its propagation; false once solved.

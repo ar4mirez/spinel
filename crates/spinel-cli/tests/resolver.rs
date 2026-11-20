@@ -10,8 +10,8 @@
 //! of its `Gemfile.lock`, or, for a Gemfile it cannot resolve, its
 //! explanation in `bundler.txt`, word for word. A case with a `spinel.txt`
 //! is one whose explanation differs from Bundler's, and that file is what
-//! Spinel says; its test checks both name the same requirements. Nothing
-//! here touches the network beyond 127.0.0.1.
+//! Spinel says; its test checks how the two differ. Nothing here touches the
+//! network beyond 127.0.0.1.
 
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
@@ -158,12 +158,8 @@ fn bundler_explanation(name: &str) -> String {
 }
 
 fn assert_resolves_as_bundler(name: &str) {
-    assert_resolves_as_bundler_with(name, &[]);
-}
-
-fn assert_resolves_as_bundler_with(name: &str, args: &[&str]) {
     let source = serve_index();
-    let out = resolve_with(name, &source, args);
+    let out = resolve(name, &source);
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         out.status.success(),
@@ -240,27 +236,11 @@ fn explains_a_transitive_conflict_as_bundler_does() {
 }
 
 /// Three gems, two steps. Bundler states a dependency for every version
-/// that shares it, prereleases included once it retries with them, where
-/// pubgrub-rs states it for the versions it tried: so where Bundler says
-/// `sinatra >= 2.0.0.beta1, < 3.0.0`, Spinel's default solver says
-/// `sinatra >= 2.0.0, < 3.0.0`. Everything else is Bundler's, line for line;
-/// the pubgrub-ruby port says all of it as Bundler does (below).
-// ponytail: the one bound the `pubgrub` crate's path cannot state; slice 5
-// of #816 makes the port the default and this test
-// `assert_explains_as_bundler("conflict_three")`.
+/// that shares it, prereleases included once it retries with them, so it
+/// says `sinatra >= 2.0.0.beta1, < 3.0.0`, and so does Spinel.
 #[test]
-fn explains_a_two_step_conflict_as_bundler_does_but_one_bound() {
-    let explanation = assert_explains("conflict_three");
-    let expected = fs::read_to_string(fixtures().join("cases/conflict_three/spinel.txt")).unwrap();
-    assert_eq!(explanation, expected);
-    let bundler = bundler_explanation("conflict_three");
-    assert_eq!(
-        explanation.replace(
-            "sinatra >= 2.0.0, < 3.0.0",
-            "sinatra >= 2.0.0.beta1, < 3.0.0"
-        ),
-        bundler
-    );
+fn explains_a_two_step_conflict_as_bundler_does() {
+    assert_explains_as_bundler("conflict_three");
 }
 
 /// A Gemfile gem no version satisfies is reported before resolving, with
@@ -278,26 +258,12 @@ fn reports_a_gem_not_found_as_bundler_does() {
     );
 }
 
-/// The port of Bundler's pubgrub-ruby (#816), behind `--solver
-/// pubgrub-ruby` until it is the only solver, resolves every case that
-/// resolves as Bundler does. Each case that does not resolve fails on it
-/// too, after retrying with the prereleases Bundler retries with, and is
-/// explained as Bundler explains it, word for word: `conflict_three`'s
-/// `sinatra >= 2.0.0.beta1, < 3.0.0` included, which the `pubgrub` crate's
-/// path cannot state (see above).
+/// Each case that does not resolve fails after retrying with the
+/// prereleases Bundler retries with: `SPINEL_DEBUG_RELAX` prints what each
+/// try relaxed, as `relax_hook.rb` logs Bundler's (`relax.log`, by
+/// `bundler.sh`), and the explanation after them is Bundler's.
 #[test]
-fn the_pubgrub_ruby_port_resolves_and_explains_as_bundler_does() {
-    let port = ["--solver", "pubgrub-ruby"];
-    for name in [
-        "sinatra",
-        "old_ruby",
-        "backtrack",
-        "json_two_platforms",
-        "prerelease",
-        "no_prerelease",
-    ] {
-        assert_resolves_as_bundler_with(name, &port);
-    }
+fn relaxes_what_bundler_relaxes_before_explaining_a_conflict() {
     let source = serve_index();
     for name in [
         "conflict",
@@ -305,12 +271,10 @@ fn the_pubgrub_ruby_port_resolves_and_explains_as_bundler_does() {
         "conflict_three",
         "conflict_transitive",
     ] {
-        let out = resolve_with_env(name, &source, &port, &[("SPINEL_DEBUG_RELAX", "1")]);
+        let out = resolve_with_env(name, &source, &[], &[("SPINEL_DEBUG_RELAX", "1")]);
         assert_eq!(out.status.code(), Some(1), "{name}: should not resolve");
         assert!(out.stdout.is_empty(), "{name}: printed a resolution");
         let stderr = String::from_utf8_lossy(&out.stderr);
-        // `SPINEL_DEBUG_RELAX` prints what each try relaxed, as
-        // `relax_hook.rb` logs Bundler's (`relax.log`, by `bundler.sh`).
         let relaxed: Vec<&str> = stderr
             .lines()
             .filter_map(|line| line.strip_prefix("find_names_to_relax: "))
@@ -324,29 +288,6 @@ fn the_pubgrub_ruby_port_resolves_and_explains_as_bundler_does() {
             .collect();
         assert_eq!(explanation, bundler_explanation(name), "{name}");
     }
-    // A Gemfile gem nothing satisfies is reported before either solver runs.
-    let out = resolve_with("not_found", &source, &port);
-    let expected = fs::read_to_string(fixtures().join("cases/not_found/spinel.txt")).unwrap();
-    assert_eq!(String::from_utf8_lossy(&out.stderr), expected);
-}
-
-/// The port takes no lockfile yet: `--locked` with it is refused.
-#[test]
-fn the_pubgrub_ruby_port_takes_no_lockfile_yet() {
-    let out = Command::new(SPINEL)
-        .args([
-            "resolve",
-            "-",
-            "--solver",
-            "pubgrub-ruby",
-            "--locked",
-            "Gemfile.lock",
-        ])
-        .output()
-        .expect("spinel runs");
-    assert_eq!(out.status.code(), Some(2));
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("cannot be used with"), "{stderr}");
 }
 
 /// Every case is one of the above.

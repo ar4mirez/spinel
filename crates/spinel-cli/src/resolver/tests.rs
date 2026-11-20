@@ -1,4 +1,3 @@
-use super::pubgrub_report::constraint_string;
 use super::*;
 
 fn local() -> Platform {
@@ -92,42 +91,18 @@ fn ranges_hold_what_requirements_are_satisfied_by() {
     ];
     for r in requirements {
         let requirement = req(&[r]);
-        let range = requirement_to_range(&requirement);
+        let range = solver::candidate_range(&requirement);
         for version in versions {
             let expected = requirement.satisfied_by(&v(version));
             for priority in [-1, 1] {
-                let held = range.contains(&Candidate::new(v(version), priority));
+                let held = range.includes(&Candidate::new(v(version), priority));
                 assert_eq!(held, expected, "{r} holds {version} ({priority})");
             }
         }
     }
-    let both = requirement_to_range(&req(&[">= 3.0.0", "< 4"]));
-    assert!(both.contains(&Candidate::new(v("3.2.8"), 1)));
-    assert!(!both.contains(&Candidate::new(v("4.0.0"), -1)));
-}
-
-#[test]
-fn writes_ranges_as_pubgrub_ruby_does() {
-    let range = |r: &[&str]| requirement_to_range(&req(r));
-    assert_eq!(constraint_string(&range(&[">= 0"]), true), ">= 0");
-    assert_eq!(constraint_string(&range(&["~> 2.2"]), true), "~> 2.2");
-    assert_eq!(
-        constraint_string(&range(&["~> 2.2"]), false),
-        ">= 2.2, < 3.A"
-    );
-    assert_eq!(constraint_string(&range(&["= 2.6.10"]), true), "= 2.6.10");
-    assert_eq!(constraint_string(&range(&["!= 1.0"]), true), "!= 1.0");
-    assert_eq!(
-        constraint_string(&range(&[">= 3.0.0", "< 4"]), true),
-        ">= 3.0.0, < 4"
-    );
-    assert_eq!(
-        constraint_string(&range(&["> 1", "!= 1.5"]), true),
-        "> 1, != 1.5"
-    );
-    let either = range(&["< 1"]).union(&range(&[">= 2"]));
-    assert_eq!(constraint_string(&either, true), "< 1 OR >= 2");
-    assert_eq!(constraint_string(&Ranges::empty(), true), "(no versions)");
+    let both = solver::candidate_range(&req(&[">= 3.0.0", "< 4"]));
+    assert!(both.includes(&Candidate::new(v("3.2.8"), 1)));
+    assert!(!both.includes(&Candidate::new(v("4.0.0"), -1)));
 }
 
 #[test]
@@ -181,31 +156,14 @@ fn leaves_prereleases_out_unless_asked_or_alone() {
 // Each expectation is what Bundler 4.0.20 did with the same /info lines and
 // Gemfile, on Ruby 4.0.0, RubyGems 4.0.16 and x86_64-linux, run with
 // `tests/fixtures/resolver/bundle_case.sh` (the indexes are
-// `tests/fixtures/resolver/oracle/<name>/`).
-// The port of pubgrub-ruby (`Solver::PubgrubRuby`) relaxes the same gems on
-// each, by construction: its `find_names_to_relax` walks the same
+// `tests/fixtures/resolver/oracle/<name>/`). The resolver relaxes the same
+// gems on each, by construction: its `find_names_to_relax` walks the same
 // derivation.
 #[test]
 fn retries_with_prereleases_of_the_gems_bundler_relaxes() {
-    for solver in [Solver::Pubgrub, Solver::PubgrubRuby] {
-        retries_with_prereleases_of_the_gems_bundler_relaxes_on(solver);
-    }
-}
-
-fn retries_with_prereleases_of_the_gems_bundler_relaxes_on(solver: Solver) {
-    let resolved = |r: &Request, gems: &Index| -> Vec<String> {
-        resolve_with(r, gems, solver)
-            .unwrap_or_else(|e| panic!("{solver:?}: {e}"))
-            .iter()
-            .map(ToString::to_string)
-            .collect()
-    };
     let platforms = ["x86_64-linux"];
     // `needs_pre`: a gem asking for a prerelease of another. Bundler
     // retries with `lib`'s prereleases: `lib (2.0.beta)`, `needs_pre (1.0)`.
-    // pubgrub-rs puts `lib` under the second cause of its first derivation,
-    // behind a fact about the gaps between `needs_pre`'s versions, which is
-    // why the walk follows what was learned from a single term.
     let gems = index(&[
         ("needs_pre", "1.0 lib:>= 2.0.a\n"),
         ("lib", "1.0\n2.0.beta\n"),
@@ -213,9 +171,8 @@ fn retries_with_prereleases_of_the_gems_bundler_relaxes_on(solver: Solver) {
     let r = request(vec![dep("needs_pre", &[])], &platforms, "4.0.0");
     assert_eq!(resolved(&r, &gems), ["lib (2.0.beta)", "needs_pre (1.0)"]);
     // `case1`: Bundler retries with `y`'s prereleases: `b (2.0)`, `c (1.0)`,
-    // `y (2.0.beta)`. pubgrub-rs learns `b 2.0` cannot be used from `y`'s
-    // missing versions, which pubgrub-ruby propagates instead, so `y` is on
-    // Bundler's chain.
+    // `y (2.0.beta)`. pubgrub-ruby propagates `y`'s missing versions, so `y`
+    // is on Bundler's chain.
     let gems = index(&[
         ("c", "1.0 b:>= 2\n"),
         ("b", "1.0\n2.0 y:>= 2.0.a\n"),
@@ -235,39 +192,21 @@ fn retries_with_prereleases_of_the_gems_bundler_relaxes_on(solver: Solver) {
         ("y", "3.0\n2.0.beta\n"),
     ]);
     let r = request(vec![dep("a", &[])], &platforms, "4.0.0");
-    let Err(Failure::Conflict(message)) = resolve_with(&r, &gems, solver) else {
-        panic!("{solver:?}: resolved with a prerelease Bundler leaves out");
+    let Err(Failure::Conflict(message)) = resolve(&r, &gems) else {
+        panic!("resolved with a prerelease Bundler leaves out");
     };
-    // The port explains it as Bundler does, word for word.
-    if solver == Solver::PubgrubRuby {
-        assert_explained_as_bundler("case2", &message);
-        return;
-    }
-    assert!(
-        message.starts_with(
-            "Could not find compatible versions\n\n\
-             Because every version of c depends on y < 3\n  \
-             and a < 2.0 depends on c >= 2.0.a,\n  \
-             a < 2.0 requires y < 3.\n\
-             And because a < 2.0 depends on y >= 3,\n  \
-             a < 2.0 cannot be used."
-        ),
-        "{message}"
-    );
+    // And explains it as Bundler does, word for word.
+    assert_explained_as_bundler("case2", &message);
 }
 
-// Known differences from Bundler (#816): random indexes from
-// `tests/fixtures/resolver/differential.py` on which Spinel and Bundler
-// 4.0.20 disagree, kept under `tests/fixtures/resolver/oracle/` (`case0138`
-// is seed 1's; the others are named for their seed and case). pubgrub-rs
-// derives a failure along other incompatibilities than pubgrub-ruby, so the
-// gems `names_to_relax` finds along it are not always those Bundler's
-// `find_names_to_relax` finds: Spinel lets in prereleases Bundler leaves out
-// and resolves where Bundler reports a conflict, or resolves to other
-// versions. Each test records both outcomes and asserts Spinel's, so a change
-// to it is seen. The port of pubgrub-ruby (`Solver::PubgrubRuby`) derives as
-// Bundler does, and each test asserts that it resolves as Bundler does; once
-// it is the only solver (#816), each becomes a test of that alone.
+// Random indexes from `tests/fixtures/resolver/differential.py`, kept
+// under `tests/fixtures/resolver/oracle/` (`case0138` is seed 1's; the
+// others are named for their seed and case), on which the `pubgrub` crate
+// Spinel resolved with before #816 found other failures than pubgrub-ruby,
+// so relaxed other gems than Bundler's `find_names_to_relax`, and let in
+// prereleases Bundler leaves out or resolved to other versions. Each test
+// asserts that Spinel resolves as Bundler 4.0.20 does, or explains the
+// conflict as Bundler does.
 
 /// The index and Gemfile of `tests/fixtures/resolver/oracle/<name>`, as
 /// `bundle_case.sh` serves them to Bundler.
@@ -323,124 +262,79 @@ fn as_strs(outcome: &Option<Vec<String>>) -> Option<Vec<&str>> {
         .map(|s| s.iter().map(String::as_str).collect())
 }
 
-/// What `solver` resolves `case` to: the builds, or `None` for a conflict.
-fn oracle_outcome(case: &str, solver: Solver) -> Option<Vec<String>> {
+/// Asserts that Spinel resolves `case` as Bundler 4.0.20 does, as
+/// `bundler` records it, or explains its conflict as Bundler does (`None`).
+fn resolves_as_bundler(case: &str, bundler: Option<&[&str]>) {
     let (r, gems) = oracle_case(case);
-    match resolve_with(&r, &gems, solver) {
+    let ours: Option<Vec<String>> = match resolve(&r, &gems) {
         Ok(specs) => Some(specs.iter().map(ToString::to_string).collect()),
-        Err(Failure::Conflict(_)) => None,
+        Err(Failure::Conflict(message)) => {
+            assert_explained_as_bundler(case, &message);
+            None
+        }
         Err(e) => panic!("{case}: {e}"),
-    }
-}
-
-/// Asserts that Spinel still resolves `case` as `spinel` records (`None` for
-/// a conflict), where Bundler 4.0.20 does as `bundler` records, and that the
-/// port of pubgrub-ruby resolves it as Bundler does, or explains its
-/// conflict as Bundler does.
-fn known_difference(case: &str, bundler: Option<&[&str]>, spinel: Option<&[&str]>) {
-    assert_ne!(bundler, spinel, "{case}: not a difference");
-    let ours = oracle_outcome(case, Solver::Pubgrub);
+    };
     assert_eq!(
         as_strs(&ours).as_deref(),
-        spinel,
-        "{case}: Spinel's outcome changed; Bundler 4.0.20's is {bundler:?}. \
-         If they now match, make this a test that Spinel resolves as Bundler does (#816)."
-    );
-    let port = oracle_outcome(case, Solver::PubgrubRuby);
-    assert_eq!(
-        as_strs(&port).as_deref(),
         bundler,
-        "{case}: the port of pubgrub-ruby does not resolve as Bundler does"
+        "{case}: not Bundler's resolution"
     );
-    if bundler.is_none() {
-        let (r, gems) = oracle_case(case);
-        let Err(Failure::Conflict(message)) = resolve_with(&r, &gems, Solver::PubgrubRuby) else {
-            unreachable!("{case}: the port reports the conflict");
-        };
-        assert_explained_as_bundler(case, &message);
-    }
 }
 
-macro_rules! known_differences {
-    ($($(#[$doc:meta])* $test:ident: $case:literal, bundler: $bundler:expr, spinel: $spinel:expr;)*) => {
+macro_rules! resolves_as_bundler {
+    ($($(#[$doc:meta])* $test:ident: $case:literal, $bundler:expr;)*) => {
         $(
             $(#[$doc])*
             #[test]
             fn $test() {
-                known_difference($case, $bundler, $spinel);
+                resolves_as_bundler($case, $bundler);
             }
         )*
     };
 }
 
-known_differences! {
+resolves_as_bundler! {
     /// Bundler retries with `g1`'s and `g3`'s prereleases and reports the
-    /// conflict; Spinel also relaxes `g0`, then `g2`, and resolves.
-    known_difference_case0138: "case0138",
-        bundler: CONFLICT,
-        spinel: Some(&["g0 (2.0)", "g1 (2.0.beta)", "g2 (2.1.rc1)", "g3 (2.0)"]);
-    /// Bundler relaxes `g0` and `g4` and reports the conflict; Spinel also
-    /// relaxes `g1` and `g2` and resolves.
-    known_difference_seed816_case0015: "seed816-case0015",
-        bundler: CONFLICT,
-        spinel: Some(&["g0 (3.0.pre)", "g1 (1.1)", "g2 (2.0.beta)", "g4 (3.0)"]);
+    /// conflict; the `pubgrub` crate also relaxed `g0`, then `g2`, and
+    /// resolved.
+    resolves_case0138_as_bundler_does: "case0138", CONFLICT;
+    /// Bundler relaxes `g0` and `g4` and reports the conflict.
+    resolves_seed816_case0015_as_bundler_does: "seed816-case0015", CONFLICT;
     /// Bundler relaxes `g0`, `g2` and `g4`, then `g3`, and reports the
-    /// conflict; Spinel relaxes `g1` with `g3` and resolves.
-    known_difference_seed816_case0358: "seed816-case0358",
-        bundler: CONFLICT,
-        spinel: Some(&["g0 (2.1.rc1)", "g1 (2.0.beta)", "g2 (2.1.rc1)", "g4 (3.0)"]);
-    /// Bundler relaxes `g3` and `g4` and reports the conflict; Spinel also
-    /// relaxes `g1` and `g2` and resolves.
-    known_difference_seed816_case0393: "seed816-case0393",
-        bundler: CONFLICT,
-        spinel: Some(&["g0 (3.0.pre)", "g1 (2.1.rc1)", "g2 (2.1.rc1)"]);
-    /// Bundler finds nothing to relax and reports the conflict; Spinel
-    /// relaxes `g3` and resolves.
-    known_difference_seed816_case0669: "seed816-case0669",
-        bundler: CONFLICT,
-        spinel: Some(&["g0 (2.1.rc1)", "g2 (3.0)", "g3 (2.0.beta)", "g4 (1.0)"]);
+    /// conflict.
+    resolves_seed816_case0358_as_bundler_does: "seed816-case0358", CONFLICT;
+    /// Bundler relaxes `g3` and `g4` and reports the conflict.
+    resolves_seed816_case0393_as_bundler_does: "seed816-case0393", CONFLICT;
+    /// Bundler finds nothing to relax and reports the conflict.
+    resolves_seed816_case0669_as_bundler_does: "seed816-case0669", CONFLICT;
     /// Bundler relaxes `g1`, `g2` and `g3`, then `g4`, and reports the
-    /// conflict; Spinel relaxes `g0` where Bundler relaxes `g1`, then `g1`
-    /// with `g4`, and resolves.
-    known_difference_seed816_case0969: "seed816-case0969",
-        bundler: CONFLICT,
-        spinel: Some(&["g0 (2.1.rc1)", "g2 (3.0.pre)", "g3 (3.0.pre)", "g4 (3.0.pre)"]);
-    /// Both resolve after relaxing `g1`; Spinel also relaxes `g0` and
-    /// resolves to other versions.
-    known_difference_seed816_case0231: "seed816-case0231",
-        bundler: Some(&["g0 (2.0)", "g1 (2.1.rc1)", "g2 (3.0)", "g3 (1.1)"]),
-        spinel: Some(&["g0 (3.0.pre)", "g1 (1.1)"]);
-    /// Both resolve after relaxing `g0` and `g2`; Spinel also relaxes `g1`
-    /// and resolves to other versions.
-    known_difference_seed816_case0377: "seed816-case0377",
-        bundler: Some(&["g0 (2.1.rc1)"]),
-        spinel: Some(&["g0 (2.0)", "g1 (2.1.rc1)", "g2 (2.0.beta)"]);
-    /// Both resolve after relaxing `g0` and `g3`; Spinel also relaxes `g1`
-    /// and resolves to other versions.
-    known_difference_seed4242_case0250: "seed4242-case0250",
-        bundler: Some(&["g0 (3.0.pre)", "g1 (1.0)", "g2 (2.0)", "g3 (3.0)"]),
-        spinel: Some(&["g0 (2.0)", "g1 (2.0.a)", "g2 (2.0)", "g3 (1.0)"]);
-    /// Both resolve after relaxing `g4`; Spinel also relaxes `g1` and `g3`
-    /// and resolves to other versions.
-    known_difference_seed4242_case0536: "seed4242-case0536",
-        bundler: Some(&["g0 (1.1)", "g1 (2.0)", "g3 (1.0)", "g4 (2.0.a)"]),
-        spinel: Some(&["g0 (1.1)", "g1 (2.0)", "g3 (2.0.a)", "g4 (2.0)"]);
-    /// Both resolve after relaxing `g2`; Spinel also relaxes `g0` and `g3`
-    /// and resolves to other versions.
-    known_difference_seed4242_case0872: "seed4242-case0872",
-        bundler: Some(&["g0 (1.1)", "g2 (2.0.beta)", "g3 (1.1)", "g4 (2.0)"]),
-        spinel: Some(&["g0 (2.0)", "g1 (1.1)", "g2 (3.0)", "g3 (2.1.rc1)", "g4 (2.0)"]);
-    /// Bundler's first try fails and it resolves after relaxing `g2`;
-    /// Spinel's first try resolves, to other versions.
-    known_difference_seed4242_case0924: "seed4242-case0924",
-        bundler: Some(&["g0 (2.0)", "g1 (3.0)", "g2 (2.0.beta)", "g3 (1.0)"]),
-        spinel: Some(&["g0 (1.1)", "g2 (3.0)", "g3 (1.0)"]);
+    /// conflict.
+    resolves_seed816_case0969_as_bundler_does: "seed816-case0969", CONFLICT;
+    /// Bundler resolves after relaxing `g1`.
+    resolves_seed816_case0231_as_bundler_does: "seed816-case0231",
+        Some(&["g0 (2.0)", "g1 (2.1.rc1)", "g2 (3.0)", "g3 (1.1)"]);
+    /// Bundler resolves after relaxing `g0` and `g2`.
+    resolves_seed816_case0377_as_bundler_does: "seed816-case0377",
+        Some(&["g0 (2.1.rc1)"]);
+    /// Bundler resolves after relaxing `g0` and `g3`.
+    resolves_seed4242_case0250_as_bundler_does: "seed4242-case0250",
+        Some(&["g0 (3.0.pre)", "g1 (1.0)", "g2 (2.0)", "g3 (3.0)"]);
+    /// Bundler resolves after relaxing `g4`.
+    resolves_seed4242_case0536_as_bundler_does: "seed4242-case0536",
+        Some(&["g0 (1.1)", "g1 (2.0)", "g3 (1.0)", "g4 (2.0.a)"]);
+    /// Bundler resolves after relaxing `g2`.
+    resolves_seed4242_case0872_as_bundler_does: "seed4242-case0872",
+        Some(&["g0 (1.1)", "g2 (2.0.beta)", "g3 (1.1)", "g4 (2.0)"]);
+    /// Bundler's first try fails and it resolves after relaxing `g2`, where
+    /// the `pubgrub` crate's first try resolved, to other versions.
+    resolves_seed4242_case0924_as_bundler_does: "seed4242-case0924",
+        Some(&["g0 (2.0)", "g1 (3.0)", "g2 (2.0.beta)", "g3 (1.0)"]);
 }
 
 // The port of pubgrub-ruby (#816), fed by Bundler's source side
-// (`resolver/source.rs`), behind `Solver::PubgrubRuby`.
+// (`resolver/source.rs`).
 
-/// What `Solver::PubgrubRuby` resolves `r` to, and every line pubgrub-ruby
+/// What the resolver resolves `r` to, and every line pubgrub-ruby
 /// logged on the way, as `DEBUG_RESOLVER` makes Bundler print them.
 fn pubgrub_ruby_log(r: &Request, gems: &Index) -> (Result<Vec<String>, Failure>, Vec<String>) {
     let (result, lines, _) = pubgrub_ruby_tries(r, gems);
@@ -458,9 +352,10 @@ fn pubgrub_ruby_tries(
     let logger: solver::Logger =
         Box::new(move |_, line: &str| sink.borrow_mut().push(line.to_owned()));
     let mut relaxed = Vec::new();
-    let result = solve_pubgrub_ruby(
+    let result = solve(
         r,
         gems,
+        Locked::default(),
         Some(logger),
         |names| relaxed.push(names.to_json()),
         resolved_builds,
@@ -502,8 +397,10 @@ fn the_pubgrub_ruby_port_decides_and_relaxes_as_bundler_does_on_every_try() {
     }
 }
 
+/// Where Bundler needs no retry, the first try's decisions are the
+/// resolution, and nothing is relaxed.
 #[test]
-fn the_pubgrub_ruby_port_resolves_as_the_pubgrub_crate_does_where_bundler_needs_no_retry() {
+fn resolves_on_the_first_try_where_bundler_needs_no_retry() {
     let platforms = ["x86_64-linux"];
     let gems = index(&[
         ("app", "1.0 lib:~> 1.0\n2.0 lib:~> 2.0\n"),
@@ -517,26 +414,45 @@ fn the_pubgrub_ruby_port_resolves_as_the_pubgrub_crate_does_where_bundler_needs_
         ("differs", "1.0\n1.0-java jruby-only:>= 0\n"),
         ("jruby-only", "1.0\n"),
     ]);
-    for (deps, platforms, ruby) in [
-        (vec![dep("app", &[])], &platforms[..], "4.0.0"),
+    for (deps, platforms, ruby, expected) in [
+        (
+            vec![dep("app", &[])],
+            &platforms[..],
+            "4.0.0",
+            &["app (2.0)", "lib (2.1)"][..],
+        ),
         (
             vec![dep("app", &[]), dep("lib", &["< 2"])],
             &platforms,
             "4.0.0",
+            &["app (1.0)", "lib (1.5)"],
         ),
-        (vec![dep("old", &[])], &platforms, "3.3.0"),
-        (vec![dep("old", &[])], &platforms, "4.0.0"),
-        (vec![dep("pre", &[])], &platforms, "4.0.0"),
-        (vec![dep("pre", &[">= 2.0.a"])], &platforms, "4.0.0"),
+        (vec![dep("old", &[])], &platforms, "3.3.0", &["old (1.0)"]),
+        (vec![dep("old", &[])], &platforms, "4.0.0", &["old (2.0)"]),
+        (vec![dep("pre", &[])], &platforms, "4.0.0", &["pre (1.0)"]),
+        (
+            vec![dep("pre", &[">= 2.0.a"])],
+            &platforms,
+            "4.0.0",
+            &["pre (2.0.beta)"],
+        ),
         (
             vec![dep("same", &[]), dep("differs", &[])],
             &["x86_64-linux", "java"],
             "4.0.0",
+            &[
+                "differs (1.0)",
+                "differs (1.0-java)",
+                "jruby-only (1.0)",
+                "same (1.0)",
+                "same (1.0-java)",
+            ],
         ),
     ] {
         let r = request(deps, platforms, ruby);
-        let (ours, _) = pubgrub_ruby_log(&r, &gems);
-        assert_eq!(ours.unwrap(), resolved(&r, &gems));
+        let (ours, _, relaxed) = pubgrub_ruby_tries(&r, &gems);
+        assert_eq!(ours.unwrap(), expected);
+        assert!(relaxed.is_empty(), "{expected:?}: retried");
     }
 }
 
@@ -749,21 +665,18 @@ fn explains_a_conflict() {
         &["x86_64-linux"],
         "4.0.0",
     );
-    for solver in [Solver::Pubgrub, Solver::PubgrubRuby] {
-        let Err(Failure::Conflict(message)) = resolve_with(&r, &index, solver) else {
-            panic!("{solver:?}: resolved");
-        };
-        assert_eq!(
-            message,
-            "Could not find compatible versions\n\n\
-             Because every version of app depends on lib ~> 1.0\n  \
-             and Gemfile depends on app >= 0,\n  \
-             lib ~> 1.0 is required.\n\
-             So, because Gemfile depends on lib >= 2,\n  \
-             version solving has failed.",
-            "{solver:?}"
-        );
-    }
+    let Err(Failure::Conflict(message)) = resolve(&r, &index) else {
+        panic!("resolved");
+    };
+    assert_eq!(
+        message,
+        "Could not find compatible versions\n\n\
+         Because every version of app depends on lib ~> 1.0\n  \
+         and Gemfile depends on app >= 0,\n  \
+         lib ~> 1.0 is required.\n\
+         So, because Gemfile depends on lib >= 2,\n  \
+         version solving has failed."
+    );
 }
 
 /// What `resolve_locked` chose, by `full_name`.
