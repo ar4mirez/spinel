@@ -9,6 +9,19 @@ bytecode a tool reads.
 
 ### Added
 
+- **`puma-spinel`, the puma gem for Spinel; the Sinatra fixture serves on Puma**
+  ([#116](https://github.com/ar4mirez/spinel/issues/116)).
+  `gems/puma-spinel/` is Puma 8.1.2's Ruby API, upstream's `lib/` and
+  `bin/` unchanged, over a `spinel-ext` extension that runs Puma's own HTTP
+  parser state machine (the tables Ragel makes of upstream's grammar) and
+  makes MiniSSL's OpenSSL calls. `spinel install` puts it in place of a
+  locked `puma 8.1.2` when `SPINEL_SUBSTITUTES=puma`, leaving the lockfile
+  as Bundler wrote it; the Sinatra fixture serves on it beside
+  nio4r-spinel, and Puma's own test suite ends test for test as it does on
+  CRuby 4.0.9, but for 33 tests neither run runs (rubygems.org access, a C
+  compiler, MRI-only checks). `gems/puma-spinel/build.rb` builds
+  `puma-spinel-8.1.2.1-<platform>.gem`; it is not on rubygems.org yet.
+
 - **`nio4r-spinel`, the nio4r gem for Spinel**
   ([#115](https://github.com/ar4mirez/spinel/issues/115)).
   `gems/nio4r-spinel/` is nio4r 2.7.5's Ruby API, upstream's `lib/`
