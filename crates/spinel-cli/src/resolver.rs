@@ -40,7 +40,10 @@
 //!   platform build before the ruby build of the same version.
 //!
 //! A conflict is explained as Bundler explains it: pubgrub-ruby's
-//! `FailureWriter`, ported in `resolver/report.rs`.
+//! `FailureWriter`, ported in `resolver/report.rs` over the port's own
+//! incompatibilities for [`Solver::PubgrubRuby`], and in
+//! `resolver/pubgrub_report.rs` over pubgrub-rs's derivation tree, reshaped
+//! into Bundler's, for the default solver.
 //!
 //! **The pubgrub-ruby port** (#816) replaces the `pubgrub` crate in slices:
 //! `resolver/solver/` is pubgrub-ruby's solver, and `resolver/source.rs`
@@ -70,11 +73,13 @@
 //! names they provide, in place of the index's (`crate::local_source`).
 //! Not here yet: a rubygems source scoped to a gem.
 
+// ponytail: the `pubgrub` crate's explanations, reshaped into Bundler's,
+// for the default solver only; slice 5 of #816 removes them with it.
+mod pubgrub_report;
 mod report;
-// ponytail: what reads the rest of the solver's derivations (the custom
-// explanations, `failure?`) arrives with slice 4 of #816 (`FailureWriter`),
-// and some of what its tests use nothing else does yet; drop this `allow`
-// with slice 4.
+// ponytail: some of what the solver's tests use, and what slice 5 of #816's
+// locked resolution will (an `InvalidDependency`, the solution's
+// assignments), nothing else uses yet; slice 5 drops this `allow`.
 #[allow(dead_code)]
 mod solver;
 mod source;
@@ -1801,7 +1806,7 @@ fn solve<T>(
                         extended_explanation: None,
                     });
                     if unlock.is_empty() && prereleases.is_empty() {
-                        let explanation = report::explain(&tree, &provider);
+                        let explanation = pubgrub_report::explain(&tree, &provider);
                         return Err(Failure::Conflict(format!(
                             "Could not find compatible versions\n\n{explanation}"
                         )));
@@ -1888,9 +1893,8 @@ fn solve_pubgrub_ruby<T>(
             let names = source::find_names_to_relax(&provider, &failure.incompatibility);
             relaxed_by(&names);
             if names.unlock.is_empty() && names.prereleases.is_empty() {
-                // ponytail: the explanation is the failing incompatibility
-                // alone until slice 4 of #816 ports `FailureWriter` over it.
-                let mut explanation = failure.incompatibility.to_string();
+                // `SolveFailure#to_s`, and after it the extended explanation.
+                let mut explanation = report::explanation(&failure.incompatibility);
                 if let Some(extended) = names.extended_explanation {
                     explanation.push_str("\n\n");
                     explanation.push_str(&extended);

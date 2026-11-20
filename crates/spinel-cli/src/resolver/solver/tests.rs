@@ -271,7 +271,8 @@ fn derivation(
 }
 
 /// The example solved as the oracle runs it, printed as the oracle prints
-/// it: the debug log, then the solution or the failure's derivation.
+/// it: the debug log, then the solution, or the failure's derivation and
+/// its explanation.
 fn solve(name: &str) -> Vec<String> {
     let log = Rc::new(RefCell::new(Vec::new()));
     let sink = log.clone();
@@ -294,6 +295,10 @@ fn solve(name: &str) -> Vec<String> {
         Err(failure) => {
             result.push("failure:".to_owned());
             derivation(&failure.incompatibility, 0, &mut result);
+            // `SolveFailure#explanation`, by the port of `FailureWriter`.
+            result.push("-- explanation".to_owned());
+            let explanation = super::super::report::explanation(&failure.incompatibility);
+            result.extend(explanation.split('\n').map(str::to_owned));
         }
     }
     let mut out = vec!["-- log".to_owned()];

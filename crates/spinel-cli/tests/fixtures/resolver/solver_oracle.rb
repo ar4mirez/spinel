@@ -14,7 +14,8 @@
 #   and three more, through `StaticPackageSource`, `^x.y.z` written `~> x.y` as
 #   pubgrub-ruby's own tests write it: the solver's debug log, then the
 #   solution, or the failure and its derivation (each incompatibility, then
-#   indented, the two it was derived from).
+#   indented, the two it was derived from), then `FailureWriter`'s
+#   explanation of it.
 #
 #   ruby solver_oracle.rb            # rewrite solver_oracle.txt
 #   ruby solver_oracle.rb --check    # agree with it, or fail
@@ -194,6 +195,8 @@ def examples_section(out)
     rescue PG::SolveFailure => e
       result << "failure:"
       derivation(e.incompatibility, 0, result)
+      result << "-- explanation"
+      result.concat(e.explanation.split("\n", -1))
     end
     out << "== example #{name}"
     out << "-- log"
