@@ -54,6 +54,9 @@
 //!   per-Ractor lock — one alone, and one whose two threads both are — while
 //!   the main Ractor defines a class and a method, which waited for them for
 //!   ever while they kept the class lock.
+//! - `env`: `ENV` shareable and not frozen in every Ractor (#865), and four
+//!   Ractors writing and reading it in parallel, their own variables and
+//!   each other's, with no read that sees what it should not.
 //!
 //! A case that has not finished in [`DEADLINE`] fails rather than hangs, as
 //! `outside_lock` did before #119.
@@ -166,4 +169,5 @@ cases!(
     refusals,
     parallel,
     outside_lock,
+    env,
 );

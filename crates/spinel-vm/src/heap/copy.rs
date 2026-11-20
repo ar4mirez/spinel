@@ -24,7 +24,9 @@
 //!
 //! An object whose class is a singleton class is copied as an instance of
 //! the class it was made from: the singleton belongs to the object left
-//! behind.
+//! behind. One marked shareable while unfrozen keeps it, since in CRuby it
+//! is the one object every Ractor uses: `ENV` (#865), whose methods are its
+//! singleton's.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -224,9 +226,10 @@ impl Heap {
         while let Some((value, index, reach)) = export.work.pop() {
             let node = export.node(value, reach, options)?;
             // A frozen object is shareable, and stays the sender's: one a
-            // frozen literal answers is every use of that literal's.
+            // frozen literal answers is every use of that literal's. So is
+            // one marked shareable unfrozen, `ENV`.
             if node.class.is_some()
-                && node.flags & FROZEN == 0
+                && node.flags & (FROZEN | SHAREABLE) == 0
                 && let Some(taken) = taken.as_deref_mut()
             {
                 taken.push(value);
@@ -469,7 +472,7 @@ impl Export<'_> {
         let Some(class) = header.class else {
             return false;
         };
-        header.flags & FROZEN == 0
+        header.flags & (FROZEN | SHAREABLE) == 0
             && !self
                 .heap
                 .class_id_of_cell(class)
@@ -508,6 +511,10 @@ impl Export<'_> {
         // SAFETY: a live object of the exported heap, which nothing writes
         // meanwhile (see `Heap::export`).
         let header = unsafe { &*object.header() };
+        // One marked shareable unfrozen, `ENV` (#865), is shareable whatever
+        // it holds, as CRuby's is: its state is the process's environment.
+        let marked = header.flags & SHAREABLE != 0 && header.flags & FROZEN == 0;
+        let reach = if marked { Reach::Hidden } else { reach };
         // The reach of what this object holds in slots that are not instance
         // variables: a `Regexp`'s are its compiled pattern's, as CRuby's are.
         let mut held = reach.inner();
@@ -530,14 +537,17 @@ impl Export<'_> {
                 {
                     return Err(ExportError::Refused(refusal.clone()));
                 }
-                if options.shareable_only && header.flags & FROZEN == 0 && !self.exempt(id, reach) {
+                if options.shareable_only
+                    && header.flags & (FROZEN | SHAREABLE) == 0
+                    && !self.exempt(id, reach)
+                {
                     return Err(ExportError::Unshareable);
                 }
                 if classes.repr(id) == Some(Builtin::Regexp) {
                     held = Reach::Hidden;
                 }
                 let mut id = id;
-                while classes.is_singleton(id) {
+                while !marked && classes.is_singleton(id) {
                     match classes.superclass(id) {
                         Some(superclass) => id = superclass,
                         None => break,

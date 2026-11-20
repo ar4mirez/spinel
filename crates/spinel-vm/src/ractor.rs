@@ -68,6 +68,11 @@ pub(crate) struct Program {
     registry: Registry,
     asked: AtomicBool,
     main_heap: std::sync::atomic::AtomicPtr<Heap>,
+    /// How many writes the program's Ractors made through `ENV` (#865).
+    /// Each Ractor's `ENV` keeps the table its enumerating methods read
+    /// until the environment changes (#729), and a write one Ractor makes
+    /// is what tells every other its table is old.
+    env_writes: AtomicU64,
 }
 
 impl Default for Program {
@@ -76,6 +81,7 @@ impl Default for Program {
             registry: Registry::new(),
             asked: AtomicBool::new(false),
             main_heap: std::sync::atomic::AtomicPtr::default(),
+            env_writes: AtomicU64::new(0),
         }
     }
 }
@@ -100,6 +106,17 @@ impl Program {
 
     pub(crate) fn main_heap(&self) -> *mut Heap {
         self.main_heap.load(Ordering::Acquire)
+    }
+
+    /// Count a write through `ENV`, made under the environment's lock.
+    pub(crate) fn wrote_env(&self) {
+        self.env_writes.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// How many writes [`Program::wrote_env`] has counted. Read before the
+    /// environment is, a table built from it is old once this has moved.
+    pub(crate) fn env_writes(&self) -> u64 {
+        self.env_writes.load(Ordering::SeqCst)
     }
 }
 
@@ -964,6 +981,14 @@ pub(super) fn native(
             new_array(scope, &[block, args])
         }
         RactorOp::Shareable => bool_value(is_shareable(scope, arg(0))),
+        RactorOp::Share => {
+            let object = arg(0);
+            if !object.is_immediate() {
+                let handle = scope.root(object);
+                scope.share(handle);
+            }
+            object
+        }
         RactorOp::Monitor => {
             let port = id_arg(1);
             let add = arg(2).is_truthy();
