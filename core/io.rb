@@ -2687,7 +2687,7 @@ end
     __readconv__ if length.nil?
     __byte_readable__ unless length.nil?
     unless buffer.nil?
-      buffer = buffer.to_str unless String === buffer
+      buffer = IO.__str__(buffer)
       raise FrozenError, "can't modify frozen String: #{buffer.inspect}" if buffer.frozen?
     end
     if length.nil?
@@ -2765,7 +2765,7 @@ end
     length = Integer.__index__(length)
     raise ArgumentError, "negative length #{length} given" if length < 0
     unless buffer.nil?
-      buffer = buffer.to_str unless String === buffer
+      buffer = IO.__str__(buffer)
       raise FrozenError, "can't modify frozen String: #{buffer.inspect}" if buffer.frozen?
     end
     if length == 0

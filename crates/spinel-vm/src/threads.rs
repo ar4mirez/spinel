@@ -50,6 +50,7 @@
 
 use std::collections::VecDeque;
 use std::mem::ManuallyDrop;
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -211,8 +212,8 @@ struct Lock {
     held: Mutex<Held>,
     /// A pipe a thread back from [`outside`] writes a byte to, so that a
     /// scheduler waiting in `poll(2)` for something else wakes to put it
-    /// back in line.
-    wake: [libc::c_int; 2],
+    /// back in line. -1 once [`Lock::close_inherited`] has closed it.
+    wake: [AtomicI32; 2],
     /// Told when a thread leaves a call made [`outside_interruptibly`], for
     /// a `close` waiting for the ones using its descriptor ([`close_fd`]).
     left: Condvar,
@@ -331,7 +332,7 @@ impl Lock {
                 back: Vec::new(),
                 blocking: (0..threads).map(|_| None).collect(),
             }),
-            wake,
+            wake: wake.map(AtomicI32::new),
             left: Condvar::new(),
         }
     }
@@ -375,10 +376,32 @@ impl Lock {
         // SAFETY: one byte, from a live local, to the pipe's write end. A
         // full pipe answers EAGAIN, and is waking the scheduler already; an
         // unblocking signal sent as the call returned may cut it short.
-        while unsafe { libc::write(self.wake[1], [1u8].as_ptr().cast(), 1) } < 0
+        while unsafe {
+            libc::write(
+                self.wake[1].load(Ordering::Relaxed),
+                [1u8].as_ptr().cast(),
+                1,
+            )
+        } < 0
             && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted
         {}
         Self::wait_in(held, me)
+    }
+
+    /// In a child after `fork`, which makes a lock of its own: close the
+    /// wake pipe this one, the parent's, holds. The parent's other OS
+    /// threads keep references to it the child never drops, so without this
+    /// each generation of a forked process that had threads kept two more
+    /// descriptors; and once closed it is forgotten, so that a drop cannot
+    /// close the numbers again after they are reused.
+    fn close_inherited(&self) {
+        for end in &self.wake {
+            let fd = end.swap(-1, Ordering::Relaxed);
+            if fd >= 0 {
+                // SAFETY: a descriptor the lock made, closed once.
+                unsafe { libc::close(fd) };
+            }
+        }
     }
 
     /// Empty the wake pipe.
@@ -386,13 +409,21 @@ impl Lock {
         let mut bytes = [0u8; 64];
         // SAFETY: reads into a live local buffer of its own length; the read
         // end is nonblocking, so an empty pipe answers -1.
-        while unsafe { libc::read(self.wake[0], bytes.as_mut_ptr().cast(), bytes.len()) } > 0 {}
+        while unsafe {
+            libc::read(
+                self.wake[0].load(Ordering::Relaxed),
+                bytes.as_mut_ptr().cast(),
+                bytes.len(),
+            )
+        } > 0
+        {}
     }
 }
 
 impl Drop for Lock {
     fn drop(&mut self) {
-        for fd in self.wake {
+        for end in &self.wake {
+            let fd = end.load(Ordering::Relaxed);
             if fd >= 0 {
                 // SAFETY: the lock made both descriptors and nothing else
                 // closes them.
@@ -478,7 +509,14 @@ pub(super) fn spawn(
         held.turns.push(Arc::new(Condvar::new()));
         held.blocking.push(None);
     }
-    let (told, started) = std::sync::mpsc::channel();
+    // Its OS thread's id comes back through a mutex and a condition
+    // variable, not a channel: a channel's wait parks the thread, and on
+    // macOS a parked thread waits on a libdispatch semaphore made the first
+    // time it parks. A child forked after its main thread did that inherits
+    // the semaphore but not the Mach port under it, so the child's next wait
+    // there killed it with SIGTRAP.
+    let started = Arc::new((Mutex::new(None), Condvar::new()));
+    let told = Arc::clone(&started);
     let its_lock = Arc::clone(&lock);
     let spawned = std::thread::Builder::new()
         .stack_size(OS_STACK)
@@ -486,7 +524,9 @@ pub(super) fn spawn(
             // Signals go to the main thread's OS thread, which runs their
             // handlers and whose waits they cut short (#44).
             crate::shared::signals::block_on_this_thread();
-            let _ = told.send(native_id());
+            let (id, condvar) = &*told;
+            *id.lock().unwrap_or_else(PoisonError::into_inner) = Some(native_id());
+            condvar.notify_one();
             os_thread(&its_lock, index);
         });
     if let Err(error) = spawned {
@@ -502,7 +542,16 @@ pub(super) fn spawn(
             format!("can't create Thread: {reason}"),
         ));
     }
-    let native_id = started.recv().unwrap_or_default();
+    let native_id = {
+        let (id, condvar) = &*started;
+        let mut id = id.lock().unwrap_or_else(PoisonError::into_inner);
+        loop {
+            if let Some(native_id) = *id {
+                break native_id;
+            }
+            id = condvar.wait(id).unwrap_or_else(PoisonError::into_inner);
+        }
+    };
     scope.fibers_mut().threads.entries.push(ThreadEntry {
         object,
         state: ThreadState::Ready {
@@ -934,7 +983,7 @@ fn wake_ready(scope: &mut HandleScope<'_>, timeout: Option<Duration>) -> usize {
         polled.push((
             usize::MAX,
             libc::pollfd {
-                fd: lock.wake[0],
+                fd: lock.wake[0].load(Ordering::Relaxed),
                 events: libc::POLLIN,
                 revents: 0,
             },
@@ -1634,7 +1683,8 @@ pub(super) fn forked(scope: &mut HandleScope<'_>) {
             entry.pending.clear();
         }
     }
-    if threads.lock.is_some() {
+    if let Some(inherited) = &threads.lock {
+        inherited.close_inherited();
         threads.lock = Some(Arc::new(Lock::new(heap, current, threads.entries.len())));
         threads.entries[current].native_id = native_id();
     }

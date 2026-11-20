@@ -654,6 +654,22 @@ module Kernel
   module_function :Array, :Hash, :Integer, :String, :sleep, :__method__, :__callee__, :__dir__
 end
 
+module Kernel
+  # `raise exception, message[, backtrace]` with an exception object, which
+  # the `raise` primitive hands here: what `exception.exception(message)`
+  # answers is raised, as `rb_make_exception` sends it, the backtrace set on
+  # it when one is given.
+  private def __raise_exception_message__(exception, message, *backtrace, **options)
+    if backtrace.size > 1
+      raise ArgumentError, "wrong number of arguments (given #{backtrace.size + 2}, expected 0..3)"
+    end
+    raised = exception.exception(message)
+    raise TypeError, "exception object expected" unless Exception === raised
+    raised.set_backtrace(backtrace[0]) unless backtrace.empty?
+    raise raised, **options
+  end
+end
+
 # `exit` and `abort` only raise `SystemExit`, which is the whole of what
 # happens until something rescues it. The rest of process control —
 # `exit!`, `fork`, `system` and the like — is `core/process.rb`'s.

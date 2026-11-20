@@ -553,6 +553,9 @@ impl Encoding {
         let lead = *prefix.first()?;
         match (self, lead) {
             (_, 0x00..=0x7f) => Some(1),
+            (Encoding::Utf8, 0xc2..=0xdf) => Some(2),
+            (Encoding::Utf8, 0xe0..=0xef) => Some(3),
+            (Encoding::Utf8, 0xf0..=0xf4) => Some(4),
             (Encoding::EucJp, 0x8f) => Some(3),
             (Encoding::EucJp, 0x8e | 0xa1..=0xfe) => Some(2),
             (Encoding::ShiftJis, 0xa1..=0xdf) => Some(1),

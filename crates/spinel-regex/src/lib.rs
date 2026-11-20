@@ -916,11 +916,25 @@ mod tests {
     }
 
     #[test]
-    fn a_byte_escape_is_refused_in_utf8() {
-        assert!(matches!(
-            Regex::new("\\xff", Flags::default()),
-            Err(Error::Unsupported(_))
-        ));
+    fn byte_escapes_spell_a_utf8_character() {
+        assert_eq!(find("\\xe3\\x81\\x82", "xあy"), Some((1, 4)));
+        assert_eq!(find("[\\343\\201\\202]", "xあy"), Some((1, 4)));
+        assert_eq!(find("\\A\\xef\\xbb\\xbf", "\u{feff}a"), Some((0, 3)));
+        for (pattern, message) in [
+            ("\\xff", "invalid multibyte escape"),
+            ("[\\x80-\\xff]", "invalid multibyte escape"),
+            ("\\xe3\\x81", "too short escaped multibyte character"),
+            ("\\xc3", "too short escaped multibyte character"),
+        ] {
+            assert!(
+                matches!(Regex::new(pattern, Flags::default()), Err(Error::Syntax(m)) if m == message),
+                "{pattern}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_codepoint_escape_is_refused_in_binary() {
         assert!(matches!(
             Regex::with_encoding("\\u00e9", Flags::default(), Encoding::Binary),
             Err(Error::Unsupported(_))

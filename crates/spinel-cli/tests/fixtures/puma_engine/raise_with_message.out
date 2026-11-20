@@ -1,0 +1,5 @@
+[MyError, "second", false, "first"]
+["b", ["here:1"]]
+["o2", nil]
+["r", "raise_with_message.rb:31:in 'Object#m'"]
+[TypeError, "exception object expected"]

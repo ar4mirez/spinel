@@ -1,0 +1,9 @@
+HTTP/1.1 200 OK
+content-type: text/html;charset=utf-8
+x-xss-protection: 1; mode=block
+x-content-type-options: nosniff
+x-frame-options: SAMEORIGIN
+connection: close
+content-length: 38
+
+Hello from Sinatra 4.2.1 on Puma 8.1.2

@@ -1915,28 +1915,48 @@ class UNIXSocket < BasicSocket
     __unix_connect__(path, Socket::SOCK_STREAM)
   end
 
+  # `unixsock_path_value`: on Linux a String that is empty or starts with a
+  # NUL names a socket in the abstract namespace, taken as it is; anything
+  # else is a path.
+  def self.__path_value__(path)
+    if RUBY_PLATFORM.include?("linux") && String === path && (path.empty? || path.getbyte(0) == 0)
+      return path
+    end
+    File.__path__(path)
+  end
+
+  # How `rsock_syserr_fail_path` names a path in a message: an abstract
+  # name's leading NUL as `\0`.
+  def self.__path_text__(path)
+    path.start_with?("\0") ? "\\0#{path.byteslice(1..)}" : path
+  end
+
   def __unix_connect__(path, type)
-    path = File.__path__(path)
+    path = UNIXSocket.__path_value__(path)
     sockaddr = Socket.sockaddr_un(path)
     fd = IO.__check__(__sock_socket__(Socket::AF_UNIX, type, 0), nil, "socket(2)")[0]
     done = __sock_connect__(fd, sockaddr)
     unless done == true
       __fd_close__(fd)
-      raise SystemCallError.new("connect(2) for #{path}", done)
+      raise SystemCallError.new("connect(2) for #{UNIXSocket.__path_text__(path)}", done)
     end
     __setup_socket__(fd)
     @__path__ = nil
   end
 
   def path
-    @__unix_path__ ||= begin
-      parsed = Socket.__sockaddr_parse__(getsockname)
-      parsed ? parsed[1] : ""
-    end
+    @__unix_path__ ||= __sock_path__
   end
 
+  # The bound name, as `getsockname(2)` answers it: a server's `path` is
+  # the path it was given.
   def addr
-    ["AF_UNIX", path]
+    ["AF_UNIX", __sock_path__]
+  end
+
+  private def __sock_path__
+    parsed = Socket.__sockaddr_parse__(getsockname)
+    parsed ? parsed[1] : ""
   end
 
   def peeraddr
@@ -1970,7 +1990,7 @@ end
 
 class UNIXServer < UNIXSocket
   def initialize(path)
-    path = File.__path__(path)
+    path = UNIXSocket.__path_value__(path)
     sockaddr = Socket.sockaddr_un(path)
     fd = IO.__check__(__sock_socket__(Socket::AF_UNIX, Socket::SOCK_STREAM, 0), nil, "socket(2)")[0]
     done = __sock_bind__(fd, sockaddr)
@@ -1980,6 +2000,8 @@ class UNIXServer < UNIXSocket
       raise SystemCallError.new("bind(2) for #{path.inspect}", done) if done
     end
     __setup_socket__(fd)
+    # The path as given, as `rsock_init_unixsock` keeps a server's.
+    @__unix_path__ = path.dup
   end
 
   def accept

@@ -1,0 +1,11 @@
+6
+110
+"\x00abc"
+"\u0000spinel.abstract.PID"
+["AF_UNIX", "\x00spinel.abstract.PID"]
+"\x00spinel.abstract.PID"
+["AF_UNIX", "\x00spinel.abstract.PID"]
+["AF_UNIX", "\x00spinel.abstract.PID"]
+"hi"
+["Errno::ECONNREFUSED", "Connection refused - connect(2) for \\0spinel.abstract.none.PID"]
+["ArgumentError", "path name contains null byte"]

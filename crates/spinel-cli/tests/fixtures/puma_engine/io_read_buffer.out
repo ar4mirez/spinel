@@ -1,0 +1,5 @@
+[:read, TypeError, "no implicit conversion of Object into String"]
+[:readpartial, TypeError, "no implicit conversion of Object into String"]
+[:sysread, TypeError, "no implicit conversion of Object into String"]
+[:read_nonblock, TypeError, "no implicit conversion of Object into String"]
+[:read_all, TypeError, "no implicit conversion of Integer into String"]

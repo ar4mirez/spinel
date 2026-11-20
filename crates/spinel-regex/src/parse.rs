@@ -1709,7 +1709,7 @@ impl Parser {
             value = value * 8 + (self.next().expect("just peeked") as u32 - '0' as u32);
             seen += 1;
         }
-        if value > 0x7f && self.encoding.multibyte_coded() {
+        if value > 0x7f && (self.encoding.multibyte_coded() || self.encoding == Encoding::Utf8) {
             let lead = u8::try_from(value).map_err(|_| {
                 Error::Unsupported("an octal escape past a byte in a multibyte pattern")
             })?;
@@ -1718,11 +1718,12 @@ impl Parser {
         char::from_u32(value).ok_or_else(|| Error::Syntax("invalid octal escape".into()))
     }
 
-    /// The character an escaped byte past ASCII starts, in a multibyte
-    /// encoding past UTF-8: the escapes after it supply the rest of its
+    /// The character an escaped byte past ASCII starts, in UTF-8 or another
+    /// multibyte encoding: the escapes after it supply the rest of its
     /// bytes, as Onigmo reads them — `\xa4\xa2` is `あ` in EUC-JP,
-    /// `\244\242` too, and `\xa4` alone is too short. Measured on ruby
-    /// 4.0.7, messages included.
+    /// `\244\242` too, and `\xa4` alone is too short; `\xe3\x81\x82` is
+    /// `あ` in UTF-8, and `\xff` leads nothing there. Measured on ruby
+    /// 4.0.7 and 4.0.10, messages included.
     fn multibyte_escape(&mut self, lead: u8) -> Result<char, Error> {
         let invalid = || Error::Syntax("invalid multibyte escape".into());
         let mut bytes = vec![lead];
@@ -1825,17 +1826,12 @@ impl Parser {
                         .map_err(|_| Error::Syntax("invalid hex escape".into()))?;
                     // A byte above ASCII is not a codepoint. In a binary or
                     // single-byte pattern it is the byte, which the matcher
-                    // carries as the `char` with the same number; in EUC-JP
-                    // and the other multibyte encodings it leads a character
-                    // the escapes after it
-                    // finish; in UTF-8 it would too, which waits for the rest
-                    // of the Onigmo dialect.
+                    // carries as the `char` with the same number; in UTF-8,
+                    // EUC-JP and the other multibyte encodings it leads a
+                    // character the escapes after it finish.
                     match self.encoding {
                         _ if n <= 0x7f => char::from_u32(n)
                             .ok_or_else(|| Error::Syntax("invalid hex escape".into()))?,
-                        Encoding::Utf8 => {
-                            return Err(Error::Unsupported("a non-ASCII \\x byte escape"));
-                        }
                         Encoding::Binary | Encoding::Single(_) => char::from(n as u8),
                         _ => self.multibyte_escape(n as u8)?,
                     }
