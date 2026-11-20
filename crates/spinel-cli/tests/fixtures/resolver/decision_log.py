@@ -4,7 +4,7 @@
 An opt-in tool, never run by CI. For each case directory (as `bundle_case.sh`
 takes: `info/<gem>` and `Gemfile.gems`), the index is served on 127.0.0.1;
 Bundler locks it through `bundler_oracle.rb` with DEBUG_RESOLVER set, and
-`spinel resolve --solver pubgrub-ruby` resolves it with DEBUG_RESOLVER set.
+`spinel resolve` resolves it with DEBUG_RESOLVER set.
 Both print pubgrub-ruby's log, every try of the resolution (each retry after
 `find_names_to_relax` starts again at `fact: (root dependency)`), and the
 lines that record decisions are compared:
@@ -118,7 +118,7 @@ def spinel_log(spinel, case_dir, source, gemfile):
     with open(path, "w") as f:
         json.dump(deps, f)
     out = subprocess.run(
-        [spinel, "resolve", path, "--solver", "pubgrub-ruby", "--platform", "x86_64-linux",
+        [spinel, "resolve", path, "--platform", "x86_64-linux",
          "--ruby-version", "4.0.0", "--rubygems-version", "4.0.16"],
         env={**os.environ, "SPINEL_HOME": os.path.join(case_dir, "spinel-home"), "DEBUG_RESOLVER": "1"},
         capture_output=True, text=True, timeout=300,

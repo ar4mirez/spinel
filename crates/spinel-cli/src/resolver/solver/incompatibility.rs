@@ -20,7 +20,11 @@ pub enum Cause<P, V> {
     /// inverse.
     Dependency,
     /// `InvalidDependency`: a dependency on a package the source does not
-    /// know, with the dependency as the source wrote it.
+    /// know, with the dependency as the source wrote it. pubgrub-ruby's
+    /// `BasicPackageSource` states it, as the tests' static source does;
+    /// Bundler's source never does (`Resolver#incompatibilities_for`
+    /// replaces that method), but `FailureWriter` still writes it.
+    #[cfg_attr(not(test), allow(dead_code))]
     InvalidDependency { package: P, constraint: String },
     /// `NoVersions`: no version satisfies the term.
     NoVersions(Term<P, V>),
@@ -78,10 +82,6 @@ impl<P: Package, V: Version> Incompatibility<P, V> {
 
     pub fn cause(&self) -> &Cause<P, V> {
         &self.cause
-    }
-
-    pub fn custom_explanation(&self) -> Option<&str> {
-        self.custom_explanation.as_deref()
     }
 
     pub fn extended_explanation(&self) -> Option<&str> {

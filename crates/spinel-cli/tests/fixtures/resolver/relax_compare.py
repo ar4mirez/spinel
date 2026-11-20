@@ -11,7 +11,7 @@ differ when what some try returns (`unlock` and `pre`, in order), or the
 number of tries, is not Bundler's:
 
   crates/spinel-cli/tests/fixtures/resolver/relax_compare.py \\
-      --spinel target/debug/spinel --solver pubgrub-ruby --seed 816 --cases 1000
+      --spinel target/debug/spinel --seed 816 --cases 1000
 
 Bundler's results are read from relax/seed<N>.json beside this file when it
 has the case, so a run needs no Bundler for the cached seeds (1, 816, 4242,
@@ -81,7 +81,7 @@ def bundler(case_dir, source, gemfile):
     return {"ok": False, "specs": None, "tries": tries}
 
 
-def spinel(binary, case_dir, source, gemfile, solver):
+def spinel(binary, case_dir, source, gemfile):
     """Spinel's outcome and, for each try, what find_names_to_relax returned."""
     deps = {
         "gemfiles": [os.path.join(case_dir, "Gemfile")],
@@ -95,10 +95,9 @@ def spinel(binary, case_dir, source, gemfile, solver):
     path = os.path.join(case_dir, "deps.json")
     with open(path, "w") as f:
         json.dump(deps, f)
-    extra = ["--solver", solver] if solver else []
     out = subprocess.run(
         [binary, "resolve", path, "--platform", "x86_64-linux", "--ruby-version", "4.0.0",
-         "--rubygems-version", "4.0.16", *extra],
+         "--rubygems-version", "4.0.16"],
         env={**os.environ, "SPINEL_HOME": os.path.join(case_dir, "spinel-home"), "SPINEL_DEBUG_RELAX": "1"},
         capture_output=True, text=True, timeout=300,
     )
@@ -114,7 +113,6 @@ def main():
     parser.add_argument("--cases", type=int, default=300)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--jobs", type=int, default=8)
-    parser.add_argument("--solver", help="spinel resolve --solver: pubgrub or pubgrub-ruby")
     parser.add_argument("--write", action="store_true", help="save Bundler's results to relax/seed<N>.json")
     args = parser.parse_args()
     binary = os.path.abspath(args.spinel)
@@ -144,7 +142,7 @@ def main():
         differential.write_index(os.path.join(case_dir, "index"), info)
         source = f"{base}/case{i:04d}/index"
         theirs = cache.get(str(i)) or bundler(case_dir, source, gemfile)
-        ours = spinel(binary, case_dir, source, gemfile, args.solver)
+        ours = spinel(binary, case_dir, source, gemfile)
         shutil.rmtree(case_dir)
         if theirs["ok"] and ours["ok"]:
             kind = "same" if theirs["specs"] == ours["specs"] else "differ"

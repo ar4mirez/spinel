@@ -71,7 +71,7 @@ Target size: under 30 MB. No libruby. OpenSSL is the system's, linked for the `o
 | `libffi` | `Spinel::FFI` |
 | `openssl-sys` | the `openssl` built-in, on the system's OpenSSL 3 |
 | `unsafe-libyaml-norway` | the `psych` built-in: libyaml 0.2.5's C, translated to Rust |
-| `pubgrub`, `reqwest`, `tokio`, `serde`, `notify`, `clap`, `zstd` | tooling |
+| `reqwest`, `tokio`, `serde`, `notify`, `clap`, `zstd` | tooling |
 | none — `spinel-regex` is this workspace's own | Ruby regex semantics; measured against CRuby by `scripts/regexp-oracle.rb` (see engine.md, "Regex") |
 
 ## Repo layout

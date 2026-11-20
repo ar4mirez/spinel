@@ -74,10 +74,6 @@ impl<V: Version> VersionRange<V> {
         self.include_min
     }
 
-    pub fn include_max(&self) -> bool {
-        self.include_max
-    }
-
     /// `any?`: no bound at all.
     pub fn is_any(&self) -> bool {
         self.min.is_none() && self.max.is_none()
@@ -409,11 +405,6 @@ impl<V: Version> RangeSet<V> {
     /// `VersionRange.any`.
     pub fn any() -> Self {
         RangeSet::Range(VersionRange::any())
-    }
-
-    /// `VersionRange.empty`.
-    pub fn empty() -> Self {
-        RangeSet::Empty
     }
 
     /// `ranges`: the disjoint ranges, in order; none for `EMPTY` (whose

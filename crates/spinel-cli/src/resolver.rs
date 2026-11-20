@@ -2,10 +2,14 @@
 //! dependencies and a compact index in, the gems to install out, chosen as
 //! Bundler 4 chooses them, or an explanation of why there are none.
 //!
-//! Bundler resolves with PubGrub (its vendored `pub_grub`), and so does this,
-//! with the `pubgrub` crate. What makes the choices Bundler's is the model
+//! Bundler resolves with PubGrub, its vendored pubgrub-ruby 0.5.0, and so
+//! does this, with a port of it (`resolver/solver/`, #816), so that what it
+//! derives, and so what it relaxes and how it explains a conflict, are
+//! Bundler's by construction. What makes the choices Bundler's is the model
 //! fed to it, which follows `Bundler::Resolver` and its `Package`,
-//! `Candidate`, `SpecGroup` and `Strategy` step for step:
+//! `Candidate`, `SpecGroup` and `Strategy` step for step, and reaches the
+//! solver through Bundler's source side (`resolver/source.rs`:
+//! `incompatibilities_for`, `Strategy`, `find_names_to_relax`):
 //!
 //! - **Candidates.** A version of a gem is up to two candidates: its `ruby`
 //!   build (priority -1) and its builds for the resolution platforms
@@ -27,12 +31,11 @@
 //! - **Prereleases** are left out of a gem's candidates unless its Gemfile
 //!   requirement names one, or it has no other version. When a resolution
 //!   fails through a gem with prereleases left out, along the failure's
-//!   first causes as Bundler follows them, it is retried with them in.
-//!   Against Bundler 4.0.20 this matches on the hand cases in
-//!   `tests/fixtures/resolver/oracle/` and on 399 of 400, 993 of 1000 and
-//!   996 of 1000 random indexes (seeds 1, 816 and 4242); the twelve that do
-//!   not, kept beside the hand cases and tested as known differences, mostly
-//!   take prereleases Bundler leaves out (#816).
+//!   first causes as Bundler follows them (`find_names_to_relax`), it is
+//!   retried with them in. Against Bundler 4.0.20 this matches on the hand
+//!   cases in `tests/fixtures/resolver/oracle/` and on every random index of
+//!   seeds 1 (400), 816 (1000) and 4242 (1000), each try relaxing the gems
+//!   Bundler's relaxes (#816).
 //! - **Order.** The next gem decided is the one with at most one candidate
 //!   left, then the one with the fewest candidates above the range asked
 //!   for, ties going to the one found first; its candidate is the newest,
@@ -40,16 +43,8 @@
 //!   platform build before the ruby build of the same version.
 //!
 //! A conflict is explained as Bundler explains it: pubgrub-ruby's
-//! `FailureWriter`, ported in `resolver/report.rs` over the port's own
-//! incompatibilities for [`Solver::PubgrubRuby`], and in
-//! `resolver/pubgrub_report.rs` over pubgrub-rs's derivation tree, reshaped
-//! into Bundler's, for the default solver.
-//!
-//! **The pubgrub-ruby port** (#816) replaces the `pubgrub` crate in slices:
-//! `resolver/solver/` is pubgrub-ruby's solver, and `resolver/source.rs`
-//! Bundler's side of it over the same candidates, with `find_names_to_relax`.
-//! [`Solver::PubgrubRuby`] resolves with them, retrying as Bundler does, for
-//! `spinel resolve --solver pubgrub-ruby` only.
+//! `FailureWriter`, ported in `resolver/report.rs` over the solver's own
+//! incompatibilities.
 //!
 //! `bundler` has one candidate, the Bundler version the lockfile is written
 //! for (`lockfile::BUNDLER_VERSION`), as Bundler's `Source::Metadata` gives
@@ -73,27 +68,14 @@
 //! names they provide, in place of the index's (`crate::local_source`).
 //! Not here yet: a rubygems source scoped to a gem.
 
-// ponytail: the `pubgrub` crate's explanations, reshaped into Bundler's,
-// for the default solver only; slice 5 of #816 removes them with it.
-mod pubgrub_report;
 mod report;
-// ponytail: some of what the solver's tests use, and what slice 5 of #816's
-// locked resolution will (an `InvalidDependency`, the solution's
-// assignments), nothing else uses yet; slice 5 drops this `allow`.
-#[allow(dead_code)]
 mod solver;
 mod source;
 
 use std::cell::RefCell;
-use std::cmp::{Ordering, Reverse};
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::ops::Bound;
-
-use pubgrub::{
-    Dependencies, DependencyProvider, DerivationTree, External, PackageResolutionStatistics,
-    PubGrubError, Ranges,
-};
 
 use crate::gem_platform::{self, GemPlatform, Platform};
 use crate::gem_requirement::{Op, Requirement};
@@ -393,7 +375,7 @@ pub enum Failure {
     /// A Gemfile dependency no version of the gem satisfies
     /// (`Bundler::GemNotFound`).
     NotFound(String),
-    /// The requirements conflict (`Bundler::SolveFailure`): pubgrub's
+    /// The requirements conflict (`Bundler::SolveFailure`): the solver's
     /// derivation, written as pubgrub-ruby's `FailureWriter` writes it.
     Conflict(String),
 }
@@ -479,10 +461,6 @@ impl Candidate {
     fn new(version: Version, priority: i8) -> Candidate {
         Candidate { version, priority }
     }
-
-    pub fn version(&self) -> &Version {
-        &self.version
-    }
 }
 
 impl PartialEq for Candidate {
@@ -522,7 +500,8 @@ impl fmt::Display for Candidate {
     }
 }
 
-pub type VersionSet = Ranges<Candidate>;
+/// A set of candidates, as pubgrub-ruby's ranges hold them.
+type VersionSet = solver::RangeSet<Candidate>;
 
 /// `to_dependency_hash`: each dependency as its package and range, the
 /// ranges on one package intersected, in the order first seen.
@@ -538,36 +517,6 @@ fn dependency_hash<R>(
         }
     }
     out
-}
-
-/// `Resolver#requirement_to_range`: each pair as a range of candidates,
-/// intersected. `~>` ends before the bump's `.A`, the lowest prerelease of
-/// it, so no prerelease of the next release is in.
-pub fn requirement_to_range(requirement: &Requirement) -> VersionSet {
-    requirement
-        .requirements()
-        .iter()
-        .map(|(op, version)| {
-            let ver = || Candidate::new(version.clone(), -1);
-            let platform_ver = || Candidate::new(version.clone(), 1);
-            let exact = || Ranges::from_range_bounds(ver()..=platform_ver());
-            match op {
-                Op::Pessimistic => Ranges::between(ver(), pessimistic_end(version)),
-                Op::Gt => Ranges::strictly_higher_than(platform_ver()),
-                Op::Ge => Ranges::higher_than(ver()),
-                Op::Lt => Ranges::strictly_lower_than(ver()),
-                Op::Le => Ranges::lower_than(platform_ver()),
-                Op::Eq => exact(),
-                Op::Ne => exact().complement(),
-            }
-        })
-        .fold(Ranges::full(), |all, range| all.intersection(&range))
-}
-
-/// Where `~> version` ends: `"#{version.bump}.A"`.
-fn pessimistic_end(version: &Version) -> Candidate {
-    let end = Version::new(&format!("{}.A", version.bump())).expect("a bump is a version");
-    Candidate::new(end, -1)
 }
 
 /// How a package treats prereleases (`Package#ignores_prereleases?` and
@@ -815,7 +764,8 @@ struct PackageState {
 /// its group of those builds, ascending.
 type Versions = (std::rc::Rc<Vec<Spec>>, Vec<(Candidate, SpecGroup)>);
 
-/// The `PubGrub` source: `Bundler::Resolver` over one index.
+/// `Bundler::Resolver`'s model over one index: each package's candidates,
+/// which `resolver/source.rs` hands the solver.
 struct Provider<'a> {
     request: &'a Request,
     index: &'a Index,
@@ -824,14 +774,8 @@ struct Provider<'a> {
     /// impossibly, sorted by version, then platform.
     specs: RefCell<HashMap<String, std::rc::Rc<Vec<Spec>>>>,
     packages: RefCell<HashMap<PackageName, PackageState>>,
-    root_dependencies: Vec<(Package, VersionSet)>,
-    /// `root_dependencies` as pubgrub-ruby's ranges, for [`Solver::PubgrubRuby`].
-    root_constraints: Vec<(Package, solver::RangeSet<Candidate>)>,
-    /// When each package was first depended on, as pubgrub-ruby's partial
-    /// solution orders the packages it has yet to decide: propagation walks
-    /// a package's incompatibilities last first, so of one version's
-    /// dependencies the last is seen first.
-    seen: RefCell<HashMap<Package, usize>>,
+    /// The root's dependencies (`prepare_dependencies`), each package once.
+    root_constraints: Vec<(Package, VersionSet)>,
 }
 
 impl<'a> Provider<'a> {
@@ -847,9 +791,7 @@ impl<'a> Provider<'a> {
             locked,
             specs: RefCell::new(HashMap::new()),
             packages: RefCell::new(HashMap::new()),
-            root_dependencies: Vec::new(),
             root_constraints: Vec::new(),
-            seen: RefCell::new(HashMap::new()),
         };
         for name in relaxed {
             provider.package_state(name);
@@ -1099,32 +1041,15 @@ impl<'a> Provider<'a> {
         (std::rc::Rc::new(builds), candidates)
     }
 
-    /// `versions_for(package, range)`: the candidates in `range`.
+    /// `select_sorted_versions(package, range)`: the candidates in `range`.
     fn versions_for(&self, name: &PackageName, range: &VersionSet) -> Vec<Candidate> {
         self.with_candidates(name, |candidates, _| {
             candidates
                 .iter()
                 .map(|(c, _)| c)
-                .filter(|c| range.contains(*c))
+                .filter(|c| range.includes(c))
                 .cloned()
                 .collect()
-        })
-    }
-
-    /// The candidates above every one `range` holds: `range.upper_invert`.
-    fn higher_versions(&self, name: &PackageName, range: &VersionSet) -> usize {
-        let Some((_, end)) = range.bounding_range() else {
-            return 0;
-        };
-        self.with_candidates(name, |candidates, _| {
-            candidates
-                .iter()
-                .filter(|(c, _)| match end {
-                    Bound::Unbounded => false,
-                    Bound::Included(end) => c > end,
-                    Bound::Excluded(end) => c >= end,
-                })
-                .count()
         })
     }
 
@@ -1255,17 +1180,11 @@ impl<'a> Provider<'a> {
         }
         let ranges = dependency_hash(
             deps.iter()
-                .map(|(name, req)| (Package::Name(name.clone()), requirement_to_range(req))),
-            VersionSet::intersection,
-        );
-        let constraints = dependency_hash(
-            deps.iter()
                 .map(|(name, req)| (Package::Name(name.clone()), solver::candidate_range(req))),
-            solver::RangeSet::intersect,
+            VersionSet::intersect,
         );
         let mut root = Vec::new();
-        let mut root_constraints = Vec::new();
-        for ((package, range), constraint) in ranges.into_iter().zip(constraints) {
+        for (package, range) in ranges {
             let Package::Name(name) = &package else {
                 unreachable!("dependencies are never the root");
             };
@@ -1279,12 +1198,10 @@ impl<'a> Provider<'a> {
             }
             if !self.versions_for(name, &range).is_empty() {
                 root.push((package, range));
-                root_constraints.push(constraint);
                 continue;
             }
             let Some(dep) = gemfile_deps.get(name) else {
                 root.push((package, range));
-                root_constraints.push(constraint);
                 continue;
             };
             if !dep.current_platform() {
@@ -1292,8 +1209,7 @@ impl<'a> Provider<'a> {
             }
             return Err(self.not_found(dep));
         }
-        self.root_dependencies = root;
-        self.root_constraints = root_constraints;
+        self.root_constraints = root;
         Ok(())
     }
 
@@ -1364,20 +1280,6 @@ impl<'a> Provider<'a> {
         deps.into_iter().filter(|(dep, _)| dep != name).collect()
     }
 
-    /// The dependencies of `candidate` of `name`, without any on itself.
-    fn candidate_dependencies(
-        &self,
-        name: &PackageName,
-        candidate: &Candidate,
-    ) -> Vec<(Package, VersionSet)> {
-        dependency_hash(
-            self.candidate_requirements(name, candidate)
-                .into_iter()
-                .map(|(dep, req)| (Package::Name(dep), requirement_to_range(&req))),
-            VersionSet::intersection,
-        )
-    }
-
     /// `Package#platforms`: the resolution platforms, or a top-level
     /// dependency's own.
     fn package_platforms(&self, package: &Package) -> Vec<GemPlatform> {
@@ -1422,8 +1324,8 @@ impl<'a> Provider<'a> {
         })
     }
 
-    /// The candidates of a package, for the report: Bundler's ranges in
-    /// explanations run between them.
+    /// `@sorted_versions[package]`: the root's one version, or the
+    /// package's candidates, ascending.
     fn sorted_candidates(&self, package: &Package) -> Vec<Candidate> {
         match package {
             Package::Root(_) => vec![root_candidate()],
@@ -1431,119 +1333,6 @@ impl<'a> Provider<'a> {
                 self.with_candidates(name, |c, _| c.iter().map(|(c, _)| c.clone()).collect())
             }
         }
-    }
-
-    /// Of the candidates of `package`, the range `Resolver#incompatibilities_for`
-    /// gives the dependency on `dep` with `range` that the versions in `held`
-    /// have: outward from them while each candidate's dependency on `dep` is
-    /// the same, open where that reaches the first or last.
-    fn dependency_span(
-        &self,
-        package: &Package,
-        held: &VersionSet,
-        dep: &Package,
-        range: &VersionSet,
-    ) -> Option<VersionSet> {
-        let Package::Name(name) = package else {
-            return None;
-        };
-        let sorted = self.sorted_candidates(package);
-        let same = |c: &Candidate| {
-            self.candidate_dependencies(name, c)
-                .iter()
-                .any(|(p, r)| p == dep && r == range)
-        };
-        let first = sorted.iter().position(|c| held.contains(c))?;
-        let last = sorted.iter().rposition(|c| held.contains(c))?;
-        let mut low = first;
-        while low > 0 && same(&sorted[low - 1]) {
-            low -= 1;
-        }
-        let mut high = last + 1;
-        while high < sorted.len() && same(&sorted[high]) {
-            high += 1;
-        }
-        Some(match (low, high == sorted.len()) {
-            (0, true) => Ranges::full(),
-            (0, false) => Ranges::strictly_lower_than(sorted[high].clone()),
-            (low, true) => Ranges::higher_than(sorted[low].clone()),
-            (low, false) => Ranges::between(sorted[low].clone(), sorted[high].clone()),
-        })
-    }
-
-    /// What to relax for the next try, `Resolver#find_names_to_relax`: the
-    /// gems with a base requirement that the conflict ran through, to
-    /// unlock, and those with prereleases left out, to let them in. Bundler
-    /// walks from the
-    /// failure along each derivation's first cause (pubgrub-ruby's
-    /// `cause.incompatibility`, pubgrub-rs's `cause1`: the incompatibility
-    /// being resolved) and looks at the terms of each; what the other cause,
-    /// the satisfier's, learned earlier it leaves alone. A learned
-    /// incompatibility is walked as well when it was learned by resolving one
-    /// of a single term: pubgrub-ruby learns nothing there, but backtracks and
-    /// propagates that term, so what pubgrub-rs learned it from is on
-    /// Bundler's first-cause chain. That can name a gem Bundler's chain does
-    /// not, and pubgrub-rs and pubgrub-ruby can learn different facts on the
-    /// way: these are the known differences, tested as `known_difference_*`
-    /// over the cases in `tests/fixtures/resolver/oracle/` (#816). In
-    /// `case0138`, for one, Spinel resolves with a prerelease of `g2` where
-    /// Bundler reports the conflict. Without that walk, `needs_pre`, `case1`
-    /// and 40 of the 400 seed 1 indexes that Bundler resolves would fail.
-    fn names_to_relax(
-        &self,
-        tree: &DerivationTree<Package, VersionSet, String>,
-    ) -> (Vec<String>, Vec<String>) {
-        let mut unlock: Vec<String> = Vec::new();
-        let mut names = Vec::new();
-        let mut chains = vec![tree];
-        while let Some(mut node) = chains.pop() {
-            while let DerivationTree::Derived(derived) = node {
-                node = &derived.cause1;
-                if learned_from_one_term(&derived.cause2) {
-                    chains.push(&derived.cause2);
-                }
-                for package in tree_packages(node) {
-                    let Package::Name(name @ PackageName::Gem(gem)) = package else {
-                        continue;
-                    };
-                    if self.locked.requirements.contains_key(gem) {
-                        if !unlock.contains(gem) {
-                            unlock.push(gem.clone());
-                        }
-                    } else if self.prereleases(name) == Prereleases::Ignore
-                        && self.all_specs(gem).iter().any(|s| s.version.prerelease())
-                        && !names.contains(gem)
-                    {
-                        names.push(gem.clone());
-                    }
-                }
-            }
-        }
-        (unlock, names)
-    }
-}
-
-/// Whether a derived incompatibility resolved, somewhere along its first
-/// causes, an incompatibility of one term.
-fn learned_from_one_term(tree: &DerivationTree<Package, VersionSet, String>) -> bool {
-    let mut node = tree;
-    while let DerivationTree::Derived(derived) = node {
-        if tree_packages(&derived.cause1).len() == 1 {
-            return true;
-        }
-        node = &derived.cause1;
-    }
-    false
-}
-
-/// The packages an incompatibility names.
-fn tree_packages(tree: &DerivationTree<Package, VersionSet, String>) -> Vec<&Package> {
-    match tree {
-        DerivationTree::External(External::NotRoot(p, _))
-        | DerivationTree::External(External::NoVersions(p, _))
-        | DerivationTree::External(External::Custom(p, _, _)) => vec![p],
-        DerivationTree::External(External::FromDependencyOf(p, _, d, _)) => vec![p, d],
-        DerivationTree::Derived(derived) => derived.terms.keys().collect(),
     }
 }
 
@@ -1577,120 +1366,18 @@ fn root_candidate() -> Candidate {
     Candidate::new(Version::new("0").expect("0 is a version"), -1)
 }
 
-/// Why pubgrub stopped other than a conflict; the provider never fails.
-#[derive(Debug)]
-pub struct Never;
-
-impl fmt::Display for Never {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("unreachable")
-    }
-}
-
-impl std::error::Error for Never {}
-
-impl DependencyProvider for Provider<'_> {
-    type P = Package;
-    type V = Candidate;
-    type VS = VersionSet;
-    type M = String;
-    type Err = Never;
-    /// `Strategy#next_term_to_try_from`'s `min_by` key, then the order the
-    /// package was found in, which `min_by` breaks ties by; reversed, since
-    /// pubgrub decides the highest priority first.
-    type Priority = Reverse<(u8, usize, usize)>;
-
-    fn prioritize(
-        &self,
-        package: &Package,
-        range: &VersionSet,
-        _stats: &PackageResolutionStatistics,
-    ) -> Self::Priority {
-        let Package::Name(name) = package else {
-            return Reverse((0, 0, 0));
-        };
-        let matching = self.versions_for(name, range).len();
-        let higher = self.higher_versions(name, range);
-        let seen = self
-            .seen
-            .borrow()
-            .get(package)
-            .copied()
-            .unwrap_or(usize::MAX);
-        Reverse((u8::from(matching > 1), higher, seen))
-    }
-
-    fn choose_version(
-        &self,
-        package: &Package,
-        range: &VersionSet,
-    ) -> Result<Option<Candidate>, Never> {
-        let Package::Name(name) = package else {
-            return Ok(Some(root_candidate()));
-        };
-        let mut versions = self.versions_for(name, range);
-        if versions.len() > 1 {
-            self.sort_preferred(name, &mut versions);
-        }
-        Ok(versions.into_iter().next())
-    }
-
-    fn get_dependencies(
-        &self,
-        package: &Package,
-        version: &Candidate,
-    ) -> Result<Dependencies<Package, VersionSet, String>, Never> {
-        let deps = match package {
-            Package::Root(_) => self.root_dependencies.clone(),
-            Package::Name(name) => self.candidate_dependencies(name, version),
-        };
-        let mut seen = self.seen.borrow_mut();
-        for (dep, _) in deps.iter().rev() {
-            let next = seen.len();
-            seen.entry(dep.clone()).or_insert(next);
-        }
-        Ok(Dependencies::Available(deps.into_iter().collect()))
-    }
-}
-
-/// The solver a resolution runs on (#816).
-// ponytail: two solvers coexist while #816 ports pubgrub-ruby in slices;
-// slice 5 makes `PubgrubRuby` the only one and removes this switch, the
-// `--solver` flag of `spinel resolve`, and the `pubgrub` crate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Solver {
-    /// The `pubgrub` crate, which `spinel install` resolves with.
-    #[default]
-    Pubgrub,
-    /// The port of the pubgrub-ruby Bundler 4.0.20 vendors
-    /// (`resolver/solver/`), fed by Bundler's source side
-    /// (`resolver/source.rs`). With no lockfile only.
-    PubgrubRuby,
-}
-
 /// Resolve `request` against `index`, as `Bundler::Resolver#start` does with
 /// no lockfile: the builds to install, in the lockfile's order (`full_name`),
 /// or why there are none.
 pub fn resolve(request: &Request, index: &Index) -> Result<Vec<Resolved>, Failure> {
-    resolve_with(request, index, Solver::Pubgrub)
-}
-
-/// [`resolve`], on the solver given.
-pub fn resolve_with(
-    request: &Request,
-    index: &Index,
-    solver: Solver,
-) -> Result<Vec<Resolved>, Failure> {
-    match solver {
-        Solver::Pubgrub => solve(request, index, Locked::default(), resolved_builds),
-        Solver::PubgrubRuby => solve_pubgrub_ruby(
-            request,
-            index,
-            debug_resolver(),
-            print_relaxed,
-            resolved_builds,
-        ),
-    }
+    solve(
+        request,
+        index,
+        Locked::default(),
+        debug_resolver(),
+        print_relaxed,
+        resolved_builds,
+    )
 }
 
 /// The builds of a resolution with no lockfile, in the lockfile's order.
@@ -1731,7 +1418,7 @@ pub fn resolve_locked(
     index: &Index,
     locked: &Locked,
 ) -> Result<Vec<Spec>, Failure> {
-    solve(request, index, locked.clone(), |provider, solution| {
+    let finish = |provider: &Provider<'_>, solution: Vec<(Package, Candidate)>| {
         let mut specs: Vec<Spec> = Vec::new();
         for (package, candidate) in solution {
             let Package::Name(name @ PackageName::Gem(gem)) = &package else {
@@ -1759,7 +1446,15 @@ pub fn resolve_locked(
         }
         specs.extend(variants);
         specs
-    })
+    };
+    solve(
+        request,
+        index,
+        locked.clone(),
+        debug_resolver(),
+        print_relaxed,
+        finish,
+    )
 }
 
 /// `SpecSet#validate_deps(s) == :valid`: each of the build's dependencies
@@ -1771,58 +1466,6 @@ pub(crate) fn valid_dependencies(spec: &Spec, set: &[Spec]) -> bool {
                 .iter()
                 .any(|s| &s.name == name && req.satisfied_by(&s.version))
     })
-}
-
-/// The solver loop of `Resolver#start`: resolve, and on a conflict unlock
-/// the gems `Resolver#find_names_to_relax` names and let in the
-/// prereleases it names, then try again; `finish` reads the solution.
-fn solve<T>(
-    request: &Request,
-    index: &Index,
-    mut locked: Locked,
-    finish: impl FnOnce(&Provider<'_>, Vec<(Package, Candidate)>) -> T,
-) -> Result<T, Failure> {
-    // `Base#requirements`: the Gemfile's dependencies that apply on some
-    // resolution platform, which `indirect_pins` leaves to the last.
-    let gemfile: Vec<&str> = request
-        .dependencies
-        .iter()
-        .filter(|d| !d.gem_platforms(&request.platforms).is_empty())
-        .map(|d| d.name.as_str())
-        .collect();
-    let mut relaxed: HashSet<PackageName> = HashSet::new();
-    let root = Package::Root(request.gemfile.clone());
-    loop {
-        let (unlock, prereleases) = {
-            let mut provider = Provider::new(request, index, &locked, &relaxed);
-            provider.prepare_root()?;
-            match pubgrub::resolve(&provider, root.clone(), root_candidate()) {
-                Ok(solution) => return Ok(finish(&provider, solution.into_iter().collect())),
-                Err(PubGrubError::NoSolution(tree)) => {
-                    let (unlock, prereleases) = provider.names_to_relax(&tree);
-                    print_relaxed(&source::NamesToRelax {
-                        unlock: unlock.clone(),
-                        prereleases: prereleases.iter().cloned().map(PackageName::Gem).collect(),
-                        extended_explanation: None,
-                    });
-                    if unlock.is_empty() && prereleases.is_empty() {
-                        let explanation = pubgrub_report::explain(&tree, &provider);
-                        return Err(Failure::Conflict(format!(
-                            "Could not find compatible versions\n\n{explanation}"
-                        )));
-                    }
-                    (unlock, prereleases)
-                }
-                // The provider never fails, so the solver has nothing else
-                // to pass on.
-                Err(error) => return Err(Failure::Conflict(error.to_string())),
-            }
-        };
-        if !unlock.is_empty() {
-            locked.unlock_names(&unlock, &gemfile);
-        }
-        relaxed.extend(prereleases.into_iter().map(PackageName::Gem));
-    }
 }
 
 /// `Resolver#debug?`: with Bundler's `DEBUG_RESOLVER` or one of its other
@@ -1850,23 +1493,25 @@ fn print_relaxed(names: &source::NamesToRelax) {
     }
 }
 
-/// `Resolver#solve_versions` on pubgrub-ruby's solver, with no lockfile: on
-/// a failure, `find_names_to_relax` names what to relax, and the resolution
-/// is set up again (`setup_solver`) and retried with those gems unlocked
+/// `Resolver#start` and `#solve_versions`: resolve with `locked`'s hold on
+/// the resolution (none with no lockfile), and on a failure let
+/// `find_names_to_relax` name what to relax: the resolution is set up again
+/// (`setup_solver`) and retried with those gems unlocked
 /// (`Base#unlock_names`) and their prereleases let in
 /// (`Base#include_prereleases`), until it resolves or there is nothing to
-/// relax. `logger` gets every line pubgrub-ruby logs, on every try, and
-/// `relaxed_by` what each failed try's `find_names_to_relax` found.
-fn solve_pubgrub_ruby<T>(
+/// relax. `logger` gets every line pubgrub-ruby logs, on every try,
+/// `relaxed_by` what each failed try's `find_names_to_relax` found, and
+/// `finish` the solution.
+fn solve<T>(
     request: &Request,
     index: &Index,
+    mut locked: Locked,
     mut logger: Option<solver::Logger>,
     mut relaxed_by: impl FnMut(&source::NamesToRelax),
     finish: impl FnOnce(&Provider<'_>, Vec<(Package, Candidate)>) -> T,
 ) -> Result<T, Failure> {
-    // ponytail: no lockfile yet, so no base requirements and nothing to
-    // unlock; slice 5 of #816 passes the lockfile's `Locked` in.
-    let mut locked = Locked::default();
+    // `Base#requirements`: the Gemfile's dependencies that apply on some
+    // resolution platform, which `indirect_pins` leaves to the last.
     let gemfile: Vec<&str> = request
         .dependencies
         .iter()

@@ -23,9 +23,8 @@
 //! never meets two spellings of one version of a package, so no derivation
 //! tells the two apart.
 //!
-//! `spinel resolve --solver pubgrub-ruby` resolves with it, through
-//! Bundler's source side (`resolver/source.rs`); slice 5 of #816 makes it
-//! the default.
+//! Every resolution runs on it, through Bundler's source side
+//! (`resolver/source.rs`).
 
 mod assignment;
 mod incompatibility;

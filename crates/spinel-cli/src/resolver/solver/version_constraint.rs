@@ -27,11 +27,6 @@ impl<P: Package, V: Version> VersionConstraint<P, V> {
         VersionConstraint::new(package, RangeSet::any())
     }
 
-    /// `VersionConstraint.empty`.
-    pub fn empty(package: P) -> Self {
-        VersionConstraint::new(package, RangeSet::Empty)
-    }
-
     pub fn package(&self) -> &P {
         &self.package
     }
@@ -64,11 +59,6 @@ impl<P: Package, V: Version> VersionConstraint<P, V> {
         VersionConstraint::new(self.package.clone(), self.range.invert())
     }
 
-    /// `difference`.
-    pub fn difference(&self, other: &Self) -> Self {
-        self.intersect(&other.invert())
-    }
-
     /// `allows_all?`.
     pub fn allows_all(&self, other: &Self) -> bool {
         self.range.allows_all(&other.range)
@@ -87,11 +77,6 @@ impl<P: Package, V: Version> VersionConstraint<P, V> {
     /// `overlap?`.
     pub fn overlaps(&self, other: &Self) -> bool {
         other.allows_any(self)
-    }
-
-    /// `disjoint?`.
-    pub fn is_disjoint(&self, other: &Self) -> bool {
-        !self.overlaps(other)
     }
 
     /// `relation`.
