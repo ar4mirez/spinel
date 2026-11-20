@@ -344,6 +344,27 @@ bytecode a tool reads.
   written by another build is ignored and rewritten. `docs/cli.md` has the
   rest.
 
+### Breaking: the resolver is Bundler's
+
+- **The resolver is a port of Bundler's pubgrub-ruby**
+  ([#816](https://github.com/ar4mirez/spinel/issues/816)). Resolution is
+  now a Rust port of Bundler 4.0.20's vendored pubgrub-ruby (pub_grub
+  0.5.0), in place of the `pubgrub` crate, for fresh resolution, locked
+  resolution (a `Gemfile.lock` held) and `update`. The hidden
+  `spinel resolve --solver` flag is gone. Relaxation and prerelease choices
+  now match Bundler's: which gems a failed try retries with prereleases or
+  unlocks, and so which versions are chosen.
+  - Conflict explanations from `spinel install`, `add`, `remove` and
+    `update` use Bundler's wording. A conflict through a gem with
+    prereleases names the range as Bundler does: `sinatra >= 2.0.0.beta1,
+    < 3.0.0` where it said `sinatra >= 2.0.0, < 3.0.0`.
+  - Lockfiles: the committed fixtures relock byte for byte. A resolution
+    changes only where the old resolver disagreed with Bundler 4.0.20: in
+    twelve random indexes it let in prereleases Bundler leaves out or chose
+    other versions, and now gives Bundler's result; in two locked random
+    cases it resolved where Bundler reports a conflict, and now reports the
+    conflict, as Bundler does.
+
 ### Breaking: the default external encoding follows the locale
 
 - **`Encoding.default_external` is the locale's**
